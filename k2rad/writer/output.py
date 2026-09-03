@@ -480,7 +480,8 @@ def _th_beam_split(state: ConversionState, ids, cids, refs, names):
     /PROP/TYPE8|13 /SPRING, neither of which is a /BEAM. (k2rad emits no
     /TRUSS at all, so the third link of the chain has no target here.)
     """
-    beam, spring = [], []
+    beam: List[int] = []
+    spring: List[int] = []
     n = len(ids)
     for k, eid in enumerate(ids):
         (beam if eid in state.beam_elem_ids else spring).append(k)
@@ -1712,6 +1713,12 @@ def _make_starter_th_swforc(state: ConversionState) -> List[str]:
     return lines
 
 
+def _nothing_excluded(state: ConversionState) -> Set[int]:
+    """The ``excluded`` accessor for a database with no per-element print
+    flag — see _DiscreteDatabase.excluded."""
+    return set()
+
+
 class _DiscreteDatabase(NamedTuple):
     """One LS-DYNA discrete-connector ASCII database and how k2rad answers it.
 
@@ -1748,7 +1755,7 @@ _TH_DISCRETE_DATABASES = (
         eids=lambda s: s.dbeam_spring_eids,
         # *ELEMENT_BEAM has no PF field — disbout has no per-element print flag
         # to honour, so nothing is ever excluded here.
-        excluded=lambda s: frozenset(),
+        excluded=_nothing_excluded,
         stem="TH_DISCRETE_BEAMS",
         covers="discrete beam element, type 6, relative displacements, "
                "rotations and forces",

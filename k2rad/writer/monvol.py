@@ -2767,8 +2767,11 @@ def _resolve_airbag_interactions(state: ConversionState) -> None:
         kw = f"*{it.keyword}"
         ref = f"{kw} (AB1 {it.ab1}, AB2 {it.ab2})"
         a, b = by_id.get(it.ab1), by_id.get(it.ab2)
-        missing = [i for i, x in ((it.ab1, a), (it.ab2, b)) if x is None]
-        if missing:
+        if a is None or b is None:
+            # `missing` non-empty <=> exactly this condition, so the list is
+            # built inside the branch that uses it (and the narrower can then
+            # see that `a`/`b` are resolved below).
+            missing = [i for i, x in ((it.ab1, a), (it.ab2, b)) if x is None]
             state.warn(
                 f"{ref}: airbag id(s) {missing} are not defined by any "
                 "*AIRBAG_* card in this deck (the ids are the ABID of an "

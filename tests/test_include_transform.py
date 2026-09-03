@@ -1286,9 +1286,13 @@ class IntegrationShellOffsetTests(_AssemblyBase):
         "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)),
         "*PART", "child part", _row(1, 1, 1),
         "*PART", "layer carrier", _row(5, 0, 2),
-        # two SETS under one *SECTION_SHELL header, the first binding a rule
+        # two SETS under one *SECTION_SHELL header, the first binding a rule.
+        # Card 2 is "t1 t2 t3 t4 nloc marea idof EDGSET": set 1 states an
+        # EDGSET (a *SET_NODE id -> IDSOFF), set 2 leaves the cell blank as the
+        # negative control.
         "*SECTION_SHELL",
-        _row(1, 2, 1.0, 3, 0.0, -3.0), _row(1.5),
+        _row(1, 2, 1.0, 3, 0.0, -3.0),
+        _row(1.5, "", "", "", "", "", "", 555),
         _row(2, 2, 1.0, 4), _row(2.5),
         # two RULES under one *INTEGRATION_SHELL header
         "*INTEGRATION_SHELL",
@@ -1336,6 +1340,41 @@ class IntegrationShellOffsetTests(_AssemblyBase):
         self.assertEqual([(p.s, p.wf, p.pid) for p in rule.points],
                          [(-1.0, 0.25, 0), (0.0, 0.5, 15), (1.0, 0.25, 0)])
         self.assertEqual((rule.nip, rule.esop), (3, 0))
+
+    def test_card_two_edgset_moves_with_idsoff(self):
+        """EDGSET is the one id on card 2 and it is a *SET_NODE, so it takes
+        IDSOFF (30) — NOT card 1's IDROFF (60). The walker used to stride card
+        2 unconditionally, leaving the cell raw; the 2D-seatbelt writer then
+        quoted a set id that existed in neither the child deck nor the
+        converted model. Card 2's floats must survive the rewrite untouched."""
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_shells), [61, 62])
+        self.assertEqual(st.sec_shells[61].nsid, 585)
+        self.assertEqual(st.sec_shells[61].t1, 1.5)
+
+    def test_a_blank_edgset_cell_is_not_offset(self):
+        """0/blank is the "no EDGSET" sentinel — offsetting it would invent a
+        set reference. Set 2's card 2 carries only T1."""
+        st = self._offset_state()
+        self.assertEqual(st.sec_shells[62].nsid, 0)
+        self.assertEqual(st.sec_shells[62].t1, 2.5)
+
+    def test_a_truncated_set_does_not_crash_the_edgset_rewrite(self):
+        """The EDGSET rewrite reaches one line PAST card 1, so a malformed set
+        whose card 2 is missing has to be bounds-checked — ``handle_section_
+        shell`` tolerates it (``_card`` returns ``[]`` out of range) and the
+        offset walk must too. MEASURED: without the guard this deck raises
+        IndexError during the *INCLUDE_TRANSFORM walk."""
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD", "*SECTION_SHELL", _row(1, 2, 1.0, 3), "*END"]) + "\n")
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD", "*INCLUDE_TRANSFORM", "child.k",
+            _row(100, 200, 10, 20, 30, 40, 0), _row(60), "", "",
+            "*END"]) + "\n")
+        st = self._state(main)
+        self.assertEqual(sorted(st.sec_shells), [61])
+        self.assertEqual(st.sec_shells[61].nsid, 0)
 
     def test_every_section_card_set_gets_its_secid_offset(self):
         st = self._offset_state()

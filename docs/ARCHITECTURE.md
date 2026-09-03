@@ -97,8 +97,8 @@ LS-DYNA-side parsing and the OpenRadioss-side emission cleanly separated.
 ### 3. Model — `k2rad/state.py`
 
 `ConversionState` is the single in-memory model that carries everything between
-handlers and the writer. It is a plain class (`__init__` initialises ~90
-attributes) holding:
+handlers and the writer. It is a `@dataclass` with **352 typed, defaulted
+fields** and 17 methods, grouped by section comments, holding:
 
 - **identity / flags**: `model_title`, `is_implicit`, `is_modal`, `units`, an
   auto-ID counter (`next_id()`), and `options` (a `ConvertOptions` dataclass);
@@ -113,8 +113,19 @@ attributes) holding:
 - **diagnostics**: `warnings` (via `state.warn()`) and `skipped_keywords`.
 
 Every LS-DYNA concept has its own small `@dataclass` (defined at the top of
-`state.py`) so a handler stores structured data, not raw strings. `warn()` and
-`next_id()` are the only behaviour on the state object; everything else is data.
+`state.py`) so a handler stores structured data, not raw strings. The only
+behaviour on the state object is `warn()`, `note_recognized_not_emitted()` and
+the twelve id allocators (`next_id`, `next_curve_id`, `next_grnod_id`, …) with
+their three lookup helpers (`all_mat_ids`, `all_skew_ids`, `reserve_skew_id`);
+everything else is data.
+
+The state is deliberately **flat but sectioned** — one level of fields under
+section comments, not `state.mesh.nodes` sub-dataclasses. See ROADMAP's
+"Architecture refactors" for the measurement that closed the grouping idea:
+0 of the 194 mypy findings burned down in PR #134 came from the state's shape,
+the 352 fields fall into 29 families rather than 4-6, and eleven dynamic-access
+sites (`getattr` on a computed name, and a `vars(state)` walk in
+`writer/sph.py`) would break a grouping — five of them *silently*.
 
 `ConvertOptions` holds the opt-in CLI switches (`auto_gapmin`, `gapmin_factor`,
 `deformable_contact_recipe`, `emit_eig`, `ams`, `rigid_cog_master`,

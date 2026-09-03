@@ -10,7 +10,15 @@ from __future__ import annotations
 import ast as _ast
 import math as _math
 from itertools import permutations as _permutations, product as _product
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
+
+#: Fixed arities the *INITIAL_STRESS_/_STRAIN_ producers below guarantee via
+#: _fixed_float_card's zero-padding (`vals += [0.0] * (n - len(vals))`), and
+#: that writer/inistate.py unpacks positionally — an 8-way `for (t, sxx, syy,
+#: szz, sxy, syz, szx, eps) in iss.layers` there. Widening the dataclass field
+#: to Tuple[float, ...] would throw away a guarantee its consumer relies on.
+_Layer8 = Tuple[float, float, float, float, float, float, float, float]
+_Layer7 = Tuple[float, float, float, float, float, float, float]
 
 from .parser import (
     Block, _strip_inline_comment, parse_fixed, parse_free, set_active_scope,
@@ -1856,6 +1864,9 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
             nip = abs(nip)
         t1 = to_float(f2[0]) if f2 else 0.0
         sec = SectionShell(secid, title, elform, nip, t1)
+        # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
+        # node set. Only writer/seatbelts.py reads it, to report it as dropped.
+        sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
         # QR/IRID (field 6, cols 51-60): a NEGATIVE value makes |QR| the id of a
         # user *INTEGRATION_SHELL rule (Manual Vol I R17 p.29-1). A positive or
         # zero value is the built-in quadrature rule and carries no reference.
@@ -4792,7 +4803,7 @@ def _sample_curve_function(expr: str, tmax: float, npts: int = 101):
     if varname is None:
         return None                        # constant expression — not a curve
     code = compile(tree, "<curve_function>", "eval")
-    env = {"__builtins__": {}}
+    env: Dict[str, Any] = {"__builtins__": {}}
     env.update(_FUNC_EXPR_FUNCS)
     env.update(_FUNC_EXPR_CONSTS)
     tmax = tmax if tmax and tmax > 0.0 else 1.0
@@ -5057,9 +5068,11 @@ def handle_set_node_list(block: Block, state: ConversionState) -> None:
     # *CONTACT_TIEBREAK_NODES_TO_SURFACE they override NFLF/NSFL/NNEN/NMES for
     # this set. Recorded so the tiebreak writer can tell a deck that states one
     # from a deck whose four cells are the 0.0 LS-PrePost writes by default.
-    da = tuple(to_float(f1[i]) if len(f1) > i else 0.0 for i in (1, 2, 3, 4))
+    def _da(i: int) -> float:
+        return to_float(f1[i]) if len(f1) > i else 0.0
+    da = (_da(1), _da(2), _da(3), _da(4))
     if any(da):
-        state.node_set_attrs[nsid] = da  # type: ignore[assignment]
+        state.node_set_attrs[nsid] = da
 
 
 def _handle_set_elem_list(block: Block, state: ConversionState, target: dict) -> None:
@@ -5106,8 +5119,9 @@ def _record_part_set_attrs(state: ConversionState, psid: int,
     """Record the *SET_PART header's DA1..DA4 attributes when any is set.
     *CONTACT_INTERIOR reads them as per-set defaults (PSF / Fa / ED / TYPE,
     Manual Vol I R17 p.11-178); no other consumer uses them yet."""
-    da = tuple(to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
-               for i in range(1, 5))
+    def _da(i: int) -> float:
+        return to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
+    da = (_da(1), _da(2), _da(3), _da(4))
     if any(da):
         state.part_set_attrs[psid] = da
 
@@ -5189,9 +5203,11 @@ def _handle_set_add(block: Block, state: ConversionState, family: str,
         # *CONTACT_TIEBREAK_NODES_TO_SURFACE's Card 4. Recorded since #131
         # converts that keyword: the writer names the override as a loss only
         # when the deck actually states one.
-        da = tuple(to_float(f1[i]) if len(f1) > i else 0.0 for i in (1, 2, 3, 4))
+        def _da(i: int) -> float:
+            return to_float(f1[i]) if len(f1) > i else 0.0
+        da = (_da(1), _da(2), _da(3), _da(4))
         if any(da):
-            state.node_set_attrs[sid] = da  # type: ignore[assignment]
+            state.node_set_attrs[sid] = da
     ids: List[int] = []
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
@@ -7977,7 +7993,7 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
                           for k in range(nthick)]
         state.ini_stress_shells.append(
             InitialStressShell(eid=eid, nplane=nplane, nthick=nthick,
-                               layers=layers))
+                               layers=cast(List[_Layer8], layers)))
         n_read += 1
 
     if n_hisv_dropped:
@@ -8047,7 +8063,8 @@ def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
         if nh > 0:
             n_hisv_dropped += 1
         state.ini_stress_solids.append(
-            InitialStressSolid(eid=eid, nint=nint, points=pts))
+            InitialStressSolid(eid=eid, nint=nint,
+                               points=cast(List[_Layer7], pts)))
 
     if n_hisv_dropped:
         state.warn(f"*INITIAL_STRESS_SOLID: NHISV/IVEFLG history values on "
@@ -8187,7 +8204,7 @@ def handle_initial_strain_shell(block: Block, state: ConversionState) -> None:
             set_dims_ignored = True
         state.ini_strain_shells.append(InitialStrainShell(
             eid=eid, nplane=nplane, nthick=nthick, ilocal=ilocal,
-            is_set=is_set, layers=layers))
+            is_set=is_set, layers=cast(List[_Layer7], layers)))
     if truncated:
         state.warn(f"*{block.keyword}: the block ends before all strain cards "
                    f"of record {truncated[0]} — that record and any after it "
@@ -12196,7 +12213,7 @@ def _airbag_prelude(raw: List[str], offset: int):
     rbid = to_int(f1[2]) if len(f1) > 2 else 0
     i = offset + 1
     if rbid > 0:
-        n = to_int(_card(raw, i, fixed=True, n=1, w=10)[0] or 0) if i < len(raw) else 0
+        n = to_int(_card(raw, i, fixed=True, n=1, w=10)[0]) if i < len(raw) else 0
         i += 1 + max(0, (n + 4) // 5)
     elif rbid < 0:
         i += 3
@@ -12621,11 +12638,9 @@ def _read_airbag_particle(ab: "Airbag", block: Block, raw: List[str],
     # even when the walk is abandoned below. Read here so they are named by
     # value either way.
     if idx["seg"] >= 0:
-        ab.segsid = to_int(_card(raw, idx["seg"], fixed=True, n=8, w=10)[0]
-                           or 0)
+        ab.segsid = to_int(_card(raw, idx["seg"], fixed=True, n=8, w=10)[0])
     if idx["jnode"] >= 0:
-        ab.jnode = to_int(_card(raw, idx["jnode"], fixed=True, n=8, w=10)[0]
-                          or 0)
+        ab.jnode = to_int(_card(raw, idx["jnode"], fixed=True, n=8, w=10)[0])
     if idx["partial"]:
         state.warn(
             f"*{kw}: STYPE2=2 selects the SIDUP/STYUP/PFRAC/LINKING card "

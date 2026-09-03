@@ -2403,6 +2403,66 @@ plate
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+class TestTwoDBeltEdgsetIsRead(unittest.TestCase):
+    """*SECTION_SHELL card 2 field 8 (cols 71-80) is EDGSET, the node set whose
+    first two nodes give a 2D belt its flow direction.
+
+    ``handle_section_shell`` reads card 2 but consumed only ``f2[0]`` (T1), and
+    ``SectionShell`` had no field for the cell, so the 2D-belt writer's
+    ``getattr(sec, "nsid", 0)`` was unconditionally 0 and the warning under it
+    was unreachable — while the same module tells the reader two screens later
+    to "state the direction with an EDGSET on the *SECTION_SHELL". A diagnostic
+    that cannot reach the deck it describes (the #122/#125 class)."""
+
+    #: card 2 = T1 T2 T3 T4 NLOC MAREA IDOF EDGSET, eight w10 cells.
+    _CARD2 = "       1.2       1.2       1.2       1.2"
+    _CARD2_EDGSET = _CARD2 + "         0       0.0         0       555"
+
+    def _deck_with(self, card2: str) -> str:
+        return _deck(
+            _SHELL_PART.replace(self._CARD2, card2),
+            _mat(kw="MAT_SEATBELT_2D"),
+            "*ELEMENT_SEATBELT\n" + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23),
+            "*SET_NODE_LIST\n       555\n        20        21\n")
+
+    def test_a_stated_edgset_is_reported_by_id(self):
+        r, _s, _e = _convert(self._deck_with(self._CARD2_EDGSET))
+        hits = _warns(r, "EDGSET")
+        self.assertEqual(len(hits), 1, r.warnings)
+        # The id must be the one on the card, not a placeholder.
+        self.assertIn("EDGSET (555)", hits[0])
+        self.assertIn("Iskew 0", hits[0])
+        # The deck still converts fully — the warning is the only change.
+        self.assertEqual(r.skipped_keywords, [])
+
+    def test_no_edgset_is_not_reported(self):
+        """The negative control: the four-cell card 2 every other test in this
+        module uses must stay silent, or the warning fires on every 2D belt."""
+        r, _s, _e = _convert(self._deck_with(self._CARD2))
+        self.assertEqual(_warns(r, "EDGSET"), [])
+
+    def _parsed_section(self, card2: str):
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        from k2rad.state import ConversionState
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(self._deck_with(card2))
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        return state.sec_shells[800]
+
+    def test_the_section_carries_the_cell(self):
+        """Read back on the state, not only through the warning: the parsed
+        field is what makes the warning reachable."""
+        self.assertEqual(self._parsed_section(self._CARD2_EDGSET).nsid, 555)
+        self.assertEqual(self._parsed_section(self._CARD2).nsid, 0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 class TestTwoDBeltDirection(unittest.TestCase):
     """The starter follows the (n1,n2)/(n4,n3) edges to build the 1D strands,
     so the local node order has to run ALONG the belt. Rotating it one place
@@ -2491,6 +2551,47 @@ class TestTwoDBeltDirection(unittest.TestCase):
             _SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914), nodes,
             "*ELEMENT_SEATBELT\n" + rows))
         self.assertTrue(_warns(r, "ERROR 2075"))
+
+    _EDGSET_SECTION = _SHELL_PART.replace(
+        "       1.2       1.2       1.2       1.2",
+        "       1.2       1.2       1.2       1.2"
+        "         0       0.0         0       555")
+
+    def _transverse_deck(self, edgset: bool):
+        """The transverse 2-element strip of :meth:`_deck`, with or without an
+        EDGSET on its *SECTION_SHELL."""
+        rows = (_belt_card(41, 800, 202, 203, 0, 0.0, 201, 200)
+                + _belt_card(42, 800, 204, 205, 0, 0.0, 203, 202))
+        parts = [self._EDGSET_SECTION if edgset else _SHELL_PART,
+                 _mat(kw="MAT_SEATBELT_2D", ulcid=914), self._STRIP_NODES,
+                 "*ELEMENT_SEATBELT\n" + rows]
+        if edgset:
+            parts.append("*SET_NODE_LIST\n       555\n       200       202\n")
+        return _deck(*parts)
+
+    def test_a_stated_edgset_does_not_silence_the_direction_check(self):
+        """An EDGSET states the direction to LS-DYNA, but this batch leaves
+        Iskew 0, so the starter still falls back to the shell edges and the
+        ERROR 2075 risk is UNCHANGED. Gating the check on the EDGSET would hide
+        a warning that is still true of the converted deck."""
+        r, _s, _e = _convert(self._transverse_deck(edgset=True))
+        self.assertEqual(len(_warns(r, "ERROR 2075")), 1, r.warnings)
+
+    def test_the_remedy_never_asks_for_an_edgset_the_deck_already_states(self):
+        """The message used to end "or state the direction with an EDGSET on
+        the *SECTION_SHELL" unconditionally — advice to redo what the deck did.
+        It is offered only when there is no EDGSET; otherwise the message says
+        why the one on the card cannot help."""
+        with_es = _warns(_convert(self._transverse_deck(edgset=True))[0],
+                         "ERROR 2075")[0]
+        self.assertNotIn("or state the direction with an EDGSET", with_es)
+        self.assertIn("cannot do it, because the converted /PROP/TYPE9 "
+                      "carries Iskew 0", with_es)
+        without = _warns(_convert(self._transverse_deck(edgset=False))[0],
+                         "ERROR 2075")[0]
+        self.assertIn("Rotate the element connectivity so n1->n2 runs along "
+                      "the belt, or state the direction with an EDGSET on the "
+                      "*SECTION_SHELL.", without)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

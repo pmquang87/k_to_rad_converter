@@ -7,7 +7,8 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
-    DampingFrequencyRange, PM_VAD_KEYWORD, RigidWallGeomFace,
+    DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
+    RigidWallGeomFace,
 )
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
@@ -635,7 +636,7 @@ def _plastic_to_total_disp(pts, stiff: float):
         pts = [p for p in pts if p[0] >= 0.0]
         if len(pts) < 2:
             return []
-    total = []
+    total: List[Tuple[float, float]] = []
     for a, o in pts:
         x = a + o / stiff
         if total and x <= total[-1][0]:
@@ -2919,7 +2920,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     fix_order: List[Tuple[int, int]] = []
     # (row, its resolved node ids) — carried together rather than looked up by
     # id(pm) later, which only stays unique while the objects are alive.
-    motions: List[Tuple[object, List[int]]] = []
+    motions: List[Tuple[PrescribedMotionSet, List[int]]] = []
     box_cache: Dict[int, Optional[Set[int]]] = {}
     for pm in state.prescribed_motion_sets:
         nids = _pm_set_nodes(state, pm, box_cache)
@@ -3459,12 +3460,17 @@ def _make_body_loads(state: ConversionState,
     # every flavour. It is built on the first card that survives its checks
     # rather than before the loop, which keeps the first card's ids exactly where
     # they have always been (byte-identity for _X/_Y/_Z-only decks).
-    def _first_group():
+    def _first_group() -> Tuple[int, int]:
+        """Build the shared /GRNOD scope; return ``(card id, grnod id)``.
+
+        The grnod id is RETURNED as well as stored in the enclosing
+        ``grnod_id``: a ``nonlocal`` write from a closure is invisible to a
+        type checker, so the three call sites take the value from here."""
         nonlocal grnod_id, lines
         glines, grnod_id, load_id = _grav_groups(state, part_pids, mains,
                                                  "body_load", part_kind)
         lines += glines
-        return load_id
+        return load_id, grnod_id
 
     for bl in state.body_loads:
         if bl.lcid not in state.curves:
@@ -3472,7 +3478,10 @@ def _make_body_loads(state: ConversionState,
                        "— skipped.")
             continue
         emitted = True
-        grav_id = _first_group() if grnod_id is None else state.next_id()
+        if grnod_id is None:
+            grav_id, gnid = _first_group()
+        else:
+            grav_id, gnid = state.next_id(), grnod_id
         skew_id = 0
         if bl.cid:
             if (bl.cid in state.coord_sys or bl.cid in state.coord_nodes
@@ -3484,7 +3493,7 @@ def _make_body_loads(state: ConversionState,
                     "— the base acceleration is applied along the GLOBAL "
                     f"{bl.dir} axis.")
         lines += _emit_grav_card(grav_id, f"Body_accel_{bl.dir}", bl.lcid,
-                                 bl.dir, grnod_id, -bl.sf, skew_id)
+                                 bl.dir, gnid, -bl.sf, skew_id)
     if emitted:
         state.warn(
             "*LOAD_BODY_{X,Y,Z} -> /GRAV with Fscale_Y = -SF: a POSITIVE LS-DYNA "
@@ -3528,7 +3537,10 @@ def _make_body_loads(state: ConversionState,
             continue
         emitted = True
         vec_emitted = True
-        grav_id = _first_group() if grnod_id is None else state.next_id()
+        if grnod_id is None:
+            grav_id, gnid = _first_group()
+        else:
+            grav_id, gnid = state.next_id(), grnod_id
         skew_id = state.reserve_skew_id(state.next_id())
         # /SKEW/FIX's two vector cards are the local Y' and Z'; the starter
         # rebuilds X' = Y' x Z' (hm_read_skw.F:448-459), and _ortho_skew_axes
@@ -3538,7 +3550,7 @@ def _make_body_loads(state: ConversionState,
         lines += _emit_skew_fix(skew_id, f"SKEW_FIX_GRAV_{grav_id}",
                                 (bv.xc, bv.yc, bv.zc), axes[0], axes[1])
         lines += _emit_grav_card(grav_id, "Body_accel_VECTOR", bv.lcid,
-                                 "X", grnod_id, -bv.sf, skew_id)
+                                 "X", gnid, -bv.sf, skew_id)
     if vec_emitted:
         state.warn(
             "*LOAD_BODY_VECTOR -> ONE /GRAV with DIR=X in a companion /SKEW/FIX "
@@ -3569,11 +3581,14 @@ def _make_body_loads(state: ConversionState,
             continue
         emitted = True
         rot_emitted = True
-        centri_id = _first_group() if grnod_id is None else state.next_id()
+        if grnod_id is None:
+            centri_id, gnid = _first_group()
+        else:
+            centri_id, gnid = state.next_id(), grnod_id
         frame_id, flines = _centri_frame(state, br)
         lines += flines
         lines += _emit_centri_card(centri_id, f"Body_omega_{br.dir}", br.lcid,
-                                   br.dir * 2, frame_id, grnod_id, br.sf)
+                                   br.dir * 2, frame_id, gnid, br.sf)
     if rot_emitted:
         lines[rot_header_at:rot_header_at] = [
             "#-  ROTATIONAL BODY LOADS (*LOAD_BODY_R* -> /LOAD/CENTRI):", HDR]
@@ -3823,7 +3838,7 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                  + [f"*INITIAL_VELOCITY_GENERATION with STYP={g.styp}"
                     for g in state.inivel_generations if not g.styp])
 
-    todo: List[Tuple[int, str, object]] = [
+    todo: List[Tuple[int, str, RigidInertia]] = [
         (pid, f"*PART_INERTIA {pid}", inr)
         for pid, inr in sorted(state.part_inertias.items())]
     todo += [(c.pid, f"*CONSTRAINED_NODAL_RIGID_BODY_INERTIA pid={c.pid}",
@@ -4713,8 +4728,8 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
                     f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} not "
                     "found — load applied in the GLOBAL system.")
         grnod_id = grnod_by_nsid.get(ln.nsid)
-        emit_grnod = grnod_id is None
-        if emit_grnod:
+        emit_grnod = grnod_id is None   # read further down; the narrowing
+        if grnod_id is None:            # needs the `is None` test itself
             grnod_id = state.next_grnod_id()
             grnod_by_nsid[ln.nsid] = grnod_id
         load_id = state.next_id()
@@ -5229,6 +5244,13 @@ def _rwall_search_distance(face: RigidWallGeomFace, corners,
         vals = [math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
                 - 0.5 * face.diameter for v in rel]
     elif face.form == "CYL":
+        # `m1` is None for SPHER only (RigidWallGeomFace's docstring: "``m1``
+        # None for SPHER"), and that form is handled by the first arm of this
+        # if/elif chain, so it never reaches here — but say so with the file's
+        # own idiom for "cannot compute, keep the wall harmless" rather than
+        # letting an unreachable TypeError stand in for it.
+        if face.m1 is None:
+            return 1e10
         ax = _vnorm((face.m1[0] - m[0], face.m1[1] - m[1], face.m1[2] - m[2]))
         if ax is None:                  # already refused upstream (ERROR 167)
             return 1e10
@@ -5238,6 +5260,8 @@ def _rwall_search_distance(face: RigidWallGeomFace, corners,
             d2 = v[0] ** 2 + v[1] ** 2 + v[2] ** 2
             vals.append(math.sqrt(max(d2 - d1 * d1, 0.0)) - 0.5 * face.diameter)
     else:                               # PLANE / PARAL
+        if face.m1 is None:             # SPHER only — see the CYL arm above
+            return 1e10
         if face.m2 is None:             # PLANE: n̂ = normalize(M1 - M)
             nrm = _vnorm((face.m1[0] - m[0], face.m1[1] - m[1],
                           face.m1[2] - m[2]))

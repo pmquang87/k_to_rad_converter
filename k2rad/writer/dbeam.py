@@ -903,7 +903,10 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         sec = state.sec_beams.get(secid)
         label = f"*SECTION_BEAM {secid} (ELFORM=6) part {pid}"
         wrong_section = sec is None or sec.elform != 6
-        if wrong_section:
+        # Tested directly rather than through `wrong_section`: the substitution
+        # four lines below is what makes `sec` non-None for the rest of the
+        # loop, and a narrower cannot see that through an intermediate bool.
+        if sec is None or sec.elform != 6:
             # The part was CLAIMED (its material is a discrete-beam material),
             # so nothing else will write it — skipping here would delete the
             # /PART along with every *SET_PART member and /GRNOD/PART scope
@@ -937,8 +940,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
             # /FUNCT ids are not — they would describe a conversion that never
             # happened and consume auto-ids nothing references.
             mat071 = None
-            built = ([SpringDof() for _ in range(6)], 0, 0, [],
-                     "unsized discrete beam")
+            built: Tuple[List[SpringDof], int, int, List[str], str] = (
+                [SpringDof() for _ in range(6)], 0, 0, [],
+                "unsized discrete beam")
         elif mat066 is not None:
             rho = mat066.rho
             built = _build_mat066(state, label, mat066, fid_alloc)

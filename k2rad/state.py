@@ -890,6 +890,11 @@ class SectionShell:
     # as SCALAR_OR_OBJECT(Sect_Option, LSD_QR, LSD_IRID) (SectShll.cfg:699) and
     # picks the object branch on the sign alone (meci_data_reader.cpp:6847).
     irid: int = 0
+    # *SECTION_SHELL card 2 field 8 (cols 71-80) EDGSET: the *SET_NODE whose
+    # first two nodes give a 2D seatbelt its flow direction. Read only by the
+    # 2D-belt property writer (writer/seatbelts.py), which reports it as
+    # dropped; 0 = none.
+    nsid: int = 0
 
 
 @dataclass
@@ -5022,6 +5027,12 @@ class Airbag:
     t_ext: float = 0.0       # ambient temperature (card 4a, CV == 0 only)
     hc_a: float = 0.0        # molar heat-capacity coefficient A (card 4a)
     hc_b: float = 0.0        # molar heat-capacity coefficient B (card 4a)
+    #: molar heat-capacity coefficient C. NOT an *AIRBAG card cell: the writer
+    #: fills it from the species mix / from CAIR at the two sites that set
+    #: ``gas_mat_kind = "MOLE"``, and _emit_mat_gas_mole reads it back under the
+    #: same flag. DECLARED so it is part of the dataclass contract instead of
+    #: appearing dynamically on the instance (writer/monvol.py:2209/2395/3668).
+    hc_c: float = 0.0
     mw: float = 0.0          # molecular weight  (card 4a)
     gasc: float = 0.0        # universal gas constant (card 4a)
     # ── ADIABATIC_GAS_MODEL ──────────────────────────────────────────────
@@ -6985,6 +6996,7 @@ class ConversionState:
     # *CONTROL_SPH — the global SPH controls; only NMNEIGH reaches /SPHGLO.
     control_sph: Optional["ControlSph"] = None
 
+    # ── Hourglass control ──────────────────────────────────────
     # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
     # HourglassDef; consumed by the per-part hourglass /PROP overlay.
     hourglass_defs: Dict[int, "HourglassDef"] = field(default_factory=dict)
@@ -6999,6 +7011,7 @@ class ConversionState:
     hourglass_prop_vals: Dict[int, Tuple[Optional[float], Optional[int]]] = \
         field(default_factory=dict)
 
+    # ── Materials & failure models ─────────────────────────────
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
     mat_plas_tab: Dict[int, MatPlasTAB] = field(default_factory=dict)
     mat_plas_kin: Dict[int, MatPlasKin] = field(default_factory=dict)
@@ -7113,6 +7126,7 @@ class ConversionState:
     # FORM plus the card-7 curves, and the choice decides the PROPERTY type as
     # well (see MatFabric and writer/fabric.py).
     mat_fabric: Dict[int, MatFabric] = field(default_factory=dict)
+    # ── Reference geometries / airbags / monitored volumes ─────
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -7155,7 +7169,8 @@ class ConversionState:
     # /XREF law whitelist and the 8/4-node solid restriction). Solid sections
     # serving these parts are emitted with Ismstr=10 (starter ERROR 2013
     # otherwise: /XREF rejects fully-integrated solids at small strain).
-    xref_part_ids: set = field(default_factory=set)
+    xref_part_ids: Set[int] = field(default_factory=set)
+    # ── Spring, damper & discrete-beam materials ───────────────
     # Discrete-element (spring/damper) materials → /PROP/TYPE4 fields
     mat_spring_elastic: Dict[int, MatSpringElastic] = field(default_factory=dict)             # MAT_S01
     mat_spring_nonlinear: Dict[int, MatSpringNonlinearElastic] = field(default_factory=dict)  # MAT_S04
@@ -7185,7 +7200,7 @@ class ConversionState:
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
 
-    # ── Rare materials batch ───────────────────────────────────
+    # ── Rare materials + thermal subsystem ─────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
     #   *MAT_156 / *MAT_MUSCLE        → /PROP/TYPE46 + /SPRING (no /MAT)
     #   *MAT_S15 / *MAT_SPRING_MUSCLE → /PROP/TYPE46 + /SPRING (no /MAT)
@@ -7286,6 +7301,7 @@ class ConversionState:
     # duplicate SBSID is a deck error the last card wins in LS-DYNA too.
     seatbelt_sensors: Dict[int, SeatbeltSensor] = field(default_factory=dict)
     seatbelt_accels: List[SeatbeltAccelerometer] = field(default_factory=list)
+    # ── Element-id registries & synthesized-property ids ───────
     # part_id → synthesized /PROP/TYPE9 (SH_ORTH) id for a 2D belt part. Same
     # split mechanism as fabric_prop_ids: /MAT/LAW119 declares SHELL_ORTHOTROPIC
     # (hm_read_mat119.F:218), so the part cannot stay on the isotropic
@@ -7314,6 +7330,7 @@ class ConversionState:
     # would add a channel the deck never requested, on a node it already
     # records through the sensor's own accelerometer.
     th_accel_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # ── Spot welds, clusters & rigid-body registries ───────────
     # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with
     # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
@@ -7412,6 +7429,7 @@ class ConversionState:
     # flag only — the /SPRING is emitted either way — so it subtracts from the
     # *DATABASE_DEFORC /TH/SPRING group and nothing else.
     deforc_suppressed_eids: Set[int] = field(default_factory=set)
+    # ── Joints & connectors ────────────────────────────────────
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
@@ -7425,17 +7443,17 @@ class ConversionState:
     # Every node a converted joint /SPRING touches — the implicit free-node
     # guard must see these (they carry joint stiffness, so /BCS-fixing them
     # would weld the joint solid).
-    joint_spring_nodes: set = field(default_factory=set)
+    joint_spring_nodes: Set[int] = field(default_factory=set)
     # Ground nodes synthesized by the connector writer (registered in
     # state.nodes for id-collision safety; excluded from the implicit
     # free-node guard because they are already fully fixed by /BCS)
-    connector_ground_nodes: set = field(default_factory=set)
+    connector_ground_nodes: Set[int] = field(default_factory=set)
     constrained_node_sets: List[ConstrainedNodeSet] = field(default_factory=list)  # *CONSTRAINED_NODE_SET → /RLINK
     # Curve ids a law consumes through a *table* slot rather than a function
     # slot — emitted as a 1-D /TABLE/1 (with its mandatory "#dimension" card)
     # instead of a /FUNCT, so _make_functions can route them. Populated by the
     # LAW76 (*MAT_187) yield tables and the LAW52 (*MAT_120) Tab_ID.
-    table_1d_ids: set = field(default_factory=set)
+    table_1d_ids: Set[int] = field(default_factory=set)
     # High-explosive / EOS (coupled ALE / JWL detonation):
     #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
     #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
@@ -7443,6 +7461,7 @@ class ConversionState:
     eos_jwl: Dict[int, EosJwl] = field(default_factory=dict)      # eosid → JWL params
     eos_cards: Dict[int, EosCard] = field(default_factory=dict)   # eosid → /EOS/<kind>
 
+    # ── Curves & tables ────────────────────────────────────────
     curves: Dict[int, Curve] = field(default_factory=dict)
     # *DEFINE_CURVE lcids in deck parse order — used to resolve the legacy
     # *DEFINE_TABLE form (curves follow the table positionally).
@@ -7461,6 +7480,7 @@ class ConversionState:
     # keeps its deck id; fresh ids come from next_curve_id, checked free of
     # every table namespace too).
     auto_tables: Dict[int, AutoTable] = field(default_factory=dict)
+    # ── Coordinate frames, vectors & skews ─────────────────────
     coord_sys: Dict[int, CoordSys] = field(default_factory=dict)
     # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
     coord_nodes: Dict[int, CoordNodes] = field(default_factory=dict)
@@ -7650,7 +7670,7 @@ class ConversionState:
     blast_surf_ids: List[Tuple[int, str]] = field(default_factory=list)
     # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
     detonations: List[InitialDetonation] = field(default_factory=list)
-    # ── Coupled ALE / FSI ──────────────────────────────────────
+    # ── Coupled ALE / FSI, added masses, rigid-body groups ─────
     # *ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT) submaterial order
     ale_mmgs: List[AleMultiMaterialGroup] = field(default_factory=list)
     # *CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling)
@@ -7681,6 +7701,8 @@ class ConversionState:
     # /RBODY Mass field (no need to distribute over slave nodes).
     element_mass_parts: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     # Populated by build_starter after _make_rbodies: pid → grnod_id of all rbody nodes
+    #: Written by writer/assembly.py; no reader in k2rad/, tests/ or tools/
+    #: — a consumer hook, audited write-only at PR #134.
     rbody_grnods: Dict[int, int] = field(default_factory=dict)
     # pid → grnod_id containing ONLY the independent node (used by /CLOAD)
     rbody_ind_grnods: Dict[int, int] = field(default_factory=dict)
@@ -7734,9 +7756,15 @@ class ConversionState:
     contact_interior_psids: List[int] = field(default_factory=list)
 
     # ── Control ────────────────────────────────────────────────
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     ctrl_accuracy: Optional[ControlAccuracy] = None
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     ctrl_contact: Optional[ControlContact] = None
     ctrl_cpu: Optional[ControlCpu] = None
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     ctrl_energy: Optional[ControlEnergy] = None
     ctrl_hourglass: Optional[ControlHourglass] = None
     # *CONTROL_PARALLEL → engine /PARITH. A LIST, not a single record: LS-DYNA
@@ -7746,8 +7774,12 @@ class ConversionState:
     ctrl_parallels: List[ControlParallel] = field(default_factory=list)
     ctrl_implicit_auto: Optional[ControlImplicitAuto] = None
     ctrl_implicit_dyn: Optional[ControlImplicitDynamics] = None
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     ctrl_output: Optional[ControlOutput] = None
     ctrl_shell: Optional[ControlShell] = None
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     ctrl_solid: Optional[ControlSolid] = None
     ctrl_implicit_gen: Optional[ControlImplicitGeneral] = None
     ctrl_implicit_sol: Optional[ControlImplicitSolution] = None
@@ -7766,7 +7798,11 @@ class ConversionState:
     db_glstat_dt: float = 0.0
     db_histories: List[DbHistory] = field(default_factory=list)
     db_abstat_dt: float = 0.0
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     db_d3thdt_dt: float = 0.0
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     db_intfor_dt: float = 0.0
     db_deforc_dt: float = 0.0
     db_disbout_dt: float = 0.0
@@ -7776,6 +7812,8 @@ class ConversionState:
     db_rcforc_dt: float = 0.0
     db_rwforc_dt: float = 0.0
     db_secforc_dt: float = 0.0
+    #: Parsed and stored; NO writer consumer reads it — the card's effect
+    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
     db_sleout_dt: float = 0.0
     # *DATABASE_SPHOUT — the SPH particle database. It requests no channel of
     # its own in Radioss (the /TH/SPHCEL groups come from
@@ -7867,6 +7905,8 @@ class ConversionState:
     # ids are deliberately left out of the *DATABASE_DEFORC group: an emitted
     # channel that is legal, accepted and all zeros is worse than an honest
     # warn-and-drop (#122). Filled AT the line that writes each /SPRING row.
+    #: Written by writer/muscle.py; the only reader is a test assertion
+    #: — audited write-only inside the package at PR #134.
     muscle_spring_eids: Set[int] = field(default_factory=set)
     # The SAME ids, split by the LS-DYNA element table they came from. An
     # LS-DYNA element id lives in a PER-TYPE namespace: *ELEMENT_BEAM 50 and

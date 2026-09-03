@@ -433,7 +433,8 @@ def convert(
     #     system down (handlers._blast_unit_system); adopt it when the caller
     #     left units at the default so the pressures come out right.
     if state.blast_unit_system:
-        blast_units = tuple(state.blast_unit_system)
+        # Already a Tuple[str, str, str] — the tuple() call was a copy of one.
+        blast_units = state.blast_unit_system
         if tuple(units) == ("Mg", "mm", "s"):
             state.units = blast_units
             m, l, t = state.units

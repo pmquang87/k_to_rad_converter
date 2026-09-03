@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..state import (ConversionState, Curve, ImposedTemperature,
                      InitialTemperature, MatPlasTAB,
@@ -493,16 +493,18 @@ def _clone_material(state: ConversionState, mid: int) -> Optional[int]:
     the parts alone rather than repointing them at nothing.
     """
     src = None
-    holder = None
+    holder: Optional[Dict[int, Any]] = None
     for d in _material_registries(state):
         if mid in d:
             src, holder = d[mid], d
             break
-    if src is None:
+    if src is None or holder is None:   # assigned together, one statement above
         return None
     new_mid = state.next_mat_id()
     holder[new_mid] = dataclasses.replace(src, mid=new_mid)
-    for rider in (state.mat_add_erosion, state.fail_gissmo, state.fail_diem):
+    riders: Tuple[Dict[int, Any], ...] = (
+        state.mat_add_erosion, state.fail_gissmo, state.fail_diem)
+    for rider in riders:
         if mid in rider:
             rider[new_mid] = dataclasses.replace(rider[mid], mid=new_mid)
     return new_mid
@@ -1975,7 +1977,7 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         # parts sharing a mid may name two DIFFERENT *MAT_THERMAL_ISOTROPICs.
         # Only one set of values can be written; say which, instead of letting
         # the dict-iteration order decide silently.
-        tms = {}
+        tms: Dict[int, Any] = {}
         for pid, part in sorted(state.parts.items()):
             if part.mid != mid:
                 continue
@@ -1983,7 +1985,9 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             if t is not None:
                 tms.setdefault(t.tmid, t)
         tm = next(iter(tms.values())) if tms else None
-        if len(tms) > 1:
+        # `len(tms) > 1` already implies `tms` truthy and therefore `tm` set;
+        # the conjunct is provably redundant and cannot change the branch.
+        if tm is not None and len(tms) > 1:
             state.warn(
                 f"/HEAT/MAT/{mid}: the parts on this material name "
                 f"{len(tms)} DIFFERENT *MAT_THERMAL_* materials "

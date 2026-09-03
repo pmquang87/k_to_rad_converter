@@ -119,20 +119,23 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
   Cowper-Symonds `SRC/SRP` was already emitted correctly to LAW44.)
-- **Testing/CI/DX:** golden-file fixtures, coverage gate, advisory mypy, Windows
-  CI leg, PyPI publish workflow, Docker bash launchers.
+- **Testing/CI/DX:** golden-file fixtures, coverage gate, blocking mypy (pinned
+  2.3.1), Windows CI leg, PyPI publish workflow, Docker bash launchers.
 
 The remaining items below are still open.
 
 ## Architecture refactors
 
 The core pipeline (parse → dispatch → `ConversionState` → writer) is sound.
-All four originally-listed refactors are now **done** (kept below for the
-rationale record): the `writer/` package split, the `ConversionState`
-dataclass, the shared `topology` module, and the `build_starter` section
-registry. Remaining architecture ideas: grouping the state's ~100 fields into
-sub-dataclasses (mesh/loads/contacts/control) and burning down the ~38
-advisory mypy findings so the CI job can become blocking.
+All four originally-listed refactors are **done** (kept below for the rationale
+record): the `writer/` package split, the `ConversionState` dataclass, the
+shared `topology` module, and the `build_starter` section registry. The mypy
+burn-down that used to be listed here alongside them is done too — `mypy k2rad`
+is clean and the CI `typecheck` job is **blocking** (see Testing/CI below).
+
+**No architecture refactor is open.** In particular, grouping the state's
+fields into sub-dataclasses is **closed as "not worth it"** — see the bullet
+below for the measurement.
 
 - **Split `writer.py` into a `writer/` package by section.** At ~5.5 k lines it
   is by far the largest module and mixes every card format. Break it into
@@ -140,11 +143,79 @@ advisory mypy findings so the CI job can become blocking.
   submodules mirroring the `_make_*` groupings already present. *Rationale:*
   faster navigation, smaller review surface per change, and a natural home for
   per-family tests.
-- **Make `ConversionState` a dataclass / grouped sub-dataclasses.** It is
-  currently a hand-written class with ~90 attributes set in `__init__`. Convert
-  it to a dataclass and group related fields into sub-dataclasses (mesh,
-  entities, loads, contacts, control, output). *Rationale:* typo-safe field
-  access, free `repr`/defaults, and a documented shape for contributors.
+- **Make `ConversionState` a dataclass.** *(done)* It is a `@dataclass` with
+  **352 typed, defaulted fields** and 17 methods, organised by section comments
+  (`k2rad/state.py`). This delivered the whole original rationale: typo-safe
+  field access, free `repr`/defaults, a documented shape for contributors, and
+  a mypy-checkable handler↔writer contract.
+- **Group those fields into sub-dataclasses.** *(closed — not worth doing;
+  measured 2026-09, PR #134.)* The idea was `state.mesh.nodes` in place of
+  `state.nodes`. Four measurements closed it:
+  1. **It buys nothing for typing.** Of the 194 mypy findings burned down in
+     PR #134, **0 were in `state.py`** and 1 of 194 mentioned `ConversionState`
+     at all. The root causes were local-variable inference (64 `"object" has no
+     attribute"` in four writer modules) and one un-narrowable `SectionBeam |
+     None` that accounted for **26** `union-attr` findings on its own — every
+     `union-attr` in `writer/dbeam.py`, spread over 24 distinct lines (1045 and
+     1064 carry two each). A grouping changes none of them.
+  2. **The domain does not decompose into 4-6 groups.** Classifying all 352
+     fields by family yields **29 families**, the largest being `materials`
+     with 78; the originally proposed `mesh/loads/contacts/control` covers 69 of
+     352. Those four figures are a **hand classification by keyword family**,
+     not a mechanical count — there is no recipe to re-run, only the field list
+     to re-read. Several families (thermal, seatbelts) genuinely span any
+     grouping, because the LS-DYNA keyword space is a family × role
+     cross-product and the state mirrors it.
+  3. **The experiment has already been run, in comment form, and it drifted.**
+     Before PR #134, **148 of 352 fields (42 %) sat under a section comment that
+     did not describe them** — 77 of the 84 fields under `# ── SPH particles ──`
+     were materials, airbags or hourglass records. The 84 is mechanical (parse
+     `state.py`'s rule comments, count the annotated fields under each: 18 rules
+     on master, 27 here, 352 fields placed either way); the 148 and the 77 are
+     the same hand classification as (2). A wrong comment costs one
+     line to fix (PR #134 split the two worst sections); a wrong *group* bakes
+     the mistake into 5-100 call sites and costs another mechanical rewrite.
+  4. **The verification net cannot cover the migration's riskiest part.** The
+     state is reached dynamically at **11 sites** in `k2rad/` — `getattr` on a
+     computed name at `handlers.py`, `writer/mesh.py` (×5), `writer/tshell.py`;
+     `vars(state)` at `writer/sph.py`; plus three vestigial
+     `getattr(state, "<literal>", default)` calls (`options`, `define_tables`,
+     `contacts_type25`; PR #134 retired a fourth, `table_1d_ids`) — and 6 more
+     in `tests/`. Five
+     of the eleven fail **silently** rather than raising: the `vars(state)` walk
+     in `sph.py` would simply find no `mat_*` dict and report every SPH density
+     as 0.0. A 163-deck corpus sweep (all `SET_*_ADD` / SPH / TSHELL carriers in
+     `C:\openradioss_run` and the `dynaexamples` tree, 0 errors) reached **0
+     decks** for four of those sites and 1 deck for two more; the test suite
+     reaches them with 5-9 hits from a single file. A zero-mover byte-identity
+     sweep therefore *cannot* prove the migration safe.
+
+  Cost side, for the record: **~4 200 field-access sites over ~78 files** —
+  counted by AST, as any `state.<f>` / `st.<f>` whose `<f>` is one of the 352
+  declared fields, which gives 4 170 sites in 78 files (`k2rad/` 2 977,
+  `tests/` 1 112, `tools/` 81); widening the receiver set to every plausible
+  alias gives 4 282 over 79. `tests/` and `tools/` are not covered by CI's
+  `files = ["k2rad"]` and would break only at runtime. Add **362 prose
+  references** to `state.<declared field>` that no mechanical rewrite touches —
+  counted over the same file set by tokenizing each module and keeping only
+  `COMMENT` and `STRING` tokens (107 in comments, 159 in docstrings and
+  strings) plus a regex over every `*.md` (96) — plus a new CST dependency.
+  A blind regex is ruled out because most attribute sites named after a state
+  field have some other receiver: by the same AST method, **203 of 437**
+  `.nodes` sites and **1 380 of 1 534** `.warnings` sites are on an object that
+  is not `state`/`st` (a whole-file regex over the same set gives 208 of 477
+  and 1 382 of 1 537 — the case holds under either method).
+
+  **The flat-but-sectioned shape is the design.** What would reopen this:
+  (a) `state.py` passing ~600 fields or ~15 000 lines, where navigation cost
+  starts to dominate; (b) a second consumer that needs a *subset* of the state
+  passed independently (e.g. a back-end taking only mesh + materials); (c) the
+  dynamic-access sites falling to ≤ 2 and the corpus growing decks that exercise
+  every one of them; (d) a measured mypy or IDE benefit the flat shape provably
+  cannot give. Whoever does reopen it should first make the three remaining
+  `getattr(state, "literal", default)` calls direct attribute reads, so a rename
+  fails loudly, and give `sph.py`'s `vars(state)` walk an explicit registry —
+  otherwise the refactor's first symptom is wrong physics at zero diagnostics.
 - **Move writer-private symbols into a shared topology module.** *(done)*
   `topology.TET10_MIDEDGE` (the Radioss `/TETRA10` mid-edge map) plus the
   midside-ordering detection/permutation helpers (`TET10_DYNA_TO_RADIOSS`,
@@ -1023,20 +1094,30 @@ Cases that convert today but drop or approximate detail worth recovering:
 
 ## Testing / CI / DX
 
-Open developer-experience items. Marked with whether they are in progress now or
-deferred.
+Developer-experience items. Every row on this list has now shipped; the section
+is kept as the rationale record, and re-checked against the repo at PR #134.
 
-- **Golden-file end-to-end regression fixtures** *(deferred, blocked)* — a
-  parametrised suite that converts a fixed `.k` and diffs the `.rad` against a
-  checked-in golden. Blocked by `.gitignore` excluding `*.k`/`*.rad`; needs an
-  un-ignored `tests/fixtures/` subtree.
-- **Coverage gate** *(deferred)* — enforce a minimum coverage threshold in CI.
-- **mypy** *(deferred)* — add static type checking (helped by the
-  `ConversionState`-dataclass refactor above).
-- **Windows CI leg** *(deferred)* — the primary validation target is Windows +
-  Intel MPI; add a Windows job to the matrix.
-- **PyPI publish + releases** *(deferred)* — package and publish tagged
-  releases.
-- **Docker bash launchers + hardening** *(deferred)* — add `or.sh` /
-  `build-and-export.sh` bash equivalents of the PowerShell launchers, de-brittle
-  the date-pinned image tag, and pin the scipy version in the image.
+- **Golden-file end-to-end regression fixtures** *(done)* — `tests/test_golden.py`
+  converts five checked-in decks and diffs both `.rad` files against
+  `tests/fixtures/expected/`, plus a second-run determinism case that guards
+  dict/set-ordering nondeterminism. The `.gitignore` blocker was solved with
+  `!tests/fixtures/**` overrides.
+- **Coverage gate** *(done)* — `coverage report --fail-under=68` in the `test`
+  job, plus a guard that fails the build if more than 15 tests self-skip.
+- **mypy** *(done — blocking)* — `mypy==2.3.1`, configured in `pyproject.toml`
+  `[tool.mypy]`, `k2rad` clean at **0 findings** (down from 194 at PR #134); the
+  CI `typecheck` job fails the build on a new finding. The pin is deliberate: an
+  unpinned `pip install mypy` lets a future release turn master red with no
+  change on our side. Two environments must both stay clean — `mypy k2rad` in a
+  venv that has numpy/scipy, and `mypy --no-site-packages k2rad`, which
+  reproduces locally the bare environment the CI job runs `mypy k2rad` in.
+  *Next tiers, measured on the clean tree, not scheduled:*
+  `--check-untyped-defs` = **2** findings (two `Need type annotation for "out"`,
+  and it silences the 10 `annotation-unchecked` notes) — a near-free next step;
+  `--disallow-untyped-defs` = 479; `--strict` = 1184.
+- **Windows CI leg** *(done)* — the `test` job matrix is
+  `[ubuntu-latest, windows-latest]` × Python 3.9-3.12.
+- **PyPI publish + releases** *(done)* — `.github/workflows/publish.yml` builds
+  and publishes on a release.
+- **Docker bash launchers + hardening** *(done)* — `docker/or.sh` and
+  `docker/build-and-export.sh` alongside the PowerShell pair.

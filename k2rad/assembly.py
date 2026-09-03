@@ -1238,7 +1238,16 @@ _USER_SHELL_ELFORMS = frozenset({101, 102, 103, 104, 105})
 def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     """Every *SECTION_SHELL card set: SECID (IDROFF) plus the card-1 field-6
     QR/IRID back-reference to an *INTEGRATION_SHELL rule, which is NEGATED and
-    so needs the sign-preserving rewriter."""
+    so needs the sign-preserving rewriter, plus the card-2 field-8 EDGSET
+    (cols 71-80, ``_rewrite_line`` index 7 — the field numbers here are 1-based
+    throughout, matching ``handlers.py`` and Vol I R17 p.41-62).
+
+    EDGSET is the ONE id on card 2 — the rest of the card is thicknesses,
+    NLOC, MAREA and the IDOF flag. It names a ``*SET_NODE`` and so belongs to
+    IDSOFF, not to card 1's IDROFF; ``handle_section_shell`` reads it into
+    ``SectionShell.nsid`` and the 2D-seatbelt writer quotes it back at the
+    user, so an un-offset cell would name a set that exists in neither the
+    child deck nor the converted model."""
     per_set_title = _title_offset(b)
     opt_card = any(b.keyword.endswith("_" + o)
                    for o in _SECTION_SHELL_OPTION_CARDS)
@@ -1262,6 +1271,10 @@ def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
         if new is not None:
             raw[idx] = new
         nip = abs(_geti(f1, 3))
+        if idx + 1 < len(raw):        # card 2 field 8 (cols 71-80) = EDGSET
+            new = _rewrite_line(raw[idx + 1], [(7, "s")], offsets)
+            if new is not None:
+                raw[idx + 1] = new
         idx += 2
         if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
             idx += ((nip if nip > 0 else 2) + 7) // 8
@@ -1965,13 +1978,13 @@ def _off_airbag_hybrid(b: Block, raw, i3: int, offsets: Dict[str, int]) -> None:
         if new is not None:
             raw[i3 + 1] = new
         # A23 < 0 names a *PART (LCA23 != -1) or a *SET_PART (LCA23 == -1).
-        lca23 = to_int(_card(raw, i3 + 1, fixed=True, n=8, w=10)[3] or 0)
+        lca23 = to_int(_card(raw, i3 + 1, fixed=True, n=8, w=10)[3])
         _rewrite_neg_cell(raw, i3 + 1, 2,
                           offsets.get("s" if lca23 == -1 else "p", 0))
     ngas = 0
     if i3 + 2 < len(raw) and raw[i3 + 2].strip():
         f5 = _card(raw, i3 + 2, fixed=True, n=8, w=10)
-        ngas = to_int(f5[2] or 0) if len(f5) > 2 else 0
+        ngas = to_int(f5[2]) if len(f5) > 2 else 0
         new = _rewrite_line(raw[i3 + 2], [(3, "f"), (4, "f")], offsets)
         if new is not None:
             raw[i3 + 2] = new
@@ -2033,8 +2046,8 @@ def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
              "against this *INCLUDE_TRANSFORM's IDSOFF / IDFOFF / IDEOFF.")
     if i1 < len(raw) and raw[i1].strip():
         f1 = _card(raw, i1, fixed=True, n=8, w=10)
-        stype1 = to_int(f1[1] or 0) if len(f1) > 1 else 0
-        stype2 = to_int(f1[3] or 0) if len(f1) > 3 else 0
+        stype1 = to_int(f1[1]) if len(f1) > 1 else 0
+        stype2 = to_int(f1[3]) if len(f1) > 3 else 0
         new = _rewrite_line(
             raw[i1],
             [(0, "s" if stype1 else "p"), (2, "s" if stype2 else "p")],
@@ -2044,7 +2057,7 @@ def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
     for r in vent_rows:
         if r < len(raw) and raw[r].strip():
             fv = _card(raw, r, fixed=True, n=8, w=10)
-            stype3 = to_int(fv[1] or 0) if len(fv) > 1 else 0
+            stype3 = to_int(fv[1]) if len(fv) > 1 else 0
             new = _rewrite_line(
                 raw[r], [(0, "s" if stype3 else "p"), (3, "f"), (4, "f")],
                 offsets)

@@ -38,7 +38,12 @@ modal = ["numpy", "scipy"]
 viz = ["numpy", "lasso-python"]
 # Everything optional, for a full local install.
 all = ["numpy", "scipy", "lasso-python"]
-# Linting / tooling for contributors.
+# Linting / tooling for contributors. Deliberately UNPINNED, like ruff and
+# coverage: this extra serves local installs, where a newer tool is welcome.
+# The GATE is pinned instead — .github/workflows/tests.yml installs
+# `mypy==2.3.1`, the version PR #134's 194 -> 0 burn-down was measured against.
+# If a floating local mypy reports something CI does not, that is the pin gap,
+# not a regression; `pip install "mypy==2.3.1"` reproduces the job exactly.
 dev = ["ruff", "coverage", "mypy"]
 
 [project.scripts]
@@ -82,13 +87,35 @@ skip_covered = false
 fail_under = 68
 
 [tool.mypy]
-# Lenient, advisory baseline (CI job prints findings without failing). The
-# ConversionState dataclass gives mypy a typed handler<->writer contract;
+# BLOCKING: the `typecheck` CI job runs `mypy k2rad` and fails on any finding
+# (PR #134 burned the advisory baseline down from 194 to 0). The pin lives in
+# .github/workflows/tests.yml alone — see the `dev` extra above for why that
+# extra stays unpinned. Moving the pin means re-running the burn-down.
+#
+# python_version is 3.10 because mypy 2.3.1 REFUSES 3.9: it prints "Python 3.9
+# is not supported (must be 3.10 or higher)" and then checks at 3.10 anyway, so
+# the old "3.9" here was inert (findings measured identical either way). The
+# project's floor is still >=3.9 — `requires-python` and the 3.9 leg of the test
+# matrix are now its ONLY guard, NOT this checker. So keep writing
+# typing.List/Dict/Optional and no `match`: mypy will not catch a 3.10-only
+# spelling here. It bites hardest in the six modules that have no `from
+# __future__ import annotations` — add_grounding_springs.py, k2rad.py,
+# k2rad/cli.py, k2rad/topology.py, k2rad/writer/__init__.py, run_converter.py —
+# where an `X | Y` annotation is EVALUATED at import and is a 3.9 TypeError.
+#
 # allow_redefinition suppresses the loop-variable-reuse false positives that
-# dominated the first baseline (124 -> ~38 findings). Promote to blocking once
-# the remaining findings are burned down.
-python_version = "3.9"
+# dominated the first baseline: turning it off adds 404 findings in 14 files
+# (writer/materials.py 121, writer/mesh.py 78, writer/contacts.py 55,
+# writer/loads.py 48, ...), none of them on a line PR #134 wrote — the
+# burn-down's narrowing rewrites all bind a NEW name rather than re-binding
+# after a guard, so none depends on the flag. warn_unused_ignores is ON so an
+# ignore cannot rot the way parser.py's did once allow_redefinition landed.
+#
+# The count is environment-sensitive: with numpy installed mypy follows its
+# inline types. Verify with BOTH `mypy k2rad` and `mypy --no-site-packages
+# k2rad` (the latter reproduces the CI environment exactly).
+python_version = "3.10"
 files = ["k2rad"]
 ignore_missing_imports = true
-warn_unused_ignores = false
+warn_unused_ignores = true
 allow_redefinition = true
