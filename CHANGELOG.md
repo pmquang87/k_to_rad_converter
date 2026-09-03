@@ -320,7 +320,7 @@ Prior history (before this changelog was introduced) is summarized in the
   ROADMAP numbers were stale — 352 fields, not ~100; 194 findings, not ~38 —
   and the measured case against grouping is in ROADMAP's architecture section:
   29 field families rather than 4-6, a 42 % drift rate in the comment-form
-  version of the same idea, 4 022 access sites over 72 files plus 434 prose
+  version of the same idea, ~4 200 access sites over ~78 files plus 434 prose
   references, and eleven dynamic-access sites (twelve before this PR retired
   one) — five of which fail SILENTLY, including a `vars(state)` walk in
   `writer/sph.py` that would report every SPH density as 0.0 — that a corpus

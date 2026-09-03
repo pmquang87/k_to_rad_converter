@@ -184,13 +184,16 @@ below for the measurement.
      reaches them with 5-9 hits from a single file. A zero-mover byte-identity
      sweep therefore *cannot* prove the migration safe.
 
-  Cost side, for the record: **4 022 field-access sites over 5 931 code lines in
-  72 files** (877 of them in `tests/` and 81 in `tools/`, neither covered by
-  CI's `files = ["k2rad"]`, both breaking only at runtime), plus **434
-  references** to `state.<field>` in comments, docstrings and Markdown that no
-  mechanical rewrite touches, plus a new CST dependency — a blind regex is ruled
-  out because 188 of 464 `.nodes` sites and 1 366 of 1 524 `.warnings` sites
-  belong to other objects.
+  Cost side, for the record: **~4 200 field-access sites over ~78 files** —
+  counted by AST, as any `state.<f>` / `st.<f>` whose `<f>` is one of the 352
+  declared fields, which gives 4 170 sites in 78 files (`k2rad/` 2 977,
+  `tests/` 1 112, `tools/` 81); widening the receiver set to every plausible
+  alias gives 4 282 over 79. `tests/` and `tools/` are not covered by CI's
+  `files = ["k2rad"]` and would break only at runtime. Add **434 references**
+  to `state.<field>` in comments, docstrings and Markdown that no mechanical
+  rewrite touches, plus a new CST dependency — a blind regex is ruled out
+  because 188 of 464 `.nodes` sites and 1 366 of 1 524 `.warnings` sites belong
+  to other objects.
 
   **The flat-but-sectioned shape is the design.** What would reopen this:
   (a) `state.py` passing ~600 fields or ~15 000 lines, where navigation cost
