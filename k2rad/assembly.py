@@ -1238,7 +1238,14 @@ _USER_SHELL_ELFORMS = frozenset({101, 102, 103, 104, 105})
 def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     """Every *SECTION_SHELL card set: SECID (IDROFF) plus the card-1 field-6
     QR/IRID back-reference to an *INTEGRATION_SHELL rule, which is NEGATED and
-    so needs the sign-preserving rewriter."""
+    so needs the sign-preserving rewriter, plus the card-2 field-7 EDGSET.
+
+    EDGSET is the ONE id on card 2 — the rest of the card is thicknesses,
+    NLOC, MAREA and the IDOF flag. It names a ``*SET_NODE`` and so belongs to
+    IDSOFF, not to card 1's IDROFF; ``handle_section_shell`` reads it into
+    ``SectionShell.nsid`` and the 2D-seatbelt writer quotes it back at the
+    user, so an un-offset cell would name a set that exists in neither the
+    child deck nor the converted model."""
     per_set_title = _title_offset(b)
     opt_card = any(b.keyword.endswith("_" + o)
                    for o in _SECTION_SHELL_OPTION_CARDS)
@@ -1262,6 +1269,10 @@ def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
         if new is not None:
             raw[idx] = new
         nip = abs(_geti(f1, 3))
+        if idx + 1 < len(raw):                  # card 2 field 7 = EDGSET
+            new = _rewrite_line(raw[idx + 1], [(7, "s")], offsets)
+            if new is not None:
+                raw[idx + 1] = new
         idx += 2
         if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
             idx += ((nip if nip > 0 else 2) + 7) // 8
