@@ -2552,6 +2552,47 @@ class TestTwoDBeltDirection(unittest.TestCase):
             "*ELEMENT_SEATBELT\n" + rows))
         self.assertTrue(_warns(r, "ERROR 2075"))
 
+    _EDGSET_SECTION = _SHELL_PART.replace(
+        "       1.2       1.2       1.2       1.2",
+        "       1.2       1.2       1.2       1.2"
+        "         0       0.0         0       555")
+
+    def _transverse_deck(self, edgset: bool):
+        """The transverse 2-element strip of :meth:`_deck`, with or without an
+        EDGSET on its *SECTION_SHELL."""
+        rows = (_belt_card(41, 800, 202, 203, 0, 0.0, 201, 200)
+                + _belt_card(42, 800, 204, 205, 0, 0.0, 203, 202))
+        parts = [self._EDGSET_SECTION if edgset else _SHELL_PART,
+                 _mat(kw="MAT_SEATBELT_2D", ulcid=914), self._STRIP_NODES,
+                 "*ELEMENT_SEATBELT\n" + rows]
+        if edgset:
+            parts.append("*SET_NODE_LIST\n       555\n       200       202\n")
+        return _deck(*parts)
+
+    def test_a_stated_edgset_does_not_silence_the_direction_check(self):
+        """An EDGSET states the direction to LS-DYNA, but this batch leaves
+        Iskew 0, so the starter still falls back to the shell edges and the
+        ERROR 2075 risk is UNCHANGED. Gating the check on the EDGSET would hide
+        a warning that is still true of the converted deck."""
+        r, _s, _e = _convert(self._transverse_deck(edgset=True))
+        self.assertEqual(len(_warns(r, "ERROR 2075")), 1, r.warnings)
+
+    def test_the_remedy_never_asks_for_an_edgset_the_deck_already_states(self):
+        """The message used to end "or state the direction with an EDGSET on
+        the *SECTION_SHELL" unconditionally — advice to redo what the deck did.
+        It is offered only when there is no EDGSET; otherwise the message says
+        why the one on the card cannot help."""
+        with_es = _warns(_convert(self._transverse_deck(edgset=True))[0],
+                         "ERROR 2075")[0]
+        self.assertNotIn("or state the direction with an EDGSET", with_es)
+        self.assertIn("cannot do it, because the converted /PROP/TYPE9 "
+                      "carries Iskew 0", with_es)
+        without = _warns(_convert(self._transverse_deck(edgset=False))[0],
+                         "ERROR 2075")[0]
+        self.assertIn("Rotate the element connectivity so n1->n2 runs along "
+                      "the belt, or state the direction with an EDGSET on the "
+                      "*SECTION_SHELL.", without)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 class TestBeltCardSlicing(unittest.TestCase):

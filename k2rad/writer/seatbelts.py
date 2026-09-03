@@ -2035,7 +2035,8 @@ def _emit_seatbelt_2d_props(state: ConversionState) -> List[str]:
                 "edges (n0,n1) and (n3,n2) when it builds the 1D springs "
                 "(GlobalModelSdi.cpp:2400-2412). Check that the mesh's local "
                 "node order runs ALONG the belt.")
-        _warn_2d_belt_direction(state, pid, part.mid)
+        _warn_2d_belt_direction(state, pid, part.mid,
+                                has_edgset=bool(sec is not None and sec.nsid))
     return lines
 
 
@@ -2089,7 +2090,7 @@ def _edge_run(elems: List[SeatbeltElem],
 
 
 def _warn_2d_belt_direction(state: ConversionState, pid: int,
-                            mid: int) -> None:
+                            mid: int, has_edgset: bool = False) -> None:
     """A 2D belt whose local node order runs ACROSS the strip, not along it.
 
     The starter builds the 1D strand chain from the ``(n1,n2)`` and ``(n4,n3)``
@@ -2127,7 +2128,13 @@ def _warn_2d_belt_direction(state: ConversionState, pid: int,
     perpendicular pair the short rungs. So the two are measured and the part is
     named only when the perpendicular pair wins. A square patch, where the two
     are equal, is genuinely ambiguous and is left alone — as is a single
-    element, or a part whose EDGSET already states the direction.
+    element.
+
+    An EDGSET on the ``*SECTION_SHELL`` does NOT silence this: the converted
+    deck leaves ``Iskew`` 0 (see the caller's own warning), so the starter
+    still falls back to the shell edges and the ERROR 2075 risk is unchanged.
+    What *has_edgset* changes is the REMEDY the message offers — telling a deck
+    that already states an EDGSET to state one is advice to redo what it did.
     """
     elems = [e for e in state.seatbelt_elems if e.is_2d and e.pid == pid]
     if len(elems) < 2:
@@ -2136,6 +2143,12 @@ def _warn_2d_belt_direction(state: ConversionState, pid: int,
     cross = _edge_run(elems, ((2, 3), (1, 4)))
     if cross <= belt:
         return
+    remedy = ("Rotate the element connectivity so n1->n2 runs along the belt "
+              "— the EDGSET this section states cannot do it, because the "
+              "converted /PROP/TYPE9 carries Iskew 0. "
+              if has_edgset else
+              "Rotate the element connectivity so n1->n2 runs along the belt, "
+              "or state the direction with an EDGSET on the *SECTION_SHELL. ")
     state.warn(
         f"2D seatbelt part {pid}: the (n1,n2)/(n4,n3) edges of its "
         f"*ELEMENT_SEATBELT shells chain into strands at most {belt} element(s) "
@@ -2146,11 +2159,9 @@ def _warn_2d_belt_direction(state: ConversionState, pid: int,
         "group these shells into strands of the wrong width and the belt "
         "entities on one material end up with different SECTIONs: "
         f"ERROR 2075 (2D SEATBELT MATERIAL {mid} IS USED FOR SEVERAL SEATBELTS "
-        "with different section, create_seatbelt.F:756-759). Rotate the "
-        "element connectivity so n1->n2 runs along the belt, or state the "
-        "direction with an EDGSET on the *SECTION_SHELL. LS-DYNA imposes no "
-        "such rule, so this is a difference between the two belt models rather "
-        "than a defect in the deck.")
+        "with different section, create_seatbelt.F:756-759). " + remedy
+        + "LS-DYNA imposes no such rule, so this is a difference between the "
+        "two belt models rather than a defect in the deck.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
