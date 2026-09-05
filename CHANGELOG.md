@@ -1055,7 +1055,7 @@ Prior history (before this changelog was introduced) is summarized in the
 
   **Verification record.** Measured on this branch at ``<this commit>``, AFTER the last
   code commit ``a3e5103``, with the main tree untouched at `92460b7`:
-  `pytest tests/ -q` **4866 passed / 2 skipped / 1929 subtests (baseline at master `92460b7`: 4697 / 2 / 1898)**; `mypy k2rad` **0 issues in 37 source
+  `pytest tests/ -q` **4867 passed / 2 skipped / 1931 subtests (baseline at master `92460b7`: 4697 / 2 / 1898)**; `mypy k2rad` **0 issues in 37 source
   files**, and **0** again under `--no-site-packages`; `ruff check .` clean; the
   five golden fixtures byte-identical (`git diff origin/master..HEAD --
   tests/fixtures` empty). Two-half corpus sweep, master `92460b7` vs this
@@ -1066,7 +1066,14 @@ Prior history (before this changelog was introduced) is summarized in the
   ****0 error rows and 0 timeouts on BOTH sides**, 0 one-sided rows, 885 comparable pairs**, half 1 (SHA256 of every emitted `.rad`) **1770 files compared -> **111** movers**,
   half 2 (`state.warnings` + `skipped_keywords` + `recognized_not_emitted`,
   stated separately) ****112** `state.warnings` movers over 6023 master-side warnings, **26** `skipped_keywords`, **18** `recognized_not_emitted`**, and every mover attributed to a named item
-  above.
+  above. MUTATION ROUND over the code this post-review added: 18 targeted
+  mutations, **18 CAUGHT**, plus one deliberate no-op control that was
+  correctly MISSED (the #133 proof that the harness is not lying); each
+  file backed up to a COPY and restored from it, each mutation shown to
+  have changed the file by `git diff --numstat`, and both `FAILED` and
+  `SUBFAILED` matched. One of the 18 exposed a guard with no pinning test —
+  `_transducer_side_pids`' own `styp in (0, 1)` screen, which its one caller
+  pre-empts — and it now has a direct unit test.
 
 - **A `*CONTACT_FORCE_TRANSDUCER` had to GUESS a parent interface, and every
   node or segment foreign to that guess was a starter error.** k2rad parented

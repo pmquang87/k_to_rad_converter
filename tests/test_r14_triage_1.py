@@ -2603,6 +2603,32 @@ class ForceTransducerSegmentSetTests(unittest.TestCase):
         self.assertIn("*SET_SEGMENT", w[0])
         self.assertNotIn("names no *PART this deck defines, so", w[0])
 
+    def test_the_side_pids_helper_refuses_types_0_and_1_directly(self):
+        """A DIRECT unit test, because the one caller pre-empts this arm.
+
+        `_transducer_surface` handles `styp in (0, 1)` itself, so a mutation
+        that deletes the same screen inside `_transducer_side_pids` is not
+        caught by any deck-level test — measured, in this round's own mutation
+        pass. The arm is defence in depth for a future caller (and the function
+        is exported), so it is pinned here on its own: reading a *SET_SEGMENT
+        id as a *PART id is the defect that skipped transducer.k, and the
+        helper must never do it again even if reached another way.
+        """
+        from k2rad.writer.contacts import _transducer_side_pids
+        state = _dispatch(self._seg_deck())
+        # part 1 EXISTS, so a type-3 side resolves it ...
+        self.assertEqual(_transducer_side_pids(state, 1, 3), [1])
+        # ... while the same id under a SEGMENT-SET type must resolve nothing
+        for styp in (0, 1):
+            with self.subTest(styp=styp):
+                self.assertEqual(_transducer_side_pids(state, 1, styp), [])
+                self.assertEqual(_transducer_side_pids(state, 10, styp), [])
+        # sid = 0 and type 5 still mean "every part"
+        self.assertEqual(_transducer_side_pids(state, 0, 0),
+                         sorted(state.parts))
+        self.assertEqual(_transducer_side_pids(state, 7, 5),
+                         sorted(state.parts))
+
     def test_a_part_id_side_still_takes_the_part_route(self):
         """The 2/3/5 spellings are untouched: no /SURF/SEG, a part surface."""
         _res, starter = _convert(_ft_deck())
