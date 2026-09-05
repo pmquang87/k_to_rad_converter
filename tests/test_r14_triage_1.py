@@ -1060,5 +1060,137 @@ class HeBunreactedTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _kw(he_bunreacted=bad)
 
+
+# ale/misc/volume-fraction-a/cylinder_impact_A.k's shape: a vacuum phase, an
+# ALE *MAT_PLASTIC_KINEMATIC phase, and a Lagrangian shell on a THIRD material.
+_MAT003 = "*MAT_PLASTIC_KINEMATIC\n" + _row(2, "8E-09", 200000, 0.3, 200,
+                                            0.0, 0.0) + "\n" \
+          + _row(0.0, 0.0, 0.0, 0.0) + "\n"
+
+
+def _ammg_deck(*, vacuum: bool = True, shared: bool = False,
+               extra_mat: str = "") -> str:
+    """Part 1 = the phase-1 material, part 2 = the *MAT_003 ALE phase, and
+    (when *shared*) part 3 = a Lagrangian part on the SAME *MAT_003."""
+    mats = ("*MAT_VACUUM\n" + _row(1, "1E-12") + "\n" if vacuum
+            else "*MAT_NULL\n" + _row(1, "1.0E-09") + "\n"
+                 "*EOS_GRUNEISEN\n"
+                 + _row(1, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + "\n")
+    third = ("*PART\nlag\n" + _row(3, 3, 2) + "\n"
+             "*SECTION_SHELL\n" + _row(3, 2) + "\n" + _row(1.0) + "\n"
+             "*ELEMENT_SHELL\n"
+             "       9       3       1       2       3       4\n"
+             ) if shared else ""
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK + _BRICK2
+            + "*PART\np1\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nale\n" + _row(2, 2, 2) + "\n"
+            + third
+            + "*SECTION_SOLID\n" + _row(1, 11) + "\n"
+            + "*SECTION_SOLID\n" + _row(2, 11) + "\n"
+            + mats + _MAT003 + extra_mat
+            + "*ALE_MULTI-MATERIAL_GROUP\n" + _row(1, 1) + "\n"
+            + _row(2, 1) + "\n"
+            + "*END\n")
+
+
+class AleSubmaterialTests(unittest.TestCase):
+    """A7 — the /MAT/LAW51 phase list: vacuum, restatement, the clone."""
+
+    def test_vacuum_and_gas_mixture_are_refused_by_name(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS
+        for kw in ("MAT_VACUUM", "MAT_140", "MAT_GAS_MIXTURE", "MAT_148"):
+            self.assertIn(kw, HANDLERS)
+            self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
+
+    def test_the_vacuum_phase_is_dropped_and_mip_falls(self):
+        """hm_read_mat51.F:608-627 reads exactly MIP rows and a tMID <= 0
+        inside them is fatal, so a vacuum cannot be declared as MID 0; the
+        undeclared balance of the volume fractions IS the void."""
+        res, starter = _convert(_ammg_deck())
+        rows = _data_rows(starter, _headers(starter, "/MAT/LAW51/")[0])
+        # rows: title, card1(blank), Iform, NU/Nu_Vol(blank), then one row per
+        # phase.
+        phases = [r for r in rows if r.strip() and r.strip() != "12"]
+        self.assertEqual(len(phases), 2)            # the title + ONE phase
+        w = [x for x in res.warnings if "phase(s) DROPPED" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("MID 1 (*MAT_VACUUM)", w[0])
+        self.assertIn("MIP falls to 1", w[0])
+
+    def test_an_ammg_only_mat003_is_restated_under_its_own_id(self):
+        _res, starter = _convert(_ammg_deck())
+        self.assertIn("/MAT/LAW2/2", starter)
+        self.assertEqual(_headers(starter, "/MAT/LAW44/"), [])
+
+    def test_the_restatement_is_never_silent(self):
+        """_target_mat_law already answers 2 for an AMMG-only material, so an
+        'is this law allowed?' test alone would change the emitted law from 44
+        to 2 with nothing said."""
+        res, _starter = _convert(_ammg_deck())
+        w = [x for x in res.warnings if "RESTATED as /MAT/LAW2" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("fill_buffer_51.F:210", w[0])
+        self.assertIn("b = E*ETAN/(E-ETAN) = 0", w[0])
+
+    def test_a_shared_mat003_is_cloned_instead(self):
+        """A material shared with a Lagrangian part keeps /MAT/LAW44 and the
+        phase list points at a minted /MAT/LAW2 — the SPH clone discipline."""
+        res, starter = _convert(_ammg_deck(shared=True))
+        self.assertIn("/MAT/LAW44/2", starter)
+        clones = [h for h in _headers(starter, "/MAT/LAW2/")]
+        self.assertEqual(len(clones), 1)
+        clone_id = int(clones[0].rsplit("/", 1)[1])
+        self.assertGreaterEqual(clone_id, 90001)
+        w = [x for x in res.warnings if "is CLONED" in x]
+        self.assertEqual(len(w), 1)
+        # ...and the phase list names the CLONE, not the original.
+        rows = _data_rows(starter, _headers(starter, "/MAT/LAW51/")[0])
+        listed = [int(r[:10]) for r in rows
+                  if r[:10].strip().isdigit() and r.strip() != "12"]
+        self.assertIn(clone_id, listed)
+        self.assertNotIn(2, listed)
+
+    def test_an_unrestatable_law_is_dropped_by_name(self):
+        """LAW1 is not on fill_buffer_51.F:210's list and cannot be restated
+        without changing the material, so the phase goes and says so."""
+        deck = _ammg_deck(vacuum=False).replace(
+            "*MAT_NULL\n" + _row(1, "1.0E-09") + "\n"
+            "*EOS_GRUNEISEN\n"
+            + _row(1, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + "\n",
+            "*MAT_ELASTIC\n" + _row(1, "1.0E-09", 210000.0, 0.3) + "\n")
+        res, _starter = _convert(deck)
+        w = [x for x in res.warnings if "phase(s) DROPPED" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("MID 1 (/MAT/LAW1)", w[0])
+        self.assertIn("unreachable yield", w[0])
+
+    def test_the_law51_card_states_that_nothing_references_it(self):
+        """The emitted /MAT/LAW51 is an orphan: the per-fluid ALE parts are
+        kept, so the phases cannot mix and the run does not reproduce the
+        LS-DYNA model. That has to be unmissable (#122 at deck scale)."""
+        res, starter = _convert(_ammg_deck())
+        law_id = int(_headers(starter, "/MAT/LAW51/")[0].rsplit("/", 1)[1])
+        self.assertNotIn(f"         {law_id}", "\n".join(
+            _data_rows(starter, "/PART/1") or []))
+        w = [x for x in res.warnings if "listing submaterials" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("no /PART in the emitted deck references this /MAT/LAW51",
+                     "CANNOT MIX",
+                     "DOES NOT REPRODUCE THE LS-DYNA MODEL",
+                     "ALPHA_MAT values are a PLACEHOLDER"):
+            self.assertIn(fact, w[0])
+
+    def test_an_all_dropped_group_emits_no_law51(self):
+        deck = _ammg_deck().replace(
+            "*ALE_MULTI-MATERIAL_GROUP\n" + _row(1, 1) + "\n" + _row(2, 1)
+            + "\n",
+            "*ALE_MULTI-MATERIAL_GROUP\n" + _row(1, 1) + "\n")
+        res, starter = _convert(deck)
+        self.assertEqual(_headers(starter, "/MAT/LAW51/"), [])
+        self.assertIn("no submaterial survives", " ".join(res.warnings))
+
 if __name__ == "__main__":
     unittest.main()

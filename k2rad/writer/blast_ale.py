@@ -385,17 +385,20 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
     if not state.ale_mmgs:
         return []
     lines: List[str] = []
-    for mmg in state.ale_mmgs:
-        submats: List[int] = []
-        for sid, idtype in mmg.entries:
-            for pid in _part_pids(state, sid, idtype == 1):
-                part = state.parts.get(pid)
-                if part and part.mid and part.mid not in submats:
-                    submats.append(part.mid)
+    for k, mmg in enumerate(state.ale_mmgs):
+        # The phase list is DECIDED by writer/materials._resolve_ale_submaterials
+        # (which drops the vacuum entry and every other law
+        # fill_buffer_51.F:210 refuses, and restates a *MAT_PLASTIC_KINEMATIC
+        # member as /MAT/LAW2), never re-derived here: two walks of the same
+        # entries would be two answers to one question.
+        submats = list(state.ale_mmg_submats.get(k, []))
         if not submats:
-            state.warn("*ALE_MULTI-MATERIAL_GROUP: could not resolve any "
-                       "submaterial (no known parts/materials) — /MAT/LAW51 not "
-                       "emitted.")
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP #{k + 1}: no submaterial survives "
+                "— either no *PART/material of the group is known to this "
+                "converter, or every phase was dropped by the LAW51 "
+                "submaterial screen (see the warning above). /MAT/LAW51 not "
+                "emitted.")
             continue
         # next_mat_id(), not a bare next_id(): the synthesized /MAT/LAW51 shares
         # the starter /MAT namespace with every converted *MAT, so a user MID at
@@ -441,11 +444,25 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
                       "/MAT/LAW5 does not (the check is in the Iform = 12 "
                       "branch alone).")
         state.warn(
-            f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing submaterials "
-            f"{submats} (phase order). In OpenRadioss the ALE domain is ONE part "
-            f"referencing this /MAT/LAW51 with the initial fill set by /INIVOL; "
-            "consolidate the LS-DYNA per-fluid ALE parts onto one mesh that "
-            f"references material {law_id}.")
+            f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing "
+            f"submaterials {submats} (phase order), with ALPHA_MAT = 1.0 on "
+            "the first phase and 0.0 on the rest. READ THIS BEFORE TRUSTING "
+            "THE RUN: **no /PART in the emitted deck references this "
+            "/MAT/LAW51**, and no /INIVOL is written. In OpenRadioss the ALE "
+            "domain is ONE part referencing the LAW51 material with the "
+            "initial fill set by /INIVOL; what k2rad emits instead is the "
+            "LS-DYNA per-fluid layout — each fluid on its own /PART with its "
+            "own single-material /MAT and Iale = 1 on its /PROP/SOLID. That "
+            "starts and runs, but the phases CANNOT MIX: on a blast deck the "
+            "detonation products cannot expand into the water region, and on a "
+            "volume-fraction deck the initial fill is not the deck's. THIS "
+            "CONVERTED DECK DOES NOT REPRODUCE THE LS-DYNA MODEL. The "
+            "ALPHA_MAT values are a PLACEHOLDER with no relation to the deck's "
+            "*INITIAL_VOLUME_FRACTION*: they are inert exactly because nothing "
+            "references the card, and they would be wrong by construction if "
+            "anything did. To reproduce the model, consolidate the per-fluid "
+            f"ALE parts onto one mesh that references material {law_id} and "
+            "give each phase its /INIVOL fill by hand.")
     return lines
 
 

@@ -267,6 +267,62 @@ Prior history (before this changelog was introduced) is summarized in the
     set it"*; it now states which value went in and where it came from, because
     prescribing what the converter already writes is a false cited fact (#129).
 
+  - **The `/MAT/LAW51` phase list is SCREENED against the starter's own rule,
+    and the card now says what it is.** `fill_buffer_51.F:210` accepts only
+    laws 2, 3, 4, 5, 6, 10, 102 and 133 as a phase and `:237` answers anything
+    else with `ERROR 99`; `:202` answers a material the deck does not define
+    with *"NON EXISTING SUBMATERIAL IDENTIFIER"*. Both were reachable from
+    k2rad's own output on five R14 decks. Three fixes:
+    **(a) a `*MAT_VACUUM` phase is DROPPED, never carried as MID 0** —
+    `hm_read_mat51.F:608-627` reads exactly `MIP` rows and a `tMID <= 0` inside
+    them is a fatal *INCORRECT MATERIAL IDENTIFIER*, while `:639-646` checks
+    only that the volume fractions SUM ABOVE 1, so a sum BELOW one is legal and
+    the undeclared balance is how Radioss represents void (`stagnation_A/B`,
+    `cylinder_impact_A/B`, and the latent `ale_wavehitcol`). The consequence is
+    named: the vacuum's tiny `RHO` (1e-14 … 1e-9 on the corpus) carried a small
+    mass in LS-DYNA that the Radioss model does not have.
+    **(b) a `*MAT_PLASTIC_KINEMATIC` member is RESTATED as `/MAT/LAW2`** —
+    `a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1`, the same
+    `_plas_kin_law2_expressible` test the SPH path already uses, which
+    `cylinder_impact`'s material (`E 200000, ν 0.3, SIGY 200, ETAN 0, BETA 0`)
+    passes losslessly because `ETAN = 0` leaves no hardening for `BETA` to
+    split. The id discipline is the SPH one verbatim: under its OWN id when
+    every `*PART` on the material is an AMMG member, otherwise a minted clone
+    so the Lagrangian parts keep `/MAT/LAW44/<mid>`. The restatement is tested
+    BEFORE the allowed-law screen on purpose — `_target_mat_law` already
+    answers 2 for an AMMG-only material, so screening first would have changed
+    the emitted law from 44 to 2 with nothing said.
+    **(c) anything else off the list is dropped BY NAME**, with the phase, its
+    law and the reason; `*MAT_ELASTIC` (LAW1) additionally names its manual
+    route (`/MAT/LAW2` with an unreachable yield). It is not an AMMG member on
+    any corpus deck — `stagnation`'s group lists parts 1 and 2, and its
+    `*MAT_ELASTIC` is the Lagrangian shell part 3 coupled by
+    `*CONSTRAINED_LAGRANGE_IN_SOLID`.
+    **And the honest sentence the batch would be dishonest without**: the
+    emitted `/MAT/LAW51` is referenced by **no `/PART`**, and no `/INIVOL` is
+    written. k2rad keeps the LS-DYNA per-fluid layout — each fluid on its own
+    part with its own single-material `/MAT` and `Iale = 1` on its
+    `/PROP/SOLID` — so the phases CANNOT MIX: on a blast deck the detonation
+    products cannot expand into the water, and on a volume-fraction deck the
+    initial fill is not the deck's. These decks now START where they used to be
+    refused, and **the converted model is not the LS-DYNA one**; the warning
+    says so in capitals rather than letting a green run imply otherwise (#122
+    at deck scale). The `ALPHA_MAT` cells are stated as the placeholder they
+    are — inert exactly because nothing references the card, and wrong by
+    construction if anything did. Consolidating the ALE mesh onto one part with
+    per-phase `/INIVOL` fills is its own item.
+
+  - **`*MAT_VACUUM` / `*MAT_140` and `*MAT_GAS_MIXTURE` / `*MAT_148` refused by
+    name.** Radioss has no vacuum material at all — the string appears nowhere
+    in the 2022 Reference or User Guide — and `*MAT_GAS_MIXTURE`'s whole
+    mechanism is `*SECTION_POINT_SOURCE_MIXTURE` + `*INITIAL_GAS_MIXTURE`, an
+    airbag-inflator point-source injection into an ALE mesh, of which
+    OpenRadioss has none: `/MAT/GAS` is a `/MONVOL` gas definition, not an ALE
+    material. A single perfect gas as a LAW51 phase WOULD be expressible as
+    `/MAT/LAW6` + `/EOS/POLYNOMIAL` with `C4 = C5 = γ−1` (RefGuide p.1112), but
+    converting the material alone would leave `point_source.k` with no
+    injection source, so the family is refused whole rather than half.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts

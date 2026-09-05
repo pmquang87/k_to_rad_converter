@@ -10287,6 +10287,32 @@ _REFUSED_MATERIALS = {
         "not just the material, has no counterpart, and its engine "
         "eigensolver is a compiled-out stub on this build. Converting the "
         "material alone would leave a deck with nothing to solve"),
+    ("MAT_VACUUM", "MAT_140"): (
+        "the ALE VACUUM phase material (*MAT_140)",
+        "Radioss has no vacuum material at all — the string does not appear "
+        "in the 2022 Reference or User Guide — and a /MAT/LAW51 phase list "
+        "cannot carry one either: hm_read_mat51.F:608-627 reads exactly MIP "
+        "rows and a tMID <= 0 inside that range is a fatal INCORRECT MATERIAL "
+        "IDENTIFIER. Radioss represents void as the UNDECLARED BALANCE of the "
+        "phase volume fractions instead (:639-646 checks only SUM > 1, so a "
+        "sum below 1 is legal), so the vacuum entry is dropped from the "
+        "submaterial list and MIP is reduced — see the "
+        "*ALE_MULTI-MATERIAL_GROUP warning, which names the group and the "
+        "resulting MIP. Consequence: *MAT_VACUUM's tiny RHO (1e-14 … 1e-9 on "
+        "the corpus decks) carried a small but nonzero mass in LS-DYNA which "
+        "the Radioss model does not have"),
+    ("MAT_GAS_MIXTURE", "MAT_148"): (
+        "the multi-species ALE gas mixture (*MAT_148)",
+        "its whole mechanism is *SECTION_POINT_SOURCE_MIXTURE + "
+        "*INITIAL_GAS_MIXTURE — an airbag-inflator point-source injection into "
+        "an ALE mesh — and OpenRadioss has none of the three. /MAT/GAS "
+        "(mat_gas.cfg, radioss120) is a /MONVOL gas definition, not an ALE "
+        "material. A single perfect gas as a LAW51 phase WOULD be expressible "
+        "as /MAT/LAW6 + /EOS/POLYNOMIAL with C4 = C5 = gamma-1 (Radioss "
+        "RefGuide p.1112, 'Modeling Technique with Polynomial EOS'), but "
+        "converting the material alone would leave the deck with no injection "
+        "source and no way to reach the LS-DYNA result, so the whole family "
+        "is refused rather than half of it"),
     ("MAT_FRAZER_NASH_RUBBER_MODEL", "MAT_031"): (
         "the Frazer-Nash hyperelastic rubber model (*MAT_031)",
         "the card states no constants to map when a least-squares fit is "

@@ -2579,7 +2579,29 @@ state them with `--units`. The legacy `*LOAD_BLAST` card's `IUNIT` is documented
 
 Coupled ALE / fluid-structure (high-explosive detonation):
 `*INITIAL_DETONATION` → `/DFS/DETPOINT`
-`*ALE_MULTI-MATERIAL_GROUP` → `/MAT/LAW51` (MULTIMAT, ordered submaterials)
+`*ALE_MULTI-MATERIAL_GROUP` → `/MAT/LAW51` (MULTIMAT, ordered submaterials).
+The phase list is SCREENED against the starter's own rule
+(`fill_buffer_51.F:210`, message at `:237`: *"SUBMATERIAL CAN ONLY BE DEFINED
+FROM LAWS 2,3,4,5,6,10 102 OR 133"*). A `*MAT_VACUUM` phase is **dropped, not
+carried as MID 0** — `hm_read_mat51.F:608-627` reads exactly `MIP` rows and a
+`tMID ≤ 0` inside them is a fatal *INCORRECT MATERIAL IDENTIFIER*, while
+`:639-646` checks only that the fractions SUM ABOVE 1, so the undeclared
+balance is how Radioss represents void (and the vacuum's tiny `RHO` carried a
+small mass LS-DYNA had and the converted model does not). A
+`*MAT_PLASTIC_KINEMATIC` member is **RESTATED as `/MAT/LAW2`** — LAW44 is not
+on the allowed list, and LAW2 describes the identical curve when the card
+carries no Cowper-Symonds term and no effective kinematic hardening
+(`a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1`) — under its own id when every
+`*PART` on it is an AMMG member, otherwise as a minted clone so the Lagrangian
+parts keep their LAW44 (the SPH clone discipline verbatim). Anything else off
+the list is dropped by name with the phase and the reason. **The emitted
+`/MAT/LAW51` is referenced by no `/PART`**: k2rad keeps the LS-DYNA per-fluid
+layout (each fluid on its own part, `Iale = 1` on its `/PROP/SOLID`) instead of
+consolidating the ALE mesh, so the phases cannot mix and no `/INIVOL` is
+written — the converted deck starts and runs but does **not** reproduce the
+LS-DYNA model, and the `ALPHA_MAT` values are a placeholder with no relation to
+the deck's `*INITIAL_VOLUME_FRACTION*`. The warning says all of that in one
+place
 `*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
 `*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`
 `*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`

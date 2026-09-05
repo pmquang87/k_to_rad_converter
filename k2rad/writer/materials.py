@@ -156,6 +156,9 @@ __all__ = [
     "_resolve_he_bunreacted",
     "_ammg_member_mids",
     "_jwl_unreacted_bulk",
+    "_resolve_ale_submaterials",
+    "_ammg_only_mid",
+    "_emit_ammg_mat_clones",
 ]
 
 
@@ -171,8 +174,12 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36(mat, state)
     for mat in state.mat_plas_kin.values():
         lines += _emit_mat_law44(mat, state)
-    # The SPH twins of the LAW44 cards above (see _emit_plas_kin_as_law2).
+    # The SPH twins of the LAW44 cards above (see _emit_plas_kin_as_law2)...
     lines += _emit_sph_mat_clones(state)
+    # ...and the *ALE_MULTI-MATERIAL_GROUP twins, which exist for the same
+    # reason one law down: /MAT/LAW51 accepts LAW2 as a phase and not LAW44
+    # (fill_buffer_51.F:210/237), and one /MAT id cannot be two laws.
+    lines += _emit_ammg_mat_clones(state)
     for mat in state.mat_johnson_cook.values():
         lines += _emit_mat_johnson_cook(mat, state)
     for mat in state.mat_aniso_visco.values():
@@ -1730,8 +1737,18 @@ def _plas_kin_law2_expressible(mat: MatPlasKin) -> bool:
 
 
 def _plas_kin_law2_eligible(state: ConversionState, mat: MatPlasKin) -> bool:
-    """Does this *MAT_PLASTIC_KINEMATIC become LAW2 UNDER ITS OWN ID?"""
-    return _sph_only_mid(state, mat.mid) and _plas_kin_law2_expressible(mat)
+    """Does this *MAT_PLASTIC_KINEMATIC become LAW2 UNDER ITS OWN ID?
+
+    TWO reasons a material can need the LAW2 form, and they are read the same
+    way: an SPH part (LAW44 is not SPH-declared, starter ERROR 3046) and an
+    *ALE_MULTI-MATERIAL_GROUP member (fill_buffer_51.F:210 accepts only laws
+    2, 3, 4, 5, 6, 10, 102 and 133 as a /MAT/LAW51 phase, :237 ERROR 99).
+    Either way the material keeps its own id only when EVERY part on it wants
+    the same thing; a shared material is cloned instead, by
+    ``sph._resolve_sph_materials`` or ``_resolve_ale_submaterials``.
+    """
+    return ((_sph_only_mid(state, mat.mid) or _ammg_only_mid(state, mat.mid))
+            and _plas_kin_law2_expressible(mat))
 
 
 def _emit_sph_mat_clones(state: ConversionState) -> List[str]:
@@ -9971,3 +9988,206 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
                 "Neither costs time step (PM(27) already holds D, and a "
                 "SMALLER C11 raises the unreacted-sound-speed limit). Use "
                 "--he-bunreacted <value> to state your own.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: the /MAT/LAW51 submaterial list
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The ONLY laws ``/MAT/LAW51`` accepts as a phase, from the starter's own
+#: test: ``fill_buffer_51.F:210`` gates on
+#: ``MLN == 2/3/4/5/6/10/102/133`` and ``:237`` answers anything else with
+#: ``ERROR 99  SUBMATERIAL CAN ONLY BE DEFINED FROM LAWS 2,3,4,5,6,10 102 OR
+#: 133``. k2rad's own ``*MAT_003 -> /MAT/LAW44`` route is exactly the case that
+#: falls outside it.
+_LAW51_ALLOWED_SUBMAT_LAWS = frozenset({2, 3, 4, 5, 6, 10, 102, 133})
+
+
+def _ammg_only_mid(state: ConversionState, mid: int) -> bool:
+    """True when EVERY ``*PART`` on *mid* is an ``*ALE_MULTI-MATERIAL_GROUP``
+    member (and at least one is) — the case where a restatement can simply BE
+    the material, with no clone.
+
+    The exact twin of :func:`_sph_only_mid`, and for the same reason: a
+    material shared with a Lagrangian part must keep the law that part needs.
+    """
+    pids = [pid for pid, p in state.parts.items() if p.mid == mid]
+    if not pids:
+        return False
+    from .blast_ale import _part_pids
+    members: Set[int] = set()
+    for mmg in state.ale_mmgs:
+        for sid, idtype in mmg.entries:
+            members.update(_part_pids(state, sid, idtype == 1))
+    return bool(members) and all(pid in members for pid in pids)
+
+
+def _resolve_ale_submaterials(state: ConversionState) -> None:
+    """Decide each ``*ALE_MULTI-MATERIAL_GROUP``'s ``/MAT/LAW51`` phase list.
+
+    Three things happen here, and each is the fix for one measured starter
+    error on the R14 corpus:
+
+    **(a) A VACUUM phase is dropped from the list, not carried as MID 0.**
+    ``hm_read_mat51.F:608-627`` reads exactly ``MIP`` rows and a ``tMID <= 0``
+    inside that range is a fatal *INCORRECT MATERIAL IDENTIFIER*, so a vacuum
+    cannot be declared at all — and it does not need to be: ``:639-646`` checks
+    only ``SUM(alpha) > 1``, so a sum BELOW one is legal and the undeclared
+    balance IS the void. `stagnation_A/B` and `cylinder_impact_A/B` are this
+    shape (*"NON EXISTING SUBMATERIAL IDENTIFIER"*, ``ERROR 99``).
+
+    **(b) A ``*MAT_PLASTIC_KINEMATIC`` member is RESTATED as ``/MAT/LAW2``.**
+    LAW44 is not on the allowed list (``fill_buffer_51.F:210/237``), and LAW2
+    describes the identical curve whenever the material carries no
+    Cowper-Symonds rate term and no EFFECTIVE kinematic hardening —
+    ``a = SIGY``, ``b = E*ETAN/(E-ETAN)``, ``n = 1``, the same
+    ``_plas_kin_law2_expressible`` test the SPH path uses. ``cylinder_impact``'s
+    material (``E 200000, nu 0.3, SIGY 200, ETAN 0, BETA 0``) is losslessly
+    expressible: ``ETAN = 0`` leaves no hardening for ``BETA`` to split. The id
+    discipline is the SPH one verbatim — a material used only by AMMG parts is
+    restated under its OWN id, one shared with a Lagrangian part keeps
+    ``/MAT/LAW44/<mid>`` and the phase list points at a minted clone.
+
+    **(c) Anything else that is not on the allowed list is dropped by name.**
+    A phase k2rad emits under an unlisted law is ``ERROR 99`` and refuses the
+    whole deck; dropping it leaves a legal card and a warning that says which
+    phase is gone and why. ``*MAT_ELASTIC`` (LAW1) is the case to watch — it is
+    NOT an AMMG member on any corpus deck (``stagnation``'s AMMG lists parts 1
+    and 2, and its ``*MAT_ELASTIC`` is the Lagrangian shell part 3 coupled by
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID``), and the manual route if it ever is
+    would be ``/MAT/LAW2`` with an unreachable yield.
+
+    What this does NOT do is consolidate the ALE mesh — see
+    ``blast_ale._make_ale_multimaterial``, whose warning states in one sentence
+    that the emitted ``/MAT/LAW51`` is referenced by no ``/PART`` and that the
+    run therefore does not reproduce the LS-DYNA model.
+    """
+    if not state.ale_mmgs:
+        return
+    from .blast_ale import _part_pids
+    from .mesh import _target_mat_law
+    for k, mmg in enumerate(state.ale_mmgs):
+        kept: List[int] = []
+        dropped: List[str] = []
+        seen: Set[int] = set()
+        for sid, idtype in mmg.entries:
+            for pid in _part_pids(state, sid, idtype == 1):
+                part = state.parts.get(pid)
+                if part is None or not part.mid or part.mid in seen:
+                    continue
+                mid = part.mid
+                seen.add(mid)
+                if mid in state.refused_materials:
+                    kw = state.refused_materials[mid][0]
+                    dropped.append(
+                        f"MID {mid} (*{kw}) — refused by name; see its own "
+                        "warning")
+                    continue
+                law = _target_mat_law(state, mid)
+                if law is None:
+                    dropped.append(
+                        f"MID {mid} — no /MAT is emitted for it at all, so a "
+                        "phase naming it would be ERROR 99 'NON EXISTING "
+                        "SUBMATERIAL IDENTIFIER' (fill_buffer_51.F:202)")
+                    continue
+                # *MAT_PLASTIC_KINEMATIC is tested BEFORE the allowed-law
+                # screen, not after it: _target_mat_law already answers 2 for a
+                # material whose every part is an AMMG member (that is what
+                # _plas_kin_law2_eligible's new arm does), so an "is this law
+                # allowed?" test alone would let the restatement through
+                # SILENTLY — the law on the emitted card would have changed
+                # from 44 to 2 with nothing said.
+                if mid in state.mat_plas_kin:
+                    clone = _restate_ammg_submaterial(state, mid, law)
+                    if clone is not None:
+                        kept.append(clone)
+                        continue
+                elif law in _LAW51_ALLOWED_SUBMAT_LAWS:
+                    kept.append(mid)
+                    continue
+                clone = None if mid in state.mat_plas_kin else                     _restate_ammg_submaterial(state, mid, law)
+                if clone is None:
+                    dropped.append(
+                        f"MID {mid} (/MAT/LAW{law}) — fill_buffer_51.F:210 "
+                        "accepts only laws 2, 3, 4, 5, 6, 10, 102 and 133 as a "
+                        "phase (:237 'SUBMATERIAL CAN ONLY BE DEFINED FROM "
+                        "LAWS 2,3,4,5,6,10 102 OR 133'), and this material "
+                        "cannot be restated as one without changing it"
+                        + (" — a *MAT_ELASTIC member would be /MAT/LAW2 with "
+                           "an unreachable yield (a = 1e20, b = 0); state it "
+                           "that way if the phase is meant to be there"
+                           if law == 1 else ""))
+                    continue
+                kept.append(clone)
+        state.ale_mmg_submats[k] = kept
+        if dropped:
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP #{k + 1}: {len(dropped)} phase(s) "
+                "DROPPED from the /MAT/LAW51 submaterial list — "
+                + "; ".join(dropped)
+                + f". MIP falls to {len(kept)}. That is legal: "
+                "hm_read_mat51.F:639-646 checks only that the volume fractions "
+                "SUM ABOVE 1, so a sum below 1 is accepted and the undeclared "
+                "balance is how Radioss represents void — but any phase "
+                "dropped for another reason is MODEL CONTENT that is gone, "
+                "not void.")
+
+
+def _restate_ammg_submaterial(state: ConversionState, mid: int,
+                              law: int) -> Optional[int]:
+    """Give an AMMG member a law ``/MAT/LAW51`` accepts, or ``None``.
+
+    Only ``*MAT_PLASTIC_KINEMATIC`` (LAW44 → LAW2) today, which is the one
+    restatement the corpus needs and the one that is provably lossless when
+    ``_plas_kin_law2_expressible`` says so. The id discipline is
+    ``sph._resolve_sph_materials``'s, verbatim: restate under the material's
+    OWN id when every part on it is an AMMG member (``_target_mat_law`` then
+    answers 2 and ``_emit_mat_law44`` writes the LAW2 form), and otherwise mint
+    a clone so the Lagrangian parts keep their LAW44.
+    """
+    if law not in (2, 44):
+        return None
+    mat = state.mat_plas_kin.get(mid)
+    if mat is None or not _plas_kin_law2_expressible(mat):
+        return None
+    if _ammg_only_mid(state, mid):
+        # _plas_kin_law2_eligible already answers True for this material, so
+        # _emit_mat_law44 writes the LAW2 form under the original id and
+        # _target_mat_law answers 2. Nothing more to allocate.
+        state.warn(
+            f"*MAT_PLASTIC_KINEMATIC {mid} is an *ALE_MULTI-MATERIAL_GROUP "
+            "member, so it is RESTATED as /MAT/LAW2 (PLAS_JOHNS) under its own "
+            "id instead of /MAT/LAW44: fill_buffer_51.F:210 accepts only laws "
+            "2, 3, 4, 5, 6, 10, 102 and 133 as a LAW51 phase and LAW44 is not "
+            "one of them (:237, ERROR 99). The curve is identical — a = SIGY, "
+            f"b = E*ETAN/(E-ETAN) = {_plas_kin_b(mat):g}, n = 1 — because the "
+            "card states no Cowper-Symonds rate term and no EFFECTIVE "
+            "kinematic hardening (BETA can only split hardening that exists). "
+            "Every *PART on this material is an AMMG member, so nothing else "
+            "needs the LAW44 form.")
+        return mid
+    clone_id = state.next_mat_id()
+    state.ammg_mat_clones[mid] = clone_id
+    state.warn(
+        f"*MAT_PLASTIC_KINEMATIC {mid} is shared between an "
+        "*ALE_MULTI-MATERIAL_GROUP member and a Lagrangian part, so it is "
+        f"CLONED: /MAT/LAW44/{mid} stays for the Lagrangian part(s) and the "
+        f"/MAT/LAW51 phase list points at a synthesized /MAT/LAW2/{clone_id} "
+        "carrying the same curve (a = SIGY, b = E*ETAN/(E-ETAN) = "
+        f"{_plas_kin_b(mat):g}, n = 1). fill_buffer_51.F:210 accepts only laws "
+        "2, 3, 4, 5, 6, 10, 102 and 133 as a phase and LAW44 is not one of "
+        "them (:237, ERROR 99), while one /MAT id cannot be two laws.")
+    return clone_id
+
+
+def _emit_ammg_mat_clones(state: ConversionState) -> List[str]:
+    """The extra ``/MAT/LAW2`` cards ``_resolve_ale_submaterials`` asked for —
+    one per ``*MAT_PLASTIC_KINEMATIC`` shared between an AMMG member and a
+    Lagrangian part."""
+    lines: List[str] = []
+    for mid, clone_id in sorted(state.ammg_mat_clones.items()):
+        mat = state.mat_plas_kin.get(mid)
+        if mat is None:
+            continue
+        lines += _emit_plas_kin_as_law2(mat, state, clone_id=clone_id)
+    return lines
