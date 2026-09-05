@@ -566,8 +566,16 @@ def convert(
     # and every *INCLUDE has been read — BEFORE --auto-gapmin analyses the mesh
     # and before build_starter emits it. Idempotent: build_starter calls it too
     # for the direct-writer callers, and the second call is a no-op.
-    from .writer import _flatten_set_adds, _screen_provisional_elements
+    from .writer import (_expand_set_ranges_and_generals, _flatten_set_adds,
+                         _screen_provisional_elements)
     _screen_provisional_elements(state)
+
+    # *SET_<F>_GENERATE / _GENERAL → plain sets of that family, BEFORE the
+    # _ADD unions are flattened (an _ADD member may be a _GENERATE sid) and
+    # before anything allocates a /GRNOD or element-group id. Vol I R17
+    # p.43-40: "these sets are generated after all input is read", which is
+    # exactly this slot. Idempotent; build_starter calls it too.
+    _expand_set_ranges_and_generals(state)
 
     # *SET_<FAMILY>_ADD → plain sets of that family now that every member
     # block has been read (a parse-time expansion could miss a child defined

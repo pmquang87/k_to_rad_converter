@@ -16,6 +16,7 @@ from .materials import (
     _resolve_mat_gurson,
     _resolve_mat_hyper_rubber,
     _resolve_mat_iso_elas_plas,
+    _resolve_eos_gruneisen_a,
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_comp_tens,
     _resolve_mat_tabulated_jc,
@@ -39,6 +40,7 @@ from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
     _downgrade_tet10_to_tet4,
+    _expand_set_ranges_and_generals,
     _flatten_set_adds,
     _resolve_contact_interior,
     _make_extra_groups,
@@ -796,6 +798,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # before the tet10->tet4 node-set prune, which mutates state.node_sets.
     # Idempotent — convert() already ran it so --auto-gapmin sees the
     # flattened sets; this covers direct build_starter callers.
+    #
+    # The *SET_<F>_GENERATE / _GENERAL ranges and OPTION clauses expand FIRST,
+    # in the same slot and for the same four reasons: an _ADD member may be a
+    # _GENERATE sid, the id allocators below dodge whatever is in the set
+    # containers, and the tet10->tet4 prune (further down) mutates node_sets.
+    _expand_set_ranges_and_generals(state)
     _flatten_set_adds(state)
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
@@ -803,6 +811,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Johnson-Cook LAW2/LAW4 routing (needs the *PART EOSID bindings) + the
     # DTF → /FAIL/GENE1 dtmin injection — before _make_materials emits.
     _resolve_mat_johnson_cook(state)
+    # *EOS_GRUNEISEN A = 0 -> a tiny positive a, BEFORE any of the six
+    # _emit_eos call sites (three of which copy the params dict onto a new
+    # EosCard) can read the cell. Idempotent: the guard is `a == 0`.
+    _resolve_eos_gruneisen_a(state)
     # Hyperelastic rubber routing (MAT_027 LAW42-vs-LAW69 needs the parsed
     # *DEFINE_CURVEs; the MAT_077 LAW69 paths synthesize rescaled duplicate
     # curves; the MAT_027 LAW42 branch synthesizes its 500-point funIDbulk

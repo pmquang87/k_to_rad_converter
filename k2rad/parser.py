@@ -48,7 +48,15 @@ class Block:
 # Parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-_TRAILING = frozenset({"ID", "TITLE", "SUBTITLE"})
+#: ``_COLLECT`` joins the three because it is the ``*SET`` chapter's second
+#: "append it to the header" option and it stacks with ``_TITLE`` in a fixed
+#: order (``_COMBINE(KEY,"_INCREMENT")`` → ``"_COLLECT"`` → ``"_TITLE"``, every
+#: ``Keyword971/SETS/*_list_generate.cfg``). Enumerating the permutations in
+#: HANDLERS instead would double every generated set spelling — the #116
+#: combinatorics trap. Scoped check before adding it here: ``_COLLECT`` occurs
+#: in 36 files of ``hm_cfg_files/config/CFG/Keyword971`` and **all 36 are under
+#: SETS/**, so no non-set keyword loses a real name suffix to this strip.
+_TRAILING = frozenset({"ID", "TITLE", "SUBTITLE", "COLLECT"})
 
 
 def _split_keyword(token: str):

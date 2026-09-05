@@ -48,6 +48,62 @@ SET_ADD_FAMILIES = (
     ("DISCRETE", "SET_DISCRETE_ADD", 1, "discrete_set_adds", "discrete_sets"),
 )
 
+#: The ``*SET_<FAMILY>`` RANGE and OPTION spellings — the second ONE-source
+#: family table, beside ``SET_ADD_FAMILIES`` above. It generates the parser
+#: keys (``handlers._set_range_keywords``), the ``*INCLUDE_TRANSFORM`` offset
+#: rows (``assembly._OFFSET_SPECS``) and the post-parse expansion pass
+#: (``writer/mesh._expand_set_ranges_and_generals``), so a spelling cannot be
+#: read by one and invisible to the others.
+#:
+#: Each row is ``(family, GENERATE spelling, has _INCREMENT, has _COLUMN,
+#: has _GENERAL, target container, member id bucket)``.
+#:
+#: **OPTION1 is family-specific and the asymmetry is REAL** — NODE/PART/SHELL
+#: spell the range option ``LIST_GENERATE`` while SOLID/BEAM/DISCRETE spell it
+#: bare ``GENERATE``, and only some carry ``_INCREMENT`` or ``_COLUMN``. Two
+#: independent sources agree, so the table is transcribed and not derived:
+#:
+#:   family    Vol I R17 OPTION1 list                            cfg HEADER
+#:   NODE      p.43-37 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          node_list_generate.cfg:110
+#:   PART      p.43-50 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          part_list_generate.cfg:112
+#:   SHELL     p.43-77 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          shell_list_generate.cfg:115
+#:   SOLID     p.43-89 GENERATE[_INCREMENT], GENERAL
+#:                                          solid_list_generate.cfg:102
+#:   BEAM      p.43-3  GENERATE[_INCREMENT], GENERAL
+#:                                          beam_list_generate.cfg:92
+#:   DISCRETE  p.43-14 GENERATE, GENERAL          (no _INCREMENT)
+#:                                          discrete_list_generate.cfg:92
+#:   SEGMENT   p.43-63 GENERAL                    (no GENERATE at all)
+#:                                          segment_general.cfg
+#:
+#: so ``*SET_SOLID_LIST_GENERATE`` must NOT be derived from the lenient
+#: ``*SET_SOLID_LIST`` alias k2rad also registers: that spelling does not exist.
+#:
+#: **``*SET_TSHELL_GENERATE``/``_GENERAL`` are deliberately absent.** Unlike
+#: ``*SET_TSHELL_ADD`` (which LS-DYNA has no such keyword for — see above),
+#: these two DO exist in R17 p.43-100; what k2rad has no room for is the
+#: RESULT: there is no ``tshell_sets`` container for a thick-shell element set
+#: to land in, and ``*SET_TSHELL`` itself is unregistered. Registering only the
+#: range spelling would parse a set nothing can read. Zero corpus carriers
+#: (measured over the 356-deck R14 roster, ``C:/openradioss_run`` and
+#: Ryan_Lee); the block stays in ``skipped_keywords``, named.
+SET_RANGE_FAMILIES = (
+    ("NODE",     "SET_NODE_LIST_GENERATE",  True,  True,  True, "node_sets",     "n"),
+    ("PART",     "SET_PART_LIST_GENERATE",  True,  True,  True, "part_sets",     "p"),
+    ("SHELL",    "SET_SHELL_LIST_GENERATE", True,  True,  True, "shell_sets",    "e"),
+    ("SOLID",    "SET_SOLID_GENERATE",      True,  False, True, "solid_sets",    "e"),
+    ("BEAM",     "SET_BEAM_GENERATE",       True,  False, True, "beam_sets",     "e"),
+    ("DISCRETE", "SET_DISCRETE_GENERATE",   False, False, True, "discrete_sets", "e"),
+    # SEGMENT has no range spelling at all — a segment is not an id in a
+    # numbered pool, so there is nothing for BnBEG..BnEND to select. Its
+    # *SET_SEGMENT_GENERAL is in the table so the GENERAL registration,
+    # offset walker and expansion arm are generated from ONE row set.
+    ("SEGMENT",  "",                        False, False, True, "segment_sets",  "n"),
+)
+
 #: ``*SET_NODE_ADD_ADVANCED`` card 2b TYPE column → the family whose members
 #: contribute their NODES (Vol I R17 p.43-46 verbatim: "EQ.1: Node set
 #: EQ.2: Shell set EQ.3: Beam set EQ.4: Solid set EQ.5: Segment set
@@ -4873,6 +4929,32 @@ class SegmentSetPressureLoad:
     at: float = 0.0
 
 
+def collapse_segment_corners(nodes: List[int]) -> List[int]:
+    """The canonical corner list of one surface segment, or ``[]``.
+
+    **A triangle has TWO legal spellings and they must become ONE.** Vol I R17
+    *SET_SEGMENT p.43-63 verbatim: *"N4 - Nodal point n4. To define a
+    triangular segment, set N4 = N3."*, and a trailing blank/zero is the other
+    house style. Both collapse to a 3-node list, so no set operation can see
+    one face as two rows and apply its pressure twice — measured on a free
+    plate against a one-row twin, both 0 ERROR / NORMAL TERMINATION / 67
+    cycles: EXT-WORK 18.35 → 73.39, i.e. impulse ×2.0001 (k2rad #131).
+
+    ONE function rather than a copy per reader: ``handlers.handle_set_segment``
+    (the ``*SET_SEGMENT`` data cards) and
+    ``writer/mesh._expand_segment_general`` (the ``*SET_SEGMENT_GENERAL`` SEG /
+    DSEG clauses) both call it, and ``state`` is the module both can import
+    without a cycle. A per-reader copy is exactly how the collapse would go
+    dead on the newer spelling.
+    """
+    out = list(nodes)
+    while len(out) > 3 and (out[-1] == 0 or out[-1] == out[-2]):
+        out.pop()
+    if len(out) >= 3 and all(n > 0 for n in out):
+        return out
+    return []
+
+
 @dataclass
 class SegmentSet:
     """*SET_SEGMENT — a set of 3- or 4-node surface segments.
@@ -4885,6 +4967,18 @@ class SegmentSet:
     sid: int
     title: str
     segments: List[List[int]] = field(default_factory=list)
+    #: ``*SET_SEGMENT_GENERAL`` ``PART`` / ``DPART`` scope — part ids whose
+    #: FACES belong to this set, kept as part ids rather than enumerated here.
+    #: Vol I R17 p.43-64 verbatim: *"For shell elements, one segment per shell
+    #: is generated. For solid elements, only those segments wrapping the solid
+    #: part and pointing outward from the part will be generated."* That is
+    #: exactly what ``writer/common._make_master_surface`` already emits
+    #: (/SURF/GRSHEL over the shells, /SURF/PART/EXT over the solids — the
+    #: starter computes the outward skin), so the parts are carried through to
+    #: it instead of being tessellated in Python, where the solid arm would
+    #: have to re-derive the wrapper and the shell arm would have to duplicate
+    #: the /SH3N split. Empty on every deck without that option.
+    part_scope: List[int] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8004,6 +8098,25 @@ class ConversionState:
     node_set_add_advanced: Dict[int, Tuple[str, List[Tuple[int, int]]]] = \
         field(default_factory=dict)
     set_adds_flattened: bool = False          # _flatten_set_adds ran
+    # ── R14 triage round 2: the *SET_* RANGE / OPTION spellings ────
+    # ``*SET_<F>[_LIST]_GENERATE[_INCREMENT]`` — the RANGES, held unexpanded
+    # until every *NODE / *PART / *ELEMENT_* card has been read. Vol I R17
+    # p.43-40 is explicit that this is a post-parse job: "These sets are
+    # generated after all input is read so that gaps in the node numbering are
+    # not a problem. BnBEG and BnEND may simply be limits on the IDs and not
+    # nodal IDs." ``(family, sid) -> (title, [(beg, end, incr)])``, with
+    # ``incr == 0`` marking the plain (non-_INCREMENT) form.
+    set_generates: Dict[Tuple[str, int], Tuple[str, List[Tuple[int, int, int]]]] = \
+        field(default_factory=dict)
+    # ``*SET_<F>_GENERAL`` — the OPTION clauses IN CARD ORDER, which is
+    # load-bearing: p.43-41 verbatim, "Note that the order of the selected
+    # operations matters. Nodes are only excluded from the set if they were
+    # previously added to the set. For instance, if you exclude node 5 and
+    # then include it, node 5 will be included in the set."
+    # ``(family, sid) -> (title, [(OPTION, [E1..E7])])``.
+    set_generals: Dict[Tuple[str, int], Tuple[str, List[Tuple[str, List[int]]]]] = \
+        field(default_factory=dict)
+    sets_expanded: bool = False      # _expand_set_ranges_and_generals ran
     # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
     # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
     # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined
