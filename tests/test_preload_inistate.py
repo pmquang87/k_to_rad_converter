@@ -986,8 +986,10 @@ class InitialAxialForceBeamTests(unittest.TestCase):
         self.assertEqual(len(_headers(starter, "/PRELOAD/AXIAL/")), 2)
         self.assertEqual(_ids_in(starter, "/GRSPRI/SPRI/"), [1002])
         self.assertEqual(_ids_in(starter, "/GRBEAM/BEAM/"), [1001])
-        self.assertTrue(any("straddles two Radioss element families" in w
-                            for w in r.warnings))
+        # The message counts the families it actually found since the R14
+        # truss batch made /GRTRUS a third one; two here.
+        self.assertTrue(any("straddles 2 Radioss element families" in w
+                            for w in r.warnings), r.warnings)
 
     def test_axial_card_is_column_exact(self):
         _r, starter = _convert(BEAMS.replace("{EXTRA}", AXIAL))

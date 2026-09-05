@@ -224,6 +224,69 @@ def build_parser() -> argparse.ArgumentParser:
              "loads/readouts by it).",
     )
     parser.add_argument(
+        "--zero-density-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Substitute rho = 1e-24 (in the deck's own units) for a material "
+             "that states RO <= 0. ON by default: the OpenRadioss starter "
+             "refuses a non-positive density outright "
+             "(hm_read_mat.F90:1575-1583, ERROR 683), while LS-DYNA accepts "
+             "the card and makes the SAME substitution silently — its own "
+             "d3hsp reports a part mass of exactly 1.000e-24 x volume, "
+             "measured on five R14 reference decks. A static or eigenvalue "
+             "answer is unaffected (the /IMPL/QSTAT stabilization is "
+             "proportional to the mass and simply vanishes with it); an "
+             "EXPLICIT deck gets a second warning, because at that density "
+             "the element time step collapses to ~1e-14 s and the run will "
+             "never finish. A material converting to a law the starter exempts "
+             "(LAW0/20/51/108/151/999 — *MAT_VACUUM above all) is left alone. "
+             "Use --no-zero-density-floor to copy the deck's own RO through "
+             "and let the starter refuse it.",
+    )
+    parser.add_argument(
+        "--zero-t0-sentinel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /HEAT/MAT T0 as 1e-10 (in the deck's own temperature "
+             "unit) when the deck STATES an initial temperature of exactly "
+             "0.0. ON by default: Radioss cannot tell a stated 0 from 'not "
+             "stated' - hm_read_therm.F:236-237 turns a zero T0 into 300 K "
+             "and scoor3.F:328-338 / cinmas.F:900-905 then overwrite every "
+             "node still at exactly 0.0 with it, so the run starts 300 K "
+             "away from where the deck says it starts. Both are EXACT zero "
+             "tests, so the value is a sentinel dodge, not physics. "
+             "MEASURED on ex_22_solid_elform_2: node 5 at t = 31.60 s reads "
+             "198.21400 against the LS-DYNA reference's 34.83880 (+468.9 "
+             "percent) with T0 = 0 and 35.15680 (+0.91 percent) with the "
+             "sentinel. A deck that states no initial temperature at all "
+             "keeps 0.0. Use --no-zero-t0-sentinel to write the deck's own "
+             "0.0.",
+    )
+    parser.add_argument(
+        "--law106-shell-restate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restate a *MAT_ELASTIC_PLASTIC_THERMAL / *MAT_CWM as "
+             "/MAT/LAW36 when every part on it is a SHELL and it carries a "
+             "thermal expansion coefficient. ON by default, because a "
+             "/MAT/LAW106 SHELL DOES NOT THERMALLY EXPAND AT ALL: "
+             "cmain3.F:348 runs THERMEXPC after MULAWC at :320 and all "
+             "THERMEXPC does on a /PROP/SHELL is SUBTRACT the thermal stress "
+             "from the stress the law just produced, while "
+             "sigeps106c.F90:297-298 rebuilds it from the TOTAL strain and "
+             "never reads the old one. MEASURED on a controlled coupon "
+             "(alpha 1.2e-5, dT 100 K, L 10 mm, closed form 1.2e-2 mm): "
+             "LAW106 shell 0.0000000e+00 (-100 %%), the LAW36 restatement "
+             "1.2000000e-02 (+0.000 %%, and identical to a *MAT_024 control "
+             "run at every printed T01 digit), the LAW106 SOLID "
+             "1.2000000e-02 (+0.000 %%) — solids are never restated. The cost "
+             "is named per "
+             "card: LAW36 has no temperature dependence, so E, nu and the "
+             "yield are frozen at the reference temperature. Use "
+             "--no-law106-shell-restate to keep /MAT/LAW106 and its E(T) at "
+             "the price of zero thermal expansion on those parts.",
+    )
+    parser.add_argument(
         "--write-restart",
         action="store_true",
         help="Keep OpenRadioss's engine restart (.rst) files. By default the "
@@ -262,6 +325,46 @@ def build_parser() -> argparse.ArgumentParser:
              "RESULTS on every shell deck, which is why it is not the "
              "default. Under-integrated Ishell 1-4 is not offered: it would "
              "break /INISHE initial-stress transfer (npg 4 -> 1).",
+    )
+    parser.add_argument(
+        "--he-bunreacted",
+        type=float,
+        default=None,
+        metavar="K",
+        help="Override the /MAT/LAW5 `Bunreacted` cell (the UNREACTED "
+             "explosive's bulk modulus), in the deck's own pressure unit. "
+             "Without it k2rad writes the *MAT_HIGH_EXPLOSIVE_BURN card's own "
+             "K when it states one, and otherwise 0 - which is exactly "
+             "LS-DYNA's p = F*p_eos on a BETA=0 card. A value is DERIVED only "
+             "under --ale-multimat-law51, where fill_buffer_51.F:496 refuses a "
+             "LAW51 phase whose cell is <= 0 (ERROR 99); the derivation is the "
+             "JWL principal isentrope's slope at the unreacted density, "
+             "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0. That substitution is "
+             "named in the log with its formula, its value and its "
+             "consequence: mjwl.F:166 has no branch on the cell, so it adds "
+             "(1-F)*K*mu to the applied pressure at EVERY burn fraction, where "
+             "an LS-DYNA BETA=0 card carries nothing. Use this to state a "
+             "measured unreacted bulk modulus instead.",
+    )
+    parser.add_argument(
+        "--ale-multimat-law51",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit the synthesized /MAT/LAW51 for an "
+             "*ALE_MULTI-MATERIAL_GROUP. OFF by default: k2rad writes the "
+             "LS-DYNA per-fluid ALE layout (each fluid on its own /PART with "
+             "its own single-material /MAT and Iale=1 on its /PROP/SOLID), so "
+             "no /PART it emits ever references that card - it is an orphan BY "
+             "CONSTRUCTION. MEASURED on underwater_C: deleting the block left "
+             "all 164 T01 channels identical at all 172 samples (max "
+             "|difference| exactly 0.000000e+00), at 0 ERROR / 0 WARNING / "
+             "NORMAL TERMINATION. What it is NOT free of is its own starter "
+             "check, fill_buffer_51.F:496, which forced a positive Bunreacted "
+             "onto the material's own LIVE /MAT/LAW5 - and mjwl.F:166 makes "
+             "that a real (1-F)*K*mu pre-burn stiffness an LS-DYNA BETA=0 card "
+             "does not carry. Turn it on if you intend to consolidate the ALE "
+             "mesh onto one /PART referencing it by hand; the Bunreacted "
+             "derivation returns with it.",
     )
     parser.add_argument(
         "--dt-del",
@@ -379,10 +482,15 @@ def main(argv=None) -> int:
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,
         rigid_cog_master=args.rigid_cog_master,
+        zero_density_floor=args.zero_density_floor,
+        law106_shell_restate=args.law106_shell_restate,
+        zero_t0_sentinel=args.zero_t0_sentinel,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,
         dt_del=args.dt_del,
+        he_bunreacted=args.he_bunreacted,
+        ale_multimat_law51=args.ale_multimat_law51,
         eroding_surf_ext=args.eroding_surf_ext,
         airbag_particle_uniform=args.airbag_particle_uniform,
         progress=None if args.quiet else _make_progress_printer(),

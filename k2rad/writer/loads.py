@@ -14,7 +14,7 @@ from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
     _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
-    _spotweld_beam_pids, _vcross, _vnorm, _vsub,
+    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
@@ -829,7 +829,7 @@ def _card_value(v: float) -> float:
     return float(_f(v))
 
 
-def _monotonic_abscissae(pts):
+def _monotonic_abscissae(pts, state=None, label: str = ""):
     """Force a /FUNCT point list to be strictly increasing AS PRINTED.
 
     ``hm_read_funct.F:143`` refuses a function whose abscissa does not grow —
@@ -837,25 +837,128 @@ def _monotonic_abscissae(pts):
     the deck is rejected, not degraded. The comparison the starter makes is on
     the CARD value, so the invariant has to be checked on ``_f``'s output and
     not on the float: a tie-break below the ten-digit field resolution survives
-    in memory and disappears on the card.
+    in memory and disappears on the card (#113).
 
-    This is a last-resort guard — every builder that can produce a tie (the
-    plastic→total mapping, the cable's zero-crossing insertion) breaks it with a
-    step of its own. Points that are already strictly increasing are returned
-    unchanged, so the emitted card is byte-identical for every well-formed
-    curve."""
-    out = []
-    for a, o in pts:
-        x = float(a)
+    TWO different defects reach this, and they get different repairs.
+
+    **A TIE** (``_card_value(x) == prev``) is the original case: a builder that
+    emits two points at one abscissa (the plastic->total mapping, the cable's
+    zero-crossing insertion) or a nudge that the ten-digit field ate. The
+    abscissa is stepped forward until the CARD value grows and the ordinate is
+    kept — the curve was never ambiguous about its value there. A caller that
+    passes a ``state`` and a ``label`` — today only the ``*DEFINE_CURVE``
+    emitter, i.e. curves the DECK typed — also gets a warning for it, because
+    on a user curve a duplicate abscissa is a STATEMENT: the common stepped
+    shape ``(0,0),(1,0),(1,100),(2,100)`` means "jump at x = 1" and the repair
+    turns it into a ramp across the nudge. The synthesized builders pass
+    neither and stay silent, where the tie is their own rounding.
+
+    **A REVERSAL** (``_card_value(x) < prev``) is a deck defect, and copying the
+    ordinate would be wrong. LS-DYNA does not reorder such a curve either: it
+    warns (``*** Warning 20446 ... load curve N x-axis reverses direction at
+    point, K``) and then evaluates it with a forward-walking segment search that
+    can simply never select the reversed interval, so the value JUMPS at the
+    reversal and continues on the segment that starts at the out-of-order point.
+    MEASURED on ``mat_spring.belted-dummy`` (curve 50, point 26 at x = 0.1125
+    after 0.1195, driving a ``*BOUNDARY_PRESCRIBED_MOTION`` acceleration): node
+    1763's x-acceleration is 5.15057E+03 at t = 0.119275 and jumps to
+    6.85894E+03 at t = 0.119512, whose back-extrapolated slope -419917 per unit
+    t hits -9810 at t = 0.1124843 and -2450 at t = 0.130012 — i.e. exactly the
+    segment (0.1125, -9810) -> (0.13, -2450), the pair AS WRITTEN.
+
+    So the reversed point is replaced by ``(prev + eps, f(prev))`` where ``f``
+    is the segment from it to the NEXT point — the value LS-DYNA jumps TO. On
+    that curve f(0.1195) = -6866.0 — exactly what this rule writes,
+    -9810 + 0.4*7360 — and the three candidates differ by far more
+    than round-off: a plain nudge (keep the ordinate) evaluates 9801.6 at
+    t = 0.119512 (+43 % against LS-DYNA's 6858.94), re-SORTING by abscissa gives
+    4907 (-28 %), this rule gives 6860.96 (+0.03 %) — the emitted curve read
+    at the nodout SAMPLE time 0.119512, not at the re-anchored abscissa
+    itself. When there is no next point
+    to anchor to — the reversal is the LAST point — it is DROPPED, because
+    LS-DYNA can never evaluate past ``prev`` there either.
+
+    Points already strictly increasing are returned unchanged, so the emitted
+    card is byte-identical for every well-formed curve. *state* and *label* are
+    optional so the connector-inline callers keep working; when they are given,
+    every repair is named.
+    """
+    out: List[Tuple[float, float]] = []
+    pts = list(pts)
+    for k, (a, o) in enumerate(pts):
+        x, y = float(a), float(o)
         if out:
             prev = _card_value(out[-1][0])
+            if _card_value(x) < prev:
+                # REVERSAL. Re-anchor onto the segment that leaves this point.
+                nxt = next(((float(p[0]), float(p[1])) for p in pts[k + 1:]
+                            if _card_value(float(p[0])) > prev), None)
+                if nxt is None:
+                    if state is not None:
+                        state.warn(
+                            f"{label}: the abscissa reverses direction at "
+                            f"point {k + 1} (x = {x:g} after {prev:g}) and no "
+                            "later point lies beyond it, so the point is "
+                            "DROPPED. LS-DYNA warns (Warning 20446 'x-axis "
+                            "reverses direction at point') and then never "
+                            "evaluates it either — its forward-walking segment "
+                            "search cannot enter a backwards interval — while "
+                            "Radioss REFUSES a non-increasing abscissa "
+                            "outright (hm_read_funct.F:143, ERROR 156). Check "
+                            "the curve: a genuinely non-monotone (x, y) data "
+                            "set must state DATTYP = 1 (Vol I R17 p.17-106).")
+                    continue
+                x2, y2 = nxt
+                y = y + (y2 - y) * (prev - x) / (x2 - x) if x2 != x else y2
+                if state is not None:
+                    state.warn(
+                        f"{label}: the abscissa reverses direction at point "
+                        f"{k + 1} (x = {x:g} after {prev:g}) — LS-DYNA itself "
+                        "flags this (Warning 20446, 'load curve N x-axis "
+                        "reverses direction at point, K') and then evaluates "
+                        "the curve by SKIPPING the reversed interval, so its "
+                        f"value jumps from {float(o):g} to {y:.6g} at "
+                        f"x = {prev:g} and follows the segment ({x:g}, "
+                        f"{float(o):g}) -> ({x2:g}, {y2:g}). Radioss REFUSES a "
+                        "non-increasing abscissa outright "
+                        "(hm_read_funct.F:143, ERROR 156), so k2rad emits the "
+                        "curve LS-DYNA ACTUALLY EVALUATES: this point becomes "
+                        f"(~{prev:g}, {y:.6g}). Keeping the stated ordinate "
+                        "instead would be a 43 % error on the corpus carrier, "
+                        "and re-sorting by abscissa a -28 % one. The source "
+                        "deck's DATTYP = 0 declares a MONOTONE curve (Vol I "
+                        "R17 p.17-106; DATTYP = 1 is the escape for "
+                        "non-monotone data), so this pair is a deck defect — "
+                        "check it.")
+            tied = _card_value(x) == prev
             step = max(abs(prev), 1.0) * 1.0e-8
             for _ in range(64):
                 if _card_value(x) > prev:
                     break
                 x = prev + step
                 step *= 2.0
-        out.append((x, float(o)))
+            if tied and state is not None:
+                # A tie on a SYNTHESIZED curve is the builder's own rounding
+                # and says nothing to the reader; a tie on a curve the DECK
+                # typed is a statement — the common stepped shape
+                # (0,0),(1,0),(1,100),(2,100) means "jump at x = 1", and the
+                # repair silently turns it into a steep ramp. Master emitted
+                # the duplicate and let the starter refuse it with ERROR 156,
+                # which at least said something, so the repair must not be the
+                # quieter of the two. Only the callers that pass a `label`
+                # (today: the *DEFINE_CURVE emitter) reach this.
+                state.warn(
+                    f"{label}: two points share the abscissa x = {prev:g} "
+                    f"(point {k + 1}), which Radioss refuses outright "
+                    "(hm_read_funct.F:143, ERROR 156 — it compares the CARD "
+                    "value, so the duplicate has to be broken on the printed "
+                    f"number). k2rad nudges the second to {x:.10g} and KEEPS "
+                    f"its ordinate {y:g}. If this pair was meant as a STEP — "
+                    "the (0,0),(1,0),(1,100),(2,100) shape LS-DYNA evaluates "
+                    "as a jump — it is now a ramp across that nudge, which is "
+                    "a different function at exactly one point. State the two "
+                    "abscissae a real distance apart if the width matters.")
+        out.append((x, y))
     return out
 
 
@@ -4478,14 +4581,42 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     ``force.F90:451-465`` sums ``+P*A*n_hat`` over the segment's nodes). The two
     sources differ:
 
-    * *LOAD_SEGMENT gives the pressure on an explicitly ORIENTED segment, and
-      k2rad passes both the node order and the scale through verbatim — the
-      deck's own segment orientation carries the direction.
+    * *LOAD_SEGMENT / _SET gives the pressure on an explicitly ORIENTED
+      segment — and the orientation does NOT carry the direction, because
+      LS-DYNA's own sign rule is stated against it: Vol I R17 p.33-107,
+      Figure 33-12's caption, *"Positive pressure acts in the negative
+      t-direction"*, with ``t`` the right-hand normal of the N1..N4 order.
+      k2rad pastes that node order into the ``/SURF/SEG`` verbatim, so
+      ``n_hat = t_hat`` and exactly ONE flip is needed: ``Fscale_y = -SF``.
     * *LOAD_SHELL gives a pressure on a SHELL, positive "in the negative
       t-direction" (Manual Vol I R16 p.3421), i.e. INTO the top face. Pasting
       the shell connectivity makes ``n_hat = t_hat``, so exactly ONE flip is
       needed and it is applied as ``Fscale_y = -SF``. Reversing the node order
       as well would cancel it back out.
+
+    The two rules are therefore the SAME rule, and until this round only the
+    shell half applied it. MEASURED on ``3.1_Elastic_Beams_etc`` against its
+    own LS-DYNA ``nodout`` (last displacement block, t = 1.0), one converted
+    deck run twice with only the ``Fscale_y`` sign patched between the runs:
+
+      =========================  ================  ================  ==========
+      node                       WITHOUT the flip  WITH the flip     LS-DYNA
+      =========================  ================  ================  ==========
+      1 root, DX                 -8.258400E-03     8.405220E-03      8.430160E-03
+                                 (**-197.96 %**)   (-0.30 %)
+      21 hex tip, DZ             +1.066000E-01     -1.066000E-01     -1.062870E-01
+                                 (**-200.29 %**)   (+0.29 %)
+      64 tet tip, DZ             +1.065740E-01     -1.066400E-01     -1.062850E-01
+                                 (**-200.27 %**)   (+0.33 %)
+      1247 mid-span, DZ          +7.595400E-02     -7.600600E-02     -7.598150E-02
+                                 (**-199.96 %**)   (+0.03 %)
+      1320 shell tip, DZ         -1.064400E-01     -1.064400E-01     -1.057880E-01
+                                 (+0.62 %)         (+0.62 %)
+      =========================  ================  ================  ==========
+
+    Node 1320 is loaded by ``*LOAD_NODE_POINT``, not by a pressure, and is
+    IDENTICAL in both runs — which is what isolates the pressure path rather
+    than blaming the whole model.
     """
     if not (state.pressure_loads or state.segment_set_pressure_loads
             or state.shell_pressure_loads):
@@ -4493,8 +4624,10 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     # Grouped by (lcid, fscale, at): one /SURF/SEG + one /PLOAD per distinct
     # load. `at` joins the key because it becomes a per-load /SENSOR/TIME.
     groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
+    seg_flipped = False
     for pl in state.pressure_loads:
-        groups[(pl.lcid, pl.sf, pl.at)].append(pl.nodes)
+        groups[(pl.lcid, -pl.sf, pl.at)].append(pl.nodes)
+        seg_flipped = True
     # *LOAD_SEGMENT_SET: expand each referenced *SET_SEGMENT into per-segment
     # cards, grouped alongside *LOAD_SEGMENT by (lcid, sf).
     for ssl in state.segment_set_pressure_loads:
@@ -4504,7 +4637,8 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
                        "which is not defined — pressure load dropped.")
             continue
         for nodes in segset.segments:
-            groups[(ssl.lcid, ssl.sf, ssl.at)].append(list(nodes))
+            groups[(ssl.lcid, -ssl.sf, ssl.at)].append(list(nodes))
+            seg_flipped = True
     # *LOAD_SHELL_ELEMENT / _SET: the sign flip is applied HERE, so the group key
     # already holds the emitted Fscale_y.
     flipped = False
@@ -4569,6 +4703,29 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
                                   sf, sensor_id)
         pload_id += 1
+    if seg_flipped:
+        state.warn(
+            "*LOAD_SEGMENT[_SET] -> /PLOAD with Fscale_y = -SF. LS-DYNA's "
+            "positive segment pressure acts along the NEGATIVE segment normal "
+            "-- Vol I R17 p.33-107, Figure 33-12's caption is 'Positive "
+            "pressure acts in the negative t-direction', with t the right-hand "
+            "normal of the N1..N4 order -- while a /PLOAD with positive "
+            "Fscale_y pushes the surface along its POSITIVE segment normal "
+            "(force.F90:451-465 sums +P*A*n_hat). k2rad pastes the deck's node "
+            "order into the /SURF/SEG verbatim, so n_hat = t_hat and exactly "
+            "ONE flip is correct -- the same flip *LOAD_SHELL_* has always "
+            "had. MEASURED on implicit/Salzburg_2017 3.1_Elastic_Beams_etc "
+            "against its own LS-DYNA nodout, one converted deck run twice "
+            "with only this cell's sign patched between the runs: WITHOUT the "
+            "flip the hex cantilever tip (node 21) reads +1.066000E-01 "
+            "against a reference -1.062870E-01, i.e. -200.29 % -- the right "
+            "magnitude the wrong way -- and the tet tip, the mid-span node "
+            "and the root DX are -200.27 %, -199.96 % and -197.96 %; WITH it "
+            "they are +0.29 %, +0.33 %, +0.03 % and -0.30 %. The same deck's "
+            "*LOAD_NODE_POINT-loaded shell tip (node 1320) is IDENTICAL in "
+            "both runs at +0.62 %, which is what isolates the pressure path. "
+            "If your deck was built against k2rad's previous behaviour, drop "
+            "the minus sign from SF.")
     if flipped:
         state.warn(
             "*LOAD_SHELL_{ELEMENT,SET} -> /PLOAD with Fscale_y = -SF. LS-DYNA's "
@@ -6727,8 +6884,21 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # principle and tested synthetically.
     for c in state.sph_elems:
         elem_nodes.update(c.nodes)
+    # A TRUSS contributes ONLY (n1, n2). /TRUSS has no third-node column, so a
+    # deck-stated N3 on an ELFORM=3 *ELEMENT_BEAM (two corpus decks do state a
+    # real one, node 45012) is a node the truss does not stiffen — counting it
+    # as "attached" would switch the implicit singularity guard OFF for it and
+    # leave six zero rows in the tangent. That is the #120 failure mode with
+    # the sign reversed: a genuinely free node left free, rather than a stiff
+    # node clamped. Both carrier decks are explicit, so no corpus run reaches
+    # this branch — closed on principle and tested synthetically, exactly as
+    # the SPH arm above was.
+    truss_pids = _truss_pids(state)
     for e in state.beam_elems:
-        elem_nodes.update((e.n1, e.n2, e.n3))
+        if e.pid in truss_pids:
+            elem_nodes.update((e.n1, e.n2))
+        else:
+            elem_nodes.update((e.n1, e.n2, e.n3))
     # /SPRING connector nodes carry spring stiffness; the synthesized ground
     # nodes are already fully /BCS-fixed by the connector section.
     #

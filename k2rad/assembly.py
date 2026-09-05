@@ -50,6 +50,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        INITIAL_STATE_PRELOAD_KEYWORDS,
                        RARE_CARD_KEYWORDS,
                        RARE_MATERIAL_KEYWORDS,
+                       _REFUSED_MATERIALS,
                        _SEATBELT_MAT_KEYWORDS,
                        _SEATBELT_SUBKEYWORDS,
                        final_geometry_node_row,
@@ -3611,6 +3612,12 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_SOIL_AND_FOAM": _mat({1: [(2, "f")]}),
     "MAT_5": _mat({1: [(2, "f")]}),
     "MAT_005": _mat({1: [(2, "f")]}),
+    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) has the SAME input as MAT_005
+    # (Vol II R17 p.2-209), so it takes the same spec — card-2 field 3 is the
+    # LCID pressure curve.
+    "MAT_SOIL_AND_FOAM_FAILURE": _mat({1: [(2, "f")]}),
+    "MAT_14": _mat({1: [(2, "f")]}),
+    "MAT_014": _mat({1: [(2, "f")]}),
     "MAT_LOW_DENSITY_VISCOUS_FOAM": _mat({0: [(3, "f")], 1: [(4, "f")]}),
     "MAT_73": _mat({0: [(3, "f")], 1: [(4, "f")]}),
     "MAT_073": _mat({0: [(3, "f")], 1: [(4, "f")]}),
@@ -4204,6 +4211,35 @@ _RARE_MATERIAL_OFFSETS = {
     "MAT_SHAPE_MEMORY":  _off_mat_shape_memory,
     "MAT_030":           _off_mat_shape_memory,
     "MAT_30":            _off_mat_shape_memory,
+    # ── R14 triage batch, round 1 ──────────────────────────────────────────
+    # *MAT_ELASTIC_PLASTIC_THERMAL: MID on card 1 and NOTHING else. Its six
+    # data rows are eight-slot FLOAT tables (T/E/PR/ALPHA/SIGY/ETAN) — no id
+    # of any class lives on them.
+    "MAT_ELASTIC_PLASTIC_THERMAL": _mat(),
+    "MAT_004": _mat(),
+    "MAT_4":   _mat(),
+    # *MAT_CWM: MID on card 1 plus its five LOAD CURVE ids in card-1 fields
+    # 3-7 (LCEM LCPR LCSY LCHR LCAT, Vol II R17 p.2-1835) -> IDFOFF "f".
+    # Card 2 is all temperatures and ghost moduli, card 3 phase-change
+    # bookkeeping — no ids on either.
+    "MAT_CWM": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
+    "MAT_270": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
+    # *MAT_VACUUM: MID on card 1, RHO beside it, nothing else.
+    "MAT_VACUUM": _mat(),
+    "MAT_140": _mat(),
+    # The refused-by-name families get MID offset and nothing else: an
+    # unmodelled card stack must not have its other cells rewritten by
+    # position (the *AIRBAG warn-drop rule), but the MID is what the *PART
+    # points at, so the ERROR-179 diagnostic has to keep naming the same id
+    # after an *INCLUDE_TRANSFORM moves the include.
+    **{kw: _mat() for names in _REFUSED_MATERIALS for kw in names},
+    # *MAT_ELASTIC_PLASTIC_HYDRO[_SPALL]: MID on card 1 and NOTHING else. Its
+    # EOS is bound by the SHARED ID (and by the *PART EOSID field, which the
+    # *PART row already offsets with IDMOFF), never by a cell on this card;
+    # the EPS/ES rows and the _SPALL card are all floats.
+    **{kw: _mat() for kw in (
+        "MAT_ELASTIC_PLASTIC_HYDRO", "MAT_ELASTIC_PLASTIC_HYDRO_SPALL",
+        "MAT_010", "MAT_10", "MAT_010_SPALL", "MAT_10_SPALL")},
     "MAT_MUSCLE":        _off_mat_muscle,
     "MAT_156":           _off_mat_muscle,
     "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,

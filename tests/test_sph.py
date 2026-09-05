@@ -1889,10 +1889,26 @@ class MoreElementRegistryArms(unittest.TestCase):
                for t in ln.split()}
         self.assertTrue({n for n, *_ in LATTICE} <= ids, sorted(ids))
 
-    def test_a_force_transducer_over_a_particle_part_is_not_empty(self):
-        """``_part_node_ids`` builds the /INTER/SUB secondary group of a
-        *CONTACT_FORCE_TRANSDUCER. Without the arm the group is empty and the
-        transducer is dropped for "no deformable nodes"."""
+    def test_a_force_transducer_over_a_particle_part_is_refused_by_name(self):
+        """A particle has no FACE, and a parentless /INTER/SUB measures a
+        SURFACE — so the transducer is refused, and the refusal has to say
+        which of the two it is.
+
+        This test used to assert the opposite, and the behaviour really did
+        change: k2rad used to give the transducer a /GRNOD secondary group,
+        which ``_part_node_ids`` (SPH arm included) filled, and parent it on an
+        existing interface. The R14 triage batch made /INTER/SUB parentless —
+        ``inter_ID = 0``, ``hm_read_intsub.F:249`` — because the parented form
+        answered ERROR 580/581 for every node or segment foreign to the parent
+        on the corpus decks. On that branch ``Second_ID`` is NOT DECODED
+        (:453-476 reads Main_ID2 and Main_ID1 and nothing else), so there is no
+        node-group route left and an SPH-only side has none at all.
+
+        The assertion is therefore that the loss is NAMED, with the node count
+        ``_part_node_ids`` still measures — an empty scope and a face-less one
+        are different mistakes and the message must distinguish them — not that
+        a group is silently written that the reader would never decode.
+        """
         shell = ("*ELEMENT_SHELL\n"
                  + f"{1:>8}{2:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n")
         d = ("*KEYWORD\n" + NODES + SPH8 + shell + PART
@@ -1904,15 +1920,23 @@ class MoreElementRegistryArms(unittest.TestCase):
              + "*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
              + _row(1, 2, 3, 3) + "\n" + _row(0.0, 0.0) + "\n" + "*END\n")
         result, starter = _convert(d)
+        hit = [w for w in result.warnings
+               if "CONTACT_FORCE_TRANSDUCER" in w and "no /SURF" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        # the SPH arm of _part_node_ids is what makes this count real: without
+        # it the message would read "0 node(s)" and look like an empty scope.
+        self.assertIn(f"{len(LATTICE)} node(s)", hit[0])
+        self.assertIn("no shell or solid FACE", hit[0])
+        self.assertIn("SPH part", hit[0])
+        # ... and nothing dangling is emitted for it.
+        self.assertNotIn("/INTER/SUB/", starter)
         self.assertEqual(
-            [w for w in result.warnings
-             if "secondary side has no" in w], [], result.warnings)
-        grp = [b for b in _blocks(starter, "/GRNOD/NODE/")
-               if b[1].endswith("_secnd")]
-        self.assertTrue(grp, starter)
-        ids = {int(t) for b in grp for ln in b[2:]
-               if not ln.startswith("#") for t in ln.split()}
-        self.assertTrue({n for n, *_ in LATTICE} <= ids, sorted(ids))
+            [b for b in _blocks(starter, "/GRNOD/NODE/")
+             if b[1].endswith("_secnd")], [])
+        self.assertTrue(any(kw == "CONTACT_FORCE_TRANSDUCER"
+                            and "Main_ID2" in reason
+                            for kw, reason in result.recognized_not_emitted),
+                        result.recognized_not_emitted)
 
     #: *MAT_ANISOTROPIC_VISCOPLASTIC (MAT_103) — the material whose parts
     #: _assign_ortho_props splits onto a synthesized /PROP/TYPE6 or TYPE9.

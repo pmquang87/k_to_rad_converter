@@ -277,11 +277,17 @@ def _mat177(kw="*MAT_HILL_FOAM", mid=7, rho="1.0E-10", k="", n=0.5, mu="",
 # ═════════════════════════════════════════════════════════════════════════════
 
 class DispatchTests(unittest.TestCase):
-    """Every documented keyword spelling and numeric alias reaches its
-    handler; *MAT_SOIL_AND_FOAM_FAILURE (014) deliberately does NOT — its
-    dyna2rad law 14 has no dispatch case (generic 1:1 dump), and silently
-    converting away its failure semantics onto LAW21 would be worse than the
-    skip."""
+    """Every documented keyword spelling and numeric alias reaches its handler.
+
+    *MAT_SOIL_AND_FOAM_FAILURE (014) used to be excluded here on the ground
+    that "dyna2rad maps it to law 14, which has no dispatch case" — a fact
+    about d2r, not a reason for k2rad, which has its own MAT_005 -> LAW21
+    route (the R14 triage batch's #130 exclusion audit). Vol II R17 p.2-209
+    states the whole keyword in one sentence: the input is MAT_005's, and at
+    the tensile failure pressure the element "loses its ability to carry
+    tension" — which is /FAIL/SPALLING with Ifail_so = 1 exactly. It IS routed
+    now, and the rider is what carries the failure semantics instead of
+    dropping them."""
 
     def test_every_spelling_is_registered(self):
         for kw in ("MAT_SOIL_AND_FOAM", "MAT_005", "MAT_5",
@@ -293,13 +299,24 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(kw=kw):
                 self.assertIn(kw, HANDLERS)
 
-    def test_soil_and_foam_failure_is_not_routed(self):
-        self.assertNotIn("MAT_SOIL_AND_FOAM_FAILURE", HANDLERS)
+    def test_soil_and_foam_failure_is_routed_with_the_latch_flag(self):
+        """MAT_014 shares MAT_005's input and its handler; the SPELLING is the
+        flag that adds the /FAIL/SPALLING latch (the emitted rider is pinned
+        in tests/test_r14_triage_1.py)."""
+        for kw in ("MAT_SOIL_AND_FOAM_FAILURE", "MAT_014", "MAT_14"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, HANDLERS)
         state = _dispatch(_solid_deck(
             "*MAT_SOIL_AND_FOAM_FAILURE\n" + _row(7, "1.8E-9", 375.0, 500.0)
             + "\n" + _row(0.0, 0.0) + "\n"))
-        self.assertNotIn(7, state.mat_soil_and_foam)
-        self.assertIn("MAT_SOIL_AND_FOAM_FAILURE", state.skipped_keywords)
+        self.assertIn(7, state.mat_soil_and_foam)
+        self.assertTrue(state.mat_soil_and_foam[7].latched_tension_failure)
+        self.assertNotIn("MAT_SOIL_AND_FOAM_FAILURE", state.skipped_keywords)
+        # ...and the plain spelling must NOT carry the latch.
+        plain = _dispatch(_solid_deck(
+            "*MAT_SOIL_AND_FOAM\n" + _row(7, "1.8E-9", 375.0, 500.0)
+            + "\n" + _row(0.0, 0.0) + "\n"))
+        self.assertFalse(plain.mat_soil_and_foam[7].latched_tension_failure)
 
     def test_offset_specs_cover_every_spelling(self):
         from k2rad.assembly import _OFFSET_SPECS

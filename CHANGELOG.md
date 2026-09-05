@@ -11,6 +11,453 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps, the
+  `/MAT/LAW51` semantics, the TRUSS element and the zero-density policy behind
+  52 of the 59 starter failures the 356-deck dynaexamples R14 campaign
+  measured.** Not a parity wish-list: every item below is a deck the user ran
+  through k2rad + OpenRadioss and got a starter error on, with the LS-DYNA
+  reference result sitting beside it on `F:`. (The two remaining classes, the
+  force transducer and the reversed load curve, are under **Fixed** — they were
+  existing behaviour producing a refused deck, not missing coverage.)
+
+  - **`*CONTROL_SOLUTION SOLN=1` + a `*PART` whose MID names no converted
+    material → a SYNTHESIZED inert `/MAT/ELAST` stand-in.** Vol I R17 `*PART`:
+    for a thermal-only solve the `MID` field is not used and `TMID` supplies the
+    material — and all ten R14 thermal-only decks write `MID = 0` literally and
+    ran NORMAL TERMINATION in LS-DYNA. Radioss has no such rule: the starter
+    answers `ERROR ID 179 "MATERIAL ID=0 DOES NOT EXIST"` **and** `ERROR ID 3046
+    "ELEMENTS OF TYPE BRICK ARE NOT COMPATIBLE WITH MATERIAL ID 0 OF TYPE 0"`
+    (`ex_21_solid_elform_2_0000.out:218` / `:252`), and `/HEAT/MAT` is itself
+    keyed on a MATERIAL id whose unresolvable form is `ERROR 1663`
+    (`hm_read_therm.F:135-152`) — so the deck's whole conduction was being
+    dropped as well. `rho` is the `*MAT_THERMAL_*` card's own **TRO**, a stated
+    density; `E = 1` in the deck's own units and `nu = 0.3`. **The modulus is
+    inert and that is measured, not argued**: under `/DT/THERM` the mechanical
+    element step is computed and then overwritten by the conduction step
+    (`resol.F:5807-5809`) and every nodal DOF is frozen (`resol.F:1738`
+    `BCSDTTH_COPY` sets `ICODT = ICODR = 7`) — two converted runs of
+    `01_2_insulated_concrete_wall_transient` at `E = 1` and `E = 210000` produced
+    **960 of 960 byte-identical anim states** and the same 6364 cycles, with
+    `HEAT STORED` differing only in round-off (−0.22779556E-11 vs
+    −0.22701840E-11). The obvious-looking alternative is the trap: `/MAT/VOID`
+    (LAW0) ran **1 cycle** with `HEAT STORED = 0.0000000` under a NORMAL
+    TERMINATION banner at 0 ERROR / 0 WARNING, because `mmain.F90` has no
+    `mtn == 0` branch, so `MQVISCB` is never called and `GLOB_THERM%DT_THERM`
+    stays at its `resol.F:2667` reset value `1e6 s` — larger than the whole run
+    (the #110/#122 class exactly). The screen runs on the **emitted** `/MAT`
+    registry, not the source keyword table, so a deck like `thermal-stress.k`
+    whose `MID = 1` names a real `*MAT_ELASTIC_PLASTIC_THERMAL` this same batch
+    newly converts is neither duplicated (`ERROR 79`) nor shadowed (#130); and
+    it is gated on `SOLN = 1`, because on a structural solve `E = 1` would be a
+    fabricated modulus with a real consequence. MEASURED on
+    `ex_21_solid_elform_2`: `/PART/1` went from `prop 1, mat 0` and no
+    `/HEAT/MAT` at all to `/MAT/ELAST/90001` + `/HEAT/MAT/90001`. Pinned by
+    `tests/test_r14_triage_1.py`.
+    Two of the ten SOLN=1 decks are NOT moved and say so: `05_4_1` and
+    `05_5_1`'s weld-seam part names `*MAT_THERMAL_CWM` through its TMID, which
+    has no Radioss counterpart (its quiet/dead/live property pairs and birth
+    time), so no stand-in is synthesized — the stand-in exists to carry a
+    `/HEAT/MAT` keyed on a MATERIAL id, and with no thermal material the part
+    would come out structurally inert AND thermally dead, which on a welding
+    thermal analysis is a weld that never heats. That part used to get **no
+    diagnostic at all** (it never reached `_resolve_heat_materials`' `wanted`
+    set, and the dangling-`/PART` scan treats `mat_ID 0` as the connector
+    convention), so it is named here or nowhere; it is named here.
+
+  - **`*MAT_ELASTIC_PLASTIC_THERMAL` / `*MAT_004` (9 decks) → `/MAT/LAW106` +
+    `/THERM_STRESS/MAT` + `/HEAT/MAT`.** The complete MAT cfg availability map
+    at `/BEGIN 2022` leaves exactly one law that carries `E(T)` and `nu(T)` as
+    plain functions of temperature on an ordinary elasto-plastic backbone:
+    `/MAT/LAW129` (`func_young`/`func_nu`/`func_yld`/`func_alpha`) is the exact
+    target and first appears in `radioss2025`, `/MAT/LAW80`'s Young function
+    belongs to the hot-stamping boron-steel law with its whole
+    austenite/ferrite/bainite/martensite kinetics, and `/MAT/LAW121`'s
+    `Fct_YOUN` is a function of STRAIN RATE, not temperature. The emitted card
+    is the `radioss2020/MAT/mat_law106.cfg` **FORMAT(radioss2019)** block, which
+    is what a `/BEGIN 2022` deck reads. `E(T)` and `nu(T)` become `/FUNCT`
+    MULTIPLIERS (`hm_read_mat106.F90:250-263` copies the tables with
+    `fscale(1:2) = e`, `fscale(3) = nu`) written to `fct_ID1` **and** `fct_ID2`,
+    because `sigeps106.F90:231-240` picks table(2) only while the element is
+    COOLING and a 0 there would use the unscaled `E` on every cooling step.
+    MEASURED that `E(T)` is CONSUMED, not merely echoed: two one-brick coupons
+    in confined compression, identical but for the card-6 `Tr` cell, gave
+    `σzz` **32.2609** at `f(T) = 1` and **11.5218** at `f(T) = 0.357143` — a
+    ratio of 0.357143, exactly `f(T)` — with `σxx/σzz = ν/(1−ν) = 0.428571` in
+    both. `ALPHA(T)` reaches `/THERM_STRESS/MAT` with **no conversion factor**:
+    Vol II R17 `*MAT_004` Remark 1 makes it the INSTANTANEOUS coefficient and
+    `mmain.F90:770-786` is incremental, two term-for-term identical forms
+    (#128). The eight-slot `T1..T8` table states no live count, so it is read as
+    the longest STRICTLY INCREASING prefix — an unused slot is written `0.0`,
+    which is also a legal temperature and is what `thermal-stress`,
+    `main_steel_frame` and `ex_24` put in `T1`. `SIGY = 0` is Remark 2's *"if a
+    thermo-elastic material is considered, do not define SIGY and ETAN"*, so
+    `A = 1e20` is written rather than a copied 0 (the reader substitutes
+    infinity for a blank `epsmax`/`sigmax` but NOT for `MAT_SIGY`); `ETAN` is a
+    TOTAL-strain tangent so `B = E·ETAN/(E−ETAN)`, `n = 1`; `Tmelt` is left
+    BLANK, which `hm_read_mat106.F90:150` turns into infinity so the
+    Johnson-Cook knockdown is identically 1 and `A` means exactly `σy(Tr)`.
+    **The named loss** is `SIGY(T)` and `ETAN(T)`, frozen at the reference
+    temperature with the deck's own spread printed (`SIGY 435 … 1 over
+    273 … 10000 K, factor 435` on the welding decks); nothing is fitted,
+    because fitting `m` to the 273→493 pair predicts 63.2 MPa at 1273 K against
+    a stated 20 — 3.2× wrong (#124). Five of the nine corpus decks lose
+    **nothing**: `E`, `ν`, `SIGY` and `ETAN` are constant across their tables.
+    Version-gated dead cells at 2022, measured on a starter probe: `Pmin`,
+    `Tmax`, the Taylor-Quinney `eta`, `T0`, the rate coefficient `C`, `deps0`
+    and `Fcut` — lost BY VERSION, not by mapping.
+
+  - **`*MAT_CWM` / `*MAT_270` (4 welding decks) → the same target, with
+    curves.** `LCEM`/`LCPR` become the same normalised `/FUNCT`s, `LCAT` the
+    `/THERM_STRESS/MAT` function, `LCSY` the `A` cell. **`LCHR` goes into `B`
+    UNCONVERTED**: Vol II R17 p.2-1836 Remark 2 states the flow law as
+    `σ_Y = σ_Y(T) + β·H(T)·ε_p`, so it is already the PLASTIC hardening modulus
+    and applying `*MAT_004`'s `E·Et/(E−Et)` to it would be a silent factor
+    error in the other direction. A conversion-time defect the corpus probe
+    caught before it shipped: `Curve.pts` is ALREADY scaled by the source
+    card's `SFA`/`SFO`, so re-applying them squared the welding decks' `LCAT`
+    `SFO = 1e-6` and produced a **1.7e-11** thermal expansion coefficient where
+    the deck states **1.7e-5**, at zero diagnostics. **Three mechanisms have no
+    counterpart and each is named per card**: the annealing window (Remark 3
+    scales the accumulated plastic strain and back stress by
+    `max[0, min(1, (T−TAend)/(TAstart−TAend))]`, i.e. RESETS them through the
+    window — the largest single loss for a multi-pass weld), the ghost→live
+    weld-metal deposition (Remark 1 blends each element's properties from its
+    OWN running `T_max`; Radioss's nearest machinery `/ACTIV` + `/SENSOR/TEMP`
+    triggers on a `/GRNOD`, `read_sensor_temp.F:81-87`, so per-element birth
+    would need one sensor + group + `/ACTIV` per weld element — and a
+    deactivated solid also stops CONDUCTING), and the kinematic fraction
+    `1−BETA` (β = 1 on all four corpus decks, so nothing is lost there). Card 3
+    loses **nothing**: Remarks 4 and 5 make `T2PHASE`/`T1PHASE`/`DTEMP`/`POSTV`
+    history-variable 11 and post-processing only, which the warning says rather
+    than calling them "dropped". The honest statement, in the warning and here:
+    a converted welding deck will START and TERMINATE NORMALLY with the correct
+    temperature-dependent elasticity and expansion and a **residual stress that
+    is not validated**.
+
+  - **`*MAT_ELASTIC_PLASTIC_HYDRO` / `*MAT_010` (3 SPH decks) → `/MAT/LAW3`
+    (`HYDPLA`) + its same-id `/EOS`.** The card states a SHEAR modulus and no
+    bulk modulus at all — LS-DYNA takes the pressure from the `*EOS_*` the
+    `*PART` binds — while `/MAT/LAW3`'s card is the isotropic pair `E, nu`.
+    The pair is **derived from two stated physical cells**, the material's `RO`
+    and the companion EOS's sound speed: `K₀ = ρ₀C²` for a Gruneisen EOS (its
+    `C` is the intercept of the `us = C + S1·up` Hugoniot, i.e. the bulk sound
+    speed at zero compression) or `K₀ = C1` for a polynomial one, then
+    `ν = (3K₀−2G)/(2(3K₀+G))`, `E = 9K₀G/(3K₀+G)`. On `taylor1.k`:
+    `K₀ = 139425.2996`, `ν = 0.376303`, `E = 103478.736`, and
+    `E/(2(1+ν)) = 37593.000 = G` exactly. Sanity that the derivation is right
+    rather than invented: `taylor1`'s own `*MAT_PLASTIC_KINEMATIC` twin for the
+    same copper states `E = 1e5, PR = 0.33`, i.e. `G = 37593.98` — the deck
+    author's own `G` to five figures. Its **one visible consequence**:
+    `hm_read_mat03.F:190/197` stores `PM(32) = E/(3(1−2ν))` for every
+    `INVERS ≥ 2018` deck, and that is the bulk modulus the `/INTER/TYPE7` and
+    `TYPE20` CONTACT STIFFNESS reads, so it now agrees with the pressure law
+    instead of with an invented Poisson ratio; the deviatoric response is
+    unaffected either way (`m3law.F:60,107-112` uses `G` alone, the pressure
+    coming from `eosmain`). **`EH` goes into `b` UNCONVERTED** — Vol II R17
+    p.2-193 Remark 2 states the flow law as `σy = σ0 + E_h·ε_p`, so `EH` is
+    already the plastic hardening modulus and the `E_t·E/(E−E_t)` form on the
+    same page is the derivation *from* a tangent; applying it here would be the
+    silent factor error `*MAT_003`'s `ETAN` legitimately needs. The `/EOS` is
+    written immediately beside the `/MAT` under the same id (the LAW4
+    `HYD_JCOOK` pattern), and `_law3_consumed_eos_ids` keeps the orphan-EOS arm
+    of `_make_explosive_and_eos_materials` from telling the reader *"the
+    equation of state was NOT emitted"* about one this batch does write (#129)
+    — that arm used to fire on exactly these three decks. **Refused by name**,
+    never half-converted: the `_SPALL` option (its `(a1 + p·a2)·max[p,0]`
+    pressure hardening and its spall selector have no `/MAT/LAW3` slot; the
+    option's card 1a also shifts the `EPS`/`ES` table by one row, which the
+    handler strides by RAW CONTIGUITY), a tabulated `EPS1..16`/`ES1..16` yield
+    curve (`a + b·ε^n` cannot hold a 16-point table, and `/MAT/LAW36` — the law
+    that could, being both SPH- and EOS-declared — is not wired to an `/EOS`
+    here yet), a missing same-id `*EOS_*`, an EOS with no usable `K₀` (an ideal
+    gas has none: `K = γp` is zero at zero pressure), `RO ≤ 0`, `G ≤ 0`, and a
+    derived `ν` outside `(−1, 0.5)`.
+
+  - **`*MAT_SOIL_AND_FOAM_FAILURE` / `*MAT_014` → `/MAT/LAW21` + a
+    `/FAIL/SPALLING` rider, and the exclusion that blocked it is CORRECTED.**
+    The old comment refused the keyword because *"dyna2rad maps it to law 14,
+    which has no case in its dispatch switch and falls into the generic 1:1
+    dump"* — a fact about d2r, not a reason for k2rad, which has its own
+    `MAT_005 → /MAT/LAW21` route (the #130 exclusion-list audit: an exclusion's
+    stated reason needs the same scrutiny as a warning's). Vol II R17 p.2-209
+    states the whole keyword in one sentence: *"The input for this model is the
+    same as for `*MATERIAL_SOIL_AND_FOAM` (Type 5); however, when the pressure
+    reaches the tensile failure pressure, the element loses its ability to
+    carry tension."* So one handler reads both spellings and the spelling is
+    the flag. `/MAT/LAW21` alone does **not** carry that sentence:
+    `m21law.F:189` clamps `p = max(pmin,p)·off` and `:196-200` zeroes
+    `A0/A1/A2` while `P < PMIN`, both recomputed from the CURRENT pressure
+    every step, so a cell that has been in tension RECOVERS its full strength.
+    `/FAIL/SPALLING` with `Ifail_so = 1` is the latch exactly:
+    `hm_read_fail_spalling.F90:98-104` clamps `isolid = max(1, min(6,
+    Ifail_so))` into `iparam(1)` and `fail_spalling_s.F90:104-131` maps
+    `iflag = 1` to `ispall = 1`, so the Johnson-Cook `D1..D5` branches
+    (`iflag == 2/3/4`) and the element deletion never run, while `:241-268`
+    accumulates `dfmax = max(dfmax, min(p,0)/P_min)` MONOTONICALLY, zeroes the
+    stress tensor once and thereafter writes `σxx = σyy = σzz = −max(p,0)` with
+    all shears 0 — compression only, no deviator, element NOT deleted.
+    Dispatch verified: `mmain.F90:2242` gates the `/FAIL` loop on
+    `nfail > 0 .and. (mtn < 28 .or. mtn == 49)` and LAW21 is `mtn = 21`, and
+    the `do ir = 1,nfail` loop is a SIBLING of the `istrain` block at `:2243`,
+    so the `/PROP` `istrain` flag does not gate it. A `PC = 0` card is named:
+    `hm_read_fail_spalling.F90:102` turns a zero `P_min` into `−1e20`, so the
+    latch can never trip and the material is plain MAT_005.
+
+  - **Three material families REFUSED BY NAME, with the parts and element
+    counts the refusal costs.** `*MAT_INV_HYPERBOLIC_SIN` (`*MAT_102`, 2
+    forging decks): Vol II R17 p.2-729 Remark 1's
+    `σ = (1/α)·arcsinh[(Z/A)^(1/N)]` with `Z = max(ε̇, EPS0)·exp(Q/(GT))` has no
+    form at `/BEGIN 2022` — the sinh rate law exists only inside `/MAT/LAW100`
+    (`viscsinh.F:63`, a hyperelastic-network polymer law with no `exp(Q/GT)`
+    cell) and `/MAT/LAW101` (`sigeps101.F:836`, the Bouvard semi-crystalline
+    polymer model), and the Garofalo/Norton creep law that carries it properly
+    is `/MAT/LAW129 crp_law = 2`, first available in `radioss2025`;
+    `/MAT/LAW103` (Hensel-Spittel) is named as the manual escape route and NOT
+    done automatically, because fitting `A0, m1..m5, m7` to the arcsinh curve
+    would invent every coefficient (#124). `*MAT_ACOUSTIC` (`*MAT_090`, 2 nvh
+    decks): OpenRadioss has neither an acoustic pressure element nor a
+    frequency-domain solver, so the whole analysis has no counterpart and
+    converting the material alone would leave a deck with nothing to solve.
+    `*MAT_FRAZER_NASH_RUBBER_MODEL` (`*MAT_031`, 1 deck): the corpus card
+    states no constants at all — p.2-312 makes `C100/C110/C010/C020 = 1.0`
+    INCLUSION FLAGS beside `SGL/SW/ST` and an `LCID`, i.e. a request for
+    LS-DYNA's own least-squares fit — and even a direct-constants card is not a
+    1:1 map, because Frazer-Nash's `I1, I2` are invariants of the
+    Green–St-Venant strain while `/MAT/LAW100 PPOLYNOMIAL` uses the REDUCED
+    Cauchy-Green ones. Each refusal is RECOGNIZED (out of `skipped_keywords`,
+    into `recognized_not_emitted`) and a writer pass — which runs once the mesh
+    is complete — names the `/PART`s and the per-family element counts the
+    refusal leaves without a material, because the starter's own `ERROR 179`
+    names one part at a time and says nothing about how much of the model goes
+    with it. MEASURED on the corpus: `forging_A` `/PART [1]` holding 3200
+    solids, `8.3.plate_kirchhoff` `/PART [2]` holding 600. The parts are NOT
+    dropped, and that is measured too: on one-brick starter probes a `/PART`
+    with a dangling `mat_ID` plus its `/BRICK` gives 3 errors (179, 3046, 61),
+    the `/PART` removed with its `/BRICK` KEPT gives `ERROR 402` *"1 PART(S)
+    REFERENCED BY ELEMENTS DO(ES) NOT EXIST"* — strictly worse — and removing
+    both gives 0 ERROR / 0 WARNING but only moves the dangling reference to
+    whatever set, contact, `/TH`, `/INIVOL` or `/RBODY` still names the part;
+    that screening is its own item. The dangling-`/PART` scan reads the refusal
+    registry as well as `skipped_keywords`, so it keeps quoting the culprit by
+    name instead of answering *"look above"* on exactly the decks whose culprit
+    is known.
+
+  - **`*MAT_HIGH_EXPLOSIVE_BURN`'s `K`/`G`/`SIGY` are read, and the
+    `/MAT/LAW5` `Bunreacted` cell is filled — derived where the deck legally
+    states 0 (4 underwater decks, `ERROR 99`).** The handler never read those
+    three cells, so `Bunreacted` went out as a literal 0 and
+    `fill_buffer_51.F:496-499` refused every `Iform = 12` deck carrying the
+    explosive: *"BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR UNREACTED
+    EXPLOSIVE"*. `K` maps 1:1 — Vol II R17 p.2-188 gives the pre-detonation
+    pressure as `p^{n+1} = K(1/V^{n+1} − 1)` and `jwl51.F:197` is
+    `Psol = C01 + C11·MU1` with `C11 = UPARAM(50) = PM(44) = Bunreacted`
+    (`hm_read_mat05.F:160/234`), term for term, so a stated `K` is copied
+    without a factor. The four `underwater_*` decks state `K = 0`, and that is
+    **correct LS-DYNA input, not a deck defect**: `K` is *"Bulk modulus
+    (BETA = 2.0 only)"* and with `BETA = 0` the unburnt explosive obeys
+    `p = F·p_eos` with `F = 0`, i.e. LS-DYNA carries no unreacted stress at
+    all. Radioss has no such branch, so the value is **DERIVED and named**: the
+    JWL isentrope's bulk modulus at the unreacted density,
+    `K_s(V=1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0`, every term from a cell the
+    `*EOS_JWL` states. On `underwater_C`'s TNT that is
+    `24271.684 + 1186.715 + 1290.0 = 26748.4 MPa`, close to the deck's own
+    `P_CJ` of 26000. The alternative from stated cells is `ρ₀D² = 100188.9` —
+    which the starter itself already computes at `fill_buffer_51.F:488` as
+    `UPARAM(275)` — and it is 3.75× stiffer, so the isentrope slope was chosen
+    because it perturbs the pre-burn state (which LS-DYNA leaves at zero) less;
+    both are printed in the warning. Neither costs time step: `PM(27)` already
+    holds `D` (`:492`) and a SMALLER `C11` raises, never lowers, the
+    unreacted-sound-speed limit (`:214`). **Scope**: the substitution fires only
+    when the source `K` is 0 **and** the material is an
+    `*ALE_MULTI-MATERIAL_GROUP` member, because `ERROR 99` lives in the
+    `Iform = 12` branch alone — a stand-alone `/MAT/LAW5` (`underwater_A`/`_B`,
+    `exploding-sphere`, `2Dlag`) is perfectly startable with 0 there and does
+    not move. `--he-bunreacted <value>` (and the GUI's mirror entry) overrides
+    it everywhere; a blank field is k2rad's own rule, and an unparseable value
+    is an error rather than a silently ignored blank.
+    **SUPERSEDED by the post-review round below**: the orphan `/MAT/LAW51` that
+    raises `ERROR 99` is no longer emitted by default, so the derivation now
+    fires only under `--ale-multimat-law51` and `Bunreacted` ships as 0 — which
+    `mjwl.F:166` makes exactly LS-DYNA's `p = F·p_eos`. `0` is therefore a
+    legal `--he-bunreacted` value and is no longer rejected.
+    `G` and `SIGY` are named as dropped — LAW5 has no deviator at all. The
+    `*ALE_MULTI-MATERIAL_GROUP` warning used to end *"(ERROR 99 otherwise) —
+    set it"*; it now states which value went in and where it came from, because
+    prescribing what the converter already writes is a false cited fact (#129).
+
+  - **The `/MAT/LAW51` phase list is SCREENED against the starter's own rule,
+    and the card now says what it is.** `fill_buffer_51.F:210` accepts only
+    laws 2, 3, 4, 5, 6, 10, 102 and 133 as a phase and `:237` answers anything
+    else with `ERROR 99`; `:202` answers a material the deck does not define
+    with *"NON EXISTING SUBMATERIAL IDENTIFIER"*. Both were reachable from
+    k2rad's own output on five R14 decks. Three fixes:
+    **(a) a `*MAT_VACUUM` phase is DROPPED, never carried as MID 0** —
+    `hm_read_mat51.F:608-627` reads exactly `MIP` rows and a `tMID <= 0` inside
+    them is a fatal *INCORRECT MATERIAL IDENTIFIER*, while `:639-646` checks
+    only that the volume fractions SUM ABOVE 1, so a sum BELOW one is legal and
+    the undeclared balance is how Radioss represents void (`stagnation_A/B`,
+    `cylinder_impact_A/B`, and the latent `ale_wavehitcol`). The consequence is
+    named: the vacuum's tiny `RHO` (1e-14 … 1e-9 on the corpus) carried a small
+    mass in LS-DYNA that the Radioss model does not have.
+    **(b) a phase with NO `/EOS` is dropped, and that MEASUREMENT corrects the
+    source's own comment.** `fill_buffer_51.F:213-219`'s THEN branch is empty
+    and its ELSE raises *"SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW
+    51"* on exactly the `EOS_TYPE` values the comment beside it calls expected
+    — `EOS_TYPE = 0` (no equation of state at all) included — and `:281` states
+    it without ambiguity: `IF(EOS_TYPE == 0 .AND. MLN /= 5) -> 'MISSING
+    SUBMATERIAL EOS'`. MEASURED both ways: on `cylinder_impact_A` a
+    `/MAT/LAW51` whose only phase was a `/MAT/LAW2` with no `/EOS` answered
+    BOTH messages, while `underwater_C` — a `/MAT/LAW5` beside a
+    `/MAT/HYD_VISC` + `/EOS/GRUNEISEN` — started at 0 ERROR / 0 WARNING. This
+    **overturns the plan** this batch started from, which was to restate a
+    `*MAT_PLASTIC_KINEMATIC` member as `/MAT/LAW2` (the law LAW51 does accept):
+    the restatement clears `:210`'s law test and then dies on `:281`, because
+    a `*MAT_PLASTIC_KINEMATIC` carries no equation of state in this converter
+    or in the deck. So the phase is dropped by name instead, the material keeps
+    the `/MAT/LAW44` its Lagrangian side needs, and the restatement machinery
+    was removed rather than shipped as a capability that cannot produce a legal
+    card. `cylinder_impact_A` starts at **0 ERROR / 0 WARNING** with no
+    `/MAT/LAW51` at all, which is the honest outcome: an ILLEGAL orphan card is
+    strictly worse than none, and nothing referenced it anyway. The screen is
+    on the EMITTED registry, never on `state.eos_cards` membership — a bare
+    `*EOS_*` whose id matches another material is not written at all, so the
+    parse registry would claim an equation of state the deck does not
+    contain (#130).
+    **(c) anything else off `fill_buffer_51.F:210`'s law list is dropped BY
+    NAME**, with the phase, its law and the reason; `*MAT_ELASTIC` (LAW1)
+    additionally names its manual route (`/MAT/LAW2` with an unreachable yield
+    AND an `/EOS`). That last screen is a GUARD and is unreachable today —
+    every material this converter gives an `/EOS` to lands on law 3, 4, 5 or 6,
+    all four on the list — which the code and its test both say out loud
+    rather than implying coverage it does not have.
+    **And the honest sentence the batch would be dishonest without**: the
+    emitted `/MAT/LAW51` is referenced by **no `/PART`**, and no `/INIVOL` is
+    written. k2rad keeps the LS-DYNA per-fluid layout — each fluid on its own
+    part with its own single-material `/MAT` and `Iale = 1` on its
+    `/PROP/SOLID` — so the phases CANNOT MIX: on a blast deck the detonation
+    products cannot expand into the water, and on a volume-fraction deck the
+    initial fill is not the deck's. These decks now START where they used to be
+    refused, and **the converted model is not the LS-DYNA one**; the warning
+    says so in capitals rather than letting a green run imply otherwise (#122
+    at deck scale). The `ALPHA_MAT` cells are stated as the placeholder they
+    are — inert exactly because nothing references the card, and wrong by
+    construction if anything did. Consolidating the ALE mesh onto one part with
+    per-phase `/INIVOL` fills is its own item.
+
+  - **`*MAT_VACUUM` / `*MAT_140` → `/MAT/VOID`, and `*MAT_GAS_MIXTURE` /
+    `*MAT_148` refused by name.** Radioss has no vacuum MATERIAL — the word
+    appears nowhere in the 2022 Reference or User Guide — but `/MAT/VOID`
+    (LAW0) is a region that carries no stress at all, which is what the
+    LS-DYNA card means, and it is the same target a bare `*MAT_NULL` already
+    takes here. It is emitted so the vacuum `*PART` RESOLVES: a `/PART` naming
+    no `/MAT` is `ERROR 179`, which `stagnation_A/B` and `cylinder_impact_A/B`
+    were getting on top of their LAW51 error. `RHO` is written verbatim, `0.0`
+    included — `hm_read_mat.F90:1575-1583` exempts law 0 from `ERROR 683`, so
+    `ale_wavehitcol.k`'s `RHO = 0` needs no density substitution. It is NOT a
+    LAW51 phase (LAW0 is not on `fill_buffer_51.F:210`'s list, and the
+    undeclared balance of the volume fractions IS Radioss's void), and what
+    that costs is named: in LS-DYNA the vacuum is an AMMG phase the other
+    materials advect into as they expand, here it is a separate
+    single-material ALE region nothing flows into. `*MAT_GAS_MIXTURE` stays
+    refused: its whole mechanism is `*SECTION_POINT_SOURCE_MIXTURE` +
+    `*INITIAL_GAS_MIXTURE`, an airbag-inflator point-source injection into an
+    ALE mesh, of which OpenRadioss has none — `/MAT/GAS` is a `/MONVOL` gas
+    definition, not an ALE material. A single perfect gas as a LAW51 phase
+    WOULD be expressible as `/MAT/LAW6` + `/EOS/POLYNOMIAL` with
+    `C4 = C5 = γ−1` (RefGuide p.1112), but converting the material alone would
+    leave `point_source.k` with no injection source, so the family is refused
+    whole rather than half.
+
+  - **`*SECTION_BEAM` ELFORM = 3 (6 decks) → `/PROP/TYPE2` + `/TRUSS`: Radioss
+    HAS a truss element, and the ROADMAP said it did not.** An ELFORM-3 section
+    states `A RAMPT STRESS` on card 2d and nothing else, so the `/PROP/BEAM`
+    fallback carried `Iyy = Izz = Ixx = 0` and `hm_read_prop03.F:151-182`
+    refused it (`ERROR 315/316/317`). `hm_read_truss.F` reads `/TRUSS` —
+    THREE cells, `id node_ID1 node_ID2`, with the material and property taken
+    from the `/PART` at `:157-158` — and `hm_read_prop02.F:110-112` reads
+    `/PROP/TYPE2` as AREA and GAP and nothing else (`initia.F:3650-3652` is
+    literally `IF(IGTYP==2)THEN` / `C---------- truss, nothing`). GAP is
+    written **0 always**: `tforc3.F:184-186` turns a positive `GEO(2)` into a
+    compression-only GAP ELEMENT and no cell of ELFORM 3 maps to that.
+    MEASURED, starter (nt = 6), master `92460b7` → this branch: `rod.k`,
+    `pend.imp.k`, `pendulum.k` (weimar), `ex_05_beam_elform_3_&_6.k`,
+    `deformable_to_rigid.pendulum.k` and `pendulum.k` (reid) all go from
+    3 × `ERROR 315/316/317` to **0 ERROR**; engine on `rod.k` NORMAL
+    TERMINATION at **415 cycles** with the element type echoed as `TRUSS`,
+    `dt = 0.2233E-05` against the closed form `0.9·L/c = 2.2325925e-6`
+    (`c = √(E/ρ) = 5.1196087e6 mm/s`, `dt1lawt.F:55-60`), TOTAL MASS
+    `0.2585E-02` against `ρ·A·L_tot = 2.585237e-3`, and node-2 DX
+    `3.59858e-3 mm` at `t = 1.8754e-4` against LS-DYNA's own `rod.nodout`
+    `3.61857e-3` (−0.55 %).
+    The DATA MODEL is a flag, not a second element container: a truss IS an
+    `*ELEMENT_BEAM` on a `*SECTION_BEAM` in LS-DYNA, so `*SET_BEAM`,
+    `*DATABASE_HISTORY_BEAM` and the `*INCLUDE_TRANSFORM` offset walk address
+    it as a beam and need no new spelling, and only the WRITE side branches.
+    The #120 audit ran over all 222 beam-registry hit lines: 13 sites grew a
+    truss arm (`/TH/TRUSS` as a third arm of the `*DATABASE_HISTORY_BEAM`
+    split — `hm_read_thgrou.F:2466-2486`, `ITYP = 4` over `MAP_TABLES%ITRUSSM`,
+    and 5 of the 6 corpus decks need it; the `/SECT` card's own `grtrus_ID`
+    column; `/PRELOAD/AXIAL`'s third family, `hm_read_preload_axial.F90:284-291`
+    `itype = 4`; `/ACTIV`'s `GR_TRUSS_SET` slot, `hm_read_activ.F:96`), 11 must
+    EXCLUDE trusses (no orientation node is synthesized for one — it would
+    enter `beam_orient_nodes`, which the implicit free-node sweeper SUBTRACTS —
+    and the sweeper plus the two `/RBODY` node walks take only `(n1, n2)`, which
+    matters because two corpus decks state a real `N3 = 45012` on a truss), and
+    22 are unaffected with a written verdict.
+    A `/TRUSS` accepts SIX materials only — LAW0, 1, 2, 13, 34, 44, the complete
+    set of `INIT_MAT_KEYWORD(MATPARAM,"TRUSS")` call sites under
+    `starter/source/materials/` — so a `*MAT_PIECEWISE_LINEAR_PLASTICITY` truss
+    (`/MAT/LAW36`, `BEAM_INTEGRATED` only) is NAMED rather than routed into
+    `check_mat_elem_prop_compatibility.F:331-335`'s `ERROR 3046`. All six corpus
+    decks use `*MAT_ELASTIC`, so the guard is for the deck one away. RAMPT and
+    STRESS are SCREENED, not dropped: p.41-18 makes them a
+    dynamic-relaxation pre-tension pair, `ex_05` states `1.0/1.0` and has no
+    relaxation phase, so they are inert in LS-DYNA too and are reported as such
+    rather than as a loss; with a phase, the equivalent `/PRELOAD/AXIAL` force
+    `STRESS × A` is named and not invented. `*ELEMENT_BEAM` RT1/RT2
+    (translational releases) are now read and named — on a truss that is a TOTAL
+    loss, axial translation being its only load path — while RR1/RR2 and LOCAL
+    are inert and deliberately not listed.
+
+  - **A material stating `RO ≤ 0` gets a MEASURED `1e-24` density floor
+    (8 decks), and the value is DERIVED from LS-DYNA, not chosen.** All eight
+    state `RO = 0.0` literally, are `*CONTROL_IMPLICIT_GENERAL` linear-static or
+    `*CONTROL_IMPLICIT_EIGENVALUE` decks where the mass matrix does not enter
+    the answer, and ran NORMAL TERMINATION in LS-DYNA;
+    `hm_read_mat.F90:1575-1583` refuses `rho <= 0` outright (`ERROR 683`,
+    exempting only laws 0/20/51/108/151/999 — none of them structural).
+    LS-DYNA makes the SAME substitution silently and its own `.d3hsp` says what
+    it is: `total mass of part = 0.20483830E-19` over the 20483.83 mm³ parts of
+    `3.1_Elastic_Beams_etc` is **ρ = 1.000e-24** to seven figures, measured
+    identically on `3.5_…_Plate_{Hex,Shell,Tet}` (2.0324782E-19 / 203247.82) and
+    `6.2.PSD_Beam_Example_LSTC` (4.0967660E-20 / 40967.66) — five decks, four
+    element families — with `Warning 30131 total number of massless nodes = 20`
+    instead of an error. A deck-RELATIVE rule (“1e-6 × the smallest positive
+    density”) was considered and REFUTED by measurement: all eight carriers
+    state `RO = 0` on EVERY material they define, so it has no input on any of
+    them, and a picked `1e-9` would have moved `6.2.PSD`'s first mode by −2.1 %
+    where `1e-24` moves it by 2.1e-17, below double precision. The scope is
+    DISCOVERED, not enumerated — the pass walks every `ConversionState` field
+    named `mat_*` whose value is a `mid → dataclass` dict, so a material family
+    added later is covered the day it is added — and the law screen reads
+    `mesh._target_mat_law` in the SAFE direction, so `*MAT_VACUUM` → `/MAT/VOID`
+    (LAW0) keeps its stated `0.0`, where that IS the card's meaning. MEASURED,
+    starter (nt = 6), master → this branch: all eight go from `ERROR 683`
+    (`ex_20_thin_shell_elform_16` from 683 + 179 + 760) to **0 ERROR**; engine
+    on `3.1_Elastic_Beams_etc` NORMAL TERMINATION with the MUMPS implicit solve
+    converging, KE = 0.000 at every cycle, and the tip deflections matching
+    LS-DYNA's own `nodout` to 0.03–2.1 % in MAGNITUDE. The warning names the
+    value, its provenance, what it costs on a static answer (nothing —
+    `/IMPL/QSTAT`'s stabilization is `∝ M/Δt²`, `imp_dyna.F:604-635`, and
+    vanishes with the mass; measured identical tip deflection
+    `-4.4872740000E-01 mm` at RO 0 / 1e-21 / 1e-15 on a HEX8 cantilever), on
+    a modal one (`Δf/f ≈ −½·(33/140)·ρV/M_eff`) and on a transient one (no
+    inertia at all — an EXPLICIT deck gets a second, harder warning, because at
+    this density `c = √(E/ρ)` collapses the time step to ~1e-14 s), and that
+    every mass diagnostic on such a deck reports k2rad's injected 1e-3
+    probe rigid body rather than the structure. `--no-zero-density-floor` /
+    `convert(zero_density_floor=False)` restores the refusal.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts
@@ -356,6 +803,510 @@ Prior history (before this changelog was introduced) is summarized in the
   presented for veto at merge time.**
 
 ### Fixed
+
+- **POST-REVIEW ROUND of the R14 triage batch — one silent wrong answer on
+  four corpus decks, one wrong-way pressure on a fifth, one capability
+  regression, one conversion-aborting crash and two gates that accepted more
+  than the fact they rest on.** An independent verification pass over this
+  batch's own new code, on the pattern that found defects reviewers missed in
+  #120-#134.
+
+  - **A `/MAT/LAW106` SHELL cannot thermally expand at all — it is now
+    RESTATED as `/MAT/LAW36`.** The `*MAT_004` / `*MAT_CWM` route this batch
+    added is correct on solids and silently inert on shells.
+    `cmain3.F:348` runs `THERMEXPC` **after** `MULAWC` at `:320`, and on an
+    ordinary `/PROP/SHELL` (`IGTYP = 1`, so `IORTH_LAY = 0` and `IORTH = 0`)
+    all `THERMEXPC` does is SUBTRACT the thermal stress from the stress the law
+    just produced (`thermexpc.F:269-293`). `sigeps106c.F90:297-298` then
+    rebuilds `signxx`/`signyy` from the TOTAL strain,
+    `aii*(epsxx − eplaxx) + aij*(epsyy − eplayy)`, and never reads `sigoxx` —
+    so the subtraction is discarded on the very next cycle. `/MAT/LAW36` is
+    incremental (`sigeps36c.F:276`, `SIGNXX = SIGOXX + A1*DEPSXX + A2*DEPSYY`)
+    and reads it back. SOLIDS are unaffected: there the expansion goes into the
+    strain increment BEFORE the law dispatch (`mmain.F90`).
+    MEASURED on four coupons differing ONLY in the element family and the law
+    (10 mm edge, `*BOUNDARY_TEMPERATURE_SET` 20 → 120 K, `alpha = 1.2e-5`,
+    `NIP = 3`, closed form `alpha·dT·L = 1.2e-2 mm`, all 0 ERROR and NORMAL
+    TERMINATION): **LAW106 SHELL `0.0000000e+00`**, the LAW36 restatement
+    `1.2000000e-02`, a `*MAT_024` + `*MAT_ADD_THERMAL_EXPANSION` control
+    `1.2000000e-02`, LAW106 SOLID `1.2000000e-02`. The restatement and the
+    control are the SAME RUN to every printed T01 digit — internal energy
+    `6.219282e-02`, external work `2.180456e-04`, last time step
+    `1.437983e-06` in both — while the kept-LAW106 shell reads internal energy
+    `−4.759515e-05`. The restatement fires only when EVERY part on the material
+    is a shell AND the material carries a `/THERM_STRESS/MAT`; it keeps the
+    same `sigma_y(T_ref)` and the same plastic modulus `B` as a two-point yield
+    curve (a flat far-yield one at `1000 × E` for a thermo-elastic card), and
+    the `/THERM_STRESS/MAT` + `/HEAT/MAT` pair is unchanged. The cost —
+    `/MAT/LAW36` has no temperature dependence, so `E`, `nu` and the yield
+    freeze at `T_ref` — is named per card from the table spreads the LAW106
+    report already computes, so a card whose tables are constant says it loses
+    nothing. A material shared between shell and non-shell parts KEEPS LAW106
+    and is warned by name (restating would take `E(T)` from solids that expand
+    correctly); an `/INISHE` carrier keeps it too (the #127 station-count
+    rule). Corpus movers: `tempcyl.vari`, `ex_20_thin_shell_elform_16`,
+    `main_steel_frame`, `05_2_welding_shell_thin` — the first three state a
+    CONSTANT `E` and `nu`, so for them the restatement is exact.
+    Opt-out `--no-law106-shell-restate` / `convert(law106_shell_restate=False)`.
+
+  - **`*LOAD_SEGMENT` pressure acted the WRONG WAY, and had since long before
+    this batch.** `*LOAD_SEGMENT[_SET]` → `/PLOAD` was emitted with
+    `Fscale_y = +SF` while `*LOAD_SHELL_{ELEMENT,SET}` → `/PLOAD`, in the same
+    function, has always been emitted with `−SF`; the docstring justified the
+    asymmetry as *"the deck's own segment orientation carries the direction"*.
+    LS-DYNA's own manual says otherwise: Vol I R17 p.33-107, the caption of
+    Figure 33-12 (the segment-numbering figure the card points at) is
+    ***"Positive pressure acts in the negative t-direction"***, with `t` the
+    right-hand normal of the `N1..N4` order — the SAME sentence the shell path
+    quotes (Vol I R16 p.3421) and inverts for. k2rad pastes the deck's node
+    order into the `/SURF/SEG` verbatim, so `n_hat = t_hat`, and `/PLOAD` with
+    a positive `Fscale_y` pushes along the POSITIVE segment normal
+    (`force.F90:451-465` sums `+P·A·n_hat`). Exactly ONE flip is needed and
+    `*LOAD_SEGMENT` had none.
+    MEASURED on `implicit/Salzburg_2017/3.1_Elastic_Beams_etc` against its own
+    LS-DYNA `nodout` (last displacement block, `t = 1.0`) — one converted deck
+    run twice with ONLY this cell's sign patched between the runs:
+
+    | node | | without the flip | with the flip | LS-DYNA |
+    |---|---|---|---|---|
+    | 1 root | DX | −8.258400E-03 (**−197.96 %**) | 8.405220E-03 (−0.30 %) | 8.430160E-03 |
+    | 21 hex tip | DZ | +1.066000E-01 (**−200.29 %**) | −1.066000E-01 (+0.29 %) | −1.062870E-01 |
+    | 64 tet tip | DZ | +1.065740E-01 (**−200.27 %**) | −1.066400E-01 (+0.33 %) | −1.062850E-01 |
+    | 1247 mid-span | DZ | +7.595400E-02 (**−199.96 %**) | −7.600600E-02 (+0.03 %) | −7.598150E-02 |
+    | 1320 shell tip | DZ | −1.064400E-01 (+0.62 %) | −1.064400E-01 (+0.62 %) | −1.057880E-01 |
+
+    Node 1320 is loaded by `*LOAD_NODE_POINT`, not by a pressure, and is
+    IDENTICAL in both runs — which is what isolates the pressure path rather
+    than blaming the model. This is PRE-EXISTING on master and outside the four
+    classes, but `3.1_Elastic_Beams_etc` is one of the eight class-3 decks this
+    batch claims to fix, so shipping the starter fix while the answer stayed
+    inverted was not an option. **47 corpus decks state a `*LOAD_SEGMENT[_SET]`
+    and every one of them moves**; the new warning names the manual sentence,
+    the engine line and the measurement, so a deck built against the old
+    behaviour can be recognised (drop the minus sign from `SF`).
+
+  - **A `*CONTACT_FORCE_TRANSDUCER` whose SURFA is a `*SET_SEGMENT` had stopped
+    converting.** `_transducer_side_pids` documented and handled only
+    *"2 = part-set ID, 3 = part ID, 5 = all parts"*, and its fall-through read
+    ANY other type as a part id — so `SURFATYP = 0` (a segment set) resolved to
+    a part that does not exist and the whole transducer was skipped, with a
+    warning telling the user the deck *"names no `*PART` this deck defines"* on
+    a deck where type 0 names no part by construction (the #125/#130 class).
+    `intro-by-j.-day/contact/force-transducer/transducer.k` carries BOTH
+    spellings and labels them in its own comments — `$ by part id` (`SSTYP 3`,
+    commented out) and `$ by segment set` (`SURFA = 10, SURFATYP = 0`, live) —
+    and was NOT in the 59-deck census, i.e. it was a working deck. A new
+    `_transducer_surface` builds the `/SURF` from EITHER spelling, using the
+    same `styp in (0, 1) and sid in state.segment_sets` screen every other
+    contact writer in the file already uses; both SURFA and SURFB go through
+    it, so a segment-set SURFB now fills `Main_ID1` and gives `TYPSUB = 3`
+    instead of silently falling back to `TYPSUB = 2`. MEASURED, master
+    `92460b7` vs this branch on that deck: master emits the old three-cell
+    parented form and runs **0 ERROR / 3 WARNING / NORMAL TERMINATION / 969
+    cycles**; the branch emits `/SURF/SEG` + a four-cell parentless
+    `/INTER/SUB` and runs **0 ERROR / 3 WARNING / NORMAL TERMINATION / 969
+    cycles**, with the `/TH/INTER` impulse channel identically zero on both
+    sides (this deck's contact never engages, and its LS-DYNA `rcforc`
+    reference is all-zero too).
+
+  - **`*MAT_CWM`'s `BETA` was dropped from the `/MAT/LAW106` `B` cell**, so the
+    isotropic hardening modulus was written `1/BETA` too stiff — and the guard
+    exempted the maximally lossy value. Vol II R17 p.2-1838 Remark 2 gives
+    `sigma_Y = sigma_Y(T) + BETA·H(T)·eps_p` with a back stress
+    `kappa_dot = (1−BETA)·H(T)·eps_dot_p`, and p.2-1836 calls `BETA` the
+    *"Fraction of isotropic hardening between 0 and 1"* (`EQ.0.0` kinematic,
+    `EQ.1.0` isotropic). `/MAT/LAW106` is purely isotropic, so
+    `B = BETA·H(T_ref)`. The warning's guard was `beta not in (0.0, 1.0)` while
+    its own text said *"only BETA = 1 is lossless here"* — so `BETA = 0`, the
+    case where LS-DYNA has NO isotropic hardening at all, got no warning; it is
+    now `!= 1.0`. Inert on the corpus (all four welding decks state `BETA = 1`).
+
+  - **A derived `Bunreacted` of 0 aborted the whole conversion.** The warning
+    formats `rho0·D²/Bunreacted` with no positivity screen between it and the
+    assignment, so a `*EOS_JWL` stating `A = B = E0 = 0` raised
+    `ZeroDivisionError` out of `writer/assembly`, producing no output and no
+    diagnostic. Every sibling derivation in this batch refuses its degenerate
+    case by name (LAW3 `bulk <= 0`, LAW106 `e_ref <= 0`, and this function's own
+    `jwl is None` arm); this one now does too — the #129 "both ARMS of a
+    back-solve must refuse the same degeneracies" rule.
+
+  - **The `Bunreacted` warning named the WRONG consumer, and the derivation the
+    wrong law.** On all four `underwater_*` carriers the emitted `/MAT/LAW51`
+    is referenced by no `/PART`, so `jwl51.F` — the routine the docstring, the
+    warning, the CLI help and the `convert()` numpydoc all cited — never
+    executes. The live consumer is the material's own `/MAT/LAW5` on a real
+    `/PART`, i.e. `m5law.F`, where `:135-146` makes the cell a **BRANCH
+    SWITCH**: `BULK == 0` gives the FULL JWL product pressure in every cell
+    with no burn-fraction weighting, and a positive `BULK` gives the
+    `(1−F)·(P0 + K·mu) + F·(…)` blend. So the substitution changes the
+    explosive's pressure law everywhere, not just before burn. The derivation
+    is also renamed correctly: it is the slope of the JWL's **principal
+    isentrope**, not *"the deck's own pressure law"* — `jwl51.F:191` and
+    `m5law.F:126-129` both carry the `(1 − omega/(R_i·V))` factors the
+    principal isentrope does not, and differentiating THAT gives **23801.8** on
+    `underwater_C` against the **26748.4** written (11 % lower). Both
+    alternatives are now printed with their numbers beside `rho0·D² = 100189`,
+    and the measured sensitivity (a 37× sweep moving the last time step 0.14 %,
+    the internal energy 1.1 % and the kinetic energy 0.19 %) says the choice is
+    not what decides the run. The value is unchanged, so no corpus deck moves
+    on this. The numerology *"which is also ≈ the deck's own P_CJ"* is gone — a
+    bulk modulus is not a CJ pressure.
+    The `/MAT/LAW51` warning also now carries the MEASURED proof that the card
+    is INERT — deleting the whole block from a converted `underwater_C` left
+    the run at 0 ERROR, NORMAL TERMINATION, the same 172 cycles and a T01 with
+    the SAME SHA256 — beside the class-2 engine numbers this batch's own
+    validation produced: `underwater_C`'s kinetic energy is **54.5×** the
+    LS-DYNA `glstat`'s with an engine energy error reaching 99.9 %, and
+    `stagnation_A`'s engine stops at cycle 18 (`t = 3.9e-5` of `ENDTIM 2e-2`,
+    0.2 % of target) with no termination line at all. The class-2 starter fix
+    is real; the engine result is not the LS-DYNA answer, and the warning says
+    so in those words.
+
+  - **Three surviving copies of the `*MAT_PLASTIC_KINEMATIC → /MAT/LAW2`
+    restatement that `ff7a82d` removed** — the exact defect this batch fixed
+    for the truss one commit earlier. `_resolve_ale_submaterials`' own
+    docstring section (b) described the removed machinery in full
+    implementation detail, `blast_ale.py`'s phase-list comment repeated it, and
+    `_ammg_member_mids`' "one predicate, three readers" invariant counted a
+    reader that no longer exists. All three now state the EOS screen that
+    replaced it, with `ff7a82d`'s own measurement.
+
+  - **The `SOLN=1` stand-in fired on `soln == 1` ALONE** while `writer/assembly`
+    writes `/DT/THERM` — the fact the stand-in's *"THE MODULUS IS INERT"* claim
+    rests on entirely — only when
+    `soln == 1 AND _thermal_solve_active AND not is_implicit AND not is_modal`,
+    with a further `not _ams_is_emitted` arm. On an implicit, modal or `--ams`
+    `SOLN=1` deck the log therefore carried two sentences contradicting each
+    other, with `E = 1` the part's REAL structural stiffness. The three
+    decidable conditions are now screened in the pass and refused by name; the
+    fourth cannot be tested there (it reads the `/HEAT/MAT` the stand-in is what
+    enables), so `writer/assembly` names it instead, at the point where the
+    answer is known. No corpus deck is that shape. The pass also now runs when
+    the thermal keyword gate does NOT fire, so a deck whose only thermal content
+    is an unconverted `*MAT_THERMAL_CWM` gets its `ERROR 179` explained rather
+    than left silent.
+
+  - **A stated initial temperature of exactly `0.0` became 300 K, silently.**
+    `hm_read_therm.F:236-237` is `IF (TINI == ZERO) TINI = THREE100`, and
+    `scoor3.F:328-338` (solids), `cinmas.F:900-905` / `c3inmas.F:1516` (shells)
+    and `pmass.F:233` then overwrite every node still at exactly `0.0` with it.
+    The existing warning describes exactly this case, but its gate accepted only
+    ONE source spelling — a `*INITIAL_TEMPERATURE` with `sid == 0` — so
+    `ex_22_solid_elform_2`, which states `*INITIAL_TEMPERATURE_SET 0.0` over a
+    set covering all 54 of its nodes, got no warning at all. It is now gated on
+    what the deck STATES, whatever spelling. And it is no longer only a warning:
+    `/HEAT/MAT` `T0` is written as **`1e-10` in the deck's own temperature
+    unit**. Both rules above are EXACT zero tests, so any non-zero value fails
+    them — the substitution is a sentinel dodge, not physics, and a tenth of a
+    nanokelvin is below every channel's print precision. A deck that states NO
+    initial temperature keeps `0.0`, because there the 300 K default is
+    Radioss's own documented behaviour and contradicts nothing.
+    MEASURED end to end on `ex_22_solid_elform_2` (32 cycles, NORMAL
+    TERMINATION both ways). With the sentinel the first anim state is
+    `min 0.0 / max 0.0` — the deck's own field — and node 5 ends at
+    **35.15680**; without it the first state is `min 0.0 / max 300.0` and node 5
+    ends at **198.21400**. The LS-DYNA reference is its own `.tprint`,
+    interpolated to the time the driven node 6 fixes (`61.32760` → `t = 31.60 s`,
+    between the printed `31.09200` and `32.00000` rows): **34.83880**. So
+    **+0.91 %** with the sentinel against **+468.9 %** without it, and node 6 is
+    `61.32760` either way. Opt-out `--no-zero-t0-sentinel`.
+
+  - **Nine shipped source citations pointed at the wrong lines**, three of them
+    inside user-facing warning text. Every one re-derived by printing the cited
+    range from the pinned tree: `hm_read_prop02.F` `:110-112 → :92-94` and
+    `:117-124 → :102-108`; `tforc3.F` `:184-186 → :137-141`, `:203-206 →
+    :186-190` and `:189-224 → :149-185`; `hm_read_mat03.F` `:187 → :186` and
+    `:190 → :189`; `hm_read_mat106.F90` `:150 → :151` (twice). The review also
+    asked for `hm_read_therm.F:228 → :229`; line 228 IS
+    `IF (RHO_CP == ZERO .AND. LAG == 0) THEN`, so that citation was left alone.
+    `/GRTRUSS` is spelled `/GRTRUS` in the `/PRELOAD/AXIAL` warning — the
+    keyword the same function emits four lines earlier. Three cfg paths named
+    `Keyword971_R14.1/MAT/`, a directory holding exactly one file; resolved
+    through the overlay they are `Keyword971/MAT/mat_004.cfg`,
+    `Keyword971/MAT/mat_010.cfg` and `Keyword971_R7.1/MAT/mat_270.cfg`.
+
+  - **Five stated premises corrected.** `_mat004_live_points` now names the
+    cfg's competing rule — `mat_004.cfg:176-207`'s `CARD_PREREAD`/`ArrayCount`
+    ladder tests `LOCAL_Tn != ""`, a purely TEXTUAL test, and every corpus
+    carrier pads its unused slots with an explicit `0.0`, so that ladder would
+    return **8** where the increasing-prefix rule returns 3 and hand `/FUNCT`
+    five spurious points at `T = 0`. `_strictly_increasing` no longer claims to
+    mirror `_monotonic_abscissae` (which grew a reversal arm) or to exist
+    because the main emitter lacks the guard (it has it now): it is the
+    TIE-ONLY half, kept because a `*DEFINE_CURVE_SMOOTH` trapezoid is
+    SYNTHESIZED and a crossing there means degenerate vertices, not a stated
+    reversal. `_apply_zero_density_floor` no longer lists `/HEAT/MAT`'s
+    `RHO0_CP` among the consumers that see the floored value — `rho_cp` is
+    computed in an EARLIER pass, and the order is the safe one because flooring
+    first would turn its `rho_cp <= 0` refusal into a silent `1e-24·Cp`.
+    `_zero_density_records` now states what its scan cannot reach: 14 of the
+    `mat_*` registries carry no density attribute under ANY name (the discrete
+    spring/damper families, the three thermal ones, `*MAT_SEATBELT` — which
+    states `MPUL`, a mass per unit LENGTH, and has no `RO` cell in LS-DYNA at
+    all — and the two `*MAT_ADD_*` riders). `*MAT_010`'s missing-EOS refusal now
+    states that this law binds its equation of state BY MATCHING ID ONLY,
+    unlike the `*MAT_015 → /MAT/LAW4` route in the same file.
+
+  - Smaller, each named where it happens: a `*MAT_CWM` whose `LCPR` resolves to
+    nothing wrote `nu = 0` silently (which makes the bulk modulus `E/3` instead
+    of `E/(3(1−2nu))`); a TIE on a curve the DECK typed is now warned, because
+    moving the #113 guard onto the main `/FUNCT` emitter put it in front of
+    every `*DEFINE_CURVE` and there a duplicate abscissa is a STATEMENT (the
+    stepped `(0,0),(1,0),(1,100),(2,100)` shape means "jump at x = 1" and the
+    repair turns it into a ramp) — the synthesized builders pass no `state` and
+    stay silent; and the stand-in id allocator got the #131 two-pass collision
+    probe it was missing, the old test asserting only `mid >= 90001`, which
+    passes with or without the guard.
+
+  **Verification record — SUPERSEDED by the post-review ROUND 2 record below.**
+  Measured at ``369bbac``, AFTER round 1's last code commit ``a3e5103``:
+  `pytest tests/ -q` 4867 passed / 2 skipped / 1931 subtests; `mypy k2rad` 0 in
+  both environments; `ruff check .` clean; the five golden fixtures
+  byte-identical; the 885-deck two-half sweep 0 error rows and 0 timeouts on
+  BOTH sides, 111 `.rad` movers and 112/26/18 half-2 movers, 0 unattributed;
+  18/18 mutations caught with a no-op control correctly missed. Round 2 re-ran
+  every one of these after ITS last code commit — see below.
+
+- **POST-REVIEW ROUND 2 — a dead `--help`, a mechanism that was false at source,
+  a sign convention, five citations, a premise and 52 stale campaign rows.**
+
+  - **`k2rad --help` CRASHED on this branch.** The `--law106-shell-restate` help
+    string added by `a4ecbc5` carries three bare `%` characters, and argparse
+    %-expands EVERY help string in `_expand_help`
+    (`self._get_help_string(action) % params`), so rendering raised
+    `ValueError: unsupported format character ')' (0x29) at index 597` and the
+    CLI died with a traceback. Reproduced from the same interpreter on both
+    sides — master `92460b7` exits 0, `369bbac` exits 1. **No test rendered the
+    help**, so it shipped past 4867 green tests and 20 green CI checks. Escaped
+    as `%%`; two tests now guard it — one renders `format_help()`, one scans
+    every `help=` the parser holds for `(?<!%)%(?![%(])`.
+
+  - **The `Bunreacted` mechanism this batch shipped was FALSE AT SOURCE, and the
+    substitution existed to answer a card that changes nothing.** `a4ecbc5`
+    replaced a substantively correct sentence with *"m5law.F:135-138 … the FULL
+    JWL product pressure in every cell with no burn-fraction weighting … it
+    changes the explosive's pressure law everywhere"*. `m5law.F:72` declares
+    `my_real P(MVSIZ)` under *Local Variables*: it is not in the `M5LAW`
+    argument list (`:28-32`), it is written at `:138`/`:143` and read ONLY at
+    `:159` to build `SSP`, and the routine zeroes the whole stress tensor at
+    `:175-182` before returning — that branch decides the SOUND SPEED and hence
+    the CFL step. `mmain.F90:1225-1261` calls `m5law`, then `mqviscb`, then
+    `mjwl`; and `mjwl.F:166-167` has NO branch on `BULK`:
+    `PNEW = −PSH + (1−F)(P0 + BULK·µ) + (FACM + ESPE·W1DF)/(1 + W1DF·dV/V0)`
+    with `FACM = F·(…)` (`:162`) and `W1DF = F·W1/DF` (`:161`), applied as
+    `SIG(I,1..3) = SIG·OFF − PNEW` (`:181-183`). The JWL product term is ALWAYS
+    burn-fraction weighted and `BULK` is ALWAYS an ADDED `(1−F)·K·µ` pre-burn
+    stiffness. So **`Bunreacted = 0` is the faithful mapping** of LS-DYNA's
+    `p = F·p_eos` on a `BETA = 0` card, and the only thing forcing a positive
+    value was `fill_buffer_51.F:493-497` on the synthesized `/MAT/LAW51` — the
+    card k2rad's own warning already declared referenced by no `/PART`.
+
+  - **The orphan `/MAT/LAW51` is therefore no longer emitted by default**
+    (`--ale-multimat-law51` restores it, and the derivation with it). It is an
+    orphan BY CONSTRUCTION, not by accident on some decks: k2rad writes the
+    LS-DYNA per-fluid ALE layout, so nothing it emits can reference the card.
+    MEASURED on `underwater_C`, four variants each run to completion at
+    `nt = 4`: as shipped → 0 ERROR / 0 WARNING / 172 cycles / NORMAL; **LAW51
+    deleted, value kept → identical to it, max |difference| over all 164 T01
+    channels and all 172 samples exactly `0.000000e+00`**; LAW51 deleted and
+    `Bunreacted = 0` → equally clean and closer to the LS-DYNA `glstat` kinetic
+    energy at all five sampled times (12.08 / 29.93 / 66.39 / 66.46 / 54.13
+    against 12.64 / 30.14 / 66.61 / 66.57 / 54.19); LAW51 KEPT with
+    `Bunreacted = 0` → `ERROR ID : 99`. That last variant is the deck
+    **`--he-bunreacted 0`** — the documented way back to LS-DYNA semantics —
+    used to produce: unstartable. `--ale-multimat-law51` reproduces the pre-fix
+    starter deck BYTE for byte (same SHA256). 6 of the corpus's 10
+    `*ALE_MULTI-MATERIAL_GROUP` decks move; the other 4 already emitted no
+    LAW51.
+
+  - Two claims in the same warning were corrected while there. *"a T01 file with
+    the SAME SHA256"* is FALSE and falsifiable in one command — 119924 bytes /
+    `3e5dfe34…` against 119872 / `aa6a92b6…`, the 52 bytes being entity metadata
+    in the header; the channel-level claim beside it is true and is what ships.
+    And *"the principal isentrope is the JWL's own reference curve for the
+    condensed (unreacted) solid"* is a physics misstatement — the JWL describes
+    the detonation PRODUCTS, and LS-DYNA gives the unreacted solid a separate
+    description entirely (`K`/`G`/`SIGY` here, a whole second unreacted JWL on
+    `*EOS_LEE-TARVER` Card 6, Vol II R17 p.1-63). It is now called what it is: a
+    dimensionally-consistent stand-in, chosen because it is the softest of the
+    three stated-cell candidates.
+
+  - **A parentless `/INTER/SUB` reports MINUS the force on the surface it names
+    when that surface is the contact MAIN side.** `i7for3.F` accumulates
+    `IMPX = +FORC_SIGN·FXI·DT12` on the secondary-side pass (`:1583-1587`) and
+    `−FORC_SIGN·FXI·DT12` on the main-side pass (`:1673-1677`), both under
+    `ITYPSUB == 2`. That is what makes the card report the NET force on its
+    surface, and it also inverts it relative to a parented `/INTER/SUB` and to
+    an LS-DYNA `rcforc` row. The batch's *"identical across all three forms"*
+    held only for the side its probe used. Measured on one deck run three ways:
+    parent `−0.1500881`, parented sub `−0.1500881`, parentless on the secondary
+    side `−0.1500881`, parentless on the MAIN side `+0.1500881` — same seven
+    digits, opposite sign. Named in the docstring and in the shipped warning.
+
+  - **Five source citations were off by one to nine lines**, three of them
+    inside user-facing warnings and two pinned by tests, in the same batch
+    (`825f236`) that claimed to have re-derived nine citations by printing the
+    cited range: `hm_read_mat03.F:191` → `:190/197` (`:190` computes `BULK`,
+    `:197` stores `PM(32)`; `:191` is `E0 = ZERO`),
+    `hm_read_fail_spalling.F90:103` → `:102`, `hm_read_truss.F:157-158` →
+    `:148-151`, `hm_read_intsub.F:472` → `:474`, and `thermexpc.F:283-300` →
+    `:269-293` — the old range covered the FOR and energy blocks rather than the
+    per-INTEGRATION-POINT `SIG` subtraction (`:269-281`) that
+    `sigeps106c.F90` actually discards. The `hm_read_truss` one had been
+    REJECTED as *"that citation does not exist in the shipped code"* after
+    searching `writer/truss.py` alone — it ships in `README.md:297` and
+    `tests/test_r14_triage_1.py:1359`.
+
+  - **The density-floor deflection figure was not reproducible and its scope
+    over-reached.** Re-measured on my own coupon rather than adopting either
+    reported number: a 20×2×2 HEX8 cantilever (L 127, 12.7 square,
+    E 68947.5729, ν 0.3, tip P = 100 N, `/IMPL/QSTAT`, all NORMAL TERMINATION)
+    gives tip DZ `−4.4872740000E-01` identically at RO 0 (floored to 1e-24),
+    1e-21 and 1e-15, and `−4.4872680000E-01` at a physical 7.85e-9. The floor's
+    OWN claim holds; the invariance is a property of the MASSLESS regime the
+    floor creates, not of densities up to a real one, and the warning says so.
+
+  - **`cylinder_impact_A`'s evidence had been quoted for the pair**, and the
+    prescription would have corrupted the database. `_A.glstat` does end at
+    kinetic energy `0.00000E+00` / internal energy `2.00000E-20` — but
+    `_B.glstat` ends at `3.17790E+05` and `1.70429E+08`, against OpenRadioss's
+    0.6584 and 51537.66, a real −100.0 % IE / −83.78 % KE row that `db.json`
+    already records as `deviation`. `ROADMAP.md` now scopes the all-zero
+    reference to `_A` and restates `_B` as an open ALE IE-collapse.
+
+  - **The SOLN=1 `/DT/THERM` refusal prescribed cards a deck may already state.**
+    Both halves of its gate are read from what was EMITTED, and a deck can state
+    a `*MAT_THERMAL_*` and a driver and have them dropped there. The new
+    `_missing_thermal_halves` names which half is missing and points at the
+    warnings that explain the drop, with an `--ams` clause. A non-zero
+    `Bunreacted` also gained its own statement on the LAW5 side, which used to
+    reach the reader only through the LAW51 warning; and the GUI stopped
+    rejecting `he_bunreacted = 0`, whose stated reason can only apply to an
+    emitted `/MAT/LAW51`.
+
+  - **The `ATYPE = 0` closure was reasoned, not measured, and half of it is
+    wrong.** `01_1_insulated_concrete_wall_steady_state` converted with this
+    branch and run AS SHIPPED is 0 ERROR / NORMAL TERMINATION / **1 CYCLE**,
+    because `*CONTROL_TERMINATION`'s `ENDTIM = 1.0 s` is copied into `/RUN`
+    verbatim and one thermal step eats the whole run: every interior node is
+    still at the deck's own 293.15 against a reference 17.42925 / 12.97170 /
+    14.20991, mean |error| 267.4 K over 549 nodes. Recorded as NOT established:
+    a reviewer's report that raising `/RUN` to 1.98e6 s converges to 0.0013 K —
+    patching only that cell gives 43750 cycles and a field still 214.4 K away on
+    average.
+
+  **Verification record — ROUND 2.** Measured on this branch at ``f1dc4ed``,
+  AFTER the last code commit ``b72c2ad`` (everything later adds tests and
+  documentation only), with the main tree untouched at
+  `92460b7`:
+  `pytest tests/ -q` **4876 passed / 2 skipped / 1930 subtests** (baseline at
+  master `92460b7`: 4697 / 2 / 1898; +179 tests, 186 `def test_` added against 7
+  removed, every removal with a named successor in place); `mypy k2rad`
+  **0 issues in 37 source files** and **0** again under `--no-site-packages`,
+  each from a fresh cache; `ruff check .` clean; the five golden fixtures
+  byte-identical (`git diff origin/master..HEAD -- tests/fixtures` empty).
+  Two-half corpus sweep RE-RUN from scratch on both sides, master `92460b7` vs
+  this branch, over the same **885 decks**:
+  **0 error rows and 0 timeouts on BOTH sides, 0 one-sided rows, 885 comparable
+  pairs**; half 1 (SHA256 of every emitted `.rad`) **1770 files per side →
+  111 movers**; half 2 (`state.warnings` + `skipped_keywords` +
+  `recognized_not_emitted`, stated separately) **112 / 26 / 18**; union **112**,
+  byte movers with no warning change **0**. The mover SET is IDENTICAL to round
+  1's — symmetric difference **0** in both directions — so the attribution table
+  still covers every one and UNATTRIBUTED is still 0; what changed is the
+  CONTENT of two rows (the `Bunreacted` six now write 0, and the LAW51 four no
+  longer get the card). Nothing after ``c969186`` reaches a `.rad`: all 356
+  campaign roster decks were re-converted at ``b72c2ad`` and every emitted file
+  is byte-identical to the ``c969186`` conversion. **Campaign:** 52 roster rows
+  described a `.rad` the branch no longer emits — 46 stamped `60609469`, 6
+  stamped `cad09614` — found by converting all 356 roster decks with each of the
+  three trees their records name plus the head and comparing every SHA256. All
+  52 were re-converted and re-run (`OPENRADIOSS_REPORT.md` §0.12): 0.72 h of
+  solver wall, no deck worse in status, `rodsol.k` `deviation` → **`match`**,
+  `benchmark.verdict match` 8 → 9, `verify_runs.py` 0 problems and
+  `xcheck_counts.py` 0 disagreements.
+  **Mutation round over the round-2 code**, in a DETACHED throwaway worktree
+  with backups by file COPY and restore-from-copy, every mutation proven
+  non-no-op by `git diff --numstat` and both `FAILED` and `SUBFAIL` matched:
+  **5 targeted mutations, 5 CAUGHT** (the `--ale-multimat-law51` emission
+  gate, the `Bunreacted` derivation gate, the escaped `%` in the help string,
+  the transducer sign sentence, the missing-thermal-half detector), plus one
+  deliberate control — a word in the density warning that no test asserts —
+  correctly MISSED. The transducer one was UNCAUGHT on the first pass and now
+  has a direct test.
+
+- **A `*CONTACT_FORCE_TRANSDUCER` had to GUESS a parent interface, and every
+  node or segment foreign to that guess was a starter error.** k2rad parented
+  each transducer's `/INTER/SUB` on an existing `/INTER`; `inintsub_7.F:123`
+  raises `ERROR 580` for every secondary node the parent's own secondary array
+  does not hold and `:452` `ERROR 581` for every segment that is not one of its
+  main segments. `hm_read_intsub.F:225-250` has a fourth sub-interface form the
+  converter was not using: when `inter_ID` is ZERO the reader sets
+  `INTSUB_TYP = 100` instead of resolving a parent, and `:448`'s own comment on
+  that branch is *"Interf 0 : adding all contacts"* — `lecint.F:531-550` counts
+  such a sub into `IPARI(36,NI)` for EVERY interface. That IS the LS-DYNA
+  semantics: a transducer measures whatever contact acts on its surface. The
+  `inter_ID = 0` branches (`inintsub_7.F:181/301/484/635`, plus the six-and-six
+  equivalents in `inintsub_11.F` and `inintsub_25.F`) SKIP an unmatched node or
+  segment with no `ANCMSG` at all. MEASURED, starter (nt = 6), master `92460b7`
+  → this branch: `plate.typ13` **8 × ERROR 580 + 2 × ERROR 581 → 0 ERROR**,
+  `pipe.k` **1168 × ERROR 581 → 0 ERROR**, both keeping their 2 pre-existing
+  `WARNING 1084`; ENGINE on both NORMAL TERMINATION at 251 and 6147 cycles, and
+  `pipe.k`'s transducer channel EVOLVES rather than sitting at zero (#122):
+  `FNZ` runs 0 → −534.18 → −1099.7 → −1344.6 → −1377.4 N·s over 500 samples and
+  freezes at `t ≈ 8e-3` when contact ends. IT MEASURES THE SAME NUMBER: on a
+  purpose-built shell-impact probe the accumulated normal impulse is
+  **−0.01453375 at every one of 1000 samples** for the `inter_ID = 0` card, for
+  a legally parented sub-interface and for the parent interface's own channel
+  alike — bit-identical to the seven printed digits, and 93.2 % of the elastic
+  bound `2·m·v₀ = 1.560e-2`. The card is now FOUR cells, the
+  `radioss2021/INTER/inter_sub.cfg` layout a `/BEGIN 2022` starter reads
+  (`inter_ID`, `Main_ID1`, `Second_ID`, `Main_ID2`): `Main_ID2` is a `/SURF`
+  over SURFA's parts and is MANDATORY (`:453-470` has no zero guard, `ERROR
+  576`), giving engine `TYPSUB = 2` (`i7for3.F:1583`) = the total force on that
+  surface with an internal contact cancelling; `Main_ID1` is SURFB's surface
+  when the card states one, giving `TYPSUB = 3` (`:1607`) = only the pairs
+  straddling the two; `Second_ID` is 0 and is not decoded on this branch at all.
+  Gone with the parent: the deformable/rigid side split (on `plate.typ13` it
+  made the main side EVERY part rather than the transducer's own SURFA), the
+  "the starter may reject foreign segments" fallback warning, the dead
+  `<title>_secnd` `/GRNOD`, and the two helpers that existed only for the match.
+  ONE capability changes and is stated rather than hidden: `Main_ID2` is a
+  SURFACE, so a transducer whose SURFA parts have no faces — an SPH cloud above
+  all — is now refused BY NAME, with the node count it does have, instead of
+  getting a node group the reader would never decode.
+
+- **A `*DEFINE_CURVE` whose abscissa REVERSES was emitted verbatim, and the
+  #113 monotonicity guard could not reach it.** k2rad had two copies of that
+  guard — `writer/loads.py::_monotonic_abscissae`, called only from the
+  connector-INLINE `_emit_funct`, and `handlers.py::_strictly_increasing`,
+  called only from `handle_define_curve_smooth`'s builder — while
+  `materials.py::_make_functions`, the emitter every `*DEFINE_CURVE` actually
+  goes through, wrote `curve.pts` verbatim. `hm_read_funct.F:143`
+  (`IF (PLD(NPC(L+1)) <= PLD(NPC(L+1)-2))`, `MSGID = 156`, MSGERROR) then
+  refused the whole deck. MEASURED, starter (nt = 6), master → this branch:
+  `mat_spring.belted-dummy` **1 × ERROR 156 → 0 ERROR**, `/FUNCT/50` rows 25-27
+  going `0.1195 −4910 / 0.1125 −9810 / 0.13 −2450` →
+  `0.1195 −4910 / 0.11950001 −6866 / 0.13 −2450`.
+  The repair is NOT the obvious nudge. LS-DYNA does not reorder such a curve
+  either: Vol I R17 p.17-104 says rediscretization is not used for displacement
+  boundary conditions, p.17-106 makes `DATTYP = 1` the escape for non-monotone
+  data while this card states 0, and the deck's own `.messag` carries
+  `*** Warning 20446 ... load curve 50 x-axis reverses direction at point, 26`
+  before it runs. Its forward-walking segment search then simply never enters
+  the backwards interval — MEASURED in `mat_spring.belted-dummy.nodout`, node
+  1763 x-acceleration: 5.40942E+03, 5.15057E+03, then a JUMP to **6.85894E+03**
+  at `t = 0.119512`, 6.75526E+03, 6.65528E+03, i.e. the segment
+  `(0.1125, −9810) → (0.13, −2450)` as written. So the reversed point is
+  replaced by `(prev + ε, f(prev))` on the segment LEAVING it — the value
+  LS-DYNA jumps TO. Evaluated on the curve each candidate emits, at that same
+  sample where LS-DYNA reads 6858.94: **re-anchor 6860.96 (+0.03 %)**, plain
+  nudge 9801.60 (+42.90 %), re-sort by abscissa 4907.19 (−28.46 %). A TIE is a
+  different defect and is untouched — two points at one abscissa leave the curve
+  unambiguous there, so the ordinate is kept, the abscissa stepped, and nothing
+  is warned; the split is on the CARD value, which is what the starter compares.
+  A reversal with no later point beyond `prev` is DROPPED, because LS-DYNA
+  cannot evaluate past it either.
 
 - **`*SECTION_SHELL`'s EDGSET cell was never parsed, so the 2D-seatbelt
   flow-direction warning could not fire.** `handle_section_shell` reads card 2

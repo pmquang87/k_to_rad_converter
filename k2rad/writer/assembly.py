@@ -8,6 +8,7 @@ from ..state import ConversionState
 from .beams import _resolve_integration_beams
 from .common import HDR, _ams_is_emitted, _f, _i
 from .materials import (
+    _apply_zero_density_floor,
     _make_functions,
     _make_materials,
     _resolve_define_tables,
@@ -25,6 +26,11 @@ from .materials import (
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
     _resolve_mat_shape_memory,
+    _resolve_mat_law106,
+    _resolve_mat_law3,
+    _resolve_he_bunreacted,
+    _resolve_ale_submaterials,
+    _warn_refused_materials,
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
@@ -926,6 +932,49 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # claiming they have no /MAT at all.
     _resolve_mat_shape_memory(state)
 
+    # R14 triage batch: *MAT_004 / *MAT_270 -> /MAT/LAW106. It SYNTHESIZES the
+    # E(T), nu(T) and alpha(T) /FUNCTs and fills state.therm_stress_cards, so
+    # it must precede _make_functions (which emits the curves) and
+    # _resolve_thermal (whose _resolve_heat_materials reads therm_stress_cards
+    # to decide which materials get the mandatory /HEAT/MAT — a
+    # /THERM_STRESS/MAT without one is ERROR 1129). It must also precede
+    # _resolve_thermal's SOLN=1 stand-in pass, whose screen is the EMITTED
+    # /MAT registry: thermal-stress.k's *PART MID names a
+    # *MAT_ELASTIC_PLASTIC_THERMAL that only converts because of this pass,
+    # and screening before it would shadow the real material (#130).
+    _resolve_mat_law106(state)
+
+    # R14 triage batch: *MAT_010 -> /MAT/LAW3 + its same-id /EOS. Synthesizes
+    # no curve and no id, so its placement does not move the /FUNCT numbering;
+    # what it needs is state.eos_cards (filled at parse time) and the FINAL
+    # element lists, because LAW3 declares SOLID_ISOTROPIC and SPH only
+    # (hm_read_mat03.F:224-225) and the compatibility reports classify parts.
+    # Before _resolve_xref_parts below: LAW3 is NOT on the starter's
+    # solid-/XREF law whitelist, so its _target_mat_law entry is what makes
+    # that gate warn-skip such a part NAMING the law instead of claiming it
+    # has no /MAT at all.
+    _resolve_mat_law3(state)
+
+    # R14 triage batch: the /MAT/LAW5 Bunreacted cell. Needs the flattened
+    # part sets (for the *ALE_MULTI-MATERIAL_GROUP membership test) and must
+    # precede _make_materials, whose _emit_mat_law5 writes the cell. Emits
+    # nothing and draws no id.
+    _resolve_he_bunreacted(state)
+
+    # R14 triage batch: the /MAT/LAW51 phase list. It reads the EMITTED law of
+    # every member (_target_mat_law) and whether that material carries an
+    # /EOS, so it must run after every _resolve_mat_* pass above and before
+    # _make_materials, whose _make_ale_multimaterial writes the list this
+    # decides. It synthesizes no card and draws no id.
+    _resolve_ale_submaterials(state)
+
+    # Materials REFUSED BY NAME (*MAT_102, *MAT_090, *MAT_031, *MAT_VACUUM,
+    # *MAT_GAS_MIXTURE). The handler could only record the law and the reason
+    # — it runs while the deck is still being parsed — so this pass, with the
+    # mesh complete, adds the /PART ids and the element counts the refusal
+    # costs. Emits nothing, so its placement is free.
+    _warn_refused_materials(state)
+
     # Thermal expansion + the temperature drivers. MUST run BEFORE
     # _make_functions (it registers the synthesized coefficient and driver
     # curves in state.curves) and before _make_materials (it can SPLIT a
@@ -948,6 +997,19 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # and the shell arm has no law gate, so the entry changes no /XREF decision
     # — it only stops that gate claiming "no /MAT at all".
     _resolve_mat_fabric(state)
+
+    # RO <= 0 -> rho = 1e-24 (starter ERROR 683). LAST of the material passes,
+    # deliberately: it screens on mesh._target_mat_law, so every routing
+    # decision above (LAW2-vs-LAW4, LAW19-vs-LAW58, the LAW51 phase list, the
+    # /MAT/VOID exemption) must already be final, and _resolve_thermal above
+    # can CLONE a material — a clone made before this pass inherits the zero
+    # and is floored with its original, one made after would not be. It
+    # mutates the RECORD rather than the emitted cell, which is the faithful
+    # model of what LS-DYNA does: its own d3hsp reports the substituted
+    # density in the part MASS, so the element time step, /HEAT/MAT's RHO0_CP
+    # and the modal chain's lumped masses all see the same number. Allocates
+    # no id, so it cannot shift an existing deck's id stream.
+    _apply_zero_density_floor(state)
 
     # *AIRBAG_* → /MONVOL. Resolves each bag's external surface to SHELL
     # ELEMENTS (a /SURF/SEG external surface is starter ERROR 18 and aborts the
@@ -1993,8 +2055,16 @@ def _warn_dangling_part_materials(state: ConversionState,
     # 827-deck corpus: 280 decks carry this defect, and in almost all of them
     # the cause is one unconverted *MAT_ keyword sitting in the skip list —
     # so quoting it turns a "look above" into an answer.
+    # A REFUSED material is uncoverted too, and it is the one this scan can
+    # name best — but it is deliberately NOT in skipped_keywords (it has a
+    # handler). Reading only that list would answer "no *MAT_ keyword is in
+    # the skipped list ... look above" on exactly the decks whose culprit is
+    # already known by name (#130: the premise of a true conclusion still has
+    # to be true).
     skipped_mats = sorted({k for k in state.skipped_keywords
-                           if k.startswith("MAT_")})
+                           if k.startswith("MAT_")}
+                          | {kw for kw, _what, _why
+                             in state.refused_materials.values()})
     culprit = (" The deck's UNCONVERTED material keyword(s): "
                + ", ".join("*" + k for k in skipped_mats[:6])
                + ("." if len(skipped_mats) <= 6 else
@@ -2194,9 +2264,10 @@ def _starter_section_registry():
         ("cross_sections",    lambda c: _make_cross_sections(c.state)),
         # Bolt pre-tension. AFTER cross_sections, which fills state.sect_ids
         # (the dedicated preload /SECT must dodge those ids) and after every
-        # /BEAM and /SPRING producer above, whose write lines fill
-        # state.beam_elem_ids / spring_elem_ids (the *SET_BEAM of
-        # *INITIAL_AXIAL_FORCE_BEAM is split by what was ACTUALLY emitted).
+        # /BEAM, /SPRING and /TRUSS producer above, whose write lines fill
+        # state.beam_elem_ids / spring_elem_ids / truss_elem_ids (the *SET_BEAM
+        # of *INITIAL_AXIAL_FORCE_BEAM is split by what was ACTUALLY emitted —
+        # a /GRTRUS group is a third family the reader scans).
         # BEFORE free_node_constraints, so the three synthesized /SECT frame
         # nodes are in state.nodes when the implicit singularity guard runs —
         # they carry no element and no stiffness, so a /BCS 111 111 on them is
@@ -2207,7 +2278,8 @@ def _starter_section_registry():
         ("preload",           lambda c: _make_preload(c.state)),
         # *DEFINE_ELEMENT_DEATH_* -> /ACTIV. AFTER parts_elements far above,
         # which fills state.shell_elem_ids / sh3n_elem_ids / solid_elem_ids /
-        # beam_elem_ids and the three BEAM->/SPRING re-route registries at the
+        # beam_elem_ids / truss_elem_ids and the three BEAM->/SPRING re-route
+        # registries at the
         # line that writes each element row — the same "registry filled at the
         # write line, consumed by a later section" ordering the /CLUSTER +
         # swforc pair relies on. A no-op drawing no id on any deck without the
@@ -2657,6 +2729,39 @@ def _warn_dt_therm_surface_rate(state: ConversionState, dt_th: float) -> None:
         "stores 2527.7000. No node should pass the environment temperature.")
 
 
+def _missing_thermal_halves(state: ConversionState) -> str:
+    """Name the half of ``_thermal_solve_active`` that is actually missing.
+
+    The sentence this feeds used to prescribe ``*MAT_THERMAL_* + *PART TMID and
+    a driver`` unconditionally — on a deck that may STATE both and simply not
+    get them emitted (``*MAT_THERMAL_CWM`` has no Radioss counterpart, and a
+    driver whose ``*SET_NODE_*`` k2rad cannot read is dropped at emission). That
+    is the #125 class: a true conclusion prescribing a fix on a correct deck.
+    Both flags are read from what was WRITTEN, the same source
+    :func:`~k2rad.writer.thermal._thermal_solve_active` reads.
+    """
+    heat = bool(state.heat_mat_cards)
+    drive = bool(state.thermal_driver_emitted or state.thermal_source_emitted)
+    if not heat and not drive:
+        return ("NEITHER — no /HEAT/MAT and no temperature-moving card reached "
+                "the output. If the deck states a *MAT_THERMAL_* and a driver, "
+                "they were DROPPED at emission (a *MAT_THERMAL_CWM has no "
+                "Radioss counterpart at all, and a driver whose *SET_NODE_* "
+                "this converter cannot read is dropped with the set); the "
+                "warnings above name each one")
+    if not heat:
+        return ("a temperature-moving card WAS written, but no /HEAT/MAT — no "
+                "*PART reached the output naming a converted *MAT_THERMAL_* "
+                "through TMID, so hm_read_therm.F:253 never arms ITHERM and "
+                "every thermal call in resol.F stays gated off")
+    return ("a /HEAT/MAT WAS written, but no temperature-moving card reached "
+            "the output — an /INITEMP is a STATE, not a driver, so DTEMP stays "
+            "identically zero on every cycle. Add an /IMPTEMP-producing "
+            "*BOUNDARY_TEMPERATURE_* or a *BOUNDARY_CONVECTION / _RADIATION / "
+            "_FLUX heat source (and check the warnings above for one that was "
+            "dropped with its node set)")
+
+
 def _make_engine_thermal(state: ConversionState) -> List[str]:
     """The two ENGINE thermal keywords: ``/DT/THERM`` and ``/THERM``.
 
@@ -2733,10 +2838,25 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
                "this deck arms no thermal solve: /DT/THERM without a "
                "/HEAT/MAT and a temperature-moving card would freeze the whole "
                "model and integrate nothing (GLOB_THERM%ITHERM_FE gates every "
-               "thermal call in resol.F). Add *MAT_THERMAL_* + *PART TMID and "
-               "a driver or heat-source boundary")
+               "thermal call in resol.F). WHICH HALF IS MISSING, from what was "
+               "EMITTED rather than what was stated: "
+               + _missing_thermal_halves(state)
+               + (" (and --ams is in force, which would refuse /DT/THERM "
+                  "anyway — freform.F:1327-1330 hard-stops the pair)"
+                  if _ams_is_emitted(state) else ""))
             + ". The mechanical model is converted as usual and its degrees of "
-            "freedom stay live.")
+            "freedom stay live."
+            + (" AND THAT MATTERS FOR THE STAND-IN MATERIALS: "
+               f"{len(state.thermal_standin_mats)} /PART(s) "
+               f"{sorted(state.thermal_standin_mats)} were given a synthesized "
+               "/MAT/ELAST whose E = 1 is justified ONLY by /DT/THERM freezing "
+               "every DOF. Without /DT/THERM that E = 1 is the part's REAL "
+               "structural stiffness, roughly five orders of magnitude below "
+               "any metal, so the mechanical answer on those parts is "
+               "meaningless. Give them a real structural *MAT_*, or state a "
+               "*MAT_THERMAL_* + a temperature driver so the thermal-only run "
+               "mode is written."
+               if state.thermal_standin_mats else ""))
     elif want_dt_therm and _ams_is_emitted(state):
         want_dt_therm = False
         state.warn(

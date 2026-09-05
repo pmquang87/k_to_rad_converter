@@ -159,7 +159,9 @@ def _split_death_eids(state: ConversionState, rec, eids: List[int]):
       shell as a ``/BRICK``, so its id lives in ``solid_elem_ids`` and
       ``/GRBRIC/BRIC`` resolves it (``lecggroup.F:83`` resolves ``/GRBRIC``
       against NUMELS, i.e. every solid family including ``/TETRA4/10``).
-    * ``BEAM`` splits beam-vs-re-routed-spring on the THREE PRODUCER-SPECIFIC
+    * ``BEAM`` splits three ways — ``/BEAM``, ``/TRUSS`` (a ``*SECTION_BEAM``
+      ELFORM=3 part) and the re-routed ``/SPRING`` connectors — on the
+      PRODUCER-SPECIFIC
       registries, never on ``state.spring_elem_ids``: that union also holds
       ``*ELEMENT_DISCRETE``, ``*ELEMENT_PLOTEL``, belt and joint spring ids,
       which live in their own LS-DYNA id namespaces — an ``*ELEMENT_BEAM 50``
@@ -183,6 +185,14 @@ def _split_death_eids(state: ConversionState, rec, eids: List[int]):
         else:                                            # BEAM
             if eid in state.beam_elem_ids:
                 slot = "grbeam"
+            elif eid in state.truss_elem_ids:
+                # /ACTIV has its own GR_TRUSS_SET slot:
+                # hm_read_activ.F:96 HM_GET_INTV('GR_TRUSS_SET',IGTR,...),
+                # resolved at :209-210. A *SECTION_BEAM ELFORM=3 element is a
+                # /TRUSS, so it belongs there and NOT in grbeam (a truss id in
+                # a /GRBEAM group resolves to nothing and the element is never
+                # deactivated).
+                slot = "grtrus"
             elif eid in rerouted:
                 slot = "grspr"
             else:
@@ -198,6 +208,7 @@ def _split_death_eids(state: ConversionState, rec, eids: List[int]):
 _DEATH_GROUP_KEYWORD = {
     "grbric": ("GRBRIC/BRIC", "bricks"),
     "grbeam": ("GRBEAM/BEAM", "beams"),
+    "grtrus": ("GRTRUS/TRUS", "trusses"),
     "grspr": ("GRSPRI/SPRI", "springs"),
 }
 

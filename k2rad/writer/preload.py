@@ -733,11 +733,19 @@ def _make_preload_axial(state: ConversionState,
 
         beam_eids: List[int] = []
         spring_eids: List[int] = []
+        truss_eids: List[int] = []
         unusable: List[int] = []
         not_emitted: List[int] = []
         for eid in entry[1]:
             if eid in state.beam_elem_ids:
                 beam_eids.append(eid)
+            elif eid in state.truss_elem_ids:
+                # /PRELOAD/AXIAL takes a TRUSS group too: the reader's scan is
+                # /GRSPRI, then /GRBEAM, then /GRTRUS
+                # (hm_read_preload_axial.F90:284-291, which sets itype = 4 on
+                # the truss branch). A truss id in a /GRBEAM group resolves to
+                # nothing.
+                truss_eids.append(eid)
             elif eid in state.spring_elem_ids:
                 (spring_eids if eid in state.spring_axial_preloadable
                  else unusable).append(eid)
@@ -761,7 +769,7 @@ def _make_preload_axial(state: ConversionState,
                 "ERROR 3053 'SPRING PROPERTY TYPE %d IS NOT COMPATIBLE WITH "
                 "/PRELOAD/AXIAL'). Both are hard stops, so emitting the card "
                 "anyway would refuse the deck instead of losing one bolt.")
-        if not beam_eids and not spring_eids:
+        if not beam_eids and not spring_eids and not truss_eids:
             state.warn(f"{label}: no preloadable 1D element left in *SET_BEAM "
                        f"{rec.bsid} — no /PRELOAD/AXIAL emitted.")
             continue
@@ -781,6 +789,8 @@ def _make_preload_axial(state: ConversionState,
             families.append(("GRSPRI/SPRI", "SPRING", spring_eids))
         if beam_eids:
             families.append(("GRBEAM/BEAM", "BEAM", beam_eids))
+        if truss_eids:
+            families.append(("GRTRUS/TRUS", "TRUSS", truss_eids))
         for keyword, fam, eids in families:
             grp = state.next_elem_group_id()
             pre_id = state.next_id()
@@ -801,16 +811,20 @@ def _make_preload_axial(state: ConversionState,
             ]
             emitted = True
 
-        if beam_eids and spring_eids:
+        present = [(n, k) for n, k in
+                   ((len(beam_eids), "/BEAM"), (len(spring_eids), "/SPRING"),
+                    (len(truss_eids), "/TRUSS")) if n]
+        if len(present) > 1:
             state.warn(
-                f"{label}: *SET_BEAM {rec.bsid} straddles two Radioss element "
-                f"families — {len(beam_eids)} /BEAM and {len(spring_eids)} "
-                "/SPRING — so it was split into TWO /PRELOAD/AXIAL cards on "
-                "two groups. One set_id resolves to exactly ONE family: "
-                "hm_read_preload_axial.F90:262-292 scans /GRSPRI, then "
-                "/GRBEAM, then /GRTRUSS and takes the FIRST non-empty match, "
-                "so a single card would have preloaded the springs and "
-                "silently dropped the beams.")
+                f"{label}: *SET_BEAM {rec.bsid} straddles "
+                f"{len(present)} Radioss element families — "
+                + " and ".join(f"{n} {k}" for n, k in present)
+                + f" — so it was split into {len(present)} /PRELOAD/AXIAL "
+                "cards on that many groups. One set_id resolves to exactly "
+                "ONE family: hm_read_preload_axial.F90:262-292 scans /GRSPRI, "
+                "then /GRBEAM, then /GRTRUS and takes the FIRST non-empty "
+                "match, so a single card would have preloaded whichever comes "
+                "first in that order and silently dropped the rest.")
         state.warn(
             f"{label}: /PRELOAD/AXIAL exists only as FORMAT(radioss2024) and "
             "this deck is written at /BEGIN 2022, so the starter reports "

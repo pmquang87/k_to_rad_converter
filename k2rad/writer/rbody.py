@@ -7,7 +7,8 @@ from typing import Dict, List, Set, Tuple
 from ..state import (
     CnrbSpcBc, ConversionState, NodeData, PartData, RigidInertia,
 )
-from .common import HDR, _emit_grnod_node, _f, _i, _vcross, _vnorm
+from .common import (HDR, _emit_grnod_node, _f, _i, _truss_pids, _vcross,
+                     _vnorm)
 from .mesh import _emit_skew_fix
 
 __all__ = [
@@ -86,8 +87,16 @@ def _inertia_element_nodes(state: ConversionState) -> Set[int]:
     # part it is one of the nodes the fabricated CoG/inertia has to cover.
     for c in state.sph_elems:
         elem_nodes.update(c.nodes)
+    # A TRUSS contributes ONLY (n1, n2): /TRUSS has no third-node column, so a
+    # deck-stated N3 on an ELFORM=3 *ELEMENT_BEAM is a node the element does
+    # not touch at all. Safe-direction today (an extra node in an "attached"
+    # set), wrong in principle — see writer/truss.py.
+    truss_pids = _truss_pids(state)
     for e in state.beam_elems:
-        elem_nodes.update((e.n1, e.n2, e.n3))
+        if e.pid in truss_pids:
+            elem_nodes.update((e.n1, e.n2))
+        else:
+            elem_nodes.update((e.n1, e.n2, e.n3))
     # A 1D SEATBELT node carries the belt's lumped mass — rinit3.F:464,474
     # ``mass = Area * max(L0,LMIN) * rho``, split over the two spring nodes —
     # so it is "attached to an element" in exactly the sense this test asks
@@ -860,8 +869,16 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         elem_nodes.update(e.nodes)
     for c in state.sph_elems:                 # SPH: the particle IS its node
         elem_nodes.update(c.nodes)
+    # A TRUSS contributes ONLY (n1, n2): /TRUSS has no third-node column, so a
+    # deck-stated N3 on an ELFORM=3 *ELEMENT_BEAM is a node the element does
+    # not touch at all. Safe-direction today (an extra node in an "attached"
+    # set), wrong in principle — see writer/truss.py.
+    truss_pids = _truss_pids(state)
     for e in state.beam_elems:
-        elem_nodes.update((e.n1, e.n2, e.n3))
+        if e.pid in truss_pids:
+            elem_nodes.update((e.n1, e.n2))
+        else:
+            elem_nodes.update((e.n1, e.n2, e.n3))
     # A 1D SEATBELT node cannot serve as the master either. A 2-node /SPRING
     # does not INVERT the way a shell does, but the ICoG move relocates the
     # node, and the belt's whole response is geometric: L0 is taken from the

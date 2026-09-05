@@ -39,8 +39,6 @@ __all__ = [
     "_note_dropped_interfaces",
     "_make_interfaces",
     "_select_parent_interface",
-    "_contact_slave_pids",
-    "_match_parent_interface",
     "_transducer_side_pids",
     "_part_node_ids",
     "_make_force_transducers",
@@ -135,6 +133,15 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         # face to build a /SURF from.
         for c in state.sph_elems:
             if c.pid == pid: nids.update(c.nodes)
+        # BEAM and TRUSS parts are deliberately NOT walked here, and the R14
+        # truss batch left that unchanged rather than "fixing" it in passing. A
+        # /TRUSS (or /BEAM) node is a perfectly good contact SECONDARY node in
+        # Radioss, so this is a real asymmetry with _part_node_ids below, which
+        # DOES walk state.beam_elems for the transducer's node inventory — but
+        # adding a 1-D family here would change the secondary side of every
+        # part-scoped contact on hundreds of corpus decks, which is its own
+        # item with its own sweep, not a truss item. Recorded, not silently
+        # closed on one side.
 
     if styp == 4:
         if sid in state.node_sets:
@@ -796,21 +803,25 @@ def _report_unconsumed_gapmin(state: ConversionState,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _select_parent_interface(state: ConversionState) -> Optional[int]:
-    """Pick a fallback parent /INTER for a /INTER/SUB sub-interface.
+    """Pick ONE representative /INTER for the /TH/INTER companion channel.
 
-    A LS-DYNA force transducer is standalone, but /INTER/SUB must reference an
-    existing parent interface. Prefer an all-parts single-surface contact (it
-    covers any surface pair); otherwise fall back to the first contact defined.
-    Used only when _match_parent_interface finds no surface-compatible parent.
+    Its ONLY caller is now ``writer/output.py::_make_starter_th_inter``, which
+    lists this id beside the force-transducer sub ids so a transducer deck also
+    gets an interface TOTAL contact force on the T01. Prefer an all-parts
+    single-surface contact (it covers any surface pair); otherwise the first
+    contact defined.
+
+    It used to pick a PARENT for ``/INTER/SUB`` as well. It no longer does:
+    ``_make_force_transducers`` writes ``inter_ID = 0`` (parentless), so there
+    is no parent to guess and no ERROR 580/581 to risk.
 
     Every candidate is filtered through ``state.dropped_inter_ids``: a contact
     whose side resolved to nothing is registered there and NO /INTER was
-    written for it, so parenting on it is a dangling reference — starter
-    ERROR 581 from /INTER/SUB, or WARNING 257 "NONEXISTENT INTER" from the
-    /TH/INTER block that also calls this. All FIVE contact writers — interfaces,
-    general_interfaces, type25_interfaces, tied_interfaces, spotweld_interfaces
-    (writer/assembly.py registry positions 19-23) — run before both call sites
-    (force_transducers 24, starter_th_inter 60), so the set is complete here.
+    written for it, so naming it is a dangling reference — WARNING 257
+    "NONEXISTENT INTER" from the /TH/INTER block. All FIVE contact writers —
+    interfaces, general_interfaces, type25_interfaces, tied_interfaces,
+    spotweld_interfaces (writer/assembly.py registry positions 19-23) — run
+    before the call site (starter_th_inter 60), so the set is complete here.
     """
     def live(c) -> bool:
         return c.inter_id not in state.dropped_inter_ids
@@ -841,87 +852,86 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
     return None
 
 
-def _contact_slave_pids(state: ConversionState, sid: int, styp: int) -> Optional[Set[int]]:
-    """Part IDs whose nodes form a contact secondary side, or None when the side
-    is not part-resolvable (an explicit node set): None = cannot verify, treat
-    as matching anything."""
-    if styp == 4:
-        return None
-    if styp == 3:
-        return {sid} if sid in state.parts else set()
-    if styp == 2:
-        ps = state.part_sets.get(sid)
-        return set(ps[1]) if ps else set()
-    if styp in (0, 1):
-        if sid in state.parts:
-            return {sid}
-        if sid in state.part_sets:
-            return set(state.part_sets[sid][1])
-        if sid in state.node_sets:
-            return None
-    return set()
-
-
-def _match_parent_interface(state: ConversionState, main_pids: Set[int],
-                            sec_pids: Set[int]) -> Optional[int]:
-    """First /INTER whose MAIN surface covers *main_pids* and whose secondary
-    node group covers *sec_pids*.
-
-    /INTER/SUB segments and nodes must be subsets of the parent interface's
-    main surface / secondary group, or the starter dies with one ERROR 581 per
-    foreign segment ("IS NOT A MAIN SEGMENT OF INTERFACE ID=n"). With several
-    split per-pair contacts (e.g. bracket-self, bracket-pin, bracket-cyl) the
-    old "first contact defined" fallback parented every transducer on whichever
-    contact came first — only a transducer measuring that exact pair survived
-    the starter. Matching by part coverage picks the right pair regardless of
-    definition order, and supports several transducers with different parents.
-    """
-    candidates: List[Tuple[int, Set[int], Optional[Set[int]]]] = []
-    all_pids = set(state.parts.keys())
-    for c in state.contacts_single:
-        if c.ssid == 0:
-            candidates.append((c.inter_id, all_pids, None))
-        else:
-            candidates.append((c.inter_id,
-                               _contact_master_pids(state, c.ssid, c.sstyp),
-                               _contact_slave_pids(state, c.ssid, c.sstyp)))
-    for c in state.contacts_surf2surf:
-        candidates.append((c.inter_id,
-                           _contact_master_pids(state, c.msid, c.mstyp),
-                           _contact_slave_pids(state, c.ssid, c.sstyp)))
-    for c in state.contacts_type25:
-        if c.variant == "NODES_TO_SURFACE":
-            continue        # ILEV=3 has no secondary segments (see _select_parent_interface)
-        main_sid, main_styp = ((c.ssid, c.sstyp) if c.variant == "SINGLE_SURFACE"
-                               else (c.msid, c.mstyp))
-        candidates.append((c.inter_id,
-                           _contact_master_pids(state, main_sid, main_styp),
-                           _contact_slave_pids(state, c.ssid, c.sstyp)))
-
-    # An interface the writers refused to emit is not in the deck, so it cannot
-    # parent anything — see _select_parent_interface.
-    for inter_id, mast, slav in candidates:
-        if inter_id in state.dropped_inter_ids:
-            continue
-        if main_pids and not (main_pids <= mast):
-            continue
-        if sec_pids and slav is not None and not (sec_pids <= slav):
-            continue
-        return inter_id
-    return None
+# ``_contact_slave_pids`` and ``_match_parent_interface`` lived here and are
+# GONE with the parented force transducer. They existed to pick the one /INTER
+# whose main surface and secondary group covered a transducer's segments and
+# nodes, because a parented /INTER/SUB answers ERROR 580/581 for anything
+# foreign to them. A parentless (``inter_ID = 0``) sub-interface has no parent
+# to cover it — ``inintsub_7.F``'s ``NOM_OPT(2,...) == 0`` branches skip an
+# unmatched node or segment in silence — so there is nothing left to match and
+# the two helpers had no caller. ``_select_parent_interface`` STAYS: the
+# /TH/INTER block still calls it (writer/output.py) to put one interface's total
+# contact force on the T01 beside the transducer channels.
 
 
 def _transducer_side_pids(state: ConversionState, sid: int, styp: int) -> List[int]:
     """Resolve a transducer SURFA/SURFB to part IDs.
 
-    LS-DYNA surf type: 2 = part-set ID, 3 = part ID, 5 = all parts.
+    LS-DYNA surf type: **0 = segment-set ID, 1 = shell-element-set ID**,
+    2 = part-set ID, 3 = part ID, 5 = all parts.
+
+    Types 0 and 1 name no ``*PART`` at all and are handled one level up, by
+    :func:`_transducer_surface`, which builds a ``/SURF/SEG`` from the
+    ``*SET_SEGMENT`` directly — the same ``styp in (0, 1) and sid in
+    state.segment_sets`` test every other contact writer in this file already
+    uses (``_general_line_group``, ``_contact_master_segments``,
+    ``_resolve_contact_slave``). This function is reached for such a side only
+    when the segment set is MISSING, and it then returns nothing rather than
+    reading the set id as a part id.
     """
     if styp == 5 or sid == 0:
         return sorted(state.parts.keys())
+    if styp in (0, 1):
+        return []
     if styp == 2:
         ps = state.part_sets.get(sid)
         return list(ps[1]) if ps else []
     return [sid] if sid in state.parts else []
+
+
+def _transducer_surface(state: ConversionState, sid: int, styp: int,
+                        title: str, out_lines: List[str]) -> Tuple[int, str]:
+    """Build the ``/SURF`` one transducer side needs, from EITHER spelling.
+
+    Returns ``(surf_id, "")`` on success, or ``(0, reason)`` naming what could
+    not be built. A parentless ``/INTER/SUB`` takes a SURFACE in ``Main_ID1``
+    and ``Main_ID2`` and nothing else (``hm_read_intsub.F:453-470`` has no zero
+    guard on ``Main_ID2`` and ``Second_ID`` is not decoded on that branch), so
+    both spellings have to arrive as one.
+
+    **Why the segment-set arm exists.** ``SURFATYP = 0`` is a ``*SET_SEGMENT``
+    id — it names no ``*PART`` — and reading it as one is how
+    ``intro-by-j.-day/contact/force-transducer/transducer.k`` lost its
+    transducer: that deck carries both spellings, with the ``$ by part id``
+    form (``SSTYP 3``) commented out and the ``$ by segment set`` form
+    (``SURFA = 10, SURFATYP = 0``, ``*SET_SEGMENT 10``) live. ``/SURF/SEG`` is
+    the exact target and ``writer/common._emit_surf_seg`` already writes it for
+    the blast / EBCS / FSI paths.
+    """
+    if styp in (0, 1):
+        ss = state.segment_sets.get(sid)
+        if ss is None or not ss.segments:
+            return 0, (f"SURFATYP {styp} makes {sid} a "
+                       + ("*SET_SEGMENT" if styp == 0 else
+                          "*SET_SHELL element set")
+                       + " id, and this deck defines no such set with any "
+                         "segment in it")
+        surf_id = state.next_id()
+        out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
+        return surf_id, ""
+    pids = [p for p in _transducer_side_pids(state, sid, styp)
+            if p in state.parts]
+    if not pids:
+        return 0, f"({sid}, type {styp}) names no *PART this deck defines"
+    surf_id = state.next_id()
+    if not _make_master_surface(state, surf_id, title, sorted(set(pids)),
+                                out_lines):
+        n_nodes = len(_part_node_ids(state, sorted(set(pids)), set()))
+        return 0, (f"no /SURF can be built from its part(s) "
+                   f"{sorted(set(pids))} ({n_nodes} node(s), but no shell or "
+                   "solid FACE among them) — an SPH part, a beam/truss part "
+                   "or a part whose elements were all dropped has no route")
+    return surf_id, ""
 
 
 def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -> List[int]:
@@ -950,96 +960,186 @@ def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -
 
 
 def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
-    """Emit a /INTER/SUB sub-interface for every *CONTACT_FORCE_TRANSDUCER.
+    """Emit a PARENTLESS ``/INTER/SUB`` for every ``*CONTACT_FORCE_TRANSDUCER``.
 
     A force transducer is a measurement-only "contact": it reports the contact
-    force already acting between two surfaces (from the model's real contacts)
-    and adds NO stiffness of its own. The OpenRadioss equivalent is /INTER/SUB,
-    a sub-interface of an existing parent /INTER that outputs the force applied
-    by a secondary node group on a main surface.
+    force already acting on a surface, from the model's real contacts, and adds
+    NO stiffness of its own. ``/INTER/SUB`` with ``inter_ID = 0`` is exactly
+    that, and it is what k2rad now writes — ``hm_read_intsub.F:225-250``::
 
-    The (sub_id, title) pairs are recorded on state.th_sub_ids so a /TH/INTER
-    block can be emitted to actually write the force to the time-history file.
+        IF(IDINT /= 0) THEN        ! ... resolve the parent, ERROR 578 if absent
+        ELSE
+           INTSUB_TYP(I) = 100
+        ENDIF
+
+    and at :448 the branch's own comment is ``Interf 0 : adding all contacts``.
+    ``lecint.F:531-550`` counts such a sub into ``IPARI(36,NI)`` for EVERY
+    interface, so it attaches to all of them at once — which is the LS-DYNA
+    semantics: a transducer measures whatever contact happens to act there, not
+    the contact of one named interface.
+
+    WHY THE PARENTED FORM HAD TO GO. It could not express the card and it
+    failed the starter on the corpus. ``inintsub_7.F:123`` raises **ERROR 580**
+    for every secondary node the parent's own secondary array does not hold and
+    :452 **ERROR 581** for every segment that is not one of the parent's main
+    segments — measured: ``plate.typ13`` 4 x 580 + 581, ``pipe.k`` many x 581.
+    The ``inter_ID = 0`` branches (``inintsub_7.F:181/301/484/635``, and the
+    same six-plus-six sites in ``inintsub_11.F`` / ``inintsub_25.F``) simply
+    SKIP a node or segment they do not find, with no ``ANCMSG`` at all. Both
+    decks then start clean and run to NORMAL TERMINATION.
+
+    IT MEASURES THE SAME NUMBER. On a purpose-built probe (10x10 mm shell
+    impactor, m = 1.56e-6 t, v0 = -5000 mm/s onto a fixed plate) the
+    accumulated normal impulse came out **-0.01453375 at every one of the 1000
+    samples** for all three forms — this ``inter_ID = 0`` card, a legally
+    parented sub-interface, and the parent interface's own channel — i.e.
+    bit-identical to the seven printed digits, and 93.2 % of the elastic bound
+    ``2 m v0`` = 1.560e-2. That probe named the SECONDARY-side surface.
+
+    **THE SIGN DEPENDS ON WHICH SIDE THE NAMED SURFACE IS.** ``i7for3.F``
+    accumulates ``IMPX = +FORC_SIGN*FXI(I)*DT12`` on the secondary-side pass
+    (``:1583-1587``, ``ITYPSUB == 2``) and ``IMPX = -FORC_SIGN*FXI(I)*DT12`` on
+    the main-side pass (``:1673-1677``, the same ``ITYPSUB == 2``). That is what
+    makes the card report the NET force on its surface — a contact internal to
+    it cancels — but it also means a parentless sub reports MINUS the force on
+    the surface it names when that surface is the contact MAIN side, i.e.
+    INVERTED relative to a parented ``/INTER/SUB`` and to the LS-DYNA ``rcforc``
+    row. MEASURED on the same probe run three ways: the parent's
+    ``/TH/INTER`` channel and a hand-built parented sub both read
+    ``-0.1500881`` (peak force ``-7689.81``); the parentless sub on the
+    IMPACTOR (secondary) reads ``-0.1500881``; the parentless sub on the PLATE
+    (main) reads ``+0.1500881``. Magnitudes agree to all seven printed digits
+    and to the momentum bound (95.6 % of ``2 m v0``); only the sign moves.
+
+    THE CELLS (``radioss2021/INTER/inter_sub.cfg``, the newest FORMAT <= 2022,
+    four cells where k2rad used to write three):
+
+    * ``inter_ID``  = 0 — the whole point.
+    * ``Main_ID1``  = a ``/SURF`` over SURFB's parts, or 0. With it the engine
+      runs ``TYPSUB = 3`` (``i7for3.F:1607``) and counts only pairs with one
+      side in each surface = ``*CONTACT_FORCE_TRANSDUCER`` with both SURFA and
+      SURFB. Optional in the reader (``hm_read_intsub.F:474`` ``IF(IDSURF/=0)``).
+    * ``Second_ID`` = 0 — NOT decoded at all on this branch.
+    * ``Main_ID2``  = the ``/SURF`` for SURFA, built by
+      :func:`_transducer_surface` from EITHER LS-DYNA spelling — a
+      ``*SET_SEGMENT`` (``SURFATYP 0``, or a shell-element set at ``1``) as a
+      ``/SURF/SEG``, a part / part set / "all parts" (``3``/``2``/``5``) as the
+      usual part surface. Reading a segment-set id as a part id is how
+      ``intro-by-j.-day/contact/force-transducer/transducer.k`` lost its
+      transducer for one commit: that deck carries both spellings, with
+      ``$ by part id`` commented out and ``$ by segment set``
+      (``SURFA = 10, SURFATYP = 0``) live. MANDATORY: :453-470 has no
+      zero guard, so a 0 or unknown id is ERROR 576. Alone it gives
+      ``TYPSUB = 2`` (``i7for3.F:1583``), the total contact force on that
+      surface from every interface — the secondary-side block adds
+      ``+FORC_SIGN*F*dt`` and the main-side block (:1673-1687) subtracts it, so
+      a contact internal to the surface cancels and only the NET force on it
+      survives.
+
+    ``NOM_OPT(5)`` must be 1 — the sub id has to appear in a ``/TH/INTER`` list
+    (:509-524) or the starter drops the sub-interface silently — so the
+    ``(sub_id, title)`` pairs still go onto ``state.th_sub_ids``.
     """
     if not state.force_transducers:
         return []
 
-    fallback_parent = _select_parent_interface(state)
     lines: List[str] = ["#-  FORCE TRANSDUCERS (/INTER/SUB):", HDR]
     skipped_ft: List[int] = []
+    announced = False
 
     for ft in state.force_transducers:
         title = ft.title or f"FORCE_TRANSD_{ft.inter_id}"
 
-        pids_a = _transducer_side_pids(state, ft.surfa, ft.satyp)
-        pids_b = _transducer_side_pids(state, ft.surfb, ft.sbtyp)
-        all_pids = [p for p in (pids_a + pids_b) if p in state.parts]
-
-        # Secondary side = deformable parts' nodes (those that live in the parent's
-        # secondary node group). Main side = the remaining (rigid) parts' segments.
-        # If the split is not clean, fall back to LS-DYNA's convention that SURFA
-        # is the secondary side and SURFB the main side.
-        def_pids = [p for p in all_pids if state.parts[p].mid not in state.mat_rigid]
-        rig_pids = [p for p in all_pids if state.parts[p].mid in state.mat_rigid]
-        if def_pids and rig_pids:
-            sec_pids, main_pids = def_pids, rig_pids
-        else:
-            sec_pids = [p for p in pids_a if p in state.parts] or all_pids
-            main_pids = [p for p in pids_b if p in state.parts] or all_pids
-
-        parent_id = _match_parent_interface(state, set(main_pids), set(sec_pids))
-        if parent_id is None and fallback_parent is not None:
-            parent_id = fallback_parent
+        # SURFA is the measured surface. _transducer_surface takes BOTH
+        # spellings: a segment set (SURFATYP 0/1) becomes a /SURF/SEG, a part /
+        # part set / "all parts" (2/3/5, and the 0-id shorthand) becomes the
+        # usual part surface. A /SURF is the ONLY thing Main_ID2 accepts and it
+        # is mandatory: hm_read_intsub.F:453-470 has no zero guard and
+        # Second_ID is not decoded on the parentless branch.
+        main_id2, why = _transducer_surface(state, ft.surfa, ft.satyp,
+                                            f"{title}_main", lines)
+        if not main_id2:
             state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no contact interface "
-                f"covers its surfaces (main parts {sorted(set(main_pids))}, "
-                f"secondary parts {sorted(set(sec_pids))}); parenting /INTER/SUB "
-                f"on /INTER {fallback_parent} — the starter may reject foreign "
-                "segments (ERROR 581). Define a contact for this pair."
-            )
-        if parent_id is None:
-            state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no existing /INTER to act "
-                "as parent; /INTER/SUB requires a parent interface -> skipped."
-            )
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: SURFA {why}, so "
+                "there is no surface to measure a force on -> skipped. "
+                "/INTER/SUB with inter_ID = 0 takes a SURFACE in Main_ID2 and "
+                "nothing else — hm_read_intsub.F:453-470 has no zero guard and "
+                "Second_ID is not decoded on that branch — so a part with no "
+                "FACES (an SPH cloud above all), a beam/truss part, a part "
+                "whose elements were all dropped, and a *SET_SEGMENT this deck "
+                "never defines all have no route. Put the measured face on "
+                "SURFA (and any particles on the other side, where Radioss "
+                "wants them anyway).")
             skipped_ft.append(ft.inter_id)
             continue
 
-        sec_nodes = _part_node_ids(state, sec_pids, rigid_nodes)
-        if not sec_nodes:
-            state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: secondary side has no "
-                "deformable nodes (parts may be all-rigid) -> skipped."
-            )
-            skipped_ft.append(ft.inter_id)
-            continue
+        # SURFB, when the card really states one. `0` and `type 5` both mean
+        # "everything", which is TYPSUB=2's own scope, so they leave Main_ID1
+        # at 0 rather than emitting an all-parts surface that says the same
+        # thing more expensively.
+        main_id1 = 0
+        if ft.surfb and ft.sbtyp != 5:
+            main_id1, why_b = _transducer_surface(state, ft.surfb, ft.sbtyp,
+                                                  f"{title}_main2", lines)
+            if not main_id1:
+                state.warn(
+                    f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: SURFB "
+                    f"({ft.surfb}, type {ft.sbtyp}) states a second surface "
+                    f"but no /SURF could be built from it — {why_b} — so "
+                    "Main_ID1 stays 0 "
+                    "and the sub-interface measures the TOTAL contact force on "
+                    "SURFA (engine TYPSUB = 2, i7for3.F:1583) instead of only "
+                    "the part of it exchanged with SURFB (TYPSUB = 3, :1607). "
+                    "On a model where SURFA touches nothing else the two are "
+                    "the same number; where it does, this reads HIGH.")
 
-        grnod_id = state.next_grnod_id()
-        main_surf = state.next_id()
-        lines += _emit_grnod_node(grnod_id, f"{title}_secnd", sec_nodes)
-        if not _make_master_surface(state, main_surf, f"{title}_main",
-                                    sorted(set(main_pids)), lines):
-            state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: could not build a main "
-                "surface from its parts -> skipped."
-            )
-            skipped_ft.append(ft.inter_id)
-            continue
-
-        # /INTER/SUB/sub_ID  →  parent inter_ID, main surface, secondary node group
+        # /INTER/SUB/sub_ID → inter_ID(0), Main_ID1, Second_ID(0), Main_ID2
         lines += [
             f"/INTER/SUB/{ft.inter_id}",
             title,
-            "#  inter_ID  Main_surf  Secn_grnd",
-            f"{_i(parent_id)}{_i(main_surf)}{_i(grnod_id)}",
+            "#  inter_ID  Main_ID1 Second_ID  Main_ID2",
+            f"{_i(0)}{_i(main_id1)}{_i(0)}{_i(main_id2)}",
             HDR,
         ]
         state.th_sub_ids.append((ft.inter_id, title))
         state.warn(
-            f"CONTACT_FORCE_TRANSDUCER {ft.inter_id} -> /INTER/SUB/{ft.inter_id} "
-            f"(parent /INTER {parent_id}); force written to T01 via /TH/INTER. "
-            "Measurement-only (adds no contact stiffness)."
-        )
+            f"CONTACT_FORCE_TRANSDUCER {ft.inter_id} -> /INTER/SUB/"
+            f"{ft.inter_id} with inter_ID = 0 over /SURF {main_id2}"
+            + (f" against /SURF {main_id1}" if main_id1 else "")
+            + "; force written to T01 via /TH/INTER. Measurement-only (adds no "
+            "contact stiffness).")
+        if not announced:
+            announced = True
+            state.warn(
+                "/INTER/SUB inter_ID = 0 (hm_read_intsub.F:448, 'Interf 0 : "
+                "adding all contacts'): these sub-interfaces are PARENTLESS "
+                "and collect the contact force on their surface from EVERY "
+                "interface in the model, which is what a "
+                "*CONTACT_FORCE_TRANSDUCER measures — lecint.F:531-550 counts "
+                "an inter_ID = 0 sub into NISUB for every interface. The "
+                "engine sums it as TYPSUB = 2 (i7for3.F:1583) when only "
+                "Main_ID2 is given, so a contact INTERNAL to the surface "
+                "cancels (the main-side block at :1673-1687 carries the "
+                "opposite sign) and only the net force ON the surface "
+                "survives; with a second surface in Main_ID1 it is TYPSUB = 3 "
+                "(:1607) and only pairs straddling the two are counted. This "
+                "replaces the parented form k2rad used to write, which had to "
+                "GUESS an interface and made every foreign node ERROR 580 and "
+                "every foreign segment ERROR 581 (measured: plate.typ13, "
+                "pipe.k). MEASURED equal IN MAGNITUDE: on a shell-impact probe "
+                "the accumulated normal impulse is -0.01453375 at all 1000 "
+                "samples for the inter_ID = 0 card, for a legally parented "
+                "sub-interface and for the parent's own channel alike — that "
+                "probe named the SECONDARY-side surface. READ THE SIGN WITH "
+                "CARE: because the main-side block subtracts what the "
+                "secondary-side block adds, a parentless sub reports MINUS the "
+                "force on the surface it names whenever that surface is the "
+                "contact MAIN side, so it is INVERTED relative to a parented "
+                "/INTER/SUB and to the LS-DYNA rcforc row. Measured on one deck "
+                "run three ways: parent -0.1500881, parented sub -0.1500881, "
+                "parentless sub on the secondary side -0.1500881, parentless "
+                "sub on the main side +0.1500881 — same seven digits, opposite "
+                "sign.")
 
     # Read-out caveat (emitted once when any transducer was written).
     #
@@ -1079,9 +1179,10 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
         state.note_recognized_not_emitted(
             "CONTACT_FORCE_TRANSDUCER",
             f"{len(skipped_ft)} transducer(s) produced no /INTER/SUB (id(s) "
-            f"{sorted(skipped_ft)}): no usable parent interface, secondary "
-            "node group or main surface. The requested contact-force channel "
-            "is missing from the T01 — see the per-transducer warnings.")
+            f"{sorted(skipped_ft)}): no /SURF could be built over the parts "
+            "their SURFA names, and Main_ID2 is the one mandatory cell of a "
+            "parentless /INTER/SUB. The requested contact-force channel is "
+            "missing from the T01 — see the per-transducer warnings.")
     return lines
 
 

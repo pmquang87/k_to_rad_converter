@@ -1064,10 +1064,18 @@ class IntegrationTests(unittest.TestCase):
         _, starter = _convert(deck)
         self.assertNotIn("/TH/INTER", starter)
 
-    def test_force_transducer_never_parents_on_a_dropped_interface(self):
-        """_select_parent_interface / _match_parent_interface must filter
-        state.dropped_inter_ids: /INTER/SUB pointing at an interface that was
-        never written is starter ERROR 581."""
+    def test_force_transducer_never_names_a_dropped_interface(self):
+        """A dangling interface reference is starter ERROR 581 / WARNING 257.
+
+        The transducer used to PARENT on an interface, so the guard was
+        ``_select_parent_interface`` / ``_match_parent_interface`` filtering
+        ``state.dropped_inter_ids``. Since the R14 triage batch it writes
+        ``/INTER/SUB`` with ``inter_ID = 0`` (parentless, hm_read_intsub.F:249),
+        which cannot dangle at all — so the assertion is the stronger one: the
+        sub-interface names NO interface. The dropped-id filter still matters
+        one card further on, in the /TH/INTER list ``_select_parent_interface``
+        still feeds, so that is asserted here too.
+        """
         deck = (_MESH
                 # dropped: the secondary side is a part that does not exist
                 + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
@@ -1083,8 +1091,16 @@ class IntegrationTests(unittest.TestCase):
         _, starter = _convert(deck)
         emitted = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
                    if ln.startswith("/INTER/TYPE7/")}
+        self.assertTrue(emitted)
         sub = _cards(_block(starter, "/INTER/SUB/90003"))[0]
-        self.assertIn(int(sub[0:10]), emitted)
+        # inter_ID = 0: no parent, so nothing to dangle.
+        self.assertEqual(int(sub[0:10]), 0)
+        # ... and the /TH/INTER list still names only interfaces that exist.
+        th = next(ln for ln in starter.splitlines()
+                  if ln.startswith("/TH/INTER/"))
+        listed = {int(t) for ln in _cards(_block(starter, th))
+                  for t in ln.split() if t.lstrip("-").isdigit()}
+        self.assertTrue(listed - {90003} <= emitted, listed)
 
 
 class ByteIdentityTests(unittest.TestCase):

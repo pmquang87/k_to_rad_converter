@@ -96,6 +96,7 @@ from .state import (
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
     MatShapeMemory, MatMuscle, MatSpringMuscle,
+    MatElasticPlasticThermal, MatCWM, MatElasticPlasticHydro, MatVacuum,
     MatAddThermalExpansion, MatThermalIsotropic,
     MatThermalIsotropicTD, MatThermalOrthotropic,
     ControlThermalSolver, ThermalBoundary, LoadThermalElement,
@@ -1226,7 +1227,13 @@ def _positional_elem_fields(line: str, n: int):
 
 
 def _parse_beam_base(line: str):
-    """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3) or None."""
+    """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3, rt1, rt2)
+    or None.
+
+    Field order is EID PID N1 N2 N3 RT1 RR1 RT2 RR2 LOCAL (Vol I R17 p.19-5).
+    Only the TRANSLATIONAL releases RT1 (field 6) and RT2 (field 8) are kept —
+    see BeamElem for why the rotational pair and LOCAL are not.
+    """
     f = _positional_elem_fields(line, 10)
     # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
     # so 4 fields (eid pid n1 n2) is a complete card.
@@ -1235,7 +1242,9 @@ def _parse_beam_base(line: str):
     eid, pid = to_int(f[0]), to_int(f[1])
     n1, n2 = to_int(f[2]), to_int(f[3])
     n3 = to_int(f[4]) if len(f) > 4 else 0
-    return eid, pid, n1, n2, n3
+    rt1 = to_int(f[5]) if len(f) > 5 else 0
+    rt2 = to_int(f[7]) if len(f) > 7 else 0
+    return eid, pid, n1, n2, n3, rt1, rt2
 
 
 def handle_element_beam(block: Block, state: ConversionState) -> None:
@@ -1270,13 +1279,14 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
             parsed = _parse_beam_base(line)
             if parsed is None:
                 continue
-            eid, pid, n1, n2, n3 = parsed
+            eid, pid, n1, n2, n3, rt1, rt2 = parsed
             if eid in seen_eids:
                 rec.n_unparsed += 1
                 continue
             seen_eids.add(eid)
             state.beam_elems.append(
-                BeamElem(eid, pid, n1, n2, n3, provisional=True))
+                BeamElem(eid, pid, n1, n2, n3, provisional=True,
+                         rt1=rt1, rt2=rt2))
             rec.eids.append(eid)
         state.provisional_elem_blocks.append(rec)
         return
@@ -1287,7 +1297,7 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
         if parsed is None:
             i += 1
             continue
-        eid, pid, n1, n2, n3 = parsed
+        eid, pid, n1, n2, n3, rt1, rt2 = parsed
         i += 1
         vx = vy = vz = 0.0
         # Card order follows the manual's card numbering: _OFFSET (card 7)
@@ -1306,7 +1316,8 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
                           to_float(f[2]) if len(f) > 2 else 0.0)
             if vx == 0.0 and vy == 0.0 and vz == 0.0:
                 n_zerovec += 1
-        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3, vx, vy, vz))
+        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3, vx, vy, vz,
+                                         rt1=rt1, rt2=rt2))
 
     if n_offset:
         state.warn(
@@ -2647,25 +2658,35 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
             # ELFORM 3 truss: A RAMPT STRESS. Only the AREA has a /PROP meaning
             # — reading fields 2/3 as Iyy/Izz (which this handler used to do,
             # via the catch-all resultant branch) put a ramp TIME and an initial
-            # STRESS into two bending inertias.
+            # STRESS into two bending inertias. RAMPT/STRESS are kept on the
+            # record and SCREENED by the truss writer (writer/truss.py), which
+            # is the only place that knows whether the deck has a
+            # dynamic-relaxation phase for them to act in. No warning here: the
+            # section now converts to /PROP/TYPE2 (TRUSS) and its elements to
+            # /TRUSS, so the old "no k2rad path yet" text was the statement of
+            # a gap this batch closes.
             sec.area = to_float(f2[0]) if f2 else 0.0
-            state.warn(
-                f"*SECTION_BEAM {secid}: ELFORM=3 is a TRUSS (axial force "
-                "only). Its AREA is carried to /PROP/BEAM but RAMPT (the "
-                "pre-tension ramp time) and STRESS (the initial axial stress) "
-                "are DROPPED — Radioss's /PROP/TYPE2 (TRUSS) has no k2rad path "
-                "yet, so the element keeps full bending stiffness with "
-                "Iyy=Izz=Ixx=0. Restate a pre-tensioned truss as an initial "
-                "condition if it carries load.")
+            sec.rampt = to_float(f2[1]) if len(f2) > 1 else 0.0
+            sec.prestress = to_float(f2[2]) if len(f2) > 2 else 0.0
         elif kind == "2b":
+            # Card 2b reaches ELFORM 2, 3 AND 12 (p.41-9), so an ELFORM=3
+            # section can state its geometry here instead of as card 2d's
+            # `A RAMPT STRESS` — and then Area stays 0. writer/truss.py's
+            # _truss_section_is_emittable REFUSES such a section rather than
+            # writing a /PROP/TYPE2 with AREA 0 (ERROR 497), which is why this
+            # message names both destinations.
             state.warn(
                 f"*SECTION_BEAM {secid}: card 2 is the NAMED standard section "
                 f"'{(f2[0] if f2 else '').strip()}', whose D1..D6 dimensions "
                 "k2rad has no path for — the section's Area/Iyy/Izz/Ixx stay "
-                "ZERO and the beam carries no stiffness. State the section "
-                "numerically (ELFORM=2 with A/ISS/ITT/J) or, for an integrated "
-                "beam, as an *INTEGRATION_BEAM rule referenced from a negative "
-                "QR/IRID.")
+                "ZERO and the beam carries no stiffness"
+                + (" (on ELFORM=3 that is a TRUSS with no cross-section area, "
+                   "so its /PROP/TYPE2 is refused outright rather than emitted "
+                   "as starter ERROR 497)" if elform == 3 else "")
+                + ". State the section "
+                "numerically (ELFORM=2 with A/ISS/ITT/J, ELFORM=3 with A) or, "
+                "for an integrated beam, as an *INTEGRATION_BEAM rule "
+                "referenced from a negative QR/IRID.")
         elif kind == "2f":
             # ELFORM=6 DISCRETE beam, card 2f: VOL INER CID CA OFFSET RRCON
             # SRCON TRCON (Manual Vol I R17 p.41-20). There is no cross-section
@@ -4345,6 +4366,14 @@ def handle_mat_high_explosive_burn(block: Block, state: ConversionState) -> None
         d=to_float(f[2])   if len(f) > 2 else 0.0,
         pcj=to_float(f[3]) if len(f) > 3 else 0.0,
         beta=to_float(f[4]) if len(f) > 4 else 0.0,
+        # K is the UNREACTED bulk modulus and maps 1:1 onto /MAT/LAW5's
+        # Bunreacted cell (Vol II R17 p.2-188 `p = K(1/V - 1)` against
+        # jwl51.F:197 `Psol = C01 + C11*MU1`); G and SIGY have no LAW5 slot.
+        # All three used to be unread, which is why the cell went out as 0 and
+        # a LAW51 Iform=12 deck met ERROR 99 (fill_buffer_51.F:496).
+        k=to_float(f[5])    if len(f) > 5 else 0.0,
+        g=to_float(f[6])    if len(f) > 6 else 0.0,
+        sigy=to_float(f[7]) if len(f) > 7 else 0.0,
     )
 
 
@@ -4617,6 +4646,7 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     # Header card: lcid sidr sfa sfo offa offo dattyp lcint
     f1   = _card(raw, offset, fixed=True, n=8, w=10)
     lcid = to_int(f1[0])
+    sidr = to_int(f1[1]) if len(f1) > 1 else 0
     sfa  = to_float(f1[2]) if len(f1) > 2 else 1.0
     sfo  = to_float(f1[3]) if len(f1) > 3 else 1.0
     offa = to_float(f1[4]) if len(f1) > 4 else 0.0
@@ -4633,7 +4663,8 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     # ids are unique across both keywords, so such a deck is malformed — but
     # the emitted CARD KIND must still match the points that survive.
     _clear_smooth_flag_on_redefinition(state, lcid, "*DEFINE_CURVE")
-    state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
+    state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts,
+                               sidr=sidr)
     state.curve_order.append(lcid)
 
 
@@ -9662,7 +9693,16 @@ def handle_mat_soil_and_foam(block: Block, state: ConversionState) -> None:
     p = ([to_float(f5[i]) if len(f5) > i else 0.0 for i in range(8)]
          + [to_float(f6[i]) if len(f6) > i else 0.0 for i in range(2)])
     state.mat_soil_and_foam[mid] = MatSoilAndFoam(
-        mid, title, rho, g, kun, a0, a1, a2, pc, vcr, ref, lcid, eps, p)
+        mid, title, rho, g, kun, a0, a1, a2, pc, vcr, ref, lcid, eps, p,
+        # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) has the SAME input as MAT_005 —
+        # Vol II R17 p.2-209 verbatim: *"The input for this model is the same
+        # as for *MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure
+        # reaches the tensile failure pressure, the element loses its ability
+        # to carry tension."* So one handler reads both spellings and the
+        # spelling itself is the flag; the writer adds the /FAIL/SPALLING
+        # latch. (_FAILURE is not a trailing _ID/_TITLE, so
+        # parser._split_keyword leaves it IN block.keyword.)
+        latched_tension_failure="FAILURE" in (block.keyword or "").upper())
 
 
 def handle_mat_low_density_viscous_foam(block: Block,
@@ -10025,6 +10065,348 @@ def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
     state.mat_shape_memory[mid] = MatShapeMemory(
         mid, title, rho, e, nu, sig[0], sig[1], sig[2], sig[3],
         epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
+
+
+def _mat004_live_points(t: List[float]) -> int:
+    """How many of ``*MAT_004``'s eight temperature slots are LIVE.
+
+    The card is a fixed eight-slot table and states no count. Vol II R17
+    p.2-177 Remark 2 requires at least two temperatures and the analysis
+    terminates outside the stated range, so the temperatures are ordered; an
+    unused slot is written ``0.0``, which is ALSO a legal temperature and is
+    what three corpus decks put in ``T1``. The longest STRICTLY INCREASING
+    prefix is therefore the only reading that separates a real point from
+    padding, and it reproduces every corpus carrier: ``tempcyl.vari``
+    (−1000, 0, 1000, 0, …) → 3, ``thermal-stress`` (0 … 50, 0, 0) → 6,
+    ``main_steel_frame``/``ex_24`` (0, 400|1000, 0, …) → 2, the four welding
+    decks (273, 493, 1273, 10000, 0, …) → 4.
+
+    **The cfg reads it differently, and this rule is deliberately not that
+    reading.** ``Keyword971/MAT/mat_004.cfg:176-207`` counts with a
+    ``CARD_PREREAD``/``ArrayCount`` ladder whose tests are ``LOCAL_Tn != ""``,
+    i.e. the last NON-BLANK column — a purely textual test. Every corpus
+    carrier pads its unused slots with an explicit ``0.0`` rather than leaving
+    them blank (``tempcyl.vari``'s ``T`` row is
+    ``-1000.0  0.0  1000.0  0.0  0.0  0.0  0.0  0.0``), so that ladder would
+    return **8** where this rule returns 3, and ``/FUNCT`` would get a
+    non-monotonic table with five spurious points at ``T = 0``. The cfg is a
+    HyperMesh import descriptor, not solver semantics (#115); the
+    increasing-prefix reading is what separates padding from a stated point,
+    and it can only ever DROP a slot.
+    """
+    n = 1
+    while n < len(t) and t[n] > t[n - 1]:
+        n += 1
+    return n
+
+
+def handle_mat_elastic_plastic_thermal(block: Block,
+                                       state: ConversionState) -> None:
+    """*MAT_ELASTIC_PLASTIC_THERMAL (*MAT_004) → /MAT/LAW106 +
+    /THERM_STRESS/MAT.
+
+    Cards (Vol II R17 pp.2-177..2-179; ``Keyword971/MAT/mat_004.cfg``
+    resolved through the cfg overlay — the ``Keyword971_R14.1/MAT`` dir
+    holds only ``M054_55.cfg``):
+      Card1: MID RO
+      Cards 2-7: T1..T8 / E1..E8 / PR1..PR8 / ALPHA1..ALPHA8 / SIGY1..SIGY8 /
+                 ETAN1..ETAN8
+
+    Fixed-width w=10 throughout, like every other ``*MAT`` here: ``RO``
+    regularly fills its whole field and fuses with ``MID``
+    (``main_steel_frame.k`` writes ``         17.85000E-9``), and a free split
+    would then shift every value — the ``*MAT_187`` trap.
+
+    The temperature-dependence tables are carried to ``/MAT/LAW106`` by
+    ``writer/materials.py::_resolve_mat_law106``; this handler only reads the
+    card. dyna2rad has no ``case 4:`` at all — ``convertmats.cxx:527``'s
+    ``default:`` calls ``Convert1To1(..., matLawNum, ...)``, which emits
+    ``/MAT/LAW4`` (HYD_JCOOK, an EOS-driven hydrodynamic law with no E(T)
+    slot). It is not a usable reference for this keyword.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ELASTIC_PLASTIC_THERMAL: empty material card — "
+                   "skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_ELASTIC_PLASTIC_THERMAL '{title}': MID parsed as "
+                   f"{mid} — unreadable (shifted or fused fields?); material "
+                   "skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    rows: List[List[float]] = []
+    for k in range(1, 7):
+        fk = _card(raw, offset + k, fixed=True, n=8, w=10)
+        rows.append([to_float(fk[i]) if len(fk) > i else 0.0
+                     for i in range(8)])
+    state.mat_ep_thermal[mid] = MatElasticPlasticThermal(
+        mid=mid, title=title, rho=rho, t=rows[0], e=rows[1], pr=rows[2],
+        alpha=rows[3], sigy=rows[4], etan=rows[5])
+
+
+def handle_mat_cwm(block: Block, state: ConversionState) -> None:
+    """*MAT_CWM (*MAT_270) → /MAT/LAW106 + /THERM_STRESS/MAT.
+
+    Cards (Vol II R17 pp.2-1835..2-1840;
+    ``Keyword971_R7.1/MAT/mat_270.cfg``, the newest dir that holds it):
+      Card1: MID RO LCEM LCPR LCSY LCHR LCAT BETA
+      Card2: TASTART TAEND TLSTART TLEND EGHOST PGHOST AGHOST EPSINI
+      Card3 (optional): T2PHASE T1PHASE ANOPT POSTV DTEMP DOSPOT
+
+    Card 3 is claimed by RAW CONTIGUITY (row index ``offset + 2``), never by
+    "the next non-blank line": an all-blank optional card is legal LS-DYNA and
+    a content scan walks past it into the following keyword (#109/#117/#119).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_CWM: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_CWM '{title}': MID parsed as {mid} — unreadable "
+                   "(shifted or fused fields?); material skipped.")
+        return
+
+    def _g(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    rec = MatCWM(
+        mid=mid, title=title, rho=_g(f1, 1),
+        lcem=to_int(f1[2]) if len(f1) > 2 else 0,
+        lcpr=to_int(f1[3]) if len(f1) > 3 else 0,
+        lcsy=to_int(f1[4]) if len(f1) > 4 else 0,
+        lchr=to_int(f1[5]) if len(f1) > 5 else 0,
+        lcat=to_int(f1[6]) if len(f1) > 6 else 0,
+        beta=_g(f1, 7),
+        tastart=_g(f2, 0), taend=_g(f2, 1), tlstart=_g(f2, 2),
+        tlend=_g(f2, 3), eghost=_g(f2, 4), pghost=_g(f2, 5),
+        aghost=_g(f2, 6), epsini=_g(f2, 7))
+    if len(raw) > offset + 2 and raw[offset + 2].strip():
+        f3 = _card(raw, offset + 2, fixed=True, n=6, w=10)
+        rec.has_card3 = True
+        rec.t2phase = _g(f3, 0)
+        rec.t1phase = _g(f3, 1)
+        rec.anopt = _g(f3, 2)
+        rec.postv = to_int(f3[3]) if len(f3) > 3 else 0
+        rec.dtemp = _g(f3, 4)
+        rec.dospot = to_int(f3[5]) if len(f3) > 5 else 0
+    state.mat_cwm[mid] = rec
+
+
+def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
+    """*MAT_VACUUM (*MAT_140) → /MAT/VOID (LAW0).
+
+    Card: MID RHO. Two separate questions this answers separately.
+
+    **The PART needs a material.** A vacuum *PART with no /MAT is starter
+    ERROR 179, which is what four corpus ALE decks used to get on top of their
+    LAW51 error. /MAT/VOID is a region that carries no stress at all — the same
+    target a bare *MAT_NULL already takes in this converter — so the part
+    resolves and contributes nothing, which is what a vacuum does.
+
+    **The LAW51 PHASE does NOT need one.** LAW0 is not on
+    ``fill_buffer_51.F:210``'s allowed list and cannot be declared as a phase
+    at all (``hm_read_mat51.F:608-627``: a ``tMID <= 0`` inside the MIP rows is
+    fatal, and there is no vacuum law to name instead). It does not need to be:
+    ``:639-646`` checks only that the volume fractions SUM ABOVE 1, so a sum
+    below one is legal and the UNDECLARED BALANCE is exactly how Radioss
+    represents void. ``_resolve_ale_submaterials`` drops the entry and reduces
+    MIP.
+
+    RHO is written verbatim, 0.0 included — ``hm_read_mat.F90:1575-1583``
+    exempts law 0 from ERROR 683.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_VACUUM: empty material card — skipped")
+        return
+    mid = to_int(f[0])
+    if mid <= 0:
+        state.warn(f"*MAT_VACUUM '{title}': MID parsed as {mid} — unreadable; "
+                   "material skipped.")
+        return
+    rho = to_float(f[1]) if len(f) > 1 else 0.0
+    state.mat_vacuum[mid] = MatVacuum(mid=mid, title=title, rho=rho)
+    state.warn(
+        f"*MAT_VACUUM {mid} -> /MAT/VOID/{mid} (LAW0, RHO_I = {rho:g}). "
+        "Radioss has no vacuum MATERIAL — the word appears nowhere in the 2022 "
+        "Reference or User Guide — but /MAT/VOID is a region that carries no "
+        "stress at all, which is what the LS-DYNA card means, and it is the "
+        "same target a bare *MAT_NULL takes here. It exists so the vacuum "
+        "*PART resolves (a /PART naming no /MAT is ERROR 179). It is NOT "
+        "written into the /MAT/LAW51 phase list: LAW0 is not on "
+        "fill_buffer_51.F:210's allowed list, and it does not need to be — "
+        "hm_read_mat51.F:639-646 checks only that the volume fractions SUM "
+        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST: "
+        "in LS-DYNA the vacuum is an AMMG PHASE that the other materials "
+        "advect into as they expand; here it is a separate single-material ALE "
+        "region on its own mesh, so nothing flows into it. See the "
+        "*ALE_MULTI-MATERIAL_GROUP warning for the whole-deck statement.")
+
+
+def handle_mat_elastic_plastic_hydro(block: Block,
+                                     state: ConversionState) -> None:
+    """*MAT_ELASTIC_PLASTIC_HYDRO[_SPALL] (*MAT_010) → /MAT/LAW3 + its same-id
+    /EOS.
+
+    Cards (Vol II R17 pp.2-191..2-195;
+    ``Keyword971/MAT/mat_010.cfg``, the newest dir that holds it):
+      Card1: MID RO G SIG0 EH PC FS CHARL
+      Card1a (``_SPALL`` option ONLY): A1 A2 SPALL
+      Cards 2-3: EPS1..EPS16
+      Cards 4-5: ES1..ES16
+
+    The ``_SPALL`` option inserts its card BETWEEN card 1 and the EPS table, so
+    the table's row index depends on the option — claimed by RAW CONTIGUITY
+    from the option flag, never by scanning for the next non-blank row
+    (#109/#117/#119: an all-zero EPS row is legal and a content scan walks past
+    it into the following keyword).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ELASTIC_PLASTIC_HYDRO: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_ELASTIC_PLASTIC_HYDRO '{title}': MID parsed as "
+                   f"{mid} — unreadable (shifted or fused fields?); material "
+                   "skipped.")
+        return
+
+    def _g(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    # ``_SPALL`` is NOT a trailing _ID/_TITLE/_SUBTITLE, so parser.
+    # _split_keyword leaves it IN the keyword rather than moving it into
+    # block.options — the spelling itself is the flag.
+    spall_option = "SPALL" in block.keyword.upper()
+    row = offset + 1
+    a1 = a2 = spall = 0.0
+    if spall_option:
+        fs_card = _card(raw, row, fixed=True, n=3, w=10)
+        a1, a2, spall = _g(fs_card, 0), _g(fs_card, 1), _g(fs_card, 2)
+        row += 1
+    eps: List[float] = []
+    es: List[float] = []
+    for k in range(2):
+        fk = _card(raw, row + k, fixed=True, n=8, w=10)
+        eps += [_g(fk, i) for i in range(8)]
+    for k in range(2):
+        fk = _card(raw, row + 2 + k, fixed=True, n=8, w=10)
+        es += [_g(fk, i) for i in range(8)]
+    state.mat_ep_hydro[mid] = MatElasticPlasticHydro(
+        mid=mid, title=title, rho=_g(f1, 1), g=_g(f1, 2), sig0=_g(f1, 3),
+        eh=_g(f1, 4), pc=_g(f1, 5), fs=_g(f1, 6), charl=_g(f1, 7),
+        eps=eps, es=es, spall_option=spall_option, a1=a1, a2=a2, spall=spall)
+
+
+def _material_refused(keyword: str, what: str, why: str):
+    """Build a handler that RECOGNIZES a material, records its MID and refuses
+    it by name.
+
+    A refused material is not the same thing as an unread one. Leaving the
+    keyword in ``skipped_keywords`` says only "k2rad does not know this card";
+    recording it here says WHICH law it is, WHY no Radioss counterpart exists,
+    and — through ``writer/materials.py::_warn_refused_materials``, which runs
+    once the mesh is parsed — exactly which ``/PART``s and how many elements
+    are left without a material by the refusal. That is the actionable half:
+    the starter's own answer is ``ERROR 179`` naming one part at a time.
+
+    The MID is read with the same fixed-width w=10 card-1 slice every ``*MAT``
+    handler uses, so a fused ``MID``+``RO`` field cannot shift it.
+    """
+    def _h(block: Block, state: ConversionState) -> None:
+        seen = block.keyword or keyword
+        offset = _title_offset(block)
+        f1 = _card(block.raw, offset, fixed=True, n=8, w=10)
+        mid = to_int(f1[0]) if f1 and f1[0].strip() else 0
+        if mid > 0:
+            state.refused_materials[mid] = (seen, what, why)
+        state.note_recognized_not_emitted(
+            seen,
+            f"{what} — no /MAT written. {why}. The *PART(s) on this material "
+            "therefore have none, which the starter answers with ERROR 179 "
+            "(MATERIAL ID DOES NOT EXIST); the parts and element counts are "
+            "named in the conversion warnings.")
+    return _h
+
+
+#: The three ``*MAT`` families of the R14 ERROR-179 census that have NO
+#: expressible Radioss counterpart at ``/BEGIN 2022``. Each row is
+#: (what the law is, why nothing can carry it) — refused BY NAME rather than
+#: left in the unrecognized-keyword list, and never fitted into a nearby law:
+#: a fit is an invented value (#124), and a converted deck that terminates
+#: normally on the wrong constitutive law is worse than a deck that refuses
+#: (#122).
+_REFUSED_MATERIALS = {
+    ("MAT_INV_HYPERBOLIC_SIN", "MAT_102"): (
+        "the inverse-hyperbolic-sine hot-forming flow law (*MAT_102)",
+        "Vol II R17 p.2-729 Remark 1 gives the flow stress as "
+        "sigma = (1/alpha)*arcsinh[(Z/A)^(1/N)] with the Zener-Hollomon "
+        "parameter Z = max(eps_dot, EPS0)*exp(Q/(G*T)). No Radioss law at "
+        "/BEGIN 2022 has that form: the sinh rate law exists only inside "
+        "/MAT/LAW100 (viscsinh.F:63, (sinh(B0*tau))^EXPN — the parallel "
+        "rheological framework's hyperelastic-network polymer law, with no "
+        "exp(Q/GT) cell) and /MAT/LAW101 (sigeps101.F:836, the Bouvard "
+        "semi-crystalline POLYMER model), and the Garofalo/Norton creep law "
+        "that carries it properly is /MAT/LAW129 crp_law = 2, first available "
+        "in radioss2025. /MAT/LAW103 (Hensel-Spittel, radioss2020, SOLID+SPH) "
+        "is the closest 2022 hot-forming law but is a FIT, not a mapping: "
+        "fitting A0, m1..m5, m7 to the arcsinh curve would invent every "
+        "coefficient, so it is named here as the manual escape route and NOT "
+        "done automatically"),
+    ("MAT_ACOUSTIC", "MAT_090"): (
+        "the acoustic pressure-formulation element material (*MAT_090)",
+        "it exists for *FREQUENCY_DOMAIN_ACOUSTIC_BEM / _FEM and "
+        "*FREQUENCY_DOMAIN_SSD, and OpenRadioss has neither an acoustic "
+        "pressure element nor a frequency-domain solver — the whole analysis, "
+        "not just the material, has no counterpart, and its engine "
+        "eigensolver is a compiled-out stub on this build. Converting the "
+        "material alone would leave a deck with nothing to solve"),
+    ("MAT_GAS_MIXTURE", "MAT_148"): (
+        "the multi-species ALE gas mixture (*MAT_148)",
+        "its whole mechanism is *SECTION_POINT_SOURCE_MIXTURE + "
+        "*INITIAL_GAS_MIXTURE — an airbag-inflator point-source injection into "
+        "an ALE mesh — and OpenRadioss has none of the three. /MAT/GAS "
+        "(mat_gas.cfg, radioss120) is a /MONVOL gas definition, not an ALE "
+        "material. A single perfect gas as a LAW51 phase WOULD be expressible "
+        "as /MAT/LAW6 + /EOS/POLYNOMIAL with C4 = C5 = gamma-1 (Radioss "
+        "RefGuide p.1112, 'Modeling Technique with Polynomial EOS'), but "
+        "converting the material alone would leave the deck with no injection "
+        "source and no way to reach the LS-DYNA result, so the whole family "
+        "is refused rather than half of it"),
+    ("MAT_FRAZER_NASH_RUBBER_MODEL", "MAT_031"): (
+        "the Frazer-Nash hyperelastic rubber model (*MAT_031)",
+        "the card states no constants to map when a least-squares fit is "
+        "requested: Vol II R17 p.2-312 says the energy terms to include are "
+        "'flagged by setting their corresponding coefficients to unity', so "
+        "C100/C110/C010/C020 = 1.0 beside SGL/SW/ST and an LCID are INCLUSION "
+        "FLAGS plus a request for LS-DYNA's own internal fit of "
+        "U = C100*I1 + C200*I1^2 + ... + f(J) to a uniaxial force-vs-gauge-"
+        "length curve — there is no value to carry, and reimplementing that "
+        "fit is not a conversion. Even a direct-constants card is not a "
+        "1:1 map: Frazer-Nash's I1, I2 are invariants of the GREEN-ST-VENANT "
+        "strain while Radioss's polynomial hyperelastic (/MAT/LAW100 "
+        "PPOLYNOMIAL, available at 2022) uses the REDUCED Cauchy-Green "
+        "invariants — the algebraic bridge I1^E = (I1^C-3)/2, "
+        "I2^E = (I2^C-2*I1^C+3)/4 is exact but the J^(-2/3) reduction breaks "
+        "it for compressible response, and the I1^4 term needs an order-4 "
+        "polynomial"),
+}
 
 
 def _scalar_or_curve(f: List[str], i: int, default: float,
@@ -14875,21 +15257,26 @@ def handle_database_history_beam(block: Block, state: ConversionState) -> None:
     The target group is decided PER ELEMENT, exactly as dyna2rad's
     ``FindRadElement`` fallback chain does (convertutils.cxx:286-338 tries
     /BEAM, then /SPRING, then /TRUSS, re-initialising the keyword INSIDE the
-    loop at converttimehistory.cxx:246). k2rad needs the same chain for its own
+    loop at converttimehistory.cxx:246). k2rad needs all three links for its own
     reason: an *ELEMENT_BEAM on a *MAT_SPOTWELD part or on a *SECTION_BEAM
-    ELFORM=6 part is emitted as a /SPRING, not a /BEAM, so one card can produce
-    both groups. (k2rad emits no /TRUSS at all, so that third link is absent.)
+    ELFORM=6 part is emitted as a /SPRING, not a /BEAM, and one on a
+    *SECTION_BEAM ELFORM=3 part is emitted as a /TRUSS, so one card can produce
+    all three groups. ``writer/output.py::_th_beam_split`` does the split, on
+    the producer registries filled at the write lines.
     """
     _handle_db_history(block, state, "BEAM")
 
 
 def handle_database_history_beam_set(block: Block, state: ConversionState) -> None:
-    """*DATABASE_HISTORY_BEAM_SET → /TH/BEAM (+/TH/SPRING) over the named sets.
+    """*DATABASE_HISTORY_BEAM_SET → /TH/BEAM (+/TH/SPRING, +/TH/TRUSS) over the
+    named sets.
 
     ``database_history_beam_set.cfg:25`` declares
     ``SUBTYPES = (/SETS/SET_COMPONENT_IDPOOL, /SETS/SET_BEAM_IDPOOL)``: the ids
     may be *SET_BEAM sets OR *SET_PART sets, and a part set expands to every
-    beam of every named part."""
+    beam of every named part — a ``*SECTION_BEAM`` ELFORM=3 part's elements
+    included, because they stay in ``state.beam_elems`` and only the WRITE side
+    splits them off into ``/TRUSS`` (see ``writer/common._truss_secids``)."""
     _handle_db_history(block, state, "BEAM_SET")
 
 
@@ -16019,11 +16406,19 @@ def _card_abscissa(v: float) -> float:
 def _strictly_increasing(pts):
     """Force a point list to grow strictly AS PRINTED (see _card_abscissa).
 
-    Mirrors ``writer/loads._monotonic_abscissae``; kept here because the smooth
-    curve is built at PARSE time and stored in ``state.curves``, which
-    ``materials._make_functions`` emits without that guard. Points already
-    strictly increasing are returned unchanged, so a well-formed curve is
-    byte-identical either way.
+    The TIE-ONLY half of ``writer/loads._monotonic_abscissae``, DELIBERATELY
+    kept separate rather than routed through it. That function grew a REVERSAL
+    arm — a stated ``x[k] < x[k-1]`` is re-anchored onto the segment LS-DYNA's
+    own ``LCINT`` rediscretization jumps to — and that rule was derived from a
+    user-typed reversed pair in a real deck. A ``*DEFINE_CURVE_SMOOTH``
+    trapezoid is SYNTHESIZED here from TSTART/TRISE/TEND, so a crossing means
+    the four vertices were computed in a degenerate order, not that the deck
+    stated a reversal; re-anchoring one would move a vertex the deck never
+    typed. The tie repair (nudge the abscissa, keep the ordinate) is the right
+    answer for that, and it runs at PARSE time because the smooth curve is
+    stored straight into ``state.curves``. Points already strictly increasing
+    are returned unchanged, so a well-formed curve is byte-identical either
+    way.
     """
     out = []
     for a, o in pts:
@@ -16778,13 +17173,24 @@ HANDLERS = {
     # Foam batch: MAT_005 → LAW21 (P(mu) transform); MAT_073 → LAW90
     # [+ /VISC/PRONY]; MAT_126 → LAW50 (+ /PROP/TYPE6); MAT_154 → LAW115;
     # MAT_177 → LAW62 (LCID=0 constants branch; LCID>0 warn-skips at parse).
-    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) is deliberately NOT routed here:
-    # dyna2rad maps it to law 14, which has no case in its dispatch switch and
-    # falls into the generic 1:1 dump — k2rad leaves it in skipped_keywords
-    # rather than silently converting away its failure semantics.
+    #
+    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) used to be excluded here on the
+    # ground that "dyna2rad maps it to law 14, which has no case in its
+    # dispatch switch and falls into the generic 1:1 dump". That is a fact
+    # about d2r, not a reason for k2rad, which has its own MAT_005 -> LAW21
+    # route — the #130 exclusion-list audit. Vol II R17 p.2-209 states the
+    # keyword in one sentence: *"The input for this model is the same as for
+    # *MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure reaches the
+    # tensile failure pressure, the element loses its ability to carry
+    # tension."* /FAIL/SPALLING with Ifail_so = 1 is that latch exactly
+    # (fail_spalling_s.F90:241-268), so the same handler reads both spellings
+    # and the writer adds the rider.
     "MAT_SOIL_AND_FOAM":                      handle_mat_soil_and_foam,
     "MAT_5":                                  handle_mat_soil_and_foam,
     "MAT_005":                                handle_mat_soil_and_foam,
+    "MAT_SOIL_AND_FOAM_FAILURE":              handle_mat_soil_and_foam,
+    "MAT_14":                                 handle_mat_soil_and_foam,
+    "MAT_014":                                handle_mat_soil_and_foam,
     "MAT_LOW_DENSITY_VISCOUS_FOAM":           handle_mat_low_density_viscous_foam,
     "MAT_73":                                 handle_mat_low_density_viscous_foam,
     "MAT_073":                                handle_mat_low_density_viscous_foam,
@@ -17590,6 +17996,37 @@ RARE_MATERIAL_KEYWORDS = {
     "MAT_SHAPE_MEMORY":   handle_mat_shape_memory,
     "MAT_030":            handle_mat_shape_memory,
     "MAT_30":             handle_mat_shape_memory,
+    # ── R14 triage batch, round 1 ──────────────────────────────────────────
+    # The two temperature-dependent elasto-plastic laws behind 13 of the 29
+    # ERROR-179 decks. Both land on /MAT/LAW106, the only law available at
+    # /BEGIN 2022 that carries E(T) and nu(T) as plain functions of
+    # temperature (LAW129, the exact target, first appears in radioss2025).
+    "MAT_ELASTIC_PLASTIC_THERMAL": handle_mat_elastic_plastic_thermal,
+    "MAT_004":                     handle_mat_elastic_plastic_thermal,
+    "MAT_4":                       handle_mat_elastic_plastic_thermal,
+    "MAT_CWM":                     handle_mat_cwm,
+    "MAT_270":                     handle_mat_cwm,
+    # *MAT_010 -> /MAT/LAW3 (HYDPLA) + the same-id /EOS. The _SPALL option is
+    # NOT a trailing _ID/_TITLE, so parser._split_keyword leaves it in the
+    # keyword: the spelling is its own row, and the handler reads the flag off
+    # block.keyword (its card 1a shifts the EPS/ES table by one row).
+    # Refused BY NAME (recognized, no /MAT): three families of the R14
+    # ERROR-179 census whose law has no Radioss counterpart at /BEGIN 2022.
+    # Generated from ONE table so the canonical name and its numeric alias can
+    # never be diagnosed differently (the _MAT_THERMAL_ALIASES rule).
+    **{kw: _material_refused(names[0], what, why)
+       for names, (what, why) in _REFUSED_MATERIALS.items() for kw in names},
+    # *MAT_140 -> /MAT/VOID so the vacuum *PART resolves; the /MAT/LAW51
+    # phase list drops it (LAW0 is not on fill_buffer_51.F:210's list, and
+    # Radioss's void is the UNDECLARED BALANCE of the volume fractions).
+    "MAT_VACUUM":                      handle_mat_vacuum,
+    "MAT_140":                         handle_mat_vacuum,
+    "MAT_ELASTIC_PLASTIC_HYDRO":       handle_mat_elastic_plastic_hydro,
+    "MAT_ELASTIC_PLASTIC_HYDRO_SPALL": handle_mat_elastic_plastic_hydro,
+    "MAT_010":                         handle_mat_elastic_plastic_hydro,
+    "MAT_10":                          handle_mat_elastic_plastic_hydro,
+    "MAT_010_SPALL":                   handle_mat_elastic_plastic_hydro,
+    "MAT_10_SPALL":                    handle_mat_elastic_plastic_hydro,
     "MAT_MUSCLE":         handle_mat_muscle,
     "MAT_156":            handle_mat_muscle,
     # *MAT_SPRING_MUSCLE's numeric alias is *MAT_S15 (Vol II R17 p.2-2095

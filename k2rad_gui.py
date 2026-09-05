@@ -94,10 +94,15 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
+                         zero_density_floor: bool = True,
+                         law106_shell_restate: bool = True,
+                         zero_t0_sentinel: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
                          dt_del: str = "",
+                         he_bunreacted: str = "",
+                         ale_multimat_law51: bool = False,
                          eroding_surf_ext: bool = False,
                          airbag_particle_uniform: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
@@ -171,9 +176,17 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_cog_master"] = bool(rigid_cog_master)
 
+    kwargs["zero_density_floor"] = bool(zero_density_floor)
+
+    kwargs["law106_shell_restate"] = bool(law106_shell_restate)
+
+    kwargs["zero_t0_sentinel"] = bool(zero_t0_sentinel)
+
     kwargs["write_restart"] = bool(write_restart)
 
     kwargs["ams"] = bool(ams)
+
+    kwargs["ale_multimat_law51"] = bool(ale_multimat_law51)
 
     kwargs["eroding_surf_ext"] = bool(eroding_surf_ext)
 
@@ -200,6 +213,27 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                 "Time-step deletion floor must be > 0 seconds (leave blank to "
                 "emit no /DT/.../DEL card).")
         kwargs["dt_del"] = v
+
+    # /MAT/LAW5 Bunreacted override. Blank = k2rad's own rule (the card's K,
+    # else 0, which mjwl.F:166 makes exactly LS-DYNA's p = F*p_eos, or the
+    # derived JWL isentrope slope for an AMMG member under
+    # --ale-multimat-law51); an unparseable value must be an error, never a
+    # silently-ignored blank. 0 IS legal and is the default: the ERROR 99 that
+    # used to forbid it can only fire on an emitted /MAT/LAW51.
+    he_bunreacted = (he_bunreacted or "").strip()
+    if he_bunreacted:
+        try:
+            hb = float(he_bunreacted)
+        except ValueError:
+            raise ValueError(
+                "Unreacted-explosive bulk modulus must be a number in the "
+                f"deck's pressure unit, not {he_bunreacted!r}.")
+        if hb < 0.0:
+            raise ValueError(
+                "Unreacted-explosive bulk modulus cannot be negative "
+                f"({hb:g}); leave it blank for k2rad's own rule, or pass 0 "
+                "for LS-DYNA's p = F*p_eos.")
+        kwargs["he_bunreacted"] = hb
 
     return kwargs
 
@@ -232,13 +266,18 @@ class ConverterGUI:
         self.fixpoint_count = tk.StringVar(value="100")
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
+        self.zero_density_floor = tk.BooleanVar(value=True)
+        self.law106_shell_restate = tk.BooleanVar(value=True)
+        self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
+        self.ale_multimat_law51 = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
         self.airbag_particle_uniform = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
+        self.he_bunreacted = tk.StringVar(value="")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -305,6 +344,35 @@ class ConverterGUI:
             variable=self.rigid_cog).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
+            io, text="Zero-density floor (default on — a material stating RO <= 0 "
+                     "gets rho = 1e-24 in the deck's own units, the substitution "
+                     "LS-DYNA itself makes; without it the starter refuses the deck "
+                     "with ERROR 683. Static/eigenvalue answers are unaffected; an "
+                     "EXPLICIT deck is warned that its time step collapses. Untick "
+                     "to copy the deck's own RO through)",
+            variable=self.zero_density_floor).grid(row=7, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Restate a shell-only *MAT_004/*MAT_CWM as /MAT/LAW36  "
+                     "(default on: a /MAT/LAW106 SHELL does not thermally expand "
+                     "at all — sigeps106c.F90:297-298 rebuilds the stress from the "
+                     "TOTAL strain and discards what cmain3.F:348's THERMEXPC "
+                     "subtracts; measured 0.0000000e+00 vs a closed-form 1.2e-2 mm, "
+                     "against an exact 1.2000000e-02 restated. Solids are "
+                     "never restated. Untick to keep "
+                     "/MAT/LAW106 and its E(T) with zero expansion)",
+            variable=self.law106_shell_restate).grid(row=8, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Dodge Radioss 0-means-300K initial temperature  "
+                     "(default on: a deck that STATES T = 0 gets /HEAT/MAT "
+                     "T0 = 1e-10 instead, because hm_read_therm.F:236-237 "
+                     "turns a zero T0 into 300 K and every node still at 0.0 "
+                     "is then overwritten with it. Measured +468.9 % vs the "
+                     "LS-DYNA reference without it, +0.91 % with it)",
+            variable=self.zero_t0_sentinel).grid(row=9, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
             io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
                      "restart files are only needed for /RERUN or crash recovery and "
                      "are large — the starter's mandatory _0000_*.rst is unaffected)",
@@ -325,6 +393,18 @@ class ConverterGUI:
                      "engine wakes when a brick dies; with /EXT the crater face a "
                      "dying element exposes has NO contact and nothing warns you",
             variable=self.eroding_surf_ext).grid(row=10, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Emit the synthesized /MAT/LAW51 for an "
+                     "*ALE_MULTI-MATERIAL_GROUP (default OFF: k2rad writes the "
+                     "LS-DYNA per-fluid ALE layout, so no /PART it emits can "
+                     "reference that card — measured inert, every T01 channel "
+                     "identical without it. Keeping it only forced a positive "
+                     "/MAT/LAW5 Bunreacted, which mjwl.F:166 turns into a real "
+                     "(1-F)*K*mu pre-burn stiffness LS-DYNA does not have. Tick "
+                     "it if you will consolidate the ALE mesh onto one /PART "
+                     "by hand)",
+            variable=self.ale_multimat_law51).grid(row=10, column=3, columnspan=3, sticky="w", **pad)
 
         # row 13: after the dt_del entry (row 12), the last row this frame uses.
         ttk.Checkbutton(
@@ -384,6 +464,31 @@ class ConverterGUI:
                  "initial step deletes elements that merely stretched ~10%, "
                  "~0.4-0.5x reserves it for near-total element collapse."
         ).grid(row=12, column=0, columnspan=3, sticky="w", **pad)
+
+        # ── Unreacted-explosive bulk modulus (R14 triage batch) ─────────────
+        # An entry box, not a checkbox: the cell is a MODULUS, and there is no
+        # safe default to tick into existence — blank means "use the card's
+        # own K, or the derived JWL isentrope slope where a LAW51 phase makes
+        # a positive value mandatory", and the derivation names itself in the
+        # log every time it fires.
+        ttk.Label(
+            io, text="Unreacted-explosive bulk modulus Bunreacted "
+                     "(blank = derive):"
+        ).grid(row=13, column=0, sticky="w", **pad)
+        ttk.Entry(io, textvariable=self.he_bunreacted, width=14).grid(
+            row=13, column=1, sticky="w", **pad)
+        ttk.Label(
+            io, wraplength=760, foreground="#804000",
+            text="Overrides the /MAT/LAW5 Bunreacted cell, in the deck's own "
+                 "pressure unit. *MAT_HIGH_EXPLOSIVE_BURN's K is 'BETA = 2.0 "
+                 "only', so a beta-burn deck legally states 0 — but "
+                 "fill_buffer_51.F:496 refuses a /MAT/LAW51 phase whose "
+                 "Bunreacted is <= 0 (ERROR 99). Left blank, k2rad writes the "
+                 "card's K when it has one and otherwise derives "
+                 "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0 from the companion "
+                 "*EOS_JWL, for AMMG members only. Fill this in to state a "
+                 "measured value instead."
+        ).grid(row=14, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -514,10 +619,15 @@ class ConverterGUI:
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
+                zero_density_floor=self.zero_density_floor.get(),
+                law106_shell_restate=self.law106_shell_restate.get(),
+                zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
                 dt_del=self.dt_del.get(),
+                he_bunreacted=self.he_bunreacted.get(),
+                ale_multimat_law51=self.ale_multimat_law51.get(),
                 eroding_surf_ext=self.eroding_surf_ext.get(),
                 airbag_particle_uniform=self.airbag_particle_uniform.get(),
             )
@@ -613,14 +723,26 @@ class ConverterGUI:
             bits.append(f"blast ground={kwargs['blast_ground']}")
         if not kwargs.get("rigid_cog_master", True):
             bits.append("mesh-node rigid masters (--no-rigid-cog-master)")
+        if not kwargs.get("zero_density_floor", True):
+            bits.append("deck's own RO <= 0 kept (--no-zero-density-floor)")
+        if not kwargs.get("law106_shell_restate", True):
+            bits.append("/MAT/LAW106 kept on shells, no thermal expansion "
+                        "(--no-law106-shell-restate)")
+        if not kwargs.get("zero_t0_sentinel", True):
+            bits.append("stated T = 0 written as 0 (--no-zero-t0-sentinel)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):
             bits.append("Advanced Mass Scaling (/DT/AMS)")
+        if kwargs.get("ale_multimat_law51"):
+            bits.append("synthesized /MAT/LAW51 for *ALE_MULTI-MATERIAL_GROUP "
+                        "(--ale-multimat-law51)")
         if kwargs.get("eroding_surf_ext"):
             bits.append("eroding contacts on /SURF/PART/EXT (no interior re-exposure)")
         if kwargs.get("airbag_particle_uniform"):
             bits.append("*AIRBAG_PARTICLE as uniform-pressure /MONVOL/AIRBAG1")
+        if kwargs.get("he_bunreacted") is not None:
+            bits.append(f"Bunreacted={kwargs['he_bunreacted']:g}")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

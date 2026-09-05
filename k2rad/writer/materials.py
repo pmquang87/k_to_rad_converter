@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState,
     MatElastic,
@@ -54,6 +55,12 @@ from ..state import (
     EosJwl,
     EosCard,
     MatShapeMemory,
+    MatCWM,
+    MatElasticPlasticThermal,
+    MatElasticPlasticHydro,
+    MatLaw3,
+    MatLaw106,
+    MatVacuum,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
                      _ref_flag_materials, _spotweld_beam_pids)
@@ -139,6 +146,22 @@ __all__ = [
     # Rare materials batch
     "_resolve_mat_shape_memory",
     "_emit_mat_law71",
+    # R14 triage batch, round 1
+    "_resolve_mat_law106",
+    "_emit_mat_law106",
+    "_interp_table",
+    "_resolve_mat_law3",
+    "_emit_mat_law3",
+    "_emit_fail_spalling",
+    "_emit_mat_vacuum",
+    "_warn_refused_materials",
+    "_resolve_he_bunreacted",
+    "_ammg_member_mids",
+    "_jwl_unreacted_bulk",
+    "_apply_zero_density_floor",
+    "_ZERO_DENSITY_FLOOR",
+    "_resolve_ale_submaterials",
+    "_submaterial_has_eos",
 ]
 
 
@@ -168,6 +191,12 @@ def _make_materials(state: ConversionState) -> List[str]:
     for mat in state.mat_null.values():
         if mat.mid in void_mids:
             lines += _emit_mat_void(mat)
+    # *MAT_VACUUM lands on the SAME /MAT/VOID: a region that carries no stress
+    # at all. It exists so the vacuum *PART resolves (ERROR 179 otherwise);
+    # _resolve_ale_submaterials keeps it OUT of the /MAT/LAW51 phase list,
+    # where Radioss's void is the undeclared balance of the volume fractions.
+    for vac in state.mat_vacuum.values():
+        lines += _emit_mat_vacuum(vac)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
     for mat in state.mat_samp.values():
@@ -185,6 +214,8 @@ def _make_materials(state: ConversionState) -> List[str]:
     # in writer/composites.py like the other material-driven ortho props)
     for mat in state.mat_soil_and_foam.values():
         lines += _emit_mat_law21(mat)
+        if mat.latched_tension_failure:
+            lines += _emit_fail_spalling(mat.mid, mat.pc)
     for mat in state.mat_low_density_viscous_foam.values():
         lines += _emit_mat_law90(mat)
     for mat in state.mat_modified_honeycomb.values():
@@ -259,6 +290,21 @@ def _make_materials(state: ConversionState) -> List[str]:
     # /MAT at all, exactly like the *MAT_Sxx spring family.
     for mat in state.mat_shape_memory.values():
         lines += _emit_mat_law71(mat)
+    # R14 triage batch: *MAT_004 and *MAT_270 both land on /MAT/LAW106, and
+    # both are routed by _resolve_mat_law106 into the single resolved registry
+    # this loop reads — a source card the resolver refused leaves no entry, so
+    # its /PART reports a dangling material rather than getting a half-built
+    # card. The matching /THERM_STRESS/MAT + /HEAT/MAT pair is written by the
+    # thermal section (both are keyed on the material id).
+    for law106 in state.mat_law106.values():
+        lines += _emit_mat_law106(law106)
+    # *MAT_010 -> /MAT/LAW3 + the same-id /EOS, emitted TOGETHER (Radioss binds
+    # an equation of state to the material of the same id) exactly as the LAW4
+    # HYD_JCOOK route does. _law3_consumed_eos_ids keeps the orphan-EOS arm of
+    # _make_explosive_and_eos_materials from claiming the same id a second
+    # time — or, worse, telling the reader the EOS was not emitted (#129).
+    for law3 in state.mat_law3.values():
+        lines += _emit_mat_law3(law3, state)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -474,7 +520,7 @@ def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
         "#                  D                P_CJ                  E0                Eadd   I_BFRAC      Qopt",
         f"{_f(heb.d)}{_f(heb.pcj)}{_f(e0)}{_f(0.0)}         0         0",
         "#                 P0                 PSH          Bunreacted",
-        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(0.0)}{_f(heb.bunreacted)}",
         HDR,
     ]
 
@@ -592,6 +638,12 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     # An *EOS_* consumed by a *MAT_JOHNSON_COOK /MAT/LAW4 route is emitted
     # there (rebound to the mat id) — not as a standalone LAW6-carrier fluid.
     jc_consumed = _jc_consumed_eos_ids(state)
+    # An *EOS_* emitted BESIDE a /MAT/LAW3 is likewise not an orphan: it is
+    # written by _emit_mat_law3 under the same id. Without this the owner arm
+    # below would tell the reader "the equation of state was NOT emitted"
+    # about one this converter does write (#129) — measured on the three
+    # *MAT_ELASTIC_PLASTIC_HYDRO corpus decks.
+    jc_consumed |= _law3_consumed_eos_ids(state)
     # ... and the ids the impact/blast batch already owns, which the shared-id
     # carrier convention below must not claim a second time (ERROR 79).
     impact_claimed = _impact_claimed_mids(state)
@@ -791,6 +843,23 @@ def _emit_mat_void(mat: MatNull) -> List[str]:
         mat.title or f"MAT_{mat.mid}",
         "#              RHO_I                   E                  nu",
         f"{_f(mat.rho)}{_f(mat.E)}{_f(mat.nu)}",
+        HDR,
+    ]
+
+
+def _emit_mat_vacuum(mat: MatVacuum) -> List[str]:
+    """``*MAT_VACUUM`` → ``/MAT/VOID`` — the same card a bare ``*MAT_NULL``
+    takes, under the vacuum material's own id.
+
+    ``RHO_I`` is written verbatim, ``0.0`` included: ``hm_read_mat.F90:
+    1575-1583`` exempts law 0 from ``ERROR 683``, so a corpus deck stating
+    ``RHO = 0`` (``ale_wavehitcol.k``) needs no density substitution.
+    """
+    return [
+        f"/MAT/VOID/{mat.mid}",
+        mat.title or f"VACUUM_{mat.mid}",
+        "#              RHO_I                   E                  nu",
+        f"{_f(mat.rho)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
 
@@ -1690,7 +1759,23 @@ def _plas_kin_law2_expressible(mat: MatPlasKin) -> bool:
 
 
 def _plas_kin_law2_eligible(state: ConversionState, mat: MatPlasKin) -> bool:
-    """Does this *MAT_PLASTIC_KINEMATIC become LAW2 UNDER ITS OWN ID?"""
+    """Does this *MAT_PLASTIC_KINEMATIC become LAW2 UNDER ITS OWN ID?
+
+    ONE reason today: an SPH part, because LAW44 is not SPH-declared and the
+    starter answers a particle on it with ERROR 3046.
+
+    An ``*ALE_MULTI-MATERIAL_GROUP`` member looks like a second reason — LAW44
+    is not on ``fill_buffer_51.F:210``'s allowed phase list either — and it is
+    NOT, because a restatement could never make such a material a legal phase:
+    ``:281`` refuses any non-explosive submaterial whose ``EOS_TYPE`` is 0 with
+    ``MISSING SUBMATERIAL EOS``, and a ``*MAT_PLASTIC_KINEMATIC`` carries no
+    equation of state in this converter or in the deck. MEASURED on
+    ``cylinder_impact_A``, whose restated LAW2 phase answered BOTH
+    ``SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW 51`` and ``MISSING
+    SUBMATERIAL EOS``. So the phase is dropped by name instead
+    (``_resolve_ale_submaterials``) and the material keeps LAW44, which is what
+    its Lagrangian side needs anyway.
+    """
     return _sph_only_mid(state, mat.mid) and _plas_kin_law2_expressible(mat)
 
 
@@ -2252,6 +2337,44 @@ def _resolve_mat_foams(state: ConversionState) -> None:
     _resolve_mat_hill_foam(state)
 
 
+def _warn_soil_foam_failure_latch(state: ConversionState,
+                                  mat: MatSoilAndFoam) -> None:
+    """Name what the ``/FAIL/SPALLING`` rider buys over a bare ``/MAT/LAW21``.
+
+    The exclusion this replaces gave a d2r fact as its reason (#130); the real
+    question is what the keyword's ONE extra sentence needs, and LAW21 alone
+    does not supply it: ``m21law.F:189`` is ``p = max(pmin,p)*off`` and
+    ``:196-200`` zeroes ``A0/A1/A2`` while ``P < PMIN`` — both recomputed from
+    the CURRENT pressure every step, so a cell that has been in tension
+    RECOVERS its full strength the moment the pressure comes back up. The
+    latch is what makes it MAT_014.
+    """
+    state.warn(
+        f"*MAT_SOIL_AND_FOAM_FAILURE {mat.mid} -> /MAT/LAW21 + "
+        f"/FAIL/SPALLING/{mat.mid} (Ifail_so = 1, P_min = {mat.pc:g}, "
+        "D1..D5 = 0). Vol II R17 p.2-209 states the whole keyword in one "
+        "sentence: 'The input for this model is the same as for "
+        "*MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure reaches "
+        "the tensile failure pressure, the element loses its ability to carry "
+        "tension.' /MAT/LAW21 ALONE does not do that: m21law.F:189 clamps "
+        "p = max(pmin,p)*off and :196-200 zeroes A0/A1/A2 while P < PMIN, both "
+        "recomputed from the CURRENT pressure every step — so a cell that has "
+        "been in tension RECOVERS its full strength when the pressure comes "
+        "back up. /FAIL/SPALLING with Ifail_so = 1 supplies the LATCH: "
+        "fail_spalling_s.F90:241-268 accumulates dfmax = max(dfmax, "
+        "min(p,0)/P_min) MONOTONICALLY, zeroes the stress tensor once when it "
+        "reaches 1, and thereafter writes sigxx = sigyy = sigzz = -max(p,0) "
+        "with all shears 0 — compression only, no deviator, and the element is "
+        "NOT deleted. D1..D5 stay 0 and Ifail_so = 1 keeps the Johnson-Cook "
+        "branches (iflag 2/3/4) and the deletion out of it entirely. "
+        "Everything else on the card is read exactly as *MAT_SOIL_AND_FOAM."
+        + ("" if mat.pc else
+           " NOTE PC = 0 on this card: hm_read_fail_spalling.F90:102 turns a "
+           "zero P_min into -1e20, so the latch can never trip and the "
+           "material behaves as plain *MAT_SOIL_AND_FOAM — state a negative "
+           "tensile cutoff if the failure is meant to occur."))
+
+
 def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
     """*MAT_SOIL_AND_FOAM: the pressure-curve axis transform and the
     field-level approximation warnings.
@@ -2274,6 +2397,8 @@ def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
         return
     shell_parts = _shell_parts_by_mid(state)
     for mat in state.mat_soil_and_foam.values():
+        if mat.latched_tension_failure:
+            _warn_soil_foam_failure_latch(state, mat)
         g, k = mat.g, mat.kun
         denom = 3.0 * k + g
         E = 9.0 * g * k / denom if denom != 0.0 else 0.0
@@ -2983,6 +3108,48 @@ def _emit_mat_law21(mat: MatSoilAndFoam) -> List[str]:
         f"{_f(mat.pc)}{_f(0.0)}",
         "#                  B              Mu_max",
         f"{_f(b)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_fail_spalling(mid: int, pc: float) -> List[str]:
+    """``/FAIL/SPALLING`` — the LATCHED tensile cutoff of
+    ``*MAT_SOIL_AND_FOAM_FAILURE`` (``*MAT_014``).
+
+    Card layout from ``radioss2018/FAIL/fail_spalling.cfg``
+    ``FORMAT(radioss130)``, the newest block a ``/BEGIN 2022`` deck reads::
+
+        C1: D1(20) D2(20) D3(20) D4(20) D5(20)
+        C2: Epsilon_Dot_0(20) P_min(20) Ifail_so(10)
+
+    ``D1..D5`` are written 0 and ``Ifail_so = 1``, which is the PURE ``P_min``
+    branch: ``hm_read_fail_spalling.F90:98-104`` clamps
+    ``isolid = max(1, min(6, Ifail_so))`` into ``fail%iparam(1)``, and
+    ``fail_spalling_s.F90:104-131`` maps ``iflag = 1`` to ``ispall = 1`` with
+    no ``idel``/``idev``, so the Johnson-Cook branches (``iflag == 2/3/4``)
+    and the element deletion never run.
+
+    What ``ispall = 1`` does, at ``fail_spalling_s.F90:241-268``: it
+    accumulates ``dfmax(i,3) = max(dfmax(i,3), min(p,0)/pmin)`` — MONOTONE, so
+    once the cell has seen ``p <= P_min`` the damage stays at 1 — zeroes the
+    whole stress tensor once, and from then on writes
+    ``sigxx = sigyy = sigzz = -max(p,0)`` with all shears 0: compression only,
+    no deviator, **element not deleted**. That is exactly Vol II R17 p.2-209's
+    *"the element loses its ability to carry tension"*.
+
+    Dispatch verified: ``mmain.F90:2242`` gates the ``/FAIL`` loop on
+    ``nfail > 0 .and. (mtn < 28 .or. mtn == 49)`` and LAW21 is ``mtn = 21``;
+    the ``do ir = 1,nfail`` loop is a SIBLING of the ``istrain`` block at
+    ``:2243``, so it runs regardless of the ``/PROP`` ``istrain`` flag, and the
+    spalling criterion reads only ``lbuf%sig``.
+    """
+    return [
+        f"/FAIL/SPALLING/{mid}",
+        "#                 D1                  D2                  D3"
+        "                  D4                  D5",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#      EPSILON_DOT_0               P_MIN  IFAIL_SO",
+        f"{_f(0.0)}{_f(pc)}{_i(1)}",
         HDR,
     ]
 
@@ -8239,6 +8406,10 @@ def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_functions(state: ConversionState) -> List[str]:
+    # Local import: writer/loads.py imports writer/mesh.py, which imports THIS
+    # module at load time, so a top-level import here would close the cycle —
+    # the same shape as the _target_mat_law imports below.
+    from .loads import _monotonic_abscissae
     tables_2d = {tbid: t for tbid, t in state.define_tables.items()
                  if t.resolved and t.rows}
     if not state.curves and not tables_2d and not state.auto_tables:
@@ -8312,7 +8483,17 @@ def _make_functions(state: ConversionState) -> List[str]:
                 curve.title or f"FUNCT_{lcid}",
                 "#                  X                   Y",
             ]
-        for a, o in curve.pts:
+        # The #113 guard, on the MAIN emitter at last. It lived on
+        # writer/loads.py::_emit_funct (the connector-inline /FUNCT writer) and
+        # on handle_define_curve_smooth's builder, and this — the one emitter
+        # every *DEFINE_CURVE goes through — wrote curve.pts verbatim, so a
+        # deck whose curve reverses direction went out unrepaired and the
+        # starter refused the whole model (ERROR 156). Measured carrier:
+        # mat_spring.belted-dummy's curve 50, point 26 at x = 0.1125 after
+        # 0.1195. A tie keeps its ordinate; a REVERSAL is re-anchored onto the
+        # value LS-DYNA itself evaluates there — see _monotonic_abscissae.
+        for a, o in _monotonic_abscissae(
+                curve.pts, state, f"*DEFINE_CURVE {lcid}"):
             lines.append(f"{_f(a)}{_f(o)}")
         lines.append(HDR)
     for tbid, tab in sorted(tables_2d.items()):
@@ -8746,3 +8927,2007 @@ def _emit_mat_law71(mat: MatShapeMemory) -> List[str]:
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: *MAT_004 / *MAT_270 → /MAT/LAW106
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The yield stress written for a THERMO-ELASTIC card. Vol II R17 p.2-177
+#: Remark 2: *"If a thermo-elastic material is considered, do not define SIGY
+#: and ETAN"* — so ``SIGY = 0`` means "never yields", not "yields at zero".
+#: ``hm_read_mat106.F90``'s default block substitutes ``infinity`` for a blank
+#: ``epsmax`` and ``sigmax`` but NOT for ``MAT_SIGY``, so a copied 0 would make
+#: the material perfectly plastic at zero stress. 1e20 is the deck's own idiom
+#: — ``thermal-stress.k`` states exactly that in its own ``SIGY1..SIGY6``.
+_LAW106_NO_YIELD = 1.0e20
+
+
+def _interp_table(xs: List[float], ys: List[float], x: float) -> float:
+    """Piecewise-linear ``y(x)`` on an increasing ``xs``, clamped at both ends.
+
+    Radioss clamps nothing — it EXTRAPOLATES a ``/FUNCT`` past its last point,
+    where LS-DYNA *"will terminate if a material temperature falls outside the
+    range specified in the input"* (Vol II R17 p.2-177 Remark 2). That
+    difference is NAMED in the per-card warning rather than papered over; this
+    helper is only used to read the card AT the reference temperature, which
+    is inside the range by construction.
+    """
+    if not xs:
+        return 0.0
+    if x <= xs[0]:
+        return ys[0]
+    for i in range(1, len(xs)):
+        if x <= xs[i]:
+            span = xs[i] - xs[i - 1]
+            if span <= 0.0:
+                return ys[i]
+            f = (x - xs[i - 1]) / span
+            return ys[i - 1] + f * (ys[i] - ys[i - 1])
+    return ys[-1]
+
+
+def _law106_reference_temperature(state: ConversionState,
+                                  xs: List[float]) -> Tuple[float, str]:
+    """The temperature at which the card's scalars are frozen, and WHY.
+
+    LAW106 carries ``E(T)``, ``nu(T)`` and ``alpha(T)`` as functions, so the
+    reference temperature is only a NORMALISATION for those three — the
+    emitted ``E·f(T)`` is the deck's own ``E(T)`` at every temperature whatever
+    reference is chosen. Where it really decides something is the yield stress
+    and the hardening modulus, which LAW106 can only hold as CONSTANTS.
+
+    The deck's own model-wide temperature at t = 0 is therefore the right
+    choice when it states one and it lies inside the stated table: that is the
+    state the structure starts from, and on the five corpus decks whose
+    properties are constant it changes nothing at all. Otherwise the table's
+    FIRST point is used — never an average, never a mid-range value, both of
+    which would be invented.
+    """
+    from .thermal import _global_initial_temperature
+    t0 = _global_initial_temperature(state)
+    if t0 is not None and xs and xs[0] <= t0 <= xs[-1]:
+        return t0, (f"the deck's own model-wide temperature at t = 0 ({t0:g}), "
+                    "which lies inside the stated range")
+    if t0 is not None and xs:
+        return xs[0], (
+            f"the table's first point ({xs[0]:g}); the deck's t = 0 "
+            f"temperature {t0:g} lies OUTSIDE the stated range "
+            f"[{xs[0]:g}, {xs[-1]:g}]")
+    return ((xs[0] if xs else 0.0),
+            "the table's first point (the deck states no model-wide "
+            "temperature at t = 0)")
+
+
+def _law106_thermal_rho_cp(state: ConversionState, mid: int) -> float:
+    """``RHO_Cp`` for the card's line 6, from the deck's own ``*MAT_THERMAL_*``.
+
+    A ``/HEAT/MAT`` OVERWRITES ``MAT_PARAM%THERM%RHOCP``
+    (``hm_read_therm.F:244``), and this batch emits one for every LAW106
+    material, so this cell is informational on a deck that has a thermal
+    material and the only capacity the law has on a deck that does not.
+    Reading it from the same TRO·HC the ``/HEAT/MAT`` uses keeps the two lines
+    saying the same thing.
+    """
+    from .thermal import _thermal_material_for_part
+    for pid, part in sorted(state.parts.items()):
+        if part.mid != mid:
+            continue
+        tm = _thermal_material_for_part(state, pid)
+        if tm is None:
+            continue
+        rho = float(getattr(tm, "tro", 0.0) or 0.0)
+        hc = float(getattr(tm, "hc", 0.0) or 0.0)
+        if rho > 0.0 and hc > 0.0:
+            return rho * hc
+    return 0.0
+
+
+def _law106_curve_points(state: ConversionState,
+                         lcid: int) -> Optional[List[Tuple[float, float]]]:
+    """A ``*DEFINE_CURVE``'s (x, y) points, ready to use.
+
+    ``Curve.pts`` is ALREADY scaled: ``handle_define_curve`` stores
+    ``((x + OFFA)·SFA, (y + OFFO)·SFO)`` and keeps ``sfa``/``sfo``/``offa``/
+    ``offo`` beside it only as a record of the source card. Re-applying them
+    here would square the factor — MEASURED on ``05_1_welding_solid.k``, whose
+    ``LCAT`` carries ``SFO = 1e-6`` with ordinates 17 … 22: the doubly-scaled
+    ``/FUNCT`` came out at ``1.7e-11`` instead of the correct ``1.7e-5``, a
+    factor 1e6 on the thermal expansion coefficient, at zero diagnostics.
+    """
+    curve = state.curves.get(lcid)
+    if curve is None or len(curve.pts) < 2:
+        return None
+    return list(curve.pts)
+
+
+def _law106_normalised_function(state: ConversionState, mid: int, tag: str,
+                                pts: List[Tuple[float, float]],
+                                ref: float) -> int:
+    """Register a ``/FUNCT`` of ``(T, y(T)/y_ref)`` and return its id.
+
+    ``hm_read_mat106.F90:250-263`` copies the three tables with
+    ``fscale(1:2) = e`` and ``fscale(3) = nu``, so the function the card names
+    is a MULTIPLIER on the scalar beside it, not the quantity itself.
+    """
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_law106_{tag}_mat{mid}",
+                    [(x, y / ref) for x, y in pts])
+    state.curve_order.append(fid)
+    return fid
+
+
+def _law106_alpha_function(state: ConversionState, mid: int,
+                           pts: List[Tuple[float, float]]) -> int:
+    """Register the ``/THERM_STRESS/MAT`` ``alpha(T)`` function, 1:1.
+
+    **No conversion factor, and that is a derivation, not an assumption.**
+    Vol II R17 ``*MAT_004`` Remark 1: *"The coefficient of thermal expansion is
+    defined as the INSTANTANEOUS value"*, i.e. ``d(eps_T) = alpha(T) dT``.
+    Radioss is the same form, incremental: ``ETH = alpha(T)·Fscale·(T_n −
+    T_{n−1})`` (``mmain.F90:770-786`` for solids, ``thermexpc.F:172-174`` for
+    shells). Two term-for-term identical closed forms need no factor (#128,
+    where d2r's invented ``sqrt(2/3)`` on ``*MAT_030`` ALPHA was the defect).
+    """
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_law106_alpha_mat{mid}", list(pts))
+    state.curve_order.append(fid)
+    return fid
+
+
+def _law106_spread(name: str, xs: List[float],
+                   ys: List[float]) -> Optional[str]:
+    """``"SIGY 435 … 1 over T = 273 … 10000 (factor 435)"`` — or ``None`` when
+    the quantity is constant over the stated range and nothing is lost."""
+    lo, hi = min(ys), max(ys)
+    if hi - lo <= 1e-12 * max(abs(hi), 1.0):
+        return None
+    factor = (f"factor {hi / lo:g}" if lo > 0.0 else
+              f"down to {lo:g}, so no finite ratio")
+    return (f"{name} {ys[0]:g} … {ys[-1]:g} over T = {xs[0]:g} … {xs[-1]:g} "
+            f"({factor})")
+
+
+def _resolve_mat_law106(state: ConversionState) -> None:
+    """``*MAT_004`` and ``*MAT_270`` → ``state.mat_law106`` (+ the
+    ``/THERM_STRESS/MAT`` their expansion coefficient needs).
+
+    **Why LAW106 and nothing else.** The complete MAT cfg availability map at
+    ``/BEGIN 2022`` (the union of ``radioss41 … radioss2022``) leaves exactly
+    one law that carries ``E(T)`` and ``nu(T)`` as plain functions of
+    temperature on an ordinary elasto-plastic backbone. ``/MAT/LAW129``
+    (``func_young``/``func_nu``/``func_yld``/``func_alpha``) is the perfect
+    target and first appears in ``radioss2025``; ``/MAT/LAW80`` has a Young
+    function but is the hot-stamping boron-steel law and demands the whole
+    austenite/ferrite/bainite/martensite kinetics; ``/MAT/LAW121``'s
+    ``Fct_YOUN`` is a function of STRAIN RATE, not temperature; LAW2/4/49/103/
+    104/109/110 carry a melting temperature for the FLOW STRESS only.
+
+    **What is carried exactly.** ``E(T)`` and ``nu(T)`` become ``/FUNCT``
+    multipliers on the scalars beside them (``fct_ID1 = fct_ID2`` for E,
+    ``fct_ID3`` for nu — ``sigeps106.F90:231-240`` picks table(2) only while
+    the element is COOLING, so leaving it 0 would use the unscaled ``E`` on
+    every cooling step), and ``alpha(T)`` becomes the ``/THERM_STRESS/MAT``
+    function 1:1. MEASURED that ``E(T)`` is CONSUMED, not merely echoed: two
+    one-brick coupons in confined compression, identical but for the card-6
+    ``Tr`` cell, gave ``sigma_zz`` 32.2609 at ``f(T) = 1`` and 11.5218 at
+    ``f(T) = 0.357143`` — a ratio of 0.357143, exactly ``f(T)`` — with
+    ``sigma_xx/sigma_zz = nu/(1-nu) = 0.428571`` in both.
+
+    **What is lost, and it is named per card.** LAW106's yield temperature
+    dependence is the Johnson-Cook power law ``1 − ((T−Tref)/(Tmelt−Tref))^m``
+    (``sigeps106.F90:306-310``), not a table, so ``SIGY(T)`` and ``ETAN(T)``
+    are frozen at the reference temperature. Fitting ``m`` to the welding
+    decks' 273→493 pair (435→100 MPa) predicts 63.2 MPa at 1273 K against a
+    stated 20 — 3.2x wrong — so nothing is fitted (#124). ``Tmelt`` is left
+    BLANK, which ``hm_read_mat106.F90:151`` turns into infinity and which makes
+    ``thsoft`` identically 1, so ``A`` means exactly ``sigma_y(T_ref)`` rather
+    than a value the engine then knocks down.
+
+    **Version-gated dead cells**, at ``/BEGIN 2022`` and measured on a starter
+    probe: the emitted card is the ``radioss2020/MAT/mat_law106.cfg``
+    ``FORMAT(radioss2019)`` layout, whose cells
+    ``MAT_PC``/``MAT_TMAX``/``MLAW106_COEF``/``MLAW106_TC`` are NOT what the
+    current reader asks for (``MAT_FCUT``, ``MLAW106_VP``, ``MLAW106_CJC``,
+    ``MLAW106_DEPS0``, ``MLAW106_ETA``, ``MLAW106_T0``). ``Pmin``, ``Tmax``,
+    the Taylor-Quinney ``eta`` (defaults to 1), ``T0`` (defaults to ``Tref``),
+    the Johnson-Cook rate coefficient ``C``, ``deps0`` and ``Fcut`` are
+    therefore unreachable — lost BY VERSION, not by mapping. ``Nmax``, ``Tol``,
+    ``m``, ``Tmelt`` and ``Tr`` sit at identical columns in both layouts, so
+    writing the 2026 layout instead would only add ``WARNING 100213/100214``
+    and drop the same cells (#119 case (a)); at ``/BEGIN 2026`` the card must
+    change.
+    """
+    if not (state.mat_ep_thermal or state.mat_cwm):
+        return
+    for mid in sorted(state.mat_ep_thermal):
+        _resolve_one_mat004(state, state.mat_ep_thermal[mid])
+    for mid in sorted(state.mat_cwm):
+        _resolve_one_mat270(state, state.mat_cwm[mid])
+    _resolve_law106_shells(state)
+
+
+def _law106_shell_pids(state: ConversionState,
+                       mid: int) -> Tuple[List[int], List[int]]:
+    """The parts on material ``mid``, split into SHELL and everything else.
+
+    A ``*ELEMENT_TSHELL`` is deliberately NOT a shell here: k2rad writes thick
+    shells as ``/BRICK``, so they take the SOLID engine path
+    (``mmain.F90``), where the expansion is applied to the strain increment
+    before the law dispatch and LAW106 was measured exact.
+    """
+    shell_pids = {e.pid for e in state.shell_elems}
+    shells, others = [], []
+    for pid, part in sorted(state.parts.items()):
+        if part.mid != mid:
+            continue
+        if pid in shell_pids or part.secid in state.sec_shells:
+            shells.append(pid)
+        else:
+            others.append(pid)
+    return shells, others
+
+
+def _resolve_law106_shells(state: ConversionState) -> None:
+    """A ``/MAT/LAW106`` SHELL part cannot expand — restate it as ``/MAT/LAW36``.
+
+    **The mechanism, from the engine source.** ``cmain3.F:348`` runs
+    ``THERMEXPC`` AFTER ``MULAWC`` at ``:320``, and all THERMEXPC does on an
+    ordinary ``/PROP/SHELL`` (``IGTYP = 1``, so ``IORTH_LAY = 0`` and
+    ``IORTH = 0``) is SUBTRACT the thermal stress ``P = (A11 + A12)*eth`` from
+    the stress the law just produced (``thermexpc.F:269-293``). That works only
+    for a law that carries its stress forward: ``sigeps36c.F:276`` is
+    ``SIGNXX = SIGOXX + A1*DEPSXX + A2*DEPSYY``, so LAW36 reads back exactly
+    what THERMEXPC left. ``sigeps106c.F90:297-298`` is
+    ``signxx = aii*(epsxx − eplaxx) + aij*(epsyy − eplayy)`` — a TOTAL-strain
+    rebuild that never reads ``sigoxx`` for the normal components — so the
+    subtraction is DISCARDED on the very next cycle and the shell never
+    expands. SOLIDS are unaffected and are left alone: there the expansion goes
+    into the strain increment BEFORE the law dispatch, and the LAW106 solid
+    coupon was measured correct.
+
+    **MEASURED**, four controlled coupons that differ ONLY in the element
+    family and the law — same 10 mm edge, same ``*BOUNDARY_TEMPERATURE_SET``
+    20 -> 120 K driver, same ``alpha = 1.2e-5``, ``NIP = 3`` on the shells —
+    against the closed form ``alpha*dT*L = 1.2e-2 mm``, all four at 0 ERROR and
+    NORMAL TERMINATION:
+
+      ================================================  =============  =========
+      coupon                                            free edge      vs 1.2e-2
+      ================================================  =============  =========
+      ``*MAT_004`` -> /MAT/LAW106, SOLID                1.2000000e-02  +0.000 %
+      ``*MAT_004`` -> /MAT/LAW106, SHELL                0.0000000e+00  **-100 %**
+      ``*MAT_004`` -> the LAW36 restatement, SHELL      1.2000000e-02  +0.000 %
+      ``*MAT_024`` + expansion -> /MAT/LAW36, SHELL     1.2000000e-02  +0.000 %
+      ================================================  =============  =========
+
+    (Displacements to the anim file's own printed precision.) The restated
+    shell and the ``*MAT_024`` control are not merely close, they are the SAME
+    RUN to every printed digit of the T01: internal energy 6.219282e-02,
+    external work 2.180456e-04, last time step 1.437983e-06 in both. The
+    kept-LAW106 shell reads internal energy -4.759515e-05 instead — 1307x
+    smaller and of the wrong sign — while its starter echoes THERMAL MATERIAL
+    EXPANSION and NIP 3 identically. The emitted cards are correct; the loss is
+    in the engine path, so no card change can reach it.
+
+    **What the restatement costs, and it is named per card.** LAW36 carries no
+    temperature dependence at all, so ``E(T)``, ``nu(T)`` and ``sigma_y(T)``
+    are frozen at the reference temperature the LAW106 record already resolved.
+    The warning prints each table's own measured spread, so a card whose E is
+    flat (``tempcyl.vari``, ``ex_20``, ``main_steel_frame`` — all three state a
+    CONSTANT E and nu) loses NOTHING, and one that is not (``05_2``'s steel,
+    ``E`` 210000 -> 1000) says by how much.
+
+    **Scope.** Only a material whose parts are ALL shells, and only when it
+    actually carries a ``/THERM_STRESS/MAT`` — with no expansion coefficient
+    there is nothing to rescue and LAW106's ``E(T)`` is strictly better. A
+    material shared between shell and solid parts keeps LAW106 and is WARNED
+    by name, because restating it would take the T-dependence away from solids
+    that expand correctly as they are. ``--no-law106-shell-restate`` keeps
+    LAW106 everywhere.
+    """
+    if not state.mat_law106:
+        return
+    from .thermal import _has_initial_state
+    for mid in sorted(state.mat_law106):
+        rec = state.mat_law106[mid]
+        shells, others = _law106_shell_pids(state, mid)
+        if not shells:
+            continue
+        if mid not in state.therm_stress_cards:
+            # No alpha at all: nothing to rescue, and LAW36 would only throw
+            # E(T) away. Silent by design — this is the correct outcome.
+            continue
+        if others:
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 is shared between SHELL "
+                f"part(s) {shells} and non-shell part(s) {others}, and a "
+                "/MAT/LAW106 SHELL DOES NOT THERMALLY EXPAND AT ALL. "
+                "cmain3.F:348 runs THERMEXPC after MULAWC at :320 and all it "
+                "does on a /PROP/SHELL is SUBTRACT the thermal stress from the "
+                "stress the law just produced (thermexpc.F:269-293), while "
+                "sigeps106c.F90:297-298 rebuilds signxx/signyy from the TOTAL "
+                "strain (aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) and never "
+                "reads sigoxx — so the subtraction is discarded on the next "
+                "cycle. MEASURED on four controlled coupons that differ ONLY "
+                "in the element family and the law (10 mm edge, "
+                "*BOUNDARY_TEMPERATURE_SET 20 -> 120 K, alpha 1.2e-5, NIP 3, "
+                "closed form 1.2e-2 mm): the LAW106 SHELL moves 0.0000000e+00 "
+                "(-100 %) where the LAW106 SOLID moves 1.2000000e-02 "
+                "(+0.000 %). k2rad restates a SHELL-ONLY material as "
+                "/MAT/LAW36, which reproduces the *MAT_024 control run to "
+                "EVERY printed T01 digit — but this "
+                "one also carries solids, which expand correctly under LAW106 "
+                "and would LOSE E(T) in the restatement, so the law is left "
+                "alone and the shell parts get NO expansion. Give the shells "
+                "their own *MAT_ELASTIC_PLASTIC_THERMAL / *MAT_CWM id if the "
+                "expansion on them matters.")
+            continue
+        if not state.options.law106_shell_restate:
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 on SHELL part(s) {shells}: "
+                "--no-law106-shell-restate was passed, so the law is KEPT and "
+                "these parts get NO THERMAL EXPANSION AT ALL — "
+                "sigeps106c.F90:297-298 rebuilds the stress from the total "
+                "strain, discarding what THERMEXPC (cmain3.F:348, after MULAWC "
+                "at :320) subtracts. MEASURED: the free edge does not move at "
+                "all (0.0000000e+00 against a closed "
+                "form on a controlled coupon. E(T) and nu(T) are carried "
+                "exactly; the expansion is not carried at all.")
+            continue
+        if _has_initial_state(state, set(shells)):
+            # The #127 mixed-deck rule, exactly as _restate_law1_shells states
+            # it: an /INISHE record's station count is cross-checked against
+            # the /PROP/SHELL N, and LAW106 and LAW36 need not agree on it.
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 on SHELL part(s) {shells} "
+                "would be restated as /MAT/LAW36 so the parts can expand at "
+                "all, but they also carry *INITIAL_STRESS_SHELL / "
+                "*INITIAL_STRAIN_SHELL records whose station count is "
+                "cross-checked against the through-thickness point count "
+                "(ERROR 26 + ERROR 1904). The law is LEFT AS LAW106 and the "
+                "thermal expansion on these parts is INERT (measured "
+                "0.0000000e+00 against a closed-form 1.2e-2 mm on a controlled "
+                "coupon). Drop the initial state, "
+                "or give these parts their own material, if the expansion "
+                "matters.")
+            continue
+        _restate_law106_shell(state, rec, shells)
+
+
+def _restate_law106_shell(state: ConversionState, rec: MatLaw106,
+                          shells: List[int]) -> None:
+    """Swap one shell-only ``/MAT/LAW106`` for the ``/MAT/LAW36`` that can
+    actually expand, and say exactly what the swap froze."""
+    from .thermal import _FAR_YIELD_OVER_E
+    thermo_elastic = rec.a >= _LAW106_NO_YIELD
+    if thermo_elastic:
+        sigy = _FAR_YIELD_OVER_E * rec.e
+        pts = [(0.0, sigy), (1.0, sigy)]
+        yield_note = (f"a flat far-yield curve at {sigy:g} (= 1000 x E, a "
+                      "plastic strain of 1000 — the law never leaves its "
+                      "elastic branch), because the source card states no "
+                      "yield")
+    else:
+        sigy = rec.a
+        pts = [(0.0, sigy), (1.0, sigy + rec.b)]
+        yield_note = (
+            f"a two-point yield curve ({sigy:g} at eps_p = 0, "
+            f"{sigy + rec.b:g} at eps_p = 1), i.e. the SAME yield "
+            f"sigma_y(T_ref) = {sigy:g} and the SAME plastic modulus "
+            f"B = {rec.b:g} the /MAT/LAW106 card carried")
+    if sigy <= 0.0:
+        state.warn(
+            f"{rec.source} {rec.mid} -> /MAT/LAW106 on SHELL part(s) {shells} "
+            f"cannot be restated as /MAT/LAW36: the yield at the reference "
+            f"temperature is {sigy:g}, and /MAT/LAW36 needs a positive one. "
+            "The law is LEFT AS LAW106 and its thermal expansion on these "
+            "parts is INERT (sigeps106c.F90:297-298 rebuilds the stress from "
+            "the total strain, discarding what cmain3.F:348's THERMEXPC "
+            "subtracts — measured 0.0000000e+00 against a closed-form "
+            "1.2e-2 mm on a controlled coupon).")
+        return
+    fid = state.next_curve_id()
+    state.curves[fid] = Curve(
+        lcid=fid, title=f"Auto_law106_shell_yield_mat{rec.mid}",
+        sfa=1.0, sfo=1.0, offa=0.0, offo=0.0, pts=pts)
+    state.curve_order.append(fid)
+    del state.mat_law106[rec.mid]
+    state.law106_shells_restated.add(rec.mid)
+    state.mat_plas_tab[rec.mid] = MatPlasTAB(
+        mid=rec.mid, title=rec.title, rho=rec.rho, E=rec.e, nu=rec.nu,
+        sigy=sigy, etan=0.0, fail=0.0, lcss=0, C=0.0, P=0.0, funct_id=fid)
+    frozen = ", ".join(s for s in state.law106_spreads.get(rec.mid, [])
+                       if s) or "nothing — every table on the card is CONSTANT"
+    state.warn(
+        f"{rec.source} {rec.mid} is on SHELL part(s) {shells} only, so it is "
+        f"RESTATED as /MAT/LAW36 with {yield_note}. WHY: a /MAT/LAW106 SHELL "
+        "DOES NOT THERMALLY EXPAND AT ALL. cmain3.F:348 runs THERMEXPC after "
+        "MULAWC at :320, and on a /PROP/SHELL all THERMEXPC does is SUBTRACT "
+        "the thermal stress from the stress the law just produced "
+        "(thermexpc.F:269-293); sigeps106c.F90:297-298 then rebuilds "
+        "signxx/signyy from the TOTAL strain "
+        "(aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) without ever reading "
+        "sigoxx, so the subtraction is discarded on the next cycle. LAW36 is "
+        "incremental (sigeps36c.F:276, SIGNXX = SIGOXX + A1*DEPSXX + "
+        "A2*DEPSYY) and reads it back. MEASURED on three controlled coupons "
+        "(alpha 1.2e-5, dT 100 K, L 10 mm, NIP 3, closed form 1.2e-2 mm, all "
+        "0 ERROR, all NORMAL TERMINATION): LAW106 SHELL 0.0000000e+00 "
+        "(-100 %, internal energy -4.759515e-05), the LAW36 restatement "
+        "1.2000000e-02 (+0.000 %, internal energy 6.219282e-02), the "
+        "*MAT_024 + *MAT_ADD_THERMAL_EXPANSION control 1.2000000e-02 with an "
+        "internal energy, external work and last time step IDENTICAL to the "
+        "restatement at every printed T01 digit, and LAW106 SOLID "
+        "1.2000000e-02 (+0.000 %). "
+        f"WHAT IT COSTS: /MAT/LAW36 has no temperature dependence, so "
+        f"E = {rec.e:g}, nu = {rec.nu:g} and the yield are FROZEN at the "
+        f"reference temperature Tr = {rec.tr:g}. Frozen on this card: "
+        f"{frozen}. The alpha(T) /THERM_STRESS/MAT and the /HEAT/MAT are "
+        "unchanged and still temperature-dependent. SOLID parts are never "
+        "restated (mmain.F90 applies the expansion before the law dispatch, "
+        "and the LAW106 solid was measured exact). Pass "
+        "--no-law106-shell-restate (convert(law106_shell_restate=False)) to "
+        "keep /MAT/LAW106 and its E(T) at the price of zero expansion.")
+
+
+def _law106_register(state: ConversionState, rec: MatLaw106,
+                     alpha_pts: Optional[List[Tuple[float, float]]]) -> None:
+    """Store the resolved card and, when the source states one, its
+    ``alpha(T)`` → ``/THERM_STRESS/MAT``.
+
+    ``state.therm_stress_cards`` is what ``writer/thermal.py::
+    _resolve_heat_materials`` reads to decide which materials get a
+    ``/HEAT/MAT`` — and the pair is MANDATORY (``ERROR 1129``,
+    ``hm_read_therm_stress.F90:130-132``), so the two must be filled together
+    or not at all.
+    """
+    state.mat_law106[rec.mid] = rec
+    if alpha_pts is None:
+        return
+    if rec.mid in state.therm_stress_cards:
+        state.warn(
+            f"{rec.source} {rec.mid}: a *MAT_ADD_THERMAL_EXPANSION already "
+            "claimed this material's /THERM_STRESS/MAT. /THERM_STRESS is keyed "
+            "on the MATERIAL id and Radioss allows ONE per material, so the "
+            "*MAT_ADD_THERMAL_EXPANSION card WINS and this card's own "
+            "temperature-dependent expansion coefficient is DROPPED. Delete "
+            "one of the two if that is not what the deck means.")
+        return
+    fid = _law106_alpha_function(state, rec.mid, alpha_pts)
+    state.therm_stress_cards[rec.mid] = (fid, 1.0)
+
+
+def _law106_plastic_modulus(state: ConversionState, kw: str, mid: int,
+                            e_ref: float, etan: float) -> float:
+    """``*MAT_004`` ``ETAN`` → the LAW106 ``B`` cell.
+
+    LS-DYNA's ``ETAN`` is the TOTAL-strain tangent modulus while LAW106's
+    ``B·eps_p^n`` is the PLASTIC branch, so ``B = E·ETAN/(E − ETAN)`` — the
+    same derivation ``_plas_kin_b`` already applies to ``*MAT_003``. **It must
+    NOT be applied to ``*MAT_CWM``'s ``LCHR``**, which Vol II R17 p.2-1836
+    Remark 2 already states as the hardening modulus of
+    ``sigma_Y(T) + beta·H(T)·eps_p``.
+    """
+    if etan <= 0.0:
+        return 0.0
+    if etan >= e_ref:
+        state.warn(
+            f"{kw} {mid}: ETAN = {etan:g} at the reference temperature is not "
+            f"below E = {e_ref:g}, so the plastic modulus E·ETAN/(E−ETAN) is "
+            "undefined (a tangent modulus at or above the elastic one is not a "
+            "physical hardening curve). B = 0 (perfectly plastic) is written "
+            "instead; check the card's ETAN row.")
+        return 0.0
+    return e_ref * etan / (e_ref - etan)
+
+
+def _resolve_one_mat004(state: ConversionState,
+                        mat: MatElasticPlasticThermal) -> None:
+    """One ``*MAT_ELASTIC_PLASTIC_THERMAL`` card → its ``/MAT/LAW106``."""
+    from ..handlers import _mat004_live_points
+    n = _mat004_live_points(mat.t)
+    kw = "*MAT_ELASTIC_PLASTIC_THERMAL"
+    if n < 2:
+        state.warn(
+            f"{kw} {mat.mid}: only {n} temperature point(s) can be read from "
+            f"T1..T8 = {[f'{v:g}' for v in mat.t]}. Vol II R17 p.2-177 Remark "
+            "2 requires at least two, in increasing order — an unused slot is "
+            "written 0.0 and the live count is the longest strictly increasing "
+            "prefix. The material is SKIPPED and its /PART reports a dangling "
+            "material id, which names the deck's real problem.")
+        return
+    xs = mat.t[:n]
+    es = mat.e[:n]
+    nus = mat.pr[:n]
+    alphas = mat.alpha[:n]
+    sigys = mat.sigy[:n]
+    etans = mat.etan[:n]
+    if mat.rho <= 0.0 and not state.options.zero_density_floor:
+        # With the floor ON (the default) the density is substituted by
+        # _apply_zero_density_floor, which runs AFTER this resolver, so the
+        # emitted card is never the ERROR-683 one this refusal describes. The
+        # density is pure inertia for LAW106 — E(T), nu(T), alpha(T) and the
+        # yield all come from the temperature table — so the substitution
+        # rescues the material without touching its constitutive answer. That
+        # is NOT true of /MAT/LAW3, whose refusal one function down stays
+        # unconditional: LAW3 derives K0 = rho0 * C^2 from its /EOS, so a
+        # floored density would make the bulk modulus (and with it nu and E)
+        # numerically meaningless rather than merely massless.
+        state.warn(
+            f"{kw} {mat.mid}: RO = {mat.rho:g}. /MAT/LAW106 is not on the "
+            "starter's zero-density exemption list (hm_read_mat.F90:1575-1583 "
+            "exempts only laws 0/20/51/151/108/999), so the card would be "
+            "ERROR 683 (DENSITY IS LESS THAN OR EQUAL TO ZERO) and refuse the "
+            "whole deck. The material is SKIPPED. (--no-zero-density-floor is "
+            "set; with the default floor ON the density would have been "
+            "substituted and this material converted.)")
+        return
+    t_ref, why_ref = _law106_reference_temperature(state, xs)
+    e_ref = _interp_table(xs, es, t_ref)
+    nu_ref = _interp_table(xs, nus, t_ref)
+    if e_ref <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: the Young's modulus at the reference temperature "
+            f"{t_ref:g} is {e_ref:g}. /MAT/LAW106 carries E(T) as a FUNCTION "
+            "SCALED BY E (hm_read_mat106.F90:262, fscale(1:2) = e), so a zero "
+            "or negative scalar makes the whole temperature dependence "
+            "identically zero. The material is SKIPPED.")
+        return
+    fct_e = _law106_normalised_function(
+        state, mat.mid, "E", list(zip(xs, es)), e_ref)
+    fct_nu = 0
+    if nu_ref != 0.0:
+        fct_nu = _law106_normalised_function(
+            state, mat.mid, "nu", list(zip(xs, nus)), nu_ref)
+    # Vol II R17 p.2-177 Remark 2: a thermo-elastic MAT_004 states SIGY = 0.
+    thermo_elastic = all(v == 0.0 for v in sigys)
+    a = _LAW106_NO_YIELD if thermo_elastic else _interp_table(xs, sigys, t_ref)
+    etan_ref = _interp_table(xs, etans, t_ref)
+    b = _law106_plastic_modulus(state, kw, mat.mid, e_ref, etan_ref)
+    alpha_stated = any(v != 0.0 for v in alphas)
+    _law106_register(state, MatLaw106(
+        mid=mat.mid, title=mat.title, rho=mat.rho, e=e_ref, nu=nu_ref,
+        fct_e=fct_e, fct_nu=fct_nu, a=a, b=b, n=1.0,
+        rho_cp=_law106_thermal_rho_cp(state, mat.mid), tr=t_ref, source=kw),
+        list(zip(xs, alphas)) if alpha_stated else None)
+    _law106_report(state, kw, mat.mid, t_ref, why_ref, fct_e, fct_nu,
+                   a, b, thermo_elastic,
+                   [_law106_spread("E", xs, es),
+                    _law106_spread("nu", xs, nus),
+                    _law106_spread("SIGY", xs, sigys),
+                    _law106_spread("ETAN", xs, etans)],
+                   alpha_stated=alpha_stated,
+                   range_lo=xs[0], range_hi=xs[-1])
+
+
+def _resolve_one_mat270(state: ConversionState, mat: MatCWM) -> None:
+    """One ``*MAT_CWM`` card → its ``/MAT/LAW106``.
+
+    Same target family as ``*MAT_004`` with load curves instead of eight-point
+    tables — and the field the two do NOT share is the hardening one.
+    ``LCHR`` is the PLASTIC hardening modulus ``H(T)`` of Vol II R17 p.2-1838
+    Remark 2's ``sigma_Y = sigma_Y(T) + BETA·H(T)·eps_p``, so MAT_004's
+    ``E·ETAN/(E−ETAN)`` total-strain conversion must NOT be applied to it.
+    What it does need is the ``BETA`` split: the same Remark makes the back
+    stress evolve as ``kappa_dot = (1−BETA)·H(T)·eps_dot_p`` and p.2-1836 calls
+    ``BETA`` the *"Fraction of isotropic hardening between 0 and 1"*
+    (``EQ.0.0`` kinematic, ``EQ.1.0`` isotropic). ``/MAT/LAW106`` is purely
+    isotropic, so ``B = BETA·H(T_ref)`` — the isotropic part exactly. Getting
+    either half wrong is a silent factor error, and ``BETA = 0`` is the case
+    where LS-DYNA has NO isotropic hardening at all.
+    """
+    kw = "*MAT_CWM"
+    if mat.rho <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: RO = {mat.rho:g}, which is starter ERROR 683 for "
+            "/MAT/LAW106 (hm_read_mat.F90:1575-1583 exempts only laws "
+            "0/20/51/151/108/999). The material is SKIPPED.")
+        return
+    e_pts = _law106_curve_points(state, mat.lcem)
+    if e_pts is None:
+        state.warn(
+            f"{kw} {mat.mid}: LCEM = {mat.lcem} names no *DEFINE_CURVE with at "
+            "least two points in the converted deck, so the temperature-"
+            "dependent Young's modulus — the one quantity /MAT/LAW106 carries "
+            "exactly — cannot be built. The material is SKIPPED and its /PART "
+            "reports a dangling material id.")
+        return
+    xs = [x for x, _y in e_pts]
+    es = [y for _x, y in e_pts]
+    t_ref, why_ref = _law106_reference_temperature(state, xs)
+    e_ref = _interp_table(xs, es, t_ref)
+    if e_ref <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: LCEM gives E = {e_ref:g} at the reference "
+            f"temperature {t_ref:g}. /MAT/LAW106 scales its E(T) function by "
+            "the E cell (hm_read_mat106.F90:262), so a zero scalar makes the "
+            "whole dependence identically zero. The material is SKIPPED.")
+        return
+    fct_e = _law106_normalised_function(state, mat.mid, "E", e_pts, e_ref)
+    nu_pts = _law106_curve_points(state, mat.lcpr)
+    nu_ref, fct_nu = 0.0, 0
+    if nu_pts is not None:
+        nu_ref = _interp_table([x for x, _y in nu_pts],
+                               [y for _x, y in nu_pts], t_ref)
+        if nu_ref != 0.0:
+            fct_nu = _law106_normalised_function(
+                state, mat.mid, "nu", nu_pts, nu_ref)
+    if nu_ref == 0.0:
+        # A zero Poisson ratio is not a neutral default: it changes the bulk
+        # modulus from E/(3(1-2nu)) to E/3 and removes the transverse coupling
+        # entirely. Every corpus carrier states all five curves, so nothing
+        # reaches this today — but a card that omits LCPR (or names a curve
+        # this deck does not define) must not get it silently.
+        state.warn(
+            f"{kw} {mat.mid}: LCPR = {mat.lcpr} resolves to no usable "
+            "*DEFINE_CURVE, so the /MAT/LAW106 card is written with "
+            "nu = 0 — the card's own default and NOT a neutral one: it makes "
+            "the bulk modulus E/3 instead of E/(3(1-2nu)) and removes the "
+            "transverse coupling, so a confined or plane-strain response is "
+            "wrong by that factor. State LCPR, or a constant Poisson ratio "
+            "curve, if that matters.")
+    sy_pts = _law106_curve_points(state, mat.lcsy)
+    a = (_interp_table([x for x, _y in sy_pts],
+                       [y for _x, y in sy_pts], t_ref)
+         if sy_pts is not None else _LAW106_NO_YIELD)
+    h_pts = _law106_curve_points(state, mat.lchr)
+    # LCHR is ALREADY the plastic hardening modulus (Remark 2) — no
+    # E·Et/(E−Et) conversion here, unlike *MAT_004's ETAN. What it DOES need is
+    # the BETA split: Vol II R17 p.2-1838 Remark 2 gives the effective yield as
+    # sigma_Y = sigma_Y(T) + BETA*H(T)*eps_p with a back stress evolving as
+    # kappa_dot = (1-BETA)*H(T)*eps_dot_p, and the BETA field itself is
+    # "Fraction of isotropic hardening between 0 and 1: EQ.0.0 kinematic,
+    # EQ.1.0 isotropic" (p.2-1836). /MAT/LAW106 is purely isotropic, so the
+    # ISOTROPIC modulus BETA*H(T) is the only part it can carry — writing H(T)
+    # raw would make the card 1/BETA too stiff.
+    h_ref = (_interp_table([x for x, _y in h_pts],
+                           [y for _x, y in h_pts], t_ref)
+             if h_pts is not None else 0.0)
+    b = mat.beta * h_ref
+    alpha_pts = _law106_curve_points(state, mat.lcat)
+    _law106_register(state, MatLaw106(
+        mid=mat.mid, title=mat.title, rho=mat.rho, e=e_ref, nu=nu_ref,
+        fct_e=fct_e, fct_nu=fct_nu, a=a, b=b, n=1.0,
+        rho_cp=_law106_thermal_rho_cp(state, mat.mid), tr=t_ref, source=kw),
+        alpha_pts)
+    spreads = [_law106_spread("E(LCEM)", xs, es)]
+    if nu_pts is not None:
+        spreads.append(_law106_spread(
+            "nu(LCPR)", [x for x, _y in nu_pts], [y for _x, y in nu_pts]))
+    if sy_pts is not None:
+        spreads.append(_law106_spread(
+            "sigma_y(LCSY)", [x for x, _y in sy_pts],
+            [y for _x, y in sy_pts]))
+    if h_pts is not None:
+        spreads.append(_law106_spread(
+            "H(LCHR)", [x for x, _y in h_pts], [y for _x, y in h_pts]))
+    _law106_report(state, kw, mat.mid, t_ref, why_ref, fct_e, fct_nu, a, b,
+                   sy_pts is None, spreads,
+                   alpha_stated=alpha_pts is not None,
+                   range_lo=xs[0], range_hi=xs[-1],
+                   hardening_note=(
+                       "LCHR is ALREADY the PLASTIC hardening modulus (Vol II "
+                       "R17 p.2-1838 Remark 2, sigma_Y = sigma_Y(T) + "
+                       "BETA*H(T)*eps_p), so the E*Et/(E-Et) derivation "
+                       "*MAT_004's total-strain ETAN needs would be a silent "
+                       f"factor error here. B = BETA*H(T_ref) = {mat.beta:g}*"
+                       f"{h_ref:g} = {b:g}: /MAT/LAW106 is purely isotropic and "
+                       "BETA is the ISOTROPIC fraction (p.2-1836), so writing "
+                       "H(T_ref) raw would make the card 1/BETA too stiff"))
+    _warn_cwm_dropped_cells(state, mat)
+
+
+def _law106_report(state: ConversionState, kw: str, mid: int, t_ref: float,
+                   why_ref: str, fct_e: int, fct_nu: int, a: float, b: float,
+                   thermo_elastic: bool, spreads: List[Optional[str]], *,
+                   alpha_stated: bool, range_lo: float, range_hi: float,
+                   hardening_note: str = "") -> None:
+    """The per-card statement of what was carried and what was frozen."""
+    lost = [s for s in spreads if s]
+    # Kept for _resolve_law106_shells: the shell restatement freezes ALL of
+    # them (LAW36 has no temperature dependence at all), and it names the ones
+    # this card actually has rather than the abstraction.
+    state.law106_spreads[mid] = list(lost)
+    frozen = [s for s in lost
+              if s.startswith(("SIGY", "ETAN", "sigma_y", "H("))]
+    carried = [s for s in lost if s not in frozen]
+    state.warn(
+        f"{kw} {mid} -> /MAT/LAW106 (the only law available at /BEGIN 2022 "
+        "that carries E(T) and nu(T) as plain functions of temperature; "
+        "/MAT/LAW129, the exact target, first appears in radioss2025). "
+        f"Reference temperature Tr = {t_ref:g}, chosen as {why_ref}. "
+        f"E(T) is carried EXACTLY as /FUNCT {fct_e} on both fct_ID1 (heating) "
+        "and fct_ID2 (cooling) — sigeps106.F90:231-240 picks the cooling table "
+        "only while the element cools, so one function must fill both"
+        + (f"; nu(T) as /FUNCT {fct_nu} on fct_ID3" if fct_nu else
+           "; nu is a constant (no fct_ID3)")
+        + (f". alpha(T) is carried 1:1 on /THERM_STRESS/MAT/{mid} with "
+           "Fscale = 1: LS-DYNA's coefficient is the INSTANTANEOUS one "
+           "(Vol II R17 *MAT_004 Remark 1) and Radioss's is incremental "
+           "(ETH = alpha(T)*(T_n - T_(n-1)), mmain.F90:770-786), two "
+           "term-for-term identical forms that need no conversion factor"
+           if alpha_stated else
+           ". The card states no thermal expansion coefficient, so no "
+           "/THERM_STRESS/MAT is written")
+        + ((". FROZEN AT Tr, because LAW106's yield temperature dependence is "
+            "the Johnson-Cook power law 1 - ((T-Tref)/(Tmelt-Tref))^m "
+            "(sigeps106.F90:306-310) and not a table: " + "; ".join(frozen)
+            + f". A = {a:g} and B = {b:g} are those values AT Tr; Tmelt is "
+              "left BLANK (hm_read_mat106.F90:151 turns that into infinity) so "
+              "the power law is identically 1 and A means exactly sigma_y(Tr) "
+              "rather than a value the engine then knocks down. NOTHING IS "
+              "FITTED: fitting m to the welding decks' 273 -> 493 K pair "
+              "predicts 63.2 MPa at 1273 K against a stated 20, a factor 3.2")
+           if frozen else
+           f". A = {a:g} and B = {b:g} are constant over the whole stated "
+           "range, so nothing is lost there")
+        + ((". The card is THERMO-ELASTIC (SIGY = 0, which Vol II R17 p.2-177 "
+            f"Remark 2 means as 'do not define'), so A = {_LAW106_NO_YIELD:g} "
+            "is written: hm_read_mat106.F90 substitutes infinity for a blank "
+            "epsmax and sigmax but NOT for MAT_SIGY, and a copied 0 would make "
+            "the material perfectly plastic at zero stress")
+           if thermo_elastic else "")
+        + ((". " + hardening_note) if hardening_note else "")
+        + (". Carried without loss: " + "; ".join(carried) if carried else "")
+        + ". RANGE: LS-DYNA 'will terminate if a material temperature falls "
+          f"outside the range specified in the input' ({range_lo:g} … "
+          f"{range_hi:g}); Radioss does NOT terminate — it EXTRAPOLATES the "
+          "/FUNCT past its last point, so a run that leaves the table gets a "
+          "silently linear-extrapolated modulus instead of a stop. "
+          "Version-gated dead cells at /BEGIN 2022 (measured on a starter "
+          "probe): Pmin, Tmax, the Taylor-Quinney eta (defaults to 1), T0 "
+          "(defaults to Tref), the Johnson-Cook rate coefficient C, deps0 and "
+          "Fcut — the 2019 cfg names cells the current reader does not ask "
+          "for, so they are lost BY VERSION, not by mapping.")
+
+
+def _warn_cwm_dropped_cells(state: ConversionState, mat: MatCWM) -> None:
+    """The three ``*MAT_CWM`` mechanisms LAW106 has no counterpart for, and the
+    four cells that lose NOTHING.
+
+    Named in full because a welding deck's whole point is the residual-stress
+    field, and these three are what produce it. The honest statement is that
+    the converted deck STARTS and TERMINATES NORMALLY and its residual
+    stresses are not validated — presenting a green run as a converted weld
+    would be the #122 "legal, accepted, misleading" trap at deck scale.
+    """
+    losses = []
+    if mat.tastart or mat.taend:
+        losses.append(
+            f"ANNEALING (TASTART={mat.tastart:g}, TAEND={mat.taend:g}): "
+            "Vol II R17 p.2-1838 Remark 3 scales the accumulated plastic "
+            "strain and the back stress by max[0, min(1, (T-TAend)/"
+            "(TAstart-TAend))] before every stress update, i.e. the plastic "
+            "strain is RESET through the annealing window. /MAT/LAW106 "
+            "accumulates plastic strain monotonically and has no such window. "
+            "For a multi-pass weld this is the single largest physics loss")
+    if mat.tlstart or mat.tlend or mat.eghost or mat.pghost or mat.aghost:
+        losses.append(
+            f"GHOST -> LIVE weld-metal deposition (TLSTART={mat.tlstart:g}, "
+            f"TLEND={mat.tlend:g}, EGHOST={mat.eghost:g}, "
+            f"PGHOST={mat.pghost:g}, AGHOST={mat.aghost:g}): Remark 1 blends "
+            "each element's properties by gamma = min(1, max(0, (T_max - "
+            "TLstart)/(TLend - TLstart))) from its OWN running maximum "
+            "temperature, so an unmelted element carries the quiet (ghost) "
+            "moduli. Radioss's nearest machinery is /ACTIV + /SENSOR/TEMP, but "
+            "/SENSOR/TEMP triggers on a /GRNOD (read_sensor_temp.F:81-87), so "
+            "per-element birth would need one sensor, one group and one /ACTIV "
+            "per weld element — and a deactivated solid also stops CONDUCTING "
+            "(STHERM multiplies by OFF). Out of scope for this batch")
+    if mat.beta != 1.0:
+        losses.append(
+            f"BETA={mat.beta:g} splits the hardening between isotropic and "
+            "KINEMATIC. Vol II R17 p.2-1838 Remark 2 makes the effective yield "
+            "sigma_Y = sigma_Y(T) + BETA*H(T)*eps_p with a back stress "
+            "kappa_dot = (1-BETA)*H(T)*eps_dot_p, and p.2-1836 calls BETA the "
+            "'Fraction of isotropic hardening between 0 and 1' (EQ.0.0 "
+            "kinematic, EQ.1.0 isotropic). /MAT/LAW106 is purely isotropic, so "
+            f"k2rad writes B = BETA*H(T_ref) — the isotropic part exactly — and "
+            f"the KINEMATIC fraction 1-BETA = {1.0 - mat.beta:g} is DROPPED "
+            "(no back stress, so no Bauschinger effect on load reversal, which "
+            "is what a multi-pass weld is made of)"
+            + (". At BETA = 0 LS-DYNA has NO isotropic hardening at all, so "
+               "B = 0 and the restated law is perfectly plastic"
+               if mat.beta == 0.0 else
+               ". Only BETA = 1 is lossless here"))
+    if mat.epsini:
+        losses.append(
+            f"EPSINI={mat.epsini:g} (uniform initial plastic strain) has no "
+            "/MAT/LAW106 cell — state it as an *INITIAL_STRESS_* record "
+            "instead")
+    if losses:
+        state.warn(
+            f"*MAT_CWM {mat.mid} -> /MAT/LAW106: NOT carried — "
+            + "; ".join(losses)
+            + ". A welding deck exists to produce a residual-stress field and "
+              "these are what produce it, so the converted deck will START and "
+              "TERMINATE NORMALLY with the correct temperature-dependent "
+              "elasticity and expansion and a residual stress that is NOT "
+              "VALIDATED. Do not read a green run as a converted weld.")
+    if mat.has_card3 and (mat.t2phase or mat.t1phase or mat.dtemp
+                          or mat.postv):
+        state.warn(
+            f"*MAT_CWM {mat.mid}: card 3 (T2PHASE={mat.t2phase:g}, "
+            f"T1PHASE={mat.t1phase:g}, DTEMP={mat.dtemp:g}, "
+            f"POSTV={mat.postv}) is POST-PROCESSING ONLY and loses NOTHING "
+            "mechanical. Vol II R17 p.2-1839 Remark 4: the phase-change cells "
+            "only fill HISTORY VARIABLE 11, an average temperature rate; "
+            "Remark 5: POSTV selects extra history variables; DTEMP sub-cycles "
+            "the bookkeeping that feeds that same variable. ANOPT = 0 is 'no "
+            "modification for thermal expansion' and DOSPOT = 0 leaves "
+            "spot-weld thinning inactive — both are the card's own defaults "
+            "here.")
+
+
+def _emit_mat_law106(mat: MatLaw106) -> List[str]:
+    """``/MAT/LAW106`` — the ``FORMAT(radioss2019)`` block of
+    ``radioss2020/MAT/mat_law106.cfg``, which is what a ``/BEGIN 2022`` deck
+    reads.
+
+    ::
+
+        C1: RHO_I(20)
+        C2: E(20)  nu(20)  fct_ID1(10) fct_ID2(10) fct_ID3(10)
+        C3: A(20)  B(20)   n(20)       epsmax(20)  sigmax(20)
+        C4: Pmin(20) ..10.. Nmax(10)   Tol(20)
+        C5: ..40.. m(20) Tmelt(20) Tmax(20)
+        C6: RHO_Cp(20) Coef(20) Tc(20) Tr(20)
+
+    Cards 4 and 5 are written BLANK on purpose. ``epsmax``/``sigmax`` blank →
+    infinity (``hm_read_mat106.F90:145-147``), ``m`` blank → 1 and ``Tmelt``
+    blank → infinity (``:150``), which is what makes the Johnson-Cook thermal
+    knockdown identically 1 so that ``A`` means ``sigma_y(Tr)`` and nothing
+    else. ``Nmax``/``Tol`` blank take the reader's own return-mapping defaults
+    (3 or 6 iterations, ``tol = 1e-20``).
+
+    **At /BEGIN 2026 this card must change**: the current reader asks for
+    ``MAT_FCUT``, ``MLAW106_VP``, ``MLAW106_NMAX``, ``MLAW106_TOL``,
+    ``MLAW106_CJC``, ``MLAW106_DEPS0`` on line 3 and ``MAT_SPHEAT``,
+    ``MLAW106_ETA``, ``MLAW106_T0``, ``MLAW106_TR`` on line 5, i.e. the 2026
+    layout is ``Fcut VP Nmax Tol C deps0`` at 100 columns on a five-line card.
+    Writing that at 2022 raises ``WARNING 100213/100214`` and drops the cells —
+    benign, because ``Nmax``, ``Tol``, ``m``, ``Tmelt`` and ``Tr`` sit at
+    identical columns in both layouts (#119 case (a), not a field shift) — but
+    pointless, so the 2019 layout is what is written.
+    """
+    return [
+        f"/MAT/LAW106/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu   fct_ID1   fct_ID2"
+        "   fct_ID3",
+        f"{_f(mat.e)}{_f(mat.nu)}{_i(mat.fct_e)}{_i(mat.fct_e)}"
+        f"{_i(mat.fct_nu)}",
+        "#                  A                   B                   n"
+        "              epsmax              sigmax",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(0.0)}{_f(0.0)}",
+        "#               Pmin                Nmax                 Tol",
+        "",
+        "#                                                          m"
+        "               Tmelt                Tmax",
+        "",
+        "#             RHO_Cp                Coef                  Tc"
+        "                  Tr",
+        f"{_f(mat.rho_cp)}{_f(0.0)}{_f(0.0)}{_f(mat.tr)}",
+        HDR,
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: *MAT_010 → /MAT/LAW3 (HYDPLA) + its same-id /EOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _law3_bulk_from_eos(eos: EosCard, rho0: float) -> Optional[float]:
+    """The unstressed bulk modulus ``K0`` the companion ``*EOS_*`` states.
+
+    * ``GRUNEISEN``: ``K0 = rho0·C²``. ``C`` is the intercept of the
+      ``us = C + S1·up`` shock Hugoniot, i.e. the BULK sound speed at zero
+      compression, so ``rho0·C²`` is the definition of the unstressed bulk
+      modulus — two stated cells, no fitted constant.
+    * ``POLYNOMIAL``: ``K0 = C1``, the linear term of
+      ``p = C0 + C1·mu + C2·mu² + …`` evaluated at ``mu → 0``.
+
+    ``None`` for any other kind: an ideal gas has no unstressed bulk modulus at
+    all (``K = gamma·p``, which is zero at zero pressure), so nothing can be
+    derived from it.
+    """
+    if eos.kind == "GRUNEISEN":
+        c = float(eos.params.get("c", 0.0))
+        if rho0 > 0.0 and c > 0.0:
+            return rho0 * c * c
+        return None
+    if eos.kind == "POLYNOMIAL":
+        c1 = float(eos.params.get("c1", 0.0))
+        return c1 if c1 > 0.0 else None
+    return None
+
+
+def _law3_consumed_eos_ids(state: ConversionState) -> set:
+    """``*EOS_*`` ids emitted BESIDE a ``/MAT/LAW3``.
+
+    ``_make_explosive_and_eos_materials``'s orphan-EOS arm must skip these, or
+    it would tell the reader *"the equation of state was NOT emitted"* about
+    one this batch writes two blocks further up — a false statement of the
+    #129 class, on the three corpus decks that carry the pair.
+    """
+    return {m.eos_id for m in state.mat_law3.values() if m.eos_id}
+
+
+def _resolve_mat_law3(state: ConversionState) -> None:
+    """``*MAT_010`` → ``state.mat_law3``, deriving the E-nu pair from the
+    material's own ``RO`` and its companion EOS's sound speed.
+
+    **Why a derivation is needed at all.** ``*MAT_010`` states a SHEAR modulus
+    and nothing else elastic — LS-DYNA takes the pressure from the ``*EOS_*``
+    the ``*PART`` binds. ``/MAT/LAW3``'s card is the isotropic pair ``E, nu``,
+    and ``hm_read_mat03.F:189`` recovers ``G = E/(2(1+nu))`` from it, so ANY
+    (E, nu) with the right ``G`` reproduces the deviatoric response exactly —
+    which is what ``m3law.F:60,107-112`` uses, the pressure coming from
+    ``eosmain`` (``mmain.F90:805``, ``:1971-1985``, ``sig = s − pnew``).
+
+    **The pair that is chosen, and its one visible consequence.** With
+    ``K0 = rho0·C²`` from the EOS,
+
+        nu = (3K0 − 2G) / (2(3K0 + G)),      E = 9·K0·G / (3K0 + G)
+
+    which is the unique pair whose bulk modulus is the EOS's own. That matters
+    because ``hm_read_mat03.F:190/197`` sets ``PM(32) = E/(3(1−2nu))`` for every
+    ``INVERS >= 2018`` deck — the material's stored bulk modulus, which the
+    ``/INTER/TYPE7`` and ``TYPE20`` contact stiffness reads. Deriving it from
+    two stated physical cells makes that number agree with the pressure law
+    instead of with an invented Poisson ratio.
+
+    MEASURED cross-check on the corpus: ``taylor1``'s own
+    ``*MAT_PLASTIC_KINEMATIC`` twin for the same copper states ``E = 1e5,
+    PR = 0.33``, i.e. ``G = 37593.98`` — the deck author's own ``G = 37593`` to
+    five figures. The EOS-consistent pair (nu 0.376303, E 103478.736) returns
+    ``E/(2(1+nu)) = 37593.000`` exactly and differs from the author's only in
+    the bulk (139425.3 vs 98039), which the EOS supplies anyway.
+
+    **``EH`` goes into ``b`` UNCONVERTED.** Vol II R17 p.2-193 Remark 2 states
+    the flow law as ``sigma_y = sigma_0 + E_h·eps_p + …``, so ``EH`` is already
+    the plastic modulus; the ``E_t E/(E − E_t)`` form on the same page is the
+    derivation FROM a tangent. Applying it here would be the silent factor
+    error ``*MAT_003``'s ``ETAN`` legitimately needs.
+    """
+    if not state.mat_ep_hydro:
+        return
+    kw = "*MAT_ELASTIC_PLASTIC_HYDRO"
+    for mid in sorted(state.mat_ep_hydro):
+        mat = state.mat_ep_hydro[mid]
+        if mat.spall_option:
+            state.warn(
+                f"{kw}_SPALL {mid}: the _SPALL option adds the "
+                f"pressure-hardening pair A1={mat.a1:g}, A2={mat.a2:g} (the "
+                "'(a1 + p*a2)*max[p,0]' term of Vol II R17 p.2-193 Remark 2) "
+                f"and the spall model selector SPALL={mat.spall:g}. "
+                "/MAT/LAW3's yield is a + b*eps_p^n with no pressure term and "
+                "no spall selector, so the option cannot be expressed. The "
+                "material is REFUSED (its /PART then reports a dangling "
+                "material id) rather than converted with the pressure "
+                "hardening silently dropped.")
+            continue
+        if mat.rho <= 0.0:
+            # UNCONDITIONAL, unlike the LAW106 twin above: the zero-density
+            # floor cannot rescue a LAW3 material, because this law's whole
+            # elastic pair is DERIVED from the density — K0 = rho0 * C^2 out
+            # of the *EOS_GRUNEISEN (or C1 out of the polynomial), then
+            # nu = (3K0-2G)/(2(3K0+G)) and E = 9K0G/(3K0+G). At rho = 1e-24
+            # the bulk modulus is numerically zero and nu comes out at the
+            # incompressible/negative edge, so the substitution would turn a
+            # refused deck into a silently wrong one.
+            state.warn(
+                f"{kw} {mid}: RO = {mat.rho:g}. /MAT/LAW3 is not on the "
+                "starter's zero-density exemption list "
+                "(hm_read_mat.F90:1575-1583 exempts only laws "
+                "0/20/51/151/108/999), so the card would be ERROR 683 and "
+                "refuse the whole deck. The material is SKIPPED. The "
+                "zero-density floor does NOT apply here: LAW3 derives its "
+                "bulk modulus as K0 = rho0*C^2 from the *EOS_*, so a "
+                "substituted density would make E and nu meaningless instead "
+                "of merely making the material massless.")
+            continue
+        if mat.g <= 0.0:
+            state.warn(
+                f"{kw} {mid}: G = {mat.g:g}. The shear modulus is the card's "
+                "only elastic cell and /MAT/LAW3 recovers it as E/(2(1+nu)) "
+                "(hm_read_mat03.F:189), so there is nothing to derive an E-nu "
+                "pair from. The material is SKIPPED.")
+            continue
+        if any(v != 0.0 for v in mat.eps) or any(v != 0.0 for v in mat.es):
+            state.warn(
+                f"{kw} {mid}: the card states a TABULATED yield curve "
+                "(EPS1..16 / ES1..16). /MAT/LAW3's yield is the analytic "
+                "a + b*eps_p^n and cannot hold an arbitrary 16-point table, "
+                "and the law that could (/MAT/LAW36, which is both SPH- and "
+                "EOS-declared) is not wired to an /EOS by this converter yet. "
+                "The material is REFUSED rather than converted with its "
+                "hardening curve replaced by the card-1 constants SIG0/EH, "
+                "which would be a different material at 0 starter errors. "
+                "Re-state the hardening as SIG0 + EH*eps_p if the table is "
+                "close to linear, or convert the part by hand.")
+            continue
+        eos = state.eos_cards.get(mid)
+        if eos is None:
+            state.warn(
+                f"{kw} {mid}: no *EOS_* of the same id in the converted deck. "
+                "*MAT_010 states a SHEAR modulus and no bulk modulus at all — "
+                "LS-DYNA takes the pressure from the equation of state the "
+                "*PART binds — so without one there is no second elastic "
+                "constant to build /MAT/LAW3's E-nu pair from, and inventing "
+                "a Poisson ratio would be a fabricated value. The material is "
+                "SKIPPED; its /PART reports a dangling material id, which "
+                "names the deck's real problem. NOTE THE BINDING RULE: this "
+                "law binds its equation of state BY MATCHING ID ONLY, unlike "
+                "the *MAT_015 -> /MAT/LAW4 route in this same file, which also "
+                "falls back to the *PART's own EOSID column. All three corpus "
+                "carriers state matching ids (taylor1: *MAT_010 2, "
+                "*EOS_GRUNEISEN 2, *PART 101 mid 2 eosid 2), so nothing has "
+                "needed the fallback yet — renumber the *EOS_* to the MID if "
+                "your deck binds it through EOSID instead.")
+            continue
+        bulk = _law3_bulk_from_eos(eos, mat.rho)
+        if bulk is None or bulk <= 0.0:
+            state.warn(
+                f"{kw} {mid}: {eos.label()} states no usable unstressed bulk "
+                "modulus (K0 = rho0*C^2 for a Gruneisen EOS, K0 = C1 for a "
+                "polynomial one; an ideal gas has none at all, since "
+                "K = gamma*p is zero at zero pressure). Without it the E-nu "
+                "pair cannot be derived and the material is SKIPPED.")
+            continue
+        nu = (3.0 * bulk - 2.0 * mat.g) / (2.0 * (3.0 * bulk + mat.g))
+        e = 9.0 * bulk * mat.g / (3.0 * bulk + mat.g)
+        if not (-1.0 < nu < 0.5) or e <= 0.0:
+            state.warn(
+                f"{kw} {mid}: the stated G = {mat.g:g} against the EOS's "
+                f"K0 = {bulk:g} gives nu = {nu:g}, outside the physical range "
+                "(-1, 0.5) that /MAT/LAW3's isotropic pair must lie in. The "
+                "material is SKIPPED; check the EOS's sound speed C and the "
+                "card's G against each other.")
+            continue
+        state.mat_law3[mid] = MatLaw3(
+            mid=mid, title=mat.title, rho=mat.rho, e=e, nu=nu,
+            a=mat.sig0, b=mat.eh, n=1.0, eps_max=mat.fs, sigma_max=0.0,
+            # -abs(0.0) is -0.0, which formats as "-0" and reads as a
+            # typo; a stated 0 means "no cutoff" and is written as a plain 0
+            # for hm_read_mat03.F:182 to turn into -1e20.
+            pmin=(-abs(mat.pc) if mat.pc else 0.0),
+            eos_id=mid, bulk=bulk)
+        _law3_report(state, kw, mat, e, nu, bulk)
+
+
+def _law3_report(state: ConversionState, kw: str,
+                 mat: MatElasticPlasticHydro, e: float, nu: float,
+                 bulk: float) -> None:
+    """Name the derivation, its consequence and every cell that was dropped."""
+    dropped = []
+    if mat.charl:
+        dropped.append(
+            f"CHARL={mat.charl:g} (Vol II R17 p.2-192: the characteristic "
+            "element thickness for 2-D deletion, which has no counterpart — "
+            "Radioss deletes on the failure criterion, not on thinning)")
+    state.warn(
+        f"{kw} {mat.mid} -> /MAT/LAW3 (HYDPLA) + the same-id "
+        f"/EOS/{state.eos_cards[mat.mid].kind}/{mat.mid}. *MAT_010 states a "
+        f"SHEAR modulus G = {mat.g:g} and no bulk modulus (LS-DYNA takes the "
+        "pressure from the EOS the *PART binds), while /MAT/LAW3's card is the "
+        "isotropic pair E, nu. DERIVED from two stated physical cells — the "
+        f"material's RO = {mat.rho:g} and the EOS's sound speed — as "
+        f"K0 = rho0*C^2 = {bulk:g}, nu = (3K0-2G)/(2(3K0+G)) = {nu:.6f}, "
+        f"E = 9*K0*G/(3K0+G) = {e:.6f}, which returns E/(2(1+nu)) = "
+        f"{e / (2.0 * (1.0 + nu)):.6f} = G exactly. Its ONE visible "
+        "consequence: hm_read_mat03.F:190/197 stores PM(32) = E/(3(1-2nu)) for "
+        "every INVERS >= 2018 deck, and that is the bulk modulus the "
+        "/INTER/TYPE7 and TYPE20 CONTACT STIFFNESS reads — so the contact "
+        "stiffness now agrees with the pressure law instead of with an "
+        "invented Poisson ratio. The deviatoric response is unaffected either "
+        "way (m3law.F:60,107-112 uses G alone; the pressure comes from "
+        f"eosmain). a = SIG0 = {mat.sig0:g}; b = EH = {mat.eh:g} is written "
+        "UNCONVERTED, because Vol II R17 p.2-193 Remark 2 states the flow law "
+        "as sigma_y = sigma_0 + E_h*eps_p, i.e. EH is ALREADY the plastic "
+        "hardening modulus and the E_t*E/(E-E_t) form on that page is the "
+        "derivation FROM a tangent — applying it here would be a silent factor "
+        "error. n = 1 is written; hm_read_mat03.F:186 substitutes 1.0001 for a "
+        "stated 1 (it avoids the derivative singularity of eps^1 at eps = 0), "
+        f"a 0.05% effect at eps_p = 0.01. Pmin = "
+        + f"{(-abs(mat.pc) if mat.pc else 0.0):g} from "
+        + ("PC (a stated 0 becomes the reader's own -1e20, "
+           "hm_read_mat03.F:182 — no cutoff)" if mat.pc == 0.0 else
+           f"PC = {mat.pc:g}")
+        + f"; eps_max = {mat.fs:g} from FS"
+        + (" (a stated 0 becomes the reader's own 1e20 — no erosion)"
+           if mat.fs == 0.0 else " (effective plastic strain at element "
+                                 "deletion)")
+        + ((". DROPPED: " + "; ".join(dropped)) if dropped else "")
+        + ".")
+
+
+def _emit_mat_law3(mat: MatLaw3, state: ConversionState) -> List[str]:
+    """``/MAT/LAW3`` (``/MAT/HYDPLA``) + its same-id ``/EOS``.
+
+    Card layout from ``radioss2020/MAT/matl3_hydpla.cfg``
+    ``FORMAT(radioss2018)``::
+
+        C1: RHO_I(20)
+        C2: E(20) nu(20)
+        C3: a(20) b(20) n(20) eps_max(20) sigma_max(20)
+        C4: Pmin(20)
+
+    The ``/EOS`` is emitted immediately after the ``/MAT``, under the SAME id —
+    Radioss binds an equation of state to the material of the same id, the way
+    ``_emit_mat_law4_hyd_jcook`` already pairs the LAW4 route. It is NOT the
+    embedded card-5 form: ``hm_read_mat03.F:152-158`` disables ``EOS_EMBEDDED``
+    for every ``INVERS >= 2018`` deck, so an inline polynomial would be read as
+    part of no card at all.
+    """
+    lines = [
+        f"/MAT/LAW3/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu",
+        f"{_f(mat.e)}{_f(mat.nu)}",
+        "#                  a                   b                   n"
+        "             eps_max           sigma_max",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(mat.eps_max)}"
+        f"{_f(mat.sigma_max)}",
+        "#               Pmin",
+        f"{_f(mat.pmin)}",
+        HDR,
+    ]
+    eos = state.eos_cards.get(mat.eos_id)
+    if eos is not None:
+        lines += _emit_eos(eos)
+    return lines
+
+
+def _element_count_by_pid(state: ConversionState) -> Dict[int, Dict[str, int]]:
+    """``pid -> {family: count}`` over every element family a ``*PART`` can
+    hold.
+
+    Written as an explicit family walk, not a union registry: element ids live
+    in separate namespaces per type and the point of the count is to tell the
+    reader WHAT the refused material was carrying (500 solids reads very
+    differently from one). Families with no ``pid`` attribute (SPH cells carry
+    one, springs and seatbelts do too) are listed the same way, so a new family
+    added later shows up here as a missing arm rather than a silent zero
+    (#120).
+    """
+    out: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    families: Tuple[Tuple[str, List[Any]], ...] = (
+        ("solid", state.solid_elems),
+        ("shell", state.shell_elems),
+        ("tshell", state.tshell_elems),
+        ("beam", state.beam_elems),
+        ("discrete", state.discrete_elems),
+        ("seatbelt", state.seatbelt_elems),
+        ("sph", state.sph_elems))
+    for fam, elems in families:
+        for e in elems:
+            pid = getattr(e, "pid", 0)
+            if pid:
+                out[pid][fam] += 1
+    return {pid: dict(fams) for pid, fams in out.items()}
+
+
+def _warn_refused_materials(state: ConversionState) -> None:
+    """Name every REFUSED material with the parts and elements it costs.
+
+    ``handlers._material_refused`` runs while the deck is being parsed, before
+    the mesh is read, so it can only record the law and the reason. This pass
+    runs once ``state.parts`` and every element list are complete and supplies
+    the half a reader actually needs: the starter answers ``ERROR 179`` one
+    part at a time and says nothing at all about how much of the model the
+    refusal takes with it.
+
+    The parts are NOT dropped. Three starter probes settle why (one brick each,
+    ``/BEGIN 2022``): a ``/PART`` with a dangling ``mat_ID`` plus its
+    ``/BRICK`` gives 3 errors (``179`` PART→MATERIAL, ``3046`` BRICK vs
+    MATERIAL ID 0 TYPE 0, ``61`` INVALID MATERIAL ID FOR BRICK ELEMENT); the
+    ``/PART`` removed with its ``/BRICK`` KEPT gives ``ERROR 402`` *"1 PART(S)
+    REFERENCED BY ELEMENTS DO(ES) NOT EXIST"* — strictly worse; both removed
+    gives 0 ERROR / 0 WARNING. So dropping is only ever right as a PAIR, and
+    then only after every other card that names the part (sets, contacts,
+    ``/TH``, ``/INIVOL``, ``/RBODY``, ``*DATABASE_HISTORY_*``) has been
+    screened too, or the next ``ERROR 402``-class failure just moves one card
+    along. That screening is its own item; until it exists a readable
+    ``ERROR 179`` naming the law beats a silently smaller model.
+    """
+    if not state.refused_materials:
+        return
+    counts = _element_count_by_pid(state)
+    for mid in sorted(state.refused_materials):
+        seen, what, why = state.refused_materials[mid]
+        pids = sorted(pid for pid, p in state.parts.items() if p.mid == mid)
+        tally: Dict[str, int] = defaultdict(int)
+        for pid in pids:
+            for fam, n in counts.get(pid, {}).items():
+                tally[fam] += n
+        held = (", ".join(f"{n} {fam}" for fam, n in sorted(tally.items()))
+                if tally else "no elements")
+        state.warn(
+            f"*{seen} {mid}: {what} is REFUSED BY NAME — {why}. "
+            + (f"/PART(s) {pids} name this material and hold {held}; they are "
+               "emitted with a mat_ID no /MAT defines, which the starter "
+               "answers with ERROR 179 (MATERIAL ID DOES NOT EXIST) plus "
+               "ERROR 3046 / ERROR 61 per element family. The parts are NOT "
+               "dropped: measured on one-brick starter probes, removing the "
+               "/PART while keeping its elements is ERROR 402 (PART(S) "
+               "REFERENCED BY ELEMENTS DO(ES) NOT EXIST) — strictly worse — "
+               "and removing both only moves the dangling reference to "
+               "whatever set, contact, /TH or /RBODY still names the part. A "
+               "readable ERROR 179 naming the law beats a silently smaller "
+               "model."
+               if pids else
+               "No /PART names this material, so nothing in the emitted deck "
+               "references it and the refusal costs the model nothing.")
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: the /MAT/LAW5 `Bunreacted` cell
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ammg_member_mids(state: ConversionState) -> Set[int]:
+    """Material ids reached by an ``*ALE_MULTI-MATERIAL_GROUP`` entry.
+
+    The ONE predicate for "is this material a LAW51 phase?", read by the
+    ``Bunreacted`` derivation and by the phase list itself (there is no third
+    reader: the submaterial RESTATEMENT was removed in ``ff7a82d`` — see
+    :func:`_resolve_ale_submaterials` (b)). If the two disagreed, a material
+    would be derived for a card it never lands on, or land on one with no
+    derivation.
+    """
+    from .blast_ale import _part_pids
+    mids: Set[int] = set()
+    for mmg in state.ale_mmgs:
+        for sid, idtype in mmg.entries:
+            for pid in _part_pids(state, sid, idtype == 1):
+                part = state.parts.get(pid)
+                if part is not None and part.mid:
+                    mids.add(part.mid)
+    return mids
+
+
+def _jwl_unreacted_bulk(jwl: EosJwl) -> float:
+    """``K_s(V = 1)`` — the slope of the JWL's PRINCIPAL ISENTROPE at the
+    unreacted density.
+
+    A dimensionally-consistent STAND-IN built from stated cells, not the
+    unreacted solid's own reference curve. The JWL describes the DETONATION
+    PRODUCTS, and its principal isentrope is the products' reference curve
+    ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V}``, with the energy term
+    ``omega·E0/V`` added at the stated ``E0``. LS-DYNA gives the unreacted
+    solid a SEPARATE description — ``K``/``G``/``SIGY`` on
+    ``*MAT_HIGH_EXPLOSIVE_BURN``, and a whole second unreacted JWL
+    (``AUR, BUR, R1U, R2U, WU``) on ``*EOS_LEE-TARVER`` Card 6, Vol II R17
+    p.1-63 — precisely because the products' isentrope is not the solid's. It
+    is used here because it is the SOFTEST of the three candidates a stated
+    card can supply, and so perturbs the pre-burn state (which LS-DYNA leaves
+    at zero) least. Its bulk modulus ``K = -V dp_s/dV`` evaluated at ``V = 1`` is
+
+        K_s(1) = A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0
+
+    Every term comes from a cell the ``*EOS_JWL`` states — nothing is fitted
+    and nothing is looked up. On ``underwater_C``'s TNT (A 371000, B 3230,
+    R1 4.15, R2 0.95, omega 0.3, E0 4300) that is
+    24271.684 + 1186.715 + 1290.000 = **26748.4 MPa**.
+
+    **This is NOT the tangent modulus of the full EOS the solver evaluates**,
+    and the difference is named rather than hidden: ``jwl51.F:191``
+    (``P0 = B1*(1 - W1/R1M)*ER1M + B2*(1 - W1/R2M)*ER2M``) and
+    ``m5law.F:126-129`` (``WDR1V = A - A*W/(R1*DF)``) both carry the
+    ``(1 - omega/(R_i·V))`` factors the principal isentrope does not, so
+    differentiating THAT gives ``_jwl_full_eos_bulk`` — 23801 on the same card,
+    11 % lower. Both are legitimate proxies for the unreacted solid's
+    stiffness; a three-value sweep spanning 37x on ``underwater_C`` moved the
+    last time step 0.14 %, the internal energy 1.1 % and the kinetic energy
+    0.19 %, so the choice does not decide the answer. The warning prints both.
+    """
+    return (jwl.a * jwl.r1 * math.exp(-jwl.r1)
+            + jwl.b * jwl.r2 * math.exp(-jwl.r2)
+            + jwl.omega * jwl.e0)
+
+
+def _jwl_full_eos_bulk(jwl: EosJwl) -> float:
+    """``-V dp/dV`` at ``V = 1`` for the FULL JWL the solver evaluates.
+
+    ``p(V, E0) = A(1 - omega/(R1·V))e^{-R1·V} + B(1 - omega/(R2·V))e^{-R2·V}
+    + omega·E0/V`` — the form ``jwl51.F:191`` and ``m5law.F:126-129`` build —
+    differentiates to
+
+        K(1) = A·e^{-R1}(R1 - omega/R1 - omega)
+             + B·e^{-R2}(R2 - omega/R2 - omega) + omega·E0
+
+    Printed beside the value actually written so a reader can see the size of
+    the modelling choice (11 % on ``underwater_C``'s TNT: 23801 against
+    26748.4). Not used as the substitution itself — which is why a degenerate
+    ``R1``/``R2`` of 0 (where the ``omega/R_i`` term is undefined) drops that
+    exponential's contribution instead of raising: this number only ever
+    appears inside a sentence.
+    """
+    out = jwl.omega * jwl.e0
+    for coef, r in ((jwl.a, jwl.r1), (jwl.b, jwl.r2)):
+        if r:
+            out += coef * math.exp(-r) * (r - jwl.omega / r - jwl.omega)
+    return out
+
+
+def _resolve_he_bunreacted(state: ConversionState) -> None:
+    """Fill every ``/MAT/LAW5``'s ``Bunreacted`` cell, deriving it where the
+    deck states ``K = 0`` and the material is a LAW51 phase.
+
+    **What the cell is.** ``hm_read_mat05.F:160/234`` reads ``BUNREACTED`` into
+    ``PM(44)``; ``fill_buffer_51.F:438/471`` copies it into ``UPARAM(50)``, and
+    the engine's ``jwl51.F:197`` uses it as the UNREACTED solid's LINEAR
+    pressure law ``Psol = C01 + C11*MU1`` (``:172 C11 = UPARAM(50)``), blended
+    with the product pressure by the burn fraction at ``:205``. ``:214`` also
+    makes it the unreacted sound speed ``sqrt(C11/RHO10)``, which enters the
+    CFL step. LS-DYNA's ``K`` is the same quantity in the same form (Vol II R17
+    p.2-188: *"Before detonation, pressure is given by
+    p^{n+1} = K(1/V^{n+1} - 1)"*), so a stated ``K`` is copied 1:1.
+
+    **Why a derivation is needed at all.** ``fill_buffer_51.F:496-499`` refuses
+    ``C14 <= 0`` outright — *"BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR
+    UNREACTED EXPLOSIVE"*, ``ERROR 99`` — and the four ``underwater_*`` corpus
+    decks all state ``K = 0`` with ``BETA = 0``. That is CORRECT LS-DYNA input,
+    not a deck defect: ``K`` is *"Bulk modulus (BETA = 2.0 only)"*, and with
+    ``BETA = 0`` ("beta burn plus programmed burn", ``F = max(F1,F2)``) the
+    unburnt explosive obeys ``p = F·p_eos`` with ``F = 0``, i.e. LS-DYNA
+    carries NO unreacted stress at all. Radioss has no such branch, so a value
+    is required and the honest thing is to derive one from the deck's own
+    physics and NAME it.
+
+    **The derivation, and the two alternatives.** Three candidates exist from
+    stated cells: the slope of the JWL's PRINCIPAL ISENTROPE at the unreacted
+    density (:func:`_jwl_unreacted_bulk`, what is written); the tangent modulus
+    of the FULL JWL the solver evaluates, which carries the
+    ``(1 - omega/(R_i·V))`` factors of ``jwl51.F:191`` /
+    ``m5law.F:126-129`` (:func:`_jwl_full_eos_bulk`); and ``rho0*D^2``, which
+    the starter itself already computes at ``fill_buffer_51.F:488``
+    (``UPARAM(275) = RHO40*SSP4^2`` with ``SSP4 = VDET``). On ``underwater_C``
+    they are 26748.4, 23801 and 100188.9 MPa. The principal isentrope is what
+    is written because it is the SOFTEST of the three — 3.7x below
+    ``rho0*D^2`` — so it perturbs the pre-burn state (which LS-DYNA leaves at
+    zero) least. It is a dimensionally-consistent STAND-IN, not the unreacted
+    solid's own curve: the JWL describes the products (see
+    :func:`_jwl_unreacted_bulk`). All three are printed in the warning, and MEASUREMENT says
+    the choice is not what decides the run: a three-value sweep spanning 37x on
+    ``underwater_C`` moved the last time step 0.14 %, the internal energy 1.1 %
+    and the kinetic energy 0.19 %. Neither raises the time step risk:
+    ``PM(27)`` already holds ``D`` (``:492``), and a SMALLER ``C11`` gives a
+    LARGER, never smaller, unreacted-sound-speed step.
+
+    **Where the value is actually consumed — and it is NOT the LAW51 branch.**
+    The substitution is triggered by an ``ERROR 99`` that lives in the LAW51
+    ``Iform = 12`` branch, but the cell is written on the material's OWN
+    ``/MAT/LAW5``, and on all four ``underwater_*`` carriers it is that
+    stand-alone card, referenced by a real ``/PART``, that the engine runs.
+    ``mmain.F90:1225-1261`` sends ``mtn == 5`` to ``m5law`` (filling the working
+    arrays and the SOUND SPEED), then ``mqviscb``, then ``mjwl`` — and the
+    pressure that reaches the stress tensor is ``mjwl.F:166-167``, which has NO
+    branch on ``BULK`` at all::
+
+        PNEW = -PSH + (1 - BFRAC)*(P0 + BULK*AMU)
+             + (FACM + ESPE*W1DF)/(1 + W1DF*DVOL/VOLO)
+
+    with ``FACM = BFRAC*(WDR1V*ER1V + WDR2V*ER2V)`` (``:162``) and
+    ``W1DF = BFRAC*W1/DF`` (``:161``), then ``SIG(I,1..3) = SIG*OFF - PNEW``
+    (``:181-183``). So the JWL product term is ALWAYS burn-fraction weighted and
+    ``BULK`` is ALWAYS an ADDED ``(1-F)·K·mu`` pre-burn stiffness. ``m5law.F``'s
+    own ``BULK`` branch at ``:135-145`` is real but writes ``P(MVSIZ)``, a LOCAL
+    declared at ``:72`` and read only at ``:159`` to build ``SSP`` — it decides
+    the sound speed and hence the CFL step, nothing else, and the routine zeroes
+    the whole stress tensor at ``:175-182`` before returning. An earlier draft of
+    this batch read that branch as the pressure law; the correction is recorded
+    here because the two readings prescribe opposite values.
+
+    **Scope — and why the default is now 0.** ``ERROR 99`` lives in the
+    ``Iform = 12`` branch alone, i.e. it can only fire on a ``/MAT/LAW51``. Since
+    k2rad emits that card only under ``--ale-multimat-law51`` (it is an orphan by
+    construction otherwise — see
+    :func:`~k2rad.writer.blast_ale._make_ale_multimaterial`), the substitution
+    now fires only when the source ``K`` is 0 AND the material is an
+    ``*ALE_MULTI-MATERIAL_GROUP`` member AND that flag is set. With the flag off,
+    ``Bunreacted`` stays 0 — which ``mjwl.F:166`` at ``P0 = PSH = 0`` makes
+    exactly LS-DYNA's ``p = F·p_eos``, the faithful mapping. MEASURED on
+    ``underwater_C``, four variants each run to completion: card + derived value
+    → 0 ERROR / 0 WARNING / NORMAL / 172 cycles; card removed, value kept →
+    identical to it in every channel at every sample; card removed, value 0 →
+    equally clean and closer to the LS-DYNA ``glstat`` kinetic energy at all five
+    sampled times (12.08 / 29.93 / 66.39 / 66.46 / 54.13 against 12.64 / 30.14 /
+    66.61 / 66.57 / 54.19); card kept, value 0 → ``ERROR 99``, which is the deck
+    ``--he-bunreacted 0`` used to produce. A stand-alone ``/MAT/LAW5``
+    (``underwater_A``/``_B``, ``exploding-sphere``, ``2Dlag``) was never affected:
+    it reads the cell only through ``hm_read_mat05.F`` and is startable with 0.
+    ``--he-bunreacted <value>`` overrides everywhere, and now produces a
+    STARTABLE deck for every value including 0.
+    """
+    if not state.mat_high_explosive:
+        return
+    # The ERROR 99 that forces a positive cell can only fire on an emitted
+    # /MAT/LAW51, so when that card is not written there is nothing to answer and
+    # 0 — LS-DYNA's own p = F*p_eos at mjwl.F:166 — is what ships.
+    members = (_ammg_member_mids(state)
+               if state.options.ale_multimat_law51 else set())
+    override = state.options.he_bunreacted
+    for mid in sorted(state.mat_high_explosive):
+        heb = state.mat_high_explosive[mid]
+        jwl = state.eos_jwl.get(mid)
+        dropped = []
+        if heb.g:
+            dropped.append(f"G={heb.g:g}")
+        if heb.sigy:
+            dropped.append(f"SIGY={heb.sigy:g}")
+        if dropped:
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid}: " + " and ".join(dropped)
+                + " have no /MAT/LAW5 cell — LAW5 is a pure pressure law with "
+                "no deviator at all (jwl51.F computes only P), so the "
+                "unreacted explosive's shear response and yield are DROPPED. "
+                "Both are 'BETA = 2.0 only' cells in LS-DYNA "
+                "(Vol II R17 p.2-186), so they are inert on a BETA = 0 or 1 "
+                "card there too.")
+        if override is not None:
+            heb.bunreacted = override
+            heb.bunreacted_note = (
+                f"the --he-bunreacted override ({override:g})")
+            if override:
+                # A non-zero cell is never unexplained: the LAW51 warning used
+                # to carry this sentence, and that card is no longer emitted by
+                # default, so the statement moves onto the LAW5 side where the
+                # cell actually lives.
+                state.warn(
+                    f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                    f"{override:g} from the --he-bunreacted override. "
+                    "mjwl.F:166-167 has no branch on this cell, so it adds "
+                    "(1-F)*K*mu to the applied pressure at EVERY burn "
+                    f"fraction; the deck's own K = {heb.k:g} and an LS-DYNA "
+                    f"BETA = {heb.beta:g} card carries p = F*p_eos with no "
+                    "unreacted stress at all (Vol II R17 p.2-186). Pass "
+                    "--he-bunreacted 0 for that LS-DYNA behaviour.")
+        elif heb.k > 0.0:
+            heb.bunreacted = heb.k
+            heb.bunreacted_note = f"the card's own stated K = {heb.k:g}"
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                f"{heb.k:g}, the card's own stated K, copied 1:1 (Vol II R17 "
+                "p.2-188 'p = K(1/V - 1)' before detonation against "
+                "jwl51.F:197 'Psol = C01 + C11*MU1' — the same form, so no "
+                "factor). mjwl.F:166-167 applies it as an added (1-F)*K*mu "
+                "pre-burn stiffness. K is a 'BETA = 2.0 only' cell in LS-DYNA, "
+                f"and this card states BETA = {heb.beta:g}"
+                + ("." if heb.beta == 2.0 else
+                   ", so LS-DYNA itself ignores it and carries p = F*p_eos "
+                   "with no unreacted stress; pass --he-bunreacted 0 to match "
+                   "that."))
+        elif mid not in members:
+            heb.bunreacted = 0.0
+            heb.bunreacted_note = ""
+            continue
+        elif jwl is None:
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} is an "
+                "*ALE_MULTI-MATERIAL_GROUP member with K = 0, and "
+                "fill_buffer_51.F:496 refuses a /MAT/LAW51 phase whose LAW5 "
+                "Bunreacted is <= 0 (ERROR 99, 'BULK MODULUS OF LAW5 (JWL) "
+                "MUST BE PROVIDED FOR UNREACTED EXPLOSIVE'). The derivation "
+                "reads the companion *EOS_JWL's own coefficients and this "
+                "material has none, so Bunreacted is left 0 and the starter "
+                "will refuse the deck. Add the *EOS_JWL, state K on the "
+                "*MAT_HIGH_EXPLOSIVE_BURN card, or pass --he-bunreacted.")
+            continue
+        else:
+            derived = _jwl_unreacted_bulk(jwl)
+            if derived <= 0.0:
+                # BOTH arms of a back-solve must refuse the same degeneracies
+                # (#129). Every sibling derivation in this batch screens its
+                # own — LAW3 refuses `bulk <= 0`, LAW106 refuses `e_ref <= 0`,
+                # and the `jwl is None` arm two branches up refuses by name —
+                # and without this the ratio printed in the warning below is a
+                # ZeroDivisionError that aborts the whole conversion with no
+                # output and no diagnostic. A *EOS_JWL stating A = B = E0 = 0
+                # reaches it exactly.
+                heb.bunreacted = 0.0
+                heb.bunreacted_note = ""
+                state.warn(
+                    f"*MAT_HIGH_EXPLOSIVE_BURN {mid} is an "
+                    "*ALE_MULTI-MATERIAL_GROUP member with K = 0, and its "
+                    f"companion *EOS_JWL (A = {jwl.a:g}, B = {jwl.b:g}, "
+                    f"R1 = {jwl.r1:g}, R2 = {jwl.r2:g}, "
+                    f"omega = {jwl.omega:g}, E0 = {jwl.e0:g}) gives a "
+                    f"principal-isentrope slope of {derived:g}, which is not a "
+                    "positive bulk modulus — so there is nothing to derive "
+                    "Bunreacted from. It is left 0 and fill_buffer_51.F:496 "
+                    "will answer ERROR 99 ('BULK MODULUS OF LAW5 (JWL) MUST BE "
+                    "PROVIDED FOR UNREACTED EXPLOSIVE'). State K on the "
+                    "*MAT_HIGH_EXPLOSIVE_BURN card, fix the *EOS_JWL "
+                    "coefficients, or pass --he-bunreacted <value>.")
+                continue
+            heb.bunreacted = derived
+            heb.bunreacted_note = (
+                "a DERIVED value: the slope of the JWL's PRINCIPAL ISENTROPE "
+                "at the unreacted density, K = -V dp_s/dV at V = 1 for "
+                "p_s(V) = A*exp(-R1*V) + B*exp(-R2*V) + omega*E0/V, i.e. "
+                "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0 = "
+                f"{jwl.a:g}*{jwl.r1:g}*exp(-{jwl.r1:g}) + "
+                f"{jwl.b:g}*{jwl.r2:g}*exp(-{jwl.r2:g}) + {jwl.omega:g}*"
+                f"{jwl.e0:g} = {heb.bunreacted:g}")
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                f"{heb.bunreacted:g}, SUBSTITUTED. The deck states K = 0, "
+                f"which is CORRECT LS-DYNA input on this card: K is 'Bulk "
+                "modulus (BETA = 2.0 only)' (Vol II R17 p.2-186) and with "
+                f"BETA = {heb.beta:g} the unburnt explosive obeys p = F*p_eos "
+                "with F = 0, i.e. LS-DYNA carries NO unreacted stress at all. "
+                "Radioss has no such branch: this material is an "
+                "*ALE_MULTI-MATERIAL_GROUP member and fill_buffer_51.F:496 "
+                "refuses a phase whose LAW5 Bunreacted is <= 0 (ERROR 99, "
+                "'BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR UNREACTED "
+                f"EXPLOSIVE'). The value written is {heb.bunreacted_note}. "
+                "WHERE IT IS CONSUMED, and it is NOT only the /MAT/LAW51 the "
+                "starter complained about: the SAME cell rides on this "
+                "material's own /MAT/LAW5, whose /PART-referenced elements run "
+                "through mmain.F90:1225-1261 — m5law, then mqviscb, then mjwl. "
+                "The pressure that reaches the stress tensor is mjwl.F:166-167, "
+                "which has NO branch on the cell: 'PNEW = -PSH + "
+                "(1-BFRAC)*(P0 + BULK*AMU) + (FACM + ESPE*W1DF)/(1 + "
+                "W1DF*DVOL/VOLO)' with FACM = BFRAC*(WDR1V*ER1V + WDR2V*ER2V) "
+                "(:162) and W1DF = BFRAC*W1/DF (:161), applied as "
+                "SIG(I,1..3) = SIG*OFF - PNEW (:181-183). So the JWL product "
+                "term is ALWAYS burn-fraction weighted and a positive "
+                "Bunreacted is an ADDED (1-F)*K*mu pre-burn stiffness at every "
+                "burn fraction, which LS-DYNA's BETA = 0 card does not carry. "
+                "(m5law.F:135-145 does branch on the cell, but it writes P, a "
+                "LOCAL declared at :72 and read only at :159 to build SSP, and "
+                "the routine zeroes the stress tensor at :175-182 — that branch "
+                "decides the SOUND SPEED and hence the time step, not the "
+                "pressure. Inside /MAT/LAW51 the same number is jwl51.F:197's "
+                "'Psol = C01 + C11*MU1', blended at :205, with sqrt(C11/rho) as "
+                "the unreacted sound speed at :214.) "
+                "MEASURED on underwater_C: a three-value sweep spanning "
+                "37x (2674.84 / 26748.40 / 100188.90) moves the last time step "
+                "0.14 %, the internal energy 1.1 % and the kinetic energy "
+                "0.19 % — so the CHOICE of value is not what decides the "
+                "answer, but its PRESENCE is not free. "
+                "THE OTHER TWO CANDIDATES, both from stated cells: "
+                f"rho0*D^2 = {heb.rho * heb.d * heb.d:g}, which the starter "
+                "already computes at fill_buffer_51.F:488 as UPARAM(275) and "
+                f"which is {(heb.rho * heb.d * heb.d) / heb.bunreacted:.3g}x "
+                "stiffer; and the tangent modulus of the FULL JWL the solver "
+                "evaluates — jwl51.F:191 and m5law.F:126-129 both carry the "
+                "(1 - omega/(R_i*V)) factors the principal isentrope does not, "
+                "giving A*exp(-R1)*(R1 - omega/R1 - omega) + "
+                "B*exp(-R2)*(R2 - omega/R2 - omega) + omega*E0 = "
+                f"{_jwl_full_eos_bulk(jwl):g}, about "
+                f"{100.0 * (1.0 - _jwl_full_eos_bulk(jwl) / heb.bunreacted):.3g}"
+                " % below the value written. The principal isentrope is used "
+                "because it is the SOFTEST of the three, so it perturbs the "
+                "pre-burn state least; it is a dimensionally-consistent "
+                "STAND-IN, not the unreacted solid's own curve (the JWL "
+                "describes the detonation PRODUCTS - LS-DYNA gives the "
+                "unreacted solid a separate description entirely, K/G/SIGY "
+                "here and a second unreacted JWL on *EOS_LEE-TARVER Card 6, "
+                "Vol II R17 p.1-63). The measurement above says the difference "
+                "does not decide the run. Neither costs time step (PM(27) already holds "
+                "D, and a SMALLER C11 raises the unreacted-sound-speed limit). "
+                "Use --he-bunreacted <value> to state your own.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: the /MAT/LAW51 submaterial list
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The ONLY laws ``/MAT/LAW51`` accepts as a phase, from the starter's own
+#: test: ``fill_buffer_51.F:210`` gates on
+#: ``MLN == 2/3/4/5/6/10/102/133`` and ``:237`` answers anything else with
+#: ``ERROR 99  SUBMATERIAL CAN ONLY BE DEFINED FROM LAWS 2,3,4,5,6,10 102 OR
+#: 133``. k2rad's own ``*MAT_003 -> /MAT/LAW44`` route is exactly the case that
+#: falls outside it.
+_LAW51_ALLOWED_SUBMAT_LAWS = frozenset({2, 3, 4, 5, 6, 10, 102, 133})
+
+
+def _submaterial_has_eos(state: ConversionState, mid: int, law: int) -> bool:
+    """Does the ``/MAT`` k2rad EMITS for *mid* carry an equation of state?
+
+    **A LAW51 phase must have one, and that MEASUREMENT corrects the source's
+    own comment.** ``fill_buffer_51.F:213-219`` reads
+
+        IF(EOS_TYPE /= 0 .AND. EOS_TYPE /= 12 .AND. EOS_TYPE /= 15
+                          .AND. EOS_TYPE <= 21 ) THEN
+          !all EoS expected <=0, 12, 15, >21
+        ELSE
+          chain1='SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW 51'
+
+    — the comment says those types are EXPECTED, while the THEN branch is empty
+    and the ELSE raises the error on exactly them, ``EOS_TYPE = 0`` included.
+    ``:281`` says the same thing without ambiguity:
+    ``IF(EOS_TYPE == 0 .AND. MLN /= 5) -> 'MISSING SUBMATERIAL EOS'``. The
+    starter settles it: on ``cylinder_impact_A`` a ``/MAT/LAW51`` whose only
+    phase was a ``/MAT/LAW2`` with no ``/EOS`` answered BOTH messages, while
+    ``underwater_C`` — a ``/MAT/LAW5`` beside a ``/MAT/HYD_VISC`` +
+    ``/EOS/GRUNEISEN`` — started at 0 ERROR / 0 WARNING.
+
+    ``MLN == 5`` is exempt on both lines, because ``/MAT/LAW5`` carries its JWL
+    inside the material.
+
+    The screen is on what is EMITTED, never on ``state.eos_cards`` membership:
+    a bare ``*EOS_*`` whose id happens to match another material is NOT written
+    at all (``_make_explosive_and_eos_materials`` refuses it and says so), so
+    the parse registry would claim an equation of state the deck does not
+    contain (#130). Only the PRESENCE is screened, not the TYPE — one accepted
+    type is measured (GRUNEISEN) and guessing the numbering of the rest would
+    be inventing a table; a type the starter still refuses surfaces as its own
+    ``ERROR 99``, which names the material.
+    """
+    if law == 5:
+        return True                     # the JWL lives inside /MAT/LAW5
+    if mid in state.mat_law3 or mid in state.mat_elastic_fluid:
+        return True                     # both emit an /EOS of the same id
+    jc = state.mat_johnson_cook.get(mid)
+    if jc is not None and getattr(jc, "use_law4", False) \
+            and getattr(jc, "eos_id", 0):
+        return True                     # the LAW4 route rebinds its /EOS
+    if mid in state.mat_null and mid not in _void_null_mids(state):
+        return True                     # the /MAT/LAW6 carrier + its /EOS
+    return mid in _null_part_eos_bindings(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RO <= 0: the density floor (starter ERROR 683)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The density k2rad substitutes when a material states ``RO <= 0``, in the
+#: DECK'S OWN unit system — DERIVED from LS-DYNA's measured behaviour, not
+#: chosen.
+#:
+#: LS-DYNA accepts ``RO = 0.0`` and silently substitutes a floor. MEASURED on
+#: the campaign's own reference results (``F:/dynaexamples_r14_ton-mm-s``,
+#: LS-DYNA R14 in ton-mm-s), five decks and four element families:
+#:
+#:   ============================================  ==============  =========  =========
+#:   deck (.d3hsp "total mass of part")            reported mass   volume     implied rho
+#:   ============================================  ==============  =========  =========
+#:   3.1_Elastic_Beams_etc  (hex/tet/shell/beam)   2.0483830E-20   20483.83   1.000e-24
+#:   3.5_..._Plate_Hex                             2.0324782E-19   203247.82  1.000e-24
+#:   3.5_..._Plate_Shell                           2.0324782E-19   203247.82  1.000e-24
+#:   3.5_..._Plate_Tet                             2.0324782E-19   203247.82  1.000e-24
+#:   6.2.PSD_Beam_Example_LSTC (beam)              4.0967660E-20   40967.66   1.000e-24
+#:   ============================================  ==============  =========  =========
+#:
+#: Seven significant figures, five decks, four families — and LS-DYNA reports
+#: ``*** Warning 30131 total number of massless nodes = 20`` rather than an
+#: error. The floor is therefore ABSOLUTE and unit-agnostic, exactly as
+#: LS-DYNA's is.
+#:
+#: A deck-RELATIVE rule ("1e-6 x the smallest positive density in the deck")
+#: was considered and REFUTED by measurement: all eight corpus carriers state
+#: RO = 0 on EVERY material they define, so such a rule has no input on any of
+#: them.
+_ZERO_DENSITY_FLOOR = 1.0e-24
+
+#: The Radioss laws ``hm_read_mat.F90:1575-1583`` exempts from ERROR 683,
+#: verbatim::
+#:
+#:     if (ilaw/=0   .and. ilaw/=20 .and. ilaw/=51 .and. ilaw/=151 .and.&
+#:       ilaw/=108 .and. ilaw /= 999) then
+#:       if (matparam%rho0 <= zero) then
+#:         call ancmsg(msgid=683, ...
+#:
+#: A material that converts to one of these may state RO = 0 and is left
+#: ALONE: on ``ale_wavehitcol.k`` the ``*MAT_VACUUM`` -> ``/MAT/VOID`` (LAW0)
+#: density of 0.0 is the card's own MEANING, and flooring it would rewrite the
+#: deck rather than rescue it.
+_RHO_EXEMPT_LAWS = frozenset({0, 20, 51, 108, 151, 999})
+
+#: The attribute names a material record spells its density with. Checked in
+#: this order; the FIRST one the record has decides, so a record carrying both
+#: cannot be floored twice.
+_RHO_ATTRS = ("rho", "ro", "rho_i", "rho0", "density")
+
+
+def _zero_density_records(state: ConversionState):
+    """``[(field_name, mid, attr)]`` for every material record stating a
+    density <= 0 whose target law is NOT exempt from ERROR 683.
+
+    DISCOVERED, not enumerated. The scan walks every ``ConversionState`` field
+    whose name starts with ``mat_`` and whose value is a ``mid -> dataclass``
+    dict, so a material family added later is covered the day it is added —
+    the inverse of the #120 trap, where a hand-kept list of registries goes
+    stale and the new family is silently missed. (There are 80 such fields
+    today, of which ``_material_registries`` deliberately lists only 47.)
+
+    **What the scan does NOT reach, stated rather than left to be found.** It
+    reads a density only under the five names in ``_RHO_ATTRS``. Fourteen of
+    the ``mat_*`` registries carry NO density attribute under any name — the
+    six ``*MAT_SPRING_*`` / two ``*MAT_DAMPER_*`` discrete families, the three
+    ``*MAT_THERMAL_*`` ones (whose ``TRO`` is a THERMAL density on a different
+    id namespace, read by ``writer/thermal``), ``*MAT_SEATBELT`` (which states
+    ``MPUL``, a mass per unit LENGTH, and no ``RO`` at all),
+    ``*MAT_ADD_EROSION`` and ``*MAT_ADD_FATIGUE`` (riders, not materials) — so
+    there is no density spelling to widen to on any of them, and none of the
+    keywords behind them has an ``RO`` cell in LS-DYNA either. A future family
+    that DOES carry one must spell it with one of the five names or add it
+    here.
+
+    The law screen is ``mesh._target_mat_law``, the ONE mid -> law map in the
+    codebase, and it is read in the SAFE direction: a material is floored
+    unless its law is on ``_RHO_EXEMPT_LAWS``. ``None`` — "this map has no
+    entry" — therefore floors, which is right for both of its cases: a
+    material k2rad emits under a law the map has not learned yet still meets
+    the starter's ERROR-683 gate, and a material k2rad emits no ``/MAT`` for
+    at all has no density cell for the substitution to reach.
+    """
+    import dataclasses
+    out: List[Tuple[str, int, str]] = []
+    from .mesh import _target_mat_law
+    for f in dataclasses.fields(state):
+        if not f.name.startswith("mat_"):
+            continue
+        holder = getattr(state, f.name)
+        if not isinstance(holder, dict):
+            continue
+        for mid, rec in sorted(holder.items()):
+            if not isinstance(mid, int) or not dataclasses.is_dataclass(rec):
+                continue
+            for attr in _RHO_ATTRS:
+                v = getattr(rec, attr, None)
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    continue
+                if v <= 0.0 and _target_mat_law(state, mid) \
+                        not in _RHO_EXEMPT_LAWS:
+                    out.append((f.name, mid, attr))
+                break
+    return out
+
+
+def _apply_zero_density_floor(state: ConversionState) -> None:
+    """Substitute ``RO = 1e-24`` for a material stating ``RO <= 0``, and say so.
+
+    Eight decks of the R14 corpus state ``RO = 0.0`` literally and ran NORMAL
+    TERMINATION in LS-DYNA; the OpenRadioss starter refuses every one of them
+    with ``ERROR ID : 683 ... DENSITY IS LESS THAN OR EQUAL TO ZERO``. They are
+    ``*CONTROL_IMPLICIT_GENERAL`` linear-static and ``*CONTROL_IMPLICIT_
+    EIGENVALUE`` decks, where the mass matrix does not enter the answer — which
+    is why LS-DYNA accepts the card at all.
+
+    The substitution is applied to EVERY deck, not only an implicit one, and
+    deliberately: the substitution IS what LS-DYNA does (there is no field-level
+    check on either side), and restricting it to implicit decks would leave an
+    explicit ``RO = 0`` deck failing at ERROR 683 with no explanation, which is
+    worse than starting with a warning that says exactly why the run will crawl.
+    The explicit case gets the harder sentence instead.
+
+    Runs as a ``build_starter`` prepass AFTER every material-routing pass (so
+    ``_target_mat_law`` answers for the final containers) and after
+    ``_resolve_thermal`` (whose ``*MAT_ADD_THERMAL_EXPANSION`` split can CLONE a
+    material — a clone made before this pass inherits the zero and is floored
+    with its original, one made after would not be). Mutating the record rather
+    than the emitted cell is the faithful model of what LS-DYNA does: its own
+    d3hsp reports the substituted density in the part MASS, so the consumers
+    downstream — the element time step, the modal chain's lumped masses —
+    see the same number the source code did.
+
+    **``/HEAT/MAT``'s ``RHO0_CP`` is deliberately NOT one of them**, and the
+    pass running LAST is what keeps it out: ``_resolve_heat_materials``
+    computes ``rho_cp = rho * cp_mean`` inside ``_resolve_thermal``, and its
+    own ``rho_cp <= 0`` arm warns and substitutes a named placeholder. Flooring
+    first would turn that diagnostic into a silent ``1e-24 * Cp`` that passes
+    the guard — a worse outcome than the one this pass exists to prevent. The
+    thermal capacity keeps the deck's own zero and its own message.
+    """
+    if not state.options.zero_density_floor:
+        return
+    hits = _zero_density_records(state)
+    if not hits:
+        return
+    from .mesh import _target_mat_law
+    laws: Dict[int, Optional[int]] = {}
+    stated: Dict[int, float] = {}
+    for field_name, mid, attr in hits:
+        holder = getattr(state, field_name)
+        stated.setdefault(mid, float(getattr(holder[mid], attr)))
+        setattr(holder[mid], attr, _ZERO_DENSITY_FLOOR)
+        state.zero_density_floored.add(mid)
+        laws[mid] = _target_mat_law(state, mid)
+    mids = sorted({m for _f, m, _a in hits})
+    # The MID and the TARGET LAW, not the LS-DYNA keyword: this pass discovers
+    # its records by walking every ``mat_*`` dict on the state (so a material
+    # family added later is covered the day it is added), and there is no
+    # mid -> source-keyword map to read the spelling out of — each resolver
+    # hard-codes its own ``kw`` string. Inventing one here would be exactly the
+    # hand-kept list this scan exists to avoid. The MID is what the reader greps
+    # the deck for, and the law says which card family it landed on.
+    named = ", ".join(
+        f"MID {mid} (RO = {stated[mid]:g}"
+        + (f" -> /MAT/LAW{laws[mid]}" if laws[mid] is not None else "")
+        + ")"
+        for mid in mids)
+    unknown = "" if all(laws[m] is not None for m in mids) else (
+        " (a MID listed without a law converts to one mesh._target_mat_law "
+        "has no entry for; the /MAT is still written and still meets the "
+        "ERROR-683 gate, which is why it is floored too.)")
+    state.warn(
+        f"DENSITY: {named} — the source deck states a non-positive density on "
+        f"each of them — and k2rad SUBSTITUTED rho = "
+        f"{_ZERO_DENSITY_FLOOR:g} in the deck's own unit system. "
+        "WHY THE VALUE: LS-DYNA makes the SAME substitution and its own d3hsp "
+        "reports it — 'total mass of part = 0.20483830E-19' for the "
+        "20483.83 mm3 part of 3.1_Elastic_Beams_etc is rho = 1.000e-24 to "
+        "seven figures, measured identically on five reference decks and four "
+        "element families, with 'Warning 30131 total number of massless nodes' "
+        "instead of an error. "
+        "WHY AT ALL: hm_read_mat.F90:1575-1583 refuses rho <= 0 outright "
+        "(ERROR 683, DENSITY IS LESS THAN OR EQUAL TO ZERO), exempting only "
+        "laws 0/20/51/151/108/999 — none of them a structural law — so the "
+        "deck does not start without it. "
+        "WHAT IT COSTS: a STATIC answer is unchanged BY THE SUBSTITUTION — "
+        "MEASURED, a 20x2x2 HEX8 cantilever (L 127, 12.7 square, E 68947.5729, "
+        "nu 0.3, tip P = 100 N, /IMPL/QSTAT, all NORMAL TERMINATION) run at "
+        "RO 0 (i.e. floored to 1e-24), 1e-21 and 1e-15 gave the identical tip "
+        "deflection -4.4872740000E-01 mm to all eight printed digits. That is "
+        "a property of the MASSLESS REGIME the floor creates, not an "
+        "invariance up to a real density: the same coupon at a physical "
+        "7.85e-9 reads -4.4872680000E-01 (7th digit), and a shell cantilever "
+        "moves by up to 1.15 % over the same span on residual QSTAT dynamics. "
+        "The floor itself is free because /IMPL/QSTAT's "
+        "inertia stabilization is S ~ M/dt^2 (imp_dyna.F:604-635) and is never "
+        "divided by the mass, so it simply vanishes with it; a MODAL or PSD "
+        "answer picks up a bounded shift df/f ~ -0.5 * rho*V / M_effective, "
+        "which on 6.2.PSD_Beam_Example_LSTC is 2.1e-17 — below double "
+        "precision; a TRANSIENT answer is not meaningful at all, because the "
+        "model has no inertia. "
+        "MASS DIAGNOSTICS ARE MEANINGLESS on such a deck: k2rad's injected "
+        "implicit probe rigid body carries a hard-coded Mass = 0.001, some 17 "
+        "orders of magnitude above the model's own, so TOTAL MASS, MAS.ERR and "
+        "any /TH mass channel report that body and not the structure. "
+        "Pass --no-zero-density-floor (convert(zero_density_floor=False)) to "
+        "copy the deck's own RO through and let the starter refuse it."
+        + unknown)
+    if not state.is_implicit:
+        state.warn(
+            "DENSITY: this deck is EXPLICIT, and a substituted rho = "
+            f"{_ZERO_DENSITY_FLOOR:g} makes the element time step collapse: "
+            "the bar wave speed is c = sqrt(E/rho), so a steel-modulus "
+            "material at this density gives c ~ 2.6e14 mm/s and dt ~ 1e-14 s. "
+            "The starter will accept the deck and the engine will never reach "
+            "the termination time. RO = 0 has a defensible meaning only on an "
+            "implicit STATIC or EIGENVALUE deck, where the mass matrix does "
+            "not enter the answer — state a real density for a transient run.")
+
+
+def _resolve_ale_submaterials(state: ConversionState) -> None:
+    """Decide each ``*ALE_MULTI-MATERIAL_GROUP``'s ``/MAT/LAW51`` phase list.
+
+    Three things happen here, and each is the fix for one measured starter
+    error on the R14 corpus:
+
+    **(a) A VACUUM phase is dropped from the list, not carried as MID 0.**
+    ``hm_read_mat51.F:608-627`` reads exactly ``MIP`` rows and a ``tMID <= 0``
+    inside that range is a fatal *INCORRECT MATERIAL IDENTIFIER*, so a vacuum
+    cannot be declared at all — and it does not need to be: ``:639-646`` checks
+    only ``SUM(alpha) > 1``, so a sum BELOW one is legal and the undeclared
+    balance IS the void. `stagnation_A/B` and `cylinder_impact_A/B` are this
+    shape (*"NON EXISTING SUBMATERIAL IDENTIFIER"*, ``ERROR 99``).
+
+    **(b) A member with no ``/EOS`` is dropped, whatever its law.** This screen
+    is what a research plan to RESTATE ``*MAT_PLASTIC_KINEMATIC`` as
+    ``/MAT/LAW2`` was replaced by, and the replacement was MEASURED (commit
+    ``ff7a82d``). ``fill_buffer_51.F:213-219``'s THEN branch is empty and its
+    ELSE raises on exactly the ``EOS_TYPE`` values its own comment calls
+    expected — ``EOS_TYPE = 0`` included — and ``:281`` states it plainly:
+    ``IF(EOS_TYPE == 0 .AND. MLN /= 5)`` → *"MISSING SUBMATERIAL EOS"*. So a
+    restatement could never produce a legal phase: it clears the law test and
+    dies on the EOS one. ``cylinder_impact_A`` carrying the restatement
+    answered BOTH messages; ``underwater_C`` (LAW5 + LAW6 with an
+    ``/EOS/GRUNEISEN``) started at 0 ERROR. The restatement machinery — and the
+    AMMG clone path that went with it — was therefore REMOVED rather than
+    shipped as a capability that cannot work, and such a phase is dropped by
+    name while the material keeps its ``/MAT/LAW44``.
+
+    **(c) Anything else that is not on the allowed list is dropped by name.**
+    A phase k2rad emits under an unlisted law is ``ERROR 99`` and refuses the
+    whole deck; dropping it leaves a legal card and a warning that says which
+    phase is gone and why. ``*MAT_ELASTIC`` (LAW1) is the case to watch — it is
+    NOT an AMMG member on any corpus deck (``stagnation``'s AMMG lists parts 1
+    and 2, and its ``*MAT_ELASTIC`` is the Lagrangian shell part 3 coupled by
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID``), and the manual route if it ever is
+    would be ``/MAT/LAW2`` with an unreachable yield.
+
+    What this does NOT do is consolidate the ALE mesh — see
+    ``blast_ale._make_ale_multimaterial``, whose warning states in one sentence
+    that the emitted ``/MAT/LAW51`` is referenced by no ``/PART`` and that the
+    run therefore does not reproduce the LS-DYNA model.
+    """
+    if not state.ale_mmgs:
+        return
+    from .blast_ale import _part_pids
+    from .mesh import _target_mat_law
+    for k, mmg in enumerate(state.ale_mmgs):
+        kept: List[int] = []
+        dropped: List[str] = []
+        seen: Set[int] = set()
+        for sid, idtype in mmg.entries:
+            for pid in _part_pids(state, sid, idtype == 1):
+                part = state.parts.get(pid)
+                if part is None or not part.mid or part.mid in seen:
+                    continue
+                mid = part.mid
+                seen.add(mid)
+                if mid in state.refused_materials:
+                    kw = state.refused_materials[mid][0]
+                    dropped.append(
+                        f"MID {mid} (*{kw}) — refused by name; see its own "
+                        "warning")
+                    continue
+                if mid in state.mat_vacuum:
+                    dropped.append(
+                        f"MID {mid} (*MAT_VACUUM -> /MAT/VOID) — Radioss "
+                        "represents void as the UNDECLARED BALANCE of the "
+                        "phase volume fractions, not as a phase: LAW0 is not "
+                        "on fill_buffer_51.F:210's list and a tMID <= 0 inside "
+                        "the MIP rows is fatal (hm_read_mat51.F:608-627), "
+                        "while :639-646 checks only that the fractions SUM "
+                        "ABOVE 1. The vacuum *PART keeps its /MAT/VOID so it "
+                        "resolves")
+                    continue
+                law = _target_mat_law(state, mid)
+                if law is None:
+                    dropped.append(
+                        f"MID {mid} — no /MAT is emitted for it at all, so a "
+                        "phase naming it would be ERROR 99 'NON EXISTING "
+                        "SUBMATERIAL IDENTIFIER' (fill_buffer_51.F:202)")
+                    continue
+                # The EOS screen comes FIRST: a phase with no equation of
+                # state is refused whatever its law, so a material that fails
+                # it must never be restated into one that passes the law test
+                # and then dies here anyway (measured on cylinder_impact_A).
+                if not _submaterial_has_eos(state, mid, law):
+                    dropped.append(
+                        f"MID {mid} (/MAT/LAW{law}) — it carries no /EOS, and "
+                        "fill_buffer_51.F:213-219 refuses a non-explosive "
+                        "phase with EOS_TYPE 0 ('SUBMATERIAL EOS IS NOT "
+                        "COMPATIBLE WITH MATERIAL LAW 51' plus 'MISSING "
+                        "SUBMATERIAL EOS'). MEASURED on cylinder_impact_A: a "
+                        "LAW51 whose only phase was a /MAT/LAW2 with no /EOS "
+                        "answered both, while underwater_C's LAW5 + "
+                        "LAW6+/EOS/GRUNEISEN pair started at 0 ERROR. NOTE the "
+                        "source's own comment at :214 reads the opposite way; "
+                        "the solver follows the code. A LAW51 phase is a FLUID "
+                        "with an equation of state — give the material an "
+                        "*EOS_* if it is meant to be one")
+                    continue
+                if law in _LAW51_ALLOWED_SUBMAT_LAWS:
+                    kept.append(mid)
+                    continue
+                # A GUARD, and today an unreachable one: every material this
+                # converter gives an /EOS to lands on law 3, 4, 5 or 6, and all
+                # four are on the list — so nothing gets past the screen above
+                # and fails here. It is written because the rule is the
+                # starter's, not because a corpus deck needs it (#120: write
+                # the screen where the risk is), and it costs one branch and no
+                # output.
+                dropped.append(
+                    f"MID {mid} (/MAT/LAW{law}) — fill_buffer_51.F:210 accepts "
+                    "only laws 2, 3, 4, 5, 6, 10, 102 and 133 as a phase "
+                    "(:237 'SUBMATERIAL CAN ONLY BE DEFINED FROM LAWS "
+                    "2,3,4,5,6,10 102 OR 133')"
+                    + (" — a *MAT_ELASTIC member would be /MAT/LAW2 with an "
+                       "unreachable yield (a = 1e20, b = 0) AND an /EOS; state "
+                       "it that way if the phase is meant to be there"
+                       if law == 1 else ""))
+        state.ale_mmg_submats[k] = kept
+        if dropped:
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP #{k + 1}: {len(dropped)} phase(s) "
+                "DROPPED from the /MAT/LAW51 submaterial list — "
+                + "; ".join(dropped)
+                + f". MIP falls to {len(kept)}. That is legal: "
+                "hm_read_mat51.F:639-646 checks only that the volume fractions "
+                "SUM ABOVE 1, so a sum below 1 is accepted and the undeclared "
+                "balance is how Radioss represents void — but any phase "
+                "dropped for another reason is MODEL CONTENT that is gone, "
+                "not void.")
+
+

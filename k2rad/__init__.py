@@ -189,10 +189,15 @@ def convert(
     emit_eig: bool = False,
     blast_ground: str = "auto",
     rigid_cog_master: bool = True,
+    zero_density_floor: bool = True,
+    law106_shell_restate: bool = True,
+    zero_t0_sentinel: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
     dt_del: Optional[float] = None,
+    he_bunreacted: Optional[float] = None,
+    ale_multimat_law51: bool = False,
     eroding_surf_ext: bool = False,
     airbag_particle_uniform: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
@@ -282,6 +287,68 @@ def convert(
         (CLI ``--no-rigid-cog-master``) to reuse the mesh node as the master,
         which keeps the master-node id stable for scripts that address
         loads/readouts by it, at the cost of those warnings and the runtime move.
+    zero_density_floor : bool
+        Substitute ``rho = 1e-24`` (in the deck's own unit system) for a
+        material that states ``RO <= 0``. **On by default**: the OpenRadioss
+        starter refuses a non-positive density outright
+        (``hm_read_mat.F90:1575-1583``, ``ERROR 683``, exempting only laws
+        0/20/51/108/151/999), while LS-DYNA accepts the card and makes the SAME
+        substitution silently — its own ``.d3hsp`` reports a part mass of
+        exactly ``1.000e-24 x volume``, measured to seven figures on five R14
+        reference decks and four element families. A STATIC or EIGENVALUE
+        answer is unaffected (``/IMPL/QSTAT``'s stabilization is ``~ M/dt^2``
+        and vanishes with the mass; a modal shift is bounded by
+        ``df/f ~ -0.5 rho V / M_eff``, 2.1e-17 on the corpus carrier); an
+        EXPLICIT deck gets a second, harder warning, because at that density
+        ``c = sqrt(E/rho)`` collapses the element time step to ~1e-14 s.
+        A material converting to an exempt law — ``*MAT_VACUUM`` -> ``/MAT/VOID``
+        above all, where ``RO = 0`` is the card's own meaning — is left alone.
+        Set False (CLI ``--no-zero-density-floor``) to copy the deck's own RO
+        through and let the starter refuse it.
+    law106_shell_restate : bool
+        Restate a ``*MAT_ELASTIC_PLASTIC_THERMAL`` / ``*MAT_CWM`` from
+        ``/MAT/LAW106`` to ``/MAT/LAW36`` when every part on it is a SHELL and
+        it carries a thermal expansion coefficient. **On by default**, because a
+        ``/MAT/LAW106`` SHELL DOES NOT THERMALLY EXPAND AT ALL: ``cmain3.F:348``
+        runs ``THERMEXPC`` AFTER ``MULAWC`` at ``:320`` and all THERMEXPC does
+        on a ``/PROP/SHELL`` is SUBTRACT the thermal stress from the stress the
+        law just produced (``thermexpc.F:269-293``), while
+        ``sigeps106c.F90:297-298`` rebuilds ``signxx``/``signyy`` from the TOTAL
+        strain and never reads ``sigoxx`` — so the subtraction is discarded on
+        the next cycle. ``/MAT/LAW36`` is incremental (``sigeps36c.F:276``) and
+        reads it back. MEASURED on three controlled coupons (alpha 1.2e-5,
+        dT 100 K, L 10 mm, NIP 3, closed form 1.2e-2 mm): LAW106 shell
+        0.0000000e+00 (**-100 %**), the LAW36 restatement 1.2000000e-02
+        (+0.000 %, and identical to a ``*MAT_024`` + expansion control run at
+        every printed T01 digit), the LAW106 SOLID 1.2000000e-02 (+0.000 %).
+        SOLIDS are never
+        restated — ``mmain.F90`` applies the expansion to the strain increment
+        before the law dispatch — and neither is a material shared between shell
+        and non-shell parts (it is warned by name instead). The cost is named per
+        card: ``/MAT/LAW36`` carries no temperature dependence, so E, nu and the
+        yield are frozen at the reference temperature and the warning prints each
+        table's own measured spread. Set False (CLI
+        ``--no-law106-shell-restate``) to keep ``/MAT/LAW106`` and its E(T) at
+        the price of zero thermal expansion on those parts.
+    zero_t0_sentinel : bool
+        Write ``/HEAT/MAT`` ``T0`` as ``1e-10`` in the deck's own temperature
+        unit when the deck STATES an initial temperature of exactly ``0.0``.
+        **On by default.** Radioss cannot tell a stated 0 from "not stated":
+        ``hm_read_therm.F:236-237`` turns a zero ``T0`` into 300 K, and
+        ``scoor3.F:328-338`` (solids), ``cinmas.F:900-905`` /
+        ``c3inmas.F:1516`` (shells) and ``pmass.F:233`` then overwrite every
+        node still at exactly ``0.0`` with it - so the run starts 300 K away
+        from where the deck says it starts. Both are EXACT zero tests, so the
+        substituted value is a sentinel dodge and not physics; a tenth of a
+        nanokelvin is below every channel's print precision. MEASURED on
+        ``ex_22_solid_elform_2``, whose ``*INITIAL_TEMPERATURE_SET`` states
+        ``0.0`` over all 54 nodes: node 5 at ``t = 31.60 s`` reads
+        ``198.21400`` against the LS-DYNA reference's ``34.83880`` (+468.9 %)
+        with ``T0 = 0``, and ``35.15680`` (+0.91 %) with the sentinel, while
+        the driven node 6 is ``61.32760`` either way. A deck that states NO
+        initial temperature keeps ``0.0`` - there the 300 K default is
+        Radioss's own documented behaviour and contradicts nothing. Set False
+        (CLI ``--no-zero-t0-sentinel``) to write the deck's own ``0.0``.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -319,6 +386,30 @@ def convert(
         stub that prints ``FVMBAGS require a mesher`` and stops. The gas
         species, injector, vents and porous surfaces are identical either way;
         only the pressure field differs.
+    he_bunreacted : float, optional
+        Override the ``/MAT/LAW5`` ``Bunreacted`` cell — the UNREACTED
+        explosive's bulk modulus — in the deck's own pressure unit. Without it
+        the card's own ``K`` is written when it states one, and otherwise the
+        value is DERIVED, but only for a material an
+        ``*ALE_MULTI-MATERIAL_GROUP`` names: ``fill_buffer_51.F:496`` refuses a
+        LAW51 phase whose ``Bunreacted`` is ``<= 0`` with ``ERROR 99``, while a
+        stand-alone ``/MAT/LAW5`` is perfectly startable with 0 there. The
+        derivation is the JWL isentrope's bulk modulus at the unreacted
+        density, ``A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0``, every term from a
+        cell the ``*EOS_JWL`` states; it is named in the log with its formula,
+        its value and its consequence: ``mjwl.F:166`` adds ``(1 - F)·K·mu`` to
+        the applied pressure at every burn fraction, where an LS-DYNA
+        ``BETA = 0`` card carries nothing at all. Since the derivation exists
+        only to answer a check on the orphan ``/MAT/LAW51``, which is no longer
+        emitted by default, it now fires only under ``ale_multimat_law51``.
+    ale_multimat_law51 : bool
+        Emit the synthesized ``/MAT/LAW51`` for an ``*ALE_MULTI-MATERIAL_GROUP``
+        (default False). k2rad writes the LS-DYNA per-fluid ALE layout, so no
+        ``/PART`` it emits ever references that card — it is an orphan by
+        construction, and MEASURED inert (deleting it left all 164
+        ``underwater_C`` T01 channels identical at all 172 samples). Turning it
+        on also re-arms the ``Bunreacted`` derivation, because
+        ``fill_buffer_51.F:496`` then applies again.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -376,10 +467,15 @@ def convert(
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",
         rigid_cog_master=rigid_cog_master,
+        zero_density_floor=zero_density_floor,
+        law106_shell_restate=law106_shell_restate,
+        zero_t0_sentinel=zero_t0_sentinel,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,
         dt_del=dt_del,
+        he_bunreacted=he_bunreacted,
+        ale_multimat_law51=ale_multimat_law51,
         eroding_surf_ext=eroding_surf_ext,
         airbag_particle_uniform=airbag_particle_uniform,
     )

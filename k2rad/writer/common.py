@@ -43,6 +43,8 @@ __all__ = [
     "_muscle_discrete_pids",
     "_muscle_part_ids",
     "_spotweld_beam_pids",
+    "_truss_pids",
+    "_truss_secids",
     "_emit_surf_seg",
     "_emit_line_seg",
     "_emit_line_surf",
@@ -719,8 +721,13 @@ def _muscle_beam_pids(state: ConversionState) -> Set[int]:
 
     LS-DYNA states MAT_156 for TRUSS elements (Vol II R17 p.2-1071, *"This is
     Material Type 156 for truss elements"*), i.e. a ``*SECTION_BEAM`` with
-    ELFORM 3, and Radioss has no truss element at all — the closest faithful
-    target is the muscle SPRING property ``/PROP/TYPE46``, whose force law
+    ELFORM 3. Radioss DOES have a truss element — ``/TRUSS`` + ``/PROP/TYPE2``,
+    which :mod:`k2rad.writer.truss` emits for every OTHER ELFORM-3 part — but
+    it carries no muscle law: ``PROP_TRUSS`` is declared by six laws only
+    (0, 1, 2, 13, 34, 44 — ``init_mat_keyword.F:269-270``), LAW156 is not among
+    them, and a ``/TRUSS`` on one would be starter ERROR 3046. The closest
+    faithful target is therefore the muscle SPRING property ``/PROP/TYPE46``,
+    not the truss property, whose force law
     ``FX = Force·f1(t)·f2(ΔL)·f3(ΔL̇) + Scale_F·f4(ΔL) + Damp·VX``
     (``ruser46.F:207-211``) is term for term the ``sigma1 + sigma2 + sigma3``
     of the LS-DYNA card. So these parts get their /PART + /PROP + /SPRING from
@@ -827,6 +834,59 @@ def _discrete_beam_pids(state: ConversionState) -> Set[int]:
             continue
         secid = p.secid if p.secid > 0 else pid
         if secid in elform6 or p.mid in dbeam_mids:
+            pids.add(pid)
+    return pids
+
+
+def _truss_secids(state: ConversionState) -> Set[int]:
+    """``*SECTION_BEAM`` ids whose ELFORM is 3 — the TRUSS formulation.
+
+    A FLAG on the section, not a new element container. A truss IS an
+    ``*ELEMENT_BEAM`` on a ``*SECTION_BEAM`` in LS-DYNA — ``*SET_BEAM``,
+    ``*DATABASE_HISTORY_BEAM`` and the ``*INCLUDE_TRANSFORM`` offset walker all
+    address it as a beam — so the elements stay in ``state.beam_elems`` and the
+    sections in ``state.sec_beams``, and only the WRITE side branches. That
+    keeps every mixed-family SECID test (``writer/sph.py``, ``writer/tshell.py``,
+    ``writer/muscle.py``), the ``next_prop_id`` allocator and the
+    ``_make_plotel_elements`` id-collision dodge correct with no edit at all —
+    a second container would have made each of them a two-dict walk, and a
+    missed one is silent mesh loss (the #120 failure mode).
+    """
+    return {s.secid for s in state.sec_beams.values() if s.elform == 3}
+
+
+def _truss_pids(state: ConversionState) -> Set[int]:
+    """Part ids whose ``*SECTION_BEAM`` is ELFORM=3, i.e. whose ``*ELEMENT_BEAM``
+    rows become ``/TRUSS`` and whose property becomes ``/PROP/TYPE2``.
+
+    Parts already claimed by a CONNECTOR path are excluded, exactly as
+    ``_discrete_beam_pids`` excludes the discrete-spring ones: ``*MAT_MUSCLE``
+    parts are ELFORM=3 by convention and already become a ``/PROP/TYPE46``
+    ``/SPRING`` (LAW156 has no Radioss counterpart and ``PROP_TRUSS`` is not
+    declared for the muscle law), and both writers emit ``/PART/<pid>`` — two
+    of them is starter ERROR 79.
+
+    A part carrying shell/solid/thick-shell/SPH elements is excluded too, on
+    the same reasoning ``_discrete_beam_pids`` states: a continuum part whose
+    SECID happens to collide with an ELFORM=3 ``*SECTION_BEAM`` must keep its
+    own element blocks.
+    """
+    secids = _truss_secids(state)
+    if not secids:
+        return set()
+    claimed = (_discrete_part_ids(state) | _muscle_beam_pids(state)
+               | _muscle_part_ids(state) | _spotweld_beam_pids(state)
+               | _discrete_beam_pids(state) | _seatbelt_part_ids(state))
+    continuum_pids = ({e.pid for e in state.shell_elems}
+                      | {e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems}
+                      | {c.pid for c in state.sph_elems})
+    pids: Set[int] = set()
+    for pid, p in state.parts.items():
+        if pid in claimed or pid in continuum_pids:
+            continue
+        secid = p.secid if p.secid > 0 else pid
+        if secid in secids:
             pids.add(pid)
     return pids
 

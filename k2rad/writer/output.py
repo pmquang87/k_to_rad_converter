@@ -129,8 +129,12 @@ def _make_ams(state: ConversionState) -> List[str]:
 #   <id cards>                 <- per type, below
 #
 # /TH/NODE            "%10d%10d%-80s"  = id, skew_ID, name   (th_node.cfg)
-# /TH/BEAM,SPRING,
+# /TH/BEAM,SPRING,TRUSS,
 #     SHEL,SH3N,BRIC  "%10d          %-80s" = id, TEN BLANK COLUMNS, name
+#                     (/TH/TRUSS from radioss110/OUTPUTBLOCK/th_truss.cfg,
+#                      FORMAT(radioss51); the starter counts it at
+#                      hm_read_thgrou.F:2466-2486 with ITYP = 4, NVALL = 6 and
+#                      resolves the ids through MAP_TABLES%ITRUSSM over NUMELT)
 # /TH/RBODY,PART      FREE_CELL_LIST(idsmax,"%10d",ids,100) = TEN IDS PER LINE,
 #                     no name column and no skew column at all
 #
@@ -288,6 +292,12 @@ _TH_SET_SOURCES = {
     "NODE_SET":       _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
     "NODE_SET_LOCAL": _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
     "SPH_SET":        _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
+    # *SET_BEAM reaches a *SECTION_BEAM ELFORM=3 part's elements too, and needs
+    # no arm of its own for it: a truss IS an *ELEMENT_BEAM in LS-DYNA and stays
+    # in state.beam_elems, so this part-set expansion already returns its eids
+    # and _th_beam_split routes them to /TH/TRUSS afterwards. (With a separate
+    # truss container this line would have silently lost them — the argument
+    # for the flag data model, see writer/common._truss_secids.)
     "BEAM_SET":       _ThSetSource(
         lambda s: s.beam_sets, "*SET_BEAM",
         lambda s, pids: _elems_of_parts(s.beam_elems, pids)),
@@ -469,26 +479,42 @@ def _drop_muscle_springs(state: ConversionState, kw: str, ids, cids, refs,
 
 
 def _th_beam_split(state: ConversionState, ids, cids, refs, names):
-    """Split a *DATABASE_HISTORY_BEAM id list into (/BEAM ids, /SPRING ids).
+    """Split a *DATABASE_HISTORY_BEAM id list into (/BEAM, /SPRING, /TRUSS).
 
     dyna2rad decides this PER ELEMENT through ``FindRadElement``'s fallback
     chain — /BEAM, then /SPRING, then /TRUSS, with the keyword re-initialised
     INSIDE the loop (converttimehistory.cxx:246, convertutils.cxx:298-312) — so
-    one card can produce up to three groups. k2rad needs two of the three for
+    one card can produce up to three groups. k2rad needs all three, each for
     its own reason: an *ELEMENT_BEAM on a *MAT_SPOTWELD part becomes a
     /PROP/TYPE13 /SPRING and one on a *SECTION_BEAM ELFORM=6 part becomes a
-    /PROP/TYPE8|13 /SPRING, neither of which is a /BEAM. (k2rad emits no
-    /TRUSS at all, so the third link of the chain has no target here.)
+    /PROP/TYPE8|13 /SPRING, while one on an ELFORM=3 part becomes a /TRUSS.
+
+    /TH/TRUSS is a group type of its own — ``hm_read_thgrou.F:2466-2486``
+    counts ``/TH/TRUSS`` with ``ITYP = 4``, ``KEY = 'TRUSS'``, and resolves the
+    ids through ``MAP_TABLES%ITRUSSM`` over ``NUMELT`` — so a truss id left in
+    a ``/TH/BEAM`` group matches nothing at all.
+
+    The test is the three PRODUCER registries filled at the write lines
+    (``beam_elem_ids``, ``truss_elem_ids``, and everything else to /SPRING),
+    never re-derived from ``state.beam_elems``.
     """
     beam: List[int] = []
     spring: List[int] = []
+    truss: List[int] = []
     n = len(ids)
     for k, eid in enumerate(ids):
-        (beam if eid in state.beam_elem_ids else spring).append(k)
+        if eid in state.beam_elem_ids:
+            beam.append(k)
+        elif eid in state.truss_elem_ids:
+            truss.append(k)
+        else:
+            spring.append(k)
     return (([ids[k] for k in beam], _th_pick(cids, beam, n),
              _th_pick(refs, beam, n), _th_pick(names, beam, n)),
             ([ids[k] for k in spring], _th_pick(cids, spring, n),
-             _th_pick(refs, spring, n), _th_pick(names, spring, n)))
+             _th_pick(refs, spring, n), _th_pick(names, spring, n)),
+            ([ids[k] for k in truss], _th_pick(cids, truss, n),
+             _th_pick(refs, truss, n), _th_pick(names, truss, n)))
 
 
 def _make_starter_th(state: ConversionState) -> List[str]:
@@ -500,7 +526,8 @@ def _make_starter_th(state: ConversionState) -> List[str]:
       ``SHELL`` / ``SHELL_SET``   → /TH/SHEL + /TH/SH3N, split by topology
       ``SOLID`` / ``TSHELL`` (+``_SET``) → /TH/BRIC
       ``SPH`` / ``SPH_SET``       → /TH/SPHCEL
-      ``BEAM`` / ``BEAM_SET``     → /TH/BEAM + /TH/SPRING, split per element
+      ``BEAM`` / ``BEAM_SET``     → /TH/BEAM + /TH/SPRING + /TH/TRUSS, split
+                                    per element
       ``DISCRETE`` (+``_SET``)    → /TH/SPRING
       ``SEATBELT``                → /TH/SPRING + /TH/SHEL + /TH/SH3N, split
                                     PER ELEMENT
@@ -521,7 +548,7 @@ def _make_starter_th(state: ConversionState) -> List[str]:
       NODE     ``state.nodes`` (which IS the emitted /NODE block: _make_nodes
                writes ``sorted(state.nodes.items())``)
       SPH      ``state.sph_cell_ids``
-      BEAM     ``state.beam_elem_ids`` ∪ ``state.spring_elem_ids``
+      BEAM     ``state.beam_elem_ids`` ∪ ``spring_elem_ids`` ∪ ``truss_elem_ids``
       DISCRETE ``state.spring_elem_ids``
       SEATBELT ``state.spring_elem_ids`` ∪ ``shell_elem_ids`` ∪ ``sh3n_elem_ids``
       SHELL    ``state.shell_elem_ids`` ∪ ``state.sh3n_elem_ids``
@@ -630,9 +657,10 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 frames += frame_lines
         elif dbh.db_type in ("BEAM", "BEAM_SET"):
             ids, cids, refs, names = _th_screen(
-                state, kw, "an emitted /BEAM or /SPRING",
+                state, kw, "an emitted /BEAM, /SPRING or /TRUSS",
                 "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
-                state.beam_elem_ids | state.spring_elem_ids,
+                state.beam_elem_ids | state.spring_elem_ids
+                | state.truss_elem_ids,
                 ids, cids, refs, names)
             ids, cids, refs, names = _drop_muscle_springs(
                 state, kw, ids, cids, refs, names,
@@ -707,10 +735,12 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 counter += 1
             continue
         if dbh.db_type in ("BEAM", "BEAM_SET"):
-            (b_ids, _bc, _br, b_names), (s_ids, _sc, _sr, s_names) = \
+            ((b_ids, _bc, _br, b_names), (s_ids, _sc, _sr, s_names),
+             (t_ids, _tc, _tr, t_names)) = \
                 _th_beam_split(state, ids, cids, refs, names)
             for sub, sub_ids, sub_names in (("BEAM", b_ids, b_names),
-                                            ("SPRING", s_ids, s_names)):
+                                            ("SPRING", s_ids, s_names),
+                                            ("TRUSS", t_ids, t_names)):
                 if not sub_ids:
                     continue
                 lines += _emit_block(sub, sub_ids, counter, None,
@@ -1174,9 +1204,19 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
             "there is no interface to output (no /TH/INTER emitted).")
     if not state.th_sub_ids and not want_ncforc and not want_rcforc:
         return []
-    # List the parent interface (total contact force) and each force-transducer
-    # sub-interface id — a sub-interface is written to the T01 only when its own
-    # id is requested here (listing just the parent leaves OUTPUT TO TH = 0).
+    # Every force-transducer sub-interface id, plus ONE representative
+    # interface for its total contact force.
+    #
+    # Listing the sub ids is MANDATORY, not cosmetic: hm_read_intsub.F:509-524
+    # scans the /TH/INTER lists and sets NOM_OPT(5) = 1 for a sub id it finds
+    # there; a sub-interface that is not listed is read and then silently
+    # dropped (OUTPUT TO TH = 0), so the requested channel is simply absent.
+    #
+    # The companion id used to be the transducers' PARENT interface. Since the
+    # transducers became parentless (/INTER/SUB inter_ID = 0, see
+    # contacts._make_force_transducers) it is just a representative interface,
+    # so the deck also carries an interface-level total beside the transducer
+    # channels — same id, same channel, a different reason for choosing it.
     ids: List[int] = []
     if state.th_sub_ids:
         parent_id = _select_parent_interface(state)

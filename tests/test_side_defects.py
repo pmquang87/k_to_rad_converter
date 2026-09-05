@@ -331,9 +331,15 @@ class TestTwoDLagCarrier(unittest.TestCase):
         self.res = res
 
     def test_the_resolved_ids_are_one_MAT_and_one_EOS_each(self):
+        # /MAT/VOID/5 is the deck's own *MAT_VACUUM 5, newly converted by the
+        # R14 triage batch (LAW0 is a region that carries no stress, and it is
+        # exempt from ERROR 683 so its RHO needs no substitution). No *PART
+        # names it on this deck — the same shape a *MAT_NULL with no part has
+        # always taken here — and it collides with nothing, which is what this
+        # class is about.
         self.assertEqual(_headers(self.starter, "/MAT/"),
                          ["/MAT/LAW4/3", "/MAT/ELAST/2", "/MAT/VOID/4",
-                          "/MAT/LAW5/1"])
+                          "/MAT/VOID/5", "/MAT/LAW5/1"])
         self.assertEqual(_headers(self.starter, "/EOS/"),
                          ["/EOS/GRUNEISEN/3"])
 
@@ -1631,10 +1637,15 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
         """The exact call-site count, so a silently deleted or re-added bare
         ``next_id()`` shows up as a number change rather than as nothing.
 
-        18 = 4 master-surface (common.py) + 5 /SECT (inistate.py) + 1
+        19 = 4 master-surface (common.py) + 6 /SECT (inistate.py) + 1
         /CLUSTER/BRICK (loads.py) + 4 bag-surface (monvol.py) + 2 /PRELOAD
         (preload.py) + 1 FSI /GRBRIC/PART (blast_ale.py) + 1 /ACTIV
-        (rarecards.py, the only one that was guarded before this batch)."""
+        (rarecards.py, the only one that was guarded before this batch).
+
+        The /SECT count went 5 -> 6 with the R14 truss batch: the card has a
+        grtrus_ID column of its own and a *SECTION_BEAM ELFORM=3 element is a
+        /TRUSS, so a cross section holding one now emits a /GRTRUS/TRUS group
+        beside the /GRBEAM one."""
         import re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
@@ -1644,7 +1655,7 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
                 # Skip prose: only count real call sites.
                 if re.search(r"state\.next_elem_group_id\(\)", ln):
                     n += 1
-        self.assertEqual(n, 18)
+        self.assertEqual(n, 19)
 
 
 class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):

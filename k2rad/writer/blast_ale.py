@@ -373,29 +373,125 @@ def _part_pids(state: ConversionState, sid: int, is_part: bool) -> List[int]:
     return list(ps[1]) if ps else []
 
 
+def _warn_ale_multimaterial_omitted(state: ConversionState) -> List[str]:
+    """State the ``*ALE_MULTI-MATERIAL_GROUP`` that got no ``/MAT/LAW51``.
+
+    Nothing is silently dropped: the phase list the card would have carried, the
+    modelling gap it never closed, and the way to get it back are all named —
+    the card itself said none of this to the solver, because no ``/PART``
+    referenced it.
+    """
+    for k, mmg in enumerate(state.ale_mmgs):
+        submats = list(state.ale_mmg_submats.get(k, []))
+        if not submats:
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP #{k + 1}: no submaterial survives "
+                "— either no *PART/material of the group is known to this "
+                "converter, or every phase was dropped by the LAW51 "
+                "submaterial screen (see the warning above). /MAT/LAW51 not "
+                "emitted.")
+            continue
+        state.warn(
+            f"*ALE_MULTI-MATERIAL_GROUP #{k + 1} (phases {submats}, in order): "
+            "NO /MAT/LAW51 is emitted, and this is deliberate. k2rad writes "
+            "the LS-DYNA per-fluid ALE layout — each fluid on its own /PART "
+            "with its own single-material /MAT and Iale = 1 on its "
+            "/PROP/SOLID — so no /PART in the emitted deck could reference a "
+            "synthesized /MAT/LAW51: it would be an ORPHAN BY CONSTRUCTION. "
+            "MEASURED, so 'orphan' is not an assumption: on a converted "
+            "underwater_C, deleting the whole block left all 164 T01 channels "
+            "identical at all 172 samples (max |difference| exactly "
+            "0.000000e+00) at 0 ERROR / 0 WARNING / NORMAL TERMINATION. What "
+            "the card was NOT free of is its own starter check — "
+            "fill_buffer_51.F:496 refuses a /MAT/LAW5 phase whose Bunreacted "
+            "is <= 0 (ERROR 99) — which forced a positive Bunreacted onto the "
+            "material's own LIVE /MAT/LAW5, where mjwl.F:166 turns it into an "
+            "added (1-F)*K*mu pre-burn stiffness that an LS-DYNA BETA = 0 card "
+            "(p = F*p_eos, Vol II R17 p.2-186) does not carry. Omitting the "
+            "card lets Bunreacted stay 0, which IS that LS-DYNA rule. WHAT IS "
+            "STILL NOT REPRODUCED, card or no card: in OpenRadioss the ALE "
+            "domain is ONE part referencing a LAW51 material with the initial "
+            "fill set by /INIVOL, and k2rad emits neither. The converted deck "
+            "starts and runs, but the phases CANNOT MIX: on a blast deck the "
+            "detonation products cannot expand into the water region, and on a "
+            "volume-fraction deck the initial fill is not the deck's. THIS "
+            "CONVERTED DECK DOES NOT REPRODUCE THE LS-DYNA MODEL. To "
+            "reproduce it, consolidate the per-fluid ALE parts onto one mesh, "
+            "re-run with --ale-multimat-law51 to get the /MAT/LAW51 back, "
+            "point that one /PART at it, and give each phase its /INIVOL fill "
+            "by hand — noting that the card's ALPHA_MAT values are a "
+            "PLACEHOLDER (1.0 on the first phase, 0.0 on the rest) with no "
+            "relation to the deck's *INITIAL_VOLUME_FRACTION*. Also measured "
+            "on these decks: underwater_C runs to its full target time with a "
+            "kinetic energy 54x the LS-DYNA glstat's and an engine energy "
+            "error reaching 99.9 %, and stagnation_A's engine stops at cycle "
+            "18 (t = 3.9e-5 of ENDTIM 2e-2) with no termination line at all. "
+            "The starter fix is real; the engine result is not the LS-DYNA "
+            "answer.")
+    return []
+
+
 def _make_ale_multimaterial(state: ConversionState) -> List[str]:
-    """*ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT), Iform=12.
+    """*ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT), Iform=12 — under
+    ``--ale-multimat-law51`` only.
 
     The AMMG order becomes the ordered submaterial list; each submaterial is the
     material of the referenced part(s) (a /MAT/LAW6+/EOS fluid or /MAT/LAW5
     explosive already emitted). Card layout from MAT/mat_law51.cfg
     FORMAT(radioss2023). The single-part-consolidation of the LS-DYNA multi-part
     ALE mesh is left to the user (warned).
+
+    **Why the card is OFF by default.** k2rad writes the LS-DYNA per-fluid ALE
+    layout — each fluid on its own ``/PART`` with its own single-material
+    ``/MAT`` and ``Iale = 1`` on its ``/PROP/SOLID`` — so no ``/PART`` k2rad
+    emits ever references the synthesized ``/MAT/LAW51``. It is an orphan BY
+    CONSTRUCTION, not by accident on some decks, and MEASURED inert: deleting
+    the block from a converted ``underwater_C`` left all 164 T01 channels
+    identical at all 172 samples (max ``|difference|`` exactly
+    ``0.000000e+00``), at 0 ERROR / 0 WARNING / NORMAL TERMINATION and the same
+    172 cycles. (The T01 *file* is 52 bytes shorter and hashes differently —
+    that is entity metadata in the header, not data.)
+
+    **What the orphan card COST.** Its own starter check,
+    ``fill_buffer_51.F:496``, refuses a ``/MAT/LAW5`` phase whose ``Bunreacted``
+    is ``<= 0`` (``ERROR 99``) — so keeping it forced a positive ``Bunreacted``
+    onto the material's own ``/MAT/LAW5``, which a ``/PART`` really does
+    reference. ``mjwl.F:166`` has NO branch on that cell:
+    ``PNEW = -PSH + (1-F)·(P0 + BULK·mu) + (F·JWL terms)/(...)``, so a positive
+    value is an ADDED ``(1-F)·K·mu`` pre-burn stiffness at every burn fraction,
+    which an LS-DYNA ``BETA = 0`` card (``p = F·p_eos``, Vol II R17 p.2-186)
+    does not carry. Dropping the card lets ``Bunreacted`` stay 0, which IS that
+    LS-DYNA rule. MEASURED on ``underwater_C``, four variants each run to
+    completion: card + derived value → clean; card removed, value kept →
+    identical to it in every channel; card removed, value 0 → 0 ERROR /
+    0 WARNING / NORMAL TERMINATION, 172 cycles, and closer to the LS-DYNA
+    ``glstat`` kinetic energy at all five sampled times (ratio 12.08 / 29.93 /
+    66.39 / 66.46 / 54.13 against 12.64 / 30.14 / 66.61 / 66.57 / 54.19);
+    card kept, value 0 → ``ERROR 99``, i.e. the deck ``--he-bunreacted 0`` used
+    to produce was unstartable.
     """
     if not state.ale_mmgs:
         return []
+    if not state.options.ale_multimat_law51:
+        return _warn_ale_multimaterial_omitted(state)
     lines: List[str] = []
-    for mmg in state.ale_mmgs:
-        submats: List[int] = []
-        for sid, idtype in mmg.entries:
-            for pid in _part_pids(state, sid, idtype == 1):
-                part = state.parts.get(pid)
-                if part and part.mid and part.mid not in submats:
-                    submats.append(part.mid)
+    for k, mmg in enumerate(state.ale_mmgs):
+        # The phase list is DECIDED by writer/materials._resolve_ale_submaterials
+        # (which drops the vacuum entry, every submaterial with no /EOS, and
+        # every law fill_buffer_51.F:210 refuses), never re-derived here: two
+        # walks of the same entries would be two answers to one question. There
+        # is no law RESTATEMENT on this path — the *MAT_PLASTIC_KINEMATIC ->
+        # /MAT/LAW2 idea was MEASURED not to work (fill_buffer_51.F:281 refuses
+        # a phase with no EOS whatever its law), so such a phase is dropped by
+        # name and the material keeps its LAW44.
+        submats = list(state.ale_mmg_submats.get(k, []))
         if not submats:
-            state.warn("*ALE_MULTI-MATERIAL_GROUP: could not resolve any "
-                       "submaterial (no known parts/materials) — /MAT/LAW51 not "
-                       "emitted.")
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP #{k + 1}: no submaterial survives "
+                "— either no *PART/material of the group is known to this "
+                "converter, or every phase was dropped by the LAW51 "
+                "submaterial screen (see the warning above). /MAT/LAW51 not "
+                "emitted.")
             continue
         # next_mat_id(), not a bare next_id(): the synthesized /MAT/LAW51 shares
         # the starter /MAT namespace with every converted *MAT, so a user MID at
@@ -417,17 +513,68 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
         lines.append(HDR)
         expl = [m for m in submats if m in state.mat_high_explosive]
         if expl:
-            state.warn(
-                f"*ALE_MULTI-MATERIAL_GROUP: /MAT/LAW51/{law_id} includes JWL "
-                f"explosive submaterial(s) {expl}; a LAW5 used inside a multi-"
-                "material ALE needs a non-zero unreacted-explosive bulk modulus "
-                "(Bunreacted) on its /MAT/LAW5 (ERROR 99 otherwise) — set it.")
+            # This used to end "set it" — a prescription k2rad now carries out
+            # itself in writer/materials._resolve_he_bunreacted, so leaving it
+            # would tell the reader to supply a value the emitted deck already
+            # has (the #129 cited-fact rule). What is worth saying is which
+            # value went in and where it came from.
+            for m in expl:
+                heb = state.mat_high_explosive[m]
+                state.warn(
+                    f"*ALE_MULTI-MATERIAL_GROUP: /MAT/LAW51/{law_id} includes "
+                    f"JWL explosive submaterial {m}, whose /MAT/LAW5 "
+                    f"Bunreacted is written as {heb.bunreacted:g}"
+                    + (f" from {heb.bunreacted_note}."
+                       if heb.bunreacted_note else
+                       " — nothing on the card or its *EOS_JWL could supply "
+                       "one, so fill_buffer_51.F:496 will refuse the phase "
+                       "with ERROR 99 ('BULK MODULUS OF LAW5 (JWL) MUST BE "
+                       "PROVIDED FOR UNREACTED EXPLOSIVE'); state K on the "
+                       "*MAT_HIGH_EXPLOSIVE_BURN card or pass "
+                       "--he-bunreacted.")
+                    + " A LAW5 used inside a multi-material ALE needs a "
+                      "POSITIVE unreacted bulk modulus; a stand-alone "
+                      "/MAT/LAW5 does not (the check is in the Iform = 12 "
+                      "branch alone).")
         state.warn(
-            f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing submaterials "
-            f"{submats} (phase order). In OpenRadioss the ALE domain is ONE part "
-            f"referencing this /MAT/LAW51 with the initial fill set by /INIVOL; "
-            "consolidate the LS-DYNA per-fluid ALE parts onto one mesh that "
-            f"references material {law_id}.")
+            f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing "
+            f"submaterials {submats} (phase order), with ALPHA_MAT = 1.0 on "
+            "the first phase and 0.0 on the rest. READ THIS BEFORE TRUSTING "
+            "THE RUN: **no /PART in the emitted deck references this "
+            "/MAT/LAW51**, and no /INIVOL is written. In OpenRadioss the ALE "
+            "domain is ONE part referencing the LAW51 material with the "
+            "initial fill set by /INIVOL; what k2rad emits instead is the "
+            "LS-DYNA per-fluid layout — each fluid on its own /PART with its "
+            "own single-material /MAT and Iale = 1 on its /PROP/SOLID. That "
+            "starts and runs, but the phases CANNOT MIX: on a blast deck the "
+            "detonation products cannot expand into the water region, and on a "
+            "volume-fraction deck the initial fill is not the deck's. THIS "
+            "CONVERTED DECK DOES NOT REPRODUCE THE LS-DYNA MODEL. The "
+            "ALPHA_MAT values are a PLACEHOLDER with no relation to the deck's "
+            "*INITIAL_VOLUME_FRACTION*: they are inert exactly because nothing "
+            "references the card, and they would be wrong by construction if "
+            "anything did. To reproduce the model, consolidate the per-fluid "
+            f"ALE parts onto one mesh that references material {law_id} and "
+            "give each phase its /INIVOL fill by hand. MEASURED, so the word "
+            "'inert' is not an assumption: deleting this entire /MAT/LAW51 "
+            "block from a converted underwater_C left the run at 0 ERROR / "
+            "0 WARNING, NORMAL TERMINATION and the same 172 cycles, with max "
+            "|difference| over all 164 T01 channels and all 172 samples "
+            "exactly 0.000000e+00. (The T01 FILE is 52 bytes shorter and "
+            "hashes differently — that is entity metadata in the header, not "
+            "data.) The card exists to answer the starter, nothing more, which "
+            "is why it is emitted only under --ale-multimat-law51. What is NOT "
+            "inert is the Bunreacted its own check then forces for a JWL "
+            "phase: that cell rides on the material's own /MAT/LAW5, which a "
+            "/PART DOES reference, and mjwl.F:166 adds it to the applied "
+            "pressure as (1-F)*K*mu at every burn fraction "
+            "(see the *MAT_HIGH_EXPLOSIVE_BURN warning). Also measured on "
+            "these decks: underwater_C runs to its full target time with a "
+            "kinetic energy 54.5x the LS-DYNA glstat's and an engine energy "
+            "error reaching 99.9 %, and stagnation_A's engine stops at cycle "
+            "18 (t = 3.9e-5 of ENDTIM 2e-2) with no termination line at all. "
+            "The starter fix is real; the engine result is not the LS-DYNA "
+            "answer.")
     return lines
 
 

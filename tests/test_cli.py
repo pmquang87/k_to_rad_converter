@@ -120,6 +120,36 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cli.build_parser().parse_args([self.kpath, "--does-not-exist"])
 
+    def test_help_renders(self):
+        """`k2rad --help` must not crash, and no test rendered it until this
+        one — so a bare `%` in a help string shipped and killed the CLI's own
+        front door at 4867 green tests and 20 green CI checks.
+
+        argparse %-expands EVERY help string in ``_expand_help``
+        (``self._get_help_string(action) % params``), so a lone ``%`` raises
+        ``ValueError: unsupported format character``. A measured percentage in
+        a help text has to be written ``%%``.
+        """
+        text = cli.build_parser().format_help()
+        self.assertIn("--units", text)
+        # and the escaped percentages come out as single ones for the reader
+        self.assertIn("(-100 %)", text)
+        self.assertIn("(+0.000 %)", text)
+
+    def test_no_help_string_carries_an_unescaped_percent(self):
+        """The general rule behind the one above: scan every `help=` the
+        parser holds, so the NEXT percent sign is caught at the source rather
+        than by a crash. A `%` is legal only as `%%` or as an argparse
+        placeholder like `%(default)s`."""
+        import re
+        bad = []
+        for action in cli.build_parser()._actions:
+            h = action.help or ""
+            for m in re.finditer(r"(?<!%)%(?![%(])", h):
+                bad.append((action.option_strings, h[max(0, m.start() - 30):
+                                                     m.start() + 5]))
+        self.assertEqual(bad, [])
+
 
 if __name__ == "__main__":
     unittest.main()

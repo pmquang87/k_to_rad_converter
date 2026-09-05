@@ -1041,9 +1041,25 @@ cyl
 
 
 class TransducerParentMatchTests(unittest.TestCase):
-    """Each /INTER/SUB must parent on the interface whose main surface and
-    secondary group actually contain its segments/nodes (starter ERROR 581
-    otherwise), independent of contact definition order."""
+    """Each /INTER/SUB is PARENTLESS and measures its OWN pair of surfaces.
+
+    This class used to pin the parent-MATCHING rule: with three split per-pair
+    contacts, each transducer had to parent on the interface whose main surface
+    and secondary group actually contained its segments and nodes, or the
+    starter answered ERROR 580/581 per foreign entity. The R14 triage batch
+    removed the parent entirely — ``/INTER/SUB`` with ``inter_ID = 0``
+    (``hm_read_intsub.F:249``, ``INTSUB_TYP = 100``, 'Interf 0 : adding all
+    contacts') collects the force from EVERY interface and the reader's
+    ``NOM_OPT(2,...) == 0`` branches raise neither 580 nor 581.
+
+    So the property under test is STRONGER now, not weaker: the deck below can
+    no longer name a wrong parent because it names none, and what has to hold
+    instead is that each transducer's Main_ID2 is a /SURF over ITS OWN SURFA
+    parts — pin 2 for transducer 101, cyl 3 for 102 — independent of contact
+    definition order. The old fallback-when-nothing-matches case is gone with
+    the parent, so its test is replaced by the no-contact case: a transducer on
+    a deck with no interface at all still converts, because it needs none.
+    """
 
     def _convert(self, deck: str):
         tmp = tempfile.TemporaryDirectory()
@@ -1055,20 +1071,52 @@ class TransducerParentMatchTests(unittest.TestCase):
         return result, Path(result.starter_path).read_text()
 
     @staticmethod
-    def _sub_parent(starter: str, sub_id: int) -> int:
+    def _sub_cells(starter: str, sub_id: int):
+        """(inter_ID, Main_ID1, Second_ID, Main_ID2) of one /INTER/SUB."""
         lines = starter.splitlines()
         i = lines.index(f"/INTER/SUB/{sub_id}")
-        # block: keyword, title, comment, data card (parent main_surf grnod)
-        return int(lines[i + 3].split()[0])
+        # block: keyword, title, comment, data card
+        row = lines[i + 3]
+        return tuple(int(row[k:k + 10]) for k in range(0, 40, 10))
 
-    def test_each_transducer_parents_on_its_own_pair(self):
+    @staticmethod
+    def _surf_id_by_title(starter: str, title: str) -> int:
+        """The id of the /SURF block whose title card is *title*."""
+        lines = starter.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("/SURF/") and lines[i + 1].strip() == title:
+                return int(ln.rsplit("/", 1)[1])
+        raise AssertionError(f"no /SURF titled {title!r}")
+
+    def test_each_transducer_measures_its_own_pair(self):
         _, starter = self._convert(TRANSD_MATCH_K)
-        self.assertEqual(self._sub_parent(starter, 101), 9)    # pin pair
-        self.assertEqual(self._sub_parent(starter, 102), 10)   # cyl pair
+        pin = self._sub_cells(starter, 101)
+        cyl = self._sub_cells(starter, 102)
+        # inter_ID = 0 and Second_ID = 0 on both: parentless, no node group.
+        self.assertEqual(pin[0], 0)
+        self.assertEqual(cyl[0], 0)
+        self.assertEqual(pin[2], 0)
+        self.assertEqual(cyl[2], 0)
+        # Main_ID2 is that transducer's OWN SURFA surface, not the other's.
+        self.assertEqual(pin[3], self._surf_id_by_title(starter,
+                                                        "pin_force_main"))
+        self.assertEqual(cyl[3], self._surf_id_by_title(starter,
+                                                        "cyl_force_main"))
+        self.assertNotEqual(pin[3], cyl[3])
+        # Both state a real SURFB (part 1, the bracket) -> Main_ID1 is set, so
+        # the engine runs TYPSUB = 3 (i7for3.F:1607) and counts only the pairs
+        # that straddle the two surfaces.
+        self.assertEqual(pin[1], self._surf_id_by_title(starter,
+                                                        "pin_force_main2"))
+        self.assertEqual(cyl[1], self._surf_id_by_title(starter,
+                                                        "cyl_force_main2"))
 
-    def test_unmatched_transducer_falls_back_with_warning(self):
-        # Remove the cyl pair contact: transducer 102 has no covering interface
-        # -> falls back to the first contact and warns loudly.
+    def test_a_transducer_needs_no_contact_at_all(self):
+        # Remove the cyl pair contact: under the old parented form transducer
+        # 102 then had no covering interface and fell back to whichever contact
+        # came first (with a loud warning). A parentless sub-interface has
+        # nothing to fall back FROM — it converts unchanged, and no warning
+        # claims a guessed parent.
         deck = TRANSD_MATCH_K.replace(
             "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
             "        10                                                        bracket_vs_cyl\n"
@@ -1076,10 +1124,14 @@ class TransducerParentMatchTests(unittest.TestCase):
             "       0.2\n",
             "")
         result, starter = self._convert(deck)
-        self.assertEqual(self._sub_parent(starter, 101), 9)
-        self.assertEqual(self._sub_parent(starter, 102), 11)   # fallback: first
-        self.assertTrue(any("no contact interface covers" in w
-                            for w in result.warnings))
+        self.assertEqual(self._sub_cells(starter, 101)[0], 0)
+        self.assertEqual(self._sub_cells(starter, 102)[0], 0)
+        self.assertEqual(self._sub_cells(starter, 102)[3],
+                         self._surf_id_by_title(starter, "cyl_force_main"))
+        self.assertFalse(any("no contact interface covers" in w
+                             for w in result.warnings), result.warnings)
+        self.assertTrue(any("inter_ID = 0" in w for w in result.warnings),
+                        result.warnings)
 
 
 DISPCTRL_K = TRANSDUCER_K.replace(
@@ -2856,7 +2908,12 @@ class CardLayoutTests(unittest.TestCase):
         self.assertEqual(int(card[0:10]), surf_id)      # surf_ID
         self.assertEqual(int(card[10:20]), 1)           # fct_IDT
         self.assertEqual(card[60:80].strip(), "1")      # Ascale_x
-        self.assertEqual(card[80:100].strip(), "2.5")   # Fscale_y = SF
+        # Fscale_y = -SF: Vol I R17 p.33-107, Figure 33-12 is "Positive
+        # pressure acts in the negative t-direction", the SAME rule
+        # *LOAD_SHELL_* has always been inverted for. MEASURED on
+        # 3.1_Elastic_Beams_etc: -200.29 % vs its LS-DYNA nodout without
+        # the flip, +0.29 % with it.
+        self.assertEqual(card[80:100].strip(), "-2.5")  # Fscale_y = -SF
         self.assertEqual(len(card), 100)
 
     def test_skew_fix_writes_local_y_and_z_vectors(self):
@@ -5999,7 +6056,14 @@ class AleFsiTests(unittest.TestCase):
         self.assertEqual(card[20:30].strip(), "1")    # Iale = 1 (field 3)
 
     def test_ale_mmg_becomes_law51(self):
-        _r, starter = self._convert(_ale_fsi_deck())
+        """Under --ale-multimat-law51. k2rad writes the LS-DYNA per-fluid ALE
+        layout, so no /PART it emits can reference the synthesized card: it is
+        an orphan BY CONSTRUCTION, measured inert (every underwater_C T01
+        channel identical without it), and its only real effect was to force a
+        positive /MAT/LAW5 Bunreacted through fill_buffer_51.F:496 — which
+        mjwl.F:166 turns into an added (1-F)*K*mu pre-burn stiffness LS-DYNA's
+        BETA = 0 card does not carry. So it is OFF by default."""
+        _r, starter = self._convert(_ale_fsi_deck(), ale_multimat_law51=True)
         self.assertIn("/MAT/LAW51/", starter)
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/MAT/LAW51/"))
@@ -6015,6 +6079,24 @@ class AleFsiTests(unittest.TestCase):
                 break
             mids.append(ln.split()[0])
         self.assertEqual(mids[:2], ["4", "2"])
+
+    def test_the_default_emits_no_law51_and_says_why(self):
+        """The DEFAULT: no orphan card, and the group is still stated in full
+        — its phase list, what is not reproduced, and how to get the card
+        back."""
+        r, starter = self._convert(_ale_fsi_deck())
+        self.assertNotIn("/MAT/LAW51/", starter)
+        w = [x for x in r.warnings if "NO /MAT/LAW51 is emitted" in x]
+        self.assertEqual(len(w), 1, r.warnings)
+        for fact in ("ORPHAN BY CONSTRUCTION",
+                     "(phases [4, 2], in order)",
+                     "0.000000e+00",
+                     "fill_buffer_51.F:496",
+                     "mjwl.F:166",
+                     "p = F*p_eos",
+                     "DOES NOT REPRODUCE THE LS-DYNA MODEL",
+                     "--ale-multimat-law51"):
+            self.assertIn(fact, w[0])
 
     def test_fsi_type18_and_grbric(self):
         _r, starter = self._convert(_ale_fsi_deck())
@@ -7932,7 +8014,10 @@ class LoadSegmentSetTests(unittest.TestCase):
         card = self._data_lines(lines, i)[1]
         self.assertEqual(int(card[0:10]), surf_id)          # surf_ID
         self.assertEqual(int(card[10:20]), 7)               # fct_IDT = lcid
-        self.assertEqual(card[80:100].strip(), "2.5")       # Fscale_y = sf
+        # Fscale_y = -sf, see CardLayoutTests
+        # ::test_load_segment_becomes_surf_seg_plus_pload for the manual
+        # sentence and the measurement.
+        self.assertEqual(card[80:100].strip(), "-2.5")      # Fscale_y = -sf
 
     def test_missing_set_segment_warns_not_crashes(self):
         deck = self.DECK.replace(
