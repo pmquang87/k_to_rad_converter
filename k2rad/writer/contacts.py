@@ -9,15 +9,21 @@ from ..state import (ConversionState, ContactSpotweld, ContactTied,
 from .common import (
     HDR,
     _emit_grnod_node,
+    _emit_grsh3n,
+    _emit_grshel,
     _emit_line_seg,
     _emit_line_surf,
+    _emit_surf_grsh3n,
+    _emit_surf_grshel,
     _emit_surf_part,
     _emit_surf_seg,
+    _emit_surf_surf,
     _f,
     _i,
     _make_master_surface,
     _ordered_unique_nodes,
     _part_node_sets,
+    _split_shell_eids_by_topology,
 )
 
 __all__ = [
@@ -87,6 +93,206 @@ __all__ = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SSTYP / MSTYP → id namespace   (R14 triage round 2, item C)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# LS-DYNA Vol I R17 p.11-24, *CONTACT_{OPTION1} mandatory card 1, verbatim:
+#
+#   SURFATYP  ID type of SURFA: EQ.0: Segment set ID for surface-to-surface
+#             contact / EQ.1: Shell element set ID for surface-to-surface
+#             contact / EQ.2: Part set ID / EQ.3: Part ID / EQ.4: Node set ID
+#             for nodes-to-surface contact / EQ.5: Include all non-spot-weld
+#             parts (the SURFA field is ignored) / EQ.6: Part set ID for
+#             exempted parts / EQ.7: Branch ID
+#   SABOXID   ... "can be used only if SURFATYP is set to 2, 3, 5, or 6,
+#             MEANING SURFA IS A PART ID OR PART SET ID."
+#
+# That last sentence is decisive: the manual itself names 2/3/5/6 as the
+# part-typed values, so 0 is not a part id under any reading. There is NO
+# fallback chain, and dyna2rad agrees — ``convertcontacts.cxx:250-300`` is a
+# bare switch (case 0 -> "*SET_SEGMENT", 1 -> "*SET_SHELL", 2 -> "*SET_PART",
+# 3 -> /SET/GENERAL PART, 4 -> "*SET_NODE", 5 -> ALL, 6 -> ALL + opt_D,
+# ``default: break``).
+#
+# MEASURED consequence of the part-first fallback k2rad had until this batch,
+# on ``intro-by-k.-weimar/contact/contact-ii/plate.typ13.k``: *SET_SEGMENT 1
+# holds FIVE segments spanning BOTH bodies (the impactor face 101 103 104 102
+# and four target faces), while *PART 1 is the target alone. Both resolvers hit
+# ``sid in state.parts`` first and built a self-contact of PART 1 — the
+# impactor was not in the interface at all and passed through. Not "no
+# contact": the WRONG contact, terminating NORMAL at 251 cycles with a
+# plausible K-ENERGY, against an LS-DYNA sleout that records a sliding
+# interface energy of 6.92699.
+#
+# A *SET_SEGMENT IS legal as the main surface of a TYPE7:
+# ``hm_read_inter_type07.F:393`` resolves the main side as
+# ``ISU2 = NGR2USR(ISU2, IGRSURF(1:NSURF)%ID, NSURF)`` — a lookup in the /SURF
+# registry with no kind check — and for a SINGLE-surface interface :448-455
+# self-pairs it (``ISU1 = ISU2; IS1 = 1`` when both grnd_IDs and surf_IDs are
+# 0). ``i7sti3.F:663 CALL INSOL3D`` re-orients solid-backed main segments
+# outward, so only a SHELL-backed /SURF/SEG depends on the deck's own node
+# order for its normal.
+#
+# ``sid == 0`` keeps meaning "all" and never reaches these helpers as a lookup:
+# k2rad's own implicit-stabilization stub is ``ssid=0, sstyp=0``.
+
+def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
+    """Every node of *pid* that may sit on a contact SECONDARY side.
+
+    ONE walk shared by ``_resolve_contact_slave``, ``_tied_slave_nids`` and the
+    styp-0/1 resolvers below — three hand-kept copies of this list is how a
+    family added for one of them goes dead on the others.
+
+    Thick shells are /BRICK in the emitted deck, so a *PART of them is a
+    perfectly good contact side; the container is empty on every deck without
+    *ELEMENT_TSHELL.
+
+    A 1D SEATBELT is a /SPRING, but it is the one spring family that genuinely
+    belongs on a contact SECONDARY side: LS-DYNA gives *SECTION_SEATBELT its
+    own AREA and THICK for exactly that, and a shoulder belt that does not
+    touch the occupant restrains nothing. (2D belt elements are folded into
+    ``state.shell_elems`` by ``seatbelts._assign_seatbelt_props`` and are
+    covered by the shell walk.)
+
+    SPH particles are deformable by construction and belong on the SECONDARY
+    (node) side of any contact that scopes their part — that is what makes
+    SSTYP=2/3 work at all. They are deliberately NOT on the MAIN-surface route
+    (``_solid_contact_master_pids`` / ``_solid_pids_by_part``): a particle has
+    no face to build a /SURF from.
+
+    BEAM and TRUSS parts are deliberately NOT walked, and the R14 truss batch
+    left that unchanged rather than "fixing" it in passing. A /TRUSS (or /BEAM)
+    node is a perfectly good contact SECONDARY node in Radioss, so this is a
+    real asymmetry with ``_part_node_ids`` below, which DOES walk
+    ``state.beam_elems`` for the transducer's node inventory — but adding a 1-D
+    family here would change the secondary side of every part-scoped contact on
+    hundreds of corpus decks, which is its own item with its own sweep.
+    Recorded, not silently closed on one side.
+    """
+    nids: Set[int] = set()
+    for e in state.shell_elems:
+        if e.pid == pid:
+            nids.update(e.nodes)
+    for e in state.solid_elems:
+        if e.pid == pid:
+            nids.update(e.nodes)
+    for e in state.tshell_elems:
+        if e.pid == pid:
+            nids.update(e.nodes)
+    for e in state.seatbelt_elems:
+        if e.pid == pid and not e.is_2d:
+            nids.update((e.n1, e.n2))
+    for c in state.sph_elems:
+        if c.pid == pid:
+            nids.update(c.nodes)
+    return nids
+
+
+def _segment_set_node_ids(state: ConversionState, ss) -> Set[int]:
+    """The nodes a ``*SET_SEGMENT`` covers — its segments' corners plus, for a
+    ``*SET_SEGMENT_GENERAL`` ``PART`` clause, the scoped parts' nodes."""
+    out: Set[int] = set()
+    for seg in ss.segments:
+        out.update(seg)
+    for pid in ss.part_scope:
+        out |= _contact_part_nodes(state, pid)
+    return {n for n in out if n > 0}
+
+
+def _styp0_side_nodes(state: ConversionState, sid: int) -> Set[int]:
+    """SSTYP/MSTYP == 0 → the ``*SET_SEGMENT``'s nodes, and NOTHING else."""
+    ss = state.segment_sets.get(sid)
+    return _segment_set_node_ids(state, ss) if ss is not None else set()
+
+
+def _styp1_side_nodes(state: ConversionState, sid: int) -> Set[int]:
+    """SSTYP/MSTYP == 1 → the ``*SET_SHELL``'s elements' nodes, and nothing
+    else. Lifted from ``_spotweld_slave_nids``, which was the only site in this
+    file that resolved type 1 to ``state.shell_sets`` at all."""
+    entry = state.shell_sets.get(sid)
+    if entry is None:
+        return set()
+    wanted = set(entry[1])
+    out: Set[int] = set()
+    for e in state.shell_elems:
+        if e.eid in wanted:
+            out.update(n for n in e.nodes if n > 0)
+    return out
+
+
+def _styp1_side_eids(state: ConversionState, sid: int) -> List[int]:
+    """The *EXISTING* shell element ids of a ``*SET_SHELL`` named by type 1."""
+    entry = state.shell_sets.get(sid)
+    if entry is None:
+        return []
+    live = {e.eid for e in state.shell_elems}
+    return sorted({eid for eid in entry[1] if eid in live})
+
+
+def _styp01_side_pids(state: ConversionState, sid: int, styp: int) -> Set[int]:
+    """The PART ids a type-0/1 side covers — for the callers that need a part
+    scope (*CONTACT_INTERIOR, the solid-main sweep, the TYPE11 fallback)."""
+    pids: Set[int] = set()
+    if styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return pids
+        pids.update(ss.part_scope)
+        nodes = set()
+        for seg in ss.segments:
+            nodes.update(seg)
+        if nodes:
+            for e in state.shell_elems:
+                if nodes.issuperset(e.nodes):
+                    pids.add(e.pid)
+            for e in state.solid_elems:
+                if nodes & set(e.nodes):
+                    pids.add(e.pid)
+            for e in state.tshell_elems:
+                if nodes & set(e.nodes):
+                    pids.add(e.pid)
+        return pids
+    for e in state.shell_elems:
+        if e.eid in set(_styp1_side_eids(state, sid)):
+            pids.add(e.pid)
+    return pids
+
+
+def _styp01_missing_note(state: ConversionState, sid: int, styp: int) -> str:
+    """The extra clause a type-0/1 side whose SET is absent must carry.
+
+    Names what the id would have been read as before this batch, so the reader
+    can tell "the deck states the wrong type" from "the set lives in an
+    *INCLUDE this conversion did not read". LS-DYNA's own behaviour on a
+    missing set is NOT quoted here: no deck in either corpus produces one, so
+    there is no d3hsp/messag line to cite and inventing one would be the #131
+    manual-vs-source mistake in reverse.
+    """
+    kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
+    clash = []
+    if sid in state.parts:
+        clash.append(f"*PART {sid}")
+    if sid in state.part_sets:
+        clash.append(f"*SET_PART {sid}")
+    if sid in state.node_sets:
+        clash.append(f"*SET_NODE {sid}")
+    tail = ""
+    if clash:
+        tail = (f" This deck DOES define {', '.join(clash)} with the same "
+                f"number, and k2rad <= PR #135 silently read the side as that "
+                "instead — measured on plate.typ13, where it built a "
+                "self-contact of the target part and let the impactor pass "
+                "through. Type 0/1 is not a part type (Vol I R17 p.11-25: "
+                "SABOXID \"can be used only if SURFATYP is set to 2, 3, 5, or "
+                "6, meaning SURFA is a part ID or part set ID\"), so the side "
+                "is DROPPED rather than read as a part.")
+    return (f"SURFATYP={styp} makes the id a {kind} id (Vol I R17 p.11-24) and "
+            f"this deck defines no {kind} {sid}.{tail} If the set lives in an "
+            "*INCLUDE this conversion did not read, convert the top-level deck "
+            "instead.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: interfaces
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -103,47 +309,9 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
     mistakes with different remedies, and returning a bare 0 for both is how
     this drop stayed invisible. See _describe_empty_secondary.
     """
-    nids = set()
+    nids: Set[int] = set()
     def add_part_nodes(pid: int):
-        for e in state.shell_elems:
-            if e.pid == pid: nids.update(e.nodes)
-        for e in state.solid_elems:
-            if e.pid == pid: nids.update(e.nodes)
-        # Thick shells are /BRICK in the emitted deck, so a *PART of them is a
-        # perfectly good contact side. The container is empty on every deck
-        # without *ELEMENT_TSHELL, so this cannot move any other conversion.
-        for e in state.tshell_elems:
-            if e.pid == pid: nids.update(e.nodes)
-        # A 1D SEATBELT is a /SPRING, but it is the one spring family that
-        # genuinely belongs on a contact SECONDARY side: LS-DYNA gives
-        # *SECTION_SEATBELT its own AREA and THICK for exactly that, and a
-        # shoulder belt that does not touch the occupant restrains nothing.
-        # Without this, SSTYP=2/3 (part / part set) over a belt part resolves
-        # to ZERO nodes and only the *SET_NODE spelling reaches the webbing —
-        # the SPH situation before the SPH batch, one family further on. (2D
-        # belt elements are folded into state.shell_elems by
-        # seatbelts._assign_seatbelt_props and are covered by the walk above.)
-        for e in state.seatbelt_elems:
-            if e.pid == pid and not e.is_2d:
-                nids.update((e.n1, e.n2))
-        # SPH particles are deformable by construction and belong on the
-        # SECONDARY (node) side of any contact that scopes their part. This is
-        # what makes SSTYP=2/3 (part / part set) work at all; before the SPH
-        # batch only the *SET_NODE spelling reached them, and then only by
-        # accident. They are deliberately NOT added to the MAIN-surface route
-        # (_solid_contact_master_pids / _solid_pids_by_part): a particle has no
-        # face to build a /SURF from.
-        for c in state.sph_elems:
-            if c.pid == pid: nids.update(c.nodes)
-        # BEAM and TRUSS parts are deliberately NOT walked here, and the R14
-        # truss batch left that unchanged rather than "fixing" it in passing. A
-        # /TRUSS (or /BEAM) node is a perfectly good contact SECONDARY node in
-        # Radioss, so this is a real asymmetry with _part_node_ids below, which
-        # DOES walk state.beam_elems for the transducer's node inventory — but
-        # adding a 1-D family here would change the secondary side of every
-        # part-scoped contact on hundreds of corpus decks, which is its own
-        # item with its own sweep, not a truss item. Recorded, not silently
-        # closed on one side.
+        nids.update(_contact_part_nodes(state, pid))
 
     if styp == 4:
         if sid in state.node_sets:
@@ -154,14 +322,10 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         if sid in state.part_sets:
             for pid in state.part_sets[sid][1]:
                 add_part_nodes(pid)
-    elif styp == 0 or styp == 1:
-        if sid in state.parts:
-            add_part_nodes(sid)
-        elif sid in state.part_sets:
-            for pid in state.part_sets[sid][1]:
-                add_part_nodes(pid)
-        elif sid in state.node_sets:
-            nids.update(state.node_sets[sid][1])
+    elif styp == 0:
+        nids.update(_styp0_side_nodes(state, sid))
+    elif styp == 1:
+        nids.update(_styp1_side_nodes(state, sid))
 
     raw_nids = [n for n in sorted(nids) if n > 0]
     clean_nids = [n for n in raw_nids if n not in rigid_nodes]
@@ -177,16 +341,60 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
 
 
 def _resolve_contact_master(state: ConversionState, sid: int, styp: int, out_lines: List[str]) -> int:
+    """Emit the MAIN /SURF of a contact side; 0 when the side resolves to none.
+
+    Type 0 builds a /SURF/SEG over the *SET_SEGMENT's own segments (plus, for a
+    *SET_SEGMENT_GENERAL ``PART`` clause, the part surface those parts wrap) and
+    type 1 a /SURF/GRSHEL over the *SET_SHELL's elements — neither falls back
+    to ``state.parts``. See the SSTYP note at the top of this section.
+    """
+    if styp == 0:
+        return _emit_styp0_master_surface(state, sid, f"contact_master_{sid}",
+                                          out_lines)
+    if styp == 1:
+        eids = _styp1_side_eids(state, sid)
+        if not eids:
+            return 0
+        surf_id = state.next_id()
+        # _make_master_surface takes PARTS; a *SET_SHELL is an ELEMENT scope,
+        # so the /GRSHEL is built from the eids directly (with the same
+        # quad/tri split every other main surface makes — a /GRSHEL/SHEL
+        # holding a 3-corner shell is starter ERROR 70, measured on
+        # W16_spotweld_E1).
+        quad_eids, tri_eids = _split_shell_eids_by_topology(state, eids)
+        sub_ids: List[int] = []
+        if quad_eids:
+            grshel_id = state.next_elem_group_id()
+            out_lines += _emit_grshel(grshel_id, f"contact_master_{sid}_grshel",
+                                      quad_eids)
+            if not tri_eids:
+                out_lines += _emit_surf_grshel(surf_id, f"contact_master_{sid}",
+                                               grshel_id)
+                return surf_id
+            sub = state.next_id()
+            out_lines += _emit_surf_grshel(sub, f"contact_master_{sid}_shells",
+                                           grshel_id)
+            sub_ids.append(sub)
+        if tri_eids:
+            grsh3n_id = state.next_elem_group_id()
+            out_lines += _emit_grsh3n(grsh3n_id, f"contact_master_{sid}_grsh3n",
+                                      tri_eids)
+            if not sub_ids:
+                out_lines += _emit_surf_grsh3n(surf_id, f"contact_master_{sid}",
+                                               grsh3n_id)
+                return surf_id
+            sub = state.next_id()
+            out_lines += _emit_surf_grsh3n(sub, f"contact_master_{sid}_tris",
+                                           grsh3n_id)
+            sub_ids.append(sub)
+        out_lines += _emit_surf_surf(surf_id, f"contact_master_{sid}", sub_ids)
+        return surf_id
+
     pids = set()
     if styp == 3:
         pids.add(sid)
     elif styp == 2:
         if sid in state.part_sets:
-            pids.update(state.part_sets[sid][1])
-    elif styp == 0 or styp == 1:
-        if sid in state.parts:
-            pids.add(sid)
-        elif sid in state.part_sets:
             pids.update(state.part_sets[sid][1])
 
     clean_pids = sorted(pids)
@@ -195,6 +403,42 @@ def _resolve_contact_master(state: ConversionState, sid: int, styp: int, out_lin
     surf_id = state.next_id()
     if not _make_master_surface(state, surf_id, f"contact_master_{sid}", clean_pids, out_lines):
         return 0
+    return surf_id
+
+
+def _emit_styp0_master_surface(state: ConversionState, sid: int, title: str,
+                               out_lines: List[str]) -> int:
+    """A MAIN /SURF from a ``*SET_SEGMENT`` (SURFATYP/SURFBTYP = 0).
+
+    The segments become a /SURF/SEG verbatim — their node order fixes the
+    outward normal, and ``i7sti3.F:663 CALL INSOL3D`` re-orients the
+    solid-backed ones anyway. A ``*SET_SEGMENT_GENERAL`` ``PART`` scope becomes
+    the part surface ``_make_master_surface`` builds (/SURF/GRSHEL per shell,
+    /SURF/PART/EXT for solids — exactly Vol I R17 p.43-64's "one segment per
+    shell ... only those segments wrapping the solid part and pointing outward
+    from the part"). A set carrying BOTH is one /SURF/SURF over the two.
+    """
+    ss = state.segment_sets.get(sid)
+    if ss is None or (not ss.segments and not ss.part_scope):
+        return 0
+    surf_id = state.next_id()
+    if ss.segments and not ss.part_scope:
+        out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
+        return surf_id
+    if ss.part_scope and not ss.segments:
+        if not _make_master_surface(state, surf_id, ss.title or title,
+                                    sorted(set(ss.part_scope)), out_lines):
+            return 0
+        return surf_id
+    sub_seg = state.next_id()
+    out_lines += _emit_surf_seg(sub_seg, f"{title}_segs", ss.segments)
+    sub_part = state.next_id()
+    if not _make_master_surface(state, sub_part, f"{title}_parts",
+                                sorted(set(ss.part_scope)), out_lines):
+        out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
+        return surf_id
+    out_lines += _emit_surf_surf(surf_id, ss.title or title,
+                                 [sub_seg, sub_part])
     return surf_id
 
 
@@ -208,10 +452,7 @@ def _contact_master_pids(state: ConversionState, sid: int, styp: int) -> Set[int
         if sid in state.part_sets:
             pids.update(state.part_sets[sid][1])
     elif styp in (0, 1):
-        if sid in state.parts:
-            pids.add(sid)
-        elif sid in state.part_sets:
-            pids.update(state.part_sets[sid][1])
+        pids.update(_styp01_side_pids(state, sid, styp))
     return pids
 
 
@@ -461,11 +702,66 @@ _RIGID_SECONDARY_REMEDY = (
 )
 
 
-def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int) -> str:
+def _secondary_side_remedy(sid: int, styp: int) -> str:
+    """REMEDY text for a contact SECONDARY side that resolved to no nodes.
+
+    Named per TYPE, because "check that SSID names a part, part set or node
+    set" is the wrong advice for the two set types: SURFATYP 0 and 1 name a
+    *SET_SEGMENT and a *SET_SHELL, and telling the reader to point them at a
+    part is telling them to state a type the cell does not mean.
+    """
+    if styp in (0, 1) and sid:
+        kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
+        return (f"REMEDY: add the {kind} {sid} this side names (SURFATYP "
+                f"{styp} is a {kind} id, Vol I R17 p.11-24), or restate the "
+                "type cell — 2 is a *SET_PART, 3 a *PART, 4 a *SET_NODE.")
+    return ("REMEDY: check that SSID names a part, part set or node set that "
+            "exists in this deck and carries elements.")
+
+
+def _describe_empty_main(state: ConversionState, sid: int, styp: int) -> str:
+    """Why a contact MAIN side built no /SURF.
+
+    A ``*SET_SEGMENT`` IS a legal main surface — ``hm_read_inter_type07.F:393``
+    resolves the main side through the /SURF registry with no kind check, and
+    k2rad has emitted a /SURF/SEG as an /INTER/TYPE2 main and an /INTER/SUB
+    ``Main_ID2`` since before this batch — so the old text ("a *SET_NODE or
+    *SET_SEGMENT cannot supply the main surface of this interface") was false
+    and is gone. What a *SET_NODE cannot supply is a surface, because a node
+    group has no faces; that half survives here.
+    """
+    if styp in (0, 1) and sid:
+        return _styp01_missing_note(state, sid, styp)
+    if styp == 4:
+        return (f"SURFATYP=4 makes {sid} a *SET_NODE id, and a node group has "
+                "no FACES — OpenRadioss builds a main /SURF from segments, "
+                "shells or a part's external skin, never from a bare node "
+                "list. State the main side as a *SET_SEGMENT (type 0), a "
+                "*SET_SHELL (type 1), a *SET_PART (2) or a *PART (3).")
+    return ("it names no part or part set carrying shell/solid elements in "
+            "this deck")
+
+
+def _main_side_remedy(state: ConversionState, sid: int, styp: int) -> str:
+    if styp in (0, 1) and sid:
+        kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
+        return (f"REMEDY: add the {kind} {sid} this side names, or restate the "
+                f"side's type cell (SURFATYP {styp} is a {kind} id; 2 is a "
+                "*SET_PART, 3 a *PART).")
+    return ("REMEDY: point the main side at a *SET_SEGMENT, a *SET_SHELL, a "
+            "part or a part set that exists in this deck and carries faces.")
+
+
+def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int,
+                              state: Optional[ConversionState] = None) -> str:
     """One clause explaining why a contact SECONDARY side produced no nodes."""
     raw = diag.get("raw", 0)
     removed = diag.get("rigid_removed", 0)
     if raw == 0:
+        if state is not None and styp in (0, 1) and sid:
+            return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} "
+                    "resolved to no nodes at all — "
+                    + _styp01_missing_note(state, sid, styp))
         return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
                 "no nodes at all — it names no part, part set or node set that "
                 "carries shell/solid elements in this deck")
@@ -671,22 +967,18 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if not slav_grnod:
                 _drop_interface(state, dropped, c.keyword, c.inter_id,
-                                _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                                _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
                                 _RIGID_SECONDARY_REMEDY
                                 if diag.get("raw") else
-                                "REMEDY: check that SSID names a part, part set "
-                                "or node set that exists in this deck and "
-                                "carries elements.")
+                                _secondary_side_remedy(c.ssid, c.sstyp))
                 continue
             if not mast_surf:
                 _drop_interface(
                     state, dropped, c.keyword, c.inter_id,
                     f"the MAIN side sid={c.ssid} styp={c.sstyp} resolved to no "
-                    "contact surface (it names no part or part set carrying "
-                    "shell/solid elements)",
-                    "REMEDY: point the contact at a part or part set that "
-                    "exists in this deck; a *SET_NODE or *SET_SEGMENT cannot "
-                    "supply the main surface of this interface.")
+                    "contact surface: " + _describe_empty_main(
+                        state, c.ssid, c.sstyp),
+                    _main_side_remedy(state, c.ssid, c.sstyp))
                 continue
             _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
             gapmin = _gapmin_override(state, c.inter_id,
@@ -707,22 +999,18 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
         if not slav_grnod:
             _drop_interface(state, dropped, c.keyword, c.inter_id,
-                            _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                            _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
                             _RIGID_SECONDARY_REMEDY
                             if diag.get("raw") else
-                            "REMEDY: check that SSID names a part, part set or "
-                            "node set that exists in this deck and carries "
-                            "elements.")
+                            _secondary_side_remedy(c.ssid, c.sstyp))
             continue
         if not mast_surf:
             _drop_interface(
                 state, dropped, c.keyword, c.inter_id,
                 f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} resolved "
-                "to no contact surface (it names no part or part set carrying "
-                "shell/solid elements)",
-                "REMEDY: point MSID at a part or part set that exists in this "
-                "deck; a *SET_NODE or *SET_SEGMENT cannot supply the main "
-                "surface of a /INTER/TYPE7.")
+                "to no contact surface: " + _describe_empty_main(
+                    state, c.msid, c.mstyp),
+                _main_side_remedy(state, c.msid, c.mstyp))
             continue
         _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
         gapmin = _gapmin_override(state, c.inter_id,
@@ -873,13 +1161,15 @@ def _transducer_side_pids(state: ConversionState, sid: int, styp: int) -> List[i
     2 = part-set ID, 3 = part ID, 5 = all parts.
 
     Types 0 and 1 name no ``*PART`` at all and are handled one level up, by
-    :func:`_transducer_surface`, which builds a ``/SURF/SEG`` from the
-    ``*SET_SEGMENT`` directly — the same ``styp in (0, 1) and sid in
-    state.segment_sets`` test every other contact writer in this file already
-    uses (``_general_line_group``, ``_contact_master_segments``,
-    ``_resolve_contact_slave``). This function is reached for such a side only
-    when the segment set is MISSING, and it then returns nothing rather than
-    reading the set id as a part id.
+    :func:`_transducer_surface`, which builds the ``/SURF`` from the
+    ``*SET_SEGMENT`` (type 0) or the ``*SET_SHELL`` (type 1) directly. Since
+    the R14 round-2 batch that is the rule EVERY resolver in this file follows
+    — see the SSTYP note at the top of the interfaces section — and the
+    docstring is no longer describing a test three of them did not do:
+    ``_resolve_contact_slave``, ``_resolve_contact_master`` and
+    ``_contact_master_pids`` all read ``state.parts`` first until then.
+    This function is reached for such a side only when the set is MISSING, and
+    it then returns nothing rather than reading the set id as a part id.
     """
     if styp == 5 or sid == 0:
         return sorted(state.parts.keys())
@@ -911,15 +1201,15 @@ def _transducer_surface(state: ConversionState, sid: int, styp: int,
     the blast / EBCS / FSI paths.
     """
     if styp in (0, 1):
-        ss = state.segment_sets.get(sid)
-        if ss is None or not ss.segments:
+        surf_id = (_emit_styp0_master_surface(state, sid, title, out_lines)
+                   if styp == 0 else
+                   _resolve_contact_master(state, sid, 1, out_lines))
+        if not surf_id:
             return 0, (f"SURFATYP {styp} makes {sid} a "
                        + ("*SET_SEGMENT" if styp == 0 else
                           "*SET_SHELL element set")
                        + " id, and this deck defines no such set with any "
-                         "segment in it")
-        surf_id = state.next_id()
-        out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
+                         "member in it")
         return surf_id, ""
     pids = [p for p in _transducer_side_pids(state, sid, styp)
             if p in state.parts]
@@ -1753,19 +2043,29 @@ def _general_line_group(state: ConversionState, sid: int, styp: int,
                         tag: str, out_lines: List[str]) -> int:
     """Build a /LINE group for one side of an edge (TYPE11) contact.
 
-    A segment set (styp 0/1 → *SET_SEGMENT) is emitted as an explicit
-    /LINE/SEG from its segment edges. Parts / part sets are emitted as a /SURF
-    (via _make_master_surface, the same surface the TYPE7/25 path builds) wrapped
-    in a /LINE/SURF, letting the starter derive the surface's segment edges.
-    Returns the /LINE id, or 0 when no geometry resolves.
+    A segment set (styp 0 → *SET_SEGMENT) is emitted as an explicit /LINE/SEG
+    from its segment edges. Parts / part sets — and a styp-1 *SET_SHELL, whose
+    elements have no edge list of their own here — are emitted as a /SURF (via
+    _make_master_surface / the styp-1 arm of _resolve_contact_master, the same
+    surface the TYPE7/25 path builds) wrapped in a /LINE/SURF, letting the
+    starter derive the surface's segment edges. Returns the /LINE id, or 0 when
+    no geometry resolves.
     """
-    if styp in (0, 1) and sid in state.segment_sets:
+    if styp == 0 and sid in state.segment_sets:
         ss = state.segment_sets[sid]
         edges = _segment_set_edges(ss.segments)
-        if not edges:
+        if edges:
+            line_id = state.next_id()
+            out_lines += _emit_line_seg(line_id, ss.title or tag, edges)
+            return line_id
+        if not ss.part_scope:
+            return 0
+    if styp == 1:
+        surf_id = _resolve_contact_master(state, sid, 1, out_lines)
+        if not surf_id:
             return 0
         line_id = state.next_id()
-        out_lines += _emit_line_seg(line_id, ss.title or tag, edges)
+        out_lines += _emit_line_surf(line_id, tag, [surf_id])
         return line_id
     pids = sorted(_contact_master_pids(state, sid, styp))
     if not pids:
@@ -2323,6 +2623,16 @@ def _type25_surface(state: ConversionState, c, sid: int, styp: int,
     # part forms), so they are resolved here.
     if styp == 5 or (sid == 0 and sid_zero_is_all_parts):
         pids = set(state.parts.keys())
+    elif styp in (0, 1) and sid:
+        # A *SET_SEGMENT (0) or *SET_SHELL (1) names its own SEGMENTS, not a
+        # part scope, so the surface is built from the set — the eroding
+        # /SURF/PART/ALL question below only arises for a part-scoped SOLID
+        # side, which a bare segment set is not. A *SET_SEGMENT_GENERAL PART
+        # clause DOES carry parts and reaches _make_master_surface through
+        # _emit_styp0_master_surface, with /EXT as everywhere else.
+        return (_emit_styp0_master_surface(state, sid, tag, out_lines)
+                if styp == 0 else
+                _resolve_contact_master(state, sid, 1, out_lines))
     else:
         pids = _contact_master_pids(state, sid, styp)
     if not pids:
@@ -2523,7 +2833,7 @@ def _make_type25_interfaces(state: ConversionState,
                                            lines, diag=diag)
             if not grnod:
                 _drop_interface(state, dropped, kw, c.inter_id,
-                                _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                                _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
                                 _RIGID_SECONDARY_REMEDY if diag.get("raw") else
                                 "REMEDY: for a node-to-surface contact SSID "
                                 "should name a *SET_NODE_LIST holding every "
@@ -2835,17 +3145,10 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
         if sid in state.part_sets:
             for pid in state.part_sets[sid][1]:
                 add_part_nodes(pid)
-    elif styp in (0, 1):
-        if sid in state.segment_sets:
-            for seg in state.segment_sets[sid].segments:
-                nids.update(seg)
-        elif sid in state.parts:
-            add_part_nodes(sid)
-        elif sid in state.part_sets:
-            for pid in state.part_sets[sid][1]:
-                add_part_nodes(pid)
-        elif sid in state.node_sets:
-            nids.update(state.node_sets[sid][1])
+    elif styp == 0:
+        nids.update(_styp0_side_nodes(state, sid))
+    elif styp == 1:
+        nids.update(_styp1_side_nodes(state, sid))
     return sorted(n for n in nids if n > 0)
 
 
@@ -2861,16 +3164,29 @@ def _tied_master_surface(state: ConversionState, c, out_lines: List[str],
     tessellating every sheet of a car body to throw the result away is the
     expensive half of this function."""
     from ..gapmin import _segment_triangles, _surface_triangles
-    if c.mstyp in (0, 1) and c.msid in state.segment_sets:
-        ss = state.segment_sets[c.msid]
-        if not ss.segments:
+    if c.mstyp == 0:
+        surf_id = _emit_styp0_master_surface(
+            state, c.msid, f"{tag}_{c.inter_id}_master", out_lines)
+        if not surf_id:
             return 0, [], []
-        surf_id = state.next_id()
-        out_lines += _emit_surf_seg(surf_id, ss.title or f"{tag}_{c.inter_id}_master",
-                                    ss.segments)
+        ss = state.segment_sets[c.msid]
         if not measure:
             return surf_id, [], []
         verts, faces = _segment_triangles(state, ss.segments)
+        if ss.part_scope:
+            pv, pf = _surface_triangles(state, sorted(set(ss.part_scope)))
+            off = len(verts)
+            verts = list(verts) + list(pv)
+            faces = list(faces) + [tuple(i + off for i in f) for f in pf]
+        return surf_id, verts, faces
+    if c.mstyp == 1:
+        surf_id = _resolve_contact_master(state, c.msid, 1, out_lines)
+        if not surf_id:
+            return 0, [], []
+        if not measure:
+            return surf_id, [], []
+        verts, faces = _surface_triangles(
+            state, sorted(_styp01_side_pids(state, c.msid, 1)))
         return surf_id, verts, faces
     pids = sorted(_contact_master_pids(state, c.msid, c.mstyp))
     if not pids:
@@ -2912,8 +3228,11 @@ def _tied_main_surface_resolves(state: ConversionState, c,
     :func:`_surface_capable_pids` once instead of walking the element tables
     per record.
     """
-    if c.mstyp in (0, 1) and c.msid in state.segment_sets:
-        return bool(state.segment_sets[c.msid].segments)
+    if c.mstyp == 0:
+        ss = state.segment_sets.get(c.msid)
+        return bool(ss is not None and (ss.segments or ss.part_scope))
+    if c.mstyp == 1:
+        return bool(_styp1_side_eids(state, c.msid))
     pids = _contact_master_pids(state, c.msid, c.mstyp)
     if not pids:
         return False
@@ -2932,8 +3251,10 @@ def _tied_slave_is_part_side(state: ConversionState, sid: int, styp: int) -> boo
     if styp == 2:
         return sid in state.part_sets
     if styp in (0, 1):
-        return (sid not in state.segment_sets
-                and (sid in state.parts or sid in state.part_sets))
+        # Neither type names a part: 0 is a *SET_SEGMENT and 1 a *SET_SHELL
+        # element set (Vol I R17 p.11-24). A missing set is a DROPPED side, not
+        # a part side — see the SSTYP note at the top of this section.
+        return False
     return False
 
 
@@ -3058,13 +3379,14 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                  "(/INTER/TYPE2 is a kinematic tie: it cannot share a node "
                  "with a /RBODY)" if all_rigid else
                  f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
-                 "resolved to no nodes at all"),
+                 "resolved to no nodes at all"
+                 + ((" — " + _styp01_missing_note(state, c.ssid, c.sstyp))
+                    if c.sstyp in (0, 1) and c.ssid else "")),
                 ("REMEDY: swap the sides so the DEFORMABLE part supplies the "
                  "tied nodes, or give the tie a negative Card-3 SST/MST so it "
                  "routes to the penalty tie /INTER/TYPE10, which does accept "
                  "rigid-body secondary nodes." if all_rigid else
-                 "REMEDY: check that SSID names a part, part set, node set or "
-                 "segment set that exists in this deck and carries nodes."))
+                 _secondary_side_remedy(c.ssid, c.sstyp)))
             continue
         master_lines: List[str] = []
         surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
@@ -4008,12 +4330,12 @@ def _tiebreak_secondary_node_attrs(state: ConversionState, c):
     Vol I R17 p.11-70 Remark 1 puts the per-set override of NFLF/SFLF/NEN/MES
     on the SURFA ``*SET_NODE`` data cards, so it exists only when SURFA IS a
     node set AND that set states a non-zero attribute — ``state.node_set_attrs``
-    holds only the sets that do. SSTYP 4 is the declared node-set spelling;
-    0/1 fall back to a node-set lookup exactly as ``_tied_slave_nids`` does.
+    holds only the sets that do. SSTYP 4 is the DECLARED node-set spelling and,
+    since the R14 round-2 batch, the only one: types 0 and 1 resolve to a
+    *SET_SEGMENT / *SET_SHELL exclusively, so a node-set attribute cannot reach
+    the tiebreak through them any more (``_tied_slave_nids``).
     """
-    if c.sstyp == 4 or (c.sstyp in (0, 1) and c.ssid not in state.segment_sets
-                        and c.ssid not in state.parts
-                        and c.ssid not in state.part_sets):
+    if c.sstyp == 4:
         return state.node_set_attrs.get(c.ssid)
     return None
 
@@ -4115,7 +4437,7 @@ def _tiebreak_report_dropped_cells(state: ConversionState, c,
                 f"TBLCID={c.tblcid} (the post-failure resisting-tension curve, "
                 "SMP only) — after a total rupture OpenRadioss releases the "
                 "node completely and cannot hold residual tension")
-        if c.ssid in state.segment_set_attr_sids and c.sstyp in (0, 1):
+        if c.ssid in state.segment_set_attr_sids and c.sstyp == 0:
             lost.append(
                 f"the per-SEGMENT override of NFLS/SFLS through the A1/A2 "
                 f"attributes on *SET_SEGMENT {c.ssid} (Vol I R17 p.11-72 "
@@ -4312,22 +4634,13 @@ def _spotweld_slave_nids(state: ConversionState, sid: int, styp: int) -> List[in
     elif styp == 2:
         if sid in state.part_sets:
             add_part_set(sid)
-    elif styp == 1 and sid in state.shell_sets:
-        by_eid = {e.eid: e for e in state.shell_elems}
-        for eid in state.shell_sets[sid][1]:
-            e = by_eid.get(eid)
-            if e is not None:
-                nids.update(n for n in e.nodes if n > 0)
-    elif styp in (0, 1):
-        if sid in state.segment_sets:
-            for seg in state.segment_sets[sid].segments:
-                nids.update(seg)
-        elif sid in state.parts:
-            add_part(sid)
-        elif sid in state.part_sets:
-            add_part_set(sid)
-        elif sid in state.node_sets:
-            nids.update(state.node_sets[sid][1])
+    elif styp == 1:
+        nids.update(_styp1_side_nodes(state, sid))
+    elif styp == 0:
+        # A spot weld's own part nodes still come through add_part, because a
+        # *SET_SEGMENT_GENERAL PART scope resolves to them (_styp0_side_nodes);
+        # what is gone is the part-first FALLBACK on a bare *SET_SEGMENT id.
+        nids.update(_styp0_side_nodes(state, sid))
     return sorted(n for n in nids if n > 0)
 
 

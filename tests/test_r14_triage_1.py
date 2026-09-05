@@ -2705,12 +2705,43 @@ class ForceTransducerSegmentSetTests(unittest.TestCase):
         self.assertEqual([int(rows[1][k:k + 10]) for k in range(10, 50, 10)],
                          [1, 2, 3, 4])
 
-    def test_a_shell_element_set_takes_the_same_route(self):
-        """SURFATYP 1 is a shell-ELEMENT set; every other contact writer in
-        the file already screens `styp in (0, 1) and sid in segment_sets`, so
-        the transducer does too."""
-        _res, starter = _convert(self._seg_deck(satyp=1))
-        self.assertIn("/SURF/SEG/", starter)
+    def test_a_shell_element_set_is_a_shell_set_not_a_segment_set(self):
+        """SUCCESSOR of ``test_a_shell_element_set_takes_the_same_route``.
+
+        That test asserted that ``SURFATYP = 1`` beside a ``*SET_SEGMENT`` of
+        the same id still produced a ``/SURF/SEG`` — the leniency every
+        resolver in ``writer/contacts`` carried at the time. R14 triage round 2
+        removed it: Vol I R17 p.11-24 makes 1 a **shell element set** id and 0
+        a segment set id, and the two are different namespaces. The successor
+        pins both halves — a *SET_SHELL of that id builds the shell surface,
+        and a deck that defines only the *SET_SEGMENT gets a named refusal
+        rather than the wrong surface.
+        """
+        shellset = "*SET_SHELL_LIST\n" + _row(10) + "\n" + _row(1) + "\n"
+        deck = _ft_deck(surfa=10, satyp=1, surfb=0, sbtyp=0).replace(
+            "*CONTROL_TERMINATION", shellset + "*CONTROL_TERMINATION")
+        res, starter = _convert(deck)
+        self.assertEqual(_headers(starter, "/SURF/SEG/"), [], starter)
+        subs = _headers(starter, "/INTER/SUB/")
+        self.assertEqual(len(subs), 1, starter)
+        grshels = {int(h.rsplit("/", 1)[1])
+                   for h in _headers(starter, "/SURF/GRSHEL/")}
+        # Main_ID2 is the transducer's own surface, and it is a /SURF/GRSHEL
+        # over the *SET_SHELL — not the parent contact's (which is the other
+        # /SURF/GRSHEL in this deck).
+        cells = _sub_cells(starter, int(subs[0].rsplit("/", 1)[1]))
+        self.assertIn(cells[3], grshels, starter)
+        self.assertEqual([x for x in res.warnings
+                          if "names no *PART" in x], [])
+
+        # ... and the *SET_SEGMENT-only deck no longer answers a type-1 side
+        res2, starter2 = _convert(self._seg_deck(satyp=1))
+        self.assertEqual(_headers(starter2, "/SURF/SEG/"), [], starter2)
+        self.assertEqual(_headers(starter2, "/INTER/SUB/"), [])
+        w = [x for x in res2.warnings if "CONTACT_FORCE_TRANSDUCER" in x
+             and "-> skipped" in x]
+        self.assertEqual(len(w), 1, res2.warnings)
+        self.assertIn("*SET_SHELL", w[0])
 
     def test_a_missing_segment_set_is_refused_by_name_not_read_as_a_part(self):
         res, starter = _convert(self._seg_deck(define=False))
