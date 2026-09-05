@@ -7282,6 +7282,16 @@ class ConversionState:
     # not call a deck "expanding" just because a flux is on it — it must call it
     # expanding because the temperature moves, which is the union.
     thermal_source_emitted: bool = False
+    # ── R14 triage batch: the THERMAL-ONLY stand-in ────────────────────────
+    # pid → the synthesized /MAT/ELAST id a *CONTROL_SOLUTION SOLN=1 part was
+    # repointed at (writer/thermal.py::_resolve_thermal_standins). LS-DYNA does
+    # not use the *PART MID field on a thermal-only deck and ten R14 corpus
+    # decks state MID = 0 outright; Radioss answers ERROR 179 + ERROR 3046, and
+    # /HEAT/MAT is itself keyed on a MATERIAL id (ERROR 1663 when unresolvable).
+    # The record is kept because part.mid is REWRITTEN in place: the original
+    # id is otherwise unrecoverable for any later diagnostic, and a reader of
+    # the log needs both halves of the substitution.
+    thermal_standin_mats: Dict[int, int] = field(default_factory=dict)
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:

@@ -60,7 +60,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..state import (ConversionState, Curve, ImposedTemperature,
-                     InitialTemperature, MatPlasTAB,
+                     InitialTemperature, MatElastic, MatPlasTAB,
                      MatThermalIsotropicTD, MatThermalOrthotropic)
 from .common import HDR, _emit_grnod_node, _emit_surf_seg, _f, _i
 
@@ -71,6 +71,9 @@ __all__ = [
     "_emit_heat_mat",
     "_emit_therm_stress",
     "_sigma_deck",
+    "_resolve_thermal_standins",
+    "_THERMAL_STANDIN_E",
+    "_THERMAL_STANDIN_NU",
 ]
 
 
@@ -770,6 +773,218 @@ def _structural_density(state: ConversionState, mid: int) -> float:
     return 0.0
 
 
+#: The stand-in's Young's modulus, in the DECK's own unit system (1 MPa in
+#: ton-mm-s). It is MEASURED-INERT under ``/DT/THERM``, and 1 is the smallest
+#: positive value that is (a) exactly representable in every unit system,
+#: (b) far enough from 0 that no starter check on a modulus can trip, and
+#: (c) small enough that if a future engine change ever let the mechanical
+#: element step back in it would RAISE the step, never lower it. A "physical"
+#: 210000 would be a fabricated value with no source on a deck that states
+#: none — and the measurement below shows it buys exactly nothing.
+_THERMAL_STANDIN_E = 1.0
+#: Any value in (-1, 0.5) is inert; 0.3 keeps ``PM(32) = E/(3(1-2nu))`` away
+#: from the incompressible singularity.
+_THERMAL_STANDIN_NU = 0.3
+
+
+def _standin_element_families(state: ConversionState) -> Dict[int, Set[str]]:
+    """``pid -> {"solid", "shell", "tshell"}`` for the continuum families.
+
+    Keyed per FAMILY, never over a union registry, for the same reason
+    ``_element_nodes_by_family`` is: element ids live in separate namespaces
+    per type. Beams, springs and SPH are deliberately absent — a stand-in is
+    only ever synthesized for a part that carries a CONTINUUM element, which
+    is what ``/HEAT/MAT`` conduction is defined on (``stherm.F``, ``thermc.F``)
+    and what the ten corpus decks hold.
+    """
+    fam: Dict[int, Set[str]] = defaultdict(set)
+    for e in state.solid_elems:
+        fam[e.pid].add("solid")
+    for e in state.shell_elems:
+        fam[e.pid].add("shell")
+    for e in state.tshell_elems:
+        fam[e.pid].add("tshell")
+    return fam
+
+
+def _ammg_member_pids(state: ConversionState) -> Set[int]:
+    """Part ids listed by an ``*ALE_MULTI-MATERIAL_GROUP``.
+
+    Excluded from the stand-in below: a LAW51 phase list may only name laws
+    2, 3, 4, 5, 6, 10, 102 or 133 (``fill_buffer_51.F:237``), so repointing an
+    AMMG part at a synthesized ``/MAT/ELAST`` (LAW1) would trade one starter
+    error for another. Empty on every deck without the keyword — no thermal-only
+    deck in the corpus has one — but the screen is written where the risk is,
+    not where today's decks happen to fall (#120).
+    """
+    pids: Set[int] = set()
+    for mmg in state.ale_mmgs:
+        for sid, idtype in mmg.entries:
+            if idtype == 1:
+                if sid in state.parts:
+                    pids.add(sid)
+            else:
+                ps = state.part_sets.get(sid)
+                if ps:
+                    pids.update(ps[1])
+    return pids
+
+
+def _resolve_thermal_standins(state: ConversionState) -> None:
+    """A synthesized inert ``/MAT/ELAST`` for a THERMAL-ONLY part whose
+    ``*PART`` MID names no converted structural material.
+
+    **The deck shape.** ``*CONTROL_SOLUTION`` ``SOLN = 1`` is *"thermal
+    analysis only"*, and Vol I R17 ``*PART`` says the ``MID`` field is then not
+    used — the thermal properties come from ``TMID``. Ten R14 corpus decks
+    write ``MID = 0`` literally and ran ``NORMAL TERMINATION`` in LS-DYNA.
+    Radioss has no such rule: the starter answers
+
+        ERROR ID :  179  MATERIAL ID=0 DOES NOT EXIST
+        ERROR ID : 3046  ELEMENTS OF TYPE BRICK ARE NOT COMPATIBLE WITH
+                         MATERIAL ID 0 OF TYPE 0
+
+    (and ``ERROR 61`` in the third spelling), so a NOTE is not enough: a real,
+    element-compatible ``/MAT`` per thermal-only part is what makes the deck
+    expressible. ``/HEAT/MAT`` is keyed on a MATERIAL id and an unresolvable
+    one is ``ERROR 1663`` (``hm_read_therm.F:135-152``), so the stand-in is
+    also the only thing that lets the deck's conduction be written at all.
+
+    **Why /MAT/ELAST (LAW1).** ``hm_read_mat01.F:146-150`` declares
+    ``SOLID_ISOTROPIC``, ``SHELL_ISOTROPIC``, ``BEAM_CLASSIC``, ``TRUSS`` and
+    ``SPH``, which covers every ``/PROP`` these parts get
+    (``check_mat_elem_prop_compatibility.F:195-235``); ``m1law.F:143`` calls
+    ``MQVISCB``, which is where the solid thermal step is computed; and
+    ``hm_read_therm.F:205`` makes LAW1 Lagrangian so the ``RHO_CP == 0 .AND.
+    LAG == 0`` error at ``:228`` cannot fire.
+
+    **Do NOT replace it with /MAT/VOID.** MEASURED on
+    ``01_2_insulated_concrete_wall_transient``: LAW0 runs **1 cycle** with
+    ``HEAT STORED = 0.0000000`` and still prints NORMAL TERMINATION at 0 ERROR
+    / 0 WARNING, because ``mmain.F90`` has no ``mtn == 0`` branch, so
+    ``MQVISCB`` is never called and ``GLOB_THERM%DT_THERM`` stays at its
+    ``resol.F:2667`` reset value ``1e6 s`` — larger than the whole run.
+
+    **The modulus is inert, measured.** Under ``/DT/THERM`` the mechanical
+    element step is computed and then OVERWRITTEN by the conduction step
+    (``resol.F:5807-5809``) and every nodal DOF is frozen
+    (``resol.F:1738`` ``BCSDTTH_COPY`` sets ``ICODT = ICODR = 7``). Two
+    converted runs of that same deck at ``E = 1`` and ``E = 210000`` produced
+    **960 of 960 byte-identical anim states** and the same 6364 cycles; the
+    heat capacity comes from ``/HEAT/MAT`` ``RHO0_CP`` alone
+    (``hm_read_therm.F:244`` stores it in ``PM(69)`` verbatim,
+    ``smass3.F:206`` spends it), never from this density.
+
+    **The screen** (all four required):
+
+    1. ``*CONTROL_SOLUTION SOLN = 1``. The inertness argument above is a
+       property of ``/DT/THERM``; on a STRUCTURAL solve ``E = 1`` would be a
+       fabricated modulus with a real consequence, so the path does not fire
+       there and the existing dangling-material diagnostic stands.
+    2. the part carries a solid / shell / tshell element (a connector part is
+       the OTHER shape ``mat_ID 0`` has, and it needs no material at all);
+    3. its ``*PART`` TMID names a CONVERTED ``*MAT_THERMAL_*``;
+    4. **no /MAT with the part's mid is in the EMITTED deck** — screened on
+       ``state.all_mat_ids()``, the output registry, not on the source keyword
+       table. ``thermal-stress.k`` states ``MID = 1`` naming a real
+       ``*MAT_ELASTIC_PLASTIC_THERMAL``; running the screen against the SOURCE
+       would either mint a duplicate id (``ERROR 79``) or shadow the real
+       material (#130 — a screen must reproduce every condition the emitter
+       drops on).
+
+    So ``MID = 0``, a MID absent from the source, and a MID present in the
+    source but dropped by the converter all take this branch; a MID that
+    resolves to an emitted ``/MAT`` takes none.
+    """
+    if state.ctrl_solution_soln != 1 or not state.parts:
+        return
+    fam = _standin_element_families(state)
+    ammg = _ammg_member_pids(state)
+    emitted = state.all_mat_ids()
+    made: List[Tuple[int, int, int, float, str]] = []
+    for pid, part in sorted(state.parts.items()):
+        if part.mid in emitted or pid in ammg or not fam.get(pid):
+            continue
+        tm = _thermal_material_for_part(state, pid)
+        if tm is None:
+            continue
+        rho = float(getattr(tm, "tro", 0.0) or 0.0)
+        if rho <= 0.0:
+            # hm_read_mat.F90:1575-1583 exempts only laws 0/20/51/151/108/999
+            # from ERROR 683, so a stand-in with no density would trade one
+            # fatal for another. The thermal card states TRO on every corpus
+            # carrier; say so rather than writing a made-up mass.
+            state.warn(
+                f"/PART {pid}: its *PART TMID {part.tmid} names "
+                f"*MAT_THERMAL_* {tm.tmid}, whose TRO is {rho:g}. A "
+                "thermal-only stand-in /MAT needs a POSITIVE density "
+                "(hm_read_mat.F90:1575-1583 raises ERROR 683 for every law but "
+                "0/20/51/151/108/999), and no other card in this deck states "
+                "one for the part — so NO stand-in is synthesized and the part "
+                "keeps its unresolvable mat_ID. State TRO on the "
+                "*MAT_THERMAL_* card.")
+            continue
+        new_mid = state.next_mat_id()
+        state.mat_elastic[new_mid] = MatElastic(
+            new_mid, f"k2rad_thermal_standin_pid{pid}", rho,
+            _THERMAL_STANDIN_E, _THERMAL_STANDIN_NU)
+        made.append((pid, part.mid, new_mid, rho, ",".join(sorted(fam[pid]))))
+        state.thermal_standin_mats[pid] = new_mid
+        # Repointed HERE, before _resolve_heat_materials reads part.mid to
+        # decide which materials get a /HEAT/MAT. #120 registry audit of the
+        # other part.mid readers: _make_ale_multimaterial is excluded by the
+        # `ammg` screen above; writer/mesh._target_mat_law and the /PART writer
+        # now answer LAW1, which is the point; writer/sph._resolve_sph_materials
+        # keys on SPH parts (LAW1 is SPH-declared and no SOLN=1 deck has any);
+        # _thermal_material_for_part reads TMID, not MID; _warn_duplicate_mat_ids
+        # scans the emitted lines and next_mat_id() already dodges every user
+        # MID; and the *INCLUDE_TRANSFORM offset walk ran at parse time, long
+        # before any writer pass.
+        state.parts[pid] = dataclasses.replace(part, mid=new_mid)
+    if not made:
+        return
+    rows = "; ".join(
+        f"/PART {pid} (mat_ID {old}) -> /MAT/ELAST/{new} rho={rho:g} [{f}]"
+        for pid, old, new, rho, f in made)
+    state.warn(
+        f"*CONTROL_SOLUTION SOLN=1 (thermal analysis only): {len(made)} "
+        "*PART(s) name a *MAT_THERMAL_* through TMID but no structural "
+        "material any emitted /MAT defines. LS-DYNA does not use the MID field "
+        "on a SOLN=1 part; Radioss has no such rule and answers ERROR 179 "
+        "(MATERIAL ID DOES NOT EXIST) plus ERROR 3046 (element/material "
+        "incompatibility), and /HEAT/MAT is itself keyed on a MATERIAL id whose "
+        "unresolvable form is ERROR 1663 (hm_read_therm.F:135-152). k2rad "
+        "therefore SYNTHESIZES an inert structural stand-in per part and "
+        f"repoints the /PART at it: {rows}. The values: rho is the "
+        "*MAT_THERMAL_* card's own TRO (a stated density; it reaches only the "
+        "nodal mass and the starter's PART mass table, never the heat capacity "
+        "-- hm_read_therm.F:244 stores RHO0_CP verbatim in PM(69)); "
+        f"E = {_THERMAL_STANDIN_E:g} in the deck's own units and "
+        f"nu = {_THERMAL_STANDIN_NU:g}. THE MODULUS IS INERT: under /DT/THERM "
+        "the mechanical element step is computed and then overwritten by the "
+        "conduction step (resol.F:5807-5809) and every nodal DOF is frozen "
+        "(resol.F:1738), so no stiffness is ever integrated. MEASURED on "
+        "01_2_insulated_concrete_wall_transient: converted runs at E = 1 and "
+        "E = 210000 gave 960 of 960 byte-identical anim states and the same "
+        "6364 cycles. (Do NOT substitute /MAT/VOID: mmain.F90 has no mtn == 0 "
+        "branch, so GLOB_THERM%DT_THERM keeps its resol.F:2667 reset of 1e6 s "
+        "and the run is ONE cycle with HEAT STORED = 0.0 under a NORMAL "
+        "TERMINATION banner at 0 ERROR / 0 WARNING.)")
+    shells = [pid for pid, _o, _n, _r, f in made
+              if "shell" in f or "tshell" in f]
+    if shells:
+        state.warn(
+            f"Thermal-only stand-in on shell/tshell part(s) {sorted(shells)}: "
+            "/MAT/LAW1 forces GLOBAL shell integration, and thermexpc.F:172-174 "
+            "writes the thermal strain per INTEGRATION POINT, so a LAW1 shell "
+            "cannot thermally expand at all. That is INERT here — a SOLN=1 deck "
+            "gets no /THERM_STRESS/MAT (nothing states an expansion "
+            "coefficient) and resol.F:1738 freezes every DOF, so no expansion "
+            "is computed on any element — but if this deck is later given a "
+            "structural step, restate those parts' material as a real "
+            "*MAT_* card rather than relying on the stand-in.")
+
+
 def _resolve_thermal(state: ConversionState) -> None:
     """Decide every /HEAT/MAT, /THERM_STRESS/MAT, boundary card and driver in
     one prepass.
@@ -800,6 +1015,13 @@ def _resolve_thermal(state: ConversionState) -> None:
         _resolve_load_thermal_elements(state)
         _resolve_expansion(state)
         _warn_duplicate_tmid(state)
+        # AFTER every material-emission decision (_resolve_expansion can still
+        # SPLIT a material, and every _resolve_mat_* pass has already run in
+        # build_starter) and BEFORE _resolve_heat_materials, which reads
+        # part.mid to decide which materials get a /HEAT/MAT. Its screen is the
+        # EMITTED registry state.all_mat_ids(), so it can neither duplicate an
+        # id nor shadow a material this batch newly converts (#130).
+        _resolve_thermal_standins(state)
         _resolve_heat_materials(state)
         _resolve_drivers(state)
         _resolve_thermal_boundaries(state)
@@ -1926,21 +2148,37 @@ def _resolve_heat_materials(state: ConversionState) -> None:
     # parts state no structural material at all). /HEAT/MAT/0 names no material
     # and hm_read_therm.F:135-152 answers ERROR 1663 for a mat_ID it cannot
     # resolve, so those parts get nothing.
+    #
+    # The SOLN=1 continuum shape no longer reaches here at all:
+    # _resolve_thermal_standins has already synthesized a /MAT/ELAST and
+    # repointed the part, so its mid is a real one. Only the parts that pass
+    # NONE of that screen are left, and the message says which screen they
+    # failed rather than announcing a loss that no longer happens (#133).
     zero = 0 in wanted
     wanted.discard(0)
     if zero:
+        left = sorted(pid for pid, part in state.parts.items()
+                      if part.mid == 0
+                      and _thermal_material_for_part(state, pid) is not None)
+        why = ("this deck is not *CONTROL_SOLUTION SOLN=1 (thermal analysis "
+               "only), where LS-DYNA itself stops using the *PART MID field"
+               if state.ctrl_solution_soln != 1 else
+               "they carry no solid/shell/tshell element (the CONNECTOR shape "
+               "of mat_ID 0), or they are an *ALE_MULTI-MATERIAL_GROUP member, "
+               "or their *MAT_THERMAL_* states no positive TRO")
         state.warn(
-            "*PART TMID names a *MAT_THERMAL_* on part(s) whose mat_ID is 0 "
-            "(no structural material in the converted deck). /HEAT/MAT is keyed "
-            "on a MATERIAL id, and one the starter cannot resolve is ERROR 1663 "
-            "(hm_read_therm.F:135-152), so no thermal material is written for "
-            "them — their conduction and heat capacity are LOST. This is the "
-            "shape of a THERMAL-ONLY LS-DYNA deck (*CONTROL_SOLUTION SOLN=1). "
-            "Radioss DOES have a thermal-only run mode — the engine card "
-            "/DT/THERM, which freezes every nodal DOF (resol.F:1738) and paces "
-            "the run by the conduction stability step — but it is still armed "
-            "per MATERIAL by /HEAT/MAT, so give the parts a structural *MAT_* "
-            "as well if they need thermal properties.")
+            f"*PART TMID names a *MAT_THERMAL_* on part(s) {left} whose mat_ID "
+            "is 0 (no structural material in the converted deck). /HEAT/MAT is "
+            "keyed on a MATERIAL id, and one the starter cannot resolve is "
+            "ERROR 1663 (hm_read_therm.F:135-152), so no thermal material is "
+            "written for them — their conduction and heat capacity are LOST. "
+            "k2rad synthesizes an inert structural stand-in /MAT for exactly "
+            f"this shape, but NOT for these parts: {why}. Radioss DOES have a "
+            "thermal-only run mode — the engine card /DT/THERM, which freezes "
+            "every nodal DOF (resol.F:1738) and paces the run by the "
+            "conduction stability step — but it is still armed per MATERIAL by "
+            "/HEAT/MAT, so give the parts a structural *MAT_* as well if they "
+            "need thermal properties.")
     if not wanted:
         return
 

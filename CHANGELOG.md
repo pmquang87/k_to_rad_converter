@@ -11,6 +11,46 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps and the
+  `/MAT/LAW51` semantics behind 38 of the 59 starter failures the 356-deck
+  dynaexamples R14 campaign measured.** Not a parity wish-list: every item below
+  is a deck the user ran through k2rad + OpenRadioss and got a starter error on,
+  with the LS-DYNA reference result sitting beside it on `F:`.
+
+  - **`*CONTROL_SOLUTION SOLN=1` + a `*PART` whose MID names no converted
+    material → a SYNTHESIZED inert `/MAT/ELAST` stand-in.** Vol I R17 `*PART`:
+    for a thermal-only solve the `MID` field is not used and `TMID` supplies the
+    material — and all ten R14 thermal-only decks write `MID = 0` literally and
+    ran NORMAL TERMINATION in LS-DYNA. Radioss has no such rule: the starter
+    answers `ERROR ID 179 "MATERIAL ID=0 DOES NOT EXIST"` **and** `ERROR ID 3046
+    "ELEMENTS OF TYPE BRICK ARE NOT COMPATIBLE WITH MATERIAL ID 0 OF TYPE 0"`
+    (`ex_21_solid_elform_2_0000.out:218` / `:252`), and `/HEAT/MAT` is itself
+    keyed on a MATERIAL id whose unresolvable form is `ERROR 1663`
+    (`hm_read_therm.F:135-152`) — so the deck's whole conduction was being
+    dropped as well. `rho` is the `*MAT_THERMAL_*` card's own **TRO**, a stated
+    density; `E = 1` in the deck's own units and `nu = 0.3`. **The modulus is
+    inert and that is measured, not argued**: under `/DT/THERM` the mechanical
+    element step is computed and then overwritten by the conduction step
+    (`resol.F:5807-5809`) and every nodal DOF is frozen (`resol.F:1738`
+    `BCSDTTH_COPY` sets `ICODT = ICODR = 7`) — two converted runs of
+    `01_2_insulated_concrete_wall_transient` at `E = 1` and `E = 210000` produced
+    **960 of 960 byte-identical anim states** and the same 6364 cycles, with
+    `HEAT STORED` differing only in round-off (−0.22779556E-11 vs
+    −0.22701840E-11). The obvious-looking alternative is the trap: `/MAT/VOID`
+    (LAW0) ran **1 cycle** with `HEAT STORED = 0.0000000` under a NORMAL
+    TERMINATION banner at 0 ERROR / 0 WARNING, because `mmain.F90` has no
+    `mtn == 0` branch, so `MQVISCB` is never called and `GLOB_THERM%DT_THERM`
+    stays at its `resol.F:2667` reset value `1e6 s` — larger than the whole run
+    (the #110/#122 class exactly). The screen runs on the **emitted** `/MAT`
+    registry, not the source keyword table, so a deck like `thermal-stress.k`
+    whose `MID = 1` names a real `*MAT_ELASTIC_PLASTIC_THERMAL` this same batch
+    newly converts is neither duplicated (`ERROR 79`) nor shadowed (#130); and
+    it is gated on `SOLN = 1`, because on a structural solve `E = 1` would be a
+    fabricated modulus with a real consequence. MEASURED on
+    `ex_21_solid_elform_2`: `/PART/1` went from `prop 1, mat 0` and no
+    `/HEAT/MAT` at all to `/MAT/ELAST/90001` + `/HEAT/MAT/90001`. Pinned by
+    `tests/test_r14_triage_1.py`.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts
