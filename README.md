@@ -646,10 +646,16 @@ runtime, so it appears to move in post-processing).
 LS-DYNA (`K` is *"Bulk modulus (BETA = 2.0 only)"*, and a `BETA = 0` beta-burn
 card carries **no** unreacted stress: `p = F·p_eos` with `F = 0`) but
 `fill_buffer_51.F:496` refuses a `/MAT/LAW51` phase whose `Bunreacted ≤ 0`
-with `ERROR 99`. So for an `*ALE_MULTI-MATERIAL_GROUP` member — and only for
-one, a stand-alone `/MAT/LAW5` is startable with 0 — the value is **DERIVED**
-from the companion `*EOS_JWL`'s own coefficients as the slope of the JWL's
-PRINCIPAL ISENTROPE at the unreacted density,
+with `ERROR 99`. **That card is no longer emitted by default**, because k2rad
+writes the LS-DYNA per-fluid ALE layout and so nothing it emits can reference
+the synthesized `/MAT/LAW51` — it is an orphan BY CONSTRUCTION, and MEASURED
+inert (deleting it left all 164 `underwater_C` T01 channels identical at all
+172 samples, max |difference| exactly `0.000000e+00`). With no LAW51 there is
+no `ERROR 99` to answer, so `Bunreacted` stays **0**, which `mjwl.F:166` at
+`P0 = PSH = 0` makes exactly LS-DYNA's `p = F·p_eos`. Under
+`--ale-multimat-law51` the card comes back and, with it, the DERIVATION from
+the companion `*EOS_JWL`'s own coefficients — the slope of the JWL's PRINCIPAL
+ISENTROPE at the unreacted density,
 `K_s(1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0` (on `underwater_C`'s TNT:
 24271.684 + 1186.715 + 1290.0 = **26748.4 MPa**). Two alternatives are named
 beside it with their numbers: `ρ₀D² = 100188.9` (what the starter already
@@ -660,13 +666,25 @@ choice is not what decides the run — a three-value sweep spanning 37× moved t
 last time step 0.14 %, the internal energy 1.1 % and the kinetic energy 0.19 %
 — and neither costs time step, since `PM(27)` already holds `D` and a smaller
 `C11` RAISES the unreacted-sound-speed limit. **Where the value is consumed is
-NOT the `/MAT/LAW51` the starter complained about**: on all four carriers that
-card is referenced by no `/PART`, so the live consumer is the material's own
-`/MAT/LAW5`, i.e. `m5law.F`, where `:135-146` makes the cell a BRANCH SWITCH —
-`BULK == 0` gives the FULL product pressure in every cell with no burn-fraction
-weighting, a positive `BULK` gives the `(1−F)` blend. The substitution names its
-formula, its value, its real consumer and its consequence; `--he-bunreacted`
-overrides it. `G` and `SIGY` have no LAW5 slot at all (LAW5 carries no
+NOT the `/MAT/LAW51` the starter complained about**: that card is referenced by
+no `/PART`, so the live consumer is the material's own `/MAT/LAW5`.
+`mmain.F90:1225-1261` sends `mtn == 5` to `m5law` (which fills the working
+arrays and the SOUND SPEED), then `mqviscb`, then `mjwl` — and the pressure
+that reaches the stress tensor is `mjwl.F:166-167`, which has **no branch on
+the cell at all**:
+`PNEW = −PSH + (1−F)·(P0 + BULK·µ) + (FACM + ESPE·W1DF)/(1 + W1DF·dV/V0)` with
+`FACM = F·(WDR1V·ER1V + WDR2V·ER2V)` and `W1DF = F·W1/DF`. So the JWL product
+term is ALWAYS burn-fraction weighted and a positive `Bunreacted` is an ADDED
+`(1−F)·K·µ` pre-burn stiffness at every burn fraction. (`m5law.F:135-145` does
+branch on the cell, but it writes `P`, a LOCAL declared at `:72` and read only
+at `:159` to build `SSP`, and the routine zeroes the stress tensor at
+`:175-182` — that branch sets the sound speed and hence the time step, not the
+pressure. An earlier draft of this batch read it as the pressure law; the two
+readings prescribe opposite values, which is why the correction is stated
+rather than quietly applied.) The substitution names its formula, its value,
+its real consumer and its consequence; `--he-bunreacted` overrides it, and
+`--he-bunreacted 0` now produces a STARTABLE deck (it used to emit the orphan
+LAW51 anyway and be refused with `ERROR 99`). `G` and `SIGY` have no LAW5 slot at all (LAW5 carries no
 deviator) and are named as dropped
 A `*MAT_ELASTIC_PLASTIC_THERMAL` / `*MAT_CWM` whose parts are ALL SHELLS and
 which carries a thermal expansion coefficient is **restated from `/MAT/LAW106`
@@ -733,8 +751,9 @@ on every material they define). A material converting to an EXEMPT law keeps its
 stated zero, `*MAT_VACUUM` → `/MAT/VOID` above all, where `RO = 0` is the card's
 own meaning. A static or eigenvalue answer is unaffected (`/IMPL/QSTAT`'s
 stabilization is `∝ M/Δt²`, `imp_dyna.F:604-635`, and vanishes with the mass —
-measured identical tip deflection `-4.4916980000E-01 mm` at ρ = 1e-9 / 1e-15 /
-1e-24 on a HEX8 cantilever); an EXPLICIT deck gets a second, harder warning,
+measured identical tip deflection `-4.4872740000E-01 mm` at RO 0 / 1e-21 /
+1e-15 on a HEX8 cantilever — an invariance of the MASSLESS regime the floor
+creates, not up to a physical density); an EXPLICIT deck gets a second, harder warning,
 because at that density `c = √(E/ρ)` collapses the element time step to ~1e-14 s
 and the run never finishes. Every mass diagnostic on such a deck reports
 k2rad's injected 1e-3 implicit probe rigid body, not the structure — the

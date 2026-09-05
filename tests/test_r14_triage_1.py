@@ -1923,7 +1923,7 @@ class ZeroDensityFloor(unittest.TestCase):
         self.assertIn("ERROR 683", hit[0])               # the refusal
         self.assertIn("STATIC answer is unchanged", hit[0])
         # ... and it is MEASURED, not asserted from the algebra alone
-        self.assertIn("-4.4916980000E-01", hit[0])
+        self.assertIn("-4.4872740000E-01", hit[0])
         self.assertIn("MASS DIAGNOSTICS ARE MEANINGLESS", hit[0])
         self.assertIn("--no-zero-density-floor", hit[0])
 

@@ -2729,6 +2729,39 @@ def _warn_dt_therm_surface_rate(state: ConversionState, dt_th: float) -> None:
         "stores 2527.7000. No node should pass the environment temperature.")
 
 
+def _missing_thermal_halves(state: ConversionState) -> str:
+    """Name the half of ``_thermal_solve_active`` that is actually missing.
+
+    The sentence this feeds used to prescribe ``*MAT_THERMAL_* + *PART TMID and
+    a driver`` unconditionally — on a deck that may STATE both and simply not
+    get them emitted (``*MAT_THERMAL_CWM`` has no Radioss counterpart, and a
+    driver whose ``*SET_NODE_*`` k2rad cannot read is dropped at emission). That
+    is the #125 class: a true conclusion prescribing a fix on a correct deck.
+    Both flags are read from what was WRITTEN, the same source
+    :func:`~k2rad.writer.thermal._thermal_solve_active` reads.
+    """
+    heat = bool(state.heat_mat_cards)
+    drive = bool(state.thermal_driver_emitted or state.thermal_source_emitted)
+    if not heat and not drive:
+        return ("NEITHER — no /HEAT/MAT and no temperature-moving card reached "
+                "the output. If the deck states a *MAT_THERMAL_* and a driver, "
+                "they were DROPPED at emission (a *MAT_THERMAL_CWM has no "
+                "Radioss counterpart at all, and a driver whose *SET_NODE_* "
+                "this converter cannot read is dropped with the set); the "
+                "warnings above name each one")
+    if not heat:
+        return ("a temperature-moving card WAS written, but no /HEAT/MAT — no "
+                "*PART reached the output naming a converted *MAT_THERMAL_* "
+                "through TMID, so hm_read_therm.F:253 never arms ITHERM and "
+                "every thermal call in resol.F stays gated off")
+    return ("a /HEAT/MAT WAS written, but no temperature-moving card reached "
+            "the output — an /INITEMP is a STATE, not a driver, so DTEMP stays "
+            "identically zero on every cycle. Add an /IMPTEMP-producing "
+            "*BOUNDARY_TEMPERATURE_* or a *BOUNDARY_CONVECTION / _RADIATION / "
+            "_FLUX heat source (and check the warnings above for one that was "
+            "dropped with its node set)")
+
+
 def _make_engine_thermal(state: ConversionState) -> List[str]:
     """The two ENGINE thermal keywords: ``/DT/THERM`` and ``/THERM``.
 
@@ -2805,8 +2838,12 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
                "this deck arms no thermal solve: /DT/THERM without a "
                "/HEAT/MAT and a temperature-moving card would freeze the whole "
                "model and integrate nothing (GLOB_THERM%ITHERM_FE gates every "
-               "thermal call in resol.F). Add *MAT_THERMAL_* + *PART TMID and "
-               "a driver or heat-source boundary")
+               "thermal call in resol.F). WHICH HALF IS MISSING, from what was "
+               "EMITTED rather than what was stated: "
+               + _missing_thermal_halves(state)
+               + (" (and --ams is in force, which would refuse /DT/THERM "
+                  "anyway — freform.F:1327-1330 hard-stops the pair)"
+                  if _ams_is_emitted(state) else ""))
             + ". The mechanical model is converted as usual and its degrees of "
             "freedom stay live."
             + (" AND THAT MATTERS FOR THE STAND-IN MATERIALS: "

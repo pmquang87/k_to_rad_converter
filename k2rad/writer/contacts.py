@@ -994,7 +994,22 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     samples** for all three forms — this ``inter_ID = 0`` card, a legally
     parented sub-interface, and the parent interface's own channel — i.e.
     bit-identical to the seven printed digits, and 93.2 % of the elastic bound
-    ``2 m v0`` = 1.560e-2.
+    ``2 m v0`` = 1.560e-2. That probe named the SECONDARY-side surface.
+
+    **THE SIGN DEPENDS ON WHICH SIDE THE NAMED SURFACE IS.** ``i7for3.F``
+    accumulates ``IMPX = +FORC_SIGN*FXI(I)*DT12`` on the secondary-side pass
+    (``:1583-1587``, ``ITYPSUB == 2``) and ``IMPX = -FORC_SIGN*FXI(I)*DT12`` on
+    the main-side pass (``:1673-1677``, the same ``ITYPSUB == 2``). That is what
+    makes the card report the NET force on its surface — a contact internal to
+    it cancels — but it also means a parentless sub reports MINUS the force on
+    the surface it names when that surface is the contact MAIN side, i.e.
+    INVERTED relative to a parented ``/INTER/SUB`` and to the LS-DYNA ``rcforc``
+    row. MEASURED on the same probe run three ways: the parent's
+    ``/TH/INTER`` channel and a hand-built parented sub both read
+    ``-0.1500881`` (peak force ``-7689.81``); the parentless sub on the
+    IMPACTOR (secondary) reads ``-0.1500881``; the parentless sub on the PLATE
+    (main) reads ``+0.1500881``. Magnitudes agree to all seven printed digits
+    and to the momentum bound (95.6 % of ``2 m v0``); only the sign moves.
 
     THE CELLS (``radioss2021/INTER/inter_sub.cfg``, the newest FORMAT <= 2022,
     four cells where k2rad used to write three):
@@ -1111,10 +1126,20 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
                 "replaces the parented form k2rad used to write, which had to "
                 "GUESS an interface and made every foreign node ERROR 580 and "
                 "every foreign segment ERROR 581 (measured: plate.typ13, "
-                "pipe.k). MEASURED equal: on a shell-impact probe the "
-                "accumulated normal impulse is -0.01453375 at all 1000 "
+                "pipe.k). MEASURED equal IN MAGNITUDE: on a shell-impact probe "
+                "the accumulated normal impulse is -0.01453375 at all 1000 "
                 "samples for the inter_ID = 0 card, for a legally parented "
-                "sub-interface and for the parent's own channel alike.")
+                "sub-interface and for the parent's own channel alike — that "
+                "probe named the SECONDARY-side surface. READ THE SIGN WITH "
+                "CARE: because the main-side block subtracts what the "
+                "secondary-side block adds, a parentless sub reports MINUS the "
+                "force on the surface it names whenever that surface is the "
+                "contact MAIN side, so it is INVERTED relative to a parented "
+                "/INTER/SUB and to the LS-DYNA rcforc row. Measured on one deck "
+                "run three ways: parent -0.1500881, parented sub -0.1500881, "
+                "parentless sub on the secondary side -0.1500881, parentless "
+                "sub on the main side +0.1500881 — same seven digits, opposite "
+                "sign.")
 
     # Read-out caveat (emitted once when any transducer was written).
     #

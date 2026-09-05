@@ -273,8 +273,13 @@ Prior history (before this changelog was introduced) is summarized in the
     `Iform = 12` branch alone — a stand-alone `/MAT/LAW5` (`underwater_A`/`_B`,
     `exploding-sphere`, `2Dlag`) is perfectly startable with 0 there and does
     not move. `--he-bunreacted <value>` (and the GUI's mirror entry) overrides
-    it everywhere; a blank field is k2rad's own rule, and an unparseable or
-    non-positive value is an error rather than a silently ignored blank.
+    it everywhere; a blank field is k2rad's own rule, and an unparseable value
+    is an error rather than a silently ignored blank.
+    **SUPERSEDED by the post-review round below**: the orphan `/MAT/LAW51` that
+    raises `ERROR 99` is no longer emitted by default, so the derivation now
+    fires only under `--ale-multimat-law51` and `Bunreacted` ships as 0 — which
+    `mjwl.F:166` makes exactly LS-DYNA's `p = F·p_eos`. `0` is therefore a
+    legal `--he-bunreacted` value and is no longer rejected.
     `G` and `SIGY` are named as dropped — LAW5 has no deviator at all. The
     `*ALE_MULTI-MATERIAL_GROUP` warning used to end *"(ERROR 99 otherwise) —
     set it"*; it now states which value went in and where it came from, because
@@ -445,7 +450,7 @@ Prior history (before this changelog was introduced) is summarized in the
     value, its provenance, what it costs on a static answer (nothing —
     `/IMPL/QSTAT`'s stabilization is `∝ M/Δt²`, `imp_dyna.F:604-635`, and
     vanishes with the mass; measured identical tip deflection
-    `-4.4916980000E-01 mm` at ρ = 1e-9 / 1e-15 / 1e-24 on a HEX8 cantilever), on
+    `-4.4872740000E-01 mm` at RO 0 / 1e-21 / 1e-15 on a HEX8 cantilever), on
     a modal one (`Δf/f ≈ −½·(33/140)·ρV/M_eff`) and on a transient one (no
     inertia at all — an EXPLICIT deck gets a second, harder warning, because at
     this density `c = √(E/ρ)` collapses the time step to ~1e-14 s), and that

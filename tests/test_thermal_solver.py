@@ -750,6 +750,32 @@ class EngineThermalCardTests(unittest.TestCase):
         result, _starter, engine = _convert(deck)
         self.assertNotIn("/DT/THERM", engine)
         self.assertTrue(_warned(result, "this deck arms no thermal solve"))
+        # ...and it names WHICH half is missing, from what was EMITTED. The
+        # sentence used to prescribe "*MAT_THERMAL_* + *PART TMID and a driver"
+        # flat, which on a deck that STATES both and has them dropped at
+        # emission (a *MAT_THERMAL_CWM, or a driver whose *SET_NODE_* k2rad
+        # cannot read) prescribes a fix on a correct deck — the #125 class.
+        self.assertTrue(_warned(result, "WHICH HALF IS MISSING"))
+        self.assertTrue(_warned(result, "NEITHER"))
+        self.assertTrue(_warned(result, "DROPPED at emission"))
+
+    def test_soln_1_with_a_heat_mat_but_no_driver_names_that_half(self):
+        """A /HEAT/MAT with nothing to move the temperature is the #122 shape:
+        an /INITEMP is a STATE, not a driver, so DTEMP is identically zero."""
+        from k2rad.writer.assembly import _missing_thermal_halves
+        from k2rad.state import ConversionState
+        st = ConversionState()
+        st.heat_mat_cards[1] = object()
+        st.thermal_driver_emitted = False
+        st.thermal_source_emitted = False
+        msg = _missing_thermal_halves(st)
+        self.assertIn("a /HEAT/MAT WAS written", msg)
+        self.assertIn("an /INITEMP is a STATE, not a driver", msg)
+        # and the mirror case
+        st2 = ConversionState()
+        st2.thermal_driver_emitted = True
+        self.assertIn("no /HEAT/MAT", _missing_thermal_halves(st2))
+        self.assertIn("hm_read_therm.F:253", _missing_thermal_halves(st2))
 
     def test_soln_1_with_ams_is_refused_naming_the_hard_stop(self):
         # freform.F:1327-1330: IDT_THERM == 1 .AND. IDTMINS /= 0 is

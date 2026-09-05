@@ -1097,14 +1097,25 @@ found and deliberately did NOT close.
   which is the whole symmetry mount. So the deck is NOT evidence for the
   `*MAT_004` mapping.
 
-- **`cylinder_impact_A`/`_B` cannot validate anything on EITHER side.** The
-  LS-DYNA reference is itself empty: `cylinder_impact_A.glstat`'s last block is
-  kinetic energy `0.000000E+00`, internal energy `2.000000E-20`,
-  total/initial 1.0, and every node in its `nodout` has `u = (0,0,0)` at
-  `t_end`. OpenRadioss also runs 361 cycles at `IE = KE = 0`. Mark them
-  `not_comparable` BY CONSTRUCTION in the campaign DB — an all-zero result
-  there is indistinguishable from the reference and must not be scored as a
-  match.
+- **`cylinder_impact_A` cannot validate anything on EITHER side — and this
+  does NOT extend to its sibling.** The `_A` reference is itself empty:
+  `cylinder_impact_A.glstat`'s last block is kinetic energy `0.000000E+00`,
+  internal energy `2.000000E-20`, total/initial 1.0, and every node in its
+  `nodout` has `u = (0,0,0)` at `t_end`. OpenRadioss also runs 361 cycles at
+  `IE = KE = 0`. Mark `_A` alone `not_comparable` BY CONSTRUCTION in the
+  campaign DB — an all-zero result there is indistinguishable from the
+  reference and must not be scored as a match.
+
+  **`cylinder_impact_B`'s reference is LIVE and its row is a real deviation.**
+  A post-review round read both files on `F:` rather than generalising from
+  `_A`: `cylinder_impact_B.glstat` ends at kinetic energy `3.17790E+05` and
+  internal energy `1.70429E+08` (t = 9.99202E-04) against OpenRadioss's 0.6584
+  and 51537.66 — a genuine −100.0 % IE / −83.78 % KE row that `db.json` already
+  records as `deviation`. Exempting the PAIR would have hidden it. `_B` belongs
+  on the open ALE IE-collapse list, not on an exclusion list; §0.10 item 7 of
+  the campaign report had this right while this entry did not. (The #130 rule:
+  an exclusion list's stated reason needs the same audit as a warning's — here
+  in its sibling flavour, one file quoted for two decks.)
 
 - **The class-3 MODAL target is unmeasurable with the shipped chain.**
   `6.2.PSD_Beam_Example_LSTC` (LS-DYNA `eigout` f1 = 110.4521 Hz):
@@ -1150,6 +1161,30 @@ found and deliberately did NOT close.
 
 - **`*ELEMENT_BEAM_THICKNESS` `PARM1`** (a per-element truss AREA override,
   Vol I p.19-7) is still not read; no corpus carrier.
+
+- **The ALE mesh is still not consolidated onto one `/PART` + per-phase
+  `/INIVOL`.** This is the real modelling gap behind the whole class-2 ALE
+  story, and dropping the orphan `/MAT/LAW51` does not touch it. k2rad emits
+  the LS-DYNA per-fluid layout — each fluid on its own `/PART` with its own
+  single-material `/MAT` and `Iale = 1` on its `/PROP/SOLID` — while in
+  OpenRadioss the ALE domain is ONE part referencing a LAW51 material with the
+  initial fill set by `/INIVOL`. The converted deck starts and runs, but the
+  phases CANNOT MIX: on a blast deck the detonation products cannot expand into
+  the water region, and on a volume-fraction deck the initial fill is not the
+  deck's. Stated to the user in the `*ALE_MULTI-MATERIAL_GROUP` warning, with
+  the phase list and the `--ale-multimat-law51` route back to the card; recorded
+  here because the previous round's accounting said it was on this list and it
+  was not.
+
+- **The drop-the-`/PART` policy for refused materials.** When a material is
+  refused BY NAME (seven of them in round 1), the `/PART` keeps its
+  unresolvable `mat_ID` and the starter stops with `ERROR 179`. That is the
+  honest answer today — an emitted part with a fabricated material would be
+  worse — but it means a deck with one unconvertible material cannot be run at
+  all, even to look at the rest. A `--drop-refused-parts` mode (drop the part,
+  its elements and everything keyed on them, and name every drop) is the
+  alternative; not started. Recorded here for the same reason as the item
+  above.
 
 ### Found while doing round 1, recorded rather than fixed
 
