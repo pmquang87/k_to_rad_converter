@@ -1058,27 +1058,172 @@ Prior history (before this changelog was introduced) is summarized in the
     probe it was missing, the old test asserting only `mid >= 90001`, which
     passes with or without the guard.
 
-  **Verification record.** Measured on this branch at ``<this commit>``, AFTER the last
-  code commit ``a3e5103``, with the main tree untouched at `92460b7`:
-  `pytest tests/ -q` **4867 passed / 2 skipped / 1931 subtests (baseline at master `92460b7`: 4697 / 2 / 1898)**; `mypy k2rad` **0 issues in 37 source
-  files**, and **0** again under `--no-site-packages`; `ruff check .` clean; the
-  five golden fixtures byte-identical (`git diff origin/master..HEAD --
-  tests/fixtures` empty). Two-half corpus sweep, master `92460b7` vs this
-  branch, **885 decks** (Ryan_Lee_Examples, dynaexamples R14,
-  `C:\openradioss_run`, `E:\foxcore_data` and the repo golden fixtures; the
-  Yaris and Camry `*INCLUDE` pullers excluded BY NAME plus the decks whose
-  measured `*INCLUDE` closure exceeds 60 MB, all listed in `excluded.txt`):
-  ****0 error rows and 0 timeouts on BOTH sides**, 0 one-sided rows, 885 comparable pairs**, half 1 (SHA256 of every emitted `.rad`) **1770 files compared -> **111** movers**,
-  half 2 (`state.warnings` + `skipped_keywords` + `recognized_not_emitted`,
-  stated separately) ****112** `state.warnings` movers over 6023 master-side warnings, **26** `skipped_keywords`, **18** `recognized_not_emitted`**, and every mover attributed to a named item
-  above. MUTATION ROUND over the code this post-review added: 18 targeted
-  mutations, **18 CAUGHT**, plus one deliberate no-op control that was
-  correctly MISSED (the #133 proof that the harness is not lying); each
-  file backed up to a COPY and restored from it, each mutation shown to
-  have changed the file by `git diff --numstat`, and both `FAILED` and
-  `SUBFAILED` matched. One of the 18 exposed a guard with no pinning test —
-  `_transducer_side_pids`' own `styp in (0, 1)` screen, which its one caller
-  pre-empts — and it now has a direct unit test.
+  **Verification record — SUPERSEDED by the post-review ROUND 2 record below.**
+  Measured at ``369bbac``, AFTER round 1's last code commit ``a3e5103``:
+  `pytest tests/ -q` 4867 passed / 2 skipped / 1931 subtests; `mypy k2rad` 0 in
+  both environments; `ruff check .` clean; the five golden fixtures
+  byte-identical; the 885-deck two-half sweep 0 error rows and 0 timeouts on
+  BOTH sides, 111 `.rad` movers and 112/26/18 half-2 movers, 0 unattributed;
+  18/18 mutations caught with a no-op control correctly missed. Round 2 re-ran
+  every one of these after ITS last code commit — see below.
+
+- **POST-REVIEW ROUND 2 — a dead `--help`, a mechanism that was false at source,
+  a sign convention, five citations, a premise and 52 stale campaign rows.**
+
+  - **`k2rad --help` CRASHED on this branch.** The `--law106-shell-restate` help
+    string added by `a4ecbc5` carries three bare `%` characters, and argparse
+    %-expands EVERY help string in `_expand_help`
+    (`self._get_help_string(action) % params`), so rendering raised
+    `ValueError: unsupported format character ')' (0x29) at index 597` and the
+    CLI died with a traceback. Reproduced from the same interpreter on both
+    sides — master `92460b7` exits 0, `369bbac` exits 1. **No test rendered the
+    help**, so it shipped past 4867 green tests and 20 green CI checks. Escaped
+    as `%%`; two tests now guard it — one renders `format_help()`, one scans
+    every `help=` the parser holds for `(?<!%)%(?![%(])`.
+
+  - **The `Bunreacted` mechanism this batch shipped was FALSE AT SOURCE, and the
+    substitution existed to answer a card that changes nothing.** `a4ecbc5`
+    replaced a substantively correct sentence with *"m5law.F:135-138 … the FULL
+    JWL product pressure in every cell with no burn-fraction weighting … it
+    changes the explosive's pressure law everywhere"*. `m5law.F:72` declares
+    `my_real P(MVSIZ)` under *Local Variables*: it is not in the `M5LAW`
+    argument list (`:28-32`), it is written at `:138`/`:143` and read ONLY at
+    `:159` to build `SSP`, and the routine zeroes the whole stress tensor at
+    `:175-182` before returning — that branch decides the SOUND SPEED and hence
+    the CFL step. `mmain.F90:1225-1261` calls `m5law`, then `mqviscb`, then
+    `mjwl`; and `mjwl.F:166-167` has NO branch on `BULK`:
+    `PNEW = −PSH + (1−F)(P0 + BULK·µ) + (FACM + ESPE·W1DF)/(1 + W1DF·dV/V0)`
+    with `FACM = F·(…)` (`:162`) and `W1DF = F·W1/DF` (`:161`), applied as
+    `SIG(I,1..3) = SIG·OFF − PNEW` (`:181-183`). The JWL product term is ALWAYS
+    burn-fraction weighted and `BULK` is ALWAYS an ADDED `(1−F)·K·µ` pre-burn
+    stiffness. So **`Bunreacted = 0` is the faithful mapping** of LS-DYNA's
+    `p = F·p_eos` on a `BETA = 0` card, and the only thing forcing a positive
+    value was `fill_buffer_51.F:493-497` on the synthesized `/MAT/LAW51` — the
+    card k2rad's own warning already declared referenced by no `/PART`.
+
+  - **The orphan `/MAT/LAW51` is therefore no longer emitted by default**
+    (`--ale-multimat-law51` restores it, and the derivation with it). It is an
+    orphan BY CONSTRUCTION, not by accident on some decks: k2rad writes the
+    LS-DYNA per-fluid ALE layout, so nothing it emits can reference the card.
+    MEASURED on `underwater_C`, four variants each run to completion at
+    `nt = 4`: as shipped → 0 ERROR / 0 WARNING / 172 cycles / NORMAL; **LAW51
+    deleted, value kept → identical to it, max |difference| over all 164 T01
+    channels and all 172 samples exactly `0.000000e+00`**; LAW51 deleted and
+    `Bunreacted = 0` → equally clean and closer to the LS-DYNA `glstat` kinetic
+    energy at all five sampled times (12.08 / 29.93 / 66.39 / 66.46 / 54.13
+    against 12.64 / 30.14 / 66.61 / 66.57 / 54.19); LAW51 KEPT with
+    `Bunreacted = 0` → `ERROR ID : 99`. That last variant is the deck
+    **`--he-bunreacted 0`** — the documented way back to LS-DYNA semantics —
+    used to produce: unstartable. `--ale-multimat-law51` reproduces the pre-fix
+    starter deck BYTE for byte (same SHA256). 6 of the corpus's 10
+    `*ALE_MULTI-MATERIAL_GROUP` decks move; the other 4 already emitted no
+    LAW51.
+
+  - Two claims in the same warning were corrected while there. *"a T01 file with
+    the SAME SHA256"* is FALSE and falsifiable in one command — 119924 bytes /
+    `3e5dfe34…` against 119872 / `aa6a92b6…`, the 52 bytes being entity metadata
+    in the header; the channel-level claim beside it is true and is what ships.
+    And *"the principal isentrope is the JWL's own reference curve for the
+    condensed (unreacted) solid"* is a physics misstatement — the JWL describes
+    the detonation PRODUCTS, and LS-DYNA gives the unreacted solid a separate
+    description entirely (`K`/`G`/`SIGY` here, a whole second unreacted JWL on
+    `*EOS_LEE-TARVER` Card 6, Vol II R17 p.1-63). It is now called what it is: a
+    dimensionally-consistent stand-in, chosen because it is the softest of the
+    three stated-cell candidates.
+
+  - **A parentless `/INTER/SUB` reports MINUS the force on the surface it names
+    when that surface is the contact MAIN side.** `i7for3.F` accumulates
+    `IMPX = +FORC_SIGN·FXI·DT12` on the secondary-side pass (`:1583-1587`) and
+    `−FORC_SIGN·FXI·DT12` on the main-side pass (`:1673-1677`), both under
+    `ITYPSUB == 2`. That is what makes the card report the NET force on its
+    surface, and it also inverts it relative to a parented `/INTER/SUB` and to
+    an LS-DYNA `rcforc` row. The batch's *"identical across all three forms"*
+    held only for the side its probe used. Measured on one deck run three ways:
+    parent `−0.1500881`, parented sub `−0.1500881`, parentless on the secondary
+    side `−0.1500881`, parentless on the MAIN side `+0.1500881` — same seven
+    digits, opposite sign. Named in the docstring and in the shipped warning.
+
+  - **Five source citations were off by one to nine lines**, three of them
+    inside user-facing warnings and two pinned by tests, in the same batch
+    (`825f236`) that claimed to have re-derived nine citations by printing the
+    cited range: `hm_read_mat03.F:191` → `:190/197` (`:190` computes `BULK`,
+    `:197` stores `PM(32)`; `:191` is `E0 = ZERO`),
+    `hm_read_fail_spalling.F90:103` → `:102`, `hm_read_truss.F:157-158` →
+    `:148-151`, `hm_read_intsub.F:472` → `:474`, and `thermexpc.F:283-300` →
+    `:269-293` — the old range covered the FOR and energy blocks rather than the
+    per-INTEGRATION-POINT `SIG` subtraction (`:269-281`) that
+    `sigeps106c.F90` actually discards. The `hm_read_truss` one had been
+    REJECTED as *"that citation does not exist in the shipped code"* after
+    searching `writer/truss.py` alone — it ships in `README.md:297` and
+    `tests/test_r14_triage_1.py:1359`.
+
+  - **The density-floor deflection figure was not reproducible and its scope
+    over-reached.** Re-measured on my own coupon rather than adopting either
+    reported number: a 20×2×2 HEX8 cantilever (L 127, 12.7 square,
+    E 68947.5729, ν 0.3, tip P = 100 N, `/IMPL/QSTAT`, all NORMAL TERMINATION)
+    gives tip DZ `−4.4872740000E-01` identically at RO 0 (floored to 1e-24),
+    1e-21 and 1e-15, and `−4.4872680000E-01` at a physical 7.85e-9. The floor's
+    OWN claim holds; the invariance is a property of the MASSLESS regime the
+    floor creates, not of densities up to a real one, and the warning says so.
+
+  - **`cylinder_impact_A`'s evidence had been quoted for the pair**, and the
+    prescription would have corrupted the database. `_A.glstat` does end at
+    kinetic energy `0.00000E+00` / internal energy `2.00000E-20` — but
+    `_B.glstat` ends at `3.17790E+05` and `1.70429E+08`, against OpenRadioss's
+    0.6584 and 51537.66, a real −100.0 % IE / −83.78 % KE row that `db.json`
+    already records as `deviation`. `ROADMAP.md` now scopes the all-zero
+    reference to `_A` and restates `_B` as an open ALE IE-collapse.
+
+  - **The SOLN=1 `/DT/THERM` refusal prescribed cards a deck may already state.**
+    Both halves of its gate are read from what was EMITTED, and a deck can state
+    a `*MAT_THERMAL_*` and a driver and have them dropped there. The new
+    `_missing_thermal_halves` names which half is missing and points at the
+    warnings that explain the drop, with an `--ams` clause. A non-zero
+    `Bunreacted` also gained its own statement on the LAW5 side, which used to
+    reach the reader only through the LAW51 warning; and the GUI stopped
+    rejecting `he_bunreacted = 0`, whose stated reason can only apply to an
+    emitted `/MAT/LAW51`.
+
+  - **The `ATYPE = 0` closure was reasoned, not measured, and half of it is
+    wrong.** `01_1_insulated_concrete_wall_steady_state` converted with this
+    branch and run AS SHIPPED is 0 ERROR / NORMAL TERMINATION / **1 CYCLE**,
+    because `*CONTROL_TERMINATION`'s `ENDTIM = 1.0 s` is copied into `/RUN`
+    verbatim and one thermal step eats the whole run: every interior node is
+    still at the deck's own 293.15 against a reference 17.42925 / 12.97170 /
+    14.20991, mean |error| 267.4 K over 549 nodes. Recorded as NOT established:
+    a reviewer's report that raising `/RUN` to 1.98e6 s converges to 0.0013 K —
+    patching only that cell gives 43750 cycles and a field still 214.4 K away on
+    average.
+
+  **Verification record — ROUND 2.** Measured on this branch at ``ea98671``,
+  AFTER the last code commit ``b72c2ad``, with the main tree untouched at
+  `92460b7`:
+  `pytest tests/ -q` **4875 passed / 2 skipped / 1930 subtests** (baseline at
+  master `92460b7`: 4697 / 2 / 1898; +178 tests, 185 `def test_` added against 7
+  removed, every removal with a named successor in place); `mypy k2rad`
+  **0 issues in 37 source files** and **0** again under `--no-site-packages`,
+  each from a fresh cache; `ruff check .` clean; the five golden fixtures
+  byte-identical (`git diff origin/master..HEAD -- tests/fixtures` empty).
+  Two-half corpus sweep RE-RUN from scratch on both sides, master `92460b7` vs
+  this branch, over the same **885 decks**:
+  **0 error rows and 0 timeouts on BOTH sides, 0 one-sided rows, 885 comparable
+  pairs**; half 1 (SHA256 of every emitted `.rad`) **1770 files per side →
+  111 movers**; half 2 (`state.warnings` + `skipped_keywords` +
+  `recognized_not_emitted`, stated separately) **112 / 26 / 18**; union **112**,
+  byte movers with no warning change **0**. The mover SET is IDENTICAL to round
+  1's — symmetric difference **0** in both directions — so the attribution table
+  still covers every one and UNATTRIBUTED is still 0; what changed is the
+  CONTENT of two rows (the `Bunreacted` six now write 0, and the LAW51 four no
+  longer get the card). Nothing after ``c969186`` reaches a `.rad`: all 356
+  campaign roster decks were re-converted at ``b72c2ad`` and every emitted file
+  is byte-identical to the ``c969186`` conversion. **Campaign:** 52 roster rows
+  described a `.rad` the branch no longer emits — 46 stamped `60609469`, 6
+  stamped `cad09614` — found by converting all 356 roster decks with each of the
+  three trees their records name plus the head and comparing every SHA256. All
+  52 were re-converted and re-run (`OPENRADIOSS_REPORT.md` §0.12): 0.72 h of
+  solver wall, no deck worse in status, `rodsol.k` `deviation` → **`match`**,
+  `benchmark.verdict match` 8 → 9, `verify_runs.py` 0 problems and
+  `xcheck_counts.py` 0 disagreements.
 
 - **A `*CONTACT_FORCE_TRANSDUCER` had to GUESS a parent interface, and every
   node or segment foreign to that guess was a starter error.** k2rad parented
