@@ -867,14 +867,71 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
 def _transducer_side_pids(state: ConversionState, sid: int, styp: int) -> List[int]:
     """Resolve a transducer SURFA/SURFB to part IDs.
 
-    LS-DYNA surf type: 2 = part-set ID, 3 = part ID, 5 = all parts.
+    LS-DYNA surf type: **0 = segment-set ID, 1 = shell-element-set ID**,
+    2 = part-set ID, 3 = part ID, 5 = all parts.
+
+    Types 0 and 1 name no ``*PART`` at all and are handled one level up, by
+    :func:`_transducer_surface`, which builds a ``/SURF/SEG`` from the
+    ``*SET_SEGMENT`` directly — the same ``styp in (0, 1) and sid in
+    state.segment_sets`` test every other contact writer in this file already
+    uses (``_general_line_group``, ``_contact_master_segments``,
+    ``_resolve_contact_slave``). This function is reached for such a side only
+    when the segment set is MISSING, and it then returns nothing rather than
+    reading the set id as a part id.
     """
     if styp == 5 or sid == 0:
         return sorted(state.parts.keys())
+    if styp in (0, 1):
+        return []
     if styp == 2:
         ps = state.part_sets.get(sid)
         return list(ps[1]) if ps else []
     return [sid] if sid in state.parts else []
+
+
+def _transducer_surface(state: ConversionState, sid: int, styp: int,
+                        title: str, out_lines: List[str]) -> Tuple[int, str]:
+    """Build the ``/SURF`` one transducer side needs, from EITHER spelling.
+
+    Returns ``(surf_id, "")`` on success, or ``(0, reason)`` naming what could
+    not be built. A parentless ``/INTER/SUB`` takes a SURFACE in ``Main_ID1``
+    and ``Main_ID2`` and nothing else (``hm_read_intsub.F:453-470`` has no zero
+    guard on ``Main_ID2`` and ``Second_ID`` is not decoded on that branch), so
+    both spellings have to arrive as one.
+
+    **Why the segment-set arm exists.** ``SURFATYP = 0`` is a ``*SET_SEGMENT``
+    id — it names no ``*PART`` — and reading it as one is how
+    ``intro-by-j.-day/contact/force-transducer/transducer.k`` lost its
+    transducer: that deck carries both spellings, with the ``$ by part id``
+    form (``SSTYP 3``) commented out and the ``$ by segment set`` form
+    (``SURFA = 10, SURFATYP = 0``, ``*SET_SEGMENT 10``) live. ``/SURF/SEG`` is
+    the exact target and ``writer/common._emit_surf_seg`` already writes it for
+    the blast / EBCS / FSI paths.
+    """
+    if styp in (0, 1):
+        ss = state.segment_sets.get(sid)
+        if ss is None or not ss.segments:
+            return 0, (f"SURFATYP {styp} makes {sid} a "
+                       + ("*SET_SEGMENT" if styp == 0 else
+                          "*SET_SHELL element set")
+                       + " id, and this deck defines no such set with any "
+                         "segment in it")
+        surf_id = state.next_id()
+        out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
+        return surf_id, ""
+    pids = [p for p in _transducer_side_pids(state, sid, styp)
+            if p in state.parts]
+    if not pids:
+        return 0, f"({sid}, type {styp}) names no *PART this deck defines"
+    surf_id = state.next_id()
+    if not _make_master_surface(state, surf_id, title, sorted(set(pids)),
+                                out_lines):
+        n_nodes = len(_part_node_ids(state, sorted(set(pids)), set()))
+        return 0, (f"no /SURF can be built from its part(s) "
+                   f"{sorted(set(pids))} ({n_nodes} node(s), but no shell or "
+                   "solid FACE among them) — an SPH part, a beam/truss part "
+                   "or a part whose elements were all dropped has no route")
+    return surf_id, ""
 
 
 def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -> List[int]:
@@ -948,7 +1005,15 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
       side in each surface = ``*CONTACT_FORCE_TRANSDUCER`` with both SURFA and
       SURFB. Optional in the reader (``hm_read_intsub.F:472`` ``IF(IDSURF/=0)``).
     * ``Second_ID`` = 0 — NOT decoded at all on this branch.
-    * ``Main_ID2``  = a ``/SURF`` over SURFA's parts. MANDATORY: :453-470 has no
+    * ``Main_ID2``  = the ``/SURF`` for SURFA, built by
+      :func:`_transducer_surface` from EITHER LS-DYNA spelling — a
+      ``*SET_SEGMENT`` (``SURFATYP 0``, or a shell-element set at ``1``) as a
+      ``/SURF/SEG``, a part / part set / "all parts" (``3``/``2``/``5``) as the
+      usual part surface. Reading a segment-set id as a part id is how
+      ``intro-by-j.-day/contact/force-transducer/transducer.k`` lost its
+      transducer for one commit: that deck carries both spellings, with
+      ``$ by part id`` commented out and ``$ by segment set``
+      (``SURFA = 10, SURFATYP = 0``) live. MANDATORY: :453-470 has no
       zero guard, so a 0 or unknown id is ERROR 576. Alone it gives
       ``TYPSUB = 2`` (``i7for3.F:1583``), the total contact force on that
       surface from every interface — the secondary-side block adds
@@ -970,42 +1035,26 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     for ft in state.force_transducers:
         title = ft.title or f"FORCE_TRANSD_{ft.inter_id}"
 
-        # SURFA is the measured surface. _transducer_side_pids already maps
-        # LS-DYNA's "0 / type 5" spelling onto every part, which is what the
-        # card means and what TYPSUB=2 measures.
-        pids_a = [p for p in _transducer_side_pids(state, ft.surfa, ft.satyp)
-                  if p in state.parts]
-        if not pids_a:
+        # SURFA is the measured surface. _transducer_surface takes BOTH
+        # spellings: a segment set (SURFATYP 0/1) becomes a /SURF/SEG, a part /
+        # part set / "all parts" (2/3/5, and the 0-id shorthand) becomes the
+        # usual part surface. A /SURF is the ONLY thing Main_ID2 accepts and it
+        # is mandatory: hm_read_intsub.F:453-470 has no zero guard and
+        # Second_ID is not decoded on the parentless branch.
+        main_id2, why = _transducer_surface(state, ft.surfa, ft.satyp,
+                                            f"{title}_main", lines)
+        if not main_id2:
             state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: SURFA "
-                f"({ft.surfa}, type {ft.satyp}) names no *PART this deck "
-                "defines, so there is no surface to measure a force on -> "
-                "skipped.")
-            skipped_ft.append(ft.inter_id)
-            continue
-
-        main_id2 = state.next_id()
-        if not _make_master_surface(state, main_id2, f"{title}_main",
-                                    sorted(set(pids_a)), lines):
-            # A /SURF is the ONLY thing Main_ID2 accepts, and it is mandatory:
-            # a parentless /INTER/SUB has no node-group route at all (Second_ID
-            # is not decoded on this branch). A part with nodes but no FACES —
-            # an SPH cloud above all — therefore cannot be a transducer side in
-            # Radioss; _part_node_ids says how much the deck lost so the reader
-            # can see it is a face problem and not an empty-scope one.
-            n_nodes = len(_part_node_ids(state, sorted(set(pids_a)),
-                                         rigid_nodes))
-            state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no /SURF can be "
-                f"built from its SURFA part(s) {sorted(set(pids_a))} "
-                f"({n_nodes} node(s), but no shell or solid FACE among them) "
-                "-> skipped. /INTER/SUB with inter_ID = 0 takes a SURFACE in "
-                "Main_ID2 and nothing else — hm_read_intsub.F:453-470 has no "
-                "zero guard and Second_ID is not decoded on that branch — so "
-                "an SPH part, a beam/truss part or a part whose elements were "
-                "all dropped has no route. Put the measured face on SURFA "
-                "(and the particles on the other side, where Radioss wants "
-                "them anyway).")
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: SURFA {why}, so "
+                "there is no surface to measure a force on -> skipped. "
+                "/INTER/SUB with inter_ID = 0 takes a SURFACE in Main_ID2 and "
+                "nothing else — hm_read_intsub.F:453-470 has no zero guard and "
+                "Second_ID is not decoded on that branch — so a part with no "
+                "FACES (an SPH cloud above all), a beam/truss part, a part "
+                "whose elements were all dropped, and a *SET_SEGMENT this deck "
+                "never defines all have no route. Put the measured face on "
+                "SURFA (and any particles on the other side, where Radioss "
+                "wants them anyway).")
             skipped_ft.append(ft.inter_id)
             continue
 
@@ -1015,18 +1064,14 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
         # thing more expensively.
         main_id1 = 0
         if ft.surfb and ft.sbtyp != 5:
-            pids_b = [p for p in
-                      _transducer_side_pids(state, ft.surfb, ft.sbtyp)
-                      if p in state.parts]
-            cand = state.next_id() if pids_b else 0
-            if pids_b and _make_master_surface(state, cand, f"{title}_main2",
-                                               sorted(set(pids_b)), lines):
-                main_id1 = cand
-            else:
+            main_id1, why_b = _transducer_surface(state, ft.surfb, ft.sbtyp,
+                                                  f"{title}_main2", lines)
+            if not main_id1:
                 state.warn(
                     f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: SURFB "
                     f"({ft.surfb}, type {ft.sbtyp}) states a second surface "
-                    "but no /SURF could be built from it, so Main_ID1 stays 0 "
+                    f"but no /SURF could be built from it — {why_b} — so "
+                    "Main_ID1 stays 0 "
                     "and the sub-interface measures the TOTAL contact force on "
                     "SURFA (engine TYPSUB = 2, i7for3.F:1583) instead of only "
                     "the part of it exchanged with SURFB (TYPSUB = 3, :1607). "

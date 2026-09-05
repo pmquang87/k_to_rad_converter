@@ -2503,5 +2503,90 @@ class MatCwmMissingPoissonTests(unittest.TestCase):
              if "resolves to no usable" in x], [])
 
 
+class ForceTransducerSegmentSetTests(unittest.TestCase):
+    """``SURFATYP = 0`` is a ``*SET_SEGMENT`` id, not a ``*PART`` id.
+
+    ``intro-by-j.-day/contact/force-transducer/transducer.k`` carries BOTH
+    spellings and labels them itself: ``$ by part id`` (``SSTYP 3``, commented
+    out) and ``$ by segment set`` (``SURFA = 10, SURFATYP = 0``, live, with
+    ``*SET_SEGMENT 10``). Reading the set id as a part id skipped the whole
+    transducer on a deck that had never failed. MEASURED after the fix: the
+    deck emits ``/SURF/SEG`` + ``/INTER/SUB`` and the starter runs it at
+    0 ERROR / 3 WARNING, NORMAL TERMINATION, 969 cycles — the same verdict and
+    the same cycle count as master's parented form.
+    """
+
+    @staticmethod
+    def _seg_deck(*, satyp: int = 0, sid: int = 10, define: bool = True) -> str:
+        segset = ("*SET_SEGMENT\n" + _row(sid) + "\n"
+                  + _row(1, 2, 3, 4) + "\n") if define else ""
+        return _ft_deck(surfa=sid, satyp=satyp, surfb=0, sbtyp=0).replace(
+            "*CONTROL_TERMINATION", segset + "*CONTROL_TERMINATION")
+
+    def test_a_segment_set_becomes_a_surf_seg(self):
+        res, starter = _convert(self._seg_deck())
+        segs = _headers(starter, "/SURF/SEG/")
+        self.assertEqual(len(segs), 1, starter)
+        sub = _headers(starter, "/INTER/SUB/")
+        self.assertEqual(len(sub), 1, starter)
+        cells = _sub_cells(starter, int(sub[0].rsplit("/", 1)[1]))
+        self.assertEqual(cells[0], 0)               # parentless
+        self.assertEqual(cells[1], 0)               # no SURFB stated
+        self.assertEqual(cells[2], 0)               # Second_ID never decoded
+        # Main_ID2 IS the /SURF/SEG built from the *SET_SEGMENT
+        self.assertEqual(cells[3], int(segs[0].rsplit("/", 1)[1]))
+        self.assertEqual(
+            [x for x in res.warnings if "names no *PART" in x], [])
+
+    def test_the_segment_rows_are_the_sets_own(self):
+        _res, starter = _convert(self._seg_deck())
+        seg = _headers(starter, "/SURF/SEG/")[0]
+        rows = _data_rows(starter, seg)
+        # rows[0] is the title card; one segment row follows, nodes 1..4
+        self.assertEqual([int(rows[1][k:k + 10]) for k in range(10, 50, 10)],
+                         [1, 2, 3, 4])
+
+    def test_a_shell_element_set_takes_the_same_route(self):
+        """SURFATYP 1 is a shell-ELEMENT set; every other contact writer in
+        the file already screens `styp in (0, 1) and sid in segment_sets`, so
+        the transducer does too."""
+        _res, starter = _convert(self._seg_deck(satyp=1))
+        self.assertIn("/SURF/SEG/", starter)
+
+    def test_a_missing_segment_set_is_refused_by_name_not_read_as_a_part(self):
+        res, starter = _convert(self._seg_deck(define=False))
+        self.assertEqual(_headers(starter, "/INTER/SUB/"), [])
+        w = [x for x in res.warnings if "CONTACT_FORCE_TRANSDUCER" in x
+             and "-> skipped" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        # names WHAT type 0 is, instead of claiming the deck defines no *PART
+        self.assertIn("*SET_SEGMENT", w[0])
+        self.assertNotIn("names no *PART this deck defines, so", w[0])
+
+    def test_a_part_id_side_still_takes_the_part_route(self):
+        """The 2/3/5 spellings are untouched: no /SURF/SEG, a part surface."""
+        _res, starter = _convert(_ft_deck())
+        self.assertEqual(_headers(starter, "/SURF/SEG/"), [])
+        sid = int(_headers(starter, "/INTER/SUB/")[0].rsplit("/", 1)[1])
+        cells = _sub_cells(starter, sid)
+        self.assertEqual(cells[0], 0)
+        self.assertNotEqual(cells[3], 0)
+
+    def test_surfb_as_a_segment_set_fills_main_id1(self):
+        """Both sides go through the same builder, so SURFB = a segment set
+        gives TYPSUB = 3 rather than silently falling back to TYPSUB = 2."""
+        deck = _ft_deck(surfa=1, satyp=3, surfb=10, sbtyp=0).replace(
+            "*CONTROL_TERMINATION",
+            "*SET_SEGMENT\n" + _row(10) + "\n" + _row(5, 6, 7, 8) + "\n"
+            + "*CONTROL_TERMINATION")
+        res, starter = _convert(deck)
+        sid = int(_headers(starter, "/INTER/SUB/")[0].rsplit("/", 1)[1])
+        cells = _sub_cells(starter, sid)
+        self.assertNotEqual(cells[1], 0)            # Main_ID1 really filled
+        self.assertEqual(len(_headers(starter, "/SURF/SEG/")), 1)
+        self.assertEqual(
+            [x for x in res.warnings if "Main_ID1 stays 0" in x], [])
+
+
 if __name__ == "__main__":
     unittest.main()
