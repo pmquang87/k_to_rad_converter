@@ -239,6 +239,38 @@ class TestNodeTcRcToBcs(unittest.TestCase):
         self.assertEqual(groups.get(("000", "111")), [1])
         self.assertEqual(groups.get(("011", "000")), [2])
 
+    def test_real_corpus_rows_are_read_verbatim(self):
+        """Three ``*NODE`` rows copied byte-for-byte out of R14 decks, not
+        rebuilt by the test's own formatter — a helper that pads the way the
+        reader expects only proves it is self-consistent.
+
+        Row 1 is ``component1.k``'s (plain decimals, ``tc 7 rc 0``), rows 2-3
+        are ``taylor1.k``'s (``E`` notation with a NEGATIVE first coordinate,
+        which is the layout that welded the id to the coordinate under a
+        whitespace split and cost 58 303 rows in #132), and row 4 is
+        ``control_contact.hemi-draw.k``'s ``tc 6 rc 7``.
+
+        **Format census, stated rather than assumed**: every TC/RC carrier in
+        both corpus roots writes this fixed ``(I8, 3E16.0, 2I8)`` layout. The
+        ``i10=y`` (``*NODE %``) and ``newformat=long`` (``*NODE +``) variants
+        have ZERO occurrences, and neither sigil is handled anywhere in the
+        parser — a named non-item, not coverage this batch claims.
+        """
+        rows = [
+            "       1             0.0             0.0             0.0       7       0",
+            "       2-1.000000000E+01-1.000000000E+01-7.000000000E+00       7       0",
+            "       3-1.000000000E+01 1.000000000E+01-7.000000000E+00       7       0",
+            "       4             0.0            10.0             0.0       6       7",
+        ]
+        state = _dispatch("\n".join(["*KEYWORD", "*NODE"] + rows + ["*END", ""]))
+        self.assertEqual(state.node_tc_rc,
+                         {1: (7, 0), 2: (7, 0), 3: (7, 0), 4: (6, 7)})
+        # The #132 guard: the E-notation rows must keep their own ids and
+        # coordinates, not collapse into a phantom node 0.
+        self.assertEqual(sorted(state.nodes), [1, 2, 3, 4])
+        self.assertEqual((state.nodes[2].x, state.nodes[2].y, state.nodes[2].z),
+                         (-10.0, -10.0, -7.0))
+
     def test_a_deck_without_the_cells_emits_no_block(self):
         starter = _convert(_plate(
             _n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),

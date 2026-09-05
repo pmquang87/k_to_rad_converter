@@ -94,6 +94,14 @@ Prior history (before this changelog was introduced) is summarized in the
     deck can discriminate the explicit path, because on all of them the
     constrained directions are the quarter-symmetry planes, orthogonal to the
     driven axis.
+    **Format census, so the coverage claim is bounded**: both layouts
+    `handle_node` discriminates are read — the fixed `(I8, 3E16.0, 2I8)` grid
+    and the comma free form (fields 5-6, where an empty field survives, so
+    `1,0.,0.,0.,,7` is TC 0 / RC 7) — and **every** TC/RC carrier in both
+    corpus roots writes the fixed one. The `i10=y` (`*NODE %`) and
+    `newformat=long` (`*NODE +`) variants have ZERO occurrences and neither
+    sigil is handled by `parser.py`'s keyword match: a NAMED non-item, not
+    coverage this batch claims.
     **`tools/` needed no arm**, and that is a verdict rather than an omission:
     `modal_solve.py` builds the mass matrix on the DOFs of the stiffness matrix
     the ENGINE exported (`/IMPL/PRINT/STIF`) from the CONVERTED `.rad` — "only

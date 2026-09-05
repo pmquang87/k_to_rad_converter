@@ -269,6 +269,18 @@ def _note_node_constraint(state: ConversionState, nid: int, tc: str,
     ``writer/loads._make_node_tc_rc_bcs`` turns the map into ``/GRNOD/NODE`` +
     ``/BCS``, screens it, and announces both the conversion and every screen
     once per deck. Codes are stored verbatim; nothing is decided here.
+
+    **Format census, so the coverage claim is bounded.** Both layouts
+    ``handle_node`` discriminates are read: the fixed ``(I8, 3E16.0, 2I8)``
+    grid (TC cols 57-64, RC cols 65-72) and the comma free form (fields 5-6,
+    where an empty field survives between commas, so ``1,0.,0.,0.,,7`` is
+    TC 0 / RC 7). MEASURED over both corpus roots: **every** TC/RC carrier
+    writes the fixed layout — the ``i10=y`` variant (``*NODE %``,
+    ``(I10, 3F16, 2I10)``) and ``newformat=long`` (``*NODE +``,
+    ``(I20, 3F20, 2I20)``) have ZERO occurrences, and ``parser.py``'s
+    ``\\*(\\S+)`` keyword match handles neither sigil (``*NODE %`` silently
+    takes the standard branch, ``*NODE+`` becomes an unknown keyword). That is
+    a NAMED non-item, not coverage this converter claims.
     """
     tc_code = _node_constraint_code(tc)
     rc_code = _node_constraint_code(rc)
