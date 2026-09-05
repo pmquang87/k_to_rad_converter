@@ -1195,11 +1195,12 @@ Prior history (before this changelog was introduced) is summarized in the
     patching only that cell gives 43750 cycles and a field still 214.4 K away on
     average.
 
-  **Verification record — ROUND 2.** Measured on this branch at ``ea98671``,
-  AFTER the last code commit ``b72c2ad``, with the main tree untouched at
+  **Verification record — ROUND 2.** Measured on this branch at ``f1dc4ed``,
+  AFTER the last code commit ``b72c2ad`` (everything later adds tests and
+  documentation only), with the main tree untouched at
   `92460b7`:
-  `pytest tests/ -q` **4875 passed / 2 skipped / 1930 subtests** (baseline at
-  master `92460b7`: 4697 / 2 / 1898; +178 tests, 185 `def test_` added against 7
+  `pytest tests/ -q` **4876 passed / 2 skipped / 1930 subtests** (baseline at
+  master `92460b7`: 4697 / 2 / 1898; +179 tests, 186 `def test_` added against 7
   removed, every removal with a named successor in place); `mypy k2rad`
   **0 issues in 37 source files** and **0** again under `--no-site-packages`,
   each from a fresh cache; `ruff check .` clean; the five golden fixtures
@@ -1224,6 +1225,15 @@ Prior history (before this changelog was introduced) is summarized in the
   solver wall, no deck worse in status, `rodsol.k` `deviation` → **`match`**,
   `benchmark.verdict match` 8 → 9, `verify_runs.py` 0 problems and
   `xcheck_counts.py` 0 disagreements.
+  **Mutation round over the round-2 code**, in a DETACHED throwaway worktree
+  with backups by file COPY and restore-from-copy, every mutation proven
+  non-no-op by `git diff --numstat` and both `FAILED` and `SUBFAIL` matched:
+  **5 targeted mutations, 5 CAUGHT** (the `--ale-multimat-law51` emission
+  gate, the `Bunreacted` derivation gate, the escaped `%` in the help string,
+  the transducer sign sentence, the missing-thermal-half detector), plus one
+  deliberate control — a word in the density warning that no test asserts —
+  correctly MISSED. The transducer one was UNCAUGHT on the first pass and now
+  has a direct test.
 
 - **A `*CONTACT_FORCE_TRANSDUCER` had to GUESS a parent interface, and every
   node or segment foreign to that guess was a starter error.** k2rad parented
