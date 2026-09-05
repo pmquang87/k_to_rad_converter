@@ -4217,6 +4217,13 @@ _RARE_MATERIAL_OFFSETS = {
     # bookkeeping — no ids on either.
     "MAT_CWM": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
     "MAT_270": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
+    # *MAT_ELASTIC_PLASTIC_HYDRO[_SPALL]: MID on card 1 and NOTHING else. Its
+    # EOS is bound by the SHARED ID (and by the *PART EOSID field, which the
+    # *PART row already offsets with IDMOFF), never by a cell on this card;
+    # the EPS/ES rows and the _SPALL card are all floats.
+    **{kw: _mat() for kw in (
+        "MAT_ELASTIC_PLASTIC_HYDRO", "MAT_ELASTIC_PLASTIC_HYDRO_SPALL",
+        "MAT_010", "MAT_10", "MAT_010_SPALL", "MAT_10_SPALL")},
     "MAT_MUSCLE":        _off_mat_muscle,
     "MAT_156":           _off_mat_muscle,
     "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,

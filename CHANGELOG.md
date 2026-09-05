@@ -121,6 +121,45 @@ Prior history (before this changelog was introduced) is summarized in the
     temperature-dependent elasticity and expansion and a **residual stress that
     is not validated**.
 
+  - **`*MAT_ELASTIC_PLASTIC_HYDRO` / `*MAT_010` (3 SPH decks) → `/MAT/LAW3`
+    (`HYDPLA`) + its same-id `/EOS`.** The card states a SHEAR modulus and no
+    bulk modulus at all — LS-DYNA takes the pressure from the `*EOS_*` the
+    `*PART` binds — while `/MAT/LAW3`'s card is the isotropic pair `E, nu`.
+    The pair is **derived from two stated physical cells**, the material's `RO`
+    and the companion EOS's sound speed: `K₀ = ρ₀C²` for a Gruneisen EOS (its
+    `C` is the intercept of the `us = C + S1·up` Hugoniot, i.e. the bulk sound
+    speed at zero compression) or `K₀ = C1` for a polynomial one, then
+    `ν = (3K₀−2G)/(2(3K₀+G))`, `E = 9K₀G/(3K₀+G)`. On `taylor1.k`:
+    `K₀ = 139425.2996`, `ν = 0.376303`, `E = 103478.736`, and
+    `E/(2(1+ν)) = 37593.000 = G` exactly. Sanity that the derivation is right
+    rather than invented: `taylor1`'s own `*MAT_PLASTIC_KINEMATIC` twin for the
+    same copper states `E = 1e5, PR = 0.33`, i.e. `G = 37593.98` — the deck
+    author's own `G` to five figures. Its **one visible consequence**:
+    `hm_read_mat03.F:191` stores `PM(32) = E/(3(1−2ν))` for every
+    `INVERS ≥ 2018` deck, and that is the bulk modulus the `/INTER/TYPE7` and
+    `TYPE20` CONTACT STIFFNESS reads, so it now agrees with the pressure law
+    instead of with an invented Poisson ratio; the deviatoric response is
+    unaffected either way (`m3law.F:60,107-112` uses `G` alone, the pressure
+    coming from `eosmain`). **`EH` goes into `b` UNCONVERTED** — Vol II R17
+    p.2-193 Remark 2 states the flow law as `σy = σ0 + E_h·ε_p`, so `EH` is
+    already the plastic hardening modulus and the `E_t·E/(E−E_t)` form on the
+    same page is the derivation *from* a tangent; applying it here would be the
+    silent factor error `*MAT_003`'s `ETAN` legitimately needs. The `/EOS` is
+    written immediately beside the `/MAT` under the same id (the LAW4
+    `HYD_JCOOK` pattern), and `_law3_consumed_eos_ids` keeps the orphan-EOS arm
+    of `_make_explosive_and_eos_materials` from telling the reader *"the
+    equation of state was NOT emitted"* about one this batch does write (#129)
+    — that arm used to fire on exactly these three decks. **Refused by name**,
+    never half-converted: the `_SPALL` option (its `(a1 + p·a2)·max[p,0]`
+    pressure hardening and its spall selector have no `/MAT/LAW3` slot; the
+    option's card 1a also shifts the `EPS`/`ES` table by one row, which the
+    handler strides by RAW CONTIGUITY), a tabulated `EPS1..16`/`ES1..16` yield
+    curve (`a + b·ε^n` cannot hold a 16-point table, and `/MAT/LAW36` — the law
+    that could, being both SPH- and EOS-declared — is not wired to an `/EOS`
+    here yet), a missing same-id `*EOS_*`, an EOS with no usable `K₀` (an ideal
+    gas has none: `K = γp` is zero at zero pressure), `RO ≤ 0`, `G ≤ 0`, and a
+    derived `ν` outside `(−1, 0.5)`.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts

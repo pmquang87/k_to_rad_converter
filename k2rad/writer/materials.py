@@ -56,6 +56,8 @@ from ..state import (
     MatShapeMemory,
     MatCWM,
     MatElasticPlasticThermal,
+    MatElasticPlasticHydro,
+    MatLaw3,
     MatLaw106,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
@@ -146,6 +148,8 @@ __all__ = [
     "_resolve_mat_law106",
     "_emit_mat_law106",
     "_interp_table",
+    "_resolve_mat_law3",
+    "_emit_mat_law3",
 ]
 
 
@@ -274,6 +278,13 @@ def _make_materials(state: ConversionState) -> List[str]:
     # thermal section (both are keyed on the material id).
     for law106 in state.mat_law106.values():
         lines += _emit_mat_law106(law106)
+    # *MAT_010 -> /MAT/LAW3 + the same-id /EOS, emitted TOGETHER (Radioss binds
+    # an equation of state to the material of the same id) exactly as the LAW4
+    # HYD_JCOOK route does. _law3_consumed_eos_ids keeps the orphan-EOS arm of
+    # _make_explosive_and_eos_materials from claiming the same id a second
+    # time — or, worse, telling the reader the EOS was not emitted (#129).
+    for law3 in state.mat_law3.values():
+        lines += _emit_mat_law3(law3, state)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -607,6 +618,12 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     # An *EOS_* consumed by a *MAT_JOHNSON_COOK /MAT/LAW4 route is emitted
     # there (rebound to the mat id) — not as a standalone LAW6-carrier fluid.
     jc_consumed = _jc_consumed_eos_ids(state)
+    # An *EOS_* emitted BESIDE a /MAT/LAW3 is likewise not an orphan: it is
+    # written by _emit_mat_law3 under the same id. Without this the owner arm
+    # below would tell the reader "the equation of state was NOT emitted"
+    # about one this converter does write (#129) — measured on the three
+    # *MAT_ELASTIC_PLASTIC_HYDRO corpus decks.
+    jc_consumed |= _law3_consumed_eos_ids(state)
     # ... and the ids the impact/blast batch already owns, which the shared-id
     # carrier convention below must not claim a second time (ERROR 79).
     impact_claimed = _impact_claimed_mids(state)
@@ -9366,3 +9383,252 @@ def _emit_mat_law106(mat: MatLaw106) -> List[str]:
         f"{_f(mat.rho_cp)}{_f(0.0)}{_f(0.0)}{_f(mat.tr)}",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: *MAT_010 → /MAT/LAW3 (HYDPLA) + its same-id /EOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _law3_bulk_from_eos(eos: EosCard, rho0: float) -> Optional[float]:
+    """The unstressed bulk modulus ``K0`` the companion ``*EOS_*`` states.
+
+    * ``GRUNEISEN``: ``K0 = rho0·C²``. ``C`` is the intercept of the
+      ``us = C + S1·up`` shock Hugoniot, i.e. the BULK sound speed at zero
+      compression, so ``rho0·C²`` is the definition of the unstressed bulk
+      modulus — two stated cells, no fitted constant.
+    * ``POLYNOMIAL``: ``K0 = C1``, the linear term of
+      ``p = C0 + C1·mu + C2·mu² + …`` evaluated at ``mu → 0``.
+
+    ``None`` for any other kind: an ideal gas has no unstressed bulk modulus at
+    all (``K = gamma·p``, which is zero at zero pressure), so nothing can be
+    derived from it.
+    """
+    if eos.kind == "GRUNEISEN":
+        c = float(eos.params.get("c", 0.0))
+        if rho0 > 0.0 and c > 0.0:
+            return rho0 * c * c
+        return None
+    if eos.kind == "POLYNOMIAL":
+        c1 = float(eos.params.get("c1", 0.0))
+        return c1 if c1 > 0.0 else None
+    return None
+
+
+def _law3_consumed_eos_ids(state: ConversionState) -> set:
+    """``*EOS_*`` ids emitted BESIDE a ``/MAT/LAW3``.
+
+    ``_make_explosive_and_eos_materials``'s orphan-EOS arm must skip these, or
+    it would tell the reader *"the equation of state was NOT emitted"* about
+    one this batch writes two blocks further up — a false statement of the
+    #129 class, on the three corpus decks that carry the pair.
+    """
+    return {m.eos_id for m in state.mat_law3.values() if m.eos_id}
+
+
+def _resolve_mat_law3(state: ConversionState) -> None:
+    """``*MAT_010`` → ``state.mat_law3``, deriving the E-nu pair from the
+    material's own ``RO`` and its companion EOS's sound speed.
+
+    **Why a derivation is needed at all.** ``*MAT_010`` states a SHEAR modulus
+    and nothing else elastic — LS-DYNA takes the pressure from the ``*EOS_*``
+    the ``*PART`` binds. ``/MAT/LAW3``'s card is the isotropic pair ``E, nu``,
+    and ``hm_read_mat03.F:190`` recovers ``G = E/(2(1+nu))`` from it, so ANY
+    (E, nu) with the right ``G`` reproduces the deviatoric response exactly —
+    which is what ``m3law.F:60,107-112`` uses, the pressure coming from
+    ``eosmain`` (``mmain.F90:805``, ``:1971-1985``, ``sig = s − pnew``).
+
+    **The pair that is chosen, and its one visible consequence.** With
+    ``K0 = rho0·C²`` from the EOS,
+
+        nu = (3K0 − 2G) / (2(3K0 + G)),      E = 9·K0·G / (3K0 + G)
+
+    which is the unique pair whose bulk modulus is the EOS's own. That matters
+    because ``hm_read_mat03.F:191`` sets ``PM(32) = E/(3(1−2nu))`` for every
+    ``INVERS >= 2018`` deck — the material's stored bulk modulus, which the
+    ``/INTER/TYPE7`` and ``TYPE20`` contact stiffness reads. Deriving it from
+    two stated physical cells makes that number agree with the pressure law
+    instead of with an invented Poisson ratio.
+
+    MEASURED cross-check on the corpus: ``taylor1``'s own
+    ``*MAT_PLASTIC_KINEMATIC`` twin for the same copper states ``E = 1e5,
+    PR = 0.33``, i.e. ``G = 37593.98`` — the deck author's own ``G = 37593`` to
+    five figures. The EOS-consistent pair (nu 0.376303, E 103478.736) returns
+    ``E/(2(1+nu)) = 37593.000`` exactly and differs from the author's only in
+    the bulk (139425.3 vs 98039), which the EOS supplies anyway.
+
+    **``EH`` goes into ``b`` UNCONVERTED.** Vol II R17 p.2-193 Remark 2 states
+    the flow law as ``sigma_y = sigma_0 + E_h·eps_p + …``, so ``EH`` is already
+    the plastic modulus; the ``E_t E/(E − E_t)`` form on the same page is the
+    derivation FROM a tangent. Applying it here would be the silent factor
+    error ``*MAT_003``'s ``ETAN`` legitimately needs.
+    """
+    if not state.mat_ep_hydro:
+        return
+    kw = "*MAT_ELASTIC_PLASTIC_HYDRO"
+    for mid in sorted(state.mat_ep_hydro):
+        mat = state.mat_ep_hydro[mid]
+        if mat.spall_option:
+            state.warn(
+                f"{kw}_SPALL {mid}: the _SPALL option adds the "
+                f"pressure-hardening pair A1={mat.a1:g}, A2={mat.a2:g} (the "
+                "'(a1 + p*a2)*max[p,0]' term of Vol II R17 p.2-193 Remark 2) "
+                f"and the spall model selector SPALL={mat.spall:g}. "
+                "/MAT/LAW3's yield is a + b*eps_p^n with no pressure term and "
+                "no spall selector, so the option cannot be expressed. The "
+                "material is REFUSED (its /PART then reports a dangling "
+                "material id) rather than converted with the pressure "
+                "hardening silently dropped.")
+            continue
+        if mat.rho <= 0.0:
+            state.warn(
+                f"{kw} {mid}: RO = {mat.rho:g}. /MAT/LAW3 is not on the "
+                "starter's zero-density exemption list "
+                "(hm_read_mat.F90:1575-1583 exempts only laws "
+                "0/20/51/151/108/999), so the card would be ERROR 683 and "
+                "refuse the whole deck. The material is SKIPPED.")
+            continue
+        if mat.g <= 0.0:
+            state.warn(
+                f"{kw} {mid}: G = {mat.g:g}. The shear modulus is the card's "
+                "only elastic cell and /MAT/LAW3 recovers it as E/(2(1+nu)) "
+                "(hm_read_mat03.F:190), so there is nothing to derive an E-nu "
+                "pair from. The material is SKIPPED.")
+            continue
+        if any(v != 0.0 for v in mat.eps) or any(v != 0.0 for v in mat.es):
+            state.warn(
+                f"{kw} {mid}: the card states a TABULATED yield curve "
+                "(EPS1..16 / ES1..16). /MAT/LAW3's yield is the analytic "
+                "a + b*eps_p^n and cannot hold an arbitrary 16-point table, "
+                "and the law that could (/MAT/LAW36, which is both SPH- and "
+                "EOS-declared) is not wired to an /EOS by this converter yet. "
+                "The material is REFUSED rather than converted with its "
+                "hardening curve replaced by the card-1 constants SIG0/EH, "
+                "which would be a different material at 0 starter errors. "
+                "Re-state the hardening as SIG0 + EH*eps_p if the table is "
+                "close to linear, or convert the part by hand.")
+            continue
+        eos = state.eos_cards.get(mid)
+        if eos is None:
+            state.warn(
+                f"{kw} {mid}: no *EOS_* of the same id in the converted deck. "
+                "*MAT_010 states a SHEAR modulus and no bulk modulus at all — "
+                "LS-DYNA takes the pressure from the equation of state the "
+                "*PART binds — so without one there is no second elastic "
+                "constant to build /MAT/LAW3's E-nu pair from, and inventing "
+                "a Poisson ratio would be a fabricated value. The material is "
+                "SKIPPED; its /PART reports a dangling material id, which "
+                "names the deck's real problem.")
+            continue
+        bulk = _law3_bulk_from_eos(eos, mat.rho)
+        if bulk is None or bulk <= 0.0:
+            state.warn(
+                f"{kw} {mid}: {eos.label()} states no usable unstressed bulk "
+                "modulus (K0 = rho0*C^2 for a Gruneisen EOS, K0 = C1 for a "
+                "polynomial one; an ideal gas has none at all, since "
+                "K = gamma*p is zero at zero pressure). Without it the E-nu "
+                "pair cannot be derived and the material is SKIPPED.")
+            continue
+        nu = (3.0 * bulk - 2.0 * mat.g) / (2.0 * (3.0 * bulk + mat.g))
+        e = 9.0 * bulk * mat.g / (3.0 * bulk + mat.g)
+        if not (-1.0 < nu < 0.5) or e <= 0.0:
+            state.warn(
+                f"{kw} {mid}: the stated G = {mat.g:g} against the EOS's "
+                f"K0 = {bulk:g} gives nu = {nu:g}, outside the physical range "
+                "(-1, 0.5) that /MAT/LAW3's isotropic pair must lie in. The "
+                "material is SKIPPED; check the EOS's sound speed C and the "
+                "card's G against each other.")
+            continue
+        state.mat_law3[mid] = MatLaw3(
+            mid=mid, title=mat.title, rho=mat.rho, e=e, nu=nu,
+            a=mat.sig0, b=mat.eh, n=1.0, eps_max=mat.fs, sigma_max=0.0,
+            # -abs(0.0) is -0.0, which formats as "-0" and reads as a
+            # typo; a stated 0 means "no cutoff" and is written as a plain 0
+            # for hm_read_mat03.F:182 to turn into -1e20.
+            pmin=(-abs(mat.pc) if mat.pc else 0.0),
+            eos_id=mid, bulk=bulk)
+        _law3_report(state, kw, mat, e, nu, bulk)
+
+
+def _law3_report(state: ConversionState, kw: str,
+                 mat: MatElasticPlasticHydro, e: float, nu: float,
+                 bulk: float) -> None:
+    """Name the derivation, its consequence and every cell that was dropped."""
+    dropped = []
+    if mat.charl:
+        dropped.append(
+            f"CHARL={mat.charl:g} (Vol II R17 p.2-192: the characteristic "
+            "element thickness for 2-D deletion, which has no counterpart — "
+            "Radioss deletes on the failure criterion, not on thinning)")
+    state.warn(
+        f"{kw} {mat.mid} -> /MAT/LAW3 (HYDPLA) + the same-id "
+        f"/EOS/{state.eos_cards[mat.mid].kind}/{mat.mid}. *MAT_010 states a "
+        f"SHEAR modulus G = {mat.g:g} and no bulk modulus (LS-DYNA takes the "
+        "pressure from the EOS the *PART binds), while /MAT/LAW3's card is the "
+        "isotropic pair E, nu. DERIVED from two stated physical cells — the "
+        f"material's RO = {mat.rho:g} and the EOS's sound speed — as "
+        f"K0 = rho0*C^2 = {bulk:g}, nu = (3K0-2G)/(2(3K0+G)) = {nu:.6f}, "
+        f"E = 9*K0*G/(3K0+G) = {e:.6f}, which returns E/(2(1+nu)) = "
+        f"{e / (2.0 * (1.0 + nu)):.6f} = G exactly. Its ONE visible "
+        "consequence: hm_read_mat03.F:191 stores PM(32) = E/(3(1-2nu)) for "
+        "every INVERS >= 2018 deck, and that is the bulk modulus the "
+        "/INTER/TYPE7 and TYPE20 CONTACT STIFFNESS reads — so the contact "
+        "stiffness now agrees with the pressure law instead of with an "
+        "invented Poisson ratio. The deviatoric response is unaffected either "
+        "way (m3law.F:60,107-112 uses G alone; the pressure comes from "
+        f"eosmain). a = SIG0 = {mat.sig0:g}; b = EH = {mat.eh:g} is written "
+        "UNCONVERTED, because Vol II R17 p.2-193 Remark 2 states the flow law "
+        "as sigma_y = sigma_0 + E_h*eps_p, i.e. EH is ALREADY the plastic "
+        "hardening modulus and the E_t*E/(E-E_t) form on that page is the "
+        "derivation FROM a tangent — applying it here would be a silent factor "
+        "error. n = 1 is written; hm_read_mat03.F:187 substitutes 1.0001 for a "
+        "stated 1 (it avoids the derivative singularity of eps^1 at eps = 0), "
+        f"a 0.05% effect at eps_p = 0.01. Pmin = "
+        + f"{(-abs(mat.pc) if mat.pc else 0.0):g} from "
+        + ("PC (a stated 0 becomes the reader's own -1e20, "
+           "hm_read_mat03.F:182 — no cutoff)" if mat.pc == 0.0 else
+           f"PC = {mat.pc:g}")
+        + f"; eps_max = {mat.fs:g} from FS"
+        + (" (a stated 0 becomes the reader's own 1e20 — no erosion)"
+           if mat.fs == 0.0 else " (effective plastic strain at element "
+                                 "deletion)")
+        + ((". DROPPED: " + "; ".join(dropped)) if dropped else "")
+        + ".")
+
+
+def _emit_mat_law3(mat: MatLaw3, state: ConversionState) -> List[str]:
+    """``/MAT/LAW3`` (``/MAT/HYDPLA``) + its same-id ``/EOS``.
+
+    Card layout from ``radioss2020/MAT/matl3_hydpla.cfg``
+    ``FORMAT(radioss2018)``::
+
+        C1: RHO_I(20)
+        C2: E(20) nu(20)
+        C3: a(20) b(20) n(20) eps_max(20) sigma_max(20)
+        C4: Pmin(20)
+
+    The ``/EOS`` is emitted immediately after the ``/MAT``, under the SAME id —
+    Radioss binds an equation of state to the material of the same id, the way
+    ``_emit_mat_law4_hyd_jcook`` already pairs the LAW4 route. It is NOT the
+    embedded card-5 form: ``hm_read_mat03.F:152-158`` disables ``EOS_EMBEDDED``
+    for every ``INVERS >= 2018`` deck, so an inline polynomial would be read as
+    part of no card at all.
+    """
+    lines = [
+        f"/MAT/LAW3/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu",
+        f"{_f(mat.e)}{_f(mat.nu)}",
+        "#                  a                   b                   n"
+        "             eps_max           sigma_max",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(mat.eps_max)}"
+        f"{_f(mat.sigma_max)}",
+        "#               Pmin",
+        f"{_f(mat.pmin)}",
+        HDR,
+    ]
+    eos = state.eos_cards.get(mat.eos_id)
+    if eos is not None:
+        lines += _emit_eos(eos)
+    return lines

@@ -6139,6 +6139,70 @@ class MatCWM:
 
 
 @dataclass
+class MatElasticPlasticHydro:
+    """``*MAT_ELASTIC_PLASTIC_HYDRO`` (``*MAT_010``) → ``/MAT/LAW3`` + its
+    same-id ``/EOS``.
+
+    Cards (Vol II R17 pp.2-191..2-195):
+      Card1: ``MID RO G SIG0 EH PC FS CHARL``
+      Cards 2-3: ``EPS1..EPS16``  (effective plastic strain points)
+      Cards 4-5: ``ES1..ES16``    (the yield stress at each)
+      ``_SPALL`` option: one extra card ``A1 A2 SPALL``
+
+    Remark 2 gives the flow law with ``EPS``/``ES`` undefined as
+    ``sigma_y = sigma_0 + E_h*eps_p + (a1 + p*a2)*max[p, 0]``, i.e. **``EH`` is
+    already the PLASTIC hardening modulus** (the manual's own
+    ``E_h = E_t E/(E − E_t)`` is the derivation FROM a tangent, not something
+    to apply again). ``PC`` is a pressure cutoff (≤ 0), ``FS`` the effective
+    plastic strain at erosion, ``CHARL`` a 2-D-only thinning deletion.
+
+    The material carries no bulk modulus of its own: LS-DYNA gets the pressure
+    from the ``*EOS_*`` the ``*PART`` binds, which is why all three corpus
+    carriers pair it with an ``*EOS_GRUNEISEN`` of the same id.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    g: float = 0.0
+    sig0: float = 0.0
+    eh: float = 0.0
+    pc: float = 0.0
+    fs: float = 0.0
+    charl: float = 0.0
+    eps: List[float] = field(default_factory=list)
+    es: List[float] = field(default_factory=list)
+    spall_option: bool = False
+    a1: float = 0.0
+    a2: float = 0.0
+    spall: float = 0.0
+
+
+@dataclass
+class MatLaw3:
+    """The RESOLVED ``/MAT/LAW3`` (``/MAT/HYDPLA``) card.
+
+    ``E`` and ``nu`` are DERIVED from two stated physical cells — the
+    material's ``RO`` and the companion EOS's bulk sound speed — because
+    ``*MAT_010`` states only a shear modulus and Radioss's card wants the
+    isotropic pair. See ``writer/materials.py::_resolve_mat_law3`` for the
+    derivation and its one visible consequence.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    e: float = 0.0
+    nu: float = 0.0
+    a: float = 0.0           # sigma_0
+    b: float = 0.0           # the PLASTIC hardening modulus EH, unconverted
+    n: float = 1.0
+    eps_max: float = 0.0     # FS (0 -> the reader's own infinity)
+    sigma_max: float = 0.0
+    pmin: float = 0.0        # -abs(PC) (0 -> the reader's own -1e20)
+    eos_id: int = 0          # the same-id *EOS_* emitted beside the /MAT
+    bulk: float = 0.0        # K0 = rho0*C^2, for the message
+
+
+@dataclass
 class MatLaw106:
     """The RESOLVED ``/MAT/LAW106`` card, whichever LS-DYNA keyword built it.
 
@@ -7322,6 +7386,14 @@ class ConversionState:
         field(default_factory=dict)
     mat_cwm: Dict[int, MatCWM] = field(default_factory=dict)
     mat_law106: Dict[int, MatLaw106] = field(default_factory=dict)
+    #   *MAT_010 / *MAT_ELASTIC_PLASTIC_HYDRO[_SPALL] → /MAT/LAW3 + same-id EOS
+    # Same source/resolved split: the E-nu pair is DERIVED from the material's
+    # own RO and the companion EOS's sound speed, and a card whose EOS is
+    # missing or whose EPS/ES table cannot be expressed leaves no resolved
+    # entry at all.
+    mat_ep_hydro: Dict[int, MatElasticPlasticHydro] = \
+        field(default_factory=dict)
+    mat_law3: Dict[int, MatLaw3] = field(default_factory=dict)
 
     # ── Rare materials + thermal subsystem ─────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
@@ -8306,7 +8378,10 @@ class ConversionState:
                   # from, and it is the one listed here: a source record the
                   # resolver refused writes no /MAT at all, so claiming its id
                   # would make next_mat_id() dodge a free number.
-                  self.mat_law106):
+                  self.mat_law106,
+                  # *MAT_010 → /MAT/LAW3 (+ the same-id /EOS), MID verbatim.
+                  # Same source/resolved rule as LAW106 above.
+                  self.mat_law3):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

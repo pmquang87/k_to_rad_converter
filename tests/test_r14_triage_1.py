@@ -589,5 +589,191 @@ class MatCwmLaw106Tests(unittest.TestCase):
             self.assertIn(kw, HANDLERS)
             self.assertIn(kw, _OFFSET_SPECS)
 
+
+# sph/bar-iv/taylor1.k's copper: G = 37593, SIG0 = 180, EH = PC = FS = 0,
+# with an *EOS_GRUNEISEN of the same id (C = 3.958e6, S1 = 1.497, gamma0 = 2).
+_MAT010 = ("*MAT_ELASTIC_PLASTIC_HYDRO\n"
+           + _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+           + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n"
+           + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n")
+_EOS_GRUN = ("*EOS_GRUNEISEN\n"
+             + _row(2, 3958000.0, 1.497, 0.0, 0.0, 2.0, 0.0, 0.0) + "\n")
+
+
+def _mat010_deck(card: str = _MAT010, eos: str = _EOS_GRUN) -> str:
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK
+            + "*PART\np1\n" + _row(1, 1, 2) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + card + eos + "*END\n")
+
+
+class Mat010Law3Tests(unittest.TestCase):
+    """A4 — *MAT_ELASTIC_PLASTIC_HYDRO / *MAT_010 → /MAT/LAW3 + same-id /EOS."""
+
+    def test_registered_under_every_spelling(self):
+        for kw in ("*MAT_ELASTIC_PLASTIC_HYDRO", "*MAT_010", "*MAT_10"):
+            with self.subTest(kw=kw):
+                res, starter = _convert(_mat010_deck(
+                    _MAT010.replace("*MAT_ELASTIC_PLASTIC_HYDRO", kw)))
+                self.assertIn("/MAT/LAW3/2", starter)
+                self.assertNotIn(kw.lstrip("*"), res.skipped_keywords)
+
+    def test_e_nu_derived_from_ro_and_the_eos_sound_speed(self):
+        """K0 = rho0*C^2 = 8.9e-9*3.958e6^2 = 139425.2996;
+        nu = (3K0-2G)/(2(3K0+G)) = 0.3763032526;
+        E  = 9*K0*G/(3K0+G)     = 103478.7364;  and E/(2(1+nu)) = G exactly."""
+        _res, starter = _convert(_mat010_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW3/2")
+                if not ln.startswith("#")]
+        self.assertEqual(float(_fields(rows[1])[0]), 8.9e-9)
+        e, nu = (float(c) for c in _fields(rows[2]))
+        k0 = 8.9e-9 * 3958000.0 ** 2
+        g = 37593.0
+        self.assertAlmostEqual(k0, 139425.2996, places=4)
+        self.assertAlmostEqual(nu, (3 * k0 - 2 * g) / (2 * (3 * k0 + g)),
+                               places=9)
+        self.assertAlmostEqual(e, 9 * k0 * g / (3 * k0 + g), places=3)
+        self.assertAlmostEqual(e / (2 * (1 + nu)), g, places=3)
+
+    def test_eh_goes_into_b_unconverted(self):
+        """Remark 2 states sigma_y = sigma_0 + E_h*eps_p, so EH is ALREADY the
+        plastic modulus: E*Et/(E-Et) here would be a silent factor error."""
+        card = _MAT010.replace(
+            _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0),
+            _row(2, "8.9E-09", 37593.0, 180.0, 1000.0, 0.0, 0.0, 0.0))
+        _res, starter = _convert(_mat010_deck(card))
+        rows = [ln for ln in _block(starter, "/MAT/LAW3/2")
+                if not ln.startswith("#")]
+        a, b, n = (float(c) for c in _fields(rows[3])[:3])
+        self.assertEqual(a, 180.0)
+        self.assertEqual(b, 1000.0)
+        e = float(_fields(rows[2])[0])
+        self.assertNotAlmostEqual(b, e * 1000.0 / (e - 1000.0), places=2)
+        self.assertEqual(n, 1.0)
+
+    def test_pc_and_fs_reach_pmin_and_eps_max(self):
+        """hvi.k states PC = -2000; Pmin = -abs(PC)."""
+        card = _MAT010.replace(
+            _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0),
+            _row(2, "8.9E-09", 37593.0, 180.0, 0.0, -2000.0, 0.35, 0.0))
+        _res, starter = _convert(_mat010_deck(card))
+        rows = [ln for ln in _block(starter, "/MAT/LAW3/2")
+                if not ln.startswith("#")]
+        self.assertEqual(float(_fields(rows[3])[3]), 0.35)     # eps_max = FS
+        self.assertEqual(float(_fields(rows[4])[0]), -2000.0)  # Pmin
+
+    def test_zero_pc_is_written_as_a_plain_zero(self):
+        """-abs(0.0) is -0.0, which formats as '-0' and reads as a typo; a
+        stated 0 means 'no cutoff' (hm_read_mat03.F:182 -> -1e20)."""
+        _res, starter = _convert(_mat010_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW3/2")
+                if not ln.startswith("#")]
+        self.assertEqual(_fields(rows[4])[0], "0")
+
+    def test_the_same_id_eos_is_emitted_beside_the_mat(self):
+        _res, starter = _convert(_mat010_deck())
+        self.assertIn("/EOS/GRUNEISEN/2", starter)
+        lines = starter.splitlines()
+        i = lines.index("/MAT/LAW3/2")
+        j = lines.index("/EOS/GRUNEISEN/2")
+        self.assertLess(i, j)
+        self.assertLess(j - i, 15)          # adjacent blocks, not scattered
+
+    def test_the_eos_is_not_also_reported_as_an_orphan(self):
+        """A warning that says the EOS was NOT emitted while the deck holds it
+        is a false cited fact (#129)."""
+        res, _starter = _convert(_mat010_deck())
+        joined = " ".join(res.warnings)
+        self.assertNotIn("The equation of state was NOT emitted", joined)
+        self.assertNotIn("no material to attach it to", joined)
+
+    def test_missing_eos_refuses_the_material_by_name(self):
+        res, starter = _convert(_mat010_deck(eos=""))
+        self.assertEqual(_headers(starter, "/MAT/LAW3/"), [])
+        self.assertIn("no *EOS_* of the same id", " ".join(res.warnings))
+
+    def test_tabulated_yield_curve_refuses_the_material_by_name(self):
+        card = ("*MAT_ELASTIC_PLASTIC_HYDRO\n"
+                + _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(0.0, 0.05, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(*([0.0] * 8)) + "\n"
+                + _row(180.0, 220.0, 260.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(*([0.0] * 8)) + "\n")
+        res, starter = _convert(_mat010_deck(card))
+        self.assertEqual(_headers(starter, "/MAT/LAW3/"), [])
+        self.assertIn("TABULATED yield curve", " ".join(res.warnings))
+
+    def test_spall_option_is_refused_by_name(self):
+        card = ("*MAT_ELASTIC_PLASTIC_HYDRO_SPALL\n"
+                + _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(1.0, 2.0, 3.0) + "\n"
+                + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n"
+                + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n")
+        res, starter = _convert(_mat010_deck(card))
+        self.assertEqual(_headers(starter, "/MAT/LAW3/"), [])
+        w = " ".join(res.warnings)
+        self.assertIn("_SPALL", w)
+        self.assertIn("A1=1, A2=2", w)
+        self.assertIn("SPALL=3", w)
+
+    def test_spall_card_shifts_the_eps_table_by_one_row(self):
+        """The option's card 1a sits BETWEEN card 1 and EPS1..8, so a handler
+        that did not stride it would read A1/A2/SPALL as the first three
+        plastic strains."""
+        deck = ("*KEYWORD\n*MAT_ELASTIC_PLASTIC_HYDRO_SPALL\n"
+                + _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(1.0, 2.0, 3.0) + "\n"
+                + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n"
+                + _row(*([0.0] * 8)) + "\n" + _row(*([0.0] * 8)) + "\n"
+                + "*END\n")
+        state = _dispatch(deck)
+        mat = state.mat_ep_hydro[2]
+        self.assertTrue(mat.spall_option)
+        self.assertEqual((mat.a1, mat.a2, mat.spall), (1.0, 2.0, 3.0))
+        self.assertEqual(mat.eps[:3], [0.0, 0.0, 0.0])
+
+    def test_zero_density_and_zero_shear_are_refused_by_name(self):
+        for cell, needle in (
+                (_row(2, 0.0, 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0),
+                 "ERROR 683"),
+                (_row(2, "8.9E-09", 0.0, 180.0, 0.0, 0.0, 0.0, 0.0),
+                 "shear modulus is the card's only elastic cell")):
+            with self.subTest(needle=needle):
+                card = _MAT010.replace(
+                    _row(2, "8.9E-09", 37593.0, 180.0, 0.0, 0.0, 0.0, 0.0),
+                    cell)
+                res, starter = _convert(_mat010_deck(card))
+                self.assertEqual(_headers(starter, "/MAT/LAW3/"), [])
+                self.assertIn(needle, " ".join(res.warnings))
+
+    def test_warning_names_the_derivation_and_its_consequence(self):
+        res, _starter = _convert(_mat010_deck())
+        w = [x for x in res.warnings if "-> /MAT/LAW3 (HYDPLA)" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("K0 = rho0*C^2 = 139425", "nu = (3K0-2G)/(2(3K0+G))",
+                     "= G exactly", "CONTACT STIFFNESS",
+                     "hm_read_mat03.F:191", "UNCONVERTED",
+                     "substitutes 1.0001"):
+            self.assertIn(fact, w[0])
+
+    def test_target_mat_law_answers_3(self):
+        from k2rad.writer.mesh import _target_mat_law
+        state = _dispatch(_mat010_deck())
+        from k2rad.writer.materials import _resolve_mat_law3
+        _resolve_mat_law3(state)
+        self.assertEqual(_target_mat_law(state, 2), 3)
+
+    def test_offset_spec_moves_the_mid_and_nothing_else(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS, RARE_MATERIAL_KEYWORDS
+        for kw in ("MAT_ELASTIC_PLASTIC_HYDRO",
+                   "MAT_ELASTIC_PLASTIC_HYDRO_SPALL",
+                   "MAT_010", "MAT_10", "MAT_010_SPALL", "MAT_10_SPALL"):
+            self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
+            self.assertIn(kw, RARE_MATERIAL_KEYWORDS)
+            self.assertIn(kw, HANDLERS)
+
 if __name__ == "__main__":
     unittest.main()

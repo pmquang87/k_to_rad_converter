@@ -4229,6 +4229,14 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # beam part IS starter ERROR 3046.
     if mid in state.mat_law106:
         return 106                                 # *MAT_004 / *MAT_270
+    # *MAT_010 -> /MAT/LAW3 (HYDPLA). Declares ELASTO_PLASTIC, EOS, HYDRO_EOS,
+    # SOLID_ISOTROPIC and SPH (hm_read_mat03.F:214-225) — no shell and no beam
+    # class — and LAW3 is already in writer/sph.py's _SPH_COMPATIBLE_LAWS, so
+    # this entry is what makes the SPH and /PROP/BEAM compatibility reports
+    # (and the solid-/XREF gate, whose whitelist LAW3 is NOT on) name the law
+    # instead of reporting "no /MAT at all".
+    if mid in state.mat_law3:
+        return 3                                   # *MAT_010 -> HYDPLA
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

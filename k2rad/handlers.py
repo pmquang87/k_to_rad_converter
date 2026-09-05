@@ -96,7 +96,7 @@ from .state import (
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
     MatShapeMemory, MatMuscle, MatSpringMuscle,
-    MatElasticPlasticThermal, MatCWM,
+    MatElasticPlasticThermal, MatCWM, MatElasticPlasticHydro,
     MatAddThermalExpansion, MatThermalIsotropic,
     MatThermalIsotropicTD, MatThermalOrthotropic,
     ControlThermalSolver, ThermalBoundary, LoadThermalElement,
@@ -10148,6 +10148,65 @@ def handle_mat_cwm(block: Block, state: ConversionState) -> None:
     state.mat_cwm[mid] = rec
 
 
+def handle_mat_elastic_plastic_hydro(block: Block,
+                                     state: ConversionState) -> None:
+    """*MAT_ELASTIC_PLASTIC_HYDRO[_SPALL] (*MAT_010) → /MAT/LAW3 + its same-id
+    /EOS.
+
+    Cards (Vol II R17 pp.2-191..2-195;
+    Keyword971_R14.1/MAT/mat_010.cfg):
+      Card1: MID RO G SIG0 EH PC FS CHARL
+      Card1a (``_SPALL`` option ONLY): A1 A2 SPALL
+      Cards 2-3: EPS1..EPS16
+      Cards 4-5: ES1..ES16
+
+    The ``_SPALL`` option inserts its card BETWEEN card 1 and the EPS table, so
+    the table's row index depends on the option — claimed by RAW CONTIGUITY
+    from the option flag, never by scanning for the next non-blank row
+    (#109/#117/#119: an all-zero EPS row is legal and a content scan walks past
+    it into the following keyword).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ELASTIC_PLASTIC_HYDRO: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_ELASTIC_PLASTIC_HYDRO '{title}': MID parsed as "
+                   f"{mid} — unreadable (shifted or fused fields?); material "
+                   "skipped.")
+        return
+
+    def _g(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    # ``_SPALL`` is NOT a trailing _ID/_TITLE/_SUBTITLE, so parser.
+    # _split_keyword leaves it IN the keyword rather than moving it into
+    # block.options — the spelling itself is the flag.
+    spall_option = "SPALL" in block.keyword.upper()
+    row = offset + 1
+    a1 = a2 = spall = 0.0
+    if spall_option:
+        fs_card = _card(raw, row, fixed=True, n=3, w=10)
+        a1, a2, spall = _g(fs_card, 0), _g(fs_card, 1), _g(fs_card, 2)
+        row += 1
+    eps: List[float] = []
+    es: List[float] = []
+    for k in range(2):
+        fk = _card(raw, row + k, fixed=True, n=8, w=10)
+        eps += [_g(fk, i) for i in range(8)]
+    for k in range(2):
+        fk = _card(raw, row + 2 + k, fixed=True, n=8, w=10)
+        es += [_g(fk, i) for i in range(8)]
+    state.mat_ep_hydro[mid] = MatElasticPlasticHydro(
+        mid=mid, title=title, rho=_g(f1, 1), g=_g(f1, 2), sig0=_g(f1, 3),
+        eh=_g(f1, 4), pc=_g(f1, 5), fs=_g(f1, 6), charl=_g(f1, 7),
+        eps=eps, es=es, spall_option=spall_option, a1=a1, a2=a2, spall=spall)
+
+
 def _scalar_or_curve(f: List[str], i: int, default: float,
                      state: Optional[ConversionState] = None,
                      field: str = "", fixed_positive: bool = False,
@@ -17721,6 +17780,16 @@ RARE_MATERIAL_KEYWORDS = {
     "MAT_4":                       handle_mat_elastic_plastic_thermal,
     "MAT_CWM":                     handle_mat_cwm,
     "MAT_270":                     handle_mat_cwm,
+    # *MAT_010 -> /MAT/LAW3 (HYDPLA) + the same-id /EOS. The _SPALL option is
+    # NOT a trailing _ID/_TITLE, so parser._split_keyword leaves it in the
+    # keyword: the spelling is its own row, and the handler reads the flag off
+    # block.keyword (its card 1a shifts the EPS/ES table by one row).
+    "MAT_ELASTIC_PLASTIC_HYDRO":       handle_mat_elastic_plastic_hydro,
+    "MAT_ELASTIC_PLASTIC_HYDRO_SPALL": handle_mat_elastic_plastic_hydro,
+    "MAT_010":                         handle_mat_elastic_plastic_hydro,
+    "MAT_10":                          handle_mat_elastic_plastic_hydro,
+    "MAT_010_SPALL":                   handle_mat_elastic_plastic_hydro,
+    "MAT_10_SPALL":                    handle_mat_elastic_plastic_hydro,
     "MAT_MUSCLE":         handle_mat_muscle,
     "MAT_156":            handle_mat_muscle,
     # *MAT_SPRING_MUSCLE's numeric alias is *MAT_S15 (Vol II R17 p.2-2095

@@ -338,6 +338,33 @@ since an empty part is as often missing mesh as it is a deliberate carrier.
 `_FLUID` option variant takes a different target entirely — see
 `*MAT_ELASTIC_FLUID` below
 `*MAT_PIECEWISE_LINEAR_PLASTICITY` (+ `_MODIFIED_`) → `/MAT/LAW36`
+`*MAT_ELASTIC_PLASTIC_HYDRO` (also `*MAT_010`/`*MAT_10`) → `/MAT/LAW3`
+(`HYDPLA`) **plus its same-id `/EOS`**, emitted together because Radioss binds
+an equation of state to the material of the same id. `*MAT_010` states a SHEAR
+modulus and no bulk modulus at all (LS-DYNA takes the pressure from the `*EOS_*`
+the `*PART` binds), so the isotropic pair Radioss's card wants is **derived from
+two stated physical cells** — the material's `RO` and the EOS's sound speed:
+`K₀ = ρ₀C²` (a Gruneisen `C` is the intercept of `us = C + S1·up`, i.e. the bulk
+sound speed at zero compression; a polynomial EOS gives `K₀ = C1`), then
+`ν = (3K₀−2G)/(2(3K₀+G))` and `E = 9K₀G/(3K₀+G)`, which returns
+`E/(2(1+ν)) = G` exactly. On `taylor1.k`: `K₀ = 139425.2996`, `ν = 0.376303`,
+`E = 103478.736`, `E/(2(1+ν)) = 37593.000 = G`. Its **one visible consequence**
+is that `hm_read_mat03.F:191` stores `PM(32) = E/(3(1−2ν))` for every
+`INVERS ≥ 2018` deck, and that is the bulk modulus the `/INTER/TYPE7`/`TYPE20`
+CONTACT STIFFNESS reads — so it now agrees with the pressure law instead of with
+an invented Poisson ratio (the deviatoric response is unaffected either way:
+`m3law.F:60,107-112` uses `G` alone). `SIG0 → a`; **`EH → b` UNCONVERTED**,
+because Vol II R17 p.2-193 Remark 2 states the flow law as
+`σy = σ0 + E_h·ε_p` — `EH` is already the plastic modulus and the
+`E_t·E/(E−E_t)` form on that page is the derivation *from* a tangent;
+`n = 1` (the reader substitutes 1.0001, avoiding the `ε^1` derivative
+singularity — 0.05 % at `ε_p = 0.01`); `PC → Pmin` as `−|PC|`, a stated 0 left
+as 0 for the reader's own `−1e20`; `FS → eps_max`. **Refused by name**, never
+half-converted: the `_SPALL` option (its `(a1 + p·a2)·max[p,0]` pressure
+hardening and spall selector have no `/MAT/LAW3` slot), a tabulated
+`EPS1..16`/`ES1..16` yield curve (`a + b·ε^n` cannot hold a 16-point table, and
+the law that could — `/MAT/LAW36`, both SPH- and EOS-declared — is not wired to
+an `/EOS` here yet), a missing same-id `*EOS_*`, and `RO ≤ 0` or `G ≤ 0`
 `*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44` (`b` = plastic hardening modulus
 E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)

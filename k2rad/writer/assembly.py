@@ -26,6 +26,7 @@ from .materials import (
     _resolve_mat_power_law,
     _resolve_mat_shape_memory,
     _resolve_mat_law106,
+    _resolve_mat_law3,
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
@@ -938,6 +939,17 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # *MAT_ELASTIC_PLASTIC_THERMAL that only converts because of this pass,
     # and screening before it would shadow the real material (#130).
     _resolve_mat_law106(state)
+
+    # R14 triage batch: *MAT_010 -> /MAT/LAW3 + its same-id /EOS. Synthesizes
+    # no curve and no id, so its placement does not move the /FUNCT numbering;
+    # what it needs is state.eos_cards (filled at parse time) and the FINAL
+    # element lists, because LAW3 declares SOLID_ISOTROPIC and SPH only
+    # (hm_read_mat03.F:224-225) and the compatibility reports classify parts.
+    # Before _resolve_xref_parts below: LAW3 is NOT on the starter's
+    # solid-/XREF law whitelist, so its _target_mat_law entry is what makes
+    # that gate warn-skip such a part NAMING the law instead of claiming it
+    # has no /MAT at all.
+    _resolve_mat_law3(state)
 
     # Thermal expansion + the temperature drivers. MUST run BEFORE
     # _make_functions (it registers the synthesized coefficient and driver
