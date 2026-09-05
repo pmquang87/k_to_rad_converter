@@ -193,6 +193,7 @@ def convert(
     ams: bool = False,
     shell_formulation: str = "qbat",
     dt_del: Optional[float] = None,
+    he_bunreacted: Optional[float] = None,
     eroding_surf_ext: bool = False,
     airbag_particle_uniform: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
@@ -319,6 +320,20 @@ def convert(
         stub that prints ``FVMBAGS require a mesher`` and stops. The gas
         species, injector, vents and porous surfaces are identical either way;
         only the pressure field differs.
+    he_bunreacted : float, optional
+        Override the ``/MAT/LAW5`` ``Bunreacted`` cell — the UNREACTED
+        explosive's bulk modulus — in the deck's own pressure unit. Without it
+        the card's own ``K`` is written when it states one, and otherwise the
+        value is DERIVED, but only for a material an
+        ``*ALE_MULTI-MATERIAL_GROUP`` names: ``fill_buffer_51.F:496`` refuses a
+        LAW51 phase whose ``Bunreacted`` is ``<= 0`` with ``ERROR 99``, while a
+        stand-alone ``/MAT/LAW5`` is perfectly startable with 0 there. The
+        derivation is the JWL isentrope's bulk modulus at the unreacted
+        density, ``A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0``, every term from a
+        cell the ``*EOS_JWL`` states; it is named in the log with its formula,
+        its value and its consequence (the unburnt cells then carry
+        ``P = K·mu``, ``jwl51.F:197``, where an LS-DYNA ``BETA = 0`` card
+        carried nothing at all).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -380,6 +395,7 @@ def convert(
         ams=ams,
         shell_formulation=shell_formulation,
         dt_del=dt_del,
+        he_bunreacted=he_bunreacted,
         eroding_surf_ext=eroding_surf_ext,
         airbag_particle_uniform=airbag_particle_uniform,
     )

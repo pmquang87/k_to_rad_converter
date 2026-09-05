@@ -27,6 +27,7 @@ from .materials import (
     _resolve_mat_shape_memory,
     _resolve_mat_law106,
     _resolve_mat_law3,
+    _resolve_he_bunreacted,
     _warn_refused_materials,
 )
 from .muscle import _make_muscle_springs
@@ -951,6 +952,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # that gate warn-skip such a part NAMING the law instead of claiming it
     # has no /MAT at all.
     _resolve_mat_law3(state)
+
+    # R14 triage batch: the /MAT/LAW5 Bunreacted cell. Needs the flattened
+    # part sets (for the *ALE_MULTI-MATERIAL_GROUP membership test) and must
+    # precede _make_materials, whose _emit_mat_law5 writes the cell. Emits
+    # nothing and draws no id.
+    _resolve_he_bunreacted(state)
 
     # Materials REFUSED BY NAME (*MAT_102, *MAT_090, *MAT_031, *MAT_VACUUM,
     # *MAT_GAS_MIXTURE). The handler could only record the law and the reason

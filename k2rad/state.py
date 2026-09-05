@@ -2307,8 +2307,16 @@ class MatHighExplosiveBurn:
     Card: mid ro d pcj beta k g sigy
       ro   = density, d = detonation velocity, pcj = Chapman-Jouguet pressure.
     Paired (shared mid) with an *EOS_JWL that supplies the JWL A,B,R1,R2,omega,E0.
-    The two together map to one OpenRadioss /MAT/LAW5 (JWL). beta/k/g/sigy have
-    no LAW5 counterpart (LAW5 is a pure detonation-product EOS) and are dropped.
+    The two together map to one OpenRadioss /MAT/LAW5 (JWL).
+
+    ``K`` is *"Bulk modulus (**BETA = 2.0 only**)"* on the LS-DYNA side and the
+    ``Bunreacted`` cell on the Radioss one, and the two are the SAME quantity in
+    the same form: Vol II R17 p.2-188 gives the pre-detonation pressure as
+    ``p^{n+1} = K(1/V^{n+1} - 1)``, i.e. ``p = K*mu``, while ``jwl51.F:197`` is
+    ``Psol = C01 + C11*MU1`` with ``C11 = UPARAM(50) = PM(44) = Bunreacted``
+    (``hm_read_mat05.F:160/234``) — term for term, no conversion factor. ``G``
+    and ``SIGY`` share the ``BETA = 2.0 only`` restriction and have no /MAT/LAW5
+    slot at all (LAW5 carries no deviator), so they are named as dropped.
     """
     mid: int
     title: str
@@ -2316,6 +2324,14 @@ class MatHighExplosiveBurn:
     d: float
     pcj: float
     beta: float = 0.0
+    k: float = 0.0        # unreacted BULK MODULUS -> the Bunreacted cell
+    g: float = 0.0        # unreacted shear modulus  (no LAW5 slot)
+    sigy: float = 0.0     # unreacted yield stress   (no LAW5 slot)
+    # Writer-resolved: the value actually written into Bunreacted and the
+    # sentence that says where it came from. Kept ON the record so the emitted
+    # cell and the warning can never drift apart (#125).
+    bunreacted: float = 0.0
+    bunreacted_note: str = ""
 
 
 @dataclass
@@ -6848,6 +6864,14 @@ class ConvertOptions:
     # Opt-in because the card DELETES ELEMENTS; see
     # writer/assembly._make_engine_dt_deletion.
     dt_del: "float | None" = None
+    # /MAT/LAW5 `Bunreacted` override, in the deck's own pressure unit. None =
+    # k2rad's own rule: the card's stated K when it has one, else the JWL
+    # isentrope's bulk modulus at the unreacted density for an
+    # *ALE_MULTI-MATERIAL_GROUP member (fill_buffer_51.F:496 refuses <= 0 with
+    # ERROR 99), else 0. An OVERRIDE rather than an opt-in, because on a LAW51
+    # phase there is no legal "off" — see
+    # writer/materials._resolve_he_bunreacted.
+    he_bunreacted: "float | None" = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

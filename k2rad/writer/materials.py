@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState,
     MatElastic,
@@ -153,6 +153,9 @@ __all__ = [
     "_emit_mat_law3",
     "_emit_fail_spalling",
     "_warn_refused_materials",
+    "_resolve_he_bunreacted",
+    "_ammg_member_mids",
+    "_jwl_unreacted_bulk",
 ]
 
 
@@ -505,7 +508,7 @@ def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
         "#                  D                P_CJ                  E0                Eadd   I_BFRAC      Qopt",
         f"{_f(heb.d)}{_f(heb.pcj)}{_f(e0)}{_f(0.0)}         0         0",
         "#                 P0                 PSH          Bunreacted",
-        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(0.0)}{_f(heb.bunreacted)}",
         HDR,
     ]
 
@@ -9802,3 +9805,169 @@ def _warn_refused_materials(state: ConversionState) -> None:
                "No /PART names this material, so nothing in the emitted deck "
                "references it and the refusal costs the model nothing.")
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: the /MAT/LAW5 `Bunreacted` cell
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ammg_member_mids(state: ConversionState) -> Set[int]:
+    """Material ids reached by an ``*ALE_MULTI-MATERIAL_GROUP`` entry.
+
+    The ONE predicate for "is this material a LAW51 phase?", read by the
+    ``Bunreacted`` derivation, by the submaterial restatement and by the phase
+    list itself — if any two of them disagreed, a material would be derived for
+    a card it never lands on, or land on one with no derivation.
+    """
+    from .blast_ale import _part_pids
+    mids: Set[int] = set()
+    for mmg in state.ale_mmgs:
+        for sid, idtype in mmg.entries:
+            for pid in _part_pids(state, sid, idtype == 1):
+                part = state.parts.get(pid)
+                if part is not None and part.mid:
+                    mids.add(part.mid)
+    return mids
+
+
+def _jwl_unreacted_bulk(jwl: EosJwl) -> float:
+    """``K_s(V = 1)`` — the JWL isentrope's slope at the UNREACTED density.
+
+    ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V} + omega·E0/V`` is the deck's own
+    pressure law; its bulk modulus ``K = -V dp/dV`` evaluated at ``V = 1`` is
+
+        K_s(1) = A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0
+
+    Every term comes from a cell the ``*EOS_JWL`` states — nothing is fitted
+    and nothing is looked up. On ``underwater_C``'s TNT (A 371000, B 3230,
+    R1 4.15, R2 0.95, omega 0.3, E0 4300) that is
+    24271.684 + 1186.715 + 1290.000 = **26748.4 MPa**, which is also ~= the
+    deck's own stated ``P_CJ`` of 26000.
+    """
+    return (jwl.a * jwl.r1 * math.exp(-jwl.r1)
+            + jwl.b * jwl.r2 * math.exp(-jwl.r2)
+            + jwl.omega * jwl.e0)
+
+
+def _resolve_he_bunreacted(state: ConversionState) -> None:
+    """Fill every ``/MAT/LAW5``'s ``Bunreacted`` cell, deriving it where the
+    deck states ``K = 0`` and the material is a LAW51 phase.
+
+    **What the cell is.** ``hm_read_mat05.F:160/234`` reads ``BUNREACTED`` into
+    ``PM(44)``; ``fill_buffer_51.F:438/471`` copies it into ``UPARAM(50)``, and
+    the engine's ``jwl51.F:197`` uses it as the UNREACTED solid's LINEAR
+    pressure law ``Psol = C01 + C11*MU1`` (``:172 C11 = UPARAM(50)``), blended
+    with the product pressure by the burn fraction at ``:205``. ``:214`` also
+    makes it the unreacted sound speed ``sqrt(C11/RHO10)``, which enters the
+    CFL step. LS-DYNA's ``K`` is the same quantity in the same form (Vol II R17
+    p.2-188: *"Before detonation, pressure is given by
+    p^{n+1} = K(1/V^{n+1} - 1)"*), so a stated ``K`` is copied 1:1.
+
+    **Why a derivation is needed at all.** ``fill_buffer_51.F:496-499`` refuses
+    ``C14 <= 0`` outright — *"BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR
+    UNREACTED EXPLOSIVE"*, ``ERROR 99`` — and the four ``underwater_*`` corpus
+    decks all state ``K = 0`` with ``BETA = 0``. That is CORRECT LS-DYNA input,
+    not a deck defect: ``K`` is *"Bulk modulus (BETA = 2.0 only)"*, and with
+    ``BETA = 0`` ("beta burn plus programmed burn", ``F = max(F1,F2)``) the
+    unburnt explosive obeys ``p = F·p_eos`` with ``F = 0``, i.e. LS-DYNA
+    carries NO unreacted stress at all. Radioss has no such branch, so a value
+    is required and the honest thing is to derive one from the deck's own
+    physics and NAME it.
+
+    **The derivation, and the alternative that was rejected.** Two candidates
+    exist from stated cells: the JWL isentrope slope at the unreacted density
+    (:func:`_jwl_unreacted_bulk`), and ``rho0*D^2`` — which the starter itself
+    already computes at ``fill_buffer_51.F:488`` (``UPARAM(275) =
+    RHO40*SSP4^2`` with ``SSP4 = VDET``). On ``underwater_C`` they are 26748.4
+    and 100188.9 MPa. The isentrope slope is what is written: it is the
+    stiffness of THIS explosive's own pressure law evaluated at THIS density —
+    the only number on the card that describes its compressibility — and it is
+    3.7x softer, so it perturbs the pre-burn state (which LS-DYNA leaves at
+    zero) less. Neither raises the time step risk: ``PM(27)`` already holds
+    ``D`` (``:492``), and a SMALLER ``C11`` gives a LARGER, never smaller,
+    unreacted-sound-speed step.
+
+    **Scope.** The substitution fires only when the source ``K`` is 0 AND the
+    material is an ``*ALE_MULTI-MATERIAL_GROUP`` member, because ``ERROR 99``
+    lives in the ``Iform = 12`` branch alone: a stand-alone ``/MAT/LAW5``
+    (``underwater_A``/``_B``, ``exploding-sphere``, ``2Dlag``) reads the cell
+    only through ``hm_read_mat05.F`` and is perfectly startable with 0 there,
+    so writing a derived stiffness onto it would change four decks that have no
+    problem. ``--he-bunreacted <value>`` overrides the derivation everywhere.
+    """
+    if not state.mat_high_explosive:
+        return
+    members = _ammg_member_mids(state)
+    override = state.options.he_bunreacted
+    for mid in sorted(state.mat_high_explosive):
+        heb = state.mat_high_explosive[mid]
+        jwl = state.eos_jwl.get(mid)
+        dropped = []
+        if heb.g:
+            dropped.append(f"G={heb.g:g}")
+        if heb.sigy:
+            dropped.append(f"SIGY={heb.sigy:g}")
+        if dropped:
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid}: " + " and ".join(dropped)
+                + " have no /MAT/LAW5 cell — LAW5 is a pure pressure law with "
+                "no deviator at all (jwl51.F computes only P), so the "
+                "unreacted explosive's shear response and yield are DROPPED. "
+                "Both are 'BETA = 2.0 only' cells in LS-DYNA "
+                "(Vol II R17 p.2-186), so they are inert on a BETA = 0 or 1 "
+                "card there too.")
+        if override is not None:
+            heb.bunreacted = override
+            heb.bunreacted_note = (
+                f"the --he-bunreacted override ({override:g})")
+        elif heb.k > 0.0:
+            heb.bunreacted = heb.k
+            heb.bunreacted_note = f"the card's own stated K = {heb.k:g}"
+        elif mid not in members:
+            heb.bunreacted = 0.0
+            heb.bunreacted_note = ""
+            continue
+        elif jwl is None:
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} is an "
+                "*ALE_MULTI-MATERIAL_GROUP member with K = 0, and "
+                "fill_buffer_51.F:496 refuses a /MAT/LAW51 phase whose LAW5 "
+                "Bunreacted is <= 0 (ERROR 99, 'BULK MODULUS OF LAW5 (JWL) "
+                "MUST BE PROVIDED FOR UNREACTED EXPLOSIVE'). The derivation "
+                "reads the companion *EOS_JWL's own coefficients and this "
+                "material has none, so Bunreacted is left 0 and the starter "
+                "will refuse the deck. Add the *EOS_JWL, state K on the "
+                "*MAT_HIGH_EXPLOSIVE_BURN card, or pass --he-bunreacted.")
+            continue
+        else:
+            heb.bunreacted = _jwl_unreacted_bulk(jwl)
+            heb.bunreacted_note = (
+                "a DERIVED value: the JWL isentrope's bulk modulus at the "
+                "UNREACTED density, K_s(V=1) = A*R1*exp(-R1) + B*R2*exp(-R2) "
+                f"+ omega*E0 = {jwl.a:g}*{jwl.r1:g}*exp(-{jwl.r1:g}) + "
+                f"{jwl.b:g}*{jwl.r2:g}*exp(-{jwl.r2:g}) + {jwl.omega:g}*"
+                f"{jwl.e0:g} = {heb.bunreacted:g}")
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                f"{heb.bunreacted:g}, SUBSTITUTED. The deck states K = 0, "
+                f"which is CORRECT LS-DYNA input on this card: K is 'Bulk "
+                "modulus (BETA = 2.0 only)' (Vol II R17 p.2-186) and with "
+                f"BETA = {heb.beta:g} the unburnt explosive obeys p = F*p_eos "
+                "with F = 0, i.e. LS-DYNA carries NO unreacted stress at all. "
+                "Radioss has no such branch: this material is an "
+                "*ALE_MULTI-MATERIAL_GROUP member and fill_buffer_51.F:496 "
+                "refuses a phase whose LAW5 Bunreacted is <= 0 (ERROR 99, "
+                "'BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR UNREACTED "
+                f"EXPLOSIVE'). The value written is {heb.bunreacted_note}. "
+                "CONSEQUENCE, stated plainly: the unburnt cells now carry "
+                "P = K*mu (jwl51.F:197 Psol = C01 + C11*MU1, blended by the "
+                "burn fraction at :205) where LS-DYNA carried 0, and "
+                "sqrt(C11/rho) becomes their sound speed (:214). The "
+                "alternative derivation from stated cells is rho0*D^2 = "
+                f"{heb.rho * heb.d * heb.d:g}, which the starter already "
+                "computes at fill_buffer_51.F:488 as UPARAM(275); it is "
+                f"{(heb.rho * heb.d * heb.d) / heb.bunreacted:.3g}x stiffer, "
+                "so the isentrope slope perturbs the pre-burn state less. "
+                "Neither costs time step (PM(27) already holds D, and a "
+                "SMALLER C11 raises the unreacted-sound-speed limit). Use "
+                "--he-bunreacted <value> to state your own.")

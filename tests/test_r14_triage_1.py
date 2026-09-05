@@ -910,5 +910,155 @@ class RefusedMaterialTests(unittest.TestCase):
             self.assertIn(kw, HANDLERS)
             self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
 
+
+# ale/explosion/underwater-c/underwater_C.k's TNT, verbatim.
+_HE_CARD = ("*MAT_HIGH_EXPLOSIVE_BURN\n"
+            + _row(2, "1.63E-09", 7840000, 26000, 0.0, 0.0, 0.0, 0.0) + "\n")
+_EOS_JWL = ("*EOS_JWL\n"
+            + _row(2, 371000, 3230, 4.15, 0.95, 0.3, 4300, 1.0) + "\n")
+# The water: a *MAT_NULL + *EOS_GRUNEISEN pair, the other AMMG phase.
+_WATER = ("*MAT_NULL\n" + _row(1, "1.0E-09") + "\n"
+          "*EOS_GRUNEISEN\n"
+          + _row(1, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + "\n")
+
+_BRICK2 = """*ELEMENT_SOLID
+       2       2       1       2       3       4       5       6       7       8
+"""
+
+
+def _he_deck(*, ammg: bool = True, card: str = _HE_CARD,
+             eos: str = _EOS_JWL) -> str:
+    """One water part and one explosive part, optionally an AMMG over both."""
+    group = ("*ALE_MULTI-MATERIAL_GROUP\n" + _row(1, 1) + "\n" + _row(2, 1)
+             + "\n") if ammg else ""
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK + _BRICK2
+            + "*PART\nwater\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nhe\n" + _row(2, 2, 2) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 11) + "\n"
+            + "*SECTION_SOLID\n" + _row(2, 11) + "\n"
+            + _WATER + card + eos + group + "*END\n")
+
+
+def _bunreacted(starter: str, mid: int) -> float:
+    rows = [ln for ln in _block(starter, f"/MAT/LAW5/{mid}")
+            if not ln.startswith("#")]
+    return float(_fields(rows[4])[2])
+
+
+class HeBunreactedTests(unittest.TestCase):
+    """A6 — the /MAT/LAW5 `Bunreacted` cell and its derivation."""
+
+    def test_k_g_sigy_are_read_from_the_card(self):
+        card = ("*MAT_HIGH_EXPLOSIVE_BURN\n"
+                + _row(2, "1.63E-09", 7840000, 26000, 2.0, 9300.0, 3500.0,
+                       200.0) + "\n")
+        state = _dispatch(_he_deck(card=card, ammg=False))
+        heb = state.mat_high_explosive[2]
+        self.assertEqual((heb.k, heb.g, heb.sigy), (9300.0, 3500.0, 200.0))
+
+    def test_a_stated_k_is_copied_one_to_one(self):
+        """Vol II R17 p.2-188 `p = K(1/V - 1)` against jwl51.F:197
+        `Psol = C01 + C11*MU1` — the same form, so no factor."""
+        card = ("*MAT_HIGH_EXPLOSIVE_BURN\n"
+                + _row(2, "1.63E-09", 7840000, 26000, 2.0, 9300.0, 0.0, 0.0)
+                + "\n")
+        res, starter = _convert(_he_deck(card=card))
+        self.assertEqual(_bunreacted(starter, 2), 9300.0)
+        self.assertIn("the card's own stated K = 9300", " ".join(res.warnings))
+
+    def test_zero_k_on_an_ammg_member_is_derived_from_the_jwl(self):
+        """K_s(V=1) = A*R1*e^-R1 + B*R2*e^-R2 + omega*E0
+        = 371000*4.15*e^-4.15 + 3230*0.95*e^-0.95 + 0.3*4300
+        = 24271.684 + 1186.715 + 1290.0 = 26748.39867 (underwater_C's TNT)."""
+        import math
+        want = (371000 * 4.15 * math.exp(-4.15)
+                + 3230 * 0.95 * math.exp(-0.95) + 0.3 * 4300)
+        self.assertAlmostEqual(want, 26748.39867, places=4)
+        res, starter = _convert(_he_deck())
+        self.assertAlmostEqual(_bunreacted(starter, 2), want, places=3)
+        w = [x for x in res.warnings if "SUBSTITUTED" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("K_s(V=1) = A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0",
+                     "fill_buffer_51.F:496", "ERROR 99",
+                     "LS-DYNA carries NO unreacted stress at all",
+                     "jwl51.F:197", "rho0*D^2 = 100189",
+                     "--he-bunreacted"):
+            self.assertIn(fact, w[0])
+
+    def test_a_standalone_law5_keeps_zero(self):
+        """ERROR 99 lives in the Iform = 12 branch alone, so a deck with no
+        *ALE_MULTI-MATERIAL_GROUP starts fine with 0 and must not move
+        (underwater_A/B, exploding-sphere, 2Dlag)."""
+        res, starter = _convert(_he_deck(ammg=False))
+        self.assertEqual(_bunreacted(starter, 2), 0.0)
+        self.assertNotIn("SUBSTITUTED", " ".join(res.warnings))
+
+    def test_the_override_wins_everywhere(self):
+        _res, starter = _convert(_he_deck(), he_bunreacted=1234.0)
+        self.assertEqual(_bunreacted(starter, 2), 1234.0)
+        _res2, starter2 = _convert(_he_deck(ammg=False), he_bunreacted=1234.0)
+        self.assertEqual(_bunreacted(starter2, 2), 1234.0)
+
+    def test_g_and_sigy_are_named_as_dropped(self):
+        card = ("*MAT_HIGH_EXPLOSIVE_BURN\n"
+                + _row(2, "1.63E-09", 7840000, 26000, 2.0, 9300.0, 3500.0,
+                       200.0) + "\n")
+        res, _starter = _convert(_he_deck(card=card, ammg=False))
+        w = " ".join(res.warnings)
+        self.assertIn("G=3500 and SIGY=200", w)
+        self.assertIn("no deviator at all", w)
+
+    def test_the_law51_warning_no_longer_prescribes_what_k2rad_writes(self):
+        """It used to end 'set it' — a prescription the converter now carries
+        out itself, which would be a false cited fact (#129)."""
+        res, _starter = _convert(_he_deck())
+        joined = " ".join(res.warnings)
+        self.assertNotIn("(ERROR 99 otherwise) — set it", joined)
+        hit = [x for x in res.warnings
+               if "includes JWL explosive submaterial" in x]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("Bunreacted is written as 26748.4", hit[0])
+
+    def test_a_member_with_no_jwl_is_refused_by_name(self):
+        res, starter = _convert(_he_deck(eos=""))
+        self.assertEqual(_bunreacted(starter, 2), 0.0)
+        self.assertIn("The derivation reads the companion *EOS_JWL",
+                      " ".join(res.warnings))
+
+    def test_the_cli_exposes_the_override(self):
+        from k2rad import cli
+        args = cli.build_parser().parse_args(["deck.k"])
+        self.assertIsNone(args.he_bunreacted)
+        args = cli.build_parser().parse_args(["deck.k", "--he-bunreacted",
+                                              "9300"])
+        self.assertEqual(args.he_bunreacted, 9300.0)
+
+    def test_the_gui_mirrors_the_cli_flag(self):
+        """A CLI flag with no GUI mirror is a silently missing option, and the
+        GUI is what the user actually runs."""
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD" + chr(10) + "*END" + chr(10))
+
+        def _kw(**extra):
+            return k2rad_gui.build_convert_kwargs(
+                path, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="100", inter_gapmin_text="",
+                soften_stfac_text="", **extra)
+
+        self.assertNotIn("he_bunreacted", _kw())     # blank -> k2rad's rule
+        self.assertEqual(_kw(he_bunreacted=" 9300 ")["he_bunreacted"], 9300.0)
+        # An unparseable or non-positive value is an ERROR, never a silently
+        # ignored blank: fill_buffer_51.F:496 refuses <= 0 with ERROR 99.
+        for bad in ("abc", "0", "-1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _kw(he_bunreacted=bad)
+
 if __name__ == "__main__":
     unittest.main()

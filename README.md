@@ -611,7 +611,26 @@ lowest-id mesh node as the master (keeps that node id stable for scripts that
 address loads/readouts by it; OpenRadioss then relocates it to the CoM at
 runtime, so it appears to move in post-processing).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
-`*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
+`*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
+`Bunreacted` 1:1 — Vol II R17 p.2-188 gives the pre-detonation pressure as
+`p = K(1/V − 1)` and `jwl51.F:197` is `Psol = C01 + C11·µ` with
+`C11 = UPARAM(50) = PM(44) = Bunreacted`, term for term. `K = 0` is legal
+LS-DYNA (`K` is *"Bulk modulus (BETA = 2.0 only)"*, and a `BETA = 0` beta-burn
+card carries **no** unreacted stress: `p = F·p_eos` with `F = 0`) but
+`fill_buffer_51.F:496` refuses a `/MAT/LAW51` phase whose `Bunreacted ≤ 0`
+with `ERROR 99`. So for an `*ALE_MULTI-MATERIAL_GROUP` member — and only for
+one, a stand-alone `/MAT/LAW5` is startable with 0 — the value is **DERIVED**
+from the companion `*EOS_JWL`'s own coefficients as the isentrope's bulk
+modulus at the unreacted density, `K_s(1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0`
+(on `underwater_C`'s TNT: 24271.684 + 1186.715 + 1290.0 = **26748.4 MPa**,
+≈ its own stated `P_CJ` of 26000). The named alternative, `ρ₀D² = 100188.9`
+(what the starter already computes at `fill_buffer_51.F:488`), is 3.75× stiffer
+and would perturb the pre-burn state more; neither costs time step, since
+`PM(27)` already holds `D` and a smaller `C11` RAISES the unreacted-sound-speed
+limit. The substitution names its formula, its value and its consequence (the
+unburnt cells now carry `P = K·µ` where LS-DYNA carried 0); `--he-bunreacted`
+overrides it. `G` and `SIGY` have no LAW5 slot at all (LAW5 carries no
+deviator) and are named as dropped
 Foams & honeycomb: `*MAT_CRUSHABLE_FOAM` (63) → `/MAT/LAW50`,
 `*MAT_LOW_DENSITY_FOAM` (57) → `/MAT/LAW38`, `*MAT_FU_CHANG_FOAM` (83) →
 `/MAT/LAW70`, `*MAT_HONEYCOMB` (26) → `/MAT/LAW28`. The referenced stress-strain

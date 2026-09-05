@@ -98,6 +98,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
                          dt_del: str = "",
+                         he_bunreacted: str = "",
                          eroding_surf_ext: bool = False,
                          airbag_particle_uniform: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
@@ -201,6 +202,24 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                 "emit no /DT/.../DEL card).")
         kwargs["dt_del"] = v
 
+    # /MAT/LAW5 Bunreacted override. Blank = k2rad's own rule (the card's K,
+    # else the derived JWL isentrope slope for an AMMG member); an
+    # unparseable value must be an error, never a silently-ignored blank.
+    he_bunreacted = (he_bunreacted or "").strip()
+    if he_bunreacted:
+        try:
+            hb = float(he_bunreacted)
+        except ValueError:
+            raise ValueError(
+                "Unreacted-explosive bulk modulus must be a number in the "
+                f"deck's pressure unit, not {he_bunreacted!r}.")
+        if hb <= 0.0:
+            raise ValueError(
+                "Unreacted-explosive bulk modulus must be > 0 "
+                "(fill_buffer_51.F:496 refuses <= 0 with ERROR 99); leave it "
+                "blank to let k2rad derive it.")
+        kwargs["he_bunreacted"] = hb
+
     return kwargs
 
 
@@ -239,6 +258,7 @@ class ConverterGUI:
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
+        self.he_bunreacted = tk.StringVar(value="")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -385,6 +405,31 @@ class ConverterGUI:
                  "~0.4-0.5x reserves it for near-total element collapse."
         ).grid(row=12, column=0, columnspan=3, sticky="w", **pad)
 
+        # ── Unreacted-explosive bulk modulus (R14 triage batch) ─────────────
+        # An entry box, not a checkbox: the cell is a MODULUS, and there is no
+        # safe default to tick into existence — blank means "use the card's
+        # own K, or the derived JWL isentrope slope where a LAW51 phase makes
+        # a positive value mandatory", and the derivation names itself in the
+        # log every time it fires.
+        ttk.Label(
+            io, text="Unreacted-explosive bulk modulus Bunreacted "
+                     "(blank = derive):"
+        ).grid(row=13, column=0, sticky="w", **pad)
+        ttk.Entry(io, textvariable=self.he_bunreacted, width=14).grid(
+            row=13, column=1, sticky="w", **pad)
+        ttk.Label(
+            io, wraplength=760, foreground="#804000",
+            text="Overrides the /MAT/LAW5 Bunreacted cell, in the deck's own "
+                 "pressure unit. *MAT_HIGH_EXPLOSIVE_BURN's K is 'BETA = 2.0 "
+                 "only', so a beta-burn deck legally states 0 — but "
+                 "fill_buffer_51.F:496 refuses a /MAT/LAW51 phase whose "
+                 "Bunreacted is <= 0 (ERROR 99). Left blank, k2rad writes the "
+                 "card's K when it has one and otherwise derives "
+                 "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0 from the companion "
+                 "*EOS_JWL, for AMMG members only. Fill this in to state a "
+                 "measured value instead."
+        ).grid(row=14, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
             main, text="Force-control implicit stabilization (leave blank/off for a standard conversion)",
@@ -518,6 +563,7 @@ class ConverterGUI:
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
                 dt_del=self.dt_del.get(),
+                he_bunreacted=self.he_bunreacted.get(),
                 eroding_surf_ext=self.eroding_surf_ext.get(),
                 airbag_particle_uniform=self.airbag_particle_uniform.get(),
             )
@@ -621,6 +667,8 @@ class ConverterGUI:
             bits.append("eroding contacts on /SURF/PART/EXT (no interior re-exposure)")
         if kwargs.get("airbag_particle_uniform"):
             bits.append("*AIRBAG_PARTICLE as uniform-pressure /MONVOL/AIRBAG1")
+        if kwargs.get("he_bunreacted") is not None:
+            bits.append(f"Bunreacted={kwargs['he_bunreacted']:g}")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

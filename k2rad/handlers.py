@@ -4346,6 +4346,14 @@ def handle_mat_high_explosive_burn(block: Block, state: ConversionState) -> None
         d=to_float(f[2])   if len(f) > 2 else 0.0,
         pcj=to_float(f[3]) if len(f) > 3 else 0.0,
         beta=to_float(f[4]) if len(f) > 4 else 0.0,
+        # K is the UNREACTED bulk modulus and maps 1:1 onto /MAT/LAW5's
+        # Bunreacted cell (Vol II R17 p.2-188 `p = K(1/V - 1)` against
+        # jwl51.F:197 `Psol = C01 + C11*MU1`); G and SIGY have no LAW5 slot.
+        # All three used to be unread, which is why the cell went out as 0 and
+        # a LAW51 Iform=12 deck met ERROR 99 (fill_buffer_51.F:496).
+        k=to_float(f[5])    if len(f) > 5 else 0.0,
+        g=to_float(f[6])    if len(f) > 6 else 0.0,
+        sigy=to_float(f[7]) if len(f) > 7 else 0.0,
     )
 
 

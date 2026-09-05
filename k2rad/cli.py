@@ -264,6 +264,24 @@ def build_parser() -> argparse.ArgumentParser:
              "break /INISHE initial-stress transfer (npg 4 -> 1).",
     )
     parser.add_argument(
+        "--he-bunreacted",
+        type=float,
+        default=None,
+        metavar="K",
+        help="Override the /MAT/LAW5 `Bunreacted` cell (the UNREACTED "
+             "explosive's bulk modulus), in the deck's own pressure unit. "
+             "Without it k2rad writes the *MAT_HIGH_EXPLOSIVE_BURN card's own "
+             "K when it states one, and otherwise - only for a material an "
+             "*ALE_MULTI-MATERIAL_GROUP names, where fill_buffer_51.F:496 "
+             "refuses a value <= 0 with ERROR 99 - DERIVES it as the JWL "
+             "isentrope's bulk modulus at the unreacted density, "
+             "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0. That substitution is "
+             "named in the log with its formula, its value and its "
+             "consequence: the unburnt cells then carry P = K*mu "
+             "(jwl51.F:197) where an LS-DYNA BETA=0 card carried 0. Use this "
+             "to state a measured unreacted bulk modulus instead.",
+    )
+    parser.add_argument(
         "--dt-del",
         type=float,
         default=None,
@@ -383,6 +401,7 @@ def main(argv=None) -> int:
         ams=args.ams,
         shell_formulation=args.shell_formulation,
         dt_del=args.dt_del,
+        he_bunreacted=args.he_bunreacted,
         eroding_surf_ext=args.eroding_surf_ext,
         airbag_particle_uniform=args.airbag_particle_uniform,
         progress=None if args.quiet else _make_progress_printer(),

@@ -417,11 +417,29 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
         lines.append(HDR)
         expl = [m for m in submats if m in state.mat_high_explosive]
         if expl:
-            state.warn(
-                f"*ALE_MULTI-MATERIAL_GROUP: /MAT/LAW51/{law_id} includes JWL "
-                f"explosive submaterial(s) {expl}; a LAW5 used inside a multi-"
-                "material ALE needs a non-zero unreacted-explosive bulk modulus "
-                "(Bunreacted) on its /MAT/LAW5 (ERROR 99 otherwise) — set it.")
+            # This used to end "set it" — a prescription k2rad now carries out
+            # itself in writer/materials._resolve_he_bunreacted, so leaving it
+            # would tell the reader to supply a value the emitted deck already
+            # has (the #129 cited-fact rule). What is worth saying is which
+            # value went in and where it came from.
+            for m in expl:
+                heb = state.mat_high_explosive[m]
+                state.warn(
+                    f"*ALE_MULTI-MATERIAL_GROUP: /MAT/LAW51/{law_id} includes "
+                    f"JWL explosive submaterial {m}, whose /MAT/LAW5 "
+                    f"Bunreacted is written as {heb.bunreacted:g}"
+                    + (f" from {heb.bunreacted_note}."
+                       if heb.bunreacted_note else
+                       " — nothing on the card or its *EOS_JWL could supply "
+                       "one, so fill_buffer_51.F:496 will refuse the phase "
+                       "with ERROR 99 ('BULK MODULUS OF LAW5 (JWL) MUST BE "
+                       "PROVIDED FOR UNREACTED EXPLOSIVE'); state K on the "
+                       "*MAT_HIGH_EXPLOSIVE_BURN card or pass "
+                       "--he-bunreacted.")
+                    + " A LAW5 used inside a multi-material ALE needs a "
+                      "POSITIVE unreacted bulk modulus; a stand-alone "
+                      "/MAT/LAW5 does not (the check is in the Iform = 12 "
+                      "branch alone).")
         state.warn(
             f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing submaterials "
             f"{submats} (phase order). In OpenRadioss the ALE domain is ONE part "

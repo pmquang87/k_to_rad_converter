@@ -229,6 +229,44 @@ Prior history (before this changelog was introduced) is summarized in the
     name instead of answering *"look above"* on exactly the decks whose culprit
     is known.
 
+  - **`*MAT_HIGH_EXPLOSIVE_BURN`'s `K`/`G`/`SIGY` are read, and the
+    `/MAT/LAW5` `Bunreacted` cell is filled — derived where the deck legally
+    states 0 (4 underwater decks, `ERROR 99`).** The handler never read those
+    three cells, so `Bunreacted` went out as a literal 0 and
+    `fill_buffer_51.F:496-499` refused every `Iform = 12` deck carrying the
+    explosive: *"BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR UNREACTED
+    EXPLOSIVE"*. `K` maps 1:1 — Vol II R17 p.2-188 gives the pre-detonation
+    pressure as `p^{n+1} = K(1/V^{n+1} − 1)` and `jwl51.F:197` is
+    `Psol = C01 + C11·MU1` with `C11 = UPARAM(50) = PM(44) = Bunreacted`
+    (`hm_read_mat05.F:160/234`), term for term, so a stated `K` is copied
+    without a factor. The four `underwater_*` decks state `K = 0`, and that is
+    **correct LS-DYNA input, not a deck defect**: `K` is *"Bulk modulus
+    (BETA = 2.0 only)"* and with `BETA = 0` the unburnt explosive obeys
+    `p = F·p_eos` with `F = 0`, i.e. LS-DYNA carries no unreacted stress at
+    all. Radioss has no such branch, so the value is **DERIVED and named**: the
+    JWL isentrope's bulk modulus at the unreacted density,
+    `K_s(V=1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0`, every term from a cell the
+    `*EOS_JWL` states. On `underwater_C`'s TNT that is
+    `24271.684 + 1186.715 + 1290.0 = 26748.4 MPa`, close to the deck's own
+    `P_CJ` of 26000. The alternative from stated cells is `ρ₀D² = 100188.9` —
+    which the starter itself already computes at `fill_buffer_51.F:488` as
+    `UPARAM(275)` — and it is 3.75× stiffer, so the isentrope slope was chosen
+    because it perturbs the pre-burn state (which LS-DYNA leaves at zero) less;
+    both are printed in the warning. Neither costs time step: `PM(27)` already
+    holds `D` (`:492`) and a SMALLER `C11` raises, never lowers, the
+    unreacted-sound-speed limit (`:214`). **Scope**: the substitution fires only
+    when the source `K` is 0 **and** the material is an
+    `*ALE_MULTI-MATERIAL_GROUP` member, because `ERROR 99` lives in the
+    `Iform = 12` branch alone — a stand-alone `/MAT/LAW5` (`underwater_A`/`_B`,
+    `exploding-sphere`, `2Dlag`) is perfectly startable with 0 there and does
+    not move. `--he-bunreacted <value>` (and the GUI's mirror entry) overrides
+    it everywhere; a blank field is k2rad's own rule, and an unparseable or
+    non-positive value is an error rather than a silently ignored blank.
+    `G` and `SIGY` are named as dropped — LAW5 has no deviator at all. The
+    `*ALE_MULTI-MATERIAL_GROUP` warning used to end *"(ERROR 99 otherwise) —
+    set it"*; it now states which value went in and where it came from, because
+    prescribing what the converter already writes is a false cited fact (#129).
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts
