@@ -281,23 +281,37 @@ Prior history (before this changelog was introduced) is summarized in the
     `cylinder_impact_A/B`, and the latent `ale_wavehitcol`). The consequence is
     named: the vacuum's tiny `RHO` (1e-14 … 1e-9 on the corpus) carried a small
     mass in LS-DYNA that the Radioss model does not have.
-    **(b) a `*MAT_PLASTIC_KINEMATIC` member is RESTATED as `/MAT/LAW2`** —
-    `a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1`, the same
-    `_plas_kin_law2_expressible` test the SPH path already uses, which
-    `cylinder_impact`'s material (`E 200000, ν 0.3, SIGY 200, ETAN 0, BETA 0`)
-    passes losslessly because `ETAN = 0` leaves no hardening for `BETA` to
-    split. The id discipline is the SPH one verbatim: under its OWN id when
-    every `*PART` on the material is an AMMG member, otherwise a minted clone
-    so the Lagrangian parts keep `/MAT/LAW44/<mid>`. The restatement is tested
-    BEFORE the allowed-law screen on purpose — `_target_mat_law` already
-    answers 2 for an AMMG-only material, so screening first would have changed
-    the emitted law from 44 to 2 with nothing said.
-    **(c) anything else off the list is dropped BY NAME**, with the phase, its
-    law and the reason; `*MAT_ELASTIC` (LAW1) additionally names its manual
-    route (`/MAT/LAW2` with an unreachable yield). It is not an AMMG member on
-    any corpus deck — `stagnation`'s group lists parts 1 and 2, and its
-    `*MAT_ELASTIC` is the Lagrangian shell part 3 coupled by
-    `*CONSTRAINED_LAGRANGE_IN_SOLID`.
+    **(b) a phase with NO `/EOS` is dropped, and that MEASUREMENT corrects the
+    source's own comment.** `fill_buffer_51.F:213-219`'s THEN branch is empty
+    and its ELSE raises *"SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW
+    51"* on exactly the `EOS_TYPE` values the comment beside it calls expected
+    — `EOS_TYPE = 0` (no equation of state at all) included — and `:281` states
+    it without ambiguity: `IF(EOS_TYPE == 0 .AND. MLN /= 5) -> 'MISSING
+    SUBMATERIAL EOS'`. MEASURED both ways: on `cylinder_impact_A` a
+    `/MAT/LAW51` whose only phase was a `/MAT/LAW2` with no `/EOS` answered
+    BOTH messages, while `underwater_C` — a `/MAT/LAW5` beside a
+    `/MAT/HYD_VISC` + `/EOS/GRUNEISEN` — started at 0 ERROR / 0 WARNING. This
+    **overturns the plan** this batch started from, which was to restate a
+    `*MAT_PLASTIC_KINEMATIC` member as `/MAT/LAW2` (the law LAW51 does accept):
+    the restatement clears `:210`'s law test and then dies on `:281`, because
+    a `*MAT_PLASTIC_KINEMATIC` carries no equation of state in this converter
+    or in the deck. So the phase is dropped by name instead, the material keeps
+    the `/MAT/LAW44` its Lagrangian side needs, and the restatement machinery
+    was removed rather than shipped as a capability that cannot produce a legal
+    card. `cylinder_impact_A` starts at **0 ERROR / 0 WARNING** with no
+    `/MAT/LAW51` at all, which is the honest outcome: an ILLEGAL orphan card is
+    strictly worse than none, and nothing referenced it anyway. The screen is
+    on the EMITTED registry, never on `state.eos_cards` membership — a bare
+    `*EOS_*` whose id matches another material is not written at all, so the
+    parse registry would claim an equation of state the deck does not
+    contain (#130).
+    **(c) anything else off `fill_buffer_51.F:210`'s law list is dropped BY
+    NAME**, with the phase, its law and the reason; `*MAT_ELASTIC` (LAW1)
+    additionally names its manual route (`/MAT/LAW2` with an unreachable yield
+    AND an `/EOS`). That last screen is a GUARD and is unreachable today —
+    every material this converter gives an `/EOS` to lands on law 3, 4, 5 or 6,
+    all four on the list — which the code and its test both say out loud
+    rather than implying coverage it does not have.
     **And the honest sentence the batch would be dishonest without**: the
     emitted `/MAT/LAW51` is referenced by **no `/PART`**, and no `/INIVOL` is
     written. k2rad keeps the LS-DYNA per-fluid layout — each fluid on its own

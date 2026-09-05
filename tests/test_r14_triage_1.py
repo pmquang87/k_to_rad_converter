@@ -1068,31 +1068,31 @@ _MAT003 = "*MAT_PLASTIC_KINEMATIC\n" + _row(2, "8E-09", 200000, 0.3, 200,
           + _row(0.0, 0.0, 0.0, 0.0) + "\n"
 
 
-def _ammg_deck(*, vacuum: bool = True, shared: bool = False,
-               extra_mat: str = "") -> str:
-    """Part 1 = the phase-1 material, part 2 = the *MAT_003 ALE phase, and
-    (when *shared*) part 3 = a Lagrangian part on the SAME *MAT_003."""
-    mats = ("*MAT_VACUUM\n" + _row(1, "1E-12") + "\n" if vacuum
-            else "*MAT_NULL\n" + _row(1, "1.0E-09") + "\n"
-                 "*EOS_GRUNEISEN\n"
-                 + _row(1, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + "\n")
-    third = ("*PART\nlag\n" + _row(3, 3, 2) + "\n"
-             "*SECTION_SHELL\n" + _row(3, 2) + "\n" + _row(1.0) + "\n"
-             "*ELEMENT_SHELL\n"
-             "       9       3       1       2       3       4\n"
-             ) if shared else ""
-    return ("*KEYWORD\n"
-            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+def _ammg_deck(*, vacuum: bool = True, fluid: bool = False) -> str:
+    """Part 1 = a *MAT_VACUUM phase, part 2 = the *MAT_003 ALE phase.
+
+    With ``fluid=True`` part 2's material becomes a *MAT_NULL + *EOS_GRUNEISEN
+    pair - the only shape that is a LEGAL /MAT/LAW51 phase, because
+    fill_buffer_51.F:281 refuses any non-explosive submaterial whose EOS_TYPE
+    is 0. A probe has to reach that branch to test anything past it (#130).
+    """
+    mats = ("*MAT_VACUUM" + chr(10) + _row(1, "1E-12") + chr(10) if vacuum
+            else "*MAT_NULL" + chr(10) + _row(1, "1.0E-09") + chr(10))
+    phase2 = (("*MAT_NULL" + chr(10) + _row(2, "1.0E-09") + chr(10)
+               + "*EOS_GRUNEISEN" + chr(10)
+               + _row(2, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + chr(10))
+              if fluid else _MAT003)
+    return ("*KEYWORD" + chr(10)
+            + "*CONTROL_TERMINATION" + chr(10) + _row(1.0) + chr(10)
             + _BRICK + _BRICK2
-            + "*PART\np1\n" + _row(1, 1, 1) + "\n"
-            + "*PART\nale\n" + _row(2, 2, 2) + "\n"
-            + third
-            + "*SECTION_SOLID\n" + _row(1, 11) + "\n"
-            + "*SECTION_SOLID\n" + _row(2, 11) + "\n"
-            + mats + _MAT003 + extra_mat
-            + "*ALE_MULTI-MATERIAL_GROUP\n" + _row(1, 1) + "\n"
-            + _row(2, 1) + "\n"
-            + "*END\n")
+            + "*PART" + chr(10) + "p1" + chr(10) + _row(1, 1, 1) + chr(10)
+            + "*PART" + chr(10) + "ale" + chr(10) + _row(2, 2, 2) + chr(10)
+            + "*SECTION_SOLID" + chr(10) + _row(1, 11) + chr(10)
+            + "*SECTION_SOLID" + chr(10) + _row(2, 11) + chr(10)
+            + mats + phase2
+            + "*ALE_MULTI-MATERIAL_GROUP" + chr(10) + _row(1, 1) + chr(10)
+            + _row(2, 1) + chr(10)
+            + "*END" + chr(10))
 
 
 class AleSubmaterialTests(unittest.TestCase):
@@ -1132,71 +1132,60 @@ class AleSubmaterialTests(unittest.TestCase):
         """hm_read_mat51.F:608-627 reads exactly MIP rows and a tMID <= 0
         inside them is fatal, so a vacuum cannot be declared as MID 0; the
         undeclared balance of the volume fractions IS the void."""
-        res, starter = _convert(_ammg_deck())
-        rows = _data_rows(starter, _headers(starter, "/MAT/LAW51/")[0])
-        # rows: title, card1(blank), Iform, NU/Nu_Vol(blank), then one row per
-        # phase.
-        phases = [r for r in rows if r.strip() and r.strip() != "12"]
-        self.assertEqual(len(phases), 2)            # the title + ONE phase
+        res, starter = _convert(_ammg_deck(fluid=True))
+        law51 = _headers(starter, "/MAT/LAW51/")
+        self.assertEqual(len(law51), 1)
+        rows = [r for r in _data_rows(starter, law51[0])
+                if r.strip() and r.strip() != "12"]
+        self.assertEqual(len(rows), 2)          # the title + ONE phase row
         w = [x for x in res.warnings if "phase(s) DROPPED" in x]
         self.assertEqual(len(w), 1)
         self.assertIn("MID 1 (*MAT_VACUUM -> /MAT/VOID)", w[0])
         self.assertIn("MIP falls to 1", w[0])
 
-    def test_an_ammg_only_mat003_is_restated_under_its_own_id(self):
-        _res, starter = _convert(_ammg_deck())
-        self.assertIn("/MAT/LAW2/2", starter)
-        self.assertEqual(_headers(starter, "/MAT/LAW44/"), [])
-
-    def test_the_restatement_is_never_silent(self):
-        """_target_mat_law already answers 2 for an AMMG-only material, so an
-        'is this law allowed?' test alone would change the emitted law from 44
-        to 2 with nothing said."""
-        res, _starter = _convert(_ammg_deck())
-        w = [x for x in res.warnings if "RESTATED as /MAT/LAW2" in x]
-        self.assertEqual(len(w), 1)
-        self.assertIn("fill_buffer_51.F:210", w[0])
-        self.assertIn("b = E*ETAN/(E-ETAN) = 0", w[0])
-
-    def test_a_shared_mat003_is_cloned_instead(self):
-        """A material shared with a Lagrangian part keeps /MAT/LAW44 and the
-        phase list points at a minted /MAT/LAW2 — the SPH clone discipline."""
-        res, starter = _convert(_ammg_deck(shared=True))
-        self.assertIn("/MAT/LAW44/2", starter)
-        clones = [h for h in _headers(starter, "/MAT/LAW2/")]
-        self.assertEqual(len(clones), 1)
-        clone_id = int(clones[0].rsplit("/", 1)[1])
-        self.assertGreaterEqual(clone_id, 90001)
-        w = [x for x in res.warnings if "is CLONED" in x]
-        self.assertEqual(len(w), 1)
-        # ...and the phase list names the CLONE, not the original.
-        rows = _data_rows(starter, _headers(starter, "/MAT/LAW51/")[0])
-        listed = [int(r[:10]) for r in rows
-                  if r[:10].strip().isdigit() and r.strip() != "12"]
-        self.assertIn(clone_id, listed)
-        self.assertNotIn(2, listed)
-
-    def test_an_unrestatable_law_is_dropped_by_name(self):
-        """LAW1 is not on fill_buffer_51.F:210's list and cannot be restated
-        without changing the material, so the phase goes and says so."""
-        deck = _ammg_deck(vacuum=False).replace(
-            "*MAT_NULL\n" + _row(1, "1.0E-09") + "\n"
-            "*EOS_GRUNEISEN\n"
-            + _row(1, 1480000.0, 1.92, 0.0, 0.0, 0.35, 0.0, 0.0) + "\n",
-            "*MAT_ELASTIC\n" + _row(1, "1.0E-09", 210000.0, 0.3) + "\n")
-        res, _starter = _convert(deck)
+    def test_a_phase_without_an_eos_is_dropped_by_name(self):
+        """MEASURED on cylinder_impact_A, and it CORRECTS the source's own
+        comment: fill_buffer_51.F:213-219's THEN branch is empty and its ELSE
+        raises 'SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW 51', while
+        :281 adds 'MISSING SUBMATERIAL EOS' for EOS_TYPE 0 on any MLN /= 5.
+        A *MAT_PLASTIC_KINEMATIC ALE phase carries no equation of state, so
+        restating LAW44 as LAW2 would clear the law test and then die on the
+        EOS one - the phase is dropped instead."""
+        res, starter = _convert(_ammg_deck())
+        self.assertEqual(_headers(starter, "/MAT/LAW51/"), [])
+        self.assertIn("/MAT/LAW44/2", starter)      # the material is untouched
         w = [x for x in res.warnings if "phase(s) DROPPED" in x]
         self.assertEqual(len(w), 1)
-        self.assertIn("MID 1 (/MAT/LAW1)", w[0])
-        self.assertIn("unreachable yield", w[0])
+        self.assertIn("it carries no /EOS", w[0])
+        self.assertIn("MISSING SUBMATERIAL EOS", w[0])
+        self.assertIn("no submaterial survives", " ".join(res.warnings))
+
+    def test_a_mat003_ale_member_is_not_silently_restated(self):
+        """_target_mat_law must keep answering 44: a restatement that can
+        never produce a legal phase would change the emitted law for nothing
+        (and LAW44 is what the material's Lagrangian side needs)."""
+        from k2rad.writer.mesh import _target_mat_law
+        state = _dispatch(_ammg_deck())
+        self.assertEqual(_target_mat_law(state, 2), 44)
+
+    def test_the_allowed_submaterial_laws_are_the_starter_s_own_list(self):
+        """fill_buffer_51.F:210 gates on MLN == 2/3/4/5/6/10/102/133 and :237
+        prints exactly that list. The law screen built on it is a GUARD and is
+        unreachable today - every material k2rad gives an /EOS to lands on law
+        3, 4, 5 or 6, all four on the list, so nothing survives the EOS screen
+        and then fails the law one. Pinned so the constant cannot drift from
+        the message the starter prints."""
+        from k2rad.writer.materials import _LAW51_ALLOWED_SUBMAT_LAWS
+        self.assertEqual(sorted(_LAW51_ALLOWED_SUBMAT_LAWS),
+                         [2, 3, 4, 5, 6, 10, 102, 133])
 
     def test_the_law51_card_states_that_nothing_references_it(self):
         """The emitted /MAT/LAW51 is an orphan: the per-fluid ALE parts are
         kept, so the phases cannot mix and the run does not reproduce the
         LS-DYNA model. That has to be unmissable (#122 at deck scale)."""
-        res, starter = _convert(_ammg_deck())
+        res, starter = _convert(_ammg_deck(fluid=True))
         law_id = int(_headers(starter, "/MAT/LAW51/")[0].rsplit("/", 1)[1])
-        self.assertNotIn(f"         {law_id}", "\n".join(
+        self.assertNotIn(str(law_id), chr(10).join(
             _data_rows(starter, "/PART/1") or []))
         w = [x for x in res.warnings if "listing submaterials" in x]
         self.assertEqual(len(w), 1)

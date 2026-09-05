@@ -7470,13 +7470,10 @@ class ConversionState:
     # state.ale_mmgs -> the ordered submaterial ids), decided by
     # writer/materials.py::_resolve_ale_submaterials: vacuum and every other
     # material fill_buffer_51.F:210 does not accept is DROPPED, and a
-    # *MAT_PLASTIC_KINEMATIC member is restated as /MAT/LAW2 (under its own id
-    # when every part on it is an AMMG member, else as a clone).
+    # material without an /EOS is DROPPED, because fill_buffer_51.F:281
+    # refuses any non-explosive phase whose EOS_TYPE is 0 with MISSING
+    # SUBMATERIAL EOS.
     ale_mmg_submats: Dict[int, List[int]] = field(default_factory=dict)
-    # mid -> the minted /MAT/LAW2 id for a *MAT_PLASTIC_KINEMATIC shared
-    # between an AMMG member and a Lagrangian part. The exact twin of
-    # sph_mat_clones, and for the same reason: one /MAT id cannot be two laws.
-    ammg_mat_clones: Dict[int, int] = field(default_factory=dict)
 
     # ── Rare materials + thermal subsystem ─────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71

@@ -960,14 +960,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # nothing and draws no id.
     _resolve_he_bunreacted(state)
 
-    # R14 triage batch: the /MAT/LAW51 phase list. AFTER _warn_refused_materials
-    # below would be wrong - it reads state.refused_materials, which the
-    # HANDLERS fill at parse time, so both orders see the same set - but it
-    # MUST run before _make_materials, whose _emit_mat_law44 asks
-    # _plas_kin_law2_eligible (now also true for an AMMG-only material) and
-    # whose _emit_ammg_mat_clones writes the clones this decides. It draws a
-    # next_mat_id() only when a clone is really needed, so a deck with no
-    # shared AMMG material keeps its id stream unchanged.
+    # R14 triage batch: the /MAT/LAW51 phase list. It reads the EMITTED law of
+    # every member (_target_mat_law) and whether that material carries an
+    # /EOS, so it must run after every _resolve_mat_* pass above and before
+    # _make_materials, whose _make_ale_multimaterial writes the list this
+    # decides. It synthesizes no card and draws no id.
     _resolve_ale_submaterials(state)
 
     # Materials REFUSED BY NAME (*MAT_102, *MAT_090, *MAT_031, *MAT_VACUUM,

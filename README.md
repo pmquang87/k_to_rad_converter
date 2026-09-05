@@ -2593,14 +2593,19 @@ at all and the same target a bare `*MAT_NULL` takes here, with `RHO` verbatim
 substitution) — because a `/PART` naming no `/MAT` is `ERROR 179`, which four
 corpus ALE decks used to get on top of their LAW51 error. What is lost is
 named: in LS-DYNA the vacuum is an AMMG PHASE the other materials advect into,
-here it is a separate single-material ALE region nothing flows into. A
-`*MAT_PLASTIC_KINEMATIC` member is **RESTATED as `/MAT/LAW2`** — LAW44 is not
-on the allowed list, and LAW2 describes the identical curve when the card
-carries no Cowper-Symonds term and no effective kinematic hardening
-(`a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1`) — under its own id when every
-`*PART` on it is an AMMG member, otherwise as a minted clone so the Lagrangian
-parts keep their LAW44 (the SPH clone discipline verbatim). Anything else off
-the list is dropped by name with the phase and the reason. **The emitted
+here it is a separate single-material ALE region nothing flows into. A phase with **no
+`/EOS` is dropped too**, and that is a MEASURED correction to the source's own
+comment: `fill_buffer_51.F:213-219`'s THEN branch is empty and its ELSE raises
+*"SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW 51"* on exactly the types
+the comment calls expected, `EOS_TYPE = 0` included, while `:281` says it
+plainly — `IF(EOS_TYPE == 0 .AND. MLN /= 5) -> "MISSING SUBMATERIAL EOS"`. On
+`cylinder_impact_A` a LAW51 whose only phase was a `/MAT/LAW2` with no `/EOS`
+answered BOTH messages; `underwater_C`, a `/MAT/LAW5` beside a `/MAT/HYD_VISC` +
+`/EOS/GRUNEISEN`, started at 0 ERROR. So a `*MAT_PLASTIC_KINEMATIC` ALE member
+is **not** restated as `/MAT/LAW2`: that would clear the law test and then die
+on the EOS one, so the phase is dropped by name and the material keeps the
+LAW44 its Lagrangian side needs. `*MAT_ELASTIC` and anything else off the list
+is dropped the same way, with the phase, its law and the reason. **The emitted
 `/MAT/LAW51` is referenced by no `/PART`**: k2rad keeps the LS-DYNA per-fluid
 layout (each fluid on its own part, `Iale = 1` on its `/PROP/SOLID`) instead of
 consolidating the ALE mesh, so the phases cannot mix and no `/INIVOL` is
