@@ -4224,6 +4224,9 @@ _RARE_MATERIAL_OFFSETS = {
     # bookkeeping — no ids on either.
     "MAT_CWM": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
     "MAT_270": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
+    # *MAT_VACUUM: MID on card 1, RHO beside it, nothing else.
+    "MAT_VACUUM": _mat(),
+    "MAT_140": _mat(),
     # The refused-by-name families get MID offset and nothing else: an
     # unmodelled card stack must not have its other cells rewritten by
     # position (the *AIRBAG warn-drop rule), but the MID is what the *PART

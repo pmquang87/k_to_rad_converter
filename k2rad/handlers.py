@@ -96,7 +96,7 @@ from .state import (
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
     MatShapeMemory, MatMuscle, MatSpringMuscle,
-    MatElasticPlasticThermal, MatCWM, MatElasticPlasticHydro,
+    MatElasticPlasticThermal, MatCWM, MatElasticPlasticHydro, MatVacuum,
     MatAddThermalExpansion, MatThermalIsotropic,
     MatThermalIsotropicTD, MatThermalOrthotropic,
     ControlThermalSolver, ThermalBoundary, LoadThermalElement,
@@ -10165,6 +10165,59 @@ def handle_mat_cwm(block: Block, state: ConversionState) -> None:
     state.mat_cwm[mid] = rec
 
 
+def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
+    """*MAT_VACUUM (*MAT_140) → /MAT/VOID (LAW0).
+
+    Card: MID RHO. Two separate questions this answers separately.
+
+    **The PART needs a material.** A vacuum *PART with no /MAT is starter
+    ERROR 179, which is what four corpus ALE decks used to get on top of their
+    LAW51 error. /MAT/VOID is a region that carries no stress at all — the same
+    target a bare *MAT_NULL already takes in this converter — so the part
+    resolves and contributes nothing, which is what a vacuum does.
+
+    **The LAW51 PHASE does NOT need one.** LAW0 is not on
+    ``fill_buffer_51.F:210``'s allowed list and cannot be declared as a phase
+    at all (``hm_read_mat51.F:608-627``: a ``tMID <= 0`` inside the MIP rows is
+    fatal, and there is no vacuum law to name instead). It does not need to be:
+    ``:639-646`` checks only that the volume fractions SUM ABOVE 1, so a sum
+    below one is legal and the UNDECLARED BALANCE is exactly how Radioss
+    represents void. ``_resolve_ale_submaterials`` drops the entry and reduces
+    MIP.
+
+    RHO is written verbatim, 0.0 included — ``hm_read_mat.F90:1575-1583``
+    exempts law 0 from ERROR 683.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_VACUUM: empty material card — skipped")
+        return
+    mid = to_int(f[0])
+    if mid <= 0:
+        state.warn(f"*MAT_VACUUM '{title}': MID parsed as {mid} — unreadable; "
+                   "material skipped.")
+        return
+    rho = to_float(f[1]) if len(f) > 1 else 0.0
+    state.mat_vacuum[mid] = MatVacuum(mid=mid, title=title, rho=rho)
+    state.warn(
+        f"*MAT_VACUUM {mid} -> /MAT/VOID/{mid} (LAW0, RHO_I = {rho:g}). "
+        "Radioss has no vacuum MATERIAL — the word appears nowhere in the 2022 "
+        "Reference or User Guide — but /MAT/VOID is a region that carries no "
+        "stress at all, which is what the LS-DYNA card means, and it is the "
+        "same target a bare *MAT_NULL takes here. It exists so the vacuum "
+        "*PART resolves (a /PART naming no /MAT is ERROR 179). It is NOT "
+        "written into the /MAT/LAW51 phase list: LAW0 is not on "
+        "fill_buffer_51.F:210's allowed list, and it does not need to be — "
+        "hm_read_mat51.F:639-646 checks only that the volume fractions SUM "
+        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST: "
+        "in LS-DYNA the vacuum is an AMMG PHASE that the other materials "
+        "advect into as they expand; here it is a separate single-material ALE "
+        "region on its own mesh, so nothing flows into it. See the "
+        "*ALE_MULTI-MATERIAL_GROUP warning for the whole-deck statement.")
+
+
 def handle_mat_elastic_plastic_hydro(block: Block,
                                      state: ConversionState) -> None:
     """*MAT_ELASTIC_PLASTIC_HYDRO[_SPALL] (*MAT_010) → /MAT/LAW3 + its same-id
@@ -10287,20 +10340,6 @@ _REFUSED_MATERIALS = {
         "not just the material, has no counterpart, and its engine "
         "eigensolver is a compiled-out stub on this build. Converting the "
         "material alone would leave a deck with nothing to solve"),
-    ("MAT_VACUUM", "MAT_140"): (
-        "the ALE VACUUM phase material (*MAT_140)",
-        "Radioss has no vacuum material at all — the string does not appear "
-        "in the 2022 Reference or User Guide — and a /MAT/LAW51 phase list "
-        "cannot carry one either: hm_read_mat51.F:608-627 reads exactly MIP "
-        "rows and a tMID <= 0 inside that range is a fatal INCORRECT MATERIAL "
-        "IDENTIFIER. Radioss represents void as the UNDECLARED BALANCE of the "
-        "phase volume fractions instead (:639-646 checks only SUM > 1, so a "
-        "sum below 1 is legal), so the vacuum entry is dropped from the "
-        "submaterial list and MIP is reduced — see the "
-        "*ALE_MULTI-MATERIAL_GROUP warning, which names the group and the "
-        "resulting MIP. Consequence: *MAT_VACUUM's tiny RHO (1e-14 … 1e-9 on "
-        "the corpus decks) carried a small but nonzero mass in LS-DYNA which "
-        "the Radioss model does not have"),
     ("MAT_GAS_MIXTURE", "MAT_148"): (
         "the multi-species ALE gas mixture (*MAT_148)",
         "its whole mechanism is *SECTION_POINT_SOURCE_MIXTURE + "
@@ -17927,6 +17966,11 @@ RARE_MATERIAL_KEYWORDS = {
     # never be diagnosed differently (the _MAT_THERMAL_ALIASES rule).
     **{kw: _material_refused(names[0], what, why)
        for names, (what, why) in _REFUSED_MATERIALS.items() for kw in names},
+    # *MAT_140 -> /MAT/VOID so the vacuum *PART resolves; the /MAT/LAW51
+    # phase list drops it (LAW0 is not on fill_buffer_51.F:210's list, and
+    # Radioss's void is the UNDECLARED BALANCE of the volume fractions).
+    "MAT_VACUUM":                      handle_mat_vacuum,
+    "MAT_140":                         handle_mat_vacuum,
     "MAT_ELASTIC_PLASTIC_HYDRO":       handle_mat_elastic_plastic_hydro,
     "MAT_ELASTIC_PLASTIC_HYDRO_SPALL": handle_mat_elastic_plastic_hydro,
     "MAT_010":                         handle_mat_elastic_plastic_hydro,

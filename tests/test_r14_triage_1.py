@@ -1098,12 +1098,35 @@ def _ammg_deck(*, vacuum: bool = True, shared: bool = False,
 class AleSubmaterialTests(unittest.TestCase):
     """A7 — the /MAT/LAW51 phase list: vacuum, restatement, the clone."""
 
-    def test_vacuum_and_gas_mixture_are_refused_by_name(self):
+    def test_vacuum_and_gas_mixture_are_registered(self):
         from k2rad.assembly import _OFFSET_SPECS
         from k2rad.handlers import HANDLERS
         for kw in ("MAT_VACUUM", "MAT_140", "MAT_GAS_MIXTURE", "MAT_148"):
             self.assertIn(kw, HANDLERS)
             self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
+
+    def test_the_vacuum_part_keeps_a_material(self):
+        """*MAT_VACUUM -> /MAT/VOID so the vacuum *PART resolves (a /PART
+        naming no /MAT is ERROR 179, which four corpus ALE decks used to get
+        on top of their LAW51 error). RHO is written verbatim, 0.0 included:
+        hm_read_mat.F90:1575-1583 exempts law 0 from ERROR 683."""
+        res, starter = _convert(_ammg_deck())
+        self.assertIn("/MAT/VOID/1", starter)
+        rows = _data_rows(starter, "/MAT/VOID/1")
+        self.assertEqual([float(c) for c in _fields(rows[1])],
+                         [1e-12, 0.0, 0.0])
+        self.assertNotIn("reference a material id that NO /MAT",
+                         " ".join(res.warnings))
+        w = [x for x in res.warnings if "-> /MAT/VOID/1" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("undeclared balance IS Radioss's void", w[0])
+        self.assertIn("nothing flows into it", w[0])
+
+    def test_a_zero_density_vacuum_needs_no_substitution(self):
+        deck = _ammg_deck().replace(_row(1, "1E-12"), _row(1, 0.0))
+        _res, starter = _convert(deck)
+        rows = _data_rows(starter, "/MAT/VOID/1")
+        self.assertEqual(float(_fields(rows[1])[0]), 0.0)
 
     def test_the_vacuum_phase_is_dropped_and_mip_falls(self):
         """hm_read_mat51.F:608-627 reads exactly MIP rows and a tMID <= 0
@@ -1117,7 +1140,7 @@ class AleSubmaterialTests(unittest.TestCase):
         self.assertEqual(len(phases), 2)            # the title + ONE phase
         w = [x for x in res.warnings if "phase(s) DROPPED" in x]
         self.assertEqual(len(w), 1)
-        self.assertIn("MID 1 (*MAT_VACUUM)", w[0])
+        self.assertIn("MID 1 (*MAT_VACUUM -> /MAT/VOID)", w[0])
         self.assertIn("MIP falls to 1", w[0])
 
     def test_an_ammg_only_mat003_is_restated_under_its_own_id(self):

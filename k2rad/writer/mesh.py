@@ -4237,6 +4237,12 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # instead of reporting "no /MAT at all".
     if mid in state.mat_law3:
         return 3                                   # *MAT_010 -> HYDPLA
+    # *MAT_140 -> /MAT/VOID, the same law a bare *MAT_NULL takes. The entry
+    # matters to _resolve_ale_submaterials, which drops law 0 from the
+    # /MAT/LAW51 phase list (fill_buffer_51.F:210 does not accept it, and
+    # Radioss's void is the undeclared balance of the volume fractions).
+    if mid in state.mat_vacuum:
+        return 0                                   # *MAT_140 -> /MAT/VOID
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

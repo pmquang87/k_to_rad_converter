@@ -2586,8 +2586,14 @@ FROM LAWS 2,3,4,5,6,10 102 OR 133"*). A `*MAT_VACUUM` phase is **dropped, not
 carried as MID 0** — `hm_read_mat51.F:608-627` reads exactly `MIP` rows and a
 `tMID ≤ 0` inside them is a fatal *INCORRECT MATERIAL IDENTIFIER*, while
 `:639-646` checks only that the fractions SUM ABOVE 1, so the undeclared
-balance is how Radioss represents void (and the vacuum's tiny `RHO` carried a
-small mass LS-DYNA had and the converted model does not). A
+balance is how Radioss represents void. The vacuum `*PART` still gets a
+material — `*MAT_VACUUM` → `/MAT/VOID` (LAW0), a region that carries no stress
+at all and the same target a bare `*MAT_NULL` takes here, with `RHO` verbatim
+(law 0 is exempt from `ERROR 683`, so a stated `RHO = 0` needs no
+substitution) — because a `/PART` naming no `/MAT` is `ERROR 179`, which four
+corpus ALE decks used to get on top of their LAW51 error. What is lost is
+named: in LS-DYNA the vacuum is an AMMG PHASE the other materials advect into,
+here it is a separate single-material ALE region nothing flows into. A
 `*MAT_PLASTIC_KINEMATIC` member is **RESTATED as `/MAT/LAW2`** — LAW44 is not
 on the allowed list, and LAW2 describes the identical curve when the card
 carries no Cowper-Symonds term and no effective kinematic hardening
@@ -4719,8 +4725,12 @@ and no frequency-domain solver, so the whole analysis has no counterpart),
 `*MAT_FRAZER_NASH_RUBBER_MODEL` (`*MAT_031`: the corpus card states inclusion
 FLAGS and asks LS-DYNA for its own least-squares fit, so there is no value to
 map — and Frazer-Nash's Green–St-Venant invariants are not the reduced
-Cauchy-Green ones `/MAT/LAW100 PPOLYNOMIAL` uses), `*MAT_VACUUM` and
-`*MAT_GAS_MIXTURE`. Each refusal names the `/PART`s and the element counts it
+Cauchy-Green ones `/MAT/LAW100 PPOLYNOMIAL` uses) and `*MAT_GAS_MIXTURE`
+(`*MAT_148`: its whole mechanism is `*SECTION_POINT_SOURCE_MIXTURE` +
+`*INITIAL_GAS_MIXTURE`, an airbag-inflator point-source injection into an ALE
+mesh, of which OpenRadioss has none — a single perfect gas as a LAW51 phase
+would be `/MAT/LAW6` + `/EOS/POLYNOMIAL` with `C4 = C5 = γ−1`, but converting
+the material alone would leave the deck with no injection source). Each refusal names the `/PART`s and the element counts it
 costs, because the starter's own `ERROR 179` names one part at a time; the
 parts are deliberately **not** dropped (measured on one-brick starter probes:
 dropping the `/PART` while keeping its elements is `ERROR 402`, strictly worse,

@@ -6164,6 +6164,32 @@ class MatCWM:
 
 
 @dataclass
+class MatVacuum:
+    """``*MAT_VACUUM`` (``*MAT_140``) → ``/MAT/VOID`` (LAW0).
+
+    Card: ``MID RHO``. LS-DYNA's own description is *"vacuum material for ALE"*
+    — a region that carries no stress at all, which is exactly what
+    ``/MAT/VOID`` is (``hm_read_mat00.F`` declares ``SOLID_ISOTROPIC`` and
+    friends, and ``mmain.F90`` has no ``mtn == 0`` arm, so nothing is
+    computed). It is the same target a bare ``*MAT_NULL`` already takes here.
+
+    It is deliberately NOT a ``/MAT/LAW51`` phase: LAW0 is not on
+    ``fill_buffer_51.F:210``'s allowed list, and it does not need to be —
+    ``hm_read_mat51.F:639-646`` checks only that the phase volume fractions
+    SUM ABOVE 1, so a sum below one is legal and the UNDECLARED BALANCE is how
+    Radioss represents void. The card exists so the vacuum ``*PART`` has a
+    material (``ERROR 179`` otherwise); the phase list drops it.
+
+    ``RHO`` is written verbatim, ``0.0`` included: ``hm_read_mat.F90:1575-1583``
+    exempts law 0 from ``ERROR 683``, so ``ale_wavehitcol.k``'s ``RHO = 0``
+    needs no substitution.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+
+
+@dataclass
 class MatElasticPlasticHydro:
     """``*MAT_ELASTIC_PLASTIC_HYDRO`` (``*MAT_010``) → ``/MAT/LAW3`` + its
     same-id ``/EOS``.
@@ -7427,6 +7453,11 @@ class ConversionState:
     mat_ep_hydro: Dict[int, MatElasticPlasticHydro] = \
         field(default_factory=dict)
     mat_law3: Dict[int, MatLaw3] = field(default_factory=dict)
+    #   *MAT_140 / *MAT_VACUUM -> /MAT/VOID (LAW0), so the vacuum *PART has a
+    # material; the /MAT/LAW51 phase list drops it (LAW0 is not on
+    # fill_buffer_51.F:210's list, and Radioss's void IS the undeclared
+    # balance of the volume fractions).
+    mat_vacuum: Dict[int, MatVacuum] = field(default_factory=dict)
     # mid -> (the spelling the deck wrote, what the law is, why nothing in
     # Radioss can carry it) for a material REFUSED BY NAME. Filled by
     # handlers._material_refused; read by writer/materials.py::
@@ -8433,7 +8464,9 @@ class ConversionState:
                   self.mat_law106,
                   # *MAT_010 → /MAT/LAW3 (+ the same-id /EOS), MID verbatim.
                   # Same source/resolved rule as LAW106 above.
-                  self.mat_law3):
+                  self.mat_law3,
+                  # *MAT_140 → /MAT/VOID, MID verbatim.
+                  self.mat_vacuum):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

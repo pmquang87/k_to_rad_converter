@@ -60,6 +60,7 @@ from ..state import (
     MatElasticPlasticHydro,
     MatLaw3,
     MatLaw106,
+    MatVacuum,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
                      _ref_flag_materials, _spotweld_beam_pids)
@@ -152,6 +153,7 @@ __all__ = [
     "_resolve_mat_law3",
     "_emit_mat_law3",
     "_emit_fail_spalling",
+    "_emit_mat_vacuum",
     "_warn_refused_materials",
     "_resolve_he_bunreacted",
     "_ammg_member_mids",
@@ -192,6 +194,12 @@ def _make_materials(state: ConversionState) -> List[str]:
     for mat in state.mat_null.values():
         if mat.mid in void_mids:
             lines += _emit_mat_void(mat)
+    # *MAT_VACUUM lands on the SAME /MAT/VOID: a region that carries no stress
+    # at all. It exists so the vacuum *PART resolves (ERROR 179 otherwise);
+    # _resolve_ale_submaterials keeps it OUT of the /MAT/LAW51 phase list,
+    # where Radioss's void is the undeclared balance of the volume fractions.
+    for vac in state.mat_vacuum.values():
+        lines += _emit_mat_vacuum(vac)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
     for mat in state.mat_samp.values():
@@ -838,6 +846,23 @@ def _emit_mat_void(mat: MatNull) -> List[str]:
         mat.title or f"MAT_{mat.mid}",
         "#              RHO_I                   E                  nu",
         f"{_f(mat.rho)}{_f(mat.E)}{_f(mat.nu)}",
+        HDR,
+    ]
+
+
+def _emit_mat_vacuum(mat: MatVacuum) -> List[str]:
+    """``*MAT_VACUUM`` → ``/MAT/VOID`` — the same card a bare ``*MAT_NULL``
+    takes, under the vacuum material's own id.
+
+    ``RHO_I`` is written verbatim, ``0.0`` included: ``hm_read_mat.F90:
+    1575-1583`` exempts law 0 from ``ERROR 683``, so a corpus deck stating
+    ``RHO = 0`` (``ale_wavehitcol.k``) needs no density substitution.
+    """
+    return [
+        f"/MAT/VOID/{mat.mid}",
+        mat.title or f"VACUUM_{mat.mid}",
+        "#              RHO_I                   E                  nu",
+        f"{_f(mat.rho)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
 
@@ -10082,6 +10107,17 @@ def _resolve_ale_submaterials(state: ConversionState) -> None:
                     dropped.append(
                         f"MID {mid} (*{kw}) — refused by name; see its own "
                         "warning")
+                    continue
+                if mid in state.mat_vacuum:
+                    dropped.append(
+                        f"MID {mid} (*MAT_VACUUM -> /MAT/VOID) — Radioss "
+                        "represents void as the UNDECLARED BALANCE of the "
+                        "phase volume fractions, not as a phase: LAW0 is not "
+                        "on fill_buffer_51.F:210's list and a tMID <= 0 inside "
+                        "the MIP rows is fatal (hm_read_mat51.F:608-627), "
+                        "while :639-646 checks only that the fractions SUM "
+                        "ABOVE 1. The vacuum *PART keeps its /MAT/VOID so it "
+                        "resolves")
                     continue
                 law = _target_mat_law(state, mid)
                 if law is None:

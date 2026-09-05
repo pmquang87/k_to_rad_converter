@@ -331,9 +331,15 @@ class TestTwoDLagCarrier(unittest.TestCase):
         self.res = res
 
     def test_the_resolved_ids_are_one_MAT_and_one_EOS_each(self):
+        # /MAT/VOID/5 is the deck's own *MAT_VACUUM 5, newly converted by the
+        # R14 triage batch (LAW0 is a region that carries no stress, and it is
+        # exempt from ERROR 683 so its RHO needs no substitution). No *PART
+        # names it on this deck — the same shape a *MAT_NULL with no part has
+        # always taken here — and it collides with nothing, which is what this
+        # class is about.
         self.assertEqual(_headers(self.starter, "/MAT/"),
                          ["/MAT/LAW4/3", "/MAT/ELAST/2", "/MAT/VOID/4",
-                          "/MAT/LAW5/1"])
+                          "/MAT/VOID/5", "/MAT/LAW5/1"])
         self.assertEqual(_headers(self.starter, "/EOS/"),
                          ["/EOS/GRUNEISEN/3"])
 

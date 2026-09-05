@@ -312,16 +312,29 @@ Prior history (before this changelog was introduced) is summarized in the
     construction if anything did. Consolidating the ALE mesh onto one part with
     per-phase `/INIVOL` fills is its own item.
 
-  - **`*MAT_VACUUM` / `*MAT_140` and `*MAT_GAS_MIXTURE` / `*MAT_148` refused by
-    name.** Radioss has no vacuum material at all — the string appears nowhere
-    in the 2022 Reference or User Guide — and `*MAT_GAS_MIXTURE`'s whole
-    mechanism is `*SECTION_POINT_SOURCE_MIXTURE` + `*INITIAL_GAS_MIXTURE`, an
-    airbag-inflator point-source injection into an ALE mesh, of which
-    OpenRadioss has none: `/MAT/GAS` is a `/MONVOL` gas definition, not an ALE
-    material. A single perfect gas as a LAW51 phase WOULD be expressible as
-    `/MAT/LAW6` + `/EOS/POLYNOMIAL` with `C4 = C5 = γ−1` (RefGuide p.1112), but
-    converting the material alone would leave `point_source.k` with no
-    injection source, so the family is refused whole rather than half.
+  - **`*MAT_VACUUM` / `*MAT_140` → `/MAT/VOID`, and `*MAT_GAS_MIXTURE` /
+    `*MAT_148` refused by name.** Radioss has no vacuum MATERIAL — the word
+    appears nowhere in the 2022 Reference or User Guide — but `/MAT/VOID`
+    (LAW0) is a region that carries no stress at all, which is what the
+    LS-DYNA card means, and it is the same target a bare `*MAT_NULL` already
+    takes here. It is emitted so the vacuum `*PART` RESOLVES: a `/PART` naming
+    no `/MAT` is `ERROR 179`, which `stagnation_A/B` and `cylinder_impact_A/B`
+    were getting on top of their LAW51 error. `RHO` is written verbatim, `0.0`
+    included — `hm_read_mat.F90:1575-1583` exempts law 0 from `ERROR 683`, so
+    `ale_wavehitcol.k`'s `RHO = 0` needs no density substitution. It is NOT a
+    LAW51 phase (LAW0 is not on `fill_buffer_51.F:210`'s list, and the
+    undeclared balance of the volume fractions IS Radioss's void), and what
+    that costs is named: in LS-DYNA the vacuum is an AMMG phase the other
+    materials advect into as they expand, here it is a separate
+    single-material ALE region nothing flows into. `*MAT_GAS_MIXTURE` stays
+    refused: its whole mechanism is `*SECTION_POINT_SOURCE_MIXTURE` +
+    `*INITIAL_GAS_MIXTURE`, an airbag-inflator point-source injection into an
+    ALE mesh, of which OpenRadioss has none — `/MAT/GAS` is a `/MONVOL` gas
+    definition, not an ALE material. A single perfect gas as a LAW51 phase
+    WOULD be expressible as `/MAT/LAW6` + `/EOS/POLYNOMIAL` with
+    `C4 = C5 = γ−1` (RefGuide p.1112), but converting the material alone would
+    leave `point_source.k` with no injection source, so the family is refused
+    whole rather than half.
 
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
