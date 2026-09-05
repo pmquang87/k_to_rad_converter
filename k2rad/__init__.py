@@ -100,13 +100,36 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
             inter_id=inter_id,
             title="auto_implicit_stabilization_self_contact",
             ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+            # Inacti = 1 (deactivate the initially-penetrating secondary
+            # nodes), stated here rather than inherited from the `ignore = 0`
+            # dataclass default nobody chose. Two reasons, both measured.
+            # (1) It is the stub's own intent: a stabilization interface that
+            #     "carries no load unless parts actually touch" should give a
+            #     node that ALREADY touches zero stiffness, not a t=0 pre-load.
+            # (2) It removes starter ERROR 611 categorically. i7pwr3.F:114-129
+            #     raises 611 whenever a secondary node lies EXACTLY on a main
+            #     segment (DN = |N|^2 <= 1e-30: no direction exists to move it
+            #     along), and the gate is `INACTI/=1 .AND. INACTI/=2 .AND.
+            #     FPENMAX==ZERO` — so 5 and 6 alike fail and only 1/2 (or a
+            #     non-zero Fpenmax) pass. MEASURED on
+            #     thermal/welding-new/welding-solids/05_1_welding_solid, whose
+            #     conformal weld mesh puts 310 nodes exactly on the stub's own
+            #     surface: 310 ERRORS with Inacti = 5, 0 ERRORS / 1 WARNING
+            #     with Inacti = 1.
+            inacti=1,
         )
     )
     state.warn(
         "Implicit model has no contact interface — the OpenRadioss engine "
         "segfaults in implicit setup without one. Injected an inert all-parts "
-        f"self-contact (/INTER/TYPE7 id {inter_id}); it carries no load unless "
-        "parts actually touch. Remove it if you define real contact."
+        f"self-contact (/INTER/TYPE7 id {inter_id}) with Inacti=1, so a "
+        "secondary node that already touches a main segment simply gets zero "
+        "contact stiffness: the stub carries no load unless parts move into "
+        "each other. Inacti=1 rather than the ordinary mapping because "
+        "i7pwr3.F:114-129 refuses a node lying EXACTLY on a main segment with "
+        "ERROR 611 for every Inacti except 1 and 2 — measured, 310 of them on "
+        "05_1_welding_solid's conformal weld mesh. Remove the interface if you "
+        "define real contact."
     )
 
 

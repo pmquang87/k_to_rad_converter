@@ -12,9 +12,13 @@ and 42 whose implicit engine will not advance.
                                        rules, each counted in the message
   A2  the modal chain and TC/RC     -> a measured NON-item (no tools/ change);
                                        see ``TestModalChainNeedsNoTcRcArm``
+  A3  starter ERROR 611             -> the synthesized implicit-stabilization
+                                       stub takes Inacti = 1, and every
+                                       /INTER/TYPE7 whose Inacti is 3/4/5/6
+                                       gains an Fpenmax
 
-A3 (starter ERROR 611) and part B (set spellings, SSTYP = 0,
-/EOS/GRUNEISEN, the modal beam mass arm) extend this module.
+Part B (set spellings, SSTYP = 0, /EOS/GRUNEISEN, the modal beam mass arm)
+extends this module.
 
 Kept in its own module, the repo's one-module-per-batch convention.
 """
@@ -580,6 +584,150 @@ class TestModalChainNeedsNoTcRcArm(unittest.TestCase):
         import inspect
         from tools import modal_common
         self.assertNotIn("node_tc_rc", inspect.getsource(modal_common))
+
+
+# ── A3: starter ERROR 611 ────────────────────────────────────────────────────
+
+class TestImplicitStabilizationStubInacti(unittest.TestCase):
+    """The synthesized ``auto_implicit_stabilization_self_contact`` takes
+    ``Inacti = 1``.
+
+    ``i7pwr3.F:113-114`` computes ``DN = |N|^2`` for the vector from the
+    projection point on a main sub-triangle to the secondary node; ``DN <=
+    1e-30`` means the node lies EXACTLY on the segment, so there is no
+    direction to depenetrate it along. ``:118`` then refuses the deck —
+    ``IF(INACTI/=1.AND.INACTI/=2.AND.FPENMAX==ZERO)`` -> ``ANCMSG(MSGID=611)``
+    — so Inacti 5 AND 6 both fail and only 1/2 (or a non-zero Fpenmax) pass.
+
+    MEASURED: ``thermal/welding-new/welding-solids/05_1_welding_solid``, whose
+    conformal weld mesh puts 310 secondary nodes exactly on the stub's own
+    surface, goes from 310 starter ERRORS to 0 ERRORS / 1 WARNING.
+
+    Inacti = 1 is also what the stub already claimed to be: "it carries no load
+    unless parts actually touch" — a node that already touches gets zero
+    stiffness rather than a t = 0 pre-load.
+    """
+
+    IMPLICIT_SOLID = "\n".join([
+        "*KEYWORD", "*NODE",
+        _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+        _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+        _n16(5, 0.0, 0.0, 1.0), _n16(6, 1.0, 0.0, 1.0),
+        _n16(7, 1.0, 1.0, 1.0), _n16(8, 0.0, 1.0, 1.0),
+        "*ELEMENT_SOLID", _row(1, 1), _row(1, 2, 3, 4, 5, 6, 7, 8),
+        "*SECTION_SOLID", _row(1, 1),
+        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+        "*PART", "block", _row(1, 1, 1),
+        "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
+        "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+    def _stub_rows(self, starter: str):
+        body = _block(starter, "/INTER/TYPE7/90001")
+        self.assertIsNotNone(body, "no stabilization stub emitted")
+        return [ln for ln in body if not ln.startswith("#")]
+
+    def test_the_stub_carries_inacti_1(self):
+        res, starter = _convert(self.IMPLICIT_SOLID)
+        rows = self._stub_rows(starter)
+        # The IBC / Inacti / VisS / VisF / Bumult row is the 6th data row.
+        ibc_row = [r for r in rows if r.strip().startswith("000")][0]
+        self.assertEqual(int(ibc_row.split()[1]), 1)
+        self.assertEqual(len(_warns(res, "with Inacti=1")), 1)
+
+    def test_the_stub_warning_carries_the_starter_line_and_the_measurement(self):
+        res, _starter = _convert(self.IMPLICIT_SOLID)
+        w = _warns(res, "with Inacti=1")[0]
+        self.assertIn("i7pwr3.F:114-129", w)
+        self.assertIn("ERROR 611", w)
+        self.assertIn("05_1_welding_solid", w)
+
+    def test_the_stub_gets_no_fpenmax(self):
+        """Inacti 1 is exempt at the gate itself, so the Fpenmax fallback is
+        neither needed nor written — the field stays at the starter default."""
+        _res, starter = _convert(self.IMPLICIT_SOLID)
+        rows = self._stub_rows(starter)
+        # rows[0] is the title; rows[2] is the Fscalegap / GAP_MAX / Fpenmax row.
+        self.assertEqual(rows[2].split(), ["0", "0", "0"])
+
+
+class TestType7FpenmaxFallback(unittest.TestCase):
+    """A USER contact keeps its faithful ``Inacti`` and gains an ``Fpenmax``.
+
+    ``4.3_General_Nonlinearity`` states ``IGNORE = 1`` on its own ``*CONTACT``
+    card, which ``_ignore_to_inacti`` maps to ``Inacti = 5`` — a faithful
+    translation, not a k2rad default and not ``--deformable-contact-recipe``.
+    Flipping it would throw away the W13 evidence that Inacti 5 is right for an
+    initially-resting contact. Fpenmax instead turns the REFUSAL into a
+    deactivation of exactly the nodes that cannot be depenetrated:
+    ``i7pwr3.F:193-195`` zeroes ``STFN`` when ``PENE > Fpenmax*GAPV``, and
+    ``PENE = GAPV - d``, so at 0.99 only ``d < 0.01*GAPV`` is affected.
+
+    It is a STARTER-only field (``hm_read_inter_type07.F:275`` ->
+    ``FRIGAP(27)``; the engine's only ``VARIABLES(27)`` use is
+    ``i21main_tri.F``, i.e. TYPE21) and MEASURED inert on two control decks
+    whose decoded ``T01`` channels are byte-identical with and without it.
+    """
+
+    def _deck(self, ignore: int) -> str:
+        return "\n".join([
+            "*KEYWORD", "*NODE",
+            _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+            _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+            _n16(5, 0.0, 0.0, 2.0), _n16(6, 1.0, 0.0, 2.0),
+            _n16(7, 1.0, 1.0, 2.0), _n16(8, 0.0, 1.0, 2.0),
+            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4), _row(2, 2, 5, 6, 7, 8),
+            "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "a", _row(1, 1, 1),
+            "*PART", "b", _row(2, 1, 1),
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
+            _row(1, 2, 3, 3), _row("0.1", "0.1"), _row(),
+            _row(0, 0, 0, ignore),
+            "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+    def _fpenmax_row(self, starter: str, inter_id: int):
+        body = _block(starter, f"/INTER/TYPE7/{inter_id}")
+        self.assertIsNotNone(body, "no /INTER/TYPE7 emitted")
+        # [0] title, [1] Slav/Mast, [2] Fscalegap / GAP_MAX / Fpenmax.
+        return [ln for ln in body if not ln.startswith("#")][2].split()
+
+    def test_inacti_5_gains_the_fpenmax(self):
+        res, starter = _convert(self._deck(1))
+        ids = [int(ln.rsplit("/", 1)[1]) for ln in _headers(starter, "/INTER/TYPE7/")]
+        self.assertEqual(self._fpenmax_row(starter, ids[0]),
+                         ["0", "0", "0.99"])
+        w = _warns(res, "Fpenmax=0.99")
+        self.assertEqual(len(w), 1)
+        self.assertIn("i7pwr3.F:114-129", w[0])
+        self.assertIn("ERROR 611", w[0])
+
+    def test_the_faithful_inacti_is_not_changed(self):
+        """``IGNORE = 1`` still maps to Inacti 5 — the fallback is additive."""
+        _res, starter = _convert(self._deck(1))
+        ids = [int(ln.rsplit("/", 1)[1]) for ln in _headers(starter, "/INTER/TYPE7/")]
+        body = _block(starter, f"/INTER/TYPE7/{ids[0]}")
+        rows = [ln for ln in body if not ln.startswith("#")]
+        ibc_row = [r for r in rows if r.strip().startswith("000")][0]
+        self.assertEqual(int(ibc_row.split()[1]), 5)
+
+    def test_an_explicit_deck_with_no_type7_is_untouched(self):
+        """The control that keeps the blast radius honest: an explicit
+        single-surface contact converts to /INTER/TYPE25, which
+        ``i7pwr3.F``/``i20pwr3.F`` never reach (a grep of the whole starter
+        finds MSGID 611/612 in those two files only), so no Fpenmax is
+        written there."""
+        deck = "\n".join([
+            "*KEYWORD", "*NODE",
+            _n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),
+            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
+            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE",
+            _row(0, 0, 5, 5), _row("0.1", "0.1")] + _SHELL_TAIL)
+        res, starter = _convert(deck)
+        self.assertTrue(_headers(starter, "/INTER/TYPE25/"))
+        self.assertEqual(_headers(starter, "/INTER/TYPE7/"), [])
+        self.assertEqual(_warns(res, "Fpenmax="), [])
 
 
 if __name__ == "__main__":                             # pragma: no cover

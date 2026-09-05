@@ -12,7 +12,8 @@ Prior history (before this changelog was introduced) is summarized in the
 ### Added
 
 - **R14 CAMPAIGN TRIAGE batch, round 2, part A — the `*NODE` card's own
-  constraint cells.** Round 1 cleared the starter-error classes; the campaign then
+  constraint cells, and the starter refusal on a node that cannot be
+  depenetrated.** Round 1 cleared the starter-error classes; the campaign then
   measured two open ENGINE classes on the same 356-deck dynaexamples R14
   roster — **69 decks that terminate NORMAL with an internal energy below 1 %
   of their LS-DYNA reference, and 42 whose implicit engine will not advance**.
@@ -99,6 +100,55 @@ Prior history (before this changelog was introduced) is summarized in the
     free (unconstrained, non-rigid-slaved) DOFs appear" — so the modal chain
     inherits this constraint through the deck. 49 of the 137 carriers are
     implicit.
+
+  - **Starter `ERROR 611` cleared, and its published root cause corrected.**
+    611 is a **zero-normal** condition, not "Inacti = 5 cannot depenetrate":
+    `i7pwr3.F:113-114` computes `DN = |N|²` for the vector from the projection
+    point to the secondary node and raises the message only when
+    `DN ≤ 1e-30` — the node lying EXACTLY on a main segment, so no
+    depenetration DIRECTION exists. (`i7pen3.F:87` then makes the reported
+    penetration equal the whole gap, which is what made it look like a depth
+    problem: both failing decks print `INITIAL PENETRATION` identical to their
+    echoed `GAP MIN`, `0.5828447E-01` and `0.6578205E-01`.) The gate is
+    `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so **`Inacti = 6` does
+    not help either**, and only `i7pwr3.F`/`i20pwr3.F` raise 611/612 at all —
+    an explicit deck converted to `/INTER/TYPE25` can never hit it.
+    - k2rad's own synthesized `auto_implicit_stabilization_self_contact` now
+      states **`Inacti = 1`** where the stub is BUILT, instead of inheriting it
+      from an `ignore = 0` dataclass default nobody chose. It is what the stub
+      already claimed to be — "carries no load unless parts actually touch", so
+      a node that already touches gets zero stiffness rather than a t = 0
+      pre-load — and 1 is exempt at the gate. MEASURED on
+      `thermal/welding-new/welding-solids/05_1_welding_solid`, whose conformal
+      weld mesh puts 310 secondary nodes exactly on the stub's own surface:
+      **310 starter ERRORS → 0 ERRORS / 1 WARNING**.
+    - A **user** contact keeps its faithful `Inacti` and gains
+      **`Fpenmax = 0.99`** whenever that value is 3/4/5/6.
+      `4.3_General_Nonlinearity`'s `Inacti = 5` is NOT a k2rad default and not
+      `--deformable-contact-recipe`: the deck states `IGNORE = 1` on its own
+      optional `*CONTACT` card (line 348) and `_ignore_to_inacti` maps it
+      faithfully, so flipping it would throw away the W13 evidence that 5 is
+      right for an initially-resting contact. The constant is derived, not
+      picked: `i7pwr3.F:193-195` deactivates a node when
+      `PENE > Fpenmax·GAPV` and `PENE = GAPV − d`, so 0.99 reaches only
+      `d < 1 %` of the gap — the zero-distance population and nothing else.
+      `Fpenmax` is a **starter-only** field (`hm_read_inter_type07.F:275` →
+      `FRIGAP(27)` → `inint3.F:831/1026`; the engine's only `VARIABLES(27)` use
+      is TYPE21's `i21main_tri.F`) and measured inert without such nodes: two
+      control decks re-run with nothing but `Fpenmax` added, one explicit
+      (`ex_01_thin_shell_elform_2`) and one implicit (`rigid_tip`), give
+      byte-identical decoded `T01` channels. MEASURED:
+      `4.3_General_Nonlinearity` **486 starter ERRORS → 0**.
+    - **Both decks then fail in the ENGINE** (`SOLVER IMPLICIT STOPPED DUE TO
+      TIMESTEP LIMIT`), so item E moves them from `error_starter` to
+      `error_engine` — a real class change, not a pass. `05_1_welding_solid`
+      carries no `*NODE` TC/RC at all and uses `*BOUNDARY_SPC_SET`, so its
+      implicit failure is not part A's either; both belong to the `/IMPL`
+      recipe item.
+    - Two golden fixtures change, each by one line and each named here:
+      `implicit_qstat_0000.rad:87` `Inacti` 5 → 1 (the stub) and
+      `rigid_contact_0000.rad:100` `Fpenmax` 0 → 0.99 (a user
+      `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` whose mapped Inacti is 5).
 
 - **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps, the
   `/MAT/LAW51` semantics, the TRUSS element and the zero-density policy behind

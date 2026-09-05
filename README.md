@@ -3429,13 +3429,28 @@ dropped behaviour (dyna2rad parses the flag and never reads it)
 initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
 deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
-pre-engagement bootstrap needs the t=0 stiffness path). `Inacti=5` can only
-*shrink* the gap, never create clearance, so two parts drawn **exactly
-coincident** still hit starter **ERROR 611** (`INITIAL PENETRATION = ...
-IMPOSSIBLE TO CALCULATE NEW COORDINATES OF SECONDARY NODE`) — the penetration
-equals the whole element-derived gap and there is nowhere to shift the node to.
-Met in practice on a friction rig whose slab touched its plate: 264 × ERROR 611,
-cleared by a 0.01 mm modelling clearance
+pre-engagement bootstrap needs the t=0 stiffness path). Whenever the resulting
+`Inacti` is one of 3/4/5/6 the card also gets **`Fpenmax = 0.99`**, and that is
+the fix for starter **ERROR 611** (`INITIAL PENETRATION = ... IMPOSSIBLE TO
+CALCULATE NEW COORDINATES OF SECONDARY NODE`). 611 is a **zero-normal**
+condition, not an "Inacti cannot depenetrate" one: `i7pwr3.F:113-114` computes
+`DN = |N|²` for the vector from the projection point to the secondary node, and
+`DN ≤ 1e-30` — the node lying *exactly* on a main segment, so no depenetration
+direction exists — is the only gate. `:118` is
+`IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so **`Inacti = 6` does not
+help either**; only 1/2 or a non-zero `Fpenmax` pass. `Fpenmax` turns the
+refusal into a deactivation of exactly those nodes: `:193-195` zeroes `STFN`
+when `PENE > Fpenmax·GAPV`, and `PENE = GAPV − d`, so `0.99` reaches only
+`d < 1 %` of the gap. It is a **starter-only** field
+(`hm_read_inter_type07.F:275` → `FRIGAP(27)`; the engine's only
+`VARIABLES(27)` use is TYPE21's `i21main_tri.F`) and is measured inert on decks
+without such nodes — two control decks, one explicit and one implicit, re-run
+with nothing but `Fpenmax` added produce byte-identical decoded `T01` channels.
+Measured on the two R14 carriers: `05_1_welding_solid` 310 → 0 starter errors,
+`4.3_General_Nonlinearity` 486 → 0. k2rad's own synthesized
+`auto_implicit_stabilization_self_contact` takes `Inacti = 1` instead — it is
+meant to carry no load, so a node that already touches should simply get zero
+stiffness, and 1 is exempt at the gate itself
 A contact **master surface** built from a part that carries 3-corner shells
 splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT` (or

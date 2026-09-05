@@ -1025,12 +1025,25 @@ report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
-- **ERROR 611**, `implicit/Salzburg_2017/example_nonlinear_3/4.3_General_Nonlinearity.k`
-  — 486 × "initial penetration cannot be depenetrated" under `Inacti = 5`. A
-  contact/mesh item, not a keyword-coverage one. (`05_1_welding_solid.k` now
-  exposes the same error on k2rad's own synthesized implicit-stabilization
-  self-contact once its ERROR 179 is cleared — same item, and the reason it is
-  worth doing next.)
+- ~~**ERROR 611**~~ — **CLOSED in R14 triage round 2.** The reading above is
+  wrong twice over and the correction is what fixed it. 611 is not "initial
+  penetration cannot be depenetrated": `i7pwr3.F:113-114` raises it only when
+  `DN = |N|² ≤ 1e-30`, i.e. the secondary node lies EXACTLY on a main segment
+  so no depenetration DIRECTION exists — the reported penetration is then the
+  whole gap, which is what made it look like a depth problem. And the gate is
+  `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so `Inacti = 6` would
+  not have helped either. `4.3_General_Nonlinearity`'s `Inacti = 5` is also not
+  a k2rad default: the deck states `IGNORE = 1` on its own optional `*CONTACT`
+  card (line 348) and `_ignore_to_inacti` maps it faithfully. Fix: the
+  synthesized stub takes `Inacti = 1` (exempt at the gate, and what "carries no
+  load unless parts touch" already meant), and any user `/INTER/TYPE7` whose
+  `Inacti` is 3/4/5/6 gains `Fpenmax = 0.99`, which deactivates exactly the
+  zero-distance nodes and is a starter-only, measured-inert field otherwise.
+  Measured: `05_1_welding_solid` 310 → 0 starter errors,
+  `4.3_General_Nonlinearity` 486 → 0. **Both then fail in the ENGINE** with
+  `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, so they move from
+  `error_starter` to `error_engine` and belong to the `/IMPL` recipe item, not
+  to this one.
 - **ERROR 495**, `icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi.k` —
   116 × zero-thickness CFD boundary shells. OpenRadioss has no ICFD solver, so
   the deck cannot run whatever the shells say.

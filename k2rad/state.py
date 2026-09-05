@@ -3340,6 +3340,15 @@ class ContactAutoSingle:
     # k2rad itself (the implicit-stabilization self-contact), which has no
     # originating keyword to report.
     keyword: str = ""
+    # /INTER/TYPE7 Inacti, stated OUTRIGHT rather than derived from `ignore`.
+    # None = the ordinary path (_ignore_to_inacti reads `ignore`), which is what
+    # every *CONTACT card gets. The one caller that sets it is k2rad's OWN
+    # synthesized implicit-stabilization self-contact: `ignore` there is a
+    # dataclass default nobody chose, and letting it decide made the stub carry
+    # Inacti = 5 and hard-fail 05_1_welding_solid with 310 x starter ERROR 611.
+    # Stating the value where the stub is BUILT keeps it from drifting with a
+    # future change to _ignore_to_inacti.
+    inacti: Optional[int] = None
 
 
 @dataclass

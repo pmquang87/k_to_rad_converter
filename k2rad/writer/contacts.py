@@ -43,6 +43,8 @@ __all__ = [
     "_part_node_ids",
     "_make_force_transducers",
     "_ignore_to_inacti",
+    "_single_inacti",
+    "_FPENMAX_ZERO_NORMAL",
     "_vdc_to_viss",
     "_sst_mst_to_gapmin",
     "_emit_inter_type7",
@@ -658,10 +660,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
+                                       _single_inacti(c, state, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id)
+                                       fric_id=fric_id, state=state)
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -693,10 +695,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
+                                       _single_inacti(c, state, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id)
+                                       fric_id=fric_id, state=state)
 
     for c in state.contacts_surf2surf:
         diag = {}
@@ -734,7 +736,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                   fric_id=fric_id)
+                                   fric_id=fric_id, state=state)
 
     _report_unconsumed_gapmin(state, gapmin_overrides)
 
@@ -1186,6 +1188,44 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     return lines
 
 
+def _single_inacti(c, state: ConversionState, gapmin: float) -> int:
+    """``/INTER/TYPE7`` Inacti for a single-surface contact.
+
+    A ``ContactAutoSingle`` that STATES ``inacti`` wins outright — the one such
+    record is k2rad's own implicit-stabilization stub, whose value is chosen
+    where the stub is built (``k2rad/__init__.py``) precisely so it cannot
+    drift with a later change to :func:`_ignore_to_inacti`. Every *CONTACT card
+    read from a deck leaves ``inacti`` at ``None`` and takes the ordinary
+    ``ignore`` mapping, unchanged.
+    """
+    stated = getattr(c, "inacti", None)
+    if stated is not None:
+        return int(stated)
+    return _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+
+
+#: ``/INTER/TYPE7`` Fpenmax written whenever Inacti is one of the values
+#: ``i7pwr3.F:118`` refuses a ZERO-NORMAL initial penetration for (3/4/5/6 —
+#: the gate is ``INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO``).
+#:
+#: The number is DERIVED, not chosen: ``i7pwr3.F:193-195`` is
+#: ``PENMAX = FPENMAX*GAPV(I)`` and deactivates a node when
+#: ``PENE(I) > PENMAX``, and ``i7pen3.F:87`` makes ``PENE = GAPV - d`` for a
+#: secondary node at distance ``d`` from the segment. So the kill condition is
+#: ``d < (1 - Fpenmax)*GAPV``: at 0.99 only nodes closer than ONE PERCENT of
+#: the gap are deactivated — which is exactly the ``d = 0`` population that
+#: cannot be depenetrated at all (``i7pwr3.F:113-114``: ``DN = |N|**2 <=
+#: 1e-30``, so there is no direction to move the node along) — while every
+#: ordinary initial penetration keeps its Inacti treatment.
+_FPENMAX_ZERO_NORMAL = 0.99
+
+#: The Inacti values that reach the ERROR 611 gate. 1 and 2 are exempt at
+#: ``i7pwr3.F:118`` itself; 0 raises MSGID 612 instead, and Fpenmax does not
+#: suppress that one (``:194`` only skips the ISTOK count for Inacti 5/6), so
+#: it is deliberately not in this set.
+_FPENMAX_INACTI = (3, 4, 5, 6)
+
+
 def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
                       gapmin: float = 0.0) -> int:
     """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
@@ -1348,7 +1388,34 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       viss: float = 0.0, visf: float = 0.0,
                       gapmin: float = 0.0, stfac: float = 0.0,
                       istf: int = 4, igap: int = 0,
-                      fric_id: int = 0) -> List[str]:
+                      fric_id: int = 0,
+                      state: Optional[ConversionState] = None) -> List[str]:
+    """One ``/INTER/TYPE7`` block.
+
+    ``Fpenmax`` is derived from ``inacti`` HERE, in the single emitter, rather
+    than at each of the four call sites — a guard keyed on one caller goes dead
+    on its sibling (the #124 class), and every TYPE7 this converter writes runs
+    the same ERROR 611 risk.
+
+    **What Fpenmax buys.** ``i7pwr3.F:113-114`` computes ``DN = |N|^2`` for the
+    vector from the projection point to the secondary node; ``DN <= 1e-30``
+    means the node lies EXACTLY on a main segment, so no depenetration
+    direction exists, and ``:118`` then refuses the deck with ``ERROR 611`` for
+    every Inacti except 1 and 2 — unless ``FPENMAX /= ZERO``. A non-zero
+    Fpenmax turns the refusal into a deactivation: ``:193-195`` zeroes
+    ``STFN`` for a node with ``PENE > Fpenmax*GAPV``, which at
+    ``_FPENMAX_ZERO_NORMAL`` is precisely the zero-distance population.
+
+    **It is inert without them.** Fpenmax is a STARTER-only field
+    (``hm_read_inter_type07.F:275`` → ``FRIGAP(27)``, read by
+    ``inint3.F:831/1026`` into ``i7pwr3``; the engine's only
+    ``VARIABLES(27)`` use is ``i21main_tri.F``, i.e. TYPE21). MEASURED on two
+    control decks re-run with nothing but Fpenmax added — an explicit shell
+    contact (``ex_01_thin_shell_elform_2``) and an implicit one
+    (``rigid_tip``) — the decoded ``T01`` channels are byte-identical
+    (sha256 ``e0d25f9b02a9396e…`` and ``da8ab7870d0b0485…`` on both arms) and
+    the starter reports the same 0 ERRORS / 2 WARNINGS.
+    """
     # istf/igap default to the ordinary single-surface/surf2surf values (Istf=4
     # minimum stiffness, Igap=0 constant gap) so those validated paths stay
     # byte-identical. The SOFT=-7 AUTOMATIC_GENERAL route overrides them to
@@ -1363,13 +1430,29 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
     fric_card = "         0         0                   0         2         0"
     if fric_id:
         fric_card += f"         0{_f(0.0)}{_i(fric_id)}"
+    fpenmax = _FPENMAX_ZERO_NORMAL if inacti in _FPENMAX_INACTI else 0.0
+    if fpenmax and state is not None:
+        state.warn(
+            f"CONTACT {inter_id}: Inacti={inacti} with Fpenmax="
+            f"{_FPENMAX_ZERO_NORMAL:g}. A secondary node that lies EXACTLY on a "
+            "main segment (distance 0) has no depenetration direction, so the "
+            "starter cannot honour Inacti 3/4/5/6 there and refuses the whole "
+            "deck with ERROR 611 (i7pwr3.F:114-129) — measured, 310 such nodes "
+            "on 05_1_welding_solid and 486 on 4.3_General_Nonlinearity. "
+            f"Fpenmax={_FPENMAX_ZERO_NORMAL:g} deactivates exactly those nodes "
+            "instead (i7pwr3.F:193-195 zeroes the stiffness of a node with "
+            f"PENE > {_FPENMAX_ZERO_NORMAL:g}*gap, i.e. closer than "
+            f"{100.0 * (1.0 - _FPENMAX_ZERO_NORMAL):g} percent of the gap) and "
+            "leaves every ordinary initial penetration on the Inacti path. It "
+            "is a STARTER-only field and inert on a deck without such nodes — "
+            "measured byte-identical T01 channels on two control decks.")
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "#  Slav_id   Mast_id      Istf      Ithe      Igap                Ibag      Idel     Icurv      Iadm",
         f"{_i(slav_id)}{_i(mast_id)}{_i(istf)}         0{_i(igap)}                   0         2         0         0",
         "#          Fscalegap             GAP_MAX             Fpenmax",
-        "                   0                   0                   0",
+        f"                   0                   0{_f(fpenmax)}",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
         "                1000                   0                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
@@ -1811,7 +1894,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                 continue
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                       istf=2, igap=2, fric_id=fric_id)
+                                       istf=2, igap=2, fric_id=fric_id, state=state)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
                 f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
