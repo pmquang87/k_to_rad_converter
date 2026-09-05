@@ -289,6 +289,34 @@ about). `KD`/`V0` (dynamic magnification) and `CL` (clearance, which makes the
 LS-DYNA spring compression-only) have no Radioss slot and are warn-dropped
 individually
 
+`*SECTION_BEAM` `ELFORM=3` is a TRUSS → `/PROP/TYPE2` + `/TRUSS`, not
+`/PROP/BEAM`. Its card 2d states `A RAMPT STRESS` and no second moments at all,
+so the old `/PROP/BEAM` fallback carried `Iyy = Izz = Ixx = 0` and
+`hm_read_prop03.F:151-182` refused the deck (ERROR 315/316/317). `/TRUSS` is
+THREE cells — `id node_ID1 node_ID2` (`radioss41/ELEM/truss.cfg`;
+`hm_read_truss.F:157-158` takes the material and property from the `/PART`) — and
+`/PROP/TYPE2` is AREA plus GAP and nothing else (`hm_read_prop02.F:110-112`;
+`initia.F:3650-3652` is literally `IF(IGTYP==2)THEN` / `C---------- truss,
+nothing`, so there is no `Ismstr`, `Dm/Df`, `Ishear` or `OmegaDof` on it). **GAP
+is written 0 always**: `tforc3.F:184-186` turns a positive `GEO(2)` into a
+compression-only GAP ELEMENT, and nothing on ELFORM 3 maps to that. A `/TRUSS`
+accepts SIX material laws — 0 (VOID), 1 (ELAST), 2 (PLAS_JOHNS), 13 (RIGID), 34
+(BOLTZMANN), 44 (COWPER), the complete set of
+`INIT_MAT_KEYWORD(MATPARAM,"TRUSS")` call sites — so `*MAT_024` →
+`/MAT/LAW36`, which is `BEAM_INTEGRATED` only, is warned by name rather than
+routed into `check_mat_elem_prop_compatibility.F:331-335`'s ERROR 3046. The
+element keeps only `A`: `dt1lawt.F:55-60` reads `ρ` and `E` for
+`SSP = √(E/ρ)`, and `tmat3.F:47-50` is literally `KX = YM·AREA/AL`. RAMPT and
+STRESS are the dynamic-relaxation pre-tension pair (Vol I R17 p.41-18) — inert
+on a deck with no relaxation phase, and reported as inert rather than as a loss;
+with a phase, the equivalent `/PRELOAD/AXIAL` force `STRESS × A` is named and
+not invented. `*ELEMENT_BEAM` `RT1`/`RT2` (translational releases) have no
+`/TRUSS` column and are named as a TOTAL loss (axial translation is the
+element's only load path); `N3`, the `_ORIENTATION` vector, `RR1`/`RR2` and
+`LOCAL` are all inert on a truss and are not listed as dropped. A card-2b
+(named `SECTION_nn` standard section) ELFORM-3 section states no area and its
+`/PROP/TYPE2` is REFUSED rather than emitted as ERROR 497
+
 `*SECTION_BEAM` `ELFORM=6` is a DISCRETE BEAM — a 6-DOF spring, not a beam: its
 card 2f states a lumped `VOL`/`INER` and a `CID`, never a cross-section, so a
 `/PROP/BEAM` from it is starter ERROR 314-317. Such a part becomes a
@@ -631,6 +659,28 @@ limit. The substitution names its formula, its value and its consequence (the
 unburnt cells now carry `P = K·µ` where LS-DYNA carried 0); `--he-bunreacted`
 overrides it. `G` and `SIGY` have no LAW5 slot at all (LAW5 carries no
 deviator) and are named as dropped
+A material stating `RO ≤ 0` gets **`rho = 1e-24` in the deck's own units**
+(default on; `--no-zero-density-floor` copies the deck's value through and lets
+the starter refuse it). `hm_read_mat.F90:1575-1583` rejects a non-positive
+density outright — `ERROR 683`, exempting only laws 0/20/51/108/151/999, none
+of them structural — while LS-DYNA accepts the card and makes the SAME
+substitution silently. The value is therefore MEASURED, not chosen: the R14
+reference `.d3hsp` files report `total mass of part = 0.20483830E-19` for the
+20483.83 mm³ parts of `3.1_Elastic_Beams_etc`, i.e. **ρ = 1.000e-24** to seven
+figures, identically on `3.5_…_Plate_{Hex,Shell,Tet}` and
+`6.2.PSD_Beam_Example_LSTC` — five decks, four element families — with
+`Warning 30131 total number of massless nodes` instead of an error. A
+deck-relative rule has no input on any of them (all eight carriers state `RO = 0`
+on every material they define). A material converting to an EXEMPT law keeps its
+stated zero, `*MAT_VACUUM` → `/MAT/VOID` above all, where `RO = 0` is the card's
+own meaning. A static or eigenvalue answer is unaffected (`/IMPL/QSTAT`'s
+stabilization is `∝ M/Δt²`, `imp_dyna.F:604-635`, and vanishes with the mass —
+measured identical tip deflection `-4.4916980000E-01 mm` at ρ = 1e-9 / 1e-15 /
+1e-24 on a HEX8 cantilever); an EXPLICIT deck gets a second, harder warning,
+because at that density `c = √(E/ρ)` collapses the element time step to ~1e-14 s
+and the run never finishes. Every mass diagnostic on such a deck reports
+k2rad's injected 1e-3 implicit probe rigid body, not the structure — the
+warning says so
 Foams & honeycomb: `*MAT_CRUSHABLE_FOAM` (63) → `/MAT/LAW50`,
 `*MAT_LOW_DENSITY_FOAM` (57) → `/MAT/LAW38`, `*MAT_FU_CHANG_FOAM` (83) →
 `/MAT/LAW70`, `*MAT_HONEYCOMB` (26) → `/MAT/LAW28`. The referenced stress-strain
@@ -2135,7 +2185,28 @@ collapse runs on `*LOAD_BLAST_SEGMENT`'s inline rows, the other producer of a
 segment set. It makes the two SPELLINGS one segment and nothing more: a face a
 single block genuinely lists twice still emits two `/SURF/SEG` rows, which is
 what LS-DYNA does with it.
-`*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
+`*DEFINE_CURVE` → `/FUNCT` (or `/TABLE/1` when a law consumes it through a
+`Tab_ID` slot, `/FUNCT_SMOOTH` for the `_SMOOTH` spelling), with a **strictly
+increasing abscissa AS PRINTED**: `hm_read_funct.F:143` refuses a
+non-increasing one outright (`ERROR 156`), and the comparison is on the card
+value, so the invariant is checked on `_f`'s output and not on the float. Two
+different defects reach that guard and get different repairs. A **tie** (two
+points at one abscissa, or a nudge the ten-digit field ate) leaves the curve
+unambiguous about its value, so the abscissa is stepped and the ordinate kept. A
+**reversal** is a deck defect, and copying the ordinate would be wrong: LS-DYNA
+warns (`*** Warning 20446 ... x-axis reverses direction at point, K`) and then
+evaluates the points as written with a forward-walking segment search that never
+enters the backwards interval, so its value JUMPS at the reversal and continues
+on the segment leaving the out-of-order point. k2rad emits that curve — the
+reversed point becomes `(prev + ε, f(prev))` on that segment. Measured on
+`mat_spring.belted-dummy`'s curve 50 (point 26 at x = 0.1125 after 0.1195,
+driving a prescribed sled acceleration), against the deck's own `nodout` value
+6858.94 at t = 0.119512: this re-anchoring gives 6860.96 (**+0.03 %**), a plain
+nudge 9801.60 (+42.90 %), re-sorting by abscissa 4907.19 (−28.46 %). A reversal
+with no later point beyond `prev` is dropped, because LS-DYNA cannot evaluate it
+either. Every repair is warned, naming the point index and both values; a
+non-monotone `(x, y)` data set must state `DATTYP = 1` (Vol I R17 p.17-106)
+`*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)
 `*DEFINE_VECTOR` → `/SKEW/FIX`, `*DEFINE_VECTOR_NODES` → `/SKEW/MOV` — a skew
@@ -3081,6 +3152,31 @@ The Card-4 fields `ISYM` / `EROSOP` / `IADJ` are all **reported**
 (dyna2rad parses and discards all three with no message — including `EROSOP`,
 whose entire purpose is to enable eroding contact), as are the `SST`/`MST`
 thicknesses, which `/INTER/TYPE25` has no column for at `/BEGIN 2022`.
+`*CONTACT_FORCE_TRANSDUCER[_PENALTY]` → a **PARENTLESS** `/INTER/SUB`, i.e.
+`inter_ID = 0`. It measures contact force and adds no stiffness, and Radioss has
+a sub-interface form for exactly that: `hm_read_intsub.F:225-250` sets
+`INTSUB_TYP = 100` when `inter_ID` is zero, `:448`'s own comment on the branch
+is *"Interf 0 : adding all contacts"*, and `lecint.F:531-550` counts such a sub
+into every interface. The card is the four-cell `radioss2021` layout —
+`inter_ID | Main_ID1 | Second_ID | Main_ID2`. `Main_ID2` is a `/SURF` over
+SURFA's parts and is MANDATORY (`:453-470` has no zero guard → `ERROR 576`); on
+its own it gives engine `TYPSUB = 2` (`i7for3.F:1583`), the total contact force
+on that surface with an internal contact cancelling because the main-side block
+at `:1673-1687` carries the opposite sign. `Main_ID1` is a `/SURF` over SURFB's
+parts when the card states one, giving `TYPSUB = 3` (`:1607`) — only pairs
+straddling the two surfaces. `Second_ID` is 0 and is not decoded on this branch.
+The sub id must appear in a `/TH/INTER` list or the starter silently drops the
+sub-interface (`NOM_OPT(5)`, `:509-524`), which is why one is always emitted.
+This replaces the parented form, which had to guess an interface and answered
+`ERROR 580` for every foreign node and `ERROR 581` for every foreign segment
+(measured: `plate.typ13` 8 × 580 + 2 × 581, `pipe.k` 1168 × 581 — both now
+0 ERROR and NORMAL TERMINATION). It measures the same number: on a shell-impact
+probe the accumulated normal impulse is −0.01453375 at all 1000 samples for this
+card, for a legally parented sub-interface and for the parent's own channel.
+Because `Main_ID2` is a SURFACE, a transducer whose SURFA parts carry no faces
+(an SPH cloud) has no route at all and is refused by name. `SABOXID`/`SBBOXID`
+are dropped, loudly — see **Boxes**
+
 `*CONTACT_NODES_TO_SURFACE` and `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` (+ `_MPP`)
 → the same `/INTER/TYPE25` ILEV=3 one-way form. dyna2rad does **not** symmetrize
 this family (`surfAttrNames[0] = "grnd_IDs"`), so neither does k2rad: the
