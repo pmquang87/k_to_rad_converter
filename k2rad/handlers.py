@@ -15242,21 +15242,26 @@ def handle_database_history_beam(block: Block, state: ConversionState) -> None:
     The target group is decided PER ELEMENT, exactly as dyna2rad's
     ``FindRadElement`` fallback chain does (convertutils.cxx:286-338 tries
     /BEAM, then /SPRING, then /TRUSS, re-initialising the keyword INSIDE the
-    loop at converttimehistory.cxx:246). k2rad needs the same chain for its own
+    loop at converttimehistory.cxx:246). k2rad needs all three links for its own
     reason: an *ELEMENT_BEAM on a *MAT_SPOTWELD part or on a *SECTION_BEAM
-    ELFORM=6 part is emitted as a /SPRING, not a /BEAM, so one card can produce
-    both groups. (k2rad emits no /TRUSS at all, so that third link is absent.)
+    ELFORM=6 part is emitted as a /SPRING, not a /BEAM, and one on a
+    *SECTION_BEAM ELFORM=3 part is emitted as a /TRUSS, so one card can produce
+    all three groups. ``writer/output.py::_th_beam_split`` does the split, on
+    the producer registries filled at the write lines.
     """
     _handle_db_history(block, state, "BEAM")
 
 
 def handle_database_history_beam_set(block: Block, state: ConversionState) -> None:
-    """*DATABASE_HISTORY_BEAM_SET → /TH/BEAM (+/TH/SPRING) over the named sets.
+    """*DATABASE_HISTORY_BEAM_SET → /TH/BEAM (+/TH/SPRING, +/TH/TRUSS) over the
+    named sets.
 
     ``database_history_beam_set.cfg:25`` declares
     ``SUBTYPES = (/SETS/SET_COMPONENT_IDPOOL, /SETS/SET_BEAM_IDPOOL)``: the ids
     may be *SET_BEAM sets OR *SET_PART sets, and a part set expands to every
-    beam of every named part."""
+    beam of every named part — a ``*SECTION_BEAM`` ELFORM=3 part's elements
+    included, because they stay in ``state.beam_elems`` and only the WRITE side
+    splits them off into ``/TRUSS`` (see ``writer/common._truss_secids``)."""
     _handle_db_history(block, state, "BEAM_SET")
 
 

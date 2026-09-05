@@ -55,6 +55,22 @@ def _convert(deck: str, **kw):
     return result, starter
 
 
+def _state_and_starter(deck: str):
+    """Parse + dispatch + build_starter, returning the FINAL state (every
+    writer prepass and every write-line register filled) and the deck text."""
+    from k2rad.writer import build_starter
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "d.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    state = ConversionState()
+    for block in parse_k_file(path):
+        dispatch(block, state)
+    starter = build_starter(state)
+    tmp.cleanup()
+    return state, starter
+
+
 def _dispatch(deck: str) -> ConversionState:
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "d.k")
@@ -1312,15 +1328,61 @@ class TrussCards(unittest.TestCase):
 
     def test_the_write_line_register_is_filled(self):
         """The #106 rule: ``state.truss_elem_ids`` is filled AT the row, so a
-        beam whose part the writer never visits is not in it."""
-        res, _starter = _convert(_truss_deck(
+        beam whose part the writer never visits is not in it — and the register
+        is the ONLY place that knows which of /BEAM and /TRUSS an id landed in,
+        because both families stay in ``state.beam_elems``."""
+        deck = _truss_deck(
             elems=("*ELEMENT_BEAM\n"
                    + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
                    # part 99 has no *PART record -> mesh loss, never written
-                   + f"{77:>8}{99:>8}{2:>8}{3:>8}" + "\n")))
-        del res
-        st = _dispatch(_truss_deck())
-        self.assertEqual({e.eid for e in st.beam_elems}, {10, 11})
+                   + f"{77:>8}{99:>8}{2:>8}{3:>8}" + "\n"))
+        st, starter = _state_and_starter(deck)
+        # PARSED: both rows are beam elements on the LS-DYNA side.
+        self.assertEqual({e.eid for e in st.beam_elems}, {10, 77})
+        # EMITTED: only the one whose /PART exists reached a /TRUSS row.
+        self.assertEqual(st.truss_elem_ids, {10})
+        self.assertEqual(st.beam_elem_ids, set())
+        self.assertEqual(_data_rows(starter, "/TRUSS/1"),
+                         [f"{10:>10}{1:>10}{2:>10}"])
+
+    def test_the_offset_walk_needs_no_new_spelling(self):
+        """C1: a truss is still spelled ``*ELEMENT_BEAM`` + ``*SECTION_BEAM``,
+        so ``assembly._OFFSET_SPECS`` sees NO new keyword and the #116
+        combinatorics table needs no new entry. That is a verdict, not an
+        omission — the /TRUSS routing is decided on the WRITE side from
+        ``sec.elform``, after every offset pass has run. Pinned by moving a
+        whole truss deck through an *INCLUDE_TRANSFORM."""
+        inner = _truss_deck()
+        tmp = tempfile.TemporaryDirectory()
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write(inner)
+        root = ("*KEYWORD\n"
+                + "*INCLUDE_TRANSFORM\n" + "child.k\n"
+                # card 2: idnoff ideoff idpoff idmoff idsoff idfoff iddoff
+                + _row(1000, 2000, 3000, 4000, 0, 0, 0) + "\n"
+                # card 3 field 1: IDROFF, which is the *SECTION id bucket
+                + _row(5000) + "\n"
+                # card 4: fctmas fcttim fctlen fcttem incout1
+                + _row(0, 0, 0, 0.0, 0.0) + "\n"
+                + "*CONTROL_TERMINATION\n" + _row(0.01) + "\n*END\n")
+        path = os.path.join(tmp.name, "root.k")
+        with open(path, "w") as fh:
+            fh.write(root)
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        from k2rad.writer import build_starter
+        starter = build_starter(state)
+        tmp.cleanup()
+        # Element ids +2000, node ids +1000, part id +3000, section id +5000.
+        self.assertEqual(_headers(starter, "/TRUSS/"), ["/TRUSS/3001"])
+        self.assertEqual(_data_rows(starter, "/TRUSS/3001"),
+                         [f"{2010:>10}{1001:>10}{1002:>10}",
+                          f"{2011:>10}{1002:>10}{1003:>10}"])
+        self.assertEqual(_headers(starter, "/PROP/TYPE2/"),
+                         ["/PROP/TYPE2/5001"])
+        self.assertEqual(state.truss_elem_ids, {2010, 2011})
 
 
 class TrussSectionCells(unittest.TestCase):
@@ -1695,13 +1757,25 @@ class ZeroDensityFloor(unittest.TestCase):
         self.assertEqual(_fields(rows[1])[0], "1.000000E-24")
         hit = [w for w in res.warnings if w.startswith("DENSITY:")]
         self.assertEqual(len(hit), 1, res.warnings)
-        self.assertIn("MID 1 (/MAT/LAW1)", hit[0])
+        # the MID, the value the SOURCE states, and the law it landed on
+        self.assertIn("MID 1 (RO = 0 -> /MAT/LAW1)", hit[0])
         self.assertIn("SUBSTITUTED rho = 1e-24", hit[0])
         self.assertIn("0.20483830E-19", hit[0])          # the provenance
         self.assertIn("ERROR 683", hit[0])               # the refusal
         self.assertIn("STATIC answer is unchanged", hit[0])
+        # ... and it is MEASURED, not asserted from the algebra alone
+        self.assertIn("-4.4916980000E-01", hit[0])
         self.assertIn("MASS DIAGNOSTICS ARE MEANINGLESS", hit[0])
         self.assertIn("--no-zero-density-floor", hit[0])
+
+    def test_a_negative_density_is_quoted_as_stated(self):
+        """The message names the value the SOURCE states, not just '<= 0': a
+        negative RO is a different deck defect from a zero one and the reader
+        has to see which they wrote."""
+        res, _s = _convert(_rho_deck(ro="-1.0"))
+        hit = [w for w in res.warnings if w.startswith("DENSITY:")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("MID 1 (RO = -1 -> /MAT/LAW1)", hit[0])
 
     def test_an_explicit_deck_gets_the_harder_second_warning(self):
         """The substitution is applied to EVERY deck — restricting it to

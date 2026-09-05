@@ -721,8 +721,13 @@ def _muscle_beam_pids(state: ConversionState) -> Set[int]:
 
     LS-DYNA states MAT_156 for TRUSS elements (Vol II R17 p.2-1071, *"This is
     Material Type 156 for truss elements"*), i.e. a ``*SECTION_BEAM`` with
-    ELFORM 3, and Radioss has no truss element at all — the closest faithful
-    target is the muscle SPRING property ``/PROP/TYPE46``, whose force law
+    ELFORM 3. Radioss DOES have a truss element — ``/TRUSS`` + ``/PROP/TYPE2``,
+    which :mod:`k2rad.writer.truss` emits for every OTHER ELFORM-3 part — but
+    it carries no muscle law: ``PROP_TRUSS`` is declared by six laws only
+    (0, 1, 2, 13, 34, 44 — ``init_mat_keyword.F:269-270``), LAW156 is not among
+    them, and a ``/TRUSS`` on one would be starter ERROR 3046. The closest
+    faithful target is therefore the muscle SPRING property ``/PROP/TYPE46``,
+    not the truss property, whose force law
     ``FX = Force·f1(t)·f2(ΔL)·f3(ΔL̇) + Scale_F·f4(ΔL) + Damp·VX``
     (``ruser46.F:207-211``) is term for term the ``sigma1 + sigma2 + sigma3``
     of the LS-DYNA card. So these parts get their /PART + /PROP + /SPRING from

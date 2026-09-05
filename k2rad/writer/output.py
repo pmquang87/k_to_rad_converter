@@ -292,6 +292,12 @@ _TH_SET_SOURCES = {
     "NODE_SET":       _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
     "NODE_SET_LOCAL": _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
     "SPH_SET":        _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
+    # *SET_BEAM reaches a *SECTION_BEAM ELFORM=3 part's elements too, and needs
+    # no arm of its own for it: a truss IS an *ELEMENT_BEAM in LS-DYNA and stays
+    # in state.beam_elems, so this part-set expansion already returns its eids
+    # and _th_beam_split routes them to /TH/TRUSS afterwards. (With a separate
+    # truss container this line would have silently lost them — the argument
+    # for the flag data model, see writer/common._truss_secids.)
     "BEAM_SET":       _ThSetSource(
         lambda s: s.beam_sets, "*SET_BEAM",
         lambda s, pids: _elems_of_parts(s.beam_elems, pids)),

@@ -135,6 +135,15 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         # face to build a /SURF from.
         for c in state.sph_elems:
             if c.pid == pid: nids.update(c.nodes)
+        # BEAM and TRUSS parts are deliberately NOT walked here, and the R14
+        # truss batch left that unchanged rather than "fixing" it in passing. A
+        # /TRUSS (or /BEAM) node is a perfectly good contact SECONDARY node in
+        # Radioss, so this is a real asymmetry with _part_node_ids below, which
+        # DOES walk state.beam_elems for the transducer's node inventory — but
+        # adding a 1-D family here would change the secondary side of every
+        # part-scoped contact on hundreds of corpus decks, which is its own
+        # item with its own sweep, not a truss item. Recorded, not silently
+        # closed on one side.
 
     if styp == 4:
         if sid in state.node_sets:

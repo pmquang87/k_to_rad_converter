@@ -44,7 +44,6 @@ from .common import (
     _seatbelt_part_ids,
     _spotweld_beam_pids,
     _truss_pids,
-    _truss_secids,
     _vcross,
     _vnorm,
     _vsub,
@@ -2516,6 +2515,14 @@ def _make_properties(state: ConversionState) -> List[str]:
     for ms in missing_solids:
         state.sec_solids[ms] = _auto_section_solid(ms)
     for ms in missing_beams:
+        # ELFORM 2, never 3: a section the deck never DEFINES states no
+        # formulation, so it cannot be known to be a truss — and because it is
+        # absent from state.sec_beams, common._truss_secids does not hold it and
+        # its parts are not in _truss_pids either, so their elements go to
+        # /BEAM and this placeholder /PROP/BEAM is what the missing-section
+        # warning below is written against. (The truss batch's audit listed
+        # "skip this synthesis for a truss part" as an arm to grow; it is
+        # vacuous by construction, and stated here rather than left unexplained.)
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
     if missing_tshells:
         for ms in sorted(missing_tshells):
@@ -2661,12 +2668,19 @@ def _make_properties(state: ConversionState) -> List[str]:
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
-        if sec.elform == 3 and sec.secid in _truss_secids(state):
+        if sec.elform == 3:
             # ELFORM=3 is a TRUSS: /PROP/TYPE2, which reads AREA and GAP and
             # nothing else. It never reaches _constants_from_thicknesses (an
             # ELFORM 3 card states no thicknesses) and never joins
             # type3_secids: a truss carries a DIFFERENT material gate
             # (PROP_TRUSS, six laws) from /PROP/BEAM's PROP_BEAM.
+            # The test is `sec.elform`, NOT membership of _truss_secids(state):
+            # that set is BUILT from this same elform over this same dict, so
+            # the second half was a no-op, and the property has to be written
+            # from the SECTION even when no *PART reaches it (an unreferenced
+            # /PROP is legal; a /PART pointing at a missing one is ERROR 178).
+            # A section whose every part is claimed by a connector path is
+            # already gone via spotweld_only_secids above.
             if _truss_section_is_emittable(state, sec):
                 truss_secids.add(sec.secid)
                 emitted_truss_secs.append(sec)
