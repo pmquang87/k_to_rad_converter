@@ -29,8 +29,13 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   `*MAT_MUSCLE` / `*MAT_156` and `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
   `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`, routed by the PROPERTY the part
   carries (truss vs discrete) and validated against the engine force law to 7
-  digits. Radioss has no truss element, so the axial-only muscle becomes a
-  spring — which is what an LS-DYNA truss states anyway.
+  digits. Radioss DOES have a truss element — `/TRUSS` + `/PROP/TYPE2`, read by
+  `hm_read_truss.F` and `hm_read_prop02.F` and integrated by `tforc3.F` — but it
+  carries no MUSCLE law: `PROP_TRUSS` is declared by six laws only (0, 1, 2, 13,
+  34, 44) and LAW156's Radioss counterpart lives entirely in a spring property,
+  so the axial-only muscle becomes a `/PROP/TYPE46` spring. (The premise
+  "Radioss has no truss element" was FALSE and was corrected with the R14 truss
+  batch; the conclusion is unchanged, for this different reason.)
   `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` + `/HEAT/MAT` with the
   minimal temperature-driver foothold (`/INITEMP`, `/IMPTEMP`); a `*MAT_ELASTIC`
   material whose every part is a SHELL is restated as `/MAT/LAW36` with a
@@ -676,9 +681,10 @@ covering them unlocks a large class of real models.
   (`/PROP/TYPE18` has a single material column), a rule on a
   `*MAT_ELASTIC` part (Radioss bans LAW1 from every layered shell property and
   from `/PROP/TYPE18`, so this needs the material re-stated rather than
-  converter work), `*SECTION_BEAM ELFORM = 3` → `/PROP/TYPE2` (TRUSS) with
-  `*ELEMENT_BEAM` routed to `/TRUSS`, the named `SECTION_nn` standard section on
-  `*SECTION_BEAM` card 2b (reported, not converted), the per-element
+  converter work), the named `SECTION_nn` standard section on
+  `*SECTION_BEAM` card 2b (reported, not converted — on ELFORM 3 the resulting
+  zero-area `/PROP/TYPE2` is refused rather than emitted as starter ERROR 497),
+  the per-element
   ply override of `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the
   element-variant batch below — but the ply cards themselves are not read; no
   converter implements this, dyna2rad included),
@@ -894,7 +900,11 @@ The modal stiffness-export chain (`/IMPL/PRINT/STIF` → offline solve) is a
 validated foundation for further linear analyses:
 
 - **Linear buckling** (`Kφ = λ K_g φ`) — **done** for beam/rod/truss elements
-  (`tools/modal_buckling.py`, Euler-validated to 0.001 %). Shells are now also
+  (`tools/modal_buckling.py`, Euler-validated to 0.001 %). "truss" there means a
+  BEAM element used as an axial rod (`sec.area > 0`, second moments falling back
+  to 0), not a Radioss `/TRUSS`; the two coincide because the R14 truss batch
+  keeps ELFORM-3 elements in `state.beam_elems` and only branches at write time,
+  so `tools/modal_common.py`'s three-family `collect` still sees them. Shells are now also
   **done** (consistent-membrane K_g, SSSS-plate-validated to 2.2 % at 8x8);
   a rigorous solid-element K_g remains open.
 - **Harmonic / FRF output** — **done** (`tools/modal_frf.py`).

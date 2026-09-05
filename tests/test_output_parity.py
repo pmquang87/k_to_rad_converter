@@ -426,7 +426,10 @@ class BeamHistory(unittest.TestCase):
             extra="*DATABASE_HISTORY_BEAM\n" + _row(101, 999)))
         ids = [_col_i(ln, 1, 10) for ln in _rows(_block(starter, "/TH/BEAM/"))]
         self.assertEqual(ids, [101])
-        hits = _warns(result, "not an emitted /BEAM or /SPRING")
+        # "/BEAM, /SPRING or /TRUSS" since the R14 truss batch: an
+        # *ELEMENT_BEAM on an ELFORM=3 section is a /TRUSS in the emitted
+        # deck, so the screen has a third register to consult.
+        hits = _warns(result, "not an emitted /BEAM, /SPRING or /TRUSS")
         self.assertTrue(hits, result.warnings)
         self.assertIn("ERROR 69", hits[0])
 

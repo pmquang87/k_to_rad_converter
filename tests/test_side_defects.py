@@ -1637,10 +1637,15 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
         """The exact call-site count, so a silently deleted or re-added bare
         ``next_id()`` shows up as a number change rather than as nothing.
 
-        18 = 4 master-surface (common.py) + 5 /SECT (inistate.py) + 1
+        19 = 4 master-surface (common.py) + 6 /SECT (inistate.py) + 1
         /CLUSTER/BRICK (loads.py) + 4 bag-surface (monvol.py) + 2 /PRELOAD
         (preload.py) + 1 FSI /GRBRIC/PART (blast_ale.py) + 1 /ACTIV
-        (rarecards.py, the only one that was guarded before this batch)."""
+        (rarecards.py, the only one that was guarded before this batch).
+
+        The /SECT count went 5 -> 6 with the R14 truss batch: the card has a
+        grtrus_ID column of its own and a *SECTION_BEAM ELFORM=3 element is a
+        /TRUSS, so a cross section holding one now emits a /GRTRUS/TRUS group
+        beside the /GRBEAM one."""
         import re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
@@ -1650,7 +1655,7 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
                 # Skip prose: only count real call sites.
                 if re.search(r"state\.next_elem_group_id\(\)", ln):
                     n += 1
-        self.assertEqual(n, 18)
+        self.assertEqual(n, 19)
 
 
 class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):

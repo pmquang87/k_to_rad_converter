@@ -14,7 +14,7 @@ from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
     _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
-    _spotweld_beam_pids, _vcross, _vnorm, _vsub,
+    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
@@ -6727,8 +6727,21 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # principle and tested synthetically.
     for c in state.sph_elems:
         elem_nodes.update(c.nodes)
+    # A TRUSS contributes ONLY (n1, n2). /TRUSS has no third-node column, so a
+    # deck-stated N3 on an ELFORM=3 *ELEMENT_BEAM (two corpus decks do state a
+    # real one, node 45012) is a node the truss does not stiffen — counting it
+    # as "attached" would switch the implicit singularity guard OFF for it and
+    # leave six zero rows in the tangent. That is the #120 failure mode with
+    # the sign reversed: a genuinely free node left free, rather than a stiff
+    # node clamped. Both carrier decks are explicit, so no corpus run reaches
+    # this branch — closed on principle and tested synthetically, exactly as
+    # the SPH arm above was.
+    truss_pids = _truss_pids(state)
     for e in state.beam_elems:
-        elem_nodes.update((e.n1, e.n2, e.n3))
+        if e.pid in truss_pids:
+            elem_nodes.update((e.n1, e.n2))
+        else:
+            elem_nodes.update((e.n1, e.n2, e.n3))
     # /SPRING connector nodes carry spring stiffness; the synthesized ground
     # nodes are already fully /BCS-fixed by the connector section.
     #

@@ -2250,9 +2250,10 @@ def _starter_section_registry():
         ("cross_sections",    lambda c: _make_cross_sections(c.state)),
         # Bolt pre-tension. AFTER cross_sections, which fills state.sect_ids
         # (the dedicated preload /SECT must dodge those ids) and after every
-        # /BEAM and /SPRING producer above, whose write lines fill
-        # state.beam_elem_ids / spring_elem_ids (the *SET_BEAM of
-        # *INITIAL_AXIAL_FORCE_BEAM is split by what was ACTUALLY emitted).
+        # /BEAM, /SPRING and /TRUSS producer above, whose write lines fill
+        # state.beam_elem_ids / spring_elem_ids / truss_elem_ids (the *SET_BEAM
+        # of *INITIAL_AXIAL_FORCE_BEAM is split by what was ACTUALLY emitted —
+        # a /GRTRUS group is a third family the reader scans).
         # BEFORE free_node_constraints, so the three synthesized /SECT frame
         # nodes are in state.nodes when the implicit singularity guard runs —
         # they carry no element and no stiffness, so a /BCS 111 111 on them is
@@ -2263,7 +2264,8 @@ def _starter_section_registry():
         ("preload",           lambda c: _make_preload(c.state)),
         # *DEFINE_ELEMENT_DEATH_* -> /ACTIV. AFTER parts_elements far above,
         # which fills state.shell_elem_ids / sh3n_elem_ids / solid_elem_ids /
-        # beam_elem_ids and the three BEAM->/SPRING re-route registries at the
+        # beam_elem_ids / truss_elem_ids and the three BEAM->/SPRING re-route
+        # registries at the
         # line that writes each element row — the same "registry filled at the
         # write line, consumed by a later section" ordering the /CLUSTER +
         # swforc pair relies on. A no-op drawing no id on any deck without the

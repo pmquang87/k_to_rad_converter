@@ -14,6 +14,8 @@
                                        count they cost
   A6  *MAT_HIGH_EXPLOSIVE_BURN K/G/SIGY, and the LAW51 `Bunreacted` derivation
   A7  /MAT/LAW51 submaterial restatement, the vacuum phase, the AMMG clone
+  B1  *SECTION_BEAM ELFORM=3       -> /PROP/TYPE2 (TRUSS) + /TRUSS elements
+  B2  a material stating RO <= 0   -> the 1e-24 density floor (opt-out)
 
 Kept in its own module, the repo's one-module-per-batch convention.
 """
@@ -1220,6 +1222,420 @@ class AleSubmaterialTests(unittest.TestCase):
         res, starter = _convert(deck)
         self.assertEqual(_headers(starter, "/MAT/LAW51/"), [])
         self.assertIn("no submaterial survives", " ".join(res.warnings))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B1 — *SECTION_BEAM ELFORM=3 -> /PROP/TYPE2 (TRUSS) + /TRUSS
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: A two-node bar of length 100 on part 1, section 1, material 1.
+_BAR_NODES = """*NODE
+         1             0.0             0.0             0.0
+         2           100.0             0.0             0.0
+         3           200.0             0.0             0.0
+         4             0.0            50.0             0.0
+"""
+
+
+def _truss_deck(*, elform: int = 3, area: float = 25.0, rampt: float = 0.0,
+                stress: float = 0.0, mat: str = "", extra: str = "",
+                elems: str = "", n3: str = "") -> str:
+    """A minimal ELFORM=3 truss deck: two bars, one section, one material."""
+    mat = mat or ("*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n")
+    elems = elems or ("*ELEMENT_BEAM\n"
+                      + f"{10:>8}{1:>8}{1:>8}{2:>8}{n3:>8}" + "\n"
+                      + f"{11:>8}{1:>8}{2:>8}{3:>8}{n3:>8}" + "\n")
+    return ("*KEYWORD\n"
+            + _BAR_NODES
+            + "*PART\nbar\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_BEAM\n" + _row(1, elform, 1.0, 0.0, 0) + "\n"
+            + _row(area, rampt, stress) + "\n"
+            + mat + elems + extra
+            + "*CONTROL_TERMINATION\n" + _row(0.01) + "\n*END\n")
+
+
+class TrussCards(unittest.TestCase):
+    """The two card layouts, resolved for /BEGIN 2022 and starter-validated on
+    ``F:/dynaexamples_r14_ton-mm-s/intro-by-j.-day/elements/rod-i/rod.k``
+    (0 ERROR / 0 WARNING; engine NORMAL TERMINATION, 415 cycles, element type
+    echoed as TRUSS)."""
+
+    def test_the_element_block_is_three_cells(self):
+        """``radioss41/ELEM/truss.cfg``: ``CARD("%10d%10d%10d",id,node_ID1,
+        node_ID2)`` — no third node, no orientation cell, no offset cell.
+        ``hm_read_truss.F:157-158`` takes material and property from the
+        /PART."""
+        _r, starter = _convert(_truss_deck())
+        rows = _data_rows(starter, "/TRUSS/1")
+        self.assertEqual(rows, [f"{10:>10}{1:>10}{2:>10}",
+                                f"{11:>10}{2:>10}{3:>10}"])
+        for ln in rows:
+            self.assertEqual(len(ln.rstrip()), 30)
+        # ... and the part gets NO /BEAM block at all.
+        self.assertEqual(_headers(starter, "/BEAM/"), [])
+
+    def test_the_property_is_area_and_a_zero_gap(self):
+        """``prop_p2_trus.cfg`` FORMAT(radioss51) = ``%20lg%20lg`` AREA GAP.
+        GAP is written 0 ALWAYS: ``tforc3.F:184-186`` turns a positive
+        ``GEO(2)`` into a compression-only GAP ELEMENT, and nothing on
+        ``*SECTION_BEAM`` ELFORM 3 maps to that."""
+        _r, starter = _convert(_truss_deck(area=25.0))
+        self.assertEqual(_headers(starter, "/PROP/TYPE2/"), ["/PROP/TYPE2/1"])
+        rows = _data_rows(starter, "/PROP/TYPE2/1")
+        # row 0 is the title card, row 1 the two cells.
+        self.assertEqual(_fields(rows[1]), ["25", "0"])
+        self.assertEqual(_headers(starter, "/PROP/BEAM/"), [])
+
+    def test_a_zero_area_section_is_refused_not_emitted(self):
+        """Card 2b (the NAMED standard section) reaches ELFORM 3 too, and reads
+        no area — ``hm_read_prop02.F:117-124`` is ERROR 497 on ``AREA <= 0``.
+        Before this batch such a section became a /PROP/BEAM with Area 0
+        (ERROR 314); it must not now become a /PROP/TYPE2 with Area 0."""
+        deck = ("*KEYWORD\n" + _BAR_NODES
+                + "*PART\nbar\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_BEAM\n" + _row(1, 3, 1.0, 0.0, 0) + "\n"
+                + "SECTION_01".ljust(10) + _row(10.0, 5.0) + "\n"
+                + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+                + "*ELEMENT_BEAM\n" + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertEqual(_headers(starter, "/PROP/TYPE2/"), [])
+        self.assertTrue(any("ERROR 497" in w for w in res.warnings),
+                        res.warnings)
+        # The elements stay: the mesh is not the defect.
+        self.assertTrue(_headers(starter, "/TRUSS/"))
+
+    def test_the_write_line_register_is_filled(self):
+        """The #106 rule: ``state.truss_elem_ids`` is filled AT the row, so a
+        beam whose part the writer never visits is not in it."""
+        res, _starter = _convert(_truss_deck(
+            elems=("*ELEMENT_BEAM\n"
+                   + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                   # part 99 has no *PART record -> mesh loss, never written
+                   + f"{77:>8}{99:>8}{2:>8}{3:>8}" + "\n")))
+        del res
+        st = _dispatch(_truss_deck())
+        self.assertEqual({e.eid for e in st.beam_elems}, {10, 11})
+
+
+class TrussSectionCells(unittest.TestCase):
+    """RAMPT / STRESS — screened, then named. Vol I R17 p.41-18: they are a
+    DYNAMIC-RELAXATION pre-tension pair."""
+
+    def test_an_inert_pair_is_reported_as_inert(self):
+        """``ex_05_beam_elform_3_&_6.k`` states RAMPT = STRESS = 1.0 and has no
+        relaxation phase, so the cells do nothing in LS-DYNA either. Calling
+        that "DROPPED" would be a false alarm (#125)."""
+        res, _s = _convert(_truss_deck(rampt=1.0, stress=1.0))
+        hit = [w for w in res.warnings if "RAMPT" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("INERT in LS-DYNA too", hit[0])
+        self.assertIn("NO dynamic-relaxation phase", hit[0])
+
+    def test_a_live_pair_states_the_equivalent_preload_force(self):
+        """With a relaxation phase the pair IS live, and the honest statement
+        is the force /PRELOAD/AXIAL would take: STRESS x A."""
+        res, _s = _convert(_truss_deck(
+            area=25.0, rampt=0.002, stress=100.0,
+            extra="*CONTROL_DYNAMIC_RELAXATION\n" + _row(250, 0.001) + "\n"))
+        hit = [w for w in res.warnings if "RAMPT" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("STRESS x A = 2500", hit[0])
+        self.assertIn("starts UNSTRESSED", hit[0])
+
+    def test_a_curve_sidr_alone_starts_a_relaxation_phase(self):
+        """A deck can start one from the curve alone — SIDR 1 = "load curve
+        used in stress initialization", 2 = both phases (p.17-104)."""
+        curve = ("*DEFINE_CURVE\n" + _row(9, 2) + "\n"
+                 + _row16(0.0, 0.0) + "\n" + _row16(1.0, 1.0) + "\n")
+        res, _s = _convert(_truss_deck(area=25.0, rampt=0.002, stress=100.0,
+                                       extra=curve))
+        hit = [w for w in res.warnings if "RAMPT" in w]
+        self.assertIn("STRESS x A = 2500", hit[0])
+
+    def test_a_zero_pair_says_nothing(self):
+        res, _s = _convert(_truss_deck())
+        self.assertEqual([w for w in res.warnings if "RAMPT" in w], [])
+
+
+class TrussElementCells(unittest.TestCase):
+    """The *ELEMENT_BEAM cells a truss cannot carry."""
+
+    def test_a_translational_release_is_named(self):
+        """RT1/RT2 (fields 6 and 8) are a REAL loss on a truss: axial
+        translation is its only load path."""
+        elems = ("*ELEMENT_BEAM\n"
+                 + f"{10:>8}{1:>8}{1:>8}{2:>8}{'':>8}{7:>8}{0:>8}{0:>8}" + "\n")
+        res, _s = _convert(_truss_deck(elems=elems))
+        hit = [w for w in res.warnings if "TRANSLATIONAL release" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("TOTAL loss", hit[0])
+        self.assertIn("Rotational releases (RR1/RR2)", hit[0])
+
+    def test_a_rotational_release_alone_says_nothing(self):
+        """RR1/RR2 and LOCAL are inert on a truss — a truss transmits no
+        moment, and LOCAL is only the FRAME of a stated release."""
+        elems = ("*ELEMENT_BEAM\n"
+                 + f"{10:>8}{1:>8}{1:>8}{2:>8}{'':>8}{0:>8}{7:>8}{0:>8}"
+                   f"{7:>8}{2:>8}" + "\n")
+        res, _s = _convert(_truss_deck(elems=elems))
+        self.assertEqual([w for w in res.warnings
+                          if "TRANSLATIONAL release" in w], [])
+
+    def test_no_orientation_node_is_synthesized_for_a_truss(self):
+        """B1 of the #120 audit. A synthesized node would be referenced by
+        nothing and would enter ``beam_orient_nodes``, which the implicit
+        free-node sweeper SUBTRACTS."""
+        elems = ("*ELEMENT_BEAM_ORIENTATION\n"
+                 + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                 + f"{0.0:>10}{0.0:>10}{1.0:>10}" + "\n")
+        res, starter = _convert(_truss_deck(elems=elems))
+        self.assertTrue(any("no third node is synthesized" in w
+                            for w in res.warnings), res.warnings)
+        # Four *NODE records in, four out — nothing was minted.
+        self.assertEqual(len(_data_rows(starter, "/NODE")), 4)
+
+    def test_an_ordinary_beam_still_gets_its_orientation_node(self):
+        """The exclusion is scoped to trusses: an ELFORM=2 part is
+        untouched."""
+        elems = ("*ELEMENT_BEAM_ORIENTATION\n"
+                 + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                 + f"{0.0:>10}{0.0:>10}{1.0:>10}" + "\n")
+        res, starter = _convert(_truss_deck(elform=2, elems=elems))
+        self.assertTrue(any("third node(s) synthesized" in w
+                            for w in res.warnings), res.warnings)
+        self.assertEqual(len(_data_rows(starter, "/NODE")), 5)
+
+
+class TrussMaterialGate(unittest.TestCase):
+    """check_mat_elem_prop_compatibility.F:331-335 (ERROR 3046) / :373-374
+    (ERROR 3047). PROP_TRUSS = 1 is declared by exactly six laws."""
+
+    def test_the_law_set_is_the_six_init_mat_keyword_call_sites(self):
+        from k2rad.writer.truss import _TRUSS_LAWS
+        self.assertEqual(set(_TRUSS_LAWS), {0, 1, 2, 13, 34, 44})
+
+    def test_law36_on_a_truss_is_named(self):
+        """*MAT_PIECEWISE_LINEAR_PLASTICITY -> /MAT/LAW36 is BEAM_INTEGRATED
+        only and is NOT truss-compatible; it is the single most common
+        LS-DYNA metal law."""
+        mat = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+               + _row(1, "7.85E-09", 210000.0, 0.3, 250.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        res, _s = _convert(_truss_deck(mat=mat))
+        hit = [w for w in res.warnings if "ERROR 3046" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("/MAT/LAW36", hit[0])
+        self.assertIn("part 1 on mid 1", hit[0])
+
+    def test_law1_on_a_truss_says_nothing(self):
+        res, _s = _convert(_truss_deck())
+        self.assertEqual([w for w in res.warnings if "ERROR 3046" in w], [])
+
+    def test_a_zero_force_law_is_named_separately(self):
+        """LAW0 (VOID) IS accepted by the starter but its engine arm writes no
+        force at all — ``tforc3.F:189-224`` dispatches only MTN 1/2/34/44."""
+        mat = "*MAT_NULL\n" + _row(1, "7.85E-09") + "\n"
+        res, _s = _convert(_truss_deck(mat=mat))
+        hit = [w for w in res.warnings if "carries NO FORCE by design" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("/MAT/LAW0", hit[0])
+
+    def test_a_refused_section_warns_about_no_material(self):
+        """The gate is driven by the sections that ACTUALLY emitted a
+        /PROP/TYPE2 — a refused one is not warned about twice."""
+        deck = ("*KEYWORD\n" + _BAR_NODES
+                + "*PART\nbar\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_BEAM\n" + _row(1, 3, 1.0, 0.0, 0) + "\n"
+                + "SECTION_01".ljust(10) + _row(10.0, 5.0) + "\n"
+                + "*MAT_BLATZ-KO_RUBBER\n" + _row(1, "1.0E-09", 5.0) + "\n"
+                + "*ELEMENT_BEAM\n" + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                + "*END\n")
+        res, _s = _convert(deck)
+        self.assertEqual([w for w in res.warnings if "ERROR 3046" in w], [])
+
+
+class TrussRegistryAudit(unittest.TestCase):
+    """The #120 audit: every element-registry walk that had to grow a truss arm
+    or an exclusion, reached by a probe."""
+
+    def test_database_history_beam_splits_three_ways(self):
+        """/TH/TRUSS is its own group type: ``hm_read_thgrou.F:2466-2486``
+        resolves it through ``MAP_TABLES%ITRUSSM`` over NUMELT, so a truss id
+        in a /TH/BEAM group matches nothing."""
+        _r, starter = _convert(_truss_deck(
+            extra="*DATABASE_HISTORY_BEAM\n" + _row(10, 11) + "\n"))
+        self.assertTrue(_headers(starter, "/TH/TRUSS/"))
+        self.assertEqual(_headers(starter, "/TH/BEAM/"), [])
+        body = _block(starter, _headers(starter, "/TH/TRUSS/")[0])
+        ids = [int(ln[:10]) for ln in body if ln[:10].strip().isdigit()]
+        self.assertEqual(ids, [10, 11])
+
+    def test_a_set_beam_of_truss_parts_reaches_the_th_group(self):
+        """C1's verdict in action: a truss is still spelled *SET_BEAM, and
+        ``_elems_of_parts(state.beam_elems, ...)`` still finds it because the
+        elements never left ``beam_elems``."""
+        extra = ("*SET_BEAM\n" + _row(5) + "\n" + _row(10, 11) + "\n"
+                 + "*DATABASE_HISTORY_BEAM_SET\n" + _row(5) + "\n")
+        _r, starter = _convert(_truss_deck(extra=extra))
+        self.assertTrue(_headers(starter, "/TH/TRUSS/"))
+
+    def test_element_death_uses_the_grtrus_slot(self):
+        """``hm_read_activ.F:96`` reads GR_TRUSS_SET; a truss id in the
+        grbeam column resolves to nothing and the element never dies."""
+        extra = ("*DEFINE_ELEMENT_DEATH_BEAM\n" + _row(10, 0.005) + "\n")
+        _r, starter = _convert(_truss_deck(extra=extra))
+        self.assertTrue(_headers(starter, "/GRTRUS/TRUS/"))
+        # rows: [title, the eight group columns, Tstart/Tstop]
+        row = _data_rows(starter, _headers(starter, "/ACTIV/")[0])[1]
+        cells = [row[i:i + 10].strip() for i in range(0, 80, 10)]
+        # sens grbric grquad grshel grtrus grbeam grspr grsh3n
+        self.assertEqual(cells[0], "0")
+        self.assertNotEqual(cells[4], "0")      # grtrus filled
+        self.assertEqual(cells[5], "0")         # grbeam empty
+
+    def test_a_cross_section_puts_trusses_in_the_grtrus_column(self):
+        """The /SECT card's grtrus_ID column, which k2rad wrote 0 into."""
+        # Card: NSID HSID BSID SSID TSID DSID (Vol I R17 p.16-49).
+        extra = ("*SET_NODE_LIST\n" + _row(6) + "\n" + _row(1, 2, 3) + "\n"
+                 + "*SET_BEAM\n" + _row(7) + "\n" + _row(10, 11) + "\n"
+                 + "*DATABASE_CROSS_SECTION_SET\n"
+                 + _row(6, 0, 7, 0, 0, 0) + "\n")
+        _r, starter = _convert(_truss_deck(extra=extra))
+        self.assertTrue(_headers(starter, "/GRTRUS/TRUS/"))
+        self.assertEqual(_headers(starter, "/GRBEAM/BEAM/"), [])
+        rows = _data_rows(starter, _headers(starter, "/SECT/")[0])
+        # rows: [title, node/frame card, file_name, the group columns]
+        cells = [rows[3][i:i + 10].strip() for i in range(0, 70, 10)]
+        # grbric <blank> grshel grtrus grbeam grsprg grtria
+        self.assertNotEqual(cells[3], "0")      # grtrus filled
+        self.assertEqual(cells[4], "0")         # grbeam empty
+
+    def test_preload_axial_takes_a_grtrus_group(self):
+        """``hm_read_preload_axial.F90:284-291`` scans ngrtrus and sets
+        itype = 4."""
+        extra = ("*SET_BEAM\n" + _row(8) + "\n" + _row(10, 11) + "\n"
+                 + "*DEFINE_CURVE\n" + _row(4) + "\n"
+                 + _row16(0.0, 0.0) + "\n" + _row16(0.01, 1.0) + "\n"
+                 + "*INITIAL_AXIAL_FORCE_BEAM\n" + _row(8, 4, 1000.0) + "\n")
+        _r, starter = _convert(_truss_deck(extra=extra))
+        self.assertTrue(_headers(starter, "/GRTRUS/TRUS/"))
+        self.assertTrue(_headers(starter, "/PRELOAD/AXIAL/"))
+        self.assertEqual(_headers(starter, "/GRBEAM/BEAM/"), [])
+
+    def test_the_free_node_sweeper_ignores_a_truss_n3(self):
+        """B2 of the audit. A deck-stated N3 on a truss is a node the element
+        does not stiffen; counting it as attached would switch the implicit
+        singularity guard OFF for it. Two corpus decks state a real N3 on a
+        truss (node 45012), and both are EXPLICIT, so this is closed on
+        principle and probed synthetically — as the SPH arm was."""
+        elems = ("*ELEMENT_BEAM\n"
+                 + f"{10:>8}{1:>8}{1:>8}{2:>8}{4:>8}" + "\n"
+                 + f"{11:>8}{1:>8}{2:>8}{3:>8}{4:>8}" + "\n")
+        implicit = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.1) + "\n")
+
+        def _free_nodes(starter):
+            for h in _headers(starter, "/GRNOD/NODE/"):
+                rows = _data_rows(starter, h)
+                if rows and rows[0].strip() == "free_reference_nodes":
+                    return {int(v) for ln in rows[1:]
+                            for v in ln.split() if v.isdigit()}
+            return set()
+
+        # Node 4 is named as N3 by the two trusses and by nothing else, so it
+        # carries no stiffness and IS a free reference node.
+        _r, starter = _convert(_truss_deck(elems=elems, extra=implicit))
+        self.assertEqual(_free_nodes(starter), {4})
+        # CONTROL — the same deck on an ELFORM=2 section: the /BEAM node_ID3
+        # column really does hold node 4, the beam arm counts it as attached,
+        # and no free-node group is emitted at all. That difference is what
+        # proves the probe reaches the branch under test.
+        _r2, starter2 = _convert(_truss_deck(elform=2, elems=elems,
+                                             extra=implicit))
+        self.assertEqual(_free_nodes(starter2), set())
+
+    def test_a_muscle_part_is_not_claimed_by_the_truss_path(self):
+        """*MAT_MUSCLE parts are ELFORM=3 by convention and already become a
+        /PROP/TYPE46 /SPRING; both writers emit /PART/<pid>, and two of them
+        is starter ERROR 79."""
+        mat = ("*MAT_MUSCLE\n"
+               + _row(1, "1.0E-09", 0, 1.0, 1.0, 1.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        _r, starter = _convert(_truss_deck(mat=mat))
+        self.assertEqual(_headers(starter, "/TRUSS/"), [])
+        self.assertEqual(_headers(starter, "/PROP/TYPE2/"), [])
+        self.assertEqual(len(_headers(starter, "/PART/1")), 1)
+
+    def test_an_integration_rule_on_a_truss_section_is_refused(self):
+        """C20. ``hm_read_prop02.F`` has no integration column at all; the
+        section keeps its card-2 AREA, which is the only cell /PROP/TYPE2
+        reads, so the refusal loses nothing."""
+        deck = ("*KEYWORD\n" + _BAR_NODES
+                + "*PART\nbar\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_BEAM\n" + _row(1, 3, 1.0, -7.0, 0) + "\n"
+                + _row(25.0, 0.0, 0.0) + "\n"
+                + "*INTEGRATION_BEAM\n" + _row(7, 0, 2) + "\n"
+                + _row(0.5, 0.5, 0.5) + "\n" + _row(-0.5, -0.5, 0.5) + "\n"
+                + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+                + "*ELEMENT_BEAM\n" + f"{10:>8}{1:>8}{1:>8}{2:>8}" + "\n"
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertTrue(any("does not integrate a cross-section" in w
+                            for w in res.warnings), res.warnings)
+        self.assertEqual(_fields(_data_rows(starter, "/PROP/TYPE2/1")[1]),
+                         ["25", "0"])
+
+    def test_a_composite_layup_still_refuses_a_truss_part(self):
+        """B10/B11: ``beam_pids = {e.pid for e in state.beam_elems}`` still
+        holds a truss part, so the composite/fabric refusal is unchanged."""
+        from k2rad.writer.common import _truss_pids
+        st = _dispatch(_truss_deck())
+        self.assertEqual(_truss_pids(st), {1})
+        self.assertEqual({e.pid for e in st.beam_elems}, {1})
+
+    def test_a_truss_section_stays_in_sec_beams(self):
+        """B9: five mixed-family SECID tests and ``next_prop_id`` all read
+        ``set(state.sec_beams)``. Keeping the truss section there is what
+        makes them correct with zero edits."""
+        st = _dispatch(_truss_deck())
+        self.assertIn(1, st.sec_beams)
+        self.assertEqual(st.sec_beams[1].elform, 3)
+
+
+class TrussAnalytic(unittest.TestCase):
+    """The physics the two cards have to reproduce, hand-computed.
+
+    Cross-checked on the solver: ``rod.k`` (40 x 12.7 mm bars, A = 645 mm2,
+    E = 206800 MPa, rho = 7.89e-9 t/mm3, 500 N step) converted by this branch
+    ran 0 ERROR / 0 WARNING in the starter and NORMAL TERMINATION / 415 cycles
+    in the engine, with dt = 2.233E-06 s against the closed form
+    L/c x 0.9 = 2.232593e-6, TOTAL MASS 0.2585E-02 against rho.A.L_tot =
+    2.585237e-3, and node-2 DX = 3.59858e-3 mm at t = 1.875e-4 against
+    LS-DYNA's own nodout 3.61857e-3 (-0.55%).
+    """
+
+    def test_the_area_reaches_the_property_verbatim(self):
+        """``tmat3.F:47-50`` KX = YM*AREA/AL: the axial stiffness is EA/L and
+        AREA is the only geometric input the property carries. A = 645 on a
+        12.7 mm bar of E = 206800 is EA/L = 1.050283e7 N/mm."""
+        _r, starter = _convert(_truss_deck(area=645.0))
+        self.assertEqual(_fields(_data_rows(starter, "/PROP/TYPE2/1")[1])[0],
+                         "645")
+        e_a_over_l = 206800.0 * 645.0 / 12.7
+        self.assertAlmostEqual(e_a_over_l, 1.0502834645669293e7, places=1)
+
+    def test_the_wave_speed_time_step_is_the_bar_formula(self):
+        """``dt1lawt.F:55-60`` SSP = SQRT(E/RHO0), DTX = DELTAX/SSP — nothing
+        else from the material reaches the truss."""
+        c = (206800.0 / 7.89e-9) ** 0.5
+        self.assertAlmostEqual(c, 5119608.667, places=2)
+        self.assertAlmostEqual(0.9 * 12.7 / c, 2.2325925e-6, places=12)
+        # ... which is what the starter echoed at cycle 0 on the real deck
+        # (0.2233E-05, ELEMENT type TRUSS).
+        self.assertEqual(f"{0.9 * 12.7 / c:.4E}", "2.2326E-06")
 
 if __name__ == "__main__":
     unittest.main()

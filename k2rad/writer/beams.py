@@ -343,6 +343,11 @@ def _resolve_integration_beams(state: ConversionState) -> None:
                 "not what the deck is about.")
             continue
         if sec.elform not in _INTEGRATED_ELFORMS:
+            # ELFORM=3 (TRUSS) reaches this arm and is REFUSED here, which is
+            # what it needs: hm_read_prop02.F has no integration column at all,
+            # so a rule bound to a truss section has nowhere to go. The section
+            # keeps its card-2 AREA, which is the only cell /PROP/TYPE2 reads —
+            # so the refusal loses nothing a truss could have used.
             state.warn(
                 f"{label}: ELFORM={sec.elform} does not integrate a "
                 f"cross-section, so *INTEGRATION_BEAM {rule.irid} is DROPPED — "

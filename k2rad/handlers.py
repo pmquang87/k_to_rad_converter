@@ -1227,7 +1227,13 @@ def _positional_elem_fields(line: str, n: int):
 
 
 def _parse_beam_base(line: str):
-    """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3) or None."""
+    """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3, rt1, rt2)
+    or None.
+
+    Field order is EID PID N1 N2 N3 RT1 RR1 RT2 RR2 LOCAL (Vol I R17 p.19-5).
+    Only the TRANSLATIONAL releases RT1 (field 6) and RT2 (field 8) are kept —
+    see BeamElem for why the rotational pair and LOCAL are not.
+    """
     f = _positional_elem_fields(line, 10)
     # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
     # so 4 fields (eid pid n1 n2) is a complete card.
@@ -1236,7 +1242,9 @@ def _parse_beam_base(line: str):
     eid, pid = to_int(f[0]), to_int(f[1])
     n1, n2 = to_int(f[2]), to_int(f[3])
     n3 = to_int(f[4]) if len(f) > 4 else 0
-    return eid, pid, n1, n2, n3
+    rt1 = to_int(f[5]) if len(f) > 5 else 0
+    rt2 = to_int(f[7]) if len(f) > 7 else 0
+    return eid, pid, n1, n2, n3, rt1, rt2
 
 
 def handle_element_beam(block: Block, state: ConversionState) -> None:
@@ -1271,13 +1279,14 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
             parsed = _parse_beam_base(line)
             if parsed is None:
                 continue
-            eid, pid, n1, n2, n3 = parsed
+            eid, pid, n1, n2, n3, rt1, rt2 = parsed
             if eid in seen_eids:
                 rec.n_unparsed += 1
                 continue
             seen_eids.add(eid)
             state.beam_elems.append(
-                BeamElem(eid, pid, n1, n2, n3, provisional=True))
+                BeamElem(eid, pid, n1, n2, n3, provisional=True,
+                         rt1=rt1, rt2=rt2))
             rec.eids.append(eid)
         state.provisional_elem_blocks.append(rec)
         return
@@ -1288,7 +1297,7 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
         if parsed is None:
             i += 1
             continue
-        eid, pid, n1, n2, n3 = parsed
+        eid, pid, n1, n2, n3, rt1, rt2 = parsed
         i += 1
         vx = vy = vz = 0.0
         # Card order follows the manual's card numbering: _OFFSET (card 7)
@@ -1307,7 +1316,8 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
                           to_float(f[2]) if len(f) > 2 else 0.0)
             if vx == 0.0 and vy == 0.0 and vz == 0.0:
                 n_zerovec += 1
-        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3, vx, vy, vz))
+        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3, vx, vy, vz,
+                                         rt1=rt1, rt2=rt2))
 
     if n_offset:
         state.warn(
@@ -2648,25 +2658,35 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
             # ELFORM 3 truss: A RAMPT STRESS. Only the AREA has a /PROP meaning
             # — reading fields 2/3 as Iyy/Izz (which this handler used to do,
             # via the catch-all resultant branch) put a ramp TIME and an initial
-            # STRESS into two bending inertias.
+            # STRESS into two bending inertias. RAMPT/STRESS are kept on the
+            # record and SCREENED by the truss writer (writer/truss.py), which
+            # is the only place that knows whether the deck has a
+            # dynamic-relaxation phase for them to act in. No warning here: the
+            # section now converts to /PROP/TYPE2 (TRUSS) and its elements to
+            # /TRUSS, so the old "no k2rad path yet" text was the statement of
+            # a gap this batch closes.
             sec.area = to_float(f2[0]) if f2 else 0.0
-            state.warn(
-                f"*SECTION_BEAM {secid}: ELFORM=3 is a TRUSS (axial force "
-                "only). Its AREA is carried to /PROP/BEAM but RAMPT (the "
-                "pre-tension ramp time) and STRESS (the initial axial stress) "
-                "are DROPPED — Radioss's /PROP/TYPE2 (TRUSS) has no k2rad path "
-                "yet, so the element keeps full bending stiffness with "
-                "Iyy=Izz=Ixx=0. Restate a pre-tensioned truss as an initial "
-                "condition if it carries load.")
+            sec.rampt = to_float(f2[1]) if len(f2) > 1 else 0.0
+            sec.prestress = to_float(f2[2]) if len(f2) > 2 else 0.0
         elif kind == "2b":
+            # Card 2b reaches ELFORM 2, 3 AND 12 (p.41-9), so an ELFORM=3
+            # section can state its geometry here instead of as card 2d's
+            # `A RAMPT STRESS` — and then Area stays 0. writer/truss.py's
+            # _truss_section_is_emittable REFUSES such a section rather than
+            # writing a /PROP/TYPE2 with AREA 0 (ERROR 497), which is why this
+            # message names both destinations.
             state.warn(
                 f"*SECTION_BEAM {secid}: card 2 is the NAMED standard section "
                 f"'{(f2[0] if f2 else '').strip()}', whose D1..D6 dimensions "
                 "k2rad has no path for — the section's Area/Iyy/Izz/Ixx stay "
-                "ZERO and the beam carries no stiffness. State the section "
-                "numerically (ELFORM=2 with A/ISS/ITT/J) or, for an integrated "
-                "beam, as an *INTEGRATION_BEAM rule referenced from a negative "
-                "QR/IRID.")
+                "ZERO and the beam carries no stiffness"
+                + (" (on ELFORM=3 that is a TRUSS with no cross-section area, "
+                   "so its /PROP/TYPE2 is refused outright rather than emitted "
+                   "as starter ERROR 497)" if elform == 3 else "")
+                + ". State the section "
+                "numerically (ELFORM=2 with A/ISS/ITT/J, ELFORM=3 with A) or, "
+                "for an integrated beam, as an *INTEGRATION_BEAM rule "
+                "referenced from a negative QR/IRID.")
         elif kind == "2f":
             # ELFORM=6 DISCRETE beam, card 2f: VOL INER CID CA OFFSET RRCON
             # SRCON TRCON (Manual Vol I R17 p.41-20). There is no cross-section
@@ -4626,6 +4646,7 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     # Header card: lcid sidr sfa sfo offa offo dattyp lcint
     f1   = _card(raw, offset, fixed=True, n=8, w=10)
     lcid = to_int(f1[0])
+    sidr = to_int(f1[1]) if len(f1) > 1 else 0
     sfa  = to_float(f1[2]) if len(f1) > 2 else 1.0
     sfo  = to_float(f1[3]) if len(f1) > 3 else 1.0
     offa = to_float(f1[4]) if len(f1) > 4 else 0.0
@@ -4642,7 +4663,8 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     # ids are unique across both keywords, so such a deck is malformed — but
     # the emitted CARD KIND must still match the points that survive.
     _clear_smooth_flag_on_redefinition(state, lcid, "*DEFINE_CURVE")
-    state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
+    state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts,
+                               sidr=sidr)
     state.curve_order.append(lcid)
 
 

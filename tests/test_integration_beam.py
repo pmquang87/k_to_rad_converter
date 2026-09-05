@@ -863,14 +863,26 @@ class SectionBeamMultiSetTests(unittest.TestCase):
 
     def test_the_truss_card_gives_only_an_area(self):
         """ELFORM 3's card 2d is A RAMPT STRESS: fields 2/3 are a ramp TIME and
-        an initial STRESS, not two bending inertias."""
+        an initial STRESS, not two bending inertias.
+
+        UPDATED by the R14 truss batch, not weakened. The handler used to warn
+        "ELFORM=3 is a TRUSS ... /PROP/TYPE2 (TRUSS) has no k2rad path yet";
+        the path now exists, so that sentence would be false. The two cells are
+        no longer discarded either — they are KEPT on the record and screened
+        at write time by ``writer/truss.py::_warn_truss_section_cells``, which
+        is the only place that knows whether the deck runs a
+        dynamic-relaxation phase for them to act in. The assertions therefore
+        move up: the four resultants are still untouched, and the ramp/stress
+        pair is now readable.
+        """
         st = _dispatch("*KEYWORD\n*SECTION_BEAM\n"
                        + _row(1, 3, 1.0, 2.0, 0) + "\n"
                        + _row(12.5, 0.002, 250.0) + "\n*END\n")
         sec = st.sec_beams[1]
         self.assertEqual((sec.area, sec.iyy, sec.izz, sec.ixx),
                          (12.5, 0, 0, 0))
-        self.assertTrue(any("ELFORM=3 is a TRUSS" in w for w in st.warnings))
+        self.assertEqual((sec.rampt, sec.prestress), (0.002, 250.0))
+        self.assertFalse([w for w in st.warnings if "TRUSS" in w], st.warnings)
 
     def test_the_spotweld_nugget_is_untouched_by_the_dialect_rewrite(self):
         """ELFORM 9 keeps whatever k2rad's /PROP/TYPE13 connector path already

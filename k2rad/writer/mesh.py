@@ -43,12 +43,25 @@ from .common import (
     _seatbelt_mat_law,
     _seatbelt_part_ids,
     _spotweld_beam_pids,
+    _truss_pids,
+    _truss_secids,
     _vcross,
     _vnorm,
     _vsub,
 )
 # One-way: materials imports .common and .blast_ale only, never .mesh.
 from .materials import _null_part_eos_bindings
+# One-way: truss imports .common and ..state only; its ONE reference back into
+# this module (_target_mat_law, for the /TRUSS material gate) is a local import
+# inside the function, the same shape as _plas_kin_law2_eligible's.
+from .truss import (
+    _emit_prop_truss,
+    _emit_truss_block,
+    _truss_section_is_emittable,
+    _warn_truss_material,
+    _warn_truss_releases,
+    _warn_truss_section_cells,
+)
 
 __all__ = [
     "_make_nodes",
@@ -1134,14 +1147,25 @@ def _synthesize_beam_orientation_nodes(state: ConversionState) -> None:
 
     Runs as a build_starter prepass so the new nodes exist before the /NODE
     section is emitted.
+
+    TRUSS parts are SKIPPED. ``/TRUSS`` has three cells and no orientation
+    column (``truss.cfg``; ``hm_read_truss.F`` takes material and property from
+    the ``/PART``), so a node minted here would be referenced by nothing — and
+    it would enter ``state.beam_orient_nodes``, which the implicit free-node
+    sweeper SUBTRACTS, leaving a genuinely unattached node unconstrained.
     """
     if not any(e.vx or e.vy or e.vz for e in state.beam_elems):
         return
+    truss_pids = _truss_pids(state)
     cache: Dict[Tuple[int, float, float, float], int] = {}
     n_missing = 0
     n_collinear = 0
+    n_truss = 0
     for e in state.beam_elems:
         if e.vx == 0.0 and e.vy == 0.0 and e.vz == 0.0:
+            continue
+        if e.pid in truss_pids:
+            n_truss += 1
             continue
         base = state.nodes.get(e.n1)
         if base is None:
@@ -1166,6 +1190,18 @@ def _synthesize_beam_orientation_nodes(state: ConversionState) -> None:
             lc = (cr[0] ** 2 + cr[1] ** 2 + cr[2] ** 2) ** 0.5
             if la > 0.0 and lv > 0.0 and lc <= 1e-6 * la * lv:
                 n_collinear += 1
+    if n_truss:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {n_truss} element(s) on a "
+            "*SECTION_BEAM ELFORM=3 (TRUSS) part state an orientation vector "
+            "— IGNORED, and no third node is synthesized for them. A /TRUSS "
+            "row is three cells (id, node_ID1, node_ID2) and the element has "
+            "no cross-section frame to orient, so the vector has no meaning "
+            "and a node placed for it would be referenced by nothing. LS-DYNA "
+            "says the same on its side: N3 is 'optional for beam types 3, 6, 7 "
+            "and 8' (Vol I R17 p.19-5), and dyna2rad guards its whole "
+            "orientation block with `if (destElem != \"/TRUSS\")` "
+            "(convertelements.cxx:203). Nothing is lost.")
     if cache:
         state.warn(
             f"*ELEMENT_BEAM_ORIENTATION: {len(cache)} third node(s) synthesized "
@@ -1476,9 +1512,19 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     for c in state.sph_elems:
         sph_by_pid[c.pid].append(c)
 
+    # *SECTION_BEAM ELFORM=3 parts: their *ELEMENT_BEAM rows are /TRUSS, not
+    # /BEAM. Split HERE, on the write side, so the elements stay in
+    # state.beam_elems for every LS-DYNA-side lookup (*SET_BEAM,
+    # *DATABASE_HISTORY_BEAM, the *INCLUDE_TRANSFORM offset walk) — see
+    # common._truss_secids for the data-model verdict.
+    truss_pids = _truss_pids(state)
     beams_by_pid: Dict[int, List[BeamElem]] = defaultdict(list)
+    truss_by_pid: Dict[int, List[BeamElem]] = defaultdict(list)
     for e in state.beam_elems:
-        beams_by_pid[e.pid].append(e)
+        (truss_by_pid if e.pid in truss_pids else beams_by_pid)[e.pid].append(e)
+    if truss_by_pid:
+        _warn_truss_releases(
+            state, [e for es in truss_by_pid.values() for e in es])
 
     # Connector parts (discrete springs/dampers, MAT_100 spotweld beam parts,
     # *SECTION_BEAM ELFORM=6 discrete beams, 1D SEATBELTS) are emitted by the
@@ -1788,6 +1834,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 # derived from state.beam_elems, for exactly that reason.
                 state.beam_elem_ids.add(e.eid)
             lines.append(HDR)
+        if pid in truss_by_pid:
+            # /TRUSS/<pid> — three cells, and its own #106 register
+            # (state.truss_elem_ids), filled at the write line inside
+            # _emit_truss_block for the same reason the /BEAM half states.
+            lines += _emit_truss_block(state, pid, truss_by_pid[pid])
 
     return lines
 
@@ -2600,8 +2651,26 @@ def _make_properties(state: ConversionState) -> List[str]:
     # beam property stays out of it without the check having to know about that
     # route (see _warn_beam_type3_material).
     type3_secids: Set[int] = set()
+    # ... and the same bookkeeping for the sections that really wrote a
+    # /PROP/TYPE2. A truss section refused by _truss_section_is_emittable never
+    # enters it, so _warn_truss_material cannot warn about a property the deck
+    # does not carry.
+    truss_secids: Set[int] = set()
+    truss_pids = _truss_pids(state)
+    emitted_truss_secs: List[SectionBeam] = []
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
+            continue
+        if sec.elform == 3 and sec.secid in _truss_secids(state):
+            # ELFORM=3 is a TRUSS: /PROP/TYPE2, which reads AREA and GAP and
+            # nothing else. It never reaches _constants_from_thicknesses (an
+            # ELFORM 3 card states no thicknesses) and never joins
+            # type3_secids: a truss carries a DIFFERENT material gate
+            # (PROP_TRUSS, six laws) from /PROP/BEAM's PROP_BEAM.
+            if _truss_section_is_emittable(state, sec):
+                truss_secids.add(sec.secid)
+                emitted_truss_secs.append(sec)
+                lines += _emit_prop_truss(sec)
             continue
         # A section that bound a usable *INTEGRATION_BEAM rule becomes the
         # INTEGRATED beam property instead of the resultant one; the rule hangs
@@ -2675,6 +2744,8 @@ def _make_properties(state: ConversionState) -> List[str]:
         lines += _emit_prop_beam(sec)
     _warn_beam_type3_material(state, part_secids, connector_beam_pids,
                               type3_secids)
+    _warn_truss_section_cells(state, emitted_truss_secs)
+    _warn_truss_material(state, part_secids, truss_pids, truss_secids)
     # Thick shells: /PROP/TYPE20 (iso) / TYPE21 (ortho) / TYPE22 (composite),
     # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup.
     # Local import: writer/tshell.py reuses the #90 AOPT machinery out of

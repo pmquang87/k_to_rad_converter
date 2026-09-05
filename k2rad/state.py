@@ -252,6 +252,16 @@ class BeamElem:
     N1 ("the orientation vector points to a virtual third node", Vol I R17).
     The writer prepass _synthesize_beam_orientation_nodes turns a non-zero
     vector into a real /NODE at ``pos(N1) + V`` and puts its id in ``n3``.
+
+    ``rt1``/``rt2`` are the base card's TRANSLATIONAL release cells (fields 6
+    and 8, cols 41-48 / 57-64; "Release conditions for translations at nodes N1
+    and N2 ... EQ.7: x, y and z (3DOF)", Vol I R17 p.19-6). They are read but
+    NOT mapped — neither ``/BEAM`` nor ``/TRUSS`` has a release column — and are
+    named at the ``/TRUSS`` write site, where the loss is total: axial
+    translation is a truss's ONLY load path, so a released end carries nothing.
+    The ROTATIONAL cells RR1/RR2 are deliberately NOT stored: a truss transmits
+    no moment, so releasing a rotational dof on one changes nothing, and LOCAL
+    (field 10) is only the FRAME of a stated release, inert when RT = RR = 0.
     """
     eid: int
     pid: int
@@ -263,6 +273,8 @@ class BeamElem:
     vz: float = 0.0
     #: See ShellElem.provisional.
     provisional: bool = False
+    rt1: int = 0
+    rt2: int = 0
 
 
 @dataclass
@@ -1222,6 +1234,15 @@ class SectionBeam:
     rrcon: float = 0.0      # rotational constraint about local r/s/t
     srcon: float = 0.0
     trcon: float = 0.0
+    # *SECTION_BEAM card 2d (ELFORM=3 TRUSS), Vol I R17 p.41-18: A RAMPT
+    # STRESS. RAMPT is an "optional ramp-up time for DYNAMIC RELAXATION. At the
+    # end of the ramp-up time, a uniform stress, STRESS, exists in the truss
+    # element" — so the pair is live ONLY in a dynamic-relaxation phase, and on
+    # a deck that has none it is inert in LS-DYNA too. Kept so the truss writer
+    # can SCREEN before it says anything about them (a "DROPPED" message on an
+    # inert pair is a false alarm).
+    rampt: float = 0.0
+    prestress: float = 0.0
 
 
 @dataclass
@@ -2645,6 +2666,15 @@ class Curve:
     offa: float
     offo: float
     pts: List[Tuple[float, float]] = field(default_factory=list)
+    #: *DEFINE_CURVE card-1 field 2 (cols 11-20), SIDR: "Stress initialization
+    #: by dynamic relaxation. EQ.0: load curve used in transient analysis
+    #: only, EQ.1: load curve used in stress initialization but not transient
+    #: analysis, EQ.2: load curve applies to both" (Vol I R17 p.17-104). Read
+    #: for ONE question a *SECTION_BEAM ELFORM=3 card has to ask: does this
+    #: deck run a dynamic-relaxation phase at all (writer/truss.py
+    #: ``_has_dynamic_relaxation``)? A deck can start one from the curve alone,
+    #: without a *CONTROL_DYNAMIC_RELAXATION card.
+    sidr: int = 0
 
 
 @dataclass
@@ -7664,6 +7694,16 @@ class ConversionState:
     # emitted as a /SPRING instead, and a beam whose PID has no *PART record is
     # never emitted at all (writer/mesh.py skips the whole part).
     beam_elem_ids: Set[int] = field(default_factory=set)
+    # ... and for /TRUSS, its own id pool. A *SECTION_BEAM ELFORM=3 part is
+    # written as /TRUSS, not /BEAM (hm_read_truss.F reads its own IXT array and
+    # VDOUBLE scans it ALONE, so a /BEAM 50 beside a /TRUSS 50 is legal), and
+    # /TH/TRUSS resolves against MAP_TABLES%ITRUSSM over NUMELT — a truss id in
+    # a /TH/BEAM group matches nothing. Filled AT the line that writes the
+    # /TRUSS row, never derived from state.beam_elems (the #106 rule): the
+    # elements stay in beam_elems — a truss IS an *ELEMENT_BEAM in LS-DYNA —
+    # and only the WRITE side splits them, so this register is the only place
+    # that knows which of the two blocks an id landed in.
+    truss_elem_ids: Set[int] = field(default_factory=set)
     # The same accounting for the two shell families and for the solids, and
     # for the same reason: an *ELEMENT_SHELL / *ELEMENT_SOLID whose PID has no
     # *PART record is parsed into state.shell_elems / solid_elems and warned

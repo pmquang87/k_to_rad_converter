@@ -2044,6 +2044,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         lines.append(HDR)
         lines += _emit_grnod_node(grnod_id, f"{title}_nodes", nids)
         grshel_id = grbric_id = grbeam_id = grtria_id = grsprg_id = 0
+        grtrus_id = 0
         quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
         if quad_eids:
             grshel_id = state.next_elem_group_id()
@@ -2131,6 +2132,18 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                 "EMPTY' and lose their contribution to the section force "
                 "entirely (measured on twin decks: /TH/SECTIO var 26 = "
                 "-1.83e-07 with the group against 0.0 without it).")
+        # A *SECTION_BEAM ELFORM=3 part's elements are /TRUSS, not /BEAM, and
+        # the /SECT card has its OWN grtrus_ID column for them (sect.cfg;
+        # hm_read_sect.F resolves it against IGRTRUSS). A truss id left in the
+        # /GRBEAM group resolves to nothing — WARNING 534 "GROUP IS EMPTY" and
+        # the element silently drops out of the section force. Same split, same
+        # reason and same column shape as the grsprg_ID re-route above.
+        truss_eids = [e for e in beam_eids if e in state.truss_elem_ids]
+        beam_eids = [e for e in beam_eids if e not in state.truss_elem_ids]
+        if truss_eids:
+            grtrus_id = state.next_elem_group_id()
+            lines += _emit_id_group("GRTRUS/TRUS", grtrus_id,
+                                    f"{title}_trusses", truss_eids)
         if beam_eids:
             grbeam_id = state.next_elem_group_id()
             lines += _emit_id_group("GRBEAM/BEAM", grbeam_id, f"{title}_beams",
@@ -2143,7 +2156,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             "#file_name (unused: ISAVE=0; a blank line could be skipped by the reader)",
             f"SECT_{sect_id}",
             "#grbric_ID           grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID     Niter              Iframe",
-            f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(0)}{_i(grbeam_id)}"
+            f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(grtrus_id)}{_i(grbeam_id)}"
             f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(iframe)}",
             HDR,
         ]
