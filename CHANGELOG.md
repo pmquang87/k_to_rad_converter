@@ -158,6 +158,59 @@ Prior history (before this changelog was introduced) is summarized in the
       `rigid_contact_0000.rad:100` `Fpenmax` 0 → 0.99 (a user
       `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` whose mapped Inacti is 5).
 
+  **Verification record — ROUND 2, PART A.** Measured on this branch at
+  ``bd04f1f``, AFTER the last code commit ``0de5b65`` (everything later adds
+  tests and documentation only), with the main tree untouched at ``363e6f6``:
+  `pytest tests/ -q` **4908 passed / 2 skipped / 1937 subtests** against a
+  master baseline of 4876 / 2 / 1930 re-measured in this worktree before the
+  first edit; `mypy k2rad` **0 issues in 37 source files** (mypy 2.3.1) and
+  **0** again under `--no-site-packages`, each from a fresh cache;
+  `ruff check .` clean; `python k2rad.py --help` renders (exit 0); the golden
+  diff against `origin/master` is exactly the **two** lines named above and
+  nothing else (`git diff origin/master..HEAD -- tests/fixtures`).
+  **Solver validation**, every job in a short run dir at `nt = 4` through the
+  run-openradioss launcher, LS-DYNA references read from `F:` with the
+  campaign's own anchored-`^` parse:
+  `ex_03_solid_elform_1_4x6x4_mesh` starter **0 ERRORS / 0 WARNINGS**, engine
+  **NORMAL TERMINATION, 16 cycles, t = 1.0**, IE = EXT-WORK = **1.363E+05**
+  evolving monotonically across the cycle table (0 → 3.035E+04 → … →
+  1.363E+05) at 0.0 % energy error — **−0.10 %** against LS-DYNA's own
+  fully-integrated `ex_03_solid_elform_2` reference (1.36441E+05), which is
+  the element k2rad emits (`ELFORM 1 → /PROP/SOLID Isolid 17`, verified in the
+  converted deck), and −20.4 % against the one-point-plus-hourglass
+  `_elform_1` reference (1.71185E+05) the campaign compares with — **that
+  residual is the `ELFORM → Isolid` mapping, not this item.**
+  `component1` starter 0/0, engine **NORMAL TERMINATION, 2757 cycles**,
+  IE **2.782E+06** vs LS-DYNA 2.74023E+06 (**+1.52 %**) and KE **3.660E+04**
+  vs 3.62222E+04 (**+1.04 %**) — a `match` inside ±5 %, both channels
+  evolving.
+  Both decks' `/BCS` groups are **node-for-node identical** to the
+  coordinator's independently hand-patched decks, compared as
+  `(Tra, Rot, skew) → node set` rather than by id or file order.
+  Screening measured on the real carriers: `control_contact.hemi-draw` drops
+  580 of its 635 TC/RC nodes as rigid-body members and converts the remaining
+  55, `ale/pipe/pipe-a/channel_A` clears exactly the four DOFs
+  (nodes 2, 16, 18, 32) its `*BOUNDARY_PRESCRIBED_MOTION` drives, and
+  `ex_12_solid_elform_1` writes **no** second `/BCS` because its
+  `*BOUNDARY_SPC_SET` already states all 32 DOFs. Starter on each:
+  channel_A **0 ERRORS / 0 WARNINGS**, ex_12 0 ERRORS with only the
+  pre-existing hourglass WARNING 311 — **no WARNING 312 anywhere**, which is
+  what rules (b) and (c) exist to prevent; hemi-draw 0 ERRORS with WARNING
+  1084 and WARNING 446, both **byte-identical to a `--no-node-tc-rc-bcs`
+  control arm of the same deck**, i.e. pre-existing.
+  ERROR 611: `05_1_welding_solid` **310 → 0** starter errors and
+  `4.3_General_Nonlinearity` **486 → 0**, each leaving one WARNING 343
+  (initial penetrations, 3896 and 2150) — the diagnostic the deck earns, not a
+  refusal. **Neither reaches NORMAL TERMINATION**: both then die in the engine
+  on `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, so they move
+  `error_starter → error_engine` and belong to the `/IMPL` recipe item.
+  A targeted master-vs-branch two-half check on seven decks attributes every
+  mover: `component2` (the named negative control — 0 TC/RC, no SPC, no rigid
+  body, its constraints from `*INTERFACE_LINKING_SEGMENT`) is **SAME/SAME**;
+  `ex_12` is **`.rad` SAME / warnings MOVED**, which is exactly why the two
+  halves are reported separately. The batch's full 885-deck sweep and the
+  campaign re-run are the validators' step.
+
 - **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps, the
   `/MAT/LAW51` semantics, the TRUSS element and the zero-density policy behind
   52 of the 59 starter failures the 356-deck dynaexamples R14 campaign
