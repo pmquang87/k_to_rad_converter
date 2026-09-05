@@ -3855,6 +3855,15 @@ class MatSoilAndFoam:
     # the clamp warning and the emitted values cannot drift apart):
     e_res: float = 0.0     # E = 9GK/(3K+G)
     nu_res: float = 0.0    # (3K-2G)/(6K+2G) clamped to [0, 0.495]
+    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) is MAT_005 plus ONE sentence, Vol II
+    # R17 p.2-209 verbatim: *"The input for this model is the same as for
+    # *MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure reaches the
+    # tensile failure pressure, the element loses its ability to carry
+    # tension."* One flag, one shared handler, and a /FAIL/SPALLING rider on
+    # the emitted /MAT/LAW21 — the LATCH that makes it MAT_014 rather than
+    # MAT_005 (LAW21 alone re-clamps at Pmin every step from the current p and
+    # so RECOVERS: m21law.F:189 p = max(pmin,p)*off).
+    latched_tension_failure: bool = False
 
 
 @dataclass
@@ -7394,6 +7403,14 @@ class ConversionState:
     mat_ep_hydro: Dict[int, MatElasticPlasticHydro] = \
         field(default_factory=dict)
     mat_law3: Dict[int, MatLaw3] = field(default_factory=dict)
+    # mid -> (the spelling the deck wrote, what the law is, why nothing in
+    # Radioss can carry it) for a material REFUSED BY NAME. Filled by
+    # handlers._material_refused; read by writer/materials.py::
+    # _warn_refused_materials, which is what turns "k2rad does not know this
+    # card" into "these parts and this many elements lose their material".
+    # A refusal is deliberate and is NOT the same thing as an unread keyword.
+    refused_materials: Dict[int, Tuple[str, str, str]] = \
+        field(default_factory=dict)
 
     # ── Rare materials + thermal subsystem ─────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71

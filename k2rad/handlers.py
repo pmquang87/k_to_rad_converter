@@ -9663,7 +9663,16 @@ def handle_mat_soil_and_foam(block: Block, state: ConversionState) -> None:
     p = ([to_float(f5[i]) if len(f5) > i else 0.0 for i in range(8)]
          + [to_float(f6[i]) if len(f6) > i else 0.0 for i in range(2)])
     state.mat_soil_and_foam[mid] = MatSoilAndFoam(
-        mid, title, rho, g, kun, a0, a1, a2, pc, vcr, ref, lcid, eps, p)
+        mid, title, rho, g, kun, a0, a1, a2, pc, vcr, ref, lcid, eps, p,
+        # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) has the SAME input as MAT_005 —
+        # Vol II R17 p.2-209 verbatim: *"The input for this model is the same
+        # as for *MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure
+        # reaches the tensile failure pressure, the element loses its ability
+        # to carry tension."* So one handler reads both spellings and the
+        # spelling itself is the flag; the writer adds the /FAIL/SPALLING
+        # latch. (_FAILURE is not a trailing _ID/_TITLE, so
+        # parser._split_keyword leaves it IN block.keyword.)
+        latched_tension_failure="FAILURE" in (block.keyword or "").upper())
 
 
 def handle_mat_low_density_viscous_foam(block: Block,
@@ -10205,6 +10214,89 @@ def handle_mat_elastic_plastic_hydro(block: Block,
         mid=mid, title=title, rho=_g(f1, 1), g=_g(f1, 2), sig0=_g(f1, 3),
         eh=_g(f1, 4), pc=_g(f1, 5), fs=_g(f1, 6), charl=_g(f1, 7),
         eps=eps, es=es, spall_option=spall_option, a1=a1, a2=a2, spall=spall)
+
+
+def _material_refused(keyword: str, what: str, why: str):
+    """Build a handler that RECOGNIZES a material, records its MID and refuses
+    it by name.
+
+    A refused material is not the same thing as an unread one. Leaving the
+    keyword in ``skipped_keywords`` says only "k2rad does not know this card";
+    recording it here says WHICH law it is, WHY no Radioss counterpart exists,
+    and — through ``writer/materials.py::_warn_refused_materials``, which runs
+    once the mesh is parsed — exactly which ``/PART``s and how many elements
+    are left without a material by the refusal. That is the actionable half:
+    the starter's own answer is ``ERROR 179`` naming one part at a time.
+
+    The MID is read with the same fixed-width w=10 card-1 slice every ``*MAT``
+    handler uses, so a fused ``MID``+``RO`` field cannot shift it.
+    """
+    def _h(block: Block, state: ConversionState) -> None:
+        seen = block.keyword or keyword
+        offset = _title_offset(block)
+        f1 = _card(block.raw, offset, fixed=True, n=8, w=10)
+        mid = to_int(f1[0]) if f1 and f1[0].strip() else 0
+        if mid > 0:
+            state.refused_materials[mid] = (seen, what, why)
+        state.note_recognized_not_emitted(
+            seen,
+            f"{what} — no /MAT written. {why}. The *PART(s) on this material "
+            "therefore have none, which the starter answers with ERROR 179 "
+            "(MATERIAL ID DOES NOT EXIST); the parts and element counts are "
+            "named in the conversion warnings.")
+    return _h
+
+
+#: The three ``*MAT`` families of the R14 ERROR-179 census that have NO
+#: expressible Radioss counterpart at ``/BEGIN 2022``. Each row is
+#: (what the law is, why nothing can carry it) — refused BY NAME rather than
+#: left in the unrecognized-keyword list, and never fitted into a nearby law:
+#: a fit is an invented value (#124), and a converted deck that terminates
+#: normally on the wrong constitutive law is worse than a deck that refuses
+#: (#122).
+_REFUSED_MATERIALS = {
+    ("MAT_INV_HYPERBOLIC_SIN", "MAT_102"): (
+        "the inverse-hyperbolic-sine hot-forming flow law (*MAT_102)",
+        "Vol II R17 p.2-729 Remark 1 gives the flow stress as "
+        "sigma = (1/alpha)*arcsinh[(Z/A)^(1/N)] with the Zener-Hollomon "
+        "parameter Z = max(eps_dot, EPS0)*exp(Q/(G*T)). No Radioss law at "
+        "/BEGIN 2022 has that form: the sinh rate law exists only inside "
+        "/MAT/LAW100 (viscsinh.F:63, (sinh(B0*tau))^EXPN — the parallel "
+        "rheological framework's hyperelastic-network polymer law, with no "
+        "exp(Q/GT) cell) and /MAT/LAW101 (sigeps101.F:836, the Bouvard "
+        "semi-crystalline POLYMER model), and the Garofalo/Norton creep law "
+        "that carries it properly is /MAT/LAW129 crp_law = 2, first available "
+        "in radioss2025. /MAT/LAW103 (Hensel-Spittel, radioss2020, SOLID+SPH) "
+        "is the closest 2022 hot-forming law but is a FIT, not a mapping: "
+        "fitting A0, m1..m5, m7 to the arcsinh curve would invent every "
+        "coefficient, so it is named here as the manual escape route and NOT "
+        "done automatically"),
+    ("MAT_ACOUSTIC", "MAT_090"): (
+        "the acoustic pressure-formulation element material (*MAT_090)",
+        "it exists for *FREQUENCY_DOMAIN_ACOUSTIC_BEM / _FEM and "
+        "*FREQUENCY_DOMAIN_SSD, and OpenRadioss has neither an acoustic "
+        "pressure element nor a frequency-domain solver — the whole analysis, "
+        "not just the material, has no counterpart, and its engine "
+        "eigensolver is a compiled-out stub on this build. Converting the "
+        "material alone would leave a deck with nothing to solve"),
+    ("MAT_FRAZER_NASH_RUBBER_MODEL", "MAT_031"): (
+        "the Frazer-Nash hyperelastic rubber model (*MAT_031)",
+        "the card states no constants to map when a least-squares fit is "
+        "requested: Vol II R17 p.2-312 says the energy terms to include are "
+        "'flagged by setting their corresponding coefficients to unity', so "
+        "C100/C110/C010/C020 = 1.0 beside SGL/SW/ST and an LCID are INCLUSION "
+        "FLAGS plus a request for LS-DYNA's own internal fit of "
+        "U = C100*I1 + C200*I1^2 + ... + f(J) to a uniaxial force-vs-gauge-"
+        "length curve — there is no value to carry, and reimplementing that "
+        "fit is not a conversion. Even a direct-constants card is not a "
+        "1:1 map: Frazer-Nash's I1, I2 are invariants of the GREEN-ST-VENANT "
+        "strain while Radioss's polynomial hyperelastic (/MAT/LAW100 "
+        "PPOLYNOMIAL, available at 2022) uses the REDUCED Cauchy-Green "
+        "invariants — the algebraic bridge I1^E = (I1^C-3)/2, "
+        "I2^E = (I2^C-2*I1^C+3)/4 is exact but the J^(-2/3) reduction breaks "
+        "it for compressible response, and the I1^4 term needs an order-4 "
+        "polynomial"),
+}
 
 
 def _scalar_or_curve(f: List[str], i: int, default: float,
@@ -16958,13 +17050,24 @@ HANDLERS = {
     # Foam batch: MAT_005 → LAW21 (P(mu) transform); MAT_073 → LAW90
     # [+ /VISC/PRONY]; MAT_126 → LAW50 (+ /PROP/TYPE6); MAT_154 → LAW115;
     # MAT_177 → LAW62 (LCID=0 constants branch; LCID>0 warn-skips at parse).
-    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) is deliberately NOT routed here:
-    # dyna2rad maps it to law 14, which has no case in its dispatch switch and
-    # falls into the generic 1:1 dump — k2rad leaves it in skipped_keywords
-    # rather than silently converting away its failure semantics.
+    #
+    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) used to be excluded here on the
+    # ground that "dyna2rad maps it to law 14, which has no case in its
+    # dispatch switch and falls into the generic 1:1 dump". That is a fact
+    # about d2r, not a reason for k2rad, which has its own MAT_005 -> LAW21
+    # route — the #130 exclusion-list audit. Vol II R17 p.2-209 states the
+    # keyword in one sentence: *"The input for this model is the same as for
+    # *MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure reaches the
+    # tensile failure pressure, the element loses its ability to carry
+    # tension."* /FAIL/SPALLING with Ifail_so = 1 is that latch exactly
+    # (fail_spalling_s.F90:241-268), so the same handler reads both spellings
+    # and the writer adds the rider.
     "MAT_SOIL_AND_FOAM":                      handle_mat_soil_and_foam,
     "MAT_5":                                  handle_mat_soil_and_foam,
     "MAT_005":                                handle_mat_soil_and_foam,
+    "MAT_SOIL_AND_FOAM_FAILURE":              handle_mat_soil_and_foam,
+    "MAT_14":                                 handle_mat_soil_and_foam,
+    "MAT_014":                                handle_mat_soil_and_foam,
     "MAT_LOW_DENSITY_VISCOUS_FOAM":           handle_mat_low_density_viscous_foam,
     "MAT_73":                                 handle_mat_low_density_viscous_foam,
     "MAT_073":                                handle_mat_low_density_viscous_foam,
@@ -17784,6 +17887,12 @@ RARE_MATERIAL_KEYWORDS = {
     # NOT a trailing _ID/_TITLE, so parser._split_keyword leaves it in the
     # keyword: the spelling is its own row, and the handler reads the flag off
     # block.keyword (its card 1a shifts the EPS/ES table by one row).
+    # Refused BY NAME (recognized, no /MAT): three families of the R14
+    # ERROR-179 census whose law has no Radioss counterpart at /BEGIN 2022.
+    # Generated from ONE table so the canonical name and its numeric alias can
+    # never be diagnosed differently (the _MAT_THERMAL_ALIASES rule).
+    **{kw: _material_refused(names[0], what, why)
+       for names, (what, why) in _REFUSED_MATERIALS.items() for kw in names},
     "MAT_ELASTIC_PLASTIC_HYDRO":       handle_mat_elastic_plastic_hydro,
     "MAT_ELASTIC_PLASTIC_HYDRO_SPALL": handle_mat_elastic_plastic_hydro,
     "MAT_010":                         handle_mat_elastic_plastic_hydro,

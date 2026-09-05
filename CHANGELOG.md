@@ -160,6 +160,75 @@ Prior history (before this changelog was introduced) is summarized in the
     gas has none: `K = γp` is zero at zero pressure), `RO ≤ 0`, `G ≤ 0`, and a
     derived `ν` outside `(−1, 0.5)`.
 
+  - **`*MAT_SOIL_AND_FOAM_FAILURE` / `*MAT_014` → `/MAT/LAW21` + a
+    `/FAIL/SPALLING` rider, and the exclusion that blocked it is CORRECTED.**
+    The old comment refused the keyword because *"dyna2rad maps it to law 14,
+    which has no case in its dispatch switch and falls into the generic 1:1
+    dump"* — a fact about d2r, not a reason for k2rad, which has its own
+    `MAT_005 → /MAT/LAW21` route (the #130 exclusion-list audit: an exclusion's
+    stated reason needs the same scrutiny as a warning's). Vol II R17 p.2-209
+    states the whole keyword in one sentence: *"The input for this model is the
+    same as for `*MATERIAL_SOIL_AND_FOAM` (Type 5); however, when the pressure
+    reaches the tensile failure pressure, the element loses its ability to
+    carry tension."* So one handler reads both spellings and the spelling is
+    the flag. `/MAT/LAW21` alone does **not** carry that sentence:
+    `m21law.F:189` clamps `p = max(pmin,p)·off` and `:196-200` zeroes
+    `A0/A1/A2` while `P < PMIN`, both recomputed from the CURRENT pressure
+    every step, so a cell that has been in tension RECOVERS its full strength.
+    `/FAIL/SPALLING` with `Ifail_so = 1` is the latch exactly:
+    `hm_read_fail_spalling.F90:98-104` clamps `isolid = max(1, min(6,
+    Ifail_so))` into `iparam(1)` and `fail_spalling_s.F90:104-131` maps
+    `iflag = 1` to `ispall = 1`, so the Johnson-Cook `D1..D5` branches
+    (`iflag == 2/3/4`) and the element deletion never run, while `:241-268`
+    accumulates `dfmax = max(dfmax, min(p,0)/P_min)` MONOTONICALLY, zeroes the
+    stress tensor once and thereafter writes `σxx = σyy = σzz = −max(p,0)` with
+    all shears 0 — compression only, no deviator, element NOT deleted.
+    Dispatch verified: `mmain.F90:2242` gates the `/FAIL` loop on
+    `nfail > 0 .and. (mtn < 28 .or. mtn == 49)` and LAW21 is `mtn = 21`, and
+    the `do ir = 1,nfail` loop is a SIBLING of the `istrain` block at `:2243`,
+    so the `/PROP` `istrain` flag does not gate it. A `PC = 0` card is named:
+    `hm_read_fail_spalling.F90:103` turns a zero `P_min` into `−1e20`, so the
+    latch can never trip and the material is plain MAT_005.
+
+  - **Three material families REFUSED BY NAME, with the parts and element
+    counts the refusal costs.** `*MAT_INV_HYPERBOLIC_SIN` (`*MAT_102`, 2
+    forging decks): Vol II R17 p.2-729 Remark 1's
+    `σ = (1/α)·arcsinh[(Z/A)^(1/N)]` with `Z = max(ε̇, EPS0)·exp(Q/(GT))` has no
+    form at `/BEGIN 2022` — the sinh rate law exists only inside `/MAT/LAW100`
+    (`viscsinh.F:63`, a hyperelastic-network polymer law with no `exp(Q/GT)`
+    cell) and `/MAT/LAW101` (`sigeps101.F:836`, the Bouvard semi-crystalline
+    polymer model), and the Garofalo/Norton creep law that carries it properly
+    is `/MAT/LAW129 crp_law = 2`, first available in `radioss2025`;
+    `/MAT/LAW103` (Hensel-Spittel) is named as the manual escape route and NOT
+    done automatically, because fitting `A0, m1..m5, m7` to the arcsinh curve
+    would invent every coefficient (#124). `*MAT_ACOUSTIC` (`*MAT_090`, 2 nvh
+    decks): OpenRadioss has neither an acoustic pressure element nor a
+    frequency-domain solver, so the whole analysis has no counterpart and
+    converting the material alone would leave a deck with nothing to solve.
+    `*MAT_FRAZER_NASH_RUBBER_MODEL` (`*MAT_031`, 1 deck): the corpus card
+    states no constants at all — p.2-312 makes `C100/C110/C010/C020 = 1.0`
+    INCLUSION FLAGS beside `SGL/SW/ST` and an `LCID`, i.e. a request for
+    LS-DYNA's own least-squares fit — and even a direct-constants card is not a
+    1:1 map, because Frazer-Nash's `I1, I2` are invariants of the
+    Green–St-Venant strain while `/MAT/LAW100 PPOLYNOMIAL` uses the REDUCED
+    Cauchy-Green ones. Each refusal is RECOGNIZED (out of `skipped_keywords`,
+    into `recognized_not_emitted`) and a writer pass — which runs once the mesh
+    is complete — names the `/PART`s and the per-family element counts the
+    refusal leaves without a material, because the starter's own `ERROR 179`
+    names one part at a time and says nothing about how much of the model goes
+    with it. MEASURED on the corpus: `forging_A` `/PART [1]` holding 3200
+    solids, `8.3.plate_kirchhoff` `/PART [2]` holding 600. The parts are NOT
+    dropped, and that is measured too: on one-brick starter probes a `/PART`
+    with a dangling `mat_ID` plus its `/BRICK` gives 3 errors (179, 3046, 61),
+    the `/PART` removed with its `/BRICK` KEPT gives `ERROR 402` *"1 PART(S)
+    REFERENCED BY ELEMENTS DO(ES) NOT EXIST"* — strictly worse — and removing
+    both gives 0 ERROR / 0 WARNING but only moves the dangling reference to
+    whatever set, contact, `/TH`, `/INIVOL` or `/RBODY` still names the part;
+    that screening is its own item. The dangling-`/PART` scan reads the refusal
+    registry as well as `skipped_keywords`, so it keeps quoting the culprit by
+    name instead of answering *"look above"* on exactly the decks whose culprit
+    is known.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts

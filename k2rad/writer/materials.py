@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 from ..state import (
     ConversionState,
@@ -150,6 +151,8 @@ __all__ = [
     "_interp_table",
     "_resolve_mat_law3",
     "_emit_mat_law3",
+    "_emit_fail_spalling",
+    "_warn_refused_materials",
 ]
 
 
@@ -196,6 +199,8 @@ def _make_materials(state: ConversionState) -> List[str]:
     # in writer/composites.py like the other material-driven ortho props)
     for mat in state.mat_soil_and_foam.values():
         lines += _emit_mat_law21(mat)
+        if mat.latched_tension_failure:
+            lines += _emit_fail_spalling(mat.mid, mat.pc)
     for mat in state.mat_low_density_viscous_foam.values():
         lines += _emit_mat_law90(mat)
     for mat in state.mat_modified_honeycomb.values():
@@ -2284,6 +2289,44 @@ def _resolve_mat_foams(state: ConversionState) -> None:
     _resolve_mat_hill_foam(state)
 
 
+def _warn_soil_foam_failure_latch(state: ConversionState,
+                                  mat: MatSoilAndFoam) -> None:
+    """Name what the ``/FAIL/SPALLING`` rider buys over a bare ``/MAT/LAW21``.
+
+    The exclusion this replaces gave a d2r fact as its reason (#130); the real
+    question is what the keyword's ONE extra sentence needs, and LAW21 alone
+    does not supply it: ``m21law.F:189`` is ``p = max(pmin,p)*off`` and
+    ``:196-200`` zeroes ``A0/A1/A2`` while ``P < PMIN`` — both recomputed from
+    the CURRENT pressure every step, so a cell that has been in tension
+    RECOVERS its full strength the moment the pressure comes back up. The
+    latch is what makes it MAT_014.
+    """
+    state.warn(
+        f"*MAT_SOIL_AND_FOAM_FAILURE {mat.mid} -> /MAT/LAW21 + "
+        f"/FAIL/SPALLING/{mat.mid} (Ifail_so = 1, P_min = {mat.pc:g}, "
+        "D1..D5 = 0). Vol II R17 p.2-209 states the whole keyword in one "
+        "sentence: 'The input for this model is the same as for "
+        "*MATERIAL_SOIL_AND_FOAM (Type 5); however, when the pressure reaches "
+        "the tensile failure pressure, the element loses its ability to carry "
+        "tension.' /MAT/LAW21 ALONE does not do that: m21law.F:189 clamps "
+        "p = max(pmin,p)*off and :196-200 zeroes A0/A1/A2 while P < PMIN, both "
+        "recomputed from the CURRENT pressure every step — so a cell that has "
+        "been in tension RECOVERS its full strength when the pressure comes "
+        "back up. /FAIL/SPALLING with Ifail_so = 1 supplies the LATCH: "
+        "fail_spalling_s.F90:241-268 accumulates dfmax = max(dfmax, "
+        "min(p,0)/P_min) MONOTONICALLY, zeroes the stress tensor once when it "
+        "reaches 1, and thereafter writes sigxx = sigyy = sigzz = -max(p,0) "
+        "with all shears 0 — compression only, no deviator, and the element is "
+        "NOT deleted. D1..D5 stay 0 and Ifail_so = 1 keeps the Johnson-Cook "
+        "branches (iflag 2/3/4) and the deletion out of it entirely. "
+        "Everything else on the card is read exactly as *MAT_SOIL_AND_FOAM."
+        + ("" if mat.pc else
+           " NOTE PC = 0 on this card: hm_read_fail_spalling.F90:103 turns a "
+           "zero P_min into -1e20, so the latch can never trip and the "
+           "material behaves as plain *MAT_SOIL_AND_FOAM — state a negative "
+           "tensile cutoff if the failure is meant to occur."))
+
+
 def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
     """*MAT_SOIL_AND_FOAM: the pressure-curve axis transform and the
     field-level approximation warnings.
@@ -2306,6 +2349,8 @@ def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
         return
     shell_parts = _shell_parts_by_mid(state)
     for mat in state.mat_soil_and_foam.values():
+        if mat.latched_tension_failure:
+            _warn_soil_foam_failure_latch(state, mat)
         g, k = mat.g, mat.kun
         denom = 3.0 * k + g
         E = 9.0 * g * k / denom if denom != 0.0 else 0.0
@@ -3015,6 +3060,48 @@ def _emit_mat_law21(mat: MatSoilAndFoam) -> List[str]:
         f"{_f(mat.pc)}{_f(0.0)}",
         "#                  B              Mu_max",
         f"{_f(b)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_fail_spalling(mid: int, pc: float) -> List[str]:
+    """``/FAIL/SPALLING`` — the LATCHED tensile cutoff of
+    ``*MAT_SOIL_AND_FOAM_FAILURE`` (``*MAT_014``).
+
+    Card layout from ``radioss2018/FAIL/fail_spalling.cfg``
+    ``FORMAT(radioss130)``, the newest block a ``/BEGIN 2022`` deck reads::
+
+        C1: D1(20) D2(20) D3(20) D4(20) D5(20)
+        C2: Epsilon_Dot_0(20) P_min(20) Ifail_so(10)
+
+    ``D1..D5`` are written 0 and ``Ifail_so = 1``, which is the PURE ``P_min``
+    branch: ``hm_read_fail_spalling.F90:98-104`` clamps
+    ``isolid = max(1, min(6, Ifail_so))`` into ``fail%iparam(1)``, and
+    ``fail_spalling_s.F90:104-131`` maps ``iflag = 1`` to ``ispall = 1`` with
+    no ``idel``/``idev``, so the Johnson-Cook branches (``iflag == 2/3/4``)
+    and the element deletion never run.
+
+    What ``ispall = 1`` does, at ``fail_spalling_s.F90:241-268``: it
+    accumulates ``dfmax(i,3) = max(dfmax(i,3), min(p,0)/pmin)`` — MONOTONE, so
+    once the cell has seen ``p <= P_min`` the damage stays at 1 — zeroes the
+    whole stress tensor once, and from then on writes
+    ``sigxx = sigyy = sigzz = -max(p,0)`` with all shears 0: compression only,
+    no deviator, **element not deleted**. That is exactly Vol II R17 p.2-209's
+    *"the element loses its ability to carry tension"*.
+
+    Dispatch verified: ``mmain.F90:2242`` gates the ``/FAIL`` loop on
+    ``nfail > 0 .and. (mtn < 28 .or. mtn == 49)`` and LAW21 is ``mtn = 21``;
+    the ``do ir = 1,nfail`` loop is a SIBLING of the ``istrain`` block at
+    ``:2243``, so it runs regardless of the ``/PROP`` ``istrain`` flag, and the
+    spalling criterion reads only ``lbuf%sig``.
+    """
+    return [
+        f"/FAIL/SPALLING/{mid}",
+        "#                 D1                  D2                  D3"
+        "                  D4                  D5",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#      EPSILON_DOT_0               P_MIN  IFAIL_SO",
+        f"{_f(0.0)}{_f(pc)}{_i(1)}",
         HDR,
     ]
 
@@ -9632,3 +9719,86 @@ def _emit_mat_law3(mat: MatLaw3, state: ConversionState) -> List[str]:
     if eos is not None:
         lines += _emit_eos(eos)
     return lines
+
+
+def _element_count_by_pid(state: ConversionState) -> Dict[int, Dict[str, int]]:
+    """``pid -> {family: count}`` over every element family a ``*PART`` can
+    hold.
+
+    Written as an explicit family walk, not a union registry: element ids live
+    in separate namespaces per type and the point of the count is to tell the
+    reader WHAT the refused material was carrying (500 solids reads very
+    differently from one). Families with no ``pid`` attribute (SPH cells carry
+    one, springs and seatbelts do too) are listed the same way, so a new family
+    added later shows up here as a missing arm rather than a silent zero
+    (#120).
+    """
+    out: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    families: Tuple[Tuple[str, List[Any]], ...] = (
+        ("solid", state.solid_elems),
+        ("shell", state.shell_elems),
+        ("tshell", state.tshell_elems),
+        ("beam", state.beam_elems),
+        ("discrete", state.discrete_elems),
+        ("seatbelt", state.seatbelt_elems),
+        ("sph", state.sph_elems))
+    for fam, elems in families:
+        for e in elems:
+            pid = getattr(e, "pid", 0)
+            if pid:
+                out[pid][fam] += 1
+    return {pid: dict(fams) for pid, fams in out.items()}
+
+
+def _warn_refused_materials(state: ConversionState) -> None:
+    """Name every REFUSED material with the parts and elements it costs.
+
+    ``handlers._material_refused`` runs while the deck is being parsed, before
+    the mesh is read, so it can only record the law and the reason. This pass
+    runs once ``state.parts`` and every element list are complete and supplies
+    the half a reader actually needs: the starter answers ``ERROR 179`` one
+    part at a time and says nothing at all about how much of the model the
+    refusal takes with it.
+
+    The parts are NOT dropped. Three starter probes settle why (one brick each,
+    ``/BEGIN 2022``): a ``/PART`` with a dangling ``mat_ID`` plus its
+    ``/BRICK`` gives 3 errors (``179`` PART→MATERIAL, ``3046`` BRICK vs
+    MATERIAL ID 0 TYPE 0, ``61`` INVALID MATERIAL ID FOR BRICK ELEMENT); the
+    ``/PART`` removed with its ``/BRICK`` KEPT gives ``ERROR 402`` *"1 PART(S)
+    REFERENCED BY ELEMENTS DO(ES) NOT EXIST"* — strictly worse; both removed
+    gives 0 ERROR / 0 WARNING. So dropping is only ever right as a PAIR, and
+    then only after every other card that names the part (sets, contacts,
+    ``/TH``, ``/INIVOL``, ``/RBODY``, ``*DATABASE_HISTORY_*``) has been
+    screened too, or the next ``ERROR 402``-class failure just moves one card
+    along. That screening is its own item; until it exists a readable
+    ``ERROR 179`` naming the law beats a silently smaller model.
+    """
+    if not state.refused_materials:
+        return
+    counts = _element_count_by_pid(state)
+    for mid in sorted(state.refused_materials):
+        seen, what, why = state.refused_materials[mid]
+        pids = sorted(pid for pid, p in state.parts.items() if p.mid == mid)
+        tally: Dict[str, int] = defaultdict(int)
+        for pid in pids:
+            for fam, n in counts.get(pid, {}).items():
+                tally[fam] += n
+        held = (", ".join(f"{n} {fam}" for fam, n in sorted(tally.items()))
+                if tally else "no elements")
+        state.warn(
+            f"*{seen} {mid}: {what} is REFUSED BY NAME — {why}. "
+            + (f"/PART(s) {pids} name this material and hold {held}; they are "
+               "emitted with a mat_ID no /MAT defines, which the starter "
+               "answers with ERROR 179 (MATERIAL ID DOES NOT EXIST) plus "
+               "ERROR 3046 / ERROR 61 per element family. The parts are NOT "
+               "dropped: measured on one-brick starter probes, removing the "
+               "/PART while keeping its elements is ERROR 402 (PART(S) "
+               "REFERENCED BY ELEMENTS DO(ES) NOT EXIST) — strictly worse — "
+               "and removing both only moves the dangling reference to "
+               "whatever set, contact, /TH or /RBODY still names the part. A "
+               "readable ERROR 179 naming the law beats a silently smaller "
+               "model."
+               if pids else
+               "No /PART names this material, so nothing in the emitted deck "
+               "references it and the refusal costs the model nothing.")
+            )

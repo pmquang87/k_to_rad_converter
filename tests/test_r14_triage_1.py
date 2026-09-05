@@ -775,5 +775,140 @@ class Mat010Law3Tests(unittest.TestCase):
             self.assertIn(kw, RARE_MATERIAL_KEYWORDS)
             self.assertIn(kw, HANDLERS)
 
+
+# introduction/intro-by-a.-tabiei/contact/contact-foam/matfoamsoil.k's soil.
+_MAT014 = ("*MAT_SOIL_AND_FOAM_FAILURE\n"
+           + _row(2, "1.874E-9", 358.55, 1523.82, 0.158, 0.124, 0.024, -0.55)
+           + "\n" + _row(0.0, 0.0, 0) + "\n"
+           + _row(0.0, -0.05, -0.1, -0.15, -0.2, -0.25, -0.3, -0.35) + "\n"
+           + _row(-0.4, -0.45) + "\n"
+           + _row(0.0, 1.0, 2.5, 4.5, 7.0, 10.0, 14.0, 19.0) + "\n"
+           + _row(25.0, 32.0) + "\n")
+
+
+def _mat014_deck(card: str = _MAT014) -> str:
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK
+            + "*PART\np1\n" + _row(1, 1, 2) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + card + "*END\n")
+
+
+class Mat014SpallingTests(unittest.TestCase):
+    """A5 — *MAT_SOIL_AND_FOAM_FAILURE → /MAT/LAW21 + /FAIL/SPALLING."""
+
+    def test_every_spelling_is_registered(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS
+        for kw in ("MAT_SOIL_AND_FOAM_FAILURE", "MAT_014", "MAT_14"):
+            self.assertIn(kw, HANDLERS)
+            self.assertEqual(_OFFSET_SPECS[kw],
+                             {"cards": {0: [(0, "m")], 1: [(2, "f")]}})
+
+    def test_law21_and_the_spalling_rider_are_both_emitted(self):
+        _res, starter = _convert(_mat014_deck())
+        self.assertIn("/MAT/LAW21/2", starter)
+        rows = _data_rows(starter, "/FAIL/SPALLING/2")
+        self.assertIsNotNone(rows)
+        self.assertEqual([float(c) for c in _fields(rows[0])],
+                         [0.0, 0.0, 0.0, 0.0, 0.0])       # D1..D5
+        self.assertEqual(float(rows[1][0:20]), 0.0)       # Epsilon_Dot_0
+        self.assertEqual(float(rows[1][20:40]), -0.55)    # P_min = PC
+        self.assertEqual(int(rows[1][40:50]), 1)          # Ifail_so
+
+    def test_the_plain_spelling_gets_no_rider(self):
+        """MAT_005 and MAT_014 share every input cell; only the LATCH differs,
+        so the plain keyword must not gain one."""
+        _res, starter = _convert(_mat014_deck(
+            _MAT014.replace("*MAT_SOIL_AND_FOAM_FAILURE",
+                            "*MAT_SOIL_AND_FOAM")))
+        self.assertIn("/MAT/LAW21/2", starter)
+        self.assertEqual(_headers(starter, "/FAIL/SPALLING/"), [])
+
+    def test_warning_names_the_latch_and_what_law21_alone_does(self):
+        res, _starter = _convert(_mat014_deck())
+        w = [x for x in res.warnings if "/FAIL/SPALLING/2" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("p.2-209", "loses its ability to carry tension",
+                     "m21law.F:189", "RECOVERS",
+                     "fail_spalling_s.F90:241-268", "MONOTONICALLY",
+                     "NOT deleted"):
+            self.assertIn(fact, w[0])
+
+    def test_zero_pc_is_named_as_a_latch_that_can_never_trip(self):
+        """hm_read_fail_spalling.F90:103 turns a zero P_min into -1e20."""
+        card = _MAT014.replace(
+            _row(2, "1.874E-9", 358.55, 1523.82, 0.158, 0.124, 0.024, -0.55),
+            _row(2, "1.874E-9", 358.55, 1523.82, 0.158, 0.124, 0.024, 0.0))
+        res, _starter = _convert(_mat014_deck(card))
+        self.assertIn("the latch can never trip", " ".join(res.warnings))
+
+
+class RefusedMaterialTests(unittest.TestCase):
+    """A5 — the three families with no Radioss counterpart, refused BY NAME."""
+
+    _CARDS = {
+        "*MAT_INV_HYPERBOLIC_SIN":
+            _row(1, "7.85E-9", 210000.0, 0.3, 1.0, 1.0, 1.0, 1.0),
+        "*MAT_ACOUSTIC": _row(1, "1.0E-9", 1500.0, 0.0, 0.0),
+        "*MAT_FRAZER_NASH_RUBBER_MODEL":
+            _row(1, "1.0E-9", 0.495, 1.0, 0.0, 0.0, 1.0, 0.0),
+    }
+
+    def _deck(self, kw: str) -> str:
+        return ("*KEYWORD\n"
+                "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                + _BRICK
+                + "*PART\np1\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                + kw + "\n" + self._CARDS[kw] + "\n*END\n")
+
+    def test_each_is_recognized_not_skipped(self):
+        for kw in self._CARDS:
+            with self.subTest(kw=kw):
+                res, starter = _convert(self._deck(kw))
+                self.assertEqual(_headers(starter, "/MAT/"), [])
+                self.assertNotIn(kw.lstrip("*"), res.skipped_keywords)
+                self.assertIn(kw.lstrip("*"),
+                              [k for k, _ in res.recognized_not_emitted])
+
+    def test_the_refusal_names_the_parts_and_their_element_count(self):
+        res, _starter = _convert(self._deck("*MAT_INV_HYPERBOLIC_SIN"))
+        w = [x for x in res.warnings if "REFUSED BY NAME" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("/PART(s) [1] name this material and hold 1 solid", w[0])
+        self.assertIn("ERROR 179", w[0])
+        self.assertIn("ERROR 402", w[0])       # why the part is not dropped
+
+    def test_each_reason_is_specific_to_its_law(self):
+        needles = {
+            "*MAT_INV_HYPERBOLIC_SIN": "arcsinh[(Z/A)^(1/N)]",
+            "*MAT_ACOUSTIC": "frequency-domain solver",
+            "*MAT_FRAZER_NASH_RUBBER_MODEL": "INCLUSION FLAGS",
+        }
+        for kw, needle in needles.items():
+            with self.subTest(kw=kw):
+                res, _starter = _convert(self._deck(kw))
+                self.assertIn(needle, " ".join(res.warnings))
+
+    def test_the_dangling_part_scan_still_names_the_culprit(self):
+        """A refused material is NOT in skipped_keywords, so the scan that
+        quotes 'the deck's UNCONVERTED material keyword(s)' has to read the
+        refusal registry too — otherwise it answers 'look above' on exactly
+        the decks whose culprit is already known by name."""
+        res, _starter = _convert(self._deck("*MAT_ACOUSTIC"))
+        hits = [x for x in res.warnings
+                if "reference a material id that NO /MAT" in x]
+        self.assertTrue(hits)
+        self.assertIn("*MAT_ACOUSTIC", hits[0])
+
+    def test_numeric_aliases_reach_the_same_refusal(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS
+        for kw in ("MAT_102", "MAT_090", "MAT_031"):
+            self.assertIn(kw, HANDLERS)
+            self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
+
 if __name__ == "__main__":
     unittest.main()

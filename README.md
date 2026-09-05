@@ -619,6 +619,27 @@ Foams & honeycomb: `*MAT_CRUSHABLE_FOAM` (63) → `/MAT/LAW50`,
 cutoff / damping / hysteresis shape, honeycomb compaction modulus) are dropped
 with a warning, so review the converted card against the source foam.
 Foam batch 2 (dyna2rad's targets, constants followed exactly):
+`*MAT_SOIL_AND_FOAM_FAILURE` (also `*MAT_014`/`*MAT_14`) → `/MAT/LAW21` **plus a
+`/FAIL/SPALLING` rider**. Vol II R17 p.2-209 states the whole keyword in one
+sentence: *"The input for this model is the same as for
+`*MATERIAL_SOIL_AND_FOAM` (Type 5); however, when the pressure reaches the
+tensile failure pressure, the element loses its ability to carry tension."* —
+so it shares MAT_005's handler and the SPELLING is the flag. `/MAT/LAW21` alone
+does not carry that sentence: `m21law.F:189` clamps `p = max(pmin,p)·off` and
+`:196-200` zeroes `A0/A1/A2` while `P < PMIN`, both recomputed from the current
+pressure every step, so a cell that has been in tension RECOVERS. The rider
+supplies the latch: with `Ifail_so = 1` (the pure `P_min` branch —
+`hm_read_fail_spalling.F90:98-104` clamps `isolid` into `iparam(1)` and
+`fail_spalling_s.F90:104-131` maps `iflag = 1` to `ispall = 1`, so the
+Johnson-Cook `D1..D5` branches and the element deletion never run),
+`fail_spalling_s.F90:241-268` accumulates `dfmax = max(dfmax, min(p,0)/P_min)`
+MONOTONICALLY, zeroes the stress tensor once, and thereafter writes
+`σxx = σyy = σzz = −max(p,0)` with all shears 0: compression only, no deviator,
+**element not deleted**. Dispatch verified — `mmain.F90:2242` gates the `/FAIL`
+loop on `nfail > 0 .and. (mtn < 28 .or. mtn == 49)` and LAW21 is `mtn = 21`,
+and the loop is a SIBLING of the `istrain` block, so the `/PROP` `istrain` flag
+does not gate it. `PC = 0` is named: `hm_read_fail_spalling.F90:103` turns a
+zero `P_min` into `−1e20`, so the latch can never trip
 `*MAT_SOIL_AND_FOAM` (005) → `/MAT/LAW21` (DPRAG) — `E=9GK/(3K+G)`,
 `ν=(3K−2G)/(6K+2G)` clamped to [0, 0.495] (the clamp warned when it fires),
 `A0/A1/A2` verbatim (identical yield surface `J2 = a0+a1·p+a2·p²`),
@@ -4648,7 +4669,22 @@ per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names),
 `*DATABASE_GLSTAT` (no card needed — OpenRadioss writes the global energy
 balance automatically), `*DATABASE_NODFOR` on a deck with no
 `*DATABASE_NODAL_FORCE_GROUP` (it is an interval, not a channel selection),
-`*DATABASE_TPRINT` on a deck that arms no thermal solve. Except for `TPRINT`, whose channels then do not exist at all, the `dt` is
+`*DATABASE_TPRINT` on a deck that arms no thermal solve, and the MATERIALS
+REFUSED BY NAME — `*MAT_INV_HYPERBOLIC_SIN` (`*MAT_102`, the arcsinh
+Zener-Hollomon hot-forming flow law: no Radioss law at `/BEGIN 2022` has that
+form, `/MAT/LAW129 crp_law = 2` is `radioss2025`, and `/MAT/LAW103` would be a
+FIT, not a mapping), `*MAT_ACOUSTIC` (`*MAT_090`: no acoustic pressure element
+and no frequency-domain solver, so the whole analysis has no counterpart),
+`*MAT_FRAZER_NASH_RUBBER_MODEL` (`*MAT_031`: the corpus card states inclusion
+FLAGS and asks LS-DYNA for its own least-squares fit, so there is no value to
+map — and Frazer-Nash's Green–St-Venant invariants are not the reduced
+Cauchy-Green ones `/MAT/LAW100 PPOLYNOMIAL` uses), `*MAT_VACUUM` and
+`*MAT_GAS_MIXTURE`. Each refusal names the `/PART`s and the element counts it
+costs, because the starter's own `ERROR 179` names one part at a time; the
+parts are deliberately **not** dropped (measured on one-brick starter probes:
+dropping the `/PART` while keeping its elements is `ERROR 402`, strictly worse,
+and dropping both only moves the dangling reference to whatever set, contact,
+`/TH` or `/RBODY` still names the part). Except for `TPRINT`, whose channels then do not exist at all, the `dt` is
 still honoured as the `/TFILE` frequency. The same channel carries any
 `*CONTACT` that produced
 no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no

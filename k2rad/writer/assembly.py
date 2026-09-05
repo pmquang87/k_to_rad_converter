@@ -27,6 +27,7 @@ from .materials import (
     _resolve_mat_shape_memory,
     _resolve_mat_law106,
     _resolve_mat_law3,
+    _warn_refused_materials,
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
@@ -950,6 +951,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # that gate warn-skip such a part NAMING the law instead of claiming it
     # has no /MAT at all.
     _resolve_mat_law3(state)
+
+    # Materials REFUSED BY NAME (*MAT_102, *MAT_090, *MAT_031, *MAT_VACUUM,
+    # *MAT_GAS_MIXTURE). The handler could only record the law and the reason
+    # — it runs while the deck is still being parsed — so this pass, with the
+    # mesh complete, adds the /PART ids and the element counts the refusal
+    # costs. Emits nothing, so its placement is free.
+    _warn_refused_materials(state)
 
     # Thermal expansion + the temperature drivers. MUST run BEFORE
     # _make_functions (it registers the synthesized coefficient and driver
@@ -2018,8 +2026,16 @@ def _warn_dangling_part_materials(state: ConversionState,
     # 827-deck corpus: 280 decks carry this defect, and in almost all of them
     # the cause is one unconverted *MAT_ keyword sitting in the skip list —
     # so quoting it turns a "look above" into an answer.
+    # A REFUSED material is uncoverted too, and it is the one this scan can
+    # name best — but it is deliberately NOT in skipped_keywords (it has a
+    # handler). Reading only that list would answer "no *MAT_ keyword is in
+    # the skipped list ... look above" on exactly the decks whose culprit is
+    # already known by name (#130: the premise of a true conclusion still has
+    # to be true).
     skipped_mats = sorted({k for k in state.skipped_keywords
-                           if k.startswith("MAT_")})
+                           if k.startswith("MAT_")}
+                          | {kw for kw, _what, _why
+                             in state.refused_materials.values()})
     culprit = (" The deck's UNCONVERTED material keyword(s): "
                + ", ".join("*" + k for k in skipped_mats[:6])
                + ("." if len(skipped_mats) <= 6 else
