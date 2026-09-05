@@ -1080,7 +1080,32 @@ found and deliberately did NOT close.
   (*"a run shorter than one thermal step stores ZERO heat under NORMAL
   TERMINATION"*) — those are correctly named limitations, not defects, and the
   campaign report must mark them "starter pass, steady state unreachable"
-  rather than counting them as validated. The two `ATYPE = 1` members that
+  rather than counting them as validated.
+
+  **The post-review MEASURED how empty that "normal" is, and it is worse than
+  "stores no heat".** `01_1_insulated_concrete_wall_steady_state` converted with
+  this branch and run as shipped is **0 ERROR / NORMAL TERMINATION / 1 CYCLE**,
+  because k2rad copies `*CONTROL_TERMINATION`'s `ENDTIM = 1.0 s` into `/RUN`
+  verbatim and one thermal step eats the whole run. Every interior node is still
+  at the deck's own `*INITIAL_TEMPERATURE_SET` value of 293.15 — node 200 reads
+  293.15000 against the LS-DYNA steady-state `tprint`'s 17.42925, node 300
+  293.15 vs 12.97170, node 500 293.15 vs 14.20991 (mean |error| over all 549
+  compared nodes 267.4 K). Only the imposed boundary nodes are right. This is
+  the #122 "legal, accepted and meaningless" shape sitting inside the `normal`
+  headline, and the campaign report now says so in §0.12.
+
+  **NOT established: that a long enough transient reaches the reference.** A
+  post-review reviewer reported the same deck converging to LS-DYNA's field to a
+  mean 0.0013 K once the engine `/RUN` end time is raised to 1.98e6 s. I patched
+  only that cell and re-ran: 43750 cycles, NORMAL TERMINATION, and the field is
+  still 214.4 K away on average — node 300 has moved 293.15 → 277.161 against a
+  reference 12.97170. Note also that this deck states its initial condition in
+  KELVIN (293.15) and its boundaries on a 10–20 scale, which a steady-state BVP
+  solve ignores entirely and a transient march does not. So the settling-time
+  reading is UNCONFIRMED and the honest statement remains the converter's own:
+  the converted run is transient and has to be given enough physical time to
+  settle, and nobody has yet shown how much that is for this deck. The two
+  `ATYPE = 1` members that
   store nothing (`ex_22`, `01_2`) are the real item: measure the `/DT/THERM`
   step actually chosen against the conduction stability limit, and check
   whether the boundary drivers are consumed at all (`RADIATION HEAT = 0.0`
