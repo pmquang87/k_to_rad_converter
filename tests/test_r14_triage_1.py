@@ -2187,6 +2187,38 @@ class ForceTransducerInterZero(unittest.TestCase):
         sid = int(_headers(starter, "/INTER/SUB/")[0].rsplit("/", 1)[1])
         self.assertNotIn(_sub_cells(starter, sid)[0], emitted)
 
+    def test_the_announcement_states_the_sign_convention(self):
+        """A parentless /INTER/SUB reports MINUS the force on the surface it
+        names whenever that surface is the contact MAIN side, so it is INVERTED
+        relative to a parented /INTER/SUB and to an LS-DYNA rcforc row.
+
+        i7for3.F accumulates ``IMPX = +FORC_SIGN*FXI(I)*DT12`` on the
+        secondary-side pass (:1583-1587, ITYPSUB == 2) and
+        ``-FORC_SIGN*FXI(I)*DT12`` on the main-side pass (:1673-1677, the same
+        ITYPSUB == 2). That is what makes the card report the NET force on its
+        surface — a contact internal to it cancels — and it is also what flips
+        the sign. The batch's "identical across all three forms" measurement
+        held only for the configuration its probe used (it named the SECONDARY
+        side); one deck run three ways gives parent -0.1500881, parented sub
+        -0.1500881, parentless on the secondary side -0.1500881 and parentless
+        on the MAIN side +0.1500881 — same seven digits, opposite sign.
+        """
+        res, _starter = _convert(_ft_deck())
+        w = [x for x in res.warnings if "inter_ID = 0 (hm_read_intsub" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        for fact in ("READ THE SIGN WITH CARE",
+                     "MINUS the force on the surface it names",
+                     "contact MAIN side",
+                     "INVERTED relative to a parented",
+                     "LS-DYNA rcforc row",
+                     "opposite sign",
+                     # the four-way measurement, so a future edit cannot drop it
+                     "parent -0.1500881",
+                     "parentless sub on the main side +0.1500881"):
+            self.assertIn(fact, w[0])
+        # and the magnitude claim is narrowed, not deleted
+        self.assertIn("MEASURED equal IN MAGNITUDE", w[0])
+
     def test_no_secondary_node_group_is_emitted_any_more(self):
         """A behaviour change worth pinning: ``Second_ID`` is not decoded on
         the inter-0 branch (``hm_read_intsub.F:453-476`` reads Main_ID2 and
