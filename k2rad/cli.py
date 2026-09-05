@@ -244,6 +244,30 @@ def build_parser() -> argparse.ArgumentParser:
              "and let the starter refuse it.",
     )
     parser.add_argument(
+        "--law106-shell-restate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Restate a *MAT_ELASTIC_PLASTIC_THERMAL / *MAT_CWM as "
+             "/MAT/LAW36 when every part on it is a SHELL and it carries a "
+             "thermal expansion coefficient. ON by default, because a "
+             "/MAT/LAW106 SHELL DOES NOT THERMALLY EXPAND AT ALL: "
+             "cmain3.F:348 runs THERMEXPC after MULAWC at :320 and all "
+             "THERMEXPC does on a /PROP/SHELL is SUBTRACT the thermal stress "
+             "from the stress the law just produced, while "
+             "sigeps106c.F90:297-298 rebuilds it from the TOTAL strain and "
+             "never reads the old one. MEASURED on a controlled coupon "
+             "(alpha 1.2e-5, dT 100 K, L 10 mm, closed form 1.2e-2 mm): "
+             "LAW106 shell 0.0000000e+00 (-100 %), the LAW36 restatement "
+             "1.2000000e-02 (+0.000 %, and identical to a *MAT_024 control "
+             "run at every printed T01 digit), the LAW106 SOLID "
+             "1.2000000e-02 (+0.000 %) — solids are never restated. The cost "
+             "is named per "
+             "card: LAW36 has no temperature dependence, so E, nu and the "
+             "yield are frozen at the reference temperature. Use "
+             "--no-law106-shell-restate to keep /MAT/LAW106 and its E(T) at "
+             "the price of zero thermal expansion on those parts.",
+    )
+    parser.add_argument(
         "--write-restart",
         action="store_true",
         help="Keep OpenRadioss's engine restart (.rst) files. By default the "
@@ -418,6 +442,7 @@ def main(argv=None) -> int:
         blast_ground=args.blast_ground,
         rigid_cog_master=args.rigid_cog_master,
         zero_density_floor=args.zero_density_floor,
+        law106_shell_restate=args.law106_shell_restate,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

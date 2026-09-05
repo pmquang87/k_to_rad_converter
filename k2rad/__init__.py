@@ -190,6 +190,7 @@ def convert(
     blast_ground: str = "auto",
     rigid_cog_master: bool = True,
     zero_density_floor: bool = True,
+    law106_shell_restate: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -302,6 +303,31 @@ def convert(
         above all, where ``RO = 0`` is the card's own meaning — is left alone.
         Set False (CLI ``--no-zero-density-floor``) to copy the deck's own RO
         through and let the starter refuse it.
+    law106_shell_restate : bool
+        Restate a ``*MAT_ELASTIC_PLASTIC_THERMAL`` / ``*MAT_CWM`` from
+        ``/MAT/LAW106`` to ``/MAT/LAW36`` when every part on it is a SHELL and
+        it carries a thermal expansion coefficient. **On by default**, because a
+        ``/MAT/LAW106`` SHELL DOES NOT THERMALLY EXPAND AT ALL: ``cmain3.F:348``
+        runs ``THERMEXPC`` AFTER ``MULAWC`` at ``:320`` and all THERMEXPC does
+        on a ``/PROP/SHELL`` is SUBTRACT the thermal stress from the stress the
+        law just produced (``thermexpc.F:283-300``), while
+        ``sigeps106c.F90:297-298`` rebuilds ``signxx``/``signyy`` from the TOTAL
+        strain and never reads ``sigoxx`` — so the subtraction is discarded on
+        the next cycle. ``/MAT/LAW36`` is incremental (``sigeps36c.F:276``) and
+        reads it back. MEASURED on three controlled coupons (alpha 1.2e-5,
+        dT 100 K, L 10 mm, NIP 3, closed form 1.2e-2 mm): LAW106 shell
+        0.0000000e+00 (**-100 %**), the LAW36 restatement 1.2000000e-02
+        (+0.000 %, and identical to a ``*MAT_024`` + expansion control run at
+        every printed T01 digit), the LAW106 SOLID 1.2000000e-02 (+0.000 %).
+        SOLIDS are never
+        restated — ``mmain.F90`` applies the expansion to the strain increment
+        before the law dispatch — and neither is a material shared between shell
+        and non-shell parts (it is warned by name instead). The cost is named per
+        card: ``/MAT/LAW36`` carries no temperature dependence, so E, nu and the
+        yield are frozen at the reference temperature and the warning prints each
+        table's own measured spread. Set False (CLI
+        ``--no-law106-shell-restate``) to keep ``/MAT/LAW106`` and its E(T) at
+        the price of zero thermal expansion on those parts.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -411,6 +437,7 @@ def convert(
         blast_ground=str(blast_ground).strip() or "auto",
         rigid_cog_master=rigid_cog_master,
         zero_density_floor=zero_density_floor,
+        law106_shell_restate=law106_shell_restate,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,

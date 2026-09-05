@@ -387,10 +387,13 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
     lines: List[str] = []
     for k, mmg in enumerate(state.ale_mmgs):
         # The phase list is DECIDED by writer/materials._resolve_ale_submaterials
-        # (which drops the vacuum entry and every other law
-        # fill_buffer_51.F:210 refuses, and restates a *MAT_PLASTIC_KINEMATIC
-        # member as /MAT/LAW2), never re-derived here: two walks of the same
-        # entries would be two answers to one question.
+        # (which drops the vacuum entry, every submaterial with no /EOS, and
+        # every law fill_buffer_51.F:210 refuses), never re-derived here: two
+        # walks of the same entries would be two answers to one question. There
+        # is no law RESTATEMENT on this path — the *MAT_PLASTIC_KINEMATIC ->
+        # /MAT/LAW2 idea was MEASURED not to work (fill_buffer_51.F:281 refuses
+        # a phase with no EOS whatever its law), so such a phase is dropped by
+        # name and the material keeps its LAW44.
         submats = list(state.ale_mmg_submats.get(k, []))
         if not submats:
             state.warn(
@@ -462,7 +465,23 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
             "references the card, and they would be wrong by construction if "
             "anything did. To reproduce the model, consolidate the per-fluid "
             f"ALE parts onto one mesh that references material {law_id} and "
-            "give each phase its /INIVOL fill by hand.")
+            "give each phase its /INIVOL fill by hand. MEASURED, so the word "
+            "'inert' is not an assumption: deleting this entire /MAT/LAW51 "
+            "block from a converted underwater_C left the run at 0 ERROR / "
+            "0 WARNING, NORMAL TERMINATION, the same 172 cycles and a T01 file "
+            "with the SAME SHA256 — max |difference| over every channel and "
+            "every sample exactly 0.0. The card exists to answer the starter, "
+            "nothing more. What is NOT inert is the Bunreacted this batch "
+            "derives for a JWL phase: that cell rides on the material's own "
+            "/MAT/LAW5, which a /PART DOES reference, and m5law.F:135-146 "
+            "makes it a branch switch on the explosive's whole pressure law "
+            "(see the *MAT_HIGH_EXPLOSIVE_BURN warning). Also measured on "
+            "these decks: underwater_C runs to its full target time with a "
+            "kinetic energy 54.5x the LS-DYNA glstat's and an engine energy "
+            "error reaching 99.9 %, and stagnation_A's engine stops at cycle "
+            "18 (t = 3.9e-5 of ENDTIM 2e-2) with no termination line at all. "
+            "The starter fix is real; the engine result is not the LS-DYNA "
+            "answer.")
     return lines
 
 

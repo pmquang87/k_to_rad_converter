@@ -6855,6 +6855,20 @@ class ConvertOptions:
     # let the starter refuse it — the honest "show me the deck's own value"
     # behaviour.
     zero_density_floor: bool = True
+    # A *MAT_004 / *MAT_CWM whose parts are ALL shells and which carries a
+    # thermal expansion coefficient is restated from /MAT/LAW106 to /MAT/LAW36
+    # (writer/materials._resolve_law106_shells), because a LAW106 SHELL cannot
+    # thermally expand at all: cmain3.F:348 runs THERMEXPC after MULAWC at :320
+    # and THERMEXPC only SUBTRACTS the thermal stress, while
+    # sigeps106c.F90:297-298 rebuilds signxx/signyy from the TOTAL strain and
+    # never reads sigoxx. MEASURED on four coupons differing only in the
+    # element family and the law: the LAW106 SHELL free edge does not move at
+    # all (0.0000000e+00 against a closed-form 1.2e-2 mm) while the LAW36
+    # restatement and the LAW106 SOLID both give 1.2000000e-02. ON by default,
+    # because the alternative ships a deck that terminates normally with no
+    # expansion at all. Set False (--no-law106-shell-restate) to keep
+    # /MAT/LAW106 and its E(T)/nu(T) at the price of zero thermal expansion.
+    law106_shell_restate: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7581,6 +7595,19 @@ class ConversionState:
     # stress), so a deck that ends up with no temperature driver at all must be
     # told its constitutive law changed for a card that does nothing.
     law1_shells_restated: Set[int] = field(default_factory=set)
+    # *MAT_004 / *MAT_CWM ids whose /MAT/LAW106 was RESTATED to /MAT/LAW36
+    # because every part on them is a SHELL and a LAW106 shell cannot thermally
+    # expand at all: cmain3.F:348 runs THERMEXPC after MULAWC at :320 and the
+    # routine only SUBTRACTS the thermal stress, while sigeps106c.F90:297-298
+    # rebuilds signxx/signyy from the TOTAL strain and never reads sigoxx
+    # (writer/materials.py::_resolve_law106_shells). Solids are untouched.
+    law106_shells_restated: Set[int] = field(default_factory=set)
+    # mid -> the per-table spread sentences _law106_report already computed
+    # ("SIGY 435 … 1 over T = 273 … 10000 (factor 435)"). The shell
+    # restatement freezes every one of them at the reference temperature, so it
+    # names them rather than saying "temperature dependence is lost" in the
+    # abstract; a card whose tables are all constant loses NOTHING and says so.
+    law106_spreads: Dict[int, List[str]] = field(default_factory=dict)
     # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
     # never from the parsed driver list: several corpus decks state a driver
     # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so

@@ -95,6 +95,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
                          zero_density_floor: bool = True,
+                         law106_shell_restate: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -174,6 +175,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["rigid_cog_master"] = bool(rigid_cog_master)
 
     kwargs["zero_density_floor"] = bool(zero_density_floor)
+
+    kwargs["law106_shell_restate"] = bool(law106_shell_restate)
 
     kwargs["write_restart"] = bool(write_restart)
 
@@ -255,6 +258,7 @@ class ConverterGUI:
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
+        self.law106_shell_restate = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
@@ -336,6 +340,17 @@ class ConverterGUI:
                      "EXPLICIT deck is warned that its time step collapses. Untick "
                      "to copy the deck's own RO through)",
             variable=self.zero_density_floor).grid(row=7, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Restate a shell-only *MAT_004/*MAT_CWM as /MAT/LAW36  "
+                     "(default on: a /MAT/LAW106 SHELL does not thermally expand "
+                     "at all — sigeps106c.F90:297-298 rebuilds the stress from the "
+                     "TOTAL strain and discards what cmain3.F:348's THERMEXPC "
+                     "subtracts; measured 0.0000000e+00 vs a closed-form 1.2e-2 mm, "
+                     "against an exact 1.2000000e-02 restated. Solids are "
+                     "never restated. Untick to keep "
+                     "/MAT/LAW106 and its E(T) with zero expansion)",
+            variable=self.law106_shell_restate).grid(row=8, column=3, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
@@ -573,6 +588,7 @@ class ConverterGUI:
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
                 zero_density_floor=self.zero_density_floor.get(),
+                law106_shell_restate=self.law106_shell_restate.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -675,6 +691,9 @@ class ConverterGUI:
             bits.append("mesh-node rigid masters (--no-rigid-cog-master)")
         if not kwargs.get("zero_density_floor", True):
             bits.append("deck's own RO <= 0 kept (--no-zero-density-floor)")
+        if not kwargs.get("law106_shell_restate", True):
+            bits.append("/MAT/LAW106 kept on shells, no thermal expansion "
+                        "(--no-law106-shell-restate)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

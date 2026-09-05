@@ -9144,6 +9144,230 @@ def _resolve_mat_law106(state: ConversionState) -> None:
         _resolve_one_mat004(state, state.mat_ep_thermal[mid])
     for mid in sorted(state.mat_cwm):
         _resolve_one_mat270(state, state.mat_cwm[mid])
+    _resolve_law106_shells(state)
+
+
+def _law106_shell_pids(state: ConversionState,
+                       mid: int) -> Tuple[List[int], List[int]]:
+    """The parts on material ``mid``, split into SHELL and everything else.
+
+    A ``*ELEMENT_TSHELL`` is deliberately NOT a shell here: k2rad writes thick
+    shells as ``/BRICK``, so they take the SOLID engine path
+    (``mmain.F90``), where the expansion is applied to the strain increment
+    before the law dispatch and LAW106 was measured exact.
+    """
+    shell_pids = {e.pid for e in state.shell_elems}
+    shells, others = [], []
+    for pid, part in sorted(state.parts.items()):
+        if part.mid != mid:
+            continue
+        if pid in shell_pids or part.secid in state.sec_shells:
+            shells.append(pid)
+        else:
+            others.append(pid)
+    return shells, others
+
+
+def _resolve_law106_shells(state: ConversionState) -> None:
+    """A ``/MAT/LAW106`` SHELL part cannot expand — restate it as ``/MAT/LAW36``.
+
+    **The mechanism, from the engine source.** ``cmain3.F:348`` runs
+    ``THERMEXPC`` AFTER ``MULAWC`` at ``:320``, and all THERMEXPC does on an
+    ordinary ``/PROP/SHELL`` (``IGTYP = 1``, so ``IORTH_LAY = 0`` and
+    ``IORTH = 0``) is SUBTRACT the thermal stress ``P = (A11 + A12)*eth`` from
+    the stress the law just produced (``thermexpc.F:283-300``). That works only
+    for a law that carries its stress forward: ``sigeps36c.F:276`` is
+    ``SIGNXX = SIGOXX + A1*DEPSXX + A2*DEPSYY``, so LAW36 reads back exactly
+    what THERMEXPC left. ``sigeps106c.F90:297-298`` is
+    ``signxx = aii*(epsxx − eplaxx) + aij*(epsyy − eplayy)`` — a TOTAL-strain
+    rebuild that never reads ``sigoxx`` for the normal components — so the
+    subtraction is DISCARDED on the very next cycle and the shell never
+    expands. SOLIDS are unaffected and are left alone: there the expansion goes
+    into the strain increment BEFORE the law dispatch, and the LAW106 solid
+    coupon was measured correct.
+
+    **MEASURED**, four controlled coupons that differ ONLY in the element
+    family and the law — same 10 mm edge, same ``*BOUNDARY_TEMPERATURE_SET``
+    20 -> 120 K driver, same ``alpha = 1.2e-5``, ``NIP = 3`` on the shells —
+    against the closed form ``alpha*dT*L = 1.2e-2 mm``, all four at 0 ERROR and
+    NORMAL TERMINATION:
+
+      ================================================  =============  =========
+      coupon                                            free edge      vs 1.2e-2
+      ================================================  =============  =========
+      ``*MAT_004`` -> /MAT/LAW106, SOLID                1.2000000e-02  +0.000 %
+      ``*MAT_004`` -> /MAT/LAW106, SHELL                0.0000000e+00  **-100 %**
+      ``*MAT_004`` -> the LAW36 restatement, SHELL      1.2000000e-02  +0.000 %
+      ``*MAT_024`` + expansion -> /MAT/LAW36, SHELL     1.2000000e-02  +0.000 %
+      ================================================  =============  =========
+
+    (Displacements to the anim file's own printed precision.) The restated
+    shell and the ``*MAT_024`` control are not merely close, they are the SAME
+    RUN to every printed digit of the T01: internal energy 6.219282e-02,
+    external work 2.180456e-04, last time step 1.437983e-06 in both. The
+    kept-LAW106 shell reads internal energy -4.759515e-05 instead — 1307x
+    smaller and of the wrong sign — while its starter echoes THERMAL MATERIAL
+    EXPANSION and NIP 3 identically. The emitted cards are correct; the loss is
+    in the engine path, so no card change can reach it.
+
+    **What the restatement costs, and it is named per card.** LAW36 carries no
+    temperature dependence at all, so ``E(T)``, ``nu(T)`` and ``sigma_y(T)``
+    are frozen at the reference temperature the LAW106 record already resolved.
+    The warning prints each table's own measured spread, so a card whose E is
+    flat (``tempcyl.vari``, ``ex_20``, ``main_steel_frame`` — all three state a
+    CONSTANT E and nu) loses NOTHING, and one that is not (``05_2``'s steel,
+    ``E`` 210000 -> 1000) says by how much.
+
+    **Scope.** Only a material whose parts are ALL shells, and only when it
+    actually carries a ``/THERM_STRESS/MAT`` — with no expansion coefficient
+    there is nothing to rescue and LAW106's ``E(T)`` is strictly better. A
+    material shared between shell and solid parts keeps LAW106 and is WARNED
+    by name, because restating it would take the T-dependence away from solids
+    that expand correctly as they are. ``--no-law106-shell-restate`` keeps
+    LAW106 everywhere.
+    """
+    if not state.mat_law106:
+        return
+    from .thermal import _has_initial_state
+    for mid in sorted(state.mat_law106):
+        rec = state.mat_law106[mid]
+        shells, others = _law106_shell_pids(state, mid)
+        if not shells:
+            continue
+        if mid not in state.therm_stress_cards:
+            # No alpha at all: nothing to rescue, and LAW36 would only throw
+            # E(T) away. Silent by design — this is the correct outcome.
+            continue
+        if others:
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 is shared between SHELL "
+                f"part(s) {shells} and non-shell part(s) {others}, and a "
+                "/MAT/LAW106 SHELL DOES NOT THERMALLY EXPAND AT ALL. "
+                "cmain3.F:348 runs THERMEXPC after MULAWC at :320 and all it "
+                "does on a /PROP/SHELL is SUBTRACT the thermal stress from the "
+                "stress the law just produced (thermexpc.F:283-300), while "
+                "sigeps106c.F90:297-298 rebuilds signxx/signyy from the TOTAL "
+                "strain (aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) and never "
+                "reads sigoxx — so the subtraction is discarded on the next "
+                "cycle. MEASURED on four controlled coupons that differ ONLY "
+                "in the element family and the law (10 mm edge, "
+                "*BOUNDARY_TEMPERATURE_SET 20 -> 120 K, alpha 1.2e-5, NIP 3, "
+                "closed form 1.2e-2 mm): the LAW106 SHELL moves 0.0000000e+00 "
+                "(-100 %) where the LAW106 SOLID moves 1.2000000e-02 "
+                "(+0.000 %). k2rad restates a SHELL-ONLY material as "
+                "/MAT/LAW36, which reproduces the *MAT_024 control run to "
+                "EVERY printed T01 digit — but this "
+                "one also carries solids, which expand correctly under LAW106 "
+                "and would LOSE E(T) in the restatement, so the law is left "
+                "alone and the shell parts get NO expansion. Give the shells "
+                "their own *MAT_ELASTIC_PLASTIC_THERMAL / *MAT_CWM id if the "
+                "expansion on them matters.")
+            continue
+        if not state.options.law106_shell_restate:
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 on SHELL part(s) {shells}: "
+                "--no-law106-shell-restate was passed, so the law is KEPT and "
+                "these parts get NO THERMAL EXPANSION AT ALL — "
+                "sigeps106c.F90:297-298 rebuilds the stress from the total "
+                "strain, discarding what THERMEXPC (cmain3.F:348, after MULAWC "
+                "at :320) subtracts. MEASURED: the free edge does not move at "
+                "all (0.0000000e+00 against a closed "
+                "form on a controlled coupon. E(T) and nu(T) are carried "
+                "exactly; the expansion is not carried at all.")
+            continue
+        if _has_initial_state(state, set(shells)):
+            # The #127 mixed-deck rule, exactly as _restate_law1_shells states
+            # it: an /INISHE record's station count is cross-checked against
+            # the /PROP/SHELL N, and LAW106 and LAW36 need not agree on it.
+            state.warn(
+                f"{rec.source} {mid} -> /MAT/LAW106 on SHELL part(s) {shells} "
+                "would be restated as /MAT/LAW36 so the parts can expand at "
+                "all, but they also carry *INITIAL_STRESS_SHELL / "
+                "*INITIAL_STRAIN_SHELL records whose station count is "
+                "cross-checked against the through-thickness point count "
+                "(ERROR 26 + ERROR 1904). The law is LEFT AS LAW106 and the "
+                "thermal expansion on these parts is INERT (measured "
+                "0.0000000e+00 against a closed-form 1.2e-2 mm on a controlled "
+                "coupon). Drop the initial state, "
+                "or give these parts their own material, if the expansion "
+                "matters.")
+            continue
+        _restate_law106_shell(state, rec, shells)
+
+
+def _restate_law106_shell(state: ConversionState, rec: MatLaw106,
+                          shells: List[int]) -> None:
+    """Swap one shell-only ``/MAT/LAW106`` for the ``/MAT/LAW36`` that can
+    actually expand, and say exactly what the swap froze."""
+    from .thermal import _FAR_YIELD_OVER_E
+    thermo_elastic = rec.a >= _LAW106_NO_YIELD
+    if thermo_elastic:
+        sigy = _FAR_YIELD_OVER_E * rec.e
+        pts = [(0.0, sigy), (1.0, sigy)]
+        yield_note = (f"a flat far-yield curve at {sigy:g} (= 1000 x E, a "
+                      "plastic strain of 1000 — the law never leaves its "
+                      "elastic branch), because the source card states no "
+                      "yield")
+    else:
+        sigy = rec.a
+        pts = [(0.0, sigy), (1.0, sigy + rec.b)]
+        yield_note = (
+            f"a two-point yield curve ({sigy:g} at eps_p = 0, "
+            f"{sigy + rec.b:g} at eps_p = 1), i.e. the SAME yield "
+            f"sigma_y(T_ref) = {sigy:g} and the SAME plastic modulus "
+            f"B = {rec.b:g} the /MAT/LAW106 card carried")
+    if sigy <= 0.0:
+        state.warn(
+            f"{rec.source} {rec.mid} -> /MAT/LAW106 on SHELL part(s) {shells} "
+            f"cannot be restated as /MAT/LAW36: the yield at the reference "
+            f"temperature is {sigy:g}, and /MAT/LAW36 needs a positive one. "
+            "The law is LEFT AS LAW106 and its thermal expansion on these "
+            "parts is INERT (sigeps106c.F90:297-298 rebuilds the stress from "
+            "the total strain, discarding what cmain3.F:348's THERMEXPC "
+            "subtracts — measured 0.0000000e+00 against a closed-form "
+            "1.2e-2 mm on a controlled coupon).")
+        return
+    fid = state.next_curve_id()
+    state.curves[fid] = Curve(
+        lcid=fid, title=f"Auto_law106_shell_yield_mat{rec.mid}",
+        sfa=1.0, sfo=1.0, offa=0.0, offo=0.0, pts=pts)
+    state.curve_order.append(fid)
+    del state.mat_law106[rec.mid]
+    state.law106_shells_restated.add(rec.mid)
+    state.mat_plas_tab[rec.mid] = MatPlasTAB(
+        mid=rec.mid, title=rec.title, rho=rec.rho, E=rec.e, nu=rec.nu,
+        sigy=sigy, etan=0.0, fail=0.0, lcss=0, C=0.0, P=0.0, funct_id=fid)
+    frozen = ", ".join(s for s in state.law106_spreads.get(rec.mid, [])
+                       if s) or "nothing — every table on the card is CONSTANT"
+    state.warn(
+        f"{rec.source} {rec.mid} is on SHELL part(s) {shells} only, so it is "
+        f"RESTATED as /MAT/LAW36 with {yield_note}. WHY: a /MAT/LAW106 SHELL "
+        "DOES NOT THERMALLY EXPAND AT ALL. cmain3.F:348 runs THERMEXPC after "
+        "MULAWC at :320, and on a /PROP/SHELL all THERMEXPC does is SUBTRACT "
+        "the thermal stress from the stress the law just produced "
+        "(thermexpc.F:283-300); sigeps106c.F90:297-298 then rebuilds "
+        "signxx/signyy from the TOTAL strain "
+        "(aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) without ever reading "
+        "sigoxx, so the subtraction is discarded on the next cycle. LAW36 is "
+        "incremental (sigeps36c.F:276, SIGNXX = SIGOXX + A1*DEPSXX + "
+        "A2*DEPSYY) and reads it back. MEASURED on three controlled coupons "
+        "(alpha 1.2e-5, dT 100 K, L 10 mm, NIP 3, closed form 1.2e-2 mm, all "
+        "0 ERROR, all NORMAL TERMINATION): LAW106 SHELL 0.0000000e+00 "
+        "(-100 %, internal energy -4.759515e-05), the LAW36 restatement "
+        "1.2000000e-02 (+0.000 %, internal energy 6.219282e-02), the "
+        "*MAT_024 + *MAT_ADD_THERMAL_EXPANSION control 1.2000000e-02 with an "
+        "internal energy, external work and last time step IDENTICAL to the "
+        "restatement at every printed T01 digit, and LAW106 SOLID "
+        "1.2000000e-02 (+0.000 %). "
+        f"WHAT IT COSTS: /MAT/LAW36 has no temperature dependence, so "
+        f"E = {rec.e:g}, nu = {rec.nu:g} and the yield are FROZEN at the "
+        f"reference temperature Tr = {rec.tr:g}. Frozen on this card: "
+        f"{frozen}. The alpha(T) /THERM_STRESS/MAT and the /HEAT/MAT are "
+        "unchanged and still temperature-dependent. SOLID parts are never "
+        "restated (mmain.F90 applies the expansion before the law dispatch, "
+        "and the LAW106 solid was measured exact). Pass "
+        "--no-law106-shell-restate (convert(law106_shell_restate=False)) to "
+        "keep /MAT/LAW106 and its E(T) at the price of zero expansion.")
 
 
 def _law106_register(state: ConversionState, rec: MatLaw106,
@@ -9280,12 +9504,17 @@ def _resolve_one_mat270(state: ConversionState, mat: MatCWM) -> None:
     """One ``*MAT_CWM`` card → its ``/MAT/LAW106``.
 
     Same target family as ``*MAT_004`` with load curves instead of eight-point
-    tables — and the field the two do NOT share is the hardening one:
-    ``LCHR`` is the PLASTIC hardening modulus ``H(T)`` of Remark 2's
-    ``sigma_Y = sigma_Y(T) + beta·H(T)·eps_p``, so it goes into ``B``
-    UNCONVERTED, where MAT_004's total-strain ``ETAN`` needs
-    ``E·ETAN/(E−ETAN)``. Getting that wrong in either direction is a silent
-    factor error.
+    tables — and the field the two do NOT share is the hardening one.
+    ``LCHR`` is the PLASTIC hardening modulus ``H(T)`` of Vol II R17 p.2-1838
+    Remark 2's ``sigma_Y = sigma_Y(T) + BETA·H(T)·eps_p``, so MAT_004's
+    ``E·ETAN/(E−ETAN)`` total-strain conversion must NOT be applied to it.
+    What it does need is the ``BETA`` split: the same Remark makes the back
+    stress evolve as ``kappa_dot = (1−BETA)·H(T)·eps_dot_p`` and p.2-1836 calls
+    ``BETA`` the *"Fraction of isotropic hardening between 0 and 1"*
+    (``EQ.0.0`` kinematic, ``EQ.1.0`` isotropic). ``/MAT/LAW106`` is purely
+    isotropic, so ``B = BETA·H(T_ref)`` — the isotropic part exactly. Getting
+    either half wrong is a silent factor error, and ``BETA = 0`` is the case
+    where LS-DYNA has NO isotropic hardening at all.
     """
     kw = "*MAT_CWM"
     if mat.rho <= 0.0:
@@ -9323,16 +9552,38 @@ def _resolve_one_mat270(state: ConversionState, mat: MatCWM) -> None:
         if nu_ref != 0.0:
             fct_nu = _law106_normalised_function(
                 state, mat.mid, "nu", nu_pts, nu_ref)
+    if nu_ref == 0.0:
+        # A zero Poisson ratio is not a neutral default: it changes the bulk
+        # modulus from E/(3(1-2nu)) to E/3 and removes the transverse coupling
+        # entirely. Every corpus carrier states all five curves, so nothing
+        # reaches this today — but a card that omits LCPR (or names a curve
+        # this deck does not define) must not get it silently.
+        state.warn(
+            f"{kw} {mat.mid}: LCPR = {mat.lcpr} resolves to no usable "
+            "*DEFINE_CURVE, so the /MAT/LAW106 card is written with "
+            "nu = 0 — the card's own default and NOT a neutral one: it makes "
+            "the bulk modulus E/3 instead of E/(3(1-2nu)) and removes the "
+            "transverse coupling, so a confined or plane-strain response is "
+            "wrong by that factor. State LCPR, or a constant Poisson ratio "
+            "curve, if that matters.")
     sy_pts = _law106_curve_points(state, mat.lcsy)
     a = (_interp_table([x for x, _y in sy_pts],
                        [y for _x, y in sy_pts], t_ref)
          if sy_pts is not None else _LAW106_NO_YIELD)
     h_pts = _law106_curve_points(state, mat.lchr)
     # LCHR is ALREADY the plastic hardening modulus (Remark 2) — no
-    # E·Et/(E−Et) conversion here, unlike *MAT_004's ETAN.
-    b = (_interp_table([x for x, _y in h_pts],
-                       [y for _x, y in h_pts], t_ref)
-         if h_pts is not None else 0.0)
+    # E·Et/(E−Et) conversion here, unlike *MAT_004's ETAN. What it DOES need is
+    # the BETA split: Vol II R17 p.2-1838 Remark 2 gives the effective yield as
+    # sigma_Y = sigma_Y(T) + BETA*H(T)*eps_p with a back stress evolving as
+    # kappa_dot = (1-BETA)*H(T)*eps_dot_p, and the BETA field itself is
+    # "Fraction of isotropic hardening between 0 and 1: EQ.0.0 kinematic,
+    # EQ.1.0 isotropic" (p.2-1836). /MAT/LAW106 is purely isotropic, so the
+    # ISOTROPIC modulus BETA*H(T) is the only part it can carry — writing H(T)
+    # raw would make the card 1/BETA too stiff.
+    h_ref = (_interp_table([x for x, _y in h_pts],
+                           [y for _x, y in h_pts], t_ref)
+             if h_pts is not None else 0.0)
+    b = mat.beta * h_ref
     alpha_pts = _law106_curve_points(state, mat.lcat)
     _law106_register(state, MatLaw106(
         mid=mat.mid, title=mat.title, rho=mat.rho, e=e_ref, nu=nu_ref,
@@ -9356,10 +9607,13 @@ def _resolve_one_mat270(state: ConversionState, mat: MatCWM) -> None:
                    range_lo=xs[0], range_hi=xs[-1],
                    hardening_note=(
                        "LCHR is ALREADY the PLASTIC hardening modulus (Vol II "
-                       "R17 p.2-1836 Remark 2, sigma_Y = sigma_Y(T) + "
-                       "beta*H(T)*eps_p), so it is written into B UNCONVERTED "
-                       "— the E*Et/(E-Et) derivation *MAT_004's total-strain "
-                       "ETAN needs would be a silent factor error here"))
+                       "R17 p.2-1838 Remark 2, sigma_Y = sigma_Y(T) + "
+                       "BETA*H(T)*eps_p), so the E*Et/(E-Et) derivation "
+                       "*MAT_004's total-strain ETAN needs would be a silent "
+                       f"factor error here. B = BETA*H(T_ref) = {mat.beta:g}*"
+                       f"{h_ref:g} = {b:g}: /MAT/LAW106 is purely isotropic and "
+                       "BETA is the ISOTROPIC fraction (p.2-1836), so writing "
+                       "H(T_ref) raw would make the card 1/BETA too stiff"))
     _warn_cwm_dropped_cells(state, mat)
 
 
@@ -9370,6 +9624,10 @@ def _law106_report(state: ConversionState, kw: str, mid: int, t_ref: float,
                    hardening_note: str = "") -> None:
     """The per-card statement of what was carried and what was frozen."""
     lost = [s for s in spreads if s]
+    # Kept for _resolve_law106_shells: the shell restatement freezes ALL of
+    # them (LAW36 has no temperature dependence at all), and it names the ones
+    # this card actually has rather than the abstraction.
+    state.law106_spreads[mid] = list(lost)
     frozen = [s for s in lost
               if s.startswith(("SIGY", "ETAN", "sigma_y", "H("))]
     carried = [s for s in lost if s not in frozen]
@@ -9456,12 +9714,22 @@ def _warn_cwm_dropped_cells(state: ConversionState, mat: MatCWM) -> None:
             "per-element birth would need one sensor, one group and one /ACTIV "
             "per weld element — and a deactivated solid also stops CONDUCTING "
             "(STHERM multiplies by OFF). Out of scope for this batch")
-    if mat.beta not in (0.0, 1.0):
+    if mat.beta != 1.0:
         losses.append(
             f"BETA={mat.beta:g} splits the hardening between isotropic and "
-            "KINEMATIC (Remark 2's back stress kappa). /MAT/LAW106 is purely "
-            "isotropic, so the kinematic fraction 1-BETA is DROPPED; only "
-            "BETA = 1 is lossless here")
+            "KINEMATIC. Vol II R17 p.2-1838 Remark 2 makes the effective yield "
+            "sigma_Y = sigma_Y(T) + BETA*H(T)*eps_p with a back stress "
+            "kappa_dot = (1-BETA)*H(T)*eps_dot_p, and p.2-1836 calls BETA the "
+            "'Fraction of isotropic hardening between 0 and 1' (EQ.0.0 "
+            "kinematic, EQ.1.0 isotropic). /MAT/LAW106 is purely isotropic, so "
+            f"k2rad writes B = BETA*H(T_ref) — the isotropic part exactly — and "
+            f"the KINEMATIC fraction 1-BETA = {1.0 - mat.beta:g} is DROPPED "
+            "(no back stress, so no Bauschinger effect on load reversal, which "
+            "is what a multi-pass weld is made of)"
+            + (". At BETA = 0 LS-DYNA has NO isotropic hardening at all, so "
+               "B = 0 and the restated law is perfectly plastic"
+               if mat.beta == 0.0 else
+               ". Only BETA = 1 is lossless here"))
     if mat.epsini:
         losses.append(
             f"EPSINI={mat.epsini:g} (uniform initial plastic strain) has no "
@@ -9898,9 +10166,11 @@ def _ammg_member_mids(state: ConversionState) -> Set[int]:
     """Material ids reached by an ``*ALE_MULTI-MATERIAL_GROUP`` entry.
 
     The ONE predicate for "is this material a LAW51 phase?", read by the
-    ``Bunreacted`` derivation, by the submaterial restatement and by the phase
-    list itself — if any two of them disagreed, a material would be derived for
-    a card it never lands on, or land on one with no derivation.
+    ``Bunreacted`` derivation and by the phase list itself (there is no third
+    reader: the submaterial RESTATEMENT was removed in ``ff7a82d`` — see
+    :func:`_resolve_ale_submaterials` (b)). If the two disagreed, a material
+    would be derived for a card it never lands on, or land on one with no
+    derivation.
     """
     from .blast_ale import _part_pids
     mids: Set[int] = set()
@@ -9914,22 +10184,59 @@ def _ammg_member_mids(state: ConversionState) -> Set[int]:
 
 
 def _jwl_unreacted_bulk(jwl: EosJwl) -> float:
-    """``K_s(V = 1)`` — the JWL isentrope's slope at the UNREACTED density.
+    """``K_s(V = 1)`` — the slope of the JWL's PRINCIPAL ISENTROPE at the
+    unreacted density.
 
-    ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V} + omega·E0/V`` is the deck's own
-    pressure law; its bulk modulus ``K = -V dp/dV`` evaluated at ``V = 1`` is
+    The principal isentrope is the JWL's own reference curve for the
+    condensed (unreacted) solid, ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V}``, with
+    the energy term ``omega·E0/V`` added at the stated ``E0``. Its bulk modulus
+    ``K = -V dp_s/dV`` evaluated at ``V = 1`` is
 
         K_s(1) = A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0
 
     Every term comes from a cell the ``*EOS_JWL`` states — nothing is fitted
     and nothing is looked up. On ``underwater_C``'s TNT (A 371000, B 3230,
     R1 4.15, R2 0.95, omega 0.3, E0 4300) that is
-    24271.684 + 1186.715 + 1290.000 = **26748.4 MPa**, which is also ~= the
-    deck's own stated ``P_CJ`` of 26000.
+    24271.684 + 1186.715 + 1290.000 = **26748.4 MPa**.
+
+    **This is NOT the tangent modulus of the full EOS the solver evaluates**,
+    and the difference is named rather than hidden: ``jwl51.F:191``
+    (``P0 = B1*(1 - W1/R1M)*ER1M + B2*(1 - W1/R2M)*ER2M``) and
+    ``m5law.F:126-129`` (``WDR1V = A - A*W/(R1*DF)``) both carry the
+    ``(1 - omega/(R_i·V))`` factors the principal isentrope does not, so
+    differentiating THAT gives ``_jwl_full_eos_bulk`` — 23801 on the same card,
+    11 % lower. Both are legitimate proxies for the unreacted solid's
+    stiffness; a three-value sweep spanning 37x on ``underwater_C`` moved the
+    last time step 0.14 %, the internal energy 1.1 % and the kinetic energy
+    0.19 %, so the choice does not decide the answer. The warning prints both.
     """
     return (jwl.a * jwl.r1 * math.exp(-jwl.r1)
             + jwl.b * jwl.r2 * math.exp(-jwl.r2)
             + jwl.omega * jwl.e0)
+
+
+def _jwl_full_eos_bulk(jwl: EosJwl) -> float:
+    """``-V dp/dV`` at ``V = 1`` for the FULL JWL the solver evaluates.
+
+    ``p(V, E0) = A(1 - omega/(R1·V))e^{-R1·V} + B(1 - omega/(R2·V))e^{-R2·V}
+    + omega·E0/V`` — the form ``jwl51.F:191`` and ``m5law.F:126-129`` build —
+    differentiates to
+
+        K(1) = A·e^{-R1}(R1 - omega/R1 - omega)
+             + B·e^{-R2}(R2 - omega/R2 - omega) + omega·E0
+
+    Printed beside the value actually written so a reader can see the size of
+    the modelling choice (11 % on ``underwater_C``'s TNT: 23801 against
+    26748.4). Not used as the substitution itself — which is why a degenerate
+    ``R1``/``R2`` of 0 (where the ``omega/R_i`` term is undefined) drops that
+    exponential's contribution instead of raising: this number only ever
+    appears inside a sentence.
+    """
+    out = jwl.omega * jwl.e0
+    for coef, r in ((jwl.a, jwl.r1), (jwl.b, jwl.r2)):
+        if r:
+            out += coef * math.exp(-r) * (r - jwl.omega / r - jwl.omega)
+    return out
 
 
 def _resolve_he_bunreacted(state: ConversionState) -> None:
@@ -9957,18 +10264,37 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
     is required and the honest thing is to derive one from the deck's own
     physics and NAME it.
 
-    **The derivation, and the alternative that was rejected.** Two candidates
-    exist from stated cells: the JWL isentrope slope at the unreacted density
-    (:func:`_jwl_unreacted_bulk`), and ``rho0*D^2`` — which the starter itself
-    already computes at ``fill_buffer_51.F:488`` (``UPARAM(275) =
-    RHO40*SSP4^2`` with ``SSP4 = VDET``). On ``underwater_C`` they are 26748.4
-    and 100188.9 MPa. The isentrope slope is what is written: it is the
-    stiffness of THIS explosive's own pressure law evaluated at THIS density —
-    the only number on the card that describes its compressibility — and it is
-    3.7x softer, so it perturbs the pre-burn state (which LS-DYNA leaves at
-    zero) less. Neither raises the time step risk: ``PM(27)`` already holds
-    ``D`` (``:492``), and a SMALLER ``C11`` gives a LARGER, never smaller,
-    unreacted-sound-speed step.
+    **The derivation, and the two alternatives.** Three candidates exist from
+    stated cells: the slope of the JWL's PRINCIPAL ISENTROPE at the unreacted
+    density (:func:`_jwl_unreacted_bulk`, what is written); the tangent modulus
+    of the FULL JWL the solver evaluates, which carries the
+    ``(1 - omega/(R_i·V))`` factors of ``jwl51.F:191`` /
+    ``m5law.F:126-129`` (:func:`_jwl_full_eos_bulk`); and ``rho0*D^2``, which
+    the starter itself already computes at ``fill_buffer_51.F:488``
+    (``UPARAM(275) = RHO40*SSP4^2`` with ``SSP4 = VDET``). On ``underwater_C``
+    they are 26748.4, 23801 and 100188.9 MPa. The principal isentrope is what
+    is written because it is the JWL's own reference curve for the condensed,
+    unreacted solid — the quantity the cell asks for — and it is 3.7x softer
+    than ``rho0*D^2``, so it perturbs the pre-burn state (which LS-DYNA leaves
+    at zero) less. All three are printed in the warning, and MEASUREMENT says
+    the choice is not what decides the run: a three-value sweep spanning 37x on
+    ``underwater_C`` moved the last time step 0.14 %, the internal energy 1.1 %
+    and the kinetic energy 0.19 %. Neither raises the time step risk:
+    ``PM(27)`` already holds ``D`` (``:492``), and a SMALLER ``C11`` gives a
+    LARGER, never smaller, unreacted-sound-speed step.
+
+    **Where the value is actually consumed — and it is NOT only LAW51.** The
+    substitution is triggered by an ``ERROR 99`` that lives in the LAW51
+    ``Iform = 12`` branch, but the cell is written on the material's OWN
+    ``/MAT/LAW5``, and on all four ``underwater_*`` carriers it is that
+    stand-alone card, referenced by a real ``/PART``, that the engine runs —
+    the emitted ``/MAT/LAW51`` is referenced by no ``/PART`` at all
+    (``blast_ale._make_ale_multimaterial`` says so in capitals). So the live
+    consumer is ``m5law.F``, where ``:135-146`` makes the cell a BRANCH SWITCH:
+    ``BULK == 0`` gives the FULL product pressure in every cell with no
+    burn-fraction weighting, and a positive ``BULK`` gives the
+    ``(1-BFRAC)·(P0 + BULK·mu) + BFRAC·(...)`` blend. The warning states that
+    rather than the ``jwl51.F`` path, which on these decks never executes.
 
     **Scope.** The substitution fires only when the source ``K`` is 0 AND the
     material is an ``*ALE_MULTI-MATERIAL_GROUP`` member, because ``ERROR 99``
@@ -10023,11 +10349,39 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
                 "*MAT_HIGH_EXPLOSIVE_BURN card, or pass --he-bunreacted.")
             continue
         else:
-            heb.bunreacted = _jwl_unreacted_bulk(jwl)
+            derived = _jwl_unreacted_bulk(jwl)
+            if derived <= 0.0:
+                # BOTH arms of a back-solve must refuse the same degeneracies
+                # (#129). Every sibling derivation in this batch screens its
+                # own — LAW3 refuses `bulk <= 0`, LAW106 refuses `e_ref <= 0`,
+                # and the `jwl is None` arm two branches up refuses by name —
+                # and without this the ratio printed in the warning below is a
+                # ZeroDivisionError that aborts the whole conversion with no
+                # output and no diagnostic. A *EOS_JWL stating A = B = E0 = 0
+                # reaches it exactly.
+                heb.bunreacted = 0.0
+                heb.bunreacted_note = ""
+                state.warn(
+                    f"*MAT_HIGH_EXPLOSIVE_BURN {mid} is an "
+                    "*ALE_MULTI-MATERIAL_GROUP member with K = 0, and its "
+                    f"companion *EOS_JWL (A = {jwl.a:g}, B = {jwl.b:g}, "
+                    f"R1 = {jwl.r1:g}, R2 = {jwl.r2:g}, "
+                    f"omega = {jwl.omega:g}, E0 = {jwl.e0:g}) gives a "
+                    f"principal-isentrope slope of {derived:g}, which is not a "
+                    "positive bulk modulus — so there is nothing to derive "
+                    "Bunreacted from. It is left 0 and fill_buffer_51.F:496 "
+                    "will answer ERROR 99 ('BULK MODULUS OF LAW5 (JWL) MUST BE "
+                    "PROVIDED FOR UNREACTED EXPLOSIVE'). State K on the "
+                    "*MAT_HIGH_EXPLOSIVE_BURN card, fix the *EOS_JWL "
+                    "coefficients, or pass --he-bunreacted <value>.")
+                continue
+            heb.bunreacted = derived
             heb.bunreacted_note = (
-                "a DERIVED value: the JWL isentrope's bulk modulus at the "
-                "UNREACTED density, K_s(V=1) = A*R1*exp(-R1) + B*R2*exp(-R2) "
-                f"+ omega*E0 = {jwl.a:g}*{jwl.r1:g}*exp(-{jwl.r1:g}) + "
+                "a DERIVED value: the slope of the JWL's PRINCIPAL ISENTROPE "
+                "at the unreacted density, K = -V dp_s/dV at V = 1 for "
+                "p_s(V) = A*exp(-R1*V) + B*exp(-R2*V) + omega*E0/V, i.e. "
+                "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0 = "
+                f"{jwl.a:g}*{jwl.r1:g}*exp(-{jwl.r1:g}) + "
                 f"{jwl.b:g}*{jwl.r2:g}*exp(-{jwl.r2:g}) + {jwl.omega:g}*"
                 f"{jwl.e0:g} = {heb.bunreacted:g}")
             state.warn(
@@ -10042,18 +10396,43 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
                 "refuses a phase whose LAW5 Bunreacted is <= 0 (ERROR 99, "
                 "'BULK MODULUS OF LAW5 (JWL) MUST BE PROVIDED FOR UNREACTED "
                 f"EXPLOSIVE'). The value written is {heb.bunreacted_note}. "
-                "CONSEQUENCE, stated plainly: the unburnt cells now carry "
-                "P = K*mu (jwl51.F:197 Psol = C01 + C11*MU1, blended by the "
-                "burn fraction at :205) where LS-DYNA carried 0, and "
-                "sqrt(C11/rho) becomes their sound speed (:214). The "
-                "alternative derivation from stated cells is rho0*D^2 = "
-                f"{heb.rho * heb.d * heb.d:g}, which the starter already "
-                "computes at fill_buffer_51.F:488 as UPARAM(275); it is "
-                f"{(heb.rho * heb.d * heb.d) / heb.bunreacted:.3g}x stiffer, "
-                "so the isentrope slope perturbs the pre-burn state less. "
-                "Neither costs time step (PM(27) already holds D, and a "
-                "SMALLER C11 raises the unreacted-sound-speed limit). Use "
-                "--he-bunreacted <value> to state your own.")
+                "WHERE IT IS CONSUMED, and it is NOT only the /MAT/LAW51 the "
+                "starter complained about: the SAME cell rides on this "
+                "material's own /MAT/LAW5, whose /PART-referenced elements run "
+                "through m5law.F — and there the cell is a BRANCH SWITCH, not "
+                "an added stiffness. m5law.F:135-138 is 'IF (BULK == ZERO) "
+                "P = P0 + (WDR1V*ER1V + WDR2V*ER2V + DR1V)', the FULL JWL "
+                "product pressure in every cell with no burn-fraction "
+                "weighting at all; :140-146 is the ELSE, "
+                "'P = (1-BFRAC)*(P0 + BULK*AMU) + BFRAC*(...)'. So a positive "
+                "Bunreacted moves the unburnt cells from LS-DYNA's zero stress "
+                "AND from Radioss's own product-pressure fallback onto "
+                "P = K*mu, i.e. it changes the explosive's pressure law "
+                "everywhere, not just before burn. (Inside /MAT/LAW51 the same "
+                "number is jwl51.F:197's 'Psol = C01 + C11*MU1', blended at "
+                ":205, with sqrt(C11/rho) as the unreacted sound speed at "
+                ":214.) MEASURED on underwater_C: a three-value sweep spanning "
+                "37x (2674.84 / 26748.40 / 100188.90) moves the last time step "
+                "0.14 %, the internal energy 1.1 % and the kinetic energy "
+                "0.19 % — so the CHOICE of value is not what decides the "
+                "answer, but its PRESENCE is not free. "
+                "THE OTHER TWO CANDIDATES, both from stated cells: "
+                f"rho0*D^2 = {heb.rho * heb.d * heb.d:g}, which the starter "
+                "already computes at fill_buffer_51.F:488 as UPARAM(275) and "
+                f"which is {(heb.rho * heb.d * heb.d) / heb.bunreacted:.3g}x "
+                "stiffer; and the tangent modulus of the FULL JWL the solver "
+                "evaluates — jwl51.F:191 and m5law.F:126-129 both carry the "
+                "(1 - omega/(R_i*V)) factors the principal isentrope does not, "
+                "giving A*exp(-R1)*(R1 - omega/R1 - omega) + "
+                "B*exp(-R2)*(R2 - omega/R2 - omega) + omega*E0 = "
+                f"{_jwl_full_eos_bulk(jwl):g}, about "
+                f"{100.0 * (1.0 - _jwl_full_eos_bulk(jwl) / heb.bunreacted):.3g}"
+                " % below the value written. The principal isentrope is used "
+                "because it is the JWL's own reference curve for the unreacted "
+                "solid; the measurement above says the difference does not "
+                "decide the run. Neither costs time step (PM(27) already holds "
+                "D, and a SMALLER C11 raises the unreacted-sound-speed limit). "
+                "Use --he-bunreacted <value> to state your own.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10325,17 +10704,20 @@ def _resolve_ale_submaterials(state: ConversionState) -> None:
     balance IS the void. `stagnation_A/B` and `cylinder_impact_A/B` are this
     shape (*"NON EXISTING SUBMATERIAL IDENTIFIER"*, ``ERROR 99``).
 
-    **(b) A ``*MAT_PLASTIC_KINEMATIC`` member is RESTATED as ``/MAT/LAW2``.**
-    LAW44 is not on the allowed list (``fill_buffer_51.F:210/237``), and LAW2
-    describes the identical curve whenever the material carries no
-    Cowper-Symonds rate term and no EFFECTIVE kinematic hardening —
-    ``a = SIGY``, ``b = E*ETAN/(E-ETAN)``, ``n = 1``, the same
-    ``_plas_kin_law2_expressible`` test the SPH path uses. ``cylinder_impact``'s
-    material (``E 200000, nu 0.3, SIGY 200, ETAN 0, BETA 0``) is losslessly
-    expressible: ``ETAN = 0`` leaves no hardening for ``BETA`` to split. The id
-    discipline is the SPH one verbatim — a material used only by AMMG parts is
-    restated under its OWN id, one shared with a Lagrangian part keeps
-    ``/MAT/LAW44/<mid>`` and the phase list points at a minted clone.
+    **(b) A member with no ``/EOS`` is dropped, whatever its law.** This screen
+    is what a research plan to RESTATE ``*MAT_PLASTIC_KINEMATIC`` as
+    ``/MAT/LAW2`` was replaced by, and the replacement was MEASURED (commit
+    ``ff7a82d``). ``fill_buffer_51.F:213-219``'s THEN branch is empty and its
+    ELSE raises on exactly the ``EOS_TYPE`` values its own comment calls
+    expected — ``EOS_TYPE = 0`` included — and ``:281`` states it plainly:
+    ``IF(EOS_TYPE == 0 .AND. MLN /= 5)`` → *"MISSING SUBMATERIAL EOS"*. So a
+    restatement could never produce a legal phase: it clears the law test and
+    dies on the EOS one. ``cylinder_impact_A`` carrying the restatement
+    answered BOTH messages; ``underwater_C`` (LAW5 + LAW6 with an
+    ``/EOS/GRUNEISEN``) started at 0 ERROR. The restatement machinery — and the
+    AMMG clone path that went with it — was therefore REMOVED rather than
+    shipped as a capability that cannot work, and such a phase is dropped by
+    name while the material keeps its ``/MAT/LAW44``.
 
     **(c) Anything else that is not on the allowed list is dropped by name.**
     A phase k2rad emits under an unlisted law is ``ERROR 99`` and refuses the

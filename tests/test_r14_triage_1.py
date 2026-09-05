@@ -1009,23 +1009,70 @@ class HeBunreactedTests(unittest.TestCase):
         self.assertIn("the card's own stated K = 9300", " ".join(res.warnings))
 
     def test_zero_k_on_an_ammg_member_is_derived_from_the_jwl(self):
-        """K_s(V=1) = A*R1*e^-R1 + B*R2*e^-R2 + omega*E0
+        """The value is the PRINCIPAL ISENTROPE's slope at V = 1,
+        A*R1*e^-R1 + B*R2*e^-R2 + omega*E0
         = 371000*4.15*e^-4.15 + 3230*0.95*e^-0.95 + 0.3*4300
-        = 24271.684 + 1186.715 + 1290.0 = 26748.39867 (underwater_C's TNT)."""
+        = 24271.684 + 1186.715 + 1290.0 = 26748.39867 (underwater_C's TNT).
+
+        The warning's SOURCE CLAIMS are pinned alongside it, and this round
+        corrected two of them: the live consumer on every carrier is
+        ``m5law.F`` (the emitted /MAT/LAW51 is referenced by no /PART, so
+        ``jwl51.F`` never executes), and there the cell is a BRANCH SWITCH
+        (``:135-146``), not an added stiffness. The full-EOS alternative is
+        printed beside it because ``jwl51.F:191`` and ``m5law.F:126-129`` both
+        carry the ``(1 - omega/(R_i*V))`` factors the principal isentrope
+        does not.
+        """
         import math
         want = (371000 * 4.15 * math.exp(-4.15)
                 + 3230 * 0.95 * math.exp(-0.95) + 0.3 * 4300)
         self.assertAlmostEqual(want, 26748.39867, places=4)
+        full = (371000 * math.exp(-4.15) * (4.15 - 0.3 / 4.15 - 0.3)
+                + 3230 * math.exp(-0.95) * (0.95 - 0.3 / 0.95 - 0.3)
+                + 0.3 * 4300)
+        self.assertAlmostEqual(full, 23801.8, places=1)
         res, starter = _convert(_he_deck())
         self.assertAlmostEqual(_bunreacted(starter, 2), want, places=3)
         w = [x for x in res.warnings if "SUBSTITUTED" in x]
         self.assertEqual(len(w), 1)
-        for fact in ("K_s(V=1) = A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0",
+        for fact in ("PRINCIPAL ISENTROPE",
+                     "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0",
                      "fill_buffer_51.F:496", "ERROR 99",
                      "LS-DYNA carries NO unreacted stress at all",
-                     "jwl51.F:197", "rho0*D^2 = 100189",
+                     # the CORRECTED consumer, and the branch it switches
+                     "m5law.F:135-138", "IF (BULK == ZERO)",
+                     "BRANCH SWITCH",
+                     # the LAW51 path is named as the one that does NOT run
+                     "jwl51.F:197",
+                     # both alternatives, with their numbers
+                     "rho0*D^2 = 100189", "3.75x stiffer",
+                     "23801.8", "11 % below the value written",
                      "--he-bunreacted"):
             self.assertIn(fact, w[0])
+
+    def test_a_degenerate_jwl_is_refused_by_name_not_by_zerodivision(self):
+        """Both ARMS of a back-solve must refuse the same degeneracies (#129).
+
+        A ``*EOS_JWL`` stating ``A = B = E0 = 0`` makes the derivation exactly
+        0, and the warning's own ``rho0*D^2 / Bunreacted`` ratio then divides
+        by it — which used to raise ``ZeroDivisionError`` out of
+        ``writer/assembly``, aborting the whole conversion with no output and
+        no diagnostic. Every sibling derivation in this batch screens its
+        degenerate case (LAW3 ``bulk <= 0``, LAW106 ``e_ref <= 0``), so this
+        one must too.
+        """
+        eos = ("*EOS_JWL\n"
+               + _row(2, 0.0, 0.0, 4.15, 0.95, 0.3, 0.0, 1.0) + "\n")
+        res, starter = _convert(_he_deck(eos=eos))
+        self.assertEqual(_bunreacted(starter, 2), 0.0)
+        w = [x for x in res.warnings
+             if "no positive" in x or "not a positive bulk modulus" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        for fact in ("principal-isentrope slope of 0",
+                     "fill_buffer_51.F:496", "ERROR 99", "--he-bunreacted"):
+            self.assertIn(fact, w[0])
+        # and NOT the SUBSTITUTED message, which would have divided by zero
+        self.assertNotIn("SUBSTITUTED", " ".join(res.warnings))
 
     def test_a_standalone_law5_keeps_zero(self):
         """ERROR 99 lives in the Iform = 12 branch alone, so a deck with no
@@ -2250,6 +2297,210 @@ class CurveAbscissaReversal(unittest.TestCase):
         src = inspect.getsource(M._make_functions)
         self.assertIn("_monotonic_abscissae", src)
         self.assertNotIn("for a, o in curve.pts:", src)
+
+
+# -----------------------------------------------------------------------------
+# Post-review: a /MAT/LAW106 SHELL cannot thermally expand at all
+# -----------------------------------------------------------------------------
+
+def _mat004_shell_deck(card: str = _MAT004_STEEL, *, mid: int = 1,
+                       extra: str = "", mesh: str = _SHELLS) -> str:
+    """The *MAT_004 deck of the corpus's SHELL carriers (tempcyl.vari, ex_20,
+    main_steel_frame, 05_2): one part on the material, shell by default."""
+    section = ("*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0) + "\n"
+               if mesh is _SHELLS else
+               "*SECTION_SOLID\n" + _row(1, 1) + "\n")
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + mesh
+            + "*PART\np1\n" + _row(1, 1, mid) + "\n"
+            + section + card + extra + "*END\n")
+
+
+class Law106ShellRestatementTests(unittest.TestCase):
+    """A /MAT/LAW106 SHELL does not thermally expand - it is restated.
+
+    MECHANISM, from the engine source: ``cmain3.F:348`` runs ``THERMEXPC``
+    AFTER ``MULAWC`` at ``:320``, and on an ordinary ``/PROP/SHELL``
+    (``IGTYP = 1``, so ``IORTH_LAY = 0``) all THERMEXPC does is SUBTRACT the
+    thermal stress from the stress the law just produced
+    (``thermexpc.F:283-300``). ``sigeps106c.F90:297-298`` then rebuilds
+    ``signxx``/``signyy`` from the TOTAL strain
+    (``aii*(epsxx - eplaxx) + aij*(epsyy - eplayy)``) and never reads
+    ``sigoxx``, so the subtraction is discarded on the next cycle.
+    ``sigeps36c.F:276`` is ``SIGNXX = SIGOXX + A1*DEPSXX + A2*DEPSYY`` and
+    reads it back.
+
+    MEASURED on four coupons differing only in the element family and the law
+    (10 mm edge, ``*BOUNDARY_TEMPERATURE_SET`` 20 -> 120 K, alpha 1.2e-5,
+    NIP 3, closed form 1.2e-2 mm, all NORMAL TERMINATION): LAW106 SHELL
+    ``0.0000000e+00``, the restatement ``1.2000000e-02``, a ``*MAT_024`` +
+    ``*MAT_ADD_THERMAL_EXPANSION`` control ``1.2000000e-02``, LAW106 SOLID
+    ``1.2000000e-02``. The restatement and the control agree on EVERY printed
+    T01 digit (internal energy 6.219282e-02, external work 2.180456e-04, last
+    time step 1.437983e-06); the kept-LAW106 shell reads -4.759515e-05.
+    """
+
+    def test_a_shell_only_mat004_is_restated_to_law36(self):
+        res, starter = _convert(_mat004_shell_deck())
+        self.assertNotIn("/MAT/LAW106/1", starter)
+        self.assertIn("/MAT/LAW36/1", starter)
+        # the expansion and its mandatory /HEAT/MAT partner SURVIVE the swap
+        self.assertIn("/THERM_STRESS/MAT/1", starter)
+        self.assertIn("/HEAT/MAT/1", starter)
+        w = [x for x in res.warnings if "RESTATED as /MAT/LAW36" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        for fact in ("cmain3.F:348", "sigeps106c.F90:297-298",
+                     "sigeps36c.F:276", "TOTAL strain",
+                     "0.0000000e+00", "1.2000000e-02",
+                     "--no-law106-shell-restate"):
+            self.assertIn(fact, w[0])
+
+    def test_a_solid_mat004_is_left_alone(self):
+        """mmain.F90 applies the expansion to the strain increment BEFORE the
+        law dispatch, so a LAW106 SOLID was measured exact (1.2000000e-02)."""
+        _res, starter = _convert(_mat004_shell_deck(mesh=_BRICK))
+        self.assertIn("/MAT/LAW106/1", starter)
+        self.assertNotIn("/MAT/LAW36/1", starter)
+
+    def test_the_opt_out_keeps_law106_and_says_what_it_costs(self):
+        res, starter = _convert(_mat004_shell_deck(),
+                                law106_shell_restate=False)
+        self.assertIn("/MAT/LAW106/1", starter)
+        self.assertNotIn("/MAT/LAW36/1", starter)
+        w = [x for x in res.warnings
+             if "--no-law106-shell-restate was passed" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("NO THERMAL EXPANSION AT ALL", w[0])
+
+    def test_a_mixed_material_keeps_law106_and_is_named(self):
+        """Restating would take E(T) away from solids that expand correctly,
+        so the law is left alone and BOTH part lists are named."""
+        deck = ("*KEYWORD\n"
+                "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                + _BRICK
+                + "*ELEMENT_SHELL\n"
+                + "       9       2       1       2       3       4\n"
+                + "*PART\nsolid\n" + _row(1, 1, 1) + "\n"
+                + "*PART\nshell\n" + _row(2, 2, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                + "*SECTION_SHELL\n" + _row(2, 2) + "\n" + _row(1.0) + "\n"
+                + _MAT004_STEEL + "*END\n")
+        res, starter = _convert(deck)
+        self.assertIn("/MAT/LAW106/1", starter)
+        w = [x for x in res.warnings if "shared between SHELL" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("SHELL part(s) [2]", w[0])
+        self.assertIn("non-shell part(s) [1]", w[0])
+
+    def test_no_expansion_coefficient_means_no_restatement(self):
+        """With no /THERM_STRESS there is nothing to rescue and LAW36 would
+        only throw E(T) away, so the law is kept - silently, by design."""
+        card = _MAT004_STEEL.replace(
+            _row("1.20000E-5", "1.20000E-5", "1.40000E-5", 0.0, 0.0, 0.0,
+                 0.0, 0.0),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        res, starter = _convert(_mat004_shell_deck(card))
+        self.assertIn("/MAT/LAW106/1", starter)
+        self.assertNotIn("/THERM_STRESS/MAT/1", starter)
+        self.assertEqual(
+            [x for x in res.warnings if "RESTATED as /MAT/LAW36" in x], [])
+
+    def test_the_restated_yield_and_hardening_are_the_law106_cells(self):
+        """The two-point curve is (sigma_y, sigma_y + B) at eps_p 0 and 1, so
+        LAW36's plastic modulus IS the LAW106 B cell."""
+        from k2rad.writer import build_starter
+        state = _dispatch(_mat004_shell_deck())
+        build_starter(state)
+        self.assertIn(1, state.law106_shells_restated)
+        rec = state.mat_plas_tab[1]
+        pts = state.curves[rec.funct_id].pts
+        self.assertEqual(len(pts), 2)
+        self.assertAlmostEqual(pts[0][0], 0.0)
+        self.assertAlmostEqual(pts[1][0], 1.0)
+        self.assertGreater(pts[1][1] - pts[0][1], 0.0)
+        self.assertAlmostEqual(pts[0][1], rec.sigy)
+
+    def test_a_thermo_elastic_card_gets_the_far_yield_curve(self):
+        """ex_20's shape: SIGY = 0 on every slot, so LAW106 wrote A = 1e20 and
+        the restatement writes a flat curve at 1000 x E (never reached)."""
+        card = _MAT004_STEEL.replace(
+            _row(435.0, 100.0, 20.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        res, _starter = _convert(_mat004_shell_deck(card))
+        w = [x for x in res.warnings if "RESTATED as /MAT/LAW36" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("flat far-yield curve", w[0])
+        self.assertIn("1000 x E", w[0])
+
+
+class MatCwmBetaTests(unittest.TestCase):
+    """*MAT_CWM BETA is the ISOTROPIC fraction, so B = BETA*H(T_ref).
+
+    Vol II R17 p.2-1838 Remark 2: ``sigma_Y = sigma_Y(T) + BETA*H(T)*eps_p``
+    with a back stress ``kappa_dot = (1-BETA)*H(T)*eps_dot_p``; p.2-1836 calls
+    BETA the "Fraction of isotropic hardening between 0 and 1" (EQ.0.0
+    kinematic, EQ.1.0 isotropic). /MAT/LAW106 is purely isotropic, so writing
+    H(T_ref) raw would make the card 1/BETA too stiff.
+    """
+
+    @staticmethod
+    def _card(beta):
+        return _MAT_CWM.replace(
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 1.0),
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, beta))
+
+    def _b_cell(self, beta) -> float:
+        from k2rad.writer import build_starter
+        state = _dispatch(_cwm_deck(self._card(beta)))
+        build_starter(state)
+        return state.mat_law106[2].b
+
+    def test_beta_one_is_the_full_hardening_modulus(self):
+        self.assertAlmostEqual(self._b_cell(1.0), 700.0, places=6)
+
+    def test_beta_half_halves_the_isotropic_modulus(self):
+        self.assertAlmostEqual(self._b_cell(0.5), 350.0, places=6)
+
+    def test_beta_zero_leaves_no_isotropic_hardening(self):
+        """LS-DYNA has NO isotropic hardening at BETA = 0, so B must be 0 -
+        the case the old guard exempted from the warning entirely."""
+        self.assertAlmostEqual(self._b_cell(0.0), 0.0, places=9)
+
+    def test_every_beta_but_one_is_warned_by_name(self):
+        for beta, extra in ((0.0, "NO isotropic hardening at all"),
+                            (0.5, "Only BETA = 1 is lossless here")):
+            res, _starter = _convert(_cwm_deck(self._card(beta)))
+            w = " ".join(res.warnings)
+            with self.subTest(beta=beta):
+                self.assertIn("BETA*H(T)*eps_p", w)
+                self.assertIn("p.2-1838 Remark 2", w)
+                self.assertIn(extra, w)
+
+    def test_beta_one_says_nothing_about_the_split(self):
+        res, _starter = _convert(_cwm_deck())
+        self.assertEqual(
+            [x for x in res.warnings if "Fraction of isotropic" in x], [])
+
+
+class MatCwmMissingPoissonTests(unittest.TestCase):
+    """A missing LCPR writes nu = 0, which is a real constitutive change."""
+
+    def test_an_unresolvable_lcpr_is_named(self):
+        card = _MAT_CWM.replace(
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 1.0),
+            _row(2, "7.85000E-9", 101, 999, 103, 104, 105, 1.0))
+        res, starter = _convert(_cwm_deck(card))
+        self.assertIn("/MAT/LAW106/2", starter)
+        w = [x for x in res.warnings if "LCPR = 999" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("E/(3(1-2nu))", w[0])
+
+    def test_a_resolvable_lcpr_says_nothing(self):
+        res, _starter = _convert(_cwm_deck())
+        self.assertEqual(
+            [x for x in res.warnings
+             if "resolves to no usable" in x], [])
 
 
 if __name__ == "__main__":
