@@ -148,7 +148,7 @@ Prior history (before this changelog was introduced) is summarized in the
     rather than invented: `taylor1`'s own `*MAT_PLASTIC_KINEMATIC` twin for the
     same copper states `E = 1e5, PR = 0.33`, i.e. `G = 37593.98` — the deck
     author's own `G` to five figures. Its **one visible consequence**:
-    `hm_read_mat03.F:191` stores `PM(32) = E/(3(1−2ν))` for every
+    `hm_read_mat03.F:190/197` stores `PM(32) = E/(3(1−2ν))` for every
     `INVERS ≥ 2018` deck, and that is the bulk modulus the `/INTER/TYPE7` and
     `TYPE20` CONTACT STIFFNESS reads, so it now agrees with the pressure law
     instead of with an invented Poisson ratio; the deviatoric response is
@@ -200,7 +200,7 @@ Prior history (before this changelog was introduced) is summarized in the
     `nfail > 0 .and. (mtn < 28 .or. mtn == 49)` and LAW21 is `mtn = 21`, and
     the `do ir = 1,nfail` loop is a SIBLING of the `istrain` block at `:2243`,
     so the `/PROP` `istrain` flag does not gate it. A `PC = 0` card is named:
-    `hm_read_fail_spalling.F90:103` turns a zero `P_min` into `−1e20`, so the
+    `hm_read_fail_spalling.F90:102` turns a zero `P_min` into `−1e20`, so the
     latch can never trip and the material is plain MAT_005.
 
   - **Three material families REFUSED BY NAME, with the parts and element
@@ -812,7 +812,7 @@ Prior history (before this changelog was introduced) is summarized in the
     `cmain3.F:348` runs `THERMEXPC` **after** `MULAWC` at `:320`, and on an
     ordinary `/PROP/SHELL` (`IGTYP = 1`, so `IORTH_LAY = 0` and `IORTH = 0`)
     all `THERMEXPC` does is SUBTRACT the thermal stress from the stress the law
-    just produced (`thermexpc.F:283-300`). `sigeps106c.F90:297-298` then
+    just produced (`thermexpc.F:269-293`). `sigeps106c.F90:297-298` then
     rebuilds `signxx`/`signyy` from the TOTAL strain,
     `aii*(epsxx − eplaxx) + aij*(epsyy − eplayy)`, and never reads `sigoxx` —
     so the subtraction is discarded on the very next cycle. `/MAT/LAW36` is

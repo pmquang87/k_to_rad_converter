@@ -294,7 +294,7 @@ individually
 so the old `/PROP/BEAM` fallback carried `Iyy = Izz = Ixx = 0` and
 `hm_read_prop03.F:151-182` refused the deck (ERROR 315/316/317). `/TRUSS` is
 THREE cells — `id node_ID1 node_ID2` (`radioss41/ELEM/truss.cfg`;
-`hm_read_truss.F:157-158` takes the material and property from the `/PART`) — and
+`hm_read_truss.F:148-151` takes the material and property from the `/PART`) — and
 `/PROP/TYPE2` is AREA plus GAP and nothing else (`hm_read_prop02.F:110-112`;
 `initia.F:3650-3652` is literally `IF(IGTYP==2)THEN` / `C---------- truss,
 nothing`, so there is no `Ismstr`, `Dm/Df`, `Ishear` or `OmegaDof` on it). **GAP
@@ -377,7 +377,7 @@ sound speed at zero compression; a polynomial EOS gives `K₀ = C1`), then
 `ν = (3K₀−2G)/(2(3K₀+G))` and `E = 9K₀G/(3K₀+G)`, which returns
 `E/(2(1+ν)) = G` exactly. On `taylor1.k`: `K₀ = 139425.2996`, `ν = 0.376303`,
 `E = 103478.736`, `E/(2(1+ν)) = 37593.000 = G`. Its **one visible consequence**
-is that `hm_read_mat03.F:191` stores `PM(32) = E/(3(1−2ν))` for every
+is that `hm_read_mat03.F:190/197` stores `PM(32) = E/(3(1−2ν))` for every
 `INVERS ≥ 2018` deck, and that is the bulk modulus the `/INTER/TYPE7`/`TYPE20`
 CONTACT STIFFNESS reads — so it now agrees with the pressure law instead of with
 an invented Poisson ratio (the deviatoric response is unaffected either way:
@@ -674,7 +674,7 @@ to `/MAT/LAW36`** (default on; `--no-law106-shell-restate` keeps LAW106). A
 `/MAT/LAW106` SHELL cannot thermally expand at all: `cmain3.F:348` runs
 `THERMEXPC` AFTER `MULAWC` at `:320`, and on an ordinary `/PROP/SHELL` all
 `THERMEXPC` does is SUBTRACT the thermal stress from the stress the law just
-produced (`thermexpc.F:283-300`) — while `sigeps106c.F90:297-298` rebuilds
+produced (`thermexpc.F:269-293`) — while `sigeps106c.F90:297-298` rebuilds
 `signxx`/`signyy` from the TOTAL strain and never reads `sigoxx`, so the
 subtraction is discarded on the next cycle. `/MAT/LAW36` is incremental
 (`sigeps36c.F:276`) and reads it back; SOLIDS are never restated, because there
@@ -765,7 +765,7 @@ MONOTONICALLY, zeroes the stress tensor once, and thereafter writes
 **element not deleted**. Dispatch verified — `mmain.F90:2242` gates the `/FAIL`
 loop on `nfail > 0 .and. (mtn < 28 .or. mtn == 49)` and LAW21 is `mtn = 21`,
 and the loop is a SIBLING of the `istrain` block, so the `/PROP` `istrain` flag
-does not gate it. `PC = 0` is named: `hm_read_fail_spalling.F90:103` turns a
+does not gate it. `PC = 0` is named: `hm_read_fail_spalling.F90:102` turns a
 zero `P_min` into `−1e20`, so the latch can never trip
 `*MAT_SOIL_AND_FOAM` (005) → `/MAT/LAW21` (DPRAG) — `E=9GK/(3K+G)`,
 `ν=(3K−2G)/(6K+2G)` clamped to [0, 0.495] (the clamp warned when it fires),

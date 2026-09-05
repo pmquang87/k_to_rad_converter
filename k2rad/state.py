@@ -6969,6 +6969,23 @@ class ConvertOptions:
     # phase there is no legal "off" — see
     # writer/materials._resolve_he_bunreacted.
     he_bunreacted: "float | None" = None
+    # Emit the synthesized /MAT/LAW51 for an *ALE_MULTI-MATERIAL_GROUP at all.
+    # OFF by default. k2rad's ALE route writes the LS-DYNA per-fluid layout —
+    # each fluid on its own /PART with its own single-material /MAT and Iale = 1
+    # on its /PROP/SOLID — so nothing k2rad emits ever references the LAW51: it
+    # is an orphan BY CONSTRUCTION, not by accident on some decks. MEASURED on
+    # underwater_C: deleting the block leaves every one of the 164 T01 channels
+    # identical at all 172 samples (max |difference| exactly 0.000000e+00). What
+    # the orphan card is NOT free of is its own starter check —
+    # fill_buffer_51.F:496 refuses a LAW5 phase whose Bunreacted is <= 0 — which
+    # forced a positive Bunreacted onto the material's own /MAT/LAW5, and there
+    # mjwl.F:166 makes it a real (1-F)*K*mu pre-burn stiffness LS-DYNA's BETA = 0
+    # card does not carry. Not emitting the card lets Bunreacted stay 0, which is
+    # exactly LS-DYNA's p = F*p_eos. Set True (--ale-multimat-law51) to get the
+    # card back — for a user who intends to consolidate the ALE mesh onto one
+    # /PART referencing it by hand — and the Bunreacted derivation returns with
+    # it, because then the check applies again.
+    ale_multimat_law51: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

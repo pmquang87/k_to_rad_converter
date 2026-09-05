@@ -819,7 +819,7 @@ class Mat010Law3Tests(unittest.TestCase):
         self.assertEqual(len(w), 1)
         for fact in ("K0 = rho0*C^2 = 139425", "nu = (3K0-2G)/(2(3K0+G))",
                      "= G exactly", "CONTACT STIFFNESS",
-                     "hm_read_mat03.F:191", "UNCONVERTED",
+                     "hm_read_mat03.F:190/197", "UNCONVERTED",
                      "substitutes 1.0001"):
             self.assertIn(fact, w[0])
 
@@ -902,7 +902,7 @@ class Mat014SpallingTests(unittest.TestCase):
             self.assertIn(fact, w[0])
 
     def test_zero_pc_is_named_as_a_latch_that_can_never_trip(self):
-        """hm_read_fail_spalling.F90:103 turns a zero P_min into -1e20."""
+        """hm_read_fail_spalling.F90:102 turns a zero P_min into -1e20."""
         card = _MAT014.replace(
             _row(2, "1.874E-9", 358.55, 1523.82, 0.158, 0.124, 0.024, -0.55),
             _row(2, "1.874E-9", 358.55, 1523.82, 0.158, 0.124, 0.024, 0.0))
@@ -1031,7 +1031,15 @@ class HeBunreactedTests(unittest.TestCase):
                 + "\n")
         res, starter = _convert(_he_deck(card=card))
         self.assertEqual(_bunreacted(starter, 2), 9300.0)
-        self.assertIn("the card's own stated K = 9300", " ".join(res.warnings))
+        # The statement lives on the LAW5 side now that the /MAT/LAW51 that
+        # used to carry it is not emitted by default. Nothing is SUBSTITUTED:
+        # the deck states its own K.
+        w = [x for x in res.warnings
+             if "the card's own stated K, copied 1:1" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("Bunreacted = 9300", w[0])
+        self.assertIn("mjwl.F:166-167", w[0])
+        self.assertNotIn("SUBSTITUTED", " ".join(res.warnings))
 
     def test_zero_k_on_an_ammg_member_is_derived_from_the_jwl(self):
         """The value is the PRINCIPAL ISENTROPE's slope at V = 1,
@@ -1039,14 +1047,20 @@ class HeBunreactedTests(unittest.TestCase):
         = 371000*4.15*e^-4.15 + 3230*0.95*e^-0.95 + 0.3*4300
         = 24271.684 + 1186.715 + 1290.0 = 26748.39867 (underwater_C's TNT).
 
-        The warning's SOURCE CLAIMS are pinned alongside it, and this round
-        corrected two of them: the live consumer on every carrier is
-        ``m5law.F`` (the emitted /MAT/LAW51 is referenced by no /PART, so
-        ``jwl51.F`` never executes), and there the cell is a BRANCH SWITCH
-        (``:135-146``), not an added stiffness. The full-EOS alternative is
-        printed beside it because ``jwl51.F:191`` and ``m5law.F:126-129`` both
-        carry the ``(1 - omega/(R_i*V))`` factors the principal isentrope
-        does not.
+        Only under ``--ale-multimat-law51``: the derivation exists solely to
+        answer ``fill_buffer_51.F:496`` on the synthesized /MAT/LAW51, which
+        is orphan by construction and is not emitted by default.
+
+        The warning's SOURCE CLAIMS are pinned alongside it. The POST-REVIEW
+        round corrected the consumer a second time: ``m5law.F:135-145`` does
+        branch on the cell, but it writes ``P``, a LOCAL declared at ``:72``
+        and read only at ``:159`` to build ``SSP``, and the routine zeroes the
+        stress tensor at ``:175-182``. The applied pressure is ``mjwl.F:166``,
+        which has NO branch on the cell — so a positive value is an ADDED
+        ``(1-F)*K*mu`` pre-burn stiffness at every burn fraction, not a branch
+        switch. The full-EOS alternative is printed beside it because
+        ``jwl51.F:191`` and ``m5law.F:126-129`` both carry the
+        ``(1 - omega/(R_i*V))`` factors the principal isentrope does not.
         """
         import math
         want = (371000 * 4.15 * math.exp(-4.15)
@@ -1056,7 +1070,7 @@ class HeBunreactedTests(unittest.TestCase):
                 + 3230 * math.exp(-0.95) * (0.95 - 0.3 / 0.95 - 0.3)
                 + 0.3 * 4300)
         self.assertAlmostEqual(full, 23801.8, places=1)
-        res, starter = _convert(_he_deck())
+        res, starter = _convert(_he_deck(), ale_multimat_law51=True)
         self.assertAlmostEqual(_bunreacted(starter, 2), want, places=3)
         w = [x for x in res.warnings if "SUBSTITUTED" in x]
         self.assertEqual(len(w), 1)
@@ -1064,9 +1078,13 @@ class HeBunreactedTests(unittest.TestCase):
                      "A*R1*exp(-R1) + B*R2*exp(-R2) + omega*E0",
                      "fill_buffer_51.F:496", "ERROR 99",
                      "LS-DYNA carries NO unreacted stress at all",
-                     # the CORRECTED consumer, and the branch it switches
-                     "m5law.F:135-138", "IF (BULK == ZERO)",
-                     "BRANCH SWITCH",
+                     # the CORRECTED consumer: mjwl, with no branch on the cell
+                     "mmain.F90:1225-1261", "mjwl.F:166-167",
+                     "ALWAYS burn-fraction weighted",
+                     "ADDED (1-F)*K*mu pre-burn stiffness",
+                     # m5law's branch is named as the SOUND SPEED one it is
+                     "m5law.F:135-145", "LOCAL declared at :72",
+                     "SOUND SPEED",
                      # the LAW51 path is named as the one that does NOT run
                      "jwl51.F:197",
                      # both alternatives, with their numbers
@@ -1074,6 +1092,10 @@ class HeBunreactedTests(unittest.TestCase):
                      "23801.8", "11 % below the value written",
                      "--he-bunreacted"):
             self.assertIn(fact, w[0])
+        # and NOTHING of the superseded branch-switch reading survives
+        for gone in ("BRANCH SWITCH", "IF (BULK == ZERO)",
+                     "with no burn-fraction weighting at all"):
+            self.assertNotIn(gone, w[0])
 
     def test_a_degenerate_jwl_is_refused_by_name_not_by_zerodivision(self):
         """Both ARMS of a back-solve must refuse the same degeneracies (#129).
@@ -1088,7 +1110,8 @@ class HeBunreactedTests(unittest.TestCase):
         """
         eos = ("*EOS_JWL\n"
                + _row(2, 0.0, 0.0, 4.15, 0.95, 0.3, 0.0, 1.0) + "\n")
-        res, starter = _convert(_he_deck(eos=eos))
+        res, starter = _convert(_he_deck(eos=eos),
+                                ale_multimat_law51=True)
         self.assertEqual(_bunreacted(starter, 2), 0.0)
         w = [x for x in res.warnings
              if "no positive" in x or "not a positive bulk modulus" in x]
@@ -1125,7 +1148,7 @@ class HeBunreactedTests(unittest.TestCase):
     def test_the_law51_warning_no_longer_prescribes_what_k2rad_writes(self):
         """It used to end 'set it' — a prescription the converter now carries
         out itself, which would be a false cited fact (#129)."""
-        res, _starter = _convert(_he_deck())
+        res, _starter = _convert(_he_deck(), ale_multimat_law51=True)
         joined = " ".join(res.warnings)
         self.assertNotIn("(ERROR 99 otherwise) — set it", joined)
         hit = [x for x in res.warnings
@@ -1134,7 +1157,8 @@ class HeBunreactedTests(unittest.TestCase):
         self.assertIn("Bunreacted is written as 26748.4", hit[0])
 
     def test_a_member_with_no_jwl_is_refused_by_name(self):
-        res, starter = _convert(_he_deck(eos=""))
+        res, starter = _convert(_he_deck(eos=""),
+                                ale_multimat_law51=True)
         self.assertEqual(_bunreacted(starter, 2), 0.0)
         self.assertIn("The derivation reads the companion *EOS_JWL",
                       " ".join(res.warnings))
@@ -1165,12 +1189,70 @@ class HeBunreactedTests(unittest.TestCase):
 
         self.assertNotIn("he_bunreacted", _kw())     # blank -> k2rad's rule
         self.assertEqual(_kw(he_bunreacted=" 9300 ")["he_bunreacted"], 9300.0)
-        # An unparseable or non-positive value is an ERROR, never a silently
-        # ignored blank: fill_buffer_51.F:496 refuses <= 0 with ERROR 99.
-        for bad in ("abc", "0", "-1"):
+        # 0 IS legal and is now the default: fill_buffer_51.F:496 can only fire
+        # on an emitted /MAT/LAW51, and mjwl.F:166 at BULK = 0 is exactly
+        # LS-DYNA's p = F*p_eos. It must reach convert(), not be rejected.
+        self.assertEqual(_kw(he_bunreacted="0")["he_bunreacted"], 0.0)
+        # An unparseable or NEGATIVE value is still an ERROR, never a silently
+        # ignored blank — a bulk modulus cannot be negative.
+        for bad in ("abc", "-1"):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     _kw(he_bunreacted=bad)
+
+    def test_the_orphan_law51_is_not_emitted_by_default(self):
+        """The card is an ORPHAN BY CONSTRUCTION — k2rad writes the LS-DYNA
+        per-fluid ALE layout, so no /PART it emits can reference it — and it
+        is MEASURED inert (deleting it left all 164 underwater_C T01 channels
+        identical at all 172 samples). Its only real effect was its own
+        starter check, fill_buffer_51.F:496, which forced a positive
+        Bunreacted onto the material's LIVE /MAT/LAW5; mjwl.F:166-167 has no
+        branch on that cell, so it is an ADDED (1-F)*K*mu pre-burn stiffness
+        that an LS-DYNA BETA = 0 card (p = F*p_eos) does not carry."""
+        res, starter = _convert(_he_deck())
+        self.assertNotIn("/MAT/LAW51/", starter)
+        self.assertEqual(_bunreacted(starter, 2), 0.0)
+        self.assertNotIn("SUBSTITUTED", " ".join(res.warnings))
+        w = [x for x in res.warnings if "NO /MAT/LAW51 is emitted" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+
+    def test_the_flag_restores_the_card_and_the_derivation(self):
+        """--ale-multimat-law51 is a complete restoration: on underwater_C it
+        reproduces the pre-fix starter deck BYTE for byte."""
+        res, starter = _convert(_he_deck(), ale_multimat_law51=True)
+        self.assertIn("/MAT/LAW51/", starter)
+        self.assertAlmostEqual(_bunreacted(starter, 2), 26748.39867, places=3)
+        self.assertIn("SUBSTITUTED", " ".join(res.warnings))
+
+    def test_zero_override_now_produces_a_startable_deck(self):
+        """--he-bunreacted 0 is the documented way back to LS-DYNA semantics
+        and used to emit a deck the starter refused with ERROR 99, because the
+        orphan /MAT/LAW51 was written anyway. MEASURED, four underwater_C
+        variants: card kept + 0 -> 'ERROR ID : 99'; card dropped + 0 ->
+        0 ERROR / 0 WARNING / NORMAL TERMINATION / 172 cycles."""
+        _res, starter = _convert(_he_deck(), he_bunreacted=0.0)
+        self.assertEqual(_bunreacted(starter, 2), 0.0)
+        self.assertNotIn("/MAT/LAW51/", starter)
+
+    def test_the_cli_and_gui_expose_the_card_flag(self):
+        from k2rad import cli
+        self.assertFalse(
+            cli.build_parser().parse_args(["deck.k"]).ale_multimat_law51)
+        self.assertTrue(cli.build_parser().parse_args(
+            ["deck.k", "--ale-multimat-law51"]).ale_multimat_law51)
+        self.assertFalse(cli.build_parser().parse_args(
+            ["deck.k", "--no-ale-multimat-law51"]).ale_multimat_law51)
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD" + chr(10) + "*END" + chr(10))
+        kw = k2rad_gui.build_convert_kwargs(
+            path, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="100", inter_gapmin_text="",
+            soften_stfac_text="", ale_multimat_law51=True)
+        self.assertTrue(kw["ale_multimat_law51"])
 
 
 # ale/misc/volume-fraction-a/cylinder_impact_A.k's shape: a vacuum phase, an
@@ -1244,7 +1326,8 @@ class AleSubmaterialTests(unittest.TestCase):
         """hm_read_mat51.F:608-627 reads exactly MIP rows and a tMID <= 0
         inside them is fatal, so a vacuum cannot be declared as MID 0; the
         undeclared balance of the volume fractions IS the void."""
-        res, starter = _convert(_ammg_deck(fluid=True))
+        res, starter = _convert(_ammg_deck(fluid=True),
+                                ale_multimat_law51=True)
         law51 = _headers(starter, "/MAT/LAW51/")
         self.assertEqual(len(law51), 1)
         rows = [r for r in _data_rows(starter, law51[0])
@@ -1294,8 +1377,12 @@ class AleSubmaterialTests(unittest.TestCase):
     def test_the_law51_card_states_that_nothing_references_it(self):
         """The emitted /MAT/LAW51 is an orphan: the per-fluid ALE parts are
         kept, so the phases cannot mix and the run does not reproduce the
-        LS-DYNA model. That has to be unmissable (#122 at deck scale)."""
-        res, starter = _convert(_ammg_deck(fluid=True))
+        LS-DYNA model. That has to be unmissable (#122 at deck scale).
+
+        Under --ale-multimat-law51, since the card is orphan BY CONSTRUCTION
+        and is no longer written by default."""
+        res, starter = _convert(_ammg_deck(fluid=True),
+                                ale_multimat_law51=True)
         law_id = int(_headers(starter, "/MAT/LAW51/")[0].rsplit("/", 1)[1])
         self.assertNotIn(str(law_id), chr(10).join(
             _data_rows(starter, "/PART/1") or []))
@@ -1356,7 +1443,7 @@ class TrussCards(unittest.TestCase):
     def test_the_element_block_is_three_cells(self):
         """``radioss41/ELEM/truss.cfg``: ``CARD("%10d%10d%10d",id,node_ID1,
         node_ID2)`` — no third node, no orientation cell, no offset cell.
-        ``hm_read_truss.F:157-158`` takes material and property from the
+        ``hm_read_truss.F:148-151`` takes material and property from the
         /PART."""
         _r, starter = _convert(_truss_deck())
         rows = _data_rows(starter, "/TRUSS/1")
@@ -2364,7 +2451,7 @@ class Law106ShellRestatementTests(unittest.TestCase):
     AFTER ``MULAWC`` at ``:320``, and on an ordinary ``/PROP/SHELL``
     (``IGTYP = 1``, so ``IORTH_LAY = 0``) all THERMEXPC does is SUBTRACT the
     thermal stress from the stress the law just produced
-    (``thermexpc.F:283-300``). ``sigeps106c.F90:297-298`` then rebuilds
+    (``thermexpc.F:269-293``). ``sigeps106c.F90:297-298`` then rebuilds
     ``signxx``/``signyy`` from the TOTAL strain
     (``aii*(epsxx - eplaxx) + aij*(epsyy - eplayy)``) and never reads
     ``sigoxx``, so the subtraction is discarded on the next cycle.

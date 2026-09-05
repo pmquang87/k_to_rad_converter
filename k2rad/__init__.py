@@ -197,6 +197,7 @@ def convert(
     shell_formulation: str = "qbat",
     dt_del: Optional[float] = None,
     he_bunreacted: Optional[float] = None,
+    ale_multimat_law51: bool = False,
     eroding_surf_ext: bool = False,
     airbag_particle_uniform: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
@@ -311,7 +312,7 @@ def convert(
         ``/MAT/LAW106`` SHELL DOES NOT THERMALLY EXPAND AT ALL: ``cmain3.F:348``
         runs ``THERMEXPC`` AFTER ``MULAWC`` at ``:320`` and all THERMEXPC does
         on a ``/PROP/SHELL`` is SUBTRACT the thermal stress from the stress the
-        law just produced (``thermexpc.F:283-300``), while
+        law just produced (``thermexpc.F:269-293``), while
         ``sigeps106c.F90:297-298`` rebuilds ``signxx``/``signyy`` from the TOTAL
         strain and never reads ``sigoxx`` — so the subtraction is discarded on
         the next cycle. ``/MAT/LAW36`` is incremental (``sigeps36c.F:276``) and
@@ -396,9 +397,19 @@ def convert(
         derivation is the JWL isentrope's bulk modulus at the unreacted
         density, ``A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0``, every term from a
         cell the ``*EOS_JWL`` states; it is named in the log with its formula,
-        its value and its consequence (the unburnt cells then carry
-        ``P = K·mu``, ``jwl51.F:197``, where an LS-DYNA ``BETA = 0`` card
-        carried nothing at all).
+        its value and its consequence: ``mjwl.F:166`` adds ``(1 - F)·K·mu`` to
+        the applied pressure at every burn fraction, where an LS-DYNA
+        ``BETA = 0`` card carries nothing at all. Since the derivation exists
+        only to answer a check on the orphan ``/MAT/LAW51``, which is no longer
+        emitted by default, it now fires only under ``ale_multimat_law51``.
+    ale_multimat_law51 : bool
+        Emit the synthesized ``/MAT/LAW51`` for an ``*ALE_MULTI-MATERIAL_GROUP``
+        (default False). k2rad writes the LS-DYNA per-fluid ALE layout, so no
+        ``/PART`` it emits ever references that card — it is an orphan by
+        construction, and MEASURED inert (deleting it left all 164
+        ``underwater_C`` T01 channels identical at all 172 samples). Turning it
+        on also re-arms the ``Bunreacted`` derivation, because
+        ``fill_buffer_51.F:496`` then applies again.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -464,6 +475,7 @@ def convert(
         shell_formulation=shell_formulation,
         dt_del=dt_del,
         he_bunreacted=he_bunreacted,
+        ale_multimat_law51=ale_multimat_law51,
         eroding_surf_ext=eroding_surf_ext,
         airbag_particle_uniform=airbag_particle_uniform,
     )

@@ -1003,7 +1003,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     * ``Main_ID1``  = a ``/SURF`` over SURFB's parts, or 0. With it the engine
       runs ``TYPSUB = 3`` (``i7for3.F:1607``) and counts only pairs with one
       side in each surface = ``*CONTACT_FORCE_TRANSDUCER`` with both SURFA and
-      SURFB. Optional in the reader (``hm_read_intsub.F:472`` ``IF(IDSURF/=0)``).
+      SURFB. Optional in the reader (``hm_read_intsub.F:474`` ``IF(IDSURF/=0)``).
     * ``Second_ID`` = 0 — NOT decoded at all on this branch.
     * ``Main_ID2``  = the ``/SURF`` for SURFA, built by
       :func:`_transducer_surface` from EITHER LS-DYNA spelling — a

@@ -6056,7 +6056,14 @@ class AleFsiTests(unittest.TestCase):
         self.assertEqual(card[20:30].strip(), "1")    # Iale = 1 (field 3)
 
     def test_ale_mmg_becomes_law51(self):
-        _r, starter = self._convert(_ale_fsi_deck())
+        """Under --ale-multimat-law51. k2rad writes the LS-DYNA per-fluid ALE
+        layout, so no /PART it emits can reference the synthesized card: it is
+        an orphan BY CONSTRUCTION, measured inert (every underwater_C T01
+        channel identical without it), and its only real effect was to force a
+        positive /MAT/LAW5 Bunreacted through fill_buffer_51.F:496 — which
+        mjwl.F:166 turns into an added (1-F)*K*mu pre-burn stiffness LS-DYNA's
+        BETA = 0 card does not carry. So it is OFF by default."""
+        _r, starter = self._convert(_ale_fsi_deck(), ale_multimat_law51=True)
         self.assertIn("/MAT/LAW51/", starter)
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/MAT/LAW51/"))
@@ -6072,6 +6079,24 @@ class AleFsiTests(unittest.TestCase):
                 break
             mids.append(ln.split()[0])
         self.assertEqual(mids[:2], ["4", "2"])
+
+    def test_the_default_emits_no_law51_and_says_why(self):
+        """The DEFAULT: no orphan card, and the group is still stated in full
+        — its phase list, what is not reproduced, and how to get the card
+        back."""
+        r, starter = self._convert(_ale_fsi_deck())
+        self.assertNotIn("/MAT/LAW51/", starter)
+        w = [x for x in r.warnings if "NO /MAT/LAW51 is emitted" in x]
+        self.assertEqual(len(w), 1, r.warnings)
+        for fact in ("ORPHAN BY CONSTRUCTION",
+                     "(phases [4, 2], in order)",
+                     "0.000000e+00",
+                     "fill_buffer_51.F:496",
+                     "mjwl.F:166",
+                     "p = F*p_eos",
+                     "DOES NOT REPRODUCE THE LS-DYNA MODEL",
+                     "--ale-multimat-law51"):
+            self.assertIn(fact, w[0])
 
     def test_fsi_type18_and_grbric(self):
         _r, starter = self._convert(_ale_fsi_deck())

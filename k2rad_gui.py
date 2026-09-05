@@ -102,6 +102,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          shell_formulation: str = "qbat",
                          dt_del: str = "",
                          he_bunreacted: str = "",
+                         ale_multimat_law51: bool = False,
                          eroding_surf_ext: bool = False,
                          airbag_particle_uniform: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
@@ -185,6 +186,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["ams"] = bool(ams)
 
+    kwargs["ale_multimat_law51"] = bool(ale_multimat_law51)
+
     kwargs["eroding_surf_ext"] = bool(eroding_surf_ext)
 
     kwargs["airbag_particle_uniform"] = bool(airbag_particle_uniform)
@@ -212,8 +215,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
         kwargs["dt_del"] = v
 
     # /MAT/LAW5 Bunreacted override. Blank = k2rad's own rule (the card's K,
-    # else the derived JWL isentrope slope for an AMMG member); an
-    # unparseable value must be an error, never a silently-ignored blank.
+    # else 0, which mjwl.F:166 makes exactly LS-DYNA's p = F*p_eos, or the
+    # derived JWL isentrope slope for an AMMG member under
+    # --ale-multimat-law51); an unparseable value must be an error, never a
+    # silently-ignored blank. 0 IS legal and is the default: the ERROR 99 that
+    # used to forbid it can only fire on an emitted /MAT/LAW51.
     he_bunreacted = (he_bunreacted or "").strip()
     if he_bunreacted:
         try:
@@ -222,11 +228,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             raise ValueError(
                 "Unreacted-explosive bulk modulus must be a number in the "
                 f"deck's pressure unit, not {he_bunreacted!r}.")
-        if hb <= 0.0:
+        if hb < 0.0:
             raise ValueError(
-                "Unreacted-explosive bulk modulus must be > 0 "
-                "(fill_buffer_51.F:496 refuses <= 0 with ERROR 99); leave it "
-                "blank to let k2rad derive it.")
+                "Unreacted-explosive bulk modulus cannot be negative "
+                f"({hb:g}); leave it blank for k2rad's own rule, or pass 0 "
+                "for LS-DYNA's p = F*p_eos.")
         kwargs["he_bunreacted"] = hb
 
     return kwargs
@@ -265,6 +271,7 @@ class ConverterGUI:
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
+        self.ale_multimat_law51 = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
         self.airbag_particle_uniform = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
@@ -386,6 +393,18 @@ class ConverterGUI:
                      "engine wakes when a brick dies; with /EXT the crater face a "
                      "dying element exposes has NO contact and nothing warns you",
             variable=self.eroding_surf_ext).grid(row=10, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Emit the synthesized /MAT/LAW51 for an "
+                     "*ALE_MULTI-MATERIAL_GROUP (default OFF: k2rad writes the "
+                     "LS-DYNA per-fluid ALE layout, so no /PART it emits can "
+                     "reference that card — measured inert, every T01 channel "
+                     "identical without it. Keeping it only forced a positive "
+                     "/MAT/LAW5 Bunreacted, which mjwl.F:166 turns into a real "
+                     "(1-F)*K*mu pre-burn stiffness LS-DYNA does not have. Tick "
+                     "it if you will consolidate the ALE mesh onto one /PART "
+                     "by hand)",
+            variable=self.ale_multimat_law51).grid(row=10, column=3, columnspan=3, sticky="w", **pad)
 
         # row 13: after the dt_del entry (row 12), the last row this frame uses.
         ttk.Checkbutton(
@@ -608,6 +627,7 @@ class ConverterGUI:
                 shell_formulation=self.shell_formulation.get(),
                 dt_del=self.dt_del.get(),
                 he_bunreacted=self.he_bunreacted.get(),
+                ale_multimat_law51=self.ale_multimat_law51.get(),
                 eroding_surf_ext=self.eroding_surf_ext.get(),
                 airbag_particle_uniform=self.airbag_particle_uniform.get(),
             )
@@ -714,6 +734,9 @@ class ConverterGUI:
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):
             bits.append("Advanced Mass Scaling (/DT/AMS)")
+        if kwargs.get("ale_multimat_law51"):
+            bits.append("synthesized /MAT/LAW51 for *ALE_MULTI-MATERIAL_GROUP "
+                        "(--ale-multimat-law51)")
         if kwargs.get("eroding_surf_ext"):
             bits.append("eroding contacts on /SURF/PART/EXT (no interior re-exposure)")
         if kwargs.get("airbag_particle_uniform"):

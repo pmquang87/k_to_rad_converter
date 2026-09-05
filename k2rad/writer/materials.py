@@ -2369,7 +2369,7 @@ def _warn_soil_foam_failure_latch(state: ConversionState,
         "branches (iflag 2/3/4) and the deletion out of it entirely. "
         "Everything else on the card is read exactly as *MAT_SOIL_AND_FOAM."
         + ("" if mat.pc else
-           " NOTE PC = 0 on this card: hm_read_fail_spalling.F90:103 turns a "
+           " NOTE PC = 0 on this card: hm_read_fail_spalling.F90:102 turns a "
            "zero P_min into -1e20, so the latch can never trip and the "
            "material behaves as plain *MAT_SOIL_AND_FOAM — state a negative "
            "tensile cutoff if the failure is meant to occur."))
@@ -9175,7 +9175,7 @@ def _resolve_law106_shells(state: ConversionState) -> None:
     ``THERMEXPC`` AFTER ``MULAWC`` at ``:320``, and all THERMEXPC does on an
     ordinary ``/PROP/SHELL`` (``IGTYP = 1``, so ``IORTH_LAY = 0`` and
     ``IORTH = 0``) is SUBTRACT the thermal stress ``P = (A11 + A12)*eth`` from
-    the stress the law just produced (``thermexpc.F:283-300``). That works only
+    the stress the law just produced (``thermexpc.F:269-293``). That works only
     for a law that carries its stress forward: ``sigeps36c.F:276`` is
     ``SIGNXX = SIGOXX + A1*DEPSXX + A2*DEPSYY``, so LAW36 reads back exactly
     what THERMEXPC left. ``sigeps106c.F90:297-298`` is
@@ -9245,7 +9245,7 @@ def _resolve_law106_shells(state: ConversionState) -> None:
                 "/MAT/LAW106 SHELL DOES NOT THERMALLY EXPAND AT ALL. "
                 "cmain3.F:348 runs THERMEXPC after MULAWC at :320 and all it "
                 "does on a /PROP/SHELL is SUBTRACT the thermal stress from the "
-                "stress the law just produced (thermexpc.F:283-300), while "
+                "stress the law just produced (thermexpc.F:269-293), while "
                 "sigeps106c.F90:297-298 rebuilds signxx/signyy from the TOTAL "
                 "strain (aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) and never "
                 "reads sigoxx — so the subtraction is discarded on the next "
@@ -9345,7 +9345,7 @@ def _restate_law106_shell(state: ConversionState, rec: MatLaw106,
         "DOES NOT THERMALLY EXPAND AT ALL. cmain3.F:348 runs THERMEXPC after "
         "MULAWC at :320, and on a /PROP/SHELL all THERMEXPC does is SUBTRACT "
         "the thermal stress from the stress the law just produced "
-        "(thermexpc.F:283-300); sigeps106c.F90:297-298 then rebuilds "
+        "(thermexpc.F:269-293); sigeps106c.F90:297-298 then rebuilds "
         "signxx/signyy from the TOTAL strain "
         "(aii*(epsxx-eplaxx) + aij*(epsyy-eplayy)) without ever reading "
         "sigoxx, so the subtraction is discarded on the next cycle. LAW36 is "
@@ -9872,7 +9872,7 @@ def _resolve_mat_law3(state: ConversionState) -> None:
         nu = (3K0 − 2G) / (2(3K0 + G)),      E = 9·K0·G / (3K0 + G)
 
     which is the unique pair whose bulk modulus is the EOS's own. That matters
-    because ``hm_read_mat03.F:191`` sets ``PM(32) = E/(3(1−2nu))`` for every
+    because ``hm_read_mat03.F:190/197`` sets ``PM(32) = E/(3(1−2nu))`` for every
     ``INVERS >= 2018`` deck — the material's stored bulk modulus, which the
     ``/INTER/TYPE7`` and ``TYPE20`` contact stiffness reads. Deriving it from
     two stated physical cells makes that number agree with the pressure law
@@ -10017,7 +10017,7 @@ def _law3_report(state: ConversionState, kw: str,
         f"K0 = rho0*C^2 = {bulk:g}, nu = (3K0-2G)/(2(3K0+G)) = {nu:.6f}, "
         f"E = 9*K0*G/(3K0+G) = {e:.6f}, which returns E/(2(1+nu)) = "
         f"{e / (2.0 * (1.0 + nu)):.6f} = G exactly. Its ONE visible "
-        "consequence: hm_read_mat03.F:191 stores PM(32) = E/(3(1-2nu)) for "
+        "consequence: hm_read_mat03.F:190/197 stores PM(32) = E/(3(1-2nu)) for "
         "every INVERS >= 2018 deck, and that is the bulk modulus the "
         "/INTER/TYPE7 and TYPE20 CONTACT STIFFNESS reads — so the contact "
         "stiffness now agrees with the pressure law instead of with an "
@@ -10194,10 +10194,18 @@ def _jwl_unreacted_bulk(jwl: EosJwl) -> float:
     """``K_s(V = 1)`` — the slope of the JWL's PRINCIPAL ISENTROPE at the
     unreacted density.
 
-    The principal isentrope is the JWL's own reference curve for the
-    condensed (unreacted) solid, ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V}``, with
-    the energy term ``omega·E0/V`` added at the stated ``E0``. Its bulk modulus
-    ``K = -V dp_s/dV`` evaluated at ``V = 1`` is
+    A dimensionally-consistent STAND-IN built from stated cells, not the
+    unreacted solid's own reference curve. The JWL describes the DETONATION
+    PRODUCTS, and its principal isentrope is the products' reference curve
+    ``p_s(V) = A·e^{-R1·V} + B·e^{-R2·V}``, with the energy term
+    ``omega·E0/V`` added at the stated ``E0``. LS-DYNA gives the unreacted
+    solid a SEPARATE description — ``K``/``G``/``SIGY`` on
+    ``*MAT_HIGH_EXPLOSIVE_BURN``, and a whole second unreacted JWL
+    (``AUR, BUR, R1U, R2U, WU``) on ``*EOS_LEE-TARVER`` Card 6, Vol II R17
+    p.1-63 — precisely because the products' isentrope is not the solid's. It
+    is used here because it is the SOFTEST of the three candidates a stated
+    card can supply, and so perturbs the pre-burn state (which LS-DYNA leaves
+    at zero) least. Its bulk modulus ``K = -V dp_s/dV`` evaluated at ``V = 1`` is
 
         K_s(1) = A·R1·e^{-R1} + B·R2·e^{-R2} + omega·E0
 
@@ -10280,40 +10288,69 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
     the starter itself already computes at ``fill_buffer_51.F:488``
     (``UPARAM(275) = RHO40*SSP4^2`` with ``SSP4 = VDET``). On ``underwater_C``
     they are 26748.4, 23801 and 100188.9 MPa. The principal isentrope is what
-    is written because it is the JWL's own reference curve for the condensed,
-    unreacted solid — the quantity the cell asks for — and it is 3.7x softer
-    than ``rho0*D^2``, so it perturbs the pre-burn state (which LS-DYNA leaves
-    at zero) less. All three are printed in the warning, and MEASUREMENT says
+    is written because it is the SOFTEST of the three — 3.7x below
+    ``rho0*D^2`` — so it perturbs the pre-burn state (which LS-DYNA leaves at
+    zero) least. It is a dimensionally-consistent STAND-IN, not the unreacted
+    solid's own curve: the JWL describes the products (see
+    :func:`_jwl_unreacted_bulk`). All three are printed in the warning, and MEASUREMENT says
     the choice is not what decides the run: a three-value sweep spanning 37x on
     ``underwater_C`` moved the last time step 0.14 %, the internal energy 1.1 %
     and the kinetic energy 0.19 %. Neither raises the time step risk:
     ``PM(27)`` already holds ``D`` (``:492``), and a SMALLER ``C11`` gives a
     LARGER, never smaller, unreacted-sound-speed step.
 
-    **Where the value is actually consumed — and it is NOT only LAW51.** The
-    substitution is triggered by an ``ERROR 99`` that lives in the LAW51
+    **Where the value is actually consumed — and it is NOT the LAW51 branch.**
+    The substitution is triggered by an ``ERROR 99`` that lives in the LAW51
     ``Iform = 12`` branch, but the cell is written on the material's OWN
     ``/MAT/LAW5``, and on all four ``underwater_*`` carriers it is that
-    stand-alone card, referenced by a real ``/PART``, that the engine runs —
-    the emitted ``/MAT/LAW51`` is referenced by no ``/PART`` at all
-    (``blast_ale._make_ale_multimaterial`` says so in capitals). So the live
-    consumer is ``m5law.F``, where ``:135-146`` makes the cell a BRANCH SWITCH:
-    ``BULK == 0`` gives the FULL product pressure in every cell with no
-    burn-fraction weighting, and a positive ``BULK`` gives the
-    ``(1-BFRAC)·(P0 + BULK·mu) + BFRAC·(...)`` blend. The warning states that
-    rather than the ``jwl51.F`` path, which on these decks never executes.
+    stand-alone card, referenced by a real ``/PART``, that the engine runs.
+    ``mmain.F90:1225-1261`` sends ``mtn == 5`` to ``m5law`` (filling the working
+    arrays and the SOUND SPEED), then ``mqviscb``, then ``mjwl`` — and the
+    pressure that reaches the stress tensor is ``mjwl.F:166-167``, which has NO
+    branch on ``BULK`` at all::
 
-    **Scope.** The substitution fires only when the source ``K`` is 0 AND the
-    material is an ``*ALE_MULTI-MATERIAL_GROUP`` member, because ``ERROR 99``
-    lives in the ``Iform = 12`` branch alone: a stand-alone ``/MAT/LAW5``
-    (``underwater_A``/``_B``, ``exploding-sphere``, ``2Dlag``) reads the cell
-    only through ``hm_read_mat05.F`` and is perfectly startable with 0 there,
-    so writing a derived stiffness onto it would change four decks that have no
-    problem. ``--he-bunreacted <value>`` overrides the derivation everywhere.
+        PNEW = -PSH + (1 - BFRAC)*(P0 + BULK*AMU)
+             + (FACM + ESPE*W1DF)/(1 + W1DF*DVOL/VOLO)
+
+    with ``FACM = BFRAC*(WDR1V*ER1V + WDR2V*ER2V)`` (``:162``) and
+    ``W1DF = BFRAC*W1/DF`` (``:161``), then ``SIG(I,1..3) = SIG*OFF - PNEW``
+    (``:181-183``). So the JWL product term is ALWAYS burn-fraction weighted and
+    ``BULK`` is ALWAYS an ADDED ``(1-F)·K·mu`` pre-burn stiffness. ``m5law.F``'s
+    own ``BULK`` branch at ``:135-145`` is real but writes ``P(MVSIZ)``, a LOCAL
+    declared at ``:72`` and read only at ``:159`` to build ``SSP`` — it decides
+    the sound speed and hence the CFL step, nothing else, and the routine zeroes
+    the whole stress tensor at ``:175-182`` before returning. An earlier draft of
+    this batch read that branch as the pressure law; the correction is recorded
+    here because the two readings prescribe opposite values.
+
+    **Scope — and why the default is now 0.** ``ERROR 99`` lives in the
+    ``Iform = 12`` branch alone, i.e. it can only fire on a ``/MAT/LAW51``. Since
+    k2rad emits that card only under ``--ale-multimat-law51`` (it is an orphan by
+    construction otherwise — see
+    :func:`~k2rad.writer.blast_ale._make_ale_multimaterial`), the substitution
+    now fires only when the source ``K`` is 0 AND the material is an
+    ``*ALE_MULTI-MATERIAL_GROUP`` member AND that flag is set. With the flag off,
+    ``Bunreacted`` stays 0 — which ``mjwl.F:166`` at ``P0 = PSH = 0`` makes
+    exactly LS-DYNA's ``p = F·p_eos``, the faithful mapping. MEASURED on
+    ``underwater_C``, four variants each run to completion: card + derived value
+    → 0 ERROR / 0 WARNING / NORMAL / 172 cycles; card removed, value kept →
+    identical to it in every channel at every sample; card removed, value 0 →
+    equally clean and closer to the LS-DYNA ``glstat`` kinetic energy at all five
+    sampled times (12.08 / 29.93 / 66.39 / 66.46 / 54.13 against 12.64 / 30.14 /
+    66.61 / 66.57 / 54.19); card kept, value 0 → ``ERROR 99``, which is the deck
+    ``--he-bunreacted 0`` used to produce. A stand-alone ``/MAT/LAW5``
+    (``underwater_A``/``_B``, ``exploding-sphere``, ``2Dlag``) was never affected:
+    it reads the cell only through ``hm_read_mat05.F`` and is startable with 0.
+    ``--he-bunreacted <value>`` overrides everywhere, and now produces a
+    STARTABLE deck for every value including 0.
     """
     if not state.mat_high_explosive:
         return
-    members = _ammg_member_mids(state)
+    # The ERROR 99 that forces a positive cell can only fire on an emitted
+    # /MAT/LAW51, so when that card is not written there is nothing to answer and
+    # 0 — LS-DYNA's own p = F*p_eos at mjwl.F:166 — is what ships.
+    members = (_ammg_member_mids(state)
+               if state.options.ale_multimat_law51 else set())
     override = state.options.he_bunreacted
     for mid in sorted(state.mat_high_explosive):
         heb = state.mat_high_explosive[mid]
@@ -10336,9 +10373,35 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
             heb.bunreacted = override
             heb.bunreacted_note = (
                 f"the --he-bunreacted override ({override:g})")
+            if override:
+                # A non-zero cell is never unexplained: the LAW51 warning used
+                # to carry this sentence, and that card is no longer emitted by
+                # default, so the statement moves onto the LAW5 side where the
+                # cell actually lives.
+                state.warn(
+                    f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                    f"{override:g} from the --he-bunreacted override. "
+                    "mjwl.F:166-167 has no branch on this cell, so it adds "
+                    "(1-F)*K*mu to the applied pressure at EVERY burn "
+                    f"fraction; the deck's own K = {heb.k:g} and an LS-DYNA "
+                    f"BETA = {heb.beta:g} card carries p = F*p_eos with no "
+                    "unreacted stress at all (Vol II R17 p.2-186). Pass "
+                    "--he-bunreacted 0 for that LS-DYNA behaviour.")
         elif heb.k > 0.0:
             heb.bunreacted = heb.k
             heb.bunreacted_note = f"the card's own stated K = {heb.k:g}"
+            state.warn(
+                f"*MAT_HIGH_EXPLOSIVE_BURN {mid} -> /MAT/LAW5 Bunreacted = "
+                f"{heb.k:g}, the card's own stated K, copied 1:1 (Vol II R17 "
+                "p.2-188 'p = K(1/V - 1)' before detonation against "
+                "jwl51.F:197 'Psol = C01 + C11*MU1' — the same form, so no "
+                "factor). mjwl.F:166-167 applies it as an added (1-F)*K*mu "
+                "pre-burn stiffness. K is a 'BETA = 2.0 only' cell in LS-DYNA, "
+                f"and this card states BETA = {heb.beta:g}"
+                + ("." if heb.beta == 2.0 else
+                   ", so LS-DYNA itself ignores it and carries p = F*p_eos "
+                   "with no unreacted stress; pass --he-bunreacted 0 to match "
+                   "that."))
         elif mid not in members:
             heb.bunreacted = 0.0
             heb.bunreacted_note = ""
@@ -10406,19 +10469,24 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
                 "WHERE IT IS CONSUMED, and it is NOT only the /MAT/LAW51 the "
                 "starter complained about: the SAME cell rides on this "
                 "material's own /MAT/LAW5, whose /PART-referenced elements run "
-                "through m5law.F — and there the cell is a BRANCH SWITCH, not "
-                "an added stiffness. m5law.F:135-138 is 'IF (BULK == ZERO) "
-                "P = P0 + (WDR1V*ER1V + WDR2V*ER2V + DR1V)', the FULL JWL "
-                "product pressure in every cell with no burn-fraction "
-                "weighting at all; :140-146 is the ELSE, "
-                "'P = (1-BFRAC)*(P0 + BULK*AMU) + BFRAC*(...)'. So a positive "
-                "Bunreacted moves the unburnt cells from LS-DYNA's zero stress "
-                "AND from Radioss's own product-pressure fallback onto "
-                "P = K*mu, i.e. it changes the explosive's pressure law "
-                "everywhere, not just before burn. (Inside /MAT/LAW51 the same "
-                "number is jwl51.F:197's 'Psol = C01 + C11*MU1', blended at "
-                ":205, with sqrt(C11/rho) as the unreacted sound speed at "
-                ":214.) MEASURED on underwater_C: a three-value sweep spanning "
+                "through mmain.F90:1225-1261 — m5law, then mqviscb, then mjwl. "
+                "The pressure that reaches the stress tensor is mjwl.F:166-167, "
+                "which has NO branch on the cell: 'PNEW = -PSH + "
+                "(1-BFRAC)*(P0 + BULK*AMU) + (FACM + ESPE*W1DF)/(1 + "
+                "W1DF*DVOL/VOLO)' with FACM = BFRAC*(WDR1V*ER1V + WDR2V*ER2V) "
+                "(:162) and W1DF = BFRAC*W1/DF (:161), applied as "
+                "SIG(I,1..3) = SIG*OFF - PNEW (:181-183). So the JWL product "
+                "term is ALWAYS burn-fraction weighted and a positive "
+                "Bunreacted is an ADDED (1-F)*K*mu pre-burn stiffness at every "
+                "burn fraction, which LS-DYNA's BETA = 0 card does not carry. "
+                "(m5law.F:135-145 does branch on the cell, but it writes P, a "
+                "LOCAL declared at :72 and read only at :159 to build SSP, and "
+                "the routine zeroes the stress tensor at :175-182 — that branch "
+                "decides the SOUND SPEED and hence the time step, not the "
+                "pressure. Inside /MAT/LAW51 the same number is jwl51.F:197's "
+                "'Psol = C01 + C11*MU1', blended at :205, with sqrt(C11/rho) as "
+                "the unreacted sound speed at :214.) "
+                "MEASURED on underwater_C: a three-value sweep spanning "
                 "37x (2674.84 / 26748.40 / 100188.90) moves the last time step "
                 "0.14 %, the internal energy 1.1 % and the kinetic energy "
                 "0.19 % — so the CHOICE of value is not what decides the "
@@ -10435,9 +10503,14 @@ def _resolve_he_bunreacted(state: ConversionState) -> None:
                 f"{_jwl_full_eos_bulk(jwl):g}, about "
                 f"{100.0 * (1.0 - _jwl_full_eos_bulk(jwl) / heb.bunreacted):.3g}"
                 " % below the value written. The principal isentrope is used "
-                "because it is the JWL's own reference curve for the unreacted "
-                "solid; the measurement above says the difference does not "
-                "decide the run. Neither costs time step (PM(27) already holds "
+                "because it is the SOFTEST of the three, so it perturbs the "
+                "pre-burn state least; it is a dimensionally-consistent "
+                "STAND-IN, not the unreacted solid's own curve (the JWL "
+                "describes the detonation PRODUCTS - LS-DYNA gives the "
+                "unreacted solid a separate description entirely, K/G/SIGY "
+                "here and a second unreacted JWL on *EOS_LEE-TARVER Card 6, "
+                "Vol II R17 p.1-63). The measurement above says the difference "
+                "does not decide the run. Neither costs time step (PM(27) already holds "
                 "D, and a SMALLER C11 raises the unreacted-sound-speed limit). "
                 "Use --he-bunreacted <value> to state your own.")
 
