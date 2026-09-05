@@ -377,6 +377,17 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     six DOFs, and keeps the rest (its mask is the superset, so a partially
     pinned free node must still reach it).
 
+    **Rule (b)'s reach is bounded by what registers itself.**
+    ``state.imp_motion_dirs`` is filled by ``_register_imp_motion_nodes``,
+    which the two ``_emit_imp_card`` sites call — i.e. every ``/IMPVEL``,
+    ``/IMPDISP`` and ``/IMPACC`` built from a ``*BOUNDARY_PRESCRIBED_MOTION_*``
+    card. Two other ``/IMP*`` sites exist and neither can matter here: the
+    geometric rigid wall's drives k2rad's OWN synthesized carrier nodes, which
+    no ``*NODE`` row can name; ``/IMPDISP/FGEO``
+    (``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY``, writer/rarecards.py) does not
+    register and would therefore not be screened — measured reach **0 decks on
+    the 356-deck R14 roster**, so it is NAMED here rather than given an arm.
+
     **What is NOT proved**, and the report says so: LS-DYNA's precedence for
     TC/RC vs a prescribed motion on the same node AND DOF. The one R14 carrier
     (``channel_A/B/C``) states ``TC 7`` beside a motion whose ``sf = 1e-8``, so
