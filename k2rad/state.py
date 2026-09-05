@@ -6843,6 +6843,18 @@ class ConvertOptions:
     # so its coordinates appear to change in post-processing — but it keeps the
     # master-node id stable for scripts that address loads/readouts by it.
     rigid_cog_master: bool = True
+    # A material stating RO <= 0 gets rho = 1e-24 in the deck's own units
+    # (writer/materials._ZERO_DENSITY_FLOOR), unless its target law is one the
+    # starter exempts from ERROR 683 (0/20/51/108/151/999 — *MAT_VACUUM's
+    # /MAT/VOID above all, where RO = 0 is the card's own meaning). The value is
+    # MEASURED from LS-DYNA's own substitution, not chosen: five R14 reference
+    # d3hsp files report part masses of exactly 1.000e-24 x volume for decks
+    # whose *MAT_ELASTIC states 0.0. ON by default, because without it eight
+    # corpus decks that ran NORMAL TERMINATION in LS-DYNA do not start at all.
+    # Set False (--no-zero-density-floor) to copy the deck's own RO through and
+    # let the starter refuse it — the honest "show me the deck's own value"
+    # behaviour.
+    zero_density_floor: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7704,6 +7716,14 @@ class ConversionState:
     # and only the WRITE side splits them, so this register is the only place
     # that knows which of the two blocks an id landed in.
     truss_elem_ids: Set[int] = field(default_factory=set)
+    # Material ids whose density was SUBSTITUTED by the zero-density floor
+    # (writer/materials._apply_zero_density_floor). Recorded so a consumer that
+    # asks "does this material state a usable density?" — writer/sph.py's
+    # particle-mass fabrication is the one that does — can tell a substituted
+    # 1e-24 from a real value and keep its own (loudly warned) fallback. The
+    # floor's job is to stop starter ERROR 683, not to hand a massless cloud a
+    # number that looks computed.
+    zero_density_floored: Set[int] = field(default_factory=set)
     # The same accounting for the two shell families and for the solids, and
     # for the same reason: an *ELEMENT_SHELL / *ELEMENT_SOLID whose PID has no
     # *PART record is parsed into state.shell_elems / solid_elems and warned

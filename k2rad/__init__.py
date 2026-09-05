@@ -189,6 +189,7 @@ def convert(
     emit_eig: bool = False,
     blast_ground: str = "auto",
     rigid_cog_master: bool = True,
+    zero_density_floor: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -283,6 +284,24 @@ def convert(
         (CLI ``--no-rigid-cog-master``) to reuse the mesh node as the master,
         which keeps the master-node id stable for scripts that address
         loads/readouts by it, at the cost of those warnings and the runtime move.
+    zero_density_floor : bool
+        Substitute ``rho = 1e-24`` (in the deck's own unit system) for a
+        material that states ``RO <= 0``. **On by default**: the OpenRadioss
+        starter refuses a non-positive density outright
+        (``hm_read_mat.F90:1575-1583``, ``ERROR 683``, exempting only laws
+        0/20/51/108/151/999), while LS-DYNA accepts the card and makes the SAME
+        substitution silently — its own ``.d3hsp`` reports a part mass of
+        exactly ``1.000e-24 x volume``, measured to seven figures on five R14
+        reference decks and four element families. A STATIC or EIGENVALUE
+        answer is unaffected (``/IMPL/QSTAT``'s stabilization is ``~ M/dt^2``
+        and vanishes with the mass; a modal shift is bounded by
+        ``df/f ~ -0.5 rho V / M_eff``, 2.1e-17 on the corpus carrier); an
+        EXPLICIT deck gets a second, harder warning, because at that density
+        ``c = sqrt(E/rho)`` collapses the element time step to ~1e-14 s.
+        A material converting to an exempt law — ``*MAT_VACUUM`` -> ``/MAT/VOID``
+        above all, where ``RO = 0`` is the card's own meaning — is left alone.
+        Set False (CLI ``--no-zero-density-floor``) to copy the deck's own RO
+        through and let the starter refuse it.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -391,6 +410,7 @@ def convert(
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",
         rigid_cog_master=rigid_cog_master,
+        zero_density_floor=zero_density_floor,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,

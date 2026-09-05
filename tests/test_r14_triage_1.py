@@ -424,8 +424,13 @@ class Mat004Law106Tests(unittest.TestCase):
         self.assertIn("only 1 temperature point(s)", " ".join(res.warnings))
 
     def test_zero_density_is_refused_by_name(self):
+        """UPDATED by B2, not weakened: the refusal is now GATED on
+        ``--no-zero-density-floor``. With the default floor ON the density is
+        substituted and the material converts (see
+        ``ZeroDensityFloor.test_law106_is_rescued_rather_than_refused``);
+        with the floor OFF the original refusal stands, verbatim."""
         card = _MAT004_STEEL.replace(_row(1, "7.85000E-9"), _row(1, 0.0))
-        res, starter = _convert(_mat004_deck(card))
+        res, starter = _convert(_mat004_deck(card), zero_density_floor=False)
         self.assertEqual(_headers(starter, "/MAT/LAW106/"), [])
         w = " ".join(res.warnings)
         self.assertIn("ERROR 683", w)
@@ -1636,6 +1641,219 @@ class TrussAnalytic(unittest.TestCase):
         # ... which is what the starter echoed at cycle 0 on the real deck
         # (0.2233E-05, ELEMENT type TRUSS).
         self.assertEqual(f"{0.9 * 12.7 / c:.4E}", "2.2326E-06")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B2 — RO <= 0: the density floor (starter ERROR 683)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rho_deck(*, ro: str = "0.0", implicit: bool = True, mat: str = "",
+              extra: str = "") -> str:
+    """A one-brick deck whose *MAT_ELASTIC states RO as given."""
+    mat = mat or ("*MAT_ELASTIC\n" + _row(1, ro, 210000.0, 0.3) + "\n")
+    ctrl = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.1) + "\n"
+            if implicit else "")
+    return ("*KEYWORD\n" + _BRICK
+            + "*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + mat + ctrl + extra
+            + "*CONTROL_TERMINATION\n" + _row(0.01) + "\n*END\n")
+
+
+class ZeroDensityFloor(unittest.TestCase):
+    """``hm_read_mat.F90:1575-1583`` refuses ``rho <= 0`` with ERROR 683 for
+    every law but 0/20/51/108/151/999. Eight R14 decks state ``RO = 0.0``
+    literally and ran NORMAL TERMINATION in LS-DYNA.
+
+    MEASURED on the solver (starter, nt=6), master -> this branch: all eight
+    go from ``ERROR 683`` to **0 ERROR** — 3.1_Elastic_Beams_etc,
+    3.3_Composite_Analysis, 3.4_Connectors_CNRB_Interpolation,
+    3.5_Linear_Elastic_QS_Plate_{Hex,Shell,Tet}, ex_20_thin_shell_elform_16
+    (whose second material, a *MAT_ELASTIC_PLASTIC_THERMAL, also carried
+    ERROR 179 because the LAW106 resolver refused it for the same zero) and
+    6.2.PSD_Beam_Example_LSTC.
+    """
+
+    def test_the_value_is_pinned(self):
+        """1e-24 is DERIVED from LS-DYNA's own substitution, not chosen: its
+        d3hsp reports 'total mass of part = 0.20483830E-19' for the
+        20483.83 mm3 part of 3.1_Elastic_Beams_etc."""
+        from k2rad.writer.materials import _ZERO_DENSITY_FLOOR
+        self.assertEqual(_ZERO_DENSITY_FLOOR, 1.0e-24)
+        self.assertAlmostEqual(2.0483830e-20 / 20483.83, 1.0e-24, places=30)
+        self.assertAlmostEqual(2.0324782e-19 / 203247.82, 1.0e-24, places=30)
+        self.assertAlmostEqual(4.0967660e-20 / (127 * 6.35 * 50.8),
+                               1.0e-24, places=30)
+
+    def test_the_exempt_law_set_is_the_starter_gate(self):
+        from k2rad.writer.materials import _RHO_EXEMPT_LAWS
+        self.assertEqual(set(_RHO_EXEMPT_LAWS), {0, 20, 51, 108, 151, 999})
+
+    def test_an_implicit_ro_zero_deck_gets_the_floor(self):
+        res, starter = _convert(_rho_deck())
+        rows = _data_rows(starter, "/MAT/ELAST/1")
+        self.assertEqual(_fields(rows[1])[0], "1.000000E-24")
+        hit = [w for w in res.warnings if w.startswith("DENSITY:")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("MID 1 (/MAT/LAW1)", hit[0])
+        self.assertIn("SUBSTITUTED rho = 1e-24", hit[0])
+        self.assertIn("0.20483830E-19", hit[0])          # the provenance
+        self.assertIn("ERROR 683", hit[0])               # the refusal
+        self.assertIn("STATIC answer is unchanged", hit[0])
+        self.assertIn("MASS DIAGNOSTICS ARE MEANINGLESS", hit[0])
+        self.assertIn("--no-zero-density-floor", hit[0])
+
+    def test_an_explicit_deck_gets_the_harder_second_warning(self):
+        """The substitution is applied to EVERY deck — restricting it to
+        implicit ones would leave an explicit RO=0 deck failing at ERROR 683
+        with no explanation — but the explicit case is told what it costs."""
+        res, starter = _convert(_rho_deck(implicit=False))
+        self.assertEqual(_fields(_data_rows(starter, "/MAT/ELAST/1")[1])[0],
+                         "1.000000E-24")
+        hit = [w for w in res.warnings if "this deck is EXPLICIT" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("time step", hit[0])
+        self.assertIn("never reach the termination time", hit[0])
+
+    def test_an_implicit_deck_gets_only_the_first(self):
+        res, _s = _convert(_rho_deck())
+        self.assertEqual([w for w in res.warnings
+                          if "this deck is EXPLICIT" in w], [])
+
+    def test_the_opt_out_restores_todays_behaviour(self):
+        res, starter = _convert(_rho_deck(), zero_density_floor=False)
+        self.assertEqual(_fields(_data_rows(starter, "/MAT/ELAST/1")[1])[0],
+                         "0")
+        self.assertEqual([w for w in res.warnings
+                          if w.startswith("DENSITY:")], [])
+
+    def test_a_positive_density_is_untouched(self):
+        res, starter = _convert(_rho_deck(ro="7.85E-09"))
+        self.assertEqual(_fields(_data_rows(starter, "/MAT/ELAST/1")[1])[0],
+                         "7.850000E-09")
+        self.assertEqual([w for w in res.warnings
+                          if w.startswith("DENSITY:")], [])
+
+    def test_an_exempt_law_keeps_its_zero(self):
+        """``ale_wavehitcol.k``'s ``*MAT_VACUUM`` -> ``/MAT/VOID`` (LAW0)
+        states RO = 0 and that IS the card's meaning: the starter exempts
+        LAW0, so flooring it would rewrite the deck rather than rescue it."""
+        deck = ("*KEYWORD\n" + _BRICK
+                + "*PART\nvac\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                + "*MAT_VACUUM\n" + _row(1, 0.0) + "\n"
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertEqual(_fields(_data_rows(starter, "/MAT/VOID/1")[1])[0],
+                         "0")
+        self.assertEqual([w for w in res.warnings
+                          if w.startswith("DENSITY:")], [])
+
+    def test_the_record_scan_is_discovered_not_enumerated(self):
+        """The scan walks every ``mat_*`` field of ConversionState that is a
+        ``mid -> dataclass`` dict, so a material family added later is covered
+        the day it is added — the inverse of the #120 stale-list trap."""
+        import dataclasses
+        from k2rad.state import ConversionState
+        st = ConversionState()
+        n = sum(1 for f in dataclasses.fields(st)
+                if f.name.startswith("mat_")
+                and isinstance(getattr(st, f.name), dict))
+        # 79 dicts today; _material_registries lists 47 of them by hand.
+        self.assertGreaterEqual(n, 79)
+
+    def test_law106_is_rescued_rather_than_refused(self):
+        """``ex_20_thin_shell_elform_16.k``: its *MAT_ELASTIC_PLASTIC_THERMAL
+        states RO = 0, and the LAW106 resolver used to SKIP it for that —
+        turning ERROR 683 into ERROR 179 on the same deck. LAW106's density is
+        pure inertia (E, nu, alpha and the yield all come from the temperature
+        table), so the floor rescues it without touching its constitutive
+        answer."""
+        mat = ("*MAT_ELASTIC_PLASTIC_THERMAL\n"
+               + _row(1, 0.0) + "\n"
+               + _row(20.0, 500.0, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(210000.0, 100000.0, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(0.3, 0.3, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(1.2e-5, 1.2e-5, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(250.0, 150.0, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(1000.0, 800.0, 0, 0, 0, 0, 0, 0) + "\n")
+        res, starter = _convert(_rho_deck(mat=mat))
+        self.assertTrue(_headers(starter, "/MAT/LAW106/"), res.warnings)
+        self.assertEqual(_fields(_data_rows(starter, "/MAT/LAW106/1")[1])[0],
+                         "1.000000E-24")
+        # ... and with the floor OFF the old refusal comes back, naming the
+        # flag, so the two halves cannot drift.
+        res2, starter2 = _convert(_rho_deck(mat=mat),
+                                  zero_density_floor=False)
+        self.assertEqual(_headers(starter2, "/MAT/LAW106/"), [])
+        self.assertTrue(any("--no-zero-density-floor is set" in w
+                            for w in res2.warnings), res2.warnings)
+
+    def test_law3_is_refused_either_way(self):
+        """The floor CANNOT rescue a /MAT/LAW3: that law derives its whole
+        elastic pair from the density (K0 = rho0*C^2 out of the *EOS_*, then
+        nu and E out of K0 and G), so a floored density would turn a refused
+        deck into a silently wrong one."""
+        mat = ("*MAT_ELASTIC_PLASTIC_HYDRO\n"
+               + _row(1, 0.0, 80000.0, 250.0, 100.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + "*EOS_GRUNEISEN\n"
+               + _row(1, 5000.0, 1.5, 0.0, 0.0, 2.0, 0.0, 0.0) + "\n"
+               + _row(0.0, 1.0) + "\n")
+        res, starter = _convert(_rho_deck(mat=mat))
+        self.assertEqual(_headers(starter, "/MAT/LAW3/"), [])
+        self.assertTrue(any("does NOT apply here" in w for w in res.warnings),
+                        res.warnings)
+
+    def test_a_floored_density_is_not_a_usable_one_for_sph(self):
+        """The floor's job is the /MAT card's ERROR-683 gate, nothing else.
+        writer/sph.py fabricates a particle mass when the material states no
+        density and says so LOUDLY ("MASS INVENTED ... a bare unit mass");
+        computing rho x V from the substituted 1e-24 would replace that loud
+        invention with a silent 1e-21 that looks measured, so
+        ``state.zero_density_floored`` keeps the two apart."""
+        st = _dispatch(_rho_deck())
+        self.assertEqual(st.zero_density_floored, set())   # a parse-only state
+        res, _s = _convert(_rho_deck())
+        del res
+        from k2rad.writer.sph import _mat_density
+        from k2rad.state import ConversionState, MatElastic
+        probe = ConversionState()
+        probe.mat_elastic[1] = MatElastic(1, "", 1.0e-24, 210000.0, 0.3)
+        self.assertEqual(_mat_density(probe, 1), 1.0e-24)
+        probe.zero_density_floored.add(1)
+        self.assertEqual(_mat_density(probe, 1), 0.0)
+
+    def test_the_modal_shift_bound_is_below_double_precision(self):
+        """The one deck class where the density is NOT inert.
+        ``6.2.PSD_Beam_Example_LSTC``: a 127 mm cantilever, 6.35 x 50.8 mm
+        section, plus *ELEMENT_MASS 2.2684179e-4 at the tip. Its LS-DYNA
+        eigout gives f1 = 110.4521 Hz with MODAL EFFECTIVE MASS 2.268420E-04
+        — exactly the lumped tip mass, i.e. the beam contributes none.
+
+        Rayleigh: m_eff = M + (33/140) m_beam, so
+        df/f ~ -0.5 (33/140) rho V / M. At rho = 1e-24 that is 2.1e-17,
+        below the double-precision epsilon 2.22e-16 — literally
+        unrepresentable. At the 1e-9 a "small positive floor" would have
+        picked it is -2.1 %, which is what makes the DERIVED value
+        load-bearing rather than cosmetic."""
+        vol = 127.0 * 6.35 * 50.8
+        m_tip = 2.2684179e-4
+        def shift(rho):
+            return -0.5 * (33.0 / 140.0) * rho * vol / m_tip
+        self.assertAlmostEqual(vol, 40967.66, places=2)
+        self.assertLess(abs(shift(1e-24)), 2.22e-16)
+        self.assertAlmostEqual(shift(1e-9) * 100.0, -2.1285, places=4)
+        # The analytic SDOF the reference itself matches to -0.09 %:
+        i = 50.8 * 6.35 ** 3 / 12.0
+        k = 3.0 * 68947.5729 * i / 127.0 ** 3
+        f = (k / m_tip) ** 0.5 / (2.0 * 3.141592653589793)
+        self.assertAlmostEqual(i, 1083.936, places=2)
+        self.assertAlmostEqual(k, 109.45427, places=4)
+        self.assertAlmostEqual(f, 110.556, places=2)
+        self.assertLess(abs(f - 110.4521) / 110.4521, 0.001)
 
 if __name__ == "__main__":
     unittest.main()

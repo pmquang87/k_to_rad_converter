@@ -158,6 +158,8 @@ __all__ = [
     "_resolve_he_bunreacted",
     "_ammg_member_mids",
     "_jwl_unreacted_bulk",
+    "_apply_zero_density_floor",
+    "_ZERO_DENSITY_FLOOR",
     "_resolve_ale_submaterials",
     "_submaterial_has_eos",
 ]
@@ -9202,13 +9204,25 @@ def _resolve_one_mat004(state: ConversionState,
     alphas = mat.alpha[:n]
     sigys = mat.sigy[:n]
     etans = mat.etan[:n]
-    if mat.rho <= 0.0:
+    if mat.rho <= 0.0 and not state.options.zero_density_floor:
+        # With the floor ON (the default) the density is substituted by
+        # _apply_zero_density_floor, which runs AFTER this resolver, so the
+        # emitted card is never the ERROR-683 one this refusal describes. The
+        # density is pure inertia for LAW106 — E(T), nu(T), alpha(T) and the
+        # yield all come from the temperature table — so the substitution
+        # rescues the material without touching its constitutive answer. That
+        # is NOT true of /MAT/LAW3, whose refusal one function down stays
+        # unconditional: LAW3 derives K0 = rho0 * C^2 from its /EOS, so a
+        # floored density would make the bulk modulus (and with it nu and E)
+        # numerically meaningless rather than merely massless.
         state.warn(
             f"{kw} {mat.mid}: RO = {mat.rho:g}. /MAT/LAW106 is not on the "
             "starter's zero-density exemption list (hm_read_mat.F90:1575-1583 "
             "exempts only laws 0/20/51/151/108/999), so the card would be "
             "ERROR 683 (DENSITY IS LESS THAN OR EQUAL TO ZERO) and refuse the "
-            "whole deck. The material is SKIPPED.")
+            "whole deck. The material is SKIPPED. (--no-zero-density-floor is "
+            "set; with the default floor ON the density would have been "
+            "substituted and this material converted.)")
         return
     t_ref, why_ref = _law106_reference_temperature(state, xs)
     e_ref = _interp_table(xs, es, t_ref)
@@ -9613,12 +9627,24 @@ def _resolve_mat_law3(state: ConversionState) -> None:
                 "hardening silently dropped.")
             continue
         if mat.rho <= 0.0:
+            # UNCONDITIONAL, unlike the LAW106 twin above: the zero-density
+            # floor cannot rescue a LAW3 material, because this law's whole
+            # elastic pair is DERIVED from the density — K0 = rho0 * C^2 out
+            # of the *EOS_GRUNEISEN (or C1 out of the polynomial), then
+            # nu = (3K0-2G)/(2(3K0+G)) and E = 9K0G/(3K0+G). At rho = 1e-24
+            # the bulk modulus is numerically zero and nu comes out at the
+            # incompressible/negative edge, so the substitution would turn a
+            # refused deck into a silently wrong one.
             state.warn(
                 f"{kw} {mid}: RO = {mat.rho:g}. /MAT/LAW3 is not on the "
                 "starter's zero-density exemption list "
                 "(hm_read_mat.F90:1575-1583 exempts only laws "
                 "0/20/51/151/108/999), so the card would be ERROR 683 and "
-                "refuse the whole deck. The material is SKIPPED.")
+                "refuse the whole deck. The material is SKIPPED. The "
+                "zero-density floor does NOT apply here: LAW3 derives its "
+                "bulk modulus as K0 = rho0*C^2 from the *EOS_*, so a "
+                "substituted density would make E and nu meaningless instead "
+                "of merely making the material massless.")
             continue
         if mat.g <= 0.0:
             state.warn(
@@ -10073,6 +10099,188 @@ def _submaterial_has_eos(state: ConversionState, mid: int, law: int) -> bool:
     if mid in state.mat_null and mid not in _void_null_mids(state):
         return True                     # the /MAT/LAW6 carrier + its /EOS
     return mid in _null_part_eos_bindings(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RO <= 0: the density floor (starter ERROR 683)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The density k2rad substitutes when a material states ``RO <= 0``, in the
+#: DECK'S OWN unit system — DERIVED from LS-DYNA's measured behaviour, not
+#: chosen.
+#:
+#: LS-DYNA accepts ``RO = 0.0`` and silently substitutes a floor. MEASURED on
+#: the campaign's own reference results (``F:/dynaexamples_r14_ton-mm-s``,
+#: LS-DYNA R14 in ton-mm-s), five decks and four element families:
+#:
+#:   ============================================  ==============  =========  =========
+#:   deck (.d3hsp "total mass of part")            reported mass   volume     implied rho
+#:   ============================================  ==============  =========  =========
+#:   3.1_Elastic_Beams_etc  (hex/tet/shell/beam)   2.0483830E-20   20483.83   1.000e-24
+#:   3.5_..._Plate_Hex                             2.0324782E-19   203247.82  1.000e-24
+#:   3.5_..._Plate_Shell                           2.0324782E-19   203247.82  1.000e-24
+#:   3.5_..._Plate_Tet                             2.0324782E-19   203247.82  1.000e-24
+#:   6.2.PSD_Beam_Example_LSTC (beam)              4.0967660E-20   40967.66   1.000e-24
+#:   ============================================  ==============  =========  =========
+#:
+#: Seven significant figures, five decks, four families — and LS-DYNA reports
+#: ``*** Warning 30131 total number of massless nodes = 20`` rather than an
+#: error. The floor is therefore ABSOLUTE and unit-agnostic, exactly as
+#: LS-DYNA's is.
+#:
+#: A deck-RELATIVE rule ("1e-6 x the smallest positive density in the deck")
+#: was considered and REFUTED by measurement: all eight corpus carriers state
+#: RO = 0 on EVERY material they define, so such a rule has no input on any of
+#: them.
+_ZERO_DENSITY_FLOOR = 1.0e-24
+
+#: The Radioss laws ``hm_read_mat.F90:1575-1583`` exempts from ERROR 683,
+#: verbatim::
+#:
+#:     if (ilaw/=0   .and. ilaw/=20 .and. ilaw/=51 .and. ilaw/=151 .and.&
+#:       ilaw/=108 .and. ilaw /= 999) then
+#:       if (matparam%rho0 <= zero) then
+#:         call ancmsg(msgid=683, ...
+#:
+#: A material that converts to one of these may state RO = 0 and is left
+#: ALONE: on ``ale_wavehitcol.k`` the ``*MAT_VACUUM`` -> ``/MAT/VOID`` (LAW0)
+#: density of 0.0 is the card's own MEANING, and flooring it would rewrite the
+#: deck rather than rescue it.
+_RHO_EXEMPT_LAWS = frozenset({0, 20, 51, 108, 151, 999})
+
+#: The attribute names a material record spells its density with. Checked in
+#: this order; the FIRST one the record has decides, so a record carrying both
+#: cannot be floored twice.
+_RHO_ATTRS = ("rho", "ro", "rho_i", "rho0", "density")
+
+
+def _zero_density_records(state: ConversionState):
+    """``[(field_name, mid, attr)]`` for every material record stating a
+    density <= 0 whose target law is NOT exempt from ERROR 683.
+
+    DISCOVERED, not enumerated. The scan walks every ``ConversionState`` field
+    whose name starts with ``mat_`` and whose value is a ``mid -> dataclass``
+    dict, so a material family added later is covered the day it is added —
+    the inverse of the #120 trap, where a hand-kept list of registries goes
+    stale and the new family is silently missed. (There are 80 such fields
+    today, of which ``_material_registries`` deliberately lists only 47.)
+
+    The law screen is ``mesh._target_mat_law``, the ONE mid -> law map in the
+    codebase, and it is read in the SAFE direction: a material is floored
+    unless its law is on ``_RHO_EXEMPT_LAWS``. ``None`` — "this map has no
+    entry" — therefore floors, which is right for both of its cases: a
+    material k2rad emits under a law the map has not learned yet still meets
+    the starter's ERROR-683 gate, and a material k2rad emits no ``/MAT`` for
+    at all has no density cell for the substitution to reach.
+    """
+    import dataclasses
+    out: List[Tuple[str, int, str]] = []
+    from .mesh import _target_mat_law
+    for f in dataclasses.fields(state):
+        if not f.name.startswith("mat_"):
+            continue
+        holder = getattr(state, f.name)
+        if not isinstance(holder, dict):
+            continue
+        for mid, rec in sorted(holder.items()):
+            if not isinstance(mid, int) or not dataclasses.is_dataclass(rec):
+                continue
+            for attr in _RHO_ATTRS:
+                v = getattr(rec, attr, None)
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    continue
+                if v <= 0.0 and _target_mat_law(state, mid) \
+                        not in _RHO_EXEMPT_LAWS:
+                    out.append((f.name, mid, attr))
+                break
+    return out
+
+
+def _apply_zero_density_floor(state: ConversionState) -> None:
+    """Substitute ``RO = 1e-24`` for a material stating ``RO <= 0``, and say so.
+
+    Eight decks of the R14 corpus state ``RO = 0.0`` literally and ran NORMAL
+    TERMINATION in LS-DYNA; the OpenRadioss starter refuses every one of them
+    with ``ERROR ID : 683 ... DENSITY IS LESS THAN OR EQUAL TO ZERO``. They are
+    ``*CONTROL_IMPLICIT_GENERAL`` linear-static and ``*CONTROL_IMPLICIT_
+    EIGENVALUE`` decks, where the mass matrix does not enter the answer — which
+    is why LS-DYNA accepts the card at all.
+
+    The substitution is applied to EVERY deck, not only an implicit one, and
+    deliberately: the substitution IS what LS-DYNA does (there is no field-level
+    check on either side), and restricting it to implicit decks would leave an
+    explicit ``RO = 0`` deck failing at ERROR 683 with no explanation, which is
+    worse than starting with a warning that says exactly why the run will crawl.
+    The explicit case gets the harder sentence instead.
+
+    Runs as a ``build_starter`` prepass AFTER every material-routing pass (so
+    ``_target_mat_law`` answers for the final containers) and after
+    ``_resolve_thermal`` (whose ``*MAT_ADD_THERMAL_EXPANSION`` split can CLONE a
+    material — a clone made before this pass inherits the zero and is floored
+    with its original, one made after would not be). Mutating the record rather
+    than the emitted cell is the faithful model of what LS-DYNA does: its own
+    d3hsp reports the substituted density in the part MASS, so every consumer
+    downstream — the element time step, ``/HEAT/MAT``'s RHO0_CP, the modal
+    chain's lumped masses — sees the same number the source code did.
+    """
+    if not state.options.zero_density_floor:
+        return
+    hits = _zero_density_records(state)
+    if not hits:
+        return
+    from .mesh import _target_mat_law
+    laws: Dict[int, Optional[int]] = {}
+    for field_name, mid, attr in hits:
+        holder = getattr(state, field_name)
+        setattr(holder[mid], attr, _ZERO_DENSITY_FLOOR)
+        state.zero_density_floored.add(mid)
+        laws[mid] = _target_mat_law(state, mid)
+    mids = sorted({m for _f, m, _a in hits})
+    named = ", ".join(
+        f"MID {mid}" + (f" (/MAT/LAW{laws[mid]})" if laws[mid] is not None
+                        else "")
+        for mid in mids)
+    unknown = "" if all(laws[m] is not None for m in mids) else (
+        " (a MID listed without a law converts to one mesh._target_mat_law "
+        "has no entry for; the /MAT is still written and still meets the "
+        "ERROR-683 gate, which is why it is floored too.)")
+    state.warn(
+        f"DENSITY: {named} state RO <= 0.0, and k2rad SUBSTITUTED rho = "
+        f"{_ZERO_DENSITY_FLOOR:g} in the deck's own unit system. "
+        "WHY THE VALUE: LS-DYNA makes the SAME substitution and its own d3hsp "
+        "reports it — 'total mass of part = 0.20483830E-19' for the "
+        "20483.83 mm3 part of 3.1_Elastic_Beams_etc is rho = 1.000e-24 to "
+        "seven figures, measured identically on five reference decks and four "
+        "element families, with 'Warning 30131 total number of massless nodes' "
+        "instead of an error. "
+        "WHY AT ALL: hm_read_mat.F90:1575-1583 refuses rho <= 0 outright "
+        "(ERROR 683, DENSITY IS LESS THAN OR EQUAL TO ZERO), exempting only "
+        "laws 0/20/51/151/108/999 — none of them a structural law — so the "
+        "deck does not start without it. "
+        "WHAT IT COSTS: a STATIC answer is unchanged, because /IMPL/QSTAT's "
+        "inertia stabilization is S ~ M/dt^2 (imp_dyna.F:604-635) and is never "
+        "divided by the mass, so it simply vanishes with it; a MODAL or PSD "
+        "answer picks up a bounded shift df/f ~ -0.5 * rho*V / M_effective, "
+        "which on 6.2.PSD_Beam_Example_LSTC is 2.1e-17 — below double "
+        "precision; a TRANSIENT answer is not meaningful at all, because the "
+        "model has no inertia. "
+        "MASS DIAGNOSTICS ARE MEANINGLESS on such a deck: k2rad's injected "
+        "implicit probe rigid body carries a hard-coded Mass = 0.001, some 17 "
+        "orders of magnitude above the model's own, so TOTAL MASS, MAS.ERR and "
+        "any /TH mass channel report that body and not the structure. "
+        "Pass --no-zero-density-floor (convert(zero_density_floor=False)) to "
+        "copy the deck's own RO through and let the starter refuse it."
+        + unknown)
+    if not state.is_implicit:
+        state.warn(
+            "DENSITY: this deck is EXPLICIT, and a substituted rho = "
+            f"{_ZERO_DENSITY_FLOOR:g} makes the element time step collapse: "
+            "the bar wave speed is c = sqrt(E/rho), so a steel-modulus "
+            "material at this density gives c ~ 2.6e14 mm/s and dt ~ 1e-14 s. "
+            "The starter will accept the deck and the engine will never reach "
+            "the termination time. RO = 0 has a defensible meaning only on an "
+            "implicit STATIC or EIGENVALUE deck, where the mass matrix does "
+            "not enter the answer — state a real density for a transient run.")
 
 
 def _resolve_ale_submaterials(state: ConversionState) -> None:

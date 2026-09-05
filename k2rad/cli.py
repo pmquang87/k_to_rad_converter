@@ -224,6 +224,26 @@ def build_parser() -> argparse.ArgumentParser:
              "loads/readouts by it).",
     )
     parser.add_argument(
+        "--zero-density-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Substitute rho = 1e-24 (in the deck's own units) for a material "
+             "that states RO <= 0. ON by default: the OpenRadioss starter "
+             "refuses a non-positive density outright "
+             "(hm_read_mat.F90:1575-1583, ERROR 683), while LS-DYNA accepts "
+             "the card and makes the SAME substitution silently — its own "
+             "d3hsp reports a part mass of exactly 1.000e-24 x volume, "
+             "measured on five R14 reference decks. A static or eigenvalue "
+             "answer is unaffected (the /IMPL/QSTAT stabilization is "
+             "proportional to the mass and simply vanishes with it); an "
+             "EXPLICIT deck gets a second warning, because at that density "
+             "the element time step collapses to ~1e-14 s and the run will "
+             "never finish. A material converting to a law the starter exempts "
+             "(LAW0/20/51/108/151/999 — *MAT_VACUUM above all) is left alone. "
+             "Use --no-zero-density-floor to copy the deck's own RO through "
+             "and let the starter refuse it.",
+    )
+    parser.add_argument(
         "--write-restart",
         action="store_true",
         help="Keep OpenRadioss's engine restart (.rst) files. By default the "
@@ -397,6 +417,7 @@ def main(argv=None) -> int:
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,
         rigid_cog_master=args.rigid_cog_master,
+        zero_density_floor=args.zero_density_floor,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

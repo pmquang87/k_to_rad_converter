@@ -238,7 +238,17 @@ def _mat_density(state: ConversionState, mid: int) -> float:
     material dicts is exactly the kind of table that falls behind the next
     material batch. Both ``rho`` and ``ro`` spellings occur in the state
     dataclasses.
+
+    A material whose density was SUBSTITUTED by the zero-density floor
+    (``state.zero_density_floored``) reports 0.0 here, deliberately: that
+    material states no usable density, and letting the particle-mass
+    fabrication compute ``rho x V`` from ``1e-24`` would replace a LOUD
+    "MASS INVENTED ... a bare unit mass" warning with a silent 1e-21 that
+    looks measured. The floor exists to clear starter ERROR 683 on the /MAT
+    card, not to answer this question.
     """
+    if mid in state.zero_density_floored:
+        return 0.0
     for name, container in vars(state).items():
         if not name.startswith("mat_") or not isinstance(container, dict):
             continue

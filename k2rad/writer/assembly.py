@@ -8,6 +8,7 @@ from ..state import ConversionState
 from .beams import _resolve_integration_beams
 from .common import HDR, _ams_is_emitted, _f, _i
 from .materials import (
+    _apply_zero_density_floor,
     _make_functions,
     _make_materials,
     _resolve_define_tables,
@@ -996,6 +997,19 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # and the shell arm has no law gate, so the entry changes no /XREF decision
     # — it only stops that gate claiming "no /MAT at all".
     _resolve_mat_fabric(state)
+
+    # RO <= 0 -> rho = 1e-24 (starter ERROR 683). LAST of the material passes,
+    # deliberately: it screens on mesh._target_mat_law, so every routing
+    # decision above (LAW2-vs-LAW4, LAW19-vs-LAW58, the LAW51 phase list, the
+    # /MAT/VOID exemption) must already be final, and _resolve_thermal above
+    # can CLONE a material — a clone made before this pass inherits the zero
+    # and is floored with its original, one made after would not be. It
+    # mutates the RECORD rather than the emitted cell, which is the faithful
+    # model of what LS-DYNA does: its own d3hsp reports the substituted
+    # density in the part MASS, so the element time step, /HEAT/MAT's RHO0_CP
+    # and the modal chain's lumped masses all see the same number. Allocates
+    # no id, so it cannot shift an existing deck's id stream.
+    _apply_zero_density_floor(state)
 
     # *AIRBAG_* → /MONVOL. Resolves each bag's external surface to SHELL
     # ELEMENTS (a /SURF/SEG external surface is starter ERROR 18 and aborts the

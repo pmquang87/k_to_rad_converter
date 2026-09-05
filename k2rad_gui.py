@@ -94,6 +94,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
+                         zero_density_floor: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -171,6 +172,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["blast_ground"] = bg
 
     kwargs["rigid_cog_master"] = bool(rigid_cog_master)
+
+    kwargs["zero_density_floor"] = bool(zero_density_floor)
 
     kwargs["write_restart"] = bool(write_restart)
 
@@ -251,6 +254,7 @@ class ConverterGUI:
         self.fixpoint_count = tk.StringVar(value="100")
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
+        self.zero_density_floor = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
@@ -323,6 +327,15 @@ class ConverterGUI:
                      "their coordinates, clears WARNINGs 448/1624, AMS-compatible. "
                      "Untick to reuse the part's lowest-id mesh node as master)",
             variable=self.rigid_cog).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Zero-density floor (default on — a material stating RO <= 0 "
+                     "gets rho = 1e-24 in the deck's own units, the substitution "
+                     "LS-DYNA itself makes; without it the starter refuses the deck "
+                     "with ERROR 683. Static/eigenvalue answers are unaffected; an "
+                     "EXPLICIT deck is warned that its time step collapses. Untick "
+                     "to copy the deck's own RO through)",
+            variable=self.zero_density_floor).grid(row=7, column=3, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
@@ -559,6 +572,7 @@ class ConverterGUI:
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
+                zero_density_floor=self.zero_density_floor.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -659,6 +673,8 @@ class ConverterGUI:
             bits.append(f"blast ground={kwargs['blast_ground']}")
         if not kwargs.get("rigid_cog_master", True):
             bits.append("mesh-node rigid masters (--no-rigid-cog-master)")
+        if not kwargs.get("zero_density_floor", True):
+            bits.append("deck's own RO <= 0 kept (--no-zero-density-floor)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):
