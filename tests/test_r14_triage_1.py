@@ -237,6 +237,23 @@ class ThermalOnlyStandinTests(unittest.TestCase):
         self.assertIn("carry no solid/shell/tshell element", w[0])
         self.assertIn("[1]", w[0])          # the part is named
 
+    def test_a_part_whose_thermal_material_is_refused_is_NAMED(self):
+        """It gets NO stand-in (there would be no /HEAT/MAT to carry) and no
+        other diagnostic either: it never reaches _resolve_heat_materials'
+        `wanted` set, and _warn_dangling_part_materials treats mat_ID 0 as the
+        connector convention. Named here or nowhere. MEASURED on 05_4_1 /
+        05_5_1, whose weld-seam part carries *MAT_THERMAL_CWM."""
+        deck = _thermal_only_deck(extra="*MAT_THERMAL_CWM" + chr(10)
+                                  + _row(9, "7.85E-09", 0, 0.0) + chr(10))
+        deck = deck.replace(_row(1, 1, 0, 0, 0, 0, 0, 1),
+                            _row(1, 1, 0, 0, 0, 0, 0, 9))
+        res, starter = _convert(deck)
+        self.assertEqual(_headers(starter, "/MAT/ELAST/"), [])
+        w = [x for x in res.warnings if "/PART 1 (TMID 9)" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("a weld that never heats", w[0])
+        self.assertIn("ERROR 179", w[0])
+
     def test_shell_standin_names_the_law1_integration_limit(self):
         _res, _starter = _convert(_thermal_only_deck(mesh=_SHELLS))
         w = [x for x in _res.warnings if "stand-in on shell/tshell part" in x]

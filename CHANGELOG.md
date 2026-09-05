@@ -50,6 +50,16 @@ Prior history (before this changelog was introduced) is summarized in the
     `ex_21_solid_elform_2`: `/PART/1` went from `prop 1, mat 0` and no
     `/HEAT/MAT` at all to `/MAT/ELAST/90001` + `/HEAT/MAT/90001`. Pinned by
     `tests/test_r14_triage_1.py`.
+    Two of the ten SOLN=1 decks are NOT moved and say so: `05_4_1` and
+    `05_5_1`'s weld-seam part names `*MAT_THERMAL_CWM` through its TMID, which
+    has no Radioss counterpart (its quiet/dead/live property pairs and birth
+    time), so no stand-in is synthesized — the stand-in exists to carry a
+    `/HEAT/MAT` keyed on a MATERIAL id, and with no thermal material the part
+    would come out structurally inert AND thermally dead, which on a welding
+    thermal analysis is a weld that never heats. That part used to get **no
+    diagnostic at all** (it never reached `_resolve_heat_materials`' `wanted`
+    set, and the dangling-`/PART` scan treats `mat_ID 0` as the connector
+    convention), so it is named here or nowhere; it is named here.
 
   - **`*MAT_ELASTIC_PLASTIC_THERMAL` / `*MAT_004` (9 decks) → `/MAT/LAW106` +
     `/THERM_STRESS/MAT` + `/HEAT/MAT`.** The complete MAT cfg availability map

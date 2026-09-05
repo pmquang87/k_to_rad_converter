@@ -902,11 +902,21 @@ def _resolve_thermal_standins(state: ConversionState) -> None:
     ammg = _ammg_member_pids(state)
     emitted = state.all_mat_ids()
     made: List[Tuple[int, int, int, float, str]] = []
+    unnamed: List[Tuple[int, int]] = []
     for pid, part in sorted(state.parts.items()):
         if part.mid in emitted or pid in ammg or not fam.get(pid):
             continue
         tm = _thermal_material_for_part(state, pid)
         if tm is None:
+            # A SOLN=1 part with ELEMENTS, a TMID and no converted thermal
+            # material gets NO stand-in and NO other diagnostic either: it
+            # never reaches _resolve_heat_materials' `wanted` set, and
+            # _warn_dangling_part_materials deliberately treats mat_ID 0 as
+            # the connector convention rather than a dangling reference. So it
+            # is named HERE or nowhere. MEASURED on 05_4_1 / 05_5_1, whose
+            # weld-seam part carries *MAT_THERMAL_CWM.
+            if part.tmid:
+                unnamed.append((pid, part.tmid))
             continue
         rho = float(getattr(tm, "tro", 0.0) or 0.0)
         if rho <= 0.0:
@@ -941,6 +951,24 @@ def _resolve_thermal_standins(state: ConversionState) -> None:
         # MID; and the *INCLUDE_TRANSFORM offset walk ran at parse time, long
         # before any writer pass.
         state.parts[pid] = dataclasses.replace(part, mid=new_mid)
+    if unnamed:
+        state.warn(
+            "*CONTROL_SOLUTION SOLN=1 (thermal analysis only): "
+            + ", ".join(f"/PART {pid} (TMID {tmid})" for pid, tmid in unnamed)
+            + " carries elements and names a thermal material through TMID, "
+            "but that *MAT_THERMAL_* is NOT converted (it is in the skipped or "
+            "the recognized-but-not-emitted list — *MAT_THERMAL_CWM's "
+            "quiet/dead/live property pairs and birth time have no Radioss "
+            "counterpart at all). NO stand-in /MAT is synthesized for it: the "
+            "stand-in exists to carry a /HEAT/MAT that is keyed on a MATERIAL "
+            "id, and with no thermal material there is nothing to carry — the "
+            "part would come out structurally inert AND thermally dead, which "
+            "on a welding thermal analysis is a weld that never heats. The "
+            "part keeps its unresolvable mat_ID and the starter stops with "
+            "ERROR 179, which is the honest answer: this deck's thermal model "
+            "for that part cannot be expressed. Give the part a "
+            "*MAT_THERMAL_ISOTROPIC (and a structural *MAT_*) if an "
+            "approximation is wanted.")
     if not made:
         return
     rows = "; ".join(
