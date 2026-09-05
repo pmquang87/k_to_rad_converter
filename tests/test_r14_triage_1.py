@@ -2096,5 +2096,161 @@ class ForceTransducerInterZero(unittest.TestCase):
         self.assertIn("NO constant correction factor", hits[0])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# B4 — *DEFINE_CURVE with a reversed abscissa (starter ERROR 156)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _curve_deck(points, lcid: int = 50) -> str:
+    """A one-brick deck carrying one *DEFINE_CURVE with *points*."""
+    rows = "".join(_row16(f"{x:.10G}", f"{y:.10G}") + "\n" for x, y in points)
+    return ("*KEYWORD\n" + _BRICK
+            + "*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+            + "*DEFINE_CURVE\n" + _row(lcid, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+            + rows
+            + "*CONTROL_TERMINATION\n" + _row(0.01) + "\n*END\n")
+
+
+def _funct_points(starter: str, lcid: int):
+    rows = _data_rows(starter, f"/FUNCT/{lcid}")
+    assert rows is not None, starter
+    return [(float(r[:20]), float(r[20:40])) for r in rows[1:]]
+
+
+#: The corpus carrier, verbatim from
+#: ``F:/dynaexamples_r14_ton-mm-s/introduction/examples-manual/material/
+#: spring/mat_spring.belted-dummy.k`` around its one reversal: point 25 is
+#: (0.1195, -4910) and point 26 is (0.1125, -9810).
+_BELTED = [(0.115, -9810.0), (0.1195, -4910.0), (0.1125, -9810.0),
+           (0.13, -2450.0)]
+
+
+class CurveAbscissaReversal(unittest.TestCase):
+    """``hm_read_funct.F:143`` — ``IF (PLD(NPC(L+1)) <= PLD(NPC(L+1)-2))``,
+    ``MSGID = 156``, MSGERROR: Radioss refuses a non-increasing abscissa
+    outright. LS-DYNA warns (``Warning 20446``) and evaluates the curve with a
+    forward-walking segment search that never enters the reversed interval.
+
+    MEASURED, starter (nt=6), master 92460b7 -> this branch, on the corpus
+    carrier: 1 x ERROR 156 -> 0 ERROR.
+    """
+
+    def test_the_reversed_point_is_re_anchored_not_nudged(self):
+        """The repair is the value LS-DYNA JUMPS TO, from the segment that
+        LEAVES the out-of-order point: lerp((0.1125,-9810) -> (0.13,-2450))
+        at 0.1195 = -9810 + 0.4*7360 = -6866 exactly."""
+        _r, starter = _convert(_curve_deck(_BELTED))
+        pts = _funct_points(starter, 50)
+        self.assertEqual(len(pts), len(_BELTED))
+        self.assertAlmostEqual(pts[2][1], -6866.0, places=6)
+        self.assertGreater(pts[2][0], pts[1][0])
+        self.assertLess(pts[2][0], pts[3][0])
+        # ... and every abscissa is strictly increasing AS PRINTED.
+        xs = [x for x, _y in pts]
+        self.assertEqual(xs, sorted(xs))
+        self.assertEqual(len(set(xs)), len(xs))
+
+    def test_the_repair_reproduces_the_ls_dyna_reference(self):
+        """Hand-computed against ``mat_spring.belted-dummy.nodout``, node 1763
+        x-acceleration, the first sample past the reversal: 5.15057E+03 at
+        t = 0.119275 JUMPS to 6.85894E+03 at t = 0.119512.
+
+        The three candidate repairs, evaluated on the curve each of them
+        emits and negated by the deck's own ``SF = -1``:
+
+          re-anchor (this fix)  6860.96   +0.03 %
+          plain nudge           9801.60  +42.90 %
+          re-sort by abscissa   4907.19  -28.46 %
+
+        A 43 % error in a prescribed sled acceleration is why the
+        smallest-looking repair is the wrong one."""
+        t, ref = 0.119512, 6858.94
+
+        def lerp(x1, y1, x2, y2, x):
+            return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+        _r, starter = _convert(_curve_deck(_BELTED))
+        (xa, ya), (xb, yb) = _funct_points(starter, 50)[2:4]
+        got = -lerp(xa, ya, xb, yb, t)
+        self.assertAlmostEqual(got, 6860.9573, places=3)
+        self.assertLess(abs(got - ref) / ref, 0.0005)
+        # the two rejected candidates, on THEIR curves
+        self.assertAlmostEqual(-lerp(xa, -9810.0, 0.13, -2450.0, t),
+                               9801.5956, places=3)
+        self.assertAlmostEqual(-lerp(0.1195, -4910.0, 0.13, -2450.0, t),
+                               4907.1886, places=3)
+
+    def test_the_warning_names_the_point_and_both_sides(self):
+        res, _s = _convert(_curve_deck(_BELTED))
+        hit = [w for w in res.warnings if w.startswith("*DEFINE_CURVE 50")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("reverses direction at point 3", "Warning 20446",
+                       "hm_read_funct.F:143", "ERROR 156", "-6866",
+                       "DATTYP = 0", "p.17-106"):
+            self.assertIn(needle, hit[0])
+
+    def test_a_trailing_reversal_is_dropped_by_name(self):
+        """No later point lies beyond the last accepted abscissa, so there is
+        no segment to anchor onto — and LS-DYNA cannot evaluate it either."""
+        res, starter = _convert(_curve_deck(
+            [(0.0, 0.0), (1.0, 10.0), (0.5, 99.0)]))
+        pts = _funct_points(starter, 50)
+        self.assertEqual(pts, [(0.0, 0.0), (1.0, 10.0)])
+        hit = [w for w in res.warnings if w.startswith("*DEFINE_CURVE 50")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        self.assertIn("DROPPED", hit[0])
+        self.assertIn("point 3", hit[0])
+
+    def test_two_consecutive_reversals(self):
+        """Each is repaired against the first LATER point that lies beyond the
+        last ACCEPTED abscissa, not against its immediate neighbour — a chain
+        of reversals must not anchor onto another reversed point."""
+        res, starter = _convert(_curve_deck(
+            [(0.0, 0.0), (1.0, 10.0), (0.4, 4.0), (0.6, 6.0), (2.0, 20.0)]))
+        pts = _funct_points(starter, 50)
+        xs = [x for x, _y in pts]
+        self.assertEqual(xs, sorted(xs))
+        self.assertEqual(len(set(xs)), len(xs))
+        # point 3 (0.4, 4.0): the next point past x = 1.0 is (2.0, 20.0), so
+        # the anchor is lerp((0.4,4) -> (2,20)) at 1.0 = 4 + 16*0.6/1.6 = 10.
+        self.assertAlmostEqual(pts[2][1], 10.0, places=6)
+        # point 4 (0.6, 6.0): same anchor point, lerp((0.6,6) -> (2,20)) at
+        # 1.0 = 6 + 14*0.4/1.4 = 10.
+        self.assertAlmostEqual(pts[3][1], 10.0, places=6)
+        self.assertEqual(len([w for w in res.warnings
+                              if w.startswith("*DEFINE_CURVE 50")]), 2)
+
+    def test_a_tie_keeps_its_ordinate_and_says_nothing(self):
+        """The original #113 case, and it must NOT move: two points at one
+        abscissa are not a reversal — the curve was never ambiguous about its
+        value there — so the ordinate is kept and the abscissa stepped."""
+        res, starter = _convert(_curve_deck(
+            [(0.0, 0.0), (1.0, 10.0), (1.0, 20.0), (2.0, 30.0)]))
+        pts = _funct_points(starter, 50)
+        self.assertEqual([y for _x, y in pts], [0.0, 10.0, 20.0, 30.0])
+        self.assertGreater(pts[2][0], pts[1][0])
+        self.assertEqual([w for w in res.warnings
+                          if w.startswith("*DEFINE_CURVE 50")], [])
+
+    def test_a_well_formed_curve_is_untouched(self):
+        pts_in = [(0.0, 0.0), (1.0, 10.0), (2.0, 5.0), (3.0, -7.5)]
+        res, starter = _convert(_curve_deck(pts_in))
+        self.assertEqual(_funct_points(starter, 50), pts_in)
+        self.assertEqual([w for w in res.warnings
+                          if w.startswith("*DEFINE_CURVE")], [])
+
+    def test_the_guard_reaches_the_main_emitter_at_all(self):
+        """The defect this closes: the #113 nudge lived on
+        ``writer/loads.py::_emit_funct`` (connector-inline curves) and on
+        ``handle_define_curve_smooth``'s builder, while
+        ``materials._make_functions`` — the emitter EVERY *DEFINE_CURVE goes
+        through — wrote ``curve.pts`` verbatim."""
+        import inspect
+        from k2rad.writer import materials as M
+        src = inspect.getsource(M._make_functions)
+        self.assertIn("_monotonic_abscissae", src)
+        self.assertNotIn("for a, o in curve.pts:", src)
+
+
 if __name__ == "__main__":
     unittest.main()

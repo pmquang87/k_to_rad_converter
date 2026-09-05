@@ -8406,6 +8406,10 @@ def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_functions(state: ConversionState) -> List[str]:
+    # Local import: writer/loads.py imports writer/mesh.py, which imports THIS
+    # module at load time, so a top-level import here would close the cycle —
+    # the same shape as the _target_mat_law imports below.
+    from .loads import _monotonic_abscissae
     tables_2d = {tbid: t for tbid, t in state.define_tables.items()
                  if t.resolved and t.rows}
     if not state.curves and not tables_2d and not state.auto_tables:
@@ -8479,7 +8483,17 @@ def _make_functions(state: ConversionState) -> List[str]:
                 curve.title or f"FUNCT_{lcid}",
                 "#                  X                   Y",
             ]
-        for a, o in curve.pts:
+        # The #113 guard, on the MAIN emitter at last. It lived on
+        # writer/loads.py::_emit_funct (the connector-inline /FUNCT writer) and
+        # on handle_define_curve_smooth's builder, and this — the one emitter
+        # every *DEFINE_CURVE goes through — wrote curve.pts verbatim, so a
+        # deck whose curve reverses direction went out unrepaired and the
+        # starter refused the whole model (ERROR 156). Measured carrier:
+        # mat_spring.belted-dummy's curve 50, point 26 at x = 0.1125 after
+        # 0.1195. A tie keeps its ordinate; a REVERSAL is re-anchored onto the
+        # value LS-DYNA itself evaluates there — see _monotonic_abscissae.
+        for a, o in _monotonic_abscissae(
+                curve.pts, state, f"*DEFINE_CURVE {lcid}"):
             lines.append(f"{_f(a)}{_f(o)}")
         lines.append(HDR)
     for tbid, tab in sorted(tables_2d.items()):

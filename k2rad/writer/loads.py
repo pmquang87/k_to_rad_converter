@@ -829,7 +829,7 @@ def _card_value(v: float) -> float:
     return float(_f(v))
 
 
-def _monotonic_abscissae(pts):
+def _monotonic_abscissae(pts, state=None, label: str = ""):
     """Force a /FUNCT point list to be strictly increasing AS PRINTED.
 
     ``hm_read_funct.F:143`` refuses a function whose abscissa does not grow —
@@ -837,25 +837,97 @@ def _monotonic_abscissae(pts):
     the deck is rejected, not degraded. The comparison the starter makes is on
     the CARD value, so the invariant has to be checked on ``_f``'s output and
     not on the float: a tie-break below the ten-digit field resolution survives
-    in memory and disappears on the card.
+    in memory and disappears on the card (#113).
 
-    This is a last-resort guard — every builder that can produce a tie (the
-    plastic→total mapping, the cable's zero-crossing insertion) breaks it with a
-    step of its own. Points that are already strictly increasing are returned
-    unchanged, so the emitted card is byte-identical for every well-formed
-    curve."""
-    out = []
-    for a, o in pts:
-        x = float(a)
+    TWO different defects reach this, and they get different repairs.
+
+    **A TIE** (``_card_value(x) == prev``) is the original case: a builder that
+    emits two points at one abscissa (the plastic->total mapping, the cable's
+    zero-crossing insertion) or a nudge that the ten-digit field ate. The
+    abscissa is stepped forward until the CARD value grows and the ordinate is
+    kept — the curve was never ambiguous about its value there.
+
+    **A REVERSAL** (``_card_value(x) < prev``) is a deck defect, and copying the
+    ordinate would be wrong. LS-DYNA does not reorder such a curve either: it
+    warns (``*** Warning 20446 ... load curve N x-axis reverses direction at
+    point, K``) and then evaluates it with a forward-walking segment search that
+    can simply never select the reversed interval, so the value JUMPS at the
+    reversal and continues on the segment that starts at the out-of-order point.
+    MEASURED on ``mat_spring.belted-dummy`` (curve 50, point 26 at x = 0.1125
+    after 0.1195, driving a ``*BOUNDARY_PRESCRIBED_MOTION`` acceleration): node
+    1763's x-acceleration is 5.15057E+03 at t = 0.119275 and jumps to
+    6.85894E+03 at t = 0.119512, whose back-extrapolated slope -419917 per unit
+    t hits -9810 at t = 0.1124843 and -2450 at t = 0.130012 — i.e. exactly the
+    segment (0.1125, -9810) -> (0.13, -2450), the pair AS WRITTEN.
+
+    So the reversed point is replaced by ``(prev + eps, f(prev))`` where ``f``
+    is the segment from it to the NEXT point — the value LS-DYNA jumps TO. On
+    that curve f(0.1195) = -6861.1, and the three candidates differ by far more
+    than round-off: a plain nudge (keep the ordinate) evaluates 9801.6 at
+    t = 0.119512 (+43 % against LS-DYNA's 6858.94), re-SORTING by abscissa gives
+    4907 (-28 %), this rule gives 6861.1 (+0.03 %). When there is no next point
+    to anchor to — the reversal is the LAST point — it is DROPPED, because
+    LS-DYNA can never evaluate past ``prev`` there either.
+
+    Points already strictly increasing are returned unchanged, so the emitted
+    card is byte-identical for every well-formed curve. *state* and *label* are
+    optional so the connector-inline callers keep working; when they are given,
+    every repair is named.
+    """
+    out: List[Tuple[float, float]] = []
+    pts = list(pts)
+    for k, (a, o) in enumerate(pts):
+        x, y = float(a), float(o)
         if out:
             prev = _card_value(out[-1][0])
+            if _card_value(x) < prev:
+                # REVERSAL. Re-anchor onto the segment that leaves this point.
+                nxt = next(((float(p[0]), float(p[1])) for p in pts[k + 1:]
+                            if _card_value(float(p[0])) > prev), None)
+                if nxt is None:
+                    if state is not None:
+                        state.warn(
+                            f"{label}: the abscissa reverses direction at "
+                            f"point {k + 1} (x = {x:g} after {prev:g}) and no "
+                            "later point lies beyond it, so the point is "
+                            "DROPPED. LS-DYNA warns (Warning 20446 'x-axis "
+                            "reverses direction at point') and then never "
+                            "evaluates it either — its forward-walking segment "
+                            "search cannot enter a backwards interval — while "
+                            "Radioss REFUSES a non-increasing abscissa "
+                            "outright (hm_read_funct.F:143, ERROR 156). Check "
+                            "the curve: a genuinely non-monotone (x, y) data "
+                            "set must state DATTYP = 1 (Vol I R17 p.17-106).")
+                    continue
+                x2, y2 = nxt
+                y = y + (y2 - y) * (prev - x) / (x2 - x) if x2 != x else y2
+                if state is not None:
+                    state.warn(
+                        f"{label}: the abscissa reverses direction at point "
+                        f"{k + 1} (x = {x:g} after {prev:g}) — LS-DYNA itself "
+                        "flags this (Warning 20446, 'load curve N x-axis "
+                        "reverses direction at point, K') and then evaluates "
+                        "the curve by SKIPPING the reversed interval, so its "
+                        f"value jumps from {float(o):g} to {y:.6g} at "
+                        f"x = {prev:g} and follows the segment ({x:g}, "
+                        f"{float(o):g}) -> ({x2:g}, {y2:g}). Radioss REFUSES a "
+                        "non-increasing abscissa outright "
+                        "(hm_read_funct.F:143, ERROR 156), so k2rad emits the "
+                        "curve LS-DYNA ACTUALLY EVALUATES: this point becomes "
+                        f"(~{prev:g}, {y:.6g}). Keeping the stated ordinate "
+                        "instead would be a 43 % error on the corpus carrier, "
+                        "and re-sorting by abscissa a -28 % one. The source "
+                        "deck's DATTYP = 0 declares a MONOTONE curve (Vol I "
+                        "R17 p.17-106; DATTYP = 1 is the escape for "
+                        "non-monotone data), so this pair is a deck defect — "
+                        "check it.")
             step = max(abs(prev), 1.0) * 1.0e-8
             for _ in range(64):
                 if _card_value(x) > prev:
                     break
                 x = prev + step
                 step *= 2.0
-        out.append((x, float(o)))
+        out.append((x, y))
     return out
 
 
