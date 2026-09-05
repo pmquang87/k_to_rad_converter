@@ -2908,7 +2908,12 @@ class CardLayoutTests(unittest.TestCase):
         self.assertEqual(int(card[0:10]), surf_id)      # surf_ID
         self.assertEqual(int(card[10:20]), 1)           # fct_IDT
         self.assertEqual(card[60:80].strip(), "1")      # Ascale_x
-        self.assertEqual(card[80:100].strip(), "2.5")   # Fscale_y = SF
+        # Fscale_y = -SF: Vol I R17 p.33-107, Figure 33-12 is "Positive
+        # pressure acts in the negative t-direction", the SAME rule
+        # *LOAD_SHELL_* has always been inverted for. MEASURED on
+        # 3.1_Elastic_Beams_etc: -200.29 % vs its LS-DYNA nodout without
+        # the flip, +0.29 % with it.
+        self.assertEqual(card[80:100].strip(), "-2.5")  # Fscale_y = -SF
         self.assertEqual(len(card), 100)
 
     def test_skew_fix_writes_local_y_and_z_vectors(self):
@@ -7984,7 +7989,10 @@ class LoadSegmentSetTests(unittest.TestCase):
         card = self._data_lines(lines, i)[1]
         self.assertEqual(int(card[0:10]), surf_id)          # surf_ID
         self.assertEqual(int(card[10:20]), 7)               # fct_IDT = lcid
-        self.assertEqual(card[80:100].strip(), "2.5")       # Fscale_y = sf
+        # Fscale_y = -sf, see CardLayoutTests
+        # ::test_load_segment_becomes_surf_seg_plus_pload for the manual
+        # sentence and the measurement.
+        self.assertEqual(card[80:100].strip(), "-2.5")      # Fscale_y = -sf
 
     def test_missing_set_segment_warns_not_crashes(self):
         deck = self.DECK.replace(

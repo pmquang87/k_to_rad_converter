@@ -4581,14 +4581,42 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     ``force.F90:451-465`` sums ``+P*A*n_hat`` over the segment's nodes). The two
     sources differ:
 
-    * *LOAD_SEGMENT gives the pressure on an explicitly ORIENTED segment, and
-      k2rad passes both the node order and the scale through verbatim — the
-      deck's own segment orientation carries the direction.
+    * *LOAD_SEGMENT / _SET gives the pressure on an explicitly ORIENTED
+      segment — and the orientation does NOT carry the direction, because
+      LS-DYNA's own sign rule is stated against it: Vol I R17 p.33-107,
+      Figure 33-12's caption, *"Positive pressure acts in the negative
+      t-direction"*, with ``t`` the right-hand normal of the N1..N4 order.
+      k2rad pastes that node order into the ``/SURF/SEG`` verbatim, so
+      ``n_hat = t_hat`` and exactly ONE flip is needed: ``Fscale_y = -SF``.
     * *LOAD_SHELL gives a pressure on a SHELL, positive "in the negative
       t-direction" (Manual Vol I R16 p.3421), i.e. INTO the top face. Pasting
       the shell connectivity makes ``n_hat = t_hat``, so exactly ONE flip is
       needed and it is applied as ``Fscale_y = -SF``. Reversing the node order
       as well would cancel it back out.
+
+    The two rules are therefore the SAME rule, and until this round only the
+    shell half applied it. MEASURED on ``3.1_Elastic_Beams_etc`` against its
+    own LS-DYNA ``nodout`` (last displacement block, t = 1.0), one converted
+    deck run twice with only the ``Fscale_y`` sign patched between the runs:
+
+      =========================  ================  ================  ==========
+      node                       WITHOUT the flip  WITH the flip     LS-DYNA
+      =========================  ================  ================  ==========
+      1 root, DX                 -8.258400E-03     8.405220E-03      8.430160E-03
+                                 (**-197.96 %**)   (-0.30 %)
+      21 hex tip, DZ             +1.066000E-01     -1.066000E-01     -1.062870E-01
+                                 (**-200.29 %**)   (+0.29 %)
+      64 tet tip, DZ             +1.065740E-01     -1.066400E-01     -1.062850E-01
+                                 (**-200.27 %**)   (+0.33 %)
+      1247 mid-span, DZ          +7.595400E-02     -7.600600E-02     -7.598150E-02
+                                 (**-199.96 %**)   (+0.03 %)
+      1320 shell tip, DZ         -1.064400E-01     -1.064400E-01     -1.057880E-01
+                                 (+0.62 %)         (+0.62 %)
+      =========================  ================  ================  ==========
+
+    Node 1320 is loaded by ``*LOAD_NODE_POINT``, not by a pressure, and is
+    IDENTICAL in both runs — which is what isolates the pressure path rather
+    than blaming the whole model.
     """
     if not (state.pressure_loads or state.segment_set_pressure_loads
             or state.shell_pressure_loads):
@@ -4596,8 +4624,10 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     # Grouped by (lcid, fscale, at): one /SURF/SEG + one /PLOAD per distinct
     # load. `at` joins the key because it becomes a per-load /SENSOR/TIME.
     groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
+    seg_flipped = False
     for pl in state.pressure_loads:
-        groups[(pl.lcid, pl.sf, pl.at)].append(pl.nodes)
+        groups[(pl.lcid, -pl.sf, pl.at)].append(pl.nodes)
+        seg_flipped = True
     # *LOAD_SEGMENT_SET: expand each referenced *SET_SEGMENT into per-segment
     # cards, grouped alongside *LOAD_SEGMENT by (lcid, sf).
     for ssl in state.segment_set_pressure_loads:
@@ -4607,7 +4637,8 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
                        "which is not defined — pressure load dropped.")
             continue
         for nodes in segset.segments:
-            groups[(ssl.lcid, ssl.sf, ssl.at)].append(list(nodes))
+            groups[(ssl.lcid, -ssl.sf, ssl.at)].append(list(nodes))
+            seg_flipped = True
     # *LOAD_SHELL_ELEMENT / _SET: the sign flip is applied HERE, so the group key
     # already holds the emitted Fscale_y.
     flipped = False
@@ -4672,6 +4703,29 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
                                   sf, sensor_id)
         pload_id += 1
+    if seg_flipped:
+        state.warn(
+            "*LOAD_SEGMENT[_SET] -> /PLOAD with Fscale_y = -SF. LS-DYNA's "
+            "positive segment pressure acts along the NEGATIVE segment normal "
+            "-- Vol I R17 p.33-107, Figure 33-12's caption is 'Positive "
+            "pressure acts in the negative t-direction', with t the right-hand "
+            "normal of the N1..N4 order -- while a /PLOAD with positive "
+            "Fscale_y pushes the surface along its POSITIVE segment normal "
+            "(force.F90:451-465 sums +P*A*n_hat). k2rad pastes the deck's node "
+            "order into the /SURF/SEG verbatim, so n_hat = t_hat and exactly "
+            "ONE flip is correct -- the same flip *LOAD_SHELL_* has always "
+            "had. MEASURED on implicit/Salzburg_2017 3.1_Elastic_Beams_etc "
+            "against its own LS-DYNA nodout, one converted deck run twice "
+            "with only this cell's sign patched between the runs: WITHOUT the "
+            "flip the hex cantilever tip (node 21) reads +1.066000E-01 "
+            "against a reference -1.062870E-01, i.e. -200.29 % -- the right "
+            "magnitude the wrong way -- and the tet tip, the mid-span node "
+            "and the root DX are -200.27 %, -199.96 % and -197.96 %; WITH it "
+            "they are +0.29 %, +0.33 %, +0.03 % and -0.30 %. The same deck's "
+            "*LOAD_NODE_POINT-loaded shell tip (node 1320) is IDENTICAL in "
+            "both runs at +0.62 %, which is what isolates the pressure path. "
+            "If your deck was built against k2rad's previous behaviour, drop "
+            "the minus sign from SF.")
     if flipped:
         state.warn(
             "*LOAD_SHELL_{ELEMENT,SET} -> /PLOAD with Fscale_y = -SF. LS-DYNA's "

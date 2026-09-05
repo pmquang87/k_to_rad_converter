@@ -802,14 +802,41 @@ class TestLoadShell(unittest.TestCase):
         self.assertTrue(_has_warn(result, "Fscale_y = -SF",
                                   "negative t-direction", "force.F90"))
 
-    def test_load_segment_sign_is_NOT_flipped(self):
-        """*LOAD_SEGMENT states an explicitly ORIENTED segment, so its scale and
-        node order both pass through — only *LOAD_SHELL needs the flip."""
-        _result, starter = _convert(_deck(
+    def test_load_segment_sign_IS_flipped(self):
+        """REPLACES ``test_load_segment_sign_is_NOT_flipped``, whose premise —
+        "*LOAD_SEGMENT states an explicitly ORIENTED segment, so its scale and
+        node order both pass through" — is contradicted by LS-DYNA's own
+        manual.
+
+        Vol I R17 p.33-107, Figure 33-12's caption: *"Positive pressure acts
+        in the negative t-direction"*, with ``t`` the right-hand normal of the
+        N1..N4 order. That is the SAME sentence the ``*LOAD_SHELL`` path has
+        always quoted and inverted for. k2rad pastes the deck's node order
+        into the ``/SURF/SEG`` verbatim, so ``n_hat = t_hat`` and exactly ONE
+        flip is needed; ``/PLOAD`` with a positive ``Fscale_y`` pushes along
+        the POSITIVE segment normal (``force.F90:451-465``).
+
+        MEASURED on ``3.1_Elastic_Beams_etc`` against its own LS-DYNA
+        ``nodout``, one converted deck run twice with only this cell patched:
+        WITHOUT the flip its hex cantilever tip (node 21) reads +1.066000E-01
+        against a reference -1.062870E-01 (-200.29 %), the tet tip -200.27 %,
+        the mid-span node -199.96 % and the root DX -197.96 %; WITH it they
+        are +0.29 %, +0.33 %, +0.03 % and -0.30 %. The same deck's
+        ``*LOAD_NODE_POINT``-loaded shell tip is identical in both runs at
+        +0.62 %, isolating the pressure path.
+        """
+        result, starter = _convert(_deck(
             "*LOAD_SEGMENT\n"
             "        10       2.5       0.0         1         2         3         4\n"))
         _surf, _fct, _sens, _ascale, fscale = _pload_card(starter, 1)
-        self.assertEqual(fscale, 2.5)
+        self.assertEqual(fscale, -2.5)
+        w = [x for x in result.warnings
+             if x.startswith("*LOAD_SEGMENT[_SET] -> /PLOAD")]
+        self.assertEqual(len(w), 1, result.warnings)
+        for fact in ("Figure 33-12", "negative t-direction",
+                     "force.F90:451-465", "3.1_Elastic_Beams_etc",
+                     "-200.29 %", "+0.29 %"):
+            self.assertIn(fact, w[0])
 
     def test_set_form_expands_the_shell_set(self):
         _result, starter = _convert(_deck("*LOAD_SHELL_SET\n"
@@ -871,7 +898,14 @@ class TestLoadShell(unittest.TestCase):
             "         8        10       2.0     0.004\n")
         _result, starter = _convert(deck)
         _surf, _fct, sens, _a, fscale = _pload_card(starter, 1)
-        self.assertEqual(fscale, 2.0, "*LOAD_SEGMENT_SET is not negated")
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual(fscale, -2.0,
+                         "*LOAD_SEGMENT_SET IS negated, exactly as "
+                         "*LOAD_SEGMENT and *LOAD_SHELL_* are")
         sid, data = _block(starter, "/SENSOR/TIME")
         self.assertEqual(sid, sens)
         self.assertEqual(float(_fields(data[0], 20, 2)[0]), 0.004)
@@ -1311,8 +1345,13 @@ class TestNoRegressionWithoutTheNewKeywords(unittest.TestCase):
                        "/FRAME/FIX"):
             self.assertEqual(_blocks(starter, header), [],
                              f"{header} must not appear")
-        # /PLOAD keeps the un-negated *LOAD_SEGMENT scale
-        self.assertEqual(_pload_card(starter, 1)[4], 2.5)
+        # /PLOAD carries the NEGATED *LOAD_SEGMENT scale.
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual(_pload_card(starter, 1)[4], -2.5)
 
 
 class TestIncludeTransformTables(unittest.TestCase):
@@ -1556,8 +1595,13 @@ class TestPressureZeroScale(unittest.TestCase):
             "*LOAD_SEGMENT\n"
             "        10       0.0       0.0         1         2         3"
             "         4\n"))
-        self.assertEqual(_pload_card(starter, 1)[4], 1.0,
-                         "*LOAD_SEGMENT is NOT negated — SF passes through")
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual(_pload_card(starter, 1)[4], -1.0,
+                         "a defaulted SF = 1 reaches the card as -1")
         self.assertTrue(_has_warn(result, "SF = 0.0", "hm_read_pload.F:167"))
 
     def test_load_segment_set_zero_sf_reads_as_the_default(self):
@@ -1567,7 +1611,12 @@ class TestPressureZeroScale(unittest.TestCase):
             "         1         2         3         4\n"
             "*LOAD_SEGMENT_SET\n"
             "        80        10       0.0\n"))
-        self.assertEqual(_pload_card(starter, 1)[4], 1.0)
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual(_pload_card(starter, 1)[4], -1.0)
         self.assertTrue(_has_warn(result, "SF = 0.0 on segment set 80"))
 
     def test_no_pload_ever_carries_a_literal_zero_scale(self):
@@ -1611,7 +1660,12 @@ class TestLoadSegmentArrivalTime(unittest.TestCase):
     def test_at_becomes_a_sensor_time_in_the_pload(self):
         result, starter = _convert(_deck(self._SEG_AT))
         _surf, fct, sens, ascale, fscale = _pload_card(starter, 1)
-        self.assertEqual((fct, ascale, fscale), (10, 1.0, 2.0))
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual((fct, ascale, fscale), (10, 1.0, -2.0))
         self.assertNotEqual(sens, 0, "AT > 0 needs a /SENSOR/TIME")
         sensors = _blocks(starter, "/SENSOR/TIME")
         self.assertEqual([s[0] for s in sensors], [sens])
@@ -1626,7 +1680,12 @@ class TestLoadSegmentArrivalTime(unittest.TestCase):
                      "         7         8\n")
         _result, starter = _convert(deck)
         cards = [_pload_card(starter, i) for i in (1, 2)]
-        self.assertEqual({c[4] for c in cards}, {2.0})
+        # Fscale_y = -SF since this round: Vol I R17 p.33-107, Figure
+        # 33-12's caption is "Positive pressure acts in the negative
+        # t-direction", the SAME rule *LOAD_SHELL_* has always been
+        # inverted for. MEASURED on 3.1_Elastic_Beams_etc against its own
+        # LS-DYNA nodout: -200.29 % without the flip, +0.29 % with it.
+        self.assertEqual({c[4] for c in cards}, {-2.0})
         self.assertEqual(len([c for c in cards if c[2] == 0]), 1,
                          "exactly one row keeps sensor_ID = 0")
 
