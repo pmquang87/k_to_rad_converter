@@ -96,6 +96,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          rigid_cog_master: bool = True,
                          zero_density_floor: bool = True,
                          law106_shell_restate: bool = True,
+                         zero_t0_sentinel: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -178,6 +179,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["law106_shell_restate"] = bool(law106_shell_restate)
 
+    kwargs["zero_t0_sentinel"] = bool(zero_t0_sentinel)
+
     kwargs["write_restart"] = bool(write_restart)
 
     kwargs["ams"] = bool(ams)
@@ -259,6 +262,7 @@ class ConverterGUI:
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
         self.law106_shell_restate = tk.BooleanVar(value=True)
+        self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
@@ -351,6 +355,15 @@ class ConverterGUI:
                      "never restated. Untick to keep "
                      "/MAT/LAW106 and its E(T) with zero expansion)",
             variable=self.law106_shell_restate).grid(row=8, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Dodge Radioss 0-means-300K initial temperature  "
+                     "(default on: a deck that STATES T = 0 gets /HEAT/MAT "
+                     "T0 = 1e-10 instead, because hm_read_therm.F:236-237 "
+                     "turns a zero T0 into 300 K and every node still at 0.0 "
+                     "is then overwritten with it. Measured +468.9 % vs the "
+                     "LS-DYNA reference without it, +0.91 % with it)",
+            variable=self.zero_t0_sentinel).grid(row=9, column=3, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
@@ -589,6 +602,7 @@ class ConverterGUI:
                 rigid_cog_master=self.rigid_cog.get(),
                 zero_density_floor=self.zero_density_floor.get(),
                 law106_shell_restate=self.law106_shell_restate.get(),
+                zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -694,6 +708,8 @@ class ConverterGUI:
         if not kwargs.get("law106_shell_restate", True):
             bits.append("/MAT/LAW106 kept on shells, no thermal expansion "
                         "(--no-law106-shell-restate)")
+        if not kwargs.get("zero_t0_sentinel", True):
+            bits.append("stated T = 0 written as 0 (--no-zero-t0-sentinel)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

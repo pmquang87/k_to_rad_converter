@@ -2808,7 +2808,18 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
                "thermal call in resol.F). Add *MAT_THERMAL_* + *PART TMID and "
                "a driver or heat-source boundary")
             + ". The mechanical model is converted as usual and its degrees of "
-            "freedom stay live.")
+            "freedom stay live."
+            + (" AND THAT MATTERS FOR THE STAND-IN MATERIALS: "
+               f"{len(state.thermal_standin_mats)} /PART(s) "
+               f"{sorted(state.thermal_standin_mats)} were given a synthesized "
+               "/MAT/ELAST whose E = 1 is justified ONLY by /DT/THERM freezing "
+               "every DOF. Without /DT/THERM that E = 1 is the part's REAL "
+               "structural stiffness, roughly five orders of magnitude below "
+               "any metal, so the mechanical answer on those parts is "
+               "meaningless. Give them a real structural *MAT_*, or state a "
+               "*MAT_THERMAL_* + a temperature driver so the thermal-only run "
+               "mode is written."
+               if state.thermal_standin_mats else ""))
     elif want_dt_therm and _ams_is_emitted(state):
         want_dt_therm = False
         state.warn(

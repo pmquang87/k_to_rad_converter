@@ -191,6 +191,7 @@ def convert(
     rigid_cog_master: bool = True,
     zero_density_floor: bool = True,
     law106_shell_restate: bool = True,
+    zero_t0_sentinel: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -328,6 +329,25 @@ def convert(
         table's own measured spread. Set False (CLI
         ``--no-law106-shell-restate``) to keep ``/MAT/LAW106`` and its E(T) at
         the price of zero thermal expansion on those parts.
+    zero_t0_sentinel : bool
+        Write ``/HEAT/MAT`` ``T0`` as ``1e-10`` in the deck's own temperature
+        unit when the deck STATES an initial temperature of exactly ``0.0``.
+        **On by default.** Radioss cannot tell a stated 0 from "not stated":
+        ``hm_read_therm.F:236-237`` turns a zero ``T0`` into 300 K, and
+        ``scoor3.F:328-338`` (solids), ``cinmas.F:900-905`` /
+        ``c3inmas.F:1516`` (shells) and ``pmass.F:233`` then overwrite every
+        node still at exactly ``0.0`` with it - so the run starts 300 K away
+        from where the deck says it starts. Both are EXACT zero tests, so the
+        substituted value is a sentinel dodge and not physics; a tenth of a
+        nanokelvin is below every channel's print precision. MEASURED on
+        ``ex_22_solid_elform_2``, whose ``*INITIAL_TEMPERATURE_SET`` states
+        ``0.0`` over all 54 nodes: node 5 at ``t = 31.60 s`` reads
+        ``198.21400`` against the LS-DYNA reference's ``34.83880`` (+468.9 %)
+        with ``T0 = 0``, and ``35.15680`` (+0.91 %) with the sentinel, while
+        the driven node 6 is ``61.32760`` either way. A deck that states NO
+        initial temperature keeps ``0.0`` - there the 300 K default is
+        Radioss's own documented behaviour and contradicts nothing. Set False
+        (CLI ``--no-zero-t0-sentinel``) to write the deck's own ``0.0``.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -438,6 +458,7 @@ def convert(
         rigid_cog_master=rigid_cog_master,
         zero_density_floor=zero_density_floor,
         law106_shell_restate=law106_shell_restate,
+        zero_t0_sentinel=zero_t0_sentinel,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,

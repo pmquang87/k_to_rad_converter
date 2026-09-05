@@ -898,6 +898,34 @@ def _resolve_thermal_standins(state: ConversionState) -> None:
     """
     if state.ctrl_solution_soln != 1 or not state.parts:
         return
+    if state.is_implicit or state.is_modal or state.options.ams:
+        # The inertness claim below rests ENTIRELY on /DT/THERM being written,
+        # and writer/assembly's gate for that is not `soln == 1` alone: it is
+        # `soln == 1 AND _thermal_solve_active AND not is_implicit AND not
+        # is_modal`, with a further `not _ams_is_emitted` arm. On an implicit,
+        # modal or --ams SOLN=1 deck no /DT/THERM is written, nothing freezes
+        # the DOFs, and E = 1 would be the part's REAL structural stiffness —
+        # exactly the fabricated modulus this pass exists not to write. The
+        # remaining condition, _thermal_solve_active, cannot be tested here
+        # (it reads the /HEAT/MAT that this pass is what enables), so it is
+        # named by writer/assembly instead, at the point where the answer is
+        # known — the #133 "a message that announces a conversion must run
+        # after every screen that can drop the record" rule.
+        state.warn(
+            "*CONTROL_SOLUTION SOLN=1 on a deck that runs "
+            + ("with --ams" if state.options.ams else
+               "as a modal analysis" if state.is_modal else "implicitly")
+            + ": NO thermal-only stand-in /MAT is synthesized. The stand-in "
+            "carries a nominal E = 1 whose only justification is that "
+            "/DT/THERM freezes every nodal DOF (resol.F:1738) and replaces "
+            "the mechanical step (resol.F:5807-5809) — and writer/assembly "
+            "does not write /DT/THERM on this deck, so E = 1 would be a "
+            "FABRICATED structural modulus with a real consequence. Any /PART "
+            "naming no emitted material keeps its unresolvable mat_ID and the "
+            "starter stops with ERROR 179. Give those parts a real structural "
+            "*MAT_*, or drop *CONTROL_IMPLICIT_* / --ams, if a thermal-only "
+            "run is what the deck means.")
+        return
     fam = _standin_element_families(state)
     ammg = _ammg_member_pids(state)
     emitted = state.all_mat_ids()
@@ -1804,8 +1832,61 @@ def _refuse_law109(state: ConversionState, mid: int,
     return True
 
 
+#: What a stated initial temperature of exactly 0.0 is written as, in the
+#: deck's own temperature unit. It is a SENTINEL DODGE, not a physical value:
+#: ``hm_read_therm.F:236-237`` (``IF (TINI == ZERO) TINI = THREE100``) and
+#: ``scoor3.F:328-338`` / ``cinmas.F:900-905`` / ``c3inmas.F:1516`` /
+#: ``pmass.F:233`` (``IF (TEMP(node) == ZERO) TEMP(node) = TEMP0``) are EXACT
+#: zero tests, so any non-zero value fails both and the field then starts where
+#: the deck says it starts. A tenth of a nanokelvin is below any temperature
+#: measurement and below the print precision of every channel that reports one.
+_ZERO_T0_SENTINEL = 1.0e-10
+
+
+def _heat_mat_t0(state: ConversionState, t0_global: Optional[float]) -> float:
+    """The ``/HEAT/MAT`` ``T0`` cell, dodging Radioss's 0-means-300 K rule.
+
+    A deck that states 0.0 gets ``_ZERO_T0_SENTINEL`` instead unless
+    ``--no-zero-t0-sentinel`` was passed; a deck that states NOTHING keeps 0.0,
+    because there the 300 K default is Radioss's own documented behaviour and
+    not a contradiction of anything the deck said.
+    """
+    if t0_global is None:
+        return 0.0
+    if t0_global != 0.0 or not state.options.zero_t0_sentinel:
+        return t0_global
+    return _ZERO_T0_SENTINEL
+
+
+def _states_a_zero_initial_temperature(state: ConversionState) -> bool:
+    """True when the deck EXPLICITLY states an initial temperature of exactly
+    0.0 somewhere — whatever spelling it used.
+
+    This is the discriminator :func:`_global_initial_temperature` is missing.
+    The trap is symmetric across the spellings: ``hm_read_therm.F:236-237``
+    turns a zero ``/HEAT/MAT`` ``T0`` into 300 K, and then ``scoor3.F:328-338``
+    (solids), ``cinmas.F:900-905`` / ``c3inmas.F:1516`` (shells) and
+    ``pmass.F:233`` overwrite every node whose temperature is STILL exactly 0.0
+    with that value. A ``*INITIAL_TEMPERATURE_SET`` on a set covering the model
+    says the same thing a ``sid = 0`` card does, and a deck that states 0.0 on
+    a SUBSET has the same problem on that subset.
+
+    A deck that states NO initial temperature at all is deliberately excluded:
+    every node is 0 there too, but that is the default rather than a statement,
+    and firing on it would put the warning on every thermal deck ever
+    converted.
+    """
+    return any(it.temp == 0.0 for it in state.initial_temperatures)
+
+
 def _global_initial_temperature(state: ConversionState) -> Optional[float]:
-    """The deck's model-wide starting temperature, if it states one."""
+    """The deck's model-wide starting temperature, if it states one.
+
+    Deliberately narrow — only a card that really is model-wide. The broader
+    question "does this deck state a zero anywhere?" is
+    :func:`_states_a_zero_initial_temperature`, which is what the 300 K
+    substitution warning is gated on.
+    """
     for it in state.initial_temperatures:
         if not it.is_node and it.sid == 0:
             return it.temp
@@ -2225,6 +2306,19 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         return
 
     t0_global = _global_initial_temperature(state)
+    if t0_global != 0.0 and _states_a_zero_initial_temperature(state):
+        # The gate below only accepts ONE source spelling — a model-wide
+        # *INITIAL_TEMPERATURE with sid == 0, or a *LOAD_THERMAL_* driver's own
+        # t=0 value. ex_22_solid_elform_2 states *INITIAL_TEMPERATURE_SET on a
+        # set that covers all 54 of its nodes, which is the SAME statement, and
+        # the warning did not fire: MEASURED at t = 31.60 s, its node 5 reads
+        # 34.83880 in LS-DYNA against 198.21400 in OpenRadioss (+468.9 %),
+        # because its whole initial field is 0.0 in LS-DYNA and 300.0 in the
+        # OpenRadioss interior. Patching the emitted /HEAT/MAT T0 from 0 to
+        # 1e-10 — one cell, nothing else — gives 35.15680 (+0.91 %) and an
+        # initial field of exactly 0.0. So the screen is on what the deck
+        # STATES, not on which spelling it used.
+        t0_global = 0.0
     if t0_global == 0.0:
         # A written T0 of exactly 0.0 is indistinguishable from "not stated" on
         # BOTH cards. hm_read_therm.F:236-237 turns it into PM(23)/RHO_CP and
@@ -2234,16 +2328,37 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         # says "The temperature at time 0 is T=0": the starter echoes
         # T0 (INITIAL TEMPERATURE) = 300.0.
         state.warn(
-            "The deck's model-wide temperature at t = 0 is exactly 0.0, which "
-            "is the one value Radioss cannot tell from 'not stated'. "
+            "This deck states an initial temperature of exactly 0.0, which is "
+            "the one value Radioss cannot tell from 'not stated'. "
             "hm_read_therm.F:236-237 replaces a zero /HEAT/MAT T0 by 300 K, "
-            "and cinmas.F:900-905 then overwrites every node whose /INITEMP "
+            "and scoor3.F:328-338 (solids), cinmas.F:900-905 / c3inmas.F:1516 "
+            "(shells) and pmass.F:233 then overwrite every node whose /INITEMP "
             "value is still exactly 0.0 with that same 300 K. On a deck whose "
             "/IMPTEMP covers every node this is harmless (resol.F:1801-1803 "
             "calls FIXTEMP once before the first element loop), but a deck "
             "driven only by an /INITEMP at 0.0, or whose /IMPTEMP covers a "
-            "subset, starts 300 K away from where it says it starts. Shift the "
-            "whole temperature field by a documented offset if that matters.")
+            "subset, starts 300 K away from where it says it starts. MEASURED "
+            "on introduction/example-22 ex_22_solid_elform_2, whose "
+            "*INITIAL_TEMPERATURE_SET states 0.0 over all 54 nodes: at the "
+            "matched time t = 31.60 s node 5 reads 34.83880 in the LS-DYNA "
+            "reference against 198.21400 in OpenRadioss (+468.9 %) with a "
+            "zero T0."
+            + (f" k2rad therefore writes /HEAT/MAT T0 = {_ZERO_T0_SENTINEL:g} "
+               "in the deck's own temperature unit instead of 0. It is a "
+               "SENTINEL DODGE, not a physical value: both rules above are "
+               "EXACT zero tests, so any non-zero number fails them and the "
+               "field starts where the deck says it starts, while a tenth of a "
+               "nanokelvin is below every channel's print precision. MEASURED "
+               "on the same deck: that one cell brings node 5 to 35.15680 "
+               "(+0.91 % against the LS-DYNA reference) with an initial field "
+               "of exactly 0.0, while the driven node 6 stays 61.32760 either "
+               "way. Pass --no-zero-t0-sentinel "
+               "(convert(zero_t0_sentinel=False)) to write the deck's own 0.0 "
+               "and let Radioss substitute 300 K."
+               if state.options.zero_t0_sentinel else
+               " --no-zero-t0-sentinel was passed, so the deck's own 0.0 is "
+               "written and Radioss WILL substitute 300 K. Shift the whole "
+               "temperature field by a documented offset if that matters."))
     refused: List[int] = []
     for mid in sorted(wanted):
         if mid in state.mat_tabulated_jc:
@@ -2389,7 +2504,7 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 "by the presence of the /HEAT/MAT.")
         _warn_law2_self_heating(state, mid)
         state.heat_mat_cards[mid] = (
-            t0_global if t0_global is not None else 0.0,
+            _heat_mat_t0(state, t0_global),
             rho_cp, a_s, bs, t1, al, bl, _efrac(state))
 
     if refused:

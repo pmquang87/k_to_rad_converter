@@ -244,6 +244,25 @@ def build_parser() -> argparse.ArgumentParser:
              "and let the starter refuse it.",
     )
     parser.add_argument(
+        "--zero-t0-sentinel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /HEAT/MAT T0 as 1e-10 (in the deck's own temperature "
+             "unit) when the deck STATES an initial temperature of exactly "
+             "0.0. ON by default: Radioss cannot tell a stated 0 from 'not "
+             "stated' - hm_read_therm.F:236-237 turns a zero T0 into 300 K "
+             "and scoor3.F:328-338 / cinmas.F:900-905 then overwrite every "
+             "node still at exactly 0.0 with it, so the run starts 300 K "
+             "away from where the deck says it starts. Both are EXACT zero "
+             "tests, so the value is a sentinel dodge, not physics. "
+             "MEASURED on ex_22_solid_elform_2: node 5 at t = 31.60 s reads "
+             "198.21400 against the LS-DYNA reference's 34.83880 (+468.9 "
+             "percent) with T0 = 0 and 35.15680 (+0.91 percent) with the "
+             "sentinel. A deck that states no initial temperature at all "
+             "keeps 0.0. Use --no-zero-t0-sentinel to write the deck's own "
+             "0.0.",
+    )
+    parser.add_argument(
         "--law106-shell-restate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -443,6 +462,7 @@ def main(argv=None) -> int:
         rigid_cog_master=args.rigid_cog_master,
         zero_density_floor=args.zero_density_floor,
         law106_shell_restate=args.law106_shell_restate,
+        zero_t0_sentinel=args.zero_t0_sentinel,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

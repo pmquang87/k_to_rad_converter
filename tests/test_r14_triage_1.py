@@ -2588,5 +2588,156 @@ class ForceTransducerSegmentSetTests(unittest.TestCase):
             [x for x in res.warnings if "Main_ID1 stays 0" in x], [])
 
 
+class ThermalStandinGateTests(unittest.TestCase):
+    """The stand-in's inertness claim rests on /DT/THERM, so its gate must.
+
+    ``writer/assembly`` writes /DT/THERM only when
+    ``soln == 1 AND _thermal_solve_active AND not is_implicit AND not
+    is_modal``, with a further ``not _ams_is_emitted`` arm. The stand-in used
+    to fire on ``soln == 1`` alone, so an implicit / modal / --ams SOLN=1 deck
+    got a synthesized /MAT/ELAST carrying ``E = 1`` AND, as the very next
+    warning, "*CONTROL_SOLUTION SOLN=1 ... It is NOT written here" - two
+    sentences contradicting each other in one log, with E = 1 the part's real
+    structural stiffness. No corpus deck is that shape (all ten SOLN=1
+    carriers get /DT/THERM), but a steady-state thermal deck driven through
+    *CONTROL_IMPLICIT_* is an ordinary one.
+    """
+
+    def test_an_implicit_soln1_deck_gets_no_standin(self):
+        deck = _thermal_only_deck(
+            extra="*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n")
+        res, starter = _convert(deck)
+        self.assertEqual(
+            [x for x in res.warnings if "SYNTHESIZES an inert" in x], [])
+        w = [x for x in res.warnings
+             if "NO thermal-only stand-in /MAT is synthesized" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("implicitly", w[0])
+        self.assertIn("FABRICATED structural modulus", w[0])
+        self.assertNotIn("k2rad_thermal_standin", starter)
+
+    def test_an_ams_soln1_deck_gets_no_standin(self):
+        res, starter = _convert(_thermal_only_deck(), ams=True)
+        w = [x for x in res.warnings
+             if "NO thermal-only stand-in /MAT is synthesized" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("--ams", w[0])
+        self.assertNotIn("k2rad_thermal_standin", starter)
+
+    def test_a_plain_soln1_deck_still_gets_one(self):
+        """The gate is narrower, not closed: the corpus shape is unchanged."""
+        res, starter = _convert(_thermal_only_deck())
+        self.assertIn("k2rad_thermal_standin", starter)
+        self.assertEqual(
+            [x for x in res.warnings
+             if "NO thermal-only stand-in /MAT is synthesized" in x], [])
+
+    def test_a_standin_without_dt_therm_is_named_by_assembly(self):
+        """The one gate condition the stand-in pass cannot test itself -
+        _thermal_solve_active reads the /HEAT/MAT the stand-in enables - is
+        named where the answer IS known: writer/assembly, after the fact."""
+        # SOLN=1, a thermal material, elements, but NO temperature driver at
+        # all, so _thermal_solve_active is False and /DT/THERM is not written.
+        res, starter = _convert(_thermal_only_deck())
+        self.assertIn("k2rad_thermal_standin", starter)
+        w = [x for x in res.warnings
+             if "AND THAT MATTERS FOR THE STAND-IN MATERIALS" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("E = 1 is the part's REAL structural stiffness", w[0])
+
+
+class ZeroInitialTemperatureTests(unittest.TestCase):
+    """A stated T = 0 must not become Radioss's 300 K default.
+
+    ``hm_read_therm.F:236-237`` is ``IF (TINI == ZERO) TINI = THREE100`` and
+    ``scoor3.F:328-338`` / ``cinmas.F:900-905`` / ``c3inmas.F:1516`` /
+    ``pmass.F:233`` are ``IF (TEMP(node) == ZERO) TEMP(node) = TEMP0``. Both
+    are EXACT zero tests, so a sentinel of 1e-10 fails them and the field
+    starts where the deck says it starts.
+
+    MEASURED end to end on ``ex_22_solid_elform_2`` (32 cycles, NORMAL
+    TERMINATION both ways). Sentinel ON: the initial anim state is min 0.0 /
+    max 0.0 and node 5 ends at 35.15680. Sentinel OFF: the initial state is
+    min 0.0 / max 300.0 and node 5 ends at 198.21400. The LS-DYNA reference
+    (its own .tprint, interpolated to the matched time the driven node 6
+    fixes, 61.32760 -> t = 31.60 s) is 34.83880 - so +0.91 % with the
+    sentinel and +468.9 % without it.
+    """
+
+    @staticmethod
+    def _t0(starter: str) -> float:
+        rows = _data_rows(starter, "/HEAT/MAT/")
+        if rows is None:
+            heads = _headers(starter, "/HEAT/MAT/")
+            rows = _data_rows(starter, heads[0])
+        return float(rows[0][0:20])
+
+    #: The fixture's own model-wide card, which these tests replace.
+    _BUILTIN = "*INITIAL_TEMPERATURE_SET\n" + _row(0, 20.0) + "\n"
+
+    def _deck(self, temp) -> str:
+        """ex_22's shape: *INITIAL_TEMPERATURE_SET on a NAMED set (not the
+        sid = 0 spelling) that covers the whole model."""
+        return _thermal_only_deck().replace(
+            self._BUILTIN,
+            "*INITIAL_TEMPERATURE_SET\n" + _row(3, temp) + "\n"
+            + "*SET_NODE_LIST\n" + _row(3) + "\n"
+            + _row(1, 2, 3, 4, 5, 6, 7, 8) + "\n")
+
+    def _deck_stating_nothing(self) -> str:
+        return _thermal_only_deck().replace(self._BUILTIN, "")
+
+    def test_a_stated_zero_becomes_the_sentinel(self):
+        res, starter = _convert(self._deck(0.0))
+        self.assertEqual(self._t0(starter), 1.0e-10)
+        w = [x for x in res.warnings if "exactly 0.0" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        for fact in ("hm_read_therm.F:236-237", "scoor3.F:328-338",
+                     "198.21400", "34.83880", "35.15680",
+                     "--no-zero-t0-sentinel"):
+            self.assertIn(fact, w[0])
+
+    def test_the_opt_out_writes_the_decks_own_zero(self):
+        res, starter = _convert(self._deck(0.0), zero_t0_sentinel=False)
+        self.assertEqual(self._t0(starter), 0.0)
+        w = [x for x in res.warnings if "exactly 0.0" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("Radioss WILL substitute 300 K", w[0])
+
+    def test_a_stated_nonzero_is_untouched(self):
+        """Neither the sentinel nor the warning: nothing states a zero.
+
+        The model-wide (sid = 0) spelling puts its own value in the T0 cell;
+        the named-set spelling leaves the cell at 0, which is the "not stated"
+        path and is unchanged by this round.
+        """
+        res, starter = _convert(_thermal_only_deck())     # sid = 0, T = 20
+        self.assertEqual(self._t0(starter), 20.0)
+        self.assertEqual([x for x in res.warnings if "exactly 0.0" in x], [])
+        res2, starter2 = _convert(self._deck(20.0))       # named set, T = 20
+        self.assertEqual(self._t0(starter2), 0.0)
+        self.assertEqual([x for x in res2.warnings if "exactly 0.0" in x], [])
+
+    def test_a_deck_that_states_nothing_keeps_zero_and_says_nothing(self):
+        """There the 300 K default is Radioss's own documented behaviour and
+        contradicts nothing the deck said, so firing would be noise."""
+        res, starter = _convert(self._deck_stating_nothing())
+        self.assertEqual(self._t0(starter), 0.0)
+        self.assertEqual(
+            [x for x in res.warnings if "exactly 0.0" in x], [])
+
+    def test_a_set_spelling_is_the_same_statement_as_sid_zero(self):
+        """The old gate accepted only *INITIAL_TEMPERATURE with sid == 0;
+        ex_22 uses _SET over a set that covers the model, which says the same
+        thing, and got no warning and no sentinel."""
+        from k2rad.writer.thermal import (_global_initial_temperature,
+                                          _states_a_zero_initial_temperature)
+        state = _dispatch(self._deck(0.0))
+        # the narrow helper still declines to call a _SET card model-wide ...
+        self.assertIsNone(_global_initial_temperature(state))
+        # ... and the new one catches it
+        self.assertTrue(_states_a_zero_initial_temperature(state))
+
+
 if __name__ == "__main__":
     unittest.main()

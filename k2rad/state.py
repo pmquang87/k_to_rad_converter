@@ -6869,6 +6869,21 @@ class ConvertOptions:
     # expansion at all. Set False (--no-law106-shell-restate) to keep
     # /MAT/LAW106 and its E(T)/nu(T) at the price of zero thermal expansion.
     law106_shell_restate: bool = True
+    # A deck that STATES an initial temperature of exactly 0.0 gets its
+    # /HEAT/MAT T0 written as 1e-10 in the deck's own temperature unit
+    # (writer/thermal._ZERO_T0_SENTINEL) instead of 0. Radioss cannot tell a
+    # stated 0 from 'not stated': hm_read_therm.F:236-237 turns a zero T0
+    # into 300 K and scoor3.F:328-338 / cinmas.F:900-905 then overwrite every
+    # node still at exactly 0.0 with it, so the run starts 300 K away from
+    # where the deck says it starts. MEASURED on ex_22_solid_elform_2 (whose
+    # *INITIAL_TEMPERATURE_SET states 0.0 over all 54 nodes): node 5 at
+    # t = 31.60 s reads 198.21400 against the LS-DYNA reference's 34.83880
+    # (+468.9 %) with T0 = 0, and 35.15680 (+0.91 %) with the sentinel. Both
+    # rules are EXACT zero tests, so the value is a dodge and not physics.
+    # A deck that states NO initial temperature keeps 0.0 - there the 300 K
+    # default is Radioss's own documented behaviour, contradicting nothing.
+    # Set False (--no-zero-t0-sentinel) to write the deck's own 0.0.
+    zero_t0_sentinel: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
