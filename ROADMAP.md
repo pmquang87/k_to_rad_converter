@@ -1050,6 +1050,107 @@ of its rows are expected to GROW as decks that never started begin to: a
 Salzburg deck that starts and then stalls in `/IMPL` is a pass for this batch and
 an input to the next.
 
+### Found in the POST-REVIEW of round 1
+
+Four defects the post-review FIXED are in `CHANGELOG.md`; these are what it
+found and deliberately did NOT close.
+
+- **`*SET_NODE_LIST_GENERATE` is not read, so `*INITIAL_VELOCITY` is silently
+  dropped — three decks now reach NORMAL TERMINATION with an identically zero
+  model.** `taylor1` (4353 cycles), `taylor2` (2579) and `matfoamsoil` (242)
+  print `I-ENERGY 0.000` and `K-ENERGY 0.000` on EVERY cycle against LS-DYNA
+  references of 41589 / 42393 / 8573. The converter NAMES it verbatim —
+  *"`*INITIAL_VELOCITY` NSID=101: node set not found (unsupported `*SET_NODE`
+  variant?) - skipped"* — and the decks define `*SET_NODE_LIST_GENERATE 101`
+  (`matfoamsoil`: 99). PRE-EXISTING; round 1 only made it observable, because
+  while the decks died in the starter the drop could not be seen. It is the
+  #122 signature exactly: legal, accepted, NORMAL — and inert. **The three
+  class-1d/1e decks must therefore NOT be read as a physics pass.** Teach the
+  `*INITIAL_VELOCITY` NSID resolver (and every other node-set consumer) to read
+  the `b1beg`/`b1end` ranges, or refuse the deck by name instead of dropping
+  the velocity, then require `IE` to leave zero.
+
+- **Of the five SOLN=1 decks that now reach NORMAL, only ONE stores any heat.**
+  `06_heating_plate` closes its balance exactly (`HEAT STORED` = `IMPOSED FLUX
+  HEAT` = 7 606 720, 142 cycles) and proves the machinery works. `ex_21` (2
+  cycles, 7.5e-12), `ex_22` (32 cycles, −2.9e-11) and
+  `01_2_insulated_concrete_wall_transient` (6364 cycles, −2.3e-12) store
+  numerical zeros. The three `ATYPE = 0` members (`ex_21`, `ex_23`, `01_1`) are
+  a steady-state solve Radioss does not have, and the converter says so
+  (*"a run shorter than one thermal step stores ZERO heat under NORMAL
+  TERMINATION"*) — those are correctly named limitations, not defects, and the
+  campaign report must mark them "starter pass, steady state unreachable"
+  rather than counting them as validated. The two `ATYPE = 1` members that
+  store nothing (`ex_22`, `01_2`) are the real item: measure the `/DT/THERM`
+  step actually chosen against the conduction stability limit, and check
+  whether the boundary drivers are consumed at all (`RADIATION HEAT = 0.0`
+  beside an emitted `/RADIATION` card is the tell).
+
+- **`thermal-stress` clears the starter and produces NO MOTION.** 406 568
+  cycles, NORMAL TERMINATION, `HEAT STORED` 3.06e-31, and every probed node's
+  displacement exactly `0.000000E+00` at all 500 samples against the LS-DYNA
+  `nodout`'s 1.50091E-04 in each direction at `t = 3.0`. Two named causes, both
+  pre-existing: *"`*MAT_THERMAL_*` 1 -> `/HEAT/MAT/1`: TGMULT dropped"* —
+  `TGMULT = 10.0` is the volumetric heat-generation rate, the only thing that
+  raises the temperature in this deck — and *"`*NODE`: 7 node(s) state a
+  constraint in the card's own TC/RC cells ... k2rad reads only NID/X/Y/Z"*,
+  which is the whole symmetry mount. So the deck is NOT evidence for the
+  `*MAT_004` mapping.
+
+- **`cylinder_impact_A`/`_B` cannot validate anything on EITHER side.** The
+  LS-DYNA reference is itself empty: `cylinder_impact_A.glstat`'s last block is
+  kinetic energy `0.000000E+00`, internal energy `2.000000E-20`,
+  total/initial 1.0, and every node in its `nodout` has `u = (0,0,0)` at
+  `t_end`. OpenRadioss also runs 361 cycles at `IE = KE = 0`. Mark them
+  `not_comparable` BY CONSTRUCTION in the campaign DB — an all-zero result
+  there is indistinguishable from the reference and must not be scored as a
+  match.
+
+- **The class-3 MODAL target is unmeasurable with the shipped chain.**
+  `6.2.PSD_Beam_Example_LSTC` (LS-DYNA `eigout` f1 = 110.4521 Hz):
+  `tools/modal_solve.py` reports a total deck mass of 0.000226842 — exactly the
+  tip `*ELEMENT_MASS`, i.e. the beam contributes nothing — and "49 node(s) in K
+  carry zero mass", IDENTICALLY at `RO` 1e-24, 1e-21 and 1e-18, because the
+  deck's `*SECTION_BEAM` is ELFORM 1 (thickness cells) so `sec.area` is 0 and
+  the mass arm skips the beams entirely; `spla.eigsh(..., sigma=0)` then dies
+  with ARPACK −9999 at all three densities. The density floor never reaches the
+  modal chain, which reads the SOURCE `.k`. Analytic cross-check of the target:
+  `I = 50.8·6.35³/12 = 1083.936`, `k = 3EI/L³ = 109.454 N/mm`,
+  `f = (1/2π)√(k/2.268418e-4) = 110.554 Hz` against the `eigout`'s 110.4521
+  (−0.09 %); the substitution's own shift is
+  `df/f ≈ −0.5·(33/140)·ρV/M = −2.13e-17`, below double precision — so the
+  floor is provably harmless here, but the frequency could not be produced.
+  Give the beam mass arm the same ELFORM-1/4 thickness→area derivation the
+  writer already has (`writer/mesh.py` derives `A = TS·TT`), and either fall
+  back to a dense generalized solve or shift `sigma` when `M` is near-singular.
+
+- **`/EOS/GRUNEISEN` turns a stated `a = 0` into `a = gamma0`.** Newly
+  reachable through `*MAT_010`: k2rad writes the deck's first-order volume
+  correction verbatim and `hm_read_eos_gruneisen.F:102` is
+  `IF(A == ZERO) A = GAMA0`, which the starter then echoes as
+  `A = 2.000000000000` while LS-DYNA's default 0 means no correction at all.
+  MEASURED on the `*MAT_010` coupon the effect at `mu = 3.89e-3` is 5e-4 %
+  (547.6218 with `a = 2` against 547.6193 with `a = 0`), but the term is
+  `−(a/2)·mu² + a·mu·E` and grows as `mu²`, so it is NOT negligible at
+  Taylor-impact compressions. Either write a tiny positive `a` so the Radioss
+  default cannot fire, or warn by name.
+
+- **Two LS-DYNA reference energies on `F:` are internally inconsistent**, and
+  reading them naively reports the class-3 density floor as a catastrophic
+  failure. `3.1_Elastic_Beams_etc.glstat` ends `internal energy = 3.45150E+02`
+  beside `external work = 5.03994E+00` and `total energy / initial energy =
+  6.84828E+01`; `3.5_Linear_Elastic_QS_Plate_Hex.glstat` ends `internal energy
+  = 1.69226E+04` beside `external work = 7.22701E+01`. Their four siblings all
+  end with `IE == external work` exactly. Against external work — the channel
+  that balances on all six — OpenRadioss lands at −0.078 % and −0.014 %, not
+  −98.54 % and −99.57 %, and OpenRadioss is self-consistent across the three
+  meshes of the same plate (72.26 / 72.28 / 72.54, spread 0.39 %) where the
+  LS-DYNA internal-energy column is not (16922.6 / 72.2787 / 72.2996). The
+  stored `ie_dev_pct` for those two decks is not a converter result.
+
+- **`*ELEMENT_BEAM_THICKNESS` `PARM1`** (a per-element truss AREA override,
+  Vol I p.19-7) is still not read; no corpus carrier.
+
 ### Found while doing round 1, recorded rather than fixed
 
 - **A `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSTYP = 0` resolves to a

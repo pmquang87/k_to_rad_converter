@@ -648,17 +648,75 @@ card carries **no** unreacted stress: `p = F·p_eos` with `F = 0`) but
 `fill_buffer_51.F:496` refuses a `/MAT/LAW51` phase whose `Bunreacted ≤ 0`
 with `ERROR 99`. So for an `*ALE_MULTI-MATERIAL_GROUP` member — and only for
 one, a stand-alone `/MAT/LAW5` is startable with 0 — the value is **DERIVED**
-from the companion `*EOS_JWL`'s own coefficients as the isentrope's bulk
-modulus at the unreacted density, `K_s(1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0`
-(on `underwater_C`'s TNT: 24271.684 + 1186.715 + 1290.0 = **26748.4 MPa**,
-≈ its own stated `P_CJ` of 26000). The named alternative, `ρ₀D² = 100188.9`
-(what the starter already computes at `fill_buffer_51.F:488`), is 3.75× stiffer
-and would perturb the pre-burn state more; neither costs time step, since
-`PM(27)` already holds `D` and a smaller `C11` RAISES the unreacted-sound-speed
-limit. The substitution names its formula, its value and its consequence (the
-unburnt cells now carry `P = K·µ` where LS-DYNA carried 0); `--he-bunreacted`
+from the companion `*EOS_JWL`'s own coefficients as the slope of the JWL's
+PRINCIPAL ISENTROPE at the unreacted density,
+`K_s(1) = A·R1·e^{−R1} + B·R2·e^{−R2} + ω·E0` (on `underwater_C`'s TNT:
+24271.684 + 1186.715 + 1290.0 = **26748.4 MPa**). Two alternatives are named
+beside it with their numbers: `ρ₀D² = 100188.9` (what the starter already
+computes at `fill_buffer_51.F:488`), 3.75× stiffer; and the tangent modulus of
+the FULL JWL the solver evaluates, which carries the `(1 − ω/(R_i·V))` factors
+of `jwl51.F:191` / `m5law.F:126-129` and gives **23801.8**, 11 % lower. The
+choice is not what decides the run — a three-value sweep spanning 37× moved the
+last time step 0.14 %, the internal energy 1.1 % and the kinetic energy 0.19 %
+— and neither costs time step, since `PM(27)` already holds `D` and a smaller
+`C11` RAISES the unreacted-sound-speed limit. **Where the value is consumed is
+NOT the `/MAT/LAW51` the starter complained about**: on all four carriers that
+card is referenced by no `/PART`, so the live consumer is the material's own
+`/MAT/LAW5`, i.e. `m5law.F`, where `:135-146` makes the cell a BRANCH SWITCH —
+`BULK == 0` gives the FULL product pressure in every cell with no burn-fraction
+weighting, a positive `BULK` gives the `(1−F)` blend. The substitution names its
+formula, its value, its real consumer and its consequence; `--he-bunreacted`
 overrides it. `G` and `SIGY` have no LAW5 slot at all (LAW5 carries no
 deviator) and are named as dropped
+A `*MAT_ELASTIC_PLASTIC_THERMAL` / `*MAT_CWM` whose parts are ALL SHELLS and
+which carries a thermal expansion coefficient is **restated from `/MAT/LAW106`
+to `/MAT/LAW36`** (default on; `--no-law106-shell-restate` keeps LAW106). A
+`/MAT/LAW106` SHELL cannot thermally expand at all: `cmain3.F:348` runs
+`THERMEXPC` AFTER `MULAWC` at `:320`, and on an ordinary `/PROP/SHELL` all
+`THERMEXPC` does is SUBTRACT the thermal stress from the stress the law just
+produced (`thermexpc.F:283-300`) — while `sigeps106c.F90:297-298` rebuilds
+`signxx`/`signyy` from the TOTAL strain and never reads `sigoxx`, so the
+subtraction is discarded on the next cycle. `/MAT/LAW36` is incremental
+(`sigeps36c.F:276`) and reads it back; SOLIDS are never restated, because there
+the expansion goes into the strain increment BEFORE the law dispatch. MEASURED
+on four coupons differing only in the element family and the law (closed form
+`α·ΔT·L = 1.2e-2 mm`): LAW106 SHELL **`0.0000000e+00`**, the restatement
+`1.2000000e-02`, a `*MAT_024` + expansion control `1.2000000e-02` (the same run
+to every printed T01 digit), LAW106 SOLID `1.2000000e-02`. On the corpus deck
+`tempcyl.vari`, node 26's DY against its own LS-DYNA `nodout` goes from
+`1.5e-03` — 0.3 % of the reference `4.4495E-01` — to `4.885E-01`, +9.79 %. The
+cost is named per card: `/MAT/LAW36` has no temperature dependence, so `E`, `ν`
+and the yield freeze at the reference temperature, and the warning prints each
+table's own measured spread. A material shared between shell and non-shell
+parts keeps LAW106 and is warned by name.
+
+A deck that STATES an initial temperature of exactly `0.0` gets its
+`/HEAT/MAT` `T0` written as **`1e-10` in the deck's own temperature unit**
+(default on; `--no-zero-t0-sentinel` writes the deck's own zero). Radioss cannot
+tell a stated 0 from "not stated": `hm_read_therm.F:236-237` turns a zero `T0`
+into 300 K, and `scoor3.F:328-338` / `cinmas.F:900-905` / `pmass.F:233` then
+overwrite every node still at exactly `0.0` with it. Both are EXACT zero tests,
+so the value is a sentinel dodge, not physics. MEASURED on
+`ex_22_solid_elform_2`, whose `*INITIAL_TEMPERATURE_SET` states `0.0` over all
+54 nodes: node 5 at the matched time reads **198.21400** against the LS-DYNA
+reference's **34.83880** (+468.9 %) with `T0 = 0`, and **35.15680** (+0.91 %)
+with the sentinel, while the driven node 6 is `61.32760` either way. A deck that
+states NO initial temperature keeps `0.0` — there the 300 K default is Radioss's
+own documented behaviour and contradicts nothing.
+
+`*LOAD_SEGMENT[_SET]` → `/PLOAD` is emitted with **`Fscale_y = −SF`**, the same
+inversion `*LOAD_SHELL_{ELEMENT,SET}` has always had. Vol I R17 p.33-107,
+Figure 33-12's caption is *"Positive pressure acts in the negative
+t-direction"*, with `t` the right-hand normal of the `N1..N4` order; k2rad
+pastes that node order into the `/SURF/SEG` verbatim, so `n̂ = t̂`, and a
+`/PLOAD` with positive `Fscale_y` pushes along the POSITIVE segment normal
+(`force.F90:451-465`). MEASURED on `3.1_Elastic_Beams_etc` against its own
+LS-DYNA `nodout`, one converted deck run twice with only this cell patched: the
+hex cantilever tip goes from `+1.066000E-01` against a reference `−1.062870E-01`
+(**−200.29 %**) to `−1.066000E-01` (+0.29 %), and the tet tip, mid-span node and
+root DX from −200.27 / −199.96 / −197.96 % to +0.33 / +0.03 / −0.30 %. The
+deck's `*LOAD_NODE_POINT`-loaded tip is identical in both runs.
+
 A material stating `RO ≤ 0` gets **`rho = 1e-24` in the deck's own units**
 (default on; `--no-zero-density-floor` copies the deck's value through and lets
 the starter refuse it). `hm_read_mat.F90:1575-1583` rejects a non-positive
