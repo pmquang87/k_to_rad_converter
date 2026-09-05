@@ -542,6 +542,83 @@ def _emit_mat_law6_carrier(mid: int, title: str, rho: float) -> List[str]:
     ]
 
 
+#: The value written into ``/EOS/GRUNEISEN``'s ``a`` cell in place of a stated
+#: ``A = 0``, so the Radioss reader's own default substitution cannot fire.
+#:
+#: MEASURED, not chosen: a four-brick starter coupon at ``taylor1``'s numbers
+#: (``C 3958000, S1 1.497, S2 = S3 = 0, Y0 = 2.0, E0 = 0``, ``RHO_I/RHO_0 =
+#: 9.79e-9/8.9e-9`` so the reader's own ``MU0 = RHOI/RHOR - 1 = 0.1``) with
+#: ``a in {0, 1e-20, 2, 1e-8}``, one /MAT/LAW3 + /EOS/GRUNEISEN pair per part,
+#: NORMAL TERMINATION at 0 ERROR / 0 WARNING in 1.71 s. The starter echo:
+#:
+#:   stated a   echoed A               echoed INITIAL PRESSURE at mu0 = 0.1
+#:   0          2.000000000000         15284.64380921
+#:   1e-20      1.0000000000000E-20    15439.03415072
+#:   2          2.000000000000         15284.64380921
+#:   1e-8       1.0000000000000E-08    15439.03414994
+#:
+#: and the closed form gives P(mu=0.1, a=0) = 15439.03415072 and
+#: P(mu=0.1, a=2) = 15284.64380921 — every digit agrees. So (a) the reader
+#: echoes a tiny positive A verbatim, unscaled and unclamped (there is no
+#: /EOS/GRUNEISEN cfg anywhere in hm_cfg_files, i.e. the field carries no
+#: DIMENSION to scale by); (b) 1e-20 reproduces the a = 0 pressure to all 13
+#: printed digits while 1e-8 already differs in the 12th, so this is the value
+#: and 1e-8 is not; (c) it is far above the single-precision underflow floor
+#: (~1.4e-45) for the ``sp`` build.
+_GRUNEISEN_A_SENTINEL = 1e-20
+
+
+def _resolve_eos_gruneisen_a(state: ConversionState) -> None:
+    """``*EOS_GRUNEISEN A = 0`` → a tiny positive ``a``, so the Radioss reader
+    does not silently substitute ``GAMMA0`` for it.
+
+    ``hm_read_eos_gruneisen.F:102`` is ``IF(A == ZERO) A=GAMA0`` — the ONLY
+    test on A in that file — and A then enters the stored parameters
+    (``:194 UPARAM(6)``), the reader's initial state (``:142`` E0, ``:160`` FF,
+    ``:168`` BB, ``:178`` ``PM(32) = PM(1)*C*C + A*E0``, the bulk modulus a
+    TYPE7/TYPE20 contact stiffness reads) and the shared evaluator
+    (``common_source/eos/gruneisen.F:110 GA=UPARAM(6)``, then
+    ``FF = 1 + (1 - G0/2)*MU - GA*MU2/2`` and ``BB = G0 + GA*MU`` in all three
+    IFLAG branches). Substituting ``XX = MU/(1+MU)`` into that file's ``FG``
+    gives Vol II R17 p.1-16's denominator term for term, expanded branch
+    included: **the two solvers' equations of state are identical and the
+    ``A == 0`` default is the only difference.** LS-DYNA states no Default for
+    A ("first order volume correction coefficient", no Default row), so a blank
+    or literal 0 is 0.
+
+    **Narrow by construction.** ``IF(A == ZERO) A = GAMA0`` is a NO-OP when
+    GAMMA0 is itself zero, and 23 of the 25 ``A = 0`` cards on the R14 roster
+    have ``GAMMA0 = 0.0`` (every ``underwater_*``, ``quadrature_*``,
+    ``stagnation_*``, ``channel_*``, ``sloshing_*``, ``bird*``, ``boot``, plus
+    Ryan_Lee's four ``W12_SETUP_Water_ALE_Elastic*``). Writing the sentinel on
+    those would move 23 emitted decks for no physical reason — the
+    "never fabricate an unstated value" rule — so the substitution fires only
+    when ``GAMMA0 != 0``: ``sph/bar-iv/taylor1.k`` and ``sph/bar-v/taylor2.k``
+    eos 2, both ``GAMMA0 = 2.0``.
+    """
+    for eos in state.eos_cards.values():
+        if eos.kind != "GRUNEISEN":
+            continue
+        p = eos.params
+        if p.get("a", 0.0) != 0.0 or p.get("y0", 0.0) == 0.0:
+            continue
+        g0 = p["y0"]
+        p["a"] = _GRUNEISEN_A_SENTINEL
+        state.warn(
+            f"{eos.label()}: A = 0 (Vol II R17 p.1-16, \"first order volume "
+            "correction coefficient\", stated with no Default row, i.e. NO "
+            f"correction) would be turned into A = GAMMA0 = {g0:g} by the "
+            "Radioss reader (hm_read_eos_gruneisen.F:102, "
+            "\"IF(A == ZERO) A=GAMA0\"), which is a DIFFERENT equation of "
+            "state: with this card's numbers the compression pressure at "
+            "mu = 0.1 drops 1.00 % and the energy term (GAMMA0 + A*mu)*E "
+            "rises 10 %. Written as A = 1e-20 instead — measured on a "
+            "single-brick starter coupon, the reader echoes it verbatim "
+            "(A . . . = 1.0000000000000E-20) and the initial pressure at "
+            "mu = 0.1 is 15439.03415072, the a = 0 closed form to 13 digits, "
+            "against 15284.64380921 for A = GAMMA0.")
+
+
 def _emit_eos(eos: EosCard) -> List[str]:
     """A standalone /EOS/<kind> block (id == its material id). Layout from
     MAT/mat_EOS.cfg FORMAT(radioss2022)."""
