@@ -95,6 +95,7 @@ from .dbeam import _make_discrete_beam_connectors
 from .loads import (
     _make_added_masses,
     _make_bcs,
+    _make_node_tc_rc_bcs,
     _make_body_loads,
     _make_constrained_spotweld_springs,
     _make_hex_spotweld_clusters,
@@ -1210,7 +1211,6 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_mat_ids(state, lines)
     _warn_duplicate_eos_ids(state, lines)
     _warn_duplicate_group_ids(state, lines)
-    _warn_node_tc_rc(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_thermal_bc_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
@@ -1553,73 +1553,6 @@ _GROUP_FAMILY_MESS = {
     "LINE":   "LINE DEFINITION",
     "SUBSET": "SUBSET DEFINITION",
 }
-
-
-def _warn_node_tc_rc(state: ConversionState, lines: List[str]) -> None:
-    """``*NODE``'s TC/RC constraint cells are read and DROPPED — say so.
-
-    Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``: TC and RC are
-    constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
-    global system, exactly the triples ``*BOUNDARY_SPC_NODE`` states one flag
-    at a time. ``handle_node`` reads only NID/X/Y/Z, so a deck that states its
-    constraints there converts into a model with those DOFs FREE.
-
-    This is the silent half that makes it worth a message: measured on a
-    spring-mass coupon whose anchor carried ``tc=7 rc=7``, no ``/BCS`` was
-    emitted, the anchor was free, the whole oscillator drifted at the
-    centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
-    0.317 mm amplitude) — and the run still reported NORMAL TERMINATION. The
-    #122 class: legal, accepted, and wrong.
-
-    **Not converted here, and the reason is the SCREENING, not the direction
-    of the error.** An earlier draft argued that an extra constraint is the
-    harder failure to notice than a missing one; that does not justify
-    shipping a missing one. What does justify deferral is that a correct /BCS
-    pass has to screen two things this round cannot validate:
-
-      * p.35-3 Remark 1, verbatim: *"No attempt should be made to apply
-        boundary conditions to nodes belonging to rigid bodies (see
-        \\*MAT_RIGID for application of rigid body constraints)."* So every
-        rigid-body secondary node has to come out of the set, and k2rad's
-        rigid nodes are assembled across ``*MAT_RIGID`` parts,
-        ``*CONSTRAINED_NODAL_RIGID_BODY`` and the synthesized element-free
-        masters.
-      * A DOF already driven by ``/IMPVEL`` or ``/IMPDISP`` must not also be
-        pinned — the two cards fight over the same slot.
-
-    Both need their own twin campaign against LS-DYNA, and the need is
-    MEASURED rather than asserted: of the 721 carrying decks in the two corpus
-    roots, **278 (39 %) also carry a rigid body or a prescribed motion** —
-    139 a ``*MAT_RIGID`` / ``*CONSTRAINED_NODAL_RIGID_BODY`` /
-    ``*CONSTRAINED_EXTRA_NODES``, 211 a ``*BOUNDARY_PRESCRIBED_MOTION_*`` — so
-    a naive pass would be wrong on two decks in five. The other 443 (61 %)
-    would be safe, which is exactly why the conversion is worth building.
-
-    The interim is the loud per-deck note below, and the conversion is a
-    ROADMAP item behind an opt-in flag (``--node-tc-rc-to-bcs``) so the
-    carrying decks can be fixed without changing the default for everyone.
-
-    The detector itself is independently checked: a scanner that does not use
-    k2rad found a non-zero TC/RC in exactly the decks this note fires on, with
-    no false positives and no misses.
-    """
-    if not state.node_tc_rc_count:
-        return
-    shown = ", ".join(str(n) for n in state.node_tc_rc[:5])
-    more = ("" if state.node_tc_rc_count <= 5
-            else f" and {state.node_tc_rc_count - 5} more")
-    state.warn(
-        f"*NODE: {state.node_tc_rc_count} node(s) state a constraint in the "
-        f"card's own TC/RC cells (node {shown}{more}) — Vol I R17 makes *NODE "
-        "Card 1 'NID X Y Z TC RC', where TC and RC are constraint codes (0 "
-        "none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system. "
-        "k2rad reads only NID/X/Y/Z, so those degrees of freedom are FREE in "
-        "the converted model and no /BCS is emitted for them. Nothing in the "
-        "run reports it: measured on a spring-mass coupon whose anchor carried "
-        "tc=7/rc=7, the anchor was free and the whole oscillator drifted at "
-        "the centre-of-mass velocity while the engine printed NORMAL "
-        "TERMINATION. Restate the constrained nodes as *BOUNDARY_SPC_NODE (or "
-        "*BOUNDARY_SPC_SET), which this converter does emit as /BCS.")
 
 
 def _warn_duplicate_group_ids(state: ConversionState,
@@ -2185,6 +2118,16 @@ def _starter_section_registry():
         # deck without the keyword, so it cannot shift an existing deck's id
         # stream (the #119 fixture rule).
         ("impdisp_fgeo",      lambda c: _make_impdisp_fgeo(c.state)),
+        # *NODE card 1's own TC/RC cells -> /GRNOD/NODE + /BCS. Deliberately
+        # HERE and not beside the *BOUNDARY_SPC "bcs" section: its screening
+        # rules read registries that only exist once earlier sections have
+        # run -- rule (a) needs rigid_nodes (available), and rule (b) needs
+        # state.imp_motion_dirs, which the three imposed-motion sections
+        # directly above fill as they emit. Announcing a conversion before
+        # the screens that can drop it is the #133 defect; the placement is
+        # what makes the announcement true.
+        ("node_tc_rc_bcs",    lambda c: _make_node_tc_rc_bcs(
+            c.state, c.rbody_info, c.rigid_nodes)),
         ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
         ("initial_velocity",  lambda c: _make_initial_velocity(c.state)),
         ("initial_velocity_generation",

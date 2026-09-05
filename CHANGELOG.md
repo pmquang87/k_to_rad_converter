@@ -11,6 +11,95 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 2, part A — the `*NODE` card's own
+  constraint cells.** Round 1 cleared the starter-error classes; the campaign then
+  measured two open ENGINE classes on the same 356-deck dynaexamples R14
+  roster — **69 decks that terminate NORMAL with an internal energy below 1 %
+  of their LS-DYNA reference, and 42 whose implicit engine will not advance**.
+  Part A goes after the support that both classes were missing.
+
+  - **`*NODE` `TC`/`RC` → one `/GRNOD/NODE` + `/BCS` per distinct `(TC, RC)`
+    pair, ON BY DEFAULT** (`--no-node-tc-rc-bcs`,
+    `convert(node_tc_rc_bcs=False)`). Vol I R17 p.35-2/35-3 makes card 1
+    `NID X Y Z TC RC`, the codes being the `*BOUNDARY_SPC` triples (0 none,
+    1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system with no CID,
+    no id and no birth/death — unconditionally active for the whole run.
+    k2rad read the cells and dropped them, so those DOFs were FREE in the
+    emitted model at 0 conversion warnings and 0 starter errors.
+    **The decode is measured, not assumed**: it reproduces LS-DYNA's own
+    `nodal spc summary on *NODE cards` d3hsp echo on **162 139 nodes across
+    155 R14 decks with zero translation-code disagreements**, and an explicit
+    deck's `nodout` confirms it holds (`intro-by-j.-day/joint/joint-i/
+    revo-stiff`: node 5 states `TC 7 RC 7`, the deck has no `*BOUNDARY_SPC`,
+    and all six components read exactly `0.00000E+00` at every sample while
+    the free node 3 moves). **Reach, re-measured with an independent scanner
+    over the three corpus roots** (893 `.k`/`.key`/`.dyn` files: 501 in
+    `C:/openradioss_run`, 356 in the R14 tree, 36 in `E:/foxcore_data`, the
+    Yaris/Camry `*INCLUDE` pullers excluded by name): **137 carriers, all of
+    them in the R14 tree**, 162 139 nodes — and **119 of the 137 have no
+    `*BOUNDARY_SPC` card at all**. Those decks sit under **44 of the 69
+    IE-collapse rows and 27 of the 42 implicit-ERROR rows**. Two of them,
+    measured against their own LS-DYNA `glstat`:
+    `intro-by-j.-day/misc/component-i/component1.k` moves from IE 2 224 vs
+    2 740 230 (−99.92 %) and KE 2.799e8 vs 36 222 (+772 630 %) to **IE +1.5 % /
+    KE +1.0 %**, and
+    `introduction/Introduction/example-03/ex_03_solid_elform_1_4x6x4_mesh.k`
+    from a TIMESTEP-LIMIT death at cycle 69, `t = 0.22`, min dt 5.2e-18, to
+    **NORMAL TERMINATION at `t = 1.0`**. (This supersedes ROADMAP.md's opt-in
+    prescription, which explicitly deferred the flip to the campaign result;
+    the same entry's unreproducible "721 of 2332 corpus decks" figure is
+    corrected there.)
+    **Four screens, each measured and each counted in the per-deck message,
+    which runs AFTER all of them (the #133 ordering rule):**
+    (a) a **rigid-body member node is DROPPED** — p.35-3 Remark 1 forbids it,
+    LS-DYNA's own d3hsp prints `*** Warning 60257 (IMP+257) skipping spc on
+    rigid body node 1003 / tcode = 6 rcode = 7` for exactly these cells
+    (`ex_16_thin_shell_elform_13`), and a `/BCS` there is inert in OpenRadioss
+    anyway: `resol.F:7073` runs `BCS10` but `resol.F:7572` runs `RBYVIT` →
+    `rgbodv.F:150-155`, which rebuilds the secondary node's acceleration from
+    the body's velocity field. Measured on a three-arm rigid twin, `/BCS` on
+    the member nodes gives K-ENERGY 0.3720E-03 — identical to the no-`/BCS`
+    control and to the closed form ½mv² — while re-pointing it to the main
+    node gives 0.000, i.e. holds a body both solvers let fall. Reach: 5 426
+    nodes in 15 decks.
+    (b) a **DOF a `*BOUNDARY_PRESCRIBED_MOTION` already drives is left to it**
+    — measured on a one-brick twin, a `/BCS` and an `/IMPVEL` on the same node
+    and DOF give starter WARNING 312 and EXT-WORK 13.66 against an I-ENERGY of
+    1688, a **99.9 % energy error on every cycle**, while the complementary
+    split measures 0.0 % with no warning. Reach: 148 nodes in 11 decks, same
+    node AND same DOF in 3 (`ale/pipe/pipe-*/channel_A|B|C`).
+    (c) a **DOF a `*BOUNDARY_SPC` already states is merged, not restated** —
+    `hm_read_bcs.F:198` unions the codes (`MY_OR`), so a second `/BCS` changes
+    no physics but costs starter WARNING 312 (measured, 1 warning / 8
+    conditions on a two-`/BCS` coupon). Reach: 512 nodes in 16 decks, all exact
+    duplication.
+    (d) a **rotational code on a mesh with no rotational DOF is EMITTED and
+    named inert** — `bcs10.F:66` applies the Rot digits only inside
+    `IF(IRODDL/=0)`, and LS-DYNA drops them too (71 885 such codes across 22
+    solid/ALE decks are stated and absent from its echo). Dropping them would
+    need an `IRODDL` prediction k2rad does not have; naming them costs nothing.
+    The implicit free-node guard resolves the fifth interaction from its own
+    side: it subtracts a node this pass has already pinned `111 111` and keeps
+    every partially pinned one, because its mask is the superset.
+    **`/GRNOD` ids come from `state.next_grnod_id()`** (the #131 rule) and the
+    `/BCS` skew is always 0 — `*NODE` TC/RC is global by definition, so
+    `hm_read_bcs.F:199-204`'s ERROR 148 is unreachable from this pass.
+    **What is NOT proved, and the log says so**: LS-DYNA's precedence for TC/RC
+    versus a prescribed motion on the same node AND DOF. The one roster carrier
+    states `TC 7` beside a motion whose `sf = 1e-8`, so its zero reaction work
+    is explained by the scale factor rather than by which card wins; rule (b)
+    is chosen on the Radioss measurement. Likewise the rigid-node evidence is
+    LS-DYNA's manual plus an `IMP+257`-tagged (implicit) warning — no roster
+    deck can discriminate the explicit path, because on all of them the
+    constrained directions are the quarter-symmetry planes, orthogonal to the
+    driven axis.
+    **`tools/` needed no arm**, and that is a verdict rather than an omission:
+    `modal_solve.py` builds the mass matrix on the DOFs of the stiffness matrix
+    the ENGINE exported (`/IMPL/PRINT/STIF`) from the CONVERTED `.rad` — "only
+    free (unconstrained, non-rigid-slaved) DOFs appear" — so the modal chain
+    inherits this constraint through the deck. 49 of the 137 carriers are
+    implicit.
+
 - **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps, the
   `/MAT/LAW51` semantics, the TRUSS element and the zero-density policy behind
   52 of the 59 starter failures the 356-deck dynaexamples R14 campaign

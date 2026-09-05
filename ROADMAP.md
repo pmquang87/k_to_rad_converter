@@ -1294,42 +1294,59 @@ Cases that convert today but drop or approximate detail worth recovering:
   references the initial state through density / `/INIBRI`, not a `V0` scalar).
 - **`*MAT_ADD_EROSION` non-strain criteria** — only `MXEPS`/`EFFEPS` map; other
   criteria and `IDAM≥1` are reported but not converted.
-- **`*NODE` `TC`/`RC` → `/BCS`** *(remaining, and the largest of these by
-  incidence)* — the card's own constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy,
-  5 yz, 6 zx, 7 xyz, global system) are read and NAMED but not converted, so
-  those degrees of freedom are free in the emitted model. **721 corpus decks
-  write a non-zero cell** — of 2332 scanned here, where the review round
-  counted 721 of 2346; the same numerator under a slightly different file-size
-  cap, which is the cross-check that both scans found the same decks. The
-  mapping itself is trivial — the codes are
-  the same triples `*BOUNDARY_SPC_NODE` states one flag at a time, and the
-  `/BCS` writer already exists — what it needs is SCREENING, and that is what
-  makes it a campaign rather than a patch:
-  - p.35-3 Remark 1, verbatim: *"No attempt should be made to apply boundary
-    conditions to nodes belonging to rigid bodies (see \*MAT_RIGID for
-    application of rigid body constraints)."* Every rigid-body secondary node
-    has to come out, across `*MAT_RIGID` parts, `*CONSTRAINED_NODAL_RIGID_BODY`
-    and the synthesized element-free masters.
-  - A DOF already driven by `/IMPVEL` or `/IMPDISP` must not also be pinned;
-    the two fight over the same slot.
+- **`*NODE` `TC`/`RC` → `/BCS`** — **DONE in R14 triage round 2, DEFAULT ON**
+  (opt out with `--no-node-tc-rc-bcs`). The entry that stood here prescribed
+  shipping it behind an opt-in `--node-tc-rc-to-bcs` and closed with *"then run
+  the campaign and consider flipping it"*. **The campaign has run, and it
+  flips.**
 
-  **How much screening is actually needed is measured, not assumed:** of the
-  721 carrying decks, **278 (39 %) also carry a rigid body or a prescribed
-  motion** — 139 a `*MAT_RIGID` / `*CONSTRAINED_NODAL_RIGID_BODY` /
-  `*CONSTRAINED_EXTRA_NODES`, 211 a `*BOUNDARY_PRESCRIBED_MOTION_*` — so a
-  naive pass would be wrong on two decks in five, while the other 443 (61 %)
-  would be safe. That split is the case for the flag: most carriers get a
-  correct model immediately, and the campaign can concentrate on the 278.
+  Two corrections to the numbers this entry used to carry, both re-measured
+  with an independent scanner (no k2rad code) over
+  `C:/openradioss_run` + the R14 deck-only tree + `E:/foxcore_data`, the
+  Yaris/Camry `*INCLUDE` pullers excluded by name:
+  - the old **"721 corpus decks write a non-zero cell — of 2332 scanned here"**
+    is **not reproducible**. The three roots hold **893** `.k`/`.key`/`.dyn`
+    files in total (501 + 356 + 36), and **137** of them carry a non-zero cell
+    — **all 137 in the R14 tree**, none in `C:/openradioss_run` and none in
+    `E:/foxcore_data`. The scanner is validated against two known counts
+    (`taylor1.k` → 8, the number `tests/test_side_defects_fixround.py` pins;
+    `component1.k` → 65) and against LS-DYNA's own d3hsp echo (below).
+  - the old **"278 of 721 (39 %) also carry a rigid body or a prescribed
+    motion"** was the argument for deferral. On the roster the real screening
+    reach is **5 426 nodes in 15 decks** for the rigid-body rule and **148
+    nodes in 11 decks** (same node *and* same DOF in 3) for the
+    prescribed-motion rule.
 
-  **Ship it behind an opt-in `--node-tc-rc-to-bcs` (default off)**, the way
-  `--ams`, `--tet10-to-tet4`, `--deformable-contact-recipe` and `--auto-gapmin`
-  are opt-in, so the 721 decks get a route to a correct model without changing
-  the default for everyone; then run the campaign and consider flipping it.
-  Validate with a with/without twin on a deck that carries both TC/RC and a
-  prescribed motion on the same node, and a second on a rigid-body node.
-  Measured consequence of the current state, so the campaign has a target: a
-  spring-mass coupon whose anchor carried `tc=7 rc=7` drifted 6.68 mm against
-  an intended 0.317 mm amplitude, under NORMAL TERMINATION.
+  **Why default ON.** 137 of the 356 R14 reference decks carry a non-zero cell
+  and **119 of them have no `*BOUNDARY_SPC` at all** — the card's own cells are
+  their only support — and those decks sit under **44 of the 69 IE-collapse
+  decks and 27 of the 42 implicit-ERROR decks**. It is LS-DYNA's standard,
+  always-active semantics, and the decode is not assumed: it reproduces
+  LS-DYNA's own `nodal spc summary on *NODE cards` d3hsp echo on **162 139
+  nodes across 155 R14 decks with zero translation-code disagreements**. Two
+  decks measured against their own `glstat`:
+  `intro-by-j.-day/misc/component-i/component1.k` went from NORMAL-but-junk
+  (IE 2 224 vs 2 740 230, KE 2.799e8 vs 36 222) to **IE +1.5 % / KE +1.0 %**,
+  and `introduction/Introduction/example-03/ex_03_solid_elform_1_4x6x4_mesh.k`
+  from a TIMESTEP-LIMIT death at `t = 0.22` to **NORMAL TERMINATION at
+  `t = 1.0`**.
+
+  The screening is measured rule by rule and every screened node is named in
+  the conversion log — see the CHANGELOG entry and
+  `writer/loads._make_node_tc_rc_bcs`. `tools/` needed no arm: `modal_solve`
+  builds its mass matrix on the DOFs of the stiffness matrix the ENGINE
+  exported from the CONVERTED `.rad`, so the modal chain inherits the
+  constraint through the deck.
+
+  **Still open, and named rather than assumed** (next round's item, not this
+  one): `writer/loads._make_bcs` still RE-POINTS a `*BOUNDARY_SPC` on a
+  rigid-body member node to the body's independent node, which is what neither
+  solver does — LS-DYNA skips such an SPC (p.35-3 Remark 1; d3hsp Warning
+  60257) and OpenRadioss makes it inert (`rgbodv.F:150-155`, measured: the
+  re-pointed arm holds a rigid block that the other two arms let fall at the
+  analytic rate). Aligning that path with the TC/RC rule (a) would move every
+  deck with an SPC on a rigid node, so it needs its own sweep and census. Until
+  it does, two contradictory rigid-node rules live in one writer.
 - **`*INITIAL_STRESS_SHELL` records at MIXED `nb_integr` in one deck**
   *(remaining, an OpenRadioss limitation rather than a conversion loss)* —
   `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common

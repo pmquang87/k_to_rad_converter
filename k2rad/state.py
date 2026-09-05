@@ -6884,6 +6884,27 @@ class ConvertOptions:
     # default is Radioss's own documented behaviour, contradicting nothing.
     # Set False (--no-zero-t0-sentinel) to write the deck's own 0.0.
     zero_t0_sentinel: bool = True
+    # *NODE's own TC/RC constraint cells (Vol I R17 p.35-2/35-3, card 1
+    # NID X Y Z TC RC) become one /GRNOD/NODE + /BCS per distinct (TC, RC)
+    # pair. ON by default. LS-DYNA applies them unconditionally — its d3hsp
+    # prints a dedicated "nodal spc summary on *NODE cards" echo, and this
+    # decode reproduces that echo on 162 139 nodes across 155 R14 decks with
+    # ZERO translation-code disagreements. Without the conversion those DOFs
+    # are FREE in the emitted model at 0 warnings and 0 starter errors: on the
+    # 356-deck dynaexamples R14 campaign 137 decks carry a non-zero cell and
+    # 119 of them have no *BOUNDARY_SPC at all, so the card's own cells are
+    # their only support; the dropped supports sit under 44 of the 69
+    # IE-collapse decks and 27 of the 42 implicit-ERROR decks. Two decks
+    # measured against their own LS-DYNA glstat: component1 goes from
+    # IE -99.92 % / KE +772630 % to IE +1.5 % / KE +1.0 %, and
+    # ex_03_solid_elform_1_4x6x4_mesh from a TIMESTEP-LIMIT death at t = 0.22
+    # to NORMAL TERMINATION at t = 1.0. Screened per rule (rigid-body member
+    # nodes dropped, DOFs a *BOUNDARY_PRESCRIBED_MOTION already drives left to
+    # it, DOFs a *BOUNDARY_SPC already states merged rather than restated) and
+    # every screen is counted in the per-deck message.
+    # Set False (--no-node-tc-rc-bcs) to keep the pre-2026-09 behaviour, in
+    # which those degrees of freedom are FREE.
+    node_tc_rc_bcs: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7147,13 +7168,23 @@ class ConversionState:
 
     # ── Mesh ───────────────────────────────────────────────────
     nodes: Dict[int, NodeData] = field(default_factory=dict)
-    #: Node ids whose ``*NODE`` card states a constraint in its TC or RC cell
-    #: (Vol I R17: ``NID X Y Z TC RC``). k2rad does not convert them — see
-    #: ``writer/assembly._warn_node_tc_rc``. Kept as ids so the message can
-    #: NAME a few of them; capped, because a third of the corpus writes them
-    #: and one deck states 14 402.
-    node_tc_rc: List[int] = field(default_factory=list)
-    node_tc_rc_count: int = 0
+    #: ``node id -> (TC, RC)`` for every ``*NODE`` card that states a
+    #: constraint in its own TC or RC cell (Vol I R17: ``NID X Y Z TC RC``;
+    #: codes 0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz, in the GLOBAL
+    #: system). ``writer/loads._make_node_tc_rc_bcs`` turns them into
+    #: ``/GRNOD/NODE`` + ``/BCS`` (one pair per distinct code pair) unless
+    #: ``options.node_tc_rc_bcs`` is off. The whole map is kept — not a capped
+    #: sample — because the codes ARE the conversion now, not a statistic: one
+    #: R14 deck states 14 402 of them and every one has to reach the writer.
+    node_tc_rc: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    #: ``node id -> (Tra, Rot)`` digit strings for every ``/BCS`` the TC/RC
+    #: pass actually emitted, i.e. AFTER its screens. Read by the implicit
+    #: free-node guard (``_make_free_node_constraints``), which drops from its
+    #: own ``111 111`` group any node this pass has already pinned in all six
+    #: DOFs — two ``/BCS`` on one node are a starter ``WARNING 312``
+    #: (INCOMPATIBLE KINEMATIC CONDITIONS, measured on a two-``/BCS`` coupon),
+    #: and the guard runs far enough after this pass to see the finished map.
+    node_tc_rc_emitted: Dict[int, Tuple[str, str]] = field(default_factory=dict)
     shell_elems: List[ShellElem] = field(default_factory=list)
     solid_elems: List[SolidElem] = field(default_factory=list)
     # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not
@@ -7827,6 +7858,20 @@ class ConversionState:
     # DOF, missing /RBODY, empty box intersection) contributes no node.
     imp_motion_nodes: Set[int] = field(default_factory=set)
     imp_motion_rot: bool = False
+    #: ``node id -> {Dir letters}`` for every /IMPVEL | /IMPDISP | /IMPACC
+    #: written in the GLOBAL system (skew_ID 0). The letters are the card's own
+    #: ``Dir`` spelling: ``X``/``Y``/``Z`` translations, ``XX``/``YY``/``ZZ``
+    #: rotations. Read by the ``*NODE`` TC/RC pass, which must NOT also pin a
+    #: DOF an imposed motion drives: MEASURED on a one-brick twin, a ``/BCS``
+    #: and an ``/IMPVEL`` on the same node and DOF give starter WARNING 312
+    #: and a 99.9 %% engine energy error (EXT-WORK 13.66 against an I-ENERGY of
+    #: 1688), while the complementary split is 0.0 %% with no warning.
+    imp_motion_dirs: Dict[int, Set[str]] = field(default_factory=dict)
+    #: Nodes whose imposed motion was written in a LOCAL system (skew_ID != 0),
+    #: where the card's ``Dir`` letter is a skew axis and no global TC/RC bit
+    #: can be matched against it. Named in the TC/RC report rather than
+    #: screened, so the reader can judge the overlap.
+    imp_motion_skew_nodes: Set[int] = field(default_factory=set)
     # *ELEMENT_DISCRETE eids carrying PF=1, the deforc PRINT flag: "EQ.1: forces
     # are not printed DEFORC file" (Vol I R16 p.19-32), and p.1944 names it as
     # one of the two ways a deck narrows the deforc selection. It is an OUTPUT

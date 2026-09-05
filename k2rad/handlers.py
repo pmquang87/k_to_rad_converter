@@ -231,38 +231,61 @@ def handle_end(block: Block, state: ConversionState) -> None:
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _node_constraint_code(cell: str) -> int:
+    """One ``*NODE`` TC or RC cell as an integer code, or 0 for "none".
+
+    Vol I R17 p.35-2/35-3 gives both cells type ``I`` with exactly eight legal
+    values, 0 through 7. A cell that is blank, unparsable, or outside that
+    range is read as 0 (no constraint) — see :func:`_note_node_constraint`,
+    which reports the out-of-range case rather than guessing a mask for it.
+    """
+    if not cell:
+        return 0
+    try:
+        code = int(float(cell))
+    except ValueError:
+        return 0
+    return code if 0 <= code <= 7 else -1
+
+
 def _note_node_constraint(state: ConversionState, nid: int, tc: str,
                           rc: str) -> None:
     """Record a ``*NODE`` card that states a constraint in TC or RC.
 
     Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``, and TC/RC are
     constraint CODES (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
-    GLOBAL system. k2rad reads only NID/X/Y/Z, so a deck that states its
-    constraints there converts into a model with those degrees of freedom
-    FREE — at 0 conversion warnings and 0 starter errors. Measured on a
-    spring-mass coupon: the anchor node carried tc=7/rc=7, no /BCS was
-    emitted, and the whole oscillator drifted at the centre-of-mass velocity
-    (6.68 mm against an intended 0.317 mm amplitude) while the run reported
-    NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero cell here.
+    GLOBAL system — the same triples ``*BOUNDARY_SPC`` states one flag at a
+    time, with no CID, no id and no birth/death, so they are unconditionally
+    active for the whole run.
 
-    Only the LOSS is recorded; ``writer/assembly._warn_node_tc_rc`` names it
-    once per deck and carries the full reasoning for why the conversion is
-    deferred rather than done here.
+    LS-DYNA APPLIES them, and that is measured rather than assumed: its d3hsp
+    carries a dedicated ``nodal spc summary on *NODE cards`` echo, and this
+    decode reproduces it on **162 139 nodes across 155 R14 decks with zero
+    translation-code disagreements**. (LS-DYNA drops the ROTATIONAL half on a
+    mesh with no rotational DOF — 71 885 nodes in 22 solid/ALE decks are not
+    echoed — which ``bcs10.F:36``'s ``IRODDL`` guard makes inert on the
+    Radioss side too.)
+
+    ``writer/loads._make_node_tc_rc_bcs`` turns the map into ``/GRNOD/NODE`` +
+    ``/BCS``, screens it, and announces both the conversion and every screen
+    once per deck. Codes are stored verbatim; nothing is decided here.
     """
-    for cell in (tc, rc):
-        if not cell:
-            continue
-        try:
-            if int(float(cell)) == 0:
-                continue
-        except ValueError:
-            continue
-        state.node_tc_rc_count += 1
-        # Five, matching what _warn_node_tc_rc prints — collecting ten left
-        # half the list dead.
-        if len(state.node_tc_rc) < 5:
-            state.node_tc_rc.append(nid)
-        return
+    tc_code = _node_constraint_code(tc)
+    rc_code = _node_constraint_code(rc)
+    if tc_code < 0 or rc_code < 0:
+        # Out of Vol I's 0-7 range. Named, not guessed: there is no mask for
+        # an eighth code, and silently clamping one would pin DOFs the deck
+        # never asked for. MEASURED: zero such cells in either corpus root.
+        state.warn(
+            f"*NODE {nid}: the card's TC/RC cells read {tc.strip()!r}/"
+            f"{rc.strip()!r}, and Vol I R17 p.35-2 gives both exactly eight "
+            "legal values (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz). "
+            "The out-of-range cell is read as 0 (no constraint) — no /BCS "
+            "mask is invented for it. Check the card's column layout.")
+        tc_code = max(tc_code, 0)
+        rc_code = max(rc_code, 0)
+    if tc_code or rc_code:
+        state.node_tc_rc[nid] = (tc_code, rc_code)
 
 
 def _free_node_id(tok: str) -> bool:

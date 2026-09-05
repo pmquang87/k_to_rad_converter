@@ -192,6 +192,7 @@ def convert(
     zero_density_floor: bool = True,
     law106_shell_restate: bool = True,
     zero_t0_sentinel: bool = True,
+    node_tc_rc_bcs: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -349,6 +350,34 @@ def convert(
         initial temperature keeps ``0.0`` - there the 300 K default is
         Radioss's own documented behaviour and contradicts nothing. Set False
         (CLI ``--no-zero-t0-sentinel``) to write the deck's own ``0.0``.
+    node_tc_rc_bcs : bool
+        Convert ``*NODE`` card 1's own ``TC``/``RC`` constraint cells into
+        ``/GRNOD/NODE`` + ``/BCS`` — one pair per distinct ``(TC, RC)`` code.
+        **On by default.** Vol I R17 p.35-2/35-3 makes card 1
+        ``NID X Y Z TC RC`` with the codes ``0`` none, ``1`` x, ``2`` y,
+        ``3`` z, ``4`` xy, ``5`` yz, ``6`` zx, ``7`` xyz in the GLOBAL system,
+        carrying no CID, no id and no birth/death — they are unconditionally
+        active for the whole run. LS-DYNA applies them, measured rather than
+        assumed: this decode reproduces its own ``nodal spc summary on *NODE
+        cards`` d3hsp echo on 162 139 nodes across 155 R14 reference decks
+        with zero translation-code disagreements. Dropping them leaves those
+        degrees of freedom FREE at 0 conversion warnings and 0 starter errors;
+        on the 356-deck dynaexamples R14 campaign **137 decks carry a non-zero
+        cell and 119 of them have no ``*BOUNDARY_SPC`` at all**, and those
+        decks sit under 44 of the 69 IE-collapse and 27 of the 42
+        implicit-ERROR rows. Two measured against their own LS-DYNA
+        ``glstat``: ``component1`` moves from IE −99.92 % / KE +772630 % to
+        IE +1.5 % / KE +1.0 %, and ``ex_03_solid_elform_1_4x6x4_mesh`` from a
+        TIMESTEP-LIMIT death at ``t = 0.22`` to NORMAL TERMINATION at
+        ``t = 1.0``. Screened rule by rule, each screen counted in the log:
+        rigid-body member nodes are DROPPED (Vol I p.35-3 Remark 1; LS-DYNA's
+        own ``Warning 60257 skipping spc on rigid body node``; inert in
+        OpenRadioss anyway per ``rgbodv.F:150-155``), a DOF a
+        ``*BOUNDARY_PRESCRIBED_MOTION`` already drives is left to it (a
+        ``/BCS`` on the same DOF measures starter WARNING 312 and a 99.9 %
+        engine energy error), and a DOF a ``*BOUNDARY_SPC`` already states is
+        merged rather than restated. Set False (CLI ``--no-node-tc-rc-bcs``)
+        to keep the pre-2026-09 behaviour, in which those DOFs are free.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -470,6 +499,7 @@ def convert(
         zero_density_floor=zero_density_floor,
         law106_shell_restate=law106_shell_restate,
         zero_t0_sentinel=zero_t0_sentinel,
+        node_tc_rc_bcs=node_tc_rc_bcs,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,

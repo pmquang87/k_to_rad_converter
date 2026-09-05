@@ -2502,6 +2502,29 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
+`*NODE` card 1's own `TC`/`RC` cells → one `/GRNOD/NODE` + `/BCS` per distinct
+`(TC, RC)` pair, **on by default** (`--no-node-tc-rc-bcs` /
+`convert(node_tc_rc_bcs=False)` restores the old drop). Vol I R17 p.35-2 makes
+card 1 `NID X Y Z TC RC` with the codes `0` none, `1` x, `2` y, `3` z, `4` xy,
+`5` yz, `6` zx, `7` xyz in the **global** system, carrying no CID, no id and no
+birth/death — always active. The decode reproduces LS-DYNA's own
+`nodal spc summary on *NODE cards` d3hsp echo on **162 139 nodes across 155 R14
+reference decks with zero translation-code disagreements**. Screened rule by
+rule, each screen counted and its nodes named in the conversion log: a
+rigid-body member node is **dropped** (p.35-3 Remark 1, and LS-DYNA's own
+`Warning 60257 skipping spc on rigid body node`; a `/BCS` there is inert anyway
+— `rgbodv.F:150-155` runs after `BCS10`), a DOF a
+`*BOUNDARY_PRESCRIBED_MOTION` already drives is **left to it** (measured: the
+same DOF pinned twice gives starter `WARNING 312` and a 99.9 % engine energy
+error), a DOF a `*BOUNDARY_SPC` already states is **merged, not restated**
+(`hm_read_bcs.F:198` unions the codes), and a rotational code on a mesh with no
+rotational DOF is **emitted and named inert** (`bcs10.F:66`'s `IRODDL` guard;
+LS-DYNA drops it too). Measured on the 356-deck dynaexamples R14 campaign: 137
+decks carry a non-zero cell, 119 of them have no `*BOUNDARY_SPC` at all, and
+two run against their own LS-DYNA `glstat` move from IE −99.92 % / KE
++772630 % to IE +1.5 % / KE +1.0 % (`component1`) and from a TIMESTEP-LIMIT
+death at `t = 0.22` to NORMAL TERMINATION at `t = 1.0`
+(`ex_03_solid_elform_1_4x6x4_mesh`)
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)

@@ -263,6 +263,32 @@ def build_parser() -> argparse.ArgumentParser:
              "0.0.",
     )
     parser.add_argument(
+        "--node-tc-rc-bcs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *NODE card 1's own TC/RC constraint cells (Vol I R17 "
+             "p.35-2: NID X Y Z TC RC, codes 0 none, 1 x, 2 y, 3 z, 4 xy, "
+             "5 yz, 6 zx, 7 xyz, in the GLOBAL system) into one /GRNOD/NODE + "
+             "/BCS per distinct (TC, RC) pair. ON by default: LS-DYNA applies "
+             "those cells unconditionally, and this decode reproduces its own "
+             "d3hsp 'nodal spc summary on *NODE cards' echo on 162139 nodes "
+             "across 155 R14 reference decks with zero translation-code "
+             "disagreements. Without it the DOFs are FREE at 0 warnings and 0 "
+             "starter errors: on the 356-deck dynaexamples R14 campaign 137 "
+             "decks carry a non-zero cell and 119 of them have no "
+             "*BOUNDARY_SPC at all. MEASURED against their own LS-DYNA "
+             "glstat: component1 IE -99.92 %% / KE +772630 %% becomes IE "
+             "+1.5 %% / KE +1.0 %%, and ex_03_solid_elform_1_4x6x4_mesh goes "
+             "from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL TERMINATION "
+             "at t = 1.0. Screened per rule and every screen counted in the "
+             "log: rigid-body member nodes DROPPED (Vol I p.35-3 Remark 1; "
+             "inert anyway, rgbodv.F:150-155), DOFs a "
+             "*BOUNDARY_PRESCRIBED_MOTION drives left to it (a /BCS on the "
+             "same DOF measures a 99.9 %% engine energy error), DOFs a "
+             "*BOUNDARY_SPC already states merged rather than restated. Use "
+             "--no-node-tc-rc-bcs to keep those DOFs free.",
+    )
+    parser.add_argument(
         "--law106-shell-restate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -485,6 +511,7 @@ def main(argv=None) -> int:
         zero_density_floor=args.zero_density_floor,
         law106_shell_restate=args.law106_shell_restate,
         zero_t0_sentinel=args.zero_t0_sentinel,
+        node_tc_rc_bcs=args.node_tc_rc_bcs,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

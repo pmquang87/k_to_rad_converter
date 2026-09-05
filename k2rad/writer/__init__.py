@@ -222,6 +222,7 @@ from .rbe3 import (
 from .loads import (
     _make_rlinks,
     _make_bcs,
+    _make_node_tc_rc_bcs,
     _FORCE_DOF_AXIS,
     _emit_spr_gene_dof,
     _emit_spr_gene_dof_kc,
@@ -619,6 +620,7 @@ __all__ = [
     "I_MODIF_NO_MODIFICATION",
     "_make_rlinks",
     "_make_bcs",
+    "_make_node_tc_rc_bcs",
     "_FORCE_DOF_AXIS",
     "_emit_spr_gene_dof",
     "_emit_spr_gene_dof_kc",
