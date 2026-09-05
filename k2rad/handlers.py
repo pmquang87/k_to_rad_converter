@@ -10080,6 +10080,19 @@ def _mat004_live_points(t: List[float]) -> int:
     (−1000, 0, 1000, 0, …) → 3, ``thermal-stress`` (0 … 50, 0, 0) → 6,
     ``main_steel_frame``/``ex_24`` (0, 400|1000, 0, …) → 2, the four welding
     decks (273, 493, 1273, 10000, 0, …) → 4.
+
+    **The cfg reads it differently, and this rule is deliberately not that
+    reading.** ``Keyword971/MAT/mat_004.cfg:176-207`` counts with a
+    ``CARD_PREREAD``/``ArrayCount`` ladder whose tests are ``LOCAL_Tn != ""``,
+    i.e. the last NON-BLANK column — a purely textual test. Every corpus
+    carrier pads its unused slots with an explicit ``0.0`` rather than leaving
+    them blank (``tempcyl.vari``'s ``T`` row is
+    ``-1000.0  0.0  1000.0  0.0  0.0  0.0  0.0  0.0``), so that ladder would
+    return **8** where this rule returns 3, and ``/FUNCT`` would get a
+    non-monotonic table with five spurious points at ``T = 0``. The cfg is a
+    HyperMesh import descriptor, not solver semantics (#115); the
+    increasing-prefix reading is what separates padding from a stated point,
+    and it can only ever DROP a slot.
     """
     n = 1
     while n < len(t) and t[n] > t[n - 1]:
@@ -10092,7 +10105,9 @@ def handle_mat_elastic_plastic_thermal(block: Block,
     """*MAT_ELASTIC_PLASTIC_THERMAL (*MAT_004) → /MAT/LAW106 +
     /THERM_STRESS/MAT.
 
-    Cards (Vol II R17 pp.2-177..2-179; Keyword971_R14.1/MAT/mat_004.cfg):
+    Cards (Vol II R17 pp.2-177..2-179; ``Keyword971/MAT/mat_004.cfg``
+    resolved through the cfg overlay — the ``Keyword971_R14.1/MAT`` dir
+    holds only ``M054_55.cfg``):
       Card1: MID RO
       Cards 2-7: T1..T8 / E1..E8 / PR1..PR8 / ALPHA1..ALPHA8 / SIGY1..SIGY8 /
                  ETAN1..ETAN8
@@ -10138,7 +10153,7 @@ def handle_mat_cwm(block: Block, state: ConversionState) -> None:
     """*MAT_CWM (*MAT_270) → /MAT/LAW106 + /THERM_STRESS/MAT.
 
     Cards (Vol II R17 pp.2-1835..2-1840;
-    Keyword971_R14.1/MAT/mat_270.cfg):
+    ``Keyword971_R7.1/MAT/mat_270.cfg``, the newest dir that holds it):
       Card1: MID RO LCEM LCPR LCSY LCHR LCAT BETA
       Card2: TASTART TAEND TLSTART TLEND EGHOST PGHOST AGHOST EPSINI
       Card3 (optional): T2PHASE T1PHASE ANOPT POSTV DTEMP DOSPOT
@@ -10246,7 +10261,7 @@ def handle_mat_elastic_plastic_hydro(block: Block,
     /EOS.
 
     Cards (Vol II R17 pp.2-191..2-195;
-    Keyword971_R14.1/MAT/mat_010.cfg):
+    ``Keyword971/MAT/mat_010.cfg``, the newest dir that holds it):
       Card1: MID RO G SIG0 EH PC FS CHARL
       Card1a (``_SPALL`` option ONLY): A1 A2 SPALL
       Cards 2-3: EPS1..EPS16
@@ -16391,11 +16406,19 @@ def _card_abscissa(v: float) -> float:
 def _strictly_increasing(pts):
     """Force a point list to grow strictly AS PRINTED (see _card_abscissa).
 
-    Mirrors ``writer/loads._monotonic_abscissae``; kept here because the smooth
-    curve is built at PARSE time and stored in ``state.curves``, which
-    ``materials._make_functions`` emits without that guard. Points already
-    strictly increasing are returned unchanged, so a well-formed curve is
-    byte-identical either way.
+    The TIE-ONLY half of ``writer/loads._monotonic_abscissae``, DELIBERATELY
+    kept separate rather than routed through it. That function grew a REVERSAL
+    arm — a stated ``x[k] < x[k-1]`` is re-anchored onto the segment LS-DYNA's
+    own ``LCINT`` rediscretization jumps to — and that rule was derived from a
+    user-typed reversed pair in a real deck. A ``*DEFINE_CURVE_SMOOTH``
+    trapezoid is SYNTHESIZED here from TSTART/TRISE/TEND, so a crossing means
+    the four vertices were computed in a degenerate order, not that the deck
+    stated a reversal; re-anchoring one would move a vertex the deck never
+    typed. The tie repair (nudge the abscissa, keep the ordinate) is the right
+    answer for that, and it runs at PARSE time because the smooth curve is
+    stored straight into ``state.curves``. Points already strictly increasing
+    are returned unchanged, so a well-formed curve is byte-identical either
+    way.
     """
     out = []
     for a, o in pts:

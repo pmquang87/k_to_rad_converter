@@ -75,7 +75,7 @@ def _emit_prop_truss(sec: SectionBeam) -> List[str]:
 
     ``radioss110/PROP/prop_p2_trus.cfg``, newest FORMAT <= 2022 is
     ``FORMAT(radioss51)``: a title card then ``%20lg%20lg`` = AREA, GAP.
-    ``hm_read_prop02.F:110-112`` reads exactly those two into ``GEO(1)`` and
+    ``hm_read_prop02.F:92-94`` reads exactly those two into ``GEO(1)`` and
     ``GEO(2) = MAX(ZERO,GAP)``; ``initia.F:3650-3652`` is literally
     ``IF(IGTYP==2)THEN`` / ``C---------- truss, nothing``, so there is no
     ``Ismstr``, no ``dm/df``, no ``Ishear`` and no ``OmegaDof`` on this
@@ -83,8 +83,9 @@ def _emit_prop_truss(sec: SectionBeam) -> List[str]:
 
     **GAP is written as 0, always.** It is not a tolerance: a non-zero
     ``GEO(2)`` turns the truss into a COMPRESSION-ONLY gap element —
-    ``tforc3.F:184-186`` ``IF (GEO(2,PID(I))>ZERO .AND. GBUF%OFF(I)>ZERO)
-    OFF(I)=ZERO`` and :203-206 re-arms the element only once the gap has
+    ``tforc3.F:137-141`` ``IF (GEO(2,PID(I))>ZERO .AND. GBUF%OFF(I)>ZERO)
+    OFF(I)=ZERO`` (the statement is :140) and :186-190 re-arms the element
+    only once the gap has
     closed. Nothing on ``*SECTION_BEAM`` ELFORM 3 maps to it. (The cfg's
     ``CHECK { GAP > 0.0; }`` contradicts its own ``DEFAULTS { GAP = 0; }``; the
     starter is the authority and clamps a zero or negative gap silently — the
@@ -128,7 +129,7 @@ def _truss_section_is_emittable(state: ConversionState,
     state.warn(
         f"*SECTION_BEAM {sec.secid}: ELFORM=3 is a TRUSS, but the section "
         f"states no positive cross-section AREA (A={sec.area:g}), so its "
-        "/PROP/TYPE2 is NOT emitted — hm_read_prop02.F:117-124 raises ERROR "
+        "/PROP/TYPE2 is NOT emitted — hm_read_prop02.F:102-108 raises ERROR "
         "497 'TRUSS AREA IS <= 0.0' on it and the deck would not start. The "
         "usual cause is card 2b, the NAMED standard-section dialect "
         "('SECTION_01'...'STYPE D1..D6'), which states the geometry as "
@@ -282,7 +283,7 @@ _TRUSS_LAWS = frozenset({0, 1, 2, 13, 34, 44})
 
 # LAW0 (void) and LAW13 (rigid) are on the list and carry NO force by design;
 # every other law that reaches the engine's truss dispatch must be one of
-# LAW1/2/34/44, because tforc3.F:189-224 is a closed IF/ELSEIF chain with NO
+# LAW1/2/34/44, because tforc3.F:149-185 is a closed IF/ELSEIF chain with NO
 # default arm — an MTN outside it never writes GBUF%FOR and the truss carries
 # exactly zero force at zero diagnostics. The starter gate above is the only
 # thing between a deck and that outcome, which is why the warning below fires
@@ -328,7 +329,7 @@ def _warn_truss_material(state: ConversionState,
             + f" carry mid {mid}, which converts to /MAT/LAW{law} — a law the "
             "starter DOES accept on a /TRUSS "
             "(INIT_MAT_KEYWORD(...,'TRUSS')) but whose engine arm carries NO "
-            "FORCE by design (tforc3.F:189-224 dispatches only MTN 1, 2, 34 "
+            "FORCE by design (tforc3.F:149-185 dispatches only MTN 1, 2, 34 "
             "and 44; LAW0 is void and LAW13 is rigid). The elements exist, "
             "have mass and a time step, and transmit nothing.")
     if not groups:

@@ -194,6 +194,31 @@ class ThermalOnlyStandinTests(unittest.TestCase):
         self.assertNotIn("reference a material id that NO /MAT card",
                          " ".join(res.warnings))
 
+    def test_the_standin_id_dodges_a_user_material_on_the_same_id(self):
+        """#131: a collision probe must target the id the allocator would
+        ACTUALLY take, not the auto-id base.
+
+        Pass 1 learns which id ``next_mat_id()`` reaches on this deck; pass 2
+        puts a user ``*MAT_ELASTIC`` on exactly that id and asserts the
+        stand-in steps past it with no duplicate ``/MAT`` header. Asserting
+        only ``mid >= 90001`` would pass whether or not the allocator's
+        ``all_mat_ids()`` loop is there at all.
+        """
+        _r1, starter1 = _convert(_thermal_only_deck())
+        taken = _mat_id(starter1, "ELAST")
+        deck2 = _thermal_only_deck(
+            extra="*MAT_ELASTIC\n"
+                  + _row(taken, "7.85E-09", 210000.0, 0.3) + "\n")
+        _r2, starter2 = _convert(deck2)
+        heads = [ln for ln in starter2.splitlines()
+                 if ln.startswith("/MAT/") and not ln.startswith("/MAT/LAW")]
+        self.assertEqual(len(heads), len(set(heads)), heads)
+        ids = sorted(int(h.rsplit("/", 1)[1]) for h in heads
+                     if h.startswith("/MAT/ELAST/"))
+        self.assertIn(taken, ids)            # the user material kept its id
+        self.assertEqual(len(ids), 2, heads)  # and the stand-in moved past it
+        self.assertGreater(max(ids), taken)
+
     def test_standin_values_are_the_stated_tro_and_the_named_constants(self):
         """rho = the *MAT_THERMAL_* TRO verbatim; E = 1; nu = 0.3."""
         _res, starter = _convert(_thermal_only_deck(tro="2.5E-09"))
@@ -2267,17 +2292,32 @@ class CurveAbscissaReversal(unittest.TestCase):
         self.assertEqual(len([w for w in res.warnings
                               if w.startswith("*DEFINE_CURVE 50")]), 2)
 
-    def test_a_tie_keeps_its_ordinate_and_says_nothing(self):
-        """The original #113 case, and it must NOT move: two points at one
-        abscissa are not a reversal — the curve was never ambiguous about its
-        value there — so the ordinate is kept and the abscissa stepped."""
+    def test_a_tie_keeps_its_ordinate_and_is_now_named(self):
+        """The original #113 REPAIR must not move: two points at one abscissa
+        are not a reversal — the curve was never ambiguous about its value
+        there — so the ordinate is kept and the abscissa stepped.
+
+        What DID move is the silence. Moving the #113 guard onto the main
+        /FUNCT emitter put it in front of every *DEFINE_CURVE in every deck,
+        and on a curve the DECK typed a duplicate abscissa is a STATEMENT: the
+        common stepped shape (0,0),(1,0),(1,100),(2,100) means "jump at x = 1"
+        and the repair turns it into a ramp across the nudge. Master emitted
+        the duplicate and let the starter refuse it with ERROR 156, which at
+        least said something, so the repair must not be the quieter of the two.
+        The synthesized builders (which pass no `state`) stay silent — there
+        the tie is their own rounding.
+        """
         res, starter = _convert(_curve_deck(
             [(0.0, 0.0), (1.0, 10.0), (1.0, 20.0), (2.0, 30.0)]))
         pts = _funct_points(starter, 50)
         self.assertEqual([y for _x, y in pts], [0.0, 10.0, 20.0, 30.0])
         self.assertGreater(pts[2][0], pts[1][0])
-        self.assertEqual([w for w in res.warnings
-                          if w.startswith("*DEFINE_CURVE 50")], [])
+        w = [x for x in res.warnings if x.startswith("*DEFINE_CURVE 50")]
+        self.assertEqual(len(w), 1, res.warnings)
+        for fact in ("two points share the abscissa x = 1",
+                     "hm_read_funct.F:143", "ERROR 156",
+                     "KEEPS", "meant as a STEP"):
+            self.assertIn(fact, w[0])
 
     def test_a_well_formed_curve_is_untouched(self):
         pts_in = [(0.0, 0.0), (1.0, 10.0), (2.0, 5.0), (3.0, -7.5)]

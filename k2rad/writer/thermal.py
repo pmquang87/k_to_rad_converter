@@ -1088,6 +1088,22 @@ def _resolve_thermal(state: ConversionState) -> None:
         _resolve_heat_materials(state)
         _resolve_drivers(state)
         _resolve_thermal_boundaries(state)
+    elif state.ctrl_solution_soln == 1:
+        # A SOLN=1 deck whose ONLY thermal content is an UNCONVERTED
+        # *MAT_THERMAL_* — *MAT_THERMAL_CWM has no counterpart at all, so it
+        # lands in none of the dicts the gate lists — and which states no
+        # *INITIAL_TEMPERATURE, no *LOAD_THERMAL_*, no thermal boundary and no
+        # *MAT_ADD_THERMAL_EXPANSION never enters the block above. Its parts
+        # would then get NO stand-in AND no message, and the deck's ERROR 179 +
+        # ERROR 3046 would go out with nothing said: _warn_dangling_part_materials
+        # deliberately treats mat_ID 0 as the connector convention. The
+        # stand-in pass is what names it, so it runs here too. It can only
+        # WARN on this branch — with no converted thermal material,
+        # _thermal_material_for_part answers None for every part and no
+        # /MAT/ELAST is synthesized. No corpus deck is this shape (both
+        # *MAT_THERMAL_CWM carriers reach the gate through their other thermal
+        # cards), so nothing moves.
+        _resolve_thermal_standins(state)
     # Outside the gate: both read what was DECIDED above, and both have
     # something to say about a deck that states a *CONTROL_* card and no
     # thermal content at all.

@@ -741,7 +741,7 @@ def _make_preload_axial(state: ConversionState,
                 beam_eids.append(eid)
             elif eid in state.truss_elem_ids:
                 # /PRELOAD/AXIAL takes a TRUSS group too: the reader's scan is
-                # /GRSPRI, then /GRBEAM, then /GRTRUSS
+                # /GRSPRI, then /GRBEAM, then /GRTRUS
                 # (hm_read_preload_axial.F90:284-291, which sets itype = 4 on
                 # the truss branch). A truss id in a /GRBEAM group resolves to
                 # nothing.
@@ -822,7 +822,7 @@ def _make_preload_axial(state: ConversionState,
                 + f" — so it was split into {len(present)} /PRELOAD/AXIAL "
                 "cards on that many groups. One set_id resolves to exactly "
                 "ONE family: hm_read_preload_axial.F90:262-292 scans /GRSPRI, "
-                "then /GRBEAM, then /GRTRUSS and takes the FIRST non-empty "
+                "then /GRBEAM, then /GRTRUS and takes the FIRST non-empty "
                 "match, so a single card would have preloaded whichever comes "
                 "first in that order and silently dropped the rest.")
         state.warn(

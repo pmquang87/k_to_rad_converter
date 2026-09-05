@@ -9120,7 +9120,7 @@ def _resolve_mat_law106(state: ConversionState) -> None:
     are frozen at the reference temperature. Fitting ``m`` to the welding
     decks' 273→493 pair (435→100 MPa) predicts 63.2 MPa at 1273 K against a
     stated 20 — 3.2x wrong — so nothing is fitted (#124). ``Tmelt`` is left
-    BLANK, which ``hm_read_mat106.F90:150`` turns into infinity and which makes
+    BLANK, which ``hm_read_mat106.F90:151`` turns into infinity and which makes
     ``thsoft`` identically 1, so ``A`` means exactly ``sigma_y(T_ref)`` rather
     than a value the engine then knocks down.
 
@@ -9653,7 +9653,7 @@ def _law106_report(state: ConversionState, kw: str, mid: int, t_ref: float,
             "the Johnson-Cook power law 1 - ((T-Tref)/(Tmelt-Tref))^m "
             "(sigeps106.F90:306-310) and not a table: " + "; ".join(frozen)
             + f". A = {a:g} and B = {b:g} are those values AT Tr; Tmelt is "
-              "left BLANK (hm_read_mat106.F90:150 turns that into infinity) so "
+              "left BLANK (hm_read_mat106.F90:151 turns that into infinity) so "
               "the power law is identically 1 and A means exactly sigma_y(Tr) "
               "rather than a value the engine then knocks down. NOTHING IS "
               "FITTED: fitting m to the welding decks' 273 -> 493 K pair "
@@ -9861,7 +9861,7 @@ def _resolve_mat_law3(state: ConversionState) -> None:
     **Why a derivation is needed at all.** ``*MAT_010`` states a SHEAR modulus
     and nothing else elastic — LS-DYNA takes the pressure from the ``*EOS_*``
     the ``*PART`` binds. ``/MAT/LAW3``'s card is the isotropic pair ``E, nu``,
-    and ``hm_read_mat03.F:190`` recovers ``G = E/(2(1+nu))`` from it, so ANY
+    and ``hm_read_mat03.F:189`` recovers ``G = E/(2(1+nu))`` from it, so ANY
     (E, nu) with the right ``G`` reproduces the deviatoric response exactly —
     which is what ``m3law.F:60,107-112`` uses, the pressure coming from
     ``eosmain`` (``mmain.F90:805``, ``:1971-1985``, ``sig = s − pnew``).
@@ -9932,7 +9932,7 @@ def _resolve_mat_law3(state: ConversionState) -> None:
             state.warn(
                 f"{kw} {mid}: G = {mat.g:g}. The shear modulus is the card's "
                 "only elastic cell and /MAT/LAW3 recovers it as E/(2(1+nu)) "
-                "(hm_read_mat03.F:190), so there is nothing to derive an E-nu "
+                "(hm_read_mat03.F:189), so there is nothing to derive an E-nu "
                 "pair from. The material is SKIPPED.")
             continue
         if any(v != 0.0 for v in mat.eps) or any(v != 0.0 for v in mat.es):
@@ -9958,7 +9958,14 @@ def _resolve_mat_law3(state: ConversionState) -> None:
                 "constant to build /MAT/LAW3's E-nu pair from, and inventing "
                 "a Poisson ratio would be a fabricated value. The material is "
                 "SKIPPED; its /PART reports a dangling material id, which "
-                "names the deck's real problem.")
+                "names the deck's real problem. NOTE THE BINDING RULE: this "
+                "law binds its equation of state BY MATCHING ID ONLY, unlike "
+                "the *MAT_015 -> /MAT/LAW4 route in this same file, which also "
+                "falls back to the *PART's own EOSID column. All three corpus "
+                "carriers state matching ids (taylor1: *MAT_010 2, "
+                "*EOS_GRUNEISEN 2, *PART 101 mid 2 eosid 2), so nothing has "
+                "needed the fallback yet — renumber the *EOS_* to the MID if "
+                "your deck binds it through EOSID instead.")
             continue
         bulk = _law3_bulk_from_eos(eos, mat.rho)
         if bulk is None or bulk <= 0.0:
@@ -10021,7 +10028,7 @@ def _law3_report(state: ConversionState, kw: str,
         "as sigma_y = sigma_0 + E_h*eps_p, i.e. EH is ALREADY the plastic "
         "hardening modulus and the E_t*E/(E-E_t) form on that page is the "
         "derivation FROM a tangent — applying it here would be a silent factor "
-        "error. n = 1 is written; hm_read_mat03.F:187 substitutes 1.0001 for a "
+        "error. n = 1 is written; hm_read_mat03.F:186 substitutes 1.0001 for a "
         "stated 1 (it avoids the derivative singularity of eps^1 at eps = 0), "
         f"a 0.05% effect at eps_p = 0.01. Pmin = "
         + f"{(-abs(mat.pc) if mat.pc else 0.0):g} from "
@@ -10558,6 +10565,19 @@ def _zero_density_records(state: ConversionState):
     stale and the new family is silently missed. (There are 80 such fields
     today, of which ``_material_registries`` deliberately lists only 47.)
 
+    **What the scan does NOT reach, stated rather than left to be found.** It
+    reads a density only under the five names in ``_RHO_ATTRS``. Fourteen of
+    the ``mat_*`` registries carry NO density attribute under any name — the
+    six ``*MAT_SPRING_*`` / two ``*MAT_DAMPER_*`` discrete families, the three
+    ``*MAT_THERMAL_*`` ones (whose ``TRO`` is a THERMAL density on a different
+    id namespace, read by ``writer/thermal``), ``*MAT_SEATBELT`` (which states
+    ``MPUL``, a mass per unit LENGTH, and no ``RO`` at all),
+    ``*MAT_ADD_EROSION`` and ``*MAT_ADD_FATIGUE`` (riders, not materials) — so
+    there is no density spelling to widen to on any of them, and none of the
+    keywords behind them has an ``RO`` cell in LS-DYNA either. A future family
+    that DOES carry one must spell it with one of the five names or add it
+    here.
+
     The law screen is ``mesh._target_mat_law``, the ONE mid -> law map in the
     codebase, and it is read in the SAFE direction: a material is floored
     unless its law is on ``_RHO_EXEMPT_LAWS``. ``None`` — "this map has no
@@ -10612,9 +10632,17 @@ def _apply_zero_density_floor(state: ConversionState) -> None:
     material — a clone made before this pass inherits the zero and is floored
     with its original, one made after would not be). Mutating the record rather
     than the emitted cell is the faithful model of what LS-DYNA does: its own
-    d3hsp reports the substituted density in the part MASS, so every consumer
-    downstream — the element time step, ``/HEAT/MAT``'s RHO0_CP, the modal
-    chain's lumped masses — sees the same number the source code did.
+    d3hsp reports the substituted density in the part MASS, so the consumers
+    downstream — the element time step, the modal chain's lumped masses —
+    see the same number the source code did.
+
+    **``/HEAT/MAT``'s ``RHO0_CP`` is deliberately NOT one of them**, and the
+    pass running LAST is what keeps it out: ``_resolve_heat_materials``
+    computes ``rho_cp = rho * cp_mean`` inside ``_resolve_thermal``, and its
+    own ``rho_cp <= 0`` arm warns and substitutes a named placeholder. Flooring
+    first would turn that diagnostic into a silent ``1e-24 * Cp`` that passes
+    the guard — a worse outcome than the one this pass exists to prevent. The
+    thermal capacity keeps the deck's own zero and its own message.
     """
     if not state.options.zero_density_floor:
         return

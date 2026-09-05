@@ -845,7 +845,13 @@ def _monotonic_abscissae(pts, state=None, label: str = ""):
     emits two points at one abscissa (the plastic->total mapping, the cable's
     zero-crossing insertion) or a nudge that the ten-digit field ate. The
     abscissa is stepped forward until the CARD value grows and the ordinate is
-    kept — the curve was never ambiguous about its value there.
+    kept — the curve was never ambiguous about its value there. A caller that
+    passes a ``state`` and a ``label`` — today only the ``*DEFINE_CURVE``
+    emitter, i.e. curves the DECK typed — also gets a warning for it, because
+    on a user curve a duplicate abscissa is a STATEMENT: the common stepped
+    shape ``(0,0),(1,0),(1,100),(2,100)`` means "jump at x = 1" and the repair
+    turns it into a ramp across the nudge. The synthesized builders pass
+    neither and stay silent, where the tie is their own rounding.
 
     **A REVERSAL** (``_card_value(x) < prev``) is a deck defect, and copying the
     ordinate would be wrong. LS-DYNA does not reorder such a curve either: it
@@ -862,10 +868,13 @@ def _monotonic_abscissae(pts, state=None, label: str = ""):
 
     So the reversed point is replaced by ``(prev + eps, f(prev))`` where ``f``
     is the segment from it to the NEXT point — the value LS-DYNA jumps TO. On
-    that curve f(0.1195) = -6861.1, and the three candidates differ by far more
+    that curve f(0.1195) = -6866.0 — exactly what this rule writes,
+    -9810 + 0.4*7360 — and the three candidates differ by far more
     than round-off: a plain nudge (keep the ordinate) evaluates 9801.6 at
     t = 0.119512 (+43 % against LS-DYNA's 6858.94), re-SORTING by abscissa gives
-    4907 (-28 %), this rule gives 6861.1 (+0.03 %). When there is no next point
+    4907 (-28 %), this rule gives 6860.96 (+0.03 %) — the emitted curve read
+    at the nodout SAMPLE time 0.119512, not at the re-anchored abscissa
+    itself. When there is no next point
     to anchor to — the reversal is the LAST point — it is DROPPED, because
     LS-DYNA can never evaluate past ``prev`` there either.
 
@@ -921,12 +930,34 @@ def _monotonic_abscissae(pts, state=None, label: str = ""):
                         "R17 p.17-106; DATTYP = 1 is the escape for "
                         "non-monotone data), so this pair is a deck defect — "
                         "check it.")
+            tied = _card_value(x) == prev
             step = max(abs(prev), 1.0) * 1.0e-8
             for _ in range(64):
                 if _card_value(x) > prev:
                     break
                 x = prev + step
                 step *= 2.0
+            if tied and state is not None:
+                # A tie on a SYNTHESIZED curve is the builder's own rounding
+                # and says nothing to the reader; a tie on a curve the DECK
+                # typed is a statement — the common stepped shape
+                # (0,0),(1,0),(1,100),(2,100) means "jump at x = 1", and the
+                # repair silently turns it into a steep ramp. Master emitted
+                # the duplicate and let the starter refuse it with ERROR 156,
+                # which at least said something, so the repair must not be the
+                # quieter of the two. Only the callers that pass a `label`
+                # (today: the *DEFINE_CURVE emitter) reach this.
+                state.warn(
+                    f"{label}: two points share the abscissa x = {prev:g} "
+                    f"(point {k + 1}), which Radioss refuses outright "
+                    "(hm_read_funct.F:143, ERROR 156 — it compares the CARD "
+                    "value, so the duplicate has to be broken on the printed "
+                    f"number). k2rad nudges the second to {x:.10g} and KEEPS "
+                    f"its ordinate {y:g}. If this pair was meant as a STEP — "
+                    "the (0,0),(1,0),(1,100),(2,100) shape LS-DYNA evaluates "
+                    "as a jump — it is now a ramp across that nudge, which is "
+                    "a different function at exactly one point. State the two "
+                    "abscissae a real distance apart if the width matters.")
         out.append((x, y))
     return out
 
