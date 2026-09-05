@@ -1204,9 +1204,19 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
             "there is no interface to output (no /TH/INTER emitted).")
     if not state.th_sub_ids and not want_ncforc and not want_rcforc:
         return []
-    # List the parent interface (total contact force) and each force-transducer
-    # sub-interface id — a sub-interface is written to the T01 only when its own
-    # id is requested here (listing just the parent leaves OUTPUT TO TH = 0).
+    # Every force-transducer sub-interface id, plus ONE representative
+    # interface for its total contact force.
+    #
+    # Listing the sub ids is MANDATORY, not cosmetic: hm_read_intsub.F:509-524
+    # scans the /TH/INTER lists and sets NOM_OPT(5) = 1 for a sub id it finds
+    # there; a sub-interface that is not listed is read and then silently
+    # dropped (OUTPUT TO TH = 0), so the requested channel is simply absent.
+    #
+    # The companion id used to be the transducers' PARENT interface. Since the
+    # transducers became parentless (/INTER/SUB inter_ID = 0, see
+    # contacts._make_force_transducers) it is just a representative interface,
+    # so the deck also carries an interface-level total beside the transducer
+    # channels — same id, same channel, a different reason for choosing it.
     ids: List[int] = []
     if state.th_sub_ids:
         parent_id = _select_parent_interface(state)

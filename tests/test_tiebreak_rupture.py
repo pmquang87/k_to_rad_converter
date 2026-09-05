@@ -951,18 +951,23 @@ class RegistryAudit(unittest.TestCase):
                           + _TAIL)
         self.assertEqual(deformable_deformable_inter_ids(state), [])
 
-    def test_transducer_parent_pool_excludes_the_tie(self):
-        """/INTER/SUB needs a penalty parent with segments; a /INTER/TYPE2 tie
-        is not one, which is why contacts_tied was never in the pool either.
-        The verdict is 'correctly excluded', asserted so a later refactor that
-        adds contacts_tiebreak to the pool fails here."""
+    def test_th_inter_representative_pool_excludes_the_tie(self):
+        """A /INTER/TYPE2 tie carries no contact-force channel worth reporting
+        as 'the' interface total, which is why contacts_tied was never in
+        ``_select_parent_interface``'s pool either. The verdict is 'correctly
+        excluded', asserted so a later refactor that adds contacts_tiebreak to
+        the pool fails here.
+
+        The companion assertion on ``_match_parent_interface`` went with that
+        function: the R14 triage batch made /INTER/SUB parentless
+        (``inter_ID = 0``), so nothing matches a parent any more and the only
+        surviving consumer of the pool is the /TH/INTER block."""
         from k2rad.writer import contacts as C
         import inspect
+        self.assertFalse(hasattr(C, "_match_parent_interface"))
         src = inspect.getsource(C._select_parent_interface)
         self.assertNotIn("contacts_tiebreak", src)
         self.assertNotIn("companion_inter_ids", src)
-        src2 = inspect.getsource(C._match_parent_interface)
-        self.assertNotIn("contacts_tiebreak", src2)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

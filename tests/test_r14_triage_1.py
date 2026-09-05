@@ -1929,5 +1929,172 @@ class ZeroDensityFloor(unittest.TestCase):
         self.assertAlmostEqual(f, 110.556, places=2)
         self.assertLess(abs(f - 110.4521) / 110.4521, 0.001)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B3 — *CONTACT_FORCE_TRANSDUCER -> a PARENTLESS /INTER/SUB (ERROR 580/581)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Two shell parts, a real contact between them, and a transducer on part 2.
+_FT_MESH = """*NODE
+         1             0.0             0.0             0.0
+         2             1.0             0.0             0.0
+         3             1.0             1.0             0.0
+         4             0.0             1.0             0.0
+         5             0.0             0.0             2.0
+         6             1.0             0.0             2.0
+         7             1.0             1.0             2.0
+         8             0.0             1.0             2.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+"""
+
+
+def _ft_deck(*, surfa: int = 2, surfb: int = 1, satyp: int = 3,
+             sbtyp: int = 3, contact: bool = True) -> str:
+    ctc = ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+           + _row(1, 2, 3, 3) + "\n" + _row(0.2, 0.2) + "\n") if contact else ""
+    return ("*KEYWORD\n" + _FT_MESH
+            + "*PART\na\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nb\n" + _row(2, 1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2, "", 3) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+            + ctc
+            + "*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
+            + _row(surfa, surfb, satyp, sbtyp) + "\n"
+            + "*CONTROL_TERMINATION\n" + _row(0.01) + "\n*END\n")
+
+
+def _sub_cells(starter: str, sub_id: int):
+    """(inter_ID, Main_ID1, Second_ID, Main_ID2) of one /INTER/SUB block."""
+    rows = _data_rows(starter, f"/INTER/SUB/{sub_id}")
+    assert rows is not None, f"no /INTER/SUB/{sub_id}"
+    row = rows[1]                       # rows[0] is the title card
+    return tuple(int(row[k:k + 10]) for k in range(0, 40, 10))
+
+
+def _surf_id_by_title(starter: str, title: str) -> int:
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/SURF/") and lines[i + 1].strip() == title:
+            return int(ln.rsplit("/", 1)[1])
+    raise AssertionError(f"no /SURF titled {title!r} in\n" + starter)
+
+
+class ForceTransducerInterZero(unittest.TestCase):
+    """``/INTER/SUB`` is written PARENTLESS.
+
+    ``hm_read_intsub.F:225-250``: ``IF(IDINT /= 0)`` resolves a parent, ``ELSE
+    INTSUB_TYP(I) = 100`` — and :448's own comment on that branch is
+    ``Interf 0 : adding all contacts``. Measured on the corpus: the parented
+    form gave ``plate.typ13`` 4 x ERROR 580 + ERROR 581 and ``pipe.k`` many x
+    ERROR 581; with ``inter_ID = 0`` both start at 0 ERROR and run to NORMAL
+    TERMINATION (251 and 6147 cycles). On a purpose-built shell-impact probe
+    the accumulated normal impulse is -0.01453375 at all 1000 samples for the
+    inter-0 card, for a legally parented sub-interface, and for the parent
+    interface's own channel — bit-identical to the printed precision, and
+    93.2 % of the elastic bound 2*m*v0 = 1.560e-2.
+    """
+
+    def test_the_card_is_four_cells_and_names_no_interface(self):
+        """``radioss2021/INTER/inter_sub.cfg`` (newest FORMAT <= 2022):
+        ``CARD("%10d%10d%10d%10d", InterfaceId, mainentityids,
+        secondaryentityids, Main_ID2)``. k2rad used to write three."""
+        _r, starter = _convert(_ft_deck())
+        sub = _headers(starter, "/INTER/SUB/")
+        self.assertEqual(len(sub), 1, starter)
+        sid = int(sub[0].rsplit("/", 1)[1])
+        rows = _data_rows(starter, sub[0])
+        self.assertEqual(len(rows[1].rstrip()), 40)
+        self.assertIn("Main_ID2", _block(starter, sub[0])[1])
+        inter_id, main1, second, main2 = _sub_cells(starter, sid)
+        self.assertEqual(inter_id, 0)
+        self.assertEqual(second, 0)
+        self.assertTrue(main2)
+        # Main_ID2 is the SURFA surface; Main_ID1 the stated SURFB one.
+        title = _block(starter, sub[0])[0]
+        self.assertEqual(main2, _surf_id_by_title(starter, f"{title}_main"))
+        self.assertEqual(main1, _surf_id_by_title(starter, f"{title}_main2"))
+
+    def test_no_interface_id_ever_reaches_cell_one(self):
+        """The mutation this replaces: putting the parent id back in cell 1
+        is what produced ERROR 580/581. Asserted against the ids that really
+        exist, so a re-introduced parent cannot pass by being 0 by luck."""
+        _r, starter = _convert(_ft_deck())
+        emitted = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                   if ln.startswith(("/INTER/TYPE7/", "/INTER/TYPE25/"))}
+        self.assertTrue(emitted, starter)
+        sid = int(_headers(starter, "/INTER/SUB/")[0].rsplit("/", 1)[1])
+        self.assertNotIn(_sub_cells(starter, sid)[0], emitted)
+
+    def test_no_secondary_node_group_is_emitted_any_more(self):
+        """A behaviour change worth pinning: ``Second_ID`` is not decoded on
+        the inter-0 branch (``hm_read_intsub.F:453-476`` reads Main_ID2 and
+        Main_ID1 and nothing else), so the ``<title>_secnd`` /GRNOD k2rad used
+        to build would be dead weight the starter never reads."""
+        _r, starter = _convert(_ft_deck())
+        self.assertNotIn("_secnd", starter)
+
+    def test_surfb_zero_leaves_main_id1_at_zero(self):
+        """SURFB = 0 (and SURFBTYP = 5) both mean 'everything', which is
+        exactly TYPSUB = 2's own scope — the total contact force on SURFA from
+        every interface (``i7for3.F:1583``). Emitting an all-parts surface
+        would say the same thing more expensively."""
+        for kw in ({"surfb": 0, "sbtyp": 0}, {"surfb": 1, "sbtyp": 5}):
+            with self.subTest(**kw):
+                _r, starter = _convert(_ft_deck(**kw))
+                sid = int(_headers(starter, "/INTER/SUB/")[0]
+                          .rsplit("/", 1)[1])
+                self.assertEqual(_sub_cells(starter, sid)[1], 0)
+
+    def test_a_transducer_survives_a_deck_with_no_contact_at_all(self):
+        """The parented form REFUSED such a deck ('no existing /INTER to act
+        as parent -> skipped'), which is backwards: a transducer measures
+        whatever contact there is, and needs none of its own."""
+        res, starter = _convert(_ft_deck(contact=False))
+        sub = _headers(starter, "/INTER/SUB/")
+        self.assertEqual(len(sub), 1, starter)
+        self.assertEqual(_sub_cells(starter,
+                                    int(sub[0].rsplit("/", 1)[1]))[0], 0)
+        self.assertFalse([w for w in res.warnings
+                          if "no existing /INTER" in w], res.warnings)
+
+    def test_the_th_inter_list_still_carries_the_sub_id(self):
+        """``hm_read_intsub.F:509-524`` sets ``NOM_OPT(5) = 1`` only for a sub
+        id it finds in a /TH/INTER list; an unlisted sub-interface is read and
+        then silently dropped (OUTPUT TO TH = 0)."""
+        _r, starter = _convert(_ft_deck())
+        sid = int(_headers(starter, "/INTER/SUB/")[0].rsplit("/", 1)[1])
+        th = _headers(starter, "/TH/INTER/")
+        self.assertEqual(len(th), 1, starter)
+        listed = {int(t) for ln in _data_rows(starter, th[0])
+                  for t in ln.split() if t.lstrip("-").isdigit()}
+        self.assertIn(sid, listed)
+
+    def test_the_semantics_warning_is_emitted_once(self):
+        deck = _ft_deck() + ""
+        deck = deck.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
+            + _row(1, 2, 3, 3) + "\n*CONTROL_TERMINATION")
+        res, starter = _convert(deck)
+        self.assertEqual(len(_headers(starter, "/INTER/SUB/")), 2, starter)
+        hit = [w for w in res.warnings if w.startswith("/INTER/SUB inter_ID")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("Interf 0 : adding all contacts", "lecint.F:531-550",
+                       "TYPSUB = 2", "i7for3.F:1583", "ERROR 580",
+                       "ERROR 581", "-0.01453375"):
+            self.assertIn(needle, hit[0])
+
+    def test_the_impulse_caveat_survives_verbatim(self):
+        """It is correct and still applies: the T01 channel is an accumulated
+        impulse whatever form the sub-interface takes."""
+        res, _s = _convert(_ft_deck())
+        hits = [w for w in res.warnings if "Force-transducer read-out" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("NO constant correction factor", hits[0])
+
+
 if __name__ == "__main__":
     unittest.main()
