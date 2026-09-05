@@ -4204,6 +4204,19 @@ _RARE_MATERIAL_OFFSETS = {
     "MAT_SHAPE_MEMORY":  _off_mat_shape_memory,
     "MAT_030":           _off_mat_shape_memory,
     "MAT_30":            _off_mat_shape_memory,
+    # ── R14 triage batch, round 1 ──────────────────────────────────────────
+    # *MAT_ELASTIC_PLASTIC_THERMAL: MID on card 1 and NOTHING else. Its six
+    # data rows are eight-slot FLOAT tables (T/E/PR/ALPHA/SIGY/ETAN) — no id
+    # of any class lives on them.
+    "MAT_ELASTIC_PLASTIC_THERMAL": _mat(),
+    "MAT_004": _mat(),
+    "MAT_4":   _mat(),
+    # *MAT_CWM: MID on card 1 plus its five LOAD CURVE ids in card-1 fields
+    # 3-7 (LCEM LCPR LCSY LCHR LCAT, Vol II R17 p.2-1835) -> IDFOFF "f".
+    # Card 2 is all temperatures and ghost moduli, card 3 phase-change
+    # bookkeeping — no ids on either.
+    "MAT_CWM": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
+    "MAT_270": _mat({0: [(2, "f"), (3, "f"), (4, "f"), (5, "f"), (6, "f")]}),
     "MAT_MUSCLE":        _off_mat_muscle,
     "MAT_156":           _off_mat_muscle,
     "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,

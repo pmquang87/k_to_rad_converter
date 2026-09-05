@@ -25,6 +25,7 @@ from .materials import (
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
     _resolve_mat_shape_memory,
+    _resolve_mat_law106,
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
@@ -925,6 +926,18 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # what makes that gate warn-skip such parts NAMING the law instead of
     # claiming they have no /MAT at all.
     _resolve_mat_shape_memory(state)
+
+    # R14 triage batch: *MAT_004 / *MAT_270 -> /MAT/LAW106. It SYNTHESIZES the
+    # E(T), nu(T) and alpha(T) /FUNCTs and fills state.therm_stress_cards, so
+    # it must precede _make_functions (which emits the curves) and
+    # _resolve_thermal (whose _resolve_heat_materials reads therm_stress_cards
+    # to decide which materials get the mandatory /HEAT/MAT — a
+    # /THERM_STRESS/MAT without one is ERROR 1129). It must also precede
+    # _resolve_thermal's SOLN=1 stand-in pass, whose screen is the EMITTED
+    # /MAT registry: thermal-stress.k's *PART MID names a
+    # *MAT_ELASTIC_PLASTIC_THERMAL that only converts because of this pass,
+    # and screening before it would shadow the real material (#130).
+    _resolve_mat_law106(state)
 
     # Thermal expansion + the temperature drivers. MUST run BEFORE
     # _make_functions (it registers the synthesized coefficient and driver

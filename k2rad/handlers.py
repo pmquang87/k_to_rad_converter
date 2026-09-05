@@ -96,6 +96,7 @@ from .state import (
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
     MatShapeMemory, MatMuscle, MatSpringMuscle,
+    MatElasticPlasticThermal, MatCWM,
     MatAddThermalExpansion, MatThermalIsotropic,
     MatThermalIsotropicTD, MatThermalOrthotropic,
     ControlThermalSolver, ThermalBoundary, LoadThermalElement,
@@ -10027,6 +10028,126 @@ def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
         epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
 
 
+def _mat004_live_points(t: List[float]) -> int:
+    """How many of ``*MAT_004``'s eight temperature slots are LIVE.
+
+    The card is a fixed eight-slot table and states no count. Vol II R17
+    p.2-177 Remark 2 requires at least two temperatures and the analysis
+    terminates outside the stated range, so the temperatures are ordered; an
+    unused slot is written ``0.0``, which is ALSO a legal temperature and is
+    what three corpus decks put in ``T1``. The longest STRICTLY INCREASING
+    prefix is therefore the only reading that separates a real point from
+    padding, and it reproduces every corpus carrier: ``tempcyl.vari``
+    (−1000, 0, 1000, 0, …) → 3, ``thermal-stress`` (0 … 50, 0, 0) → 6,
+    ``main_steel_frame``/``ex_24`` (0, 400|1000, 0, …) → 2, the four welding
+    decks (273, 493, 1273, 10000, 0, …) → 4.
+    """
+    n = 1
+    while n < len(t) and t[n] > t[n - 1]:
+        n += 1
+    return n
+
+
+def handle_mat_elastic_plastic_thermal(block: Block,
+                                       state: ConversionState) -> None:
+    """*MAT_ELASTIC_PLASTIC_THERMAL (*MAT_004) → /MAT/LAW106 +
+    /THERM_STRESS/MAT.
+
+    Cards (Vol II R17 pp.2-177..2-179; Keyword971_R14.1/MAT/mat_004.cfg):
+      Card1: MID RO
+      Cards 2-7: T1..T8 / E1..E8 / PR1..PR8 / ALPHA1..ALPHA8 / SIGY1..SIGY8 /
+                 ETAN1..ETAN8
+
+    Fixed-width w=10 throughout, like every other ``*MAT`` here: ``RO``
+    regularly fills its whole field and fuses with ``MID``
+    (``main_steel_frame.k`` writes ``         17.85000E-9``), and a free split
+    would then shift every value — the ``*MAT_187`` trap.
+
+    The temperature-dependence tables are carried to ``/MAT/LAW106`` by
+    ``writer/materials.py::_resolve_mat_law106``; this handler only reads the
+    card. dyna2rad has no ``case 4:`` at all — ``convertmats.cxx:527``'s
+    ``default:`` calls ``Convert1To1(..., matLawNum, ...)``, which emits
+    ``/MAT/LAW4`` (HYD_JCOOK, an EOS-driven hydrodynamic law with no E(T)
+    slot). It is not a usable reference for this keyword.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ELASTIC_PLASTIC_THERMAL: empty material card — "
+                   "skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_ELASTIC_PLASTIC_THERMAL '{title}': MID parsed as "
+                   f"{mid} — unreadable (shifted or fused fields?); material "
+                   "skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    rows: List[List[float]] = []
+    for k in range(1, 7):
+        fk = _card(raw, offset + k, fixed=True, n=8, w=10)
+        rows.append([to_float(fk[i]) if len(fk) > i else 0.0
+                     for i in range(8)])
+    state.mat_ep_thermal[mid] = MatElasticPlasticThermal(
+        mid=mid, title=title, rho=rho, t=rows[0], e=rows[1], pr=rows[2],
+        alpha=rows[3], sigy=rows[4], etan=rows[5])
+
+
+def handle_mat_cwm(block: Block, state: ConversionState) -> None:
+    """*MAT_CWM (*MAT_270) → /MAT/LAW106 + /THERM_STRESS/MAT.
+
+    Cards (Vol II R17 pp.2-1835..2-1840;
+    Keyword971_R14.1/MAT/mat_270.cfg):
+      Card1: MID RO LCEM LCPR LCSY LCHR LCAT BETA
+      Card2: TASTART TAEND TLSTART TLEND EGHOST PGHOST AGHOST EPSINI
+      Card3 (optional): T2PHASE T1PHASE ANOPT POSTV DTEMP DOSPOT
+
+    Card 3 is claimed by RAW CONTIGUITY (row index ``offset + 2``), never by
+    "the next non-blank line": an all-blank optional card is legal LS-DYNA and
+    a content scan walks past it into the following keyword (#109/#117/#119).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_CWM: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_CWM '{title}': MID parsed as {mid} — unreadable "
+                   "(shifted or fused fields?); material skipped.")
+        return
+
+    def _g(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    rec = MatCWM(
+        mid=mid, title=title, rho=_g(f1, 1),
+        lcem=to_int(f1[2]) if len(f1) > 2 else 0,
+        lcpr=to_int(f1[3]) if len(f1) > 3 else 0,
+        lcsy=to_int(f1[4]) if len(f1) > 4 else 0,
+        lchr=to_int(f1[5]) if len(f1) > 5 else 0,
+        lcat=to_int(f1[6]) if len(f1) > 6 else 0,
+        beta=_g(f1, 7),
+        tastart=_g(f2, 0), taend=_g(f2, 1), tlstart=_g(f2, 2),
+        tlend=_g(f2, 3), eghost=_g(f2, 4), pghost=_g(f2, 5),
+        aghost=_g(f2, 6), epsini=_g(f2, 7))
+    if len(raw) > offset + 2 and raw[offset + 2].strip():
+        f3 = _card(raw, offset + 2, fixed=True, n=6, w=10)
+        rec.has_card3 = True
+        rec.t2phase = _g(f3, 0)
+        rec.t1phase = _g(f3, 1)
+        rec.anopt = _g(f3, 2)
+        rec.postv = to_int(f3[3]) if len(f3) > 3 else 0
+        rec.dtemp = _g(f3, 4)
+        rec.dospot = to_int(f3[5]) if len(f3) > 5 else 0
+    state.mat_cwm[mid] = rec
+
+
 def _scalar_or_curve(f: List[str], i: int, default: float,
                      state: Optional[ConversionState] = None,
                      field: str = "", fixed_positive: bool = False,
@@ -17590,6 +17711,16 @@ RARE_MATERIAL_KEYWORDS = {
     "MAT_SHAPE_MEMORY":   handle_mat_shape_memory,
     "MAT_030":            handle_mat_shape_memory,
     "MAT_30":             handle_mat_shape_memory,
+    # ── R14 triage batch, round 1 ──────────────────────────────────────────
+    # The two temperature-dependent elasto-plastic laws behind 13 of the 29
+    # ERROR-179 decks. Both land on /MAT/LAW106, the only law available at
+    # /BEGIN 2022 that carries E(T) and nu(T) as plain functions of
+    # temperature (LAW129, the exact target, first appears in radioss2025).
+    "MAT_ELASTIC_PLASTIC_THERMAL": handle_mat_elastic_plastic_thermal,
+    "MAT_004":                     handle_mat_elastic_plastic_thermal,
+    "MAT_4":                       handle_mat_elastic_plastic_thermal,
+    "MAT_CWM":                     handle_mat_cwm,
+    "MAT_270":                     handle_mat_cwm,
     "MAT_MUSCLE":         handle_mat_muscle,
     "MAT_156":            handle_mat_muscle,
     # *MAT_SPRING_MUSCLE's numeric alias is *MAT_S15 (Vol II R17 p.2-2095

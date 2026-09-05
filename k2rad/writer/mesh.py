@@ -4217,6 +4217,18 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # *MAT_Sxx spring answer) is the correct one for them.
     if mid in state.mat_shape_memory:
         return 71                                  # *MAT_030 → LAW71 (SMA)
+    # R14 triage batch. *MAT_004 and *MAT_270 both land on /MAT/LAW106, and the
+    # RESOLVED registry is the one to test: a source card the resolver refused
+    # (fewer than two temperature points, RO <= 0, an unresolvable LCEM) emits
+    # no /MAT at all, so `None` is the right answer for it. LAW106 is NOT on
+    # the starter's solid-/XREF law whitelist, so this entry makes that gate
+    # warn-skip such a part NAMING the law instead of misreporting it as
+    # having no /MAT; it also routes the part through the /PROP/BEAM TYPE3
+    # report, which is correct — hm_read_mat106.F90:293-295 declares
+    # SOLID_ISOTROPIC, SHELL_ISOTROPIC and SPH and nothing else, so a LAW106
+    # beam part IS starter ERROR 3046.
+    if mid in state.mat_law106:
+        return 106                                 # *MAT_004 / *MAT_270
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

@@ -263,5 +263,331 @@ class ThermalOnlyStandinTests(unittest.TestCase):
         self.assertEqual(state.thermal_standin_mats, {})
 
 
+
+# The eight-slot *MAT_004 rows of thermal/welding-new/welding-solids/
+# 05_1_welding_solid.k ("steel"), the richest carrier in the corpus.
+_MAT004_STEEL = (
+    "*MAT_ELASTIC_PLASTIC_THERMAL\n"
+    + _row(1, "7.85000E-9") + "\n"
+    + _row(273.0, 493.0, 1273.0, 10000.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+    + _row(210000.0, 210000.0, 75000.0, 1000.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+    + _row(0.285, 0.285, 0.3, 0.45, 0.0, 0.0, 0.0, 0.0) + "\n"
+    + _row("1.20000E-5", "1.20000E-5", "1.40000E-5", 0.0, 0.0, 0.0, 0.0, 0.0)
+    + "\n"
+    + _row(435.0, 100.0, 20.0, 1.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+    + _row(1000.0, 1000.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+
+
+def _mat004_deck(card: str = _MAT004_STEEL, mid: int = 1,
+                 extra: str = "") -> str:
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK
+            + "*PART\np1\n" + _row(1, 1, mid) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + card + extra + "*END\n")
+
+
+class Mat004Law106Tests(unittest.TestCase):
+    """A2 — *MAT_ELASTIC_PLASTIC_THERMAL / *MAT_004 → /MAT/LAW106."""
+
+    def test_registered_under_all_three_spellings(self):
+        for kw in ("*MAT_ELASTIC_PLASTIC_THERMAL", "*MAT_004", "*MAT_4"):
+            with self.subTest(kw=kw):
+                deck = _mat004_deck(
+                    _MAT004_STEEL.replace("*MAT_ELASTIC_PLASTIC_THERMAL", kw))
+                res, starter = _convert(deck)
+                self.assertIn("/MAT/LAW106/1", starter)
+                self.assertNotIn(kw.lstrip("*"), res.skipped_keywords)
+
+    def test_live_point_count_is_the_increasing_prefix(self):
+        """An unused slot is 0.0, which is also a legal temperature — three
+        corpus decks put it in T1."""
+        from k2rad.handlers import _mat004_live_points
+        cases = [
+            ([273.0, 493.0, 1273.0, 10000.0, 0, 0, 0, 0], 4),   # 05_1
+            ([-1000.0, 0.0, 1000.0, 0, 0, 0, 0, 0], 3),         # tempcyl
+            ([0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 0, 0], 6),     # thermal-stress
+            ([0.0, 400.0, 0, 0, 0, 0, 0, 0], 2),                # steel_frame
+            ([0.0, 0, 0, 0, 0, 0, 0, 0], 1),                    # degenerate
+        ]
+        for t, want in cases:
+            with self.subTest(t=t[:4]):
+                self.assertEqual(_mat004_live_points(t), want)
+
+    def test_card_layout_is_the_2019_block(self):
+        """C2 E/nu/fct1/fct2/fct3, C3 A/B/n, C4+C5 blank, C6 RHO_Cp/../Tr."""
+        _res, starter = _convert(_mat004_deck())
+        body = _block(starter, "/MAT/LAW106/1")
+        rows = [ln for ln in body if not ln.startswith("#")]
+        # rows: title, RHO_I, E-line, A-line, C4(blank), C5(blank), C6
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(float(_fields(rows[1])[0]), 7.85e-9)
+        e_line = rows[2]
+        self.assertEqual(float(e_line[0:20]), 210000.0)
+        self.assertEqual(float(e_line[20:40]), 0.285)
+        f1 = int(e_line[40:50])
+        f2 = int(e_line[50:60])
+        f3 = int(e_line[60:70])
+        # fct_ID1 (heating) and fct_ID2 (cooling) must be the SAME function:
+        # sigeps106.F90:231-240 uses table(2) while the element cools, so a 0
+        # there would use the unscaled E on every cooling step.
+        self.assertEqual(f1, f2)
+        self.assertNotEqual(f3, f1)
+        self.assertEqual(rows[4].strip(), "")     # Pmin/Nmax/Tol
+        self.assertEqual(rows[5].strip(), "")     # m/Tmelt/Tmax
+        self.assertEqual(float(_fields(rows[6])[3]), 273.0)   # Tr
+
+    def test_scalars_are_the_table_values_at_the_reference_temperature(self):
+        """Hand-computed from the 05_1 steel card at Tr = T1 = 273:
+        E = 210000, nu = 0.285, A = SIGY(273) = 435,
+        B = E*ETAN/(E-ETAN) = 210000*1000/209000 = 1004.784688995215."""
+        _res, starter = _convert(_mat004_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/1")
+                if not ln.startswith("#")]
+        self.assertEqual(float(rows[2][0:20]), 210000.0)
+        self.assertEqual(float(rows[2][20:40]), 0.285)
+        a, b, n = (float(c) for c in _fields(rows[3])[:3])
+        self.assertEqual(a, 435.0)
+        self.assertAlmostEqual(b, 210000.0 * 1000.0 / 209000.0, places=4)
+        self.assertEqual(n, 1.0)
+
+    def test_e_function_is_normalised_by_the_scalar(self):
+        """hm_read_mat106.F90:262 sets fscale(1:2) = e, so the function is a
+        MULTIPLIER: E(10000)/E(273) = 1000/210000."""
+        _res, starter = _convert(_mat004_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/1")
+                if not ln.startswith("#")]
+        fid = int(rows[2][40:50])
+        pts = [[float(c) for c in _fields(ln)]
+               for ln in _data_rows(starter, f"/FUNCT/{fid}")[1:]]
+        self.assertEqual([p[0] for p in pts], [273.0, 493.0, 1273.0, 10000.0])
+        self.assertAlmostEqual(pts[0][1], 1.0)
+        self.assertAlmostEqual(pts[3][1], 1000.0 / 210000.0, places=10)
+
+    def test_alpha_reaches_therm_stress_one_to_one(self):
+        """Two term-for-term identical incremental forms need no factor."""
+        _res, starter = _convert(_mat004_deck())
+        rows = _data_rows(starter, "/THERM_STRESS/MAT/1")
+        self.assertIsNotNone(rows)
+        fid = int(rows[0][0:10])
+        self.assertEqual(float(rows[0][10:30]), 1.0)          # Fscale_y
+        pts = [[float(c) for c in _fields(ln)]
+               for ln in _data_rows(starter, f"/FUNCT/{fid}")[1:]]
+        self.assertEqual([p[1] for p in pts],
+                         [1.2e-5, 1.2e-5, 1.4e-5, 0.0])
+        # ...and the mandatory /HEAT/MAT partner (ERROR 1129 without it).
+        self.assertIn("/HEAT/MAT/1", starter)
+
+    def test_thermo_elastic_card_gets_an_unreachable_yield(self):
+        """SIGY = 0 is Remark 2's 'do not define', not 'yields at zero'."""
+        card = (
+            "*MAT_ELASTIC_PLASTIC_THERMAL\n"
+            + _row(1, "1E-9") + "\n"
+            + _row(0.0, 1000.0, 0, 0, 0, 0, 0, 0) + "\n"
+            + _row(210000.0, 210000.0, 0, 0, 0, 0, 0, 0) + "\n"
+            + _row(0.3, 0.3, 0, 0, 0, 0, 0, 0) + "\n"
+            + _row("2.30000E-4", "2.30000E-4", 0, 0, 0, 0, 0, 0) + "\n"
+            + _row(0.0, 0.0, 0, 0, 0, 0, 0, 0) + "\n"
+            + _row(0.0, 0.0, 0, 0, 0, 0, 0, 0) + "\n")
+        res, starter = _convert(_mat004_deck(card))
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/1")
+                if not ln.startswith("#")]
+        self.assertEqual(float(_fields(rows[3])[0]), 1.0e20)
+        self.assertIn("THERMO-ELASTIC", " ".join(res.warnings))
+
+    def test_one_point_table_is_refused_by_name(self):
+        card = _MAT004_STEEL.replace(
+            _row(273.0, 493.0, 1273.0, 10000.0, 0.0, 0.0, 0.0, 0.0),
+            _row(273.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        res, starter = _convert(_mat004_deck(card))
+        self.assertEqual(_headers(starter, "/MAT/LAW106/"), [])
+        self.assertIn("only 1 temperature point(s)", " ".join(res.warnings))
+
+    def test_zero_density_is_refused_by_name(self):
+        card = _MAT004_STEEL.replace(_row(1, "7.85000E-9"), _row(1, 0.0))
+        res, starter = _convert(_mat004_deck(card))
+        self.assertEqual(_headers(starter, "/MAT/LAW106/"), [])
+        w = " ".join(res.warnings)
+        self.assertIn("ERROR 683", w)
+        self.assertIn("hm_read_mat.F90:1575-1583", w)
+
+    def test_warning_names_the_frozen_yield_with_the_deck_s_own_spread(self):
+        res, _starter = _convert(_mat004_deck())
+        w = [x for x in res.warnings if "-> /MAT/LAW106" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("SIGY 435 … 1 over T = 273 … 10000 (factor 435)",
+                     "sigeps106.F90:306-310", "NOTHING IS FITTED",
+                     "Tmelt is left BLANK", "EXTRAPOLATES",
+                     "lost BY VERSION, not by mapping"):
+            self.assertIn(fact, w[0])
+
+    def test_reference_temperature_follows_the_deck_s_own_t0(self):
+        deck = _mat004_deck(
+            extra="*INITIAL_TEMPERATURE_SET\n" + _row(0, 493.0) + "\n")
+        res, starter = _convert(deck)
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/1")
+                if not ln.startswith("#")]
+        self.assertEqual(float(_fields(rows[6])[3]), 493.0)
+        # E(493) = 210000 too, but SIGY(493) = 100 — the value that moves.
+        self.assertEqual(float(_fields(rows[3])[0]), 100.0)
+        self.assertIn("model-wide temperature at t = 0 (493)",
+                      " ".join(res.warnings))
+
+    def test_out_of_range_t0_falls_back_to_the_first_point(self):
+        deck = _mat004_deck(
+            extra="*INITIAL_TEMPERATURE_SET\n" + _row(0, 20000.0) + "\n")
+        res, starter = _convert(deck)
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/1")
+                if not ln.startswith("#")]
+        self.assertEqual(float(_fields(rows[6])[3]), 273.0)
+        self.assertIn("lies OUTSIDE the stated range", " ".join(res.warnings))
+
+    def test_offset_spec_moves_the_mid_and_nothing_else(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        for kw in ("MAT_ELASTIC_PLASTIC_THERMAL", "MAT_004", "MAT_4"):
+            self.assertEqual(_OFFSET_SPECS[kw], {"cards": {0: [(0, "m")]}})
+
+
+# The *MAT_CWM card and its five curves, verbatim from 05_1_welding_solid.k.
+_CWM_CURVES = (
+    "*DEFINE_CURVE\n" + _row(101, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+    + _row16(273.0, 210000.0) + "\n" + _row16(493.0, 210000.0) + "\n"
+    + _row16(10000.0, 1000.0) + "\n"
+    "*DEFINE_CURVE\n" + _row(102, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+    + _row16(273.0, 0.3) + "\n" + _row16(473.0, 0.3) + "\n"
+    + _row16(10000.0, 0.49) + "\n"
+    "*DEFINE_CURVE\n" + _row(103, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+    + _row16(273.0, 240.0) + "\n" + _row16(473.0, 240.0) + "\n"
+    + _row16(10000.0, 5.0) + "\n"
+    "*DEFINE_CURVE\n" + _row(104, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+    + _row16(273.0, 700.0) + "\n" + _row16(473.0, 700.0) + "\n"
+    + _row16(10000.0, 5.0) + "\n"
+    "*DEFINE_CURVE\n" + _row(105, 0, 1.0, "1.00000E-6", 0.0, 0.0) + "\n"
+    + _row16(273.0, 17.0) + "\n" + _row16(473.0, 17.0) + "\n"
+    + _row16(1000.0, 22.0) + "\n" + _row16(10000.0, 0.0) + "\n")
+
+_MAT_CWM = (
+    "*MAT_CWM\n"
+    + _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 1.0) + "\n"
+    + _row(1300.0, 1400.0, 1200.0, 1400.0, 10000.0, 0.49, 0.0, 0.0) + "\n"
+    + _row(800.0, 500.0, 0.0, 0, 0.0, 0) + "\n")
+
+
+def _cwm_deck(card: str = _MAT_CWM, extra: str = "") -> str:
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + _BRICK
+            + "*PART\np1\n" + _row(1, 1, 2) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + card + _CWM_CURVES + extra + "*END\n")
+
+
+class MatCwmLaw106Tests(unittest.TestCase):
+    """A3 — *MAT_CWM / *MAT_270 → /MAT/LAW106, curves instead of tables."""
+
+    def test_registered_under_both_spellings(self):
+        for kw in ("*MAT_CWM", "*MAT_270"):
+            with self.subTest(kw=kw):
+                res, starter = _convert(
+                    _cwm_deck(_MAT_CWM.replace("*MAT_CWM", kw)))
+                self.assertIn("/MAT/LAW106/2", starter)
+                self.assertNotIn(kw.lstrip("*"), res.skipped_keywords)
+
+    def test_lchr_is_written_unconverted(self):
+        """LCHR is ALREADY the plastic hardening modulus (Remark 2), so
+        B = H(Tr) = 700 — NOT E*Et/(E-Et) = 210000*700/209300 = 702.3."""
+        _res, starter = _convert(_cwm_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/2")
+                if not ln.startswith("#")]
+        a, b, n = (float(c) for c in _fields(rows[3])[:3])
+        self.assertEqual(a, 240.0)              # LCSY at 273
+        self.assertEqual(b, 700.0)              # LCHR at 273, UNCONVERTED
+        self.assertNotAlmostEqual(b, 210000.0 * 700.0 / 209300.0, places=2)
+        self.assertEqual(n, 1.0)
+
+    def test_lcat_scale_factor_is_applied_exactly_once(self):
+        """The corpus card's SFO is 1e-6 with ordinates 17..22, so alpha is
+        1.7e-5. Curve.pts is ALREADY scaled — re-applying SFO here squared it
+        to 1.7e-11 (measured on 05_1_welding_solid.k before the fix)."""
+        _res, starter = _convert(_cwm_deck())
+        rows = _data_rows(starter, "/THERM_STRESS/MAT/2")
+        fid = int(rows[0][0:10])
+        pts = [[float(c) for c in _fields(ln)]
+               for ln in _data_rows(starter, f"/FUNCT/{fid}")[1:]]
+        self.assertEqual([p[1] for p in pts],
+                         [1.7e-5, 1.7e-5, 2.2e-5, 0.0])
+
+    def test_e_and_nu_curves_become_normalised_functions(self):
+        _res, starter = _convert(_cwm_deck())
+        rows = [ln for ln in _block(starter, "/MAT/LAW106/2")
+                if not ln.startswith("#")]
+        self.assertEqual(float(rows[2][0:20]), 210000.0)
+        self.assertEqual(float(rows[2][20:40]), 0.3)
+        f_e = int(rows[2][40:50])
+        self.assertEqual(int(rows[2][50:60]), f_e)
+        f_nu = int(rows[2][60:70])
+        e_pts = [[float(c) for c in _fields(ln)]
+                 for ln in _data_rows(starter, f"/FUNCT/{f_e}")[1:]]
+        self.assertAlmostEqual(e_pts[-1][1], 1000.0 / 210000.0, places=10)
+        nu_pts = [[float(c) for c in _fields(ln)]
+                  for ln in _data_rows(starter, f"/FUNCT/{f_nu}")[1:]]
+        # 8 places, not 10: the card format is 10 significant digits, so the
+        # written 1.633333333 is the emitted value, not a rounding of it.
+        self.assertAlmostEqual(nu_pts[-1][1], 0.49 / 0.3, places=8)
+
+    def test_annealing_and_ghost_losses_are_named(self):
+        res, _starter = _convert(_cwm_deck())
+        w = [x for x in res.warnings if "NOT carried" in x]
+        self.assertEqual(len(w), 1)
+        for fact in ("ANNEALING (TASTART=1300, TAEND=1400)",
+                     "p.2-1838 Remark 3",
+                     "GHOST -> LIVE weld-metal deposition",
+                     "read_sensor_temp.F:81-87",
+                     "residual stress that is NOT VALIDATED"):
+            self.assertIn(fact, w[0])
+
+    def test_card3_is_named_as_post_processing_only(self):
+        res, _starter = _convert(_cwm_deck())
+        w = [x for x in res.warnings if "POST-PROCESSING ONLY" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("HISTORY VARIABLE 11", w[0])
+        self.assertIn("T2PHASE=800", w[0])
+
+    def test_partial_beta_names_the_kinematic_loss(self):
+        card = _MAT_CWM.replace(
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 1.0),
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 0.5))
+        res, _starter = _convert(_cwm_deck(card))
+        self.assertIn("splits the hardening between isotropic and KINEMATIC",
+                      " ".join(res.warnings))
+
+    def test_missing_lcem_refuses_the_material_by_name(self):
+        card = _MAT_CWM.replace(
+            _row(2, "7.85000E-9", 101, 102, 103, 104, 105, 1.0),
+            _row(2, "7.85000E-9", 999, 102, 103, 104, 105, 1.0))
+        res, starter = _convert(_cwm_deck(card))
+        self.assertEqual(_headers(starter, "/MAT/LAW106/"), [])
+        self.assertIn("LCEM = 999 names no *DEFINE_CURVE",
+                      " ".join(res.warnings))
+
+    def test_offset_spec_moves_the_mid_and_the_five_curve_ids(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        want = {"cards": {0: [(0, "m"), (2, "f"), (3, "f"), (4, "f"),
+                              (5, "f"), (6, "f")]}}
+        for kw in ("MAT_CWM", "MAT_270"):
+            self.assertEqual(_OFFSET_SPECS[kw], want)
+
+    def test_registry_and_offset_key_sets_agree(self):
+        """A spelling with no offset verdict is a KeyError at import, never a
+        silent gap (#116) — this pins the four new rows into that contract."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS, RARE_MATERIAL_KEYWORDS
+        for kw in ("MAT_ELASTIC_PLASTIC_THERMAL", "MAT_004", "MAT_4",
+                   "MAT_CWM", "MAT_270"):
+            self.assertIn(kw, RARE_MATERIAL_KEYWORDS)
+            self.assertIn(kw, HANDLERS)
+            self.assertIn(kw, _OFFSET_SPECS)
+
 if __name__ == "__main__":
     unittest.main()

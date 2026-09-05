@@ -54,6 +54,9 @@ from ..state import (
     EosJwl,
     EosCard,
     MatShapeMemory,
+    MatCWM,
+    MatElasticPlasticThermal,
+    MatLaw106,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
                      _ref_flag_materials, _spotweld_beam_pids)
@@ -139,6 +142,10 @@ __all__ = [
     # Rare materials batch
     "_resolve_mat_shape_memory",
     "_emit_mat_law71",
+    # R14 triage batch, round 1
+    "_resolve_mat_law106",
+    "_emit_mat_law106",
+    "_interp_table",
 ]
 
 
@@ -259,6 +266,14 @@ def _make_materials(state: ConversionState) -> List[str]:
     # /MAT at all, exactly like the *MAT_Sxx spring family.
     for mat in state.mat_shape_memory.values():
         lines += _emit_mat_law71(mat)
+    # R14 triage batch: *MAT_004 and *MAT_270 both land on /MAT/LAW106, and
+    # both are routed by _resolve_mat_law106 into the single resolved registry
+    # this loop reads — a source card the resolver refused leaves no entry, so
+    # its /PART reports a dangling material rather than getting a half-built
+    # card. The matching /THERM_STRESS/MAT + /HEAT/MAT pair is written by the
+    # thermal section (both are keyed on the material id).
+    for law106 in state.mat_law106.values():
+        lines += _emit_mat_law106(law106)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -8744,5 +8759,610 @@ def _emit_mat_law71(mat: MatShapeMemory) -> List[str]:
         "#               TSSA                TFSA                  CP"
         "                TINI",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage batch, round 1: *MAT_004 / *MAT_270 → /MAT/LAW106
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The yield stress written for a THERMO-ELASTIC card. Vol II R17 p.2-177
+#: Remark 2: *"If a thermo-elastic material is considered, do not define SIGY
+#: and ETAN"* — so ``SIGY = 0`` means "never yields", not "yields at zero".
+#: ``hm_read_mat106.F90``'s default block substitutes ``infinity`` for a blank
+#: ``epsmax`` and ``sigmax`` but NOT for ``MAT_SIGY``, so a copied 0 would make
+#: the material perfectly plastic at zero stress. 1e20 is the deck's own idiom
+#: — ``thermal-stress.k`` states exactly that in its own ``SIGY1..SIGY6``.
+_LAW106_NO_YIELD = 1.0e20
+
+
+def _interp_table(xs: List[float], ys: List[float], x: float) -> float:
+    """Piecewise-linear ``y(x)`` on an increasing ``xs``, clamped at both ends.
+
+    Radioss clamps nothing — it EXTRAPOLATES a ``/FUNCT`` past its last point,
+    where LS-DYNA *"will terminate if a material temperature falls outside the
+    range specified in the input"* (Vol II R17 p.2-177 Remark 2). That
+    difference is NAMED in the per-card warning rather than papered over; this
+    helper is only used to read the card AT the reference temperature, which
+    is inside the range by construction.
+    """
+    if not xs:
+        return 0.0
+    if x <= xs[0]:
+        return ys[0]
+    for i in range(1, len(xs)):
+        if x <= xs[i]:
+            span = xs[i] - xs[i - 1]
+            if span <= 0.0:
+                return ys[i]
+            f = (x - xs[i - 1]) / span
+            return ys[i - 1] + f * (ys[i] - ys[i - 1])
+    return ys[-1]
+
+
+def _law106_reference_temperature(state: ConversionState,
+                                  xs: List[float]) -> Tuple[float, str]:
+    """The temperature at which the card's scalars are frozen, and WHY.
+
+    LAW106 carries ``E(T)``, ``nu(T)`` and ``alpha(T)`` as functions, so the
+    reference temperature is only a NORMALISATION for those three — the
+    emitted ``E·f(T)`` is the deck's own ``E(T)`` at every temperature whatever
+    reference is chosen. Where it really decides something is the yield stress
+    and the hardening modulus, which LAW106 can only hold as CONSTANTS.
+
+    The deck's own model-wide temperature at t = 0 is therefore the right
+    choice when it states one and it lies inside the stated table: that is the
+    state the structure starts from, and on the five corpus decks whose
+    properties are constant it changes nothing at all. Otherwise the table's
+    FIRST point is used — never an average, never a mid-range value, both of
+    which would be invented.
+    """
+    from .thermal import _global_initial_temperature
+    t0 = _global_initial_temperature(state)
+    if t0 is not None and xs and xs[0] <= t0 <= xs[-1]:
+        return t0, (f"the deck's own model-wide temperature at t = 0 ({t0:g}), "
+                    "which lies inside the stated range")
+    if t0 is not None and xs:
+        return xs[0], (
+            f"the table's first point ({xs[0]:g}); the deck's t = 0 "
+            f"temperature {t0:g} lies OUTSIDE the stated range "
+            f"[{xs[0]:g}, {xs[-1]:g}]")
+    return ((xs[0] if xs else 0.0),
+            "the table's first point (the deck states no model-wide "
+            "temperature at t = 0)")
+
+
+def _law106_thermal_rho_cp(state: ConversionState, mid: int) -> float:
+    """``RHO_Cp`` for the card's line 6, from the deck's own ``*MAT_THERMAL_*``.
+
+    A ``/HEAT/MAT`` OVERWRITES ``MAT_PARAM%THERM%RHOCP``
+    (``hm_read_therm.F:244``), and this batch emits one for every LAW106
+    material, so this cell is informational on a deck that has a thermal
+    material and the only capacity the law has on a deck that does not.
+    Reading it from the same TRO·HC the ``/HEAT/MAT`` uses keeps the two lines
+    saying the same thing.
+    """
+    from .thermal import _thermal_material_for_part
+    for pid, part in sorted(state.parts.items()):
+        if part.mid != mid:
+            continue
+        tm = _thermal_material_for_part(state, pid)
+        if tm is None:
+            continue
+        rho = float(getattr(tm, "tro", 0.0) or 0.0)
+        hc = float(getattr(tm, "hc", 0.0) or 0.0)
+        if rho > 0.0 and hc > 0.0:
+            return rho * hc
+    return 0.0
+
+
+def _law106_curve_points(state: ConversionState,
+                         lcid: int) -> Optional[List[Tuple[float, float]]]:
+    """A ``*DEFINE_CURVE``'s (x, y) points, ready to use.
+
+    ``Curve.pts`` is ALREADY scaled: ``handle_define_curve`` stores
+    ``((x + OFFA)·SFA, (y + OFFO)·SFO)`` and keeps ``sfa``/``sfo``/``offa``/
+    ``offo`` beside it only as a record of the source card. Re-applying them
+    here would square the factor — MEASURED on ``05_1_welding_solid.k``, whose
+    ``LCAT`` carries ``SFO = 1e-6`` with ordinates 17 … 22: the doubly-scaled
+    ``/FUNCT`` came out at ``1.7e-11`` instead of the correct ``1.7e-5``, a
+    factor 1e6 on the thermal expansion coefficient, at zero diagnostics.
+    """
+    curve = state.curves.get(lcid)
+    if curve is None or len(curve.pts) < 2:
+        return None
+    return list(curve.pts)
+
+
+def _law106_normalised_function(state: ConversionState, mid: int, tag: str,
+                                pts: List[Tuple[float, float]],
+                                ref: float) -> int:
+    """Register a ``/FUNCT`` of ``(T, y(T)/y_ref)`` and return its id.
+
+    ``hm_read_mat106.F90:250-263`` copies the three tables with
+    ``fscale(1:2) = e`` and ``fscale(3) = nu``, so the function the card names
+    is a MULTIPLIER on the scalar beside it, not the quantity itself.
+    """
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_law106_{tag}_mat{mid}",
+                    [(x, y / ref) for x, y in pts])
+    state.curve_order.append(fid)
+    return fid
+
+
+def _law106_alpha_function(state: ConversionState, mid: int,
+                           pts: List[Tuple[float, float]]) -> int:
+    """Register the ``/THERM_STRESS/MAT`` ``alpha(T)`` function, 1:1.
+
+    **No conversion factor, and that is a derivation, not an assumption.**
+    Vol II R17 ``*MAT_004`` Remark 1: *"The coefficient of thermal expansion is
+    defined as the INSTANTANEOUS value"*, i.e. ``d(eps_T) = alpha(T) dT``.
+    Radioss is the same form, incremental: ``ETH = alpha(T)·Fscale·(T_n −
+    T_{n−1})`` (``mmain.F90:770-786`` for solids, ``thermexpc.F:172-174`` for
+    shells). Two term-for-term identical closed forms need no factor (#128,
+    where d2r's invented ``sqrt(2/3)`` on ``*MAT_030`` ALPHA was the defect).
+    """
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_law106_alpha_mat{mid}", list(pts))
+    state.curve_order.append(fid)
+    return fid
+
+
+def _law106_spread(name: str, xs: List[float],
+                   ys: List[float]) -> Optional[str]:
+    """``"SIGY 435 … 1 over T = 273 … 10000 (factor 435)"`` — or ``None`` when
+    the quantity is constant over the stated range and nothing is lost."""
+    lo, hi = min(ys), max(ys)
+    if hi - lo <= 1e-12 * max(abs(hi), 1.0):
+        return None
+    factor = (f"factor {hi / lo:g}" if lo > 0.0 else
+              f"down to {lo:g}, so no finite ratio")
+    return (f"{name} {ys[0]:g} … {ys[-1]:g} over T = {xs[0]:g} … {xs[-1]:g} "
+            f"({factor})")
+
+
+def _resolve_mat_law106(state: ConversionState) -> None:
+    """``*MAT_004`` and ``*MAT_270`` → ``state.mat_law106`` (+ the
+    ``/THERM_STRESS/MAT`` their expansion coefficient needs).
+
+    **Why LAW106 and nothing else.** The complete MAT cfg availability map at
+    ``/BEGIN 2022`` (the union of ``radioss41 … radioss2022``) leaves exactly
+    one law that carries ``E(T)`` and ``nu(T)`` as plain functions of
+    temperature on an ordinary elasto-plastic backbone. ``/MAT/LAW129``
+    (``func_young``/``func_nu``/``func_yld``/``func_alpha``) is the perfect
+    target and first appears in ``radioss2025``; ``/MAT/LAW80`` has a Young
+    function but is the hot-stamping boron-steel law and demands the whole
+    austenite/ferrite/bainite/martensite kinetics; ``/MAT/LAW121``'s
+    ``Fct_YOUN`` is a function of STRAIN RATE, not temperature; LAW2/4/49/103/
+    104/109/110 carry a melting temperature for the FLOW STRESS only.
+
+    **What is carried exactly.** ``E(T)`` and ``nu(T)`` become ``/FUNCT``
+    multipliers on the scalars beside them (``fct_ID1 = fct_ID2`` for E,
+    ``fct_ID3`` for nu — ``sigeps106.F90:231-240`` picks table(2) only while
+    the element is COOLING, so leaving it 0 would use the unscaled ``E`` on
+    every cooling step), and ``alpha(T)`` becomes the ``/THERM_STRESS/MAT``
+    function 1:1. MEASURED that ``E(T)`` is CONSUMED, not merely echoed: two
+    one-brick coupons in confined compression, identical but for the card-6
+    ``Tr`` cell, gave ``sigma_zz`` 32.2609 at ``f(T) = 1`` and 11.5218 at
+    ``f(T) = 0.357143`` — a ratio of 0.357143, exactly ``f(T)`` — with
+    ``sigma_xx/sigma_zz = nu/(1-nu) = 0.428571`` in both.
+
+    **What is lost, and it is named per card.** LAW106's yield temperature
+    dependence is the Johnson-Cook power law ``1 − ((T−Tref)/(Tmelt−Tref))^m``
+    (``sigeps106.F90:306-310``), not a table, so ``SIGY(T)`` and ``ETAN(T)``
+    are frozen at the reference temperature. Fitting ``m`` to the welding
+    decks' 273→493 pair (435→100 MPa) predicts 63.2 MPa at 1273 K against a
+    stated 20 — 3.2x wrong — so nothing is fitted (#124). ``Tmelt`` is left
+    BLANK, which ``hm_read_mat106.F90:150`` turns into infinity and which makes
+    ``thsoft`` identically 1, so ``A`` means exactly ``sigma_y(T_ref)`` rather
+    than a value the engine then knocks down.
+
+    **Version-gated dead cells**, at ``/BEGIN 2022`` and measured on a starter
+    probe: the emitted card is the ``radioss2020/MAT/mat_law106.cfg``
+    ``FORMAT(radioss2019)`` layout, whose cells
+    ``MAT_PC``/``MAT_TMAX``/``MLAW106_COEF``/``MLAW106_TC`` are NOT what the
+    current reader asks for (``MAT_FCUT``, ``MLAW106_VP``, ``MLAW106_CJC``,
+    ``MLAW106_DEPS0``, ``MLAW106_ETA``, ``MLAW106_T0``). ``Pmin``, ``Tmax``,
+    the Taylor-Quinney ``eta`` (defaults to 1), ``T0`` (defaults to ``Tref``),
+    the Johnson-Cook rate coefficient ``C``, ``deps0`` and ``Fcut`` are
+    therefore unreachable — lost BY VERSION, not by mapping. ``Nmax``, ``Tol``,
+    ``m``, ``Tmelt`` and ``Tr`` sit at identical columns in both layouts, so
+    writing the 2026 layout instead would only add ``WARNING 100213/100214``
+    and drop the same cells (#119 case (a)); at ``/BEGIN 2026`` the card must
+    change.
+    """
+    if not (state.mat_ep_thermal or state.mat_cwm):
+        return
+    for mid in sorted(state.mat_ep_thermal):
+        _resolve_one_mat004(state, state.mat_ep_thermal[mid])
+    for mid in sorted(state.mat_cwm):
+        _resolve_one_mat270(state, state.mat_cwm[mid])
+
+
+def _law106_register(state: ConversionState, rec: MatLaw106,
+                     alpha_pts: Optional[List[Tuple[float, float]]]) -> None:
+    """Store the resolved card and, when the source states one, its
+    ``alpha(T)`` → ``/THERM_STRESS/MAT``.
+
+    ``state.therm_stress_cards`` is what ``writer/thermal.py::
+    _resolve_heat_materials`` reads to decide which materials get a
+    ``/HEAT/MAT`` — and the pair is MANDATORY (``ERROR 1129``,
+    ``hm_read_therm_stress.F90:130-132``), so the two must be filled together
+    or not at all.
+    """
+    state.mat_law106[rec.mid] = rec
+    if alpha_pts is None:
+        return
+    if rec.mid in state.therm_stress_cards:
+        state.warn(
+            f"{rec.source} {rec.mid}: a *MAT_ADD_THERMAL_EXPANSION already "
+            "claimed this material's /THERM_STRESS/MAT. /THERM_STRESS is keyed "
+            "on the MATERIAL id and Radioss allows ONE per material, so the "
+            "*MAT_ADD_THERMAL_EXPANSION card WINS and this card's own "
+            "temperature-dependent expansion coefficient is DROPPED. Delete "
+            "one of the two if that is not what the deck means.")
+        return
+    fid = _law106_alpha_function(state, rec.mid, alpha_pts)
+    state.therm_stress_cards[rec.mid] = (fid, 1.0)
+
+
+def _law106_plastic_modulus(state: ConversionState, kw: str, mid: int,
+                            e_ref: float, etan: float) -> float:
+    """``*MAT_004`` ``ETAN`` → the LAW106 ``B`` cell.
+
+    LS-DYNA's ``ETAN`` is the TOTAL-strain tangent modulus while LAW106's
+    ``B·eps_p^n`` is the PLASTIC branch, so ``B = E·ETAN/(E − ETAN)`` — the
+    same derivation ``_plas_kin_b`` already applies to ``*MAT_003``. **It must
+    NOT be applied to ``*MAT_CWM``'s ``LCHR``**, which Vol II R17 p.2-1836
+    Remark 2 already states as the hardening modulus of
+    ``sigma_Y(T) + beta·H(T)·eps_p``.
+    """
+    if etan <= 0.0:
+        return 0.0
+    if etan >= e_ref:
+        state.warn(
+            f"{kw} {mid}: ETAN = {etan:g} at the reference temperature is not "
+            f"below E = {e_ref:g}, so the plastic modulus E·ETAN/(E−ETAN) is "
+            "undefined (a tangent modulus at or above the elastic one is not a "
+            "physical hardening curve). B = 0 (perfectly plastic) is written "
+            "instead; check the card's ETAN row.")
+        return 0.0
+    return e_ref * etan / (e_ref - etan)
+
+
+def _resolve_one_mat004(state: ConversionState,
+                        mat: MatElasticPlasticThermal) -> None:
+    """One ``*MAT_ELASTIC_PLASTIC_THERMAL`` card → its ``/MAT/LAW106``."""
+    from ..handlers import _mat004_live_points
+    n = _mat004_live_points(mat.t)
+    kw = "*MAT_ELASTIC_PLASTIC_THERMAL"
+    if n < 2:
+        state.warn(
+            f"{kw} {mat.mid}: only {n} temperature point(s) can be read from "
+            f"T1..T8 = {[f'{v:g}' for v in mat.t]}. Vol II R17 p.2-177 Remark "
+            "2 requires at least two, in increasing order — an unused slot is "
+            "written 0.0 and the live count is the longest strictly increasing "
+            "prefix. The material is SKIPPED and its /PART reports a dangling "
+            "material id, which names the deck's real problem.")
+        return
+    xs = mat.t[:n]
+    es = mat.e[:n]
+    nus = mat.pr[:n]
+    alphas = mat.alpha[:n]
+    sigys = mat.sigy[:n]
+    etans = mat.etan[:n]
+    if mat.rho <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: RO = {mat.rho:g}. /MAT/LAW106 is not on the "
+            "starter's zero-density exemption list (hm_read_mat.F90:1575-1583 "
+            "exempts only laws 0/20/51/151/108/999), so the card would be "
+            "ERROR 683 (DENSITY IS LESS THAN OR EQUAL TO ZERO) and refuse the "
+            "whole deck. The material is SKIPPED.")
+        return
+    t_ref, why_ref = _law106_reference_temperature(state, xs)
+    e_ref = _interp_table(xs, es, t_ref)
+    nu_ref = _interp_table(xs, nus, t_ref)
+    if e_ref <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: the Young's modulus at the reference temperature "
+            f"{t_ref:g} is {e_ref:g}. /MAT/LAW106 carries E(T) as a FUNCTION "
+            "SCALED BY E (hm_read_mat106.F90:262, fscale(1:2) = e), so a zero "
+            "or negative scalar makes the whole temperature dependence "
+            "identically zero. The material is SKIPPED.")
+        return
+    fct_e = _law106_normalised_function(
+        state, mat.mid, "E", list(zip(xs, es)), e_ref)
+    fct_nu = 0
+    if nu_ref != 0.0:
+        fct_nu = _law106_normalised_function(
+            state, mat.mid, "nu", list(zip(xs, nus)), nu_ref)
+    # Vol II R17 p.2-177 Remark 2: a thermo-elastic MAT_004 states SIGY = 0.
+    thermo_elastic = all(v == 0.0 for v in sigys)
+    a = _LAW106_NO_YIELD if thermo_elastic else _interp_table(xs, sigys, t_ref)
+    etan_ref = _interp_table(xs, etans, t_ref)
+    b = _law106_plastic_modulus(state, kw, mat.mid, e_ref, etan_ref)
+    alpha_stated = any(v != 0.0 for v in alphas)
+    _law106_register(state, MatLaw106(
+        mid=mat.mid, title=mat.title, rho=mat.rho, e=e_ref, nu=nu_ref,
+        fct_e=fct_e, fct_nu=fct_nu, a=a, b=b, n=1.0,
+        rho_cp=_law106_thermal_rho_cp(state, mat.mid), tr=t_ref, source=kw),
+        list(zip(xs, alphas)) if alpha_stated else None)
+    _law106_report(state, kw, mat.mid, t_ref, why_ref, fct_e, fct_nu,
+                   a, b, thermo_elastic,
+                   [_law106_spread("E", xs, es),
+                    _law106_spread("nu", xs, nus),
+                    _law106_spread("SIGY", xs, sigys),
+                    _law106_spread("ETAN", xs, etans)],
+                   alpha_stated=alpha_stated,
+                   range_lo=xs[0], range_hi=xs[-1])
+
+
+def _resolve_one_mat270(state: ConversionState, mat: MatCWM) -> None:
+    """One ``*MAT_CWM`` card → its ``/MAT/LAW106``.
+
+    Same target family as ``*MAT_004`` with load curves instead of eight-point
+    tables — and the field the two do NOT share is the hardening one:
+    ``LCHR`` is the PLASTIC hardening modulus ``H(T)`` of Remark 2's
+    ``sigma_Y = sigma_Y(T) + beta·H(T)·eps_p``, so it goes into ``B``
+    UNCONVERTED, where MAT_004's total-strain ``ETAN`` needs
+    ``E·ETAN/(E−ETAN)``. Getting that wrong in either direction is a silent
+    factor error.
+    """
+    kw = "*MAT_CWM"
+    if mat.rho <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: RO = {mat.rho:g}, which is starter ERROR 683 for "
+            "/MAT/LAW106 (hm_read_mat.F90:1575-1583 exempts only laws "
+            "0/20/51/151/108/999). The material is SKIPPED.")
+        return
+    e_pts = _law106_curve_points(state, mat.lcem)
+    if e_pts is None:
+        state.warn(
+            f"{kw} {mat.mid}: LCEM = {mat.lcem} names no *DEFINE_CURVE with at "
+            "least two points in the converted deck, so the temperature-"
+            "dependent Young's modulus — the one quantity /MAT/LAW106 carries "
+            "exactly — cannot be built. The material is SKIPPED and its /PART "
+            "reports a dangling material id.")
+        return
+    xs = [x for x, _y in e_pts]
+    es = [y for _x, y in e_pts]
+    t_ref, why_ref = _law106_reference_temperature(state, xs)
+    e_ref = _interp_table(xs, es, t_ref)
+    if e_ref <= 0.0:
+        state.warn(
+            f"{kw} {mat.mid}: LCEM gives E = {e_ref:g} at the reference "
+            f"temperature {t_ref:g}. /MAT/LAW106 scales its E(T) function by "
+            "the E cell (hm_read_mat106.F90:262), so a zero scalar makes the "
+            "whole dependence identically zero. The material is SKIPPED.")
+        return
+    fct_e = _law106_normalised_function(state, mat.mid, "E", e_pts, e_ref)
+    nu_pts = _law106_curve_points(state, mat.lcpr)
+    nu_ref, fct_nu = 0.0, 0
+    if nu_pts is not None:
+        nu_ref = _interp_table([x for x, _y in nu_pts],
+                               [y for _x, y in nu_pts], t_ref)
+        if nu_ref != 0.0:
+            fct_nu = _law106_normalised_function(
+                state, mat.mid, "nu", nu_pts, nu_ref)
+    sy_pts = _law106_curve_points(state, mat.lcsy)
+    a = (_interp_table([x for x, _y in sy_pts],
+                       [y for _x, y in sy_pts], t_ref)
+         if sy_pts is not None else _LAW106_NO_YIELD)
+    h_pts = _law106_curve_points(state, mat.lchr)
+    # LCHR is ALREADY the plastic hardening modulus (Remark 2) — no
+    # E·Et/(E−Et) conversion here, unlike *MAT_004's ETAN.
+    b = (_interp_table([x for x, _y in h_pts],
+                       [y for _x, y in h_pts], t_ref)
+         if h_pts is not None else 0.0)
+    alpha_pts = _law106_curve_points(state, mat.lcat)
+    _law106_register(state, MatLaw106(
+        mid=mat.mid, title=mat.title, rho=mat.rho, e=e_ref, nu=nu_ref,
+        fct_e=fct_e, fct_nu=fct_nu, a=a, b=b, n=1.0,
+        rho_cp=_law106_thermal_rho_cp(state, mat.mid), tr=t_ref, source=kw),
+        alpha_pts)
+    spreads = [_law106_spread("E(LCEM)", xs, es)]
+    if nu_pts is not None:
+        spreads.append(_law106_spread(
+            "nu(LCPR)", [x for x, _y in nu_pts], [y for _x, y in nu_pts]))
+    if sy_pts is not None:
+        spreads.append(_law106_spread(
+            "sigma_y(LCSY)", [x for x, _y in sy_pts],
+            [y for _x, y in sy_pts]))
+    if h_pts is not None:
+        spreads.append(_law106_spread(
+            "H(LCHR)", [x for x, _y in h_pts], [y for _x, y in h_pts]))
+    _law106_report(state, kw, mat.mid, t_ref, why_ref, fct_e, fct_nu, a, b,
+                   sy_pts is None, spreads,
+                   alpha_stated=alpha_pts is not None,
+                   range_lo=xs[0], range_hi=xs[-1],
+                   hardening_note=(
+                       "LCHR is ALREADY the PLASTIC hardening modulus (Vol II "
+                       "R17 p.2-1836 Remark 2, sigma_Y = sigma_Y(T) + "
+                       "beta*H(T)*eps_p), so it is written into B UNCONVERTED "
+                       "— the E*Et/(E-Et) derivation *MAT_004's total-strain "
+                       "ETAN needs would be a silent factor error here"))
+    _warn_cwm_dropped_cells(state, mat)
+
+
+def _law106_report(state: ConversionState, kw: str, mid: int, t_ref: float,
+                   why_ref: str, fct_e: int, fct_nu: int, a: float, b: float,
+                   thermo_elastic: bool, spreads: List[Optional[str]], *,
+                   alpha_stated: bool, range_lo: float, range_hi: float,
+                   hardening_note: str = "") -> None:
+    """The per-card statement of what was carried and what was frozen."""
+    lost = [s for s in spreads if s]
+    frozen = [s for s in lost
+              if s.startswith(("SIGY", "ETAN", "sigma_y", "H("))]
+    carried = [s for s in lost if s not in frozen]
+    state.warn(
+        f"{kw} {mid} -> /MAT/LAW106 (the only law available at /BEGIN 2022 "
+        "that carries E(T) and nu(T) as plain functions of temperature; "
+        "/MAT/LAW129, the exact target, first appears in radioss2025). "
+        f"Reference temperature Tr = {t_ref:g}, chosen as {why_ref}. "
+        f"E(T) is carried EXACTLY as /FUNCT {fct_e} on both fct_ID1 (heating) "
+        "and fct_ID2 (cooling) — sigeps106.F90:231-240 picks the cooling table "
+        "only while the element cools, so one function must fill both"
+        + (f"; nu(T) as /FUNCT {fct_nu} on fct_ID3" if fct_nu else
+           "; nu is a constant (no fct_ID3)")
+        + (f". alpha(T) is carried 1:1 on /THERM_STRESS/MAT/{mid} with "
+           "Fscale = 1: LS-DYNA's coefficient is the INSTANTANEOUS one "
+           "(Vol II R17 *MAT_004 Remark 1) and Radioss's is incremental "
+           "(ETH = alpha(T)*(T_n - T_(n-1)), mmain.F90:770-786), two "
+           "term-for-term identical forms that need no conversion factor"
+           if alpha_stated else
+           ". The card states no thermal expansion coefficient, so no "
+           "/THERM_STRESS/MAT is written")
+        + ((". FROZEN AT Tr, because LAW106's yield temperature dependence is "
+            "the Johnson-Cook power law 1 - ((T-Tref)/(Tmelt-Tref))^m "
+            "(sigeps106.F90:306-310) and not a table: " + "; ".join(frozen)
+            + f". A = {a:g} and B = {b:g} are those values AT Tr; Tmelt is "
+              "left BLANK (hm_read_mat106.F90:150 turns that into infinity) so "
+              "the power law is identically 1 and A means exactly sigma_y(Tr) "
+              "rather than a value the engine then knocks down. NOTHING IS "
+              "FITTED: fitting m to the welding decks' 273 -> 493 K pair "
+              "predicts 63.2 MPa at 1273 K against a stated 20, a factor 3.2")
+           if frozen else
+           f". A = {a:g} and B = {b:g} are constant over the whole stated "
+           "range, so nothing is lost there")
+        + ((". The card is THERMO-ELASTIC (SIGY = 0, which Vol II R17 p.2-177 "
+            f"Remark 2 means as 'do not define'), so A = {_LAW106_NO_YIELD:g} "
+            "is written: hm_read_mat106.F90 substitutes infinity for a blank "
+            "epsmax and sigmax but NOT for MAT_SIGY, and a copied 0 would make "
+            "the material perfectly plastic at zero stress")
+           if thermo_elastic else "")
+        + ((". " + hardening_note) if hardening_note else "")
+        + (". Carried without loss: " + "; ".join(carried) if carried else "")
+        + ". RANGE: LS-DYNA 'will terminate if a material temperature falls "
+          f"outside the range specified in the input' ({range_lo:g} … "
+          f"{range_hi:g}); Radioss does NOT terminate — it EXTRAPOLATES the "
+          "/FUNCT past its last point, so a run that leaves the table gets a "
+          "silently linear-extrapolated modulus instead of a stop. "
+          "Version-gated dead cells at /BEGIN 2022 (measured on a starter "
+          "probe): Pmin, Tmax, the Taylor-Quinney eta (defaults to 1), T0 "
+          "(defaults to Tref), the Johnson-Cook rate coefficient C, deps0 and "
+          "Fcut — the 2019 cfg names cells the current reader does not ask "
+          "for, so they are lost BY VERSION, not by mapping.")
+
+
+def _warn_cwm_dropped_cells(state: ConversionState, mat: MatCWM) -> None:
+    """The three ``*MAT_CWM`` mechanisms LAW106 has no counterpart for, and the
+    four cells that lose NOTHING.
+
+    Named in full because a welding deck's whole point is the residual-stress
+    field, and these three are what produce it. The honest statement is that
+    the converted deck STARTS and TERMINATES NORMALLY and its residual
+    stresses are not validated — presenting a green run as a converted weld
+    would be the #122 "legal, accepted, misleading" trap at deck scale.
+    """
+    losses = []
+    if mat.tastart or mat.taend:
+        losses.append(
+            f"ANNEALING (TASTART={mat.tastart:g}, TAEND={mat.taend:g}): "
+            "Vol II R17 p.2-1838 Remark 3 scales the accumulated plastic "
+            "strain and the back stress by max[0, min(1, (T-TAend)/"
+            "(TAstart-TAend))] before every stress update, i.e. the plastic "
+            "strain is RESET through the annealing window. /MAT/LAW106 "
+            "accumulates plastic strain monotonically and has no such window. "
+            "For a multi-pass weld this is the single largest physics loss")
+    if mat.tlstart or mat.tlend or mat.eghost or mat.pghost or mat.aghost:
+        losses.append(
+            f"GHOST -> LIVE weld-metal deposition (TLSTART={mat.tlstart:g}, "
+            f"TLEND={mat.tlend:g}, EGHOST={mat.eghost:g}, "
+            f"PGHOST={mat.pghost:g}, AGHOST={mat.aghost:g}): Remark 1 blends "
+            "each element's properties by gamma = min(1, max(0, (T_max - "
+            "TLstart)/(TLend - TLstart))) from its OWN running maximum "
+            "temperature, so an unmelted element carries the quiet (ghost) "
+            "moduli. Radioss's nearest machinery is /ACTIV + /SENSOR/TEMP, but "
+            "/SENSOR/TEMP triggers on a /GRNOD (read_sensor_temp.F:81-87), so "
+            "per-element birth would need one sensor, one group and one /ACTIV "
+            "per weld element — and a deactivated solid also stops CONDUCTING "
+            "(STHERM multiplies by OFF). Out of scope for this batch")
+    if mat.beta not in (0.0, 1.0):
+        losses.append(
+            f"BETA={mat.beta:g} splits the hardening between isotropic and "
+            "KINEMATIC (Remark 2's back stress kappa). /MAT/LAW106 is purely "
+            "isotropic, so the kinematic fraction 1-BETA is DROPPED; only "
+            "BETA = 1 is lossless here")
+    if mat.epsini:
+        losses.append(
+            f"EPSINI={mat.epsini:g} (uniform initial plastic strain) has no "
+            "/MAT/LAW106 cell — state it as an *INITIAL_STRESS_* record "
+            "instead")
+    if losses:
+        state.warn(
+            f"*MAT_CWM {mat.mid} -> /MAT/LAW106: NOT carried — "
+            + "; ".join(losses)
+            + ". A welding deck exists to produce a residual-stress field and "
+              "these are what produce it, so the converted deck will START and "
+              "TERMINATE NORMALLY with the correct temperature-dependent "
+              "elasticity and expansion and a residual stress that is NOT "
+              "VALIDATED. Do not read a green run as a converted weld.")
+    if mat.has_card3 and (mat.t2phase or mat.t1phase or mat.dtemp
+                          or mat.postv):
+        state.warn(
+            f"*MAT_CWM {mat.mid}: card 3 (T2PHASE={mat.t2phase:g}, "
+            f"T1PHASE={mat.t1phase:g}, DTEMP={mat.dtemp:g}, "
+            f"POSTV={mat.postv}) is POST-PROCESSING ONLY and loses NOTHING "
+            "mechanical. Vol II R17 p.2-1839 Remark 4: the phase-change cells "
+            "only fill HISTORY VARIABLE 11, an average temperature rate; "
+            "Remark 5: POSTV selects extra history variables; DTEMP sub-cycles "
+            "the bookkeeping that feeds that same variable. ANOPT = 0 is 'no "
+            "modification for thermal expansion' and DOSPOT = 0 leaves "
+            "spot-weld thinning inactive — both are the card's own defaults "
+            "here.")
+
+
+def _emit_mat_law106(mat: MatLaw106) -> List[str]:
+    """``/MAT/LAW106`` — the ``FORMAT(radioss2019)`` block of
+    ``radioss2020/MAT/mat_law106.cfg``, which is what a ``/BEGIN 2022`` deck
+    reads.
+
+    ::
+
+        C1: RHO_I(20)
+        C2: E(20)  nu(20)  fct_ID1(10) fct_ID2(10) fct_ID3(10)
+        C3: A(20)  B(20)   n(20)       epsmax(20)  sigmax(20)
+        C4: Pmin(20) ..10.. Nmax(10)   Tol(20)
+        C5: ..40.. m(20) Tmelt(20) Tmax(20)
+        C6: RHO_Cp(20) Coef(20) Tc(20) Tr(20)
+
+    Cards 4 and 5 are written BLANK on purpose. ``epsmax``/``sigmax`` blank →
+    infinity (``hm_read_mat106.F90:145-147``), ``m`` blank → 1 and ``Tmelt``
+    blank → infinity (``:150``), which is what makes the Johnson-Cook thermal
+    knockdown identically 1 so that ``A`` means ``sigma_y(Tr)`` and nothing
+    else. ``Nmax``/``Tol`` blank take the reader's own return-mapping defaults
+    (3 or 6 iterations, ``tol = 1e-20``).
+
+    **At /BEGIN 2026 this card must change**: the current reader asks for
+    ``MAT_FCUT``, ``MLAW106_VP``, ``MLAW106_NMAX``, ``MLAW106_TOL``,
+    ``MLAW106_CJC``, ``MLAW106_DEPS0`` on line 3 and ``MAT_SPHEAT``,
+    ``MLAW106_ETA``, ``MLAW106_T0``, ``MLAW106_TR`` on line 5, i.e. the 2026
+    layout is ``Fcut VP Nmax Tol C deps0`` at 100 columns on a five-line card.
+    Writing that at 2022 raises ``WARNING 100213/100214`` and drops the cells —
+    benign, because ``Nmax``, ``Tol``, ``m``, ``Tmelt`` and ``Tr`` sit at
+    identical columns in both layouts (#119 case (a), not a field shift) — but
+    pointless, so the 2019 layout is what is written.
+    """
+    return [
+        f"/MAT/LAW106/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu   fct_ID1   fct_ID2"
+        "   fct_ID3",
+        f"{_f(mat.e)}{_f(mat.nu)}{_i(mat.fct_e)}{_i(mat.fct_e)}"
+        f"{_i(mat.fct_nu)}",
+        "#                  A                   B                   n"
+        "              epsmax              sigmax",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(0.0)}{_f(0.0)}",
+        "#               Pmin                Nmax                 Tol",
+        "",
+        "#                                                          m"
+        "               Tmelt                Tmax",
+        "",
+        "#             RHO_Cp                Coef                  Tc"
+        "                  Tr",
+        f"{_f(mat.rho_cp)}{_f(0.0)}{_f(0.0)}{_f(mat.tr)}",
         HDR,
     ]

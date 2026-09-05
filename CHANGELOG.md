@@ -51,6 +51,76 @@ Prior history (before this changelog was introduced) is summarized in the
     `/HEAT/MAT` at all to `/MAT/ELAST/90001` + `/HEAT/MAT/90001`. Pinned by
     `tests/test_r14_triage_1.py`.
 
+  - **`*MAT_ELASTIC_PLASTIC_THERMAL` / `*MAT_004` (9 decks) → `/MAT/LAW106` +
+    `/THERM_STRESS/MAT` + `/HEAT/MAT`.** The complete MAT cfg availability map
+    at `/BEGIN 2022` leaves exactly one law that carries `E(T)` and `nu(T)` as
+    plain functions of temperature on an ordinary elasto-plastic backbone:
+    `/MAT/LAW129` (`func_young`/`func_nu`/`func_yld`/`func_alpha`) is the exact
+    target and first appears in `radioss2025`, `/MAT/LAW80`'s Young function
+    belongs to the hot-stamping boron-steel law with its whole
+    austenite/ferrite/bainite/martensite kinetics, and `/MAT/LAW121`'s
+    `Fct_YOUN` is a function of STRAIN RATE, not temperature. The emitted card
+    is the `radioss2020/MAT/mat_law106.cfg` **FORMAT(radioss2019)** block, which
+    is what a `/BEGIN 2022` deck reads. `E(T)` and `nu(T)` become `/FUNCT`
+    MULTIPLIERS (`hm_read_mat106.F90:250-263` copies the tables with
+    `fscale(1:2) = e`, `fscale(3) = nu`) written to `fct_ID1` **and** `fct_ID2`,
+    because `sigeps106.F90:231-240` picks table(2) only while the element is
+    COOLING and a 0 there would use the unscaled `E` on every cooling step.
+    MEASURED that `E(T)` is CONSUMED, not merely echoed: two one-brick coupons
+    in confined compression, identical but for the card-6 `Tr` cell, gave
+    `σzz` **32.2609** at `f(T) = 1` and **11.5218** at `f(T) = 0.357143` — a
+    ratio of 0.357143, exactly `f(T)` — with `σxx/σzz = ν/(1−ν) = 0.428571` in
+    both. `ALPHA(T)` reaches `/THERM_STRESS/MAT` with **no conversion factor**:
+    Vol II R17 `*MAT_004` Remark 1 makes it the INSTANTANEOUS coefficient and
+    `mmain.F90:770-786` is incremental, two term-for-term identical forms
+    (#128). The eight-slot `T1..T8` table states no live count, so it is read as
+    the longest STRICTLY INCREASING prefix — an unused slot is written `0.0`,
+    which is also a legal temperature and is what `thermal-stress`,
+    `main_steel_frame` and `ex_24` put in `T1`. `SIGY = 0` is Remark 2's *"if a
+    thermo-elastic material is considered, do not define SIGY and ETAN"*, so
+    `A = 1e20` is written rather than a copied 0 (the reader substitutes
+    infinity for a blank `epsmax`/`sigmax` but NOT for `MAT_SIGY`); `ETAN` is a
+    TOTAL-strain tangent so `B = E·ETAN/(E−ETAN)`, `n = 1`; `Tmelt` is left
+    BLANK, which `hm_read_mat106.F90:150` turns into infinity so the
+    Johnson-Cook knockdown is identically 1 and `A` means exactly `σy(Tr)`.
+    **The named loss** is `SIGY(T)` and `ETAN(T)`, frozen at the reference
+    temperature with the deck's own spread printed (`SIGY 435 … 1 over
+    273 … 10000 K, factor 435` on the welding decks); nothing is fitted,
+    because fitting `m` to the 273→493 pair predicts 63.2 MPa at 1273 K against
+    a stated 20 — 3.2× wrong (#124). Five of the nine corpus decks lose
+    **nothing**: `E`, `ν`, `SIGY` and `ETAN` are constant across their tables.
+    Version-gated dead cells at 2022, measured on a starter probe: `Pmin`,
+    `Tmax`, the Taylor-Quinney `eta`, `T0`, the rate coefficient `C`, `deps0`
+    and `Fcut` — lost BY VERSION, not by mapping.
+
+  - **`*MAT_CWM` / `*MAT_270` (4 welding decks) → the same target, with
+    curves.** `LCEM`/`LCPR` become the same normalised `/FUNCT`s, `LCAT` the
+    `/THERM_STRESS/MAT` function, `LCSY` the `A` cell. **`LCHR` goes into `B`
+    UNCONVERTED**: Vol II R17 p.2-1836 Remark 2 states the flow law as
+    `σ_Y = σ_Y(T) + β·H(T)·ε_p`, so it is already the PLASTIC hardening modulus
+    and applying `*MAT_004`'s `E·Et/(E−Et)` to it would be a silent factor
+    error in the other direction. A conversion-time defect the corpus probe
+    caught before it shipped: `Curve.pts` is ALREADY scaled by the source
+    card's `SFA`/`SFO`, so re-applying them squared the welding decks' `LCAT`
+    `SFO = 1e-6` and produced a **1.7e-11** thermal expansion coefficient where
+    the deck states **1.7e-5**, at zero diagnostics. **Three mechanisms have no
+    counterpart and each is named per card**: the annealing window (Remark 3
+    scales the accumulated plastic strain and back stress by
+    `max[0, min(1, (T−TAend)/(TAstart−TAend))]`, i.e. RESETS them through the
+    window — the largest single loss for a multi-pass weld), the ghost→live
+    weld-metal deposition (Remark 1 blends each element's properties from its
+    OWN running `T_max`; Radioss's nearest machinery `/ACTIV` + `/SENSOR/TEMP`
+    triggers on a `/GRNOD`, `read_sensor_temp.F:81-87`, so per-element birth
+    would need one sensor + group + `/ACTIV` per weld element — and a
+    deactivated solid also stops CONDUCTING), and the kinematic fraction
+    `1−BETA` (β = 1 on all four corpus decks, so nothing is lost there). Card 3
+    loses **nothing**: Remarks 4 and 5 make `T2PHASE`/`T1PHASE`/`DTEMP`/`POSTV`
+    history-variable 11 and post-processing only, which the warning says rather
+    than calling them "dropped". The honest statement, in the warning and here:
+    a converted welding deck will START and TERMINATE NORMALLY with the correct
+    temperature-dependent elasticity and expansion and a **residual stress that
+    is not validated**.
+
 - **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
   thermal keywords and the richer thermal materials, closing the deferred
   registry the RARE MATERIALS batch left behind.** Six engine-source verdicts

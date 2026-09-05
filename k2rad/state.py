@@ -6060,6 +6060,115 @@ class SeatbeltAccelerometer:
     mass: float = 0.0
 
 
+# ── R14 triage batch: the temperature-dependent elasto-plastic laws ──────────
+
+@dataclass
+class MatElasticPlasticThermal:
+    """``*MAT_ELASTIC_PLASTIC_THERMAL`` (``*MAT_004``) → ``/MAT/LAW106`` +
+    ``/THERM_STRESS/MAT``.
+
+    Cards (Vol II R17 pp.2-177..2-179): ``MID RO`` then six eight-slot rows —
+    ``T1..T8``, ``E1..E8``, ``PR1..PR8``, ``ALPHA1..ALPHA8``, ``SIGY1..SIGY8``,
+    ``ETAN1..ETAN8``. The eight slots are a fixed-width table, so how many are
+    LIVE is not stated anywhere: the temperatures must increase, and an unused
+    slot is written as ``0.0`` — a value that is also a legal temperature and
+    that three corpus decks really use as ``T1``. The point count is therefore
+    the length of the longest STRICTLY INCREASING prefix of ``T``, which
+    reproduces all nine corpus carriers (``tempcyl.vari`` −1000/0/1000 → 3,
+    ``thermal-stress`` 0..50 → 6, ``main_steel_frame`` 0/400 → 2).
+
+    Remark 2 (p.2-177): *"At least two temperatures and their corresponding
+    material properties must be defined. The analysis will terminate if a
+    material temperature falls outside the range specified in the input. If a
+    thermo-elastic material is considered, do not define SIGY and ETAN."* —
+    which is why ``ex_24`` states ``SIGY = ETAN = 0`` and ``thermal-stress``
+    ``SIGY = 1e20``: a zero SIGY means THERMO-ELASTIC, not "yields at zero".
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    t: List[float] = field(default_factory=list)
+    e: List[float] = field(default_factory=list)
+    pr: List[float] = field(default_factory=list)
+    alpha: List[float] = field(default_factory=list)
+    sigy: List[float] = field(default_factory=list)
+    etan: List[float] = field(default_factory=list)
+
+
+@dataclass
+class MatCWM:
+    """``*MAT_CWM`` (``*MAT_270``) → ``/MAT/LAW106`` + ``/THERM_STRESS/MAT``.
+
+    Cards (Vol II R17 pp.2-1835..2-1840):
+      Card1: ``MID RO LCEM LCPR LCSY LCHR LCAT BETA``
+      Card2: ``TASTART TAEND TLSTART TLEND EGHOST PGHOST AGHOST EPSINI``
+      Card3 (optional): ``T2PHASE T1PHASE ANOPT POSTV DTEMP DOSPOT``
+
+    The same target family as ``*MAT_004``, with load curves where MAT_004 has
+    eight-point tables. Remark 2 gives the flow law
+    ``sigma_Y = sigma_Y(T) + beta*H(T)*eps_p`` with a back stress
+    ``kappa' = (1-beta)*H(T)*eps_p'*(s-kappa)/sigma_bar`` — so **``LCHR`` is
+    already the plastic HARDENING MODULUS, not a total-strain tangent**: the
+    ``E*Et/(E-Et)`` derivation MAT_004's ``ETAN`` needs must NOT be applied to
+    it (a silent factor error in either direction).
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    lcem: int = 0            # E(T)
+    lcpr: int = 0            # nu(T)
+    lcsy: int = 0            # sigma_y(T)
+    lchr: int = 0            # H(T), the PLASTIC hardening modulus
+    lcat: int = 0            # alpha(T), instantaneous
+    beta: float = 0.0        # 1 = isotropic, 0 = kinematic
+    tastart: float = 0.0     # annealing window (no counterpart)
+    taend: float = 0.0
+    tlstart: float = 0.0     # ghost/live ("weld metal deposition") window
+    tlend: float = 0.0
+    eghost: float = 0.0
+    pghost: float = 0.0
+    aghost: float = 0.0
+    epsini: float = 0.0
+    t2phase: float = 0.0     # card 3: history variable 11 only (Remark 4)
+    t1phase: float = 0.0
+    anopt: float = 0.0
+    postv: int = 0
+    dtemp: float = 0.0
+    dospot: int = 0
+    has_card3: bool = False
+
+
+@dataclass
+class MatLaw106:
+    """The RESOLVED ``/MAT/LAW106`` card, whichever LS-DYNA keyword built it.
+
+    ``*MAT_004`` and ``*MAT_270`` land on the same Radioss law and the same
+    emitter, so the routing decision (which reference temperature, which
+    ``/FUNCT`` ids, what ``A``/``B`` mean) is made ONCE in
+    ``writer/materials.py::_resolve_mat_law106`` and this record is what the
+    writer reads — the #100 one-map rule.
+
+    Card layout: the ``radioss2020/MAT/mat_law106.cfg`` **FORMAT(radioss2019)**
+    block, which is what a ``/BEGIN 2022`` deck reads. ``fct_e`` fills BOTH
+    ``fct_ID1`` (heating) and ``fct_ID2`` (cooling): LS-DYNA states one E(T),
+    and ``sigeps106.F90:231-240`` picks table(2) only when the element is
+    cooling, so leaving it 0 would make a cooling step use ``E`` unscaled.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    e: float = 0.0
+    nu: float = 0.0
+    fct_e: int = 0           # → fct_ID1 AND fct_ID2 (E(T)/E_ref)
+    fct_nu: int = 0          # → fct_ID3 (nu(T)/nu_ref)
+    a: float = 0.0           # sigma_y(T_ref)
+    b: float = 0.0           # the PLASTIC hardening modulus at T_ref
+    n: float = 1.0
+    rho_cp: float = 0.0      # card 6 RHO_Cp, from the deck's *MAT_THERMAL_*
+    tr: float = 0.0          # card 6 Tr — the reference temperature
+    source: str = ""         # the LS-DYNA keyword, for every message
+
+
 # ── Rare materials batch ─────────────────────────────────────────────────────
 
 @dataclass
@@ -7200,6 +7309,20 @@ class ConversionState:
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
 
+    # ── R14 triage batch: the temperature-dependent elasto-plastic laws ──
+    #   *MAT_004 / *MAT_ELASTIC_PLASTIC_THERMAL → /MAT/LAW106 (+ /THERM_STRESS)
+    #   *MAT_270 / *MAT_CWM                     → /MAT/LAW106 (+ /THERM_STRESS)
+    # Two SOURCE registries and one RESOLVED one: both keywords land on the
+    # same law, and writer/materials.py::_resolve_mat_law106 is the single
+    # place that decides the reference temperature, the /FUNCT ids and what
+    # A/B mean (the #100 one-map rule). mat_law106 is what the emitter reads;
+    # a source record that could not be resolved leaves no entry, so the /PART
+    # reports its dangling material rather than getting a half-built card.
+    mat_ep_thermal: Dict[int, MatElasticPlasticThermal] = \
+        field(default_factory=dict)
+    mat_cwm: Dict[int, MatCWM] = field(default_factory=dict)
+    mat_law106: Dict[int, MatLaw106] = field(default_factory=dict)
+
     # ── Rare materials + thermal subsystem ─────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
     #   *MAT_156 / *MAT_MUSCLE        → /PROP/TYPE46 + /SPRING (no /MAT)
@@ -8177,7 +8300,13 @@ class ConversionState:
                   # *MAT_030 → /MAT/LAW71, MID verbatim. (*MAT_156 and
                   # *MAT_S15 are deliberately NOT here: both live entirely
                   # inside a /PROP/TYPE46 and emit no /MAT at all.)
-                  self.mat_shape_memory):
+                  self.mat_shape_memory,
+                  # *MAT_004 and *MAT_270 → /MAT/LAW106 under the MID
+                  # verbatim. The RESOLVED registry is what the writer emits
+                  # from, and it is the one listed here: a source record the
+                  # resolver refused writes no /MAT at all, so claiming its id
+                  # would make next_mat_id() dodge a free number.
+                  self.mat_law106):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

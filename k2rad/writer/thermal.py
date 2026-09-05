@@ -1001,10 +1001,17 @@ def _resolve_thermal(state: ConversionState) -> None:
     be read, echoed and completely inert.
     """
     _warn_control_thermal_solver(state)
+    # state.therm_stress_cards and state.mat_law106 are in the gate because the
+    # R14 triage batch fills BOTH before this pass runs: *MAT_004 / *MAT_270
+    # state their own alpha(T), and a /THERM_STRESS/MAT without the /HEAT/MAT
+    # this pass writes is a hard ERROR 1129 (hm_read_therm_stress.F90:130-132).
+    # Screening only one of the two would let the other through — the #133
+    # "screen BOTH registries when one family lands in two of them" rule.
     if (state.mat_add_thermal_expansion or state.initial_temperatures
             or state.imposed_temperatures or state.mat_thermal_isotropic
             or state.mat_thermal_iso_td or state.mat_thermal_ortho
-            or state.thermal_boundaries or state.load_thermal_elements):
+            or state.thermal_boundaries or state.load_thermal_elements
+            or state.therm_stress_cards or state.mat_law106):
         # FIRST, so nothing announces a conversion this then takes back: the
         # element resolver prints "-> /IMPTEMP over the elements' OWN nodes"
         # as it builds its records, and a drop two passes later would leave
@@ -2138,6 +2145,13 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
 def _resolve_heat_materials(state: ConversionState) -> None:
     """Fill ``state.heat_mat_cards`` — ONCE per material id (#125)."""
     wanted: Set[int] = set(state.therm_stress_cards)
+    # Every /MAT/LAW106, whether or not it states an expansion coefficient.
+    # hm_read_mat106.F90:154-158 turns a Tr <= 0 into 300 K and then sets
+    # TINI = T0 = Tref, so a LAW106 with no /HEAT/MAT would start 300 K away
+    # from a deck whose temperatures are stated on a Celsius scale beginning
+    # at 0 (three corpus carriers do). A /HEAT/MAT OVERWRITES %TINI from its
+    # own T0 (hm_read_therm.F:236-252), which is the deck's own value.
+    wanted |= set(state.mat_law106)
     # A *PART TMID naming a *MAT_THERMAL_* is the deck saying "this part has
     # thermal properties", so it gets a /HEAT/MAT even with no expansion card:
     # that is what lets a temperature driver reach its nodes at all.
