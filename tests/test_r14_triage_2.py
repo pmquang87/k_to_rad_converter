@@ -1,28 +1,29 @@
-"""Tests for the R14 CAMPAIGN TRIAGE batch, round 2.
+"""Tests for the R14 CAMPAIGN TRIAGE batch, round 2 (the engine classes):
 
-Round 1 cleared the STARTER-error classes. Round 2 attacks the two open ENGINE
-classes the 356-deck dynaexamples R14 campaign then measured — 69 decks that
-terminate NORMAL with an internal energy below 1 % of their LS-DYNA reference,
-and 42 whose implicit engine will not advance.
+  A1  *NODE TC/RC constraint cells   -> /GRNOD/NODE + /BCS, default on
+      (pinned in tests/test_side_defects_review.py and
+      tests/test_side_defects_fixround.py, which already owned those
+      sentences; the named successors live there)
+  A3  starter ERROR 611              -> stub Inacti=1, user contacts Fpenmax
+  B1  *SET_<F>_GENERATE / _GENERATE_INCREMENT / _GENERAL / _COLUMN
+  B2  SSTYP/MSTYP = 0 is a *SET_SEGMENT id, 1 a *SET_SHELL id
+  B3  *EOS_GRUNEISEN A = 0           -> a tiny positive a, so the Radioss
+                                        reader's A = GAMMA0 default cannot fire
+  B4  the modal chain's beam mass arm (tools/modal_solve.py)
+  B5  the two side findings B1 exposed: an /INIVEL over rigid-body members,
+      and the modal dummy /CLOAD's per-DOF screen
 
-  A1  ``*NODE`` card 1's own TC/RC constraint cells
-                                    -> one /GRNOD/NODE + /BCS per distinct
-                                       (TC, RC) pair, DEFAULT ON, opt out with
-                                       ``--no-node-tc-rc-bcs``; four screening
-                                       rules, each counted in the message
-  A2  the modal chain and TC/RC     -> a measured NON-item (no tools/ change);
-                                       see ``TestModalChainNeedsNoTcRcArm``
-  A3  starter ERROR 611             -> the synthesized implicit-stabilization
-                                       stub takes Inacti = 1, and every
-                                       /INTER/TYPE7 whose Inacti is 3/4/5/6
-                                       gains an Fpenmax
-
-Part B (set spellings, SSTYP = 0, /EOS/GRUNEISEN, the modal beam mass arm)
-extends this module.
-
-Kept in its own module, the repo's one-module-per-batch convention.
+Kept in its own module, the repo's one-module-per-batch convention. Two
+round-2 tests do NOT live here and must not be moved here: the successors of
+``ForceTransducerSegmentSetTests.test_a_shell_element_set_takes_the_same_route``
+(tests/test_r14_triage_1.py) and of
+``TestEveryElementGroupSiteIsGuarded.test_the_call_site_count``
+(tests/test_side_defects.py) replace tests this batch INVALIDATED, and the
+"a moved or removed test carries its named successor IN PLACE" rule puts them
+where the reader of the old test will look.
 """
 
+import math
 import os
 import tempfile
 import unittest
@@ -40,9 +41,12 @@ def _row(*vals) -> str:
     return "".join(f"{v:>10}" for v in vals)
 
 
-def _row16(*vals) -> str:
-    """LS-DYNA *DEFINE_CURVE point row (2 x 16-char fields)."""
-    return "".join(f"{v:>16}" for v in vals)
+def _grow(option: str, *ids) -> str:
+    """A ``*SET_<F>_GENERAL`` card-2e row: OPTION left-justified in cols 1-10
+    (A10), then E1..E7 in 10-wide integer cells from col 11
+    (``node_general_subgrp.cfg:135``; measured on
+    ``show-cases/contact-overview/main.k:3613`` and ``wall.key:30``)."""
+    return f"{option:<10}" + "".join(f"{v:>10}" for v in ids)
 
 
 def _convert(deck: str, **kw):
@@ -58,7 +62,7 @@ def _convert(deck: str, **kw):
     return result, starter
 
 
-def _state_and_starter(deck: str, **kw):
+def _state_and_starter(deck: str):
     """Parse + dispatch + build_starter, returning the FINAL state (every
     writer prepass and every write-line register filled) and the deck text."""
     from k2rad.writer import build_starter
@@ -66,7 +70,7 @@ def _state_and_starter(deck: str, **kw):
     path = os.path.join(tmp.name, "d.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    state = ConversionState(**kw)
+    state = ConversionState()
     for block in parse_k_file(path):
         dispatch(block, state)
     starter = build_starter(state)
@@ -101,666 +105,1061 @@ def _block(starter: str, header: str):
     return None
 
 
-def _headers(starter: str, prefix: str):
-    return [ln for ln in starter.splitlines() if ln.startswith(prefix)]
-
-
-def _warns(res, needle: str):
-    return [w for w in res.warnings if needle in w]
-
-
-def _n16(nid, x, y, z) -> str:
-    return f"{nid:>8}{x:>16.9G}{y:>16.9G}{z:>16.9G}"
-
-
-def _n16c(nid, x, y, z, tc, rc) -> str:
-    """A *NODE row in the FIXED layout with its TC/RC cells filled: Vol I R17
-    p.35-2 gives card 1 the grid (I8, 3E16.0, 2I8), so TC is cols 57-64 and RC
-    cols 65-72."""
-    return _n16(nid, x, y, z) + f"{tc:>8}{rc:>8}"
-
-
-def _bcs_groups(starter: str):
-    """``{(Tra, Rot): [node ids]}`` for every ``/BCS`` in the TC/RC block.
-
-    Reads the EMITTED text rather than any internal register, so a group that
-    is built but not written cannot pass. The ``/GRNOD/NODE`` a ``/BCS``
-    references is looked up by the id in its data row, which is what the
-    starter itself resolves.
-    """
-    lines = starter.splitlines()
-    grnods = {}
-    i = 0
-    while i < len(lines):
-        if lines[i].startswith("/GRNOD/NODE/"):
-            gid = int(lines[i].rsplit("/", 1)[1])
-            ids = []
-            for data in lines[i + 2:]:
-                if data.startswith("/") or data.startswith("#"):
-                    break
-                ids.extend(int(t) for t in data.split())
-            grnods[gid] = ids
-        i += 1
-    out = {}
-    for i, ln in enumerate(lines):
-        if not ln.startswith("/BCS/"):
+def _ids(starter: str, header: str):
+    """Every integer id of a 10-wide group block (skipping its title card)."""
+    rows = _block(starter, header)
+    assert rows is not None, f"no block {header!r} in\n{starter}"
+    out = []
+    for row in rows[1:]:
+        if row.startswith("#"):
             continue
-        row = lines[i + 3]
-        tra, rot = row.split()[0], row.split()[1]
-        gid = int(row.split()[-1])
-        out[(tra, rot)] = grnods.get(gid, [])
+        for k in range(0, len(row.rstrip()), 10):
+            cell = row[k:k + 10].strip()
+            if cell:
+                out.append(int(cell))
     return out
 
 
-# ── A1: *NODE TC/RC -> /GRNOD/NODE + /BCS ────────────────────────────────────
-
-_SHELL_TAIL = [
-    "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
-    "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
-    "*PART", "plate", _row(1, 1, 1),
-    "*CONTROL_TERMINATION", _row("1.0"), "*END", ""]
+def _headers(starter: str, prefix: str):
+    return [ln.strip() for ln in starter.splitlines()
+            if ln.strip().startswith(prefix)]
 
 
-def _plate(*node_rows) -> str:
-    return "\n".join(
-        ["*KEYWORD", "*NODE"] + list(node_rows)
-        + ["*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
+# ─────────────────────────────────────────────────────────────────────────────
+# B1 — the *SET_* GENERATE / GENERAL / COLUMN spellings
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Two hexes with a HOLE in the node numbering: brick 1 is nodes 1-8, brick 2
+#: is nodes 11-18, and ids 9 and 10 do not exist. Coupon B-1 of the round-2
+#: spec — a range 1..12 selects the 10 EXISTING ids in it, which is what
+#: Vol I R17 p.43-40 says ("All DEFINED IDs between and including BnBEG to
+#: BnEND ... BnBEG and BnEND may simply be limits on the IDs and not nodal
+#: IDs") and what separates "filter the pool" from "materialise the range".
+_TWO_BRICKS = """*NODE
+         1             0.0             0.0             0.0
+         2             1.0             0.0             0.0
+         3             1.0             1.0             0.0
+         4             0.0             1.0             0.0
+         5             0.0             0.0             1.0
+         6             1.0             0.0             1.0
+         7             1.0             1.0             1.0
+         8             0.0             1.0             1.0
+        11             3.0             0.0             0.0
+        12             4.0             0.0             0.0
+        13             4.0             1.0             0.0
+        14             3.0             1.0             0.0
+        15             3.0             0.0             1.0
+        16             4.0             0.0             1.0
+        17             4.0             1.0             1.0
+        18             3.0             1.0             1.0
+*ELEMENT_SOLID
+       1       1
+       1       2       3       4       5       6       7       8
+       2       2
+      11      12      13      14      15      16      17      18
+"""
+
+_TWO_BRICK_TAIL = ("*PART\nbrick one\n" + _row(1, 1, 1) + "\n"
+                   + "*PART\nbrick two\n" + _row(2, 1, 1) + "\n"
+                   + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                   + "*MAT_ELASTIC\n"
+                   + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+                   + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
 
 
-class TestNodeTcRcToBcs(unittest.TestCase):
-    """``*NODE`` card 1 is ``NID X Y Z TC RC`` (Vol I R17 p.35-2/35-3), and the
-    codes are the ``*BOUNDARY_SPC`` triples in the GLOBAL system: 0 none, 1 x,
-    2 y, 3 z, 4 x+y, 5 y+z, 6 z+x, 7 x+y+z.
+def _bricks(*cards: str) -> str:
+    return "*KEYWORD\n" + _TWO_BRICKS + "".join(cards) + _TWO_BRICK_TAIL
 
-    The decode is not asserted from the manual alone. It reproduces LS-DYNA's
-    OWN ``nodal spc summary on *NODE cards`` d3hsp echo on 162 139 nodes across
-    155 R14 reference decks with zero translation-code disagreements, and an
-    explicit deck's ``nodout`` confirms the constraint holds
-    (``intro-by-j.-day/joint/joint-i/revo-stiff``: node 5 states ``TC 7 RC 7``,
-    the deck has no ``*BOUNDARY_SPC``, and all six components read exactly
-    ``0.00000E+00`` at every sample while the free node 3 moves).
-    """
 
-    def test_each_distinct_code_pair_gets_its_own_group(self):
-        starter = _convert(_plate(
-            _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-            _n16c(2, 10.0, 0.0, 0.0, 4, 0),
-            _n16c(3, 10.0, 10.0, 0.0, 4, 0),
-            _n16(4, 0.0, 10.0, 0.0)))[1]
-        groups = _bcs_groups(starter)
-        self.assertEqual(groups.get(("111", "111")), [1])
-        self.assertEqual(groups.get(("110", "000")), [2, 3])
+class SetGenerateRanges(unittest.TestCase):
+    """``*SET_<F>[_LIST]_GENERATE`` expands against the id POOL, post-parse."""
 
-    def test_every_code_maps_to_the_manuals_own_triple(self):
-        """0-7 on TC and on RC, one node each, checked against the table Vol I
-        p.35-2 prints (and LS-DYNA's own echo reproduces)."""
-        expect = {0: "000", 1: "100", 2: "010", 3: "001",
-                  4: "110", 5: "011", 6: "101", 7: "111"}
-        rows = []
-        for code in range(1, 8):
-            rows.append(_n16c(code, float(code), 0.0, 0.0, code, 0))
-            rows.append(_n16c(10 + code, float(code), 1.0, 0.0, 0, code))
-        deck = "\n".join(["*KEYWORD", "*NODE"] + rows
-                         + ["*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)]
-                         + _SHELL_TAIL)
-        groups = _bcs_groups(_convert(deck)[1])
-        for code in range(1, 8):
-            with self.subTest(code=code):
-                self.assertEqual(groups.get((expect[code], "000")), [code])
-                self.assertEqual(groups.get(("000", expect[code])), [10 + code])
+    def test_a_range_with_a_hole_selects_only_the_ids_that_exist(self):
+        """Hand-computed: `B1BEG 1 / B1END 12` over a deck whose nodes are
+        1-8 and 11-18 selects TEN ids — 1..8 plus 11 and 12. Nodes 9 and 10
+        are not in the deck and 13..18 are outside the range."""
+        res, starter = _convert(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 12) + "\n"
+            + "*INITIAL_VELOCITY\n" + _row(100) + "\n"
+            + _row(0.0, 0.0, -500.0) + "\n"))
+        self.assertNotIn("SET_NODE_LIST_GENERATE", res.skipped_keywords)
+        st = _dispatch(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 12) + "\n"))
+        # The RANGE is recorded at parse time, unexpanded (p.43-40: "these
+        # sets are generated after all input is read").
+        self.assertEqual(st.set_generates[("NODE", 100)][1], [(1, 12, 0)])
+        self.assertEqual(st.node_sets, {})
+        # ... and expands in the writer prepass, against the pool.
+        st2, starter2 = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 12) + "\n"))
+        self.assertEqual(st2.node_sets[100][1], [1, 2, 3, 4, 5, 6, 7, 8, 11, 12])
+        del starter, starter2
 
-    def test_the_group_ids_come_from_the_guarded_allocator(self):
-        """Every synthesized /GRNOD goes through ``state.next_grnod_id()`` (the
-        #131 rule): a user ``*SET_NODE`` re-emitted verbatim at or above the
-        90001 auto base collides otherwise, and that is starter ERROR 79 /
-        IN NODE GROUP DEFINITION with no restart file. The probe puts a user
-        set exactly on the id the allocator would hand out first."""
-        deck = "\n".join(
-            ["*KEYWORD", "*NODE",
-             _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-             _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
-             _n16(4, 0.0, 10.0, 0.0),
-             "*SET_NODE_LIST", _row(90001), _row(2, 3),
-             "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-        starter = _convert(deck)[1]
-        ids = [int(ln.rsplit("/", 1)[1]) for ln in _headers(starter, "/GRNOD/NODE/")]
-        self.assertEqual(len(ids), len(set(ids)), f"duplicate /GRNOD id in {ids}")
-        self.assertIn(90001, ids)
+    def test_the_initial_velocity_lands_on_exactly_those_nodes(self):
+        """The consumer end of the same coupon: `/INIVEL` over the 10 selected
+        nodes and no others. Every one of the ~40 `state.node_sets` readers
+        works unchanged, because the expanded set lands under its own sid."""
+        _res, starter = _convert(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 12) + "\n"
+            + "*INITIAL_VELOCITY\n" + _row(100) + "\n"
+            + _row(0.0, 0.0, -500.0) + "\n"))
+        inivel = _headers(starter, "/INIVEL/")
+        self.assertEqual(len(inivel), 1, starter)
+        grnod = [h for h in _headers(starter, "/GRNOD/NODE/")]
+        nids = None
+        for h in grnod:
+            got = _ids(starter, h)
+            if got == [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]:
+                nids = got
+        self.assertEqual(nids, [1, 2, 3, 4, 5, 6, 7, 8, 11, 12], starter)
 
-    def test_the_free_format_layout_is_read_too(self):
-        """The comma form keeps an empty field between commas, so
-        ``1,0.,0.,0.,,7`` is TC 0 / RC 7 and not TC 7."""
-        deck = "\n".join(
-            ["*KEYWORD", "*NODE",
-             "1,0.0,0.0,0.0,,7", "2,10.0,0.0,0.0,5,0",
-             "3,10.0,10.0,0.0", "4,0.0,10.0,0.0",
-             "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-        groups = _bcs_groups(_convert(deck)[1])
-        self.assertEqual(groups.get(("000", "111")), [1])
-        self.assertEqual(groups.get(("011", "000")), [2])
+    def test_a_twenty_million_wide_range_is_bounded_by_the_pool(self):
+        """Coupon B-2. `show-cases/contact-overview/main.k` really states a
+        `*SET_PART_LIST_GENERATE` spanning 10 000 000..30 199 999 over 664
+        parts, so `range(beg, end + 1)` is a memory bomb on a roster deck, not
+        a hypothetical. The pool is bisected instead: 16 ids out, and the
+        conversion is not measurably slower than the same deck without it."""
+        import time
+        t0 = time.time()
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 30000000) + "\n"))
+        elapsed = time.time() - t0
+        self.assertEqual(len(st.node_sets[100][1]), 16)
+        self.assertEqual(st.node_sets[100][1][0], 1)
+        self.assertEqual(st.node_sets[100][1][-1], 18)
+        self.assertLess(elapsed, 10.0)
 
-    def test_real_corpus_rows_are_read_verbatim(self):
-        """Three ``*NODE`` rows copied byte-for-byte out of R14 decks, not
-        rebuilt by the test's own formatter — a helper that pads the way the
-        reader expects only proves it is self-consistent.
+    def test_the_increment_form_samples_the_range(self):
+        """Card 2d, p.43-40: "Node IDs BBEG, BBEG + INCR, BBEG + 2 x INCR, and
+        so on through BEND are added to the set." 1..18 step 3 is
+        {1, 4, 7, 10, 13, 16}; 10 does not exist, so the set is
+        {1, 4, 7, 13, 16} — five ids, and the hole is REPORTED, not hidden."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE_INCREMENT\n" + _row(100) + "\n"
+            + _row(1, 18, 3) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1, 4, 7, 13, 16])
+        holes = [w for w in st.warnings if "GENERATE 100" in w]
+        self.assertEqual(len(holes), 1, st.warnings)
+        self.assertIn("span 6 ids and 5 of them exist", holes[0])
 
-        Row 1 is ``component1.k``'s (plain decimals, ``tc 7 rc 0``), rows 2-3
-        are ``taylor1.k``'s (``E`` notation with a NEGATIVE first coordinate,
-        which is the layout that welded the id to the coordinate under a
-        whitespace split and cost 58 303 rows in #132), and row 4 is
-        ``control_contact.hemi-draw.k``'s ``tc 6 rc 7``.
+    def test_a_non_positive_stride_is_named_and_read_as_one(self):
+        """`node_list_generate.cfg:28` gives `by` no DEFAULT row, so a stated
+        0 is a stated 0 — but BBEG + 0 + 0 + ... never reaches BEND, so it
+        cannot be read literally either."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE_INCREMENT\n" + _row(100) + "\n"
+            + _row(1, 8, 0) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1, 2, 3, 4, 5, 6, 7, 8])
+        w = [x for x in st.warnings if "INCR=0" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+        self.assertIn("is not a positive stride", w[0])
 
-        **Format census, stated rather than assumed**: every TC/RC carrier in
-        both corpus roots writes this fixed ``(I8, 3E16.0, 2I8)`` layout. The
-        ``i10=y`` (``*NODE %``) and ``newformat=long`` (``*NODE +``) variants
-        have ZERO occurrences, and neither sigil is handled anywhere in the
-        parser — a named non-item, not coverage this batch claims.
-        """
-        rows = [
-            "       1             0.0             0.0             0.0       7       0",
-            "       2-1.000000000E+01-1.000000000E+01-7.000000000E+00       7       0",
-            "       3-1.000000000E+01 1.000000000E+01-7.000000000E+00       7       0",
-            "       4             0.0            10.0             0.0       6       7",
-        ]
-        state = _dispatch("\n".join(["*KEYWORD", "*NODE"] + rows + ["*END", ""]))
-        self.assertEqual(state.node_tc_rc,
-                         {1: (7, 0), 2: (7, 0), 3: (7, 0), 4: (6, 7)})
-        # The #132 guard: the E-notation rows must keep their own ids and
-        # coordinates, not collapse into a phantom node 0.
-        self.assertEqual(sorted(state.nodes), [1, 2, 3, 4])
-        self.assertEqual((state.nodes[2].x, state.nodes[2].y, state.nodes[2].z),
-                         (-10.0, -10.0, -7.0))
+    def test_a_zero_zero_pair_is_padding_and_not_a_range(self):
+        """LS-PrePost fills card 2c's four `(BnBEG, BnEND)` slots with literal
+        ZEROS, so `taylor2.k:113` reads `9  2008  0  0  0  0  0  0`. A blank
+        cell is dropped by the strip test; a literal 0 is not, and counting
+        the three padding pairs as ranges inflated the SPAN the hole report
+        quotes (matfoamsoil's set 9 read "726 of 1002" against its true
+        "726 of 999")."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 8, 0, 0, 0, 0, 0, 0) + "\n"))
+        self.assertEqual(st.set_generates[("NODE", 100)][1], [(1, 8, 0)])
+        self.assertEqual(st.node_sets[100][1], [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([w for w in st.warnings if "GENERATE 100" in w], [])
 
-    def test_a_deck_without_the_cells_emits_no_block(self):
-        starter = _convert(_plate(
-            _n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)))[1]
-        self.assertNotIn("*NODE TC/RC", starter)
-        self.assertEqual(_headers(starter, "/BCS/"), [])
+    def test_four_pairs_on_one_card_all_count(self):
+        """Card 2c holds FOUR ranges (`FREE_CELL_LIST(genemax,"%10d%10d",
+        start,end,80)`), and a second card continues the list."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE\n" + _row(100) + "\n"
+            + _row(1, 2, 5, 6, 11, 11, 13, 13) + "\n"
+            + _row(17, 18) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1, 2, 5, 6, 11, 13, 17, 18])
 
-    def test_an_out_of_range_code_is_named_and_not_guessed(self):
-        """Vol I gives both cells exactly eight values. There is no mask for a
-        ninth, and clamping one would pin DOFs the deck never asked for."""
+    def test_a_part_set_generate_reaches_the_part_pool(self):
+        """*SET_PART_LIST_GENERATE is the second family with a corpus carrier
+        (`show-cases/contact-overview/main.k`). The range 1..99 over a
+        two-part deck selects both."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_PART_LIST_GENERATE\n" + _row(42) + "\n"
+            + _row(1, 99) + "\n"))
+        self.assertEqual(st.part_sets[42][1], [1, 2])
+
+    def test_a_solid_set_generate_uses_the_bare_spelling(self):
+        """OPTION1 is family-specific and the asymmetry is real: SOLID/BEAM/
+        DISCRETE spell it bare `GENERATE` (p.43-89 / 43-3 / 43-14,
+        `solid_list_generate.cfg:102` `*SET_SOLID_GENERATE%s`), so
+        `*SET_SOLID_LIST_GENERATE` must NOT fall out of the lenient
+        `*SET_SOLID_LIST` alias k2rad also registers."""
+        from k2rad.handlers import HANDLERS
+        self.assertIn("SET_SOLID_GENERATE", HANDLERS)
+        self.assertNotIn("SET_SOLID_LIST_GENERATE", HANDLERS)
+        self.assertIn("SET_NODE_LIST_GENERATE", HANDLERS)
+        self.assertNotIn("SET_NODE_GENERATE", HANDLERS)
+        self.assertIn("SET_DISCRETE_GENERATE", HANDLERS)
+        self.assertNotIn("SET_DISCRETE_GENERATE_INCREMENT", HANDLERS)
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_SOLID_GENERATE\n" + _row(7) + "\n" + _row(1, 99) + "\n"))
+        self.assertEqual(st.solid_sets[7][1], [1, 2])
+
+    def test_a_tshell_range_spelling_stays_refused_by_name(self):
+        """`*SET_TSHELL_GENERATE` DOES exist (p.43-100), unlike
+        `*SET_TSHELL_ADD`. What k2rad has no room for is the RESULT: there is
+        no tshell_sets container and `*SET_TSHELL` itself is unregistered, so
+        registering only the range spelling would parse a set nothing can
+        read."""
+        res, _starter = _convert(_bricks(
+            "*SET_TSHELL_GENERATE\n" + _row(7) + "\n" + _row(1, 99) + "\n"))
+        self.assertIn("SET_TSHELL_GENERATE", res.skipped_keywords)
+
+    def test_collect_and_title_are_stripped_by_the_parser(self):
+        """`_COMBINE(KEY,"_INCREMENT")` -> `"_COLLECT"` -> `"_TITLE"` in every
+        `Keyword971/SETS/*_list_generate.cfg`, so the suffixes stack and
+        enumerating the permutations in HANDLERS would double every generated
+        spelling (the #116 combinatorics trap). `parser._TRAILING` strips
+        both, and two cards with the same id MERGE — which is what _COLLECT
+        exists for."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST_GENERATE_COLLECT\n" + _row(100) + "\n"
+            + _row(1, 4) + "\n"
+            + "*SET_NODE_LIST_GENERATE_COLLECT_TITLE\nsecond half\n"
+            + _row(100) + "\n" + _row(11, 14) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1, 2, 3, 4, 11, 12, 13, 14])
+
+
+class SetGeneralOptions(unittest.TestCase):
+    """``*SET_<F>_GENERAL`` — clauses applied IN ORDER, exclusions only
+    against what is already in the set."""
+
+    def test_the_manuals_own_worked_example(self):
+        """Coupon B-3, Vol I R17 p.43-41 verbatim: part 6 = {10,15,20,32},
+        box 7 = {5,20,32}, part 10 = {5,22,106}; `PART 6 / DBOX 7 / PART 10`
+        -> **{5, 10, 15, 22, 106}**. A set-semantics implementation gives
+        {10,15,22,106} (5 excluded by the box before it was ever added) or
+        {5,10,15,20,22,32,106} (no exclusion at all)."""
+        mesh = ["*NODE"]
+        # part 6's nodes, on a plane the box does not reach except 20 and 32
+        for nid, x in ((10, 0.0), (15, 1.0), (20, 5.0), (32, 6.0)):
+            mesh.append(_row(nid, x, 0.0, 0.0))
+        for nid, x in ((5, 5.5), (22, 0.5), (106, 1.5)):
+            mesh.append(_row(nid, x, 10.0, 0.0))
+        deck = ("*KEYWORD\n" + "\n".join(mesh) + "\n"
+                # two 1-D "parts" so PART 6 and PART 10 have a node census
+                + "*ELEMENT_BEAM\n" + _row(1, 6, 10, 15, 0) + "\n"
+                + _row(2, 6, 20, 32, 0) + "\n"
+                + _row(3, 10, 5, 22, 0) + "\n" + _row(4, 10, 106, 5, 0) + "\n"
+                + "*PART\nsix\n" + _row(6, 1, 1) + "\n"
+                + "*PART\nten\n" + _row(10, 1, 1) + "\n"
+                + "*SECTION_BEAM\n" + _row(1, 1) + "\n"
+                + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+                + "*MAT_ELASTIC\n"
+                + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+                # the box covers x in [4.5, 6.5], y in [-1, 1]: nodes 20, 32
+                # from part 6 and, at y = 10, nothing -- so node 5 is NOT in
+                # it geometrically. Give it y up to 11 so 5 IS in it, which is
+                # what makes the ORDER observable.
+                + "*DEFINE_BOX\n"
+                + _row(7, 4.5, 6.5, -1.0, 11.0, -1.0, 1.0) + "\n"
+                + "*SET_NODE_GENERAL\n" + _row(1) + "\n"
+                + _grow("PART", 6) + "\n"
+                + _grow("DBOX", 7) + "\n"
+                + _grow("PART", 10) + "\n"
+                + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
+        st, _starter = _state_and_starter(deck)
+        self.assertEqual(sorted(st.node_sets[1][1]), [5, 10, 15, 22, 106])
+
+    def test_a_general_part_clause_is_the_parts_node_census(self):
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_GENERAL\n" + _row(1) + "\n" + _grow("PART", 2) + "\n"))
+        self.assertEqual(st.node_sets[1][1],
+                         [11, 12, 13, 14, 15, 16, 17, 18])
+
+    def test_a_general_all_clause_is_every_node(self):
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_GENERAL\n" + _row(1) + "\n" + _grow("ALL") + "\n"))
+        self.assertEqual(len(st.node_sets[1][1]), 16)
+
+    def test_a_general_box_clause_intersects_the_source_nodes(self):
+        """`*DEFINE_BOX` sweeps must intersect `state.source_node_ids` so a box
+        drawn round the user's model does not also catch k2rad's own
+        synthesized nodes (`writer/assembly.py`'s existing rule)."""
+        st, _starter = _state_and_starter(_bricks(
+            "*DEFINE_BOX\n"
+            + _row(7, 2.5, 5.0, -1.0, 2.0, -1.0, 2.0) + "\n"
+            + "*SET_NODE_GENERAL\n" + _row(1) + "\n" + _grow("BOX", 7) + "\n"))
+        self.assertEqual(st.node_sets[1][1],
+                         [11, 12, 13, 14, 15, 16, 17, 18])
+
+    def test_a_general_dpart_clause_excludes(self):
+        """The only two `DPART` rows in either corpus are inside the Yaris and
+        Camry `*INCLUDE` trees, which no sweep converts — so this is a
+        CORRECTNESS requirement with no mover behind it, and a test is the
+        only thing that can hold it."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_GENERAL\n" + _row(1) + "\n"
+            + _grow("ALL") + "\n" + _grow("DPART", 1) + "\n"))
+        self.assertEqual(st.node_sets[1][1],
+                         [11, 12, 13, 14, 15, 16, 17, 18])
+
+    def test_a_segment_general_seg_row_shares_the_triangle_collapse(self):
+        """Coupon B-4. A face written `n1 n2 n3 n3` (the manual's N4 = N3
+        spelling, which `Model-318_Achshebel-fein_tobi.k:392` really uses) and
+        the same face written `n1 n2 n3 0` on a `*SET_SEGMENT` must become ONE
+        segment, or one `*LOAD_SEGMENT_SET` pressure is applied twice — the
+        #131-measured EXT-WORK 18.35 -> 73.39 trap."""
+        st, starter = _state_and_starter(_bricks(
+            "*SET_SEGMENT\n" + _row(9) + "\n" + _row(1, 2, 3, 0) + "\n"
+            + "*SET_SEGMENT_GENERAL\n" + _row(9) + "\n"
+            + _grow("SEG", 1, 2, 3, 3) + "\n"
+            + "*LOAD_SEGMENT_SET\n" + _row(9, 1, 1.0) + "\n"
+            + "*DEFINE_CURVE\n" + _row(1) + "\n"
+            + f"{0.0:>20}{1.0:>20}\n" + f"{1.0:>20}{1.0:>20}\n"))
+        self.assertEqual(len(st.segment_sets[9].segments), 1)
+        self.assertEqual(st.segment_sets[9].segments[0], [1, 2, 3])
+        self.assertEqual(len(_headers(starter, "/PLOAD/")), 1, starter)
+
+    def test_a_segment_general_part_clause_keeps_the_part_ids(self):
+        """Vol I R17 p.43-64: "For shell elements, one segment per shell is
+        generated. For solid elements, only those segments wrapping the solid
+        part and pointing outward from the part will be generated." That is
+        what `_make_master_surface` already emits, so the PART ids ride
+        through on `SegmentSet.part_scope` instead of being tessellated in
+        Python (and E4..E7 on that option are FLOAT attributes, not part ids
+        — reading them as ids would add phantom parts)."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_SEGMENT_GENERAL\n" + _row(9) + "\n"
+            + _grow("PART", 2) + "\n"))
+        self.assertEqual(st.segment_sets[9].part_scope, [2])
+        self.assertEqual(st.segment_sets[9].segments, [])
+
+    def test_an_option_with_no_resolver_is_refused_by_name(self):
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_SEGMENT_GENERAL\n" + _row(9) + "\n"
+            + _grow("SEG", 1, 2, 3, 4) + "\n"
+            + _grow("BOX_SHELL", 7) + "\n"))
+        w = [x for x in st.warnings if "BOX_SHELL" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+        self.assertIn("*SET_SEGMENT_GENERAL 9", w[0])
+        self.assertIn("_SEGMENT_GENERAL_OPTIONS", w[0])
+        # the other clause still built the set
+        self.assertEqual(len(st.segment_sets[9].segments), 1)
+
+    def test_a_part_general_refusal_cites_the_part_option_table(self):
+        """A warning's CITED FACT needs the same audit as its conclusion: the
+        `*SET_PART_GENERAL` reader is `_PART_GENERAL_OPTIONS`, and sending the
+        reader to the element table would name a list that does not hold this
+        family's options."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_PART_GENERAL\n" + _row(3) + "\n"
+            + _grow("MATTYPE", 1) + "\n"))
+        w = [x for x in st.warnings if "MATTYPE" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+        self.assertIn("_PART_GENERAL_OPTIONS", w[0])
+        self.assertNotIn("_ELEM_GENERAL_OPTIONS", w[0])
+
+    def test_an_add_union_named_by_a_general_clause_is_named(self):
+        """The one back-edge the pass order cannot serve — GENERAL resolves
+        before `_flatten_set_adds`, so a clause naming an `_ADD` union is
+        warned by name rather than silently dropped. No corpus deck does it."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2) + "\n"
+            + "*SET_NODE_ADD\n" + _row(6) + "\n" + _row(5) + "\n"
+            + "*SET_NODE_GENERAL\n" + _row(1) + "\n"
+            + _grow("SET_NODE", 6) + "\n"))
+        w = [x for x in st.warnings if "*SET_NODE_ADD 6" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+
+
+class SetColumnSpelling(unittest.TestCase):
+    def test_a_node_column_set_is_a_plain_node_list(self):
+        """Card 2b, p.43-39: one `NID A1 A2 A3 A4` per card, the A cells
+        overriding the header's DA1..DA4 for THAT node (Remark 2, p.43-44).
+        No k2rad consumer reads a per-ENTITY attribute, so a COLUMN set is a
+        plain id list — and the dropped cells are named, not ignored."""
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_COLUMN\n" + _row(100) + "\n"
+            + _row(1, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(5, 2.5, 0.0, 0.0, 0.0) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1, 5])
+        w = [x for x in st.warnings if "SET_NODE_COLUMN 100" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+        self.assertIn("A1..A4", w[0])
+
+    def test_a_column_set_with_no_attributes_is_silent(self):
+        st, _starter = _state_and_starter(_bricks(
+            "*SET_NODE_COLUMN\n" + _row(100) + "\n" + _row(1) + "\n"))
+        self.assertEqual(st.node_sets[100][1], [1])
+        self.assertEqual([x for x in st.warnings if "SET_NODE_COLUMN" in x], [])
+
+
+class SetSpellingsAreRegistered(unittest.TestCase):
+    """One `assertNotIn(<spelling>, skipped_keywords)` per newly registered
+    family, so a dropped registration is caught as a test failure rather than
+    as a silently empty set."""
+
+    def test_every_registered_spelling_leaves_skipped_keywords(self):
+        cards = {
+            "SET_NODE_LIST_GENERATE":
+                "*SET_NODE_LIST_GENERATE\n" + _row(101) + "\n" + _row(1, 8),
+            "SET_NODE_LIST_GENERATE_INCREMENT":
+                "*SET_NODE_LIST_GENERATE_INCREMENT\n" + _row(102) + "\n"
+                + _row(1, 8, 2),
+            "SET_NODE_GENERAL":
+                "*SET_NODE_GENERAL\n" + _row(103) + "\n" + _grow("ALL"),
+            "SET_NODE_COLUMN":
+                "*SET_NODE_COLUMN\n" + _row(104) + "\n" + _row(1),
+            "SET_PART_LIST_GENERATE":
+                "*SET_PART_LIST_GENERATE\n" + _row(105) + "\n" + _row(1, 9),
+            "SET_PART_COLUMN":
+                "*SET_PART_COLUMN\n" + _row(106) + "\n" + _row(1),
+            "SET_PART_GENERAL":
+                "*SET_PART_GENERAL\n" + _row(107) + "\n" + _grow("ALL"),
+            "SET_SHELL_LIST_GENERATE":
+                "*SET_SHELL_LIST_GENERATE\n" + _row(108) + "\n" + _row(1, 9),
+            "SET_SHELL_COLUMN":
+                "*SET_SHELL_COLUMN\n" + _row(109) + "\n" + _row(1),
+            "SET_SHELL_GENERAL":
+                "*SET_SHELL_GENERAL\n" + _row(110) + "\n" + _grow("ALL"),
+            "SET_SOLID_GENERATE":
+                "*SET_SOLID_GENERATE\n" + _row(111) + "\n" + _row(1, 9),
+            "SET_SOLID_GENERATE_INCREMENT":
+                "*SET_SOLID_GENERATE_INCREMENT\n" + _row(112) + "\n"
+                + _row(1, 9, 1),
+            "SET_SOLID_GENERAL":
+                "*SET_SOLID_GENERAL\n" + _row(113) + "\n" + _grow("ALL"),
+            "SET_BEAM_GENERATE":
+                "*SET_BEAM_GENERATE\n" + _row(114) + "\n" + _row(1, 9),
+            "SET_BEAM_GENERATE_INCREMENT":
+                "*SET_BEAM_GENERATE_INCREMENT\n" + _row(115) + "\n"
+                + _row(1, 9, 1),
+            "SET_BEAM_GENERAL":
+                "*SET_BEAM_GENERAL\n" + _row(116) + "\n" + _grow("ALL"),
+            "SET_DISCRETE_GENERATE":
+                "*SET_DISCRETE_GENERATE\n" + _row(117) + "\n" + _row(1, 9),
+            "SET_DISCRETE_GENERAL":
+                "*SET_DISCRETE_GENERAL\n" + _row(118) + "\n" + _grow("ALL"),
+            "SET_SEGMENT_GENERAL":
+                "*SET_SEGMENT_GENERAL\n" + _row(119) + "\n"
+                + _grow("SEG", 1, 2, 3, 4),
+        }
+        for kw, card in sorted(cards.items()):
+            with self.subTest(kw=kw):
+                res, _starter = _convert(_bricks(card + "\n"))
+                self.assertNotIn(kw, res.skipped_keywords)
+
+    def test_the_three_generators_read_the_same_family_table(self):
+        """`state.SET_RANGE_FAMILIES` generates the parser keys, the
+        `*INCLUDE_TRANSFORM` offset rows and the expansion pass's family loop.
+        A spelling read by one and invisible to the others is the #116 silent
+        failure, so the two generated key sets must be equal."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import _set_range_keywords
+        generated = {kw for kw, _f, _k, _i in _set_range_keywords()}
+        self.assertTrue(generated)
+        self.assertEqual(generated - set(_OFFSET_SPECS), set())
+
+
+class SetSpellingOffsets(unittest.TestCase):
+    """`*INCLUDE_TRANSFORM` — every range CELL is an entity id."""
+
+    @staticmethod
+    def _with_include(child: str, idnoff: int = 100000, ideoff: int = 0,
+                      idpoff: int = 0, idsoff: int = 0):
+        """Card 2 of `*INCLUDE_TRANSFORM` is
+        `IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF IDROFF` — IDSOFF is
+        field FIVE, and putting it in field four offsets materials instead."""
+        tmp = tempfile.TemporaryDirectory()
+        with open(os.path.join(tmp.name, "child.k"), "w") as fh:
+            fh.write("*KEYWORD\n" + child + "*END\n")
+        parent = ("*KEYWORD\n"
+                  + "*INCLUDE_TRANSFORM\nchild.k\n"
+                  + _row(idnoff, ideoff, idpoff, 0, idsoff, 0, 0, 0) + "\n"
+                  + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                  + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
+        path = os.path.join(tmp.name, "parent.k")
+        with open(path, "w") as fh:
+            fh.write(parent)
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        return state
+
+    def test_a_generate_range_moves_with_the_node_offset(self):
+        """A range 1..999 under IDNOFF = 100000 must become 100001..100999,
+        or the include's nodes move, the range does not, and the set resolves
+        EMPTY at zero diagnostics."""
+        st = self._with_include(
+            "*SET_NODE_LIST_GENERATE\n" + _row(7) + "\n"
+            + _row(1, 999) + "\n", idnoff=100000, idsoff=500)
+        self.assertEqual(st.set_generates[("NODE", 507)][1],
+                         [(100001, 100999, 0)])
+
+    def test_the_increment_stride_is_not_an_id(self):
+        """Field 2 of card 2d is a STRIDE. An `(ALL, ...)` spec would offset
+        it and re-sample the range."""
+        st = self._with_include(
+            "*SET_NODE_LIST_GENERATE_INCREMENT\n" + _row(7) + "\n"
+            + _row(1, 999, 3) + "\n", idnoff=100000)
+        self.assertEqual(st.set_generates[("NODE", 7)][1],
+                         [(100001, 100999, 3)])
+
+    def test_a_column_set_offsets_field_zero_only(self):
+        """A1..A4 are floats."""
+        st = self._with_include(
+            "*SET_NODE_COLUMN\n" + _row(7) + "\n"
+            + _row(4, 2.5, 0.0, 0.0, 0.0) + "\n", idnoff=100000)
+        self.assertEqual(st.node_sets[7][1], [100004])
+
+    def test_a_general_clause_offsets_by_its_own_option(self):
+        """The id columns depend on the OPTION in cols 1-10 of the SAME row,
+        so the walker is callable: SEG's E1..E4 are NODE ids, PART's E1..E3
+        are PART ids and its E4..E7 are FLOAT attributes
+        (`segment_general_subgrp.cfg:258`), and SET_* names SET ids."""
+        st = self._with_include(
+            "*SET_SEGMENT_GENERAL\n" + _row(7) + "\n"
+            + _grow("SEG", 1, 2, 3, 4) + "\n"
+            + _grow("PART", 5) + "\n",
+            idnoff=100000, idpoff=300, idsoff=20)
+        clauses = st.set_generals[("SEGMENT", 27)][1]
+        self.assertEqual(clauses[0], ("SEG", [100001, 100002, 100003, 100004]))
+        self.assertEqual(clauses[1], ("PART", [305]))
+
+    def test_a_general_all_clause_has_nothing_to_offset(self):
+        st = self._with_include(
+            "*SET_NODE_GENERAL\n" + _row(7) + "\n" + _grow("ALL") + "\n",
+            idnoff=100000)
+        self.assertEqual(st.set_generals[("NODE", 7)][1], [("ALL", [])])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B2 — SSTYP/MSTYP = 0 is a *SET_SEGMENT id, 1 a *SET_SHELL id
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: A 2x2 shell plate (part 1) plus a separate impactor shell (part 2). The
+#: shape of `intro-by-k.-weimar/contact/contact-ii/plate.typ13.k`: a
+#: `*SET_SEGMENT 1` that spans BOTH bodies beside a `*PART 1` that is the
+#: plate alone, so part-first precedence and set precedence give visibly
+#: different interfaces.
+_PLATE_MESH = """*NODE
+         1             0.0             0.0             0.0
+         2             1.0             0.0             0.0
+         3             2.0             0.0             0.0
+         4             0.0             1.0             0.0
+         5             1.0             1.0             0.0
+         6             2.0             1.0             0.0
+         7             0.0             2.0             0.0
+         8             1.0             2.0             0.0
+         9             2.0             2.0             0.0
+       101             0.0             0.0             5.0
+       102             1.0             0.0             5.0
+       103             1.0             1.0             5.0
+       104             0.0             1.0             5.0
+*ELEMENT_SHELL
+       1       1       1       2       5       4
+       2       1       2       3       6       5
+       3       1       4       5       8       7
+       4       1       5       6       9       8
+      11       2     101     102     103     104
+"""
+
+
+def _plate(*cards: str, seg: bool = True) -> str:
+    segset = ("*SET_SEGMENT\n" + _row(1) + "\n"
+              + _row(101, 102, 103, 104) + "\n"
+              + _row(1, 2, 5, 4) + "\n") if seg else ""
+    return ("*KEYWORD\n" + _PLATE_MESH
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nimpactor\n" + _row(2, 1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2, "", 3) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+            + segset + "".join(cards)
+            + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
+
+
+class SstypZeroIsASegmentSet(unittest.TestCase):
+    """Vol I R17 p.11-24: SURFATYP EQ.0 is a Segment set ID. p.11-25 settles
+    it from the other side — SABOXID "can be used only if SURFATYP is set to
+    2, 3, 5, or 6, meaning SURFA is a part ID or part set ID"."""
+
+    def test_the_segment_set_wins_over_a_part_of_the_same_id(self):
+        """`plate.typ13`'s shape. Master resolved `sid=1, styp=0` through
+        `sid in state.parts` and built a self-contact of PART 1 — the
+        impactor was not in the interface at all and passed through. Measured
+        on the real deck: /GRNOD 90003 held nodes 1..25 (the target alone) and
+        the main surface was a /SURF/GRSHEL over shells 1..16."""
+        _res, starter = _convert(_plate(
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(1, 0, 0, 0) + "\n"))
+        segs = _headers(starter, "/SURF/SEG/")
+        self.assertEqual(len(segs), 1, starter)
+        rows = _block(starter, segs[0])
+        assert rows is not None
+        data = [r for r in rows[1:] if not r.startswith("#")]
+        self.assertEqual(len(data), 2, starter)     # the set's TWO segments
+        # ... and the secondary group holds the segment set's nodes, ONLY.
+        grnods = {h: _ids(starter, h) for h in _headers(starter, "/GRNOD/NODE/")}
+        self.assertIn([1, 2, 4, 5, 101, 102, 103, 104], list(grnods.values()),
+                      starter)
+        for nids in grnods.values():
+            self.assertNotIn(9, nids, starter)      # a plate node NOT in the set
+
+    def test_a_missing_segment_set_is_named_and_never_read_as_a_part(self):
+        """The WARN-BY-NAME case (`W7_SETUP_3P BendTest_implicit.k` states
+        SURFA 1 / SURFB 2 typed 0 with no `*SET_SEGMENT` anywhere in the
+        file). LS-DYNA's own behaviour on a missing set is not quoted: no
+        corpus run produces one, so there is no d3hsp line to cite."""
         res, starter = _convert(_plate(
-            _n16c(1, 0.0, 0.0, 0.0, 9, 0),
-            _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
-            _n16(4, 0.0, 10.0, 0.0)))
-        self.assertEqual(len(_warns(res, "eight legal values")), 1)
-        self.assertEqual(_headers(starter, "/BCS/"), [])
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            + _row(7, 2, 0, 3) + "\n", seg=False))
+        self.assertEqual(_headers(starter, "/INTER/TYPE7/"), [], starter)
+        self.assertEqual(_headers(starter, "/INTER/TYPE25/"), [], starter)
+        w = [x for x in res.warnings if "SURFATYP=0" in x]
+        self.assertTrue(w, res.warnings)
+        self.assertIn("*SET_SEGMENT 7", w[0])
+        self.assertIn("*INCLUDE", w[0])
 
-
-class TestNodeTcRcOptOut(unittest.TestCase):
-    """``--no-node-tc-rc-bcs`` / ``convert(node_tc_rc_bcs=False)``."""
-
-    DECK = _plate(_n16c(1, 0.0, 0.0, 0.0, 7, 7),
-                  _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
-                  _n16(4, 0.0, 10.0, 0.0))
-
-    def test_off_emits_nothing_and_says_the_dofs_are_free(self):
-        res, starter = _convert(self.DECK, node_tc_rc_bcs=False)
-        self.assertEqual(_headers(starter, "/BCS/"), [])
-        w = _warns(res, "are FREE in the converted model")
-        self.assertEqual(len(w), 1)
-        self.assertIn("--no-node-tc-rc-bcs", w[0])
-
-    def test_on_is_the_default(self):
-        res, starter = _convert(self.DECK)
-        self.assertEqual(_bcs_groups(starter).get(("111", "111")), [1])
-        self.assertEqual(_warns(res, "are FREE in the converted model"), [])
-
-    def test_the_cli_flag_exists_and_defaults_on(self):
-        from k2rad import cli
-        args = cli.build_parser().parse_args(["deck.k"])
-        self.assertTrue(args.node_tc_rc_bcs)
-        args = cli.build_parser().parse_args(["deck.k", "--no-node-tc-rc-bcs"])
-        self.assertFalse(args.node_tc_rc_bcs)
-
-    def test_the_help_renders_and_names_the_flag(self):
-        """The #135 rule: a bare ``%`` in an argparse help string kills
-        ``--help``, and this batch's help quotes measured percentages."""
-        from k2rad import cli
-        text = cli.build_parser().format_help()
-        self.assertIn("--no-node-tc-rc-bcs", text)
-
-    def test_the_gui_mirrors_the_flag(self):
-        """Every opt-out has a GUI checkbox and a summary line; a flag wired
-        into the CLI only is invisible to half the users."""
-        import inspect
-        import k2rad_gui
-        src = inspect.getsource(k2rad_gui)
-        self.assertIn("self.node_tc_rc_bcs = tk.BooleanVar(value=True)", src)
-        self.assertIn("variable=self.node_tc_rc_bcs", src)
-        self.assertIn("node_tc_rc_bcs=self.node_tc_rc_bcs.get()", src)
-        self.assertIn('kwargs["node_tc_rc_bcs"] = bool(node_tc_rc_bcs)', src)
-        self.assertIn("(--no-node-tc-rc-bcs)", src)
-
-
-class TestNodeTcRcScreeningRigidBodies(unittest.TestCase):
-    """Rule (a): a node belonging to a rigid body is DROPPED, not re-pointed.
-
-    Vol I R17 p.35-3 Remark 1, verbatim: *"No attempt should be made to apply
-    boundary conditions to nodes belonging to rigid bodies (see \\*MAT_RIGID for
-    application of rigid body constraints)."* LS-DYNA says the same in its own
-    listing — ``ex_16_thin_shell_elform_13.d3hsp`` prints ``*** Warning 60257
-    (IMP+257) skipping spc on rigid body node 1003 / tcode = 6 rcode = 7`` for
-    cells that live in that deck's ``*NODE`` columns 57-72.
-
-    And a ``/BCS`` there is inert in OpenRadioss: ``resol.F:7073`` runs
-    ``BCS10`` (which zeroes V and A on the coded DOFs) but ``resol.F:7572``
-    then runs ``RBYVIT`` -> ``rgbodv.F:150-155``, which rebuilds every
-    secondary node's acceleration from the body's own velocity field. MEASURED
-    on a three-arm twin — a ``*MAT_RIGID`` brick falling under
-    ``*LOAD_BODY_Z`` — ``/BCS 111 111`` on the member nodes gives K-ENERGY
-    0.3720E-03 at t = 9.955E-04, identical to the no-``/BCS`` control and to
-    the closed form 1/2 m v^2; re-pointing the same constraint onto the body's
-    main node gives 0.000, i.e. holds a body both solvers let fall.
-    """
-
-    DECK = "\n".join([
-        "*KEYWORD", "*NODE",
-        _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-        _n16c(2, 10.0, 0.0, 0.0, 7, 7),
-        _n16c(3, 10.0, 10.0, 0.0, 7, 7),
-        _n16c(4, 0.0, 10.0, 0.0, 7, 7),
-        _n16c(5, 0.0, 0.0, 10.0, 4, 0),
-        _n16(6, 10.0, 0.0, 10.0), _n16(7, 10.0, 10.0, 10.0),
-        _n16(8, 0.0, 10.0, 10.0),
-        "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4), _row(2, 2, 5, 6, 7, 8),
-        "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
-        "*MAT_RIGID", _row(1, "7.85E-9", "2.1E5", "0.3"),
-        _row("0.0", "7", "7"), _row("0.0", "0.0", "0.0"),
-        "*MAT_ELASTIC", _row(2, "7.85E-9", "2.1E5", "0.3"),
-        "*PART", "rigid_tool", _row(1, 1, 1),
-        "*PART", "blank", _row(2, 1, 2),
-        "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
-
-    def test_the_rigid_nodes_are_dropped_and_the_deformable_one_is_kept(self):
-        res, starter = _convert(self.DECK)
-        groups = _bcs_groups(starter)
-        # Node 5 is the only TC/RC node on the deformable part.
-        self.assertEqual(groups.get(("110", "000")), [5])
-        for nids in groups.values():
-            self.assertNotIn(1, nids)
-            self.assertNotIn(4, nids)
-        w = _warns(res, "belong to a rigid body and were DROPPED")
-        self.assertEqual(len(w), 1)
-        self.assertIn("4 node(s)", w[0])
-
-    def test_the_message_carries_the_rule_its_own_evidence(self):
-        res, _starter = _convert(self.DECK)
-        w = _warns(res, "belong to a rigid body and were DROPPED")[0]
-        self.assertIn("p.35-3 Remark 1", w)
-        self.assertIn("Warning 60257", w)
-        self.assertIn("rgbodv.F:150-155", w)
-        self.assertIn("*MAT_RIGID CMO/CON1/CON2", w)
-
-
-class TestNodeTcRcScreeningPrescribedMotion(unittest.TestCase):
-    """Rule (b): a DOF an imposed motion already drives is left to it.
-
-    MEASURED on a one-brick twin (bottom face ``/BCS 111 111``, top face driven
-    by ``/IMPVEL X`` at 100 mm/s): with a ``/BCS 100 000`` on the SAME top face
-    the starter reports WARNING 312 and the engine reports EXT-WORK 13.66
-    against an I-ENERGY of 1688 — a 99.9 % energy error on every cycle, because
-    ``fixvel.F`` forms its work increment from a V and an AOLD that ``BCS10``
-    has already zeroed. The complementary split (``/BCS 011 111`` beside the
-    same ``/IMPVEL X``) measures EXT-WORK = I-ENERGY = 4002, 0.0 %, and no
-    warning. That control is what makes this a SPLIT rather than a drop: the
-    node's other five DOFs stay pinned.
-    """
-
-    def _deck(self, dof: int) -> str:
-        return "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-            _n16c(2, 10.0, 0.0, 0.0, 7, 7),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
-            "*SET_NODE_LIST", _row(10), _row(2),
-            "*DEFINE_CURVE", _row(1), _row16("0.0", "0.0"),
-            _row16("1.0", "1.0"),
-            "*BOUNDARY_PRESCRIBED_MOTION_SET",
-            _row(10, dof, 0, 1, "1.0"),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-
-    def test_the_driven_dof_is_cleared_and_the_rest_stay_pinned(self):
-        res, starter = _convert(self._deck(1))       # dof 1 = global x
-        groups = _bcs_groups(starter)
-        self.assertEqual(groups.get(("111", "111")), [1])
-        self.assertEqual(groups.get(("011", "111")), [2])
-        w = _warns(res, "already driven by a *BOUNDARY_PRESCRIBED_MOTION")
-        self.assertEqual(len(w), 1)
-        self.assertIn("1 DOF(s) on 1 node(s)", w[0])
-
-    def test_a_rotational_drive_clears_a_rotational_bit_only(self):
-        res, starter = _convert(self._deck(6))       # dof 6 = rotation about y
-        groups = _bcs_groups(starter)
-        self.assertEqual(groups.get(("111", "101")), [2])
-        self.assertEqual(len(
-            _warns(res, "already driven by a *BOUNDARY_PRESCRIBED_MOTION")), 1)
-
-    def test_an_undriven_node_keeps_every_bit(self):
-        """The control: the same deck with the motion on a node that has no
-        TC/RC cell must leave both TC/RC nodes fully pinned."""
-        deck = "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-            _n16c(2, 10.0, 0.0, 0.0, 7, 7),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
-            "*SET_NODE_LIST", _row(10), _row(3),
-            "*DEFINE_CURVE", _row(1), _row16("0.0", "0.0"),
-            _row16("1.0", "1.0"),
-            "*BOUNDARY_PRESCRIBED_MOTION_SET", _row(10, 1, 0, 1, "1.0"),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-        res, starter = _convert(deck)
-        self.assertEqual(_bcs_groups(starter).get(("111", "111")), [1, 2])
-        self.assertEqual(
-            _warns(res, "already driven by a *BOUNDARY_PRESCRIBED_MOTION"), [])
-
-
-class TestNodeTcRcScreeningBoundarySpc(unittest.TestCase):
-    """Rule (c): a DOF a ``*BOUNDARY_SPC`` already states is merged, not
-    restated.
-
-    ``hm_read_bcs.F:198`` unions the codes (``ICODE(NOSYS) = MY_OR(IC,
-    ICODE(NOSYS))``), so a second ``/BCS`` changes no physics — but
-    ``kinset``/``kinchk`` still count it, and a coupon with two identical
-    ``/BCS`` on one ``/GRNOD`` measures 1 x starter WARNING 312 / 8
-    INCOMPATIBLE KINEMATIC CONDITIONS. All 16 overlap decks on the R14 roster
-    are exact duplication (``ex_12_solid_elform_1``: 32 nodes ``TC 3`` and a
-    ``*BOUNDARY_SPC_SET dofz = 1`` on the same 32).
-    """
-
-    def _deck(self, dofs, cid=0) -> str:
-        return "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16c(1, 0.0, 0.0, 0.0, 7, 7),
-            _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
-            _n16(4, 0.0, 10.0, 0.0),
-            "*SET_NODE_LIST", _row(10), _row(1),
-            "*BOUNDARY_SPC_SET", _row(10, cid, *dofs),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-
-    def test_a_duplicated_dof_is_not_restated(self):
-        res, starter = _convert(self._deck((1, 1, 1, 0, 0, 0)))
-        groups = _bcs_groups(starter)
-        # The *BOUNDARY_SPC already pins all three translations; only the
-        # rotations are left for the TC/RC pass.
-        self.assertEqual(groups.get(("000", "111")), [1])
-        self.assertIsNone(groups.get(("111", "111")))
-        w = _warns(res, "merged rather than restated")
-        self.assertEqual(len(w), 1)
-        self.assertIn("3 DOF(s) on 1 node(s)", w[0])
-        self.assertIn("hm_read_bcs.F:198", w[0])
-
-    def test_a_fully_duplicated_node_gets_no_second_bcs(self):
-        res, starter = _convert(self._deck((1, 1, 1, 1, 1, 1)))
-        self.assertNotIn("*NODE TC/RC", starter)
-        self.assertEqual(len(_warns(res, "had every stated DOF removed")), 1)
-
-    def test_a_disjoint_spc_leaves_the_tc_rc_bits_alone(self):
-        """The control: an SPC that pins only z must not cancel x or y."""
-        _res, starter = _convert(self._deck((0, 0, 1, 0, 0, 0)))
-        self.assertEqual(_bcs_groups(starter).get(("110", "111")), [1])
-
-
-class TestNodeTcRcRotationalCodesAreNamed(unittest.TestCase):
-    """Rule (d): a rotational code on a mesh with no rotational DOF is EMITTED
-    and named, not dropped.
-
-    ``bcs10.F:66`` applies the Rot digits only inside ``IF(IRODDL/=0)``, so on
-    a solid-only model they are inert — and LS-DYNA drops them too: 71 885
-    ``*NODE`` rotational codes across 22 solid/ALE R14 decks are stated in the
-    deck and absent from its ``nodal spc summary`` echo
-    (``control_energy.bar-impact``'s 864 ``TC 0 / RC 7`` nodes produce no echo
-    row at all). Emitting them costs nothing on either side; predicting
-    ``IRODDL`` in order to drop them would cost a guess.
-    """
-
-    SOLID = "\n".join([
-        "*KEYWORD", "*NODE",
-        _n16c(1, 0.0, 0.0, 0.0, 5, 7), _n16c(2, 1.0, 0.0, 0.0, 5, 7),
-        _n16c(3, 1.0, 1.0, 0.0, 5, 7), _n16c(4, 0.0, 1.0, 0.0, 5, 7),
-        _n16(5, 0.0, 0.0, 1.0), _n16(6, 1.0, 0.0, 1.0),
-        _n16(7, 1.0, 1.0, 1.0), _n16(8, 0.0, 1.0, 1.0),
-        "*ELEMENT_SOLID", _row(1, 1), _row(1, 2, 3, 4, 5, 6, 7, 8),
-        "*SECTION_SOLID", _row(1, 1),
-        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
-        "*PART", "block", _row(1, 1, 1),
-        "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
-
-    def test_the_rotational_code_is_emitted_and_reported_inert(self):
-        res, starter = _convert(self.SOLID)
-        self.assertEqual(_bcs_groups(starter).get(("011", "111")), [1, 2, 3, 4])
-        w = _warns(res, "rotational code on a mesh with no shell")
-        self.assertEqual(len(w), 1)
-        self.assertIn("bcs10.F:66", w[0])
-        self.assertIn("4 node(s)", w[0])
-
-    def test_a_shell_mesh_does_not_get_the_note(self):
+    def test_a_same_numbered_part_is_named_in_the_refusal(self):
+        """Naming the clash is what tells the reader "the deck states the
+        wrong type" apart from "the set lives in an *INCLUDE I did not read"."""
         res, _starter = _convert(_plate(
-            _n16c(1, 0.0, 0.0, 0.0, 5, 7),
-            _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
-            _n16(4, 0.0, 10.0, 0.0)))
-        self.assertEqual(_warns(res, "rotational code on a mesh with no shell"), [])
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            + _row(1, 2, 0, 3) + "\n", seg=False))
+        w = [x for x in res.warnings if "SURFATYP=0" in x]
+        self.assertTrue(w, res.warnings)
+        self.assertIn("*PART 1", w[0])
+        self.assertIn("p.11-25", w[0])
+
+    def test_a_two_way_contact_with_mstyp_zero_takes_the_main_side(self):
+        """`_resolve_contact_master` is a DIFFERENT emission site from
+        `_resolve_contact_slave` and needs its own carrier (the #131/#132
+        rule): a two-way contact whose MAIN side is typed 0."""
+        _res, starter = _convert(_plate(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            + _row(2, 1, 3, 0) + "\n"))
+        self.assertEqual(len(_headers(starter, "/SURF/SEG/")), 1, starter)
+        self.assertEqual(_headers(starter, "/SURF/GRSHEL/"), [], starter)
+
+    def test_sstyp_one_builds_a_shell_surface_not_a_segment_one(self):
+        """Coupon C-2. SURFATYP 1 is a shell ELEMENT set, a different
+        namespace from 0 — so a deck with BOTH a `*SET_SHELL_LIST 1` and a
+        `*SET_SEGMENT 1` must take the shell set."""
+        _res, starter = _convert(_plate(
+            "*SET_SHELL_LIST\n" + _row(1) + "\n" + _row(1, 2) + "\n"
+            + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            + _row(2, 1, 3, 1) + "\n"))
+        self.assertEqual(_headers(starter, "/SURF/SEG/"), [], starter)
+        grshel = _headers(starter, "/GRSHEL/SHEL/")
+        self.assertEqual(len(grshel), 1, starter)
+        self.assertEqual(_ids(starter, grshel[0]), [1, 2])
+        self.assertEqual(len(_headers(starter, "/SURF/GRSHEL/")), 1, starter)
+
+    def test_ssid_zero_still_means_all_parts(self):
+        """k2rad's own implicit-stabilization stub is `ssid=0, sstyp=0`, so a
+        blanket "styp 0 -> look up a *SET_SEGMENT" would break it on every
+        implicit deck."""
+        _res, starter = _convert(_plate(
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(0, 0, 0, 0) + "\n"))
+        self.assertTrue(_headers(starter, "/INTER/TYPE25/")
+                        or _headers(starter, "/INTER/TYPE7/"), starter)
+        self.assertEqual(_headers(starter, "/SURF/SEG/"), [], starter)
+
+    def test_gapmin_describes_the_side_by_its_type(self):
+        """`--auto-gapmin`'s `_describe_side` printed "part 1 (plate)" for the
+        segment side of plate.typ13 — a label agreeing with a resolution that
+        was itself wrong."""
+        from k2rad import gapmin
+        st = _dispatch(_plate(
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(1, 0, 0, 0) + "\n"))
+        self.assertEqual(gapmin._describe_side(st, 1, 0),
+                         "segment set 1 (2 segment(s))")
+        self.assertEqual(gapmin._describe_side(st, 1, 3), "part 1 (plate)")
+        self.assertEqual(gapmin._describe_side(st, 9, 1),
+                         "shell element set 9 (not defined in this deck)")
 
 
-class TestNodeTcRcAndTheFreeNodeGuard(unittest.TestCase):
-    """Rule (e): the implicit free-node guard subtracts a node the TC/RC pass
-    has ALREADY pinned in all six DOFs, and keeps every other one.
+# ─────────────────────────────────────────────────────────────────────────────
+# B3 — *EOS_GRUNEISEN A = 0
+# ─────────────────────────────────────────────────────────────────────────────
 
-    The guard's mask is ``111 111``, i.e. the SUPERSET of any TC/RC code, so it
-    can only drop the exact-match case: a free node the TC/RC pass pinned
-    partially must still reach it or its remaining DOFs stay zero rows in the
-    implicit tangent (the #120 failure with the sign reversed). Two ``/BCS`` on
-    one node are starter WARNING 312, measured.
-    """
+def _gruneisen(a, gamma0) -> str:
+    """taylor1's numbers: C 3958000, S1 1.497, S2 = S3 = 0, E0 = 0.
 
-    def _deck(self, tc: int, rc: int) -> str:
-        return "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
-            _n16c(99, 50.0, 50.0, 50.0, tc, rc),       # attached to nothing
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
-            "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1")] + _SHELL_TAIL)
-
-    def test_a_fully_pinned_free_node_is_not_pinned_twice(self):
-        _res, starter = _convert(self._deck(7, 7))
-        pinning = [nids for key, nids in _bcs_groups(starter).items()
-                   if 99 in nids]
-        self.assertEqual(len(pinning), 1, f"node 99 pinned {len(pinning)} times")
-
-    def test_a_partially_pinned_free_node_still_reaches_the_guard(self):
-        _res, starter = _convert(self._deck(1, 0))
-        groups = _bcs_groups(starter)
-        self.assertIn(99, groups.get(("100", "000"), []))
-        guard = [nids for key, nids in groups.items()
-                 if key == ("111", "111") and 99 in nids]
-        self.assertTrue(guard, "the free-node guard must still pin node 99")
+    The EOS needs a carrier: a same-id `*MAT_NULL` is the spelling k2rad
+    resolves (no `*EOS_*` keyword carries a density, so a synthesized
+    `/MAT/LAW6` would be starter ERROR 683)."""
+    return ("*KEYWORD\n" + _TWO_BRICKS
+            + "*PART\nbrick one\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nfluid\n" + _row(2, 1, 2, 0, 0, 0, 0, 2) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+            + "*MAT_NULL\n" + _row(2, "8.90E-09", 0.0, 0.0, 0.0) + "\n"
+            + "*EOS_GRUNEISEN\n"
+            + _row(2, 3958000.0, 1.497, 0.0, 0.0, gamma0, a, 0.0) + "\n"
+            + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
 
 
-class TestModalChainNeedsNoTcRcArm(unittest.TestCase):
-    """A2, and it is a MEASURED verdict rather than an omission.
+class GruneisenZeroA(unittest.TestCase):
+    """`hm_read_eos_gruneisen.F:102` is `IF(A == ZERO) A=GAMA0` — the only
+    test on A in that file — and LS-DYNA states no Default for A (Vol II R17
+    p.1-16), so a blank or a literal 0 IS zero."""
 
-    ``tools/modal_solve.py`` builds the mass matrix on the DOFs of the
-    stiffness matrix the ENGINE exported (``/IMPL/PRINT/STIF``) from the
-    CONVERTED ``.rad`` — its own docstring says "Only free (unconstrained,
-    non-rigid-slaved) DOFs appear" — so a DOF this pass pins simply has no row
-    by the time ``build_mass_diagonal`` runs. Neither ``modal_common`` nor
-    ``modal_solve`` reads ``*BOUNDARY_SPC`` either, for the same reason. The
-    modal chain therefore inherits item A through the emitted deck, and adding
-    a second TC/RC reader in ``tools/`` would be a second source of truth for
-    a constraint the first one already applied.
+    def test_a_zero_a_beside_a_nonzero_gamma0_becomes_the_sentinel(self):
+        """MEASURED on a four-brick starter coupon at these numbers
+        (RHO_I/RHO_0 = 9.79e-9/8.9e-9, so the reader's own MU0 = 0.1): the
+        starter echoes `A = 1.0000000000000E-20` verbatim and an INITIAL
+        PRESSURE of 15439.03415072, the a = 0 closed form to 13 digits,
+        against 15284.64380921 for A = GAMMA0. 1e-8 already differs in the
+        12th digit, so 1e-20 is the value."""
+        st, starter = _state_and_starter(_gruneisen(0.0, 2.0))
+        self.assertEqual(st.eos_cards[2].params["a"], 1e-20)
+        rows = _block(starter, "/EOS/GRUNEISEN/2")
+        assert rows is not None, starter
+        cells = [r for r in rows if "E-20" in r]
+        self.assertEqual(len(cells), 1, starter)
+        self.assertIn("1.000000E-20", cells[0])
 
-    What this test pins is the property the verdict rests on: the constraint
-    reaches the ``.rad`` on a MODAL deck too, so the exported stiffness matrix
-    is the supported one.
-    """
+    def test_the_warning_names_the_reader_line_and_the_size(self):
+        st, _starter = _state_and_starter(_gruneisen(0.0, 2.0))
+        w = [x for x in st.warnings if "GRUNEISEN" in x]
+        self.assertEqual(len(w), 1, st.warnings)
+        self.assertIn("hm_read_eos_gruneisen.F:102", w[0])
+        self.assertIn("IF(A == ZERO) A=GAMA0", w[0])
+        self.assertIn("A = GAMMA0 = 2", w[0])
+        # bulk -(g0/2)mu^2 / (1 + (1 - g0/2)mu) at mu = 0.1, g0 = 2 = -1.00 %;
+        # energy +mu = +10.00 %, and that half is GAMMA0-independent.
+        self.assertIn("changes -1.00 %", w[0])
+        self.assertIn("rises 10.00 %", w[0])
 
-    def test_a_modal_deck_still_gets_the_tc_rc_constraint(self):
-        deck = "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16c(1, 0.0, 0.0, 0.0, 7, 7), _n16c(2, 10.0, 0.0, 0.0, 7, 7),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
-            "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
-            "*CONTROL_IMPLICIT_EIGENVALUE", _row(3),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4)] + _SHELL_TAIL)
-        state, starter = _state_and_starter(deck)
-        self.assertTrue(state.is_modal)
-        self.assertEqual(_bcs_groups(starter).get(("111", "111")), [1, 2])
+    def test_a_zero_gamma0_is_left_alone_because_the_default_is_a_no_op(self):
+        """`IF(A == ZERO) A = GAMA0` is a NO-OP when GAMMA0 is itself 0, and
+        23 of the 25 A = 0 cards on the R14 roster have GAMMA0 = 0.0. Writing
+        the sentinel there would move 23 emitted decks for no physical reason
+        — "never fabricate an unstated value"."""
+        st, starter = _state_and_starter(_gruneisen(0.0, 0.0))
+        self.assertEqual(st.eos_cards[2].params["a"], 0.0)
+        self.assertEqual([x for x in st.warnings if "GRUNEISEN" in x], [])
+        self.assertNotIn("E-20", "\n".join(_block(starter, "/EOS/GRUNEISEN/2")
+                                           or []))
 
-    def test_tools_do_not_reimplement_the_reader(self):
-        """A second TC/RC reader in ``tools/`` would be a second source of
-        truth. If one is ever added, this test is the place that says why the
-        first one was enough."""
-        import inspect
-        from tools import modal_common
-        self.assertNotIn("node_tc_rc", inspect.getsource(modal_common))
+    def test_a_stated_a_passes_through_untouched(self):
+        st, _starter = _state_and_starter(_gruneisen(0.47, 2.0))
+        self.assertEqual(st.eos_cards[2].params["a"], 0.47)
+        self.assertEqual([x for x in st.warnings if "GRUNEISEN" in x], [])
 
-
-# ── A3: starter ERROR 611 ────────────────────────────────────────────────────
-
-class TestImplicitStabilizationStubInacti(unittest.TestCase):
-    """The synthesized ``auto_implicit_stabilization_self_contact`` takes
-    ``Inacti = 1``.
-
-    ``i7pwr3.F:113-114`` computes ``DN = |N|^2`` for the vector from the
-    projection point on a main sub-triangle to the secondary node; ``DN <=
-    1e-30`` means the node lies EXACTLY on the segment, so there is no
-    direction to depenetrate it along. ``:118`` then refuses the deck —
-    ``IF(INACTI/=1.AND.INACTI/=2.AND.FPENMAX==ZERO)`` -> ``ANCMSG(MSGID=611)``
-    — so Inacti 5 AND 6 both fail and only 1/2 (or a non-zero Fpenmax) pass.
-
-    MEASURED: ``thermal/welding-new/welding-solids/05_1_welding_solid``, whose
-    conformal weld mesh puts 310 secondary nodes exactly on the stub's own
-    surface, goes from 310 starter ERRORS to 0 ERRORS / 1 WARNING.
-
-    Inacti = 1 is also what the stub already claimed to be: "it carries no load
-    unless parts actually touch" — a node that already touches gets zero
-    stiffness rather than a t = 0 pre-load.
-    """
-
-    IMPLICIT_SOLID = "\n".join([
-        "*KEYWORD", "*NODE",
-        _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
-        _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
-        _n16(5, 0.0, 0.0, 1.0), _n16(6, 1.0, 0.0, 1.0),
-        _n16(7, 1.0, 1.0, 1.0), _n16(8, 0.0, 1.0, 1.0),
-        "*ELEMENT_SOLID", _row(1, 1), _row(1, 2, 3, 4, 5, 6, 7, 8),
-        "*SECTION_SOLID", _row(1, 1),
-        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
-        "*PART", "block", _row(1, 1, 1),
-        "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
-        "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
-
-    def _stub_rows(self, starter: str):
-        body = _block(starter, "/INTER/TYPE7/90001")
-        self.assertIsNotNone(body, "no stabilization stub emitted")
-        return [ln for ln in body if not ln.startswith("#")]
-
-    def test_the_stub_carries_inacti_1(self):
-        res, starter = _convert(self.IMPLICIT_SOLID)
-        rows = self._stub_rows(starter)
-        # The IBC / Inacti / VisS / VisF / Bumult row is the 6th data row.
-        ibc_row = [r for r in rows if r.strip().startswith("000")][0]
-        self.assertEqual(int(ibc_row.split()[1]), 1)
-        self.assertEqual(len(_warns(res, "with Inacti=1")), 1)
-
-    def test_the_stub_warning_carries_the_starter_line_and_the_measurement(self):
-        res, _starter = _convert(self.IMPLICIT_SOLID)
-        w = _warns(res, "with Inacti=1")[0]
-        self.assertIn("i7pwr3.F:114-129", w)
-        self.assertIn("ERROR 611", w)
-        self.assertIn("05_1_welding_solid", w)
-
-    def test_the_stub_gets_no_fpenmax(self):
-        """Inacti 1 is exempt at the gate itself, so the Fpenmax fallback is
-        neither needed nor written — the field stays at the starter default."""
-        _res, starter = _convert(self.IMPLICIT_SOLID)
-        rows = self._stub_rows(starter)
-        # rows[0] is the title; rows[2] is the Fscalegap / GAP_MAX / Fpenmax row.
-        self.assertEqual(rows[2].split(), ["0", "0", "0"])
+    def test_the_substitution_size_is_derived_from_the_cards_own_gamma0(self):
+        """Only the ENERGY half is card-independent (`BB = g0 + a*mu` makes it
+        `+mu` whatever GAMMA0 is). Quoting the coupon's -1.00 % as "with this
+        card's numbers" would be false on any other GAMMA0."""
+        from k2rad.writer.materials import _gruneisen_substitution_size
+        # hand-computed -(g0/2)*0.01 / (1 + (1 - g0/2)*0.1) * 100
+        for g0, expect in ((2.0, -1.0000), (1.0, -0.4762), (4.0, -2.2222)):
+            with self.subTest(g0=g0):
+                ff0 = 1.0 + (1.0 - g0 / 2.0) * 0.1
+                want = -(g0 / 2.0) * 0.01 / ff0 * 100.0
+                self.assertAlmostEqual(want, expect, places=4)
+                self.assertIn(f"changes {want:+.2f} %",
+                              _gruneisen_substitution_size(g0))
+        # a GAMMA0 large enough to make the reference value non-positive
+        # reports the energy term alone rather than a percentage of a sign
+        # change: 1 + (1 - 25/2)*0.1 = -0.15.
+        big = _gruneisen_substitution_size(25.0)
+        self.assertIn("rises 10.00 %", big)
+        self.assertNotIn("compression pressure changes", big)
 
 
-class TestType7FpenmaxFallback(unittest.TestCase):
-    """A USER contact keeps its faithful ``Inacti`` and gains an ``Fpenmax``.
+# ─────────────────────────────────────────────────────────────────────────────
+# B5 — the two side findings the set batch exposed
+# ─────────────────────────────────────────────────────────────────────────────
 
-    ``4.3_General_Nonlinearity`` states ``IGNORE = 1`` on its own ``*CONTACT``
-    card, which ``_ignore_to_inacti`` maps to ``Inacti = 5`` — a faithful
-    translation, not a k2rad default and not ``--deformable-contact-recipe``.
-    Flipping it would throw away the W13 evidence that Inacti 5 is right for an
-    initially-resting contact. Fpenmax instead turns the REFUSAL into a
-    deactivation of exactly the nodes that cannot be depenetrated:
-    ``i7pwr3.F:193-195`` zeroes ``STFN`` when ``PENE > Fpenmax*GAPV``, and
-    ``PENE = GAPV - d``, so at 0.99 only ``d < 0.01*GAPV`` is affected.
+class InivelOnRigidBodyMembers(unittest.TestCase):
+    """`matfoamsoil`'s shape: a `*SET_NODE_LIST_GENERATE` that now resolves,
+    an `*INITIAL_VELOCITY` over it, and every node of it a member of a
+    `*MAT_RIGID` part."""
 
-    It is a STARTER-only field (``hm_read_inter_type07.F:275`` ->
-    ``FRIGAP(27)``; the engine's only ``VARIABLES(27)`` use is
-    ``i21main_tri.F``, i.e. TYPE21) and MEASURED inert on two control decks
-    whose decoded ``T01`` channels are byte-identical with and without it.
-    """
+    def _deck(self, rigid: bool) -> str:
+        mat = ("*MAT_RIGID\n" + _row(2, "7.85E-09", 210000.0, 0.3) + "\n"
+               + _row(0, 7, 7) + "\n" + _row(0.0, 0.0, 0.0) + "\n") if rigid \
+            else ("*MAT_ELASTIC\n"
+                  + _row(2, "7.85E-09", 210000.0, 0.3) + "\n")
+        return ("*KEYWORD\n" + _TWO_BRICKS
+                + "*PART\nbrick one\n" + _row(1, 1, 1) + "\n"
+                + "*PART\nbrick two\n" + _row(2, 1, 2) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                + "*MAT_ELASTIC\n"
+                + _row(1, "7.85E-09", 210000.0, 0.3) + "\n" + mat
+                + "*SET_NODE_LIST_GENERATE\n" + _row(99) + "\n"
+                + _row(11, 18) + "\n"
+                + "*INITIAL_VELOCITY\n" + _row(99) + "\n"
+                + _row(25000.0, 0.0, 0.0) + "\n"
+                + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
 
-    def _deck(self, ignore: int) -> str:
-        return "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
-            _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
-            _n16(5, 0.0, 0.0, 2.0), _n16(6, 1.0, 0.0, 2.0),
-            _n16(7, 1.0, 1.0, 2.0), _n16(8, 0.0, 1.0, 2.0),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4), _row(2, 2, 5, 6, 7, 8),
-            "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
-            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
-            "*PART", "a", _row(1, 1, 1),
-            "*PART", "b", _row(2, 1, 1),
-            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
-            _row(1, 2, 3, 3), _row("0.1", "0.1"), _row(),
-            _row(0, 0, 0, ignore),
-            "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
-            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+    def test_an_inivel_entirely_on_rigid_members_is_named(self):
+        """`inirby.F` rebuilds a /RBODY secondary node's velocity from the
+        body's main node every cycle, so the /INIVEL is overwritten before
+        cycle 1 and the body starts at rest — at 0 starter diagnostics."""
+        res, starter = _convert(self._deck(rigid=True))
+        self.assertEqual(len(_headers(starter, "/INIVEL/")), 1, starter)
+        w = [x for x in res.warnings
+             if "*INITIAL_VELOCITY NSID=99" in x and "rigid body" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("8 of its 8 node(s)", w[0])
+        self.assertIn("inirby.F", w[0])
+        self.assertIn("EVERY node of this card is a rigid-body member", w[0])
+        self.assertIn("*INITIAL_VELOCITY_RIGID_BODY", w[0])
 
-    def _fpenmax_row(self, starter: str, inter_id: int):
-        body = _block(starter, f"/INTER/TYPE7/{inter_id}")
-        self.assertIsNotNone(body, "no /INTER/TYPE7 emitted")
-        # [0] title, [1] Slav/Mast, [2] Fscalegap / GAP_MAX / Fpenmax.
-        return [ln for ln in body if not ln.startswith("#")][2].split()
-
-    def test_inacti_5_gains_the_fpenmax(self):
-        res, starter = _convert(self._deck(1))
-        ids = [int(ln.rsplit("/", 1)[1]) for ln in _headers(starter, "/INTER/TYPE7/")]
-        self.assertEqual(self._fpenmax_row(starter, ids[0]),
-                         ["0", "0", "0.99"])
-        w = _warns(res, "Fpenmax=0.99")
-        self.assertEqual(len(w), 1)
-        self.assertIn("i7pwr3.F:114-129", w[0])
-        self.assertIn("ERROR 611", w[0])
-
-    def test_the_faithful_inacti_is_not_changed(self):
-        """``IGNORE = 1`` still maps to Inacti 5 — the fallback is additive."""
-        _res, starter = _convert(self._deck(1))
-        ids = [int(ln.rsplit("/", 1)[1]) for ln in _headers(starter, "/INTER/TYPE7/")]
-        body = _block(starter, f"/INTER/TYPE7/{ids[0]}")
-        rows = [ln for ln in body if not ln.startswith("#")]
-        ibc_row = [r for r in rows if r.strip().startswith("000")][0]
-        self.assertEqual(int(ibc_row.split()[1]), 5)
-
-    def test_an_explicit_deck_with_no_type7_is_untouched(self):
-        """The control that keeps the blast radius honest: an explicit
-        single-surface contact converts to /INTER/TYPE25, which
-        ``i7pwr3.F``/``i20pwr3.F`` never reach (a grep of the whole starter
-        finds MSGID 611/612 in those two files only), so no Fpenmax is
-        written there."""
-        deck = "\n".join([
-            "*KEYWORD", "*NODE",
-            _n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),
-            _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
-            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
-            "*CONTACT_AUTOMATIC_SINGLE_SURFACE",
-            _row(0, 0, 5, 5), _row("0.1", "0.1")] + _SHELL_TAIL)
-        res, starter = _convert(deck)
-        self.assertTrue(_headers(starter, "/INTER/TYPE25/"))
-        self.assertEqual(_headers(starter, "/INTER/TYPE7/"), [])
-        self.assertEqual(_warns(res, "Fpenmax="), [])
+    def test_a_deformable_twin_says_nothing(self):
+        """The negative control — the same deck with part 2 deformable."""
+        res, starter = _convert(self._deck(rigid=False))
+        self.assertEqual(len(_headers(starter, "/INIVEL/")), 1, starter)
+        self.assertEqual([x for x in res.warnings if "rigid body" in x], [])
 
 
-if __name__ == "__main__":                             # pragma: no cover
+class ModalDummyCloadScreensPerDof(unittest.TestCase):
+    """`ex_08_beam_elform_1`'s shape: a `*CONTROL_IMPLICIT_EIGENVALUE` deck
+    whose `*BOUNDARY_SPC_SET` cards sit on `_GENERATE` sets."""
+
+    def _deck(self, spc: str) -> str:
+        return ("*KEYWORD\n" + _TWO_BRICKS
+                + "*PART\nbrick one\n" + _row(1, 1, 1) + "\n"
+                + "*PART\nbrick two\n" + _row(2, 1, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                + "*MAT_ELASTIC\n"
+                + _row(1, "7.85E-09", 210000.0, 0.3) + "\n"
+                + "*SET_NODE_LIST_GENERATE\n" + _row(1) + "\n"
+                + _row(1, 18) + "\n" + spc
+                + "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+                + "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(3) + "\n"
+                + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
+
+    def test_a_node_pinned_in_z_can_still_carry_the_dummy_load_in_x(self):
+        """The whole-node screen dropped every node named by any
+        `*BOUNDARY_SPC`, whatever it pins — harmless while few node sets
+        resolved, and not harmless once `*SET_NODE_LIST_GENERATE` is read. A
+        unit /CLOAD along a FREE direction is perfectly good loading data for
+        a load-independent stiffness export."""
+        res, starter = _convert(self._deck(
+            "*BOUNDARY_SPC_SET\n" + _row(1, 0, 0, 0, 1, 1, 1, 1) + "\n"))
+        self.assertEqual(len(_headers(starter, "/CLOAD/")), 1, starter)
+        w = [x for x in res.warnings if "dummy unit /CLOAD" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("dir X", w[0])
+        self.assertIn("--static", w[0])
+        self.assertIn(" X 1", w[0])
+
+    def test_z_is_still_tried_first(self):
+        """The historical choice, so no already-correct deck moves."""
+        res, starter = _convert(self._deck(""))
+        self.assertEqual(len(_headers(starter, "/CLOAD/")), 1, starter)
+        w = [x for x in res.warnings if "dummy unit /CLOAD" in x]
+        self.assertIn("dir Z", w[0])
+
+    def test_a_fully_pinned_model_still_refuses_by_name(self):
+        res, starter = _convert(self._deck(
+            "*BOUNDARY_SPC_SET\n" + _row(1, 0, 1, 1, 1, 1, 1, 1) + "\n"))
+        self.assertEqual(_headers(starter, "/CLOAD/"), [], starter)
+        w = [x for x in res.warnings
+             if "no node with a FREE translational DOF" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("MESSAGE ID 79", w[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B4 — the modal chain's beam mass arm (tools/modal_solve.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PSD_DECK = ("C:/Users/pmqua/PycharmProjects/FEM_solver/verification/"
+             "dynaexamples_r14_ton-mm-s/nvh/example-06-02/"
+             "6.2.PSD_Beam_Example_LSTC.k")
+
+
+def _modal_solve():
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tools = os.path.join(root, "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import modal_solve
+    return modal_solve
+
+
+class ModalBeamMassArm(unittest.TestCase):
+    """`*SECTION_BEAM` ELFORM 0/1/4/5/11 state THICKNESSES, not section
+    constants, so `sec.area` is 0 and every such beam weighed nothing."""
+
+    #: 6.2.PSD's own section: elform 1, CST 0, TS1 6.35, TT1 50.8.
+    def test_the_area_comes_from_the_writers_own_derivation(self):
+        """6.35 x 50.8 = 322.58 by hand, and that is the number k2rad wrote
+        into the deck's emitted `/PROP/BEAM/1` — the property the engine built
+        its stiffness matrix from. The derivation is IMPORTED from
+        `writer/beams._constants_from_thicknesses`, not repeated."""
+        ms = _modal_solve()
+        from k2rad.state import SectionBeam
+        sec = SectionBeam(secid=1, title="", elform=1, cst=0, ts1=6.35,
+                          tt1=50.8)
+        self.assertEqual(sec.area, 0.0)
+        self.assertAlmostEqual(ms._beam_section_area(sec), 322.58, places=6)
+
+    def test_a_section_that_states_its_constants_is_left_alone(self):
+        """ELFORM 2 states A/Iss/Itt directly, so there is nothing to derive
+        and the fallback must not fire."""
+        ms = _modal_solve()
+        from k2rad.state import SectionBeam
+        sec = SectionBeam(secid=1, title="", elform=2, cst=0, ts1=6.35,
+                          tt1=50.8)
+        self.assertEqual(ms._beam_section_area(sec), 0.0)
+
+    def test_the_zero_density_floor_mirrors_the_converters(self):
+        """Not a fabrication: the K this module pairs the mass with was
+        exported from the CONVERTED .rad, in which k2rad had already written
+        1e-24 for a material stating RO <= 0."""
+        ms = _modal_solve()
+        from k2rad.writer.materials import _ZERO_DENSITY_FLOOR
+        st = _dispatch("*KEYWORD\n*MAT_ELASTIC\n"
+                       + _row(1, 0.0, 68947.5729, 0.33) + "\n*END\n")
+        self.assertEqual(ms._material_rho(st)[1], _ZERO_DENSITY_FLOOR)
+        self.assertEqual(ms._material_rho(st, False)[1], 0.0)
+
+    def test_the_two_together_give_the_beam_nodes_mass(self):
+        """Hand-computed on 6.2.PSD: 50 elements over 127 mm, so Le = 2.54 and
+        m_elem = rho*A*Le = 1e-24 * 322.58 * 2.54 = 8.193532e-22 — split
+        evenly, an INTERIOR node carries two halves and gets the whole of it.
+        Negligible beside the 2.26842e-4 tip mass (Df/f ~ 1e-18), which is the
+        point: the arm exists to give M its RANK back, not to add mass."""
+        if not os.path.exists(_PSD_DECK):
+            self.skipTest("the R14 deck-only corpus is not on this machine")
+        ms = _modal_solve()
+        st = ms.parse_deck(_PSD_DECK)
+        mass, _inertia = ms.nodal_masses_from_state(st)
+        self.assertEqual(len(mass), 51)
+        interior = [m for n, m in mass.items() if n not in (1, 2)]
+        self.assertEqual(len(interior), 49)
+        for m in interior:
+            self.assertAlmostEqual(m, 1e-24 * 322.58 * 2.54, delta=1e-30)
+        self.assertAlmostEqual(mass[2], 0.00022684179, places=12)
+        # ... and with the floor off, every beam node is massless again.
+        mass0, _i0 = ms.nodal_masses_from_state(st, zero_density_floor=False)
+        self.assertEqual(sorted(n for n, m in mass0.items() if m > 0.0), [2])
+
+    def test_the_rank_guard_names_itself(self):
+        """ARPACK's shift-invert operator is `OP = K^-1 M`, whose RANK is the
+        number of non-zero mass DOFs; asking for more modes than that breaks
+        the Arnoldi factorization and returns -9999 — a failure that reads
+        like a singular stiffness matrix and is not one."""
+        try:
+            import numpy as np
+            import scipy.sparse as sp                       # noqa: F401
+        except Exception:                                   # pragma: no cover
+            self.skipTest("numpy/scipy not installed")
+        ms = _modal_solve()
+        n = 12
+        rows = [(i, i, 1000.0 + i) for i in range(n)]
+        K = sp.coo_matrix(
+            ([v for _i, _j, v in rows],
+             ([i for i, _j, _v in rows], [j for _i, j, _v in rows])),
+            shape=(n, n)).tocsc()
+        stiff = ms.StiffnessMatrix(
+            n_declared=n, gids=np.arange(n), K=K,
+            user_node=np.ones(n, dtype=int), dof=np.arange(1, n + 1),
+            low_precision=False)
+        md = np.zeros(n)
+        md[:3] = 1.0e-3
+        freq, _phi = ms.solve_modes(stiff, md, 6)
+        self.assertEqual(len(freq), 2)          # clamped to rank - 1
+
+    def test_f1_of_6_2_psd_against_its_own_eigout(self):
+        """The end-to-end target, on an EXACT stiffness matrix.
+
+        This machine's stock engine prints `/IMPL/PRINT/STIF` with
+        `FORMAT(...,E10.2)`, and 2 significant digits destroy a slender beam's
+        soft bending mode: the exported matrix gives a NEGATIVE tip stiffness
+        and f1 = 334.196 Hz. So the matrix here is assembled exactly, from the
+        very section constants k2rad wrote into the deck's own
+        `/PROP/BEAM/1` (Area 322.58, Iyy 69371.90427, Izz 1083.936004,
+        Ixx 70455.84027) — 50 Euler-Bernoulli elements over 127 mm with the
+        root node pinned — and fed through the shipped reader.
+
+        MEASURED: f1 = 110.5541 Hz against the deck's own `.eigout`
+        f1 = 110.4521 Hz, **+0.092 %**; the tip stiffness of that matrix is
+        109.454 = 3EI/L^3 to six figures; f2 = 884.4330 = f1 x 8 (the
+        sqrt(Iyy/Izz) = 8 pair) and f3 = 4422.1651 is the axial mode. The
+        control `zero_density_floor=False` on the SAME exact matrix still dies
+        ARPACK -9999, so both halves of the arm are necessary.
+        """
+        if not os.path.exists(_PSD_DECK):
+            self.skipTest("the R14 deck-only corpus is not on this machine")
+        try:
+            import numpy                                    # noqa: F401
+            import scipy                                    # noqa: F401
+        except Exception:                                   # pragma: no cover
+            self.skipTest("numpy/scipy not installed")
+        ms = _modal_solve()
+        E, nu = 68947.5729, 0.33
+        A, iyy, izz, ixx = 322.58, 69371.90427, 1083.936004, 70455.84027
+        st = ms.parse_deck(_PSD_DECK)
+        order = [nid for _x, nid in
+                 sorted((n.x, nid) for nid, n in st.nodes.items())]
+        span = st.nodes[order[-1]].x - st.nodes[order[0]].x
+        le = span / (len(order) - 1)
+        G = E / (2.0 * (1.0 + nu))
+        ke = [[0.0] * 12 for _ in range(12)]
+        ke[0][0] = ke[6][6] = E * A / le
+        ke[0][6] = ke[6][0] = -E * A / le
+        ke[3][3] = ke[9][9] = G * ixx / le
+        ke[3][9] = ke[9][3] = -G * ixx / le
+        for inertia, (t1, t2, r1, r2), sgn in ((izz, (1, 7, 5, 11), 1.0),
+                                               (iyy, (2, 8, 4, 10), -1.0)):
+            a12 = 12 * E * inertia / le ** 3
+            a6 = 6 * E * inertia / le ** 2
+            a4, a2 = 4 * E * inertia / le, 2 * E * inertia / le
+            ke[t1][t1] += a12; ke[t2][t2] += a12
+            ke[t1][t2] -= a12; ke[t2][t1] -= a12
+            ke[r1][r1] += a4; ke[r2][r2] += a4
+            ke[r1][r2] += a2; ke[r2][r1] += a2
+            for t, s in ((t1, 1.0), (t2, -1.0)):
+                for r in (r1, r2):
+                    ke[t][r] += sgn * s * a6
+                    ke[r][t] += sgn * s * a6
+        root = order[0]
+        dead = {6 * (root - 1) + d for d in range(1, 7)}
+        entries = {}
+        for e in range(len(order) - 1):
+            idx = [6 * (order[e] - 1) + d for d in range(1, 7)] + \
+                  [6 * (order[e + 1] - 1) + d for d in range(1, 7)]
+            for i in range(12):
+                for j in range(12):
+                    if ke[i][j] == 0.0 or idx[i] < idx[j]:
+                        continue
+                    if idx[i] in dead or idx[j] in dead:
+                        continue
+                    key = (idx[i], idx[j])
+                    entries[key] = entries.get(key, 0.0) + ke[i][j]
+        ndof = 6 * (len(order) - 1)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "K")
+        with open(path, "w") as fh:
+            fh.write(f"{ndof} {ndof} {len(entries)}\n")
+            for (ii, jj), v in sorted(entries.items()):
+                fh.write(f"{ii:10d}{jj:10d}{v:24.16E}\n")
+        stiff = ms.read_stiffness(path)
+        self.assertFalse(stiff.low_precision)
+        mass, inertia_d = ms.nodal_masses_from_state(st)
+        md = ms.build_mass_diagonal(stiff, mass, inertia_d)
+        freq, _phi = ms.solve_modes(stiff, md, 1)
+        tmp.cleanup()
+        self.assertAlmostEqual(freq[0], 110.5541, places=3)
+        self.assertLess(abs(freq[0] - 110.4521) / 110.4521, 0.01)
+        # the analytic cantilever with the SOFT-axis inertia, hand-derived
+        analytic = math.sqrt(
+            3 * E * izz / span ** 3 / 0.00022684179) / (2 * math.pi)
+        self.assertAlmostEqual(freq[0], analytic, places=3)
+
+
+if __name__ == "__main__":                       # pragma: no cover
     unittest.main()
