@@ -2555,7 +2555,7 @@ card 1 `NID X Y Z TC RC` with the codes `0` none, `1` x, `2` y, `3` z, `4` xy,
 `5` yz, `6` zx, `7` xyz in the **global** system, carrying no CID, no id and no
 birth/death — always active. The decode reproduces LS-DYNA's own
 `nodal spc summary on *NODE cards` d3hsp echo (printed by 155 of the R14
-reference runs) on all **162 139 TC/RC cells of the 137 carrier
+reference runs) on all **162 139 constrained `*NODE` rows of the 137 carrier
 reference decks with zero translation-code disagreements**. Screened rule by
 rule, each screen counted and its nodes named in the conversion log: a
 rigid-body member node is **dropped** (p.35-3 Remark 1, and LS-DYNA's own

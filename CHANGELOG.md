@@ -29,7 +29,7 @@ Prior history (before this changelog was introduced) is summarized in the
     emitted model at 0 conversion warnings and 0 starter errors.
     **The decode is measured, not assumed**: it reproduces LS-DYNA's own
     `nodal spc summary on *NODE cards` d3hsp echo — printed by 155 of the R14
-    reference runs — on all **162 139 TC/RC cells of the 137 carrier decks,
+    reference runs — on all **162 139 constrained *NODE rows of the 137 carrier decks,
     with zero translation-code disagreements**, and an explicit
     deck's `nodout` confirms it holds (`intro-by-j.-day/joint/joint-i/
     revo-stiff`: node 5 states `TC 7 RC 7`, the deck has no `*BOUNDARY_SPC`,
@@ -475,7 +475,11 @@ Prior history (before this changelog was introduced) is summarized in the
   4424 cycles, t = 2.000E-04**, cycle-0 K-ENERGY **4.481E+04** against the
   44 807.05 its LS-DYNA `glstat` implies (**+0.007 %**) and a final I-ENERGY of
   **4.259E+04** against 41 588.6 (**+2.4 %**), both channels evolving — where
-  part A's head gave `I-ENERGY = K-ENERGY = 0.000` on all 4353 cycles.
+  part A's head gave `I-ENERGY = K-ENERGY = 0.000` on all 4353 cycles. The
+  FINAL kinetic channel is the half this record first left out and it is the
+  reason the verdict is `deviation` and not `match`: the database rows this
+  round wrote are `taylor1` IE +2.41 % / **KE +31.67 %** and `taylor2`
+  IE −1.87 % / **KE +29.17 %**, both three times the 10 % band.
   `plate.typ13` starter 0 ERRORS / 2 WARNINGS, engine **NORMAL, 253 cycles**,
   the before/after above.
   `ex_08_beam_elform_1` starter 0/1, engine NORMAL at **2 cycles** (unchanged),
@@ -1339,17 +1343,30 @@ Prior history (before this changelog was introduced) is summarized in the
     Inacti 0 stays out of the set for the real reason — the bootstrap contact
     is meant to carry stiffness at t = 0.
   - **A TC/RC `/BCS` on a `*MAT_NULL` mesh is now named at conversion time.**
-    Four R14 decks lost a NORMAL termination to it in the campaign re-run
-    (`ale/sloshing-a/-c/-d`, `ale/bird/bird-b`; sloshing_A: 33 813 cycles at
-    min dt 5.9e-05 reaching t = 2.0 → 697 421 cycles at min dt 2.3e-16
-    reaching t = 0.18). The conversion is faithful — LS-DYNA's own d3hsp lists
-    those same 242 nodes as `1 1 1` and runs the model to t = 2.0 — and two of
-    the four move CLOSER to their reference, so this is a stability
-    interaction with a mesh that has no deviatoric stiffness, not a decode
-    error. The warning names the count, the first five nodes, the `*MAT_NULL`
-    part ids, the four measured decks and `--no-node-tc-rc-bcs`, which
-    reproduces master byte for byte. The class goes to ROADMAP with the
-    decision it owes (`/BCS` vs `/ALE/BCS` vs a named drop).
+    THREE R14 decks lost a NORMAL termination to it in the campaign re-run
+    (`ale/sloshing-a/-c/-d`; sloshing_A: 33 813 cycles at min dt 5.9e-05
+    reaching t = 2.0 → 697 421 cycles at min dt 2.3e-16 reaching t = 0.18),
+    and `--no-node-tc-rc-bcs` is byte-identical to a true master conversion on
+    all three. This entry first said FOUR and named `ale/bird/bird-b`; the
+    verification round measured that deck's opt-out arm and it differs from
+    master by 337 added / 6 removed lines — item B, not item A, is what gave
+    the bird an `/INIVEL` master had dropped, and the opt-out arm collapses
+    exactly like the full branch. It is an item-B row (master's NORMAL was an
+    ie/ke −100 % zero model) and `/BCS`, `/ALE/BCS` and no-BCS all collapse
+    alike on it. The decode is faithful: 242 of 242 nodes agree with LS-DYNA's
+    own `nodal spc summary on *NODE cards` echo — 180 as `0 0 1`, 40 as
+    `1 0 1`, 22 as `1 1 1`, and `0 0 0` in every rotational column although
+    every node states RC = 7, which is what rule (d) predicts. (This entry
+    first said all 242 read `1 1 1`.) The warning names the count, the first
+    five nodes, the `*MAT_NULL` part ids, the measured decks and the opt-out.
+    The CAUSE was queued here as *"a constrained mesh with no deviatoric
+    stiffness"* with a `/BCS` vs `/ALE/BCS` decision; the verification round
+    measured it to be the `*SECTION_SOLID` ELFORM 1 → `Isolid` 17 mapping with
+    LS-DYNA's default hourglass control not carried — same shipped `.rad` with
+    only the Isolid cell changed runs sloshing_A to NORMAL at t = 2.0, IE
+    −0.25 % against its own reference — and `/ALE/BCS` is a provable no-op
+    there (`bcs0.F:66-76` decodes the ALE fields only `IF(IALE>0)`, and the
+    deck has no ALE card at all). See ROADMAP for the corrected class.
   - **`*SET_<F>_GENERAL`'s id columns are FAMILY-dependent, and one
     option-keyed table was wrong in both directions.**
     `node_general_subgrp.cfg:141` gives EVERY node-family option seven id
@@ -1422,7 +1439,8 @@ Prior history (before this changelog was introduced) is summarized in the
     real bound (this pass always writes skew 0, so only a node a SKEWED
     `*BOUNDARY_SPC` already stamped could trip it — 0 such decks in 893 corpus
     files). "162 139 nodes across 155 R14 decks" becomes "the echo is printed
-    by 155 of the reference runs; the decode covers all 162 139 cells of the
+    by 155 of the reference runs; the decode covers all 162 139 constrained
+    `*NODE` rows (267 641 non-zero TC/RC cells) of the
     137 carrier decks". `parser.py`'s `_COLLECT` scope check said 36 files; it
     is 37 (all under `SETS/`, so the conclusion holds). And the argparse `%%`
     escape had leaked into six plain docstrings and comments, where it renders
@@ -1451,8 +1469,9 @@ Prior history (before this changelog was introduced) is summarized in the
     master baseline of 4876 / 2 / 1930; part B's head was 4929 / 2 / 1952.
   * ``mypy k2rad`` (mypy 2.3.1, fresh per-tree cache) **0 issues in 37 source
     files**, and **0** again with ``--no-site-packages``.
-  * ``ruff check .`` clean; ``k2rad.py --help`` renders (exit 0, 22 087 chars,
-    0 unescaped ``%``).
+  * ``ruff check .`` clean; ``k2rad.py --help`` renders (exit 0, 22 087 BYTES —
+    21 777 characters after universal-newline translation; the byte count is
+    what was measured — 0 unescaped ``%`` in any ``help=`` string).
   * Goldens vs ``origin/master``: exactly **two lines**, both the new
     ``Fpenmax`` cell — ``implicit_qstat_0000.rad`` (whose stub ``Inacti`` is
     back at master's 5) and ``rigid_contact_0000.rad``.
@@ -1481,7 +1500,10 @@ Prior history (before this changelog was introduced) is summarized in the
     ``/CLOAD`` finding a node that is actually free), both
     ``05_x_2_welding_uncoupled_link_*_structuralstep`` **error_starter →
     normal** (the tied ``Itied = 1``), and four ``run_pass = 2`` decks that had
-    never run. Whole database: normal 260 → 266, error_starter 15 → 13,
+    never run. (That headline counts four ``pending -> X`` transitions as
+    improvements and two of the four end in a failure, so read it as: **4 rows
+    improved, 0 regressed, and 4 previously-unrun ``run_pass = 2`` decks gained
+    a status, 2 of them a failing one.**) Whole database: normal 260 → 266, error_starter 15 → 13,
     error_engine 44 → 43, pending 11 → 7, timeout 18 → 19; IE-collapse 49 → 51
     and implicit-stop 29 → 28, where both new IE-collapse rows are those
     previously-unrun decks entering the population (like-for-like 49 → 49).

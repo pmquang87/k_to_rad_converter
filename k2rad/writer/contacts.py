@@ -1514,8 +1514,10 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
 #: ``PENE(I) > PENMAX`` — BEFORE the Inacti branches at ``:200-208``, so every
 #: node it catches loses its Inacti treatment as well as its stiffness.
 #: ``i7pen3.F:70-80`` makes ``PENE = MAX(0, GAPV + MARGE - d)`` for a secondary
-#: node at distance ``d`` from the segment, so the caught population is
-#: ``d < (1 - Fpenmax)*GAPV + MARGE`` — a SUPERSET of the ``d = 0`` nodes that
+#: node at distance ``d`` from the segment — and on the ONLY path that feeds
+#: ``i7pwr3`` that term is identically zero: ``inint3.F:819`` and ``:1019`` are
+#: both ``CALL I7PEN3(ZERO, GAPV, ...)``. So the caught population is exactly
+#: ``d < (1 - Fpenmax)*GAPV`` — a SUPERSET of the ``d = 0`` nodes that
 #: cannot be depenetrated at all (``:113-114``: ``DN = |N|**2 <= 1e-30``, no
 #: direction to move the node along), and on a real mesh a much bigger one.
 #:
@@ -1531,8 +1533,12 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
 #: 0.999999 is therefore the value: it clears the refusal and takes exactly the
 #: nodes that have no other treatment available. (On the conformal weld mesh of
 #: ``05_1_welding_solid`` it takes 355 against 310 zero-normal ones, and
-#: tightening to 0.99999999 still takes 355 — that residue is the ``MARGE``
-#: term above, not the constant.)
+#: tightening to 0.99999999 still takes 355. This residue was first attributed
+#: to the ``MARGE`` term, which is zero here — the 45 extra nodes are ones
+#: whose distance is below 1e-8 of the gap but NOT bit-exactly zero, so
+#: ``i7pen3.F``'s ``S2 = ONE/MAX(EM30, |N|)`` normalisation leaves
+#: ``DN > 1e-30`` and the zero-normal test at ``:113-114`` does not fire on
+#: them. Numerically- but not bit-coincident nodes on a conformal weld seam.)
 _FPENMAX_ZERO_NORMAL = 0.999999
 
 #: The Inacti values that reach the ERROR 611 gate. 1 and 2 are exempt at

@@ -74,7 +74,13 @@ def _part_scoped_segment_set(state: ConversionState, ssid: int,
     so before this helper a PART-scoped set turned a NAMED drop ("set not
     defined") into a SILENT one — the set now EXISTS, so the old
     ``is None`` guard no longer fires and the loop simply contributes nothing.
-    Every one of those consumers now calls this and says what it lost.
+    FIVE of those six call this and say what they lost (``writer/loads``
+    ``*LOAD_SEGMENT_SET``; ``writer/blast_ale`` ``*LOAD_BLAST_SEGMENT_SET``,
+    ``*BOUNDARY_NON_REFLECTING`` and ``*CONSTRAINED_LAGRANGE_IN_SOLID``;
+    ``writer/monvol``'s airbag surface). The sixth,
+    ``writer/mesh._referenced_node_ids``, carries a written verdict at its own
+    site instead of a call: that pass keeps a node only a LOAD references, and
+    a scoped part's nodes are already referenced by that part's own elements.
 
     MEASURED reach: 0 corpus decks combine a PART-scoped ``*SET_SEGMENT_GENERAL``
     with any of these keywords (the six PART rows in the corpus are the welding

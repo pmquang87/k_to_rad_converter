@@ -224,8 +224,10 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 #: displacement, EQ.2 y, EQ.3 z, EQ.4 x and y, EQ.5 y and z, EQ.6 z and x,
 #: EQ.7 x, y, and z" (RC the same seven on rotations). NOT assumed: the table
 #: reproduces LS-DYNA's OWN ``nodal spc summary on *NODE cards`` d3hsp echo
-#: (printed by 155 of the R14 reference runs) on all 162 139 TC/RC cells of the
-#: 137 carrier decks, with zero translation-code disagreements.
+#: (printed by 155 of the R14 reference runs) on all 162 139 constrained *NODE
+#: ROWS of the 137 carrier decks (267 641 non-zero TC/RC cells, counting TC and
+#: RC separately — the echo prints one row per node), with zero
+#: translation-code disagreements.
 _TC_RC_DIGITS = {0: "000", 1: "100", 2: "010", 3: "001",
                  4: "110", 5: "011", 6: "101", 7: "111"}
 
@@ -614,22 +616,39 @@ def _warn_node_tc_rc_on_null_material(
         groups: Dict[Tuple[str, str], List[int]]) -> None:
     """Name the TC/RC pins that land on a ``*MAT_NULL`` mesh.
 
-    A null material carries no deviatoric stiffness, so a constrained wall of
-    such elements deforms without resisting shear and the explicit time step
-    can collapse. MEASURED on the R14 campaign re-run of this batch: of the
-    137 carriers, four ``*MAT_NULL`` decks LOST a NORMAL termination they had
-    when the cells were dropped — ``ale/sloshing/sloshing-a`` (33 813 cycles
-    at min dt 5.9e-05 to t = 2.0, against 697 421 cycles at min dt 2.3e-16
-    reaching t = 0.18), ``sloshing-c``, ``sloshing-d`` and ``ale/bird/bird-b``.
-    The conversion is not the defect: LS-DYNA's own d3hsp lists the same 242
-    ``sloshing_A`` nodes in its ``nodal spc summary on *NODE cards`` block as
-    ``1 1 1`` and runs the constrained model to t = 2.0, and two of the four
-    move CLOSER to their reference (sloshing_A's KE deviation falls from
-    6.5e+11 % to 2.4e+07 %). What is unresolved is the interaction with a mesh
-    that has no deviatoric stiffness, which belongs to the ALE/hydrodynamic
-    modelling item, not to this pass — so the risk is NAMED here with the flag
-    that restores the previous behaviour exactly (measured byte-identical to
-    master on sloshing_A).
+    MEASURED on the R14 campaign re-run of this batch: of the 137 carriers,
+    THREE ``*MAT_NULL`` decks LOST a NORMAL termination they had when the cells
+    were dropped — ``ale/sloshing/sloshing-a`` (33 813 cycles at min dt 5.9e-05
+    to t = 2.0, against 697 421 cycles at min dt 2.3e-16 reaching t = 0.18),
+    ``sloshing-c`` and ``sloshing-d``. On all three ``--no-node-tc-rc-bcs`` is
+    byte-identical to a true master conversion. The decode is faithful: 242 of
+    242 ``sloshing_A`` nodes agree with LS-DYNA's own ``nodal spc summary on
+    *NODE cards`` echo (180 as ``0 0 1``, 40 as ``1 0 1``, 22 as ``1 1 1``,
+    and 0 in every rotational column), and LS-DYNA runs the constrained model
+    to t = 2.0.
+
+    Two things this warning used to say, both corrected by measurement:
+
+      * ``ale/bird/bird-b`` was listed as a fourth carrier. It is not one:
+        with the opt-out its ``.rad`` still differs from a true master
+        conversion by 337 added / 6 removed lines (item B gave the bird an
+        ``/INIVEL`` master had dropped) and the opt-out arm collapses exactly
+        like the full branch.
+      * the class was named "``*MAT_NULL`` / ALE". Only ``bird_B`` of the four
+        emits an ALE property at all: ``sloshing_A``/``_B`` carry no ALE
+        keyword, and ``sloshing_C``/``_D`` state ELFORM 5 (1-point ALE) +
+        ``*CONTROL_ALE`` yet convert to ``Iale = 0``, i.e. a Lagrangian solid.
+        That silent ELFORM 5/6/7 downgrade is its own ROADMAP gap.
+
+    And the CAUSE is not the pin. Same shipped ``.rad`` with only the
+    ``/PROP/SOLID`` Isolid cell changed: Isolid 17 (what ELFORM 1 maps to)
+    collapses at t = 0.18, Isolid 1 with h = 0.1 runs to NORMAL at t = 2.0 with
+    IE −0.25 % against sloshing_A's own reference. The corpus even holds the
+    controlled experiment — ``sloshing_B.k`` is ``sloshing_A.k`` plus three
+    lines of ``*CONTROL_HOURGLASS``, which is what makes ``_ihq_to_isolid``
+    remap 17 → 1, and it does not regress. The discriminator this warning gives
+    the reader is therefore the deck's own ``*CONTROL_HOURGLASS`` card; the
+    class is in ROADMAP as the ELFORM → Isolid item.
     """
     if not groups or not state.mat_null:
         return
@@ -649,10 +668,25 @@ def _warn_node_tc_rc_on_null_material(
         f"{_named(hit)}) belong to a *MAT_NULL part ("
         f"{', '.join(str(p) for p in sorted(null_pids))}), which carries no "
         "deviatoric stiffness. The /BCS is faithful — LS-DYNA applies these "
-        "cells and its own d3hsp echoes them — but MEASURED on the R14 "
-        "campaign four *MAT_NULL decks (ale/sloshing-a/-c/-d, ale/bird/bird-b) "
-        "lost a NORMAL termination to a time-step collapse once their tank "
-        "walls were pinned. If this deck's dt collapses, --no-node-tc-rc-bcs "
+        "cells, its own d3hsp echoes all of them and it runs the constrained "
+        "model to termination — but MEASURED on the R14 campaign three "
+        "*MAT_NULL decks (ale/sloshing-a/-c/-d) lost a NORMAL termination to a "
+        "time-step collapse once their tank walls were pinned. The cause is "
+        "NOT the pin: the same .rad with /PROP/SOLID Isolid 1 instead of 17 "
+        "runs sloshing_A to t = 2.0 at IE -0.25 % against its own LS-DYNA "
+        "reference. *SECTION_SOLID ELFORM 1 is 1-point integration and k2rad "
+        "maps it to the 8-point Isolid 17, and it re-maps to Isolid 1 ONLY "
+        "when the deck carries a *CONTROL_HOURGLASS / *HOURGLASS card - so a "
+        "deck relying on LS-DYNA's own default (IHQ 2 / QH 0.1, Vol I R17 "
+        "p.12-271 Remark 1) gets no hourglass control at all. THE "
+        "DISCRIMINATOR: this deck "
+        + ("HAS" if (state.ctrl_hourglass or state.hourglass_defs)
+           else "does NOT have")
+        + " a *CONTROL_HOURGLASS/*HOURGLASS card"
+        + ("." if (state.ctrl_hourglass or state.hourglass_defs) else
+           " - sloshing_B, which is sloshing_A plus exactly that card, does "
+           "not regress.")
+        + " If this deck's dt collapses, --no-node-tc-rc-bcs "
         "(convert(node_tc_rc_bcs=False)) reproduces the previous behaviour "
         "byte for byte.")
 

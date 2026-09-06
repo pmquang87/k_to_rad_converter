@@ -504,9 +504,13 @@ shipped, so the marginal cost is small.
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11
   edge-to-edge with synthesized `/LINE/SEG`|`/LINE/SURF`, `-19`→TYPE19; default →
   single-surface) — **done** (dyna2rad `convertcontacts.cxx` cc:133-164).
-- `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` negative-offset discriminator
+- `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` routing
   `(SFST*SST + SFMT*MST)/2 < 0` → `/INTER/TYPE10` penalty tie (else TYPE2) —
-  **done** (dyna2rad cc:220).
+  **shipped, but PRAGMATIC rather than faithful** (the rule is dyna2rad's,
+  cc:220; dyna2rad is a peer, never an authority). The two things it used to be
+  justified with are false at the LS-DYNA source and the arm that runs has a
+  measured cost — see `writer/contacts._tied_interface_type` for all of it, and
+  the round-3 entry below.
 - `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE + /INISH3 /
   /INIBRI — **done** (the GLOB flavours, layer-count checks per the starter
   readers). The 3-node half landed in the SIDE-DEFECT batch: the `/INISH3`
@@ -1317,25 +1321,81 @@ found and deliberately did NOT close.
 
 ### Found while doing round 2, recorded rather than fixed
 
-- **A `*NODE` TC/RC pin on a `*MAT_NULL` mesh can collapse the explicit time
-  step, and four R14 decks lost a NORMAL termination to it.** Measured in the
-  round-2 campaign re-run: `ale/sloshing/sloshing-a` went from 33 813 cycles at
-  min dt 5.9e-05 (t = 2.0 of 2.0) to 697 421 cycles at min dt 2.3e-16 reaching
-  t = 0.18, and `sloshing-c`, `sloshing-d` and `ale/bird/bird-b` the same way.
-  The CONVERSION is right — LS-DYNA's own d3hsp lists those 242 `sloshing_A`
-  nodes in its `nodal spc summary on *NODE cards` block as `1 1 1` and runs the
-  constrained model to t = 2.0 — and two of the four move CLOSER to their
-  reference (sloshing_A's KE deviation 6.5e+11 % → 2.4e+07 %); both states are
-  junk against the reference either way, because an unconstrained tank in free
-  fall is not a sloshing simulation. What is unresolved is a constrained mesh
-  with no deviatoric stiffness, which is the ALE/hydrodynamic modelling item.
-  Round 2 NAMES the risk at conversion time (the count, the first five nodes,
-  the `*MAT_NULL` part ids and the four measured decks) and leaves
-  `--no-node-tc-rc-bcs`, which reproduces master byte for byte, as the escape.
-  The decision the next round owes this class: `/BCS` vs `/ALE/BCS`
-  (`hm_read_alebcs.F` packs `IC = IC1*8 + IC2` into the SAME ICODE word that
-  `hm_read_bcs.F:188` fills as `IC1*512 + IC2*64`, i.e. different bit fields)
-  vs a named drop, decided on a with/without twin of `ale/sloshing/sloshing-a`.
+- **THE `*SECTION_SOLID` ELFORM → `Isolid` MAPPING, exposed by the TC/RC pins
+  on three `*MAT_NULL` decks.** Round 2 shipped this as *"a constrained mesh
+  with no deviatoric stiffness"* with a `/BCS` vs `/ALE/BCS` decision attached.
+  The verification round measured all three parts of that and they are wrong;
+  the corrected statement is below, because the wrong CAUSE would have sent
+  round 3 after the wrong card.
+
+  What is true: pinning the walls costs `ale/sloshing/sloshing-a` its NORMAL
+  termination (33 813 cycles at min dt 5.9e-05, t = 2.0 of 2.0 → 697 421 cycles
+  at min dt 2.3e-16, stuck at t = 0.18), and `sloshing-c` and `sloshing-d` the
+  same way. `--no-node-tc-rc-bcs` is byte-identical to a true master conversion
+  on all three (verified, 0 diff lines each). The DECODE is exactly faithful:
+  242 of 242 nodes agree with LS-DYNA's own `nodal spc summary on *NODE cards`
+  echo, 0 disagreements.
+
+  What is NOT true, each refuted by measurement:
+
+    * *"the four decks"* — `ale/bird/bird-b` is not in this class. With
+      `--no-node-tc-rc-bcs` its `.rad` still differs from a true master
+      conversion by 337 added / 6 removed lines, because item B made a
+      `*SET_NODE_LIST_GENERATE` resolve and gave the bird an `/INIVEL` master
+      dropped entirely; the opt-out arm collapses exactly like the full branch
+      (t = 3.34e-5, dt 1.4e-13). It is an item-B row: master's NORMAL was a
+      zero model (ie/ke −100 %), the projectile now flies, and the ALE FSI then
+      collapses. `/BCS`, `/ALE/BCS` and no-BCS all collapse alike on it.
+    * *"`/BCS` vs `/ALE/BCS`"* — a provable no-op on the deck nominated as the
+      twin. `sloshing_A.k` carries NO `*ALE_*` and no `*CONTROL_ALE` card at
+      all (its `*SECTION_SOLID` is ELFORM 1, Lagrangian), the converted
+      `/PROP/SOLID` has `Iale = 0`, and `bcs0.F:66-76` decodes ICODE's two ALE
+      fields only `IF(IALE>0)`. An `/ALE/BCS` there is read by nothing.
+    * *"LS-DYNA lists the same 242 nodes as `1 1 1`"* — the echo is 180 nodes
+      `0 0 1` (TC 3), 40 `1 0 1` (TC 6) and 22 `1 1 1` (TC 7), with `0 0 0` in
+      the three rotational columns for all 242 although every node states
+      RC = 7 (which is what rule (d) predicts). The substantive half — LS-DYNA
+      applies them and runs to t = 2.0 — holds.
+
+  THE CAUSE, measured on the shipped `.rad` with only the `/PROP/SOLID` Isolid
+  cell changed, against sloshing_A's own LS `glstat` (IE 3.10688e-3,
+  EXT-WORK 0.165455):
+
+    | Isolid | outcome |
+    |---|---|
+    | 17 (shipped, from ELFORM 1) | dt 2.3e-16, stuck at t = 0.1807 |
+    | 24 (HEPH) | dt 9.2e-7, stuck at t = 0.6868 — its stabilisation is stiffness-form and scales with G = 0 |
+    | 17 + Ismstr 1 | NORMAL BANNER at IE 1.85e24 — a #110 junk pass, not a run |
+    | **1, h = 0.1** | **NORMAL, 34 118 cycles, t = 2.0, IE −0.25 %, EXT-WORK +0.03 %** |
+    | 2 | NORMAL, 34 110 cycles, IE 3.101e-3 |
+
+  Same on `sloshing_C` (Isolid 1 → NORMAL, 84 932 cycles, t = 5.0, IE +2.8 %,
+  EXT-WORK −0.73 %). **The corpus contains the controlled experiment:**
+  `sloshing_A.k` and `sloshing_B.k` are identical except three lines,
+  `*CONTROL_HOURGLASS / IHQ 1 / QH 0.005` — and that card alone makes
+  `_ihq_to_isolid` remap 17 → 1, which is why `sloshing_B` does not regress.
+  LS-DYNA says the same: `sloshing_A.d3hsp` echoes *"solid formulation = 1 …
+  eq. 1: 1 point integration"*, *"hourglass type = 2"*, *"hourglass coefficient
+  = 1.00000E-01"* and its glstat ends with an hourglass energy of 0.162346
+  against an external work of 0.165455 — 98 % of the input work. Vol I R17
+  p.12-271 `*CONTROL_HOURGLASS` Remark 1: *"If omitted or if IHQ = 0, the
+  default hourglass control types are as follows: … b) For solids: type 2 for
+  explicit"* (QH default 0.1), in the same paragraph as *"Without hourglass
+  control, these elements would have zero energy deformation modes which could
+  grow large and destroy the solution."*
+
+  So the class is: **`*SECTION_SOLID` ELFORM 1 (1-point) → `Isolid` 17
+  (8-point) on a material with no deviatoric stiffness, with LS-DYNA's own
+  DEFAULT hourglass control (IHQ 2 / QH 0.1) not carried** — `_solid_hg_values`
+  remaps to Isolid 1 only when the deck CARRIES a `*CONTROL_HOURGLASS` /
+  `*HOURGLASS` card, so a deck relying on the solver default gets an element
+  with a different integration rule and no hourglass control. Round 3's item,
+  with `sloshing_A` / `sloshing_B` as its three-line twin pair and
+  `ex_03_solid_elform_1` as the second carrier (see the cross-deck row in the
+  PR's LS-DYNA table). It needs its own corpus sweep: `_elform_to_isolid`'s
+  docstring records a single-hex pull that hourglassed at Isolid 2, so the
+  remap is not a one-line change. Round 2 leaves `--no-node-tc-rc-bcs` as the
+  escape and NAMES the risk at conversion time.
 
 - **A free single-element-thick `Isolid = 17` body is linearly unstable at the
   engine's default time-step scale** — PRE-EXISTING on master, no batch keyword
@@ -1347,37 +1407,134 @@ found and deliberately did NOT close.
   TERMINATION banner. `*CONTROL_TIMESTEP TSSFAC = 0.4` is exactly stable (474
   cycles, KE constant to all printed digits) and so is a 2x2x2 mesh of the same
   block; restoring the artificial bulk viscosity (q_a = 1.1, q_b = 0.05, hand
-  patched into the `.rad`) does NOT cure it, so the cause is the step scale
-  against Isolid 17's own stability limit and not the missing viscosity. Any
-  coupon or corpus deck of that shape needs TSSFAC <= 0.4 or a finer mesh.
+  patched into the `.rad`) does NOT cure it. Round 2 concluded from that *"the
+  cause is the step scale against Isolid 17's own stability limit"*; the
+  verification round's `sloshing_A` measurement narrows it — `Isolid 1` is
+  stable on that deck at the IDENTICAL `Tsca = 0.7`, so what the step scale
+  interacts with is the ELFORM → Isolid mapping above, not a property of the
+  step alone. The two entries are one defect. Any coupon or corpus deck of that
+  shape needs TSSFAC <= 0.4, a finer mesh, or the Isolid its ELFORM asks for.
 
-- **Eleven decks terminate NORMAL as numerically-zero models against a
-  non-zero LS-DYNA reference**, and one of them is only visible because the
-  round-2 evolve check was given an absolute floor: `transducer.k` runs 969
-  cycles at I-ENERGY ~ 8.3e-27 against a reference of 161.5. The list (LS
-  reference not a structural zero): `quadrature_B`, `quadrature_C`,
-  `cylinder_impact_B`, `Intermediate_fsi_flap/main_fsi`, `transducer`,
-  `typ14-m24`, `translat`, `contact.n2s-sphere`, `matfoamsoil`,
-  `projectile-block`, `sph/foam`. Round 3's named input class;
-  OPENRADIOSS_REPORT section 0.13's evolve table carries each verdict.
+- **Fourteen decks terminate NORMAL as numerically-zero models against a
+  non-zero LS-DYNA reference** — a WHOLE-DATABASE census, not a movers-only
+  one. Round 2 shipped "eleven", which was the evolve table of that round's
+  184 `normal` MOVERS presented as the class itself; censused over all 373
+  records with the criterion *(status `normal`, both OpenRadioss final energies
+  below 1e-10, and the LS reference not a structural zero)* it was **twenty**
+  before this verification round and is **fourteen** after it, because the
+  `/INIVEL` → `/RBODY` main-node re-point cleared six (`transducer`,
+  `typ14-m24`, `translat`, `contact.n2s-sphere`, `matfoamsoil`, `sph/foam`).
+  The fourteen that remain, with their LS `ie`/`ke`:
 
-- **An `*INITIAL_VELOCITY` over a rigid part's nodes is emitted and inert, and
-  the re-point onto the `/RBODY` main node is NOT done.** `inirby.F` rebuilds
+    `quadrature_A` (2e-20 / 15 300 — excluded from round 2's list on its zero
+    LS *internal* energy while its kinetic reference is real),
+    `quadrature_B` (166.5 / 12 405), `quadrature_C` (335.1 / 12 707),
+    `ale_wavehitcol` (5.19e5 / 119.2), `cylinder_impact_B` (1.70e8 / 3.18e5),
+    `Intermediate_fsi_flap/main_fsi` (6.65e4 / 8.15),
+    `intermediate-fsi-2-flaps/main` (1.22e6 / 1.87e6),
+    `sphere1` (7.91e4 / 7.03e6), `ex_17_spring_elform_0` (256.2 / 26.3),
+    `ex_18_spring_elform_0` (310.7 / 28.3),
+    `section_solid.hourglassing` (1.60e7 / 5.30e7),
+    `projectile-block` (1.70e6 / 1.58e7), `wood-post` (4.68e6 / 4.87e7),
+    `EXP_SC_CONTACT_INTERFERENCE` (1869 / 0.154).
+
+  Round 3's named input class. Six of the fourteen (`quadrature_A/_B/_C`,
+  `sphere1`, `projectile-block`, `wood-post`, `section_solid.hourglassing`)
+  carry an `*INITIAL_VELOCITY_GENERATION` entirely on rigid-body members, which
+  is the one remaining half of the re-point below.
+
+- **An `*INITIAL_VELOCITY_GENERATION` over a rigid part's nodes is still
+  emitted and inert** — the uniform-translation forms were re-pointed in the
+  verification round and this one was not. `inirby.F` rebuilds
   every `/RBODY` secondary node's velocity from the body's main node as a rigid
   field before cycle 1, so an `/INIVEL` written on the secondaries is
   overwritten at 0 starter diagnostics. LS-DYNA has no such rule —
   `*INITIAL_VELOCITY` over a rigid part's nodes sets the PART's velocity, which
   is what the IRIGID cell exists to override — so this is a real conversion gap
-  and not a deck defect. MEASURED on `matfoamsoil` once round 2's set batch made
-  its `*SET_NODE_LIST_GENERATE 99` resolve: the `/INIVEL/TRA` vx = 25000 lands
-  on nodes 1000..1124, all 125 of them members of `*MAT_RIGID` part 10
-  (`/RBODY/1125 'Ball'`), and the deck STILL terminates NORMAL at 242 cycles
-  with `I-ENERGY = K-ENERGY = 0.000` against an LS-DYNA glstat of 8573.23 /
-  19834.5. Round 2 NAMES it (count, first five ids, `inirby.F`, and the two
-  spellings that do move the body). Re-pointing the group changes the velocity
-  field of every deck that states an `*INITIAL_VELOCITY` over a rigid part, so
-  it needs its own corpus sweep and its own reference runs — the same reason
-  part A deferred the mirror-image `_make_bcs` re-point.
+  and not a deck defect.
+
+  **SHIPPED for the uniform forms** (`*INITIAL_VELOCITY_NODE` and the NSID
+  `*INITIAL_VELOCITY`): when EVERY node of the card belongs to a rigid body the
+  group is replaced by that body's main node. MEASURED on `matfoamsoil`,
+  nothing changed but the group's member list — cycle-0 K-ENERGY 3.547E+04
+  against the LS-DYNA reference's own initial total energy 3.54775E+04
+  (−0.02 %), where the un-re-pointed card gives 0.000; 1320 cycles NORMAL at
+  0 ERRORS / 0 WARNINGS with both channels evolving (final IE +66.7 %,
+  KE −36.9 % against 8573.23 / 19834.5) against 242 cycles flat at zero.
+  Reach: 8 roster decks re-pointed, and 6 of the 14 remaining zero models are
+  cleared by it.
+
+  **NOT shipped for `*INITIAL_VELOCITY_GENERATION`**, which is round 3's half.
+  That form emits `/INIVEL/AXIS`, whose `Vr` gives each node the TRANSLATIONAL
+  velocity `omega x r` about the frame axis; collapsing the group to the main
+  node would give that one node its own `omega x r` and the body NO spin at
+  all, because a `/RBODY` secondary's motion comes from the main node's six
+  DOFs. The faithful mapping is an angular velocity on the main node, not a
+  smaller node group. Reach: 15 roster decks still carry the warning (a mixed
+  card, or this form), and `quadrature_A/_B/_C`, `sphere1`, `projectile-block`,
+  `wood-post` and `section_solid.hourglassing` are zero models because of it.
+  The mixed case (some nodes rigid, some free) deliberately keeps the warning:
+  re-pointing only the rigid half would drop the free nodes out of the group.
+
+- **THE TIED-CONTACT FAMILY IS PICKED BY THE WRONG FIELD, AND THE CARD THAT
+  RUNS IS SOFT.** Two halves of one round-3 item, both measured in the
+  verification round.
+
+  *The family.* `_tied_interface_type` routes on
+  `(SFST*SST + SFMT*MST)/2 < 0`, inherited from dyna2rad and shipped with the
+  rationale *"LS-DYNA's maintain-the-physical-offset flag"*. Vol I R17 p.11-33
+  (`SAST`) is verbatim: *"For the \*CONTACT_TIED_… options, SAST and SBST
+  (below) can be defined as negative values, which will cause the determination
+  of whether or not a node is tied to depend only on the separation distance
+  relative to the absolute value of these thicknesses (see Remark 4 in General
+  Remarks)"*, and General Remark 4 (p.11-125) is the tying SEARCH DISTANCE
+  `delta = abs(delta_1)`. The sentence that DOES pick the family is General
+  Remark 7, "Tying to rigid bodies" (p.11-127), and it keys on the KEYWORD:
+  `TIED_SURFACE_TO_SURFACE`, `TIED_NODES_TO_SURFACE`,
+  `TIED_SHELL_EDGE_TO_SURFACE` and the `_CONSTRAINED_OFFSET` spellings are
+  *constraint-based*; only the plain `_OFFSET` / `_BEAM_OFFSET` spellings are
+  *penalty-based*. All five corpus cards the sign rule sends to
+  `/INTER/TYPE10` are the plain constraint-based spelling.
+
+  *Why it was not simply corrected.* Routing them to `/INTER/TYPE2` was TRIED
+  and reverted, measured on this machine at `nt = 4`, the same deck differing
+  only in the tie card: `05_4_2_welding_uncoupled_link_d3plot_structuralstep`
+  (an `/IMPL` quasi-static step) with `/INTER/TYPE10` `Itied = 1` reaches
+  NORMAL TERMINATION in 81 cycles, and with `/INTER/TYPE2` (Spotflag 27,
+  `dsearch` 0.1, starter 0 ERRORS / 0 WARNINGS) diverges at cycle 16, t = 2.299
+  — `ITERATION DIVERGE with RELATIVE R = 0.1723E+01` at every reduced step
+  until `ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, `ISTOP = -2`.
+  `05_5_2` is the same deck with a different output database. The faithful card
+  costs both carriers their NORMAL termination on this build.
+
+  *What the arm that runs costs.* `/INTER/TYPE10`'s `STFAC` is Radioss's own
+  documented default — k2rad writes 0, `hm_read_inter_type10.F:135` turns that
+  into `ONE_FIFTH`, and `radioss120/INTER/inter_type10.cfg:76` gives
+  `TYPE10_SCALE` the default `0.2` (a dimensionless stiffness SCALE, `:27`).
+  On a determinate EXPLICIT steel-bar coupon (10x10x20 mm, two hexes, top face
+  driven 100 mm/s, closed form `IE = 1/2 E eps^2 A L = 210.0`) the merged
+  single bar gives IE 209.2 / EXT-WORK 209.3 / −0.0 % / 316 cycles, the
+  `/INTER/TYPE2` twin reproduces that to every printed digit, and this
+  `/INTER/TYPE10` carries **68.34 / 119.6 / −42.8 % / 407 cycles**. STFAC sweep
+  on the same coupon: 1 → 158.4 (−13.0 %), 10 → 203.5 (−1.5 %), 100 → 209.2
+  (−0.1 %). So an EXPLICIT tie routed here transfers about a third less load
+  than the seam should carry, and flipping the `_OFFSET` spellings onto it —
+  which Remark 7 would justify — would move three more corpus cards
+  (`05_2_welding_shell_thin` and two `getriebekette` decks) onto that card.
+
+  Round 3 owes both halves at once: derive a real `STFAC` (or find the TYPE2
+  setting the implicit solve accepts), THEN key the family on the keyword.
+  Doing either alone trades one measured defect for the other.
+
+- **`*SECTION_SOLID` ELFORM 5/6/7 (the 1-point ALE solids) convert to a
+  LAGRANGIAN solid, silently.** Found while correcting the `*MAT_NULL` class:
+  `ale/sloshing/sloshing-c` and `-d` state `*SECTION_SOLID` ELFORM 5 beside a
+  `*CONTROL_ALE`, and the emitted `/PROP/SOLID` has `Iale = 0` (read off the
+  card). The only thing the conversion log says about ALE on those decks is the
+  `*CONTROL_ALE` note — *"OpenRadioss keeps its default ALE advection"* — which
+  reads as if the ALE scheme were preserved. Either map ELFORM 5/6/7 onto
+  `Iale`, or warn that the element became Lagrangian and say what that costs.
+  (ELFORM 11/12 already map to `Iale`; this is the 1-point family only.)
 
 - **`*CONTACT_SURFACE_TO_SURFACE` and eight sibling contact keywords are not
   registered at all.** Measured while correcting item C's census: **62 of the
@@ -1561,9 +1718,10 @@ Cases that convert today but drop or approximate detail worth recovering:
   their only support — and those decks sit under **44 of the 69 IE-collapse
   decks and 27 of the 42 implicit-ERROR decks**. It is LS-DYNA's standard,
   always-active semantics, and the decode is not assumed: it reproduces
-  LS-DYNA's own `nodal spc summary on *NODE cards` d3hsp echo on **162 139
-  TC/RC cells of the 137 carrier decks (the echo is printed by 155 of the R14
-  reference runs), with zero translation-code disagreements**. Two
+  LS-DYNA's own `nodal spc summary on *NODE cards` d3hsp echo on **all 162 139
+  constrained `*NODE` rows of the 137 carrier decks (267 641 non-zero TC/RC
+  cells — the echo prints one row per node; the echo itself is printed by 155
+  of the R14 reference runs), with zero translation-code disagreements**. Two
   decks measured against their own `glstat`:
   `intro-by-j.-day/misc/component-i/component1.k` went from NORMAL-but-junk
   (IE 2 224 vs 2 740 230, KE 2.799e8 vs 36 222) to **IE +1.5 % / KE +1.0 %**,
@@ -1578,15 +1736,23 @@ Cases that convert today but drop or approximate detail worth recovering:
   exported from the CONVERTED `.rad`, so the modal chain inherits the
   constraint through the deck.
 
-  **Still open, and named rather than assumed** (next round's item, not this
-  one): `writer/loads._make_bcs` still RE-POINTS a `*BOUNDARY_SPC` on a
-  rigid-body member node to the body's independent node, which is what neither
-  solver does — LS-DYNA skips such an SPC (p.35-3 Remark 1; d3hsp Warning
-  60257) and OpenRadioss makes it inert (`rgbodv.F:150-155`, measured: the
-  re-pointed arm holds a rigid block that the other two arms let fall at the
-  analytic rate). Aligning that path with the TC/RC rule (a) would move every
-  deck with an SPC on a rigid node, so it needs its own sweep and census. Until
-  it does, two contradictory rigid-node rules live in one writer.
+  **RESOLVED in the verification round, and the other way round.** This entry
+  said `writer/loads._make_bcs`'s re-point of a `*BOUNDARY_SPC` on a rigid-body
+  member node is *"what neither solver does — LS-DYNA skips such an SPC
+  (p.35-3 Remark 1; d3hsp Warning 60257)"*. Vol I R17 p.35-3 Remark 1 is
+  verbatim *"No attempt should be made to apply boundary conditions to nodes
+  belonging to rigid bodies"* — advice to the deck author, not a statement that
+  the solver ignores them — and Warning 60257 is an `IMP+` (implicit) message
+  on 1 of the 16 R14 rule-(a) carriers. LS-DYNA's EXPLICIT solver applies the
+  constraint to the BODY: on `control_contact.hemi-draw` part 4 (525 nodes at
+  TC 7 / RC 7, `*MAT_RIGID` CMO 0, no other constraint anywhere in the deck,
+  carrying 1.8e4 of interface-3 contact force) its own `matsum` holds the body
+  at rigid-body velocity exactly 0.0 in all three components at all 121 output
+  times, while parts 2 and 3 — same material, TC codes unioning to x and z —
+  move freely in y. So `_make_bcs`'s re-point is the arm that MATCHES LS-DYNA,
+  and the TC/RC path has been aligned WITH it (rule (a) now re-points too,
+  through the shared `_rbody_main_of` map) rather than the reverse. One
+  rigid-node rule in one writer.
 - **`*INITIAL_STRESS_SHELL` records at MIXED `nb_integr` in one deck**
   *(remaining, an OpenRadioss limitation rather than a conversion loss)* —
   `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common
