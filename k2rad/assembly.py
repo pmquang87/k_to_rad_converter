@@ -4113,6 +4113,16 @@ def _off_set_general(b: Block, offsets: Dict[str, int], warn) -> None:
     is skipped.
     """
     toff = _title_offset(b)
+    # Card 1 SID, exactly as the declarative specs do it. Giving the whole
+    # keyword to a callable replaces the ``{"cards": {0: [(0, "s")]}}`` half
+    # too, and a *SET_*_GENERAL whose own id stays behind while every
+    # consumer's reference to it moves with IDSOFF resolves EMPTY at zero
+    # diagnostics — the #116 silent failure, one card up from the one this
+    # walker exists for (caught by tests/test_r14_triage_2.py).
+    if toff < len(b.raw):
+        new = _rewrite_line(b.raw[toff], [(0, "s")], offsets)
+        if new is not None:
+            b.raw[toff] = new
     for i in range(toff + 1, len(b.raw)):
         line = b.raw[i]
         if not line.strip():
