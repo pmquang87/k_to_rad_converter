@@ -6219,17 +6219,37 @@ def _make_modal_dummy_cload(state: ConversionState,
         elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2))
-    constrained: Set[int] = set()
-    for bc in state.bcs_spcs:
-        constrained.update(state.node_sets.get(bc.nsid, ("", []))[1])
-    candidates = elem_nodes - constrained - rigid_nodes
-    if not candidates:
+    # The screen is per-DOF, not per-node. It used to drop every node named by
+    # any *BOUNDARY_SPC whatever that SPC pins, which was harmless while few
+    # node sets resolved — and stopped being harmless the moment the R14
+    # round-2 batch taught the converter to read *SET_NODE_LIST_GENERATE.
+    # MEASURED on introduction/Introduction/example-08/ex_08_beam_elform_1.k
+    # (a *CONTROL_IMPLICIT_EIGENVALUE deck): its two *BOUNDARY_SPC_SET cards
+    # sit on _GENERATE sets and used to resolve to NOTHING, so every node was
+    # a candidate; with them read, one set is `Tra 111` and the other
+    # `Tra 001 Rot 110`, i.e. every node is named — and the whole-node screen
+    # emptied the candidate list and turned a deck that reached 2 cycles into
+    # a MESSAGE ID 79 stop. X and Y are free on 66 of its 74 nodes, and a unit
+    # /CLOAD along a FREE direction is perfectly good loading data.
+    spc = _global_spc_dofs(state)
+    dof_free = {"X": 0, "Y": 1, "Z": 2}
+    candidates = elem_nodes - rigid_nodes
+    node = 0
+    direction = "Z"
+    for d in ("Z", "X", "Y"):           # Z first: the historical choice
+        free = [n for n in sorted(candidates)
+                if spc.get(n, ("000", "000"))[0][dof_free[d]] == "0"]
+        if free:
+            node, direction = max(free), d
+            break
+    if not node:
         state.warn(
-            "Modal stiffness-export run has no load and no free node to put a "
-            "dummy /CLOAD on — the engine will stop with MESSAGE ID 79. Add "
-            "any load to the deck manually.")
+            "Modal stiffness-export run has no load and no node with a FREE "
+            "translational DOF to put a dummy /CLOAD on (every structural node "
+            "is pinned in X, Y and Z by a *BOUNDARY_SPC or a zero-scale "
+            "*BOUNDARY_PRESCRIBED_MOTION) — the engine will stop with MESSAGE "
+            "ID 79. Add any load to the deck manually.")
         return []
-    node = max(candidates)              # deterministic, away from low-id corners
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     funct_id = state.next_id()
     grnod_id = state.next_grnod_id()
@@ -6237,9 +6257,11 @@ def _make_modal_dummy_cload(state: ConversionState,
     state.warn(
         "Modal stiffness-export run: the deck has no load, but the implicit "
         "engine refuses to start without loading data (MESSAGE ID 79). Added "
-        f"a dummy unit /CLOAD (node {node}, dir Z). The exported stiffness "
-        "matrix is load-independent; the static solution can be cross-checked "
-        f"with: tools/modal_solve.py <matrix> --static {node} Z 1"
+        f"a dummy unit /CLOAD (node {node}, dir {direction} — the highest-"
+        "numbered structural node with that translation still free). The "
+        "exported stiffness matrix is load-independent; the static solution "
+        "can be cross-checked with: tools/modal_solve.py <matrix> --static "
+        f"{node} {direction} 1"
     )
     lines = [
         "#-  DUMMY STATIC LOAD (modal stiffness-export run needs loading data):",
@@ -6256,7 +6278,7 @@ def _make_modal_dummy_cload(state: ConversionState,
         f"/CLOAD/{cload_id}",
         "modal_dummy_static_load",
         "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-        f"{_i(funct_id)}{'Z'.rjust(10)}{_i(0)}         0{_i(grnod_id)}"
+        f"{_i(funct_id)}{direction.rjust(10)}{_i(0)}         0{_i(grnod_id)}"
         f"          {_f(1.0)}{_f(1.0)}",
         HDR,
     ]
