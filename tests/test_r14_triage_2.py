@@ -985,14 +985,21 @@ class ModalDummyCloadScreensPerDof(unittest.TestCase):
         w = [x for x in res.warnings if "dummy unit /CLOAD" in x]
         self.assertIn("dir Z", w[0])
 
-    def test_a_fully_pinned_model_still_refuses_by_name(self):
+    def test_a_fully_pinned_model_still_gets_its_load_and_says_why(self):
+        """A model with NO free translational DOF anywhere still needs loading
+        data: the engine stops with MESSAGE ID 79 without it, and the matrix
+        this run exports is load-INDEPENDENT, so the `/CLOAD` goes on a pinned
+        node and the message WITHDRAWS the static cross-check instead of
+        pretending the node is free. (Refusing outright was this round's own
+        first answer; it would have cost two corpus decks their export.)"""
         res, starter = _convert(self._deck(
             "*BOUNDARY_SPC_SET\n" + _row(1, 0, 1, 1, 1, 1, 1, 1) + "\n"))
-        self.assertEqual(_headers(starter, "/CLOAD/"), [], starter)
+        self.assertEqual(len(_headers(starter, "/CLOAD/")), 1, starter)
         w = [x for x in res.warnings
-             if "no node with a FREE translational DOF" in x]
+             if "EVERY structural node is pinned" in x]
         self.assertEqual(len(w), 1, res.warnings)
         self.assertIn("MESSAGE ID 79", w[0])
+        self.assertIn("is NOT available on this deck", w[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

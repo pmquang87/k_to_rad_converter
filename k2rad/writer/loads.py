@@ -403,13 +403,15 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
          ``hm_read_bcs.F:198`` unions the codes (``ICODE = MY_OR(IC, ICODE)``),
          so a second ``/BCS`` changes no physics — but ``kinset``/``kinchk``
          still count it, and a two-``/BCS`` coupon measures 1 × WARNING 312 /
-         8 incompatible conditions. Measured reach on the R14 roster, AFTER the
-         set spellings of this same batch made two more ``*BOUNDARY_SPC_SET``
-         cards resolve: see the "MEASURED (branch head)" figure in CHANGELOG's
-         round-2 record — most overlaps are exact duplication (``ex_12``: 32
-         nodes ``TC 3`` and a ``*BOUNDARY_SPC_SET`` ``dofz = 1`` on the same
-         32) and a few are partial, where the node keeps a ``/BCS`` for the
-         DOFs the SPC does not state.
+         8 incompatible conditions. MEASURED on the R14 roster at this head —
+         AFTER the set spellings of this same batch made two more
+         ``*BOUNDARY_SPC_SET`` cards resolve, which is why the figure moved:
+         **570 DOFs on 570 nodes in 18 decks**, of which 16 (512 nodes, the
+         ``ex_12`` / ``ex_13`` / ``ex_14`` / ``ex_15`` family — 32 nodes
+         ``TC 3`` beside a ``*BOUNDARY_SPC_SET`` ``dofz = 1`` on the same 32)
+         are exact duplication and lose the node entirely, while ``ex_09``
+         (26 DOFs) and ``ex_10`` (32) are PARTIAL and keep a ``/BCS`` for the
+         DOFs their SPC does not state.
       d. *Rotational codes on a mesh with no rotational DOF are EMITTED and
          named.* See :func:`_mesh_has_rotational_dof`.
 
@@ -6381,13 +6383,21 @@ def _make_modal_dummy_cload(state: ConversionState,
         if free:
             node, direction = max(free), d
             break
+    pinned_fallback = False
+    if not node and candidates:
+        # No free translational DOF anywhere. Emitting NOTHING is worse than
+        # emitting a load the constraints hold: the engine stops with MESSAGE
+        # ID 79 without loading data, and the exported stiffness matrix — the
+        # only thing this run exists for — is load-INDEPENDENT, so a /CLOAD on
+        # a pinned node still lets the export happen. What is lost is the
+        # static cross-check, and the message says so instead of pretending
+        # the node is free (a check that cannot fail is worse than no check).
+        node, direction, pinned_fallback = max(candidates), "Z", True
     if not node:
         state.warn(
-            "Modal stiffness-export run has no load and no node with a FREE "
-            "translational DOF to put a dummy /CLOAD on (every structural node "
-            "is pinned in X, Y and Z by a *BOUNDARY_SPC, a *NODE TC/RC cell "
-            "or a zero-scale *BOUNDARY_PRESCRIBED_MOTION) — the engine will "
-            "stop with MESSAGE ID 79. Add any load to the deck manually.")
+            "Modal stiffness-export run has no load and no structural node to "
+            "put a dummy /CLOAD on at all — the engine will stop with MESSAGE "
+            "ID 79. Add any load to the deck manually.")
         return []
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     funct_id = state.next_id()
@@ -6403,6 +6413,16 @@ def _make_modal_dummy_cload(state: ConversionState,
         "exported stiffness matrix is load-independent; the static solution "
         "can be cross-checked with: tools/modal_solve.py <matrix> --static "
         f"{node} {direction} 1"
+        if not pinned_fallback else
+        "Modal stiffness-export run: the deck has no load, but the implicit "
+        "engine refuses to start without loading data (MESSAGE ID 79), and "
+        "EVERY structural node is pinned in X, Y and Z by a *BOUNDARY_SPC, a "
+        "*NODE TC/RC cell or a zero-scale *BOUNDARY_PRESCRIBED_MOTION. Added "
+        f"the dummy unit /CLOAD on node {node} (dir {direction}) anyway, "
+        "because the stiffness matrix this run exports is load-independent "
+        "and no load at all is MESSAGE ID 79. The static cross-check "
+        "(tools/modal_solve.py --static) is NOT available on this deck: the "
+        "loaded DOF is constrained, so both sides of it are zero."
     )
     lines = [
         "#-  DUMMY STATIC LOAD (modal stiffness-export run needs loading data):",
