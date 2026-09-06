@@ -28,8 +28,9 @@ Prior history (before this changelog was introduced) is summarized in the
     k2rad read the cells and dropped them, so those DOFs were FREE in the
     emitted model at 0 conversion warnings and 0 starter errors.
     **The decode is measured, not assumed**: it reproduces LS-DYNA's own
-    `nodal spc summary on *NODE cards` d3hsp echo on **162 139 nodes across
-    155 R14 decks with zero translation-code disagreements**, and an explicit
+    `nodal spc summary on *NODE cards` d3hsp echo — printed by 155 of the R14
+    reference runs — on all **162 139 TC/RC cells of the 137 carrier decks,
+    with zero translation-code disagreements**, and an explicit
     deck's `nodout` confirms it holds (`intro-by-j.-day/joint/joint-i/
     revo-stiff`: node 5 states `TC 7 RC 7`, the deck has no `*BOUNDARY_SPC`,
     and all six components read exactly `0.00000E+00` at every sample while
@@ -72,7 +73,8 @@ Prior history (before this changelog was introduced) is summarized in the
     (c) a **DOF a `*BOUNDARY_SPC` already states is merged, not restated** —
     `hm_read_bcs.F:198` unions the codes (`MY_OR`), so a second `/BCS` changes
     no physics but costs starter WARNING 312 (measured, 1 warning / 8
-    conditions on a two-`/BCS` coupon). Reach: 512 nodes in 16 decks, all exact
+    conditions on a two-`/BCS` coupon). Reach as measured in part A: 512 nodes in
+    16 decks, all exact
     duplication.
     (d) a **rotational code on a mesh with no rotational DOF is EMITTED and
     named inert** — `bcs10.F:66` applies the Rot digits only inside
@@ -121,8 +123,11 @@ Prior history (before this changelog was introduced) is summarized in the
     `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so **`Inacti = 6` does
     not help either**, and only `i7pwr3.F`/`i20pwr3.F` raise 611/612 at all —
     an explicit deck converted to `/INTER/TYPE25` can never hit it.
-    - k2rad's own synthesized `auto_implicit_stabilization_self_contact` now
-      states **`Inacti = 1`** where the stub is BUILT, instead of inheriting it
+    - *(SUPERSEDED by the review round below — Inacti = 1 cost
+      `efg/metal-cutting` its NORMAL termination and the stub is back on the
+      ordinary Inacti = 5 + Fpenmax.)* k2rad's own synthesized
+      `auto_implicit_stabilization_self_contact` states **`Inacti = 1`** where
+      the stub is BUILT, instead of inheriting it
       from an `ignore = 0` dataclass default nobody chose. It is what the stub
       already claimed to be — "carries no load unless parts actually touch", so
       a node that already touches gets zero stiffness rather than a t = 0
@@ -139,7 +144,10 @@ Prior history (before this changelog was introduced) is summarized in the
       right for an initially-resting contact. The constant is derived, not
       picked: `i7pwr3.F:193-195` deactivates a node when
       `PENE > Fpenmax·GAPV` and `PENE = GAPV − d`, so 0.99 reaches only
-      `d < 1 %` of the gap — the zero-distance population and nothing else.
+      `d < 1 %` of the gap. *(SUPERSEDED: 1 % of the gap is not the
+      zero-distance population — measured 928 deactivations against 486
+      zero-normal nodes on `4.3_General_Nonlinearity`. The constant is
+      0.999999 after the review round below.)*
       `Fpenmax` is a **starter-only** field (`hm_read_inter_type07.F:275` →
       `FRIGAP(27)` → `inint3.F:831/1026`; the engine's only `VARIABLES(27)` use
       is TYPE21's `i21main_tri.F`) and measured inert without such nodes: two
@@ -157,6 +165,8 @@ Prior history (before this changelog was introduced) is summarized in the
       `implicit_qstat_0000.rad:87` `Inacti` 5 → 1 (the stub) and
       `rigid_contact_0000.rad:100` `Fpenmax` 0 → 0.99 (a user
       `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` whose mapped Inacti is 5).
+      *(Both moved again in the review round: the stub's Inacti is back to 5
+      and both Fpenmax cells read 0.999999.)*
 
   **Verification record — ROUND 2, PART A.** Measured on this branch at
   ``bd04f1f``, AFTER the last code commit ``0de5b65`` (everything later adds

@@ -1036,10 +1036,17 @@ report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
   not have helped either. `4.3_General_Nonlinearity`'s `Inacti = 5` is also not
   a k2rad default: the deck states `IGNORE = 1` on its own optional `*CONTACT`
   card (line 348) and `_ignore_to_inacti` maps it faithfully. Fix: the
-  synthesized stub takes `Inacti = 1` (exempt at the gate, and what "carries no
-  load unless parts touch" already meant), and any user `/INTER/TYPE7` whose
-  `Inacti` is 3/4/5/6 gains `Fpenmax = 0.99`, which deactivates exactly the
-  zero-distance nodes and is a starter-only, measured-inert field otherwise.
+  synthesized stub keeps the ordinary `Inacti = 5` and every `/INTER/TYPE7`
+  whose `Inacti` is 3/4/5/6 — the stub included — gains
+  `Fpenmax = 0.999999`, a starter-only field that deactivates the nodes with
+  no depenetration direction and is measured inert otherwise. The constant is
+  measured: four starter runs of `4.3_General_Nonlinearity` give 928
+  deactivations at 0.99 against its 486 zero-normal nodes, and 486 at
+  0.999999. (The stub stated `Inacti = 1` for one round; that zeroes EVERY
+  penetrating node's stiffness and cost `efg/metal-cutting` its NORMAL
+  termination, 218 cycles → a TIMESTEP-LIMIT death at t = 0.0084.) A tied
+  `/INTER/TYPE10` has no Fpenmax field (`hm_read_inter_type10.F:94`) and uses
+  `Itied = 1` instead.
   Measured: `05_1_welding_solid` 310 → 0 starter errors,
   `4.3_General_Nonlinearity` 486 → 0. **Both then fail in the ENGINE** with
   `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, so they move from
@@ -1302,6 +1309,50 @@ found and deliberately did NOT close.
 
 ### Found while doing round 2, recorded rather than fixed
 
+- **A `*NODE` TC/RC pin on a `*MAT_NULL` mesh can collapse the explicit time
+  step, and four R14 decks lost a NORMAL termination to it.** Measured in the
+  round-2 campaign re-run: `ale/sloshing/sloshing-a` went from 33 813 cycles at
+  min dt 5.9e-05 (t = 2.0 of 2.0) to 697 421 cycles at min dt 2.3e-16 reaching
+  t = 0.18, and `sloshing-c`, `sloshing-d` and `ale/bird/bird-b` the same way.
+  The CONVERSION is right — LS-DYNA's own d3hsp lists those 242 `sloshing_A`
+  nodes in its `nodal spc summary on *NODE cards` block as `1 1 1` and runs the
+  constrained model to t = 2.0 — and two of the four move CLOSER to their
+  reference (sloshing_A's KE deviation 6.5e+11 % → 2.4e+07 %); both states are
+  junk against the reference either way, because an unconstrained tank in free
+  fall is not a sloshing simulation. What is unresolved is a constrained mesh
+  with no deviatoric stiffness, which is the ALE/hydrodynamic modelling item.
+  Round 2 NAMES the risk at conversion time (the count, the first five nodes,
+  the `*MAT_NULL` part ids and the four measured decks) and leaves
+  `--no-node-tc-rc-bcs`, which reproduces master byte for byte, as the escape.
+  The decision the next round owes this class: `/BCS` vs `/ALE/BCS`
+  (`hm_read_alebcs.F` packs `IC = IC1*8 + IC2` into the SAME ICODE word that
+  `hm_read_bcs.F:188` fills as `IC1*512 + IC2*64`, i.e. different bit fields)
+  vs a named drop, decided on a with/without twin of `ale/sloshing/sloshing-a`.
+
+- **A free single-element-thick `Isolid = 17` body is linearly unstable at the
+  engine's default time-step scale** — PRE-EXISTING on master, no batch keyword
+  involved, and it invalidated three coupons of the round-2 physics validator
+  before it was isolated. A k2rad-converted 10x10x10 mm steel cube
+  (`*SECTION_SOLID` ELFORM 1 or 2 → `/PROP/SOLID` Isolid 17, q_a = q_b = 0, no
+  `/DT` scale) given an exact rigid-body translation grows I-ENERGY x10 per
+  cycle from round-off and destroys itself by cycle ~210 — under a NORMAL
+  TERMINATION banner. `*CONTROL_TIMESTEP TSSFAC = 0.4` is exactly stable (474
+  cycles, KE constant to all printed digits) and so is a 2x2x2 mesh of the same
+  block; restoring the artificial bulk viscosity (q_a = 1.1, q_b = 0.05, hand
+  patched into the `.rad`) does NOT cure it, so the cause is the step scale
+  against Isolid 17's own stability limit and not the missing viscosity. Any
+  coupon or corpus deck of that shape needs TSSFAC <= 0.4 or a finer mesh.
+
+- **Eleven decks terminate NORMAL as numerically-zero models against a
+  non-zero LS-DYNA reference**, and one of them is only visible because the
+  round-2 evolve check was given an absolute floor: `transducer.k` runs 969
+  cycles at I-ENERGY ~ 8.3e-27 against a reference of 161.5. The list (LS
+  reference not a structural zero): `quadrature_B`, `quadrature_C`,
+  `cylinder_impact_B`, `Intermediate_fsi_flap/main_fsi`, `transducer`,
+  `typ14-m24`, `translat`, `contact.n2s-sphere`, `matfoamsoil`,
+  `projectile-block`, `sph/foam`. Round 3's named input class;
+  OPENRADIOSS_REPORT section 0.13's evolve table carries each verdict.
+
 - **An `*INITIAL_VELOCITY` over a rigid part's nodes is emitted and inert, and
   the re-point onto the `/RBODY` main node is NOT done.** `inirby.F` rebuilds
   every `/RBODY` secondary node's velocity from the body's main node as a rigid
@@ -1503,7 +1554,8 @@ Cases that convert today but drop or approximate detail worth recovering:
   decks and 27 of the 42 implicit-ERROR decks**. It is LS-DYNA's standard,
   always-active semantics, and the decode is not assumed: it reproduces
   LS-DYNA's own `nodal spc summary on *NODE cards` d3hsp echo on **162 139
-  nodes across 155 R14 decks with zero translation-code disagreements**. Two
+  TC/RC cells of the 137 carrier decks (the echo is printed by 155 of the R14
+  reference runs), with zero translation-code disagreements**. Two
   decks measured against their own `glstat`:
   `intro-by-j.-day/misc/component-i/component1.k` went from NORMAL-but-junk
   (IE 2 224 vs 2 740 230, KE 2.799e8 vs 36 222) to **IE +1.5 % / KE +1.0 %**,

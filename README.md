@@ -2554,7 +2554,8 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 card 1 `NID X Y Z TC RC` with the codes `0` none, `1` x, `2` y, `3` z, `4` xy,
 `5` yz, `6` zx, `7` xyz in the **global** system, carrying no CID, no id and no
 birth/death — always active. The decode reproduces LS-DYNA's own
-`nodal spc summary on *NODE cards` d3hsp echo on **162 139 nodes across 155 R14
+`nodal spc summary on *NODE cards` d3hsp echo (printed by 155 of the R14
+reference runs) on all **162 139 TC/RC cells of the 137 carrier
 reference decks with zero translation-code disagreements**. Screened rule by
 rule, each screen counted and its nodes named in the conversion log: a
 rigid-body member node is **dropped** (p.35-3 Remark 1, and LS-DYNA's own
@@ -3494,7 +3495,8 @@ initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
 deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
 pre-engagement bootstrap needs the t=0 stiffness path). Whenever the resulting
-`Inacti` is one of 3/4/5/6 the card also gets **`Fpenmax = 0.99`**, and that is
+`Inacti` is one of 3/4/5/6 the card also gets **`Fpenmax = 0.999999`**, and
+that is
 the fix for starter **ERROR 611** (`INITIAL PENETRATION = ... IMPOSSIBLE TO
 CALCULATE NEW COORDINATES OF SECONDARY NODE`). 611 is a **zero-normal**
 condition, not an "Inacti cannot depenetrate" one: `i7pwr3.F:113-114` computes
@@ -3503,18 +3505,31 @@ condition, not an "Inacti cannot depenetrate" one: `i7pwr3.F:113-114` computes
 direction exists — is the only gate. `:118` is
 `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so **`Inacti = 6` does not
 help either**; only 1/2 or a non-zero `Fpenmax` pass. `Fpenmax` turns the
-refusal into a deactivation of exactly those nodes: `:193-195` zeroes `STFN`
-when `PENE > Fpenmax·GAPV`, and `PENE = GAPV − d`, so `0.99` reaches only
-`d < 1 %` of the gap. It is a **starter-only** field
+refusal into a deactivation: `:193-195` zeroes `STFN` when
+`PENE > Fpenmax·GAPV` — BEFORE the Inacti branches at `:200-208`, so a caught
+node loses its Inacti treatment too — and `i7pen3.F:70-80` makes
+`PENE = GAPV + MARGE − d`. The constant is MEASURED, not reasoned: four
+starter runs of `4.3_General_Nonlinearity` differing only in that cell give
+0 → 486 × ERROR 611, 0.99 → **928** nodes deactivated, 0.9999 → 503, and
+0.999999 → **486**, which is the starter's own count of zero-normal nodes.
+On `05_1_welding_solid` (310 zero-normal) it takes 355 and stays at 355 at
+0.99999999 — that residue is the `MARGE` term, not the constant. It is a **starter-only** field
 (`hm_read_inter_type07.F:275` → `FRIGAP(27)`; the engine's only
 `VARIABLES(27)` use is TYPE21's `i21main_tri.F`) and is measured inert on decks
 without such nodes — two control decks, one explicit and one implicit, re-run
 with nothing but `Fpenmax` added produce byte-identical decoded `T01` channels.
 Measured on the two R14 carriers: `05_1_welding_solid` 310 → 0 starter errors,
 `4.3_General_Nonlinearity` 486 → 0. k2rad's own synthesized
-`auto_implicit_stabilization_self_contact` takes `Inacti = 1` instead — it is
-meant to carry no load, so a node that already touches should simply get zero
-stiffness, and 1 is exempt at the gate itself
+`auto_implicit_stabilization_self_contact` takes the SAME policy — the
+ordinary `Inacti = 5` plus that `Fpenmax`. It stated `Inacti = 1` for one
+round; measured, that zeroes the stiffness of every initially penetrating node
+and cost `efg/metal-cutting/main.k` its NORMAL termination (218 cycles to
+t = 0.03 became a TIMESTEP-LIMIT death at t = 0.0084), so the lever is Fpenmax
+and not Inacti. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
+(`hm_read_inter_type10.F:94`) and clears the same refusal with `Itied = 1`
+("TIED AFTER IMPACT NO REBOUND AUTORIZED", `:188`), which is what a
+`*CONTACT_TIED_*` without `_FAILURE` means anyway — measured, 310 × ERROR 612
+→ 0 on `05_4_2_welding_uncoupled_link_d3plot_structuralstep`
 A contact **master surface** built from a part that carries 3-corner shells
 splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT` (or

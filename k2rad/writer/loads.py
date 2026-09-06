@@ -524,7 +524,56 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         motion_nodes=motion_nodes, motion_dofs=motion_dofs,
         spc_nodes=spc_nodes, spc_dof_count=spc_dof_count,
         rot_inert=rot_inert, skewed_motion=skewed_motion, emptied=emptied)
+    _warn_node_tc_rc_on_null_material(state, groups)
     return lines
+
+
+def _warn_node_tc_rc_on_null_material(
+        state: ConversionState,
+        groups: Dict[Tuple[str, str], List[int]]) -> None:
+    """Name the TC/RC pins that land on a ``*MAT_NULL`` mesh.
+
+    A null material carries no deviatoric stiffness, so a constrained wall of
+    such elements deforms without resisting shear and the explicit time step
+    can collapse. MEASURED on the R14 campaign re-run of this batch: of the
+    137 carriers, four ``*MAT_NULL`` decks LOST a NORMAL termination they had
+    when the cells were dropped — ``ale/sloshing/sloshing-a`` (33 813 cycles
+    at min dt 5.9e-05 to t = 2.0, against 697 421 cycles at min dt 2.3e-16
+    reaching t = 0.18), ``sloshing-c``, ``sloshing-d`` and ``ale/bird/bird-b``.
+    The conversion is not the defect: LS-DYNA's own d3hsp lists the same 242
+    ``sloshing_A`` nodes in its ``nodal spc summary on *NODE cards`` block as
+    ``1 1 1`` and runs the constrained model to t = 2.0, and two of the four
+    move CLOSER to their reference (sloshing_A's KE deviation falls from
+    6.5e+11 % to 2.4e+07 %). What is unresolved is the interaction with a mesh
+    that has no deviatoric stiffness, which belongs to the ALE/hydrodynamic
+    modelling item, not to this pass — so the risk is NAMED here with the flag
+    that restores the previous behaviour exactly (measured byte-identical to
+    master on sloshing_A).
+    """
+    if not groups or not state.mat_null:
+        return
+    part_nodes = _part_node_sets(state)
+    null_pids = {p.pid for p in state.parts.values()
+                 if p.mid in state.mat_null}
+    if not null_pids:
+        return
+    null_nodes: Set[int] = set()
+    for pid in null_pids:
+        null_nodes |= part_nodes.get(pid, set())
+    hit = sorted({n for ids in groups.values() for n in ids} & null_nodes)
+    if not hit:
+        return
+    state.warn(
+        f"*NODE TC/RC: {len(hit)} of the converted node(s) (node "
+        f"{_named(hit)}) belong to a *MAT_NULL part ("
+        f"{', '.join(str(p) for p in sorted(null_pids))}), which carries no "
+        "deviatoric stiffness. The /BCS is faithful — LS-DYNA applies these "
+        "cells and its own d3hsp echoes them — but MEASURED on the R14 "
+        "campaign four *MAT_NULL decks (ale/sloshing-a/-c/-d, ale/bird/bird-b) "
+        "lost a NORMAL termination to a time-step collapse once their tank "
+        "walls were pinned. If this deck's dt collapses, --no-node-tc-rc-bcs "
+        "(convert(node_tc_rc_bcs=False)) reproduces the previous behaviour "
+        "byte for byte.")
 
 
 def _named(nids: List[int], cap: int = 5) -> str:
