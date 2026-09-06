@@ -2141,7 +2141,8 @@ def _starter_section_registry():
         ("node_tc_rc_bcs",    lambda c: _make_node_tc_rc_bcs(
             c.state, c.rbody_info, c.rigid_nodes)),
         ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
-        ("initial_velocity",  lambda c: _make_initial_velocity(c.state)),
+        ("initial_velocity",  lambda c: _make_initial_velocity(
+            c.state, c.rigid_nodes)),
         ("initial_velocity_generation",
                               lambda c: _make_initial_velocity_generation(c.state)),
         ("pressure_loads",    lambda c: _make_pressure_loads(c.state)),

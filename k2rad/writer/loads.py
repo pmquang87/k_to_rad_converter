@@ -4593,7 +4593,55 @@ def _emit_inivel_axis(inivel_id: int, title: str, frame_id: int, grnod_id: int,
     ]
 
 
-def _make_initial_velocity(state: ConversionState) -> List[str]:
+def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
+                                  nids: List[int],
+                                  rigid_nodes: Optional[Set[int]]) -> None:
+    """Name the /INIVEL that lands on RIGID-BODY member nodes and does nothing.
+
+    ``inirby.F`` rebuilds every secondary node's velocity from its /RBODY main
+    node as a rigid field, so an /INIVEL written on the secondaries is
+    overwritten before the first cycle — the group is emitted, the starter
+    accepts it at 0 ERROR / 0 WARNING, and the body does not move. LS-DYNA has
+    no such rule: *INITIAL_VELOCITY on a rigid part's nodes sets the PART's
+    velocity (that is what the IRIGID cell exists to override).
+
+    MEASURED on ``intro-by-a.-tabiei/contact/contact-foam/matfoamsoil.k`` after
+    the R14 round-2 set batch made its ``*SET_NODE_LIST_GENERATE 99`` resolve:
+    the /INIVEL/TRA vx = 25000 lands on nodes 1000..1124, every one of them a
+    member of ``*MAT_RIGID`` part 10 (/RBODY/1125), and the engine reaches
+    NORMAL TERMINATION at 242 cycles with I-ENERGY = K-ENERGY = 0.000 against
+    an LS-DYNA glstat of IE 8573.23 / KE 19834.5. Before the batch the set did
+    not exist and no /INIVEL was written at all, so the deck was a zero model
+    for a DIFFERENT reason — clearing the first one promoted the second into
+    view, which is why it is named here rather than left silent.
+
+    Re-pointing the group onto the /RBODY main node is the fix, and it is NOT
+    done here: it changes the velocity field of every deck that states an
+    *INITIAL_VELOCITY over a rigid part, which needs its own corpus sweep and
+    its own reference runs. Recorded in ROADMAP as the next round's item.
+    """
+    if not rigid_nodes:
+        return
+    on_rigid = [n for n in nids if n in rigid_nodes]
+    if not on_rigid:
+        return
+    where = f"NSID={nsid}" if nsid else "over the whole model"
+    named = ", ".join(str(n) for n in on_rigid[:5])
+    state.warn(
+        f"*INITIAL_VELOCITY {where}: {len(on_rigid)} of its {len(nids)} "
+        f"node(s) (e.g. {named}) belong to a rigid body. OpenRadioss rebuilds "
+        "a /RBODY secondary node's velocity from the body's main node every "
+        "cycle (inirby.F), so the /INIVEL on them is OVERWRITTEN before cycle "
+        "1 and the body starts at rest — at 0 starter diagnostics."
+        + (" EVERY node of this card is a rigid-body member, so the card moves "
+           "NOTHING." if len(on_rigid) == len(nids) else "")
+        + " LS-DYNA instead gives the rigid PART that velocity. State it as "
+          "*INITIAL_VELOCITY_RIGID_BODY on the part (k2rad puts that on the "
+          "/RBODY main node), or as *PART_INERTIA card 5, to move the body.")
+
+
+def _make_initial_velocity(state: ConversionState,
+                           rigid_nodes: Optional[Set[int]] = None) -> List[str]:
     """*INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT).
 
     NSID scopes the node group (blank/0 = whole model); NSIDEX is subtracted by
@@ -4652,6 +4700,7 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
+        _warn_inivel_on_rigid_members(state, iv.nsid, nids, rigid_nodes)
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
