@@ -1026,6 +1026,14 @@ report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
+**Round 2's REVIEW round** re-derived item E on the solver (the stub keeps
+`Inacti = 5`; `Fpenmax = 0.999999` is the measured zero-normal cut, 486 nodes
+against 0.99's 928 on `4.3_General_Nonlinearity`; a tied `/INTER/TYPE10` states
+`Itied = 1`), bounded item A's LS-DYNA evidence to what reproduces, named the
+`*MAT_NULL` stability class it costs four ALE decks, and gave the batch's
+headline default-on change the tests it did not have. The campaign was re-run
+for every deck whose emitted `.rad` moved — see `OPENRADIOSS_REPORT.md` §0.14.
+
 - ~~**ERROR 611**~~ — **CLOSED in R14 triage round 2.** The reading above is
   wrong twice over and the correction is what fixed it. 611 is not "initial
   penetration cannot be depenetrated": `i7pwr3.F:113-114` raises it only when

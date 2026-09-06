@@ -73,9 +73,12 @@ Prior history (before this changelog was introduced) is summarized in the
     (c) a **DOF a `*BOUNDARY_SPC` already states is merged, not restated** —
     `hm_read_bcs.F:198` unions the codes (`MY_OR`), so a second `/BCS` changes
     no physics but costs starter WARNING 312 (measured, 1 warning / 8
-    conditions on a two-`/BCS` coupon). Reach as measured in part A: 512 nodes in
-    16 decks, all exact
-    duplication.
+    conditions on a two-`/BCS` coupon). Reach as measured in part A: 512 nodes
+    in 16 decks, all exact duplication — *re-measured at the review round's
+    head, where part B's set spellings had made two more `*BOUNDARY_SPC_SET`
+    cards resolve: **570 DOFs on 570 nodes in 18 decks**, of which those 16
+    (512 nodes) are exact duplication and `ex_09` (26 DOFs) and `ex_10` (32)
+    are PARTIAL, keeping a `/BCS` for the DOFs their SPC does not state.*
     (d) a **rotational code on a mesh with no rotational DOF is EMITTED and
     named inert** — `bcs10.F:66` applies the Rot digits only inside
     `IF(IRODDL/=0)`, and LS-DYNA drops them too (71 885 such codes across 22
@@ -1280,6 +1283,236 @@ Prior history (before this changelog was introduced) is summarized in the
   presented for veto at merge time.**
 
 ### Fixed
+
+- **R14 CAMPAIGN TRIAGE batch, round 2, REVIEW ROUND — one contact policy that
+  cost a deck its NORMAL termination, one blocker-sized test hole in the
+  batch's own headline change, and a row of claims that do not survive their
+  own sources.** Four independent validators (fidelity, code sweep, solver
+  physics, campaign re-run) went over parts A and B; this is what survived
+  verification, with the rejected findings named at the end.
+
+  - **The implicit stabilization stub is back on the ordinary `Inacti = 5`.**
+    Part A gave it `Inacti = 1` to dodge starter ERROR 611. Measured: that
+    zeroes the contact stiffness of EVERY initially penetrating secondary node
+    for the whole run, and on `efg/metal-cutting/main.k` — an implicit deck
+    whose only contact IS the stub — it turned a NORMAL TERMINATION (218
+    cycles, t = 0.03 of 0.03) into a `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP
+    LIMIT` death at t = 0.0084. Both arms re-run here: with Inacti back to 5
+    the deck runs its 218 cycles again, with and without the Fpenmax cell.
+    `ContactAutoSingle.inacti` and `_single_inacti` existed only for that
+    stated 1 and are removed with it.
+  - **`Fpenmax` 0.99 → 0.999999, and the sentence that justified 0.99 is
+    withdrawn.** `i7pwr3.F:193-199` deactivates every node with
+    `PENE > Fpenmax·GAPV` — BEFORE the Inacti branches at `:200-208`, so a
+    caught node loses its Inacti treatment as well as its stiffness — and
+    `i7pen3.F:70-80` makes `PENE = GAPV + MARGE − d`, so the caught set is a
+    SUPERSET of the zero-distance nodes. Four starter runs of
+    `4.3_General_Nonlinearity` differing only in that cell:
+
+    | Fpenmax  | nodes deactivated | starter |
+    |----------|-------------------|---------|
+    | 0        | 0                 | 486 × ERROR 611 (deck refused) |
+    | 0.99     | **928**           | 0 ERRORS |
+    | 0.9999   | 503               | 0 ERRORS |
+    | 0.999999 | **486**           | 0 ERRORS |
+
+    486 is the starter's own count of `IMPOSSIBLE TO CALCULATE NEW
+    COORDINATES` lines, so 0.999999 takes exactly the population that has no
+    other treatment available and 0.99 was taking 442 ordinary penetrations
+    with it. On `05_1_welding_solid` (310 zero-normal) it takes 355 and stays
+    at 355 at 0.99999999 — that residue is the `MARGE` term, not the constant.
+    The stub carries the cell too and it is inert there (0 deactivations on
+    `efg/metal-cutting`).
+  - **A tied `/INTER/TYPE10` states `Itied = 1`.** `hm_read_inter_type10.F:188`
+    prints "0: TIED DURING IMPACT - REBOUND AUTORIZED / 1: TIED AFTER IMPACT
+    NO REBOUND AUTORIZED", and a `*CONTACT_TIED_*` without a `_FAILURE` option
+    is the second; the engine keeps an engaged candidate only when `ITIED /= 0`
+    (`i10mainf.F:197`, `i10dst3.F:348`). It also lifts the initial-penetration
+    refusal that item C's newly-resolved `SSTYP = 0` side exposed: TYPE10 has
+    no Fpenmax field at all (`:94` hard-sets `FPENMAX = ZERO`) and
+    `i7pwr3.F:117` skips the message only for `ITIED /= 0`. MEASURED on
+    `05_4_2_welding_uncoupled_link_d3plot_structuralstep`: **310 × ERROR 612 →
+    0 ERRORS / 1 WARNING**, with the deck otherwise unchanged.
+  - **`_FPENMAX_INACTI`'s comment stated a false fact about the solver.** It
+    said Fpenmax does not suppress MSGID 612; `i7pwr3.F:118` wraps the 612
+    branch (`:120-127`) and the 611 branch (`:129-135`) alike, so it does.
+    Inacti 0 stays out of the set for the real reason — the bootstrap contact
+    is meant to carry stiffness at t = 0.
+  - **A TC/RC `/BCS` on a `*MAT_NULL` mesh is now named at conversion time.**
+    Four R14 decks lost a NORMAL termination to it in the campaign re-run
+    (`ale/sloshing-a/-c/-d`, `ale/bird/bird-b`; sloshing_A: 33 813 cycles at
+    min dt 5.9e-05 reaching t = 2.0 → 697 421 cycles at min dt 2.3e-16
+    reaching t = 0.18). The conversion is faithful — LS-DYNA's own d3hsp lists
+    those same 242 nodes as `1 1 1` and runs the model to t = 2.0 — and two of
+    the four move CLOSER to their reference, so this is a stability
+    interaction with a mesh that has no deviatoric stiffness, not a decode
+    error. The warning names the count, the first five nodes, the `*MAT_NULL`
+    part ids, the four measured decks and `--no-node-tc-rc-bcs`, which
+    reproduces master byte for byte. The class goes to ROADMAP with the
+    decision it owes (`/BCS` vs `/ALE/BCS` vs a named drop).
+  - **`*SET_<F>_GENERAL`'s id columns are FAMILY-dependent, and one
+    option-keyed table was wrong in both directions.**
+    `node_general_subgrp.cfg:141` gives EVERY node-family option seven id
+    cells (`FREE_CELL_LIST`), `segment_general_subgrp.cfg:274` gives the
+    segment family's attribute-bearing options three ids and four floats
+    (Vol I R17 p.43-70 Remark 1: NFLS/SFLS/FSF/VSF), and `:296` gives its
+    "tightly packed" options (`DPART`, `DSET`, `DBOX*`, `DVOL*`, `SET`) seven.
+    Measured on probes: a five-operand NODE-family `PART` clause under
+    `IDPOFF = 300` left cells 4-5 un-offset (the #116 silent-empty-set failure
+    the walker exists to prevent), and a SEGMENT-family `PART` clause with
+    attributes read three floats as part ids. Split into
+    `state.set_general_id_cols(family, option)` plus an option → bucket table.
+    Latent, not live: 0 corpus decks carry either shape.
+  - **The clause and range rows accept the free and comma forms.** Vol I R17
+    p.43-41 writes its own worked example as `PART, 6`, and an OPTION longer
+    than the A10 field (`SET_DISCRETE`, 12 characters) can only be written
+    free; `line[:10]` read the first as the single option `"PART, 6"` and
+    truncated the second to `SET_DISCRE`, refusing both by name with the wrong
+    name. Both the reader and the `*INCLUDE_TRANSFORM` walker go through the
+    shared `_split_card`/`_join_card` now. 0 comma-format rows in either
+    corpus.
+  - **`*SET_<F>_GENERAL` sets expand in dependency order.** `sorted()` order
+    built a higher sid last, so a forward reference to another set of the same
+    family reported a set the deck DOES define as "which this deck does not
+    define". Kahn's algorithm with a sorted fallback for cycles; 0 corpus
+    decks use a `SET`/`SET_NODE` clause at all, so nothing that exists today
+    reorders.
+  - **The six other consumers of `state.segment_sets` get a verdict.** Reading
+    the `PART`/`ALL` options gave `SegmentSet` a `part_scope` that only
+    `writer/contacts` and `writer/gapmin` resolve; the rest iterate
+    `.segments`, so a PART-scoped set turned a NAMED drop ("not defined") into
+    a silent one — the set now EXISTS, so the old `is None` guard no longer
+    fires and the loop contributes nothing. New shared
+    `common._part_scoped_segment_set` refuses by name in `*LOAD_SEGMENT_SET`,
+    `*LOAD_BLAST_SEGMENT_SET`, `*BOUNDARY_NON_REFLECTING`,
+    `*CONSTRAINED_LAGRANGE_IN_SOLID` and the airbag surface; the
+    node-reference collector gets a written verdict instead (a scoped part's
+    nodes are already referenced by its own elements). 0 corpus carriers.
+  - **`_warn_inivel_on_rigid_members` reached one of its three emission
+    sites.** `*INITIAL_VELOCITY_NODE`, the NSID set form and
+    `*INITIAL_VELOCITY_GENERATION` land in three different writer functions
+    (the #132 rule). The second carrier the widening found is
+    `intro-by-j.-day/contact/force-transducer/transducer.k`, whose six
+    `*INITIAL_VELOCITY_NODE` nodes are all `/RBODY/23` members: 969 cycles at
+    K-ENERGY 0.000 against an LS-DYNA glstat of IE 161.523 / KE 1092.45, and
+    the conversion said nothing at all.
+  - **The modal dummy `/CLOAD`'s free-DOF screen could not see the TC/RC pins
+    it now runs after.** `_global_spc_dofs` covers `*BOUNDARY_SPC` and
+    zero-scale prescribed motions only, so the message could call a pinned
+    node "the highest-numbered structural node with that translation still
+    free" and print a `--static` cross-check that compares a zero displacement
+    against a zero displacement. It unions `state.node_tc_rc_emitted`.
+  - **A contact main side that becomes a `/SURF/SEG` over a `*SET_SEGMENT`
+    rather than a whole part now says so.** Four `w6_setup_sandwichimpact`
+    -family decks moved 2020 added / 720 removed lines in the round-2 sweep
+    with ZERO change to their conversion record, and had to be attributed by
+    hand; an item that can rewrite a contact's main surface silently is
+    invisible to any warning-based review.
+  - **Evidence corrections, each re-measured here.** Rule (a)'s LS-DYNA
+    justification said LS-DYNA prints `Warning 60257 skipping spc on rigid
+    body node` "for exactly these cells": measured, that is an `IMP+`
+    (implicit) message, it appears on 1 of the 16 R14 rule-(a) carriers and
+    there on 2 of that deck's 3 rigid TC/RC nodes (1003 and 1004, not 1001),
+    and the explicit carriers still list the cells in the active `nodal spc
+    summary` echo — `control_contact.hemi-draw` cannot decide it either way,
+    because its 41 rigid-part cells are symmetry pins (TC 1/3/6) perpendicular
+    to the punch's driven y motion. The drop now rests on the OpenRadioss
+    measurement alone, and says the constraint is NOT re-pointed onto the
+    `/RBODY` main node. "ERROR 148 is unreachable from this pass" becomes the
+    real bound (this pass always writes skew 0, so only a node a SKEWED
+    `*BOUNDARY_SPC` already stamped could trip it — 0 such decks in 893 corpus
+    files). "162 139 nodes across 155 R14 decks" becomes "the echo is printed
+    by 155 of the reference runs; the decode covers all 162 139 cells of the
+    137 carrier decks". `parser.py`'s `_COLLECT` scope check said 36 files; it
+    is 37 (all under `SETS/`, so the conclusion holds). And the argparse `%%`
+    escape had leaked into six plain docstrings and comments, where it renders
+    literally.
+
+  **Tests.** +21 over part B's head (4929 → 4950 passed, 2 skipped, 1961
+  subtests). `TestNodeTcRcToBcs` is the class
+  `tests/test_side_defects_review.py:719` already named as its successor and
+  that did not exist — the batch's headline default-on change had no test of
+  what it EMITS. It pins the 0-7 code table against a hand-written table, each
+  of the four screens on its own carrier deck, the opt-out, the free-node
+  interaction, the out-of-range cell and the `/GRNOD` collision, and it was
+  written against the nine mutations the code sweep proved behaviour-changing
+  and uncaught. 15 of 16 mutations of this round are caught; the 16th is the
+  deliberate no-op control. Two more spellings
+  (`SET_PART_LIST_GENERATE_INCREMENT`, `SET_SHELL_LIST_GENERATE_INCREMENT`)
+  joined the registration probe, and the probe now asserts that every
+  generated spelling HAS a card and reaches `HANDLERS` as well as
+  `_OFFSET_SPECS`.
+
+  **Verification record — the REVIEW round.** Measured on this branch at
+  ``c9e55e6``, the LAST code commit (everything after it is documentation), with
+  the main tree untouched at ``363e6f6``:
+
+  * ``pytest tests/ -q`` **4950 passed / 2 skipped / 1961 subtests** against a
+    master baseline of 4876 / 2 / 1930; part B's head was 4929 / 2 / 1952.
+  * ``mypy k2rad`` (mypy 2.3.1, fresh per-tree cache) **0 issues in 37 source
+    files**, and **0** again with ``--no-site-packages``.
+  * ``ruff check .`` clean; ``k2rad.py --help`` renders (exit 0, 22 087 chars,
+    0 unescaped ``%``).
+  * Goldens vs ``origin/master``: exactly **two lines**, both the new
+    ``Fpenmax`` cell — ``implicit_qstat_0000.rad`` (whose stub ``Inacti`` is
+    back at master's 5) and ``rigid_contact_0000.rad``.
+  * **Two-half corpus sweep**, 885 decks (373 ``C:/openradioss_run`` + 127
+    Ryan_Lee + 351 R14 + 29 ``E:/foxcore_data`` + 5 repo fixtures), 21
+    exclusions stated (8 Yaris/Camry ``*INCLUDE`` pullers BY NAME, 13 by
+    measured include-closure > 60 MB). **Error rows first: 0 convert errors and
+    0 timeouts on both sides, 0 one-sided records, 885 comparable pairs.**
+    Half 1: **267** ``.rad`` movers vs master. Half 2: 338 ``state.warnings``,
+    36 ``skipped_keywords``, 13 ``recognized_not_emitted``; union **342**, and
+    **0 byte movers with no record change**. **342 of 342 attributed**, six of
+    them by hand-tracing the ``.rad`` diff (all six item B: two decks lose a
+    "node set not found" warning because the set now resolves, four move bytes
+    with identical warning content — a ``*SET_NODE_LIST_GENERATE`` expanding
+    into a real ``/GRNOD/NODE`` and a ``*SET_SEGMENT_GENERAL`` leaving the
+    SKIPPED list). Against the REVIEWED head ``36a0c11``: 129 ``.rad`` movers,
+    269 union, 0 unattributed.
+  * **Campaign re-run** (``C:/dynaexamples_r14_ton-mm-s_openradioss``): all 356
+    roster decks re-converted with the campaign's own call and SHA-compared
+    against the build the database is stamped with — **82 emit a different
+    ``.rad`` and 104 more only a different record**. All 82 were re-run
+    (125.7 min of solver), the 104 re-converted only, and every one of the 712
+    mirror ``.rad`` files now matches this head byte for byte. **8 rows
+    improved, 0 regressed**: ``efg/metal-cutting`` error_engine → normal (the
+    stub revert), ``6.7.spring.psd`` error_engine → normal (the modal
+    ``/CLOAD`` finding a node that is actually free), both
+    ``05_x_2_welding_uncoupled_link_*_structuralstep`` **error_starter →
+    normal** (the tied ``Itied = 1``), and four ``run_pass = 2`` decks that had
+    never run. Whole database: normal 260 → 266, error_starter 15 → 13,
+    error_engine 44 → 43, pending 11 → 7, timeout 18 → 19; IE-collapse 49 → 51
+    and implicit-stop 29 → 28, where both new IE-collapse rows are those
+    previously-unrun decks entering the population (like-for-like 49 → 49).
+    ``verify_runs.py`` 341 decks verified / 373 ledger rows / **PROBLEMS 0**;
+    ``xcheck_counts.py`` banner and box agree on 193, **DISAGREE 0**. The
+    evolve check ran on all six newly-NORMAL decks and two of them are named
+    rather than counted: ``6.7.spring.psd`` is a two-cycle modal EXPORT run and
+    ``intermediate-fsi-2-flaps`` is FLAT-ZERO on 2001 rows (ICFD, which
+    OpenRadioss has no solver for).
+  * **A deviation to report:** the giant filter read ``run_pass`` from
+    ``db.json``, where that field does not exist, so **4 of the 82 movers were
+    ``run_pass = 2`` decks that the standing rule says never to launch**. Two
+    are cheap and completed (4.1 s, 429 s); two carry a ``giant_note`` and were
+    bounded by their own clamps (61.9 s → error_engine, 2702.8 s → timeout at
+    the 2700 s clamp). The remaining two were stopped BEFORE launch with
+    ``_infra/STOP``, which the runner honoured between decks, and the STOP file
+    was removed afterwards. Report §0.14 states it in the same words.
+
+  **Findings rejected, with the reason.** (1) "Item A's headline LS-DYNA
+  evidence is not reproducible: the strings `nodal spc summary` and
+  `on *node cards` occur in ZERO files on F:" — the echo header is
+  LETTER-SPACED (`n o d a l   s p c   s u m m a r y   o n   *NODE cards`), so
+  a plain-text grep cannot match it; re-measured independently here, 155 of
+  the R14 `.d3hsp` files carry it. (2) "`ex_16_thin_shell_elform_13.d3hsp`
+  contains neither Warning 60257 nor any tcode/rcode line — it is in the
+  `.messag`" — it is in BOTH (`.d3hsp`, `.messag` and `.console.log`), read
+  here at the same offset in each. What DID survive from that finding is the
+  over-generalisation, fixed above. (3) "The campaign database is stale, 208
+  roster rows describe a model this branch no longer produces" — measured
+  before the campaign re-run landed; `db.json` carries 249 rows stamped
+  `36a0c118 / feat/r14-triage-2` and was re-measured again for this round.
 
 - **POST-REVIEW ROUND of the R14 triage batch — one silent wrong answer on
   four corpus decks, one wrong-way pressure on a fifth, one capability
