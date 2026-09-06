@@ -4,7 +4,9 @@
       (pinned in tests/test_side_defects_review.py and
       tests/test_side_defects_fixround.py, which already owned those
       sentences; the named successors live there)
-  A3  starter ERROR 611              -> stub Inacti=1, user contacts Fpenmax
+  A3  starter ERROR 611/612          -> the stub keeps the ordinary Inacti=5,
+      every Inacti-3/4/5/6 TYPE7 states Fpenmax = 0.999999 (the MEASURED
+      zero-normal cut), and a tied /INTER/TYPE10 states Itied = 1
   B1  *SET_<F>_GENERATE / _GENERATE_INCREMENT / _GENERAL / _COLUMN
   B2  SSTYP/MSTYP = 0 is a *SET_SEGMENT id, 1 a *SET_SHELL id
   B3  *EOS_GRUNEISEN A = 0           -> a tiny positive a, so the Radioss
@@ -88,6 +90,11 @@ def _dispatch(deck: str) -> ConversionState:
         dispatch(block, state)
     tmp.cleanup()
     return state
+
+
+def _warns(result, needle: str):
+    """Every conversion warning containing *needle*."""
+    return [w for w in result.warnings if needle in w]
 
 
 def _block(starter: str, header: str):
@@ -516,6 +523,12 @@ class SetSpellingsAreRegistered(unittest.TestCase):
                 "*SET_NODE_COLUMN\n" + _row(104) + "\n" + _row(1),
             "SET_PART_LIST_GENERATE":
                 "*SET_PART_LIST_GENERATE\n" + _row(105) + "\n" + _row(1, 9),
+            "SET_PART_LIST_GENERATE_INCREMENT":
+                "*SET_PART_LIST_GENERATE_INCREMENT\n" + _row(120) + "\n"
+                + _row(1, 9, 1),
+            "SET_SHELL_LIST_GENERATE_INCREMENT":
+                "*SET_SHELL_LIST_GENERATE_INCREMENT\n" + _row(121) + "\n"
+                + _row(1, 9, 1),
             "SET_PART_COLUMN":
                 "*SET_PART_COLUMN\n" + _row(106) + "\n" + _row(1),
             "SET_PART_GENERAL":
@@ -548,6 +561,13 @@ class SetSpellingsAreRegistered(unittest.TestCase):
                 "*SET_SEGMENT_GENERAL\n" + _row(119) + "\n"
                 + _grow("SEG", 1, 2, 3, 4),
         }
+        # Every generated spelling needs a probe card, or a registration that
+        # stops generating is caught by nothing (the two _INCREMENT rows above
+        # were missing exactly that way until the round-2 review counted them).
+        from k2rad.handlers import _set_range_keywords
+        self.assertEqual(
+            {kw for kw, _f, _k, _i in _set_range_keywords()} - set(cards),
+            set())
         for kw, card in sorted(cards.items()):
             with self.subTest(kw=kw):
                 res, _starter = _convert(_bricks(card + "\n"))
@@ -563,6 +583,11 @@ class SetSpellingsAreRegistered(unittest.TestCase):
         generated = {kw for kw, _f, _k, _i in _set_range_keywords()}
         self.assertTrue(generated)
         self.assertEqual(generated - set(_OFFSET_SPECS), set())
+        # ...and the HANDLERS side too: a table row that stopped generating a
+        # PARSER key would show up in neither of the other assertions, and the
+        # spelling would land in skipped_keywords with the set silently empty.
+        from k2rad.handlers import HANDLERS
+        self.assertEqual(generated - set(HANDLERS), set())
 
 
 class SetSpellingOffsets(unittest.TestCase):
@@ -1159,6 +1184,407 @@ class ModalBeamMassArm(unittest.TestCase):
         analytic = math.sqrt(
             3 * E * izz / span ** 3 / 0.00022684179) / (2 * math.pi)
         self.assertAlmostEqual(freq[0], analytic, places=3)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A1  *NODE TC/RC -> /GRNOD/NODE + /BCS  (the conversion, the four screens,
+#     the opt-out, the free-node interaction and the id allocation)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _n16(nid, x, y, z, tc=None, rc=None) -> str:
+    """One fixed-layout ``*NODE`` row, ``(I8,3E16.0,2I8)`` — TC in cols 57-64,
+    RC in 65-72 (Vol I R17 p.35-2)."""
+    row = f"{nid:>8}{x:>16}{y:>16}{z:>16}"
+    if tc is not None or rc is not None:
+        row += f"{tc or 0:>8}{rc or 0:>8}"
+    return row
+
+
+def _tcrc_shell_deck(node_rows, extra=()) -> str:
+    """A one-shell deck whose four nodes may carry TC/RC cells."""
+    return "\n".join(["*KEYWORD", "*NODE", *node_rows,
+                      "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+                      "*SECTION_SHELL", _row(1, 2),
+                      _row("1.0", "1.0", "1.0", "1.0"),
+                      "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+                      "*PART", "plate", _row(1, 1, 1),
+                      *extra,
+                      "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+
+def _bcs_group_list(starter: str):
+    """``[((Tra, Rot), sorted node ids), ...]`` for every ``/BCS``, in emission
+    order — two groups can share a code (a TC/RC ``111 111`` group and the
+    implicit free-node group), which a dict would collapse."""
+    lines = starter.splitlines()
+    out = []
+    for i, ln in enumerate(lines):
+        if not ln.startswith("/BCS/"):
+            continue
+        card = lines[i + 3]                  # title, column header, then data
+        tra, rot, _skew, grnod = card.split()
+        out.append(((tra, rot),
+                    sorted(_ids(starter, f"/GRNOD/NODE/{int(grnod)}"))))
+    return out
+
+
+def _bcs_groups(starter: str):
+    """``{(Tra, Rot): sorted node ids}`` for every ``/BCS`` in the starter."""
+    return dict(_bcs_group_list(starter))
+
+
+class TestNodeTcRcToBcs(unittest.TestCase):
+    """``*NODE`` card 1's own TC/RC cells become ``/GRNOD/NODE`` + ``/BCS``.
+
+    The named successor promised by
+    ``tests/test_side_defects_review.TestNodeTcRcIsNamed``: that class keeps
+    the READING of both card layouts, this one pins what the conversion
+    EMITS — the code table, each screen with its own carrier deck, the
+    opt-out, the free-node interaction and the id allocation. Every test here
+    was written against a mutation the round-2 review proved
+    behaviour-changing on a real deck and that the suite did not catch.
+    """
+
+    def test_every_code_emits_its_own_digits(self):
+        """The 0-7 table of Vol I R17 p.35-2, hand-written so a transposition
+        (the 4 <-> 6 swap the review mutated in) fails."""
+        want = {1: "100", 2: "010", 3: "001",
+                4: "110", 5: "011", 6: "101", 7: "111"}
+        for code, digits in want.items():
+            with self.subTest(code=code):
+                rows = [_n16(1, 0.0, 0.0, 0.0, code, 0),
+                        _n16(2, 10.0, 0.0, 0.0), _n16(3, 10.0, 10.0, 0.0),
+                        _n16(4, 0.0, 10.0, 0.0)]
+                _res, starter = _convert(_tcrc_shell_deck(rows))
+                self.assertEqual(_bcs_groups(starter), {(digits, "000"): [1]})
+
+    def test_the_rotation_cell_drives_the_rot_digits(self):
+        """TC and RC come from their OWN columns: a deck with TC != RC fails
+        if the two fixed slices are swapped."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 1, 2), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        _res, starter = _convert(_tcrc_shell_deck(rows))
+        self.assertEqual(_bcs_groups(starter), {("100", "010"): [1]})
+
+    def test_one_group_per_distinct_pair(self):
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0, 7, 7),
+                _n16(3, 10.0, 10.0, 0.0, 3, 0), _n16(4, 0.0, 10.0, 0.0)]
+        _res, starter = _convert(_tcrc_shell_deck(rows))
+        self.assertEqual(_bcs_groups(starter),
+                         {("111", "111"): [1, 2], ("001", "000"): [3]})
+
+    def test_rule_a_drops_rigid_body_member_nodes(self):
+        """A ``*MAT_RIGID`` part's nodes get NO ``/BCS`` — rgbodv.F:150-155
+        overwrites it — and the message says so with the count and the ids."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0, 7, 7),
+                _n16(3, 10.0, 10.0, 0.0, 7, 7), _n16(4, 0.0, 10.0, 0.0, 7, 7)]
+        deck = "\n".join(["*KEYWORD", "*NODE", *rows,
+                          "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+                          "*SECTION_SHELL", _row(1, 2),
+                          _row("1.0", "1.0", "1.0", "1.0"),
+                          "*MAT_RIGID", _row(1, "7.85E-9", "2.1E5", "0.3"),
+                          _row("0.0", 0, 0), _row(0, 0, 0),
+                          "*PART", "rigid", _row(1, 1, 1),
+                          "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        res, starter = _convert(deck)
+        self.assertEqual(_bcs_groups(starter), {})
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
+        self.assertIn("4 node(s) (node 1, 2, 3, 4) belong to a rigid body", w)
+        self.assertIn("rgbodv.F:150-155", w)
+
+    def test_rule_b_leaves_a_driven_dof_to_the_motion(self):
+        """A ``*BOUNDARY_PRESCRIBED_MOTION_NODE`` in x clears the x digit and
+        keeps the other two."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 0), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        extra = ["*DEFINE_CURVE", _row(9), _row("0.0", "0.0"),
+                 _row("1.0", "1.0"),
+                 "*BOUNDARY_PRESCRIBED_MOTION_NODE",
+                 _row(1, 1, 0, 9, "1.0")]
+        res, starter = _convert(_tcrc_shell_deck(rows, extra))
+        self.assertEqual(_bcs_groups(starter), {("011", "000"): [1]})
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
+        self.assertIn("already driven by a *BOUNDARY_PRESCRIBED_MOTION", w)
+        self.assertIn("1 DOF(s) on 1 node(s) (node 1)", w)
+
+    def test_rule_c_merges_a_dof_a_boundary_spc_already_states(self):
+        """A ``*BOUNDARY_SPC_NODE`` pinning z removes the z digit, so
+        hm_read_bcs.F:198's union is not restated (starter WARNING 312)."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 0), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        extra = ["*BOUNDARY_SPC_NODE", _row(1, 0, 0, 0, 1)]
+        res, starter = _convert(_tcrc_shell_deck(rows, extra))
+        self.assertEqual(_bcs_groups(starter)[("110", "000")], [1])
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
+        self.assertIn("already stated by a *BOUNDARY_SPC", w)
+        self.assertIn("1 DOF(s) on 1 node(s) (node 1)", w)
+
+    def test_rule_d_names_a_rotational_code_on_a_rotation_free_mesh(self):
+        """A solid-only deck has no rotational DOF (bcs10.F:66's IRODDL gate),
+        so an RC code is emitted AND named inert."""
+        coords = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0),
+                  (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 1.0),
+                  (1.0, 1.0, 1.0), (0.0, 1.0, 1.0)]
+        rows = [_n16(i + 1, x, y, z, 0, 7) for i, (x, y, z) in enumerate(coords)]
+        deck = "\n".join(["*KEYWORD", "*NODE", *rows,
+                          "*ELEMENT_SOLID", _row(1, 1),
+                          _row(1, 2, 3, 4, 5, 6, 7, 8),
+                          "*SECTION_SOLID", _row(1, 1),
+                          "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+                          "*PART", "block", _row(1, 1, 1),
+                          "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        res, starter = _convert(deck)
+        self.assertEqual(sorted(_bcs_groups(starter)), [("000", "111")])
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
+        self.assertIn("no rotational DOF at all", w)
+        self.assertIn("IF(IRODDL/=0)", w)
+
+    def test_the_opt_out_emits_nothing_and_says_what_is_lost(self):
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        res, starter = _convert(_tcrc_shell_deck(rows), node_tc_rc_bcs=False)
+        self.assertEqual(_bcs_groups(starter), {})
+        self.assertNotIn("node_tc_rc_", starter)
+        w = _warns(res, "--no-node-tc-rc-bcs")
+        self.assertTrue(w)
+        self.assertIn("FREE in the converted model", w[0])
+
+    def test_a_pinned_node_is_not_clamped_twice_by_the_free_node_guard(self):
+        """The fifth interaction: ``_make_free_node_constraints`` subtracts a
+        node this pass already pinned in all six DOFs — which it learns from
+        ``state.node_tc_rc_emitted``."""
+        # Node 9 is BOTH an orphan (so the free-node guard wants it) and a
+        # TC/RC carrier pinned in all six DOFs (so this pass already has it) —
+        # the only shape that reaches the interaction. Node 10 is the control.
+        rows = [_n16(1, 0.0, 0.0, 0.0), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0),
+                _n16(9, 50.0, 50.0, 50.0, 7, 7),
+                _n16(10, 60.0, 60.0, 60.0)]
+        extra = ["*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1")]
+        _res, starter = _convert(_tcrc_shell_deck(rows, extra))
+        groups = _bcs_group_list(starter)
+        free = [ids for _key, ids in groups if 10 in ids]
+        self.assertTrue(free, f"no free-node group in {groups}")
+        self.assertNotIn(9, free[0])
+        self.assertEqual(sum(1 for _key, ids in groups if 9 in ids), 1)
+
+    def test_an_out_of_range_code_is_named_and_not_guessed(self):
+        rows = [_n16(1, 0.0, 0.0, 0.0, 9, 0), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        res, starter = _convert(_tcrc_shell_deck(rows))
+        self.assertEqual(_bcs_groups(starter), {})
+        w = _warns(res, "exactly eight")
+        self.assertTrue(w)
+        self.assertIn("no /BCS", w[0])
+
+    def test_the_group_dodges_a_user_set_on_the_auto_id(self):
+        """``/GRNOD`` ids come from ``next_grnod_id()``, so a user
+        ``*SET_NODE`` sitting on the id the allocator would actually reach is
+        not duplicated (starter ERROR 79) — the #131 probe rule."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        _res, plain = _convert(_tcrc_shell_deck(rows))
+        taken = [int(ln.rsplit("/", 1)[1]) for ln in plain.splitlines()
+                 if ln.startswith("/GRNOD/NODE/")]
+        self.assertTrue(taken)
+        extra = ["*SET_NODE_LIST", _row(taken[0]), _row(2, 3)]
+        _res, starter = _convert(_tcrc_shell_deck(rows, extra))
+        gids = [int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                if ln.startswith("/GRNOD/NODE/")]
+        self.assertEqual(len(gids), len(set(gids)))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A3 (fix round)  the zero-normal initial-penetration policy
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestZeroNormalPenetrationPolicy(unittest.TestCase):
+    """``i7pwr3.F:118`` refuses a zero-normal initial penetration unless Inacti
+    is 1/2 or Fpenmax is non-zero, and ``:193-199`` deactivates every node with
+    ``PENE > Fpenmax*GAPV`` BEFORE the Inacti branches. Four starter runs of
+    ``4.3_General_Nonlinearity`` differing only in that cell measured 928
+    deactivations at 0.99 against its 486 zero-normal nodes, and exactly 486
+    at 0.999999.
+    """
+
+    def test_the_constant_is_the_measured_one(self):
+        from k2rad.writer import contacts as ct
+        self.assertEqual(ct._FPENMAX_ZERO_NORMAL, 0.999999)
+        self.assertEqual(ct._FPENMAX_INACTI, (3, 4, 5, 6))
+
+    def test_the_implicit_stub_keeps_the_ordinary_inacti_5(self):
+        """Inacti = 1 on the stub zeroes EVERY penetrating node's stiffness and
+        cost ``efg/metal-cutting/main.k`` its NORMAL TERMINATION (218 cycles to
+        t = 0.03 became a TIMESTEP-LIMIT death at t = 0.0084). The stub is back
+        on the ordinary mapping and clears ERROR 611 through Fpenmax."""
+        coords = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0),
+                  (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 1.0),
+                  (1.0, 1.0, 1.0), (0.0, 1.0, 1.0)]
+        deck = "\n".join([
+            "*KEYWORD", "*NODE",
+            *[_n16(i + 1, x, y, z) for i, (x, y, z) in enumerate(coords)],
+            "*ELEMENT_SOLID", _row(1, 1), _row(1, 2, 3, 4, 5, 6, 7, 8),
+            "*SECTION_SOLID", _row(1, 1),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "block", _row(1, 1, 1),
+            "*BOUNDARY_SPC_NODE", _row(1, 0, 1, 1, 1),
+            "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        res, starter = _convert(deck)
+        parts = starter.split("auto_implicit_stabilization_self_contact", 1)
+        self.assertEqual(len(parts), 2, "no stabilization stub emitted")
+        body = parts[1].splitlines()
+        inacti_row = [ln for ln in body if ln.startswith("       000")][0]
+        self.assertEqual(inacti_row.split()[1], "5")
+        fp = [i for i, ln in enumerate(body) if "Fpenmax" in ln][0]
+        self.assertEqual(body[fp + 1].split()[-1], "0.999999")
+        w = _warns(res, "Implicit model has no contact interface")
+        self.assertTrue(w)
+        self.assertIn("ordinary Inacti=5", w[0])
+        self.assertIn("Inacti=1 was tried and rejected", w[0])
+
+    def test_a_tied_type10_states_itied_1(self):
+        """``hm_read_inter_type10.F:188-190``: Itied 0 authorizes rebound, 1
+        does not — and ``i7pwr3.F:117`` skips the initial-penetration refusal
+        only for a TYPE10 whose Itied is non-zero (measured: 310 x ERROR 612
+        -> 0 on 05_4_2_welding_uncoupled_link_d3plot_structuralstep)."""
+        from k2rad.writer.contacts import _emit_inter_type10
+        lines = _emit_inter_type10(7, "tie", 11, 12, 0.1)
+        hdr = [i for i, ln in enumerate(lines) if "ITIED" in ln][0]
+        cells = lines[hdr + 1].split()
+        self.assertEqual(cells[0], "1")            # Itied
+        self.assertEqual(cells[1], "0")            # INACTI
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B1 (fix round)  the *SET_<F>_GENERAL clause row: FAMILY-dependent id columns,
+#                 and the free/comma forms the manual's own example uses
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestSetGeneralClauseColumns(unittest.TestCase):
+    """How many of ``E1..E7`` are entity ids depends on the FAMILY, not just
+    the option: Vol I R17 p.43-41 Card 2e types all seven ``I`` for the NODE
+    family (``node_general_subgrp.cfg:141`` FREE_CELL_LIST), while p.43-65 /
+    ``segment_general_subgrp.cfg:274`` gives the SEGMENT family's
+    attribute-bearing options three ids and four floats.
+    """
+
+    def test_the_table_is_family_dependent(self):
+        from k2rad.state import set_general_id_cols as n
+        self.assertEqual(n("NODE", "PART"), 7)
+        self.assertEqual(n("NODE", "BOX"), 7)
+        self.assertEqual(n("SEGMENT", "PART"), 3)
+        self.assertEqual(n("SEGMENT", "SEG"), 4)
+        self.assertEqual(n("SEGMENT", "DPART"), 7)   # p.43-70 Remark 4
+        self.assertEqual(n("SEGMENT", "DSET"), 7)
+        self.assertEqual(n("SHELL", "PART"), 7)
+        self.assertEqual(n("PART", "PART"), 7)
+
+    def test_a_node_general_part_clause_takes_all_seven_ids(self):
+        """Five parts on one row: cells 4 and 5 are ids too, and a 3-cell
+        table would silently drop them."""
+        rows = ["*KEYWORD", "*NODE"]
+        pid_nodes = {}
+        nid = 1
+        for pid in range(1, 6):
+            base = nid
+            for dx in (0.0, 1.0, 1.0, 0.0):
+                rows.append(_n16(nid, dx + 10 * pid, 0.0, 0.0))
+                nid += 1
+            pid_nodes[pid] = list(range(base, base + 4))
+        rows.append("*ELEMENT_SHELL")
+        for pid, ns in pid_nodes.items():
+            rows.append(_row(pid, pid, *ns))
+        rows += ["*SECTION_SHELL", _row(1, 2),
+                 _row("1.0", "1.0", "1.0", "1.0"),
+                 "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3")]
+        for pid in pid_nodes:
+            rows += ["*PART", f"p{pid}", _row(pid, 1, 1)]
+        rows += ["*SET_NODE_GENERAL", _row(77),
+                 _grow("PART", 1, 2, 3, 4, 5),
+                 "*BOUNDARY_SPC_SET", _row(77, 0, 1, 1, 1, 1, 1, 1),
+                 "*CONTROL_TERMINATION", _row("1.0"), "*END", ""]
+        st = _dispatch("\n".join(rows))
+        from k2rad.writer.mesh import _expand_set_ranges_and_generals
+        _expand_set_ranges_and_generals(st)
+        self.assertEqual(len(st.node_sets[77][1]), 20)
+
+    def test_a_segment_general_part_clause_ignores_the_attribute_cells(self):
+        """``PART 1 0 0 100.0 50.0 1.0 1.0`` — E4..E7 are NFLS/SFLS/FSF/VSF
+        (p.43-70 Remark 1), not three more part ids."""
+        deck = "\n".join([
+            "*KEYWORD", "*NODE",
+            _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+            _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+            "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "plate", _row(1, 1, 1),
+            "*SET_SEGMENT_GENERAL", _row(5),
+            f"{'PART':<10}{1:>10}{0:>10}{0:>10}"
+            f"{'100.0':>10}{'50.0':>10}{'1.0':>10}{'1.0':>10}",
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        st = _dispatch(deck)
+        self.assertEqual(st.set_generals[("SEGMENT", 5)][1],
+                         [("PART", [1])])
+
+    def test_the_clause_row_may_be_comma_delimited(self):
+        """Vol I R17 p.43-41 writes its own worked example as ``PART, 6``."""
+        deck = "\n".join([
+            "*KEYWORD", "*NODE",
+            _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+            _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+            "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+            "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "plate", _row(1, 1, 1),
+            "*SET_NODE_GENERAL", _row(8), "PART, 1",
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        st = _dispatch(deck)
+        self.assertEqual(st.set_generals[("NODE", 8)][1], [("PART", [1])])
+        from k2rad.writer.mesh import _expand_set_ranges_and_generals
+        _expand_set_ranges_and_generals(st)
+        self.assertEqual(sorted(st.node_sets[8][1]), [1, 2, 3, 4])
+
+    def test_a_generate_range_row_may_be_comma_delimited_too(self):
+        deck = "\n".join([
+            "*KEYWORD", "*NODE",
+            _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+            _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+            "*SET_NODE_LIST_GENERATE", _row(4), "1,3",
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        st = _dispatch(deck)
+        from k2rad.writer.mesh import _expand_set_ranges_and_generals
+        _expand_set_ranges_and_generals(st)
+        self.assertEqual(sorted(st.node_sets[4][1]), [1, 2, 3])
+
+    def test_the_five_operand_part_clause_offsets_every_cell(self):
+        """Under ``*INCLUDE_TRANSFORM`` IDPOFF every operand must move: an
+        under-counted table leaves the tail behind and the set resolves to the
+        WRONG parts at zero diagnostics (the #116 class)."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.parser import Block
+        b = Block(keyword="SET_NODE_GENERAL", options=[],
+                  raw=[_row(7), _grow("PART", 1, 2, 3, 4, 5)])
+        _OFFSET_SPECS["SET_NODE_GENERAL"](b, {"p": 300, "s": 20},
+                                          lambda *_a, **_k: None)
+        self.assertEqual(b.raw[0].strip(), "27")
+        self.assertEqual([int(x) for x in b.raw[1][10:].split()],
+                         [301, 302, 303, 304, 305])
+
+    def test_a_segment_part_clause_offsets_only_its_three_id_cells(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.parser import Block
+        row = (f"{'PART':<10}{1:>10}{2:>10}{3:>10}"
+               f"{'100.0':>10}{'50.0':>10}{'1.0':>10}{'1.0':>10}")
+        b = Block(keyword="SET_SEGMENT_GENERAL", options=[],
+                  raw=[_row(7), row])
+        _OFFSET_SPECS["SET_SEGMENT_GENERAL"](b, {"p": 300, "s": 20},
+                                             lambda *_a, **_k: None)
+        cells = b.raw[1].split()
+        self.assertEqual(cells[:4], ["PART", "301", "302", "303"])
+        self.assertEqual([float(c) for c in cells[4:]],
+                         [100.0, 50.0, 1.0, 1.0])
 
 
 if __name__ == "__main__":                       # pragma: no cover

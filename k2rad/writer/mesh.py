@@ -923,6 +923,11 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
     for pl in state.pressure_loads:
         ref.update(n for n in pl.nodes if n > 0)
     for ssl in state.segment_set_pressure_loads:
+        # A PART-scoped *SET_SEGMENT_GENERAL contributes no segment here, and
+        # that is the right answer rather than a hole: this pass exists to keep
+        # a node that ONLY a load references, and every node of a scoped part is
+        # already referenced by that part's own elements. (The load itself is
+        # refused by name in writer/loads — _part_scoped_segment_set.)
         segset = state.segment_sets.get(ssl.ssid)
         if segset is not None:
             for nodes in segset.segments:
@@ -3303,13 +3308,68 @@ def _expand_set_ranges_and_generals(state: ConversionState) -> None:
         return
     state.sets_expanded = True
     _expand_set_generates(state)
-    for (family, sid), (title, clauses) in sorted(state.set_generals.items()):
+    for family, sid in _general_expansion_order(state):
+        title, clauses = state.set_generals[(family, sid)]
         if family == "NODE":
             _expand_node_general(state, sid, title, clauses)
         elif family == "SEGMENT":
             _expand_segment_general(state, sid, title, clauses)
         else:
             _expand_entity_general(state, family, sid, title, clauses)
+
+
+#: ``*SET_<F>_GENERAL`` options whose operands are SET ids of the SAME family
+#: — the only clauses that can make one GENERAL set depend on another.
+_GENERAL_SAME_FAMILY_SET_OPTIONS = {
+    "NODE": ("SET_NODE", "DSET_NODE"),
+    "SEGMENT": ("SET", "DSET"),
+    "SHELL": ("SET", "DSET"),
+    "SOLID": ("SET", "DSET"),
+    "BEAM": ("SET", "DSET"),
+    "DISCRETE": ("SET", "DSET"),
+    "PART": ("SET", "DSET"),
+}
+
+
+def _general_expansion_order(state: ConversionState) -> List[Tuple[str, int]]:
+    """``state.set_generals`` keys, dependency-first.
+
+    A ``*SET_<F>_GENERAL`` clause may name another set of the same family, and
+    plain ``sorted()`` order builds the higher sid last — so a forward
+    reference met a set that exists in the deck but not yet in the container,
+    and the "which this deck does not define" warning fired on a set the deck
+    DOES define. Kahn's algorithm over the same-family SET clauses fixes the
+    order; a cycle (or anything else unresolvable) falls back to sorted order,
+    where the existing per-clause warnings still apply.
+
+    Measured reach: 0 corpus decks use a ``SET``/``SET_NODE`` clause at all
+    (the whole option census over both corpora is SEG / PART / DPART / ALL /
+    BOX), so this reorders nothing that exists today.
+    """
+    keys = sorted(state.set_generals)
+    deps: Dict[Tuple[str, int], Set[Tuple[str, int]]] = {k: set() for k in keys}
+    for (family, sid), (_title, clauses) in state.set_generals.items():
+        wanted = _GENERAL_SAME_FAMILY_SET_OPTIONS.get(family, ())
+        for option, ids in clauses:
+            if option.upper() not in wanted:
+                continue
+            for e in ids:
+                dep = (family, e)
+                if dep in deps and dep != (family, sid):
+                    deps[(family, sid)].add(dep)
+    order: List[Tuple[str, int]] = []
+    done: Set[Tuple[str, int]] = set()
+    remaining = list(keys)
+    while remaining:
+        ready = [k for k in remaining if deps[k] <= done]
+        if not ready:                      # cycle — keep the deck's own order
+            order.extend(remaining)
+            break
+        for k in ready:
+            order.append(k)
+            done.add(k)
+        remaining = [k for k in remaining if k not in done]
+    return order
 
 
 def _flatten_set_adds(state: ConversionState) -> None:

@@ -70,7 +70,8 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      set_active_scope, to_float, to_int)
-from .state import FABRIC_CURVE_FORMS, SET_ADD_FAMILIES, SET_RANGE_FAMILIES
+from .state import (FABRIC_CURVE_FORMS, SET_ADD_FAMILIES, SET_RANGE_FAMILIES,
+                    set_general_id_cols)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
@@ -4112,6 +4113,7 @@ def _off_set_general(b: Block, offsets: Dict[str, int], warn) -> None:
     so shifting their operands would be inventing an offset for a clause that
     is skipped.
     """
+    family = b.keyword.upper().split("SET_", 1)[-1].split("_GENERAL", 1)[0]
     toff = _title_offset(b)
     # Card 1 SID, exactly as the declarative specs do it. Giving the whole
     # keyword to a callable replaces the ``{"cards": {0: [(0, "s")]}}`` half
@@ -4127,43 +4129,54 @@ def _off_set_general(b: Block, offsets: Dict[str, int], warn) -> None:
         line = b.raw[i]
         if not line.strip():
             continue
-        option = line[:10].strip().upper()
-        spec = _SET_GENERAL_ID_COLS.get(option)
-        if not spec:
+        # _split_card, not a hand-rolled [:10] slice: the clause row may be
+        # COMMA-delimited (Vol I R17 p.43-41 writes its own worked example that
+        # way — "PART, 6"), whitespace-free, or fixed. The option itself can
+        # also outgrow the A10 field (SET_DISCRETE is 12 characters), which
+        # only the free forms can express.
+        fields, comma, ws_free = _split_card(line, 10)
+        if not fields:
             continue
-        ncols, bucket = spec
+        option = fields[0].strip().upper()
+        bucket = _SET_GENERAL_ID_BUCKET.get(option)
+        if not bucket:
+            continue
+        ncols = set_general_id_cols(family, option)
         off = offsets.get(bucket, 0)
         if not off:
             continue
-        head, tail = line[:10], line[10:]
-        cells = _fields(tail, 7, 10)
         changed = False
-        for c in range(min(ncols, len(cells))):
-            tok = cells[c].strip()
+        for c in range(1, min(ncols + 1, len(fields))):
+            tok = fields[c].strip()
             if not tok:
                 continue
             v = to_int(tok)
             if v > 0:
-                cells[c] = str(v + off)
+                fields[c] = str(v + off)
                 changed = True
         if changed:
-            b.raw[i] = head + "".join(f"{t.strip():>10}" for t in cells).rstrip()
+            b.raw[i] = _join_card(fields, comma, ws_free, 10)
 
 
-#: ``*SET_<F>_GENERAL`` OPTION → (how many of E1..E7 are ids, id bucket).
+#: ``*SET_<F>_GENERAL`` OPTION → the id BUCKET its operands belong to. HOW MANY
+#: of E1..E7 are ids is a separate, FAMILY-dependent question and comes from
+#: :func:`state.set_general_id_cols` — the two were one option-keyed table until
+#: the round-2 review measured that a NODE-family ``PART`` clause carries seven
+#: part ids (``node_general_subgrp.cfg:141`` FREE_CELL_LIST) while a
+#: SEGMENT-family one carries three plus four float attributes (``:274``).
 #: Only the options ``writer/mesh._NODE_GENERAL_OPTIONS`` /
 #: ``._SEGMENT_GENERAL_OPTIONS`` / ``._ELEM_GENERAL_OPTIONS`` actually resolve
 #: are listed; ``ALL`` takes no operand at all.
-_SET_GENERAL_ID_COLS: Dict[str, Tuple[int, str]] = {
-    "SEG": (4, "n"), "DSEG": (4, "n"),
-    "NODE": (7, "n"), "DNODE": (7, "n"),
-    "PART": (3, "p"), "DPART": (3, "p"),
-    "ELEM": (7, "e"), "DELEM": (7, "e"),
-    "BOX": (3, "d"), "DBOX": (3, "d"),
-    "SET": (7, "s"), "DSET": (7, "s"),
-    "SET_NODE": (7, "s"), "DSET_NODE": (7, "s"), "SET_PART": (7, "s"),
-    "SET_SHELL": (7, "s"), "SET_SOLID": (7, "s"),
-    "SET_BEAM": (7, "s"), "SET_DISCRETE": (7, "s"),
+_SET_GENERAL_ID_BUCKET: Dict[str, str] = {
+    "SEG": "n", "DSEG": "n",
+    "NODE": "n", "DNODE": "n",
+    "PART": "p", "DPART": "p",
+    "ELEM": "e", "DELEM": "e",
+    "BOX": "d", "DBOX": "d",
+    "SET": "s", "DSET": "s",
+    "SET_NODE": "s", "DSET_NODE": "s", "SET_PART": "s",
+    "SET_SHELL": "s", "SET_SOLID": "s",
+    "SET_BEAM": "s", "SET_DISCRETE": "s",
 }
 
 for (_family, _gen_kw, _incr, _col, _gen,

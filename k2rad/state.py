@@ -104,6 +104,44 @@ SET_RANGE_FAMILIES = (
     ("SEGMENT",  "",                        False, False, True, "segment_sets",  "n"),
 )
 
+#: ``*SET_<F>_GENERAL`` clause rows: which of the seven ``E1..E7`` cells are
+#: ENTITY IDS. The answer depends on the FAMILY as well as the OPTION, and
+#: getting that wrong goes both ways — under-count and an *INCLUDE_TRANSFORM
+#: leaves real operands un-offset (the #116 silent-empty-set failure);
+#: over-count and four FLOAT attributes are read as phantom entity ids.
+#:
+#:   * SEGMENT family, ``SEG``/``DSEG``: four NODE ids
+#:     (``segment_general_subgrp.cfg:262`` ``CARD("%-10s%10d%10d%10d%10d",
+#:     KEY,N1,N2,N3,N4)``).
+#:   * SEGMENT family, the options in :data:`SEGMENT_GENERAL_ATTR_OPTIONS`:
+#:     three ids then four floats (``:274``
+#:     ``CARD("%-10s%10d%10d%10d%10lg%10lg%10lg%10lg", KEY,ids0,ids1,ids2,
+#:     A1,A2,A3,A4)``; Vol I R17 p.43-70 Remark 1 names them NFLS/SFLS/FSF/VSF).
+#:   * Everything else — every NODE-family option (``node_general_subgrp.cfg:141``
+#:     ``FREE_CELL_LIST(idsmax,"%10d",ids,80)`` for ALL of them, ``PART`` and
+#:     ``BOX`` included), every element-family option
+#:     (``{shell,solid,beam,discrete}_general_subgrp.cfg:123``, same list), the
+#:     PART family, and the SEGMENT family's own "tightly packed" options
+#:     (``DPART``, ``DSET``, ``DBOX*``, ``DVOL*``, ``SET`` — p.43-70 Remark 4,
+#:     the cfg's ``else`` branch at ``:296``): all seven cells are ids.
+SEGMENT_GENERAL_ATTR_OPTIONS = frozenset({
+    "BOX", "BOX_SHELL", "BOX_SOLID", "BOX_SLDIO",
+    "PART", "PART_IO", "BRANCH", "BRANCH_IO",
+    "SET_SHELL", "SET_SOLID", "SET_SLDIO", "SET_TSHELL", "SET_TSHIO",
+    "SHELL", "VOL", "VOL_SHELL", "VOL_SLDIO", "VOL_SOLID",
+})
+
+
+def set_general_id_cols(family: str, option: str) -> int:
+    """How many of ``E1..E7`` are entity ids on this family's clause row."""
+    if family == "SEGMENT":
+        if option in ("SEG", "DSEG"):
+            return 4
+        if option in SEGMENT_GENERAL_ATTR_OPTIONS:
+            return 3
+    return 7
+
+
 #: ``*SET_NODE_ADD_ADVANCED`` card 2b TYPE column → the family whose members
 #: contribute their NODES (Vol I R17 p.43-46 verbatim: "EQ.1: Node set
 #: EQ.2: Shell set EQ.3: Beam set EQ.4: Solid set EQ.5: Segment set
@@ -3396,15 +3434,17 @@ class ContactAutoSingle:
     # k2rad itself (the implicit-stabilization self-contact), which has no
     # originating keyword to report.
     keyword: str = ""
-    # /INTER/TYPE7 Inacti, stated OUTRIGHT rather than derived from `ignore`.
-    # None = the ordinary path (_ignore_to_inacti reads `ignore`), which is what
-    # every *CONTACT card gets. The one caller that sets it is k2rad's OWN
-    # synthesized implicit-stabilization self-contact: `ignore` there is a
-    # dataclass default nobody chose, and letting it decide made the stub carry
-    # Inacti = 5 and hard-fail 05_1_welding_solid with 310 x starter ERROR 611.
-    # Stating the value where the stub is BUILT keeps it from drifting with a
-    # future change to _ignore_to_inacti.
-    inacti: Optional[int] = None
+    # NOTE (round 2, 2026-09-06): an `inacti: Optional[int]` field lived here
+    # for one round so k2rad's synthesized implicit-stabilization stub could
+    # state Inacti = 1 and dodge starter ERROR 611. It was REMOVED after
+    # measurement: Inacti = 1 zeroes the stiffness of every initially
+    # penetrating secondary node for the whole run, and on
+    # `efg/metal-cutting/main.k` — an implicit deck whose only contact IS that
+    # stub — it cost the deck its NORMAL TERMINATION (218 cycles to t = 0.03
+    # became a TIMESTEP-LIMIT death at t = 0.0084). The stub is back on the
+    # ordinary `ignore` mapping (Inacti = 5) and ERROR 611 is cleared by the
+    # Fpenmax cell instead (writer/contacts._FPENMAX_ZERO_NORMAL), which takes
+    # only the nodes that have no other treatment available.
 
 
 @dataclass
@@ -6991,8 +7031,9 @@ class ConvertOptions:
     # NID X Y Z TC RC) become one /GRNOD/NODE + /BCS per distinct (TC, RC)
     # pair. ON by default. LS-DYNA applies them unconditionally — its d3hsp
     # prints a dedicated "nodal spc summary on *NODE cards" echo, and this
-    # decode reproduces that echo on 162 139 nodes across 155 R14 decks with
-    # ZERO translation-code disagreements. Without the conversion those DOFs
+    # decode reproduces that echo (printed by 155 of the R14 reference runs)
+    # on all 162 139 TC/RC cells of the 137 carrier decks, with ZERO
+    # translation-code disagreements. Without the conversion those DOFs
     # are FREE in the emitted model at 0 warnings and 0 starter errors: on the
     # 356-deck dynaexamples R14 campaign 137 decks carry a non-zero cell and
     # 119 of them have no *BOUNDARY_SPC at all, so the card's own cells are
@@ -7969,8 +8010,8 @@ class ConversionState:
     #: rotations. Read by the ``*NODE`` TC/RC pass, which must NOT also pin a
     #: DOF an imposed motion drives: MEASURED on a one-brick twin, a ``/BCS``
     #: and an ``/IMPVEL`` on the same node and DOF give starter WARNING 312
-    #: and a 99.9 %% engine energy error (EXT-WORK 13.66 against an I-ENERGY of
-    #: 1688), while the complementary split is 0.0 %% with no warning.
+    #: and a 99.9 % engine energy error (EXT-WORK 13.66 against an I-ENERGY of
+    #: 1688), while the complementary split is 0.0 % with no warning.
     imp_motion_dirs: Dict[int, Set[str]] = field(default_factory=dict)
     #: Nodes whose imposed motion was written in a LOCAL system (skew_ID != 0),
     #: where the card's ``Dir`` letter is a skew axis and no global TC/RC bit

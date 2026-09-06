@@ -100,36 +100,37 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
             inter_id=inter_id,
             title="auto_implicit_stabilization_self_contact",
             ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
-            # Inacti = 1 (deactivate the initially-penetrating secondary
-            # nodes), stated here rather than inherited from the `ignore = 0`
-            # dataclass default nobody chose. Two reasons, both measured.
-            # (1) It is the stub's own intent: a stabilization interface that
-            #     "carries no load unless parts actually touch" should give a
-            #     node that ALREADY touches zero stiffness, not a t=0 pre-load.
-            # (2) It removes starter ERROR 611 categorically. i7pwr3.F:114-129
-            #     raises 611 whenever a secondary node lies EXACTLY on a main
-            #     segment (DN = |N|^2 <= 1e-30: no direction exists to move it
-            #     along), and the gate is `INACTI/=1 .AND. INACTI/=2 .AND.
-            #     FPENMAX==ZERO` — so 5 and 6 alike fail and only 1/2 (or a
-            #     non-zero Fpenmax) pass. MEASURED on
-            #     thermal/welding-new/welding-solids/05_1_welding_solid, whose
-            #     conformal weld mesh puts 310 nodes exactly on the stub's own
-            #     surface: 310 ERRORS with Inacti = 5, 0 ERRORS / 1 WARNING
-            #     with Inacti = 1.
-            inacti=1,
+            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
+            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
+            # stated Inacti = 1 here to dodge starter ERROR 611 on
+            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
+            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
+            # initially penetrating secondary node for the whole run, not just
+            # the ones that cannot be depenetrated. On
+            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
+            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
+            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
+            # putting Inacti back to 5 restored the 218-cycle run exactly.
+            # ERROR 611 is cleared by the Fpenmax cell that
+            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
+            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
+            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
+            # zero-normal ones).
         )
     )
     state.warn(
         "Implicit model has no contact interface — the OpenRadioss engine "
         "segfaults in implicit setup without one. Injected an inert all-parts "
-        f"self-contact (/INTER/TYPE7 id {inter_id}) with Inacti=1, so a "
-        "secondary node that already touches a main segment simply gets zero "
-        "contact stiffness: the stub carries no load unless parts move into "
-        "each other. Inacti=1 rather than the ordinary mapping because "
-        "i7pwr3.F:114-129 refuses a node lying EXACTLY on a main segment with "
-        "ERROR 611 for every Inacti except 1 and 2 — measured, 310 of them on "
-        "05_1_welding_solid's conformal weld mesh. Remove the interface if you "
-        "define real contact."
+        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
+        "(variable gap: an initially touching node gets a gap reduced to its "
+        "own penetration, so the stub carries no load at t=0 and still resists "
+        "if parts move further into each other) plus Fpenmax=0.999999, which "
+        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
+        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
+        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
+        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
+        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
+        "TERMINATION. Remove the interface if you define real contact."
     )
 
 
@@ -382,8 +383,9 @@ def convert(
         carrying no CID, no id and no birth/death — they are unconditionally
         active for the whole run. LS-DYNA applies them, measured rather than
         assumed: this decode reproduces its own ``nodal spc summary on *NODE
-        cards`` d3hsp echo on 162 139 nodes across 155 R14 reference decks
-        with zero translation-code disagreements. Dropping them leaves those
+        cards`` d3hsp echo — printed by 155 of the R14 reference runs — on all
+        162 139 TC/RC cells of the 137 carrier decks, with zero
+        translation-code disagreements. Dropping them leaves those
         degrees of freedom FREE at 0 conversion warnings and 0 starter errors;
         on the 356-deck dynaexamples R14 campaign **137 decks carry a non-zero
         cell and 119 of them have no ``*BOUNDARY_SPC`` at all**, and those

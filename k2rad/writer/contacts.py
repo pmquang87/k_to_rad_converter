@@ -49,7 +49,6 @@ __all__ = [
     "_part_node_ids",
     "_make_force_transducers",
     "_ignore_to_inacti",
-    "_single_inacti",
     "_FPENMAX_ZERO_NORMAL",
     "_vdc_to_viss",
     "_sst_mst_to_gapmin",
@@ -406,6 +405,31 @@ def _resolve_contact_master(state: ConversionState, sid: int, styp: int, out_lin
     return surf_id
 
 
+def _note_styp0_surface_kind(state: ConversionState, sid: int, title: str,
+                             nseg: int) -> None:
+    """Say when a contact MAIN side becomes a ``/SURF/SEG`` over a
+    ``*SET_SEGMENT`` rather than the whole part's surface.
+
+    Before the SSTYP typing of this batch, ``SURFATYP/SURFBTYP = 0`` looked its
+    id up among the ``*PART``s first, so a deck defining both ``*PART 1`` and
+    ``*SET_SEGMENT 1`` got the PART's entire surface. The typed resolver gives
+    it the set's segments — a different, usually much smaller, main surface.
+
+    That change is invisible in a warning-diff review unless it is said out
+    loud: four ``w6_setup_sandwichimpact``-family decks moved 2020 added /
+    720 removed lines in the round-2 sweep with ZERO change to their
+    conversion record, and had to be attributed by hand. This note makes the
+    surface KIND part of the record.
+    """
+    state.warn(
+        f"CONTACT main side '{title}': SURFATYP/SURFBTYP = 0 is a "
+        f"*SET_SEGMENT id (Vol I R17 p.11-24), so the main surface is a "
+        f"/SURF/SEG over the {nseg} segment(s) of *SET_SEGMENT {sid} — NOT "
+        f"the whole surface of a *PART {sid}, which is what k2rad emitted "
+        "before 2026-09 when the deck defined both. Check that the set really "
+        "carries every face this contact must see.")
+
+
 def _emit_styp0_master_surface(state: ConversionState, sid: int, title: str,
                                out_lines: List[str]) -> int:
     """A MAIN /SURF from a ``*SET_SEGMENT`` (SURFATYP/SURFBTYP = 0).
@@ -423,6 +447,7 @@ def _emit_styp0_master_surface(state: ConversionState, sid: int, title: str,
         return 0
     surf_id = state.next_id()
     if ss.segments and not ss.part_scope:
+        _note_styp0_surface_kind(state, sid, title, len(ss.segments))
         out_lines += _emit_surf_seg(surf_id, ss.title or title, ss.segments)
         return surf_id
     if ss.part_scope and not ss.segments:
@@ -956,7 +981,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _single_inacti(c, state, gapmin),
+                                       _ignore_to_inacti(c.ignore, state,
+                                                         c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
@@ -987,7 +1013,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _single_inacti(c, state, gapmin),
+                                       _ignore_to_inacti(c.ignore, state,
+                                                         c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
@@ -1478,41 +1505,48 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     return lines
 
 
-def _single_inacti(c, state: ConversionState, gapmin: float) -> int:
-    """``/INTER/TYPE7`` Inacti for a single-surface contact.
-
-    A ``ContactAutoSingle`` that STATES ``inacti`` wins outright — the one such
-    record is k2rad's own implicit-stabilization stub, whose value is chosen
-    where the stub is built (``k2rad/__init__.py``) precisely so it cannot
-    drift with a later change to :func:`_ignore_to_inacti`. Every *CONTACT card
-    read from a deck leaves ``inacti`` at ``None`` and takes the ordinary
-    ``ignore`` mapping, unchanged.
-    """
-    stated = getattr(c, "inacti", None)
-    if stated is not None:
-        return int(stated)
-    return _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
-
-
 #: ``/INTER/TYPE7`` Fpenmax written whenever Inacti is one of the values
 #: ``i7pwr3.F:118`` refuses a ZERO-NORMAL initial penetration for (3/4/5/6 —
 #: the gate is ``INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO``).
 #:
-#: The number is DERIVED, not chosen: ``i7pwr3.F:193-195`` is
-#: ``PENMAX = FPENMAX*GAPV(I)`` and deactivates a node when
-#: ``PENE(I) > PENMAX``, and ``i7pen3.F:87`` makes ``PENE = GAPV - d`` for a
-#: secondary node at distance ``d`` from the segment. So the kill condition is
-#: ``d < (1 - Fpenmax)*GAPV``: at 0.99 only nodes closer than ONE PERCENT of
-#: the gap are deactivated — which is exactly the ``d = 0`` population that
-#: cannot be depenetrated at all (``i7pwr3.F:113-114``: ``DN = |N|**2 <=
-#: 1e-30``, so there is no direction to move the node along) — while every
-#: ordinary initial penetration keeps its Inacti treatment.
-_FPENMAX_ZERO_NORMAL = 0.99
+#: The number is MEASURED, not reasoned. ``i7pwr3.F:193-195`` is
+#: ``PENMAX = FPENMAX*GAPV(I)``, and it deactivates a node whenever
+#: ``PENE(I) > PENMAX`` — BEFORE the Inacti branches at ``:200-208``, so every
+#: node it catches loses its Inacti treatment as well as its stiffness.
+#: ``i7pen3.F:70-80`` makes ``PENE = MAX(0, GAPV + MARGE - d)`` for a secondary
+#: node at distance ``d`` from the segment, so the caught population is
+#: ``d < (1 - Fpenmax)*GAPV + MARGE`` — a SUPERSET of the ``d = 0`` nodes that
+#: cannot be depenetrated at all (``:113-114``: ``DN = |N|**2 <= 1e-30``, no
+#: direction to move the node along), and on a real mesh a much bigger one.
+#:
+#: Measured on ``4.3_General_Nonlinearity`` (486 zero-normal nodes, counted as
+#: the starter's own ``IMPOSSIBLE TO CALCULATE NEW COORDINATES`` lines), four
+#: starter runs of one deck differing only in this cell:
+#:
+#:     Fpenmax 0        -> 0 deactivated, 486 x ERROR 611 (the deck is refused)
+#:     Fpenmax 0.99     -> 928 deactivated  (442 ORDINARY penetrations killed)
+#:     Fpenmax 0.9999   -> 503 deactivated
+#:     Fpenmax 0.999999 -> 486 deactivated  == the zero-normal population
+#:
+#: 0.999999 is therefore the value: it clears the refusal and takes exactly the
+#: nodes that have no other treatment available. (On the conformal weld mesh of
+#: ``05_1_welding_solid`` it takes 355 against 310 zero-normal ones, and
+#: tightening to 0.99999999 still takes 355 — that residue is the ``MARGE``
+#: term above, not the constant.)
+_FPENMAX_ZERO_NORMAL = 0.999999
 
 #: The Inacti values that reach the ERROR 611 gate. 1 and 2 are exempt at
-#: ``i7pwr3.F:118`` itself; 0 raises MSGID 612 instead, and Fpenmax does not
-#: suppress that one (``:194`` only skips the ISTOK count for Inacti 5/6), so
-#: it is deliberately not in this set.
+#: ``i7pwr3.F:118`` itself. Inacti 0 is NOT excluded because the message
+#: survives — ``:118`` wraps the ``MSGID=612`` branch (``:120-127``) and the
+#: ``MSGID=611`` branch (``:129-135``) alike, so a non-zero Fpenmax suppresses
+#: 612 too — but because an Inacti-0 interface here is k2rad's own implicit
+#: bootstrap (``_ignore_to_inacti``'s SST/MST-derived-Gapmin exception), whose
+#: whole purpose is to carry stiffness at t = 0; silently zeroing the stiffness
+#: of its closest nodes is a different trade from clearing a hard refusal, and
+#: no corpus deck has asked for it (the two ERROR 612 carriers in the R14
+#: roster are ``/INTER/TYPE10``, which has no Fpenmax field at all —
+#: ``hm_read_inter_type10.F:94`` hard-sets ``FPENMAX = ZERO`` — and are cleared
+#: by ``Itied = 1`` instead, see :func:`_emit_inter_type10`).
 _FPENMAX_INACTI = (3, 4, 5, 6)
 
 
@@ -1693,8 +1727,11 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
     direction exists, and ``:118`` then refuses the deck with ``ERROR 611`` for
     every Inacti except 1 and 2 — unless ``FPENMAX /= ZERO``. A non-zero
     Fpenmax turns the refusal into a deactivation: ``:193-195`` zeroes
-    ``STFN`` for a node with ``PENE > Fpenmax*GAPV``, which at
-    ``_FPENMAX_ZERO_NORMAL`` is precisely the zero-distance population.
+    ``STFN`` for a node with ``PENE > Fpenmax*GAPV``. That test is a superset
+    of the zero-distance population, so the constant matters: see
+    :data:`_FPENMAX_ZERO_NORMAL`, where four starter runs of one deck measure
+    928 nodes deactivated at 0.99 against the 486 that actually have no
+    depenetration direction, and 486 at the shipped 0.999999.
 
     **It is inert without them.** Fpenmax is a STARTER-only field
     (``hm_read_inter_type07.F:275`` → ``FRIGAP(27)``, read by
@@ -1729,13 +1766,18 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
             "starter cannot honour Inacti 3/4/5/6 there and refuses the whole "
             "deck with ERROR 611 (i7pwr3.F:114-129) — measured, 310 such nodes "
             "on 05_1_welding_solid and 486 on 4.3_General_Nonlinearity. "
-            f"Fpenmax={_FPENMAX_ZERO_NORMAL:g} deactivates exactly those nodes "
-            "instead (i7pwr3.F:193-195 zeroes the stiffness of a node with "
+            f"Fpenmax={_FPENMAX_ZERO_NORMAL:g} deactivates them instead "
+            "(i7pwr3.F:193-195 zeroes the stiffness of a node with "
             f"PENE > {_FPENMAX_ZERO_NORMAL:g}*gap, i.e. closer than "
-            f"{100.0 * (1.0 - _FPENMAX_ZERO_NORMAL):g} percent of the gap) and "
-            "leaves every ordinary initial penetration on the Inacti path. It "
-            "is a STARTER-only field and inert on a deck without such nodes — "
-            "measured byte-identical T01 channels on two control decks.")
+            f"{100.0 * (1.0 - _FPENMAX_ZERO_NORMAL):g} percent of the gap) — "
+            "and that test catches a node whose distance is merely SMALL as "
+            "well, which is why the constant is not a round number: measured "
+            "on 4.3_General_Nonlinearity, Fpenmax 0.99 deactivates 928 nodes "
+            f"against the 486 zero-normal ones, {_FPENMAX_ZERO_NORMAL:g} "
+            "deactivates exactly 486. Every ordinary initial penetration stays "
+            "on the Inacti path. It is a STARTER-only field and inert on a deck "
+            "without such nodes — measured byte-identical T01 channels on two "
+            "control decks, and 0 deactivations on efg/metal-cutting.")
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -3090,9 +3132,28 @@ def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
 
     grnod_id (secondary /GRNOD) + surf_id (main /SURF), same entities as TYPE2.
     Unlike the kinematic TYPE2, TYPE10 bonds by a penalty spring over a GAP, so
-    its secondary nodes may coexist with /RBODY. Matches dyna2rad's routed
-    TYPE10 (Idel=1, STFAC=0 engine-auto, GAP from SST/MST, ITIED=0, INACTI=0,
-    VIS_S=0, BUMULT=0). No Fric field exists on TYPE10 (a tie does not slide).
+    its secondary nodes may coexist with /RBODY. Idel=1, STFAC=0 (engine-auto),
+    GAP from SST/MST, INACTI=0, VIS_S=0, BUMULT=0. No Fric field exists on
+    TYPE10 (a tie does not slide) — the cell in that column IS ``Itied``
+    (``hm_read_inter_type10.F:109`` reads it, ``:134`` stores it as ``FRIC``).
+
+    **Itied = 1, and that is the tie.** The starter's own echo
+    (``hm_read_inter_type10.F:188-190``) reads::
+
+        TYPE 10 TIED - AUTO IMPACTING
+        ITIED . . . 0: TIED DURING IMPACT - REBOUND AUTORIZED
+                    1: TIED AFTER IMPACT NO REBOUND AUTORIZED
+
+    A ``*CONTACT_TIED_*`` without a ``_FAILURE`` option is a permanent tie, so
+    "rebound authorized" is the wrong half; the engine keeps an engaged
+    candidate only when ``ITIED/=0`` (``i10mainf.F:197``, ``i10dst3.F:348``).
+    Itied=1 also lifts the initial-penetration refusal: ``i7pwr3.F:117`` gates
+    the ERROR 611/612 block on ``NTY/=24 .AND. (NTY/=10 .OR. ITIED==0)``, and
+    TYPE10 has no Fpenmax field to clear it with instead
+    (``hm_read_inter_type10.F:94`` hard-sets ``FPENMAX = ZERO``). MEASURED on
+    ``05_4_2_welding_uncoupled_link_d3plot_structuralstep``, whose 310 secondary
+    nodes sit exactly on the main surface: 310 x ERROR 612 at Itied=0, and
+    0 ERRORS / 1 WARNING at Itied=1 with the same deck otherwise unchanged.
 
     Card columns (FORMAT radioss120):
       C1  grnod_id(1-10) surf_id(11-20) <blank 21-70> Idel(71-80)
@@ -3108,7 +3169,7 @@ def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
         "#              STFAC                                     GAP              Tstart               Tstop",
         f"{_f(0.0)}{blank20}{_f(gap)}{_f(0.0)}{_f(0.0)}",
         "#                              ITIED    INACTI               VIS_S                              BUMULT",
-        f"{blank20}{_i(0)}{_i(0)}{_f(0.0)}{blank20}{_f(0.0)}",
+        f"{blank20}{_i(1)}{_i(0)}{_f(0.0)}{blank20}{_f(0.0)}",
         HDR,
     ]
 
@@ -3409,8 +3470,15 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 f"{c.inter_id} -> /INTER/TYPE10/{c.inter_id} (penalty tie: "
                 f"(SFST*SST + SFMT*MST)/2 = {(c.sfst * c.sst + c.sfmt * c.mst) / 2.0:g} "
                 f"< 0, LS-DYNA's negative offset). GAP={gap:g}, {len(clean)} "
-                "secondary nodes. Unlike TYPE2 this bonds by penalty (rigid-body "
-                "secondary nodes allowed) and does not tie rotations."
+                "secondary nodes, Itied=1. Unlike TYPE2 this bonds by penalty "
+                "(rigid-body secondary nodes allowed) and does not tie "
+                "rotations. Itied=1 is 'TIED AFTER IMPACT NO REBOUND "
+                "AUTORIZED' (hm_read_inter_type10.F:188-190), which is what a "
+                "*CONTACT_TIED_* without a _FAILURE option means; it also lifts "
+                "the starter's initial-penetration refusal for this interface "
+                "type (i7pwr3.F:117 gates ERROR 611/612 on NTY/=10 .OR. "
+                "ITIED==0), and TYPE10 has no Fpenmax field to clear it with "
+                "instead (hm_read_inter_type10.F:94)."
             )
             continue
         dsearch = _tied_dsearch(state, c, clean, verts, faces)

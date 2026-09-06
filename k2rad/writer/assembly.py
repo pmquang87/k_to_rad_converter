@@ -2140,11 +2140,13 @@ def _starter_section_registry():
         # what makes the announcement true.
         ("node_tc_rc_bcs",    lambda c: _make_node_tc_rc_bcs(
             c.state, c.rbody_info, c.rigid_nodes)),
-        ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
+        ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info,
+                                                       c.rigid_nodes)),
         ("initial_velocity",  lambda c: _make_initial_velocity(
             c.state, c.rigid_nodes)),
         ("initial_velocity_generation",
-                              lambda c: _make_initial_velocity_generation(c.state)),
+                              lambda c: _make_initial_velocity_generation(
+                                  c.state, c.rigid_nodes)),
         ("pressure_loads",    lambda c: _make_pressure_loads(c.state)),
         # Both gravity paths need rbody_info: a /GRAV whose group holds only
         # rigid secondary nodes moves nothing (the engine overwrites their

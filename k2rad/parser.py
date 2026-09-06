@@ -54,7 +54,7 @@ class Block:
 #: ``Keyword971/SETS/*_list_generate.cfg``). Enumerating the permutations in
 #: HANDLERS instead would double every generated set spelling — the #116
 #: combinatorics trap. Scoped check before adding it here: ``_COLLECT`` occurs
-#: in 36 files of ``hm_cfg_files/config/CFG/Keyword971`` and **all 36 are under
+#: in 37 files of ``hm_cfg_files/config/CFG/Keyword971`` and **all 37 are under
 #: SETS/**, so no non-set keyword loses a real name suffix to this strip.
 _TRAILING = frozenset({"ID", "TITLE", "SUBTITLE", "COLLECT"})
 

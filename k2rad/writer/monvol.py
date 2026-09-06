@@ -64,7 +64,8 @@ from typing import Dict, List, Set, Tuple
 from ..state import Airbag, AirbagVent, ConversionState, GasSpecies
 from .common import (
     HDR, _emit_grsh3n, _emit_grshel, _emit_surf_grsh3n, _emit_surf_grshel,
-    _emit_surf_surf, _f, _i, _split_shell_eids_by_topology,
+    _emit_surf_surf, _f, _i, _part_scoped_segment_set,
+    _split_shell_eids_by_topology,
 )
 
 __all__ = [
@@ -392,6 +393,16 @@ def _airbag_surface_eids(state: ConversionState, ab: Airbag) -> List[int]:
             "set — so check which kind SID really is.")
         return []
 
+    if segset is not None and not segset.segments and segset.part_scope:
+        # A *SET_SEGMENT_GENERAL scoped to whole PARTs: it exists, so the
+        # "not defined" arms above do not fire, and the face loop below would
+        # silently find nothing. Named, then treated as no segment set at all
+        # so the *SET_PART fallback (if any) can still carry the bag.
+        _part_scoped_segment_set(state, ab.sid, kw,
+                                 "The monitored volume falls back to a "
+                                 "*SET_PART with the same id if the deck "
+                                 "defines one, and is dropped otherwise.")
+        segset = None
     if segset is not None and (ab.sidtyp == 0 or partset is None):
         by_nodes = _shell_by_corner_nodes(state)
         eids: List[int] = []

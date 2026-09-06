@@ -28,6 +28,7 @@ from .state import (
     ConversionState,
     SET_ADD_FAMILIES,
     SET_RANGE_FAMILIES,
+    set_general_id_cols,
     collapse_segment_corners,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     TshellElem, SphCell,
@@ -262,7 +263,8 @@ def _note_node_constraint(state: ConversionState, nid: int, tc: str,
 
     LS-DYNA APPLIES them, and that is measured rather than assumed: its d3hsp
     carries a dedicated ``nodal spc summary on *NODE cards`` echo, and this
-    decode reproduces it on **162 139 nodes across 155 R14 decks with zero
+    decode reproduces it — the echo is printed by 155 of the R14 reference
+    runs — on all **162 139 TC/RC cells of the 137 carrier decks, with zero
     translation-code disagreements**. (LS-DYNA drops the ROTATIONAL half on a
     mesh with no rotational DOF — 71 885 nodes in 22 solid/ALE decks are not
     echoed — which ``bcs10.F:36``'s ``IRODDL`` guard makes inert on the
@@ -5287,7 +5289,7 @@ def _handle_set_generate(block: Block, state: ConversionState, family: str,
     for line in raw[offset + 1:]:
         if not line.strip():
             continue
-        cells = parse_fixed(line, 8, 10)
+        cells = _set_range_cells(line, 8)
         vals = [to_int(c) for c in cells if c.strip()]
         if increment:
             if len(vals) >= 2:
@@ -5343,14 +5345,55 @@ def _handle_set_generate(block: Block, state: ConversionState, family: str,
         state.set_generates[key] = (title, ranges)
 
 
+def _set_range_cells(line: str, n: int) -> List[str]:
+    """One data row of a ``*SET_<F>_..._GENERATE[_INCREMENT]`` / ``_COLUMN``
+    card, in whichever format the deck wrote it.
+
+    The cells are ``I10`` in the fixed form, but LS-DYNA reads any card
+    comma-delimited and the ``*SET`` chapter's own examples do it (p.43-41), so
+    a ``parse_fixed`` alone turns ``1,10`` into the single cell ``"1,10"`` and
+    the range silently becomes ``1..0``. Measured: 0 comma-format range rows in
+    C:/openradioss_run, Ryan_Lee and the R14 tree — the guard is for decks the
+    corpus does not have, which is exactly when a silent mis-read costs most.
+    """
+    if "," in line:
+        return ([c.strip() for c in line.split(",")] + [""] * n)[:n]
+    return parse_fixed(line, n, 10)
+
+
+def _set_general_clause(line: str) -> Tuple[str, List[str]]:
+    """One ``*SET_<F>_GENERAL`` clause row → (OPTION, the seven E cells).
+
+    Fixed form puts OPTION in cols 1-10 and E1..E7 in 10-wide cells from col
+    11. But LS-DYNA takes any card comma-delimited, and Vol I R17 p.43-41
+    writes its OWN worked example that way (``PART, 6``); and an OPTION longer
+    than the A10 field (``SET_DISCRETE``, 12 characters) can only be written in
+    a free form. A plain ``line[:10]`` slice reads the first as the single
+    option ``"PART, 6"`` and truncates the second to ``SET_DISCRE`` — both then
+    miss the option table and are refused by name, with the wrong name.
+    """
+    if "," in line:
+        parts = [c.strip() for c in line.split(",")]
+        return parts[0].upper(), (parts[1:] + [""] * 7)[:7]
+    tok = line.split()[0] if line.split() else ""
+    if len(tok) > 10:
+        return tok.upper(), (line[len(tok):].split() + [""] * 7)[:7]
+    return line[:10].strip().upper(), parse_fixed(line[10:], 7, 10)
+
+
 def _handle_set_general(block: Block, state: ConversionState,
                         family: str) -> None:
     """``*SET_<F>_GENERAL`` → ``state.set_generals``.
 
     Card 2e (Vol I R17 p.43-41; ``node_general_subgrp.cfg:135``
     ``CARD("%-10s", KEY){NO_END;} FREE_CELL_LIST(idsmax,"%10d",ids,80)``):
-    ``OPTION`` in cols 1-10 (A10), then ``E1..E7`` in 10-wide integer cells
-    from col 11.
+    ``OPTION`` in cols 1-10 (A10), then ``E1..E7`` in 10-wide cells from
+    col 11 — of which :func:`state.set_general_id_cols` says how many are
+    entity IDS, because that count is FAMILY-dependent: a SEGMENT-family
+    ``PART`` clause is three ids and four float attributes
+    (``segment_general_subgrp.cfg:274``) while a NODE-family ``PART`` clause is
+    seven ids (``node_general_subgrp.cfg:141``). Reading the attribute cells as
+    ids would put phantom parts in the set's scope.
 
     Column layout MEASURED on the corpus rather than taken from the cfg's
     ``%1s%10s`` (a HyperMesh D-prefix convenience, the "a cfg can lie" case):
@@ -5375,10 +5418,11 @@ def _handle_set_general(block: Block, state: ConversionState,
     for line in raw[offset + 1:]:
         if not line.strip():
             continue
-        option = line[:10].strip().upper()
+        option, cells = _set_general_clause(line)
         if not option:
             continue
-        ids = [to_int(c) for c in parse_fixed(line[10:], 7, 10) if c.strip()]
+        ncols = set_general_id_cols(family, option)
+        ids = [to_int(c) for c in cells[:ncols] if c.strip()]
         clauses.append((option, [v for v in ids if v != 0]))
     if family == "PART":
         _record_part_set_attrs(state, sid, f1)
@@ -5413,7 +5457,7 @@ def _handle_set_column(block: Block, state: ConversionState,
     for line in raw[offset + 1:]:
         if not line.strip():
             continue
-        cells = parse_fixed(line, 5, 10)
+        cells = _set_range_cells(line, 5)
         if not cells or not cells[0].strip():
             continue
         v = to_int(cells[0])
