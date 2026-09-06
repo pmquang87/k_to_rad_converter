@@ -3110,16 +3110,70 @@ def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
 
 
 def _tied_interface_type(c) -> str:
-    """dyna2rad discriminator (convertcontacts.cxx cc:220) for a
-    *CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET…]: (SFST*SST + SFMT*MST)/2 < 0 →
-    the penalty tie /INTER/TYPE10, otherwise the kinematic tie /INTER/TYPE2.
+    """Which Radioss tie a ``*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET…]`` gets:
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → ``/INTER/TYPE10``, else ``/INTER/TYPE2``.
 
-    The discriminator uses the RAW Card-3 SFST/SFMT (no zero→1 defaulting), so a
-    blank SFST/SFMT (0) always yields dSearch=0 ≥ 0 → TYPE2 regardless of
-    SST/MST — TYPE10 needs a nonzero SFST/SFMT together with a negative SST/MST
-    (LS-DYNA's "maintain the physical offset" flag). NODES_/SHELL_EDGE tied
-    variants are always kinematic TYPE2 (the discriminator is a
-    SURFACE_TO_SURFACE construct)."""
+    The rule is dyna2rad's (``convertcontacts.cxx`` cc:220) and it is kept as a
+    **pragmatic** selector, NOT as a statement about LS-DYNA. Two things it
+    used to be justified with are false, and one measurement says why it stays
+    anyway. All three belong here because the next reader will otherwise
+    "fix" it into a regression.
+
+    **1. A negative Card-3 SST/MST is not an offset flag.** Vol I R17 p.11-33
+    (``SAST``), verbatim: *"For the \\*CONTACT_TIED_… options, SAST and SBST
+    (below) can be defined as negative values, which will cause the
+    determination of whether or not a node is tied to depend only on the
+    separation distance relative to the absolute value of these thicknesses
+    (see Remark 4 in General Remarks)."* General Remark 4 (p.11-125) is the
+    tying SEARCH DISTANCE ``delta = abs(delta_1)``. So the sign is a tolerance,
+    and k2rad consumes it as one — in ``_tied_dsearch``, which is what puts
+    ``dsearch = 0.1`` on the welding decks' ``|SST| = 0.1``. It says nothing
+    about penalty vs constraint, and the old wording ("LS-DYNA's negative
+    offset", "maintain the physical offset") is deleted.
+
+    **2. LS-DYNA's own family split keys on the KEYWORD, not the sign.**
+    General Remark 7, "Tying to rigid bodies" (p.11-127), lists
+    ``TIED_SURFACE_TO_SURFACE``, ``TIED_NODES_TO_SURFACE``,
+    ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings as
+    *constraint-based*, and only the plain ``_OFFSET`` / ``_BEAM_OFFSET``
+    spellings as *penalty-based*. Every one of the five corpus cards this rule
+    currently sends to ``/INTER/TYPE10`` is a PLAIN
+    ``*CONTACT_TIED_SURFACE_TO_SURFACE``, i.e. constraint-based, i.e. by the
+    manual it should be the tie ``/INTER/TYPE2``.
+
+    **3. The faithful family does not converge on the decks that have it.**
+    MEASURED here, both arms on this machine at ``nt = 4``, the same deck
+    differing only in the tie card:
+    ``05_4_2_welding_uncoupled_link_d3plot_structuralstep`` (an ``/IMPL``
+    quasi-static step) with ``/INTER/TYPE10`` ``Itied = 1`` reaches **NORMAL
+    TERMINATION in 81 cycles**; the identical deck with ``/INTER/TYPE2``
+    (Spotflag 27, ``dsearch`` 0.1, starter 0 ERRORS / 0 WARNINGS) **diverges at
+    cycle 16**, t = 2.299 — ``ITERATION DIVERGE with RELATIVE R = 0.1723E+01``
+    at every reduced step until ``ERROR: SOLVER IMPLICIT STOPPED DUE TO
+    TIMESTEP LIMIT``, ``ISTOP = -2``. ``05_5_2`` is the same deck with a
+    different output database. So routing the constraint-based family to the
+    constraint-based Radioss card, on this build, costs both corpus carriers
+    their NORMAL termination.
+
+    **What the surviving card costs.** ``/INTER/TYPE10``'s ``STFAC`` is
+    Radioss's own documented default: k2rad writes 0,
+    ``hm_read_inter_type10.F:135`` turns that into ``ONE_FIFTH``, and
+    ``radioss120/INTER/inter_type10.cfg:76`` gives ``TYPE10_SCALE`` the default
+    ``0.2`` — a stiffness SCALE (``:27``, dimensionless), not a stiffness. On a
+    determinate EXPLICIT steel-bar coupon (10x10x20 mm, two hexes, top face
+    driven 100 mm/s, closed form ``IE = 1/2 E eps^2 A L = 210.0``) the merged
+    single bar gives IE 209.2 and the ``/INTER/TYPE2`` twin reproduces it to
+    every printed digit, while this ``/INTER/TYPE10`` carries **68.34, a
+    -42.8 % energy error** (STFAC sweep on the same coupon: 1 → -13.0 %,
+    10 → -1.5 %, 100 → -0.1 %). So an explicit tie routed here transfers about
+    a third less load than the seam should carry.
+
+    Both halves are named in ROADMAP as one round-3 item: the family is decided
+    by the keyword, the Radioss counterpart of the penalty family needs a
+    DERIVED ``STFAC`` rather than the card's 0.2 default, and moving the family
+    without that would trade a -42.8 % explicit tie for a non-converging
+    implicit one. NODES_/SHELL_EDGE tied variants never take this branch.
+    """
     if c.variant != "SURFACE_TO_SURFACE":
         return "TYPE2"
     dsearch = (c.sfst * c.sst + c.sfmt * c.mst) / 2.0
@@ -3469,8 +3523,23 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 f"*CONTACT_TIED_SURFACE_TO_SURFACE{'_OFFSET' if c.offset else ''} "
                 f"{c.inter_id} -> /INTER/TYPE10/{c.inter_id} (penalty tie: "
                 f"(SFST*SST + SFMT*MST)/2 = {(c.sfst * c.sst + c.sfmt * c.mst) / 2.0:g} "
-                f"< 0, LS-DYNA's negative offset). GAP={gap:g}, {len(clean)} "
-                "secondary nodes, Itied=1. Unlike TYPE2 this bonds by penalty "
+                f"< 0). GAP={gap:g}, {len(clean)} "
+                "secondary nodes, Itied=1. NOTE the routing rule is dyna2rad's "
+                "and is PRAGMATIC, not LS-DYNA's: a negative Card-3 SST/MST is "
+                "the tying SEARCH DISTANCE (Vol I R17 p.11-33 SAST + General "
+                "Remark 4 p.11-125), not an offset flag, and General Remark 7 "
+                "(p.11-127) puts a plain *CONTACT_TIED_SURFACE_TO_SURFACE in "
+                "the CONSTRAINT-based family, i.e. /INTER/TYPE2. It is routed "
+                "here because on this build the faithful card does not "
+                "converge: measured on this deck's own twin, /INTER/TYPE10 "
+                "reaches NORMAL TERMINATION in 81 cycles while /INTER/TYPE2 "
+                "diverges at cycle 16 (ITERATION DIVERGE, RELATIVE R = 1.723) "
+                "into an implicit TIMESTEP-LIMIT death. The cost of this arm: "
+                "STFAC is Radioss's own 0.2 default "
+                "(hm_read_inter_type10.F:135, inter_type10.cfg:76), which on a "
+                "determinate EXPLICIT tie coupon carries a -42.8 % energy "
+                "error against the merged-bar closed form that /INTER/TYPE2 "
+                "matches exactly. Unlike TYPE2 this bonds by penalty "
                 "(rigid-body secondary nodes allowed) and does not tie "
                 "rotations. Itied=1 is 'TIED AFTER IMPACT NO REBOUND "
                 "AUTORIZED' (hm_read_inter_type10.F:188-190), which is what a "

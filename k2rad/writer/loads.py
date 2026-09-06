@@ -349,36 +349,66 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
 
     **The four screens, each measured.**
 
-      a. *Rigid-body member nodes are DROPPED, and the OpenRadioss side is
-         what decides it.* A ``/BCS`` on a ``/RBODY`` secondary node is inert:
-         ``resol.F:7073`` runs ``BCS10`` but ``resol.F:7572`` then runs
-         ``RBYVIT`` → ``rgbodv.F:150-155``, which rebuilds every secondary
-         node's acceleration from the body's velocity field. MEASURED on a
-         three-arm rigid twin (``*MAT_RIGID`` block under ``*LOAD_BODY_Z``):
-         ``/BCS`` on the member nodes gives K-ENERGY 0.3720E-03, identical to
-         the no-``/BCS`` control and to the analytic ½mv² — while re-pointing
-         the constraint to the body's main node gives 0.000. So emitting the
-         card would only add a kinematic condition the engine discards; the
-         only way to honour such a cell at all is the re-point, which
-         constrains the WHOLE body and is deferred (ROADMAP, round 3).
+      a. *A rigid-body member's cell is RE-POINTED onto the body's /RBODY main
+         node, unioned per body.* Two independent measurements pick this over
+         the two alternatives (emit it on the member; drop it).
 
-         The LS-DYNA side agrees in the manual — Vol I R17 p.35-3 Remark 1,
-         "No attempt should be made to apply boundary conditions to nodes
-         belonging to rigid bodies" — and PARTLY in its output, which is
-         quoted here exactly as far as it was measured.
+         *OpenRadioss: the card on the member is inert.* ``resol.F:7073`` runs
+         ``BCS10``, ``resol.F:7572`` then runs ``RBYVIT`` →
+         ``rgbodv.F:150-155``, which rebuilds every secondary node's
+         acceleration from the body's field, with no third ``BCS10`` after it.
+         MEASURED on a three-arm rigid twin (``*MAT_RIGID`` block under
+         ``*LOAD_BODY_Z``): ``/BCS`` on the member nodes gives K-ENERGY
+         0.3720E-03, identical to the no-``/BCS`` control and to the analytic
+         ½mv²; the SAME ``/BCS`` on the body's MAIN node gives 0.000, i.e. the
+         body is held. So the main node is the only place the cell can act.
+
+         *LS-DYNA: it applies the cell to the BODY.* This was shipped as "not
+         decidable on this corpus" and the corpus decides it — in the same deck
+         the old sentence used. ``control_contact.hemi-draw`` has four parts,
+         three of them on one ``*MAT_RIGID`` (mid 2, ``CMO`` 0.0, ``CON1`` /
+         ``CON2`` 0), no ``*BOUNDARY_SPC`` and no ``*CONSTRAINED`` anywhere,
+         one ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` (part 2, dof 2) and one
+         ``*RIGIDWALL_PLANAR`` whose node set holds 175 of part 3's nodes and
+         none of part 4's:
+
+           ============ ========================= ===================== ==================================
+           part          TC cells (all its nodes)  union of translations  ``matsum`` max abs rbv over 121 steps
+           ============ ========================= ===================== ==================================
+           2 Punch       TC 3/1/6 on 41 of 331     x, z                   x 0.0, **y 1.885e4**, z 0.0
+           3 Holder      TC 3/1 on 14 of 175       x, z                   x 0.0, **y 1.534e4**, z 0.0
+           4 Die         **TC 7 / RC 7 on all 525**  x, y, z              **x 0.0, y 0.0, z 0.0**
+           ============ ========================= ===================== ==================================
+
+         The Die is not driven, not on the rigidwall, has no other constraint
+         of any kind, and carries up to 1.8e4 of interface-3 contact force
+         (``rcforc``) — and LS-DYNA holds it at exactly zero rigid-body
+         velocity in all three components at every output time, while the two
+         bodies whose cells leave y free move in y. That is the union rule and
+         the control in one deck. ``control_adaptive.cup-draw`` says the same
+         in its ``rbdout`` (body 4, TC 7, CMO 0, contact-loaded: acceleration
+         exactly 0 in all six components at all 141 steps).
+
+         Vol I R17 p.35-3 Remark 1 — "No attempt should be made to apply
+         boundary conditions to nodes belonging to rigid bodies" — is advice to
+         the deck author, not a statement that the solver ignores them; only
+         the IMPLICIT path says otherwise out loud.
          ``ex_16_thin_shell_elform_13`` prints ``*** Warning 60257 (IMP+257)
          skipping spc on rigid body node 1003 / tcode = 6 rcode = 7`` (in its
-         ``.d3hsp``, its ``.messag`` and its ``.console.log``) for cells that
-         live in that deck's ``*NODE`` columns 57-72 — but for 2 of that deck's
-         3 rigid TC/RC nodes (1003 and 1004, not 1001), the message is an
-         ``IMP+`` (implicit) one, and it appears on 1 of the 16 rule-(a)
-         carriers in the R14 tree. On the explicit carriers the same cells are
-         listed as stated in the ``nodal spc summary on *NODE cards`` echo.
-         Whether the EXPLICIT solver then honours them is not decidable on this
-         corpus: on ``control_contact.hemi-draw`` the 41 TC/RC cells that sit
-         on the rigid punch (part 2, ``*MAT_RIGID`` CMO 0) are symmetry pins —
-         TC 1, 3 and 6, i.e. x and z — while the punch is driven in y, so both
-         readings predict the same trajectory.
+         ``.d3hsp``, its ``.messag`` and its ``.console.log``) — but for 2 of
+         that deck's 3 rigid TC/RC nodes (1003 and 1004, not 1001), and on 1 of
+         the 16 rule-(a) carriers in the R14 tree. On the explicit carriers the
+         cells are listed as stated in the ``nodal spc summary on *NODE cards``
+         echo.
+
+         The re-point is what ``_make_bcs`` has always done for a
+         ``*BOUNDARY_SPC`` on a rigid member (``node_to_ind``), so the two
+         paths now agree; the shared member→main map is ``_rbody_main_of``.
+         Rules (b), (c) and (d) are applied AT THE MAIN NODE (one ``_screen``
+         helper for both passes), which is the node
+         ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its ``/IMPVEL``
+         against — so a driven rigid body keeps its driven DOF. A member whose
+         body has no main node in ``rbody_info`` is still dropped, and named.
       b. *A DOF an imposed motion already drives is left to it.* MEASURED on a
          one-brick twin: ``/BCS`` and ``/IMPVEL`` on the same node and DOF give
          starter WARNING 312 and EXT-WORK 13.66 against an I-ENERGY of 1688 —
@@ -458,14 +488,17 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     skewed_motion: List[int] = []
     emptied: List[int] = []
 
-    for nid in sorted(state.node_tc_rc):
-        tc, rc = state.node_tc_rc[nid]
-        stated[(tc, rc)] += 1
-        if nid in rigid_nodes:
-            rigid_dropped.append(nid)
-            continue
-        tra = list(_TC_RC_DIGITS[tc])
-        rot = list(_TC_RC_DIGITS[rc])
+    def _screen(nid: int, tra: List[str], rot: List[str]) -> Tuple[str, str]:
+        """Rules (b), (c) and (d) on one node's digits.
+
+        ONE implementation for both passes — the ordinary nodes and the
+        re-pointed rigid-body main nodes — so a screen cannot be applied to one
+        and forgotten on the other (the #120 "audit every registry walk" class,
+        here with only two walks). Every screen keys on ``nid``, which is why
+        the rigid pass must pass the MAIN node: that is the node
+        ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its /IMPVEL against.
+        """
+        nonlocal motion_dofs, spc_dof_count
         cleared_here = 0
         for letter in sorted(state.imp_motion_dirs.get(nid, ())):
             which, idx = _IMP_DIR_BIT[letter]
@@ -492,12 +525,56 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
             spc_dof_count += merged_here
         if "1" in rot and not rot_capable:
             rot_inert.append(nid)
-        tra_s, rot_s = "".join(tra), "".join(rot)
+        return "".join(tra), "".join(rot)
+
+    # A rigid-body member's cell is re-pointed onto the body's MAIN node and
+    # UNIONED with every other member's, because that is what LS-DYNA does with
+    # it (see the rule (a) docstring) and because a /BCS on the secondary is
+    # inert (rgbodv.F:150-155). The union is collected first and screened after
+    # the member loop, at the MAIN node — the node an imposed motion on a rigid
+    # part is registered against (_register_imp_motion_nodes is called with
+    # info["ind_node"] for *BOUNDARY_PRESCRIBED_MOTION_RIGID), so rule (b) sees
+    # the conflict it exists for.
+    main_of = _rbody_main_of(rbody_info)
+    rigid_union: Dict[int, Tuple[List[str], List[str]]] = {}
+    rigid_members: Dict[int, List[int]] = defaultdict(list)
+    rigid_orphans: List[int] = []
+    rigid_repointed: Dict[int, Tuple[str, str]] = {}
+
+    for nid in sorted(state.node_tc_rc):
+        tc, rc = state.node_tc_rc[nid]
+        stated[(tc, rc)] += 1
+        if nid in rigid_nodes:
+            main = main_of.get(nid)
+            if main is None:
+                rigid_orphans.append(nid)
+                continue
+            acc = rigid_union.setdefault(main, (list("000"), list("000")))
+            for i in range(3):
+                if _TC_RC_DIGITS[tc][i] == "1":
+                    acc[0][i] = "1"
+                if _TC_RC_DIGITS[rc][i] == "1":
+                    acc[1][i] = "1"
+            rigid_members[main].append(nid)
+            rigid_dropped.append(nid)
+            continue
+        tra_s, rot_s = _screen(nid, list(_TC_RC_DIGITS[tc]),
+                               list(_TC_RC_DIGITS[rc]))
         if tra_s == "000" and rot_s == "000":
             emptied.append(nid)
             continue
         groups[(tra_s, rot_s)].append(nid)
         state.node_tc_rc_emitted[nid] = (tra_s, rot_s)
+
+    # ── the re-pointed rigid-body constraints, screened AT THE MAIN NODE ──
+    for main in sorted(rigid_union):
+        tra_s, rot_s = _screen(main, *rigid_union[main])
+        if tra_s == "000" and rot_s == "000":
+            emptied.append(main)
+            continue
+        groups[(tra_s, rot_s)].append(main)
+        state.node_tc_rc_emitted[main] = (tra_s, rot_s)
+        rigid_repointed[main] = (tra_s, rot_s)
 
     lines: List[str] = []
     if groups:
@@ -523,6 +600,8 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
 
     _warn_node_tc_rc_converted(
         state, stated=stated, groups=groups, rigid_dropped=rigid_dropped,
+        rigid_repointed=rigid_repointed, rigid_members=dict(rigid_members),
+        rigid_orphans=rigid_orphans,
         motion_nodes=motion_nodes, motion_dofs=motion_dofs,
         spc_nodes=spc_nodes, spc_dof_count=spc_dof_count,
         rot_inert=rot_inert, skewed_motion=skewed_motion, emptied=emptied)
@@ -589,6 +668,9 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                stated: Dict[Tuple[int, int], int],
                                groups: Dict[Tuple[str, str], List[int]],
                                rigid_dropped: List[int],
+                               rigid_repointed: Dict[int, Tuple[str, str]],
+                               rigid_members: Dict[int, List[int]],
+                               rigid_orphans: List[int],
                                motion_nodes: List[int], motion_dofs: int,
                                spc_nodes: List[int], spc_dof_count: int,
                                rot_inert: List[int],
@@ -619,21 +701,43 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
     if rigid_dropped:
         msg.append(
             f" {len(rigid_dropped)} node(s) (node {_named(rigid_dropped)}) "
-            "belong to a rigid body and were DROPPED, because a /BCS on a "
-            "/RBODY secondary node is INERT in OpenRadioss: rgbodv.F:150-155 "
-            "rebuilds that node's acceleration from the body after BCS10 has "
-            "run (resol.F:7073 vs :7572) — measured identical to a free-fall "
-            "control. Vol I R17 p.35-3 Remark 1 forbids boundary conditions on "
-            "rigid-body nodes, and LS-DYNA's implicit path says so out loud "
+            "belong to a rigid body. A /BCS written on them would be INERT: "
+            "rgbodv.F:150-155 rebuilds a /RBODY secondary's acceleration from "
+            "the body after BCS10 has run (resol.F:7073 vs :7572) — measured "
+            "identical to a free-fall control. LS-DYNA, however, DOES apply "
+            "them, measured rather than assumed: on "
+            "control_contact.hemi-draw part 4 (the Die: 525 nodes all at "
+            "TC 7 / RC 7, *MAT_RIGID CMO 0, no *BOUNDARY_SPC and no "
+            "*CONSTRAINED anywhere in the deck, not in the *RIGIDWALL node "
+            "set, not the *BOUNDARY_PRESCRIBED_MOTION_RIGID target, and "
+            "carrying up to 1.8e4 of interface-3 contact force) its own matsum "
+            "holds the body at x-rbv = y-rbv = z-rbv = 0.0 at all 121 output "
+            "times, while parts 2 and 3 — same *MAT_RIGID, TC codes unioning "
+            "to x and z only — are held in x and z and move freely in y. "
+            "Vol I R17 p.35-3 Remark 1 ('No attempt should be made to apply "
+            "boundary conditions to nodes belonging to rigid bodies') is "
+            "advice to the deck author, not a statement that the solver "
+            "ignores them; only the IMPLICIT path prints Warning 60257 "
             "('skipping spc on rigid body node <n> tcode=<tc> rcode=<rc>', "
-            "Warning 60257 (IMP+257) — seen on 1 of the 16 R14 rule-(a) "
-            "carriers, and there on 2 of that deck's 3 rigid TC/RC nodes); its "
-            "EXPLICIT solver still lists these cells in the d3hsp 'nodal spc "
-            "summary on *NODE cards' echo, and no corpus deck can decide "
-            "whether it applies them, so this drop is chosen on the "
-            "OpenRadioss measurement alone. If the body must be held, "
-            "constrain it through *MAT_RIGID CMO/CON1/CON2 — k2rad does not "
-            "re-point a *NODE TC/RC cell onto the body's main node.")
+            "IMP+257 — 1 of the 16 R14 rule-(a) carriers, and there 2 of that "
+            "deck's 3 rigid TC/RC nodes). So the cells are RE-POINTED onto the "
+            "/RBODY main node, unioned per body, exactly as _make_bcs already "
+            "does for a *BOUNDARY_SPC on a rigid member." + (
+                " " + f"{len(rigid_repointed)} main node(s): "
+                + ", ".join(
+                    f"{m} -> {rigid_repointed[m][0]} {rigid_repointed[m][1]}"
+                    f" (from {len(rigid_members.get(m, []))} member cell(s))"
+                    for m in sorted(rigid_repointed)[:5])
+                + (" ..." if len(rigid_repointed) > 5 else "") + "."
+                if rigid_repointed else
+                " Every one of them screened away to 000 000."))
+    if rigid_orphans:
+        msg.append(
+            f" {len(rigid_orphans)} node(s) (node {_named(rigid_orphans)}) are "
+            "rigid-body members whose body has no main node in rbody_info "
+            "(a *CONSTRAINED_RIGID_BODIES merge whose master was itself "
+            "dropped, say), so their cells are DROPPED rather than re-pointed "
+            "— a /BCS on the secondary would be inert (rgbodv.F:150-155).")
     if motion_nodes:
         msg.append(
             f" {motion_dofs} DOF(s) on {len(motion_nodes)} node(s) (node "
@@ -4364,8 +4468,10 @@ def _make_inivel(state: ConversionState, rbody_info: Dict,
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
-        _warn_inivel_on_rigid_members(state, 0, sorted(nids), rigid_nodes,
-                                      keyword="*INITIAL_VELOCITY_NODE")
+        nids = _warn_inivel_on_rigid_members(
+            state, 0, sorted(nids), rigid_nodes,
+            keyword="*INITIAL_VELOCITY_NODE",
+            rbody_info=rbody_info, repoint=True)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
@@ -4697,12 +4803,30 @@ def _emit_inivel_axis(inivel_id: int, title: str, frame_id: int, grnod_id: int,
     ]
 
 
+def _rbody_main_of(rbody_info: Optional[Dict]) -> Dict[int, int]:
+    """member node -> its /RBODY main node, the map ``_make_bcs`` builds inline.
+
+    One helper so the ``*BOUNDARY_SPC`` re-point (``_make_bcs``), the
+    ``*NODE`` TC/RC re-point and the ``/INIVEL`` re-point cannot drift apart:
+    all three answer the same question — *which node carries this body's six
+    degrees of freedom?*
+    """
+    out: Dict[int, int] = {}
+    for info in (rbody_info or {}).values():
+        ind = info["ind_node"]
+        for node in info["nodes"]:
+            out[node] = ind
+    return out
+
+
 def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                                   nids: List[int],
                                   rigid_nodes: Optional[Set[int]],
                                   keyword: str = "*INITIAL_VELOCITY",
-                                  sid_label: str = "NSID") -> None:
-    """Name the /INIVEL that lands on RIGID-BODY member nodes and does nothing.
+                                  sid_label: str = "NSID",
+                                  rbody_info: Optional[Dict] = None,
+                                  repoint: bool = False) -> List[int]:
+    """Re-point (or name) the /INIVEL that lands on RIGID-BODY member nodes.
 
     ``inirby.F`` rebuilds every secondary node's velocity from its /RBODY main
     node as a rigid field, so an /INIVEL written on the secondaries is
@@ -4721,10 +4845,32 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     for a DIFFERENT reason — clearing the first one promoted the second into
     view, which is why it is named here rather than left silent.
 
-    Re-pointing the group onto the /RBODY main node is the fix, and it is NOT
-    done here: it changes the velocity field of every deck that states an
-    *INITIAL_VELOCITY over a rigid part, which needs its own corpus sweep and
-    its own reference runs. Recorded in ROADMAP as the next round's item.
+    Re-pointing the group onto the /RBODY main node IS the fix, and with
+    ``repoint=True`` this function performs it: when EVERY node of the card
+    belongs to a rigid body, the group is replaced by that body's main node
+    (or, for a card spanning several bodies, by one main node each). MEASURED
+    on ``matfoamsoil`` — nothing changed but this group's member list — cycle-0
+    K-ENERGY 3.547E+04 against the LS-DYNA glstat's own initial total energy
+    3.54775E+04 (-0.008 %), where the un-re-pointed card gives 0.000; 1320
+    cycles with both channels evolving against 242 flat at zero; starter
+    0 ERRORS / 0 WARNINGS and NORMAL TERMINATION on both arms. Reproducing
+    LS-DYNA's initial kinetic energy to four significant figures is direct
+    evidence that LS-DYNA gives the rigid PART the velocity, and ``_make_bcs``
+    already performs the same re-point for a ``*BOUNDARY_SPC`` on a rigid
+    member (loads.py, ``node_to_ind``).
+
+    Two cases deliberately KEEP the old warn-and-leave:
+
+      * a MIXED card (some nodes rigid, some free) — replacing only the rigid
+        half changes which nodes the card names, and no corpus deck needs it;
+      * ``*INITIAL_VELOCITY_GENERATION`` (``repoint=False`` at its site).
+        That form emits ``/INIVEL/AXIS``, whose ``Vr`` gives each node the
+        TRANSLATIONAL velocity ``omega x r`` about the frame axis; collapsing
+        the group to the main node would give that one node its own
+        ``omega x r`` and the body NO spin at all, because a /RBODY secondary's
+        motion comes from the main node's six DOFs. A faithful mapping there is
+        an angular velocity on the main node, not a smaller node group, and it
+        is left to ROADMAP.
 
     **All three emission sites call this** — ``_make_inivel``
     (``*INITIAL_VELOCITY_NODE``), ``_make_initial_velocity`` (the NSID set
@@ -4739,12 +4885,34 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     KE 1092.45 — and before this the deck said nothing at all.
     """
     if not rigid_nodes:
-        return
+        return list(nids)
     on_rigid = [n for n in nids if n in rigid_nodes]
     if not on_rigid:
-        return
+        return list(nids)
     where = f"{sid_label}={nsid}" if nsid else "over the whole model"
     named = ", ".join(str(n) for n in on_rigid[:5])
+    all_rigid = len(on_rigid) == len(nids)
+
+    if repoint and all_rigid:
+        main_of = _rbody_main_of(rbody_info)
+        mains = sorted({main_of[n] for n in nids if n in main_of})
+        if mains and len(mains) < len(nids):
+            state.warn(
+                f"{keyword} {where}: all {len(nids)} of its node(s) (e.g. "
+                f"{named}) belong to a rigid body, so the card is RE-POINTED "
+                f"onto the {len(mains)} /RBODY main node(s) "
+                f"{', '.join(str(m) for m in mains[:5])}"
+                + (" ..." if len(mains) > 5 else "") + ". OpenRadioss rebuilds "
+                "a /RBODY secondary node's velocity from the body's main node "
+                "every cycle (inirby.F), so the same card written on the "
+                "secondaries is OVERWRITTEN before cycle 1 and the body starts "
+                "at rest at 0 starter diagnostics; LS-DYNA gives the rigid PART "
+                "that velocity. Measured on matfoamsoil: cycle-0 K-ENERGY "
+                "3.547E+04 against the LS-DYNA reference's own 3.54775E+04 "
+                "(-0.008 %), where the un-re-pointed card gives 0.000. Pass "
+                "*INITIAL_VELOCITY_RIGID_BODY to state it explicitly.")
+            return mains
+
     state.warn(
         f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
         f"node(s) (e.g. {named}) belong to a rigid body. OpenRadioss rebuilds "
@@ -4752,14 +4920,24 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
         "cycle (inirby.F), so the /INIVEL on them is OVERWRITTEN before cycle "
         "1 and the body starts at rest — at 0 starter diagnostics."
         + (" EVERY node of this card is a rigid-body member, so the card moves "
-           "NOTHING." if len(on_rigid) == len(nids) else "")
+           "NOTHING." if all_rigid else "")
         + " LS-DYNA instead gives the rigid PART that velocity. State it as "
           "*INITIAL_VELOCITY_RIGID_BODY on the part (k2rad puts that on the "
-          "/RBODY main node), or as *PART_INERTIA card 5, to move the body.")
+          "/RBODY main node), or as *PART_INERTIA card 5, to move the body."
+        + ("" if all_rigid else
+           " The card is left over its stated nodes: re-pointing only the "
+           "rigid half would change which nodes it names.")
+        + (" Not re-pointed here: this card becomes an /INIVEL/AXIS, whose Vr "
+           "gives each node the translational velocity omega x r, so "
+           "collapsing the group to the main node would leave the body with no "
+           "spin at all."
+           if keyword.endswith("_GENERATION") and all_rigid else ""))
+    return list(nids)
 
 
 def _make_initial_velocity(state: ConversionState,
-                           rigid_nodes: Optional[Set[int]] = None) -> List[str]:
+                           rigid_nodes: Optional[Set[int]] = None,
+                           rbody_info: Optional[Dict] = None) -> List[str]:
     """*INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT).
 
     NSID scopes the node group (blank/0 = whole model); NSIDEX is subtracted by
@@ -4818,7 +4996,9 @@ def _make_initial_velocity(state: ConversionState,
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
-        _warn_inivel_on_rigid_members(state, iv.nsid, nids, rigid_nodes)
+        nids = _warn_inivel_on_rigid_members(
+            state, iv.nsid, nids, rigid_nodes,
+            rbody_info=rbody_info, repoint=True)
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
@@ -4922,7 +5102,8 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
 
 def _make_initial_velocity_generation(
         state: ConversionState,
-        rigid_nodes: Optional[Set[int]] = None) -> List[str]:
+        rigid_nodes: Optional[Set[int]] = None,
+        rbody_info: Optional[Dict] = None) -> List[str]:
     """*INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + a companion /FRAME/FIX.
 
     The rotation axis (through (XC,YC,ZC) along (NX,NY,NZ), or node-defined when
@@ -5036,7 +5217,8 @@ def _make_initial_velocity_generation(
                                  origin, fy, fz)
         _warn_inivel_on_rigid_members(
             state, g.sid, list(nids), rigid_nodes,
-            keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID")
+            keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID",
+            rbody_info=rbody_info, repoint=False)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()

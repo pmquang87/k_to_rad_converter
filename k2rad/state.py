@@ -3517,18 +3517,22 @@ class ContactTied:
       * SURFACE_TO_SURFACE → Spotflag=5 (standard formulation — the
         mesh-transition glue it is used for in LS-DYNA).
 
-    ``sst``/``mst`` are the Card-3 contact thicknesses: LS-DYNA gives a
-    NEGATIVE value the special meaning "absolute tie-criterion distance", which
-    the writer honours as a floor on the /INTER/TYPE2 dsearch.
+    ``sst``/``mst`` are the Card-3 contact thicknesses. A NEGATIVE value makes
+    the tying test use ``delta = abs(delta_1)`` instead of the area-derived
+    ``delta_2`` — Vol I R17 p.11-33 (``SAST``) and General Remark 4 (p.11-125),
+    a tying SEARCH DISTANCE — and the writer honours it as a floor on the
+    /INTER/TYPE2 dsearch.
 
     ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) drive the dyna2rad
-    kinematic-vs-penalty discriminator (``convertcontacts.cxx`` cc:220):
-    ``(SFST*SST + SFMT*MST)/2 < 0`` → penalty tie /INTER/TYPE10, otherwise the
-    kinematic tie /INTER/TYPE2. A negative SST/MST with a nonzero SFST/SFMT is
-    LS-DYNA's "maintain the physical offset" flag, which dyna2rad maps to the
-    penalty TYPE10 (physical gap kept) rather than TYPE2 (secondary nodes
-    projected onto the main segment). ``sfs``/``sfm`` (Card-3 penalty stiffness
-    scales) size the TYPE10 GAP.
+    discriminator (``convertcontacts.cxx`` cc:220):
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10, otherwise /INTER/TYPE2.
+    That rule is PRAGMATIC and not LS-DYNA's: General Remark 7 (p.11-127) puts
+    a plain ``*CONTACT_TIED_SURFACE_TO_SURFACE`` in the CONSTRAINT-based family
+    and only the plain ``_OFFSET`` / ``_BEAM_OFFSET`` spellings in the
+    penalty-based one. It is kept because the faithful card does not converge
+    on this build's only two carriers — see ``_tied_interface_type`` for both
+    measured arms. ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size the
+    TYPE10 GAP.
     """
     inter_id: int
     title: str

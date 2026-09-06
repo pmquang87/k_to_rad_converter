@@ -934,10 +934,20 @@ class InivelOnRigidBodyMembers(unittest.TestCase):
         w = [x for x in res.warnings
              if "*INITIAL_VELOCITY NSID=99" in x and "rigid body" in x]
         self.assertEqual(len(w), 1, res.warnings)
-        self.assertIn("8 of its 8 node(s)", w[0])
+        self.assertIn("all 8 of its node(s)", w[0])
         self.assertIn("inirby.F", w[0])
-        self.assertIn("EVERY node of this card is a rigid-body member", w[0])
+        self.assertIn("RE-POINTED onto the 1 /RBODY main node(s)", w[0])
         self.assertIn("*INITIAL_VELOCITY_RIGID_BODY", w[0])
+        # and the emitted group really is the main node, not the members
+        lines = starter.splitlines()
+        i = [k for k, ln in enumerate(lines) if ln.startswith("/INIVEL/")][0]
+        grnod = int(lines[i + 3].split()[-2])   # Gnod_id, then Skew_id
+        h = lines.index(f"/GRNOD/NODE/{grnod}")
+        members = [int(t) for t in lines[h + 2].split()]
+        self.assertEqual(len(members), 1, members)
+        self.assertNotIn(members[0], range(11, 19),
+                         "the /INIVEL still sits on the rigid members")
+        self.assertIn(f"/RBODY/{members[0]}", starter)
 
     def test_a_deformable_twin_says_nothing(self):
         """The negative control — the same deck with part 2 deformable."""
@@ -1280,24 +1290,66 @@ class TestNodeTcRcToBcs(unittest.TestCase):
         self.assertEqual(_bcs_groups(starter),
                          {("111", "111"): [1, 2], ("001", "000"): [3]})
 
-    def test_rule_a_drops_rigid_body_member_nodes(self):
-        """A ``*MAT_RIGID`` part's nodes get NO ``/BCS`` — rgbodv.F:150-155
-        overwrites it — and the message says so with the count and the ids."""
-        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0, 7, 7),
-                _n16(3, 10.0, 10.0, 0.0, 7, 7), _n16(4, 0.0, 10.0, 0.0, 7, 7)]
-        deck = "\n".join(["*KEYWORD", "*NODE", *rows,
+    def _rigid_deck(self, rows, extra=()) -> str:
+        return "\n".join(["*KEYWORD", "*NODE", *rows,
                           "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
                           "*SECTION_SHELL", _row(1, 2),
                           _row("1.0", "1.0", "1.0", "1.0"),
                           "*MAT_RIGID", _row(1, "7.85E-9", "2.1E5", "0.3"),
                           _row("0.0", 0, 0), _row(0, 0, 0),
                           "*PART", "rigid", _row(1, 1, 1),
+                          *extra,
                           "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
-        res, starter = _convert(deck)
-        self.assertEqual(_bcs_groups(starter), {})
+
+    def test_rule_a_repoints_a_rigid_members_cell_onto_the_main_node(self):
+        """The cell may not stay on the member — ``rgbodv.F:150-155`` rebuilds
+        that node's acceleration from the body after ``BCS10`` — but LS-DYNA
+        DOES apply it to the body (``control_contact.hemi-draw`` part 4: 525
+        nodes at TC 7/RC 7, ``*MAT_RIGID`` CMO 0, no other constraint, 1.8e4 of
+        contact force, ``matsum`` rigid-body velocity exactly 0.0 in all three
+        components at all 121 output times). So it moves to the /RBODY MAIN
+        node, which is what ``_make_bcs`` already does for a ``*BOUNDARY_SPC``.
+        """
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 7), _n16(2, 10.0, 0.0, 0.0, 7, 7),
+                _n16(3, 10.0, 10.0, 0.0, 7, 7), _n16(4, 0.0, 10.0, 0.0, 7, 7)]
+        res, starter = _convert(self._rigid_deck(rows))
+        groups = _bcs_groups(starter)
+        self.assertEqual(list(groups), [("111", "111")],
+                         "the body's union must be one 111 111 /BCS")
+        pinned = groups[("111", "111")]
+        self.assertEqual(len(pinned), 1, "one main node, not four members")
+        self.assertNotIn(pinned[0], (1, 2, 3, 4),
+                         "the /BCS must NOT sit on a member node")
+        self.assertIn(f"/RBODY/{pinned[0]}", starter)
         w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
         self.assertIn("4 node(s) (node 1, 2, 3, 4) belong to a rigid body", w)
         self.assertIn("rgbodv.F:150-155", w)
+        self.assertIn("RE-POINTED onto the", w)
+        self.assertIn("control_contact.hemi-draw part 4", w)
+
+    def test_rule_a_unions_the_members_codes_on_the_one_main_node(self):
+        """hemi-draw's part 2 is the pinning shape: different members state
+        different TC codes and LS-DYNA holds the UNION (TC 3 and TC 1 together
+        give x and z held, y free and driven)."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 3, 0), _n16(2, 10.0, 0.0, 0.0, 1, 0),
+                _n16(3, 10.0, 10.0, 0.0), _n16(4, 0.0, 10.0, 0.0)]
+        _, starter = _convert(self._rigid_deck(rows))
+        self.assertEqual(list(_bcs_groups(starter)), [("101", "000")])
+
+    def test_rule_a_re_point_keeps_a_driven_rigid_bodys_own_dof_free(self):
+        """Rule (b) is applied AT THE MAIN NODE, so a
+        ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` still drives its DOF — the
+        screens must not be silently skipped on the re-pointed pass."""
+        rows = [_n16(1, 0.0, 0.0, 0.0, 7, 0), _n16(2, 10.0, 0.0, 0.0, 7, 0),
+                _n16(3, 10.0, 10.0, 0.0, 7, 0), _n16(4, 0.0, 10.0, 0.0, 7, 0)]
+        extra = ["*DEFINE_CURVE", _row(9), _row("0.0", "0.0"),
+                 _row("1.0", "1.0"),
+                 "*BOUNDARY_PRESCRIBED_MOTION_RIGID",
+                 _row(1, 2, 0, 9, "1.0")]
+        res, starter = _convert(self._rigid_deck(rows, extra))
+        # y (digit 2) is driven -> cleared; x and z stay pinned.
+        self.assertEqual(list(_bcs_groups(starter)), [("101", "000")])
+        self.assertTrue(_warns(res, "already driven by a"))
 
     def test_rule_b_leaves_a_driven_dof_to_the_motion(self):
         """A ``*BOUNDARY_PRESCRIBED_MOTION_NODE`` in x clears the x digit and
@@ -1592,6 +1644,86 @@ class TestSetGeneralClauseColumns(unittest.TestCase):
         self.assertEqual(cells[:4], ["PART", "301", "302", "303"])
         self.assertEqual([float(c) for c in cells[4:]],
                          [100.0, 50.0, 1.0, 1.0])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B1 (verification round)  the *SET_<F>_GENERAL expansion ORDER
+#
+# a84afe3 replaced sorted(state.set_generals) with _general_expansion_order()
+# and shipped with NO pinning test: reverting mesh.py to sorted() left the
+# whole suite green (4950 passed).  These two pin the ORDER itself, so the
+# revert fails.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_DEP_MESH = "\n".join([
+    "*KEYWORD", "*NODE",
+    _n16(1, 0.0, 0.0, 0.0), _n16(2, 1.0, 0.0, 0.0),
+    _n16(3, 1.0, 1.0, 0.0), _n16(4, 0.0, 1.0, 0.0),
+    "*ELEMENT_SHELL", _row(1, 1, 1, 2, 3, 4),
+    "*PART", "plate", _row(1, 1, 1),
+    "*SECTION_SHELL", _row(1, 2, 1.0, 3), _row(2.0),
+    "*MAT_ELASTIC", _row(1, "7.86e-9", 210000.0, 0.3),
+    ""])
+
+
+class SetGeneralExpansionOrderTests(unittest.TestCase):
+    """A ``*SET_<F>_GENERAL`` clause may name another set of the SAME family.
+
+    ``sorted()`` builds the higher sid last, so a LOWER sid whose clause names
+    a HIGHER one met a set the deck defines but the container does not hold
+    yet — and the per-clause screen then told the user the deck does not
+    define it. ``_general_expansion_order`` (Kahn, sorted fallback) is what
+    fixes that, and nothing pinned it.
+    """
+
+    def _deck(self) -> str:
+        # set 1's ONLY clause forward-references set 2; set 2 is PART 1.
+        return _DEP_MESH + "\n".join([
+            "*SET_NODE_GENERAL", _row(1), _grow("SET_NODE", 2),
+            "*SET_NODE_GENERAL", _row(2), _grow("PART", 1),
+            "*BOUNDARY_SPC_SET", _row(1, 0, 1, 1, 1, 0, 0, 0),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+    def test_a_forward_reference_resolves_and_reaches_its_consumer(self):
+        res, starter = _convert(self._deck())
+        lines = starter.splitlines()
+        # the ORDER is the whole point: the *BOUNDARY_SPC_SET's /BCS must be
+        # emitted AND its grnod_ID must hold set 2's members, reached through
+        # set 1's forward reference.
+        bcs = [i for i, ln in enumerate(lines) if ln.startswith("/BCS/")]
+        self.assertTrue(bcs, "the *BOUNDARY_SPC_SET produced no /BCS")
+        grnod_id = int(lines[bcs[0] + 3].split()[-1])
+        hdr = lines.index(f"/GRNOD/NODE/{grnod_id}")
+        ids = set()
+        for row in lines[hdr + 2:]:
+            if row.startswith(("/", "#")):
+                break
+            ids.update(int(t) for t in row.split() if t.lstrip("-").isdigit())
+        self.assertEqual(sorted(ids), [1, 2, 3, 4])
+        # ... and NO screen may claim the deck does not define set 2.
+        self.assertFalse(
+            [w for w in res.warnings
+             if "which this deck does not define" in w and "SET_NODE" in w],
+            "the forward reference was reported as an undefined set")
+
+    def test_the_expansion_order_puts_the_dependency_first(self):
+        st = _dispatch(self._deck())
+        from k2rad.writer.mesh import _general_expansion_order
+        order = _general_expansion_order(st)
+        self.assertLess(order.index(("NODE", 2)), order.index(("NODE", 1)))
+
+    def test_a_cycle_falls_back_to_sorted_order_without_hanging(self):
+        """Kahn's fallback arm: two sets naming each other must still produce
+        every key exactly once (the deck is invalid, the converter is not)."""
+        deck = _DEP_MESH + "\n".join([
+            "*SET_NODE_GENERAL", _row(1), _grow("SET_NODE", 2),
+            "*SET_NODE_GENERAL", _row(2), _grow("SET_NODE", 1),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        st = _dispatch(deck)
+        from k2rad.writer.mesh import _general_expansion_order
+        order = _general_expansion_order(st)
+        self.assertEqual(sorted(order), [("NODE", 1), ("NODE", 2)])
+        self.assertEqual(len(order), len(set(order)))
 
 
 if __name__ == "__main__":                       # pragma: no cover
