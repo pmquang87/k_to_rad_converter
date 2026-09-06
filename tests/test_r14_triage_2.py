@@ -955,6 +955,34 @@ class InivelOnRigidBodyMembers(unittest.TestCase):
         self.assertEqual(len(_headers(starter, "/INIVEL/")), 1, starter)
         self.assertEqual([x for x in res.warnings if "rigid body" in x], [])
 
+    def test_a_MIXED_card_is_warned_and_left_over_all_its_nodes(self):
+        """The guard that makes the re-point safe: when only SOME of the
+        card's nodes are rigid members, re-pointing would drop the FREE ones
+        out of the group entirely (the map has no entry for them), so the card
+        is left alone and named. Without the ``all_rigid`` guard this deck
+        loses brick one's eight nodes silently."""
+        deck = self._deck(rigid=True).replace(
+            "*SET_NODE_LIST_GENERATE\n" + _row(99) + "\n" + _row(11, 18),
+            "*SET_NODE_LIST_GENERATE\n" + _row(99) + "\n" + _row(1, 18))
+        self.assertIn(_row(1, 18), deck)          # the edit really landed
+        res, starter = _convert(deck)
+        lines = starter.splitlines()
+        i = [k for k, ln in enumerate(lines) if ln.startswith("/INIVEL/")][0]
+        grnod = int(lines[i + 3].split()[-2])
+        h = lines.index(f"/GRNOD/NODE/{grnod}")
+        members = set()
+        for row in lines[h + 2:]:
+            if row.startswith(("/", "#")):
+                break
+            members.update(int(t) for t in row.split())
+        self.assertEqual(len(members), 16, sorted(members))
+        w = [x for x in res.warnings
+             if "*INITIAL_VELOCITY NSID=99" in x and "rigid body" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("8 of its 16 node(s)", w[0])
+        self.assertNotIn("RE-POINTED", w[0])
+        self.assertIn("re-pointing only the rigid half", w[0])
+
 
 class ModalDummyCloadScreensPerDof(unittest.TestCase):
     """`ex_08_beam_elform_1`'s shape: a `*CONTROL_IMPLICIT_EIGENVALUE` deck
