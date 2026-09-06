@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set
 from ..state import ConversionState
-from .common import HDR, _emit_surf_part, _emit_surf_seg, _f, _i
+from .common import (HDR, _emit_surf_part, _emit_surf_seg, _f, _i,
+                     _part_scoped_segment_set)
 
 __all__ = [
     "_AXIS_VEC",
@@ -230,6 +231,10 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
                        "*LOAD_BLAST[_ENHANCED] — skipped.")
             continue
         segset = state.segment_sets.get(load.ssid)
+        if _part_scoped_segment_set(state, load.ssid,
+                                    "*LOAD_BLAST_SEGMENT_SET",
+                                    "The blast load is DROPPED."):
+            continue
         if segset is None or not segset.segments:
             state.warn(f"*LOAD_BLAST_SEGMENT_SET ssid={load.ssid}: segment set "
                        "not found or empty — skipped.")
@@ -609,7 +614,10 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
     lines: List[str] = []
     for cls in state.lagrange_in_solid:
         # structure surface
-        if cls.sstyp == 2 and cls.slave in state.segment_sets:
+        if (cls.sstyp == 2 and cls.slave in state.segment_sets
+                and not _part_scoped_segment_set(
+                    state, cls.slave, "*CONSTRAINED_LAGRANGE_IN_SOLID",
+                    "The coupling falls back to the part resolver below.")):
             surf_id = state.next_id()
             lines += _emit_surf_seg(surf_id, f"fsi_struct_{cls.slave}",
                                     state.segment_sets[cls.slave].segments)
@@ -667,6 +675,10 @@ def _make_ebcs(state: ConversionState) -> List[str]:
     surf_for_ssid: Dict[int, int] = {}
     for nrf in state.non_reflecting:
         segset = state.segment_sets.get(nrf.nsid)
+        if _part_scoped_segment_set(state, nrf.nsid,
+                                    "*BOUNDARY_NON_REFLECTING",
+                                    "The /EBCS/NRF is DROPPED."):
+            continue
         if segset is None or not segset.segments:
             state.warn(f"*BOUNDARY_NON_REFLECTING nsid={nrf.nsid}: segment set not "
                        "found or empty — /EBCS/NRF skipped.")

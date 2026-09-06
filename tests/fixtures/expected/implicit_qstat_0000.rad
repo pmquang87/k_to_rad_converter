@@ -78,7 +78,7 @@ auto_implicit_stabilization_self_contact
 #  Slav_id   Mast_id      Istf      Ithe      Igap                Ibag      Idel     Icurv      Iadm
      90005     90006         4         0         0                   0         2         0         0
 #          Fscalegap             GAP_MAX             Fpenmax
-                   0                   0                   0
+                   0                   0            0.999999
 #              Stmin               Stmax          %mesh_size               dtmin  Irem_gap
                 1000                   0                   0                   0         0
 #              Stfac                Fric              Gapmin              Tstart               Tstop

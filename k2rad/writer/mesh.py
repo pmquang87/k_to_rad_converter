@@ -8,6 +8,8 @@ from ..state import (
     ConversionState,
     SET_ADD_ADVANCED_TYPES,
     SET_ADD_FAMILIES,
+    SET_RANGE_FAMILIES,
+    collapse_segment_corners as _collapse_segment_corners,
     NodeData,
     SegmentSet,
     ShellElem,
@@ -921,6 +923,11 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
     for pl in state.pressure_loads:
         ref.update(n for n in pl.nodes if n > 0)
     for ssl in state.segment_set_pressure_loads:
+        # A PART-scoped *SET_SEGMENT_GENERAL contributes no segment here, and
+        # that is the right answer rather than a hole: this pass exists to keep
+        # a node that ONLY a load references, and every node of a scoped part is
+        # already referenced by that part's own elements. (The load itself is
+        # refused by name in writer/loads — _part_scoped_segment_set.)
         segset = state.segment_sets.get(ssl.ssid)
         if segset is not None:
             for nodes in segset.segments:
@@ -2827,6 +2834,544 @@ def _segment_key(nodes):
     return min(tuple(nodes[i:] + nodes[:i]) for i in range(n)) if n else ()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *SET_<F>_GENERATE / _GENERAL expansion   (R14 triage round 2, item B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: ``*SET_NODE_GENERAL`` OPTION table, Vol I R17 p.43-41…43-43 verbatim. The
+#: value is the resolver key; ``None`` means "documented but refused by name".
+#: ``D`` prefixed options EXCLUDE, and only what is already in the set.
+_NODE_GENERAL_OPTIONS = {
+    "ALL": "all", "NODE": "node", "DNODE": "node",
+    "PART": "part", "DPART": "part", "BOX": "box", "DBOX": "box",
+    "SET_NODE": "set_node", "DSET_NODE": "set_node", "SET_PART": "set_part",
+    "SET_SHELL": "set_shell", "SET_SOLID": "set_solid",
+    "SET_BEAM": "set_beam", "SET_DISCRETE": "set_discrete",
+    "SET_TSHELL": None, "BRANCH": None, "DBRANCH": None,
+    "VOL": None, "DVOL": None,
+    "SALEBOXL": None, "SALECPT": None, "SALEFAC": None,
+}
+
+#: ``*SET_SEGMENT_GENERAL`` OPTION table, Vol I R17 p.43-63…43-70 verbatim.
+#: The cfg's own RADIO list (``segment_general_subgrp.cfg:96-124``) is NOT this
+#: table — it omits SET, DSET, SALEBOXL, DVOL_SHELL and DVOL_SOLID and spells
+#: PSLDFi/BRSLDFi/SET_SLDFi without the trailing index — so the manual is taken
+#: (the #115 "a cfg can lie" rule). No corpus deck carries any of the refused
+#: options, so this is a table-completeness point, not a live one.
+_SEGMENT_GENERAL_OPTIONS = {
+    "SEG": "seg", "DSEG": "seg",
+    "SET": "set", "DSET": "set",
+    "PART": "part", "DPART": "part",
+    "ALL": "all",
+    "PART_IO": None, "SHELL": None,
+    "BOX": None, "DBOX": None, "BOX_SHELL": None, "DBOX_SHELL": None,
+    "BOX_SOLID": None, "DBOX_SOLID": None, "BOX_SLDIO": None,
+    "BRANCH": None, "BRANCH_IO": None,
+    "VOL": None, "DVOL": None, "VOL_SHELL": None, "DVOL_SHELL": None,
+    "VOL_SOLID": None, "DVOL_SOLID": None, "VOL_SLDIO": None,
+    "SET_SHELL": None, "SET_SOLID": None, "SET_SLDIO": None,
+    "SET_TSHELL": None, "SET_TSHIO": None,
+    "SALEBOXL": None, "SALECPT": None, "SALEFAC": None,
+}
+
+#: ``*SET_PART_GENERAL`` (p.43-50) and the element families' GENERAL tables
+#: (SHELL p.43-77 / SOLID p.43-89 / BEAM p.43-3 / DISCRETE p.43-14 / TSHELL
+#: p.43-100). Zero corpus carriers of any of them; the rows exist so a deck
+#: that DOES carry one is resolved rather than dropped.
+_PART_GENERAL_OPTIONS = {
+    "ALL": "all", "PART": "elem", "DPART": "elem",
+    "SET": "set", "DSET": "set", "MATTYPE": None,
+}
+_ELEM_GENERAL_OPTIONS = {
+    "ALL": "all", "ELEM": "elem", "DELEM": "elem",
+    "PART": "part", "DPART": "part", "SET": "set", "DSET": "set",
+    "BOX": None, "DBOX": None, "VOL": None, "DVOL": None,
+    "SALEBOXL": None, "SALECPT": None, "SALEFAC": None,
+}
+
+_ELEM_FAMILY_CONTAINER = {
+    "SHELL": "shell_elems", "SOLID": "solid_elems",
+    "BEAM": "beam_elems", "DISCRETE": "discrete_elems",
+}
+
+
+def _set_entity_pool(state: ConversionState, family: str) -> List[int]:
+    """The SORTED id pool a ``*SET_<family>`` range is intersected with.
+
+    Vol I R17 p.43-40, ``BnEND`` verbatim: *"All defined IDs between and
+    including BnBEG to BnEND are added to the set. These sets are generated
+    after all input is read so that gaps in the node numbering are not a
+    problem. BnBEG and BnEND may simply be limits on the IDs and not nodal
+    IDs."* — so the pool, not the range, is the thing that gets walked.
+    """
+    if family == "NODE":
+        return sorted(state.nodes)
+    if family == "PART":
+        return sorted(state.parts)
+    attr = _ELEM_FAMILY_CONTAINER.get(family)
+    if attr:
+        return sorted({e.eid for e in getattr(state, attr)})
+    return []
+
+
+def _set_family_part_nodes(state: ConversionState, pid: int) -> Set[int]:
+    """Every node of *pid*'s elements — the ``PART`` option's node census."""
+    out: Set[int] = set()
+    for e in state.shell_elems:
+        if e.pid == pid:
+            out.update(e.nodes)
+    for e in state.solid_elems:
+        if e.pid == pid:
+            out.update(e.nodes)
+    for e in state.tshell_elems:
+        if e.pid == pid:
+            out.update(e.nodes)
+    for c in state.sph_elems:
+        if c.pid == pid:
+            out.update(c.nodes)
+    for e in state.beam_elems:
+        if e.pid == pid:
+            out.update((e.n1, e.n2))
+    for e in state.discrete_elems:
+        if e.pid == pid:
+            out.update((e.n1, e.n2))
+    for e in state.seatbelt_elems:
+        if e.pid == pid:
+            out.update((e.n1, e.n2))
+    return {n for n in out if n > 0}
+
+
+def _expand_one_range(pool: List[int], beg: int, end: int,
+                      incr: int) -> List[int]:
+    """The ids of *pool* selected by one ``BnBEG..BnEND[/INCR]`` range.
+
+    **The POOL is walked, never the range.** ``range(beg, end + 1)`` here is a
+    memory bomb on a real roster deck: ``show-cases/contact-overview/main.k``
+    states ``*SET_PART_LIST_GENERATE 42`` with ``B1BEG 10000000 / B1END
+    30199999`` — 20 200 000 wide — over a 664-part model, plus two
+    ``*SET_NODE_LIST_GENERATE`` sets with six ranges of 10 000-100 000 each
+    over 3 876 nodes. The bisect slice makes every range O(log N + k).
+    """
+    import bisect
+    lo = bisect.bisect_left(pool, beg)
+    hi = bisect.bisect_right(pool, end)
+    chunk = pool[lo:hi]
+    if incr > 1:
+        chunk = [i for i in chunk if (i - beg) % incr == 0]
+    return chunk
+
+
+def _expand_set_generates(state: ConversionState) -> None:
+    """``*SET_<F>[_LIST]_GENERATE[_INCREMENT]`` → the plain family container."""
+    pools: Dict[str, List[int]] = {}
+    for (family, sid), (title, ranges) in sorted(state.set_generates.items()):
+        if family not in pools:
+            pools[family] = _set_entity_pool(state, family)
+        pool = pools[family]
+        members: List[int] = []
+        seen: Set[int] = set()
+        span_total = 0
+        for beg, end, incr in ranges:
+            # `incr == 0` is the PLAIN (non-_INCREMENT) form's marker and
+            # behaves identically to a stride of 1 here. A non-positive stride
+            # stated on an _INCREMENT card is normalised — and named — by
+            # ``handlers._handle_set_generate``, which is the only producer of
+            # this container and the only place that can tell the two apart.
+            eff = incr if incr > 0 else 0
+            if end >= beg:
+                span_total += (end - beg + 1) if eff <= 1 else \
+                    ((end - beg) // eff + 1)
+            for v in _expand_one_range(pool, beg, end, eff):
+                if v not in seen:
+                    seen.add(v)
+                    members.append(v)
+        target = _set_range_container(state, family)
+        if sid in target:
+            old_title, old = target[sid]
+            target[sid] = (old_title or title,
+                           old + [m for m in members if m not in set(old)])
+        else:
+            target[sid] = (title, members)
+        holes = span_total - len(members)
+        if holes > 0:
+            state.warn(
+                f"*SET_{family}_..._GENERATE {sid}: the stated range(s) span "
+                f"{span_total} ids and {len(members)} of them exist in this "
+                f"deck; the other {holes} have no *{_SET_CARD_NAME[family]} "
+                "card. That is the documented behaviour, not a loss — Vol I "
+                "R17 p.43-40: \"All DEFINED IDs between and including BnBEG "
+                "to BnEND are added to the set ... BnBEG and BnEND may simply "
+                "be limits on the IDs and not nodal IDs.\"")
+
+
+#: The ``*`` card whose absence makes an id in a GENERATE range a "hole".
+_SET_CARD_NAME = {
+    "NODE": "NODE", "PART": "PART", "SHELL": "ELEMENT_SHELL",
+    "SOLID": "ELEMENT_SOLID", "BEAM": "ELEMENT_BEAM",
+    "DISCRETE": "ELEMENT_DISCRETE",
+}
+
+
+def _set_range_container(state: ConversionState, family: str):
+    for row in SET_RANGE_FAMILIES:
+        if row[0] == family:
+            return getattr(state, row[5])
+    raise KeyError(family)               # pragma: no cover - table is closed
+
+
+#: family → the module-level OPTION table the refusal message points the
+#: reader at. Named per family rather than "NODE else SEGMENT else ELEM",
+#: because ``*SET_PART_GENERAL`` reads ``_PART_GENERAL_OPTIONS`` and citing the
+#: element table for it would send the reader to a list that does not hold its
+#: options (the "check a warning's CITED FACT, not only its conclusion" rule).
+_GENERAL_OPTION_TABLE_NAME = {
+    "NODE": "_NODE_GENERAL_OPTIONS",
+    "SEGMENT": "_SEGMENT_GENERAL_OPTIONS",
+    "PART": "_PART_GENERAL_OPTIONS",
+}
+
+
+def _general_refused(state: ConversionState, family: str, sid: int,
+                     option: str, ids: List[int]) -> None:
+    table = _GENERAL_OPTION_TABLE_NAME.get(family, "_ELEM_GENERAL_OPTIONS")
+    state.warn(
+        f"*SET_{family}_GENERAL {sid}: option {option} "
+        f"{'(ids ' + ', '.join(str(i) for i in ids[:5]) + ')' if ids else ''}"
+        " has no k2rad resolver and the clause is SKIPPED — the set is built "
+        "from its other clauses only. Every option k2rad does resolve is "
+        f"listed in writer/mesh.{table}; this one selects a scope OpenRadioss "
+        "has no group for (a *SET_PART_TREE branch, a structured-ALE region, a "
+        "*DEFINE_CONTACT_VOLUME) or an entity family k2rad does not read.")
+
+
+def _expand_node_general(state: ConversionState, sid: int, title: str,
+                         clauses: List[Tuple[str, List[int]]]) -> None:
+    """``*SET_NODE_GENERAL`` — clauses applied IN ORDER, exclusions only
+    against what is already in the set.
+
+    Vol I R17 p.43-41 verbatim: *"Note that the order of the selected
+    operations matters. Nodes are only excluded from the set if they were
+    previously added to the set. For instance, if you exclude node 5 and then
+    include it, node 5 will be included in the set."* The manual's own worked
+    example — part 6 = {10,15,20,32}, box 7 = {5,20,32}, part 10 = {5,22,106};
+    ``PART 6 / DBOX 7 / PART 10`` → **{5, 10, 15, 22, 106}** — is the pinning
+    test (``tests/test_r14_triage_2.py``).
+    """
+    from .loads import _box_node_ids
+    members: List[int] = []
+    seen: Set[int] = set()
+
+    def add(nids) -> None:
+        for n in sorted(nids):
+            if n > 0 and n not in seen:
+                seen.add(n)
+                members.append(n)
+
+    def drop(nids) -> None:
+        gone = {n for n in nids}
+        if not gone & seen:
+            return
+        seen.difference_update(gone)
+        members[:] = [n for n in members if n not in gone]
+
+    for option, ids in clauses:
+        kind = _NODE_GENERAL_OPTIONS.get(option)
+        if kind is None:
+            _general_refused(state, "NODE", sid, option, ids)
+            continue
+        exclude = option.startswith("D") and option != "DISCRETE"
+        picked: Set[int] = set()
+        if kind == "all":
+            src = state.source_node_ids
+            picked = set(src) if src else set(state.nodes)
+        elif kind == "node":
+            picked = {i for i in ids if i in state.nodes}
+        elif kind == "part":
+            for pid in ids:
+                picked |= _set_family_part_nodes(state, pid)
+        elif kind == "box":
+            for bid in ids:
+                box = state.boxes.get(bid)
+                if box is None:
+                    state.warn(
+                        f"*SET_NODE_GENERAL {sid}: option {option} names "
+                        f"*DEFINE_BOX {bid}, which this deck does not define "
+                        "— the clause is skipped.")
+                    continue
+                picked |= _box_node_ids(state, box)
+        elif kind == "set_node":
+            for e in ids:
+                if e in state.node_sets:
+                    picked.update(state.node_sets[e][1])
+                elif e in state.node_set_adds:
+                    state.warn(
+                        f"*SET_NODE_GENERAL {sid}: option {option} names "
+                        f"*SET_NODE_ADD {e}, a union that is resolved AFTER "
+                        "this pass (_flatten_set_adds) — the clause is "
+                        "skipped. Name the member sets directly, or restate "
+                        "the union as a *SET_NODE_LIST.")
+                else:
+                    state.warn(
+                        f"*SET_NODE_GENERAL {sid}: option {option} names "
+                        f"*SET_NODE {e}, which this deck does not define — "
+                        "the clause is skipped.")
+        elif kind == "set_part":
+            for e in ids:
+                for pid in state.part_sets.get(e, ("", []))[1]:
+                    picked |= _set_family_part_nodes(state, pid)
+        else:                                    # set_shell/solid/beam/discrete
+            fam = kind.split("_", 1)[1].upper()
+            cont = _set_range_container(state, fam)
+            attr = _ELEM_FAMILY_CONTAINER[fam]
+            by_eid = {e.eid: e for e in getattr(state, attr)}
+            for e in ids:
+                for eid in cont.get(e, ("", []))[1]:
+                    el = by_eid.get(eid)
+                    if el is None:
+                        continue
+                    picked.update(getattr(el, "nodes", None)
+                                  or (el.n1, el.n2))
+        if exclude:
+            drop(picked)
+        else:
+            add(picked)
+    if sid in state.node_sets:
+        old_title, old = state.node_sets[sid]
+        state.node_sets[sid] = (old_title or title,
+                                old + [m for m in members if m not in set(old)])
+    else:
+        state.node_sets[sid] = (title, members)
+
+
+def _expand_segment_general(state: ConversionState, sid: int, title: str,
+                            clauses: List[Tuple[str, List[int]]]) -> None:
+    """``*SET_SEGMENT_GENERAL`` — SEG / SET / PART / ALL, in order.
+
+    ``SEG`` (12 538 of the 12 550 corpus rows, all in
+    ``getriebekette/.../Model-318_Achshebel-fein_tobi.k``) states four NODE ids
+    and goes through the SAME triangle collapse ``handle_set_segment`` applies,
+    so the two spellings of one face cannot end up as two segments and load the
+    face twice (the #131-measured EXT-WORK 18.35 → 73.39 trap). That deck
+    exercises the collapse directly: line 392 writes ``412166 417151 412165
+    412165``, the manual's N4 = N3 spelling.
+
+    ``PART`` keeps the part IDS (``SegmentSet.part_scope``) instead of
+    enumerating faces in Python — see that field's own note.
+    """
+    ss = state.segment_sets.get(sid)
+    if ss is None:
+        ss = SegmentSet(sid=sid, title=title)
+        state.segment_sets[sid] = ss
+    elif title and not ss.title:
+        ss.title = title
+    keys = {_segment_key(s) for s in ss.segments}
+    scope = list(ss.part_scope)
+
+    def add_seg(nodes: List[int]) -> None:
+        corners = _collapse_segment_corners(nodes)
+        if len(corners) < 3:
+            return
+        k = _segment_key(corners)
+        if k in keys:
+            return
+        keys.add(k)
+        ss.segments.append(corners)
+
+    def drop_seg(nodes: List[int]) -> None:
+        corners = _collapse_segment_corners(nodes)
+        k = _segment_key(corners)
+        if k not in keys:
+            return
+        keys.discard(k)
+        ss.segments[:] = [s for s in ss.segments if _segment_key(s) != k]
+
+    for option, ids in clauses:
+        kind = _SEGMENT_GENERAL_OPTIONS.get(option)
+        if kind is None:
+            _general_refused(state, "SEGMENT", sid, option, ids)
+            continue
+        exclude = option.startswith("D")
+        if kind == "seg":
+            (drop_seg if exclude else add_seg)(ids[:4])
+        elif kind == "set":
+            for e in ids:
+                other = state.segment_sets.get(e)
+                if other is None:
+                    state.warn(
+                        f"*SET_SEGMENT_GENERAL {sid}: option {option} names "
+                        f"*SET_SEGMENT {e}, which this deck does not define — "
+                        "the clause is skipped.")
+                    continue
+                for seg in other.segments:
+                    (drop_seg if exclude else add_seg)(list(seg))
+                for pid in other.part_scope:
+                    if exclude:
+                        scope = [p for p in scope if p != pid]
+                    elif pid not in scope:
+                        scope.append(pid)
+        elif kind == "part":
+            for pid in ids:
+                if exclude:
+                    scope = [p for p in scope if p != pid]
+                elif pid not in scope:
+                    scope.append(pid)
+        else:                                                       # ALL
+            for pid in sorted(state.parts):
+                if pid not in scope:
+                    scope.append(pid)
+    ss.part_scope = scope
+
+
+def _expand_entity_general(state: ConversionState, family: str, sid: int,
+                           title: str,
+                           clauses: List[Tuple[str, List[int]]]) -> None:
+    """``*SET_{PART,SHELL,SOLID,BEAM,DISCRETE}_GENERAL`` — clauses in order."""
+    table = _PART_GENERAL_OPTIONS if family == "PART" else _ELEM_GENERAL_OPTIONS
+    pool = set(_set_entity_pool(state, family))
+    by_part: Dict[int, Set[int]] = {}
+    if family != "PART":
+        attr = _ELEM_FAMILY_CONTAINER[family]
+        for e in getattr(state, attr):
+            by_part.setdefault(e.pid, set()).add(e.eid)
+    members: List[int] = []
+    seen: Set[int] = set()
+    for option, ids in clauses:
+        kind = table.get(option)
+        if kind is None:
+            _general_refused(state, family, sid, option, ids)
+            continue
+        exclude = option.startswith("D")
+        picked: Set[int] = set()
+        if kind == "all":
+            picked = set(pool)
+        elif kind == "elem":
+            picked = {i for i in ids if i in pool}
+        elif kind == "part":
+            for pid in ids:
+                picked |= by_part.get(pid, set())
+        else:                                                       # SET/DSET
+            src = state.part_sets if family == "PART" \
+                else _set_range_container(state, family)
+            for e in ids:
+                picked.update(i for i in src.get(e, ("", []))[1] if i in pool)
+        if exclude:
+            seen.difference_update(picked)
+            members[:] = [m for m in members if m not in picked]
+        else:
+            for v in sorted(picked):
+                if v not in seen:
+                    seen.add(v)
+                    members.append(v)
+    target = _set_range_container(state, family)
+    if sid in target:
+        old_title, old = target[sid]
+        target[sid] = (old_title or title,
+                       old + [m for m in members if m not in set(old)])
+    else:
+        target[sid] = (title, members)
+
+
+def _expand_set_ranges_and_generals(state: ConversionState) -> None:
+    """``*SET_<F>_GENERATE`` / ``_GENERAL`` → the plain family containers.
+
+    **Placement is non-negotiable: immediately BEFORE ``_flatten_set_adds``**,
+    at both of that function's call sites (``k2rad/__init__.py`` and
+    ``writer/assembly.build_starter``). Four reasons, each measured or quoted:
+
+    1. Vol I R17 p.43-40 — "these sets are generated after all input is read" —
+       the entity pools are only complete post-parse.
+    2. A ``*SET_NODE_ADD`` member may be a ``_GENERATE`` sid, so the expansion
+       has to precede the flattening.
+    3. ``state.next_grnod_id()`` dodges the ids already in ``node_sets`` and
+       ``next_elem_group_id()`` dodges the four element-set dicts; both run
+       AFTER this slot, so expanding later would leave them blind to the new
+       sids and the starter would answer ERROR 79 on a duplicate group id.
+    4. ``writer/mesh`` prunes tet10 mid-side nodes OUT of ``state.node_sets``;
+       expanding after that would put them back.
+
+    Ordering inside the pass: (1) the ranges, which need only the entity pools;
+    (2) the GENERAL clauses, which may reference ``SET_NODE`` / ``SET_PART`` /
+    ``SET_<ELEM>`` / ``SET``; then the caller's ``_flatten_set_adds``. A
+    GENERAL clause naming an ``_ADD`` union is the one back-edge this order
+    cannot serve — no corpus deck does it, and it is warned by name rather than
+    dropped silently.
+
+    Idempotent behind ``state.sets_expanded``, like ``_flatten_set_adds``.
+
+    The four PARSE-TIME set readers inherit the ``_flatten_set_adds``
+    limitation verbatim and still see only sets defined in the plain spelling:
+    ``*ELEMENT_MASS_NODE_SET``, ``*ELEMENT_MASS_PART_SET``,
+    ``*LOAD_BODY_PARTS`` and ``*CONSTRAINED_EXTRA_NODES_SET`` resolve during
+    dispatch. Zero corpus carriers combine one of those with a range spelling.
+    """
+    if state.sets_expanded:
+        return
+    state.sets_expanded = True
+    _expand_set_generates(state)
+    for family, sid in _general_expansion_order(state):
+        title, clauses = state.set_generals[(family, sid)]
+        if family == "NODE":
+            _expand_node_general(state, sid, title, clauses)
+        elif family == "SEGMENT":
+            _expand_segment_general(state, sid, title, clauses)
+        else:
+            _expand_entity_general(state, family, sid, title, clauses)
+
+
+#: ``*SET_<F>_GENERAL`` options whose operands are SET ids of the SAME family
+#: — the only clauses that can make one GENERAL set depend on another.
+_GENERAL_SAME_FAMILY_SET_OPTIONS = {
+    "NODE": ("SET_NODE", "DSET_NODE"),
+    "SEGMENT": ("SET", "DSET"),
+    "SHELL": ("SET", "DSET"),
+    "SOLID": ("SET", "DSET"),
+    "BEAM": ("SET", "DSET"),
+    "DISCRETE": ("SET", "DSET"),
+    "PART": ("SET", "DSET"),
+}
+
+
+def _general_expansion_order(state: ConversionState) -> List[Tuple[str, int]]:
+    """``state.set_generals`` keys, dependency-first.
+
+    A ``*SET_<F>_GENERAL`` clause may name another set of the same family, and
+    plain ``sorted()`` order builds the higher sid last — so a forward
+    reference met a set that exists in the deck but not yet in the container,
+    and the "which this deck does not define" warning fired on a set the deck
+    DOES define. Kahn's algorithm over the same-family SET clauses fixes the
+    order; a cycle (or anything else unresolvable) falls back to sorted order,
+    where the existing per-clause warnings still apply.
+
+    Measured reach: 0 corpus decks use a ``SET``/``SET_NODE`` clause at all
+    (the whole option census over both corpora is SEG / PART / DPART / ALL /
+    BOX), so this reorders nothing that exists today.
+    """
+    keys = sorted(state.set_generals)
+    deps: Dict[Tuple[str, int], Set[Tuple[str, int]]] = {k: set() for k in keys}
+    for (family, sid), (_title, clauses) in state.set_generals.items():
+        wanted = _GENERAL_SAME_FAMILY_SET_OPTIONS.get(family, ())
+        for option, ids in clauses:
+            if option.upper() not in wanted:
+                continue
+            for e in ids:
+                dep = (family, e)
+                if dep in deps and dep != (family, sid):
+                    deps[(family, sid)].add(dep)
+    order: List[Tuple[str, int]] = []
+    done: Set[Tuple[str, int]] = set()
+    remaining = list(keys)
+    while remaining:
+        ready = [k for k in remaining if deps[k] <= done]
+        if not ready:                      # cycle — keep the deck's own order
+            order.extend(remaining)
+            break
+        for k in ready:
+            order.append(k)
+            done.add(k)
+        remaining = [k for k in remaining if k not in done]
+    return order
+
+
 def _flatten_set_adds(state: ConversionState) -> None:
     """``*SET_<FAMILY>_ADD`` → a plain set of that family, resolved ONCE for
     every consumer — the shared resolver for all seven families.
@@ -3338,9 +3883,10 @@ def _resolve_contact_interior(state: ConversionState) -> None:
         if direct is None:
             state.warn(
                 f"*CONTACT_INTERIOR: part set {psid} is not defined in the "
-                "deck (or uses an unsupported *SET_PART variant such as "
-                "_COLUMN/_GENERATE) — the interior-contact scope cannot be "
-                "resolved for it.")
+                "deck — the interior-contact scope cannot be resolved for it. "
+                "(_COLUMN, _GENERATE and _GENERAL used to be named here as "
+                "the likely cause; R14 triage round 2 registered all three, "
+                "so a missing set is now a missing set.)")
             continue
         title, pids = direct[0], list(direct[1])
         known = [p for p in pids if p in state.parts]

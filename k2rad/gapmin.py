@@ -639,8 +639,13 @@ def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
 
 
 def _side_pids(state: ConversionState, sid: int, styp: int) -> Optional[Set[int]]:
-    """Part ids a *CONTACT side (sid/styp) resolves to, or ``None`` for a node
-    set (not part-resolvable).  Mirrors the writer's contact-side rules."""
+    """Part ids a *CONTACT side (sid/styp) resolves to, or ``None`` when the
+    side is not part-resolvable (a node set, or a segment set whose segments
+    are a SUBSET of their parts).  Mirrors the writer's contact-side rules —
+    since the R14 round-2 batch that means SURFATYP 0 is a *SET_SEGMENT and 1 a
+    *SET_SHELL, with no part-first fallback. Before it, --auto-gapmin measured
+    the clearance of the whole *PART whose id the segment set happened to
+    share, i.e. the wrong bodies."""
     if styp == 4:
         return None
     if styp == 3:
@@ -648,13 +653,17 @@ def _side_pids(state: ConversionState, sid: int, styp: int) -> Optional[Set[int]
     if styp == 2:
         ps = state.part_sets.get(sid)
         return set(ps[1]) if ps else set()
-    if styp in (0, 1):
-        if sid in state.parts:
-            return {sid}
-        if sid in state.part_sets:
-            return set(state.part_sets[sid][1])
-        if sid in state.node_sets:
-            return None
+    if styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return set()
+        # A segment set names FACES. Only a pure PART scope is a part list; a
+        # set with explicit segments is measured through _side_node_ids instead
+        # (None = "not part-resolvable"), so the suggestion is derived from the
+        # segments the contact really carries.
+        return set(ss.part_scope) if (ss.part_scope and not ss.segments) else None
+    if styp == 1:
+        return None if state.shell_sets.get(sid) else set()
     return set()
 
 
@@ -673,14 +682,20 @@ def _side_node_ids(state: ConversionState, sid: int, styp: int,
         if ps:
             for pid in ps[1]:
                 out.update(part_nodes.get(pid, ()))
-    elif styp in (0, 1):
-        if sid in state.parts:
-            out.update(part_nodes.get(sid, ()))
-        elif sid in state.part_sets:
-            for pid in state.part_sets[sid][1]:
+    elif styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is not None:
+            for seg in ss.segments:
+                out.update(n for n in seg if n > 0)
+            for pid in ss.part_scope:
                 out.update(part_nodes.get(pid, ()))
-        elif sid in state.node_sets:
-            out.update(n for n in state.node_sets[sid][1] if n > 0)
+    elif styp == 1:
+        entry = state.shell_sets.get(sid)
+        if entry is not None:
+            wanted = set(entry[1])
+            for e in state.shell_elems:
+                if e.eid in wanted:
+                    out.update(n for n in e.nodes if n > 0)
     return out
 
 
@@ -709,10 +724,29 @@ class GapminSuggestion:
 
 
 def _describe_side(state: ConversionState, sid: int, styp: int) -> str:
-    """A short 'part 60000000 (title)' / 'part set 7' label for a contact side."""
-    if styp == 4 or (styp in (0, 1) and sid in state.node_sets):
+    """A short 'part 60000000 (title)' / 'part set 7' label for a contact side.
+
+    Typed by SURFATYP, not by which container happens to hold the number: a
+    ``*SET_SEGMENT 1`` beside a ``*PART 1`` used to print "part 1 (Impacted
+    Material)" for the segment side of plate.typ13 — the label agreeing with a
+    resolution that was itself wrong.
+    """
+    if styp == 4:
         return f"node set {sid}"
-    if styp == 2 or (styp in (0, 1) and sid in state.part_sets):
+    if styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return f"segment set {sid} (not defined in this deck)"
+        n = len(ss.segments)
+        scope = (f", parts {sorted(set(ss.part_scope))}"
+                 if ss.part_scope else "")
+        return f"segment set {sid} ({n} segment(s){scope})"
+    if styp == 1:
+        entry = state.shell_sets.get(sid)
+        return (f"shell element set {sid} ({len(entry[1])} element(s))"
+                if entry else
+                f"shell element set {sid} (not defined in this deck)")
+    if styp == 2:
         return f"part set {sid}"
     p = state.parts.get(sid)
     if p is not None:

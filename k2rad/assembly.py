@@ -70,7 +70,8 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      set_active_scope, to_float, to_int)
-from .state import FABRIC_CURVE_FORMS, SET_ADD_FAMILIES
+from .state import (FABRIC_CURVE_FORMS, SET_ADD_FAMILIES, SET_RANGE_FAMILIES,
+                    set_general_id_cols)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
@@ -4077,6 +4078,124 @@ del _kw
 for _family, _kw, _n, _adds, _target in SET_ADD_FAMILIES:
     _OFFSET_SPECS[_kw] = {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "s")])}
 del _family, _kw, _n, _adds, _target
+
+
+# *SET_<F>[_LIST]_GENERATE[_INCREMENT] / _COLUMN / _GENERAL — generated from
+# state.SET_RANGE_FAMILIES, the SAME source handlers.py registers the parser
+# keys from and writer/mesh expands with.
+#
+# EVERY range CELL is an entity id and must be offset with the family's own
+# bucket: a range `1..999` under IDNOFF = 100000 has to become
+# `100001..100999`, or the include's nodes move, the range does not, and the
+# set resolves EMPTY at zero diagnostics — the #116 silent failure. The one
+# cell that is NOT an id is `_INCREMENT`'s third field: INCR is a STRIDE, and
+# an (ALL, ...) spec would shift it and re-sample the range, so that spelling
+# names fields 0 and 1 only. _COLUMN names field 0 only (A1..A4 are floats).
+#
+# _COLLECT and _TITLE need no rows: parser._split_keyword strips both into
+# block.options before _apply_offsets looks the keyword up.
+def _off_set_general(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*SET_<F>_GENERAL — a CALLABLE walker, because the id columns depend on
+    the OPTION in cols 1-10 of the SAME row.
+
+    A declarative ``(ALL, <bucket>)`` spec cannot express this: on
+    ``PART``/``DPART`` only E1..E3 are ids (E4..E7 are FLOAT attributes,
+    ``segment_general_subgrp.cfg:258``
+    ``CARD("%-10s%10d%10d%10d%10lg%10lg%10lg%10lg", KEY, ids0, ids1, ids2,
+    A1, A2, A3, A4)``), on ``SEG``/``DSEG`` E1..E4 are NODE ids, on the
+    ``SET*`` options every cell is a SET id, and on ``ALL`` there is no id at
+    all. Reading a float attribute as an id would add phantom parts under an
+    *INCLUDE_TRANSFORM.
+
+    The option → bucket table is derived from the SAME option names
+    ``writer/mesh`` resolves, so a newly-resolved option cannot be left
+    un-offset. Options k2rad refuses are left untouched: they select nothing,
+    so shifting their operands would be inventing an offset for a clause that
+    is skipped.
+    """
+    family = b.keyword.upper().split("SET_", 1)[-1].split("_GENERAL", 1)[0]
+    toff = _title_offset(b)
+    # Card 1 SID, exactly as the declarative specs do it. Giving the whole
+    # keyword to a callable replaces the ``{"cards": {0: [(0, "s")]}}`` half
+    # too, and a *SET_*_GENERAL whose own id stays behind while every
+    # consumer's reference to it moves with IDSOFF resolves EMPTY at zero
+    # diagnostics — the #116 silent failure, one card up from the one this
+    # walker exists for (caught by tests/test_r14_triage_2.py).
+    if toff < len(b.raw):
+        new = _rewrite_line(b.raw[toff], [(0, "s")], offsets)
+        if new is not None:
+            b.raw[toff] = new
+    for i in range(toff + 1, len(b.raw)):
+        line = b.raw[i]
+        if not line.strip():
+            continue
+        # _split_card, not a hand-rolled [:10] slice: the clause row may be
+        # COMMA-delimited (Vol I R17 p.43-41 writes its own worked example that
+        # way — "PART, 6"), whitespace-free, or fixed. The option itself can
+        # also outgrow the A10 field (SET_DISCRETE is 12 characters), which
+        # only the free forms can express.
+        fields, comma, ws_free = _split_card(line, 10)
+        if not fields:
+            continue
+        option = fields[0].strip().upper()
+        bucket = _SET_GENERAL_ID_BUCKET.get(option)
+        if not bucket:
+            continue
+        ncols = set_general_id_cols(family, option)
+        off = offsets.get(bucket, 0)
+        if not off:
+            continue
+        changed = False
+        for c in range(1, min(ncols + 1, len(fields))):
+            tok = fields[c].strip()
+            if not tok:
+                continue
+            v = to_int(tok)
+            if v > 0:
+                fields[c] = str(v + off)
+                changed = True
+        if changed:
+            b.raw[i] = _join_card(fields, comma, ws_free, 10)
+
+
+#: ``*SET_<F>_GENERAL`` OPTION → the id BUCKET its operands belong to. HOW MANY
+#: of E1..E7 are ids is a separate, FAMILY-dependent question and comes from
+#: :func:`state.set_general_id_cols` — the two were one option-keyed table until
+#: the round-2 review measured that a NODE-family ``PART`` clause carries seven
+#: part ids (``node_general_subgrp.cfg:141`` FREE_CELL_LIST) while a
+#: SEGMENT-family one carries three plus four float attributes (``:274``).
+#: Only the options ``writer/mesh._NODE_GENERAL_OPTIONS`` /
+#: ``._SEGMENT_GENERAL_OPTIONS`` / ``._ELEM_GENERAL_OPTIONS`` actually resolve
+#: are listed; ``ALL`` takes no operand at all.
+_SET_GENERAL_ID_BUCKET: Dict[str, str] = {
+    "SEG": "n", "DSEG": "n",
+    "NODE": "n", "DNODE": "n",
+    "PART": "p", "DPART": "p",
+    "ELEM": "e", "DELEM": "e",
+    "BOX": "d", "DBOX": "d",
+    "SET": "s", "DSET": "s",
+    "SET_NODE": "s", "DSET_NODE": "s", "SET_PART": "s",
+    "SET_SHELL": "s", "SET_SOLID": "s",
+    "SET_BEAM": "s", "SET_DISCRETE": "s",
+}
+
+for (_family, _gen_kw, _incr, _col, _gen,
+     _target, _bucket) in SET_RANGE_FAMILIES:
+    if _gen_kw:
+        _OFFSET_SPECS[_gen_kw] = {"cards": {0: [(0, "s")]},
+                                  "data": (1, [(ALL, _bucket)])}
+        if _incr:
+            _OFFSET_SPECS[_gen_kw + "_INCREMENT"] = {
+                "cards": {0: [(0, "s")]},
+                "data": (1, [(0, _bucket), (1, _bucket)]),
+            }
+    if _col:
+        _OFFSET_SPECS[f"SET_{_family}_COLUMN"] = {
+            "cards": {0: [(0, "s")]}, "data": (1, [(0, _bucket)]),
+        }
+    if _gen:
+        _OFFSET_SPECS[f"SET_{_family}_GENERAL"] = _off_set_general
+del _family, _gen_kw, _incr, _col, _gen, _target, _bucket
 
 
 def _off_set_part_add(b: Block, offsets: Dict[str, int], warn) -> None:

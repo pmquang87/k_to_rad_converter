@@ -48,6 +48,100 @@ SET_ADD_FAMILIES = (
     ("DISCRETE", "SET_DISCRETE_ADD", 1, "discrete_set_adds", "discrete_sets"),
 )
 
+#: The ``*SET_<FAMILY>`` RANGE and OPTION spellings — the second ONE-source
+#: family table, beside ``SET_ADD_FAMILIES`` above. It generates the parser
+#: keys (``handlers._set_range_keywords``), the ``*INCLUDE_TRANSFORM`` offset
+#: rows (``assembly._OFFSET_SPECS``) and the post-parse expansion pass
+#: (``writer/mesh._expand_set_ranges_and_generals``), so a spelling cannot be
+#: read by one and invisible to the others.
+#:
+#: Each row is ``(family, GENERATE spelling, has _INCREMENT, has _COLUMN,
+#: has _GENERAL, target container, member id bucket)``.
+#:
+#: **OPTION1 is family-specific and the asymmetry is REAL** — NODE/PART/SHELL
+#: spell the range option ``LIST_GENERATE`` while SOLID/BEAM/DISCRETE spell it
+#: bare ``GENERATE``, and only some carry ``_INCREMENT`` or ``_COLUMN``. Two
+#: independent sources agree, so the table is transcribed and not derived:
+#:
+#:   family    Vol I R17 OPTION1 list                            cfg HEADER
+#:   NODE      p.43-37 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          node_list_generate.cfg:110
+#:   PART      p.43-50 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          part_list_generate.cfg:112
+#:   SHELL     p.43-77 LIST_GENERATE[_INCREMENT], COLUMN, GENERAL
+#:                                          shell_list_generate.cfg:115
+#:   SOLID     p.43-89 GENERATE[_INCREMENT], GENERAL
+#:                                          solid_list_generate.cfg:102
+#:   BEAM      p.43-3  GENERATE[_INCREMENT], GENERAL
+#:                                          beam_list_generate.cfg:92
+#:   DISCRETE  p.43-14 GENERATE, GENERAL          (no _INCREMENT)
+#:                                          discrete_list_generate.cfg:92
+#:   SEGMENT   p.43-63 GENERAL                    (no GENERATE at all)
+#:                                          segment_general.cfg
+#:
+#: so ``*SET_SOLID_LIST_GENERATE`` must NOT be derived from the lenient
+#: ``*SET_SOLID_LIST`` alias k2rad also registers: that spelling does not exist.
+#:
+#: **``*SET_TSHELL_GENERATE``/``_GENERAL`` are deliberately absent.** Unlike
+#: ``*SET_TSHELL_ADD`` (which LS-DYNA has no such keyword for — see above),
+#: these two DO exist in R17 p.43-100; what k2rad has no room for is the
+#: RESULT: there is no ``tshell_sets`` container for a thick-shell element set
+#: to land in, and ``*SET_TSHELL`` itself is unregistered. Registering only the
+#: range spelling would parse a set nothing can read. Zero corpus carriers
+#: (measured over the 356-deck R14 roster, ``C:/openradioss_run`` and
+#: Ryan_Lee); the block stays in ``skipped_keywords``, named.
+SET_RANGE_FAMILIES = (
+    ("NODE",     "SET_NODE_LIST_GENERATE",  True,  True,  True, "node_sets",     "n"),
+    ("PART",     "SET_PART_LIST_GENERATE",  True,  True,  True, "part_sets",     "p"),
+    ("SHELL",    "SET_SHELL_LIST_GENERATE", True,  True,  True, "shell_sets",    "e"),
+    ("SOLID",    "SET_SOLID_GENERATE",      True,  False, True, "solid_sets",    "e"),
+    ("BEAM",     "SET_BEAM_GENERATE",       True,  False, True, "beam_sets",     "e"),
+    ("DISCRETE", "SET_DISCRETE_GENERATE",   False, False, True, "discrete_sets", "e"),
+    # SEGMENT has no range spelling at all — a segment is not an id in a
+    # numbered pool, so there is nothing for BnBEG..BnEND to select. Its
+    # *SET_SEGMENT_GENERAL is in the table so the GENERAL registration,
+    # offset walker and expansion arm are generated from ONE row set.
+    ("SEGMENT",  "",                        False, False, True, "segment_sets",  "n"),
+)
+
+#: ``*SET_<F>_GENERAL`` clause rows: which of the seven ``E1..E7`` cells are
+#: ENTITY IDS. The answer depends on the FAMILY as well as the OPTION, and
+#: getting that wrong goes both ways — under-count and an *INCLUDE_TRANSFORM
+#: leaves real operands un-offset (the #116 silent-empty-set failure);
+#: over-count and four FLOAT attributes are read as phantom entity ids.
+#:
+#:   * SEGMENT family, ``SEG``/``DSEG``: four NODE ids
+#:     (``segment_general_subgrp.cfg:262`` ``CARD("%-10s%10d%10d%10d%10d",
+#:     KEY,N1,N2,N3,N4)``).
+#:   * SEGMENT family, the options in :data:`SEGMENT_GENERAL_ATTR_OPTIONS`:
+#:     three ids then four floats (``:274``
+#:     ``CARD("%-10s%10d%10d%10d%10lg%10lg%10lg%10lg", KEY,ids0,ids1,ids2,
+#:     A1,A2,A3,A4)``; Vol I R17 p.43-70 Remark 1 names them NFLS/SFLS/FSF/VSF).
+#:   * Everything else — every NODE-family option (``node_general_subgrp.cfg:141``
+#:     ``FREE_CELL_LIST(idsmax,"%10d",ids,80)`` for ALL of them, ``PART`` and
+#:     ``BOX`` included), every element-family option
+#:     (``{shell,solid,beam,discrete}_general_subgrp.cfg:123``, same list), the
+#:     PART family, and the SEGMENT family's own "tightly packed" options
+#:     (``DPART``, ``DSET``, ``DBOX*``, ``DVOL*``, ``SET`` — p.43-70 Remark 4,
+#:     the cfg's ``else`` branch at ``:296``): all seven cells are ids.
+SEGMENT_GENERAL_ATTR_OPTIONS = frozenset({
+    "BOX", "BOX_SHELL", "BOX_SOLID", "BOX_SLDIO",
+    "PART", "PART_IO", "BRANCH", "BRANCH_IO",
+    "SET_SHELL", "SET_SOLID", "SET_SLDIO", "SET_TSHELL", "SET_TSHIO",
+    "SHELL", "VOL", "VOL_SHELL", "VOL_SLDIO", "VOL_SOLID",
+})
+
+
+def set_general_id_cols(family: str, option: str) -> int:
+    """How many of ``E1..E7`` are entity ids on this family's clause row."""
+    if family == "SEGMENT":
+        if option in ("SEG", "DSEG"):
+            return 4
+        if option in SEGMENT_GENERAL_ATTR_OPTIONS:
+            return 3
+    return 7
+
+
 #: ``*SET_NODE_ADD_ADVANCED`` card 2b TYPE column → the family whose members
 #: contribute their NODES (Vol I R17 p.43-46 verbatim: "EQ.1: Node set
 #: EQ.2: Shell set EQ.3: Beam set EQ.4: Solid set EQ.5: Segment set
@@ -3340,6 +3434,17 @@ class ContactAutoSingle:
     # k2rad itself (the implicit-stabilization self-contact), which has no
     # originating keyword to report.
     keyword: str = ""
+    # NOTE (round 2, 2026-09-06): an `inacti: Optional[int]` field lived here
+    # for one round so k2rad's synthesized implicit-stabilization stub could
+    # state Inacti = 1 and dodge starter ERROR 611. It was REMOVED after
+    # measurement: Inacti = 1 zeroes the stiffness of every initially
+    # penetrating secondary node for the whole run, and on
+    # `efg/metal-cutting/main.k` — an implicit deck whose only contact IS that
+    # stub — it cost the deck its NORMAL TERMINATION (218 cycles to t = 0.03
+    # became a TIMESTEP-LIMIT death at t = 0.0084). The stub is back on the
+    # ordinary `ignore` mapping (Inacti = 5) and ERROR 611 is cleared by the
+    # Fpenmax cell instead (writer/contacts._FPENMAX_ZERO_NORMAL), which takes
+    # only the nodes that have no other treatment available.
 
 
 @dataclass
@@ -3412,18 +3517,22 @@ class ContactTied:
       * SURFACE_TO_SURFACE → Spotflag=5 (standard formulation — the
         mesh-transition glue it is used for in LS-DYNA).
 
-    ``sst``/``mst`` are the Card-3 contact thicknesses: LS-DYNA gives a
-    NEGATIVE value the special meaning "absolute tie-criterion distance", which
-    the writer honours as a floor on the /INTER/TYPE2 dsearch.
+    ``sst``/``mst`` are the Card-3 contact thicknesses. A NEGATIVE value makes
+    the tying test use ``delta = abs(delta_1)`` instead of the area-derived
+    ``delta_2`` — Vol I R17 p.11-33 (``SAST``) and General Remark 4 (p.11-125),
+    a tying SEARCH DISTANCE — and the writer honours it as a floor on the
+    /INTER/TYPE2 dsearch.
 
     ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) drive the dyna2rad
-    kinematic-vs-penalty discriminator (``convertcontacts.cxx`` cc:220):
-    ``(SFST*SST + SFMT*MST)/2 < 0`` → penalty tie /INTER/TYPE10, otherwise the
-    kinematic tie /INTER/TYPE2. A negative SST/MST with a nonzero SFST/SFMT is
-    LS-DYNA's "maintain the physical offset" flag, which dyna2rad maps to the
-    penalty TYPE10 (physical gap kept) rather than TYPE2 (secondary nodes
-    projected onto the main segment). ``sfs``/``sfm`` (Card-3 penalty stiffness
-    scales) size the TYPE10 GAP.
+    discriminator (``convertcontacts.cxx`` cc:220):
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10, otherwise /INTER/TYPE2.
+    That rule is PRAGMATIC and not LS-DYNA's: General Remark 7 (p.11-127) puts
+    a plain ``*CONTACT_TIED_SURFACE_TO_SURFACE`` in the CONSTRAINT-based family
+    and only the plain ``_OFFSET`` / ``_BEAM_OFFSET`` spellings in the
+    penalty-based one. It is kept because the faithful card does not converge
+    on this build's only two carriers — see ``_tied_interface_type`` for both
+    measured arms. ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size the
+    TYPE10 GAP.
     """
     inter_id: int
     title: str
@@ -4864,6 +4973,32 @@ class SegmentSetPressureLoad:
     at: float = 0.0
 
 
+def collapse_segment_corners(nodes: List[int]) -> List[int]:
+    """The canonical corner list of one surface segment, or ``[]``.
+
+    **A triangle has TWO legal spellings and they must become ONE.** Vol I R17
+    *SET_SEGMENT p.43-63 verbatim: *"N4 - Nodal point n4. To define a
+    triangular segment, set N4 = N3."*, and a trailing blank/zero is the other
+    house style. Both collapse to a 3-node list, so no set operation can see
+    one face as two rows and apply its pressure twice — measured on a free
+    plate against a one-row twin, both 0 ERROR / NORMAL TERMINATION / 67
+    cycles: EXT-WORK 18.35 → 73.39, i.e. impulse ×2.0001 (k2rad #131).
+
+    ONE function rather than a copy per reader: ``handlers.handle_set_segment``
+    (the ``*SET_SEGMENT`` data cards) and
+    ``writer/mesh._expand_segment_general`` (the ``*SET_SEGMENT_GENERAL`` SEG /
+    DSEG clauses) both call it, and ``state`` is the module both can import
+    without a cycle. A per-reader copy is exactly how the collapse would go
+    dead on the newer spelling.
+    """
+    out = list(nodes)
+    while len(out) > 3 and (out[-1] == 0 or out[-1] == out[-2]):
+        out.pop()
+    if len(out) >= 3 and all(n > 0 for n in out):
+        return out
+    return []
+
+
 @dataclass
 class SegmentSet:
     """*SET_SEGMENT — a set of 3- or 4-node surface segments.
@@ -4876,6 +5011,18 @@ class SegmentSet:
     sid: int
     title: str
     segments: List[List[int]] = field(default_factory=list)
+    #: ``*SET_SEGMENT_GENERAL`` ``PART`` / ``DPART`` scope — part ids whose
+    #: FACES belong to this set, kept as part ids rather than enumerated here.
+    #: Vol I R17 p.43-64 verbatim: *"For shell elements, one segment per shell
+    #: is generated. For solid elements, only those segments wrapping the solid
+    #: part and pointing outward from the part will be generated."* That is
+    #: exactly what ``writer/common._make_master_surface`` already emits
+    #: (/SURF/GRSHEL over the shells, /SURF/PART/EXT over the solids — the
+    #: starter computes the outward skin), so the parts are carried through to
+    #: it instead of being tessellated in Python, where the solid arm would
+    #: have to re-derive the wrapper and the shell arm would have to duplicate
+    #: the /SH3N split. Empty on every deck without that option.
+    part_scope: List[int] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6884,6 +7031,28 @@ class ConvertOptions:
     # default is Radioss's own documented behaviour, contradicting nothing.
     # Set False (--no-zero-t0-sentinel) to write the deck's own 0.0.
     zero_t0_sentinel: bool = True
+    # *NODE's own TC/RC constraint cells (Vol I R17 p.35-2/35-3, card 1
+    # NID X Y Z TC RC) become one /GRNOD/NODE + /BCS per distinct (TC, RC)
+    # pair. ON by default. LS-DYNA applies them unconditionally — its d3hsp
+    # prints a dedicated "nodal spc summary on *NODE cards" echo, and this
+    # decode reproduces that echo (printed by 155 of the R14 reference runs)
+    # on all 162 139 TC/RC cells of the 137 carrier decks, with ZERO
+    # translation-code disagreements. Without the conversion those DOFs
+    # are FREE in the emitted model at 0 warnings and 0 starter errors: on the
+    # 356-deck dynaexamples R14 campaign 137 decks carry a non-zero cell and
+    # 119 of them have no *BOUNDARY_SPC at all, so the card's own cells are
+    # their only support; the dropped supports sit under 44 of the 69
+    # IE-collapse decks and 27 of the 42 implicit-ERROR decks. Two decks
+    # measured against their own LS-DYNA glstat: component1 goes from
+    # IE -99.92 % / KE +772630 % to IE +1.5 % / KE +1.0 %, and
+    # ex_03_solid_elform_1_4x6x4_mesh from a TIMESTEP-LIMIT death at t = 0.22
+    # to NORMAL TERMINATION at t = 1.0. Screened per rule (rigid-body member
+    # nodes dropped, DOFs a *BOUNDARY_PRESCRIBED_MOTION already drives left to
+    # it, DOFs a *BOUNDARY_SPC already states merged rather than restated) and
+    # every screen is counted in the per-deck message.
+    # Set False (--no-node-tc-rc-bcs) to keep the pre-2026-09 behaviour, in
+    # which those degrees of freedom are FREE.
+    node_tc_rc_bcs: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7147,13 +7316,23 @@ class ConversionState:
 
     # ── Mesh ───────────────────────────────────────────────────
     nodes: Dict[int, NodeData] = field(default_factory=dict)
-    #: Node ids whose ``*NODE`` card states a constraint in its TC or RC cell
-    #: (Vol I R17: ``NID X Y Z TC RC``). k2rad does not convert them — see
-    #: ``writer/assembly._warn_node_tc_rc``. Kept as ids so the message can
-    #: NAME a few of them; capped, because a third of the corpus writes them
-    #: and one deck states 14 402.
-    node_tc_rc: List[int] = field(default_factory=list)
-    node_tc_rc_count: int = 0
+    #: ``node id -> (TC, RC)`` for every ``*NODE`` card that states a
+    #: constraint in its own TC or RC cell (Vol I R17: ``NID X Y Z TC RC``;
+    #: codes 0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz, in the GLOBAL
+    #: system). ``writer/loads._make_node_tc_rc_bcs`` turns them into
+    #: ``/GRNOD/NODE`` + ``/BCS`` (one pair per distinct code pair) unless
+    #: ``options.node_tc_rc_bcs`` is off. The whole map is kept — not a capped
+    #: sample — because the codes ARE the conversion now, not a statistic: one
+    #: R14 deck states 14 402 of them and every one has to reach the writer.
+    node_tc_rc: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    #: ``node id -> (Tra, Rot)`` digit strings for every ``/BCS`` the TC/RC
+    #: pass actually emitted, i.e. AFTER its screens. Read by the implicit
+    #: free-node guard (``_make_free_node_constraints``), which drops from its
+    #: own ``111 111`` group any node this pass has already pinned in all six
+    #: DOFs — two ``/BCS`` on one node are a starter ``WARNING 312``
+    #: (INCOMPATIBLE KINEMATIC CONDITIONS, measured on a two-``/BCS`` coupon),
+    #: and the guard runs far enough after this pass to see the finished map.
+    node_tc_rc_emitted: Dict[int, Tuple[str, str]] = field(default_factory=dict)
     shell_elems: List[ShellElem] = field(default_factory=list)
     solid_elems: List[SolidElem] = field(default_factory=list)
     # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not
@@ -7641,9 +7820,11 @@ class ConversionState:
     # abstract; a card whose tables are all constant loses NOTHING and says so.
     law106_spreads: Dict[int, List[str]] = field(default_factory=dict)
     # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
-    # never from the parsed driver list: several corpus decks state a driver
-    # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so
-    # the driver is dropped at emission and NOTHING changes the temperature.
+    # never from the parsed driver list: a driver whose *SET_NODE does not
+    # resolve is dropped at emission and NOTHING changes the temperature.
+    # (*SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE were the measured examples
+    # until R14 triage round 2 registered them; an undefined id and the
+    # _GENERAL clauses k2rad refuses by name still reach this.)
     # This is what gates /TH/NODE TEMP, /ANIM/NODA/TEMP and the *DATABASE_TPRINT
     # note (the #122 rule: a legal, accepted, frozen channel is worse than none).
     thermal_driver_emitted: bool = False
@@ -7827,6 +8008,20 @@ class ConversionState:
     # DOF, missing /RBODY, empty box intersection) contributes no node.
     imp_motion_nodes: Set[int] = field(default_factory=set)
     imp_motion_rot: bool = False
+    #: ``node id -> {Dir letters}`` for every /IMPVEL | /IMPDISP | /IMPACC
+    #: written in the GLOBAL system (skew_ID 0). The letters are the card's own
+    #: ``Dir`` spelling: ``X``/``Y``/``Z`` translations, ``XX``/``YY``/``ZZ``
+    #: rotations. Read by the ``*NODE`` TC/RC pass, which must NOT also pin a
+    #: DOF an imposed motion drives: MEASURED on a one-brick twin, a ``/BCS``
+    #: and an ``/IMPVEL`` on the same node and DOF give starter WARNING 312
+    #: and a 99.9 % engine energy error (EXT-WORK 13.66 against an I-ENERGY of
+    #: 1688), while the complementary split is 0.0 % with no warning.
+    imp_motion_dirs: Dict[int, Set[str]] = field(default_factory=dict)
+    #: Nodes whose imposed motion was written in a LOCAL system (skew_ID != 0),
+    #: where the card's ``Dir`` letter is a skew axis and no global TC/RC bit
+    #: can be matched against it. Named in the TC/RC report rather than
+    #: screened, so the reader can judge the overlap.
+    imp_motion_skew_nodes: Set[int] = field(default_factory=set)
     # *ELEMENT_DISCRETE eids carrying PF=1, the deforc PRINT flag: "EQ.1: forces
     # are not printed DEFORC file" (Vol I R16 p.19-32), and p.1944 names it as
     # one of the two ways a deck narrows the deforc selection. It is an OUTPUT
@@ -7950,6 +8145,25 @@ class ConversionState:
     node_set_add_advanced: Dict[int, Tuple[str, List[Tuple[int, int]]]] = \
         field(default_factory=dict)
     set_adds_flattened: bool = False          # _flatten_set_adds ran
+    # ── R14 triage round 2: the *SET_* RANGE / OPTION spellings ────
+    # ``*SET_<F>[_LIST]_GENERATE[_INCREMENT]`` — the RANGES, held unexpanded
+    # until every *NODE / *PART / *ELEMENT_* card has been read. Vol I R17
+    # p.43-40 is explicit that this is a post-parse job: "These sets are
+    # generated after all input is read so that gaps in the node numbering are
+    # not a problem. BnBEG and BnEND may simply be limits on the IDs and not
+    # nodal IDs." ``(family, sid) -> (title, [(beg, end, incr)])``, with
+    # ``incr == 0`` marking the plain (non-_INCREMENT) form.
+    set_generates: Dict[Tuple[str, int], Tuple[str, List[Tuple[int, int, int]]]] = \
+        field(default_factory=dict)
+    # ``*SET_<F>_GENERAL`` — the OPTION clauses IN CARD ORDER, which is
+    # load-bearing: p.43-41 verbatim, "Note that the order of the selected
+    # operations matters. Nodes are only excluded from the set if they were
+    # previously added to the set. For instance, if you exclude node 5 and
+    # then include it, node 5 will be included in the set."
+    # ``(family, sid) -> (title, [(OPTION, [E1..E7])])``.
+    set_generals: Dict[Tuple[str, int], Tuple[str, List[Tuple[str, List[int]]]]] = \
+        field(default_factory=dict)
+    sets_expanded: bool = False      # _expand_set_ranges_and_generals ran
     # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
     # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
     # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined

@@ -704,18 +704,20 @@ def _tcrc_deck(node_block: str) -> str:
 class TestNodeTcRcIsNamed(unittest.TestCase):
     """Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC`` — TC and RC are
     constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
-    global system. ``handle_node`` reads only NID/X/Y/Z.
+    global system, and ``handle_node`` reads them out of both card layouts.
 
-    MEASURED on a spring-mass coupon whose anchor carried ``tc=7 rc=7``: no
-    ``/BCS`` was emitted, the anchor was free, the whole oscillator drifted at
-    the centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
-    0.317 mm amplitude) — and the engine printed NORMAL TERMINATION. The #122
-    class: legal, accepted, and wrong, with nothing anywhere saying so.
+    This class was written when the cells were DROPPED and only named, on the
+    argument that the screening (rigid bodies, prescribed motions) could not be
+    validated in that round. The R14 campaign validated it: the conversion is
+    now ON by default and lives in ``writer/loads._make_node_tc_rc_bcs``.
 
-    721 of 2346 corpus decks write a non-zero cell here, so this is NOT
-    converted in this round — adding constraints to a third of the corpus
-    needs its own validation, and an EXTRA constraint is the harder failure to
-    notice. The loss is NAMED instead.
+    What survives here is what this class was really pinning — that BOTH card
+    layouts are read, that an explicit zero and an absent cell are not
+    constraints, and that the per-deck message states the count and names the
+    nodes. **Named successor**: the conversion itself, its four screening
+    rules, the ``--no-node-tc-rc-bcs`` opt-out and the id allocation are
+    covered by ``tests/test_r14_triage_2.py`` (``TestNodeTcRcToBcs`` and the
+    classes below it).
     """
 
     FIXED = "\n".join([
@@ -734,7 +736,8 @@ class TestNodeTcRcIsNamed(unittest.TestCase):
         w = _warns(res, "state a constraint in the card's own TC/RC cells")
         self.assertEqual(len(w), 1)
         self.assertIn("2 node(s)", w[0])
-        self.assertIn("(node 1, 4)", w[0])
+        self.assertIn("TC=7 RC=7: 1 node(s)", w[0])
+        self.assertIn("TC=4 RC=0: 1 node(s)", w[0])
 
     def test_the_comma_format_cells_are_seen_too(self):
         """Node 2 states EXPLICIT zeros and node 3 states nothing — neither is
@@ -743,21 +746,27 @@ class TestNodeTcRcIsNamed(unittest.TestCase):
         w = _warns(res, "state a constraint in the card's own TC/RC cells")
         self.assertEqual(len(w), 1)
         self.assertIn("2 node(s)", w[0])
-        self.assertIn("(node 1, 4)", w[0])
+        self.assertIn("TC=7 RC=7: 1 node(s)", w[0])
+        self.assertIn("TC=0 RC=3: 1 node(s)", w[0])
 
     def test_an_ordinary_deck_says_nothing(self):
         plain = "\n".join([
             "*NODE", _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
             _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0)])
-        res, _starter = _convert(_tcrc_deck(plain))
+        res, starter = _convert(_tcrc_deck(plain))
         self.assertEqual(
             _warns(res, "state a constraint in the card's own TC/RC cells"), [])
+        self.assertNotIn("*NODE TC/RC", starter)
 
-    def test_the_message_names_a_remedy_that_this_converter_emits(self):
+    def test_the_message_names_the_escape_in_both_spellings(self):
+        """The remedy sentence used to point at ``*BOUNDARY_SPC_NODE`` because
+        the cells were dropped. Now that they are converted, the sentence the
+        reader needs is the OPT-OUT — and it must name the CLI flag and the
+        ``convert()`` keyword, the way every other default-on switch does."""
         res, _starter = _convert(_tcrc_deck(self.FIXED))
         w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
-        self.assertIn("*BOUNDARY_SPC_NODE", w)
-        self.assertIn("/BCS", w)
+        self.assertIn("--no-node-tc-rc-bcs", w)
+        self.assertIn("convert(node_tc_rc_bcs=False)", w)
 
 
 if __name__ == "__main__":                             # pragma: no cover

@@ -90,6 +90,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from k2rad.parser import parse_k_file            # noqa: E402
 from k2rad.handlers import dispatch              # noqa: E402
 from k2rad.state import ConversionState          # noqa: E402
+# The two derivations this module must NOT re-implement: the writer's
+# thickness-to-section-constants rule (the /PROP/BEAM the engine's stiffness
+# matrix came from used it) and the converter's own RO <= 0 floor (the .rad it
+# came from carries it). See _beam_section_area and _material_rho.
+from k2rad.writer.beams import _constants_from_thicknesses   # noqa: E402
+from k2rad.writer.materials import _ZERO_DENSITY_FLOOR       # noqa: E402
+
+#: *SECTION_BEAM ELFORMs whose card 2 states THICKNESSES instead of section
+#: constants (Vol I R17 p.41-11: cards 2a and 2e) — the ones
+#: ``_constants_from_thicknesses`` is written for.
+_THICKNESS_BEAM_ELFORMS = frozenset({0, 1, 4, 5, 11})
 
 try:                                             # pragma: no cover - env dependent
     import numpy as np
@@ -204,17 +215,72 @@ _HEXA_TETS = ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
               (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6))
 
 
-def _material_rho(state: ConversionState) -> Dict[int, float]:
+def _material_rho(state: ConversionState,
+                  zero_density_floor: bool = True) -> Dict[int, float]:
+    """``mid -> rho`` for every law this module can weigh.
+
+    ``zero_density_floor`` mirrors the CONVERTER's own ``RO <= 0`` floor
+    (``writer/materials._ZERO_DENSITY_FLOOR``). This is not a fabrication and
+    not a modelling choice: the stiffness matrix this module pairs the mass
+    with was exported by the engine from the CONVERTED ``.rad``, in which
+    k2rad has already written ``rho = 1e-24`` for exactly these materials.
+    Building M at ``rho = 0`` while K comes from a model at ``rho = 1e-24``
+    pairs a mass matrix with a stiffness matrix from a DIFFERENT model — and
+    the zero rows are what makes the eigensolve fail (see ``solve_modes``).
+    The substitution is printed the way the converter prints it, and
+    ``--no-zero-density-floor`` turns it off.
+
+    ``nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k`` is the measured carrier:
+    its ``*MAT_ELASTIC`` card 1 parses as ``mid 1 | RO 0.0 | E 68947.5729 |
+    PR 0.33``, so the density really is zero in the source.
+    """
     rho: Dict[int, float] = {}
+    floored: List[int] = []
     for mats in (state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
                  state.mat_rigid, state.mat_null, state.mat_power_law):
         for mid, m in mats.items():
-            rho[mid] = m.rho
+            r = m.rho
+            if r <= 0.0 and zero_density_floor:
+                r = _ZERO_DENSITY_FLOOR
+                floored.append(mid)
+            rho[mid] = r
+    if floored:
+        print(f"  NOTE: material(s) {sorted(floored)} state RO <= 0; the mass "
+              f"matrix uses rho = {_ZERO_DENSITY_FLOOR:g}, the same floor "
+              "k2rad wrote into the .rad the stiffness matrix was exported "
+              "from (writer/materials._ZERO_DENSITY_FLOOR). "
+              "--no-zero-density-floor keeps the stated zero.")
     return rho
 
 
+def _beam_section_area(sec) -> float:
+    """Cross-section AREA of a *SECTION_BEAM that states only thicknesses.
+
+    ELFORM 0/1/4/5/11 carry no A/Iyy/Izz/Ixx at all — their card 2 is
+    ``TS1 TS2 TT1 TT2 ...`` — so ``sec.area`` is 0 and this module weighed the
+    beam at zero. The WRITER already derives the constants for exactly these
+    formulations (``k2rad.writer.beams._constants_from_thicknesses``, CST 0/2
+    rectangular TS1 x TT1, CST 1 tubular with TS1 the OUTER and TT1 the INNER
+    diameter), so the derivation is IMPORTED rather than repeated here: the
+    /PROP/BEAM the engine built its stiffness matrix from used those very
+    numbers, and a second copy of the rule is how the two drift apart.
+
+    MEASURED on ``nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k``: elform 1,
+    area 0.0, ts1 6.35, tt1 50.8, cst 0 ->
+    ``_constants_from_thicknesses(0, 6.35, 50.8) = (322.58, 69371.904,
+    1083.936, 70455.840)``, and I = 50.8*6.35**3/12 = 1083.936 gives
+    k = 3EI/L**3 = 109.4543 and f = 110.5541 Hz against the deck's own
+    ``.eigout`` f1 = 110.4521 Hz (-0.09 %).
+    """
+    if getattr(sec, "elform", -1) not in _THICKNESS_BEAM_ELFORMS:
+        return 0.0
+    got = _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1)
+    return float(got[0]) if got else 0.0
+
+
 def nodal_masses_from_state(
-        state: ConversionState) -> Tuple[Dict[int, float], Dict[int, float]]:
+        state: ConversionState, zero_density_floor: bool = True
+) -> Tuple[Dict[int, float], Dict[int, float]]:
     """Lumped nodal masses and rotary inertias [deck units] from the parsed deck.
 
     Returns ``(mass, inertia)``: translational mass and rotational inertia per
@@ -225,7 +291,7 @@ def nodal_masses_from_state(
     precision (verified on the W14 bogie). *ELEMENT_MASS /
     *ELEMENT_MASS_PART additions are then applied to the masses.
     """
-    rho_by_mid = _material_rho(state)
+    rho_by_mid = _material_rho(state, zero_density_floor)
     nodes = state.nodes
     mass: Dict[int, float] = {}
     inertia: Dict[int, float] = {}
@@ -288,15 +354,18 @@ def nodal_masses_from_state(
             continue
         sec = state.sec_beams.get(part.secid)
         rho = rho_by_mid.get(part.mid, 0.0)
-        if sec is None or rho == 0.0 or sec.area == 0.0:
+        if sec is None or rho == 0.0:
+            continue
+        area = sec.area or _beam_section_area(sec)
+        if area <= 0.0:
             continue
         try:
             p1 = nodes[e.n1]; p2 = nodes[e.n2]
         except KeyError:
             continue
         length = math.dist((p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z))
-        m_elem = length * sec.area * rho
-        add((e.n1, e.n2), m_elem)
+        m_elem = length * area * rho
+        add((e.n1, e.n2), m_elem)   # rho*A*L/2 per end node
         add_part(e.pid, m_elem)
 
     # *ELEMENT_MASS point masses (per node).
@@ -468,7 +537,36 @@ def solve_modes(stiff: StiffnessMatrix, md: "np.ndarray",
     (columns of phi are M-mass-normalized eigenvectors, one per frequency).
     """
     M = sp.diags(md).tocsc()
-    vals, vecs = spla.eigsh(stiff.K, k=n_modes, M=M, sigma=0, which="LM")
+    # ARPACK's shift-invert operator here is OP = K^-1 M, whose RANK is the
+    # number of non-zero mass DOFs. Asking for more modes than that (scipy's
+    # default ncv is ~min(n, max(2k+1, 20))) makes the Arnoldi factorization
+    # break down after a few steps and eigsh returns -9999 — a FAILURE that
+    # reads like a singular stiffness matrix and is not one. MEASURED on
+    # nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k, whose M had exactly THREE
+    # non-zero diagonal entries (node 2's translations) before the beam mass
+    # arm was fixed: rank 3 against ncv 20.
+    rank = int((md > 0.0).sum())
+    n = stiff.K.shape[0]
+    kw = {}
+    if rank and n_modes >= rank:
+        print(f"  NOTE: only {rank} DOF(s) of the mass matrix are non-zero, so "
+              f"at most {rank - 1} mode(s) can be extracted by shift-invert "
+              f"(OP = K^-1 M has rank {rank}); asking for {n_modes} makes "
+              "ARPACK break down and return -9999. Solving for "
+              f"{max(1, rank - 1)}.")
+        n_modes = max(1, rank - 1)
+    # Clamping k alone is NOT enough, and believing it was is why this guard
+    # had to be measured rather than reasoned: scipy picks
+    # ncv = min(n, max(2k+1, 20)) on its own, so with rank 3 and k = 2 the
+    # Krylov space is still 12-20 wide against an operator of rank 3 and the
+    # factorization still breaks down. ncv must fit INSIDE the rank as well,
+    # and ARPACK needs k < ncv <= n. Left to scipy whenever the rank is
+    # comfortable (the normal case: 6.2.PSD is rank 150 against ncv 20), so
+    # this changes nothing on a healthy mass matrix.
+    if rank and rank < min(n, max(2 * n_modes + 1, 20)):
+        kw["ncv"] = max(n_modes + 1, min(n, rank))
+    vals, vecs = spla.eigsh(stiff.K, k=n_modes, M=M, sigma=0, which="LM",
+                            **kw)
     order = np.argsort(vals)
     vals, vecs = vals[order], vecs[:, order]
     freq = np.sqrt(np.maximum(vals, 0.0)) / (2.0 * math.pi)
@@ -503,9 +601,19 @@ def _print_matrix_info(stiff: StiffnessMatrix) -> None:
           f"{len(np.unique(stiff.user_node))} nodes")
     if stiff.low_precision:
         print("  WARNING: matrix printed by a STOCK engine (FORMAT E10.2, 2 "
-              "significant digits) - expect ~1% stiffness rounding and "
-              "~0.5-1% frequency error. A patched engine (imp_mumps.F FORMAT "
-              "1003 E10.2 -> E24.16) is exact; see the k2rad README.")
+              "significant digits). On a compact model that is ~1% stiffness "
+              "rounding and ~0.5-1% frequency error, but the error is NOT "
+              "bounded at 1%: a soft global mode of a slender structure is a "
+              "near-cancellation of much larger local terms, and 2 digits "
+              "destroy it. MEASURED on the 50-element cantilever of "
+              "nvh/example-06-02 (6.2.PSD_Beam_Example_LSTC.k, LS-DYNA eigout "
+              "f1 = 110.4521 Hz): the exact matrix gives 110.5541 Hz and a "
+              "tip stiffness of 109.454 = 3EI/L^3 to six figures, while the "
+              "SAME matrix rounded to E10.2 gives a NEGATIVE tip stiffness "
+              "(-2.6e5) and f1 = 0.0000 Hz. Treat any frequency from a "
+              "low-precision matrix as unvalidated until a patched engine "
+              "(imp_mumps.F FORMAT 1003 E10.2 -> E24.16, which the k2rad "
+              "Docker image ships) reproduces it; see the k2rad README.")
 
 
 class _Tee:
@@ -568,6 +676,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "modal_solve.log next to the matrix file")
     ap.add_argument("--no-log", action="store_true",
                     help="do not write the console log file")
+    ap.add_argument("--zero-density-floor",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="build the mass matrix with k2rad's own RO <= 0 floor "
+                         "(%(default)s) so M and the exported K describe the "
+                         "SAME model - the .rad the engine exported from "
+                         "already carries rho = 1e-24 on those materials. "
+                         "--no-zero-density-floor keeps the stated zero, which "
+                         "leaves those elements massless")
     args = ap.parse_args(argv)
 
     if not _HAVE_SCIPY:
@@ -641,7 +757,8 @@ def _run(args) -> int:
         return 1
     print(f"Building lumped mass matrix from: {args.k_file}")
     state = parse_deck(args.k_file)
-    node_mass, node_inertia = nodal_masses_from_state(state)
+    node_mass, node_inertia = nodal_masses_from_state(
+        state, zero_density_floor=args.zero_density_floor)
     md = build_mass_diagonal(stiff, node_mass, node_inertia)
     n_modes = default_n_modes(state, args.n_modes)
     in_k = np.unique(stiff.user_node)

@@ -1525,10 +1525,17 @@ class ThermalOutputTests(unittest.TestCase):
         self.assertNotIn("TEMP", plain)
 
     #: A /HEAT/MAT and a stated driver whose *SET_NODE the converter cannot
-    #: read — the shape of thermal/metal-forming/metal-forming.k
-    #: (*SET_NODE_LIST_GENERATE) and of the mat-add carrier
-    #: (*SET_NODE_GENERAL). The driver is dropped at EMISSION, so nothing ever
-    #: changes the temperature and the channels must stay out.
+    #: resolve — here a plain undefined id 404. The driver is dropped at
+    #: EMISSION, so nothing ever changes the temperature and the channels must
+    #: stay out.
+    #:
+    #: The two corpus examples this comment used to name,
+    #: thermal/metal-forming/metal-forming.k (*SET_NODE_LIST_GENERATE) and the
+    #: mat-add carrier (*SET_NODE_GENERAL), stopped being examples of the shape
+    #: in R14 triage round 2, which registered both spellings; the ones that
+    #: still leave this hole are *SET_NODE_LIST_SMOOTH and a *SET_NODE_GENERAL
+    #: clause k2rad refuses by name. The probe itself never depended on them —
+    #: id 404 exists nowhere in it — so only the sentence changed.
     UNRESOLVABLE_DRIVER = ("*BOUNDARY_TEMPERATURE_SET\n"
                            + _row(404, 0, 250.0, 0, 1.0e20, 0.0) + "\n")
 

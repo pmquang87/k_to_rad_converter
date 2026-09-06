@@ -100,13 +100,45 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
             inter_id=inter_id,
             title="auto_implicit_stabilization_self_contact",
             ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
+            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
+            # stated Inacti = 1 here to dodge starter ERROR 611 on
+            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
+            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
+            # initially penetrating secondary node for the whole run, not just
+            # the ones that cannot be depenetrated. On
+            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
+            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
+            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
+            # putting Inacti back to 5 restored the 218-cycle run exactly.
+            # ERROR 611 is cleared by the Fpenmax cell that
+            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
+            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
+            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
+            # zero-normal ones).
         )
     )
     state.warn(
         "Implicit model has no contact interface — the OpenRadioss engine "
         "segfaults in implicit setup without one. Injected an inert all-parts "
-        f"self-contact (/INTER/TYPE7 id {inter_id}); it carries no load unless "
-        "parts actually touch. Remove it if you define real contact."
+        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
+        "(variable gap: an initially touching node gets a gap reduced to its "
+        "own penetration, so the stub carries no load at t=0) plus "
+        "Fpenmax=0.999999, which "
+        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
+        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
+        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
+        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
+        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
+        "TERMINATION. What the stub does AFTER t=0 depends on the mesh, "
+        "measured on a two-block implicit coupon: with a 0.5 mm physical gap "
+        "(0 nodes deactivated) it resists further interpenetration (I-ENERGY "
+        "1.636E+05 with the block, 4.469 without); on COINCIDENT non-merged "
+        "faces (24 nodes deactivated by Fpenmax) it is fully inert — the run "
+        "is identical to one with the whole /INTER/TYPE7 block deleted, "
+        "I-ENERGY = EXT-WORK matching at every cycle. Fpenmax buys the "
+        "refusal-free start by removing the resistance on exactly the meshes "
+        "that need Fpenmax. Remove the interface if you define real contact."
     )
 
 
@@ -192,6 +224,7 @@ def convert(
     zero_density_floor: bool = True,
     law106_shell_restate: bool = True,
     zero_t0_sentinel: bool = True,
+    node_tc_rc_bcs: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -349,6 +382,35 @@ def convert(
         initial temperature keeps ``0.0`` - there the 300 K default is
         Radioss's own documented behaviour and contradicts nothing. Set False
         (CLI ``--no-zero-t0-sentinel``) to write the deck's own ``0.0``.
+    node_tc_rc_bcs : bool
+        Convert ``*NODE`` card 1's own ``TC``/``RC`` constraint cells into
+        ``/GRNOD/NODE`` + ``/BCS`` — one pair per distinct ``(TC, RC)`` code.
+        **On by default.** Vol I R17 p.35-2/35-3 makes card 1
+        ``NID X Y Z TC RC`` with the codes ``0`` none, ``1`` x, ``2`` y,
+        ``3`` z, ``4`` xy, ``5`` yz, ``6`` zx, ``7`` xyz in the GLOBAL system,
+        carrying no CID, no id and no birth/death — they are unconditionally
+        active for the whole run. LS-DYNA applies them, measured rather than
+        assumed: this decode reproduces its own ``nodal spc summary on *NODE
+        cards`` d3hsp echo — printed by 155 of the R14 reference runs — on all
+        162 139 TC/RC cells of the 137 carrier decks, with zero
+        translation-code disagreements. Dropping them leaves those
+        degrees of freedom FREE at 0 conversion warnings and 0 starter errors;
+        on the 356-deck dynaexamples R14 campaign **137 decks carry a non-zero
+        cell and 119 of them have no ``*BOUNDARY_SPC`` at all**, and those
+        decks sit under 44 of the 69 IE-collapse and 27 of the 42
+        implicit-ERROR rows. Two measured against their own LS-DYNA
+        ``glstat``: ``component1`` moves from IE −99.92 % / KE +772630 % to
+        IE +1.5 % / KE +1.0 %, and ``ex_03_solid_elform_1_4x6x4_mesh`` from a
+        TIMESTEP-LIMIT death at ``t = 0.22`` to NORMAL TERMINATION at
+        ``t = 1.0``. Screened rule by rule, each screen counted in the log:
+        rigid-body member nodes are DROPPED (Vol I p.35-3 Remark 1; LS-DYNA's
+        own ``Warning 60257 skipping spc on rigid body node``; inert in
+        OpenRadioss anyway per ``rgbodv.F:150-155``), a DOF a
+        ``*BOUNDARY_PRESCRIBED_MOTION`` already drives is left to it (a
+        ``/BCS`` on the same DOF measures starter WARNING 312 and a 99.9 %
+        engine energy error), and a DOF a ``*BOUNDARY_SPC`` already states is
+        merged rather than restated. Set False (CLI ``--no-node-tc-rc-bcs``)
+        to keep the pre-2026-09 behaviour, in which those DOFs are free.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -470,6 +532,7 @@ def convert(
         zero_density_floor=zero_density_floor,
         law106_shell_restate=law106_shell_restate,
         zero_t0_sentinel=zero_t0_sentinel,
+        node_tc_rc_bcs=node_tc_rc_bcs,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,
@@ -513,8 +576,16 @@ def convert(
     # and every *INCLUDE has been read — BEFORE --auto-gapmin analyses the mesh
     # and before build_starter emits it. Idempotent: build_starter calls it too
     # for the direct-writer callers, and the second call is a no-op.
-    from .writer import _flatten_set_adds, _screen_provisional_elements
+    from .writer import (_expand_set_ranges_and_generals, _flatten_set_adds,
+                         _screen_provisional_elements)
     _screen_provisional_elements(state)
+
+    # *SET_<F>_GENERATE / _GENERAL → plain sets of that family, BEFORE the
+    # _ADD unions are flattened (an _ADD member may be a _GENERATE sid) and
+    # before anything allocates a /GRNOD or element-group id. Vol I R17
+    # p.43-40: "these sets are generated after all input is read", which is
+    # exactly this slot. Idempotent; build_starter calls it too.
+    _expand_set_ranges_and_generals(state)
 
     # *SET_<FAMILY>_ADD → plain sets of that family now that every member
     # block has been read (a parse-time expansion could miss a child defined

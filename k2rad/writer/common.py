@@ -8,6 +8,7 @@ from ..state import ConversionState
 
 __all__ = [
     "HDR",
+    "_part_scoped_segment_set",
     "_nid_centroid",
     "_node_cloud_normal",
     "_orthonormal_pair",
@@ -58,6 +59,45 @@ __all__ = [
 
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
+
+
+def _part_scoped_segment_set(state: ConversionState, ssid: int,
+                             keyword: str, consequence: str) -> bool:
+    """True (and WARNED) when ``*SET_SEGMENT`` *ssid* exists but holds no
+    explicit segment because a ``*SET_SEGMENT_GENERAL`` clause scoped it to
+    whole PARTs.
+
+    Reading the ``PART``/``ALL`` options of ``*SET_SEGMENT_GENERAL`` (round 2)
+    gave ``SegmentSet`` a ``part_scope`` list and left ``.segments`` empty for
+    such a set. ``writer/contacts`` and ``writer/gapmin`` resolve that scope; the
+    six other consumers of ``state.segment_sets`` iterate ``.segments`` alone,
+    so before this helper a PART-scoped set turned a NAMED drop ("set not
+    defined") into a SILENT one — the set now EXISTS, so the old
+    ``is None`` guard no longer fires and the loop simply contributes nothing.
+    FIVE of those six call this and say what they lost (``writer/loads``
+    ``*LOAD_SEGMENT_SET``; ``writer/blast_ale`` ``*LOAD_BLAST_SEGMENT_SET``,
+    ``*BOUNDARY_NON_REFLECTING`` and ``*CONSTRAINED_LAGRANGE_IN_SOLID``;
+    ``writer/monvol``'s airbag surface). The sixth,
+    ``writer/mesh._referenced_node_ids``, carries a written verdict at its own
+    site instead of a call: that pass keeps a node only a LOAD references, and
+    a scoped part's nodes are already referenced by that part's own elements.
+
+    MEASURED reach: 0 corpus decks combine a PART-scoped ``*SET_SEGMENT_GENERAL``
+    with any of these keywords (the six PART rows in the corpus are the welding
+    decks' segment set 4, consumed as a tied contact's main side), so this is an
+    audit verdict rather than a live drop.
+    """
+    ss = state.segment_sets.get(ssid)
+    if ss is None or ss.segments or not ss.part_scope:
+        return False
+    state.warn(
+        f"{keyword}: *SET_SEGMENT {ssid} is defined by a *SET_SEGMENT_GENERAL "
+        f"whose only clause scopes it to whole part(s) "
+        f"{', '.join(str(p) for p in ss.part_scope)} — it names no explicit "
+        f"segment, and this consumer needs segments. {consequence} Restate the "
+        "faces as SEG clauses (or a plain *SET_SEGMENT) if the load/boundary "
+        "really belongs on that part's surface.")
+    return True
 
 
 def _ams_is_emitted(state: ConversionState) -> bool:

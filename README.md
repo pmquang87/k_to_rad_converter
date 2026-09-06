@@ -111,19 +111,19 @@ export the image.
 ## Supported LS-DYNA keywords
 
 ### Mesh & geometry
-`*NODE` (`NID X Y Z` — its **`TC`/`RC` constraint cells are NOT converted**:
-they are constraint codes in the global system, exactly what
-`*BOUNDARY_SPC_NODE` states one flag at a time, and a deck that puts its
-constraints there converts into a model with those dofs FREE. Measured on a
-spring-mass coupon whose anchor carried `tc=7/rc=7`: no `/BCS`, the anchor
-free, the whole oscillator drifting at the centre-of-mass velocity while the
-engine printed NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero
-cell, so this is NAMED per deck — with the count, a few ids and the
-`*BOUNDARY_SPC_NODE` remedy — rather than silently converted. The deferral is
-about SCREENING, not about which direction the error runs: a correct `/BCS`
-pass has to exclude rigid-body nodes (p.35-3 Remark 1) and any dof already
-driven by `/IMPVEL`/`/IMPDISP`, and both need their own twin campaign. See
-ROADMAP for the opt-in flag that will carry it. The rows themselves are read
+`*NODE` (`NID X Y Z` — its **`TC`/`RC` constraint cells ARE converted**, to one
+`/GRNOD/NODE` + `/BCS` per distinct `(TC, RC)` pair and **on by default**; see
+**Boundary conditions & motion** below for the screens and the
+`--no-node-tc-rc-bcs` opt-out. Until R14 triage round 2 they were read and
+dropped, so a deck that puts its constraints there converted into a model with
+those dofs FREE — measured on a spring-mass coupon whose anchor carried
+`tc=7/rc=7`: no `/BCS`, the anchor free, the whole oscillator drifting at the
+centre-of-mass velocity while the engine printed NORMAL TERMINATION.
+**137** of the 893 `.k`/`.key`/`.dyn` files in the three corpus roots write a
+non-zero cell, all of them in the dynaexamples R14 tree, and 119 of those have
+no `*BOUNDARY_SPC` card at all. (The "721 of 2346 corpus decks" this sentence
+used to quote is not reproducible against those roots and was replaced by the
+measured count; see ROADMAP.) The rows themselves are read
 from their fixed columns even when a negative X and Y weld the node id onto
 the first coordinate — a shape that used to lose the node and mint a phantom
 node 0 on 188 corpus files),
@@ -1222,7 +1222,18 @@ control — ELFORM 20/22's shell-offset moments and `COHOFF` have no TYPE43
 mechanism, `GASKETT` is not an adhesive path, and hourglass splits
 (`*HOURGLASS`/`*CONTROL_HOURGLASS`) never touch a cohesive part.
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
-`*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
+`*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0).
+`*EOS_GRUNEISEN`'s first-order volume correction `A = 0` is written as
+`1e-20` when the card's `GAMMA0` is non-zero, because
+`hm_read_eos_gruneisen.F:102` is `IF(A == ZERO) A = GAMA0` and LS-DYNA states
+no Default for A (Vol II R17 p.1-16) — the two solvers' equations of state are
+otherwise identical term for term, so that substitution is the whole
+difference. Measured on a four-brick starter coupon at µ0 = 0.1: the reader
+echoes `1.0000000000000E-20` verbatim and its INITIAL PRESSURE is
+15439.03415072, the `a = 0` closed form to 13 digits, against 15284.64380921
+for `A = GAMMA0`. A card whose `GAMMA0` is 0 is left alone — the substitution
+is a no-op there, and 23 of the 25 `A = 0` cards on the R14 roster are that
+shape.
 `*MAT_TABULATED_JOHNSON_COOK` (224, `_LOG_INTERPOLATION` → `I_smooth=2`) →
 `/MAT/LAW109` `[+ /FAIL/TAB1]` — the fully tabulated flow stress
 `σ_y = k1(ε_p, ε̇)·kt(ε_p,T)/kt(ε_p,T_ref)`. `CP` copies 1:1 (LAW109's `C_p`
@@ -2230,6 +2241,41 @@ it grows for stubby beams.
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
 `*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
+`*SET_<FAMILY>_GENERATE` / `_GENERATE_INCREMENT` / `_GENERAL` / `_COLUMN` — the
+range and OPTION spellings, registered from **one** family table
+(`state.SET_RANGE_FAMILIES`, which also generates the `*INCLUDE_TRANSFORM`
+offset rows and the expansion pass). OPTION1 is family-specific and the
+asymmetry is real: NODE/PART/SHELL spell the range `LIST_GENERATE`,
+SOLID/BEAM/DISCRETE spell it bare `GENERATE`, DISCRETE has no `_INCREMENT`,
+only NODE/PART/SHELL have `_COLUMN`, and SEGMENT has no range spelling at all
+— so `*SET_SOLID_LIST_GENERATE` does not exist and is not derived from the
+lenient `*SET_SOLID_LIST` alias. `_COLLECT` and `_TITLE` stack and are stripped
+by the parser.
+**The ranges expand POST-PARSE, against the id POOL, never by materialising
+`range(beg, end + 1)`**: Vol I R17 p.43-40 says the sets "are generated after
+all input is read so that gaps in the node numbering are not a problem" and
+that "BnBEG and BnEND may simply be limits on the IDs and not nodal IDs" — and
+`show-cases/contact-overview/main.k` states a `*SET_PART_LIST_GENERATE`
+spanning 10 000 000..30 199 999 over 664 parts. 20 of the ~50 corpus ranges
+have holes; the hole count is reported once per set as a FACT, with the page
+that makes it correct. `_GENERAL` clauses are applied IN ORDER and an
+exclusion removes only what is already in the set (p.43-41's own worked
+example, part 6 / `DBOX` 7 / part 10 → {5, 10, 15, 22, 106}); the options
+k2rad resolves are `ALL`, `NODE`/`DNODE`, `PART`/`DPART`, `BOX`/`DBOX`,
+`SET_NODE`/`DSET_NODE`, `SET_PART`, `SET_SHELL`/`_SOLID`/`_BEAM`/`_DISCRETE`
+for nodes and `SEG`/`DSEG`, `SET`/`DSET`, `PART`/`DPART`, `ALL` for segments,
+each other documented option being refused BY NAME with the set id. A
+`*SET_SEGMENT_GENERAL` `PART` clause keeps the part IDs rather than
+tessellating faces in Python — p.43-64's "one segment per shell ... only those
+segments wrapping the solid part and pointing outward" is exactly what
+`/SURF/GRSHEL` + `/SURF/PART/EXT` already emit — and its `SEG` rows share the
+`*SET_SEGMENT` triangle collapse, so one face written both ways stays one
+segment. A `_COLUMN` set is a plain id list to every consumer (no Radioss group
+carries a per-member attribute) and its `A1..A4` cells are named as dropped.
+`*SET_TSHELL_GENERATE`/`_GENERAL` DO exist in R17 but are deliberately NOT
+registered: there is no thick-shell set container for the result and
+`*SET_TSHELL` itself is unregistered, so the block would parse a set nothing
+can read — it stays in `skipped_keywords`, named.
 `*SET_NODE_ADD`, `*SET_PART_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
 `*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` (+ every `_TITLE` form)
 → a conversion-time boolean UNION expanded into the family's ordinary set, so
@@ -2502,6 +2548,39 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
+`*NODE` card 1's own `TC`/`RC` cells → one `/GRNOD/NODE` + `/BCS` per distinct
+`(TC, RC)` pair, **on by default** (`--no-node-tc-rc-bcs` /
+`convert(node_tc_rc_bcs=False)` restores the old drop). Vol I R17 p.35-2 makes
+card 1 `NID X Y Z TC RC` with the codes `0` none, `1` x, `2` y, `3` z, `4` xy,
+`5` yz, `6` zx, `7` xyz in the **global** system, carrying no CID, no id and no
+birth/death — always active. The decode reproduces LS-DYNA's own
+`nodal spc summary on *NODE cards` d3hsp echo (printed by 155 of the R14
+reference runs) on all **162 139 constrained `*NODE` rows of the 137 carrier
+reference decks with zero translation-code disagreements**. Screened rule by
+rule, each screen counted and its nodes named in the conversion log: a
+rigid-body member node is **re-pointed onto the body's `/RBODY` main node**,
+unioned per body — the card cannot stay on the member (`rgbodv.F:150-155` runs
+after `BCS10` and rebuilds a secondary's acceleration from the body, measured
+inert) and LS-DYNA applies the cell to the BODY, measured on
+`control_contact.hemi-draw` part 4 (525 nodes at TC 7 / RC 7, `*MAT_RIGID`
+CMO 0, no other constraint, 1.8e4 of contact force, `matsum` rigid-body
+velocity exactly 0.0 in all three components at all 121 output times, while
+parts 2 and 3 with TC codes unioning to x and z move freely in y). It is the
+same re-point `_make_bcs` performs for a `*BOUNDARY_SPC` on a rigid member.
+Vol I R17 p.35-3 Remark 1 is advice to the deck author, and
+`Warning 60257 skipping spc on rigid body node` is an `IMP+` (implicit)
+message on 1 of the 16 carriers. A DOF a
+`*BOUNDARY_PRESCRIBED_MOTION` already drives is **left to it** (measured: the
+same DOF pinned twice gives starter `WARNING 312` and a 99.9 % engine energy
+error), a DOF a `*BOUNDARY_SPC` already states is **merged, not restated**
+(`hm_read_bcs.F:198` unions the codes), and a rotational code on a mesh with no
+rotational DOF is **emitted and named inert** (`bcs10.F:66`'s `IRODDL` guard;
+LS-DYNA drops it too). Measured on the 356-deck dynaexamples R14 campaign: 137
+decks carry a non-zero cell, 119 of them have no `*BOUNDARY_SPC` at all, and
+two run against their own LS-DYNA `glstat` move from IE −99.92 % / KE
++772630 % to IE +1.5 % / KE +1.0 % (`component1`) and from a TIMESTEP-LIMIT
+death at `t = 0.22` to NORMAL TERMINATION at `t = 1.0`
+(`ex_03_solid_elform_1_4x6x4_mesh`)
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
@@ -2882,8 +2961,11 @@ EXT-WORK 4.283) under a `NORMAL TERMINATION` banner.
 `/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT`
 and an **emitted** temperature-moving card both exist, **and the run is
 explicit** — read from what was written, not from what was parsed, because a
-driver whose `*SET_NODE_GENERAL` k2rad cannot read is dropped at emission and
-then nothing changes the temperature. The implicit exclusion is a measurement:
+driver whose `*SET_NODE` does not resolve is dropped at emission and then
+nothing changes the temperature. (`*SET_NODE_GENERAL` was the measured example
+until R14 triage round 2 registered it; an undefined id, a
+`*SET_NODE_LIST_SMOOTH` and a `_GENERAL` clause k2rad refuses by name still
+leave exactly this hole, so the gate stays.) The implicit exclusion is a measurement:
 a twin pair of converted decks (10-brick bar, an `/IMPTEMP` holding one end at
 400 K against an `/INITEMP` of 300) carries the far end 300 → 399.731 → 400.000 K
 over 84 111 explicit cycles, while the same `.k` plus a
@@ -2986,7 +3068,17 @@ exempted-node history.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),
-grouped by identical 6-tuple velocity
+grouped by identical 6-tuple velocity. When EVERY node of such a card belongs
+to a rigid body the group is **re-pointed onto that body's `/RBODY` main
+node** — `inirby.F` rebuilds a secondary's velocity from the main node every
+cycle, so the card written on the secondaries is overwritten before cycle 1 and
+the body starts at rest, at 0 starter diagnostics, while LS-DYNA gives the
+rigid PART the velocity (measured on `matfoamsoil`: cycle-0 K-ENERGY 3.547E+04
+against the LS-DYNA reference's own 3.54775E+04, −0.02 %, where the
+un-re-pointed card gives 0.000). A MIXED card is left over its stated nodes and
+named, and `*INITIAL_VELOCITY_GENERATION` is not re-pointed at all: it emits
+`/INIVEL/AXIS`, whose `Vr` gives each node the translational velocity
+`omega x r`, so collapsing the group would leave the body with no spin
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
@@ -3133,6 +3225,21 @@ and `0.7·ΔT` it quotes the fraction of `E` actually reached from
 preloaded group 10 -> 4 with WARNING 1775, so the preload takes the
 total-strain formulation away again), and a curve whose peak is zero or
 compressive (starter WARNING 1255)
+`SURFATYP`/`SURFBTYP` (SSTYP/MSTYP) is read as the ID NAMESPACE it is, with no
+fallback chain: **0 is a `*SET_SEGMENT` id and 1 a `*SET_SHELL` element-set id**
+(Vol I R17 p.11-24), 2 a part set, 3 a part, 4 a node set, 5 all parts, 6 all
+parts minus a set, 7 refused. p.11-25 settles it from the other side — SABOXID
+"can be used only if SURFATYP is set to 2, 3, 5, or 6, meaning SURFA is a part
+ID or part set ID" — so a type-0 side is never read as a `*PART` of the same
+number. Type 0 builds a `/SURF/SEG` over the set's own segments (plus, for a
+`*SET_SEGMENT_GENERAL` `PART` scope, that part surface) and takes its secondary
+nodes from the same segments; type 1 builds a `/GRSHEL/SHEL` + `/SURF/GRSHEL`
+over the set's element ids. A `*SET_SEGMENT` IS a legal main surface —
+`hm_read_inter_type07.F:393` resolves the main side through the `/SURF`
+registry with no kind check, and `:448-455` self-pairs it for a single-surface
+interface. A side whose set is MISSING is dropped and named, with the type, the
+id, any same-numbered `*PART` and the `*INCLUDE` possibility; it never falls
+back to a part. `--auto-gapmin` measures and labels the side the same way.
 `*INITIAL_AXIAL_FORCE_BEAM` → `/PRELOAD/AXIAL` with `Preload = SCALE` (blank → 1.0;
 `preload_axial.F90:33` computes `f1 = SCALE·f(t)`, replacing the element's own
 axial force inside the window). Emitted at `/BEGIN 2022`, where the starter adds
@@ -3406,13 +3513,42 @@ dropped behaviour (dyna2rad parses the flag and never reads it)
 initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
 deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
-pre-engagement bootstrap needs the t=0 stiffness path). `Inacti=5` can only
-*shrink* the gap, never create clearance, so two parts drawn **exactly
-coincident** still hit starter **ERROR 611** (`INITIAL PENETRATION = ...
-IMPOSSIBLE TO CALCULATE NEW COORDINATES OF SECONDARY NODE`) — the penetration
-equals the whole element-derived gap and there is nowhere to shift the node to.
-Met in practice on a friction rig whose slab touched its plate: 264 × ERROR 611,
-cleared by a 0.01 mm modelling clearance
+pre-engagement bootstrap needs the t=0 stiffness path). Whenever the resulting
+`Inacti` is one of 3/4/5/6 the card also gets **`Fpenmax = 0.999999`**, and
+that is
+the fix for starter **ERROR 611** (`INITIAL PENETRATION = ... IMPOSSIBLE TO
+CALCULATE NEW COORDINATES OF SECONDARY NODE`). 611 is a **zero-normal**
+condition, not an "Inacti cannot depenetrate" one: `i7pwr3.F:113-114` computes
+`DN = |N|²` for the vector from the projection point to the secondary node, and
+`DN ≤ 1e-30` — the node lying *exactly* on a main segment, so no depenetration
+direction exists — is the only gate. `:118` is
+`IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so **`Inacti = 6` does not
+help either**; only 1/2 or a non-zero `Fpenmax` pass. `Fpenmax` turns the
+refusal into a deactivation: `:193-195` zeroes `STFN` when
+`PENE > Fpenmax·GAPV` — BEFORE the Inacti branches at `:200-208`, so a caught
+node loses its Inacti treatment too — and `i7pen3.F:70-80` makes
+`PENE = GAPV + MARGE − d`. The constant is MEASURED, not reasoned: four
+starter runs of `4.3_General_Nonlinearity` differing only in that cell give
+0 → 486 × ERROR 611, 0.99 → **928** nodes deactivated, 0.9999 → 503, and
+0.999999 → **486**, which is the starter's own count of zero-normal nodes.
+On `05_1_welding_solid` (310 zero-normal) it takes 355 and stays at 355 at
+0.99999999 — that residue is the `MARGE` term, not the constant. It is a **starter-only** field
+(`hm_read_inter_type07.F:275` → `FRIGAP(27)`; the engine's only
+`VARIABLES(27)` use is TYPE21's `i21main_tri.F`) and is measured inert on decks
+without such nodes — two control decks, one explicit and one implicit, re-run
+with nothing but `Fpenmax` added produce byte-identical decoded `T01` channels.
+Measured on the two R14 carriers: `05_1_welding_solid` 310 → 0 starter errors,
+`4.3_General_Nonlinearity` 486 → 0. k2rad's own synthesized
+`auto_implicit_stabilization_self_contact` takes the SAME policy — the
+ordinary `Inacti = 5` plus that `Fpenmax`. It stated `Inacti = 1` for one
+round; measured, that zeroes the stiffness of every initially penetrating node
+and cost `efg/metal-cutting/main.k` its NORMAL termination (218 cycles to
+t = 0.03 became a TIMESTEP-LIMIT death at t = 0.0084), so the lever is Fpenmax
+and not Inacti. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
+(`hm_read_inter_type10.F:94`) and clears the same refusal with `Itied = 1`
+("TIED AFTER IMPACT NO REBOUND AUTORIZED", `:188`), which is what a
+`*CONTACT_TIED_*` without `_FAILURE` means anyway — measured, 310 × ERROR 612
+→ 0 on `05_4_2_welding_uncoupled_link_d3plot_structuralstep`
 A contact **master surface** built from a part that carries 3-corner shells
 splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT` (or
@@ -5085,6 +5221,24 @@ See [`docs/MODAL.md`](docs/MODAL.md) for the full chain — the export recipe,
 drilling-stiffness parity (`--drill`), stock-engine caveats and 1-line patches,
 the inert probe rigid body, mode-shape viewing, random vibration & fatigue, and
 GUI integration.
+
+The mass arm weighs a `*SECTION_BEAM` that states only THICKNESSES (ELFORM
+0/1/4/5/11, whose card 2 is `TS1 TS2 TT1 TT2 …`): the area is taken from the
+same `writer/beams._constants_from_thicknesses` the converter used to build the
+`/PROP/BEAM` the engine's stiffness matrix came from, and a material stating
+`RO ≤ 0` gets the converter's own 1e-24 floor for the same reason — the `.rad`
+the matrix was exported from already carries it, so building `M` at `ρ = 0`
+would pair a mass matrix with a stiffness matrix from a different model
+(`--no-zero-density-floor` keeps the stated zero). Without both,
+`nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k` gave a mass matrix of RANK 3
+and `eigsh` died with ARPACK −9999 — which reads like a singular stiffness
+matrix and is not one; the solver now clamps both the mode count and ARPACK's
+`ncv` into the rank and says so. **The stock engine's `E10.2` matrix print is
+not a ~1 % error on a slender model**: measured on that deck, an exact matrix
+gives f1 = 110.5541 Hz against its `eigout`'s 110.4521 (+0.09 %) while the SAME
+matrix rounded to two significant digits gives a NEGATIVE tip stiffness and
+f1 = 0. Treat a frequency from a low-precision matrix as unvalidated — the
+warning now says so with those numbers.
 
 ### Further linear analyses on the exported stiffness matrix
 

@@ -97,6 +97,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          zero_density_floor: bool = True,
                          law106_shell_restate: bool = True,
                          zero_t0_sentinel: bool = True,
+                         node_tc_rc_bcs: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -181,6 +182,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["law106_shell_restate"] = bool(law106_shell_restate)
 
     kwargs["zero_t0_sentinel"] = bool(zero_t0_sentinel)
+
+    kwargs["node_tc_rc_bcs"] = bool(node_tc_rc_bcs)
 
     kwargs["write_restart"] = bool(write_restart)
 
@@ -269,6 +272,7 @@ class ConverterGUI:
         self.zero_density_floor = tk.BooleanVar(value=True)
         self.law106_shell_restate = tk.BooleanVar(value=True)
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
+        self.node_tc_rc_bcs = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
@@ -371,6 +375,21 @@ class ConverterGUI:
                      "is then overwritten with it. Measured +468.9 % vs the "
                      "LS-DYNA reference without it, +0.91 % with it)",
             variable=self.zero_t0_sentinel).grid(row=9, column=3, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Convert *NODE's own TC/RC constraint cells to /BCS  "
+                     "(default on: Vol I R17 p.35-2 makes *NODE card 1 "
+                     "'NID X Y Z TC RC', and LS-DYNA applies those codes "
+                     "unconditionally — its d3hsp echoes them, matched here "
+                     "on all 162139 TC/RC cells of the 137 carrier decks (the "
+                     "echo is printed by 155 of the R14 reference runs). "
+                     "Without it 137 of "
+                     "the 356 R14 reference decks run unsupported: measured, "
+                     "component1 goes from IE -99.92 % / KE +772630 % to "
+                     "+1.5 % / +1.0 %. Rigid-body nodes and DOFs a "
+                     "prescribed motion drives are screened out and counted. "
+                     "Untick to leave those DOFs free)",
+            variable=self.node_tc_rc_bcs).grid(row=11, column=3, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
@@ -622,6 +641,7 @@ class ConverterGUI:
                 zero_density_floor=self.zero_density_floor.get(),
                 law106_shell_restate=self.law106_shell_restate.get(),
                 zero_t0_sentinel=self.zero_t0_sentinel.get(),
+                node_tc_rc_bcs=self.node_tc_rc_bcs.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -730,6 +750,9 @@ class ConverterGUI:
                         "(--no-law106-shell-restate)")
         if not kwargs.get("zero_t0_sentinel", True):
             bits.append("stated T = 0 written as 0 (--no-zero-t0-sentinel)")
+        if not kwargs.get("node_tc_rc_bcs", True):
+            bits.append("*NODE TC/RC constraints left free "
+                        "(--no-node-tc-rc-bcs)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

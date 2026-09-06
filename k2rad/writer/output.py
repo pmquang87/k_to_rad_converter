@@ -2017,9 +2017,10 @@ def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
         if entry is None:
             state.warn(
                 f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: no converted "
-                "*SET_NODE with that id (or a set spelling k2rad does not "
-                "expand, e.g. *SET_NODE_GENERAL), so NO /TH/NODE group is "
-                "written "
+                "*SET_NODE with that id (*SET_NODE_GENERAL was the example "
+                "here until R14 triage round 2 registered it; what still does "
+                "not expand is *SET_NODE_LIST_SMOOTH and the _GENERAL clauses "
+                "k2rad refuses by name), so NO /TH/NODE group is written "
                 "and those nodfor channels are lost. Listing the set id as if "
                 "it were a node id would be starter ERROR 78.")
             continue

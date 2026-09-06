@@ -1637,15 +1637,23 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
         """The exact call-site count, so a silently deleted or re-added bare
         ``next_id()`` shows up as a number change rather than as nothing.
 
-        19 = 4 master-surface (common.py) + 6 /SECT (inistate.py) + 1
-        /CLUSTER/BRICK (loads.py) + 4 bag-surface (monvol.py) + 2 /PRELOAD
-        (preload.py) + 1 FSI /GRBRIC/PART (blast_ale.py) + 1 /ACTIV
-        (rarecards.py, the only one that was guarded before this batch).
+        21 = 4 master-surface (common.py) + 2 styp-1 contact main surface
+        (contacts.py) + 6 /SECT (inistate.py) + 1 /CLUSTER/BRICK (loads.py) +
+        4 bag-surface (monvol.py) + 2 /PRELOAD (preload.py) + 1 FSI
+        /GRBRIC/PART (blast_ale.py) + 1 /ACTIV (rarecards.py, the only one that
+        was guarded before this batch).
 
         The /SECT count went 5 -> 6 with the R14 truss batch: the card has a
         grtrus_ID column of its own and a *SECTION_BEAM ELFORM=3 element is a
         /TRUSS, so a cross section holding one now emits a /GRTRUS/TRUS group
-        beside the /GRBEAM one."""
+        beside the /GRBEAM one.
+
+        19 -> 21 with R14 triage round 2: SURFATYP/SURFBTYP = 1 is a
+        *SET_SHELL element set (Vol I R17 p.11-24), and its main /SURF is built
+        from the eids directly rather than from a part scope
+        (``_resolve_contact_master``), so it allocates its own /GRSHEL/SHEL and
+        /GRSH3N/SH3N — through the guarded allocator, because a deck stating a
+        *SET_SHELL puts a group of that number in the element-set registry."""
         import re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
@@ -1655,7 +1663,7 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
                 # Skip prose: only count real call sites.
                 if re.search(r"state\.next_elem_group_id\(\)", ln):
                     n += 1
-        self.assertEqual(n, 19)
+        self.assertEqual(n, 21)
 
 
 class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):

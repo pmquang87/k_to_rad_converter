@@ -14,6 +14,7 @@ from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
     _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
+    _part_scoped_segment_set,
     _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
@@ -22,6 +23,9 @@ from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
 __all__ = [
     "_make_rlinks",
     "_make_bcs",
+    "_make_node_tc_rc_bcs",
+    "_global_spc_dofs",
+    "_mesh_has_rotational_dof",
     "_FORCE_DOF_AXIS",
     "_emit_spr_gene_dof",
     "_emit_spr_gene_dof_kc",
@@ -209,6 +213,627 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         set_title = state.node_sets.get(nsid, ("", []))[0]
         lines += _emit_grnod_node(nsid, set_title or f"SET_{nsid}", sorted(mapped_nids))
     return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: *NODE's own TC/RC constraint cells → /GRNOD/NODE + /BCS
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: LS-DYNA ``*NODE`` TC / RC code → the three ``/BCS`` digits. Vol I R17
+#: p.35-2/35-3, verbatim: "EQ.0 no constraints, EQ.1 constrained x
+#: displacement, EQ.2 y, EQ.3 z, EQ.4 x and y, EQ.5 y and z, EQ.6 z and x,
+#: EQ.7 x, y, and z" (RC the same seven on rotations). NOT assumed: the table
+#: reproduces LS-DYNA's OWN ``nodal spc summary on *NODE cards`` d3hsp echo
+#: (printed by 155 of the R14 reference runs) on all 162 139 constrained *NODE
+#: ROWS of the 137 carrier decks (267 641 non-zero TC/RC cells, counting TC and
+#: RC separately — the echo prints one row per node), with zero
+#: translation-code disagreements.
+_TC_RC_DIGITS = {0: "000", 1: "100", 2: "010", 3: "001",
+                 4: "110", 5: "011", 6: "101", 7: "111"}
+
+#: ``/IMPVEL|/IMPDISP|/IMPACC`` ``Dir`` letter → (0 = translation code /
+#: 1 = rotation code, digit index). The letters are the ones ``_DOF_DIR``
+#: produces, so this cannot drift from what the motion cards actually say.
+_IMP_DIR_BIT = {"X": (0, 0), "Y": (0, 1), "Z": (0, 2),
+                "XX": (1, 0), "YY": (1, 1), "ZZ": (1, 2)}
+
+
+def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
+    """``node id -> (Tra, Rot)`` already pinned by a GLOBAL-system ``/BCS``
+    that another pass writes from the deck's own cards.
+
+    Two sources, and they are the only two a ``*NODE`` TC/RC node can collide
+    with:
+
+      * ``*BOUNDARY_SPC_{NODE,SET}`` (``state.bcs_spcs`` → :func:`_make_bcs`);
+      * a ``*BOUNDARY_PRESCRIBED_MOTION_{NODE,SET}`` row with ``SF = 0``, which
+        :func:`_make_imposed_motions_set` writes as a ``/BCS`` rather than an
+        ``/IMP*`` ("zero x any curve = 0 displacement = fixed").
+
+    Every OTHER ``/BCS`` k2rad emits — the spring/discrete ground anchors, the
+    inert probe rigid body, the ``*MAT_RIGID`` auto-constraint and the CNRB
+    ``_SPC`` card — sits on a node no ``*NODE`` row can name: the first three
+    are ids k2rad MINTS, and the last two act on an ``/RBODY`` independent
+    node, whose members rule (a) drops from the TC/RC set anyway. So the map
+    is complete for the purpose it is read for.
+
+    A ``*BOUNDARY_SPC`` with a resolvable ``CID`` is deliberately NOT here: its
+    ``/BCS`` carries a skew, so its digits are axes of that skew and no global
+    TC/RC bit can be cancelled against them. The test mirrors ``_make_bcs``
+    exactly (an unresolvable CID falls back to the global system there, so it
+    counts here).
+
+    The ``_BOX`` rows of a prescribed motion are skipped: resolving a
+    ``*DEFINE_BOX`` costs the box resolver's own diagnostics, and running it a
+    second time here would print them twice. The consequence is bounded and
+    named in the report — at worst one extra ``/BCS`` on a node that already
+    has one, which ``hm_read_bcs.F:198`` unions (``MY_OR``) into the identical
+    constraint and only reports as starter WARNING 312.
+    """
+    out: Dict[int, Tuple[str, str]] = {}
+
+    def _add(nid: int, tra: str, rot: str) -> None:
+        old = out.get(nid, ("000", "000"))
+        out[nid] = (_or_dof_codes([old[0], tra]), _or_dof_codes([old[1], rot]))
+
+    for bc in state.bcs_spcs:
+        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+            continue                      # a skewed /BCS: not a global bit
+        tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
+        rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
+        for nid in state.node_sets.get(bc.nsid, ("", []))[1]:
+            _add(nid, tra, rot)
+    for pm in state.prescribed_motion_sets:
+        if pm.sf != 0.0 or pm.boxid:
+            continue
+        mapped = _PM_DOF_TO_BCS.get(pm.dof)
+        if mapped is None:
+            continue
+        for nid in state.node_sets.get(pm.nsid, ("", []))[1]:
+            _add(nid, mapped[0], mapped[1])
+    return out
+
+
+def _mesh_has_rotational_dof(state: ConversionState,
+                             rbody_info: Dict) -> bool:
+    """True unless this deck's mesh provably carries no rotational DOF.
+
+    ``bcs10.F:66`` applies the ROTATIONAL half of every ``/BCS`` only inside
+    ``IF(IRODDL/=0)``, so on a solid-only model the Rot digits are inert — and
+    LS-DYNA agrees, dropping them from its own ``nodal spc summary`` echo
+    (measured: 71 885 ``*NODE`` rotational codes across 22 solid/ALE R14 decks
+    are stated in the deck and absent from the echo; ``control_energy.bar-impact``
+    with its 864 ``TC 0 / RC 7`` nodes produces no echo row at all).
+
+    The predicate is deliberately one-sided: it only says NO when the deck has
+    none of the entities that bring rotational DOF with them. Anything else —
+    a rigid body included — answers yes, so the report can never claim a code
+    is inert on a model where it is not.
+    """
+    return bool(state.shell_elems or state.beam_elems or state.discrete_elems
+                or state.seatbelt_elems or state.constrained_spotwelds
+                or rbody_info)
+
+
+def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
+                         rigid_nodes: Set[int]) -> List[str]:
+    """``*NODE`` card 1's own TC/RC cells → one ``/GRNOD/NODE`` + ``/BCS`` per
+    distinct ``(TC, RC)`` pair. **On by default**; ``--no-node-tc-rc-bcs``
+    (``convert(node_tc_rc_bcs=False)``) restores the old drop.
+
+    Vol I R17 p.35-2/35-3 makes card 1 ``NID X Y Z TC RC`` with TC/RC the
+    ``*BOUNDARY_SPC`` triples in the GLOBAL system, and unlike ``*BOUNDARY_SPC``
+    they carry no CID, no id and no birth/death — they are unconditionally
+    active for the whole run. So ``skew_ID`` is always 0 here.
+
+    That bounds, but does not eliminate, the reader's ``ERROR 148`` ("A SKEW IS
+    ALREADY DEFINED WITH THE NODE"). ``hm_read_bcs.F:107-109`` seeds
+    ``ISKEW(I) = -1`` for every node and ``:198-204`` then raises 148 per NODE
+    whenever the node's stored skew is neither -1 nor THIS card's — so the pair
+    that can trip it is a node carrying both a ``*BOUNDARY_SPC`` with a
+    resolvable CID (which ``_make_bcs`` writes as ``/BCS ... skew_ID = cid``)
+    and a ``*NODE`` TC/RC cell, which this pass always writes at skew 0.
+    :func:`_global_spc_dofs` deliberately skips skewed SPCs, so nothing screens
+    that node out. MEASURED: 0 of the 893 decks in the three corpus roots carry
+    a non-zero ``*NODE`` TC/RC beside a ``*BOUNDARY_SPC`` with a non-zero CID,
+    so the pair is unrealised rather than impossible.
+
+    **Why it is ON.** ROADMAP.md prescribed shipping this behind an opt-in and
+    said "then run the campaign and consider flipping it". The campaign has
+    run: on the 356-deck dynaexamples R14 roster **137 decks carry a non-zero
+    TC/RC cell and 119 of them have no ``*BOUNDARY_SPC`` at all** — the card's
+    own cells are their only support — and those decks sit under **44 of the
+    69 IE-collapse decks and 27 of the 42 implicit-ERROR decks**. Two of them,
+    patched by hand and run against their own LS-DYNA ``glstat``:
+    ``component1`` went from IE −99.92 % / KE +772630 % to **IE +1.5 % /
+    KE +1.0 %**, and ``ex_03_solid_elform_1_4x6x4_mesh`` from a TIMESTEP-LIMIT
+    death at t = 0.22 to **NORMAL TERMINATION at t = 1.0**.
+
+    **The four screens, each measured.**
+
+      a. *A rigid-body member's cell is RE-POINTED onto the body's /RBODY main
+         node, unioned per body.* Two independent measurements pick this over
+         the two alternatives (emit it on the member; drop it).
+
+         *OpenRadioss: the card on the member is inert.* ``resol.F:7073`` runs
+         ``BCS10``, ``resol.F:7572`` then runs ``RBYVIT`` →
+         ``rgbodv.F:150-155``, which rebuilds every secondary node's
+         acceleration from the body's field, with no third ``BCS10`` after it.
+         MEASURED on a three-arm rigid twin (``*MAT_RIGID`` block under
+         ``*LOAD_BODY_Z``): ``/BCS`` on the member nodes gives K-ENERGY
+         0.3720E-03, identical to the no-``/BCS`` control and to the analytic
+         ½mv²; the SAME ``/BCS`` on the body's MAIN node gives 0.000, i.e. the
+         body is held. So the main node is the only place the cell can act.
+
+         *LS-DYNA: it applies the cell to the BODY.* This was shipped as "not
+         decidable on this corpus" and the corpus decides it — in the same deck
+         the old sentence used. ``control_contact.hemi-draw`` has four parts,
+         three of them on one ``*MAT_RIGID`` (mid 2, ``CMO`` 0.0, ``CON1`` /
+         ``CON2`` 0), no ``*BOUNDARY_SPC`` and no ``*CONSTRAINED`` anywhere,
+         one ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` (part 2, dof 2) and one
+         ``*RIGIDWALL_PLANAR`` whose node set holds 175 of part 3's nodes and
+         none of part 4's:
+
+           ============ ========================= ===================== ==================================
+           part          TC cells (all its nodes)  union of translations  ``matsum`` max abs rbv over 121 steps
+           ============ ========================= ===================== ==================================
+           2 Punch       TC 3/1/6 on 41 of 331     x, z                   x 0.0, **y 1.885e4**, z 0.0
+           3 Holder      TC 3/1 on 14 of 175       x, z                   x 0.0, **y 1.534e4**, z 0.0
+           4 Die         **TC 7 / RC 7 on all 525**  x, y, z              **x 0.0, y 0.0, z 0.0**
+           ============ ========================= ===================== ==================================
+
+         The Die is not driven, not on the rigidwall, has no other constraint
+         of any kind, and carries up to 1.8e4 of interface-3 contact force
+         (``rcforc``) — and LS-DYNA holds it at exactly zero rigid-body
+         velocity in all three components at every output time, while the two
+         bodies whose cells leave y free move in y. That is the union rule and
+         the control in one deck. ``control_adaptive.cup-draw`` says the same
+         in its ``rbdout`` (body 4, TC 7, CMO 0, contact-loaded: acceleration
+         exactly 0 in all six components at all 141 steps).
+
+         Vol I R17 p.35-3 Remark 1 — "No attempt should be made to apply
+         boundary conditions to nodes belonging to rigid bodies" — is advice to
+         the deck author, not a statement that the solver ignores them; only
+         the IMPLICIT path says otherwise out loud.
+         ``ex_16_thin_shell_elform_13`` prints ``*** Warning 60257 (IMP+257)
+         skipping spc on rigid body node 1003 / tcode = 6 rcode = 7`` (in its
+         ``.d3hsp``, its ``.messag`` and its ``.console.log``) — but for 2 of
+         that deck's 3 rigid TC/RC nodes (1003 and 1004, not 1001), and on 1 of
+         the 16 rule-(a) carriers in the R14 tree. On the explicit carriers the
+         cells are listed as stated in the ``nodal spc summary on *NODE cards``
+         echo.
+
+         The re-point is what ``_make_bcs`` has always done for a
+         ``*BOUNDARY_SPC`` on a rigid member (``node_to_ind``), so the two
+         paths now agree; the shared member→main map is ``_rbody_main_of``.
+         Rules (b), (c) and (d) are applied AT THE MAIN NODE (one ``_screen``
+         helper for both passes), which is the node
+         ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its ``/IMPVEL``
+         against — so a driven rigid body keeps its driven DOF. A member whose
+         body has no main node in ``rbody_info`` is still dropped, and named.
+      b. *A DOF an imposed motion already drives is left to it.* MEASURED on a
+         one-brick twin: ``/BCS`` and ``/IMPVEL`` on the same node and DOF give
+         starter WARNING 312 and EXT-WORK 13.66 against an I-ENERGY of 1688 —
+         a 99.9 % energy error on every cycle, which is the implicit
+         residual-never-converges signature and, on an explicit deck, poisons
+         exactly the channel the campaign grades by. The complementary split
+         (pin the DOFs the motion does not drive) measures 0.0 % with no
+         warning.
+
+         The screen is UNCONDITIONAL in time, and the card it defers to may not
+         be: ``_register_imp_motion_nodes`` records the ``Dir`` letter only, so
+         a ``*BOUNDARY_PRESCRIBED_MOTION`` with a BIRTH or a finite DEATH
+         clears the DOF for the whole run while its ``/IMPVEL`` drives only
+         inside its window — and a ``*NODE`` TC/RC cell has no window at all.
+         MEASURED reach on the 356-deck R14 roster: 30 TC/RC carriers also
+         carry a prescribed motion, 9 of the 10 whose DEATH looks finite state
+         ``DEATH = 0.0``, which Vol I R17 p.35 makes the 1e28 default, and the
+         one genuinely finite carrier (``275key2.k``, dof 3, death 5e-4) is a
+         ``*_RIGID`` motion, which drives k2rad's own ``/RBODY`` main node and
+         so meets no ``*NODE`` row. 0 decks affected today.
+      c. *A DOF a ``*BOUNDARY_SPC`` already states is merged, not restated.*
+         ``hm_read_bcs.F:198`` unions the codes (``ICODE = MY_OR(IC, ICODE)``),
+         so a second ``/BCS`` changes no physics — but ``kinset``/``kinchk``
+         still count it, and a two-``/BCS`` coupon measures 1 × WARNING 312 /
+         8 incompatible conditions. MEASURED on the R14 roster at this head —
+         AFTER the set spellings of this same batch made two more
+         ``*BOUNDARY_SPC_SET`` cards resolve, which is why the figure moved:
+         **570 DOFs on 570 nodes in 18 decks**, of which 16 (512 nodes, the
+         ``ex_12`` / ``ex_13`` / ``ex_14`` / ``ex_15`` family — 32 nodes
+         ``TC 3`` beside a ``*BOUNDARY_SPC_SET`` ``dofz = 1`` on the same 32)
+         are exact duplication and lose the node entirely, while ``ex_09``
+         (26 DOFs) and ``ex_10`` (32) are PARTIAL and keep a ``/BCS`` for the
+         DOFs their SPC does not state.
+      d. *Rotational codes on a mesh with no rotational DOF are EMITTED and
+         named.* See :func:`_mesh_has_rotational_dof`.
+
+    The implicit free-node guard is the fifth interaction, and it is resolved
+    from the OTHER side: :func:`_make_free_node_constraints` runs later, drops
+    from its own ``111 111`` group any node this pass has already pinned in all
+    six DOFs, and keeps the rest (its mask is the superset, so a partially
+    pinned free node must still reach it).
+
+    **Rule (b)'s reach is bounded by what registers itself.**
+    ``state.imp_motion_dirs`` is filled by ``_register_imp_motion_nodes``,
+    which the two ``_emit_imp_card`` sites call — i.e. every ``/IMPVEL``,
+    ``/IMPDISP`` and ``/IMPACC`` built from a ``*BOUNDARY_PRESCRIBED_MOTION_*``
+    card. Two other ``/IMP*`` sites exist and neither can matter here: the
+    geometric rigid wall's drives k2rad's OWN synthesized carrier nodes, which
+    no ``*NODE`` row can name; ``/IMPDISP/FGEO``
+    (``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY``, writer/rarecards.py) does not
+    register and would therefore not be screened — measured reach **0 decks on
+    the 356-deck R14 roster**, so it is NAMED here rather than given an arm.
+
+    **What is NOT proved**, and the report says so: LS-DYNA's precedence for
+    TC/RC vs a prescribed motion on the same node AND DOF. The one R14 carrier
+    (``channel_A/B/C``) states ``TC 7`` beside a motion whose ``sf = 1e-8``, so
+    its zero reaction work is explained by the scale factor and not by which
+    card wins. Rule (b) is chosen on the Radioss measurement above.
+    """
+    if not state.node_tc_rc:
+        return []
+    if not state.options.node_tc_rc_bcs:
+        _warn_node_tc_rc_dropped(state)
+        return []
+
+    spc_dofs = _global_spc_dofs(state)
+    rot_capable = _mesh_has_rotational_dof(state, rbody_info)
+
+    groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
+    stated: Dict[Tuple[int, int], int] = defaultdict(int)
+    rigid_dropped: List[int] = []
+    motion_nodes: List[int] = []
+    motion_dofs = 0
+    spc_nodes: List[int] = []
+    spc_dof_count = 0
+    rot_inert: List[int] = []
+    skewed_motion: List[int] = []
+    emptied: List[int] = []
+
+    def _screen(nid: int, tra: List[str], rot: List[str]) -> Tuple[str, str]:
+        """Rules (b), (c) and (d) on one node's digits.
+
+        ONE implementation for both passes — the ordinary nodes and the
+        re-pointed rigid-body main nodes — so a screen cannot be applied to one
+        and forgotten on the other (the #120 "audit every registry walk" class,
+        here with only two walks). Every screen keys on ``nid``, which is why
+        the rigid pass must pass the MAIN node: that is the node
+        ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its /IMPVEL against.
+        """
+        nonlocal motion_dofs, spc_dof_count
+        cleared_here = 0
+        for letter in sorted(state.imp_motion_dirs.get(nid, ())):
+            which, idx = _IMP_DIR_BIT[letter]
+            target = tra if which == 0 else rot
+            if target[idx] == "1":
+                target[idx] = "0"
+                cleared_here += 1
+        if cleared_here:
+            motion_nodes.append(nid)
+            motion_dofs += cleared_here
+        if nid in state.imp_motion_skew_nodes:
+            skewed_motion.append(nid)
+        spc_tra, spc_rot = spc_dofs.get(nid, ("000", "000"))
+        merged_here = 0
+        for i in range(3):
+            if spc_tra[i] == "1" and tra[i] == "1":
+                tra[i] = "0"
+                merged_here += 1
+            if spc_rot[i] == "1" and rot[i] == "1":
+                rot[i] = "0"
+                merged_here += 1
+        if merged_here:
+            spc_nodes.append(nid)
+            spc_dof_count += merged_here
+        if "1" in rot and not rot_capable:
+            rot_inert.append(nid)
+        return "".join(tra), "".join(rot)
+
+    # A rigid-body member's cell is re-pointed onto the body's MAIN node and
+    # UNIONED with every other member's, because that is what LS-DYNA does with
+    # it (see the rule (a) docstring) and because a /BCS on the secondary is
+    # inert (rgbodv.F:150-155). The union is collected first and screened after
+    # the member loop, at the MAIN node — the node an imposed motion on a rigid
+    # part is registered against (_register_imp_motion_nodes is called with
+    # info["ind_node"] for *BOUNDARY_PRESCRIBED_MOTION_RIGID), so rule (b) sees
+    # the conflict it exists for.
+    main_of = _rbody_main_of(rbody_info)
+    rigid_union: Dict[int, Tuple[List[str], List[str]]] = {}
+    rigid_members: Dict[int, List[int]] = defaultdict(list)
+    rigid_orphans: List[int] = []
+    rigid_repointed: Dict[int, Tuple[str, str]] = {}
+
+    for nid in sorted(state.node_tc_rc):
+        tc, rc = state.node_tc_rc[nid]
+        stated[(tc, rc)] += 1
+        if nid in rigid_nodes:
+            main = main_of.get(nid)
+            if main is None:
+                rigid_orphans.append(nid)
+                continue
+            acc = rigid_union.setdefault(main, (list("000"), list("000")))
+            for i in range(3):
+                if _TC_RC_DIGITS[tc][i] == "1":
+                    acc[0][i] = "1"
+                if _TC_RC_DIGITS[rc][i] == "1":
+                    acc[1][i] = "1"
+            rigid_members[main].append(nid)
+            rigid_dropped.append(nid)
+            continue
+        tra_s, rot_s = _screen(nid, list(_TC_RC_DIGITS[tc]),
+                               list(_TC_RC_DIGITS[rc]))
+        if tra_s == "000" and rot_s == "000":
+            emptied.append(nid)
+            continue
+        groups[(tra_s, rot_s)].append(nid)
+        state.node_tc_rc_emitted[nid] = (tra_s, rot_s)
+
+    # ── the re-pointed rigid-body constraints, screened AT THE MAIN NODE ──
+    for main in sorted(rigid_union):
+        tra_s, rot_s = _screen(main, *rigid_union[main])
+        if tra_s == "000" and rot_s == "000":
+            emptied.append(main)
+            continue
+        groups[(tra_s, rot_s)].append(main)
+        state.node_tc_rc_emitted[main] = (tra_s, rot_s)
+        rigid_repointed[main] = (tra_s, rot_s)
+
+    lines: List[str] = []
+    if groups:
+        lines = ["#-  BOUNDARY CONDITIONS (*NODE TC/RC cells):", HDR]
+    for tra_s, rot_s in sorted(groups):
+        nids = groups[(tra_s, rot_s)]
+        # next_grnod_id, never a bare next_id: a user *SET_NODE at or above the
+        # 90001 auto base is re-emitted verbatim as /GRNOD/NODE/<sid>, and a
+        # collision is starter ERROR 79 IN NODE GROUP DEFINITION with no
+        # restart file (the #131 rule — every synthesized /GRNOD goes through
+        # the guarded counter).
+        grnod_id = state.next_grnod_id()
+        bc_id = state.next_id()
+        title = f"node_tc_rc_{tra_s}_{rot_s}"
+        lines += [
+            f"/BCS/{bc_id}",
+            title,
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   {tra_s} {rot_s}         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(grnod_id, title, nids)
+
+    _warn_node_tc_rc_converted(
+        state, stated=stated, groups=groups, rigid_dropped=rigid_dropped,
+        rigid_repointed=rigid_repointed, rigid_members=dict(rigid_members),
+        rigid_orphans=rigid_orphans,
+        motion_nodes=motion_nodes, motion_dofs=motion_dofs,
+        spc_nodes=spc_nodes, spc_dof_count=spc_dof_count,
+        rot_inert=rot_inert, skewed_motion=skewed_motion, emptied=emptied)
+    _warn_node_tc_rc_on_null_material(state, groups)
+    return lines
+
+
+def _warn_node_tc_rc_on_null_material(
+        state: ConversionState,
+        groups: Dict[Tuple[str, str], List[int]]) -> None:
+    """Name the TC/RC pins that land on a ``*MAT_NULL`` mesh.
+
+    MEASURED on the R14 campaign re-run of this batch: of the 137 carriers,
+    THREE ``*MAT_NULL`` decks LOST a NORMAL termination they had when the cells
+    were dropped — ``ale/sloshing/sloshing-a`` (33 813 cycles at min dt 5.9e-05
+    to t = 2.0, against 697 421 cycles at min dt 2.3e-16 reaching t = 0.18),
+    ``sloshing-c`` and ``sloshing-d``. On all three ``--no-node-tc-rc-bcs`` is
+    byte-identical to a true master conversion. The decode is faithful: 242 of
+    242 ``sloshing_A`` nodes agree with LS-DYNA's own ``nodal spc summary on
+    *NODE cards`` echo (180 as ``0 0 1``, 40 as ``1 0 1``, 22 as ``1 1 1``,
+    and 0 in every rotational column), and LS-DYNA runs the constrained model
+    to t = 2.0.
+
+    Two things this warning used to say, both corrected by measurement:
+
+      * ``ale/bird/bird-b`` was listed as a fourth carrier. It is not one:
+        with the opt-out its ``.rad`` still differs from a true master
+        conversion by 337 added / 6 removed lines (item B gave the bird an
+        ``/INIVEL`` master had dropped) and the opt-out arm collapses exactly
+        like the full branch.
+      * the class was named "``*MAT_NULL`` / ALE". Only ``bird_B`` of the four
+        emits an ALE property at all: ``sloshing_A``/``_B`` carry no ALE
+        keyword, and ``sloshing_C``/``_D`` state ELFORM 5 (1-point ALE) +
+        ``*CONTROL_ALE`` yet convert to ``Iale = 0``, i.e. a Lagrangian solid.
+        That silent ELFORM 5/6/7 downgrade is its own ROADMAP gap.
+
+    And the CAUSE is not the pin. Same shipped ``.rad`` with only the
+    ``/PROP/SOLID`` Isolid cell changed: Isolid 17 (what ELFORM 1 maps to)
+    collapses at t = 0.18, Isolid 1 with h = 0.1 runs to NORMAL at t = 2.0 with
+    IE −0.25 % against sloshing_A's own reference. The corpus even holds the
+    controlled experiment — ``sloshing_B.k`` is ``sloshing_A.k`` plus three
+    lines of ``*CONTROL_HOURGLASS``, which is what makes ``_ihq_to_isolid``
+    remap 17 → 1, and it does not regress. The discriminator this warning gives
+    the reader is therefore the deck's own ``*CONTROL_HOURGLASS`` card; the
+    class is in ROADMAP as the ELFORM → Isolid item.
+    """
+    if not groups or not state.mat_null:
+        return
+    part_nodes = _part_node_sets(state)
+    null_pids = {p.pid for p in state.parts.values()
+                 if p.mid in state.mat_null}
+    if not null_pids:
+        return
+    null_nodes: Set[int] = set()
+    for pid in null_pids:
+        null_nodes |= part_nodes.get(pid, set())
+    hit = sorted({n for ids in groups.values() for n in ids} & null_nodes)
+    if not hit:
+        return
+    state.warn(
+        f"*NODE TC/RC: {len(hit)} of the converted node(s) (node "
+        f"{_named(hit)}) belong to a *MAT_NULL part ("
+        f"{', '.join(str(p) for p in sorted(null_pids))}), which carries no "
+        "deviatoric stiffness. The /BCS is faithful — LS-DYNA applies these "
+        "cells, its own d3hsp echoes all of them and it runs the constrained "
+        "model to termination — but MEASURED on the R14 campaign three "
+        "*MAT_NULL decks (ale/sloshing-a/-c/-d) lost a NORMAL termination to a "
+        "time-step collapse once their tank walls were pinned. The cause is "
+        "NOT the pin: the same .rad with /PROP/SOLID Isolid 1 instead of 17 "
+        "runs sloshing_A to t = 2.0 at IE -0.25 % against its own LS-DYNA "
+        "reference. *SECTION_SOLID ELFORM 1 is 1-point integration and k2rad "
+        "maps it to the 8-point Isolid 17, and it re-maps to Isolid 1 ONLY "
+        "when the deck carries a *CONTROL_HOURGLASS / *HOURGLASS card - so a "
+        "deck relying on LS-DYNA's own default (IHQ 2 / QH 0.1, Vol I R17 "
+        "p.12-271 Remark 1) gets no hourglass control at all. THE "
+        "DISCRIMINATOR: this deck "
+        + ("HAS" if (state.ctrl_hourglass or state.hourglass_defs)
+           else "does NOT have")
+        + " a *CONTROL_HOURGLASS/*HOURGLASS card"
+        + ("." if (state.ctrl_hourglass or state.hourglass_defs) else
+           " - sloshing_B, which is sloshing_A plus exactly that card, does "
+           "not regress.")
+        + " If this deck's dt collapses, --no-node-tc-rc-bcs "
+        "(convert(node_tc_rc_bcs=False)) reproduces the previous behaviour "
+        "byte for byte.")
+
+
+def _named(nids: List[int], cap: int = 5) -> str:
+    """``"1, 4, 7 and 12 more"`` — the first *cap* ids of a screened set."""
+    shown = ", ".join(str(n) for n in nids[:cap])
+    rest = len(nids) - cap
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _warn_node_tc_rc_converted(state: ConversionState, *,
+                               stated: Dict[Tuple[int, int], int],
+                               groups: Dict[Tuple[str, str], List[int]],
+                               rigid_dropped: List[int],
+                               rigid_repointed: Dict[int, Tuple[str, str]],
+                               rigid_members: Dict[int, List[int]],
+                               rigid_orphans: List[int],
+                               motion_nodes: List[int], motion_dofs: int,
+                               spc_nodes: List[int], spc_dof_count: int,
+                               rot_inert: List[int],
+                               skewed_motion: List[int],
+                               emptied: List[int]) -> None:
+    """Announce the ``*NODE`` TC/RC conversion once per deck, AFTER every
+    screen has run and with each screen's own count.
+
+    The ordering is the #133 rule, not a preference: a message that ANNOUNCES a
+    conversion has to run after every screen that can drop the record, or the
+    log states a conversion the deck never gets. Every screen below therefore
+    reports what it actually removed, from the same pass that removed it.
+    """
+    total = sum(stated.values())
+    emitted = sum(len(v) for v in groups.values())
+    codes = ", ".join(
+        f"TC={tc} RC={rc}: {n} node(s)" for (tc, rc), n in sorted(stated.items()))
+    msg = [
+        f"*NODE: {total} node(s) state a constraint in the card's own TC/RC "
+        f"cells ({codes}) — Vol I R17 p.35-2 makes card 1 'NID X Y Z TC RC', "
+        "where TC and RC are constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, "
+        "5 yz, 6 zx, 7 xyz) in the GLOBAL system, always active. "
+        f"{emitted} node(s) were converted to {len(groups)} /GRNOD/NODE + "
+        "/BCS group(s): "
+        + ("; ".join(f"Tra {t} Rot {r}: {len(groups[(t, r)])} node(s)"
+                     for t, r in sorted(groups)) if groups else "none")
+        + "."]
+    if rigid_dropped:
+        msg.append(
+            f" {len(rigid_dropped)} node(s) (node {_named(rigid_dropped)}) "
+            "belong to a rigid body. A /BCS written on them would be INERT: "
+            "rgbodv.F:150-155 rebuilds a /RBODY secondary's acceleration from "
+            "the body after BCS10 has run (resol.F:7073 vs :7572) — measured "
+            "identical to a free-fall control. LS-DYNA, however, DOES apply "
+            "them, measured rather than assumed: on "
+            "control_contact.hemi-draw part 4 (the Die: 525 nodes all at "
+            "TC 7 / RC 7, *MAT_RIGID CMO 0, no *BOUNDARY_SPC and no "
+            "*CONSTRAINED anywhere in the deck, not in the *RIGIDWALL node "
+            "set, not the *BOUNDARY_PRESCRIBED_MOTION_RIGID target, and "
+            "carrying up to 1.8e4 of interface-3 contact force) its own matsum "
+            "holds the body at x-rbv = y-rbv = z-rbv = 0.0 at all 121 output "
+            "times, while parts 2 and 3 — same *MAT_RIGID, TC codes unioning "
+            "to x and z only — are held in x and z and move freely in y. "
+            "Vol I R17 p.35-3 Remark 1 ('No attempt should be made to apply "
+            "boundary conditions to nodes belonging to rigid bodies') is "
+            "advice to the deck author, not a statement that the solver "
+            "ignores them; only the IMPLICIT path prints Warning 60257 "
+            "('skipping spc on rigid body node <n> tcode=<tc> rcode=<rc>', "
+            "IMP+257 — 1 of the 16 R14 rule-(a) carriers, and there 2 of that "
+            "deck's 3 rigid TC/RC nodes). So the cells are RE-POINTED onto the "
+            "/RBODY main node, unioned per body, exactly as _make_bcs already "
+            "does for a *BOUNDARY_SPC on a rigid member." + (
+                " " + f"{len(rigid_repointed)} main node(s): "
+                + ", ".join(
+                    f"{m} -> {rigid_repointed[m][0]} {rigid_repointed[m][1]}"
+                    f" (from {len(rigid_members.get(m, []))} member cell(s))"
+                    for m in sorted(rigid_repointed)[:5])
+                + (" ..." if len(rigid_repointed) > 5 else "") + "."
+                if rigid_repointed else
+                " Every one of them screened away to 000 000."))
+    if rigid_orphans:
+        msg.append(
+            f" {len(rigid_orphans)} node(s) (node {_named(rigid_orphans)}) are "
+            "rigid-body members whose body has no main node in rbody_info "
+            "(a *CONSTRAINED_RIGID_BODIES merge whose master was itself "
+            "dropped, say), so their cells are DROPPED rather than re-pointed "
+            "— a /BCS on the secondary would be inert (rgbodv.F:150-155).")
+    if motion_nodes:
+        msg.append(
+            f" {motion_dofs} DOF(s) on {len(motion_nodes)} node(s) (node "
+            f"{_named(motion_nodes)}) are already driven by a "
+            "*BOUNDARY_PRESCRIBED_MOTION and were left to it: a /BCS and an "
+            "/IMPVEL on one DOF give starter WARNING 312 and a 99.9 percent "
+            "engine energy error (measured on a one-brick twin: EXT-WORK 13.66 "
+            "against an I-ENERGY of 1688). The node's remaining DOFs are still "
+            "pinned.")
+    if skewed_motion:
+        msg.append(
+            f" {len(skewed_motion)} node(s) (node {_named(skewed_motion)}) also "
+            "carry an imposed motion written in a LOCAL system (/IMP* skew_ID "
+            "!= 0). Its Dir letter is a skew axis, so no global TC/RC bit can "
+            "be matched against it and NOTHING was cleared for those nodes — "
+            "check whether the skew axis and the pinned global axis overlap.")
+    if spc_nodes:
+        msg.append(
+            f" {spc_dof_count} DOF(s) on {len(spc_nodes)} node(s) (node "
+            f"{_named(spc_nodes)}) are already stated by a *BOUNDARY_SPC (or a "
+            "zero-scale *BOUNDARY_PRESCRIBED_MOTION) on the same node and were "
+            "merged rather than restated: hm_read_bcs.F:198 unions the codes, "
+            "so a second /BCS only adds starter WARNING 312.")
+    if rot_inert:
+        msg.append(
+            f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
+            "rotational code on a mesh with no shell, beam, spring or rigid "
+            "body — i.e. no rotational DOF at all. They are emitted, and they "
+            "are inert on both sides: bcs10.F:66 applies the Rot digits only "
+            "inside IF(IRODDL/=0), and LS-DYNA drops them too (they do not "
+            "appear in its 'nodal spc summary on *NODE cards' d3hsp echo).")
+    if emptied:
+        msg.append(
+            f" {len(emptied)} node(s) (node {_named(emptied)}) had every stated "
+            "DOF removed by the screens above, so no /BCS was written for them.")
+    msg.append(
+        " Pass --no-node-tc-rc-bcs (convert(node_tc_rc_bcs=False)) to keep the "
+        "pre-2026-09 behaviour, in which these DOFs are FREE.")
+    state.warn("".join(msg))
+
+
+def _warn_node_tc_rc_dropped(state: ConversionState) -> None:
+    """The ``--no-node-tc-rc-bcs`` path: say what the deck loses.
+
+    MEASURED on a spring-mass coupon whose anchor carried ``tc=7 rc=7``: no
+    ``/BCS`` was emitted, the anchor was free, the whole oscillator drifted at
+    the centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
+    0.317 mm amplitude) — and the engine still printed NORMAL TERMINATION. The
+    #122 class: legal, accepted, and wrong.
+    """
+    total = len(state.node_tc_rc)
+    shown = _named(sorted(state.node_tc_rc))
+    state.warn(
+        f"*NODE: {total} node(s) state a constraint in the card's own TC/RC "
+        f"cells (node {shown}), and --no-node-tc-rc-bcs "
+        "(convert(node_tc_rc_bcs=False)) was passed — so those degrees of "
+        "freedom are FREE in the converted model and no /BCS is emitted for "
+        "them. Nothing in the run reports it: measured on a spring-mass coupon "
+        "whose anchor carried tc=7/rc=7, the anchor was free and the whole "
+        "oscillator drifted at the centre-of-mass velocity while the engine "
+        "printed NORMAL TERMINATION. Drop the flag to convert them, or restate "
+        "the constrained nodes as *BOUNDARY_SPC_NODE / *BOUNDARY_SPC_SET.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2432,8 +3057,8 @@ _IMP_COMMENT2 = ("#           Ascale_x            Fscale_Y"
                  "              Tstart               Tstop")
 
 
-def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str
-                               ) -> None:
+def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
+                               skew_id: int = 0) -> None:
     """Record the nodes an /IMPDISP | /IMPVEL | /IMPACC was just written for.
 
     This is the *DATABASE_BNDOUT scope. dyna2rad builds it by re-walking the
@@ -2447,10 +3072,23 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str
     ROTATIONAL directions (_DOF_DIR maps LS-DYNA dof 5/6/7 and |8| onto them),
     and their presence is what gates the REACXX/YY/ZZ channels — the same
     discipline ``_spc_constrains_rotations`` applies to the SPC block.
+
+    ``skew_id`` splits the per-node record in two. A motion written in the
+    GLOBAL system (skew_ID 0) is recorded per DIRECTION in
+    ``state.imp_motion_dirs``, because that is the only form a global ``*NODE``
+    TC/RC bit can be compared against; a motion written in a LOCAL system
+    lands in ``state.imp_motion_skew_nodes`` instead, where the TC/RC pass
+    NAMES it rather than guessing which global bits the skew axis touches.
     """
-    state.imp_motion_nodes.update(n for n in nids if n in state.nodes)
+    real = [n for n in nids if n in state.nodes]
+    state.imp_motion_nodes.update(real)
     if len(dir_str) > 1:
         state.imp_motion_rot = True
+    if skew_id:
+        state.imp_motion_skew_nodes.update(real)
+        return
+    for n in real:
+        state.imp_motion_dirs.setdefault(n, set()).add(dir_str)
 
 
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
@@ -2670,7 +3308,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                 pm.lcid, base_dir, grnod_id, pm.sf,
                                 tstart, tstop, skew_id, state=state)
         motion_counter += 1
-        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir)
+        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -2679,7 +3317,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
             motion_counter += 1
-            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir)
+            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir, skew_id)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
     # the pid — an element-free rigid part, or a *CONSTRAINED_RIGID_BODIES slave
     # whose nodes were merged into its master) still has its three nodes in /NODE
@@ -3098,7 +3736,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
                                 skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
-        _register_imp_motion_nodes(state, nids, base_dir)
+        _register_imp_motion_nodes(state, nids, base_dir, skew_id)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -3106,7 +3744,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
-            _register_imp_motion_nodes(state, nids, lock_dir)
+            _register_imp_motion_nodes(state, nids, lock_dir, skew_id)
 
     return lines
 
@@ -3847,7 +4485,8 @@ def _emit_inivel(kind: str, inivel_id: int, title: str, grnod_id: int,
     ]
 
 
-def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
+def _make_inivel(state: ConversionState, rbody_info: Dict,
+                 rigid_nodes: Optional[Set[int]] = None) -> List[str]:
     """Initial velocities → /INIVEL/TRA (+ /INIVEL/ROT for rotational DOFs).
 
     The only valid /INIVEL subtypes are TRA/ROT (cfg inivel.cfg); rotational
@@ -3863,6 +4502,10 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
+        nids = _warn_inivel_on_rigid_members(
+            state, 0, sorted(nids), rigid_nodes,
+            keyword="*INITIAL_VELOCITY_NODE",
+            rbody_info=rbody_info, repoint=True)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
@@ -4194,7 +4837,141 @@ def _emit_inivel_axis(inivel_id: int, title: str, frame_id: int, grnod_id: int,
     ]
 
 
-def _make_initial_velocity(state: ConversionState) -> List[str]:
+def _rbody_main_of(rbody_info: Optional[Dict]) -> Dict[int, int]:
+    """member node -> its /RBODY main node, the map ``_make_bcs`` builds inline.
+
+    One helper so the ``*BOUNDARY_SPC`` re-point (``_make_bcs``), the
+    ``*NODE`` TC/RC re-point and the ``/INIVEL`` re-point cannot drift apart:
+    all three answer the same question — *which node carries this body's six
+    degrees of freedom?*
+    """
+    out: Dict[int, int] = {}
+    for info in (rbody_info or {}).values():
+        ind = info["ind_node"]
+        for node in info["nodes"]:
+            out[node] = ind
+    return out
+
+
+def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
+                                  nids: List[int],
+                                  rigid_nodes: Optional[Set[int]],
+                                  keyword: str = "*INITIAL_VELOCITY",
+                                  sid_label: str = "NSID",
+                                  rbody_info: Optional[Dict] = None,
+                                  repoint: bool = False) -> List[int]:
+    """Re-point (or name) the /INIVEL that lands on RIGID-BODY member nodes.
+
+    ``inirby.F`` rebuilds every secondary node's velocity from its /RBODY main
+    node as a rigid field, so an /INIVEL written on the secondaries is
+    overwritten before the first cycle — the group is emitted, the starter
+    accepts it at 0 ERROR / 0 WARNING, and the body does not move. LS-DYNA has
+    no such rule: *INITIAL_VELOCITY on a rigid part's nodes sets the PART's
+    velocity (that is what the IRIGID cell exists to override).
+
+    MEASURED on ``intro-by-a.-tabiei/contact/contact-foam/matfoamsoil.k`` after
+    the R14 round-2 set batch made its ``*SET_NODE_LIST_GENERATE 99`` resolve:
+    the /INIVEL/TRA vx = 25000 lands on nodes 1000..1124, every one of them a
+    member of ``*MAT_RIGID`` part 10 (/RBODY/1125), and the engine reaches
+    NORMAL TERMINATION at 242 cycles with I-ENERGY = K-ENERGY = 0.000 against
+    an LS-DYNA glstat of IE 8573.23 / KE 19834.5. Before the batch the set did
+    not exist and no /INIVEL was written at all, so the deck was a zero model
+    for a DIFFERENT reason — clearing the first one promoted the second into
+    view, which is why it is named here rather than left silent.
+
+    Re-pointing the group onto the /RBODY main node IS the fix, and with
+    ``repoint=True`` this function performs it: when EVERY node of the card
+    belongs to a rigid body, the group is replaced by that body's main node
+    (or, for a card spanning several bodies, by one main node each). MEASURED
+    on ``matfoamsoil`` — nothing changed but this group's member list — cycle-0
+    K-ENERGY 3.547E+04 against the LS-DYNA glstat's own initial total energy
+    3.54775E+04 (-0.008 %), where the un-re-pointed card gives 0.000; 1320
+    cycles with both channels evolving against 242 flat at zero; starter
+    0 ERRORS / 0 WARNINGS and NORMAL TERMINATION on both arms. Reproducing
+    LS-DYNA's initial kinetic energy to four significant figures is direct
+    evidence that LS-DYNA gives the rigid PART the velocity, and ``_make_bcs``
+    already performs the same re-point for a ``*BOUNDARY_SPC`` on a rigid
+    member (loads.py, ``node_to_ind``).
+
+    Two cases deliberately KEEP the old warn-and-leave:
+
+      * a MIXED card (some nodes rigid, some free) — replacing only the rigid
+        half changes which nodes the card names, and no corpus deck needs it;
+      * ``*INITIAL_VELOCITY_GENERATION`` (``repoint=False`` at its site).
+        That form emits ``/INIVEL/AXIS``, whose ``Vr`` gives each node the
+        TRANSLATIONAL velocity ``omega x r`` about the frame axis; collapsing
+        the group to the main node would give that one node its own
+        ``omega x r`` and the body NO spin at all, because a /RBODY secondary's
+        motion comes from the main node's six DOFs. A faithful mapping there is
+        an angular velocity on the main node, not a smaller node group, and it
+        is left to ROADMAP.
+
+    **All three emission sites call this** — ``_make_inivel``
+    (``*INITIAL_VELOCITY_NODE``), ``_make_initial_velocity`` (the NSID set
+    form) and ``_make_initial_velocity_generation``
+    (``*INITIAL_VELOCITY_GENERATION``) — because the same keyword family lands
+    in three different writer functions and a probe on one leaves the other two
+    silent (the #132 rule). The second carrier the widening found is
+    ``intro-by-j.-day/contact/force-transducer/transducer.k``: all six
+    ``*INITIAL_VELOCITY_NODE`` nodes (1-6, vy = 10160) are the member set of
+    ``/RBODY/23``, the engine reports K-ENERGY 0.000 at cycle 0 and at every
+    one of its 969 cycles against an LS-DYNA glstat of IE 161.523 /
+    KE 1092.45 — and before this the deck said nothing at all.
+    """
+    if not rigid_nodes:
+        return list(nids)
+    on_rigid = [n for n in nids if n in rigid_nodes]
+    if not on_rigid:
+        return list(nids)
+    where = f"{sid_label}={nsid}" if nsid else "over the whole model"
+    named = ", ".join(str(n) for n in on_rigid[:5])
+    all_rigid = len(on_rigid) == len(nids)
+
+    if repoint and all_rigid:
+        main_of = _rbody_main_of(rbody_info)
+        mains = sorted({main_of[n] for n in nids if n in main_of})
+        if mains and len(mains) < len(nids):
+            state.warn(
+                f"{keyword} {where}: all {len(nids)} of its node(s) (e.g. "
+                f"{named}) belong to a rigid body, so the card is RE-POINTED "
+                f"onto the {len(mains)} /RBODY main node(s) "
+                f"{', '.join(str(m) for m in mains[:5])}"
+                + (" ..." if len(mains) > 5 else "") + ". OpenRadioss rebuilds "
+                "a /RBODY secondary node's velocity from the body's main node "
+                "every cycle (inirby.F), so the same card written on the "
+                "secondaries is OVERWRITTEN before cycle 1 and the body starts "
+                "at rest at 0 starter diagnostics; LS-DYNA gives the rigid PART "
+                "that velocity. Measured on matfoamsoil: cycle-0 K-ENERGY "
+                "3.547E+04 against the LS-DYNA reference's own 3.54775E+04 "
+                "(-0.008 %), where the un-re-pointed card gives 0.000. Pass "
+                "*INITIAL_VELOCITY_RIGID_BODY to state it explicitly.")
+            return mains
+
+    state.warn(
+        f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
+        f"node(s) (e.g. {named}) belong to a rigid body. OpenRadioss rebuilds "
+        "a /RBODY secondary node's velocity from the body's main node every "
+        "cycle (inirby.F), so the /INIVEL on them is OVERWRITTEN before cycle "
+        "1 and the body starts at rest — at 0 starter diagnostics."
+        + (" EVERY node of this card is a rigid-body member, so the card moves "
+           "NOTHING." if all_rigid else "")
+        + " LS-DYNA instead gives the rigid PART that velocity. State it as "
+          "*INITIAL_VELOCITY_RIGID_BODY on the part (k2rad puts that on the "
+          "/RBODY main node), or as *PART_INERTIA card 5, to move the body."
+        + ("" if all_rigid else
+           " The card is left over its stated nodes: re-pointing only the "
+           "rigid half would change which nodes it names.")
+        + (" Not re-pointed here: this card becomes an /INIVEL/AXIS, whose Vr "
+           "gives each node the translational velocity omega x r, so "
+           "collapsing the group to the main node would leave the body with no "
+           "spin at all."
+           if keyword.endswith("_GENERATION") and all_rigid else ""))
+    return list(nids)
+
+
+def _make_initial_velocity(state: ConversionState,
+                           rigid_nodes: Optional[Set[int]] = None,
+                           rbody_info: Optional[Dict] = None) -> List[str]:
     """*INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT).
 
     NSID scopes the node group (blank/0 = whole model); NSIDEX is subtracted by
@@ -4216,8 +4993,16 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
             ns = state.node_sets.get(iv.nsid)
             if ns is None:
                 state.warn(
-                    f"*INITIAL_VELOCITY NSID={iv.nsid}: node set not found "
-                    "(unsupported *SET_NODE variant?) - skipped")
+                    f"*INITIAL_VELOCITY NSID={iv.nsid}: this deck defines no "
+                    "*SET_NODE with that id - skipped. (The parenthetical this "
+                    "message used to carry, \"unsupported *SET_NODE "
+                    "variant?\", named the R14 round-2 defect: "
+                    "*SET_NODE_LIST_GENERATE, _GENERAL and _COLUMN went "
+                    "unread, so taylor1/taylor2/matfoamsoil ran with no "
+                    "/INIVEL at all. All three spellings are read now. The "
+                    "spellings still NOT read are *SET_NODE_LIST_SMOOTH and "
+                    "the *SET_NODE_GENERAL clauses k2rad refuses by name "
+                    "(BRANCH, VOL, SALE*), each of which warns for itself.)")
                 continue
             base = set(ns[1])
         else:
@@ -4245,6 +5030,9 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
+        nids = _warn_inivel_on_rigid_members(
+            state, iv.nsid, nids, rigid_nodes,
+            rbody_info=rbody_info, repoint=True)
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
@@ -4346,7 +5134,10 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
     return sorted(n for n in nids if n > 0)
 
 
-def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
+def _make_initial_velocity_generation(
+        state: ConversionState,
+        rigid_nodes: Optional[Set[int]] = None,
+        rbody_info: Optional[Dict] = None) -> List[str]:
     """*INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + a companion /FRAME/FIX.
 
     The rotation axis (through (XC,YC,ZC) along (NX,NY,NZ), or node-defined when
@@ -4458,6 +5249,10 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
             frame_id = state.next_id()
         lines += _emit_frame_fix(frame_id, f"FRAME_INIVEL_GEN_{frame_id}",
                                  origin, fy, fz)
+        _warn_inivel_on_rigid_members(
+            state, g.sid, list(nids), rigid_nodes,
+            keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID",
+            rbody_info=rbody_info, repoint=False)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()
@@ -4635,6 +5430,9 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
         if segset is None:
             state.warn(f"*LOAD_SEGMENT_SET references *SET_SEGMENT {ssl.ssid}, "
                        "which is not defined — pressure load dropped.")
+            continue
+        if _part_scoped_segment_set(state, ssl.ssid, "*LOAD_SEGMENT_SET",
+                                    "The pressure load is DROPPED."):
             continue
         for nodes in segset.segments:
             groups[(ssl.lcid, -ssl.sf, ssl.at)].append(list(nodes))
@@ -5763,17 +6561,60 @@ def _make_modal_dummy_cload(state: ConversionState,
         elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2))
-    constrained: Set[int] = set()
-    for bc in state.bcs_spcs:
-        constrained.update(state.node_sets.get(bc.nsid, ("", []))[1])
-    candidates = elem_nodes - constrained - rigid_nodes
-    if not candidates:
+    # The screen is per-DOF, not per-node. It used to drop every node named by
+    # any *BOUNDARY_SPC whatever that SPC pins, which was harmless while few
+    # node sets resolved — and stopped being harmless the moment the R14
+    # round-2 batch taught the converter to read *SET_NODE_LIST_GENERATE.
+    # MEASURED on introduction/Introduction/example-08/ex_08_beam_elform_1.k
+    # (a *CONTROL_IMPLICIT_EIGENVALUE deck): its two *BOUNDARY_SPC_SET cards
+    # sit on _GENERATE sets and used to resolve to NOTHING, so every node was
+    # a candidate; with them read, one set is `Tra 111` and the other
+    # `Tra 001 Rot 110`, i.e. every node is named — and the whole-node screen
+    # emptied the candidate list and turned a deck that reached 2 cycles into
+    # a MESSAGE ID 79 stop. X and Y are free on 66 of its 74 nodes, and a unit
+    # /CLOAD along a FREE direction is perfectly good loading data.
+    #
+    # The screen also has to see the *NODE TC/RC pins this batch introduced.
+    # `_global_spc_dofs` covers *BOUNDARY_SPC and zero-scale
+    # *BOUNDARY_PRESCRIBED_MOTION only; `state.node_tc_rc_emitted` is filled by
+    # _make_node_tc_rc_bcs, which writer/assembly runs BEFORE this section, so
+    # unioning it here is both possible and necessary — without it the message
+    # below would call a pinned node "still free" and the --static cross-check
+    # it prints would compare a zero displacement against a zero displacement,
+    # i.e. a check that cannot fail.
+    spc = _global_spc_dofs(state)
+    for nid, (tra, rot) in state.node_tc_rc_emitted.items():
+        have_t, have_r = spc.get(nid, ("000", "000"))
+        spc[nid] = ("".join("1" if a == "1" or b == "1" else "0"
+                            for a, b in zip(have_t, tra)),
+                    "".join("1" if a == "1" or b == "1" else "0"
+                            for a, b in zip(have_r, rot)))
+    dof_free = {"X": 0, "Y": 1, "Z": 2}
+    candidates = elem_nodes - rigid_nodes
+    node = 0
+    direction = "Z"
+    for d in ("Z", "X", "Y"):           # Z first: the historical choice
+        free = [n for n in sorted(candidates)
+                if spc.get(n, ("000", "000"))[0][dof_free[d]] == "0"]
+        if free:
+            node, direction = max(free), d
+            break
+    pinned_fallback = False
+    if not node and candidates:
+        # No free translational DOF anywhere. Emitting NOTHING is worse than
+        # emitting a load the constraints hold: the engine stops with MESSAGE
+        # ID 79 without loading data, and the exported stiffness matrix — the
+        # only thing this run exists for — is load-INDEPENDENT, so a /CLOAD on
+        # a pinned node still lets the export happen. What is lost is the
+        # static cross-check, and the message says so instead of pretending
+        # the node is free (a check that cannot fail is worse than no check).
+        node, direction, pinned_fallback = max(candidates), "Z", True
+    if not node:
         state.warn(
-            "Modal stiffness-export run has no load and no free node to put a "
-            "dummy /CLOAD on — the engine will stop with MESSAGE ID 79. Add "
-            "any load to the deck manually.")
+            "Modal stiffness-export run has no load and no structural node to "
+            "put a dummy /CLOAD on at all — the engine will stop with MESSAGE "
+            "ID 79. Add any load to the deck manually.")
         return []
-    node = max(candidates)              # deterministic, away from low-id corners
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     funct_id = state.next_id()
     grnod_id = state.next_grnod_id()
@@ -5781,9 +6622,23 @@ def _make_modal_dummy_cload(state: ConversionState,
     state.warn(
         "Modal stiffness-export run: the deck has no load, but the implicit "
         "engine refuses to start without loading data (MESSAGE ID 79). Added "
-        f"a dummy unit /CLOAD (node {node}, dir Z). The exported stiffness "
-        "matrix is load-independent; the static solution can be cross-checked "
-        f"with: tools/modal_solve.py <matrix> --static {node} Z 1"
+        f"a dummy unit /CLOAD (node {node}, dir {direction} — the highest-"
+        "numbered structural node with that translation still free, screened "
+        "against *BOUNDARY_SPC, *NODE TC/RC and zero-scale prescribed "
+        "motions). The "
+        "exported stiffness matrix is load-independent; the static solution "
+        "can be cross-checked with: tools/modal_solve.py <matrix> --static "
+        f"{node} {direction} 1"
+        if not pinned_fallback else
+        "Modal stiffness-export run: the deck has no load, but the implicit "
+        "engine refuses to start without loading data (MESSAGE ID 79), and "
+        "EVERY structural node is pinned in X, Y and Z by a *BOUNDARY_SPC, a "
+        "*NODE TC/RC cell or a zero-scale *BOUNDARY_PRESCRIBED_MOTION. Added "
+        f"the dummy unit /CLOAD on node {node} (dir {direction}) anyway, "
+        "because the stiffness matrix this run exports is load-independent "
+        "and no load at all is MESSAGE ID 79. The static cross-check "
+        "(tools/modal_solve.py --static) is NOT available on this deck: the "
+        "loaded DOF is constrained, so both sides of it are zero."
     )
     lines = [
         "#-  DUMMY STATIC LOAD (modal stiffness-export run needs loading data):",
@@ -5800,7 +6655,7 @@ def _make_modal_dummy_cload(state: ConversionState,
         f"/CLOAD/{cload_id}",
         "modal_dummy_static_load",
         "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-        f"{_i(funct_id)}{'Z'.rjust(10)}{_i(0)}         0{_i(grnod_id)}"
+        f"{_i(funct_id)}{direction.rjust(10)}{_i(0)}         0{_i(grnod_id)}"
         f"          {_f(1.0)}{_f(1.0)}",
         HDR,
     ]
@@ -7000,9 +7855,21 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # it only removes six zero rows from the implicit tangent, which is the
     # whole point of the guard. A jet node that IS on the inflator housing is
     # in elem_nodes already and never gets here.
+    # A node the *NODE TC/RC pass has ALREADY pinned in all six DOFs needs
+    # nothing from this guard, and a second /BCS on it is starter WARNING 312
+    # (INCOMPATIBLE KINEMATIC CONDITIONS — measured, 1 warning / 8 conditions
+    # on a two-/BCS coupon). Only the exact `111 111` case is subtracted: this
+    # guard's mask is the SUPERSET, so a free node the TC/RC pass pinned only
+    # partially must still arrive here or its remaining DOFs stay zero rows in
+    # the implicit tangent. The subtraction is done HERE rather than in the
+    # TC/RC pass because only this side knows the finished free set — the
+    # element walk above depends on registries (state.rbe3_nodes,
+    # state.connector_ground_nodes) that later sections fill.
+    fully_pinned = {n for n, (tra, rot) in state.node_tc_rc_emitted.items()
+                    if tra == "111" and rot == "111"}
     free = sorted(n for n in state.nodes
                   if n > 0 and n not in elem_nodes and n not in rigid_nodes
-                  and n not in keep_free)
+                  and n not in keep_free and n not in fully_pinned)
     if not free:
         return []
     state.warn(

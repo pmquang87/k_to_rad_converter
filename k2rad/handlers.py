@@ -27,6 +27,9 @@ from .parser import (
 from .state import (
     ConversionState,
     SET_ADD_FAMILIES,
+    SET_RANGE_FAMILIES,
+    set_general_id_cols,
+    collapse_segment_corners,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     TshellElem, SphCell,
     PartData, SectionShell, SectionSolid, SectionTshell, SectionBeam,
@@ -231,38 +234,74 @@ def handle_end(block: Block, state: ConversionState) -> None:
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _node_constraint_code(cell: str) -> int:
+    """One ``*NODE`` TC or RC cell as an integer code, or 0 for "none".
+
+    Vol I R17 p.35-2/35-3 gives both cells type ``I`` with exactly eight legal
+    values, 0 through 7. A cell that is blank, unparsable, or outside that
+    range is read as 0 (no constraint) — see :func:`_note_node_constraint`,
+    which reports the out-of-range case rather than guessing a mask for it.
+    """
+    if not cell:
+        return 0
+    try:
+        code = int(float(cell))
+    except ValueError:
+        return 0
+    return code if 0 <= code <= 7 else -1
+
+
 def _note_node_constraint(state: ConversionState, nid: int, tc: str,
                           rc: str) -> None:
     """Record a ``*NODE`` card that states a constraint in TC or RC.
 
     Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``, and TC/RC are
     constraint CODES (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
-    GLOBAL system. k2rad reads only NID/X/Y/Z, so a deck that states its
-    constraints there converts into a model with those degrees of freedom
-    FREE — at 0 conversion warnings and 0 starter errors. Measured on a
-    spring-mass coupon: the anchor node carried tc=7/rc=7, no /BCS was
-    emitted, and the whole oscillator drifted at the centre-of-mass velocity
-    (6.68 mm against an intended 0.317 mm amplitude) while the run reported
-    NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero cell here.
+    GLOBAL system — the same triples ``*BOUNDARY_SPC`` states one flag at a
+    time, with no CID, no id and no birth/death, so they are unconditionally
+    active for the whole run.
 
-    Only the LOSS is recorded; ``writer/assembly._warn_node_tc_rc`` names it
-    once per deck and carries the full reasoning for why the conversion is
-    deferred rather than done here.
+    LS-DYNA APPLIES them, and that is measured rather than assumed: its d3hsp
+    carries a dedicated ``nodal spc summary on *NODE cards`` echo, and this
+    decode reproduces it — the echo is printed by 155 of the R14 reference
+    runs — on all **162 139 TC/RC cells of the 137 carrier decks, with zero
+    translation-code disagreements**. (LS-DYNA drops the ROTATIONAL half on a
+    mesh with no rotational DOF — 71 885 nodes in 22 solid/ALE decks are not
+    echoed — which ``bcs10.F:36``'s ``IRODDL`` guard makes inert on the
+    Radioss side too.)
+
+    ``writer/loads._make_node_tc_rc_bcs`` turns the map into ``/GRNOD/NODE`` +
+    ``/BCS``, screens it, and announces both the conversion and every screen
+    once per deck. Codes are stored verbatim; nothing is decided here.
+
+    **Format census, so the coverage claim is bounded.** Both layouts
+    ``handle_node`` discriminates are read: the fixed ``(I8, 3E16.0, 2I8)``
+    grid (TC cols 57-64, RC cols 65-72) and the comma free form (fields 5-6,
+    where an empty field survives between commas, so ``1,0.,0.,0.,,7`` is
+    TC 0 / RC 7). MEASURED over both corpus roots: **every** TC/RC carrier
+    writes the fixed layout — the ``i10=y`` variant (``*NODE %``,
+    ``(I10, 3F16, 2I10)``) and ``newformat=long`` (``*NODE +``,
+    ``(I20, 3F20, 2I20)``) have ZERO occurrences, and ``parser.py``'s
+    ``\\*(\\S+)`` keyword match handles neither sigil (``*NODE %`` silently
+    takes the standard branch, ``*NODE+`` becomes an unknown keyword). That is
+    a NAMED non-item, not coverage this converter claims.
     """
-    for cell in (tc, rc):
-        if not cell:
-            continue
-        try:
-            if int(float(cell)) == 0:
-                continue
-        except ValueError:
-            continue
-        state.node_tc_rc_count += 1
-        # Five, matching what _warn_node_tc_rc prints — collecting ten left
-        # half the list dead.
-        if len(state.node_tc_rc) < 5:
-            state.node_tc_rc.append(nid)
-        return
+    tc_code = _node_constraint_code(tc)
+    rc_code = _node_constraint_code(rc)
+    if tc_code < 0 or rc_code < 0:
+        # Out of Vol I's 0-7 range. Named, not guessed: there is no mask for
+        # an eighth code, and silently clamping one would pin DOFs the deck
+        # never asked for. MEASURED: zero such cells in either corpus root.
+        state.warn(
+            f"*NODE {nid}: the card's TC/RC cells read {tc.strip()!r}/"
+            f"{rc.strip()!r}, and Vol I R17 p.35-2 gives both exactly eight "
+            "legal values (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz). "
+            "The out-of-range cell is read as 0 (no constraint) — no /BCS "
+            "mask is invented for it. Check the card's column layout.")
+        tc_code = max(tc_code, 0)
+        rc_code = max(rc_code, 0)
+    if tc_code or rc_code:
+        state.node_tc_rc[nid] = (tc_code, rc_code)
 
 
 def _free_node_id(tok: str) -> bool:
@@ -5171,6 +5210,277 @@ def handle_set_part_list(block: Block, state: ConversionState) -> None:
             if v > 0:
                 pids.append(v)
     state.part_sets[psid] = (title, pids)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *SET_<FAMILY>_GENERATE / _GENERAL / _COLUMN  (R14 triage round 2, item B)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# All three spellings share Card 1 with the plain list form: ``SID DA1 DA2 DA3
+# DA4 SOLVER ITS``. ITS (field 7, R17, the *INCLUDE_COSIM coupling type) IS
+# written by the corpus — ``taylor2.k:111`` and ``matfoamsoil.k:261`` end
+# ``0.0MECH               1`` — and has no counterpart, so the slice stays six
+# wide and nothing reads it. Card 1 may also be SID ALONE
+# (``taylor1.k:4520`` writes ``       101`` and nothing else).
+
+def _set_range_keywords():
+    """Every ``*SET_<F>_GENERATE`` / ``_GENERAL`` / ``_COLUMN`` spelling, from
+    the ONE family table ``state.SET_RANGE_FAMILIES``.
+
+    ``_TITLE`` and ``_COLLECT`` need no entry of their own —
+    ``parser._split_keyword`` strips both into ``block.options`` (Vol I R17
+    p.43-2: "an additional keyword option TITLE may be appended to all the
+    *SET keywords"; ``_COLLECT`` is the sibling option every
+    ``Keyword971/SETS/*_list_generate.cfg`` appends between ``_INCREMENT`` and
+    ``_TITLE``). ``assembly._OFFSET_SPECS`` is generated from the SAME table,
+    so the parser keys and the ``*INCLUDE_TRANSFORM`` offset rows cannot drift:
+    an unmapped range spelling would keep BnBEG/BnEND pointing at the parent
+    deck's ids while the include's entities moved, and the set would resolve
+    empty — the #116 silent failure.
+
+    Yields ``(keyword, family, kind, increment)`` with ``kind`` in
+    {"GENERATE", "GENERAL", "COLUMN"}.
+    """
+    for (family, gen_kw, has_incr, has_col, has_gen,
+         _target, _bucket) in SET_RANGE_FAMILIES:
+        if gen_kw:
+            yield gen_kw, family, "GENERATE", False
+            if has_incr:
+                yield gen_kw + "_INCREMENT", family, "GENERATE", True
+        if has_col:
+            yield f"SET_{family}_COLUMN", family, "COLUMN", False
+        if has_gen:
+            yield f"SET_{family}_GENERAL", family, "GENERAL", False
+
+
+def _set_range_target(state: ConversionState, family: str):
+    """The plain container a *SET_<family> lands in, from the family table."""
+    for row in SET_RANGE_FAMILIES:
+        if row[0] == family:
+            return getattr(state, row[5])
+    raise KeyError(family)               # pragma: no cover - table is closed
+
+
+def _handle_set_generate(block: Block, state: ConversionState, family: str,
+                         increment: bool) -> None:
+    """``*SET_<F>[_LIST]_GENERATE[_INCREMENT]`` → ``state.set_generates``.
+
+    Card 2c (plain, Vol I R17 p.43-40; ``node_list_generate.cfg:151``
+    ``FREE_CELL_LIST(genemax,"%10d%10d",start,end,80)``): FOUR ``(BnBEG,
+    BnEND)`` pairs per card, cols 1-80, repeated to the next ``*``.
+    Card 2d (``_INCREMENT``, p.43-40; ``node_list_generate.cfg:145``): one
+    ``BBEG BEND INCR`` per card — "IDs BBEG, BBEG + INCR, BBEG + 2 x INCR, and
+    so on through BEND are added to the set."
+
+    The ranges are RECORDED, not expanded: p.43-40 says the sets "are generated
+    after all input is read", and a range may legally overshoot the id pool by
+    any amount (``show-cases/contact-overview/main.k`` states a 20 200 000-wide
+    *SET_PART_LIST_GENERATE over a 664-part deck). See
+    ``writer/mesh._expand_set_ranges_and_generals``.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    ranges: List[Tuple[int, int, int]] = []
+    for line in raw[offset + 1:]:
+        if not line.strip():
+            continue
+        cells = _set_range_cells(line, 8)
+        vals = [to_int(c) for c in cells if c.strip()]
+        if increment:
+            if len(vals) >= 2:
+                incr = vals[2] if len(vals) > 2 else 1
+                if incr <= 0:
+                    # The ONE place that knows this is the _INCREMENT spelling:
+                    # in state.set_generates a stride of 0 is the marker for the
+                    # PLAIN form, so the expansion pass cannot tell a stated
+                    # INCR = 0 from "no INCR column at all". node_list_generate
+                    # .cfg:28 declares `by` with no DEFAULT row, so a stated 0
+                    # is a stated 0 and not the #133 "a 0 in a DEFAULTED column
+                    # is the default" case — but BBEG + 0 + 0 + ... never
+                    # reaches BEND, so it cannot be read literally either.
+                    state.warn(
+                        f"*SET_{family}_..._GENERATE_INCREMENT {sid}: "
+                        f"INCR={incr} is not a positive stride (Vol I R17 "
+                        "p.43-40: \"IDs BBEG, BBEG + INCR, BBEG + 2 x INCR, "
+                        "and so on through BEND are added to the set\"), so "
+                        f"the range {vals[0]}..{vals[1]} is read with a stride "
+                        "of 1 — every DEFINED id in it joins the set.")
+                    incr = 1
+                ranges.append((vals[0], vals[1], incr))
+        else:
+            for k in range(0, len(vals) - 1, 2):
+                if vals[k] == 0 and vals[k + 1] == 0:
+                    # LS-PrePost fills the four (BnBEG, BnEND) slots of card 2c
+                    # with literal ZEROS, not blanks, when the card states
+                    # fewer than four ranges — every corpus carrier writes
+                    # `         9      2008         0         0 ...`. A blank
+                    # cell is dropped by the strip test above, a literal 0 is
+                    # not, and a (0, 0) pair selects nothing while inflating
+                    # the SPAN the hole report quotes: matfoamsoil's set 9 read
+                    # "726 of 1002" instead of the true "726 of 999", and
+                    # advection_A's hole-free 1..1204 range claimed 3 holes.
+                    # No entity has id 0, so a stated (0, 0) is the padding.
+                    continue
+                ranges.append((vals[k], vals[k + 1], 0))
+    if family == "PART":
+        _record_part_set_attrs(state, sid, f1)
+    if family == "NODE":
+        def _da(i: int) -> float:
+            return to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
+        da = (_da(1), _da(2), _da(3), _da(4))
+        if any(da):
+            state.node_set_attrs[sid] = da
+    key = (family, sid)
+    if key in state.set_generates:
+        # _COLLECT (and a plain duplicate id) merge into one set rather than
+        # replacing: that is what the option exists for.
+        old_title, old = state.set_generates[key]
+        state.set_generates[key] = (old_title or title, old + ranges)
+    else:
+        state.set_generates[key] = (title, ranges)
+
+
+def _set_range_cells(line: str, n: int) -> List[str]:
+    """One data row of a ``*SET_<F>_..._GENERATE[_INCREMENT]`` / ``_COLUMN``
+    card, in whichever format the deck wrote it.
+
+    The cells are ``I10`` in the fixed form, but LS-DYNA reads any card
+    comma-delimited and the ``*SET`` chapter's own examples do it (p.43-41), so
+    a ``parse_fixed`` alone turns ``1,10`` into the single cell ``"1,10"`` and
+    the range silently becomes ``1..0``. Measured: 0 comma-format range rows in
+    C:/openradioss_run, Ryan_Lee and the R14 tree — the guard is for decks the
+    corpus does not have, which is exactly when a silent mis-read costs most.
+    """
+    if "," in line:
+        return ([c.strip() for c in line.split(",")] + [""] * n)[:n]
+    return parse_fixed(line, n, 10)
+
+
+def _set_general_clause(line: str) -> Tuple[str, List[str]]:
+    """One ``*SET_<F>_GENERAL`` clause row → (OPTION, the seven E cells).
+
+    Fixed form puts OPTION in cols 1-10 and E1..E7 in 10-wide cells from col
+    11. But LS-DYNA takes any card comma-delimited, and Vol I R17 p.43-41
+    writes its OWN worked example that way (``PART, 6``); and an OPTION longer
+    than the A10 field (``SET_DISCRETE``, 12 characters) can only be written in
+    a free form. A plain ``line[:10]`` slice reads the first as the single
+    option ``"PART, 6"`` and truncates the second to ``SET_DISCRE`` — both then
+    miss the option table and are refused by name, with the wrong name.
+    """
+    if "," in line:
+        parts = [c.strip() for c in line.split(",")]
+        return parts[0].upper(), (parts[1:] + [""] * 7)[:7]
+    tok = line.split()[0] if line.split() else ""
+    if len(tok) > 10:
+        return tok.upper(), (line[len(tok):].split() + [""] * 7)[:7]
+    return line[:10].strip().upper(), parse_fixed(line[10:], 7, 10)
+
+
+def _handle_set_general(block: Block, state: ConversionState,
+                        family: str) -> None:
+    """``*SET_<F>_GENERAL`` → ``state.set_generals``.
+
+    Card 2e (Vol I R17 p.43-41; ``node_general_subgrp.cfg:135``
+    ``CARD("%-10s", KEY){NO_END;} FREE_CELL_LIST(idsmax,"%10d",ids,80)``):
+    ``OPTION`` in cols 1-10 (A10), then ``E1..E7`` in 10-wide cells from
+    col 11 — of which :func:`state.set_general_id_cols` says how many are
+    entity IDS, because that count is FAMILY-dependent: a SEGMENT-family
+    ``PART`` clause is three ids and four float attributes
+    (``segment_general_subgrp.cfg:274``) while a NODE-family ``PART`` clause is
+    seven ids (``node_general_subgrp.cfg:141``). Reading the attribute cells as
+    ids would put phantom parts in the set's scope.
+
+    Column layout MEASURED on the corpus rather than taken from the cfg's
+    ``%1s%10s`` (a HyperMesh D-prefix convenience, the "a cfg can lie" case):
+    ``show-cases/contact-overview/main.k:3613`` writes
+    ``PART        10110000  10111000 …`` and ``wall.key:30`` writes
+    ``DPART           1001`` — in both the option is left-justified inside
+    cols 1-10 and the first id ends at col 20.
+
+    OPTION casing is NOT fixed — ``Model-318_Achshebel-fein_tobi.k:283`` writes
+    ``SEG`` and ``05_1_welding_solid.k:489`` writes ``part`` — so it is
+    upper-cased and stripped before matching. A trailing run of ``0`` cells is
+    the padding LS-PrePost writes and is dropped (0 is no entity).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    clauses: List[Tuple[str, List[int]]] = []
+    for line in raw[offset + 1:]:
+        if not line.strip():
+            continue
+        option, cells = _set_general_clause(line)
+        if not option:
+            continue
+        ncols = set_general_id_cols(family, option)
+        ids = [to_int(c) for c in cells[:ncols] if c.strip()]
+        clauses.append((option, [v for v in ids if v != 0]))
+    if family == "PART":
+        _record_part_set_attrs(state, sid, f1)
+    key = (family, sid)
+    if key in state.set_generals:
+        old_title, old = state.set_generals[key]
+        state.set_generals[key] = (old_title or title, old + clauses)
+    else:
+        state.set_generals[key] = (title, clauses)
+
+
+def _handle_set_column(block: Block, state: ConversionState,
+                       family: str) -> None:
+    """``*SET_<F>_COLUMN`` → the plain family container, at PARSE time.
+
+    Card 2b (Vol I R17 p.43-39): one ``NID A1 A2 A3 A4`` per card, where
+    A1..A4 override the header's DA1..DA4 **for that entity** (Remark 2,
+    p.43-44). No k2rad consumer reads a per-ENTITY attribute — the tiebreak
+    override is per-SET (``state.node_set_attrs``) — so a COLUMN set is a plain
+    id list to every consumer and needs no post-parse pass. The per-entity
+    cells are recorded as dropped rather than silently ignored.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    ids: List[int] = []
+    stated_attrs = False
+    for line in raw[offset + 1:]:
+        if not line.strip():
+            continue
+        cells = _set_range_cells(line, 5)
+        if not cells or not cells[0].strip():
+            continue
+        v = to_int(cells[0])
+        if v > 0 and v not in ids:
+            ids.append(v)
+        if any(c.strip() and to_float(c) != 0.0 for c in cells[1:]):
+            stated_attrs = True
+    if family == "PART":
+        _record_part_set_attrs(state, sid, f1)
+    target = _set_range_target(state, family)
+    if sid in target:
+        target[sid] = (target[sid][0] or title,
+                       target[sid][1] + [i for i in ids if i not in target[sid][1]])
+    else:
+        target[sid] = (title, ids)
+    if stated_attrs:
+        state.warn(
+            f"*SET_{family}_COLUMN {sid}: the per-entity A1..A4 attribute "
+            "cells (Vol I R17 p.43-39 card 2b, which override the header's "
+            "DA1..DA4 for that entity alone, Remark 2 p.43-44) have no "
+            "OpenRadioss counterpart — a /GRNOD or /GR* group carries no "
+            "per-member attribute — and are dropped. The set's MEMBERS are "
+            "converted in full.")
 
 
 def _set_add_keywords():
@@ -14710,10 +15020,11 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
         # (space/comma) cards are equally legal — use the shared free-with-
         # fixed-fallback parse so both survive.
         f = _card([line], 0, fixed=True, n=8, w=10)
-        nodes = [to_int(f[j]) for j in range(min(4, len(f)))]
-        while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
-            nodes.pop()
-        if len(nodes) >= 3 and all(n > 0 for n in nodes):
+        # The collapse itself lives in state.collapse_segment_corners — the ONE
+        # copy *SET_SEGMENT_GENERAL's SEG clause shares (writer/mesh).
+        nodes = collapse_segment_corners(
+            [to_int(f[j]) for j in range(min(4, len(f)))])
+        if nodes:
             segments.append(nodes)
             # A1/A2 are the PER-SEGMENT override of a
             # *CONTACT_TIEBREAK_SURFACE_TO_SURFACE's NFLS/SFLS (Vol I R17
@@ -17723,6 +18034,27 @@ for _family, _kw, _ncells, _adds, _target in SET_ADD_FAMILIES:
                      lambda b, s: _handle_set_add(b, s, fam, nc, ad))(
         _family, _ncells, _adds)
 del _family, _kw, _ncells, _adds, _target
+
+# *SET_<FAMILY>[_LIST]_GENERATE[_INCREMENT] / _GENERAL / _COLUMN — the second
+# generated set block, from state.SET_RANGE_FAMILIES (the same source
+# assembly._OFFSET_SPECS and writer/mesh._expand_set_ranges_and_generals read).
+# Before this batch every one of these landed in skipped_keywords and the set
+# simply did not exist: `sph/bar-iv/taylor1.k` states
+# *SET_NODE_LIST_GENERATE 101 over its 4425 SPH particles and drives it with an
+# *INITIAL_VELOCITY, and the converted deck reached NORMAL TERMINATION at
+# I-ENERGY = K-ENERGY = 0.000 on every one of its 4353 cycles.
+for _kw, _family, _kind, _incr in _set_range_keywords():
+    if _kind == "GENERATE":
+        HANDLERS[_kw] = (lambda fam, inc:
+                         lambda b, s: _handle_set_generate(b, s, fam, inc))(
+            _family, _incr)
+    elif _kind == "GENERAL":
+        HANDLERS[_kw] = (lambda fam:
+                         lambda b, s: _handle_set_general(b, s, fam))(_family)
+    else:
+        HANDLERS[_kw] = (lambda fam:
+                         lambda b, s: _handle_set_column(b, s, fam))(_family)
+del _kw, _family, _kind, _incr
 
 # *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL,TITLE} in any order
 # — 326 spellings ("The order of the options in the keyword name is arbitrary",
