@@ -5312,6 +5312,18 @@ def _handle_set_generate(block: Block, state: ConversionState, family: str,
                 ranges.append((vals[0], vals[1], incr))
         else:
             for k in range(0, len(vals) - 1, 2):
+                if vals[k] == 0 and vals[k + 1] == 0:
+                    # LS-PrePost fills the four (BnBEG, BnEND) slots of card 2c
+                    # with literal ZEROS, not blanks, when the card states
+                    # fewer than four ranges — every corpus carrier writes
+                    # `         9      2008         0         0 ...`. A blank
+                    # cell is dropped by the strip test above, a literal 0 is
+                    # not, and a (0, 0) pair selects nothing while inflating
+                    # the SPAN the hole report quotes: matfoamsoil's set 9 read
+                    # "726 of 1002" instead of the true "726 of 999", and
+                    # advection_A's hole-free 1..1204 range claimed 3 holes.
+                    # No entity has id 0, so a stated (0, 0) is the padding.
+                    continue
                 ranges.append((vals[k], vals[k + 1], 0))
     if family == "PART":
         _record_part_set_attrs(state, sid, f1)
