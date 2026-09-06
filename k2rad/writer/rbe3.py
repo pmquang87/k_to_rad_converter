@@ -267,9 +267,11 @@ def _make_rbe3(state: ConversionState, rbody_info: Dict,
                 if ns is None:
                     state.warn(
                         f"{label}: ITYP=1 makes INID={ind.inid} a *SET_NODE id, "
-                        "but no such node set is in the deck (an unsupported "
-                        "*SET_NODE variant?) — that whole independent set is "
-                        "DROPPED from the constraint.")
+                        "but no such node set is in the deck — that whole "
+                        "independent set is DROPPED from the constraint. "
+                        "(The _GENERATE / _GENERAL / _COLUMN spellings this "
+                        "message used to blame are read since R14 triage "
+                        "round 2, so the id really is undefined here.)")
                     continue
                 nids = [n for n in ns[1] if n > 0]
             else:

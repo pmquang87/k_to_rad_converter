@@ -4615,8 +4615,16 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
             ns = state.node_sets.get(iv.nsid)
             if ns is None:
                 state.warn(
-                    f"*INITIAL_VELOCITY NSID={iv.nsid}: node set not found "
-                    "(unsupported *SET_NODE variant?) - skipped")
+                    f"*INITIAL_VELOCITY NSID={iv.nsid}: this deck defines no "
+                    "*SET_NODE with that id - skipped. (The parenthetical this "
+                    "message used to carry, \"unsupported *SET_NODE "
+                    "variant?\", named the R14 round-2 defect: "
+                    "*SET_NODE_LIST_GENERATE, _GENERAL and _COLUMN went "
+                    "unread, so taylor1/taylor2/matfoamsoil ran with no "
+                    "/INIVEL at all. All three spellings are read now. The "
+                    "spellings still NOT read are *SET_NODE_LIST_SMOOTH and "
+                    "the *SET_NODE_GENERAL clauses k2rad refuses by name "
+                    "(BRANCH, VOL, SALE*), each of which warns for itself.)")
                 continue
             base = set(ns[1])
         else:

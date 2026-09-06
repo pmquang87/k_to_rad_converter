@@ -7775,9 +7775,11 @@ class ConversionState:
     # abstract; a card whose tables are all constant loses NOTHING and says so.
     law106_spreads: Dict[int, List[str]] = field(default_factory=dict)
     # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
-    # never from the parsed driver list: several corpus decks state a driver
-    # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so
-    # the driver is dropped at emission and NOTHING changes the temperature.
+    # never from the parsed driver list: a driver whose *SET_NODE does not
+    # resolve is dropped at emission and NOTHING changes the temperature.
+    # (*SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE were the measured examples
+    # until R14 triage round 2 registered them; an undefined id and the
+    # _GENERAL clauses k2rad refuses by name still reach this.)
     # This is what gates /TH/NODE TEMP, /ANIM/NODA/TEMP and the *DATABASE_TPRINT
     # note (the #122 rule: a legal, accepted, frozen channel is worse than none).
     thermal_driver_emitted: bool = False

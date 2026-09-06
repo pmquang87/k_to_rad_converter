@@ -5292,6 +5292,23 @@ def _handle_set_generate(block: Block, state: ConversionState, family: str,
         if increment:
             if len(vals) >= 2:
                 incr = vals[2] if len(vals) > 2 else 1
+                if incr <= 0:
+                    # The ONE place that knows this is the _INCREMENT spelling:
+                    # in state.set_generates a stride of 0 is the marker for the
+                    # PLAIN form, so the expansion pass cannot tell a stated
+                    # INCR = 0 from "no INCR column at all". node_list_generate
+                    # .cfg:28 declares `by` with no DEFAULT row, so a stated 0
+                    # is a stated 0 and not the #133 "a 0 in a DEFAULTED column
+                    # is the default" case — but BBEG + 0 + 0 + ... never
+                    # reaches BEND, so it cannot be read literally either.
+                    state.warn(
+                        f"*SET_{family}_..._GENERATE_INCREMENT {sid}: "
+                        f"INCR={incr} is not a positive stride (Vol I R17 "
+                        "p.43-40: \"IDs BBEG, BBEG + INCR, BBEG + 2 x INCR, "
+                        "and so on through BEND are added to the set\"), so "
+                        f"the range {vals[0]}..{vals[1]} is read with a stride "
+                        "of 1 — every DEFINED id in it joins the set.")
+                    incr = 1
                 ranges.append((vals[0], vals[1], incr))
         else:
             for k in range(0, len(vals) - 1, 2):

@@ -568,6 +568,38 @@ def _emit_mat_law6_carrier(mid: int, title: str, rho: float) -> List[str]:
 _GRUNEISEN_A_SENTINEL = 1e-20
 
 
+def _gruneisen_substitution_size(g0: float, mu: float = 0.1) -> str:
+    """How big the ``A = 0 -> A = GAMMA0`` substitution is, for THIS card.
+
+    Derived from the two solvers' own (identical) closed form rather than
+    quoted from the coupon, because the coupon measured ``GAMMA0 = 2`` and the
+    bulk half of the error depends on GAMMA0:
+
+    * bulk    ``FF = 1 + (1 - g0/2) mu - (a/2) mu^2``
+      (``common_source/eos/gruneisen.F:120``, Vol II R17 p.1-16), so with
+      ``a = g0`` the compression term changes by
+      ``-(g0/2) mu^2 / (1 + (1 - g0/2) mu)`` — quadratic in mu, and only ~-1 %
+      at mu = 0.1 for g0 = 2;
+    * energy  ``BB = g0 + a mu`` (``:127``, ``DPDE = BB``), so with ``a = g0``
+      the ``(GAMMA0 + A mu) E`` term changes by ``+mu`` — **independent of
+      GAMMA0, LINEAR in mu, and the larger of the two** on any deck hot enough
+      to carry internal energy.
+
+    A negative-or-zero ``FF(a = 0)`` (large GAMMA0 at this mu) makes the bulk
+    ratio meaningless, so the sentence then reports the energy term alone
+    rather than printing a percentage of a sign change.
+    """
+    ff0 = 1.0 + (1.0 - g0 / 2.0) * mu
+    energy = f"the energy term (GAMMA0 + A*mu)*E rises {mu * 100.0:.2f} %"
+    if ff0 <= 0.0:
+        return (f"at mu = {mu:g} {energy} (the compression term's reference "
+                f"value 1 + (1 - GAMMA0/2)*mu is {ff0:g} at this GAMMA0, so a "
+                "percentage of it would say nothing).")
+    bulk = -(g0 / 2.0) * mu * mu / ff0 * 100.0
+    return (f"at mu = {mu:g} the compression pressure changes {bulk:+.2f} % "
+            f"and {energy}.")
+
+
 def _resolve_eos_gruneisen_a(state: ConversionState) -> None:
     """``*EOS_GRUNEISEN A = 0`` → a tiny positive ``a``, so the Radioss reader
     does not silently substitute ``GAMMA0`` for it.
@@ -610,13 +642,13 @@ def _resolve_eos_gruneisen_a(state: ConversionState) -> None:
             f"correction) would be turned into A = GAMMA0 = {g0:g} by the "
             "Radioss reader (hm_read_eos_gruneisen.F:102, "
             "\"IF(A == ZERO) A=GAMA0\"), which is a DIFFERENT equation of "
-            "state: with this card's numbers the compression pressure at "
-            "mu = 0.1 drops 1.00 % and the energy term (GAMMA0 + A*mu)*E "
-            "rises 10 %. Written as A = 1e-20 instead — measured on a "
-            "single-brick starter coupon, the reader echoes it verbatim "
-            "(A . . . = 1.0000000000000E-20) and the initial pressure at "
-            "mu = 0.1 is 15439.03415072, the a = 0 closed form to 13 digits, "
-            "against 15284.64380921 for A = GAMMA0.")
+            "state: " + _gruneisen_substitution_size(g0)
+            + " Written as A = 1e-20 instead — measured on a four-brick "
+              "starter coupon at taylor1's numbers (GAMMA0 = 2, mu0 = 0.1), "
+              "the reader echoes it verbatim "
+              "(A . . . = 1.0000000000000E-20) and the echoed INITIAL "
+              "PRESSURE is 15439.03415072, the a = 0 closed form to 13 "
+              "digits, against 15284.64380921 for A = GAMMA0.")
 
 
 def _emit_eos(eos: EosCard) -> List[str]:

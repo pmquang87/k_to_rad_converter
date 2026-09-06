@@ -2967,14 +2967,12 @@ def _expand_set_generates(state: ConversionState) -> None:
         seen: Set[int] = set()
         span_total = 0
         for beg, end, incr in ranges:
-            eff = incr
-            if incr and incr < 0:
-                state.warn(
-                    f"*SET_{family}_..._GENERATE_INCREMENT {sid}: INCR={incr} "
-                    "is not a positive stride (Vol I R17 p.43-40: "
-                    "\"IDs BBEG, BBEG + INCR, BBEG + 2 x INCR, and so on "
-                    f"through BEND\") — read as 1 for the range {beg}..{end}.")
-                eff = 1
+            # `incr == 0` is the PLAIN (non-_INCREMENT) form's marker and
+            # behaves identically to a stride of 1 here. A non-positive stride
+            # stated on an _INCREMENT card is normalised — and named — by
+            # ``handlers._handle_set_generate``, which is the only producer of
+            # this container and the only place that can tell the two apart.
+            eff = incr if incr > 0 else 0
             if end >= beg:
                 span_total += (end - beg + 1) if eff <= 1 else \
                     ((end - beg) // eff + 1)
@@ -3016,16 +3014,28 @@ def _set_range_container(state: ConversionState, family: str):
     raise KeyError(family)               # pragma: no cover - table is closed
 
 
+#: family → the module-level OPTION table the refusal message points the
+#: reader at. Named per family rather than "NODE else SEGMENT else ELEM",
+#: because ``*SET_PART_GENERAL`` reads ``_PART_GENERAL_OPTIONS`` and citing the
+#: element table for it would send the reader to a list that does not hold its
+#: options (the "check a warning's CITED FACT, not only its conclusion" rule).
+_GENERAL_OPTION_TABLE_NAME = {
+    "NODE": "_NODE_GENERAL_OPTIONS",
+    "SEGMENT": "_SEGMENT_GENERAL_OPTIONS",
+    "PART": "_PART_GENERAL_OPTIONS",
+}
+
+
 def _general_refused(state: ConversionState, family: str, sid: int,
                      option: str, ids: List[int]) -> None:
+    table = _GENERAL_OPTION_TABLE_NAME.get(family, "_ELEM_GENERAL_OPTIONS")
     state.warn(
         f"*SET_{family}_GENERAL {sid}: option {option} "
         f"{'(ids ' + ', '.join(str(i) for i in ids[:5]) + ')' if ids else ''}"
         " has no k2rad resolver and the clause is SKIPPED — the set is built "
         "from its other clauses only. Every option k2rad does resolve is "
-        f"listed in writer/mesh._{'NODE' if family == 'NODE' else 'SEGMENT' if family == 'SEGMENT' else 'ELEM'}"
-        "_GENERAL_OPTIONS; this one selects a scope OpenRadioss has no group "
-        "for (a *SET_PART_TREE branch, a structured-ALE region, a "
+        f"listed in writer/mesh.{table}; this one selects a scope OpenRadioss "
+        "has no group for (a *SET_PART_TREE branch, a structured-ALE region, a "
         "*DEFINE_CONTACT_VOLUME) or an entity family k2rad does not read.")
 
 
@@ -3813,9 +3823,10 @@ def _resolve_contact_interior(state: ConversionState) -> None:
         if direct is None:
             state.warn(
                 f"*CONTACT_INTERIOR: part set {psid} is not defined in the "
-                "deck (or uses an unsupported *SET_PART variant such as "
-                "_COLUMN/_GENERATE) — the interior-contact scope cannot be "
-                "resolved for it.")
+                "deck — the interior-contact scope cannot be resolved for it. "
+                "(_COLUMN, _GENERATE and _GENERAL used to be named here as "
+                "the likely cause; R14 triage round 2 registered all three, "
+                "so a missing set is now a missing set.)")
             continue
         title, pids = direct[0], list(direct[1])
         known = [p for p in pids if p in state.parts]

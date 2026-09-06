@@ -300,10 +300,13 @@ def _thermal_solve_active(state: ConversionState) -> bool:
       ``thermal_driver_emitted`` is set at the line that writes an ``/IMPTEMP``
       and ``thermal_source_emitted`` at the line that writes a ``/CONVEC``,
       ``/RADIATION`` or ``/IMPFLUX``, i.e. after the set has been resolved.
-      Several corpus decks state a driver whose ``*SET_NODE_GENERAL`` /
-      ``*SET_NODE_LIST_GENERATE`` k2rad does not read, so the driver is dropped
-      at emission — reading the PARSED list here would call those decks
-      "thermal" and ship a frozen fringe.
+      A driver whose ``*SET_NODE`` does not resolve is dropped at emission, so
+      reading the PARSED list here would call such a deck "thermal" and ship a
+      frozen fringe. (``*SET_NODE_GENERAL`` / ``*SET_NODE_LIST_GENERATE`` were
+      the measured examples until R14 triage round 2 registered them —
+      ``thermal/metal-forming/metal-forming.k`` was one. The GATE is unchanged
+      and still needed: an undefined set id, a ``*SET_NODE_LIST_SMOOTH`` and a
+      refused ``_GENERAL`` clause all still leave exactly this hole.)
 
     All four cards were MEASURED to move the temperature on their own. The
     ``/CONVEC`` probe is the discriminating one, because it needs neither an
@@ -2669,8 +2672,10 @@ def _driver_nodes(state: ConversionState, sid: int, is_node: bool,
                 state.warn(
                     f"{label}: *SET_NODE {sid} is not defined in the converted "
                     "deck, so there is no /GRNOD to impose the temperature on "
-                    "— card dropped. (A *SET_NODE_GENERAL or *SET_NODE_COLUMN "
-                    "the converter does not read leaves exactly this hole.)")
+                    "— card dropped. (*SET_NODE_GENERAL and *SET_NODE_COLUMN "
+                    "were named here as the likely cause until R14 triage "
+                    "round 2 registered them; a *SET_NODE_LIST_SMOOTH or a "
+                    "_GENERAL clause k2rad refuses still leaves this hole.)")
             if seen is not None:
                 seen.add((sid, is_node))
             return []
