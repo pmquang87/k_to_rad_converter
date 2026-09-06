@@ -1013,15 +1013,16 @@ censuses are `OPENRADIOSS_REPORT.md` §0.3/0.4/0.7. Of 356 decks, 348 converted,
 59 then failed in the STARTER and 49 in the engine. The ranking below is the
 report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
 
-| # | class | decks | closed by round 1 |
-|--:|---|--:|---|
-| 1 | `/PART` → `/MAT` id never emitted (starter ERROR 179) | 29 | **22** — the thermal-only stand-in, `*MAT_004`, `*MAT_CWM`, `*MAT_010`, `*MAT_014`; 7 are deliberate refusals BY NAME (`*MAT_102`, `*MAT_090` ×2, `*MAT_031`, `*MAT_148`, `*MAT_002` ANIS) and 2 are the named `*MAT_THERMAL_CWM` weld seam |
-| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own |
-| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START |
-| 4 | `nvh` frequency-domain family (7 NORMAL at cycle ≤ 1, 6 stall at cycle 0) | 13 | no — the #110 class |
-| 5 | `/MAT` density ≤ 0 (ERROR 683, 8) + beam property (ERROR 314/315, 8) | 16 | **14** — all 8 density decks and the 6 ELFORM-3 truss decks |
-| — | `/MAT/LAW51` (ERROR 99): 4 `Bunreacted`, 5 submaterial | 9 | **8** — `point_source.k` stays refused (`*MAT_GAS_MIXTURE`) |
-| — | singles: ERROR 156, 580, 581 | 3 | **3** |
+| # | class | decks | closed by round 1 | round 2 |
+|--:|---|--:|---|---|
+| 1 | `/PART` → `/MAT` id never emitted (starter ERROR 179) | 29 | **22** — the thermal-only stand-in, `*MAT_004`, `*MAT_CWM`, `*MAT_010`, `*MAT_014`; 7 are deliberate refusals BY NAME (`*MAT_102`, `*MAT_090` ×2, `*MAT_031`, `*MAT_148`, `*MAT_002` ANIS) and 2 are the named `*MAT_THERMAL_CWM` weld seam | — |
+| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own | **the SUPPORT half.** `*NODE` TC/RC (part A) sits under 44 of the class's rows and the `*SET_*` range spellings (part B) under 25 more. Measured: `taylor1` 0.000 → IE 42 590 (+2.4 % vs 41 588.6), `plate.typ13` 0.0 → a contact carrying 4151 of elastic contact energy. **Re-census AFTER the campaign re-run, not before** |
+| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START | partly: 27 of the class carry `*NODE` TC/RC and 5 more (`ex_06`, `ex_08` ×3, `ex_09`, `ex_10`) a `*BOUNDARY_SPC_SET` on a `_GENERATE` set. `ex_03` went from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL at t = 1.0. **The residue is the `/IMPL` recipe item and must be re-measured after BOTH parts, or the attribution is unreadable** |
+| 4 | `nvh` frequency-domain family (7 NORMAL at cycle ≤ 1, 6 stall at cycle 0) | 13 | no — the #110 class | the modal CHAIN is fixed for `6.2.PSD` (f1 110.5541 Hz on an exact matrix, +0.09 % vs its `eigout`), but that is `tools/`, not the `.rad` — the family's engine behaviour is unchanged |
+| 5 | `/MAT` density ≤ 0 (ERROR 683, 8) + beam property (ERROR 314/315, 8) | 16 | **14** — all 8 density decks and the 6 ELFORM-3 truss decks | — |
+| — | `/MAT/LAW51` (ERROR 99): 4 `Bunreacted`, 5 submaterial | 9 | **8** — `point_source.k` stays refused (`*MAT_GAS_MIXTURE`) | — |
+| — | singles: ERROR 156, 580, 581 | 3 | **3** | — |
+| — | starter ERROR 611 (zero-normal secondary node) | 2 | no | **2** — both start at 0 errors now and move `error_starter` → `error_engine` |
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
@@ -1068,7 +1069,32 @@ an input to the next.
 Four defects the post-review FIXED are in `CHANGELOG.md`; these are what it
 found and deliberately did NOT close.
 
-- **`*SET_NODE_LIST_GENERATE` is not read, so `*INITIAL_VELOCITY` is silently
+- ~~**`*SET_NODE_LIST_GENERATE` is not read, so `*INITIAL_VELOCITY` is silently
+  dropped**~~ — **CLOSED in R14 triage round 2.** Of the two options this entry
+  offered, the FIRST was taken — and the resolver was NOT the thing taught. A
+  post-parse expansion pass (`writer/mesh._expand_set_ranges_and_generals`,
+  immediately before `_flatten_set_adds` at both of its call sites) turns
+  `*SET_<FAMILY>_GENERATE`, `_GENERATE_INCREMENT`, `_GENERAL` and `_COLUMN` into the
+  family's ordinary set, so **every** consumer of `state.node_sets` and its six
+  sibling containers benefits, not just `*INITIAL_VELOCITY`. Vol I R17 p.43-40
+  is explicit that this is a post-parse job and that only DEFINED ids join the
+  set, so the pass bisects the id pool and never materialises the range (one
+  roster deck states a 20 200 000-wide one over 664 parts). MEASURED on
+  `taylor1`: the `*SET_NODE_LIST_GENERATE 101` resolves to exactly **4425**
+  node ids — the count LS-DYNA's own `glstat` implies (initial energy
+  44 807.05 = 4425 × ½ × 2.0251772e-9 × 1e10) — one `/INIVEL/TRA` is written,
+  and the engine reaches NORMAL TERMINATION at 4424 cycles with cycle-0
+  K-ENERGY 4.481E+04 (+0.007 % against that reference) and a final I-ENERGY of
+  **4.259E+04 against LS-DYNA's 41 588.6, +2.4 %**, both channels evolving.
+  **`matfoamsoil` did NOT come back with them, and that is the #122 rule
+  working**: its set resolves and its `/INIVEL` IS written — onto 125 nodes
+  every one of which is a member of `*MAT_RIGID` part 10, so `inirby.F`
+  overwrites the velocity and the deck is still `I-ENERGY = K-ENERGY = 0.000`
+  at 242 cycles. The converter now names exactly that (see the deferred
+  re-point item below); the deck must NOT be scored as a physics pass. The
+  original finding, kept because it is the measurement the fix was built on:
+
+  **`*SET_NODE_LIST_GENERATE` is not read, so `*INITIAL_VELOCITY` is silently
   dropped — three decks now reach NORMAL TERMINATION with an identically zero
   model.** `taylor1` (4353 cycles), `taylor2` (2579) and `matfoamsoil` (242)
   print `I-ENERGY 0.000` and `K-ENERGY 0.000` on EVERY cycle against LS-DYNA
@@ -1155,7 +1181,29 @@ found and deliberately did NOT close.
   an exclusion list's stated reason needs the same audit as a warning's — here
   in its sibling flavour, one file quoted for two decks.)
 
-- **The class-3 MODAL target is unmeasurable with the shipped chain.**
+- ~~**The class-3 MODAL target is unmeasurable with the shipped chain.**~~ —
+  **CLOSED in R14 triage round 2, and this entry's diagnosis was right on both
+  counts.** `tools/modal_solve.py` takes the beam area from the writer's own
+  `_constants_from_thicknesses` for the thickness ELFORMs (6.35 × 50.8 =
+  322.58, the number k2rad wrote into the deck's `/PROP/BEAM/1`) and mirrors
+  the converter's `RO ≤ 0` floor — not a fabrication, because the K it pairs
+  the mass with was exported from a `.rad` that already carries 1e-24. Both are
+  necessary: with either one missing the mass matrix keeps RANK 3 and `eigsh`
+  still dies −9999 (measured, `--no-zero-density-floor` reproduces it on
+  demand). MEASURED **f1 = 110.5541 Hz** against the `eigout`'s 110.4521
+  (**+0.09 %**), f2 = 884.4330 = f1 × 8 (the √(Iyy/Izz) pair) and
+  f3 = 4422.1651 (axial), on a matrix whose tip stiffness is 109.454 = 3EI/L³
+  to six figures — exactly the analytic cross-check this entry derived. The one
+  thing it did not predict: the frequency is only reachable on an EXACT matrix.
+  This machine's stock engine prints `/IMPL/PRINT/STIF` with
+  `FORMAT(...,E10.2)`, and on a 50-element cantilever two significant digits
+  turn the soft mode's tip stiffness NEGATIVE and f1 into 0.0000 Hz — the
+  shipped export answers 334.196 Hz. So the "~1 % frequency error" the
+  low-precision warning used to promise is a compact-model figure; the warning
+  now carries the measurement and points at the patched engine (which the k2rad
+  Docker image ships and the Windows install does not). The original finding:
+
+  **The class-3 MODAL target is unmeasurable with the shipped chain.**
   `6.2.PSD_Beam_Example_LSTC` (LS-DYNA `eigout` f1 = 110.4521 Hz):
   `tools/modal_solve.py` reports a total deck mass of 0.000226842 — exactly the
   tip `*ELEMENT_MASS`, i.e. the beam contributes nothing — and "49 node(s) in K
@@ -1173,7 +1221,35 @@ found and deliberately did NOT close.
   writer already has (`writer/mesh.py` derives `A = TS·TT`), and either fall
   back to a dense generalized solve or shift `sigma` when `M` is near-singular.
 
-- **`/EOS/GRUNEISEN` turns a stated `a = 0` into `a = gamma0`.** Newly
+- ~~**`/EOS/GRUNEISEN` turns a stated `a = 0` into `a = gamma0`.**~~ —
+  **CLOSED in R14 triage round 2** by the first of the two options, narrowed:
+  `a = 1e-20` is written only when the card states `A = 0` **and** its `GAMMA0`
+  is non-zero, because `IF(A == ZERO) A = GAMA0` is a NO-OP when GAMMA0 is
+  itself 0 and **23 of the 25 `A = 0` cards on the R14 roster are that shape** —
+  writing the sentinel there would move 23 emitted decks for no physical
+  reason. The two carriers are `sph/bar-iv/taylor1.k` and `sph/bar-v/taylor2.k`
+  eos 2, both `GAMMA0 = 2.0`. The value is MEASURED, not chosen: a four-brick
+  starter coupon at µ0 = 0.1 echoes `1.0000000000000E-20` verbatim with an
+  INITIAL PRESSURE of 15439.03415072 — the `a = 0` closed form to all 13
+  printed digits — while `1e-8` already differs in the 12th and `a = 0` itself
+  is echoed as `A = 2.000000000000` with 15284.64380921. This entry's "grows as
+  mu²" is right for the bulk term and INCOMPLETE: the energy term
+  `(GAMMA0 + A·mu)·E` errs by `+mu`, LINEAR in mu, GAMMA0-independent, and the
+  larger of the two on anything hot — +10 % at mu = 0.1 against the bulk term's
+  −1.00 %. The warning derives both halves from the card's own GAMMA0 rather
+  than quoting the coupon's.
+
+  Two sibling "zero means default" EOS traps found while measuring it and
+  deliberately NOT fixed here: `hm_read_eos_ideal_gas.F:140` (and `_vt.F:206`,
+  `hm_read_eos_nasg.F:152`) turns a stated `T0 = 0` into 300 K while k2rad
+  writes `*EOS_IDEAL_GAS`'s T0 verbatim, so a deck stating 0 silently gets
+  300 K — the same class as the `/HEAT/MAT T0 = 0 → 300 K` finding already
+  recorded; and `hm_read_eos_polynomial.F:163` reclassifies a polynomial EOS as
+  ISFLUID when its coefficients happen to form the ideal-gas signature, a
+  shape-triggered classification rather than a value override, with no corpus
+  carrier checked. The original finding:
+
+  **`/EOS/GRUNEISEN` turns a stated `a = 0` into `a = gamma0`.** Newly
   reachable through `*MAT_010`: k2rad writes the deck's first-order volume
   correction verbatim and `hm_read_eos_gruneisen.F:102` is
   `IF(A == ZERO) A = GAMA0`, which the starter then echoes as
@@ -1224,9 +1300,100 @@ found and deliberately did NOT close.
   alternative; not started. Recorded here for the same reason as the item
   above.
 
+### Found while doing round 2, recorded rather than fixed
+
+- **An `*INITIAL_VELOCITY` over a rigid part's nodes is emitted and inert, and
+  the re-point onto the `/RBODY` main node is NOT done.** `inirby.F` rebuilds
+  every `/RBODY` secondary node's velocity from the body's main node as a rigid
+  field before cycle 1, so an `/INIVEL` written on the secondaries is
+  overwritten at 0 starter diagnostics. LS-DYNA has no such rule —
+  `*INITIAL_VELOCITY` over a rigid part's nodes sets the PART's velocity, which
+  is what the IRIGID cell exists to override — so this is a real conversion gap
+  and not a deck defect. MEASURED on `matfoamsoil` once round 2's set batch made
+  its `*SET_NODE_LIST_GENERATE 99` resolve: the `/INIVEL/TRA` vx = 25000 lands
+  on nodes 1000..1124, all 125 of them members of `*MAT_RIGID` part 10
+  (`/RBODY/1125 'Ball'`), and the deck STILL terminates NORMAL at 242 cycles
+  with `I-ENERGY = K-ENERGY = 0.000` against an LS-DYNA glstat of 8573.23 /
+  19834.5. Round 2 NAMES it (count, first five ids, `inirby.F`, and the two
+  spellings that do move the body). Re-pointing the group changes the velocity
+  field of every deck that states an `*INITIAL_VELOCITY` over a rigid part, so
+  it needs its own corpus sweep and its own reference runs — the same reason
+  part A deferred the mirror-image `_make_bcs` re-point.
+
+- **`*CONTACT_SURFACE_TO_SURFACE` and eight sibling contact keywords are not
+  registered at all.** Measured while correcting item C's census: **62 of the
+  69 type-0 contact sides on the R14 roster** sit on a `*CONTACT_*` keyword
+  that is not in `handlers.HANDLERS` and lands in `skipped_keywords` before any
+  side resolution — `*CONTACT_SURFACE_TO_SURFACE` (34 cards, the most frequent
+  contact keyword on the roster), `_ONE_WAY_SURFACE_TO_SURFACE`,
+  `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_SLIDING_ONLY`, `_SINGLE_EDGE`,
+  `*CONTACT_ENTITY`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
+  `_TIED_SURFACE_TO_SURFACE_THERMAL` and `_TIED_SURFACE_TO_SURFACE_OFFSET_
+  THERMAL`. `plate.typ3.k` is the visible shape: `skipped_keywords =
+  ['CONTACT_SURFACE_TO_SURFACE']` and *"`*DATABASE_RCFORC` requested but no
+  `*CONTACT` was converted"*. Its own item, with its own sweep; folding it into
+  the SSTYP precedence fix would have made both unattributable.
+
+- **`*EOS_IDEAL_GAS` `T0 = 0` silently becomes 300 K.**
+  `hm_read_eos_ideal_gas.F:140` (and `_vt.F:206`, `hm_read_eos_nasg.F:152`) is
+  `IF (T0 == ZERO) T0 = THREE100`, and `handlers.py` reads `*EOS_IDEAL_GAS`'s
+  T0 verbatim into `params["t0"]` for `writer/materials` to write. Same class
+  as the `/HEAT/MAT T0 = 0 → 300 K` finding already recorded, and as the
+  `/EOS/GRUNEISEN A = 0` round 2 fixed — but the fix is not the same shape (a
+  temperature has a physically meaningful zero, so a 1e-20 sentinel is not
+  obviously right) and no corpus carrier was measured.
+  `hm_read_eos_polynomial.F:163` is a second, different trap on the same page:
+  a polynomial EOS whose coefficients happen to form the ideal-gas signature
+  (`C1 = C2 = C3 = 0`, `C4 == C5 > 1`, `C6 = 0`) is RECLASSIFIED as ISFLUID —
+  a shape-triggered classification, not a value override. No carrier checked.
+
+- **The four PARSE-TIME set readers still see only the plain spellings.**
+  `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART_SET`, `*LOAD_BODY_PARTS` and
+  `*CONSTRAINED_EXTRA_NODES_SET` resolve their set during dispatch, before the
+  post-parse expansion pass and before `_flatten_set_adds`, so a `_GENERATE` or
+  `_ADD` set named by one of them is still empty. They inherit the
+  `_flatten_set_adds` limitation verbatim rather than gaining a new one, and
+  zero corpus decks combine one of those keywords with a range spelling —
+  stated here rather than left implicit.
+
+- **A `*SET_<FAMILY>_GENERAL` clause naming a `*SET_<FAMILY>_ADD` union is skipped.** The
+  expansion order is ranges → GENERAL → `_flatten_set_adds`, because a GENERAL
+  clause may name a plain set and an `_ADD` member may be a `_GENERATE` sid; a
+  GENERAL clause naming an `_ADD` union is the one back-edge that order cannot
+  serve. Warned by name. No corpus deck does it (the only options in use are
+  `SEG`/`PART`/`ALL`/`BOX`/`DPART`), so a fixpoint iteration would be machinery
+  for a case that does not exist.
+
 ### Found while doing round 1, recorded rather than fixed
 
-- **A `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSTYP = 0` resolves to a
+- ~~**A `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSTYP = 0` resolves to a
+  `*PART`**~~ — **CLOSED in R14 triage round 2.** All ten styp-typed sites in
+  `writer/contacts` and the three in `gapmin` read ONE table with no fallback
+  chain — 0 → `*SET_SEGMENT` only, 1 → `*SET_SHELL` only — and a missing set is
+  a NAMED drop, never a part. The seven sites that already consulted
+  `segment_sets` kept a part fallback behind it; that leniency is gone too.
+  MEASURED on `plate.typ13`, before → after on the same branch: glstat
+  I-ENERGY **0.000 on every one of 251 cycles → 404.24 at the last of 253**,
+  peaking at 4631; K-ENERGY **constant at 7850 → 4836 + 760 rotational**
+  (a perfectly constant KE is what "the impactor passed through" looks like);
+  and the T01 CONTACT ENERGY channel **0.0 for the whole run → a peak of
+  4151**. The emitted interface is now a `/SURF/SEG` over the set's five
+  segments with a secondary `/GRNOD` of the 13 nodes they own — spanning BOTH
+  bodies — where it used to be a `/SURF/GRSHEL` over the plate's 16 shells
+  against a `/GRNOD` of the plate's own 25 nodes.
+
+  Two corrections to this entry's own premises, both measured. The ROSTER reach
+  is **one** contact card, not 13: 62 of the 69 type-0 sides sit on `*CONTACT_*`
+  keywords k2rad does not register at all (`*CONTACT_SURFACE_TO_SURFACE` alone
+  is 34 of them, and `plate.typ3.k` reports it in `skipped_keywords` today) —
+  registering those is a separate item, not folded in here. And `pipe.k`,
+  `EXP_SC_PRELOAD.k`, `mainboltaexpl.k`, `contact-overview/main.k` and the
+  square-beam and blow-mold decks are NOT carriers: their cards read SSTYP 2 or
+  3, and the number that looked like a type was the SURFA id. The corpus reach
+  is Ryan_Lee (76 sides, all on registered keywords) plus `getriebekette` (5,
+  which needs the `*SET_SEGMENT_GENERAL` item as well). The original finding:
+
+  **A `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSTYP = 0` resolves to a
   `*PART`, and its `*SET_SEGMENT` is never read.** `contacts._resolve_contact_slave`
   takes the `styp in (0, 1)` branch and looks the id up in `state.parts` FIRST,
   so `plate.typ13`'s `SSID = 1, SSTYP = 0` resolves to part 1 and the deck's own

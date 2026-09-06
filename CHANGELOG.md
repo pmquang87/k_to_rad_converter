@@ -211,6 +211,273 @@ Prior history (before this changelog was introduced) is summarized in the
   halves are reported separately. The batch's full 885-deck sweep and the
   campaign re-run are the validators' step.
 
+- **R14 CAMPAIGN TRIAGE batch, round 2, part B — the set spellings nobody
+  read, the contact side type nobody honoured, an equation of state the reader
+  quietly changed, and the modal chain's missing beam mass.** Part A gave the
+  two open engine classes their SUPPORT back; part B gives them their VELOCITY
+  FIELD, their CONTACT and their EOS. Same roster, same references on `F:`.
+
+  - **`*SET_<FAMILY>_GENERATE` / `_GENERATE_INCREMENT` / `_GENERAL` / `_COLUMN` are
+    read.** 25 roster decks state a `*SET_NODE_LIST_GENERATE`, 1 a
+    `*SET_PART_LIST_GENERATE`, 5 a `*SET_NODE_GENERAL`, 6 a
+    `*SET_SEGMENT_GENERAL`, 1 a `*SET_NODE_COLUMN`, and one corpus deck 544
+    `*SET_SEGMENT_GENERAL_TITLE` cards with 12 538 `SEG` rows. None of those
+    spellings was registered, so **the set did not exist** and every consumer
+    resolved nothing. MEASURED at master `363e6f6`: `sph/bar-iv/taylor1.k`
+    reaches NORMAL TERMINATION at `I-ENERGY = K-ENERGY = 0.000` on every one of
+    its 4353 cycles, with `skipped_keywords ['CONTROL_DAMPING',
+    'SET_NODE_LIST_GENERATE']`, `state.node_sets {}` and **zero** `/INIVEL`,
+    against an LS-DYNA `glstat` of IE 41 588.6 / KE 66.4851 — and the same
+    shape on `taylor2` (0/0 vs 42 392.8 / 53.3113), `matfoamsoil` (0/0 vs
+    8 573.23 / 19 834.5), `matrubber`, `foam` and `advection_A`.
+    **ONE family table** (`state.SET_RANGE_FAMILIES`, beside the
+    `SET_ADD_FAMILIES` it copies) generates all three consumers — the
+    `handlers.HANDLERS` keys, the `assembly._OFFSET_SPECS` rows and the
+    expansion pass's family loop — because OPTION1 is family-specific and the
+    asymmetry is REAL (NODE/PART/SHELL spell it `LIST_GENERATE`,
+    SOLID/BEAM/DISCRETE bare `GENERATE`; DISCRETE has no `_INCREMENT`; only
+    NODE/PART/SHELL have `_COLUMN`; SEGMENT has no range spelling at all), so
+    the table is transcribed from Vol I R17 ch. 43 and cross-checked against
+    `Keyword971/SETS/*.cfg` rather than derived: `*SET_SOLID_LIST_GENERATE`
+    does not exist and must not fall out of the lenient `*SET_SOLID_LIST`
+    alias. `_COLLECT` joins `_TITLE`/`_ID`/`_SUBTITLE` in `parser._TRAILING`
+    (checked first: all 36 files carrying `_COLLECT` in the Keyword971 cfg pool
+    are under `SETS/`).
+    **The ranges expand POST-PARSE, against the id POOL.** Vol I R17 p.43-40:
+    *"All defined IDs between and including BnBEG to BnEND are added to the
+    set. These sets are generated after all input is read so that gaps in the
+    node numbering are not a problem. BnBEG and BnEND may simply be limits on
+    the IDs and not nodal IDs."* The pass bisects the sorted pool;
+    `range(beg, end+1)` would be a memory bomb on a real roster deck —
+    `show-cases/contact-overview/main.k` states a `*SET_PART_LIST_GENERATE`
+    spanning 10 000 000..30 199 999, **20 200 000 wide, over 664 parts**. 20 of
+    the ~50 corpus ranges have holes and the count is reported once per set as
+    a fact with the page that makes it correct. Cross-checked against an
+    LS-DYNA reference run rather than assumed: `taylor1`'s range
+    1000001..1004425 is 4425 wide over 4425 SPH particles of mass 2.0251772E-09
+    at `vz = -1e5`, and LS-DYNA's own `glstat` ends `total/initial 0.993332` at
+    `total 4.45083E+04`, i.e. an initial energy of 44 807.05 =
+    4425 × ½ × 2.0251772e-9 × 1e10 **exactly** — so LS-DYNA moved every node in
+    the range, and k2rad now emits a `/GRNOD/NODE` of exactly 4425 ids.
+    A `(0, 0)` pair on card 2c is LS-PrePost's PADDING, not a range: every
+    carrier writes `9  2008  0  0  0  0  0  0`, a literal zero survives the
+    strip test a blank does not, and counting the three padding pairs inflated
+    the span the hole report quotes (matfoamsoil's set 9 read "726 of 1002"
+    against its true, independently censused "726 of 999").
+    **Pass placement is non-negotiable and documented in place**: immediately
+    BEFORE `_flatten_set_adds` at BOTH of its call sites, because (1) the
+    entity pools are only complete post-parse, (2) a `*SET_NODE_ADD` member may
+    be a `_GENERATE` sid, (3) `next_grnod_id()` and `next_elem_group_id()` dodge
+    whatever is already in the set containers and run AFTER this slot —
+    expanding later is starter ERROR 79 — and (4) the tet10→tet4 prune mutates
+    `state.node_sets`. Inside the pass: ranges first, then GENERAL.
+    **GENERAL clauses apply IN ORDER and an exclusion removes only what is
+    already in the set** (p.43-41: *"if you exclude node 5 and then include it,
+    node 5 will be included"*), pinned by the manual's own worked example —
+    part 6 / `DBOX` 7 / part 10 → {5, 10, 15, 22, 106}, an answer both wrong
+    implementations miss in opposite directions. The option tables are the
+    MANUAL's, not the cfg's: `segment_general_subgrp.cfg:96-124` omits `SET`,
+    `DSET`, `SALEBOXL`, `DVOL_SHELL` and `DVOL_SOLID` and misspells
+    `PSLDFi`/`BRSLDFi`/`SET_SLDFi` (the #115 "a cfg can lie" case). Options
+    with no k2rad resolver are refused BY NAME with the set id, the consequence
+    and the table to look in. `*SET_SEGMENT_GENERAL` `PART` keeps the part IDS
+    (`SegmentSet.part_scope`) instead of tessellating faces in Python —
+    p.43-64's *"one segment per shell ... only those segments wrapping the
+    solid part and pointing outward"* is exactly what `_make_master_surface`
+    already emits — and its `SEG` rows share the `*SET_SEGMENT` triangle
+    collapse through the new `state.collapse_segment_corners`, so one face
+    written both ways cannot become two rows and load itself twice (the
+    #131-measured EXT-WORK 18.35 → 73.39 trap).
+    **`*INCLUDE_TRANSFORM`**: every range CELL is an entity id and takes the
+    family's own bucket — a range `1..999` under `IDNOFF = 100000` has to
+    become `100001..100999`, or the include's nodes move, the range does not,
+    and the set resolves EMPTY at zero diagnostics (#116). `_INCREMENT`'s third
+    field is a STRIDE and is left alone; `_COLUMN` offsets field 0 only (A1..A4
+    are floats); `_GENERAL` needs a CALLABLE walker because the id columns
+    depend on the OPTION in cols 1-10 of the same row (`PART`'s E4..E7 are
+    FLOAT attributes, `segment_general_subgrp.cfg:258`) — and that walker must
+    still offset card 1's own SID, which is the one thing giving a keyword to a
+    callable silently drops.
+    Column layout MEASURED rather than taken from the cfg's `%1s%10s`
+    D-prefix convenience: `contact-overview/main.k:3613` writes
+    `PART        10110000  …` and `wall.key:30` `DPART           1001`, so the
+    option is left-justified in cols 1-10 and the ids are 10-wide from col 11;
+    OPTION casing is not fixed either (`SEG` vs `part`).
+    `*SET_TSHELL_GENERATE`/`_GENERAL` DO exist in R17 p.43-100 — unlike
+    `*SET_TSHELL_ADD` — and are deliberately NOT registered: there is no
+    thick-shell set container for the result and `*SET_TSHELL` itself is
+    unregistered, so the block would parse a set nothing can read. Zero corpus
+    carriers; it stays in `skipped_keywords`, named.
+
+  - **`SSTYP`/`MSTYP = 0` is a `*SET_SEGMENT` id and `1` a `*SET_SHELL` id, at
+    every one of the ten styp-typed sites.** Vol I R17 p.11-24 gives SURFATYP
+    `EQ.0: Segment set ID` and `EQ.1: Shell element set ID`, and p.11-25
+    settles it from the other side: SABOXID *"can be used only if SURFATYP is
+    set to 2, 3, 5, or 6, **meaning SURFA is a part ID or part set ID**"* —
+    type 0 is not a part id under any reading. dyna2rad agrees as a peer
+    (`convertcontacts.cxx:250-300` is a bare switch with `default: break` and
+    no fallback chain). k2rad read `state.parts` FIRST at
+    `_resolve_contact_slave`, `_resolve_contact_master` and
+    `_contact_master_pids` (whose callers include the `*CONTACT_INTERIOR`
+    scope, the solid-main sweep, `_type25_surface`, the TYPE11 fallback and the
+    tied main fallback) and in `gapmin`'s `_side_pids` / `_side_node_ids` /
+    `_describe_side`. MEASURED on
+    `intro-by-k.-weimar/contact/contact-ii/plate.typ13.k`, whose
+    `*SET_SEGMENT 1` holds FIVE segments spanning BOTH bodies while `*PART 1`
+    is the target alone: both resolvers built a **self-contact of PART 1** and
+    the impactor was not in the interface at all. Not "no contact": the WRONG
+    contact, terminating NORMAL with a plausible K-ENERGY. Before → after on
+    the same branch, same run dir, same launcher: glstat I-ENERGY **0.000 on
+    every one of 251 cycles → 404.24 at the last of 253** (peak 4631),
+    K-ENERGY **constant at 7850 → 4836 + 760 rotational** — a perfectly
+    constant KE being what "the impactor passed through" looks like — and the
+    T01 CONTACT ENERGY channel **0.0 for the whole run → a peak of 4151**,
+    against an LS-DYNA `glstat` of IE 824.072 / KE 7164.81 and a `sleout`
+    sliding-interface energy of 6.92699. The emitted interface is a
+    `/SURF/SEG` over the set's five segments with a secondary `/GRNOD` of the
+    13 nodes they own, where it was a `/SURF/GRSHEL` over the plate's 16 shells
+    against the plate's own 25 nodes.
+    The seven sites that already consulted `segment_sets` kept a
+    part/part-set/node-set fallback BEHIND it; that leniency is gone too, so a
+    mislabelled side is a NAMED drop instead of a silent wrong contact. The
+    message names the keyword, the interface, the side, the type, the id, any
+    same-numbered `*PART`/`*SET_PART`/`*SET_NODE`, and the `*INCLUDE`
+    possibility — required by `W7_SETUP_3P BendTest_implicit.k`, which types
+    two sides 0 with no `*SET_SEGMENT` anywhere in the file. LS-DYNA's own
+    behaviour on a missing set is NOT quoted: no corpus run produces one, so
+    there is no d3hsp line to cite and inventing one would be the #131 mistake
+    in reverse.
+    Type 1 gains a real main surface (`/GRSHEL/SHEL` + `/SURF/GRSHEL` over the
+    set's eids, with the same quad/tri split every other main surface makes —
+    a 3-corner shell in a `/GRSHEL/SHEL` is starter ERROR 70), and
+    `*SET_SEGMENT_GENERAL`'s PART scope rides through `_make_master_surface`.
+    Two user-facing sentences were false and are replaced: *"a `*SET_NODE` or
+    `*SET_SEGMENT` cannot supply the main surface"* —
+    `hm_read_inter_type07.F:393` resolves the main side through the `/SURF`
+    registry with NO kind check and `:448-455` self-pairs it for a
+    single-surface interface, and k2rad has emitted a `/SURF/SEG` as a
+    `/INTER/TYPE2` main since before this batch. A third docstring claimed
+    `_resolve_contact_slave` already made this test; it did not, and now it
+    does. `ssid == 0` still means "all parts" and never reaches the set
+    lookups, because k2rad's own implicit stabilization stub is `ssid=0,
+    sstyp=0`. `--auto-gapmin` labels a side by its TYPE now, instead of
+    printing `part 1 (Impacted Material)` for a segment set.
+    Two corrections to the census this item was scoped on, both measured: the
+    ROSTER reach is **one** card, because 62 of the 69 type-0 sides sit on
+    `*CONTACT_*` keywords k2rad does not register at all (recorded in ROADMAP
+    as its own item), and `pipe.k`, `EXP_SC_PRELOAD.k`, `mainboltaexpl.k`,
+    `contact-overview/main.k`, the square-beam and the blow-mold deck are NOT
+    carriers — their cards read SSTYP 2 or 3 and the number that looked like a
+    type was the SURFA id. `transducer.k` and `plate.typ3.k` are unmoved
+    controls (`.rad` byte-identical to part A's head).
+
+  - **`*EOS_GRUNEISEN A = 0` is written as `1e-20`, so the Radioss reader's own
+    default cannot fire.** `hm_read_eos_gruneisen.F:102` is
+    `IF(A == ZERO) A=GAMA0` — the only test on A in that file — while LS-DYNA
+    states NO Default for A (Vol II R17 p.1-16, *"first order volume correction
+    coefficient"*), so a blank or a literal 0 IS zero. The two solvers'
+    equations of state are otherwise identical term for term: substituting
+    `XX = MU/(1+MU)` into `common_source/eos/gruneisen.F`'s
+    `FG = 1 - (S1 - 1 + S2*XX + S3*XX*XX)*MU` gives Vol II's denominator
+    exactly, expanded branch included. **MEASURED on a four-brick starter
+    coupon** at `taylor1`'s numbers (`C 3958000, S1 1.497, S2 = S3 = 0,
+    Y0 = 2.0`, `RHO_I/RHO_0 = 9.79e-9/8.9e-9` so the reader's own `MU0 = 0.1`),
+    NORMAL TERMINATION at 0 ERROR / 0 WARNING in 1.71 s:
+
+    | stated `a` | echoed `A` | echoed INITIAL PRESSURE at µ0 = 0.1 |
+    |---|---|---|
+    | `0` | 2.000000000000 | 15284.64380921 |
+    | `1e-20` | 1.0000000000000E-20 | **15439.03415072** |
+    | `2` (control) | 2.000000000000 | 15284.64380921 |
+    | `1e-8` | 1.0000000000000E-08 | 15439.03414994 |
+
+    against closed forms of `P(µ=0.1, a=0) = 15439.03415072` and
+    `P(µ=0.1, a=2) = 15284.64380921` — every digit agrees. So the reader echoes
+    a tiny positive A verbatim, unscaled (there is no `/EOS/GRUNEISEN` cfg
+    anywhere in `hm_cfg_files`, i.e. the field has no DIMENSION), `1e-20`
+    reproduces the `a = 0` pressure to all 13 printed digits while `1e-8`
+    already differs in the 12th, and it is far above the `sp` build's underflow
+    floor. **Narrow by construction**: the substitution is a NO-OP when GAMMA0
+    is itself 0, and 23 of the 25 `A = 0` cards on the R14 roster have
+    `GAMMA0 = 0.0`, so writing the sentinel there would move 23 emitted decks
+    for no physical reason. Two carriers, both `GAMMA0 = 2.0`: `taylor1` and
+    `taylor2` eos 2. The warning derives its size from the CARD's own GAMMA0,
+    because only the energy half is card-independent: `BB = g0 + a·mu` makes
+    the `(GAMMA0 + A·mu)·E` error `+mu` whatever GAMMA0 is (+10 % at mu = 0.1)
+    while the bulk half `-(g0/2)mu² / (1 + (1 - g0/2)mu)` is −1.00 % only at
+    GAMMA0 = 2, which is what the coupon measured.
+
+  - **The modal chain weighs a thickness-section beam** (`tools/` only, zero
+    `.rad` change). `*SECTION_BEAM` ELFORM 0/1/4/5/11 state THICKNESSES, so
+    `sec.area` was 0 and `nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k` built
+    a mass matrix of RANK 3 — the tip `*ELEMENT_MASS` alone — against ARPACK's
+    default `ncv` of ~20, and `eigsh` died −9999, a failure that reads like a
+    singular stiffness matrix and is not one. The area now comes from the
+    WRITER's own `_constants_from_thicknesses` (6.35 × 50.8 = 322.58, the
+    number k2rad wrote into that deck's `/PROP/BEAM/1`) and a material stating
+    `RO ≤ 0` gets the converter's 1e-24 floor — not a fabrication, since the K
+    was exported from a `.rad` that already carries it, and
+    `--no-zero-density-floor` keeps the stated zero. Both halves are necessary:
+    with either missing the rank stays 3. MEASURED **f1 = 110.5541 Hz** against
+    the deck's own `.eigout` **110.4521 Hz (+0.092 %)**, with f2 = 884.4330
+    (= f1 × 8, the √(Iyy/Izz) pair), f3 = 4422.1651 (axial) and a tip
+    stiffness of 109.454 = 3EI/L³ to six figures — on an EXACT matrix, because
+    this machine's stock engine prints `/IMPL/PRINT/STIF` with
+    `FORMAT(...,E10.2)` and on a 50-element cantilever two significant digits
+    turn the soft mode's tip stiffness NEGATIVE and f1 into 0.0000 Hz (the
+    shipped export answers 334.196 Hz). The low-precision warning's old
+    "~0.5-1 % frequency error" promise is corrected with those numbers.
+    `solve_modes` also clamps both the mode count AND ARPACK's `ncv` into the
+    mass rank and says so — clamping `k` alone is not enough, because scipy
+    picks `ncv = min(n, max(2k+1, 20))` on its own.
+
+  - **Two side findings the set batch EXPOSED, both named rather than fixed
+    silently.** (a) `matfoamsoil`'s `/INIVEL` now resolves — onto nodes
+    1000..1124, every one a member of `*MAT_RIGID` part 10 (`/RBODY/1125`), so
+    `inirby.F` overwrites it before cycle 1 and the deck STILL terminates
+    NORMAL at 242 cycles with `I-ENERGY = K-ENERGY = 0.000`. The warning names
+    the count, the first five ids, the engine routine and the two spellings
+    that do move the body; the re-point onto the `/RBODY` main node is deferred
+    to ROADMAP with its reason. **Clearing one drop promoted the next into
+    view, which is exactly the #122 check working, and this deck must not be
+    scored as a physics pass.** (b) the modal dummy `/CLOAD` screened per NODE:
+    `ex_08_beam_elform_1`'s two `*BOUNDARY_SPC_SET` cards sit on `_GENERATE`
+    sets, and once they resolved the whole-node screen emptied the candidate
+    list and turned a 2-cycle deck into a MESSAGE ID 79 stop. It screens per
+    DOF now (Z first, the historical choice, then X, then Y) and names the
+    direction in both the warning and the `--static` command it prints.
+
+  **Verification record — ROUND 2, PART B.** Measured on this branch at
+  ``f3164fd``, AFTER the last code commit ``ae146ce`` (everything later adds
+  tests and documentation only), with the main tree untouched at ``363e6f6``:
+  `pytest tests/ -q` **4929 passed / 2 skipped / 1952 subtests** against part
+  A's head of 4908 / 2 / 1937 and a master baseline of 4876 / 2 / 1930;
+  `mypy k2rad` **0 issues in 37 source files** (mypy 2.3.1) and **0** again
+  under `--no-site-packages`, each from a fresh cache; `ruff check .` clean;
+  `python k2rad.py --help` renders (exit 0); the golden diff against
+  `origin/master` is still exactly part A's **two** lines and nothing else.
+  **Solver validation**, every job in a short run dir at `nt = 4` through the
+  run-openradioss launcher, LS-DYNA references read from `F:`:
+  `taylor1` starter **0 ERRORS / 0 WARNINGS**, engine **NORMAL TERMINATION,
+  4424 cycles, t = 2.000E-04**, cycle-0 K-ENERGY **4.481E+04** against the
+  44 807.05 its LS-DYNA `glstat` implies (**+0.007 %**) and a final I-ENERGY of
+  **4.259E+04** against 41 588.6 (**+2.4 %**), both channels evolving — where
+  part A's head gave `I-ENERGY = K-ENERGY = 0.000` on all 4353 cycles.
+  `plate.typ13` starter 0 ERRORS / 2 WARNINGS, engine **NORMAL, 253 cycles**,
+  the before/after above.
+  `ex_08_beam_elform_1` starter 0/1, engine NORMAL at **2 cycles** (unchanged),
+  with `/BCS` blocks 3 → 4 as its `*BOUNDARY_SPC_SET 1` starts resolving.
+  `matfoamsoil` starter 0/0, engine NORMAL at 242 cycles and **still 0/0** —
+  reported as the finding it is, not as a pass.
+  Two-half attribution over eleven converted decks against part A's head:
+  `taylor1`/`taylor2` moved for items B **and** D (one range each, one
+  `/EOS/GRUNEISEN` cell each), `advection_A`/`matfoamsoil`/`ex_08` for item B,
+  `plate.typ13` for item C, and `transducer`/`pipe`/`plate.typ3`/`sloshing_A`/
+  `6.2.PSD` are **byte-identical** — `sloshing_A` because its `GAMMA0` is 0 and
+  item D deliberately leaves it alone, `6.2.PSD` because item F is `tools/`
+  only. The batch's full 885-deck sweep and the campaign re-run are the
+  validators' step.
+
 - **R14 STARTER-ERROR TRIAGE batch, round 1 — the MATERIAL coverage gaps, the
   `/MAT/LAW51` semantics, the TRUSS element and the zero-density policy behind
   52 of the 59 starter failures the 356-deck dynaexamples R14 campaign

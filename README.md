@@ -111,19 +111,19 @@ export the image.
 ## Supported LS-DYNA keywords
 
 ### Mesh & geometry
-`*NODE` (`NID X Y Z` — its **`TC`/`RC` constraint cells are NOT converted**:
-they are constraint codes in the global system, exactly what
-`*BOUNDARY_SPC_NODE` states one flag at a time, and a deck that puts its
-constraints there converts into a model with those dofs FREE. Measured on a
-spring-mass coupon whose anchor carried `tc=7/rc=7`: no `/BCS`, the anchor
-free, the whole oscillator drifting at the centre-of-mass velocity while the
-engine printed NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero
-cell, so this is NAMED per deck — with the count, a few ids and the
-`*BOUNDARY_SPC_NODE` remedy — rather than silently converted. The deferral is
-about SCREENING, not about which direction the error runs: a correct `/BCS`
-pass has to exclude rigid-body nodes (p.35-3 Remark 1) and any dof already
-driven by `/IMPVEL`/`/IMPDISP`, and both need their own twin campaign. See
-ROADMAP for the opt-in flag that will carry it. The rows themselves are read
+`*NODE` (`NID X Y Z` — its **`TC`/`RC` constraint cells ARE converted**, to one
+`/GRNOD/NODE` + `/BCS` per distinct `(TC, RC)` pair and **on by default**; see
+**Boundary conditions & motion** below for the screens and the
+`--no-node-tc-rc-bcs` opt-out. Until R14 triage round 2 they were read and
+dropped, so a deck that puts its constraints there converted into a model with
+those dofs FREE — measured on a spring-mass coupon whose anchor carried
+`tc=7/rc=7`: no `/BCS`, the anchor free, the whole oscillator drifting at the
+centre-of-mass velocity while the engine printed NORMAL TERMINATION.
+**137** of the 893 `.k`/`.key`/`.dyn` files in the three corpus roots write a
+non-zero cell, all of them in the dynaexamples R14 tree, and 119 of those have
+no `*BOUNDARY_SPC` card at all. (The "721 of 2346 corpus decks" this sentence
+used to quote is not reproducible against those roots and was replaced by the
+measured count; see ROADMAP.) The rows themselves are read
 from their fixed columns even when a negative X and Y weld the node id onto
 the first coordinate — a shape that used to lose the node and mint a phantom
 node 0 on 188 corpus files),
@@ -1222,7 +1222,18 @@ control — ELFORM 20/22's shell-offset moments and `COHOFF` have no TYPE43
 mechanism, `GASKETT` is not an adhesive path, and hourglass splits
 (`*HOURGLASS`/`*CONTROL_HOURGLASS`) never touch a cohesive part.
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
-`*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
+`*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0).
+`*EOS_GRUNEISEN`'s first-order volume correction `A = 0` is written as
+`1e-20` when the card's `GAMMA0` is non-zero, because
+`hm_read_eos_gruneisen.F:102` is `IF(A == ZERO) A = GAMA0` and LS-DYNA states
+no Default for A (Vol II R17 p.1-16) — the two solvers' equations of state are
+otherwise identical term for term, so that substitution is the whole
+difference. Measured on a four-brick starter coupon at µ0 = 0.1: the reader
+echoes `1.0000000000000E-20` verbatim and its INITIAL PRESSURE is
+15439.03415072, the `a = 0` closed form to 13 digits, against 15284.64380921
+for `A = GAMMA0`. A card whose `GAMMA0` is 0 is left alone — the substitution
+is a no-op there, and 23 of the 25 `A = 0` cards on the R14 roster are that
+shape.
 `*MAT_TABULATED_JOHNSON_COOK` (224, `_LOG_INTERPOLATION` → `I_smooth=2`) →
 `/MAT/LAW109` `[+ /FAIL/TAB1]` — the fully tabulated flow stress
 `σ_y = k1(ε_p, ε̇)·kt(ε_p,T)/kt(ε_p,T_ref)`. `CP` copies 1:1 (LAW109's `C_p`
@@ -2230,6 +2241,41 @@ it grows for stubby beams.
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
 `*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
+`*SET_<FAMILY>_GENERATE` / `_GENERATE_INCREMENT` / `_GENERAL` / `_COLUMN` — the
+range and OPTION spellings, registered from **one** family table
+(`state.SET_RANGE_FAMILIES`, which also generates the `*INCLUDE_TRANSFORM`
+offset rows and the expansion pass). OPTION1 is family-specific and the
+asymmetry is real: NODE/PART/SHELL spell the range `LIST_GENERATE`,
+SOLID/BEAM/DISCRETE spell it bare `GENERATE`, DISCRETE has no `_INCREMENT`,
+only NODE/PART/SHELL have `_COLUMN`, and SEGMENT has no range spelling at all
+— so `*SET_SOLID_LIST_GENERATE` does not exist and is not derived from the
+lenient `*SET_SOLID_LIST` alias. `_COLLECT` and `_TITLE` stack and are stripped
+by the parser.
+**The ranges expand POST-PARSE, against the id POOL, never by materialising
+`range(beg, end + 1)`**: Vol I R17 p.43-40 says the sets "are generated after
+all input is read so that gaps in the node numbering are not a problem" and
+that "BnBEG and BnEND may simply be limits on the IDs and not nodal IDs" — and
+`show-cases/contact-overview/main.k` states a `*SET_PART_LIST_GENERATE`
+spanning 10 000 000..30 199 999 over 664 parts. 20 of the ~50 corpus ranges
+have holes; the hole count is reported once per set as a FACT, with the page
+that makes it correct. `_GENERAL` clauses are applied IN ORDER and an
+exclusion removes only what is already in the set (p.43-41's own worked
+example, part 6 / `DBOX` 7 / part 10 → {5, 10, 15, 22, 106}); the options
+k2rad resolves are `ALL`, `NODE`/`DNODE`, `PART`/`DPART`, `BOX`/`DBOX`,
+`SET_NODE`/`DSET_NODE`, `SET_PART`, `SET_SHELL`/`_SOLID`/`_BEAM`/`_DISCRETE`
+for nodes and `SEG`/`DSEG`, `SET`/`DSET`, `PART`/`DPART`, `ALL` for segments,
+each other documented option being refused BY NAME with the set id. A
+`*SET_SEGMENT_GENERAL` `PART` clause keeps the part IDs rather than
+tessellating faces in Python — p.43-64's "one segment per shell ... only those
+segments wrapping the solid part and pointing outward" is exactly what
+`/SURF/GRSHEL` + `/SURF/PART/EXT` already emit — and its `SEG` rows share the
+`*SET_SEGMENT` triangle collapse, so one face written both ways stays one
+segment. A `_COLUMN` set is a plain id list to every consumer (no Radioss group
+carries a per-member attribute) and its `A1..A4` cells are named as dropped.
+`*SET_TSHELL_GENERATE`/`_GENERAL` DO exist in R17 but are deliberately NOT
+registered: there is no thick-shell set container for the result and
+`*SET_TSHELL` itself is unregistered, so the block would parse a set nothing
+can read — it stays in `skipped_keywords`, named.
 `*SET_NODE_ADD`, `*SET_PART_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
 `*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` (+ every `_TITLE` form)
 → a conversion-time boolean UNION expanded into the family's ordinary set, so
@@ -2905,8 +2951,11 @@ EXT-WORK 4.283) under a `NORMAL TERMINATION` banner.
 `/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT`
 and an **emitted** temperature-moving card both exist, **and the run is
 explicit** — read from what was written, not from what was parsed, because a
-driver whose `*SET_NODE_GENERAL` k2rad cannot read is dropped at emission and
-then nothing changes the temperature. The implicit exclusion is a measurement:
+driver whose `*SET_NODE` does not resolve is dropped at emission and then
+nothing changes the temperature. (`*SET_NODE_GENERAL` was the measured example
+until R14 triage round 2 registered it; an undefined id, a
+`*SET_NODE_LIST_SMOOTH` and a `_GENERAL` clause k2rad refuses by name still
+leave exactly this hole, so the gate stays.) The implicit exclusion is a measurement:
 a twin pair of converted decks (10-brick bar, an `/IMPTEMP` holding one end at
 400 K against an `/INITEMP` of 300) carries the far end 300 → 399.731 → 400.000 K
 over 84 111 explicit cycles, while the same `.k` plus a
@@ -3156,6 +3205,21 @@ and `0.7·ΔT` it quotes the fraction of `E` actually reached from
 preloaded group 10 -> 4 with WARNING 1775, so the preload takes the
 total-strain formulation away again), and a curve whose peak is zero or
 compressive (starter WARNING 1255)
+`SURFATYP`/`SURFBTYP` (SSTYP/MSTYP) is read as the ID NAMESPACE it is, with no
+fallback chain: **0 is a `*SET_SEGMENT` id and 1 a `*SET_SHELL` element-set id**
+(Vol I R17 p.11-24), 2 a part set, 3 a part, 4 a node set, 5 all parts, 6 all
+parts minus a set, 7 refused. p.11-25 settles it from the other side — SABOXID
+"can be used only if SURFATYP is set to 2, 3, 5, or 6, meaning SURFA is a part
+ID or part set ID" — so a type-0 side is never read as a `*PART` of the same
+number. Type 0 builds a `/SURF/SEG` over the set's own segments (plus, for a
+`*SET_SEGMENT_GENERAL` `PART` scope, that part surface) and takes its secondary
+nodes from the same segments; type 1 builds a `/GRSHEL/SHEL` + `/SURF/GRSHEL`
+over the set's element ids. A `*SET_SEGMENT` IS a legal main surface —
+`hm_read_inter_type07.F:393` resolves the main side through the `/SURF`
+registry with no kind check, and `:448-455` self-pairs it for a single-surface
+interface. A side whose set is MISSING is dropped and named, with the type, the
+id, any same-numbered `*PART` and the `*INCLUDE` possibility; it never falls
+back to a part. `--auto-gapmin` measures and labels the side the same way.
 `*INITIAL_AXIAL_FORCE_BEAM` → `/PRELOAD/AXIAL` with `Preload = SCALE` (blank → 1.0;
 `preload_axial.F90:33` computes `f1 = SCALE·f(t)`, replacing the element's own
 axial force inside the window). Emitted at `/BEGIN 2022`, where the starter adds
@@ -5123,6 +5187,24 @@ See [`docs/MODAL.md`](docs/MODAL.md) for the full chain — the export recipe,
 drilling-stiffness parity (`--drill`), stock-engine caveats and 1-line patches,
 the inert probe rigid body, mode-shape viewing, random vibration & fatigue, and
 GUI integration.
+
+The mass arm weighs a `*SECTION_BEAM` that states only THICKNESSES (ELFORM
+0/1/4/5/11, whose card 2 is `TS1 TS2 TT1 TT2 …`): the area is taken from the
+same `writer/beams._constants_from_thicknesses` the converter used to build the
+`/PROP/BEAM` the engine's stiffness matrix came from, and a material stating
+`RO ≤ 0` gets the converter's own 1e-24 floor for the same reason — the `.rad`
+the matrix was exported from already carries it, so building `M` at `ρ = 0`
+would pair a mass matrix with a stiffness matrix from a different model
+(`--no-zero-density-floor` keeps the stated zero). Without both,
+`nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k` gave a mass matrix of RANK 3
+and `eigsh` died with ARPACK −9999 — which reads like a singular stiffness
+matrix and is not one; the solver now clamps both the mode count and ARPACK's
+`ncv` into the rank and says so. **The stock engine's `E10.2` matrix print is
+not a ~1 % error on a slender model**: measured on that deck, an exact matrix
+gives f1 = 110.5541 Hz against its `eigout`'s 110.4521 (+0.09 %) while the SAME
+matrix rounded to two significant digits gives a NEGATIVE tip stiffness and
+f1 = 0. Treat a frequency from a low-precision matrix as unvalidated — the
+warning now says so with those numbers.
 
 ### Further linear analyses on the exported stiffness matrix
 
