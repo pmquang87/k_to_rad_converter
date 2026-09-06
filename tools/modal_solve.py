@@ -546,6 +546,8 @@ def solve_modes(stiff: StiffnessMatrix, md: "np.ndarray",
     # non-zero diagonal entries (node 2's translations) before the beam mass
     # arm was fixed: rank 3 against ncv 20.
     rank = int((md > 0.0).sum())
+    n = stiff.K.shape[0]
+    kw = {}
     if rank and n_modes >= rank:
         print(f"  NOTE: only {rank} DOF(s) of the mass matrix are non-zero, so "
               f"at most {rank - 1} mode(s) can be extracted by shift-invert "
@@ -553,7 +555,18 @@ def solve_modes(stiff: StiffnessMatrix, md: "np.ndarray",
               "ARPACK break down and return -9999. Solving for "
               f"{max(1, rank - 1)}.")
         n_modes = max(1, rank - 1)
-    vals, vecs = spla.eigsh(stiff.K, k=n_modes, M=M, sigma=0, which="LM")
+    # Clamping k alone is NOT enough, and believing it was is why this guard
+    # had to be measured rather than reasoned: scipy picks
+    # ncv = min(n, max(2k+1, 20)) on its own, so with rank 3 and k = 2 the
+    # Krylov space is still 12-20 wide against an operator of rank 3 and the
+    # factorization still breaks down. ncv must fit INSIDE the rank as well,
+    # and ARPACK needs k < ncv <= n. Left to scipy whenever the rank is
+    # comfortable (the normal case: 6.2.PSD is rank 150 against ncv 20), so
+    # this changes nothing on a healthy mass matrix.
+    if rank and rank < min(n, max(2 * n_modes + 1, 20)):
+        kw["ncv"] = max(n_modes + 1, min(n, rank))
+    vals, vecs = spla.eigsh(stiff.K, k=n_modes, M=M, sigma=0, which="LM",
+                            **kw)
     order = np.argsort(vals)
     vals, vecs = vals[order], vecs[:, order]
     freq = np.sqrt(np.maximum(vals, 0.0)) / (2.0 * math.pi)
