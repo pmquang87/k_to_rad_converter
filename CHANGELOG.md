@@ -1536,6 +1536,189 @@ Prior history (before this changelog was introduced) is summarized in the
   before the campaign re-run landed; `db.json` carries 249 rows stamped
   `36a0c118 / feat/r14-triage-2` and was re-measured again for this round.
 
+  **THE VERIFICATION ROUND (after the review round).** Four independent
+  verifiers re-measured this branch against the source and the corpus. Three
+  of their findings are code, one is a missing test, and a fourth prescription
+  was TRIED and reverted because the measurement went the other way.
+
+  - **Rule (a) was wrong about LS-DYNA, so a rigid-body member's TC/RC cell is
+    now RE-POINTED onto the `/RBODY` main node instead of dropped.** The branch
+    shipped *"whether the EXPLICIT solver then honours them is not decidable on
+    this corpus"*, resting on `control_contact.hemi-draw`'s rigid punch. The
+    same deck decides it, three bodies at once, with its own control: part 4
+    (the Die) is 525 nodes all at TC 7 / RC 7 on `*MAT_RIGID` CMO 0, has no
+    `*BOUNDARY_SPC` and no `*CONSTRAINED` anywhere in the deck, is not the
+    `*BOUNDARY_PRESCRIBED_MOTION_RIGID` target, holds none of the
+    `*RIGIDWALL_PLANAR` node set, and carries up to **1.8e4** of interface-3
+    contact force — and its own `matsum` reports `x-rbv = y-rbv = z-rbv = 0.0`
+    at **all 121** output times, while parts 2 and 3 (same `*MAT_RIGID`, TC
+    codes unioning to x and z only) are held in x and z and move freely in y.
+    `control_adaptive.cup-draw`'s `rbdout` agrees independently. Vol I R17
+    p.35-3 Remark 1 — *"No attempt should be made to apply boundary conditions
+    to nodes belonging to rigid bodies"* — is advice to the deck author, not
+    solver behaviour, and Warning 60257 is an `IMP+` message on 1 of the 16
+    carriers. The OpenRadioss half is unchanged and still verified: a `/BCS` on
+    a `/RBODY` secondary IS inert (`rgbodv.F:150-155` after `BCS10`), so the
+    member is the one place the cell cannot go and the MAIN node is where it
+    acts — which is what `_make_bcs` has always done for a `*BOUNDARY_SPC` on a
+    rigid member. The two paths now share one `_rbody_main_of` map, codes are
+    unioned per body (hemi-draw's part 2 is the pinning shape) and rules
+    (b)/(c)/(d) run AT THE MAIN NODE through one `_screen` helper, so a driven
+    rigid body keeps its driven DOF. This also RESOLVES the "two contradictory
+    rigid-node rules in one writer" item ROADMAP deferred — in the other
+    direction from the one it predicted.
+  - **An `/INIVEL` whose every node is a rigid-body member is RE-POINTED too.**
+    MEASURED on `matfoamsoil` with nothing changed but that group's member
+    list: cycle-0 K-ENERGY **3.547E+04** against the LS-DYNA reference's own
+    initial total energy **3.54775E+04** (**-0.02 %**), where the shipped card
+    gives 0.000; 1320 cycles NORMAL at 0 ERRORS / 0 WARNINGS with both channels
+    evolving (final IE +66.7 %, KE -36.9 % against 8573.23 / 19834.5) against
+    242 cycles flat at zero. `transducer`, the second carrier, goes from
+    KE ~1e-25 to 845.8 against its reference's 1092.45. Reproducing LS-DYNA's
+    initial kinetic energy to four significant figures is direct evidence that
+    LS-DYNA gives the rigid PART the velocity. The MIXED case (some nodes
+    rigid, some free) and `*INITIAL_VELOCITY_GENERATION` deliberately keep the
+    warning — the `_GENERATION` form emits `/INIVEL/AXIS`, whose `Vr` gives
+    each node `omega x r`, so collapsing it to the main node would leave the
+    body with no spin at all.
+  - **The tied-contact routing: the RATIONALE was false, the routing stays,
+    and both facts are now stated.** *"A negative Card-3 SST/MST is LS-DYNA's
+    maintain-the-physical-offset flag"* is wrong at source — Vol I R17 p.11-33
+    (`SAST`) and General Remark 4 (p.11-125) make it the tying SEARCH DISTANCE
+    `delta = abs(delta_1)` — and General Remark 7 (p.11-127) puts a plain
+    `*CONTACT_TIED_SURFACE_TO_SURFACE` in the CONSTRAINT-based family, i.e.
+    `/INTER/TYPE2`. All five corpus cards the sign rule sends to
+    `/INTER/TYPE10` are that plain spelling. Routing them to the faithful card
+    was TRIED and REVERTED, measured on this machine at `nt = 4` with the deck
+    differing only in the tie card:
+    `05_4_2_welding_uncoupled_link_d3plot_structuralstep` (an `/IMPL`
+    quasi-static step) reaches **NORMAL TERMINATION in 81 cycles** with
+    `/INTER/TYPE10` `Itied = 1` and **diverges at cycle 16** with
+    `/INTER/TYPE2` (Spotflag 27, `dsearch` 0.1, starter 0 ERRORS / 0 WARNINGS)
+    — `ITERATION DIVERGE with RELATIVE R = 0.1723E+01` into `SOLVER IMPLICIT
+    STOPPED DUE TO TIMESTEP LIMIT`, `ISTOP = -2`. The cost of the arm that runs
+    is stated too: `STFAC` is Radioss's own 0.2 default
+    (`hm_read_inter_type10.F:135`, `inter_type10.cfg:76`), which on a
+    determinate EXPLICIT tie coupon carries **-42.8 %** of the load
+    `/INTER/TYPE2` matches exactly. Both halves are one ROADMAP item, because
+    fixing either alone trades one measured defect for the other.
+  - **`a84afe3`'s dependency-ordered `*SET_<F>_GENERAL` expansion had no
+    test.** Reverting `mesh.py:3311` to `sorted()` left the whole suite green
+    (4950 passed). Three tests now pin the ORDER, the CALL SITE (a
+    `*BOUNDARY_SPC_SET` whose set forward-references a higher sid must emit its
+    `/BCS` over the referenced members, with no "which this deck does not
+    define" warning) and the cycle fallback.
+
+  **Statements corrected because a measurement contradicted them** (each was
+  shipped in this entry, ROADMAP, README or the PR body):
+
+  * *"four `*MAT_NULL` decks lose a NORMAL termination ... the opt-out
+    reproduces master byte for byte"* -> **three**. `ale/bird/bird-b` is an
+    item-B row, not an item-A one: with `--no-node-tc-rc-bcs` its `.rad` still
+    differs from a true master conversion by 337 added / 6 removed lines, and
+    the opt-out arm collapses exactly like the full branch. For
+    `sloshing-a/-c/-d` the opt-out IS byte-identical (verified, 0 diff lines).
+  * *"LS-DYNA's own d3hsp lists the same 242 nodes as `1 1 1`"* -> **180 as
+    `0 0 1`, 40 as `1 0 1`, 22 as `1 1 1`**, and `0 0 0` in every rotational
+    column although every node states RC = 7.
+  * *"what is unresolved is a constrained mesh with no deviatoric stiffness ...
+    decide `/BCS` vs `/ALE/BCS`"* -> the cause is the **`*SECTION_SOLID`
+    ELFORM 1 -> `Isolid` 17** mapping with LS-DYNA's DEFAULT hourglass control
+    not carried. Same shipped `.rad`, only the Isolid cell changed: 17 -> stuck
+    at t = 0.1807; **1 with h = 0.1 -> NORMAL, 34 118 cycles, t = 2.0, IE
+    -0.25 % and EXT-WORK +0.03 % against sloshing_A's own reference**; 2 ->
+    NORMAL; 24 -> stuck at t = 0.6868. The corpus holds the controlled
+    experiment: `sloshing_B.k` is `sloshing_A.k` plus three lines of
+    `*CONTROL_HOURGLASS`, which is exactly what makes `_ihq_to_isolid` remap
+    17 -> 1, and it does not regress. `/ALE/BCS` is a provable NO-OP there —
+    `sloshing_A` carries no ALE keyword at all and `bcs0.F:66-76` decodes the
+    ALE fields only `IF(IALE>0)`.
+  * *"162 139 TC/RC cells"* -> **162 139 constrained `*NODE` rows** (267 641
+    non-zero cells, counting TC and RC separately). The number reproduces
+    exactly; the noun was wrong at five sites.
+  * *"the caught population is `d < (1 - Fpenmax)*GAPV + MARGE`"* -> MARGE is
+    identically zero on the only path that feeds `i7pwr3` (`inint3.F:819` and
+    `:1019` are both `CALL I7PEN3(ZERO, GAPV, ...)`), so the 45-node residue on
+    `05_1_welding_solid` is nodes below 1e-8 of the gap but not bit-exactly
+    zero, not a MARGE offset.
+  * *"the stub ... still resists if parts move further into each other"* ->
+    only where Fpenmax has NOT deactivated the node. Measured on a two-block
+    implicit coupon: with a 0.5 mm gap (0 deactivations) it resists (I-ENERGY
+    1.636E+05 with, 4.469 without); on COINCIDENT non-merged faces (24
+    deactivated) the run is identical to one with the whole block deleted.
+  * *"Every one of those consumers now calls `_part_scoped_segment_set`"* ->
+    **five of six**; `writer/mesh._referenced_node_ids` carries a written
+    verdict at its own site instead.
+  * *"eleven decks terminate NORMAL as numerically-zero models"* -> that was
+    the evolve table of the round's 184 `normal` MOVERS. Censused over all 373
+    records it was **twenty** before this round and is **fourteen** after it.
+  * *"`k2rad.py --help` ... 22 087 chars"* -> 22 087 **bytes** (21 777
+    characters after universal-newline translation). The load-bearing half —
+    0 unescaped `%` in any `help=` string — holds.
+
+  **Verification record — the VERIFICATION round.** Measured on this branch at
+  ``57602ee``, the LAST code commit (everything after it is documentation),
+  with the main tree untouched at ``363e6f6``:
+
+  * ``pytest tests/ -q`` **4956 passed / 2 skipped / 1961 subtests** (the
+    review round's head was 4950 / 2 / 1961; master 4876 / 2 / 1930).
+  * ``mypy k2rad`` **0 issues in 37 source files**, and **0** again with
+    ``--no-site-packages`` (mypy 2.3.1, fresh per-tree cache).
+  * ``ruff check .`` clean; ``k2rad.py --help`` renders, exit 0.
+  * Goldens vs ``origin/master``: still exactly **two lines**, unchanged — no
+    fixture carries a rigid-body TC/RC cell or an all-rigid ``/INIVEL``.
+  * **Mutations: 6 of 6 real ones CAUGHT**, on a detached worktree with
+    backup-copy restore and a FULL-suite run per mutation (never a ``-k``
+    selector, which is how the review round's harness missed a site no selector
+    named). The six: the TC/RC re-point reverted to a drop; the per-body union
+    becoming last-wins; the main-node screen skipped; the ``/INIVEL`` re-point
+    disabled; its ``all_rigid`` guard removed (which silently drops a mixed
+    card's FREE nodes); and ``mesh.py:3311`` reverted to ``sorted()``. A
+    deliberate whitespace-in-a-comment control stays green.
+  * **Two-half roster comparison, from `F:`** — and that tree matters: the
+    earlier comparisons of this round were run against the deck-only roster,
+    while the campaign converts from ``F:``, and the two trees' ``.k`` files
+    DIFFER on at least 14 decks. Over the 356 joblist keys (2 Yaris decks are
+    not on ``F:``): **22 ``.rad`` byte movers, 110 conversion-record movers,
+    union 110, 0 byte movers with no record change, 0 convert errors on either
+    side.** By cause: 15 the TC/RC re-point, 8 the ``/INIVEL`` re-point (one
+    deck in both), the rest a changed warning. **0 unattributed.**
+  * **Campaign re-run.** 110 decks re-converted with the campaign's own call,
+    the 22 ``.rad`` movers reset and re-run in the FOREGROUND (8.6 min,
+    ``nt = 4``); **all 708 verifiable mirror ``.rad`` files byte-identical to
+    this head** (708 not 712 — the two Yaris giants' decks are not on ``F:``).
+    ``verify_runs.py`` PROBLEMS **0**; ``xcheck_counts.py`` DISAGREE **0**.
+    **0 status regressions and 0 verdict regressions**; the whole-database
+    distribution is unchanged (normal 266 / error_engine 43 / error_starter 13
+    / timeout 19 / pending 7 / skipped 25; match 17 / deviation 136). What
+    moved is the **IE-collapse class, 51 -> 45**: six ``-100 % / -100 %`` zero
+    models cleared, all six EVOLVES on the ``camp_evolve.py`` check —
+    ``transducer`` (IE -24.10 / KE -22.58), ``typ14-m24`` (-26.66 / +49.66),
+    ``translat``, ``contact.n2s-sphere`` (-69.35 / +27.39), ``matfoamsoil``
+    (+66.68 / -36.93) and ``sph/foam`` (+311.2 / -70.29). |IE dev| smaller on
+    5 of the 22 and LARGER on 2; |KE dev| smaller on 8 and LARGER on 1 — the
+    three that grew are the two decks that stopped being zero models, where
+    "the deviation grew" and "the model now runs" are the same event. The six
+    metal-forming rows do not move at all, and that is expected: the tooling is
+    now held exactly as LS-DYNA holds it, but nothing loads it while their
+    ``*CONTACT_SURFACE_TO_SURFACE`` cards are still unregistered. Report
+    **section 0.15** carries every row and the WHOLE-BRANCH accounting (4
+    status regressions end to end — ``sloshing_A/_C`` and ``bird_B`` normal ->
+    timeout, ``sloshing_D`` normal -> error_engine; 0 verdict regressions;
+    |IE dev| larger on 15 decks and |KE dev| on 16, each named).
+  * **0 giants launched, and the mechanism is FIXED rather than only
+    reported.** All 22 movers are ``run_pass = 1``. ``run_queue.py`` kept its
+    ``run_pass`` filter in the ``elif`` of ``--only``/``--only-file``, so any
+    named list bypassed it by construction — which is how all six giant
+    launches so far were made. The screen now runs AFTER the selection, prints
+    the excluded keys and their count every run, and refuses the batch with
+    exit 2 unless ``--allow-giants`` is passed (verified both ways). Six of the
+    13 giants have now been run across the campaign, not four: ``2Dlag`` and
+    ``ale_wavehitcol`` went through section 0.12's re-run and were recorded
+    there without being named as giants. All six rows now carry the deviation
+    in their own ``openradioss.notes``, and ``_meta`` carries the
+    unmerged-branch caveat.
+
 - **POST-REVIEW ROUND of the R14 triage batch — one silent wrong answer on
   four corpus decks, one wrong-way pressure on a fifth, one capability
   regression, one conversion-aborting crash and two gates that accepted more

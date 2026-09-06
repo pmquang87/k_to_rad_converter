@@ -2558,9 +2558,18 @@ birth/death — always active. The decode reproduces LS-DYNA's own
 reference runs) on all **162 139 constrained `*NODE` rows of the 137 carrier
 reference decks with zero translation-code disagreements**. Screened rule by
 rule, each screen counted and its nodes named in the conversion log: a
-rigid-body member node is **dropped** (p.35-3 Remark 1, and LS-DYNA's own
-`Warning 60257 skipping spc on rigid body node`; a `/BCS` there is inert anyway
-— `rgbodv.F:150-155` runs after `BCS10`), a DOF a
+rigid-body member node is **re-pointed onto the body's `/RBODY` main node**,
+unioned per body — the card cannot stay on the member (`rgbodv.F:150-155` runs
+after `BCS10` and rebuilds a secondary's acceleration from the body, measured
+inert) and LS-DYNA applies the cell to the BODY, measured on
+`control_contact.hemi-draw` part 4 (525 nodes at TC 7 / RC 7, `*MAT_RIGID`
+CMO 0, no other constraint, 1.8e4 of contact force, `matsum` rigid-body
+velocity exactly 0.0 in all three components at all 121 output times, while
+parts 2 and 3 with TC codes unioning to x and z move freely in y). It is the
+same re-point `_make_bcs` performs for a `*BOUNDARY_SPC` on a rigid member.
+Vol I R17 p.35-3 Remark 1 is advice to the deck author, and
+`Warning 60257 skipping spc on rigid body node` is an `IMP+` (implicit)
+message on 1 of the 16 carriers. A DOF a
 `*BOUNDARY_PRESCRIBED_MOTION` already drives is **left to it** (measured: the
 same DOF pinned twice gives starter `WARNING 312` and a 99.9 % engine energy
 error), a DOF a `*BOUNDARY_SPC` already states is **merged, not restated**
@@ -3059,7 +3068,17 @@ exempted-node history.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),
-grouped by identical 6-tuple velocity
+grouped by identical 6-tuple velocity. When EVERY node of such a card belongs
+to a rigid body the group is **re-pointed onto that body's `/RBODY` main
+node** — `inirby.F` rebuilds a secondary's velocity from the main node every
+cycle, so the card written on the secondaries is overwritten before cycle 1 and
+the body starts at rest, at 0 starter diagnostics, while LS-DYNA gives the
+rigid PART the velocity (measured on `matfoamsoil`: cycle-0 K-ENERGY 3.547E+04
+against the LS-DYNA reference's own 3.54775E+04, −0.02 %, where the
+un-re-pointed card gives 0.000). A MIXED card is left over its stated nodes and
+named, and `*INITIAL_VELOCITY_GENERATION` is not re-pointed at all: it emits
+`/INIVEL/AXIS`, whose `Vr` gives each node the translational velocity
+`omega x r`, so collapsing the group would leave the body with no spin
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
