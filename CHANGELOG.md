@@ -16,13 +16,13 @@ Prior history (before this changelog was introduced) is summarized in the
   wrong field.** Rounds 1 and 2 cleared the starter-error classes and the
   `*NODE` constraint cells; the round-3 census then ranked the remaining
   converter classes by measured reach over the same 356-deck dynaexamples R14
-  roster. Item A is the largest: **16 `*CONTACT_*` spellings, 78 cards on 44
+  roster. Item A is the largest: **16 `*CONTACT_*` spellings, 77 cards on 44
   decks, 37 of which have NO other contact — and 18 of the 30 decks whose
   OpenRadioss internal energy is zero against a non-zero LS-DYNA reference
   carry one.** A skipped `*CONTACT` is not a missing output card, it is a
   missing LOAD PATH: the two surfaces pass through each other and the run
   terminates NORMALLY with a wrong answer. dyna2rad drops the same spellings
-  (`convertcontacts.cxx:233` `if (interType.empty()) continue;`), so this is
+  (`convertcontacts.cxx:234` `if (interType.empty()) continue;`), so this is
   one of the areas where k2rad has to exceed the native reader.
 
   - **One source table, three consumers** (`handlers._CONTACT_SPELLINGS`).
@@ -45,7 +45,8 @@ Prior history (before this changelog was introduced) is summarized in the
     one-sided segment (p.11-10 item 4 — a gain in permissiveness, nothing
     dropped); the two-way ones are checked from one side only by
     `/INTER/TYPE7` (p.11-8 item 1b); `FORMING` ignores the tooling thickness
-    and offsets SURFB by `|SBST|/2` (General Remark 9, p.11-128); `MORTAR` is
+    and, on a NEGATIVE `SBST` only, additionally offsets SURFB by `|SBST|/2`
+    (General Remark 9, p.11-128); `MORTAR` is
     a segment-to-segment contact OpenRadioss has no interface for at all
     (General Remark 14, p.11-131).
   - **`*CONTACT_SINGLE_EDGE` → `/INTER/TYPE11` self edge-impact**
@@ -81,7 +82,9 @@ Prior history (before this changelog was introduced) is summarized in the
     invent a restraining force the deck does not state), `*CONTACT_ENTITY`
     (only GEOTYP 1/2/3 map to `/RWALL`, which cannot carry `SO`, `INTORD`,
     `ITHK` or a damping/friction curve and makes every secondary node
-    kinematically constrained — `hm_read_rwall_spher.F:290`), and
+    kinematically constrained whenever the wall is not penalty-coupled —
+    `hm_read_rwall_spher.F:286`, gated `IF (IDDLEVEL == 0 .AND. IPEN == 0)`),
+    and
     `*CONTACT_SLIDING_ONLY` (no OpenRadioss interface forbids separation while
     allowing sliding; `/INTER/TYPE3` and `/INTER/TYPE5` both echo `SLIDING AND
     VOIDS`). The last is a MEASURED refusal: routing its one carrier through
@@ -196,7 +199,7 @@ Prior history (before this changelog was introduced) is summarized in the
     DEFAULT and not a remap of stated cards.
 
     Screened out, each for its own quoted or measured reason: **ELFORM −1/−2**
-    (p.41-97 Remark 13 — *"there is no hourglass energy, and the behavior is
+    (p.41-104 Remark 13 — *"there is no hourglass energy, and the behavior is
     not affected by hourglass parameters"*; they are 15-16 points too stiff at
     `Isolid` 17, but that is a LOCKING item and it is in the ROADMAP with its
     numbers, not fixed here), **ELFORM 2/3** and the tetrahedra (no hourglass
@@ -223,7 +226,7 @@ Prior history (before this changelog was introduced) is summarized in the
     to byte-identical starters (`sloshing_A_0000.rad` and
     `sloshing_C_0000.rad`). They are still not mapped, and that is MEASURED,
     not deferred: `hm_read_prop14.F:264-267` refuses `Iale /= 0` on any
-    `Isolid` but 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
+    `Isolid` but 0, 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
     4 on `advection_B`), and with `Isolid` 1 the remap took `taylor_B` from
     IE +5.1 % / KE +4.9 % to a **99.9 % energy error at 198 220 cycles** and
     `channel_A` from IE −98.9 % / KE −25.6 % to **−100 % / −94.3 %**. A real
@@ -283,7 +286,9 @@ Prior history (before this changelog was introduced) is summarized in the
     partly covered and keeps a card that moves nothing. A body only PARTLY
     covered is refused and NAMED rather than modelled: p.28-129 Remark 3 makes
     LS-DYNA's answer a MASS-weighted momentum average over the whole body, and
-    k2rad has no nodal masses at conversion time.
+    this writer computes no nodal masses. **(SUPERSEDED for the ALL-RIGID
+    case by the part-C entry below: such a card re-points its partly-covered
+    bodies and NAMES the over-estimate. Only a MIXED card still refuses.)**
     Named consequence: with the body actually moving, `quadrature_B` and `_C`
     can now diverge in their ALE FSI where the zero model terminated NORMAL —
     clearing one defect promotes the next, and the campaign census will show
@@ -328,12 +333,16 @@ Prior history (before this changelog was introduced) is summarized in the
     `/IMPL/DT/FIXPOINT` header and its 20 data rows — 21 deletions, no other
     line, on the one fixture that carries the card.
     Item B and item F interact on `ex_14_solid_elform_1` and the interaction is
-    reported rather than averaged: with the grid gone and the default hourglass
-    OFF the deck reads IE −41.354 % / KE −17.934 % against its reference; with
-    the default ON (`Isolid` 24) the engine energy error improves from −3.1 %
-    to −0.7 % but the deviation becomes IE +108.758 % / KE +26.337 %. Both arms
-    stop at the same `t = 0.01839` while the LS reference row is at its own end
-    time, so those two rows compare the ARMS, not absolute accuracy.
+    reported rather than averaged. Both arms stop at `t = 0.01839` of 0.02,
+    so the two rows the campaign database carries — computed against the LS
+    reference at LS's OWN end time — are IE −41.354 % / KE −17.934 % with the
+    default hourglass OFF and IE +108.758 % / KE +26.337 % with it ON
+    (`Isolid` 24), and they do NOT rank the arms. **At the MATCHED time the
+    ranking is the other way round**: the deck's own glstat interpolates to
+    IE 5.89526e7 / KE 4.7469e7 at `t = 0.01839`, against which the shipped
+    `Isolid` 24 arm reads **−14.4 % / +4.8 %** and the `--no-default-hourglass`
+    arm **−76.0 % / −31.9 %** — the default is five times closer on IE, and
+    its engine energy error is −0.7 % against −3.1 %.
 
 - **R14 CAMPAIGN TRIAGE batch, round 3, part C — the verification round's
   corrections, and the round's verification record.** Four independent
@@ -371,8 +380,9 @@ Prior history (before this changelog was introduced) is summarized in the
     against 1.20123e5 (−6.2 %). The direction agrees: a one-way check
     UNDER-transfers load, and `twobar`'s own glstat books 6.38 of
     sliding-interface energy in 125018 total. The p.11-8 item 1b fact stays;
-    the number and the remedy are re-attributed and an explicit Gapmin for
-    these spellings is filed as round 4.
+    the number and the remedy are re-attributed and an explicit Gapmin is
+    filed as round 4 (scope corrected in part D below: it is every
+    solid-segment interface, AUTOMATIC spellings included).
   - **Four rules the mutation round found unpinned now have tests**, each
     proved behaviour-changing first and each re-checked against the WHOLE
     suite after the fix: `*HOURGLASS` Remark 7's *stated* `QM = 0.0`
@@ -414,12 +424,163 @@ Prior history (before this changelog was introduced) is summarized in the
     `nt = 4` the other way round — so no screen may be justified on it yet);
     `quadrature_B` / `_C`, where item C's correct velocity fix promotes an ALE
     FSI instability into view; the tied family's `_OFFSET` split; a default
-    Gapmin for the non-AUTOMATIC spellings; the all-rigid-SSID contact class;
+    Gapmin for SOLID-SEGMENT interfaces (AUTOMATIC included - the scope is
+    the element type, not the spelling); the all-rigid-SSID contact class;
     and the two-sided `/INTER/TYPE7` mapping of the non-AUTOMATIC spellings
-    (`pend.imp` is the clean probe: its LS reference IE is a structural zero).
+    (**no clean probe on this corpus yet** — `pend.imp` was named as one and
+    the post-review round MEASURED it to be an item-B carrier instead, see
+    the entry below).
 
-  **Verification record — ROUND 3.** Measured on this branch at **`e81e0c0`** — the last CODE commit of the batch;
-  the documentation commit that carries this entry follows it — measured from
+- **R14 CAMPAIGN TRIAGE batch, round 3, part D — the post-review round.**
+  A second, independent review of the whole branch (an at-source physics pass
+  over items B/C, another over items A/D/E/F, a code-and-sweep pass and an
+  evidence pass over every user-facing claim) found **no blocker and one code
+  defect**; everything else was a shipped claim that did not survive
+  re-measurement. Each item below is a correction to something parts A–C
+  shipped.
+
+  - **CODE — `--tie-stfac` silently discarded a Python `int`.**
+    `writer/contacts._tie_stfac` gated the user value on
+    `isinstance(opt, float)`, so `convert(tie_stfac=30)` fell through to the
+    `auto` derivation and got **120** — a tie four times stiffer than asked
+    for, on the API path only (the CLI and the GUI both coerce with
+    `float()`). mypy cannot see it: PEP 484's numeric tower accepts an `int`
+    wherever a `float` is declared. Any number is now taken verbatim and a
+    string that is not `auto` raises instead of falling through. Two tests
+    pin it; the int arm reads 120.0 without the fix.
+  - **`pend.imp` is an item-B carrier, not the item-A probe the branch named
+    it.** Parts A/C filed its `or_ie` 5.162e5 against an LS reference of
+    5.035e-06 under "the non-AUTOMATIC spellings map to a two-sided
+    `/INTER/TYPE7`". Three arms, `nt = 4`, converted from `F:`, the two branch
+    arms differing in exactly two `.rad` lines (`Isolid` 17 → 1, h 0 → 0.1)
+    with the newly registered `/INTER/TYPE7/90005` present in BOTH: master
+    `b3807bd` IE **5.658e-06** / KE 21.87 / energy error −0.0 % / 119 157
+    cycles; branch + `--no-default-hourglass` IE **5.658e-06** / KE 21.87 /
+    −0.0 % / 119 156; branch as shipped IE **5.162e5** / KE 21.86 / **99.9 %**
+    / 125 052, NORMAL TERMINATION. Arms 1 and 2 agree to every printed digit,
+    so item A is measurably INERT on this deck and item B's viscous hourglass
+    on one-hex bodies owns the whole excess. Two further corrections: the LS
+    reference IE is a structural zero because `*DEFORMABLE_TO_RIGID` makes
+    both bobs rigid at t = 0 (`pend.imp.d3hsp`: *"number of deformable to
+    rigid = 2"*) and k2rad SKIPS that keyword, so any internal energy there is
+    a dropped keyword rather than a spurious contact; and the two-sided item
+    now says plainly that **no clean probe exists on this corpus yet**.
+    `pend.imp` is the branch's single worst benchmark row and it is now filed
+    under item B, where it can be worked.
+  - **`--help` and `state.py` quoted the WRONG ARM's numbers for `ex_14`.**
+    Both said *"ex_14's energy error from 99.9 % to −3.1 %"* with
+    IE 1.417e7 / KE 3.231e7. Measured at the shipped default: NORMAL at cycle
+    33, `t = 0.01839` of 0.02, engine energy error **−0.7 %**, IE **5.044e7** /
+    KE **4.974e7** against the LS reference's 2.4162e7 / 3.937e7 — the
+    −3.1 % / 1.417e7 / 3.231e7 belongs to the SAME deck with
+    `--no-default-hourglass`, an item-F-only arm measured before item B
+    reached that implicit deck. The campaign database has carried the right
+    figures all along. Same string, second figure: at `--fixpoint-count 10`
+    **`ex_15`** terminates at a 99.9 % energy error, **`ex_14` at 86.1 %** —
+    both junk NORMALs, but only one of them is 99.9 %.
+  - **The item-C paragraph in README described the behaviour part C
+    REVERSED**, and its last sentence had no full stop: it still said a
+    partly-covered body "is refused and NAMED", which is true only of a MIXED
+    card. The three-way rule is now stated where a user reads it, with
+    `translat`'s 387.9 against 189.962 named in README as well as in
+    CHANGELOG and ROADMAP.
+  - **README shipped the retracted `twobar` attribution and its refuted
+    remedy** — *"measured on `twobar`, IE +1151 % against the LS reference, so
+    put the finer side on SSID"* — in the same PR that retracts both in
+    `handlers._CONTACT_SPELLING_NOTES["twoway"]`. Removed there and in the
+    note itself, which no longer prescribes a side swap nobody has measured to
+    help.
+  - **Four citations were corrected in `k2rad/` by part C and left standing in
+    the docs**, so one file stated a fact and its retraction a few hundred
+    lines apart: `convertcontacts.cxx:233`→**`:234`**,
+    `hm_read_rwall_spher.F:290`→**`:286`** plus its
+    `IF (IDDLEVEL == 0 .AND. IPEN == 0)` gate, `hm_read_prop14.F:264-267`
+    accepts **IHBE 0** as well as 1/2, and the FORMING SURFB offset is
+    conditional on a **negative `SBST`**. All four re-verified at source and
+    applied to README/CHANGELOG/ROADMAP.
+  - **A fifth citation was wrong everywhere.** `*SECTION_SOLID` Remark 13
+    (*"not truly hourglassing behavior … no hourglass energy"*) is printed
+    page **41-104** of Vol I R17, not 41-97 (41-97 is the user-defined-element
+    field table). Eight sites, `--help` included.
+  - **Two more source lines corrected.** The `H0` → `Kthe` row of the thermal
+    loss table cited `hm_read_inter_type07.F:738` for
+    `FRIGAP(20) = ONE/RSTH`; the assignment is at **:725**. And the comment
+    justifying an always-emitted `h = 0.1` named "Isolid 5 and 24" as reading
+    the cell: at `hm_read_prop14.F:358-372` only **1 and 2** read it
+    (`GEO(13) = QH`), Isolid **24** takes the coefficient from `Dn` (blank →
+    the `EM01` default, the same 0.1 by coincidence) and on every other
+    Isolid, **5 and 17 included**, `:369-372` forces `GEO(13) = ZERO` and the
+    emitted `h` is inert.
+  - **"k2rad has no nodal masses at conversion time" is false about the
+    project** and it was printed to the user at five sites and used as the
+    ROADMAP deferral's reason. `tools/modal_solve.nodal_masses_from_state`
+    lumps element mass and rotary inertia off exactly the `ConversionState`
+    the writer holds, applies `*ELEMENT_MASS`, and reproduces the starter's
+    own MS/IN arrays. What is true is that the WRITER computes none; the
+    mass-weighted arm is deferred for lack of a second carrier, not for lack
+    of machinery, and the ROADMAP item now says so and names the lumper.
+  - **The round-4 Gapmin item was scoped to the wrong population.** It said
+    "the non-AUTOMATIC solid-segment spellings"; k2rad writes `Igap 0` with
+    `Gapmin 0` on **every** `/INTER/TYPE7` it emits, AUTOMATIC included
+    (verified on `ex_26_thin_shell_elform_16`), and `i7sti3.F:1055-1063` then
+    takes the mesh-size branch `GAP = 0.1 * GAPMX` whenever no shell thickness
+    was accumulated — `DXM` only ever takes `THK` (`:499/506/591`), so a
+    solid-segment main surface never reaches the thickness branch. Round 3
+    only made more decks REACH a pre-existing behaviour. Re-scoped to the
+    element type.
+  - **The all-rigid-SSID round-4 list was short by one deck and missed a
+    shape.** Censused over all 44 item-A carriers converted from `F:` (the
+    three Yaris include-pullers excluded by name): **6** decks lose a whole
+    interface and **4** end with no `/INTER` at all — `bumper`, `sphere1`,
+    `EXP_SC_CONTACT_INTERFERENCE` and **`forging_A`**, whose two
+    `*CONTACT_SURFACE_TO_SURFACE` cards are both dropped. `blow-mold` (1 of 3)
+    and `belted-dummy` (1 of 11) lose one and keep the rest, and a third shape
+    — a PARTLY rigid secondary side silently thinned — hits `mainboltaexpl`
+    and `belted-dummy` again.
+  - **The item-A card count does not re-sum.** "16 spellings, **78** cards on
+    44 decks" ships in README, CHANGELOG and the PR body; the round's own
+    per-spelling table has 16 rows summing to **77**, and an independent
+    census with the branch's own parser over the 356 joblist keys read from
+    `F:` gives 77 cards / 44 decks / 37 with no other `*CONTACT`. The decks
+    and the "no other contact" figure were right; the total was never added
+    up. Corrected in both files.
+  - **The `ex_14` arm comparison implied the inverted ranking.** Its two rows
+    are measured against the LS reference at LS's own end time while both arms
+    stop at `t = 0.01839`. At the MATCHED time (the deck's glstat interpolates
+    to IE 5.89526e7 / KE 4.7469e7) the shipped `Isolid` 24 arm reads
+    **−14.4 % / +4.8 %** and the opt-out **−76.0 % / −31.9 %** — the default
+    is five times closer, where the old rows read as if the opt-out were
+    better. Stated in the entry above.
+  - **README contradicted itself about `/IMPL/DT/FIXPOINT`**, telling the
+    reader in one section that the converter "already emits" it and in another
+    that it is off by default since 2026-09. Fixed.
+  - **The two deferred text findings were text-only, so they were fixed.** The
+    `RCTOL >= 1.0` warning told the reader an all-blank leading card had
+    probably shifted the columns; Vol I R17 p.12-362 Remark 5 says verbatim
+    *"By default, residual norm ratio (RCTOL) criterion is effectively
+    disabled (RCTOL = 10^10)"*, which is the case on 15 of the 34 implicit R14
+    decks. The warning now names that idiom first. And
+    `ControlImplicitSolution.nsolvr`'s comment described
+    `*CONTROL_IMPLICIT_SOLVER`'s `LSOLVR`; it now says parsed-and-unused.
+  - **The verification record named the wrong commit as the batch's last code
+    commit.** It said `e81e0c0`; `git diff --stat e81e0c0..8d730a3` changes
+    six modules and a test file, and `git diff 8d730a3..a6814d6 -- k2rad tools
+    k2rad_gui.py` is empty. Re-labelled, with the command that decides it.
+  - **Emitted output is UNCHANGED by this round.** All 356 roster decks were
+    converted from `F:` on the pre-round head and again after the last code
+    commit and SHA256-compared: **0 `.rad` movers**. Every change above is a
+    comment, a docstring, a warning string, a `--help` line or a document —
+    plus the `_tie_stfac` guard, which can only change an emitted card for a
+    caller who passed a number and did not get it. Campaign section **0.17**
+    records the comparison; no deck was re-converted and no solver job was
+    launched for it.
+
+  **Verification record — ROUND 3.** Measured on this branch at **`a6814d6`**,
+  the head this entry shipped on. The last CODE commit of the batch was
+  **`8d730a3`** (`git diff 8d730a3..a6814d6 -- k2rad tools k2rad_gui.py` is
+  EMPTY, which is how "last code commit" was determined — the first draft of
+  this line said `e81e0c0` from memory and `git diff --stat e81e0c0..8d730a3`
+  names six modules and a test file). Measured from
   the branch worktree, with the main tree untouched at `b3807bd`:
 
   - `pytest tests/ -q` → **5052 passed / 2 skipped / 2078 subtests**

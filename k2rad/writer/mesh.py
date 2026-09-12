@@ -2025,7 +2025,7 @@ _LSDYNA_DEFAULT_HG_COEFF = 0.1
 #:      coefficient 0.1 echoed in their own d3hsp (taylor_B, sloshing_C,
 #:      channel_A, advection_B).
 #: DELIBERATELY ABSENT:
-#:   -1/-2  8-point assumed-strain hexes. Vol I R17 p.41-97 Remark 13: "This
+#:   -1/-2  8-point assumed-strain hexes. Vol I R17 p.41-104 Remark 13: "This
 #:          side effect is not truly hourglassing behavior, so there is no
 #:          hourglass energy, and the behavior is not affected by hourglass
 #:          parameters." A default hourglass control has nothing to act on
@@ -2215,12 +2215,17 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
         # A blank QH/QM cell AND a stated 0.0 both mean the 0.1 Default row:
         # birdball.k states IHQ 2 / QH 0.0 and its own d3hsp echoes
         # "hourglass coefficient = 1.00000E-01"; 275key2.k does the same at
-        # IHQ 4. (Radioss would reach 0.1 by itself for Isolid 1/2 —
-        # hm_read_prop14.F:365 `IF (QH == ZERO .AND. ICONTROL == 0) QH = EM01`,
-        # confirmed twice by measurement: sloshing_A and underwater_A at
-        # h = 0.0 are identical to h = 0.1 in every printed digit — but Isolid
-        # 5 and 24 read the cell differently, and an emitted 0.1 states in the
-        # deck what the run actually uses.)
+        # IHQ 4. WHICH Isolid actually READS the cell, from
+        # hm_read_prop14.F:358-372: only 1 and 2 (`GEO(13) = QH`, and :365
+        # `IF (QH == ZERO .AND. ICONTROL == 0) QH = EM01` reaches 0.1 by
+        # itself - confirmed twice by measurement, sloshing_A and underwater_A
+        # at h = 0.0 are identical to h = 0.1 in every printed digit). On
+        # Isolid 24 the coefficient comes from Dn instead (:358-361 `GEO(13) =
+        # CVIS`, blank Dn -> the EM01 default, i.e. the same 0.1 by
+        # coincidence) and h is DISCARDED; on every other Isolid, 5 and 17
+        # included, :369-372 forces `QH = CVIS = GEO(13) = ZERO` and the
+        # emitted h is inert. It is written on all of them so the deck states
+        # one rule rather than three.
         h = _LSDYNA_DEFAULT_HG_COEFF
     return (h, iso)
 

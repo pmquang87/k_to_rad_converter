@@ -5997,7 +5997,13 @@ class ControlImplicitEigenvalue:
 
 @dataclass
 class ControlImplicitSolution:
-    nsolvr: int         # solver (11=MUMPS,12=PARDISO)
+    nsolvr: int         # PARSED AND UNUSED: LS-DYNA's *CONTROL_IMPLICIT_
+    #                   # SOLUTION solution method (1 = linear, 2 =
+    #                   # nonlinear + BFGS, ...). It is NOT the linear
+    #                   # solver LSOLVR of *CONTROL_IMPLICIT_SOLVER, which
+    #                   # an earlier comment here named. Nothing in the
+    #                   # package reads it; _make_engine_implicit always
+    #                   # writes /IMPL/NONLIN/1. See ROADMAP.
     ilimit: int         # max stiffness reformations
     maxref: int         # max refinements
     dctol: float        # displacement convergence
@@ -7083,8 +7089,13 @@ class ConvertOptions:
     # x3 (elform 2/6/16, all at cycle 20), ex_14 x4 (cycle 33), ex_15 x3
     # (cycle 38). ex_01_thin_shell_elform_2 goes from ERROR at t = 0.105 to
     # NORMAL at t = 1.000, IE 0.7061 vs the LS-DYNA reference's 0.818398
-    # (-13.7 %); ex_14_solid_elform_1 from a 99.9 % energy error to -3.1 %,
-    # IE 1.417e7 / KE 3.231e7 against 2.4162e7 / 3.937e7. Regression controls
+    # (-13.7 %); ex_14_solid_elform_1 from ERROR TERMINATION (ISTOP=-2 at
+    # cycle 52) to NORMAL at cycle 33, t = 0.01839 of 0.02, engine energy
+    # error -0.7 %, IE 5.044e7 / KE 4.974e7 against 2.4162e7 / 3.937e7 (the
+    # -3.1 % / 1.417e7 / 3.231e7 this comment used to quote is the SAME deck
+    # with --no-default-hourglass: an item-F-only arm, measured before item B
+    # reached it -- MISTAKES #137, a runtime string drifting from its own
+    # measurement). Regression controls
     # that terminate NORMAL today do not: ex_04_solid_elform_2 +0.06 %,
     # 3.5_Linear_Elastic_QS_Plate_Shell identical, ex_19_thin_shell_elform_2
     # +1.9 % (its LS deviation improves from -1.317 % to about +0.6 %). Every
@@ -7229,7 +7240,7 @@ class ConvertOptions:
     # -1.72/+1.41 %; tension1 +0.10 % → -0.01 %; the IMPLICIT
     # ex_03_solid_elform_1 -20.38 % → -4.14 % and ex_04_solid_elform_1
     # -8.67 % → -5.76 %. Screened: ELFORM -1/-2 (no hourglass energy at all,
-    # p.41-97 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
+    # p.41-104 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
     # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115
     # sections (their own measured 17 → 24) and any deck carrying
     # *INITIAL_STRESS_SECTION (Isolid 1/2 = zero-or-negative volume at cycle 0

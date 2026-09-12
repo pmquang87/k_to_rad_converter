@@ -4960,8 +4960,12 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     its nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes
     the body's translational and rotational MOMENTUM from the prescribed nodal
     velocities and resets every node from that rigid motion — a mass-weighted
-    average k2rad cannot form, because it has no nodal masses at conversion
-    time. Inventing one would be a fabricated value in a mandatory slot.
+    average this WRITER does not form: it computes no nodal masses, and
+    inventing one would be a fabricated value in a mandatory slot. The
+    machinery exists elsewhere in the repo (``tools/modal_solve``'s
+    ``nodal_masses_from_state``, which lumps element mass and applies
+    ``*ELEMENT_MASS``), so the arm is DEFERRED for measurement on more than
+    one carrier, not blocked — see ROADMAP.
 
     **But a card that names ONLY rigid nodes re-points its partly-covered
     bodies too.** Refusing there does not fall back on the deformable half —
@@ -4987,9 +4991,9 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     ``1/2 M (v/2)^2 = 97.0``, and the two loaded nodes sit on one edge so the
     body also SPINS — ``L = (M/4)(r3 + r4) x v`` over the lumped corner
     inertia gives ``omega = (300, 0, -45)`` and ``1/2 omega.I.omega = 93.0``;
-    97.0 + 93.0 = 190.0 against the glstat's 189.962. k2rad writes neither
-    half: it has no nodal masses, so it gives the main node the card's FULL
-    velocity and NAMES the over-estimate. Between a model that is 2x too fast
+    97.0 + 93.0 = 190.0 against the glstat's 189.962. The writer forms neither
+    half - it computes no nodal masses - so it gives the main node the card's
+    FULL velocity and NAMES the over-estimate. Between a model that is 2x too fast
     and one that does not move at all, the over-estimate is the one whose
     channels evolve — it is what round 2 shipped, and what the campaign
     recorded as a cleared zero model. The mass-weighted arm is a round-4 item.
@@ -5114,8 +5118,8 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                         "when the card is left on the secondaries. LS-DYNA's "
                         "190.0 is 97.0 translational + 93.0 rotational (hand "
                         "arithmetic on the deck's own geometry at equal "
-                        "corner masses), i.e. the body also SPINS; k2rad has "
-                        "no nodal masses at conversion time and writes "
+                        "corner masses), i.e. the body also SPINS; this "
+                        "writer computes no nodal masses and writes "
                         "neither the halved velocity nor the spin. State "
                         "*INITIAL_VELOCITY_RIGID_BODY on the part to control "
                         "it exactly."
@@ -5165,8 +5169,8 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
     rigid body motion, the velocities of the nodal points are computed and
     reset to the new values. These new values may or may not be the same as the
     values prescribed for the node."* That is a MASS-weighted average over the
-    whole body, so the body's velocity is smaller than the card's; k2rad has no
-    nodal masses at conversion time and will not invent one.
+    whole body, so the body's velocity is smaller than the card's; this writer
+    computes no nodal masses and will not invent one.
     """
     shown = ", ".join(str(m) for m in sorted(mains)[:5])
     state.warn(
@@ -5181,8 +5185,8 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
         "translational and rotational MOMENTUM from the prescribed nodal "
         "velocities and resets every node from that rigid motion, i.e. a "
         "MASS-weighted average that is smaller than the stated velocity. "
-        "k2rad has no nodal masses at conversion time and will not invent "
-        "one. Give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
+        "This writer computes no nodal masses and will not invent one. "
+        "Give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
         "*PART_INERTIA card 5) with the velocity you want, or extend the "
         "card's set to the whole body.")
 

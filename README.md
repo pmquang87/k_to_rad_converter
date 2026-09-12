@@ -2844,7 +2844,7 @@ place
 `*SECTION_SOLID` ELFORM **5/6/7** (1-point ALE / Eulerian / Eulerian
 ambient) → `Iale=0`, i.e. a LAGRANGIAN element, and NAMED as such. They are
 deliberately not mapped: `hm_read_prop14.F:264-267` refuses `Iale != 0` on
-any `Isolid` but 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
+any `Isolid` but 0, 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
 4 on `advection_B`), and with `Isolid` 1 the remap was MEASURED destructive
 (`taylor_B` from IE +5.1 % / KE +4.9 % against its LS-DYNA reference to a
 99.9 % energy error at 198 220 cycles; `channel_A` from −98.9 % / −25.6 % to
@@ -3106,9 +3106,17 @@ body the card FULLY covers is replaced by its main node (`pipe.k` goes from
 −0.100 % to −0.005 %). Coverage counts a body's ELEMENT nodes only —
 `*CONSTRAINED_EXTRA_NODES` are exempt, because Vol I R17 p.28-127 says
 LS-DYNA does not initialise them either when `IVATN = 0`. A body the card only
-PARTLY covers is refused and NAMED rather than modelled: p.28-129 Remark 3
-makes LS-DYNA's answer a MASS-weighted momentum average over the whole body,
-and k2rad has no nodal masses at conversion time
+PARTLY covers takes one of two answers, decided by the REST of the card.
+A body a MIXED card only partly covers is refused and NAMED rather than
+modelled: p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted momentum
+average over the whole body, this writer computes no nodal masses, and the
+deformable half of the card still works. A body an ALL-RIGID card only partly
+covers is RE-POINTED anyway with the over-estimate NAMED, because refusing
+there leaves nothing at all: `translat.k`, whose `*INITIAL_VELOCITY_NODE`
+names 2 of rigid part 1's 4 element nodes, reads cycle-0 K-ENERGY **387.9**
+re-pointed against its own LS-DYNA glstat's **189.962** (+104 %) and
+**0.000** refused, with every channel flat for all 13 980 cycles. The
+mass-weighted arm is a round-4 item.
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
@@ -3330,17 +3338,21 @@ from it.
 `_FORMING_SURFACE_TO_SURFACE_MORTAR` and `_SINGLE_SURFACE` (each optionally
 `_MPP` / `_ID` / `_TITLE`) take the SAME route as their `AUTOMATIC_` twins —
 `/INTER/TYPE7`, and `/INTER/TYPE25` self-contact for the single-surface one.
-They were in NO dispatch table until R14 triage round 3: 78 cards on 44 of the
+They were in NO dispatch table until R14 triage round 3: 77 cards on 44 of the
 356 R14 reference decks, 37 of which have no other contact, and 18 of the 30
 decks whose OpenRadioss internal energy collapses to zero against a non-zero
 LS-DYNA reference carry one. dyna2rad drops the same spellings
-(`convertcontacts.cxx:233` `if (interType.empty()) continue;`). Each states
+(`convertcontacts.cxx:234` `if (interType.empty()) continue;`). Each states
 what LS-DYNA fact it could not carry: the non-`AUTOMATIC` spellings are
 ONE-SIDED in LS-DYNA and Radioss has no one-sided segment (p.11-10 item 4 — a
 gain in permissiveness, nothing dropped); the two-way ones are checked from one
-side only by `/INTER/TYPE7` (p.11-8 item 1b; measured on `twobar`, IE +1151 %
-against the LS reference, so put the finer side on SSID); `FORMING` ignores the
-tooling thickness and offsets SURFB by `|SBST|/2` (General Remark 9 p.11-128),
+side only by `/INTER/TYPE7` (p.11-8 item 1b — the fact, with NO remedy
+attached: `twobar`'s +1151 % internal energy was measured down to −5.6 % by
+changing the derived `Gapmin`, not by swapping the sides, and a default
+Gapmin for solid-segment interfaces is a round-4 item; `--inter-gapmin
+ID=VAL` is the lever today); `FORMING` ignores the tooling thickness and, on
+a NEGATIVE `SBST` only, additionally offsets SURFB by `|SBST|/2` (General
+Remark 9 p.11-128),
 neither of which the `(|SAST|+|SBST|)/2` Gapmin reproduces — use
 `--inter-gapmin ID=VAL`; `MORTAR` is a segment-to-segment contact with a
 consistent nodal assembly and automatic erosion (General Remark 14 p.11-131)
@@ -3388,8 +3400,9 @@ cannot carry it, the physical consequence and a remedy. `/INTER/TYPE8` takes a
 CONSTANT lineic restraining force where `LCIDRF` is a curve of it against the
 bead closure (`hm_read_inter_type08.F:131-137` vs p.11-54); `*CONTACT_ENTITY`'s
 analytic surface maps only onto `/RWALL/{PLANE,SPHER,CYL}` for GEOTYP 1/2/3 and
-`/RWALL` makes every secondary node kinematically constrained
-(`hm_read_rwall_spher.F:290`); and no OpenRadioss interface forbids separation
+`/RWALL` makes a secondary node kinematically constrained whenever the wall
+is not penalty-coupled (`hm_read_rwall_spher.F:286`, gated
+`IF (IDDLEVEL == 0 .AND. IPEN == 0)`); and no OpenRadioss interface forbids separation
 while allowing sliding — `/INTER/TYPE3` and `/INTER/TYPE5` both echo `SLIDING
 AND VOIDS`. The `SLIDING_ONLY` refusal is MEASURED: routing its one corpus
 carrier through `/INTER/TYPE7` collapsed the time step from 1.01e-07 to 8.3e-17
@@ -4689,8 +4702,9 @@ only `SORTIE_MAIN` call site and is not gated on `IMPL_S`. **So no implicit
 guard is applied and none should be**; what to expect instead is FEWER files
 than the schedule asks for, because `sortie_main.F:952` advances `TDYNAIN` by
 one interval per write and a long implicit step strides over several triggers.
-`/IMPL/DT/FIXPOINT`, which this converter already emits, removes the
-intermediate overshoot.
+`/IMPL/DT/FIXPOINT`, which `--fixpoint-count N` re-enables (it is OFF by
+default since 2026-09, see below), removes the intermediate overshoot — at
+the cost the same section names.
 
 **The STRAIN card's spelling is load-bearing.** `fredynain.F:140` accepts the
 card on `KEY3(1:5) == 'STRAI'`, so `/DYNAIN/SHELL/STRAI/FULL` parses too — but
@@ -4726,8 +4740,9 @@ that alternates 2 : 1 every cycle: MEASURED, ten dynaexamples R14 decks that
 died `** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **` reach NORMAL
 TERMINATION without it (`ex_01` x3 at cycle 20, `ex_14` x4 at cycle 33,
 `ex_15` x3 at cycle 38), while three currently-NORMAL controls do not regress
-and two improve. A coarser grid is NOT the fix — at 10 points `ex_14` and
-`ex_15` terminate at a 99.9 % energy error. The cost of 0 is fewer output
+and two improve. A coarser grid is NOT the fix — at 10 points `ex_15`
+terminates at a 99.9 % energy error and `ex_14` at 86.1 %, both NORMAL
+banners over junk (measured 2026-09-12, `nt = 4`). The cost of 0 is fewer output
 states (15 cycles become 8 on the controls)
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
@@ -4829,7 +4844,7 @@ forces the coefficient to ZERO. MEASURED against each deck's own LS-DYNA
 `taylor_A` from IE +2.562 % / KE +1.478 % to +0.002 % / −0.027 %, `rodsol`
 from +2.884 % / +4.041 % to −1.719 % / +1.405 %, and the IMPLICIT
 `ex_03_solid_elform_1` from −20.379 % to −4.139 %. Screened out: ELFORM −1/−2
-(p.41-97 Remark 13 — no hourglass energy at all), ELFORM 2/3/16 and the
+(p.41-104 Remark 13 — no hourglass energy at all), ELFORM 2/3/16 and the
 tetrahedra (no hourglass modes), ALE sections, `/MAT/LAW115` sections (their
 own measured 17 → 24) and any deck carrying an `*INITIAL_STRESS_SECTION`
 (`Isolid` 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0 under `/PRELOAD`).

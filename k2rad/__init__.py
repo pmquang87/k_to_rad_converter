@@ -471,7 +471,7 @@ def convert(
         −4.14 % (its ``_elform_2`` sibling, gated out, moves only through
         item F, −0.10 % → −0.03 %).
         Screened out, each for its own measured or quoted reason: ELFORM
-        −1/−2 (p.41-97 Remark 13 — *"there is no hourglass energy, and the
+        −1/−2 (p.41-104 Remark 13 — *"there is no hourglass energy, and the
         behavior is not affected by hourglass parameters"*), ELFORM 2/3/16 and
         the tetrahedra (no hourglass modes), ALE sections, ``/MAT/LAW115``
         sections (their own measured 17 → 24) and any deck carrying an

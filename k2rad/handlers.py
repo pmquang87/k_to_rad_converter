@@ -6275,18 +6275,26 @@ _CONTACT_SPELLING_NOTES = {
         "LS-DYNA's two-way contact checks BOTH surfaces for penetration (Vol I "
         "R17 p.11-8 item 1b). /INTER/TYPE7 checks only the SURFA (SSID) nodes "
         "against the SURFB (MSID) segments, so if the MSID side is the finer "
-        "or the softer mesh its nodes can pass through. Put the finer / more "
-        "deformable side on SSID if the pair is symmetric. NOT the cause of "
-        "the twobar overshoot: the round-3 verification round MEASURED that "
+        "or the softer mesh its nodes can pass through. NO remedy is "
+        "prescribed here: the obvious one (swap the sides) has never been "
+        "measured to help on any corpus deck, and it is NOT the cause of "
+        "the twobar overshoot - the round-3 verification round MEASURED that "
         "deck's +1151 % internal energy down to -5.6 % by changing ONE cell "
         "of the emitted card — the Gapmin the starter derives when k2rad "
         "leaves it 0 (GAP MIN = 1.0 mm on a 10 mm bar; 0.05 gives IE 2866 "
         "against the LS-DYNA reference 3036.17 and KE 1.127e5 against "
         "1.20123e5). A one-way check UNDER-transfers load and cannot produce "
         "a 12x energy excess, and twobar's own LS-DYNA glstat books only 6.38 "
-        "of sliding-interface energy in 125018 total. An explicit Gapmin for "
-        "the non-AUTOMATIC solid-segment spellings is a round-4 item; until "
-        "then set it per interface with --inter-gapmin <id>=VAL."),
+        "of sliding-interface energy in 125018 total. An explicit Gapmin is "
+        "a round-4 item for EVERY solid-segment /INTER/TYPE7 k2rad emits, "
+        "AUTOMATIC spellings included - the scope is the element type, not "
+        "the spelling: k2rad writes Igap 0 with Gapmin 0 on all of them "
+        "(verified on the already-registered AUTOMATIC carrier "
+        "ex_26_thin_shell_elform_16), and i7sti3.F:1055-1063 then derives "
+        "`GAP = 0.1 * GAPMX` from the MESH SIZE whenever no shell thickness "
+        "was accumulated (`DXM` only ever takes THK, i7sti3.F:499/506/591). "
+        "Round 3 only made more decks REACH that pre-existing behaviour. "
+        "Until then set it per interface with --inter-gapmin <id>=VAL."),
     "forming": (
         "the FORMING family IGNORES the SURFB (tooling) contact thickness, "
         "and a NEGATIVE SBST additionally offsets SURFB by |SBST|/2 opposite "
@@ -18595,7 +18603,7 @@ HANDLERS["CONTACT_AIRBAG_SINGLE_SURFACE_MPP"] = (
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # CENSUS that motivates it: 16 *CONTACT_* spellings were in NO dispatch table
-# at all — 78 cards on 44 of the 356 R14 roster decks, 37 of which have no
+# at all — 77 cards on 44 of the 356 R14 roster decks, 37 of which have no
 # other contact, and 18 of the 30 decks whose OpenRadioss internal energy
 # collapses to zero against a non-zero LS-DYNA reference carry one. A skipped
 # *CONTACT is not a missing output card, it is a MISSING LOAD PATH: the run

@@ -468,7 +468,7 @@ class ConverterGUI:
                      "No Hourglass'. Measured: sloshing_A goes from a "
                      "TIMESTEP-LIMIT death at t = 0.18 to NORMAL at t = 2.0 "
                      "(IE -0.25 %), taylor_A from IE +2.56 % to +0.00 %, the "
-                     "implicit ex_03_solid_elform_1 from -20.4 % to -4.3 %. "
+                     "implicit ex_03_solid_elform_1 from -20.4 % to -4.1 %. "
                      "ELFORM -1/-2, 2/3/16, tets, ALE, LAW115 and preloaded decks "
                      "are screened out; a *MAT_NULL fluid keeps the viscous form. "
                      "Untick to keep the pre-2026-09 output)",

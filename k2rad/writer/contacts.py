@@ -1690,7 +1690,7 @@ def _contact_thermal_cells(state: ConversionState, keyword: str, inter_id: int,
     ==============  ==================  =========================================
     ``H0``          ``Kthe``            ``i7therm.F:191`` ``PHI = A*dT*dt/RSTIF``
                                         with ``FRIGAP(20) = ONE/RSTH``
-                                        (``hm_read_inter_type07.F:738``), so
+                                        (``hm_read_inter_type07.F:725``), so
                                         ``Kthe`` IS a conductance per unit area —
                                         the same physical quantity as ``H0``.
                                         ``/INTER/TYPE2`` uses it directly:
@@ -3516,10 +3516,22 @@ def _tie_stfac(state: ConversionState, c, forced: bool) -> Tuple[float, str]:
     user never chose.
     """
     opt = state.options.tie_stfac
-    if opt is None and not forced:
-        return 0.0, "Radioss's own default (0 -> 0.2)"
-    if isinstance(opt, float):
-        return opt, "--tie-stfac %g" % opt
+    if opt is None:
+        if not forced:
+            return 0.0, "Radioss's own default (0 -> 0.2)"
+    elif isinstance(opt, str):
+        if opt.strip().lower() != "auto":
+            raise ValueError(
+                "tie_stfac must be a number or 'auto', not %r" % (opt,))
+    else:
+        # ANY number, ``int`` included. The first cut tested
+        # ``isinstance(opt, float)``, so ``convert(tie_stfac=30)`` fell through
+        # to the derivation below and silently got 120 -- a tie four times
+        # stiffer than the caller asked for. mypy cannot catch it either: PEP
+        # 484's numeric tower accepts an ``int`` wherever a ``float`` is
+        # declared. The CLI and the GUI both coerce with ``float()``; the API
+        # caller does not have to.
+        return float(opt), "--tie-stfac %g" % float(opt)
     nu = _tie_main_poisson(state, c)
     if nu is None:
         return (_TIE_STFAC_NO_NU,

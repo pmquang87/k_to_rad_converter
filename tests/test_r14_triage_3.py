@@ -753,6 +753,29 @@ class TiedStfacLever(unittest.TestCase):
     def test_a_number_is_used_verbatim(self):
         self.assertAlmostEqual(self._stfac(tie_stfac=30.0), 30.0)
 
+    def test_a_python_int_is_a_number_too(self):
+        """``convert(tie_stfac=30)`` must give 30, not the derived 120.
+
+        The first cut of ``_tie_stfac`` gated the user value on
+        ``isinstance(opt, float)``, so an ``int`` fell through to the ``auto``
+        derivation and the stated number was silently discarded -- a tie four
+        times stiffer than asked for. mypy cannot see it: PEP 484's numeric
+        tower accepts an ``int`` where a ``float`` is declared. The CLI and
+        the GUI both coerce with ``float()``, so only the API caller was
+        exposed; MEASURED before the fix, this arm read 120.0.
+        """
+        self.assertAlmostEqual(self._stfac(tie_stfac=30), 30.0)
+        self.assertNotAlmostEqual(self._stfac(tie_stfac=30), 120.0)
+
+    def test_a_string_that_is_not_auto_is_refused(self):
+        """Anything else used to fall through to the derivation as if the
+        caller had asked for ``auto``."""
+        with self.assertRaises(ValueError) as cm:
+            self._stfac(tie_stfac="120")
+        self.assertIn("tie_stfac", str(cm.exception))
+        # ...and the accepted spelling stays accepted, case-insensitively.
+        self.assertAlmostEqual(self._stfac(tie_stfac="AUTO"), 120.0)
+
     def test_auto_falls_back_to_thirty_without_one_poisson_ratio(self):
         """``_TIE_STFAC_NO_NU``. The main side here spans two materials with
         different ratios, so ``K/E`` has no single value and the derived
@@ -927,7 +950,7 @@ class DefaultSolidHourglassScreens(unittest.TestCase):
     """The ELFORMs and decks the default deliberately does NOT reach."""
 
     def test_elform_minus_one_keeps_the_full_integration_isolid(self):
-        # Vol I R17 p.41-97 Remark 13: an ELFORM -1 assumed-strain hex has "no
+        # Vol I R17 p.41-104 Remark 13: an ELFORM -1 assumed-strain hex has "no
         # hourglass energy, and the behavior is not affected by hourglass
         # parameters", so a default hourglass control has nothing to act on.
         _, s = _convert(_hg_deck(elform=-1))
@@ -1225,7 +1248,7 @@ class InivelGenerationRigidRepoint(unittest.TestCase):
 
 class OnePointAleElformIsNamedNotMapped(unittest.TestCase):
     """The measured NO-GO. Three carriers, four arms, all worse or fatal:
-    ``hm_read_prop14.F:264-267`` refuses ``Iale /= 0`` on any Isolid but 1 or 2
+    ``hm_read_prop14.F:264-267`` refuses ``Iale /= 0`` on any Isolid but 0, 1 or 2
     (ERROR 131 + 608 — 9 starter errors on taylor_B, 4 on advection_B), and
     with Isolid 1 the remap took taylor_B from IE +5.1 %% / KE +4.9 %% against
     its LS-DYNA reference to a 99.9 %% energy error at 198 220 cycles.
@@ -1314,6 +1337,100 @@ class ImplicitFixpointGridIsOptIn(unittest.TestCase):
                 break
             vals.extend(float(t) for t in ln.split())
         self.assertEqual(len(vals), 10)
+
+
+class RetractedSourceCitationsAreGoneEverywhere(unittest.TestCase):
+    """A citation corrected in the CODE must not survive in the DOCS.
+
+    Round 3's finalize commit re-opened four cited facts against the
+    OpenRadioss / dyna2rad sources and fixed them in ``k2rad/`` -- and left all
+    four standing in ``README.md`` and in the same ``CHANGELOG.md``, which then
+    stated a fact and its retraction a few hundred lines apart. The post-review
+    round found them by grepping the OLD string; this test is that grep, kept.
+
+    ``CHANGELOG.md`` is EXEMPT by construction: it is a historical record and
+    its correction entries quote the retracted strings on purpose. README and
+    ROADMAP are reference documents and the code is the code, so a retracted
+    token there is a defect.
+    """
+
+    #: retracted token -> (what it should be, what was verified at source)
+    _RETRACTED = {
+        "convertcontacts.cxx:233":
+            ":234 -- :233 is blank, `if (interType.empty()) continue;` is :234",
+        "hm_read_rwall_spher.F:290":
+            ":286 -- :290 is the comment `! Itet=2 of S10`; the KINSET(4,...) "
+            "call is :286, gated IF (IDDLEVEL == 0 .AND. IPEN == 0)",
+        "hm_read_inter_type07.F:738":
+            ":725 -- FRIGAP(20) = ONE/RSTH is at :725",
+        "p.41-97 Remark 13":
+            "p.41-104 -- *SECTION_SOLID Remark 13 is on printed page 41-104 of "
+            "Vol I R17 (pdf page 3786); 41-97 is the user-defined-element table",
+    }
+
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _SCANNED = ("README.md", "ROADMAP.md", "k2rad_gui.py")
+
+    def _files(self):
+        for name in self._SCANNED:
+            yield os.path.join(self._ROOT, name)
+        for base, _dirs, names in os.walk(os.path.join(self._ROOT, "k2rad")):
+            for n in sorted(names):
+                if n.endswith(".py"):
+                    yield os.path.join(base, n)
+
+    def test_no_retracted_citation_survives(self):
+        paths = list(self._files())
+        self.assertGreater(len(paths), 10, "the scanner found no files")
+        for token, why in self._RETRACTED.items():
+            for path in paths:
+                with self.subTest(token=token, file=os.path.basename(path)):
+                    with open(path, encoding="utf-8") as fh:
+                        text = fh.read()
+                    self.assertNotIn(
+                        token, text,
+                        "%s still cites %s; it is %s"
+                        % (os.path.relpath(path, self._ROOT), token, why))
+
+
+class TwowayNotePrescribesNoUnmeasuredRemedy(unittest.TestCase):
+    """The ``twoway`` loss note, after its retraction.
+
+    The note used to blame ``twobar``'s +1151 % internal energy on one-way
+    ``/INTER/TYPE7`` scoping and prescribe swapping SSID. The number was
+    re-attributed to the starter-DERIVED ``Gapmin`` (measured: 0.05 gives
+    IE 2866 against the LS reference 3036.17, -5.6 %) -- but the REMEDY
+    sentence survived the correction and kept telling the reader to make a
+    change the same paragraph says will not help. The round-4 item was also
+    scoped to "the non-AUTOMATIC solid-segment spellings" when k2rad writes
+    ``Igap 0`` / ``Gapmin 0`` on EVERY ``/INTER/TYPE7`` it emits (verified on
+    the already-registered AUTOMATIC carrier ``ex_26_thin_shell_elform_16``)
+    and ``i7sti3.F:1055-1063`` derives the mesh-size gap for any main surface
+    that accumulated no shell thickness.
+    """
+
+    def _note(self):
+        from k2rad.handlers import _CONTACT_SPELLING_NOTES
+        return _CONTACT_SPELLING_NOTES["twoway"]
+
+    def test_the_ssid_swap_remedy_is_gone(self):
+        note = self._note()
+        self.assertNotIn("Put the finer", note)
+        self.assertNotIn("side on SSID if", note)
+        self.assertIn("NO remedy is", note)
+
+    def test_the_retraction_and_its_measurement_stay(self):
+        note = self._note()
+        self.assertIn("p.11-8 item 1b", note)      # the LS-DYNA fact stays
+        self.assertIn("Gapmin", note)
+        self.assertIn("3036.17", note)
+
+    def test_the_round4_gapmin_item_is_scoped_to_the_element_type(self):
+        note = self._note()
+        self.assertIn("AUTOMATIC spellings included", note)
+        self.assertIn("i7sti3.F:1055-1063", note)
+        self.assertNotIn("Gapmin for the non-AUTOMATIC", note)
+
 
 
 if __name__ == "__main__":

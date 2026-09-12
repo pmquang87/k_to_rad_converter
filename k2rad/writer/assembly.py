@@ -594,8 +594,14 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             if val and val >= 1.0:
                 state.warn(
                     f"*CONTROL_IMPLICIT_SOLUTION {name}={val:g} is >= 1.0 (not a valid "
-                    "relative tolerance); ignored. This usually means an all-blank "
-                    "leading card shifted the fixed-format columns — check the card. "
+                    "relative tolerance); ignored. rctol=1e10 is LS-DYNA's own "
+                    "'criterion disabled' idiom (Vol I R17 p.12-362 Remark 5: "
+                    "'By default, residual norm ratio (RCTOL) criterion is "
+                    "effectively disabled (RCTOL = 10^10)') and is the usual "
+                    "reason on this corpus - 15 of the 34 implicit R14 decks; "
+                    "an all-blank leading card shifting the fixed-format "
+                    "columns is the other reading, worth a look if the value "
+                    "is not 1e10. "
                     f"Using robust /IMPL/NONLIN default Toli={toli:g}.")
     lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
