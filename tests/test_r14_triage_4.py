@@ -195,6 +195,85 @@ class QstatDtscalArgumentTests(unittest.TestCase):
         self.assertIn("--qstat-dtscal", text)
 
 
+class GuiWiringTests(unittest.TestCase):
+    """``k2rad_gui.build_convert_kwargs`` is the 13th wiring site, and nothing
+    else reads it.
+
+    Same shape as ``tie_stfac``'s: a BLANK entry means "let ``convert()``
+    decide" and must not put the key in the kwargs at all, ``none`` survives as
+    the string, and a bad value raises a user-facing ``ValueError`` rather than
+    reaching the writer. The BooleanOptionalAction twins pass straight through
+    with their ON defaults.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "a.k")
+        with open(self.path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        self.base = dict(ground_springs=False, ground_spring_k_text="",
+                         soften_stfac_text="")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _kw(self, **extra):
+        import k2rad_gui
+        return k2rad_gui.build_convert_kwargs(
+            self.path, "", ("Mg", "mm", "s"), **self.base, **extra)
+
+    def test_blank_leaves_the_convert_default_alone(self):
+        kw = self._kw()
+        self.assertNotIn("qstat_dtscal", kw)
+        self.assertFalse(kw["arclength_riks"])
+        self.assertTrue(kw["discrete_offset"])
+        self.assertTrue(kw["spring_token_mass_compensation"])
+        self.assertTrue(kw["tgmult_imptemp"])
+
+    def test_a_value_and_none_both_survive(self):
+        self.assertEqual(self._kw(qstat_dtscal_text="0.1")["qstat_dtscal"], 0.1)
+        self.assertEqual(self._kw(qstat_dtscal_text="NONE")["qstat_dtscal"],
+                         "none")
+
+    def test_a_bad_value_raises_before_the_writer_sees_it(self):
+        for bad in ("0", "-1", "foo"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    self._kw(qstat_dtscal_text=bad)
+
+    def test_the_options_summary_names_every_non_default(self):
+        """The "options in effect" line is the 13th site: a flag wired
+        everywhere but here ships silently, and the user never learns which
+        conversion they got."""
+        import k2rad_gui
+        captured = []
+        app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)   # no Tk root needed
+        app._append = captured.append
+        k2rad_gui.ConverterGUI._describe_options(app, self._kw(
+            qstat_dtscal_text="0.1", arclength_riks=True,
+            discrete_offset=False, spring_token_mass_compensation=False,
+            tgmult_imptemp=False))
+        text = "".join(captured)
+        for needle in ("/IMPL/QSTAT/DTSCAL=0.1", "--arclength-riks",
+                       "--no-discrete-offset",
+                       "--no-spring-token-mass-compensation",
+                       "--no-tgmult-imptemp"):
+            self.assertIn(needle, text)
+
+    def test_the_summary_stays_quiet_on_a_default_conversion(self):
+        import k2rad_gui
+        captured = []
+        app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+        app._append = captured.append
+        k2rad_gui.ConverterGUI._describe_options(app, self._kw())
+        text = "".join(captured)
+        for needle in ("/IMPL/QSTAT/DTSCAL", "--arclength-riks",
+                       "--no-discrete-offset",
+                       "--no-spring-token-mass-compensation",
+                       "--no-tgmult-imptemp"):
+            self.assertNotIn(needle, text)
+
+
 class QstatDtscalRecipeStillWinsTests(unittest.TestCase):
     """``--deformable-contact-recipe``'s 0.05 is separately validated, opt-in,
     and must not be reachable from ``--qstat-dtscal``.
