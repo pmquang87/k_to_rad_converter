@@ -750,6 +750,27 @@ class TiedStfacLever(unittest.TestCase):
     def test_a_number_is_used_verbatim(self):
         self.assertAlmostEqual(self._stfac(tie_stfac=30.0), 30.0)
 
+    def test_auto_falls_back_to_thirty_without_one_poisson_ratio(self):
+        """``_TIE_STFAC_NO_NU``. The main side here spans two materials with
+        different ratios, so ``K/E`` has no single value and the derived
+        formula has nothing to evaluate. MEASURED on the same coupon:
+        -0.76 % against the merged bar at a fifth of the nu = 0.3 arm's
+        time-step cost. Pinned because the round-3 mutation round changed the
+        constant to 3.0 and the whole suite stayed green."""
+        head, tail = self._DECK.split("*PART\nright\n", 1)
+        row, rest = tail.split("\n", 1)
+        deck = (head + "*PART\nright\n"        # part 2 -> its own material
+                + row[:20] + f"{2:>10}" + row[30:] + "\n" + rest)
+        self.assertNotEqual(deck, self._DECK)
+        deck = deck.replace(
+            "*SET_SEGMENT",
+            "*MAT_ELASTIC\n" + _row(2, "7.85e-9", 210000.0, 0.45) + "\n"
+            + "*SET_SEGMENT", 1)
+        _, s = _convert(deck, tie_stfac="auto")
+        body = s[s.index("/INTER/TYPE10/"):]
+        card = body[body.index("#              STFAC"):].splitlines()[1]
+        self.assertAlmostEqual(float(card.split()[0]), 30.0)
+
     def test_the_default_arm_names_the_measured_softness(self):
         res, _ = _convert(self._DECK)
         w = next(w for w in res.warnings if "/INTER/TYPE10/" in w)
@@ -872,6 +893,32 @@ class DefaultSolidHourglassRuleTable(unittest.TestCase):
         ref = int([ln for ln in s.splitlines()
                    if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
         self.assertAlmostEqual(_solid_prop(s, ref)[1], 0.03)
+
+
+    def test_a_stated_zero_qm_inherits_the_global_qh_too(self):
+        """The OTHER half of Remark 7, and the half the blank-QM test above
+        does not reach: "unless superseded by a NONZERO value of QH" makes a
+        stated ``QM = 0.0`` exactly as un-stated as a blank cell. Pinned
+        because the round-3 mutation round dropped the ``or not hg.qm`` term
+        and the whole suite stayed green while this deck moved 0.03 -> 0.1."""
+        _, s = _convert(_hg_deck(
+            hgid=7,
+            control="*CONTROL_HOURGLASS\n" + _row(1, 0.03) + "\n",
+            hourglass="*HOURGLASS\n" + _row(7, 2, 0.0) + "\n"))
+        ref = int([ln for ln in s.splitlines()
+                   if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
+        self.assertAlmostEqual(_solid_prop(s, ref)[1], 0.03)
+
+    def test_a_stated_nonzero_qm_supersedes_the_global_qh(self):
+        """The control for the two above: "A nonzero value of QM supersedes
+        QH" (p.25-5 Remark 7)."""
+        _, s = _convert(_hg_deck(
+            hgid=7,
+            control="*CONTROL_HOURGLASS\n" + _row(1, 0.03) + "\n",
+            hourglass="*HOURGLASS\n" + _row(7, 2, 0.02) + "\n"))
+        ref = int([ln for ln in s.splitlines()
+                   if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
+        self.assertAlmostEqual(_solid_prop(s, ref)[1], 0.02)
 
 
 class DefaultSolidHourglassScreens(unittest.TestCase):
