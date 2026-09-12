@@ -642,7 +642,8 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             f"Deformable-deformable contact detected on interface(s) {ids} in an "
             "implicit deck. This is prone to an active-set chatter and a force-"
             "control soft-mode step-overshoot that stall the implicit solve with "
-            "the default L_dtn=20 cap / QSTAT/DTSCAL=0.1. If the solve diverges "
+            "the default L_dtn=20 cap and the shipped QSTAT/DTSCAL (10 since "
+            "round 4; --qstat-dtscal sets it). If the solve diverges "
             "or stalls, re-convert with the known working recipe: "
             "--deformable-contact-recipe (GUI: 'Deformable-deformable contact "
             "recipe') = Inacti=5 + L_dtn=50 + QSTAT/DTSCAL=0.05 with a mesh-scale "
@@ -3567,9 +3568,18 @@ def _tied_interface_type(c, state: ConversionState) -> str:
     ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings in
     the CONSTRAINT-based family and the plain ``_OFFSET`` / ``_BEAM_OFFSET``
     ones in the PENALTY-based one. This function ignores ``c.offset``: an
-    ``_OFFSET`` tie on an explicit deck gets the constraint ``/INTER/TYPE2``
-    like any other, which also projects the secondary nodes onto the main
-    segment and so removes the very offset the keyword names. Measured reach
+    ``_OFFSET`` tie on an explicit deck gets ``/INTER/TYPE2`` at **Spotflag
+    27** like any other ``SURFACE_TO_SURFACE`` tie. 27 is an AUTO-PENALTY
+    variant (``_TIED_PENALTY_SPOTFLAGS``), not a kinematic constraint, and
+    Radioss does NOT project a TYPE2 secondary node onto its main segment — no
+    starter ``i2*.F`` routine writes ``X(1..3, .)`` at all; the only such
+    assignment among the interface initialisers is ``i24pen3.F:317-319``, which
+    is TYPE24. (An earlier revision of this docstring said it did, and the
+    ROADMAP entry beside it repeated the claim; round 4 retracted both.) What
+    the offset really costs is the constant-stiffness rigid link Spotflag 28
+    ("like 1", the spotweld formulation) carries and 27 ("like 5", the glue
+    formulation) does not — which makes ``27 -> 28`` the one-cell variant that
+    would read the field, and its reach is 0 roster decks. Measured reach
     on the corpus today is ZERO — all 29 ``*CONTACT_TIED_*`` decks on
     ``F:``, ``C:/openradioss_run`` and ``Ryan_Lee`` convert identically on both
     trees, because the two ``_OFFSET`` carriers (``getriebekette``,

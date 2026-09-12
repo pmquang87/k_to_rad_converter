@@ -1078,6 +1078,17 @@ from a list rather than a re-census:
   interface at all, so the stub's own stated premise (the implicit solver
   segfaults without one) does not hold there; the injected probe `/RBODY`
   covers the real trigger.
+  **CLOSED in round 4, measured-not-worth-fixing.** The forced-stub arm on
+  `bumper` — the one deck the predicate reaches — ERRORs at `t = 1e-4` against
+  the shipped NORMAL zero model at `t = 0.05`, so making the predicate faithful
+  would REPLACE a NORMAL termination with an error termination on the only
+  carrier. The wider class is inert: **53 `/INTER/TYPE7` rows on the roster
+  carry the injected stub title `auto_implicit_stabilization_self_contact`**,
+  and five of them (`ex_14_solid_elform_1`, `ex_04_solid_elform_2`,
+  `ex_03_solid_elform_2`, `ex_02_thick_shell_elform_2`,
+  `ex_27_..._penalty_implicit` — three distinct emitted models) were measured
+  with the stub DELETED and are byte-inert in the iterates. The architectural
+  fix (re-evaluate after `_make_interfaces`) buys nothing on this corpus.
 - **An explicit `Gapmin` for SOLID-SEGMENT `/INTER/TYPE7` interfaces —
   AUTOMATIC spellings included.** The scope is the ELEMENT TYPE, not the
   spelling: k2rad writes `Igap 0` with `Gapmin 0` on every `/INTER/TYPE7` it
@@ -1098,9 +1109,29 @@ from a list rather than a re-census:
 - **The tied family's `_OFFSET` split.** Vol I R17 p.11-127 General Remark 7
   puts `TIED_*_OFFSET` / `_BEAM_OFFSET` in LS-DYNA's PENALTY family;
   `_tied_interface_type` keys on the solver and the variant only and sends them
-  to the constraint `/INTER/TYPE2` on an explicit deck, which projects the
-  secondary nodes onto the main segment and removes the offset the keyword
-  exists for. Measured reach today is ZERO (all 29 `*CONTACT_TIED_*` decks on
+  to `/INTER/TYPE2` on an explicit deck — at **Spotflag 27**
+  (`_TIED_SPOTFLAG["SURFACE_TO_SURFACE"]`, `writer/contacts.py`), which is an
+  AUTO-PENALTY variant, not a kinematic constraint (`_TIED_PENALTY_SPOTFLAGS =
+  (25, 26, 27, 28)`). CORRECTED in round 4: this entry used to claim that card
+  moves the secondary nodes onto the main segment and so removes the offset
+  the keyword exists for (the retracted wording is quoted verbatim in the
+  round-4 CHANGELOG entry). Radioss does **not** move a TYPE2 secondary
+  node — no starter `i2*.F` routine writes `X(1..3, .)` at all, and the only
+  such assignment among the interface initialisers is `i24pen3.F:317-319`,
+  which is TYPE24. What Spotflag 27 (the glue formulation, "like 5") does not
+  do that 28 ("like 1", the spotweld formulation) does is carry the offset as a
+  rigid link of constant stiffness. `ContactTied.offset` is stored by the
+  handler and **read nowhere**: `grep -n "\.offset" k2rad/writer/contacts.py`
+  returns exactly one hit, inside a docstring. The round-5 variant is therefore
+  the one-cell change that reads the field already parsed — **Spotflag 27 -> 28
+  when a `SURFACE_TO_SURFACE` tie's keyword carries `_OFFSET`** — with its own
+  measured reach: **0 R14-roster decks** (the two `F:` `_OFFSET` carriers,
+  `05_2_welding_shell_thin` and `000_yaris_dynamic_roof_crush_01`, are both
+  IMPLICIT and already take TYPE10/Spotflag 28) and 1 off-roster model (four
+  `getriebekette` files). Do NOT route `_OFFSET` to TYPE10 on an explicit deck:
+  the repo's own determinate tie coupon reads 209.2 at Spotflag 1/5/27 against
+  a closed form of 210.0, and **67.85 = -67.6 %** at TYPE10's default STFAC.
+  Measured reach today is ZERO (all 29 `*CONTACT_TIED_*` decks on
   `F:`, `C:/openradioss_run` and `Ryan_Lee` convert identically on both trees),
   so it is a fidelity item, not a live defect; `getriebekette` is the deck to
   measure both arms on.
@@ -1149,11 +1180,31 @@ from a list rather than a re-census:
   to be measured first. `pend.imp` belongs with item B: it is the branch's
   single worst benchmark row (an energy balance that was exact at −0.0 % now
   runs at 99.9 % under a NORMAL banner) and it is filed there.
-- **`IHQ 8/9/10`** (the Cockcroft-Latham / Belytschko-Bindeman assumed-strain
-  co-rotational forms). Round 3 leaves those sections on `Isolid` 17 and warns:
-  Radioss `/PROP/SOLID` has no co-rotational stiffness-form hourglass with the
-  same energy accounting, so the mapping needs its own measurement rather than
-  a table row. Reach on the R14 roster: the `fl_exp_ihq8_*` coupon family only.
+- **`IHQ 8/9/10`.** CORRECTED in round 4 — this entry used to name two
+  metal-forming/assumed-strain authors and call 8/9/10 "co-rotational forms",
+  and neither half was right (the retracted wording is quoted verbatim in the
+  round-4 CHANGELOG entry, which is the place for it). Vol I R17 p.12-271 `*CONTROL_HOURGLASS`: `EQ.8`
+  *"Activates full projection warping stiffness for shell formulations 9, 16
+  and -16"* — a SHELL option, not a solid hourglass form (Remark 1, same page:
+  *"Only shell forms 9, 16 and -16 use the warping stiffness invoked by
+  IHQ = 8"*); `EQ.9` Puso [2000] enhanced assumed strain for 3D hexahedra;
+  `EQ.10` Cosserat Point Element (Jabareen & Rubin [2008]). The assumed-strain
+  co-rotational form the entry named is `EQ.6`, **Belytschko-Bindeman [1993]**.
+  `k2rad/writer/mesh.py:2182-2185` already stated this correctly; the table did
+  not. `_ihq_to_isolid` (`writer/mesh.py:1978-1993`) returns None for 8/9/10,
+  so the section keeps its ELFORM-derived `Isolid` and `writer/mesh.py`'s
+  unsupported-IHQ branch warns once per distinct IHQ. **Reach on the R14
+  roster: IHQ 9 and IHQ 10 have ZERO carriers; IHQ 8 has FOUR, and all four
+  state `*SECTION_SHELL` ELFORM 16 -> `Ishell 12` (QBAT, fully integrated),
+  where the hourglass coefficients are physically inert** —
+  `introduction/intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k`,
+  `show-cases/bolts/typea/explicit/mainboltaexpl.k`,
+  `show-cases/contact-overview/main.k` (`run_pass = 2`) and
+  `thermal/thick-thin-shells/07_metalstrip.k`. Only `mainboltaexpl` has a solid
+  part (one ELFORM -1 section) and it is the only one whose conversion log
+  carries the IHQ-8 line. **The `fl_exp_ihq8*` coupon family this entry used
+  to name as its only roster reach does not exist** — a `find` for `*ihq*` over `F:`, `C:/openradioss_run` and
+  `E:/foxcore_data` returns nothing. NO-GO, doc fix only.
 - `SOLN = 1` / `TGMULT` policy (the thermal-only solution class).
 - ALE mesh consolidation onto one `/PART` + `/INIVOL`, and with it the real
   ALE conversion for ELFORM 5/6/7 (see the closed entry below for the four
@@ -1936,7 +1987,7 @@ stalls, which are NOT the same class.
 | `ex_15` thick shells `elform_2/3/5` | 3 | cycle **38**, t = 0.00559 of 0.02 | **FIXED** — NORMAL to t = 0.01963 |
 | Salzburg `4.2_Buckling_of_Beer_Can` | 1 | cycle 38, t = 0.1298 of 1.0 | **IMPROVED, not fixed** — reaches t = 0.3661 (2.8×) and its KE falls from 7.26e10 to 1.56e5 |
 | beams `ex_05`, `ex_06`, `ex_07`, `ex_11` | 4 | t = 1e-5 / 0.387 / 3e-8 / 0.0945-of-0.1 | **NOT fixed** (`ex_06` moves 0.3869 → 0.3870). MAX_ITER on three; `ex_11` prints a NORMAL banner at 94.5 % of target, the #110 shape. Own mechanism — the beam property or the `/IMPL` recipe |
-| `ex_27` rigid-wall implicit ×2 | 2 | cycle 1 / 3, t ≈ 1e-7 of 8e-5 | **NOT fixed**, byte-identical with and without the grid. `RELATIVE R` 10.9 / 5.18 and KE 5.8e9 at cycle 3: a rigid-wall-plus-implicit class of its own |
+| `ex_27` implicit Taylor bar ×2 | 2 | cycle 1 / 3, t ≈ 1e-7 of 8e-5 | **NOT fixed**, byte-identical with and without the grid. **The "rigid-wall class" attribution this row used to carry is WRONG and was corrected in round 4**: `ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit.k` has **no `*RIGIDWALL` keyword at all** (`grep -c RIGIDWALL` = 0; its keyword list carries `*CONSTRAINED_GLOBAL` instead) while only the `_penalty_` twin has `*RIGIDWALL_PLANAR_ID` (`grep -c` = 1). Both are the SAME Taylor copper bar at 227 000 mm/s under Newmark trapezoidal at `DT0 = 1e-6`, both diverge from cycle 1 (`RELATIVE R` to 2.3e15), cutting Δt 22 times to `DT_MIN = 1e-10` where `\|r\|/\|r0\|` still sits at ≈ 5.0; the arm `DT_MAX 0 → 1e-6` (LS's own constant step) changes nothing. A real solver constraint worth recording for the `_penalty_` twin ONLY: `nl_solv.F:520` `IF (ILINE_S>0.AND.ISIGN>=0.AND.IRWALL==0)` — the line search is bypassed outright whenever a rigid wall is active — and `imp_solv.F:673-700` forces a full stiffness reform on every rigid-wall impact. What is missing is a DOF-level residual dump (`/IMPL/NONLIN/SOLVINFO`, or a higher `/IMPL/PRINT/NONL`); it is not obtainable from the cycle table. Note the grouping: `ex_27_-1_rigidwall` ≡ `ex_27_-2_rigidwall` is ONE emitted model on 2 deck keys, one row a `match` and one a `deviation` |
 | Salzburg `4.1` / `4.3` | 2 | 4.1 timeout at 0.3 % of target; 4.3 cycle 56 | **NOT fixed**. `4.3` is also the one roster deck with an `*INITIAL_STRESS_SECTION`, and its solids are ELFORM −1, so neither item B nor item F reaches it |
 | `tensile2` | 1 | cycle 349, t = 0.7701 of 1.0 | marginal (t → 0.7804): genuine near-completion nonlinearity, plus `Warning: MUMPS workspace too small. Retry` |
 | `doorbeam` | 1 | cycle 6, t = 2.6e-7 of 0.0011 | **NOT fixed**, byte-identical death |
