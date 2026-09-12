@@ -142,6 +142,199 @@ Prior history (before this changelog was introduced) is summarized in the
   `C:/openradioss_run`; the movers on those decks come from item A registering
   the `_THERMAL` spellings.
 
+- **R14 CAMPAIGN TRIAGE batch, round 3, part B — the hourglass control the
+  deck does not state, the rigid body that never span, and the implicit
+  milestone grid that killed ten decks.** Part A registered the missing load
+  paths; part B goes after the three classes the census ranked next by reach —
+  **46 roster decks whose 1-point hex solids get a full-integration element
+  with NO hourglass control, 12 whose rigid-body initial velocity is emitted
+  and then overwritten, and 34 implicit decks that die in the engine** — plus
+  the ELFORM 5/6/7 silence. Every figure below is measured against the deck's
+  own LS-DYNA reference on `F:/dynaexamples_r14_ton-mm-s`, on this machine at
+  `nt = 4`.
+
+  - **A 1-point `*SECTION_SOLID` the deck leaves DEFAULTED now gets LS-DYNA's
+    own default hourglass control, ON BY DEFAULT** (`--no-default-hourglass`,
+    `convert(default_hourglass=False)`). Vol I R17 p.12-271
+    `*CONTROL_HOURGLASS` Remark 1: *"If omitted or if IHQ = 0, the default
+    hourglass control types are as follows: … b) For solids: type 2 for
+    explicit; type 6 for implicit"*, with `QH`'s own Default row 0.1, and
+    p.25-5 `*HOURGLASS` Remark 7 making a blank-or-zero `QM`/`QH` that same 0.1
+    *"unless superseded by a nonzero value of QH"*. Those go through the
+    EXISTING `_ihq_to_isolid` remap, so an explicit deck gets `Isolid` 1 (the
+    Belytschko-orthogonalised viscous 1-point hex) with `h` 0.1 and an implicit
+    one `Isolid` 24 (HEPH). k2rad remapped only when the card was PRESENT, so a
+    defaulted deck shipped at `Isolid` 17 — which `prop_p14_solid.cfg` itself
+    calls *"2\*2\*2 Integration Points, No Hourglass"* and for which
+    `hm_read_prop14.F:369-372` forces `GEO(13) = ZERO`: a different integration
+    rule AND no hourglass control, where LS-DYNA runs a one-point element with
+    control on.
+    **The deck's own d3hsp says which default it used**, which is how the rule
+    was checked rather than assumed: `sloshing_A` states no card and prints
+    `hourglass model = 2` / `hourglass coefficient = 1.00000E-01`;
+    `component2` states IHQ 0 / QH 0.05 and prints `model = 2` with the stated
+    0.05 kept; `birdball` states IHQ 2 / **QH 0.0** and prints
+    `coefficient = 1.00000E-01`; `275key2` the same at IHQ 4; and the IMPLICIT
+    `ex_03_solid_elform_1_4x6x4_mesh` prints `hourglass model.(bricks) = 6`.
+
+    | deck (LS-DYNA `glstat` reference) | before | after |
+    |---|---|---|
+    | `sloshing_A` (`*MAT_NULL`, IE 3.10688e-3) | TIMESTEP-LIMIT death at `t = 0.18` | **NORMAL at `t = 2.0`, 34 119 cycles, IE −0.254 %** |
+    | `sloshing_C` (ELFORM 5, IE 3.01976e-3) | timeout | **NORMAL, 84 932 cycles, +2.823 %** |
+    | `taylor_A` (IE 45699.2 / KE 41191.3) | +2.562 % / +1.478 % | **+0.002 % / −0.027 %** |
+    | `rodsol` (IE 399672 / KE 121394) | +2.884 % / +4.041 % | **−1.719 % / +1.405 %** |
+    | `tension1` (IE 170225) | +0.103 % | **−0.015 %** |
+    | `underwater_A` (IE 2.56477e8 / KE 2.85344e8) | +0.087 % / +3.034 % | **+0.555 % / −0.226 %** |
+    | `taylor_B` (ELFORM 5, IE 44612 / KE 39864.5) | +5.061 % / +4.855 % | **+2.439 % / +3.300 %** |
+    | `ex_03_solid_elform_1` (IMPLICIT, IE 171185) | −20.379 % | **−4.139 %** |
+    | `ex_03_solid_elform_2` (the control, IE 136441) | −0.103 % | **−0.030 %**, and its `/PROP/SOLID` is byte-identical — the move is item F's engine deck |
+    | `sloshing_B` (the three-line twin, IE 3.12665e-3) | −14.09 % | **−14.093 %, unchanged** |
+
+    `sloshing_A.k` and `sloshing_B.k` differ by exactly three lines
+    (`*CONTROL_HOURGLASS` / IHQ 1 / QH 0.005) and B does not move: the corpus's
+    own controlled experiment for this item, and the reason the fix is a
+    DEFAULT and not a remap of stated cards.
+
+    Screened out, each for its own quoted or measured reason: **ELFORM −1/−2**
+    (p.41-97 Remark 13 — *"there is no hourglass energy, and the behavior is
+    not affected by hourglass parameters"*; they are 15-16 points too stiff at
+    `Isolid` 17, but that is a LOCKING item and it is in the ROADMAP with its
+    numbers, not fixed here), **ELFORM 2/3** and the tetrahedra (no hourglass
+    modes), **ELFORM 16** (a `/TETRA10` that `_elform_to_isolid` maps to 17 and
+    the old `{14,18}` gate therefore missed), **ALE** sections,
+    **`/MAT/LAW115`** sections (their own measured 17 → 24), and **any deck
+    carrying `*INITIAL_STRESS_SECTION`** — `_PRELOAD_STABLE_ISOLID` measured
+    `Isolid` 1 and 2 at ZERO OR NEGATIVE VOLUME at cycle 0 under `/PRELOAD`
+    `Itype = 2`, and the preloaded parts are only resolved in a much later
+    writer pass, so the screen is deck-wide and can only fail safe. A
+    **`*MAT_NULL` / `*MAT_ELASTIC_FLUID`** section keeps the VISCOUS `Isolid` 1
+    even on an implicit deck: p.25-3 `*HOURGLASS` Remark 4 says type 6 IS
+    viscous on a null material, and the stiffness-form `Isolid` 24 makes
+    `sloshing_A` "terminate normally" at 243 506 cycles with IE 1.75e16 and a
+    99.9 % energy error. On an implicit deck a STATED IHQ 1-5 also becomes type
+    6, which is what LS-DYNA does itself (p.12-272).
+    `/INIBRI` follows automatically — `_effective_solid_isolid` reads the same
+    resolver, so `Nb_integr` tracks the new one-point formulation instead of
+    raising starter MSGID 695.
+
+  - **`*SECTION_SOLID` ELFORM 5/6/7 are NAMED as becoming Lagrangian.** The
+    three 1-point ALE / Eulerian / Eulerian-ambient solids took `Iale = 0`
+    silently, so an ELFORM-5 ALE deck and an ELFORM-1 Lagrangian one converged
+    to byte-identical starters (`sloshing_A_0000.rad` and
+    `sloshing_C_0000.rad`). They are still not mapped, and that is MEASURED,
+    not deferred: `hm_read_prop14.F:264-267` refuses `Iale /= 0` on any
+    `Isolid` but 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
+    4 on `advection_B`), and with `Isolid` 1 the remap took `taylor_B` from
+    IE +5.1 % / KE +4.9 % to a **99.9 % energy error at 198 220 cycles** and
+    `channel_A` from IE −98.9 % / KE −25.6 % to **−100 % / −94.3 %**. A real
+    ALE conversion additionally needs an `/ALE/GRID` formulation (with no card
+    the default is `NWALE = 1` "DISP", `hm_read_ale_grid.F:202-208`), an
+    ALE-capable material and inflow/void boundaries the ELFORM cell does not
+    state. What they DO get is the 1-point hourglass control above — the half
+    LS-DYNA's own d3hsp says they carry (`solid formulation = 11`, hourglass
+    type 2 / coefficient 0.1 on `taylor_B`, `sloshing_C`, `channel_A`,
+    `advection_B`) — worth `taylor_B` +5.06 % → +2.44 % and `sloshing_C` a
+    timeout → NORMAL at +2.82 %. ELFORM 7's `AET` is named as dropped.
+
+  - **`*INITIAL_VELOCITY_GENERATION` on a rigid body is re-pointed onto the
+    `/RBODY` main node**, the second half of round 2's re-point. Two defects,
+    one mechanical and one a docstring rationale that was never
+    solver-measured: the site CALLED `_warn_inivel_on_rigid_members` and threw
+    its return value away, and its stated reason — *"collapsing the group to
+    the main node would give that one node its own omega × r and the body NO
+    spin at all"* — is refuted at source. `hm_read_inivel.F:580-617`, the
+    `ITYPE == 4` (`/INIVEL/AXIS`) branch, writes BOTH `VR = ω·n̂` and
+    `V + ω × (x − O)` on every node when `IRODDL > 0`, and `contrl.F:1053`
+    puts `NRBODY` in the `IRODDL` minimum, so any deck with an `/RBODY` has it;
+    `inirby.F:1032-1048` then rebuilds the secondaries from the main node's six
+    DOFs. So the fix needs no arithmetic.
+
+    Cycle-0 kinetic energy against each deck's own LS-DYNA `glstat` initial
+    energy — every one of these reads **0.000** without the re-point:
+
+    | deck | re-pointed | LS `glstat` t = 0 | dev |
+    |---|---|---|---|
+    | `sphere1` | 6.993e6 | 6.99320e6 | **−0.003 %** |
+    | `wood-post` | 5.409e7 | 5.40914e7 | **−0.003 %** |
+    | `projectile-block` | 2.334e7 | 2.33407e7 | **−0.003 %** |
+    | `section_solid.hourglassing` | 5.812e7 | 5.81166e7 | **+0.006 %** |
+    | `quadrature_A` | 15300 | 1.53000e4 | **+0.000 %** |
+    | `brake` (rotational, ω = 300) | 1.345e7 | 1.33808e7 | **+0.517 %** |
+    | `brake_debug` | −4.4e-11 | 0.00000E+00 | **inert, and correct** |
+    | `pipe` (MIXED, was −0.100 %) | 8.70569e7 | 8.70616e7 | **−0.005 %** |
+
+    `brake.k` and `brake_debug.k` are the corpus's own controlled experiment
+    for the spin half: their emitted starters differ in exactly ONE line
+    (`/BCS/90005` `111 101` vs `111 011`, from `*MAT_RIGID` CON2 6 vs 5), the
+    spin axis is global Y, and LS-DYNA's own initial KE is 1.33808e7 for one
+    and exactly 0.0 for the other. The re-point moves the one whose axis is
+    free. An analytic coupon closes it: one 10 mm `*MAT_RIGID` cube at
+    OMEGA 100 about global Z through (50,0,0) has `½mv_c² = 98.125` and
+    `½Iω² = 1.9625` from the starter's own echoed lumped inertia, and the
+    re-pointed arm reads 98.13 (+0.005 %) / 1.963 (+0.026 %) against a control
+    of 0.000 / 0.000.
+
+    A **MIXED** card is now SPLIT in place — every deformable node stays and
+    each rigid body the card FULLY covers is replaced by its main node — where
+    round 2 left it whole. Coverage counts a body's ELEMENT nodes only:
+    `*CONSTRAINED_EXTRA_NODES` are exempt because Vol I R17 p.28-127 says
+    LS-DYNA does not initialise them either when `IVATN = 0`, and without that
+    exemption `brake.k` (144 element nodes named, 146 in the `/RBODY`) reads as
+    partly covered and keeps a card that moves nothing. A body only PARTLY
+    covered is refused and NAMED rather than modelled: p.28-129 Remark 3 makes
+    LS-DYNA's answer a MASS-weighted momentum average over the whole body, and
+    k2rad has no nodal masses at conversion time.
+    Named consequence: with the body actually moving, `quadrature_B` and `_C`
+    can now diverge in their ALE FSI where the zero model terminated NORMAL —
+    clearing one defect promotes the next, and the campaign census will show
+    it.
+
+  - **`/IMPL/DT/FIXPOINT` is off by default** (`fixpoint_count` 100 → 0;
+    `--fixpoint-count N` still asks for it). The milestone grid is a k2rad
+    convenience LS-DYNA never asks for, and it makes the adaptive implicit step
+    oscillate against `/IMPL/DT/2`: `ex_14`'s own cycle table reads 9.0e-5,
+    7.9e-5, 6.69e-5, 1.464e-4, 5.359e-5, 1.611e-4, 3.895e-5, 1.772e-4,
+    2.284e-5, 1.949e-4, 5.128e-6 — a big FIXPOINT jump alternating with a tiny
+    recovery at 2 : 1 ratios — while its energy error climbs 0.6 → 1.7 → 3.0 →
+    4.7 → 9.3 → 13.1 → **99.9 %** by cycle 14 and `nl_solv.F`'s residual norm
+    overflows 1e30 at cycle 33, where `imp_solv.F:2031` prints
+    `** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **` with
+    `ISTOP = -2`. Trapezoidal Newmark (`/IMPL/DYNA/2`, γ = 0.5, β = 0.25) is
+    unconditionally stable at a CONSTANT step, not at one that alternates like
+    that.
+    **Ten roster decks that died that way reach NORMAL TERMINATION without it**,
+    and they die in FAMILIES at identical cycles — `ex_01` ×3 at cycle 20,
+    `ex_14` ×4 at cycle 33, `ex_15` ×3 at cycle 38 — i.e. one mechanism per
+    family. Measured on this branch: `ex_01_thin_shell_elform_2` goes from
+    ERROR at `t = 0.1052` to **NORMAL at `t = 1.000`, 28 cycles, IE 0.7061 vs
+    the reference's 0.818398 (−13.72 %)**; `ex_14_solid_elform_1` from an
+    energy error of 99.9 % to **NORMAL at `t = 0.01839` (its `/RUN` end is
+    0.02) with the error ≤ 0.8 % at every cycle**; `4.2_Buckling_of_Beer_Can`
+    reaches 2.8× further. Regression controls that terminate NORMAL today do
+    not regress and two improve: `ex_04_solid_elform_2_8x12x4_mesh`
+    **+0.055 %** (was −0.006 %), `ex_19_thin_shell_elform_2_29x76_mesh`
+    **+0.546 %** (was −1.317 %), `3.5_Linear_Elastic_QS_Plate_Shell`
+    identical.
+    Eight other arms were tried on `ex_14` and NONE fixes it: QSTAT instead of
+    `/IMPL/DYNA/2`, `/IMPL/DT/2` `L_dtn = 50`, a lower `/IMPL/DT/STOP` floor
+    (which produces a "NORMAL TERMINATION" banner over `MESSAGE ID 205 ** RUN
+    KILLED: ENERGY ERROR LIMIT REACHED` at KE 8.5e28), deleting the injected
+    `/INTER/TYPE7` stub, deleting `/DAMP`, `Isolid` 1 and `Isolid` 24. A
+    COARSER grid is not the fix either — `--fixpoint-count 10` makes `ex_14`
+    and `ex_15` *terminate* at a 99.9 % energy error. **The cost of 0, named:
+    fewer output states** (15 cycles become 8 on the controls), which is the
+    whole reason the card exists.
+    Golden `tests/fixtures/expected/implicit_qstat_0001.rad` loses exactly the
+    `/IMPL/DT/FIXPOINT` header and its 20 data rows — 21 deletions, no other
+    line, on the one fixture that carries the card.
+    Item B and item F interact on `ex_14_solid_elform_1` and the interaction is
+    reported rather than averaged: with the grid gone and the default hourglass
+    OFF the deck reads IE −41.354 % / KE −17.934 % against its reference; with
+    the default ON (`Isolid` 24) the engine energy error improves from −3.1 %
+    to −0.7 % but the deviation becomes IE +108.758 % / KE +26.337 %. Both arms
+    stop at the same `t = 0.01839` while the LS reference row is at its own end
+    time, so those two rows compare the ARMS, not absolute accuracy.
+
 - **R14 CAMPAIGN TRIAGE batch, round 2, part A — the `*NODE` card's own
   constraint cells, and the starter refusal on a node that cannot be
   depenetrated.** Round 1 cleared the starter-error classes; the campaign then

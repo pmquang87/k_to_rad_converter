@@ -2841,6 +2841,20 @@ LS-DYNA model, and the `ALPHA_MAT` values are a placeholder with no relation to
 the deck's `*INITIAL_VOLUME_FRACTION*`. The warning says all of that in one
 place
 `*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
+`*SECTION_SOLID` ELFORM **5/6/7** (1-point ALE / Eulerian / Eulerian
+ambient) → `Iale=0`, i.e. a LAGRANGIAN element, and NAMED as such. They are
+deliberately not mapped: `hm_read_prop14.F:264-267` refuses `Iale != 0` on
+any `Isolid` but 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
+4 on `advection_B`), and with `Isolid` 1 the remap was MEASURED destructive
+(`taylor_B` from IE +5.1 % / KE +4.9 % against its LS-DYNA reference to a
+99.9 % energy error at 198 220 cycles; `channel_A` from −98.9 % / −25.6 % to
+−100 % / −94.3 %). A real ALE conversion also needs an `/ALE/GRID`
+formulation, an ALE-capable material and the inflow/void boundaries the
+ELFORM cell does not state. They DO take the 1-point hourglass control (see
+*Control tables* below) — the half LS-DYNA's own d3hsp says they carry
+(`solid formulation = 11`, hourglass type 2 / coefficient 0.1) — worth
+`taylor_B` +5.06 % → +2.44 % and `sloshing_C` a timeout → NORMAL at +2.82 %.
+ELFORM 7's `AET` is named as dropped
 `*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`
 `*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`
 `*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
@@ -3075,10 +3089,26 @@ cycle, so the card written on the secondaries is overwritten before cycle 1 and
 the body starts at rest, at 0 starter diagnostics, while LS-DYNA gives the
 rigid PART the velocity (measured on `matfoamsoil`: cycle-0 K-ENERGY 3.547E+04
 against the LS-DYNA reference's own 3.54775E+04, −0.02 %, where the
-un-re-pointed card gives 0.000). A MIXED card is left over its stated nodes and
-named, and `*INITIAL_VELOCITY_GENERATION` is not re-pointed at all: it emits
-`/INIVEL/AXIS`, whose `Vr` gives each node the translational velocity
-`omega x r`, so collapsing the group would leave the body with no spin
+un-re-pointed card gives 0.000). `*INITIAL_VELOCITY_GENERATION` is re-pointed
+the same way, and needs no arithmetic to keep the body's SPIN:
+`hm_read_inivel.F:580-617` writes BOTH `VR = omega*n` and
+`V + omega x (x - O)` on every node of an `/INIVEL/AXIS` group when
+`IRODDL > 0`, and `contrl.F:1053` puts `NRBODY` in the `IRODDL` minimum, so
+any deck with an `/RBODY` has it. Measured cycle-0 kinetic energy against
+each deck's own LS-DYNA `glstat` (all of them 0.000 without the re-point):
+`sphere1` −0.003 %, `wood-post` −0.003 %, `projectile-block` −0.003 %,
+`section_solid.hourglassing` +0.006 %, `quadrature_A` +0.000 %, and `brake`'s
+ROTATIONAL 1.345e7 against 1.33808e7 = +0.517 % (its `brake_debug` twin, whose
+only emitted difference is one `/BCS` digit locking the spin axis, stays inert
+at −4.4e-11 against LS-DYNA's own 0.0).
+A **MIXED** card is SPLIT in place: every deformable node stays and each rigid
+body the card FULLY covers is replaced by its main node (`pipe.k` goes from
+−0.100 % to −0.005 %). Coverage counts a body's ELEMENT nodes only —
+`*CONSTRAINED_EXTRA_NODES` are exempt, because Vol I R17 p.28-127 says
+LS-DYNA does not initialise them either when `IVATN = 0`. A body the card only
+PARTLY covers is refused and NAMED rather than modelled: p.28-129 Remark 3
+makes LS-DYNA's answer a MASS-weighted momentum average over the whole body,
+and k2rad has no nodal masses at conversion time
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
@@ -4683,7 +4713,18 @@ the part ids follow that line immediately, and why they are capped at ten per
 line (`fredynain.F` reads them into a fixed `IV2(10)`).
 
 ### Control / output
-`*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks
+`*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks.
+`/IMPL/DT/FIXPOINT` — k2rad's own output-milestone grid, which LS-DYNA never
+asks for — is **OFF by default since 2026-09** (`--fixpoint-count N` requests
+it). The grid makes the adaptive step oscillate against `/IMPL/DT/2`, and
+trapezoidal Newmark is unconditionally stable at a CONSTANT step, not at one
+that alternates 2 : 1 every cycle: MEASURED, ten dynaexamples R14 decks that
+died `** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **` reach NORMAL
+TERMINATION without it (`ex_01` x3 at cycle 20, `ex_14` x4 at cycle 33,
+`ex_15` x3 at cycle 38), while three currently-NORMAL controls do not regress
+and two improve. A coarser grid is NOT the fix — at 10 points `ex_14` and
+`ex_15` terminate at a 99.9 % energy error. The cost of 0 is fewer output
+states (15 cycles become 8 on the controls)
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
@@ -4768,6 +4809,29 @@ every part on it was split). Shells carry the coefficient into `Hm/Hf/Hr`
 `12` (QBAT) / `24` (QEPH) make those coefficients physically inert (warned).
 _Note: `*CONTROL_HOURGLASS` was previously parsed and dropped; it is now honored,
 so a deck with one may see its solid `Isolid` change off the ELFORM default._
+**A deck that states NO hourglass control gets LS-DYNA's own default**, ON by
+default (`--no-default-hourglass`, `convert(default_hourglass=False)`). Vol I
+R17 p.12-271 Remark 1: *"If omitted or if IHQ = 0, the default hourglass
+control types are as follows: … b) For solids: type 2 for explicit; type 6 for
+implicit"*, with `QH` 0.1 — and a STATED `QH`/`QM` of 0.0 is that same default
+(`birdball.k` states IHQ 2 / QH 0.0 and its own d3hsp echoes `hourglass
+coefficient = 1.00000E-01`). So a defaulted 1-point solid gets `Isolid` 1 with
+`h` 0.1 explicitly and `Isolid` 24 implicitly, instead of the
+full-integration `Isolid` 17 — which `prop_p14_solid.cfg` calls *"2\*2\*2
+Integration Points, No Hourglass"* and for which `hm_read_prop14.F:369-372`
+forces the coefficient to ZERO. MEASURED against each deck's own LS-DYNA
+`glstat`: `sloshing_A` from a TIMESTEP-LIMIT death at `t = 0.18` to NORMAL at
+`t = 2.0` (IE −0.254 %), `sloshing_C` from a timeout to NORMAL (+2.823 %),
+`taylor_A` from IE +2.562 % / KE +1.478 % to +0.002 % / −0.027 %, `rodsol`
+from +2.884 % / +4.041 % to −1.719 % / +1.405 %, and the IMPLICIT
+`ex_03_solid_elform_1` from −20.379 % to −4.139 %. Screened out: ELFORM −1/−2
+(p.41-97 Remark 13 — no hourglass energy at all), ELFORM 2/3/16 and the
+tetrahedra (no hourglass modes), ALE sections, `/MAT/LAW115` sections (their
+own measured 17 → 24) and any deck carrying an `*INITIAL_STRESS_SECTION`
+(`Isolid` 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0 under `/PRELOAD`).
+A `*MAT_NULL` / `*MAT_ELASTIC_FLUID` section keeps the VISCOUS `Isolid` 1 even
+implicitly (p.25-3 `*HOURGLASS` Remark 4), and on an implicit deck a stated
+IHQ 1-5 also becomes type 6 (p.12-272), which is what LS-DYNA does itself._
 `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_OUTPUT`, `*CONTROL_SHELL`,
 `*CONTROL_SOLID`, `*CONTROL_ENERGY`, `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)
@@ -5416,11 +5480,17 @@ mypy k2rad
   velocity vectors under rotation, literal rotation-axis points under any
   transform — is warned per keyword).
 - **Single-element / sparsely-connected SOLID validation decks need
-  `*CONTROL_TIMESTEP TSSFAC <= 0.35`.** `*SECTION_SOLID ELFORM = 1` maps to
-  `/PROP/SOLID` `Isolid = 17`, which is FULL 2x2x2 integration
-  (`hm_read_prop14.F:333-341` sets `NPT = NPG = 8`); LS-DYNA's `TSSFAC = 0.9`
-  default was calibrated for the UNDER-integrated `ELFORM = 1` element k2rad
-  substitutes away from. No `/DT` card is emitted unless the deck states
+  `*CONTROL_TIMESTEP TSSFAC <= 0.35` — on the paths that still emit
+  `Isolid = 17`.** Since 2026-09 a 1-point `*SECTION_SOLID` whose deck leaves
+  the hourglass control DEFAULTED takes LS-DYNA's own default instead
+  (`Isolid` 1 explicit / 24 implicit, `--no-default-hourglass` to opt out), and
+  `Isolid` 1 IS the under-integrated element `TSSFAC = 0.9` was calibrated for
+  — so this bites the SCREENED cases: an `ELFORM = -1/-2` section, an
+  `ELFORM = 2` section, a preloaded deck, a `/MAT/LAW115` section, or the
+  opt-out. There `*SECTION_SOLID` still maps to `/PROP/SOLID` `Isolid = 17`,
+  which is FULL 2x2x2 integration (`hm_read_prop14.F:333-341` sets
+  `NPT = NPG = 8`), and LS-DYNA's `TSSFAC = 0.9` default was calibrated for the
+  UNDER-integrated element k2rad substitutes away from. No `/DT` card is emitted unless the deck states
   `TSSFAC > 0`, so the engine then runs at Radioss's own default `Tsca = 0.9`
   (`dt = 0.857 L/c`), which is super-critical for a lightly-connected hex:
   measured on a 10 mm steel hex, an unstable mode amplified round-off by x3.07
