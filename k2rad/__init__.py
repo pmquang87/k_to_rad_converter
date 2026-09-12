@@ -217,7 +217,7 @@ def convert(
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
-    fixpoint_count: int = 100,
+    fixpoint_count: int = 0,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
@@ -300,7 +300,21 @@ def convert(
         k = 1 … N), so an animation / time-history state is produced at each
         instead of wherever the variable step falls. The OpenRadioss engine caps
         the list at 100, so this is clamped to 1…100; 0 disables the card.
-        Default 100 (a point every 1% of the run). Implicit decks only.
+        **Default 0** — changed from 100 on 2026-09, because the grid makes
+        the adaptive step oscillate against ``/IMPL/DT/2`` and trapezoidal
+        Newmark is unconditionally stable at a CONSTANT step, not at one that
+        alternates 2 : 1 every cycle. MEASURED on the dynaexamples R14 roster:
+        ten decks that died ``** ERROR: SOLVER IMPLICIT STOPPED DUE TO
+        TIMESTEP LIMIT **`` reach NORMAL TERMINATION without the card
+        (``ex_01`` x3 at cycle 20, ``ex_14`` x4 at cycle 33, ``ex_15`` x3 at
+        cycle 38); ``ex_01_thin_shell_elform_2`` goes from ERROR at
+        ``t = 0.105`` to ``t = 1.000`` at IE −13.7 % against its LS-DYNA
+        reference, and ``ex_14_solid_elform_1`` from a 99.9 % energy error to
+        −3.1 %. Three currently-NORMAL implicit controls do not regress and
+        two improve. A coarser grid is NOT the fix: at 10 points ``ex_14`` and
+        ``ex_15`` terminate at a 99.9 % energy error. The cost of 0 is fewer
+        output states (15 cycles become 8 on the controls) — set a count to
+        get the milestones back. Implicit decks only.
     deformable_contact_recipe : bool
         Apply the validated stabilization recipe for an implicit deck with
         deformable-vs-deformable contact (e.g. force control through a

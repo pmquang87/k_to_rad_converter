@@ -7067,9 +7067,38 @@ class ConvertOptions:
     # clean animation / time-history state is produced at each milestone instead
     # of wherever the variable implicit step happens to fall. The OpenRadioss
     # engine caps the list at 100 (engine/source/input/freimpl.F); the writer
-    # clamps to that 1…100 range and treats 0 as "off". Default 100 → a point
-    # every 1% of the run. Implicit decks only (no effect on explicit output).
-    fixpoint_count: int = 100
+    # clamps to that 1…100 range and treats 0 as "off".
+    # DEFAULT 0 — changed from 100 on 2026-09. The card is a k2rad convenience
+    # LS-DYNA never asks for, and the grid makes the adaptive step oscillate
+    # against /IMPL/DT/2: ex_14's own cycle table reads 9.0e-5 → 7.9e-5 →
+    # 6.69e-5 → 1.464e-4 → 5.359e-5 → 1.611e-4 → 3.895e-5 → 1.772e-4 →
+    # 2.284e-5 → 1.949e-4 → 5.128e-6, a big FIXPOINT jump alternating with a
+    # tiny recovery at 2 : 1 ratios, while its energy error climbs 0.6 → 1.7 →
+    # 3.0 → 4.7 → 9.3 → 13.1 → 99.9 % by cycle 14 and the residual norm
+    # overflows 1e30 at cycle 33. Trapezoidal Newmark (/IMPL/DYNA/2, gamma =
+    # 0.5, beta = 0.25) is unconditionally stable at a CONSTANT step, not at
+    # one that alternates like that. MEASURED on the dynaexamples R14 roster:
+    # ten decks whose engine died "** ERROR: SOLVER IMPLICIT STOPPED DUE TO
+    # TIMESTEP LIMIT **" reach NORMAL TERMINATION with the card gone — ex_01
+    # x3 (elform 2/6/16, all at cycle 20), ex_14 x4 (cycle 33), ex_15 x3
+    # (cycle 38). ex_01_thin_shell_elform_2 goes from ERROR at t = 0.105 to
+    # NORMAL at t = 1.000, IE 0.7061 vs the LS-DYNA reference's 0.818398
+    # (-13.7 %); ex_14_solid_elform_1 from a 99.9 % energy error to -3.1 %,
+    # IE 1.417e7 / KE 3.231e7 against 2.4162e7 / 3.937e7. Regression controls
+    # that terminate NORMAL today do not: ex_04_solid_elform_2 +0.06 %,
+    # 3.5_Linear_Elastic_QS_Plate_Shell identical, ex_19_thin_shell_elform_2
+    # +1.9 % (its LS deviation improves from -1.317 % to about +0.6 %). Every
+    # OTHER arm was tried and does NOT fix ex_14: dropping /IMPL/DYNA/2 for
+    # QSTAT, /IMPL/DT/2 L_dtn = 50, lowering the /IMPL/DT/STOP floor (which
+    # produces a NORMAL banner over "MESSAGE ID 205 ** RUN KILLED: ENERGY
+    # ERROR LIMIT REACHED" at KE 8.5e28), deleting the injected /INTER/TYPE7
+    # stub, deleting /DAMP, Isolid 1 and Isolid 24. A COARSER grid is not the
+    # fix either: fixpoint_count = 10 makes ex_14 and ex_15 terminate at a
+    # 99.9 % energy error. The COST of 0, named: fewer output states — 15
+    # cycles become 8 on the controls — which is exactly what the card exists
+    # for, so set a count to get the milestones back.
+    # Implicit decks only (no effect on explicit output).
+    fixpoint_count: int = 0
     # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
     # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
     # stub (the kernel is gated behind an undefined DNC build macro and the real

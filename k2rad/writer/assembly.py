@@ -678,8 +678,21 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # them ascending and caps the list at 100 (OpenRadioss
     # engine/source/input/freimpl.F). It is honoured by /IMPL/DT/1 and /IMPL/DT/2
     # (our default); only /IMPL/DT/3 (RIKS) ignores it. N is
-    # options.fixpoint_count (default 100 → a point every 1% of the run); we
-    # clamp it to the engine's 1…100 range here, and 0 disables the card.
+    # options.fixpoint_count; we clamp it to the engine's 1…100 range here, and
+    # 0 disables the card.
+    #
+    # OFF BY DEFAULT since 2026-09 (options.fixpoint_count 100 → 0). This is a
+    # k2rad convenience LS-DYNA never asks for, and the milestone grid is not
+    # free: it makes the adaptive step oscillate against /IMPL/DT/2, and
+    # trapezoidal Newmark (/IMPL/DYNA/2, γ = 0.5, β = 0.25) is unconditionally
+    # stable at a CONSTANT step, not at one that alternates 2 : 1 every cycle.
+    # MEASURED on the dynaexamples R14 roster, ten implicit decks that died
+    # "** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **"
+    # (imp_solv.F:2031, ISTOP = -2) reach NORMAL TERMINATION once the card is
+    # gone — ex_01 x3 at cycle 20, ex_14 x4 at cycle 33, ex_15 x3 at cycle 38,
+    # each family dying at an identical cycle, i.e. one mechanism per family.
+    # See state.ConvertOptions.fixpoint_count for the numbers and for the eight
+    # other arms that do NOT fix ex_14.
     n_fix = min(max(int(state.options.fixpoint_count), 0), 100)
     if n_fix > 0 and state.ctrl_termination and state.ctrl_termination.endtim > 0:
         endtim = state.ctrl_termination.endtim

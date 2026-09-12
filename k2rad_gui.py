@@ -132,7 +132,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["tet10_to_tet4"] = bool(tet10_to_tet4)
 
     fp_text = (fixpoint_count_text or "").strip()
-    if fp_text:                                   # blank → convert() default (100)
+    if fp_text:                                     # blank → convert() default (0)
         try:
             kwargs["fixpoint_count"] = int(fp_text)
         except ValueError:
@@ -281,7 +281,7 @@ class ConverterGUI:
         self.u_len = tk.StringVar(value="mm")
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
-        self.fixpoint_count = tk.StringVar(value="100")
+        self.fixpoint_count = tk.StringVar(value="0")
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
@@ -344,7 +344,10 @@ class ConverterGUI:
         ttk.Label(fp, text="Implicit FIXPOINT count:").pack(side="left")
         ttk.Entry(fp, textvariable=self.fixpoint_count, width=6).pack(side="left", padx=3)
         ttk.Label(fp, text="evenly spaced output milestones the implicit time step lands on "
-                           "(1–100, default 100; 0 = off; implicit decks only)",
+                           "(1–100; DEFAULT 0 = off since 2026-09 — the grid makes the adaptive "
+                           "step oscillate against /IMPL/DT/2 and cost ten R14 reference decks "
+                           "their termination; the price of 0 is fewer output states. "
+                           "Implicit decks only)",
                   foreground="gray").pack(side="left")
 
         bg = ttk.Frame(io)
@@ -774,7 +777,7 @@ class ConverterGUI:
         bits = []
         if kwargs.get("tet10_to_tet4"):
             bits.append("TET10→TET4 downgrade")
-        if kwargs.get("fixpoint_count", 100) != 100:
+        if kwargs.get("fixpoint_count", 0) != 0:
             bits.append(f"fixpoint count={kwargs['fixpoint_count']}")
         if kwargs.get("ground_springs"):
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")

@@ -117,13 +117,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fixpoint-count",
         type=int,
-        default=100,
+        default=0,
         metavar="N",
         help="Number of evenly spaced /IMPL/DT/FIXPOINT output milestones the "
              "implicit time-step controller is forced to land on (k/N x the run "
-             "end, for k = 1..N; default 100 = a point every 1 percent). Clamped "
-             "to the engine's 1..100 range; 0 disables the card. Implicit decks "
-             "only; ignored for explicit.",
+             "end, for k = 1..N). Clamped to the engine's 1..100 range. "
+             "DEFAULT 0 = no card, changed 2026-09 from 100: the grid makes "
+             "the adaptive step oscillate hard against /IMPL/DT/2 (ex_14's own "
+             "cycle table alternates a big FIXPOINT jump with a tiny recovery "
+             "at 2:1 ratios), and trapezoidal Newmark is unconditionally "
+             "stable at a CONSTANT step, not at one that alternates like "
+             "that. MEASURED on the dynaexamples R14 roster: ten decks that "
+             "died 'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' reach "
+             "NORMAL TERMINATION without it (ex_01 x3, ex_14 x4, ex_15 x3 - "
+             "ex_01_thin_shell_elform_2 from an ERROR at t = 0.105 to t = "
+             "1.000 at IE -13.7 %% against its LS-DYNA reference, ex_14's "
+             "energy error from 99.9 %% to -3.1 %%), 4.2_Buckling_of_Beer_Can "
+             "reaches 2.8x further, and three currently-NORMAL controls do "
+             "not regress (two improve). A COARSER grid is not the fix: "
+             "--fixpoint-count 10 makes ex_14 and ex_15 terminate at a 99.9 "
+             "%% energy error. The COST of 0 is fewer output states - 15 "
+             "cycles become 8 on the controls - which is the whole reason the "
+             "card exists, so pass a count back if you need the milestones. "
+             "Implicit decks only; ignored for explicit.",
     )
 
     parser.add_argument(
