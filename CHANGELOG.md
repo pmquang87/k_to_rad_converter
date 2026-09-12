@@ -211,7 +211,15 @@ Prior history (before this changelog was introduced) is summarized in the
     `ex_14_solid_elform_3` reads −99.65 %. Since the ELFORM siblings of these
     examples convert to ONE file, **this warning is the only thing that
     distinguishes −1/−2 from 2 in the converted deck**; `_elform_to_isolid`'s
-    `2: 17` entry stays EXPLICIT so it can never ride the same default.
+    `2: 17` entry stays EXPLICIT so it can never ride the same default. It is
+    called from BOTH `/PROP/SOLID` write lines, not one: when a `*PART` carries
+    its own `*HOURGLASS` the section is SPLIT into a per-part property and the
+    shared-section emitter never runs for it — on
+    `ex_27_solid_elform_-2_rigidwall` that split `/PROP/SOLID/90001` at
+    `Isolid 17` is the only solid property in the whole file. The predicate is
+    the `Isolid` the property really carries, so a split that moves it to 24
+    (a 1-point HEPH, not the locking hex) stays silent — which is
+    `ex_12_solid_elform_-1` on the corpus.
     (ii) An `*INITIAL_VOID_PART`/`_SET` naming a part that is the ALE fluid
     group of an emitted `/INTER/TYPE18`. The void is skipped (no Radioss card
     expresses it), so the region LS-DYNA empties converts as ORDINARY FLUID and
