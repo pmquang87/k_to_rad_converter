@@ -575,6 +575,43 @@ Prior history (before this changelog was introduced) is summarized in the
     records the comparison; no deck was re-converted and no solver job was
     launched for it.
 
+  **Verification record — the POST-REVIEW round (part D).** Measured at
+  **`44869b5`**, this round's LAST CODE COMMIT — determined by running
+  `git diff <candidate>..HEAD -- k2rad tools k2rad_gui.py` rather than from the
+  commit subjects, which is the mistake the round-3 record above made. Run from
+  the branch worktree at `git status --porcelain` EMPTY, with the main tree
+  untouched at `b3807bd`:
+
+  - `pytest tests/ -q` → **5058 passed / 2 skipped / 2238 subtests**
+    (83 s), from **5052 / 2 / 2078** at `a6814d6`: +6 tests, +160 subtests,
+    none removed or weakened. The six are two `--tie-stfac` arms (a Python
+    `int`, and a string that is not `auto`), three on the retracted `twoway`
+    remedy and its re-scoped round-4 item, and one subtest sweep that greps
+    README / ROADMAP / every `k2rad` module for four retracted source
+    citations so a correction applied to the code and not the docs fails CI.
+  - `mypy k2rad` and `mypy k2rad --no-site-packages` (mypy 2.3.1, a fresh
+    `MYPY_CACHE_DIR` each) → **"Success: no issues found in 37 source files"**
+    in both. `ruff check .` → **All checks passed**. `k2rad.py --help` → exit 0,
+    **385 lines** (379 before; the six are the corrected `ex_14` sentence).
+  - **Emitted output unchanged: 0 `.rad` movers of 356.** Every key of the
+    campaign's `joblist_or.csv` converted from `F:\dynaexamples_r14_ton-mm-s`
+    on `a6814d6` and again at `44869b5`, one subprocess per deck with
+    `k2rad.__file__` printed by the child and asserted by the parent, SHA256
+    over `_0000.rad` AND `_0001.rad`: **0 movers**, 0 errors and 0 timeouts on
+    either side (352 keys in the main batch, the 4 Yaris include-pullers run
+    separately — 0 movers, 0 errors). Stated separately, the other half:
+    `state.warnings` **68 movers**, `skipped_keywords` **0**,
+    `recognized_not_emitted` **0**. Campaign report section **0.17** records
+    the comparison; no deck was re-converted, `run_queue.py` was never invoked
+    and the runner stayed IDLE.
+  - **Mutations: 6 of 6 CAUGHT**, run on a detached worktree of this
+    round's own commit (`k2rad-wt-vmut`, removed and pruned afterwards) and
+    never in the shared branch worktree, whole suite per mutation, restoring
+    from backup COPIES, matching `FAILED ` and `SUBFAILED`, with
+    `git status --porcelain` asserted empty after every restore. Each mutation
+    REVERTS one fix of this round: the `int` falling through to the derivation,
+    a non-`auto` string doing the same, and four retracted strings coming back.
+
   **Verification record — ROUND 3.** Measured on this branch at **`a6814d6`**,
   the head this entry shipped on. The last CODE commit of the batch was
   **`8d730a3`** (`git diff 8d730a3..a6814d6 -- k2rad tools k2rad_gui.py` is
