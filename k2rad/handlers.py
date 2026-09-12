@@ -4634,6 +4634,45 @@ def handle_constrained_lagrange_in_solid(block: Block, state: ConversionState) -
         ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end))
 
 
+def handle_initial_void(block: Block, state: ConversionState) -> None:
+    """``*INITIAL_VOID_{PART,SET}`` — RECORDED, never converted.
+
+    LS-DYNA empties the named part (or part set) of material at ``t = 0``: the
+    region becomes a void that the ALE advection then fills. Radioss has no
+    such card. Expressing it needs a real void PHASE — a ``/MAT/LAW51``
+    multi-material group with a vacuum submaterial plus an ``/INIVOL``, or a
+    ``/MAT/VOID`` region — which is a mapping, not a cell, and is not
+    implemented.
+
+    A handler exists all the same, because *where* the void sits decides
+    whether the deck is merely missing a card or is producing an invalid
+    answer: a void that is also the ALE fluid group of an emitted
+    ``/INTER/TYPE18`` converts as ORDINARY FLUID, and a Lagrangian body that
+    starts inside it is loaded by the FSI penalty from cycle 0. Without the
+    record ``dispatch`` would file the keyword under ``skipped_keywords``, which
+    carries no warning at all (``handlers.py`` dispatch else-branch), and the
+    only trace in the deck would be a ``#-- SKIPPED:`` comment.
+    ``writer/blast_ale._warn_initial_void_in_fsi`` is what reads this.
+    """
+    # Still listed as SKIPPED, and deliberately so. Registering a handler
+    # normally MOVES a keyword out of `skipped_keywords` and therefore removes
+    # its "#-- SKIPPED: *..." line from the starter file — a byte change on
+    # five corpus decks for a round that converts nothing new. The card really
+    # is unconverted, the comment really is true, and keeping it means this
+    # item adds a warning and not one byte.
+    state.skipped_keywords.append(block.keyword)
+    is_set = block.keyword.endswith("_SET")
+    for i in range(_title_offset(block), len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if not f or not f[0].strip():
+            continue
+        sid = to_int(f[0])
+        if sid > 0:
+            state.initial_void_parts.append((sid, is_set))
+
+
 def handle_initial_volume_fraction_geometry(block: Block, state: ConversionState) -> None:
     """*INITIAL_VOLUME_FRACTION_GEOMETRY → /INIVOL initial ALE fill.
 
@@ -7926,8 +7965,16 @@ def handle_control_implicit_solution(block: Block, state: ConversionState) -> No
     # Card2: dnorm diverg istif nlprint nlnorm d3itctl cpchk
     f2 = _card(raw, 1, fixed=True, n=8, w=10)
     nlprint = to_int(f2[3]) if len(f2) > 3 else 0
+    # Card3: arcctl arcdir arclen arcmth arcdmp arcpsi arcalf arctim — the
+    # arc-length (Riks) block. Verified against ex_06_beam_elform_1.k's own
+    # "$#" header line, which reads exactly that. ARCCTL is the controlled DOF:
+    # any non-zero value turns the arc-length method on even when NSOLVR is not
+    # one of 6/7/8/9 (ex_06 states NSOLVR 12 / ARCCTL 6), so the
+    # --arclength-riks predicate is the OR of the two.
+    f3 = _card(raw, 2, fixed=True, n=8, w=10)
+    arcctl = to_int(f3[0]) if f3 else 0
     state.ctrl_implicit_sol = ControlImplicitSolution(
-        nsolvr, ilimit, maxref, dctol, ectol, nlprint, rctol
+        nsolvr, ilimit, maxref, dctol, ectol, nlprint, rctol, arcctl
     )
 
 
@@ -18175,6 +18222,12 @@ HANDLERS = {
     "INITIAL_VELOCITY_GENERATION":            handle_initial_velocity_generation,
     "INITIAL_DETONATION":                     handle_initial_detonation,
     "INITIAL_VOLUME_FRACTION_GEOMETRY":       handle_initial_volume_fraction_geometry,
+    # RECORDED, not converted — see handle_initial_void. The handler exists so
+    # the writer can say whether the skipped void sits inside an emitted
+    # /INTER/TYPE18 fluid group, which is the difference between a dropped cell
+    # and an invalid FSI answer.
+    "INITIAL_VOID_PART":                      handle_initial_void,
+    "INITIAL_VOID_SET":                       handle_initial_void,
     # Coupled ALE / fluid-structure coupling / boundaries
     "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
     "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,

@@ -446,7 +446,13 @@ class ImplicitEngineTests(unittest.TestCase):
         engine = self._engine_for(IMPL_QSTAT_K)
         # Quasi-static (no *CONTROL_IMPLICIT_DYNAMICS) -> QSTAT with strong anchoring.
         self.assertIn("/IMPL/QSTAT/DTSCAL", engine)
-        self.assertIn(" 0.1", engine)
+        # Round 4: the default moved 0.1 -> 10. imp_dyna.F:351-355 makes the
+        # added diagonal M/((1+alpha)*beta*(DTSCAL*dt)^2), so 0.1 was 100x
+        # Radioss's own SCAL_DTQ = 1 and every auto-step cut stiffened the
+        # tangent further. The assertNotIn keeps the old constant from
+        # creeping back the way a silent default flip would.
+        self.assertIn(" 10", engine)
+        self.assertNotIn(" 0.1" + chr(10), engine)
         self.assertNotIn(" 1000", engine)
         # Robust nonlinear defaults: reform every 2 iters, force, tol 1e-2.
         self.assertIn("/IMPL/NONLIN/1", engine)
@@ -3965,7 +3971,7 @@ class DeformableContactRecipeTests(unittest.TestCase):
                         f"no recommendation warning in {result.warnings}")
         self.assertEqual(self._inter_inacti(starter, 9), "0")     # Inacti untouched
         self.assertEqual(self._impl_dt2_l_dtn(engine), "0")       # engine default cap
-        self.assertEqual(self._qstat_dtscal(engine), "0.1")       # default stabilization
+        self.assertEqual(self._qstat_dtscal(engine), "10")        # default stabilization
 
     def test_recipe_applies_inacti_ldtn_qstat(self):
         result, starter, engine = self._convert(DEFDEF_K, deformable_contact_recipe=True)

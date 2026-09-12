@@ -92,6 +92,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          auto_gapmin: bool = False,
                          gapmin_factor_text: str = "",
                          fixpoint_count_text: str = "",
+                         qstat_dtscal_text: str = "",
+                         arclength_riks: bool = False,
+                         discrete_offset: bool = True,
+                         spring_token_mass_compensation: bool = True,
+                         tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
@@ -178,6 +183,31 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             except ValueError:
                 raise ValueError(
                     f"Tie STFAC must be a number or 'auto', got {ts!r}.")
+
+    qd = (qstat_dtscal_text or "").strip()
+    if qd:                                        # blank -> convert() default (10)
+        if qd.lower() == "none":
+            kwargs["qstat_dtscal"] = "none"
+        else:
+            try:
+                qd_v = float(qd)
+            except ValueError:
+                raise ValueError(
+                    f"/IMPL/QSTAT/DTSCAL must be a number or 'none', got {qd!r}.")
+            if qd_v <= 0.0:
+                raise ValueError(
+                    "/IMPL/QSTAT/DTSCAL must be > 0 (use 'none' to emit no "
+                    f"/IMPL/QSTAT card), got {qd!r}.")
+            kwargs["qstat_dtscal"] = qd_v
+
+    kwargs["arclength_riks"] = bool(arclength_riks)
+
+    kwargs["discrete_offset"] = bool(discrete_offset)
+
+    kwargs["spring_token_mass_compensation"] = bool(
+        spring_token_mass_compensation)
+
+    kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
 
@@ -282,6 +312,11 @@ class ConverterGUI:
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="0")
+        self.qstat_dtscal = tk.StringVar(value="")
+        self.arclength_riks = tk.BooleanVar(value=False)
+        self.discrete_offset = tk.BooleanVar(value=True)
+        self.spring_token_mass_comp = tk.BooleanVar(value=True)
+        self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
@@ -349,6 +384,57 @@ class ConverterGUI:
                            "their termination; the price of 0 is fewer output states. "
                            "Implicit decks only)",
                   foreground="gray").pack(side="left")
+
+        qd = ttk.Frame(io)
+        qd.grid(row=20, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(qd, text="/IMPL/QSTAT/DTSCAL:").pack(side="left")
+        ttk.Entry(qd, textvariable=self.qstat_dtscal, width=8).pack(side="left", padx=3)
+        ttk.Label(qd, text="inertia stabilization on a quasi-static implicit deck "
+                           "(blank = 10, the default since 2026-09). The added "
+                           "stiffness is M/((1+a)*b*(DTSCAL*dt)^2), so it grows as "
+                           "1/DTSCAL^2: 0.1 was the OLD default and 100x Radioss's "
+                           "own SCAL_DTQ=1. Measured at nt 3 and nt 4: "
+                           "4.2.frf.cant-1 goes 4 cycles+ERROR -> 104 cycles, "
+                           "t=1.000, IE -0.31 %; the cost is the "
+                           "ex_02_thick_shell family (3 keys, one file) going "
+                           "normal -> timeout. 'none' emits no card (measured "
+                           "worse). The deformable-contact recipe keeps 0.05.",
+                  foreground="gray", wraplength=620, justify="left").pack(side="left")
+
+        ttk.Checkbutton(
+            io, text="Arc-length (RIKS) /IMPL/DT/3 when *CONTROL_IMPLICIT_SOLUTION asks "
+                     "for it (NSOLVR 6-9 or ARCCTL != 0) — OFF by default; the request "
+                     "is warned about either way. It buys the load path, not the "
+                     "answer: ex_07 reaches t=1.000 at -1.72 % but still ERRORs on the "
+                     "last increment, ex_06's NORMAL is IE -99.8 % and flips with the "
+                     "thread count, and ex_05 turns a 1.5 s error into a 600 s timeout",
+            variable=self.arclength_riks).grid(
+                row=21, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Honour *ELEMENT_DISCRETE OFFSET (shift the force law's abscissae "
+                     "by -OFFSET + /INISPRI/FULL pre-stretch energy) — ON. With the "
+                     "token-mass compensation below, ex_17/ex_18 go from strict ZERO "
+                     "models to IE +0.007 % / +0.006 % against their LS-DYNA glstat",
+            variable=self.discrete_offset).grid(
+                row=22, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Subtract k2rad's artificial spring mass (1e-4 per /PROP/TYPE4, "
+                     "half on each end node per element) from those nodes' /ADMAS — ON. "
+                     "Inert on its own; it is what makes the OFFSET fix exact. Never "
+                     "writes a non-positive /ADMAS",
+            variable=self.spring_token_mass_comp).grid(
+                row=23, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_THERMAL_* TGMULT -> /IMPTEMP (the adiabatic closed form "
+                     "T = T0 + TGMULT*f(t)/(rho*Cp)) — ON, and only on a deck with NO "
+                     "other temperature driver. Measured on thermal-stress: node 2's "
+                     "free expansion goes from exactly 0.0 to 1.49531e-04 mm against "
+                     "the LS-DYNA nodout's 1.49216e-04 (+0.21 %)",
+            variable=self.tgmult_imptemp).grid(
+                row=24, column=0, columnspan=3, sticky="w", **pad)
 
         bg = ttk.Frame(io)
         bg.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
@@ -684,6 +770,11 @@ class ConverterGUI:
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
                 fixpoint_count_text=self.fixpoint_count.get(),
+                qstat_dtscal_text=self.qstat_dtscal.get(),
+                arclength_riks=self.arclength_riks.get(),
+                discrete_offset=self.discrete_offset.get(),
+                spring_token_mass_compensation=self.spring_token_mass_comp.get(),
+                tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
@@ -791,6 +882,21 @@ class ConverterGUI:
             _ts = kwargs["tie_stfac"]
             bits.append("tie STFAC=" + (_ts if isinstance(_ts, str)
                                         else f"{_ts:g}"))
+        if "qstat_dtscal" in kwargs:
+            _qd = kwargs["qstat_dtscal"]
+            bits.append("/IMPL/QSTAT/DTSCAL=" + (_qd if isinstance(_qd, str)
+                                                 else f"{_qd:g}"))
+        if kwargs.get("arclength_riks"):
+            bits.append("arc-length /IMPL/DT/3 (--arclength-riks)")
+        if not kwargs.get("discrete_offset", True):
+            bits.append("*ELEMENT_DISCRETE OFFSET dropped "
+                        "(--no-discrete-offset)")
+        if not kwargs.get("spring_token_mass_compensation", True):
+            bits.append("spring token mass left on the nodes "
+                        "(--no-spring-token-mass-compensation)")
+        if not kwargs.get("tgmult_imptemp", True):
+            bits.append("*MAT_THERMAL_* TGMULT dropped "
+                        "(--no-tgmult-imptemp)")
         if kwargs.get("deformable_contact_recipe"):
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":

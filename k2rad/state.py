@@ -6010,6 +6010,12 @@ class ControlImplicitSolution:
     ectol: float        # energy convergence
     nlprint: int        # nonlinear print flag
     rctol: float = 0.0  # residual/force convergence (LS-DYNA rctol; 1e10 = off)
+    arcctl: int = 0     # card-3 field 1: the arc-length CONTROLLED DOF (a node
+    #                   # id). Any non-zero value selects LS-DYNA's arc-length
+    #                   # (Riks) continuation just as NSOLVR 6-9 does, and it
+    #                   # is the ONLY way ex_06_beam_elform_1 asks for it (its
+    #                   # NSOLVR is 12). Read for the --arclength-riks
+    #                   # predicate; the node id itself has no /IMPL/DT/3 cell.
 
 
 @dataclass
@@ -6975,6 +6981,37 @@ class InitialTemperature:
 
 
 @dataclass
+class TgmultGeneration:
+    """A ``*MAT_THERMAL_*`` ``TGMULT`` that IS expressible as an ``/IMPTEMP``.
+
+    LS-DYNA's ``TGMULT`` is a volumetric heat-generation multiplier (with
+    ``TGRLC`` its optional curve) and ``/HEAT/MAT`` has no such slot. On a deck
+    whose ONLY temperature driver is that generation, however, the nodal heat
+    balance has exactly one term and the solution is closed-form and uniform —
+    ``T(t) = T0 + TGMULT*f(t)/(rho*Cp)`` — which IS expressible, as an
+    ``/IMPTEMP`` over the parts' own nodes.
+
+    Filled by ``writer/thermal._resolve_thermal_materials`` only when the gate
+    holds (see ``ConvertOptions.tgmult_imptemp``); consumed by
+    ``writer/thermal._make_thermal``. ``rate = TGMULT/(rho*Cp)`` is the
+    temperature RATE the closed form runs at, in the deck's own units.
+    """
+    tmid: int
+    mid: int                 # the /HEAT/MAT this generation belongs to
+    pids: List[int]          # the *PARTs whose TMID names it
+    tgmult: float
+    tgrlc: int               # 0 = the constant-1 form
+    rho_cp: float
+    t0: float
+    rate: float
+    #: The synthesized /FUNCT holding T(t). MINTED AT RESOLVE TIME (into
+    #: state.curves + state.curve_order) because the single /FUNCT emitter,
+    #: materials._make_functions, runs at the "functions" section — far before
+    #: the "thermal" one that writes the /IMPTEMP.
+    func_id: int = 0
+
+
+@dataclass
 class ImposedTemperature:
     """A converted temperature DRIVER → /IMPTEMP.
 
@@ -7058,6 +7095,153 @@ class ConvertOptions:
     # "auto" = 100 * 3(1-2nu) from the main side's Poisson ratio (120 at
     # nu = 0.3), falling back to 30 when nu is unavailable.
     tie_stfac: Optional[Union[str, float]] = None
+    # --qstat-dtscal VALUE|none: the /IMPL/QSTAT/DTSCAL inertia-stabilization
+    # scale written on a QUASI-STATIC implicit deck (one with no
+    # *CONTROL_IMPLICIT_DYNAMICS). "none" emits no /IMPL/QSTAT card at all.
+    #
+    # The stabilization added to the stiffness diagonal is
+    # M/((1+alpha)*beta*(DTSCAL*dt)^2) -- imp_dyna.F:351 builds
+    # S = (1+D_AL)*DY_B*DT2*DT2 and :353 multiplies it by SCAL_DTQ^2 before
+    # :355 takes BDT = 1/S -- so it grows as 1/DTSCAL^2 AND as 1/dt^2. At
+    # k2rad's old 0.1 it was 100x the Radioss default (SCAL_DTQ = 1,
+    # freimpl.F:135), and every auto-step cut made the tangent stiffer still,
+    # shrinking the next Newton correction instead of letting the step recover.
+    # LS-DYNA's standard static implicit adds none at all (its own d3hsp:
+    # "artificial stabilization flag 2 = off ('standard' analysis DEFAULT)",
+    # 4.2.frf.cant-1.d3hsp:1265-1296).
+    #
+    # DEFAULT 10 -- changed from 0.1 on 2026-09. MEASURED at nt 3 AND nt 4 on
+    # the R14 roster (51 carrier keys on 40 emitted models, every one of them
+    # a not_comparable row, so this moves openradioss.status and nothing else):
+    # 4.2.frf.cant-1 goes from 4 cycles + ERROR to 104 cycles, t = 1.000,
+    # IE 7922 against its LS-DYNA reference's 7946.31 (-0.31 %); tensile2 from
+    # 179 cycles + ERROR at t = 0.78 to 685 cycles NORMAL at +7.36 %;
+    # 6.5.tbl.psd.prepressure-1 from 3 cycles + ERROR to 610 cycles NORMAL at
+    # +0.03 %; doorbeam from ERROR to NORMAL (its +380 % is a SEPARATE drop --
+    # its own _0001.out says "INTERFACE TYPE 25 IS NOT AVAILABLE WITH IMPLICIT
+    # SOLUTION; IT WILL BE IGNORED" -- not a match, and that figure has to be
+    # re-measured if TYPE25 is ever touched).
+    #
+    # The COST, named: ex_02_thick_shell_elform_{2,3,5} (3 deck keys on ONE
+    # emitted file, all three not_comparable) go normal -> timeout -- 1908
+    # cycles / 10 s NORMAL at 0.1 against 101172 cycles at t = 0.5955 still
+    # running at the 600 s campaign cap, at both nt. Pass 0.1 to restore the
+    # old default on such a deck.
+    #
+    # "none" was MEASURED and is WORSE than either: it is the Radioss default
+    # SCAL_DTQ = 1, and on these decks the default does not converge --
+    # ex_02 dies at cycle 0 ("ERROR, TIMESTEP LIMIT", 0.2 s) and tensile2 at
+    # t = 0.746, while 4.2.frf's cycle count becomes nt-dependent (98 at nt 3,
+    # 107 at nt 4, where 10 gives 104 at both). It is kept as an escape, not
+    # as a recommendation.
+    #
+    # --deformable-contact-recipe keeps its separately validated 0.05 and
+    # IGNORES this field (the recipe branch is evaluated first).
+    qstat_dtscal: Union[str, float] = 10.0
+    # --arclength-riks: emit /IMPL/DT/3 (RIKS arc-length continuation) instead
+    # of /IMPL/DT/2 when *CONTROL_IMPLICIT_SOLUTION asks for LS-DYNA's
+    # arc-length method (card-1 NSOLVR in {6,7,8,9}, or card-3 ARCCTL != 0).
+    #
+    # OPT-IN, default OFF. The predicate itself is always evaluated and always
+    # WARNS -- the three R14 carriers are told what LS-DYNA asked for and which
+    # flag supplies it -- but the card only ships behind the flag, because the
+    # repeat at a second nt REFUTED it as a default:
+    #   * ex_05_beam_elform_3_&_6 (NSOLVR 6) is a measured REGRESSION:
+    #     error_engine in 1.5 s becomes a 600 s TIMEOUT at t = 5.08e-11 after
+    #     111734 cycles (nt 4). No card field separates it from ex_07 -- both
+    #     are NSOLVR 6 / ARCCTL 0 -- so a narrower predicate is not available.
+    #   * ex_06_beam_elform_1 (ARCCTL 6) reaches NORMAL t = 1.000 at IE -99.8 %
+    #     (a NORMAL that is not a result), and COMBINED with the shipped
+    #     /IMPL/QSTAT/DTSCAL 10 it reads -0.08 % at nt 4 and ERROR at t = 0 at
+    #     nt 3 -- an nt-flip, never quotable as a figure (MISTAKES k2rad #137).
+    #   * ex_07_beam_elform_1 (NSOLVR 6) is the one nt-stable arm: with
+    #     DTSCAL 10 it walks from t = 3e-8 to t = 1.000 and lands at -1.72 % of
+    #     its LS reference, identical at nt 3 and nt 4 -- but still exits ERROR
+    #     on the last increment (its own RCTOL = 1e-5).
+    # It buys the load path, not the answer. Net movers: zero.
+    arclength_riks: bool = False
+    # --no-discrete-offset: stop honouring *ELEMENT_DISCRETE's OFFSET cell.
+    #
+    # ON by default. Vol I R17 p.19-33: OFFSET is "a displacement or rotation
+    # at time zero. For example, a positive offset on a translational spring
+    # will lead to a tensile force being developed at time zero." Radioss's
+    # spring deflection is purely geometric (r1def3.F:206 DL = ALDP - AL0DP)
+    # and /PROP/TYPE4 has no offset cell at all (hm_read_prop04.F:102-132), so
+    # with delta_LS = delta_RAD + OFFSET the exact restatement is
+    # f_RAD(d) = f_LS(d + OFFSET): the force function's ABSCISSAE are shifted
+    # by -OFFSET, ordinates untouched, plus an /INISPRI/FULL carrying the
+    # pre-stretch energy EI = 1/2 * f_LS(OFFSET) * OFFSET as the deck's own
+    # datum (hm_read_inistate_d00.F:4598-4606 -> rinit3.F:2029-2036 EINT).
+    #
+    # It only ever fires with the token-mass compensation below: on
+    # ex_17_spring_elform_0 the shift ALONE reads IE +10.20 % / KE -99.27 %
+    # against the LS-DYNA glstat, and the two together read +0.0074 % /
+    # +0.039 % (ex_18, the nonlinear twin, +0.0064 % / -0.015 %). The shipped
+    # arm before this was a strict ZERO model on both decks (IE and KE
+    # identically 0.000 at every state, -100 %).
+    #
+    # Reach: 2 deck keys on 2 emitted models on the whole 885-deck two-half
+    # roster (ex_17 and ex_18, both OFFSET 25.4). Everything else states
+    # OFFSET 0 and is byte-identical.
+    discrete_offset: bool = True
+    # --no-spring-token-mass-compensation: stop subtracting k2rad's own
+    # artificial spring mass from the nodes it lands on.
+    #
+    # ON by default. LS-DYNA discrete elements are MASSLESS (nodal mass comes
+    # from *ELEMENT_MASS), but hm_read_prop04.F:136-142 refuses a /PROP/TYPE4
+    # MASS <= 1e-15 outright (ERROR 229), so k2rad writes a token
+    # _SPRING_TOKEN_MASS = 1e-4 and rinit3.F:1926 (EMS = HALF*UMASS) with
+    # :1937-1939 (MSR(1..3) = EMS) puts HALF of it on EACH end node, PER
+    # ELEMENT. A node touched by k springs therefore carries k*MASS/2 of
+    # invented mass. This subtracts exactly that from the node's /ADMAS, per
+    # node, splitting one /ADMAS group into several when its members carry
+    # different spring counts.
+    #
+    # MEASURED ALONE it is INERT on every carrier where it can be measured:
+    # spring.k, spring1.k and gnonspring.k keep their cycle counts (352 / 431 /
+    # 786) and their IE to four significant digits, and on ex_17 it changes
+    # nothing at all (a zero model stays a zero model). It is load-bearing
+    # only INSIDE the OFFSET bundle above, where it turns +10.20 % / -99.27 %
+    # into +0.0074 % / +0.039 % -- the uncompensated token shifts ex_17's omega
+    # by sqrt(1 + m_token/(2*m_node)) = 41.715 rad/s against LS-DYNA's 43.954,
+    # a 5.4 % frequency error.
+    #
+    # It NEVER writes a non-positive /ADMAS: where the node's own mass is at or
+    # below the token share the value is left alone and the numbers are named
+    # (gnonspring.k's /ADMAS is 1e-6 against a token half of 5e-5, 50x), and
+    # where there is no /ADMAS at all (mat_spring.belted-dummy.k: 122 springs,
+    # zero /ADMAS) it can only warn.
+    spring_token_mass_compensation: bool = True
+    # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
+    # *MAT_THERMAL_* TGMULT.
+    #
+    # ON by default. TGMULT is LS-DYNA's volumetric heat-generation multiplier
+    # (with TGRLC its optional curve); /HEAT/MAT has no such slot, so it used
+    # to be dropped outright. On a deck whose ONLY temperature driver is that
+    # generation the adiabatic uniform-generation solution is closed-form,
+    # T(t) = T0 + TGMULT*f(t)/(rho*Cp), and it is expressible as an /IMPTEMP
+    # over the parts' own nodes (hm_read_imptemp.F:121-133).
+    #
+    # MEASURED on thermal/thermal-stress (TGMULT 10, TGRLC 0, RHO0_CP 1, so
+    # T = 10 + 10t): the free-expansion displacement of node 2 goes from
+    # exactly 0.0 -- all 500 T01 states, all 12 DX/DY/DZ channels -- to
+    # 1.49531e-04 mm against the LS-DYNA nodout's 1.49216e-04 at t = 2.99,
+    # +0.21 %, at 406580 cycles and 0 ERROR / 0 WARNING. IE and KE are NOT the
+    # observable here: the LS reference energies are structural zeros and the
+    # campaign row is and stays not_comparable.
+    #
+    # The REFUSAL is the half that matters. /IMPTEMP is a HARD Dirichlet reset
+    # applied to every node in its group on every cycle (fixtemp.F:180-199), so
+    # on a deck that also carries a real thermal boundary condition it would
+    # OVERWRITE the conduction solution instead of adding to it. It is
+    # therefore dropped, with the drivers named, whenever the deck states a
+    # *BOUNDARY_{TEMPERATURE,CONVECTION,FLUX,RADIATION}* or a *LOAD_THERMAL_* /
+    # *LOAD_HEAT_*. *INITIAL_TEMPERATURE is NOT in that set -- it is the T0 of
+    # the closed form, a required companion, not a blocker.
+    #
+    # Reach: 1 deck key on 1 emitted model on the whole 885-deck roster. The
+    # other 17 *MAT_THERMAL_* decks state TGMULT 0 and are byte-identical.
+    tgmult_imptemp: bool = True
     # Auto-Gapmin: derive each surface-to-surface interface's Gapmin from the
     # minimum node-to-node clearance between its two parts (Gapmin =
     # gapmin_factor × clearance), instead of hand-tuning Card-3 SST/SBST per
@@ -7994,6 +8178,10 @@ class ConversionState:
     # card is inert at 0 starter errors and 0 warnings.
     initial_temperatures: List[InitialTemperature] = field(default_factory=list)
     imposed_temperatures: List[ImposedTemperature] = field(default_factory=list)
+    # *MAT_THERMAL_* TGMULT records that passed the "no other temperature
+    # driver" gate and become a synthesized /IMPTEMP. See TgmultGeneration and
+    # ConvertOptions.tgmult_imptemp.
+    tgmult_generations: List[TgmultGeneration] = field(default_factory=list)
     # Writer-resolved (writer/thermal.py::_resolve_thermal), filled ONCE per mid
     # — the #125 "emit shared cards once per ID, not once per consumer" rule.
     #   heat_mat_cards   : mid → (T0, RHO0_CP, AS, BS, T1, AL, BL, EFRAC)
@@ -8131,6 +8319,28 @@ class ConversionState:
     # *CONSTRAINED_SPOTWELD ties, joints) are deliberately NOT in here: their
     # ids are invented by the converter and match no LS-DYNA deforc/disbout row.
     discrete_spring_eids: Set[int] = field(default_factory=set)
+    # node id -> the ARTIFICIAL mass k2rad's own discrete-spring properties put
+    # on that node, in the deck's mass unit. Filled at the line that writes each
+    # /SPRING row (writer/loads._emit_spring_part), because that is the only
+    # place that knows which elements really reached the deck.
+    #
+    # LS-DYNA discrete elements are MASSLESS; hm_read_prop04.F:136-142 refuses a
+    # /PROP/TYPE4 MASS <= 1e-15 (ERROR 229), so k2rad writes a token
+    # _SPRING_TOKEN_MASS and rinit3.F:1926 (EMS = HALF*UMASS) with :1937-1939
+    # (MSR(1..3,I) = EMS(I)) puts HALF of it on EACH end node, PER ELEMENT.
+    # _make_added_masses subtracts these values from the nodes' /ADMAS (option
+    # spring_token_mass_compensation) and names every node it could not.
+    spring_token_mass_by_node: Dict[int, float] = field(default_factory=dict)
+    # *SECTION_SOLID secids already named by _warn_assumed_strain_elform, so a
+    # section reached from two writer passes warns once (the #129 dedup rule:
+    # one message per distinct SOURCE CARD, not per part or per element).
+    warned_assumed_strain_secids: Set[int] = field(default_factory=set)
+    # *INITIAL_VOID_{PART,SET} records the deck states. No handler CONVERTS
+    # them (there is no Radioss void phase k2rad can write), but the ids are
+    # kept so _warn_initial_void_in_fsi can say when a skipped void sits inside
+    # an emitted /INTER/TYPE18 fluid group — the difference between "a cell was
+    # dropped" and "the FSI result on this deck is not valid".
+    initial_void_parts: List[Tuple[int, bool]] = field(default_factory=list)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the

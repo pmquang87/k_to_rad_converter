@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from ..state import ConversionState
 from .beams import _resolve_integration_beams
 from .common import HDR, _ams_is_emitted, _f, _i
@@ -533,6 +533,131 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     return lines
 
 
+#: The LS-DYNA *CONTROL_IMPLICIT_SOLUTION card-1 NSOLVR values that select the
+#: arc-length (Riks) continuation. Card-3 ARCCTL != 0 selects it too, and is
+#: the ONLY way ex_06_beam_elform_1 (NSOLVR 12 / ARCCTL 6) asks for it — so the
+#: predicate below is the OR, never the NSOLVR test alone.
+_ARCLENGTH_NSOLVR = frozenset({6, 7, 8, 9})
+
+
+def _arclength_requested(state: ConversionState) -> bool:
+    """Does this deck ask LS-DYNA for arc-length (Riks) continuation?"""
+    sol = state.ctrl_implicit_sol
+    if sol is None:
+        return False
+    return sol.nsolvr in _ARCLENGTH_NSOLVR or sol.arcctl != 0
+
+
+def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
+    """The ``/IMPL/QSTAT/DTSCAL`` data cell, or None to emit no card.
+
+    ``options.qstat_dtscal`` is a positive number or the literal ``"none"``
+    (``--qstat-dtscal none``). Numbers are printed with ``%g`` so the default
+    10.0 writes ``10`` and 0.1 writes ``0.1`` — the same text the pre-round-4
+    constant produced, so ``--qstat-dtscal 0.1`` restores the old line byte for
+    byte.
+    """
+    v = state.options.qstat_dtscal
+    if isinstance(v, str):
+        if v.strip().lower() == "none":
+            return None
+        try:
+            v = float(v)
+        except ValueError:
+            return "10"
+    return f"{float(v):g}"
+
+
+def _warn_arclength(state: ConversionState) -> None:
+    """Name LS-DYNA's arc-length request, and what ``--arclength-riks`` buys.
+
+    Fires on EVERY carrier, flag or no flag: the deck asked for a continuation
+    method k2rad does not write by default, and silence is what used to leave
+    ``ControlImplicitSolution.nsolvr`` "PARSED AND UNUSED" with nothing in the
+    log. What the flag emits is named, and so is the measurement that keeps it
+    opt-in.
+    """
+    sol = state.ctrl_implicit_sol
+    if sol is None:
+        return
+    asks = []
+    if sol.nsolvr in _ARCLENGTH_NSOLVR:
+        asks.append(f"card-1 NSOLVR={sol.nsolvr}")
+    if sol.arcctl != 0:
+        asks.append(f"card-3 ARCCTL={sol.arcctl}")
+    head = (f"*CONTROL_IMPLICIT_SOLUTION {' and '.join(asks)} requests "
+            "LS-DYNA's ARC-LENGTH (Riks) continuation. Its Radioss counterpart "
+            "is /IMPL/DT/3 (freimpl.F:384-387 reads SEVEN fields "
+            "NL_DTP/ALEN0/NL_DTN/Tsca_dn/Tsca_up/IAL_M/SCAL_RIKS; the zero "
+            "cells take lectur.F:3518-3522's defaults NL_DTP 12 / NL_DTN 25 / "
+            "Tsca_dn 2-3 / Tsca_up 1.2 / IAL_M 2). ")
+    measured = (
+        "It BUYS THE LOAD PATH, NOT THE ANSWER - measured at nt 3 AND nt 4 on "
+        "this corpus's three carriers, all three of which are error_engine "
+        "either way: ex_07_beam_elform_1 walks from t = 3e-8 to t = 1.000 and "
+        "lands at -1.72 % of its LS-DYNA reference (identical at both nt) but "
+        "still exits ERROR on the last increment; ex_06_beam_elform_1 reaches "
+        "NORMAL at IE -99.8 % (a NORMAL that is not a result), and combined "
+        "with the shipped /IMPL/QSTAT/DTSCAL 10 it reads -0.08 % at nt 4 and "
+        "ERROR at t = 0 at nt 3, an nt-flip that is not quotable as a figure; "
+        "ex_05_beam_elform_3_&_6 runs 111734 cycles to t = 5e-11 and TIMES OUT "
+        "where it used to fail in 1.5 s. /IMPL/DT/FIXPOINT is DEACTIVATED by "
+        "the engine under RIKS (lectur.F:3523-3532), so --fixpoint-count is "
+        "silently disarmed with it.")
+    if state.options.arclength_riks:
+        state.warn(head + "--arclength-riks was passed, so /IMPL/DT/3 is "
+                          "emitted in place of /IMPL/DT/2. " + measured)
+    else:
+        state.warn(head + "It is NOT emitted: k2rad writes /IMPL/DT/2 and the "
+                          "arc-length request is DROPPED. Pass "
+                          "--arclength-riks to emit it. " + measured)
+
+
+def _warn_implicit_auto_drops(state: ConversionState) -> None:
+    """``*CONTROL_IMPLICIT_AUTO``: the cells that reach no ``/IMPL`` card.
+
+    ``handle_control_implicit_auto`` parses IAUTO, ITEOPT, ITEWIN, DTMIN,
+    DTMAX and KFAIL; the writer reads ITEOPT (into ``/IMPL/DT/2`` It_w) and
+    DTMIN/DTMAX (into ``/IMPL/DT/STOP``) and NOTHING else. Three of the six are
+    therefore parsed-and-unused, and a NEGATIVE DTMAX — LS-DYNA's "this is a
+    load-curve id, not a value" idiom — is dropped outright, leaving the
+    implicit step unbounded (``lectur.F:3546`` turns a zero DT_MAX into EP10).
+
+    One warning per deck (the card is a singleton), and only the cells this
+    deck actually states are named.
+    """
+    auto = state.ctrl_implicit_auto
+    if auto is None:
+        return
+    gloss = {"IAUTO": "the auto-step on/off switch",
+             "ITEWIN": "the iteration window",
+             "KFAIL": "the number of failed steps before an abort"}
+    unused = [(n, v) for n, v in (("IAUTO", auto.iauto),
+                                  ("ITEWIN", auto.itewin),
+                                  ("KFAIL", auto.kfail)) if v]
+    neg_dtmax = auto.dtmax < 0.0
+    if not unused and not neg_dtmax:
+        return
+    msg = "*CONTROL_IMPLICIT_AUTO: "
+    if unused:
+        msg += (", ".join(f"{n}={v} ({gloss[n]})" for n, v in unused) + " "
+                + ("is" if len(unused) == 1 else "are")
+                + " parsed and NOT used - k2rad always writes /IMPL/DT/2 with "
+                  "It_w taken from ITEOPT alone. ")
+    if neg_dtmax:
+        msg += (f"DTMAX={auto.dtmax:g} is NEGATIVE, i.e. LS-DYNA's idiom for "
+                "'-DTMAX is a LOAD CURVE id giving the maximum step as a "
+                "function of time' (Vol I R17 *CONTROL_IMPLICIT_AUTO). "
+                "/IMPL/DT/STOP takes a CONSTANT maximum, so the curve is "
+                "DROPPED and the step is left UNBOUNDED: lectur.F:3546 turns "
+                "a zero DT_MAX into EP10. LS-DYNA's own default for DTMAX = 0 "
+                "is 'max. allowed step size is 10*initial step size', which "
+                "k2rad does not write either. MEASURED on "
+                "ex_27_solid_elform_2_rigidwall_penalty_implicit: setting "
+                "DT_MAX to that deck's own DT0 changed nothing.")
+    state.warn(msg.rstrip())
+
+
 def _make_engine_implicit(state: ConversionState) -> List[str]:
     if state.is_modal:
         # Normal-modes (/EIG) → one-shot linear eigensolve, not the QSTAT/NONLIN
@@ -540,6 +665,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         return _make_engine_modal(state)
     if not state.is_implicit:
         return []
+    if _arclength_requested(state):
+        _warn_arclength(state)
+    _warn_implicit_auto_drops(state)
     gen  = state.ctrl_implicit_gen
     dyn  = state.ctrl_implicit_dyn
     auto = state.ctrl_implicit_auto
@@ -617,21 +745,36 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         beta  = dyn.beta  if dyn.beta  > 0 else 0.25
         lines += ["/IMPL/DYNA/2", f" {gamma:.6G}  {beta:.6G}"]
     else:
-        # /IMPL/QSTAT/DTSCAL: inertia-stabilization scale; stabilization grows as
-        # 1/DTSCAL^2 (Reference Guide p.2973). 0.1 (=> x100 stiffness) anchors free
-        # rigid bodies connected only by contact. For nonlinear analysis it only
-        # affects convergence speed, not the result, so a strong (small) value is
-        # safe. (The SEAT example's 1000 is too weak for free-body-via-contact:
-        # the body sloshed in its rigid mode and the solve never converged.)
+        # /IMPL/QSTAT/DTSCAL: the inertia-stabilization scale. imp_dyna.F:351
+        # builds S = (1+D_AL)*DY_B*DT2*DT2, :353 multiplies it by SCAL_DTQ^2
+        # and :355 takes BDT = 1/S, so the stabilization added to the stiffness
+        # diagonal is M/((1+alpha)*beta*(DTSCAL*dt)^2) — it grows as 1/DTSCAL^2
+        # AND as 1/dt^2. Radioss's own default is SCAL_DTQ = 1
+        # (freimpl.F:135), and imp_dyna.F:1148 returns immediately at that
+        # value; k2rad shipped 0.1 (= 100x the default) until 2026-09, which
+        # made every auto-step cut stiffen the tangent further and shrink the
+        # next Newton correction instead of letting the step recover.
         #
-        # The deformable-deformable contact recipe tightens this to 0.05 (=> x400):
-        # a compliant contact under force control adds a soft mode that 0.1 leaves
-        # a step-overshoot 2-cycle on, while 0.01 over-damps and freezes the solve;
-        # 0.05 anchors it without over-stiffening the tangent. Physics-neutral for
-        # nonlinear analysis (the stabilization vanishes at equilibrium). See
+        # The value now comes from options.qstat_dtscal (default 10, CLI
+        # --qstat-dtscal), and "none" emits no /IMPL/QSTAT card at all. See
+        # state.ConvertOptions.qstat_dtscal for the measured arms: 4.2.frf,
+        # tensile2, 6.5.tbl.psd and doorbeam move error_engine -> normal, at
+        # the cost of the ex_02_thick_shell_elform_{2,3,5} family (3 keys on
+        # one emitted file) going normal -> timeout.
+        #
+        # The deformable-deformable contact recipe keeps 0.05 (=> x400) and
+        # IGNORES the option: a compliant contact under force control adds a
+        # soft mode that 0.1 leaves a step-overshoot 2-cycle on, while 0.01
+        # over-damps and freezes the solve; 0.05 anchors it without
+        # over-stiffening the tangent. Separately validated, opt-in, and it is
+        # evaluated FIRST so --qstat-dtscal cannot override it. See
         # _warn_deformable_deformable_contact.
-        dtscal = "0.05" if _recipe_active(state) else "0.1"
-        lines += ["/IMPL/QSTAT/DTSCAL", f" {dtscal}"]
+        if _recipe_active(state):
+            lines += ["/IMPL/QSTAT/DTSCAL", " 0.05"]
+        else:
+            dtscal = _qstat_dtscal_cell(state)
+            if dtscal is not None:
+                lines += ["/IMPL/QSTAT/DTSCAL", f" {dtscal}"]
 
     # /IMPL/SOLVER format (Reference Guide p.2976-2978):
     #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
@@ -672,7 +815,21 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     #   Tsca_up = scale for increasing (0 = 1.1)
     it_w = iteopt if iteopt > 0 else 8
     l_dtn = 50 if _recipe_active(state) else 0
-    lines += ["/IMPL/DT/2", f"{_i(it_w)}{_i(0)}{_i(l_dtn)}{_i(0)}{_i(0)}"]
+    if _arclength_requested(state) and state.options.arclength_riks:
+        # /IMPL/DT/3 — RIKS arc-length continuation, LS-DYNA's NSOLVR 6-9 /
+        # ARCCTL. freimpl.F:377 stores IDTC = IM and :384-387 READs SEVEN
+        # list-directed fields from ONE record:
+        #     NL_DTP ALEN0 NL_DTN SCAL_DTN SCAL_DTP IAL_M SCAL_RIKS
+        # /IMPL/DT/2's data line is only FIVE, so a five-field line would run
+        # the READ off the end of the record. The four zeros and the two extra
+        # cells take lectur.F:3518-3522's own defaults (NL_DTP 12, NL_DTN 25,
+        # SCAL_DTN 2/3, SCAL_DTP 1.2, IAL_M 2) — which is exactly what the
+        # measurement used. It_w (from *CONTROL_IMPLICIT_AUTO ITEOPT) and the
+        # recipe's L_dtn keep their slots.
+        lines += ["/IMPL/DT/3",
+                  f"{_i(it_w)}{_i(0)}{_i(l_dtn)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}"]
+    else:
+        lines += ["/IMPL/DT/2", f"{_i(it_w)}{_i(0)}{_i(l_dtn)}{_i(0)}{_i(0)}"]
 
     # /IMPL/DT/FIXPOINT — force the implicit time-step controller to land EXACTLY
     # on evenly spaced times (k/N × the run end, for k = 1 … N) so a clean
@@ -700,6 +857,19 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # See state.ConvertOptions.fixpoint_count for the numbers and for the eight
     # other arms that do NOT fix ex_14.
     n_fix = min(max(int(state.options.fixpoint_count), 0), 100)
+    if n_fix > 0 and _arclength_requested(state) and state.options.arclength_riks:
+        # Not a k2rad choice: lectur.F:3523-3532 prints "** WARNING :RIKS
+        # METHOD IS NOT COMPATIBLE WITH FIXED TIME POINT" and sets NDTFIX = 0
+        # itself, so the card would be read and then thrown away. Dropping it
+        # here says so in the log instead of leaving the reader to find the
+        # engine's own line.
+        n_fix = 0
+        state.warn(
+            "--fixpoint-count is DISARMED on this deck: --arclength-riks "
+            "emitted /IMPL/DT/3, and lectur.F:3523-3532 deactivates "
+            "/IMPL/DT/FIXPOINT under RIKS (it prints '** WARNING :RIKS METHOD "
+            "IS NOT COMPATIBLE WITH FIXED TIME POINT' and sets NDTFIX = 0). No "
+            "/IMPL/DT/FIXPOINT is written.")
     if n_fix > 0 and state.ctrl_termination and state.ctrl_termination.endtim > 0:
         endtim = state.ctrl_termination.endtim
         fixpts = [endtim * k / n_fix for k in range(1, n_fix + 1)]  # 1/N … N/N

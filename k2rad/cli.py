@@ -36,6 +36,28 @@ def _tie_stfac_arg(text: str) -> Union[str, float]:
             f"--tie-stfac takes a number or 'auto', not {text!r}")
 
 
+def _qstat_dtscal_arg(text: str) -> Union[str, float]:
+    """``--qstat-dtscal`` accepts a positive number or the literal ``none``.
+
+    ``none`` is kept as the STRING all the way to the writer, where it means
+    "emit no ``/IMPL/QSTAT`` card at all" — which is Radioss's own default
+    (``SCAL_DTQ = 1``, ``freimpl.F:135``) and is measured WORSE than 10 on this
+    corpus, so it is an escape rather than a value.
+    """
+    if text.strip().lower() == "none":
+        return "none"
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--qstat-dtscal takes a number or 'none', not {text!r}")
+    if v <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "--qstat-dtscal must be > 0 (use 'none' to emit no /IMPL/QSTAT "
+            "card)")
+    return v
+
+
 def _make_progress_printer():
     """A convert() progress callback that prints an updating percentage line."""
     def cb(frac: float, label: str) -> None:
@@ -148,6 +170,122 @@ def build_parser() -> argparse.ArgumentParser:
              "Implicit decks only; ignored for explicit.",
     )
 
+    parser.add_argument(
+        "--qstat-dtscal",
+        type=_qstat_dtscal_arg,
+        default=10.0,
+        metavar="VALUE|none",
+        help="The /IMPL/QSTAT/DTSCAL inertia-stabilization scale on a "
+             "QUASI-STATIC implicit deck (one with no "
+             "*CONTROL_IMPLICIT_DYNAMICS). Default 10. The stabilization "
+             "added to the stiffness diagonal is "
+             "M/((1+alpha)*beta*(DTSCAL*dt)^2) (imp_dyna.F:351-355), so it "
+             "grows as 1/DTSCAL^2 AND as 1/dt^2: at the pre-2026-09 default "
+             "of 0.1 it was 100x the Radioss default (SCAL_DTQ = 1, "
+             "freimpl.F:135), and every auto-step cut made the tangent "
+             "stiffer, shrinking the next Newton correction. LS-DYNA's "
+             "standard static implicit adds none at all (its own d3hsp: "
+             "'artificial stabilization flag 2 = off (standard analysis "
+             "DEFAULT)'). MEASURED at nt 3 AND nt 4 against each deck's own "
+             "LS-DYNA glstat: 4.2.frf.cant-1 goes from 4 cycles and an ERROR "
+             "at 0.1 to 104 cycles, t = 1.000, IE 7922 against the reference "
+             "7946.31 (-0.31 %%) at 10; tensile2 +7.36 %%, "
+             "6.5.tbl.psd.prepressure-1 +0.03 %%, doorbeam NORMAL. The COST "
+             "is ex_02_thick_shell_elform_{2,3,5} (3 deck keys on ONE emitted "
+             "file): 1908 cycles / 10 s NORMAL at 0.1 against 101172 cycles "
+             "at t = 0.5955 still running at the 600 s campaign cap. Pass 0.1 "
+             "to restore the old default on such a deck. 'none' emits no card "
+             "at all - measured WORSE than either (ex_02 dies at cycle 0 and "
+             "tensile2 at t = 0.746). --deformable-contact-recipe keeps its "
+             "separately validated 0.05 and ignores this flag.",
+    )
+    parser.add_argument(
+        "--arclength-riks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit /IMPL/DT/3 (RIKS arc-length continuation) instead of "
+             "/IMPL/DT/2 when *CONTROL_IMPLICIT_SOLUTION asks for LS-DYNA's "
+             "arc-length method - card-1 NSOLVR in {6,7,8,9}, or card-3 "
+             "ARCCTL non-zero. OFF by default; the request is WARNED about "
+             "either way. freimpl.F:384-387 reads seven fields "
+             "(NL_DTP/ALEN0/NL_DTN/Tsca_dn/Tsca_up/IAL_M/SCAL_RIKS) and the "
+             "zero cells take lectur.F:3518-3522's defaults. It buys the load "
+             "path, not the answer: measured at nt 3 AND nt 4 on this "
+             "corpus's three carriers, all error_engine either way, "
+             "ex_07_beam_elform_1 walks from t = 3e-8 to t = 1.000 and lands "
+             "at -1.72 %% of its LS-DYNA reference but still exits ERROR on "
+             "the last increment; ex_06_beam_elform_1 reaches NORMAL at IE "
+             "-99.8 %% (a NORMAL that is not a result) and, combined with "
+             "/IMPL/QSTAT/DTSCAL 10, reads -0.08 %% at nt 4 and ERROR at t = 0 "
+             "at nt 3; ex_05_beam_elform_3_&_6 runs 111734 cycles to "
+             "t = 5e-11 and TIMES OUT where it used to fail in 1.5 s. "
+             "/IMPL/DT/FIXPOINT is deactivated by the engine under RIKS "
+             "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
+    )
+    parser.add_argument(
+        "--discrete-offset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Honour *ELEMENT_DISCRETE's OFFSET cell (Vol I R17 p.19-33: 'a "
+             "displacement or rotation at time zero ... a positive offset on "
+             "a translational spring will lead to a tensile force being "
+             "developed at time zero'). ON by default. Radioss spring "
+             "deflection is purely geometric (r1def3.F:206) and /PROP/TYPE4 "
+             "has no offset cell, so the exact restatement is "
+             "f_RAD(d) = f_LS(d + OFFSET): the force function's ABSCISSAE are "
+             "shifted by -OFFSET (ordinates untouched) and an /INISPRI/FULL "
+             "carries the pre-stretch energy EI = 1/2*f_LS(OFFSET)*OFFSET. "
+             "MEASURED on ex_17_spring_elform_0 and ex_18_spring_elform_0 "
+             "(the only two carriers on 885 decks, both OFFSET 25.4) together "
+             "with --spring-token-mass-compensation: IE +0.0074 %% / KE "
+             "+0.039 %% and +0.0064 %% / -0.015 %% against their own LS-DYNA "
+             "glstat, where the shipped arm was a strict ZERO model "
+             "(-100 %% / -100 %%). The shift ALONE is +10.20 %% / -99.27 %% - "
+             "the two halves are one change. Use --no-discrete-offset to go "
+             "back to dropping the cell with a warning.",
+    )
+    parser.add_argument(
+        "--spring-token-mass-compensation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Subtract k2rad's own artificial spring mass from the /ADMAS of "
+             "the nodes it lands on. ON by default. LS-DYNA discrete elements "
+             "are MASSLESS, but hm_read_prop04.F:136-142 refuses a "
+             "/PROP/TYPE4 MASS <= 1e-15 (ERROR 229), so k2rad writes a token "
+             "1e-4 and rinit3.F:1926/1937-1939 puts HALF of it on EACH end "
+             "node, per element - a node touched by k springs carries "
+             "k*1e-4/2 of invented mass. MEASURED ALONE it is inert "
+             "(spring.k, spring1.k, gnonspring.k keep their cycle counts and "
+             "their IE to four significant digits); it is load-bearing inside "
+             "the --discrete-offset bundle, where it turns ex_17's +10.20 %% "
+             "/ -99.27 %% into +0.0074 %% / +0.039 %% - uncompensated, the "
+             "token shifts that deck's omega to 41.715 rad/s against LS-DYNA's "
+             "43.954, a 5.4 %% frequency error. It never writes a "
+             "non-positive /ADMAS: a node whose own mass is at or below the "
+             "token share is left alone and the numbers are named.",
+    )
+    parser.add_argument(
+        "--tgmult-imptemp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Turn a *MAT_THERMAL_* TGMULT (volumetric heat generation) into "
+             "an /IMPTEMP holding the closed-form adiabatic solution "
+             "T(t) = T0 + TGMULT*f(t)/(rho*Cp) over the parts' own nodes. ON "
+             "by default, and gated HARD: it fires only when the deck states "
+             "NO other temperature driver (no *BOUNDARY_TEMPERATURE / "
+             "_CONVECTION / _FLUX / _RADIATION, no *LOAD_THERMAL_* or "
+             "*LOAD_HEAT_*), because /IMPTEMP is a hard Dirichlet reset "
+             "applied every cycle (fixtemp.F:180-199) and would OVERWRITE a "
+             "conduction solution rather than add to it. "
+             "*INITIAL_TEMPERATURE is the T0 of that closed form, not a "
+             "blocker. MEASURED on thermal/thermal-stress (TGMULT 10, "
+             "TGRLC 0, RHO0_CP 1): the free-expansion displacement of node 2 "
+             "goes from exactly 0.0 - all 500 states, all channels - to "
+             "1.49531e-04 mm against the LS-DYNA nodout's 1.49216e-04 at "
+             "t = 2.99, +0.21 %%, at 406580 cycles and 0 ERROR / 0 WARNING. "
+             "Quote the DISPLACEMENT: that deck's LS reference energies are "
+             "structural zeros.",
+    )
     parser.add_argument(
         "--eig",
         action="store_true",
@@ -595,6 +733,11 @@ def main(argv=None) -> int:
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
         fixpoint_count=args.fixpoint_count,
+        qstat_dtscal=args.qstat_dtscal,
+        arclength_riks=args.arclength_riks,
+        discrete_offset=args.discrete_offset,
+        spring_token_mass_compensation=args.spring_token_mass_compensation,
+        tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,
