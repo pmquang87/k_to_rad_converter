@@ -11,6 +11,237 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 4, part A — the implicit stabilization
+  constant that was 100x the solver's own default, the spring preload that was
+  dropped, the heat generation that was dropped, and four cells that changed
+  nothing and said nothing.** Round 3 cleared the contact registration and the
+  element-formulation defaults; the round-4 census ranked what was left over
+  the same 356-deck dynaexamples R14 roster (312 distinct emitted models — 29
+  collision groups covering 73 keys — so every reach below is stated as
+  **N deck keys on M emitted models**). Part A is the disjoint half: five items,
+  every one measured against its own LS-DYNA reference, and the four that change
+  a DEFAULT each carry an opt-out flag wired at every site.
+
+  - **A1 `/IMPL/QSTAT/DTSCAL` 0.1 → 10, with `--qstat-dtscal VALUE|none`.**
+    `imp_dyna.F:351` builds `S = (1+D_AL)*DY_B*DT2*DT2`, `:353` multiplies it by
+    `SCAL_DTQ**2` and `:355` takes `BDT = 1/S`, so the stabilization k2rad adds
+    to the stiffness diagonal is `M/((1+alpha)*beta*(DTSCAL*dt)^2)` — it grows
+    as `1/DTSCAL^2` AND as `1/dt^2`. At the shipped 0.1 that was **100× the
+    Radioss default** (`SCAL_DTQ = 1`, `freimpl.F:135`; `imp_dyna.F:1148`
+    returns immediately at that value), so every auto-step cut stiffened the
+    tangent further and shrank the next Newton correction instead of letting
+    the step recover. LS-DYNA's standard static implicit adds none at all — its
+    own d3hsp: *"artificial stabilization flag 2 = off ('standard' analysis
+    DEFAULT)"*. MEASURED at **nt 3 AND nt 4** against each deck's own LS-DYNA
+    `glstat`: `nvh/example-04-02/4.2.frf.cant-1` goes from 4 cycles and an
+    ERROR to **104 cycles, t = 1.000, IE 7922 against the reference's 7946.31
+    (−0.31 %)**; `implicit/basic-examples/basics-ii/tensile2` from 179 cycles
+    and an ERROR at t = 0.78 to 685 cycles NORMAL at **+7.36 %**;
+    `nvh/example-06-05/6.5.tbl.psd.prepressure-1` from 3 cycles and an ERROR to
+    610 cycles NORMAL at **+0.03 %**;
+    `implicit/basic-examples/springback-i/doorbeam` from ERROR to NORMAL.
+    Channels EVOLVE on all of them (`4.2.frf` climbs
+    0 → 55.23 → 537.5 → 1972 → 5103 → 7922 and holds it from t ≈ 0.055 to
+    t = 1.000). `doorbeam`'s **+380 % is NOT a match**: its own `_0001.out`
+    says `INTERFACE TYPE 25 IS NOT AVAILABLE WITH IMPLICIT SOLUTION; IT WILL BE
+    IGNORED`, a separate drop, and that figure must be re-measured on the
+    combined arm if TYPE25 is ever touched.
+    **The named cost:**
+    `introduction/Introduction/example-02/ex_02_thick_shell_elform_{2,3,5}` —
+    **3 deck keys on ONE emitted file** — go `normal → timeout`: 1908 cycles /
+    10 s NORMAL at 0.1 against 101 172 cycles at t = 0.5955 still running at
+    the campaign's own 600 s cap, at both nt. All three rows are
+    `not_comparable` (their LS IE 0.771729 / 0.058509 / 0.100376 are structural
+    zeros), so no benchmark fidelity is lost — only ledger status and 3 × 600 s
+    of budget. Pass `--qstat-dtscal 0.1` to restore the old default on such a
+    deck.
+    **`none` was measured and is WORSE than either**, which is why deleting the
+    card — Radioss's own default — is not what ships: `ex_02` dies at cycle 0
+    ("ERROR, TIMESTEP LIMIT", 0.2 s) and `tensile2` at t = 0.746, and
+    `4.2.frf`'s cycle count becomes nt-DEPENDENT (98 at nt 3, 107 at nt 4,
+    where 10 gives 104 at both). Reach: **51 deck keys on 40 emitted models**,
+    every one of them a `not_comparable` row, so A1 moves
+    `openradioss.status` and nothing else. `--deformable-contact-recipe` keeps
+    its separately validated 0.05 and IGNORES the flag (the recipe branch is
+    evaluated first, exactly as before).
+    *Golden moved, with its justification:*
+    `tests/fixtures/expected/implicit_qstat_0001.rad:41` ` 0.1` → ` 10`. It is
+    the ONLY golden line in the whole of part A — no other fixture carries an
+    `/IMPL` block, and `grep -rn QSTAT tests/fixtures/` returns this one file.
+
+  - **A2 `NSOLVR ∈ {6,7,8,9}` or card-3 `ARCCTL ≠ 0` → `/IMPL/DT/3` (RIKS) —
+    OPT-IN behind `--arclength-riks`, and WARNED about either way.**
+    `ControlImplicitSolution.nsolvr` had been marked "PARSED AND UNUSED" and
+    `ARCCTL` was not parsed at all; card 3 is now read (`ARCCTL ARCDIR ARCLEN
+    ARCMTH ARCDMP ARCPSI ARCALF ARCTIM`, verified against
+    `ex_06_beam_elform_1.k`'s own `$#` header line) because `ex_06` states
+    `NSOLVR 12` and asks for the arc-length method through **`ARCCTL 6` alone**
+    — an NSOLVR-only predicate would miss the corpus's only ARCCTL carrier.
+    The card carries SEVEN fields, not five: `freimpl.F:384-387` READs
+    `NL_DTP ALEN0 NL_DTN SCAL_DTN SCAL_DTP IAL_M SCAL_RIKS` list-directed from
+    ONE record, so a `/IMPL/DT/2`-shaped line would run off the end of it; the
+    zero cells take `lectur.F:3518-3522`'s defaults (12 / 25 / 2⁄3 / 1.2 / 2).
+    **It ships OPT-IN because the repeat at a second nt REFUTED it as a
+    default** — the batch's own condition was "ship after ONE repeat at a
+    second nt", and the repeat did not confirm. Measured at nt 3 AND nt 4 on
+    all three carriers, every one `error_engine` either way:
+    `ex_07_beam_elform_1` walks from t = 3e-8 to **t = 1.000 at −1.72 %** of
+    its reference (identical at both nt) but still exits ERROR on the last
+    increment (its own `RCTOL = 1e-5`); `ex_06_beam_elform_1` reaches NORMAL at
+    **IE −99.8 %** — a NORMAL that is not a result — and combined with the
+    shipped `/IMPL/QSTAT/DTSCAL 10` it reads −0.08 % at nt 4 and **ERROR at
+    t = 0 at nt 3**, an nt-flip that is not quotable as a figure;
+    `ex_05_beam_elform_3_&_6` is a measured REGRESSION, 111 734 cycles to
+    t = 5.08e-11 and a **600 s TIMEOUT where it used to fail in 1.5 s**, and no
+    card field separates it from `ex_07` (both are NSOLVR 6 / ARCCTL 0), so a
+    narrower predicate is not available. It buys the load path, not the answer;
+    net movers **zero**, and it is counted as none. `/IMPL/DT/FIXPOINT` is
+    deactivated by the engine under RIKS (`lectur.F:3523-3532` prints
+    `** WARNING :RIKS METHOD IS NOT COMPATIBLE WITH FIXED TIME POINT` and sets
+    `NDTFIX = 0`), so `--fixpoint-count` is dropped with it and says so.
+
+  - **A3 `*ELEMENT_DISCRETE` `OFFSET` → an abscissa-shifted force law +
+    `/INISPRI/FULL`, bundled with the spring token-mass compensation.** The two
+    halves are ONE change and the headline belongs to the BUNDLE.
+    *(A)* Vol I R17 p.19-33: `OFFSET` is *"a displacement or rotation at time
+    zero. For example, a positive offset on a translational spring will lead to
+    a tensile force being developed at time zero."* Radioss's spring deflection
+    is purely geometric (`r1def3.F:206` `DL = ALDP - AL0DP`) and `/PROP/TYPE4`
+    has no offset cell (`hm_read_prop04.F:102-132`), so with
+    `δ_LS = δ_RAD + OFFSET` the exact restatement is
+    `f_RAD(δ) = f_LS(δ + OFFSET)` — the force function's ABSCISSAE shifted by
+    `−OFFSET` onto a COPY (never the shared curve; the same LCID may drive
+    another part), ordinates untouched, `K` left on the card for `r1len3.F`'s
+    time step — plus an `/INISPRI/FULL` record at `prop_type 4` carrying
+    `EI = ½·f_LS(OFFSET)·OFFSET` and nothing else
+    (`hm_read_inistate_d00.F:4598-4606` → `rinit3.F:2024-2036` `EINT`; `L_X`
+    stays 0 because `rinit3.F:2022` initialises `XL0` to zero for the "not
+    concerned by INISPRI" case `r1def3.F:150-151` reads as "length not
+    initialised"). That energy is LS-DYNA's OWN datum, not an assumption:
+    `ex_17`'s `deforc` at t = 0 reads `y-force 2.22402E+01` at `change in
+    length 2.54000E+01` and its `glstat` `internal energy 2.82451E+02`.
+    *(B)* LS-DYNA discrete elements are MASSLESS, but
+    `hm_read_prop04.F:136-142` refuses a property `MASS <= 1e-15` (ERROR 229),
+    so k2rad writes a token `1e-4` and `rinit3.F:1926`/`:1937-1939` puts HALF
+    of it on EACH end node, per element. That token is now SUBTRACTED from
+    those nodes' `/ADMAS`, per node, splitting one `/ADMAS` group into several
+    when its members carry different spring counts — `spring.k`'s five-node row
+    comes out as 4.5e-4 on the two ends and 4.0e-4 on the three interior nodes.
+    It never writes a non-positive `/ADMAS`.
+    MEASURED on the ONLY two `OFFSET` carriers of 885 roster decks (both
+    `OFFSET = 25.4`): `ex_17_spring_elform_0` IE **+0.0074 %** / KE
+    **+0.039 %** and `ex_18_spring_elform_0` **+0.0064 %** / **−0.015 %**
+    against their own LS-DYNA `glstat`, where the shipped arm was a **strict
+    ZERO model on both** (IE and KE identically 0.000, −100 %). The shift ALONE
+    reads +10.20 % / −99.27 %: uncompensated, the token shifts `ex_17`'s ω to
+    41.715 rad/s against LS-DYNA's 43.954, a 5.4 % frequency error. Half (B)
+    measured ALONE is INERT on every deck where it can be measured —
+    `spring.k`, `spring1.k` and `gnonspring.k` keep their cycle counts
+    (352 / 431 / 786) and their IE to four significant digits, and on `ex_17` a
+    zero model stays a zero model — so it is shipped as what it is: the thing
+    that makes (A) exact.
+    Opt-outs `--no-discrete-offset` and `--no-spring-token-mass-compensation`.
+    Refused BY NAME, with the value: a `DRO=1` torsional section and a
+    `*DEFINE_SD_ORIENTATION`-oriented element (their `/INISPRI/FULL` record is
+    the 6-DOF type-8/13/25 subobject, zero carriers anywhere), and
+    `*ELEMENT_DISCRETE_LCO`, whose ramped offset is not an abscissa shift at
+    all (p.19-33: *"Ignore this input if LCID is defined below"*). The shifted
+    `/FUNCT` id comes from `next_curve_id()`, never `next_id()` — `/FUNCT` and
+    `/TABLE` are ONE starter duplicate scan (`hm_read_table.F:88`) and a
+    collision is ERROR 79 (k2rad #111). The `_SPRING_TOKEN_MASS` constant,
+    which was named once and then written as a bare `1.0e-4` at three emission
+    sites and two warning strings, is now routed through the name everywhere so
+    the compensation and the emission cannot drift apart. **The two old
+    warnings were WRONG and are corrected in the same commit**: they read *"The
+    spring carries a small artificial mass (1e-4) for the explicit time step —
+    add \*ELEMENT_MASS-equivalent mass if dynamics of the spring ends matter"*
+    — advice to ADD mass, when the defect is that k2rad had ADDED mass.
+    No golden moves (no fixture carries a `/PROP/TYPE4`).
+
+  - **A4 `*MAT_THERMAL_*` `TGMULT` → `/FUNCT` + `/GRNOD/NODE` + `/IMPTEMP`,
+    hard-gated.** `TGMULT` (with `TGRLC` its curve) is LS-DYNA's volumetric
+    heat-generation multiplier and `/HEAT/MAT` has no such slot, so it used to
+    be dropped outright. On a deck whose ONLY temperature driver is that
+    generation the nodal heat balance has exactly one term and its solution is
+    uniform and closed-form — `T(t) = T0 + TGMULT·f(t)/(ρ·Cp)` — which IS
+    expressible, as an `/IMPTEMP` over the parts' own nodes
+    (`hm_read_imptemp.F:121-133`). MEASURED on `thermal/thermal-stress`
+    (TGMULT 10, TGRLC 0, RHO0_CP 1, so `T = 10 + 10t`): the free-expansion
+    displacement of node 2 goes from **exactly 0.0** — all 500 T01 states, all
+    12 DX/DY/DZ channels — to **1.49531e-04 mm against the LS-DYNA `nodout`'s
+    1.49216e-04 at t = 2.99, +0.21 %**, at 406 580 cycles and 0 ERROR / 0
+    WARNING, with node 1 (fully fixed) staying 0 and nodes 2/3/5 moving only in
+    their free directions. The intermediate states track the closed form
+    `ε = 1e-7·(T²−100)` to five figures. **Quote the DISPLACEMENT, never an
+    energy percentage**: that deck's LS reference energies are structural zeros
+    and its campaign row is and stays `not_comparable` — this buys fidelity,
+    not a ledger move, and closes one strict zero model on its real observable.
+    **The REFUSAL is the half that matters.** `/IMPTEMP` is a HARD Dirichlet
+    reset applied to every node in its group on every cycle
+    (`fixtemp.F:180-199`, the writes at `:187` and `:198`), so it is dropped —
+    with the competing cards NAMED — whenever the deck states a
+    `*BOUNDARY_{TEMPERATURE,CONVECTION,FLUX,RADIATION}`, a `*LOAD_THERMAL_*`
+    k2rad keeps, an UNPARSED `*LOAD_HEAT_*` (screening only the resolved
+    registries would be a filter keyed on a field those records do not have),
+    more than one distinct `*INITIAL_TEMPERATURE` value, or a second
+    `/HEAT/MAT` that generates at a different rate. `*INITIAL_TEMPERATURE` is
+    the `T0` of the closed form, a required COMPANION and not a blocker: a gate
+    written as "drop whenever any thermal card exists" would exclude the rule's
+    own only carrier. The `/GRNOD` is scoped by the `*PART`s whose TMID names
+    the thermal material, never by the material id — on a `SOLN = 1` deck the
+    `/HEAT/MAT` id is a synthesized stand-in (`/HEAT/MAT/90001`). Reach **1
+    deck key on 1 emitted model** of 885; opt-out `--no-tgmult-imptemp`. No
+    golden moves.
+
+  - **A5 four warnings, zero emitted bytes.**
+    (i) A `*SECTION_SOLID` `ELFORM −1/−2/3` that ships on `Isolid 17`.
+    `−1`/`−2` are LS-DYNA's ASSUMED-STRAIN hexes, which exist to remove the
+    shear locking of ELFORM 2 (Vol I R17 p.41-104 Remark 13), and `Isolid 17`
+    IS the locking ELFORM-2 element; they reach it through
+    `_elform_to_isolid`'s `.get` default and STAY there, because round 3's
+    hourglass remap is gated to `_ONE_POINT_SOLID_ELFORMS`. Measured against
+    this corpus's own byte-identical sibling pair,
+    `ex_03_solid_elform_-1_4x6x4_mesh` reads −21.66 % against its own reference
+    and **−0.030 % against the ELFORM-2 one**; `ex_04`, four times finer,
+    −5.78 % / +0.055 %. No Radioss `Isolid` reproduces −1/−2 (24 / 18 / 14 give
+    −5.75 / −5.18 / −6.27 % on ex_03 and REGRESS four other decks —
+    `ex_27_solid_elform_-2_rigidwall` loses the population's only `match`), and
+    `Icpre` cannot help: `hm_read_prop14.F:296-303` already FORCES `Icpre = 1`
+    on `Isolid 17`. `ELFORM 3` lands there by the same default —
+    `ex_14_solid_elform_3` reads −99.65 %. Since the ELFORM siblings of these
+    examples convert to ONE file, **this warning is the only thing that
+    distinguishes −1/−2 from 2 in the converted deck**; `_elform_to_isolid`'s
+    `2: 17` entry stays EXPLICIT so it can never ride the same default.
+    (ii) An `*INITIAL_VOID_PART`/`_SET` naming a part that is the ALE fluid
+    group of an emitted `/INTER/TYPE18`. The void is skipped (no Radioss card
+    expresses it), so the region LS-DYNA empties converts as ORDINARY FLUID and
+    a Lagrangian body starting inside it is loaded by the FSI penalty from
+    cycle 0. MEASURED on `quadrature_B` (a rigid impactor at vy = −5000 mm/s
+    starting inside part 1): the converted deck reaches KE 1.029e6 / IE 1.115e6
+    against the reference's IE 166.47 / KE 1.24046e4 — a 99.9 % energy error —
+    while the same deck with part 1 given a near-vacuum density by hand reads
+    IE 1.080 / KE 1.530e4 at **0.0 %**, and with the coupling deleted
+    terminates NORMAL in 1051 cycles exactly like its Lagrangian sibling
+    `quadrature_A`, **which carries the same −5000 velocity and is the
+    legitimate control**. No `/INTER/TYPE18` parameter moves it. The predicate
+    is the INTERSECTION, so a void with no coupling (`bird-el.k`) and a
+    coupling with no void (`quadrature_A`) both stay silent. The keyword is now
+    registered — and DELIBERATELY still listed as `#-- SKIPPED:`, so the item
+    adds a warning and not one byte.
+    (iii) The `*CONSTRAINED_LAGRANGE_IN_SOLID` cells that reach no `/INTER`
+    cell: `NQUAD`, `DIREC`, `MCOUP`, `FRCMIN`, `NORM`, `DAMP`, `ILEAK` and
+    `PLEAK` are never parsed, and `CTYPE` and `PFAC` are parsed and never read.
+    The corpus carries the controlled experiment: `quadrature_B` and
+    `quadrature_C` differ in EXACTLY one cell (`NQUAD` 1 vs 3) and convert to
+    **byte-identical files**. The emitted interface's cells are UNCHANGED this
+    round.
+    (iv) `*CONTROL_IMPLICIT_AUTO` `IAUTO` / `ITEWIN` / `KFAIL` parsed and
+    unused (the writer reads `ITEOPT` and `DTMIN`/`DTMAX` and nothing else),
+    and a NEGATIVE `DTMAX` — LS-DYNA's "−DTMAX is a LOAD CURVE id" idiom —
+    dropped outright, leaving the implicit step UNBOUNDED (`lectur.F:3546`
+    turns a zero `DT_MAX` into `EP10`). Eight roster decks state a negative
+    `DTMAX` at include depth 1, ten counting the two nested Yaris.
+
 - **R14 CAMPAIGN TRIAGE batch, round 3, part A — the sixteen `*CONTACT`
   spellings that were in no dispatch table, and the tied family picked by the
   wrong field.** Rounds 1 and 2 cleared the starter-error classes and the
@@ -1935,6 +2166,66 @@ Prior history (before this changelog was introduced) is summarized in the
   presented for veto at merge time.**
 
 ### Fixed
+
+- **R14 round 4 — four retracted statements in `ROADMAP.md` and one in
+  `k2rad/writer/contacts.py`, each grepped out of README/ROADMAP/code and added
+  to the `RetractedSourceCitationsAreGoneEverywhere` guard.** The retracted
+  wording is quoted here, which is the only file that may:
+  - *"**`IHQ 8/9/10`** (the Cockcroft-Latham / Belytschko-Bindeman
+    assumed-strain co-rotational forms)"* — Vol I R17 p.12-271
+    `*CONTROL_HOURGLASS` `EQ.8` is *"Activates full projection warping
+    stiffness for shell formulations 9, 16 and -16"*, a SHELL option (Remark 1,
+    same page: *"Only shell forms 9, 16 and -16 use the warping stiffness
+    invoked by IHQ = 8"*); `EQ.9` is Puso [2000] and `EQ.10` the Cosserat Point
+    Element (Jabareen & Rubin [2008]); the assumed-strain co-rotational form is
+    `EQ.6`, Belytschko-Bindeman [1993]; and Cockcroft-Latham is a DAMAGE
+    criterion with nothing to do with hourglass control.
+    `k2rad/writer/mesh.py:2182-2185` had said so correctly all along — the
+    table beside it did not.
+  - *"Reach on the R14 roster: the `fl_exp_ihq8_*` coupon family only."* — that
+    family does not exist; a `find` for `*ihq*` over `F:`,
+    `C:/openradioss_run` and `E:/foxcore_data` returns nothing. IHQ 9 and 10
+    have ZERO carriers; IHQ 8 has four (`spotweld.k`, `mainboltaexpl.k`,
+    `show-cases/contact-overview/main.k`, `07_metalstrip.k`), and all four
+    state `*SECTION_SHELL` ELFORM 16 → `Ishell 12`, where the coefficients are
+    physically inert.
+  - *"which projects the secondary nodes onto the main segment and removes the
+    offset the keyword exists for"* (ROADMAP) and *"which also projects the
+    secondary nodes onto the main segment and so removes the very offset the
+    keyword names"* (`contacts.py`) — no starter `i2*.F` routine writes
+    `X(1..3, .)` at all; the only such assignment among the interface
+    initialisers is `i24pen3.F:317-319`, which is TYPE24. k2rad emits the tie
+    at **Spotflag 27**, an AUTO-PENALTY variant
+    (`_TIED_PENALTY_SPOTFLAGS = (25, 26, 27, 28)`), not a kinematic constraint,
+    and `ContactTied.offset` is parsed and read NOWHERE. The round-5 variant is
+    therefore `27 → 28`, with reach 0 roster decks.
+  - *"a rigid-wall-plus-implicit class of its own"* —
+    `ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit.k` has **no
+    `*RIGIDWALL` keyword at all** (`grep -c` = 0; it carries
+    `*CONSTRAINED_GLOBAL`), and only the `_penalty_` twin has
+    `*RIGIDWALL_PLANAR_ID`. Both are the same Taylor copper bar at
+    227 000 mm/s diverging from cycle 1. The real rigid-wall constraint, which
+    applies to the `_penalty_` twin ONLY, is `nl_solv.F:520` — the line search
+    is bypassed outright whenever a rigid wall is active — plus
+    `imp_solv.F:673-700`, a full stiffness reform on every rigid-wall impact.
+- **R14 round 4 — the implicit-contact stub-predicate ROADMAP item is CLOSED,
+  measured-not-worth-fixing.** The forced-stub arm on `bumper` — the one deck
+  the predicate reaches — ERRORs at t = 1e-4 against the shipped NORMAL zero
+  model at t = 0.05, so a faithful predicate would REPLACE a NORMAL termination
+  with an error termination on the only carrier. The wider class is inert: 53
+  `/INTER/TYPE7` rows on the roster carry the injected stub title
+  `auto_implicit_stabilization_self_contact`, and five of them (three distinct
+  emitted models) were measured with the stub deleted and are byte-inert in the
+  iterates.
+- **R14 round 4 — three stale runtime strings that quoted a superseded
+  measurement.** `k2rad/writer/contacts.py`'s deformable-contact advisory and
+  `add_grounding_springs.py`'s header both named the old
+  `/IMPL/QSTAT/DTSCAL 0.1` as the shipped constant and now state the shipped
+  value; and `k2rad/__init__.py`'s `fixpoint_count` docstring, which still
+  quoted `ex_14_solid_elform_1` at "−3.1 %", now carries the COMBINED-arm
+  figure (−0.7 %) that its own `ConvertOptions` comment and `--help` text
+  already had (MISTAKES: "a figure measured on a ONE-ITEM arm stops being the
+  batch's figure the moment a second item reaches that deck").
 
 - **`*CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET_THERMAL` was read as the plain
   (constraint-based) family.** `handle_contact_tied` tested
