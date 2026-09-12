@@ -17,6 +17,23 @@ Examples
 import argparse
 import sys
 from pathlib import Path
+from typing import Union
+
+
+def _tie_stfac_arg(text: str) -> Union[str, float]:
+    """``--tie-stfac`` accepts a number or the literal ``auto``.
+
+    ``auto`` is kept as the STRING all the way to the writer, which is the only
+    place that can evaluate ``100*3(1-2nu)`` — nu comes from the tie's own main
+    side, so there is no one value the CLI could resolve it to.
+    """
+    if text.strip().lower() == "auto":
+        return "auto"
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--tie-stfac takes a number or 'auto', not {text!r}")
 
 
 def _make_progress_printer():
@@ -161,6 +178,23 @@ def build_parser() -> argparse.ArgumentParser:
              "(e.g. 0.3) as contact-chatter insurance; overrides the per-contact "
              "Card-3 SFS mapping. Default: engine auto (0). (.k-native per contact: "
              "set Card-3 SFS, e.g. SFS=0.3.)",
+    )
+    fc.add_argument(
+        "--tie-stfac",
+        type=_tie_stfac_arg,
+        default=None,
+        metavar="VALUE|auto",
+        help="Set STFAC (the penalty-tie stiffness scale) on every "
+             "/INTER/TYPE10 tie. 'auto' asks for 100x the local element "
+             "stiffness, i.e. 100*3(1-2nu) from the tie's main side (120 at "
+             "nu = 0.3). Default: leave STFAC 0, which the starter turns into "
+             "Radioss's own 0.2 — MEASURED on a determinate two-hex coupon "
+             "that is a -67.6 %% tie (0.167x the stiffness of the element it "
+             "welds); 30 reaches -0.76 %% and 120 reaches +0.05 %%, at "
+             "dt x 0.115 and dt x 0.058 (dt scales as 1/sqrt(STFAC)). Only "
+             "IMPLICIT ties and ties with an all-rigid secondary side use "
+             "/INTER/TYPE10 at all; an explicit tie gets /INTER/TYPE2, which "
+             "reproduces the same coupon exactly at no time-step cost.",
     )
     fc.add_argument(
         "--auto-gapmin",
@@ -501,6 +535,7 @@ def main(argv=None) -> int:
         ground_spring_k=args.ground_spring_k,
         inter_gapmin=inter_gapmin,
         soften_stfac=args.soften_stfac,
+        tie_stfac=args.tie_stfac,
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,

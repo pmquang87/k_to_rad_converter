@@ -86,6 +86,7 @@ def parse_inter_gapmin(text: str) -> dict:
 def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ground_springs: bool, ground_spring_k_text: str,
                          soften_stfac_text: str,
+                         tie_stfac_text: str = "",
                          inter_gapmin_text: str = "",
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
@@ -165,6 +166,17 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             kwargs["soften_stfac"] = float(st)
         except ValueError:
             raise ValueError(f"Soften Stfac must be a number, got {st!r}.")
+
+    ts = (tie_stfac_text or "").strip()
+    if ts:
+        if ts.lower() == "auto":
+            kwargs["tie_stfac"] = "auto"
+        else:
+            try:
+                kwargs["tie_stfac"] = float(ts)
+            except ValueError:
+                raise ValueError(
+                    f"Tie STFAC must be a number or 'auto', got {ts!r}.")
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
 
@@ -287,6 +299,7 @@ class ConverterGUI:
         self.auto_gapmin = tk.BooleanVar(value=False)
         self.gapmin_factor = tk.StringVar(value="0.8")
         self.stfac = tk.StringVar()
+        self.tie_stfac = tk.StringVar()
         self.deformable_recipe = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready.")
         self.progress = tk.DoubleVar(value=0.0)
@@ -545,8 +558,19 @@ class ConverterGUI:
                            ".k-native per contact: Card-3 SFS (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
+        ttk.Label(fc, text="Tie STFAC:").grid(row=5, column=0, sticky="w", **pad)
+        ttk.Entry(fc, textvariable=self.tie_stfac, width=10).grid(
+            row=5, column=1, sticky="w", **pad)
+        ttk.Label(fc, text="penalty-tie stiffness scale on /INTER/TYPE10 — a number, or "
+                           "'auto' for 100x the local element stiffness (120 at nu=0.3). "
+                           "Blank = Radioss's own 0.2, measured as a -67.6 % tie on a "
+                           "determinate coupon; 30 -> -0.76 %, 120 -> +0.05 %, at dt x 0.115 "
+                           "and dt x 0.058. Only implicit ties and all-rigid-secondary ties "
+                           "use /INTER/TYPE10.",
+                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+
         rc = ttk.Frame(fc)
-        rc.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        rc.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
             rc, text="Deformable–deformable contact recipe (Inacti=5 + /IMPL/DT/2 L_dtn=50 "
                      "+ /IMPL/QSTAT/DTSCAL=0.05)",
@@ -554,7 +578,7 @@ class ConverterGUI:
         ttk.Label(fc, text="Use when two DEFORMABLE parts contact in an implicit deck (e.g. force control "
                            "through a clearance-fit deformable pin) and the solve chatters or stalls. "
                            "The converter warns when it detects such contact.",
-                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+                  foreground="gray").grid(row=8, column=1, columnspan=2, sticky="w", padx=6)
 
         # ── Action row ──────────────────────────────────────────────────────
         actions = ttk.Frame(main)
@@ -631,6 +655,7 @@ class ConverterGUI:
                 ground_springs=self.ground.get(),
                 ground_spring_k_text=self.ground_k.get(),
                 soften_stfac_text=self.stfac.get(),
+                tie_stfac_text=self.tie_stfac.get(),
                 tet10_to_tet4=self.tet10.get(),
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
@@ -737,6 +762,10 @@ class ConverterGUI:
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:
             bits.append(f"soften Stfac={kwargs['soften_stfac']:g}")
+        if kwargs.get("tie_stfac") is not None:
+            _ts = kwargs["tie_stfac"]
+            bits.append("tie STFAC=" + (_ts if isinstance(_ts, str)
+                                        else f"{_ts:g}"))
         if kwargs.get("deformable_contact_recipe"):
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":
