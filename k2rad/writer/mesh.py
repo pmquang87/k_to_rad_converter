@@ -4825,6 +4825,13 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                     "unchanged.")
             if ismstr == 10:
                 state.ismstr10_solid_pids.update(siblings)   # see above
+            # The SECOND /PROP/SOLID emission site, and the reason the warning
+            # is called from the write line rather than from one place that
+            # "knows" the Isolid: on a deck whose *SECTION_SOLID is split out
+            # per part by the hourglass overlay, this is the ONLY /PROP/SOLID
+            # in the file — ex_27_solid_elform_-2_rigidwall emits
+            # /PROP/SOLID/90001 at Isolid 17 here and nothing at all above.
+            _warn_assumed_strain_elform(state, sec, isolid)
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:

@@ -993,6 +993,53 @@ class AssumedStrainElformWarningTests(unittest.TestCase):
         hits = [w for w in result.warnings if "ASSUMED-STRAIN" in w]
         self.assertEqual(len(hits), 1, hits)
 
+    def test_it_fires_from_the_PER_PART_SPLIT_property_too(self):
+        """There are TWO ``/PROP/SOLID`` emission sites and the warning has to
+        be called from BOTH.
+
+        When a ``*PART`` carries its own ``*HOURGLASS`` the section is split
+        out into a per-part ``/PROP/SOLID`` and the shared-section emitter
+        never runs for it — on
+        ``ex_27_solid_elform_-2_rigidwall`` the split ``/PROP/SOLID/90001`` at
+        ``Isolid 17`` is the ONLY solid property in the whole file, so a hook
+        on the shared path alone was silent on a real carrier (found by
+        converting the corpus, not by reading the code).
+        """
+        # ex_27's own shape, verbatim: a per-part *HOURGLASS at IHQ 0 / QM 0.0
+        # and no *CONTROL_HOURGLASS at all, so the part is split out and its
+        # split property stays on the ELFORM-derived Isolid 17 — which is
+        # exactly the case the warning exists for.
+        deck = self._solid_deck(-2).replace(
+            "*PART\nbrick\n" + _row(1, 1, 1) + "\n",
+            "*HOURGLASS\n" + _row(7, 0, 0.0) + "\n"
+            "*PART\nbrick\n" + _row(1, 1, 1, 0, 7) + "\n")
+        result, starter, _e = _convert(deck)
+        self.assertIn("HG_PROP_", starter)          # the split really happened
+        lines = starter.splitlines()
+        i = next(j for j, l in enumerate(lines)
+                 if l.startswith("/PROP/SOLID/") and "HG_PROP_" in lines[j + 1])
+        self.assertEqual(int(lines[i + 3].split()[0]), 17)   # …and stayed at 17
+        self.assertTrue(_has(result.warnings, "ELFORM -2", "ASSUMED-STRAIN"),
+                        result.warnings)
+
+    def test_it_does_NOT_fire_when_the_split_moves_it_OFF_Isolid_17(self):
+        """The predicate is the EMITTED ``Isolid``, not the ELFORM: a deck
+        whose ``*HOURGLASS`` remaps the section to 24 gets a DIFFERENT element
+        (1-point HEPH), and the warning's premise — that ``Isolid 17`` is the
+        locking ELFORM-2 hex — is simply false there.
+        ``ex_12_solid_elform_-1`` is the corpus carrier of that shape."""
+        deck = self._solid_deck(-1).replace(
+            "*PART\nbrick\n" + _row(1, 1, 1) + "\n",
+            "*HOURGLASS\n" + _row(7, 6, 0.05) + "\n"
+            "*PART\nbrick\n" + _row(1, 1, 1, 0, 7) + "\n")
+        _r, starter, _e = _convert(deck)
+        lines = starter.splitlines()
+        i = next(j for j, l in enumerate(lines) if l.startswith("/PROP/SOLID/"))
+        self.assertEqual(int(lines[i + 3].split()[0]), 24)
+        result, _s, _e = _convert(deck)
+        self.assertFalse(any("ASSUMED-STRAIN" in w for w in result.warnings),
+                         result.warnings)
+
     def test_elform_2_still_maps_to_isolid_17_EXPLICITLY(self):
         """``_elform_to_isolid``'s ``2: 17`` entry must never ride the ``.get``
         default: ELFORM 2 IS the fully-integrated hex 17 reproduces, and the
