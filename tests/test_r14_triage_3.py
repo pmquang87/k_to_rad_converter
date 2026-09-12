@@ -1125,18 +1125,67 @@ class InivelGenerationRigidRepoint(unittest.TestCase):
         self.assertEqual(len(w), 1, res.warnings)
         self.assertIn("the deformable nodes unchanged", w[0])
 
-    def test_a_partly_covered_body_is_refused_and_named(self):
+    def test_a_partly_covered_body_in_a_MIXED_card_is_refused_and_named(self):
         """Vol I R17 p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted
         momentum average over the WHOLE body — k2rad has no nodal masses at
-        conversion time and will not invent one."""
+        conversion time and will not invent one. On a MIXED card the refusal
+        costs nothing the deck had: the deformable half keeps working.
+
+        (Named successor of ``test_a_partly_covered_body_is_refused_and_named``,
+        whose all-rigid probe deck is now the arm below: the refusal is
+        deliberately NOT applied when the card names ONLY rigid nodes.)"""
         res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),
-                                    set_nodes=[9, 10, 11, 12]))
+                                    set_nodes=list(range(1, 9))
+                                    + [9, 10, 11, 12]))
         members = set(_inivel_group(s))
-        self.assertEqual(members, {9, 10, 11, 12}, sorted(members))
+        self.assertEqual(members, set(range(1, 13)), sorted(members))
         w = [x for x in res.warnings if "NOT every element node" in x]
         self.assertEqual(len(w), 1, res.warnings)
         self.assertIn("p.28-129 Remark 3", w[0])
         self.assertIn("*INITIAL_VELOCITY_RIGID_BODY", w[0])
+
+    def test_an_all_rigid_card_repoints_a_partly_covered_body(self):
+        """``intro-by-j.-day/joint/joint-ii/translat.k``'s shape, and the
+        regression the round-3 verification round measured: refusing here does
+        not fall back on a deformable half — there is none — it makes the whole
+        card inert. Round 2 re-pointed such a card and the campaign recorded a
+        cleared zero model; the round-3 coverage rule undid it and translat
+        went back to I-ENERGY = K-ENERGY = 0.000 on all 13980 cycles against an
+        LS-DYNA glstat of 189.962. The over-estimate (387.9, +104 %) is named
+        in the warning rather than silently shipped."""
+        res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),
+                                    set_nodes=[9, 10, 11, 12]))
+        members = _inivel_group(s)
+        self.assertEqual(len(members), 1, members)
+        self.assertIn(f"/RBODY/{members[0]}", s)
+        self.assertEqual([x for x in res.warnings
+                          if "NOT every element node" in x], [])
+        w = [x for x in res.warnings if "OVER-STATES" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("p.28-129 Remark 3", w[0])
+        self.assertIn("translat.k", w[0])
+        self.assertIn("189.962", w[0])
+
+    def test_extra_rigid_nodes_do_not_count_against_coverage(self):
+        """``_rbody_coverage_exempt``: Vol I R17 p.28-127 says LS-DYNA does not
+        initialise ``*CONSTRAINED_EXTRA_NODES`` members at ``IVATN = 0``, so
+        they are not part of the coverage test either. ``brake.k`` names its
+        part's 144 element nodes while the /RBODY carries 146; without the
+        exemption it reads as PARTLY covered and takes the over-estimate arm.
+
+        Pinned because the round-3 mutation round replaced the whole function
+        body with ``return set()`` and the suite stayed green."""
+        deck = _ivg_deck(v=(1000.0, 0.0, 0.0)).replace(
+            "*CONTROL_TERMINATION",
+            "*CONSTRAINED_EXTRA_NODES_NODE\n" + _row(2, 1, 0) + "\n"
+            + "*CONTROL_TERMINATION")
+        res, s = _convert(deck)
+        members = _inivel_group(s)
+        self.assertEqual(len(members), 1, members)
+        w = [x for x in res.warnings if "RE-POINTED" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("FULLY covers", w[0])
+        self.assertNotIn("OVER-STATES", w[0])
 
     def test_a_wholly_deformable_ivg_says_nothing(self):
         res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),

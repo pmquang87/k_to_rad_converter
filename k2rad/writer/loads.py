@@ -4956,12 +4956,43 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     A MIXED card is SPLIT rather than left whole: every deformable node stays,
     and each rigid body the card FULLY covers is replaced by its main node.
     Coverage is measured over the body's element nodes only
-    (``_rbody_coverage_exempt``). A body the card only PARTLY covers keeps its
-    nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes the
-    body's translational and rotational MOMENTUM from the prescribed nodal
+    (``_rbody_coverage_exempt``). A body a MIXED card only PARTLY covers keeps
+    its nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes
+    the body's translational and rotational MOMENTUM from the prescribed nodal
     velocities and resets every node from that rigid motion — a mass-weighted
     average k2rad cannot form, because it has no nodal masses at conversion
     time. Inventing one would be a fabricated value in a mandatory slot.
+
+    **But a card that names ONLY rigid nodes re-points its partly-covered
+    bodies too.** Refusing there does not fall back on the deformable half —
+    there is none — it makes the whole card inert, and the round-3
+    verification round measured exactly that regression on
+    ``intro-by-j.-day/joint/joint-ii/translat.k``: its
+    ``*INITIAL_VELOCITY_NODE`` names nodes 3 and 4 of rigid part 1, whose one
+    shell element carries nodes 1-4, so the coverage test refused and the deck
+    became a NORMAL-terminating model with I-ENERGY = K-ENERGY = 0.000 on all
+    13980 cycles — the very zero model round 2 had cleared. The three arms,
+    against the deck's own LS-DYNA glstat:
+
+    ==========================  ==================  ==========
+    arm                         cycle-0 K-ENERGY    vs LS
+    ==========================  ==================  ==========
+    LS-DYNA (glstat)            189.962             --
+    re-pointed (shipped)        387.9               +104 %
+    left on the secondaries     0.000               -100 %
+    ==========================  ==================  ==========
+
+    LS-DYNA's 189.962 is reproduced by hand from the deck's own geometry with
+    equal corner masses: the momentum average gives the body ``v/2``, i.e.
+    ``1/2 M (v/2)^2 = 97.0``, and the two loaded nodes sit on one edge so the
+    body also SPINS — ``L = (M/4)(r3 + r4) x v`` over the lumped corner
+    inertia gives ``omega = (300, 0, -45)`` and ``1/2 omega.I.omega = 93.0``;
+    97.0 + 93.0 = 190.0 against the glstat's 189.962. k2rad writes neither
+    half: it has no nodal masses, so it gives the main node the card's FULL
+    velocity and NAMES the over-estimate. Between a model that is 2x too fast
+    and one that does not move at all, the over-estimate is the one whose
+    channels evolve — it is what round 2 shipped, and what the campaign
+    recorded as a cleared zero model. The mass-weighted arm is a round-4 item.
     MEASURED on the two corpus carriers: ``pipe.k`` (IVG over 2 parts of which
     1 is rigid, omega -82) goes from a cycle-0 KE of 8.69749e7 to 8.70569e7
     against the LS-DYNA glstat's 8.70616e7, i.e. -0.100 % to -0.005 %; and
@@ -5019,10 +5050,23 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             else:
                 partial_mains.append(main)
                 partial_nodes |= hit
+        over_mains: List[int] = []
+        if all_rigid and partial_mains:
+            # EVERY node the card names is a rigid-body member, so leaving a
+            # partly-covered body's nodes where they are makes the card move
+            # NOTHING at all (inirby.F:1032-1048 rebuilds every one of them
+            # from the main node). The choice here is not between a faithful
+            # arm and an over-estimate - it is between an over-estimate and an
+            # inert model, and round 2 shipped the over-estimate. The
+            # docstring carries the three measured arms on translat.k.
+            over_mains = sorted(partial_mains)
+            covered_mains = sorted(set(covered_mains) | set(partial_mains))
+            partial_mains = []
+            partial_nodes = set()
         if covered_mains:
             # Every node of a fully-covered body leaves the group; the body's
             # main node takes its place. Deformable nodes, and the nodes of a
-            # body only partly covered, stay exactly where they were.
+            # body only partly covered by a MIXED card, stay where they were.
             kept = [n for n in nids
                     if n not in main_of or main_of[n] in partial_mains]
             out = sorted(set(kept) | set(covered_mains))
@@ -5031,8 +5075,9 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                 state.warn(
                     f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
                     f"node(s) (e.g. {named}) belong to a rigid body, so the "
-                    f"{len(covered_mains)} body/bodies the card FULLY covers "
-                    f"are RE-POINTED onto their /RBODY main node(s) {shown}"
+                    f"{len(covered_mains)} body/bodies the card "
+                    + ("touches" if over_mains else "FULLY covers")
+                    + f" are RE-POINTED onto their /RBODY main node(s) {shown}"
                     + (" ..." if len(covered_mains) > 5 else "")
                     + f" — the group goes from {len(nids)} to {len(out)} "
                     "node(s)"
@@ -5046,11 +5091,35 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                     "the rigid PART that velocity (Vol I R17 p.28-129 Remark "
                     "3). Measured cycle-0 K-ENERGY against each deck's own "
                     "LS-DYNA glstat: matfoamsoil 3.547E+04 vs 3.54775E+04 "
-                    "(-0.008 %), sphere1 7.005E+06 vs 6.99320E+06 (+0.169 %), "
-                    "wood-post 5.409E+07 vs 5.40914E+07 (-0.003 %), brake's "
-                    "rotational 1.345E+07 vs 1.33808E+07 (+0.517 %) — all "
-                    "0.000 without the re-point. Pass "
+                    "(-0.008 %), sphere1 6.993E+06 vs 6.99320E+06 "
+                    "(-0.003 %), wood-post 5.409E+07 vs 5.40914E+07 "
+                    "(-0.003 %), brake's rotational 1.345E+07 vs 1.33808E+07 "
+                    "(+0.517 %) — all 0.000 without the re-point. Pass "
                     "*INITIAL_VELOCITY_RIGID_BODY to state it explicitly."
+                    + (
+                        f" {len(over_mains)} of these bodies (main node(s) "
+                        + ", ".join(str(m) for m in over_mains[:5])
+                        + (" ..." if len(over_mains) > 5 else "")
+                        + ") are only PARTLY covered by the card and are "
+                        "re-pointed anyway, which OVER-STATES their velocity: "
+                        "Vol I R17 p.28-129 Remark 3 gives such a body the "
+                        "MASS-WEIGHTED momentum average of the prescribed "
+                        "nodal velocities, which is smaller. Every node this "
+                        "card names is a rigid member, so the alternative is "
+                        "not a smaller velocity but NONE - MEASURED on "
+                        "translat.k (2 of rigid part 1's 4 element nodes, "
+                        "v = (2286, 0, 7620)): cycle-0 K-ENERGY 387.9 "
+                        "re-pointed against the LS-DYNA glstat's 189.962, and "
+                        "0.000 with every channel flat for all 13980 cycles "
+                        "when the card is left on the secondaries. LS-DYNA's "
+                        "190.0 is 97.0 translational + 93.0 rotational (hand "
+                        "arithmetic on the deck's own geometry at equal "
+                        "corner masses), i.e. the body also SPINS; k2rad has "
+                        "no nodal masses at conversion time and writes "
+                        "neither the halved velocity nor the spin. State "
+                        "*INITIAL_VELOCITY_RIGID_BODY on the part to control "
+                        "it exactly."
+                        if over_mains else "")
                     + axis_note)
             if partial_mains:
                 _warn_inivel_partial_rigid_body(
@@ -5081,9 +5150,13 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
 def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
                                     where: str, mains: List[int],
                                     hit: Set[int]) -> None:
-    """Name a rigid body an initial-velocity card covers only PARTLY.
+    """Name a rigid body a MIXED initial-velocity card covers only PARTLY.
 
-    Refused rather than modelled. Vol I R17 p.28-129 ``*INITIAL_VELOCITY_
+    Refused rather than modelled — and only on a card that also names
+    DEFORMABLE nodes, which keep working. When EVERY node of the card is a
+    rigid member the caller re-points these bodies instead and names the
+    over-estimate, because refusing there leaves the card moving nothing at
+    all (see ``_warn_inivel_on_rigid_members``, translat.k). Vol I R17 p.28-129 ``*INITIAL_VELOCITY_
     GENERATION`` Remark 3 (``*INITIAL_VELOCITY`` Remark 4, p.28-125, is the
     same sentence): *"Nodes that belong to rigid bodies must have motion
     consistent with the translational and rotational velocity of the rigid
