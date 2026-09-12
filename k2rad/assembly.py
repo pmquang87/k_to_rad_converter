@@ -3837,6 +3837,16 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Found by the SIDE-DEFECT batch's audit of every INITIAL_* handler:
     # readable and un-offsettable, like the two *INITIAL_STRESS_* keywords.
     "INITIAL_VOLUME_FRACTION_GEOMETRY": _off_initial_volume_fraction_geometry,
+    # *INITIAL_VOID_{PART,SET} — one id per row, in the namespace the SPELLING
+    # names (unlike *INITIAL_VOLUME_FRACTION_GEOMETRY, whose FMSID is bucketed
+    # by a cell beside it). k2rad converts neither card — there is no Radioss
+    # void phase to write — but the ids must still travel through an
+    # *INCLUDE_TRANSFORM, because writer/blast_ale._warn_initial_void_in_fsi
+    # intersects them with the /INTER/TYPE18 fluid group's PART ids, and an
+    # un-offset id would silently miss (a warning that fires on nothing is the
+    # #130 shape).
+    "INITIAL_VOID_PART": {"data": (0, [(0, "p")])},
+    "INITIAL_VOID_SET": {"data": (0, [(0, "s")])},
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)

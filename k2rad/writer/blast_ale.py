@@ -643,6 +643,8 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
         edge = _mean_brick_edge(state, set(mpids))
         gap = 0.5 * edge if edge > 0 else 1.0
         inter_id = state.next_id()
+        _warn_clis_dropped_cells(state, cls, inter_id)
+        _warn_initial_void_in_fsi(state, cls, mpids, inter_id)
         lines += [
             f"/INTER/TYPE18/{inter_id}",
             f"fsi_coupling_{inter_id}",
@@ -660,6 +662,86 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
             "tune Stfval/Gap for your coupling, or switch to /INTER/TYPE22 "
             "(cut-cell) for demanding fluid-structure interaction.")
     return lines
+
+
+def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None:
+    """The ``*CONSTRAINED_LAGRANGE_IN_SOLID`` cells that reach no ``/INTER`` cell.
+
+    ``handle_constrained_lagrange_in_solid`` reads card-1 fields 1-6 and
+    card-2 fields 1-3; ``ConstrainedLagrangeInSolid`` stores ``slave master
+    sstyp mstyp ctype pfac start end``; and this writer uses ``slave``,
+    ``master``, ``sstyp``, ``mstyp``, ``start``, ``end`` and NOTHING ELSE —
+    ``ctype`` and ``pfac`` are parsed and never read, and NQUAD, DIREC, MCOUP,
+    FRCMIN, NORM, DAMP, ILEAK and PLEAK are never parsed at all.
+
+    That the drop is real, not a bookkeeping quibble, has a controlled
+    experiment in the corpus itself: ``quadrature_B`` and ``quadrature_C``
+    differ in EXACTLY one cell (``NQUAD`` 1 vs 3) and emit BYTE-IDENTICAL
+    ``_0000.rad`` files.
+
+    Per CLIS card; the card ids are in the text so a deck with several is
+    readable.
+    """
+    state.warn(
+        f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
+        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: the coupling cells NQUAD, "
+        "DIREC, MCOUP, FRCMIN, NORM, DAMP, ILEAK and PLEAK are NOT PARSED at "
+        f"all, and CTYPE={cls.ctype} and PFAC={cls.pfac:g} are parsed and "
+        "never read. The emitted interface uses a CONSTANT UNIT stiffness "
+        "(Stfval = 1.0, Vref = 0.0, Iauto left blank so the starter takes "
+        "ISTIFF = 1, 'constant user value' - hm_read_inter_type18.F:131 and "
+        ":158-159) and a mesh-derived Gap = 0.5 x the mean brick edge. The "
+        "corpus carries the controlled experiment for how much that costs: "
+        "quadrature_B and quadrature_C differ in EXACTLY one cell (NQUAD 1 vs "
+        "3) and convert to byte-identical files. Tune Stfval/Gap by hand for "
+        "your coupling.")
+
+
+def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
+                              inter_id: int) -> None:
+    """An ``*INITIAL_VOID_*`` part that IS the ALE fluid group of this coupling.
+
+    The void is skipped (no Radioss card expresses it — see
+    ``handlers.handle_initial_void``), so the region LS-DYNA empties converts
+    as ORDINARY FLUID. On a deck where a Lagrangian body starts inside it, the
+    FSI penalty then loads that body from cycle 0 against material that should
+    not be there, and the run is not a wrong number, it is a different model.
+
+    The predicate is the INTERSECTION, not the presence of either card: a void
+    with no coupling (``bird-el.k``) is a dropped cell and nothing more, and a
+    coupling with no void (``quadrature_A.k`` — which carries the same
+    ``*INITIAL_VELOCITY_GENERATION`` vy = -5000 and is the legitimate control)
+    is correct as emitted.
+    """
+    if not state.initial_void_parts:
+        return
+    mset = set(mpids)
+    hit: List[int] = []
+    for sid, is_set in state.initial_void_parts:
+        if set(_part_pids(state, sid, not is_set)) & mset:
+            hit.append(sid)
+    if not hit:
+        return
+    for sid in sorted(set(hit)):
+        state.warn(
+            f"*INITIAL_VOID_PART {sid} is SKIPPED, and that part is the ALE "
+            f"fluid group of an emitted /INTER/TYPE18 coupling (interface "
+            f"{inter_id}). The region LS-DYNA empties is therefore converted "
+            "as ORDINARY FLUID: a Lagrangian body that starts inside it is "
+            "loaded by the FSI penalty from cycle 0. MEASURED on quadrature_B "
+            "(a rigid impactor at vy = -5000 mm/s starting inside part 1, "
+            "y in [500,700]): the converted deck reaches KE 1.029e6 and IE "
+            "1.115e6 against the LS-DYNA reference's IE 166.47 / KE 1.24046e4 "
+            "- a 99.9 % energy error - while the same deck with part 1 given a "
+            "near-vacuum density BY HAND reads IE 1.080 / KE 1.530e4 at 0.0 % "
+            "error, and with the coupling deleted terminates NORMAL in 1051 "
+            "cycles exactly like its Lagrangian sibling quadrature_A (which "
+            "carries the same -5000 velocity). No /INTER/TYPE18 parameter "
+            "moves this: Stfval x0.01, x100, the Iauto = 2 / PFAC / Vref form "
+            "and a halved impact velocity all end at 99.9 %. THE FSI RESULT ON "
+            "THIS DECK IS NOT VALID. A correct mapping needs a void phase "
+            "(/MAT/LAW51 multi-material + /INIVOL, or a /MAT/VOID region) and "
+            "is not implemented.")
 
 
 def _make_ebcs(state: ConversionState) -> List[str]:
