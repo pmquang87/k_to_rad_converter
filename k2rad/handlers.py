@@ -2235,6 +2235,41 @@ def _dup_secid(keyword: str, secid: int, seen, state: ConversionState) -> None:
             "one's. Delete the duplicate if the two sections differ.")
 
 
+def _warn_section_solid_one_point_ale(state: ConversionState, secid: int,
+                                      elform: int, aet: int) -> None:
+    """*SECTION_SOLID ELFORM 5/6/7 → a LAGRANGIAN element, named.
+
+    The three 1-point ALE / Eulerian formulations are NOT mapped onto
+    ``/PROP/SOLID`` ``Iale``. That is a measured decision, not an oversight —
+    see the message. What they DO get is the 1-point hourglass control
+    (``writer/mesh._ONE_POINT_SOLID_ELFORMS``), which is the half of the
+    difference LS-DYNA's own d3hsp says they carry.
+    """
+    kind = {5: "1-point ALE", 6: "1-point Eulerian",
+            7: "1-point Eulerian ambient"}[elform]
+    state.warn(
+        f"*SECTION_SOLID {secid}: ELFORM={elform} is LS-DYNA's {kind} solid. "
+        "k2rad emits Iale=0, i.e. a LAGRANGIAN element: the mesh follows the "
+        "material and no advection is performed. LS-DYNA itself runs these as "
+        "formulation 11 (multi-material ALE) — its own d3hsp echoes 'solid "
+        "formulation = 11' for a stated ELFORM 5 (taylor_B, sloshing_C) and "
+        "for a stated 6 (channel_A, advection_B). Mapping the cell to "
+        "Iale=1/2 is NOT a drop-in: hm_read_prop14.F:264-267 refuses Iale/=0 "
+        "on any Isolid but 1 or 2 (ERROR 131 + 608 — measured, 9 starter "
+        "errors on taylor_B and 4 on advection_B), and with Isolid 1 the "
+        "remap was MEASURED destructive: taylor_B goes from IE +5.1 % / KE "
+        "+4.9 % against its LS-DYNA reference to a 99.9 % energy error at "
+        "198220 cycles, and channel_A from IE -98.9 % / KE -25.6 % to "
+        "-100 % / -94.3 %. A real ALE conversion additionally needs an "
+        "/ALE/GRID formulation (with no card the default is NWALE=1 'DISP', "
+        "hm_read_ale_grid.F:202-208), an ALE-capable material and the inflow "
+        "/ void boundaries the ELFORM cell does not state. The 1-point "
+        "HOURGLASS control IS carried — see the Isolid/h note on this "
+        "property."
+        + (f" AET={aet} (ambient type) is dropped with the Eulerian "
+           "framework." if elform == 7 or aet else ""))
+
+
 def handle_section_solid(block: Block, state: ConversionState) -> None:
     """*SECTION_SOLID (+ _EFG/_SPG/_MISC/_TITLE) — every card SET under the
     header.
@@ -2289,6 +2324,10 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
             state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> "
                        "/PROP/SOLID Iale=1. If the mesh is fixed (Eulerian), "
                        "switch Iale to 2 (Euler) for a cheaper run.")
+        if elform in (5, 6, 7):
+            _warn_section_solid_one_point_ale(state, secid, elform,
+                                              to_int(f1[2]) if len(f1) > 2
+                                              else 0)
         # Cohesive sections (ELFORM ±19/20/±21/22 → /PROP/TYPE43): card-1
         # fields 7/8 are COHOFF and GASKETT (Vol I R16 p.41-88). COHOFF only
         # matters for the shell-offset forms 20/22 (it places the cohesive
@@ -8012,7 +8051,13 @@ def handle_control_hourglass(block: Block, state: ConversionState) -> None:
     if not raw:
         return
     f = _card(raw, 0, fixed=True, n=2, w=10)
-    ihq = to_int(f[0])   if f else 1
+    # An absent IHQ cell is 0, NOT 1: Vol I R17 p.12-271 Remark 1 gives IHQ the
+    # default "Rem 1" and says "If omitted or if IHQ = 0, the default hourglass
+    # control types are as follows: ... b) For solids: type 2 for explicit;
+    # type 6 for implicit." 0 therefore means "resolve the solver default"
+    # (writer/mesh._default_solid_ihq does that), while the old `else 1` said
+    # "standard viscous", which is a different type on an implicit deck.
+    ihq = to_int(f[0])   if f else 0
     qh  = to_float(f[1]) if len(f) > 1 else 0.1
     state.ctrl_hourglass = ControlHourglass(ihq, qh)
 
@@ -8034,8 +8079,14 @@ def handle_hourglass(block: Block, state: ConversionState) -> None:
     ihq = to_int(f[1]) if len(f) > 1 else 0
     # A genuinely blank QM field means "LS-DYNA default 0.10"; an explicit 0.0
     # is kept as 0.0 (Radioss then applies its own h default for Isolid 1/2).
-    qm = to_float(f[2]) if (len(f) > 2 and f[2].strip()) else 0.10
-    state.hourglass_defs[hgid] = HourglassDef(hgid, ihq, qm)
+    # Whether the cell was WRITTEN is recorded separately, because Vol I R17
+    # p.25-5 Remark 7 makes the default conditional: "The default value for QM
+    # is 0.1 unless superseded by a nonzero value of QH in
+    # *CONTROL_HOURGLASS." That other card may not have been read yet, so the
+    # resolution happens in writer/mesh._solid_hg_values.
+    qm_stated = len(f) > 2 and bool(f[2].strip())
+    qm = to_float(f[2]) if qm_stated else 0.10
+    state.hourglass_defs[hgid] = HourglassDef(hgid, ihq, qm, qm_stated)
 
 
 def handle_control_implicit_auto(block: Block, state: ConversionState) -> None:

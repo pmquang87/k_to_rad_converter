@@ -19,6 +19,7 @@ from ..state import (
     SectionSolid,
     SectionBeam,
     SectionTshell,
+    SolidHourglassScreens,
 )
 from ..topology import (
     TET10_MIDEDGE as _TET10_MIDEDGE,
@@ -1976,7 +1977,13 @@ def _element_free_part_ids(state: ConversionState,
 
 def _ihq_to_isolid(ihq: int) -> Optional[int]:
     """LS-DYNA solid IHQ → Radioss Isolid (dyna2rad table). None = unmapped
-    (IHQ 0/8/9/10): the section's ELFORM-derived Isolid is kept."""
+    (IHQ 0/8/9/10): the section's ELFORM-derived Isolid is kept.
+
+    IHQ 0 is unmapped HERE on purpose — it is not "no hourglass control", it is
+    "use the solver default" (Vol I R17 p.12-271 Remark 1), and which default
+    that is depends on the analysis type. ``_default_solid_ihq`` resolves it
+    before this table is consulted; see ``_solid_hg_values``.
+    """
     if ihq in (1, 2, 3):
         return 1
     if ihq in (4, 5):
@@ -1986,14 +1993,148 @@ def _ihq_to_isolid(ihq: int) -> Optional[int]:
     return None
 
 
+# LS-DYNA's own DEFAULT solid hourglass control, quoted from Vol I R17
+# p.12-271 *CONTROL_HOURGLASS Remark 1: "If omitted or if IHQ = 0, the default
+# hourglass control types are as follows: ... b) For solids: type 2 for
+# explicit; type 6 for implicit." *HOURGLASS Remark 9 (p.25-5) restates it for
+# the per-part card, and the QH/QM default is 0.1 (the Default row of both
+# cards; *HOURGLASS Remark 7: "The default value for QM is 0.1 unless
+# superseded by a nonzero value of QH in *CONTROL_HOURGLASS").
+#
+# The deck's own d3hsp echoes it. sloshing_A.k states no *CONTROL_HOURGLASS at
+# all and its LS-DYNA d3hsp prints "hourglass model = 2" /
+# "hourglass coefficient = 1.00000E-01" in the defaults block and
+# "hourglass type = 2" per part; component2.k states IHQ 0 / QH 0.05 and gets
+# "hourglass model = 2" with the stated 0.05 kept; birdball.k states IHQ 2 /
+# QH 0.0 and gets "coefficient = 1.00000E-01", i.e. a stated 0.0 IS the
+# default; ex_03_solid_elform_1_4x6x4_mesh.k is IMPLICIT, states no card, and
+# prints "hourglass model.(bricks) = 6" with "hourglass type = 6" per part.
+_LSDYNA_DEFAULT_SOLID_IHQ_EXPLICIT = 2
+_LSDYNA_DEFAULT_SOLID_IHQ_IMPLICIT = 6
+_LSDYNA_DEFAULT_HG_COEFF = 0.1
+
+#: *SECTION_SOLID ELFORMs that are ONE-POINT solids in LS-DYNA and therefore
+#: carry hourglass control, so the default above is meaningful for them
+#: (Vol I R17 p.41-85..41-105):
+#:   0  1 point corotational (*MAT_MODIFIED_HONEYCOMB); also what a BLANK
+#:      ELFORM cell parses to
+#:   1  constant stress solid element — LS-DYNA's own default element type
+#:   5  1 point ALE, 6  1 point Eulerian, 7  1 point Eulerian ambient — these
+#:      stay LAGRANGIAN in k2rad (see item E's warning in _make_properties),
+#:      and LS-DYNA runs them as formulation 11 with hourglass type 2 /
+#:      coefficient 0.1 echoed in their own d3hsp (taylor_B, sloshing_C,
+#:      channel_A, advection_B).
+#: DELIBERATELY ABSENT:
+#:   -1/-2  8-point assumed-strain hexes. Vol I R17 p.41-97 Remark 13: "This
+#:          side effect is not truly hourglassing behavior, so there is no
+#:          hourglass energy, and the behavior is not affected by hourglass
+#:          parameters." A default hourglass control has nothing to act on
+#:          there, and writer/materials._exact_all_ip gates a /FAIL/TAB1
+#:          Ifail_so=2 exactness claim on elform ∈ (2,-1,-2) AND Isolid 17.
+#:          MEASURED anyway, for the ROADMAP: ex_03_solid_elform_-1 is -21.72 %
+#:          against its LS reference at Isolid 17 and -5.87 % at Isolid 24 —
+#:          i.e. "ELFORM -1/-2 wants a locking-free 8-point Isolid" is a real
+#:          but SEPARATE item.
+#:   2/3    fully-integrated S/R hexes — no hourglass modes (already gated out
+#:          below, and *CONTROL_HOURGLASS itself does not apply to them).
+#:   16     10-noded tetrahedron (/TETRA10): no hourglass modes. It reaches
+#:          this point only because _elform_to_isolid(16) is 17, which the
+#:          {14,18} gate below does not catch — so it is excluded HERE.
+#:   10/13  tets, already gated out.
+_ONE_POINT_SOLID_ELFORMS = frozenset({0, 1, 5, 6, 7})
+
+
+def _default_solid_ihq(state: ConversionState) -> int:
+    """The IHQ LS-DYNA itself would use for a 1-point solid on THIS deck."""
+    return (_LSDYNA_DEFAULT_SOLID_IHQ_IMPLICIT if state.is_implicit
+            else _LSDYNA_DEFAULT_SOLID_IHQ_EXPLICIT)
+
+
+def _solid_hg_screens(state: ConversionState) -> SolidHourglassScreens:
+    """Which sections the LS-DYNA-default hourglass synthesis must NOT touch,
+    and which of them are FLUID.
+
+    Memoised on the state: ``_solid_hg_values`` is called once per part in the
+    ``_assign_hourglass_props`` prepass and once per preloaded element in the
+    /PRELOAD writer, and every screen here walks ``state.parts``.
+
+    Three screens, each with its own measured reason:
+
+    * **deck_enabled** — a deck carrying ``*INITIAL_STRESS_SECTION`` keeps its
+      ELFORM Isolid everywhere. ``writer/preload._PRELOAD_STABLE_ISOLID`` is
+      ``{5, 14, 17}``: measured on a 1x1x4 hex bar at /PRELOAD Itype=2 /
+      200 MPa, **Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0**. The
+      screen is deck-wide rather than per-section because the preloaded parts
+      are only known once the cross-section cut has been resolved, in a writer
+      pass that runs much later than this one; a deck-wide screen can only fail
+      SAFE (it leaves other sections at today's Isolid 17). Reach on the R14
+      roster: one deck (``4.3_General_Nonlinearity``), whose solids are
+      ELFORM -1 and out of scope anyway.
+    * **excluded_secids** — sections serving a /MAT/LAW115 part. Those already
+      have a MEASURED remap (17 → 24 HEPH, see ``law115_secids`` in
+      ``_make_properties``: LAW115 at Isolid 17 collapses the time step at
+      cycle 0 under a NORMAL TERMINATION banner). Isolid 1 is 1-point too, but
+      nothing has measured LAW115 THERE, so the default stays out of its way.
+    * **fluid_secids** — sections any of whose parts is on ``*MAT_NULL`` or
+      ``*MAT_ELASTIC_FLUID``. *HOURGLASS Remark 4 (Vol I R17 p.25-3): "For
+      fluids modeled with null material, type 6 hourglass control is viscous
+      and is scaled to the viscosity coefficient of the material", i.e.
+      LS-DYNA's own type 6 is NOT the stiffness form there, so mapping it onto
+      the physically-stabilised Isolid 24 is wrong. MEASURED on sloshing_A
+      (*MAT_NULL, ELFORM 1): Isolid 24 "terminates NORMALLY" at 243 506 cycles
+      with IE 1.75e16 and a 99.9 % energy error, while Isolid 1 with h = 0.1
+      runs to t = 2.0 at IE -0.25 % against the LS-DYNA reference. dyna2rad
+      reaches the same place from the other side — convertprops.cxx:323-327
+      routes *MAT_NULL/*MAT_009 to Isolid 1 before it ever looks at ELFORM.
+    """
+    memo = state.solid_hg_screens
+    if memo is not None:
+        return memo
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    solid_pids = {e.pid for e in state.solid_elems}
+    law115: Set[int] = {
+        part_secids[pid] for pid, part in state.parts.items()
+        if part.mid in state.mat_deshpande_fleck
+        and pid in solid_pids and pid in part_secids}
+    fluid_mids = set(state.mat_null) | set(state.mat_elastic_fluid)
+    fluid: Set[int] = {
+        part_secids[pid] for pid, part in state.parts.items()
+        if part.mid in fluid_mids and pid in part_secids}
+    memo = SolidHourglassScreens(
+        deck_enabled=not state.ini_stress_sections,
+        excluded_secids=frozenset(law115),
+        fluid_secids=frozenset(fluid))
+    state.solid_hg_screens = memo
+    return memo
+
+
+def _solid_default_hg_applies(state: ConversionState,
+                              sec: SectionSolid) -> bool:
+    """True when this section gets LS-DYNA's DEFAULT solid hourglass control.
+
+    The caller has already applied the pre-existing gate (ALE / ELFORM 2 / 13 /
+    cohesive / Isolid 14 / 18); this adds the default-specific screens.
+    """
+    if not state.options.default_hourglass:
+        return False
+    if sec.elform not in _ONE_POINT_SOLID_ELFORMS:
+        return False
+    screens = _solid_hg_screens(state)
+    if not screens.deck_enabled:
+        return False
+    return sec.secid not in screens.excluded_secids
+
+
 def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
                      hg) -> Tuple[Optional[float], Optional[int]]:
     """Effective (h, isolid_override) for a solid section, combining the global
-    *CONTROL_HOURGLASS base with an optional *HOURGLASS override *hg*. Returns
-    (None, None) when the (k2rad-adapted) solid gate excludes the section — ALE,
-    a fully-integrated S/R hex (ELFORM 2) or tetra (ELFORM 13), or a tet4/
-    cohesive Isolid (14/18) — or no hourglass source applies. h is the
-    coefficient verbatim (no IHQ dependence);
+    *CONTROL_HOURGLASS base with an optional *HOURGLASS override *hg* — and,
+    when neither states a usable IHQ, LS-DYNA's OWN DEFAULT for a 1-point solid
+    (``_LSDYNA_DEFAULT_SOLID_IHQ_*``, opt out with ``--no-default-hourglass``).
+    Returns (None, None) when the (k2rad-adapted) solid gate excludes the
+    section — ALE, a fully-integrated S/R hex (ELFORM 2) or tetra (ELFORM 13),
+    or a tet4/cohesive Isolid (14/18) — or no hourglass source applies.
     isolid_override None keeps the ELFORM Isolid — the 'mixed result' when the
     IHQ is unmapped but the base card mapped one. See the gate note below for
     why k2rad's structural-hex Isolid 17 is (unlike dyna2rad) NOT excluded."""
@@ -2030,7 +2171,105 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
         m = _ihq_to_isolid(hg.ihq)
         if m is not None:
             iso = m
+    if not _solid_default_hg_applies(state, sec):
+        return (h, iso)
+    # ── LS-DYNA's own default, for a 1-point solid the deck leaves defaulted ──
+    # The GOVERNING card is the per-part *HOURGLASS if there is one, else the
+    # global *CONTROL_HOURGLASS, else nothing — exactly the precedence Vol I
+    # R17 p.12-271 states ("These default values are used unless HGID on *PART
+    # is used to point to *HOURGLASS data which overrides the default values
+    # for that part"). Reading the governing IHQ rather than the resolved
+    # `iso` keeps a STATED-but-unmapped IHQ 8/9/10 out of the synthesis: those
+    # name a real formulation k2rad cannot express (8 is shell-warping-only,
+    # 9 Puso, 10 Cosserat), and overwriting them with the default would replace
+    # the deck's own statement instead of filling a blank.
+    gov: Optional[int] = None
+    if hg is not None:
+        gov = hg.ihq
+    elif state.ctrl_hourglass is not None:
+        gov = state.ctrl_hourglass.ihq
+    if gov is None or gov == 0:
+        iso = _ihq_to_isolid(_default_solid_ihq(state))
+    elif state.is_implicit and 1 <= gov <= 5:
+        # Vol I R17 p.12-272: "For implicit analysis, only IHQ = 6, 7, 9, and
+        # 10 are available. ... if IHQ = 1-5, then solid elements will be
+        # switched to type 6." So an implicit deck stating a viscous or
+        # stiffness type runs type 6 in LS-DYNA too — the Radioss analogue is
+        # HEPH (Isolid 24), and MEASURED on ex_03_solid_elform_1 the viscous
+        # Isolid 1 does not converge implicitly at all (11 cycles in 600 s)
+        # while Isolid 24 reaches its reference at -4.26 %.
+        iso = _ihq_to_isolid(_LSDYNA_DEFAULT_SOLID_IHQ_IMPLICIT)
+    if iso == 24 and sec.secid in _solid_hg_screens(state).fluid_secids:
+        # *HOURGLASS Remark 4 / the sloshing_A measurement — see
+        # _solid_hg_screens. A null-material fluid takes the VISCOUS form.
+        iso = _ihq_to_isolid(1)
+    if hg is not None and (not hg.qm_stated or not hg.qm):
+        # Vol I R17 p.25-5 *HOURGLASS Remark 7: "The default value for QM is
+        # 0.1 unless superseded by a nonzero value of QH in
+        # *CONTROL_HOURGLASS. A nonzero value of QM supersedes QH." So a
+        # per-part card that leaves QM blank (or states 0.0) inherits the
+        # global coefficient, and only falls to 0.1 when there is none.
+        h = (state.ctrl_hourglass.qh
+             if state.ctrl_hourglass is not None else None)
+    if not h:
+        # A blank QH/QM cell AND a stated 0.0 both mean the 0.1 Default row:
+        # birdball.k states IHQ 2 / QH 0.0 and its own d3hsp echoes
+        # "hourglass coefficient = 1.00000E-01"; 275key2.k does the same at
+        # IHQ 4. (Radioss would reach 0.1 by itself for Isolid 1/2 —
+        # hm_read_prop14.F:365 `IF (QH == ZERO .AND. ICONTROL == 0) QH = EM01`,
+        # confirmed twice by measurement: sloshing_A and underwater_A at
+        # h = 0.0 are identical to h = 0.1 in every printed digit — but Isolid
+        # 5 and 24 read the cell differently, and an emitted 0.1 states in the
+        # deck what the run actually uses.)
+        h = _LSDYNA_DEFAULT_HG_COEFF
     return (h, iso)
+
+
+def _warn_default_solid_hourglass(
+        state: ConversionState,
+        moved: List[Tuple[int, int, int, float]]) -> None:
+    """Say, once, that LS-DYNA's DEFAULT hourglass control was supplied — which
+    sections it moved, to what, and why that is not an invention."""
+    if not moved:
+        return
+    ihq = _default_solid_ihq(state)
+    kind = "an IMPLICIT" if state.is_implicit else "an explicit"
+    fluid = _solid_hg_screens(state).fluid_secids
+    per_sec = "; ".join(
+        f"{sid} (ELFORM {ef}) -> Isolid {iso} h={hv:g}"
+        + (" [*MAT_NULL fluid: kept VISCOUS]" if sid in fluid else "")
+        for sid, ef, iso, hv in moved)
+    state.warn(
+        f"*SECTION_SOLID {per_sec}: the deck leaves the hourglass control of "
+        "these 1-point solids DEFAULTED (no *CONTROL_HOURGLASS and no per-part "
+        "*HOURGLASS, or a stated IHQ 0 — Remark 1 makes those the same thing), "
+        f"so LS-DYNA's own default for {kind} analysis is supplied — IHQ "
+        f"{ihq}, QH 0.1. Vol I R17 p.12-271 "
+        "*CONTROL_HOURGLASS Remark 1: \"If omitted or if IHQ = 0, the default "
+        "hourglass control types are as follows: ... b) For solids: type 2 "
+        "for explicit; type 6 for implicit\" (p.25-5 *HOURGLASS Remark 9 "
+        "restates it for the per-part card, and Remark 7 makes a blank or "
+        "zero QM/QH the 0.1 Default row). The deck's own d3hsp echoes the "
+        "default it used: sloshing_A.k states no *CONTROL_HOURGLASS and "
+        "prints 'hourglass model = 2' / 'hourglass coefficient = "
+        "1.00000E-01'; the implicit ex_03_solid_elform_1_4x6x4_mesh.k prints "
+        "'hourglass model.(bricks) = 6'. Without this the section keeps "
+        "Isolid 17, which prop_p14_solid.cfg calls '2*2*2 Integration Points, "
+        "No Hourglass' and for which hm_read_prop14.F:369-372 forces "
+        "GEO(13) = ZERO - a different integration rule AND no hourglass "
+        "control. MEASURED against the decks' own LS-DYNA glstat: sloshing_A "
+        "goes from a TIMESTEP-LIMIT death at t = 0.18 to NORMAL TERMINATION "
+        "at t = 2.0 (IE -0.25 %), taylor_A from IE +2.56 % / KE +1.48 % to "
+        "+0.00 % / -0.03 %, rodsol from +2.88 % / +4.04 % to -1.72 % / "
+        "+1.41 %, and the implicit ex_03_solid_elform_1 from -20.38 % to "
+        "-4.26 %."
+        + (" On an implicit deck the engine will now print '***** WARNING : "
+           "ELEMENT FORMULATION ISOLID= 24 IS NOT AVAILABLE FOR STIFFNESS "
+           "MATRIX BUILDING' at cycle 1 (imp_glob_k.F:234) - the implicit "
+           "tangent of an 8-node hex is the full 2x2x2 stiffness whatever "
+           "Isolid says, and the deck converges anyway (measured: 16 cycles, "
+           "2.0 s)." if state.is_implicit else "")
+        + " Pass --no-default-hourglass to keep the pre-2026-09 output.")
 
 
 def _shell_hg_values(state: ConversionState, sec: Optional[SectionShell],
@@ -2582,6 +2821,10 @@ def _make_properties(state: ConversionState) -> List[str]:
         lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   ishell, nip, istrain, sec.t1, hcoef=hm)
     cohesive_secids = _cohesive_solid_secids(state)
+    # (secid, elform, emitted Isolid, emitted h) for every solid section whose
+    # Isolid the LS-DYNA-default hourglass synthesis actually MOVED — reported
+    # once, after the loop, by _warn_default_solid_hourglass.
+    default_hg_moved: List[Tuple[int, int, int, float]] = []
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
             continue
@@ -2643,6 +2886,16 @@ def _make_properties(state: ConversionState) -> List[str]:
         # (tetra / ALE / cohesive) returns (None, None) → prop unchanged.
         h, iso = _solid_hg_values(state, sec, None)
         if iso is not None:
+            # Was the DEFAULT the source of this remap, or the deck's own card?
+            # The default fills a blank (no card, or IHQ 0) and, on an implicit
+            # deck, also re-types a stated IHQ 1-5 the way LS-DYNA does.
+            gov = (state.ctrl_hourglass.ihq
+                   if state.ctrl_hourglass is not None else None)
+            from_default = (gov is None or gov == 0
+                            or (state.is_implicit and 1 <= gov <= 5))
+            if (iso != isolid and h is not None and from_default
+                    and _solid_default_hg_applies(state, sec)):
+                default_hg_moved.append((sec.secid, sec.elform, iso, h))
             isolid = iso
         # LAW115 sections: remap the (engine-fatal) full-integration hex 17
         # to HEPH 24 — see the law115_secids comment above. Applied last so
@@ -2660,6 +2913,7 @@ def _make_properties(state: ConversionState) -> List[str]:
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
+    _warn_default_solid_hourglass(state, default_hg_moved)
     # Collected, not re-derived: the check below must see exactly the sections
     # that really carry a /PROP/BEAM, so that a section routed to some other
     # beam property stays out of it without the check having to know about that
@@ -4096,7 +4350,12 @@ def _assign_hourglass_props(state: ConversionState) -> None:
             # The global *CONTROL_HOURGLASS was previously inert; now honored, it
             # can remap the shared solid /PROP Isolid off its ELFORM default.
             # Note it once for the parts that inherit the global card (no HGID).
+            # Gated on the card's OWN IHQ mapping: when it is 0 the remap comes
+            # from the LS-DYNA DEFAULT, not from "honouring" the card, and
+            # _warn_default_solid_hourglass states that case in full. Saying
+            # both would credit the same Isolid to two different sources.
             if hg is None and state.ctrl_hourglass is not None \
+                    and _ihq_to_isolid(state.ctrl_hourglass.ihq) is not None \
                     and base[1] is not None and not ctrl_isolid_warned \
                     and sec is not None and base[1] != _elform_to_isolid(sec.elform):
                 ctrl_isolid_warned = True
@@ -4112,8 +4371,16 @@ def _assign_hourglass_props(state: ConversionState) -> None:
                 gov = (hg.ihq if hg is not None
                        else state.ctrl_hourglass.ihq
                        if state.ctrl_hourglass is not None else None)
+                # IHQ 0 is EXCLUDED once the default synthesis has claimed the
+                # section: there it is not an unmappable formulation, it is
+                # "use the solver default", and _warn_default_solid_hourglass
+                # says which one was used. Keeping this message would have told
+                # the reader the ELFORM Isolid was kept on a section whose
+                # Isolid had just been remapped (component2.k, IHQ 0 / QH 0.05).
                 if gov is not None and _ihq_to_isolid(gov) is None \
-                        and gov not in warned_ihq:
+                        and gov not in warned_ihq \
+                        and not (gov == 0 and sec is not None
+                                 and _solid_default_hg_applies(state, sec)):
                     warned_ihq.add(gov)
                     src = (f"*HOURGLASS {hg.hgid}" if hg is not None
                            else "*CONTROL_HOURGLASS")

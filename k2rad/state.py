@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
 
 #: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
@@ -5888,6 +5888,30 @@ class ControlHourglass:
     qh: float           # hourglass viscosity coefficient
 
 
+@dataclass(frozen=True)
+class SolidHourglassScreens:
+    """The three screens on the LS-DYNA-default solid hourglass synthesis
+    (``writer/mesh._solid_hg_screens``, which builds and memoises this).
+
+    Kept as one record because all three walk ``state.parts`` and the synthesis
+    is consulted once per part in the ``_assign_hourglass_props`` prepass and
+    once per preloaded element in the /PRELOAD writer.
+    """
+    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: /PRELOAD
+    #: Itype=2 measured ZERO OR NEGATIVE VOLUME at cycle 0 on Isolid 1 and 2
+    #: (``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
+    #: ELFORM Isolid everywhere.
+    deck_enabled: bool
+    #: Section ids the synthesis skips outright — today the /MAT/LAW115
+    #: (*MAT_DESHPANDE_FLECK_FOAM) sections, which already carry a MEASURED
+    #: 17 → 24 remap.
+    excluded_secids: FrozenSet[int]
+    #: Section ids with a ``*MAT_NULL`` / ``*MAT_ELASTIC_FLUID`` part: the
+    #: hourglass control stays VISCOUS (Isolid 1) there even when the resolved
+    #: IHQ is 6/7 (*HOURGLASS Remark 4).
+    fluid_secids: FrozenSet[int]
+
+
 @dataclass
 class HourglassDef:
     """A *HOURGLASS card, referenced per-part via the *PART HGID field. Only the
@@ -5898,6 +5922,13 @@ class HourglassDef:
     hgid: int
     ihq: int
     qm: float
+    #: Whether the QM cell was actually WRITTEN. A blank one already parses to
+    #: the 0.1 Default row, but Vol I R17 p.25-5 Remark 7 makes that default
+    #: conditional — "The default value for QM is 0.1 unless superseded by a
+    #: nonzero value of QH in *CONTROL_HOURGLASS. A nonzero value of QM
+    #: supersedes QH" — and *CONTROL_HOURGLASS may be read after this card, so
+    #: the flag is carried to the writer instead of resolved here.
+    qm_stated: bool = True
 
 
 @dataclass
@@ -7147,6 +7178,33 @@ class ConvertOptions:
     # Set False (--no-node-tc-rc-bcs) to keep the pre-2026-09 behaviour, in
     # which those degrees of freedom are FREE.
     node_tc_rc_bcs: bool = True
+    # LS-DYNA's OWN DEFAULT hourglass control for a 1-point *SECTION_SOLID the
+    # deck leaves defaulted (no *CONTROL_HOURGLASS, no per-part *HOURGLASS, or
+    # a stated IHQ 0 — Vol I R17 p.12-271 Remark 1 says those are the same
+    # thing): IHQ 2 for an explicit deck, IHQ 6 for an implicit one, QH 0.1,
+    # fed through the existing IHQ → Isolid remap. ON by default.
+    # Without it k2rad emits Isolid 17 — 2x2x2 full integration, "No
+    # Hourglass" in the cfg's own words (prop_p14_solid.cfg), and
+    # hm_read_prop14.F:369-372 forces GEO(13) = ZERO for every Isolid but
+    # 1/2/24 — where LS-DYNA runs a ONE-POINT element with hourglass control
+    # on. The deck's own d3hsp echoes the default it uses ("hourglass model =
+    # 2" / "coefficient = 1.00000E-01" for sloshing_A, which states no card at
+    # all; "hourglass model.(bricks) = 6" for the implicit ex_03).
+    # MEASURED against each deck's own LS-DYNA glstat, Isolid 17 → the default:
+    # sloshing_A (*MAT_NULL) a TIMESTEP-LIMIT death at t = 0.18 → NORMAL at
+    # t = 2.0, IE -0.25 %; sloshing_C timeout → NORMAL, +2.82 %; taylor_A
+    # IE/KE +2.56/+1.48 % → +0.00/-0.03 %; rodsol +2.88/+4.04 % →
+    # -1.72/+1.41 %; tension1 +0.10 % → -0.01 %; the IMPLICIT
+    # ex_03_solid_elform_1 -20.38 % → -4.26 % and ex_04_solid_elform_1
+    # -8.67 % → -5.76 %. Screened: ELFORM -1/-2 (no hourglass energy at all,
+    # p.41-97 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
+    # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115
+    # sections (their own measured 17 → 24) and any deck carrying
+    # *INITIAL_STRESS_SECTION (Isolid 1/2 = zero-or-negative volume at cycle 0
+    # under /PRELOAD Itype=2).
+    # Set False (--no-default-hourglass) to keep the pre-2026-09 behaviour, in
+    # which a defaulted deck gets full integration and NO hourglass control.
+    default_hourglass: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7603,6 +7661,14 @@ class ConversionState:
     # ELFORM-derived formulation. Populated by _assign_hourglass_props.
     hourglass_prop_vals: Dict[int, Tuple[Optional[float], Optional[int]]] = \
         field(default_factory=dict)
+    # Memo for writer/mesh._solid_hg_screens — the three screens on the
+    # LS-DYNA-default solid hourglass synthesis. None = not computed yet. It is
+    # a pure function of parse-time data (parts, materials, solid elements,
+    # *INITIAL_STRESS_SECTION records) and every caller is a writer pass, so the
+    # memo cannot go stale mid-conversion; it exists because the synthesis is
+    # consulted once per PART in the _assign_hourglass_props prepass and once
+    # per preloaded ELEMENT in the /PRELOAD writer.
+    solid_hg_screens: Optional["SolidHourglassScreens"] = None
 
     # ── Materials & failure models ─────────────────────────────
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)

@@ -99,6 +99,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          law106_shell_restate: bool = True,
                          zero_t0_sentinel: bool = True,
                          node_tc_rc_bcs: bool = True,
+                         default_hourglass: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -197,6 +198,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["node_tc_rc_bcs"] = bool(node_tc_rc_bcs)
 
+    kwargs["default_hourglass"] = bool(default_hourglass)
+
     kwargs["write_restart"] = bool(write_restart)
 
     kwargs["ams"] = bool(ams)
@@ -285,6 +288,7 @@ class ConverterGUI:
         self.law106_shell_restate = tk.BooleanVar(value=True)
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.node_tc_rc_bcs = tk.BooleanVar(value=True)
+        self.default_hourglass = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
@@ -450,6 +454,23 @@ class ConverterGUI:
                      "uniform pressure instead of a pressure field",
             variable=self.airbag_particle_uniform).grid(
                 row=13, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="LS-DYNA's DEFAULT hourglass control on a defaulted 1-point "
+                     "*SECTION_SOLID (default on: Vol I R17 p.12-271 Remark 1 — "
+                     "an omitted *CONTROL_HOURGLASS, or IHQ 0, means type 2 for "
+                     "explicit and type 6 for implicit solids, QH 0.1; the deck's "
+                     "own d3hsp echoes it. Without it those hexes get Isolid 17, "
+                     "which prop_p14_solid.cfg calls '2*2*2 Integration Points, "
+                     "No Hourglass'. Measured: sloshing_A goes from a "
+                     "TIMESTEP-LIMIT death at t = 0.18 to NORMAL at t = 2.0 "
+                     "(IE -0.25 %), taylor_A from IE +2.56 % to +0.00 %, the "
+                     "implicit ex_03_solid_elform_1 from -20.4 % to -4.3 %. "
+                     "ELFORM -1/-2, 2/3/16, tets, ALE, LAW115 and preloaded decks "
+                     "are screened out; a *MAT_NULL fluid keeps the viscous form. "
+                     "Untick to keep the pre-2026-09 output)",
+            variable=self.default_hourglass).grid(
+                row=13, column=3, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -667,6 +688,7 @@ class ConverterGUI:
                 law106_shell_restate=self.law106_shell_restate.get(),
                 zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 node_tc_rc_bcs=self.node_tc_rc_bcs.get(),
+                default_hourglass=self.default_hourglass.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -782,6 +804,9 @@ class ConverterGUI:
         if not kwargs.get("node_tc_rc_bcs", True):
             bits.append("*NODE TC/RC constraints left free "
                         "(--no-node-tc-rc-bcs)")
+        if not kwargs.get("default_hourglass", True):
+            bits.append("defaulted 1-point solids left at Isolid 17 with no "
+                        "hourglass control (--no-default-hourglass)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

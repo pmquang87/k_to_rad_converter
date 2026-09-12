@@ -324,6 +324,39 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-node-tc-rc-bcs to keep those DOFs free.",
     )
     parser.add_argument(
+        "--default-hourglass",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give a 1-point *SECTION_SOLID that the deck leaves DEFAULTED "
+             "LS-DYNA's own default hourglass control. ON by default. Vol I "
+             "R17 p.12-271 *CONTROL_HOURGLASS Remark 1: 'If omitted or if "
+             "IHQ = 0, the default hourglass control types are as follows: "
+             "... b) For solids: type 2 for explicit; type 6 for implicit', "
+             "with QH 0.1 (a stated QH/QM of 0.0 is that same default - "
+             "birdball.k states IHQ 2 / QH 0.0 and its own d3hsp echoes "
+             "'hourglass coefficient = 1.00000E-01'). Those go through the "
+             "existing IHQ -> Isolid remap, i.e. Isolid 1 (viscous, "
+             "Belytschko) explicit and Isolid 24 (HEPH) implicit, instead of "
+             "the full-integration Isolid 17 - which prop_p14_solid.cfg calls "
+             "'2*2*2 Integration Points, No Hourglass' and for which "
+             "hm_read_prop14.F:369-372 forces the coefficient to ZERO. "
+             "MEASURED against each deck's own LS-DYNA glstat: sloshing_A "
+             "goes from a TIMESTEP-LIMIT death at t = 0.18 to NORMAL "
+             "TERMINATION at t = 2.0 (IE -0.25 %%), sloshing_C from a timeout "
+             "to NORMAL (+2.82 %%), taylor_A from IE +2.56 %% / KE +1.48 %% "
+             "to +0.00 %% / -0.03 %%, rodsol from +2.88 %% / +4.04 %% to "
+             "-1.72 %% / +1.41 %%, and the IMPLICIT ex_03_solid_elform_1 from "
+             "-20.38 %% to -4.26 %%. Screened out: ELFORM -1/-2 (Vol I "
+             "p.41-97 Remark 13 - no hourglass energy at all), ELFORM 2/3/16 "
+             "and the tets (no hourglass modes), ALE sections, /MAT/LAW115 "
+             "sections (own measured remap) and any deck with an "
+             "*INITIAL_STRESS_SECTION (Isolid 1/2 hit zero-or-negative volume "
+             "at cycle 0 under /PRELOAD). A *MAT_NULL / *MAT_ELASTIC_FLUID "
+             "section keeps the VISCOUS Isolid 1 even implicitly (Vol I "
+             "p.25-3 *HOURGLASS Remark 4). Use --no-default-hourglass to keep "
+             "the pre-2026-09 full-integration, no-hourglass output.",
+    )
+    parser.add_argument(
         "--law106-shell-restate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -548,6 +581,7 @@ def main(argv=None) -> int:
         law106_shell_restate=args.law106_shell_restate,
         zero_t0_sentinel=args.zero_t0_sentinel,
         node_tc_rc_bcs=args.node_tc_rc_bcs,
+        default_hourglass=args.default_hourglass,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

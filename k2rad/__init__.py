@@ -226,6 +226,7 @@ def convert(
     law106_shell_restate: bool = True,
     zero_t0_sentinel: bool = True,
     node_tc_rc_bcs: bool = True,
+    default_hourglass: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -426,6 +427,50 @@ def convert(
         engine energy error), and a DOF a ``*BOUNDARY_SPC`` already states is
         merged rather than restated. Set False (CLI ``--no-node-tc-rc-bcs``)
         to keep the pre-2026-09 behaviour, in which those DOFs are free.
+    default_hourglass : bool
+        Give a 1-point ``*SECTION_SOLID`` that the deck leaves DEFAULTED
+        LS-DYNA's own default hourglass control, and feed it through the
+        existing IHQ → Isolid remap. **On by default.** Vol I R17 p.12-271
+        ``*CONTROL_HOURGLASS`` Remark 1: *"If omitted or if IHQ = 0, the
+        default hourglass control types are as follows: … b) For solids: type
+        2 for explicit; type 6 for implicit"*, with ``QH`` 0.1 from the card's
+        own Default row — and a STATED ``QH``/``QM`` of 0.0 is that same
+        default (``birdball.k`` states IHQ 2 / QH 0.0 and its d3hsp echoes
+        ``hourglass coefficient = 1.00000E-01``; ``275key2.k`` the same at
+        IHQ 4). So an explicit deck gets ``Isolid`` 1 (viscous
+        Belytschko-orthogonalised) with ``h`` 0.1 and an implicit one
+        ``Isolid`` 24 (HEPH), instead of the full-integration ``Isolid`` 17 —
+        which ``prop_p14_solid.cfg`` itself calls *"2*2*2 Integration Points,
+        No Hourglass"* and for which ``hm_read_prop14.F:369-372`` forces
+        ``GEO(13) = ZERO``, i.e. no hourglass control at all. The deck's own
+        d3hsp states which default it used: ``sloshing_A`` carries no
+        ``*CONTROL_HOURGLASS`` and prints ``hourglass model = 2`` /
+        ``hourglass coefficient = 1.00000E-01``; the implicit
+        ``ex_03_solid_elform_1_4x6x4_mesh`` prints ``hourglass
+        model.(bricks) = 6``. MEASURED against each deck's own LS-DYNA
+        ``glstat``: ``sloshing_A`` goes from a TIMESTEP-LIMIT death at
+        ``t = 0.18`` to NORMAL TERMINATION at ``t = 2.0`` with IE −0.25 %,
+        ``sloshing_C`` from a timeout to NORMAL at +2.82 %, ``taylor_A`` from
+        IE +2.56 % / KE +1.48 % to +0.00 % / −0.03 %, ``rodsol`` from
+        +2.88 % / +4.04 % to −1.72 % / +1.41 %, ``tension1`` from +0.10 % to
+        −0.01 %, and the implicit ``ex_03_solid_elform_1`` from −20.38 % to
+        −4.26 % (its ``_elform_2`` sibling, gated out, stays at −0.10 %).
+        Screened out, each for its own measured or quoted reason: ELFORM
+        −1/−2 (p.41-97 Remark 13 — *"there is no hourglass energy, and the
+        behavior is not affected by hourglass parameters"*), ELFORM 2/3/16 and
+        the tetrahedra (no hourglass modes), ALE sections, ``/MAT/LAW115``
+        sections (their own measured 17 → 24) and any deck carrying an
+        ``*INITIAL_STRESS_SECTION`` (``Isolid`` 1 and 2 hit ZERO OR NEGATIVE
+        VOLUME at cycle 0 under ``/PRELOAD`` ``Itype=2``). A ``*MAT_NULL`` /
+        ``*MAT_ELASTIC_FLUID`` section keeps the VISCOUS ``Isolid`` 1 even on
+        an implicit deck (p.25-3 ``*HOURGLASS`` Remark 4: *"For fluids modeled
+        with null material, type 6 hourglass control is viscous"*; the
+        stiffness-form ``Isolid`` 24 makes ``sloshing_A`` "terminate normally"
+        at a 99.9 % energy error). On an implicit deck a STATED IHQ 1-5 also
+        becomes type 6, which is what LS-DYNA does itself (p.12-272). Set
+        False (CLI ``--no-default-hourglass``) to keep the pre-2026-09 output,
+        in which a defaulted deck gets full integration and no hourglass
+        control.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -549,6 +594,7 @@ def convert(
         law106_shell_restate=law106_shell_restate,
         zero_t0_sentinel=zero_t0_sentinel,
         node_tc_rc_bcs=node_tc_rc_bcs,
+        default_hourglass=default_hourglass,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,
