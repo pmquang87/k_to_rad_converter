@@ -335,6 +335,132 @@ Prior history (before this changelog was introduced) is summarized in the
     stop at the same `t = 0.01839` while the LS reference row is at its own end
     time, so those two rows compare the ARMS, not absolute accuracy.
 
+- **R14 CAMPAIGN TRIAGE batch, round 3, part C — the verification round's
+  corrections, and the round's verification record.** Four independent
+  reviewers re-measured parts A and B end to end: an adversarial fidelity
+  review, a code sweep with 41 mutations and a two-half 885-deck corpus sweep,
+  an end-to-end solver-physics validation (102 runs, its own analytic coupons),
+  and the campaign re-run over the 356-deck dynaexamples R14 roster. What came
+  back is listed here rather than folded silently into the two entries above,
+  because several items RETRACT a number those entries ship.
+
+  - **One behaviour regression, fixed.** Item C's new coverage rule — refuse a
+    rigid body an initial-velocity card covers only PARTLY, because Vol I R17
+    p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted momentum average
+    k2rad cannot form — is right on a MIXED card and wrong on a card whose
+    every node is a rigid member: there it is not a refusal but an inert model,
+    since `inirby.F:1032-1048` rebuilds all of those nodes from the main node.
+    Measured on `intro-by-j.-day/joint/joint-ii/translat.k`, a campaign roster
+    deck round 2 had already cleared: it went back to a NORMAL-terminating
+    model with I-ENERGY = K-ENERGY = 0.000 on all 13980 cycles. The three arms
+    against the deck's own LS-DYNA `glstat`: **189.962** (LS-DYNA),
+    **387.9 = +104 %** (re-pointed, now shipped again), **0.000 = −100 %**
+    (refused). LS-DYNA's 189.962 is 97.0 translational + 93.0 rotational,
+    reproduced by hand from the deck's own geometry at equal corner masses —
+    the two loaded nodes sit on one edge, so the body also SPINS at
+    `omega = (300, 0, −45)`. k2rad writes neither half and NAMES the
+    over-estimate; the mass-weighted arm is a round-4 ROADMAP item. Corpus
+    reach of the fix, measured over all 356 roster keys: **exactly one `.rad`
+    mover.**
+  - **One shipped rationale retracted.** The `twoway` note blamed `twobar`'s
+    +1151 % internal energy on `/INTER/TYPE7` checking only the SSID side, and
+    prescribed swapping the sides. Changing ONE cell of the branch's own
+    `twobar_0000.rad` — the `Gapmin` k2rad leaves 0, which the starter then
+    derives as `GAP MIN = 1.000000` mm on bars of 10 mm cross-section — to 0.05
+    gives IE 2866 against the LS reference 3036.17 (−5.6 %) and KE 1.127e5
+    against 1.20123e5 (−6.2 %). The direction agrees: a one-way check
+    UNDER-transfers load, and `twobar`'s own glstat books 6.38 of
+    sliding-interface energy in 125018 total. The p.11-8 item 1b fact stays;
+    the number and the remedy are re-attributed and an explicit Gapmin for
+    these spellings is filed as round 4.
+  - **Four rules the mutation round found unpinned now have tests**, each
+    proved behaviour-changing first and each re-checked against the WHOLE
+    suite after the fix: `*HOURGLASS` Remark 7's *stated* `QM = 0.0`
+    inheriting a nonzero global QH (dropping the `or not hg.qm` term moved a
+    probe deck 0.03 → 0.1 at a green suite), `_TIE_STFAC_NO_NU = 30.0`,
+    `_rbody_coverage_exempt` (the `*CONSTRAINED_EXTRA_NODES` exemption that
+    makes `brake.k`'s 144-named-vs-146-in-the-`/RBODY` read as fully covered),
+    and the CLI's own `--fixpoint-count` default. All six mutations run in the
+    finalize round — those four plus two controls — are now CAUGHT.
+  - **Numbers and citations re-measured or re-opened.** `ex_03_solid_elform_1`
+    is −4.14 %, not −4.26 % (five code sites, `--help` included); `sphere1`'s
+    cycle-0 KE is 6.993e6 / −0.003 %, not 7.005e6 / +0.169 %;
+    `contact.edge.k` states 58 edge rows, not 60. `imp_glob_k.F`'s warning is
+    at :241 (`:234` is a comment) and its second clause — *"USING GENERIC ONE
+    INSTEAD, POSSIBLE CONVERGING ISSUE."* — had been dropped from a quote that
+    then reassured the reader; `hm_read_rwall_spher.F`'s `KINSET(4,…)` is at
+    :286 and is gated `IPEN == 0`; `hm_read_prop14.F:264-267` accepts IHBE 0
+    as well; dyna2rad's guard is at `convertcontacts.cxx:234`; the FORMING
+    SURFB offset is conditional on a NEGATIVE SBST; the TIED thermal refusal
+    quoted a WARNING 702 gate that `hm_read_inter_type02.F:436-444` does not
+    have; `_tied_interface_type`'s docstring justified the rule with General
+    Remark 7 while the code ignores `_OFFSET` entirely; and the all-rigid
+    TYPE10 fallback framed a drop as a defect when GR7 says LS-DYNA does not
+    tie there either.
+  - **Two README claims corrected by coupon.** The TSSFAC entry said the new
+    `Isolid` 1 default is what `TSSFAC = 0.9` was calibrated for and therefore
+    cures the single-element instability: a 25 × 1 × 1 hex cantilever at
+    `Tsca 0.9` is killed at `Isolid` 1 by `MESSAGE ID 205` at cycle 65 while
+    the `Isolid` 17 arm stalls, and BOTH run at `Tsca 0.5`. And item B's
+    explicit half turns a one-element-thick solid in bending into a MECHANISM
+    — 83.7 % of the external work goes into hourglass VISCOSITY, which Radioss
+    books as neither IE nor KE — faithful to LS-DYNA's viscous IHQ 2, now
+    named beside the improvements.
+  - **Named, measured, deliberately NOT fixed here** (each in ROADMAP with its
+    mechanism): `bumper`'s NORMAL-terminating zero model and the implicit
+    contact stub's guard, which tests PARSED records instead of EMITTED
+    interfaces; the `05_4_2` / `05_5_2` NORMAL → ERROR pair, whose verdict
+    FLIPS with the OpenMP thread count (`nt = 3` branch NORMAL / master ERROR,
+    `nt = 4` the other way round — so no screen may be justified on it yet);
+    `quadrature_B` / `_C`, where item C's correct velocity fix promotes an ALE
+    FSI instability into view; the tied family's `_OFFSET` split; a default
+    Gapmin for the non-AUTOMATIC spellings; the all-rigid-SSID contact class;
+    and the two-sided `/INTER/TYPE7` mapping of the non-AUTOMATIC spellings
+    (`pend.imp` is the clean probe: its LS reference IE is a structural zero).
+
+  **Verification record — ROUND 3.** Measured on this branch at **`e81e0c0`** — the last CODE commit of the batch;
+  the documentation commit that carries this entry follows it — measured from
+  the branch worktree, with the main tree untouched at `b3807bd`:
+
+  - `pytest tests/ -q` → **5052 passed / 2 skipped / 2078 subtests**
+    (163 s). Baseline at `b3807bd` 4956 / 2 / 1961; part A 5010 / 2 / 2072;
+    part B 5047 / 2 / 2078. No test deleted or weakened — every invalidated
+    test carries a named successor IN PLACE, including this round's
+    `test_a_partly_covered_body_is_refused_and_named`, replaced by its MIXED
+    and all-rigid arms. One golden regenerated in the whole batch
+    (`implicit_qstat_0001.rad`, 21 deletions, the `/IMPL/DT/FIXPOINT` block).
+  - `mypy k2rad` → **0 issues in 37 source files** in the dev venv AND with
+    `--no-site-packages` (mypy 2.3.1, a per-tree `MYPY_CACHE_DIR` each).
+  - `ruff check .` → **All checks passed**. `k2rad.py --help` → exit 0,
+    379 lines (every measured percentage written `%%`).
+  - Corpus sweep, roster and exclusions stated: the verification round's
+    two-half sweep covered **885** decks (373 `C:/openradioss_run` + 127
+    `Ryan_Lee_Examples` + 351 FEM_solver `dynaexamples_r14_ton-mm-s` + 29
+    `E:/foxcore_data` + 5 repo fixtures) with **13** decks excluded by a
+    measured `*INCLUDE`-closure cap over 60 MB and **2 directories excluded BY
+    NAME** (`2010-toyota-yaris-detailed-v2j`, `2012-toyota-camry-detailed-v5a`,
+    4 deck files each — 10 KB roots that pull > 160 MB). 0 conversion errors
+    either side; 330 `.rad` SHA movers; `state.warnings` 272 /
+    `skipped_keywords` 41 / `recognized_not_emitted` 10, stated separately;
+    **0 unattributed movers** (A 41 · B 217 · C 31 · D 6 · E 0 · F 85 ·
+    warning-only 16). The finalize round then re-ran the 356-key R14 roster
+    half against its own head: **1** `.rad` mover (`translat.k`), 108
+    `warnings`-only movers, 0 `skipped_keywords`, 0 `recognized_not_emitted`.
+  - Campaign, over all 373 database records — `b3807bd` → this branch: status
+    `normal` **266 → 282**, `error_engine` **43 → 30**, `timeout` **19 → 16**,
+    `error_starter` 13 unchanged, `pending` 7 unchanged; verdict `match`
+    **17 → 21**, `deviation` **136 → 145**, `not_comparable` **213 → 200**.
+    IE-collapse under all three definitions, each named: STRICT
+    (`analyze_pass1.py e`) **30 → 10**, broad (`ie_dev_pct <= -99`, status
+    `normal`) **46 → 23**, broad over all statuses **68 → 37**. NORMAL zero
+    models **15 → 9**. Implicit decks: `error_engine` **27 → 16**, `normal`
+    **90 → 101**. 4 status regressions (`05_4_2`, `05_5_2` → `error_engine`;
+    `quadrature_B`, `_C` → `timeout`), 21 status improvements. 0 decks gained
+    a starter error. 0 giants launched — the `joblist_or.csv` guard refused
+    the 10 `run_pass = 2` keys in the mover list and `--allow-giants` was never
+    passed. Report section **0.16** carries the round, **0.16.1** the finalize
+    round's single re-converted and re-run deck.
+
 - **R14 CAMPAIGN TRIAGE batch, round 2, part A — the `*NODE` card's own
   constraint cells, and the starter refusal on a node that cannot be
   depenetrated.** Round 1 cleared the starter-error classes; the campaign then
