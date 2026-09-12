@@ -1476,55 +1476,49 @@ found and deliberately did NOT close.
   The mixed case (some nodes rigid, some free) deliberately keeps the warning:
   re-pointing only the rigid half would drop the free nodes out of the group.
 
-- **THE TIED-CONTACT FAMILY IS PICKED BY THE WRONG FIELD, AND THE CARD THAT
-  RUNS IS SOFT.** Two halves of one round-3 item, both measured in the
-  verification round.
+- **CLOSED in round 3 (part A): THE TIED-CONTACT FAMILY IS PICKED BY THE WRONG
+  FIELD, AND THE CARD THAT RUNS IS SOFT.** Both halves shipped at once, as this
+  entry required.
 
-  *The family.* `_tied_interface_type` routes on
-  `(SFST*SST + SFMT*MST)/2 < 0`, inherited from dyna2rad and shipped with the
-  rationale *"LS-DYNA's maintain-the-physical-offset flag"*. Vol I R17 p.11-33
-  (`SAST`) is verbatim: *"For the \*CONTACT_TIED_… options, SAST and SBST
-  (below) can be defined as negative values, which will cause the determination
-  of whether or not a node is tied to depend only on the separation distance
-  relative to the absolute value of these thicknesses (see Remark 4 in General
-  Remarks)"*, and General Remark 4 (p.11-125) is the tying SEARCH DISTANCE
-  `delta = abs(delta_1)`. The sentence that DOES pick the family is General
-  Remark 7, "Tying to rigid bodies" (p.11-127), and it keys on the KEYWORD:
-  `TIED_SURFACE_TO_SURFACE`, `TIED_NODES_TO_SURFACE`,
-  `TIED_SHELL_EDGE_TO_SURFACE` and the `_CONSTRAINED_OFFSET` spellings are
-  *constraint-based*; only the plain `_OFFSET` / `_BEAM_OFFSET` spellings are
-  *penalty-based*. All five corpus cards the sign rule sends to
-  `/INTER/TYPE10` are the plain constraint-based spelling.
+  *The family.* The sign rule `(SFST*SST + SFMT*MST)/2 < 0` is DELETED.
+  `_tied_interface_type` now keys on the KEYWORD and the SOLVER: a
+  non-`SURFACE_TO_SURFACE` variant is always `/INTER/TYPE2`; a
+  `SURFACE_TO_SURFACE` one is `/INTER/TYPE10` on an implicit deck and
+  `/INTER/TYPE2` on an explicit one. Vol I R17 p.11-33 (`SAST`) and General
+  Remark 4 (p.11-125) make the negative cell a tying SEARCH DISTANCE, which
+  `_tied_dsearch` still consumes; General Remark 7 (p.11-127) keys the family on
+  the keyword.
 
-  *Why it was not simply corrected.* Routing them to `/INTER/TYPE2` was TRIED
-  and reverted, measured on this machine at `nt = 4`, the same deck differing
-  only in the tie card: `05_4_2_welding_uncoupled_link_d3plot_structuralstep`
-  (an `/IMPL` quasi-static step) with `/INTER/TYPE10` `Itied = 1` reaches
-  NORMAL TERMINATION in 81 cycles, and with `/INTER/TYPE2` (Spotflag 27,
-  `dsearch` 0.1, starter 0 ERRORS / 0 WARNINGS) diverges at cycle 16, t = 2.299
-  — `ITERATION DIVERGE with RELATIVE R = 0.1723E+01` at every reduced step
-  until `ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, `ISTOP = -2`.
-  `05_5_2` is the same deck with a different output database. The faithful card
-  costs both carriers their NORMAL termination on this build.
+  *What decided the solver split.* EXPLICIT — on the determinate two-hex coupon
+  (closed form IE 210.0, merged bar 209.2) `/INTER/TYPE2` at Spotflag 1, 5 AND
+  27 reproduces the bar exactly at no time-step cost, while `/INTER/TYPE10` at
+  the default STFAC carries 67.85. IMPLICIT — on `05_4_2` every `/INTER/TYPE2`
+  arm fails: Spotflag 25/26 by a HARD refusal (`ind_glob_k.F:4594-4599`,
+  ERROR 241 for ILEV 10..25; 26 downgrades to 25 with WARNING 1177) and
+  27/28/1/5 by divergence at cycles 16/8/9/19, with `dsearch`, `Ignore` and
+  `Stfac` all inert (three byte-identical runs).
 
-  *What the arm that runs costs.* `/INTER/TYPE10`'s `STFAC` is Radioss's own
-  documented default — k2rad writes 0, `hm_read_inter_type10.F:135` turns that
-  into `ONE_FIFTH`, and `radioss120/INTER/inter_type10.cfg:76` gives
-  `TYPE10_SCALE` the default `0.2` (a dimensionless stiffness SCALE, `:27`).
-  On a determinate EXPLICIT steel-bar coupon (10x10x20 mm, two hexes, top face
-  driven 100 mm/s, closed form `IE = 1/2 E eps^2 A L = 210.0`) the merged
-  single bar gives IE 209.2 / EXT-WORK 209.3 / −0.0 % / 316 cycles, the
-  `/INTER/TYPE2` twin reproduces that to every printed digit, and this
-  `/INTER/TYPE10` carries **68.34 / 119.6 / −42.8 % / 407 cycles**. STFAC sweep
-  on the same coupon: 1 → 158.4 (−13.0 %), 10 → 203.5 (−1.5 %), 100 → 209.2
-  (−0.1 %). So an EXPLICIT tie routed here transfers about a third less load
-  than the seam should carry, and flipping the `_OFFSET` spellings onto it —
-  which Remark 7 would justify — would move three more corpus cards
-  (`05_2_welding_shell_thin` and two `getriebekette` decks) onto that card.
+  *CORRECTION to this entry's own numbers.* It said the `/INTER/TYPE10` arm
+  carries "68.34 / 119.6 / **-42.8 %**" and quoted a sweep "1 -> -13.0 %,
+  10 -> -1.5 %, 100 -> -0.1 %". **-42.8 % is the ENGINE's own energy-error
+  column, not the load-transfer deviation.** Against the merged bar (209.2) the
+  deviations are **-67.6 / -24.3 / -2.63 / -0.10 %** at STFAC 0.2 / 1 / 10 / 100
+  — the shipped sentence understated the default tie's loss by a factor of ~1.6
+  and mislabelled the quantity.
 
-  Round 3 owes both halves at once: derive a real `STFAC` (or find the TYPE2
-  setting the implicit solve accepts), THEN key the family on the keyword.
-  Doing either alone trades one measured defect for the other.
+  *The STFAC half.* `i7sti3.F:148/:444` make the tie spring `STFAC*A^2*K/V` per
+  tied secondary node = `STFAC/(3(1-2nu))` times the stiffness of the element it
+  welds, so `--tie-stfac auto` resolves to `100*3(1-2nu)` (120 at nu = 0.3,
+  measured +0.05 %), 30 is the no-Poisson fallback (-0.76 %), and `dt` scales as
+  `1/sqrt(STFAC)` (141 cycles at 0.2, 2435 at 120). Opt-in, because STFAC 10
+  changes IE by -30.5 % and halves the implicit step on the welding deck. The
+  all-rigid-secondary arm — which used to be a DROP — takes the derived value
+  unconditionally.
+
+  *Still open, named:* on an implicit deck the tie is a penalty spring, so a
+  converged implicit weld transfers less than a constraint would. That residual
+  is now a consequence of ERROR 241 and the divergence table, with `--tie-stfac`
+  as the lever.
 
 - **`*SECTION_SOLID` ELFORM 5/6/7 (the 1-point ALE solids) convert to a
   LAGRANGIAN solid, silently.** Found while correcting the `*MAT_NULL` class:
@@ -1536,19 +1530,64 @@ found and deliberately did NOT close.
   `Iale`, or warn that the element became Lagrangian and say what that costs.
   (ELFORM 11/12 already map to `Iale`; this is the 1-point family only.)
 
-- **`*CONTACT_SURFACE_TO_SURFACE` and eight sibling contact keywords are not
-  registered at all.** Measured while correcting item C's census: **62 of the
-  69 type-0 contact sides on the R14 roster** sit on a `*CONTACT_*` keyword
-  that is not in `handlers.HANDLERS` and lands in `skipped_keywords` before any
-  side resolution — `*CONTACT_SURFACE_TO_SURFACE` (34 cards, the most frequent
-  contact keyword on the roster), `_ONE_WAY_SURFACE_TO_SURFACE`,
-  `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_SLIDING_ONLY`, `_SINGLE_EDGE`,
-  `*CONTACT_ENTITY`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
-  `_TIED_SURFACE_TO_SURFACE_THERMAL` and `_TIED_SURFACE_TO_SURFACE_OFFSET_
-  THERMAL`. `plate.typ3.k` is the visible shape: `skipped_keywords =
-  ['CONTACT_SURFACE_TO_SURFACE']` and *"`*DATABASE_RCFORC` requested but no
-  `*CONTACT` was converted"*. Its own item, with its own sweep; folding it into
-  the SSTYP precedence fix would have made both unattributable.
+- **CLOSED in round 3 (part A): `*CONTACT_SURFACE_TO_SURFACE` and fifteen
+  sibling contact keywords were not registered at all.** This entry's own
+  numbers were a FLOOR and are corrected here rather than merely closed: it
+  named **nine** spellings and "34 cards", counted from the type-0 contact
+  SIDES of item C's census. The round-3 census, which opened every roster deck
+  on `F:` and resolved one level of `*INCLUDE`, measures **16 spellings, 78
+  cards, 44 of the 356 roster decks** — 37 of which have NO other contact, and
+  **18 of the 30 decks whose OpenRadioss internal energy is zero against a
+  non-zero LS-DYNA reference** carry one. The full list is
+  `_SURFACE_TO_SURFACE` (36 cards / 19 decks), `_ONE_WAY_SURFACE_TO_SURFACE`,
+  `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
+  `_FORMING_SURFACE_TO_SURFACE_MORTAR`, `_SINGLE_SURFACE`, `_SINGLE_EDGE`,
+  `_SLIDING_ONLY`, `_SURFACE_TO_SURFACE_INTERFERENCE`, `_DRAWBEAD`, `_ENTITY`,
+  `_AUTOMATIC_GENERAL_MPP`, `_SURFACE_TO_SURFACE_THERMAL`,
+  `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_THERMAL`,
+  `_TIED_SURFACE_TO_SURFACE_THERMAL` and
+  `_TIED_SURFACE_TO_SURFACE_OFFSET_THERMAL`. All sixteen are registered from
+  ONE table (`handlers._CONTACT_SPELLINGS`, 31 spellings with the `_MPP`
+  siblings); `_DRAWBEAD`, `_ENTITY` and `_SLIDING_ONLY` are refused BY NAME with
+  their source lines and physical consequence.
+
+  *Left open by the fix, each measured and named:*
+
+  - **Three of the 44 carriers still emit no interface** for a PRE-EXISTING
+    reason the registration cannot touch: `sphere1`, `bumper` and
+    `EXP_SC_CONTACT_INTERFERENCE` put a rigid part on the SECONDARY (SSID)
+    side, and `/INTER/TYPE7`'s secondary node group cannot hold rigid-body
+    nodes, so the contact is dropped with the side-swap remedy. `bumper` even
+    goes `error_engine -> NORMAL` because of it, as a NORMAL-terminating ZERO
+    model (IE identically 0) — the #135 shape. Whether k2rad should swap the
+    sides, or emit `/INTER/TYPE25` (whose secondary side is a `/SURF`), is its
+    own item with its own measurement.
+  - **`twobar` and `ring_01` leave zero and OVERSHOOT.** `twobar` moves from
+    IE -100 % to **+1151 %** (37 990 against the LS reference's 3036) at an
+    engine energy error of -11.3 %; `ring_01` from -100 % to +207 %. The
+    obvious suspect — one-way `/INTER/TYPE7` scoping where LS-DYNA is two-way
+    — was TESTED on `twobar` and is NOT the answer: a hand-built
+    `/INTER/TYPE25` over two `/SURF`, in both k2rad's parameterisations
+    (`Istf` 2 with zero Gap_max, and `Istf` 4 with `Igap0` 1000 / `Gap_max`
+    1e30), develops **peak IE 0.95 and 0.78 out of 125 000** — i.e. no contact
+    at all — while the TYPE7 arm peaks at 44 590. Whatever the over-shoot is,
+    routing the two-way spellings to TYPE25 is not the fix.
+  - **`05_4_2` and `05_5_2` regress NORMAL -> ERROR TERMINATION.** Registering
+    `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR` adds a second penalty interface to
+    an implicit quasi-static weld whose two plates already interpenetrate
+    (1537 initial penetrations on 384 of 9984 secondary nodes), and the
+    implicit Newton overflows (`|r|/|r0| = 1.96e6`, `RELATIVE R = 0.1000E+31`)
+    at cycle 1. NINE arms were measured on the deck's own `.rad`, all
+    ERROR except the first: delete the interface (NORMAL, 79 cycles, identical
+    to master), `Inacti` 0, `Inacti` 1, `Stfac` 0.01, `Fric` 0, `GAP_MAX` 1e-3,
+    `Igap` 1 (constant zero gap), `Igap` 2, `Istf` 2, and removing the tie's
+    secondary nodes from the group (they do not overlap it at all). It is NOT a
+    general "implicit + new penalty contact" failure — `hemi`, an implicit
+    `SURFACE_TO_SURFACE` carrier, stays NORMAL and moves IE from -99.998 % to
+    +265 % — so no family-level screen is justified by one model. The decision
+    (accept the two rows, or screen the MORTAR family on implicit decks) is
+    owed to the campaign re-run, which is where the whole-database arithmetic
+    is.
 
 - **`*EOS_IDEAL_GAS` `T0 = 0` silently becomes 300 K.**
   `hm_read_eos_ideal_gas.F:140` (and `_vt.F:206`, `hm_read_eos_nasg.F:152`) is

@@ -11,6 +11,137 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 3, part A — the sixteen `*CONTACT`
+  spellings that were in no dispatch table, and the tied family picked by the
+  wrong field.** Rounds 1 and 2 cleared the starter-error classes and the
+  `*NODE` constraint cells; the round-3 census then ranked the remaining
+  converter classes by measured reach over the same 356-deck dynaexamples R14
+  roster. Item A is the largest: **16 `*CONTACT_*` spellings, 78 cards on 44
+  decks, 37 of which have NO other contact — and 18 of the 30 decks whose
+  OpenRadioss internal energy is zero against a non-zero LS-DYNA reference
+  carry one.** A skipped `*CONTACT` is not a missing output card, it is a
+  missing LOAD PATH: the two surfaces pass through each other and the run
+  terminates NORMALLY with a wrong answer. dyna2rad drops the same spellings
+  (`convertcontacts.cxx:233` `if (interType.empty()) continue;`), so this is
+  one of the areas where k2rad has to exceed the native reader.
+
+  - **One source table, three consumers** (`handlers._CONTACT_SPELLINGS`).
+    It generates `HANDLERS`, the `CONTACT_OFFSET_KEYWORDS` that
+    `assembly._OFFSET_SPECS` consumes, and the coverage assertion — the #116
+    combinatorics rule, in the family where a missed spelling costs a load
+    path. Sixteen rows become **31 registered spellings** with their `_MPP`
+    siblings (`_ID`/`_TITLE` are stripped by the parser and need no key); the
+    `_MPP` ones are deliberately excluded from the offset table, because the
+    MPP card pushes Card 1 down a line and `_off_contact` rewrites
+    `b.raw[start]` blind. Each row states its named losses, so a spelling
+    cannot be registered without the deck being told what it could not carry.
+  - **The aliases** — `SURFACE_TO_SURFACE`, `ONE_WAY_SURFACE_TO_SURFACE`,
+    `FORMING_ONE_WAY_SURFACE_TO_SURFACE`,
+    `AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`, `FORMING_SURFACE_TO_SURFACE_MORTAR`
+    and `SINGLE_SURFACE` — take the SAME route as their `AUTOMATIC_` twins, so
+    the converted deck differs from the twin's only in the `/INTER` title.
+    Four named losses, each with its manual page and its consequence: the
+    non-`AUTOMATIC` spellings are ONE-SIDED in LS-DYNA and Radioss has no
+    one-sided segment (p.11-10 item 4 — a gain in permissiveness, nothing
+    dropped); the two-way ones are checked from one side only by
+    `/INTER/TYPE7` (p.11-8 item 1b); `FORMING` ignores the tooling thickness
+    and offsets SURFB by `|SBST|/2` (General Remark 9, p.11-128); `MORTAR` is
+    a segment-to-segment contact OpenRadioss has no interface for at all
+    (General Remark 14, p.11-131).
+  - **`*CONTACT_SINGLE_EDGE` → `/INTER/TYPE11` self edge-impact**
+    (`line_IDm = 0`), through the `/LINE` synthesis the `SOFT = -11` sentinel
+    route already had. Its carrier also exposed a silent drop one layer down:
+    a `*SET_SEGMENT` may state its EDGES directly as two-node rows — 58 of them
+    and no face at all on `contact.edge.k` — and `collapse_segment_corners`
+    discarded every one with no diagnostic. They are now kept as the set's
+    edge list (`SegmentSet.edges`), named in a warning, and are still absent
+    from the `/SURF/SEG` the same set builds, which is what a set of edges
+    means.
+  - **`*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE` forces `Inacti = 0`** and
+    ignores the deck's own IGNORE cell. The keyword exists to RESOLVE an
+    initial overlap into prestress (p.11-66), and `i7pwr3.F:244-258` makes
+    Inacti 5/6 ACCEPT the overlap as the zero-force state — the exact opposite,
+    and it would leave the deck a zero model after registration. The
+    `LCID1`/`LCID2` stiffness ramp has no counterpart and is named.
+  - **The five `_THERMAL` spellings get a real thermal contact.** `Ithe = 1`
+    plus `Kthe = H0`, `Ithe_form = 1`, `Frad`, `Drad = LMAX` and
+    `Fheats/Fheatm = FTOSA / 1−FTOSA` on `/INTER/TYPE7`/`TYPE25`, and the
+    conduction-only `Ithe`/`Kthe` card on `/INTER/TYPE2` — the same physical
+    quantity on both sides (`i7therm.F:191` `PHI = A·ΔT·dt/RSTIF` with
+    `FRIGAP(20) = 1/Kthe`; `i2therm.F:110` `PHI = A·ΔT·dt·Kthe`). `K`, `LMIN`
+    and `BC_FLAG` are NAMED drops, `ALGO = 1/2/3` is refused by name rather
+    than given an invented `Tint` (the #124 rule), and the card is dropped
+    entirely — with the reason — on a deck that emits no `/HEAT/MAT`, because
+    `hm_read_inter_type07.F:700-707` would otherwise disable it with
+    `WARNING 702`.
+  - **Three refusals BY NAME**, each with the source line and the physical
+    consequence: `*CONTACT_DRAWBEAD` (`/INTER/TYPE8` takes a CONSTANT lineic
+    force where `LCIDRF` is a curve of it against the bead closure —
+    `hm_read_inter_type08.F:131-137` vs p.11-54; collapsing the curve would
+    invent a restraining force the deck does not state), `*CONTACT_ENTITY`
+    (only GEOTYP 1/2/3 map to `/RWALL`, which cannot carry `SO`, `INTORD`,
+    `ITHK` or a damping/friction curve and makes every secondary node
+    kinematically constrained — `hm_read_rwall_spher.F:290`), and
+    `*CONTACT_SLIDING_ONLY` (no OpenRadioss interface forbids separation while
+    allowing sliding; `/INTER/TYPE3` and `/INTER/TYPE5` both echo `SLIDING AND
+    VOIDS`). The last is a MEASURED refusal: routing its one carrier through
+    `/INTER/TYPE7` collapsed the time step 1.01e-07 → **8.3e-17** and froze the
+    run at 64.6 % of the target after 266 379 cycles, against a 1.8 s NORMAL
+    termination without it.
+  - **An unregistered `*CONTACT` is no longer silent.** It still reaches
+    `skipped_keywords` — the accounting is unchanged — but a prefix handler now
+    says what a skipped contact costs and quotes the census.
+
+- **The tied-contact family is keyed on the KEYWORD and the SOLVER, both
+  measured — the Card-3 sign rule is deleted.** k2rad picked `/INTER/TYPE10`
+  over `/INTER/TYPE2` on dyna2rad's discriminator
+  `(SFST*SST + SFMT*MST)/2 < 0`. That cell is a tying SEARCH DISTANCE (Vol I
+  R17 p.11-33 `SAST`, General Remark 4 p.11-125), not a family flag, and
+  LS-DYNA's own split keys on the keyword (General Remark 7 p.11-127). What
+  actually decides is the solver, and both arms are measured on this machine at
+  `nt = 4`:
+
+  - EXPLICIT, a determinate two-hex steel coupon (10×10×20 mm, E 210000,
+    ν 0.3, top face driven 100 mm/s; closed form `IE = ½Eε²AL = 210.0`, merged
+    single bar **209.2**): `/INTER/TYPE2` at Spotflag 1, 5 AND 27 reproduces the
+    bar to every printed digit (IE 209.2, engine energy error −0.0 %, dt
+    1.426e-6, 141 cycles), while `/INTER/TYPE10` at Radioss's own default STFAC
+    carries **67.85 = −67.6 %** of the tie. So an explicit tie now gets
+    `/INTER/TYPE2`.
+    (Correction to the shipped record: the pre-round-3 docstring and ROADMAP
+    called this arm "68.34, a −42.8 % energy error". −42.8 % is the ENGINE's own
+    energy-error column, not the load-transfer deviation; against the merged bar
+    the deviations are −67.6 / −24.3 / −2.63 / −0.10 % at STFAC 0.2 / 1 / 10 / 100.)
+  - IMPLICIT, `05_4_2_welding_uncoupled_link_d3plot_structuralstep`:
+    `/INTER/TYPE10` `Itied = 1` reaches NORMAL TERMINATION in **79 cycles**
+    while EVERY `/INTER/TYPE2` arm fails — Spotflag 25 and 26 by a HARD engine
+    refusal (`ind_glob_k.F:4594-4599` raises `ERROR 241 … NOT AVAILABLE WITH
+    IMPLICIT SOLUTION` for every `ILEV` in 10…25, and 26 downgrades to 25 with
+    `WARNING 1177` first) and Spotflag 27/28/1/5 by divergence at cycles
+    16/8/9/19. Neither `dsearch`, `Ignore` nor `Stfac` moves the Spotflag-27
+    failure by a single cycle (three byte-identical runs). So an implicit tie
+    keeps `/INTER/TYPE10`, now for a stated reason.
+
+  `/INTER/TYPE10` is also the fallback where a kinematic tie cannot be built at
+  all — a secondary side that is ENTIRELY rigid, which used to be DROPPED so
+  that the joint did not exist. **`--tie-stfac VALUE|auto`** (`convert(
+  tie_stfac=…)`, and the GUI's *Tie STFAC* field) is the lever:
+  `i7sti3.F:148/:444` make the tie spring `STFAC·A²·K/V` per tied secondary
+  node, i.e. `STFAC/(3(1−2ν))` times the stiffness of the element it welds —
+  0.167× at the 0.2 default — so `auto` asks for 100× and resolves to
+  `100·3(1−2ν)` from the tie's own main side (120 at ν = 0.3, measured
+  **+0.05 %** against the merged bar), falling back to 30 (−0.76 %) when the
+  main side gives no single ratio. It is OPT-IN because `dt ∝ 1/√STFAC`
+  (measured 141 cycles at 0.2, 2435 at 120) and because on the implicit welding
+  deck STFAC 10 already changes IE by −30.5 % and halves the implicit step; the
+  default leaves STFAC 0 (byte-identical) and NAMES the softness. The all-rigid
+  fallback applies the derived value regardless, since there is no `/INTER/TYPE2`
+  alternative to fall back on. `05_4_2` and `05_5_2` — the corpus's only two
+  carriers of the deleted sign rule — are both implicit and keep the card they
+  had, so item D moves ZERO decks in the R14 campaign and zero in
+  `C:/openradioss_run`; the movers on those decks come from item A registering
+  the `_THERMAL` spellings.
+
 - **R14 CAMPAIGN TRIAGE batch, round 2, part A — the `*NODE` card's own
   constraint cells, and the starter refusal on a node that cannot be
   depenetrated.** Round 1 cleared the starter-error classes; the campaign then
@@ -1287,6 +1418,12 @@ Prior history (before this changelog was introduced) is summarized in the
   presented for veto at merge time.**
 
 ### Fixed
+
+- **`*CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET_THERMAL` was read as the plain
+  (constraint-based) family.** `handle_contact_tied` tested
+  `kw.endswith("OFFSET")`, and the R14 spelling carries the option in the
+  MIDDLE of the keyword. Every pre-existing spelling ends in `OFFSET`, so the
+  new `"_OFFSET" in kw` test agrees with the old one on all of them.
 
 - **R14 CAMPAIGN TRIAGE batch, round 2, REVIEW ROUND — one contact policy that
   cost a deck its NORMAL termination, one blocker-sized test hole in the

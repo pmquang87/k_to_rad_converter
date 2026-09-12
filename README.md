@@ -3295,6 +3295,72 @@ self-contact with no deformable nodes, the `SOFT`-routed
 `*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`. A *partially*
 rigid secondary side keeps its interface and warns about the nodes removed
 from it.
+`*CONTACT_SURFACE_TO_SURFACE`, `_ONE_WAY_SURFACE_TO_SURFACE`,
+`_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
+`_FORMING_SURFACE_TO_SURFACE_MORTAR` and `_SINGLE_SURFACE` (each optionally
+`_MPP` / `_ID` / `_TITLE`) take the SAME route as their `AUTOMATIC_` twins —
+`/INTER/TYPE7`, and `/INTER/TYPE25` self-contact for the single-surface one.
+They were in NO dispatch table until R14 triage round 3: 78 cards on 44 of the
+356 R14 reference decks, 37 of which have no other contact, and 18 of the 30
+decks whose OpenRadioss internal energy collapses to zero against a non-zero
+LS-DYNA reference carry one. dyna2rad drops the same spellings
+(`convertcontacts.cxx:233` `if (interType.empty()) continue;`). Each states
+what LS-DYNA fact it could not carry: the non-`AUTOMATIC` spellings are
+ONE-SIDED in LS-DYNA and Radioss has no one-sided segment (p.11-10 item 4 — a
+gain in permissiveness, nothing dropped); the two-way ones are checked from one
+side only by `/INTER/TYPE7` (p.11-8 item 1b; measured on `twobar`, IE +1151 %
+against the LS reference, so put the finer side on SSID); `FORMING` ignores the
+tooling thickness and offsets SURFB by `|SBST|/2` (General Remark 9 p.11-128),
+neither of which the `(|SAST|+|SBST|)/2` Gapmin reproduces — use
+`--inter-gapmin ID=VAL`; `MORTAR` is a segment-to-segment contact with a
+consistent nodal assembly and automatic erosion (General Remark 14 p.11-131)
+that OpenRadioss has no interface for at all.
+`*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE` takes the same route with
+**`Inacti` forced to 0** and the deck's own `IGNORE` cell ignored: the keyword
+exists to RESOLVE an initial overlap into prestress (p.11-66), and
+`i7pwr3.F:244-258` makes `Inacti` 5/6 ACCEPT the overlap as the zero-force
+state — which would leave the interference fit unstressed. The `LCID1`/`LCID2`
+stiffness ramp has no counterpart (Radioss has no time-varying `Stfac`), so the
+full penalty force appears in cycle 1 instead of ramping in.
+`*CONTACT_SINGLE_EDGE` → `/INTER/TYPE11` **self edge-impact** (`line_IDm = 0`)
+over the surface's own edges, through the same `/LINE` synthesis the
+`SOFT = -11` route uses. A `*SET_SEGMENT` may state those edges DIRECTLY as
+two-node rows (the R14 carrier `contact.edge.k` states 58 of them and no face);
+they are kept as the set's edge list, named in a warning, and are NOT part of
+the `/SURF/SEG` built from the same set. LS-DYNA restricts the contact to
+exterior edges whose in-plane normals face each other (p.11-124 Remark 3);
+`/INTER/TYPE11` has no such restriction, so the converted contact is the more
+permissive of the two, and no node-to-surface interface is added — matching the
+keyword, which has none.
+`*CONTACT_{SURFACE_TO_SURFACE,AUTOMATIC_SURFACE_TO_SURFACE_MORTAR,TIED_SURFACE_TO_SURFACE[_OFFSET]}_THERMAL`
+carry a real thermal contact, not a warn-drop: `Ithe = 1` plus `Kthe = H0`
+(the closed-gap conductance — `i7therm.F:191` `PHI = A·ΔT·dt/RSTIF` with
+`FRIGAP(20) = 1/Kthe`, `i2therm.F:110` `PHI = A·ΔT·dt·Kthe`),
+`Ithe_form = 1` (`ALGO = 0`, two-way), `Frad = FRAD`, `Drad = LMAX` and
+`Fheats/Fheatm = FTOSA / 1−FTOSA` on TYPE7/TYPE25 (TYPE2 has conduction only).
+NOT converted, and NAMED per card: `K` (the fluid-gap branch `h = K/l_gap` —
+Radioss's `Kthe` is a constant or a function of contact PRESSURE, so the whole
+open-gap branch collapses onto `H0`), `LMIN`, `BC_FLAG`, and `ALGO = 1/2/3`,
+which is refused by name rather than given an invented `Tint`. The card is
+dropped entirely, with the reason, on a deck that emits no `/HEAT/MAT`: the
+starter disables interface heat exchange with `WARNING 702`
+(`hm_read_inter_type07.F:700-707`) unless a Lagrangian part's material carries
+one, and on an implicit tie the card is lost outright because `/INTER/TYPE10`
+has no thermal field at all.
+`*CONTACT_DRAWBEAD`, `*CONTACT_ENTITY` and `*CONTACT_SLIDING_ONLY` are
+**RECOGNIZED and deliberately NOT converted** — they reach "Recognized but not
+emitted" with a warning that names the LS-DYNA field, the OpenRadioss card that
+cannot carry it, the physical consequence and a remedy. `/INTER/TYPE8` takes a
+CONSTANT lineic restraining force where `LCIDRF` is a curve of it against the
+bead closure (`hm_read_inter_type08.F:131-137` vs p.11-54); `*CONTACT_ENTITY`'s
+analytic surface maps only onto `/RWALL/{PLANE,SPHER,CYL}` for GEOTYP 1/2/3 and
+`/RWALL` makes every secondary node kinematically constrained
+(`hm_read_rwall_spher.F:290`); and no OpenRadioss interface forbids separation
+while allowing sliding — `/INTER/TYPE3` and `/INTER/TYPE5` both echo `SLIDING
+AND VOIDS`. The `SLIDING_ONLY` refusal is MEASURED: routing its one corpus
+carrier through `/INTER/TYPE7` collapsed the time step from 1.01e-07 to 8.3e-17
+and froze the run at 64.6 % of the target after 266 379 cycles, against a 1.8 s
+NORMAL termination without it.
 `*CONTACT_ERODING_{SINGLE_SURFACE,SURFACE_TO_SURFACE,NODES_TO_SURFACE}` (each
 optionally `_MPP` / `_ID` / `_TITLE`) → `/INTER/TYPE25`, following dyna2rad's
 routing (`convertcontacts.cxx:117-131` and the generic `NODES_TO_SURFACE`
@@ -3482,11 +3548,32 @@ auto-penalty standard formulation) for SURFACE_TO_SURFACE — the purely
 kinematic 1/5 hard-fail with `ERROR 556` as soon as the two tied parts are
 conformally meshed and share a node, which is exactly the layout these
 keywords exist for.
-A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` with a **negative offset** —
-dyna2rad's discriminator `(SFST*SST + SFMT*MST)/2 < 0` (raw Card-3 scale factors,
-no zero→1 defaulting, so a blank `SFST`/`SFMT` always stays TYPE2) — instead
-becomes `/INTER/TYPE10` (**penalty** tie: bonds by a spring over `GAP=(|SST|+|MST|)/2`,
+A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET][_THERMAL]` on an **IMPLICIT** deck,
+and any tied contact whose secondary side is **entirely rigid**, instead becomes
+`/INTER/TYPE10` (**penalty** tie: bonds by a spring over `GAP=(|SST|+|MST|)/2`,
 so its secondary nodes may coexist with `/RBODY` and rotations are not tied).
+The family is keyed on the KEYWORD and the SOLVER, both measured — the old
+dyna2rad discriminator `(SFST*SST + SFMT*MST)/2 < 0` is **deleted**: a negative
+Card-3 `SST`/`MST` is a tying SEARCH DISTANCE (Vol I R17 p.11-33 `SAST`,
+General Remark 4 p.11-125), not a family flag, and General Remark 7 (p.11-127)
+puts the plain spelling in the CONSTRAINT-based family. What decides is the
+solver: the implicit engine **refuses** `/INTER/TYPE2` Spotflag 10…25 outright
+(`ind_glob_k.F:4594-4599`, `ERROR 241`; 26 downgrades to 25 with `WARNING
+1177`) and diverges on 27/28/1/5 at cycles 16/8/9/19 on the corpus carrier
+`05_4_2_welding_uncoupled_link`, where `/INTER/TYPE10` reaches NORMAL in 79 —
+while on a determinate two-hex EXPLICIT coupon (closed form `IE = ½Eε²AL =
+210.0`, merged bar 209.2) `/INTER/TYPE2` reproduces the bar EXACTLY and
+`/INTER/TYPE10` at Radioss's default `STFAC` carries 67.85, **−67.6 %** of the
+tie. So an explicit tie gets the exact card and an implicit one the card that
+converges. `--tie-stfac VALUE|auto` stiffens the penalty tie: `i7sti3.F:444`
+makes the tie spring `STFAC·A²·K/V` per tied node = `STFAC/(3(1−2ν))` times the
+stiffness of the element it welds (0.167× at the 0.2 default), so `auto` =
+`100·3(1−2ν)` from the main side's Poisson ratio (120 at ν = 0.3, measured
++0.05 %); `dt` scales as `1/√STFAC` (0.2 → 141 cycles, 120 → 2435). The default
+leaves `STFAC` at 0 and NAMES the softness, because on the implicit welding
+deck `STFAC = 10` already changes IE by −30.5 % and halves the implicit step.
+The all-rigid-secondary arm applies the derived value whether or not you ask
+for it — there is no `/INTER/TYPE2` alternative there.
 The TYPE2 `dsearch` is measured from the mesh — the worst slave-node-to-master-
 segment distance × 1.2 — so tied nodes offset from a shell master's MID-PLANE
 by half the plate thickness (the usual welded-shell layout) stay tied;
