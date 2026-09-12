@@ -224,23 +224,43 @@ def _elform_to_ishell(elform: int, is_implicit: bool,
 
 
 def _elform_to_isolid(elform: int) -> int:
-    # Radioss /PROP/SOLID Isolid (cfg prop_p14_solid):
-    #   17 = 8-node full (2x2x2) integration — k2rad's structural-hex default;
-    #        no hourglass modes, chosen for implicit accuracy.
-    #   14 = tet4 (Kessler).  24 = HEPH (reduced integration, *physically*
-    #        stabilized). NB: Isolid=2 is the Hallquist 1-IP viscous-hourglass
-    #        hex (under-integrated, hourglass-prone) — it is NOT HEPH and is
-    #        intentionally never emitted here.
-    # LS-DYNA ELFORM 2 is the FULLY-INTEGRATED selective-reduced (S/R) hex, so
-    # it maps to the full-integration Isolid 17 — matching its fully-integrated
-    # semantics, keeping every hex ELFORM {0,1,2,16,-1} → 17, and staying
-    # consistent with the *HOURGLASS gate (ELFORM 2 = no hourglass modes, so it
-    # is excluded from IHQ→Isolid remapping in mesh.py). The previous 2→2
-    # mapping put a fully-integrated LS-DYNA element onto an under-integrated
-    # Radioss element: a single-hex uniaxial-pull validation hourglassed to a
-    # ~99.9% energy-error blow-up (IE 0.14→178 while external work stayed ~2.5),
-    # spuriously spiking sigma1 and deleting the element ~8x early; ELFORM 1→17
-    # ran clean.
+    """The Isolid an ELFORM implies BEFORE hourglass control has its say.
+
+    This is the *base* of a two-step resolution, not the emitted value. The
+    second step is ``writer/mesh._solid_hg_values``, which remaps the base
+    through the LS-DYNA hourglass type — from the deck's ``*CONTROL_HOURGLASS``
+    / ``*HOURGLASS`` card when it states one, and otherwise (default on, opt
+    out with ``--no-default-hourglass``) from LS-DYNA's OWN default for a
+    1-point solid: IHQ 2 → ``Isolid`` 1 on an explicit deck, IHQ 6 →
+    ``Isolid`` 24 on an implicit one. So a plain ELFORM 1 hex does NOT ship at
+    17 any more; it ships at 1 (explicit) or 24 (implicit), which is what
+    LS-DYNA itself runs. Keep the two steps separate: the ELFORM alone says
+    what the element IS, the hourglass source says how it is stabilised.
+
+    Radioss /PROP/SOLID Isolid (cfg ``prop_p14_solid.cfg``):
+      * ``17`` H8C, 8-node compatible, full 2x2x2 integration, "No Hourglass"
+        in the cfg's own words. ``hm_read_prop14.F:369-372`` forces
+        ``GEO(13) = ZERO`` for every Isolid but 1/2/24, so the ``h`` cell is
+        physically dead on it. Still the base for every hex here, and the
+        EMITTED value wherever the default is screened off (ELFORM -1/-2, a
+        preloaded deck, an unmapped IHQ 8/9/10) or the flag is off.
+      * ``14`` tet4 (Kessler). ``24`` HEPH (1 Gauss point with physical
+        stabilisation). ``1`` the Belytschko-orthogonalised viscous 1-point
+        hex; ``2`` the Hallquist viscous 1-point hex without orthogonality,
+        which is never a target here.
+
+    LS-DYNA ELFORM 2 is the FULLY-INTEGRATED selective-reduced (S/R) hex, so it
+    maps to the full-integration Isolid 17 and STAYS there: it has no hourglass
+    modes, and ``_solid_hg_values`` gates it out of every remap. The previous
+    2 → 2 mapping put a fully-integrated LS-DYNA element onto an
+    under-integrated Radioss element: a single-hex uniaxial-pull validation
+    hourglassed to a ~99.9 % energy-error blow-up (IE 0.14 → 178 while external
+    work stayed ~2.5), spuriously spiking sigma1 and deleting the element ~8x
+    early. Note that arm was Isolid **2** (Hallquist, no orthogonalisation) —
+    not the Isolid 1 the hourglass default now selects, which is measured good
+    on the same class of deck (``taylor_A`` IE +2.56 % → +0.00 % against its
+    own LS-DYNA reference).
+    """
     return {0: 17, 1: 17, 2: 17, 10: 14, 13: 14, 16: 17, -1: 17}.get(elform, 17)
 
 

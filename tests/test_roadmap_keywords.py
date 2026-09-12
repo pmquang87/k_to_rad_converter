@@ -19,13 +19,16 @@ from k2rad.writer.loads import (
 )
 
 
-def _convert(deck: str):
-    """convert() a deck string; return (result, starter_text)."""
+def _convert(deck: str, **kw):
+    """convert() a deck string; return (result, starter_text).
+
+    ``**kw`` reaches ``convert()`` — the tie-family tests pass ``tie_stfac``.
+    """
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -1213,7 +1216,7 @@ class AutomaticGeneralSoftRoutingTests(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# *CONTACT_TIED_SURFACE_TO_SURFACE — negative-gap discriminator → TYPE10/TYPE2
+# *CONTACT_TIED_SURFACE_TO_SURFACE — the tie family, keyed on KEYWORD + SOLVER
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TIED_MESH = (
@@ -1265,14 +1268,31 @@ def _tied_contact(sfs=1.0, sfm=1.0, sst=0.0, mst=0.0, sfst=0.0, sfmt=0.0,
     )
 
 
-class TiedNegativeGapRoutingTests(unittest.TestCase):
-    """(SFST*SST + SFMT*MST)/2 < 0 → /INTER/TYPE10 (penalty), else /INTER/TYPE2."""
+_TIED_IMPLICIT = "*CONTROL_IMPLICIT_GENERAL\n         1       0.1\n"
 
-    def test_negative_discriminator_emits_type10(self):
+
+class TiedFamilyRoutingTests(unittest.TestCase):
+    """The named successor of ``TiedNegativeGapRoutingTests``.
+
+    That class pinned dyna2rad's discriminator ``(SFST*SST + SFMT*MST)/2 < 0``
+    → ``/INTER/TYPE10``. R14 triage round 3 DELETED that rule: a negative
+    Card-3 SST/MST is a tying SEARCH DISTANCE (Vol I R17 p.11-33 SAST,
+    General Remark 4 p.11-125), LS-DYNA's own family split keys on the KEYWORD
+    (General Remark 7 p.11-127), and the corpus's only two carriers of the sign
+    rule are IMPLICIT — where ``/INTER/TYPE2`` is refused or diverges
+    (``ind_glob_k.F:4594-4599`` ERROR 241; measured divergence at cycles
+    16/8/9/19). So the family is now ``variant`` + ``state.is_implicit``, and
+    the same decks that used to be routed by accident are routed for a stated
+    reason. Every assertion of the old class has its successor here.
+    """
+
+    # --- the SIGN is no longer a family selector (5 old tests) -------------
+    def test_negative_discriminator_is_no_longer_type10_on_an_explicit_deck(self):
         res, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
-        self.assertIn("/INTER/TYPE10/60", s)
-        self.assertNotIn("/INTER/TYPE2/", s)
-        self.assertTrue(any("penalty tie" in w and "TYPE10" in w for w in res.warnings))
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+        # ...and the old rule's own text is gone with it.
+        self.assertFalse(any("SFST*SST" in w for w in res.warnings))
 
     def test_nonnegative_discriminator_stays_type2(self):
         _, s = _convert(_TIED_MESH + _tied_contact(sst=0.5, sfst=1.0) + _TIED_TAIL)
@@ -1280,7 +1300,6 @@ class TiedNegativeGapRoutingTests(unittest.TestCase):
         self.assertNotIn("/INTER/TYPE10/", s)
 
     def test_discriminator_boundary_zero_is_type2(self):
-        # (1*-0.5 + 1*0.5)/2 == 0 → NOT < 0 → kinematic TYPE2.
         _, s = _convert(_TIED_MESH
                         + _tied_contact(sst=-0.5, mst=0.5, sfst=1.0, sfmt=1.0)
                         + _TIED_TAIL)
@@ -1288,15 +1307,40 @@ class TiedNegativeGapRoutingTests(unittest.TestCase):
         self.assertNotIn("/INTER/TYPE10/", s)
 
     def test_blank_sfst_stays_type2_even_with_negative_sst(self):
-        # The reimplementation trap: a blank SFST/SFMT (0) → dSearch 0 → TYPE2,
-        # regardless of a negative SST. TYPE10 needs BOTH a nonzero SFST/SFMT and
-        # a negative SST/MST.
         _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=0.0) + _TIED_TAIL)
         self.assertIn("/INTER/TYPE2/60", s)
         self.assertNotIn("/INTER/TYPE10/", s)
 
+    def test_offset_variant_is_type2_too_on_an_explicit_deck(self):
+        # _OFFSET / _CONSTRAINED_OFFSET shared the sign branch; now they share
+        # the solver branch, and explicit means the exact tie.
+        _, s = _convert(_TIED_MESH
+                        + _tied_contact(sst=-0.5, sfst=1.0,
+                                        kw="SURFACE_TO_SURFACE_OFFSET")
+                        + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+    # --- the SOLVER is (2 new tests + the two old TYPE10 shape tests) -------
+    def test_implicit_surface_to_surface_takes_the_penalty_tie(self):
+        res, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                          + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE10/60", s)
+        self.assertNotIn("/INTER/TYPE2/", s)
+        w = next(w for w in res.warnings if "/INTER/TYPE10/60" in w)
+        self.assertIn("ERROR 241", w)
+        self.assertIn("ind_glob_k.F:4594-4599", w)
+        self.assertIn("An EXPLICIT deck gets the exact /INTER/TYPE2 tie", w)
+
+    def test_implicit_positive_card3_also_takes_the_penalty_tie(self):
+        """The sign is now irrelevant on BOTH sides of the old rule."""
+        _, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                        + _tied_contact(sst=0.5, sfst=1.0) + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE10/60", s)
+
     def test_type10_entities_are_grnod_and_surf(self):
-        _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        _, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                        + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
         _, card1 = _inter_card1_floats(s, "/INTER/TYPE10/")
         grnod_id, surf_id = int(card1[0]), int(card1[1])
         self.assertIn(f"/GRNOD/NODE/{grnod_id}", s)
@@ -1305,30 +1349,62 @@ class TiedNegativeGapRoutingTests(unittest.TestCase):
 
     def test_type10_gap_from_sst_mst(self):
         # GAP = (|SST| + |MST|)/2 = (0.5 + 0)/2 = 0.25 on the STFAC/…/GAP card.
-        _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        _, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                        + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
         body = _block(s, _hdr(s, "/INTER/TYPE10/"))
         gap_card = next(r for ln in body
                         if len(r := _num_row(ln)) == 4 and 0.25 in r)
         self.assertEqual(gap_card, [0.0, 0.25, 0.0, 0.0])   # STFAC GAP Tstart Tstop
 
-    def test_offset_variant_also_discriminates_to_type10(self):
-        # _OFFSET / _CONSTRAINED_OFFSET share the branch — routed only by sign.
-        _, s = _convert(_TIED_MESH
-                        + _tied_contact(sst=-0.5, sfst=1.0, kw="SURFACE_TO_SURFACE_OFFSET")
-                        + _TIED_TAIL)
-        self.assertIn("/INTER/TYPE10/60", s)
+    # --- the STFAC lever ---------------------------------------------------
+    def test_default_implicit_tie_keeps_stfac_zero_and_names_the_cost(self):
+        """Byte-identical to the shipped card — the softness is NAMED, not
+        silently fixed, because STFAC 10 on the corpus carrier changes IE by
+        -30.5 % and halves the implicit step."""
+        res, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                          + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        w = next(w for w in res.warnings if "/INTER/TYPE10/60" in w)
+        self.assertIn("STFAC=0 from Radioss's own default (0 -> 0.2)", w)
+        self.assertIn("-67.6 %", w)
+        self.assertIn("i7sti3.F:444", w)
 
+    def test_tie_stfac_auto_derives_120_from_the_main_side_poisson(self):
+        # 100 * 3 * (1 - 2*0.3) = 120 for the fixture's *MAT_ELASTIC nu = 0.3.
+        res, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                          + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL,
+                          tie_stfac="auto")
+        body = _block(s, _hdr(s, "/INTER/TYPE10/"))
+        gap_card = next(r for ln in body
+                        if len(r := _num_row(ln)) == 4 and 0.25 in r)
+        self.assertEqual(gap_card, [120.0, 0.25, 0.0, 0.0])
+        self.assertTrue(any("nu=0.3 on the main side" in w
+                            for w in res.warnings))
+
+    def test_tie_stfac_number_is_used_verbatim(self):
+        _, s = _convert(_TIED_MESH + _TIED_IMPLICIT
+                        + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL,
+                        tie_stfac=30.0)
+        body = _block(s, _hdr(s, "/INTER/TYPE10/"))
+        gap_card = next(r for ln in body
+                        if len(r := _num_row(ln)) == 4 and 0.25 in r)
+        self.assertEqual(gap_card, [30.0, 0.25, 0.0, 0.0])
+
+    # --- unchanged classes -------------------------------------------------
     def test_nodes_to_surface_never_type10(self):
-        # The discriminator is a SURFACE_TO_SURFACE construct; a NODES_TO_SURFACE
-        # tie stays kinematic TYPE2 even with a negative SST.
-        deck = (_TIED_MESH
-                + _tied_contact(sst=-0.5, sfst=1.0, kw="NODES_TO_SURFACE")
-                + _TIED_TAIL)
-        _, s = _convert(deck)
-        self.assertIn("/INTER/TYPE2/60", s)
-        self.assertNotIn("/INTER/TYPE10/", s)
+        # variant != SURFACE_TO_SURFACE is the first branch: a NODES_TO_SURFACE
+        # tie stays kinematic TYPE2 on either solver.
+        for tail in ("", _TIED_IMPLICIT):
+            with self.subTest(implicit=bool(tail)):
+                _, s = _convert(_TIED_MESH + tail
+                                + _tied_contact(sst=-0.5, sfst=1.0,
+                                                kw="NODES_TO_SURFACE")
+                                + _TIED_TAIL)
+                self.assertIn("/INTER/TYPE2/60", s)
+                self.assertNotIn("/INTER/TYPE10/", s)
 
     def test_sst_mst_sfst_sfmt_are_parsed(self):
+        # They are no longer a family selector, but they are still Card-3 cells
+        # a reader expects to see carried (sst/mst drive _tied_dsearch).
         st = _dispatch(_TIED_MESH
                        + _tied_contact(sfs=1.0, sfm=1.0, sst=-0.5, mst=-0.25,
                                        sfst=2.0, sfmt=3.0)
@@ -1340,8 +1416,6 @@ class TiedNegativeGapRoutingTests(unittest.TestCase):
         self.assertEqual((c.sfs, c.sfm), (1.0, 1.0))
 
     def test_plain_tied_no_thickness_still_type2(self):
-        # No SST/MST/SFST/SFMT at all → kinematic TYPE2 (no regression on the
-        # ordinary tied weld).
         _, s = _convert(_TIED_MESH + _tied_contact() + _TIED_TAIL)
         self.assertIn("/INTER/TYPE2/60", s)
         self.assertNotIn("/INTER/TYPE10/", s)

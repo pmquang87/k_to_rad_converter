@@ -86,6 +86,7 @@ def parse_inter_gapmin(text: str) -> dict:
 def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ground_springs: bool, ground_spring_k_text: str,
                          soften_stfac_text: str,
+                         tie_stfac_text: str = "",
                          inter_gapmin_text: str = "",
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
@@ -98,6 +99,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          law106_shell_restate: bool = True,
                          zero_t0_sentinel: bool = True,
                          node_tc_rc_bcs: bool = True,
+                         default_hourglass: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -130,7 +132,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["tet10_to_tet4"] = bool(tet10_to_tet4)
 
     fp_text = (fixpoint_count_text or "").strip()
-    if fp_text:                                   # blank → convert() default (100)
+    if fp_text:                                     # blank → convert() default (0)
         try:
             kwargs["fixpoint_count"] = int(fp_text)
         except ValueError:
@@ -166,6 +168,17 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
         except ValueError:
             raise ValueError(f"Soften Stfac must be a number, got {st!r}.")
 
+    ts = (tie_stfac_text or "").strip()
+    if ts:
+        if ts.lower() == "auto":
+            kwargs["tie_stfac"] = "auto"
+        else:
+            try:
+                kwargs["tie_stfac"] = float(ts)
+            except ValueError:
+                raise ValueError(
+                    f"Tie STFAC must be a number or 'auto', got {ts!r}.")
+
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
 
     bg = (blast_ground or "auto").strip() or "auto"
@@ -184,6 +197,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["zero_t0_sentinel"] = bool(zero_t0_sentinel)
 
     kwargs["node_tc_rc_bcs"] = bool(node_tc_rc_bcs)
+
+    kwargs["default_hourglass"] = bool(default_hourglass)
 
     kwargs["write_restart"] = bool(write_restart)
 
@@ -266,13 +281,14 @@ class ConverterGUI:
         self.u_len = tk.StringVar(value="mm")
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
-        self.fixpoint_count = tk.StringVar(value="100")
+        self.fixpoint_count = tk.StringVar(value="0")
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
         self.law106_shell_restate = tk.BooleanVar(value=True)
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.node_tc_rc_bcs = tk.BooleanVar(value=True)
+        self.default_hourglass = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
@@ -287,6 +303,7 @@ class ConverterGUI:
         self.auto_gapmin = tk.BooleanVar(value=False)
         self.gapmin_factor = tk.StringVar(value="0.8")
         self.stfac = tk.StringVar()
+        self.tie_stfac = tk.StringVar()
         self.deformable_recipe = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready.")
         self.progress = tk.DoubleVar(value=0.0)
@@ -327,7 +344,10 @@ class ConverterGUI:
         ttk.Label(fp, text="Implicit FIXPOINT count:").pack(side="left")
         ttk.Entry(fp, textvariable=self.fixpoint_count, width=6).pack(side="left", padx=3)
         ttk.Label(fp, text="evenly spaced output milestones the implicit time step lands on "
-                           "(1–100, default 100; 0 = off; implicit decks only)",
+                           "(1–100; DEFAULT 0 = off since 2026-09 — the grid makes the adaptive "
+                           "step oscillate against /IMPL/DT/2 and cost ten R14 reference decks "
+                           "their termination; the price of 0 is fewer output states. "
+                           "Implicit decks only)",
                   foreground="gray").pack(side="left")
 
         bg = ttk.Frame(io)
@@ -438,6 +458,23 @@ class ConverterGUI:
             variable=self.airbag_particle_uniform).grid(
                 row=13, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="LS-DYNA's DEFAULT hourglass control on a defaulted 1-point "
+                     "*SECTION_SOLID (default on: Vol I R17 p.12-271 Remark 1 — "
+                     "an omitted *CONTROL_HOURGLASS, or IHQ 0, means type 2 for "
+                     "explicit and type 6 for implicit solids, QH 0.1; the deck's "
+                     "own d3hsp echoes it. Without it those hexes get Isolid 17, "
+                     "which prop_p14_solid.cfg calls '2*2*2 Integration Points, "
+                     "No Hourglass'. Measured: sloshing_A goes from a "
+                     "TIMESTEP-LIMIT death at t = 0.18 to NORMAL at t = 2.0 "
+                     "(IE -0.25 %), taylor_A from IE +2.56 % to +0.00 %, the "
+                     "implicit ex_03_solid_elform_1 from -20.4 % to -4.1 %. "
+                     "ELFORM -1/-2, 2/3/16, tets, ALE, LAW115 and preloaded decks "
+                     "are screened out; a *MAT_NULL fluid keeps the viscous form. "
+                     "Untick to keep the pre-2026-09 output)",
+            variable=self.default_hourglass).grid(
+                row=13, column=3, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -545,8 +582,19 @@ class ConverterGUI:
                            ".k-native per contact: Card-3 SFS (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
+        ttk.Label(fc, text="Tie STFAC:").grid(row=5, column=0, sticky="w", **pad)
+        ttk.Entry(fc, textvariable=self.tie_stfac, width=10).grid(
+            row=5, column=1, sticky="w", **pad)
+        ttk.Label(fc, text="penalty-tie stiffness scale on /INTER/TYPE10 — a number, or "
+                           "'auto' for 100x the local element stiffness (120 at nu=0.3). "
+                           "Blank = Radioss's own 0.2, measured as a -67.6 % tie on a "
+                           "determinate coupon; 30 -> -0.76 %, 120 -> +0.05 %, at dt x 0.115 "
+                           "and dt x 0.058. Only implicit ties and all-rigid-secondary ties "
+                           "use /INTER/TYPE10.",
+                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+
         rc = ttk.Frame(fc)
-        rc.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        rc.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
             rc, text="Deformable–deformable contact recipe (Inacti=5 + /IMPL/DT/2 L_dtn=50 "
                      "+ /IMPL/QSTAT/DTSCAL=0.05)",
@@ -554,7 +602,7 @@ class ConverterGUI:
         ttk.Label(fc, text="Use when two DEFORMABLE parts contact in an implicit deck (e.g. force control "
                            "through a clearance-fit deformable pin) and the solve chatters or stalls. "
                            "The converter warns when it detects such contact.",
-                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+                  foreground="gray").grid(row=8, column=1, columnspan=2, sticky="w", padx=6)
 
         # ── Action row ──────────────────────────────────────────────────────
         actions = ttk.Frame(main)
@@ -631,6 +679,7 @@ class ConverterGUI:
                 ground_springs=self.ground.get(),
                 ground_spring_k_text=self.ground_k.get(),
                 soften_stfac_text=self.stfac.get(),
+                tie_stfac_text=self.tie_stfac.get(),
                 tet10_to_tet4=self.tet10.get(),
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
@@ -642,6 +691,7 @@ class ConverterGUI:
                 law106_shell_restate=self.law106_shell_restate.get(),
                 zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 node_tc_rc_bcs=self.node_tc_rc_bcs.get(),
+                default_hourglass=self.default_hourglass.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -727,7 +777,7 @@ class ConverterGUI:
         bits = []
         if kwargs.get("tet10_to_tet4"):
             bits.append("TET10→TET4 downgrade")
-        if kwargs.get("fixpoint_count", 100) != 100:
+        if kwargs.get("fixpoint_count", 0) != 0:
             bits.append(f"fixpoint count={kwargs['fixpoint_count']}")
         if kwargs.get("ground_springs"):
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")
@@ -737,6 +787,10 @@ class ConverterGUI:
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:
             bits.append(f"soften Stfac={kwargs['soften_stfac']:g}")
+        if kwargs.get("tie_stfac") is not None:
+            _ts = kwargs["tie_stfac"]
+            bits.append("tie STFAC=" + (_ts if isinstance(_ts, str)
+                                        else f"{_ts:g}"))
         if kwargs.get("deformable_contact_recipe"):
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":
@@ -753,6 +807,9 @@ class ConverterGUI:
         if not kwargs.get("node_tc_rc_bcs", True):
             bits.append("*NODE TC/RC constraints left free "
                         "(--no-node-tc-rc-bcs)")
+        if not kwargs.get("default_hourglass", True):
+            bits.append("defaulted 1-point solids left at Isolid 17 with no "
+                        "hourglass control (--no-default-hourglass)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

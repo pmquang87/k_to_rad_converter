@@ -17,6 +17,23 @@ Examples
 import argparse
 import sys
 from pathlib import Path
+from typing import Union
+
+
+def _tie_stfac_arg(text: str) -> Union[str, float]:
+    """``--tie-stfac`` accepts a number or the literal ``auto``.
+
+    ``auto`` is kept as the STRING all the way to the writer, which is the only
+    place that can evaluate ``100*3(1-2nu)`` — nu comes from the tie's own main
+    side, so there is no one value the CLI could resolve it to.
+    """
+    if text.strip().lower() == "auto":
+        return "auto"
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--tie-stfac takes a number or 'auto', not {text!r}")
 
 
 def _make_progress_printer():
@@ -100,13 +117,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fixpoint-count",
         type=int,
-        default=100,
+        default=0,
         metavar="N",
         help="Number of evenly spaced /IMPL/DT/FIXPOINT output milestones the "
              "implicit time-step controller is forced to land on (k/N x the run "
-             "end, for k = 1..N; default 100 = a point every 1 percent). Clamped "
-             "to the engine's 1..100 range; 0 disables the card. Implicit decks "
-             "only; ignored for explicit.",
+             "end, for k = 1..N). Clamped to the engine's 1..100 range. "
+             "DEFAULT 0 = no card, changed 2026-09 from 100: the grid makes "
+             "the adaptive step oscillate hard against /IMPL/DT/2 (ex_14's own "
+             "cycle table alternates a big FIXPOINT jump with a tiny recovery "
+             "at 2:1 ratios), and trapezoidal Newmark is unconditionally "
+             "stable at a CONSTANT step, not at one that alternates like "
+             "that. MEASURED on the dynaexamples R14 roster: ten decks that "
+             "died 'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' reach "
+             "NORMAL TERMINATION without it (ex_01 x3, ex_14 x4, ex_15 x3 - "
+             "ex_01_thin_shell_elform_2 from an ERROR at t = 0.105 to t = "
+             "1.000 at IE -13.7 %% against its LS-DYNA reference; "
+             "ex_14_solid_elform_1 from ERROR TERMINATION to NORMAL at cycle "
+             "33, t = 0.01839 of 0.02, engine energy error -0.7 %%, IE "
+             "5.044e7 / KE 4.974e7 against the LS reference's 2.4162e7 / "
+             "3.937e7 - the -3.1 %% / 1.417e7 / 3.231e7 this string used to "
+             "quote is the --no-default-hourglass arm of the same deck, not "
+             "this one), 4.2_Buckling_of_Beer_Can "
+             "reaches 2.8x further, and three currently-NORMAL controls do "
+             "not regress (two improve). A COARSER grid is not the fix: at "
+             "--fixpoint-count 10 ex_15 terminates at a 99.9 %% energy error "
+             "and ex_14 at 86.1 %%, both NORMAL banners over junk. "
+             "The COST of 0 is fewer output states - 15 "
+             "cycles become 8 on the controls - which is the whole reason the "
+             "card exists, so pass a count back if you need the milestones. "
+             "Implicit decks only; ignored for explicit.",
     )
 
     parser.add_argument(
@@ -161,6 +200,23 @@ def build_parser() -> argparse.ArgumentParser:
              "(e.g. 0.3) as contact-chatter insurance; overrides the per-contact "
              "Card-3 SFS mapping. Default: engine auto (0). (.k-native per contact: "
              "set Card-3 SFS, e.g. SFS=0.3.)",
+    )
+    fc.add_argument(
+        "--tie-stfac",
+        type=_tie_stfac_arg,
+        default=None,
+        metavar="VALUE|auto",
+        help="Set STFAC (the penalty-tie stiffness scale) on every "
+             "/INTER/TYPE10 tie. 'auto' asks for 100x the local element "
+             "stiffness, i.e. 100*3(1-2nu) from the tie's main side (120 at "
+             "nu = 0.3). Default: leave STFAC 0, which the starter turns into "
+             "Radioss's own 0.2 — MEASURED on a determinate two-hex coupon "
+             "that is a -67.6 %% tie (0.167x the stiffness of the element it "
+             "welds); 30 reaches -0.76 %% and 120 reaches +0.05 %%, at "
+             "dt x 0.115 and dt x 0.058 (dt scales as 1/sqrt(STFAC)). Only "
+             "IMPLICIT ties and ties with an all-rigid secondary side use "
+             "/INTER/TYPE10 at all; an explicit tie gets /INTER/TYPE2, which "
+             "reproduces the same coupon exactly at no time-step cost.",
     )
     fc.add_argument(
         "--auto-gapmin",
@@ -288,6 +344,39 @@ def build_parser() -> argparse.ArgumentParser:
              "same DOF measures a 99.9 %% engine energy error), DOFs a "
              "*BOUNDARY_SPC already states merged rather than restated. Use "
              "--no-node-tc-rc-bcs to keep those DOFs free.",
+    )
+    parser.add_argument(
+        "--default-hourglass",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give a 1-point *SECTION_SOLID that the deck leaves DEFAULTED "
+             "LS-DYNA's own default hourglass control. ON by default. Vol I "
+             "R17 p.12-271 *CONTROL_HOURGLASS Remark 1: 'If omitted or if "
+             "IHQ = 0, the default hourglass control types are as follows: "
+             "... b) For solids: type 2 for explicit; type 6 for implicit', "
+             "with QH 0.1 (a stated QH/QM of 0.0 is that same default - "
+             "birdball.k states IHQ 2 / QH 0.0 and its own d3hsp echoes "
+             "'hourglass coefficient = 1.00000E-01'). Those go through the "
+             "existing IHQ -> Isolid remap, i.e. Isolid 1 (viscous, "
+             "Belytschko) explicit and Isolid 24 (HEPH) implicit, instead of "
+             "the full-integration Isolid 17 - which prop_p14_solid.cfg calls "
+             "'2*2*2 Integration Points, No Hourglass' and for which "
+             "hm_read_prop14.F:369-372 forces the coefficient to ZERO. "
+             "MEASURED against each deck's own LS-DYNA glstat: sloshing_A "
+             "goes from a TIMESTEP-LIMIT death at t = 0.18 to NORMAL "
+             "TERMINATION at t = 2.0 (IE -0.25 %%), sloshing_C from a timeout "
+             "to NORMAL (+2.82 %%), taylor_A from IE +2.56 %% / KE +1.48 %% "
+             "to +0.00 %% / -0.03 %%, rodsol from +2.88 %% / +4.04 %% to "
+             "-1.72 %% / +1.41 %%, and the IMPLICIT ex_03_solid_elform_1 from "
+             "-20.38 %% to -4.14 %%. Screened out: ELFORM -1/-2 (Vol I "
+             "p.41-104 Remark 13 - no hourglass energy at all), ELFORM 2/3/16 "
+             "and the tets (no hourglass modes), ALE sections, /MAT/LAW115 "
+             "sections (own measured remap) and any deck with an "
+             "*INITIAL_STRESS_SECTION (Isolid 1/2 hit zero-or-negative volume "
+             "at cycle 0 under /PRELOAD). A *MAT_NULL / *MAT_ELASTIC_FLUID "
+             "section keeps the VISCOUS Isolid 1 even implicitly (Vol I "
+             "p.25-3 *HOURGLASS Remark 4). Use --no-default-hourglass to keep "
+             "the pre-2026-09 full-integration, no-hourglass output.",
     )
     parser.add_argument(
         "--law106-shell-restate",
@@ -501,6 +590,7 @@ def main(argv=None) -> int:
         ground_spring_k=args.ground_spring_k,
         inter_gapmin=inter_gapmin,
         soften_stfac=args.soften_stfac,
+        tie_stfac=args.tie_stfac,
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
@@ -513,6 +603,7 @@ def main(argv=None) -> int:
         law106_shell_restate=args.law106_shell_restate,
         zero_t0_sentinel=args.zero_t0_sentinel,
         node_tc_rc_bcs=args.node_tc_rc_bcs,
+        default_hourglass=args.default_hourglass,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

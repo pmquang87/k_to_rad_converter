@@ -1532,7 +1532,12 @@ class PreloadWarningGateTests(unittest.TestCase):
         # ISOLNOD=6 under a solid property is ERROR 3107 at every Isolid but
         # 24 (initia.F:1081-1094), and a silent zero-preload at 24 — the
         # message used to claim the silent case unconditionally, while this
-        # converter emits Isolid 17 for *SECTION_SOLID ELFORM 1.
+        # converter emits Isolid 17 for *SECTION_SOLID ELFORM 1. It still does
+        # HERE, and that is the point: _bar_deck() carries an
+        # *INITIAL_STRESS_SECTION, and writer/mesh._solid_hg_screens turns the
+        # 2026-09 LS-DYNA-default hourglass synthesis OFF for the whole deck
+        # when one is present (Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at
+        # cycle 0 under /PRELOAD Itype=2 — see _PRELOAD_STABLE_ISOLID).
         deck = _bar_deck()
         out = []
         for ln in deck.splitlines():

@@ -934,9 +934,13 @@ class InivelOnRigidBodyMembers(unittest.TestCase):
         w = [x for x in res.warnings
              if "*INITIAL_VELOCITY NSID=99" in x and "rigid body" in x]
         self.assertEqual(len(w), 1, res.warnings)
-        self.assertIn("all 8 of its node(s)", w[0])
+        self.assertIn("8 of its 8 node(s)", w[0])
         self.assertIn("inirby.F", w[0])
-        self.assertIn("RE-POINTED onto the 1 /RBODY main node(s)", w[0])
+        # Round 3 made the MIXED case a SPLIT, so the message counts BODIES
+        # re-pointed rather than saying "all N nodes"; the all-rigid arm is now
+        # the special case of "every body the card covers is fully covered".
+        self.assertIn("1 body/bodies the card FULLY covers", w[0])
+        self.assertIn("RE-POINTED onto their /RBODY main node(s)", w[0])
         self.assertIn("*INITIAL_VELOCITY_RIGID_BODY", w[0])
         # and the emitted group really is the main node, not the members
         lines = starter.splitlines()
@@ -955,12 +959,24 @@ class InivelOnRigidBodyMembers(unittest.TestCase):
         self.assertEqual(len(_headers(starter, "/INIVEL/")), 1, starter)
         self.assertEqual([x for x in res.warnings if "rigid body" in x], [])
 
-    def test_a_MIXED_card_is_warned_and_left_over_all_its_nodes(self):
-        """The guard that makes the re-point safe: when only SOME of the
-        card's nodes are rigid members, re-pointing would drop the FREE ones
-        out of the group entirely (the map has no entry for them), so the card
-        is left alone and named. Without the ``all_rigid`` guard this deck
-        loses brick one's eight nodes silently."""
+    def test_a_MIXED_card_is_SPLIT_in_place(self):
+        """Successor, in place, to
+        ``test_a_MIXED_card_is_warned_and_left_over_all_its_nodes``.
+
+        Round 2 left a mixed card whole, on the reasoning that "re-pointing
+        would drop the FREE ones out of the group entirely (the map has no
+        entry for them)". That is a property of a whole-group replacement, not
+        of the mapping: keeping every deformable node and swapping only the
+        members of the bodies the card FULLY covers loses nothing and is exact
+        for both halves. MEASURED on the corpus's mixed carrier ``pipe.k``
+        (an IVG over 2 parts of which 1 is rigid): cycle-0 KE goes from
+        8.69749e7 to 8.70569e7 against the LS-DYNA glstat's own 8.70616e7,
+        i.e. -0.100 %% to -0.005 %%.
+
+        Here brick two (nodes 11-18) is the *MAT_RIGID part and brick one
+        (1-8) is deformable, so the 16-node group becomes brick one's 8 free
+        nodes plus the one /RBODY main node.
+        """
         deck = self._deck(rigid=True).replace(
             "*SET_NODE_LIST_GENERATE\n" + _row(99) + "\n" + _row(11, 18),
             "*SET_NODE_LIST_GENERATE\n" + _row(99) + "\n" + _row(1, 18))
@@ -975,13 +991,19 @@ class InivelOnRigidBodyMembers(unittest.TestCase):
             if row.startswith(("/", "#")):
                 break
             members.update(int(t) for t in row.split())
-        self.assertEqual(len(members), 16, sorted(members))
+        # every deformable node kept, every rigid member replaced by ONE main
+        self.assertEqual(len(members), 9, sorted(members))
+        self.assertTrue(set(range(1, 9)) <= members, sorted(members))
+        self.assertEqual(members & set(range(11, 19)), set(), sorted(members))
+        main = sorted(members - set(range(1, 9)))[0]
+        self.assertIn(f"/RBODY/{main}", starter)
         w = [x for x in res.warnings
              if "*INITIAL_VELOCITY NSID=99" in x and "rigid body" in x]
         self.assertEqual(len(w), 1, res.warnings)
         self.assertIn("8 of its 16 node(s)", w[0])
-        self.assertNotIn("RE-POINTED", w[0])
-        self.assertIn("re-pointing only the rigid half", w[0])
+        self.assertIn("RE-POINTED onto their /RBODY main node(s)", w[0])
+        self.assertIn("the deformable nodes unchanged", w[0])
+        self.assertIn("from 16 to 9 node(s)", w[0])
 
 
 class ModalDummyCloadScreensPerDof(unittest.TestCase):

@@ -42,12 +42,12 @@ from k2rad.handlers import dispatch
 from k2rad.state import ConversionState
 
 
-def _convert(deck: str):
+def _convert(deck: str, **opts):
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **opts)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -604,7 +604,20 @@ class XrefTests(unittest.TestCase):
         _, starter = _convert(SOLID_DECK.format(MAT=BLATZ_KO + REF_GEOM))
         prop = _block_lines(starter, "/PROP/SOLID/1")
         self.assertEqual(int(prop[1][10:20]), 10)                    # Ismstr
-        self.assertEqual(int(prop[1][0:10]), 17)                     # Isolid kept
+        # SOLID_DECK is ELFORM 1 with no hourglass card, so the Isolid is now
+        # LS-DYNA's own default for an explicit 1-point solid (IHQ 2 -> 1); it
+        # used to read 17 here. The Ismstr promotion is unaffected — and on a
+        # 1-point solid it is belt-and-braces rather than mandatory:
+        # hm_read_xref.F:230 sets ICOMPA = 1 for NPT == 1 as well as for
+        # ISMSTR >= 10, so ERROR 2013 cannot fire either way.
+        self.assertEqual(int(prop[1][0:10]), 1)
+        # The opt-out arm keeps the 8-point Isolid this line used to assert,
+        # where the Ismstr >= 10 branch is the ONLY thing clearing ERROR 2013.
+        _, starter17 = _convert(SOLID_DECK.format(MAT=BLATZ_KO + REF_GEOM),
+                                default_hourglass=False)
+        prop17 = _block_lines(starter17, "/PROP/SOLID/1")
+        self.assertEqual(int(prop17[1][0:10]), 17)
+        self.assertEqual(int(prop17[1][10:20]), 10)
         # ... and without reference geometry the property is untouched.
         _, starter2 = _convert(SOLID_DECK.format(MAT=BLATZ_KO))
         self.assertEqual(int(_block_lines(starter2, "/PROP/SOLID/1")[1][10:20]), 0)
@@ -627,7 +640,11 @@ class XrefTests(unittest.TestCase):
         _, starter = _convert(SOLID_DECK.format(MAT=HYPER_DIRECT))
         prop = _block_lines(starter, "/PROP/SOLID/1")
         self.assertEqual(int(prop[1][10:20]), 10)                    # Ismstr
-        self.assertEqual(int(prop[1][0:10]), 17)                     # Isolid kept
+        # Isolid is LS-DYNA's default for this ELFORM-1 section with no
+        # hourglass card (IHQ 2 -> 1); it used to read 17. The LAW95 Ismstr
+        # rule is what this test pins and it is law-driven, not Isolid-driven
+        # (WARNING 1200 fires on the material, whatever the formulation).
+        self.assertEqual(int(prop[1][0:10]), 1)
         # ... but the N>0 (LAW69) routing keeps the default formulation.
         law69 = ("*MAT_HYPERELASTIC_RUBBER\n"
                  + _row(1, "1.1E-9", 0.495, 2, 0) + "\n"

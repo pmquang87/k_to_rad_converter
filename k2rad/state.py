@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
 
 #: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
@@ -3414,6 +3414,60 @@ class LoadRigidBody:
 
 
 @dataclass
+class ContactRefused:
+    """A ``*CONTACT`` spelling k2rad RECOGNIZES and deliberately does NOT emit.
+
+    The three refusals of R14 triage round 3 (``_DRAWBEAD``, ``_ENTITY``,
+    ``_SLIDING_ONLY``) each have a measured or source-quoted reason why the
+    nearest OpenRadioss card cannot carry the keyword — see
+    ``writer/contacts._make_refused_contact_notes``, which is where the message
+    is built.
+
+    It is a RECORD rather than a warning raised in the handler because the
+    refusal text quotes the deck's own numbers, and one of them
+    (``*CONTACT_DRAWBEAD``'s ``LCIDRF`` curve) is a ``*DEFINE_CURVE`` that in
+    the corpus carrier is defined 150 lines AFTER the contact — so a handler
+    that resolved it would print the range of a curve it has not read yet.
+    """
+    keyword: str
+    inter_id: int
+    #: Card cells the refusal text names, e.g. ``{"lcidrf": 3.0, "dbdth": 4.43}``.
+    #: Integer cells are stored as floats and printed with ``:g``.
+    cells: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ContactThermal:
+    """The ``*CONTACT_..._THERMAL`` THRM 1 card, as the deck states it.
+
+    Card layout (Vol I R17 p.11-76/77, and
+    ``Keyword971/CONTACT/contact_surface_to_surface.cfg:1102-1103``
+    ``COMMENT("$        K      FRAD        HO      LMIN      LMAX      CHLM
+    BG_FLAG      ALGO")``; the R14 decks label column 6 ``ftoslv``/``ftosa``,
+    which is the manual's ``FTOSA``)::
+
+        K  FRAD  H0  LMIN  LMAX  FTOSA  BC_FLAG  ALGO
+
+    The card sits BETWEEN mandatory Card 3 and optional Card A — which is why
+    every ``_THERMAL`` spelling registers with ``extra = 1`` so
+    ``_read_contact_soft`` / ``_read_contact_ignore`` keep landing on Card A /
+    Card C (see the registration table in ``handlers.py``).
+
+    ``K``, ``LMIN`` and ``BC_FLAG`` have no OpenRadioss counterpart and are
+    NAMED as dropped by the writer, not silently discarded — see
+    ``writer/contacts._contact_thermal_cells``.
+    """
+    k: float = 0.0          # fluid conductivity, h_cond = K/l_gap for LMIN<l_gap<=LMAX
+    frad: float = 0.0       # radiation factor            → /INTER Frad
+    h0: float = 0.0         # closed-gap conductance      → /INTER Kthe
+    lmin: float = 0.0       # gap below which H0 applies  (no Radioss field)
+    lmax: float = 0.0       # gap above which no thermal contact → /INTER Drad
+    ftosa: float = 0.0      # fraction of friction heat to SURFA → Fheats/Fheatm
+    bc_flg: int = 0         # thermal boundary-condition flag (no Radioss field)
+    algo: int = 0           # 0 = two-way, 1 = one-way, 2/3 = edge
+
+
+@dataclass
 class ContactAutoSingle:
     inter_id: int
     title: str
@@ -3461,6 +3515,14 @@ class ContactAutoSurf2Surf:
     mst: float = 0.0    # LS-DYNA Card3 MST: contact thickness, main side → Gapmin
     sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
     keyword: str = ""   # source *CONTACT spelling — see ContactAutoSingle.keyword
+    #: The ``_THERMAL`` THRM 1 card, when the spelling carries one.
+    thermal: Optional[ContactThermal] = None
+    #: ``*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE``. The keyword exists to make
+    #: the contact RESOLVE an initial overlap into prestress (Vol I R17 p.11-66),
+    #: so the writer forces ``Inacti = 0`` on it and ignores the deck's own
+    #: IGNORE cell — ``i7pwr3.F:244-258`` makes Inacti 5/6 ACCEPT the overlap as
+    #: the new zero-force state, which is the exact opposite of the keyword.
+    interference: bool = False
 
 
 @dataclass
@@ -3523,16 +3585,14 @@ class ContactTied:
     a tying SEARCH DISTANCE — and the writer honours it as a floor on the
     /INTER/TYPE2 dsearch.
 
-    ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) drive the dyna2rad
-    discriminator (``convertcontacts.cxx`` cc:220):
-    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10, otherwise /INTER/TYPE2.
-    That rule is PRAGMATIC and not LS-DYNA's: General Remark 7 (p.11-127) puts
-    a plain ``*CONTACT_TIED_SURFACE_TO_SURFACE`` in the CONSTRAINT-based family
-    and only the plain ``_OFFSET`` / ``_BEAM_OFFSET`` spellings in the
-    penalty-based one. It is kept because the faithful card does not converge
-    on this build's only two carriers — see ``_tied_interface_type`` for both
-    measured arms. ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size the
-    TYPE10 GAP.
+    ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) used to drive the
+    dyna2rad discriminator (``convertcontacts.cxx`` cc:220)
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10. **That rule is deleted**
+    (R14 triage round 3): the family is now keyed on the KEYWORD and the
+    SOLVER, exactly as ``_tied_interface_type`` documents and measures.
+    ``sfst``/``sfmt`` are still parsed — they are Card-3 cells a reader expects
+    to see carried — and ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size
+    the TYPE10 GAP.
     """
     inter_id: int
     title: str
@@ -3551,6 +3611,9 @@ class ContactTied:
     # say out loud that neither /INTER/TYPE2 nor /INTER/TYPE10 has a fric_ID
     # column to bind the table to.
     fs: float = 0.0
+    keyword: str = ""   # source *CONTACT spelling — see ContactAutoSingle.keyword
+    #: The ``_THERMAL`` THRM 1 card, when the spelling carries one.
+    thermal: Optional[ContactThermal] = None
 
 
 @dataclass
@@ -5023,6 +5086,18 @@ class SegmentSet:
     #: have to re-derive the wrapper and the shell arm would have to duplicate
     #: the /SH3N split. Empty on every deck without that option.
     part_scope: List[int] = field(default_factory=list)
+    #: Data rows that state exactly TWO positive nodes. They are not surface
+    #: segments — ``collapse_segment_corners`` rejects them, and it is right to:
+    #: a two-node row has no area, no normal and no face. They are EDGES, and
+    #: LS-DYNA decks write them when the set feeds an edge-only contact
+    #: (``*CONTACT_SINGLE_EDGE``; the R14 carrier
+    #: ``examples-manual/contact/edge/contact.edge.k`` states 58 of them and no
+    #: face at all). Kept HERE, beside the faces and not among them, so the
+    #: /LINE synthesis can use them while ``/SURF/SEG`` and every pressure /
+    #: contact-main consumer still sees an empty surface — which is what a set
+    #: of edges is. Before R14 triage round 3 the rows vanished with no
+    #: diagnostic of any kind.
+    edges: List[Tuple[int, int]] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5813,6 +5888,30 @@ class ControlHourglass:
     qh: float           # hourglass viscosity coefficient
 
 
+@dataclass(frozen=True)
+class SolidHourglassScreens:
+    """The three screens on the LS-DYNA-default solid hourglass synthesis
+    (``writer/mesh._solid_hg_screens``, which builds and memoises this).
+
+    Kept as one record because all three walk ``state.parts`` and the synthesis
+    is consulted once per part in the ``_assign_hourglass_props`` prepass and
+    once per preloaded element in the /PRELOAD writer.
+    """
+    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: /PRELOAD
+    #: Itype=2 measured ZERO OR NEGATIVE VOLUME at cycle 0 on Isolid 1 and 2
+    #: (``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
+    #: ELFORM Isolid everywhere.
+    deck_enabled: bool
+    #: Section ids the synthesis skips outright — today the /MAT/LAW115
+    #: (*MAT_DESHPANDE_FLECK_FOAM) sections, which already carry a MEASURED
+    #: 17 → 24 remap.
+    excluded_secids: FrozenSet[int]
+    #: Section ids with a ``*MAT_NULL`` / ``*MAT_ELASTIC_FLUID`` part: the
+    #: hourglass control stays VISCOUS (Isolid 1) there even when the resolved
+    #: IHQ is 6/7 (*HOURGLASS Remark 4).
+    fluid_secids: FrozenSet[int]
+
+
 @dataclass
 class HourglassDef:
     """A *HOURGLASS card, referenced per-part via the *PART HGID field. Only the
@@ -5823,6 +5922,13 @@ class HourglassDef:
     hgid: int
     ihq: int
     qm: float
+    #: Whether the QM cell was actually WRITTEN. A blank one already parses to
+    #: the 0.1 Default row, but Vol I R17 p.25-5 Remark 7 makes that default
+    #: conditional — "The default value for QM is 0.1 unless superseded by a
+    #: nonzero value of QH in *CONTROL_HOURGLASS. A nonzero value of QM
+    #: supersedes QH" — and *CONTROL_HOURGLASS may be read after this card, so
+    #: the flag is carried to the writer instead of resolved here.
+    qm_stated: bool = True
 
 
 @dataclass
@@ -5891,7 +5997,13 @@ class ControlImplicitEigenvalue:
 
 @dataclass
 class ControlImplicitSolution:
-    nsolvr: int         # solver (11=MUMPS,12=PARDISO)
+    nsolvr: int         # PARSED AND UNUSED: LS-DYNA's *CONTROL_IMPLICIT_
+    #                   # SOLUTION solution method (1 = linear, 2 =
+    #                   # nonlinear + BFGS, ...). It is NOT the linear
+    #                   # solver LSOLVR of *CONTROL_IMPLICIT_SOLVER, which
+    #                   # an earlier comment here named. Nothing in the
+    #                   # package reads it; _make_engine_implicit always
+    #                   # writes /IMPL/NONLIN/1. See ROADMAP.
     ilimit: int         # max stiffness reformations
     maxref: int         # max refinements
     dctol: float        # displacement convergence
@@ -6927,6 +7039,25 @@ class ConvertOptions:
     ground_spring_k: float = 100.0                       # N/mm per loaded axis
     inter_gapmin: Dict[int, float] = field(default_factory=dict)  # inter_id → Gapmin
     soften_stfac: Optional[float] = None                 # None = engine auto (0)
+    # --tie-stfac VALUE|auto: the /INTER/TYPE10 penalty-tie stiffness scale.
+    #
+    # MEASURED on a determinate two-hex explicit coupon (10x10x20 mm steel,
+    # closed form IE = 1/2 E eps^2 A L = 210.0, merged bar 209.2): /INTER/TYPE10
+    # at Radioss's own default STFAC (0, which hm_read_inter_type10.F:135 turns
+    # into 0.2) carries IE 67.85 = -67.6 % of the tie, because i7sti3.F:444
+    # makes the tie spring STFAC*A^2*K/V per tied secondary node, i.e.
+    # STFAC/(3(1-2nu)) times the stiffness of the element it welds -- 0.167x at
+    # the default. The same coupon at STFAC 1/10/30/100/120 gives
+    # -24.3/-2.63/-0.76/-0.10/+0.05 %, and dt scales as 1/sqrt(STFAC)
+    # (measured 1.06e-6/sqrt(STFAC), 141 cycles at 0.2 -> 2435 at 120).
+    #
+    # It is OPT-IN because the time-step cost is real and because on the
+    # implicit welding deck 05_4_2 STFAC 10 changes IE by -30.5 % and halves
+    # the implicit step (3.920 -> 1.960). None = leave STFAC 0 (the shipped
+    # behaviour, byte-identical) with the softness NAMED in the warning;
+    # "auto" = 100 * 3(1-2nu) from the main side's Poisson ratio (120 at
+    # nu = 0.3), falling back to 30 when nu is unavailable.
+    tie_stfac: Optional[Union[str, float]] = None
     # Auto-Gapmin: derive each surface-to-surface interface's Gapmin from the
     # minimum node-to-node clearance between its two parts (Gapmin =
     # gapmin_factor × clearance), instead of hand-tuning Card-3 SST/SBST per
@@ -6942,9 +7073,46 @@ class ConvertOptions:
     # clean animation / time-history state is produced at each milestone instead
     # of wherever the variable implicit step happens to fall. The OpenRadioss
     # engine caps the list at 100 (engine/source/input/freimpl.F); the writer
-    # clamps to that 1…100 range and treats 0 as "off". Default 100 → a point
-    # every 1% of the run. Implicit decks only (no effect on explicit output).
-    fixpoint_count: int = 100
+    # clamps to that 1…100 range and treats 0 as "off".
+    # DEFAULT 0 — changed from 100 on 2026-09. The card is a k2rad convenience
+    # LS-DYNA never asks for, and the grid makes the adaptive step oscillate
+    # against /IMPL/DT/2: ex_14's own cycle table reads 9.0e-5 → 7.9e-5 →
+    # 6.69e-5 → 1.464e-4 → 5.359e-5 → 1.611e-4 → 3.895e-5 → 1.772e-4 →
+    # 2.284e-5 → 1.949e-4 → 5.128e-6, a big FIXPOINT jump alternating with a
+    # tiny recovery at 2 : 1 ratios, while its energy error climbs 0.6 → 1.7 →
+    # 3.0 → 4.7 → 9.3 → 13.1 → 99.9 % by cycle 14 and the residual norm
+    # overflows 1e30 at cycle 33. Trapezoidal Newmark (/IMPL/DYNA/2, gamma =
+    # 0.5, beta = 0.25) is unconditionally stable at a CONSTANT step, not at
+    # one that alternates like that. MEASURED on the dynaexamples R14 roster:
+    # ten decks whose engine died "** ERROR: SOLVER IMPLICIT STOPPED DUE TO
+    # TIMESTEP LIMIT **" reach NORMAL TERMINATION with the card gone — ex_01
+    # x3 (elform 2/6/16, all at cycle 20), ex_14 x4 (cycle 33), ex_15 x3
+    # (cycle 38). ex_01_thin_shell_elform_2 goes from ERROR at t = 0.105 to
+    # NORMAL at t = 1.000, IE 0.7061 vs the LS-DYNA reference's 0.818398
+    # (-13.7 %); ex_14_solid_elform_1 from ERROR TERMINATION (ISTOP=-2 at
+    # cycle 52) to NORMAL at cycle 33, t = 0.01839 of 0.02, engine energy
+    # error -0.7 %, IE 5.044e7 / KE 4.974e7 against 2.4162e7 / 3.937e7 (the
+    # -3.1 % / 1.417e7 / 3.231e7 this comment used to quote is the SAME deck
+    # with --no-default-hourglass: an item-F-only arm, measured before item B
+    # reached it -- MISTAKES #137, a runtime string drifting from its own
+    # measurement). Regression controls
+    # that terminate NORMAL today do not: ex_04_solid_elform_2 +0.06 %,
+    # 3.5_Linear_Elastic_QS_Plate_Shell identical, ex_19_thin_shell_elform_2
+    # +1.9 % (its LS deviation improves from -1.317 % to about +0.6 %). Every
+    # OTHER arm was tried and does NOT fix ex_14: dropping /IMPL/DYNA/2 for
+    # QSTAT, /IMPL/DT/2 L_dtn = 50, lowering the /IMPL/DT/STOP floor (which
+    # produces a NORMAL banner over "MESSAGE ID 205 ** RUN KILLED: ENERGY
+    # ERROR LIMIT REACHED" at KE 8.5e28), deleting the injected /INTER/TYPE7
+    # stub, deleting /DAMP, Isolid 1 and Isolid 24. A COARSER grid is not the
+    # fix either: fixpoint_count = 10 makes ex_14 and ex_15 terminate at a
+    # 99.9 % energy error. The COST of 0, named: fewer output states — 15
+    # cycles become 8 on the controls — which is exactly what the card exists
+    # for, so set a count to get the milestones back.
+    # Implicit decks only (no effect on explicit output). NOTE: convert() is
+    # the package's only ConvertOptions construction and always passes this
+    # field, so the value here is a documentation default, not the live one -
+    # cli.py's --fixpoint-count default is what a CLI run reads.
+    fixpoint_count: int = 0
     # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
     # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
     # stub (the kernel is gated behind an undefined DNC build macro and the real
@@ -7053,6 +7221,33 @@ class ConvertOptions:
     # Set False (--no-node-tc-rc-bcs) to keep the pre-2026-09 behaviour, in
     # which those degrees of freedom are FREE.
     node_tc_rc_bcs: bool = True
+    # LS-DYNA's OWN DEFAULT hourglass control for a 1-point *SECTION_SOLID the
+    # deck leaves defaulted (no *CONTROL_HOURGLASS, no per-part *HOURGLASS, or
+    # a stated IHQ 0 — Vol I R17 p.12-271 Remark 1 says those are the same
+    # thing): IHQ 2 for an explicit deck, IHQ 6 for an implicit one, QH 0.1,
+    # fed through the existing IHQ → Isolid remap. ON by default.
+    # Without it k2rad emits Isolid 17 — 2x2x2 full integration, "No
+    # Hourglass" in the cfg's own words (prop_p14_solid.cfg), and
+    # hm_read_prop14.F:369-372 forces GEO(13) = ZERO for every Isolid but
+    # 1/2/24 — where LS-DYNA runs a ONE-POINT element with hourglass control
+    # on. The deck's own d3hsp echoes the default it uses ("hourglass model =
+    # 2" / "coefficient = 1.00000E-01" for sloshing_A, which states no card at
+    # all; "hourglass model.(bricks) = 6" for the implicit ex_03).
+    # MEASURED against each deck's own LS-DYNA glstat, Isolid 17 → the default:
+    # sloshing_A (*MAT_NULL) a TIMESTEP-LIMIT death at t = 0.18 → NORMAL at
+    # t = 2.0, IE -0.25 %; sloshing_C timeout → NORMAL, +2.82 %; taylor_A
+    # IE/KE +2.56/+1.48 % → +0.00/-0.03 %; rodsol +2.88/+4.04 % →
+    # -1.72/+1.41 %; tension1 +0.10 % → -0.01 %; the IMPLICIT
+    # ex_03_solid_elform_1 -20.38 % → -4.14 % and ex_04_solid_elform_1
+    # -8.67 % → -5.76 %. Screened: ELFORM -1/-2 (no hourglass energy at all,
+    # p.41-104 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
+    # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115
+    # sections (their own measured 17 → 24) and any deck carrying
+    # *INITIAL_STRESS_SECTION (Isolid 1/2 = zero-or-negative volume at cycle 0
+    # under /PRELOAD Itype=2).
+    # Set False (--no-default-hourglass) to keep the pre-2026-09 behaviour, in
+    # which a defaulted deck gets full integration and NO hourglass control.
+    default_hourglass: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7509,6 +7704,14 @@ class ConversionState:
     # ELFORM-derived formulation. Populated by _assign_hourglass_props.
     hourglass_prop_vals: Dict[int, Tuple[Optional[float], Optional[int]]] = \
         field(default_factory=dict)
+    # Memo for writer/mesh._solid_hg_screens — the three screens on the
+    # LS-DYNA-default solid hourglass synthesis. None = not computed yet. It is
+    # a pure function of parse-time data (parts, materials, solid elements,
+    # *INITIAL_STRESS_SECTION records) and every caller is a writer pass, so the
+    # memo cannot go stale mid-conversion; it exists because the synthesis is
+    # consulted once per PART in the _assign_hourglass_props prepass and once
+    # per preloaded ELEMENT in the /PRELOAD writer.
+    solid_hg_screens: Optional["SolidHourglassScreens"] = None
 
     # ── Materials & failure models ─────────────────────────────
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
@@ -8332,6 +8535,12 @@ class ConversionState:
     contacts_general: List[ContactAutoGeneral] = field(default_factory=list)
     # *CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie)
     contacts_tied: List[ContactTied] = field(default_factory=list)
+    #: *CONTACT spellings that are REGISTERED (so they never reach
+    #: skipped_keywords unnamed) and deliberately emit nothing: _DRAWBEAD,
+    #: _ENTITY, _SLIDING_ONLY. Consumed by
+    #: writer/contacts._make_refused_contact_notes, which is the ONE place the
+    #: refusal text is built — see ContactRefused for why it is not the handler.
+    contacts_refused: List[ContactRefused] = field(default_factory=list)
     # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
     contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
     # *CONTACT_..._TIEBREAK whose PRE-FAILURE state is a tie → /INTER/TYPE2

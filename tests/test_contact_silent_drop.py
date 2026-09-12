@@ -243,19 +243,52 @@ class MainSideDropIsAlsoReported(unittest.TestCase):
                       dict(result.recognized_not_emitted))
 
 
-class TiedContactDropIsAccounted(unittest.TestCase):
-    """*CONTACT_TIED_* already warned, but the loss never reached the tally."""
+class TiedContactAllRigidSecondaryTakesThePenaltyTie(unittest.TestCase):
+    """The named successor of ``TiedContactDropIsAccounted``.
 
-    def test_all_rigid_tied_secondary(self):
-        result, starter = _convert(DECK_TIED_RIGID_SECONDARY)
-        self.assertNotIn("/INTER/TYPE2/", starter)
-        hits = [w for w in result.warnings if "NO /INTER was emitted" in w]
-        self.assertEqual(len(hits), 1, repr(result.warnings))
-        self.assertIn("kinematic tie", hits[0])
-        # The tie-specific remedy: TYPE10 accepts rigid-body secondary nodes.
-        self.assertIn("/INTER/TYPE10", hits[0])
-        self.assertIn("CONTACT_TIED_NODES_TO_SURFACE",
-                      dict(result.recognized_not_emitted))
+    That test pinned the pre-round-3 behaviour: a tie whose secondary side is
+    ENTIRELY rigid was DROPPED (a kinematic /INTER/TYPE2 cannot share a node
+    with a /RBODY), warned about, and accounted in
+    ``recognized_not_emitted`` — with a remedy telling the user to make it a
+    /INTER/TYPE10 by hand. R14 triage round 3 does that itself: the penalty
+    tie holds the joint, so the drop is gone and the accounting entry with
+    it. The ACCOUNTING half of the old test is not weakened — it is asserted
+    here in its true form, that nothing is dropped and nothing is unaccounted.
+    """
+
+    def setUp(self):
+        self.result, self.starter = _convert(DECK_TIED_RIGID_SECONDARY)
+
+    def test_the_tie_is_emitted_as_the_penalty_tie(self):
+        self.assertIn("/INTER/TYPE10/", self.starter)
+        self.assertNotIn("/INTER/TYPE2/", self.starter)
+
+    def test_nothing_is_dropped_or_left_unaccounted(self):
+        self.assertEqual(
+            [w for w in self.result.warnings if "NO /INTER was emitted" in w],
+            [])
+        self.assertNotIn("CONTACT_TIED_NODES_TO_SURFACE",
+                         dict(self.result.recognized_not_emitted))
+
+    def test_the_reroute_is_named_with_its_cost(self):
+        hits = [w for w in self.result.warnings if "/INTER/TYPE10/" in w]
+        self.assertEqual(len(hits), 1, repr(self.result.warnings))
+        w = hits[0]
+        self.assertIn("every one of its secondary nodes belongs to a rigid "
+                      "body", w)
+        # The measured cost of the penalty tie, and the lever.
+        self.assertIn("-67.6 %", w)
+        self.assertIn("--tie-stfac", w)
+        # ...and that it is not the same physics as a constraint tie.
+        self.assertIn("does not tie ROTATIONS", w)
+
+    def test_the_forced_arm_does_not_ship_radioss_default_stfac(self):
+        """There is no /INTER/TYPE2 alternative on this arm, so the derived
+        STFAC is applied whether or not --tie-stfac was passed. The fixture's
+        main side is *MAT_ELASTIC nu = 0.3 -> 100 * 3(1-2*0.3) = 120."""
+        hits = [w for w in self.result.warnings if "/INTER/TYPE10/" in w]
+        self.assertIn("STFAC=120", hits[0])
+        self.assertIn("nu=0.3 on the main side", hits[0])
 
 
 if __name__ == "__main__":

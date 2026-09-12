@@ -114,6 +114,13 @@ class CliTests(unittest.TestCase):
         self.assertTrue(args.rigid_cog_master)      # BooleanOptionalAction default
         self.assertFalse(args.ams)
         self.assertEqual(args.inter_gapmin, [])
+        # Round 3's three new levers. --fixpoint-count in particular: its API
+        # twin is caught by the implicit_qstat golden, but nothing read the
+        # PARSER default, so a silent 0 -> 100 there would have re-emitted
+        # /IMPL/DT/FIXPOINT on every implicit CLI conversion at a green suite.
+        self.assertEqual(args.fixpoint_count, 0)
+        self.assertTrue(args.default_hourglass)     # BooleanOptionalAction
+        self.assertIsNone(args.tie_stfac)
 
     def test_no_such_flag_errors(self):
         # argparse exits with SystemExit(2) on an unknown option.

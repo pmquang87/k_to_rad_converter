@@ -16,7 +16,7 @@ __version__ = "0.1.0"
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
@@ -213,10 +213,11 @@ def convert(
     ground_spring_k: float = 100.0,
     inter_gapmin: Optional[Dict[int, float]] = None,
     soften_stfac: Optional[float] = None,
+    tie_stfac: Optional[Union[str, float]] = None,
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
-    fixpoint_count: int = 100,
+    fixpoint_count: int = 0,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
@@ -225,6 +226,7 @@ def convert(
     law106_shell_restate: bool = True,
     zero_t0_sentinel: bool = True,
     node_tc_rc_bcs: bool = True,
+    default_hourglass: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
@@ -265,6 +267,20 @@ def convert(
     soften_stfac : float, optional
         Stfac (penalty stiffness scale) set on ALL /INTER/TYPE7 interfaces
         (e.g. 0.3). None leaves the engine default (0).
+    tie_stfac : float or ``"auto"``, optional
+        STFAC (penalty-tie stiffness scale) on every ``/INTER/TYPE10``
+        tie. ``"auto"`` asks for 100x the local element stiffness, i.e.
+        ``100*3(1-2nu)`` read from the tie's own main side (120 at
+        nu = 0.3). None (the default) leaves STFAC 0, which the starter
+        turns into Radioss's own 0.2 — MEASURED on a determinate two-hex
+        coupon that is a -67.6 % tie, because ``i7sti3.F:444`` makes the
+        tie spring ``STFAC/(3(1-2nu))`` times the stiffness of the element
+        it welds (0.167x at the default). STFAC 30 reaches -0.76 % and 120
+        reaches +0.05 %, at dt x 0.115 and dt x 0.058 (dt scales as
+        ``1/sqrt(STFAC)``). Only IMPLICIT ties and ties whose secondary
+        side is entirely rigid use ``/INTER/TYPE10``; an explicit tie gets
+        ``/INTER/TYPE2``, which reproduces the same coupon exactly at no
+        time-step cost.
     tet10_to_tet4 : bool
         Downgrade every 10-node quadratic tet to a 4-node linear tet (keep the
         4 corners, drop the mid-edge nodes). Off by default.
@@ -284,7 +300,21 @@ def convert(
         k = 1 … N), so an animation / time-history state is produced at each
         instead of wherever the variable step falls. The OpenRadioss engine caps
         the list at 100, so this is clamped to 1…100; 0 disables the card.
-        Default 100 (a point every 1% of the run). Implicit decks only.
+        **Default 0** — changed from 100 on 2026-09, because the grid makes
+        the adaptive step oscillate against ``/IMPL/DT/2`` and trapezoidal
+        Newmark is unconditionally stable at a CONSTANT step, not at one that
+        alternates 2 : 1 every cycle. MEASURED on the dynaexamples R14 roster:
+        ten decks that died ``** ERROR: SOLVER IMPLICIT STOPPED DUE TO
+        TIMESTEP LIMIT **`` reach NORMAL TERMINATION without the card
+        (``ex_01`` x3 at cycle 20, ``ex_14`` x4 at cycle 33, ``ex_15`` x3 at
+        cycle 38); ``ex_01_thin_shell_elform_2`` goes from ERROR at
+        ``t = 0.105`` to ``t = 1.000`` at IE −13.7 % against its LS-DYNA
+        reference, and ``ex_14_solid_elform_1`` from a 99.9 % energy error to
+        −3.1 %. Three currently-NORMAL implicit controls do not regress and
+        two improve. A coarser grid is NOT the fix: at 10 points ``ex_14`` and
+        ``ex_15`` terminate at a 99.9 % energy error. The cost of 0 is fewer
+        output states (15 cycles become 8 on the controls) — set a count to
+        get the milestones back. Implicit decks only.
     deformable_contact_recipe : bool
         Apply the validated stabilization recipe for an implicit deck with
         deformable-vs-deformable contact (e.g. force control through a
@@ -411,6 +441,51 @@ def convert(
         engine energy error), and a DOF a ``*BOUNDARY_SPC`` already states is
         merged rather than restated. Set False (CLI ``--no-node-tc-rc-bcs``)
         to keep the pre-2026-09 behaviour, in which those DOFs are free.
+    default_hourglass : bool
+        Give a 1-point ``*SECTION_SOLID`` that the deck leaves DEFAULTED
+        LS-DYNA's own default hourglass control, and feed it through the
+        existing IHQ → Isolid remap. **On by default.** Vol I R17 p.12-271
+        ``*CONTROL_HOURGLASS`` Remark 1: *"If omitted or if IHQ = 0, the
+        default hourglass control types are as follows: … b) For solids: type
+        2 for explicit; type 6 for implicit"*, with ``QH`` 0.1 from the card's
+        own Default row — and a STATED ``QH``/``QM`` of 0.0 is that same
+        default (``birdball.k`` states IHQ 2 / QH 0.0 and its d3hsp echoes
+        ``hourglass coefficient = 1.00000E-01``; ``275key2.k`` the same at
+        IHQ 4). So an explicit deck gets ``Isolid`` 1 (viscous
+        Belytschko-orthogonalised) with ``h`` 0.1 and an implicit one
+        ``Isolid`` 24 (HEPH), instead of the full-integration ``Isolid`` 17 —
+        which ``prop_p14_solid.cfg`` itself calls *"2*2*2 Integration Points,
+        No Hourglass"* and for which ``hm_read_prop14.F:369-372`` forces
+        ``GEO(13) = ZERO``, i.e. no hourglass control at all. The deck's own
+        d3hsp states which default it used: ``sloshing_A`` carries no
+        ``*CONTROL_HOURGLASS`` and prints ``hourglass model = 2`` /
+        ``hourglass coefficient = 1.00000E-01``; the implicit
+        ``ex_03_solid_elform_1_4x6x4_mesh`` prints ``hourglass
+        model.(bricks) = 6``. MEASURED against each deck's own LS-DYNA
+        ``glstat``: ``sloshing_A`` goes from a TIMESTEP-LIMIT death at
+        ``t = 0.18`` to NORMAL TERMINATION at ``t = 2.0`` with IE −0.25 %,
+        ``sloshing_C`` from a timeout to NORMAL at +2.82 %, ``taylor_A`` from
+        IE +2.56 % / KE +1.48 % to +0.00 % / −0.03 %, ``rodsol`` from
+        +2.88 % / +4.04 % to −1.72 % / +1.41 %, ``tension1`` from +0.10 % to
+        −0.01 %, and the implicit ``ex_03_solid_elform_1`` from −20.38 % to
+        −4.14 % (its ``_elform_2`` sibling, gated out, moves only through
+        item F, −0.10 % → −0.03 %).
+        Screened out, each for its own measured or quoted reason: ELFORM
+        −1/−2 (p.41-104 Remark 13 — *"there is no hourglass energy, and the
+        behavior is not affected by hourglass parameters"*), ELFORM 2/3/16 and
+        the tetrahedra (no hourglass modes), ALE sections, ``/MAT/LAW115``
+        sections (their own measured 17 → 24) and any deck carrying an
+        ``*INITIAL_STRESS_SECTION`` (``Isolid`` 1 and 2 hit ZERO OR NEGATIVE
+        VOLUME at cycle 0 under ``/PRELOAD`` ``Itype=2``). A ``*MAT_NULL`` /
+        ``*MAT_ELASTIC_FLUID`` section keeps the VISCOUS ``Isolid`` 1 even on
+        an implicit deck (p.25-3 ``*HOURGLASS`` Remark 4: *"For fluids modeled
+        with null material, type 6 hourglass control is viscous"*; the
+        stiffness-form ``Isolid`` 24 makes ``sloshing_A`` "terminate normally"
+        at a 99.9 % energy error). On an implicit deck a STATED IHQ 1-5 also
+        becomes type 6, which is what LS-DYNA does itself (p.12-272). Set
+        False (CLI ``--no-default-hourglass``) to keep the pre-2026-09 output,
+        in which a defaulted deck gets full integration and no hourglass
+        control.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -521,6 +596,7 @@ def convert(
         ground_spring_k=ground_spring_k,
         inter_gapmin=dict(inter_gapmin or {}),
         soften_stfac=soften_stfac,
+        tie_stfac=tie_stfac,
         tet10_to_tet4=tet10_to_tet4,
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
@@ -533,6 +609,7 @@ def convert(
         law106_shell_restate=law106_shell_restate,
         zero_t0_sentinel=zero_t0_sentinel,
         node_tc_rc_bcs=node_tc_rc_bcs,
+        default_hourglass=default_hourglass,
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,

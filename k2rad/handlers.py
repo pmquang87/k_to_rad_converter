@@ -10,7 +10,8 @@ from __future__ import annotations
 import ast as _ast
 import math as _math
 from itertools import permutations as _permutations, product as _product
-from typing import Any, Dict, List, Optional, Tuple, cast
+from dataclasses import dataclass as _dataclass, field as _field
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 #: Fixed arities the *INITIAL_STRESS_/_STRAIN_ producers below guarantee via
 #: _fixed_float_card's zero-padding (`vals += [0.0] * (n - len(vals))`), and
@@ -75,6 +76,7 @@ from .state import (
     LoadNode, RigidWallPlanar, RigidWallGeometric,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
     ContactForceTransducer, ContactTied, ContactSpotweld, ContactType25,
+    ContactThermal, ContactRefused,
     ContactTiebreak,
     DefineFriction, FrictionPair, HexSpotweldAssembly,
     InitialVelocityNode, InitialVelocityRigidBody,
@@ -2233,6 +2235,42 @@ def _dup_secid(keyword: str, secid: int, seen, state: ConversionState) -> None:
             "one's. Delete the duplicate if the two sections differ.")
 
 
+def _warn_section_solid_one_point_ale(state: ConversionState, secid: int,
+                                      elform: int, aet: int) -> None:
+    """*SECTION_SOLID ELFORM 5/6/7 → a LAGRANGIAN element, named.
+
+    The three 1-point ALE / Eulerian formulations are NOT mapped onto
+    ``/PROP/SOLID`` ``Iale``. That is a measured decision, not an oversight —
+    see the message. What they DO get is the 1-point hourglass control
+    (``writer/mesh._ONE_POINT_SOLID_ELFORMS``), which is the half of the
+    difference LS-DYNA's own d3hsp says they carry.
+    """
+    kind = {5: "1-point ALE", 6: "1-point Eulerian",
+            7: "1-point Eulerian ambient"}[elform]
+    state.warn(
+        f"*SECTION_SOLID {secid}: ELFORM={elform} is LS-DYNA's {kind} solid. "
+        "k2rad emits Iale=0, i.e. a LAGRANGIAN element: the mesh follows the "
+        "material and no advection is performed. LS-DYNA itself runs these as "
+        "formulation 11 (multi-material ALE) — its own d3hsp echoes 'solid "
+        "formulation = 11' for a stated ELFORM 5 (taylor_B, sloshing_C) and "
+        "for a stated 6 (channel_A, advection_B). Mapping the cell to "
+        "Iale=1/2 is NOT a drop-in: hm_read_prop14.F:264-267 refuses Iale/=0 "
+        "on any Isolid but 0, 1 or 2 (0 is what k2rad's own ELFORM 11/12 ALE "
+        "properties emit; ERROR 131 + 608 — measured, 9 starter "
+        "errors on taylor_B and 4 on advection_B), and with Isolid 1 the "
+        "remap was MEASURED destructive: taylor_B goes from IE +5.1 % / KE "
+        "+4.9 % against its LS-DYNA reference to a 99.9 % energy error at "
+        "198220 cycles, and channel_A from IE -98.9 % / KE -25.6 % to "
+        "-100 % / -94.3 %. A real ALE conversion additionally needs an "
+        "/ALE/GRID formulation (with no card the default is NWALE=1 'DISP', "
+        "hm_read_ale_grid.F:202-208), an ALE-capable material and the inflow "
+        "/ void boundaries the ELFORM cell does not state. The 1-point "
+        "HOURGLASS control IS carried — see the Isolid/h note on this "
+        "property."
+        + (f" AET={aet} (ambient type) is dropped with the Eulerian "
+           "framework." if elform == 7 or aet else ""))
+
+
 def handle_section_solid(block: Block, state: ConversionState) -> None:
     """*SECTION_SOLID (+ _EFG/_SPG/_MISC/_TITLE) — every card SET under the
     header.
@@ -2287,6 +2325,10 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
             state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> "
                        "/PROP/SOLID Iale=1. If the mesh is fixed (Eulerian), "
                        "switch Iale to 2 (Euler) for a cheaper run.")
+        if elform in (5, 6, 7):
+            _warn_section_solid_one_point_ale(state, secid, elform,
+                                              to_int(f1[2]) if len(f1) > 2
+                                              else 0)
         # Cohesive sections (ELFORM ±19/20/±21/22 → /PROP/TYPE43): card-1
         # fields 7/8 are COHOFF and GASKETT (Vol I R16 p.41-88). COHOFF only
         # matters for the shell-offset forms 20/22 (it places the cohesive
@@ -6178,10 +6220,146 @@ def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
             "*SET manually if the box scoping matters.")
 
 
+def _read_contact_thermal(raw: List[str], offset: int) -> ContactThermal:
+    """Read the ``*CONTACT_..._THERMAL`` THRM 1 card (``raw[offset + 3]``).
+
+    THRM 1 sits immediately after mandatory Card 3 and BEFORE optional Card A
+    (Vol I R17 p.11-6/11-7 card order), which is why every ``_THERMAL``
+    spelling registers with ``extra = 1``: ``_read_contact_soft`` and
+    ``_read_contact_ignore`` both shift past this card so SOFT and IGNORE keep
+    landing on Card A and Card C.
+
+    Cell order is ``K FRAD H0 LMIN LMAX FTOSA BC_FLAG ALGO``
+    (``Keyword971/CONTACT/contact_surface_to_surface.cfg:1102-1103``; the R14
+    welding decks print the same header with ``ftoslv``/``ftosa`` in column 6).
+    Reading H0 out of column 1 — the natural mistake, since it is the field
+    that matters — would put the FLUID conductivity (0.026 on every R14
+    carrier) into ``Kthe`` in place of the closed-gap conductance (50.0), i.e.
+    a seam conducting 1900x too slowly.
+    """
+    f = _card(raw, offset + 3, fixed=True, n=8, w=10)
+
+    def _flt(i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    def _int(i: int) -> int:
+        return to_int(f[i]) if len(f) > i else 0
+
+    return ContactThermal(k=_flt(0), frad=_flt(1), h0=_flt(2), lmin=_flt(3),
+                          lmax=_flt(4), ftosa=_flt(5), bc_flg=_int(6),
+                          algo=_int(7))
+
+
+#: Named losses per registered ``*CONTACT`` spelling, keyed by the tags the
+#: registration table (:data:`_CONTACT_SPELLINGS`) puts on each row. One text
+#: per LS-DYNA fact, each naming the fact, its manual page and the consequence
+#: — the deck has to say what it lost (R14 triage round 3, item A).
+#:
+#: They are emitted from the handler, where the interface id is known, and
+#: driven off the ONE table that also builds ``HANDLERS`` and
+#: ``assembly._OFFSET_SPECS``, so a spelling cannot be registered without its
+#: losses being stated.
+_CONTACT_SPELLING_NOTES = {
+    "nonauto": (
+        "LS-DYNA's non-AUTOMATIC contacts are ONE-SIDED — the segment "
+        "orientation decides which side is contacted (Vol I R17 p.11-10 item "
+        "4: 'Automatic contacts are two-sided ... In contrast, non-automatic "
+        "contacts are one-sided. Thus, segment orientation does not matter for "
+        "automatic contact but is crucial for non-automatic contact'). "
+        "/INTER/TYPE7 and /INTER/TYPE25 are two-sided by construction and "
+        "there is no Radioss flag that makes a segment one-sided, so a deck "
+        "that relied on a deliberately oriented segment set now also blocks "
+        "the back side. Nothing is dropped; the contact is MORE permissive "
+        "than LS-DYNA's."),
+    "twoway": (
+        "LS-DYNA's two-way contact checks BOTH surfaces for penetration (Vol I "
+        "R17 p.11-8 item 1b). /INTER/TYPE7 checks only the SURFA (SSID) nodes "
+        "against the SURFB (MSID) segments, so if the MSID side is the finer "
+        "or the softer mesh its nodes can pass through. NO remedy is "
+        "prescribed here: the obvious one (swap the sides) has never been "
+        "measured to help on any corpus deck, and it is NOT the cause of "
+        "the twobar overshoot - the round-3 verification round MEASURED that "
+        "deck's +1151 % internal energy down to -5.6 % by changing ONE cell "
+        "of the emitted card — the Gapmin the starter derives when k2rad "
+        "leaves it 0 (GAP MIN = 1.0 mm on a 10 mm bar; 0.05 gives IE 2866 "
+        "against the LS-DYNA reference 3036.17 and KE 1.127e5 against "
+        "1.20123e5). A one-way check UNDER-transfers load and cannot produce "
+        "a 12x energy excess, and twobar's own LS-DYNA glstat books only 6.38 "
+        "of sliding-interface energy in 125018 total. An explicit Gapmin is "
+        "a round-4 item for EVERY solid-segment /INTER/TYPE7 k2rad emits, "
+        "AUTOMATIC spellings included - the scope is the element type, not "
+        "the spelling: k2rad writes Igap 0 with Gapmin 0 on all of them "
+        "(verified on the already-registered AUTOMATIC carrier "
+        "ex_26_thin_shell_elform_16), and i7sti3.F:1055-1063 then derives "
+        "`GAP = 0.1 * GAPMX` from the MESH SIZE whenever no shell thickness "
+        "was accumulated (`DXM` only ever takes THK, i7sti3.F:499/506/591). "
+        "Round 3 only made more decks REACH that pre-existing behaviour. "
+        "Until then set it per interface with --inter-gapmin <id>=VAL."),
+    "forming": (
+        "the FORMING family IGNORES the SURFB (tooling) contact thickness, "
+        "and a NEGATIVE SBST additionally offsets SURFB by |SBST|/2 opposite "
+        "its normal (Vol I R17 p.11-128 General Remark 9: SURFB *can* be "
+        "offset by setting a negative value — only the "
+        "thickness-ignoring half is unconditional). k2rad's Gapmin is (|SAST|+|SBST|)/2 for BOTH "
+        "sides, so the tooling half-thickness is INCLUDED and the tooling "
+        "offset is NOT applied: the blank engages the tool half a tool "
+        "thickness too early. Set the engagement gap explicitly with "
+        "--inter-gapmin <id>=VAL if the drawn thickness matters."),
+    "mortar": (
+        "MORTAR is a segment-to-segment contact with a consistent nodal force "
+        "assembly and an automatic eroding treatment (Vol I R17 p.11-131 "
+        "General Remark 14). OpenRadioss has no mortar interface; the contact "
+        "converts to the node-to-segment /INTER/TYPE7. Expect a coarser "
+        "contact-pressure distribution and, on an implicit deck, worse Newton "
+        "behaviour than LS-DYNA's. The MORTAR family's IGNORE default of 2 and "
+        "its implicit MPAR1 prestress/ramp variants (p.11-133) have no "
+        "counterpart either."),
+    "interference": (
+        "an INTERFERENCE contact must RESOLVE its initial overlap into "
+        "prestress (Vol I R17 p.11-66: 'the contact forces to develop to "
+        "remove the interpenetrations'). Inacti is therefore FORCED to 0 on "
+        "this interface and the deck's own IGNORE cell is ignored, because "
+        "i7pwr3.F:244-258 makes Inacti 5/6 ACCEPT the overlap as the "
+        "zero-force state — which would leave the interference fit unstressed "
+        "and the deck a zero model. NOT converted: the LCID1/LCID2 stiffness "
+        "ramp, which has no /INTER/TYPE7 counterpart (Radioss has no "
+        "time-varying Stfac), so the full penalty force appears in cycle 1 "
+        "instead of ramping in — check the first cycles for a force spike. "
+        "HAZARD of Inacti 0, MEASURED on a purpose-built coupon: a secondary "
+        "node lying ON an extension of the main surface (conformal, co-planar "
+        "footprints) hard-fails the starter with ERROR 612 'INITIAL "
+        "PENETRATION IN INTERFACE ... INACTI = 0 ... SECONDARY NODE n IS ON "
+        "THE MAIN SURFACE' — 14 of them on that coupon, and the deck does "
+        "not start. Trim the interfering surfaces to the fit itself, or set "
+        "--inter-gapmin on this interface, if the starter refuses."),
+    "single_edge": (
+        "LS-DYNA's SINGLE_EDGE only contacts EXTERIOR edges whose in-plane "
+        "normals point toward each other (Vol I R17 p.11-124 Remark 3). "
+        "/INTER/TYPE11 has no such restriction and k2rad's /LINE synthesis "
+        "keeps interior edges too, so the Radioss contact is the more "
+        "permissive of the two. No node-to-surface contact is added, which "
+        "matches the keyword: SINGLE_EDGE has none."),
+    "mpp": (
+        "the _MPP decomposition cards (IGNORE BCKT LCBCKT NS2TRK INITITR "
+        "PARMAX / CPARM8) are read only to find Card 1 and are otherwise "
+        "DROPPED — they tune LS-DYNA's MPP contact bucket sort and have no "
+        "OpenRadioss counterpart. The contact itself converts unchanged."),
+}
+
+
+def _warn_contact_spelling(state: ConversionState, keyword: str, inter_id: int,
+                           notes: Tuple[str, ...]) -> None:
+    """Emit one named-loss warning per tag on this spelling's table row."""
+    for tag in notes:
+        state.warn(f"*{keyword} {inter_id}: {_CONTACT_SPELLING_NOTES[tag]}")
+
+
 def handle_contact_automatic_single_surface(block: Block, state: ConversionState,
                                             extra: int = 0,
                                             card1: Optional[int] = None,
-                                            inter_id: Optional[int] = None) -> None:
+                                            inter_id: Optional[int] = None,
+                                            mpp: bool = False,
+                                            notes: Tuple[str, ...] = ()) -> None:
     """``card1``/``inter_id``: a caller that has ALREADY resolved the block's
     first mandatory card index and its interface id passes them in. Both exist
     for the ``*CONTACT_..._TIEBREAK`` delegation, which needs them for two
@@ -6191,12 +6369,14 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     name it in its warnings, so allocating a second one would make the log and
     the card disagree. Both default to the old behaviour."""
     hdr_id, title, offset = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(block.raw, offset, mpp)
     if card1 is not None:
         offset = card1
     if inter_id is None:
         inter_id = hdr_id
         if inter_id <= 0 or inter_id > 90000:
             inter_id = state.next_id()
+    _warn_contact_spelling(state, block.keyword, inter_id, notes)
     raw = block.raw
     # Card1: ssid msid sstyp mstyp sboxid mboxid spr mpr
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
@@ -6225,7 +6405,9 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     )
 
 
-def handle_contact_automatic_general(block: Block, state: ConversionState) -> None:
+def handle_contact_automatic_general(block: Block, state: ConversionState,
+                                     mpp: bool = False,
+                                     notes: Tuple[str, ...] = ()) -> None:
     """*CONTACT_AUTOMATIC_GENERAL — dyna2rad SOFT-sentinel routing.
 
     The optional-Card-A SOFT field selects the OpenRadioss interface
@@ -6245,15 +6427,22 @@ def handle_contact_automatic_general(block: Block, state: ConversionState) -> No
     """
     inter_id, title, offset = _parse_contact_header(block)
     raw = block.raw
+    offset = _contact_mpp_card_offset(raw, offset, mpp)
     soft = _read_contact_soft(raw, offset)
     if soft not in (-7, -11, -19):
         # Ordinary AUTOMATIC_GENERAL → the validated single-surface routing,
-        # byte-for-byte unchanged (no regression on the default case).
-        handle_contact_automatic_single_surface(block, state)
+        # byte-for-byte unchanged (no regression on the default case). The MPP
+        # card offset is passed on explicitly: re-deriving it inside the
+        # delegate would read SSID off the MPP IGNORE flag (the reason
+        # _contact_mpp_card_offset exists), and `notes` is passed so an _MPP
+        # spelling states its dropped decomposition cards exactly once.
+        handle_contact_automatic_single_surface(block, state, card1=offset,
+                                                notes=notes)
         return
 
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
+    _warn_contact_spelling(state, block.keyword, inter_id, notes)
     # Card1: ssid msid sstyp mstyp sboxid mboxid spr mpr
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
@@ -6286,18 +6475,29 @@ def handle_contact_automatic_general(block: Block, state: ConversionState) -> No
 def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionState,
                                                 extra: int = 0,
                                                 card1: Optional[int] = None,
-                                                inter_id: Optional[int] = None) -> None:
+                                                inter_id: Optional[int] = None,
+                                                mpp: bool = False,
+                                                notes: Tuple[str, ...] = (),
+                                                thermal: bool = False,
+                                                interference: bool = False) -> None:
     """``card1``/``inter_id`` — see
     :func:`handle_contact_automatic_single_surface`. Both default to the old
     behaviour; only the ``*CONTACT_..._TIEBREAK`` OPTION-4 delegation passes
-    them."""
+    them.
+
+    ``mpp`` / ``notes`` / ``thermal`` / ``interference`` come from the
+    registration table (:data:`_CONTACT_SPELLINGS`) and all default to the old
+    behaviour, so the two spellings that reached this handler before R14 triage
+    round 3 are byte-identical."""
     hdr_id, title, offset = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(block.raw, offset, mpp)
     if card1 is not None:
         offset = card1
     if inter_id is None:
         inter_id = hdr_id
         if inter_id <= 0 or inter_id > 90000:
             inter_id = state.next_id()
+    _warn_contact_spelling(state, block.keyword, inter_id, notes)
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
@@ -6322,8 +6522,198 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs,
-                             keyword=block.keyword)
+                             keyword=block.keyword,
+                             thermal=(_read_contact_thermal(raw, offset)
+                                      if thermal else None),
+                             interference=interference)
     )
+
+
+def handle_contact_single_edge(block: Block, state: ConversionState,
+                               mpp: bool = False,
+                               notes: Tuple[str, ...] = ()) -> None:
+    """``*CONTACT_SINGLE_EDGE`` → ``/INTER/TYPE11`` self edge-impact.
+
+    Vol I R17 p.11-124 Remark 3, verbatim: *"SINGLE_EDGE contact is an old
+    contact algorithm that only handles edge-to-edge contact ... It also only
+    applies to exterior edges. As it is based on single surface contact, only
+    SURFA is defined ... contact only occurs between edges whose normal vectors
+    ... point toward each other"*. The exact OpenRadioss analogue is the
+    ``/INTER/TYPE11`` self edge-impact interface (``line_IDm = 0``), which
+    k2rad already builds for ``*CONTACT_AUTOMATIC_GENERAL`` with the dyna2rad
+    ``SOFT = -11`` sentinel — /LINE synthesis, gap, Inacti, Stfac and all.
+
+    So this handler is thin ON PURPOSE: it reads the standard Card 1/2/3 grid
+    (identical to every other contact in this family) and files a
+    ``ContactAutoGeneral`` with ``soft = -11`` and the self-mirror applied, so
+    the ONE emitter path stays the one that is already solver-validated.
+    ``keyword`` is carried so the writer names the real spelling instead of
+    *CONTACT_AUTOMATIC_GENERAL in its log line.
+    """
+    inter_id, title, offset = _parse_contact_header(block)
+    raw = block.raw
+    offset = _contact_mpp_card_offset(raw, offset, mpp)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    _warn_contact_spelling(state, block.keyword, inter_id, notes)
+    # Card1: surfa surfb surfatyp surfbtyp saboxid sbboxid sapr sbpr
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid = to_int(f1[0]) if f1 else 0
+    msid = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
+    # Card2: fs fd dc vc vdc penchk bt dt
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs = to_float(f2[0]) if f2 else 0.0
+    fd = to_float(f2[1]) if len(f2) > 1 else 0.0
+    bt = to_float(f2[6]) if len(f2) > 6 else 0.0
+    dt = to_float(f2[7]) if len(f2) > 7 else 1e28
+    vdc = to_float(f2[4]) if len(f2) > 4 else 0.0
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f3[0]) if f3 else 0.0
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    ignore = _read_contact_ignore(raw, offset)
+    if msid == 0:
+        msid, mstyp = ssid, sstyp
+    state.contacts_general.append(
+        ContactAutoGeneral(inter_id, title, ssid, sstyp, msid, mstyp, -11,
+                           fs, fd, bt, dt, ignore, vdc=vdc, sst=sst, mst=mst,
+                           sfs=sfs, keyword=block.keyword)
+    )
+
+
+def _refuse_contact(block: Block, state: ConversionState,
+                    cells: Dict[str, float],
+                    mpp: bool = False) -> int:
+    """File a RECOGNIZED-but-not-converted ``*CONTACT`` and return its id.
+
+    The message itself is built later, in
+    ``writer/contacts._make_refused_contact_notes`` — see
+    :class:`~k2rad.state.ContactRefused` for why.
+    """
+    inter_id, _title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    state.contacts_refused.append(
+        ContactRefused(keyword=block.keyword, inter_id=inter_id, cells=cells))
+    return inter_id
+
+
+def handle_contact_drawbead(block: Block, state: ConversionState,
+                            mpp: bool = False,
+                            notes: Tuple[str, ...] = ()) -> None:
+    """``*CONTACT_DRAWBEAD`` — RECOGNIZED, deliberately NOT converted.
+
+    Card 4.1 is ``LCIDRF LCIDNF DBDTH DFSCL NUMINT DBPID ELOFF NBEAD``
+    (Vol I R17 p.11-53) and ``LCIDRF`` / ``LCIDNF`` are CURVES of restraining
+    and normal force per unit bead length as functions of the bead closure
+    ``delta`` (p.11-54). OpenRadioss's ``/INTER/TYPE8`` takes those two as
+    CONSTANT lineic forces (``hm_read_inter_type08.F:131-137``;
+    ``radioss2022/INTER/inter_type8.cfg`` ``FN``/``Ft``, ``DIMENSION=
+    "lineic_force"``), with only a linear variation to the last bead node — no
+    ``f(delta)`` slot exists. Collapsing the curve to one number would invent
+    a restraining force the deck does not state (the #124 rule), so the card
+    is refused BY NAME with its own numbers quoted.
+    """
+    raw = block.raw
+    _hdr, _t, offset = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(raw, offset, mpp)
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+
+    def _cell(i: int) -> float:
+        return to_float(f4[i]) if len(f4) > i else 0.0
+
+    _refuse_contact(block, state, {
+        "lcidrf": _cell(0), "lcidnf": _cell(1), "dbdth": _cell(2),
+        "dfscl": _cell(3), "numint": _cell(4), "dbpid": _cell(5),
+    }, mpp=mpp)
+
+
+def handle_contact_entity(block: Block, state: ConversionState,
+                          mpp: bool = False,
+                          notes: Tuple[str, ...] = ()) -> None:
+    """``*CONTACT_ENTITY`` — RECOGNIZED, deliberately NOT converted.
+
+    The keyword contacts deformable nodes against an ANALYTIC rigid surface
+    attached to a rigid part (Vol I R17 pp.11-155…163): Card 1
+    ``PID GEOTYP SURFA SURFATYP SF DF CF INTORD``, Card 5
+    ``INOUT G1 … G7``. Only GEOTYP 1/2/3 (plane / sphere / cylinder) have a
+    Radioss counterpart at all (``/RWALL/PLANE|SPHER|CYL`` following the rigid
+    body's main node, ``hm_read_rwall_spher.F:220-227``), and even those cannot
+    carry ``SO``, ``INTORD``, ``ITHK``, a damping curve (``DF < 0``) or a
+    friction curve (``CF < 0``) — while ``/RWALL`` makes every secondary node
+    KINEMATICALLY constrained unless the wall is a PENALTY one
+    (``hm_read_rwall_spher.F:286``: ``IF (IDDLEVEL == 0 .AND. IPEN == 0) CALL
+    KINSET(4,…)``),
+    which collides with any other constraint they carry. One card on one deck
+    in the 368-file R14 corpus does not justify that surface, so it is refused
+    by name with the entity's own geometry quoted.
+    """
+    raw = block.raw
+    _hdr, _t, offset = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(raw, offset, mpp)
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+
+    def _c(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    _refuse_contact(block, state, {
+        "pid": _c(f1, 0), "geotyp": _c(f1, 1), "surfa": _c(f1, 2),
+        "surfatyp": _c(f1, 3),
+        "g1": _c(f5, 1), "g2": _c(f5, 2), "g3": _c(f5, 3), "g4": _c(f5, 4),
+    }, mpp=mpp)
+
+
+def handle_contact_sliding_only(block: Block, state: ConversionState,
+                                mpp: bool = False,
+                                notes: Tuple[str, ...] = ()) -> None:
+    """``*CONTACT_SLIDING_ONLY`` — RECOGNIZED, deliberately NOT converted.
+
+    Vol I R17 p.11-10 item 1g: the interface is CONSTRAINT-based and lets the
+    SURFA nodes slide along SURFB while allowing **no separation**. Every
+    OpenRadioss sliding interface allows separation — ``/INTER/TYPE3`` and
+    ``/INTER/TYPE5`` both echo ``SLIDING AND VOIDS``
+    (``hm_read_inter_type03.F:262``, ``hm_read_inter_type05.F:391``) — and
+    ``/INTER/TYPE10`` ``Itied = 1`` forbids separation only by also forbidding
+    sliding.
+
+    Routing it to an ordinary ``/INTER/TYPE7`` was MEASURED on the corpus's one
+    carrier and is a REGRESSION, which is why the obvious fallback is not
+    offered: see ``writer/contacts._REFUSED_CONTACT_NOTES``.
+    """
+    _refuse_contact(block, state, {}, mpp=mpp)
+
+
+def handle_contact_unregistered(block: Block, state: ConversionState) -> None:
+    """Any ``*CONTACT_*`` with no exact key — skipped, but never in silence.
+
+    ``dispatch`` is an exact dict lookup and its no-handler arm simply appends
+    to ``state.skipped_keywords``. That list is printed at the end of the
+    conversion log, one line among many, with no indication that a contact is
+    different in kind from an unmodelled output request. It is: MEASURED over
+    the 356-deck R14 roster, 16 unregistered ``*CONTACT`` spellings appear on
+    44 decks, 37 of which have NO other contact, and 18 of the 30 decks whose
+    OpenRadioss internal energy collapses to zero against a non-zero LS-DYNA
+    reference carry one.
+
+    This keeps the accounting identical (the keyword still reaches
+    ``skipped_keywords``) and adds the sentence the reader needs.
+    """
+    state.skipped_keywords.append(block.keyword)
+    state.warn(
+        f"*{block.keyword} has no handler and is SKIPPED. A skipped *CONTACT "
+        "is not a missing output card, it is a MISSING LOAD PATH: the two "
+        "surfaces do not interact, and the run terminates NORMALLY with a "
+        "wrong answer rather than failing. MEASURED on the 356-deck R14 "
+        "reference corpus: 18 of the 30 decks whose OpenRadioss internal "
+        "energy is zero against a non-zero LS-DYNA reference carry an "
+        "unregistered *CONTACT spelling. REMEDY: re-spell the contact as one "
+        "of the registered families (see the README contact table), or add "
+        "the /INTER by hand to the converted deck.")
 
 
 def handle_contact_airbag_single_surface(block: Block,
@@ -7062,23 +7452,28 @@ def handle_define_friction(block: Block, state: ConversionState) -> None:
     state.define_frictions[fric_id] = fric
 
 
-def handle_contact_tied(block: Block, state: ConversionState) -> None:
+def handle_contact_tied(block: Block, state: ConversionState,
+                        mpp: bool = False, notes: Tuple[str, ...] = (),
+                        thermal: bool = False) -> None:
     """*CONTACT_TIED_{NODES,SURFACE,SHELL_EDGE}_TO_SURFACE[_OFFSET…] →
-    /INTER/TYPE2 (tied kinematic interface).
+    /INTER/TYPE2 (tied kinematic interface) or /INTER/TYPE10 (penalty tie).
 
     Card1: ssid msid sstyp mstyp …  (slave commonly a *SET_NODE_LIST, sstyp=4;
            master commonly a *SET_SEGMENT, mstyp=0)
     Card2: fs fd dc vc vdc penchk bt dt — friction is meaningless on a tie and
            is not carried over.
     Card3: sfs sfm sst mst sfst sfmt — a NEGATIVE sst/mst is LS-DYNA's "absolute
-           tie-criterion distance", kept as a floor for the TYPE2 dsearch. The
-           dyna2rad discriminator (SFST*SST + SFMT*MST)/2 < 0 routes the contact
-           to the penalty tie /INTER/TYPE10 instead of the kinematic /INTER/TYPE2
-           (decided in the writer); sfs/sfm size the TYPE10 GAP.
+           tie-criterion distance" (Vol I R17 p.11-33 SAST + General Remark 4
+           p.11-125), kept as a floor for the TYPE2 dsearch. It is NOT a
+           family selector: which Radioss tie a record gets is decided in the
+           writer by the KEYWORD and the solver — see
+           ``writer/contacts._tied_interface_type``. sfs/sfm size the TYPE10 GAP.
     """
     inter_id, title, offset = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(block.raw, offset, mpp)
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
+    _warn_contact_spelling(state, block.keyword, inter_id, notes)
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
@@ -7105,9 +7500,17 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
     else:
         variant = "SURFACE_TO_SURFACE"
     state.contacts_tied.append(
+        # ``"_OFFSET" in kw``, not ``kw.endswith("OFFSET")``: the R14 spelling
+        # *CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET_THERMAL carries the option in
+        # the middle of the keyword, and endswith() reported it as the plain
+        # (constraint-based) family. Every pre-existing spelling ends in
+        # OFFSET, so the two tests agree on all of them.
         ContactTied(inter_id, title, ssid, sstyp, msid, mstyp, variant,
-                    offset=kw.endswith("OFFSET"), sst=sst, mst=mst,
-                    sfs=sfs, sfm=sfm, sfst=sfst, sfmt=sfmt, fs=fs_tied)
+                    offset="_OFFSET" in kw, sst=sst, mst=mst,
+                    sfs=sfs, sfm=sfm, sfst=sfst, sfmt=sfmt, fs=fs_tied,
+                    keyword=kw,
+                    thermal=(_read_contact_thermal(raw, offset)
+                             if thermal else None))
     )
 
 
@@ -7675,7 +8078,16 @@ def handle_control_hourglass(block: Block, state: ConversionState) -> None:
     if not raw:
         return
     f = _card(raw, 0, fixed=True, n=2, w=10)
-    ihq = to_int(f[0])   if f else 1
+    # An absent IHQ cell is 0, NOT 1: Vol I R17 p.12-271 Remark 1 gives IHQ the
+    # default "Rem 1" and says "If omitted or if IHQ = 0, the default hourglass
+    # control types are as follows: ... b) For solids: type 2 for explicit;
+    # type 6 for implicit." 0 therefore means "resolve the solver default"
+    # (writer/mesh._default_solid_ihq does that). The `else 0` arm is
+    # DEFENSIVE and unreachable: the early return covers an empty raw, and
+    # _card(..., n=2) always returns two cells, so a blank IHQ already reaches
+    # to_int('') == 0. It is written 0 rather than the old 1 so the fallback
+    # says the same thing the live path does.
+    ihq = to_int(f[0])   if f else 0
     qh  = to_float(f[1]) if len(f) > 1 else 0.1
     state.ctrl_hourglass = ControlHourglass(ihq, qh)
 
@@ -7697,8 +8109,14 @@ def handle_hourglass(block: Block, state: ConversionState) -> None:
     ihq = to_int(f[1]) if len(f) > 1 else 0
     # A genuinely blank QM field means "LS-DYNA default 0.10"; an explicit 0.0
     # is kept as 0.0 (Radioss then applies its own h default for Isolid 1/2).
-    qm = to_float(f[2]) if (len(f) > 2 and f[2].strip()) else 0.10
-    state.hourglass_defs[hgid] = HourglassDef(hgid, ihq, qm)
+    # Whether the cell was WRITTEN is recorded separately, because Vol I R17
+    # p.25-5 Remark 7 makes the default conditional: "The default value for QM
+    # is 0.1 unless superseded by a nonzero value of QH in
+    # *CONTROL_HOURGLASS." That other card may not have been read yet, so the
+    # resolution happens in writer/mesh._solid_hg_values.
+    qm_stated = len(f) > 2 and bool(f[2].strip())
+    qm = to_float(f[2]) if qm_stated else 0.10
+    state.hourglass_defs[hgid] = HourglassDef(hgid, ihq, qm, qm_stated)
 
 
 def handle_control_implicit_auto(block: Block, state: ConversionState) -> None:
@@ -15013,6 +15431,11 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
         return
     sid = to_int(f1[0])
     segments: List[List[int]] = []
+    # Rows that state exactly TWO positive nodes. They are not faces (no area,
+    # no normal), so collapse_segment_corners rejects them and /SURF/SEG must
+    # not see them -- but they ARE the set's edges, which is how an LS-DYNA
+    # deck writes a *CONTACT_SINGLE_EDGE surface. See SegmentSet.edges.
+    edges: List[Tuple[int, int]] = []
     for line in raw[offset + 1:]:
         if not line.strip():
             continue
@@ -15022,8 +15445,11 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
         f = _card([line], 0, fixed=True, n=8, w=10)
         # The collapse itself lives in state.collapse_segment_corners — the ONE
         # copy *SET_SEGMENT_GENERAL's SEG clause shares (writer/mesh).
-        nodes = collapse_segment_corners(
-            [to_int(f[j]) for j in range(min(4, len(f)))])
+        cells = [to_int(f[j]) for j in range(min(4, len(f)))]
+        nodes = collapse_segment_corners(cells)
+        if not nodes and len(cells) >= 2 and cells[0] > 0 and cells[1] > 0 \
+                and cells[0] != cells[1] and not any(c > 0 for c in cells[2:]):
+            edges.append((cells[0], cells[1]))
         if nodes:
             segments.append(nodes)
             # A1/A2 are the PER-SEGMENT override of a
@@ -15045,7 +15471,20 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
             # grows the arm; when it does, this is the second half to add.
             if any(to_float(f[j]) for j in (4, 5) if len(f) > j):
                 state.segment_set_attr_sids.add(sid)
-    state.segment_sets[sid] = SegmentSet(sid, title, segments)
+    if edges:
+        state.warn(
+            f"*SET_SEGMENT {sid}: {len(edges)} data row(s) state only TWO "
+            f"nodes and {len(segments)} state a face. A two-node row has no "
+            "area and no normal, so it is not a surface segment (Vol I R17 "
+            "p.43-63 gives N1..N4, with N4 = N3 for a triangle) — it is an "
+            "EDGE, which is how a deck writes the SURFA of an edge-only "
+            "contact. Those rows are kept as this set's EDGE list and are "
+            "used by *CONTACT_SINGLE_EDGE / an /INTER/TYPE11 route; they are "
+            "NOT in the /SURF/SEG built from this set, so a pressure load or "
+            "a contact MAIN side pointed at it sees only the "
+            f"{len(segments)} face(s). Before R14 triage round 3 they were "
+            "discarded with no diagnostic at all.")
+    state.segment_sets[sid] = SegmentSet(sid, title, segments, edges=edges)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18158,6 +18597,161 @@ del _kw
 HANDLERS["CONTACT_AIRBAG_SINGLE_SURFACE_MPP"] = (
     handle_contact_airbag_single_surface)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The ONE *CONTACT registration table (R14 triage round 3, item A)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# CENSUS that motivates it: 16 *CONTACT_* spellings were in NO dispatch table
+# at all — 77 cards on 44 of the 356 R14 roster decks, 37 of which have no
+# other contact, and 18 of the 30 decks whose OpenRadioss internal energy
+# collapses to zero against a non-zero LS-DYNA reference carry one. A skipped
+# *CONTACT is not a missing output card, it is a MISSING LOAD PATH: the run
+# terminates normally with the two surfaces passing through each other.
+# dyna2rad drops the same spellings (``convertcontacts.cxx:234`` ``if
+# (interType.empty()) continue;``), so there is no peer to copy here.
+#
+# ONE table, three consumers (#116): ``HANDLERS`` below,
+# ``assembly._OFFSET_SPECS`` (which imports ``CONTACT_OFFSET_KEYWORDS``), and
+# the README/test coverage assertion. Hand-listing any of the three is what
+# leaves a ``*CONTACT_SURFACE_TO_SURFACE_MPP`` unroutable while its base
+# spelling converts.
+
+@_dataclass(frozen=True)
+class _ContactRoute:
+    """One row of :data:`_CONTACT_SPELLINGS`.
+
+    ``kwargs`` are forwarded verbatim to ``handler(block, state, **kwargs)``,
+    so a row states only the arguments its own handler takes:
+
+    * ``extra`` — mandatory cards between Card 3 and optional Card A
+      (1 for the ``_THERMAL`` spellings' THRM 1 and for
+      ``_INTERFERENCE``'s Card 4 ``LCID1 LCID2``, 0 otherwise). Without it
+      ``_read_contact_soft`` reads THRM 1's ``K`` as SOFT and
+      ``_read_contact_ignore`` reads Card B's ``THKOPT`` as IGNORE.
+    * ``notes`` — tags into :data:`_CONTACT_SPELLING_NOTES`, the named losses
+      the deck must be told about.
+    * ``thermal`` / ``interference`` — record flags the writer routes on.
+
+    ``mpp_sibling`` also registers ``<spelling>_MPP``: ``dispatch`` is an exact
+    dict lookup, and ``_MPP`` is a legal suffix on every one of these
+    keywords. ``offsets`` feeds ``assembly._OFFSET_SPECS``; the ``_MPP``
+    siblings are excluded there for the reason the spotweld and eroding ones
+    are — the MPP card pushes Card 1 down a line and ``_off_contact`` rewrites
+    ``b.raw[start]`` blind.
+    """
+    handler: Callable[..., None]
+    kwargs: Dict[str, Any] = _field(default_factory=dict)
+    mpp_sibling: bool = True
+    offsets: bool = True
+
+
+_CONTACT_SPELLINGS: Dict[str, _ContactRoute] = {
+    # ── The two-way / one-way surface pairs → the surf2surf route ──────────
+    # Vol I R17 p.11-13. The AUTOMATIC twins of these already route here, so
+    # the converted deck is byte-identical to the twin's apart from the
+    # /INTER title — which is the point: the LS-DYNA difference is segment
+    # orientation (p.11-10 item 4), and Radioss has no one-sided segment.
+    "CONTACT_SURFACE_TO_SURFACE": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"notes": ("nonauto", "twoway")}),
+    "CONTACT_ONE_WAY_SURFACE_TO_SURFACE": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"notes": ("nonauto",)}),
+    "CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"notes": ("forming",)}),
+    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"notes": ("mortar", "twoway")}),
+    "CONTACT_FORMING_SURFACE_TO_SURFACE_MORTAR": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"notes": ("forming", "mortar", "twoway")}),
+    # ── Self-contact ───────────────────────────────────────────────────────
+    # p.11-12; SURFA = 0 means "all parts" (p.11-24), which the single-surface
+    # route already handles. MEASURED on the R14 deck pips (two contacting
+    # pipes): registering it moves IE from -28.0 % to +1.39 % and KE from
+    # +15.2 % to +0.37 % against the LS-DYNA reference — a `match`.
+    "CONTACT_SINGLE_SURFACE": _ContactRoute(
+        handle_contact_automatic_single_surface,
+        {"notes": ("nonauto",)}),
+    # ── The _MPP flavour of an already-registered base ─────────────────────
+    "CONTACT_AUTOMATIC_GENERAL_MPP": _ContactRoute(
+        handle_contact_automatic_general,
+        {"mpp": True, "notes": ("mpp",)},
+        mpp_sibling=False, offsets=False),
+    # ── The _THERMAL spellings: mechanical route + a real Ithe card ────────
+    "CONTACT_SURFACE_TO_SURFACE_THERMAL": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"extra": 1, "thermal": True, "notes": ("nonauto", "twoway")}),
+    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_THERMAL": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"extra": 1, "thermal": True, "notes": ("mortar", "twoway")}),
+    "CONTACT_TIED_SURFACE_TO_SURFACE_THERMAL": _ContactRoute(
+        handle_contact_tied, {"thermal": True}),
+    "CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET_THERMAL": _ContactRoute(
+        handle_contact_tied, {"thermal": True}),
+    # ── The two new small routes ───────────────────────────────────────────
+    "CONTACT_SINGLE_EDGE": _ContactRoute(
+        handle_contact_single_edge, {"notes": ("single_edge",)}),
+    "CONTACT_SURFACE_TO_SURFACE_INTERFERENCE": _ContactRoute(
+        handle_contact_automatic_surface_to_surface,
+        {"extra": 1, "interference": True,
+         "notes": ("nonauto", "twoway", "interference")}),
+    # ── Refused BY NAME (recognized, never silently skipped) ───────────────
+    # Each has a source-quoted or measured reason no OpenRadioss card can
+    # carry it; see writer/contacts._REFUSED_CONTACT_NOTES for the texts.
+    # They get NO offset spec: an unmodelled card stack must not have its
+    # cells rewritten by position (the *AIRBAG warn-drop rule), and
+    # *CONTACT_ENTITY's Card 1 is PID/GEOTYP, not SSID/MSID, so _off_contact
+    # would offset a PART id as a set id.
+    "CONTACT_DRAWBEAD": _ContactRoute(handle_contact_drawbead, offsets=False),
+    "CONTACT_ENTITY": _ContactRoute(handle_contact_entity, offsets=False),
+    "CONTACT_SLIDING_ONLY": _ContactRoute(handle_contact_sliding_only,
+                                          offsets=False),
+}
+
+
+def _contact_route(handler: Callable[..., None], **kwargs: Any):
+    """Bind one :data:`_CONTACT_SPELLINGS` row into a dispatchable handler.
+
+    The return type is deliberately INFERRED rather than annotated
+    ``Callable[[Block, ConversionState], None]``: the values of ``HANDLERS``
+    are plain ``def``s whose parameters are positional-OR-keyword, while a
+    ``Callable[[...], None]`` is positional-only — so the annotated form is not
+    a subtype of the dict's inferred value type and mypy rejects the
+    assignment (``handlers.py: Incompatible types in assignment``). The
+    inferred type of ``_route`` has the same named parameters every other
+    handler has, and is what the dispatcher calls.
+    """
+    def _route(block: Block, state: ConversionState) -> None:
+        handler(block, state, **kwargs)
+    return _route
+
+
+#: Every spelling the table registers, ``_MPP`` siblings included. Exported so
+#: a test can assert HANDLERS covers exactly this set.
+CONTACT_REGISTERED_KEYWORDS: List[str] = []
+#: The subset that also gets ``assembly._OFFSET_SPECS[kw] = _off_contact`` —
+#: i.e. the shared-Card-1 spellings, minus every ``_MPP`` one and minus the
+#: three refusals. Imported by ``assembly`` so the two tables read ONE source.
+CONTACT_OFFSET_KEYWORDS: List[str] = []
+
+for _base, _route_spec in _CONTACT_SPELLINGS.items():
+    for _mpp_sfx in ("", "_MPP") if _route_spec.mpp_sibling else ("",):
+        _spelling = _base + _mpp_sfx
+        _route_kwargs = dict(_route_spec.kwargs)
+        if _mpp_sfx:
+            _route_kwargs["mpp"] = True
+            _route_kwargs["notes"] = (
+                tuple(_route_kwargs.get("notes", ())) + ("mpp",))
+        HANDLERS[_spelling] = _contact_route(_route_spec.handler,
+                                             **_route_kwargs)
+        CONTACT_REGISTERED_KEYWORDS.append(_spelling)
+        if _route_spec.offsets and not _mpp_sfx:
+            CONTACT_OFFSET_KEYWORDS.append(_spelling)
+del _base, _route_spec, _mpp_sfx, _spelling, _route_kwargs
+
 HANDLERS["DEFINE_FRICTION"] = handle_define_friction
 
 # ── *AIRBAG_* → /MONVOL ──────────────────────────────────────────────────────
@@ -18886,6 +19480,11 @@ _PREFIX_HANDLERS = (
     # one, which would otherwise land in skipped_keywords unnamed. It emits
     # nothing and says so — a warn-only handler, never a card.
     ("AIRBAG", handle_airbag_unsupported),
+    # *CONTACT_* with no exact key. It STILL lands in skipped_keywords (the
+    # accounting is unchanged), but it no longer lands there in silence — see
+    # handle_contact_unregistered for the measured reason a skipped contact is
+    # the most expensive silent drop in the converter.
+    ("CONTACT", handle_contact_unregistered),
     ("ELEMENT_TSHELL", handle_element_tshell),
     ("ELEMENT_SPH", handle_element_sph),
     ("ELEMENT_SHELL", handle_element_shell),

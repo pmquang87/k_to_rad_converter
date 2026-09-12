@@ -2841,6 +2841,20 @@ LS-DYNA model, and the `ALPHA_MAT` values are a placeholder with no relation to
 the deck's `*INITIAL_VOLUME_FRACTION*`. The warning says all of that in one
 place
 `*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
+`*SECTION_SOLID` ELFORM **5/6/7** (1-point ALE / Eulerian / Eulerian
+ambient) → `Iale=0`, i.e. a LAGRANGIAN element, and NAMED as such. They are
+deliberately not mapped: `hm_read_prop14.F:264-267` refuses `Iale != 0` on
+any `Isolid` but 0, 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
+4 on `advection_B`), and with `Isolid` 1 the remap was MEASURED destructive
+(`taylor_B` from IE +5.1 % / KE +4.9 % against its LS-DYNA reference to a
+99.9 % energy error at 198 220 cycles; `channel_A` from −98.9 % / −25.6 % to
+−100 % / −94.3 %). A real ALE conversion also needs an `/ALE/GRID`
+formulation, an ALE-capable material and the inflow/void boundaries the
+ELFORM cell does not state. They DO take the 1-point hourglass control (see
+*Control tables* below) — the half LS-DYNA's own d3hsp says they carry
+(`solid formulation = 11`, hourglass type 2 / coefficient 0.1) — worth
+`taylor_B` +5.06 % → +2.44 % and `sloshing_C` a timeout → NORMAL at +2.82 %.
+ELFORM 7's `AET` is named as dropped
 `*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`
 `*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`
 `*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
@@ -3075,10 +3089,34 @@ cycle, so the card written on the secondaries is overwritten before cycle 1 and
 the body starts at rest, at 0 starter diagnostics, while LS-DYNA gives the
 rigid PART the velocity (measured on `matfoamsoil`: cycle-0 K-ENERGY 3.547E+04
 against the LS-DYNA reference's own 3.54775E+04, −0.02 %, where the
-un-re-pointed card gives 0.000). A MIXED card is left over its stated nodes and
-named, and `*INITIAL_VELOCITY_GENERATION` is not re-pointed at all: it emits
-`/INIVEL/AXIS`, whose `Vr` gives each node the translational velocity
-`omega x r`, so collapsing the group would leave the body with no spin
+un-re-pointed card gives 0.000). `*INITIAL_VELOCITY_GENERATION` is re-pointed
+the same way, and needs no arithmetic to keep the body's SPIN:
+`hm_read_inivel.F:580-617` writes BOTH `VR = omega*n` and
+`V + omega x (x - O)` on every node of an `/INIVEL/AXIS` group when
+`IRODDL > 0`, and `contrl.F:1053` puts `NRBODY` in the `IRODDL` minimum, so
+any deck with an `/RBODY` has it. Measured cycle-0 kinetic energy against
+each deck's own LS-DYNA `glstat` (all of them 0.000 without the re-point):
+`sphere1` −0.003 %, `wood-post` −0.003 %, `projectile-block` −0.003 %,
+`section_solid.hourglassing` +0.006 %, `quadrature_A` +0.000 %, and `brake`'s
+ROTATIONAL 1.345e7 against 1.33808e7 = +0.517 % (its `brake_debug` twin, whose
+only emitted difference is one `/BCS` digit locking the spin axis, stays inert
+at −4.4e-11 against LS-DYNA's own 0.0).
+A **MIXED** card is SPLIT in place: every deformable node stays and each rigid
+body the card FULLY covers is replaced by its main node (`pipe.k` goes from
+−0.100 % to −0.005 %). Coverage counts a body's ELEMENT nodes only —
+`*CONSTRAINED_EXTRA_NODES` are exempt, because Vol I R17 p.28-127 says
+LS-DYNA does not initialise them either when `IVATN = 0`. A body the card only
+PARTLY covers takes one of two answers, decided by the REST of the card.
+A body a MIXED card only partly covers is refused and NAMED rather than
+modelled: p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted momentum
+average over the whole body, this writer computes no nodal masses, and the
+deformable half of the card still works. A body an ALL-RIGID card only partly
+covers is RE-POINTED anyway with the over-estimate NAMED, because refusing
+there leaves nothing at all: `translat.k`, whose `*INITIAL_VELOCITY_NODE`
+names 2 of rigid part 1's 4 element nodes, reads cycle-0 K-ENERGY **387.9**
+re-pointed against its own LS-DYNA glstat's **189.962** (+104 %) and
+**0.000** refused, with every channel flat for all 13 980 cycles. The
+mass-weighted arm is a round-4 item.
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
@@ -3295,6 +3333,81 @@ self-contact with no deformable nodes, the `SOFT`-routed
 `*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`. A *partially*
 rigid secondary side keeps its interface and warns about the nodes removed
 from it.
+`*CONTACT_SURFACE_TO_SURFACE`, `_ONE_WAY_SURFACE_TO_SURFACE`,
+`_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
+`_FORMING_SURFACE_TO_SURFACE_MORTAR` and `_SINGLE_SURFACE` (each optionally
+`_MPP` / `_ID` / `_TITLE`) take the SAME route as their `AUTOMATIC_` twins —
+`/INTER/TYPE7`, and `/INTER/TYPE25` self-contact for the single-surface one.
+They were in NO dispatch table until R14 triage round 3: 77 cards on 44 of the
+356 R14 reference decks, 37 of which have no other contact, and 18 of the 30
+decks whose OpenRadioss internal energy collapses to zero against a non-zero
+LS-DYNA reference carry one. dyna2rad drops the same spellings
+(`convertcontacts.cxx:234` `if (interType.empty()) continue;`). Each states
+what LS-DYNA fact it could not carry: the non-`AUTOMATIC` spellings are
+ONE-SIDED in LS-DYNA and Radioss has no one-sided segment (p.11-10 item 4 — a
+gain in permissiveness, nothing dropped); the two-way ones are checked from one
+side only by `/INTER/TYPE7` (p.11-8 item 1b — the fact, with NO remedy
+attached: `twobar`'s +1151 % internal energy was measured down to −5.6 % by
+changing the derived `Gapmin`, not by swapping the sides, and a default
+Gapmin for solid-segment interfaces is a round-4 item; `--inter-gapmin
+ID=VAL` is the lever today); `FORMING` ignores the tooling thickness and, on
+a NEGATIVE `SBST` only, additionally offsets SURFB by `|SBST|/2` (General
+Remark 9 p.11-128),
+neither of which the `(|SAST|+|SBST|)/2` Gapmin reproduces — use
+`--inter-gapmin ID=VAL`; `MORTAR` is a segment-to-segment contact with a
+consistent nodal assembly and automatic erosion (General Remark 14 p.11-131)
+that OpenRadioss has no interface for at all.
+`*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE` takes the same route with
+**`Inacti` forced to 0** and the deck's own `IGNORE` cell ignored: the keyword
+exists to RESOLVE an initial overlap into prestress (p.11-66), and
+`i7pwr3.F:244-258` makes `Inacti` 5/6 ACCEPT the overlap as the zero-force
+state — which would leave the interference fit unstressed. The `LCID1`/`LCID2`
+stiffness ramp has no counterpart (Radioss has no time-varying `Stfac`), so the
+full penalty force appears in cycle 1 instead of ramping in.
+`*CONTACT_SINGLE_EDGE` → `/INTER/TYPE11` **self edge-impact** (`line_IDm = 0`)
+over the surface's own edges, through the same `/LINE` synthesis the
+`SOFT = -11` route uses. A `*SET_SEGMENT` may state those edges DIRECTLY as
+two-node rows (the R14 carrier `contact.edge.k` states 58 of them and no face);
+they are kept as the set's edge list, named in a warning, and are NOT part of
+the `/SURF/SEG` built from the same set. LS-DYNA restricts the contact to
+exterior edges whose in-plane normals face each other (p.11-124 Remark 3);
+`/INTER/TYPE11` has no such restriction, so the converted contact is the more
+permissive of the two, and no node-to-surface interface is added — matching the
+keyword, which has none.
+`*CONTACT_{SURFACE_TO_SURFACE,AUTOMATIC_SURFACE_TO_SURFACE_MORTAR,TIED_SURFACE_TO_SURFACE[_OFFSET]}_THERMAL`
+carry a real thermal contact, not a warn-drop: `Ithe = 1` plus `Kthe = H0`
+(the closed-gap conductance — `i7therm.F:191` `PHI = A·ΔT·dt/RSTIF` with
+`FRIGAP(20) = 1/Kthe`, `i2therm.F:110` `PHI = A·ΔT·dt·Kthe`),
+`Ithe_form = 1` (`ALGO = 0`, two-way), `Frad = FRAD`, `Drad = LMAX` and
+`Fheats/Fheatm = FTOSA / 1−FTOSA` on TYPE7 (TYPE2 has conduction only; the
+TYPE25 emitter takes the same cells but no registered spelling routes a
+`ContactThermal` to it today, so that branch is forward-looking).
+NOT converted, and NAMED per card: `K` (the fluid-gap branch `h = K/l_gap` —
+Radioss's `Kthe` is a constant or a function of contact PRESSURE, so the whole
+open-gap branch collapses onto `H0`), `LMIN`, `BC_FLAG`, and `ALGO = 1/2/3`,
+which is refused by name rather than given an invented `Tint`. The card is
+dropped entirely, with the reason, on a deck that emits no `/HEAT/MAT`: the
+deck has no thermal solve for the interface to feed at all (heat capacity and
+conductivity reach the solver only through that card). On TYPE7/TYPE25 the
+starter says so itself — `WARNING 702`, `hm_read_inter_type07.F:700-707`; the
+TYPE2 reader (`hm_read_inter_type02.F:436-444`) has NO such gate and would
+store `Kthe` silently, which is why k2rad refuses there too. On an implicit tie
+the card is lost outright because `/INTER/TYPE10` has no thermal field at all.
+`*CONTACT_DRAWBEAD`, `*CONTACT_ENTITY` and `*CONTACT_SLIDING_ONLY` are
+**RECOGNIZED and deliberately NOT converted** — they reach "Recognized but not
+emitted" with a warning that names the LS-DYNA field, the OpenRadioss card that
+cannot carry it, the physical consequence and a remedy. `/INTER/TYPE8` takes a
+CONSTANT lineic restraining force where `LCIDRF` is a curve of it against the
+bead closure (`hm_read_inter_type08.F:131-137` vs p.11-54); `*CONTACT_ENTITY`'s
+analytic surface maps only onto `/RWALL/{PLANE,SPHER,CYL}` for GEOTYP 1/2/3 and
+`/RWALL` makes a secondary node kinematically constrained whenever the wall
+is not penalty-coupled (`hm_read_rwall_spher.F:286`, gated
+`IF (IDDLEVEL == 0 .AND. IPEN == 0)`); and no OpenRadioss interface forbids separation
+while allowing sliding — `/INTER/TYPE3` and `/INTER/TYPE5` both echo `SLIDING
+AND VOIDS`. The `SLIDING_ONLY` refusal is MEASURED: routing its one corpus
+carrier through `/INTER/TYPE7` collapsed the time step from 1.01e-07 to 8.3e-17
+and froze the run at 64.6 % of the target after 266 379 cycles, against a 1.8 s
+NORMAL termination without it.
 `*CONTACT_ERODING_{SINGLE_SURFACE,SURFACE_TO_SURFACE,NODES_TO_SURFACE}` (each
 optionally `_MPP` / `_ID` / `_TITLE`) → `/INTER/TYPE25`, following dyna2rad's
 routing (`convertcontacts.cxx:117-131` and the generic `NODES_TO_SURFACE`
@@ -3482,11 +3595,32 @@ auto-penalty standard formulation) for SURFACE_TO_SURFACE — the purely
 kinematic 1/5 hard-fail with `ERROR 556` as soon as the two tied parts are
 conformally meshed and share a node, which is exactly the layout these
 keywords exist for.
-A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` with a **negative offset** —
-dyna2rad's discriminator `(SFST*SST + SFMT*MST)/2 < 0` (raw Card-3 scale factors,
-no zero→1 defaulting, so a blank `SFST`/`SFMT` always stays TYPE2) — instead
-becomes `/INTER/TYPE10` (**penalty** tie: bonds by a spring over `GAP=(|SST|+|MST|)/2`,
+A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET][_THERMAL]` on an **IMPLICIT** deck,
+and any tied contact whose secondary side is **entirely rigid**, instead becomes
+`/INTER/TYPE10` (**penalty** tie: bonds by a spring over `GAP=(|SST|+|MST|)/2`,
 so its secondary nodes may coexist with `/RBODY` and rotations are not tied).
+The family is keyed on the KEYWORD and the SOLVER, both measured — the old
+dyna2rad discriminator `(SFST*SST + SFMT*MST)/2 < 0` is **deleted**: a negative
+Card-3 `SST`/`MST` is a tying SEARCH DISTANCE (Vol I R17 p.11-33 `SAST`,
+General Remark 4 p.11-125), not a family flag, and General Remark 7 (p.11-127)
+puts the plain spelling in the CONSTRAINT-based family. What decides is the
+solver: the implicit engine **refuses** `/INTER/TYPE2` Spotflag 10…25 outright
+(`ind_glob_k.F:4594-4599`, `ERROR 241`; 26 downgrades to 25 with `WARNING
+1177`) and diverges on 27/28/1/5 at cycles 16/8/9/19 on the corpus carrier
+`05_4_2_welding_uncoupled_link`, where `/INTER/TYPE10` reaches NORMAL in 79 —
+while on a determinate two-hex EXPLICIT coupon (closed form `IE = ½Eε²AL =
+210.0`, merged bar 209.2) `/INTER/TYPE2` reproduces the bar EXACTLY and
+`/INTER/TYPE10` at Radioss's default `STFAC` carries 67.85, **−67.6 %** of the
+tie. So an explicit tie gets the exact card and an implicit one the card that
+converges. `--tie-stfac VALUE|auto` stiffens the penalty tie: `i7sti3.F:444`
+makes the tie spring `STFAC·A²·K/V` per tied node = `STFAC/(3(1−2ν))` times the
+stiffness of the element it welds (0.167× at the 0.2 default), so `auto` =
+`100·3(1−2ν)` from the main side's Poisson ratio (120 at ν = 0.3, measured
++0.05 %); `dt` scales as `1/√STFAC` (0.2 → 141 cycles, 120 → 2435). The default
+leaves `STFAC` at 0 and NAMES the softness, because on the implicit welding
+deck `STFAC = 10` already changes IE by −30.5 % and halves the implicit step.
+The all-rigid-secondary arm applies the derived value whether or not you ask
+for it — there is no `/INTER/TYPE2` alternative there.
 The TYPE2 `dsearch` is measured from the mesh — the worst slave-node-to-master-
 segment distance × 1.2 — so tied nodes offset from a shell master's MID-PLANE
 by half the plate thickness (the usual welded-shell layout) stay tied;
@@ -4568,8 +4702,9 @@ only `SORTIE_MAIN` call site and is not gated on `IMPL_S`. **So no implicit
 guard is applied and none should be**; what to expect instead is FEWER files
 than the schedule asks for, because `sortie_main.F:952` advances `TDYNAIN` by
 one interval per write and a long implicit step strides over several triggers.
-`/IMPL/DT/FIXPOINT`, which this converter already emits, removes the
-intermediate overshoot.
+`/IMPL/DT/FIXPOINT`, which `--fixpoint-count N` re-enables (it is OFF by
+default since 2026-09, see below), removes the intermediate overshoot — at
+the cost the same section names.
 
 **The STRAIN card's spelling is load-bearing.** `fredynain.F:140` accepts the
 card on `KEY3(1:5) == 'STRAI'`, so `/DYNAIN/SHELL/STRAI/FULL` parses too — but
@@ -4596,7 +4731,19 @@ the part ids follow that line immediately, and why they are capped at ten per
 line (`fredynain.F` reads them into a fixed `IV2(10)`).
 
 ### Control / output
-`*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks
+`*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks.
+`/IMPL/DT/FIXPOINT` — k2rad's own output-milestone grid, which LS-DYNA never
+asks for — is **OFF by default since 2026-09** (`--fixpoint-count N` requests
+it). The grid makes the adaptive step oscillate against `/IMPL/DT/2`, and
+trapezoidal Newmark is unconditionally stable at a CONSTANT step, not at one
+that alternates 2 : 1 every cycle: MEASURED, ten dynaexamples R14 decks that
+died `** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **` reach NORMAL
+TERMINATION without it (`ex_01` x3 at cycle 20, `ex_14` x4 at cycle 33,
+`ex_15` x3 at cycle 38), while three currently-NORMAL controls do not regress
+and two improve. A coarser grid is NOT the fix — at 10 points `ex_15`
+terminates at a 99.9 % energy error and `ex_14` at 86.1 %, both NORMAL
+banners over junk (measured 2026-09-12, `nt = 4`). The cost of 0 is fewer output
+states (15 cycles become 8 on the controls)
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
@@ -4681,6 +4828,29 @@ every part on it was split). Shells carry the coefficient into `Hm/Hf/Hr`
 `12` (QBAT) / `24` (QEPH) make those coefficients physically inert (warned).
 _Note: `*CONTROL_HOURGLASS` was previously parsed and dropped; it is now honored,
 so a deck with one may see its solid `Isolid` change off the ELFORM default._
+**A deck that states NO hourglass control gets LS-DYNA's own default**, ON by
+default (`--no-default-hourglass`, `convert(default_hourglass=False)`). Vol I
+R17 p.12-271 Remark 1: *"If omitted or if IHQ = 0, the default hourglass
+control types are as follows: … b) For solids: type 2 for explicit; type 6 for
+implicit"*, with `QH` 0.1 — and a STATED `QH`/`QM` of 0.0 is that same default
+(`birdball.k` states IHQ 2 / QH 0.0 and its own d3hsp echoes `hourglass
+coefficient = 1.00000E-01`). So a defaulted 1-point solid gets `Isolid` 1 with
+`h` 0.1 explicitly and `Isolid` 24 implicitly, instead of the
+full-integration `Isolid` 17 — which `prop_p14_solid.cfg` calls *"2\*2\*2
+Integration Points, No Hourglass"* and for which `hm_read_prop14.F:369-372`
+forces the coefficient to ZERO. MEASURED against each deck's own LS-DYNA
+`glstat`: `sloshing_A` from a TIMESTEP-LIMIT death at `t = 0.18` to NORMAL at
+`t = 2.0` (IE −0.254 %), `sloshing_C` from a timeout to NORMAL (+2.823 %),
+`taylor_A` from IE +2.562 % / KE +1.478 % to +0.002 % / −0.027 %, `rodsol`
+from +2.884 % / +4.041 % to −1.719 % / +1.405 %, and the IMPLICIT
+`ex_03_solid_elform_1` from −20.379 % to −4.139 %. Screened out: ELFORM −1/−2
+(p.41-104 Remark 13 — no hourglass energy at all), ELFORM 2/3/16 and the
+tetrahedra (no hourglass modes), ALE sections, `/MAT/LAW115` sections (their
+own measured 17 → 24) and any deck carrying an `*INITIAL_STRESS_SECTION`
+(`Isolid` 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0 under `/PRELOAD`).
+A `*MAT_NULL` / `*MAT_ELASTIC_FLUID` section keeps the VISCOUS `Isolid` 1 even
+implicitly (p.25-3 `*HOURGLASS` Remark 4), and on an implicit deck a stated
+IHQ 1-5 also becomes type 6 (p.12-272), which is what LS-DYNA does itself._
 `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_OUTPUT`, `*CONTROL_SHELL`,
 `*CONTROL_SOLID`, `*CONTROL_ENERGY`, `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)
@@ -5329,11 +5499,35 @@ mypy k2rad
   velocity vectors under rotation, literal rotation-axis points under any
   transform — is warned per keyword).
 - **Single-element / sparsely-connected SOLID validation decks need
-  `*CONTROL_TIMESTEP TSSFAC <= 0.35`.** `*SECTION_SOLID ELFORM = 1` maps to
-  `/PROP/SOLID` `Isolid = 17`, which is FULL 2x2x2 integration
-  (`hm_read_prop14.F:333-341` sets `NPT = NPG = 8`); LS-DYNA's `TSSFAC = 0.9`
-  default was calibrated for the UNDER-integrated `ELFORM = 1` element k2rad
-  substitutes away from. No `/DT` card is emitted unless the deck states
+  `*CONTROL_TIMESTEP TSSFAC <= 0.35` — on the paths that still emit
+  `Isolid = 17`.** Since 2026-09 a 1-point `*SECTION_SOLID` whose deck leaves
+  the hourglass control DEFAULTED takes LS-DYNA's own default instead
+  (`Isolid` 1 explicit / 24 implicit, `--no-default-hourglass` to opt out).
+  **That does NOT make the deck immune**, and the round-3 finalize coupon
+  measured it: a 25 x 1 x 1 hex cantilever (L 50 mm, 2 x 2 mm section) carried
+  to `Tsca = 0.9` is killed at `Isolid` 1 by `MESSAGE ID 205 ** RUN KILLED:
+  ENERGY ERROR LIMIT REACHED` at cycle 65 after amplifying round-off ~1.6x per
+  cycle, while the `Isolid` 17 arm collapses `dt` to 6.3e-19 and stalls; BOTH
+  arms run to completion at `Tsca = 0.5`. The instability is about how few
+  elements share a node, not about which `Isolid`. It still bites the SCREENED
+  cases hardest — an `ELFORM = -1/-2` section, an `ELFORM = 2` section, a
+  preloaded deck, a `/MAT/LAW115` section, or the opt-out. There `*SECTION_SOLID` still maps to `/PROP/SOLID` `Isolid = 17`,
+  which is FULL 2x2x2 integration (`hm_read_prop14.F:333-341` sets
+  `NPT = NPG = 8`), and LS-DYNA's `TSSFAC = 0.9` default was calibrated for the
+  UNDER-integrated element k2rad substitutes away from.
+  A second consequence of the same default, measured on the same coupon and
+  worth knowing before you read a soft result: on a solid structure ONE element
+  thick in bending, `Isolid` 1 + viscous hourglass is a MECHANISM. The
+  cantilever above (tip pushed 0.5 mm through a `sin^2` ramp, analytic
+  Euler-Bernoulli + Timoshenko `k = 6.711 N/mm`, `IE = 0.8389 N.mm`) reads
+  IE 0.6973 = `k` 5.578 N/mm at `Isolid` 17 (-16.9 %, energy error 0.0 %) and
+  IE 3.75e-6 at `Isolid` 1, with **83.7 % of the external work going into
+  hourglass VISCOSITY** — which Radioss books as neither internal nor kinetic
+  energy, so it shows up only in the engine's ERROR column. That is FAITHFUL
+  (LS-DYNA's viscous IHQ 2 has no static hourglass stiffness either) and every
+  real corpus deck improved, but if a thin solid part suddenly reads soft, this
+  is the new default and `--no-default-hourglass` is the arm to compare
+  against. No `/DT` card is emitted unless the deck states
   `TSSFAC > 0`, so the engine then runs at Radioss's own default `Tsca = 0.9`
   (`dt = 0.857 L/c`), which is super-critical for a lightly-connected hex:
   measured on a 10 mm steel hex, an unstable mode amplified round-off by x3.07

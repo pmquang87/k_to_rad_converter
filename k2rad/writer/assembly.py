@@ -81,6 +81,7 @@ from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
     _make_force_transducers,
+    _make_refused_contact_notes,
     _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
@@ -593,8 +594,14 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             if val and val >= 1.0:
                 state.warn(
                     f"*CONTROL_IMPLICIT_SOLUTION {name}={val:g} is >= 1.0 (not a valid "
-                    "relative tolerance); ignored. This usually means an all-blank "
-                    "leading card shifted the fixed-format columns — check the card. "
+                    "relative tolerance); ignored. rctol=1e10 is LS-DYNA's own "
+                    "'criterion disabled' idiom (Vol I R17 p.12-362 Remark 5: "
+                    "'By default, residual norm ratio (RCTOL) criterion is "
+                    "effectively disabled (RCTOL = 10^10)') and is the usual "
+                    "reason on this corpus - 15 of the 34 implicit R14 decks; "
+                    "an all-blank leading card shifting the fixed-format "
+                    "columns is the other reading, worth a look if the value "
+                    "is not 1e10. "
                     f"Using robust /IMPL/NONLIN default Toli={toli:g}.")
     lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
@@ -677,8 +684,21 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # them ascending and caps the list at 100 (OpenRadioss
     # engine/source/input/freimpl.F). It is honoured by /IMPL/DT/1 and /IMPL/DT/2
     # (our default); only /IMPL/DT/3 (RIKS) ignores it. N is
-    # options.fixpoint_count (default 100 → a point every 1% of the run); we
-    # clamp it to the engine's 1…100 range here, and 0 disables the card.
+    # options.fixpoint_count; we clamp it to the engine's 1…100 range here, and
+    # 0 disables the card.
+    #
+    # OFF BY DEFAULT since 2026-09 (options.fixpoint_count 100 → 0). This is a
+    # k2rad convenience LS-DYNA never asks for, and the milestone grid is not
+    # free: it makes the adaptive step oscillate against /IMPL/DT/2, and
+    # trapezoidal Newmark (/IMPL/DYNA/2, γ = 0.5, β = 0.25) is unconditionally
+    # stable at a CONSTANT step, not at one that alternates 2 : 1 every cycle.
+    # MEASURED on the dynaexamples R14 roster, ten implicit decks that died
+    # "** ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **"
+    # (imp_solv.F:2031, ISTOP = -2) reach NORMAL TERMINATION once the card is
+    # gone — ex_01 x3 at cycle 20, ex_14 x4 at cycle 33, ex_15 x3 at cycle 38,
+    # each family dying at an identical cycle, i.e. one mechanism per family.
+    # See state.ConvertOptions.fixpoint_count for the numbers and for the eight
+    # other arms that do NOT fix ex_14.
     n_fix = min(max(int(state.options.fixpoint_count), 0), 100)
     if n_fix > 0 and state.ctrl_termination and state.ctrl_termination.endtim > 0:
         endtim = state.ctrl_termination.endtim
@@ -2114,6 +2134,12 @@ def _starter_section_registry():
         ("spotweld_interfaces",
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
+        # A note-only section (it returns []): it emits the by-name
+        # refusal for every *CONTACT k2rad RECOGNIZES and deliberately
+        # does not convert. Here rather than in the handler because one
+        # refusal quotes a *DEFINE_CURVE that the corpus carrier defines
+        # 150 lines AFTER the contact - see state.ContactRefused.
+        ("refused_contacts", lambda c: _make_refused_contact_notes(c.state)),
         ("rbodies",           lambda c: c.rbody_lines),
         # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
         # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts

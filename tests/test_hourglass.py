@@ -422,12 +422,17 @@ class MissingHgidTests(unittest.TestCase):
         self.assertTrue(any("HGID=99" in w for w in result.warnings))
 
     def test_dangling_hgid_no_control_no_split(self):
-        # No control either → nothing applies; the part keeps its section prop.
+        # No control either → the section falls back to LS-DYNA's own default
+        # (Vol I R17 p.12-271 Remark 1), which is the same for every part, so
+        # there is still no SPLIT: one /PROP, referenced by the /PART.
+        # (Before the default was supplied this line read Isolid 17 / h 0.0.)
         result, starter = _convert(_solid_deck(hgid1=99, hg_cards=""))
         self.assertEqual(_part_prop_ref(starter, 1), 1)
+        self.assertEqual(starter.count("/PROP/SOLID/"), 1)
         i, h = _solid_isolid_h(starter, "/PROP/SOLID/1")
-        self.assertEqual(i, 17)
-        self.assertAlmostEqual(h, 0.0)
+        self.assertEqual(i, 1)
+        self.assertAlmostEqual(h, 0.1)
+        self.assertTrue(any("HGID=99" in w for w in result.warnings))
 
 
 # ── 6. Shell coefficient handling ────────────────────────────────────────────
@@ -457,12 +462,34 @@ class ShellHourglassTests(unittest.TestCase):
 # ── 7. Regression: no hourglass data → coefficients stay zero ────────────────
 
 class NoHourglassRegressionTests(unittest.TestCase):
-    def test_no_hourglass_leaves_zero_coefficients(self):
+    def test_no_hourglass_card_takes_the_lsdyna_default(self):
+        """Successor, in place, to ``test_no_hourglass_leaves_zero_coefficients``.
+
+        That test asserted Isolid 17 / h 0.0 for a deck with no hourglass card
+        at all — "the ELFORM default, unchanged". Vol I R17 p.12-271 Remark 1
+        says an OMITTED ``*CONTROL_HOURGLASS`` is not "no hourglass control",
+        it is type 2 for an explicit solid with QH 0.1, and the deck's own
+        d3hsp echoes exactly that. The old expectation is kept below as the
+        ``--no-default-hourglass`` arm, which is what it now describes.
+        """
         _, starter = _convert(_solid_deck(hgid1=0, hg_cards=""))
         self.assertEqual(_part_prop_ref(starter, 1), 1)
         isolid, h = _solid_isolid_h(starter, "/PROP/SOLID/1")
-        self.assertEqual(isolid, 17)          # ELFORM default, unchanged
-        self.assertAlmostEqual(h, 0.0)        # Radioss default (0 → 0.10)
+        self.assertEqual(isolid, 1)           # IHQ 2 (explicit default) -> 1
+        self.assertAlmostEqual(h, 0.1)        # the QH Default row
+
+    def test_the_opt_out_restores_the_bare_elform_isolid(self):
+        _, starter = _convert(_solid_deck(hgid1=0, hg_cards=""),
+                              default_hourglass=False)
+        isolid, h = _solid_isolid_h(starter, "/PROP/SOLID/1")
+        self.assertEqual(isolid, 17)
+        self.assertAlmostEqual(h, 0.0)
+
+    def test_the_default_names_itself(self):
+        result, _ = _convert(_solid_deck(hgid1=0, hg_cards=""))
+        self.assertTrue(any("DEFAULTED" in w and "p.12-271" in w
+                            and "Isolid 1" in w for w in result.warnings),
+                        [w for w in result.warnings if "hourglass" in w])
 
     def test_no_split_props(self):
         _, starter = _convert(_solid_deck(hgid1=0, hg_cards=""))
@@ -532,10 +559,25 @@ class InitialStressHourglassTests(unittest.TestCase):
         self.assertEqual(ini_isolid, 5)
         self.assertEqual(nbint, _NBINT_FOR_ISOLID[prop_isolid])
 
-    def test_inibri_unchanged_without_hourglass(self):
-        # No hourglass source → /PROP keeps Isolid 17 (8 IP); /INIBRI stays
-        # Nb_integr 8 (guards the fix against regressing the plain path).
+    def test_inibri_follows_the_lsdyna_default_isolid(self):
+        """Successor, in place, to ``test_inibri_unchanged_without_hourglass``.
+
+        A deck with no hourglass card no longer "keeps Isolid 17": it takes
+        LS-DYNA's own default (IHQ 2 → Isolid 1, one integration point), so the
+        /INIBRI Nb_integr must follow it to 1 — the same MSGID-695 coupling the
+        two tests above pin for a STATED card, now on the defaulted path. The
+        old 17/8 expectation is the opt-out arm below.
+        """
         prop_isolid, ini_isolid, nbint = self._prop_and_inibri(_iss_deck())
+        self.assertEqual(prop_isolid, 1)
+        self.assertEqual(ini_isolid, 1)
+        self.assertEqual(nbint, _NBINT_FOR_ISOLID[prop_isolid])
+
+    def test_inibri_unchanged_with_the_default_opted_out(self):
+        _, starter = _convert(_iss_deck(), default_hourglass=False)
+        ref = _part_prop_ref(starter, 1)
+        prop_isolid, _ = _solid_isolid_h(starter, f"/PROP/SOLID/{ref}")
+        nbint, ini_isolid = _inibri_nbint_isolid(starter)
         self.assertEqual(prop_isolid, 17)
         self.assertEqual(ini_isolid, 17)
         self.assertEqual(nbint, 8)
