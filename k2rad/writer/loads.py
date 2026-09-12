@@ -4853,6 +4853,38 @@ def _rbody_main_of(rbody_info: Optional[Dict]) -> Dict[int, int]:
     return out
 
 
+def _rbody_coverage_exempt(state: ConversionState) -> Set[int]:
+    """Nodes that must not count against a rigid body's /INIVEL COVERAGE.
+
+    A body is "fully covered" by an initial-velocity card when the card names
+    every node of it that LS-DYNA would have initialised. Two kinds of member
+    node are in k2rad's ``rbody_info[...]["nodes"]`` and in NO LS-DYNA node
+    group:
+
+    * ``*CONSTRAINED_EXTRA_NODES_NODE/_SET`` nodes. Vol I R17 p.28-127, the
+      ``ID`` field of ``*INITIAL_VELOCITY_GENERATION``: *"WARNING for if
+      IVATN = 0: If a part ID of a rigid body is specified, only the nodes
+      that belong to elements of the rigid body are initialized. Nodes added
+      with \\*CONSTRAINED_EXTRA_NODES are not initialized."* So LS-DYNA does
+      not count them either.
+    * the helper nodes ``_synthesize_local_motion_frames`` invents to carry a
+      ``*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL`` triad — k2rad's own, absent
+      from the source deck.
+
+    (The synthesized element-free CoG master is already outside ``["nodes"]``:
+    ``writer/rbody`` keeps it in ``ind_node`` only.) Without this exemption
+    ``brake.k`` — whose IVG names the part's 144 element nodes while its
+    /RBODY carries 146 — reads as PARTLY covered and keeps a card that moves
+    nothing.
+    """
+    exempt: Set[int] = set()
+    for extra in state.extra_rigid_nodes.values():
+        exempt.update(extra)
+    for helpers in state.local_frame_nodes.values():
+        exempt.update(helpers)
+    return exempt
+
+
 def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                                   nids: List[int],
                                   rigid_nodes: Optional[Set[int]],
@@ -4893,18 +4925,48 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     already performs the same re-point for a ``*BOUNDARY_SPC`` on a rigid
     member (loads.py, ``node_to_ind``).
 
-    Two cases deliberately KEEP the old warn-and-leave:
+    ``*INITIAL_VELOCITY_GENERATION`` is re-pointed too, and needs NO arithmetic
+    to keep its spin. The 2026-09 round-2 docstring claimed the opposite —
+    "collapsing the group to the main node would give that one node its own
+    omega x r and the body NO spin at all" — and it was never solver-measured.
+    ``hm_read_inivel.F:580-617``, the ``ITYPE == 4`` (``/INIVEL/AXIS``) branch,
+    writes BOTH halves per node::
 
-      * a MIXED card (some nodes rigid, some free) — replacing only the rigid
-        half changes which nodes the card names, and no corpus deck needs it;
-      * ``*INITIAL_VELOCITY_GENERATION`` (``repoint=False`` at its site).
-        That form emits ``/INIVEL/AXIS``, whose ``Vr`` gives each node the
-        TRANSLATIONAL velocity ``omega x r`` about the frame axis; collapsing
-        the group to the main node would give that one node its own
-        ``omega x r`` and the body NO spin at all, because a /RBODY secondary's
-        motion comes from the main node's six DOFs. A faithful mapping there is
-        an angular velocity on the main node, not a smaller node group, and it
-        is left to ROADMAP.
+        IF (IRODDL>0) THEN
+           VR(1,NOSYS)= VRA*XFRAME(K1,IFM)      ! the ANGULAR velocity
+           ...
+        V(1,NOSYS)= V1+VRA*(NIXJ(3)-NIXJ(4))    ! V + omega x (x - O)
+
+    and ``contrl.F:1053`` puts ``NRBODY`` in the ``IRODDL`` minimum, so any
+    deck with an /RBODY has ``IRODDL = 1`` and the ``VR`` write always happens.
+    ``inirby.F:1032-1048`` then rebuilds every secondary from the main node's
+    six DOFs (``v_N = v_M + omega_M x (x_N - x_M)``, ``VR(:,N) = VR(:,M)``), so
+    the body spins. MEASURED on a hand-built coupon (one 10 mm *MAT_RIGID cube,
+    ``*INITIAL_VELOCITY_GENERATION`` STYP 2, OMEGA 100 about global Z through
+    (50,0,0)): hand values ``1/2 m v_c^2 = 98.125`` and ``1/2 I omega^2 =
+    1.9625`` from the starter's own echoed lumped inertia; the control reads
+    KE-T 0.000 / KE-R 0.000 and the re-pointed arm 98.13 (+0.005 %) / 1.963
+    (+0.026 %). And on the corpus's own controlled pair: ``brake.k`` and
+    ``brake_debug.k`` differ by ONE emitted line (their ``*MAT_RIGID`` CON2
+    cells, 6 vs 5, give ``/BCS/90005`` "111 101" vs "111 011"), the spin axis
+    is global Y, and LS-DYNA's own initial KE is 1.33808e7 for brake and
+    exactly 0.0 for brake_debug — the re-point moves the one whose axis is
+    free, to +0.517 %, and leaves the other inert.
+
+    A MIXED card is SPLIT rather than left whole: every deformable node stays,
+    and each rigid body the card FULLY covers is replaced by its main node.
+    Coverage is measured over the body's element nodes only
+    (``_rbody_coverage_exempt``). A body the card only PARTLY covers keeps its
+    nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes the
+    body's translational and rotational MOMENTUM from the prescribed nodal
+    velocities and resets every node from that rigid motion — a mass-weighted
+    average k2rad cannot form, because it has no nodal masses at conversion
+    time. Inventing one would be a fabricated value in a mandatory slot.
+    MEASURED on the two corpus carriers: ``pipe.k`` (IVG over 2 parts of which
+    1 is rigid, omega -82) goes from a cycle-0 KE of 8.69749e7 to 8.70569e7
+    against the LS-DYNA glstat's 8.70616e7, i.e. -0.100 % to -0.005 %; and
+    ``mat_spring.belted-dummy`` (whole-model ``*INITIAL_VELOCITY``, 1640 of
+    1931 nodes rigid) is byte-identical either way at -0.006 %.
 
     **All three emission sites call this** — ``_make_inivel``
     (``*INITIAL_VELOCITY_NODE``), ``_make_initial_velocity`` (the NSID set
@@ -4926,26 +4988,78 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     where = f"{sid_label}={nsid}" if nsid else "over the whole model"
     named = ", ".join(str(n) for n in on_rigid[:5])
     all_rigid = len(on_rigid) == len(nids)
+    axis_note = (
+        " The card becomes an /INIVEL/AXIS, which writes BOTH halves on every "
+        "node of its group when IRODDL > 0 (hm_read_inivel.F:580-617: "
+        "VR = omega*n and V = V + omega x (x - O)), and any deck with an "
+        "/RBODY has IRODDL = 1 (contrl.F:1053) — so the main node carries the "
+        "body's spin as well as its translation, and inirby.F:1032-1048 "
+        "rebuilds the secondaries from it."
+        if keyword.endswith("_GENERATION") else "")
 
-    if repoint and all_rigid:
+    if repoint:
+        group = set(nids)
         main_of = _rbody_main_of(rbody_info)
-        mains = sorted({main_of[n] for n in nids if n in main_of})
-        if mains and len(mains) < len(nids):
-            state.warn(
-                f"{keyword} {where}: all {len(nids)} of its node(s) (e.g. "
-                f"{named}) belong to a rigid body, so the card is RE-POINTED "
-                f"onto the {len(mains)} /RBODY main node(s) "
-                f"{', '.join(str(m) for m in mains[:5])}"
-                + (" ..." if len(mains) > 5 else "") + ". OpenRadioss rebuilds "
-                "a /RBODY secondary node's velocity from the body's main node "
-                "every cycle (inirby.F), so the same card written on the "
-                "secondaries is OVERWRITTEN before cycle 1 and the body starts "
-                "at rest at 0 starter diagnostics; LS-DYNA gives the rigid PART "
-                "that velocity. Measured on matfoamsoil: cycle-0 K-ENERGY "
-                "3.547E+04 against the LS-DYNA reference's own 3.54775E+04 "
-                "(-0.008 %), where the un-re-pointed card gives 0.000. Pass "
-                "*INITIAL_VELOCITY_RIGID_BODY to state it explicitly.")
-            return mains
+        exempt = _rbody_coverage_exempt(state)
+        covered_mains: List[int] = []
+        partial_mains: List[int] = []
+        partial_nodes: Set[int] = set()
+        seen_mains: Set[int] = set()
+        for info in (rbody_info or {}).values():
+            body = set(info["nodes"])
+            hit = body & group
+            if not hit:
+                continue
+            main = info["ind_node"]
+            if main in seen_mains:
+                continue
+            seen_mains.add(main)
+            if (body - exempt) <= group:
+                covered_mains.append(main)
+            else:
+                partial_mains.append(main)
+                partial_nodes |= hit
+        if covered_mains:
+            # Every node of a fully-covered body leaves the group; the body's
+            # main node takes its place. Deformable nodes, and the nodes of a
+            # body only partly covered, stay exactly where they were.
+            kept = [n for n in nids
+                    if n not in main_of or main_of[n] in partial_mains]
+            out = sorted(set(kept) | set(covered_mains))
+            if out != sorted(nids):
+                shown = ", ".join(str(m) for m in sorted(covered_mains)[:5])
+                state.warn(
+                    f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
+                    f"node(s) (e.g. {named}) belong to a rigid body, so the "
+                    f"{len(covered_mains)} body/bodies the card FULLY covers "
+                    f"are RE-POINTED onto their /RBODY main node(s) {shown}"
+                    + (" ..." if len(covered_mains) > 5 else "")
+                    + f" — the group goes from {len(nids)} to {len(out)} "
+                    "node(s)"
+                    + ("" if all_rigid else
+                       ", the deformable nodes unchanged")
+                    + ". OpenRadioss rebuilds a /RBODY secondary node's "
+                    "velocity from the body's main node every cycle "
+                    "(inirby.F:1032-1048), so the same card written on the "
+                    "secondaries is OVERWRITTEN before cycle 1 and the body "
+                    "starts at rest at 0 starter diagnostics; LS-DYNA gives "
+                    "the rigid PART that velocity (Vol I R17 p.28-129 Remark "
+                    "3). Measured cycle-0 K-ENERGY against each deck's own "
+                    "LS-DYNA glstat: matfoamsoil 3.547E+04 vs 3.54775E+04 "
+                    "(-0.008 %), sphere1 7.005E+06 vs 6.99320E+06 (+0.169 %), "
+                    "wood-post 5.409E+07 vs 5.40914E+07 (-0.003 %), brake's "
+                    "rotational 1.345E+07 vs 1.33808E+07 (+0.517 %) — all "
+                    "0.000 without the re-point. Pass "
+                    "*INITIAL_VELOCITY_RIGID_BODY to state it explicitly."
+                    + axis_note)
+            if partial_mains:
+                _warn_inivel_partial_rigid_body(
+                    state, keyword, where, partial_mains, partial_nodes)
+            return out
+        if partial_mains:
+            _warn_inivel_partial_rigid_body(
+                state, keyword, where, partial_mains, partial_nodes)
+            return list(nids)
 
     state.warn(
         f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
@@ -4960,13 +5074,44 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
           "/RBODY main node), or as *PART_INERTIA card 5, to move the body."
         + ("" if all_rigid else
            " The card is left over its stated nodes: re-pointing only the "
-           "rigid half would change which nodes it names.")
-        + (" Not re-pointed here: this card becomes an /INIVEL/AXIS, whose Vr "
-           "gives each node the translational velocity omega x r, so "
-           "collapsing the group to the main node would leave the body with no "
-           "spin at all."
-           if keyword.endswith("_GENERATION") and all_rigid else ""))
+           "rigid half would change which nodes it names."))
     return list(nids)
+
+
+def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
+                                    where: str, mains: List[int],
+                                    hit: Set[int]) -> None:
+    """Name a rigid body an initial-velocity card covers only PARTLY.
+
+    Refused rather than modelled. Vol I R17 p.28-129 ``*INITIAL_VELOCITY_
+    GENERATION`` Remark 3 (``*INITIAL_VELOCITY`` Remark 4, p.28-125, is the
+    same sentence): *"Nodes that belong to rigid bodies must have motion
+    consistent with the translational and rotational velocity of the rigid
+    body. During initialization, the translational and rotational rigid body
+    momentums are computed based on the prescribed nodal velocities. From this
+    rigid body motion, the velocities of the nodal points are computed and
+    reset to the new values. These new values may or may not be the same as the
+    values prescribed for the node."* That is a MASS-weighted average over the
+    whole body, so the body's velocity is smaller than the card's; k2rad has no
+    nodal masses at conversion time and will not invent one.
+    """
+    shown = ", ".join(str(m) for m in sorted(mains)[:5])
+    state.warn(
+        f"{keyword} {where}: it names {len(hit)} node(s) of rigid body/bodies "
+        f"whose main node(s) are {shown}"
+        + (" ..." if len(mains) > 5 else "")
+        + " but NOT every element node of them, so those bodies are left "
+        "un-re-pointed and their part of the card moves nothing "
+        "(inirby.F:1032-1048 rebuilds a secondary's velocity from the main "
+        "node). LS-DYNA does not give the body the card's velocity either: "
+        "Vol I R17 p.28-129 Remark 3 says it computes the body's "
+        "translational and rotational MOMENTUM from the prescribed nodal "
+        "velocities and resets every node from that rigid motion, i.e. a "
+        "MASS-weighted average that is smaller than the stated velocity. "
+        "k2rad has no nodal masses at conversion time and will not invent "
+        "one. Give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
+        "*PART_INERTIA card 5) with the velocity you want, or extend the "
+        "card's set to the whole body.")
 
 
 def _make_initial_velocity(state: ConversionState,
@@ -5249,10 +5394,12 @@ def _make_initial_velocity_generation(
             frame_id = state.next_id()
         lines += _emit_frame_fix(frame_id, f"FRAME_INIVEL_GEN_{frame_id}",
                                  origin, fy, fz)
-        _warn_inivel_on_rigid_members(
+        # The RETURN VALUE is the group: the round-2 site called this helper
+        # and threw it away, so flipping repoint would have changed nothing.
+        nids = _warn_inivel_on_rigid_members(
             state, g.sid, list(nids), rigid_nodes,
             keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID",
-            rbody_info=rbody_info, repoint=False)
+            rbody_info=rbody_info, repoint=True)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()
