@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 #: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
@@ -3414,6 +3414,60 @@ class LoadRigidBody:
 
 
 @dataclass
+class ContactRefused:
+    """A ``*CONTACT`` spelling k2rad RECOGNIZES and deliberately does NOT emit.
+
+    The three refusals of R14 triage round 3 (``_DRAWBEAD``, ``_ENTITY``,
+    ``_SLIDING_ONLY``) each have a measured or source-quoted reason why the
+    nearest OpenRadioss card cannot carry the keyword — see
+    ``writer/contacts._make_refused_contact_notes``, which is where the message
+    is built.
+
+    It is a RECORD rather than a warning raised in the handler because the
+    refusal text quotes the deck's own numbers, and one of them
+    (``*CONTACT_DRAWBEAD``'s ``LCIDRF`` curve) is a ``*DEFINE_CURVE`` that in
+    the corpus carrier is defined 150 lines AFTER the contact — so a handler
+    that resolved it would print the range of a curve it has not read yet.
+    """
+    keyword: str
+    inter_id: int
+    #: Card cells the refusal text names, e.g. ``{"lcidrf": 3.0, "dbdth": 4.43}``.
+    #: Integer cells are stored as floats and printed with ``:g``.
+    cells: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ContactThermal:
+    """The ``*CONTACT_..._THERMAL`` THRM 1 card, as the deck states it.
+
+    Card layout (Vol I R17 p.11-76/77, and
+    ``Keyword971/CONTACT/contact_surface_to_surface.cfg:1102-1103``
+    ``COMMENT("$        K      FRAD        HO      LMIN      LMAX      CHLM
+    BG_FLAG      ALGO")``; the R14 decks label column 6 ``ftoslv``/``ftosa``,
+    which is the manual's ``FTOSA``)::
+
+        K  FRAD  H0  LMIN  LMAX  FTOSA  BC_FLAG  ALGO
+
+    The card sits BETWEEN mandatory Card 3 and optional Card A — which is why
+    every ``_THERMAL`` spelling registers with ``extra = 1`` so
+    ``_read_contact_soft`` / ``_read_contact_ignore`` keep landing on Card A /
+    Card C (see the registration table in ``handlers.py``).
+
+    ``K``, ``LMIN`` and ``BC_FLAG`` have no OpenRadioss counterpart and are
+    NAMED as dropped by the writer, not silently discarded — see
+    ``writer/contacts._contact_thermal_cells``.
+    """
+    k: float = 0.0          # fluid conductivity, h_cond = K/l_gap for LMIN<l_gap<=LMAX
+    frad: float = 0.0       # radiation factor            → /INTER Frad
+    h0: float = 0.0         # closed-gap conductance      → /INTER Kthe
+    lmin: float = 0.0       # gap below which H0 applies  (no Radioss field)
+    lmax: float = 0.0       # gap above which no thermal contact → /INTER Drad
+    ftosa: float = 0.0      # fraction of friction heat to SURFA → Fheats/Fheatm
+    bc_flg: int = 0         # thermal boundary-condition flag (no Radioss field)
+    algo: int = 0           # 0 = two-way, 1 = one-way, 2/3 = edge
+
+
+@dataclass
 class ContactAutoSingle:
     inter_id: int
     title: str
@@ -3461,6 +3515,14 @@ class ContactAutoSurf2Surf:
     mst: float = 0.0    # LS-DYNA Card3 MST: contact thickness, main side → Gapmin
     sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
     keyword: str = ""   # source *CONTACT spelling — see ContactAutoSingle.keyword
+    #: The ``_THERMAL`` THRM 1 card, when the spelling carries one.
+    thermal: Optional[ContactThermal] = None
+    #: ``*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE``. The keyword exists to make
+    #: the contact RESOLVE an initial overlap into prestress (Vol I R17 p.11-66),
+    #: so the writer forces ``Inacti = 0`` on it and ignores the deck's own
+    #: IGNORE cell — ``i7pwr3.F:244-258`` makes Inacti 5/6 ACCEPT the overlap as
+    #: the new zero-force state, which is the exact opposite of the keyword.
+    interference: bool = False
 
 
 @dataclass
@@ -3523,16 +3585,14 @@ class ContactTied:
     a tying SEARCH DISTANCE — and the writer honours it as a floor on the
     /INTER/TYPE2 dsearch.
 
-    ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) drive the dyna2rad
-    discriminator (``convertcontacts.cxx`` cc:220):
-    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10, otherwise /INTER/TYPE2.
-    That rule is PRAGMATIC and not LS-DYNA's: General Remark 7 (p.11-127) puts
-    a plain ``*CONTACT_TIED_SURFACE_TO_SURFACE`` in the CONSTRAINT-based family
-    and only the plain ``_OFFSET`` / ``_BEAM_OFFSET`` spellings in the
-    penalty-based one. It is kept because the faithful card does not converge
-    on this build's only two carriers — see ``_tied_interface_type`` for both
-    measured arms. ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size the
-    TYPE10 GAP.
+    ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) used to drive the
+    dyna2rad discriminator (``convertcontacts.cxx`` cc:220)
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → /INTER/TYPE10. **That rule is deleted**
+    (R14 triage round 3): the family is now keyed on the KEYWORD and the
+    SOLVER, exactly as ``_tied_interface_type`` documents and measures.
+    ``sfst``/``sfmt`` are still parsed — they are Card-3 cells a reader expects
+    to see carried — and ``sfs``/``sfm`` (Card-3 penalty stiffness scales) size
+    the TYPE10 GAP.
     """
     inter_id: int
     title: str
@@ -3551,6 +3611,9 @@ class ContactTied:
     # say out loud that neither /INTER/TYPE2 nor /INTER/TYPE10 has a fric_ID
     # column to bind the table to.
     fs: float = 0.0
+    keyword: str = ""   # source *CONTACT spelling — see ContactAutoSingle.keyword
+    #: The ``_THERMAL`` THRM 1 card, when the spelling carries one.
+    thermal: Optional[ContactThermal] = None
 
 
 @dataclass
@@ -5023,6 +5086,18 @@ class SegmentSet:
     #: have to re-derive the wrapper and the shell arm would have to duplicate
     #: the /SH3N split. Empty on every deck without that option.
     part_scope: List[int] = field(default_factory=list)
+    #: Data rows that state exactly TWO positive nodes. They are not surface
+    #: segments — ``collapse_segment_corners`` rejects them, and it is right to:
+    #: a two-node row has no area, no normal and no face. They are EDGES, and
+    #: LS-DYNA decks write them when the set feeds an edge-only contact
+    #: (``*CONTACT_SINGLE_EDGE``; the R14 carrier
+    #: ``examples-manual/contact/edge/contact.edge.k`` states 60 of them and no
+    #: face at all). Kept HERE, beside the faces and not among them, so the
+    #: /LINE synthesis can use them while ``/SURF/SEG`` and every pressure /
+    #: contact-main consumer still sees an empty surface — which is what a set
+    #: of edges is. Before R14 triage round 3 the rows vanished with no
+    #: diagnostic of any kind.
+    edges: List[Tuple[int, int]] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6927,6 +7002,25 @@ class ConvertOptions:
     ground_spring_k: float = 100.0                       # N/mm per loaded axis
     inter_gapmin: Dict[int, float] = field(default_factory=dict)  # inter_id → Gapmin
     soften_stfac: Optional[float] = None                 # None = engine auto (0)
+    # --tie-stfac VALUE|auto: the /INTER/TYPE10 penalty-tie stiffness scale.
+    #
+    # MEASURED on a determinate two-hex explicit coupon (10x10x20 mm steel,
+    # closed form IE = 1/2 E eps^2 A L = 210.0, merged bar 209.2): /INTER/TYPE10
+    # at Radioss's own default STFAC (0, which hm_read_inter_type10.F:135 turns
+    # into 0.2) carries IE 67.85 = -67.6 % of the tie, because i7sti3.F:444
+    # makes the tie spring STFAC*A^2*K/V per tied secondary node, i.e.
+    # STFAC/(3(1-2nu)) times the stiffness of the element it welds -- 0.167x at
+    # the default. The same coupon at STFAC 1/10/30/100/120 gives
+    # -24.3/-2.63/-0.76/-0.10/+0.05 %, and dt scales as 1/sqrt(STFAC)
+    # (measured 1.06e-6/sqrt(STFAC), 141 cycles at 0.2 -> 2435 at 120).
+    #
+    # It is OPT-IN because the time-step cost is real and because on the
+    # implicit welding deck 05_4_2 STFAC 10 changes IE by -30.5 % and halves
+    # the implicit step (3.920 -> 1.960). None = leave STFAC 0 (the shipped
+    # behaviour, byte-identical) with the softness NAMED in the warning;
+    # "auto" = 100 * 3(1-2nu) from the main side's Poisson ratio (120 at
+    # nu = 0.3), falling back to 30 when nu is unavailable.
+    tie_stfac: Optional[Union[str, float]] = None
     # Auto-Gapmin: derive each surface-to-surface interface's Gapmin from the
     # minimum node-to-node clearance between its two parts (Gapmin =
     # gapmin_factor × clearance), instead of hand-tuning Card-3 SST/SBST per
@@ -8332,6 +8426,12 @@ class ConversionState:
     contacts_general: List[ContactAutoGeneral] = field(default_factory=list)
     # *CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie)
     contacts_tied: List[ContactTied] = field(default_factory=list)
+    #: *CONTACT spellings that are REGISTERED (so they never reach
+    #: skipped_keywords unnamed) and deliberately emit nothing: _DRAWBEAD,
+    #: _ENTITY, _SLIDING_ONLY. Consumed by
+    #: writer/contacts._make_refused_contact_notes, which is the ONE place the
+    #: refusal text is built — see ContactRefused for why it is not the handler.
+    contacts_refused: List[ContactRefused] = field(default_factory=list)
     # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
     contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
     # *CONTACT_..._TIEBREAK whose PRE-FAILURE state is a tie → /INTER/TYPE2

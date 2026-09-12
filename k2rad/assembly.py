@@ -60,7 +60,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        perturbation_node_records,
                        springback_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
-                       TIEBREAK_CONTACT_KEYWORDS,
+                       TIEBREAK_CONTACT_KEYWORDS, CONTACT_OFFSET_KEYWORDS,
                        _cnrb_option_keywords, _cnrb_options,
                        _free_node_id,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -4594,6 +4594,18 @@ for _kw in _TYPE25_CONTACT_BASES:
 for _kw in TIEBREAK_CONTACT_KEYWORDS:
     if "_MPP" not in _kw:
         _OFFSET_SPECS[_kw] = _off_contact
+
+# The 16 *CONTACT spellings R14 triage round 3 registered — from the SAME
+# table handlers.py builds HANDLERS from (handlers._CONTACT_SPELLINGS), which
+# already excludes the _MPP siblings (the MPP card pushes Card 1 down a line
+# and _off_contact rewrites b.raw[start] blind) and the three refusals
+# (*CONTACT_DRAWBEAD / _ENTITY / _SLIDING_ONLY emit nothing, and *CONTACT_ENTITY
+# card 1 is PID/GEOTYP, not SSID/MSID — offsetting it would renumber a PART id
+# in the SET namespace). A *_THERMAL spelling's THRM 1 card and an
+# _INTERFERENCE's Card 4 both sit AFTER Card 1, so _off_contact is unaffected
+# by them.
+for _kw in CONTACT_OFFSET_KEYWORDS:
+    _OFFSET_SPECS[_kw] = _off_contact
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
 # keyword with TITLE in options, so the base entry covers it.

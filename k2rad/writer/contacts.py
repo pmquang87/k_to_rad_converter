@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import itertools
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
-from ..state import (ConversionState, ContactSpotweld, ContactTied,
-                     ContactTiebreak, PartData, SolidElem, TshellElem)
+from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
+                    Union)
+from ..state import (ConversionState, ContactSpotweld, ContactThermal,
+                     ContactTied, ContactTiebreak, PartData, SolidElem,
+                     TshellElem)
 from .common import (
     HDR,
     _emit_grnod_node,
@@ -52,6 +54,11 @@ __all__ = [
     "_FPENMAX_ZERO_NORMAL",
     "_vdc_to_viss",
     "_sst_mst_to_gapmin",
+    "_ThermalCells",
+    "_contact_thermal_cells",
+    "_emit_thermal_cards",
+    "_REFUSED_CONTACT_NOTES",
+    "_make_refused_contact_notes",
     "_emit_inter_type7",
     "_emit_inter_type25_self",
     "_emit_inter_type25",
@@ -1043,15 +1050,28 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
-        inacti = (5 if c.inter_id in recipe_inacti_ids
-                  else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
+        if c.interference:
+            # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
+            # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
+            # would ACCEPT the overlap as the zero-force state
+            # (i7pwr3.F:244-258) and leave the fit unstressed, so the deck's
+            # own IGNORE cell is overridden here. The reason is stated on the
+            # keyword's own "interference" note, emitted by the handler.
+            inacti = 0
+        elif c.inter_id in recipe_inacti_ids:
+            inacti = 5
+        else:
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
         fric, fric_id = _contact_friction(
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                   fric_id=fric_id, state=state)
+                                   fric_id=fric_id, state=state,
+                                   thermal=_contact_thermal_cells(
+                                       state, c.keyword, c.inter_id, c.thermal,
+                                       "TYPE7"))
 
     _report_unconsumed_gapmin(state, gapmin_overrides)
 
@@ -1092,7 +1112,7 @@ def _report_unconsumed_gapmin(state: ConversionState,
     for c in state.contacts_tied:
         known[c.inter_id] = (
             f"is a *CONTACT_TIED_{c.variant} and "
-            + (_TIE_REASON if _tied_interface_type(c) == "TYPE2" else
+            + (_TIE_REASON if _tied_interface_type(c, state) == "TYPE2" else
                "was emitted as /INTER/TYPE10, the penalty tie, whose "
                "engagement distance is its GAP field, sized from Card-3 "
                "SST/MST"))
@@ -1643,6 +1663,285 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
     return 5
 
 
+class _ThermalCells(NamedTuple):
+    """The ``/INTER/TYPE{7,25}`` thermal card, as k2rad fills it.
+
+    ``Ithe_form`` is always 1 and ``Tint`` always 0 because only ``ALGO = 0``
+    (two-way) is converted — see :func:`_contact_thermal_cells`.
+    """
+    kthe: float         # LS-DYNA H0, the closed-gap conductance
+    frad: float         # LS-DYNA FRAD
+    drad: float         # LS-DYNA LMAX (bounds the RADIATION branch only)
+    fheats: float       # LS-DYNA FTOSA
+    fheatm: float       # 1 - FTOSA
+
+
+def _contact_thermal_cells(state: ConversionState, keyword: str, inter_id: int,
+                           th: Optional[ContactThermal],
+                           target: str) -> Optional[_ThermalCells]:
+    """Map a ``*CONTACT_..._THERMAL`` THRM 1 card onto the Radioss cells.
+
+    Returns None — with a NAMED reason — whenever the card cannot be honoured.
+
+    **Field map, per source line.**
+
+    ==============  ==================  =========================================
+    LS-DYNA THRM 1  Radioss             evidence
+    ==============  ==================  =========================================
+    ``H0``          ``Kthe``            ``i7therm.F:191`` ``PHI = A*dT*dt/RSTIF``
+                                        with ``FRIGAP(20) = ONE/RSTH``
+                                        (``hm_read_inter_type07.F:738``), so
+                                        ``Kthe`` IS a conductance per unit area —
+                                        the same physical quantity as ``H0``.
+                                        ``/INTER/TYPE2`` uses it directly:
+                                        ``i2therm.F:110`` ``PHI = A*dT*dt*KTHE``.
+    ``FRAD``        ``Frad``            ``i7therm.F:181-186``
+    ``LMAX``        ``Drad``            ``i7therm.F:181`` gates the RADIATION
+                                        branch on ``PENRAD <= DRAD``; Radioss
+                                        conduction has no upper gap bound, so
+                                        this is only PARTLY the same field.
+    ``FTOSA``       ``Fheats``,         ``i7therm.F:171/201-206``; the starter
+                    ``Fheatm=1-FTOSA``  warns (1064) if the two sum above 1.
+    ``ALGO = 0``    ``Ithe_form = 1``   ``i7therm.F:177-197`` interpolates the
+                                        main-side temperature and applies
+                                        ``-PHI*Hi`` back to it = two-way.
+    ``K``           —                   ``h = K/l_gap`` for
+                                        ``LMIN < l_gap <= LMAX``. Radioss's
+                                        ``Kthe`` is a constant or a function of
+                                        contact PRESSURE (``fct_ID_k``,
+                                        ``hm_read_inter_type07.F:261-320``) —
+                                        the whole open-gap branch collapses
+                                        onto ``H0``. NAMED DROP.
+    ``LMIN``        —                   no field. NAMED DROP.
+    ``BC_FLAG``     —                   no field. NAMED DROP.
+    ==============  ==================  =========================================
+
+    **The ITHERM_FE gate.** ``hm_read_inter_type07.F:700-707`` (and
+    ``hm_read_inter_type25.F:803``) zero ``IPARI(47)`` with ``WARNING 702``
+    unless ``GLOB_THERM%ITHERM_FE`` is set, which
+    ``ale_euler_init.F:193-200`` (called per ``*PART`` from
+    ``hm_read_part.F:366-368``) sets only when at least one Lagrangian part's
+    material carries ``/HEAT/MAT``. So a deck with no ``/HEAT/MAT`` gets the
+    thermal card DROPPED here, with the reason, rather than emitted for the
+    starter to disable.
+
+    ``ALGO = 1`` (one-way) is REFUSED rather than approximated: the Radioss
+    one-way form ``Ithe_form = 0`` exchanges heat with a CONSTANT ``Tint``
+    (``i7therm.F:139-167``, ``PHI1..4 = 0``), while LS-DYNA's SURFB keeps its
+    own evolving temperature. Inventing a ``Tint`` to fill the slot is the #124
+    fabricated-value trap.
+    """
+    if th is None:
+        return None
+    tie = target == "TYPE2"
+    head = f"*{keyword} {inter_id}: the THERMAL card is NOT converted — "
+    if not state.heat_mat_cards:
+        state.warn(
+            head + "this deck emits no /HEAT/MAT. The starter disables "
+            "interface heat exchange entirely (WARNING 702, "
+            "hm_read_inter_type07.F:700-707) unless at least one Lagrangian "
+            "part's material carries one (ale_euler_init.F:193-200 via "
+            "hm_read_part.F:366-368), so an Ithe card here would be read and "
+            "then switched off. CONSEQUENCE: the seam transfers no heat. "
+            "REMEDY: give the contacting parts' materials a *MAT_THERMAL_* "
+            "(or *MAT_ADD_THERMAL_EXPANSION) so k2rad emits /HEAT/MAT.")
+        return None
+    if th.algo != 0:
+        state.warn(
+            head + f"ALGO={th.algo:d}. Only ALGO=0 (two-way, both surfaces "
+            "exchange with each other) has a Radioss counterpart: Ithe_form=1 "
+            "(i7therm.F:177-197). Ithe_form=0 exchanges with a CONSTANT Tint "
+            "and leaves the main side untouched (i7therm.F:139-167), which is "
+            "not what ALGO=1 means, and ALGO=2/3 is edge conduction that k2rad "
+            "builds no thermal /LINE for. No Tint is invented to fill the "
+            "slot. CONSEQUENCE: the seam transfers no heat.")
+        return None
+    if th.h0 <= 0.0 and th.frad <= 0.0:
+        state.warn(
+            head + f"H0={th.h0:g} and FRAD={th.frad:g} are both zero, so the "
+            "card states no closed-gap conductance and no radiation. The "
+            "starter turns Kthe=0 into RSTH=1e-30 and then Kthe=1/RSTH=1e30 "
+            "of thermal RESISTANCE (hm_read_inter_type07.F:723,738), i.e. an "
+            "insulated seam — emitting it would only look like a thermal "
+            f"contact. NOT converted either: K={th.k:g} (the fluid-gap branch, "
+            "which has no Radioss field at all).")
+        return None
+    cells = _ThermalCells(kthe=th.h0, frad=th.frad, drad=th.lmax,
+                          fheats=th.ftosa, fheatm=max(0.0, 1.0 - th.ftosa))
+    state.warn(
+        f"*{keyword} {inter_id}: THERMAL card -> /INTER/{target} Ithe=1, "
+        f"Kthe={cells.kthe:g} (LS-DYNA H0, the closed-gap conductance)"
+        + ("" if tie else
+           f", Ithe_form=1 (ALGO=0, two-way), Frad={cells.frad:g}, "
+           f"Drad={cells.drad:g} (LS-DYNA LMAX, which bounds the RADIATION "
+           f"branch only), Fheats/Fheatm={cells.fheats:g}/{cells.fheatm:g} "
+           f"(LS-DYNA FTOSA and its complement), AscaleK left 0 = one unit "
+           f"(hm_read_inter_type07.F:693-697)")
+        + f". NOT converted: K={th.k:g} (the fluid-conductivity branch "
+          f"h=K/l_gap for LMIN<l_gap<=LMAX — Radioss's Kthe is a constant or a "
+          "function of contact PRESSURE, hm_read_inter_type07.F:261-320, so "
+          f"the whole open-gap branch collapses onto H0), LMIN={th.lmin:g}, "
+          f"BC_FLAG={th.bc_flg:d}"
+        + (f", FRAD={th.frad:g} and LMAX={th.lmax:g} (/INTER/TYPE2 has no "
+           "radiation branch at all — i2therm.F:110 is pure conduction), "
+           f"FTOSA={th.ftosa:g} (no friction-heat split on a tie)" if tie
+           else "")
+        + ". The seam conducts at the closed-gap rate whenever the two sides "
+          "are contact candidates: Radioss applies Kthe to every candidate "
+          "pair, with no LMIN/LMAX window."
+        + (" NOTE this deck is IMPLICIT, and on an implicit cycle "
+           "resol.F:6547 jumps over the only CALL TEMPUR (:6736), so the "
+           "interface heat is computed and never integrated — the temperature "
+           "field will not move." if state.is_implicit else ""))
+    return cells
+
+
+def _emit_thermal_cards(cells: Optional[_ThermalCells],
+                        target: str) -> List[str]:
+    """The two (TYPE7) or three (TYPE25) optional thermal cards of an /INTER.
+
+    Column maps, verbatim from the CFG resolved for /BEGIN 2022:
+
+    ``radioss2020/INTER/inter_type7.cfg`` (the newest overlay <= 2022 that
+    holds the file), ``if (I_TH == 1)``::
+
+        %20lg%10d%10s%20lg%10d%20lg   Kthe fct_IDK <blank> Tint Ithe_form AscaleK
+        %20lg%20lg%20lg%20lg          Frad Drad Fheats Fheatm
+
+    ``radioss2022/INTER/inter_type25.cfg:543-551``, ``if (Ithe > 0)`` — note
+    the DIFFERENT widths, fct_IDK and Ithe_form each sit one 10-column field
+    further right, and a third card follows::
+
+        %20lg%10s%10d%20lg%10s%10d%20lg   Kthe <blank> fct_IDK Tint <blank> Ithe_form AscaleK
+        %20lg%20lg%20lg%20lg%10s%10d      Frad Drad Fheats Fheatm <blank> FRIC_FUN
+        %10s%10d%20lg                     <blank> Fcond Dcond
+    """
+    if cells is None:
+        return []
+    if target == "TYPE25":
+        return [
+            "#               Kthe             fct_IDK                Tint"
+            "           Ithe_form             AscaleK",
+            f"{_f(cells.kthe)}                   0                   0"
+            f"                   1                   0",
+            "#               Frad                Drad              Fheats"
+            "              Fheatm            FRIC_FUN",
+            f"{_f(cells.frad)}{_f(cells.drad)}{_f(cells.fheats)}"
+            f"{_f(cells.fheatm)}                   0",
+            "#              Fcond               Dcond",
+            "                   0                   0",
+        ]
+    return [
+        "#               Kthe   fct_IDK                          Tint"
+        " Ithe_form             AscaleK",
+        f"{_f(cells.kthe)}         0                             0"
+        f"         1                   0",
+        "#               Frad                Drad              Fheats"
+        "              Fheatm",
+        f"{_f(cells.frad)}{_f(cells.drad)}{_f(cells.fheats)}{_f(cells.fheatm)}",
+    ]
+
+
+#: The three ``*CONTACT`` spellings that are REGISTERED and deliberately emit
+#: nothing. Each text names the LS-DYNA fact, the OpenRadioss card that cannot
+#: carry it (with the source line), the PHYSICAL CONSEQUENCE and a REMEDY —
+#: the deck has to say what it lost. Formatted with the record's own cells.
+_REFUSED_CONTACT_NOTES = {
+    "CONTACT_DRAWBEAD": (
+        "*{kw} {id} is RECOGNIZED but NOT converted. OpenRadioss's "
+        "/INTER/TYPE8 drawbead takes a CONSTANT restraining force per unit "
+        "length (Ft) and a constant normal force per unit length (Fn), "
+        "optionally varying linearly to the last bead node "
+        "(hm_read_inter_type08.F:131-137; radioss2022/INTER/inter_type8.cfg "
+        "gives both DIMENSION=\"lineic_force\"). LS-DYNA's LCIDRF={lcidrf:g} "
+        "is a CURVE of restraining force per unit length as a function of the "
+        "bead closure delta (Vol I R17 p.11-54){curve}, with DFSCL={dfscl:g} "
+        "and a bead depth DBDTH={dbdth:g}; LCIDNF={lcidnf:g}. Collapsing that "
+        "curve to one number would invent a restraining force the deck does "
+        "not state. PHYSICAL CONSEQUENCE: the blank is NOT restrained at this "
+        "bead — the draw-in is unopposed and the drawn depth and thinning "
+        "will be wrong. REMEDY: add an /INTER/TYPE8 by hand with an Ft read "
+        "off the curve at your working closure, or model the bead "
+        "geometrically."),
+    "CONTACT_ENTITY": (
+        "*{kw} {id} (rigid part {pid:g}, GEOTYP={geotyp:g}) is RECOGNIZED but "
+        "NOT converted. LS-DYNA contacts the tracked nodes against an "
+        "ANALYTIC surface attached to the rigid part — here the geometric "
+        "cells are g1..g4 = {g1:g}, {g2:g}, {g3:g}, {g4:g} (Vol I R17 "
+        "pp.11-155..163) — not against that part's mesh. OpenRadioss's "
+        "nearest equivalent is /RWALL/{{PLANE|SPHER|CYL}} following the rigid "
+        "body's main node (hm_read_rwall_spher.F:220-227), which reproduces "
+        "GEOTYP 1/2/3 only and cannot carry SO, INTORD, ITHK, a damping curve "
+        "(DF<0) or a friction curve (CF<0); /RWALL also makes every secondary "
+        "node KINEMATICALLY constrained (hm_read_rwall_spher.F:290 "
+        "KINSET(4,...)), which conflicts with any other constraint on them. "
+        "PHYSICAL CONSEQUENCE: nothing stops the tracked nodes at this entity "
+        "— they pass through the rigid body. REMEDY: add an explicit /RWALL "
+        "to the converted deck, or mesh the entity and use a "
+        "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE against it."),
+    "CONTACT_SLIDING_ONLY": (
+        "*{kw} {id} is RECOGNIZED but NOT converted. LS-DYNA's SLIDING_ONLY "
+        "is a CONSTRAINT-based interface that lets the SURFA nodes slide "
+        "along SURFB but allows NO SEPARATION (Vol I R17 p.11-10 item 1g). "
+        "Every OpenRadioss sliding interface allows separation — "
+        "/INTER/TYPE3 and /INTER/TYPE5 both echo 'SLIDING AND VOIDS' "
+        "(hm_read_inter_type03.F:262, hm_read_inter_type05.F:391) — and "
+        "/INTER/TYPE10 Itied=1 forbids separation only by also forbidding "
+        "sliding. Converting it to an ordinary /INTER/TYPE7 was MEASURED on "
+        "this keyword's own corpus carrier (exploding-sphere.k): the time "
+        "step collapsed from 1.01e-07 to 8.3e-17 and the run froze at 64.6 % "
+        "of the target time after 266379 cycles, against a 1.8 s NORMAL "
+        "TERMINATION without it — so it is not offered. PHYSICAL "
+        "CONSEQUENCE: the two surfaces do not interact; on a "
+        "high-explosive/structure interface the detonation products are not "
+        "confined. REMEDY: add an /INTER/TYPE7 by hand with a gap and Inacti "
+        "tuned for the initial configuration, or an /INTER/TYPE10 Itied=1 if "
+        "the surfaces genuinely never slide."),
+}
+
+
+def _make_refused_contact_notes(state: ConversionState) -> List[str]:
+    """Emit the by-name refusal for every ``state.contacts_refused`` record.
+
+    A note-only section: it writes no cards, and returns ``[]`` so the
+    starter deck is unchanged. It runs from ``build_starter``'s section table
+    rather than from the handler because one refusal quotes a
+    ``*DEFINE_CURVE`` the handler has not read yet (see
+    :class:`~k2rad.state.ContactRefused`).
+    """
+    for rec in state.contacts_refused:
+        # The notes are keyed on the BASE spelling: an _MPP sibling is the same
+        # keyword with a decomposition card in front of Card 1, and looking it
+        # up whole returned None — i.e. a *CONTACT_DRAWBEAD_MPP was refused in
+        # total silence, the one thing the by-name refusal exists to prevent.
+        base = (rec.keyword[:-4] if rec.keyword.endswith("_MPP")
+                else rec.keyword)
+        text = _REFUSED_CONTACT_NOTES.get(base)
+        if text is None:                      # pragma: no cover - table-driven
+            continue
+        cells: Dict[str, float] = dict(rec.cells)
+        curve = ""
+        if base == "CONTACT_DRAWBEAD":
+            lc = int(cells.get("lcidrf", 0.0))
+            pts = state.curves[lc].pts if lc in state.curves else []
+            if pts:
+                curve = (f", here rising from {min(y for _x, y in pts):g} to "
+                         f"{max(y for _x, y in pts):g} over delta "
+                         f"{min(x for x, _y in pts):g}.."
+                         f"{max(x for x, _y in pts):g}")
+            elif lc:
+                curve = (f", whose *DEFINE_CURVE {lc} is not in the converted "
+                         "deck")
+        state.warn(text.format(kw=rec.keyword, id=rec.inter_id, curve=curve,
+                               **cells))
+        state.note_recognized_not_emitted(
+            rec.keyword,
+            "recognized and deliberately not converted — no OpenRadioss "
+            "interface can carry it; the per-interface warning names the "
+            "LS-DYNA field, the source line and the physical consequence.")
+    return []
+
+
 def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
     """Map LS-DYNA *CONTACT Card2 vdc (viscous damping, % of critical) →
     OpenRadioss /INTER/TYPE7 VisS (fraction of critical, normal direction).
@@ -1719,7 +2018,8 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       gapmin: float = 0.0, stfac: float = 0.0,
                       istf: int = 4, igap: int = 0,
                       fric_id: int = 0,
-                      state: Optional[ConversionState] = None) -> List[str]:
+                      state: Optional[ConversionState] = None,
+                      thermal: Optional["_ThermalCells"] = None) -> List[str]:
     """One ``/INTER/TYPE7`` block.
 
     ``Fpenmax`` is derived from ``inacti`` HERE, in the single emitter, rather
@@ -1788,7 +2088,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "#  Slav_id   Mast_id      Istf      Ithe      Igap                Ibag      Idel     Icurv      Iadm",
-        f"{_i(slav_id)}{_i(mast_id)}{_i(istf)}         0{_i(igap)}                   0         2         0         0",
+        f"{_i(slav_id)}{_i(mast_id)}{_i(istf)}{_i(1 if thermal else 0)}{_i(igap)}                   0         2         0         0",
         "#          Fscalegap             GAP_MAX             Fpenmax",
         f"                   0                   0{_f(fpenmax)}",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
@@ -1801,8 +2101,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
          "             AscaleF   fric_ID" if fric_id else
          "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID"),
         fric_card,
-        HDR,
-    ]
+    ] + _emit_thermal_cards(thermal, "TYPE7") + [HDR]
 
 
 def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
@@ -1886,7 +2185,8 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
                        fric: float = 0.0, tstart: float = 0.0,
                        tstop: float = 0.0, inacti: int = 5,
                        viss: float = 0.05, fric_id: int = 0,
-                       irem_i2: int = 0) -> List[str]:
+                       irem_i2: int = 0,
+                       thermal: Optional["_ThermalCells"] = None) -> List[str]:
     """/INTER/TYPE25, FORMAT(radioss2022) — the exact card set /BEGIN 2022 reads.
 
     Column map, verbatim from ``radioss2022/INTER/inter_type25.cfg:503-527``::
@@ -1933,7 +2233,7 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
         title or f"CONTACT_{inter_id}",
         "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2"
         "                Idel     Iedge",
-        f"{_i(surf_id1)}{_i(surf_id2)}{_i(istf)}         0{_i(igap)}"
+        f"{_i(surf_id1)}{_i(surf_id2)}{_i(istf)}{_i(1 if thermal else 0)}{_i(igap)}"
         f"{_i(irem_i2)}          {_i(idel)}{_i(iedge)}",
         "# grnd_IDs                     Gap_scale          %mesh_size"
         "           Gap_max_s           Gap_max_m",
@@ -1954,8 +2254,7 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
         "                                 fric_ID",
         f"         0         0                   0                   0"
         f"                              {_i(fric_id)}",
-        HDR,
-    ]
+    ] + _emit_thermal_cards(thermal, "TYPE25") + [HDR]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2101,7 +2400,12 @@ def _general_line_group(state: ConversionState, sid: int, styp: int,
     """
     if styp == 0 and sid in state.segment_sets:
         ss = state.segment_sets[sid]
-        edges = _segment_set_edges(ss.segments)
+        # A *SET_SEGMENT can hold the edges DIRECTLY, as two-node rows -- the
+        # way an LS-DYNA deck spells the SURFA of *CONTACT_SINGLE_EDGE (the
+        # R14 carrier contact.edge.k states 60 of them and no face). They are
+        # already an edge list, so they are used as one; the faces (if any)
+        # still contribute their own boundary edges.
+        edges = list(ss.edges) + _segment_set_edges(ss.segments)
         if edges:
             line_id = state.next_id()
             out_lines += _emit_line_seg(line_id, ss.title or tag, edges)
@@ -2295,8 +2599,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                 state, c.msid, c.mstyp, f"general_{c.inter_id}_m", lines)
             if not line_s:
                 _drop_interface(
-                    state, dropped, "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
-                    f"(SOFT=-11 -> TYPE11) ssid={c.ssid} resolved to no "
+                    state, dropped,
+                    c.keyword or "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
+                    f"(TYPE11 edge contact) ssid={c.ssid} resolved to no "
                     "edge/line geometry",
                     "REMEDY: point SSID at a *SET_SEGMENT that has segments, "
                     "or at a part / part set carrying shell or solid "
@@ -2306,8 +2611,15 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac,
                                         fric_id=fric_id)
             state.warn(
-                f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-11 -> "
-                f"/INTER/TYPE11 edge-to-edge {'self-' if self_contact else ''}"
+                # *CONTACT_SINGLE_EDGE reaches this branch too (it files a
+                # soft = -11 record, so the ONE validated /LINE + TYPE11
+                # emitter serves both), so the real spelling is named rather
+                # than the sentinel keyword it shares the emitter with — and
+                # the "SOFT=-11" half is only true of the sentinel route.
+                f"*{c.keyword or 'CONTACT_AUTOMATIC_GENERAL'} {c.inter_id}: "
+                + ("" if c.keyword == "CONTACT_SINGLE_EDGE" else "SOFT=-11 ")
+                + f"-> /INTER/TYPE11 edge-to-edge "
+                f"{'self-' if self_contact else ''}"
                 "contact. k2rad synthesizes the /LINE group(s) the interface "
                 "needs (a /LINE/SEG from a *SET_SEGMENT's edges, else a "
                 "/LINE/SURF over the part surface so the starter derives the "
@@ -3032,8 +3344,8 @@ _TIED_RUPTURE_SPOTFLAGS = (20, 21, 22)
 
 def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
                       spotflag: int, dsearch: float, idel2: int = 0,
-                      rupture: Optional[Tuple[int, int, float, float, float]] = None
-                      ) -> List[str]:
+                      rupture: Optional[Tuple[int, int, float, float, float]] = None,
+                      kthe: Optional[float] = None) -> List[str]:
     """/INTER/TYPE2 card (FORMAT radioss2017 — unchanged through /BEGIN 2022):
     grnd_IDs surf_IDm Ignore Spotflag Level Isearch Idel2 <blank10> dsearch(20).
 
@@ -3111,83 +3423,168 @@ def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
             "               Alpha                Area",
             f"{_f(scal_f)}{_f(0.0)}{_f(1.0)}{_f(0.0)}{_f(0.0)}",
         ]
+    if kthe is not None:
+        # The optional thermal card, LAST — ``inter_type2.cfg``
+        # FORMAT(radioss2017) reads it after the rupture / penalty blocks.
+        # Its LAYOUT depends on the Spotflag: WFLAG 1/28/30 get the short
+        # ``%10d%20lg`` (Ithe Kthe) and every other flavour the wide
+        # ``%10d%20lg <60 blanks> %10d`` with Iproj in cols 91-100. Iproj is
+        # written 0, which ``hm_read_inter_type02.F:439`` turns back into its
+        # own default 1.
+        lines += [
+            "#     Ithe                Kthe",
+            f"{_i(1)}{_f(kthe)}",
+        ] if spotflag in (1, 28, 30) else [
+            "#     Ithe                Kthe"
+            "                                                                 Iproj",
+            f"{_i(1)}{_f(kthe)}" + " " * 60 + _i(0),
+        ]
     lines.append(HDR)
     return lines
 
 
-def _tied_interface_type(c) -> str:
-    """Which Radioss tie a ``*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET…]`` gets:
-    ``(SFST*SST + SFMT*MST)/2 < 0`` → ``/INTER/TYPE10``, else ``/INTER/TYPE2``.
+#: TARGET_RATIO for ``--tie-stfac auto``: the tie spring is asked for 100x the
+#: local element stiffness. DERIVED, not fitted -- ``i7sti3.F:148``
+#: ``SLSFAC = STFAC`` and ``:444``
+#: ``STF = SLSFAC*FILLSOL*AREA*AREA*BULK/VOL`` make the spring of ONE tied
+#: secondary node ``STFAC * A^2 * K / V``, against the local element stiffness
+#: ``E*A/h``, so ``k_tie/k_element = STFAC * K/E = STFAC / (3(1-2nu))``.
+#: MEASURED on the determinate two-hex coupon at nu = 0.3 (=> STFAC 120):
+#: +0.05 % against the merged bar, at dt x 0.058.
+_TIE_STFAC_TARGET_RATIO = 100.0
 
-    The rule is dyna2rad's (``convertcontacts.cxx`` cc:220) and it is kept as a
-    **pragmatic** selector, NOT as a statement about LS-DYNA. Two things it
-    used to be justified with are false, and one measurement says why it stays
-    anyway. All three belong here because the next reader will otherwise
-    "fix" it into a regression.
+#: The fallback when the main side's Poisson ratio cannot be read (a mixed or
+#: rigid main side). MEASURED on the same coupon: -0.76 % at dt x 0.115 --
+#: inside 1 % at a fifth of the time-step cost of the nu = 0.3 auto value.
+_TIE_STFAC_NO_NU = 30.0
 
-    **1. A negative Card-3 SST/MST is not an offset flag.** Vol I R17 p.11-33
-    (``SAST``), verbatim: *"For the \\*CONTACT_TIED_… options, SAST and SBST
-    (below) can be defined as negative values, which will cause the
-    determination of whether or not a node is tied to depend only on the
-    separation distance relative to the absolute value of these thicknesses
-    (see Remark 4 in General Remarks)."* General Remark 4 (p.11-125) is the
-    tying SEARCH DISTANCE ``delta = abs(delta_1)``. So the sign is a tolerance,
-    and k2rad consumes it as one — in ``_tied_dsearch``, which is what puts
-    ``dsearch = 0.1`` on the welding decks' ``|SST| = 0.1``. It says nothing
-    about penalty vs constraint, and the old wording ("LS-DYNA's negative
-    offset", "maintain the physical offset") is deleted.
 
-    **2. LS-DYNA's own family split keys on the KEYWORD, not the sign.**
-    General Remark 7, "Tying to rigid bodies" (p.11-127), lists
+def _tie_main_poisson(state: ConversionState, c) -> Optional[float]:
+    """Poisson's ratio of the tie's MAIN side, or None if it is not one value.
+
+    The main side is the one ``i7sti3.F:444`` reads ``BULK = PM(32)`` from, so
+    it is the one whose ``K/E`` sets the tie spring's ratio to the element it
+    welds. A side spanning several materials with different ratios has no
+    single answer and returns None (the caller then uses
+    :data:`_TIE_STFAC_NO_NU`) rather than picking one.
+    """
+    from .thermal import _material_registries
+    pids = _contact_master_pids(state, c.msid, c.mstyp)
+    nus: Set[float] = set()
+    for pid in sorted(pids):
+        part = state.parts.get(pid)
+        if part is None:
+            continue
+        for reg in _material_registries(state):
+            mat = reg.get(part.mid)
+            if mat is None:
+                continue
+            nu = getattr(mat, "nu", None)
+            # 0.5 is incompressible: K/E diverges and the formula is useless.
+            if isinstance(nu, float) and 0.0 <= nu < 0.5:
+                nus.add(round(nu, 6))
+            break
+    return nus.pop() if len(nus) == 1 else None
+
+
+def _tie_stfac(state: ConversionState, c, forced: bool) -> Tuple[float, str]:
+    """The ``/INTER/TYPE10`` ``STFAC`` cell, and a phrase saying where it came
+    from.
+
+    ``forced`` is True on the arm where there IS no ``/INTER/TYPE2``
+    alternative (an all-rigid secondary side), so the derived value is applied
+    whether or not the user asked for it: leaving Radioss's 0.2 default there
+    would ship a weld six times softer than the material it joins, on a tie the
+    user never chose.
+    """
+    opt = state.options.tie_stfac
+    if opt is None and not forced:
+        return 0.0, "Radioss's own default (0 -> 0.2)"
+    if isinstance(opt, float):
+        return opt, "--tie-stfac %g" % opt
+    nu = _tie_main_poisson(state, c)
+    if nu is None:
+        return (_TIE_STFAC_NO_NU,
+                "the no-Poisson fallback %g (the main side's materials do not "
+                "give ONE ratio below 0.5)" % _TIE_STFAC_NO_NU)
+    val = _TIE_STFAC_TARGET_RATIO * 3.0 * (1.0 - 2.0 * nu)
+    return val, ("%g x 3(1-2nu) with nu=%g on the main side"
+                 % (_TIE_STFAC_TARGET_RATIO, nu))
+
+
+def _tied_interface_type(c, state: ConversionState) -> str:
+    """Which Radioss tie a ``*CONTACT_TIED_*`` gets: keyed on the KEYWORD and
+    the SOLVER, both measured.
+
+    ::
+
+        variant != SURFACE_TO_SURFACE  -> /INTER/TYPE2   (constraint tie)
+        SURFACE_TO_SURFACE, implicit   -> /INTER/TYPE10  (penalty tie)
+        SURFACE_TO_SURFACE, explicit   -> /INTER/TYPE2   (constraint tie)
+
+    **The old rule is gone.** Until R14 triage round 3 the family was picked by
+    dyna2rad's discriminator ``(SFST*SST + SFMT*MST)/2 < 0``
+    (``convertcontacts.cxx`` cc:220). That is a TYING SEARCH DISTANCE, not a
+    family flag -- Vol I R17 p.11-33 (``SAST``): *"can be defined as negative
+    values, which will cause the determination of whether or not a node is
+    tied to depend only on the separation distance relative to the absolute
+    value of these thicknesses"*, General Remark 4 p.11-125 -- and LS-DYNA's own
+    family split keys on the KEYWORD: General Remark 7 (p.11-127) puts
     ``TIED_SURFACE_TO_SURFACE``, ``TIED_NODES_TO_SURFACE``,
-    ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings as
-    *constraint-based*, and only the plain ``_OFFSET`` / ``_BEAM_OFFSET``
-    spellings as *penalty-based*. Every one of the five corpus cards this rule
-    currently sends to ``/INTER/TYPE10`` is a PLAIN
-    ``*CONTACT_TIED_SURFACE_TO_SURFACE``, i.e. constraint-based, i.e. by the
-    manual it should be the tie ``/INTER/TYPE2``.
+    ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings in
+    the CONSTRAINT-based family and only the plain ``_OFFSET`` /
+    ``_BEAM_OFFSET`` ones in the penalty-based one. ``sst``/``mst`` keep their
+    real job in ``_tied_dsearch``.
 
-    **3. The faithful family does not converge on the decks that have it.**
-    MEASURED here, both arms on this machine at ``nt = 4``, the same deck
-    differing only in the tie card:
-    ``05_4_2_welding_uncoupled_link_d3plot_structuralstep`` (an ``/IMPL``
-    quasi-static step) with ``/INTER/TYPE10`` ``Itied = 1`` reaches **NORMAL
-    TERMINATION in 81 cycles**; the identical deck with ``/INTER/TYPE2``
-    (Spotflag 27, ``dsearch`` 0.1, starter 0 ERRORS / 0 WARNINGS) **diverges at
-    cycle 16**, t = 2.299 — ``ITERATION DIVERGE with RELATIVE R = 0.1723E+01``
-    at every reduced step until ``ERROR: SOLVER IMPLICIT STOPPED DUE TO
-    TIMESTEP LIMIT``, ``ISTOP = -2``. ``05_5_2`` is the same deck with a
-    different output database. So routing the constraint-based family to the
-    constraint-based Radioss card, on this build, costs both corpus carriers
-    their NORMAL termination.
+    **Why the solver, and not the keyword alone.** Both arms were measured on
+    this machine, ``nt = 4``:
 
-    **What the surviving card costs.** ``/INTER/TYPE10``'s ``STFAC`` is
-    Radioss's own documented default: k2rad writes 0,
-    ``hm_read_inter_type10.F:135`` turns that into ``ONE_FIFTH``, and
-    ``radioss120/INTER/inter_type10.cfg:76`` gives ``TYPE10_SCALE`` the default
-    ``0.2`` — a stiffness SCALE (``:27``, dimensionless), not a stiffness. On a
-    determinate EXPLICIT steel-bar coupon (10x10x20 mm, two hexes, top face
-    driven 100 mm/s, closed form ``IE = 1/2 E eps^2 A L = 210.0``) the merged
-    single bar gives IE 209.2 and the ``/INTER/TYPE2`` twin reproduces it to
-    every printed digit, while this ``/INTER/TYPE10`` carries **68.34, a
-    -42.8 % energy error** (STFAC sweep on the same coupon: 1 → -13.0 %,
-    10 → -1.5 %, 100 → -0.1 %). So an explicit tie routed here transfers about
-    a third less load than the seam should carry.
+    *EXPLICIT* -- a determinate two-hex steel coupon (10x10x20 mm, E 210000,
+    nu 0.3, top face driven 100 mm/s to u = 0.02 mm; closed form
+    ``IE = 1/2 E eps^2 A L = 210.0``, merged single bar 209.2).
+    ``/INTER/TYPE2`` at Spotflag 1, 5 AND 27 reproduces the merged bar to every
+    printed digit (IE 209.2, engine energy error -0.0 %, dt 1.426e-6, 141
+    cycles). ``/INTER/TYPE10`` at Radioss's default STFAC carries **67.85 =
+    -67.6 %** of the tie and cannot be brought inside 1 % below STFAC ~ 30,
+    which costs dt x 0.115. So an explicit tie belongs on TYPE2 -- and the
+    corpus has no explicit ``*CONTACT_TIED_SURFACE_TO_SURFACE`` with a negative
+    Card 3 at all: the old rule's only two carriers are both implicit.
 
-    Both halves are named in ROADMAP as one round-3 item: the family is decided
-    by the keyword, the Radioss counterpart of the penalty family needs a
-    DERIVED ``STFAC`` rather than the card's 0.2 default, and moving the family
-    without that would trade a -42.8 % explicit tie for a non-converging
-    implicit one. NODES_/SHELL_EDGE tied variants never take this branch.
+    (NOTE for the reader of the pre-round-3 docstring: it said this TYPE10 arm
+    "carries 68.34, a -42.8 % energy error". -42.8 % is the ENGINE's own
+    energy-error column, not the load-transfer deviation. Against the merged
+    bar the deviations are -67.6 / -24.3 / -2.63 / -0.10 % at STFAC
+    0.2 / 1 / 10 / 100.)
+
+    *IMPLICIT* -- on ``05_4_2_welding_uncoupled_link_d3plot_structuralstep``
+    (an ``/IMPL`` quasi-static step) ``/INTER/TYPE10`` ``Itied = 1`` reaches
+    NORMAL TERMINATION in 79 cycles while EVERY ``/INTER/TYPE2`` arm fails:
+    Spotflag 25 and 26 by a HARD engine refusal -- ``ind_glob_k.F:4594-4599``
+    raises ``ERROR 241 INTERFACE TYPE2, Spotflag=25 IS NOT AVAILABLE WITH
+    IMPLICIT SOLUTION`` for every ``ILEV`` in 10..25, and 26 is downgraded to
+    25 by WARNING 1177 first -- and Spotflag 27/28/1/5 by divergence at cycles
+    16/8/9/19. Neither ``dsearch``, ``Ignore`` nor ``Stfac`` moves the
+    Spotflag-27 failure by a single cycle (three byte-identical runs).
+
+    A second fact from the same routine bounds every OTHER interface this
+    converter writes on an implicit deck -- ``ind_glob_k.F:4601-4606`` accepts
+    only ``NTY`` 5, 7, 10, 11 and 24 and otherwise raises message 232,
+    *"INTERFACE TYPE %d IS NOT AVAILABLE WITH IMPLICIT SOLUTION; IT WILL BE
+    IGNORED"*. ``/INTER/TYPE25`` is NOT in that list, which is what k2rad's
+    existing "TYPE25 explicit / TYPE7 implicit" policy rests on.
+
+    Residual, stated: on an implicit deck the tie is a penalty spring, so a
+    converged implicit weld transfers less than a constraint would. That is now
+    a named consequence of ERROR 241 and the divergence table, with
+    ``--tie-stfac`` as the lever -- not an accident of a Card-3 sign.
     """
     if c.variant != "SURFACE_TO_SURFACE":
         return "TYPE2"
-    dsearch = (c.sfst * c.sst + c.sfmt * c.mst) / 2.0
-    return "TYPE10" if dsearch < 0.0 else "TYPE2"
+    return "TYPE10" if state.is_implicit else "TYPE2"
 
 
 def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
-                       gap: float) -> List[str]:
+                       gap: float, stfac: float = 0.0) -> List[str]:
     """/INTER/TYPE10 penalty tied contact (FORMAT radioss120).
 
     grnod_id (secondary /GRNOD) + surf_id (main /SURF), same entities as TYPE2.
@@ -3227,7 +3624,7 @@ def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
         "#  grnod_id   surf_id                                                        Idel",
         f"{_i(grnod_id)}{_i(surf_id)}{_i(1, 60)}",
         "#              STFAC                                     GAP              Tstart               Tstop",
-        f"{_f(0.0)}{blank20}{_f(gap)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(stfac)}{blank20}{_f(gap)}{_f(0.0)}{_f(0.0)}",
         "#                              ITIED    INACTI               VIS_S                              BUMULT",
         f"{blank20}{_i(1)}{_i(0)}{_f(0.0)}{blank20}{_f(0.0)}",
         HDR,
@@ -3456,19 +3853,25 @@ def _tied_dsearch(state: ConversionState, c, slave_nids: List[int],
 
 
 def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
-    """*CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie).
+    """*CONTACT_TIED_* -> /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie).
 
-    The dyna2rad discriminator (SFST*SST + SFMT*MST)/2 < 0 picks the penalty tie
-    /INTER/TYPE10 (physical offset kept, secondary nodes may coexist with
-    /RBODY); otherwise the kinematic /INTER/TYPE2 (secondary nodes projected onto
-    the main segment). Both take a /GRNOD secondary side + /SURF main side.
+    :func:`_tied_interface_type` picks the family from the KEYWORD and the
+    SOLVER (both measured). ``/INTER/TYPE10`` is used a second time HERE, as
+    the fallback for a tie whose secondary side is entirely rigid: a kinematic
+    ``/INTER/TYPE2`` cannot share a node with a ``/RBODY`` at all, so before
+    R14 triage round 3 such a tie was DROPPED and the joint simply did not
+    exist. A penalty spring can hold it, and it gets the derived ``STFAC``
+    (:func:`_tie_stfac`) because there is no TYPE2 alternative to fall back on.
+
+    Both families take a /GRNOD secondary side + a /SURF main side.
     """
     if not state.contacts_tied:
         return []
     lines = ["#-  TIED INTERFACES (*CONTACT_TIED_* -> /INTER/TYPE2 | /INTER/TYPE10):", HDR]
     dropped: Dict[str, List[int]] = {}
     for c in state.contacts_tied:
-        itype = _tied_interface_type(c)
+        itype = _tied_interface_type(c, state)
+        kw = c.keyword or f"CONTACT_TIED_{c.variant}"
         if c.fs == _FS_DEFINE_FRICTION:
             # Not silently dropped: _bind_friction_table names the interface,
             # the target type and why neither TYPE2 nor TYPE10 can hold the
@@ -3477,13 +3880,20 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
             _bind_friction_table(state, 0.0, c.inter_id,
                                  f"CONTACT_TIED_{c.variant}", itype)
         nids = _tied_slave_nids(state, c.ssid, c.sstyp)
+        rigid_fallback = False
         if itype == "TYPE10":
             # Penalty tie: rigid-body secondary nodes are permitted (the bond is
             # a spring, not a kinematic constraint), so they are kept.
             clean = list(nids)
         else:
             clean = [n for n in nids if n not in rigid_nodes]
-            if len(clean) < len(nids):
+            if nids and not clean:
+                # EVERY secondary node is a rigid-body member. A kinematic tie
+                # is impossible; a penalty tie is not. Route it rather than
+                # drop the joint — and say so, because the two ties are not
+                # the same physics (TYPE10 does not tie rotations).
+                itype, clean, rigid_fallback = "TYPE10", list(nids), True
+            elif len(clean) < len(nids):
                 state.warn(
                     f"TIED CONTACT {c.inter_id}: {len(nids) - len(clean)} secondary "
                     "node(s) belong to a rigid body and were removed from the tie "
@@ -3491,23 +3901,13 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                     "node with /RBODY)."
                 )
         if not clean:
-            all_rigid = bool(nids)
             _drop_interface(
                 state, dropped, f"CONTACT_TIED_{c.variant}", c.inter_id,
                 (f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
-                 f"resolved to {len(nids)} node(s) and ALL of them belong to a "
-                 "rigid body, leaving an empty secondary node group "
-                 "(/INTER/TYPE2 is a kinematic tie: it cannot share a node "
-                 "with a /RBODY)" if all_rigid else
-                 f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
                  "resolved to no nodes at all"
                  + ((" — " + _styp01_missing_note(state, c.ssid, c.sstyp))
                     if c.sstyp in (0, 1) and c.ssid else "")),
-                ("REMEDY: swap the sides so the DEFORMABLE part supplies the "
-                 "tied nodes, or give the tie a negative Card-3 SST/MST so it "
-                 "routes to the penalty tie /INTER/TYPE10, which does accept "
-                 "rigid-body secondary nodes." if all_rigid else
-                 _secondary_side_remedy(c.ssid, c.sstyp)))
+                _secondary_side_remedy(c.ssid, c.sstyp))
             continue
         master_lines: List[str] = []
         surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
@@ -3524,50 +3924,71 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
         lines += master_lines
         if itype == "TYPE10":
             gap = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id, target="TYPE10")
-            lines += _emit_inter_type10(c.inter_id, c.title, grnod_id, surf_id, gap)
+            stfac, stfac_why = _tie_stfac(state, c, forced=rigid_fallback)
+            lines += _emit_inter_type10(c.inter_id, c.title, grnod_id, surf_id,
+                                        gap, stfac=stfac)
+            reason = (
+                "every one of its secondary nodes belongs to a rigid body, so "
+                "the kinematic /INTER/TYPE2 cannot hold it (it would share a "
+                "node with a /RBODY). Before this round the tie was DROPPED "
+                "and the joint did not exist at all"
+                if rigid_fallback else
+                "this deck is IMPLICIT, and the implicit engine refuses or "
+                "diverges on every /INTER/TYPE2 tie: ind_glob_k.F:4594-4599 "
+                "raises ERROR 241 for Spotflag 10..25 (26 downgrades to 25 "
+                "with WARNING 1177), and Spotflag 27/28/1/5 were MEASURED "
+                "diverging at cycles 16/8/9/19 on the corpus carrier "
+                "05_4_2_welding_uncoupled_link, where this /INTER/TYPE10 "
+                "reaches NORMAL TERMINATION in 79. An EXPLICIT deck gets the "
+                "exact /INTER/TYPE2 tie instead")
+            if c.thermal is not None:
+                state.warn(
+                    f"*{kw} {c.inter_id}: the THERMAL card is NOT converted — "
+                    "this tie is emitted as /INTER/TYPE10, which has NO "
+                    "thermal fields at all (hm_read_inter_type10.F reads no "
+                    "I_TH/Kthe, and radioss120/INTER/inter_type10.cfg defines "
+                    "none). CONSEQUENCE: the seam transfers no heat across "
+                    "the weld. REMEDY: on an explicit run the same card "
+                    "converts to /INTER/TYPE2 Ithe=1 Kthe=H0.")
             state.warn(
-                f"*CONTACT_TIED_SURFACE_TO_SURFACE{'_OFFSET' if c.offset else ''} "
-                f"{c.inter_id} -> /INTER/TYPE10/{c.inter_id} (penalty tie: "
-                f"(SFST*SST + SFMT*MST)/2 = {(c.sfst * c.sst + c.sfmt * c.mst) / 2.0:g} "
-                f"< 0). GAP={gap:g}, {len(clean)} "
-                "secondary nodes, Itied=1. NOTE the routing rule is dyna2rad's "
-                "and is PRAGMATIC, not LS-DYNA's: a negative Card-3 SST/MST is "
-                "the tying SEARCH DISTANCE (Vol I R17 p.11-33 SAST + General "
-                "Remark 4 p.11-125), not an offset flag, and General Remark 7 "
-                "(p.11-127) puts a plain *CONTACT_TIED_SURFACE_TO_SURFACE in "
-                "the CONSTRAINT-based family, i.e. /INTER/TYPE2. It is routed "
-                "here because on this build the faithful card does not "
-                "converge: measured on this deck's own twin, /INTER/TYPE10 "
-                "reaches NORMAL TERMINATION in 81 cycles while /INTER/TYPE2 "
-                "diverges at cycle 16 (ITERATION DIVERGE, RELATIVE R = 1.723) "
-                "into an implicit TIMESTEP-LIMIT death. The cost of this arm: "
-                "STFAC is Radioss's own 0.2 default "
-                "(hm_read_inter_type10.F:135, inter_type10.cfg:76), which on a "
-                "determinate EXPLICIT tie coupon carries a -42.8 % energy "
-                "error against the merged-bar closed form that /INTER/TYPE2 "
-                "matches exactly. Unlike TYPE2 this bonds by penalty "
-                "(rigid-body secondary nodes allowed) and does not tie "
-                "rotations. Itied=1 is 'TIED AFTER IMPACT NO REBOUND "
-                "AUTORIZED' (hm_read_inter_type10.F:188-190), which is what a "
-                "*CONTACT_TIED_* without a _FAILURE option means; it also lifts "
-                "the starter's initial-penetration refusal for this interface "
-                "type (i7pwr3.F:117 gates ERROR 611/612 on NTY/=10 .OR. "
-                "ITIED==0), and TYPE10 has no Fpenmax field to clear it with "
-                "instead (hm_read_inter_type10.F:94)."
+                f"*{kw} {c.inter_id} -> /INTER/TYPE10/{c.inter_id} (penalty "
+                f"tie, Itied=1, GAP={gap:g}, {len(clean)} secondary nodes) "
+                f"because {reason}. STFAC={stfac:g} from {stfac_why}. MEASURED "
+                "on a determinate two-hex EXPLICIT coupon (closed form "
+                "IE = 1/2 E eps^2 A L = 210.0, merged bar 209.2): "
+                "/INTER/TYPE10 at Radioss's default STFAC (0, which "
+                "hm_read_inter_type10.F:135 turns into 0.2) carries IE 67.85 "
+                "= -67.6 % of the tie, because i7sti3.F:444 makes the tie "
+                "spring STFAC*A^2*K/V per tied node = STFAC/(3(1-2nu)) times "
+                "the stiffness of the element it welds — 0.167x at the "
+                "default. Reaching 1 % needs STFAC ~ 30 and costs dt x 0.115 "
+                "(dt scales as 1/sqrt(STFAC)); /INTER/TYPE2 reproduces the "
+                "same coupon EXACTLY at no time-step cost. Pass --tie-stfac "
+                "auto to stiffen this tie to 100x the local element "
+                "stiffness. Unlike TYPE2 this bonds by penalty (rigid-body "
+                "secondary nodes allowed) and does not tie ROTATIONS. Itied=1 "
+                "is 'TIED AFTER IMPACT NO REBOUND AUTORIZED' "
+                "(hm_read_inter_type10.F:188-190), which is what a "
+                "*CONTACT_TIED_* without a _FAILURE option means; it also "
+                "lifts the starter's initial-penetration refusal for this "
+                "interface type (i7pwr3.F:117 gates ERROR 611/612 on NTY/=10 "
+                ".OR. ITIED==0), and TYPE10 has no Fpenmax field to clear it "
+                "with instead (hm_read_inter_type10.F:94)."
             )
             continue
         dsearch = _tied_dsearch(state, c, clean, verts, faces)
         spotflag = _TIED_SPOTFLAG.get(c.variant, 1)
+        kthe = _contact_thermal_cells(state, kw, c.inter_id, c.thermal, "TYPE2")
         lines += _emit_inter_type2(c.inter_id, c.title, grnod_id, surf_id,
-                                   spotflag, dsearch)
+                                   spotflag, dsearch,
+                                   kthe=None if kthe is None else kthe.kthe)
         rot_note = (
             " Note: TYPE2 also ties the secondary nodes' ROTATIONS to the main "
             "segment (a moment-carrying weld); the LS-DYNA keyword tied "
             "translations only." if c.variant != "SHELL_EDGE_TO_SURFACE" else ""
         )
         state.warn(
-            f"*CONTACT_TIED_{c.variant}{'_OFFSET' if c.offset else ''} "
-            f"{c.inter_id} -> /INTER/TYPE2/{c.inter_id} (tied interface, "
+            f"*{kw} {c.inter_id} -> /INTER/TYPE2/{c.inter_id} (tied interface, "
             f"Spotflag={spotflag}, {len(clean)} secondary nodes). Spotflag "
             f"{spotflag} is the kinematic tie with an AUTOMATIC SWITCH TO A "
             "PENALTY tie on any secondary node whose kinematic condition is "
@@ -3690,7 +4111,7 @@ def _emitted_type2_mains(state: ConversionState):
     out: List[Tuple[Union[ContactTied, ContactSpotweld, ContactTiebreak],
                     int, str, Set[int]]] = []
     for c in state.contacts_tied:
-        if _tied_interface_type(c) != "TYPE2":
+        if _tied_interface_type(c, state) != "TYPE2":
             continue                              # /INTER/TYPE10 penalty tie
         if (not side(c.ssid, c.sstyp)
                 or not _tied_main_surface_resolves(state, c, surf_pids)):

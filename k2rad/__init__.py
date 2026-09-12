@@ -16,7 +16,7 @@ __version__ = "0.1.0"
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
@@ -213,6 +213,7 @@ def convert(
     ground_spring_k: float = 100.0,
     inter_gapmin: Optional[Dict[int, float]] = None,
     soften_stfac: Optional[float] = None,
+    tie_stfac: Optional[Union[str, float]] = None,
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
@@ -265,6 +266,20 @@ def convert(
     soften_stfac : float, optional
         Stfac (penalty stiffness scale) set on ALL /INTER/TYPE7 interfaces
         (e.g. 0.3). None leaves the engine default (0).
+    tie_stfac : float or ``"auto"``, optional
+        STFAC (penalty-tie stiffness scale) on every ``/INTER/TYPE10``
+        tie. ``"auto"`` asks for 100x the local element stiffness, i.e.
+        ``100*3(1-2nu)`` read from the tie's own main side (120 at
+        nu = 0.3). None (the default) leaves STFAC 0, which the starter
+        turns into Radioss's own 0.2 — MEASURED on a determinate two-hex
+        coupon that is a -67.6 % tie, because ``i7sti3.F:444`` makes the
+        tie spring ``STFAC/(3(1-2nu))`` times the stiffness of the element
+        it welds (0.167x at the default). STFAC 30 reaches -0.76 % and 120
+        reaches +0.05 %, at dt x 0.115 and dt x 0.058 (dt scales as
+        ``1/sqrt(STFAC)``). Only IMPLICIT ties and ties whose secondary
+        side is entirely rigid use ``/INTER/TYPE10``; an explicit tie gets
+        ``/INTER/TYPE2``, which reproduces the same coupon exactly at no
+        time-step cost.
     tet10_to_tet4 : bool
         Downgrade every 10-node quadratic tet to a 4-node linear tet (keep the
         4 corners, drop the mid-edge nodes). Off by default.
@@ -521,6 +536,7 @@ def convert(
         ground_spring_k=ground_spring_k,
         inter_gapmin=dict(inter_gapmin or {}),
         soften_stfac=soften_stfac,
+        tie_stfac=tie_stfac,
         tet10_to_tet4=tet10_to_tet4,
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,

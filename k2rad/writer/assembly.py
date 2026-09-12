@@ -81,6 +81,7 @@ from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
     _make_force_transducers,
+    _make_refused_contact_notes,
     _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
@@ -2114,6 +2115,12 @@ def _starter_section_registry():
         ("spotweld_interfaces",
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
+        # A note-only section (it returns []): it emits the by-name
+        # refusal for every *CONTACT k2rad RECOGNIZES and deliberately
+        # does not convert. Here rather than in the handler because one
+        # refusal quotes a *DEFINE_CURVE that the corpus carrier defines
+        # 150 lines AFTER the contact - see state.ContactRefused.
+        ("refused_contacts", lambda c: _make_refused_contact_notes(c.state)),
         ("rbodies",           lambda c: c.rbody_lines),
         # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
         # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts
