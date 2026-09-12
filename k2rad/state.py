@@ -5091,7 +5091,7 @@ class SegmentSet:
     #: a two-node row has no area, no normal and no face. They are EDGES, and
     #: LS-DYNA decks write them when the set feeds an edge-only contact
     #: (``*CONTACT_SINGLE_EDGE``; the R14 carrier
-    #: ``examples-manual/contact/edge/contact.edge.k`` states 60 of them and no
+    #: ``examples-manual/contact/edge/contact.edge.k`` states 58 of them and no
     #: face at all). Kept HERE, beside the faces and not among them, so the
     #: /LINE synthesis can use them while ``/SURF/SEG`` and every pressure /
     #: contact-main consumer still sees an empty surface — which is what a set
@@ -7097,7 +7097,10 @@ class ConvertOptions:
     # 99.9 % energy error. The COST of 0, named: fewer output states — 15
     # cycles become 8 on the controls — which is exactly what the card exists
     # for, so set a count to get the milestones back.
-    # Implicit decks only (no effect on explicit output).
+    # Implicit decks only (no effect on explicit output). NOTE: convert() is
+    # the package's only ConvertOptions construction and always passes this
+    # field, so the value here is a documentation default, not the live one -
+    # cli.py's --fixpoint-count default is what a CLI run reads.
     fixpoint_count: int = 0
     # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
     # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
@@ -7224,7 +7227,7 @@ class ConvertOptions:
     # t = 2.0, IE -0.25 %; sloshing_C timeout → NORMAL, +2.82 %; taylor_A
     # IE/KE +2.56/+1.48 % → +0.00/-0.03 %; rodsol +2.88/+4.04 % →
     # -1.72/+1.41 %; tension1 +0.10 % → -0.01 %; the IMPLICIT
-    # ex_03_solid_elform_1 -20.38 % → -4.26 % and ex_04_solid_elform_1
+    # ex_03_solid_elform_1 -20.38 % → -4.14 % and ex_04_solid_elform_1
     # -8.67 % → -5.76 %. Screened: ELFORM -1/-2 (no hourglass energy at all,
     # p.41-97 Remark 13), ELFORM 2/3/16 and the tets (no hourglass modes), ALE,
     # a *MAT_NULL fluid (kept VISCOUS, Isolid 1, p.25-3 Remark 4), /MAT/LAW115

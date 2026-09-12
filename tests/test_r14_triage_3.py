@@ -603,7 +603,10 @@ class RefusedByName(unittest.TestCase):
     def test_entity_names_the_geotype_and_the_rwall_it_would_need(self):
         _, _, w = self._run("CONTACT_ENTITY")
         self.assertIn("GEOTYP=2", w)
-        self.assertIn("hm_read_rwall_spher.F:290", w)
+        # :286, not :290 - the round-3 finalize round opened the file:
+        # KINSET(4,...) sits at :286 and is gated IPEN == 0, so a PENALTY
+        # rigid wall does not kinematically constrain its nodes.
+        self.assertIn("hm_read_rwall_spher.F:286", w)
         self.assertIn("KINEMATICALLY constrained", w)
 
     def test_sliding_only_names_the_measured_regression_it_avoids(self):
@@ -893,7 +896,6 @@ class DefaultSolidHourglassRuleTable(unittest.TestCase):
         ref = int([ln for ln in s.splitlines()
                    if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
         self.assertAlmostEqual(_solid_prop(s, ref)[1], 0.03)
-
 
     def test_a_stated_zero_qm_inherits_the_global_qh_too(self):
         """The OTHER half of Remark 7, and the half the blank-QM test above

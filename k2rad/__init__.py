@@ -468,7 +468,8 @@ def convert(
         IE +2.56 % / KE +1.48 % to +0.00 % / −0.03 %, ``rodsol`` from
         +2.88 % / +4.04 % to −1.72 % / +1.41 %, ``tension1`` from +0.10 % to
         −0.01 %, and the implicit ``ex_03_solid_elform_1`` from −20.38 % to
-        −4.26 % (its ``_elform_2`` sibling, gated out, stays at −0.10 %).
+        −4.14 % (its ``_elform_2`` sibling, gated out, moves only through
+        item F, −0.10 % → −0.03 %).
         Screened out, each for its own measured or quoted reason: ELFORM
         −1/−2 (p.41-97 Remark 13 — *"there is no hourglass energy, and the
         behavior is not affected by hourglass parameters"*), ELFORM 2/3/16 and

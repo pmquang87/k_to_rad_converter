@@ -3367,16 +3367,20 @@ carry a real thermal contact, not a warn-drop: `Ithe = 1` plus `Kthe = H0`
 (the closed-gap conductance — `i7therm.F:191` `PHI = A·ΔT·dt/RSTIF` with
 `FRIGAP(20) = 1/Kthe`, `i2therm.F:110` `PHI = A·ΔT·dt·Kthe`),
 `Ithe_form = 1` (`ALGO = 0`, two-way), `Frad = FRAD`, `Drad = LMAX` and
-`Fheats/Fheatm = FTOSA / 1−FTOSA` on TYPE7/TYPE25 (TYPE2 has conduction only).
+`Fheats/Fheatm = FTOSA / 1−FTOSA` on TYPE7 (TYPE2 has conduction only; the
+TYPE25 emitter takes the same cells but no registered spelling routes a
+`ContactThermal` to it today, so that branch is forward-looking).
 NOT converted, and NAMED per card: `K` (the fluid-gap branch `h = K/l_gap` —
 Radioss's `Kthe` is a constant or a function of contact PRESSURE, so the whole
 open-gap branch collapses onto `H0`), `LMIN`, `BC_FLAG`, and `ALGO = 1/2/3`,
 which is refused by name rather than given an invented `Tint`. The card is
 dropped entirely, with the reason, on a deck that emits no `/HEAT/MAT`: the
-starter disables interface heat exchange with `WARNING 702`
-(`hm_read_inter_type07.F:700-707`) unless a Lagrangian part's material carries
-one, and on an implicit tie the card is lost outright because `/INTER/TYPE10`
-has no thermal field at all.
+deck has no thermal solve for the interface to feed at all (heat capacity and
+conductivity reach the solver only through that card). On TYPE7/TYPE25 the
+starter says so itself — `WARNING 702`, `hm_read_inter_type07.F:700-707`; the
+TYPE2 reader (`hm_read_inter_type02.F:436-444`) has NO such gate and would
+store `Kthe` silently, which is why k2rad refuses there too. On an implicit tie
+the card is lost outright because `/INTER/TYPE10` has no thermal field at all.
 `*CONTACT_DRAWBEAD`, `*CONTACT_ENTITY` and `*CONTACT_SLIDING_ONLY` are
 **RECOGNIZED and deliberately NOT converted** — they reach "Recognized but not
 emitted" with a warning that names the LS-DYNA field, the OpenRadioss card that
@@ -5483,14 +5487,32 @@ mypy k2rad
   `*CONTROL_TIMESTEP TSSFAC <= 0.35` — on the paths that still emit
   `Isolid = 17`.** Since 2026-09 a 1-point `*SECTION_SOLID` whose deck leaves
   the hourglass control DEFAULTED takes LS-DYNA's own default instead
-  (`Isolid` 1 explicit / 24 implicit, `--no-default-hourglass` to opt out), and
-  `Isolid` 1 IS the under-integrated element `TSSFAC = 0.9` was calibrated for
-  — so this bites the SCREENED cases: an `ELFORM = -1/-2` section, an
-  `ELFORM = 2` section, a preloaded deck, a `/MAT/LAW115` section, or the
-  opt-out. There `*SECTION_SOLID` still maps to `/PROP/SOLID` `Isolid = 17`,
+  (`Isolid` 1 explicit / 24 implicit, `--no-default-hourglass` to opt out).
+  **That does NOT make the deck immune**, and the round-3 finalize coupon
+  measured it: a 25 x 1 x 1 hex cantilever (L 50 mm, 2 x 2 mm section) carried
+  to `Tsca = 0.9` is killed at `Isolid` 1 by `MESSAGE ID 205 ** RUN KILLED:
+  ENERGY ERROR LIMIT REACHED` at cycle 65 after amplifying round-off ~1.6x per
+  cycle, while the `Isolid` 17 arm collapses `dt` to 6.3e-19 and stalls; BOTH
+  arms run to completion at `Tsca = 0.5`. The instability is about how few
+  elements share a node, not about which `Isolid`. It still bites the SCREENED
+  cases hardest — an `ELFORM = -1/-2` section, an `ELFORM = 2` section, a
+  preloaded deck, a `/MAT/LAW115` section, or the opt-out. There `*SECTION_SOLID` still maps to `/PROP/SOLID` `Isolid = 17`,
   which is FULL 2x2x2 integration (`hm_read_prop14.F:333-341` sets
   `NPT = NPG = 8`), and LS-DYNA's `TSSFAC = 0.9` default was calibrated for the
-  UNDER-integrated element k2rad substitutes away from. No `/DT` card is emitted unless the deck states
+  UNDER-integrated element k2rad substitutes away from.
+  A second consequence of the same default, measured on the same coupon and
+  worth knowing before you read a soft result: on a solid structure ONE element
+  thick in bending, `Isolid` 1 + viscous hourglass is a MECHANISM. The
+  cantilever above (tip pushed 0.5 mm through a `sin^2` ramp, analytic
+  Euler-Bernoulli + Timoshenko `k = 6.711 N/mm`, `IE = 0.8389 N.mm`) reads
+  IE 0.6973 = `k` 5.578 N/mm at `Isolid` 17 (-16.9 %, energy error 0.0 %) and
+  IE 3.75e-6 at `Isolid` 1, with **83.7 % of the external work going into
+  hourglass VISCOSITY** — which Radioss books as neither internal nor kinetic
+  energy, so it shows up only in the engine's ERROR column. That is FAITHFUL
+  (LS-DYNA's viscous IHQ 2 has no static hourglass stiffness either) and every
+  real corpus deck improved, but if a thin solid part suddenly reads soft, this
+  is the new default and `--no-default-hourglass` is the arm to compare
+  against. No `/DT` card is emitted unless the deck states
   `TSSFAC > 0`, so the engine then runs at Radioss's own default `Tsca = 0.9`
   (`dt = 0.857 L/c`), which is super-critical for a lightly-connected hex:
   measured on a 10 mm steel hex, an unstable mode amplified round-off by x3.07

@@ -1737,12 +1737,23 @@ def _contact_thermal_cells(state: ConversionState, keyword: str, inter_id: int,
     head = f"*{keyword} {inter_id}: the THERMAL card is NOT converted — "
     if not state.heat_mat_cards:
         state.warn(
-            head + "this deck emits no /HEAT/MAT. The starter disables "
-            "interface heat exchange entirely (WARNING 702, "
-            "hm_read_inter_type07.F:700-707) unless at least one Lagrangian "
-            "part's material carries one (ale_euler_init.F:193-200 via "
-            "hm_read_part.F:366-368), so an Ithe card here would be read and "
-            "then switched off. CONSEQUENCE: the seam transfers no heat. "
+            head + "this deck emits no /HEAT/MAT, so there is no thermal "
+            "solve for the interface to feed: heat capacity and conductivity "
+            "reach the solver only through that card "
+            "(ale_euler_init.F:193-200 via hm_read_part.F:366-368)."
+            + (" The TYPE7/TYPE25 reader says so itself, refusing the "
+               "interface's own heat exchange with WARNING 702 "
+               "(hm_read_inter_type07.F:700-707) unless at least one "
+               "Lagrangian part's material carries one; the TYPE2 reader "
+               "(hm_read_inter_type02.F:436-444) has NO such test and would "
+               "store Kthe silently."
+               if not tie else
+               " The TYPE2 reader (hm_read_inter_type02.F:436-444) has no "
+               "gate of its own — it stores I_TH and Kthe whatever the "
+               "materials say — so nothing would warn you at run time. "
+               "(The TYPE7 arm of this same refusal is enforced by the "
+               "starter, WARNING 702, hm_read_inter_type07.F:700-707.)")
+            + " CONSEQUENCE: the seam transfers no heat. "
             "REMEDY: give the contacting parts' materials a *MAT_THERMAL_* "
             "(or *MAT_ADD_THERMAL_EXPANSION) so k2rad emits /HEAT/MAT.")
         return None
@@ -1873,8 +1884,9 @@ _REFUSED_CONTACT_NOTES = {
         "body's main node (hm_read_rwall_spher.F:220-227), which reproduces "
         "GEOTYP 1/2/3 only and cannot carry SO, INTORD, ITHK, a damping curve "
         "(DF<0) or a friction curve (CF<0); /RWALL also makes every secondary "
-        "node KINEMATICALLY constrained (hm_read_rwall_spher.F:290 "
-        "KINSET(4,...)), which conflicts with any other constraint on them. "
+        "node KINEMATICALLY constrained unless the wall is a PENALTY one "
+        "(hm_read_rwall_spher.F:286, gated IDDLEVEL == 0 .AND. IPEN == 0), "
+        "which conflicts with any other constraint on them. "
         "PHYSICAL CONSEQUENCE: nothing stops the tracked nodes at this entity "
         "— they pass through the rigid body. REMEDY: add an explicit /RWALL "
         "to the converted deck, or mesh the entity and use a "
@@ -2187,6 +2199,12 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
                        viss: float = 0.05, fric_id: int = 0,
                        irem_i2: int = 0,
                        thermal: Optional["_ThermalCells"] = None) -> List[str]:
+    # ``thermal`` is FORWARD-LOOKING: no caller passes it today. Only
+    # ``contacts_surf2surf`` records can carry a ContactThermal and they are
+    # emitted through _emit_inter_type7 exclusively, so the TYPE25 branch of
+    # _emit_thermal_cards is exercised by its unit test and by nothing else.
+    # It is kept (rather than deleted) because the *_THERMAL single-surface
+    # spellings are the next registration and land straight on this card.
     """/INTER/TYPE25, FORMAT(radioss2022) — the exact card set /BEGIN 2022 reads.
 
     Column map, verbatim from ``radioss2022/INTER/inter_type25.cfg:503-527``::
@@ -2402,7 +2420,7 @@ def _general_line_group(state: ConversionState, sid: int, styp: int,
         ss = state.segment_sets[sid]
         # A *SET_SEGMENT can hold the edges DIRECTLY, as two-node rows -- the
         # way an LS-DYNA deck spells the SURFA of *CONTACT_SINGLE_EDGE (the
-        # R14 carrier contact.edge.k states 60 of them and no face). They are
+        # R14 carrier contact.edge.k states 58 of them and no face). They are
         # already an edge list, so they are used as one; the faces (if any)
         # still contribute their own boundary edges.
         edges = list(ss.edges) + _segment_set_edges(ss.segments)
@@ -3528,13 +3546,25 @@ def _tied_interface_type(c, state: ConversionState) -> str:
     family flag -- Vol I R17 p.11-33 (``SAST``): *"can be defined as negative
     values, which will cause the determination of whether or not a node is
     tied to depend only on the separation distance relative to the absolute
-    value of these thicknesses"*, General Remark 4 p.11-125 -- and LS-DYNA's own
-    family split keys on the KEYWORD: General Remark 7 (p.11-127) puts
+    value of these thicknesses"*, General Remark 4 p.11-125. ``sst``/``mst``
+    keep their real job in ``_tied_dsearch``.
+
+    **What the rule is NOT keyed on.** LS-DYNA has its own family split, and
+    k2rad does not reproduce it: General Remark 7 (p.11-127) puts
     ``TIED_SURFACE_TO_SURFACE``, ``TIED_NODES_TO_SURFACE``,
     ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings in
-    the CONSTRAINT-based family and only the plain ``_OFFSET`` /
-    ``_BEAM_OFFSET`` ones in the penalty-based one. ``sst``/``mst`` keep their
-    real job in ``_tied_dsearch``.
+    the CONSTRAINT-based family and the plain ``_OFFSET`` / ``_BEAM_OFFSET``
+    ones in the PENALTY-based one. This function ignores ``c.offset``: an
+    ``_OFFSET`` tie on an explicit deck gets the constraint ``/INTER/TYPE2``
+    like any other, which also projects the secondary nodes onto the main
+    segment and so removes the very offset the keyword names. Measured reach
+    on the corpus today is ZERO — all 29 ``*CONTACT_TIED_*`` decks on
+    ``F:``, ``C:/openradioss_run`` and ``Ryan_Lee`` convert identically on both
+    trees, because the two ``_OFFSET`` carriers (``getriebekette``,
+    ``spotweld.k``) have a non-negative Card-3 discriminator and the deleted
+    sign rule sent them to ``/INTER/TYPE2`` as well. Keying the penalty tie on
+    ``_OFFSET`` is a round-4 item and needs both arms measured on
+    ``getriebekette``.
 
     **Why the solver, and not the keyword alone.** Both arms were measured on
     this machine, ``nt = 4``:
@@ -3931,7 +3961,15 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 "every one of its secondary nodes belongs to a rigid body, so "
                 "the kinematic /INTER/TYPE2 cannot hold it (it would share a "
                 "node with a /RBODY). Before this round the tie was DROPPED "
-                "and the joint did not exist at all"
+                "and the joint did not exist at all. This is a k2rad CHOICE, "
+                "not a restoration of LS-DYNA behaviour: Vol I R17 p.11-127 "
+                "General Remark 7 opens 'The following tied contact types are "
+                "constraint-based and will not work with rigid bodies' and "
+                "lists exactly this family, so the reference solver does not "
+                "tie here either — the penalty spring is a load path "
+                "LS-DYNA does not have. No corpus deck reaches this arm (0 of "
+                "29 *CONTACT_TIED_* decks on F:, C:/openradioss_run and "
+                "Ryan_Lee); drop the tie by hand if you want LS-DYNA's answer"
                 if rigid_fallback else
                 "this deck is IMPLICIT, and the implicit engine refuses or "
                 "diverges on every /INTER/TYPE2 tie: ind_glob_k.F:4594-4599 "
@@ -4083,7 +4121,15 @@ def _emitted_type2_mains(state: ConversionState):
     the starter reads, and naming one in a refusal would print a statement
     about a card the converter itself dropped (the #130 class, one layer up
     from a warning's cited fact). Two conditions do that, and BOTH are screened
-    here because all three producers ``continue`` on either:
+    here because all three producers ``continue`` on either.
+
+    One case is deliberately NOT screened, and over-approximates in the safe
+    direction: a ``*CONTACT_TIED_*`` whose secondary side is entirely rigid is
+    emitted as ``/INTER/TYPE10`` (see ``_make_tied_interfaces``) while
+    ``_tied_interface_type`` still answers ``TYPE2`` for it, so such a record
+    is counted as a TYPE2 main here. Counting a main that is not there can
+    only WITHHOLD a rupture Spotflag, never grant one, and no corpus deck
+    reaches the fallback at all.
 
     * the SECONDARY side resolves to no nodes, and
     * the MAIN side resolves to no ``/SURF`` (``_tied_main_surface_resolves``) —

@@ -2255,7 +2255,8 @@ def _warn_section_solid_one_point_ale(state: ConversionState, secid: int,
         "formulation = 11' for a stated ELFORM 5 (taylor_B, sloshing_C) and "
         "for a stated 6 (channel_A, advection_B). Mapping the cell to "
         "Iale=1/2 is NOT a drop-in: hm_read_prop14.F:264-267 refuses Iale/=0 "
-        "on any Isolid but 1 or 2 (ERROR 131 + 608 — measured, 9 starter "
+        "on any Isolid but 0, 1 or 2 (0 is what k2rad's own ELFORM 11/12 ALE "
+        "properties emit; ERROR 131 + 608 — measured, 9 starter "
         "errors on taylor_B and 4 on advection_B), and with Isolid 1 the "
         "remap was MEASURED destructive: taylor_B goes from IE +5.1 % / KE "
         "+4.9 % against its LS-DYNA reference to a 99.9 % energy error at "
@@ -6274,14 +6275,24 @@ _CONTACT_SPELLING_NOTES = {
         "LS-DYNA's two-way contact checks BOTH surfaces for penetration (Vol I "
         "R17 p.11-8 item 1b). /INTER/TYPE7 checks only the SURFA (SSID) nodes "
         "against the SURFB (MSID) segments, so if the MSID side is the finer "
-        "or the softer mesh its nodes can pass through — MEASURED on the R14 "
-        "deck twobar (two disjoint bars impacting), where the one-way arm "
-        "overshoots the LS-DYNA reference internal energy by +1151 %. Put the "
-        "finer / more deformable side on SSID if the pair is symmetric."),
+        "or the softer mesh its nodes can pass through. Put the finer / more "
+        "deformable side on SSID if the pair is symmetric. NOT the cause of "
+        "the twobar overshoot: the round-3 verification round MEASURED that "
+        "deck's +1151 % internal energy down to -5.6 % by changing ONE cell "
+        "of the emitted card — the Gapmin the starter derives when k2rad "
+        "leaves it 0 (GAP MIN = 1.0 mm on a 10 mm bar; 0.05 gives IE 2866 "
+        "against the LS-DYNA reference 3036.17 and KE 1.127e5 against "
+        "1.20123e5). A one-way check UNDER-transfers load and cannot produce "
+        "a 12x energy excess, and twobar's own LS-DYNA glstat books only 6.38 "
+        "of sliding-interface energy in 125018 total. An explicit Gapmin for "
+        "the non-AUTOMATIC solid-segment spellings is a round-4 item; until "
+        "then set it per interface with --inter-gapmin <id>=VAL."),
     "forming": (
-        "the FORMING family IGNORES the SURFB (tooling) contact thickness and "
-        "offsets SURFB by |SBST|/2 opposite its normal (Vol I R17 p.11-128 "
-        "General Remark 9). k2rad's Gapmin is (|SAST|+|SBST|)/2 for BOTH "
+        "the FORMING family IGNORES the SURFB (tooling) contact thickness, "
+        "and a NEGATIVE SBST additionally offsets SURFB by |SBST|/2 opposite "
+        "its normal (Vol I R17 p.11-128 General Remark 9: SURFB *can* be "
+        "offset by setting a negative value — only the "
+        "thickness-ignoring half is unconditional). k2rad's Gapmin is (|SAST|+|SBST|)/2 for BOTH "
         "sides, so the tooling half-thickness is INCLUDED and the tooling "
         "offset is NOT applied: the blank engages the tool half a tool "
         "thickness too early. Set the engagement gap explicitly with "
@@ -6305,7 +6316,14 @@ _CONTACT_SPELLING_NOTES = {
         "and the deck a zero model. NOT converted: the LCID1/LCID2 stiffness "
         "ramp, which has no /INTER/TYPE7 counterpart (Radioss has no "
         "time-varying Stfac), so the full penalty force appears in cycle 1 "
-        "instead of ramping in — check the first cycles for a force spike."),
+        "instead of ramping in — check the first cycles for a force spike. "
+        "HAZARD of Inacti 0, MEASURED on a purpose-built coupon: a secondary "
+        "node lying ON an extension of the main surface (conformal, co-planar "
+        "footprints) hard-fails the starter with ERROR 612 'INITIAL "
+        "PENETRATION IN INTERFACE ... INACTI = 0 ... SECONDARY NODE n IS ON "
+        "THE MAIN SURFACE' — 14 of them on that coupon, and the deck does "
+        "not start. Trim the interfering surfaces to the fit itself, or set "
+        "--inter-gapmin on this interface, if the starter refuses."),
     "single_edge": (
         "LS-DYNA's SINGLE_EDGE only contacts EXTERIOR edges whose in-plane "
         "normals point toward each other (Vol I R17 p.11-124 Remark 3). "
@@ -6569,7 +6587,6 @@ def _refuse_contact(block: Block, state: ConversionState,
     :class:`~k2rad.state.ContactRefused` for why.
     """
     inter_id, _title, offset = _parse_contact_header(block)
-    _ = _contact_mpp_card_offset(block.raw, offset, mpp)
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
     state.contacts_refused.append(
@@ -6620,7 +6637,9 @@ def handle_contact_entity(block: Block, state: ConversionState,
     body's main node, ``hm_read_rwall_spher.F:220-227``), and even those cannot
     carry ``SO``, ``INTORD``, ``ITHK``, a damping curve (``DF < 0``) or a
     friction curve (``CF < 0``) — while ``/RWALL`` makes every secondary node
-    KINEMATICALLY constrained (``hm_read_rwall_spher.F:290`` ``KINSET(4,…)``),
+    KINEMATICALLY constrained unless the wall is a PENALTY one
+    (``hm_read_rwall_spher.F:286``: ``IF (IDDLEVEL == 0 .AND. IPEN == 0) CALL
+    KINSET(4,…)``),
     which collides with any other constraint they carry. One card on one deck
     in the 368-file R14 corpus does not justify that surface, so it is refused
     by name with the entity's own geometry quoted.
@@ -8055,8 +8074,11 @@ def handle_control_hourglass(block: Block, state: ConversionState) -> None:
     # default "Rem 1" and says "If omitted or if IHQ = 0, the default hourglass
     # control types are as follows: ... b) For solids: type 2 for explicit;
     # type 6 for implicit." 0 therefore means "resolve the solver default"
-    # (writer/mesh._default_solid_ihq does that), while the old `else 1` said
-    # "standard viscous", which is a different type on an implicit deck.
+    # (writer/mesh._default_solid_ihq does that). The `else 0` arm is
+    # DEFENSIVE and unreachable: the early return covers an empty raw, and
+    # _card(..., n=2) always returns two cells, so a blank IHQ already reaches
+    # to_int('') == 0. It is written 0 rather than the old 1 so the fallback
+    # says the same thing the live path does.
     ihq = to_int(f[0])   if f else 0
     qh  = to_float(f[1]) if len(f) > 1 else 0.1
     state.ctrl_hourglass = ControlHourglass(ihq, qh)
@@ -18578,7 +18600,7 @@ HANDLERS["CONTACT_AIRBAG_SINGLE_SURFACE_MPP"] = (
 # collapses to zero against a non-zero LS-DYNA reference carry one. A skipped
 # *CONTACT is not a missing output card, it is a MISSING LOAD PATH: the run
 # terminates normally with the two surfaces passing through each other.
-# dyna2rad drops the same spellings (``convertcontacts.cxx:233`` ``if
+# dyna2rad drops the same spellings (``convertcontacts.cxx:234`` ``if
 # (interType.empty()) continue;``), so there is no peer to copy here.
 #
 # ONE table, three consumers (#116): ``HANDLERS`` below,

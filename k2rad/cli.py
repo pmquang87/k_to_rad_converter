@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
              "to NORMAL (+2.82 %%), taylor_A from IE +2.56 %% / KE +1.48 %% "
              "to +0.00 %% / -0.03 %%, rodsol from +2.88 %% / +4.04 %% to "
              "-1.72 %% / +1.41 %%, and the IMPLICIT ex_03_solid_elform_1 from "
-             "-20.38 %% to -4.26 %%. Screened out: ELFORM -1/-2 (Vol I "
+             "-20.38 %% to -4.14 %%. Screened out: ELFORM -1/-2 (Vol I "
              "p.41-97 Remark 13 - no hourglass energy at all), ELFORM 2/3/16 "
              "and the tets (no hourglass modes), ALE sections, /MAT/LAW115 "
              "sections (own measured remap) and any deck with an "

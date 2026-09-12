@@ -2197,7 +2197,7 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
         # stiffness type runs type 6 in LS-DYNA too — the Radioss analogue is
         # HEPH (Isolid 24), and MEASURED on ex_03_solid_elform_1 the viscous
         # Isolid 1 does not converge implicitly at all (11 cycles in 600 s)
-        # while Isolid 24 reaches its reference at -4.26 %.
+        # while Isolid 24 reaches its reference at -4.14 %.
         iso = _ihq_to_isolid(_LSDYNA_DEFAULT_SOLID_IHQ_IMPLICIT)
     if iso == 24 and sec.secid in _solid_hg_screens(state).fluid_secids:
         # *HOURGLASS Remark 4 / the sloshing_A measurement — see
@@ -2262,13 +2262,23 @@ def _warn_default_solid_hourglass(
         "at t = 2.0 (IE -0.25 %), taylor_A from IE +2.56 % / KE +1.48 % to "
         "+0.00 % / -0.03 %, rodsol from +2.88 % / +4.04 % to -1.72 % / "
         "+1.41 %, and the implicit ex_03_solid_elform_1 from -20.38 % to "
-        "-4.26 %."
+        "-4.14 % (IE 0.1641E+06 against the LS-DYNA reference 171185, "
+        "measured at this branch's final head)."
         + (" On an implicit deck the engine will now print '***** WARNING : "
            "ELEMENT FORMULATION ISOLID= 24 IS NOT AVAILABLE FOR STIFFNESS "
-           "MATRIX BUILDING' at cycle 1 (imp_glob_k.F:234) - the implicit "
-           "tangent of an 8-node hex is the full 2x2x2 stiffness whatever "
-           "Isolid says, and the deck converges anyway (measured: 16 cycles, "
-           "2.0 s)." if state.is_implicit else "")
+           "MATRIX BUILDING; USING GENERIC ONE INSTEAD, POSSIBLE CONVERGING "
+           "ISSUE.' at cycle 1 (imp_glob_k.F:241, FORMAT 1002 at :562) - the "
+           "implicit tangent of an 8-node hex is the full 2x2x2 stiffness "
+           "whatever Isolid says; the converging issue the engine warns of "
+           "did NOT appear on the carriers measured here (ex_03_elform_1 "
+           "reaches its reference in 16 cycles / 2.0 s), but it is the "
+           "engine's own caveat and not k2rad's to withdraw. NOTE also that "
+           "the coefficient an Isolid 24 uses is Dn, not h: "
+           "hm_read_prop14.F:358-361 is 'IF (IHBE == 24) THEN IF (CVIS == "
+           "ZERO) CVIS = EM01; GEO(13) = CVIS; QH = ZERO', and k2rad leaves "
+           "Dn blank, so the run uses the CVIS default 0.1 - the same number "
+           "h states, but a deck stating some other QH/QM would not carry it "
+           "here." if state.is_implicit else "")
         + " Pass --no-default-hourglass to keep the pre-2026-09 output.")
 
 
