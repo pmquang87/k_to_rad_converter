@@ -535,29 +535,40 @@ class ImplicitEngineTests(unittest.TestCase):
             fh.write(deck)
         return Path(convert(path, **opts).engine_path).read_text()
 
-    def test_fixpoint_written_every_one_percent_by_default(self):
-        # Auto /IMPL/DT/FIXPOINT makes the implicit time-step controller land
-        # exactly on evenly spaced fractions of the run end (endtim=1.0 here) so
-        # a clean animation/TH state is produced at each milestone. The default
-        # count is 100, so we emit 100 points 0.01*T … 1.00*T; the engine reads
-        # them free-format and sorts ascending.
+    def test_no_fixpoint_card_by_default(self):
+        """Successor, in place, to
+        ``test_fixpoint_written_every_one_percent_by_default``.
+
+        That test pinned ``fixpoint_count`` 100 as the default. The milestone
+        grid is a k2rad convenience LS-DYNA never asks for, and it makes the
+        adaptive implicit step oscillate against ``/IMPL/DT/2``: MEASURED on
+        the dynaexamples R14 roster, ten decks that died ``** ERROR: SOLVER
+        IMPLICIT STOPPED DUE TO TIMESTEP LIMIT **`` reach NORMAL TERMINATION
+        once the card is gone (ex_01 x3 at cycle 20, ex_14 x4 at cycle 33,
+        ex_15 x3 at cycle 38), while three currently-NORMAL controls do not
+        regress. So the default is 0 and the card is opt-in; the every-1-%%
+        grid it used to assert is the ``fixpoint_count=100`` arm below.
+        """
         engine = self._engine_for(IMPL_QSTAT_K)
+        self.assertNotIn("/IMPL/DT/FIXPOINT", engine)
+        # The block itself is unchanged: /IMPL/DT/2 still drives the step, and
+        # /IMPL/DT/3 (RIKS, which would ignore FIXPOINT anyway) is not in play.
+        self.assertIn("/IMPL/DT/2", engine)
+        self.assertNotIn("/IMPL/DT/3", engine)
+
+    def test_fixpoint_written_every_one_percent_when_asked_for(self):
+        engine = self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=100)
         self.assertIn("/IMPL/DT/FIXPOINT", engine)
         vals = self._fixpoints(engine)
         self.assertEqual(len(vals), 100)
         self.assertEqual([round(v, 10) for v in vals],
                          [round(k / 100.0, 10) for k in range(1, 101)])
-        # Must sit inside the implicit block (before its terminating comment),
-        # so /IMPL/DT/3 (RIKS, which would ignore it) is not in play — we use
-        # /IMPL/DT/2.
-        self.assertIn("/IMPL/DT/2", engine)
-        self.assertNotIn("/IMPL/DT/3", engine)
 
     def test_fixpoint_scales_with_endtim(self):
         # The points track the actual termination time, not a hard-coded 1.0:
-        # for a 10 s run the 100 default milestones are 0.1,0.2,…,10.0 s.
+        # for a 10 s run 100 requested milestones are 0.1,0.2,…,10.0 s.
         deck = IMPL_QSTAT_K.replace("       1.0\n*END", "      10.0\n*END")
-        vals = self._fixpoints(self._engine_for(deck))
+        vals = self._fixpoints(self._engine_with_opts(deck, fixpoint_count=100))
         self.assertEqual([round(v, 6) for v in vals],
                          [round(k / 10.0, 6) for k in range(1, 101)])
 
@@ -575,14 +586,16 @@ class ImplicitEngineTests(unittest.TestCase):
         self.assertEqual(len(vals), 100)
 
     def test_fixpoint_count_zero_disables_card(self):
-        # 0 turns the milestone card off entirely.
+        # 0 turns the milestone card off entirely — and 0 is the DEFAULT since
+        # 2026-09, so this states the explicit request as well as the default.
         engine = self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=0)
         self.assertNotIn("/IMPL/DT/FIXPOINT", engine)
 
     def test_no_fixpoint_lines_exceed_radioss_line_width(self):
         # The engine input buffer is NCHARLINE100 (100 chars). The ≤5-fields-per
-        # -line layout must never overflow it.
-        engine = self._engine_for(IMPL_QSTAT_K)
+        # -line layout must never overflow it. Asked for explicitly: the card
+        # is off by default now.
+        engine = self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=100)
         lines = engine.splitlines()
         idx = lines.index("/IMPL/DT/FIXPOINT")
         for ln in lines[idx + 1:]:

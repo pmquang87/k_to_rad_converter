@@ -22,13 +22,13 @@ from k2rad.state import ConversionState
 from k2rad.writer import _f, _i
 
 
-def _convert(deck: str):
+def _convert(deck: str, **opts):
     """convert() a deck string; return (result, starter_text, engine_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **opts)
     with open(result.starter_path) as fh:
         starter = fh.read()
     with open(result.engine_path) as fh:
@@ -251,15 +251,32 @@ class InitialStressSolidTests(unittest.TestCase):
     def test_emits_inibri_glob(self):
         result, starter, _ = _convert(SOLID_CUBE.replace("{EXTRA}", self.INI))
         self.assertIn("/INIBRI/STRS_FGLO", starter)
-        # Card 1: brick_ID=1, Nb_integr=8 (Isolid 17 = 8 points), Isolnod=8,
-        # Isolid=17, nptr=npts=nptt=2, nlay=1, grbric=0
-        self.assertIn(f"{_i(1)}{_i(8)}{_i(8)}{_i(17)}{_i(2)}{_i(2)}{_i(2)}{_i(1)}{_i(0)}",
-                      starter)
-        # NINT=1 replicated onto the 8-point formulation; component order per
-        # the radioss2021 cfg: (SIGMA1 SIGMA2 SIGMA3) / (SIGMA12 SIGMA23 SIGMA31)
+        # SOLID_CUBE is *SECTION_SOLID ELFORM 1 with no hourglass card, so the
+        # /PROP takes LS-DYNA's own default (IHQ 2 -> Isolid 1, ONE integration
+        # point) and the /INIBRI must follow it: Nb_integr 1, Isolid 1. This
+        # assertion used to read Nb_integr 8 / Isolid 17, which is now the
+        # opt-out arm below — a stale Nb_integr is starter MSGID 695.
+        # Card 1: brick_ID=1, Nb_integr, Isolnod=8, Isolid, nptr/npts/nptt,
+        # nlay=1, grbric=0
+        self.assertIn(
+            f"{_i(1)}{_i(1)}{_i(8)}{_i(1)}{_i(1)}{_i(1)}{_i(1)}{_i(1)}{_i(0)}",
+            starter)
+        # NINT=1 on the 1-point formulation; component order per the
+        # radioss2021 cfg: (SIGMA1 SIGMA2 SIGMA3) / (SIGMA12 SIGMA23 SIGMA31)
+        self.assertEqual(starter.count(f"{_f(100.0)}{_f(200.0)}{_f(300.0)}"), 1)
+        self.assertEqual(starter.count(f"{_f(10.0)}{_f(20.0)}{_f(30.0)}"), 1)
+        # layout A: EPS on its own Epsilon_p card
+        self.assertEqual(starter.count(f"\n{_f(0.05)}\n"), 1)
+
+    def test_emits_inibri_glob_at_eight_points_with_the_default_opted_out(self):
+        """The pre-2026-09 shape of the test above, kept as its opt-out arm."""
+        _, starter, _ = _convert(SOLID_CUBE.replace("{EXTRA}", self.INI),
+                                 default_hourglass=False)
+        self.assertIn(
+            f"{_i(1)}{_i(8)}{_i(8)}{_i(17)}{_i(2)}{_i(2)}{_i(2)}{_i(1)}{_i(0)}",
+            starter)
         self.assertEqual(starter.count(f"{_f(100.0)}{_f(200.0)}{_f(300.0)}"), 8)
         self.assertEqual(starter.count(f"{_f(10.0)}{_f(20.0)}{_f(30.0)}"), 8)
-        # layout A: EPS on its own Epsilon_p card
         self.assertEqual(starter.count(f"\n{_f(0.05)}\n"), 8)
 
     def test_handler_collects_points(self):

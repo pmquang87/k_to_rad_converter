@@ -11,6 +11,17 @@
   D1  the tied family keyed on the KEYWORD and the SOLVER, and the derived
       ``/INTER/TYPE10`` ``STFAC``
 
+...and PART B (elements, rigid velocities, ALE, the implicit residue):
+
+  B   LS-DYNA's own DEFAULT hourglass control on a 1-point ``*SECTION_SOLID``
+      the deck leaves defaulted (IHQ 2 explicit / 6 implicit, QH 0.1), through
+      the existing IHQ -> Isolid remap, with the fluid / preload / LAW115 /
+      ELFORM screens and the ``--no-default-hourglass`` opt-out
+  C   ``*INITIAL_VELOCITY_GENERATION`` re-pointed onto the ``/RBODY`` main
+      node, MIXED groups SPLIT in place, a PARTLY covered body refused
+  E   ``*SECTION_SOLID`` ELFORM 5/6/7 stay LAGRANGIAN, named
+  F   ``/IMPL/DT/FIXPOINT`` off by default
+
 Kept in its own module, the repo's one-module-per-batch convention. Round 3's
 item-D tests that REPLACE an invalidated test do NOT live here and must not be
 moved here — ``TiedFamilyRoutingTests`` (tests/test_roadmap_keywords.py) and
@@ -745,6 +756,466 @@ class TiedStfacLever(unittest.TestCase):
         self.assertIn("-67.6 %", w)
         self.assertIn("i7sti3.F:444", w)
         self.assertIn("--tie-stfac", w)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B — item B: LS-DYNA's DEFAULT solid hourglass control
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _solid_prop(starter: str, prop_id):
+    """(Isolid, h) of a /PROP/SOLID block. h is card 2 field 3 (cols 41-60)."""
+    lines = starter.splitlines()
+    i = lines.index(f"/PROP/SOLID/{prop_id}")
+    data = [ln for ln in lines[i + 1:i + 9] if not ln.startswith("#")]
+    return int(data[1][0:10]), float(data[2][40:60])
+
+
+def _hg_deck(elform=1, mat=None, control="", hourglass="", hgid=0,
+             implicit=False, extra=""):
+    """One brick on *SECTION_SOLID <elform>, with whatever hourglass source."""
+    mat = mat or ("*MAT_ELASTIC\n" + _row(1, "7.85e-9", 210000.0, 0.3) + "\n")
+    return (
+        "*KEYWORD\n*NODE\n"
+        + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                  for i, (x, y, z) in enumerate(
+                      [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+                       (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], start=1))
+        + "*ELEMENT_SOLID\n"
+          "       1       1       1       2       3       4       5       6       7       8\n"
+        + "*PART\nbrick\n" + _row(1, 1, 1, 0, hgid) + "\n"
+        + "*SECTION_SOLID\n" + _row(1, elform) + "\n"
+        + mat + control + hourglass + extra
+        + ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.1) + "\n" if implicit else "")
+        + "*CONTROL_TERMINATION\n" + _row(1.0) + "\n*END\n")
+
+
+_MAT_NULL = ("*MAT_NULL\n" + _row(1, "1.0e-9", 0.0, 0.0, 0.0, 0.0, 1.0e-3)
+             + "\n")
+
+
+class DefaultSolidHourglassRuleTable(unittest.TestCase):
+    """The rule, cell by cell: absent card / IHQ 0 / QH 0 / explicit vs
+    implicit / fluid -> (Isolid, h).
+
+    Vol I R17 p.12-271 ``*CONTROL_HOURGLASS`` Remark 1: "If omitted or if
+    IHQ = 0, the default hourglass control types are as follows: ... b) For
+    solids: type 2 for explicit; type 6 for implicit." QH's Default row is
+    0.1, and p.25-5 Remark 7 makes a blank-or-zero QM/QH that same 0.1 unless
+    a nonzero QH supersedes it.
+    """
+
+    def test_absent_card_explicit(self):
+        _, s = _convert(_hg_deck())
+        self.assertEqual(_solid_prop(s, 1), (1, 0.1))
+
+    def test_absent_card_implicit(self):
+        _, s = _convert(_hg_deck(implicit=True))
+        self.assertEqual(_solid_prop(s, 1), (24, 0.1))
+
+    def test_stated_ihq_zero_is_the_same_default(self):
+        # component2.k's shape: IHQ 0 with a stated QH, which LS-DYNA's own
+        # d3hsp echoes as "hourglass model = 2" / "coefficient = 5.00000E-02".
+        _, s = _convert(_hg_deck(
+            control="*CONTROL_HOURGLASS\n" + _row(0, 0.05) + "\n"))
+        self.assertEqual(_solid_prop(s, 1), (1, 0.05))
+
+    def test_stated_qh_zero_takes_the_default_coefficient(self):
+        # birdball.k's shape: IHQ 2 / QH 0.0, whose d3hsp echoes
+        # "hourglass coefficient = 1.00000E-01".
+        _, s = _convert(_hg_deck(
+            control="*CONTROL_HOURGLASS\n" + _row(2, 0.0) + "\n"))
+        self.assertEqual(_solid_prop(s, 1), (1, 0.1))
+
+    def test_a_stated_nonzero_coefficient_is_kept(self):
+        # sloshing_B.k's shape (IHQ 1 / QH 0.005) — the three-line twin of
+        # sloshing_A that must NOT move.
+        _, s = _convert(_hg_deck(
+            control="*CONTROL_HOURGLASS\n" + _row(1, 0.005) + "\n"))
+        self.assertEqual(_solid_prop(s, 1), (1, 0.005))
+
+    def test_a_fluid_keeps_the_viscous_form_even_implicitly(self):
+        # *HOURGLASS Remark 4 (p.25-3): "For fluids modeled with null
+        # material, type 6 hourglass control is viscous". MEASURED on
+        # sloshing_A: Isolid 24 "terminates normally" at IE 1.75e16 / 99.9 %
+        # energy error, Isolid 1 runs to t = 2.0 at IE -0.25 %.
+        _, s = _convert(_hg_deck(mat=_MAT_NULL, implicit=True))
+        self.assertEqual(_solid_prop(s, 1), (1, 0.1))
+        _, s2 = _convert(_hg_deck(mat=_MAT_NULL))
+        self.assertEqual(_solid_prop(s2, 1), (1, 0.1))
+
+    def test_an_implicit_deck_retypes_a_stated_ihq_one_to_five(self):
+        # Vol I R17 p.12-272: "For implicit analysis ... if IHQ = 1-5, then
+        # solid elements will be switched to type 6."
+        _, s = _convert(_hg_deck(
+            implicit=True,
+            control="*CONTROL_HOURGLASS\n" + _row(4, 0.1) + "\n"))
+        self.assertEqual(_solid_prop(s, 1)[0], 24)
+        # ... and an EXPLICIT deck keeps the stated stiffness form (IHQ 4 -> 5)
+        _, s2 = _convert(_hg_deck(
+            control="*CONTROL_HOURGLASS\n" + _row(4, 0.1) + "\n"))
+        self.assertEqual(_solid_prop(s2, 1)[0], 5)
+
+    def test_a_per_part_hourglass_with_ihq_zero_follows_the_same_rule(self):
+        _, s = _convert(_hg_deck(
+            hgid=7, hourglass="*HOURGLASS\n" + _row(7, 0, 0.0) + "\n"))
+        ref = int([ln for ln in s.splitlines()
+                   if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
+        self.assertEqual(_solid_prop(s, ref), (1, 0.1))
+
+    def test_a_blank_qm_inherits_a_nonzero_global_qh(self):
+        # Remark 7 (p.25-5): "The default value for QM is 0.1 unless
+        # superseded by a nonzero value of QH in *CONTROL_HOURGLASS."
+        _, s = _convert(_hg_deck(
+            hgid=7,
+            control="*CONTROL_HOURGLASS\n" + _row(1, 0.03) + "\n",
+            hourglass="*HOURGLASS\n" + _row(7, 2) + "\n"))
+        ref = int([ln for ln in s.splitlines()
+                   if ln.startswith("/PROP/SOLID/")][0].rsplit("/", 1)[1])
+        self.assertAlmostEqual(_solid_prop(s, ref)[1], 0.03)
+
+
+class DefaultSolidHourglassScreens(unittest.TestCase):
+    """The ELFORMs and decks the default deliberately does NOT reach."""
+
+    def test_elform_minus_one_keeps_the_full_integration_isolid(self):
+        # Vol I R17 p.41-97 Remark 13: an ELFORM -1 assumed-strain hex has "no
+        # hourglass energy, and the behavior is not affected by hourglass
+        # parameters", so a default hourglass control has nothing to act on.
+        _, s = _convert(_hg_deck(elform=-1))
+        self.assertEqual(_solid_prop(s, 1), (17, 0.0))
+
+    def test_elform_two_is_a_no_op(self):
+        # Fully-integrated S/R hex: no hourglass modes, already gated out.
+        _, s = _convert(_hg_deck(elform=2))
+        self.assertEqual(_solid_prop(s, 1), (17, 0.0))
+
+    def test_elform_sixteen_is_a_tet10_and_is_excluded(self):
+        # _elform_to_isolid(16) is 17, which the {14,18} gate does not catch —
+        # so ELFORM 16 is excluded by the 1-point ELFORM set instead.
+        _, s = _convert(_hg_deck(elform=16))
+        self.assertEqual(_solid_prop(s, 1), (17, 0.0))
+
+    def test_elform_five_six_seven_DO_take_it(self):
+        # They are 1-point solids in LS-DYNA and its own d3hsp echoes
+        # "hourglass type = 2" / "coefficient = 1.00000E-01" for them
+        # (taylor_B, sloshing_C, channel_A, advection_B).
+        for ef in (5, 6, 7):
+            with self.subTest(elform=ef):
+                _, s = _convert(_hg_deck(elform=ef))
+                self.assertEqual(_solid_prop(s, 1), (1, 0.1))
+
+    def test_a_preloaded_deck_keeps_the_full_integration_isolid(self):
+        # writer/preload._PRELOAD_STABLE_ISOLID: measured on a 1x1x4 hex bar at
+        # /PRELOAD Itype=2 / 200 MPa, Isolid 1 and 2 hit ZERO OR NEGATIVE
+        # VOLUME at cycle 0. The screen is deck-wide because the preloaded
+        # parts are only known after the cross-section cut is resolved.
+        deck = _hg_deck(extra=(
+            "*DATABASE_CROSS_SECTION_PLANE\n"
+            + _row(0, 0.5, 0.5, 0.5, 1.0, 0.5, 0.5) + "\n"
+            + _row(0.5, 1.5, 0.5) + "\n"
+            + "*DEFINE_CURVE\n" + _row(77) + "\n"
+              "                 0.0                 0.0\n"
+              "                 1.0               200.0\n"
+            + "*INITIAL_STRESS_SECTION\n" + _row(1, 1, 77) + "\n"))
+        _, s = _convert(deck)
+        self.assertEqual(_solid_prop(s, 1), (17, 0.0))
+
+
+class DefaultSolidHourglassOptOut(unittest.TestCase):
+    def test_the_opt_out_is_byte_identical_to_the_old_behaviour(self):
+        _, on = _convert(_hg_deck())
+        _, off = _convert(_hg_deck(), default_hourglass=False)
+        self.assertNotEqual(on, off)
+        self.assertEqual(_solid_prop(off, 1), (17, 0.0))
+
+    def test_the_opt_out_leaves_a_stated_card_alone(self):
+        """A deck that STATES its hourglass control is unaffected by the flag —
+        the flag is about the DEFAULT, not about the remap."""
+        deck = _hg_deck(control="*CONTROL_HOURGLASS\n" + _row(1, 0.005) + "\n")
+        _, on = _convert(deck)
+        _, off = _convert(deck, default_hourglass=False)
+        self.assertEqual(on, off)
+
+
+class DefaultSolidHourglassInibriCoupling(unittest.TestCase):
+    """/INIBRI Nb_integr must follow the DEFAULT-resolved Isolid, or the
+    starter refuses the deck with MSGID 695."""
+
+    _ISS = ("*INITIAL_STRESS_SOLID\n" + _row(1, 1) + "\n"
+            "     100.0     200.0     300.0      10.0      20.0      30.0       0.0\n")
+
+    def _inibri(self, starter):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/INIBRI/STRS_FGLO"))
+        card = next(ln for ln in lines[i + 1:] if not ln.startswith("#"))
+        return int(card[10:20]), int(card[30:40])       # Nb_integr, Isolid
+
+    def test_nb_integr_follows_the_default(self):
+        _, s = _convert(_hg_deck(extra=self._ISS))
+        self.assertEqual(_solid_prop(s, 1)[0], 1)
+        self.assertEqual(self._inibri(s), (1, 1))
+
+    def test_nb_integr_follows_the_opt_out_too(self):
+        _, s = _convert(_hg_deck(extra=self._ISS), default_hourglass=False)
+        self.assertEqual(_solid_prop(s, 1)[0], 17)
+        self.assertEqual(self._inibri(s), (8, 17))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B — item C: the second half of the rigid-velocity re-point
+# ═════════════════════════════════════════════════════════════════════════════
+
+_IVG_NODES = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+              (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10),
+              (20, 0, 0), (30, 0, 0), (30, 10, 0), (20, 10, 0),
+              (20, 0, 10), (30, 0, 10), (30, 10, 10), (20, 10, 10)]
+
+_MAT_RIGID = ("*MAT_RIGID\n" + _row(2, "7.85e-9", 210000.0, 0.3) + "\n"
+              + _row(0, 0, 0) + "\n" + _row(0.0, 0.0, 0.0) + "\n")
+
+
+def _ivg_deck(styp=2, sid=2, omega=0.0, v=(0.0, 0.0, 0.0),
+              axis=(0.0, 0.0, 1.0), origin=(50.0, 0.0, 0.0),
+              both_rigid=False, set_nodes=None):
+    """Two bricks: part 1 deformable, part 2 *MAT_RIGID (or both rigid), with
+    one *INITIAL_VELOCITY_GENERATION over whatever scope."""
+    mat1 = (_MAT_RIGID.replace(_row(2, "7.85e-9", 210000.0, 0.3),
+                               _row(1, "7.85e-9", 210000.0, 0.3))
+            if both_rigid
+            else "*MAT_ELASTIC\n" + _row(1, "7.85e-9", 210000.0, 0.3) + "\n")
+    sets = ""
+    if styp == 2:
+        sets = "*SET_PART_LIST\n" + _row(sid) + "\n" + _row(2) + "\n"
+    elif styp == 3:
+        sets = ("*SET_NODE_LIST\n" + _row(sid) + "\n"
+                + _row(*(set_nodes or [])) + "\n")
+    return (
+        "*KEYWORD\n*NODE\n"
+        + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                  for i, (x, y, z) in enumerate(_IVG_NODES, start=1))
+        + "*ELEMENT_SOLID\n"
+          "       1       1       1       2       3       4       5       6       7       8\n"
+          "       2       2       9      10      11      12      13      14      15      16\n"
+        + "*PART\nleft\n" + _row(1, 1, 1) + "\n"
+        + "*PART\nright\n" + _row(2, 1, 2) + "\n"
+        + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+        + mat1 + _MAT_RIGID + sets
+        + "*INITIAL_VELOCITY_GENERATION\n"
+        + _row(sid, styp, omega, v[0], v[1], v[2], 0, 0) + "\n"
+        + _row(origin[0], origin[1], origin[2],
+               axis[0], axis[1], axis[2], 0, 0) + "\n"
+        + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
+
+
+def _inivel_group(starter: str):
+    """The member list of the /GRNOD the (single) /INIVEL/AXIS points at."""
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("/INIVEL/AXIS/"))
+    data = [ln for ln in lines[i + 1:i + 8] if not ln.startswith("#")]
+    grnod = int(data[1][20:30])
+    h = lines.index(f"/GRNOD/NODE/{grnod}")
+    out = []
+    for row in lines[h + 2:]:
+        if row.startswith(("/", "#")):
+            break
+        out.extend(int(t) for t in row.split())
+    return out
+
+
+class InivelGenerationRigidRepoint(unittest.TestCase):
+    """``*INITIAL_VELOCITY_GENERATION`` on rigid members — round 2 left this
+    half warned-only on a docstring rationale that was never solver-measured.
+
+    ``hm_read_inivel.F:580-617`` writes BOTH ``VR = omega*n`` and
+    ``V + omega x (x - O)`` on every node of an ``/INIVEL/AXIS`` group when
+    ``IRODDL > 0``, and ``contrl.F:1053`` puts ``NRBODY`` in the ``IRODDL``
+    minimum — so the main node carries the body's SPIN as well as its
+    translation, and ``inirby.F:1032-1048`` rebuilds the secondaries from it.
+    """
+
+    def test_an_all_rigid_ivg_is_repointed_onto_the_main_node(self):
+        res, s = _convert(_ivg_deck(v=(1000.0, 0.0, 0.0)))
+        members = _inivel_group(s)
+        self.assertEqual(len(members), 1, members)
+        self.assertEqual(set(members) & set(range(9, 17)), set(), members)
+        self.assertIn(f"/RBODY/{members[0]}", s)
+        w = [x for x in res.warnings
+             if "*INITIAL_VELOCITY_GENERATION" in x and "RE-POINTED" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("hm_read_inivel.F:580-617", w[0])
+        self.assertIn("inirby.F:1032-1048", w[0])
+
+    def test_the_spin_carrier_is_repointed_too(self):
+        """brake.k's shape: OMEGA on a rigid part about an off-centre axis.
+
+        Hand values from the coupon the round measured: a 10 mm *MAT_RIGID
+        cube at OMEGA 100 about global Z through (50,0,0) gives
+        1/2 m v_c^2 = 98.125 and 1/2 I omega^2 = 1.9625, and the re-pointed
+        arm reads KE-T 98.13 (+0.005 %) / KE-R 1.963 (+0.026 %) where the
+        control reads 0.000 / 0.000.
+        """
+        res, s = _convert(_ivg_deck(omega=100.0))
+        self.assertEqual(len(_inivel_group(s)), 1)
+        # the angular velocity really is on the card (VR, card 2 field 4)
+        lines = s.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/INIVEL/AXIS/"))
+        data = [ln for ln in lines[i + 1:i + 8] if not ln.startswith("#")]
+        self.assertAlmostEqual(float(data[2][60:80]), 100.0)
+
+    def test_a_mixed_ivg_is_split_in_place(self):
+        """pipe.k's shape: the group spans a deformable and a rigid part."""
+        res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),
+                                    set_nodes=list(range(1, 9))
+                                    + list(range(9, 17))))
+        members = set(_inivel_group(s))
+        self.assertTrue(set(range(1, 9)) <= members, sorted(members))
+        self.assertEqual(members & set(range(9, 17)), set(), sorted(members))
+        self.assertEqual(len(members), 9, sorted(members))
+        w = [x for x in res.warnings
+             if "*INITIAL_VELOCITY_GENERATION" in x and "RE-POINTED" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("the deformable nodes unchanged", w[0])
+
+    def test_a_partly_covered_body_is_refused_and_named(self):
+        """Vol I R17 p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted
+        momentum average over the WHOLE body — k2rad has no nodal masses at
+        conversion time and will not invent one."""
+        res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),
+                                    set_nodes=[9, 10, 11, 12]))
+        members = set(_inivel_group(s))
+        self.assertEqual(members, {9, 10, 11, 12}, sorted(members))
+        w = [x for x in res.warnings if "NOT every element node" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("p.28-129 Remark 3", w[0])
+        self.assertIn("*INITIAL_VELOCITY_RIGID_BODY", w[0])
+
+    def test_a_wholly_deformable_ivg_says_nothing(self):
+        res, s = _convert(_ivg_deck(styp=3, sid=5, v=(1000.0, 0.0, 0.0),
+                                    set_nodes=list(range(1, 9))))
+        self.assertEqual(sorted(_inivel_group(s)), list(range(1, 9)))
+        self.assertEqual([x for x in res.warnings
+                          if "*INITIAL_VELOCITY_GENERATION" in x
+                          and ("rigid body" in x or "RE-POINTED" in x)], [])
+
+    def test_the_round_two_nsid_repoint_is_unchanged(self):
+        """The ``*INITIAL_VELOCITY`` NSID form keeps behaving as round 2 left
+        it: an all-rigid group collapses onto the one main node."""
+        deck = _ivg_deck(v=(1000.0, 0.0, 0.0)).replace(
+            "*INITIAL_VELOCITY_GENERATION\n"
+            + _row(2, 2, 0.0, 1000.0, 0.0, 0.0, 0, 0) + "\n"
+            + _row(50.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0) + "\n",
+            "*SET_NODE_LIST\n" + _row(88) + "\n"
+            + _row(*range(9, 17)) + "\n"
+            + "*INITIAL_VELOCITY\n" + _row(88) + "\n"
+            + _row(1000.0, 0.0, 0.0) + "\n")
+        res, s = _convert(deck)
+        lines = s.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INIVEL/TRA/"))
+        data = [ln for ln in lines[i + 1:i + 8] if not ln.startswith("#")]
+        grnod = int(data[1][60:70])
+        h = lines.index(f"/GRNOD/NODE/{grnod}")
+        members = [int(t) for t in lines[h + 2].split()]
+        self.assertEqual(len(members), 1, members)
+        self.assertIn(f"/RBODY/{members[0]}", s)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B — item E: ELFORM 5/6/7 stay LAGRANGIAN, named
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OnePointAleElformIsNamedNotMapped(unittest.TestCase):
+    """The measured NO-GO. Three carriers, four arms, all worse or fatal:
+    ``hm_read_prop14.F:264-267`` refuses ``Iale /= 0`` on any Isolid but 1 or 2
+    (ERROR 131 + 608 — 9 starter errors on taylor_B, 4 on advection_B), and
+    with Isolid 1 the remap took taylor_B from IE +5.1 %% / KE +4.9 %% against
+    its LS-DYNA reference to a 99.9 %% energy error at 198 220 cycles.
+    """
+
+    def test_iale_stays_zero(self):
+        for ef in (5, 6, 7):
+            with self.subTest(elform=ef):
+                _, s = _convert(_hg_deck(elform=ef))
+                lines = s.splitlines()
+                i = lines.index("/PROP/SOLID/1")
+                card = [ln for ln in lines[i + 1:i + 9]
+                        if not ln.startswith("#")][1]
+                self.assertEqual(int(card[20:30]), 0)     # Iale
+
+    def test_the_warning_names_the_measurement_and_the_source(self):
+        res, _ = _convert(_hg_deck(elform=5))
+        w = [x for x in res.warnings if "ELFORM=5" in x and "LAGRANGIAN" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("hm_read_prop14.F:264-267", w[0])
+        self.assertIn("ERROR 131", w[0])
+        self.assertIn("solid formulation = 11", w[0])
+        self.assertIn("/ALE/GRID", w[0])
+        self.assertIn("HOURGLASS control IS carried", w[0])
+
+    def test_elform_seven_names_its_dropped_ambient_type(self):
+        res, _ = _convert(_hg_deck(elform=7))
+        w = [x for x in res.warnings if "ELFORM=7" in x][0]
+        self.assertIn("AET", w)
+
+    def test_elform_eleven_still_maps_to_iale_one(self):
+        """The negative control: the ALE ELFORMs k2rad DOES map are untouched."""
+        _, s = _convert(_hg_deck(elform=11))
+        lines = s.splitlines()
+        i = lines.index("/PROP/SOLID/1")
+        card = [ln for ln in lines[i + 1:i + 9] if not ln.startswith("#")][1]
+        self.assertEqual(int(card[20:30]), 1)             # Iale
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B — item F: /IMPL/DT/FIXPOINT off by default
+# ═════════════════════════════════════════════════════════════════════════════
+
+class ImplicitFixpointGridIsOptIn(unittest.TestCase):
+    """The milestone grid is a k2rad convenience LS-DYNA never asks for, and it
+    makes the adaptive implicit step oscillate against ``/IMPL/DT/2``.
+    MEASURED: ten R14 reference decks that died ``** ERROR: SOLVER IMPLICIT
+    STOPPED DUE TO TIMESTEP LIMIT **`` reach NORMAL TERMINATION without it.
+    """
+
+    def _engine(self, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "impl.k")
+        with open(path, "w") as fh:
+            fh.write(_hg_deck(implicit=True))
+        res = convert(path, write_log=False, **kw)
+        with open(res.engine_path) as fh:
+            return fh.read()
+
+    def test_no_fixpoint_card_by_default(self):
+        self.assertNotIn("/IMPL/DT/FIXPOINT", self._engine())
+
+    def test_the_rest_of_the_implicit_block_is_unchanged(self):
+        eng = self._engine()
+        self.assertIn("/IMPL/DT/2", eng)
+        self.assertNotIn("/IMPL/DT/3", eng)
+
+    def test_an_explicit_deck_never_had_the_card(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "x.k")
+        with open(path, "w") as fh:
+            fh.write(_hg_deck())
+        res = convert(path, write_log=False)
+        with open(res.engine_path) as fh:
+            self.assertNotIn("/IMPL", fh.read())
+
+    def test_asking_for_it_still_works(self):
+        eng = self._engine(fixpoint_count=10)
+        self.assertIn("/IMPL/DT/FIXPOINT", eng)
+        i = eng.splitlines().index("/IMPL/DT/FIXPOINT")
+        vals = []
+        for ln in eng.splitlines()[i + 1:]:
+            if not ln.strip() or ln.startswith(("/", "#")):
+                break
+            vals.extend(float(t) for t in ln.split())
+        self.assertEqual(len(vals), 10)
 
 
 if __name__ == "__main__":
