@@ -2559,6 +2559,97 @@ class ConvertOptionsRefusesAnImpossibleLeverTests(unittest.TestCase):
                 self.assertIn("derived_gapmin_factor", str(cm.exception))
 
 
+class UntestedBranchesTheFinalizeAuditFoundTests(unittest.TestCase):
+    """Branches that no test reached — a grep for each message returned
+    nothing. The TET10 one matters most: it decides the derived GAP MIN on a
+    quadratic-tet main, and it is the only ``TET10_EDGEMID`` consumer in
+    ``writer/contacts``."""
+
+    _T10 = [(0, 0, 0), (10, 0, 0), (0, 10, 0), (0, 0, 10),
+            (5, 0, 0), (5, 5, 0), (0, 5, 0), (0, 0, 5), (5, 0, 5), (0, 5, 5)]
+
+    def _tet10_deck(self):
+        """ONE /TETRA10 in Radioss corner+midside order, as its own part."""
+        nodes = "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                        for i, (x, y, z) in enumerate(self._T10, start=1))
+        return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                "*NODE\n" + nodes
+                # The TEN-NODE format: card 1 is EID PID, card 2 is n1..n10.
+                + "*ELEMENT_SOLID\n"
+                + f"{1:>8}{1:>8}\n"
+                + "".join(f"{i:>8}" for i in range(1, 11)) + "\n"
+                + "*PART\np1\n" + _row(1, 1, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 10) + "\n"
+                  "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n*END\n")
+
+    def test_a_TET10_face_is_split_into_the_starters_four_sub_triangles(self):
+        """The starter builds four linear sub-triangles per /TETRA10 boundary
+        face, so its own GAPMX — and the derived GAP MIN — is measured on the
+        HALF-edges. The TET10 ordering is already normalised to Radioss by
+        ``_normalize_tet10_ordering`` long before the interfaces section, so
+        this consumer only ever sees Radioss-ordered midsides."""
+        from k2rad.writer.contacts import (_solid_boundary_faces,
+                                           _min_segment_side)
+        st = _dispatch(self._tet10_deck())
+        self.assertEqual([len(e.nodes) for e in st.solid_elems], [10])
+        faces, complete = _solid_boundary_faces(st, [1])
+        self.assertTrue(complete)
+        # 4 boundary faces x 4 sub-triangles, every one a TRIANGLE.
+        self.assertEqual(len(faces), 16)
+        self.assertEqual({len(f) for f in faces}, {3})
+        # Every emitted node id is a real node of the element.
+        self.assertTrue(set().union(*faces) <= set(range(1, 11)))
+        # The shortest side is a HALF-edge (5.0), not a corner edge (10.0).
+        self.assertAlmostEqual(_min_segment_side(st, faces), 5.0, places=9)
+
+    def test_a_D2R_part_with_no_element_is_named_as_NOT_rigid(self):
+        """The one place a ``*DEFORMABLE_TO_RIGID`` card silently does nothing.
+        LS-DYNA still deactivates that part's elements at t = 0
+        (Vol I R17 p.18-1), so the log has to say the converted model is
+        different."""
+        deck = _d2r_deck(rows=((77, 0, "PART"),), gravity=False,
+                         contact=False).replace(
+            "*END\n", "*PART\nempty\n" + _row(77, 1, 1) + "\n*END\n")
+        result, starter, _e = _convert(deck)
+        self.assertTrue(_has(result.warnings, "*DEFORMABLE_TO_RIGID pid=77",
+                             "NOT rigid in the converted model"),
+                        result.warnings)
+        self.assertNotIn("/RBODY", starter)
+
+    def test_the_SAME_note_on_the_partly_emitted_path(self):
+        """``_make_rbodies`` has TWO such branches — the all-empty one above
+        (``not nodes_by_pid``) and the per-pid sweep that runs when some D2R
+        parts DID emit. Only the second cites Vol I R17 p.18-1, and neither
+        had a test."""
+        deck = _d2r_deck(rows=((1, 0, "PART"), (77, 0, "PART")),
+                         gravity=False, contact=False).replace(
+            "*END\n", "*PART\nempty\n" + _row(77, 1, 1) + "\n*END\n")
+        result, starter, _e = _convert(deck)
+        self.assertIn("/RBODY", starter)              # part 1 did emit
+        self.assertTrue(_has(result.warnings, "*DEFORMABLE_TO_RIGID pid=77",
+                             "NOT rigid in the converted model", "p.18-1"),
+                        result.warnings)
+
+    def test_the_TGMULT_FUNCT_id_never_collides_with_a_deck_curve(self):
+        """A4 mints through ``next_curve_id()``; ``/FUNCT`` and ``/TABLE``
+        share ONE starter duplicate scan (``hm_read_table.F:88``) and a
+        collision is ERROR 79 (k2rad #111). A3 has a probe aimed at
+        90001-90004; A4 had none."""
+        deck = _thermal_deck(
+            extra="".join("*DEFINE_CURVE\n" + _row(i) + "\n"
+                          "             0.0             0.0\n"
+                          "             1.0             1.0\n"
+                          for i in (90001, 90002, 90003, 90004, 90005)))
+        _r, starter, _e = _convert(deck)
+        ids = [int(ln.split("/")[-1]) for ln in starter.splitlines()
+               if ln.startswith(("/FUNCT/", "/FUNCT_SMOOTH/", "/TABLE/"))]
+        self.assertEqual(len(ids), len(set(ids)), sorted(ids))
+        auto = [ln for ln in starter.splitlines()
+                if ln.startswith("Auto_tgmult_T_tmid")]
+        self.assertEqual(len(auto), 1, auto)
+        self.assertNotIn(int(auto[0].rsplit("_", 1)[1]), range(90001, 90006))
+
+
 class TheCorrectedSourceCitationsTests(unittest.TestCase):
     """A true conclusion resting on a false premise still misinforms. The
     round-4 retraction of the tied ``_OFFSET`` claim cited ``i24pen3.F:317-319``

@@ -7129,10 +7129,18 @@ class ConvertOptions:
     # re-measured if TYPE25 is ever touched).
     #
     # The COST, named: ex_02_thick_shell_elform_{2,3,5} (3 deck keys on ONE
-    # emitted file, all three not_comparable) go normal -> timeout -- 1908
-    # cycles / 10 s NORMAL at 0.1 against 101172 cycles at t = 0.5955 still
-    # running at the 600 s campaign cap, at both nt. Pass 0.1 to restore the
-    # old default on such a deck.
+    # emitted file) go normal -> timeout. 1908 cycles / 10 s NORMAL at 0.1;
+    # at 10 the run is still going at the 600 s campaign cap, having reached
+    # t = 0.32 to 0.60 of 1.0 depending on machine load (three measurements
+    # under three loads), at nt 3 AND nt 4 -- the verdict does not flip with
+    # nt. All three keys are `not_comparable` BOTH WAYS, so what is lost is a
+    # status label and not a benchmark: the rows carry no comparable LS-DYNA
+    # energy either way. Pass 0.1 to restore the old default on such a deck --
+    # on THIS family it reproduces the pre-round-4 file BYTE FOR BYTE, so the
+    # escape costs nothing else. Note also that the 600 s budget is the
+    # clamp's FLOOR: joblist_or.csv derives it as clamp(4 x lsdyna_elapsed_s,
+    # 600, 2700) and this deck's LS-DYNA implicit solve takes 2 s, which says
+    # nothing about the explicit OpenRadioss cost of the same model.
     #
     # "none" was MEASURED and is WORSE than either: it is the Radioss default
     # SCAL_DTQ = 1, and on these decks the default does not converge --

@@ -387,7 +387,9 @@ def convert(
         ``6.5.tbl.psd.prepressure-1`` +0.03 %; ``doorbeam`` NORMAL (its
         +380 % is a separate, named ``/INTER/TYPE25``-under-implicit drop, not
         a match). The cost is ``ex_02_thick_shell_elform_{2,3,5}`` — 3 deck
-        keys on ONE emitted file — going ``normal`` → ``timeout``. ``"none"``
+        keys on ONE emitted file, all three ``not_comparable`` BOTH WAYS —
+        going ``normal`` → ``timeout``; ``--qstat-dtscal 0.1`` reproduces the
+        pre-round-4 file byte for byte on that family. ``"none"``
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
         validated 0.05 and ignores this.

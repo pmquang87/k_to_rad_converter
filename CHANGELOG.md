@@ -49,12 +49,18 @@ Prior history (before this changelog was introduced) is summarized in the
     **The named cost:**
     `introduction/Introduction/example-02/ex_02_thick_shell_elform_{2,3,5}` —
     **3 deck keys on ONE emitted file** — go `normal → timeout`: 1908 cycles /
-    10 s NORMAL at 0.1 against 101 172 cycles at t = 0.5955 still running at
-    the campaign's own 600 s cap, at both nt. All three rows are
-    `not_comparable` (their LS IE 0.771729 / 0.058509 / 0.100376 are structural
-    zeros), so no benchmark fidelity is lost — only ledger status and 3 × 600 s
-    of budget. Pass `--qstat-dtscal 0.1` to restore the old default on such a
-    deck.
+    10 s NORMAL at 0.1 against a run still going at the campaign's own 600 s
+    cap at 10, having reached `t` **0.32 to 0.60** of 1.0 across three
+    measurements under three machine loads, at nt 3 **and** nt 4 — the verdict
+    does not flip with `nt`. All three rows are `not_comparable` BOTH WAYS
+    (their LS IE 0.771729 / 0.058509 / 0.100376 are structural zeros), so no
+    benchmark fidelity is lost — only ledger status and 3 × 600 s of budget.
+    Pass `--qstat-dtscal 0.1` to restore the old default on such a deck; on
+    THIS family it reproduces the pre-round-4 file **byte for byte**, so the
+    escape costs nothing else. The 600 s budget is also the clamp's FLOOR —
+    `joblist_or.csv` derives it as `clamp(4 × lsdyna_elapsed_s, 600, 2700)` and
+    this deck's LS-DYNA *implicit* solve takes 2 s, which says nothing about
+    the explicit OpenRadioss cost of the same model.
     **`none` was measured and is WORSE than either**, which is why deleting the
     card — Radioss's own default — is not what ships: `ex_02` dies at cycle 0
     ("ERROR, TIMESTEP LIMIT", 0.2 s) and `tensile2` at t = 0.746, and

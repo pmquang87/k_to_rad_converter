@@ -828,7 +828,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # state.ConvertOptions.qstat_dtscal for the measured arms: 4.2.frf,
         # tensile2, 6.5.tbl.psd and doorbeam move error_engine -> normal, at
         # the cost of the ex_02_thick_shell_elform_{2,3,5} family (3 keys on
-        # one emitted file) going normal -> timeout.
+        # one emitted file, all three not_comparable both ways) going
+        # normal -> timeout; --qstat-dtscal 0.1 reproduces the pre-round-4
+        # file byte for byte on that family.
         #
         # The deformable-deformable contact recipe keeps 0.05 (=> x400) and
         # IGNORES the option: a compliant contact under force control adds a
