@@ -2480,10 +2480,22 @@ def _warn_type43_pairings(state: ConversionState, secid: int,
 #: they are NOT the ELFORM-2 element ``Isolid`` 17 reproduces. ``-1`` and ``-2``
 #: are the assumed-strain hexes that exist precisely to remove ELFORM 2's shear
 #: locking (Vol I R17 p.41-104 Remark 13); ``3`` is the fully-integrated
-#: quadratic hex with nodal rotations. All three reach 17 through
-#: ``_elform_to_isolid``'s ``.get`` default and stay there — the round-3
-#: hourglass remap is gated to ``_ONE_POINT_SOLID_ELFORMS``, which none of them
-#: is — so the emitted deck carries no trace of the distinction at all.
+#: quadratic hex with nodal rotations. All three reach ``Isolid`` 17 through
+#: ``_elform_to_isolid``'s ``.get`` default — the round-3 hourglass remap is
+#: gated to ``_ONE_POINT_SOLID_ELFORMS``, which none of them is — so the
+#: emitted deck carries no trace of the distinction at all.
+#:
+#: They stay at 17 only where NO per-part ``*HOURGLASS`` overlay applies. When
+#: one does, the part takes the split ``/PROP/SOLID`` at whatever ``Isolid``
+#: the overlay selects, and the warning below (gated on ``isolid != 17``) is
+#: silent by design. MEASURED on the R14 roster:
+#: ``ex_12_solid_elform_{-1,-2,3}`` carry an explicit ``*HOURGLASS`` IHQ 6 and
+#: emit ``Isolid`` **24**, so two of the roster's ELFORM -1/-2 carriers and one
+#: of its two ELFORM-3 carriers take that arm. That substitution — an 8-point
+#: assumed-strain hex becoming a 1-POINT ``Isolid`` 24 (``sgrtails.F:1107-1123``)
+#: — is at least as large as the one this warning describes; naming it is a
+#: round-5 item, because the Isolid-24 arm is also the one that keeps
+#: ``ex_27_-2_rigidwall``'s match and so cannot be moved on a comment alone.
 _ASSUMED_STRAIN_ELFORMS = frozenset({-1, -2, 3})
 
 

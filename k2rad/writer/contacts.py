@@ -736,8 +736,8 @@ _HEX_FACE_IDX = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
 
 
 def _solid_boundary_faces(state: ConversionState,
-                          pids: Iterable[int]) -> List[List[int]]:
-    """External faces of the given parts' solids / thick shells, as node lists.
+                          pids: Iterable[int]) -> Tuple[List[List[int]], bool]:
+    """``(external faces, complete)`` for the given parts' solids/thick shells.
 
     A face used by exactly one element is external; an interior face appears
     twice and is dropped. HEX/BRICK -> its 6 quad faces, TET4 -> its 4 triangles,
@@ -745,9 +745,23 @@ def _solid_boundary_faces(state: ConversionState,
     through its mid-edge nodes, which is what the starter builds for a /TETRA10
     contact surface and therefore what its own GAPMX is measured on (a TET10
     deck's derived GAP MIN is half the corner-edge value for exactly this
-    reason). Element shapes the starter does not facet this way are skipped.
+    reason).
+
+    ``complete`` is False when ANY element of those parts had a shape this
+    function does not facet — a 6-node pentahedron or 5-node pyramid written on
+    a short ``*ELEMENT_SOLID`` card, which ``handlers.handle_element_solid``
+    stores with its real node count after dropping the blank fields. Caller
+    contract: a side that is not ``complete`` is NOT ``all_solid``, so the
+    derived rule and its warning both stand down. The alternative — measuring
+    the partial skin — is silently WRONG on a part that MIXES faceted and
+    unfaceted shapes, because a face shared between a hex and a wedge is then
+    seen once and counted EXTERNAL, and the minimum edge (hence the written
+    ``Gapmin`` and the quoted starter ``GAP MIN``) comes out too small. No
+    carrier of the shipped 15-interface class has that shape, so this is a
+    guard against a latent case, not a correction to a measured one.
     """
     pidset = set(pids)
+    complete = True
     seen: Dict[Tuple[int, ...], Optional[Tuple[List[int], Tuple[int, ...]]]] = {}
     for e in list(state.solid_elems) + list(state.tshell_elems):
         if e.pid not in pidset:
@@ -759,6 +773,7 @@ def _solid_boundary_faces(state: ConversionState,
         elif n == 8:
             faces = _HEX_FACE_IDX
         else:
+            complete = False
             continue
         for f in faces:
             key = tuple(sorted(nds[i] for i in f))
@@ -784,7 +799,7 @@ def _solid_boundary_faces(state: ConversionState,
             out += [[a, mij, mik], [mij, b, mjk], [mik, mjk, c], [mij, mjk, mik]]
         else:
             out.append([nds[i] for i in f])
-    return out
+    return out, complete
 
 
 def _main_surface_segments(state: ConversionState, sid: int, styp: int
@@ -797,9 +812,12 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     and only a shell-free solid/thick-shell part contributes external faces.
     A ``*SET_SEGMENT`` side's segments are classified by NODE MEMBERSHIP.
 
-    ``all_solid`` is False whenever the side is empty or any segment is a shell
+    ``all_solid`` is False whenever the side is empty, any segment is a shell
     — a MIXED shell+solid main feeds the starter's shell-thickness branch
-    (``DXM``) and is out of the derived rule's scope.
+    (``DXM``) and is out of the derived rule's scope — or any of the side's
+    solids has a shape ``_solid_boundary_faces`` cannot facet (a 6-node
+    pentahedron, a 5-node pyramid), because the skin it measured is then only
+    part of the real one.
 
     ``styp == 5 or sid == 0`` is the ALL-PARTS sentinel the ``SSID = 0``
     self-contact passes, and it matches that path's own
@@ -811,9 +829,10 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     """
     segs: List[List[int]] = []
     any_shell = False
+    partial_skin = False
 
     def _from_pids(pids: Iterable[int]) -> None:
-        nonlocal any_shell
+        nonlocal any_shell, partial_skin
         shell_pids = {e.pid for e in state.shell_elems}
         solid_pids = ({e.pid for e in state.solid_elems}
                       | {e.pid for e in state.tshell_elems})
@@ -823,7 +842,10 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
                 any_shell = True
             elif pid in solid_pids:
                 solid_only.append(pid)
-        segs.extend(_solid_boundary_faces(state, solid_only))
+        faces, complete = _solid_boundary_faces(state, solid_only)
+        segs.extend(faces)
+        if not complete:
+            partial_skin = True
 
     if styp == 5 or sid == 0:
         _from_pids(state.parts.keys())
@@ -853,7 +875,7 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
         _from_pids(ss.part_scope)
     else:
         return [], False
-    return segs, bool(segs) and not any_shell
+    return segs, bool(segs) and not any_shell and not partial_skin
 
 
 def _min_segment_side(state: ConversionState,
@@ -912,10 +934,15 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     if gapmin > 0.0:
         return gapmin                       # --inter-gapmin / --auto-gapmin / Card-3
     if title == AUTO_IMPLICIT_STUB_TITLE:
-        # k2rad's own implicit stabilization card, not the deck's contact:
-        # 28 of the roster's 41 solid-only mains are this stub, and five of them
-        # were measured byte-inert with the Gapmin set. Warning about it would
-        # be noise about a card the user did not write.
+        # k2rad's own implicit stabilization card, not the deck's contact.
+        # MEASURED over the 356-key R14 roster with the stub INJECTED (the
+        # census must call `k2rad._inject_implicit_contact_stub`, or its
+        # "stub: 0" is a filter keyed on a field the record does not have):
+        # 42 solid-only-main rows on this rule's own route, of which 27 are
+        # this stub on 27 deck keys and 15 are the live interfaces on 14 keys
+        # named in `ConvertOptions.derived_gapmin`. Five of the 27 were
+        # measured byte-inert with the Gapmin set. Warning about it would be
+        # noise about a card the user did not write.
         return gapmin
     segments, all_solid = _main_surface_segments(state, main_sid, main_styp)
     if not all_solid:
@@ -1165,11 +1192,13 @@ def _warn_rigid_secondary_keep(state: ConversionState, keyword: str,
         "element-based (i7stslav.F:55-58 STIFINT), not nodal-mass-based, so a "
         "rigid secondary node still carries one. On this corpus the "
         "rigid-vs-rigid contact is INERT: mat_spring.belted-dummy reads the "
-        "identical 110 032 cycles / IE 8.804e5 / KE 1.4811e6 with and without "
-        "it (LS-DYNA's own sleout books -2 418 / +2 044 through that interface "
-        "against 9.69e5 over all 11), and pend.imp / "
-        "deformable_to_rigid.pendulum likewise reproduce their "
-        "*DEFORMABLE_TO_RIGID arms to every printed digit — but it costs engine "
+        "identical 110 032 cycles / IE 8.804e5 / KE 1.4811e6 (KE_T 1.376e6 + "
+        "KE_R 1.051e5) with and without it, both arms run at nt 4, 0 starter "
+        "ERRORS (LS-DYNA's own sleout books -2 418 / +2 044 through that "
+        "interface against 9.69e5 over all 11), and pend.imp — the only other "
+        "deck this branch reaches, all three carriers being pend.imp, "
+        "pendulum-ii/pendulum and belted-dummy — reproduces its "
+        "*DEFORMABLE_TO_RIGID arm to every printed digit. It costs engine "
         "time (16.5 % of pend.imp's CPU went to contact sorting and forces for "
         "no effect). Disable with --no-rigid-secondary-swap.")
 
@@ -1570,11 +1599,19 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                             _secondary_side_remedy(sec_sid, sec_styp))
             continue
         if not mast_surf:
+            # After a SWAP the main side is the deck's SSID, so naming the id
+            # "msid" would print one cell's value under another cell's name —
+            # the #131 label class `_warn_partial_rigid_secondary` already
+            # carries its `label` parameter for.
+            main_label = ("the MAIN side, which the all-rigid-SSID swap took "
+                          f"from this contact's SSID cell, ssid={main_sid} "
+                          f"sstyp={main_styp}," if plan == _RS_SWAP else
+                          f"the MAIN (MSID) side msid={main_sid} "
+                          f"mstyp={main_styp}")
             _drop_interface(
                 state, dropped, c.keyword, c.inter_id,
-                f"the MAIN (MSID) side msid={main_sid} mstyp={main_styp} resolved "
-                "to no contact surface: " + _describe_empty_main(
-                    state, main_sid, main_styp),
+                f"{main_label} resolved to no contact surface: "
+                + _describe_empty_main(state, main_sid, main_styp),
                 _main_side_remedy(state, main_sid, main_styp))
             continue
         _warn_partial_rigid_secondary(
@@ -4147,10 +4184,16 @@ def _tied_interface_type(c, state: ConversionState) -> str:
     ``_OFFSET`` tie on an explicit deck gets ``/INTER/TYPE2`` at **Spotflag
     27** like any other ``SURFACE_TO_SURFACE`` tie. 27 is an AUTO-PENALTY
     variant (``_TIED_PENALTY_SPOTFLAGS``), not a kinematic constraint, and
-    Radioss does NOT project a TYPE2 secondary node onto its main segment — no
-    starter ``i2*.F`` routine writes ``X(1..3, .)`` at all; the only such
-    assignment among the interface initialisers is ``i24pen3.F:317-319``, which
-    is TYPE24. (An earlier revision of this docstring said it did, and the
+    Radioss does NOT project a TYPE2 secondary node onto its main segment: no
+    TYPE2 starter routine writes ``X(1..3, .)`` at all — ``i2buc1.F``,
+    ``i2chk3.F``, ``i2cor3.F``, ``i2dst3.F``, ``i2dst3_27.F``, ``i2surfs.F``,
+    ``i2tid3.F``, ``i2_dtn.F``, ``i2_dtn_27.F``, ``i2_dtn_28.F``,
+    ``interf1/i2master.F`` and ``inter2d1/inint2.F`` read the coordinate array
+    and never assign to it. FOUR starter interface files do move a node, and
+    none of them is TYPE2: the initial-penetration removers ``i3pen3.F:187-197``
+    (TYPE3), ``i7pwr3.F:213-242`` (TYPE7 under ``INACTI`` 3 and 4) and
+    ``i24pen3.F:317-319`` (TYPE24), plus ``in12r.F:120-133``, the TYPE12 frame
+    transform (``inint3.F:1203-1242`` calls it only under ``NTY == 12``). (An earlier revision of this docstring said it did, and the
     ROADMAP entry beside it repeated the claim; round 4 retracted both.) What
     the offset really costs is the constant-stiffness rigid link Spotflag 28
     ("like 1", the spotweld formulation) carries and 27 ("like 5", the glue
