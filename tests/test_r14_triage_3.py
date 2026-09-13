@@ -1381,10 +1381,13 @@ class RetractedSourceCitationsAreGoneEverywhere(unittest.TestCase):
             "for '*ihq*' over F:, C:/openradioss_run and E:/foxcore_data "
             "returns nothing, so this coupon family does not exist",
         "projects the secondary nodes":
-            "nothing -- no starter i2*.F routine writes X(1..3,.) at all; the "
-            "only such assignment among the interface initialisers is "
-            "i24pen3.F:317-319, which is TYPE24. /INTER/TYPE2 does not move a "
-            "secondary node, and k2rad emits it at Spotflag 27 (auto-penalty) "
+            "nothing -- no TYPE2 starter routine writes X(1..3,.) at all "
+            "(i2buc1/i2chk3/i2cor3/i2dst3/i2dst3_27/i2surfs/i2tid3/i2_dtn*/"
+            "i2master/inint2 read the array and never assign to it). The FOUR "
+            "interface files that do move a node are i3pen3.F:187-197 "
+            "(TYPE3), i7pwr3.F:213-242 (TYPE7 INACTI 3/4), "
+            "i24pen3.F:317-319 (TYPE24) and in12r.F:120-133 (TYPE12) -- none "
+            "of them TYPE2. k2rad emits the tie at Spotflag 27 (auto-penalty) "
             "anyway",
         "rigid-wall-plus-implicit":
             "nothing -- ex_27_solid_elform_2_rigidwall_constrained_nodes_"

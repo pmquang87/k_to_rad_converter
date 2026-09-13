@@ -41,6 +41,7 @@ test_k2rad_does_not_silently_swap_the_sides`` is replaced by its named
 successor in that same class — where the reader of the old value will look.
 """
 
+import inspect
 import os
 import tempfile
 import unittest
@@ -120,8 +121,13 @@ _MAT_SEC = (
 )
 
 
-def _implicit_deck(elform=1, nsolvr=2, arcctl=0, auto=None) -> str:
-    """A minimal QUASI-STATIC implicit deck (no *CONTROL_IMPLICIT_DYNAMICS)."""
+def _implicit_deck(elform=1, nsolvr=2, arcctl=0, auto=None,
+                   modal=False) -> str:
+    """A minimal QUASI-STATIC implicit deck (no *CONTROL_IMPLICIT_DYNAMICS).
+
+    *modal* adds a ``*CONTROL_IMPLICIT_EIGENVALUE`` so the engine takes the
+    ``/EIG`` branch instead — the shape ``ex_08_beam_elform_*`` has.
+    """
     deck = ("*KEYWORD\n"
             "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
             "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
@@ -129,6 +135,8 @@ def _implicit_deck(elform=1, nsolvr=2, arcctl=0, auto=None) -> str:
             + _row(nsolvr, 0, 0, 0, 0, 0, 0, 0) + "\n"
             + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
             + _row(arcctl, 1, 0.0, 1, 2, 0, 0, 0) + "\n")
+    if modal:
+        deck += "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
     if auto is not None:
         deck += "*CONTROL_IMPLICIT_AUTO\n" + _row(*auto) + "\n"
     deck += _BRICK + _MAT_SEC.replace("%ELFORM%", str(elform)) + "*END\n"
@@ -569,8 +577,7 @@ class DiscreteOffsetLinearLawTests(unittest.TestCase):
         and ``hm_read_prop04.F:249`` stores the stiffness as ``K/A``."""
         _r, starter, _e = _convert(_spring_deck())
         block = starter.split("/PROP/TYPE4/")[1]
-        self.assertIn(f"{_K:.10G}", block.replace(" ", "").join([" ", " "])
-                      if False else block)
+        self.assertIn(f"{_K:.10G}", block)
 
     def test_fct_id11_points_at_the_shifted_clone(self):
         _r, starter, _e = _convert(_spring_deck())
@@ -1234,11 +1241,56 @@ class ImplicitAutoDroppedCellsWarningTests(unittest.TestCase):
             _implicit_deck(auto=(0, 11, 0, 0.0, 0.0, 0, 4)))
         self.assertTrue(_has(result.warnings, "KFAIL=4"), result.warnings)
 
-    def test_it_does_NOT_fire_on_a_card_that_states_none_of_them(self):
+    def test_IAUTO_0_is_NAMED_as_the_constant_step_LS_DYNA_asks_for(self):
+        """Successor to ``test_it_does_NOT_fire_on_a_card_that_states_none_of
+        _them``, which asserted silence on exactly the card where the
+        substitution is LARGEST.
+
+        Vol I R17 p.12-277: ``IAUTO EQ.0: Constant time step size`` — and that
+        is the card's own default, so a blank field says the same thing
+        (MISTAKES #136: a value the deck omits still has a solver default and
+        the default can be load-bearing). k2rad writes ``/IMPL/DT/2``,
+        AUTOMATIC step control, on every implicit deck regardless. 11 of the
+        356 roster keys state or blank ``IAUTO = 0``, ``tensile2`` and the
+        whole ``ex_14_solid_elform_*`` family among them.
+        """
         result, _s, _e = _convert(
             _implicit_deck(auto=(0, 11, 0, 0.0, 0.001, 0, 0)))
-        self.assertFalse(any("*CONTROL_IMPLICIT_AUTO:" in w
-                             for w in result.warnings), result.warnings)
+        self.assertTrue(_has(result.warnings, "*CONTROL_IMPLICIT_AUTO:",
+                             "IAUTO=0", "Constant time step size",
+                             "p.12-277", "AUTOMATIC step control"),
+                        result.warnings)
+        # ...and the cells this deck really does leave blank are NOT named.
+        hit = [w for w in result.warnings if "*CONTROL_IMPLICIT_AUTO:" in w][0]
+        self.assertNotIn("ITEWIN", hit)
+        self.assertNotIn("KFAIL", hit)
+
+    def test_a_NEGATIVE_IAUTO_gets_the_load_curve_gloss(self):
+        """p.12-277 ``IAUTO LT.0: Curve ID = (-IAUTO) gives time step size as a
+        function of time`` — the same idiom ``DTMAX < 0`` already had spelled
+        out, where the truthiness filter used to print a generic
+        "auto-step on/off switch" gloss instead. 0 roster carriers."""
+        result, _s, _e = _convert(
+            _implicit_deck(auto=(-77, 11, 0, 0.0, 0.0, 0, 0)))
+        self.assertTrue(_has(result.warnings, "IAUTO=-77", "NEGATIVE",
+                             "Curve ID", "DROPPED"), result.warnings)
+
+    def test_a_MODAL_deck_is_warned_too_and_names_its_own_engine(self):
+        """The two "asked for and did not get" warnings used to sit BELOW
+        ``_make_engine_implicit``'s modal early return, so a ``/EIG`` deck was
+        told nothing — measured on ``ex_08_beam_elform_{1,2,13}``, which state
+        ``*CONTROL_IMPLICIT_AUTO`` IAUTO 1 / ITEWIN 15 beside
+        ``*CONTROL_IMPLICIT_EIGENVALUE``. The modal recipe ignores those cells
+        exactly as ``/IMPL/DT/2`` does, and the sentence must not name a card
+        the deck will not carry."""
+        result, _s, engine = _convert(
+            _implicit_deck(auto=(1, 11, 15, 0.0, 0.0, 0, 0), modal=True))
+        hits = [w for w in result.warnings if "*CONTROL_IMPLICIT_AUTO:" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("ITEWIN=15", hits[0])
+        self.assertIn("no /IMPL/DT card at all", hits[0])
+        self.assertNotIn("/IMPL/DT/2", hits[0])
+        self.assertNotIn("/IMPL/DT/2", engine)
 
     def test_it_does_NOT_fire_without_the_card(self):
         result, _s, _e = _convert(_implicit_deck())
@@ -2049,9 +2101,10 @@ class DerivedGapminTests(unittest.TestCase):
 
 
     def test_the_injected_implicit_stub_is_excluded(self):
-        """28 of the roster's solid-only mains are k2rad's OWN stabilization
-        card, measured byte-inert on 5 of 5 carriers — deriving a gap for it
-        would be noise about a card the user did not write."""
+        """27 of the roster's 42 solid-only mains are k2rad's OWN stabilization
+        card (27 deck keys, censused WITH the stub injected), measured
+        byte-inert on 5 of 5 carriers — deriving a gap for it would be noise
+        about a card the user did not write."""
         from k2rad.writer.common import AUTO_IMPLICIT_STUB_TITLE
         deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
                 "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
@@ -2237,6 +2290,348 @@ class PartBDocsTests(unittest.TestCase):
         self.assertIn("5.03545e-06", text)
         self.assertIn("79 147.3", text)
         self.assertIn("25 675 cycles", text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The finalize round — every defect the four validators confirmed
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TgmultGateReadsEveryDropBucketTests(unittest.TestCase):
+    """A registered-and-declined driver lands in ``recognized_not_emitted``
+    and in NEITHER other registry.
+
+    The gate screened ``skipped_keywords`` alone, which is a filter keyed on a
+    field those records do not have (MISTAKES #136). MEASURED on
+    ``thermal/thermal-stress`` with one card added: ``*BOUNDARY_THERMAL_WELD``,
+    ``*BOUNDARY_TEMPERATURE_RSW``, ``*BOUNDARY_TEMPERATURE_TRAJECTORY`` and
+    ``*BOUNDARY_THERMAL_BULKNODE`` — 4 of 4 — passed a gate that exists to stop
+    them, and an ``/IMPTEMP`` was emitted that would clamp away the very field
+    the source drives (``fixtemp.F:180-199``).
+    """
+
+    DECLINED = ("BOUNDARY_THERMAL_WELD", "BOUNDARY_TEMPERATURE_RSW",
+                "BOUNDARY_TEMPERATURE_TRAJECTORY",
+                "BOUNDARY_THERMAL_BULKNODE", "BOUNDARY_FLUX_TRAJECTORY")
+
+    def test_each_declined_driver_blocks_the_restatement(self):
+        for kw in self.DECLINED:
+            with self.subTest(keyword=kw):
+                result, starter, _e = _convert(
+                    _thermal_deck(extra=f"*{kw}\n" + _row(1, 0) + "\n"))
+                self.assertNotIn("/IMPTEMP/", starter)
+                self.assertTrue(_has(result.warnings, "TGMULT=10",
+                                     "DROPPED", f"*{kw}"), result.warnings)
+
+    def test_the_declined_drivers_really_are_in_that_bucket(self):
+        """The probe must REACH the branch it claims to test: if these landed
+        in ``skipped_keywords`` the old gate would already have caught them and
+        the test above would prove nothing."""
+        for kw in self.DECLINED:
+            with self.subTest(keyword=kw):
+                st = _dispatch(_thermal_deck(
+                    extra=f"*{kw}\n" + _row(1, 0) + "\n"))
+                self.assertIn(kw, [k for k, _ in st.recognized_not_emitted])
+                self.assertNotIn(kw, st.skipped_keywords)
+
+    def test_LOAD_THERMAL_on_a_thermal_solve_deck_still_does_NOT_block(self):
+        """Vol I R17 p.33-162: LS-DYNA ignores the whole
+        ``*LOAD_THERMAL_OPTION`` family in a thermal-only or coupled analysis,
+        and ``_drop_load_thermal_on_thermal_soln`` drops it for the same
+        reason. A card inert in BOTH codes cannot veto a restatement — and the
+        rule now applies to the declined spellings too, not just the parsed
+        ones."""
+        result, starter, _e = _convert(
+            _thermal_deck(extra="*LOAD_THERMAL_D3PLOT\n" + _row(1) + "\n"))
+        self.assertIn("/IMPTEMP/", starter)
+        self.assertTrue(_has(result.warnings, "TGMULT=10", "/IMPTEMP/"),
+                        result.warnings)
+
+    def test_LOAD_HEAT_is_not_in_that_family_and_does_block(self):
+        """A volumetric generation is not a ``*LOAD_THERMAL_OPTION``; the
+        SOLN exemption must not reach it."""
+        result, starter, _e = _convert(
+            _thermal_deck(extra="*LOAD_HEAT_GENERATION_SOLID\n"
+                                + _row(1, 0) + "\n"))
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertTrue(_has(result.warnings, "TGMULT=10", "DROPPED",
+                             "LOAD_HEAT_GENERATION_SOLID"), result.warnings)
+
+
+class TgmultDoesNotShipAFalseInertExpansionNoteTests(unittest.TestCase):
+    """``_warn_constant_driver_expansion`` ran every test over
+    ``imposed_temperatures``, which is EMPTY for a TGMULT record.
+
+    With nothing in that list no early return fired and the message printed an
+    empty constant — telling the reader the deck "develops NO thermal strain
+    from these cards" on the one deck where round 4 makes it develop some, and
+    three lines after the A4 warning reported node 2 moving 0.0 to
+    1.49531e-04 mm.
+    """
+
+    def _deck(self):
+        return _thermal_deck(extra="*MAT_ADD_THERMAL_EXPANSION\n"
+                                   + _row(1, 1.0e-7) + "\n")
+
+    def test_the_NEVER_MOVE_sentence_is_absent(self):
+        result, starter, _e = _convert(self._deck())
+        self.assertIn("/IMPTEMP/", starter)
+        for w in result.warnings:
+            self.assertNotIn("NEVER MOVE", w)
+
+    def test_no_shipped_warning_carries_an_empty_parenthesis(self):
+        """The visible symptom was ``a constant ()`` — the same class as a doc
+        template placeholder shipping."""
+        result, _s, _e = _convert(self._deck())
+        for w in result.warnings:
+            self.assertNotIn(" ()", w)
+
+
+class RefusedTgmultWithdrawsItsCurveTests(unittest.TestCase):
+    """``_resolve_tgmult_generation`` mints the ``/FUNCT`` before the deck-wide
+    screen can withdraw the record, and the single ``/FUNCT`` emitter runs at
+    the "functions" assembly step — long before "thermal". A refusal therefore
+    used to leave an orphan curve behind and shift every later auto id."""
+
+    def _two_material_deck(self):
+        """Two *HEAT/MAT materials, only one of which carries TGMULT — the
+        ``uncovered`` branch of ``_screen_tgmult_generations``."""
+        return ("*KEYWORD\n"
+                "*CONTROL_TERMINATION\n" + _row(3.0) + "\n"
+                "*CONTROL_SOLUTION\n" + _row(2) + "\n"
+                "*CONTROL_THERMAL_SOLVER\n" + _row(1, 0.0, 0) + "\n"
+                "*NODE\n"
+                + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                          for i, (x, y, z) in enumerate(_D2R_NODES, start=1))
+                + "*ELEMENT_SOLID\n"
+                  "       1       1       1       2       3       4       5"
+                  "       6       7       8\n"
+                  "       2       2       9      10      11      12      13"
+                  "      14      15      16\n"
+                + "*PART\np1\n" + _row(1, 1, 1, 0, 0, 0, 0, 1) + "\n"
+                + "*PART\np2\n" + _row(2, 1, 2, 0, 0, 0, 0, 2) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                  "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                  "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+                  "*MAT_THERMAL_ISOTROPIC\n"
+                + _row(1, 1.0, 0, 10.0, 0.0, 0.0) + "\n" + _row(1.0, 1.0) + "\n"
+                  "*MAT_THERMAL_ISOTROPIC\n"
+                + _row(2, 1.0, 0, 0.0, 0.0, 0.0) + "\n" + _row(1.0, 1.0) + "\n"
+                  "*INITIAL_TEMPERATURE_SET\n" + _row(0, 10.0) + "\n*END\n")
+
+    def test_the_uncovered_screen_refuses_and_leaves_no_orphan_FUNCT(self):
+        result, starter, _e = _convert(self._two_material_deck())
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertTrue(_has(result.warnings, "TGMULT", "DROPPED",
+                             "carry NO TGMULT"), result.warnings)
+        self.assertNotIn("Auto_tgmult_T_tmid", starter)
+
+    def test_a_refused_deck_is_byte_identical_to_the_opt_out_arm(self):
+        """The orphan's real cost: it shifted every later auto id, so the
+        refused deck was NOT the deck ``--no-tgmult-imptemp`` produces."""
+        _r1, refused, _e1 = _convert(self._two_material_deck())
+        _r2, optout, _e2 = _convert(self._two_material_deck(),
+                                    tgmult_imptemp=False)
+        self.assertEqual(refused, optout)
+
+    def test_two_different_rates_are_refused_too(self):
+        """The other branch of the deck-wide screen — no test reached it."""
+        deck = self._two_material_deck().replace(
+            _row(2, 1.0, 0, 0.0, 0.0, 0.0), _row(2, 1.0, 0, 99.0, 0.0, 0.0))
+        result, starter, _e = _convert(deck)
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertTrue(_has(result.warnings, "DIFFERENT rates"),
+                        result.warnings)
+        self.assertNotIn("Auto_tgmult_T_tmid", starter)
+
+    def test_parts_with_no_element_are_refused_before_the_curve_is_minted(self):
+        """The empty-node drop used to live at emit time, where it could not
+        withdraw the curve it was rejecting."""
+        deck = _thermal_deck().replace(
+            "*ELEMENT_SOLID\n"
+            "       1       1       1       2       3       4       5"
+            "       6       7       8\n", "")
+        result, starter, _e = _convert(deck)
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertNotIn("Auto_tgmult_T_tmid", starter)
+        self.assertTrue(_has(result.warnings, "TGMULT=10", "DROPPED"),
+                        result.warnings)
+
+
+class RigidPartIdsHonoursTheOptOutTests(unittest.TestCase):
+    """``rigid_part_ids`` unioned ``deformable_to_rigid`` unconditionally while
+    the EMITTER honoured ``--no-deformable-to-rigid``, so the six consumers of
+    the shared predicate called a part rigid that the emitted deck leaves
+    deformable."""
+
+    def _damping_deck(self):
+        return _d2r_deck(gravity=False, contact=False).replace(
+            "*END\n", "*DAMPING_GLOBAL\n" + _row(0, 1.0) + "\n*END\n")
+
+    def test_with_the_flag_OFF_the_part_is_rigid_for_every_consumer(self):
+        _r, starter, _e = _convert(self._damping_deck())
+        self.assertIn("/RBODY", starter)
+
+    def test_with_the_flag_ON_no_RBODY_and_no_consumer_calls_it_rigid(self):
+        from k2rad.parser import parse_k_file as _p
+        from k2rad.writer.common import rigid_part_ids
+        _r, starter, _e = _convert(self._damping_deck(),
+                                   deformable_to_rigid=False)
+        self.assertNotIn("/RBODY", starter)
+        self.assertEqual(_p, _p)                       # keep the import honest
+        # ...and the predicate itself agrees with the emitter.
+        st = _dispatch(self._damping_deck())
+        st.options.deformable_to_rigid = False
+        self.assertEqual(rigid_part_ids(st), set())
+        st.options.deformable_to_rigid = True
+        self.assertEqual(rigid_part_ids(st), {1})
+
+    def test_the_XREF_screen_follows_the_option_too(self):
+        deck = self._damping_deck().replace(
+            "*END\n", "*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+                      "       1             0.0             0.0             0.0\n"
+                      "*END\n")
+        result, _s, _e = _convert(deck, deformable_to_rigid=False)
+        hits = [w for w in result.warnings if "/XREF" in w and "rigid" in w]
+        self.assertEqual(hits, [], hits)
+
+
+class SolidBoundaryFacesReportsAPartialSkinTests(unittest.TestCase):
+    """A 6-node pentahedron on a short ``*ELEMENT_SOLID`` card is stored with
+    SIX nodes and is not faceted. On a part that MIXES hexes with wedges the
+    face they share is then seen once and counted EXTERNAL, so the minimum edge
+    — hence the written ``Gapmin`` and the quoted starter ``GAP MIN`` — comes
+    out too small. The side must stop being ``all_solid`` instead."""
+
+    def test_a_wedge_makes_the_side_not_all_solid(self):
+        from k2rad.writer.contacts import _main_surface_segments
+        base = _d2r_deck(card="", rows=(), gravity=False, contact=False)
+        st = _dispatch(base)
+        _segs, all_solid = _main_surface_segments(st, 1, 3)
+        self.assertTrue(all_solid, "the hex-only control must be all_solid")
+        mixed = base.replace(
+            "       2       2       9      10      11      12      13"
+            "      14      15      16\n",
+            "       2       1       9      10      11      12      13      14\n")
+        st2 = _dispatch(mixed)
+        self.assertEqual(
+            [len(e.nodes) for e in st2.solid_elems if e.pid == 1], [8, 6])
+        _segs2, all_solid2 = _main_surface_segments(st2, 1, 3)
+        self.assertFalse(all_solid2)
+
+    def test_the_helper_reports_completeness(self):
+        from k2rad.writer.contacts import _solid_boundary_faces
+        st = _dispatch(_d2r_deck(card="", rows=(), gravity=False,
+                                 contact=False))
+        faces, complete = _solid_boundary_faces(st, [1])
+        self.assertTrue(complete)
+        self.assertEqual(len(faces), 6)
+
+
+class ConvertOptionsRefusesAnImpossibleLeverTests(unittest.TestCase):
+    """``convert()`` is a public entry point of its own; the CLI's and the
+    GUI's validation never ran for it."""
+
+    def test_a_non_positive_qstat_dtscal_raises(self):
+        for bad in (0.0, -3.0):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError) as cm:
+                    _convert(_implicit_deck(), qstat_dtscal=bad)
+                self.assertIn("qstat_dtscal", str(cm.exception))
+                self.assertIn("imp_dyna.F", str(cm.exception))
+
+    def test_an_unparsable_qstat_dtscal_raises_instead_of_defaulting(self):
+        with self.assertRaises(ValueError):
+            _convert(_implicit_deck(), qstat_dtscal="fast")
+
+    def test_none_and_a_positive_number_are_both_accepted(self):
+        _r, _s, engine = _convert(_implicit_deck(), qstat_dtscal="none")
+        self.assertNotIn("/IMPL/QSTAT", engine)
+        _r, _s, engine = _convert(_implicit_deck(), qstat_dtscal=0.1)
+        self.assertIn(" 0.1", engine)
+
+    def test_a_non_positive_derived_gapmin_factor_raises(self):
+        """A non-positive Gapmin is starter ERROR 785 (``i7sti3.F:1068``)."""
+        for bad in (0.0, -0.005):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError) as cm:
+                    _convert(_implicit_deck(), derived_gapmin=True,
+                             derived_gapmin_factor=bad)
+                self.assertIn("derived_gapmin_factor", str(cm.exception))
+
+
+class TheCorrectedSourceCitationsTests(unittest.TestCase):
+    """A true conclusion resting on a false premise still misinforms. The
+    round-4 retraction of the tied ``_OFFSET`` claim cited ``i24pen3.F:317-319``
+    as "the only such assignment among the interface initialisers" — which
+    contradicts its own ``no i2*.F routine`` clause and is false: an anchored
+    grep over ``starter/source/interfaces`` returns FOUR files."""
+
+    MOVERS = ("i3pen3.F:187-197", "i7pwr3.F:213-242", "i24pen3.F:317-319",
+              "in12r.F:120-133")
+
+    def _read(self, name):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_code_names_all_four_node_movers(self):
+        from k2rad.writer import contacts
+        src = inspect.getsource(contacts)
+        for cite in self.MOVERS:
+            with self.subTest(cite=cite):
+                self.assertIn(cite, src)
+
+    def test_the_roadmap_names_all_four_too(self):
+        text = self._read("ROADMAP.md")
+        for cite in self.MOVERS:
+            with self.subTest(cite=cite):
+                self.assertIn(cite, text)
+
+    def test_the_self_contradicting_exclusivity_claim_is_gone(self):
+        from k2rad.writer import contacts
+        for text in (inspect.getsource(contacts), self._read("ROADMAP.md"),
+                     self._read("CHANGELOG.md")):
+            self.assertNotIn("the only such assignment among the interface",
+                             text)
+
+
+class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
+    """Re-summed from its own detail table, and re-measured on the COMBINED
+    arm — MISTAKES #137 twice over."""
+
+    def _read(self, name):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def _everywhere(self):
+        import k2rad as pkg
+        from k2rad import cli, state
+        return ([inspect.getsource(m) for m in (cli, state, pkg)]
+                + [self._read(n) for n in
+                   ("README.md", "ROADMAP.md", "CHANGELOG.md")])
+
+    def test_the_stale_ex_01_fixpoint_figure_is_gone(self):
+        """``-13.7 %`` was the DTSCAL-0.1 arm; the shipped combined arm reads
+        ``-14.12 %`` and the campaign row agrees (``ie_dev -14.1249``)."""
+        for text in self._everywhere():
+            self.assertNotIn("IE -13.7 %", text)
+            self.assertNotIn("IE −13.7 %", text)
+
+    def test_the_derived_gapmin_unmeasured_count_re_sums(self):
+        """15 carriers, 2 with a measured solver arm -> 13 unmeasured. The
+        shipped 12 contradicted the same sentence's own "the only OTHER
+        carrier with a measured arm"."""
+        for text in self._everywhere():
+            self.assertNotIn("12 of the 15", text)
+            self.assertNotIn("TWELVE of the fifteen", text)
+            self.assertNotIn("12 of them unmeasured", text)
+
+    def test_the_stub_split_is_the_measured_one(self):
+        from k2rad.writer import contacts
+        src = inspect.getsource(contacts)
+        self.assertIn("27 are", src)
+        self.assertNotIn("28 of the roster's 41", src)
 
 
 if __name__ == "__main__":
