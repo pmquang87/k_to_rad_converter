@@ -1427,6 +1427,29 @@ class DeformableToRigidRbodyTests(unittest.TestCase):
                              "CO-ROTATING"))
 
 
+    def test_a_reference_geometry_on_the_part_is_skipped_by_name(self):
+        """``writer/inistate``'s ``/XREF`` screen asks the same PART question.
+        On ``state.mat_rigid`` alone a *DEFORMABLE_TO_RIGID part would take a
+        stress-free reference geometry it has no strain state for, and would
+        drag its whole *SECTION_SOLID to ``Ismstr = 10`` with it. Corpus reach:
+        0 decks combine the two — this is the predicate's pin."""
+        coords = ((1, 0.0, 0.0, 0.0), (2, 0.9, 0.0, 0.0), (3, 0.9, 0.9, 0.0),
+                  (4, 0.0, 0.9, 0.0), (5, 0.0, 0.0, 0.9), (6, 0.9, 0.0, 0.9),
+                  (7, 0.9, 0.9, 0.9), (8, 0.0, 0.9, 0.9))
+        xref = ("*INITIAL_FOAM_REFERENCE_GEOMETRY@"
+                + "".join(f"{n:>8}{x:>16}{y:>16}{z:>16}@"
+                          for n, x, y, z in coords))
+        deck = (_d2r_deck(gravity=False, contact=False).replace("*END@", "")
+                + xref + "*END@").replace("@", "\n")
+        result, starter, _ = _convert(deck)
+        self.assertNotIn("/XREF/", starter)
+        self.assertTrue(_has(result.warnings,
+                             "*INITIAL_FOAM_REFERENCE_GEOMETRY",
+                             "*DEFORMABLE_TO_RIGID part",
+                             "keeps its own deformable law"),
+                        repr(result.warnings))
+
+
 class DeformableToRigidOptOutTests(unittest.TestCase):
 
     def setUp(self):
