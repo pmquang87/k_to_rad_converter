@@ -861,9 +861,9 @@ def _min_segment_side(state: ConversionState,
     """The smallest non-degenerate segment SIDE length — the starter's GAPMX.
 
     ``i4gmx3.F:58-66`` walks each main segment's sides and skips a pair whose
-    two node ids are equal (a collapsed quad) or whose length is zero; this
-    reproduces that, so a coupon with an ``n3 == n4`` face is measured over its
-    three real sides.
+    two node ids are equal (a collapsed quad) or whose length is zero; the
+    zero-length test carries both here (see the comment at the guard), so a
+    coupon with an ``n3 == n4`` face is measured over its three real sides.
     """
     best = 0.0
     for seg in segments:
@@ -873,12 +873,15 @@ def _min_segment_side(state: ConversionState,
             continue
         for a in range(k):
             n1, n2 = nds[a], nds[(a + 1) % k]
-            if n1 == n2:
-                continue
             p, q = state.nodes.get(n1), state.nodes.get(n2)
             if p is None or q is None:
                 continue
             d = math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+            # i4gmx3.F:58-66 skips a side on TWO tests, `N1 == N2` and a zero
+            # length. Only the second is written here, because the first cannot
+            # fail independently of it: equal ids name the SAME node, so the
+            # distance is identically 0 and this guard already has it. A
+            # separate `n1 == n2` branch would be a check that cannot fail.
             if d <= 0.0:
                 continue
             if best == 0.0 or d < best:

@@ -2006,6 +2006,37 @@ class DerivedGapminTests(unittest.TestCase):
                 self.assertFalse(any("SOLID segments only" in x
                                      for x in flagged[0].warnings))
 
+    def test_a_MIXED_shell_and_solid_main_is_excluded(self):
+        """A main side that resolves to BOTH shell and solid segments feeds the
+        starter's SHELL-THICKNESS branch (``DXM``), not the mesh-size one, so it
+        is out of this rule's scope — and per part SHELLS WIN, exactly as
+        ``_make_master_surface`` decides it. Measured roster population: 3 real
+        mixed mains (``mainboltaexpl``, ``show-cases/contact-overview/main``,
+        ``EXP_SC_PRELOAD``), whose starter ``GAP MIN / min edge`` ratios are
+        0.500, 0.277 and 0.124 — NOT the 0.100 a solid-only main takes."""
+        from test_converter import AUTO_GAPMIN_K
+        # Part 3: one shell on four of the existing nodes, and a *SET_PART that
+        # scopes the contact's MAIN side over the rigid tet part AND that shell.
+        deck = AUTO_GAPMIN_K.replace(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
+            "         9                                                              pin_pair\n"
+            "         1         2         3         3         0         0         0         0\n",
+            "*ELEMENT_SHELL\n"
+            "       9       3       5       6       7       8\n"
+            "*PART\nshell skin\n"
+            + _row(3, 3, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(3, 16) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            "*SET_PART_LIST\n" + _row(300) + "\n" + _row(2, 3) + "\n"
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
+            "         9                                                              pin_pair\n"
+            "         1       300         3         2         0         0         0         0\n")
+        result, starter, _ = _convert(deck, derived_gapmin=True)
+        self.assertEqual(_gapmin_cell(starter), "0")
+        self.assertFalse(any("SOLID segments only" in x
+                             for x in result.warnings), result.warnings)
+
+
     def test_the_injected_implicit_stub_is_excluded(self):
         """28 of the roster's solid-only mains are k2rad's OWN stabilization
         card, measured byte-inert on 5 of 5 carriers — deriving a gap for it
@@ -2036,15 +2067,22 @@ class DerivedGapminTests(unittest.TestCase):
                              "EXP_SC_CONTACT_INTERFERENCE"))
 
     def test_a_collapsed_face_side_is_skipped_like_i4gmx3(self):
-        """``i4gmx3.F:58-66`` skips a side whose two node ids are equal, so a
-        collapsed quad is measured over its three real sides."""
+        """``i4gmx3.F:58-66`` skips a collapsed side. Both of its tests —
+        ``N1 == N2`` and a zero length — reduce to ONE here, because equal ids
+        name the same node and the distance is then identically 0; the code
+        says so at the guard rather than carrying a branch that cannot fail."""
         from k2rad.writer.contacts import _min_segment_side
         from k2rad.state import ConversionState, NodeData
         st = ConversionState()
         st.nodes = {1: NodeData(0.0, 0.0, 0.0), 2: NodeData(3.0, 0.0, 0.0),
-                    3: NodeData(3.0, 4.0, 0.0)}
+                    3: NodeData(3.0, 4.0, 0.0),
+                    4: NodeData(3.0, 4.0, 0.0)}      # coincident with node 3
         self.assertEqual(_min_segment_side(st, [[1, 2, 3, 3]]), 3.0)
         self.assertEqual(_min_segment_side(st, [[1, 2, 3]]), 3.0)
+        # Two DISTINCT ids at the same point are skipped by the same guard.
+        self.assertEqual(_min_segment_side(st, [[1, 2, 3, 4]]), 3.0)
+        # A missing node id contributes no side at all.
+        self.assertEqual(_min_segment_side(st, [[1, 2, 99]]), 3.0)
 
     def test_the_two_goldens_that_carry_a_TYPE7_have_shell_mains(self):
         """Zero golden moves under B3, verified from the fixtures themselves."""
