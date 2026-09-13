@@ -375,11 +375,86 @@ def build_parser() -> argparse.ArgumentParser:
              "raise it toward 1.0 if a contact fails to engage.",
     )
     fc.add_argument(
+        "--derived-gapmin",
+        action="store_true",
+        help="Write an explicit Gapmin on every /INTER/TYPE7 whose MAIN surface "
+             "is SOLID segments only and whose Gapmin would otherwise be 0 "
+             "(Gapmin = --derived-gapmin-factor x the smallest main-surface "
+             "segment side, ceiling 0.5 x that side). OFF by default. Without "
+             "it the starter derives its own gap, 0.1 x that side "
+             "(i7sti3.F:1055-1063 -- DXM only ever accumulates shell "
+             "thickness, so a solid main takes the EM01*GAPMX fallback), while "
+             "LS-DYNA's offset on a solid segment is ZERO unless SLDTHK > 0 is "
+             "stated (Vol I R17 p.11-101/103). A default-ON WARNING names the "
+             "derived value on every carrier whether or not this flag is set. "
+             "MEASURED on twobar (10 mm bars, derived GAP MIN 1.0): the "
+             "starter's gap costs +1151 %% internal energy against the LS-DYNA "
+             "reference 3036.17, where this flag writes 0.005 x 10 = 0.05 and "
+             "reads -5.60 %% with KE -6.18 %%. It is OPT-IN because the same "
+             "factor degrades the only other carrier with a measured arm: on "
+             "sphere1 it writes 0.02921 and internal energy goes -1.66 %% -> "
+             "-7.77 %% at 4.1x the cycles. Class census with k2rad's own "
+             "resolver over the 356-key R14 roster: 15 interfaces on 14 deck "
+             "keys, 12 of them unmeasured. A press-fit "
+             "*CONTACT_*_INTERFERENCE and k2rad's own injected implicit "
+             "stabilization stub are excluded.",
+    )
+    fc.add_argument(
+        "--derived-gapmin-factor",
+        type=float,
+        default=0.005,
+        metavar="F",
+        help="Fraction of the smallest main-surface segment side used by "
+             "--derived-gapmin (default 0.005). MEASURED on twobar: 0.005 "
+             "reads -5.60 %% against its LS-DYNA reference, 0.01 reads "
+             "+14.45 %% (do NOT use), 0.001 -15.22 %% and 1e-4 -55.83 %% at "
+             "43x the cycles.",
+    )
+    fc.add_argument(
         "--suggest-gapmin",
         action="store_true",
         help="Print the suggested per-interface Gapmin (min nodal clearance between "
              "each contact's two parts) and exit WITHOUT converting. Inspect before "
              "applying with --auto-gapmin.",
+    )
+    fc.add_argument(
+        "--rigid-secondary-swap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an EXPLICIT deck, rescue a *CONTACT whose SECONDARY (SSID) "
+             "side is WHOLLY RIGID instead of losing the whole interface. ON "
+             "by default. /INTER/TYPE7 is an asymmetric node-to-segment "
+             "contact, so the DEFORMABLE side must supply the tracked nodes: "
+             "k2rad swaps the roles when the MSID side carries deformable "
+             "nodes, and keeps the rigid secondary group when BOTH sides are "
+             "wholly rigid. The starter does NOT refuse /RBODY members in a "
+             "TYPE7 node group - measured at 0 ERROR(S) - so the old drop was "
+             "a k2rad policy, not a solver constraint. MEASURED: sphere1 "
+             "internal energy 0 (-100 %%) -> 77 830 (-1.66 %%) against the "
+             "LS-DYNA reference 79 147.3; EXP_SC_CONTACT_INTERFERENCE -100 %% "
+             "-> -42.8 %%; boundary_prescribed_motion.blow-mold from a "
+             "diverging 241 934-cycle run at t = 0.0061 of 0.015 to NORMAL "
+             "TERMINATION at t = 0.015 in 25 675 cycles. IMPLICIT decks keep "
+             "the drop either way: every restoration arm on bumper diverges at "
+             "ISTOP = -2 at nt 2 and nt 4.",
+    )
+    fc.add_argument(
+        "--deformable-to-rigid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Honour *DEFORMABLE_TO_RIGID (the plain spelling): the named "
+             "part is rigid FROM t = 0 and is emitted as an /RBODY through the "
+             "same path a *MAT_RIGID part takes, keeping its own material "
+             "(Vol I R17 p.18-1). ON by default. Its elements are then "
+             "DEACTIVATED, so the part no longer controls the time step: "
+             "MEASURED on pend.imp, the controlling element goes SOLID at "
+             "dt 1.360e-06 to TRUSS at dt 1.794e-05 - LS-DYNA's own "
+             "1.79363E-05 - and the deck's energy error goes 99.9 %% to "
+             "-0.0 %% (internal energy 5.162e5 to 5.901e-06 against the "
+             "LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA "
+             "takes 9 479. The run-time-triggered options (_AUTOMATIC, "
+             "_INERTIA, *RIGID_DEFORMABLE_*) are refused by name; they have 0 "
+             "carriers on every corpus this converter is measured against.",
     )
     fc.add_argument(
         "--deformable-contact-recipe",
@@ -732,6 +807,10 @@ def main(argv=None) -> int:
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
+        derived_gapmin=args.derived_gapmin,
+        derived_gapmin_factor=args.derived_gapmin_factor,
+        rigid_secondary_swap=args.rigid_secondary_swap,
+        deformable_to_rigid=args.deformable_to_rigid,
         fixpoint_count=args.fixpoint_count,
         qstat_dtscal=args.qstat_dtscal,
         arclength_riks=args.arclength_riks,
