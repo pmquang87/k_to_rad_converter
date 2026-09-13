@@ -2983,6 +2983,14 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
         docstring under a spelling the literal did not match) were either not
         scanned or not matched. A guard that cannot fail is worse than no
         guard, so this now walks the whole package plus the GUI.
+
+        Each text is also NORMALIZED before it is searched: adjacent string
+        literals are joined and every whitespace run collapses to one space,
+        so a figure split across two source lines reads as the one sentence a
+        user sees. A mutation check caught that too — the GUI tooltip's
+        ``"… and 12 of the class's "`` / ``"15 R14-roster interfaces …"`` pair
+        put 46 characters of quote-newline-indent between the two numbers and
+        walked straight through a window that allowed 40.
         """
         import k2rad as pkg
         from k2rad import cli, state
@@ -2998,8 +3006,15 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
                     with open(os.path.join(root, name), "r",
                               encoding="utf-8") as fh:
                         srcs.append(fh.read())
-        return (srcs + [inspect.getsource(m) for m in mods]
-                + [self._read(n) for n in self._STATING_DOCS])
+        texts = (srcs + [inspect.getsource(m) for m in mods]
+                 + [self._read(n) for n in self._STATING_DOCS])
+        return [self._normalise(t) for t in texts]
+
+    @staticmethod
+    def _normalise(text):
+        """Join adjacent string literals, then collapse whitespace runs."""
+        text = re.sub(r"""(['"])\s*\n\s*\1""", "", text)
+        return re.sub(r"\s+", " ", text)
 
     def test_the_stale_ex_01_fixpoint_figure_is_gone(self):
         """``-13.7 %`` was the DTSCAL-0.1 arm; the shipped combined arm reads
@@ -3034,17 +3049,24 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
         pat = re.compile(
             r"\b(?:12|twelve)\b[^.]{0,40}\b(?:15|fifteen)\b"
             r"[^.]{0,70}?(?:measured arm|unmeasured|interface)", re.I)
+        norm = EveryBatchFigureIsOneNumberTests._normalise
         for spelling in (
                 "and 12 of the 15 have no measured arm at all.",
                 "and 12 of the class's 15 interfaces on the R14 roster have "
                 "no measured arm at all.",
                 "and 12 of the class's 15 R14-roster interfaces are "
                 "unmeasured.",
-                "TWELVE of the fifteen have no measured arm"):
-            with self.subTest(spelling=spelling):
-                self.assertIsNotNone(pat.search(spelling))
+                "TWELVE of the fifteen have no measured arm",
+                # the SOURCE form that walked through the first window: two
+                # adjacent literals with a newline and 27 spaces between them
+                '                           "…and 12 of the class\'s "\n'
+                '                           "15 R14-roster interfaces are '
+                'unmeasured.",'):
+            with self.subTest(spelling=spelling[:40]):
+                self.assertIsNotNone(pat.search(norm(spelling)))
         # ...and does not fire on an unrelated pair of numbers.
-        self.assertIsNone(pat.search("fills 1-12 and 15-18: the mixture CP"))
+        self.assertIsNone(pat.search(norm(
+            "fills 1-12 and 15-18: the mixture CP")))
 
     def test_the_changelog_records_both_retractions(self):
         """The exclusion above is only sound while the CHANGELOG really does
