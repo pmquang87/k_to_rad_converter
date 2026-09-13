@@ -7004,10 +7004,16 @@ class TgmultGeneration:
     rho_cp: float
     t0: float
     rate: float
-    #: The synthesized /FUNCT holding T(t). MINTED AT RESOLVE TIME (into
-    #: state.curves + state.curve_order) because the single /FUNCT emitter,
-    #: materials._make_functions, runs at the "functions" section — far before
-    #: the "thermal" one that writes the /IMPTEMP.
+    #: The closed form's own points, (t, T). Carried on the record so the
+    #: /FUNCT can be minted AFTER the deck-wide screen has had its say.
+    pts: List[Tuple[float, float]] = field(default_factory=list)
+    #: The synthesized /FUNCT holding T(t). Minted into state.curves +
+    #: state.curve_order at the END of the resolve pass (``_mint_tgmult_curves``)
+    #: because the single /FUNCT emitter, materials._make_functions, runs at the
+    #: "functions" section — far before the "thermal" one that writes the
+    #: /IMPTEMP — but AFTER ``_screen_tgmult_generations``, so a REFUSED record
+    #: consumes no curve id at all and a refused deck is byte-identical to the
+    #: ``--no-tgmult-imptemp`` arm.
     func_id: int = 0
 
 
@@ -7225,8 +7231,10 @@ class ConvertOptions:
     # MEASURED on thermal/thermal-stress (TGMULT 10, TGRLC 0, RHO0_CP 1, so
     # T = 10 + 10t): the free-expansion displacement of node 2 goes from
     # exactly 0.0 -- all 500 T01 states, all 12 DX/DY/DZ channels -- to
-    # 1.49531e-04 mm against the LS-DYNA nodout's 1.49216e-04 at t = 2.99,
-    # +0.21 %, at 406580 cycles and 0 ERROR / 0 WARNING. IE and KE are NOT the
+    # 1.49531e-04 mm at t = 2.994002 -- +0.21 % against the LS-DYNA nodout's
+    # NEAREST SAMPLE (1.49216e-04 at t = 2.99) and +0.007 % against the closed
+    # form at the same time, the sample-time offset being the larger of the two
+    # errors -- at 406580 cycles and 0 ERROR / 0 WARNING. IE and KE are NOT the
     # observable here: the LS reference energies are structural zeros and the
     # campaign row is and stays not_comparable.
     #
@@ -7235,9 +7243,25 @@ class ConvertOptions:
     # on a deck that also carries a real thermal boundary condition it would
     # OVERWRITE the conduction solution instead of adding to it. It is
     # therefore dropped, with the drivers named, whenever the deck states a
-    # *BOUNDARY_{TEMPERATURE,CONVECTION,FLUX,RADIATION}* or a *LOAD_THERMAL_* /
-    # *LOAD_HEAT_*. *INITIAL_TEMPERATURE is NOT in that set -- it is the T0 of
-    # the closed form, a required companion, not a blocker.
+    # *BOUNDARY_{TEMPERATURE,CONVECTION,FLUX,RADIATION}* or a *LOAD_HEAT_*.
+    # *INITIAL_TEMPERATURE is NOT in that set -- it is the T0 of the closed
+    # form, a required companion, not a blocker.
+    #
+    # The screen reads ALL THREE drop buckets, because a keyword k2rad
+    # REGISTERS and declines lands in `recognized_not_emitted` and in neither
+    # of the other two: screening `skipped_keywords` alone was a filter keyed
+    # on a field those records do not have, and MEASURED on thermal-stress with
+    # one card added, *BOUNDARY_THERMAL_WELD, *BOUNDARY_TEMPERATURE_RSW,
+    # *BOUNDARY_TEMPERATURE_TRAJECTORY and *BOUNDARY_THERMAL_BULKNODE all
+    # passed a gate that exists to stop them (4 of 4; live reach 0, since the
+    # four F: *BOUNDARY_THERMAL_WELD decks all state TGMULT 0.0).
+    #
+    # The ONE family that does NOT block is *LOAD_THERMAL_OPTION on a
+    # *CONTROL_SOLUTION SOLN 1 or 2 deck: Vol I R17 p.33-162 says LS-DYNA
+    # ignores it there, k2rad drops it for the same reason
+    # (`_drop_load_thermal_on_thermal_soln`), and a card inert in BOTH codes
+    # cannot veto a restatement. TGMULT only acts on a thermal-solve deck, so
+    # that is the only case.
     #
     # Reach: 1 deck key on 1 emitted model on the whole 885-deck roster. The
     # other 17 *MAT_THERMAL_* decks state TGMULT 0 and are byte-identical.
@@ -7273,8 +7297,9 @@ class ConvertOptions:
     # 4.1x the cycles. The class's own census, taken with this module's
     # resolver over the 356-key R14 roster (4 Yaris include-pullers excluded BY
     # NAME), is 15 interfaces on 14 deck keys -- one of them created by the
-    # round's own all-rigid-SSID swap (sphere1) -- and TWELVE of the fifteen
-    # have no measured arm at all. A press-fit *CONTACT_*_INTERFERENCE is
+    # round's own all-rigid-SSID swap (sphere1). Exactly TWO of the fifteen,
+    # twobar and sphere1, have a measured solver arm at this factor; the other
+    # THIRTEEN have none at all. A press-fit *CONTACT_*_INTERFERENCE is
     # excluded outright: it needs a LARGE gap to engage, which is why k2rad
     # already forces Inacti = 0 on that family. (Reach of that exclusion on
     # this corpus: 0 -- EXP_SC_CONTACT_INTERFERENCE's main surface is SHELL
@@ -7329,10 +7354,16 @@ class ConvertOptions:
     rigid_secondary_swap: bool = True
     # --no-deformable-to-rigid: leave a *DEFORMABLE_TO_RIGID part DEFORMABLE.
     # ON by default. See ConversionState.deformable_to_rigid for the card and
-    # writer/rbody.py for the machinery; MEASURED on pend.imp, the deck's
-    # energy error goes 99.9 % -> -0.0 % (internal energy 5.162e5 -> 5.901e-06
-    # against the LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA
-    # takes 9 479.
+    # writer/rbody.py for the machinery; MEASURED on pend.imp (nt 4), the
+    # deck's ENGINE energy-error column goes 99.9 % -> -0.0 % in 9 480 cycles
+    # where LS-DYNA takes 9 479. That -0.0 % is the engine's own energy
+    # balance, NOT a deviation from the reference: the campaign row still reads
+    # ie_dev +17.19 % (internal energy 5.901e-06 against the LS-DYNA reference
+    # 5.03545e-06 -- both structural zeros on a gravity pendulum) and stays a
+    # `deviation`, not a `match`. The FIDELITY channel on this deck is the
+    # KINETIC energy: 21.8702 against 21.874, -0.017 %, with the whole KE
+    # trajectory inside +/-0.07 % at 11 matched times where the shipped arm was
+    # +5 649 % at t = 0.012.
     deformable_to_rigid: bool = True
     # Mesh transform: downgrade 10-node quadratic tets to 4-node linear tets
     # (keep the 4 corners, drop mid-edge nodes). Stiffer/less accurate but lets a
@@ -7358,8 +7389,11 @@ class ConvertOptions:
     # TIMESTEP LIMIT **" reach NORMAL TERMINATION with the card gone — ex_01
     # x3 (elform 2/6/16, all at cycle 20), ex_14 x4 (cycle 33), ex_15 x3
     # (cycle 38). ex_01_thin_shell_elform_2 goes from ERROR at t = 0.105 to
-    # NORMAL at t = 1.000, IE 0.7061 vs the LS-DYNA reference's 0.818398
-    # (-13.7 %); ex_14_solid_elform_1 from ERROR TERMINATION (ISTOP=-2 at
+    # NORMAL at t = 1.000, IE 0.7028 vs the LS-DYNA reference's 0.818398
+    # (-14.12 %) -- the COMBINED arm; the IE 0.7061 / -13.7 % this comment used
+    # to quote was measured before --qstat-dtscal 10 reached the same deck's
+    # _0001.rad, the second time in two rounds a one-item arm drifted on this
+    # very deck (MISTAKES #137); ex_14_solid_elform_1 from ERROR TERMINATION (ISTOP=-2 at
     # cycle 52) to NORMAL at cycle 33, t = 0.01839 of 0.02, engine energy
     # error -0.7 %, IE 5.044e7 / KE 4.974e7 against 2.4162e7 / 3.937e7 (the
     # -3.1 % / 1.417e7 / 3.231e7 this comment used to quote is the SAME deck
@@ -7620,6 +7654,38 @@ class ConvertOptions:
     # /PART referencing it by hand — and the Bunreacted derivation returns with
     # it, because then the check applies again.
     ale_multimat_law51: bool = False
+
+    def __post_init__(self) -> None:
+        """Refuse a numeric lever the writer would otherwise print verbatim.
+
+        The CLI and the GUI both validate these two, but ``convert()`` is a
+        public entry point of its own and used to pass whatever it was handed
+        straight through. MEASURED through the API before this check:
+        ``qstat_dtscal=-3.0`` wrote the cell ``-3`` and ``0.0`` wrote ``0``,
+        which is a division by zero in ``M/((1+alpha)*beta*(DTSCAL*dt)^2)``
+        (``imp_dyna.F:351-356``); a non-numeric string became the default 10
+        silently, so the caller's value simply never arrived.
+        ``derived_gapmin_factor <= 0`` would ask the writer for a non-positive
+        ``Gapmin``, which is starter ``ERROR 785`` (``i7sti3.F:1068``).
+        """
+        v = self.qstat_dtscal
+        if not (isinstance(v, str) and v.strip().lower() == "none"):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "qstat_dtscal must be a number or 'none', not "
+                    f"{self.qstat_dtscal!r}")
+            if not fv > 0.0:
+                raise ValueError(
+                    f"qstat_dtscal must be > 0 (got {fv:g}); pass 'none' to "
+                    "emit no /IMPL/QSTAT card at all. The engine divides by "
+                    "(DTSCAL*dt)^2 (imp_dyna.F:351-356).")
+        if not float(self.derived_gapmin_factor) > 0.0:
+            raise ValueError(
+                "derived_gapmin_factor must be > 0 (got "
+                f"{self.derived_gapmin_factor!r}); a non-positive Gapmin is "
+                "starter ERROR 785 (i7sti3.F:1068).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

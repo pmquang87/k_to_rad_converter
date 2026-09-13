@@ -358,8 +358,10 @@ def convert(
         TIMESTEP LIMIT **`` reach NORMAL TERMINATION without the card
         (``ex_01`` x3 at cycle 20, ``ex_14`` x4 at cycle 33, ``ex_15`` x3 at
         cycle 38); ``ex_01_thin_shell_elform_2`` goes from ERROR at
-        ``t = 0.105`` to ``t = 1.000`` at IE −13.7 % against its LS-DYNA
-        reference, and ``ex_14_solid_elform_1`` from ERROR TERMINATION to
+        ``t = 0.105`` to ``t = 1.000`` at IE −14.12 % against its LS-DYNA
+        reference (the COMBINED arm — the −13.7 % this entry used to quote was
+        measured before ``--qstat-dtscal 10`` reached the same deck), and
+        ``ex_14_solid_elform_1`` from ERROR TERMINATION to
         NORMAL at cycle 33, engine energy error −0.7 % (the −3.1 % this entry
         used to quote is the ``--no-default-hourglass`` arm of the same deck,
         measured before the hourglass default reached it). Three
@@ -436,9 +438,10 @@ def convert(
         applied every cycle (``fixtemp.F:180-199``) and would overwrite a
         conduction solution rather than add to it. MEASURED on
         ``thermal/thermal-stress``: the free-expansion displacement of node 2
-        goes from exactly 0.0 to 1.49531e-04 mm against the LS-DYNA
-        ``nodout``'s 1.49216e-04 at ``t = 2.99`` (+0.21 %), at 406 580 cycles
-        and 0 ERROR / 0 WARNING. Quote the DISPLACEMENT — that deck's LS
+        goes from exactly 0.0 to 1.49531e-04 mm at ``t = 2.994002`` -
+        +0.21 % against the LS-DYNA ``nodout``'s NEAREST SAMPLE
+        (1.49216e-04 at ``t = 2.99``) and +0.007 % against the closed form at
+        the same time - at 406 580 cycles and 0 ERROR / 0 WARNING. Quote the DISPLACEMENT — that deck's LS
         reference energies are structural zeros.
     deformable_contact_recipe : bool
         Apply the validated stabilization recipe for an implicit deck with

@@ -2051,6 +2051,15 @@ _THERMAL_BOUNDARY_KEYWORD = {
     "RADIATION": "*BOUNDARY_RADIATION",
 }
 
+#: Keyword PREFIXES of every LS-DYNA spelling that moves a temperature and
+#: which k2rad may end up not converting. Both unparsed-and-skipped and
+#: parsed-but-not-emitted spellings are screened with this tuple — see
+#: :func:`_tgmult_blocking_drivers` for why one bucket is not enough.
+_THERMAL_DRIVER_PREFIXES = (
+    "LOAD_HEAT", "LOAD_THERMAL", "BOUNDARY_TEMPERATURE", "BOUNDARY_CONVECTION",
+    "BOUNDARY_FLUX", "BOUNDARY_RADIATION", "BOUNDARY_THERMAL",
+)
+
 
 def _tgmult_blocking_drivers(state: ConversionState) -> List[str]:
     """Every temperature-moving card this deck STATES, by keyword.
@@ -2059,6 +2068,23 @@ def _tgmult_blocking_drivers(state: ConversionState) -> List[str]:
     ``*BOUNDARY_CONVECTION`` k2rad had to drop is still part of the model
     LS-DYNA ran, so an adiabatic closed form would be a different model either
     way.
+
+    **Both drop buckets are read, not just one.** A keyword k2rad does not
+    parse at all lands in ``skipped_keywords``; a keyword it REGISTERS and then
+    declines (``handlers._thermal_deferred``, which serves
+    ``*BOUNDARY_THERMAL_WELD``, ``*BOUNDARY_TEMPERATURE_RSW`` /
+    ``_TRAJECTORY`` / ``_PERIODIC_SET``, ``*BOUNDARY_THERMAL_BULKNODE`` /
+    ``_BULKFLOW``, ``*BOUNDARY_FLUX_TRAJECTORY`` and the ``*LOAD_THERMAL_*``
+    spellings with no counterpart) lands in ``recognized_not_emitted`` and in
+    NEITHER of the other registries. Screening only ``skipped_keywords`` was a
+    filter keyed on a field those records do not have: MEASURED on
+    ``thermal/thermal-stress`` with one ``*BOUNDARY_THERMAL_WELD`` added, the
+    gate passed and an ``/IMPTEMP`` was emitted that would have clamped away
+    the very field the weld source drives. Reproduced for
+    ``*BOUNDARY_TEMPERATURE_RSW``, ``*BOUNDARY_TEMPERATURE_TRAJECTORY`` and
+    ``*BOUNDARY_THERMAL_BULKNODE`` — 4 of 4 passed a gate that exists to stop
+    them. (Live reach when the hole was found: 0 — the four ``F:`` decks
+    carrying ``*BOUNDARY_THERMAL_WELD`` all state ``TGMULT 0.0``.)
     """
     names: Set[str] = set()
     for d in state.imposed_temperatures:
@@ -2067,16 +2093,26 @@ def _tgmult_blocking_drivers(state: ConversionState) -> List[str]:
         names.add(_THERMAL_BOUNDARY_KEYWORD.get(bc.kind, f"*BOUNDARY_{bc.kind}"))
     if state.load_thermal_elements:
         names.add("*LOAD_THERMAL_*_ELEMENT_<FAMILY>")
-    # ...and the spellings k2rad does not PARSE. Screening only the resolved
-    # registries would be a filter keyed on a field those records do not have:
-    # *LOAD_HEAT_GENERATION_{SOLID,SHELL} reaches no handler at all and lands
-    # in skipped_keywords with no warning of its own, and it is the closest
-    # thing LS-DYNA has to a second volumetric generation.
-    for kw in state.skipped_keywords:
-        if kw.startswith(("LOAD_HEAT", "LOAD_THERMAL", "BOUNDARY_TEMPERATURE",
-                          "BOUNDARY_CONVECTION", "BOUNDARY_FLUX",
-                          "BOUNDARY_RADIATION")):
-            names.add(f"*{kw}")
+    # ...and the spellings that reach no /IMPTEMP, /IMPFLUX, /CONVEC or
+    # /RADIATION — whether because no handler parses them at all
+    # (*LOAD_HEAT_GENERATION_{SOLID,SHELL}, the closest thing LS-DYNA has to a
+    # second volumetric generation) or because a handler names them and
+    # declines (every _thermal_deferred spelling).
+    for kw in list(state.skipped_keywords) + [k for k, _ in
+                                              state.recognized_not_emitted]:
+        if not kw.startswith(_THERMAL_DRIVER_PREFIXES):
+            continue
+        # The ONE family that does not block, for the same reason
+        # `_drop_load_thermal_on_thermal_soln` drops its parsed members: Vol I
+        # R17 p.33-162 says *LOAD_THERMAL_OPTION temperatures "are ignored in a
+        # thermal only or coupled thermal/structural analysis", and TGMULT only
+        # ever acts on such a deck. A card inert in BOTH codes cannot veto a
+        # restatement. *LOAD_HEAT_* is NOT in that family — it is a volumetric
+        # generation and blocks.
+        if (kw.startswith("LOAD_THERMAL")
+                and state.ctrl_solution_soln in (1, 2)):
+            continue
+        names.add(f"*{kw}")
     return sorted(names)
 
 
@@ -2147,6 +2183,16 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
             "a hard Dirichlet reset every cycle (fixtemp.F:180-199) and would "
             "clamp that gradient away instead of letting it diffuse.")
         return False
+    if not _tgmult_nodes(state, pids):
+        # Checked HERE and not at emit time, because the /FUNCT is minted a few
+        # lines below and the single /FUNCT emitter has already run by the time
+        # `_make_tgmult_imptemps` walks the records — a drop taken there left an
+        # orphan curve behind and shifted every later auto id.
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} is DROPPED - "
+            f"part(s) {pids} carry no element whose nodes could form the "
+            "/IMPTEMP group.")
+        return False
     rate = float(tm.tgmult) / rho_cp
     tgrlc = int(tm.tgrlc or 0)
     # T(t) = T0 + TGMULT*f(t)/(rho*Cp). f is the TGRLC curve when the card
@@ -2171,18 +2217,35 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
                if state.ctrl_termination and state.ctrl_termination.endtim > 0
                else 1.0)
         pts = [(0.0, float(t0)), (end, float(t0) + rate * end)]
-    # next_curve_id(), never next_id(): /FUNCT and /TABLE share ONE starter
-    # duplicate scan (hm_read_table.F:88 counts "total number /TABLE + /FUNCT"
-    # before the UDOUBLE pass) and a collision is ERROR 79 (k2rad #111).
-    fid = state.next_curve_id()
-    state.curves[fid] = Curve(
-        lcid=fid, title=f"Auto_tgmult_T_tmid{tm.tmid}_{fid}",
-        sfa=1.0, sfo=1.0, offa=0.0, offo=0.0, pts=pts)
-    state.curve_order.append(fid)
+    # The /FUNCT is NOT minted here: `_screen_tgmult_generations` may still
+    # withdraw this record, and an id taken is never given back, so a refused
+    # deck would carry a shifted auto-id sequence (measured: [90001..90004]
+    # against the opt-out arm's [90001..90003]). `_mint_tgmult_curves` runs
+    # after the screen, in the same resolve pass, and still long before the
+    # single /FUNCT emitter at the "functions" section.
     state.tgmult_generations.append(TgmultGeneration(
         tmid=tm.tmid, mid=mid, pids=pids, tgmult=float(tm.tgmult),
-        tgrlc=tgrlc, rho_cp=rho_cp, t0=float(t0), rate=rate, func_id=fid))
+        tgrlc=tgrlc, rho_cp=rho_cp, t0=float(t0), rate=rate, pts=pts))
     return True
+
+
+def _mint_tgmult_curves(state: ConversionState) -> None:
+    """Give every SURVIVING TGMULT record its ``/FUNCT``.
+
+    ``next_curve_id()``, never ``next_id()``: ``/FUNCT`` and ``/TABLE`` share
+    ONE starter duplicate scan (``hm_read_table.F:88`` counts "total number
+    /TABLE + /FUNCT" before the UDOUBLE pass) and a collision is ERROR 79
+    (k2rad #111).
+    """
+    for rec in state.tgmult_generations:
+        if rec.func_id:
+            continue
+        fid = state.next_curve_id()
+        rec.func_id = fid
+        state.curves[fid] = Curve(
+            lcid=fid, title=f"Auto_tgmult_T_tmid{rec.tmid}_{fid}",
+            sfa=1.0, sfo=1.0, offa=0.0, offo=0.0, pts=list(rec.pts))
+        state.curve_order.append(fid)
 
 
 def _screen_tgmult_generations(state: ConversionState) -> None:
@@ -2199,6 +2262,15 @@ def _screen_tgmult_generations(state: ConversionState) -> None:
 
     Either way every record is withdrawn (not just the odd one out): what is
     wrong is the model, not one card.
+
+    Nothing has to be un-minted here, and that is the point: the ``/FUNCT``
+    used to be created inside ``_resolve_tgmult_generation``, BEFORE this
+    screen could run, so a refusal left an orphan curve behind and shifted
+    every later auto id — MEASURED on a two-material SOLN-2 coupon, auto ids
+    ``[90001..90004]`` against the ``--no-tgmult-imptemp`` arm's
+    ``[90001..90003]``. The mint moved to ``_mint_tgmult_curves``, which runs
+    AFTER this screen, so a refused deck now reproduces the opt-out arm byte
+    for byte and no withdrawal code exists to go stale.
     """
     recs = state.tgmult_generations
     if not recs:
@@ -2729,6 +2801,7 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             rho_cp, a_s, bs, t1, al, bl, _efrac(state))
 
     _screen_tgmult_generations(state)
+    _mint_tgmult_curves(state)
 
     if refused:
         state.warn(
@@ -3786,6 +3859,13 @@ def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
     The ``/FUNCT`` id comes from ``next_curve_id()``: ``/FUNCT`` and ``/TABLE``
     share ONE starter duplicate scan (``hm_read_table.F:88``) and a collision
     is ERROR 79 (k2rad #111).
+
+    **No empty-node branch here.** ``_resolve_tgmult_generation`` refuses a
+    record whose parts carry no element, so ``_tgmult_nodes`` is non-empty for
+    every record that reaches this loop. The check used to live here and could
+    not withdraw the ``/FUNCT`` it was rejecting — the single ``/FUNCT``
+    emitter runs at the "functions" assembly step, far above "thermal" — so it
+    was moved to the one place that still can.
     """
     if not state.tgmult_generations:
         return []
@@ -3796,12 +3876,6 @@ def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
     emitted = False
     for rec in state.tgmult_generations:
         nodes = _tgmult_nodes(state, rec.pids)
-        if not nodes:
-            state.warn(
-                f"*MAT_THERMAL_* {rec.tmid}: TGMULT={rec.tgmult:g} is DROPPED "
-                f"- part(s) {rec.pids} carry no element whose nodes could "
-                "form the /IMPTEMP group.")
-            continue
         fid = rec.func_id
         gid = state.next_grnod_id()
         tid = state.next_id()
@@ -3828,8 +3902,11 @@ def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
             + (f"*f(t) (TGRLC {rec.tgrlc})" if rec.tgrlc else "*t") + ". "
             "MEASURED on thermal/thermal-stress: the free-expansion "
             "displacement of node 2 goes from exactly 0.0 (all 500 T01 states, "
-            "all 12 DX/DY/DZ channels) to 1.49531e-04 mm against the LS-DYNA "
-            "nodout's 1.49216e-04 at t = 2.99, +0.21 %, at 406580 cycles and "
+            "all 12 DX/DY/DZ channels) to 1.49531e-04 mm at t = 2.994002 - "
+            "+0.21 % against the LS-DYNA nodout's NEAREST SAMPLE "
+            "(1.49216e-04 at t = 2.99), and +0.007 % against the closed form "
+            "at the same time, the sample-time offset being the larger of the "
+            "two errors - at 406580 cycles and "
             "0 ERROR / 0 WARNING. IE and KE are NOT the observable on that "
             "deck - its LS-DYNA reference energies are structural zeros. "
             "/IMPTEMP is a HARD Dirichlet reset applied every cycle "
@@ -4086,6 +4163,17 @@ def _warn_constant_driver_expansion(state: ConversionState) -> None:
         return
     if state.thermal_source_emitted:
         return                       # a heat source moves the field for real
+    if state.tgmult_generations:
+        # A synthesized TGMULT /IMPTEMP is a MOVER by construction: its /FUNCT
+        # is the ramp T0 + TGMULT*f(t)/(rho*Cp), and its record lives in
+        # `tgmult_generations`, NOT in `imposed_temperatures`. Without this
+        # line every test below ran over an EMPTY list — no `movers`, no early
+        # return from either loop, an empty `consts` — and the deck's own
+        # carrier (thermal/thermal-stress) was told in the log that it
+        # "develops NO thermal strain from these cards" three lines after the
+        # A4 warning reported node 2 moving 0.0 -> 1.49531e-04 mm, with the
+        # constant printed as an empty "()".
+        return
     movers = [d for d in state.imposed_temperatures if d.lcid]
     if movers:
         return
