@@ -2506,6 +2506,33 @@ a rigid body)
 `*CONSTRAINED_RIGID_BODIES` → one merged `/RBODY`: the slave rigid part's nodes
 fold into the master's secondary-node group (chains `A←B←C` resolve
 transitively), and the slave part id still resolves for loads/motions/readouts
+`*DEFORMABLE_TO_RIGID` (the PLAIN spelling) → the named part is rigid **from
+`t = 0`** — Vol I R17 p.18-1: *"Deformable parts may be switched to rigid at the
+start of the calculation by specifying them on the \*DEFORMABLE_TO_RIGID
+card"* — and is emitted as an `/RBODY` through the same path a `*MAT_RIGID`
+part takes. The part KEEPS its own deformable material (the card is a PART
+switch, not a material one, so the pid is recorded rather than the MID; a
+MID-keyed record would re-title the law and make every other part sharing it
+rigid too). `LRB ≠ 0` folds through the same `*CONSTRAINED_RIGID_BODIES`
+union-find, and `PTYPE = PSET` is refused by name with its `*INCLUDE_TRANSFORM`
+offset caveat — both have **0 carriers** on every corpus this converter is
+measured against. ONE predicate (`writer/common.rigid_part_ids`) answers "is
+this part rigid?" for the `/RBODY` builder, the `/GRAV` scope, the
+`*INITIAL_VELOCITY` re-point, the contacts, `/XREF`, damping and the composite
+layup screen; a consumer left on `state.mat_rigid` alone would silently treat
+the part as deformable — measured, an `/RBODY` the gravity-group builder does
+not see makes `pend.imp` a 0.000 / 0.000 zero model at 9 480 NORMAL cycles.
+MEASURED on `intro-by-k.-weimar/misc/pendulum-i/pend.imp.k` at `nt 4`: the
+part's elements are deactivated (`hm_read_rbody.F:700-722`), so the controlling
+element goes SOLID at `dt` 1.360e-06 to TRUSS at **1.794e-05** — LS-DYNA's own
+1.79363E-05 — and the deck's energy error goes **99.9 % to −0.0 %** (internal
+energy 5.162e5 to 5.901e-06 against the LS-DYNA reference 5.03545e-06) in
+**9 480** cycles where LS-DYNA takes 9 479. `--no-deformable-to-rigid` leaves
+the part deformable and reports the loss. The run-time-triggered options
+(`_AUTOMATIC`, `_INERTIA`, `*RIGID_DEFORMABLE_*`) are **refused by name**, with
+the Radioss mechanism that would carry them spelled out (`/RBODY` card 1
+`sens_ID` + a `/SENSOR/TIME`, `hm_read_rbody.F:363-388`, `rbyonf.F:331/399`):
+they have 0 live cards on 893 corpus files, so no arm could be measured
 `*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` — without
 failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
@@ -3365,18 +3392,36 @@ volumes*
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`.
 The SSID side becomes the secondary `/GRNOD` and the MSID side the main
 `/SURF`, so **the deformable part belongs on the SSID side**: `/INTER/TYPE7`
-is an asymmetric node-to-surface contact, and rigid-body nodes cannot form a
-secondary node group. A contact whose SSID side is entirely rigid (a loading
-platen or impactor put on the secondary side) therefore has no interface to
-emit; k2rad **warns, names the interface, states the physical consequence and
-the side-swap remedy, and reports the loss under "Recognized but not
-emitted"** rather than dropping it silently. It deliberately does *not* swap
-the sides for you — that would convert a model you did not write. The same
-reporting covers a main side that resolves to no surface, an all-parts
-self-contact with no deformable nodes, the `SOFT`-routed
-`*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`. A *partially*
-rigid secondary side keeps its interface and warns about the nodes removed
-from it.
+is an asymmetric node-to-**segment** contact and only the secondary nodes are
+checked against the main segments. A contact whose SSID side is **entirely
+rigid** (a loading platen or impactor put on the secondary side) used to lose
+its whole interface. On an **explicit** deck k2rad now **swaps the roles** —
+the deformable MSID side supplies the tracked nodes, the rigid SSID side the
+main `/SURF` — and says so loudly; `--no-rigid-secondary-swap` restores the
+drop. The old claim that a rigid-body node is INADMISSIBLE in a secondary node
+group was REFUTED by measurement: the starter accepts `/RBODY` members in a TYPE7
+node group at **0 ERROR(S)** (`sphere1`, `mat_spring.belted-dummy`), and the
+secondary nodal stiffness is element-based (`i7stslav.F:55-58 STIFINT`), not
+nodal-mass-based. MEASURED at `nt 4`: `sphere1` internal energy 0 (−100 %) →
+77 830 (−1.66 %) against the LS-DYNA reference 79 147.3 with KE −1.73 %, NORMAL
+in 1 592 cycles; `EXP_SC_CONTACT_INTERFERENCE` −100 % → −42.80 % (KE −16.02 %);
+`boundary_prescribed_motion.blow-mold` a diverging 241 934-cycle run at
+t = 0.0061 of 0.015 with a 99.9 % energy error → **NORMAL TERMINATION** at
+t = 0.015 in 25 675 cycles with a −1.3 % energy error. Where **both** sides are
+wholly rigid (`mat_spring.belted-dummy`) there is nothing to swap to, so the
+interface is emitted with the rigid secondary nodes kept — measurably inert on
+this corpus, and a restored load path rather than a silent drop. On an
+**implicit** deck the drop survives, because every restoration arm on
+`implicit/basic-examples/contact-i/bumper.k` diverges at `ISTOP = -2` at
+`nt` 2 and `nt` 4. A one-sided `*CONTACT_AUTOMATIC_SINGLE_SURFACE` names ONE
+side for both roles, so the swap does not apply there and the drop is kept with
+its own reason. The same reporting still covers a main side that resolves to no
+surface, an all-parts self-contact with no surface at all, the `SOFT`-routed
+`*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`: k2rad **warns,
+names the interface, states the physical consequence and the remedy, and
+reports the loss under "Recognized but not emitted"** rather than dropping it
+silently. A *partially* rigid secondary side keeps its interface and warns
+about the nodes removed from it.
 `*CONTACT_SURFACE_TO_SURFACE`, `_ONE_WAY_SURFACE_TO_SURFACE`,
 `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
 `_FORMING_SURFACE_TO_SURFACE_MORTAR` and `_SINGLE_SURFACE` (each optionally
@@ -3391,10 +3436,11 @@ what LS-DYNA fact it could not carry: the non-`AUTOMATIC` spellings are
 ONE-SIDED in LS-DYNA and Radioss has no one-sided segment (p.11-10 item 4 — a
 gain in permissiveness, nothing dropped); the two-way ones are checked from one
 side only by `/INTER/TYPE7` (p.11-8 item 1b — the fact, with NO remedy
-attached: `twobar`'s +1151 % internal energy was measured down to −5.6 % by
-changing the derived `Gapmin`, not by swapping the sides, and a default
-Gapmin for solid-segment interfaces is a round-4 item; `--inter-gapmin
-ID=VAL` is the lever today); `FORMING` ignores the tooling thickness and, on
+attached for a DEFORMABLE pair: `twobar`'s +1151 % internal energy was measured
+down to −5.6 % by changing the derived `Gapmin`, not by swapping the sides,
+which reads +188 % there. An explicit Gapmin for a solid-segment main is now
+available as `--derived-gapmin` (off by default, warned about either way) and
+`--inter-gapmin ID=VAL` still pins one interface); `FORMING` ignores the tooling thickness and, on
 a NEGATIVE `SBST` only, additionally offsets SURFB by `|SBST|/2` (General
 Remark 9 p.11-128),
 neither of which the `(|SAST|+|SBST|)/2` Gapmin reproduces — use
@@ -5414,6 +5460,40 @@ See [`docs/IMPLICIT.md`](docs/IMPLICIT.md) for the full treatment — the K_eff
 stabilization mechanics, the `/BCS`/`*ELEMENT_MASS_PART` layering, the
 `--auto-gapmin` / `--suggest-gapmin` workflow, and the deformable-contact
 recipe.
+
+### `--derived-gapmin` — an explicit Gapmin for a SOLID-segment main surface
+
+k2rad writes `Igap 0` with `Gapmin 0` on every `/INTER/TYPE7` it emits unless
+the card states Card-3 `SAST`/`SBST`, and the starter then derives one itself:
+`i7sti3.F:1055-1063` takes `GAP = 0.1 × GAPMX` whenever no shell thickness was
+accumulated — `DXM` only ever takes `THK` (`:499/506/591`) — and `GAPMX` is the
+**smallest side of any main segment** (`i4gmx3.F:58-66`). So a SOLID-segment
+main surface gets a tenth of its own mesh size as a contact offset, while
+LS-DYNA's own offset on a solid segment is **ZERO** unless `SLDTHK > 0` is
+stated (Vol I R17 p.11-101 default table, p.11-103; `SAST`/`SBST` apply to
+shells and beams only, p.11-33).
+
+k2rad **warns by default** on every such interface, naming the value the
+starter will derive. `--derived-gapmin` writes an explicit
+`--derived-gapmin-factor × min edge` instead (default factor **0.005**, ceiling
+`0.5 × min edge` — the starter's own `WARNING 94` gate at `i7sti3.F:1075` — and
+never a non-positive value, which is `ERROR 785`). Pure standard library,
+unlike `--auto-gapmin`, which needs numpy + scipy.
+
+It is **OFF by default** because the measured arms disagree. On
+`intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm bars, derived
+`GAP MIN` 1.0) the starter's gap costs **+1151 %** internal energy against the
+LS-DYNA reference 3036.17, where the flag's own `0.005 × 10 = 0.05` reads
+**−5.60 %** and KE −6.18 % (factor 0.01 reads +14.45 % and must not be used).
+But the same factor degrades the only other carrier with a measured arm:
+on `sphere1` it writes 0.02921 and internal energy goes −1.66 % → **−7.77 %**
+at 4.1× the cycles. Censused with the writer's own resolver over the 356-key
+R14 roster (the 4 Yaris `*INCLUDE` pullers excluded BY NAME): **15 solid-only-
+main interfaces on 14 deck keys**, one of them created by round 4's
+all-rigid-SSID swap, and **12 of the 15 have no measured arm at all**. A
+press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
+same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
+stabilization stub are excluded from the flag.
 
 ---
 
