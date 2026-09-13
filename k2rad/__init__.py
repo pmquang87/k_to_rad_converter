@@ -396,17 +396,24 @@ def convert(
     arclength_riks : bool
         Emit ``/IMPL/DT/3`` (RIKS arc-length continuation) in place of
         ``/IMPL/DT/2`` when ``*CONTROL_IMPLICIT_SOLUTION`` asks for LS-DYNA's
-        arc-length method — card-1 ``NSOLVR`` in {6,7,8,9}, or card-3
-        ``ARCCTL`` non-zero. **Off by default**; the request is warned about
-        either way. It buys the load path, not the answer: measured at nt 3
-        AND nt 4 on this corpus's three carriers (all ``error_engine`` either
-        way), ``ex_07_beam_elform_1`` walks from ``t = 3e-8`` to ``t = 1.000``
-        at −1.72 % of its reference but still exits ERROR on the last
-        increment, ``ex_06_beam_elform_1`` reaches NORMAL at IE −99.8 % and
-        flips to an ERROR at ``t = 0`` when the thread count changes, and
-        ``ex_05_beam_elform_3_&_6`` turns a 1.5 s ``error_engine`` into a
-        600 s timeout at ``t = 5e-11``. ``/IMPL/DT/FIXPOINT`` is deactivated
-        by the engine under RIKS (``lectur.F:3523-3532``).
+        arc-length method — the manual's own rule (Vol I R17 p.12-354 and
+        p.12-358): ``6 <= NSOLVR <= 9``, or ``NSOLVR = 12`` with card-3
+        ``ARCMTH = 3``. ``ARCCTL`` is NOT part of the predicate — p.12-358
+        defines it as the arc-length CONTROLLING NODE ID whose 0 means
+        *"Generalized arc length method"*, and card 3 is ignored outright
+        unless the method is already active. (An ``ARCCTL != 0`` clause
+        shipped first and is retracted: it made ``ex_06_beam_elform_1`` a
+        carrier, and that deck's own LS-DYNA ``d3hsp`` shows plain BFGS.)
+        Roster reach: **2 keys**. **Off by default**; the request is warned
+        about either way. It buys the load path, not the answer: measured at
+        nt 3 AND nt 4 on both carriers (``error_engine`` either way) against
+        this branch's own flag-off baseline, ``ex_07_beam_elform_1`` walks
+        from ``t = 0.3004`` to ``t = 1.000`` at −1.72 % of its reference but
+        still exits ERROR on the last increment, and
+        ``ex_05_beam_elform_3_&_6`` fails in ~2 s without the flag and with
+        it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
+        ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
+        (``lectur.F:3523-3532``).
     discrete_offset : bool
         Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
         *"a displacement or rotation at time zero … a positive offset on a

@@ -3415,9 +3415,16 @@ in 1 592 cycles; `EXP_SC_CONTACT_INTERFERENCE` −100 % → −42.80 % (KE −16
 `boundary_prescribed_motion.blow-mold` a diverging 241 934-cycle run at
 t = 0.0061 of 0.015 with a 99.9 % energy error → **NORMAL TERMINATION** at
 t = 0.015 in 25 675 cycles with a −1.3 % energy error. Where **both** sides are
-wholly rigid (`mat_spring.belted-dummy`) there is nothing to swap to, so the
+wholly rigid — `mat_spring.belted-dummy`, and after B1 also
+`intro-by-k.-weimar/misc/pendulum-i/pend.imp.k` and
+`intro-by-k.-weimar/misc/pendulum-ii/pendulum.k`, so **3 keys / 3 interfaces
+on 2 emitted models**, not the one key the reach tables first named — there is
+nothing to swap to, so the
 interface is emitted with the rigid secondary nodes kept — measurably inert on
-this corpus, and a restored load path rather than a silent drop. On an
+this corpus, and a restored load path rather than a silent drop. On the two
+pendulums that KEEP is what stops B1 from regressing them: with
+`--no-rigid-secondary-swap`, `pend.imp` emits **0** `/INTER` where master
+emits 1. On an
 **implicit** deck the drop survives, because every restoration arm on
 `implicit/basic-examples/contact-i/bumper.k` diverges at `ISTOP = -2` at
 `nt` 2 and `nt` 4. A one-sided `*CONTACT_AUTOMATIC_SINGLE_SURFACE` names ONE
@@ -4841,6 +4848,44 @@ and two improve. A coarser grid is NOT the fix — at 10 points `ex_15`
 terminates at a 99.9 % energy error and `ex_14` at 86.1 %, both NORMAL
 banners over junk (measured 2026-09-12, `nt = 4`). The cost of 0 is fewer output
 states (15 cycles become 8 on the controls)
+`/IMPL/QSTAT/DTSCAL` is **10 since 2026-09**, changed from 0.1
+(`--qstat-dtscal VALUE|none` to override, `--qstat-dtscal 0.1` to restore).
+That cell scales the inertia stabilization k2rad adds to the implicit tangent:
+`imp_dyna.F:351-355` builds the added diagonal as
+`M/((1+α)β(DTSCAL·dt)²)`, so at 0.1 it was **100×** Radioss's own
+`SCAL_DTQ = 1` (`freimpl.F:135`), and LS-DYNA's standard static implicit adds
+none at all (its own `d3hsp`: *"artificial stabilization flag 2 = off
+('standard' analysis DEFAULT)"*). Reach: **51 deck keys on 40 emitted
+models** on the dynaexamples R14 roster. MEASURED at `nt` 3 **and** `nt` 4
+against each deck's own LS-DYNA `glstat`: `4.2.frf.cant-1` goes from 4 cycles
+and an ERROR to 104 cycles at `t = 1.000`, IE 7922 against the reference
+7946.31 (**−0.31 %**); `tensile2` **+7.36 %**;
+`6.5.tbl.psd.prepressure-1` **+0.03 %**; `doorbeam` ERROR → NORMAL. **The
+cost, named:** `ex_02_thick_shell_elform_{2,3,5}` — 3 deck keys on ONE emitted
+file — go `normal → timeout`; the campaign rows read 1899 / 1896 / 1903 cycles
+at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (`nt` 4) against a run still going at
+the 600 s campaign cap at 10. The verdict does not flip with `nt`, all three
+rows are `not_comparable` both ways (their LS reference **kinetic** energy is
+a structural zero), and `--qstat-dtscal 0.1` reproduces the pre-round-4 file
+**byte for byte** on that family. `none` — emitting no `/IMPL/QSTAT` at all,
+which is Radioss's own default — was measured and is WORSE than either
+(`ex_02` dies at cycle 0, `tensile2` at `t = 0.746`), so it is an escape and
+not a recommendation. `--deformable-contact-recipe` keeps its separately
+validated 0.05 and ignores the flag.
+`*CONTROL_IMPLICIT_SOLUTION`'s arc-length (RIKS) request → `/IMPL/DT/3`,
+**off by default**, `--arclength-riks` to emit it; the request is WARNED about
+either way. The predicate is the manual's own rule (Vol I R17 p.12-354 and
+p.12-358): `6 ≤ NSOLVR ≤ 9`, or `NSOLVR = 12` with card-3 `ARCMTH = 3`.
+`ARCCTL` is the arc-length controlling NODE ID, whose 0 means *"Generalized
+arc length method"* — not a switch; card 3 is ignored outright unless the
+method is already active. Roster reach: **2 keys**. `/IMPL/DT/3` carries SEVEN
+cells where `/IMPL/DT/2` carries five (`freimpl.F:384-387`), and the engine
+DEACTIVATES `/IMPL/DT/FIXPOINT` under RIKS (`lectur.F:3523-3532`), so
+`--fixpoint-count` is dropped with it and says so. It buys the load path, not
+the answer: `ex_07_beam_elform_1` walks from `t = 0.3004` to `t = 1.000` at
+**−1.72 %** of its reference and still exits ERROR on the last increment,
+while `ex_05_beam_elform_3_&_6` turns a ~2 s ERROR into a 600 s timeout —
+which is why it ships off.
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
@@ -5473,7 +5518,7 @@ recipe.
 k2rad writes `Igap 0` with `Gapmin 0` on every `/INTER/TYPE7` it emits unless
 the card states Card-3 `SAST`/`SBST`, and the starter then derives one itself:
 `i7sti3.F:1055-1063` takes `GAP = 0.1 × GAPMX` whenever no shell thickness was
-accumulated — `DXM` only ever takes `THK` (`:499/506/591`) — and `GAPMX` is the
+accumulated — `DXM` only ever takes `THK` (`:506/592/762/845`) — and `GAPMX` is the
 **smallest side of any main segment** (`i4gmx3.F:58-66`). So a SOLID-segment
 main surface gets a tenth of its own mesh size as a contact offset, while
 LS-DYNA's own offset on a solid segment is **ZERO** unless `SLDTHK > 0` is

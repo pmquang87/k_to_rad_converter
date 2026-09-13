@@ -699,12 +699,20 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None
     state.warn(
         f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
         f"{cls.master}) -> /INTER/TYPE18/{inter_id}: every coupling cell "
-        "except the two sides and the two times is NOT PARSED at all - card 1 "
-        "NQUAD, DIREC, MCOUP; card 2 FRIC (the coupling FRICTION coefficient), "
-        "FRCMIN, NORM, NORMTYP, DAMP; the whole of card 3 (K/CQ, HMIN, HMAX, "
-        "ILEAK, PLEAK, LCIDPOR, NVENT, BLOCKAGE); and the whole of the "
-        "optional card 4 (IBOXID, IPENCHK, INTFORC, IALESOF, LAGMUL, PFACMM, "
-        f"THKF) - and CTYPE={cls.ctype} and PFAC={cls.pfac:g} are parsed and "
+        "except the two sides and the two times is NOT PARSED at all. Vol I "
+        "R17 p.10-113/114's Card Summary has SIX cards and all six are "
+        "inventoried here - card 1 NQUAD, DIREC, MCOUP; card 2 FRIC (the "
+        "coupling FRICTION coefficient), FRCMIN, NORM, NORMTYP, DAMP; the "
+        "whole of card 3 (K, HMIN, HMAX, ILEAK, PLEAK, LCIDPOR, NVENT, IBLOCK "
+        "- which the corpus decks' own $# header still spells 'blockage'); "
+        "the whole of the optional card 4 (IBOXID, IPENCHK, INTFORC, IALESOF, "
+        "LAGMUL, PFACMM, THKF); card 5, required for CTYPE 11/12 (A1, B1, A2, "
+        "B2, A3, B3, POREINI); and card 6, one per vent hole (VENTSID, "
+        "VENTYP, VTCOEF, POPPRES, COEFLC). Cards 5 and 6 have ZERO carriers on "
+        "this corpus - every CLIS deck on F: writes at most cards 1-4 (plus a "
+        "_TITLE id line, which is what makes ale_wavehitcol's block five lines "
+        f"long) - so that half is a statement, not a measured loss. CTYPE="
+        f"{cls.ctype} and PFAC={cls.pfac:g} are parsed and "
         "never read. The emitted interface uses a CONSTANT UNIT stiffness "
         "(Stfval = 1.0, Vref = 0.0, Iauto left blank so the starter takes "
         "ISTIFF = 1, 'constant user value' - hm_read_inter_type18.F:131 and "
@@ -725,11 +733,18 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
     FSI penalty then loads that body from cycle 0 against material that should
     not be there, and the run is not a wrong number, it is a different model.
 
-    The predicate is the INTERSECTION, not the presence of either card: a void
-    with no coupling (``bird-el.k``) is a dropped cell and nothing more, and a
-    coupling with no void (``quadrature_A.k`` — which carries the same
-    ``*INITIAL_VELOCITY_GENERATION`` vy = -5000 and is the legitimate control)
-    is correct as emitted.
+    The predicate is the INTERSECTION, not the presence of either card, and
+    BOTH controls are measured. A void with no coupling (``bird-el.k``) is a
+    dropped cell and nothing more, and stays silent. A coupling with no void —
+    ``stagnation_A.k``, ``stagnation_B.k``, ``cylinder_impact_B.k`` and
+    ``ale_wavehitcol.k``, each of which emits its ``/INTER/TYPE18`` and gets
+    the CLIS inventory but NOT this warning — is correct as emitted.
+    (``quadrature_A.k`` used to be named as that control and cannot be: it
+    carries NEITHER card. Its whole keyword list is a pure Lagrangian-velocity
+    ALE model — ``*MAT_NULL`` + ``*EOS_GRUNEISEN`` + ``*MAT_RIGID``, no
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID`` and no ``*INITIAL_VOID`` — so it never
+    reaches this function at all and proved nothing about either arm. It is
+    still the right name for the velocity sibling below.)
     """
     if not state.initial_void_parts:
         return

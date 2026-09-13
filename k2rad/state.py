@@ -7140,13 +7140,20 @@ class ConvertOptions:
     # re-measured if TYPE25 is ever touched).
     #
     # The COST, named: ex_02_thick_shell_elform_{2,3,5} (3 deck keys on ONE
-    # emitted file) go normal -> timeout. 1908 cycles / 10 s NORMAL at 0.1;
-    # at 10 the run is still going at the 600 s campaign cap, having reached
-    # t = 0.32 to 0.60 of 1.0 depending on machine load (three measurements
-    # under three loads), at nt 3 AND nt 4 -- the verdict does not flip with
-    # nt. All three keys are `not_comparable` BOTH WAYS, so what is lost is a
-    # status label and not a benchmark: the rows carry no comparable LS-DYNA
-    # energy either way. Pass 0.1 to restore the old default on such a deck --
+    # emitted file) go normal -> timeout. The campaign rows read 1899 / 1896 /
+    # 1903 cycles at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (nt 4); at 10 the run
+    # is still going at the 600 s campaign cap, having reached t = 0.44 / 0.49
+    # / 0.59 of 1.0 there and t = 0.32 on an independent quiet-machine repeat,
+    # at nt 3 AND nt 4 -- the verdict does not flip with nt. All three keys
+    # are `not_comparable` BOTH WAYS, but say WHY: their LS reference KINETIC
+    # energy is 0.0, a structural zero, which is what each row's own
+    # benchmark note names ("absolute pair: KE (LS 0.0 vs OR 0.0)"). The LS
+    # INTERNAL energy 0.771729 / 0.058509 / 0.100376 is ~1e14x
+    # build_benchmark's own 1e-15 threshold, so it is NOT a structural zero,
+    # it IS comparable, and it degraded: ie_dev -94.6756 -> -98.1237,
+    # -30.1133 -> -83.0829, -59.3528 -> -91.8985. The VERDICT label does not
+    # move; the benchmark number on that channel does. Pass 0.1 to restore
+    # the old default on such a deck --
     # on THIS family it reproduces the pre-round-4 file BYTE FOR BYTE, so the
     # escape costs nothing else. Note also that the 600 s budget is the
     # clamp's FLOOR: joblist_or.csv derives it as clamp(4 x lsdyna_elapsed_s,
@@ -7298,7 +7305,7 @@ class ConvertOptions:
     #
     # WHAT THE STARTER DOES WITHOUT IT. i7sti3.F:1055-1063: with Igap 0 and
     # GAP <= 0 the starter derives one itself, and because DXM only ever
-    # accumulates SHELL THICKNESS (i7sti3.F:499/506/591) a solid-segment main
+    # accumulates SHELL THICKNESS (i7sti3.F:506/592/762/845) a solid-segment main
     # leaves NDX = 0 and takes the `GAP = EM01 * GAPMX` fallback -- one TENTH
     # of the smallest main-segment side (i4gmx3.F:58-66). LS-DYNA's own offset
     # on a solid segment is ZERO unless SLDTHK > 0 is stated (Vol I R17

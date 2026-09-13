@@ -425,11 +425,13 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="Arc-length (RIKS) /IMPL/DT/3 when *CONTROL_IMPLICIT_SOLUTION asks "
-                     "for it (NSOLVR 6-9 or ARCCTL != 0) — OFF by default; the request "
+                     "for it (Vol I R17 p.12-354: 6 <= NSOLVR <= 9, or NSOLVR 12 with "
+                     "card-3 ARCMTH = 3 — ARCCTL is the controlling NODE ID, not a "
+                     "switch) — OFF by default; the request "
                      "is warned about either way. It buys the load path, not the "
-                     "answer: ex_07 reaches t=1.000 at -1.72 % but still ERRORs on the "
-                     "last increment, ex_06's NORMAL is IE -99.8 % and flips with the "
-                     "thread count, and ex_05 turns a 1.5 s error into a 600 s timeout",
+                     "answer: ex_07 walks from t=0.3004 to t=1.000 at -1.72 % but still "
+                     "ERRORs on the last increment, and ex_05 turns a ~2 s error into a "
+                     "600 s timeout",
             variable=self.arclength_riks).grid(
                 row=21, column=0, columnspan=3, sticky="w", **pad)
 

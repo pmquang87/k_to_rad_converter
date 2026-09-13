@@ -2433,6 +2433,36 @@ class PartBDocsTests(unittest.TestCase):
         self.assertIn("--no-rigid-secondary-swap", text)
         self.assertIn("--derived-gapmin", text)
 
+    def test_EVERY_new_flag_reaches_the_README(self):
+        """The round shipped nine new levers and documented seven. The two
+        missing ones were the IMPLICIT pair — ``--qstat-dtscal``, the round's
+        largest default change (51 keys on 40 models) and its only lost
+        NORMAL, whose escape ``--qstat-dtscal 0.1`` is exactly what a user hit
+        by that regression needs to find, and ``--arclength-riks``. Round 3's
+        own flipped default has a full paragraph three lines away in the same
+        README section, so the precedent was there to match.
+
+        Scoped to ROUND 4's own nine levers rather than to every flag the
+        parser owns: several older options are documented under their
+        ``--no-`` spelling only or not at all, which is a separate debt and
+        not what this guard is about. Each name is also asserted to BE a real
+        parser option, so a renamed flag fails here instead of quietly passing
+        on a stale string.
+        """
+        text = self._read("README.md")
+        parser = cli.build_parser()
+        known = {opt for action in parser._actions
+                 for opt in action.option_strings}
+        for flag in ("--qstat-dtscal", "--arclength-riks",
+                     "--no-discrete-offset",
+                     "--no-spring-token-mass-compensation",
+                     "--no-tgmult-imptemp", "--no-deformable-to-rigid",
+                     "--no-rigid-secondary-swap", "--derived-gapmin",
+                     "--derived-gapmin-factor"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, known, "not a parser option any more")
+                self.assertIn(flag, text, "absent from README.md")
+
     def test_the_changelog_quotes_pend_imp_and_sphere1(self):
         text = self._read("CHANGELOG.md")
         self.assertIn("5.03545e-06", text)

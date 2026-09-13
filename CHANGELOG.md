@@ -48,13 +48,26 @@ Prior history (before this changelog was introduced) is summarized in the
     combined arm if TYPE25 is ever touched.
     **The named cost:**
     `introduction/Introduction/example-02/ex_02_thick_shell_elform_{2,3,5}` —
-    **3 deck keys on ONE emitted file** — go `normal → timeout`: 1908 cycles /
-    10 s NORMAL at 0.1 against a run still going at the campaign's own 600 s
-    cap at 10, having reached `t` **0.32 to 0.60** of 1.0 across three
-    measurements under three machine loads, at nt 3 **and** nt 4 — the verdict
-    does not flip with `nt`. All three rows are `not_comparable` BOTH WAYS
-    (their LS IE 0.771729 / 0.058509 / 0.100376 are structural zeros), so no
-    benchmark fidelity is lost — only ledger status and 3 × 600 s of budget.
+    **3 deck keys on ONE emitted file** — go `normal → timeout`: the campaign
+    rows read **1899 / 1896 / 1903 cycles at 24.1 / 24.8 / 33.6 s** NORMAL at
+    0.1 (nt 4) against a run still going at the campaign's own 600 s cap at 10,
+    having reached `t` **0.44 / 0.49 / 0.59** of 1.0 there and **0.32** on an
+    independent quiet-machine repeat, at nt 3 **and** nt 4 — the verdict does
+    not flip with `nt`. (First shipped as *"1908 cycles / 10 s"* and *"t 0.32 to
+    0.60"*: the pair came from a research agent's own local run and was never
+    labelled as one, while the ledger and report §0.19 carried 1899 / 24.1 s
+    all along. `--help` now quotes the database.)
+    All three rows are `not_comparable` BOTH WAYS — but say WHICH channel:
+    their LS reference **KINETIC** energy is 0.0, a structural zero, and that
+    is what each row's own benchmark note names (*"absolute pair: KE (LS 0.0 vs
+    OR 0.0)"*). The LS **INTERNAL** energy 0.771729 / 0.058509 / 0.100376 is
+    ~1e14× `build_benchmark`'s own `abs(x) <= 1e-15` threshold, so it is NOT a
+    structural zero, it IS the comparable channel, and it **degraded**:
+    `ie_dev` −94.6756 → −98.1237, −30.1133 → −83.0829 (+52.97 pp), −59.3528 →
+    −91.8985 (+32.55 pp). The earlier wording (*"their LS IE … are structural
+    zeros, so no benchmark fidelity is lost"*) named the wrong channel and is
+    retracted: the ledger VERDICT does not move, the benchmark NUMBER on the
+    comparable channel does, and 3 × 600 s of budget go with it.
     Pass `--qstat-dtscal 0.1` to restore the old default on such a deck; on
     THIS family it reproduces the pre-round-4 file **byte for byte**, so the
     escape costs nothing else. The 600 s budget is also the clamp's FLOOR —
@@ -67,7 +80,10 @@ Prior history (before this changelog was introduced) is summarized in the
     `4.2.frf`'s cycle count becomes nt-DEPENDENT (98 at nt 3, 107 at nt 4,
     where 10 gives 104 at both). Reach: **51 deck keys on 40 emitted models**,
     every one of them a `not_comparable` row, so A1 moves
-    `openradioss.status` and nothing else. `--deformable-contact-recipe` keeps
+    `openradioss.status` and, on 20 already-converged rows, the `ie_dev`
+    INSIDE an unchanged `not_comparable` verdict (8 worse / 12 better, largest
+    +0.4461 pp on `ex_01_thin_shell_elform_16`). *"and nothing else"* shipped
+    first and is retracted: the verdict LABEL is what does not move. `--deformable-contact-recipe` keeps
     its separately validated 0.05 and IGNORES the flag (the recipe branch is
     evaluated first, exactly as before).
     *Golden moved, with its justification:*
@@ -75,14 +91,39 @@ Prior history (before this changelog was introduced) is summarized in the
     the ONLY golden line in the whole of part A — no other fixture carries an
     `/IMPL` block, and `grep -rn QSTAT tests/fixtures/` returns this one file.
 
-  - **A2 `NSOLVR ∈ {6,7,8,9}` or card-3 `ARCCTL ≠ 0` → `/IMPL/DT/3` (RIKS) —
-    OPT-IN behind `--arclength-riks`, and WARNED about either way.**
+  - **A2 `6 ≤ NSOLVR ≤ 9`, or `NSOLVR = 12` with card-3 `ARCMTH = 3`, →
+    `/IMPL/DT/3` (RIKS) — OPT-IN behind `--arclength-riks`, and WARNED about
+    either way.**
     `ControlImplicitSolution.nsolvr` had been marked "PARSED AND UNUSED" and
-    `ARCCTL` was not parsed at all; card 3 is now read (`ARCCTL ARCDIR ARCLEN
+    card 3 was not parsed at all; it is now read (`ARCCTL ARCDIR ARCLEN
     ARCMTH ARCDMP ARCPSI ARCALF ARCTIM`, verified against
-    `ex_06_beam_elform_1.k`'s own `$#` header line) because `ex_06` states
-    `NSOLVR 12` and asks for the arc-length method through **`ARCCTL 6` alone**
-    — an NSOLVR-only predicate would miss the corpus's only ARCCTL carrier.
+    `ex_06_beam_elform_1.k`'s own `$#` header line).
+    **The predicate first shipped as `NSOLVR ∈ {6,7,8,9}` or `ARCCTL ≠ 0`,
+    and that is RETRACTED.** Vol I R17 p.12-354 and again on the card-3
+    definition page p.12-358 state the rule verbatim, twice: *"The contents of
+    this card are ignored unless an arc-length method is activated
+    (6 ≤ NSOLVR ≤ 9, or NSOLVR = 12 and ARCMTH = 3)"*, and *"ARCCTL — Arc
+    length controlling node ID (see Remark 7). EQ.0: Generalized arc length
+    method"*. `ARCCTL` is a NODE ID whose 0 selects the generalized variant of
+    a method already on — not a switch that turns one on — and the identical
+    sentence is in Vol I R16, so it is not an R17 novelty. `ARCMTH`, the cell
+    that DOES activate it under NSOLVR 12 (*"Setting ARCMTH = 3 invokes an arc
+    length method"*, the p.12-354 EQ.12 gloss), was not parsed at all, so the
+    correct predicate could not even be computed.
+    The deck the retracted clause was written for settles it: `ex_06` states
+    `NSOLVR 12 / ARCMTH 1 / ARCCTL 6`, and its own LS-DYNA reference `d3hsp`
+    reads `solution method ... 12` with the legend *"eq.12: nonlinear,
+    (experimental), BFGS updates with optional arclength"* and card 6 echoing
+    *"arc length formulation 1 = Crisfield (generalized arc length only)"*
+    beside *"eq.3: Modified Crisfield (used with nonlinear solution method 12
+    only)"*. **LS-DYNA ran it with plain BFGS.** So `ex_06` was getting a
+    default-ON warning saying it had asked for arc length, and under the flag
+    would have been converted to a solver LS-DYNA did not use. Corrected
+    reach: **2 keys** (`ex_05_beam_elform_3_&_6`, `ex_07_beam_elform_1`, both
+    NSOLVR 6), not 3. The `NSOLVR 12 + ARCMTH 3` arm has 0 carriers here and
+    is stated as a rule, not as a measured save. Emitted bytes by default:
+    **none** (A2 ships OFF); `ex_06` loses one warning and that is the whole
+    observable change.
     The card carries SEVEN fields, not five: `freimpl.F:384-387` READs
     `NL_DTP ALEN0 NL_DTN SCAL_DTN SCAL_DTP IAL_M SCAL_RIKS` list-directed from
     ONE record, so a `/IMPL/DT/2`-shaped line would run off the end of it; the
@@ -90,17 +131,24 @@ Prior history (before this changelog was introduced) is summarized in the
     **It ships OPT-IN because the repeat at a second nt REFUTED it as a
     default** — the batch's own condition was "ship after ONE repeat at a
     second nt", and the repeat did not confirm. Measured at nt 3 AND nt 4 on
-    all three carriers, every one `error_engine` either way:
-    `ex_07_beam_elform_1` walks from t = 3e-8 to **t = 1.000 at −1.72 %** of
-    its reference (identical at both nt) but still exits ERROR on the last
-    increment (its own `RCTOL = 1e-5`); `ex_06_beam_elform_1` reaches NORMAL at
-    **IE −99.8 %** — a NORMAL that is not a result — and combined with the
-    shipped `/IMPL/QSTAT/DTSCAL 10` it reads −0.08 % at nt 4 and **ERROR at
-    t = 0 at nt 3**, an nt-flip that is not quotable as a figure;
-    `ex_05_beam_elform_3_&_6` is a measured REGRESSION, 111 734 cycles to
-    t = 5.08e-11 and a **600 s TIMEOUT where it used to fail in 1.5 s**, and no
-    card field separates it from `ex_07` (both are NSOLVR 6 / ARCCTL 0), so a
-    narrower predicate is not available. It buys the load path, not the answer;
+    both carriers, each `error_engine` either way, and each stated against
+    **this branch's own flag-off baseline**, which `/IMPL/QSTAT/DTSCAL 10` had
+    already moved: `ex_07_beam_elform_1` walks from **t = 0.3004** (its
+    campaign row at `330fe91`: `error_engine`, cycle 38, `ie_dev` −63.806) to
+    **t = 1.000 at −1.72 %** of its reference (identical at both nt) but still
+    exits ERROR on the last increment (`ISTOP -2`, MESSAGE ID 79; its own
+    `RCTOL = 1e-5`). *First shipped as "walks from t = 3e-8", which is
+    MASTER's state — retracted.* `ex_05_beam_elform_3_&_6` is a measured
+    REGRESSION: ~2 s to ERROR without the flag, and with it tens of thousands
+    of cycles to `t ~ 1e-7` of 1.0 and a **600 s TIMEOUT**; no card field
+    separates it from `ex_07` (both NSOLVR 6 / ARCCTL 0 / ARCMTH 1), so a
+    narrower predicate is not available and this regression carries the opt-in
+    decision on its own. *An `ex_06` nt-flip ("NORMAL at nt 4, ERROR at t = 0
+    at nt 3") was cited beside it and is WITHDRAWN twice over: an independent
+    quiet-machine repeat of the shipped combined arm gives NORMAL TERMINATION
+    at BOTH nt — 16 565 cycles / IE −0.0934 % at nt 4 and 5 503 cycles /
+    −0.0740 % at nt 3, agreeing to 0.02 pp — and under the manual's own
+    predicate `ex_06` is not an arc-length carrier at all.* It buys the load path, not the answer;
     net movers **zero**, and it is counted as none. `/IMPL/DT/FIXPOINT` is
     deactivated by the engine under RIKS (`lectur.F:3523-3532` prints
     `** WARNING :RIKS METHOD IS NOT COMPATIBLE WITH FIXED TIME POINT` and sets
@@ -209,9 +257,13 @@ Prior history (before this changelog was introduced) is summarized in the
     `_elform_to_isolid`'s `.get` default and STAY there, because round 3's
     hourglass remap is gated to `_ONE_POINT_SOLID_ELFORMS`. Measured against
     this corpus's own byte-identical sibling pair,
-    `ex_03_solid_elform_-1_4x6x4_mesh` reads −21.66 % against its own reference
-    and **−0.030 % against the ELFORM-2 one**; `ex_04`, four times finer,
-    −5.78 % / +0.055 %. No Radioss `Isolid` reproduces −1/−2 (24 / 18 / 14 give
+    `ex_03_solid_elform_-1_4x6x4_mesh` reads −21.72 % against its own reference
+    and **−0.103 % against the ELFORM-2 one**; `ex_04`, four times finer,
+    −5.84 % / −0.006 %. (First shipped as −21.66 / −0.030 / −5.78 / +0.055 —
+    the PRE-round-4 column; A1's own `/IMPL/QSTAT/DTSCAL` moved all four,
+    `ex_03_solid_elform_2` by a factor 3.4 and `ex_04_solid_elform_2` across
+    zero. Corrected to this branch's campaign rows.) No Radioss `Isolid`
+    reproduces −1/−2 (24 / 18 / 14 give
     −5.75 / −5.18 / −6.27 % on ex_03 and REGRESS four other decks —
     `ex_27_solid_elform_-2_rigidwall` loses the population's only `match`), and
     `Icpre` cannot help: `hm_read_prop14.F:296-303` already FORCES `Icpre = 1`
@@ -2430,6 +2482,134 @@ Prior history (before this changelog was introduced) is summarized in the
   presented for veto at merge time.**
 
 ### Fixed
+
+- **R14 round 4, the REVIEW round — two laws measured wrong, one guard that
+  could not fire, two mutations nothing caught, and eleven figures re-measured
+  on the branch's own rows.** Three independent verifiers re-checked the
+  finalize round's own output; every finding below was re-verified against the
+  LS-DYNA manual page, the OpenRadioss source or the campaign database before
+  it was acted on, and **two were REJECTED because their cited fact did not
+  survive that check** (below). **0 byte movers:** all 356 roster keys
+  converted from `F:` are SHA256-identical before and after
+  (352 by conversion on two pristine detached checkouts with `k2rad.__file__`
+  printed and asserted per side, 0 errors; the 4 Yaris/Camry keys excluded BY
+  NAME and settled by census instead — **0** `*MAT_THERMAL_*` cards anywhere in
+  their include trees, and the two that state `*CONTROL_IMPLICIT_SOLUTION` read
+  `NSOLVR 12 / ARCMTH 1 / ARCCTL 0`, which neither the old predicate nor the
+  new one fires on). **18 keys move their WARNING record**, and they are
+  exactly the predicted ones: the 14 derived-Gapmin carriers (15 interfaces)
+  reworded 12 → 13, `ex_05` and `ex_07` reworded, `ex_06` **loses** its
+  arc-length warning, `thermal-stress` reworded. The campaign ledger is
+  untouched and every campaign figure still covers the shipped code.
+
+  - **MAJOR — `ARCCTL` is a NODE ID, not an arc-length switch.** See the A2
+    entry above for the full retraction. Reach 3 keys → **2**.
+  - **MAJOR — `TGRLC > 0` wrote the RATE into the temperature curve instead of
+    integrating it.** See the A4 entry. `T(t) = T0 + (TGMULT/(ρ·Cp))·∫f dt` now,
+    at all fourteen sites that stated the formula, with the shipped test's
+    expectation corrected from a temperature that FELL under a strictly
+    positive generation. A negative `TGRLC` (rate against TEMPERATURE) is
+    refused by name, and the uniformity screen compares the curve as well as
+    the scalar rate. Corpus reach **0**.
+  - **MAJOR — `--derived-gapmin`'s unmeasured count, and a guard that could
+    not fail.** The finalize round recorded "12 → 13 at six sites"; it reached
+    four. Three SHIPPED sites still read 12 — `writer/contacts.py`'s
+    default-ON runtime warning, `ConvertOptions.derived_gapmin`'s docstring
+    (three lines below its own *"the only OTHER carrier with a measured arm"*,
+    i.e. 2 + 12 = 14 of a 15-interface class) and the GUI tooltip. The guard
+    greps the literal `"12 of the 15"` while the survivors spell it
+    `"12 of the class's 15"`, and it read only `cli`/`state`/`__init__`/the two
+    docs, so `writer/contacts` and `k2rad_gui` were never scanned: **MEASURED,
+    the substring is absent from every text the guard reads, so the assertion
+    could never fail.** The guard now walks every `k2rad/**/*.py` plus the GUI
+    and matches a regex, and a companion test runs that regex over each
+    retracted spelling so it is proven to have teeth.
+  - **MAJOR — two designed mutations the whole suite did not catch**, both
+    proven observable, both correct code with no test reaching them.
+    `_min_segment_side` walking `range(k - 1)` — skipping each segment's
+    CLOSING side — stays green because every fixture carries its minimum
+    elsewhere, yet returns 8.0 instead of 2.0 on a quad whose short side is
+    `n4 → n1`; `_round_sig`'s `sig` 4 → 6 stays green because every fixture's
+    minimum edge is exactly 1.0, yet turns `sphere1`'s written cell `0.02921`
+    into `0.0292064`. Both pinned.
+  - **The one lost NORMAL's stated reason named the wrong channel.** *"their
+    LS IE 0.771729 / 0.058509 / 0.100376 are structural zeros, so no benchmark
+    fidelity is lost"* — `build_benchmark` defines a structural zero as
+    `abs(x) <= 1e-15` and those IE values are ~1e14× it. Each `ex_02` row's own
+    note names the other channel (*"absolute pair: KE (LS 0.0 vs OR 0.0)"*).
+    The IE IS comparable and **degraded** — `ie_dev` −94.6756 → −98.1237,
+    −30.1133 → −83.0829, −59.3528 → −91.8985. Corrected at four sites; the
+    verdict claim (unchanged, `not_comparable` both ways) stands.
+  - **`--help` quoted a figure the ledger does not carry.** The `ex_02` escape
+    arm shipped as *"1908 cycles / 10 s"*; the campaign rows read **1899 /
+    1896 / 1903 cycles at 24.1 / 24.8 / 33.6 s** (nt 4) and report §0.19 quotes
+    24.1 s at 1899. The pair came from a research agent's own local run and was
+    never labelled as one. `--help`, `state.py`, the CHANGELOG and the report
+    now state one number, and the 600 s band's lower bound is the campaign
+    rows' own 0.44 / 0.49 / 0.59 beside the quiet-machine repeat's 0.32.
+  - **`--qstat-dtscal` and `--arclength-riks` reached no README row** — seven
+    of the round's nine new levers were documented and the two IMPLICIT ones
+    were not, including the round's largest default change (51 keys on 40
+    models) and its only lost NORMAL, whose escape is what a user hit by that
+    regression needs to find. Round 3's own flipped default has a full
+    paragraph three lines away in the same section. Both added, and a test now
+    asserts every round-4 flag reaches the README.
+  - **A5's four sibling figures were the PRE-round-4 column.** The
+    assumed-strain warning quoted −21.66 / −0.030 / −5.78 / +0.055; A1's own
+    `/IMPL/QSTAT/DTSCAL` moved all four on this branch to −21.72 / −0.103 /
+    −5.84 / −0.006 — `ex_03_solid_elform_2` by a factor 3.4,
+    `ex_04_solid_elform_2` across zero. Re-measured at three sites.
+  - **`quadrature_A` was named as a control for an arm it never reaches.** The
+    `*INITIAL_VOID` × `/INTER/TYPE18` docstring called it *"a coupling with no
+    void … the legitimate control"*; MEASURED on the `F:` deck it carries
+    NEITHER card (`grep -c` 0 for both), so it never enters the function. The
+    real controls are named and measured instead — `stagnation_A`,
+    `stagnation_B`, `cylinder_impact_B` and `ale_wavehitcol`, each of which
+    emits the coupling and gets the CLIS inventory but NOT the void warning.
+  - **The CLIS inventory stopped at card 4 while claiming completeness.** Vol I
+    R17 p.10-113/114's Card Summary has SIX cards; card 5 (`A1 B1 A2 B2 A3 B3
+    POREINI`, required for CTYPE 11/12) and card 6 (`VENTSID VENTYP VTCOEF
+    POPPRES COEFLC`, one per vent hole) were unnamed. Both added with their
+    zero-carrier census — every CLIS deck on `F:` writes at most cards 1–4
+    (plus a `_TITLE` id line, which is what makes `ale_wavehitcol`'s block five
+    lines long). Card 3's eighth cell is named `IBLOCK`, R17's spelling, with
+    the decks' own `$#` header spelling `blockage` noted beside it.
+  - **`ex_07`'s A2 arm and the "and nothing else" clause** both stated
+    against the wrong baseline. `t = 3e-8` is MASTER's state; this branch's own
+    flag-off baseline is `t = 0.3004` (campaign row at `330fe91`). And A1 moves
+    `openradioss.status` *and* the `ie_dev` inside an unchanged
+    `not_comparable` verdict on 20 rows (8 worse / 12 better, largest +0.4461
+    pp on `ex_01_thin_shell_elform_16`).
+  - **B2's KEEP reach was understated by 2 keys**, and the understatement hid
+    the combined B1×B2 arm. Re-derived by converting all 352 non-Yaris roster
+    keys and grepping the two shipped warning strings: SWAP **4 keys / 5
+    interfaces** (`forging_A` ×2, `sphere1`, `blow-mold`, `EXP_SC`) — which
+    matches — and KEEP **3 keys / 3 interfaces on 2 emitted models**
+    (`mat_spring.belted-dummy`, `pend.imp`, `pendulum-ii/pendulum`), not 1.
+    The two extra carriers exist only because B1 makes both pendulum bodies
+    rigid in the same round, so *"1 key kept"* was master's PRE-round drop
+    class. It matters: with `--no-rigid-secondary-swap`, `pend.imp` emits
+    **0** `/INTER` where master emits 1, so B1 shipped without B2's KEEP would
+    DELETE the round's headline deck's interface.
+  - **The DXM citation was off by one and short by two sites.**
+    `i7sti3.F:499/506/591` → `506/592/762/845` — all four `DXM = DXM + DX`
+    accumulations, read at source, all four inside shell-element branches, so
+    the conclusion (a solid main takes the `EM01*GAPMX` fallback) is unchanged.
+  - **One stated exception on the ONE rigid-part predicate** and its ROADMAP
+    entry (NOT-closed item 18): on an element-free `*DEFORMABLE_TO_RIGID` part
+    `rigid_part_ids` calls rigid what `_make_rbodies` declines to emit.
+    Reach 0; named in the docstring and pinned rather than fixed by
+    re-deriving the emitter's node walk, because *"emits an `/RBODY`"* is a
+    different question from *"is rigid"*.
+  - **REJECTED — *"`imp_dyna.F:1148` should be `:1147`"*.** `grep -n
+    "SCAL_DTQ==ONE"` returns **1148**; `:1147` is the comment line above it.
+    The shipped citation is correct and is kept.
+  - **REJECTED — *"ROADMAP's `grep -c RIGIDWALL` = 0 on
+    `ex_27_..._constrained_nodes_implicit.k` is refuted, a grep returns 1"*.**
+    It returns 1 only CASE-INSENSITIVELY, on the title line *"Copper Bar
+    Impacting a Rigidwall"*; the case-sensitive grep the ROADMAP wrote really
+    is 0. The pattern is anchored to `^\*RIGIDWALL` anyway so the ambiguity
+    cannot recur, and the numbers are unchanged.
 
 - **R14 round 4, the finalize round — every defect the four validators
   confirmed, re-verified against the code and the sources before it was acted

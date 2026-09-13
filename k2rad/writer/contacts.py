@@ -718,7 +718,7 @@ def _gapmin_override(state: ConversionState, inter_id: int, base: float,
 #   1075    IF ((INACTI /= 7).AND.(GAP > 0.5*GAPMX).AND.(IREM_GAP /= 2))
 #                                -> ANCMSG(MSGID=94, MSGWARNING)
 #
-# DXM/NDX accumulates ONLY shell thickness (i7sti3.F:499/506/591), so a
+# DXM/NDX accumulates ONLY shell thickness (i7sti3.F:506/592/762/845), so a
 # solid-segment main leaves NDX = 0 and takes GAP = 0.1 x GAPMX, and
 # i4gmx3.F:58-66 ("C MINIMUM LENGTH OF SEGMENT SIDES") makes GAPMX the SMALLEST
 # side length of any main segment, skipping N1 == N2 and zero-length pairs.
@@ -971,7 +971,7 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         "no Gapmin is stated, so the OpenRadioss starter derives one itself - "
         f"GAP MIN = 0.1 x {_round_sig(min_edge):g} (the smallest main-surface "
         f"segment side) = {derived:g} (i7sti3.F:1055-1063; DXM only ever "
-        "accumulates shell thickness, i7sti3.F:499/506/591, so a solid main "
+        "accumulates shell thickness, i7sti3.F:506/592/762/845, so a solid main "
         "takes the EM01*GAPMX fallback, and GAPMX is the smallest segment side, "
         "i4gmx3.F:58-66). LS-DYNA's own offset on a solid segment is ZERO "
         "unless SLDTHK > 0 is stated (Vol I R17 p.11-101 default 0.0, p.11-103; "

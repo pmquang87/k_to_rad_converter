@@ -6339,7 +6339,7 @@ _CONTACT_SPELLING_NOTES = {
         "(verified on the already-registered AUTOMATIC carrier "
         "ex_26_thin_shell_elform_16), and i7sti3.F:1055-1063 then derives "
         "`GAP = 0.1 * GAPMX` from the MESH SIZE whenever no shell thickness "
-        "was accumulated (`DXM` only ever takes THK, i7sti3.F:499/506/591). "
+        "was accumulated (`DXM` only ever takes THK, i7sti3.F:506/592/762/845). "
         "The flag is OFF by default because the measured arms disagree; a "
         "default-ON warning names the derived value on every carrier either "
         "way. Set one interface with --inter-gapmin <id>=VAL."),
