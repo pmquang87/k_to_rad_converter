@@ -9419,7 +9419,10 @@ def handle_deformable_to_rigid(block: Block, state: ConversionState) -> None:
     which is MID-keyed (see the state field's comment for why that distinction
     is load-bearing).
 
-    ``PSET`` is expanded here, at parse time, so every consumer sees part ids.
+    ``PSET`` is EXPANDED here, at parse time, so every consumer sees part ids —
+    it is not refused. Only a set the deck never defines is, and both branches
+    carry the ``*INCLUDE_TRANSFORM`` caveat, the found-set one because there
+    the expansion succeeds silently on whatever set now holds the offset id.
     Reach on the measured corpora: **0 PSET cards**, and 0 non-zero ``LRB``.
 
     ``--no-deformable-to-rigid`` is honoured in the WRITER
@@ -9451,6 +9454,18 @@ def handle_deformable_to_rigid(block: Block, state: ConversionState) -> None:
                     "AFTER the offset pass.")
                 continue
             pids = [p for p in ps[1] if p > 0]
+            # The *INCLUDE_TRANSFORM caveat belongs on THIS branch too, and
+            # more than on the missing-set one: here the expansion SUCCEEDS,
+            # silently, on whatever set now carries the offset part id.
+            state.warn(
+                f"*DEFORMABLE_TO_RIGID PTYPE=PSET expands part set {pid} to "
+                f"part(s) {sorted(pids)}, which become rigid at t = 0. Note "
+                "for *INCLUDE_TRANSFORM decks: the id in column 1 is offset "
+                "as a PART id (assembly._OFFSET_SPECS), because PTYPE is read "
+                "AFTER the offset pass - inside a transform this card can "
+                "therefore name the WRONG set without failing. (Reach of the "
+                "PSET spelling on the measured corpora: 0 cards, so this arm "
+                "is untested against a reference.)")
         else:
             pids = [pid]
         for p in pids:

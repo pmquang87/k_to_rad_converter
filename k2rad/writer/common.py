@@ -129,9 +129,22 @@ def rigid_part_ids(state: ConversionState) -> Set[int]:
     ``state.all_mat_ids``, ``assembly``'s ``*MAT_RIGID`` MID offsetter)
     deliberately do NOT use this: a ``*DEFORMABLE_TO_RIGID`` part's material is
     still its own law and is still emitted as such.
+
+    **``--no-deformable-to-rigid`` is honoured HERE too**, so that this
+    predicate and ``rbody._deformable_to_rigid_map`` — the emitter — always
+    name the same set. Unconditional, this function said "rigid" about a part
+    the opt-out leaves DEFORMABLE in the emitted deck: MEASURED on a two-part
+    D2R coupon with the flag set, no ``/RBODY`` is written, yet
+    ``*DAMPING_GLOBAL`` damped only 8 of the 12 nodes and the ``/XREF`` screen
+    dropped the part's reference geometry under a message saying "it converts
+    to an /RBODY" on a deck that emits none. (Corpus reach of the opt-out:
+    0 decks — the default path never saw this.) The refusal MESSAGE still has
+    exactly one home, in ``_deformable_to_rigid_map``; what is shared here is
+    the predicate, not the warning.
     """
     out = {p for p, part in state.parts.items() if part.mid in state.mat_rigid}
-    out |= set(state.deformable_to_rigid)
+    if state.options.deformable_to_rigid:
+        out |= set(state.deformable_to_rigid)
     return out
 
 

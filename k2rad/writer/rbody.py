@@ -394,6 +394,12 @@ def _warn_deformable_to_rigid(state: ConversionState, pid: int,
         "LS-DYNA's own 1.79363E-05, and the deck's energy error goes 99.9 % to "
         "-0.0 % (internal energy 5.162e5 to 5.901e-06 against the LS-DYNA "
         "reference 5.03545e-06) in 9 480 cycles where LS-DYNA takes 9 479."
+        " That -0.0 % is the ENGINE's own energy balance, not a deviation "
+        "from the reference: the campaign row still reads ie_dev +17.19 % and "
+        "stays a deviation, both energies being structural zeros on a gravity "
+        "pendulum. The FIDELITY channel here is the KINETIC energy - 21.8702 "
+        "against 21.874, -0.017 %, the whole trajectory inside +/-0.07 % at "
+        "11 matched times."
         + merge +
         " Mass and inertia come from the MESH, as in LS-DYNA. Pass "
         "--no-deformable-to-rigid to leave the part deformable.")
@@ -403,7 +409,10 @@ def _deformable_to_rigid_map(state: ConversionState) -> Dict[int, int]:
     """``{pid: LRB}`` for the *DEFORMABLE_TO_RIGID parts this run will convert.
 
     Empty (with the loss recorded) under ``--no-deformable-to-rigid``. This is
-    the ONLY site that reads the option, so the refusal message has one home.
+    the only site that WARNS about the option, so the refusal message has one
+    home. The shared predicate ``writer.common.rigid_part_ids`` reads the same
+    flag — it has to, or the six consumers that ask "is this part rigid?" would
+    answer yes about a part this function leaves deformable.
     """
     if not state.deformable_to_rigid:
         return {}
