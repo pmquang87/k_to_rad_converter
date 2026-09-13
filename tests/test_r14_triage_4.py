@@ -169,6 +169,40 @@ class QstatDtscalArgumentTests(unittest.TestCase):
         args = cli.build_parser().parse_args(["m.k"])
         self.assertEqual(args.qstat_dtscal, 10.0)
 
+    def test_the_THREE_declarations_of_every_default_agree(self):
+        """``ConvertOptions``, ``convert()`` and the parser each state a
+        default, and only two of the three are read on any given run.
+
+        ``convert()`` is the package's only ``ConvertOptions`` construction and
+        always passes every field, so the DATACLASS default is documentation —
+        and a documentation default that drifts from the live one is exactly
+        the shape MISTAKES calls "the same measurement shipping as two
+        numbers". A whole-suite mutation of ``ConvertOptions.qstat_dtscal``
+        10.0 -> 0.1 was MISSED by the round-4 suite until this test; it is the
+        third leg of the ``--fixpoint-count`` lesson.
+        """
+        import inspect
+        from k2rad.state import ConvertOptions
+        opts = ConvertOptions()
+        sig = inspect.signature(convert).parameters
+        parser_defaults = vars(cli.build_parser().parse_args(["m.k"]))
+        for field, parser_name in (("qstat_dtscal", "qstat_dtscal"),
+                                   ("arclength_riks", "arclength_riks"),
+                                   ("discrete_offset", "discrete_offset"),
+                                   ("spring_token_mass_compensation",
+                                    "spring_token_mass_compensation"),
+                                   ("tgmult_imptemp", "tgmult_imptemp")):
+            with self.subTest(field=field):
+                dataclass_default = getattr(opts, field)
+                self.assertEqual(dataclass_default, sig[field].default,
+                                 f"ConvertOptions.{field} disagrees with "
+                                 f"convert()'s signature")
+                self.assertEqual(dataclass_default,
+                                 parser_defaults[parser_name],
+                                 f"ConvertOptions.{field} disagrees with the "
+                                 f"--{parser_name.replace('_', '-')} parser "
+                                 f"default")
+
     def test_none_survives_as_the_string(self):
         args = cli.build_parser().parse_args(["m.k", "--qstat-dtscal", "none"])
         self.assertEqual(args.qstat_dtscal, "none")
