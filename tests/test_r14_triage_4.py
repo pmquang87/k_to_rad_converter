@@ -2695,12 +2695,18 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
         with open(os.path.join(root, name), encoding="utf-8") as fh:
             return fh.read()
 
+    #: Every place a figure may be STATED. CHANGELOG.md is deliberately NOT
+    #: here: it is the one file that may quote a retracted value, exactly as
+    #: ``RetractedSourceCitationsAreGoneEverywhere`` scopes its own guard — and
+    #: ``test_the_changelog_records_both_retractions`` below asserts that it
+    #: does, so the exclusion cannot become a place for a stale figure to hide.
+    _STATING_DOCS = ("README.md", "ROADMAP.md")
+
     def _everywhere(self):
         import k2rad as pkg
         from k2rad import cli, state
         return ([inspect.getsource(m) for m in (cli, state, pkg)]
-                + [self._read(n) for n in
-                   ("README.md", "ROADMAP.md", "CHANGELOG.md")])
+                + [self._read(n) for n in self._STATING_DOCS])
 
     def test_the_stale_ex_01_fixpoint_figure_is_gone(self):
         """``-13.7 %`` was the DTSCAL-0.1 arm; the shipped combined arm reads
@@ -2717,6 +2723,16 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
             self.assertNotIn("12 of the 15", text)
             self.assertNotIn("TWELVE of the fifteen", text)
             self.assertNotIn("12 of them unmeasured", text)
+
+    def test_the_changelog_records_both_retractions(self):
+        """The exclusion above is only sound while the CHANGELOG really does
+        carry the retracted values — a reader has to be able to find out what
+        the number used to be and why it moved."""
+        text = self._read("CHANGELOG.md")
+        for quoted in ("IE -13.7 %", "TWELVE of the fifteen",
+                       "28 of the roster's 41 solid-only mains"):
+            with self.subTest(quoted=quoted):
+                self.assertIn(quoted, text)
 
     def test_the_stub_split_is_the_measured_one(self):
         from k2rad.writer import contacts
