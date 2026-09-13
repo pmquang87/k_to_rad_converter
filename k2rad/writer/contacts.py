@@ -964,7 +964,7 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         f"{inter_id}=VAL for this one interface). It is OFF by default because "
         "it is not uniformly good: on sphere1 the same factor writes 0.02921 "
         "and moves internal energy from -1.66 % to -7.77 % at 4.1x the cycles, "
-        "and 12 of the class's 15 interfaces on the R14 roster have no "
+        "and 13 of the class's 15 interfaces on the R14 roster have no "
         "measured arm at all.")
     state.warn(
         f"/INTER/TYPE7 {inter_id}: the main surface is SOLID segments only and "

@@ -277,7 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Turn a *MAT_THERMAL_* TGMULT (volumetric heat generation) into "
              "an /IMPTEMP holding the closed-form adiabatic solution "
-             "T(t) = T0 + TGMULT*f(t)/(rho*Cp) over the parts' own nodes. ON "
+             "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) over the parts' own nodes. ON "
              "by default, and gated HARD: it fires only when the deck states "
              "NO other temperature driver. The gate names every spelling it "
              "screens, and it screens ALL THREE drop buckets - what k2rad "

@@ -7976,14 +7976,25 @@ def handle_control_implicit_solution(block: Block, state: ConversionState) -> No
     nlprint = to_int(f2[3]) if len(f2) > 3 else 0
     # Card3: arcctl arcdir arclen arcmth arcdmp arcpsi arcalf arctim — the
     # arc-length (Riks) block. Verified against ex_06_beam_elform_1.k's own
-    # "$#" header line, which reads exactly that. ARCCTL is the controlled DOF:
-    # any non-zero value turns the arc-length method on even when NSOLVR is not
-    # one of 6/7/8/9 (ex_06 states NSOLVR 12 / ARCCTL 6), so the
-    # --arclength-riks predicate is the OR of the two.
+    # "$#" header line, which reads exactly that.
+    #
+    # ARCCTL is NOT an activation switch. Vol I R17 p.12-354 and the card-3
+    # definition page (p.12-358) state the rule twice, verbatim: "The contents
+    # of this card are ignored unless an arc-length method is activated
+    # (6 <= NSOLVR <= 9, or NSOLVR = 12 and ARCMTH = 3)", and "ARCCTL - Arc
+    # length controlling node ID (see Remark 7). EQ.0: Generalized arc length
+    # method". So ARCCTL is a NODE ID whose 0 selects the generalized variant,
+    # and ARCMTH is what turns the method on under NSOLVR 12 ("Setting
+    # ARCMTH = 3 invokes an arc length method", p.12-354's NSOLVR EQ.12 gloss).
+    # The identical sentence is in Vol I R16, so it is not an R17 novelty.
+    # Both cells are read here and `_arclength_requested` is the manual's own
+    # rule; ARCMTH is stored as STATED (a blank or absent card 3 gives 0, and
+    # LS-DYNA's own default is 1 — neither is 3, so neither activates).
     f3 = _card(raw, 2, fixed=True, n=8, w=10)
     arcctl = to_int(f3[0]) if f3 else 0
+    arcmth = to_int(f3[3]) if len(f3) > 3 else 0
     state.ctrl_implicit_sol = ControlImplicitSolution(
-        nsolvr, ilimit, maxref, dctol, ectol, nlprint, rctol, arcctl
+        nsolvr, ilimit, maxref, dctol, ectol, nlprint, rctol, arcctl, arcmth
     )
 
 

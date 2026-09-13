@@ -131,8 +131,9 @@ def rigid_part_ids(state: ConversionState) -> Set[int]:
     still its own law and is still emitted as such.
 
     **``--no-deformable-to-rigid`` is honoured HERE too**, so that this
-    predicate and ``rbody._deformable_to_rigid_map`` — the emitter — always
-    name the same set. Unconditional, this function said "rigid" about a part
+    predicate and ``rbody._deformable_to_rigid_map`` — the function that
+    decides WHICH parts the run converts — always name the same set.
+    Unconditional, this function said "rigid" about a part
     the opt-out leaves DEFORMABLE in the emitted deck: MEASURED on a two-part
     D2R coupon with the flag set, no ``/RBODY`` is written, yet
     ``*DAMPING_GLOBAL`` damped only 8 of the 12 nodes and the ``/XREF`` screen
@@ -141,6 +142,22 @@ def rigid_part_ids(state: ConversionState) -> Set[int]:
     0 decks — the default path never saw this.) The refusal MESSAGE still has
     exactly one home, in ``_deformable_to_rigid_map``; what is shared here is
     the predicate, not the warning.
+
+    ONE stated exception, so the invariant above is not read wider than it is.
+    ``_make_rbodies`` — the EMITTER — declines a part that contributes no node
+    at all (no element, no ``*CONSTRAINED_EXTRA_NODES``), warning
+    *"no elements found; /RBODY not emitted — the part is NOT rigid in the
+    converted model"*. This predicate still calls such a part rigid. Reach on
+    the R14 roster: 0 (all four ``*DEFORMABLE_TO_RIGID`` keys own elements),
+    and a part with no nodes contributes nothing to the node-set consumers
+    either — but ``_synthesize_local_motion_frames`` and the ``/XREF`` screen
+    would still speak of an ``/RBODY`` the deck does not carry. Recorded as a
+    ROADMAP NOT-closed item rather than fixed by re-deriving the emitter's node
+    walk here: "emits an ``/RBODY``" is NOT the same question as "is rigid"
+    (``*CONSTRAINED_RIGID_BODIES`` merges a slave's nodes into its master, so a
+    merged slave is rigid and emits no body of its own), and a second
+    implementation of that walk is exactly the drift this ONE predicate exists
+    to remove.
     """
     out = {p for p, part in state.parts.items() if part.mid in state.mat_rigid}
     if state.options.deformable_to_rigid:

@@ -2042,7 +2042,7 @@ def _thermal_material_usable(state: ConversionState, tm, mid: int) -> bool:
 #: solution those cards drive instead of adding to it.
 #:
 #: *INITIAL_TEMPERATURE is deliberately NOT in this set: it is the T0 of the
-#: closed form T(t) = T0 + TGMULT*f(t)/(rho*Cp), a required companion, not a
+#: closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt), a required companion, not a
 #: competing driver. A gate written as "drop whenever any thermal card exists"
 #: excludes the only carrier this rule has.
 _THERMAL_BOUNDARY_KEYWORD = {
@@ -2133,6 +2133,39 @@ def _tgmult_initial_temperature(state: ConversionState, mid: int) -> Optional[fl
     return card[0] if card else 0.0
 
 
+def _integrate_generation(pts: List[Tuple[float, float]], t0: float,
+                          rate: float) -> List[Tuple[float, float]]:
+    """``[(t, T0 + rate*INTEGRAL(f dtau, 0..t))]`` on the curve's OWN abscissae.
+
+    *pts* is the ``TGRLC`` curve — generation RATE against time (Vol II R17
+    p.3-2) — and *rate* is ``TGMULT/(rho*Cp)``. The adiabatic uniform body
+    obeys ``rho*Cp*dT/dt = TGMULT*f(t)``, so the temperature is the running
+    TIME INTEGRAL of the curve. The abscissae are kept exactly as the deck
+    states them, so no shape is lost, and the integral between two consecutive
+    samples is the trapezoid — which is exact for the piecewise-linear
+    interpolation LS-DYNA itself applies to a ``*DEFINE_CURVE``.
+
+    A curve whose first abscissa is above 0 is integrated from ``t = 0`` with
+    its first ordinate held flat back to the origin, which is LS-DYNA's own
+    out-of-range convention for a load curve (the endpoint value is used), and
+    the synthesized ``(0, T0 + ...)`` sample is prepended so the ``/IMPTEMP``
+    covers the whole run. A curve that already starts at or below 0 keeps its
+    own first point as the origin of the integral.
+    """
+    pts = sorted(pts, key=lambda p: p[0])
+    if pts[0][0] > 0.0:
+        pts = [(0.0, pts[0][1])] + pts
+    out: List[Tuple[float, float]] = []
+    acc = 0.0
+    prev_t, prev_y = pts[0]
+    out.append((prev_t, t0))
+    for t, y in pts[1:]:
+        acc += 0.5 * (prev_y + y) * (t - prev_t)
+        out.append((t, t0 + rate * acc))
+        prev_t, prev_y = t, y
+    return out
+
+
 def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
                                rho_cp: float) -> bool:
     """Can this ``TGMULT`` become an ``/IMPTEMP``? Record it, or say why not.
@@ -2151,7 +2184,7 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
         state.warn(
             f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} could not be "
             f"restated as an /IMPTEMP because /HEAT/MAT/{mid}'s RHO0_CP is "
-            f"{rho_cp:g}. The closed form T(t) = T0 + TGMULT*f(t)/(rho*Cp) "
+            f"{rho_cp:g}. The closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) "
             "DIVIDES by it. TGMULT is dropped; state the material's real "
             "capacity (TRO x HC, or the law's own RO x HC) to get the "
             "generation back.")
@@ -2165,7 +2198,7 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
             "as an /IMPTEMP, because this deck also states "
             + ", ".join(blocking) + ": /IMPTEMP is a HARD Dirichlet reset "
             "applied to every node in its group on every cycle "
-            "(fixtemp.F:180-199), so imposing T(t) = T0 + TGMULT*f(t)/(rho*Cp) "
+            "(fixtemp.F:180-199), so imposing T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) "
             "would OVERWRITE the solution those cards drive instead of adding "
             "to it. Remove the other driver, or restate the generation as a "
             "*BOUNDARY_FLUX.")
@@ -2179,7 +2212,7 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
             f"({sorted({it.temp for it in state.initial_temperatures})}), so "
             "the field starts with a real conduction gradient and the "
             "adiabatic uniform-generation closed form "
-            "T(t) = T0 + TGMULT*f(t)/(rho*Cp) is not the solution. /IMPTEMP is "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) is not the solution. /IMPTEMP is "
             "a hard Dirichlet reset every cycle (fixtemp.F:180-199) and would "
             "clamp that gradient away instead of letting it diffuse.")
         return False
@@ -2195,15 +2228,38 @@ def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
         return False
     rate = float(tm.tgmult) / rho_cp
     tgrlc = int(tm.tgrlc or 0)
-    # T(t) = T0 + TGMULT*f(t)/(rho*Cp). f is the TGRLC curve when the card
-    # states one — sampled on its OWN abscissae, so no shape is lost — and the
-    # constant 1 otherwise, where the closed form is a straight line and two
-    # points spanning [0, ENDTIM] are exact.
+    # T(t) = T0 + (TGMULT/(rho*Cp)) * INTEGRAL(f dtau, 0..t).
+    #
+    # TGMULT is a RATE, not a temperature: Vol II R17 p.3-2 defines it as
+    # "Thermal generation rate multiplier" and TGRLC as "GT.0: Load curve ID
+    # giving thermal generation RATE as a function of time". For an adiabatic
+    # uniform body rho*Cp*dT/dt = TGMULT*f(t), so the temperature is the TIME
+    # INTEGRAL of the curve, never the curve itself. A direct map
+    # `T0 + rate*f(t)` shipped here until this was caught: it is dimensionally
+    # dT/dt, it made T fall wherever a strictly positive f fell, and it
+    # contradicted the TGRLC = 0 branch below, which has always integrated the
+    # constant rate 1 (`T0 + rate*end`). 0 carriers on the R14 roster — the one
+    # deck with TGMULT != 0 states TGRLC 0 — so nothing shipped was wrong, but
+    # the default-ON path was.
     pts: List[Tuple[float, float]] = []
+    if tgrlc < 0:
+        # |TGRLC| is a curve of rate vs TEMPERATURE (Vol II R17 p.3-2 "LT.0"),
+        # which makes rho*Cp*dT/dt = TGMULT*g(T) a NONLINEAR ODE whose solution
+        # is not this closed form. Refused by name rather than silently read as
+        # a time curve. 0 carriers on the R14 roster.
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGRLC={tgrlc} is NEGATIVE, so |TGRLC| "
+            "is a curve of generation rate against TEMPERATURE (Vol II R17 "
+            "p.3-2 LT.0), not against time. The adiabatic closed form "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) only solves the "
+            "time-curve form, so TGMULT="
+            f"{tm.tgmult:g} is DROPPED rather than restated on the wrong "
+            "curve.")
+        return False
     if tgrlc:
         curve = state.curves.get(tgrlc)
         if curve is not None and len(curve.pts) >= 2:
-            pts = [(t, float(t0) + rate * v) for t, v in curve.pts]
+            pts = _integrate_generation(list(curve.pts), float(t0), rate)
         else:
             state.warn(
                 f"*MAT_THERMAL_* {tm.tmid}: TGRLC={tgrlc} (the heat-generation "
@@ -2275,9 +2331,16 @@ def _screen_tgmult_generations(state: ConversionState) -> None:
     recs = state.tgmult_generations
     if not recs:
         return
+    # The scalar rate alone is NOT the whole generation: with a TGRLC curve the
+    # history is `rate * f(t)`, so two /HEAT/MATs can carry the same
+    # TGMULT/(rho*Cp) and still drive their parts apart on different curves.
+    # Compare the SHAPE too — the curve id, and the emitted temperature samples
+    # themselves so two different ids holding the same points do not trip it.
     rates = sorted({round(r.rate, 12) for r in recs})
+    shapes = {(r.tgrlc, tuple((round(t, 12), round(v, 12)) for t, v in r.pts))
+              for r in recs}
     uncovered = sorted(set(state.heat_mat_cards) - {r.mid for r in recs})
-    if len(rates) == 1 and not uncovered:
+    if len(rates) == 1 and len(shapes) == 1 and not uncovered:
         return
     why = []
     if uncovered:
@@ -2286,11 +2349,15 @@ def _screen_tgmult_generations(state: ConversionState) -> None:
     if len(rates) > 1:
         why.append(f"the generations run at DIFFERENT rates {rates} "
                    "(TGMULT/(rho*Cp))")
+    elif len(shapes) > 1:
+        why.append("the generations share one rate but run on DIFFERENT TGRLC "
+                   f"curves {sorted({r.tgrlc for r in recs})}, so their "
+                   "temperature histories separate")
     state.warn(
         "*MAT_THERMAL_* TGMULT on material(s) "
         f"{sorted(r.tmid for r in recs)} is DROPPED rather than synthesized as "
         "an /IMPTEMP: " + "; and ".join(why) + ". The adiabatic "
-        "uniform-generation closed form T(t) = T0 + TGMULT*f(t)/(rho*Cp) is "
+        "uniform-generation closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) is "
         "only the solution while the whole field stays uniform, and /IMPTEMP "
         "is a hard Dirichlet reset every cycle (fixtemp.F:180-199) - it would "
         "hold one side of a real conduction front instead of letting it "
@@ -3854,7 +3921,7 @@ def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
     temperature-moving card, starts from one uniform temperature, and every
     ``/HEAT/MAT`` generates at the same rate. Under exactly those conditions
     the nodal heat balance has one term and its solution is the uniform,
-    closed-form ``T(t) = T0 + TGMULT*f(t)/(rho*Cp)``.
+    closed-form ``T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)``.
 
     The ``/FUNCT`` id comes from ``next_curve_id()``: ``/FUNCT`` and ``/TABLE``
     share ONE starter duplicate scan (``hm_read_table.F:88``) and a collision
@@ -3898,8 +3965,12 @@ def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
             f"temperature driver in the deck -> /IMPTEMP/{tid} over "
             f"{len(nodes)} node(s) of part(s) {rec.pids}, func_IDT={fid}: the "
             "adiabatic uniform-generation solution "
-            f"T(t) = T0 + TGMULT*f(t)/(rho*Cp) = {rec.t0:g} + {rec.rate:g}"
-            + (f"*f(t) (TGRLC {rec.tgrlc})" if rec.tgrlc else "*t") + ". "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dtau, 0..t) = "
+            f"{rec.t0:g} + {rec.rate:g}"
+            + (f"*INTEGRAL(f dtau) (TGRLC {rec.tgrlc}, the generation-RATE "
+               "curve - Vol II R17 p.3-2 - so the temperature is its running "
+               "TIME INTEGRAL, trapezoidal on the curve's own abscissae, "
+               "never the curve itself)" if rec.tgrlc else "*t") + ". "
             "MEASURED on thermal/thermal-stress: the free-expansion "
             "displacement of node 2 goes from exactly 0.0 (all 500 T01 states, "
             "all 12 DX/DY/DZ channels) to 1.49531e-04 mm at t = 2.994002 - "
@@ -4165,7 +4236,7 @@ def _warn_constant_driver_expansion(state: ConversionState) -> None:
         return                       # a heat source moves the field for real
     if state.tgmult_generations:
         # A synthesized TGMULT /IMPTEMP is a MOVER by construction: its /FUNCT
-        # is the ramp T0 + TGMULT*f(t)/(rho*Cp), and its record lives in
+        # is the ramp T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt), and its record lives in
         # `tgmult_generations`, NOT in `imposed_temperatures`. Without this
         # line every test below ran over an EMPTY list — no `movers`, no early
         # return from either loop, an empty `consts` — and the deck's own

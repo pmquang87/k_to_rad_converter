@@ -316,7 +316,7 @@ def convert(
         ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
         the only other carrier with a measured arm (``sphere1``, where it
         writes 0.02921 and internal energy goes −1.66 % → −7.77 % at 4.1× the
-        cycles), and 12 of the class's 15 interfaces on the 356-key R14 roster
+        cycles), and 13 of the class's 15 interfaces on the 356-key R14 roster
         have no measured arm at all — which is why it is opt-in. A press-fit
         ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
         stabilization stub are excluded.
@@ -434,7 +434,7 @@ def convert(
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
-        ``T(t) = T0 + TGMULT·f(t)/(ρ·Cp)`` over the parts' own nodes. **On by
+        ``T(t) = T0 + (TGMULT/(ρ·Cp))·∫f dt`` over the parts' own nodes. **On by
         default**, and gated hard: it fires only when the deck states no OTHER
         temperature driver, because ``/IMPTEMP`` is a hard Dirichlet reset
         applied every cycle (``fixtemp.F:180-199``) and would overwrite a

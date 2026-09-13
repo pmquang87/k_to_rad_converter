@@ -468,7 +468,7 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="*MAT_THERMAL_* TGMULT -> /IMPTEMP (the adiabatic closed form "
-                     "T = T0 + TGMULT*f(t)/(rho*Cp)) — ON, and only on a deck with NO "
+                     "T = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)) — ON, and only on a deck with NO "
                      "other temperature driver. Measured on thermal-stress: node 2's "
                      "free expansion goes from exactly 0.0 to 1.49531e-04 mm against "
                      "the LS-DYNA nodout's 1.49216e-04 (+0.21 %)",
@@ -714,7 +714,7 @@ class ConverterGUI:
         ttk.Label(fc, text="OFF by default; a warning names the starter-derived GAP MIN either way. "
                            "Gapmin = factor × the smallest main-surface segment side (ceiling 0.5 ×). "
                            "twobar: the starter's own gap is +1151 % vs its LS reference, 0.005 is -5.6 % — "
-                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 12 of the class's "
+                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 13 of the class's "
                            "15 R14-roster interfaces are unmeasured.",
                   foreground="gray").grid(row=22, column=1, columnspan=2, sticky="w", padx=6)
 

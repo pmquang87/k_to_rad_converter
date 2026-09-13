@@ -43,6 +43,7 @@ successor in that same class — where the reader of the old value will look.
 
 import inspect
 import os
+import re
 import tempfile
 import unittest
 
@@ -122,7 +123,7 @@ _MAT_SEC = (
 
 
 def _implicit_deck(elform=1, nsolvr=2, arcctl=0, auto=None,
-                   modal=False) -> str:
+                   modal=False, arcmth=1) -> str:
     """A minimal QUASI-STATIC implicit deck (no *CONTROL_IMPLICIT_DYNAMICS).
 
     *modal* adds a ``*CONTROL_IMPLICIT_EIGENVALUE`` so the engine takes the
@@ -134,7 +135,7 @@ def _implicit_deck(elform=1, nsolvr=2, arcctl=0, auto=None,
             "*CONTROL_IMPLICIT_SOLUTION\n"
             + _row(nsolvr, 0, 0, 0, 0, 0, 0, 0) + "\n"
             + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
-            + _row(arcctl, 1, 0.0, 1, 2, 0, 0, 0) + "\n")
+            + _row(arcctl, 1, 0.0, arcmth, 2, 0, 0, 0) + "\n")
     if modal:
         deck += "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
     if auto is not None:
@@ -397,21 +398,34 @@ class QstatDtscalRecipeStillWinsTests(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ArcLengthPredicateTests(unittest.TestCase):
-    """``NSOLVR`` in {6,7,8,9} OR card-3 ``ARCCTL`` != 0 — the OR, not either
-    half.
+    """THE MANUAL'S OWN RULE: ``6 <= NSOLVR <= 9``, or ``NSOLVR = 12`` with
+    card-3 ``ARCMTH = 3``.
 
-    ``ex_06_beam_elform_1`` is the reason: it states ``NSOLVR 12`` and asks for
-    the arc-length method through ``ARCCTL 6`` alone, so an NSOLVR-only
-    predicate would miss the corpus's only ARCCTL carrier.
+    Vol I R17 p.12-354 and p.12-358 both state it verbatim — *"The contents of
+    this card are ignored unless an arc-length method is activated
+    (6 <= NSOLVR <= 9, or NSOLVR = 12 and ARCMTH = 3)"* — and p.12-358 defines
+    ``ARCCTL`` as *"Arc length controlling node ID (see Remark 7). EQ.0:
+    Generalized arc length method"*, i.e. a NODE ID, not a switch. The
+    identical sentence is in Vol I R16.
+
+    A ``arcctl != 0`` clause used to ship here and was wrong on a deck we can
+    check against LS-DYNA's own output: ``ex_06_beam_elform_1`` states
+    NSOLVR 12 / ARCMTH 1 / ARCCTL 6, and its reference ``d3hsp`` reads
+    ``solution method ... 12`` with ``arc length formulation 1 = Crisfield``
+    beside the legend ``eq.3: Modified Crisfield (used with nonlinear solution
+    method 12 only)`` — plain BFGS, no arc length. So the deck got a
+    default-ON warning saying it asked for one, and ``--arclength-riks`` would
+    have converted it to a solver LS-DYNA did not use.
     """
 
-    def test_arcctl_is_parsed_off_card_3(self):
-        state = _dispatch(_implicit_deck(nsolvr=12, arcctl=6))
+    def test_arcctl_and_arcmth_are_parsed_off_card_3(self):
+        state = _dispatch(_implicit_deck(nsolvr=12, arcctl=6, arcmth=1))
         self.assertIsNotNone(state.ctrl_implicit_sol)
         self.assertEqual(state.ctrl_implicit_sol.nsolvr, 12)
         self.assertEqual(state.ctrl_implicit_sol.arcctl, 6)
+        self.assertEqual(state.ctrl_implicit_sol.arcmth, 1)
 
-    def test_a_deck_with_no_card_3_reads_arcctl_0(self):
+    def test_a_deck_with_no_card_3_reads_both_cells_0(self):
         deck = ("*KEYWORD\n"
                 "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
                 "*CONTROL_IMPLICIT_SOLUTION\n"
@@ -419,16 +433,34 @@ class ArcLengthPredicateTests(unittest.TestCase):
                 "*END\n")
         state = _dispatch(deck)
         self.assertEqual(state.ctrl_implicit_sol.arcctl, 0)
+        self.assertEqual(state.ctrl_implicit_sol.arcmth, 0)
 
     def test_nsolvr_6_fires_and_nsolvr_2_does_not(self):
         from k2rad.writer.assembly import _arclength_requested
         self.assertTrue(_arclength_requested(_dispatch(_implicit_deck(nsolvr=6))))
         self.assertFalse(_arclength_requested(_dispatch(_implicit_deck(nsolvr=2))))
 
-    def test_arcctl_alone_fires(self):
+    def test_arcctl_alone_does_NOT_fire(self):
+        """The successor of ``test_arcctl_alone_fires``, which pinned the
+        retracted predicate on exactly ``ex_06``'s own card values."""
         from k2rad.writer.assembly import _arclength_requested
-        self.assertTrue(
-            _arclength_requested(_dispatch(_implicit_deck(nsolvr=12, arcctl=6))))
+        self.assertFalse(_arclength_requested(
+            _dispatch(_implicit_deck(nsolvr=12, arcctl=6, arcmth=1))))
+        # ...and it does not rescue a non-arc-length NSOLVR either.
+        self.assertFalse(_arclength_requested(
+            _dispatch(_implicit_deck(nsolvr=2, arcctl=6, arcmth=1))))
+
+    def test_nsolvr_12_with_ARCMTH_3_is_the_other_route(self):
+        from k2rad.writer.assembly import _arclength_requested
+        self.assertTrue(_arclength_requested(
+            _dispatch(_implicit_deck(nsolvr=12, arcmth=3))))
+        # ARCCTL is irrelevant to the predicate in BOTH directions.
+        self.assertTrue(_arclength_requested(
+            _dispatch(_implicit_deck(nsolvr=12, arcmth=3, arcctl=6))))
+        # ARCMTH 3 is meaningless outside NSOLVR 12 ("used with nonlinear
+        # solution method 12 only").
+        self.assertFalse(_arclength_requested(
+            _dispatch(_implicit_deck(nsolvr=2, arcmth=3))))
 
     def test_every_nsolvr_in_the_set_fires(self):
         from k2rad.writer.assembly import _arclength_requested
@@ -441,14 +473,36 @@ class ArcLengthPredicateTests(unittest.TestCase):
                 self.assertFalse(
                     _arclength_requested(_dispatch(_implicit_deck(nsolvr=n))))
 
+    def test_the_ex_06_arm_is_silent_and_emits_DT2(self):
+        """End to end on ``ex_06``'s own card, both arms of the flag: no
+        warning, and the flag cannot turn it into ``/IMPL/DT/3``."""
+        for riks in (False, True):
+            with self.subTest(arclength_riks=riks):
+                result, _s, engine = _convert(
+                    _implicit_deck(nsolvr=12, arcctl=6, arcmth=1),
+                    arclength_riks=riks)
+                self.assertIn("/IMPL/DT/2", engine)
+                self.assertNotIn("/IMPL/DT/3", engine)
+                self.assertFalse(_has(result.warnings, "ARC-LENGTH"),
+                                 result.warnings)
+
+    def test_the_ARCMTH_3_arm_names_both_cells_in_its_warning(self):
+        result, _s, _e = _convert(_implicit_deck(nsolvr=12, arcmth=3,
+                                                 arcctl=6))
+        self.assertTrue(_has(result.warnings, "ARC-LENGTH", "NSOLVR=12",
+                             "ARCMTH=3", "ARCCTL=6"), result.warnings)
+
 
 class ArcLengthCardTests(unittest.TestCase):
     """The card, and the fact that it is OPT-IN.
 
     The repeat at a second thread count REFUTED it as a default:
-    ``ex_05_beam_elform_3_&_6`` turns a 1.5 s ``error_engine`` into a 600 s
-    timeout at ``t = 5e-11``, and ``ex_06``'s NORMAL flips to an ERROR at
-    ``t = 0`` between nt 3 and nt 4.
+    ``ex_05_beam_elform_3_&_6`` fails in ~2 s without the flag and with it
+    runs tens of thousands of cycles to ``t ~ 1e-7`` of 1.0 and TIMES OUT, at
+    nt 3 and nt 4 alike. (An ``ex_06`` nt-flip was cited beside it and is
+    withdrawn twice over: it did not reproduce on a quiet machine — NORMAL at
+    both nt, agreeing to 0.02 pp — and under the manual's own predicate
+    ``ex_06`` is not an arc-length carrier at all.)
     """
 
     def test_off_by_default_the_card_is_dt2_and_the_request_is_warned(self):
@@ -853,7 +907,7 @@ def _thermal_deck(tgmult=10.0, tgrlc=0, t0=10.0, hc=1.0, tro=1.0,
 
 
 class TgmultImptempTests(unittest.TestCase):
-    """``T(t) = T0 + TGMULT*f(t)/(rho*Cp)`` — the adiabatic uniform-generation
+    """``T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)`` — the adiabatic uniform-generation
     closed form, the only shape in which a volumetric heat generation is
     expressible as an ``/IMPTEMP``."""
 
@@ -898,14 +952,66 @@ class TgmultImptempTests(unittest.TestCase):
         self.assertEqual(self._funct_pts(starter, fid),
                          [(0.0, 10.0), (3.0, 10.0 + 3.0 * 10.0 / 4.0)])
 
-    def test_tgrlc_samples_that_curve_on_its_own_abscissae(self):
+    def test_tgrlc_is_INTEGRATED_on_its_own_abscissae(self):
+        """TGMULT is a RATE (Vol II R17 p.3-2: ``TGRLC`` GT.0 gives the
+        "thermal generation rate as a function of time", ``TGMULT`` is the
+        "thermal generation rate multiplier"), so the adiabatic body obeys
+        ``rho*Cp*dT/dt = TGMULT*f(t)`` and the temperature is the curve's
+        running TIME INTEGRAL.
+
+        A direct map ``T0 + rate*f(t)`` shipped here and is what this test
+        used to pin: on this very curve it asserted ``(1, 30) -> (3, 20)`` — a
+        temperature FALLING while a strictly positive generation is still
+        running. With ``rate = TGMULT/(rho*Cp) = 10`` and ``f`` the trapezoid
+        of ``(0,0) (1,2) (3,1)``: ``INTEGRAL = 0, 1, 4`` so ``T = 10, 20, 50``.
+        """
         curve = ("*DEFINE_CURVE\n" + _row(5) + "\n"
                  + "".join(f"{x:>20.10G}{y:>20.10G}\n"
                            for x, y in ((0.0, 0.0), (1.0, 2.0), (3.0, 1.0))))
         _r, starter, _e = _convert(_thermal_deck(tgrlc=5, extra=curve))
         fid, _s, _g = self._imptemp(starter)
         self.assertEqual(self._funct_pts(starter, fid),
-                         [(0.0, 10.0), (1.0, 30.0), (3.0, 20.0)])
+                         [(0.0, 10.0), (1.0, 20.0), (3.0, 50.0)])
+
+    def test_a_strictly_positive_generation_never_cools(self):
+        """The property the old law broke: while ``f > 0`` the temperature is
+        strictly increasing, whatever shape the curve has."""
+        pts = ((0.0, 5.0), (1.0, 2.0), (2.0, 9.0), (4.0, 0.5))
+        curve = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+                 + "".join(f"{x:>20.10G}{y:>20.10G}\n" for x, y in pts))
+        _r, starter, _e = _convert(_thermal_deck(tgrlc=5, extra=curve))
+        fid, _s, _g = self._imptemp(starter)
+        got = self._funct_pts(starter, fid)
+        self.assertEqual([t for t, _v in got], [0.0, 1.0, 2.0, 4.0])
+        temps = [v for _t, v in got]
+        for a, b in zip(temps, temps[1:]):
+            self.assertGreater(b, a)
+        # trapezoid: 0, 3.5, 9.0, 18.5 -> T0 + 10 * that
+        self.assertEqual(temps, [10.0, 45.0, 100.0, 195.0])
+
+    def test_a_curve_that_starts_after_zero_is_integrated_from_zero(self):
+        """LS-DYNA holds a load curve's endpoint value outside its range, so a
+        curve beginning at ``t = 1`` has been generating at its first ordinate
+        since ``t = 0``; the synthesized origin sample carries that."""
+        curve = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+                 + "".join(f"{x:>20.10G}{y:>20.10G}\n"
+                           for x, y in ((1.0, 2.0), (3.0, 2.0))))
+        _r, starter, _e = _convert(_thermal_deck(tgrlc=5, extra=curve))
+        fid, _s, _g = self._imptemp(starter)
+        # f == 2 throughout, so T = 10 + 10*2*t
+        self.assertEqual(self._funct_pts(starter, fid),
+                         [(0.0, 10.0), (1.0, 30.0), (3.0, 70.0)])
+
+    def test_a_negative_tgrlc_is_refused_by_name(self):
+        """``|TGRLC|`` is rate against TEMPERATURE (Vol II R17 p.3-2 LT.0), a
+        nonlinear ODE the closed form does not solve."""
+        curve = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+                 + "".join(f"{x:>20.10G}{y:>20.10G}\n"
+                           for x, y in ((0.0, 1.0), (100.0, 2.0))))
+        result, starter, _e = _convert(_thermal_deck(tgrlc=-5, extra=curve))
+        self.assertNotIn("tgmult_generation_", starter)
+        self.assertTrue(_has(result.warnings, "TGRLC=-5", "NEGATIVE",
+                             "against TEMPERATURE"))
 
     def test_a_zero_tgmult_emits_nothing(self):
         _r, starter, _e = _convert(_thermal_deck(tgmult=0.0))
@@ -2148,6 +2254,48 @@ class DerivedGapminTests(unittest.TestCase):
         # A missing node id contributes no side at all.
         self.assertEqual(_min_segment_side(st, [[1, 2, 99]]), 3.0)
 
+    def test_the_CLOSING_side_of_a_segment_is_measured_too(self):
+        """``i4gmx3.F:58-66`` walks all FOUR sides of a quad, the n4->n1
+        closing one included, and ``_min_segment_side`` does the same through
+        ``(a + 1) % k``.
+
+        Every other fixture in this file happens to carry its minimum on a
+        NON-closing side (AUTO_GAPMIN_K's min is 1.0, the TET10 coupon's 5.0,
+        the collapsed-face coupon's 3.0), so a mutation to ``range(k - 1)`` —
+        skip the closing side — left the WHOLE suite green while changing the
+        written Gapmin and the quoted starter ``GAP MIN`` by 4x on this shape.
+        """
+        from k2rad.writer.contacts import _min_segment_side
+        from k2rad.state import ConversionState, NodeData
+        st = ConversionState()
+        st.nodes = {1: NodeData(0.0, 0.0, 0.0), 2: NodeData(10.0, 0.0, 0.0),
+                    3: NodeData(10.0, 8.0, 0.0), 4: NodeData(0.0, 2.0, 0.0)}
+        # sides: 1->2 = 10, 2->3 = 8, 3->4 = 10.0 (sqrt(100+36)=11.66), and the
+        # CLOSING 4->1 = 2.0, which is the unique minimum.
+        self.assertEqual(_min_segment_side(st, [[1, 2, 3, 4]]), 2.0)
+        # A triangle's closing side counts the same way: 3->1 here.
+        st.nodes[5] = NodeData(0.0, 1.5, 0.0)
+        self.assertEqual(_min_segment_side(st, [[1, 2, 5]]), 1.5)
+
+    def test_the_written_cell_keeps_FOUR_significant_digits(self):
+        """``_round_sig``'s digit count is part of the emitted cell, not
+        cosmetic: on a main surface whose minimum edge is not a round number
+        the Gapmin k2rad writes, and the value its default-ON warning quotes,
+        both come out of it.
+
+        Pinned on ``sphere1``'s own measured minimum edge (5.841288355312,
+        read back from the starter's ``GAP MIN = 0.5841288355312`` echo): at
+        the shipped ``sig = 4`` the cell is ``0.02921``. Every other fixture's
+        minimum edge is exactly 1.0, where every digit count agrees, so
+        ``sig = 6`` used to leave the whole suite green.
+        """
+        from k2rad.writer.contacts import _round_sig
+        min_edge = 5.841288355312
+        self.assertEqual(_round_sig(0.005 * min_edge), 0.02921)
+        self.assertEqual(_round_sig(min_edge), 5.841)
+        self.assertEqual(_round_sig(0.1 * min_edge), 0.5841)
+        self.assertEqual(_round_sig(0.0), 0.0)
+
     def test_the_two_goldens_that_carry_a_TYPE7_have_shell_mains(self):
         """Zero golden moves under B3, verified from the fixtures themselves."""
         import glob
@@ -2494,6 +2642,32 @@ class RigidPartIdsHonoursTheOptOutTests(unittest.TestCase):
         hits = [w for w in result.warnings if "/XREF" in w and "rigid" in w]
         self.assertEqual(hits, [], hits)
 
+    def test_an_ELEMENT_FREE_part_is_the_ONE_stated_exception(self):
+        """The invariant is "the predicate and ``_deformable_to_rigid_map``
+        name the same set", and it holds. What does NOT follow from it is
+        "the predicate and the EMITTED deck agree": ``_make_rbodies`` declines
+        a part that contributes no node at all, and this pins that the
+        predicate still calls it rigid — the exception the docstring now
+        states by name, so nobody re-derives it as a bug or as a guarantee.
+
+        Reach on the R14 roster: 0 (all four ``*DEFORMABLE_TO_RIGID`` keys own
+        elements). Recorded as a ROADMAP NOT-closed item.
+        """
+        from k2rad.writer.common import rigid_part_ids
+        # part 3 exists and is named by a *DEFORMABLE_TO_RIGID card, but owns
+        # no element: the mesh helper only ever makes parts 1 and 2.
+        deck = _d2r_deck(rows=((1, 0, "PART"), (3, 0, "PART")),
+                         gravity=False, contact=False).replace(
+            "*SECTION_SOLID\n", "*PART\npart 3\n" + _row(3, 1, 1) + "\n"
+                                "*SECTION_SOLID\n", 1)
+        result, starter, _e = _convert(deck)
+        self.assertIn("/RBODY", starter)                       # part 1 emits
+        self.assertTrue(_has(result.warnings, "*DEFORMABLE_TO_RIGID pid=3",
+                             "NO /RBODY was emitted for it",
+                             "NOT rigid in the converted model"),
+                        result.warnings)
+        self.assertEqual(rigid_part_ids(_dispatch(deck)), {1, 3})
+
 
 class SolidBoundaryFacesReportsAPartialSkinTests(unittest.TestCase):
     """A 6-node pentahedron on a short ``*ELEMENT_SOLID`` card is stored with
@@ -2747,9 +2921,31 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
     _STATING_DOCS = ("README.md", "ROADMAP.md")
 
     def _everywhere(self):
+        """EVERY shipped text a figure can be stated in.
+
+        The narrow version of this helper read only ``cli``, ``state``, the
+        package ``__init__`` and the two docs — so the three sites that really
+        carried the stale ``--derived-gapmin`` count (the default-ON runtime
+        warning in ``writer/contacts``, the GUI tooltip, and the ``__init__``
+        docstring under a spelling the literal did not match) were either not
+        scanned or not matched. A guard that cannot fail is worse than no
+        guard, so this now walks the whole package plus the GUI.
+        """
         import k2rad as pkg
         from k2rad import cli, state
-        return ([inspect.getsource(m) for m in (cli, state, pkg)]
+        import k2rad_gui
+        mods = [cli, state, pkg, k2rad_gui]
+        pkg_dir = os.path.dirname(inspect.getfile(pkg))
+        srcs = []
+        for root, _dirs, files in os.walk(pkg_dir):
+            if "__pycache__" in root:
+                continue
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    with open(os.path.join(root, name), "r",
+                              encoding="utf-8") as fh:
+                        srcs.append(fh.read())
+        return (srcs + [inspect.getsource(m) for m in mods]
                 + [self._read(n) for n in self._STATING_DOCS])
 
     def test_the_stale_ex_01_fixpoint_figure_is_gone(self):
@@ -2762,11 +2958,40 @@ class EveryBatchFigureIsOneNumberTests(unittest.TestCase):
     def test_the_derived_gapmin_unmeasured_count_re_sums(self):
         """15 carriers, 2 with a measured solver arm -> 13 unmeasured. The
         shipped 12 contradicted the same sentence's own "the only OTHER
-        carrier with a measured arm"."""
+        carrier with a measured arm".
+
+        Matched as a REGEX, not as one exact literal: the count survived a
+        first correction pass at three sites purely because they spell it
+        ``12 of the class's 15`` while the guard asserted on ``12 of the 15``.
+        """
+        pat = re.compile(
+            r"\b(?:12|twelve)\b[^.]{0,40}\b(?:15|fifteen)\b"
+            r"[^.]{0,70}?(?:measured arm|unmeasured|interface)", re.I)
         for text in self._everywhere():
-            self.assertNotIn("12 of the 15", text)
-            self.assertNotIn("TWELVE of the fifteen", text)
+            self.assertIsNone(pat.search(text),
+                              "a '12 ... 15' derived-gapmin count survives")
             self.assertNotIn("12 of them unmeasured", text)
+
+    def test_that_guard_can_actually_fire(self):
+        """The predecessor of the guard above asserted on the literal
+        ``"12 of the 15"`` while the three surviving sites spelled it
+        ``"12 of the class's 15"`` — an assertion that could never fail. This
+        runs the guard's own regex over each retracted spelling and requires a
+        match, so the guard is proven to have teeth rather than assumed to."""
+        pat = re.compile(
+            r"\b(?:12|twelve)\b[^.]{0,40}\b(?:15|fifteen)\b"
+            r"[^.]{0,70}?(?:measured arm|unmeasured|interface)", re.I)
+        for spelling in (
+                "and 12 of the 15 have no measured arm at all.",
+                "and 12 of the class's 15 interfaces on the R14 roster have "
+                "no measured arm at all.",
+                "and 12 of the class's 15 R14-roster interfaces are "
+                "unmeasured.",
+                "TWELVE of the fifteen have no measured arm"):
+            with self.subTest(spelling=spelling):
+                self.assertIsNotNone(pat.search(spelling))
+        # ...and does not fire on an unrelated pair of numbers.
+        self.assertIsNone(pat.search("fills 1-12 and 15-18: the mixture CP"))
 
     def test_the_changelog_records_both_retractions(self):
         """The exclusion above is only sound while the CHANGELOG really does

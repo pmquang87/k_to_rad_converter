@@ -6010,12 +6010,23 @@ class ControlImplicitSolution:
     ectol: float        # energy convergence
     nlprint: int        # nonlinear print flag
     rctol: float = 0.0  # residual/force convergence (LS-DYNA rctol; 1e10 = off)
-    arcctl: int = 0     # card-3 field 1: the arc-length CONTROLLED DOF (a node
-    #                   # id). Any non-zero value selects LS-DYNA's arc-length
-    #                   # (Riks) continuation just as NSOLVR 6-9 does, and it
-    #                   # is the ONLY way ex_06_beam_elform_1 asks for it (its
-    #                   # NSOLVR is 12). Read for the --arclength-riks
-    #                   # predicate; the node id itself has no /IMPL/DT/3 cell.
+    arcctl: int = 0     # card-3 field 1: the arc-length CONTROLLING NODE ID.
+    #                   # NOT an activation switch: Vol I R17 p.12-358 defines
+    #                   # it as "Arc length controlling node ID ... EQ.0:
+    #                   # Generalized arc length method", and the card itself
+    #                   # is "ignored unless an arc-length method is activated
+    #                   # (6 <= NSOLVR <= 9, or NSOLVR = 12 and ARCMTH = 3)".
+    #                   # Parsed for the warning's "what the deck asked for"
+    #                   # text only; the node id has no /IMPL/DT/3 cell.
+    arcmth: int = 0     # card-3 field 4: the arc-length METHOD. Under
+    #                   # NSOLVR 12 this is the activation cell — "Setting
+    #                   # ARCMTH = 3 invokes an arc length method" (p.12-354,
+    #                   # EQ.12 gloss; the d3hsp legend prints EQ.3 as
+    #                   # "Modified Crisfield (used with nonlinear solution
+    #                   # method 12 only)"). Stored as STATED: 0 means the
+    #                   # deck left the cell or the whole card blank, and
+    #                   # LS-DYNA's own default is 1, so neither activates.
+    #                   # Read by `_arclength_requested`.
 
 
 @dataclass
@@ -6988,7 +6999,7 @@ class TgmultGeneration:
     ``TGRLC`` its optional curve) and ``/HEAT/MAT`` has no such slot. On a deck
     whose ONLY temperature driver is that generation, however, the nodal heat
     balance has exactly one term and the solution is closed-form and uniform —
-    ``T(t) = T0 + TGMULT*f(t)/(rho*Cp)`` — which IS expressible, as an
+    ``T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)`` — which IS expressible, as an
     ``/IMPTEMP`` over the parts' own nodes.
 
     Filled by ``writer/thermal._resolve_thermal_materials`` only when the gate
@@ -7233,7 +7244,7 @@ class ConvertOptions:
     # (with TGRLC its optional curve); /HEAT/MAT has no such slot, so it used
     # to be dropped outright. On a deck whose ONLY temperature driver is that
     # generation the adiabatic uniform-generation solution is closed-form,
-    # T(t) = T0 + TGMULT*f(t)/(rho*Cp), and it is expressible as an /IMPTEMP
+    # T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt), and it is expressible as an /IMPTEMP
     # over the parts' own nodes (hm_read_imptemp.F:121-133).
     #
     # MEASURED on thermal/thermal-stress (TGMULT 10, TGRLC 0, RHO0_CP 1, so

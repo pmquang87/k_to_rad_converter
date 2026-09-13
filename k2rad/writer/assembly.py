@@ -534,18 +534,49 @@ def _make_engine_output(state: ConversionState) -> List[str]:
 
 
 #: The LS-DYNA *CONTROL_IMPLICIT_SOLUTION card-1 NSOLVR values that select the
-#: arc-length (Riks) continuation. Card-3 ARCCTL != 0 selects it too, and is
-#: the ONLY way ex_06_beam_elform_1 (NSOLVR 12 / ARCCTL 6) asks for it — so the
-#: predicate below is the OR, never the NSOLVR test alone.
+#: arc-length (Riks) continuation on their own. The ONE other route is
+#: NSOLVR 12 with card-3 ARCMTH = 3 — see `_arclength_requested`.
 _ARCLENGTH_NSOLVR = frozenset({6, 7, 8, 9})
+
+#: The card-3 ARCMTH value that activates the method under NSOLVR 12.
+_ARCLENGTH_ARCMTH = 3
 
 
 def _arclength_requested(state: ConversionState) -> bool:
-    """Does this deck ask LS-DYNA for arc-length (Riks) continuation?"""
+    """Does this deck ask LS-DYNA for arc-length (Riks) continuation?
+
+    THE MANUAL'S OWN RULE, quoted verbatim from Vol I R17 p.12-354 and again
+    on the card-3 definition page p.12-358 (and identically in Vol I R16, so
+    it is not an R17 novelty): *"The contents of this card are ignored unless
+    an arc-length method is activated (6 <= NSOLVR <= 9, or NSOLVR = 12 and
+    ARCMTH = 3)"*.
+
+    ``ARCCTL`` is NOT part of the predicate and must not be: p.12-358 defines
+    it as *"Arc length controlling node ID (see Remark 7). EQ.0: Generalized
+    arc length method"* — a node id whose 0 selects the generalized variant of
+    a method that is already on, not a switch that turns one on.
+
+    An ``arcctl != 0`` predicate used to ship here, and it was wrong on a
+    corpus deck we could measure: ``ex_06_beam_elform_1`` states NSOLVR 12 /
+    ARCMTH 1 / ARCCTL 6, and its LS-DYNA reference run's own ``d3hsp`` shows
+    plain BFGS — ``solution method ... 12``, the legend
+    *"eq.12: nonlinear, (experimental), BFGS updates with optional arclength"*,
+    and card 6 echoing *"arc length formulation 1 = Crisfield (generalized arc
+    length only)"* beside *"eq.3: Modified Crisfield (used with nonlinear
+    solution method 12 only)"*. So the deck LS-DYNA ran WITHOUT arc length was
+    getting a default-ON warning saying it asked for one, and under
+    ``--arclength-riks`` would have been converted to a solver LS-DYNA did not
+    use. Carriers on the 356-key R14 roster under the manual's rule: TWO
+    (``ex_05_beam_elform_3_&_6`` and ``ex_07_beam_elform_1``, both NSOLVR 6);
+    under the retracted rule, three. The canonical NSOLVR 12 + ARCMTH 3 deck
+    has 0 carriers here, so that arm is a rule and not a measured save.
+    """
     sol = state.ctrl_implicit_sol
     if sol is None:
         return False
-    return sol.nsolvr in _ARCLENGTH_NSOLVR or sol.arcctl != 0
+    if sol.nsolvr in _ARCLENGTH_NSOLVR:
+        return True
+    return sol.nsolvr == 12 and sol.arcmth == _ARCLENGTH_ARCMTH
 
 
 def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
@@ -605,8 +636,11 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
     asks = []
     if sol.nsolvr in _ARCLENGTH_NSOLVR:
         asks.append(f"card-1 NSOLVR={sol.nsolvr}")
+    else:
+        asks.append(f"card-1 NSOLVR={sol.nsolvr} with card-3 "
+                    f"ARCMTH={sol.arcmth}")
     if sol.arcctl != 0:
-        asks.append(f"card-3 ARCCTL={sol.arcctl}")
+        asks.append(f"controlling node card-3 ARCCTL={sol.arcctl}")
     head = (f"*CONTROL_IMPLICIT_SOLUTION {' and '.join(asks)} requests "
             "LS-DYNA's ARC-LENGTH (Riks) continuation. Its Radioss counterpart "
             "is /IMPL/DT/3 (freimpl.F:384-387 reads SEVEN fields "
@@ -615,17 +649,18 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
             "Tsca_dn 2-3 / Tsca_up 1.2 / IAL_M 2). ")
     measured = (
         "It BUYS THE LOAD PATH, NOT THE ANSWER - measured at nt 3 AND nt 4 on "
-        "this corpus's three carriers, all three of which are error_engine "
-        "either way: ex_07_beam_elform_1 walks from t = 3e-8 to t = 1.000 and "
-        "lands at -1.72 % of its LS-DYNA reference (identical at both nt) but "
-        "still exits ERROR on the last increment; ex_06_beam_elform_1 reaches "
-        "NORMAL at IE -99.8 % (a NORMAL that is not a result), and combined "
-        "with the shipped /IMPL/QSTAT/DTSCAL 10 it reads -0.08 % at nt 4 and "
-        "ERROR at t = 0 at nt 3, an nt-flip that is not quotable as a figure; "
-        "ex_05_beam_elform_3_&_6 runs 111734 cycles to t = 5e-11 and TIMES OUT "
-        "where it used to fail in 1.5 s. /IMPL/DT/FIXPOINT is DEACTIVATED by "
-        "the engine under RIKS (lectur.F:3523-3532), so --fixpoint-count is "
-        "silently disarmed with it.")
+        "this corpus's TWO carriers, both of which are error_engine either "
+        "way, and both arms stated against this branch's OWN flag-off "
+        "baseline (which /IMPL/QSTAT/DTSCAL 10 already moved): "
+        "ex_07_beam_elform_1 walks from t = 0.3004 to t = 1.000 and lands at "
+        "-1.72 % of its LS-DYNA reference (identical at both nt) but still "
+        "exits ERROR on the last increment (ISTOP -2, MESSAGE ID 79); "
+        "ex_05_beam_elform_3_&_6 stays at t = 1e-5 and fails in ~2 s without "
+        "the flag, and with it runs tens of thousands of cycles to t ~ 1e-7 "
+        "and TIMES OUT - which is why the flag ships OFF. "
+        "/IMPL/DT/FIXPOINT is DEACTIVATED by the engine under RIKS "
+        "(lectur.F:3523-3532), so --fixpoint-count is silently disarmed with "
+        "it.")
     if modal:
         state.warn(head + "This deck is a NORMAL-MODES (/EIG) analysis, whose "
                           "engine is /IMPL/LINEAR plus the stiffness export "
