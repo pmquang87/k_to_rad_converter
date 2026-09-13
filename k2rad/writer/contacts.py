@@ -1277,19 +1277,25 @@ def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int,
 
 def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
                                   inter_id: int, diag: Dict[str, int],
-                                  sid: int) -> None:
+                                  sid: int, label: str = "ssid") -> None:
     """Flag a secondary side that KEPT its interface but lost some nodes.
 
     The same filter that empties an all-rigid side quietly thins a mixed one.
     The interface is still emitted (so this warns rather than dropping), but the
     share of the contact those rigid nodes carried is gone from the converted
-    model and the user is entitled to know."""
+    model and the user is entitled to know.
+
+    ``label`` names the CELL the surviving group came from, because after the
+    all-rigid-SSID swap the secondary nodes come from the MSID side and calling
+    that id ``ssid`` sends the reader to the wrong column of the card (#131's
+    label class). Every caller that swapped passes ``"msid (swapped)"``.
+    """
     removed = diag.get("rigid_removed", 0)
     if removed <= 0 or removed == diag.get("raw", 0):
         return
     state.warn(
         f"*{keyword or 'CONTACT'} {inter_id}: {removed} of the "
-        f"{diag.get('raw', 0)} node(s) on the SECONDARY side (ssid={sid}) "
+        f"{diag.get('raw', 0)} node(s) on the SECONDARY side ({label}={sid}) "
         "belong to a rigid body and were removed from the secondary node "
         f"group; the interface is emitted with the remaining "
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
@@ -1568,7 +1574,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     state, main_sid, main_styp),
                 _main_side_remedy(state, main_sid, main_styp))
             continue
-        _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, sec_sid)
+        _warn_partial_rigid_secondary(
+            state, c.keyword, c.inter_id, diag, sec_sid,
+            "msid (swapped)" if plan == _RS_SWAP else "ssid")
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
@@ -3796,7 +3804,9 @@ def _make_type25_interfaces(state: ConversionState,
                     "this deck; a *SET_NODE or *SET_SEGMENT cannot supply the "
                     "main surface of a /INTER/TYPE25.")
                 continue
-            _warn_partial_rigid_secondary(state, kw, c.inter_id, diag, sec25_sid)
+            _warn_partial_rigid_secondary(
+                state, kw, c.inter_id, diag, sec25_sid,
+                "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
