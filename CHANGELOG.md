@@ -250,6 +250,245 @@ Prior history (before this changelog was introduced) is summarized in the
     turns a zero `DT_MAX` into `EP10`). Eight roster decks state a negative
     `DTMAX` at include depth 1, ten counting the two nested Yaris.
 
+- **R14 CAMPAIGN TRIAGE batch, round 4, part B — the keyword that made two
+  pendulum bobs deformable, and the contact side-order rule that threw whole
+  interfaces away on a premise the solver does not hold.** Part A took the
+  disjoint decks; part B is the rigid/contact set, every figure measured on the
+  COMBINED arm because its three items reach the same decks. Reach is stated as
+  **N deck keys on M emitted models** (the 356 roster keys are 312 distinct
+  `_0000.rad`). Solver figures are `nt 4` unless stated.
+
+  - **B1 `*DEFORMABLE_TO_RIGID` (the plain spelling) → an `/RBODY` at `t = 0`,
+    through the `*MAT_RIGID` machinery.** The keyword was in NO dispatch table:
+    `dispatch` filed it under `skipped_keywords`, which carries no warning at
+    all, and the converted deck kept both bobs DEFORMABLE. Vol I R17 p.18-1 is
+    explicit — *"Deformable parts may be switched to rigid at the start of the
+    calculation by specifying them on the \*DEFORMABLE_TO_RIGID card"* — and
+    the deck's own `pend.imp.d3hsp` prints `number of deformable to rigid = 2`.
+    Reach: **4 deck keys on 2 emitted models** (`pend.imp` ==
+    `pendulum-ii/pendulum`, `defo2rigid/deformable_to_rigid.pendulum` ==
+    `intro-by-j.-reid/pendulum`), and 0 on every other corpus.
+
+    The card is a PART switch, not a material one — the part keeps its own
+    deformable law (`*MAT_ELASTIC` on `pend.imp`, `*MAT_PLASTIC_KINEMATIC` on
+    `deformable_to_rigid.pendulum`) — so the pid is recorded in
+    `state.deformable_to_rigid` and NOT in `state.mat_rigid`, which is MID-keyed:
+    adding the MID there would re-emit the law as a rigid one and make every
+    OTHER part sharing it rigid too. **ONE predicate**
+    (`writer/common.rigid_part_ids`) answers "is this part rigid?" and every
+    part-level consumer now tests it — the `/RBODY` builder and its
+    `*CONSTRAINED_EXTRA_NODES` / `*CONSTRAINED_RIGID_BODIES` / `*PART_INERTIA`
+    screens, `_side_has_deformable_part` (so a rigid pair cannot reach
+    `_recipe_active` as a "deformable" one), the `_LOCAL` prescribed-motion
+    triads, the `*DAMPING_GLOBAL` scope, the `/XREF` skip and the composite
+    layup drop — with the MATERIAL registries deliberately left alone, because
+    they answer a MID question. A test pins the shape
+    (`parts[...].mid in state.mat_rigid`) out of `k2rad/writer/`. The `/GRAV`
+    scope, the `*INITIAL_VELOCITY` re-point, the contacts' `rigid_nodes` screen,
+    `/BCS`, `/TH/RBODY` and `_make_added_masses` come along for free, because
+    they all read `_make_rbodies`'s three return values — and that mattered: an
+    `/RBODY` the gravity-group builder does not see makes `pend.imp` a
+    0.000 / 0.000 zero model at 9 480 NORMAL cycles.
+
+    MEASURED on `intro-by-k.-weimar/misc/pendulum-i/pend.imp.k` (LS-DYNA
+    reference: 9 479 cycles, `dt` 1.79363E-05, IE 5.03545e-06, KE 21.8740, EXT
+    21.8743). The part's elements are DEACTIVATED
+    (`hm_read_rbody.F:700-722` sets `ISOLOFF`), so the part stops controlling
+    the time step: the shipped arm ran **125 052 cycles** at `dt` 1.360e-06 on
+    SOLID 1 with a **99.9 %** energy error and IE 5.162e5; the branch runs
+    **9 480 cycles** at `dt` **1.794e-05** on NODE 19, starter 0 ERROR /
+    0 WARNING, engine energy error **−0.0 %**, IE 5.901e-06, KE
+    21.77 + 0.1002 = 21.8702 (**−0.017 %** of the reference KE), NORMAL
+    TERMINATION in 10.5 s. The critic's matched-time check holds the whole KE
+    trajectory to ±0.07 % at 11 times, where the shipped arm is **+5 649 %** at
+    t = 0.012. `deformable_to_rigid.pendulum` goes 39 390 → **607** cycles
+    (LS-DYNA takes 607) and ie_dev −82.64 % → −19.39 %.
+
+    `LRB ≠ 0` folds through the same `*CONSTRAINED_RIGID_BODIES` union-find and
+    `PTYPE = PSET` is refused by name with its `*INCLUDE_TRANSFORM` offset
+    caveat — both have **0 carriers** anywhere, so both ship stated rather than
+    validated. The run-time-triggered options — `_AUTOMATIC` (p.18-3),
+    `_INERTIA` and the `*RIGID_DEFORMABLE_*` family — are **refused BY NAME**,
+    with the Radioss mechanism that would carry them spelled out (`/RBODY`
+    card 1 `sens_ID` plus a `/SENSOR/TIME`: `hm_read_rbody.F:363-388` stores the
+    sensor in `NPBY(4,NRB)`, forces `Ikrem = 1` and starts the body INACTIVE;
+    `rbyonf.F:331/399` switches it per cycle). They have **0 live cards on 893
+    corpus files**, so no arm could be measured — the refusal says that instead
+    of calling the keyword unsupported. `--no-deformable-to-rigid` leaves the
+    part deformable and reports the loss.
+
+  - **B2 the all-rigid-SSID contact swap, EXPLICIT decks, default ON.** A
+    `*CONTACT` whose SECONDARY (SSID) side is wholly rigid lost its WHOLE
+    interface: `_resolve_contact_slave` filters `/RBODY` member nodes out of the
+    secondary group, the group goes empty, and `_drop_interface` warns and drops.
+    Round 3's ROADMAP entry justified that with a claim that is now **RETRACTED
+    by measurement** — it said `/INTER/TYPE7`'s *"secondary side is a node group
+    and cannot hold `/RBODY` members"*, and `writer/contacts._RIGID_SECONDARY_
+    REMEDY` said *"k2rad deliberately does NOT swap them for you: that would
+    silently convert a model different from the one you wrote"*, while
+    `handlers._CONTACT_SPELLING_NOTES["twoway"]` said the swap *"has never been
+    measured to help on any corpus deck"*. All three are corrected in this
+    commit. The OpenRadioss starter ACCEPTS `/RBODY` member nodes in a TYPE7
+    secondary group at **0 ERROR(S)** (measured on `sphere1` and on
+    `mat_spring.belted-dummy`; the only extra diagnostic is `WARNING 343 INITIAL
+    PENETRATIONS`), and the secondary nodal stiffness is element-based
+    (`i7stslav.F:55-58 STIFINT`), not nodal-mass-based. The drop was a k2rad
+    POLICY.
+
+    What ships: on an EXPLICIT deck, when the SSID side is wholly rigid and the
+    MSID side carries deformable nodes, k2rad **swaps the roles** — the
+    deformable MSID side supplies the tracked nodes, the rigid SSID side the
+    main `/SURF` — and says so loudly. The rationale is REWRITTEN: `/INTER/TYPE7`
+    is an ASYMMETRIC node-to-SEGMENT contact (only the secondary nodes are
+    checked against the main segments), so the deformable side must supply them;
+    and the warning states that this **changes which side is penalised**,
+    because LS-DYNA's non-AUTOMATIC contacts are one-sided (Vol I R17 p.11-10
+    item 4) while an AUTOMATIC one checks both surfaces. The two sides travel
+    with their TYPE cells, so a `*SET_SEGMENT` main can become the secondary
+    node source and a part the `/SURF` (`W6_SETUP_SandwichImpact` does exactly
+    that). Where BOTH sides are wholly rigid there is nothing to swap to and the
+    interface is emitted with the rigid secondary group KEPT, rather than
+    dropping a load path silently. `--no-rigid-secondary-swap` turns both
+    branches off.
+
+    MEASURED (`sphere1` reproduced at `nt 2` by the pre-research):
+    `intro-by-j.-day/contact/sphere/sphere1.k` internal energy
+    **0 (−100.00 %) → 77 830 (−1.66 %)** against the LS-DYNA reference
+    **79 147.3**, KE 6.90573e6 (−1.73 %), NORMAL in 1 592 cycles, starter
+    0 ERROR / 2 WARNING, starter echo `GAP MIN = 0.5841288355312`;
+    `show-cases/contact-interference/EXP_SC_CONTACT_INTERFERENCE.k`
+    **−100 % / −100 % → IE 1 069 (−42.80 %) / KE 0.1293 (−16.02 %)**, NORMAL in
+    1 826 cycles with the press fit's 112 initial penetrations back;
+    `introduction/examples-manual/load/presrcibed/boundary_prescribed_motion.blow-mold.k`
+    from a diverging run killed at 241 934 cycles and t = 0.0061 of 0.015 with a
+    99.9 % energy error to **NORMAL TERMINATION at t = 0.015 in 25 675 cycles**
+    (49 s) with a −1.3 % energy error, IE 1.091e5 (+25.25 %) — a `timeout` row
+    that becomes `normal`. `ale/misc/forging-a/forging_A.k` goes 0 → 2 `/INTER`
+    and is REACH ONLY: it still fails the starter with `ERROR 179 MATERIAL
+    ID=1 DOES NOT EXIST`. `mat_spring.belted-dummy` keeps its 11th interface
+    through the both-rigid branch and is measurably INERT — identical 110 032
+    cycles / IE 8.804e5 / KE 1.4811e6 with and without it, starter 0 ERROR /
+    5 WARNING either way, and LS-DYNA's own `sleout` books −2 418 / +2 044
+    through that interface against 9.69e5 over all 11. Off-roster reach, counted
+    and never quoted as accuracy: `Ryan_Lee_Examples/W2_Door_Impact*` ×5 go
+    3 → **7** `/INTER`, `W6_SETUP_SandwichImpact*` ×6 go **0 → 1**.
+
+    **Two corrections to round 3's own census, both re-measured with k2rad's own
+    side resolver.** The class is **7 deck keys / 8 interfaces** over the full
+    356-key roster, not 6 — round 3's census excluded the Yaris `_MORTAR`
+    carrier by name and never said so. And `mat_spring.belted-dummy` was
+    mis-assigned as a swap candidate: BOTH sides of its dropped interface are
+    wholly rigid (SSID 148/148, MSID 228/228), so the swap cannot restore it;
+    the both-rigid branch does.
+
+    **IMPLICIT decks keep the DROP**, with the measurement named in the warning:
+    on `implicit/basic-examples/contact-i/bumper.k` the shipped drop reaches
+    NORMAL at t = 0.05 as a ZERO MODEL (IE 0 against the LS-DYNA reference
+    1.23131e7), while every restoration arm diverges at `ISTOP = -2` /
+    `MESSAGE ID 79` at `nt` 2 AND `nt` 4 — the swap at t = 2.0e-4, and with an
+    explicit Gapmin 0.14986 at t = 7.1e-3. `--deformable-contact-recipe` does
+    not reach the interface at all (`_recipe_active` excludes a rigid-MAIN
+    interface), and the two conversions are SHA256-identical. `bumper`'s starter
+    file is BYTE-IDENTICAL on this branch, which is the check that says the gate
+    holds.
+
+    Two shapes are deliberately NOT swap sites and say so: a one-sided
+    `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSID != 0` names ONE side for both
+    roles (and loses nothing physical — a rigid body cannot deform, so LS-DYNA's
+    own contact across it carries nothing either), and a PARTLY rigid secondary
+    side keeps its interface and its existing thinning warning.
+
+    **A second interaction the pre-research did not name, and it would have been
+    a REGRESSION.** `deformable_to_rigid.pendulum` carries
+    `*CONTACT_AUTOMATIC_SINGLE_SURFACE` with `SSID = 0`, whose guard tested
+    `not all_deformable_nodes or not all_pids` as ONE condition. After B1 makes
+    both of its shell parts rigid, `all_deformable_nodes` is EMPTY (its only
+    other part is a `*SECTION_BEAM` one, which `_contact_part_nodes`
+    deliberately does not walk) — so the fused guard threw the deck's whole
+    self-contact away, even though the EXPLICIT branch below it builds a
+    `/INTER/TYPE25` over a `/SURF/PART/EXT` and never reads that list. The guard
+    is SPLIT: `not all_pids` is fatal either way; `not all_deformable_nodes`
+    gates only the implicit node→surface route. Measured consequence of getting
+    it wrong on this deck: none (the interface is inert) — it is the degenerate
+    arm of a more-faithful rule, and it is pinned by its own test.
+
+  - **B3 `--derived-gapmin [--derived-gapmin-factor F]` — an explicit Gapmin for
+    a SOLID-segment main surface, OPT-IN, with a default-ON warning.** k2rad
+    writes `Igap 0` / `Gapmin 0` on every `/INTER/TYPE7` unless the card states
+    Card-3 `SAST`/`SBST`, and `i7sti3.F:1055-1063` then derives one itself:
+    because `DXM` only ever accumulates shell thickness (`:499/506/591`), a
+    solid-segment main leaves `NDX = 0` and takes `GAP = 0.1 × GAPMX`, where
+    `GAPMX` is the smallest side of any main segment (`i4gmx3.F:58-66`). So a
+    solid main gets a tenth of its own mesh size as a contact offset, while
+    LS-DYNA's own offset on a solid segment is ZERO unless `SLDTHK > 0` is
+    stated (Vol I R17 p.11-101 default table, p.11-103; `SAST`/`SBST` apply to
+    shells and beams only, p.11-33) — and no carrier states one.
+
+    The flag writes `F × min main-surface segment side` (default **0.005**),
+    ceilinged at `0.5 × min edge` — the starter's own `WARNING 94` gate at
+    `i7sti3.F:1075` — and never a non-positive value (`ERROR 785`, `:1068`).
+    The resolver mirrors `_make_master_surface` exactly (per part, SHELLS WIN;
+    only a shell-free solid/thick-shell part contributes external faces; a
+    `*SET_SEGMENT` side is classified by node membership; a TET10 boundary face
+    is subdivided into the 4 linear sub-triangles the starter itself builds), so
+    it reproduces the starter's own `GAP MIN =` echo on every deck where one
+    exists — `twobar` 1.0, `pend.imp` 1.0, `bend` 0.0254, `hemi` 14.6447,
+    `sphere1` 0.5841288 (against the starter's `0.5841288355312`). Pure standard
+    library, unlike `--auto-gapmin`, which needs numpy + scipy. Precedence,
+    tightest first: `--inter-gapmin ID=VAL` > Card-3 `SAST`/`SBST` /
+    `--auto-gapmin` > `--derived-gapmin` > the starter's own derivation.
+
+    OFF by default, because the measured arms disagree. On
+    `intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm bars, derived
+    `GAP MIN` 1.0) the derived gap costs **+1151 %** internal energy against the
+    LS-DYNA reference 3036.17, where the flag's `0.005 × 10 = 0.05` reads
+    **−5.60 %** and KE −6.18 % (factor 0.01 reads +14.45 % and must not be
+    used); but the same factor on `sphere1` writes 0.02921 and moves internal
+    energy **−1.66 % → −7.77 % at 4.1× the cycles**. Censused with the writer's
+    own resolver over the 356-key R14 roster (the 4 Yaris `*INCLUDE` pullers
+    excluded BY NAME): **15 solid-only-main interfaces on 14 deck keys**, one of
+    them created by B2's swap, and **12 of the 15 unmeasured**. A press-fit
+    `*CONTACT_*_INTERFERENCE` and k2rad's own injected implicit stabilization
+    stub (`auto_implicit_stabilization_self_contact`, measured byte-inert on 5
+    of 5 carriers) are excluded from the flag; **0 golden and 0 `match` deck
+    moves by default**, verified from the fixtures — both TYPE7 goldens and both
+    pipe `match` decks have `/SURF/GRSHEL` mains.
+
+    **A correction to the round's own pre-research, measured.** The starter's
+    `GAP MIN =` echo is NOT evidence of a solid main: `i7sti3.F:1064` sits
+    inside `IF(GAP <= ZERO)` after BOTH branches, so a shell main echoes it too.
+    `boundary_prescribed_motion.blow-mold` (echoes 0.8905 / 0.5170 / 0.8916),
+    `EXP_SC_CONTACT_INTERFERENCE` (0.2) and `forging_A` are therefore NOT in
+    this class once the swap has run — their post-swap main surfaces are SHELL
+    segments — so the pre-research's "+5 after B2" is **+1** (`sphere1`), and
+    the `*CONTACT_*_INTERFERENCE` exclusion is a rule with 0 measured carriers
+    on this corpus rather than a measured save. Every runtime string says so.
+
+  - **B4 the shipped-string corrections and the docs.** `handlers._CONTACT_
+    SPELLING_NOTES["twoway"]` no longer says the swap "has never been measured
+    to help on any corpus deck" (it now names the `sphere1` and `blow-mold`
+    arms, and keeps the separately-measured fact that swapping the sides on
+    `twobar` reads +188 % where the shipped assignment reads +1151 % and an
+    explicit Gapmin reads −5.6 %, so the side order is not THAT deck's defect);
+    `_RIGID_SECONDARY_REMEDY` is renamed `_RIGID_SECONDARY_REMEDY_IMPLICIT` and
+    rewritten as the implicit-only remedy, with its "deliberately does NOT swap
+    them for you" clause gone. README's contact paragraph, the ROADMAP's
+    all-rigid-SSID entry and the round-3 "the node group cannot hold rigid
+    nodes" sentences are corrected; the ROADMAP's R14 defect-queue table gains a
+    **round 4** column, the implicit-residue table gains one per family, and a
+    **"What round 4 deliberately does NOT close"** list records fourteen items
+    with the measurement that decided each and the deck that would decide it
+    next.
+
+  Wiring: `--no-rigid-secondary-swap`, `--no-deformable-to-rigid`,
+  `--derived-gapmin` and `--derived-gapmin-factor F` are wired at every one of
+  the documented sites (`cli.build_parser` + the `convert()` call, the
+  `convert()` signature + numpydoc + `ConvertOptions` construction, the
+  `ConvertOptions` field with its measured comment, the writer consumer, and
+  five `k2rad_gui` sites including the "options in effect" summary), with
+  `tests/test_cli.py`-style parser-default assertions and a `format_help()`
+  render — every measured percentage in a `help=` string is written `%%`.
+
 - **R14 CAMPAIGN TRIAGE batch, round 3, part A — the sixteen `*CONTACT`
   spellings that were in no dispatch table, and the tied family picked by the
   wrong field.** Rounds 1 and 2 cleared the starter-error classes and the
