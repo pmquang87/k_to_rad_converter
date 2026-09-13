@@ -2539,6 +2539,50 @@ class ConvertOptionsRefusesAnImpossibleLeverTests(unittest.TestCase):
                 self.assertIn("qstat_dtscal", str(cm.exception))
                 self.assertIn("imp_dyna.F", str(cm.exception))
 
+    def test_the_CONSTRUCTION_guard_fires_on_its_own(self):
+        """A mutation check found this: with BOTH guards in place, disabling
+        the ``ConvertOptions.__post_init__`` one changed nothing, because
+        ``_qstat_dtscal_cell`` raised instead and the test above still passed.
+
+        Two layers are wanted here — the dataclass is mutable, so a caller can
+        still set the field after construction and only the writer-side guard
+        can catch that — but each layer needs a test that reaches ONLY it.
+        This one constructs the options directly."""
+        from k2rad.state import ConvertOptions
+        for bad in (0.0, -3.0, "fast"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    ConvertOptions(qstat_dtscal=bad)
+        ConvertOptions(qstat_dtscal="none")          # the escape still works
+        ConvertOptions(qstat_dtscal=0.1)
+
+    def test_the_construction_guard_reaches_an_EXPLICIT_deck_too(self):
+        """`_qstat_dtscal_cell` never runs on an explicit deck —
+        `_make_engine_implicit` returns before it — so this arm can only be
+        caught by the construction guard."""
+        explicit = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                    + _BRICK + _MAT_SEC.replace("%ELFORM%", "1") + "*END\n")
+        _r, _s, engine = _convert(explicit)
+        self.assertNotIn("/IMPL/QSTAT", engine)      # the arm really is dead
+        with self.assertRaises(ValueError) as cm:
+            _convert(explicit, qstat_dtscal=-3.0)
+        self.assertIn("qstat_dtscal", str(cm.exception))
+
+    def test_the_WRITER_side_guard_fires_on_its_own(self):
+        """The other layer: a field set AFTER construction reaches only
+        ``_qstat_dtscal_cell``."""
+        from k2rad.state import ConversionState
+        from k2rad.writer.assembly import _qstat_dtscal_cell
+        st = ConversionState()
+        self.assertEqual(_qstat_dtscal_cell(st), "10")
+        st.options.qstat_dtscal = -3.0
+        with self.assertRaises(ValueError) as cm:
+            _qstat_dtscal_cell(st)
+        self.assertIn("imp_dyna.F", str(cm.exception))
+        st.options.qstat_dtscal = "fast"
+        with self.assertRaises(ValueError):
+            _qstat_dtscal_cell(st)
+
     def test_an_unparsable_qstat_dtscal_raises_instead_of_defaulting(self):
         with self.assertRaises(ValueError):
             _convert(_implicit_deck(), qstat_dtscal="fast")
