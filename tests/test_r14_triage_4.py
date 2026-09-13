@@ -1613,6 +1613,42 @@ class RigidSecondarySwapTests(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class SwappedSecondaryLabelTests(unittest.TestCase):
+    """After a swap the surviving secondary nodes come from the MSID side, so
+    the thinning warning must NAME that cell — calling the MSID id an ``ssid``
+    sends the reader to the wrong column of the *CONTACT card (#131's label
+    class). MEASURED carrier: Ryan_Lee ``W2_Door_Impact``, where 66 of 1545,
+    97 of 2439, 13 of 379 and 18 of 927 MSID nodes are rigid.
+    """
+
+    _SET = "*SET_PART_LIST@       200@         1         2@"
+
+    def _deck(self, ssid, msid, sstyp, mstyp):
+        return ("*KEYWORD@" + _RS_MESH + self._SET
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE@"
+                + _row(ssid, msid, sstyp, mstyp, 0, 0, 0, 0) + "@"
+                + _row(0.2, 0.1) + "@"
+                + "*CONTROL_TERMINATION@" + _row(1.0) + "@*END@").replace("@", "\n")
+
+    def test_the_thinning_warning_names_the_msid_cell(self):
+        """SSID = the rigid platen, MSID = a part set holding BOTH parts: the
+        swap fires and the new secondary group loses the rigid half."""
+        result, starter, _ = _convert(self._deck(2, 200, 3, 2))
+        self.assertIn("/INTER/TYPE7/", starter)
+        self.assertTrue(_has(result.warnings, "SWAPPED the roles"))
+        w = [x for x in result.warnings
+             if "on the SECONDARY side" in x and "belong to a rigid body" in x]
+        self.assertEqual(len(w), 1, repr(result.warnings))
+        self.assertIn("(msid (swapped)=200)", w[0])
+        self.assertNotIn("(ssid=200)", w[0])
+
+    def test_an_unswapped_thinning_still_says_ssid(self):
+        result, _, _ = _convert(self._deck(200, 1, 2, 3))
+        self.assertFalse(_has(result.warnings, "SWAPPED the roles"))
+        self.assertTrue(_has(result.warnings,
+                             "on the SECONDARY side (ssid=200)"))
+
+
 class RigidSecondaryImplicitGateTests(unittest.TestCase):
     """An IMPLICIT deck keeps the drop, and says why with the measured arm."""
 
