@@ -2431,6 +2431,168 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **R14 round 4, the finalize round — every defect the four validators
+  confirmed, re-verified against the code and the sources before it was acted
+  on.** Four majors, twelve minors, one finding REJECTED with its evidence.
+  **All 356 roster decks converted from `F:` are SHA256-identical before and
+  after** (two pristine detached checkouts, `330fe91` against this head, both
+  `_0000.rad` and `_0001.rad`, `k2rad.__file__` printed on each side and
+  asserted): the round's campaign figures still cover the shipped code, and no
+  deck had to be re-converted or re-run. 48 of the 354 comparable keys move
+  their WARNING record only.
+
+  - **The `*MAT_THERMAL_*` `TGMULT` gate was blind to a whole drop bucket.**
+    `_tgmult_blocking_drivers` screened `state.skipped_keywords` alone, while
+    `handlers._thermal_deferred` routes 13 registered thermal-driver spellings
+    through `note_recognized_not_emitted`, which appends to
+    `recognized_not_emitted` and to NEITHER other registry — a filter keyed on
+    a field those records do not have. MEASURED on `thermal/thermal-stress`
+    with one card added: `*BOUNDARY_THERMAL_WELD`, `*BOUNDARY_TEMPERATURE_RSW`,
+    `*BOUNDARY_TEMPERATURE_TRAJECTORY` and `*BOUNDARY_THERMAL_BULKNODE` — **4
+    of 4** — passed a gate that exists to stop them, and an `/IMPTEMP` was
+    emitted that would clamp away the very field the source drives
+    (`fixtemp.F:180-199`). Positive control: `*LOAD_HEAT_GENERATION_SOLID` and
+    `*BOUNDARY_CONVECTION_SET` DID fire it, so the mechanism was the bucket and
+    not the probe. Live reach 0 today — the four `F:` `*BOUNDARY_THERMAL_WELD`
+    decks all state `TGMULT 0.0`, so this was a latent hole in a default-ON
+    rule, not a wrong deck shipped. The one family that still does not block is
+    `*LOAD_THERMAL_OPTION` on a `SOLN` 1 or 2 deck (Vol I R17 p.33-162: a card
+    inert in BOTH codes cannot veto a restatement), and that exemption now
+    applies to all three buckets instead of two of three.
+  - **`_warn_constant_driver_expansion` shipped a categorically FALSE sentence
+    on A4's only carrier.** Setting `thermal_driver_emitted` un-gated it, and
+    every test below the gate runs over `state.imposed_temperatures`, which is
+    EMPTY for a TGMULT record (it lives in `tgmult_generations`): no `movers`,
+    no early return from either loop, an empty `consts`. `thermal-stress`'s log
+    therefore read *"drivers that NEVER MOVE: every emitted /IMPTEMP is a
+    constant ()"* three lines after the A4 warning reported node 2 moving
+    `0.0 → 1.49531e-04 mm`. The emitted bytes were correct; only the log was
+    wrong, in the one place the round says the deck now develops thermal
+    strain. The visible `()` is the runtime-string cousin of a doc template
+    placeholder shipping.
+  - **A refused `TGMULT` left its `/FUNCT` behind.** The curve was minted
+    inside `_resolve_tgmult_generation`, before `_screen_tgmult_generations`
+    could withdraw the record and before the empty-node drop at emit time could
+    either. MEASURED on a two-material SOLN-2 coupon: the refusal fired
+    correctly, no `/IMPTEMP` was written, and the starter gained an orphan
+    `/FUNCT` while every later auto id shifted (`[90001..90004]` against
+    `[90001..90003]` with `--no-tgmult-imptemp`). The mint moved to
+    `_mint_tgmult_curves`, which runs AFTER the screen; the empty-node refusal
+    moved INTO the resolve path, the last place that can still decline an id. A
+    refused deck is now byte-identical to the opt-out arm, and no withdrawal
+    code exists to go stale. Neither screen branch had had any test at all.
+  - **`writer/common.rigid_part_ids` ignored its own opt-out.** It unioned
+    `state.deformable_to_rigid` unconditionally while the EMITTER,
+    `rbody._deformable_to_rigid_map`, honours `--no-deformable-to-rigid` — the
+    defect that function's own docstring names, inverted. MEASURED on a
+    two-part D2R coupon with the flag set: no `/RBODY` is emitted, yet
+    `*DAMPING_GLOBAL` damped only 8 of the 12 nodes and the `/XREF` screen
+    dropped the part's reference geometry under a warning saying *"it converts
+    to an /RBODY"* on a deck that emits none. Corpus reach of the opt-out: 0
+    decks, so the default path was never affected.
+  - **A partial solid skin no longer measures a Gapmin.**
+    `_solid_boundary_faces` facets only 4-, 8- and 10-node shapes and silently
+    skipped anything else, while the side was still called `all_solid`. A
+    6-node pentahedron on a short `*ELEMENT_SOLID` card is stored with SIX
+    nodes, so on a part MIXING hexes with wedges the shared face is seen once
+    and counted EXTERNAL — and the minimum edge, hence the written
+    `--derived-gapmin` cell and the quoted starter `GAP MIN`, comes out too
+    small. No carrier of the 15-interface class has that shape; this closes a
+    latent case rather than correcting a measured one.
+  - **`*CONTROL_IMPLICIT_AUTO` never named `IAUTO = 0`** — a truthiness filter,
+    on exactly the value where k2rad's behaviour differs. Vol I R17 p.12-277:
+    `IAUTO EQ.0: Constant time step size`, which is also the card's own
+    default, and k2rad writes `/IMPL/DT/2` (AUTOMATIC step control)
+    unconditionally. Censused over the roster: **11 decks** state or blank
+    `IAUTO = 0`, `tensile2` — one of A1's four movers — and the whole
+    `ex_14_solid_elform_*` family among them, against 22 with `IAUTO > 0`. A
+    NEGATIVE `IAUTO` now gets p.12-277's load-curve gloss instead of a generic
+    one.
+  - **Neither implicit "asked for and did not get" warning reached a MODAL
+    deck**: both were called below `_make_engine_implicit`'s `is_modal` early
+    return. MEASURED on `ex_08_beam_elform_{1,2,13}`, which state
+    `*CONTROL_IMPLICIT_AUTO` IAUTO 1 / ITEWIN 15 beside
+    `*CONTROL_IMPLICIT_EIGENVALUE` and got nothing at all. Both now run for
+    either implicit shape and are told WHICH, so neither names a card the deck
+    will not carry.
+  - **The `*CONSTRAINED_LAGRANGE_IN_SOLID` dropped-cell inventory was
+    incomplete** while presenting itself as complete — the item's whole
+    deliverable. Eight further stated cells are unparsed and were unnamed:
+    `FRIC` (the coupling FRICTION coefficient, a physics cell) and `NORMTYP` on
+    card 2, and card 3's `K`/`CQ`, `HMIN`, `HMAX`, `LCIDPOR`, `NVENT`,
+    `BLOCKAGE` — plus the whole of the optional card 4. Every one is printed in
+    `quadrature_B.k`'s own `$#` headers.
+  - **`convert()` never validated two numeric levers** the CLI and the GUI both
+    refuse. MEASURED through the API: `qstat_dtscal=-3.0` wrote the cell `-3`,
+    `0.0` wrote `0` — a division by zero in `M/((1+alpha)*beta*(DTSCAL*dt)^2)`
+    (`imp_dyna.F:351-356`) — and an unparsable string silently became the
+    default `10`, so the caller's value never arrived.
+  - **Six corrected statements.** (a) The round-4 retraction of the tied
+    `_OFFSET` claim cited `i24pen3.F:317-319` as *"the only such assignment
+    among the interface initialisers"* one clause after *"no starter `i2*.F`
+    routine writes `X(1..3, .)` at all"* — self-contradicting (`i24pen3.F` IS
+    an `i2*.F`) and false. An anchored grep over `starter/source/interfaces`
+    returns FOUR files: `i3pen3.F:187-197` (TYPE3), `i7pwr3.F:213-242` (TYPE7
+    under `INACTI` 3/4), `i24pen3.F:317-319` (TYPE24) and `in12r.F:120-133`
+    (the TYPE12 frame transform, called only under `NTY == 12`). The conclusion
+    survives — all twelve TYPE2 routines have ZERO such writes, checked file by
+    file — but the evidence for it was wrong, in the sentence whose job is to
+    be the authoritative correction. (b) `--derived-gapmin` said *"15
+    interfaces on 14 deck keys … and TWELVE of the fifteen have no measured
+    arm"* three lines after *"the only OTHER carrier with a measured arm"*:
+    12 + 2 = 14, not 15. Exactly TWO (`twobar`, `sphere1`) have a measured
+    solver arm at the shipped factor; **thirteen** have none. Six sites.
+    (c) The stub exclusion said *"28 of the roster's 41 solid-only mains"*,
+    irreconcilable with the same file's 15-on-14 live census. An independent
+    census over the 356 joblist keys WITH `k2rad._inject_implicit_contact_stub`
+    called — a census that does not call it structurally cannot see a stub,
+    which is why the number was never re-measured — gives **27 stub rows on 27
+    keys**, and 27 + 15 = 42. (d) `_warn_rigid_secondary_keep` named
+    `deformable_to_rigid.pendulum` as a carrier of the both-rigid KEEP; that
+    branch fires on exactly three files, and that deck's contact is the
+    one-sided `SSID = 0` route this batch documents as NOT a swap site. Its
+    `belted-dummy` equality was shipped with only one arm run, and both now
+    exist (nt 4, both NORMAL, 110 032 cycles, IE 0.8804E+06, KE_T 1.376e6 +
+    KE_R 1.051e5). (e) `_ASSUMED_STRAIN_ELFORMS`' comment claimed ELFORM
+    -1/-2/3 "reach 17 and stay there"; `ex_12_solid_elform_{-1,-2,3}` carry an
+    explicit `*HOURGLASS` IHQ 6 and emit `Isolid` **24**, so the warning is
+    silent on two of the roster's ELFORM -1/-2 carriers and one of its two
+    ELFORM-3 carriers — deliberate, but unstated. (f) After a SWAP the
+    main-side drop printed the deck's SSID value under the name `msid`.
+  - **Two figures re-measured on the COMBINED arm.** `--fixpoint-count`'s
+    `ex_01_thin_shell_elform_2 … IE -13.7 %` was taken before this same round's
+    `--qstat-dtscal 10` changed that deck's `_0001.rad`; the shipped arm reads
+    **IE 0.7028 = −14.12 %** and the campaign row agrees (`ie_dev -14.1249` at
+    `330fe91f`) — the DB row is the cheapest check there is, and it had carried
+    the right number all along. This is the second round running in which a
+    one-item arm drifted on an `ex_01`/`ex_14` deck. `thermal-stress`'s
+    `+0.21 %` names the LS sample time it is matched against and now carries
+    the matched-time figure beside it (**+0.007 %** against the closed form at
+    `t = 2.994002`), which is the smaller of the two errors.
+  - **`pend.imp`'s `99.9 % → −0.0 %` is the ENGINE's energy-BALANCE column**,
+    not a deviation from the reference: that campaign row reads `ie_dev`
+    **+17.19 %** and stays a `deviation`, both energies being structural zeros
+    on a gravity pendulum. The fidelity channel is KE at **−0.017 %**. Five
+    sites now say which channel. `PTYPE = PSET` is EXPANDED at parse time, not
+    refused — only an undefined set is — and the found-set branch now carries
+    the `*INCLUDE_TRANSFORM` caveat too, because that is the branch where the
+    expansion succeeds silently on whatever set holds the offset id.
+  - **The `ex_02` cost is now stated so the trade can be evaluated.** The
+    `--qstat-dtscal` help quoted ONE contended run (*"101 172 cycles at
+    t = 0.5955"*) as if it were the deck's; three measurements under three
+    machine loads put it at `t` 0.32 to 0.60 of 1.0 at the 600 s cap, at nt 3
+    AND nt 4 — the verdict does not flip with `nt`, which is what matters. Two
+    facts were missing: all three keys are `not_comparable` BOTH WAYS, so what
+    is lost is a status label and not a benchmark; and `--qstat-dtscal 0.1`
+    reproduces the pre-round-4 file **byte for byte** on that family, so the
+    escape costs nothing else.
+  - **REJECTED, with the reason.** *"The CHANGELOG's
+    `deformable_to_rigid.pendulum` figures come from the pre-research's
+    hand-patched arm."* They do not: the campaign database's own row for that
+    deck is stamped `330fe91f` / 2026-09-13 and reads `ie_dev −19.3947`,
+    `ke_dev +0.296` — the SHIPPED conversion was run. The CHANGELOG now names
+    that source so the question need not be asked again.
+
 - **R14 round 4 — four retracted statements in `ROADMAP.md` and one in
   `k2rad/writer/contacts.py`, each grepped out of README/ROADMAP/code and added
   to the `RetractedSourceCitationsAreGoneEverywhere` guard.** The retracted

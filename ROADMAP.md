@@ -1379,6 +1379,43 @@ that decided it and the deck that would decide it next.
     flag carries is therefore a RULE with 0 measured carriers on this corpus,
     not a measured save.
 
+15. **The `*BOUNDARY_THERMAL_*` / `*BOUNDARY_TEMPERATURE_{RSW,TRAJECTORY,
+    PERIODIC_SET}` family, as a CONVERSION.** Round 4's finalize round made
+    them BLOCK the `TGMULT` restatement — they are temperature drivers and a
+    hard Dirichlet `/IMPTEMP` beside one would clamp the field it drives away
+    (`fixtemp.F:180-199`) — but they still convert to nothing. `F:` carries
+    four `*BOUNDARY_THERMAL_WELD_TRAJECTORY` decks (the `thermal/welding-new/*`
+    family), all of which state `TGMULT 0.0`, so the gate's reach is 0 and none
+    of them is blocked in practice today. What would decide it: whether a
+    moving weld source has ANY Radioss counterpart — `/IMPFLUX` on a moving
+    segment set is the only candidate, and nothing in
+    `engine/source/constraints/thermic` moves a segment group with time.
+
+16. **The `Isolid` 24 arm of the assumed-strain `ELFORM -1/-2/3`.** The A5-i
+    warning is gated on `isolid != 17`, and `ex_12_solid_elform_{-1,-2,3}`
+    carry an explicit `*HOURGLASS` IHQ 6, take the per-part overlay and emit
+    `/PROP/SOLID/90001` at `Isolid` **24** — so the warning is silent on two of
+    the roster's ELFORM -1/-2 carriers and on one of its two ELFORM-3 carriers.
+    The substitution on that arm — an 8-point assumed-strain hex becoming a
+    1-POINT `Isolid` 24 (`sgrtails.F:1107-1123`) — is at least as large as the
+    one the warning describes. It is NOT simply given the same sentence,
+    because the Isolid-24 arm is also the one that keeps
+    `ex_27_solid_elform_-2_rigidwall`'s `match`: the two cannot be separated on
+    a comment. What would decide it: the same bending coupon meshed 1/2/4
+    through the depth that item 2 above needs.
+
+17. **Faceting the 6-node pentahedron and the 5-node pyramid in
+    `writer/contacts._solid_boundary_faces`.** Round 4's finalize round made an
+    unfaceted shape clear `all_solid`, so the derived-Gapmin rule and its
+    default-ON warning both STAND DOWN on such a side rather than measure a
+    partial skin — the failure mode being a part that MIXES hexes with wedges,
+    where the face they share is seen once and counted EXTERNAL and the minimum
+    edge comes out too small. Standing down is the safe direction, not the
+    complete one: a solid-only main built entirely of wedges now falls out of
+    the class silently. No carrier of the 15-interface class has that shape, so
+    the reach today is 0. What would decide it: a wedge-meshed contact main
+    with an LS-DYNA reference — none exists on the three measured corpora.
+
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
 **Round 2's REVIEW round** re-derived item E on the solver (the stub keeps
