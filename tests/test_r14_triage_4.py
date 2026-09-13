@@ -207,7 +207,18 @@ class QstatDtscalArgumentTests(unittest.TestCase):
                                    ("discrete_offset", "discrete_offset"),
                                    ("spring_token_mass_compensation",
                                     "spring_token_mass_compensation"),
-                                   ("tgmult_imptemp", "tgmult_imptemp")):
+                                   ("tgmult_imptemp", "tgmult_imptemp"),
+                                   # part B's four levers, added for the same
+                                   # reason: a whole-suite mutation of
+                                   # ConvertOptions.derived_gapmin_factor
+                                   # 0.005 -> 0.01 was MISSED until this row.
+                                   ("derived_gapmin", "derived_gapmin"),
+                                   ("derived_gapmin_factor",
+                                    "derived_gapmin_factor"),
+                                   ("rigid_secondary_swap",
+                                    "rigid_secondary_swap"),
+                                   ("deformable_to_rigid",
+                                    "deformable_to_rigid")):
             with self.subTest(field=field):
                 dataclass_default = getattr(opts, field)
                 self.assertEqual(dataclass_default, sig[field].default,
