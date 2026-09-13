@@ -3857,6 +3857,13 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_EXTRA_NODES_NODE": {"data": (0, [(0, "p"), (1, "n")])},
     "CONSTRAINED_EXTRA_NODES_SET": {"data": (0, [(0, "p"), (1, "s")])},
     "CONSTRAINED_RIGID_BODIES": {"data": (0, [(0, "p"), (1, "p")])},
+    # *DEFORMABLE_TO_RIGID: PID and LRB are both PART ids under the card's
+    # default PTYPE = PART. Under PTYPE = PSET column 1 is a part-SET id, and
+    # this spec would offset it in the wrong namespace — the handler says so by
+    # name when it meets a PSET card, because PTYPE is read only after the
+    # offset pass has already run. Measured reach of PSET on every corpus: 0
+    # cards, so no deck is mis-offset today.
+    "DEFORMABLE_TO_RIGID": {"data": (0, [(0, "p"), (1, "p")])},
     "CONSTRAINED_SPOTWELD": {"data": (0, [(0, "n"), (1, "n")])},
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE": {"data": (0, [(0, "n"), (1, "n")]),
                                             "stride": 2},

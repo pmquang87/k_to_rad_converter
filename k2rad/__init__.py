@@ -21,7 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
-from .writer.common import SHELL_FORMULATIONS
+from .writer.common import AUTO_IMPLICIT_STUB_TITLE, SHELL_FORMULATIONS
 from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active)
@@ -98,7 +98,7 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
     state.contacts_single.append(
         ContactAutoSingle(
             inter_id=inter_id,
-            title="auto_implicit_stabilization_self_contact",
+            title=AUTO_IMPLICIT_STUB_TITLE,
             ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
             # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
             # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
@@ -217,6 +217,10 @@ def convert(
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
+    derived_gapmin: bool = False,
+    derived_gapmin_factor: float = 0.005,
+    rigid_secondary_swap: bool = True,
+    deformable_to_rigid: bool = True,
     fixpoint_count: int = 0,
     qstat_dtscal: Union[str, float] = 10.0,
     arclength_riks: bool = False,
@@ -299,6 +303,47 @@ def convert(
         Fraction of the measured clearance used as the suggested Gapmin (default
         0.8). <1 keeps the gap below the clearance (0 initial penetration);
         near 1 still engages promptly.
+    derived_gapmin : bool
+        Write an explicit Gapmin on every ``/INTER/TYPE7`` whose MAIN surface is
+        SOLID segments only and whose Gapmin would otherwise be 0 — the
+        population where the starter derives ``0.1 ×`` the smallest main-surface
+        segment side itself (``i7sti3.F:1055-1063``) while LS-DYNA's own offset
+        on a solid segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17
+        p.11-101/103). **Off by default**, with a default-ON warning naming the
+        derived value on every carrier. MEASURED on ``twobar`` (10 mm bars,
+        derived ``GAP MIN`` 1.0): the starter's gap costs +1151 % internal
+        energy against the LS-DYNA reference 3036.17 where this rule writes
+        ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
+        the only other carrier with a measured arm (``sphere1``, where it
+        writes 0.02921 and internal energy goes −1.66 % → −7.77 % at 4.1× the
+        cycles), and 12 of the class's 15 interfaces on the 356-key R14 roster
+        have no measured arm at all — which is why it is opt-in. A press-fit
+        ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
+        stabilization stub are excluded.
+    derived_gapmin_factor : float
+        Fraction of the smallest main-surface segment side used by
+        ``derived_gapmin`` (default 0.005 — measured; 0.01 reads +14.45 % on
+        ``twobar`` and must not be used).
+    rigid_secondary_swap : bool
+        On an EXPLICIT deck, rescue a ``*CONTACT`` whose SECONDARY (SSID) side
+        is WHOLLY RIGID instead of losing the whole interface: the roles are
+        swapped when the MSID side carries deformable nodes, and the rigid
+        secondary group is kept when BOTH sides are wholly rigid. **On by
+        default.** ``/INTER/TYPE7`` is an asymmetric node-to-segment contact, so
+        the deformable side must supply the tracked nodes. MEASURED:
+        ``sphere1`` internal energy 0 (−100 %) → 77 830 (−1.66 %) against the
+        LS-DYNA reference 79 147.3; ``EXP_SC_CONTACT_INTERFERENCE`` −100 % →
+        −42.8 %; ``boundary_prescribed_motion.blow-mold`` from a diverging
+        241 934-cycle run at t = 0.0061 of 0.015 to NORMAL TERMINATION at
+        t = 0.015 in 25 675 cycles. IMPLICIT decks keep the drop either way.
+    deformable_to_rigid : bool
+        Honour ``*DEFORMABLE_TO_RIGID`` (the plain spelling): the named part is
+        rigid FROM ``t = 0`` and is emitted as an ``/RBODY`` through the same
+        path a ``*MAT_RIGID`` part takes, keeping its own material (Vol I R17
+        p.18-1). **On by default.** MEASURED on ``pend.imp``: the deck's energy
+        error goes 99.9 % → −0.0 % (internal energy 5.162e5 → 5.901e-06 against
+        the LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA takes
+        9 479.
     fixpoint_count : int
         Number of evenly spaced /IMPL/DT/FIXPOINT milestones the implicit
         time-step controller is forced to land on (k/N × the run end, for
@@ -680,6 +725,10 @@ def convert(
         tet10_to_tet4=tet10_to_tet4,
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
+        derived_gapmin=derived_gapmin,
+        derived_gapmin_factor=derived_gapmin_factor,
+        rigid_secondary_swap=rigid_secondary_swap,
+        deformable_to_rigid=deformable_to_rigid,
         fixpoint_count=fixpoint_count,
         qstat_dtscal=qstat_dtscal,
         arclength_riks=arclength_riks,

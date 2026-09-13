@@ -6315,9 +6315,17 @@ _CONTACT_SPELLING_NOTES = {
         "R17 p.11-8 item 1b). /INTER/TYPE7 checks only the SURFA (SSID) nodes "
         "against the SURFB (MSID) segments, so if the MSID side is the finer "
         "or the softer mesh its nodes can pass through. NO remedy is "
-        "prescribed here: the obvious one (swap the sides) has never been "
-        "measured to help on any corpus deck, and it is NOT the cause of "
-        "the twobar overshoot - the round-3 verification round MEASURED that "
+        "prescribed here for a DEFORMABLE pair: swapping the sides on twobar "
+        "reads +188 % where the shipped assignment reads +1151 % and an "
+        "explicit Gapmin reads -5.6 %, so the side order is not that deck's "
+        "defect. Where the SSID side is WHOLLY RIGID the swap IS the remedy "
+        "and k2rad now performs it on an explicit deck "
+        "(--no-rigid-secondary-swap to opt out): measured, sphere1 goes from a "
+        "dropped interface at -100 % to -1.66 % against the LS-DYNA reference "
+        "79147.3, and boundary_prescribed_motion.blow-mold from a diverging "
+        "run killed at 241934 cycles to NORMAL TERMINATION at t = 0.015 in "
+        "25675 cycles. The twobar overshoot is NOT the two-way loss - "
+        "the round-3 verification round MEASURED that "
         "deck's +1151 % internal energy down to -5.6 % by changing ONE cell "
         "of the emitted card — the Gapmin the starter derives when k2rad "
         "leaves it 0 (GAP MIN = 1.0 mm on a 10 mm bar; 0.05 gives IE 2866 "
@@ -6325,15 +6333,16 @@ _CONTACT_SPELLING_NOTES = {
         "1.20123e5). A one-way check UNDER-transfers load and cannot produce "
         "a 12x energy excess, and twobar's own LS-DYNA glstat books only 6.38 "
         "of sliding-interface energy in 125018 total. An explicit Gapmin is "
-        "a round-4 item for EVERY solid-segment /INTER/TYPE7 k2rad emits, "
+        "available for every solid-segment /INTER/TYPE7 with --derived-gapmin, "
         "AUTOMATIC spellings included - the scope is the element type, not "
         "the spelling: k2rad writes Igap 0 with Gapmin 0 on all of them "
         "(verified on the already-registered AUTOMATIC carrier "
         "ex_26_thin_shell_elform_16), and i7sti3.F:1055-1063 then derives "
         "`GAP = 0.1 * GAPMX` from the MESH SIZE whenever no shell thickness "
         "was accumulated (`DXM` only ever takes THK, i7sti3.F:499/506/591). "
-        "Round 3 only made more decks REACH that pre-existing behaviour. "
-        "Until then set it per interface with --inter-gapmin <id>=VAL."),
+        "The flag is OFF by default because the measured arms disagree; a "
+        "default-ON warning names the derived value on every carrier either "
+        "way. Set one interface with --inter-gapmin <id>=VAL."),
     "forming": (
         "the FORMING family IGNORES the SURFB (tooling) contact thickness, "
         "and a NEGATIVE SBST additionally offsets SURFB by |SBST|/2 opposite "
@@ -9369,6 +9378,129 @@ def handle_constrained_rigid_bodies(block: Block, state: ConversionState) -> Non
         if pidm <= 0 or pids <= 0 or pidm == pids:
             continue
         state.rigid_body_merges.append((pidm, pids))
+
+
+# ── *DEFORMABLE_TO_RIGID ─────────────────────────────────────────────────────
+
+#: The Radioss mechanism a TIME- or force-TRIGGERED switch would need, named in
+#: full so the refusal below states what exists rather than "unsupported".
+_D2R_SENSOR_PATH = (
+    "The mechanism exists in Radioss - /RBODY card 1 field 2 `sens_ID` plus a "
+    "/SENSOR/TIME: hm_read_rbody.F:363-388 stores the sensor index in "
+    "NPBY(4,NRB), forces Ikrem = 1 and starts the body INACTIVE, and "
+    "rbyonf.F:331/399 switches it on and off per cycle (RefGuide 2022 p.1881 "
+    "Remark 6). It is NOT converted because there are ZERO live _AUTOMATIC, "
+    "_INERTIA or *RIGID_DEFORMABLE_* cards on any corpus this converter is "
+    "measured against (356 R14 decks, 501 C:/openradioss_run files, 36 "
+    "E:/foxcore_data files), so no arm could be measured. The named part(s) "
+    "stay DEFORMABLE for the whole run."
+)
+
+
+def handle_deformable_to_rigid(block: Block, state: ConversionState) -> None:
+    """``*DEFORMABLE_TO_RIGID`` (the PLAIN spelling) → the part is rigid from
+    ``t = 0``, through the same ``/RBODY`` machinery a ``*MAT_RIGID`` part takes.
+
+    Card 1 is three fields (Vol I R17 p.18-2), ``PID LRB PTYPE``:
+
+    ``PID``   part id (or, under ``PTYPE = PSET``, a part-SET id).
+    ``LRB``   "Part ID of the lead rigid body to which the part is merged. If
+              zero, the part becomes either an independent or lead rigid body."
+              Default 0. (The corpus decks' own ``$`` comment calls this field
+              ``mrb``; R17 names it ``LRB``. Both spellings appear here so a
+              grep for either finds this handler.)
+    ``PTYPE`` type ``A`` (character): ``"PART"`` (default) or ``"PSET"``.
+
+    p.18-1 is explicit about the timing this handler implements: *"Deformable
+    parts may be switched to rigid at the start of the calculation by
+    specifying them on the \\*DEFORMABLE_TO_RIGID card"*. The part KEEPS its own
+    deformable material — only the ``/RBODY`` constrains it — so the pid is
+    recorded in ``state.deformable_to_rigid`` and NOT in ``state.mat_rigid``,
+    which is MID-keyed (see the state field's comment for why that distinction
+    is load-bearing).
+
+    ``PSET`` is expanded here, at parse time, so every consumer sees part ids.
+    Reach on the measured corpora: **0 PSET cards**, and 0 non-zero ``LRB``.
+
+    ``--no-deformable-to-rigid`` is honoured in the WRITER
+    (``writer/rbody._make_rbodies``), not here: the parse is unconditional so
+    every later screen sees the same state whichever way the flag is set, and
+    one site owns the refusal message.
+    """
+    for i in range(_title_offset(block), len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=3, w=10)
+        if not f or not f[0].strip():
+            continue
+        pid = to_int(f[0])
+        lrb = to_int(f[1]) if len(f) > 1 else 0
+        ptype = (f[2].strip().upper() if len(f) > 2 else "") or "PART"
+        if pid <= 0:
+            continue
+        if ptype == "PSET":
+            ps = state.part_sets.get(pid)
+            if ps is None:
+                state.warn(
+                    f"*DEFORMABLE_TO_RIGID PTYPE=PSET names part set {pid}, "
+                    "which this deck does not define — no part was switched to "
+                    "rigid. (Reach of the PSET spelling on the measured "
+                    "corpora: 0 cards, so this arm is untested against a "
+                    "reference.) Note for *INCLUDE_TRANSFORM decks: the id in "
+                    "column 1 is offset as a PART id, because PTYPE is read "
+                    "AFTER the offset pass.")
+                continue
+            pids = [p for p in ps[1] if p > 0]
+        else:
+            pids = [pid]
+        for p in pids:
+            state.deformable_to_rigid[p] = lrb
+
+
+def handle_deformable_to_rigid_triggered(block: Block,
+                                         state: ConversionState) -> None:
+    """``*DEFORMABLE_TO_RIGID_AUTOMATIC`` / ``_INERTIA`` — REFUSED BY NAME.
+
+    Both describe a switch that happens DURING the run (``_AUTOMATIC``, Vol I
+    R17 p.18-3, is time- or force-triggered; ``_INERTIA``, p.18-7, supplies the
+    inertial properties a later swap is to use). k2rad converts only the plain
+    card, which is the ``t = 0`` case.
+    """
+    opt = block.keyword[len("DEFORMABLE_TO_RIGID"):].lstrip("_") or "AUTOMATIC"
+    extra = ""
+    if opt.startswith("INERTIA"):
+        extra = (" The card's inertial properties for a LATER swap have no "
+                 "t = 0 meaning; *PART_INERTIA is the supported route for a "
+                 "body that is rigid from the start.")
+    state.warn(
+        f"*{block.keyword} (Vol I R17 p.18-3): a TIME- or force-triggered "
+        "switch between deformable and rigid. k2rad converts only the PLAIN "
+        "*DEFORMABLE_TO_RIGID card (rigid from t = 0). " + _D2R_SENSOR_PATH
+        + extra)
+    state.note_recognized_not_emitted(
+        block.keyword,
+        "a run-time deformable<->rigid switch; only the plain "
+        "*DEFORMABLE_TO_RIGID (rigid from t = 0) is converted. The named "
+        "part(s) stay deformable for the whole run.")
+
+
+def handle_rigid_deformable(block: Block, state: ConversionState) -> None:
+    """``*RIGID_DEFORMABLE_*`` (``_CONTROL`` / ``_D2R`` / ``_R2D``) — REFUSED
+    BY NAME.
+
+    The mirror family of ``*DEFORMABLE_TO_RIGID_AUTOMATIC``: it turns rigid
+    parts deformable (and back) at a restart or at a sensor time. Nothing in it
+    is a ``t = 0`` statement, so there is no card to write.
+    """
+    state.warn(
+        f"*{block.keyword} (Vol I R17 p.42-1): a RIGID<->DEFORMABLE switch "
+        "during the run or at a restart. k2rad converts only the plain "
+        "*DEFORMABLE_TO_RIGID card (rigid from t = 0), so a part this keyword "
+        "names keeps whatever it is in the source deck. " + _D2R_SENSOR_PATH)
+    state.note_recognized_not_emitted(
+        block.keyword,
+        "a run-time rigid<->deformable switch; k2rad converts only the plain "
+        "*DEFORMABLE_TO_RIGID (rigid from t = 0).")
 
 
 # ── *CONSTRAINED_JOINT ───────────────────────────────────────────────────────
@@ -18244,6 +18376,12 @@ HANDLERS = {
     "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
     "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
     "CONSTRAINED_RIGID_BODIES":               handle_constrained_rigid_bodies,
+    # *DEFORMABLE_TO_RIGID: the PLAIN card converts (rigid from t = 0); the two
+    # run-time-triggered options are refused BY NAME rather than left to the
+    # dispatch else-branch, which appends to skipped_keywords with NO warning.
+    "DEFORMABLE_TO_RIGID":                    handle_deformable_to_rigid,
+    "DEFORMABLE_TO_RIGID_AUTOMATIC":          handle_deformable_to_rigid_triggered,
+    "DEFORMABLE_TO_RIGID_INERTIA":            handle_deformable_to_rigid_triggered,
     "CONSTRAINED_SPOTWELD":                   handle_constrained_spotweld,
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE":    handle_constrained_spotweld,
     "CONSTRAINED_GENERALIZED_WELD_SPOT":      handle_constrained_generalized_weld_spot,
@@ -19544,6 +19682,10 @@ _PREFIX_HANDLERS = (
     ("ELEMENT_BEAM", handle_element_beam),
     ("ELEMENT_PLOTEL", handle_element_plotel),
     ("RIGIDWALL_GEOMETRIC", handle_rigidwall_geometric_unsupported),
+    # *RIGID_DEFORMABLE_{CONTROL,D2R,R2D} — a token-boundary prefix so every
+    # spelling of the family is refused by name. RIGIDWALL_GEOMETRIC above is
+    # a different token ("RIGIDWALL"), so the two cannot collide.
+    ("RIGID_DEFORMABLE", handle_rigid_deformable),
     ("PART_COMPOSITE", handle_part_composite),
     ("PART", handle_part_unknown_option),
 )

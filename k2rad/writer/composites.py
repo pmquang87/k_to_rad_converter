@@ -51,7 +51,8 @@ from ..state import (
     PartComposite,
     SectionShell,
 )
-from .common import HDR, _f, _i, _elform_to_ishell, _vcross, _vnorm
+from .common import (HDR, _f, _i, _elform_to_ishell, _vcross, _vnorm,
+                     rigid_part_ids)
 from .materials import _add_auto_curve
 from .mesh import (
     _auto_section_shell,
@@ -1344,15 +1345,21 @@ def _resolve_integration_shells(state: ConversionState) -> None:
                 f"{label}: the rule is DROPPED — the part has no elements at "
                 "all, so no property can be synthesized for it.")
             continue
-        if part.mid in state.mat_rigid:
+        if pid in rigid_part_ids(state):
             # A rigid part deforms not at all, so a through-thickness layup is
             # meaningless on it in EITHER code — this is not a conversion loss.
-            # (It also converts to /MAT/ELAST for the /RBODY's inertia, so it
-            # would hit the same LAW1 gate below, but saying so would send the
-            # user hunting for an elasto-plastic law a rigid body must not have.)
+            # (A *MAT_RIGID part also converts to /MAT/ELAST for the /RBODY's
+            # inertia, so it would hit the same LAW1 gate below, but saying so
+            # would send the user hunting for an elasto-plastic law a rigid body
+            # must not have.) The test is on the PART: a *DEFORMABLE_TO_RIGID
+            # part is rigid from t = 0 while keeping its own law, so a
+            # material-keyed screen would miss it.
+            why = (f"material {part.mid} is *MAT_RIGID"
+                   if part.mid in state.mat_rigid else
+                   "a *DEFORMABLE_TO_RIGID card names the part")
             state.warn(
-                f"{label}: the rule is DROPPED — part {pid}'s material "
-                f"{part.mid} is *MAT_RIGID, so the part becomes an /RBODY with "
+                f"{label}: the rule is DROPPED — part {pid}'s "
+                f"{why}, so the part becomes an /RBODY with "
                 "no through-thickness state and no stress integration at all. "
                 "An integration rule has nothing to act on there; the layup is "
                 "irrelevant rather than lost. Make the part deformable if its "

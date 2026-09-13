@@ -7248,6 +7248,92 @@ class ConvertOptions:
     # mesh. Explicit inter_gapmin entries still win. See k2rad.gapmin.
     auto_gapmin: bool = False
     gapmin_factor: float = 0.8                            # Gapmin = factor × clearance
+    # --derived-gapmin / --derived-gapmin-factor F: write an explicit Gapmin =
+    # F x (min main-surface segment side) on every /INTER/TYPE7 whose MAIN side
+    # is SOLID segments only and whose Gapmin would otherwise be 0. OFF by
+    # default.
+    #
+    # WHAT THE STARTER DOES WITHOUT IT. i7sti3.F:1055-1063: with Igap 0 and
+    # GAP <= 0 the starter derives one itself, and because DXM only ever
+    # accumulates SHELL THICKNESS (i7sti3.F:499/506/591) a solid-segment main
+    # leaves NDX = 0 and takes the `GAP = EM01 * GAPMX` fallback -- one TENTH
+    # of the smallest main-segment side (i4gmx3.F:58-66). LS-DYNA's own offset
+    # on a solid segment is ZERO unless SLDTHK > 0 is stated (Vol I R17
+    # p.11-101 default table, p.11-103; SAST/SBST apply to shells and beams
+    # only, p.11-33) and no carrier on this corpus states one.
+    #
+    # MEASURED, and this is why it is OPT-IN rather than a default. On
+    # intro-by-k.-weimar/contact/twobars/twobar.k (10 mm bars, derived
+    # GAP MIN 1.0) the derived gap costs +1151.3 % internal energy against the
+    # LS-DYNA reference 3036.17, where the flag's own 0.005 x 10 = 0.05 reads
+    # -5.60 % and KE -6.18 %; FACTOR 0.01 reads +14.45 %, so 0.005 is the
+    # measured default and 0.01 is NOT. But the same factor degrades the only
+    # OTHER carrier with a measured arm: on sphere1 the flag writes
+    # 0.005 x 5.84129 = 0.02921 and internal energy goes -1.66 % -> -7.77 % at
+    # 4.1x the cycles. The class's own census, taken with this module's
+    # resolver over the 356-key R14 roster (4 Yaris include-pullers excluded BY
+    # NAME), is 15 interfaces on 14 deck keys -- one of them created by the
+    # round's own all-rigid-SSID swap (sphere1) -- and TWELVE of the fifteen
+    # have no measured arm at all. A press-fit *CONTACT_*_INTERFERENCE is
+    # excluded outright: it needs a LARGE gap to engage, which is why k2rad
+    # already forces Inacti = 0 on that family. (Reach of that exclusion on
+    # this corpus: 0 -- EXP_SC_CONTACT_INTERFERENCE's main surface is SHELL
+    # segments once the swap has run, so the rule does not select it either
+    # way. The guard is a rule, not a measured save.) k2rad's own injected
+    # implicit stabilization stub is excluded too, measured inert on 5 of 5
+    # carriers.
+    #
+    # The rule is pure standard library, unlike --auto-gapmin, which needs
+    # numpy + scipy (k2rad/gapmin.py, docs/DEPENDENCIES.md) and silently applies
+    # nothing without them. Precedence, tightest first: --inter-gapmin ID=VAL >
+    # Card-3 SAST/SBST > --auto-gapmin > --derived-gapmin > 0 (the starter's own
+    # 0.1 x min edge). A default-ON WARNING names the derived value and this
+    # flag on every carrier whether or not the flag is set.
+    derived_gapmin: bool = False
+    derived_gapmin_factor: float = 0.005       # Gapmin = factor × min segment side
+    # --no-rigid-secondary-swap: turn OFF the all-rigid-SSID remedies on an
+    # EXPLICIT deck. ON by default.
+    #
+    # /INTER/TYPE7 is an ASYMMETRIC node-to-segment contact (only the secondary
+    # nodes are checked against the main segments), so the DEFORMABLE side is
+    # the one that must supply the tracked nodes. A *CONTACT whose SSID side is
+    # wholly rigid therefore resolved to an empty secondary group and lost its
+    # WHOLE interface -- 7 deck keys / 8 interfaces on the 356-key R14 roster,
+    # 4 of them ending with no /INTER at all. With this option ON k2rad instead
+    # SWAPS the roles when the MSID side carries deformable nodes, and KEEPS the
+    # rigid secondary group when BOTH sides are wholly rigid.
+    #
+    # The starter does NOT refuse /RBODY member nodes in a TYPE7 secondary
+    # group: measured at 0 ERROR(S) on sphere1 and on mat_spring.belted-dummy
+    # (only WARNING 343, initial penetrations), and the secondary nodal
+    # stiffness is element-based (i7stslav.F:55-58 STIFINT), not nodal-mass
+    # based. The drop was a k2rad policy, not a solver constraint.
+    #
+    # MEASURED (nt 4, reproduced at nt 2 on sphere1): sphere1 internal energy
+    # 0 (-100.00 %) -> 77 830 (-1.66 %) against the LS-DYNA reference 79 147.3,
+    # KE -1.73 %, NORMAL in 1 592 cycles; EXP_SC_CONTACT_INTERFERENCE -100 % ->
+    # -42.80 %; boundary_prescribed_motion.blow-mold from a diverging run killed
+    # at 241 934 cycles and t = 0.0061 of 0.015 with a 99.9 % energy error to
+    # NORMAL TERMINATION at t = 0.015 in 25 675 cycles with a -1.3 % energy
+    # error. mat_spring.belted-dummy's both-rigid interface is measurably INERT
+    # (110 032 cycles, IE 8.804e5, KE 1.4811e6 with and without it) and is
+    # emitted anyway rather than dropping a load path silently.
+    #
+    # IMPLICIT decks keep the DROP. Six arms on
+    # implicit/basic-examples/contact-i/bumper.k, at nt 2 AND nt 4, all
+    # ISTOP = -2 / MESSAGE ID 79 TIMESTEP LIMIT: the swap reaches t = 2.0e-4 of
+    # 0.05, the swap with an explicit Gapmin 0.14986 reaches t = 7.1e-3 and
+    # still ERROR-terminates. --deformable-contact-recipe does not reach the
+    # interface at all (_recipe_active excludes a rigid-MAIN interface,
+    # writer/contacts.py) -- the two conversions are SHA256-identical.
+    rigid_secondary_swap: bool = True
+    # --no-deformable-to-rigid: leave a *DEFORMABLE_TO_RIGID part DEFORMABLE.
+    # ON by default. See ConversionState.deformable_to_rigid for the card and
+    # writer/rbody.py for the machinery; MEASURED on pend.imp, the deck's
+    # energy error goes 99.9 % -> -0.0 % (internal energy 5.162e5 -> 5.901e-06
+    # against the LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA
+    # takes 9 479.
+    deformable_to_rigid: bool = True
     # Mesh transform: downgrade 10-node quadratic tets to 4-node linear tets
     # (keep the 4 corners, drop mid-edge nodes). Stiffer/less accurate but lets a
     # TET10-only source .k produce a TET4 run.
@@ -8635,6 +8721,22 @@ class ConversionState:
     # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
     # rigid part's nodes are folded into the master's single /RBODY
     rigid_body_merges: List[Tuple[int, int]] = field(default_factory=list)
+
+    # *DEFORMABLE_TO_RIGID (the PLAIN spelling): pid -> LRB (0 = the part
+    # becomes an independent / lead rigid body; non-zero = merge it into part
+    # LRB's body). The part is rigid FROM t = 0 — Vol I R17 p.18-1: "Deformable
+    # parts may be switched to rigid at the start of the calculation by
+    # specifying them on the *DEFORMABLE_TO_RIGID card" — and it KEEPS its own
+    # deformable material (*MAT_PLASTIC_KINEMATIC on
+    # defo2rigid/deformable_to_rigid.pendulum, *MAT_ELASTIC on pend.imp), so
+    # this map is PART-keyed and must never be folded into ``mat_rigid``, which
+    # is keyed by MID: adding the MID there would re-emit the material as
+    # /MAT/ELAST and would make every OTHER part sharing that MID rigid too.
+    # ``writer.common.rigid_part_ids`` is the one predicate every consumer
+    # tests; see it for the list of sites.
+    # The card's PTYPE=PSET spelling is expanded to member pids at parse time,
+    # so the keys here are always part ids.
+    deformable_to_rigid: Dict[int, int] = field(default_factory=dict)
 
     # *PART_INERTIA cards 3-6, keyed by PID → the /RBODY Mass/Jxx..Jxz override,
     # the main node's position and the card-5 /INIVEL. Only rigid parts consume

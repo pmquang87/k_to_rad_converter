@@ -25,6 +25,7 @@ from .common import (
     _ref_flag_materials,
     _vcross,
     _vnorm,
+    rigid_part_ids,
 )
 
 __all__ = [
@@ -1122,20 +1123,30 @@ def _resolve_xref_parts(state: ConversionState) -> None:
             "they would do anyway. (dyna2rad converts no reference geometry of "
             "any kind.)")
     any_hit = False
+    rigid_parts = rigid_part_ids(state)     # *MAT_RIGID + *DEFORMABLE_TO_RIGID
     for pid, part in sorted(state.parts.items()):
         if not (pnodes.get(pid, set()) & ref_nids):
             continue
         any_hit = True
-        if part.mid in state.mat_rigid:
+        if pid in rigid_parts:
+            is_mat_rigid = part.mid in state.mat_rigid
+            kind = ("*MAT_RIGID" if is_mat_rigid else "*DEFORMABLE_TO_RIGID")
+            # The LAW1 half of the sentence is true only of a *MAT_RIGID part:
+            # a *DEFORMABLE_TO_RIGID part keeps its own law (Vol I R17 p.18-1)
+            # and its /RBODY deactivates the elements regardless of which one.
+            law_note = (
+                "the part's /MAT/ELAST is LAW1, which IS on the solid-/XREF "
+                "whitelist, and a rigid brick carrying the block measures "
+                "0 ERROR(S) 0 WARNING(S)" if is_mat_rigid else
+                "the part keeps its own deformable law and only the /RBODY "
+                "constrains it, so nothing here is refused by the starter")
             state.warn(
                 f"{kw}: part {pid} (mid "
-                f"{part.mid}) is a *MAT_RIGID part — it converts to an /RBODY, "
+                f"{part.mid}) is a {kind} part — it converts to an /RBODY, "
                 "so all of its nodes are kinematically slaved to the rigid "
                 "master and it has no strain state for a stress-free "
                 "reference geometry to define; /XREF skipped. This is NOT a "
-                "starter rejection: the part's /MAT/ELAST is LAW1, which IS "
-                "on the solid-/XREF whitelist, and a rigid brick carrying the "
-                "block measures 0 ERROR(S) 0 WARNING(S). It is skipped "
+                f"starter rejection: {law_note}. It is skipped "
                 "because it would change no physics while forcing the part's "
                 "*SECTION_SOLID to Ismstr=10 — which any deformable part "
                 "sharing that section is dragged along into. If the reference "

@@ -6,7 +6,7 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
-    ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
+    ConversionState, NodeData, BeamElem, SectionDiscrete, Curve,
     DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
     RigidWallGeomFace,
 )
@@ -15,7 +15,7 @@ from .common import (
     _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
     _part_scoped_segment_set,
-    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub,
+    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub, rigid_part_ids,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
@@ -3717,8 +3717,7 @@ def _synthesize_local_motion_frames(state: ConversionState) -> None:
     # with no /IMP* Dir letter (9/10/11/12) is refused by the writer, so a triad
     # for it would be three unexplained nodes plus a warning promising a
     # co-rotating skew that the .rad never contains.
-    rigid_pids = {p for p, part in state.parts.items()
-                  if part.mid in state.mat_rigid}
+    rigid_pids = set(rigid_part_ids(state))      # *MAT_RIGID + *DEFORMABLE_TO_RIGID
     rigid_pids |= {c.pid for c in state.cnrbs}
     locals_ = [pm for pm in state.prescribed_motions
                if pm.local and pm.pid in rigid_pids
@@ -7534,9 +7533,16 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
         # — so a /RBODY MAIN node is NOT tagged and IS damped. Putting the main
         # node in the group is therefore exactly LS-DYNA's "mass center of the
         # rigid bodies", not an approximation of it.
+        # "Deformable" through the ONE predicate: a *DEFORMABLE_TO_RIGID part
+        # is rigid from t = 0 and belongs on the mass-centre half of LS-DYNA's
+        # own sentence, not on the nodal half. Equivalent on every shipping
+        # deck (its nodes are in `rigid_nodes` and would be subtracted anyway)
+        # and the degenerate arm is EMPTY by construction: a rigid part with no
+        # elements contributes no node to _damping_elem_nodes either.
+        rigid_parts = rigid_part_ids(state)
+
         def _deformable(pid: int) -> bool:
-            return (state.parts.get(pid, PartData(0, "", 0, 0)).mid
-                    not in state.mat_rigid)
+            return pid not in rigid_parts
 
         target_nodes_set = _damping_elem_nodes(state, _deformable) - rigid_nodes
         # *ELEMENT_MASS on an ordinary node: k2rad gives it an /ADMAS, so it
