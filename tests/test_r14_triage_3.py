@@ -1397,6 +1397,31 @@ class RetractedSourceCitationsAreGoneEverywhere(unittest.TestCase):
         "hm_read_inter_type18.F:230-253":
             ":232-234 (SCALE = STFAC under ISTIFF == 2) and :252-253 "
             "(STFAC = STFAC*VREF*VREF)",
+        # ── round 4, part B ───────────────────────────────────────────────
+        "never been measured to help":
+            "MEASURED, and it helps -- the all-rigid-SSID swap takes sphere1's "
+            "internal energy from 0 (-100 %) to 77 830 (-1.66 %) against the "
+            "LS-DYNA reference 79 147.3, and boundary_prescribed_motion."
+            "blow-mold from a diverging 241 934-cycle run to NORMAL "
+            "TERMINATION in 25 675 cycles. It is the DEFAULT on an explicit "
+            "deck since round 4",
+        "deliberately does NOT swap":
+            "k2rad DOES swap the sides on an explicit deck "
+            "(--no-rigid-secondary-swap opts out); the drop survives only on "
+            "an IMPLICIT one, where every restoration arm on bumper.k diverges "
+            "at ISTOP = -2 at nt 2 and nt 4",
+        "cannot hold `/RBODY` members":
+            "the starter ACCEPTS them -- 0 ERROR(S) with all 2 273 rigid nodes "
+            "of sphere1's part 1 in a TYPE7 secondary group, and again on "
+            "mat_spring.belted-dummy; the secondary nodal stiffness is "
+            "element-based (i7stslav.F:55-58 STIFINT), not nodal-mass-based",
+        "cannot form a secondary node group":
+            "the same refutation -- a rigid-body node in a TYPE7 secondary "
+            "group is accepted at 0 ERROR(S). The drop was a k2rad policy, not "
+            "a solver constraint",
+        "secondary node group cannot hold rigid":
+            "the same refutation, third spelling -- measured at 0 ERROR(S) on "
+            "sphere1 and mat_spring.belted-dummy",
     }
 
     _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

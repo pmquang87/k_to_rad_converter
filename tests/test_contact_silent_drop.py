@@ -131,10 +131,22 @@ DECK_TIED_RIGID_SECONDARY = (
 
 
 class RigidSecondaryContactDropped(unittest.TestCase):
-    """The reported defect: SSID = a rigid part, and the /INTER vanishes."""
+    """The reported defect: SSID = a rigid part, and the /INTER vanishes.
+
+    ROUND 4 changed the DEFAULT: on an explicit deck k2rad now swaps the roles
+    instead of dropping the interface (``--no-rigid-secondary-swap`` restores
+    the drop), because the starter was measured to ACCEPT /RBODY member nodes
+    in a TYPE7 secondary group at 0 ERROR(S) — the drop was a k2rad policy, not
+    a solver constraint. Every assertion in this class is still live and still
+    pins the drop's diagnostics; they now run on the OPT-OUT arm, which is the
+    only path that still drops on an explicit deck. The DEFAULT behaviour is
+    pinned by :class:`RigidSecondarySwapIsTheDefault` below, and the implicit
+    arm by ``tests/test_r14_triage_4.py``.
+    """
 
     def setUp(self):
-        self.result, self.starter = _convert(DECK_RIGID_SECONDARY)
+        self.result, self.starter = _convert(DECK_RIGID_SECONDARY,
+                                             rigid_secondary_swap=False)
 
     def _drop_warnings(self):
         return [w for w in self.result.warnings if "NO /INTER was emitted" in w]
@@ -167,10 +179,18 @@ class RigidSecondaryContactDropped(unittest.TestCase):
         self.assertIn("DEFORMABLE", w)
         self.assertIn("SECONDARY (SSID)", w)
 
-    def test_k2rad_does_not_silently_swap_the_sides(self):
-        """Option (b) rejected: emitting the contact with the sides reversed
-        would convert a model the user did not write. The warning says so."""
-        self.assertIn("does NOT swap them", self._drop_warnings()[0])
+    def test_the_opt_out_remedy_names_the_flag(self):
+        """SUCCESSOR, in place, of ``test_k2rad_does_not_silently_swap_the_
+        sides``. That test asserted the warning's sentence "k2rad deliberately
+        does NOT swap them for you: that would silently convert a model
+        different from the one you wrote."  Round 4 RETRACTED it: the swap was
+        measured (``sphere1`` internal energy −100 % → −1.66 % against its
+        LS-DYNA reference, ``blow-mold`` timeout → NORMAL TERMINATION) and is
+        now the default on an explicit deck. What the drop's remedy must do
+        instead is name the flag that produced it."""
+        w = self._drop_warnings()[0]
+        self.assertIn("--no-rigid-secondary-swap", w)
+        self.assertNotIn("does NOT swap them", w)
 
     def test_the_loss_reaches_the_log_accounting(self):
         """`skipped : 0 unsupported keyword(s)` can no longer coexist with a
@@ -186,12 +206,50 @@ class RigidSecondaryContactDropped(unittest.TestCase):
         """Two dropped contacts of the same keyword are one log entry naming
         both ids -- note_recognized_not_emitted deduplicates on the keyword."""
         deck = _MESH + _s2s(2, 1) + _s2s(2, 1) + _TERM
-        result, starter = _convert(deck)
+        result, starter = _convert(deck, rigid_secondary_swap=False)
         self.assertNotIn("/INTER/TYPE7/", starter)
         reason = dict(result.recognized_not_emitted)[
             "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"]
         self.assertIn("2 contact(s)", reason)
         self.assertIn("[90001, 90002]", reason)
+
+
+class RigidSecondarySwapIsTheDefault(unittest.TestCase):
+    """Round 4: the same deck, with the flag left at its default.
+
+    The interface is KEPT, with the two sides exchanged, and the swap is said
+    out loud — the load path is restored rather than reported lost.
+    """
+
+    def setUp(self):
+        self.result, self.starter = _convert(DECK_RIGID_SECONDARY)
+
+    def test_the_interface_is_emitted(self):
+        self.assertIn("/INTER/TYPE7/90001", self.starter)
+
+    def test_nothing_is_reported_lost(self):
+        self.assertEqual(dict(self.result.recognized_not_emitted), {})
+        self.assertEqual(
+            [w for w in self.result.warnings if "NO /INTER was emitted" in w],
+            [])
+
+    def test_the_deformable_side_supplies_the_tracked_nodes(self):
+        """The secondary /GRNOD holds part 1's nodes (the deformable plate),
+        and the main /SURF is built from part 2 (the rigid platen)."""
+        lines = self.starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/GRNOD/NODE/")
+                 and lines[k + 1] == "contact_slave_1")
+        self.assertEqual(lines[i + 2].split(), ["1", "2", "3", "4"])
+        self.assertIn("contact_master_2", self.starter)
+
+    def test_the_swap_is_warned_with_its_measurement(self):
+        w = [x for x in self.result.warnings if "SWAPPED the roles" in x]
+        self.assertEqual(len(w), 1, repr(self.result.warnings))
+        self.assertIn("CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", w[0])
+        self.assertIn("ASYMMETRIC node-to-segment", w[0])
+        self.assertIn("sphere1", w[0])
+        self.assertIn("--no-rigid-secondary-swap", w[0])
 
 
 class CorrectlyOrderedContactIsUntouched(unittest.TestCase):

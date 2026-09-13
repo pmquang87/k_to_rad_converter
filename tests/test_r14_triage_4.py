@@ -1,4 +1,4 @@
-"""Tests for the R14 CAMPAIGN TRIAGE batch, round 4 — PART A:
+"""Tests for the R14 CAMPAIGN TRIAGE batch, round 4 — PARTS A and B:
 
   A1  ``/IMPL/QSTAT/DTSCAL`` 0.1 -> 10 with the ``--qstat-dtscal VALUE|none``
       escape; ``--deformable-contact-recipe`` keeps its validated 0.05
@@ -17,12 +17,28 @@
       cells; ``IAUTO``/``ITEWIN``/``KFAIL`` parsed-unused and a NEGATIVE
       ``DTMAX`` dropped
 
+  B1  ``*DEFORMABLE_TO_RIGID`` (the plain spelling) -> the part is rigid from
+      ``t = 0`` through the ``*MAT_RIGID`` / ``/RBODY`` machinery, behind ONE
+      part-level predicate (``writer.common.rigid_part_ids``); the
+      run-time-triggered options are refused BY NAME
+  B2  the all-rigid-SSID swap on an EXPLICIT deck (default ON,
+      ``--no-rigid-secondary-swap``), the both-sides-rigid KEEP, and the
+      IMPLICIT drop that survives with ``bumper``'s measured divergence named
+  B3  ``--derived-gapmin [--derived-gapmin-factor F]`` (default OFF) on a
+      SOLID-only-main ``/INTER/TYPE7``, plus the default-ON warning that names
+      the starter's own derived ``GAP MIN``
+  B4  the docs: the ROADMAP round-4 column, the "deliberately does NOT close"
+      list, the README rows, and the two shipped strings round 4 retracts
+
 Kept in its own module, the repo's one-module-per-batch convention. Round 4
-REPLACES no round-3 test, so nothing is moved here; the two round-3
-assertions A1 invalidates are corrected IN PLACE
+REPLACES two tests, and neither is moved here: A1's two round-3 assertions are
+corrected IN PLACE
 (``tests/test_converter.py::ImplicitEngineTests::test_qstat_and_nonlin_defaults``
 and ``DeformableContactRecipeTests::test_defdef_detected_warns_without_recipe``),
-where the reader of the old value will look.
+and B2's
+``tests/test_contact_silent_drop.py::RigidSecondaryContactDropped::
+test_k2rad_does_not_silently_swap_the_sides`` is replaced by its named
+successor in that same class — where the reader of the old value will look.
 """
 
 import os
@@ -1258,6 +1274,797 @@ class RoadmapRoundFourCorrectionsTests(unittest.TestCase):
         src = inspect.getsource(contacts)
         self.assertNotIn("projects the secondary nodes", src)
         self.assertIn("_TIED_PENALTY_SPOTFLAGS", src)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B1 — *DEFORMABLE_TO_RIGID (the plain spelling)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Two 8-node bricks on two parts, gravity over the whole model, and one
+#: *CONTACT so the /INTER path is exercised too. Part 1 is the one the
+#: *DEFORMABLE_TO_RIGID card names in :func:`_d2r_deck`; the *MAT_RIGID twin
+#: makes the same part rigid through its MATERIAL instead, which is the
+#: comparison that says "the same machinery".
+_D2R_NODES = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+              (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
+              (0, 0, 2), (1, 0, 2), (1, 1, 2), (0, 1, 2),
+              (0, 0, 3), (1, 0, 3), (1, 1, 3), (0, 1, 3)]
+
+
+def _d2r_mesh() -> str:
+    return (
+        "*NODE\n"
+        + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                  for i, (x, y, z) in enumerate(_D2R_NODES, start=1))
+        + "*ELEMENT_SOLID\n"
+          "       1       1       1       2       3       4       5       6       7       8\n"
+          "       2       2       9      10      11      12      13      14      15      16\n"
+    )
+
+
+def _d2r_deck(card="*DEFORMABLE_TO_RIGID", rows=((1, 0, "PART"),),
+              mat_rigid_pid=0, gravity=True, contact=True) -> str:
+    """One coupon, three arms: the D2R card, the *MAT_RIGID twin, or neither."""
+    deck = "*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n" + _d2r_mesh()
+    for pid in (1, 2):
+        mid = 2 if pid == mat_rigid_pid else 1
+        deck += f"*PART\npart {pid}\n" + _row(pid, 1, mid) + "\n"
+    deck += ("*SECTION_SOLID\n" + _row(1, 1) + "\n"
+             "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n")
+    if mat_rigid_pid:
+        deck += "*MAT_RIGID\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+    if rows and card:
+        for pid, lrb, ptype in rows:
+            deck += card + "\n" + f"{pid:>10}{lrb:>10}" + ptype + "\n"
+    if gravity:
+        deck += ("*DEFINE_CURVE\n" + _row(1) + "\n"
+                 "             0.0             1.0\n"
+                 "             1.0             1.0\n"
+                 "*LOAD_BODY_Z\n" + _row(1, 1.0) + "\n")
+    if contact:
+        deck += ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+                 + _row(1, 2, 3, 3, 0, 0, 0, 0) + "\n"
+                 + _row(0.2, 0.1) + "\n")
+    return deck + "*END\n"
+
+
+class DeformableToRigidRegistrationTests(unittest.TestCase):
+    """The keyword was in NO dispatch table: `dispatch` filed it under
+    ``skipped_keywords`` with no warning at all."""
+
+    def test_the_plain_card_is_registered(self):
+        self.assertIn("DEFORMABLE_TO_RIGID", HANDLERS)
+
+    def test_it_no_longer_lands_in_skipped_keywords(self):
+        result, starter, _ = _convert(_d2r_deck())
+        self.assertNotIn("DEFORMABLE_TO_RIGID", result.skipped_keywords)
+        self.assertNotIn("#-- SKIPPED: *DEFORMABLE_TO_RIGID", starter)
+
+    def test_the_offset_spec_travels_the_pid_through_include_transform(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        self.assertIn("DEFORMABLE_TO_RIGID", _OFFSET_SPECS)
+        spec = _OFFSET_SPECS["DEFORMABLE_TO_RIGID"]
+        self.assertEqual(spec, {"data": (0, [(0, "p"), (1, "p")])})
+
+    def test_the_card_is_parsed_into_a_part_keyed_map(self):
+        state = _dispatch(_d2r_deck())
+        self.assertEqual(state.deformable_to_rigid, {1: 0})
+
+
+class DeformableToRigidRbodyTests(unittest.TestCase):
+    """The part becomes an /RBODY at t = 0, through the *MAT_RIGID path."""
+
+    def setUp(self):
+        self.result, self.starter, _ = _convert(_d2r_deck())
+
+    def test_an_rbody_is_emitted_over_the_named_part(self):
+        self.assertIn("#-  RIGID BODIES:", self.starter)
+        lines = self.starter.splitlines()
+        i = lines.index("rb_nodes_pid1")
+        self.assertEqual(lines[i + 1].split(),
+                         ["1", "2", "3", "4", "5", "6", "7", "8"])
+        self.assertNotIn("rb_nodes_pid2", self.starter)
+
+    def test_the_material_is_NOT_re_emitted_as_a_rigid_one(self):
+        """The pid is recorded, not the MID: adding the MID to state.mat_rigid
+        would re-title the law AND make part 2 (which shares it) rigid too."""
+        self.assertNotIn("(rigid body material)", self.starter)
+        state = _dispatch(_d2r_deck())
+        self.assertEqual(state.mat_rigid, {})
+
+    def test_the_warning_states_the_card_and_the_measurement(self):
+        w = [x for x in self.result.warnings
+             if x.startswith("*DEFORMABLE_TO_RIGID PID 1:")]
+        self.assertEqual(len(w), 1, repr(self.result.warnings))
+        self.assertIn("rigid FROM t = 0", w[0])
+        self.assertIn("p.18-1", w[0])
+        self.assertIn("hm_read_rbody.F:700-722", w[0])
+        self.assertIn("5.03545e-06", w[0])         # the LS-DYNA reference
+        self.assertIn("9 480", w[0])
+        self.assertIn("--no-deformable-to-rigid", w[0])
+
+    def test_the_gravity_scope_sees_the_new_rigid_body(self):
+        """The arm this guards was MEASURED: an /RBODY the /GRAV group builder
+        does not see makes pend.imp a 0.000 / 0.000 zero model at 9 480 NORMAL
+        cycles, because rgbodv.F overwrites a rigid secondary's acceleration."""
+        lines = self.starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/GRNOD/PART/"))
+        self.assertEqual(lines[i + 2].split(), ["2"])   # part 1 is gone
+        self.assertIn("body_load_rbody_mains_", self.starter)
+        self.assertIn("/GRNOD/GRNOD/", self.starter)
+
+    def test_the_mat_rigid_twin_emits_the_same_rigid_body_section(self):
+        _, twin, _ = _convert(_d2r_deck(card="", rows=(), mat_rigid_pid=1))
+
+        def section(text):
+            ls = text.splitlines()
+            a = ls.index("#-  RIGID BODIES:")
+            b = next(k for k in range(a + 1, len(ls))
+                     if ls[k].startswith("#-  ") and k > a)
+            return [ln for ln in ls[a:b] if not ln.startswith("part ")]
+
+        self.assertEqual(section(self.starter), section(twin))
+
+
+class DeformableToRigidOptOutTests(unittest.TestCase):
+
+    def setUp(self):
+        self.result, self.starter, _ = _convert(
+            _d2r_deck(), deformable_to_rigid=False)
+
+    def test_no_rbody_is_emitted(self):
+        self.assertNotIn("#-  RIGID BODIES:", self.starter)
+
+    def test_the_loss_is_warned_and_accounted(self):
+        self.assertTrue(_has(self.result.warnings,
+                             "--no-deformable-to-rigid", "[1]"))
+        self.assertIn("DEFORMABLE_TO_RIGID",
+                      dict(self.result.recognized_not_emitted))
+
+    def test_the_parser_still_records_the_card(self):
+        """The option is honoured in the WRITER, so every later screen sees the
+        same parsed state whichever way the flag is set."""
+        state = _dispatch(_d2r_deck())
+        self.assertEqual(state.deformable_to_rigid, {1: 0})
+
+
+class DeformableToRigidRefusalTests(unittest.TestCase):
+    """The run-time-triggered spellings are refused BY NAME, with the Radioss
+    mechanism that would be needed spelled out."""
+
+    def _arm(self, card):
+        return _convert(_d2r_deck(card=card))
+
+    def test_automatic_is_refused_by_name(self):
+        result, starter, _ = self._arm("*DEFORMABLE_TO_RIGID_AUTOMATIC")
+        self.assertNotIn("#-  RIGID BODIES:", starter)
+        self.assertTrue(_has(result.warnings,
+                             "*DEFORMABLE_TO_RIGID_AUTOMATIC",
+                             "/SENSOR/TIME", "hm_read_rbody.F:363-388",
+                             "rbyonf.F:331/399"))
+        self.assertIn("DEFORMABLE_TO_RIGID_AUTOMATIC",
+                      dict(result.recognized_not_emitted))
+
+    def test_inertia_names_part_inertia_as_the_supported_route(self):
+        result, _, _ = self._arm("*DEFORMABLE_TO_RIGID_INERTIA")
+        self.assertTrue(_has(result.warnings,
+                             "*DEFORMABLE_TO_RIGID_INERTIA", "*PART_INERTIA"))
+
+    def test_rigid_deformable_is_refused_through_the_prefix(self):
+        for spelling in ("*RIGID_DEFORMABLE_CONTROL", "*RIGID_DEFORMABLE_D2R",
+                         "*RIGID_DEFORMABLE_R2D"):
+            with self.subTest(spelling=spelling):
+                result, starter, _ = self._arm(spelling)
+                self.assertNotIn("#-  RIGID BODIES:", starter)
+                self.assertTrue(_has(result.warnings, spelling, "/SENSOR/TIME"))
+
+    def test_pset_is_refused_with_the_offset_caveat(self):
+        result, starter, _ = _convert(
+            _d2r_deck(rows=((77, 0, "PSET"),)))
+        self.assertNotIn("#-  RIGID BODIES:", starter)
+        self.assertTrue(_has(result.warnings, "PTYPE=PSET",
+                             "*INCLUDE_TRANSFORM"))
+
+
+class DeformableToRigidLrbTests(unittest.TestCase):
+    """LRB folds through the SAME union-find *CONSTRAINED_RIGID_BODIES uses."""
+
+    def test_lrb_merges_the_two_parts_into_one_rbody(self):
+        result, starter, _ = _convert(
+            _d2r_deck(rows=((1, 0, "PART"), (2, 1, "PART"))))
+        self.assertEqual(starter.count("/RBODY/"), 1)
+        lines = starter.splitlines()
+        i = lines.index("rb_nodes_pid1")
+        self.assertEqual(len(lines[i + 1].split() + lines[i + 2].split()), 16)
+
+    def test_lrb_naming_a_deformable_part_is_warned_and_dropped(self):
+        result, starter, _ = _convert(
+            _d2r_deck(rows=((1, 2, "PART"),)))
+        self.assertTrue(_has(result.warnings, "*DEFORMABLE_TO_RIGID LRB (2,1)",
+                             "merge skipped"))
+
+
+class RigidPartPredicateTests(unittest.TestCase):
+    """ONE predicate, and every part-level consumer tests it."""
+
+    def test_it_covers_both_routes(self):
+        from k2rad.writer.common import rigid_part_ids
+        self.assertEqual(rigid_part_ids(_dispatch(_d2r_deck())), {1})
+        twin = _dispatch(_d2r_deck(card="", rows=(), mat_rigid_pid=1))
+        self.assertEqual(rigid_part_ids(twin), {1})
+        plain = _dispatch(_d2r_deck(card="", rows=()))
+        self.assertEqual(rigid_part_ids(plain), set())
+
+    def test_no_writer_module_answers_the_part_question_from_mat_rigid(self):
+        """A consumer left on ``state.mat_rigid`` alone is the defect. The
+        MATERIAL registries may still use it (they answer a MID question), so
+        the scan is for the PART-level shape ``parts[...].mid in mat_rigid``."""
+        import glob
+        import os as _os
+        import re as _re
+        root = _os.path.join(self._ROOT, "k2rad", "writer")
+        shape = _re.compile(r"parts[^\n]{0,60}\.mid\s+(?:not\s+)?in\s+"
+                            r"state\.mat_rigid")
+        offenders = []
+        for path in glob.glob(_os.path.join(root, "*.py")):
+            base = _os.path.basename(path)
+            with open(path, encoding="utf-8") as fh:
+                for n, line in enumerate(fh, 1):
+                    if not shape.search(line):
+                        continue
+                    # common.py IS the predicate — one definition, by design.
+                    if base == "common.py" and "out = {p for p" in line:
+                        continue
+                    offenders.append(f"{base}:{n}")
+        self.assertEqual(offenders, [], "use writer.common.rigid_part_ids")
+
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B2 — the explicit all-rigid-SSID swap
+# ═════════════════════════════════════════════════════════════════════════════
+
+_RS_MESH = """\
+*NODE
+         1             0.0             0.0             0.0
+         2            10.0             0.0             0.0
+         3            10.0            10.0             0.0
+         4             0.0            10.0             0.0
+         5             0.0             0.0             1.0
+         6            10.0             0.0             1.0
+         7            10.0            10.0             1.0
+         8             0.0            10.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+plate
+         1         1         1
+*PART
+platen
+         2         2         2
+*SECTION_SHELL
+         1        16
+       1.0       1.0       1.0       1.0
+*MAT_ELASTIC
+         1   7.85e-9    210000.0      0.3
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+"""
+
+
+def _rs_deck(ssid=2, msid=1, implicit=False, rcforc=False, both_rigid=False,
+             keyword="*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", extra=""):
+    deck = "*KEYWORD\n" + _RS_MESH
+    if both_rigid:
+        deck = deck.replace("         1         1         1\n",
+                            "         1         1         2\n")
+    if implicit:
+        deck += ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n")
+    if rcforc:
+        deck += "*DATABASE_RCFORC\n" + _row(1.0e-4) + "\n"
+    deck += (keyword + "\n" + _row(ssid, msid, 3, 3, 0, 0, 0, 0) + "\n"
+             + _row(0.2, 0.1) + "\n")
+    return deck + extra + "*CONTROL_TERMINATION\n" + _row(1.0) + "\n*END\n"
+
+
+class RigidSecondarySwapTests(unittest.TestCase):
+    """SSID wholly rigid + MSID deformable, EXPLICIT -> the roles are swapped."""
+
+    def setUp(self):
+        self.result, self.starter, _ = _convert(_rs_deck())
+
+    def test_the_interface_survives(self):
+        self.assertIn("/INTER/TYPE7/", self.starter)
+        self.assertEqual(dict(self.result.recognized_not_emitted), {})
+
+    def test_the_deformable_side_supplies_the_tracked_nodes(self):
+        lines = self.starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/GRNOD/NODE/") and lines[k + 1] ==
+                 "contact_slave_1")
+        self.assertEqual(lines[i + 2].split(), ["1", "2", "3", "4"])
+        self.assertIn("contact_master_2", self.starter)
+
+    def test_the_warning_carries_the_rewritten_rationale(self):
+        w = [x for x in self.result.warnings if "SWAPPED the roles" in x]
+        self.assertEqual(len(w), 1, repr(self.result.warnings))
+        self.assertIn("ASYMMETRIC node-to-segment", w[0])
+        self.assertIn("p.11-10", w[0])            # the one-sided citation
+        self.assertIn("CHANGES WHICH SIDE IS PENALISED", w[0].upper())
+        self.assertIn("sphere1", w[0])
+        self.assertIn("-1.66", w[0])
+        self.assertIn("blow-mold", w[0])
+        self.assertIn("--no-rigid-secondary-swap", w[0])
+
+    def test_the_opt_out_restores_the_drop(self):
+        result, starter, _ = _convert(_rs_deck(), rigid_secondary_swap=False)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertTrue(_has(result.warnings, "NO /INTER was emitted",
+                             "--no-rigid-secondary-swap"))
+
+    def test_a_correctly_ordered_contact_is_untouched(self):
+        """The deck that was already right must not move."""
+        a = _convert(_rs_deck(ssid=1, msid=2))[1]
+        b = _convert(_rs_deck(ssid=1, msid=2),
+                     rigid_secondary_swap=False)[1]
+        self.assertEqual(a, b)
+
+
+class RigidSecondaryImplicitGateTests(unittest.TestCase):
+    """An IMPLICIT deck keeps the drop, and says why with the measured arm."""
+
+    def setUp(self):
+        self.result, self.starter, _ = _convert(_rs_deck(implicit=True))
+
+    def test_the_interface_is_still_dropped(self):
+        self.assertNotIn("/INTER/TYPE7/90", self.starter.replace(
+            "auto_implicit_stabilization_self_contact", ""))
+        self.assertTrue(_has(self.result.warnings, "NO /INTER was emitted"))
+
+    def test_the_drop_names_bumper_and_the_measured_divergence(self):
+        w = [x for x in self.result.warnings if "NO /INTER was emitted" in x][0]
+        self.assertIn("IMPLICIT deck", w)
+        self.assertIn("bumper.k", w)
+        self.assertIn("ISTOP = -2", w)
+        self.assertIn("nt 2 and nt 4", w)
+
+    def test_the_remedy_states_the_solver_accepts_rigid_nodes(self):
+        w = [x for x in self.result.warnings if "NO /INTER was emitted" in x][0]
+        self.assertIn("does NOT refuse /RBODY member nodes", w)
+        self.assertIn("policy, not a solver constraint", w)
+
+
+class RigidVsRigidKeepTests(unittest.TestCase):
+    """BOTH sides wholly rigid: there is nothing to swap to, and the interface
+    is emitted anyway rather than dropping a load path silently."""
+
+    def setUp(self):
+        self.result, self.starter, _ = _convert(_rs_deck(both_rigid=True))
+
+    def test_the_interface_is_emitted_with_the_rigid_secondary(self):
+        self.assertIn("/INTER/TYPE7/", self.starter)
+        lines = self.starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if lines[k] == "contact_slave_2")
+        self.assertEqual(lines[i + 1].split(), ["5", "6", "7", "8"])
+
+    def test_the_warning_names_the_measured_inertness_and_its_cost(self):
+        w = [x for x in self.result.warnings
+             if "BOTH sides are wholly rigid" in x]
+        self.assertEqual(len(w), 1, repr(self.result.warnings))
+        self.assertIn("i7stslav.F:55-58", w[0])
+        self.assertIn("mat_spring.belted-dummy", w[0])
+        self.assertIn("16.5 %", w[0])
+        self.assertIn("--no-rigid-secondary-swap", w[0])
+
+    def test_the_opt_out_drops_it_again(self):
+        _, starter, _ = _convert(_rs_deck(both_rigid=True),
+                                 rigid_secondary_swap=False)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+
+
+class RigidSecondaryIdStreamTests(unittest.TestCase):
+    """The renumber signature, pinned — a sweep classifier has to treat every
+    B2 deck as RENUMBERED, never byte- or id-compared.
+
+    Two things move and they are independent:
+
+    * the restored interface allocates its own ids. How MANY depends on the two
+      sides' surface KINDS, not on the swap: MEASURED on
+      ``intro-by-j.-day/contact/sphere/sphere1.k`` the count is unchanged (the
+      dropped arm's orphaned ``/SURF/GRSHEL`` + ``/GRSHEL/SHEL`` pair becomes a
+      ``/GRNOD/NODE`` + ``/SURF/PART/EXT`` pair at the same two ids, 90129 and
+      90130, with only the CARD KIND changing); on a shell-vs-shell coupon the
+      swapped arm allocates ONE more, because a ``/SURF/GRSHEL`` main needs two
+      ids and a secondary ``/GRNOD`` only one.
+    * the restored ``/TH/INTER``: ``_drop_interface`` registers the id in
+      ``state.dropped_inter_ids``, which suppresses the time-history record, so
+      a deck carrying ``*DATABASE_RCFORC`` gains one FURTHER id — measured on
+      ``sphere1`` as ``/TH/NODE/90134 -> /TH/INTER/90134`` plus a new 90135.
+    """
+
+    @staticmethod
+    def _auto_ids(text):
+        import re as _re
+        return [int(m.group(1)) for m in
+                _re.finditer(r"^/[A-Z0-9_/]+/(9\d{4})\s*$", text, _re.M)]
+
+    @staticmethod
+    def _auto_kinds(text):
+        import re as _re
+        return {int(m.group(2)): m.group(1) for m in
+                _re.finditer(r"^(/[A-Z0-9_/]+)/(9\d{4})\s*$", text, _re.M)}
+
+    def test_the_card_kind_at_an_auto_id_changes(self):
+        dropped = _convert(_rs_deck(), rigid_secondary_swap=False)[1]
+        swapped = _convert(_rs_deck())[1]
+        a, b = self._auto_kinds(dropped), self._auto_kinds(swapped)
+        shared = set(a) & set(b)
+        self.assertTrue(any(a[i] != b[i] for i in shared),
+                        "a B2 deck must not be compared by id")
+
+    def test_the_restored_TH_INTER_costs_one_further_id(self):
+        plain_d = self._auto_ids(_convert(_rs_deck(),
+                                          rigid_secondary_swap=False)[1])
+        plain_s = self._auto_ids(_convert(_rs_deck())[1])
+        rc_d_txt = _convert(_rs_deck(rcforc=True),
+                            rigid_secondary_swap=False)[1]
+        rc_s_txt = _convert(_rs_deck(rcforc=True))[1]
+        self.assertNotIn("/TH/INTER/", rc_d_txt)
+        self.assertIn("/TH/INTER/", rc_s_txt)
+        rc_d = self._auto_ids(rc_d_txt)
+        rc_s = self._auto_ids(rc_s_txt)
+        self.assertEqual(len(rc_s) - len(rc_d),
+                         len(plain_s) - len(plain_d) + 1)
+
+
+class OneSidedSelfContactIsNotASwapSiteTests(unittest.TestCase):
+    """``*CONTACT_AUTOMATIC_SINGLE_SURFACE`` with SSID != 0 names ONE side and
+    uses it for both roles, so there is no second side to move to."""
+
+    def test_the_drop_says_so_instead_of_offering_the_swap(self):
+        deck = _rs_deck(ssid=2, msid=0,
+                        keyword="*CONTACT_AUTOMATIC_SINGLE_SURFACE")
+        result, starter, _ = _convert(deck)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        w = [x for x in result.warnings if "NO /INTER was emitted" in x][0]
+        self.assertIn("names ONE side", w)
+        self.assertIn("cannot deform", w)
+
+
+class AllPartsSelfContactGuardTests(unittest.TestCase):
+    """The SSID = 0 guard's two halves belong to DIFFERENT branches.
+
+    Fusing them threw away an explicit all-rigid deck's whole /INTER/TYPE25,
+    which never reads ``all_deformable_nodes`` at all — the degenerate arm of a
+    more-faithful rule (measured on
+    ``introduction/examples-manual/misc/defo2rigid/deformable_to_rigid.pendulum.k``,
+    whose only two shell parts are exactly the two *DEFORMABLE_TO_RIGID makes
+    rigid).
+    """
+
+    def _deck(self, implicit):
+        deck = "*KEYWORD\n" + _RS_MESH.replace(
+            "         1         1         1\n", "         1         1         2\n")
+        if implicit:
+            deck += "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+        deck += ("*CONTACT_AUTOMATIC_SINGLE_SURFACE\n"
+                 + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n" + _row(0.2, 0.1) + "\n"
+                 "*CONTROL_TERMINATION\n" + _row(1.0) + "\n*END\n")
+        return deck
+
+    def test_explicit_all_rigid_keeps_its_type25_self_contact(self):
+        result, starter, _ = _convert(self._deck(implicit=False))
+        self.assertIn("/INTER/TYPE25/", starter)
+        self.assertEqual(dict(result.recognized_not_emitted), {})
+
+    def test_implicit_all_rigid_still_drops_the_node_to_surface_route(self):
+        result, starter, _ = _convert(self._deck(implicit=True))
+        w = [x for x in result.warnings if "NO /INTER was emitted" in x]
+        self.assertEqual(len(w), 1, repr(result.warnings))
+        self.assertIn("IMPLICIT", w[0])
+        self.assertIn("no deformable nodes left", w[0])
+
+
+class Type25NodesToSurfaceSwapTests(unittest.TestCase):
+    """Implemented for symmetry; measured reach on the R14 roster is 0."""
+
+    def test_the_swap_reaches_the_type25_node_to_surface_route(self):
+        deck = _rs_deck(
+            keyword="*CONTACT_ERODING_NODES_TO_SURFACE")
+        result, starter, _ = _convert(deck)
+        self.assertIn("/INTER/TYPE25/", starter)
+        self.assertTrue(_has(result.warnings, "SWAPPED the roles"))
+
+
+class RigidSecondaryStringCorrectionTests(unittest.TestCase):
+    """The two shipped strings round 4 RETRACTS, and what replaces them."""
+
+    def test_the_twoway_note_no_longer_says_the_swap_was_never_measured(self):
+        from k2rad.handlers import _CONTACT_SPELLING_NOTES
+        note = _CONTACT_SPELLING_NOTES["twoway"]
+        self.assertNotIn("never been measured to help", note)
+        self.assertIn("sphere1", note)
+        self.assertIn("--no-rigid-secondary-swap", note)
+
+    def test_the_remedy_constant_is_the_implicit_one(self):
+        from k2rad.writer import contacts
+        self.assertFalse(hasattr(contacts, "_RIGID_SECONDARY_REMEDY"))
+        text = contacts._RIGID_SECONDARY_REMEDY_IMPLICIT
+        self.assertNotIn("deliberately does NOT swap", text)
+        self.assertIn("bumper.k", text)
+        self.assertIn("policy, not a solver constraint", text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B3 — --derived-gapmin (OPT-IN) on a SOLID-only-main /INTER/TYPE7
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _gapmin_cell(starter: str) -> str:
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines)
+             if ln.startswith("#              Stfac"))
+    return lines[i + 1].split()[2]
+
+
+class DerivedGapminTests(unittest.TestCase):
+    """``AUTO_GAPMIN_K`` (tests/test_converter.py) is the only fixture in the
+    repo the predicate selects: two 4-node tets, part 2 *MAT_RIGID, the main
+    side a ``/SURF/PART/EXT``, no Card-3 SAST/SBST.
+
+    Hand-computed ``min_edge``: part 2's nodes are 5 (0.5,0,0), 6 (1.5,0,0),
+    7 (0.5,1,0), 8 (0.5,0,1); the four faces are all external and the edge
+    lengths are 1.0 (5-6, 5-7, 5-8) and sqrt(2) (6-7, 7-8, 8-6), so
+    ``min_edge = 1.0``.
+    """
+
+    @staticmethod
+    def _conv(**kw):
+        from test_converter import AUTO_GAPMIN_K
+        return _convert(AUTO_GAPMIN_K, **kw)
+
+    def test_default_off_leaves_the_cell_at_zero(self):
+        result, starter, _ = self._conv()
+        self.assertEqual(_gapmin_cell(starter), "0")
+        self.assertEqual(starter, self._conv(derived_gapmin=False)[1])
+
+    def test_the_solid_main_warns_by_default(self):
+        result, _, _ = self._conv()
+        w = [x for x in result.warnings if "SOLID segments only" in x]
+        self.assertEqual(len(w), 1, repr(result.warnings))
+        self.assertIn("GAP MIN = 0.1 x 1", w[0])
+        self.assertIn("i7sti3.F:1055-1063", w[0])
+        self.assertIn("i4gmx3.F:58-66", w[0])
+        self.assertIn("twobar", w[0])
+        self.assertIn("--derived-gapmin", w[0])
+        # The two substrings other tests forbid on this very deck.
+        self.assertFalse(any("Gapmin=" in x for x in result.warnings))
+        self.assertFalse(any("auto-gapmin" in x for x in result.warnings))
+
+    def test_the_flag_writes_factor_times_min_edge(self):
+        self.assertEqual(_gapmin_cell(self._conv(derived_gapmin=True)[1]),
+                         "0.005")
+
+    def test_the_factor_changes_the_cell(self):
+        self.assertEqual(
+            _gapmin_cell(self._conv(derived_gapmin=True,
+                                    derived_gapmin_factor=0.01)[1]), "0.01")
+
+    def test_the_ceiling_is_half_the_min_edge(self):
+        result, starter, _ = self._conv(derived_gapmin=True,
+                                        derived_gapmin_factor=0.8)
+        self.assertEqual(_gapmin_cell(starter), "0.5")
+        self.assertTrue(_has(result.warnings, "CLAMPED to the ceiling",
+                             "i7sti3.F:1075"))
+
+    def test_inter_gapmin_still_wins(self):
+        result, starter, _ = self._conv(derived_gapmin=True,
+                                        inter_gapmin={9: 0.03})
+        self.assertEqual(_gapmin_cell(starter), "0.03")
+        self.assertFalse(any("--derived-gapmin wrote" in x
+                             for x in result.warnings))
+
+    def test_card3_sst_mst_still_wins(self):
+        from test_converter import GAPMIN_K
+        result, starter, _ = _convert(GAPMIN_K, derived_gapmin=True)
+        self.assertEqual(_gapmin_cell(starter), "0.11")
+
+    def test_a_shell_main_is_untouched_and_unwarned(self):
+        from test_converter import GAPMIN_K, DEFDEF_K, FORCE_RB_K
+        for name, deck in (("GAPMIN_K", GAPMIN_K), ("DEFDEF_K", DEFDEF_K),
+                           ("FORCE_RB_K", FORCE_RB_K)):
+            with self.subTest(deck=name):
+                base = _convert(deck)[1]
+                flagged = _convert(deck, derived_gapmin=True)
+                self.assertEqual(base, flagged[1])
+                self.assertFalse(any("SOLID segments only" in x
+                                     for x in flagged[0].warnings))
+
+    def test_the_injected_implicit_stub_is_excluded(self):
+        """28 of the roster's solid-only mains are k2rad's OWN stabilization
+        card, measured byte-inert on 5 of 5 carriers — deriving a gap for it
+        would be noise about a card the user did not write."""
+        from k2rad.writer.common import AUTO_IMPLICIT_STUB_TITLE
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+                + _d2r_mesh()
+                + "*PART\np1\n" + _row(1, 1, 1) + "\n"
+                + "*PART\np2\n" + _row(2, 1, 1) + "\n"
+                + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                  "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n*END\n")
+        base = _convert(deck)
+        flagged = _convert(deck, derived_gapmin=True)
+        self.assertIn(AUTO_IMPLICIT_STUB_TITLE, base[1])
+        self.assertEqual(base[1], flagged[1])
+        self.assertFalse(any("SOLID segments only" in x
+                             for x in flagged[0].warnings))
+
+    def test_the_interference_family_is_excluded(self):
+        from test_converter import AUTO_GAPMIN_K
+        deck = AUTO_GAPMIN_K.replace(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID",
+            "*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE_ID")
+        result, starter, _ = _convert(deck, derived_gapmin=True)
+        self.assertEqual(_gapmin_cell(starter), "0")
+        self.assertTrue(_has(result.warnings, "EXCLUDED from --derived-gapmin",
+                             "EXP_SC_CONTACT_INTERFERENCE"))
+
+    def test_a_collapsed_face_side_is_skipped_like_i4gmx3(self):
+        """``i4gmx3.F:58-66`` skips a side whose two node ids are equal, so a
+        collapsed quad is measured over its three real sides."""
+        from k2rad.writer.contacts import _min_segment_side
+        from k2rad.state import ConversionState, NodeData
+        st = ConversionState()
+        st.nodes = {1: NodeData(0.0, 0.0, 0.0), 2: NodeData(3.0, 0.0, 0.0),
+                    3: NodeData(3.0, 4.0, 0.0)}
+        self.assertEqual(_min_segment_side(st, [[1, 2, 3, 3]]), 3.0)
+        self.assertEqual(_min_segment_side(st, [[1, 2, 3]]), 3.0)
+
+    def test_the_two_goldens_that_carry_a_TYPE7_have_shell_mains(self):
+        """Zero golden moves under B3, verified from the fixtures themselves."""
+        import glob
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "fixtures", "expected")
+        carriers = [p for p in glob.glob(os.path.join(root, "*.rad"))
+                    if "/INTER/TYPE7" in open(p, encoding="utf-8").read()
+                    .replace("\r\n", "\n")]
+        self.assertEqual(sorted(os.path.basename(p) for p in carriers),
+                         ["implicit_qstat_0000.rad", "rigid_contact_0000.rad"])
+        for p in carriers:
+            with self.subTest(golden=os.path.basename(p)):
+                self.assertIn("/SURF/GRSHEL/",
+                              open(p, encoding="utf-8").read())
+
+
+class DerivedGapminCliTests(unittest.TestCase):
+
+    def test_the_parser_defaults(self):
+        args = cli.build_parser().parse_args(["deck.k"])
+        self.assertIs(args.derived_gapmin, False)
+        self.assertEqual(args.derived_gapmin_factor, 0.005)
+        self.assertIs(args.rigid_secondary_swap, True)
+        self.assertIs(args.deformable_to_rigid, True)
+
+    def test_the_positional_output_stem_is_not_eaten(self):
+        """``--derived-gapmin`` is store_true, NOT ``nargs='?'``: the parser
+        already declares an optional positional ``output_stem``, so an optional
+        argument to the flag would silently swallow it."""
+        args = cli.build_parser().parse_args(
+            ["deck.k", "out/stem", "--derived-gapmin"])
+        self.assertEqual(args.output_stem, "out/stem")
+        self.assertIs(args.derived_gapmin, True)
+
+    def test_help_renders(self):
+        text = cli.build_parser().format_help()
+        self.assertIn("--derived-gapmin", text)
+        self.assertIn("--no-rigid-secondary-swap", text)
+        self.assertIn("--no-deformable-to-rigid", text)
+
+
+class PartBGuiWiringTests(unittest.TestCase):
+
+    def test_build_convert_kwargs_carries_the_three_levers(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        open(path, "w").write("*KEYWORD\n*END\n")
+        kw = k2rad_gui.build_convert_kwargs(
+            input_path=path, output_stem="", units=("Mg", "mm", "s"),
+            ground_springs=False, ground_spring_k_text="",
+            soften_stfac_text="", derived_gapmin=True,
+            derived_gapmin_factor_text="0.01",
+            rigid_secondary_swap=False, deformable_to_rigid=False)
+        self.assertIs(kw["derived_gapmin"], True)
+        self.assertEqual(kw["derived_gapmin_factor"], 0.01)
+        self.assertIs(kw["rigid_secondary_swap"], False)
+        self.assertIs(kw["deformable_to_rigid"], False)
+        tmp.cleanup()
+
+    def test_the_factor_is_only_read_when_the_box_is_ticked(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        open(path, "w").write("*KEYWORD\n*END\n")
+        kw = k2rad_gui.build_convert_kwargs(
+            input_path=path, output_stem="", units=("Mg", "mm", "s"),
+            ground_springs=False, ground_spring_k_text="",
+            soften_stfac_text="", derived_gapmin=False,
+            derived_gapmin_factor_text="not a number")
+        self.assertNotIn("derived_gapmin_factor", kw)
+        tmp.cleanup()
+
+    def test_the_summary_names_every_non_default(self):
+        import k2rad_gui
+        captured = []
+        app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+        app._append = captured.append
+        k2rad_gui.ConverterGUI._describe_options(app, {
+            "derived_gapmin": True, "derived_gapmin_factor": 0.005,
+            "rigid_secondary_swap": False, "deformable_to_rigid": False})
+        text = "".join(captured)
+        self.assertIn("derived gapmin", text)
+        self.assertIn("--no-rigid-secondary-swap", text)
+        self.assertIn("--no-deformable-to-rigid", text)
+
+    def test_the_summary_stays_quiet_on_a_default_conversion(self):
+        import k2rad_gui
+        captured = []
+        app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+        app._append = captured.append
+        k2rad_gui.ConverterGUI._describe_options(app, {})
+        text = "".join(captured)
+        for needle in ("derived gapmin", "--no-rigid-secondary-swap",
+                       "--no-deformable-to-rigid"):
+            self.assertNotIn(needle, text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B4 — the docs
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PartBDocsTests(unittest.TestCase):
+
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _read(self, name):
+        with open(os.path.join(self._ROOT, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_roadmap_queue_table_gained_a_round_4_column(self):
+        text = self._read("ROADMAP.md")
+        header = next(ln for ln in text.splitlines()
+                      if ln.startswith("| # | class | decks |"))
+        self.assertIn("round 4", header)
+
+    def test_the_roadmap_lists_what_round_4_does_not_close(self):
+        text = self._read("ROADMAP.md")
+        self.assertIn("What round 4 deliberately does NOT close", text)
+        for item in ("mass-weighted", "pseudo-inverse", "transducer",
+                     "advection_B", "CNRB DOF releases"):
+            with self.subTest(item=item):
+                self.assertIn(item, text)
+
+    def test_the_refuted_solver_constraint_is_gone_from_the_docs(self):
+        for name in ("README.md", "ROADMAP.md"):
+            with self.subTest(doc=name):
+                text = self._read(name)
+                self.assertNotIn("cannot hold `/RBODY` members", text)
+                self.assertNotIn("cannot form a secondary node group", text)
+
+    def test_the_readme_has_the_three_new_rows(self):
+        text = self._read("README.md")
+        self.assertIn("*DEFORMABLE_TO_RIGID", text)
+        self.assertIn("--no-rigid-secondary-swap", text)
+        self.assertIn("--derived-gapmin", text)
+
+    def test_the_changelog_quotes_pend_imp_and_sphere1(self):
+        text = self._read("CHANGELOG.md")
+        self.assertIn("5.03545e-06", text)
+        self.assertIn("79 147.3", text)
+        self.assertIn("25 675 cycles", text)
 
 
 if __name__ == "__main__":
