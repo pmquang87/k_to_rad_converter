@@ -1272,61 +1272,6 @@ from a list rather than a re-census:
 - **ELFORM −1/−2 → a locking-free 8-point `Isolid`**, with the numbers
   measured by round 3 and recorded in the item-B entry below.
 
-**52 of the 59 starter failures.** What is deliberately left, by name:
-
-**Round 2's REVIEW round** re-derived item E on the solver (the stub keeps
-`Inacti = 5`; `Fpenmax = 0.999999` is the measured zero-normal cut, 486 nodes
-against 0.99's 928 on `4.3_General_Nonlinearity`; a tied `/INTER/TYPE10` states
-`Itied = 1`), bounded item A's LS-DYNA evidence to what reproduces, named the
-`*MAT_NULL` stability class it costs four ALE decks, and gave the batch's
-headline default-on change the tests it did not have. The campaign was re-run
-for every deck whose emitted `.rad` moved — see `OPENRADIOSS_REPORT.md` §0.14.
-
-- ~~**ERROR 611**~~ — **CLOSED in R14 triage round 2.** The reading above is
-  wrong twice over and the correction is what fixed it. 611 is not "initial
-  penetration cannot be depenetrated": `i7pwr3.F:113-114` raises it only when
-  `DN = |N|² ≤ 1e-30`, i.e. the secondary node lies EXACTLY on a main segment
-  so no depenetration DIRECTION exists — the reported penetration is then the
-  whole gap, which is what made it look like a depth problem. And the gate is
-  `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so `Inacti = 6` would
-  not have helped either. `4.3_General_Nonlinearity`'s `Inacti = 5` is also not
-  a k2rad default: the deck states `IGNORE = 1` on its own optional `*CONTACT`
-  card (line 348) and `_ignore_to_inacti` maps it faithfully. Fix: the
-  synthesized stub keeps the ordinary `Inacti = 5` and every `/INTER/TYPE7`
-  whose `Inacti` is 3/4/5/6 — the stub included — gains
-  `Fpenmax = 0.999999`, a starter-only field that deactivates the nodes with
-  no depenetration direction and is measured inert otherwise. The constant is
-  measured: four starter runs of `4.3_General_Nonlinearity` give 928
-  deactivations at 0.99 against its 486 zero-normal nodes, and 486 at
-  0.999999. (The stub stated `Inacti = 1` for one round; that zeroes EVERY
-  penetrating node's stiffness and cost `efg/metal-cutting` its NORMAL
-  termination, 218 cycles → a TIMESTEP-LIMIT death at t = 0.0084.) A tied
-  `/INTER/TYPE10` has no Fpenmax field (`hm_read_inter_type10.F:94`) and uses
-  `Itied = 1` instead.
-  Measured: `05_1_welding_solid` 310 → 0 starter errors,
-  `4.3_General_Nonlinearity` 486 → 0. **Both then fail in the ENGINE** with
-  `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, so they move from
-  `error_starter` to `error_engine` and belong to the `/IMPL` recipe item, not
-  to this one.
-- **ERROR 495**, `icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi.k` —
-  116 × zero-thickness CFD boundary shells. OpenRadioss has no ICFD solver, so
-  the deck cannot run whatever the shells say.
-- **`ex_16_thin_shell_elform_13.k`** — `*SECTION_BEAM` ELFORM = 7, a 2-D
-  plane-strain "beam" on a rigid part. Not a truss, no Radioss counterpart; it
-  keeps its ERROR 314-317 and is named here rather than swept into class 4.
-- **`show-cases/contact-overview/mesh.k`** — a DECK DEFECT: it never defines the
-  `*SECTION_BEAM` its beam parts reference, and 664 of its `/PART`s name no
-  material. k2rad's placeholder warning is correct; nothing to fix here.
-- **`point_source.k`** — `*MAT_GAS_MIXTURE` is refused whole rather than half,
-  because converting the material without
-  `*SECTION_POINT_SOURCE_MIXTURE`/`*INITIAL_GAS_MIXTURE` would leave the deck
-  with no injection source (see CHANGELOG).
-
-Round 1 closes the STARTER classes only. The engine census is untouched, and two
-of its rows are expected to GROW as decks that never started begin to: a
-Salzburg deck that starts and then stalls in `/IMPL` is a pass for this batch and
-an input to the next.
-
 **What round 4 deliberately does NOT close** - each entry with the measurement
 that decided it and the deck that would decide it next.
 
@@ -1426,6 +1371,61 @@ that decided it and the deck that would decide it next.
     surfaces are SHELL segments. The `*CONTACT_*_INTERFERENCE` exclusion the
     flag carries is therefore a RULE with 0 measured carriers on this corpus,
     not a measured save.
+
+**52 of the 59 starter failures.** What is deliberately left, by name:
+
+**Round 2's REVIEW round** re-derived item E on the solver (the stub keeps
+`Inacti = 5`; `Fpenmax = 0.999999` is the measured zero-normal cut, 486 nodes
+against 0.99's 928 on `4.3_General_Nonlinearity`; a tied `/INTER/TYPE10` states
+`Itied = 1`), bounded item A's LS-DYNA evidence to what reproduces, named the
+`*MAT_NULL` stability class it costs four ALE decks, and gave the batch's
+headline default-on change the tests it did not have. The campaign was re-run
+for every deck whose emitted `.rad` moved — see `OPENRADIOSS_REPORT.md` §0.14.
+
+- ~~**ERROR 611**~~ — **CLOSED in R14 triage round 2.** The reading above is
+  wrong twice over and the correction is what fixed it. 611 is not "initial
+  penetration cannot be depenetrated": `i7pwr3.F:113-114` raises it only when
+  `DN = |N|² ≤ 1e-30`, i.e. the secondary node lies EXACTLY on a main segment
+  so no depenetration DIRECTION exists — the reported penetration is then the
+  whole gap, which is what made it look like a depth problem. And the gate is
+  `IF(INACTI/=1 .AND. INACTI/=2 .AND. FPENMAX==ZERO)`, so `Inacti = 6` would
+  not have helped either. `4.3_General_Nonlinearity`'s `Inacti = 5` is also not
+  a k2rad default: the deck states `IGNORE = 1` on its own optional `*CONTACT`
+  card (line 348) and `_ignore_to_inacti` maps it faithfully. Fix: the
+  synthesized stub keeps the ordinary `Inacti = 5` and every `/INTER/TYPE7`
+  whose `Inacti` is 3/4/5/6 — the stub included — gains
+  `Fpenmax = 0.999999`, a starter-only field that deactivates the nodes with
+  no depenetration direction and is measured inert otherwise. The constant is
+  measured: four starter runs of `4.3_General_Nonlinearity` give 928
+  deactivations at 0.99 against its 486 zero-normal nodes, and 486 at
+  0.999999. (The stub stated `Inacti = 1` for one round; that zeroes EVERY
+  penetrating node's stiffness and cost `efg/metal-cutting` its NORMAL
+  termination, 218 cycles → a TIMESTEP-LIMIT death at t = 0.0084.) A tied
+  `/INTER/TYPE10` has no Fpenmax field (`hm_read_inter_type10.F:94`) and uses
+  `Itied = 1` instead.
+  Measured: `05_1_welding_solid` 310 → 0 starter errors,
+  `4.3_General_Nonlinearity` 486 → 0. **Both then fail in the ENGINE** with
+  `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT`, so they move from
+  `error_starter` to `error_engine` and belong to the `/IMPL` recipe item, not
+  to this one.
+- **ERROR 495**, `icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi.k` —
+  116 × zero-thickness CFD boundary shells. OpenRadioss has no ICFD solver, so
+  the deck cannot run whatever the shells say.
+- **`ex_16_thin_shell_elform_13.k`** — `*SECTION_BEAM` ELFORM = 7, a 2-D
+  plane-strain "beam" on a rigid part. Not a truss, no Radioss counterpart; it
+  keeps its ERROR 314-317 and is named here rather than swept into class 4.
+- **`show-cases/contact-overview/mesh.k`** — a DECK DEFECT: it never defines the
+  `*SECTION_BEAM` its beam parts reference, and 664 of its `/PART`s name no
+  material. k2rad's placeholder warning is correct; nothing to fix here.
+- **`point_source.k`** — `*MAT_GAS_MIXTURE` is refused whole rather than half,
+  because converting the material without
+  `*SECTION_POINT_SOURCE_MIXTURE`/`*INITIAL_GAS_MIXTURE` would leave the deck
+  with no injection source (see CHANGELOG).
+
+Round 1 closes the STARTER classes only. The engine census is untouched, and two
+of its rows are expected to GROW as decks that never started begin to: a
+Salzburg deck that starts and then stalls in `/IMPL` is a pass for this batch and
+an input to the next.
 
 ### Found in the POST-REVIEW of round 1
 
