@@ -1407,6 +1407,26 @@ class DeformableToRigidRbodyTests(unittest.TestCase):
         self.assertEqual(section(self.starter), section(twin))
 
 
+    def test_a_LOCAL_prescribed_motion_gets_its_co_rotating_triad(self):
+        """``_synthesize_local_motion_frames`` builds the /SKEW/MOV triad only
+        for a part it considers RIGID. On ``state.mat_rigid`` alone a
+        *DEFORMABLE_TO_RIGID part is skipped, the motion falls back to the
+        GLOBAL axes and the error grows as cos(theta(t)) — the same silence the
+        /GRAV re-point had. Reach on the corpus: 0 decks combine the two, so
+        this is the predicate's pin, not a live carrier."""
+        deck = (_d2r_deck(gravity=False, contact=False).replace("*END@", "")
+                + "*DEFINE_CURVE@" + _row(1) + "@"
+                  "             0.0             0.0@"
+                  "             1.0             1.0@"
+                + "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL@"
+                + _row(1, 1, 2, 1, 1.0) + "@*END@").replace("@", "\n")
+        result, starter, _ = _convert(deck)
+        self.assertIn("/SKEW/MOV/", starter)
+        self.assertTrue(_has(result.warnings,
+                             "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL pid=1",
+                             "CO-ROTATING"))
+
+
 class DeformableToRigidOptOutTests(unittest.TestCase):
 
     def setUp(self):
@@ -1504,19 +1524,32 @@ class RigidPartPredicateTests(unittest.TestCase):
         import os as _os
         import re as _re
         root = _os.path.join(self._ROOT, "k2rad", "writer")
-        shape = _re.compile(r"parts[^\n]{0,60}\.mid\s+(?:not\s+)?in\s+"
-                            r"state\.mat_rigid")
+        # Matched over the WHOLE file, not line by line: the shape a revert
+        # takes is usually WRAPPED across two lines
+        # (`state.parts.items()` / `if part.mid in state.mat_rigid`), which a
+        # per-line scan misses entirely — a mutation that reverted
+        # writer/loads._synthesize_local_motion_frames to exactly that shape
+        # stayed GREEN against the first version of this test.
+        shape = _re.compile(r"state\.parts[\s\S]{0,80}?\.mid\s+(?:not\s+)?"
+                            r"in\s+state\.mat_rigid")
+        # The TWO places the union is legitimately spelled out: the predicate
+        # itself, and _make_rbodies, which needs the two halves separately (it
+        # carries the LRB map into the merge union-find). Named, not inferred.
+        allowed = {("common.py", "rigid_part_ids"), ("rbody.py", "_make_rbodies")}
         offenders = []
         for path in glob.glob(_os.path.join(root, "*.py")):
             base = _os.path.basename(path)
             with open(path, encoding="utf-8") as fh:
-                for n, line in enumerate(fh, 1):
-                    if not shape.search(line):
-                        continue
-                    # common.py IS the predicate — one definition, by design.
-                    if base == "common.py" and "out = {p for p" in line:
-                        continue
-                    offenders.append(f"{base}:{n}")
+                text = fh.read()
+            for m in shape.finditer(text):
+                before = text[:m.start()]
+                defs = _re.findall(r"^def ([A-Za-z_][A-Za-z_0-9]*)",
+                                   before, _re.M)
+                where = defs[-1] if defs else "<module>"
+                if (base, where) in allowed:
+                    continue
+                offenders.append(f"{base}:{before.count(chr(10)) + 1} "
+                                 f"in {where}()")
         self.assertEqual(offenders, [], "use writer.common.rigid_part_ids")
 
     _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
