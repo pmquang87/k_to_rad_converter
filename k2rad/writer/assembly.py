@@ -556,6 +556,14 @@ def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
     10.0 writes ``10`` and 0.1 writes ``0.1`` — the same text the pre-round-4
     constant produced, so ``--qstat-dtscal 0.1`` restores the old line byte for
     byte.
+
+    Anything else RAISES. ``cli._qstat_dtscal_arg`` and the GUI already refuse
+    ``<= 0`` and a non-number, but ``convert(qstat_dtscal=...)`` is a public
+    entry point of its own and used to format whatever it was handed: MEASURED
+    through the API, ``-3.0`` wrote the cell ``-3`` and ``0.0`` wrote ``0``,
+    which divides by zero in ``M/((1+alpha)*beta*(DTSCAL*dt)^2)``
+    (``imp_dyna.F:351-356``), and an unparsable string silently became the
+    default ``10`` instead of telling the caller their value never arrived.
     """
     v = state.options.qstat_dtscal
     if isinstance(v, str):
@@ -564,11 +572,19 @@ def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
         try:
             v = float(v)
         except ValueError:
-            return "10"
-    return f"{float(v):g}"
+            raise ValueError(
+                f"qstat_dtscal must be a number or 'none', not {v!r}")
+    fv = float(v)
+    if fv <= 0.0:
+        raise ValueError(
+            f"qstat_dtscal must be > 0 (got {fv:g}); pass 'none' to emit no "
+            "/IMPL/QSTAT card. The engine divides by (DTSCAL*dt)^2 "
+            "(imp_dyna.F:351-356), so 0 is a division by zero and a negative "
+            "value has no meaning.")
+    return f"{fv:g}"
 
 
-def _warn_arclength(state: ConversionState) -> None:
+def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
     """Name LS-DYNA's arc-length request, and what ``--arclength-riks`` buys.
 
     Fires on EVERY carrier, flag or no flag: the deck asked for a continuation
@@ -576,6 +592,12 @@ def _warn_arclength(state: ConversionState) -> None:
     ``ControlImplicitSolution.nsolvr`` "PARSED AND UNUSED" with nothing in the
     log. What the flag emits is named, and so is the measurement that keeps it
     opt-in.
+
+    *modal* is True on a ``/EIG`` deck, where the request is dropped no matter
+    what the flag says — the modal engine writes no ``/IMPL/DT`` card at all,
+    so there is nothing for ``/IMPL/DT/3`` to replace. Reach of that arm on the
+    R14 roster: 0 decks (all three arc-length carriers are non-modal), so it is
+    stated rather than measured.
     """
     sol = state.ctrl_implicit_sol
     if sol is None:
@@ -604,7 +626,14 @@ def _warn_arclength(state: ConversionState) -> None:
         "where it used to fail in 1.5 s. /IMPL/DT/FIXPOINT is DEACTIVATED by "
         "the engine under RIKS (lectur.F:3523-3532), so --fixpoint-count is "
         "silently disarmed with it.")
-    if state.options.arclength_riks:
+    if modal:
+        state.warn(head + "This deck is a NORMAL-MODES (/EIG) analysis, whose "
+                          "engine is /IMPL/LINEAR plus the stiffness export "
+                          "and writes no /IMPL/DT card at all, so the "
+                          "arc-length request is DROPPED whatever "
+                          "--arclength-riks says - there is no step controller "
+                          "for /IMPL/DT/3 to replace. " + measured)
+    elif state.options.arclength_riks:
         state.warn(head + "--arclength-riks was passed, so /IMPL/DT/3 is "
                           "emitted in place of /IMPL/DT/2. " + measured)
     else:
@@ -613,7 +642,8 @@ def _warn_arclength(state: ConversionState) -> None:
                           "--arclength-riks to emit it. " + measured)
 
 
-def _warn_implicit_auto_drops(state: ConversionState) -> None:
+def _warn_implicit_auto_drops(state: ConversionState,
+                              modal: bool = False) -> None:
     """``*CONTROL_IMPLICIT_AUTO``: the cells that reach no ``/IMPL`` card.
 
     ``handle_control_implicit_auto`` parses IAUTO, ITEOPT, ITEWIN, DTMIN,
@@ -623,27 +653,56 @@ def _warn_implicit_auto_drops(state: ConversionState) -> None:
     load-curve id, not a value" idiom — is dropped outright, leaving the
     implicit step unbounded (``lectur.F:3546`` turns a zero DT_MAX into EP10).
 
-    One warning per deck (the card is a singleton), and only the cells this
-    deck actually states are named.
+    **``IAUTO = 0`` is named too**, and it is the cell where the substitution
+    is largest. A truthiness filter used to skip it; but Vol I R17 p.12-277
+    defines ``IAUTO EQ.0: Constant time step size``, that is the card's own
+    DEFAULT, and k2rad writes ``/IMPL/DT/2`` — automatic step control — on
+    every implicit deck regardless. MISTAKES #136: a value a deck leaves blank
+    still has a solver default and the default can be load-bearing. Censused
+    over the 356-key R14 roster: 11 decks state or blank ``IAUTO = 0``,
+    ``tensile2`` (one of round 4's four ``--qstat-dtscal`` movers) and the
+    whole ``ex_14_solid_elform_*`` family among them, against 22 with
+    ``IAUTO > 0``. ``IAUTO < 0`` gets the load-curve gloss p.12-277 gives it,
+    the same one ``DTMAX < 0`` already had.
+
+    One warning per deck (the card is a singleton). *modal* is True on a
+    ``/EIG`` deck, where the drop is the same but the card that would have read
+    the cells is not ``/IMPL/DT/2`` — the modal recipe writes no ``/IMPL/DT``
+    card at all — so the sentence says that instead of naming a card the deck
+    does not carry.
     """
     auto = state.ctrl_implicit_auto
     if auto is None:
         return
-    gloss = {"IAUTO": "the auto-step on/off switch",
-             "ITEWIN": "the iteration window",
+    gloss = {"ITEWIN": "the iteration window",
              "KFAIL": "the number of failed steps before an abort"}
-    unused = [(n, v) for n, v in (("IAUTO", auto.iauto),
-                                  ("ITEWIN", auto.itewin),
+    unused = [(n, v) for n, v in (("ITEWIN", auto.itewin),
                                   ("KFAIL", auto.kfail)) if v]
     neg_dtmax = auto.dtmax < 0.0
-    if not unused and not neg_dtmax:
-        return
+    written = ("no /IMPL/DT card at all - a modal deck's engine is "
+               "/IMPL/LINEAR plus the stiffness export"
+               if modal else
+               "/IMPL/DT/2 (AUTOMATIC step control) with It_w taken from "
+               "ITEOPT alone")
     msg = "*CONTROL_IMPLICIT_AUTO: "
+    if auto.iauto == 0:
+        msg += ("IAUTO=0 - LS-DYNA's own default, and Vol I R17 p.12-277 "
+                "defines it as 'Constant time step size' - asks for a step "
+                f"that never changes. k2rad writes {written}, so the "
+                "converted deck grows and cuts the implicit step where "
+                "LS-DYNA holds it at DT0. ")
+    elif auto.iauto < 0:
+        msg += (f"IAUTO={auto.iauto} is NEGATIVE, i.e. Vol I R17 p.12-277's "
+                "'IAUTO LT.0: Curve ID = (-IAUTO) gives time step size as a "
+                f"function of time'. The curve is DROPPED: k2rad writes "
+                f"{written}. ")
+    else:
+        msg += (f"IAUTO={auto.iauto} (the auto-step on/off switch) is parsed "
+                f"and NOT used - k2rad writes {written} whatever it says. ")
     if unused:
         msg += (", ".join(f"{n}={v} ({gloss[n]})" for n, v in unused) + " "
                 + ("is" if len(unused) == 1 else "are")
-                + " parsed and NOT used - k2rad always writes /IMPL/DT/2 with "
-                  "It_w taken from ITEOPT alone. ")
+                + " parsed and NOT used either. ")
     if neg_dtmax:
         msg += (f"DTMAX={auto.dtmax:g} is NEGATIVE, i.e. LS-DYNA's idiom for "
                 "'-DTMAX is a LOAD CURVE id giving the maximum step as a "
@@ -659,15 +718,24 @@ def _warn_implicit_auto_drops(state: ConversionState) -> None:
 
 
 def _make_engine_implicit(state: ConversionState) -> List[str]:
+    # The two "what this deck asked for and did not get" warnings run for BOTH
+    # implicit shapes. They used to sit below the modal early return, so a
+    # /EIG deck was told nothing: MEASURED, ex_08_beam_elform_{1,2,13} state
+    # *CONTROL_IMPLICIT_AUTO IAUTO 1 / ITEWIN 15 beside
+    # *CONTROL_IMPLICIT_EIGENVALUE and got no drop warning at all, though the
+    # modal recipe ignores those cells exactly as /IMPL/DT/2 does. Each warning
+    # is told which shape it is on, so neither names a card the deck will not
+    # carry.
+    if state.is_modal or state.is_implicit:
+        if _arclength_requested(state):
+            _warn_arclength(state, modal=state.is_modal)
+        _warn_implicit_auto_drops(state, modal=state.is_modal)
     if state.is_modal:
         # Normal-modes (/EIG) → one-shot linear eigensolve, not the QSTAT/NONLIN
         # time-marching engine below.
         return _make_engine_modal(state)
     if not state.is_implicit:
         return []
-    if _arclength_requested(state):
-        _warn_arclength(state)
-    _warn_implicit_auto_drops(state)
     gen  = state.ctrl_implicit_gen
     dyn  = state.ctrl_implicit_dyn
     auto = state.ctrl_implicit_auto

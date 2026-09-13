@@ -667,12 +667,26 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
 def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None:
     """The ``*CONSTRAINED_LAGRANGE_IN_SOLID`` cells that reach no ``/INTER`` cell.
 
-    ``handle_constrained_lagrange_in_solid`` reads card-1 fields 1-6 and
+    ``handle_constrained_lagrange_in_solid`` reads card-1 fields 1-4 and 6 and
     card-2 fields 1-3; ``ConstrainedLagrangeInSolid`` stores ``slave master
     sstyp mstyp ctype pfac start end``; and this writer uses ``slave``,
     ``master``, ``sstyp``, ``mstyp``, ``start``, ``end`` and NOTHING ELSE —
-    ``ctype`` and ``pfac`` are parsed and never read, and NQUAD, DIREC, MCOUP,
-    FRCMIN, NORM, DAMP, ILEAK and PLEAK are never parsed at all.
+    ``ctype`` and ``pfac`` are parsed and never read, and EVERY OTHER CELL of
+    the keyword is never parsed at all.
+
+    The inventory is the whole point of this warning, so it is enumerated per
+    card against the deck's own ``$#`` headers rather than summarised:
+    card 1's ``NQUAD``, ``DIREC`` and ``MCOUP``; card 2's ``FRIC`` (the
+    coupling friction coefficient — a physics cell, not a control), ``FRCMIN``,
+    ``NORM``, ``NORMTYP`` and ``DAMP``; the whole of card 3 (``K``/``CQ``,
+    ``HMIN``, ``HMAX``, ``ILEAK``, ``PLEAK``, ``LCIDPOR``, ``NVENT``,
+    ``BLOCKAGE``); and the whole of the optional card 4 where a deck writes one
+    (``IBOXID``, ``IPENCHK``, ``INTFORC``, ``IALESOF``, ``LAGMUL``, ``PFACMM``,
+    ``THKF``). Censused over the 12 CLIS cards on ``F:`` and
+    ``C:/openradioss_run``: every unnamed cell is 0 or its default except
+    ``stagnation_A``/``_B``'s ``K 1.4013E-45``, ``BLOCKAGE 2113929216`` and
+    ``IBOXID 1073741824`` — so nothing real is lost on this corpus today, which
+    is a reason to name them, not a reason to leave them out.
 
     That the drop is real, not a bookkeeping quibble, has a controlled
     experiment in the corpus itself: ``quadrature_B`` and ``quadrature_C``
@@ -684,9 +698,13 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None
     """
     state.warn(
         f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
-        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: the coupling cells NQUAD, "
-        "DIREC, MCOUP, FRCMIN, NORM, DAMP, ILEAK and PLEAK are NOT PARSED at "
-        f"all, and CTYPE={cls.ctype} and PFAC={cls.pfac:g} are parsed and "
+        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: every coupling cell "
+        "except the two sides and the two times is NOT PARSED at all - card 1 "
+        "NQUAD, DIREC, MCOUP; card 2 FRIC (the coupling FRICTION coefficient), "
+        "FRCMIN, NORM, NORMTYP, DAMP; the whole of card 3 (K/CQ, HMIN, HMAX, "
+        "ILEAK, PLEAK, LCIDPOR, NVENT, BLOCKAGE); and the whole of the "
+        "optional card 4 (IBOXID, IPENCHK, INTFORC, IALESOF, LAGMUL, PFACMM, "
+        f"THKF) - and CTYPE={cls.ctype} and PFAC={cls.pfac:g} are parsed and "
         "never read. The emitted interface uses a CONSTANT UNIT stiffness "
         "(Stfval = 1.0, Vref = 0.0, Iauto left blank so the starter takes "
         "ISTIFF = 1, 'constant user value' - hm_read_inter_type18.F:131 and "
