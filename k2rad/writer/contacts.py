@@ -800,6 +800,14 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     ``all_solid`` is False whenever the side is empty or any segment is a shell
     — a MIXED shell+solid main feeds the starter's shell-thickness branch
     (``DXM``) and is out of the derived rule's scope.
+
+    ``styp == 5 or sid == 0`` is the ALL-PARTS sentinel the ``SSID = 0``
+    self-contact passes, and it matches that path's own
+    ``_make_master_surface(..., all_pids, ...)``. No OTHER caller can reach it:
+    ``_resolve_contact_master`` resolves only types 0, 1, 2 and 3 and returns 0
+    for a type-5 side, so such a contact is dropped before a Gapmin is
+    computed at all (measured reach of a type-5 MAIN side on the 352-deck R14
+    roster this resolver was censused over: 0 interfaces).
     """
     segs: List[List[int]] = []
     any_shell = False
