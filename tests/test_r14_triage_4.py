@@ -2621,6 +2621,29 @@ class RefusedTgmultWithdrawsItsCurveTests(unittest.TestCase):
                         result.warnings)
         self.assertNotIn("Auto_tgmult_T_tmid", starter)
 
+    def test_one_rate_on_two_DIFFERENT_curves_is_refused_too(self):
+        """The scalar rate is not the whole generation. With a ``TGRLC``
+        curve the history is ``rate * INTEGRAL(f dt)``, so two ``/HEAT/MAT``s
+        can share one ``TGMULT/(rho*Cp)`` and still drive their parts apart —
+        which is exactly the non-uniform field the ``/IMPTEMP`` may not clamp.
+        The screen compared only the scalar and let that pass."""
+        curves = ""
+        for lcid, pts in ((7, ((0.0, 0.0), (3.0, 2.0))),
+                          (8, ((0.0, 2.0), (3.0, 0.0)))):
+            curves += ("*DEFINE_CURVE\n" + _row(lcid) + "\n"
+                       + "".join(f"{x:>20.10G}{y:>20.10G}\n" for x, y in pts))
+        deck = self._two_material_deck().replace(
+            _row(1, 1.0, 0, 10.0, 0.0, 0.0), _row(1, 1.0, 7, 10.0, 0.0, 0.0)
+        ).replace(
+            _row(2, 1.0, 0, 0.0, 0.0, 0.0), _row(2, 1.0, 8, 10.0, 0.0, 0.0)
+        ).replace("*END\n", curves + "*END\n")
+        result, starter, _e = _convert(deck)
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertTrue(_has(result.warnings, "DIFFERENT TGRLC",
+                             "temperature histories separate"),
+                        result.warnings)
+        self.assertNotIn("Auto_tgmult_T_tmid", starter)
+
     def test_parts_with_no_element_are_refused_before_the_curve_is_minted(self):
         """The empty-node drop used to live at emit time, where it could not
         withdraw the curve it was rejecting."""
