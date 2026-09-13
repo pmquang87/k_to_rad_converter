@@ -7130,7 +7130,11 @@ class ConvertOptions:
     # DEFAULT 10 -- changed from 0.1 on 2026-09. MEASURED at nt 3 AND nt 4 on
     # the R14 roster (51 carrier keys on 40 emitted models, every one of them
     # a not_comparable row, so this moves openradioss.status and nothing else):
-    # 4.2.frf.cant-1 goes from 4 cycles + ERROR to 104 cycles, t = 1.000,
+    # 4.2.frf.cant-1 goes from 4 cycles + ERROR (the 4 is its pre-round
+    # CAMPAIGN ROW; an independent quiet-machine master repeat never leaves
+    # cycle 0 -- 13 cycle-0 rows at ISTOP -2 -- so quote the row, not a
+    # reproducible count; either way the arm advances nothing) to 104
+    # cycles, t = 1.000,
     # IE 7922 against its LS-DYNA reference's 7946.31 (-0.31 %); tensile2 from
     # 179 cycles + ERROR at t = 0.78 to 685 cycles NORMAL at +7.36 %;
     # 6.5.tbl.psd.prepressure-1 from 3 cycles + ERROR to 610 cycles NORMAL at

@@ -4858,7 +4858,9 @@ none at all (its own `d3hsp`: *"artificial stabilization flag 2 = off
 ('standard' analysis DEFAULT)"*). Reach: **51 deck keys on 40 emitted
 models** on the dynaexamples R14 roster. MEASURED at `nt` 3 **and** `nt` 4
 against each deck's own LS-DYNA `glstat`: `4.2.frf.cant-1` goes from 4 cycles
-and an ERROR to 104 cycles at `t = 1.000`, IE 7922 against the reference
+and an ERROR (the 4 is its pre-round campaign row; a quiet-machine master
+repeat never leaves cycle 0 — either way the arm advances nothing) to 104
+cycles at `t = 1.000`, IE 7922 against the reference
 7946.31 (**−0.31 %**); `tensile2` **+7.36 %**;
 `6.5.tbl.psd.prepressure-1` **+0.03 %**; `doorbeam` ERROR → NORMAL. **The
 cost, named:** `ex_02_thick_shell_elform_{2,3,5}` — 3 deck keys on ONE emitted

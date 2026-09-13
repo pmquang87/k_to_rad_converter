@@ -33,7 +33,10 @@ Prior history (before this changelog was introduced) is summarized in the
     the step recover. LS-DYNA's standard static implicit adds none at all — its
     own d3hsp: *"artificial stabilization flag 2 = off ('standard' analysis
     DEFAULT)"*. MEASURED at **nt 3 AND nt 4** against each deck's own LS-DYNA
-    `glstat`: `nvh/example-04-02/4.2.frf.cant-1` goes from 4 cycles and an
+    `glstat`: `nvh/example-04-02/4.2.frf.cant-1` goes from 4 cycles — its
+    pre-round CAMPAIGN ROW; a quiet-machine master repeat never leaves cycle
+    0, 13 cycle-0 rows at `ISTOP -2`, and either way the arm advances
+    nothing — and an
     ERROR to **104 cycles, t = 1.000, IE 7922 against the reference's 7946.31
     (−0.31 %)**; `implicit/basic-examples/basics-ii/tensile2` from 179 cycles
     and an ERROR at t = 0.78 to 685 cycles NORMAL at **+7.36 %**;

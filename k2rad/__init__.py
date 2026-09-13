@@ -382,6 +382,8 @@ def convert(
         auto-step cut stiffened the tangent further. LS-DYNA's standard static
         implicit adds none at all. MEASURED at nt 3 AND nt 4 against each
         deck's own LS-DYNA ``glstat``: ``4.2.frf.cant-1`` goes from 4 cycles
+        (its pre-round CAMPAIGN ROW — a quiet-machine master repeat never
+        leaves cycle 0; either way the arm advances nothing)
         and an ERROR to 104 cycles, ``t = 1.000``, IE 7922 against the
         reference 7946.31 (−0.31 %); ``tensile2`` +7.36 %;
         ``6.5.tbl.psd.prepressure-1`` +0.03 %; ``doorbeam`` NORMAL (its
