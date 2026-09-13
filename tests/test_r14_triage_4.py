@@ -1539,6 +1539,37 @@ class RigidPartPredicateTests(unittest.TestCase):
         plain = _dispatch(_d2r_deck(card="", rows=()))
         self.assertEqual(rigid_part_ids(plain), set())
 
+    #: Module -> how many times it must CALL the one predicate. Counting the
+    #: calls, not the import, is what makes this a pin: a revert to
+    #: ``part.mid in state.mat_rigid`` leaves the import untouched and only the
+    #: call site disappears. ``rbody.py`` is absent on purpose — ``_make_rbodies``
+    #: needs the two halves separately (it carries the LRB map into the merge
+    #: union-find) and spells the union out, which the source scan above
+    #: allowlists BY NAME.
+    _PREDICATE_CALLS = {
+        "contacts.py": 2,     # _side_has_deformable_part, all_deformable_nodes
+        "loads.py": 2,        # the _LOCAL triads, the *DAMPING_GLOBAL scope
+        "inistate.py": 1,     # the /XREF skip
+        "composites.py": 1,   # the *INTEGRATION_SHELL layup drop
+    }
+
+    def test_every_part_level_consumer_calls_the_predicate(self):
+        """Two mutations that reverted a consumer to ``state.mat_rigid`` ran the
+        WHOLE suite green, because the consumers they hit have no corpus carrier
+        that combines *DEFORMABLE_TO_RIGID with their own keyword. The functional
+        pins for those two are above; this counts the call sites, so a revert
+        anywhere in the list fails even where no deck exercises it."""
+        import os as _os
+        for base, n in sorted(self._PREDICATE_CALLS.items()):
+            with self.subTest(module=base):
+                path = _os.path.join(self._ROOT, "k2rad", "writer", base)
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                self.assertEqual(text.count("rigid_part_ids(state)"), n,
+                                 f"{base} must call writer.common."
+                                 f"rigid_part_ids {n} time(s)")
+
+
     def test_no_writer_module_answers_the_part_question_from_mat_rigid(self):
         """A consumer left on ``state.mat_rigid`` alone is the defect. The
         MATERIAL registries may still use it (they answer a MID question), so
