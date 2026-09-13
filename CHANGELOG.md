@@ -168,8 +168,10 @@ Prior history (before this changelog was introduced) is summarized in the
     (`hm_read_imptemp.F:121-133`). MEASURED on `thermal/thermal-stress`
     (TGMULT 10, TGRLC 0, RHO0_CP 1, so `T = 10 + 10t`): the free-expansion
     displacement of node 2 goes from **exactly 0.0** — all 500 T01 states, all
-    12 DX/DY/DZ channels — to **1.49531e-04 mm against the LS-DYNA `nodout`'s
-    1.49216e-04 at t = 2.99, +0.21 %**, at 406 580 cycles and 0 ERROR / 0
+    12 DX/DY/DZ channels — to **1.49531e-04 mm at t = 2.994002**, which is
+    **+0.21 %** against the LS-DYNA `nodout`'s NEAREST SAMPLE (1.49216e-04 at
+    t = 2.99) and **+0.007 %** against the closed form at the same time, at
+    406 580 cycles and 0 ERROR / 0
     WARNING, with node 1 (fully fixed) staying 0 and nodes 2/3/5 moving only in
     their free directions. The intermediate states track the closed form
     `ε = 1e-7·(T²−100)` to five figures. **Quote the DISPLACEMENT, never an
@@ -302,12 +304,20 @@ Prior history (before this changelog was introduced) is summarized in the
     TERMINATION in 10.5 s. The critic's matched-time check holds the whole KE
     trajectory to ±0.07 % at 11 times, where the shipped arm is **+5 649 %** at
     t = 0.012. `deformable_to_rigid.pendulum` goes 39 390 → **607** cycles
-    (LS-DYNA takes 607) and ie_dev −82.64 % → −19.39 %.
+    (LS-DYNA takes 607) and ie_dev −82.64 % → −19.39 % — both figures from the
+    campaign database's own re-run of the SHIPPED conversion (row
+    `330fe91f`, 2026-09-13), not from the pre-research's hand-patched arm.
+    The `−0.0 %` on `pend.imp` is the ENGINE's energy-balance column, not a
+    deviation from the reference: that row reads `ie_dev` **+17.19 %** and
+    stays a `deviation`, both energies being structural zeros; the fidelity
+    channel is KE at **−0.017 %**.
 
     `LRB ≠ 0` folds through the same `*CONSTRAINED_RIGID_BODIES` union-find and
-    `PTYPE = PSET` is refused by name with its `*INCLUDE_TRANSFORM` offset
-    caveat — both have **0 carriers** anywhere, so both ship stated rather than
-    validated. The run-time-triggered options — `_AUTOMATIC` (p.18-3),
+    `PTYPE = PSET` is EXPANDED to its member part ids at parse time, with
+    only an UNDEFINED set refused — by name, and carrying the
+    `*INCLUDE_TRANSFORM` offset caveat (`_OFFSET_SPECS` offsets column 1 as a
+    PART id because `PTYPE` is read after the offset pass). Both have
+    **0 carriers** anywhere, so both ship stated rather than validated. The run-time-triggered options — `_AUTOMATIC` (p.18-3),
     `_INERTIA` and the `*RIGID_DEFORMABLE_*` family — are **refused BY NAME**,
     with the Radioss mechanism that would carry them spelled out (`/RBODY`
     card 1 `sens_ID` plus a `/SENSOR/TIME`: `hm_read_rbody.F:363-388` stores the
@@ -447,7 +457,8 @@ Prior history (before this changelog was introduced) is summarized in the
     energy **−1.66 % → −7.77 % at 4.1× the cycles**. Censused with the writer's
     own resolver over the 356-key R14 roster (the 4 Yaris `*INCLUDE` pullers
     excluded BY NAME): **15 solid-only-main interfaces on 14 deck keys**, one of
-    them created by B2's swap, and **12 of the 15 unmeasured**. A press-fit
+    them created by B2's swap; exactly **two of the 15** (`twobar`, `sphere1`)
+    have a measured solver arm at this factor and **13 have none**. A press-fit
     `*CONTACT_*_INTERFERENCE` and k2rad's own injected implicit stabilization
     stub (`auto_implicit_stabilization_self_contact`, measured byte-inert on 5
     of 5 carriers) are excluded from the flag; **0 golden and 0 `match` deck
@@ -2439,9 +2450,13 @@ Prior history (before this changelog was introduced) is summarized in the
   - *"which projects the secondary nodes onto the main segment and removes the
     offset the keyword exists for"* (ROADMAP) and *"which also projects the
     secondary nodes onto the main segment and so removes the very offset the
-    keyword names"* (`contacts.py`) — no starter `i2*.F` routine writes
-    `X(1..3, .)` at all; the only such assignment among the interface
-    initialisers is `i24pen3.F:317-319`, which is TYPE24. k2rad emits the tie
+    keyword names"* (`contacts.py`) — no TYPE2 starter routine writes
+    `X(1..3, .)` at all (`i2buc1.F`, `i2chk3.F`, `i2cor3.F`, `i2dst3.F`,
+    `i2dst3_27.F`, `i2surfs.F`, `i2tid3.F`, `i2_dtn*.F`, `i2master.F` and
+    `inint2.F` read the coordinate array and never assign to it). The four
+    interface files that DO move a node are `i3pen3.F:187-197` (TYPE3),
+    `i7pwr3.F:213-242` (TYPE7 under `INACTI` 3/4), `i24pen3.F:317-319`
+    (TYPE24) and `in12r.F:120-133` (the TYPE12 frame transform) — none TYPE2. k2rad emits the tie
     at **Spotflag 27**, an AUTO-PENALTY variant
     (`_TIED_PENALTY_SPOTFLAGS = (25, 26, 27, 28)`), not a kinematic constraint,
     and `ContactTied.offset` is parsed and read NOWHERE. The round-5 variant is
