@@ -668,6 +668,13 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             # a whole *MAT_RIGID PART: consumers keyed on the part id (the
             # /GRAV group builder) may swap the part out for its main node
             "kind": "part",
+            # The ICoG cell this body's /RBODY carries, for the ONE consumer
+            # that needs to know WHERE the main node ends up:
+            # --mass-weighted-inivel writes v_cm on it, which is only the
+            # rigid field's value there when the starter has moved the node to
+            # the centre of mass (ICoG 0/1, inirby.F:186-211). Read, never
+            # re-derived -- a second copy of the rule is how the two disagree.
+            "icog": icog,
         }
 
         # /RBODY format: 2 data cards (one per logical record).
@@ -1152,6 +1159,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             # a *CONSTRAINED_NODAL_RIGID_BODY over nodes of DEFORMABLE parts:
             # keyed by the CNRB's own pid, never a whole rigid part
             "kind": "cnrb",
+            "icog": icog,      # see the *MAT_RIGID site for why
+
         }
 
         # Optional added mass on the master node / part (same sources as

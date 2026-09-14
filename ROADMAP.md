@@ -1984,7 +1984,9 @@ found and deliberately did NOT close.
   round 3 refused BOTH and thereby un-cleared one of round 2's own six:
   `translat.k` went back to I-ENERGY = K-ENERGY = 0.000 on all 13980 cycles
   against an LS-DYNA glstat of 189.962. The three arms are in
-  `_warn_inivel_on_rigid_members`; the mass-weighted arm is a round-4 item. **Named consequence:** with the body actually moving,
+  `_warn_inivel_on_rigid_members`; the mass-weighted arm SHIPPED in round 5
+  as the opt-in `--mass-weighted-inivel` (translat cycle-0 K-ENERGY 220.58
+  against 189.962, +16.12 %, where the re-point reads +104.20 %). **Named consequence:** with the body actually moving,
   `quadrature_B` and `_C` can diverge in their ALE FSI where the zero model
   terminated NORMAL — two `deviation → error/timeout` rows are expected in
   the campaign census. The original entry follows.

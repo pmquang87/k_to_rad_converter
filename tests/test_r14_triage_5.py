@@ -26,6 +26,7 @@ Kept in its own module, the repo's one-module-per-batch convention.
 import inspect
 import os
 import re
+import sys
 import tempfile
 import unittest
 
@@ -1500,6 +1501,275 @@ class ImplicitRigidSecondarySwap(unittest.TestCase):
         retracted = ("every restoration arm measured on implicit",
                      "EVERY arm that restores the load path diverges",
                      "with an explicit Gapmin of 0.14986 it reaches")
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in retracted:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+
+# ── B2: --mass-weighted-inivel ───────────────────────────────────────────────
+
+class MomentumAverageArithmetic(unittest.TestCase):
+    """B2's arithmetic, on its own: ``lumping.rigid_body_momentum_velocity``.
+
+    Vol I R17 p.28-129 Remark 3 computes the body's momentum from the
+    PRESCRIBED nodal velocities over the WHOLE body's mass, which is what
+    makes the average smaller than the card's own velocity.
+    """
+
+    def _f(self):
+        from k2rad.lumping import rigid_body_momentum_velocity
+        return rigid_body_momentum_velocity
+
+    def test_the_analytic_four_node_plate(self):
+        """Four equal corner masses on a 2 x 2 plate, the two at x = 2
+        carrying v = (0, 0, 10). By hand: v_cm = v/2 = (0, 0, 5);
+        ``L = m(d3 + d4) x v = (0, -20, 0)``; ``Iyy = 4 m (L/2)^2 = 4`` so
+        ``omega = (0, -5, 0)``; KE = 1/2 M v_cm^2 + 1/2 omega.I.omega =
+        50 + 50 = 100. ``max|hand - code| = 0.0``."""
+        v_cm, omega, cog, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 2.0, 0.0), (0.0, 2.0, 0.0)],
+            [1.0, 1.0, 1.0, 1.0],
+            [None, (0.0, 0.0, 10.0), (0.0, 0.0, 10.0), None],
+            model_mass=4.0)
+        self.assertEqual(refusal, "")
+        self.assertEqual(v_cm, (0.0, 0.0, 5.0))
+        self.assertEqual(cog, (1.0, 1.0, 0.0))
+        for got, want in zip(omega, (0.0, -5.0, 0.0)):
+            self.assertAlmostEqual(got, want, places=12)
+        ke = 0.5 * 4.0 * 25.0 + 0.5 * 4.0 * omega[1] ** 2
+        self.assertAlmostEqual(ke, 100.0, places=10)
+
+    def test_a_fully_covered_body_returns_the_cards_own_velocity(self):
+        """The degenerate arm, and the reason no deck of that class moves a
+        byte: with every node prescribed the momentum average IS the card's
+        velocity and omega is exactly zero."""
+        v = (2286.0, 0.0, 7620.0)
+        v_cm, omega, _cog, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+            [0.25, 0.25, 0.25, 0.25], [v, v, v, v], model_mass=1.0)
+        self.assertEqual(refusal, "")
+        for got, want in zip(v_cm, v):
+            self.assertAlmostEqual(got, want, places=9)
+        self.assertEqual(omega, (0.0, 0.0, 0.0))
+
+    def test_a_collinear_two_node_body_gets_no_axial_spin(self):
+        """A line of point masses has NO moment of inertia about its own
+        axis, and its angular momentum is perpendicular to that axis — so the
+        pseudo-inverse is EXACT here, not an approximation.
+
+        The separation is the real one from the Yaris suspension deck's 2-node
+        CNRB ``nsid 2202010`` (9.784467 mm, ``det`` 8.75e-12, condition number
+        1.34e16, where a ``solve()`` returns an angular velocity two orders of
+        magnitude wrong with no diagnostic). The two node positions here are
+        placed along that measured separation rather than lifted from the
+        deck, so what is pinned is the GUARD, not the Yaris numbers.
+        """
+        import math as _m
+        d = 9.784467
+        axis = (1.0 / _m.sqrt(3.0),) * 3
+        p0 = (0.0, 0.0, 0.0)
+        p1 = tuple(d * a for a in axis)
+        v_cm, omega, _cog, refusal = self._f()(
+            [p0, p1], [1.0e-6, 1.0e-6], [None, (0.0, 100.0, 0.0)],
+            model_mass=1.0e-3)
+        self.assertEqual(refusal, "")
+        self.assertAlmostEqual(v_cm[1], 50.0, places=9)
+        axial = sum(o * a for o, a in zip(omega, axis))
+        self.assertAlmostEqual(axial, 0.0, places=9)
+        # ... and the answer is FINITE and of the right order: |omega| is
+        # about |v|/2 divided by the half-separation.
+        self.assertLess(max(abs(o) for o in omega), 50.0 / (d / 2.0) * 1.01)
+        self.assertGreater(max(abs(o) for o in omega), 1.0)
+
+    def test_a_single_node_body_translates_and_does_not_spin(self):
+        v_cm, omega, _c, refusal = self._f()(
+            [(1.0, 2.0, 3.0)], [2.0], [(1.0, 0.0, 0.0)], model_mass=2.0)
+        self.assertEqual(refusal, "")
+        self.assertEqual(v_cm, (1.0, 0.0, 0.0))
+        self.assertEqual(omega, (0.0, 0.0, 0.0))
+
+    def test_coincident_nodes_do_not_produce_a_spin(self):
+        v_cm, omega, _c, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)], [1.0, 1.0],
+            [(10.0, 0.0, 0.0), None], model_mass=2.0)
+        self.assertEqual(refusal, "")
+        self.assertEqual(v_cm, (5.0, 0.0, 0.0))
+        self.assertEqual(omega, (0.0, 0.0, 0.0))
+
+    def test_a_relatively_massless_body_is_REFUSED_by_name(self):
+        """A 37-node CNRB on this corpus lumps to 4.55e-24 in a model whose
+        own lumped mass is ~1e-4: an absolute ``M <= 0`` test misses it and an
+        absolute 1e-30 test accepts it."""
+        v_cm, omega, cog, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)], [2.275e-24, 2.275e-24],
+            [(1.0, 0.0, 0.0), None], model_mass=1.0048e-4)
+        self.assertIsNone(v_cm)
+        self.assertIsNone(omega)
+        self.assertIsNone(cog)
+        self.assertIn("lumped mass", refusal)
+        self.assertIn("ANCMSG 679", refusal)
+
+    def test_the_same_body_is_ACCEPTED_when_the_model_is_that_light(self):
+        """The refusal is RELATIVE: the same masses in a model whose own mass
+        is of that order carry real momentum."""
+        v_cm, _o, _c, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)], [2.275e-24, 2.275e-24],
+            [(1.0, 0.0, 0.0), None], model_mass=1.0e-20)
+        self.assertEqual(refusal, "")
+        self.assertAlmostEqual(v_cm[0], 0.5, places=12)
+
+    def test_the_eigen_solver_matches_a_hand_diagonalisation(self):
+        from k2rad.lumping import _sym3_eigen
+        a = ((4.0, 1.0, 0.0), (1.0, 4.0, 0.0), (0.0, 0.0, 9.0))
+        vals, vecs = _sym3_eigen(a)
+        self.assertEqual(sorted(round(v, 9) for v in vals), [3.0, 5.0, 9.0])
+        for lam, vec in zip(vals, vecs):
+            av = tuple(sum(a[i][j] * vec[j] for j in range(3))
+                       for i in range(3))
+            for got, want in zip(av, tuple(lam * c for c in vec)):
+                self.assertAlmostEqual(got, want, places=9)
+
+
+def _mixed_inivel_deck(all_rigid: bool = True, rot: bool = False) -> str:
+    """``translat``'s shape: a 4-node shell on a *MAT_RIGID part, of which an
+    ``*INITIAL_VELOCITY_NODE`` names TWO nodes. *all_rigid* False adds a
+    deformable node to the card, making it the MIXED arm."""
+    nodes = "".join(
+        f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+        for i, (x, y, z) in enumerate(
+            [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0),
+             (0, 0, 10), (2, 0, 10), (2, 2, 10), (0, 2, 10)], start=1))
+    card = "".join(
+        _row(n, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0 if rot else 0.0) + "\n"
+        for n in ([2, 3] + ([] if all_rigid else [5])))
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n" + nodes
+            + "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 3, 4) + "\n"
+            + _row(2, 2, 5, 6, 7, 8) + "\n"
+            + "*PART\nrigid plate\n" + _row(1, 1, 1) + "\n"
+            + "deformable plate\n" + _row(2, 1, 2) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            + "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + _row(0, 0, 0) + "\n" + _row(0, 0, 0) + "\n"
+            + "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+            + "*INITIAL_VELOCITY_NODE\n" + card
+            + "*END\n")
+
+
+class MassWeightedInivel(unittest.TestCase):
+    """B2 — a rigid body an initial-velocity card covers only PARTLY.
+
+    MEASURED on ``intro-by-j.-day/joint/joint-ii/translat.k`` at nt 4 (2 of
+    rigid part 1's 4 element nodes carry ``v = (2286, 0, 7620)``; LS-DYNA's own
+    glstat cycle-0 K-ENERGY is 189.962): the shipped full-velocity re-point
+    reads 387.9 (+104.20 %), this rule emits ``v_cm = (1143, 0, 3810)`` and
+    ``omega = (300, 0, -45)`` — the hand values the round-3 docstring recorded,
+    to every digit — for **220.58** (+16.12 %), and the final ``ke_dev`` goes
+    +194.03 % → **+47.82 %**. Both arms NORMAL TERMINATION, 0 ERROR / 1
+    WARNING; the starter echoes ``NEW X,Y,Z 12.70000 12.70000 4.14e-15``, i.e.
+    ``ICoG`` really did move the main node to the centre of mass.
+    """
+
+    def test_the_default_writes_the_cards_full_velocity(self):
+        _r, starter, _e = _convert(_mixed_inivel_deck())
+        block = _block_after(starter, "/INIVEL/TRA/", 4)
+        self.assertEqual([float(x) for x in block[3].split()[:3]],
+                         [0.0, 0.0, 10.0])
+        self.assertNotIn("/INIVEL/ROT/", starter)
+
+    def test_the_flag_writes_the_momentum_average_on_the_main_node(self):
+        res, starter, _e = _convert(_mixed_inivel_deck(),
+                                    mass_weighted_inivel=True)
+        tra = _block_after(starter, "/INIVEL/TRA/", 4)
+        self.assertEqual([float(x) for x in tra[3].split()[:3]],
+                         [0.0, 0.0, 5.0])
+        rot = _block_after(starter, "/INIVEL/ROT/", 4)
+        self.assertAlmostEqual(float(rot[3].split()[1]), -5.0, places=9)
+        self.assertTrue(_has(res.warnings, "MOMENTUM AVERAGE"), res.warnings)
+
+    def test_the_MIXED_card_keeps_its_deformable_half(self):
+        """The mixed arm is where the body was REFUSED before: its deformable
+        nodes must keep working either way."""
+        res, starter, _e = _convert(_mixed_inivel_deck(all_rigid=False),
+                                    mass_weighted_inivel=True)
+        self.assertTrue(_has(res.warnings, "MOMENTUM AVERAGE"), res.warnings)
+        grp = [ln for ln in starter.splitlines() if ln.startswith("         5")]
+        self.assertTrue(grp, "the deformable node left the group")
+
+    def test_a_card_with_NODAL_ROTATIONS_is_refused_out_loud(self):
+        """The average is formed from TRANSLATIONAL momentum only; a card that
+        also prescribes nodal spin is out of scope and says so rather than
+        silently doing nothing."""
+        res, starter, _e = _convert(_mixed_inivel_deck(rot=True),
+                                    mass_weighted_inivel=True)
+        self.assertTrue(_has(res.warnings, "did NOT touch",
+                             "NODAL ROTATIONAL"), res.warnings)
+        self.assertFalse(_has(res.warnings, "MOMENTUM AVERAGE"))
+
+    def test_the_flag_off_arm_is_byte_identical(self):
+        deck = _mixed_inivel_deck()
+        _r, a, ea = _convert(deck)
+        _r2, b, eb = _convert(deck, mass_weighted_inivel=False)
+        self.assertEqual(a, b)
+        self.assertEqual(ea, eb)
+
+    def test_a_FULLY_covered_body_is_untouched_by_the_flag(self):
+        """The 20 class-C keys: their card names every node of the body, so
+        the momentum average IS the card's velocity and the existing re-point
+        already writes it. Byte-identical with and without the flag."""
+        deck = _mixed_inivel_deck().replace(
+            "*INITIAL_VELOCITY_NODE\n",
+            "*INITIAL_VELOCITY_NODE\n"
+            + "".join(_row(n, 0.0, 0.0, 10.0) + "\n" for n in (1, 4)))
+        _r, off, _e = _convert(deck)
+        _r2, on, _e2 = _convert(deck, mass_weighted_inivel=True)
+        self.assertEqual(off, on)
+        self.assertNotIn("/INIVEL/ROT/", on)
+
+    def test_every_call_site_takes_the_two_value_return(self):
+        """The #132 rule: the same keyword family lands in THREE writer
+        functions, and a change to one leaves the other two silent."""
+        import k2rad.writer.loads as lw
+        src = inspect.getsource(lw)
+        self.assertEqual(src.count("_warn_inivel_on_rigid_members("), 4)
+        self.assertEqual(src.count("nids, mw_bodies = "), 3)
+        self.assertEqual(src.count("_emit_mass_weighted_bodies(state, mw_bodies"),
+                         3)
+
+    def test_the_lumper_moved_into_the_package_and_tools_imports_it_back(self):
+        import k2rad.lumping as pkg
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tools"))
+        import modal_solve
+        self.assertIs(modal_solve._tet_volume, pkg._tet_volume)
+        self.assertIs(modal_solve._HEXA_TETS, pkg._HEXA_TETS)
+        self.assertIs(modal_solve._beam_section_area, pkg._beam_section_area)
+        # the WRAPPER is the tool's own (it passes print); the arithmetic is
+        # the package's
+        self.assertIsNot(modal_solve.nodal_masses_from_state,
+                         pkg.nodal_masses_from_state)
+        deck = _mixed_inivel_deck()
+        st = _dispatch(deck)
+        self.assertEqual(modal_solve.nodal_masses_from_state(st),
+                         pkg.nodal_masses_from_state(st))
+
+    def test_the_package_never_imports_numpy(self):
+        """``k2rad`` must run without numpy/scipy; the momentum average is
+        pure standard library."""
+        import k2rad.lumping as pkg
+        src = inspect.getsource(pkg)
+        self.assertNotIn("import numpy", src)
+        self.assertNotIn("import scipy", src)
+
+    def test_the_retracted_no_nodal_masses_claims_are_gone(self):
+        retracted = ("this writer computes no nodal masses and will not "
+                     "invent one",
+                     "a mass-weighted average this WRITER does not form",
+                     "The mass-weighted arm is a round-4 item")
         for rel, joined in _SHIPPED_TEXTS():
             for needle in retracted:
                 with self.subTest(file=rel, needle=needle):

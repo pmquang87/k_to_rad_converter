@@ -11,6 +11,74 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5, part B item B2 —
+  `--mass-weighted-inivel`: the momentum average Vol I R17 p.28-129 Remark 3
+  describes, for a rigid body an initial-velocity card covers only PARTLY.
+  Default OFF; 0 movers by default.** Remark 3 (and `*INITIAL_VELOCITY`
+  Remark 4, p.28-125) is explicit: *"During initialization, the translational
+  and rotational rigid body momentums are computed based on the prescribed
+  nodal velocities. From this rigid body motion, the velocities of the nodal
+  points are computed and reset to the new values."* k2rad did not form that
+  average — it gave such a body the card's FULL velocity (an all-rigid card,
+  an over-estimate it named) or nothing at all (a mixed card, where it was
+  refused and named). It forms it now:
+
+      M     = sum m_i                 over EVERY node of the body
+      x_cm  = sum m_i x_i / M
+      v_cm  = sum m_i v_i / M         over the PRESCRIBED nodes only
+      L     = sum d_i x m_i v_i       d_i = x_i - x_cm, prescribed only
+      omega = I_cm^+ L                I_cm over EVERY node
+
+  written as `/INIVEL/TRA` + `/INIVEL/ROT` on the body's `/RBODY` main node,
+  from which `inirby.F:1032-1048` rebuilds every secondary. MEASURED on
+  `intro-by-j.-day/joint/joint-ii/translat.k` at nt 4, where 2 of rigid part
+  1's 4 element nodes carry `v = (2286, 0, 7620)` and LS-DYNA's own glstat
+  cycle-0 K-ENERGY is **189.962**: the flag emits `v_cm = (1143, 0, 3810)` —
+  half the card's — and `omega = (300, 0, −45)`, which are the hand values the
+  round-3 docstring derived for that deck **to every digit**, for a cycle-0
+  K-ENERGY of **220.58** (+104.20 % → **+16.12 %**) and a final `ke_dev` of
+  +194.03 % → **+47.82 %**. Both arms NORMAL TERMINATION, 0 ERROR / 1 WARNING;
+  the starter echoes `NEW X,Y,Z 12.70000 12.70000 4.14e-15`, i.e. `ICoG` did
+  move the main node onto the centre of mass where `v_cm` acts (a body whose
+  `ICoG` KEEPS the main node elsewhere gets the transport term
+  `omega × (x_main − x_cm)` added instead; any other `ICoG` is refused by
+  name). The residual is not the velocity — it is the `/RBODY`'s own lumped
+  rotary inertia (starter `NEW INERTIA` 0.2642894E-02 against LS-DYNA's
+  0.1977E-02, the difference being exactly `4 × (m/4)(A + t²)/12 = 6.65667e-4`
+  per diagonal), which the `/RBODY` `J` cells would ADD rather than replace
+  (`hm_read_rbody.F:276-279`): named, not compensated, and on the ROADMAP.
+  **Opt-in for an evidence reason, not a physics one:** exactly ONE carrier
+  with an LS-DYNA reference exists on this machine (Ryan_Lee's `W16_SW_door`
+  is 3 files on 1 model with no reference; the 19 non-roster F: deck files and
+  `E:/foxcore_data` carry no `*INITIAL_VELOCITY` at all), and there is no
+  LS-DYNA solver here to make a second. A body the card FULLY covers is
+  untouched by construction — its momentum average IS the card's velocity with
+  `omega` 0 — so no deck of that class changes a byte, pinned by a test.
+  **The lumper MOVED into the package.** `nodal_masses_from_state` (and the
+  helpers it needs) left `tools/modal_solve` for the new `k2rad/lumping.py`,
+  because a writer may not import from `tools/` and a second copy of the rule
+  is how the two drift apart; `tools/modal_solve` imports it back and keeps its
+  console NOTE through a `report` callable, so the modal chain is unchanged
+  (pinned by a test that compares both against one state and asserts the tool's
+  re-exported helpers ARE the package's objects).
+  **The degenerate-geometry guard ships with it**, and never inverts anything:
+  a scale-free rank test on `I_cm` (an eigenvalue at or below
+  `1e-10 × M × R²max` is a direction the body has no extent in), a
+  Moore-Penrose pseudo-inverse through a pure-Python cyclic Jacobi
+  eigen-decomposition — EXACT here, because the angular momentum of a collinear
+  body is perpendicular to its axis, so the discarded component is 0 — a
+  RELATIVE zero-mass refusal mirroring `inirby.F:200-201` (`MASRB <= 1e-30`,
+  ANCMSG 679; a 37-node CNRB on this corpus lumps to 4.55e-24 in a model whose
+  own mass is ~1e-4, so an absolute test is useless either way), single-node
+  and coincident-node handling. The real 2-node CNRB that motivated it (the
+  Yaris suspension deck's `nsid 2202010`, nodes 9.784467 mm apart, `det`
+  8.75e-12, condition number 1.34e16) is what `np.linalg.solve` answers two
+  orders of magnitude wrong with no diagnostic. `k2rad` still imports **no
+  numpy and no scipy** — pinned by a test.
+  A card that also prescribes NODAL ROTATIONAL velocities is out of the rule's
+  scope (the average is formed from translational momentum only) and says so
+  out loud rather than silently doing nothing.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5, part B item B1 —
   `--implicit-rigid-secondary-swap`: on an IMPLICIT deck, swap an all-rigid
   SSID contact instead of dropping it. Default OFF; 0 movers by default, 1 deck

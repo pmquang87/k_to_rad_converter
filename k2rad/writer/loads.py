@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, Curve,
     DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
@@ -19,6 +19,7 @@ from .common import (
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
+from ..lumping import rigid_body_momentum_velocity
 from .sph import _mat_density
 
 __all__ = [
@@ -4830,6 +4831,51 @@ def _emit_inivel(kind: str, inivel_id: int, title: str, grnod_id: int,
     ]
 
 
+def _constant_velocity_of(v: Tuple[float, float, float]
+                          ) -> Callable[[int], Tuple[float, float, float]]:
+    """The per-node velocity field of a card that states ONE velocity.
+
+    A named function rather than a lambda at each call site: the two TRA
+    cards and the `_GENERATION` field all hand
+    ``_warn_inivel_on_rigid_members`` the same shape, and this is the one that
+    says so in the type.
+    """
+    def _of(_nid: int) -> Tuple[float, float, float]:
+        return v
+    return _of
+
+
+def _emit_mass_weighted_bodies(state: ConversionState,
+                               bodies: List[_MassWeightedBody],
+                               tag: str) -> List[str]:
+    """One ``/INIVEL/TRA`` (+ ``/INIVEL/ROT``) pair per momentum-averaged body.
+
+    Each pair is written on a one-node ``/GRNOD`` over the body's ``/RBODY``
+    MAIN node — ``hm_read_inivel.F:535-541`` writes the three components
+    straight into that node's ``V``/``VR``, and ``inirby.F:1032-1048`` rebuilds
+    every secondary from it as ``v_N = v_M + omega x (x_N - x_M)``.
+    ``/INIVEL/ROT`` rather than ``/INIVEL/AXIS`` because ``omega`` is an
+    arbitrary 3-vector here, while ``/INIVEL/AXIS`` carries one magnitude about
+    a frame axis — and the manual forbids combining it with TRA/ROT on the same
+    node anyway.
+
+    The ROT block is written even when ``omega`` is all zeros: it is the cell
+    that says the body has no spin, and emitting it on one body and not on
+    another would make the deck depend on round-off.
+    """
+    lines: List[str] = []
+    for main, v_cm, omega in bodies:
+        grnod_id = state.next_grnod_id()
+        lines += _emit_grnod_node(grnod_id, f"{tag}_rb_main_{main}", [main])
+        inivel_id = state.next_id()
+        lines += _emit_inivel("TRA", inivel_id, f"InitVelMW_{inivel_id}",
+                              grnod_id, v_cm)
+        rot_id = state.next_id()
+        lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
+                              grnod_id, omega)
+    return lines
+
+
 def _make_inivel(state: ConversionState, rbody_info: Dict,
                  rigid_nodes: Optional[Set[int]] = None) -> List[str]:
     """Initial velocities → /INIVEL/TRA (+ /INIVEL/ROT for rotational DOFs).
@@ -4847,10 +4893,21 @@ def _make_inivel(state: ConversionState, rbody_info: Dict,
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
-        nids = _warn_inivel_on_rigid_members(
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, 0, sorted(nids), rigid_nodes,
             keyword="*INITIAL_VELOCITY_NODE",
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_constant_velocity_of((vx, vy, vz)),
+            mass_weighted_block=("the card also states NODAL ROTATIONAL velocities "
+                     "(VXR/VYR/VZR), and this rule forms the body's angular "
+                     "momentum from the TRANSLATIONAL velocities alone - "
+                     "folding a prescribed nodal spin into it needs each "
+                     "node's own rotary inertia, which the momentum average "
+                     "does not use"
+                                 if (vxr or vyr or vzr) else ""))
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_nodes")
+        if not nids:
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
@@ -5230,13 +5287,158 @@ def _rbody_coverage_exempt(state: ConversionState) -> Set[int]:
     return exempt
 
 
+#: One partly-covered rigid body the momentum average was formed for:
+#: ``(main node, v_cm, omega)``. ``_make_inivel`` and its two siblings write
+#: one /INIVEL/TRA + /INIVEL/ROT pair per entry on that main node.
+_MassWeightedBody = Tuple[int, Tuple[float, float, float],
+                          Tuple[float, float, float]]
+
+
+#: Cache for the model's lumped nodal masses, keyed by the state object's id.
+#: The lumper walks every element, so a card-by-card re-walk would be O(cards x
+#: elements); one pass per conversion is enough because nothing between the
+#: /INIVEL writers changes the mesh.
+_NODAL_MASS_CACHE: Dict[int, Tuple[Dict[int, float], float]] = {}
+
+
+def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
+                                                          float]:
+    """``(mass by node, the model's total lumped mass)``, computed once.
+
+    The rule is ``k2rad.lumping.nodal_masses_from_state`` — the same one
+    ``tools/modal_solve`` pairs with the engine's exported stiffness matrix,
+    which reproduces the starter's own MS array. Imported INSIDE the function:
+    ``k2rad.lumping`` imports ``writer.beams`` and ``writer.materials``, and a
+    module-level import here would put the writer package in a cycle with
+    itself.
+    """
+    key = id(state)
+    got = _NODAL_MASS_CACHE.get(key)
+    if got is None:
+        from ..lumping import nodal_masses_from_state
+        mass, _inertia = nodal_masses_from_state(state)
+        got = (mass, math.fsum(mass.values()))
+        _NODAL_MASS_CACHE[key] = got
+    return got
+
+
+def _momentum_average_body(state: ConversionState, info: Optional[Dict],
+                           main: int, group: Set[int],
+                           velocity_of: Callable[
+                               [int], Optional[Tuple[float, float, float]]],
+                           keyword: str, where: str
+                           ) -> Optional[_MassWeightedBody]:
+    """The momentum average for ONE partly-covered rigid body, or ``None``.
+
+    ``None`` means "leave this body to the caller's existing behaviour", and
+    every route to it warns with the reason — a guard that refuses in silence
+    is a guard that cannot be audited.
+
+    The arithmetic is :func:`k2rad.lumping.rigid_body_momentum_velocity`;
+    everything here is the bookkeeping around it: which nodes the card
+    prescribes (``group``), what velocity each of them carries
+    (``velocity_of``, a constant for a ``*INITIAL_VELOCITY[_NODE]`` and the
+    ``v + omega x r`` field for an ``_GENERATION``), and whether the body's
+    /RBODY puts its main node where ``v_cm`` acts.
+
+    **Where the velocity is written.** ``/INIVEL/TRA`` + ``/INIVEL/ROT`` on the
+    MAIN node, from which ``inirby.F:1032-1048`` rebuilds every secondary as
+    ``v_N = v_M + omega x (x_N - x_M)``. That is exact when the main node sits
+    at the centre of mass, which is what ``ICoG`` 0/1 does (the starter MOVES
+    it there, ``inirby.F:186-211``; measured on ``translat`` as
+    ``NEW X/Y/Z 12.7 / 12.7 / 4e-15`` against LS-DYNA's 12.7 / 12.7 / 0). A
+    body whose ``ICoG`` KEEPS the main node where it is (3, or 4 on an
+    ``_INERTIA`` body) gets the transport term ``omega x (x_main - x_cm)``
+    added to ``v_cm`` instead, so the rigid field is the same one either way.
+    Any other ``ICoG`` is refused by name rather than guessed at — k2rad emits
+    only 0, 3 and 4 today.
+    """
+    if info is None:
+        return None
+    nodes = sorted(set(info["nodes"]) | {main})
+    mass_by_node, model_mass = _lumped_nodal_masses(state)
+    coords: List[Tuple[float, float, float]] = []
+    masses: List[float] = []
+    vels: List[Optional[Tuple[float, float, float]]] = []
+    for nid in nodes:
+        nd = state.nodes.get(nid)
+        if nd is None:
+            state.warn(
+                f"{keyword} {where}: --mass-weighted-inivel could not form the "
+                f"momentum average for the rigid body on main node {main} - "
+                f"its member node {nid} has no coordinates. The body keeps the "
+                "behaviour it had without the flag.")
+            return None
+        coords.append((nd.x, nd.y, nd.z))
+        masses.append(mass_by_node.get(nid, 0.0))
+        vels.append(velocity_of(nid) if nid in group else None)
+    icog = int(info.get("icog", 0) or 0)
+    if icog not in (0, 1, 3, 4):
+        state.warn(
+            f"{keyword} {where}: --mass-weighted-inivel did not touch the "
+            f"rigid body on main node {main} - its /RBODY carries ICoG "
+            f"{icog}, and where that leaves the main node decides whether "
+            "v_cm may be written there unchanged. k2rad emits only 0, 3 and 4, "
+            "so this is a card no path of this writer produces. The body keeps "
+            "the behaviour it had without the flag.")
+        return None
+    v_cm, omega, cog, refusal = rigid_body_momentum_velocity(
+        coords, masses, vels, model_mass)
+    if v_cm is None or omega is None or cog is None:
+        state.warn(
+            f"{keyword} {where}: --mass-weighted-inivel REFUSED the rigid body "
+            f"on main node {main} - {refusal}. The body keeps the behaviour it "
+            "had without the flag (the card's full velocity when every node of "
+            "the card is a rigid member, nothing otherwise).")
+        return None
+    if icog in (3, 4):
+        # The main node is NOT moved to the centre of mass, so the velocity
+        # written on it is the rigid field's value AT the main node.
+        nd = state.nodes[main]
+        dx, dy, dz = nd.x - cog[0], nd.y - cog[1], nd.z - cog[2]
+        v_cm = (v_cm[0] + omega[1] * dz - omega[2] * dy,
+                v_cm[1] + omega[2] * dx - omega[0] * dz,
+                v_cm[2] + omega[0] * dy - omega[1] * dx)
+    covered = sum(1 for v in vels if v)
+    state.warn(
+        f"{keyword} {where}: --mass-weighted-inivel gave the rigid body on "
+        f"main node {main} the MOMENTUM AVERAGE of the {covered} of its "
+        f"{len(nodes)} node(s) the card names - v_cm = ({v_cm[0]:.6g}, "
+        f"{v_cm[1]:.6g}, {v_cm[2]:.6g}) and omega = ({omega[0]:.6g}, "
+        f"{omega[1]:.6g}, {omega[2]:.6g}) on /INIVEL/TRA + /INIVEL/ROT, from "
+        "which inirby.F:1032-1048 rebuilds every secondary. Vol I R17 "
+        "p.28-129 Remark 3: 'the translational and rotational rigid body "
+        "momentums are computed based on the prescribed nodal velocities. From "
+        "this rigid body motion, the velocities of the nodal points are "
+        "computed and reset to the new values.' Without the flag this body "
+        "gets the card's FULL velocity (when every node of the card is a rigid "
+        "member) or NOTHING at all (a mixed card). MEASURED on "
+        "intro-by-j.-day/joint/joint-ii/translat.k at nt 4, where 2 of rigid "
+        "part 1's 4 element nodes carry v = (2286, 0, 7620) against an LS-DYNA "
+        "glstat cycle-0 K-ENERGY of 189.962: the full-velocity re-point reads "
+        "387.9 (+104.20 %), this rule reads 220.58 (+16.12 %), and the final "
+        "ke_dev goes +194.03 % -> +47.82 %. The residual is NOT the velocity - "
+        "it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
+        "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
+        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), which the "
+        "/RBODY J cells would ADD rather than replace "
+        "(hm_read_rbody.F:276-279): not compensated here.")
+    return main, v_cm, omega
+
+
 def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                                   nids: List[int],
                                   rigid_nodes: Optional[Set[int]],
                                   keyword: str = "*INITIAL_VELOCITY",
                                   sid_label: str = "NSID",
                                   rbody_info: Optional[Dict] = None,
-                                  repoint: bool = False) -> List[int]:
+                                  repoint: bool = False,
+                                  velocity_of: Optional[Callable[
+                                      [int], Optional[Tuple[
+                                          float, float, float]]]] = None,
+                                  mass_weighted_block: str = ""
+                                  ) -> Tuple[List[int],
+                                             List[_MassWeightedBody]]:
     """Re-point (or name) the /INIVEL that lands on RIGID-BODY member nodes.
 
     ``inirby.F`` rebuilds every secondary node's velocity from its /RBODY main
@@ -5302,15 +5504,18 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     and each rigid body the card FULLY covers is replaced by its main node.
     Coverage is measured over the body's element nodes only
     (``_rbody_coverage_exempt``). A body a MIXED card only PARTLY covers keeps
-    its nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes
-    the body's translational and rotational MOMENTUM from the prescribed nodal
-    velocities and resets every node from that rigid motion — a mass-weighted
-    average this WRITER does not form: it computes no nodal masses, and
-    inventing one would be a fabricated value in a mandatory slot. The
-    machinery exists elsewhere in the repo (``tools/modal_solve``'s
-    ``nodal_masses_from_state``, which lumps element mass and applies
-    ``*ELEMENT_MASS``), so the arm is DEFERRED for measurement on more than
-    one carrier, not blocked — see ROADMAP.
+    its nodes and is named: Vol I
+    R17 p.28-129 Remark 3 says LS-DYNA computes the body's translational and
+    rotational MOMENTUM from the prescribed nodal velocities and resets every
+    node from that rigid motion. **``--mass-weighted-inivel`` forms exactly
+    that average** (``_momentum_average_body`` →
+    ``k2rad.lumping.rigid_body_momentum_velocity``, on the same lumped nodal
+    masses ``tools/modal_solve`` pairs with the engine's own stiffness export)
+    and writes it as ``/INIVEL/TRA`` + ``/INIVEL/ROT`` on the body's main node.
+    It is OFF by default for an evidence reason, not a physics one: exactly ONE
+    carrier with an LS-DYNA reference exists on this machine, and there is no
+    LS-DYNA solver here to make a second — see
+    ``ConvertOptions.mass_weighted_inivel``.
 
     **But a card that names ONLY rigid nodes re-points its partly-covered
     bodies too.** Refusing there does not fall back on the deformable half —
@@ -5336,12 +5541,15 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     ``1/2 M (v/2)^2 = 97.0``, and the two loaded nodes sit on one edge so the
     body also SPINS — ``L = (M/4)(r3 + r4) x v`` over the lumped corner
     inertia gives ``omega = (300, 0, -45)`` and ``1/2 omega.I.omega = 93.0``;
-    97.0 + 93.0 = 190.0 against the glstat's 189.962. The writer forms neither
-    half - it computes no nodal masses - so it gives the main node the card's
-    FULL velocity and NAMES the over-estimate. Between a model that is 2x too fast
-    and one that does not move at all, the over-estimate is the one whose
-    channels evolve — it is what round 2 shipped, and what the campaign
-    recorded as a cleared zero model. The mass-weighted arm is a round-4 item.
+    97.0 + 93.0 = 190.0 against the glstat's 189.962. By DEFAULT the writer
+    forms neither half — it gives the main node the card's FULL velocity and
+    NAMES the over-estimate. Between a model that is 2x too fast and one that
+    does not move at all, the over-estimate is the one whose channels evolve;
+    it is what round 2 shipped and what the campaign recorded as a cleared zero
+    model. ``--mass-weighted-inivel`` forms BOTH halves and writes them on the
+    main node: on this very deck it emits ``v_cm = (1143, 0, 3810)`` — half the
+    card's ``(2286, 0, 7620)`` — and ``omega = (300, 0, -45)``, the hand values
+    above to every digit, for a cycle-0 K-ENERGY of **220.58** (+16.12 %).
     MEASURED on the two corpus carriers: ``pipe.k`` (IVG over 2 parts of which
     1 is rigid, omega -82) goes from a cycle-0 KE of 8.69749e7 to 8.70569e7
     against the LS-DYNA glstat's 8.70616e7, i.e. -0.100 % to -0.005 %; and
@@ -5361,10 +5569,10 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     KE 1092.45 — and before this the deck said nothing at all.
     """
     if not rigid_nodes:
-        return list(nids)
+        return list(nids), []
     on_rigid = [n for n in nids if n in rigid_nodes]
     if not on_rigid:
-        return list(nids)
+        return list(nids), []
     where = f"{sid_label}={nsid}" if nsid else "over the whole model"
     named = ", ".join(str(n) for n in on_rigid[:5])
     all_rigid = len(on_rigid) == len(nids)
@@ -5399,6 +5607,43 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             else:
                 partial_mains.append(main)
                 partial_nodes |= hit
+        # --mass-weighted-inivel: a body the card covers only PARTLY gets the
+        # momentum average of Vol I R17 p.28-129 Remark 3 on its main node,
+        # instead of the card's FULL velocity (an all-rigid card, below) or
+        # nothing at all (a mixed card, where it is refused). A body the card
+        # FULLY covers is deliberately NOT routed through here: its momentum
+        # average IS the card's velocity with omega 0, so the existing
+        # re-point already writes the same physics and no deck of that class
+        # changes a byte.
+        mw_bodies: List[_MassWeightedBody] = []
+        mw_dropped: Set[int] = set()
+        if (state.options.mass_weighted_inivel and partial_mains
+                and mass_weighted_block):
+            # The flag is ON and this card HAS the class it targets, but
+            # something about the card puts it out of the rule's scope. Said
+            # out loud: a lever that silently does nothing on the one deck it
+            # was passed for is worse than no lever.
+            state.warn(
+                f"{keyword} {where}: --mass-weighted-inivel did NOT touch the "
+                f"{len(partial_mains)} partly covered rigid body/bodies here - "
+                + mass_weighted_block + ". They keep the behaviour they have "
+                "without the flag.")
+        elif (state.options.mass_weighted_inivel and partial_mains
+                and velocity_of is not None):
+            info_by_main = {i["ind_node"]: i
+                            for i in (rbody_info or {}).values()}
+            still_partial: List[int] = []
+            for main in sorted(partial_mains):
+                got = _momentum_average_body(
+                    state, info_by_main.get(main), main, group, velocity_of,
+                    keyword, where)
+                if got is None:
+                    still_partial.append(main)
+                    continue
+                mw_bodies.append(got)
+                mw_dropped |= set(info_by_main[main]["nodes"]) | {main}
+            partial_mains = still_partial
+            partial_nodes = {n for n in partial_nodes if n not in mw_dropped}
         over_mains: List[int] = []
         if all_rigid and partial_mains:
             # EVERY node the card names is a rigid-body member, so leaving a
@@ -5417,7 +5662,8 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             # main node takes its place. Deformable nodes, and the nodes of a
             # body only partly covered by a MIXED card, stay where they were.
             kept = [n for n in nids
-                    if n not in main_of or main_of[n] in partial_mains]
+                    if (n not in main_of or main_of[n] in partial_mains)
+                    and n not in mw_dropped]
             out = sorted(set(kept) | set(covered_mains))
             if out != sorted(nids):
                 shown = ", ".join(str(m) for m in sorted(covered_mains)[:5])
@@ -5463,9 +5709,14 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                         "when the card is left on the secondaries. LS-DYNA's "
                         "190.0 is 97.0 translational + 93.0 rotational (hand "
                         "arithmetic on the deck's own geometry at equal "
-                        "corner masses), i.e. the body also SPINS; this "
-                        "writer computes no nodal masses and writes "
-                        "neither the halved velocity nor the spin. State "
+                        "corner masses), i.e. the body also SPINS. PASS "
+                        "--mass-weighted-inivel to write both halves instead "
+                        "of the card's full velocity: on that deck it emits "
+                        "v_cm = (1143, 0, 3810) and omega = (300, 0, -45) on "
+                        "the main node for a cycle-0 K-ENERGY of 220.58 "
+                        "(+16.12 % against 189.962, where this arm reads "
+                        "+104.20 %). It is opt-in because exactly one carrier "
+                        "with an LS-DYNA reference exists. Or state "
                         "*INITIAL_VELOCITY_RIGID_BODY on the part to control "
                         "it exactly."
                         if over_mains else "")
@@ -5473,11 +5724,18 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             if partial_mains:
                 _warn_inivel_partial_rigid_body(
                     state, keyword, where, partial_mains, partial_nodes)
-            return out
+            return out, mw_bodies
         if partial_mains:
             _warn_inivel_partial_rigid_body(
                 state, keyword, where, partial_mains, partial_nodes)
-            return list(nids)
+        if mw_bodies:
+            # No body was FULLY covered, but at least one partly-covered body
+            # took the momentum average: its nodes leave the group (the
+            # /INIVEL on them would be overwritten from the main node anyway)
+            # and the deformable half of a mixed card stays exactly as it was.
+            return ([n for n in nids if n not in mw_dropped], mw_bodies)
+        if partial_mains:
+            return list(nids), []
 
     state.warn(
         f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
@@ -5493,7 +5751,7 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
         + ("" if all_rigid else
            " The card is left over its stated nodes: re-pointing only the "
            "rigid half would change which nodes it names."))
-    return list(nids)
+    return list(nids), []
 
 
 def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
@@ -5514,8 +5772,10 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
     rigid body motion, the velocities of the nodal points are computed and
     reset to the new values. These new values may or may not be the same as the
     values prescribed for the node."* That is a MASS-weighted average over the
-    whole body, so the body's velocity is smaller than the card's; this writer
-    computes no nodal masses and will not invent one.
+    whole body, so the body's velocity is smaller than the card's.
+    ``--mass-weighted-inivel`` forms it and writes it on the body's main node;
+    this refusal is what happens with the flag OFF, which is the default (one
+    carrier with a reference — see ``ConvertOptions.mass_weighted_inivel``).
     """
     shown = ", ".join(str(m) for m in sorted(mains)[:5])
     state.warn(
@@ -5530,8 +5790,14 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
         "translational and rotational MOMENTUM from the prescribed nodal "
         "velocities and resets every node from that rigid motion, i.e. a "
         "MASS-weighted average that is smaller than the stated velocity. "
-        "This writer computes no nodal masses and will not invent one. "
-        "Give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
+        "PASS --mass-weighted-inivel and k2rad forms exactly that average "
+        "from the body's own lumped nodal masses and writes it as "
+        "/INIVEL/TRA + /INIVEL/ROT on the /RBODY main node (MEASURED on "
+        "intro-by-j.-day/joint/joint-ii/translat.k at nt 4: cycle-0 K-ENERGY "
+        "220.58 against the LS-DYNA glstat's 189.962, +16.12 %, where the "
+        "full-velocity arm reads 387.9 / +104.20 %); it is OFF by default "
+        "because exactly one carrier with an LS-DYNA reference exists on this "
+        "machine. Or give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
         "*PART_INERTIA card 5) with the velocity you want, or extend the "
         "card's set to the whole body.")
 
@@ -5597,9 +5863,20 @@ def _make_initial_velocity(state: ConversionState,
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
-        nids = _warn_inivel_on_rigid_members(
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, iv.nsid, nids, rigid_nodes,
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_constant_velocity_of((iv.vx, iv.vy, iv.vz)),
+            mass_weighted_block=("the card also states NODAL ROTATIONAL velocities "
+                     "(VXR/VYR/VZR), and this rule forms the body's angular "
+                     "momentum from the TRANSLATIONAL velocities alone - "
+                     "folding a prescribed nodal spin into it needs each "
+                     "node's own rotary inertia, which the momentum average "
+                     "does not use"
+                                 if (iv.vxr or iv.vyr or iv.vzr) else ""))
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_set")
+        if not nids:
+            continue
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
@@ -5818,10 +6095,32 @@ def _make_initial_velocity_generation(
                                  origin, fy, fz)
         # The RETURN VALUE is the group: the round-2 site called this helper
         # and threw it away, so flipping repoint would have changed nothing.
-        nids = _warn_inivel_on_rigid_members(
+        # The card's velocity FIELD, per node: the rigid motion
+        # v + omega x (x - O) that hm_read_inivel.F:580-617 writes itself. The
+        # momentum average needs the prescribed velocity of each node, and on
+        # this card that is not one constant.
+        def _gen_velocity_of(nid: int, _o=origin, _n=nhat, _w=vr,
+                             _v=(g.vx, g.vy, g.vz)
+                             ) -> Optional[Tuple[float, float, float]]:
+            nd = state.nodes.get(nid)
+            if nd is None:
+                return None
+            if not _w or _n is None:
+                return _v
+            rx, ry, rz = nd.x - _o[0], nd.y - _o[1], nd.z - _o[2]
+            wx, wy, wz = _w * _n[0], _w * _n[1], _w * _n[2]
+            return (_v[0] + wy * rz - wz * ry,
+                    _v[1] + wz * rx - wx * rz,
+                    _v[2] + wx * ry - wy * rx)
+
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, g.sid, list(nids), rigid_nodes,
             keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID",
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_gen_velocity_of)
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_gen")
+        if not nids:
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()

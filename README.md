@@ -3280,14 +3280,16 @@ LS-DYNA does not initialise them either when `IVATN = 0`. A body the card only
 PARTLY covers takes one of two answers, decided by the REST of the card.
 A body a MIXED card only partly covers is refused and NAMED rather than
 modelled: p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted momentum
-average over the whole body, this writer computes no nodal masses, and the
-deformable half of the card still works. A body an ALL-RIGID card only partly
-covers is RE-POINTED anyway with the over-estimate NAMED, because refusing
-there leaves nothing at all: `translat.k`, whose `*INITIAL_VELOCITY_NODE`
-names 2 of rigid part 1's 4 element nodes, reads cycle-0 K-ENERGY **387.9**
-re-pointed against its own LS-DYNA glstat's **189.962** (+104 %) and
-**0.000** refused, with every channel flat for all 13 980 cycles. The
-mass-weighted arm is a round-4 item.
+average over the whole body, and the deformable half of the card still works.
+A body an ALL-RIGID card only partly covers is RE-POINTED anyway with the
+over-estimate NAMED, because refusing there leaves nothing at all:
+`translat.k`, whose `*INITIAL_VELOCITY_NODE` names 2 of rigid part 1's 4
+element nodes, reads cycle-0 K-ENERGY **387.9** re-pointed against its own
+LS-DYNA glstat's **189.962** (+104 %) and **0.000** refused, with every
+channel flat for all 13 980 cycles. Both answers are the flag-off ones:
+[`--mass-weighted-inivel`](#--mass-weighted-inivel--the-momentum-average-for-a-partly-covered-rigid-body)
+forms the momentum average for either kind of card and reads **220.58**
+(+16.12 %) on that deck.
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
