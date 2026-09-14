@@ -25,6 +25,7 @@ Kept in its own module, the repo's one-module-per-batch convention.
 
 import inspect
 import os
+import re
 import tempfile
 import unittest
 
@@ -739,24 +740,42 @@ class GeneralizedWeldButtRbody(unittest.TestCase):
 class Round5FlagWiring(unittest.TestCase):
     """Every new lever reaches the parser, the API, the GUI and the README."""
 
+    #: default-ON opt-outs: the spelling the README and the GUI summary carry
+    #: is the ``--no-`` one.
     _FLAGS = {
         "--shell-to-solid-rbody": "shell_to_solid_rbody",
         "--generalized-weld-butt": "generalized_weld_butt",
     }
+    #: part B's default-OFF levers: ``(option, attribute, the GUI value that
+    #: turns it on)``. Every one of the five is checked at the same five
+    #: sites; a lever wired everywhere but the summary ships silently.
+    _OPT_IN_FLAGS = (
+        ("--implicit-rigid-secondary-swap",
+         "implicit_rigid_secondary_swap", True),
+        ("--mass-weighted-inivel", "mass_weighted_inivel", True),
+        ("--assumed-strain-isolid", "assumed_strain_isolid", "24"),
+    )
+
+    def _readme(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            return fh.read()
 
     def test_every_round_5_flag_reaches_the_README(self):
         from k2rad import cli
         opts = {s for a in cli.build_parser()._actions
                 for s in a.option_strings}
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
-            readme = fh.read()
+        readme = self._readme()
         for flag in self._FLAGS:
             with self.subTest(flag=flag):
                 self.assertIn(flag, opts, f"{flag} is not a parser option")
                 neg = "--no-" + flag[2:]
                 self.assertIn(neg, opts, f"{neg} is not a parser option")
                 self.assertIn(neg, readme, f"{neg} is not in README.md")
+        for flag, _attr, _on in self._OPT_IN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertIn(flag, opts, f"{flag} is not a parser option")
+                self.assertIn(flag, readme, f"{flag} is not in README.md")
 
     def test_the_help_renders_and_carries_the_measured_numbers(self):
         """A bare %% in a help string kills --help at a green suite."""
@@ -764,8 +783,16 @@ class Round5FlagWiring(unittest.TestCase):
         text = cli.build_parser().format_help()
         for flag in self._FLAGS:
             self.assertIn("--no-" + flag[2:], text)
-        self.assertIn("48190 cycles", text)
-        self.assertIn("2082 cycles", text)
+        for flag, _attr, _on in self._OPT_IN_FLAGS:
+            self.assertIn(flag, text)
+        # argparse WRAPS a help string, so the figures are matched against the
+        # whitespace-collapsed render — the sentence the user reads.
+        flat = _collapse(text)
+        for figure in ("48190 cycles", "2082 cycles", "131 cycles",
+                       "6.934e5", "220.58", "189.962", "-5.87 %",
+                       "22 deck keys on 18 emitted models"):
+            with self.subTest(figure=figure):
+                self.assertIn(figure, flat)
 
     def test_the_gui_wires_both_levers_end_to_end(self):
         import k2rad_gui
@@ -788,6 +815,61 @@ class Round5FlagWiring(unittest.TestCase):
                 self.assertIn("--no-" + name.replace("_", "-"),
                               "".join(captured))
         tmp.cleanup()
+
+    def test_the_gui_wires_the_three_opt_in_levers_end_to_end(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        for flag, name, on in self._OPT_IN_FLAGS:
+            with self.subTest(name=name):
+                kw = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), ground_springs=False,
+                    ground_spring_k_text="", soften_stfac_text="",
+                    **{name: on})
+                self.assertEqual(kw[name], on)
+                captured = []
+                app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+                app._append = captured.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw)
+                self.assertIn(flag, "".join(captured))
+                # ... and the default arm says NOTHING about it
+                kw_off = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), ground_springs=False,
+                    ground_spring_k_text="", soften_stfac_text="")
+                captured_off = []
+                app._append = captured_off.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw_off)
+                self.assertNotIn(flag, "".join(captured_off))
+        tmp.cleanup()
+
+    def test_the_gui_refuses_an_unknown_assumed_strain_value(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        with self.assertRaises(ValueError):
+            k2rad_gui.build_convert_kwargs(
+                path, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", soften_stfac_text="",
+                assumed_strain_isolid="18")
+        tmp.cleanup()
+
+    def test_every_new_lever_reaches_convert_and_ConvertOptions(self):
+        """The 13-site checklist's API half: a flag the parser owns but
+        ``convert()`` does not is a flag that silently does nothing."""
+        from k2rad import convert
+        from k2rad.state import ConvertOptions
+        sig = inspect.signature(convert).parameters
+        fields = {f for f in ConvertOptions.__dataclass_fields__}
+        names = ([n for n in self._FLAGS.values()]
+                 + [n for _f, n, _o in self._OPT_IN_FLAGS])
+        for name in names:
+            with self.subTest(name=name):
+                self.assertIn(name, sig)
+                self.assertIn(name, fields)
 
     def test_both_keywords_carry_an_include_transform_offset_spec(self):
         """Both cards hold node/set ids, so an *INCLUDE_TRANSFORM renumber
@@ -831,6 +913,57 @@ class JointScrewIsStillRefused(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 # PART B — opt-in levers, hygiene, docs
 # ═════════════════════════════════════════════════════════════════════════════
+
+# ── the shipped-text guard, shared by every retracted-figure test below ──────
+
+def _collapse(text: str) -> str:
+    """One space per whitespace run — so a sentence split across source lines
+    reads as the one sentence a user sees."""
+    return re.sub(r"\s+", " ", text)
+
+
+def _SHIPPED_TEXTS():
+    """``(relative path, normalized text)`` for every text a figure can ship in.
+
+    Round 4's own convention (``test_r14_triage_4._STATING_DOCS`` plus the
+    whole package and the GUI): the two DOCS a user reads, every module of the
+    package — a default-ON runtime warning is shipped text too — and the GUI.
+    ``CHANGELOG.md`` is excluded on purpose: it is the historical record of
+    what each round shipped, not a claim about the current code.
+
+    Adjacent string literals are JOINED before the whitespace collapses, so a
+    figure split across two literals is one string here, exactly as it is in
+    the message the user sees.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rels = ["README.md", "ROADMAP.md", "k2rad_gui.py"]
+    for dirpath, _dirs, files in os.walk(os.path.join(root, "k2rad")):
+        if "__pycache__" in dirpath:
+            continue
+        for name in sorted(files):
+            if name.endswith(".py"):
+                rels.append(os.path.relpath(
+                    os.path.join(dirpath, name), root))
+    out = []
+    for rel in rels:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):        # a measurement, not an assumption
+            continue
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        out.append((rel, _collapse(re.sub(r'"\s*\n\s*"', "", text))))
+    assert len(out) >= 10, out
+    return out
+
+
+#: B3's three corrected claims, in every spelling they were ever written in.
+_RETRACTED_B3 = (
+    "-5.75 / -5.18 / -6.27",
+    "−5.75 / −5.18 / −6.27",
+    "-5.75/-5.18/-6.27",
+    "Refine through the thickness",
+    "refine through the thickness",
+)
 
 # ── B4: a solid stored with six node ids ─────────────────────────────────────
 
@@ -977,6 +1110,244 @@ class ShortCardSolidIsNotPaddedWithItsLastNode(unittest.TestCase):
         row = _block_after(starter, "/BRICK/1", 2)[1]
         self.assertEqual([int(row[i:i + 10]) for i in range(10, 90, 10)],
                          [1, 2, 3, 3, 5, 6, 7, 7])
+
+
+# ── B3: --assumed-strain-isolid {24,none} ────────────────────────────────────
+
+def _isolid_of(starter: str, index: int = 0) -> int:
+    lines = starter.splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/")]
+    return int(lines[hits[index] + 3].split()[0])
+
+
+def _h_cell_of(starter: str, index: int = 0) -> str:
+    lines = starter.splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/")]
+    return lines[hits[index] + 5][40:60].strip()
+
+
+class AssumedStrainIsolidFlag(unittest.TestCase):
+    """B3 — ``--assumed-strain-isolid 24`` puts LS-DYNA's assumed-strain
+    ELFORM -1/-2 on Isolid 24 (HEPH) instead of the locking Isolid 17.
+
+    MEASURED at this branch's head on
+    ``ex_03_solid_elform_-1_4x6x4_mesh`` (nt 4, reproduced identically at
+    nt 2) against its own LS-DYNA reference 174114: Isolid 17 → 136300
+    (−21.72 %), **24 → 163900 (−5.87 %)**, 18 → 165000 (−5.23 %), 14 →
+    163100 (−6.33 %). The starter echoes ``SOLID FORMULATION FLAG. = 24``.
+
+    Reach 22 deck keys on 18 emitted models; the flag moves 20 on 17,
+    because ``ex_12_solid_elform_{-1,-2}`` already reaches 24 through its own
+    ``*HOURGLASS`` IHQ 6 overlay — verified byte-identical with and without
+    the flag on the real deck.
+    """
+
+    def test_minus_1_and_minus_2_move_to_24(self):
+        for elform in (-1, -2):
+            with self.subTest(elform=elform):
+                _, off, _ = _convert(_solid_deck(
+                    _solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=elform))
+                _, on, _ = _convert(
+                    _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8),
+                                elform=elform),
+                    assumed_strain_isolid="24")
+                self.assertEqual(_isolid_of(off), 17)
+                self.assertEqual(_isolid_of(on), 24)
+
+    def test_elform_2_and_3_are_NOT_touched(self):
+        """2 is the fully-integrated element 17 reproduces; 3 is the quadratic
+        hex, for which no Radioss Isolid exists."""
+        for elform in (2, 3):
+            with self.subTest(elform=elform):
+                _, on, _ = _convert(
+                    _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8),
+                                elform=elform),
+                    assumed_strain_isolid="24")
+                self.assertEqual(_isolid_of(on), 17)
+
+    def test_the_h_cell_carries_LS_DYNAs_own_default_QH(self):
+        _, on, _ = _convert(
+            _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=-1),
+            assumed_strain_isolid="24")
+        self.assertEqual(_h_cell_of(on), "0.1")
+
+    def test_a_stated_hourglass_coefficient_still_wins(self):
+        deck = _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8),
+                           elform=-1).replace(
+            "*PART\n", "*CONTROL_HOURGLASS\n" + _row(6, 0.07) + "\n*PART\n")
+        _, on, _ = _convert(deck, assumed_strain_isolid="24")
+        self.assertEqual(_isolid_of(on), 24)
+        self.assertEqual(_h_cell_of(on), "0.07")
+
+    def test_the_flag_off_arm_is_byte_identical(self):
+        deck = _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=-1)
+        _, a, ea = _convert(deck)
+        _, b, eb = _convert(deck, assumed_strain_isolid="none")
+        self.assertEqual(a, b)
+        self.assertEqual(ea, eb)
+
+    def test_the_PER_PART_hourglass_split_property_honours_it(self):
+        """ex_27_solid_elform_-2_rigidwall's own shape: the split
+        /PROP/SOLID is the ONLY solid property in the file."""
+        deck = _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8),
+                           elform=-2).replace(
+            "*PART\nblock\n" + _row(1, 1, 1) + "\n",
+            "*HOURGLASS\n" + _row(7, 0, 0.0) + "\n"
+            "*PART\nblock\n" + _row(1, 1, 1, 0, 7) + "\n")
+        _, off, _ = _convert(deck)
+        _, on, _ = _convert(deck, assumed_strain_isolid="24")
+        self.assertIn("HG_PROP_", off)
+        self.assertEqual(_isolid_of(off), 17)
+        self.assertEqual(_isolid_of(on), 24)
+
+    def test_the_effective_isolid_predicate_reports_24(self):
+        """The predicate /INIBRI and /FAIL/TAB1 read must not disagree with
+        the property that was written."""
+        from k2rad.writer.mesh import _effective_solid_isolid
+        deck = _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=-1)
+        for value, want in (("none", 17), ("24", 24)):
+            with self.subTest(value=value):
+                st = _dispatch(deck)
+                st.options.assumed_strain_isolid = value
+                sec = st.sec_solids[1]
+                self.assertEqual(_effective_solid_isolid(st, 1, sec), want)
+
+    def _tab1_deck(self, elform: int) -> str:
+        """A ``*MAT_TABULATED_JOHNSON_COOK`` (224) → ``/FAIL/TAB1`` deck with
+        ``NUMINT = 8``, the shape ``tests/test_tabulated_jc.py`` uses for the
+        8-of-8 rule. The probe has to REACH that branch, so it is built from
+        the keyword that really carries ``NUMINT`` into ``/FAIL/TAB1``."""
+        nodes = "".join(
+            f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+            for i, (x, y, z) in enumerate(
+                [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+                 (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10)], start=1))
+        return ("*KEYWORD\n*NODE\n" + nodes
+                + "*ELEMENT_SOLID\n" + _row(1, 7) + "\n"
+                + _row(*range(1, 9)) + "\n"
+                + "*PART\njc part\n" + _row(7, 7, 7) + "\n"
+                + "*SECTION_SOLID\n" + _row(7, elform) + "\n"
+                + "*MAT_TABULATED_JOHNSON_COOK\n"
+                + _row(7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 8) + "\n"
+                + _row(110, 0, 300, 0, 0, 0) + "\n"
+                + "*DEFINE_CURVE\n" + _row(110) + "\n"
+                + f"{0.0:>20}{350.0:>20}\n{0.5:>20}{500.0:>20}\n"
+                + "*DEFINE_CURVE\n" + _row(300) + "\n"
+                + f"{-0.667:>20}{1.2:>20}\n{0.333:>20}{0.3:>20}\n"
+                + "*END\n")
+
+    def test_a_FAIL_TAB1_deck_loses_its_exact_8_of_8_rule_and_says_so(self):
+        """The second, non-obvious effect: ``_exact_all_ip`` gates
+        ``Ifail_so = 2`` (delete when ALL integration points fail) on the
+        element really having 8 of them, so moving an ELFORM -1 part to the
+        ONE-point Isolid 24 takes that exactness away — and the deck erodes
+        on the FIRST failed point instead."""
+        deck = self._tab1_deck(-1)
+        res_off, off, _ = _convert(deck)
+        res_on, on, _ = _convert(deck, assumed_strain_isolid="24")
+        # the probe REACHES the branch: the 8-of-8 rule really is in effect
+        self.assertTrue(any("exactly LS-DYNA's 8-of-8 rule" in w
+                            for w in res_off.warnings), res_off.warnings)
+        self.assertIn("/FAIL/TAB1/7", off)
+        tab1_off = [ln for ln in off.split("/FAIL/TAB1/7")[1].splitlines()
+                    if ln and not ln.startswith("#")]
+        tab1_on = [ln for ln in on.split("/FAIL/TAB1/7")[1].splitlines()
+                   if ln and not ln.startswith("#")]
+        self.assertEqual(int(tab1_off[0][10:20]), 2)     # Ifail_so = 2
+        self.assertEqual(int(tab1_on[0][10:20]), 1)      # ... and now 1
+        self.assertFalse(any("exactly LS-DYNA's 8-of-8 rule" in w
+                             for w in res_on.warnings), res_on.warnings)
+        self.assertTrue(any("erode EARLIER" in w for w in res_on.warnings))
+        self.assertTrue(any("--assumed-strain-isolid 24" in w
+                            for w in res_on.warnings), res_on.warnings)
+
+    def test_an_ELFORM_2_FAIL_TAB1_deck_keeps_its_8_of_8_rule(self):
+        """The control: the flag must not reach ELFORM 2."""
+        deck = self._tab1_deck(2)
+        res_on, _s, _e = _convert(deck, assumed_strain_isolid="24")
+        self.assertTrue(any("exactly LS-DYNA's 8-of-8 rule" in w
+                            for w in res_on.warnings), res_on.warnings)
+        self.assertFalse(any("--assumed-strain-isolid" in w
+                             for w in res_on.warnings), res_on.warnings)
+
+    def test_an_unknown_value_is_refused_rather_than_written(self):
+        from k2rad.state import ConvertOptions
+        for bad in ("18", "14", "17", "", "true", "yes", "1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ConvertOptions(assumed_strain_isolid=bad)
+        self.assertEqual(
+            ConvertOptions(assumed_strain_isolid="none")
+            .assumed_strain_isolid_value, 0)
+        self.assertEqual(
+            ConvertOptions(assumed_strain_isolid="24")
+            .assumed_strain_isolid_value, 24)
+        # whitespace is tolerated by BOTH the check and the reader, so a
+        # padded value can never be accepted by one and ignored by the other
+        self.assertEqual(
+            ConvertOptions(assumed_strain_isolid=" 24 ")
+            .assumed_strain_isolid_value, 24)
+
+    def test_the_24_arm_gets_its_own_warning_naming_the_flag(self):
+        res, _s, _e = _convert(
+            _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=-1),
+            assumed_strain_isolid="24")
+        hits = [w for w in res.warnings if "ASSUMED-STRAIN" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("--assumed-strain-isolid 24 was passed", hits[0])
+        self.assertIn("SMALLEST", hits[0])
+        self.assertIn("-2.9 %", hits[0])
+
+    def test_the_17_warning_carries_the_re_measured_figures(self):
+        res, _s, _e = _convert(
+            _solid_deck(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8), elform=-1))
+        hit = next(w for w in res.warnings if "ASSUMED-STRAIN" in w)
+        for figure in ("-5.87 / -5.23 / -6.33 %", "163900 / 165000 / 163100",
+                       "174114", "22 deck keys on 18 emitted models",
+                       "20 of them on 17 models",
+                       "convertprops.cxx:398-402",
+                       "REFINE ALONG THE BEAM",
+                       "+19.7 % -> -28.8 %"):
+            with self.subTest(figure=figure):
+                self.assertIn(figure, hit)
+
+    def test_the_retracted_figures_are_gone_from_every_shipped_text(self):
+        """A rename is a prefix: the guard matches the JOINED, whitespace-
+        collapsed text of every shipped file, so a string split across two
+        adjacent literals cannot hide.
+
+        ``CHANGELOG.md`` is deliberately NOT scanned — round 4's own
+        ``_STATING_DOCS`` convention. It is a historical record of what each
+        round shipped, and deleting a figure from a past entry would rewrite
+        that history; the round-4 entry instead carries an in-place
+        ``re-measured in round 5`` note beside its own number, and
+        :meth:`test_the_changelog_records_the_re_measurement` pins it.
+        """
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_B3:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+    def test_each_retracted_spelling_is_one_the_guard_can_see(self):
+        """The companion the #137 rule asks for: feed the guard each retracted
+        string on its own, in the shape a source file would carry it — split
+        across two adjacent literals, with the space kept INSIDE the first one
+        — and prove the guard FIRES. A guard that silently matches nothing
+        cannot pass for a clean one."""
+        for needle in _RETRACTED_B3:
+            with self.subTest(needle=needle):
+                fake = ('some shipped sentence '
+                        + needle.replace(" ", ' "\n            "')
+                        + ' and the rest')
+                self.assertIn(_collapse(needle), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)))
+
+    def test_the_changelog_records_the_re_measurement(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "CHANGELOG.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("re-measured in round 5", text)
+        self.assertIn("−5.87 / −5.23 / −6.33", text)
 
 
 if __name__ == "__main__":      # pragma: no cover

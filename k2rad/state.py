@@ -7724,6 +7724,104 @@ class ConvertOptions:
     # Set False (--no-default-hourglass) to keep the pre-2026-09 behaviour, in
     # which a defaulted deck gets full integration and NO hourglass control.
     default_hourglass: bool = True
+    # --assumed-strain-isolid {24,none}: what *SECTION_SOLID ELFORM -1 and -2,
+    # LS-DYNA's ASSUMED-STRAIN 8-point hexes, land on. Default "none" = the
+    # shipped Isolid 17, which IS the locking ELFORM-2 element those two
+    # formulations exist to replace (Vol I R17 p.41-104 Remark 13). "24" writes
+    # HEPH -- one Gauss point with physical stabilisation -- instead, and
+    # supplies LS-DYNA's own default hourglass coefficient QH 0.1 in the h cell
+    # when the deck states no hourglass card of its own. ELFORM 2 and 3 are NOT
+    # touched by it: 2 is the fully-integrated element 17 reproduces exactly,
+    # and 3 is the quadratic hex, for which no Radioss Isolid exists.
+    #
+    # REACH: 22 deck keys on 18 emitted models state ELFORM -1 or -2 (two
+    # independently written scanners over the 356-key R14 roster, one of them
+    # *SECTION_SOLID_TITLE-aware -- the census that missed the _TITLE spelling
+    # read 21/17). With the flag ON it moves 20 keys on 17 models: the
+    # ex_12_solid_elform_{-1,-2} pair already lands on Isolid 24 through its
+    # own *HOURGLASS IHQ 6 overlay.
+    #
+    # WHY IT IS OPT-IN -- the arms disagree, measured against each deck's own
+    # LS-DYNA reference at nt 4 (Isolid 17 -> 24):
+    #   ex_03_solid_elform_-1_4x6x4_mesh  -21.72 % -> -5.87 %   (better)
+    #   ex_04_solid_elform_-1             -5.84 %  -> -2.83 %   (better)
+    #   ex_14_solid_elform_-1/-2          +313.9/+494.0 % -> +1373/+2014 %
+    #   ex_27_solid_elform_-2_rigidwall   ke +9.75 % -> +15.43 % (the
+    #     population's ONLY match, LOST)
+    #   mainboltaexpl                     IE -72.72 % -> -81.40 %, 5x the wall
+    # Two better, four worse, and one of the four is the only match in the
+    # class -- so the user asks for it explicitly. A self-built bending coupon
+    # (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; Euler-Bernoulli
+    # 0.20571429, Timoshenko 0.21017143, converged 3-D 0.2072-0.2074) says why
+    # anyone would: Isolid 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at
+    # 1/2/4/8 elements through the depth, i.e. the error GROWS with refinement
+    # to -28.8 %, while 24 and 14 read 0.20540 / 0.20180 / 0.20140 / 0.20140
+    # (-2.9 %).
+    #
+    # dyna2rad maps ELFORM -1 to Isolid 24 and 2/3 to 18
+    # (convertprops.cxx:398-402); -2 is not in its table and falls to the
+    # /DEF_SOLID default.
+    assumed_strain_isolid: str = "none"
+    # --implicit-rigid-secondary-swap: extend the all-rigid-SSID SWAP to an
+    # IMPLICIT deck, where the interface is otherwise DROPPED. Default OFF.
+    #
+    # The flag reaches ONE branch: an implicit *CONTACT_SURFACE_TO_SURFACE
+    # whose SSID side is wholly rigid and whose MSID side carries deformable
+    # nodes, i.e. exactly the case the explicit path swaps. It IMPLIES the
+    # derived Gapmin on the interface it creates and REFUSES to swap without
+    # one (the bare swap ERRORs), so it reaches only a main surface built of
+    # SOLID segments -- everything else keeps the drop and says so.
+    #
+    # MEASURED on implicit/basic-examples/contact-i/bumper.k at nt 2 AND nt 4
+    # (LS-DYNA reference IE 1.23131e7, KE exactly 0):
+    #   shipped drop        NORMAL, a ZERO MODEL: IE 0 (-100 %)
+    #   bare swap           ERROR at t 3.0e-4 (ISTOP -2, MESSAGE ID 79)
+    #   swap + Gapmin 0.1499 (Inacti 0)   NORMAL 131 cycles to t 0.05,
+    #                       IE 6.934e5 (-94.4 %)
+    #   the same with /IMPL/QSTAT/DTSCAL 1  IE 1.473e6 (-88.0 %)
+    #   the deformable-contact recipe's DTSCAL 0.05  IE -8.973e5, NEGATIVE
+    # So the flag buys a load path that is still 94 % short of the reference,
+    # and the campaign VERDICT cannot move either way: bumper's LS-DYNA KE is
+    # a structural zero and the benchmark short-circuits on it. It is a byte
+    # mover on 1 deck key / 1 emitted model (plus the Yaris Dynamic Roof
+    # Crush giant, convert-only) and only with the flag ON.
+    #
+    # _recipe_active and deformable_deformable_inter_ids are deliberately NOT
+    # widened: the DTSCAL 0.05 arm above drives the internal energy negative,
+    # and those two predicates also carry the four E:/foxcore_data
+    # implicit_elevator-linkage decks the recipe was validated on.
+    implicit_rigid_secondary_swap: bool = False
+    # --mass-weighted-inivel: give a rigid body a *INITIAL_VELOCITY[_NODE|
+    # _GENERATION] card covers only PARTLY the momentum average Vol I R17
+    # p.28-129 Remark 3 describes, instead of the card's full velocity (an
+    # all-rigid card) or nothing at all (a mixed card). Default OFF.
+    #
+    # v_cm = (sum over the COVERED nodes of m_i v_i) / M_body and
+    # omega = I_cm^+ (sum over the covered nodes of d_i x m_i v_i), both taken
+    # over the body's own lumped nodal masses, are written as /INIVEL/TRA +
+    # /INIVEL/ROT on the /RBODY main node; inirby.F:1032-1048 then rebuilds
+    # every secondary from it.
+    #
+    # MEASURED on intro-by-j.-day/joint/joint-ii/translat.k at nt 4 (2 of rigid
+    # part 1's 4 element nodes carry v = (2286, 0, 7620); LS-DYNA cycle-0
+    # K-ENERGY 189.962): the shipped full-velocity re-point reads 387.9
+    # (+104.20 %), this rule reads 220.58 (+16.12 %), and the final ke_dev goes
+    # +194.03 % -> +47.82 %. The residual is NOT the velocity: it is the
+    # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
+    # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
+    # 0.1977E-02), which the /RBODY J cells would ADD rather than replace
+    # (hm_read_rbody.F:276-279) -- a named follow-up, not compensated here.
+    #
+    # OPT-IN because exactly ONE carrier with an LS-DYNA reference exists on
+    # this machine (translat; Ryan_Lee's W16_SW_door is 3 files on 1 model with
+    # no reference, and the 19 non-roster F: deck files and E:/foxcore_data
+    # carry no *INITIAL_VELOCITY at all), and there is no LS-DYNA solver here
+    # to make a second. The default flip waits for a second carrier.
+    #
+    # A body the card FULLY covers is untouched by construction: its momentum
+    # average IS the card's velocity with omega 0, so it stays in the shared
+    # /INIVEL group and no deck of that class changes a byte.
+    mass_weighted_inivel: bool = False
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets
@@ -7796,6 +7894,18 @@ class ConvertOptions:
         """The Ishell an unmapped ELFORM resolves to, per the user's choice."""
         from .writer.common import ISHELL_QBAT, SHELL_FORMULATIONS
         return SHELL_FORMULATIONS.get(self.shell_formulation, ISHELL_QBAT)
+
+    @property
+    def assumed_strain_isolid_value(self) -> int:
+        """The Isolid ``--assumed-strain-isolid`` asks for: 24, or 0 = off.
+
+        ONE reader for the option, so the predicate
+        (``writer/mesh._effective_solid_isolid``, which decides what
+        ``/INIBRI`` Nb_integr and ``/FAIL/TAB1`` Ifail_so see) and the
+        emitter (``writer/mesh._make_properties``) can never disagree about
+        what was asked for.
+        """
+        return 24 if str(self.assumed_strain_isolid).strip() == "24" else 0
     # /DT/<elem>/DEL Tmin [s]: delete an element whose time step reaches
     # this. None = only what *CONTROL_TIMESTEP ERODE=1 + TSLIMT asks for.
     # Opt-in because the card DELETES ELEMENTS; see
@@ -7858,6 +7968,13 @@ class ConvertOptions:
                 "derived_gapmin_factor must be > 0 (got "
                 f"{self.derived_gapmin_factor!r}); a non-positive Gapmin is "
                 "starter ERROR 785 (i7sti3.F:1068).")
+        if str(self.assumed_strain_isolid).strip().lower() not in ("none", "24"):
+            raise ValueError(
+                "assumed_strain_isolid must be '24' or 'none' (got "
+                f"{self.assumed_strain_isolid!r}). Only Isolid 24 was measured "
+                "as a substitute for LS-DYNA's assumed-strain ELFORM -1/-2; "
+                "18 and 14 read worse on the same decks and an arbitrary cell "
+                "would be written into /PROP/SOLID verbatim.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

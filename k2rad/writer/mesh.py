@@ -2255,6 +2255,9 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
         return (None, None)
     if sec.elform in _COHESIVE_ELFORMS:
         return (None, None)     # /PROP/TYPE43: 4 mid-plane points, no HG modes
+    # No `assumed_strain_isolid` here on purpose: this asks "is this a tet or
+    # a cohesive", and the only cell the option can produce is 24, which is
+    # neither. Passing it would change no answer and would suggest it could.
     if _elform_to_isolid(sec.elform) in (14, 18):
         return (None, None)     # tet4 (Kessler=14) / cohesive (18): no HG modes
     h: Optional[float] = None
@@ -2414,7 +2417,9 @@ def _effective_solid_isolid(state: ConversionState, pid: int,
     once IHQ remaps a full-integration hex to an under-integrated 1/5/24 (a
     stale Nb_integr is rejected by the starter, MSGID 695)."""
     base = 0 if (sec and sec.iale) else \
-        (_elform_to_isolid(sec.elform) if sec else 17)
+        (_elform_to_isolid(sec.elform,
+                           state.options.assumed_strain_isolid_value)
+         if sec else 17)
     if pid in state.hourglass_prop_ids:
         iso_over = state.hourglass_prop_vals.get(pid, (None, None))[1]
         return iso_over if iso_over is not None else base
@@ -2597,18 +2602,91 @@ def _warn_type43_pairings(state: ConversionState, secid: int,
 _ASSUMED_STRAIN_ELFORMS = frozenset({-1, -2, 3})
 
 
+def _assumed_strain_h(state: ConversionState, sec, isolid: int,
+                      h: Optional[float]) -> Optional[float]:
+    """The ``h`` cell for a section ``--assumed-strain-isolid 24`` moved.
+
+    A deck that states an hourglass coefficient of its own keeps it (``h`` is
+    not None). One that states none gets LS-DYNA's own default QH **0.1**, the
+    same number the default-hourglass synthesis writes beside an ``Isolid``
+    24, so the two routes to that formulation emit the same property.
+
+    The cell is INERT either way, and saying so is the point of writing it
+    from one place: ``hm_read_prop14.F:358-361`` is ``IF (IHBE == 24) THEN IF
+    (CVIS == ZERO) CVIS = EM01; GEO(13) = CVIS; QH = ZERO``, i.e. an Isolid 24
+    takes its coefficient from ``Dn``, which k2rad leaves blank, so the run
+    uses the CVIS default 0.1 — the same number ``h`` states.
+    """
+    if h is not None:
+        return h
+    if (isolid == 24 and sec is not None and sec.elform in (-1, -2)
+            and state.options.assumed_strain_isolid_value):
+        return 0.1
+    return None
+
+
 def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> None:
-    """``ELFORM -1/-2/3`` that ships on ``Isolid`` 17, once per ``*SECTION_SOLID``.
+    """``ELFORM -1/-2/3`` and the ``Isolid`` it ships on, once per section.
 
     It fires at the line that WRITES the property, so the predicate is the
     emitted ``Isolid``, not a re-derivation of it. Deduped per section by
-    construction: ``_make_properties`` walks ``state.sec_solids`` once.
+    construction: ``_make_properties`` walks ``state.sec_solids`` once, and
+    the per-part hourglass split reads the same memo.
+
+    Two arms, because an ELFORM -1/-2 section can now leave here on either of
+    two cells and BOTH are substitutions:
+
+    * ``Isolid`` 17 — the shipped default, and the LOCKING ELFORM-2 element
+      that -1/-2 exist to replace;
+    * ``Isolid`` 24 — HEPH, reached either through the deck's own
+      ``*HOURGLASS`` IHQ 6 overlay (the ``ex_12_solid_elform_*`` family) or
+      through ``--assumed-strain-isolid 24``. An 8-point element becomes a
+      1-POINT one, which is a large substitution in its own right — it is
+      simply the SMALLEST one measured.
     """
-    if sec is None or sec.elform not in _ASSUMED_STRAIN_ELFORMS or isolid != 17:
+    if sec is None or sec.elform not in _ASSUMED_STRAIN_ELFORMS:
+        return
+    if isolid not in (17, 24):
+        return
+    if isolid == 24 and sec.elform == 3:
+        # ELFORM 3 has no measured 24 arm at all — the sentence below is
+        # about the assumed-strain pair, and inventing one for the quadratic
+        # hex would be a claim nothing here measured.
         return
     if sec.secid in state.warned_assumed_strain_secids:
         return
     state.warned_assumed_strain_secids.add(sec.secid)
+    if isolid == 24:
+        state.warn(
+            f"*SECTION_SOLID {sec.secid} ELFORM {sec.elform} is LS-DYNA's "
+            "ASSUMED-STRAIN 8-point hex and this property lands on Isolid 24 "
+            "(HEPH, ONE Gauss point with physical stabilisation, "
+            "sgrtails.F:1107-1123) "
+            + ("because --assumed-strain-isolid 24 was passed"
+               if state.options.assumed_strain_isolid_value == 24 else
+               "through this deck's own *HOURGLASS IHQ 6 overlay")
+            + ". That is still a SUBSTITUTION - an 8-point assumed-strain "
+            "element becomes a 1-point one - and it is the SMALLEST of the "
+            "measured ones, not a faithful mapping. On a self-built bending "
+            "coupon (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; "
+            "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
+            "0.2072-0.2074) Isolid 24 reads 0.20540 / 0.20180 / 0.20140 / "
+            "0.20140 at 1/2/4/8 elements through the depth (-2.9 %) where the "
+            "default Isolid 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 "
+            "(+19.7 % -> -28.8 %, i.e. WORSE with refinement). On the roster "
+            "the two arms disagree by deck: ex_03_solid_elform_-1_4x6x4_mesh "
+            "-21.72 % -> -5.87 % and ex_04_solid_elform_-1 -5.84 % -> "
+            "-2.83 % improve, while ex_14_solid_elform_-1/-2 go "
+            "+313.9/+494.0 % -> +1373/+2014 %, mainboltaexpl -72.72 % -> "
+            "-81.40 % at 5x the wall time and ex_27_solid_elform_-2_rigidwall "
+            "LOSES the class's only campaign match (ke +9.75 % -> +15.43 %). "
+            "dyna2rad makes the same choice for -1 (convertprops.cxx:398-402: "
+            "-1 -> 24, 2/3 -> 18; -2 is not in its table and falls to the "
+            "/DEF_SOLID default). NOTE the h cell: hm_read_prop14.F:358-361 "
+            "reads an Isolid 24's coefficient from Dn, not h, and k2rad "
+            "leaves Dn blank - so the run uses the CVIS default 0.1 whatever "
+            "h says.")
+        return
     if sec.elform == 3:
         state.warn(
             f"*SECTION_SOLID {sec.secid} ELFORM 3 is LS-DYNA's FULLY "
@@ -2637,14 +2715,31 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "which is the PRE-round-4 column: A1's /IMPL/QSTAT/DTSCAL moved all "
         "four, one of them by a factor 3.4 and one across zero.) "
         "No Radioss Isolid reproduces -1/-2: "
-        "24 / 18 / 14 measure -5.75 / -5.18 / -6.27 % on ex_03 and REGRESS "
-        "four other corpus decks (ex_27_solid_elform_-2_rigidwall loses the "
-        "population's only match, ke +9.75 % -> +15.43 %; mainboltaexpl "
-        "-72.7 -> -81.4 % IE at 5x the wall time; ex_14_solid_elform_-1/-2 "
-        "+314/+494 % -> +1373/+2014 %). Icpre cannot help - "
+        "24 / 18 / 14 measure -5.87 / -5.23 / -6.33 % on ex_03 (internal "
+        "energy 163900 / 165000 / 163100 against the LS-DYNA reference "
+        "174114, re-measured at this branch's head at nt 4 and identical at "
+        "nt 2; the three figures this sentence carried before round 5 were a "
+        "PRE-round-4 column, from before /IMPL/QSTAT/DTSCAL 10 reached the "
+        "deck) and they REGRESS four other corpus decks "
+        "(ex_27_solid_elform_-2_rigidwall loses the population's only match, "
+        "ke +9.75 % -> +15.43 %; mainboltaexpl -72.72 -> -81.40 % IE at 5x "
+        "the wall time; ex_14_solid_elform_-1/-2 +313.9/+494.0 % -> "
+        "+1373/+2014 %). --assumed-strain-isolid 24 writes the 24 arm on this "
+        "section if you want it: 22 deck keys on 18 emitted models state "
+        "ELFORM -1/-2 and the flag moves 20 of them on 17 models. dyna2rad "
+        "makes that same choice for -1 (convertprops.cxx:398-402: -1 -> 24 "
+        "and 2/3 -> 18; -2 is not in its table and falls to the /DEF_SOLID "
+        "default). Icpre cannot help - "
         "hm_read_prop14.F:296-303 already FORCES Icpre = 1 on Isolid 17 (the "
         "starter echo prints CONSTANT PRESSURE FLAG = 1) - and Isolid 19 "
-        "diverges by nine orders. Refine through the thickness, or restate the "
+        "diverges by nine orders. REFINE ALONG THE BEAM, so the hexes stay "
+        "near aspect ratio 1 in the bending plane: refining THROUGH THE "
+        "THICKNESS makes Isolid 17 worse, not better - on a self-built "
+        "bending coupon (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; "
+        "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
+        "0.2072-0.2074) it reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at "
+        "1/2/4/8 elements through the depth, i.e. +19.7 % -> -28.8 %, while "
+        "Isolid 24 holds -2.9 % over the same sweep. Or restate the "
         "section as ELFORM 2 if the locked answer is what you want. NOTE: the "
         "ELFORM siblings of these examples convert to ONE file "
         "(ex_03_solid_elform_{-1,2,18} share a byte-identical _0000.rad), so "
@@ -3058,7 +3153,8 @@ def _make_properties(state: ConversionState) -> List[str]:
         # "INCOMPATIBLE ELEMENT TYPE WITH ALE/EULER FRAMEWORK"). Isolid 0 =
         # the default, which resolves to the co-located ALE brick (the value
         # used by the reference Drop_Container FSI deck).
-        isolid = 0 if sec.iale else _elform_to_isolid(sec.elform)
+        isolid = 0 if sec.iale else _elform_to_isolid(
+            sec.elform, state.options.assumed_strain_isolid_value)
         # /PROP/SOLID card 1 (cfg radioss2022): Isolid Ismstr Iale Icpre Itetra10
         # Inpts Itetra4 Iframe Dn — note the Iale column at 21-30 (the 2022 PDF
         # p.1738 omits it; writing the PDF's 8-field layout shifts Itetra10 into
@@ -3102,7 +3198,8 @@ def _make_properties(state: ConversionState) -> List[str]:
             state.ismstr10_solid_secids.add(sec.secid)
         _warn_assumed_strain_elform(state, sec, isolid)
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
-                                  isolid, sec.iale, itetra10, istrain, hcoef=h,
+                                  isolid, sec.iale, itetra10, istrain,
+                                  hcoef=_assumed_strain_h(state, sec, isolid, h),
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
     _warn_default_solid_hourglass(state, default_hg_moved)
@@ -4549,12 +4646,15 @@ def _assign_hourglass_props(state: ConversionState) -> None:
             if hg is None and state.ctrl_hourglass is not None \
                     and _ihq_to_isolid(state.ctrl_hourglass.ihq) is not None \
                     and base[1] is not None and not ctrl_isolid_warned \
-                    and sec is not None and base[1] != _elform_to_isolid(sec.elform):
+                    and sec is not None and base[1] != _elform_to_isolid(
+                        sec.elform,
+                        state.options.assumed_strain_isolid_value):
                 ctrl_isolid_warned = True
                 state.warn(
                     f"*CONTROL_HOURGLASS IHQ={state.ctrl_hourglass.ihq} is now "
                     "honored (was previously dropped): the shared /PROP/SOLID "
-                    f"Isolid is remapped {_elform_to_isolid(sec.elform)}→"
+                    "Isolid is remapped "
+                    f"{_elform_to_isolid(sec.elform, state.options.assumed_strain_isolid_value)}→"
                     f"{base[1]} (h={base[0]:g}) for parts without a *PART HGID. "
                     "Set HGID or *HOURGLASS per part to override.")
             # Unsupported IHQ (0/8/9/10): h is applied but Isolid is unmapped —
@@ -4691,7 +4791,8 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      phi: float = 0.0, skew_id: int = 0,
                      refpoint=(0.0, 0.0, 0.0),
                      isolid: Optional[int] = None,
-                     ismstr: int = 0) -> List[str]:
+                     ismstr: int = 0,
+                     assumed_strain_isolid: int = 0) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
@@ -4711,9 +4812,14 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     *isolid* None (default) derives the formulation from the section ELFORM
     as everywhere else; an explicit value pins it (the MAT_126 honeycomb
     path passes 1 — with *ismstr* 1 — matching dyna2rad's fixed
-    ISOLID=1/Ismstr=1 for the honeycomb-family TYPE6, CP:404-476)."""
+    ISOLID=1/Ismstr=1 for the honeycomb-family TYPE6, CP:404-476).
+    *assumed_strain_isolid* is ``ConvertOptions.assumed_strain_isolid_value``,
+    threaded in because an ORTHOTROPIC solid section can state ELFORM -1/-2
+    too and must take the same cell the isotropic emitter writes; every caller
+    passes it."""
     if isolid is None:
-        isolid = _elform_to_isolid(sec.elform) if sec else 0
+        isolid = (_elform_to_isolid(sec.elform, assumed_strain_isolid)
+                  if sec else 0)
     vx, vy, vz = (0.0, 0.0, 0.0) if skew_id else refvec
     px, py, pz = (0.0, 0.0, 0.0) if skew_id else refpoint
     if skew_id:
@@ -4867,8 +4973,10 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
                                     (0.0, 0.0, 0.0), axes[0], axes[1])
             sec = state.sec_solids.get(secid)
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
-            lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain,
-                                      skew_id=skew_id)
+            lines += _emit_prop_type6(
+                prop_id, title, sec, itetra10, istrain, skew_id=skew_id,
+                assumed_strain_isolid=(
+                    state.options.assumed_strain_isolid_value))
     return lines
 
 
@@ -4908,7 +5016,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
         if pid in solid_pids:
             sec = state.sec_solids.get(secid)
             isolid = (0 if (sec and sec.iale)
-                      else (_elform_to_isolid(sec.elform) if sec else 17))
+                      else (_elform_to_isolid(
+                          sec.elform,
+                          state.options.assumed_strain_isolid_value)
+                          if sec else 17))
             if iso_over is not None:
                 isolid = iso_over
             iale = sec.iale if sec else 0
@@ -4946,8 +5057,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             # in the file — ex_27_solid_elform_-2_rigidwall emits
             # /PROP/SOLID/90001 at Isolid 17 here and nothing at all above.
             _warn_assumed_strain_elform(state, sec, isolid)
-            lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
-                                      istrain, hcoef=coeff, ismstr=ismstr)
+            lines += _emit_prop_solid(
+                prop_id, title, isolid, iale, itetra10, istrain,
+                hcoef=_assumed_strain_h(state, sec, isolid, coeff),
+                ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)
             ishell = (_elform_to_ishell(sec.elform, state.is_implicit,

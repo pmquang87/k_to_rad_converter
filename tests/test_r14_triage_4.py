@@ -1252,23 +1252,34 @@ class AssumedStrainElformWarningTests(unittest.TestCase):
         self.assertTrue(_has(result.warnings, "ELFORM -2", "ASSUMED-STRAIN"),
                         result.warnings)
 
-    def test_it_does_NOT_fire_when_the_split_moves_it_OFF_Isolid_17(self):
-        """The predicate is the EMITTED ``Isolid``, not the ELFORM: a deck
-        whose ``*HOURGLASS`` remaps the section to 24 gets a DIFFERENT element
-        (1-point HEPH), and the warning's premise — that ``Isolid 17`` is the
-        locking ELFORM-2 hex — is simply false there.
-        ``ex_12_solid_elform_-1`` is the corpus carrier of that shape."""
+    def test_the_Isolid_24_split_gets_its_OWN_sentence_not_the_17_one(self):
+        """The predicate is the EMITTED ``Isolid``, not the ELFORM — and
+        round 5 changed what the 24 arm is told.
+
+        Round 4 shipped SILENCE here, on the reading that an ``*HOURGLASS``
+        remap to 24 gives a DIFFERENT element and the 17 sentence's premise
+        (that ``Isolid`` 17 is the locking ELFORM-2 hex) is false there. That
+        half is still true and still asserted below. What was wrong was the
+        conclusion: ROADMAP item 16 is CLOSED in the opposite direction — an
+        8-point assumed-strain element becoming a 1-POINT HEPH is a
+        substitution of its own, simply the SMALLEST measured one (a bending
+        coupon reads −2.9 % at 24 against −28.8 % at 17), so the user is told
+        about it in a sentence of its own instead of being told nothing.
+        ``ex_12_solid_elform_{-1,-2}`` is the corpus carrier of that shape."""
         deck = self._solid_deck(-1).replace(
             "*PART\nbrick\n" + _row(1, 1, 1) + "\n",
             "*HOURGLASS\n" + _row(7, 6, 0.05) + "\n"
             "*PART\nbrick\n" + _row(1, 1, 1, 0, 7) + "\n")
-        _r, starter, _e = _convert(deck)
+        result, starter, _e = _convert(deck)
         lines = starter.splitlines()
         i = next(j for j, l in enumerate(lines) if l.startswith("/PROP/SOLID/"))
         self.assertEqual(int(lines[i + 3].split()[0]), 24)
-        result, _s, _e = _convert(deck)
-        self.assertFalse(any("ASSUMED-STRAIN" in w for w in result.warnings),
-                         result.warnings)
+        hits = [w for w in result.warnings if "ASSUMED-STRAIN" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        # the 24 sentence, not the 17 one
+        self.assertIn("lands on Isolid 24", hits[0])
+        self.assertIn("*HOURGLASS IHQ 6 overlay", hits[0])
+        self.assertNotIn("Isolid 17 IS the locking", hits[0])
 
     def test_elform_2_still_maps_to_isolid_17_EXPLICITLY(self):
         """``_elform_to_isolid``'s ``2: 17`` entry must never ride the ``.get``

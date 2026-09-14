@@ -682,6 +682,70 @@ def build_parser() -> argparse.ArgumentParser:
              "the pre-2026-09 full-integration, no-hourglass output.",
     )
     parser.add_argument(
+        "--assumed-strain-isolid",
+        choices=("24", "none"),
+        default="none",
+        help="What *SECTION_SOLID ELFORM -1 and -2 -- LS-DYNA's "
+             "ASSUMED-STRAIN 8-point hexes -- land on. Default 'none' = the "
+             "shipped /PROP/SOLID Isolid 17, which IS the locking ELFORM-2 "
+             "element those two formulations exist to replace (Vol I R17 "
+             "p.41-104 Remark 13). '24' writes HEPH (one Gauss point with "
+             "physical stabilisation) instead, with LS-DYNA's own default "
+             "QH 0.1 in the h cell when the deck states no hourglass card. "
+             "ELFORM 2 and 3 are NOT touched. Reach: 22 deck keys on 18 "
+             "emitted models state ELFORM -1/-2; the flag moves 20 keys on "
+             "17 models (the ex_12 pair is already at 24 through its own "
+             "*HOURGLASS IHQ 6). OPT-IN because the arms disagree, measured "
+             "against each deck's own LS-DYNA reference at nt 4 (17 -> 24): "
+             "ex_03_solid_elform_-1_4x6x4_mesh -21.72 %% -> -5.87 %% and "
+             "ex_04_solid_elform_-1 -5.84 %% -> -2.83 %% get BETTER, while "
+             "ex_14_solid_elform_-1/-2 go +313.9/+494.0 %% -> +1373/+2014 %%, "
+             "mainboltaexpl -72.72 %% -> -81.40 %% at 5x the wall time, and "
+             "ex_27_solid_elform_-2_rigidwall LOSES the class's only match "
+             "(ke +9.75 %% -> +15.43 %%). dyna2rad maps -1 -> 24 and 2/3 -> "
+             "18 (convertprops.cxx:398-402).",
+    )
+    parser.add_argument(
+        "--implicit-rigid-secondary-swap",
+        action="store_true",
+        help="On an IMPLICIT deck, SWAP the two sides of a *CONTACT whose "
+             "SECONDARY (SSID) side is wholly rigid instead of DROPPING the "
+             "interface. OFF by default. The flag implies the derived Gapmin "
+             "on the interface it creates and refuses to swap without one, so "
+             "it reaches only a main surface built of SOLID segments. "
+             "MEASURED on implicit/basic-examples/contact-i/bumper.k at nt 2 "
+             "AND nt 4 against the LS-DYNA reference IE 1.23131e7: the "
+             "shipped drop is a NORMAL-terminating ZERO MODEL (IE 0, "
+             "-100 %%); the bare swap ERRORs at t 3.0e-4 (ISTOP -2, MESSAGE "
+             "ID 79); swap + Gapmin 0.1499 with Inacti 0 reaches NORMAL "
+             "TERMINATION in 131 cycles at t 0.05 with IE 6.934e5 "
+             "(-94.4 %%), and 1.473e6 (-88.0 %%) with /IMPL/QSTAT/DTSCAL 1. "
+             "So it buys a load path that is still 94 %% short, and the "
+             "campaign verdict cannot move: bumper's LS-DYNA KE is exactly 0. "
+             "--deformable-contact-recipe is NOT widened to reach it -- its "
+             "DTSCAL 0.05 drives the same deck's internal energy to -8.973e5, "
+             "negative.",
+    )
+    parser.add_argument(
+        "--mass-weighted-inivel",
+        action="store_true",
+        help="Give a rigid body that an *INITIAL_VELOCITY / _NODE / "
+             "_GENERATION card covers only PARTLY the MOMENTUM AVERAGE Vol I "
+             "R17 p.28-129 Remark 3 describes, as /INIVEL/TRA + /INIVEL/ROT "
+             "on its /RBODY main node. OFF by default. Without it such a body "
+             "gets the card's FULL velocity (an all-rigid card) or nothing at "
+             "all (a mixed card). MEASURED on "
+             "intro-by-j.-day/joint/joint-ii/translat.k at nt 4, where 2 of "
+             "rigid part 1's 4 element nodes carry v = (2286, 0, 7620) and "
+             "LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped "
+             "full-velocity re-point reads 387.9 (+104.20 %%), this rule "
+             "reads 220.58 (+16.12 %%), and the final ke_dev goes +194.03 %% "
+             "-> +47.82 %%. OPT-IN because exactly ONE carrier with an "
+             "LS-DYNA reference exists on this machine. A body the card FULLY "
+             "covers is untouched by construction (its momentum average IS "
+             "the card's velocity, with omega 0).",
+    )
+    parser.add_argument(
         "--law106-shell-restate",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -918,6 +982,9 @@ def main(argv=None) -> int:
         zero_t0_sentinel=args.zero_t0_sentinel,
         node_tc_rc_bcs=args.node_tc_rc_bcs,
         default_hourglass=args.default_hourglass,
+        assumed_strain_isolid=args.assumed_strain_isolid,
+        implicit_rigid_secondary_swap=args.implicit_rigid_secondary_swap,
+        mass_weighted_inivel=args.mass_weighted_inivel,
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,

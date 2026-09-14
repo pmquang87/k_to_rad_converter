@@ -111,6 +111,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          zero_t0_sentinel: bool = True,
                          node_tc_rc_bcs: bool = True,
                          default_hourglass: bool = True,
+                         assumed_strain_isolid: str = "none",
+                         implicit_rigid_secondary_swap: bool = False,
+                         mass_weighted_inivel: bool = False,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -254,6 +257,21 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["default_hourglass"] = bool(default_hourglass)
 
+    # A radio pair in the GUI, a {24, none} choice on the CLI -- and nothing
+    # else may reach ConvertOptions, whose __post_init__ refuses any other
+    # value rather than writing it into /PROP/SOLID verbatim.
+    asi = str(assumed_strain_isolid).strip() or "none"
+    if asi not in ("24", "none"):
+        raise ValueError(
+            "assumed_strain_isolid must be '24' or 'none' (got "
+            f"{assumed_strain_isolid!r})")
+    kwargs["assumed_strain_isolid"] = asi
+
+    kwargs["implicit_rigid_secondary_swap"] = bool(
+        implicit_rigid_secondary_swap)
+
+    kwargs["mass_weighted_inivel"] = bool(mass_weighted_inivel)
+
     kwargs["write_restart"] = bool(write_restart)
 
     kwargs["ams"] = bool(ams)
@@ -350,6 +368,9 @@ class ConverterGUI:
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.node_tc_rc_bcs = tk.BooleanVar(value=True)
         self.default_hourglass = tk.BooleanVar(value=True)
+        self.assumed_strain_isolid = tk.StringVar(value="none")
+        self.implicit_rigid_secondary_swap = tk.BooleanVar(value=False)
+        self.mass_weighted_inivel = tk.BooleanVar(value=False)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
@@ -634,6 +655,40 @@ class ConverterGUI:
             variable=self.default_hourglass).grid(
                 row=13, column=3, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="ELFORM -1/-2 (assumed-strain hex) \u2192 Isolid 24 instead of "
+                     "17 \u2014 OFF. 17 IS the locking ELFORM-2 element -1/-2 exist "
+                     "to replace (p.41-104 Remark 13). Opt-in because the arms "
+                     "disagree: ex_03 -21.72 % \u2192 -5.87 % and ex_04 -5.84 % \u2192 "
+                     "-2.83 % improve, but ex_14 -1/-2 go +314/+494 % \u2192 "
+                     "+1373/+2014 %, mainboltaexpl -72.7 \u2192 -81.4 % and "
+                     "ex_27_-2_rigidwall loses the class's only match. Reach "
+                     "22 keys / 18 models, 20 / 17 with the flag",
+            variable=self.assumed_strain_isolid,
+            onvalue="24", offvalue="none").grid(
+                row=29, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT deck: swap an all-rigid SSID contact instead of "
+                     "dropping it \u2014 OFF. Implies the derived Gapmin and refuses "
+                     "to swap without one. bumper (nt 2 and 4): the drop is a "
+                     "NORMAL zero model (IE 0 vs 1.23131e7), the bare swap "
+                     "ERRORs at t 3.0e-4, swap + Gapmin 0.1499 reaches NORMAL "
+                     "131 cycles at IE 6.934e5 (-94.4 %). The verdict cannot "
+                     "move \u2014 that deck's LS-DYNA KE is exactly 0",
+            variable=self.implicit_rigid_secondary_swap).grid(
+                row=30, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*INITIAL_VELOCITY on a PARTLY covered rigid body: write "
+                     "the momentum average (p.28-129 Remark 3) on the /RBODY "
+                     "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
+                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %); the "
+                     "residual is the body's own lumped rotary inertia. One "
+                     "carrier with a reference exists, hence opt-in",
+            variable=self.mass_weighted_inivel).grid(
+                row=31, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -884,6 +939,10 @@ class ConverterGUI:
                 zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 node_tc_rc_bcs=self.node_tc_rc_bcs.get(),
                 default_hourglass=self.default_hourglass.get(),
+                assumed_strain_isolid=self.assumed_strain_isolid.get(),
+                implicit_rigid_secondary_swap=(
+                    self.implicit_rigid_secondary_swap.get()),
+                mass_weighted_inivel=self.mass_weighted_inivel.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -1032,6 +1091,17 @@ class ConverterGUI:
         if not kwargs.get("default_hourglass", True):
             bits.append("defaulted 1-point solids left at Isolid 17 with no "
                         "hourglass control (--no-default-hourglass)")
+        if kwargs.get("assumed_strain_isolid", "none") != "none":
+            bits.append("ELFORM -1/-2 on Isolid "
+                        f"{kwargs['assumed_strain_isolid']} "
+                        "(--assumed-strain-isolid "
+                        f"{kwargs['assumed_strain_isolid']})")
+        if kwargs.get("implicit_rigid_secondary_swap"):
+            bits.append("implicit all-rigid-SSID contacts SWAPPED with the "
+                        "derived Gapmin (--implicit-rigid-secondary-swap)")
+        if kwargs.get("mass_weighted_inivel"):
+            bits.append("partly covered rigid bodies get the momentum-average "
+                        "initial velocity (--mass-weighted-inivel)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

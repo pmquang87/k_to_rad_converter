@@ -11,6 +11,72 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5, part B item B3 —
+  `--assumed-strain-isolid {24,none}`: LS-DYNA's assumed-strain ELFORM −1/−2
+  off the locking hex they exist to replace. Default `none`; 0 movers by
+  default, 20 deck keys on 17 emitted models with the flag.** `*SECTION_SOLID`
+  ELFORM **−1 and −2** are the assumed-strain 8-point hexes of Vol I R17
+  p.41-104 Remark 13 — *"Solid formulations -1 and -2 employ an assumed strain
+  approach to avoid the shear locking behavior seen in formulation 2 elements
+  with poor aspect ratios"* — and k2rad ships them on `/PROP/SOLID` `Isolid`
+  **17**, which IS the locking ELFORM-2 element. With `24` they take HEPH (one
+  Gauss point with physical stabilisation) instead, with LS-DYNA's own default
+  `QH` 0.1 in the `h` cell when the deck states no hourglass card of its own —
+  an inert cell, and said so: `hm_read_prop14.F:358-361` reads an `Isolid` 24's
+  coefficient from `Dn`, which k2rad leaves blank, so the run takes the same
+  0.1 from the `CVIS` default. ELFORM **2 and 3 are not touched** (2 is the
+  fully-integrated element 17 reproduces exactly; 3 is the quadratic hex, for
+  which no Radioss `Isolid` exists). One option, read by one property
+  (`ConvertOptions.assumed_strain_isolid_value`) — the emitter, the per-part
+  hourglass-split emitter, the orthotropic `/PROP/TYPE6` emitter, the
+  `*CONTROL_HOURGLASS` remap note, the `/MAT/LAW115` gate and the
+  `_effective_solid_isolid` predicate that `/INIBRI` and `/FAIL/TAB1` read all
+  take it from there, so a predicate can never disagree with what was written.
+  **Reach, from two independently written scanners: 22 deck keys on 18 emitted
+  models** state ELFORM −1/−2 on the 356-key R14 roster (the census that missed
+  the `*SECTION_SOLID_TITLE` spelling read 21/17); the flag MOVES **20 keys on
+  17 models**, because `ex_12_solid_elform_{-1,-2}` already lands on 24 through
+  its own `*HOURGLASS` IHQ 6 overlay — verified byte-identical with and without
+  the flag on the real deck, as is `ex_03` with the flag off against a pristine
+  `76bc193` checkout. **Opt-in because the arms disagree**, each measured at
+  nt 4 against its own LS-DYNA reference (17 → 24):
+  `ex_03_solid_elform_-1_4x6x4_mesh` −21.72 % → **−5.87 %** and
+  `ex_04_solid_elform_-1` −5.84 % → −2.83 % improve;
+  `ex_14_solid_elform_-1/-2` go +313.9/+494.0 % → +1373/+2014 %,
+  `mainboltaexpl` −72.72 % → −81.40 % at 5× the wall time, and
+  `ex_27_solid_elform_-2_rigidwall` LOSES the class's only campaign `match`
+  (ke +9.75 % → +15.43 %). Two better, four worse.
+  Three claims in the default-ON `Isolid`-17 warning were **corrected**, each
+  re-measured at this branch's head:
+  (1) its remedy said *"Refine through the thickness"*, which is exactly
+  backwards — on a self-built bending coupon (L 120 × b 20 × h 20, E 210000,
+  ν 0.3, P 1000; Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged
+  3-D 0.2072–0.2074) `Isolid` 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at
+  1/2/4/8 elements through the depth, i.e. **+19.7 % → −28.8 %, worse with
+  refinement**, while 24 holds −2.9 % over the same sweep; the remedy is now to
+  refine ALONG the beam so the hexes stay near aspect ratio 1 in the bending
+  plane;
+  (2) its `24 / 18 / 14` figures were a PRE-round-4 column — re-run here on
+  `ex_03` at nt 4 and identically at nt 2, they are **−5.87 / −5.23 / −6.33 %**
+  (internal energy 163900 / 165000 / 163100 against the LS-DYNA reference
+  174114, starter `SOLID FORMULATION FLAG` 24 / 18 / 14 echoed on each arm);
+  (3) it did not say that **dyna2rad makes the same choice for −1**
+  (`convertprops.cxx:398-402`: −1 → 24, 2/3 → 18; −2 is not in its table and
+  falls to the `/DEF_SOLID` default). The retracted spellings are pinned out of
+  every shipped text by a regex guard whose companion feeds it each one.
+  ROADMAP item 16 is **CLOSED in the opposite direction**: the `Isolid`-24
+  overlay arm is not a bigger substitution than 17, it is the SMALLEST measured
+  one — so an ELFORM −1/−2 section that lands on 24 (through the flag or
+  through the deck's own IHQ 6) now gets a short warning of its own instead of
+  silence, and round 4's test that asserted that silence was rewritten to
+  assert the new sentence.
+  Second effect, named because it is not obvious: with the flag ON an ELFORM
+  −1/−2 part no longer satisfies `writer/materials._exact_all_ip`, which gates
+  a `/FAIL/TAB1` `Ifail_so = 2` on the element really having 8 integration
+  points — such a deck erodes on the FIRST failed point (`Ifail_so` 2 → 1,
+  pinned on a `*MAT_TABULATED_JOHNSON_COOK` probe that reaches the branch) and
+  its own warning names the flag as the cause.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5, part A items A2 and A3 — two
   `*CONSTRAINED_*` keywords LS-DYNA's own manual says are nodal rigid bodies,
   dropped since the first release.** Both were absent from `handlers.HANDLERS`
@@ -446,7 +512,9 @@ Prior history (before this changelog was introduced) is summarized in the
     zero. Corrected to this branch's campaign rows.) No Radioss `Isolid`
     reproduces −1/−2 (24 / 18 / 14 give
     −5.75 / −5.18 / −6.27 % on ex_03 and REGRESS four other decks —
-    `ex_27_solid_elform_-2_rigidwall` loses the population's only `match`), and
+    `ex_27_solid_elform_-2_rigidwall` loses the population's only `match`;
+    **re-measured in round 5 at −5.87 / −5.23 / −6.33 %** — those three were
+    themselves a pre-round-4 column, see the round-5 B3 entry), and
     `Icpre` cannot help: `hm_read_prop14.F:296-303` already FORCES `Icpre = 1`
     on `Isolid 17`. `ELFORM 3` lands there by the same default —
     `ex_14_solid_elform_3` reads −99.65 %. Since the ELFORM siblings of these

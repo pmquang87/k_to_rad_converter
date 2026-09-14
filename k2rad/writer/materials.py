@@ -3067,7 +3067,12 @@ def _resolve_mat_deshpande_fleck(state: ConversionState) -> None:
             if part.mid != mat.mid or pid not in solid_pids:
                 continue
             sec = state.sec_solids.get(part.secid if part.secid > 0 else pid)
-            isolid = _elform_to_isolid(sec.elform) if sec else 17
+            # The same option the property emitter reads: with
+            # --assumed-strain-isolid 24 an ELFORM -1/-2 part is NOT on the
+            # unrunnable 17 and must not be reported as if it were.
+            isolid = (_elform_to_isolid(
+                sec.elform, state.options.assumed_strain_isolid_value)
+                if sec else 17)
             if isolid == 17:
                 routed.append(pid)
             elif 2 < isolid < 21:
@@ -6780,13 +6785,34 @@ def _resolve_mat224_failure(state: ConversionState, mat: MatTabulatedJC,
                     "integration points fail — exactly LS-DYNA's 8-of-8 "
                     "rule (fail_tab_s.F:258).")
             else:
+                # --assumed-strain-isolid 24 reaches this branch from the
+                # side: it moves an ELFORM -1/-2 part off Isolid 17, so the
+                # element no longer HAS 8 integration points and the 8-of-8
+                # claim above stops being exact. The predicate reads the
+                # option through _effective_solid_isolid; the sentence names
+                # it so the user is not left wondering why a flag about
+                # element formulation changed when the deck erodes.
+                def _assumed_strain_sec(pid: int) -> bool:
+                    sec = state.sec_solids.get(state.parts[pid].secid)
+                    return sec is not None and sec.elform in (-1, -2)
+
+                by_flag = (state.options.assumed_strain_isolid_value == 24
+                           and count == 8
+                           and any(_assumed_strain_sec(pid)
+                                   for pid in mat_solid_pids))
                 state.warn(
                     f"{kw} mid={mat.mid}: NUMINT={count} on SOLID part(s) "
                     "— /FAIL/TAB1's Ifail_so has no integration-point "
                     "count (1 = delete on first failed IP; 2 = all IPs "
                     "must fail, exact only when NUMINT equals the "
                     "element's IP count), so solids erode EARLIER than "
-                    f"LS-DYNA's {count}-IP rule.")
+                    f"LS-DYNA's {count}-IP rule."
+                    + (" On this deck that is a consequence of "
+                       "--assumed-strain-isolid 24: it puts the ELFORM -1/-2 "
+                       "part(s) on the ONE-point Isolid 24, where the 8-of-8 "
+                       "rule cannot be reproduced at all. Drop the flag to "
+                       "keep Isolid 17 and the exact Ifail_so = 2."
+                       if by_flag else ""))
 
 
 def _emit_mat_law109(mat: MatTabulatedJC) -> List[str]:
