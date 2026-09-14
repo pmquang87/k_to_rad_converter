@@ -2476,6 +2476,84 @@ def _warn_type43_pairings(state: ConversionState, secid: int,
             "the nodes). Expect softer peel response on shell-bonded joints.")
 
 
+#: LS-DYNA ``*SECTION_SOLID`` ELFORMs that k2rad lands on ``Isolid`` 17 while
+#: they are NOT the ELFORM-2 element ``Isolid`` 17 reproduces. ``-1`` and ``-2``
+#: are the assumed-strain hexes that exist precisely to remove ELFORM 2's shear
+#: locking (Vol I R17 p.41-104 Remark 13); ``3`` is the fully-integrated
+#: quadratic hex with nodal rotations. All three reach ``Isolid`` 17 through
+#: ``_elform_to_isolid``'s ``.get`` default — the round-3 hourglass remap is
+#: gated to ``_ONE_POINT_SOLID_ELFORMS``, which none of them is — so the
+#: emitted deck carries no trace of the distinction at all.
+#:
+#: They stay at 17 only where NO per-part ``*HOURGLASS`` overlay applies. When
+#: one does, the part takes the split ``/PROP/SOLID`` at whatever ``Isolid``
+#: the overlay selects, and the warning below (gated on ``isolid != 17``) is
+#: silent by design. MEASURED on the R14 roster:
+#: ``ex_12_solid_elform_{-1,-2,3}`` carry an explicit ``*HOURGLASS`` IHQ 6 and
+#: emit ``Isolid`` **24**, so two of the roster's ELFORM -1/-2 carriers and one
+#: of its two ELFORM-3 carriers take that arm. That substitution — an 8-point
+#: assumed-strain hex becoming a 1-POINT ``Isolid`` 24 (``sgrtails.F:1107-1123``)
+#: — is at least as large as the one this warning describes; naming it is a
+#: round-5 item, because the Isolid-24 arm is also the one that keeps
+#: ``ex_27_-2_rigidwall``'s match and so cannot be moved on a comment alone.
+_ASSUMED_STRAIN_ELFORMS = frozenset({-1, -2, 3})
+
+
+def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> None:
+    """``ELFORM -1/-2/3`` that ships on ``Isolid`` 17, once per ``*SECTION_SOLID``.
+
+    It fires at the line that WRITES the property, so the predicate is the
+    emitted ``Isolid``, not a re-derivation of it. Deduped per section by
+    construction: ``_make_properties`` walks ``state.sec_solids`` once.
+    """
+    if sec is None or sec.elform not in _ASSUMED_STRAIN_ELFORMS or isolid != 17:
+        return
+    if sec.secid in state.warned_assumed_strain_secids:
+        return
+    state.warned_assumed_strain_secids.add(sec.secid)
+    if sec.elform == 3:
+        state.warn(
+            f"*SECTION_SOLID {sec.secid} ELFORM 3 is LS-DYNA's FULLY "
+            "INTEGRATED quadratic 8-node hex with nodal rotations. It lands on "
+            "/PROP/SOLID Isolid 17 by _elform_to_isolid's default - the same "
+            "cell an ELFORM 2 gets - so the converted deck carries no trace of "
+            "the quadratic formulation, and the round-3 default-hourglass "
+            "remap cannot help (it is gated to the 1-point ELFORMs 0/1/5/6/7). "
+            "MEASURED: ex_14_solid_elform_3 reads ie_dev -99.65 % against its "
+            "own LS-DYNA reference. There is no Radioss Isolid for it; refine "
+            "the mesh, or restate the section as ELFORM 2 if the locked answer "
+            "is what you want.")
+        return
+    state.warn(
+        f"*SECTION_SOLID {sec.secid} ELFORM {sec.elform} is LS-DYNA's "
+        "ASSUMED-STRAIN 8-point hex, which exists to remove the shear locking "
+        "of ELFORM 2 (Vol I R17 p.41-104 Remark 13: 'Solid formulations -1 and "
+        "-2 employ an assumed strain approach to avoid the shear locking "
+        "behavior seen in formulation 2 elements with poor aspect ratios'). "
+        "Radioss /PROP/SOLID Isolid 17 IS the locking ELFORM-2 element: "
+        "measured against this corpus's own byte-identical sibling pair, "
+        "ex_03_solid_elform_-1_4x6x4_mesh reads -21.72 % against its own "
+        "LS-DYNA reference and -0.103 % against the ELFORM-2 one; ex_04, four "
+        "times finer, -5.84 % / -0.006 %. (Those four are this branch's own "
+        "campaign rows. The round shipped -21.66 / -0.030 / -5.78 / +0.055, "
+        "which is the PRE-round-4 column: A1's /IMPL/QSTAT/DTSCAL moved all "
+        "four, one of them by a factor 3.4 and one across zero.) "
+        "No Radioss Isolid reproduces -1/-2: "
+        "24 / 18 / 14 measure -5.75 / -5.18 / -6.27 % on ex_03 and REGRESS "
+        "four other corpus decks (ex_27_solid_elform_-2_rigidwall loses the "
+        "population's only match, ke +9.75 % -> +15.43 %; mainboltaexpl "
+        "-72.7 -> -81.4 % IE at 5x the wall time; ex_14_solid_elform_-1/-2 "
+        "+314/+494 % -> +1373/+2014 %). Icpre cannot help - "
+        "hm_read_prop14.F:296-303 already FORCES Icpre = 1 on Isolid 17 (the "
+        "starter echo prints CONSTANT PRESSURE FLAG = 1) - and Isolid 19 "
+        "diverges by nine orders. Refine through the thickness, or restate the "
+        "section as ELFORM 2 if the locked answer is what you want. NOTE: the "
+        "ELFORM siblings of these examples convert to ONE file "
+        "(ex_03_solid_elform_{-1,2,18} share a byte-identical _0000.rad), so "
+        "this warning is the only thing that distinguishes -1/-2 from 2 in the "
+        "converted deck.")
+
+
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
                      itetra10: int, istrain: int,
                      hcoef: Optional[float] = None,
@@ -2924,6 +3002,7 @@ def _make_properties(state: ConversionState) -> List[str]:
             # sgrtails.F:1387-1412 (WARNING 1775), i.e. the total-strain
             # formulation these parts were given is taken away again.
             state.ismstr10_solid_secids.add(sec.secid)
+        _warn_assumed_strain_elform(state, sec, isolid)
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
@@ -4762,6 +4841,13 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                     "unchanged.")
             if ismstr == 10:
                 state.ismstr10_solid_pids.update(siblings)   # see above
+            # The SECOND /PROP/SOLID emission site, and the reason the warning
+            # is called from the write line rather than from one place that
+            # "knows" the Isolid: on a deck whose *SECTION_SOLID is split out
+            # per part by the hourglass overlay, this is the ONLY /PROP/SOLID
+            # in the file — ex_27_solid_elform_-2_rigidwall emits
+            # /PROP/SOLID/90001 at Isolid 17 here and nothing at all above.
+            _warn_assumed_strain_elform(state, sec, isolid)
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:

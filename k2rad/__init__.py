@@ -21,7 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
-from .writer.common import SHELL_FORMULATIONS
+from .writer.common import AUTO_IMPLICIT_STUB_TITLE, SHELL_FORMULATIONS
 from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active)
@@ -98,7 +98,7 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
     state.contacts_single.append(
         ContactAutoSingle(
             inter_id=inter_id,
-            title="auto_implicit_stabilization_self_contact",
+            title=AUTO_IMPLICIT_STUB_TITLE,
             ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
             # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
             # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
@@ -217,7 +217,16 @@ def convert(
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
+    derived_gapmin: bool = False,
+    derived_gapmin_factor: float = 0.005,
+    rigid_secondary_swap: bool = True,
+    deformable_to_rigid: bool = True,
     fixpoint_count: int = 0,
+    qstat_dtscal: Union[str, float] = 10.0,
+    arclength_riks: bool = False,
+    discrete_offset: bool = True,
+    spring_token_mass_compensation: bool = True,
+    tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
@@ -294,6 +303,47 @@ def convert(
         Fraction of the measured clearance used as the suggested Gapmin (default
         0.8). <1 keeps the gap below the clearance (0 initial penetration);
         near 1 still engages promptly.
+    derived_gapmin : bool
+        Write an explicit Gapmin on every ``/INTER/TYPE7`` whose MAIN surface is
+        SOLID segments only and whose Gapmin would otherwise be 0 — the
+        population where the starter derives ``0.1 ×`` the smallest main-surface
+        segment side itself (``i7sti3.F:1055-1063``) while LS-DYNA's own offset
+        on a solid segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17
+        p.11-101/103). **Off by default**, with a default-ON warning naming the
+        derived value on every carrier. MEASURED on ``twobar`` (10 mm bars,
+        derived ``GAP MIN`` 1.0): the starter's gap costs +1151 % internal
+        energy against the LS-DYNA reference 3036.17 where this rule writes
+        ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
+        the only other carrier with a measured arm (``sphere1``, where it
+        writes 0.02921 and internal energy goes −1.66 % → −7.77 % at 4.1× the
+        cycles), and 13 of the class's 15 interfaces on the 356-key R14 roster
+        have no measured arm at all — which is why it is opt-in. A press-fit
+        ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
+        stabilization stub are excluded.
+    derived_gapmin_factor : float
+        Fraction of the smallest main-surface segment side used by
+        ``derived_gapmin`` (default 0.005 — measured; 0.01 reads +14.45 % on
+        ``twobar`` and must not be used).
+    rigid_secondary_swap : bool
+        On an EXPLICIT deck, rescue a ``*CONTACT`` whose SECONDARY (SSID) side
+        is WHOLLY RIGID instead of losing the whole interface: the roles are
+        swapped when the MSID side carries deformable nodes, and the rigid
+        secondary group is kept when BOTH sides are wholly rigid. **On by
+        default.** ``/INTER/TYPE7`` is an asymmetric node-to-segment contact, so
+        the deformable side must supply the tracked nodes. MEASURED:
+        ``sphere1`` internal energy 0 (−100 %) → 77 830 (−1.66 %) against the
+        LS-DYNA reference 79 147.3; ``EXP_SC_CONTACT_INTERFERENCE`` −100 % →
+        −42.8 %; ``boundary_prescribed_motion.blow-mold`` from a diverging
+        241 934-cycle run at t = 0.0061 of 0.015 to NORMAL TERMINATION at
+        t = 0.015 in 25 675 cycles. IMPLICIT decks keep the drop either way.
+    deformable_to_rigid : bool
+        Honour ``*DEFORMABLE_TO_RIGID`` (the plain spelling): the named part is
+        rigid FROM ``t = 0`` and is emitted as an ``/RBODY`` through the same
+        path a ``*MAT_RIGID`` part takes, keeping its own material (Vol I R17
+        p.18-1). **On by default.** MEASURED on ``pend.imp``: the deck's energy
+        error goes 99.9 % → −0.0 % (internal energy 5.162e5 → 5.901e-06 against
+        the LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA takes
+        9 479.
     fixpoint_count : int
         Number of evenly spaced /IMPL/DT/FIXPOINT milestones the implicit
         time-step controller is forced to land on (k/N × the run end, for
@@ -308,13 +358,102 @@ def convert(
         TIMESTEP LIMIT **`` reach NORMAL TERMINATION without the card
         (``ex_01`` x3 at cycle 20, ``ex_14`` x4 at cycle 33, ``ex_15`` x3 at
         cycle 38); ``ex_01_thin_shell_elform_2`` goes from ERROR at
-        ``t = 0.105`` to ``t = 1.000`` at IE −13.7 % against its LS-DYNA
-        reference, and ``ex_14_solid_elform_1`` from a 99.9 % energy error to
-        −3.1 %. Three currently-NORMAL implicit controls do not regress and
+        ``t = 0.105`` to ``t = 1.000`` at IE −14.12 % against its LS-DYNA
+        reference (the COMBINED arm — the −13.7 % this entry used to quote was
+        measured before ``--qstat-dtscal 10`` reached the same deck), and
+        ``ex_14_solid_elform_1`` from ERROR TERMINATION to
+        NORMAL at cycle 33, engine energy error −0.7 % (the −3.1 % this entry
+        used to quote is the ``--no-default-hourglass`` arm of the same deck,
+        measured before the hourglass default reached it). Three
+        currently-NORMAL implicit controls do not regress and
         two improve. A coarser grid is NOT the fix: at 10 points ``ex_14`` and
         ``ex_15`` terminate at a 99.9 % energy error. The cost of 0 is fewer
         output states (15 cycles become 8 on the controls) — set a count to
         get the milestones back. Implicit decks only.
+    qstat_dtscal : str or float
+        The ``/IMPL/QSTAT/DTSCAL`` inertia-stabilization scale written on a
+        QUASI-STATIC implicit deck (one with no
+        ``*CONTROL_IMPLICIT_DYNAMICS``); ``"none"`` emits no ``/IMPL/QSTAT``
+        card at all. **Default 10** — changed from 0.1 on 2026-09. The
+        stabilization added to the stiffness diagonal is
+        ``M/((1+alpha)*beta*(DTSCAL*dt)^2)`` (``imp_dyna.F:351-355``), so it
+        grows as ``1/DTSCAL^2`` AND as ``1/dt^2``: at 0.1 it was 100x the
+        Radioss default (``SCAL_DTQ = 1``, ``freimpl.F:135``) and every
+        auto-step cut stiffened the tangent further. LS-DYNA's standard static
+        implicit adds none at all. MEASURED at nt 3 AND nt 4 against each
+        deck's own LS-DYNA ``glstat``: ``4.2.frf.cant-1`` goes from 4 cycles
+        (its pre-round CAMPAIGN ROW — a quiet-machine master repeat never
+        leaves cycle 0; either way the arm advances nothing)
+        and an ERROR to 104 cycles, ``t = 1.000``, IE 7922 against the
+        reference 7946.31 (−0.31 %); ``tensile2`` +7.36 %;
+        ``6.5.tbl.psd.prepressure-1`` +0.03 %; ``doorbeam`` NORMAL (its
+        +380 % is a separate, named ``/INTER/TYPE25``-under-implicit drop, not
+        a match). The cost is ``ex_02_thick_shell_elform_{2,3,5}`` — 3 deck
+        keys on ONE emitted file, all three ``not_comparable`` BOTH WAYS —
+        going ``normal`` → ``timeout``; ``--qstat-dtscal 0.1`` reproduces the
+        pre-round-4 file byte for byte on that family. ``"none"``
+        is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
+        at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
+        validated 0.05 and ignores this.
+    arclength_riks : bool
+        Emit ``/IMPL/DT/3`` (RIKS arc-length continuation) in place of
+        ``/IMPL/DT/2`` when ``*CONTROL_IMPLICIT_SOLUTION`` asks for LS-DYNA's
+        arc-length method — the manual's own rule (Vol I R17 p.12-354 and
+        p.12-358): ``6 <= NSOLVR <= 9``, or ``NSOLVR = 12`` with card-3
+        ``ARCMTH = 3``. ``ARCCTL`` is NOT part of the predicate — p.12-358
+        defines it as the arc-length CONTROLLING NODE ID whose 0 means
+        *"Generalized arc length method"*, and card 3 is ignored outright
+        unless the method is already active. (An ``ARCCTL != 0`` clause
+        shipped first and is retracted: it made ``ex_06_beam_elform_1`` a
+        carrier, and that deck's own LS-DYNA ``d3hsp`` shows plain BFGS.)
+        Roster reach: **2 keys**. **Off by default**; the request is warned
+        about either way. It buys the load path, not the answer: measured at
+        nt 3 AND nt 4 on both carriers (``error_engine`` either way) against
+        this branch's own flag-off baseline, ``ex_07_beam_elform_1`` walks
+        from ``t = 0.3004`` to ``t = 1.000`` at −1.72 % of its reference but
+        still exits ERROR on the last increment, and
+        ``ex_05_beam_elform_3_&_6`` fails in ~2 s without the flag and with
+        it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
+        ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
+        (``lectur.F:3523-3532``).
+    discrete_offset : bool
+        Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
+        *"a displacement or rotation at time zero … a positive offset on a
+        translational spring will lead to a tensile force being developed at
+        time zero"*). **On by default.** Radioss spring deflection is purely
+        geometric (``r1def3.F:206``) and ``/PROP/TYPE4`` has no offset cell,
+        so the exact restatement is ``f_RAD(d) = f_LS(d + OFFSET)``: the force
+        function's ABSCISSAE are shifted by ``−OFFSET`` (ordinates untouched)
+        and an ``/INISPRI/FULL`` carries the pre-stretch energy
+        ``EI = ½·f_LS(OFFSET)·OFFSET``. MEASURED, together with
+        ``spring_token_mass_compensation``, on the only two carriers of 885
+        roster decks: ``ex_17_spring_elform_0`` IE +0.0074 % / KE +0.039 % and
+        ``ex_18_spring_elform_0`` +0.0064 % / −0.015 %, where the shipped arm
+        was a strict ZERO model on both.
+    spring_token_mass_compensation : bool
+        Subtract k2rad's own artificial spring mass from the ``/ADMAS`` of the
+        nodes it lands on. **On by default.** LS-DYNA discrete elements are
+        massless, but ``hm_read_prop04.F:136-142`` refuses a ``/PROP/TYPE4``
+        ``MASS <= 1e-15`` (ERROR 229), so k2rad writes a token ``1e-4`` and
+        ``rinit3.F:1926``/``:1937-1939`` puts HALF of it on EACH end node, per
+        element. Measured ALONE it is inert on every deck where it can be
+        measured; it is load-bearing inside the ``discrete_offset`` bundle,
+        where it turns ``ex_17``'s +10.20 % / −99.27 % into +0.0074 % /
+        +0.039 %. It never writes a non-positive ``/ADMAS``.
+    tgmult_imptemp : bool
+        Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
+        an ``/IMPTEMP`` holding the closed-form adiabatic solution
+        ``T(t) = T0 + (TGMULT/(ρ·Cp))·∫f dt`` over the parts' own nodes. **On by
+        default**, and gated hard: it fires only when the deck states no OTHER
+        temperature driver, because ``/IMPTEMP`` is a hard Dirichlet reset
+        applied every cycle (``fixtemp.F:180-199``) and would overwrite a
+        conduction solution rather than add to it. MEASURED on
+        ``thermal/thermal-stress``: the free-expansion displacement of node 2
+        goes from exactly 0.0 to 1.49531e-04 mm at ``t = 2.994002`` -
+        +0.21 % against the LS-DYNA ``nodout``'s NEAREST SAMPLE
+        (1.49216e-04 at ``t = 2.99``) and +0.007 % against the closed form at
+        the same time - at 406 580 cycles and 0 ERROR / 0 WARNING. Quote the DISPLACEMENT — that deck's LS
+        reference energies are structural zeros.
     deformable_contact_recipe : bool
         Apply the validated stabilization recipe for an implicit deck with
         deformable-vs-deformable contact (e.g. force control through a
@@ -600,7 +739,16 @@ def convert(
         tet10_to_tet4=tet10_to_tet4,
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
+        derived_gapmin=derived_gapmin,
+        derived_gapmin_factor=derived_gapmin_factor,
+        rigid_secondary_swap=rigid_secondary_swap,
+        deformable_to_rigid=deformable_to_rigid,
         fixpoint_count=fixpoint_count,
+        qstat_dtscal=qstat_dtscal,
+        arclength_riks=arclength_riks,
+        discrete_offset=discrete_offset,
+        spring_token_mass_compensation=spring_token_mass_compensation,
+        tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",

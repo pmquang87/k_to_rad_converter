@@ -1017,16 +1017,16 @@ censuses are `OPENRADIOSS_REPORT.md` §0.3/0.4/0.7. Of 356 decks, 348 converted,
 59 then failed in the STARTER and 49 in the engine. The ranking below is the
 report's own (§0.7), with what the R14 TRIAGE ROUND 1 batch closes.
 
-| # | class | decks | closed by round 1 | round 2 | round 3 |
-|--:|---|--:|---|---|---|
-| 1 | `/PART` → `/MAT` id never emitted (starter ERROR 179) | 29 | **22** — the thermal-only stand-in, `*MAT_004`, `*MAT_CWM`, `*MAT_010`, `*MAT_014`; 7 are deliberate refusals BY NAME (`*MAT_102`, `*MAT_090` ×2, `*MAT_031`, `*MAT_148`, `*MAT_002` ANIS) and 2 are the named `*MAT_THERMAL_CWM` weld seam | — | — |
-| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own | **the SUPPORT half.** `*NODE` TC/RC (part A) sits under 44 of the class's rows and the `*SET_*` range spellings (part B) under 25 more. Measured: `taylor1` 0.000 → IE 42 590 (+2.4 % vs 41 588.6), `plate.typ13` 0.0 → a contact carrying 4151 of elastic contact energy. **Re-census AFTER the campaign re-run, not before** | **the LOAD PATH and the ELEMENT halves.** Item A registers 16 `*CONTACT` spellings that sit under 18 of the 30 STRICT IE-collapse rows; item B gives 46 more decks the hourglass control LS-DYNA defaults to; item C re-points the 7 rigid-body velocity carriers. **Re-census after the campaign re-run** — and state WHICH criterion: `analyze_pass1.py e` STRICT (`|or_ie| <= 1e-15 < |ls_ie|`, status normal) is **30 of 266** at `b3807bd`, `ie_dev_pct <= -99` on normals is **46**, over all statuses **68**, and the report's §0.15 headline "45" is a MOVERS carry-forward, not a census |
-| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START | partly: 27 of the class carry `*NODE` TC/RC and 5 more (`ex_06`, `ex_08` ×3, `ex_09`, `ex_10`) a `*BOUNDARY_SPC_SET` on a `_GENERATE` set. `ex_03` went from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL at t = 1.0. **The residue is the `/IMPL` recipe item and must be re-measured after BOTH parts, or the attribution is unreadable** | **partly, and the rest is censused rather than guessed.** Item F removes `/IMPL/DT/FIXPOINT` from the default output: measured, ten decks that died `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT` reach NORMAL TERMINATION (`ex_01` x3, `ex_14` x4, `ex_15` x3), and three currently-NORMAL controls do not regress. The residue is grouped by FAMILY, with its mechanism per family, in *The implicit residue after round 3* below |
-| 4 | `nvh` frequency-domain family (7 NORMAL at cycle ≤ 1, 6 stall at cycle 0) | 13 | no — the #110 class | the modal CHAIN is fixed for `6.2.PSD` (f1 110.5541 Hz on an exact matrix, +0.09 % vs its `eigout`), but that is `tools/`, not the `.rad` — the family's engine behaviour is unchanged | unchanged, and now separated from row 3 by measurement: the 6 cycle-0 stalls are SSD / ERP / PSD frequency-domain requests, not an `/IMPL` recipe problem — OpenRadioss has no frequency-domain solver at all |
-| 5 | `/MAT` density ≤ 0 (ERROR 683, 8) + beam property (ERROR 314/315, 8) | 16 | **14** — all 8 density decks and the 6 ELFORM-3 truss decks | — | — |
-| — | `/MAT/LAW51` (ERROR 99): 4 `Bunreacted`, 5 submaterial | 9 | **8** — `point_source.k` stays refused (`*MAT_GAS_MIXTURE`) | — | — |
-| — | singles: ERROR 156, 580, 581 | 3 | **3** | — | — |
-| — | starter ERROR 611 (zero-normal secondary node) | 2 | no | **2** — both start at 0 errors now and move `error_starter` → `error_engine` | — |
+| # | class | decks | closed by round 1 | round 2 | round 3 | round 4 |
+|--:|---|--:|---|---|---|---|
+| 1 | `/PART` → `/MAT` id never emitted (starter ERROR 179) | 29 | **22** — the thermal-only stand-in, `*MAT_004`, `*MAT_CWM`, `*MAT_010`, `*MAT_014`; 7 are deliberate refusals BY NAME (`*MAT_102`, `*MAT_090` ×2, `*MAT_031`, `*MAT_148`, `*MAT_002` ANIS) and 2 are the named `*MAT_THERMAL_CWM` weld seam | — | — | — |
+| 2 | IE collapse — NORMAL run, `or_ie_final ≈ 0` against a real LS reference | 36 | no — a physics item of its own | **the SUPPORT half.** `*NODE` TC/RC (part A) sits under 44 of the class's rows and the `*SET_*` range spellings (part B) under 25 more. Measured: `taylor1` 0.000 → IE 42 590 (+2.4 % vs 41 588.6), `plate.typ13` 0.0 → a contact carrying 4151 of elastic contact energy. **Re-census AFTER the campaign re-run, not before** | **the LOAD PATH and the ELEMENT halves.** Item A registers 16 `*CONTACT` spellings that sit under 18 of the 30 STRICT IE-collapse rows; item B gives 46 more decks the hourglass control LS-DYNA defaults to; item C re-points the 7 rigid-body velocity carriers. **Re-census after the campaign re-run** — and state WHICH criterion: `analyze_pass1.py e` STRICT (`|or_ie| <= 1e-15 < |ls_ie|`, status normal) is **30 of 266** at `b3807bd`, `ie_dev_pct <= -99` on normals is **46**, over all statuses **68**, and the report's §0.15 headline "45" is a MOVERS carry-forward, not a census | **the CONSTRAINT and the RIGID-BODY halves.** B1 makes a `*DEFORMABLE_TO_RIGID` part rigid at t = 0 (4 keys / 2 models; `pend.imp`'s ENGINE energy-error column 99.9 % → −0.0 %, KE −0.017 % against the reference — its `ie_dev` row stays a `deviation` at +17.19 %, both energies being structural zeros), B2 restores the load path on every explicit all-rigid-SSID contact (4 keys / 5 interfaces swapped — `forging_A` ×2, `sphere1`, `blow-mold`, `EXP_SC_CONTACT_INTERFERENCE` — **plus 3 keys / 3 interfaces KEPT on 2 emitted models** (`mat_spring.belted-dummy`, `pend.imp`, `pendulum-ii/pendulum`), of which the two pendulums are created by B1 in this same round; the tables first said "1 key kept", which is master's PRE-round drop class and not the shipped reach. The KEEP is load-bearing on the round's own headline deck: with `--no-rigid-secondary-swap`, `pend.imp` emits 0 `/INTER` where master emits 1, so B1 shipped without B2's KEEP would DELETE that interface), and part A's items close three strict zero models (`ex_17`, `ex_18`, `thermal-stress`). Strict zero models 9 → 5 with `bumper`, 2 icfd and 2 ALE named. **Re-census after the campaign re-run** |
+| 3 | implicit engine will not advance (`TIMESTEP LIMIT` / `LOADING DATA` / indefinite stiffness) | 37 | no — the `/IMPL` recipe item; expect the 8 class-3 decks to reach it now that they START | partly: 27 of the class carry `*NODE` TC/RC and 5 more (`ex_06`, `ex_08` ×3, `ex_09`, `ex_10`) a `*BOUNDARY_SPC_SET` on a `_GENERATE` set. `ex_03` went from a TIMESTEP-LIMIT death at t = 0.22 to NORMAL at t = 1.0. **The residue is the `/IMPL` recipe item and must be re-measured after BOTH parts, or the attribution is unreadable** | **partly, and the rest is censused rather than guessed.** Item F removes `/IMPL/DT/FIXPOINT` from the default output: measured, ten decks that died `SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT` reach NORMAL TERMINATION (`ex_01` x3, `ex_14` x4, `ex_15` x3), and three currently-NORMAL controls do not regress. The residue is grouped by FAMILY, with its mechanism per family, in *The implicit residue after round 3* below | **partly.** A1 raises `/IMPL/QSTAT/DTSCAL` 0.1 → 10 on all 51 carriers (`4.2.frf.cant-1` 4 cycles + ERROR → 104 cycles at t = 1.000, IE −0.31 %), A2 adds the RIKS `/IMPL/DT/3` behind `--arclength-riks`, and the four `thermal/welding-new` rows are re-verdicted not-comparable BY CONSTRUCTION. `bumper` stays a NORMAL zero model by the IMPLICIT gate on B2, NAMED. The per-family residue table below is updated in place |
+| 4 | `nvh` frequency-domain family (7 NORMAL at cycle ≤ 1, 6 stall at cycle 0) | 13 | no — the #110 class | the modal CHAIN is fixed for `6.2.PSD` (f1 110.5541 Hz on an exact matrix, +0.09 % vs its `eigout`), but that is `tools/`, not the `.rad` — the family's engine behaviour is unchanged | unchanged, and now separated from row 3 by measurement: the 6 cycle-0 stalls are SSD / ERP / PSD frequency-domain requests, not an `/IMPL` recipe problem — OpenRadioss has no frequency-domain solver at all | unchanged — still queue row 4, no frequency-domain solver |
+| 5 | `/MAT` density ≤ 0 (ERROR 683, 8) + beam property (ERROR 314/315, 8) | 16 | **14** — all 8 density decks and the 6 ELFORM-3 truss decks | — | — | — |
+| — | `/MAT/LAW51` (ERROR 99): 4 `Bunreacted`, 5 submaterial | 9 | **8** — `point_source.k` stays refused (`*MAT_GAS_MIXTURE`) | — | — | — |
+| — | singles: ERROR 156, 580, 581 | 3 | **3** | — | — | — |
+| — | starter ERROR 611 (zero-normal secondary node) | 2 | no | **2** — both start at 0 errors now and move `error_starter` → `error_engine` | — | — |
 
 **What round 3 closes, by class and deck count** (measured on the branch;
 the campaign RE-RUN and the two-half corpus sweep are the PR's own gates and
@@ -1078,6 +1078,17 @@ from a list rather than a re-census:
   interface at all, so the stub's own stated premise (the implicit solver
   segfaults without one) does not hold there; the injected probe `/RBODY`
   covers the real trigger.
+  **CLOSED in round 4, measured-not-worth-fixing.** The forced-stub arm on
+  `bumper` — the one deck the predicate reaches — ERRORs at `t = 1e-4` against
+  the shipped NORMAL zero model at `t = 0.05`, so making the predicate faithful
+  would REPLACE a NORMAL termination with an error termination on the only
+  carrier. The wider class is inert: **53 `/INTER/TYPE7` rows on the roster
+  carry the injected stub title `auto_implicit_stabilization_self_contact`**,
+  and five of them (`ex_14_solid_elform_1`, `ex_04_solid_elform_2`,
+  `ex_03_solid_elform_2`, `ex_02_thick_shell_elform_2`,
+  `ex_27_..._penalty_implicit` — three distinct emitted models) were measured
+  with the stub DELETED and are byte-inert in the iterates. The architectural
+  fix (re-evaluate after `_make_interfaces`) buys nothing on this corpus.
 - **An explicit `Gapmin` for SOLID-SEGMENT `/INTER/TYPE7` interfaces —
   AUTOMATIC spellings included.** The scope is the ELEMENT TYPE, not the
   spelling: k2rad writes `Igap 0` with `Gapmin 0` on every `/INTER/TYPE7` it
@@ -1085,10 +1096,23 @@ from a list rather than a re-census:
   `ex_26_thin_shell_elform_16` as well as on `pend.imp`), and
   `i7sti3.F:1055-1063` then takes the mesh-size branch `GAP = 0.1 * GAPMX`
   whenever no shell thickness was accumulated — `DXM` only ever takes `THK`
-  (`i7sti3.F:499/506/591`), so a solid-segment main surface never reaches the
+  (`i7sti3.F:506/592/762/845`), so a solid-segment main surface never reaches the
   thickness branch. Round 3 only made MORE decks reach a pre-existing
-  behaviour. The question for round 4 is whether `--auto-gapmin` should become
-  the default for that population. `twobar`'s +1151 % internal energy is NOT the two-way loss the
+  behaviour. **ANSWERED in round 4, and the answer is a FLAG, not a default:**
+  `--derived-gapmin` (with `--derived-gapmin-factor F`, default 0.005) writes
+  `F x the smallest main-surface segment side`, ceiling `0.5 x` that side (the
+  starter's own `WARNING 94` gate, `i7sti3.F:1075`) and never a non-positive
+  value (`ERROR 785`, `:1068`). It is OFF by default and a warning names the
+  starter-derived `GAP MIN` on every carrier either way; `--auto-gapmin` was
+  NOT the lever, because it needs numpy + scipy and measures a different
+  quantity (nodal clearance, not mesh size). The class, censused with the
+  writer's own resolver over the 356-key roster, is **15 solid-only-main
+  interfaces on 14 deck keys** — one of them created by round 4's own swap
+  (`sphere1`); exactly **two of the 15** (`twobar`, `sphere1`) have a
+  measured solver arm at the shipped factor and **13 are unmeasured** — see
+  the round-4
+  NOT-closed list for why that keeps it opt-in.
+  `twobar`'s +1151 % internal energy is NOT the two-way loss the
   first draft of the `twoway` note blamed: the verification round changed ONE
   cell of the emitted `.rad` — the `Gapmin` k2rad leaves at 0 and the starter
   then derives as `GAP MIN = 1.0` mm on a 10 mm bar — to 0.05 and the deck
@@ -1098,29 +1122,80 @@ from a list rather than a re-census:
 - **The tied family's `_OFFSET` split.** Vol I R17 p.11-127 General Remark 7
   puts `TIED_*_OFFSET` / `_BEAM_OFFSET` in LS-DYNA's PENALTY family;
   `_tied_interface_type` keys on the solver and the variant only and sends them
-  to the constraint `/INTER/TYPE2` on an explicit deck, which projects the
-  secondary nodes onto the main segment and removes the offset the keyword
-  exists for. Measured reach today is ZERO (all 29 `*CONTACT_TIED_*` decks on
+  to `/INTER/TYPE2` on an explicit deck — at **Spotflag 27**
+  (`_TIED_SPOTFLAG["SURFACE_TO_SURFACE"]`, `writer/contacts.py`), which is an
+  AUTO-PENALTY variant, not a kinematic constraint (`_TIED_PENALTY_SPOTFLAGS =
+  (25, 26, 27, 28)`). CORRECTED in round 4: this entry used to claim that card
+  moves the secondary nodes onto the main segment and so removes the offset
+  the keyword exists for (the retracted wording is quoted verbatim in the
+  round-4 CHANGELOG entry). Radioss does **not** move a TYPE2 secondary
+  node: no TYPE2 starter routine writes `X(1..3, .)` at all — `i2buc1.F`,
+  `i2chk3.F`, `i2cor3.F`, `i2dst3.F`, `i2dst3_27.F`, `i2surfs.F`, `i2tid3.F`,
+  `i2_dtn.F`, `i2_dtn_27.F`, `i2_dtn_28.F`, `interf1/i2master.F` and
+  `inter2d1/inint2.F` read the coordinate array and never assign to it. FOUR
+  starter interface files do move a node and none is TYPE2: the
+  initial-penetration removers `i3pen3.F:187-197` (TYPE3), `i7pwr3.F:213-242`
+  (TYPE7 under `INACTI` 3/4) and `i24pen3.F:317-319` (TYPE24), plus
+  `in12r.F:120-133`, the TYPE12 frame transform (`inint3.F:1203-1242`). What Spotflag 27 (the glue formulation, "like 5") does not
+  do that 28 ("like 1", the spotweld formulation) does is carry the offset as a
+  rigid link of constant stiffness. `ContactTied.offset` is stored by the
+  handler and **read nowhere**: `grep -n "\.offset" k2rad/writer/contacts.py`
+  returns exactly one hit, inside a docstring. The round-5 variant is therefore
+  the one-cell change that reads the field already parsed — **Spotflag 27 -> 28
+  when a `SURFACE_TO_SURFACE` tie's keyword carries `_OFFSET`** — with its own
+  measured reach: **0 R14-roster decks** (the two `F:` `_OFFSET` carriers,
+  `05_2_welding_shell_thin` and `000_yaris_dynamic_roof_crush_01`, are both
+  IMPLICIT and already take TYPE10/Spotflag 28) and 1 off-roster model (four
+  `getriebekette` files). Do NOT route `_OFFSET` to TYPE10 on an explicit deck:
+  the repo's own determinate tie coupon reads 209.2 at Spotflag 1/5/27 against
+  a closed form of 210.0, and **67.85 = -67.6 %** at TYPE10's default STFAC.
+  Measured reach today is ZERO (all 29 `*CONTACT_TIED_*` decks on
   `F:`, `C:/openradioss_run` and `Ryan_Lee` convert identically on both trees),
   so it is a fidelity item, not a live defect; `getriebekette` is the deck to
   measure both arms on.
-- **The all-rigid-SSID contact class.** `/INTER/TYPE7`'s secondary side is a
-  node group and cannot hold `/RBODY` members, so a `*CONTACT` whose SSID side
-  is wholly rigid is warned and dropped. CENSUSED over all 44 item-A carriers
-  on the roster (converted from `F:` at the post-review head, the three Yaris
-  include-pullers excluded by name): **6 decks lose a whole interface** and
-  **4 of them end with NO `/INTER` at all** — `bumper`, `sphere1`,
-  `EXP_SC_CONTACT_INTERFERENCE` and **`ale/misc/forging-a/forging_A.k`**,
-  whose TWO `*CONTACT_SURFACE_TO_SURFACE` cards are both dropped. The other
-  two lose one interface and keep the rest:
-  `boundary_prescribed_motion.blow-mold.k` (1 of 3) and
-  `mat_spring.belted-dummy.k` (1 of 11). A THIRD shape exists and is easy to
-  miss because the interface survives: a PARTLY rigid secondary side is
-  silently thinned, on `mainboltaexpl.k` and again on `belted-dummy` —
-  warned by `_warn_partial_rigid_secondary`, but the load path is still
-  reduced. Nothing is silent; the list simply has to cover all three shapes.
-  Swapping the sides is not free — LS-DYNA's non-AUTOMATIC contact is
-  one-sided — and has to be measured.
+- **The all-rigid-SSID contact class — CLOSED in round 4 for EXPLICIT decks.**
+  Round 3's entry claimed that "`/INTER/TYPE7`'s secondary side is a node group
+  and could not hold `/RBODY` members (the retracted wording is quoted verbatim
+  in the round-4 CHANGELOG entry, which is the place for it). That is REFUTED:
+  the OpenRadioss
+  starter accepts them at **0 ERROR(S)** (measured on `sphere1` and on
+  `mat_spring.belted-dummy`; the only extra diagnostic is `WARNING 343 INITIAL
+  PENETRATIONS`), and the secondary nodal stiffness is element-based
+  (`i7stslav.F:55-58 STIFINT`), not nodal-mass-based. The drop was a k2rad
+  POLICY, not a solver constraint, and `starter_message_description.txt`
+  contains no message coupling a rigid-body secondary node to an interface.
+  Round 3's census was also short: over the full 356-key roster (the four Yaris
+  `*INCLUDE` pullers excluded BY NAME) it is **7 deck keys / 8 interfaces**
+  that lose a whole interface, and it mis-assigned `mat_spring.belted-dummy` —
+  BOTH sides of its dropped interface are wholly rigid (SSID 148/148, MSID
+  228/228), so a swap cannot restore it.
+  Round 4 ships the swap on an EXPLICIT deck, default ON,
+  `--no-rigid-secondary-swap` to opt out: the DEFORMABLE MSID side supplies the
+  tracked nodes and the rigid SSID side the main `/SURF`, because
+  `/INTER/TYPE7` is an ASYMMETRIC node-to-segment contact. This CHANGES WHICH
+  SIDE IS PENALISED and the warning says so (Vol I R17 p.11-10 item 4: a
+  non-AUTOMATIC contact is one-sided, so the swap reverses its direction; an
+  AUTOMATIC one checks both surfaces and the swap keeps the half the deformable
+  mesh can resolve). Where BOTH sides are wholly rigid the interface is emitted
+  with the rigid secondary group KEPT rather than dropped. MEASURED at `nt 4`
+  (`sphere1` reproduced at `nt 2`):
+
+  | deck | shipped | round 4 | LS-DYNA reference |
+  |---|---|---|---|
+  | `intro-by-j.-day/contact/sphere/sphere1.k` | IE 0 (−100 %), 1 344 cycles | IE 77 830 (**−1.66 %**), KE −1.73 %, NORMAL 1 592 cycles, starter 0 ERROR / 2 WARNING | IE 79 147.3 / KE 7.0275e6 |
+  | `show-cases/contact-interference/EXP_SC_CONTACT_INTERFERENCE.k` | IE 0 / KE 0 (−100 % / −100 %) | IE 1 069 (**−42.80 %**), KE 0.1293 (−16.02 %), NORMAL 1 826 cycles, 0 ERROR / 3 WARNING (the third is the press fit's 112 initial penetrations) | IE 1 868.92 / KE 0.153971 |
+  | `introduction/examples-manual/load/presrcibed/boundary_prescribed_motion.blow-mold.k` | **`timeout`** — 241 934 cycles at t = 0.0061 of 0.015, 99.9 % energy error | **NORMAL TERMINATION** at t = 0.015 in 25 675 cycles (49 s), energy error −1.3 %, IE 1.091e5 (+25.25 %), KE 16.095 (−46.49 %) | IE 8.71049e4 / KE 30.0765 |
+  | `ale/misc/forging-a/forging_A.k` | 0 `/INTER` | **2** `/INTER` — reach only, the deck still fails the starter with `ERROR 179 MATERIAL ID=1 DOES NOT EXIST` | — |
+  | `introduction/examples-manual/material/spring/mat_spring.belted-dummy.k` | 10 of 11 interfaces | **11** (the both-rigid KEEP), starter 0 ERROR / 5 WARNING unchanged | LS's own `sleout` books −2 418 / +2 044 through that interface against 9.69e5 over all 11 — it carries nothing either way |
+
+  Off-roster reach, counted and never quoted as accuracy (no LS reference on
+  that roster): `Ryan_Lee_Examples/W2_Door_Impact*` ×5 go 3 → **7** `/INTER`
+  and `W6_SETUP_SandwichImpact*` ×6 go **0 → 1**.
+  Two keys are held back by the IMPLICIT gate and stay dropped —
+  `implicit/basic-examples/contact-i/bumper.k` and
+  `implicit/Yaris%20Dynamic%20Roof%20Crush` — see the round-4 NOT-closed list.
+  The THIRD shape, a PARTLY rigid secondary side silently thinned, is NOT
+  touched this round; its measured arm is recorded in the same list.
 - **The non-AUTOMATIC spellings map to a TWO-SIDED `/INTER/TYPE7`.** The
   campaign re-run named four carriers where the reverse side looks engaged or
   over-stiff: `hemi`, `twobar`, `thick` — and `pend.imp`, which the
@@ -1149,11 +1224,31 @@ from a list rather than a re-census:
   to be measured first. `pend.imp` belongs with item B: it is the branch's
   single worst benchmark row (an energy balance that was exact at −0.0 % now
   runs at 99.9 % under a NORMAL banner) and it is filed there.
-- **`IHQ 8/9/10`** (the Cockcroft-Latham / Belytschko-Bindeman assumed-strain
-  co-rotational forms). Round 3 leaves those sections on `Isolid` 17 and warns:
-  Radioss `/PROP/SOLID` has no co-rotational stiffness-form hourglass with the
-  same energy accounting, so the mapping needs its own measurement rather than
-  a table row. Reach on the R14 roster: the `fl_exp_ihq8_*` coupon family only.
+- **`IHQ 8/9/10`.** CORRECTED in round 4 — this entry used to name two
+  metal-forming/assumed-strain authors and call 8/9/10 "co-rotational forms",
+  and neither half was right (the retracted wording is quoted verbatim in the
+  round-4 CHANGELOG entry, which is the place for it). Vol I R17 p.12-271 `*CONTROL_HOURGLASS`: `EQ.8`
+  *"Activates full projection warping stiffness for shell formulations 9, 16
+  and -16"* — a SHELL option, not a solid hourglass form (Remark 1, same page:
+  *"Only shell forms 9, 16 and -16 use the warping stiffness invoked by
+  IHQ = 8"*); `EQ.9` Puso [2000] enhanced assumed strain for 3D hexahedra;
+  `EQ.10` Cosserat Point Element (Jabareen & Rubin [2008]). The assumed-strain
+  co-rotational form the entry named is `EQ.6`, **Belytschko-Bindeman [1993]**.
+  `k2rad/writer/mesh.py:2182-2185` already stated this correctly; the table did
+  not. `_ihq_to_isolid` (`writer/mesh.py:1978-1993`) returns None for 8/9/10,
+  so the section keeps its ELFORM-derived `Isolid` and `writer/mesh.py`'s
+  unsupported-IHQ branch warns once per distinct IHQ. **Reach on the R14
+  roster: IHQ 9 and IHQ 10 have ZERO carriers; IHQ 8 has FOUR, and all four
+  state `*SECTION_SHELL` ELFORM 16 -> `Ishell 12` (QBAT, fully integrated),
+  where the hourglass coefficients are physically inert** —
+  `introduction/intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k`,
+  `show-cases/bolts/typea/explicit/mainboltaexpl.k`,
+  `show-cases/contact-overview/main.k` (`run_pass = 2`) and
+  `thermal/thick-thin-shells/07_metalstrip.k`. Only `mainboltaexpl` has a solid
+  part (one ELFORM -1 section) and it is the only one whose conversion log
+  carries the IHQ-8 line. **The `fl_exp_ihq8*` coupon family this entry used
+  to name as its only roster reach does not exist** — a `find` for `*ihq*` over `F:`, `C:/openradioss_run` and
+  `E:/foxcore_data` returns nothing. NO-GO, doc fix only.
 - `SOLN = 1` / `TGMULT` policy (the thermal-only solution class).
 - ALE mesh consolidation onto one `/PART` + `/INIVOL`, and with it the real
   ALE conversion for ELFORM 5/6/7 (see the closed entry below for the four
@@ -1171,11 +1266,179 @@ from a list rather than a re-census:
 - the **`/TH/NODE REAC*` scope** of the TC/RC nodes.
 - **`*EOS_IDEAL_GAS` `T0 = 0`** (the `zero_t0_sentinel` class, one law further).
 - the **four parse-time set readers** that still resolve eagerly.
-- **the rigid-SSID contact class** item A measured and could not fix:
-  `sphere1`, `bumper` and `EXP_SC_CONTACT_INTERFERENCE` put a rigid part on the
-  secondary side and `/INTER/TYPE7`'s node group cannot hold rigid nodes.
+- **the rigid-SSID contact class on an IMPLICIT deck** — `bumper` and
+  `Yaris Dynamic Roof Crush`. `sphere1`, `EXP_SC_CONTACT_INTERFERENCE`,
+  `blow-mold` and `forging_A` are closed by round 4's swap and `belted-dummy`
+  by the both-sides-rigid keep. The node group CAN hold rigid nodes (the
+  starter accepts them at 0 ERROR(S)); what is missing is an implicit
+  stabilization that REACHES a rigid-MAIN interface — `_recipe_active` /
+  `deformable_deformable_inter_ids` (`writer/contacts.py`) exclude one by
+  construction, which is why `--deformable-contact-recipe` is a byte-identical
+  no-op on `bumper`. That gate is the concrete thing round 5 would have to
+  change and re-measure.
 - **ELFORM −1/−2 → a locking-free 8-point `Isolid`**, with the numbers
   measured by round 3 and recorded in the item-B entry below.
+
+**What round 4 deliberately does NOT close** (18 items) - each entry with the measurement
+that decided it and the deck that would decide it next.
+
+1. **The mass-weighted mixed `*INITIAL_VELOCITY` re-point.** The lumper
+   (`tools/modal_solve.nodal_masses_from_state`) reproduces LS-DYNA's own
+   `d3hsp` rigid-body mass, CoG and inertia to **8 digits** on shell bodies
+   (`translat` parts 1 and 2, `transducer` part 1) and to +0.16 % / +0.86 % on
+   distorted solid bodies (`sphere1`, `matfoamsoil`); the momentum average
+   reproduces the `translat` glstat's cycle-0 kinetic energy to six significant
+   figures (**189.962129** against `1.89962E+02`) and returns the card's own
+   velocity with zero spin in the degenerate full-coverage case, so no
+   fully-covered deck would move. The solver arm moves cycle-0 KE
+   **+104.2 % -> +16.1 %**, and the residual is fully attributed: Radioss's
+   `/RBODY` carries the four shell nodes' own lumped rotary inertia,
+   `4 x (m/4)(A + t^2)/12 = 6.65667e-04` on every diagonal
+   (`NEW INERTIA 0.2642894E-02` against LS-DYNA's `0.1977E-02`). NOT shipped
+   for two reasons: there is exactly ONE carrier with an LS-DYNA reference on
+   356 + 501 + 36 deck files (`translat`; `Ryan_Lee_Examples/W16_SW_door_*` has
+   no reference results anywhere), and `I_cm` is **singular for a collinear
+   rigid body** - the rule needs a pseudo-inverse, or a rank check that falls
+   back to `omega = 0`, before it can be default-ON.
+2. **`ELFORM -1/-2` -> a locking-free `Isolid`.** Round 4 ships the WARNING only
+   (part A, item A5). `Isolid 17` IS LS-DYNA ELFORM 2 to -0.103 % / -0.006 % on
+   two byte-identical sibling meshes, while the ELFORM -1 references are
+   -21.72 % / -5.84 % away (this branch's own campaign rows; the round first
+   quoted the pre-round-4 column -0.030 / +0.055 / -21.66 / -5.78, which A1
+   moved); every alternative regresses more than it gains -
+   `Isolid 24` loses the population's only `match`
+   (`ex_27_solid_elform_-2_rigidwall`, ke_dev +9.75 % -> +15.43 %), costs
+   `mainboltaexpl` -72.7 % -> -81.4 % at 5x the wall time, and sends
+   `ex_14_solid_elform_-1/-2` from +314 % / +494 % to +1373 % / +2014 %. Net 4
+   worse, 2 better. The round-5 measurement is NAMED: a **bending coupon meshed
+   1/2/4 elements through the depth**, at `Isolid` 17/24/18/14, with a
+   nu = 0.499 companion, under a load path that actually locks (pure bending or
+   clamped-clamped) - round 3's cantilever measured `Isolid 17` 86 % SOFTER
+   than converged, the opposite sign.
+3. **The IMPLICIT all-rigid-SSID swap** (`bumper`, `Yaris Dynamic Roof Crush`).
+   Six restoration arms at `nt` 2 AND `nt` 4, all `ISTOP = -2` / `MESSAGE ID
+   79`: the swap reaches t = 2.0e-4 of 0.05; the swap with an explicit Gapmin
+   0.14986 reaches t = 7.1e-3 (35x further) and still ERROR-terminates; the
+   forced stub t = 1.0e-4; the rigid-nodes-kept arm t = 1.0e-4.
+   `--deformable-contact-recipe` is a BYTE-IDENTICAL no-op there. `bumper`
+   stays a NORMAL **zero model**, named. What round 5 must change: the
+   `_recipe_active` / `deformable_deformable_inter_ids` gate in
+   `writer/contacts.py`, which excludes a rigid-MAIN interface by construction.
+4. **The PARTLY rigid secondary side, silently thinned - 10 keys, 6
+   non-giant.** `transducer` (6 of 22 nodes, 27 %), `EXP_SC_PRELOAD` (274 of
+   1392, 20 %), `mainboltaexpl` (68 of 1943), `doorbeam` (16 of 214), `pipe`
+   (20 of 1400, a `match`), `belted-dummy` ssid 9 (39 of 49, 80 %), plus 4
+   Yaris giants. The ARM is now recorded, measured on `transducer.k` at `nt 4`
+   (LS reference IE 161.523 / KE 1092.45): shipped 974 cycles, IE 122.6
+   (-24.10 %), KE 845.8 (-22.58 %), engine error -26.9 %; with the 6 rigid
+   nodes KEPT in the secondary group, 974 cycles, IE 191.1 (**+18.31 %**), KE
+   883.1 (-19.16 %), engine error **-18.9 %**, 0 ERROR(S) / 3 WARNING(S) both
+   ways. Both channels improve in magnitude and the energy error improves, but
+   internal energy OVERSHOOTS - one carrier is not the class, and `pipe` is a
+   `match` that could be lost.
+5. **The `ex_27` implicit pair.** Round 4 corrects its ATTRIBUTION only (the
+   `_rigidwall` twin has no `*RIGIDWALL`); the divergence itself is untouched
+   and needs a DOF-level residual dump. See the implicit-residue table.
+6. **The tied `_OFFSET` `Spotflag 27 -> 28` one-cell variant** - 0 roster
+   reach; `getriebekette` is the deck to measure both arms on.
+7. **`ELFORM 5/6/7` -> a real ALE model** - 12 deck keys on ~7 emitted models
+   (`taylor` A-D are ONE file; `advection` A == B == C, because the Lagrangian
+   fallback erases the distinction). `advection_B` is the probe.
+8. **The `*INITIAL_VOID_PART` MAPPING and the `/INTER/TYPE18` `Iauto 2` /
+   `PFAC` / `Vref` cells.** Round 4 ships the WARNING (part A, item A5); the
+   mapping waits until `ale_wavehitcol` and `cylinder_impact_B` are measured.
+9. **The beam/truss contact SECONDARY** - `_contact_part_nodes` does not walk
+   them while `_part_node_ids` does; 3 decks, and the only non-giant's beam has
+   `n2 = 0`.
+10. **The one-node `*MAT_SPOTWELD` beam** (`spotweld.k`; LS-DYNA carries it at
+    length 2.0).
+11. **`*CONSTRAINED_SHELL_TO_SOLID` / `_GENERALIZED_WELD_BUTT` /
+    `_JOINT_SCREW`** - unregistered, 3 tiny `F:` decks at ie -100 %. **Round
+    5's FIRST research item.**
+12. **CNRB DOF releases** - 1 858 `F:` cards on 10 decks, 4 of them giants.
+13. **Dropped from the queue with their census: `*EOS_IDEAL_GAS` `T0`,
+    Ignition-and-Growth, `*CONSTRAINED_BEAM_IN_SOLID`, `*PARTICLE_BLAST`,
+    `NIP > 10` - 0 carriers on 893 deck files.**
+14. **`--derived-gapmin` as a DEFAULT.** The flag ships (see the answered
+    round-3 entry above); making it the default does not. Censused with the
+    writer's own resolver over the 356-key R14 roster, the class is **15
+    solid-only-main `/INTER/TYPE7` interfaces on 14 deck keys** - one of them
+    created by round 4's own swap (`sphere1`) - and **13 of the 15 have no
+    measured arm**. The two that do disagree: `twobar` goes +1151 % -> -5.60 %
+    at factor 0.005, and `sphere1` goes -1.66 % -> **-7.77 % at 4.1x the
+    cycles**. What would decide it: the 13 unmeasured carriers, above all the
+    five `thermal/welding-new/*` decks (0.0582845 each),
+    `nvh/example-11-01/11.1.sbrake.k` (x2 at 0.261611) and
+    `implicit/Salzburg_2017/.../4.3_General_Nonlinearity.k` (0.0657821).
+    Two CORRECTIONS to the round's own pre-research, both measured with the
+    resolver and cross-checked against the starter's own `GAP MIN =` echo: the
+    echo appears for the SHELL-thickness branch too (`i7sti3.F:1064` sits
+    inside `IF(GAP <= ZERO)`, after BOTH arms), so it is not evidence of a
+    solid main - `boundary_prescribed_motion.blow-mold` (echoes 0.8905 /
+    0.5170 / 0.8916), `EXP_SC_CONTACT_INTERFERENCE` (0.2) and `forging_A` are
+    NOT in the class once the swap has run, because their post-swap main
+    surfaces are SHELL segments. The `*CONTACT_*_INTERFERENCE` exclusion the
+    flag carries is therefore a RULE with 0 measured carriers on this corpus,
+    not a measured save.
+
+15. **The `*BOUNDARY_THERMAL_*` / `*BOUNDARY_TEMPERATURE_{RSW,TRAJECTORY,
+    PERIODIC_SET}` family, as a CONVERSION.** Round 4's finalize round made
+    them BLOCK the `TGMULT` restatement — they are temperature drivers and a
+    hard Dirichlet `/IMPTEMP` beside one would clamp the field it drives away
+    (`fixtemp.F:180-199`) — but they still convert to nothing. `F:` carries
+    four `*BOUNDARY_THERMAL_WELD_TRAJECTORY` decks (the `thermal/welding-new/*`
+    family), all of which state `TGMULT 0.0`, so the gate's reach is 0 and none
+    of them is blocked in practice today. What would decide it: whether a
+    moving weld source has ANY Radioss counterpart — `/IMPFLUX` on a moving
+    segment set is the only candidate, and nothing in
+    `engine/source/constraints/thermic` moves a segment group with time.
+
+16. **The `Isolid` 24 arm of the assumed-strain `ELFORM -1/-2/3`.** The A5-i
+    warning is gated on `isolid != 17`, and `ex_12_solid_elform_{-1,-2,3}`
+    carry an explicit `*HOURGLASS` IHQ 6, take the per-part overlay and emit
+    `/PROP/SOLID/90001` at `Isolid` **24** — so the warning is silent on two of
+    the roster's ELFORM -1/-2 carriers and on one of its two ELFORM-3 carriers.
+    The substitution on that arm — an 8-point assumed-strain hex becoming a
+    1-POINT `Isolid` 24 (`sgrtails.F:1107-1123`) — is at least as large as the
+    one the warning describes. It is NOT simply given the same sentence,
+    because the Isolid-24 arm is also the one that keeps
+    `ex_27_solid_elform_-2_rigidwall`'s `match`: the two cannot be separated on
+    a comment. What would decide it: the same bending coupon meshed 1/2/4
+    through the depth that item 2 above needs.
+
+17. **Faceting the 6-node pentahedron and the 5-node pyramid in
+    `writer/contacts._solid_boundary_faces`.** Round 4's finalize round made an
+    unfaceted shape clear `all_solid`, so the derived-Gapmin rule and its
+    default-ON warning both STAND DOWN on such a side rather than measure a
+    partial skin — the failure mode being a part that MIXES hexes with wedges,
+    where the face they share is seen once and counted EXTERNAL and the minimum
+    edge comes out too small. Standing down is the safe direction, not the
+    complete one: a solid-only main built entirely of wedges now falls out of
+    the class silently. No carrier of the 15-interface class has that shape, so
+    the reach today is 0. What would decide it: a wedge-meshed contact main
+    with an LS-DYNA reference — none exists on the three measured corpora.
+
+18. **The ONE rigid-part predicate vs an ELEMENT-FREE
+    `*DEFORMABLE_TO_RIGID` part.** `writer/common.rigid_part_ids` answers
+    "is this part rigid?" for eight consumers and honours
+    `--no-deformable-to-rigid`, so it and `rbody._deformable_to_rigid_map`
+    name the same set. What does NOT follow is that it and the EMITTED deck
+    agree: `_make_rbodies` declines a part contributing no node at all (no
+    element, no `*CONSTRAINED_EXTRA_NODES`) and warns *"NO /RBODY was emitted
+    for it and the part is NOT rigid in the converted model"*, while the
+    predicate still calls it rigid. Measured on a coupon: `rigid_part_ids`
+    returns `{1, 3}` where the deck emits one `/RBODY`. Reach on the R14
+    roster: **0** — all four `*DEFORMABLE_TO_RIGID` keys own elements — and a
+    part with no nodes contributes nothing to the node-set consumers either;
+    what would still misfire is `_synthesize_local_motion_frames` (it would
+    mint a `/SKEW/MOV` triad for a body that is never emitted) and the `/XREF`
+    screen's message. NOT fixed by re-deriving the emitter's node walk inside
+    the predicate: "emits an `/RBODY`" is a DIFFERENT question from "is
+    rigid" — `*CONSTRAINED_RIGID_BODIES` merges a slave's nodes into its
+    master, so a merged slave is rigid and emits no body of its own — and a
+    second copy of that walk is the drift the one predicate exists to remove.
+    The exception is stated in the docstring and pinned by a test. What would
+    decide it: a corpus deck that switches an element-free part to rigid.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
@@ -1825,12 +2088,17 @@ found and deliberately did NOT close.
   - **Three of the 44 carriers still emit no interface** for a PRE-EXISTING
     reason the registration cannot touch: `sphere1`, `bumper` and
     `EXP_SC_CONTACT_INTERFERENCE` put a rigid part on the SECONDARY (SSID)
-    side, and `/INTER/TYPE7`'s secondary node group cannot hold rigid-body
-    nodes, so the contact is dropped with the side-swap remedy. `bumper` even
+    side, so `_resolve_contact_slave`'s rigid filter emptied the node group and
+    the contact was dropped with the side-swap remedy. `bumper` even
     goes `error_engine -> NORMAL` because of it, as a NORMAL-terminating ZERO
     model (IE identically 0) — the #135 shape. Whether k2rad should swap the
     sides, or emit `/INTER/TYPE25` (whose secondary side is a `/SURF`), is its
-    own item with its own measurement.
+    own item with its own measurement. **ROUND 4 ANSWERED IT**: the drop was a
+    k2rad POLICY, not a solver constraint — the starter accepts `/RBODY` member
+    nodes in a TYPE7 secondary group at 0 ERROR(S) — and the swap now ships on
+    an EXPLICIT deck. `sphere1` reads −1.66 % and
+    `EXP_SC_CONTACT_INTERFERENCE` −42.80 %; `bumper` is IMPLICIT and stays a
+    named zero model. See the all-rigid-SSID entry in the defect queue.
   - **`twobar` and `ring_01` leave zero and OVERSHOOT.** `twobar` moves from
     IE -100 % to **+1151 %** (37 990 against the LS reference's 3036) at an
     engine energy error of -11.3 %; `ring_01` from -100 % to +207 %. Two
@@ -1929,22 +2197,29 @@ Population: **34** roster decks with `*CONTROL_IMPLICIT_GENERAL` `IMFLAG > 0`
 and status `error_engine` or `timeout` — 28 structural plus 6 frequency-domain
 stalls, which are NOT the same class.
 
-| family | decks | death | verdict after round 3 |
-|---|--:|---|---|
-| `ex_01` thin shells `elform_2/6/16` | 3 | cycle **20**, t = 0.1052 of 1.0, identical | **FIXED** by dropping the FIXPOINT grid — `ex_01_thin_shell_elform_2` reaches NORMAL at t = 1.000, 28 cycles, IE 0.7061 vs the reference's 0.818398 (−13.72 %) |
-| `ex_14` solids `elform_1/-1/2/-2` | 4 | cycle **33**, t = 0.004954 of 0.02 | **FIXED** — all four are ONE model (every ELFORM collapses to the same `/PROP/SOLID`); `ex_14_solid_elform_1` reaches NORMAL at t = 0.01839 with the energy error ≤ 0.8 % at every cycle, where it used to hit 99.9 % by cycle 14 |
-| `ex_15` thick shells `elform_2/3/5` | 3 | cycle **38**, t = 0.00559 of 0.02 | **FIXED** — NORMAL to t = 0.01963 |
-| Salzburg `4.2_Buckling_of_Beer_Can` | 1 | cycle 38, t = 0.1298 of 1.0 | **IMPROVED, not fixed** — reaches t = 0.3661 (2.8×) and its KE falls from 7.26e10 to 1.56e5 |
-| beams `ex_05`, `ex_06`, `ex_07`, `ex_11` | 4 | t = 1e-5 / 0.387 / 3e-8 / 0.0945-of-0.1 | **NOT fixed** (`ex_06` moves 0.3869 → 0.3870). MAX_ITER on three; `ex_11` prints a NORMAL banner at 94.5 % of target, the #110 shape. Own mechanism — the beam property or the `/IMPL` recipe |
-| `ex_27` rigid-wall implicit ×2 | 2 | cycle 1 / 3, t ≈ 1e-7 of 8e-5 | **NOT fixed**, byte-identical with and without the grid. `RELATIVE R` 10.9 / 5.18 and KE 5.8e9 at cycle 3: a rigid-wall-plus-implicit class of its own |
-| Salzburg `4.1` / `4.3` | 2 | 4.1 timeout at 0.3 % of target; 4.3 cycle 56 | **NOT fixed**. `4.3` is also the one roster deck with an `*INITIAL_STRESS_SECTION`, and its solids are ELFORM −1, so neither item B nor item F reaches it |
-| `tensile2` | 1 | cycle 349, t = 0.7701 of 1.0 | marginal (t → 0.7804): genuine near-completion nonlinearity, plus `Warning: MUMPS workspace too small. Retry` |
-| `doorbeam` | 1 | cycle 6, t = 2.6e-7 of 0.0011 | **NOT fixed**, byte-identical death |
-| `bumper` | 1 | cycle 1 | an **item A** deck (`*CONTACT_SURFACE_TO_SURFACE`, its only contact). It now reaches NORMAL — as a zero model, because its rigid SSID side still drops the interface. Re-measure after the rigid-secondary item, not here |
-| `05_1` / `05_2` welding | 2 | cycle 26 / cycle 0 | **items A + D.** Re-measure after the campaign re-run |
-| Yaris roof-crush / door-sag | 2 | cycle 0 | `run_pass = 2` giants — **do not launch** |
-| `nvh` frequency-domain 5.3, 5.4, 5.5, 10.2, 8.11 ×2 | 6 | cycle 0, 600 s, `final_time = 0.0` | **NOT an `/IMPL` recipe row at all.** SSD / ERP / PSD frequency-domain requests; OpenRadioss has no frequency-domain solver. They belong to queue row 4 |
-| `6.5` / `4.2.frf` | 2 | cycle 11 / 4 | MAX_ITER, same neighbourhood; `6.5`'s sibling `6.5.tbl.psd.prepressure.k` is `normal` at IE −0.38 % |
+The **round 4** column below says what the round did to each family. Read it
+with two cautions the round measured for itself: (a) `4.2.frf`, `6.5`,
+`tensile2` and `doorbeam` are expected `error_engine` movers but the campaign
+re-run is the gate, not this table; (b) the four `thermal/welding-new` rows
+are BOTH A1 carriers AND the re-verdict's exclusion class — the two effects
+must never be added together.
+
+| family | decks | death | verdict after round 3 | round 4 |
+|---|--:|---|---|---|
+| `ex_01` thin shells `elform_2/6/16` | 3 | cycle **20**, t = 0.1052 of 1.0, identical | **FIXED** by dropping the FIXPOINT grid — `ex_01_thin_shell_elform_2` reaches NORMAL at t = 1.000, 28 cycles, IE 0.7061 vs the reference's 0.818398 (−13.72 %) | A1 raises `/IMPL/QSTAT/DTSCAL` to 10 on all three; re-run by the campaign |
+| `ex_14` solids `elform_1/-1/2/-2` | 4 | cycle **33**, t = 0.004954 of 0.02 | **FIXED** — all four are ONE model (every ELFORM collapses to the same `/PROP/SOLID`); `ex_14_solid_elform_1` reaches NORMAL at t = 0.01839 with the energy error ≤ 0.8 % at every cycle, where it used to hit 99.9 % by cycle 14 | A1 carrier; re-run by the campaign |
+| `ex_15` thick shells `elform_2/3/5` | 3 | cycle **38**, t = 0.00559 of 0.02 | **FIXED** — NORMAL to t = 0.01963 | A1 carrier; re-run by the campaign |
+| Salzburg `4.2_Buckling_of_Beer_Can` | 1 | cycle 38, t = 0.1298 of 1.0 | **IMPROVED, not fixed** — reaches t = 0.3661 (2.8×) and its KE falls from 7.26e10 to 1.56e5 | A1 carrier; re-run by the campaign |
+| beams `ex_05`, `ex_06`, `ex_07`, `ex_11` | 4 | t = 1e-5 / 0.387 / 3e-8 / 0.0945-of-0.1 | **NOT fixed** (`ex_06` moves 0.3869 → 0.3870). MAX_ITER on three; `ex_11` prints a NORMAL banner at 94.5 % of target, the #110 shape. Own mechanism — the beam property or the `/IMPL` recipe | **A1 + A2, the COMBINED arm.** All four are A1 carriers and **two** are also A2's only carriers (`ex_05` and `ex_07`, both NSOLVR 6). *`ex_06` was listed as a third on an `ARCCTL != 0` clause that is RETRACTED: Vol I R17 p.12-354/12-358 say card 3 is ignored unless `6 ≤ NSOLVR ≤ 9` or `NSOLVR = 12` with `ARCMTH = 3`, and define ARCCTL as the controlling NODE ID whose 0 means "generalized arc length method". `ex_06` states NSOLVR 12 / ARCMTH 1 / ARCCTL 6, and its own reference `d3hsp` shows plain BFGS — it is not an arc-length deck, and it now gets no arc-length warning.* A2 ships OPT-IN behind `--arclength-riks` because the required second-`nt` repeat REFUTED the default: `ex_05` fails in ~2 s without the flag and with it runs tens of thousands of cycles to t ~ 1e-7 and TIMES OUT. *(An `ex_06` nt-flip was cited beside it and is withdrawn twice over — an independent quiet-machine repeat gives NORMAL at BOTH nt, agreeing to 0.02 pp, and ex_06 is not a carrier.)* With the flag ON, `ex_07` walks from **t = 0.3004** — this branch's own flag-off baseline, which A1 had already moved from master's 3e-8 — to **t = 1.000** and lands at **−1.72 %** of its LS-DYNA reference while still exiting ERROR on the last increment — it buys the load path, not the answer, and is counted as ZERO movers |
+| `ex_27` implicit Taylor bar ×2 | 2 | cycle 1 / 3, t ≈ 1e-7 of 8e-5 | **NOT fixed**, byte-identical with and without the grid. **The "rigid-wall class" attribution this row used to carry is WRONG and was corrected in round 4**: `ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit.k` has **no `*RIGIDWALL` keyword at all** (`grep -c '^\*RIGIDWALL'` = 0; its keyword list carries `*CONSTRAINED_GLOBAL` instead) while only the `_penalty_` twin has `*RIGIDWALL_PLANAR_ID` (`grep -c '^\*RIGIDWALL'` = 1). *Anchor the pattern: an unanchored case-INSENSITIVE grep returns 1 on the constrained deck too, matching its title line "Copper Bar Impacting a Rigidwall"*. Both are the SAME Taylor copper bar at 227 000 mm/s under Newmark trapezoidal at `DT0 = 1e-6`, both diverge from cycle 1 (`RELATIVE R` to 2.3e15), cutting Δt 22 times to `DT_MIN = 1e-10` where `\|r\|/\|r0\|` still sits at ≈ 5.0; the arm `DT_MAX 0 → 1e-6` (LS's own constant step) changes nothing. A real solver constraint worth recording for the `_penalty_` twin ONLY: `nl_solv.F:520` `IF (ILINE_S>0.AND.ISIGN>=0.AND.IRWALL==0)` — the line search is bypassed outright whenever a rigid wall is active — and `imp_solv.F:673-700` forces a full stiffness reform on every rigid-wall impact. What is missing is a DOF-level residual dump (`/IMPL/NONLIN/SOLVINFO`, or a higher `/IMPL/PRINT/NONL`); it is not obtainable from the cycle table. Note the grouping: `ex_27_-1_rigidwall` ≡ `ex_27_-2_rigidwall` is ONE emitted model on 2 deck keys, one row a `match` and one a `deviation` | attribution corrected (see the round-3 cell); the divergence is UNTOUCHED and is item 5 of the round-4 NOT-closed list |
+| Salzburg `4.1` / `4.3` | 2 | 4.1 timeout at 0.3 % of target; 4.3 cycle 56 | **NOT fixed**. `4.3` is also the one roster deck with an `*INITIAL_STRESS_SECTION`, and its solids are ELFORM −1, so neither item B nor item F reaches it | A1 carriers; `4.3` is also one of the 15 `--derived-gapmin` carriers (derived `GAP MIN` 0.0657821), unmeasured |
+| `tensile2` | 1 | cycle 349, t = 0.7701 of 1.0 | marginal (t → 0.7804): genuine near-completion nonlinearity, plus `Warning: MUMPS workspace too small. Retry` | A1 carrier, expected to move — its own arm is +7.36 %; re-run by the campaign |
+| `doorbeam` | 1 | cycle 6, t = 2.6e-7 of 0.0011 | **NOT fixed**, byte-identical death | **A1 x the implicit TYPE25 drop, a COMBINED arm.** NORMAL with A1, at +380 % — which is that deck's dropped implicit interface, not A1's error. Not counted as a fix |
+| `bumper` | 1 | cycle 1 | an **item A** deck (`*CONTACT_SURFACE_TO_SURFACE`, its only contact). It now reaches NORMAL — as a zero model, because its rigid SSID side still drops the interface. Re-measure after the rigid-secondary item, not here | **NOT fixed, and now NAMED rather than deferred.** B2 gates the all-rigid-SSID swap to EXPLICIT decks: six restoration arms at nt 2 AND nt 4 all die `ISTOP = -2`, and `--deformable-contact-recipe` is a byte-identical no-op because `_recipe_active` excludes a rigid-MAIN interface. `bumper` stays a NORMAL **zero model**. Item 3 of the round-4 NOT-closed list |
+| `05_1` / `05_2` welding | 2 | cycle 26 / cycle 0 | **items A + D.** Re-measure after the campaign re-run | **re-verdicted `not_comparable` BY CONSTRUCTION** (campaign bookkeeping, a DEFINITION change and not a fix): `*LOAD_THERMAL_D3PLOT` has no Radioss counterpart, the LS-DYNA reference internal energy is identically 0 on all four rows, and the `nt` flip is OpenMP nondeterminism — `05_4_2` terminates NORMAL only at `nt = 3`, and three identical `nt = 3` runs give IE 1.611e4 / 2.428e4 / 2.217e4, a 51 % spread. `openradioss.status` is UNTOUCHED. The same four rows are A1 carriers and their A1 result is reported separately — never added to the −4 |
+| Yaris roof-crush / door-sag | 2 | cycle 0 | `run_pass = 2` giants — **do not launch** | `run_pass = 2` giants — still **do not launch**; both are A1 carriers and are RE-CONVERTED only |
+| `nvh` frequency-domain 5.3, 5.4, 5.5, 10.2, 8.11 ×2 | 6 | cycle 0, 600 s, `final_time = 0.0` | **NOT an `/IMPL` recipe row at all.** SSD / ERP / PSD frequency-domain requests; OpenRadioss has no frequency-domain solver. They belong to queue row 4 | unchanged — queue row 4, no frequency-domain solver |
+| `6.5` / `4.2.frf` | 2 | cycle 11 / 4 | MAX_ITER, same neighbourhood; `6.5`'s sibling `6.5.tbl.psd.prepressure.k` is `normal` at IE −0.38 % | **FIXED by A1.** `4.2.frf.cant-1` goes from 4 cycles + `ERROR: SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT` to **104 cycles at t = 1.000**, IE 7922 against the LS-DYNA reference 7946.31 (**−0.31 %**), reproduced at `nt` 3 AND `nt` 4; `6.5.tbl.psd.prepressure-1` +0.03 % |
 
 Two smaller findings from the same census. **Both were text-only and both
 were FIXED in the post-review round** (the entries stay for their measured
@@ -1960,7 +2235,8 @@ census, which is round-4 input):
   `ex_01` ×3 and the nvh 5.4 / 5.5 / 10.2 / 8.11 ×2 — with `ex_01`'s own d3hsp
   printing `solution method … 1 / eq.1: linear`; **12 on 21**; **6 on 2**
   (`ex_05`, `ex_07`). Measured, `/IMPL/LINEAR` turns `ex_01` into NORMAL at
-  IE −22.6 % — WORSE than the −13.7 % dropping the FIXPOINT grid already gives,
+  IE −22.6 % — WORSE than the −14.12 % dropping the FIXPOINT grid already gives
+  on the shipped combined arm (−13.7 % before round 4's `--qstat-dtscal 10`),
   and it solves in one step so the deck loses its 100-state time history; on an
   `NSOLVR = 12` deck it produces garbage that only looks like success (`ex_14`
   KE 3.75e9 against 3.94e7). So: correct the field comment, and if `/IMPL/LINEAR`

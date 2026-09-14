@@ -6,7 +6,7 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
-    ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
+    ConversionState, NodeData, BeamElem, SectionDiscrete, Curve,
     DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
     RigidWallGeomFace,
 )
@@ -15,7 +15,7 @@ from .common import (
     _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
     _part_scoped_segment_set,
-    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub,
+    _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub, rigid_part_ids,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
@@ -1332,6 +1332,40 @@ def _element_length(state: ConversionState, e) -> float:
 _SPRING_TOKEN_MASS = 1.0e-4
 
 
+def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
+    """The sentence every discrete-spring warning ends with.
+
+    It used to read *"The spring carries a small artificial mass (1e-4) for the
+    explicit time step — add \\*ELEMENT_MASS-equivalent mass if dynamics of the
+    spring ends matter."* — advice to ADD mass, when the defect is that k2rad
+    had ADDED mass the LS-DYNA card does not carry. The measured consequence is
+    a frequency error, so that is what it states now.
+    """
+    ends = sorted({n for e in g_elems for n in (e.n1, e.n2) if n > 0})
+    head = (f"LS-DYNA discrete elements are MASSLESS (nodal mass comes from "
+            f"*ELEMENT_MASS), but hm_read_prop04.F:136-142 refuses a property "
+            f"MASS <= 1e-15 (ERROR 229), so k2rad writes a token "
+            f"{_SPRING_TOKEN_MASS:g} and rinit3.F:1926/1937-1939 puts HALF of "
+            f"it on EACH end node, per element.")
+    if state.options.spring_token_mass_compensation:
+        return (head + " That token is SUBTRACTED again from those nodes' "
+                "/ADMAS wherever there is one to subtract it from (see the "
+                "*ELEMENT_MASS line below, which names every node that had "
+                "none). Uncompensated it shifts omega by "
+                "sqrt(1 + m_token/(2*m_node)) - MEASURED on "
+                "ex_17_spring_elform_0: 41.715 rad/s against LS-DYNA's 43.954, "
+                "a 5.4 % frequency error that reads as IE +10.20 % / KE "
+                "-99.27 % at t = 0.15 once the OFFSET pre-load is honoured.")
+    return (head + " --no-spring-token-mass-compensation was passed, so it is "
+            f"LEFT on node(s) {ends[:20]}"
+            + (f" and {len(ends) - 20} more" if len(ends) > 20 else "")
+            + ": the model's total mass is HIGH by "
+              f"{_SPRING_TOKEN_MASS * len(g_elems):g} and every local "
+              "frequency is LOW by sqrt(1 + m_token/(2*m_node)) - MEASURED on "
+              "ex_17_spring_elform_0, 41.715 rad/s against LS-DYNA's 43.954, a "
+              "5.4 % error.")
+
+
 def _connector_inertia(state: ConversionState, elems) -> float:
     """The rotational inertia written on a synthesized 6-DOF spring property.
 
@@ -1419,6 +1453,16 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # deck (a /TH/SPRING on a missing element is starter ERROR 69).
         state.discrete_spring_eids.add(e.eid)
         state.spring_elem_ids.add(e.eid)      # producer 1 of 9
+        # ... and the artificial mass this row puts on its two nodes, for the
+        # /ADMAS compensation (rinit3.F:1926/1937-1939 — HALF the property mass
+        # on EACH end node, per element). Recorded for BOTH nodes including a
+        # synthesized ground node, so the tally is the deck's truth; the ground
+        # node is /BCS-fixed and carries no /ADMAS, so nothing is subtracted
+        # there and nothing is warned about it (see _spring_token_warn_nodes).
+        for _n in (n1, n2):
+            state.spring_token_mass_by_node[_n] = (
+                state.spring_token_mass_by_node.get(_n, 0.0)
+                + 0.5 * _SPRING_TOKEN_MASS)
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_grnod_id()
@@ -1633,6 +1677,90 @@ def _emit_funct(fid: int, title: str, pts, smooth: bool = False) -> List[str]:
     return lines
 
 
+def _shift_curve_abscissae(pts, offset: float):
+    """*pts* with every abscissa reduced by *offset*, ordinates untouched.
+
+    Radioss's spring deflection is purely geometric — ``r1def3.F:206``
+    ``DL(I) = ALDP(I) - AL0DP(I)`` — so an ``*ELEMENT_DISCRETE`` ``OFFSET``,
+    which LS-DYNA defines as "a displacement or rotation at time zero"
+    (Vol I R17 p.19-33), makes ``delta_LS = delta_RAD + OFFSET``. The exact
+    restatement of ``F = f_LS(delta_LS)`` in the Radioss variable is therefore
+    ``f_RAD(d) = f_LS(d + OFFSET)``: a pure SHIFT of the abscissae by
+    ``-OFFSET``, with the ordinates unchanged. Nothing else in the law moves.
+    """
+    return [(a - offset, o) for a, o in pts]
+
+
+def _curve_value_at(pts, x: float) -> float:
+    """Linear interpolation of *pts* at *x*, extrapolating the end segments.
+
+    That is what the engine does with a spring function (``redef3.F90`` reads
+    it through the ordinary FINTER path, which walks to the bracketing segment
+    and evaluates it), so the pre-stretch force this returns is the one the
+    run would develop.
+    """
+    if not pts:
+        return 0.0
+    if len(pts) == 1:
+        return pts[0][1]
+    if x <= pts[0][0]:
+        (x0, y0), (x1, y1) = pts[0], pts[1]
+    elif x >= pts[-1][0]:
+        (x0, y0), (x1, y1) = pts[-2], pts[-1]
+    else:
+        i = 0
+        while i + 2 < len(pts) and pts[i + 1][0] < x:
+            i += 1
+        (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+    if x1 == x0:
+        return y0
+    return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+
+def _emit_inispri_full_type4(records) -> List[str]:
+    """``/INISPRI/FULL`` for ``prop_type`` 4 springs: ``[(spring_id, EI), …]``.
+
+    Layout from ``hm_cfg_files/.../TABLE/inispri_full_subobject_type_4_12.cfg``
+    ``FORMAT(radioss2018)`` — one record per spring, three cards:
+
+        ``# springID prop_type     nvars``      ``%10d%10d%10d``
+        ``#  F_X  D_X  FEP_X  DPL_X+  DPL_X-``  ``%20lg`` x5
+        ``#  L_X  EI``                          ``%20lg%20lg``
+
+    The header itself carries NO title line: ``inispri.cfg``'s
+    ``CARD_PREREAD("%10s%10d",_BLANK_,prop_type)`` reads ``prop_type`` out of
+    the FIRST record's own card, so the records follow the keyword directly and
+    every record in one block must share a ``prop_type``.
+
+    Only ``EI`` is written. ``hm_read_inistate_d00.F:4598-4606`` maps the cells
+    to ``SIGRS(2..8)`` and ``rinit3.F:2024-2036`` (``R4INI``) unpacks them into
+    ``F0 / DL0 / FEP / DPL / DPL2 / XL0 / EINT`` — so a non-zero ``F_X`` or
+    ``D_X`` would state a force and an elongation the geometry does not have,
+    and ``L_X`` must stay 0 because ``rinit3.F:2022`` initialises ``XL0`` to
+    zero for exactly the "not concerned by INISPRI" case that
+    ``r1def3.F:150-151`` then treats as "length not initialised". The energy is
+    the only datum an OFFSET really carries: LS-DYNA's own ``ex_17`` ``glstat``
+    reads ``internal energy 2.82451E+02`` at ``t = 0`` against a ``deforc``
+    ``y-force 2.22402E+01`` at ``change in length 2.54000E+01``, i.e. exactly
+    ``1/2 * f(OFFSET) * OFFSET``.
+    """
+    if not records:
+        return []
+    lines: List[str] = ["/INISPRI/FULL"]
+    for spring_id, ei in records:
+        lines += [
+            "# springID prop_type     nvars",
+            f"{_i(spring_id)}{_i(4)}{_i(0)}",
+            "#                F_X                 D_X               FEP_X"
+            "              DPL_X+              DPL_X-",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                L_X                  EI",
+            f"{_f(0.0)}{_f(ei)}",
+        ]
+    lines.append(HDR)
+    return lines
+
+
 def _s03_curve_points(k: float, kt: float, fy: float):
     """The 5-point symmetric elastic-plastic force function of *MAT_S03.
 
@@ -1705,6 +1833,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
     # /PART/<pid> under the source pid, so a part claimed by both is ERROR 79.
     muscle_pids = _muscle_discrete_pids(state)
 
+    inispri_records: List[Tuple[int, float]] = []
     for pid in sorted(by_pid):
         if pid in muscle_pids:
             continue
@@ -1731,6 +1860,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         hflag = 0
         kind = None
         funct_lines: List[str] = []
+        # The POINTS behind fct_ID11, whatever built it — a deck *DEFINE_CURVE
+        # (state.curves) or one this writer synthesized here (whose id is a
+        # next_curve_id() and is therefore NOT in state.curves). The OFFSET
+        # abscissa shift needs them, and a shift that silently found nothing
+        # would ship an unshifted law.
+        fct1_pts: Optional[List[Tuple[float, float]]] = None
         mat_lin = state.mat_spring_elastic.get(part.mid)
         mat_nl = state.mat_spring_nonlinear.get(part.mid)
         mat_dmp = state.mat_damper_viscous.get(part.mid)
@@ -1752,6 +1887,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 emitted = True
                 continue
             fct1 = mat_nl.lcd            # curve is already emitted as /FUNCT
+            fct1_pts = list(curve.pts)
             hflag = 0                    # H=0: nonlinear ELASTIC (S04 semantics)
             k = _curve_slope_at_origin(curve)
             if k <= 0.0:
@@ -1790,6 +1926,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 emitted = True
                 continue
             fct1 = state.next_curve_id()
+            fct1_pts = list(pts)
             funct_lines = _emit_funct(
                 fct1, f"MATS03_elastoplastic_mid{part.mid}", pts)
             k = mat_ep.k
@@ -1818,6 +1955,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 emitted = True
                 continue
             fct1 = mat_gnl.lcdl
+            fct1_pts = list(state.curves[mat_gnl.lcdl].pts)
             # H=6 makes K1 the UNLOADING stiffness, and the starter refuses to
             # let it be smaller than the loading curve's steepest segment: it
             # raises it silently under WARNING 506. State it instead, so the
@@ -1882,6 +2020,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 emitted = True
                 continue
             fct1 = state.next_curve_id()
+            fct1_pts = list(pts)
             side = "tension" if mat_inel.ctf < 0.0 else "compression"
             funct_lines = _emit_funct(
                 fct1, f"MATS08_{side}_only_mid{part.mid}", pts)
@@ -1952,8 +2091,14 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         # *DEFINE_SD_ORIENTATION (VID) that resolved to a /SKEW are grouped by
         # (vid, S) onto an oriented /PROP/TYPE8; everything else is axial
         # /PROP/TYPE4.
-        groups: Dict[float, List] = defaultdict(list)
-        ori_groups: Dict[Tuple[int, float], List] = defaultdict(list)
+        # Keyed on (S, OFFSET), not on S alone: a non-zero OFFSET is honoured
+        # by SHIFTING the force function's abscissae by -OFFSET, which is a
+        # different /FUNCT and therefore a different /PROP — exactly as a
+        # different force scale already was. With every element at OFFSET 0
+        # (every deck on this corpus but ex_17 and ex_18) the grouping, the
+        # property ids and the emitted bytes are unchanged.
+        groups: Dict[Tuple[float, float], List] = defaultdict(list)
+        ori_groups: Dict[Tuple[int, float, float], List] = defaultdict(list)
         n_vid = 0
         n_bad = 0
         for e in elems:
@@ -1965,16 +2110,29 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                     n_vid += 1
                     continue
                 if e.offset:
-                    state.warn(f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} "
-                               "(initial preload offset) has no /SPRING "
-                               "equivalent — dropped.")
-                ori_groups[(e.vid, e.s if e.s else 1.0)].append(e)
+                    # REFUSED BY NAME rather than emitted: an oriented section
+                    # puts the payload on slot 1 (or 4) of a /PROP/TYPE8, whose
+                    # /INISPRI/FULL record is the SIX-DOF subobject
+                    # (inispri_full_subobject_type_8_13_25.cfg, prop_type 8),
+                    # a card shape nothing on any roster exercises. Reach 0 on
+                    # 885 decks — an unmeasured card is not shipped.
+                    state.warn(
+                        f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} (Vol I "
+                        "R17 p.19-33, 'a displacement or rotation at time zero') "
+                        "is DROPPED on this element, so it starts at zero force "
+                        "instead of the pre-stretched state the card names. The "
+                        "abscissa-shift + /INISPRI/FULL restatement k2rad "
+                        "applies to an axial spring is NOT applied here: this "
+                        "element is oriented by *DEFINE_SD_ORIENTATION "
+                        f"VID={e.vid}, so it becomes a 6-DOF /PROP/TYPE8 whose "
+                        "/INISPRI/FULL record is the type-8/13/25 subobject - a "
+                        "card shape with no carrier on any corpus here and "
+                        "therefore unmeasured. Restate the offset as a shifted, "
+                        "one-sided force-displacement function if it carries "
+                        "load.")
+                ori_groups[(e.vid, e.s if e.s else 1.0, e.offset)].append(e)
                 continue
-            if e.offset:
-                state.warn(f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} "
-                           "(initial preload offset) has no /SPRING equivalent "
-                           "— dropped.")
-            groups[e.s if e.s else 1.0].append(e)
+            groups[(e.s if e.s else 1.0, e.offset)].append(e)
         if n_vid:
             state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_vid} element(s) "
                        "reference a *DEFINE_SD_ORIENTATION VID that is undefined "
@@ -1996,8 +2154,13 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 return pid          # keep the DYNA part id for traceability
             return state.next_id()
 
-        def _scaled(s):
+        def _scaled(s, fct=None):
             """(K, C, A, Hscale) for a per-element force scale S.
+
+            *fct* overrides the part's own ``fct_ID11`` — the OFFSET path
+            hands in the abscissa-SHIFTED clone, and a linear spring that had
+            no function at all acquires one there, which moves the scale from
+            K/C onto the A coefficient exactly as a deck-supplied curve would.
 
             With no function the force is K·δ and A cancels out entirely (the
             reader stores K/A, the engine multiplies by A again), so K and C
@@ -2012,10 +2175,11 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             curve-driven damper (*MAT_S05, whose whole payload sits on
             fct_ID41 with K = C = 0) needs the scale on Hscale or S is lost
             without a trace."""
+            fct_eff = fct1 if fct is None else fct
             a_coef = 0.0            # 0 → reader default 1.0
             k_s, c_s, h_s = k, c, hscale
             if s != 1.0:
-                if fct1:
+                if fct_eff:
                     a_coef = s      # scales f(δ) (A coefficient, B=0)
                     k_s, c_s = k * s * s, c * s
                 else:
@@ -2025,13 +2189,102 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                     h_s = (hscale or 1.0) * s
             return k_s, c_s, a_coef, h_s
 
-        def _dof(s):
+        def _dof(s, fct=None):
             """The loaded SpringDof for per-element force scale *s*."""
-            k_s, c_s, a_coef, h_s = _scaled(s)
+            fct_eff = fct1 if fct is None else fct
+            k_s, c_s, a_coef, h_s = _scaled(s, fct_eff)
             return SpringDof(k=k_s, c=c_s, a=a_coef, b=b_coef, d=d_coef,
-                             fct1=fct1, h=hflag, fct2=fct2, fct3=fct3,
+                             fct1=fct_eff, h=hflag, fct2=fct2, fct3=fct3,
                              fct4=fct4, dmin=dmin, dmax=dmax, e=e_coef,
                              hscale=h_s)
+
+        def _offset_law(offset: float, s: float, g_elems):
+            """(fct_ID11, extra /FUNCT lines, [(spring_id, EI), …]) for a
+            group whose elements carry ``OFFSET``.
+
+            Returns ``(fct1, [], [])`` unchanged when there is no offset to
+            honour (or ``--no-discrete-offset`` was passed), so the OFFSET-free
+            path below is byte-identical to the pre-round-4 writer.
+            """
+            if not offset:
+                return fct1, [], []
+            if not state.options.discrete_offset:
+                state.warn(
+                    f"*ELEMENT_DISCRETE part {pid}: OFFSET={offset:g} on "
+                    f"{len(g_elems)} element(s) is DROPPED "
+                    "(--no-discrete-offset). LS-DYNA develops a force at "
+                    "t = 0 from it (Vol I R17 p.19-33); the converted spring "
+                    "starts unstressed.")
+                return fct1, [], []
+            if torsional:
+                # Same refusal as the oriented branch, for the same reason: a
+                # DRO=1 section is a /PROP/TYPE13, whose /INISPRI/FULL record
+                # is the type-8/13/25 six-DOF subobject. Reach 0 on 885 decks.
+                state.warn(
+                    f"*ELEMENT_DISCRETE part {pid}: OFFSET={offset:g} on "
+                    f"{len(g_elems)} element(s) is DROPPED. *SECTION_DISCRETE "
+                    f"{secid} is TORSIONAL (DRO=1), so the spring becomes a "
+                    "6-DOF /PROP/TYPE13 whose /INISPRI/FULL record is the "
+                    "type-8/13/25 subobject - a card shape with no carrier on "
+                    "any corpus here and therefore unmeasured. The axial "
+                    "abscissa-shift restatement is not applied; the converted "
+                    "spring starts at zero moment.")
+                return fct1, [], []
+            if fct1:
+                if not fct1_pts:
+                    state.warn(
+                        f"*ELEMENT_DISCRETE part {pid}: OFFSET={offset:g} is "
+                        f"DROPPED - fct_ID11={fct1}'s points could not be "
+                        "resolved, so there is nothing to shift. The converted "
+                        "spring starts unstressed.")
+                    return fct1, [], []
+                base_pts = fct1_pts
+                shifted = _shift_curve_abscissae(base_pts, offset)
+                new_fct = state.next_curve_id()
+                extra = _emit_funct(
+                    new_fct,
+                    f"discrete_offset_{offset:g}_from_fct{fct1}_pid{pid}",
+                    shifted)
+                f_at = _curve_value_at(base_pts, offset)
+            else:
+                # No loading function: *MAT_SPRING_ELASTIC's K is the whole
+                # law, so synthesize the two points of f(d) = K*(d + OFFSET).
+                # Two points are exact for a linear law (Radioss extrapolates
+                # a spring function's end segments), and K STAYS on the card -
+                # r1len3.F reads it for the element time step and for
+                # MAX_SLOPE, and hm_read_prop04.F:249 stores it as K/A.
+                if k <= 0.0:
+                    state.warn(
+                        f"*ELEMENT_DISCRETE part {pid}: OFFSET={offset:g} is "
+                        f"DROPPED - material {part.mid} states no positive "
+                        "stiffness and no loading function, so there is no "
+                        "law to shift. The converted spring starts unstressed.")
+                    return fct1, [], []
+                lo, hi = sorted((-2.0 * offset, offset))
+                pts2 = [(lo, k * (lo + offset)), (hi, k * (hi + offset))]
+                new_fct = state.next_curve_id()
+                extra = _emit_funct(
+                    new_fct, f"discrete_offset_{offset:g}_K_pid{pid}", pts2)
+                f_at = k * offset
+            # LS-DYNA's own datum: the energy already stored in the spring at
+            # t = 0. ex_17's glstat reads internal energy 2.82451E+02 against a
+            # deforc y-force 2.22402E+01 at a change in length 2.54000E+01,
+            # i.e. exactly 1/2 * f(OFFSET) * OFFSET. The per-element force
+            # scale S multiplies the force, so it multiplies the energy too.
+            ei = 0.5 * s * f_at * offset
+            recs = [(e.eid, ei) for e in g_elems]
+            if dmin or dmax:
+                state.warn(
+                    f"*SECTION_DISCRETE {secid}: TDL/CDL/FD deflection limits "
+                    f"({dmin:g} .. {dmax:g}) are written to the /PROP/TYPE4 "
+                    "rupture cells UNSHIFTED while OFFSET="
+                    f"{offset:g} shifts the deflection datum by that much - "
+                    "LS-DYNA measures its deflection limits on the OFFSET "
+                    "side of the datum and Radioss on the geometric side, and "
+                    "no deck on any corpus here states both, so which one the "
+                    "limits belong to is UNMEASURED. Check the rupture "
+                    "displacements if they carry load.")
+            return new_fct, extra, recs
 
         # ── translational (axial) springs → /PROP/TYPE4 ────────────────────
         # A DRO=1 torsional section cannot use TYPE4 (a purely translational
@@ -2039,8 +2292,8 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         # whose local X is node1→node2 by construction (r4buf3.F:145), so the
         # torsion acts about the element's own axis exactly as in LS-DYNA.
         pid_emitted = False
-        for s in sorted(groups):
-            g_elems = groups[s]
+        for (s, offset) in sorted(groups):
+            g_elems = groups[(s, offset)]
             if torsional:
                 usable = [e for e in g_elems if _finite_length(state, e)]
                 if len(usable) < len(g_elems):
@@ -2060,22 +2313,28 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             part_id = _alloc_part_id()
             if part_id != pid:
                 state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
-                           f"scale S={s:g} were split onto auto part {part_id} "
+                           f"scale S={s:g}"
+                           + (f" / OFFSET={offset:g}" if offset else "")
+                           + f" were split onto auto part {part_id} "
                            "(the per-element scale has no /SPRING field).")
+            eff_fct, off_funct, off_recs = _offset_law(offset, s, g_elems)
+            inispri_records += off_recs
             lines += funct_lines
             funct_lines = []       # one /FUNCT, shared by every scaled clone
+            lines += off_funct     # the OFFSET clone is per (S, OFFSET) group
             if torsional:
                 dofs = [SpringDof(), SpringDof(), SpringDof(),
-                        _dof(s), SpringDof(), SpringDof()]
+                        _dof(s, eff_fct), SpringDof(), SpringDof()]
                 lines += _emit_prop_type13(
                     prop_id, f"{title} ({kind}, torsional DRO=1)",
-                    1.0e-4, _connector_inertia(state, g_elems), 0, 0, dofs)
+                    _SPRING_TOKEN_MASS, _connector_inertia(state, g_elems),
+                    0, 0, dofs)
             else:
-                k_s, c_s, a_coef, h_s = _scaled(s)
+                k_s, c_s, a_coef, h_s = _scaled(s, eff_fct)
                 lines += _emit_prop_type4(
-                    prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
-                    fct1, hflag, dmin, dmax, fct2=fct2, fct3=fct3, fct4=fct4,
-                    b=b_coef, d=d_coef, e=e_coef, hscale=h_s)
+                    prop_id, f"{title} ({kind})", _SPRING_TOKEN_MASS, k_s, c_s,
+                    a_coef, eff_fct, hflag, dmin, dmax, fct2=fct2, fct3=fct3,
+                    fct4=fct4, b=b_coef, d=d_coef, e=e_coef, hscale=h_s)
             lines += _emit_spring_part(
                 state, part_id, prop_id, title, g_elems, pid,
                 spring_kind_label="TYPE13" if torsional else "TYPE4")
@@ -2089,10 +2348,21 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                           "the units LS-DYNA already states them in, so "
                           "nothing is rescaled"
                           if torsional else f"/PROP/TYPE4/{prop_id}")
-                       + f" + /SPRING on /PART/{part_id}. The spring carries a "
-                       "small artificial mass (1e-4) for the explicit time "
-                       "step — add *ELEMENT_MASS-equivalent mass if dynamics "
-                       "of the spring ends matter.")
+                       + f" + /SPRING on /PART/{part_id}."
+                       + (f" OFFSET={offset:g} is honoured by SHIFTING the "
+                          f"force law's abscissae by {-offset:g} onto "
+                          f"/FUNCT/{eff_fct} (Vol I R17 p.19-33: OFFSET is 'a "
+                          "displacement or rotation at time zero ... a "
+                          "positive offset on a translational spring will lead "
+                          "to a tensile force being developed at time zero', "
+                          "and Radioss spring deflection is purely geometric - "
+                          "r1def3.F:206 DL = ALDP - AL0DP - so delta_LS = "
+                          "delta_RAD + OFFSET and f_RAD(d) = f_LS(d + OFFSET)), "
+                          "plus an /INISPRI/FULL carrying the pre-stretch "
+                          f"energy EI = 1/2*f(OFFSET)*OFFSET = "
+                          f"{(off_recs[0][1] if off_recs else 0.0):g}."
+                          if off_recs else "")
+                       + " " + _spring_token_mass_sentence(state, g_elems))
 
         # ── oriented springs → /PROP/TYPE8 (SPR_GENE) on the VID's /SKEW ────
         # Only TYPE8 carries a skew_ID, so an oriented discrete element becomes a
@@ -2101,8 +2371,8 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         # A DRO=1 section puts the payload on slot 4 instead: the skew's local X
         # IS the *DEFINE_SD_ORIENTATION axis, so Rx is rotation about it.
         slot = 4 if torsional else 1
-        for (vid, s) in sorted(ori_groups):
-            g_elems = ori_groups[(vid, s)]
+        for (vid, s, offset) in sorted(ori_groups):
+            g_elems = ori_groups[(vid, s, offset)]
             skew_id = state.sdorient_skew_ids[vid]
             prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
@@ -2113,7 +2383,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 f"/PROP/TYPE8/{prop_id}",
                 f"{title} ({kind}, oriented VID {vid})",
                 "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
-                f"{_f(1.0e-4)}{_f(_connector_inertia(state, g_elems))}"
+                f"{_f(_SPRING_TOKEN_MASS)}{_f(_connector_inertia(state, g_elems))}"
                 f"{_i(skew_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
             ]
             for j in range(1, 7):
@@ -2137,8 +2407,8 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 f"/PROP/TYPE8/{prop_id} (SPR_GENE) + /SPRING on /PART/{part_id} "
                 f"with skew_ID={skew_id}; stiffness on local DOF {slot} ("
                 + ("rotation about" if torsional else "translation along")
-                + " the orientation axis). Carries a small artificial mass "
-                "(1e-4) for the explicit time step.")
+                + " the orientation axis). "
+                + _spring_token_mass_sentence(state, g_elems))
 
         if not pid_emitted:
             # Every element was filtered out (grounded/zero-length under DRO=1,
@@ -2149,6 +2419,14 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 state, pid, title,
                 f"none of its {len(elems)} element(s) could be converted.")
             emitted = True
+
+    # ONE /INISPRI/FULL block for the whole deck: inispri.cfg's
+    # CARD_PREREAD("%10s%10d", _BLANK_, prop_type) reads prop_type out of the
+    # FIRST record, so every record in a block must share it. Only prop_type 4
+    # (axial /PROP/TYPE4) is written — the 6-DOF subobject of TYPE8/TYPE13 is
+    # refused by name where the OFFSET is read.
+    if inispri_records:
+        lines += _emit_inispri_full_type4(inispri_records)
 
     return lines if emitted else []
 
@@ -3439,8 +3717,7 @@ def _synthesize_local_motion_frames(state: ConversionState) -> None:
     # with no /IMP* Dir letter (9/10/11/12) is refused by the writer, so a triad
     # for it would be three unexplained nodes plus a warning promising a
     # co-rotating skew that the .rad never contains.
-    rigid_pids = {p for p, part in state.parts.items()
-                  if part.mid in state.mat_rigid}
+    rigid_pids = set(rigid_part_ids(state))      # *MAT_RIGID + *DEFORMABLE_TO_RIGID
     rigid_pids |= {c.pid for c in state.cnrbs}
     locals_ = [pm for pm in state.prescribed_motions
                if pm.local and pm.pid in rigid_pids
@@ -5781,6 +6058,104 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
 # Engine file sections
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fmt_node_list(nids, cap: int = 20) -> str:
+    """``[1, 2, 3]`` for a short list, ``[1, 2, …] and N more`` for a long one.
+
+    ``mat_spring.belted-dummy.k`` has 122 springs; a warning that prints every
+    node it touches is a warning nobody reads."""
+    nids = sorted(nids)
+    if len(nids) <= cap:
+        return str(nids)
+    return f"{nids[:cap]} and {len(nids) - cap} more"
+
+
+def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
+                            compensated, degenerate) -> None:
+    """What happened to k2rad's own artificial spring mass, node by class.
+
+    Four classes, and every one of them is named because the mass is INVENTED —
+    LS-DYNA's discrete elements carry none (``*ELEMENT_DISCRETE`` has no mass
+    cell at all; nodal mass comes from ``*ELEMENT_MASS``):
+
+    * SUBTRACTED — the node has an ``/ADMAS`` big enough to take the token off.
+    * DEGENERATE — it has one, but at or below the token share, so subtracting
+      would write a non-positive ``/ADMAS``. The deck's own value is kept.
+    * NO ``/ADMAS`` — nothing to subtract from (``mat_spring.belted-dummy.k``:
+      122 springs, zero ``/ADMAS``).
+    * RIGID — the node belongs to a rigid body, whose mass is folded into the
+      ``/RBODY`` Mass field, not into an ``/ADMAS``; the token rides along
+      there and this writer cannot reach it.
+
+    Synthesized ground nodes are excluded: ``_emit_spring_part`` mints them
+    fully ``/BCS``-fixed, so a mass on one cannot move anything.
+    """
+    if not state.spring_token_mass_by_node:
+        return
+    if not state.options.spring_token_mass_compensation:
+        # The per-part warnings already said the token was left in place and
+        # what it costs; one deck-level line would only repeat them.
+        return
+    done = {nid for nid, _b, _s in compensated}
+    bad = {nid for nid, _m, _s in degenerate}
+    rigid: List[int] = []
+    orphan: List[int] = []
+    for nid in state.spring_token_mass_by_node:
+        if nid in done or nid in bad:
+            continue
+        if nid in state.connector_ground_nodes:
+            continue                     # /BCS 111 111 — mass cannot act
+        (rigid if nid in rigid_nodes else orphan).append(nid)
+    if compensated:
+        total = sum(sh for _n, _b, sh in compensated)
+        state.warn(
+            f"*ELEMENT_DISCRETE: k2rad's token spring mass "
+            f"({_SPRING_TOKEN_MASS:g} per /PROP, half on each end node per "
+            f"element - rinit3.F:1926/1937-1939) was SUBTRACTED from the "
+            f"/ADMAS of {len(compensated)} node(s) {_fmt_node_list(done)}, "
+            f"{total:g} in total, so the model's mass and its natural "
+            "frequencies are LS-DYNA's. (LS-DYNA discrete elements are "
+            "massless; hm_read_prop04.F:136-142 refuses a property MASS "
+            "<= 1e-15 with ERROR 229, which is why the token exists at all.) "
+            "Pass --no-spring-token-mass-compensation to keep the "
+            "pre-round-4 output.")
+    if degenerate:
+        detail = ", ".join(f"node {n}: /ADMAS {m:g} vs token share {sh:g}"
+                           for n, m, sh in sorted(degenerate)[:5])
+        state.warn(
+            f"*ELEMENT_DISCRETE: {len(degenerate)} node(s) carry LESS /ADMAS "
+            "than k2rad's own token spring mass, so nothing was subtracted "
+            "(an /ADMAS must stay positive) and their mass is HIGH by that "
+            f"share: {detail}"
+            + (" ..." if len(degenerate) > 5 else "")
+            + ". The local frequency is LOW by sqrt(1 + share/m_node). "
+              "MEASURED on the carrier of this shape, gnonspring.k (/ADMAS "
+              "1e-6 against a token half of 5e-5, 50x): the arm that floors "
+              "the mass to 1e-12 - the most a compensation could ever remove "
+              "- changes nothing (IE 431.3 either way, 786 cycles both "
+              "times). Give those nodes an *ELEMENT_MASS if their dynamics "
+              "matter.")
+    if orphan:
+        state.warn(
+            f"*ELEMENT_DISCRETE: {len(orphan)} spring node(s) "
+            f"{_fmt_node_list(orphan)} carry NO /ADMAS for k2rad's token "
+            f"spring mass to be subtracted from, so their mass is HIGH by "
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element and "
+            "their local frequency LOW by sqrt(1 + share/m_node). LS-DYNA's "
+            "discrete elements are massless; the token exists only because "
+            "hm_read_prop04.F:136-142 refuses a property MASS <= 1e-15 "
+            "(ERROR 229). Give those nodes an *ELEMENT_MASS if their dynamics "
+            "matter.")
+    if rigid:
+        state.warn(
+            f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
+            f"{_fmt_node_list(rigid)} belong to a RIGID BODY, whose mass is "
+            "folded into the /RBODY Mass field rather than an /ADMAS, so "
+            f"k2rad's token spring mass ({_SPRING_TOKEN_MASS / 2:g} per "
+            "attached element) rides along there UNCOMPENSATED. It is added "
+            "to the body's total mass; a rigid body's own dynamics are paced "
+            "by that total.")
+
+
 def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     """*ELEMENT_MASS lumped masses on ORDINARY nodes → /ADMAS/0.
 
@@ -5793,6 +6168,8 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     *ELEMENT_MASS was silently dropped (writer consumed added_node_masses only
     for rigid masters) — a real mass/dynamics error on any deck with point masses.
     """
+    compensated: List[Tuple[int, float, float]] = []     # (nid, before, share)
+    degenerate: List[Tuple[int, float, float]] = []      # (nid, m_node, share)
     masses_by_value: Dict[float, List[int]] = {}
     skipped_rigid = 0
     for nid, mass in state.added_node_masses.items():
@@ -5801,7 +6178,20 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
         if nid in rigid_nodes:
             skipped_rigid += 1          # folded into its /RBODY already
             continue
+        share = state.spring_token_mass_by_node.get(nid, 0.0)
+        if share > 0.0 and state.options.spring_token_mass_compensation:
+            if mass - share > 0.0:
+                compensated.append((nid, mass, share))
+                mass = mass - share
+            else:
+                # NEVER a non-positive /ADMAS. gnonspring.k is the carrier:
+                # 1e-6 of stated nodal mass against a token half of 5e-5, 50x.
+                # Its measured arm says even flooring the value to 1e-12 moves
+                # nothing (IE 431.3 either way), so leaving the deck's own
+                # number and naming the error beats inventing one.
+                degenerate.append((nid, mass, share))
         masses_by_value.setdefault(mass, []).append(nid)
+    _warn_spring_token_mass(state, rigid_nodes, compensated, degenerate)
     if not masses_by_value:
         return []
     lines: List[str] = [HDR, "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
@@ -7143,9 +7533,16 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
         # — so a /RBODY MAIN node is NOT tagged and IS damped. Putting the main
         # node in the group is therefore exactly LS-DYNA's "mass center of the
         # rigid bodies", not an approximation of it.
+        # "Deformable" through the ONE predicate: a *DEFORMABLE_TO_RIGID part
+        # is rigid from t = 0 and belongs on the mass-centre half of LS-DYNA's
+        # own sentence, not on the nodal half. Equivalent on every shipping
+        # deck (its nodes are in `rigid_nodes` and would be subtracted anyway)
+        # and the degenerate arm is EMPTY by construction: a rigid part with no
+        # elements contributes no node to _damping_elem_nodes either.
+        rigid_parts = rigid_part_ids(state)
+
         def _deformable(pid: int) -> bool:
-            return (state.parts.get(pid, PartData(0, "", 0, 0)).mid
-                    not in state.mat_rigid)
+            return pid not in rigid_parts
 
         target_nodes_set = _damping_elem_nodes(state, _deformable) - rigid_nodes
         # *ELEMENT_MASS on an ordinary node: k2rad gives it an /ADMAS, so it

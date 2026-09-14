@@ -38,7 +38,7 @@
 # L_A Itol Toli
   2 2 0.01
 /IMPL/QSTAT/DTSCAL
- 0.1
+ 10
 /IMPL/PRINT/NONL/-1
 /IMPL/SOLVER/2
   0 0 0 0

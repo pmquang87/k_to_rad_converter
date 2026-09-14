@@ -25,7 +25,8 @@ the singular mode while staying soft enough that contact carries the load once
 it engages (spring reaction ~= k * pin_disp, a few % of 6 kN at k~100 N/mm).
 
 It grounds ONLY the pin; the deformable bracket's early-time rigid motion is
-carried by the QSTAT inertia stabilization (/IMPL/QSTAT/DTSCAL 0.1), exactly as
+carried by the QSTAT inertia stabilization (/IMPL/QSTAT/DTSCAL, whose shipped
+value is 10 since round 4 -- it was 0.1 when this recipe was written), exactly as
 in the working displacement-control deck. If the bracket itself stalls, ground a
 couple of bracket nodes the same way.
 

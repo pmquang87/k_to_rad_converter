@@ -61,7 +61,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..state import (ConversionState, Curve, ImposedTemperature,
                      InitialTemperature, MatElastic, MatPlasTAB,
-                     MatThermalIsotropicTD, MatThermalOrthotropic)
+                     MatThermalIsotropicTD, MatThermalOrthotropic,
+                     TgmultGeneration)
 from .common import HDR, _emit_grnod_node, _emit_surf_seg, _f, _i
 
 __all__ = [
@@ -2034,11 +2035,351 @@ def _thermal_material_usable(state: ConversionState, tm, mid: int) -> bool:
     return True
 
 
-def _warn_thermal_generation_drops(state: ConversionState, tm, mid: int) -> None:
+#: The LS-DYNA keywords that MOVE a temperature. Any of them in the deck makes
+#: the TGMULT -> /IMPTEMP restatement wrong, because /IMPTEMP is a HARD
+#: Dirichlet reset applied to every node in its group on every cycle
+#: (fixtemp.F:180-199, the writes at :187 and :198) — it would OVERWRITE the
+#: solution those cards drive instead of adding to it.
+#:
+#: *INITIAL_TEMPERATURE is deliberately NOT in this set: it is the T0 of the
+#: closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt), a required companion, not a
+#: competing driver. A gate written as "drop whenever any thermal card exists"
+#: excludes the only carrier this rule has.
+_THERMAL_BOUNDARY_KEYWORD = {
+    "FLUX": "*BOUNDARY_FLUX",
+    "CONVEC": "*BOUNDARY_CONVECTION",
+    "RADIATION": "*BOUNDARY_RADIATION",
+}
+
+#: Keyword PREFIXES of every LS-DYNA spelling that moves a temperature and
+#: which k2rad may end up not converting. Both unparsed-and-skipped and
+#: parsed-but-not-emitted spellings are screened with this tuple — see
+#: :func:`_tgmult_blocking_drivers` for why one bucket is not enough.
+_THERMAL_DRIVER_PREFIXES = (
+    "LOAD_HEAT", "LOAD_THERMAL", "BOUNDARY_TEMPERATURE", "BOUNDARY_CONVECTION",
+    "BOUNDARY_FLUX", "BOUNDARY_RADIATION", "BOUNDARY_THERMAL",
+)
+
+
+def _tgmult_blocking_drivers(state: ConversionState) -> List[str]:
+    """Every temperature-moving card this deck STATES, by keyword.
+
+    Keyed on what the deck states, not on what survived conversion: a
+    ``*BOUNDARY_CONVECTION`` k2rad had to drop is still part of the model
+    LS-DYNA ran, so an adiabatic closed form would be a different model either
+    way.
+
+    **Both drop buckets are read, not just one.** A keyword k2rad does not
+    parse at all lands in ``skipped_keywords``; a keyword it REGISTERS and then
+    declines (``handlers._thermal_deferred``, which serves
+    ``*BOUNDARY_THERMAL_WELD``, ``*BOUNDARY_TEMPERATURE_RSW`` /
+    ``_TRAJECTORY`` / ``_PERIODIC_SET``, ``*BOUNDARY_THERMAL_BULKNODE`` /
+    ``_BULKFLOW``, ``*BOUNDARY_FLUX_TRAJECTORY`` and the ``*LOAD_THERMAL_*``
+    spellings with no counterpart) lands in ``recognized_not_emitted`` and in
+    NEITHER of the other registries. Screening only ``skipped_keywords`` was a
+    filter keyed on a field those records do not have: MEASURED on
+    ``thermal/thermal-stress`` with one ``*BOUNDARY_THERMAL_WELD`` added, the
+    gate passed and an ``/IMPTEMP`` was emitted that would have clamped away
+    the very field the weld source drives. Reproduced for
+    ``*BOUNDARY_TEMPERATURE_RSW``, ``*BOUNDARY_TEMPERATURE_TRAJECTORY`` and
+    ``*BOUNDARY_THERMAL_BULKNODE`` — 4 of 4 passed a gate that exists to stop
+    them. (Live reach when the hole was found: 0 — the four ``F:`` decks
+    carrying ``*BOUNDARY_THERMAL_WELD`` all state ``TGMULT 0.0``.)
+    """
+    names: Set[str] = set()
+    for d in state.imposed_temperatures:
+        names.add(d.source.split(" ")[0])
+    for bc in state.thermal_boundaries:
+        names.add(_THERMAL_BOUNDARY_KEYWORD.get(bc.kind, f"*BOUNDARY_{bc.kind}"))
+    if state.load_thermal_elements:
+        names.add("*LOAD_THERMAL_*_ELEMENT_<FAMILY>")
+    # ...and the spellings that reach no /IMPTEMP, /IMPFLUX, /CONVEC or
+    # /RADIATION — whether because no handler parses them at all
+    # (*LOAD_HEAT_GENERATION_{SOLID,SHELL}, the closest thing LS-DYNA has to a
+    # second volumetric generation) or because a handler names them and
+    # declines (every _thermal_deferred spelling).
+    for kw in list(state.skipped_keywords) + [k for k, _ in
+                                              state.recognized_not_emitted]:
+        if not kw.startswith(_THERMAL_DRIVER_PREFIXES):
+            continue
+        # The ONE family that does not block, for the same reason
+        # `_drop_load_thermal_on_thermal_soln` drops its parsed members: Vol I
+        # R17 p.33-162 says *LOAD_THERMAL_OPTION temperatures "are ignored in a
+        # thermal only or coupled thermal/structural analysis", and TGMULT only
+        # ever acts on such a deck. A card inert in BOTH codes cannot veto a
+        # restatement. *LOAD_HEAT_* is NOT in that family — it is a volumetric
+        # generation and blocks.
+        if (kw.startswith("LOAD_THERMAL")
+                and state.ctrl_solution_soln in (1, 2)):
+            continue
+        names.add(f"*{kw}")
+    return sorted(names)
+
+
+def _tgmult_initial_temperature(state: ConversionState, mid: int) -> Optional[float]:
+    """``T0`` for the closed form, or None when the deck states no single one.
+
+    The deck must start from ONE uniform temperature: with two distinct
+    ``*INITIAL_TEMPERATURE`` values there is a real conduction gradient from
+    ``t = 0``, and an ``/IMPTEMP`` would clamp it away rather than let it
+    diffuse.
+    """
+    vals = {it.temp for it in state.initial_temperatures}
+    if len(vals) > 1:
+        return None
+    if vals:
+        return next(iter(vals))
+    card = state.heat_mat_cards.get(mid)
+    return card[0] if card else 0.0
+
+
+def _integrate_generation(pts: List[Tuple[float, float]], t0: float,
+                          rate: float) -> List[Tuple[float, float]]:
+    """``[(t, T0 + rate*INTEGRAL(f dtau, 0..t))]`` on the curve's OWN abscissae.
+
+    *pts* is the ``TGRLC`` curve — generation RATE against time (Vol II R17
+    p.3-2) — and *rate* is ``TGMULT/(rho*Cp)``. The adiabatic uniform body
+    obeys ``rho*Cp*dT/dt = TGMULT*f(t)``, so the temperature is the running
+    TIME INTEGRAL of the curve. The abscissae are kept exactly as the deck
+    states them, so no shape is lost, and the integral between two consecutive
+    samples is the trapezoid — which is exact for the piecewise-linear
+    interpolation LS-DYNA itself applies to a ``*DEFINE_CURVE``.
+
+    A curve whose first abscissa is above 0 is integrated from ``t = 0`` with
+    its first ordinate held flat back to the origin, which is LS-DYNA's own
+    out-of-range convention for a load curve (the endpoint value is used), and
+    the synthesized ``(0, T0 + ...)`` sample is prepended so the ``/IMPTEMP``
+    covers the whole run. A curve that already starts at or below 0 keeps its
+    own first point as the origin of the integral.
+    """
+    pts = sorted(pts, key=lambda p: p[0])
+    if pts[0][0] > 0.0:
+        pts = [(0.0, pts[0][1])] + pts
+    out: List[Tuple[float, float]] = []
+    acc = 0.0
+    prev_t, prev_y = pts[0]
+    out.append((prev_t, t0))
+    for t, y in pts[1:]:
+        acc += 0.5 * (prev_y + y) * (t - prev_t)
+        out.append((t, t0 + rate * acc))
+        prev_t, prev_y = t, y
+    return out
+
+
+def _resolve_tgmult_generation(state: ConversionState, tm, mid: int,
+                               rho_cp: float) -> bool:
+    """Can this ``TGMULT`` become an ``/IMPTEMP``? Record it, or say why not.
+
+    Returns True when the record was taken (so the drop warning must NOT name
+    TGMULT), False otherwise.
+    """
+    if not tm.tgmult or not state.options.tgmult_imptemp:
+        return False
+    pids = sorted(pid for pid, part in state.parts.items()
+                  if part.mid == mid
+                  and _thermal_material_for_part(state, pid) is tm)
+    if not pids:
+        return False
+    if rho_cp <= 0.0:
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} could not be "
+            f"restated as an /IMPTEMP because /HEAT/MAT/{mid}'s RHO0_CP is "
+            f"{rho_cp:g}. The closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) "
+            "DIVIDES by it. TGMULT is dropped; state the material's real "
+            "capacity (TRO x HC, or the law's own RO x HC) to get the "
+            "generation back.")
+        return False
+    blocking = _tgmult_blocking_drivers(state)
+    if blocking:
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} is a VOLUMETRIC "
+            "HEAT GENERATION LS-DYNA integrates alongside conduction, and "
+            "/HEAT/MAT has no such slot. It is DROPPED rather than synthesized "
+            "as an /IMPTEMP, because this deck also states "
+            + ", ".join(blocking) + ": /IMPTEMP is a HARD Dirichlet reset "
+            "applied to every node in its group on every cycle "
+            "(fixtemp.F:180-199), so imposing T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) "
+            "would OVERWRITE the solution those cards drive instead of adding "
+            "to it. Remove the other driver, or restate the generation as a "
+            "*BOUNDARY_FLUX.")
+        return False
+    t0 = _tgmult_initial_temperature(state, mid)
+    if t0 is None:
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} is DROPPED rather "
+            "than synthesized as an /IMPTEMP - this deck states MORE THAN ONE "
+            "*INITIAL_TEMPERATURE value "
+            f"({sorted({it.temp for it in state.initial_temperatures})}), so "
+            "the field starts with a real conduction gradient and the "
+            "adiabatic uniform-generation closed form "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) is not the solution. /IMPTEMP is "
+            "a hard Dirichlet reset every cycle (fixtemp.F:180-199) and would "
+            "clamp that gradient away instead of letting it diffuse.")
+        return False
+    if not _tgmult_nodes(state, pids):
+        # Checked HERE and not at emit time, because the /FUNCT is minted a few
+        # lines below and the single /FUNCT emitter has already run by the time
+        # `_make_tgmult_imptemps` walks the records — a drop taken there left an
+        # orphan curve behind and shifted every later auto id.
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGMULT={tm.tgmult:g} is DROPPED - "
+            f"part(s) {pids} carry no element whose nodes could form the "
+            "/IMPTEMP group.")
+        return False
+    rate = float(tm.tgmult) / rho_cp
+    tgrlc = int(tm.tgrlc or 0)
+    # T(t) = T0 + (TGMULT/(rho*Cp)) * INTEGRAL(f dtau, 0..t).
+    #
+    # TGMULT is a RATE, not a temperature: Vol II R17 p.3-2 defines it as
+    # "Thermal generation rate multiplier" and TGRLC as "GT.0: Load curve ID
+    # giving thermal generation RATE as a function of time". For an adiabatic
+    # uniform body rho*Cp*dT/dt = TGMULT*f(t), so the temperature is the TIME
+    # INTEGRAL of the curve, never the curve itself. A direct map
+    # `T0 + rate*f(t)` shipped here until this was caught: it is dimensionally
+    # dT/dt, it made T fall wherever a strictly positive f fell, and it
+    # contradicted the TGRLC = 0 branch below, which has always integrated the
+    # constant rate 1 (`T0 + rate*end`). 0 carriers on the R14 roster — the one
+    # deck with TGMULT != 0 states TGRLC 0 — so nothing shipped was wrong, but
+    # the default-ON path was.
+    pts: List[Tuple[float, float]] = []
+    if tgrlc < 0:
+        # |TGRLC| is a curve of rate vs TEMPERATURE (Vol II R17 p.3-2 "LT.0"),
+        # which makes rho*Cp*dT/dt = TGMULT*g(T) a NONLINEAR ODE whose solution
+        # is not this closed form. Refused by name rather than silently read as
+        # a time curve. 0 carriers on the R14 roster.
+        state.warn(
+            f"*MAT_THERMAL_* {tm.tmid}: TGRLC={tgrlc} is NEGATIVE, so |TGRLC| "
+            "is a curve of generation rate against TEMPERATURE (Vol II R17 "
+            "p.3-2 LT.0), not against time. The adiabatic closed form "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) only solves the "
+            "time-curve form, so TGMULT="
+            f"{tm.tgmult:g} is DROPPED rather than restated on the wrong "
+            "curve.")
+        return False
+    if tgrlc:
+        curve = state.curves.get(tgrlc)
+        if curve is not None and len(curve.pts) >= 2:
+            pts = _integrate_generation(list(curve.pts), float(t0), rate)
+        else:
+            state.warn(
+                f"*MAT_THERMAL_* {tm.tmid}: TGRLC={tgrlc} (the heat-generation "
+                "curve) is not a resolvable *DEFINE_CURVE, so TGMULT="
+                f"{tm.tgmult:g} could not be restated as an /IMPTEMP and is "
+                "DROPPED. Define the curve, or blank TGRLC to state a constant "
+                "generation.")
+            return False
+    if not pts:
+        end = (state.ctrl_termination.endtim
+               if state.ctrl_termination and state.ctrl_termination.endtim > 0
+               else 1.0)
+        pts = [(0.0, float(t0)), (end, float(t0) + rate * end)]
+    # The /FUNCT is NOT minted here: `_screen_tgmult_generations` may still
+    # withdraw this record, and an id taken is never given back, so a refused
+    # deck would carry a shifted auto-id sequence (measured: [90001..90004]
+    # against the opt-out arm's [90001..90003]). `_mint_tgmult_curves` runs
+    # after the screen, in the same resolve pass, and still long before the
+    # single /FUNCT emitter at the "functions" section.
+    state.tgmult_generations.append(TgmultGeneration(
+        tmid=tm.tmid, mid=mid, pids=pids, tgmult=float(tm.tgmult),
+        tgrlc=tgrlc, rho_cp=rho_cp, t0=float(t0), rate=rate, pts=pts))
+    return True
+
+
+def _mint_tgmult_curves(state: ConversionState) -> None:
+    """Give every SURVIVING TGMULT record its ``/FUNCT``.
+
+    ``next_curve_id()``, never ``next_id()``: ``/FUNCT`` and ``/TABLE`` share
+    ONE starter duplicate scan (``hm_read_table.F:88`` counts "total number
+    /TABLE + /FUNCT" before the UDOUBLE pass) and a collision is ERROR 79
+    (k2rad #111).
+    """
+    for rec in state.tgmult_generations:
+        if rec.func_id:
+            continue
+        fid = state.next_curve_id()
+        rec.func_id = fid
+        state.curves[fid] = Curve(
+            lcid=fid, title=f"Auto_tgmult_T_tmid{rec.tmid}_{fid}",
+            sfa=1.0, sfo=1.0, offa=0.0, offo=0.0, pts=list(rec.pts))
+        state.curve_order.append(fid)
+
+
+def _screen_tgmult_generations(state: ConversionState) -> None:
+    """Deck-wide screen: the /IMPTEMP may not clamp a REAL gradient.
+
+    The closed form is valid only while the whole temperature field is
+    uniform. Two ways it stops being so, both checked over the finished
+    ``heat_mat_cards``:
+
+    * a /HEAT/MAT with NO generation sits beside one that has it — those parts
+      stay at ``T0`` while the driven ones climb, and wherever the two meshes
+      touch the ``/IMPTEMP`` would hold one side of a real conduction front;
+    * two generations run at DIFFERENT rates, for the same reason.
+
+    Either way every record is withdrawn (not just the odd one out): what is
+    wrong is the model, not one card.
+
+    Nothing has to be un-minted here, and that is the point: the ``/FUNCT``
+    used to be created inside ``_resolve_tgmult_generation``, BEFORE this
+    screen could run, so a refusal left an orphan curve behind and shifted
+    every later auto id — MEASURED on a two-material SOLN-2 coupon, auto ids
+    ``[90001..90004]`` against the ``--no-tgmult-imptemp`` arm's
+    ``[90001..90003]``. The mint moved to ``_mint_tgmult_curves``, which runs
+    AFTER this screen, so a refused deck now reproduces the opt-out arm byte
+    for byte and no withdrawal code exists to go stale.
+    """
+    recs = state.tgmult_generations
+    if not recs:
+        return
+    # The scalar rate alone is NOT the whole generation: with a TGRLC curve the
+    # history is `rate * f(t)`, so two /HEAT/MATs can carry the same
+    # TGMULT/(rho*Cp) and still drive their parts apart on different curves.
+    # Compare the SHAPE too — the curve id, and the emitted temperature samples
+    # themselves so two different ids holding the same points do not trip it.
+    rates = sorted({round(r.rate, 12) for r in recs})
+    shapes = {(r.tgrlc, tuple((round(t, 12), round(v, 12)) for t, v in r.pts))
+              for r in recs}
+    uncovered = sorted(set(state.heat_mat_cards) - {r.mid for r in recs})
+    if len(rates) == 1 and len(shapes) == 1 and not uncovered:
+        return
+    why = []
+    if uncovered:
+        why.append(f"/HEAT/MAT material(s) {uncovered} carry NO TGMULT, so "
+                   "they would stay at T0 while the driven parts climb")
+    if len(rates) > 1:
+        why.append(f"the generations run at DIFFERENT rates {rates} "
+                   "(TGMULT/(rho*Cp))")
+    elif len(shapes) > 1:
+        why.append("the generations share one rate but run on DIFFERENT TGRLC "
+                   f"curves {sorted({r.tgrlc for r in recs})}, so their "
+                   "temperature histories separate")
+    state.warn(
+        "*MAT_THERMAL_* TGMULT on material(s) "
+        f"{sorted(r.tmid for r in recs)} is DROPPED rather than synthesized as "
+        "an /IMPTEMP: " + "; and ".join(why) + ". The adiabatic "
+        "uniform-generation closed form T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) is "
+        "only the solution while the whole field stays uniform, and /IMPTEMP "
+        "is a hard Dirichlet reset every cycle (fixtemp.F:180-199) - it would "
+        "hold one side of a real conduction front instead of letting it "
+        "diffuse. Model the generation as a *BOUNDARY_FLUX on those parts.")
+    state.tgmult_generations.clear()
+
+
+def _warn_thermal_generation_drops(state: ConversionState, tm, mid: int,
+                                   rho_cp: float = 0.0) -> None:
     """``TGRLC``/``TGMULT``/``TLAT``/``HLAT`` — the four cells every
-    ``*MAT_THERMAL_*`` carries and /HEAT/MAT has no slot for."""
-    dropped = [n for n, v in (("TGRLC", tm.tgrlc), ("TGMULT", tm.tgmult),
-                              ("TLAT", tm.tlat), ("HLAT", tm.hlat)) if v]
+    ``*MAT_THERMAL_*`` carries and /HEAT/MAT has no slot for.
+
+    ``TGMULT`` is the one that can sometimes be restated: see
+    :func:`_resolve_tgmult_generation`. When it is taken, neither it nor its
+    curve ``TGRLC`` belongs in the dropped list — saying otherwise would tell
+    the reader a cell was lost that is in the emitted deck.
+    """
+    taken = _resolve_tgmult_generation(state, tm, mid, rho_cp)
+    cells = (("TLAT", tm.tlat), ("HLAT", tm.hlat)) if taken else \
+            (("TGRLC", tm.tgrlc), ("TGMULT", tm.tgmult),
+             ("TLAT", tm.tlat), ("HLAT", tm.hlat))
+    dropped = [n for n, v in cells if v]
     if not dropped:
         return
     state.warn(
@@ -2431,14 +2772,14 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 refused_tm, tm = tm, None
             else:
                 rho_cp, a_s, bs, al, bl = fit
-                _warn_thermal_generation_drops(state, tm, mid)
+                _warn_thermal_generation_drops(state, tm, mid, rho_cp)
         elif tm is not None:
             # T01 and the isotropic-in-fact T02 both land here: ONE
             # conductivity, so k = AS with BS = 0, and AL/BL mirror it.
             rho_cp = (tm.tro or rho) * tm.hc
             a_s = getattr(tm, "tc", 0.0) or getattr(tm, "k1", 0.0)
             al = a_s
-            _warn_thermal_generation_drops(state, tm, mid)
+            _warn_thermal_generation_drops(state, tm, mid, rho_cp)
             if rho_cp <= 0.0:
                 state.warn(
                     f"*MAT_THERMAL_* {tm.tmid} -> /HEAT/MAT/{mid}: the "
@@ -2525,6 +2866,9 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         state.heat_mat_cards[mid] = (
             _heat_mat_t0(state, t0_global),
             rho_cp, a_s, bs, t1, al, bl, _efrac(state))
+
+    _screen_tgmult_generations(state)
+    _mint_tgmult_curves(state)
 
     if refused:
         state.warn(
@@ -3543,6 +3887,107 @@ def _emit_thermal_boundary(bc, card_id: int, surf_id: int) -> List[str]:
     return lines
 
 
+def _tgmult_nodes(state: ConversionState, pids: List[int]) -> List[int]:
+    """Every node of *pids*' own elements.
+
+    Scoped by PART, never by material id: on a ``*CONTROL_SOLUTION`` SOLN = 1
+    deck the ``/HEAT/MAT`` id is a SYNTHESIZED stand-in (``/HEAT/MAT/90001``,
+    not the LS-DYNA TMID or MID), so a group built from the material id would
+    name nothing.
+    """
+    pidset = set(pids)
+    nodes: Set[int] = set()
+    for e in state.solid_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.shell_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.tshell_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.beam_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in (e.n1, e.n2) if n > 0)
+    return sorted(nodes)
+
+
+def _make_tgmult_imptemps(state: ConversionState) -> List[str]:
+    """``*MAT_THERMAL_*`` ``TGMULT`` → ``/FUNCT`` + ``/GRNOD/NODE`` + ``/IMPTEMP``.
+
+    Only reached for records that passed the gate in
+    ``_resolve_tgmult_generation`` and the deck-wide screen in
+    ``_screen_tgmult_generations`` — i.e. the deck states NO other
+    temperature-moving card, starts from one uniform temperature, and every
+    ``/HEAT/MAT`` generates at the same rate. Under exactly those conditions
+    the nodal heat balance has one term and its solution is the uniform,
+    closed-form ``T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)``.
+
+    The ``/FUNCT`` id comes from ``next_curve_id()``: ``/FUNCT`` and ``/TABLE``
+    share ONE starter duplicate scan (``hm_read_table.F:88``) and a collision
+    is ERROR 79 (k2rad #111).
+
+    **No empty-node branch here.** ``_resolve_tgmult_generation`` refuses a
+    record whose parts carry no element, so ``_tgmult_nodes`` is non-empty for
+    every record that reaches this loop. The check used to live here and could
+    not withdraw the ``/FUNCT`` it was rejecting — the single ``/FUNCT``
+    emitter runs at the "functions" assembly step, far above "thermal" — so it
+    was moved to the one place that still can.
+    """
+    if not state.tgmult_generations:
+        return []
+    lines: List[str] = [
+        "#-  VOLUMETRIC HEAT GENERATION (*MAT_THERMAL_* TGMULT -> /IMPTEMP):",
+        HDR,
+    ]
+    emitted = False
+    for rec in state.tgmult_generations:
+        nodes = _tgmult_nodes(state, rec.pids)
+        fid = rec.func_id
+        gid = state.next_grnod_id()
+        tid = state.next_id()
+        lines += _emit_grnod_node(gid, f"tgmult_nodes_{rec.tmid}", nodes)
+        lines += [
+            f"/IMPTEMP/{tid}",
+            f"tgmult_generation_{rec.tmid}",
+            "# func_IDT sensor_ID  grnod_ID",
+            f"{_i(fid)}{_i(0)}{_i(gid)}",
+            "#           Ascale_x            Fscale_y             T_start"
+            "              T_stop",
+            f"{_f(0.0)}{_f(1.0)}{_f(0.0)}{_f(0.0)}",
+            HDR,
+        ]
+        state.thermal_driver_emitted = True
+        emitted = True
+        state.warn(
+            f"*MAT_THERMAL_* {rec.tmid} TGMULT={rec.tgmult:g} "
+            f"(TGRLC={rec.tgrlc}) with RHO0_CP={rec.rho_cp:g} and NO other "
+            f"temperature driver in the deck -> /IMPTEMP/{tid} over "
+            f"{len(nodes)} node(s) of part(s) {rec.pids}, func_IDT={fid}: the "
+            "adiabatic uniform-generation solution "
+            "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dtau, 0..t) = "
+            f"{rec.t0:g} + {rec.rate:g}"
+            + (f"*INTEGRAL(f dtau) (TGRLC {rec.tgrlc}, the generation-RATE "
+               "curve - Vol II R17 p.3-2 - so the temperature is its running "
+               "TIME INTEGRAL, trapezoidal on the curve's own abscissae, "
+               "never the curve itself)" if rec.tgrlc else "*t") + ". "
+            "MEASURED on thermal/thermal-stress: the free-expansion "
+            "displacement of node 2 goes from exactly 0.0 (all 500 T01 states, "
+            "all 12 DX/DY/DZ channels) to 1.49531e-04 mm at t = 2.994002 - "
+            "+0.21 % against the LS-DYNA nodout's NEAREST SAMPLE "
+            "(1.49216e-04 at t = 2.99), and +0.007 % against the closed form "
+            "at the same time, the sample-time offset being the larger of the "
+            "two errors - at 406580 cycles and "
+            "0 ERROR / 0 WARNING. IE and KE are NOT the observable on that "
+            "deck - its LS-DYNA reference energies are structural zeros. "
+            "/IMPTEMP is a HARD Dirichlet reset applied every cycle "
+            "(fixtemp.F:180-199), which is exactly right here (there is "
+            "nothing else driving the field) and is why the rule refuses to "
+            "fire on a deck that states any other temperature driver. Turn it "
+            "off with --no-tgmult-imptemp.")
+    return lines if emitted else []
+
+
 def _make_thermal_boundaries(state: ConversionState) -> List[str]:
     """Emit the /SURF/SEGs and the three boundary cards."""
     if not state.thermal_boundaries:
@@ -3699,6 +4144,7 @@ def _make_thermal(state: ConversionState) -> List[str]:
             "reset applied every cycle while T_start <= t <= T_stop "
             "(fixtemp.F:180-200); outside that window the nodes are untouched "
             "and simply conduct.")
+    lines += _make_tgmult_imptemps(state)
     # The three heat-SOURCE cards come after the drivers, so that
     # `thermal_source_emitted` is set before _warn_inert_expansion and
     # _make_thermal_output read it.
@@ -3788,6 +4234,17 @@ def _warn_constant_driver_expansion(state: ConversionState) -> None:
         return
     if state.thermal_source_emitted:
         return                       # a heat source moves the field for real
+    if state.tgmult_generations:
+        # A synthesized TGMULT /IMPTEMP is a MOVER by construction: its /FUNCT
+        # is the ramp T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt), and its record lives in
+        # `tgmult_generations`, NOT in `imposed_temperatures`. Without this
+        # line every test below ran over an EMPTY list — no `movers`, no early
+        # return from either loop, an empty `consts` — and the deck's own
+        # carrier (thermal/thermal-stress) was told in the log that it
+        # "develops NO thermal strain from these cards" three lines after the
+        # A4 warning reported node 2 moving 0.0 -> 1.49531e-04 mm, with the
+        # constant printed as an empty "()".
+        return
     movers = [d for d in state.imposed_temperatures if d.lcid]
     if movers:
         return

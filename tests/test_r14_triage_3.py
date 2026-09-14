@@ -1366,6 +1366,65 @@ class RetractedSourceCitationsAreGoneEverywhere(unittest.TestCase):
         "p.41-97 Remark 13":
             "p.41-104 -- *SECTION_SOLID Remark 13 is on printed page 41-104 of "
             "Vol I R17 (pdf page 3786); 41-97 is the user-defined-element table",
+        # ── round 4 ──────────────────────────────────────────────────────
+        "Cockcroft-Latham":
+            "nothing -- *CONTROL_HOURGLASS IHQ 8 is SHELL warping stiffness "
+            "(Vol I R17 p.12-271 EQ.8, 'Activates full projection warping "
+            "stiffness for shell formulations 9, 16 and -16'), 9 is Puso "
+            "[2000] and 10 the Cosserat Point Element; the assumed-strain "
+            "co-rotational form is IHQ 6, Belytschko-Bindeman [1993]. The "
+            "Cockcroft-Latham criterion is a DAMAGE model and has nothing to "
+            "do with hourglass control",
+        "fl_exp_ihq8_":
+            "the four REAL IHQ-8 carriers -- spotweld.k, mainboltaexpl.k, "
+            "show-cases/contact-overview/main.k and 07_metalstrip.k. A find "
+            "for '*ihq*' over F:, C:/openradioss_run and E:/foxcore_data "
+            "returns nothing, so this coupon family does not exist",
+        "projects the secondary nodes":
+            "nothing -- no TYPE2 starter routine writes X(1..3,.) at all "
+            "(i2buc1/i2chk3/i2cor3/i2dst3/i2dst3_27/i2surfs/i2tid3/i2_dtn*/"
+            "i2master/inint2 read the array and never assign to it). The FOUR "
+            "interface files that do move a node are i3pen3.F:187-197 "
+            "(TYPE3), i7pwr3.F:213-242 (TYPE7 INACTI 3/4), "
+            "i24pen3.F:317-319 (TYPE24) and in12r.F:120-133 (TYPE12) -- none "
+            "of them TYPE2. k2rad emits the tie at Spotflag 27 (auto-penalty) "
+            "anyway",
+        "rigid-wall-plus-implicit":
+            "nothing -- ex_27_solid_elform_2_rigidwall_constrained_nodes_"
+            "implicit.k has NO *RIGIDWALL keyword (grep -c = 0); it carries "
+            "*CONSTRAINED_GLOBAL. Only the _penalty_ twin has "
+            "*RIGIDWALL_PLANAR_ID",
+        "hm_read_inter_type18.F:283-291":
+            ":312-313 -- the two ISTIFF modes are documented there; Iauto is "
+            "read into ISTIFF at :131 and defaulted at :158-159",
+        "hm_read_inter_type18.F:230-253":
+            ":232-234 (SCALE = STFAC under ISTIFF == 2) and :252-253 "
+            "(STFAC = STFAC*VREF*VREF)",
+        # ── round 4, part B ───────────────────────────────────────────────
+        "never been measured to help":
+            "MEASURED, and it helps -- the all-rigid-SSID swap takes sphere1's "
+            "internal energy from 0 (-100 %) to 77 830 (-1.66 %) against the "
+            "LS-DYNA reference 79 147.3, and boundary_prescribed_motion."
+            "blow-mold from a diverging 241 934-cycle run to NORMAL "
+            "TERMINATION in 25 675 cycles. It is the DEFAULT on an explicit "
+            "deck since round 4",
+        "deliberately does NOT swap":
+            "k2rad DOES swap the sides on an explicit deck "
+            "(--no-rigid-secondary-swap opts out); the drop survives only on "
+            "an IMPLICIT one, where every restoration arm on bumper.k diverges "
+            "at ISTOP = -2 at nt 2 and nt 4",
+        "cannot hold `/RBODY` members":
+            "the starter ACCEPTS them -- 0 ERROR(S) with all 2 273 rigid nodes "
+            "of sphere1's part 1 in a TYPE7 secondary group, and again on "
+            "mat_spring.belted-dummy; the secondary nodal stiffness is "
+            "element-based (i7stslav.F:55-58 STIFINT), not nodal-mass-based",
+        "cannot form a secondary node group":
+            "the same refutation -- a rigid-body node in a TYPE7 secondary "
+            "group is accepted at 0 ERROR(S). The drop was a k2rad policy, not "
+            "a solver constraint",
+        "secondary node group cannot hold rigid":
+            "the same refutation, third spelling -- measured at 0 ERROR(S) on "
+            "sphere1 and mat_spring.belted-dummy",
     }
 
     _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

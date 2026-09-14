@@ -36,6 +36,28 @@ def _tie_stfac_arg(text: str) -> Union[str, float]:
             f"--tie-stfac takes a number or 'auto', not {text!r}")
 
 
+def _qstat_dtscal_arg(text: str) -> Union[str, float]:
+    """``--qstat-dtscal`` accepts a positive number or the literal ``none``.
+
+    ``none`` is kept as the STRING all the way to the writer, where it means
+    "emit no ``/IMPL/QSTAT`` card at all" — which is Radioss's own default
+    (``SCAL_DTQ = 1``, ``freimpl.F:135``) and is measured WORSE than 10 on this
+    corpus, so it is an escape rather than a value.
+    """
+    if text.strip().lower() == "none":
+        return "none"
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--qstat-dtscal takes a number or 'none', not {text!r}")
+    if v <= 0.0:
+        raise argparse.ArgumentTypeError(
+            "--qstat-dtscal must be > 0 (use 'none' to emit no /IMPL/QSTAT "
+            "card)")
+    return v
+
+
 def _make_progress_printer():
     """A convert() progress callback that prints an updating percentage line."""
     def cb(frac: float, label: str) -> None:
@@ -131,7 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
              "died 'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' reach "
              "NORMAL TERMINATION without it (ex_01 x3, ex_14 x4, ex_15 x3 - "
              "ex_01_thin_shell_elform_2 from an ERROR at t = 0.105 to t = "
-             "1.000 at IE -13.7 %% against its LS-DYNA reference; "
+             "1.000 at IE -14.12 %% against its LS-DYNA reference - the "
+             "COMBINED arm, re-measured after --qstat-dtscal 10 reached the "
+             "same deck's _0001.rad; the -13.7 %% this string used to quote "
+             "was the DTSCAL-0.1 arm; "
              "ex_14_solid_elform_1 from ERROR TERMINATION to NORMAL at cycle "
              "33, t = 0.01839 of 0.02, engine energy error -0.7 %%, IE "
              "5.044e7 / KE 4.974e7 against the LS reference's 2.4162e7 / "
@@ -148,6 +173,153 @@ def build_parser() -> argparse.ArgumentParser:
              "Implicit decks only; ignored for explicit.",
     )
 
+    parser.add_argument(
+        "--qstat-dtscal",
+        type=_qstat_dtscal_arg,
+        default=10.0,
+        metavar="VALUE|none",
+        help="The /IMPL/QSTAT/DTSCAL inertia-stabilization scale on a "
+             "QUASI-STATIC implicit deck (one with no "
+             "*CONTROL_IMPLICIT_DYNAMICS). Default 10. The stabilization "
+             "added to the stiffness diagonal is "
+             "M/((1+alpha)*beta*(DTSCAL*dt)^2) (imp_dyna.F:351-355), so it "
+             "grows as 1/DTSCAL^2 AND as 1/dt^2: at the pre-2026-09 default "
+             "of 0.1 it was 100x the Radioss default (SCAL_DTQ = 1, "
+             "freimpl.F:135), and every auto-step cut made the tangent "
+             "stiffer, shrinking the next Newton correction. LS-DYNA's "
+             "standard static implicit adds none at all (its own d3hsp: "
+             "'artificial stabilization flag 2 = off (standard analysis "
+             "DEFAULT)'). MEASURED at nt 3 AND nt 4 against each deck's own "
+             "LS-DYNA glstat: 4.2.frf.cant-1 goes from 4 cycles and an ERROR "
+             "at 0.1 - the 4 is its pre-round campaign row; a quiet-machine "
+             "master repeat never leaves cycle 0, and either way the arm "
+             "advances nothing - to 104 cycles, t = 1.000, IE 7922 against the reference "
+             "7946.31 (-0.31 %%) at 10; tensile2 +7.36 %%, "
+             "6.5.tbl.psd.prepressure-1 +0.03 %%, doorbeam NORMAL. The COST "
+             "is ex_02_thick_shell_elform_{2,3,5} (3 deck keys on ONE emitted "
+             "file, all three not_comparable BOTH WAYS - because their LS "
+             "reference KINETIC energy is a structural zero, which is what "
+             "the rows' own note names; their LS IE 0.771729/0.058509/0.100376 "
+             "is NOT a structural zero and IS the comparable channel, and it "
+             "degrades 3.4/53.0/32.5 pp - so the VERDICT is unchanged but "
+             "fidelity on that channel is not): the campaign rows read 1899 / "
+             "1896 / 1903 cycles at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (nt 4) "
+             "against a run still going at the 600 s campaign cap at 10, having "
+             "reached t = 0.44 / 0.49 / 0.59 there and t = 0.32 on an "
+             "independent quiet-machine repeat, at nt 3 AND nt 4 - the verdict "
+             "does not flip with nt. Pass 0.1 to "
+             "restore the old default on such a deck; on THAT family it "
+             "reproduces the pre-round-4 file BYTE FOR BYTE. 'none' emits no card "
+             "at all - measured WORSE than either (ex_02 dies at cycle 0 and "
+             "tensile2 at t = 0.746). --deformable-contact-recipe keeps its "
+             "separately validated 0.05 and ignores this flag.",
+    )
+    parser.add_argument(
+        "--arclength-riks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit /IMPL/DT/3 (RIKS arc-length continuation) instead of "
+             "/IMPL/DT/2 when *CONTROL_IMPLICIT_SOLUTION asks for LS-DYNA's "
+             "arc-length method - THE MANUAL'S OWN RULE, Vol I R17 p.12-354 "
+             "and p.12-358: 6 <= NSOLVR <= 9, or NSOLVR = 12 with card-3 "
+             "ARCMTH = 3. (ARCCTL is NOT part of it: p.12-358 defines it as "
+             "the arc-length CONTROLLING NODE ID whose 0 means 'generalized "
+             "arc length method', and the whole card is ignored unless the "
+             "method is already active. An ARCCTL != 0 clause shipped first "
+             "and is retracted - it made ex_06_beam_elform_1 a carrier, and "
+             "that deck's own LS-DYNA d3hsp shows plain BFGS.) Roster reach: "
+             "2 keys, ex_05_beam_elform_3_&_6 and ex_07_beam_elform_1. "
+             "OFF by default; the request is WARNED about "
+             "either way. freimpl.F:384-387 reads seven fields "
+             "(NL_DTP/ALEN0/NL_DTN/Tsca_dn/Tsca_up/IAL_M/SCAL_RIKS) and the "
+             "zero cells take lectur.F:3518-3522's defaults. It buys the load "
+             "path, not the answer: measured at nt 3 AND nt 4 on both "
+             "carriers, error_engine either way, against this branch's own "
+             "flag-off baseline: ex_07_beam_elform_1 walks from t = 0.3004 "
+             "to t = 1.000 and lands "
+             "at -1.72 %% of its LS-DYNA reference but still exits ERROR on "
+             "the last increment; ex_05_beam_elform_3_&_6 fails in ~2 s "
+             "without the flag and with it runs tens of thousands of cycles "
+             "to t ~ 1e-7 and TIMES OUT. "
+             "/IMPL/DT/FIXPOINT is deactivated by the engine under RIKS "
+             "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
+    )
+    parser.add_argument(
+        "--discrete-offset",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Honour *ELEMENT_DISCRETE's OFFSET cell (Vol I R17 p.19-33: 'a "
+             "displacement or rotation at time zero ... a positive offset on "
+             "a translational spring will lead to a tensile force being "
+             "developed at time zero'). ON by default. Radioss spring "
+             "deflection is purely geometric (r1def3.F:206) and /PROP/TYPE4 "
+             "has no offset cell, so the exact restatement is "
+             "f_RAD(d) = f_LS(d + OFFSET): the force function's ABSCISSAE are "
+             "shifted by -OFFSET (ordinates untouched) and an /INISPRI/FULL "
+             "carries the pre-stretch energy EI = 1/2*f_LS(OFFSET)*OFFSET. "
+             "MEASURED on ex_17_spring_elform_0 and ex_18_spring_elform_0 "
+             "(the only two carriers on 885 decks, both OFFSET 25.4) together "
+             "with --spring-token-mass-compensation: IE +0.0074 %% / KE "
+             "+0.039 %% and +0.0064 %% / -0.015 %% against their own LS-DYNA "
+             "glstat, where the shipped arm was a strict ZERO model "
+             "(-100 %% / -100 %%). The shift ALONE is +10.20 %% / -99.27 %% - "
+             "the two halves are one change. Use --no-discrete-offset to go "
+             "back to dropping the cell with a warning.",
+    )
+    parser.add_argument(
+        "--spring-token-mass-compensation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Subtract k2rad's own artificial spring mass from the /ADMAS of "
+             "the nodes it lands on. ON by default. LS-DYNA discrete elements "
+             "are MASSLESS, but hm_read_prop04.F:136-142 refuses a "
+             "/PROP/TYPE4 MASS <= 1e-15 (ERROR 229), so k2rad writes a token "
+             "1e-4 and rinit3.F:1926/1937-1939 puts HALF of it on EACH end "
+             "node, per element - a node touched by k springs carries "
+             "k*1e-4/2 of invented mass. MEASURED ALONE it is inert "
+             "(spring.k, spring1.k, gnonspring.k keep their cycle counts and "
+             "their IE to four significant digits); it is load-bearing inside "
+             "the --discrete-offset bundle, where it turns ex_17's +10.20 %% "
+             "/ -99.27 %% into +0.0074 %% / +0.039 %% - uncompensated, the "
+             "token shifts that deck's omega to 41.715 rad/s against LS-DYNA's "
+             "43.954, a 5.4 %% frequency error. It never writes a "
+             "non-positive /ADMAS: a node whose own mass is at or below the "
+             "token share is left alone and the numbers are named.",
+    )
+    parser.add_argument(
+        "--tgmult-imptemp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Turn a *MAT_THERMAL_* TGMULT (volumetric heat generation) into "
+             "an /IMPTEMP holding the closed-form adiabatic solution "
+             "T(t) = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt) over the parts' own nodes. ON "
+             "by default, and gated HARD: it fires only when the deck states "
+             "NO other temperature driver. The gate names every spelling it "
+             "screens, and it screens ALL THREE drop buckets - what k2rad "
+             "converts, what it does not parse at all, and what it parses and "
+             "declines - so the *BOUNDARY_TEMPERATURE_RSW / _TRAJECTORY / "
+             "_PERIODIC_SET, *BOUNDARY_THERMAL_WELD / _BULKNODE / _BULKFLOW "
+             "and *BOUNDARY_FLUX_TRAJECTORY spellings block it too, not just "
+             "the *BOUNDARY_{TEMPERATURE,CONVECTION,FLUX,RADIATION} and "
+             "*LOAD_HEAT_* ones. The ONE exception is the "
+             "*LOAD_THERMAL_OPTION family on a *CONTROL_SOLUTION SOLN 1 or 2 "
+             "deck, which LS-DYNA itself ignores there (Vol I R17 p.33-162) "
+             "and k2rad drops for the same reason - and a TGMULT only ever "
+             "acts on such a deck. The gate exists because /IMPTEMP is a hard "
+             "Dirichlet reset "
+             "applied every cycle (fixtemp.F:180-199) and would OVERWRITE a "
+             "conduction solution rather than add to it. "
+             "*INITIAL_TEMPERATURE is the T0 of that closed form, not a "
+             "blocker. MEASURED on thermal/thermal-stress (TGMULT 10, "
+             "TGRLC 0, RHO0_CP 1): the free-expansion displacement of node 2 "
+             "goes from exactly 0.0 - all 500 states, all channels - to "
+             "1.49531e-04 mm at t = 2.994002 - +0.21 %% against the "
+             "LS-DYNA nodout's NEAREST SAMPLE (1.49216e-04 at t = 2.99) and "
+             "+0.007 %% against the closed form at the same time - at 406580 "
+             "cycles and 0 ERROR / 0 WARNING. "
+             "Quote the DISPLACEMENT: that deck's LS reference energies are "
+             "structural zeros.",
+    )
     parser.add_argument(
         "--eig",
         action="store_true",
@@ -237,11 +409,93 @@ def build_parser() -> argparse.ArgumentParser:
              "raise it toward 1.0 if a contact fails to engage.",
     )
     fc.add_argument(
+        "--derived-gapmin",
+        action="store_true",
+        help="Write an explicit Gapmin on every /INTER/TYPE7 whose MAIN surface "
+             "is SOLID segments only and whose Gapmin would otherwise be 0 "
+             "(Gapmin = --derived-gapmin-factor x the smallest main-surface "
+             "segment side, ceiling 0.5 x that side). OFF by default. Without "
+             "it the starter derives its own gap, 0.1 x that side "
+             "(i7sti3.F:1055-1063 -- DXM only ever accumulates shell "
+             "thickness, so a solid main takes the EM01*GAPMX fallback), while "
+             "LS-DYNA's offset on a solid segment is ZERO unless SLDTHK > 0 is "
+             "stated (Vol I R17 p.11-101/103). A default-ON WARNING names the "
+             "derived value on every carrier whether or not this flag is set. "
+             "MEASURED on twobar (10 mm bars, derived GAP MIN 1.0): the "
+             "starter's gap costs +1151 %% internal energy against the LS-DYNA "
+             "reference 3036.17, where this flag writes 0.005 x 10 = 0.05 and "
+             "reads -5.60 %% with KE -6.18 %%. It is OPT-IN because the same "
+             "factor degrades the only other carrier with a measured arm: on "
+             "sphere1 it writes 0.02921 and internal energy goes -1.66 %% -> "
+             "-7.77 %% at 4.1x the cycles. Class census with k2rad's own "
+             "resolver over the 356-key R14 roster: 15 interfaces on 14 deck "
+             "keys, of which exactly TWO - twobar and sphere1 - have a "
+             "measured solver arm at this factor and THIRTEEN have none. "
+             "A press-fit "
+             "*CONTACT_*_INTERFERENCE and k2rad's own injected implicit "
+             "stabilization stub are excluded.",
+    )
+    fc.add_argument(
+        "--derived-gapmin-factor",
+        type=float,
+        default=0.005,
+        metavar="F",
+        help="Fraction of the smallest main-surface segment side used by "
+             "--derived-gapmin (default 0.005). MEASURED on twobar: 0.005 "
+             "reads -5.60 %% against its LS-DYNA reference, 0.01 reads "
+             "+14.45 %% (do NOT use), 0.001 -15.22 %% and 1e-4 -55.83 %% at "
+             "43x the cycles.",
+    )
+    fc.add_argument(
         "--suggest-gapmin",
         action="store_true",
         help="Print the suggested per-interface Gapmin (min nodal clearance between "
              "each contact's two parts) and exit WITHOUT converting. Inspect before "
              "applying with --auto-gapmin.",
+    )
+    fc.add_argument(
+        "--rigid-secondary-swap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an EXPLICIT deck, rescue a *CONTACT whose SECONDARY (SSID) "
+             "side is WHOLLY RIGID instead of losing the whole interface. ON "
+             "by default. /INTER/TYPE7 is an asymmetric node-to-segment "
+             "contact, so the DEFORMABLE side must supply the tracked nodes: "
+             "k2rad swaps the roles when the MSID side carries deformable "
+             "nodes, and keeps the rigid secondary group when BOTH sides are "
+             "wholly rigid. The starter does NOT refuse /RBODY members in a "
+             "TYPE7 node group - measured at 0 ERROR(S) - so the old drop was "
+             "a k2rad policy, not a solver constraint. MEASURED: sphere1 "
+             "internal energy 0 (-100 %%) -> 77 830 (-1.66 %%) against the "
+             "LS-DYNA reference 79 147.3; EXP_SC_CONTACT_INTERFERENCE -100 %% "
+             "-> -42.8 %%; boundary_prescribed_motion.blow-mold from a "
+             "diverging 241 934-cycle run at t = 0.0061 of 0.015 to NORMAL "
+             "TERMINATION at t = 0.015 in 25 675 cycles. IMPLICIT decks keep "
+             "the drop either way: every restoration arm on bumper diverges at "
+             "ISTOP = -2 at nt 2 and nt 4.",
+    )
+    fc.add_argument(
+        "--deformable-to-rigid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Honour *DEFORMABLE_TO_RIGID (the plain spelling): the named "
+             "part is rigid FROM t = 0 and is emitted as an /RBODY through the "
+             "same path a *MAT_RIGID part takes, keeping its own material "
+             "(Vol I R17 p.18-1). ON by default. Its elements are then "
+             "DEACTIVATED, so the part no longer controls the time step: "
+             "MEASURED on pend.imp, the controlling element goes SOLID at "
+             "dt 1.360e-06 to TRUSS at dt 1.794e-05 - LS-DYNA's own "
+             "1.79363E-05 - and the deck's energy error goes 99.9 %% to "
+             "-0.0 %% (internal energy 5.162e5 to 5.901e-06 against the "
+             "LS-DYNA reference 5.03545e-06) in 9 480 cycles where LS-DYNA "
+             "takes 9 479. That -0.0 %% is the ENGINE's own energy balance, "
+             "not a deviation from the reference: the campaign row still "
+             "reads ie_dev +17.19 %% and stays a deviation, both energies "
+             "being structural zeros on a gravity pendulum. The FIDELITY "
+             "channel here is the KINETIC energy - 21.8702 against 21.874, "
+             "-0.017 %%. The run-time-triggered options (_AUTOMATIC, "
+             "_INERTIA, *RIGID_DEFORMABLE_*) are refused by name; they have 0 "
+             "carriers on every corpus this converter is measured against.",
     )
     fc.add_argument(
         "--deformable-contact-recipe",
@@ -594,7 +848,16 @@ def main(argv=None) -> int:
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
+        derived_gapmin=args.derived_gapmin,
+        derived_gapmin_factor=args.derived_gapmin_factor,
+        rigid_secondary_swap=args.rigid_secondary_swap,
+        deformable_to_rigid=args.deformable_to_rigid,
         fixpoint_count=args.fixpoint_count,
+        qstat_dtscal=args.qstat_dtscal,
+        arclength_riks=args.arclength_riks,
+        discrete_offset=args.discrete_offset,
+        spring_token_mass_compensation=args.spring_token_mass_compensation,
+        tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,

@@ -55,10 +55,19 @@ __all__ = [
     "_seatbelt_part_ids",
     "_seatbelt_2d_part_ids",
     "_ams_is_emitted",
+    "rigid_part_ids",
+    "AUTO_IMPLICIT_STUB_TITLE",
 ]
 
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
+
+#: Title of the inert all-parts self-contact ``k2rad._inject_implicit_contact_stub``
+#: adds to a contact-free IMPLICIT deck. ONE spelling, because two consumers now
+#: key on it: the injector writes it and ``writer/contacts`` EXCLUDES it from the
+#: derived-Gapmin rule (measured inert on 5 of 5 stub carriers, so deriving a gap
+#: for k2rad's own stabilization card would be noise on 28 roster interfaces).
+AUTO_IMPLICIT_STUB_TITLE = "auto_implicit_stabilization_self_contact"
 
 
 def _part_scoped_segment_set(state: ConversionState, ssid: int,
@@ -98,6 +107,62 @@ def _part_scoped_segment_set(state: ConversionState, ssid: int,
         "faces as SEG clauses (or a plain *SET_SEGMENT) if the load/boundary "
         "really belongs on that part's surface.")
     return True
+
+
+def rigid_part_ids(state: ConversionState) -> Set[int]:
+    """Every PID that becomes an ``/RBODY`` at ``t = 0`` — a ``*MAT_RIGID``
+    part OR a ``*DEFORMABLE_TO_RIGID`` part. The ONE predicate every consumer
+    of "is this part rigid?" tests.
+
+    ``state.mat_rigid`` is keyed by MID and answers a MATERIAL question ("does
+    this material card make its parts rigid?"). ``*DEFORMABLE_TO_RIGID`` is a
+    PART-level switch that leaves the part's own deformable material in place
+    (Vol I R17 p.18-1), so a consumer that keeps testing ``state.mat_rigid``
+    alone silently treats a rigid part as deformable. That is not a cosmetic
+    difference: on ``intro-by-k.-weimar/misc/pendulum-i/pend.imp.k`` a
+    ``/GRAV`` group builder that did not see the switch left an ``/RBODY``
+    outside the gravity scope and produced a 0.000 / 0.000 zero model at 9 480
+    NORMAL cycles.
+
+    The MATERIAL registries (``writer/materials``' ``/MAT/ELAST`` emission and
+    label lookup, ``writer/mesh``'s law id, ``writer/thermal``'s law screen,
+    ``state.all_mat_ids``, ``assembly``'s ``*MAT_RIGID`` MID offsetter)
+    deliberately do NOT use this: a ``*DEFORMABLE_TO_RIGID`` part's material is
+    still its own law and is still emitted as such.
+
+    **``--no-deformable-to-rigid`` is honoured HERE too**, so that this
+    predicate and ``rbody._deformable_to_rigid_map`` — the function that
+    decides WHICH parts the run converts — always name the same set.
+    Unconditional, this function said "rigid" about a part
+    the opt-out leaves DEFORMABLE in the emitted deck: MEASURED on a two-part
+    D2R coupon with the flag set, no ``/RBODY`` is written, yet
+    ``*DAMPING_GLOBAL`` damped only 8 of the 12 nodes and the ``/XREF`` screen
+    dropped the part's reference geometry under a message saying "it converts
+    to an /RBODY" on a deck that emits none. (Corpus reach of the opt-out:
+    0 decks — the default path never saw this.) The refusal MESSAGE still has
+    exactly one home, in ``_deformable_to_rigid_map``; what is shared here is
+    the predicate, not the warning.
+
+    ONE stated exception, so the invariant above is not read wider than it is.
+    ``_make_rbodies`` — the EMITTER — declines a part that contributes no node
+    at all (no element, no ``*CONSTRAINED_EXTRA_NODES``), warning
+    *"no elements found; /RBODY not emitted — the part is NOT rigid in the
+    converted model"*. This predicate still calls such a part rigid. Reach on
+    the R14 roster: 0 (all four ``*DEFORMABLE_TO_RIGID`` keys own elements),
+    and a part with no nodes contributes nothing to the node-set consumers
+    either — but ``_synthesize_local_motion_frames`` and the ``/XREF`` screen
+    would still speak of an ``/RBODY`` the deck does not carry. Recorded as a
+    ROADMAP NOT-closed item rather than fixed by re-deriving the emitter's node
+    walk here: "emits an ``/RBODY``" is NOT the same question as "is rigid"
+    (``*CONSTRAINED_RIGID_BODIES`` merges a slave's nodes into its master, so a
+    merged slave is rigid and emits no body of its own), and a second
+    implementation of that walk is exactly the drift this ONE predicate exists
+    to remove.
+    """
+    out = {p for p, part in state.parts.items() if part.mid in state.mat_rigid}
+    if state.options.deformable_to_rigid:
+        out |= set(state.deformable_to_rigid)
+    return out
 
 
 def _ams_is_emitted(state: ConversionState) -> bool:

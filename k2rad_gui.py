@@ -91,7 +91,16 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
                          gapmin_factor_text: str = "",
+                         derived_gapmin: bool = False,
+                         derived_gapmin_factor_text: str = "",
+                         rigid_secondary_swap: bool = True,
+                         deformable_to_rigid: bool = True,
                          fixpoint_count_text: str = "",
+                         qstat_dtscal_text: str = "",
+                         arclength_riks: bool = False,
+                         discrete_offset: bool = True,
+                         spring_token_mass_compensation: bool = True,
+                         tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
@@ -161,6 +170,20 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                 raise ValueError(
                     f"Gapmin factor must be a number, got {f_text!r}.")
 
+    kwargs["derived_gapmin"] = bool(derived_gapmin)
+    if derived_gapmin:
+        d_text = (derived_gapmin_factor_text or "").strip()
+        if d_text:
+            try:
+                kwargs["derived_gapmin_factor"] = float(d_text)
+            except ValueError:
+                raise ValueError(
+                    f"Derived-Gapmin factor must be a number, got {d_text!r}.")
+
+    kwargs["rigid_secondary_swap"] = bool(rigid_secondary_swap)
+
+    kwargs["deformable_to_rigid"] = bool(deformable_to_rigid)
+
     st = (soften_stfac_text or "").strip()
     if st:
         try:
@@ -178,6 +201,31 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             except ValueError:
                 raise ValueError(
                     f"Tie STFAC must be a number or 'auto', got {ts!r}.")
+
+    qd = (qstat_dtscal_text or "").strip()
+    if qd:                                        # blank -> convert() default (10)
+        if qd.lower() == "none":
+            kwargs["qstat_dtscal"] = "none"
+        else:
+            try:
+                qd_v = float(qd)
+            except ValueError:
+                raise ValueError(
+                    f"/IMPL/QSTAT/DTSCAL must be a number or 'none', got {qd!r}.")
+            if qd_v <= 0.0:
+                raise ValueError(
+                    "/IMPL/QSTAT/DTSCAL must be > 0 (use 'none' to emit no "
+                    f"/IMPL/QSTAT card), got {qd!r}.")
+            kwargs["qstat_dtscal"] = qd_v
+
+    kwargs["arclength_riks"] = bool(arclength_riks)
+
+    kwargs["discrete_offset"] = bool(discrete_offset)
+
+    kwargs["spring_token_mass_compensation"] = bool(
+        spring_token_mass_compensation)
+
+    kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
 
@@ -282,6 +330,11 @@ class ConverterGUI:
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="0")
+        self.qstat_dtscal = tk.StringVar(value="")
+        self.arclength_riks = tk.BooleanVar(value=False)
+        self.discrete_offset = tk.BooleanVar(value=True)
+        self.spring_token_mass_comp = tk.BooleanVar(value=True)
+        self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
         self.zero_density_floor = tk.BooleanVar(value=True)
@@ -302,6 +355,10 @@ class ConverterGUI:
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
         self.gapmin_factor = tk.StringVar(value="0.8")
+        self.derived_gapmin = tk.BooleanVar(value=False)
+        self.derived_gapmin_factor = tk.StringVar(value="0.005")
+        self.rigid_secondary_swap = tk.BooleanVar(value=True)
+        self.deformable_to_rigid = tk.BooleanVar(value=True)
         self.stfac = tk.StringVar()
         self.tie_stfac = tk.StringVar()
         self.deformable_recipe = tk.BooleanVar(value=False)
@@ -349,6 +406,76 @@ class ConverterGUI:
                            "their termination; the price of 0 is fewer output states. "
                            "Implicit decks only)",
                   foreground="gray").pack(side="left")
+
+        qd = ttk.Frame(io)
+        qd.grid(row=20, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(qd, text="/IMPL/QSTAT/DTSCAL:").pack(side="left")
+        ttk.Entry(qd, textvariable=self.qstat_dtscal, width=8).pack(side="left", padx=3)
+        ttk.Label(qd, text="inertia stabilization on a quasi-static implicit deck "
+                           "(blank = 10, the default since 2026-09). The added "
+                           "stiffness is M/((1+a)*b*(DTSCAL*dt)^2), so it grows as "
+                           "1/DTSCAL^2: 0.1 was the OLD default and 100x Radioss's "
+                           "own SCAL_DTQ=1. Measured at nt 3 and nt 4: "
+                           "4.2.frf.cant-1 goes 4 cycles+ERROR -> 104 cycles, "
+                           "t=1.000, IE -0.31 %; the cost is the "
+                           "ex_02_thick_shell family (3 keys, one file) going "
+                           "normal -> timeout. 'none' emits no card (measured "
+                           "worse). The deformable-contact recipe keeps 0.05.",
+                  foreground="gray", wraplength=620, justify="left").pack(side="left")
+
+        ttk.Checkbutton(
+            io, text="Arc-length (RIKS) /IMPL/DT/3 when *CONTROL_IMPLICIT_SOLUTION asks "
+                     "for it (Vol I R17 p.12-354: 6 <= NSOLVR <= 9, or NSOLVR 12 with "
+                     "card-3 ARCMTH = 3 — ARCCTL is the controlling NODE ID, not a "
+                     "switch) — OFF by default; the request "
+                     "is warned about either way. It buys the load path, not the "
+                     "answer: ex_07 walks from t=0.3004 to t=1.000 at -1.72 % but still "
+                     "ERRORs on the last increment, and ex_05 turns a ~2 s error into a "
+                     "600 s timeout",
+            variable=self.arclength_riks).grid(
+                row=21, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Honour *ELEMENT_DISCRETE OFFSET (shift the force law's abscissae "
+                     "by -OFFSET + /INISPRI/FULL pre-stretch energy) — ON. With the "
+                     "token-mass compensation below, ex_17/ex_18 go from strict ZERO "
+                     "models to IE +0.007 % / +0.006 % against their LS-DYNA glstat",
+            variable=self.discrete_offset).grid(
+                row=22, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Subtract k2rad's artificial spring mass (1e-4 per /PROP/TYPE4, "
+                     "half on each end node per element) from those nodes' /ADMAS — ON. "
+                     "Inert on its own; it is what makes the OFFSET fix exact. Never "
+                     "writes a non-positive /ADMAS",
+            variable=self.spring_token_mass_comp).grid(
+                row=23, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="All-rigid SSID contacts: swap the roles instead of losing the "
+                     "interface (explicit decks) — ON. /INTER/TYPE7 is asymmetric "
+                     "node-to-segment, so the deformable side must supply the tracked "
+                     "nodes. sphere1 IE -100 % -> -1.66 %, blow-mold timeout -> NORMAL. "
+                     "Implicit decks keep the drop (bumper diverges on every arm)",
+            variable=self.rigid_secondary_swap).grid(
+                row=25, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*DEFORMABLE_TO_RIGID -> /RBODY at t = 0 (the part keeps its own "
+                     "material) — ON. pend.imp's energy error goes 99.9 % to "
+                     "-0.0 % and its 125 052 cycles become 9 480, where LS-DYNA takes "
+                     "9 479",
+            variable=self.deformable_to_rigid).grid(
+                row=26, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_THERMAL_* TGMULT -> /IMPTEMP (the adiabatic closed form "
+                     "T = T0 + (TGMULT/(rho*Cp))*INTEGRAL(f dt)) — ON, and only on a deck with NO "
+                     "other temperature driver. Measured on thermal-stress: node 2's "
+                     "free expansion goes from exactly 0.0 to 1.49531e-04 mm against "
+                     "the LS-DYNA nodout's 1.49216e-04 (+0.21 %)",
+            variable=self.tgmult_imptemp).grid(
+                row=24, column=0, columnspan=3, sticky="w", **pad)
 
         bg = ttk.Frame(io)
         bg.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
@@ -576,6 +703,23 @@ class ConverterGUI:
                            "Needs numpy+scipy; see docs/DEPENDENCIES.md.",
                   foreground="gray").grid(row=2, column=1, columnspan=2, sticky="w", padx=6)
 
+        dg = ttk.Frame(fc)
+        dg.grid(row=21, column=0, columnspan=3, sticky="w", **pad)
+        self._derived_gapmin_chk = ttk.Checkbutton(
+            dg, text="Derived Gapmin on SOLID-only-main /INTER/TYPE7 (pure stdlib, no scipy)",
+            variable=self.derived_gapmin, command=self._sync_derived_gapmin_factor)
+        self._derived_gapmin_chk.pack(side="left")
+        ttk.Label(dg, text="   factor:").pack(side="left")
+        self._derived_gapmin_entry = ttk.Entry(
+            dg, textvariable=self.derived_gapmin_factor, width=6)
+        self._derived_gapmin_entry.pack(side="left", padx=3)
+        ttk.Label(fc, text="OFF by default; a warning names the starter-derived GAP MIN either way. "
+                           "Gapmin = factor × the smallest main-surface segment side (ceiling 0.5 ×). "
+                           "twobar: the starter's own gap is +1151 % vs its LS reference, 0.005 is -5.6 % — "
+                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 13 of the class's "
+                           "15 R14-roster interfaces are unmeasured.",
+                  foreground="gray").grid(row=22, column=1, columnspan=2, sticky="w", padx=6)
+
         ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
         ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default; "
@@ -634,6 +778,7 @@ class ConverterGUI:
 
         self._sync_ground_k()
         self._sync_gapmin_factor()
+        self._sync_derived_gapmin_factor()
 
     # ── widget callbacks ─────────────────────────────────────────────────────
 
@@ -643,6 +788,10 @@ class ConverterGUI:
     def _sync_gapmin_factor(self) -> None:
         self._gapmin_factor_entry.config(
             state="normal" if self.auto_gapmin.get() else "disabled")
+
+    def _sync_derived_gapmin_factor(self) -> None:
+        self._derived_gapmin_entry.config(
+            state="normal" if self.derived_gapmin.get() else "disabled")
 
     def _pick_input(self) -> None:
         path = filedialog.askopenfilename(
@@ -683,7 +832,16 @@ class ConverterGUI:
                 tet10_to_tet4=self.tet10.get(),
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
+                derived_gapmin=self.derived_gapmin.get(),
+                derived_gapmin_factor_text=self.derived_gapmin_factor.get(),
+                rigid_secondary_swap=self.rigid_secondary_swap.get(),
+                deformable_to_rigid=self.deformable_to_rigid.get(),
                 fixpoint_count_text=self.fixpoint_count.get(),
+                qstat_dtscal_text=self.qstat_dtscal.get(),
+                arclength_riks=self.arclength_riks.get(),
+                discrete_offset=self.discrete_offset.get(),
+                spring_token_mass_compensation=self.spring_token_mass_comp.get(),
+                tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
@@ -783,6 +941,15 @@ class ConverterGUI:
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")
         if kwargs.get("auto_gapmin"):
             bits.append(f"auto gapmin (factor={kwargs.get('gapmin_factor', 0.8):g})")
+        if kwargs.get("derived_gapmin"):
+            bits.append("derived gapmin on solid-only mains (factor="
+                        f"{kwargs.get('derived_gapmin_factor', 0.005):g})")
+        if not kwargs.get("rigid_secondary_swap", True):
+            bits.append("all-rigid-SSID contacts dropped "
+                        "(--no-rigid-secondary-swap)")
+        if not kwargs.get("deformable_to_rigid", True):
+            bits.append("*DEFORMABLE_TO_RIGID parts left deformable "
+                        "(--no-deformable-to-rigid)")
         if kwargs.get("inter_gapmin"):
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:
@@ -791,6 +958,21 @@ class ConverterGUI:
             _ts = kwargs["tie_stfac"]
             bits.append("tie STFAC=" + (_ts if isinstance(_ts, str)
                                         else f"{_ts:g}"))
+        if "qstat_dtscal" in kwargs:
+            _qd = kwargs["qstat_dtscal"]
+            bits.append("/IMPL/QSTAT/DTSCAL=" + (_qd if isinstance(_qd, str)
+                                                 else f"{_qd:g}"))
+        if kwargs.get("arclength_riks"):
+            bits.append("arc-length /IMPL/DT/3 (--arclength-riks)")
+        if not kwargs.get("discrete_offset", True):
+            bits.append("*ELEMENT_DISCRETE OFFSET dropped "
+                        "(--no-discrete-offset)")
+        if not kwargs.get("spring_token_mass_compensation", True):
+            bits.append("spring token mass left on the nodes "
+                        "(--no-spring-token-mass-compensation)")
+        if not kwargs.get("tgmult_imptemp", True):
+            bits.append("*MAT_THERMAL_* TGMULT dropped "
+                        "(--no-tgmult-imptemp)")
         if kwargs.get("deformable_contact_recipe"):
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":

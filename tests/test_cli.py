@@ -121,6 +121,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.fixpoint_count, 0)
         self.assertTrue(args.default_hourglass)     # BooleanOptionalAction
         self.assertIsNone(args.tie_stfac)
+        # Round 4's five new levers, same reason: qstat_dtscal in particular
+        # is caught by the implicit_qstat golden through the API, but nothing
+        # would read the PARSER default, so a silent 10 -> 0.1 there would
+        # quietly restore the pre-round-4 stabilization on every implicit CLI
+        # conversion at a green suite.
+        self.assertEqual(args.qstat_dtscal, 10.0)
+        self.assertFalse(args.arclength_riks)       # BooleanOptionalAction
+        self.assertTrue(args.discrete_offset)
+        self.assertTrue(args.spring_token_mass_compensation)
+        self.assertTrue(args.tgmult_imptemp)
 
     def test_no_such_flag_errors(self):
         # argparse exits with SystemExit(2) on an unknown option.

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import itertools
+import math
 from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
 from ..state import (ConversionState, ContactSpotweld, ContactThermal,
-                     ContactTied, ContactTiebreak, PartData, SolidElem,
+                     ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
+from ..topology import TET10_EDGEMID
 from .common import (
+    AUTO_IMPLICIT_STUB_TITLE,
     HDR,
     _emit_grnod_node,
     _emit_grsh3n,
@@ -26,6 +29,7 @@ from .common import (
     _ordered_unique_nodes,
     _part_node_sets,
     _split_shell_eids_by_topology,
+    rigid_part_ids,
 )
 
 __all__ = [
@@ -302,9 +306,36 @@ def _styp01_missing_note(state: ConversionState, sid: int, styp: int) -> str:
 # Starter: interfaces
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _side_node_ids(state: ConversionState, sid: int, styp: int) -> Set[int]:
+    """The nodes a contact side resolves to — NO id allocated, NO line emitted.
+
+    Lifted verbatim out of :func:`_resolve_contact_slave` so the all-rigid-SSID
+    rule can ASK what a side holds before anything is written. That is not
+    cosmetic: ``_resolve_contact_slave`` allocates a ``/GRNOD`` id the moment
+    the side is non-empty, so a screen that called it to look would shift every
+    later auto-id.
+    """
+    nids: Set[int] = set()
+    if styp == 4:
+        if sid in state.node_sets:
+            nids.update(state.node_sets[sid][1])
+    elif styp == 3:
+        nids.update(_contact_part_nodes(state, sid))
+    elif styp == 2:
+        if sid in state.part_sets:
+            for pid in state.part_sets[sid][1]:
+                nids.update(_contact_part_nodes(state, pid))
+    elif styp == 0:
+        nids.update(_styp0_side_nodes(state, sid))
+    elif styp == 1:
+        nids.update(_styp1_side_nodes(state, sid))
+    return nids
+
+
 def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
                            rigid_nodes: Set[int], out_lines: List[str],
-                           diag: Optional[Dict[str, int]] = None) -> int:
+                           diag: Optional[Dict[str, int]] = None,
+                           keep_rigid: bool = False) -> int:
     """Emit the /GRNOD for a contact SECONDARY side; 0 when nothing is left.
 
     ``diag``, when given, is filled with ``raw`` (nodes the side resolved to
@@ -314,27 +345,20 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
     WHY: "ssid names nothing" and "ssid is a rigid platen" are different
     mistakes with different remedies, and returning a bare 0 for both is how
     this drop stayed invisible. See _describe_empty_secondary.
-    """
-    nids: Set[int] = set()
-    def add_part_nodes(pid: int):
-        nids.update(_contact_part_nodes(state, pid))
 
-    if styp == 4:
-        if sid in state.node_sets:
-            nids.update(state.node_sets[sid][1])
-    elif styp == 3:
-        add_part_nodes(sid)
-    elif styp == 2:
-        if sid in state.part_sets:
-            for pid in state.part_sets[sid][1]:
-                add_part_nodes(pid)
-    elif styp == 0:
-        nids.update(_styp0_side_nodes(state, sid))
-    elif styp == 1:
-        nids.update(_styp1_side_nodes(state, sid))
+    ``keep_rigid`` turns the rigid-body filter OFF for this side — the
+    both-sides-rigid arm of the all-rigid-SSID rule, where filtering would
+    leave an empty group and throw the whole interface away. The starter does
+    NOT refuse /RBODY member nodes in a TYPE7 secondary group (measured at
+    0 ERROR(S) on ``sphere1`` and on ``mat_spring.belted-dummy``), and the
+    secondary nodal stiffness is element-based (``i7stslav.F:55-58 STIFINT``),
+    not nodal-mass based, so such a node still carries one.
+    """
+    nids = _side_node_ids(state, sid, styp)
 
     raw_nids = [n for n in sorted(nids) if n > 0]
-    clean_nids = [n for n in raw_nids if n not in rigid_nodes]
+    clean_nids = (list(raw_nids) if keep_rigid else
+                  [n for n in raw_nids if n not in rigid_nodes])
     if diag is not None:
         diag["raw"] = len(raw_nids)
         diag["rigid_removed"] = len(raw_nids) - len(clean_nids)
@@ -568,11 +592,13 @@ def _warn_implicit_solid_contact_np1(state: ConversionState) -> None:
 
 def _side_has_deformable_part(state: ConversionState, pids: Set[int]) -> bool:
     """True if *pids* is non-empty and contains at least one deformable part.
-    A part is rigid iff its material is a *MAT_RIGID (mid in state.mat_rigid)."""
-    return any(
-        p in state.parts and state.parts[p].mid not in state.mat_rigid
-        for p in pids
-    )
+
+    A part is rigid iff ``rigid_part_ids`` says so — its material is a
+    ``*MAT_RIGID`` OR a ``*DEFORMABLE_TO_RIGID`` card names the part. Testing
+    ``state.mat_rigid`` alone here would let a rigid-vs-rigid pair reach
+    ``_recipe_active`` as a "deformable pair"."""
+    rigid = rigid_part_ids(state)
+    return any(p in state.parts and p not in rigid for p in pids)
 
 
 def deformable_deformable_inter_ids(state: ConversionState) -> List[int]:
@@ -642,7 +668,8 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             f"Deformable-deformable contact detected on interface(s) {ids} in an "
             "implicit deck. This is prone to an active-set chatter and a force-"
             "control soft-mode step-overshoot that stall the implicit solve with "
-            "the default L_dtn=20 cap / QSTAT/DTSCAL=0.1. If the solve diverges "
+            "the default L_dtn=20 cap and the shipped QSTAT/DTSCAL (10 since "
+            "round 4; --qstat-dtscal sets it). If the solve diverges "
             "or stalls, re-convert with the known working recipe: "
             "--deformable-contact-recipe (GUI: 'Deformable-deformable contact "
             "recipe') = Inacti=5 + L_dtn=50 + QSTAT/DTSCAL=0.05 with a mesh-scale "
@@ -670,6 +697,316 @@ def _gapmin_override(state: ConversionState, inter_id: int, base: float,
         )
         return val
     return base
+
+
+# -----------------------------------------------------------------------------
+# --derived-gapmin: an explicit Gapmin for a SOLID-segment /INTER/TYPE7 main
+#
+# i7sti3.F:1054-1084, read at source:
+#
+#   1054  GAPMX=SQRT(GAPMX)
+#   1055  IF(IGAP == 0)THEN
+#   1057    IF(GAP <= ZERO)THEN
+#   1058      IF(NDX  /= 0)THEN
+#   1059        GAP = DXM/NDX
+#   1060        GAP = MIN(HALF*GAPMX,GAP)
+#   1061      ELSE
+#   1062        GAP = EM01 * GAPMX
+#   1064      IF (IT19 <= 0 .AND. .NOT.TYPE18) WRITE(IOUT,1300)GAP
+#   1066    GAPMIN = GAP
+#   1068    IF (GAPMIN <= 0) THEN  -> ANCMSG(MSGID=785, MSGERROR)
+#   1075    IF ((INACTI /= 7).AND.(GAP > 0.5*GAPMX).AND.(IREM_GAP /= 2))
+#                                -> ANCMSG(MSGID=94, MSGWARNING)
+#
+# DXM/NDX accumulates ONLY shell thickness (i7sti3.F:506/592/762/845), so a
+# solid-segment main leaves NDX = 0 and takes GAP = 0.1 x GAPMX, and
+# i4gmx3.F:58-66 ("C MINIMUM LENGTH OF SEGMENT SIDES") makes GAPMX the SMALLEST
+# side length of any main segment, skipping N1 == N2 and zero-length pairs.
+# Two consequences this rule honours: never write a Gapmin <= 0 (ERROR 785),
+# and clamp at 0.5 x GAPMX (the WARNING 94 gate; k2rad writes Inacti 5 on every
+# roster TYPE7, so the INACTI /= 7 half of that gate is always true).
+# -----------------------------------------------------------------------------
+
+#: Solid element faces, as local-corner-index tuples. Same convention as
+#: ``k2rad.gapmin`` — deliberately re-stated here rather than imported, because
+#: this path must stay pure standard library (``gapmin`` is the numpy+scipy one).
+_TET4_FACE_IDX = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+_HEX_FACE_IDX = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+                 (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7))
+
+
+def _solid_boundary_faces(state: ConversionState,
+                          pids: Iterable[int]) -> Tuple[List[List[int]], bool]:
+    """``(external faces, complete)`` for the given parts' solids/thick shells.
+
+    A face used by exactly one element is external; an interior face appears
+    twice and is dropped. HEX/BRICK -> its 6 quad faces, TET4 -> its 4 triangles,
+    TET10 -> each boundary face SUBDIVIDED into the 4 linear sub-triangles
+    through its mid-edge nodes, which is what the starter builds for a /TETRA10
+    contact surface and therefore what its own GAPMX is measured on (a TET10
+    deck's derived GAP MIN is half the corner-edge value for exactly this
+    reason).
+
+    ``complete`` is False when ANY element of those parts had a shape this
+    function does not facet — a 6-node pentahedron or 5-node pyramid written on
+    a short ``*ELEMENT_SOLID`` card, which ``handlers.handle_element_solid``
+    stores with its real node count after dropping the blank fields. Caller
+    contract: a side that is not ``complete`` is NOT ``all_solid``, so the
+    derived rule and its warning both stand down. The alternative — measuring
+    the partial skin — is silently WRONG on a part that MIXES faceted and
+    unfaceted shapes, because a face shared between a hex and a wedge is then
+    seen once and counted EXTERNAL, and the minimum edge (hence the written
+    ``Gapmin`` and the quoted starter ``GAP MIN``) comes out too small. No
+    carrier of the shipped 15-interface class has that shape, so this is a
+    guard against a latent case, not a correction to a measured one.
+    """
+    pidset = set(pids)
+    complete = True
+    seen: Dict[Tuple[int, ...], Optional[Tuple[List[int], Tuple[int, ...]]]] = {}
+    for e in list(state.solid_elems) + list(state.tshell_elems):
+        if e.pid not in pidset:
+            continue
+        nds = list(e.nodes)
+        n = len(nds)
+        if n in (4, 10):
+            faces: Tuple[Tuple[int, ...], ...] = _TET4_FACE_IDX
+        elif n == 8:
+            faces = _HEX_FACE_IDX
+        else:
+            complete = False
+            continue
+        for f in faces:
+            key = tuple(sorted(nds[i] for i in f))
+            if key in seen:
+                seen[key] = None            # interior: used by 2 elements
+            else:
+                seen[key] = (nds, f)
+    out: List[List[int]] = []
+    for rec in seen.values():
+        if rec is None:
+            continue
+        nds, f = rec
+        if len(nds) == 10 and len(f) == 3:
+            i, j, k = f
+            try:
+                mij = nds[TET10_EDGEMID[frozenset((i, j))]]
+                mjk = nds[TET10_EDGEMID[frozenset((j, k))]]
+                mik = nds[TET10_EDGEMID[frozenset((i, k))]]
+            except (KeyError, IndexError):
+                out.append([nds[i], nds[j], nds[k]])
+                continue
+            a, b, c = nds[i], nds[j], nds[k]
+            out += [[a, mij, mik], [mij, b, mjk], [mik, mjk, c], [mij, mjk, mik]]
+        else:
+            out.append([nds[i] for i in f])
+    return out, complete
+
+
+def _main_surface_segments(state: ConversionState, sid: int, styp: int
+                           ) -> Tuple[List[List[int]], bool]:
+    """``(segments, all_solid)`` for a contact MAIN side.
+
+    Mirrors :func:`writer.common._make_master_surface` exactly, because that is
+    what decides which cards are actually emitted: per part, SHELLS WIN (a part
+    with shell elements contributes its shells even when it also has solids),
+    and only a shell-free solid/thick-shell part contributes external faces.
+    A ``*SET_SEGMENT`` side's segments are classified by NODE MEMBERSHIP.
+
+    ``all_solid`` is False whenever the side is empty, any segment is a shell
+    — a MIXED shell+solid main feeds the starter's shell-thickness branch
+    (``DXM``) and is out of the derived rule's scope — or any of the side's
+    solids has a shape ``_solid_boundary_faces`` cannot facet (a 6-node
+    pentahedron, a 5-node pyramid), because the skin it measured is then only
+    part of the real one.
+
+    ``styp == 5 or sid == 0`` is the ALL-PARTS sentinel the ``SSID = 0``
+    self-contact passes, and it matches that path's own
+    ``_make_master_surface(..., all_pids, ...)``. No OTHER caller can reach it:
+    ``_resolve_contact_master`` resolves only types 0, 1, 2 and 3 and returns 0
+    for a type-5 side, so such a contact is dropped before a Gapmin is
+    computed at all (measured reach of a type-5 MAIN side on the 352-deck R14
+    roster this resolver was censused over: 0 interfaces).
+    """
+    segs: List[List[int]] = []
+    any_shell = False
+    partial_skin = False
+
+    def _from_pids(pids: Iterable[int]) -> None:
+        nonlocal any_shell, partial_skin
+        shell_pids = {e.pid for e in state.shell_elems}
+        solid_pids = ({e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems})
+        solid_only: List[int] = []
+        for pid in sorted(set(pids)):
+            if pid in shell_pids:
+                any_shell = True
+            elif pid in solid_pids:
+                solid_only.append(pid)
+        faces, complete = _solid_boundary_faces(state, solid_only)
+        segs.extend(faces)
+        if not complete:
+            partial_skin = True
+
+    if styp == 5 or sid == 0:
+        _from_pids(state.parts.keys())
+    elif styp == 1:
+        any_shell = True                      # a *SET_SHELL IS shell segments
+    elif styp == 2:
+        ps = state.part_sets.get(sid)
+        _from_pids(ps[1] if ps else ())
+    elif styp == 3:
+        _from_pids([sid] if sid in state.parts else ())
+    elif styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return [], False
+        shell_nodes = {n for e in state.shell_elems for n in e.nodes if n > 0}
+        solid_nodes = {n for e in state.solid_elems for n in e.nodes if n > 0}
+        solid_nodes |= {n for e in state.tshell_elems for n in e.nodes if n > 0}
+        for seg in ss.segments:
+            nds = [n for n in seg if n > 0]
+            if not nds:
+                continue
+            if all(n in solid_nodes for n in nds) and not all(
+                    n in shell_nodes for n in nds):
+                segs.append(nds)
+            else:
+                any_shell = True
+        _from_pids(ss.part_scope)
+    else:
+        return [], False
+    return segs, bool(segs) and not any_shell and not partial_skin
+
+
+def _min_segment_side(state: ConversionState,
+                      segments: Iterable[Iterable[int]]) -> float:
+    """The smallest non-degenerate segment SIDE length — the starter's GAPMX.
+
+    ``i4gmx3.F:58-66`` walks each main segment's sides and skips a pair whose
+    two node ids are equal (a collapsed quad) or whose length is zero; the
+    zero-length test carries both here (see the comment at the guard), so a
+    coupon with an ``n3 == n4`` face is measured over its three real sides.
+    """
+    best = 0.0
+    for seg in segments:
+        nds = [n for n in seg if n > 0]
+        k = len(nds)
+        if k < 3:
+            continue
+        for a in range(k):
+            n1, n2 = nds[a], nds[(a + 1) % k]
+            p, q = state.nodes.get(n1), state.nodes.get(n2)
+            if p is None or q is None:
+                continue
+            d = math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+            # i4gmx3.F:58-66 skips a side on TWO tests, `N1 == N2` and a zero
+            # length. Only the second is written here, because the first cannot
+            # fail independently of it: equal ids name the SAME node, so the
+            # distance is identically 0 and this guard already has it. A
+            # separate `n1 == n2` branch would be a check that cannot fail.
+            if d <= 0.0:
+                continue
+            if best == 0.0 or d < best:
+                best = d
+    return best
+
+
+def _round_sig(x: float, sig: int = 4) -> float:
+    """*x* rounded to *sig* significant digits (0 stays 0)."""
+    if x == 0.0:
+        return 0.0
+    return round(x, -int(math.floor(math.log10(abs(x)))) + (sig - 1))
+
+
+def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
+                          gapmin: float, main_sid: int, main_styp: int,
+                          interference: bool = False) -> float:
+    """Warn about — and with ``--derived-gapmin``, write — a Gapmin for a
+    SOLID-only-main ``/INTER/TYPE7`` that would otherwise be emitted as 0.
+
+    The WARNING is default-ON on every carrier: the starter then derives
+    ``0.1 x min main-surface edge`` itself, and LS-DYNA's own offset on a solid
+    segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17 p.11-101 default
+    table, p.11-103; ``SAST``/``SBST`` apply to shells and beams only, p.11-33).
+    The FLAG is off by default because the measured arms disagree — see
+    ``ConvertOptions.derived_gapmin``.
+    """
+    if gapmin > 0.0:
+        return gapmin                       # --inter-gapmin / --auto-gapmin / Card-3
+    if title == AUTO_IMPLICIT_STUB_TITLE:
+        # k2rad's own implicit stabilization card, not the deck's contact.
+        # MEASURED over the 356-key R14 roster with the stub INJECTED (the
+        # census must call `k2rad._inject_implicit_contact_stub`, or its
+        # "stub: 0" is a filter keyed on a field the record does not have):
+        # 42 solid-only-main rows on this rule's own route, of which 27 are
+        # this stub on 27 deck keys and 15 are the live interfaces on 14 keys
+        # named in `ConvertOptions.derived_gapmin`. Five of the 27 were
+        # measured byte-inert with the Gapmin set. Warning about it would be
+        # noise about a card the user did not write.
+        return gapmin
+    segments, all_solid = _main_surface_segments(state, main_sid, main_styp)
+    if not all_solid:
+        return gapmin
+    min_edge = _min_segment_side(state, segments)
+    if min_edge <= 0.0:
+        return gapmin                       # degenerate: no rule, no claim
+    derived = _round_sig(0.1 * min_edge)
+    flag_note = (
+        "A press-fit *CONTACT_*_INTERFERENCE is EXCLUDED from --derived-gapmin: "
+        "it needs the large derived gap to engage at all "
+        "(EXP_SC_CONTACT_INTERFERENCE records 112 initial penetrations at the "
+        "derived 0.2 and ZERO at 0.01, and its internal energy collapses to a "
+        "zero model)."
+        if interference else
+        "Pass --derived-gapmin to write "
+        f"{state.options.derived_gapmin_factor:g} x <min edge> on interfaces "
+        "like this one (--derived-gapmin-factor F to tune, --inter-gapmin "
+        f"{inter_id}=VAL for this one interface). It is OFF by default because "
+        "it is not uniformly good: on sphere1 the same factor writes 0.02921 "
+        "and moves internal energy from -1.66 % to -7.77 % at 4.1x the cycles, "
+        "and 13 of the class's 15 interfaces on the R14 roster have no "
+        "measured arm at all.")
+    state.warn(
+        f"/INTER/TYPE7 {inter_id}: the main surface is SOLID segments only and "
+        "no Gapmin is stated, so the OpenRadioss starter derives one itself - "
+        f"GAP MIN = 0.1 x {_round_sig(min_edge):g} (the smallest main-surface "
+        f"segment side) = {derived:g} (i7sti3.F:1055-1063; DXM only ever "
+        "accumulates shell thickness, i7sti3.F:506/592/762/845, so a solid main "
+        "takes the EM01*GAPMX fallback, and GAPMX is the smallest segment side, "
+        "i4gmx3.F:58-66). LS-DYNA's own offset on a solid segment is ZERO "
+        "unless SLDTHK > 0 is stated (Vol I R17 p.11-101 default 0.0, p.11-103; "
+        "SAST/SBST apply to shells and beams only, p.11-33) - this deck states "
+        "none. MEASURED on intro-by-k.-weimar/contact/twobars/twobar.k (10 mm "
+        "bars, derived GAP MIN 1.0): the derived gap gives internal energy "
+        "37 990 against the LS-DYNA reference 3036.17 (+1151 %), where an "
+        "explicit 0.05 mm gives 2 866 (-5.6 %) and KE 1.127e5 against 1.20123e5 "
+        f"(-6.2 %). {flag_note}")
+    if not state.options.derived_gapmin or interference:
+        return gapmin
+    factor = state.options.derived_gapmin_factor
+    value = _round_sig(factor * min_edge)
+    ceiling = 0.5 * min_edge
+    clamped = value > ceiling
+    if clamped:
+        value = _round_sig(ceiling)
+    if value <= 0.0:
+        state.warn(
+            f"/INTER/TYPE7 {inter_id}: --derived-gapmin computed a "
+            "non-positive Gapmin and wrote NOTHING — the starter's own "
+            f"{derived:g} stands. A Gapmin <= 0 is starter ERROR 785 "
+            "(i7sti3.F:1068).")
+        return gapmin
+    state.warn(
+        f"/INTER/TYPE7 {inter_id}: --derived-gapmin wrote Gapmin = {value:g} "
+        f"(= {factor:g} x {_round_sig(min_edge):g}, the smallest main-surface "
+        "segment side)"
+        + (f", CLAMPED to the ceiling 0.5 x min edge = {_round_sig(ceiling):g} "
+           "because the requested value is above the starter's WARNING 94 gate "
+           "(i7sti3.F:1075: INACTI /= 7 and GAP > 0.5*GAPMX)" if clamped else "")
+        + ". The starter no longer derives a gap for this interface, so its "
+        "\"GAP MIN =\" echo disappears from the .out (i7sti3.F:1057 is taken "
+        "only when the stated GAP is <= 0).")
+    return value
 
 
 def _sfs_to_stfac(sfs: float, state: ConversionState, inter_id: int) -> float:
@@ -723,15 +1060,177 @@ _DROP_CONSEQUENCE = (
     "internal and contact energy climb."
 )
 
-#: Why an all-rigid secondary side is a side-order mistake, not a modelling one.
-_RIGID_SECONDARY_REMEDY = (
-    "REMEDY: swap the sides — put the DEFORMABLE part on the SECONDARY (SSID) "
-    "side and the rigid part on the MAIN (MSID) side. /INTER/TYPE7 is an "
-    "asymmetric node-to-surface contact, so the deformable side is the one "
-    "that must supply the tracked nodes. k2rad deliberately does NOT swap them "
-    "for you: that would silently convert a model different from the one you "
-    "wrote."
+#: Why an all-rigid secondary side is dropped on an IMPLICIT deck only.
+#: k2rad DOES swap the sides on an explicit deck (--no-rigid-secondary-swap);
+#: the drop survives here because every restoration arm on `bumper` diverges.
+_RIGID_SECONDARY_REMEDY_IMPLICIT = (
+    "REMEDY: swap the sides in the .k — put the DEFORMABLE part on the "
+    "SECONDARY (SSID) side and the rigid part on the MAIN (MSID) side. "
+    "/INTER/TYPE7 is an ASYMMETRIC node-to-segment contact (only the secondary "
+    "nodes are checked against the main segments), so the deformable side is "
+    "the one that must supply the tracked nodes. On an EXPLICIT deck k2rad "
+    "performs that swap for you; on an IMPLICIT deck it does not, because "
+    "every restoration arm measured on implicit/basic-examples/contact-i/"
+    "bumper.k diverges at ISTOP=-2 (MESSAGE ID 79, TIMESTEP LIMIT) at nt 2 and "
+    "nt 4, with and without --deformable-contact-recipe, which is a "
+    "byte-identical no-op there (_recipe_active excludes a rigid-main "
+    "interface). The starter itself does NOT refuse /RBODY member nodes in a "
+    "TYPE7 secondary group — it accepts them at 0 ERROR(S) — so this drop is a "
+    "k2rad policy, not a solver constraint."
 )
+
+#: Why an all-rigid secondary side is dropped when the user turned the rule off.
+_RIGID_SECONDARY_REMEDY_OPTED_OUT = (
+    "REMEDY: drop --no-rigid-secondary-swap and k2rad keeps this interface — it "
+    "swaps the roles so the DEFORMABLE MSID side supplies the tracked nodes and "
+    "the rigid SSID side the main /SURF, or, when BOTH sides are wholly rigid, "
+    "emits it with the rigid secondary nodes kept. Or swap the sides in the .k "
+    "yourself: put the DEFORMABLE part on the SECONDARY (SSID) side and the "
+    "rigid part on the MAIN (MSID) side. /INTER/TYPE7 is an ASYMMETRIC "
+    "node-to-segment contact (only the secondary nodes are checked against the "
+    "main segments), so the deformable side is the one that must supply them."
+)
+
+#: Why an all-rigid secondary side is dropped when the MAIN side is empty too.
+_RIGID_SECONDARY_REMEDY_NO_MAIN = (
+    "REMEDY: k2rad would have swapped the roles — /INTER/TYPE7 is an ASYMMETRIC "
+    "node-to-segment contact and the deformable side must supply the tracked "
+    "nodes — but the MAIN (MSID) side resolves to NO nodes either, so there is "
+    "nothing to swap to. Point one of the two sides at a part, part set, "
+    "*SET_SEGMENT or *SET_NODE that exists in this deck and carries deformable "
+    "elements."
+)
+
+#: Why a ONE-SIDED self-contact whose single side is wholly rigid is dropped.
+#: There is no other side to swap to, and the physics is not lost: a rigid body
+#: does not deform, so LS-DYNA's own contact across it carries nothing either.
+_RIGID_SECONDARY_REMEDY_SELF = (
+    "REMEDY: this contact names ONE side (SSID) and uses it as both the tracked "
+    "nodes and the main surface, so the all-rigid-SSID swap has no second side "
+    "to move to and does not apply. Nothing physical is lost — a rigid body "
+    "cannot deform, so a self-contact confined to one carries no load in "
+    "LS-DYNA either. Give the impacted part a deformable material, or state an "
+    "explicit surface-to-surface contact against the part it really touches."
+)
+
+#: Plan codes returned by :func:`_rigid_secondary_plan`.
+_RS_NONE = ""          # the secondary side is not wholly rigid — nothing to do
+_RS_SWAP = "swap"      # explicit, MSID deformable  -> exchange the two sides
+_RS_KEEP = "keep"      # explicit, BOTH sides rigid -> keep the rigid secondary
+_RS_IMPLICIT = "implicit"    # implicit deck        -> drop (bumper)
+_RS_OPTED_OUT = "optout"     # --no-rigid-secondary-swap -> drop
+_RS_NO_MAIN = "nomain"       # the MSID side is empty too -> drop
+
+
+def _rigid_secondary_plan(state: ConversionState, rigid_nodes: Set[int],
+                          ssid: int, sstyp: int, msid: int, mstyp: int
+                          ) -> Tuple[str, int, int]:
+    """What to do about an all-rigid SECONDARY side. ``(plan, n_sec, n_main)``.
+
+    ``plan`` is ``_RS_NONE`` unless the SSID side resolves to at least one node
+    and EVERY one of them belongs to a rigid body — the case that used to lose
+    the whole interface. Pure: it allocates no id and emits no line (see
+    :func:`_side_node_ids`).
+    """
+    sec = _side_node_ids(state, ssid, sstyp)
+    sec = {n for n in sec if n > 0}
+    if not sec or not sec <= rigid_nodes:
+        return _RS_NONE, 0, 0
+    main = {n for n in _side_node_ids(state, msid, mstyp) if n > 0}
+    if state.is_implicit:
+        return _RS_IMPLICIT, len(sec), len(main)
+    if not state.options.rigid_secondary_swap:
+        return _RS_OPTED_OUT, len(sec), len(main)
+    if not main:
+        return _RS_NO_MAIN, len(sec), 0
+    if main - rigid_nodes:
+        return _RS_SWAP, len(sec), len(main)
+    return _RS_KEEP, len(sec), len(main)
+
+
+def _warn_rigid_secondary_swap(state: ConversionState, keyword: str,
+                               inter_id: int, n_sec: int, n_main: int) -> None:
+    """The loud note that k2rad exchanged the two sides of an interface."""
+    state.warn(
+        f"*{keyword or 'CONTACT'} {inter_id}: all {n_sec} node(s) of the "
+        "SECONDARY (SSID) side belong to a rigid body, so /INTER/TYPE7's node "
+        "group would be empty and the WHOLE interface would be lost. k2rad "
+        f"SWAPPED the roles: the DEFORMABLE MSID side ({n_main} node(s)) now "
+        "supplies the tracked nodes and the rigid SSID side the main /SURF. "
+        "/INTER/TYPE7 is an ASYMMETRIC node-to-segment contact — only the "
+        "secondary nodes are checked against the main segments — so the "
+        "deformable side is the one that must supply them. THIS CHANGES WHICH "
+        "SIDE IS PENALISED: LS-DYNA's non-AUTOMATIC contacts are one-sided "
+        "(Vol I R17 p.11-10: \"Automatic contacts are two-sided ... In "
+        "contrast, non-automatic contacts are one-sided. Thus, segment "
+        "orientation does not matter for automatic contact but is crucial for "
+        "non-automatic contact\"), so on a non-AUTOMATIC card the swap reverses "
+        "the contact's direction; on an AUTOMATIC card LS-DYNA checks both "
+        "surfaces and the swap keeps the half the deformable mesh can actually "
+        "resolve. MEASURED: intro-by-j.-day/contact/sphere/sphere1.k internal "
+        "energy goes 0 (-100 %) to 77 830 (-1.66 %) against the LS-DYNA "
+        "reference 79 147.3, with KE -1.73 %, in 1 592 NORMAL cycles (identical "
+        "at nt 2); EXP_SC_CONTACT_INTERFERENCE -100 % to -42.8 %; "
+        "boundary_prescribed_motion.blow-mold from a diverging run killed at "
+        "241 934 cycles and t = 0.0061 of 0.015 with a 99.9 % energy error to "
+        "NORMAL TERMINATION at t = 0.015 in 25 675 cycles with a -1.3 % energy "
+        "error. Disable with --no-rigid-secondary-swap.")
+
+
+def _warn_rigid_secondary_keep(state: ConversionState, keyword: str,
+                               inter_id: int, n_sec: int, n_main: int) -> None:
+    """The note for an interface whose BOTH sides are wholly rigid."""
+    state.warn(
+        f"*{keyword or 'CONTACT'} {inter_id}: BOTH sides are wholly rigid "
+        f"(SSID {n_sec}/{n_sec}, MSID {n_main}/{n_main} nodes are rigid-body "
+        "members), so there is no deformable side to move to the secondary. "
+        "k2rad emits the interface anyway, with the rigid SSID nodes as the "
+        "secondary group, rather than dropping a load path silently. The "
+        "OpenRadioss starter accepts /RBODY member nodes in a TYPE7 secondary "
+        "group — measured at 0 ERROR(S) on sphere1 and on "
+        "mat_spring.belted-dummy — and the secondary nodal stiffness is "
+        "element-based (i7stslav.F:55-58 STIFINT), not nodal-mass-based, so a "
+        "rigid secondary node still carries one. On this corpus the "
+        "rigid-vs-rigid contact is INERT: mat_spring.belted-dummy reads the "
+        "identical 110 032 cycles / IE 8.804e5 / KE 1.4811e6 (KE_T 1.376e6 + "
+        "KE_R 1.051e5) with and without it, both arms run at nt 4, 0 starter "
+        "ERRORS (LS-DYNA's own sleout books -2 418 / +2 044 through that "
+        "interface against 9.69e5 over all 11), and pend.imp — the only other "
+        "deck this branch reaches, all three carriers being pend.imp, "
+        "pendulum-ii/pendulum and belted-dummy — reproduces its "
+        "*DEFORMABLE_TO_RIGID arm to every printed digit. It costs engine "
+        "time (16.5 % of pend.imp's CPU went to contact sorting and forces for "
+        "no effect). Disable with --no-rigid-secondary-swap.")
+
+
+_RIGID_REMEDY_BY_PLAN = {
+    _RS_IMPLICIT: _RIGID_SECONDARY_REMEDY_IMPLICIT,
+    _RS_OPTED_OUT: _RIGID_SECONDARY_REMEDY_OPTED_OUT,
+    _RS_NO_MAIN: _RIGID_SECONDARY_REMEDY_NO_MAIN,
+}
+
+
+def _rigid_secondary_remedy(plan: str) -> str:
+    """The REMEDY text for an all-rigid SECONDARY side that still got dropped.
+
+    ``_RS_SWAP`` and ``_RS_KEEP`` never reach a drop — the swapped side is
+    non-empty by the plan's own precondition and the kept side skips the filter
+    — so the default here is unreachable rather than a silent catch-all.
+    """
+    return _RIGID_REMEDY_BY_PLAN.get(plan, _RIGID_SECONDARY_REMEDY_NO_MAIN)
+
+
+def _implicit_rigid_secondary_note(state: ConversionState) -> str:
+    """The extra sentence an IMPLICIT all-rigid-SSID drop carries."""
+    return (
+        " This is an IMPLICIT deck, so k2rad keeps the drop rather than "
+        "swapping the sides. MEASURED on implicit/basic-examples/contact-i/"
+        "bumper.k: the shipped drop reaches NORMAL TERMINATION at t = 0.05 as a "
+        "ZERO MODEL (internal energy 0 against the LS-DYNA reference 1.23131e7), "
+        "while EVERY arm that restores the load path diverges at ISTOP = -2 / "
+        "MESSAGE ID : 79 SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT — the "
+        "swap at t = 2.0e-4, reproduced identically at nt 2 and nt 4; with an "
+        "explicit Gapmin of 0.14986 it reaches t = 7.1e-3 and still fails.")
 
 
 def _secondary_side_remedy(sid: int, styp: int) -> str:
@@ -810,19 +1309,25 @@ def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int,
 
 def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
                                   inter_id: int, diag: Dict[str, int],
-                                  sid: int) -> None:
+                                  sid: int, label: str = "ssid") -> None:
     """Flag a secondary side that KEPT its interface but lost some nodes.
 
     The same filter that empties an all-rigid side quietly thins a mixed one.
     The interface is still emitted (so this warns rather than dropping), but the
     share of the contact those rigid nodes carried is gone from the converted
-    model and the user is entitled to know."""
+    model and the user is entitled to know.
+
+    ``label`` names the CELL the surviving group came from, because after the
+    all-rigid-SSID swap the secondary nodes come from the MSID side and calling
+    that id ``ssid`` sends the reader to the wrong column of the card (#131's
+    label class). Every caller that swapped passes ``"msid (swapped)"``.
+    """
     removed = diag.get("rigid_removed", 0)
     if removed <= 0 or removed == diag.get("raw", 0):
         return
     state.warn(
         f"*{keyword or 'CONTACT'} {inter_id}: {removed} of the "
-        f"{diag.get('raw', 0)} node(s) on the SECONDARY side (ssid={sid}) "
+        f"{diag.get('raw', 0)} node(s) on the SECONDARY side ({label}={sid}) "
         "belong to a rigid body and were removed from the secondary node "
         f"group; the interface is emitted with the remaining "
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
@@ -908,40 +1413,68 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         set(deformable_deformable_inter_ids(state)) if _recipe_active(state) else set()
     )
 
+    # "Deformable" through the ONE predicate (writer.common.rigid_part_ids), so
+    # a *DEFORMABLE_TO_RIGID part is excluded by the same test a *MAT_RIGID one
+    # is. Equivalent on every deck that emits an /RBODY for the part (its nodes
+    # are in `rigid_nodes` and the second half of each clause removes them
+    # anyway); the arm where the two differ — a rigid part with NO elements —
+    # is empty by construction, because these walks are over ELEMENTS.
+    _rigid_parts = rigid_part_ids(state)
     all_deformable_nodes: List[int] = sorted(
         {n for e in state.shell_elems
-         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+         if e.pid not in _rigid_parts
          for n in e.nodes if n > 0 and n not in rigid_nodes}
         | {n for e in state.solid_elems
-           if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           if e.pid not in _rigid_parts
            for n in e.nodes if n > 0 and n not in rigid_nodes}
         | {n for e in state.tshell_elems          # /BRICK too — see above
-           if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           if e.pid not in _rigid_parts
            for n in e.nodes if n > 0 and n not in rigid_nodes}
         | {n for c in state.sph_elems             # SPH: deformable by nature
-           if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           if c.pid not in _rigid_parts
            for n in c.nodes if n > 0 and n not in rigid_nodes}
         | {n for e in state.seatbelt_elems        # 1D belt — see above
-           if not e.is_2d
-           and state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           if not e.is_2d and e.pid not in _rigid_parts
            for n in (e.n1, e.n2) if n > 0 and n not in rigid_nodes}
     )
     all_pids: List[int] = sorted(state.parts.keys())
 
     for c in state.contacts_single:
         if c.ssid == 0:
-            if not all_deformable_nodes or not all_pids:
+            # The two halves of this guard belong to DIFFERENT branches, and
+            # fusing them dropped a load path. `not all_pids` means there is no
+            # surface to build at all and is fatal either way. `not
+            # all_deformable_nodes` only blocks the IMPLICIT node->surface
+            # branch below, which is the sole consumer of that list — the
+            # EXPLICIT branch builds a /INTER/TYPE25 over a /SURF/PART/EXT and
+            # never reads it. MEASURED: after B1 makes both shell parts of
+            # introduction/examples-manual/misc/defo2rigid/
+            # deformable_to_rigid.pendulum.k rigid, its only other part is a
+            # *SECTION_BEAM one (which _contact_part_nodes deliberately does not
+            # walk), so all_deformable_nodes is EMPTY and the fused guard threw
+            # away the deck's whole self-contact — the degenerate arm of a
+            # more-faithful rule.
+            if not all_pids:
                 _drop_interface(
                     state, dropped, c.keyword, c.inter_id,
                     "it is an all-parts self-contact (SSID=0) but the deck has "
-                    + ("no parts at all" if not all_pids else
-                       "no deformable nodes left for the secondary side (every "
-                       "shell/solid node belongs to a rigid body)"),
-                    "REMEDY: a self-contact needs at least one deformable part "
-                    "to supply the tracked nodes. If the model really is "
-                    "all-rigid, replace the self-contact with an explicit "
-                    "surface-to-surface contact between the rigid parts, or "
-                    "give the impacted part a deformable material.")
+                    "no parts at all",
+                    "REMEDY: a self-contact needs at least one part carrying "
+                    "shell or solid elements to build a surface from.")
+                continue
+            if state.is_implicit and not all_deformable_nodes:
+                _drop_interface(
+                    state, dropped, c.keyword, c.inter_id,
+                    "it is an all-parts self-contact (SSID=0) on an IMPLICIT "
+                    "deck, which k2rad converts through the validated "
+                    "node->surface /INTER/TYPE7 recipe, and the deck has no "
+                    "deformable nodes left for the secondary side (every "
+                    "shell/solid node belongs to a rigid body)",
+                    "REMEDY: a node->surface self-contact needs at least one "
+                    "deformable part to supply the tracked nodes. If the model "
+                    "really is all-rigid, replace the self-contact with an "
+                    "explicit surface-to-surface contact between the rigid "
+                    "parts, or give the impacted part a deformable material.")
                 continue
             if not state.is_implicit:
                 # EXPLICIT: surfa=0 self-contact → native-style /INTER/TYPE25 over ONE
@@ -985,6 +1518,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
+            gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
+                                           0, 5)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
@@ -999,9 +1534,14 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                                 lines, diag=diag)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if not slav_grnod:
+                # NOT an all-rigid-SSID swap site: this contact names ONE side
+                # and uses it for both the tracked nodes and the main surface,
+                # so there is no second side to move to. It is also not a load
+                # path lost — a rigid body cannot deform, so a self-contact
+                # confined to one carries nothing in LS-DYNA either.
                 _drop_interface(state, dropped, c.keyword, c.inter_id,
                                 _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
-                                _RIGID_SECONDARY_REMEDY
+                                _RIGID_SECONDARY_REMEDY_SELF
                                 if diag.get("raw") else
                                 _secondary_side_remedy(c.ssid, c.sstyp))
                 continue
@@ -1017,6 +1557,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
+            gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
+                                           c.ssid, c.sstyp)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
@@ -1028,28 +1570,59 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
 
     for c in state.contacts_surf2surf:
         diag = {}
-        slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
-                                            lines, diag=diag)
-        mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
+        # The all-rigid-SSID rule. Decided BEFORE anything is emitted, because
+        # the resolvers allocate ids; the two sides then travel with their TYPE
+        # cells, so a *SET_SEGMENT main can become the secondary node source and
+        # a part the /SURF (W6_SETUP_SandwichImpact does exactly that).
+        plan, n_sec, n_main = _rigid_secondary_plan(
+            state, rigid_nodes, c.ssid, c.sstyp, c.msid, c.mstyp)
+        sec_sid, sec_styp = c.ssid, c.sstyp
+        main_sid, main_styp = c.msid, c.mstyp
+        keep_rigid = False
+        if plan == _RS_SWAP:
+            _warn_rigid_secondary_swap(state, c.keyword, c.inter_id, n_sec, n_main)
+            sec_sid, sec_styp = c.msid, c.mstyp
+            main_sid, main_styp = c.ssid, c.sstyp
+        elif plan == _RS_KEEP:
+            _warn_rigid_secondary_keep(state, c.keyword, c.inter_id, n_sec, n_main)
+            keep_rigid = True
+        slav_grnod = _resolve_contact_slave(state, sec_sid, sec_styp, rigid_nodes,
+                                            lines, diag=diag, keep_rigid=keep_rigid)
+        mast_surf = _resolve_contact_master(state, main_sid, main_styp, lines)
         if not slav_grnod:
             _drop_interface(state, dropped, c.keyword, c.inter_id,
-                            _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
-                            _RIGID_SECONDARY_REMEDY
+                            _describe_empty_secondary(diag, sec_sid, sec_styp, state)
+                            + (_implicit_rigid_secondary_note(state)
+                               if plan == _RS_IMPLICIT else ""),
+                            _rigid_secondary_remedy(plan)
                             if diag.get("raw") else
-                            _secondary_side_remedy(c.ssid, c.sstyp))
+                            _secondary_side_remedy(sec_sid, sec_styp))
             continue
         if not mast_surf:
+            # After a SWAP the main side is the deck's SSID, so naming the id
+            # "msid" would print one cell's value under another cell's name —
+            # the #131 label class `_warn_partial_rigid_secondary` already
+            # carries its `label` parameter for.
+            main_label = ("the MAIN side, which the all-rigid-SSID swap took "
+                          f"from this contact's SSID cell, ssid={main_sid} "
+                          f"sstyp={main_styp}," if plan == _RS_SWAP else
+                          f"the MAIN (MSID) side msid={main_sid} "
+                          f"mstyp={main_styp}")
             _drop_interface(
                 state, dropped, c.keyword, c.inter_id,
-                f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} resolved "
-                "to no contact surface: " + _describe_empty_main(
-                    state, c.msid, c.mstyp),
-                _main_side_remedy(state, c.msid, c.mstyp))
+                f"{main_label} resolved to no contact surface: "
+                + _describe_empty_main(state, main_sid, main_styp),
+                _main_side_remedy(state, main_sid, main_styp))
             continue
-        _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
+        _warn_partial_rigid_secondary(
+            state, c.keyword, c.inter_id, diag, sec_sid,
+            "msid (swapped)" if plan == _RS_SWAP else "ssid")
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
+        gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
+                                       main_sid, main_styp,
+                                       interference=c.interference)
         if c.interference:
             # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
             # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
@@ -2550,8 +3123,26 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             state, c.fs, c.fd, c.inter_id, "CONTACT_AUTOMATIC_GENERAL", tname)
 
         if c.soft == -7:
-            slav = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
-            mast = _resolve_contact_master(state, c.msid, c.mstyp, lines)
+            # The all-rigid-SSID rule reaches this sentinel route too (measured
+            # reach on every corpus: 0 carriers). Igap=2 below means the gap is
+            # element-derived, so the B3 Gapmin rule deliberately does NOT.
+            plan7, n_sec7, n_main7 = _rigid_secondary_plan(
+                state, rigid_nodes, c.ssid, c.sstyp, c.msid, c.mstyp)
+            sec7_sid, sec7_styp = c.ssid, c.sstyp
+            main7_sid, main7_styp = c.msid, c.mstyp
+            keep7 = False
+            if plan7 == _RS_SWAP:
+                _warn_rigid_secondary_swap(state, "CONTACT_AUTOMATIC_GENERAL",
+                                           c.inter_id, n_sec7, n_main7)
+                sec7_sid, sec7_styp = c.msid, c.mstyp
+                main7_sid, main7_styp = c.ssid, c.sstyp
+            elif plan7 == _RS_KEEP:
+                _warn_rigid_secondary_keep(state, "CONTACT_AUTOMATIC_GENERAL",
+                                           c.inter_id, n_sec7, n_main7)
+                keep7 = True
+            slav = _resolve_contact_slave(state, sec7_sid, sec7_styp, rigid_nodes,
+                                          lines, keep_rigid=keep7)
+            mast = _resolve_contact_master(state, main7_sid, main7_styp, lines)
             if not slav or not mast:
                 _drop_interface(
                     state, dropped, "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
@@ -3207,12 +3798,33 @@ def _make_type25_interfaces(state: ConversionState,
         surf1 = surf2 = grnod = 0
         if c.variant == "NODES_TO_SURFACE":
             diag: Dict[str, int] = {}
-            grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
-                                           lines, diag=diag)
+            # The same all-rigid-SSID rule the TYPE7 route runs. TYPE25's
+            # node-to-surface variant has the identical asymmetry — surf_ID1=0
+            # with the secondary node group tracked against surf_ID2 — so the
+            # deformable side has to supply the nodes here too. Measured reach
+            # on the R14 roster: 0 carriers; implemented for symmetry so the
+            # rule does not depend on which spelling the deck used.
+            plan25, n_sec25, n_main25 = _rigid_secondary_plan(
+                state, rigid_nodes, c.ssid, c.sstyp, c.msid, c.mstyp)
+            sec25_sid, sec25_styp = c.ssid, c.sstyp
+            main25_sid, main25_styp = c.msid, c.mstyp
+            keep25 = False
+            if plan25 == _RS_SWAP:
+                _warn_rigid_secondary_swap(state, kw, c.inter_id, n_sec25, n_main25)
+                sec25_sid, sec25_styp = c.msid, c.mstyp
+                main25_sid, main25_styp = c.ssid, c.sstyp
+            elif plan25 == _RS_KEEP:
+                _warn_rigid_secondary_keep(state, kw, c.inter_id, n_sec25, n_main25)
+                keep25 = True
+            grnod = _resolve_contact_slave(state, sec25_sid, sec25_styp, rigid_nodes,
+                                           lines, diag=diag, keep_rigid=keep25)
             if not grnod:
                 _drop_interface(state, dropped, kw, c.inter_id,
-                                _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
-                                _RIGID_SECONDARY_REMEDY if diag.get("raw") else
+                                _describe_empty_secondary(diag, sec25_sid,
+                                                          sec25_styp, state)
+                                + (_implicit_rigid_secondary_note(state)
+                                   if plan25 == _RS_IMPLICIT else ""),
+                                _rigid_secondary_remedy(plan25) if diag.get("raw") else
                                 "REMEDY: for a node-to-surface contact SSID "
                                 "should name a *SET_NODE_LIST holding every "
                                 "node that may become exposed as elements "
@@ -3220,19 +3832,21 @@ def _make_type25_interfaces(state: ConversionState,
                                 "set works too, but it must exist and carry "
                                 "elements.")
                 continue
-            surf2 = _type25_surface(state, c, c.msid, c.mstyp,
+            surf2 = _type25_surface(state, c, main25_sid, main25_styp,
                                     f"contact_{c.inter_id}_main", lines)
             if not surf2:
                 _drop_interface(
                     state, dropped, kw, c.inter_id,
-                    f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} "
+                    f"the MAIN (MSID) side msid={main25_sid} mstyp={main25_styp} "
                     "resolved to no contact surface (it names no part or part "
                     "set carrying shell/solid elements)",
                     "REMEDY: point MSID at a part or part set that exists in "
                     "this deck; a *SET_NODE or *SET_SEGMENT cannot supply the "
                     "main surface of a /INTER/TYPE25.")
                 continue
-            _warn_partial_rigid_secondary(state, kw, c.inter_id, diag, c.ssid)
+            _warn_partial_rigid_secondary(
+                state, kw, c.inter_id, diag, sec25_sid,
+                "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
@@ -3567,9 +4181,24 @@ def _tied_interface_type(c, state: ConversionState) -> str:
     ``TIED_SHELL_EDGE_TO_SURFACE`` and the ``_CONSTRAINED_OFFSET`` spellings in
     the CONSTRAINT-based family and the plain ``_OFFSET`` / ``_BEAM_OFFSET``
     ones in the PENALTY-based one. This function ignores ``c.offset``: an
-    ``_OFFSET`` tie on an explicit deck gets the constraint ``/INTER/TYPE2``
-    like any other, which also projects the secondary nodes onto the main
-    segment and so removes the very offset the keyword names. Measured reach
+    ``_OFFSET`` tie on an explicit deck gets ``/INTER/TYPE2`` at **Spotflag
+    27** like any other ``SURFACE_TO_SURFACE`` tie. 27 is an AUTO-PENALTY
+    variant (``_TIED_PENALTY_SPOTFLAGS``), not a kinematic constraint, and
+    Radioss does NOT project a TYPE2 secondary node onto its main segment: no
+    TYPE2 starter routine writes ``X(1..3, .)`` at all — ``i2buc1.F``,
+    ``i2chk3.F``, ``i2cor3.F``, ``i2dst3.F``, ``i2dst3_27.F``, ``i2surfs.F``,
+    ``i2tid3.F``, ``i2_dtn.F``, ``i2_dtn_27.F``, ``i2_dtn_28.F``,
+    ``interf1/i2master.F`` and ``inter2d1/inint2.F`` read the coordinate array
+    and never assign to it. FOUR starter interface files do move a node, and
+    none of them is TYPE2: the initial-penetration removers ``i3pen3.F:187-197``
+    (TYPE3), ``i7pwr3.F:213-242`` (TYPE7 under ``INACTI`` 3 and 4) and
+    ``i24pen3.F:317-319`` (TYPE24), plus ``in12r.F:120-133``, the TYPE12 frame
+    transform (``inint3.F:1203-1242`` calls it only under ``NTY == 12``). (An earlier revision of this docstring said it did, and the
+    ROADMAP entry beside it repeated the claim; round 4 retracted both.) What
+    the offset really costs is the constant-stiffness rigid link Spotflag 28
+    ("like 1", the spotweld formulation) carries and 27 ("like 5", the glue
+    formulation) does not — which makes ``27 -> 28`` the one-cell variant that
+    would read the field, and its reach is 0 roster decks. Measured reach
     on the corpus today is ZERO — all 29 ``*CONTACT_TIED_*`` decks on
     ``F:``, ``C:/openradioss_run`` and ``Ryan_Lee`` convert identically on both
     trees, because the two ``_OFFSET`` carriers (``getriebekette``,

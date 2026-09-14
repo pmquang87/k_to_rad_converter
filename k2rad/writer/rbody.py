@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
-    CnrbSpcBc, ConversionState, NodeData, PartData, RigidInertia,
+    CnrbSpcBc, ConversionState, MatRigid, NodeData, RigidInertia,
 )
 from .common import (HDR, _emit_grnod_node, _f, _i, _truss_pids, _vcross,
                      _vnorm)
@@ -314,7 +314,7 @@ def _inertia_lines(j: Tuple[float, ...]) -> List[str]:
 
 
 def _warn_unapplied_part_inertias(state: ConversionState, applied: Set[int],
-                                  rigid_mids: Set[int],
+                                  rigid_pids: Set[int],
                                   merge_root: Dict[int, int],
                                   rbody_info: Dict) -> None:
     """Report every `*PART_INERTIA` whose properties never reached an `/RBODY`.
@@ -337,8 +337,9 @@ def _warn_unapplied_part_inertias(state: ConversionState, applied: Set[int],
         part = state.parts.get(pid)
         if part is None:
             reason = "no *PART card defines that id"
-        elif part.mid not in rigid_mids:
-            reason = (f"its material {part.mid} is not a *MAT_RIGID, and "
+        elif pid not in rigid_pids:
+            reason = (f"its material {part.mid} is not a *MAT_RIGID (and no "
+                      "*DEFORMABLE_TO_RIGID card names the part), and "
                       "*PART_INERTIA 'applies to rigid bodies (see *MAT_RIGID) "
                       "only'")
         elif pid in merge_root:
@@ -362,13 +363,94 @@ def _warn_unapplied_part_inertias(state: ConversionState, applied: Set[int],
 # Starter: rigid bodies
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _warn_deformable_to_rigid(state: ConversionState, pid: int,
+                              lrb: int) -> None:
+    """The per-part *DEFORMABLE_TO_RIGID note, with the measured consequence.
+
+    Split out so the ELEMENT-deactivation fact and the pend.imp numbers are
+    stated once, where the /RBODY is actually emitted.
+    """
+    part = state.parts.get(pid)
+    law = (f"*PART {pid}'s own material {part.mid}" if part is not None
+           else "the part's own material")
+    merge = ""
+    if lrb:
+        merge = (f" LRB = {lrb} merges this part into part {lrb}'s single "
+                 "/RBODY, through the same union-find *CONSTRAINED_RIGID_BODIES "
+                 "uses. (Reach of a non-zero LRB on every corpus this converter "
+                 "is measured against: 0 cards.)")
+    state.warn(
+        f"*DEFORMABLE_TO_RIGID PID {pid}: the part is rigid FROM t = 0 (Vol I "
+        "R17 p.18-1: \"Deformable parts may be switched to rigid at the start "
+        "of the calculation by specifying them on the *DEFORMABLE_TO_RIGID "
+        "card\") and is emitted as an /RBODY through the same path a *MAT_RIGID "
+        f"part takes — {law} is KEPT and only supplies the body's element mass "
+        "and contact stiffness; /RBODY merely constrains the nodes. Its "
+        "elements are DEACTIVATED (hm_read_rbody.F:700-722 sets ISOLOFF for "
+        "every solid whose 8 nodes are in the group), so the part no longer "
+        "controls the time step: MEASURED on "
+        "intro-by-k.-weimar/misc/pendulum-i/pend.imp.k, the controlling element "
+        "goes SOLID at dt 1.360e-06 to TRUSS at dt 1.794e-05, which is "
+        "LS-DYNA's own 1.79363E-05, and the deck's energy error goes 99.9 % to "
+        "-0.0 % (internal energy 5.162e5 to 5.901e-06 against the LS-DYNA "
+        "reference 5.03545e-06) in 9 480 cycles where LS-DYNA takes 9 479."
+        " That -0.0 % is the ENGINE's own energy balance, not a deviation "
+        "from the reference: the campaign row still reads ie_dev +17.19 % and "
+        "stays a deviation, both energies being structural zeros on a gravity "
+        "pendulum. The FIDELITY channel here is the KINETIC energy - 21.8702 "
+        "against 21.874, -0.017 %, the whole trajectory inside +/-0.07 % at "
+        "11 matched times."
+        + merge +
+        " Mass and inertia come from the MESH, as in LS-DYNA. Pass "
+        "--no-deformable-to-rigid to leave the part deformable.")
+
+
+def _deformable_to_rigid_map(state: ConversionState) -> Dict[int, int]:
+    """``{pid: LRB}`` for the *DEFORMABLE_TO_RIGID parts this run will convert.
+
+    Empty (with the loss recorded) under ``--no-deformable-to-rigid``. This is
+    the only site that WARNS about the option, so the refusal message has one
+    home. The shared predicate ``writer.common.rigid_part_ids`` reads the same
+    flag — it has to, or the six consumers that ask "is this part rigid?" would
+    answer yes about a part this function leaves deformable.
+    """
+    if not state.deformable_to_rigid:
+        return {}
+    if state.options.deformable_to_rigid:
+        return dict(state.deformable_to_rigid)
+    pids = sorted(state.deformable_to_rigid)
+    state.warn(
+        f"--no-deformable-to-rigid: *DEFORMABLE_TO_RIGID part(s) {pids} were "
+        "left DEFORMABLE. LS-DYNA makes them rigid at t = 0 (Vol I R17 "
+        "p.18-1), so the converted model is SOFTER than the source deck, its "
+        "time step is controlled by elements LS-DYNA deactivates, and its "
+        "internal energy is not comparable to the reference: measured on "
+        "pend.imp, 5.162e5 against an LS-DYNA reference of 5.03545e-06.")
+    state.note_recognized_not_emitted(
+        "DEFORMABLE_TO_RIGID",
+        f"--no-deformable-to-rigid: part(s) {pids} stay deformable, so no "
+        "/RBODY was emitted for them.")
+    return {}
+
+
 def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     """Return (rad_lines, rigid_node_set, rbody_info_dict)."""
     lines: List[str] = []
     rigid_nodes: Set[int] = set()
     rbody_info: Dict = {}
 
-    if not state.mat_rigid:
+    # *MAT_RIGID parts AND *DEFORMABLE_TO_RIGID parts, through the ONE
+    # predicate — see writer.common.rigid_part_ids for why a consumer left on
+    # state.mat_rigid alone is a defect. Every downstream consumer that reads
+    # the three values this function returns (the /GRAV scope's rbody_info
+    # tags, the /INIVEL classification, the contacts' rigid_nodes screen,
+    # /BCS's node_to_ind, state.rbody_ids -> /TH/RBODY, _make_added_masses'
+    # skip-rigid rule) is therefore correct for free.
+    d2r: Dict[int, int] = _deformable_to_rigid_map(state)
+    rigid_pids: Set[int] = {p for p, part in state.parts.items()
+                            if part.mid in state.mat_rigid} | set(d2r)
+
+    if not rigid_pids:
         for pid in sorted(state.extra_rigid_nodes):
             state.warn(
                 f"*CONSTRAINED_EXTRA_NODES pid={pid}: part is not a *MAT_RIGID "
@@ -377,31 +459,28 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         _warn_unapplied_part_inertias(state, set(), set(), {}, rbody_info)
         return lines, rigid_nodes, rbody_info
 
-    rigid_mids: Set[int] = set(state.mat_rigid.keys())
-
     nodes_by_pid: Dict[int, List[int]] = defaultdict(list)
     for e in state.shell_elems:
-        if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+        if e.pid in rigid_pids:
             nodes_by_pid[e.pid].extend(e.nodes)
     for e in state.solid_elems:
-        if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+        if e.pid in rigid_pids:
             nodes_by_pid[e.pid].extend(e.nodes)
     for e in state.tshell_elems:              # /BRICK too — see above
-        if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+        if e.pid in rigid_pids:
             nodes_by_pid[e.pid].extend(e.nodes)
     for c in state.sph_elems:                 # SPH nodes join like any other
-        if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+        if c.pid in rigid_pids:
             nodes_by_pid[c.pid].extend(c.nodes)
     for e in state.beam_elems:
-        if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+        if e.pid in rigid_pids:
             nodes_by_pid[e.pid].extend([e.n1, e.n2])
 
     # *CONSTRAINED_EXTRA_NODES_NODE/_SET: extra nodes rigidly attached to the
     # part join its /RBODY secondary-node group (they also let an element-free
     # *MAT_RIGID part form a rigid body at all).
     for pid, extra in state.extra_rigid_nodes.items():
-        part = state.parts.get(pid)
-        if part is None or part.mid not in rigid_mids:
+        if pid not in rigid_pids:
             state.warn(
                 f"*CONSTRAINED_EXTRA_NODES pid={pid}: part is not a *MAT_RIGID "
                 "part — extra nodes not attached (deformable-part extra nodes "
@@ -423,16 +502,20 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     # *CONSTRAINED_RIGID_BODIES: fold each slave rigid part's nodes into its
     # master so only the master emits an /RBODY. Chains (A<-B, B<-C) resolve
     # transitively via union-find with the master as the representative.
-    merge_root = _resolve_rigid_body_merges(state, rigid_mids)
+    merge_root = _resolve_rigid_body_merges(state, rigid_pids, d2r)
     for slave, master in sorted(merge_root.items()):
         moved = nodes_by_pid.pop(slave, [])
         if moved:
             nodes_by_pid[master].extend(moved)
 
     if not nodes_by_pid:
-        for mid in rigid_mids:
+        for mid in sorted(state.mat_rigid):
             state.warn(f"*MAT_RIGID mid={mid}: no elements found; /RBODY not emitted")
-        _warn_unapplied_part_inertias(state, set(), rigid_mids, merge_root,
+        for pid in sorted(d2r):
+            state.warn(f"*DEFORMABLE_TO_RIGID pid={pid}: no elements found; "
+                       "/RBODY not emitted — the part is NOT rigid in the "
+                       "converted model.")
+        _warn_unapplied_part_inertias(state, set(), rigid_pids, merge_root,
                                       rbody_info)
         return lines, rigid_nodes, rbody_info
 
@@ -449,13 +532,24 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     elem_nodes: Set[int] = (_inertia_element_nodes(state)
                             if state.part_inertias else set())
 
+    emitted_pids: Set[int] = set()
     for pid, all_nodes in sorted(nodes_by_pid.items()):
         part = state.parts.get(pid)
         if not part: continue
-        mat = state.mat_rigid.get(part.mid)
-        if not mat: continue
+        # A *DEFORMABLE_TO_RIGID part has NO *MAT_RIGID card at all — it keeps
+        # its own deformable law — so `mat` is legitimately None here and the
+        # old `if not mat: continue` would have dropped the whole body. Every
+        # read of `mat` below is guarded; the keyword name travels with it so
+        # the warnings say which card made the part rigid.
+        mat: Optional[MatRigid] = state.mat_rigid.get(part.mid)
+        is_d2r = pid in d2r
+        if mat is None and not is_d2r: continue
+        kw = "*DEFORMABLE_TO_RIGID" if mat is None else "*MAT_RIGID"
         unique_nodes = sorted(set(n for n in all_nodes if n > 0))
         if not unique_nodes: continue
+        if is_d2r:
+            _warn_deformable_to_rigid(state, pid, d2r[pid])
+        emitted_pids.add(pid)
 
         # *PART_INERTIA cards 3-6. ``inr`` is the parsed record (used for the
         # card-5 velocities even when the mass override is refused); ``props`` is
@@ -531,7 +625,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 state.nodes[ind_node] = NodeData(0.0, 0.0, 0.0)
             rigid_nodes.add(ind_node)
             state.warn(
-                f"*MAT_RIGID pid={pid}: /RBODY master is a synthesized "
+                f"{kw} pid={pid}: /RBODY master is a synthesized "
                 f"element-free node {ind_node} at the part's nodal centroid "
                 "(default; mesh nodes keep their coordinates and loads/readouts "
                 "on the rigid body now address this node — pass "
@@ -605,7 +699,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             if part_fin > 0:
                 sources.append(f"*ELEMENT_MASS_PART FINMASS={part_fin:.6G}")
             state.warn(
-                f"*MAT_RIGID pid={pid}: total added mass {added_mass:.6G} "
+                f"{kw} pid={pid}: total added mass {added_mass:.6G} "
                 f"({', '.join(sources)}) placed in /RBODY Mass field."
             )
         if props is not None:
@@ -685,8 +779,13 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # contribution to K_eff to stabilize without artificial constraint).
         # Tested empirically: without either added mass OR the auto-constraint,
         # the engine segfaults on RANK 0 due to ill-conditioned K_eff.
-        tra_chars = list(_con1_to_tra(mat.con1) if mat.cmo == 1.0 else "000")
-        rot_chars = list(_con2_to_rot(mat.con2) if mat.cmo == 1.0 else "000")
+        # A *DEFORMABLE_TO_RIGID part has no CMO/CON1/CON2 cells at all
+        # (the card is three fields, Vol I R17 p.18-2), so it is free in
+        # every DOF and gets no /BCS — which is what LS-DYNA does too.
+        tra_chars = list(_con1_to_tra(mat.con1)
+                         if mat is not None and mat.cmo == 1.0 else "000")
+        rot_chars = list(_con2_to_rot(mat.con2)
+                         if mat is not None and mat.cmo == 1.0 else "000")
         # Determine which translation DOFs this rigid body is loaded on.
         # /LOAD_RIGID_BODY dof: 1=Fx, 2=Fy, 3=Fz, 5=Mx, 6=My, 7=Mz
         loaded_tra_idx: set = set()
@@ -708,15 +807,16 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                     added_stab = True
         if added_stab:
             free_axes = [("X","Y","Z")[i] for i in range(3) if tra_chars[i] == "1"
-                         and (mat.con1 == 0 or _con1_to_tra(mat.con1)[i] == "0")]
+                         and (mat is None or mat.con1 == 0
+                              or _con1_to_tra(mat.con1)[i] == "0")]
             state.warn(
-                f"*MAT_RIGID pid={pid}: auto-constrained non-loaded free "
+                f"{kw} pid={pid}: auto-constrained non-loaded free "
                 f"translation(s) {','.join(free_axes)} on rigid body master "
                 f"to stabilize implicit K. Add *ELEMENT_MASS_PART to skip this."
             )
         elif state.is_implicit and loaded_tra_idx and user_added_mass > 0:
             state.warn(
-                f"*MAT_RIGID pid={pid}: user-added mass {user_added_mass:.6G} "
+                f"{kw} pid={pid}: user-added mass {user_added_mass:.6G} "
                 f"detected — skipping auto Z constraint (mass provides stability)."
             )
         tra = "".join(tra_chars)
@@ -731,7 +831,19 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 HDR,
             ]
 
-    _warn_unapplied_part_inertias(state, inertia_applied, rigid_mids, merge_root,
+    # A *DEFORMABLE_TO_RIGID part whose elements never reached a /RBODY is NOT
+    # rigid in the converted model, and that has to be said: LS-DYNA deactivates
+    # those elements at t = 0 and k2rad would leave them controlling the time
+    # step. The *MAT_RIGID half already has its own mid-keyed warning on the
+    # all-empty path above.
+    for pid in sorted(set(d2r) - emitted_pids - set(merge_root)):
+        state.warn(
+            f"*DEFORMABLE_TO_RIGID pid={pid}: no shell/solid/beam/SPH element "
+            "of this part was found, so NO /RBODY was emitted for it and the "
+            "part is NOT rigid in the converted model. LS-DYNA makes it rigid "
+            "at t = 0 and deactivates its elements (Vol I R17 p.18-1).")
+
+    _warn_unapplied_part_inertias(state, inertia_applied, rigid_pids, merge_root,
                                   rbody_info)
 
     # *CONSTRAINED_RIGID_BODIES: repoint each merged slave pid at its master's
@@ -745,13 +857,24 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     return lines, rigid_nodes, rbody_info
 
 
-def _resolve_rigid_body_merges(state: ConversionState, rigid_mids: Set[int]) -> Dict[int, int]:
+def _resolve_rigid_body_merges(state: ConversionState, rigid_pids: Set[int],
+                               d2r: Optional[Dict[int, int]] = None
+                               ) -> Dict[int, int]:
     """*CONSTRAINED_RIGID_BODIES (PIDM, PIDS) pairs → {slave_pid: root_master_pid}.
 
     Union-find with the master (PIDM) side as the representative, so chained
     merges (A<-B, B<-C) all resolve to the ultimate master A. Only pairs whose
-    BOTH parts are *MAT_RIGID are honoured; others are warned and dropped. The
-    root master itself is not in the returned map (it keeps its own /RBODY)."""
+    BOTH parts are RIGID are honoured — a *MAT_RIGID part or a
+    *DEFORMABLE_TO_RIGID one, tested on the PART and not on its material,
+    because a *DEFORMABLE_TO_RIGID part keeps its own deformable law. Others
+    are warned and dropped. The root master itself is not in the returned map
+    (it keeps its own /RBODY).
+
+    *DEFORMABLE_TO_RIGID's own ``LRB`` field folds through the SAME union-find:
+    Vol I R17 p.18-2 defines it as the "Part ID of the lead rigid body to which
+    the part is merged", which is exactly a (master, slave) pair. Measured reach
+    of a non-zero LRB on every corpus this converter is checked against: 0
+    cards, so the path ships stated rather than validated against a reference."""
     parent: Dict[int, int] = {}
 
     def find(p: int) -> int:
@@ -761,14 +884,16 @@ def _resolve_rigid_body_merges(state: ConversionState, rigid_mids: Set[int]) -> 
             p = parent[p]
         return p
 
-    for pidm, pids in state.rigid_body_merges:
-        mp = state.parts.get(pidm)
-        sp = state.parts.get(pids)
-        if (mp is None or mp.mid not in rigid_mids
-                or sp is None or sp.mid not in rigid_mids):
+    pairs: List[Tuple[str, int, int]] = [
+        ("*CONSTRAINED_RIGID_BODIES", m, s) for m, s in state.rigid_body_merges]
+    pairs += [("*DEFORMABLE_TO_RIGID LRB", lrb, pid)
+              for pid, lrb in sorted((d2r or {}).items()) if lrb]
+    for kw, pidm, pids in pairs:
+        if pidm not in rigid_pids or pids not in rigid_pids:
             state.warn(
-                f"*CONSTRAINED_RIGID_BODIES ({pidm},{pids}): both parts must be "
-                "*MAT_RIGID to merge into one rigid body — merge skipped.")
+                f"{kw} ({pidm},{pids}): both parts must be rigid (a *MAT_RIGID "
+                "part or a *DEFORMABLE_TO_RIGID one) to merge into one rigid "
+                "body — merge skipped.")
             continue
         rm, rs = find(pidm), find(pids)
         if rm != rs:

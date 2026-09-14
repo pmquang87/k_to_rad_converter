@@ -643,6 +643,8 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
         edge = _mean_brick_edge(state, set(mpids))
         gap = 0.5 * edge if edge > 0 else 1.0
         inter_id = state.next_id()
+        _warn_clis_dropped_cells(state, cls, inter_id)
+        _warn_initial_void_in_fsi(state, cls, mpids, inter_id)
         lines += [
             f"/INTER/TYPE18/{inter_id}",
             f"fsi_coupling_{inter_id}",
@@ -660,6 +662,119 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
             "tune Stfval/Gap for your coupling, or switch to /INTER/TYPE22 "
             "(cut-cell) for demanding fluid-structure interaction.")
     return lines
+
+
+def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None:
+    """The ``*CONSTRAINED_LAGRANGE_IN_SOLID`` cells that reach no ``/INTER`` cell.
+
+    ``handle_constrained_lagrange_in_solid`` reads card-1 fields 1-4 and 6 and
+    card-2 fields 1-3; ``ConstrainedLagrangeInSolid`` stores ``slave master
+    sstyp mstyp ctype pfac start end``; and this writer uses ``slave``,
+    ``master``, ``sstyp``, ``mstyp``, ``start``, ``end`` and NOTHING ELSE —
+    ``ctype`` and ``pfac`` are parsed and never read, and EVERY OTHER CELL of
+    the keyword is never parsed at all.
+
+    The inventory is the whole point of this warning, so it is enumerated per
+    card against the deck's own ``$#`` headers rather than summarised:
+    card 1's ``NQUAD``, ``DIREC`` and ``MCOUP``; card 2's ``FRIC`` (the
+    coupling friction coefficient — a physics cell, not a control), ``FRCMIN``,
+    ``NORM``, ``NORMTYP`` and ``DAMP``; the whole of card 3 (``K``/``CQ``,
+    ``HMIN``, ``HMAX``, ``ILEAK``, ``PLEAK``, ``LCIDPOR``, ``NVENT``,
+    ``BLOCKAGE``); and the whole of the optional card 4 where a deck writes one
+    (``IBOXID``, ``IPENCHK``, ``INTFORC``, ``IALESOF``, ``LAGMUL``, ``PFACMM``,
+    ``THKF``). Censused over the 12 CLIS cards on ``F:`` and
+    ``C:/openradioss_run``: every unnamed cell is 0 or its default except
+    ``stagnation_A``/``_B``'s ``K 1.4013E-45``, ``BLOCKAGE 2113929216`` and
+    ``IBOXID 1073741824`` — so nothing real is lost on this corpus today, which
+    is a reason to name them, not a reason to leave them out.
+
+    That the drop is real, not a bookkeeping quibble, has a controlled
+    experiment in the corpus itself: ``quadrature_B`` and ``quadrature_C``
+    differ in EXACTLY one cell (``NQUAD`` 1 vs 3) and emit BYTE-IDENTICAL
+    ``_0000.rad`` files.
+
+    Per CLIS card; the card ids are in the text so a deck with several is
+    readable.
+    """
+    state.warn(
+        f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
+        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: every coupling cell "
+        "except the two sides and the two times is NOT PARSED at all. Vol I "
+        "R17 p.10-113/114's Card Summary has SIX cards and all six are "
+        "inventoried here - card 1 NQUAD, DIREC, MCOUP; card 2 FRIC (the "
+        "coupling FRICTION coefficient), FRCMIN, NORM, NORMTYP, DAMP; the "
+        "whole of card 3 (K, HMIN, HMAX, ILEAK, PLEAK, LCIDPOR, NVENT, IBLOCK "
+        "- which the corpus decks' own $# header still spells 'blockage'); "
+        "the whole of the optional card 4 (IBOXID, IPENCHK, INTFORC, IALESOF, "
+        "LAGMUL, PFACMM, THKF); card 5, required for CTYPE 11/12 (A1, B1, A2, "
+        "B2, A3, B3, POREINI); and card 6, one per vent hole (VENTSID, "
+        "VENTYP, VTCOEF, POPPRES, COEFLC). Cards 5 and 6 have ZERO carriers on "
+        "this corpus - every CLIS deck on F: writes at most cards 1-4 (plus a "
+        "_TITLE id line, which is what makes ale_wavehitcol's block five lines "
+        f"long) - so that half is a statement, not a measured loss. CTYPE="
+        f"{cls.ctype} and PFAC={cls.pfac:g} are parsed and "
+        "never read. The emitted interface uses a CONSTANT UNIT stiffness "
+        "(Stfval = 1.0, Vref = 0.0, Iauto left blank so the starter takes "
+        "ISTIFF = 1, 'constant user value' - hm_read_inter_type18.F:131 and "
+        ":158-159) and a mesh-derived Gap = 0.5 x the mean brick edge. The "
+        "corpus carries the controlled experiment for how much that costs: "
+        "quadrature_B and quadrature_C differ in EXACTLY one cell (NQUAD 1 vs "
+        "3) and convert to byte-identical files. Tune Stfval/Gap by hand for "
+        "your coupling.")
+
+
+def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
+                              inter_id: int) -> None:
+    """An ``*INITIAL_VOID_*`` part that IS the ALE fluid group of this coupling.
+
+    The void is skipped (no Radioss card expresses it — see
+    ``handlers.handle_initial_void``), so the region LS-DYNA empties converts
+    as ORDINARY FLUID. On a deck where a Lagrangian body starts inside it, the
+    FSI penalty then loads that body from cycle 0 against material that should
+    not be there, and the run is not a wrong number, it is a different model.
+
+    The predicate is the INTERSECTION, not the presence of either card, and
+    BOTH controls are measured. A void with no coupling (``bird-el.k``) is a
+    dropped cell and nothing more, and stays silent. A coupling with no void —
+    ``stagnation_A.k``, ``stagnation_B.k``, ``cylinder_impact_B.k`` and
+    ``ale_wavehitcol.k``, each of which emits its ``/INTER/TYPE18`` and gets
+    the CLIS inventory but NOT this warning — is correct as emitted.
+    (``quadrature_A.k`` used to be named as that control and cannot be: it
+    carries NEITHER card. Its whole keyword list is a pure Lagrangian-velocity
+    ALE model — ``*MAT_NULL`` + ``*EOS_GRUNEISEN`` + ``*MAT_RIGID``, no
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID`` and no ``*INITIAL_VOID`` — so it never
+    reaches this function at all and proved nothing about either arm. It is
+    still the right name for the velocity sibling below.)
+    """
+    if not state.initial_void_parts:
+        return
+    mset = set(mpids)
+    hit: List[int] = []
+    for sid, is_set in state.initial_void_parts:
+        if set(_part_pids(state, sid, not is_set)) & mset:
+            hit.append(sid)
+    if not hit:
+        return
+    for sid in sorted(set(hit)):
+        state.warn(
+            f"*INITIAL_VOID_PART {sid} is SKIPPED, and that part is the ALE "
+            f"fluid group of an emitted /INTER/TYPE18 coupling (interface "
+            f"{inter_id}). The region LS-DYNA empties is therefore converted "
+            "as ORDINARY FLUID: a Lagrangian body that starts inside it is "
+            "loaded by the FSI penalty from cycle 0. MEASURED on quadrature_B "
+            "(a rigid impactor at vy = -5000 mm/s starting inside part 1, "
+            "y in [500,700]): the converted deck reaches KE 1.029e6 and IE "
+            "1.115e6 against the LS-DYNA reference's IE 166.47 / KE 1.24046e4 "
+            "- a 99.9 % energy error - while the same deck with part 1 given a "
+            "near-vacuum density BY HAND reads IE 1.080 / KE 1.530e4 at 0.0 % "
+            "error, and with the coupling deleted terminates NORMAL in 1051 "
+            "cycles exactly like its Lagrangian sibling quadrature_A (which "
+            "carries the same -5000 velocity). No /INTER/TYPE18 parameter "
+            "moves this: Stfval x0.01, x100, the Iauto = 2 / PFAC / Vref form "
+            "and a halved impact velocity all end at 99.9 %. THE FSI RESULT ON "
+            "THIS DECK IS NOT VALID. A correct mapping needs a void phase "
+            "(/MAT/LAW51 multi-material + /INIVOL, or a /MAT/VOID region) and "
+            "is not implemented.")
 
 
 def _make_ebcs(state: ConversionState) -> List[str]:

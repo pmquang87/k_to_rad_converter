@@ -3837,6 +3837,16 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Found by the SIDE-DEFECT batch's audit of every INITIAL_* handler:
     # readable and un-offsettable, like the two *INITIAL_STRESS_* keywords.
     "INITIAL_VOLUME_FRACTION_GEOMETRY": _off_initial_volume_fraction_geometry,
+    # *INITIAL_VOID_{PART,SET} — one id per row, in the namespace the SPELLING
+    # names (unlike *INITIAL_VOLUME_FRACTION_GEOMETRY, whose FMSID is bucketed
+    # by a cell beside it). k2rad converts neither card — there is no Radioss
+    # void phase to write — but the ids must still travel through an
+    # *INCLUDE_TRANSFORM, because writer/blast_ale._warn_initial_void_in_fsi
+    # intersects them with the /INTER/TYPE18 fluid group's PART ids, and an
+    # un-offset id would silently miss (a warning that fires on nothing is the
+    # #130 shape).
+    "INITIAL_VOID_PART": {"data": (0, [(0, "p")])},
+    "INITIAL_VOID_SET": {"data": (0, [(0, "s")])},
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)
@@ -3847,6 +3857,13 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_EXTRA_NODES_NODE": {"data": (0, [(0, "p"), (1, "n")])},
     "CONSTRAINED_EXTRA_NODES_SET": {"data": (0, [(0, "p"), (1, "s")])},
     "CONSTRAINED_RIGID_BODIES": {"data": (0, [(0, "p"), (1, "p")])},
+    # *DEFORMABLE_TO_RIGID: PID and LRB are both PART ids under the card's
+    # default PTYPE = PART. Under PTYPE = PSET column 1 is a part-SET id, and
+    # this spec would offset it in the wrong namespace — the handler says so by
+    # name when it meets a PSET card, because PTYPE is read only after the
+    # offset pass has already run. Measured reach of PSET on every corpus: 0
+    # cards, so no deck is mis-offset today.
+    "DEFORMABLE_TO_RIGID": {"data": (0, [(0, "p"), (1, "p")])},
     "CONSTRAINED_SPOTWELD": {"data": (0, [(0, "n"), (1, "n")])},
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE": {"data": (0, [(0, "n"), (1, "n")]),
                                             "stride": 2},
