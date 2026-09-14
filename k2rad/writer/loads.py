@@ -6209,19 +6209,30 @@ def _spring_token_negative_admas(
     done = {nid for nid, _b, _s in compensated}
     want: Dict[int, float] = {}
     for nid, share in state.spring_token_mass_by_node.items():
+        # `nid in done` = the share is already off the deck's own /ADMAS.
+        # `nid not in state.nodes` is DEFENSIVE and no deck reaches it: every
+        # registered node was written into a /SPRING row, and the synthesized
+        # ground node is registered in state.nodes by _new_ground_node. It
+        # stays because a /GRNOD naming a node the deck does not define is a
+        # starter error, and a mutation of it is therefore a no-op rather than
+        # an uncaught branch — probed with a *MAT_SPOTWELD beam on a missing
+        # node, which the zero-length screen drops one level up.
         if share <= 0.0 or nid in done or nid not in state.nodes:
-            continue                     # already off the deck's own /ADMAS
+            continue
         if nid in state.connector_ground_nodes:
             continue                     # /BCS 111 111 — mass cannot act
         if nid in rigid_nodes:
             continue                     # measured inert; see the warning
         want[nid] = share
-    # The DEGENERATE class keeps the deck's own /ADMAS value AND takes the FULL
-    # share off with a negative card, so the sum is exact:
-    # m_own + m_admas + token - token.
-    for nid, _m, share in degenerate:
-        if nid in state.nodes and nid not in rigid_nodes:
-            want[nid] = share
+    # NOTE on the DEGENERATE class (a deck /ADMAS at or below the token share):
+    # it needs NO pass of its own. Such a node is not in `done` — nothing was
+    # subtracted from it — so the loop above already selected it, and the
+    # deck's own /ADMAS value is kept by _make_added_masses while the FULL
+    # share comes off here: m_own + m_admas + token - token. A second loop over
+    # `degenerate` was written here and then removed as dead code; the
+    # parameter is kept because _warn_spring_token_mass needs the list to
+    # choose its wording.
+    del degenerate
     if not want:
         return {}, []
     has_mass = _spring_token_own_element_mass(state, set(want))

@@ -312,6 +312,52 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
         self.assertTrue(_has(result.warnings,
                              "carry NO element mass of their own"))
 
+    def test_a_synthesized_ground_node_is_neither_compensated_nor_named(self):
+        """``_emit_spring_part`` mints a grounded element's second node fully
+        ``/BCS 111 111``-fixed, so a mass on it cannot move anything — and it
+        is not a user node the guard sentence may name either."""
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n*NODE\n"
+                + "".join(f"{i:>8}{x:>16.4f}{y:>16.4f}{0.0:>16.4f}\n"
+                          for i, (x, y) in enumerate(
+                              [(0, 0), (10, 0), (10, 10), (0, 10)], 1))
+                + "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 3, 4) + "\n"
+                  "*ELEMENT_DISCRETE\n"
+                + f"{1:>8}{2:>8}{1:>8}{0:>8}{0:>8}{1.0:>16.8G}"
+                  f"{0:>8}{0.0:>16.8G}\n"
+                + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+                + "*PART\nspring\n" + _row(2, 2, 2) + "\n"
+                + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+                  "*SECTION_DISCRETE\n" + _row(2, 0) + "\n"
+                + _row(0.0, 1.0, 0.0, 0.0) + "\n"
+                  "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                  "*MAT_SPRING_ELASTIC\n" + _row(2, 100.0) + "\n*END\n")
+        result, starter, _e = _convert(deck)
+        cards = _admas_cards(starter)
+        self.assertEqual(sorted(cards), [-_SHARE], cards)
+        self.assertEqual(cards[-_SHARE], [1],
+                         "only the REAL end node may be compensated")
+        self.assertFalse(_has(result.warnings,
+                              "carry NO element mass of their own"),
+                         "the synthesized ground node must not be named")
+
+    def test_a_rigid_body_secondary_node_gets_no_negative_admas(self):
+        """MEASURED inert on the roster's only carrier: with ``ICoG = 4``
+        ``inirby.F:265-266`` discards the secondaries' mass, so the token AND
+        any compensation of it do nothing. Compensating anyway would write a
+        card that cannot act."""
+        deck = _weld_deck().replace(
+            "*SECTION_SHELL",
+            "*SET_NODE_LIST\n" + _row(77) + "\n" + _row(1, 11, 2) + "\n"
+            "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(88, 0, 77) + "\n"
+            "*SECTION_SHELL")
+        result, starter, _e = _convert(deck)
+        self.assertIn("/RBODY/", starter)
+        self.assertNotIn("spring_token_compensation", starter)
+        self.assertTrue(_has(result.warnings,
+                             "are SECONDARY nodes of a rigid body",
+                             "inirby.F:265-266"))
+
     def test_the_retracted_rigid_sentence_is_gone_from_every_shipped_text(self):
         """The old RIGID sentence stated a fact that is FALSE on the only
         carrier: *"It is added to the body's total mass"*. With ICoG = 4
@@ -362,6 +408,53 @@ _SPOTWELD_BEAM_DECK = (
     + _row(0, 0, 0, 1000.0, 500.0, 500.0) + "\n"
       "*END\n"
 )
+
+
+_CABLE_DECK = (
+    "*KEYWORD\n"
+    "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2             0.0             0.0            10.0\n"
+    "       3             1.0             0.0             0.0\n"
+    "       4             5.0             0.0            10.0\n"
+    "       5             5.0             0.0             0.0\n"
+    "*ELEMENT_BEAM\n" + _row(1, 7, 1, 2, 3) + "\n"
+    "*ELEMENT_SHELL\n" + _row(2, 1, 1, 5, 4, 2) + "\n"
+    "*PART\n" "cable\n" + _row(7, 3, 9) + "\n"
+    "*PART\n" "plate\n" + _row(1, 1, 1) + "\n"
+    "*SECTION_BEAM\n" + _row(3, 6) + "\n"
+    "     100.0       5.0         0      12.0\n"
+    "*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+    "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+    "*MAT_CABLE_DISCRETE_BEAM\n"
+    "         9   %RO%  210000.0\n"
+    "*END\n"
+)
+
+
+class DiscreteBeamTokenIsLengthScaled(unittest.TestCase):
+    """A1 — the discrete-beam fallback, and the ``Ileng = 1`` length factor.
+
+    ``*MAT_CABLE_DISCRETE_BEAM`` forces ``Ileng = 1``, and on such a property
+    ``rinit3.F``'s ``UMASS`` is ``Mass x L_element``, so the share an element
+    really puts on its two ends scales with its OWN length. The cable here is
+    10 long, so the token's half-share is ``0.5 x 1e-4 x 10 = 5e-04``, not
+    ``5e-05``.
+    """
+
+    def test_a_real_RO_VOL_cable_mass_is_never_compensated(self):
+        _r, starter, _e = _convert(_CABLE_DECK.replace("%RO%", "  7.8E-09"))
+        self.assertNotIn("spring_token_compensation", starter)
+
+    def test_the_fallback_token_is_scaled_by_the_element_length(self):
+        r, starter, _e = _convert(
+            _CABLE_DECK.replace("%RO%", "      0.0"),
+            zero_density_floor=False)
+        self.assertTrue(_has(r.warnings, "non-positive connector mass"))
+        cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
+        self.assertEqual(sorted(cards), [-5.0e-4], cards)
+        self.assertEqual(sorted(cards[-5.0e-4]), [1, 2])
 
 
 class SpringTokenIsRegisteredOnlyWhereItIsInvented(unittest.TestCase):

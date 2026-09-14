@@ -1353,8 +1353,44 @@ that decided it and the deck that would decide it next.
 10. **The one-node `*MAT_SPOTWELD` beam** (`spotweld.k`; LS-DYNA carries it at
     length 2.0).
 11. **`*CONSTRAINED_SHELL_TO_SOLID` / `_GENERALIZED_WELD_BUTT` /
-    `_JOINT_SCREW`** - unregistered, 3 tiny `F:` decks at ie -100 %. **Round
-    5's FIRST research item.**
+    `_JOINT_SCREW`** - unregistered, 3 tiny `F:` decks at ie -100 %.
+    **ANSWERED for two of the three in round 5, part A.**
+    `*CONSTRAINED_SHELL_TO_SOLID` and `*CONSTRAINED_GENERALIZED_WELD_BUTT` are
+    now one `/RBODY` per card (items A2 / A3, default ON,
+    `--no-shell-to-solid-rbody` / `--no-generalized-weld-butt`): the dome goes
+    IE -99.90 % -> **+36.08 %** with external work **-0.21 %** against
+    LS-DYNA's 1692.55, and the butt weld IE -100.00 % -> **+4.70 %** with the
+    right two welds set off at t 1.269e-3 against LS-DYNA's own 1.26914e-3.
+    Neither campaign VERDICT moves - both rows stay `deviation` under the
+    10/10/5 bands - so this queue row closes as a **physics** item, not as two
+    fixed decks.
+    `*CONSTRAINED_JOINT_SCREW` is **NOT** closed - **1 deck key on 1 emitted
+    model** (`show-cases/joint-screw/EXP_SC_JOINT_SCREW.k`, normal /
+    `deviation`, ie -100.0 / ke -54.259), and not for want of a Radioss
+    mechanism. `/PROP/TYPE45` has no helical type (`hm_read_prop45.F`
+    dispatches JTYP 1..9 and answers MSGID 938 otherwise), but both
+    `/MPC` (`hm_read_mpc.F:95-125`) and `/GJOINT/RACK` (`gjnt_rack.F:236-280`)
+    express the card's `xdot = PARM*omega`, and both restore a load path.
+    Neither is shippable. Measured at `76bc193`, nt 4, all NORMAL
+    TERMINATION, against LS-DYNA's IE 3.22360e6 / KE 6.28753e7 and its
+    `nodout` nut travel **+183.72 mm** at t 9.9997e-2: `/MPC` gives IE
+    +45.55 % at an ENGINE energy error of **-30.8 %**; `/GJOINT/RACK` with a
+    grounded reference `/RBODY` and both rigid bodies' `/BCS` kept gives IE
+    -95.26 % at **-99.9 %**; with the redundant `/BCS` removed, IE -43.70 % /
+    KE +8.06 % at **-34.0 %** and a nut travel of **-15.91 mm**; the opposite
+    `FscaleV` sign gives a monotonic **-324.42 mm** at **-25.6 %**. The gates
+    were an energy error <= 5 % and a reproduced travel, so both fail by an
+    order of magnitude. ROOT CAUSE: `/GJOINT/RACK` imposes NINE constraints
+    (`LAG_NCF += 9`), i.e. the complete joint kinematics, and cannot be
+    layered on a pair of rigid bodies that `*MAT_RIGID` CMO/CON1/CON2 has
+    already reduced to three free DOFs; and the screw relation is by
+    construction an equation in the DRIVEN rotation DOF, which also carries
+    the `/IMPDISP` (starter `WARNING 312`). Two facts a future round needs:
+    `FscaleV` is INVERTED by the reader (`hm_read_gjoint.F`
+    `GJBUFR(1) = 1/ALPHA`), so the card value is `-1/PARM`; and `N0` must be
+    the main node of a real inert `/RBODY` - the card's own `Mass`/`Inertia`
+    cells do NOT satisfy `lgmini_gj.F`'s ERROR 535/536 zero-mass check
+    (measured). `/GJOINT` appears in **no** OpenRadioss `qa-tests` deck.
 12. **CNRB DOF releases** - 1 858 `F:` cards on 10 decks, 4 of them giants.
 13. **Dropped from the queue with their census: `*EOS_IDEAL_GAS` `T0`,
     Ignition-and-Growth, `*CONSTRAINED_BEAM_IN_SOLID`, `*PARTICLE_BLAST`,
