@@ -22,7 +22,30 @@ __all__ = [
     "_inertia_element_nodes",
     "_resolve_inertia",
     "ICOG_DEFINED_PROPERTIES",
+    "_RBODY_CARD1_HDR",
+    "_RBODY_IOPTOFF_HDR",
 ]
+
+
+#: The /RBODY card-1 comment, shared by EVERY producer so the shape cannot
+#: drift between them again.
+#:
+#: NINE fields. ``hm_cfg_files/config/CFG/radioss2021/RBODY/rbody.cfg`` card 1
+#: is ``CARD("%10d%10d%10d%10d%20lg%10d%10d%10d%10d", independentnode, ISENSOR,
+#: SKEW_CSID, ISPHERE, MASS, dependentnodeset, IKREM, ICOG, SURF_ID)`` and the
+#: reader stops there (``hm_read_rbody.F:260-274``). ``Ifail`` is NOT a card-1
+#: column: ``hm_read_rbody.F:286-289`` reads ``Ioptoff``, ``Iexpams``, then
+#: ``Ifail`` as the THIRD value of the card below the inertia pair. Between
+#: round 1 and round 5 the CNRB producer wrote a tenth ``Ifail`` column here
+#: and a two-field ``Ioptoff`` card; the fixed-column reader stops at nine, so
+#: the emitted zero was never read and no behaviour changed — but the card was
+#: not the card the cfg describes.
+_RBODY_CARD1_HDR = (
+    "#  node_ID   sens_ID   skew_ID    Ispher                Mass"
+    "   grnd_ID     Ikrem      ICoG   surf_ID")
+
+#: The /RBODY ``Ioptoff`` card comment — THREE fields, ``Ifail`` last.
+_RBODY_IOPTOFF_HDR = "#  Ioptoff   Iexpams     Ifail"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -760,12 +783,12 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
-            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+            _RBODY_CARD1_HDR,
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
         lines += [
-            "#  Ioptoff   Iexpams     Ifail",
+            _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"rb_nodes_pid{pid}", unique_nodes)
@@ -1157,7 +1180,10 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             added_mass = inertia_mass
 
         # /RBODY — same 4-card form as _make_rbodies (Card1 + Jxx Jyy Jzz +
-        # Jxy Jyz Jxz + Ioptoff Iexpams; all four required or np>1 segfaults).
+        # Jxy Jyz Jxz + Ioptoff Iexpams Ifail; all four required or np>1
+        # segfaults). Card 1 and the Ioptoff comment come from the SHARED
+        # constants so this producer's shape cannot drift from the other four
+        # again.
         # Without _INERTIA, ICoG=0 (=default 1, RefGuide p.1879) MOVES the master
         # node to the computed center of gravity, so a /CLOAD force from
         # *LOAD_RIGID_BODY acts through the CoG as a pure force with no spurious
@@ -1169,13 +1195,13 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         lines += [
             f"/RBODY/{ind_node}",
             cnrb.title or f"CNRB_{cnrb.pid}",
-            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
-            f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}{_i(0)}",
+            _RBODY_CARD1_HDR,
+            f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
         lines += [
-            "#  Ioptoff   Iexpams",
-            f"{_i(0)}{_i(0)}",
+            _RBODY_IOPTOFF_HDR,
+            f"{_i(0)}{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"cnrb_nodes_pid{cnrb.pid}", secondary_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"cnrb_indnode_pid{cnrb.pid}", [ind_node])
@@ -1262,13 +1288,13 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     lines += [
         f"/RBODY/{n1}",
         "inert_probe_rbody",
-        "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+        _RBODY_CARD1_HDR,
         f"{_i(n1)}{_i(0)}{_i(0)}{_i(0)}{_f(1e-3)}{_i(slave_grnod)}{_i(0)}{_i(0)}{_i(0)}",
         "#                Jxx                 Jyy                 Jzz",
         f"{_f(1e-3)}{_f(1e-3)}{_f(1e-3)}",
         "#                Jxy                 Jyz                 Jxz",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-        "#  Ioptoff   Iexpams     Ifail",
+        _RBODY_IOPTOFF_HDR,
         f"{_i(0)}{_i(0)}{_i(0)}",
     ]
     lines += _emit_grnod_node(slave_grnod, "inert_probe_slaves", [n1 + 1, n1 + 2])

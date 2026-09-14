@@ -2486,6 +2486,33 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **R14 round 5, part A item A4 — the `*CONSTRAINED_NODAL_RIGID_BODY`
+  `/RBODY` carried a phantom tenth column on card 1 and a two-field `Ioptoff`
+  card. No behaviour change; a byte-mover on the 11 CNRB carriers, proved by
+  the sweep.** `hm_cfg_files/config/CFG/radioss2021/RBODY/rbody.cfg` card 1 is
+  `CARD("%10d%10d%10d%10d%20lg%10d%10d%10d%10d", independentnode, ISENSOR,
+  SKEW_CSID, ISPHERE, MASS, dependentnodeset, IKREM, ICOG, SURF_ID)` — **nine**
+  fields — and `hm_read_rbody.F:286-289` reads `Ioptoff`, `Iexpams`, **then
+  `Ifail`**, i.e. `Ifail` is the THIRD value of the card BELOW the inertia
+  pair, exactly as the `*MAT_RIGID` producer (`writer/rbody.py`) and the
+  implicit probe have always written it. The CNRB producer instead wrote a
+  110-column card 1 ending in a tenth `Ifail 0` and a two-field `Ioptoff` row.
+  **Why nothing moved:** the reader is fixed-column and stops after nine
+  fields, and the value that fell off the end was `0` = the reader's own
+  default. MEASURED, not asserted: `implicit/basic-examples/springback-i/
+  doorbeam.k` (4 CNRB cards) converted on a pristine `76bc193` checkout and on
+  the branch, both run through the starter at nt 4 — **0 ERROR / 3 WARNING on
+  both**, and the two `_0000.out` listings differ in exactly one line, the
+  host's free-RAM readout; the rigid-body echo, the mass/inertia table and
+  every count are identical. `_0001.rad` is SHA256-identical
+  (`b430164fe2fff93d`). The `.rad` diff is exactly the item's signature: 4
+  cards × (card-1 comment, card-1 row 110 → 100 columns, `Ioptoff` comment,
+  `Ioptoff` row 20 → 30 columns) = 16 lines. All five `/RBODY` producers now
+  read ONE pair of shared constants (`_RBODY_CARD1_HDR`,
+  `_RBODY_IOPTOFF_HDR`) so the shape cannot drift between them again.
+  Reach: **11 deck keys on 11 emitted models** (4 of them run_pass-2 Yaris
+  giants, re-converted only).
+
 - **R14 round 4, the REVIEW round — two laws measured wrong, one guard that
   could not fire, two mutations nothing caught, and eleven figures re-measured
   on the branch's own rows.** Three independent verifiers re-checked the
