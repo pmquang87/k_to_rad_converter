@@ -753,12 +753,22 @@ def _solid_boundary_faces(state: ConversionState,
     stores with its real node count after dropping the blank fields. Caller
     contract: a side that is not ``complete`` is NOT ``all_solid``, so the
     derived rule and its warning both stand down. The alternative — measuring
-    the partial skin — is silently WRONG on a part that MIXES faceted and
+    the partial skin — would be WRONG on a part that MIXES faceted and
     unfaceted shapes, because a face shared between a hex and a wedge is then
     seen once and counted EXTERNAL, and the minimum edge (hence the written
-    ``Gapmin`` and the quoted starter ``GAP MIN``) comes out too small. No
-    carrier of the shipped 15-interface class has that shape, so this is a
-    guard against a latent case, not a correction to a measured one.
+    ``Gapmin`` and the quoted starter ``GAP MIN``) comes out too small.
+
+    That is a guard against an input shape, not a correction to a measured
+    defect, and the round-5 census says how far the guard is from firing. A
+    6-field ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling (Vol I R17
+    p.19-124), so there are ZERO short cards on the 901-file corpus and all
+    7417 roster pentahedra arrive on the 8-field collapsed spelling — which
+    this function DOES facet, as the degenerate hex the reader also sees. The
+    predictor was checked against the starter's own ``GAP MIN`` echo on 6 of
+    6 carriers and matched all six, two of them parts that mix hexes with
+    collapsed-card wedges: a wedge whose collapsed face is unpaired
+    contributes 2 spurious ridge-edge entries, and both tie the true minimum
+    edge rather than undercutting it (10.0 == 10.0 on the measured pair).
     """
     pidset = set(pids)
     complete = True
@@ -817,7 +827,11 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     (``DXM``) and is out of the derived rule's scope — or any of the side's
     solids has a shape ``_solid_boundary_faces`` cannot facet (a 6-node
     pentahedron, a 5-node pyramid), because the skin it measured is then only
-    part of the real one.
+    part of the real one. The unfaceted shapes need a SHORT ``*ELEMENT_SOLID``
+    card, of which the R14 corpus has none (0 on 901 files), so that third
+    clause has never fired on a measured deck: a roster pentahedron arrives as
+    an 8-field collapsed hex and IS faceted. See ``_solid_boundary_faces`` for
+    the 6-of-6 ``GAP MIN`` check that includes two mixed hex+wedge parts.
 
     ``styp == 5 or sid == 0`` is the ALL-PARTS sentinel the ``SSID = 0``
     self-contact passes, and it matches that path's own

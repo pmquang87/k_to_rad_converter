@@ -1477,6 +1477,105 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
             "directly (or *CONTACT Card 3 SST/MST) if the gap has to change.")
 
 
+def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
+    """One ``/BRICK`` data row for a solid stored with fewer than 8 node ids.
+
+    ``(row, wedge)`` — ``wedge`` is 1 when the row is a six-id pentahedron
+    written as the COLLAPSED hexahedron below, so the caller can name it once
+    per part.
+
+    ``hm_read_solid.F:145-197`` classifies a ``/BRICK`` row by its EMPTY
+    cells, in this order:
+
+    * cells 5-8 all zero/blank -> ``ISOLNOD = 4``, a tetrahedron on cells 1-4;
+    * cells 7-8 zero/blank     -> ``ISOLNOD = 6``, a native ``/PENTA6`` whose
+      bottom triangle is cells 1-3 and whose top triangle is cells 4-6 (the
+      five assignments at :166-176, read in order, expand it to
+      ``n1 n2 n3 n1 | n4 n5 n6 n4``, i.e. the pairing is n1-n4, n2-n5, n3-n6);
+    * anything else            -> ``ISOLNOD = 8``, a hexahedron read verbatim,
+      degenerate node ids included.
+
+    THE DEFECT THIS FIXES. A solid the deck stored with six node ids used to
+    be padded with its LAST node (``nodes += [nodes[-1]] * (8 - len(nodes))``),
+    producing ``n1 n2 n3 n4 n5 n6 n6 n6`` — eight non-blank cells, so the
+    reader takes the THIRD branch and integrates a hexahedron whose bottom
+    face is ``n1 n2 n3 n4`` (a QUAD across the wedge, not its triangle).
+    MEASURED on ``tests/fixtures/wedge_short_card.k`` (a 10 x 10 x 10 mm block
+    as two wedges, rho 7.85e-9): starter ``TOTAL MASS`` **3.9250E-06 against
+    the exact 7.8500E-06 — HALF the block** — with the mass centre at
+    (5, 6.25, 6.25) instead of (5, 5, 5), at 0 ERROR and 0 WARNING. Nothing in
+    the run says so.
+
+    WHAT IS EMITTED INSTEAD: the collapsed eight-cell hexahedron
+    ``n1 n2 n3 n3 | n4 n5 n6 n6`` — the two triangles with their last id
+    repeated, which is the spelling Vol I R17 p.19-124 gives
+    ``*ELEMENT_SOLID`` for a pentahedron and the one all 7417 R14-corpus
+    pentahedra use. Same coupon: ``TOTAL MASS`` 7.8500E-06, exact.
+
+    WHY NOT THE NATIVE SIX-CELL FORM, which the reader plainly offers:
+    ``/PENTA6`` is accepted on a solid property ONLY at ``Isolid = 24``. The
+    same coupon emitted with cells 7-8 blank dies at the starter —
+    ``ERROR ID : 3107 ** ERROR IN 6-NODES PENTAHEDRON PROPERTY DEFINITION /
+    6-NODES PENTAHEDRON (/PENTA6) WITH SOLID PROPERTIES ARE ONLY COMPATIBLE
+    WITH ISOLID = 24 FORMULATION`` — on the ``Isolid = 1`` this deck's ELFORM
+    and hourglass default select. Hand-set to 24 the very same file reaches
+    NORMAL TERMINATION with ``TOTAL MASS`` 7.8500E-06 and the mass centre
+    (5, 5, 5), i.e. a BETTER lumping than the collapsed form's (5, 6.25, 5) —
+    so the native form is the more faithful card and is unusable without also
+    moving the part's formulation. Coupling an element's spelling to a
+    hourglass flag is a surprise this reach does not justify (ROADMAP).
+
+    REACH ON THE R14 ROSTER: ZERO, by construction. A 6-field
+    ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling at all, and an
+    independent scan of the 901 corpus deck files finds 0 short cards. This is
+    a correctness fix for a shape k2rad can be handed, not a change to any
+    corpus deck; the two-tree SHA sweep is the proof.
+
+    The other short counts keep the padded row, each for a reader reason:
+
+    * 4 stored nodes never arrive here — four distinct corners are emitted as
+      a ``/TETRA4``, a real tetrahedron rather than a degenerate hex, by the
+      branch above this one;
+    * 5 nodes (a pyramid) have no ``ISOLNOD`` of their own, and padding with
+      the last node IS the degenerate-hex spelling for one:
+      ``n1 n2 n3 n4 n5 n5 n5 n5`` collapses the top face onto the apex;
+    * 7 nodes likewise have no native form, and the padded row is the
+      standard collapsed spelling;
+    * a 6-id card whose ids are NOT all distinct is already degenerate; its
+      intended shape cannot be read off the row, so it is left as it was.
+    """
+    nds = list(nodes)
+    if len(nds) == 6 and len(set(nds)) == 6:
+        nds = [nds[0], nds[1], nds[2], nds[2], nds[3], nds[4], nds[5], nds[5]]
+        return _i(eid) + "".join(_i(n) for n in nds), 1
+    if len(nds) < 8:
+        nds = nds + [nds[-1]] * (8 - len(nds))
+    return _i(eid) + "".join(_i(n) for n in nds[:8]), 0
+
+
+def _warn_native_pentahedron(state: ConversionState, pid: int,
+                             count: int) -> None:
+    """Name the short-card pentahedra of one part, once per part."""
+    state.warn(
+        f"PART {pid}: {count} solid element(s) are stored with SIX node ids "
+        "(a short *ELEMENT_SOLID card, which is not an LS-DYNA spelling — Vol "
+        "I R17 p.19-124 gives the card eight node columns) and are emitted as "
+        "the COLLAPSED /BRICK pentahedron n1 n2 n3 n3 n4 n5 n6 n6, the "
+        "spelling every one of the R14 corpus's 7417 pentahedra uses. The "
+        "node ORDER is taken verbatim, so cells 1-3 must be one triangle and "
+        "cells 4-6 the other, paired n1-n4, n2-n5, n3-n6. Writing the six ids "
+        "into an eight-cell row by repeating the LAST node — what k2rad did "
+        "before 2026-09 — makes the reader integrate a hexahedron over the "
+        "wrong bottom face: MEASURED on a two-wedge 10 mm block, starter "
+        "TOTAL MASS 3.9250E-06 against the exact 7.8500E-06 (HALF the block, "
+        "mass centre (5, 6.25, 6.25) instead of (5, 5, 5)) at 0 ERROR and 0 "
+        "WARNING. The reader's own six-cell /PENTA6 form is NOT used: "
+        "hm_read_solid.F:166-176 reads it, but a /PENTA6 is accepted only on "
+        "a property at Isolid 24 (starter ERROR 3107 on this coupon's Isolid "
+        "1; hand-set to 24 the same file runs and lumps the mass centre "
+        "exactly). Prefer the eight-column card in the source deck.")
+
+
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
@@ -1776,16 +1875,15 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 lines.append(HDR)
             if bricks:
                 lines.append(f"/BRICK/{pid}")
+                wedges = 0
                 for e in bricks:
-                    nodes = list(e.nodes)
-                    if len(nodes) < 8:
-                        nodes += [nodes[-1]] * (8 - len(nodes))
-                    row = _i(e.eid)
-                    for n in nodes[:8]:
-                        row += _i(n)
+                    row, wedge = _brick_row(e.eid, list(e.nodes))
+                    wedges += wedge
                     lines.append(row)
                     state.solid_elem_ids.add(e.eid)          # #106 register
                     _tick()
+                if wedges:
+                    _warn_native_pentahedron(state, pid, wedges)
                 lines.append(HDR)
         if pid in tshells_by_pid:
             # *ELEMENT_TSHELL → /BRICK with the LS-DYNA n1..n8 order VERBATIM.

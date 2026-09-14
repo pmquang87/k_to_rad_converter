@@ -828,5 +828,156 @@ class JointScrewIsStillRefused(unittest.TestCase):
         self.assertEqual(st.constrained_joints, [])
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B — opt-in levers, hygiene, docs
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── B4: a solid stored with six node ids ─────────────────────────────────────
+
+def _solid_row(*vals) -> str:
+    """One ``*ELEMENT_SOLID`` card row (eight-column fields)."""
+    return "".join(f"{v:>8}" for v in vals)
+
+
+def _solid_deck(*rows: str, elform: int = 1) -> str:
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n"
+            + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                      for i, (x, y, z) in enumerate(
+                          [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+                           (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10),
+                           (5, 5, 20)], start=1))
+            + "*ELEMENT_SOLID\n" + "".join(r + "\n" for r in rows)
+            + "*PART\n"
+              "block\n" + _row(1, 1, 1) + "\n"
+              "*SECTION_SOLID\n" + _row(1, elform) + "\n"
+              "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+              "*END\n")
+
+
+class ShortCardSolidIsNotPaddedWithItsLastNode(unittest.TestCase):
+    """B4 — a solid the deck stored with SIX node ids used to be padded with
+    its last node, which the reader takes as a HEXAHEDRON over the wrong
+    bottom face.
+
+    MEASURED on ``tests/fixtures/wedge_short_card.k`` with OpenRadioss
+    20260520 at nt 4 (a 10 x 10 x 10 mm block as two wedges, rho 7.85e-9, so
+    the exact mass is 7.85e-6): the padded rows read starter ``TOTAL MASS``
+    **3.9250E-06** — half the block — with the mass centre at (5, 6.25, 6.25),
+    at 0 ERROR and 0 WARNING. The collapsed spelling this now emits reads
+    **7.8500E-06** and (5, 6.25, 5), 0 ERROR / 0 WARNING / NORMAL TERMINATION,
+    and is byte-identical to what the eight-column twin
+    ``wedge_collapsed_card.k`` produces.
+
+    The reader's OWN six-cell ``/PENTA6`` form is not used: it is accepted
+    only on a property at ``Isolid = 24`` (starter ``ERROR ID : 3107`` on this
+    coupon's ``Isolid`` 1; the same file with the cell hand-set to 24 runs and
+    lumps the mass centre to an exact (5, 5, 5)).
+
+    REACH: 0 roster decks — a six-field ``*ELEMENT_SOLID`` card is not an
+    LS-DYNA spelling (Vol I R17 p.19-124) and the corpus has none.
+    """
+
+    def _bricks(self, *rows, **kw):
+        _, starter, _ = _convert(_solid_deck(*rows, **kw))
+        head = starter.index("/BRICK/1")
+        block = starter[head:].split("#---", 1)[0].splitlines()
+        return [ln for ln in block[1:] if ln.strip()]
+
+    def test_a_six_id_solid_becomes_the_collapsed_pentahedron(self):
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 5, 6, 7))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual([int(rows[0][i:i + 10]) for i in range(10, 90, 10)],
+                         [1, 2, 3, 3, 5, 6, 7, 7])
+
+    def test_it_is_NOT_padded_with_the_last_node(self):
+        """The shipped defect, pinned as its own assertion."""
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 5, 6, 7))
+        self.assertNotEqual([int(rows[0][i:i + 10]) for i in range(10, 90, 10)],
+                            [1, 2, 3, 5, 6, 7, 7, 7])
+
+    def test_cells_7_and_8_are_never_left_blank(self):
+        """A native /PENTA6 needs Isolid 24 (ERROR 3107), which this part is
+        not at — so the row must stay eight cells wide."""
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 5, 6, 7))
+        self.assertEqual(len(rows[0].rstrip()), 90)
+
+    def test_the_two_spellings_produce_the_same_row(self):
+        short = self._bricks(_solid_row(1, 1, 1, 2, 3, 5, 6, 7))
+        full = self._bricks(_solid_row(1, 1, 1, 2, 3, 3, 5, 6, 7, 7))
+        self.assertEqual(short, full)
+
+    def test_a_five_id_pyramid_keeps_the_padded_form(self):
+        """A pyramid has no ISOLNOD of its own; padding with the apex IS the
+        degenerate-hex spelling for one."""
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 4, 9))
+        self.assertEqual([int(rows[0][i:i + 10]) for i in range(10, 90, 10)],
+                         [1, 2, 3, 4, 9, 9, 9, 9])
+
+    def test_a_seven_id_solid_keeps_the_padded_form(self):
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7))
+        self.assertEqual([int(rows[0][i:i + 10]) for i in range(10, 90, 10)],
+                         [1, 2, 3, 4, 5, 6, 7, 7])
+
+    def test_a_six_id_solid_with_a_repeated_id_keeps_the_padded_form(self):
+        """Already degenerate: the intended shape cannot be read off the row."""
+        rows = self._bricks(_solid_row(1, 1, 1, 2, 3, 5, 6, 6))
+        self.assertEqual([int(rows[0][i:i + 10]) for i in range(10, 90, 10)],
+                         [1, 2, 3, 5, 6, 6, 6, 6])
+
+    def test_a_four_id_solid_never_reaches_the_brick_emitter(self):
+        _, starter, _ = _convert(_solid_deck(_solid_row(1, 1, 1, 2, 3, 5)))
+        self.assertIn("/TETRA4/1", starter)
+        self.assertNotIn("/BRICK/1", starter)
+
+    def test_the_element_is_still_registered_for_TH_BRIC(self):
+        deck = _solid_deck(_solid_row(1, 1, 1, 2, 3, 5, 6, 7))
+        st = _dispatch(deck)
+        self.assertEqual([len(e.nodes) for e in st.solid_elems], [6])
+        _, starter, _ = _convert(deck)
+        self.assertIn("/BRICK/1", starter)
+
+    def test_one_warning_per_part_naming_the_measured_mass(self):
+        res, _, _ = _convert(_solid_deck(_solid_row(1, 1, 1, 2, 3, 5, 6, 7),
+                                         _solid_row(2, 1, 1, 3, 4, 5, 7, 8)))
+        hits = [w for w in res.warnings if "SIX node ids" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("2 solid element(s)", hits[0])
+        self.assertIn("3.9250E-06", hits[0])
+        self.assertIn("7.8500E-06", hits[0])
+        self.assertIn("ERROR 3107", hits[0])
+
+    def test_a_full_eight_id_hex_warns_about_nothing(self):
+        res, _, _ = _convert(_solid_deck(
+            _solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)))
+        self.assertFalse([w for w in res.warnings if "SIX node ids" in w])
+
+    def test_the_thick_shell_branch_still_writes_its_collapsed_eight(self):
+        """*ELEMENT_TSHELL keeps the verbatim eight-cell row — written with
+        trailing zeros it would be classified ISOLNOD=6 and refused on any
+        thick-shell property with Isolid != 15 (ERROR 639)."""
+        deck = ("*KEYWORD\n"
+                "*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+                "*NODE\n"
+                + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                          for i, (x, y, z) in enumerate(
+                              [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+                               (0, 0, 1), (10, 0, 1), (10, 10, 1), (0, 10, 1)],
+                              start=1))
+                + "*ELEMENT_TSHELL\n"
+                + _solid_row(1, 1, 1, 2, 3, 3, 5, 6, 7, 7) + "\n"
+                  "*PART\n"
+                  "tsh\n" + _row(1, 1, 1) + "\n"
+                  "*SECTION_TSHELL\n" + _row(1, 2) + "\n"
+                  "*MAT_ELASTIC\n"
+                + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                  "*END\n")
+        _, starter, _ = _convert(deck)
+        row = _block_after(starter, "/BRICK/1", 2)[1]
+        self.assertEqual([int(row[i:i + 10]) for i in range(10, 90, 10)],
+                         [1, 2, 3, 3, 5, 6, 7, 7])
+
+
 if __name__ == "__main__":      # pragma: no cover
     unittest.main()

@@ -2664,6 +2664,57 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **R14 round 5, part B item B4 — a solid stored with SIX node ids was padded
+  with its last node, and the starter then integrated a hexahedron at HALF the
+  block's mass. 0 movers on every corpus, by construction — the SHA sweep is
+  the proof, not the argument.** `writer/mesh`'s `/BRICK` emitter filled a
+  short row with `nodes += [nodes[-1]] * (8 - len(nodes))`, so a six-id
+  pentahedron `n1..n6` went out as `n1 n2 n3 n4 n5 n6 n6 n6`. Eight non-blank
+  cells is `hm_read_solid.F`'s THIRD branch (`:189-197`), a hexahedron read
+  verbatim — whose bottom face is then `n1 n2 n3 n4`, a quad ACROSS the wedge
+  rather than its triangle. MEASURED on the new golden pair
+  `tests/fixtures/wedge_short_card.k` (a 10 × 10 × 10 mm block as two wedges,
+  ρ 7.85e-9, exact mass 7.85e-6) with OpenRadioss 20260520 at nt 4: the padded
+  rows read starter `TOTAL MASS` **3.9250E-06**, half the block, with the mass
+  centre at (5, 6.25, 6.25) instead of (5, 5, 5) — at **0 ERROR and 0
+  WARNING**, i.e. nothing in the run says so. What is emitted now is the
+  COLLAPSED eight-cell hexahedron `n1 n2 n3 n3 n4 n5 n6 n6`, the spelling
+  Vol I R17 p.19-124 gives `*ELEMENT_SOLID` for a pentahedron and the one all
+  7417 R14-corpus pentahedra use: same coupon, `TOTAL MASS` **7.8500E-06**,
+  exact, NORMAL TERMINATION, and byte-identical to what the eight-column twin
+  `wedge_collapsed_card.k` produces (both are checked-in goldens, and a third
+  test compares the two `/BRICK` blocks as text).
+  **Why not the reader's own six-cell `/PENTA6` form,** which
+  `hm_read_solid.F:166-176` plainly offers and the research spec asked for:
+  it is accepted only on a property at `Isolid = 24`. The same coupon emitted
+  with cells 7-8 blank dies at the starter — `ERROR ID : 3107 ** ERROR IN
+  6-NODES PENTAHEDRON PROPERTY DEFINITION / 6-NODES PENTAHEDRON (/PENTA6) WITH
+  SOLID PROPERTIES ARE ONLY COMPATIBLE WITH ISOLID = 24 FORMULATION` — on the
+  `Isolid` 1 this deck's ELFORM and hourglass default select. With that one
+  cell hand-set to 24 the very same file reaches NORMAL TERMINATION at
+  `TOTAL MASS` 7.8500E-06 and lumps the mass centre to an exact (5, 5, 5),
+  i.e. the native card is the more faithful one and is unusable without also
+  moving the part's formulation; coupling an element's spelling to a hourglass
+  flag is a surprise this reach does not justify (recorded in ROADMAP.md).
+  The other short counts are unchanged and each says why: four distinct
+  corners never reach this emitter at all (they are a `/TETRA4`), a five-id
+  pyramid and a seven-id solid have no native form and the padded row IS their
+  standard collapsed spelling, and a six-id card whose ids are not all
+  distinct is already degenerate. One warning per part names the count, the
+  assumed triangle ordering and both measured masses.
+  **Reach: 0 deck keys on 0 emitted models.** A six-field `*ELEMENT_SOLID`
+  card is not an LS-DYNA spelling, and an independent scan of the 901 corpus
+  deck files finds zero short cards (the 16 candidate rows are all
+  `*ELEMENT_SOLID_NURBS_PATCH`, a different keyword k2rad already screens).
+  Two docstring claims in `writer/contacts` were corrected with the same
+  census: `_solid_boundary_faces`'s "no carrier of the shipped 15-interface
+  class has that shape" and `_main_surface_segments`'s unfaceted-shape clause
+  are now the measurement — the predictor matched the starter's own `GAP MIN`
+  on 6 of 6 carriers, two of them parts that MIX hexes with collapsed-card
+  wedges, where the unpaired collapsed face contributes 2 spurious ridge-edge
+  entries that tie the true minimum edge (10.0 == 10.0) rather than
+  undercutting it.
+
 - **R14 round 5, part A item A4 — the `*CONSTRAINED_NODAL_RIGID_BODY`
   `/RBODY` carried a phantom tenth column on card 1 and a two-field `Ioptoff`
   card. No behaviour change; a byte-mover on the 11 CNRB carriers, proved by
