@@ -1485,6 +1485,42 @@ class ImplicitRigidSecondarySwap(unittest.TestCase):
                                  [])
                 self.assertFalse(_recipe_active(st))
 
+    def test_only_the_TYPE7_route_can_take_the_flag(self):
+        """The `gapmin_route` gate, probed on the plan function itself.
+
+        The swap is inseparable from the derived Gapmin, and the two routes
+        that have no Gapmin cell — the `SOFT=-7` sentinel (`Igap 2`, an
+        element-derived gap) and `/INTER/TYPE25` — must keep the drop however
+        the flag is set. Their measured reach for an all-rigid secondary on
+        every corpus here is 0 interfaces, so this is the probe that reaches
+        the branch: the same state, the same sides, one argument apart.
+        """
+        from k2rad.writer.contacts import (_RS_IMPLICIT, _RS_IMPLICIT_SWAP,
+                                           _rigid_secondary_plan)
+        from k2rad.writer.common import rigid_part_ids
+        st = _dispatch(_implicit_rigid_ssid_deck())
+        st.options.implicit_rigid_secondary_swap = True
+        rigid_parts = rigid_part_ids(st)
+        rigid_nodes = {n for e in st.solid_elems if e.pid in rigid_parts
+                       for n in e.nodes if n > 0}
+        c = st.contacts_surf2surf[0]
+        plan7, _s, _m = _rigid_secondary_plan(
+            st, rigid_nodes, c.ssid, c.sstyp, c.msid, c.mstyp,
+            gapmin_route=True)
+        plan_other, _s2, _m2 = _rigid_secondary_plan(
+            st, rigid_nodes, c.ssid, c.sstyp, c.msid, c.mstyp)
+        self.assertEqual(plan7, _RS_IMPLICIT_SWAP)
+        self.assertEqual(plan_other, _RS_IMPLICIT)
+
+    def test_exactly_one_call_site_passes_the_gapmin_route(self):
+        """...and it is the plain /INTER/TYPE7 one. A second site quietly
+        opting in would give a route with no Gapmin cell a swap that is
+        measured to ERROR without one."""
+        import k2rad.writer.contacts as cw
+        src = inspect.getsource(cw)
+        self.assertEqual(src.count("gapmin_route=True"), 1)
+        self.assertEqual(src.count("_rigid_secondary_plan("), 4)
+
     def test_the_drop_message_names_the_flag_only_where_it_can_reach(self):
         """A named control must reach the branch it controls: the TYPE25 and
         SOFT=-7 routes have no Gapmin cell, so neither is told to pass a flag
@@ -1581,6 +1617,31 @@ class MomentumAverageArithmetic(unittest.TestCase):
         # about |v|/2 divided by the half-separation.
         self.assertLess(max(abs(o) for o in omega), 50.0 / (d / 2.0) * 1.01)
         self.assertGreater(max(abs(o) for o in omega), 1.0)
+
+    def test_a_NEARLY_collinear_body_does_not_explode(self):
+        """The one the rank test is actually for.
+
+        An EXACTLY collinear body has an exactly-zero eigenvalue, which any
+        guard catches. What bites is a body that is nearly-but-not-quite a
+        line: the real 2-node CNRB of the Yaris suspension deck has
+        ``det`` 8.75e-12 and condition number 1.34e16, and ``solve()`` answers
+        it two orders of magnitude wrong with no diagnostic. Here the two
+        masses sit 10 mm apart with a 1e-9 mm kink, so the transverse
+        eigenvalues are ~1e-4 and the axial one ~1e-22 — far below
+        ``1e-10 x M x R2max`` and far above zero. With the rank test the axial
+        spin is dropped; without it, it is ``L_axial / 1e-22``.
+        """
+        v_cm, omega, _cog, refusal = self._f()(
+            [(0.0, 0.0, 0.0), (10.0, 1e-9, 0.0)], [1.0e-6, 1.0e-6],
+            [None, (0.0, 0.0, 100.0)], model_mass=1.0e-3)
+        self.assertEqual(refusal, "")
+        self.assertAlmostEqual(v_cm[2], 50.0, places=9)
+        # the spin the body CAN carry: about the transverse axis, |omega| ~
+        # |v|/2 / (half the separation) = 10 rad/s
+        self.assertLess(max(abs(o) for o in omega), 20.0)
+        self.assertAlmostEqual(omega[1], -10.0, delta=0.1)
+        # ... and nothing at all about its own axis
+        self.assertAlmostEqual(omega[0], 0.0, places=6)
 
     def test_a_single_node_body_translates_and_does_not_spin(self):
         v_cm, omega, _c, refusal = self._f()(
