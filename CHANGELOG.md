@@ -2981,9 +2981,12 @@ Prior history (before this changelog was introduced) is summarized in the
   distinct is already degenerate. One warning per part names the count, the
   assumed triangle ordering and both measured masses.
   **Reach: 0 deck keys on 0 emitted models.** A six-field `*ELEMENT_SOLID`
-  card is not an LS-DYNA spelling, and an independent scan of the 901 corpus
-  deck files finds zero short cards (the 16 candidate rows are all
-  `*ELEMENT_SOLID_NURBS_PATCH`, a different keyword k2rad already screens).
+  card is not an LS-DYNA spelling, and a scan of every `.k`/`.key`/`.dyn`/
+  `.inc` file on the three corpora here — **932 files**, with the two
+  `*INCLUDE`-pulling `combine.key` roots excluded BY NAME — finds **zero**
+  short `*ELEMENT_SOLID` cards; the 16 short rows it does find are all
+  `*ELEMENT_SOLID_NURBS_PATCH` in `nvh/example-11-05/11.5.nurbs.k`, a
+  different keyword k2rad already screens.
   Two docstring claims in `writer/contacts` were corrected with the same
   census: `_solid_boundary_faces`'s "no carrier of the shipped 15-interface
   class has that shape" and `_main_surface_segments`'s unfaceted-shape clause

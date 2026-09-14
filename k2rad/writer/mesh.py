@@ -1526,8 +1526,14 @@ def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
     hourglass flag is a surprise this reach does not justify (ROADMAP).
 
     REACH ON THE R14 ROSTER: ZERO, by construction. A 6-field
-    ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling at all, and an
-    independent scan of the 901 corpus deck files finds 0 short cards. This is
+    ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling at all, and a scan of
+    every ``.k``/``.key``/``.dyn``/``.inc`` file on the three corpora here —
+    **932 files** (``F:``, ``C:/openradioss_run`` with the two ``*INCLUDE``
+    pullers excluded by name, ``E:/foxcore_data``) — finds **zero** short
+    ``*ELEMENT_SOLID`` cards. The only short rows anywhere are 16
+    ``*ELEMENT_SOLID_NURBS_PATCH`` rows in ``nvh/example-11-05/11.5.nurbs.k``,
+    a different keyword with a different card stack that
+    ``handlers._ELEM_NOT_A_MESH_TOKENS`` already screens. This is
     a correctness fix for a shape k2rad can be handed, not a change to any
     corpus deck; the two-tree SHA sweep is the proof.
 

@@ -828,7 +828,9 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     solids has a shape ``_solid_boundary_faces`` cannot facet (a 6-node
     pentahedron, a 5-node pyramid), because the skin it measured is then only
     part of the real one. The unfaceted shapes need a SHORT ``*ELEMENT_SOLID``
-    card, of which the R14 corpus has none (0 on 901 files), so that third
+    card, of which the corpora here have none (0 on 932 scanned files, the
+    only short rows being 16 ``*ELEMENT_SOLID_NURBS_PATCH`` ones), so that
+    third
     clause has never fired on a measured deck: a roster pentahedron arrives as
     an 8-field collapsed hex and IS faceted. See ``_solid_boundary_faces`` for
     the 6-of-6 ``GAP MIN`` check that includes two mixed hex+wedge parts.

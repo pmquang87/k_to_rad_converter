@@ -1486,7 +1486,11 @@ that decided it and the deck that would decide it next.
     it is 0 by construction: the unfaceted shapes need a SHORT
     `*ELEMENT_SOLID` card, which is not an LS-DYNA spelling at all (Vol I R17
     p.19-124 gives the card eight node columns), and an independent scan of the
-    901 corpus deck files finds **zero** short cards - all 7 417 roster
+    932 corpus deck files (`F:`, `C:/openradioss_run` with the two `*INCLUDE`
+    pullers excluded by name, `E:/foxcore_data`, plus the repo's own fixtures)
+    finds **zero** short cards - the only short rows anywhere being 16
+    `*ELEMENT_SOLID_NURBS_PATCH` ones in `11.5.nurbs.k`, a different keyword
+    k2rad already screens - and all 7 417 roster
     pentahedra arrive as 8-field collapsed hexes, which this function DOES
     facet. The predictor was also checked against the starter's own `GAP MIN`
     echo on **6 of 6** carriers and matched all six, two of them parts that MIX
