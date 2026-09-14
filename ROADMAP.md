@@ -1535,7 +1535,10 @@ printed digit); A2 `*CONSTRAINED_SHELL_TO_SOLID` and A3
 `--implicit-rigid-secondary-swap`; B2 `--mass-weighted-inivel`; B3
 `--assumed-strain-isolid 24`; B4 the six-id solid's collapsed `/BRICK` form
 (0 movers, a correctness fix: the padded row read HALF the block's mass);
-B6 fourteen corrected statements.
+B6 corrected statements in EIGHT areas (the `--derived-gapmin` class census,
+the ELFORM 5/6/7 starter-error claim, the two `/IMPFLUX` facts, the
+partly-rigid remedy, the `*INITIAL_VOID` arm, the `/INTER/TYPE18` stiffness,
+six ROADMAP reaches, and the measured constant-step NO-GO).
 
 **What round 5 deliberately does NOT close** — each entry with the measurement
 that decided it and the deck that would decide it next.
@@ -1963,7 +1966,12 @@ found and deliberately did NOT close.
   parameters"* — so a hourglass default has nothing to act on there. They
   are nevertheless measurably too stiff at `Isolid` 17:
   `ex_03_solid_elform_-1` is −21.72 % against its LS reference at 17 and
-  **−5.87 % at `Isolid` 24, −6.96 % at 18, −6.33 % at 14**. That is a
+  **−5.87 % at `Isolid` 24, −5.23 % at 18, −6.33 % at 14** — all four
+  re-measured at round 5's head at nt 4 and reproduced at nt 2 (internal
+  energy 136300 / 163900 / 165000 / 163100 against the LS-DYNA reference
+  174114, with the starter's own `SOLID FORMULATION FLAG` echo on each arm);
+  the −6.96 % this line used to give for `Isolid` 18 is not what that arm
+  reads here. That is a
   LOCKING item — "ELFORM −1/−2 wants a locking-free 8-point Isolid, not the
   H8C 17" — and it needs its own measurement, because
   `writer/materials._exact_all_ip` gates a `/FAIL/TAB1` `Ifail_so = 2`

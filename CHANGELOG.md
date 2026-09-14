@@ -2847,9 +2847,12 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
-- **R14 round 5, part B item B6 — fourteen shipped statements the round
-  measured to be wrong, and the ROADMAP's round-5 column. No `.rad` byte
-  moves; the warning RECORD does.** Each correction names what was measured:
+- **R14 round 5, part B item B6 — the shipped statements this round measured
+  to be wrong, in EIGHT areas, and the ROADMAP's round-5 column. No `.rad`
+  byte moves; the warning RECORD does.** (The commit that landed this said
+  "fourteen", counting individual sentences; the eight areas below are what
+  can be re-summed from this list.) Each correction names what was
+  measured:
 
   - **The `--derived-gapmin` class had TWO measured arms when it was written
     and has SEVEN now.** *"13 of the class's 15 interfaces have no measured arm
