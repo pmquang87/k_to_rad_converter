@@ -3013,12 +3013,21 @@ place
 `*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
 `*SECTION_SOLID` ELFORM **5/6/7** (1-point ALE / Eulerian / Eulerian
 ambient) → `Iale=0`, i.e. a LAGRANGIAN element, and NAMED as such. They are
-deliberately not mapped: `hm_read_prop14.F:264-267` refuses `Iale != 0` on
-any `Isolid` but 0, 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
-4 on `advection_B`), and with `Isolid` 1 the remap was MEASURED destructive
-(`taylor_B` from IE +5.1 % / KE +4.9 % against its LS-DYNA reference to a
-99.9 % energy error at 198 220 cycles; `channel_A` from −98.9 % / −25.6 % to
-−100 % / −94.3 %). A real ALE conversion also needs an `/ALE/GRID`
+deliberately not mapped, and round 5 corrected WHY. `hm_read_prop14.F:264-267`
+does refuse `Iale != 0` on any `Isolid` but 0, 1 or 2 — but that gate never
+fires on this route, because the `Isolid` these sections emit is 1:
+`advection_B` converts and runs at **0 ERROR / 0 WARNING with `Iale` 1 AND
+with `Iale` 2** (`sgrtails.F:920-926` passes). What the remap costs is the
+ANSWER. On `advection_B` the shipped Lagrangian arm reaches NORMAL in 6 571
+cycles at KE 6.000e7 against its reference's 6.00000e7 (energy error −0.0 %),
+while the `Iale` 2 arm reaches NORMAL in 7 195 cycles with internal energy
+blowing up 1.017e-16 → 1.353e13 and the energy error at **99.9 %** — and its
+`SUM EPSP` going 10.0 → 0.0 is NOT a failure but the expected Eulerian answer
+(the tracer leaves a 3 000 mm FIXED domain at 1e5 mm/s in 0.05 s). On the other
+two carriers `Isolid` 1 + the remap is destructive: `taylor_B` from IE +5.1 % /
+KE +4.9 % against its LS-DYNA reference to a 99.9 % energy error at 198 220
+cycles; `channel_A` from −98.9 % / −25.6 % to −100 % / −94.3 %. dyna2rad makes
+the same Lagrangian choice — there is no `Iale` anywhere in its tree. A real ALE conversion also needs an `/ALE/GRID`
 formulation, an ALE-capable material and the inflow/void boundaries the
 ELFORM cell does not state. They DO take the 1-point hourglass control (see
 *Control tables* below) — the half LS-DYNA's own d3hsp says they carry
@@ -5629,18 +5638,25 @@ starter will derive. `--derived-gapmin` writes an explicit
 never a non-positive value, which is `ERROR 785`). Pure standard library,
 unlike `--auto-gapmin`, which needs numpy + scipy.
 
-It is **OFF by default** because the measured arms disagree. On
+It is **OFF by default** because the seven interfaces of the class that have
+a measured arm disagree with each other. On
 `intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm bars, derived
 `GAP MIN` 1.0) the starter's gap costs **+1151 %** internal energy against the
 LS-DYNA reference 3036.17, where the flag's own `0.005 × 10 = 0.05` reads
 **−5.60 %** and KE −6.18 % (factor 0.01 reads +14.45 % and must not be used).
-But the same factor degrades the only other carrier with a measured arm:
-on `sphere1` it writes 0.02921 and internal energy goes −1.66 % → **−7.77 %**
-at 4.1× the cycles. Censused with the writer's own resolver over the 356-key
+But the same factor degrades others: on `sphere1` it writes 0.02921 and
+internal energy goes −1.66 % → **−7.77 %** at 4.1× the cycles, and `bend`
+goes −2.0038 % → −2.8418 % at 4.69× (−2.7860 % at 2.50× with the smaller
+factor). Censused with the writer's own resolver over the 356-key
 R14 roster (the 4 Yaris `*INCLUDE` pullers excluded BY NAME): **15 solid-only-
-main interfaces on 14 deck keys**, one of them created by round 4's
-all-rigid-SSID swap. Exactly **two of the 15** — `twobar` and `sphere1` — have
-a measured solver arm at this factor; the other **13 have none at all**. A
+main interfaces on 14 deck keys and 13 emitted models**, one of them created by
+round 4's all-rigid-SSID swap. **Seven of the 15 now have a measured arm and
+eight are still unjudgeable**, and the seven disagree: `twobar` better,
+`sphere1` and `bend` worse, `4.3_General_Nonlinearity` mixed (energy error
+−99.9 % → −55.2 %, internal energy −98.87 % → −99.92 %), `pend.imp` and
+`06_heating_plate` byte-inert, and `hemi` paying **+47.9 % cycles** to reach
+the same time — cycle inflation measured against a base run in the same
+window, not the lost NORMAL round 4 read it as. A
 press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
 same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
 stabilization stub are excluded from the flag.

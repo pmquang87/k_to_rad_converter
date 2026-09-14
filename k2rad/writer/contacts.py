@@ -971,7 +971,9 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     ``0.1 x min main-surface edge`` itself, and LS-DYNA's own offset on a solid
     segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17 p.11-101 default
     table, p.11-103; ``SAST``/``SBST`` apply to shells and beams only, p.11-33).
-    The FLAG is off by default because the measured arms disagree — see
+    The FLAG is off by default because the seven interfaces of the class
+    that now HAVE a measured arm disagree with each other (1 better, 3 worse,
+    2 byte-inert, 1 mixed), and 8 of the 15 are still unjudgeable — see
     ``ConvertOptions.derived_gapmin``.
 
     *force* writes the value even with the flag off. Its ONE caller is the
@@ -1012,8 +1014,13 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         f"{inter_id}=VAL for this one interface). It is OFF by default because "
         "it is not uniformly good: on sphere1 the same factor writes 0.02921 "
         "and moves internal energy from -1.66 % to -7.77 % at 4.1x the cycles, "
-        "and 13 of the class's 15 interfaces on the R14 roster have no "
-        "measured arm at all.")
+        "and of the class's 15 interfaces on the R14 roster 7 now have a "
+        "measured arm and 8 are still UNJUDGEABLE. Of the 7: twobar improves "
+        "(+1151 % -> -5.60 %), sphere1 and bend degrade, 4.3_General_"
+        "Nonlinearity's energy error improves while its internal energy gets "
+        "worse, pend.imp and 06_heating_plate are byte-inert, and hemi pays "
+        "+47.9 % CYCLES to reach the same time. That is 1 better, 3 worse, 2 "
+        "inert, 1 mixed -- not a default.")
     state.warn(
         f"/INTER/TYPE7 {inter_id}: the main surface is SOLID segments only and "
         "no Gapmin is stated, so the OpenRadioss starter derives one itself - "
@@ -1500,8 +1507,19 @@ def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
         "belong to a rigid body and were removed from the secondary node "
         f"group; the interface is emitted with the remaining "
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
-        "the converted model — if that part of the surface is load-bearing, "
-        "make it the MAIN (MSID) side of its own contact instead."
+        "the converted model. THE OBVIOUS REMEDY IS MEASURED AND MOSTLY "
+        "USELESS, so it is not offered as one: keeping the rigid nodes in the "
+        "secondary group changes NOTHING on 4 of the 6 carriers of this class "
+        "(pipe, doorbeam and mat_spring.belted-dummy are identical arm for "
+        "arm, and 4 of the 6 are SINGLE_SURFACE contacts whose segments are "
+        "on the main side already), and where it does change something it "
+        "disagrees with itself - transducer's internal energy goes -24.10 % "
+        "-> +18.31 % against its own LS-DYNA reference, EXP_SC_PRELOAD's "
+        "energy error -9.0 % -> -11.2 %, and mainboltaexpl COLLAPSES to "
+        "-62.05 % under a NORMAL TERMINATION banner. What DOES fix a "
+        "load-bearing rigid surface is to make it the MAIN (MSID) side of its "
+        "own contact, where /INTER/TYPE7's asymmetry puts the segments it can "
+        "actually carry."
     )
 
 

@@ -7463,15 +7463,22 @@ class ConvertOptions:
     # GAP MIN 1.0) the derived gap costs +1151.3 % internal energy against the
     # LS-DYNA reference 3036.17, where the flag's own 0.005 x 10 = 0.05 reads
     # -5.60 % and KE -6.18 %; FACTOR 0.01 reads +14.45 %, so 0.005 is the
-    # measured default and 0.01 is NOT. But the same factor degrades the only
-    # OTHER carrier with a measured arm: on sphere1 the flag writes
-    # 0.005 x 5.84129 = 0.02921 and internal energy goes -1.66 % -> -7.77 % at
-    # 4.1x the cycles. The class's own census, taken with this module's
+    # measured default and 0.01 is NOT. But the same factor degrades OTHER
+    # carriers: on sphere1 the flag writes 0.005 x 5.84129 = 0.02921 and
+    # internal energy goes -1.66 % -> -7.77 % at 4.1x the cycles, and bend
+    # goes -2.0038 % -> -2.8418 % at 4.69x (or -2.7860 % at 2.50x with the
+    # smaller factor). The class's own census, taken with this module's
     # resolver over the 356-key R14 roster (4 Yaris include-pullers excluded BY
-    # NAME), is 15 interfaces on 14 deck keys -- one of them created by the
-    # round's own all-rigid-SSID swap (sphere1). Exactly TWO of the fifteen,
-    # twobar and sphere1, have a measured solver arm at this factor; the other
-    # THIRTEEN have none at all. A press-fit *CONTACT_*_INTERFERENCE is
+    # NAME), is 15 interfaces on 14 deck keys and 13 emitted models -- one of
+    # them created by the round's own all-rigid-SSID swap (sphere1). SEVEN of
+    # the fifteen now have a measured solver arm and EIGHT are still
+    # unjudgeable. The seven: twobar better, sphere1 and bend worse,
+    # 4.3_General_Nonlinearity mixed (energy error -99.9 % -> -55.2 %,
+    # internal energy -98.87 % -> -99.92 %), pend.imp and 06_heating_plate
+    # byte-inert, and hemi paying +47.9 % CYCLES to reach the same time
+    # (round 4 read that as a lost NORMAL; re-measured under contention it is
+    # cycle inflation, not a timeout). The predicted 0.1 x min edge matched
+    # the starter's own GAP MIN echo on 6 of 6 carriers checked. A press-fit *CONTACT_*_INTERFERENCE is
     # excluded outright: it needs a LARGE gap to engage, which is why k2rad
     # already forces Inacti = 0 on that family. (Reach of that exclusion on
     # this corpus: 0 -- EXP_SC_CONTACT_INTERFERENCE's main surface is SHELL

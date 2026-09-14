@@ -719,8 +719,15 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None
         ":158-159) and a mesh-derived Gap = 0.5 x the mean brick edge. The "
         "corpus carries the controlled experiment for how much that costs: "
         "quadrature_B and quadrature_C differ in EXACTLY one cell (NQUAD 1 vs "
-        "3) and convert to byte-identical files. Tune Stfval/Gap by hand for "
-        "your coupling.")
+        "3) and convert to byte-identical files. HOW FAR the unit stiffness "
+        "is from the solver's own idea of one: with Iauto = 2 the starter "
+        "computes it itself as SCALE * Vref^2 * rho_max * A_mean / Gap "
+        "(insurf_dx.F:114), which on cylinder_impact_B at Vref 2e5 is 28224 - "
+        "four orders above the 1.0 emitted here. NOTE ALSO that a NEGATIVE "
+        "PFAC is a LOAD CURVE id, not a scale: cylinder_impact_B states -1 "
+        "and stagnation_B -2, i.e. a penalty-stiffness curve, and "
+        "/INTER/TYPE18 has no field for one at all. Tune Stfval/Gap by hand "
+        "for your coupling.")
 
 
 def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
@@ -772,9 +779,18 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
             "carries the same -5000 velocity). No /INTER/TYPE18 parameter "
             "moves this: Stfval x0.01, x100, the Iauto = 2 / PFAC / Vref form "
             "and a halved impact velocity all end at 99.9 %. THE FSI RESULT ON "
-            "THIS DECK IS NOT VALID. A correct mapping needs a void phase "
-            "(/MAT/LAW51 multi-material + /INIVOL, or a /MAT/VOID region) and "
-            "is not implemented.")
+            "THIS DECK IS NOT VALID. What LS-DYNA means by the card is on Vol "
+            "I R17 p.28-134: a void is 'the same material as the material "
+            "that is being voided but with a very low density', and it is "
+            "incompatible with *ALE_MULTI-MATERIAL_GROUP. A correct mapping "
+            "therefore needs a void PHASE (/MAT/LAW51 multi-material + "
+            "/INIVOL, or a /MAT/VOID region) and is not implemented. The "
+            "low-density arm was MEASURED in round 4 and is NOT a substitute: "
+            "at rho = 1e-15 this deck's energies are right - IE 1.080 / KE "
+            "1.530e4 at 0.0 % error - but the time step collapses on the "
+            "near-massless fluid and the run reaches t = 1.949e-3 of 0.07, "
+            "2.8 % of the target, before it is killed. That is a diagnosis, "
+            "not a fix.")
 
 
 def _make_ebcs(state: ConversionState) -> List[str]:

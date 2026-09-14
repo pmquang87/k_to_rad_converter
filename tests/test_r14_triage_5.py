@@ -1776,5 +1776,110 @@ class MassWeightedInivel(unittest.TestCase):
                     self.assertNotIn(_collapse(needle), joined)
 
 
+# ── B6: the corrected statements ─────────────────────────────────────────────
+
+#: Every claim round 5 measured to be WRONG, in every spelling it was ever
+#: shipped in. The guard below runs each one against every shipped text; the
+#: companion feeds each one to the guard's own matcher and proves it fires.
+_RETRACTED_ROUND_5 = (
+    # the derived-Gapmin class had 2 measured arms; it has 7
+    "13 of the class's 15",
+    "the only OTHER carrier with a measured arm",
+    "the only other carrier with a measured arm",
+    "the measured arms disagree",
+    "THIRTEEN have none",
+    "13 have none at all",
+    # the ELFORM 5/6/7 gate never fires on this route
+    "9 starter errors on taylor_B",
+    "4 on advection_B",
+    # /IMPFLUX HAS a volumetric form and HAS a time window
+    "no volume source",
+    "neither the motion nor the depth distribution can be expressed",
+    # the implicit all-rigid-SSID swap: one arm does NOT diverge
+    "every restoration arm measured on implicit",
+    "EVERY arm that restores the load path diverges",
+    "with an explicit Gapmin of 0.14986 it reaches",
+    # the writer DOES compute nodal masses now
+    "this writer computes no nodal masses and will not invent one",
+    "a mass-weighted average this WRITER does not form",
+    "The mass-weighted arm is a round-4 item",
+    # the assumed-strain figures and remedy
+    "-5.75 / -5.18 / -6.27",
+    "−5.75 / −5.18 / −6.27",
+    "Refine through the thickness",
+)
+
+
+class Round5RetractedStatements(unittest.TestCase):
+    """Fourteen statements round 5 measured to be wrong, guarded as a family.
+
+    The matcher is the one the round-4 figure guard established: adjacent
+    string literals JOINED and every whitespace run collapsed, over every
+    shipped text (both docs, the whole package, the GUI). ``CHANGELOG.md`` is
+    the historical record and is deliberately not scanned — a past entry says
+    what that round shipped, and the round-4 entry carries an in-place
+    ``re-measured in round 5`` note beside its own figure.
+    """
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_5:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        """A guard that matches nothing passes for a clean one. Each needle is
+        fed back in the shape a source file would carry it — split across two
+        adjacent literals — and must be FOUND."""
+        for needle in _RETRACTED_ROUND_5:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)))
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        """A rename is a prefix, not a removal."""
+        for needle in _RETRACTED_ROUND_5:
+            with self.subTest(needle=needle):
+                self.assertIn(_collapse(needle[:max(8, len(needle) // 2)]),
+                              _collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        """The other half: the corrected statement has to BE somewhere, or the
+        retraction is just a deletion."""
+        texts = dict(_SHIPPED_TEXTS())
+        pairs = (
+            ("k2rad\\writer\\contacts.py", "7 now have a measured arm and 8 are still UNJUDGEABLE"),
+            ("k2rad\\handlers.py", "0 ERROR / 0 WARNING with Iale 1 AND with Iale 2"),
+            ("k2rad\\handlers.py", "/IMPFLUX DOES have a volumetric form"),
+            ("k2rad\\writer\\contacts.py", "the swap WITH the derived Gapmin"),
+            ("k2rad\\writer\\loads.py",
+             "``--mass-weighted-inivel`` forms exactly that average"),
+            ("k2rad\\writer\\mesh.py", "REFINE ALONG THE BEAM"),
+            ("ROADMAP.md", "What round 5 deliberately does NOT close"),
+            ("README.md", "--assumed-strain-isolid"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts if k.replace("/", "\\") == rel),
+                           None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+    def test_the_roadmap_carries_a_round_5_column(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "ROADMAP.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(
+            "| # | class | decks | closed by round 1 | round 2 | round 3 | "
+            "round 4 | round 5 |", text)
+        self.assertIn(
+            "| family | decks | death | verdict after round 3 | round 4 | "
+            "round 5 |", text)
+        # the constant-step NO-GO, with the measurement that decided it
+        self.assertIn("152 811", text)
+        self.assertIn("1 888", text)
+
+
 if __name__ == "__main__":      # pragma: no cover
     unittest.main()

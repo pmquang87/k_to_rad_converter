@@ -319,10 +319,15 @@ def convert(
         derived ``GAP MIN`` 1.0): the starter's gap costs +1151 % internal
         energy against the LS-DYNA reference 3036.17 where this rule writes
         ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
-        the only other carrier with a measured arm (``sphere1``, where it
-        writes 0.02921 and internal energy goes −1.66 % → −7.77 % at 4.1× the
-        cycles), and 13 of the class's 15 interfaces on the 356-key R14 roster
-        have no measured arm at all — which is why it is opt-in. A press-fit
+        other carriers (``sphere1``, where it writes 0.02921 and internal
+        energy goes −1.66 % → −7.77 % at 4.1× the cycles; ``bend``,
+        −2.0038 % → −2.8418 % at 4.69×). Of the class's 15 interfaces on the
+        356-key R14 roster **7 now have a measured arm and 8 are still
+        unjudgeable**, and the 7 disagree: 1 better, 3 worse, 2 byte-inert
+        (``pend.imp``, ``06_heating_plate``) and 1 mixed
+        (``4.3_General_Nonlinearity``, whose energy error improves −99.9 % →
+        −55.2 % while its internal energy gets worse −98.87 % → −99.92 %) —
+        which is why it is opt-in. A press-fit
         ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
         stabilization stub are excluded.
     derived_gapmin_factor : float

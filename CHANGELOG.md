@@ -2847,6 +2847,98 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **R14 round 5, part B item B6 — fourteen shipped statements the round
+  measured to be wrong, and the ROADMAP's round-5 column. No `.rad` byte
+  moves; the warning RECORD does.** Each correction names what was measured:
+
+  - **The `--derived-gapmin` class had TWO measured arms when it was written
+    and has SEVEN now.** *"13 of the class's 15 interfaces have no measured arm
+    at all"*, *"the only OTHER carrier with a measured arm"* and *"the measured
+    arms disagree"* are retracted from `writer/contacts`, `handlers`, `cli`,
+    `state`, `__init__`, the GUI and both docs, and replaced by the census the
+    round re-took: **15 interfaces on 14 deck keys and 13 emitted models; 7
+    measured, 8 unjudgeable**, and the 7 disagree — `twobar` better, `sphere1`
+    and `bend` worse, `4.3_General_Nonlinearity` mixed, `pend.imp` and
+    `06_heating_plate` byte-inert, and `hemi` paying **+47.9 % cycles** to
+    reach the same time. That last one is itself a correction: round 4 recorded
+    `hemi` as a LOST NORMAL, and re-measured against a base run launched in the
+    same window it is CYCLE INFLATION, not a timeout (the same deck ran at
+    574.7 / 296.9 / 202.1 cycles per second on three arms differing in ONE
+    cell). `show-cases/contact-overview/main.k` is NOT a carrier of this class.
+  - **The ELFORM 5/6/7 warning's starter-error claim is withdrawn.** It said
+    the `Iale` remap costs *"ERROR 131 + 608 — 9 starter errors on `taylor_B`
+    and 4 on `advection_B`"*. The gate is real (`hm_read_prop14.F:264-267`) but
+    never fires on this route: the `Isolid` these sections emit is 1, so
+    `advection_B` converts and runs at **0 ERROR / 0 WARNING with `Iale` 1 AND
+    with `Iale` 2** (`sgrtails.F:920-926` passes). What the remap costs is the
+    ANSWER — its energy error goes −0.0 % → **99.9 %** with internal energy
+    1.017e-16 → 1.353e13 — and the Eulerian mesh does hold still (5…2995, like
+    LS-DYNA's own `nodout`) where the Lagrangian one translates 4 990 mm. Its
+    `SUM EPSP` going 10.0 → 0.0 is NOT cited as a failure any more: the tracer
+    leaves a 3 000 mm FIXED domain at 1e5 mm/s in 0.05 s, which is the expected
+    Eulerian answer. dyna2rad makes the same Lagrangian choice — no `Iale`
+    anywhere in its tree.
+  - **The `*BOUNDARY_THERMAL_WELD` refusal stated two FALSE facts.** `/IMPFLUX`
+    DOES have a volumetric form (a `GRBRIC_ID` group,
+    `radioss2018/LOADS/impflux.cfg:25/54`, taken by `fixflux.F:205`'s VOLUMIC
+    branch) and DOES have its own time window (`TSTART`/`TSTOP`/sensor,
+    `hm_read_impflux.F:120/129/130`, applied at `fixflux.F:100-115`). Only *"no
+    position argument"* survives, and nothing in the ENGINE moves a group. The
+    refusal now says what a conversion would actually take: N time-windowed
+    `/IMPFLUX VOLUME` cards, about 33 on `05_1`'s 425-element seam — a
+    synthesis, not a mapping, and blocked behind ERROR 179 on a
+    `*MAT_THERMAL_*`-only part either way.
+  - **The partly-rigid-secondary warning's remedy.** It pointed at the obvious
+    fix; the obvious fix is measured and mostly useless. Keeping the rigid
+    nodes in the secondary group changes NOTHING on 4 of the 6 carriers (`pipe`,
+    `doorbeam`, `mat_spring.belted-dummy` identical; 4 of the 6 are
+    `SINGLE_SURFACE` contacts whose segments are on the main side already), and
+    where it changes something it disagrees with itself — `transducer` IE
+    −24.10 % → +18.31 %, `EXP_SC_PRELOAD` energy error −9.0 % → −11.2 %,
+    `mainboltaexpl` COLLAPSING to −62.05 % under a NORMAL banner.
+  - **The `*INITIAL_VOID` warning** gains the manual's own definition (Vol I
+    R17 p.28-134: a void is *"the same material … but with a very low
+    density"*, incompatible with `*ALE_MULTI-MATERIAL_GROUP`) and round 4's
+    low-density arm INCLUDING what killed it: the energies come out right
+    (IE 1.080 / KE 1.530e4 at 0.0 % error) and the time step collapses, the run
+    reaching t = 1.949e-3 of 0.07 — 2.8 % of target. A diagnosis, not a fix.
+  - **The `/INTER/TYPE18` warning** now names how far its unit stiffness is
+    from the solver's own idea of one: with `Iauto = 2` the starter computes
+    `SCALE × Vref² × rho_max × A_mean / Gap` itself (`insurf_dx.F:114`), which
+    on `cylinder_impact_B` at `Vref` 2e5 is **28 224** against the emitted 1.0 —
+    and that a NEGATIVE `PFAC` is a LOAD CURVE id, not a scale
+    (`cylinder_impact_B` states −1, `stagnation_B` −2), for which
+    `/INTER/TYPE18` has no field at all.
+  - **ROADMAP:** the campaign-queue table and the implicit-residue table each
+    gain a **round 5** column (the residue table also gains the `ex_02` family
+    round 4's own regression created); a **"What round 5 deliberately does NOT
+    close"** list of 13 entries, each with the measurement that decided it and
+    the deck that would decide it next; item 16 CLOSED in the opposite
+    direction; item 6's reach corrected to **2 roster keys** that state the
+    spelling (0 that move); item 12's to **0** (all 1 858 CNRB cards state
+    `DRFLAG = RRFLAG = 0`, and the only release-stating file anywhere has no
+    reference); item 17's to 0 BY CONSTRUCTION with the 6-of-6 `GAP MIN` check;
+    item 18's carriers to 4 keys on **2 emitted models**; item 10 records the
+    one-node spotweld rule (Vol I R17 p.19-3, LS-DYNA synthesizing node 1214,
+    the 2-node arm buying nothing at 18.2× the cycles).
+  - **`--implicit-constant-step` was MEASURED and is a NO-GO**, so it is not
+    shipped. 98 deck keys on 76 emitted models state no `*CONTROL_IMPLICIT_AUTO`
+    (a blank `IAUTO` is *"Constant time step size"*, Vol I R17 p.12-277) and
+    k2rad writes `/IMPL/DT/2` on every one; 81 are `normal`. On
+    `ex_02_thick_shell_elform_2` — round 4's own `normal → timeout` family — with
+    `/IMPL/DT/2` DELETED, at **nt 4 AND nt 2** with a 600 s budget each: the run
+    is killed at the cap at cycle 152 811 / t = 0.7467 and cycle 173 811 /
+    t = 0.8493, its step collapsed to 4.883e-6 from the initial 0.01. Deleting
+    the card does not pin the step — the engine still adapts, and it does not
+    finish. The same deck at `--qstat-dtscal 0.1` reaches NORMAL TERMINATION in
+    **1 888 cycles / 11 s**, so that family's way back is the step-SCALE cell.
+
+  Every retracted spelling is pinned out of every shipped text by a regex guard
+  over the joined, whitespace-collapsed sources, with three companions: one
+  that feeds the guard each spelling and proves it FIRES, one that proves a
+  PREFIX of each still matches (a rename is a prefix), and one that asserts the
+  replacement statements really are shipped.
+
 - **R14 round 5, part B item B4 — a solid stored with SIX node ids was padded
   with its last node, and the starter then integrated a hexahedron at HALF the
   block's mass. 0 movers on every corpus, by construction — the SHA sweep is
