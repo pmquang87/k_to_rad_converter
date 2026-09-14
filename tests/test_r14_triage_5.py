@@ -165,5 +165,258 @@ class CnrbRbodyCardShape(unittest.TestCase):
         self.assertEqual(len(rbody_writer._RBODY_CARD1_HDR), 100)
 
 
+# ── A1: the spring token-mass compensation ───────────────────────────────────
+
+_TOKEN = 1.0e-4
+_SHARE = _TOKEN / 2.0
+
+
+def _plate(nid0=1, z0=0.0, eid=1, pid=1):
+    """Four nodes + one shell, so their nodes carry element mass of their own."""
+    pts = [(0.0, 0.0, z0), (10.0, 0.0, z0), (10.0, 10.0, z0), (0.0, 10.0, z0)]
+    nodes = "".join(f"{nid0 + i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                    for i, (x, y, z) in enumerate(pts))
+    elem = _row(eid, pid, nid0, nid0 + 1, nid0 + 2, nid0 + 3) + "\n"
+    return nodes, elem
+
+
+def _weld_deck(sn=1.0e4, ss=5.0e4, meshed=True, admas=0.0, pairs=None,
+               rho=7.85e-9):
+    """Two shell plates 1 mm apart + *CONSTRAINED_SPOTWELD pair(s) WITH failure.
+
+    Node ``n`` of the lower plate welds to node ``n + 10`` of the upper one, so
+    every pair has a finite length (a coincident pair is refused outright).
+    ``meshed`` False drops both plates, so the weld nodes carry no element mass
+    of their own and the guard must refuse the compensation.
+    """
+    n1, e1 = _plate(1, 0.0, 1, 1)
+    n2, e2 = _plate(11, 1.0, 2, 2)
+    if not meshed:
+        nodes = "*NODE\n" + n1 + n2
+        elems = ""
+        parts = ""
+    else:
+        nodes = "*NODE\n" + n1 + n2
+        elems = "*ELEMENT_SHELL\n" + e1 + e2
+        parts = ("*PART\n" "plate1\n" + _row(1, 1, 1) + "\n"
+                 "*PART\n" "plate2\n" + _row(2, 1, 1) + "\n")
+    welds = ""
+    for a, b in (pairs or [(1, 11)]):
+        welds += "*CONSTRAINED_SPOTWELD\n" + _row(a, b, sn, ss) + "\n"
+    mass = ""
+    if admas:
+        mass = ("*ELEMENT_MASS\n"
+                + "".join(f"{900 + i:>8}{n:>8}{admas:>16.8G}\n"
+                          for i, n in enumerate((1, 11))))
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + nodes + elems + parts
+            + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+              "*MAT_ELASTIC\n" + _row(1, rho, 210000.0, 0.3) + "\n"
+            + welds + mass + "*END\n")
+
+
+def _admas_cards(starter: str):
+    """{mass value: [node ids]} over every emitted /ADMAS/0."""
+    out = {}
+    lines = starter.splitlines()
+    grnods = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/"):
+            gid = int(ln.rsplit("/", 1)[1])
+            nids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                nids += [int(v) for v in lines[j].split()]
+                j += 1
+            grnods[gid] = nids
+    for i, ln in enumerate(lines):
+        if ln.startswith("/ADMAS/0/"):
+            mass, gid = lines[i + 3].split()
+            out.setdefault(float(mass), []).extend(grnods[int(gid)])
+    return out
+
+
+class SpringTokenNegativeAdmas(unittest.TestCase):
+    """A1 — the classes that carry no ``/ADMAS`` to subtract from.
+
+    The shipped rule only SUBTRACTED, so those classes got nothing. On
+    ``intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k`` that is the whole
+    defect: one ``(stiff weld tie)`` token of 1e-4 against an LS-DYNA model
+    mass of 1.0048e-4, i.e. the starter's ``TOTAL MASS`` read **2.0048E-04,
+    +99.52 %**.  ``hm_read_admas.F:161-171`` accepts a NEGATIVE added mass
+    (``ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)`` only, no sign check, no floor)
+    and adds it algebraically at ``:247-248``.
+    """
+
+    def test_one_weld_with_no_admas_gets_a_negative_card_of_half_the_token(self):
+        """Hand: one element, 0.5 x 1e-4 = 5e-05 on EACH of its two ends."""
+        _r, starter, _e = _convert(_weld_deck())
+        cards = _admas_cards(starter)
+        self.assertEqual(sorted(cards), [-_SHARE], cards)
+        self.assertEqual(sorted(cards[-_SHARE]), [1, 11])
+        self.assertIn("       -5.000000E-05", starter)
+
+    def test_k_welds_on_one_node_scale_the_share(self):
+        """Hand: node 1 sits on three welds -> 3 x 5e-05 = 1.5e-04."""
+        deck = _weld_deck(pairs=[(1, 11), (1, 12), (1, 13)])
+        _r, starter, _e = _convert(deck)
+        cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
+        self.assertEqual(sorted(cards), [-1.5e-4, -_SHARE], cards)
+        self.assertEqual(cards[-1.5e-4], [1])
+        self.assertEqual(sorted(cards[-_SHARE]), [11, 12, 13])
+
+    def test_the_opt_out_writes_no_negative_admas_at_all(self):
+        """--no-spring-token-mass-compensation reproduces the master output."""
+        deck = _weld_deck()
+        _r, on, _e = _convert(deck)
+        _r2, off, _e2 = _convert(deck, spring_token_mass_compensation=False)
+        self.assertIn("/ADMAS", on)
+        self.assertNotIn("/ADMAS", off)
+        self.assertNotIn("spring_token_compensation", off)
+        # and the opt-out arm is the pre-round-5 file, not a renumbered one
+        self.assertNotIn("-5.000000E-05", off)
+
+    def test_a_degenerate_admas_is_kept_and_the_share_removed_separately(self):
+        """``gnonspring.k``'s shape, but on MESHED nodes so the guard passes.
+
+        The deck's own /ADMAS stays exactly as stated (an /ADMAS must be
+        positive) and the FULL share comes off on a card of its own, so the
+        sum is m_own + m_admas + token - token.
+        """
+        _r, starter, _e = _convert(_weld_deck(admas=1.0e-6))
+        cards = _admas_cards(starter)
+        self.assertEqual(sorted(cards), [-_SHARE, 1.0e-6], cards)
+        self.assertEqual(sorted(cards[1.0e-6]), [1, 11])
+        self.assertEqual(sorted(cards[-_SHARE]), [1, 11])
+        self.assertTrue(_has(_r.warnings, "LESS /ADMAS",
+                             "The full share was taken off 2 of them"))
+
+    def test_an_element_free_weld_node_is_guarded_and_named(self):
+        """Subtracting there would leave MS = 0 and the engine divides by it
+        (``rcheckmass.F:126-135`` -> ERROR 1870)."""
+        result, starter, _e = _convert(_weld_deck(meshed=False))
+        self.assertNotIn("/ADMAS", starter)
+        self.assertTrue(_has(result.warnings,
+                             "carry NO element mass of their own",
+                             "ERROR 1870", "[1, 11]"))
+
+    def test_a_zero_density_part_does_not_satisfy_the_guard(self):
+        """The screen is incidence AND rho > 0 — a node whose only element
+        sits on a zero-density part would otherwise pass it and still land
+        near zero mass."""
+        result, starter, _e = _convert(_weld_deck(rho=0.0),
+                                       zero_density_floor=True)
+        self.assertNotIn("spring_token_compensation", starter)
+        self.assertTrue(_has(result.warnings,
+                             "carry NO element mass of their own"))
+
+    def test_the_retracted_rigid_sentence_is_gone_from_every_shipped_text(self):
+        """The old RIGID sentence stated a fact that is FALSE on the only
+        carrier: *"It is added to the body's total mass"*. With ICoG = 4
+        ``inirby.F:265-266`` discards the secondaries' mass entirely."""
+        import re as _re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        retracted = [
+            "It is added to the body's total mass",
+            "rides along there UNCOMPENSATED",
+            "a rigid body's own dynamics are paced by that total",
+        ]
+        pats = [_re.compile(r"\s+".join(_re.escape(w) for w in r.split()))
+                for r in retracted]
+        # CHANGELOG.md is deliberately NOT scanned — the same scope
+        # tests/test_r14_triage_4.py::_STATING_DOCS uses. A changelog RECORDS
+        # a retraction and has to be able to quote the sentence it retracts;
+        # every text that STATES the fact to a user is below.
+        texts = {}
+        for rel in ("README.md", "ROADMAP.md",
+                    "k2rad_gui.py", os.path.join("k2rad", "cli.py"),
+                    os.path.join("k2rad", "state.py"),
+                    os.path.join("k2rad", "__init__.py"),
+                    os.path.join("k2rad", "writer", "loads.py")):
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                # adjacent string literals joined, whitespace collapsed
+                texts[rel] = " ".join(
+                    fh.read().replace('"\n', "").replace("'\n", "").split())
+        for rel, txt in texts.items():
+            for pat, raw in zip(pats, retracted):
+                self.assertIsNone(pat.search(txt), f"{rel}: {raw!r}")
+        # the companion: the guard MUST match each retracted spelling
+        for pat, raw in zip(pats, retracted):
+            self.assertIsNotNone(pat.search(" ".join(raw.split())), raw)
+            self.assertIsNotNone(
+                pat.search("x " + raw.replace(" ", "\n   ") + " y"), raw)
+
+
+_SPOTWELD_BEAM_DECK = (
+    "*KEYWORD\n"
+    "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+    "*NODE\n"
+    + "".join(f"{i:>8}{x:>16.4f}{0.0:>16.4f}{0.0:>16.4f}\n"
+              for i, x in ((1, 0.0), (2, 2.0), (3, 0.0)))
+    + "*ELEMENT_BEAM\n" + _row(1, 7, 1, 2, 3) + "\n"
+      "*PART\n" "weld\n" + _row(7, 7, 7) + "\n"
+      "*SECTION_BEAM\n" + _row(7, 9) + "\n" + _row(0.0, 3.0, 3.0) + "\n"
+      "*MAT_SPOTWELD\n" + _row(7, "%RO%", 210000.0, 0.3, 300.0) + "\n"
+    + _row(0, 0, 0, 1000.0, 500.0, 500.0) + "\n"
+      "*END\n"
+)
+
+
+class SpringTokenIsRegisteredOnlyWhereItIsInvented(unittest.TestCase):
+    """A1 — LS-DYNA's OWN mass is never compensated.
+
+    ``_make_spotweld_beam_connectors`` writes ``RO*A*L`` when the material
+    states a density and falls back to the token only when that is
+    non-positive. Compensating the first would be a NEW defect — it is the
+    mass ``*MAT_SPOTWELD`` states.
+    """
+
+    def _state_shares(self, deck, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        res = convert(path, output_stem=os.path.join(tmp.name, "o"),
+                      write_log=False, **kw)
+        with open(res.starter_path) as fh:
+            starter = fh.read()
+        tmp.cleanup()
+        return res, starter
+
+    def test_a_real_RO_A_L_weld_mass_is_never_compensated(self):
+        res, starter = self._state_shares(
+            _SPOTWELD_BEAM_DECK.replace("%RO%", "7.85E-09"))
+        self.assertNotIn("spring_token_compensation", starter)
+        self.assertNotIn("non-positive weld mass", "\n".join(res.warnings))
+
+    def test_a_non_positive_weld_mass_registers_the_token_it_invents(self):
+        # zero_density_floor OFF: with it on, the floor substitutes a POSITIVE
+        # rho = 1e-24 before the writer runs, so RO*A*L never reaches the
+        # fallback at all and there is no invented mass to register.
+        res, starter = self._state_shares(
+            _SPOTWELD_BEAM_DECK.replace("%RO%", "0.0"),
+            zero_density_floor=False)
+        self.assertTrue(_has(res.warnings, "non-positive weld mass",
+                             "negative /ADMAS"))
+        # The beam's own nodes carry no OTHER element, so the guard refuses
+        # the card and names them — which is what proves the token reached
+        # the registry at all.
+        self.assertTrue(_has(res.warnings,
+                             "carry NO element mass of their own", "[1, 2]"))
+        self.assertNotIn("spring_token_compensation", starter)
+
+    def test_the_third_node_of_a_weld_spring_gets_no_share(self):
+        """``rinit3.F:1937-1939`` writes ``MSR`` onto ``IXR(2,I)``/``IXR(3,I)``
+        only — node_ID3 is the orientation node and carries nothing."""
+        res, _s = self._state_shares(
+            _SPOTWELD_BEAM_DECK.replace("%RO%", "0.0"),
+            zero_density_floor=False)
+        joined = "\n".join(res.warnings)
+        self.assertIn("[1, 2]", joined)
+        self.assertNotIn("[1, 2, 3]", joined)
+
+
 if __name__ == "__main__":      # pragma: no cover
     unittest.main()

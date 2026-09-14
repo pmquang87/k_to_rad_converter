@@ -11,6 +11,83 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5, part A item A1 — the spring token mass
+  was compensated at ONE producer and invented at four, and the class that
+  carries no `/ADMAS` to subtract from got nothing at all.** Round 4 taught
+  k2rad to take its own artificial spring mass back off the nodes it lands on,
+  but the registry was filled at a single site
+  (`writer/loads._emit_spring_part`, the `*ELEMENT_DISCRETE` path) while
+  `_make_constrained_spotweld_springs` wrote a hard-coded `1.0e-4` /
+  `1.0e-6` on its `(stiff weld tie)` `/PROP/TYPE13` and declared nothing — and
+  the round-4 guard test could not see it, because the literal sat on the
+  CONTINUATION line of the emission call and the scan was per LINE.
+  The consequence, measured: `intro-by-k.-weimar/spotweld/spotweld-ii/
+  plates.nrbc.k` states one `*CONSTRAINED_GENERALIZED_WELD_SPOT` and an
+  LS-DYNA model mass of `1.0048E-04`; the converted deck's starter echoed
+  `TOTAL MASS 2.0048000000000E-04` — **+99.52 %, a token that is 99.5 % of the
+  model**.
+  - **Registration** now happens at the line that WRITES each `/SPRING` row, at
+    every producer that invents a mass: the weld tie (4 deck keys on 4 emitted
+    models — `plates.nrbc`, `plates.spot`, `intro-by-a.-tabiei/elements/plates/
+    plates.k`, `constrained.spotweld.plates`), and the `mass <= 0` fallbacks of
+    `_make_spotweld_beam_connectors` and `writer/dbeam` (0 roster carriers,
+    pinned by unit fixtures). LS-DYNA's OWN `RO·A·L` / `RO·VOL` is never
+    compensated: `plates.mat100`, `mainboltaexpl`, the two Yaris
+    `*MAT_SPOTWELD` decks and `ex_05_beam_elform_3_&_6` carry a physical mass
+    and are byte-identical — verified by conversion against a pristine
+    `76bc193` checkout. On an `Ileng = 1` property `rinit3.F`'s `UMASS` is
+    `mass × L_element`, so the discrete-beam site scales the share by the
+    element's own length; a `/PROP/TYPE13`'s third node is the ORIENTATION
+    node and gets nothing (`rinit3.F:1937-1939` writes `IXR(2,I)`/`IXR(3,I)`).
+  - **A negative `/ADMAS` for the class a subtraction cannot reach.**
+    `hm_read_admas.F:161-171` accepts a negative added mass — it raises only
+    `ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)` `NEGATIVE ADDED MASS` (twice per
+    card, because the reader runs both FLAG passes), with no sign check and no
+    floor — and adds it algebraically at `:247-248`
+    (`MS(NOSYS) = MS(NOSYS) + AMAS`). `/ADMAS` is read at `lectur.F:7969`,
+    before the rigid bodies and before `INITIA`, so the model total
+    (`initia.F:2250`) is LS-DYNA's again. MEASURED on `plates.nrbc` at nt 4,
+    base and arm launched in the same window: starter `TOTAL MASS`
+    **2.0048000000000E-04 → 1.0048000000000E-04** = LS-DYNA's own total to
+    every printed digit; **2646 → 2678 cycles, +1.21 %**; NORMAL TERMINATION
+    on both; starter 0 ERROR on both, 2 → 4 WARNING (the two extra are the one
+    negative card's WARNING 476, raised once per FLAG pass). **This is a MASS
+    claim, not an energy claim** — that deck's channels are dominated by
+    post-rupture oscillation and the campaign row stays `deviation` in every
+    arm (IE 4760 → 7257 against LS's 5869.61 = −18.90 % → +23.64 %; KE
+    9014 → 5585 against 3449.03 = +161.35 % → +61.93 %; the weld ruptures at
+    t 3.130E-04 against 3.033E-04 before, LS's own 2.41930E-04). The chosen
+    route was measured against the alternative: a token scaled RELATIVE to the
+    end nodes' element mass leaves a residual that depends on a free parameter
+    (α = 1.0 → `1.0362E-04`, +3.12 %; α = 0.1 → `1.00794E-04`, +0.31 %) and
+    moves the spring's own `dt` through `r2len3.F:219-247`, while the negative
+    card restores the mass exactly and leaves the property untouched.
+  - **Two classes are NOT compensated, each for a measured reason, and both are
+    named in the warning.** A spring node with no element mass of its own is
+    REFUSED — subtracting there would leave `MS = 0` and `rcheckmass.F:126-135`
+    answers ERROR 1870 (`SPRING(S) WITH TRANSLATIONAL STIFFNESS AND NULL MASS
+    IS CONNECTED TO A NODE WITH NO MASS`); the screen is element INCIDENCE plus
+    `rho > 0` on the element's part, and the warning says so, because it is not
+    a lumped-mass test. A SECONDARY node of a rigid body is left alone and the
+    old sentence — *"It is added to the body's total mass; a rigid body's own
+    dynamics are paced by that total"* — is **RETRACTED**: with `ICoG = 4`,
+    `inirby.F:265-266` (`C-----CG OF THE MAIN NODE (MASS OF SECONDS IGNORED)`,
+    `MASRB = MS(M)`) discards the secondaries' mass entirely, so the token AND
+    any compensation of it are inert. MEASURED on
+    `examples-manual/material/spring/mat_spring.belted-dummy.k` (108
+    `/PROP/TYPE8`, 15 registered token nodes, 0.0108 in total, every one of
+    them on an `ICoG = 4` body): the starter's `TOTAL MASS` is
+    `0.3356681850251` with the token, with the property mass floored to
+    `1e-12`, with a −0.0108 `/ADMAS` and with a +0.0108 one, and the full
+    110032-cycle engine run is bit-identical in every arm. That deck is
+    therefore NOT a mover — its `_0000.rad` SHA256 `899bc35412d8f730` is
+    unchanged.
+  - Opt-out: the existing `--no-spring-token-mass-compensation`
+    (`convert(spring_token_mass_compensation=False)`), which reproduces the
+    pre-round-5 file byte for byte. The round-4 guard test was strengthened to
+    scan the emission STATEMENT (AST), not the line, so a literal on a
+    continuation line cannot hide again.
+
 - **R14 CAMPAIGN TRIAGE batch, round 4, part A — the implicit stabilization
   constant that was 100x the solver's own default, the spring preload that was
   dropped, the heat generation that was dropped, and four cells that changed

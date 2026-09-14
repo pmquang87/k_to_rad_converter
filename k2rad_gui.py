@@ -444,10 +444,13 @@ class ConverterGUI:
                 row=22, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="Subtract k2rad's artificial spring mass (1e-4 per /PROP/TYPE4, "
-                     "half on each end node per element) from those nodes' /ADMAS — ON. "
-                     "Inert on its own; it is what makes the OFFSET fix exact. Never "
-                     "writes a non-positive /ADMAS",
+            io, text="Remove k2rad's artificial spring mass (1e-4 per spring /PROP, "
+                     "half on each end node per element) from those nodes again — ON. "
+                     "Subtracted from an /ADMAS the deck states, else taken off with a "
+                     "NEGATIVE /ADMAS (round 5). plates.nrbc TOTAL MASS 2.0048E-04 -> "
+                     "1.0048E-04 = LS-DYNA's own, +1.21 % cycles. Never writes a "
+                     "non-positive value on the deck's OWN /ADMAS; refuses a spring "
+                     "node with no element mass of its own (ERROR 1870)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
 

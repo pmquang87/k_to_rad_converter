@@ -808,11 +808,22 @@ class SpringTokenMassCompensationTests(unittest.TestCase):
         self.assertTrue(_has(result.warnings, "LESS /ADMAS",
                              "token share 5e-05"))
 
-    def test_a_node_with_no_admas_is_named_and_none_is_invented(self):
-        """``mat_spring.belted-dummy.k``: 122 springs, zero ``/ADMAS``."""
+    def test_a_node_with_no_admas_and_no_element_mass_is_named(self):
+        """``mat_spring.belted-dummy.k``: 122 springs, zero ``/ADMAS``.
+
+        ROUND 5 supersedes the old name
+        (``test_a_node_with_no_admas_is_named_and_none_is_invented``) and the
+        old warning text: the no-``/ADMAS`` class is now compensated with a
+        NEGATIVE ``/ADMAS``. What this fixture still pins is the GUARDED arm —
+        these spring ends carry no element of their own, so nothing may be
+        subtracted (``rcheckmass.F:126-135`` = ERROR 1870) and no ``/ADMAS``
+        is invented. The compensated arm is
+        ``tests/test_r14_triage_5.py::SpringTokenNegativeAdmas``.
+        """
         result, starter, _e = _convert(_spring_deck(mass=0.0))
         self.assertNotIn("/ADMAS", starter)
-        self.assertTrue(_has(result.warnings, "carry NO /ADMAS",
+        self.assertTrue(_has(result.warnings,
+                             "carry NO element mass of their own",
                              "*ELEMENT_MASS if their dynamics matter"))
 
     def test_the_opt_out_leaves_the_admas_exactly_as_the_deck_states_it(self):
@@ -824,21 +835,66 @@ class SpringTokenMassCompensationTests(unittest.TestCase):
     def test_the_token_mass_constant_is_named_once_and_never_a_literal(self):
         """The compensation and the EMISSION must not be able to drift: the
         constant was named at ``loads.py`` module level and then written as a
-        bare ``1.0e-4`` at three emission sites and two warning strings."""
+        bare ``1.0e-4`` at three emission sites and two warning strings.
+
+        ROUND 5 strengthened this, because the LINE scan below missed a whole
+        release: ``_make_constrained_spotweld_springs`` put its
+        ``_emit_prop_type13(...)`` on one line and the literal ``1.0e-4`` on
+        the CONTINUATION line, so no single line held both and the guard was
+        satisfied while a fourth emission site invented a token nobody
+        compensated. The AST half scans the STATEMENT, not the line.
+        """
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "k2rad", "writer", "loads.py"),
                   encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+            src = fh.read()
+        lines = src.splitlines()
         offenders = [
             (i + 1, l) for i, l in enumerate(lines)
             if "1.0e-4" in l and "_SPRING_TOKEN_MASS = 1.0e-4" not in l
             and "1.0e-6" not in l]
-        # The two surviving 1.0e-4 literals belong to OTHER emitters (the
-        # grounding-spring /PROP/TYPE8 and the muscle-spring fallback), which
-        # have their own mass policies and are not compensated here.
+        # The surviving 1.0e-4 literal belongs to ANOTHER emitter (the opt-in
+        # --ground-springs /PROP/TYPE8), which has its own mass policy and is
+        # deliberately not compensated here.
         for _n, line in offenders:
             self.assertNotIn("_emit_prop_type4(", line)
             self.assertNotIn("_emit_prop_type13(", line)
+
+        # ── the statement-level half ──────────────────────────────────────
+        import ast
+        tree = ast.parse(src)
+        #: The ONE function allowed to write a bare spring token mass: the
+        #: opt-in grounding spring, which the LS deck does not state at all.
+        allowed = {"_make_grounding_springs"}
+        def _is_token(node):
+            return (isinstance(node, ast.Constant)
+                    and isinstance(node.value, float)
+                    and node.value == 1.0e-4)
+
+        bad = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if fn.name in allowed:
+                continue
+            for node in ast.walk(fn):
+                # a bare token in a spring-property EMISSION call ...
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id.startswith("_emit_prop_type")
+                        and any(_is_token(a) for a in node.args)):
+                    bad.append(f"{fn.name}:{node.lineno} (emission call)")
+                # ... or assigned to anything called a mass on its way there.
+                if isinstance(node, ast.Assign) and _is_token(node.value):
+                    names = [t.id for t in node.targets
+                             if isinstance(t, ast.Name)]
+                    if any("mass" in n.lower() for n in names):
+                        bad.append(f"{fn.name}:{node.lineno} ({names})")
+        self.assertEqual(
+            bad, [],
+            "a bare 1.0e-4 spring token mass outside "
+            f"{sorted(allowed)} — use _SPRING_TOKEN_MASS so the /ADMAS "
+            f"compensation cannot drift from the emission: {bad}")
 
     def test_the_warning_no_longer_tells_the_reader_to_ADD_mass(self):
         """The old sentence prescribed exactly the wrong fix: *"add

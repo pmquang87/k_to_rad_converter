@@ -7242,11 +7242,36 @@ class ConvertOptions:
     # by sqrt(1 + m_token/(2*m_node)) = 41.715 rad/s against LS-DYNA's 43.954,
     # a 5.4 % frequency error.
     #
-    # It NEVER writes a non-positive /ADMAS: where the node's own mass is at or
-    # below the token share the value is left alone and the numbers are named
-    # (gnonspring.k's /ADMAS is 1e-6 against a token half of 5e-5, 50x), and
-    # where there is no /ADMAS at all (mat_spring.belted-dummy.k: 122 springs,
-    # zero /ADMAS) it can only warn.
+    # It NEVER writes a non-positive value on the deck's OWN /ADMAS: where the
+    # node's stated mass is at or below the token share that value is left
+    # alone and the numbers are named (gnonspring.k's /ADMAS is 1e-6 against a
+    # token half of 5e-5, 50x).
+    #
+    # ROUND 5 extended the registry to the three producers that INVENT a token
+    # and never declared one -- writer/loads._make_constrained_spotweld_springs
+    # (the "(stiff weld tie)" /PROP/TYPE13, 4 deck keys on 4 emitted models),
+    # and the mass <= 0 fallbacks of _make_spotweld_beam_connectors and
+    # writer/dbeam (0 roster carriers; LS-DYNA's own RO*A*L / RO*VOL is never
+    # compensated) -- and gave the class with NO /ADMAS to subtract from a
+    # NEGATIVE /ADMAS of its own. hm_read_admas.F:161-171 accepts one (ANCMSG
+    # MSGID 476 MSGWARNING NEGATIVE ADDED MASS, raised twice per card because
+    # the reader runs both FLAG passes; no sign check, no floor) and adds it
+    # algebraically at :247-248, before the rigid bodies and before INITIA.
+    # MEASURED on intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc at nt 4:
+    # the starter's TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is
+    # LS-DYNA's own total mass to five figures (+99.52 % -> +0.02 %), at
+    # +1.21 % cycles (2646 -> 2678), both arms NORMAL TERMINATION. That is a
+    # MASS claim, not an energy claim: the row stays deviation in both arms.
+    #
+    # Two classes stay UNCOMPENSATED, each for a measured reason:
+    #   * a spring node with NO element mass of its own -- subtracting there
+    #     would leave MS = 0 and rcheckmass.F:126-135 answers ERROR 1870;
+    #   * a SECONDARY node of an ICoG = 4 rigid body -- inirby.F:265-266 ("CG
+    #     OF THE MAIN NODE (MASS OF SECONDS IGNORED)") discards it anyway.
+    #     Measured on mat_spring.belted-dummy (15 token nodes, 0.0108 total):
+    #     starter TOTAL MASS 0.3356681850251 with the token, with the token at
+    #     1e-12, with a -0.0108 /ADMAS and with a +0.0108 one, and the full
+    #     110032-cycle engine run bit-identical in every arm.
     spring_token_mass_compensation: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.

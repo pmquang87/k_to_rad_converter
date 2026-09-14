@@ -282,9 +282,15 @@ def build_parser() -> argparse.ArgumentParser:
              "the --discrete-offset bundle, where it turns ex_17's +10.20 %% "
              "/ -99.27 %% into +0.0074 %% / +0.039 %% - uncompensated, the "
              "token shifts that deck's omega to 41.715 rad/s against LS-DYNA's "
-             "43.954, a 5.4 %% frequency error. It never writes a "
-             "non-positive /ADMAS: a node whose own mass is at or below the "
-             "token share is left alone and the numbers are named.",
+             "43.954, a 5.4 %% frequency error. ROUND 5 extended it to the "
+             "*CONSTRAINED_SPOTWELD weld tie and the two mass <= 0 fallbacks, "
+             "and gave the class with NO /ADMAS to subtract from a NEGATIVE "
+             "/ADMAS of its own (hm_read_admas.F:164-170 accepts one, WARNING "
+             "ID 476): plates.nrbc's starter TOTAL MASS goes 2.0048E-04 -> "
+             "1.0048E-04, LS-DYNA's own to five figures, at +1.21 %% cycles "
+             "(2646 -> 2678, nt 4). It never writes a non-positive value on "
+             "the deck's OWN /ADMAS, and it refuses a spring node that "
+             "carries no element mass of its own (MS = 0 is ERROR 1870).",
     )
     parser.add_argument(
         "--tgmult-imptemp",

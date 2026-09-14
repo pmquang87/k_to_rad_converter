@@ -318,12 +318,41 @@ COMPENSATED. LS-DYNA discrete elements are massless (nodal mass comes from
 `*ELEMENT_MASS`), but `hm_read_prop04.F:136-142` refuses a property
 `MASS <= 1e-15` with ERROR 229, so k2rad writes `1e-4` — and `rinit3.F:1926`
 (`EMS = HALF*UMASS`) with `:1937-1939` (`MSR(1..3,I) = EMS(I)`) puts HALF of it
-on EACH end node, PER ELEMENT. That invented mass is now SUBTRACTED from those
+on EACH end node, PER ELEMENT. That invented mass is SUBTRACTED from those
 nodes' `/ADMAS`, per node, splitting one `/ADMAS` group into several when its
-members carry different spring counts. It never writes a non-positive
-`/ADMAS`: a node whose own mass is at or below the token share keeps the deck's
-value and the numbers are named, and a node with no `/ADMAS` at all can only be
-warned about. `--no-spring-token-mass-compensation` restores the pre-round-4
+members carry different spring counts. It never writes a non-positive value on
+the deck's own `/ADMAS`: a node whose own mass is at or below the token share
+keeps the stated value.
+
+**Round 5 closed the classes a subtraction cannot reach** and extended the
+registry to the three producers that invent a token and never declared one —
+`*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` with failure
+forces (the `(stiff weld tie)` `/PROP/TYPE13`, 4 deck keys on 4 emitted
+models), and the `mass <= 0` fallbacks of the `*MAT_SPOTWELD` beam connector
+and of the discrete-beam writer (0 roster carriers; LS-DYNA's own `RO·A·L` /
+`RO·VOL` is never compensated). A node with no `/ADMAS` to subtract from now
+gets the token taken off with a **negative `/ADMAS/0`** of its own:
+`hm_read_admas.F:161-171` accepts one — `ANCMSG(MSGID=476, MSGWARNING)`
+`NEGATIVE ADDED MASS`, raised twice per card because the reader runs both FLAG
+passes, no sign check and no floor — and adds it algebraically at `:247-248`,
+before the rigid bodies and before `INITIA`. Measured on
+`intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k` (nt 4): the starter's
+`TOTAL MASS` goes **2.0048E-04 → 1.0048E-04**, which is LS-DYNA's own total
+mass to five figures (+99.52 % → +0.02 %), at **+1.21 % cycles** (2646 → 2678),
+both arms NORMAL. **It is a MASS claim, not an energy claim** — that deck's
+channels are dominated by post-rupture oscillation and stay `deviation` in
+every arm (IE −18.90 % → +23.64 %, KE +161.35 % → +61.93 % against LS's
+5869.61 / 3449.03 at t 1.99882E-03; the weld ruptures at t 3.130E-04 against
+3.033E-04 before). Two classes are still NOT compensated, each for a measured
+reason: a spring node with **no element mass of its own** (subtracting there
+would leave `MS = 0`, and `rcheckmass.F:126-135` answers ERROR 1870), and a
+**secondary node of an ICoG = 4 rigid body**, where `inirby.F:265-266`
+discards the secondaries' mass entirely — measured on
+`mat_spring.belted-dummy` (15 token nodes, 0.0108 total), whose starter
+`TOTAL MASS` is `0.3356681850251` with the token, with the token floored to
+1e-12, with a −0.0108 `/ADMAS` and with a +0.0108 one, and whose full 110032-
+cycle run is bit-identical in every arm.
+`--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885
 roster decks: `ex_17_spring_elform_0` IE +0.0074 % / KE +0.039 % and
 `ex_18_spring_elform_0` +0.0064 % / −0.015 % against their own LS-DYNA

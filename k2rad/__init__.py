@@ -439,7 +439,22 @@ def convert(
         element. Measured ALONE it is inert on every deck where it can be
         measured; it is load-bearing inside the ``discrete_offset`` bundle,
         where it turns ``ex_17``'s +10.20 % / −99.27 % into +0.0074 % /
-        +0.039 %. It never writes a non-positive ``/ADMAS``.
+        +0.039 %. **Round 5** extended it to the three producers that invent a
+        token and never registered one (the ``*CONSTRAINED_SPOTWELD`` /
+        ``*CONSTRAINED_GENERALIZED_WELD_SPOT`` ``(stiff weld tie)``, and the
+        ``mass <= 0`` fallbacks of the ``*MAT_SPOTWELD`` beam connector and the
+        discrete-beam writer — LS-DYNA's own ``RO·A·L`` / ``RO·VOL`` is never
+        compensated), and gave the class with NO ``/ADMAS`` to subtract from a
+        NEGATIVE ``/ADMAS`` of its own (``hm_read_admas.F:161-171`` accepts one
+        — WARNING ID 476, no sign check, no floor — and adds it algebraically
+        at ``:247-248``). MEASURED on ``plates.nrbc`` at nt 4: the starter's
+        ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to five
+        figures, at +1.21 % cycles (2646 → 2678), both arms NORMAL. It never
+        writes a non-positive value on the deck's OWN ``/ADMAS``, and it
+        refuses a spring node carrying no element mass of its own
+        (``rcheckmass.F:126-135`` = ERROR 1870) and a secondary node of an
+        ICoG = 4 rigid body (``inirby.F:265-266`` discards that mass anyway —
+        measured inert on ``mat_spring.belted-dummy``).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
