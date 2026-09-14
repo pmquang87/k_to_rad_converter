@@ -1618,30 +1618,38 @@ class MomentumAverageArithmetic(unittest.TestCase):
         self.assertLess(max(abs(o) for o in omega), 50.0 / (d / 2.0) * 1.01)
         self.assertGreater(max(abs(o) for o in omega), 1.0)
 
-    def test_a_NEARLY_collinear_body_does_not_explode(self):
-        """The one the rank test is actually for.
+    def test_a_NEARLY_collinear_body_does_not_explode_at_EITHER_scale(self):
+        """The one the rank test is actually for, and why it is SCALE-FREE.
 
-        An EXACTLY collinear body has an exactly-zero eigenvalue, which any
-        guard catches. What bites is a body that is nearly-but-not-quite a
-        line: the real 2-node CNRB of the Yaris suspension deck has
-        ``det`` 8.75e-12 and condition number 1.34e16, and ``solve()`` answers
-        it two orders of magnitude wrong with no diagnostic. Here the two
-        masses sit 10 mm apart with a 1e-9 mm kink, so the transverse
-        eigenvalues are ~1e-4 and the axial one ~1e-22 — far below
-        ``1e-10 x M x R2max`` and far above zero. With the rank test the axial
-        spin is dropped; without it, it is ``L_axial / 1e-22``.
+        A TWO-node body is exactly collinear whatever its coordinates — two
+        points always are — so its axial inertia is exactly 0 and any guard
+        catches it. It takes THREE nearly-collinear masses to make an
+        eigenvalue that is tiny but NOT zero, which is the case a
+        ``solve()`` answers by orders of magnitude (the real 2-node CNRB of
+        the Yaris suspension deck reads ``det`` 8.75e-12 / condition 1.34e16).
+
+        Both bodies below are the same shape — three masses on a 10-long line
+        with a small transverse kink — and both must give the same answer:
+        ``omega = (0, -10, 0)``, the transverse spin
+        ``|v|/2 ÷ half the span``. They differ only in UNITS, and that is the
+        point: the light one's small eigenvalue is ~6.7e-19 and the heavy
+        one's is ~1.0e-6, so a fixed ABSOLUTE tolerance can only be right for
+        one of them, while ``1e-10 × M × R²max`` is right for both.
         """
-        v_cm, omega, _cog, refusal = self._f()(
-            [(0.0, 0.0, 0.0), (10.0, 1e-9, 0.0)], [1.0e-6, 1.0e-6],
-            [None, (0.0, 0.0, 100.0)], model_mass=1.0e-3)
-        self.assertEqual(refusal, "")
-        self.assertAlmostEqual(v_cm[2], 50.0, places=9)
-        # the spin the body CAN carry: about the transverse axis, |omega| ~
-        # |v|/2 / (half the separation) = 10 rad/s
-        self.assertLess(max(abs(o) for o in omega), 20.0)
-        self.assertAlmostEqual(omega[1], -10.0, delta=0.1)
-        # ... and nothing at all about its own axis
-        self.assertAlmostEqual(omega[0], 0.0, places=6)
+        for mass, kink, small in ((1.0e-6, 1.0e-6, 6.7e-19),
+                                  (1.0e+3, 3.9e-5, 1.0e-06)):
+            with self.subTest(mass=mass):
+                v_cm, omega, _cog, refusal = self._f()(
+                    [(0.0, 0.0, 0.0), (5.0, kink, 0.0), (10.0, 0.0, 0.0)],
+                    [mass, mass, mass],
+                    [None, None, (0.0, 0.0, 100.0)], model_mass=mass * 3)
+                self.assertEqual(refusal, "")
+                self.assertAlmostEqual(v_cm[2], 100.0 / 3.0, places=9)
+                # the spin it CAN carry, and nothing about its own axis
+                self.assertAlmostEqual(omega[1], -10.0, delta=0.2)
+                self.assertAlmostEqual(omega[0], 0.0, places=6)
+                self.assertLess(max(abs(o) for o in omega), 20.0,
+                                f"the {small:g} eigenvalue was inverted")
 
     def test_a_single_node_body_translates_and_does_not_spin(self):
         v_cm, omega, _c, refusal = self._f()(
