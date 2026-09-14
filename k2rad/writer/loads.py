@@ -5403,7 +5403,8 @@ def _momentum_average_body(state: ConversionState, info: Optional[Dict],
     state.warn(
         f"{keyword} {where}: --mass-weighted-inivel gave the rigid body on "
         f"main node {main} the MOMENTUM AVERAGE of the {covered} of its "
-        f"{len(nodes)} node(s) the card names - v_cm = ({v_cm[0]:.6g}, "
+        f"{len(nodes)} /RBODY member node(s) (its secondary group plus "
+        f"the main node) the card names - v_cm = ({v_cm[0]:.6g}, "
         f"{v_cm[1]:.6g}, {v_cm[2]:.6g}) and omega = ({omega[0]:.6g}, "
         f"{omega[1]:.6g}, {omega[2]:.6g}) on /INIVEL/TRA + /INIVEL/ROT, from "
         "which inirby.F:1032-1048 rebuilds every secondary. Vol I R17 "
