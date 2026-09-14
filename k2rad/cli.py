@@ -287,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
              "and gave the class with NO /ADMAS to subtract from a NEGATIVE "
              "/ADMAS of its own (hm_read_admas.F:164-170 accepts one, WARNING "
              "ID 476): plates.nrbc's starter TOTAL MASS goes 2.0048E-04 -> "
-             "1.0048E-04, LS-DYNA's own to five figures, at +1.21 %% cycles "
+             "1.0048E-04, LS-DYNA's own to every printed digit, at +1.21 %% cycles "
              "(2646 -> 2678, nt 4). It never writes a non-positive value on "
              "the deck's OWN /ADMAS, and it refuses a spring node that "
              "carries no element mass of its own (MS = 0 is ERROR 1870).",

@@ -7306,7 +7306,7 @@ class ConvertOptions:
     # algebraically at :247-248, before the rigid bodies and before INITIA.
     # MEASURED on intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc at nt 4:
     # the starter's TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is
-    # LS-DYNA's own total mass to five figures (+99.52 % -> +0.02 %), at
+    # LS-DYNA's own total mass to every printed digit (+99.52 % -> 0.00 %), at
     # +1.21 % cycles (2646 -> 2678), both arms NORMAL TERMINATION. That is a
     # MASS claim, not an energy claim: the row stays deviation in both arms.
     #

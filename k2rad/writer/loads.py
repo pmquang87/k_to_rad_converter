@@ -6345,7 +6345,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
               "reader runs both FLAG passes) and adds it algebraically at "
               ":247. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
               "TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is LS-DYNA's "
-              "own total mass to five figures (+99.52 % -> +0.02 %), at "
+              "own total mass to every printed digit (+99.52 % -> 0.00 %), at "
               "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION. Pass "
               "--no-spring-token-mass-compensation to keep the pre-round-5 "
               "output.")

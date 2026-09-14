@@ -450,7 +450,7 @@ def convert(
         NEGATIVE ``/ADMAS`` of its own (``hm_read_admas.F:161-171`` accepts one
         — WARNING ID 476, no sign check, no floor — and adds it algebraically
         at ``:247-248``). MEASURED on ``plates.nrbc`` at nt 4: the starter's
-        ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to five
+        ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to every
         figures, at +1.21 % cycles (2646 → 2678), both arms NORMAL. It never
         writes a non-positive value on the deck's OWN ``/ADMAS``, and it
         refuses a spring node carrying no element mass of its own

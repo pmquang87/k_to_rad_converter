@@ -338,7 +338,8 @@ passes, no sign check and no floor — and adds it algebraically at `:247-248`,
 before the rigid bodies and before `INITIA`. Measured on
 `intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k` (nt 4): the starter's
 `TOTAL MASS` goes **2.0048E-04 → 1.0048E-04**, which is LS-DYNA's own total
-mass to five figures (+99.52 % → +0.02 %), at **+1.21 % cycles** (2646 → 2678),
+mass to every printed digit (+99.52 % → 0.00 %), at **+1.21 % cycles**
+(2646 → 2678),
 both arms NORMAL. **It is a MASS claim, not an energy claim** — that deck's
 channels are dominated by post-rupture oscillation and stay `deviation` in
 every arm (IE −18.90 % → +23.64 %, KE +161.35 % → +61.93 % against LS's
