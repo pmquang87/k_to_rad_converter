@@ -3868,6 +3868,13 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE": {"data": (0, [(0, "n"), (1, "n")]),
                                             "stride": 2},
     "CONSTRAINED_GENERALIZED_WELD_SPOT": {"cards": {0: [(0, "s"), (1, "d")]}},
+    # *CONSTRAINED_GENERALIZED_WELD_BUTT card 1 is NSID CID FILTER WINDOW NPR
+    # NPRT (Vol I R17 p.10-24): only NSID is an id, CID is a coordinate-system
+    # id k2rad drops, and card 2c (TFAIL EPSF SIGY BETA L D) carries none.
+    "CONSTRAINED_GENERALIZED_WELD_BUTT": {"cards": {0: [(0, "s"), (1, "d")]}},
+    # *CONSTRAINED_SHELL_TO_SOLID: NID (a NODE) + NSID (a node SET), one card
+    # per tie and stackable, so the repeating "data" shape rather than "cards".
+    "CONSTRAINED_SHELL_TO_SOLID": {"data": (0, [(0, "n"), (1, "s")])},
     "CONSTRAINED_NODE_SET": {"cards": {0: [(0, "s")]}},
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
     # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option

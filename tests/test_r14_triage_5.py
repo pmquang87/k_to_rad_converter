@@ -29,7 +29,7 @@ import tempfile
 import unittest
 
 from k2rad import convert
-from k2rad.handlers import dispatch
+from k2rad.handlers import HANDLERS, dispatch
 from k2rad.parser import parse_k_file
 from k2rad.state import ConversionState
 from k2rad.writer import rbody as rbody_writer
@@ -416,6 +416,323 @@ class SpringTokenIsRegisteredOnlyWhereItIsInvented(unittest.TestCase):
         joined = "\n".join(res.warnings)
         self.assertIn("[1, 2]", joined)
         self.assertNotIn("[1, 2, 3]", joined)
+
+
+# ── A2 / A3: the two new /RBODY producers ────────────────────────────────────
+
+_SHELL_MAT_SEC = (
+    "*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+    "*SECTION_SOLID\n" + _row(2, 1) + "\n"
+    "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+)
+
+
+def _shell_to_solid_deck(nid=5, nsid=9, fibre=(1, 2, 3), tc=0, extra=""):
+    """One brick + a shell strip + one *CONSTRAINED_SHELL_TO_SOLID card.
+
+    Nodes 1-4 are the brick's lower face, 11-14 its upper one; node 5 is the
+    shell node on the fibre; ``fibre`` names the set members.
+    """
+    pts = {1: (0, 0, 0), 2: (10, 0, 0), 3: (10, 10, 0), 4: (0, 10, 0),
+           11: (0, 0, 10), 12: (10, 0, 10), 13: (10, 10, 10), 14: (0, 10, 10),
+           5: (0, 0, 20), 6: (10, 0, 20), 7: (10, 10, 20)}
+    nodes = "*NODE\n" + "".join(
+        f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}"
+        + (f"{tc:>8}{0:>8}" if tc and i in (1, 5) else "") + "\n"
+        for i, (x, y, z) in sorted(pts.items()))
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + nodes
+            + "*ELEMENT_SOLID\n"
+            + _row(1, 2, 1, 2, 3, 4, 11, 12, 13, 14) + "\n"
+              "*ELEMENT_SHELL\n" + _row(2, 1, 5, 6, 7, 7) + "\n"
+              "*PART\n" "shell\n" + _row(1, 1, 1) + "\n"
+              "*PART\n" "brick\n" + _row(2, 2, 1) + "\n"
+            + _SHELL_MAT_SEC
+            + "*SET_NODE_LIST\n" + _row(nsid) + "\n" + _row(*fibre) + "\n"
+            + f"*CONSTRAINED_SHELL_TO_SOLID\n{_row(nid, nsid)}\n"
+            + extra
+            + "*END\n")
+
+
+class ShellToSolidRbody(unittest.TestCase):
+    """A2 — one ``/RBODY`` per ``*CONSTRAINED_SHELL_TO_SOLID`` card."""
+
+    def test_the_card_is_registered_and_no_longer_skipped(self):
+        st = _dispatch(_shell_to_solid_deck())
+        self.assertNotIn("CONSTRAINED_SHELL_TO_SOLID", st.skipped_keywords)
+        self.assertEqual(len(st.shell_to_solids), 1)
+        self.assertEqual((st.shell_to_solids[0].nid,
+                          st.shell_to_solids[0].nsid), (5, 9))
+
+    def test_the_emitted_body_is_the_shell_node_over_the_fibre_set(self):
+        _r, starter, _e = _convert(_shell_to_solid_deck())
+        blk = _block_after(starter, "/RBODY/5", 9)
+        self.assertEqual(blk[0], "/RBODY/5")
+        self.assertEqual(blk[2], rbody_writer._RBODY_CARD1_HDR)
+        cells = blk[3].split()
+        self.assertEqual(len(cells), 9, blk[3])
+        # node_ID sens skew Ispher Mass grnd Ikrem ICoG surf
+        self.assertEqual(cells[0], "5")
+        self.assertEqual(cells[4], "0", "Mass must be 0 — Radioss lumps it")
+        self.assertEqual(cells[7], "3", "ICoG 3 keeps a MESHED master in place")
+        self.assertEqual(blk[5].split(), ["0", "0", "0"])   # Jxx Jyy Jzz
+        self.assertEqual(blk[7].split(), ["0", "0", "0"])   # Jxy Jyz Jxz
+        self.assertEqual(blk[8], rbody_writer._RBODY_IOPTOFF_HDR)
+        grnod = cells[5]
+        gblk = _block_after(starter, f"/GRNOD/NODE/{grnod}", 3)
+        self.assertEqual(gblk[2].split(), ["1", "2", "3"])
+
+    def test_the_opt_out_is_byte_identical_to_dropping_the_keyword(self):
+        deck = _shell_to_solid_deck()
+        r_on, on, _e = _convert(deck)
+        r_off, off, _e2 = _convert(deck, shell_to_solid_rbody=False)
+        self.assertIn("/RBODY/5", on)
+        self.assertNotIn("/RBODY/5", off)
+        self.assertNotIn("shell_to_solid", off)
+        self.assertTrue(_has(r_off.warnings, "were NOT converted",
+                             "--no-shell-to-solid-rbody"))
+        self.assertIn("CONSTRAINED_SHELL_TO_SOLID",
+                      [k for k, _r in r_off.recognized_not_emitted])
+
+    def test_a_missing_node_set_is_refused_by_name(self):
+        r, starter, _e = _convert(_shell_to_solid_deck(nsid=9).replace(
+            "*SET_NODE_LIST\n" + _row(9) + "\n" + _row(1, 2, 3) + "\n", ""))
+        self.assertNotIn("/RBODY/5", starter)
+        self.assertTrue(_has(r.warnings, "node set 9 not found",
+                             "tie NOT converted"))
+
+    def test_a_shell_node_with_no_coordinates_is_refused_by_name(self):
+        r, starter, _e = _convert(_shell_to_solid_deck(nid=999))
+        self.assertNotIn("/RBODY/999", starter)
+        self.assertTrue(_has(r.warnings, "the shell node has no coordinates",
+                             "tie NOT converted"))
+
+    def test_the_main_node_is_removed_from_its_own_secondary_group(self):
+        r, starter, _e = _convert(_shell_to_solid_deck(fibre=(1, 2, 5)))
+        blk = _block_after(starter, "/RBODY/5", 4)
+        grnod = blk[3].split()[5]
+        gblk = _block_after(starter, f"/GRNOD/NODE/{grnod}", 3)
+        self.assertEqual(gblk[2].split(), ["1", "2"])
+        self.assertTrue(_has(r.warnings, "ALSO a member of the solid node set"))
+
+    def test_a_BCS_on_a_tied_node_predicts_starter_WARNING_312(self):
+        r, _s, _e = _convert(_shell_to_solid_deck(tc=7))
+        self.assertTrue(_has(r.warnings, "WARNING ID 312",
+                             "INCOMPATIBLE KINEMATIC CONDITIONS"))
+
+    def test_the_tied_nodes_keep_their_own_NODE_TC_RC_constraint(self):
+        """Registering them in ``rigid_nodes`` DROPPED the deck's own stated
+        constraints — measured, 12 of 132 on the dome. They must survive."""
+        _r, starter, _e = _convert(_shell_to_solid_deck(tc=7))
+        self.assertIn("/BCS/", starter)
+        self.assertIn("node_tc_rc_111_000", starter)
+        tail = starter.split("node_tc_rc_111_000")[-1]
+        self.assertEqual(tail.splitlines()[1].split(), ["1", "5"],
+                         "both tied nodes must keep their own TC/RC")
+
+    def test_a_duplicate_RBODY_id_takes_a_fresh_auto_id(self):
+        """``/RBODY`` has no allocator — its id IS the main node id, and a
+        duplicate is starter ERROR 79."""
+        deck = _shell_to_solid_deck(nid=5) + ""
+        deck = deck.replace(
+            "*CONSTRAINED_SHELL_TO_SOLID\n" + _row(5, 9) + "\n",
+            "*CONSTRAINED_SHELL_TO_SOLID\n" + _row(5, 9) + "\n"
+            + "*CONSTRAINED_SHELL_TO_SOLID\n" + _row(5, 9) + "\n")
+        _r, starter, _e = _convert(deck)
+        ids = [ln.split("/")[-1] for ln in starter.splitlines()
+               if ln.startswith("/RBODY/")]
+        self.assertEqual(len(ids), 2, ids)
+        self.assertEqual(len(set(ids)), 2, f"duplicate /RBODY id: {ids}")
+        self.assertIn("5", ids)
+
+
+def _butt_deck(sigy=250.0, length=10.0, depth=2.0, beta=0.9, nsid=21,
+               pair=((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), members=(21, 33),
+               tfail=1e17, epsf=0.3, cid=0):
+    pts = {21: pair[0], 33: pair[1],
+           1: (10.0, 0.0, 0.0), 2: (10.0, 10.0, 0.0), 3: (0.0, 10.0, 0.0),
+           4: (20.0, 0.0, 0.0), 5: (20.0, 10.0, 0.0)}
+    nodes = "*NODE\n" + "".join(
+        f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+        for i, (x, y, z) in sorted(pts.items()))
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            + nodes
+            + "*ELEMENT_SHELL\n" + _row(1, 1, 21, 1, 2, 3) + "\n"
+            + _row(2, 1, 33, 4, 5, 5) + "\n"
+              "*PART\n" "plate\n" + _row(1, 1, 1) + "\n"
+              "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+              "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+              "*SET_NODE_LIST\n" + _row(nsid) + "\n" + _row(*members) + "\n"
+              "*CONSTRAINED_GENERALIZED_WELD_BUTT\n"
+            + _row(nsid, cid, 0, 0, 0, 0) + "\n"
+            + _row(tfail, epsf, sigy, beta, length, depth) + "\n"
+              "*END\n")
+
+
+class GeneralizedWeldButtRbody(unittest.TestCase):
+    """A3 — one ``/RBODY`` with ``Ifail = 1`` per butt-weld card."""
+
+    def test_the_card_is_registered_with_both_of_its_cards(self):
+        st = _dispatch(_butt_deck())
+        self.assertNotIn("CONSTRAINED_GENERALIZED_WELD_BUTT",
+                         st.skipped_keywords)
+        self.assertEqual(len(st.generalized_weld_butts), 1)
+        c = st.generalized_weld_butts[0]
+        self.assertEqual((c.nsid, c.sigy, c.beta, c.length, c.depth),
+                         (21, 250.0, 0.9, 10.0, 2.0))
+
+    def test_FN_equals_FT_equals_SIGY_L_D_over_BETA(self):
+        """Hand: 250 x 10 x 2 / 0.9 = 5555.555555... -> _f prints 5555.555556,
+        and the starter echoes NORMAL/SHEAR FORCE AT FAILURE 5556."""
+        _r, starter, _e = _convert(_butt_deck())
+        blk = _block_after(starter, "/RBODY/21", 11)
+        self.assertEqual(blk[8], rbody_writer._RBODY_IOPTOFF_HDR)
+        self.assertEqual(blk[9].split(), ["0", "0", "1"],
+                         "Ifail is the THIRD value of the Ioptoff card")
+        self.assertIn("FN", blk[10])
+        fn, ft, en, et = starter.splitlines()[
+            starter.splitlines().index(blk[10]) + 1].split()
+        self.assertEqual(fn, "5555.555556")
+        self.assertEqual(ft, fn, "FT = FNmax, not FNmax/sqrt(3)")
+        self.assertEqual((en, et), ("2", "2"))
+
+    def test_a_blank_BETA_takes_the_cards_own_default_of_one(self):
+        """Hand: 250 x 10 x 2 / 1.0 = 5000."""
+        _r, starter, _e = _convert(_butt_deck(beta=0.0))
+        blk = _block_after(starter, "/RBODY/21", 12)
+        self.assertEqual(blk[11].split(), ["5000", "5000", "2", "2"])
+
+    def test_a_non_coincident_pair_is_refused_by_name(self):
+        r, starter, _e = _convert(
+            _butt_deck(pair=((0.0, 0.0, 0.0), (0.0, 0.0, 1.0))))
+        self.assertNotIn("/RBODY/21", starter)
+        self.assertTrue(_has(r.warnings, "is NOT coincident",
+                             "weld NOT converted", "rgbodv.F:249-256"))
+
+    def test_a_set_that_is_not_a_pair_is_refused_by_name(self):
+        for members in ((21,), (21, 33, 1)):
+            with self.subTest(members=members):
+                r, starter, _e = _convert(_butt_deck(members=members))
+                self.assertNotIn("/RBODY/21", starter)
+                self.assertTrue(_has(r.warnings, "node(s), and a BUTT weld is "
+                                                 "exactly ONE nodal pair"))
+
+    def test_a_weld_with_no_failure_force_becomes_an_unbreakable_tie(self):
+        r, starter, _e = _convert(_butt_deck(sigy=0.0))
+        blk = _block_after(starter, "/RBODY/21", 10)
+        self.assertEqual(blk[9].split(), ["0", "0", "0"])
+        self.assertNotIn("expN", "\n".join(blk))
+        self.assertTrue(_has(r.warnings, "UNBREAKABLE tie (Ifail 0)"))
+
+    def test_EPSF_TFAIL_and_CID_are_dropped_and_named(self):
+        r, _s, _e = _convert(_butt_deck(cid=3))
+        self.assertTrue(_has(r.warnings, "EPSF, TFAIL, CID",
+                             "have no /RBODY slot and were DROPPED"))
+
+    def test_the_opt_out_is_byte_identical_to_dropping_the_keyword(self):
+        deck = _butt_deck()
+        _r, on, _e = _convert(deck)
+        r_off, off, _e2 = _convert(deck, generalized_weld_butt=False)
+        self.assertIn("/RBODY/21", on)
+        self.assertNotIn("/RBODY/21", off)
+        self.assertNotIn("gen_weld_butt", off)
+        self.assertTrue(_has(r_off.warnings, "were NOT converted",
+                             "--no-generalized-weld-butt"))
+
+
+class Round5FlagWiring(unittest.TestCase):
+    """Every new lever reaches the parser, the API, the GUI and the README."""
+
+    _FLAGS = {
+        "--shell-to-solid-rbody": "shell_to_solid_rbody",
+        "--generalized-weld-butt": "generalized_weld_butt",
+    }
+
+    def test_every_round_5_flag_reaches_the_README(self):
+        from k2rad import cli
+        opts = {s for a in cli.build_parser()._actions
+                for s in a.option_strings}
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            readme = fh.read()
+        for flag in self._FLAGS:
+            with self.subTest(flag=flag):
+                self.assertIn(flag, opts, f"{flag} is not a parser option")
+                neg = "--no-" + flag[2:]
+                self.assertIn(neg, opts, f"{neg} is not a parser option")
+                self.assertIn(neg, readme, f"{neg} is not in README.md")
+
+    def test_the_help_renders_and_carries_the_measured_numbers(self):
+        """A bare %% in a help string kills --help at a green suite."""
+        from k2rad import cli
+        text = cli.build_parser().format_help()
+        for flag in self._FLAGS:
+            self.assertIn("--no-" + flag[2:], text)
+        self.assertIn("48190 cycles", text)
+        self.assertIn("2082 cycles", text)
+
+    def test_the_gui_wires_both_levers_end_to_end(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        for name in self._FLAGS.values():
+            with self.subTest(name=name):
+                kw = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), ground_springs=False,
+                    ground_spring_k_text="", soften_stfac_text="",
+                    **{name: False})
+                self.assertIs(kw[name], False)
+                captured = []
+                app = k2rad_gui.ConverterGUI.__new__(
+                    k2rad_gui.ConverterGUI)   # no Tk root needed
+                app._append = captured.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw)
+                self.assertIn("--no-" + name.replace("_", "-"),
+                              "".join(captured))
+        tmp.cleanup()
+
+    def test_both_keywords_carry_an_include_transform_offset_spec(self):
+        """Both cards hold node/set ids, so an *INCLUDE_TRANSFORM renumber
+        must reach them."""
+        from k2rad.assembly import _OFFSET_SPECS
+        for kw in ("CONSTRAINED_SHELL_TO_SOLID",
+                   "CONSTRAINED_GENERALIZED_WELD_BUTT"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, _OFFSET_SPECS)
+                self.assertIn(kw, HANDLERS)
+
+
+# ── A5: *CONSTRAINED_JOINT_SCREW is NOT implemented this round ───────────────
+
+class JointScrewIsStillRefused(unittest.TestCase):
+    """A5 — the ``/GJOINT/RACK`` arm missed both acceptance gates (energy
+    error ≤ 5 %: best −25.6 %; nut travel within 2 % of LS-DYNA's +183.72 mm:
+    best −324.4 mm), so the keyword is NOT converted this round and the
+    numbers are recorded in ROADMAP.md. What is pinned here is that it is
+    still REFUSED rather than silently read as some other joint.
+    """
+
+    def test_the_keyword_is_not_registered(self):
+        self.assertNotIn("CONSTRAINED_JOINT_SCREW", HANDLERS)
+
+    def test_it_lands_in_skipped_keywords_rather_than_another_joint(self):
+        deck = ("*KEYWORD\n"
+                "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                "*NODE\n"
+                + "".join(f"{i:>8}{float(i):>16.4f}{0.0:>16.4f}{0.0:>16.4f}\n"
+                          for i in (1, 2, 3, 4))
+                + "*CONSTRAINED_JOINT_SCREW\n"
+                + _row(1, 2, 3, 4, 0, 0) + "\n"
+                + _row(25.0) + "\n"
+                  "*END\n")
+        st = _dispatch(deck)
+        self.assertIn("CONSTRAINED_JOINT_SCREW", st.skipped_keywords)
+        self.assertEqual(st.constrained_joints, [])
 
 
 if __name__ == "__main__":      # pragma: no cover

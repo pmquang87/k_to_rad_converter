@@ -226,6 +226,8 @@ def convert(
     arclength_riks: bool = False,
     discrete_offset: bool = True,
     spring_token_mass_compensation: bool = True,
+    shell_to_solid_rbody: bool = True,
+    generalized_weld_butt: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -455,6 +457,34 @@ def convert(
         (``rcheckmass.F:126-135`` = ERROR 1870) and a secondary node of an
         ICoG = 4 rigid body (``inirby.F:265-266`` discards that mass anyway —
         measured inert on ``mat_spring.belted-dummy``).
+    shell_to_solid_rbody : bool
+        Convert ``*CONSTRAINED_SHELL_TO_SOLID`` to one ``/RBODY`` per card —
+        the shell node ``NID`` as the main node, the ``NSID`` set as the
+        secondary group, ``Mass`` 0, ``ICoG`` 3, ``Ifail`` 0. **On by
+        default.** LS-DYNA names the substitute in the card's own Purpose
+        sentence (Vol I R17 p.10-182): *"Nodal rigid bodies can perform the
+        same function and may also be used."* THE COST: LS-DYNA lets the brick
+        nodes *"move relative to each other in the fiber direction"*
+        (p.10-183) and an ``/RBODY`` cannot. MEASURED on
+        ``constrained.shell_solid.dome`` (7 cards, 5 nodes each, nt 4): NORMAL
+        48190 cycles (+0.27 % over the drop arm's 48060), external work 1689
+        against LS-DYNA's 1692.55 (−0.21 %), IE 0.6693 → 873.9
+        (−99.90 % → +36.08 %), KE 1.290e5 → 806.4 (+12299.9 % → −22.49 %).
+        The campaign row stays ``deviation``.
+    generalized_weld_butt : bool
+        Convert ``*CONSTRAINED_GENERALIZED_WELD_BUTT`` to one ``/RBODY`` per
+        card with ``Ifail = 1``, ``FN = FT = SIGY·L·D/BETA`` and
+        ``expN = expT = 2``. **On by default**, COINCIDENT node pairs only.
+        LS-DYNA's own model of this weld IS a nodal rigid body (*"When the
+        failure time, tf, is reached the nodal rigid body becomes inactive"*,
+        Vol I R17 p.10-32). On a coincident pair Radioss's normal is a zero
+        vector (``rgbodv.F:249-256``), so ``FN`` is identically 0 and ``FT``
+        carries the whole reaction — hence ``FT = FNmax`` and not
+        ``FNmax/√3``, at the price of the normal/shear distinction. MEASURED
+        on ``constrained.butt-weld`` (nt 4): NORMAL 2082 cycles (+0.63 %),
+        IE −100.00 % → +4.70 %, KE −30.79 % → −26.85 %; the SAME two
+        welds LS-DYNA's own ``.messag`` records trip the criterion at
+        t 1.269e-3 against its own 1.26914e-3 and are set off at 1.272e-3.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -763,6 +793,8 @@ def convert(
         arclength_riks=arclength_riks,
         discrete_offset=discrete_offset,
         spring_token_mass_compensation=spring_token_mass_compensation,
+        shell_to_solid_rbody=shell_to_solid_rbody,
+        generalized_weld_butt=generalized_weld_butt,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

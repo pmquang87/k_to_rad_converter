@@ -91,7 +91,9 @@ from .contacts import (
     _recipe_active,
 )
 from .frictions import _make_frictions
-from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
+from .rbody import (_make_cnrb_rbodies, _make_generalized_weld_butt_rbodies,
+                    _make_probe_rbody, _make_rbodies,
+                    _make_shell_to_solid_rbodies)
 from .rbe3 import _make_rbe3
 from .joints import _make_joints, _resolve_joints
 from .dbeam import _make_discrete_beam_connectors
@@ -1490,6 +1492,21 @@ def build_starter(state: ConversionState, progress=None) -> str:
             "part id.")
     rbody_info = {**rbody_info, **cnrb_info}
     rbody_lines = rbody_lines + cnrb_lines
+    # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT:
+    # /RBODY producers 4 and 5, appended before the probe body.
+    #
+    # They contribute NEITHER an rbody_info record NOR members to
+    # `rigid_nodes`, and both halves are the same reason. rbody_info is keyed
+    # by LS-DYNA PART id and consumed by *LOAD_RIGID_BODY /
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID / *INITIAL_VELOCITY_RIGID_BODY; a tie
+    # or a weld has no part id, so it cannot have a record — and every
+    # `rigid_nodes` consumer that matters here (the *NODE TC/RC re-point
+    # first) resolves a member through rbody_info and DROPS it when the lookup
+    # fails. MEASURED on constrained.shell_solid.dome: registering the tied
+    # nodes cost 12 of the deck's 132 stated TC/RC constraints, silently, so
+    # they are left out. See _make_shell_to_solid_rbodies' docstring.
+    rbody_lines = rbody_lines + _make_shell_to_solid_rbodies(state)
+    rbody_lines = rbody_lines + _make_generalized_weld_butt_rbodies(state)
     # Implicit deck without any rigid body: the engine segfaults at solver init
     # (MESSAGE ID 44) — give it an inert fully-fixed probe rigid body.
     rbody_lines = rbody_lines + _make_probe_rbody(state, rbody_info)

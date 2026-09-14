@@ -59,7 +59,8 @@ from .state import (
     MatJHCeramics, MatJHConcrete, MatElasticFluid,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
-    MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
+    MatDamperViscous, MatSpotweld, ConstrainedSpotweld, ShellToSolid,
+    GeneralizedWeldButt,
     MatSpringElastoplastic, MatDamperNonlinearViscous,
     MatSpringGeneralNonlinear, MatSpringInelastic,
     MatDiscreteBeamLinear, MatDiscreteBeamNonlinearElastic,
@@ -9781,6 +9782,74 @@ def handle_constrained_generalized_weld_spot(block: Block, state: ConversionStat
                           0, 0, nsid, sn, ss, n_exp, m_exp, tfail, epsf)
 
 
+def handle_constrained_shell_to_solid(block: Block,
+                                      state: ConversionState) -> None:
+    """*CONSTRAINED_SHELL_TO_SOLID[_ID][_TITLE] — a shell node tied to a brick
+    fibre.
+
+    Card 1 (Vol I R17 p.10-182): ``NID NSID``. *"Card Sets. ... This input ends
+    at the next keyword card"* is the shape every *CONSTRAINED_ card uses, and
+    the roster's carrier writes ONE card per keyword — but a stacked card set
+    is legal, so every non-blank row is read.
+
+    The set is resolved at WRITE time (a ``*SET_NODE_LIST`` may follow this
+    card in the deck), which is also how ``*CONSTRAINED_GENERALIZED_WELD_SPOT``
+    handles its NSID.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    found = False
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=2, w=10)
+        nid = to_int(f[0]) if f else 0
+        nsid = to_int(f[1]) if len(f) > 1 else 0
+        if nid <= 0 and nsid <= 0:
+            continue
+        found = True
+        state.shell_to_solids.append(
+            ShellToSolid(nid=nid, nsid=nsid, title=title))
+    if not found:
+        state.warn("*CONSTRAINED_SHELL_TO_SOLID: no NID/NSID pair found — "
+                   "skipped.")
+
+
+def handle_constrained_generalized_weld_butt(block: Block,
+                                             state: ConversionState) -> None:
+    """*CONSTRAINED_GENERALIZED_WELD_BUTT[_ID][_TITLE] — one butt weld.
+
+    Card 1 (Vol I R17 p.10-24): ``NSID CID FILTER WINDOW NPR NPRT``;
+    card 2c (p.10-31): ``TFAIL EPSF SIGY BETA L D``. ONE nodal pair per
+    definition — p.10-32: *"This requires 3 separate
+    \\*CONSTRAINED_GENERALIZED_WELD_BUTT definitions, one for each nodal
+    pair."*
+
+    NOTE on the card layout: ``Keyword971_R6.1``'s
+    ``constrained_generalized_weld_butt.cfg`` describes an OLDER spelling
+    (``NSID1 NSID2 NSIDE TFAIL EPSF SIGY BETA L W A ALPHA``). The R17 manual
+    and the roster's own carrier
+    (``examples-manual/constrained/weld/constrained.butt-weld.k``, whose four
+    cards read ``nsid cid filter window npr nprt`` then
+    ``tfail epsf sigy beta l d``) are what this reads.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    nsid = to_int(f1[0]) if f1 else 0
+    cid = to_int(f1[1]) if len(f1) > 1 else 0
+    if nsid <= 0:
+        state.warn("*CONSTRAINED_GENERALIZED_WELD_BUTT: no node set id — "
+                   "skipped.")
+        return
+    f2 = _card(raw, offset + 1, fixed=True, n=6, w=10)
+    g = lambda j: to_float(f2[j]) if len(f2) > j else 0.0   # noqa: E731
+    state.generalized_weld_butts.append(GeneralizedWeldButt(
+        nsid=nsid, cid=cid, tfail=g(0), epsf=g(1), sigy=g(2), beta=g(3),
+        length=g(4), depth=g(5), title=title))
+
+
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
                                 rwid: int, raw, idx: int, family: str) -> None:
     """One guard for both rigid-wall families.
@@ -18411,6 +18480,10 @@ HANDLERS = {
     "CONSTRAINED_SPOTWELD":                   handle_constrained_spotweld,
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE":    handle_constrained_spotweld,
     "CONSTRAINED_GENERALIZED_WELD_SPOT":      handle_constrained_generalized_weld_spot,
+    # _ID / _TITLE come free via parser._split_keyword (see the joint block
+    # below); only the base names are registered.
+    "CONSTRAINED_GENERALIZED_WELD_BUTT":      handle_constrained_generalized_weld_butt,
+    "CONSTRAINED_SHELL_TO_SOLID":             handle_constrained_shell_to_solid,
 
     # Joints. _ID/_TITLE come free via parser._split_keyword; _LOCAL and
     # _FAILURE stay in the base name and need their own literal keys (the same

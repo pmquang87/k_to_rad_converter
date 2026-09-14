@@ -785,6 +785,53 @@ class ConstrainedSpotweld:
     title: str = ""
 
 
+@dataclass
+class ShellToSolid:
+    """One ``*CONSTRAINED_SHELL_TO_SOLID`` card → one ``/RBODY``.
+
+    Card 1 (Vol I R17 p.10-182): ``NID NSID``. ``NID`` is *"Shell node ID"*,
+    ``NSID`` *"Solid nodal set ID"* — the brick nodes along the shell node's
+    fibre.
+
+    LS-DYNA names the substitute itself, in the card's own Purpose sentence:
+    *"Define a tie between a shell edge and solid elements. Nodal rigid bodies
+    can perform the same function and may also be used."* What the rigid body
+    costs is on p.10-183: LS-DYNA's tie lets the brick nodes *"move relative to
+    each other in the fiber direction"* while the shell node keeps its relative
+    spacing, and an ``/RBODY`` cannot.
+    """
+    nid: int = 0
+    nsid: int = 0
+    title: str = ""
+
+
+@dataclass
+class GeneralizedWeldButt:
+    """One ``*CONSTRAINED_GENERALIZED_WELD_BUTT`` card → one ``/RBODY``
+    with ``Ifail = 1``.
+
+    Card 1 (Vol I R17 p.10-24): ``NSID CID FILTER WINDOW NPR NPRT``.
+    Card 2c (p.10-31): ``TFAIL EPSF SIGY BETA L D``, defaults
+    ``1e16 / 1e16 / 1e16 / 1.0 / none / none``.
+
+    ``NSID`` is ONE nodal PAIR: p.10-26 defines ``NPR`` as *"Number of
+    individual nodal pairs in the cross fillet or combined general weld"* — a
+    count the BUTT card does not carry — and the manual's own example on
+    p.10-32 says it outright: *"This requires 3 separate
+    \\*CONSTRAINED_GENERALIZED_WELD_BUTT definitions, one for each nodal
+    pair."*
+    """
+    nsid: int = 0
+    cid: int = 0
+    tfail: float = 0.0
+    epsf: float = 0.0
+    sigy: float = 0.0
+    beta: float = 0.0
+    length: float = 0.0
+    depth: float = 0.0
+    title: str = ""
+
+
 #: LS-DYNA *CONSTRAINED_JOINT_<KIND> → the /PROP/TYPE45 ``Type`` integer.
 #: Verified against prop_p45_kjoint2.cfg lines 261-272 (1 Spherical, 2 Revolute,
 #: 3 Cylindrical, 4 Planar, 5 Universal, 6 Translational, 7 Oldham, 8 Fixed,
@@ -7273,6 +7320,76 @@ class ConvertOptions:
     #     1e-12, with a -0.0108 /ADMAS and with a +0.0108 one, and the full
     #     110032-cycle engine run bit-identical in every arm.
     spring_token_mass_compensation: bool = True
+    # --no-shell-to-solid-rbody: stop converting *CONSTRAINED_SHELL_TO_SOLID.
+    #
+    # ON by default. LS-DYNA names the substitute in the card's own Purpose
+    # sentence (Vol I R17 p.10-182): "Define a tie between a shell edge and
+    # solid elements. Nodal rigid bodies can perform the same function and may
+    # also be used." k2rad writes one /RBODY per card -- main node = the
+    # card's NID (the shell node), secondary group = the NSID set, Mass 0,
+    # ICoG 3 (inirby.F's ELSEIF(ICDG==3) keeps XG = X(main), so a MESHED shell
+    # node is not relocated to the computed CoG), Ifail 0.
+    #
+    # THE COST: p.10-183 says the brick nodes "can move relative to each other
+    # in the fiber direction" while the shell node keeps its relative spacing;
+    # an /RBODY makes the whole fibre rigid, so it can no longer stretch.
+    #
+    # MEASURED on introduction/examples-manual/constrained/shell2solid/
+    # constrained.shell_solid.dome (1 deck key on 1 emitted model, the only
+    # carrier on any corpus here; 7 cards x 5 fibre nodes, nt 4): the shipped
+    # arm dropped the keyword and read IE 0.6693 / KE 1.290e5 against
+    # LS-DYNA's 642.206 / 1040.33 at t 3.99996E-04, i.e. -99.90 % and
+    # +12299.9 %. With the tie: NORMAL 48190 cycles (+0.27 % over the drop
+    # arm's 48060), IE 873.9 (+36.08 %), KE 791.9 + 14.47 = 806.4 (-22.49 %),
+    # EXT-WORK 1689 against 1692.55 (-0.21 %). The campaign VERDICT does not
+    # move -- build_benchmark's bands are 10/10/5 and ke reads -22.5 % -- so
+    # this is a physics claim, not a fixed deck. Starter 0 ERROR / 9 WARNING
+    # (7 x ID 448 MAIN NODE CONNECTED TO AN ELEMENT, benign: the master is a
+    # meshed shell node by construction; 1 x ID 312, 60 incompatible kinematic
+    # conditions from the deck's own *NODE TC/RC on tied nodes; 1 x ID 1084,
+    # the deck's own).
+    shell_to_solid_rbody: bool = True
+    # --no-generalized-weld-butt: stop converting
+    # *CONSTRAINED_GENERALIZED_WELD_BUTT.
+    #
+    # ON by default, COINCIDENT node pairs only. One /RBODY per card with
+    # Ifail = 1, FN = FT = SIGY*L*D/BETA (BETA 0 -> 1.0, the card's own
+    # Default row), expN = expT = 2, master = the pair's first node.
+    #
+    # WHY /RBODY: LS-DYNA's own model of this weld IS a nodal rigid body --
+    # "When the failure time, tf, is reached the nodal rigid body becomes
+    # inactive" (Vol I R17 p.10-32) -- and its brittle criterion
+    # beta*sqrt(sig_n^2 + 3*(tau_n^2 + tau_t^2)) >= sig_f maps onto
+    # rgbodv.F:267's (FN/FNmax)^expN + (FT/FTmax)^expT >= 1 with sig = F/(L*D).
+    #
+    # WHY FT = FNmax AND NOT FNmax/sqrt(3): rgbodv.F:249-256 takes the body's
+    # normal from the main->secondary GEOMETRY. On a coincident pair
+    # NN = 1/EM20 and U = 0, so FN is identically 0 and the criterion collapses
+    # to |R| >= FTmax -- numerically LS-DYNA's beta*sig_n >= sig_f for an axial
+    # weld. FNmax/sqrt(3) would fire sqrt(3) early on exactly the load these
+    # decks carry. The price is that the normal/shear DISTINCTION is lost: a
+    # weld failing in pure shear fails sqrt(3) late.
+    #
+    # WHY COINCIDENT ONLY: on an offset pair that same vector is an arbitrary
+    # geometric offset with no relation to the weld normal L x D defines, so
+    # any FN/FT split would be invented. Roster reach of the refusal: 0 cards
+    # (all four pairs of the one carrier are coincident to 0.0).
+    #
+    # MEASURED on introduction/examples-manual/constrained/weld/
+    # constrained.butt-weld (1 deck key on 1 emitted model, nt 4): the drop arm
+    # read IE 1.048e-6 against LS-DYNA's 10974.0 (-100 %); with the tie, NORMAL
+    # 2082 cycles (+0.63 % over 2069), IE 1.149e4 (+4.70 %), KE 4.966
+    # (-26.85 % against 6.78908). Radioss sets off the SAME two welds LS-DYNA's
+    # own .messag records ("butt weld constraint failed between nodes 35 & 23 :
+    # Time = 1.26914E-03 : xl-force = 5.56104E+03"): the criterion trips at
+    # t 1.269e-3 (cycle 872) and the bodies are SET OFF at t 1.272e-3 (cycle
+    # 874). The starter echoes NORMAL FORCE AT FAILURE 5556. / SHEAR FORCE AT
+    # FAILURE 5556. with both exponents 2.000, and the emitted FNmax 5555.556
+    # is 0.099 % below that xl-force. The SAME emitted deck with Ifail forced
+    # to 0 (a hand-edited control arm) reads IE 2.775e4 = +152.87 % and KE
+    # 0.9026 = -86.71 %, so the failure model is the load-bearing half. The
+    # campaign row stays deviation on KE.
+    generalized_weld_butt: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8500,6 +8617,15 @@ class ConversionState:
     # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
     constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
+    # *CONSTRAINED_SHELL_TO_SOLID → one /RBODY per card (writer/rbody
+    # ._make_shell_to_solid_rbodies, /RBODY producer 4 of 5), default ON,
+    # --no-shell-to-solid-rbody.
+    shell_to_solids: List[ShellToSolid] = field(default_factory=list)
+    # *CONSTRAINED_GENERALIZED_WELD_BUTT → one /RBODY with Ifail=1 per card
+    # (writer/rbody._make_generalized_weld_butt_rbodies, /RBODY producer 5 of
+    # 5), default ON, --no-generalized-weld-butt.
+    generalized_weld_butts: List[GeneralizedWeldButt] = field(
+        default_factory=list)
     # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
     hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)
     # (cluster_id, title) of each emitted /CLUSTER/BRICK — set by the writer's

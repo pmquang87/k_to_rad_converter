@@ -293,6 +293,49 @@ def build_parser() -> argparse.ArgumentParser:
              "carries no element mass of its own (MS = 0 is ERROR 1870).",
     )
     parser.add_argument(
+        "--shell-to-solid-rbody",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_SHELL_TO_SOLID to one /RBODY per card (the "
+             "shell node NID as the main node, the NSID set as the secondary "
+             "group, Mass 0, ICoG 3, Ifail 0). ON by default. LS-DYNA names "
+             "the substitute in the card's own Purpose sentence - \"Nodal "
+             "rigid bodies can perform the same function and may also be "
+             "used\", Vol I R17 p.10-182. THE COST: LS-DYNA lets the brick "
+             "nodes \"move relative to each other in the fiber direction\" "
+             "(p.10-183) and an /RBODY cannot, so the fibre can no longer "
+             "stretch. MEASURED on constrained.shell_solid.dome (7 cards, 5 "
+             "nodes each, nt 4): NORMAL 48190 cycles, EXT-WORK 1689 against "
+             "LS-DYNA's 1692.55 (-0.21 %%), IE 0.6693 -> 873.9 (-99.90 %% -> "
+             "+36.08 %%), KE 1.290e5 -> 806.4 (+12299.9 %% -> -22.49 %%) - "
+             "the campaign row stays deviation. "
+             "Use --no-shell-to-solid-rbody to go back to dropping the "
+             "keyword.",
+    )
+    parser.add_argument(
+        "--generalized-weld-butt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_GENERALIZED_WELD_BUTT to one /RBODY per "
+             "card with Ifail=1 and FN = FT = SIGY*L*D/BETA, expN = expT = 2. "
+             "ON by default, COINCIDENT node pairs only. LS-DYNA's own model "
+             "of this weld IS a nodal rigid body (\"When the failure time is "
+             "reached the nodal rigid body becomes inactive\", Vol I R17 "
+             "p.10-32) and its criterion beta*sqrt(sig_n^2 + 3*(tau_n^2 + "
+             "tau_t^2)) >= sig_f maps onto rgbodv.F:267 with sig = F/(L*D). "
+             "On a coincident pair Radioss's own normal is a ZERO vector "
+             "(rgbodv.F:249-256), so FN is identically 0 and FT carries the "
+             "whole reaction - hence FT = FNmax, not FNmax/sqrt(3), and a "
+             "weld failing in pure SHEAR fails sqrt(3) late. EPSF, TFAIL, "
+             "CID, FILTER, WINDOW, NPR and NPRT are dropped and named. "
+             "MEASURED on constrained.butt-weld (nt 4): NORMAL 2082 cycles "
+             "(+0.63 %%), IE -100.00 %% -> +4.70 %%, KE -30.79 %% -> "
+             "-26.85 %%; the SAME two welds LS-DYNA's own .messag records "
+             "trip the criterion at t 1.269e-3 against its 1.26914e-3 and are "
+             "set off at 1.272e-3. Use "
+             "--no-generalized-weld-butt to go back to dropping the keyword.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -863,6 +906,8 @@ def main(argv=None) -> int:
         arclength_riks=args.arclength_riks,
         discrete_offset=args.discrete_offset,
         spring_token_mass_compensation=args.spring_token_mass_compensation,
+        shell_to_solid_rbody=args.shell_to_solid_rbody,
+        generalized_weld_butt=args.generalized_weld_butt,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

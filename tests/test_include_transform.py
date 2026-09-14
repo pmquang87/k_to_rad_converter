@@ -656,10 +656,11 @@ class AssemblyWarningTests(_AssemblyBase):
             "*KEYWORD",
             "*NODE",
             _nline(1, 0.0, 0.0, 0.0),
-            # Not in the offset map. (*CONSTRAINED_INTERPOLATION used to stand in
-            # here; it gained a walker with the /RBE3 batch, so the example moved
-            # to a keyword that is still genuinely unmapped.)
-            "*CONSTRAINED_SHELL_TO_SOLID",
+            # Not in the offset map. (*CONSTRAINED_INTERPOLATION used to stand
+            # in here; it gained a walker with the /RBE3 batch. Round 5 then
+            # mapped its successor *CONSTRAINED_SHELL_TO_SOLID, so the example
+            # moved again — to a keyword k2rad neither handles nor offsets.)
+            "*CONTROL_DEBUG",
             _row(1, 1),
             "*END",
         ]) + "\n")
@@ -670,7 +671,7 @@ class AssemblyWarningTests(_AssemblyBase):
             "*END",
         ]) + "\n")
         self._state(main)
-        self.assertTrue(any("CONSTRAINED_SHELL_TO_SOLID" in w
+        self.assertTrue(any("CONTROL_DEBUG" in w
                             and "NOT applied" in w for w in PARSER_WARNINGS))
 
     def test_coordinate_bearing_keyword_warns_under_transform(self):

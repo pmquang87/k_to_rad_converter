@@ -100,6 +100,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          arclength_riks: bool = False,
                          discrete_offset: bool = True,
                          spring_token_mass_compensation: bool = True,
+                         shell_to_solid_rbody: bool = True,
+                         generalized_weld_butt: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -225,6 +227,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["spring_token_mass_compensation"] = bool(
         spring_token_mass_compensation)
 
+    kwargs["shell_to_solid_rbody"] = bool(shell_to_solid_rbody)
+
+    kwargs["generalized_weld_butt"] = bool(generalized_weld_butt)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -334,6 +340,8 @@ class ConverterGUI:
         self.arclength_riks = tk.BooleanVar(value=False)
         self.discrete_offset = tk.BooleanVar(value=True)
         self.spring_token_mass_comp = tk.BooleanVar(value=True)
+        self.shell_to_solid_rbody = tk.BooleanVar(value=True)
+        self.generalized_weld_butt = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -453,6 +461,27 @@ class ConverterGUI:
                      "node with no element mass of its own (ERROR 1870)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_SHELL_TO_SOLID → one /RBODY per card (shell "
+                     "node = main, NSID set = secondary, Mass 0, ICoG 3) — ON. "
+                     "LS-DYNA names the substitute itself (Vol I R17 p.10-182). "
+                     "Cost: the brick fibre can no longer stretch. dome: "
+                     "EXT-WORK 1689 vs 1692.55 (−0.21 %), IE 0.6693 → 873.9 "
+                     "(−99.90 % → +36.08 %), KE 1.290e5 → 806.4 "
+                     "(+12299.9 % → −22.49 %)",
+            variable=self.shell_to_solid_rbody).grid(
+                row=27, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_GENERALIZED_WELD_BUTT → one /RBODY with "
+                     "Ifail=1, FN = FT = SIGY·L·D/BETA — ON, coincident pairs "
+                     "only. LS-DYNA's own model of the weld IS a nodal rigid "
+                     "body (p.10-32). butt-weld: NORMAL 2082 cycles, IE −100 % "
+                     "→ +4.70 %, the right two welds off at t 1.272e-3 vs "
+                     "1.26914e-3. EPSF/TFAIL/CID dropped and named",
+            variable=self.generalized_weld_butt).grid(
+                row=28, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="All-rigid SSID contacts: swap the roles instead of losing the "
@@ -844,6 +873,8 @@ class ConverterGUI:
                 arclength_riks=self.arclength_riks.get(),
                 discrete_offset=self.discrete_offset.get(),
                 spring_token_mass_compensation=self.spring_token_mass_comp.get(),
+                shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
+                generalized_weld_butt=self.generalized_weld_butt.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -973,6 +1004,12 @@ class ConverterGUI:
         if not kwargs.get("spring_token_mass_compensation", True):
             bits.append("spring token mass left on the nodes "
                         "(--no-spring-token-mass-compensation)")
+        if not kwargs.get("shell_to_solid_rbody", True):
+            bits.append("*CONSTRAINED_SHELL_TO_SOLID dropped "
+                        "(--no-shell-to-solid-rbody)")
+        if not kwargs.get("generalized_weld_butt", True):
+            bits.append("*CONSTRAINED_GENERALIZED_WELD_BUTT dropped "
+                        "(--no-generalized-weld-butt)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

@@ -11,6 +11,107 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5, part A items A2 and A3 — two
+  `*CONSTRAINED_*` keywords LS-DYNA's own manual says are nodal rigid bodies,
+  dropped since the first release.** Both were absent from `handlers.HANDLERS`
+  and landed in `skipped_keywords` with no conversion at all. Each is now one
+  `/RBODY` per card, default ON with an opt-out flag, and each carries the
+  substitution's COST in the warning it emits.
+
+  - **A2 `*CONSTRAINED_SHELL_TO_SOLID` → one `/RBODY` per card
+    (`--no-shell-to-solid-rbody`).** LS-DYNA names the substitute in the
+    card's own Purpose sentence, Vol I R17 p.10-182: *"Define a tie between a
+    shell edge and solid elements. Nodal rigid bodies can perform the same
+    function and may also be used."* The card's `NID` (the shell node) is the
+    main node, the `NSID` set is the secondary group, `Mass` and all six `J`
+    cells are 0 so Radioss lumps the body from the nodes, and `ICoG` is **3**
+    — not the reader's default 1, because `inirby.F`'s `ELSEIF(ICDG==3)` keeps
+    `XG(J) = X(J,M)` while the default MOVES the main node to the computed
+    centre of gravity, which on a general fibre would displace a MESHED shell
+    node at t = 0 (the CNRB producer synthesizes a free centroid node for
+    exactly that reason). Measured both cells on the dome at nt 4: identical
+    to four significant figures, so `ICoG = 3` costs nothing and removes the
+    hazard. THE COST, from the same manual page (p.10-183): LS-DYNA lets the
+    brick nodes *"move relative to each other in the fiber direction"* while
+    the shell node keeps its relative spacing, and an `/RBODY` cannot — the
+    fibre can no longer stretch. Refusals by name: a shell node with no
+    coordinates, an unresolved or empty `NSID`; a set of more than nine nodes
+    converts but is named (p.10-182 *"A shell node may be tied to up to nine
+    brick nodes"*); the main node is removed from its own secondary group and
+    said so. MEASURED on
+    `introduction/examples-manual/constrained/shell2solid/
+    constrained.shell_solid.dome.k` — **1 deck key on 1 emitted model**, the
+    only carrier on any corpus here, 7 cards × 5 fibre nodes, nt 4, base and
+    arm in the same window: NORMAL **48190 cycles** (+0.27 % over the drop
+    arm's 48060), external work 1.290e5 → **1689** against LS-DYNA's 1692.55
+    (**−0.21 %**), IE 0.6693 → **873.9** (−99.90 % → **+36.08 %** against
+    642.206), KE 1.290e5 → **806.4** (+12299.9 % → **−22.49 %** against
+    1040.33); starter 0 ERROR / 9 WARNING (7 × ID 448 — the master is a meshed
+    shell node by construction, benign; 1 × ID 312, the deck's own 60 symmetry
+    conditions on tied nodes; 1 × ID 1084, the deck's own). **The campaign row
+    STAYS `deviation`** — `build_benchmark`'s bands are 10/10/5 and `ke` reads
+    −22.5 %. This is a physics claim with numbers, not a fixed deck.
+    **One deviation from the research spec, measured:** the spec asked for the
+    tied nodes to be registered in the writer's `rigid_nodes` set. Doing so
+    sends `_make_node_tc_rc_bcs` down its `main_of.get(nid) is None` branch —
+    that set means *"re-point this node to an `/RBODY` main node `rbody_info`
+    knows"*, and `rbody_info` is keyed by LS-DYNA PART id, which a tie does
+    not have — and **12 of the dome's 132 stated `*NODE` TC/RC constraints
+    were silently DROPPED**, under a warning blaming a
+    `*CONSTRAINED_RIGID_BODIES` merge the deck does not contain. They are left
+    out instead; Radioss applies the rigid body first and the redundant `/BCS`
+    costs `WARNING ID 312` with 0 ERRORs, which is what the per-card warning
+    says and what the run shows.
+
+  - **A3 `*CONSTRAINED_GENERALIZED_WELD_BUTT` → one `/RBODY` with `Ifail = 1`
+    per card, COINCIDENT pairs only (`--no-generalized-weld-butt`).**
+    LS-DYNA's own model of this weld IS a nodal rigid body — *"When the
+    failure time, tf, is reached the nodal rigid body becomes inactive"*,
+    Vol I R17 p.10-32 — and its brittle criterion
+    `β√(σn² + 3(τn² + τt²)) ≥ σf` maps onto `rgbodv.F:249-269`'s
+    `(FN/FNmax)^expN + (FT/FTmax)^expT ≥ 1` with `σ = F/(L·D)`, i.e.
+    `FNmax = SIGY·L·D/BETA` (`BETA` 0 → 1.0, the card's own Default row),
+    `expN = expT = 2`. `FT` is set to `FNmax` and **not** `FNmax/√3`: on a
+    coincident pair `rgbodv.F:249-256` builds the body's normal from the
+    main→secondary GEOMETRY and gets a ZERO vector (`NN = 1/EM20`, `U = 0`),
+    so `FN` is identically 0 and the whole reaction lands in `FT` —
+    numerically LS-DYNA's own `β·σn ≥ σf` for an axial weld. The price is
+    named: the normal/shear DISTINCTION is lost, so a weld failing in pure
+    SHEAR fails √3 late. A NON-coincident pair is **refused** (tolerance
+    `max(1e-6, 1e-9 × mesh diagonal)`) because that same vector is then a
+    geometric offset unrelated to the weld normal `L` and `D` define — roster
+    reach of the refusal, 0 cards. A set that does not resolve to exactly two
+    nodes is refused with p.10-32's own sentence (*"This requires 3 separate
+    …definitions, one for each nodal pair"*), and `EPSF`, `TFAIL`, `CID`,
+    `FILTER`, `WINDOW`, `NPR`, `NPRT` are dropped and named. `SIGY`/`L`/`D`
+    that give no positive force emit the tie with `Ifail 0` and say so.
+    MEASURED on `introduction/examples-manual/constrained/weld/
+    constrained.butt-weld.k` — **1 deck key on 1 emitted model**, nt 4:
+    NORMAL **2082 cycles** (+0.63 % over the drop arm's 2069), IE 1.048e-6 →
+    **1.149e4** (−100.00 % → **+4.70 %** against LS-DYNA's 10974.0), KE
+    4.699 → 4.966 (−30.79 % → −26.85 % against 6.78908); starter 0 ERROR /
+    4 WARNING (4 × ID 448). Radioss sets off the **same two welds** LS-DYNA's
+    own `.messag` records (35 & 23 and 37 & 25): the criterion trips at
+    t 1.269e-3 (cycle 872) against LS-DYNA's own **1.26914e-3** and the bodies
+    are SET OFF at t 1.272e-3 (cycle 874). The starter echoes back the cells —
+    `NORMAL FORCE AT FAILURE 5556.` / `SHEAR FORCE AT FAILURE 5556.`, both
+    exponents `2.000` — and the emitted `FNmax` 5555.556 is 0.099 % below the
+    `xl-force` 5561.04 that `.messag` reports at failure. The SAME emitted
+    deck with `Ifail` forced to 0 reads IE 2.775e4 = **+152.87 %** and KE
+    0.9026 = −86.71 %, so the failure model is the load-bearing half. **The
+    campaign row STAYS `deviation`** on KE.
+
+  - The card layout A3 reads is the R17 manual's and the roster carrier's —
+    card 1 `NSID CID FILTER WINDOW NPR NPRT`, card 2c `TFAIL EPSF SIGY BETA L
+    D` — NOT `Keyword971_R6.1`'s older
+    `NSID1 NSID2 NSIDE TFAIL EPSF SIGY BETA L W A ALPHA` spelling; the handler
+    docstring says which and why. Both keywords gained an
+    `assembly._OFFSET_SPECS` row, because both cards carry node and set ids
+    that an `*INCLUDE_TRANSFORM` must renumber, and both flags are wired at
+    every site (parser, `main()`, `convert()` signature, numpydoc,
+    `ConvertOptions`, the state field, the GUI's kwargs signature, body, tk
+    var, widget and options summary, README, and the flag-parity test).
+
 - **R14 CAMPAIGN TRIAGE batch, round 5, part A item A1 — the spring token mass
   was compensated at ONE producer and invented at four, and the class that
   carries no `/ADMAS` to subtract from got nothing at all.** Round 4 taught

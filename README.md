@@ -2574,6 +2574,69 @@ failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
 `/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
 exponents are warned)
+`*CONSTRAINED_SHELL_TO_SOLID` → one `/RBODY` per card (default ON,
+`--no-shell-to-solid-rbody`): the card's `NID` — the shell node — is the main
+node, the `NSID` set is the secondary group, `Mass` and every `J` cell are 0 so
+Radioss lumps the body from the nodes, and `ICoG` is **3**
+(`inirby.F`'s `ELSEIF(ICDG==3)` keeps `XG = X(main)`, so a MESHED shell node is
+not relocated to the computed centre of gravity — the reader default would move
+it). LS-DYNA names the substitute in the card's own Purpose sentence,
+Vol I R17 p.10-182: *"Nodal rigid bodies can perform the same function and may
+also be used."* THE COST is on p.10-183 — LS-DYNA lets the brick nodes *"move
+relative to each other in the fiber direction"* and an `/RBODY` cannot, so the
+fibre can no longer stretch. Refusals, by name: a shell node with no
+coordinates, an unresolved or empty `NSID`, and a set of more than nine nodes
+is converted but named (p.10-182: *"A shell node may be tied to up to nine
+brick nodes"*). The tied nodes are deliberately NOT registered in the writer's
+`rigid_nodes` set — that set means "re-point this node's constraints to a
+`/RBODY` main node `rbody_info` knows", and a tie has no LS-DYNA PART id, so
+registering them made `*NODE` TC/RC drop 12 of the dome's 132 stated
+constraints. Radioss applies the rigid body first and the redundant `/BCS`
+costs a starter `WARNING ID 312` with 0 ERRORs, which the per-card warning
+says. MEASURED on `examples-manual/constrained/shell2solid/
+constrained.shell_solid.dome.k` — **1 deck key on 1 emitted model**, the only
+carrier on any corpus here (7 cards × 5 fibre nodes, nt 4): NORMAL 48190 cycles
+(+0.27 % over the drop arm's 48060), external work 1.290e5 → **1689** against
+LS-DYNA's 1692.55 (**−0.21 %**), IE 0.6693 → **873.9** (−99.90 % → **+36.08 %**
+against 642.206), KE 1.290e5 → **806.4** (+12299.9 % → **−22.49 %** against
+1040.33); starter 0 ERROR / 9 WARNING (7 × ID 448, benign — the master is a
+meshed shell node by construction; 1 × ID 312, the 60 symmetry conditions;
+1 × ID 1084, the deck's own). The campaign row **stays `deviation`** — the
+bands are 10/10/5 and `ke` reads −22.5 %. This is a physics claim, not a fixed
+deck
+
+`*CONSTRAINED_GENERALIZED_WELD_BUTT` → one `/RBODY` per card with `Ifail = 1`
+(default ON, `--no-generalized-weld-butt`), **coincident node pairs only**:
+`FN = FT = SIGY·L·D/BETA` (`BETA` 0 → 1.0, the card's own Default row),
+`expN = expT = 2`, master = the pair's first node, secondary = the other.
+LS-DYNA's own model of this weld IS a nodal rigid body — *"When the failure
+time, tf, is reached the nodal rigid body becomes inactive"*, Vol I R17
+p.10-32 — and its brittle criterion `β√(σn² + 3(τn² + τt²)) ≥ σf` maps onto
+`rgbodv.F:267`'s `(FN/FNmax)^expN + (FT/FTmax)^expT ≥ 1` with `σ = F/(L·D)`.
+`FT` is `FNmax`, not `FNmax/√3`, because `rgbodv.F:249-256` takes the body's
+normal from the main→secondary GEOMETRY: on a coincident pair that is a ZERO
+vector, `FN` is identically 0 and the whole reaction lands in `FT` — numerically
+LS-DYNA's own `β·σn ≥ σf` for an axial weld, at the price of the normal/shear
+distinction (a weld failing in pure SHEAR fails √3 late). A NON-coincident pair
+is **refused by name** (tolerance `max(1e-6, 1e-9 × mesh diagonal)`): there the
+same vector is an arbitrary geometric offset unrelated to the weld normal `L`
+and `D` define, so any split would be invented — roster reach of the refusal,
+0 cards. A set that does not resolve to exactly two nodes is refused too
+(p.10-32: *"This requires 3 separate `*CONSTRAINED_GENERALIZED_WELD_BUTT`
+definitions, one for each nodal pair"*), and `EPSF`, `TFAIL`, `CID`, `FILTER`,
+`WINDOW`, `NPR` and `NPRT` are dropped and named. MEASURED on
+`examples-manual/constrained/weld/constrained.butt-weld.k` — **1 deck key on 1
+emitted model**, nt 4: NORMAL 2082 cycles (+0.63 % over the drop arm's 2069),
+IE 1.048e-6 → **1.149e4** (−100.00 % → **+4.70 %** against LS-DYNA's 10974.0),
+KE 4.699 → 4.966 (−30.79 % → −26.85 % against 6.78908). Radioss sets off the
+**same two welds** LS-DYNA's own `.messag` records (35 & 23 and 37 & 25): the
+criterion trips at t 1.269e-3 against LS-DYNA's own **1.26914e-3** and the
+bodies are SET OFF at t 1.272e-3; the starter echoes `NORMAL FORCE AT FAILURE
+5556.` / `SHEAR FORCE AT FAILURE 5556.` and the emitted `FNmax` 5555.556 is
+0.099 % below the `xl-force` 5561.04 that `.messag` reports at failure. The
+same deck with `Ifail` forced to 0 reads IE +152.87 %, so the failure model is
+the load-bearing half. The campaign row **stays `deviation`** on KE
+
 `*CONSTRAINED_NODAL_RIGID_BODY` → `/RBODY` (id = the `/RBODY` main node id, as on
 the `*MAT_RIGID` path; `NSID` blank = `PID`), in **all 326 option spellings** —
 `_SPC`, `_INERTIA`, `_OVERRIDE`, `_THERMAL`, `_TITLE` in any order, generated
