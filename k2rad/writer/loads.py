@@ -5876,8 +5876,6 @@ def _make_initial_velocity(state: ConversionState,
                      "does not use"
                                  if (iv.vxr or iv.vyr or iv.vzr) else ""))
         lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_set")
-        if not nids:
-            continue
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
@@ -5900,6 +5898,12 @@ def _make_initial_velocity(state: ConversionState,
                     "that id - velocity applied in the GLOBAL frame")
 
         # ── emit ────────────────────────────────────────────────────────────
+        if not nids:
+            # Every node this card named went to a momentum-averaged
+            # rigid body above (--mass-weighted-inivel); there is no
+            # group left to write. The lossy-field warnings above still
+            # ran, because what the card STATED is still worth saying.
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_grp_{grnod_id}", nids)
         if has_tra:
@@ -6121,6 +6125,13 @@ def _make_initial_velocity_generation(
             velocity_of=_gen_velocity_of)
         lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_gen")
         if not nids:
+            # Every node of the card went to a momentum-averaged body
+            # (--mass-weighted-inivel), so there is no group left for the
+            # /INIVEL/AXIS. The /FRAME/FIX above stays behind, unused: a
+            # frame is a standalone card (nothing requires it to be
+            # referenced) and it costs one id, which is cheaper than
+            # moving the frame emission below a decision that depends on
+            # the group this very call returns.
             continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
