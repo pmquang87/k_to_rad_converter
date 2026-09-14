@@ -7779,7 +7779,8 @@ class ConvertOptions:
     #   swap + Gapmin 0.1499 (Inacti 0)   NORMAL 131 cycles to t 0.05,
     #                       IE 6.934e5 (-94.4 %)
     #   the same with /IMPL/QSTAT/DTSCAL 1  IE 1.473e6 (-88.0 %)
-    #   the deformable-contact recipe's DTSCAL 0.05  IE -8.973e5, NEGATIVE
+    #   the recipe's DTSCAL 0.05, hand-set  NORMAL 131 cycles, IE -7.418e5,
+    #                                       NEGATIVE
     # So the flag buys a load path that is still 94 % short of the reference,
     # and the campaign VERDICT cannot move either way: bumper's LS-DYNA KE is
     # a structural zero and the benchmark short-circuits on it. It is a byte

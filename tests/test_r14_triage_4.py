@@ -1984,11 +1984,20 @@ class RigidSecondaryImplicitGateTests(unittest.TestCase):
         self.assertTrue(_has(self.result.warnings, "NO /INTER was emitted"))
 
     def test_the_drop_names_bumper_and_the_measured_divergence(self):
+        """Round 5 re-measured the arm this sentence reports and renamed the
+        flag it points at: the BARE swap still ERRORs at ``t = 3.0e-4``
+        (ISTOP −2), but the swap WITH the derived Gapmin reaches NORMAL
+        TERMINATION in 131 cycles — so the drop message now names
+        ``--implicit-rigid-secondary-swap`` instead of claiming that every
+        restoration arm diverges. The facts asserted here are the same ones;
+        the spellings are the new text's."""
         w = [x for x in self.result.warnings if "NO /INTER was emitted" in x][0]
         self.assertIn("IMPLICIT deck", w)
         self.assertIn("bumper.k", w)
-        self.assertIn("ISTOP = -2", w)
-        self.assertIn("nt 2 and nt 4", w)
+        self.assertIn("ISTOP -2", w)
+        self.assertIn("nt 2 AND nt 4", w)
+        self.assertIn("--implicit-rigid-secondary-swap", w)
+        self.assertIn("131 cycles", w)
 
     def test_the_remedy_states_the_solver_accepts_rigid_nodes(self):
         w = [x for x in self.result.warnings if "NO /INTER was emitted" in x][0]

@@ -5717,7 +5717,7 @@ AND nt 4, against the LS-DYNA reference IE 1.23131e7:
 | bare swap | **ERROR** at t = 3.0e-4 (ISTOP −2, MESSAGE ID 79) |
 | swap + derived `Gapmin` 0.1499, `Inacti` 0 | NORMAL, **131 cycles** to t = 0.05, IE **6.934e5** (−94.4 %) |
 | the same with `/IMPL/QSTAT/DTSCAL` 1 | IE 1.473e6 (−88.0 %) |
-| the deformable-contact recipe's `DTSCAL` 0.05 | IE **−8.973e5**, negative |
+| the recipe's `DTSCAL` 0.05, hand-set on the same deck | NORMAL, 131 cycles, IE **−7.418e5** — negative |
 
 So it buys a load path that is still 94 % short of the reference, and the
 campaign verdict cannot move either way — that deck's LS-DYNA KE is exactly 0,

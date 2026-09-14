@@ -732,8 +732,8 @@ def convert(
         cannot move either way — that deck's LS-DYNA KE is exactly 0, a
         structural zero the benchmark short-circuits on. The
         deformable-contact recipe is deliberately NOT widened to reach it: its
-        ``DTSCAL`` 0.05 drives the same deck's internal energy to −8.973e5,
-        negative.
+        ``DTSCAL`` 0.05, hand-set on the same converted deck, drives its
+        internal energy to −7.418e5 at the same 131 cycles — NEGATIVE.
     mass_weighted_inivel : bool
         Give a rigid body that an ``*INITIAL_VELOCITY`` / ``_NODE`` /
         ``_GENERATION`` card covers only PARTLY the momentum average Vol I R17

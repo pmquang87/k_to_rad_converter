@@ -723,8 +723,9 @@ def build_parser() -> argparse.ArgumentParser:
              "So it buys a load path that is still 94 %% short, and the "
              "campaign verdict cannot move: bumper's LS-DYNA KE is exactly 0. "
              "--deformable-contact-recipe is NOT widened to reach it -- its "
-             "DTSCAL 0.05 drives the same deck's internal energy to -8.973e5, "
-             "negative.",
+             "DTSCAL 0.05, hand-set on this converted deck, drives its "
+             "internal energy to -7.418e5 at the same 131 cycles -- "
+             "NEGATIVE.",
     )
     parser.add_argument(
         "--mass-weighted-inivel",

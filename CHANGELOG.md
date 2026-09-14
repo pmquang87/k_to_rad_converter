@@ -11,6 +11,53 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5, part B item B1 —
+  `--implicit-rigid-secondary-swap`: on an IMPLICIT deck, swap an all-rigid
+  SSID contact instead of dropping it. Default OFF; 0 movers by default, 1 deck
+  key on 1 emitted model with the flag (plus one Yaris giant, convert-only).**
+  On an EXPLICIT deck k2rad already rescues a `*CONTACT` whose SECONDARY (SSID)
+  side is wholly rigid by swapping the roles; on an implicit deck it drops the
+  interface, because round 4 measured every restoration arm diverging. **That
+  measurement was incomplete** — it never tried the swap together with the
+  derived `Gapmin`. Re-measured here on
+  `implicit/basic-examples/contact-i/bumper.k` at nt 4 AND nt 2 (identical on
+  both), against the LS-DYNA reference IE 1.23131e7:
+
+  | arm | result |
+  |---|---|
+  | shipped drop | NORMAL TERMINATION, 502 cycles, **IE 0** — a zero model |
+  | bare swap (`Gapmin` hand-set back to 0) | **ERROR** at t = 3.0e-4, ISTOP −2, MESSAGE ID 79 |
+  | swap + derived `Gapmin` 0.1499, `Inacti` 0 | NORMAL, **131 cycles** to t = 0.05, **IE 6.934e5** (−94.4 %) |
+  | the same with `/IMPL/QSTAT/DTSCAL` 1 | IE 1.473e6 (−88.0 %) |
+  | the recipe's `DTSCAL` 0.05, hand-set | NORMAL 131 cycles, IE **−7.418e5** — negative |
+
+  Starter 0 ERROR on both arms (1 → 2 WARNING, both ID 1084, the deck's own
+  `*MAT_ELASTIC` integration-point note). So the flag **restores a load path,
+  not the answer**, and the campaign VERDICT cannot move either way: that
+  deck's LS-DYNA KE is exactly 0 and `run_queue.build_benchmark` short-circuits
+  on a structural zero. That is why it is opt-in and why the PR does not claim
+  a fixed deck.
+  The flag is inseparable from the gap: `_rigid_secondary_plan` computes the
+  derivable `Gapmin` — through a new PURE `_derived_gapmin_value`, before any
+  resolver allocates an id — and REFUSES to swap when none can be derived (a
+  main surface that is not solid segments only), naming the refusal and the
+  measured reason. It reaches only the plain `/INTER/TYPE7` route: the
+  `SOFT=-7` sentinel derives its gap from the elements (`Igap 2`) and
+  `/INTER/TYPE25` has no `Gapmin` column, so both keep the drop and their
+  message says the flag does not reach them rather than pointing at a lever
+  that would do nothing (measured reach of an all-rigid secondary on either
+  route, over every corpus here: 0 interfaces). `--no-rigid-secondary-swap`
+  disarms it too — it is the same exchange.
+  `_recipe_active` and `deformable_deformable_inter_ids` are deliberately NOT
+  widened (the last row of the table is why), which also leaves the four
+  `E:/foxcore_data` `implicit_elevator-linkage` decks the recipe was validated
+  on untouched. Two retracted sentences: the drop's *"every restoration arm
+  measured on … diverges"* and *"with an explicit Gapmin of 0.14986 it reaches
+  t = 7.1e-3 and still fails"* are gone from every shipped text, regex-guarded,
+  and the round-4 test that pinned their spellings now pins the new ones.
+  `bumper` with the flag OFF is byte-identical to a pristine `76bc193`
+  checkout in both files.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5, part B item B3 —
   `--assumed-strain-isolid {24,none}`: LS-DYNA's assumed-strain ELFORM −1/−2
   off the locking hex they exist to replace. Default `none`; 0 movers by

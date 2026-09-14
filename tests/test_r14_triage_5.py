@@ -1350,5 +1350,161 @@ class AssumedStrainIsolidFlag(unittest.TestCase):
         self.assertIn("−5.87 / −5.23 / −6.33", text)
 
 
+# ── B1: --implicit-rigid-secondary-swap ──────────────────────────────────────
+
+def _implicit_rigid_ssid_deck(main_solid: bool = True) -> str:
+    """An IMPLICIT deck whose *CONTACT SSID side is a wholly RIGID part and
+    whose MSID side is deformable — ``bumper``'s shape, in miniature.
+
+    *main_solid* False makes the side that BECOMES the main surface a SHELL
+    part, so no Gapmin can be derived for it: the refusal arm.
+    """
+    nodes = "".join(
+        f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+        for i, (x, y, z) in enumerate(
+            [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+             (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10),
+             (0, 0, 20), (10, 0, 20), (10, 10, 20), (0, 10, 20),
+             (0, 0, 30), (10, 0, 30), (10, 10, 30), (0, 10, 30)], start=1))
+    rigid = ("*ELEMENT_SOLID\n" + _solid_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)
+             + "\n" if main_solid else
+             "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 3, 4) + "\n")
+    rigid_sec = ("*SECTION_SOLID\n" + _row(1, 1) + "\n" if main_solid else
+                 "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                 + _row(1.0, 1.0, 1.0, 1.0) + "\n")
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(0.05) + "\n"
+            "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+            "*NODE\n" + nodes
+            + rigid
+            + "*ELEMENT_SOLID\n"
+            + _solid_row(2, 2, 9, 10, 11, 12, 13, 14, 15, 16) + "\n"
+            + "*PART\nrigid platen\n" + _row(1, 1, 1) + "\n"
+            + "deformable block\n" + _row(2, 2, 2) + "\n"
+            + rigid_sec
+            + "*SECTION_SOLID\n" + _row(2, 1) + "\n"
+            + "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + _row(0, 7, 7) + "\n" + _row(0, 0, 0) + "\n"
+            + "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+            + "*CONTACT_SURFACE_TO_SURFACE\n"
+            + _row(1, 2, 3, 3) + "\n" + _row(0.2, 0.2) + "\n"
+            + "*END\n")
+
+
+class ImplicitRigidSecondarySwap(unittest.TestCase):
+    """B1 — on an IMPLICIT deck an all-rigid SSID contact is DROPPED;
+    ``--implicit-rigid-secondary-swap`` swaps it instead, with the derived
+    Gapmin the swap needs.
+
+    MEASURED on ``implicit/basic-examples/contact-i/bumper.k`` at nt 4 AND
+    nt 2 (identical on both), against the LS-DYNA reference IE 1.23131e7:
+
+    ==========================================  =========================
+    arm                                         result
+    ==========================================  =========================
+    shipped drop                                NORMAL 502 cycles, IE 0
+    bare swap (Gapmin hand-set back to 0)       ERROR at t = 3.0e-4
+    swap + derived Gapmin 0.1499, Inacti 0      NORMAL 131 cycles,
+                                                IE 6.934e5 (−94.4 %)
+    the same with /IMPL/QSTAT/DTSCAL 1          IE 1.473e6 (−88.0 %)
+    the recipe's DTSCAL 0.05, hand-set          IE −7.418e5, NEGATIVE
+    ==========================================  =========================
+
+    Starter: 0 ERROR on both arms (1 → 2 WARNING, both ID 1084, the deck's
+    own). The campaign VERDICT cannot move — bumper's LS-DYNA KE is exactly 0,
+    a structural zero the benchmark short-circuits on.
+    """
+
+    def test_the_default_is_still_the_drop(self):
+        res, starter, _e = _convert(_implicit_rigid_ssid_deck())
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertTrue(_has(res.warnings, "NO /INTER was emitted"),
+                        res.warnings)
+
+    def test_the_flag_emits_the_swapped_interface_with_a_derived_gapmin(self):
+        res, starter, _e = _convert(_implicit_rigid_ssid_deck(),
+                                    implicit_rigid_secondary_swap=True)
+        self.assertIn("/INTER/TYPE7/", starter)
+        self.assertTrue(_has(res.warnings, "the roles are SWAPPED instead"),
+                        res.warnings)
+        self.assertTrue(
+            _has(res.warnings, "IMPLIED the derived Gapmin"), res.warnings)
+        block = _block_after(starter, "/INTER/TYPE7/", 40)
+        i = next(j for j, ln in enumerate(block) if "Gapmin" in ln)
+        self.assertGreater(float(block[i + 1][40:60]), 0.0)
+
+    def test_the_flag_is_a_no_op_with_the_explicit_swap_turned_off(self):
+        """``--no-rigid-secondary-swap`` disarms it: it is the same exchange."""
+        _r, a, _e = _convert(_implicit_rigid_ssid_deck(),
+                             implicit_rigid_secondary_swap=True,
+                             rigid_secondary_swap=False)
+        self.assertNotIn("/INTER/TYPE7/", a)
+
+    def test_an_EXPLICIT_deck_is_untouched_by_the_flag(self):
+        deck = _implicit_rigid_ssid_deck().replace(
+            "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n", "")
+        _r, off, _e = _convert(deck)
+        _r2, on, _e2 = _convert(deck, implicit_rigid_secondary_swap=True)
+        self.assertIn("/INTER/TYPE7/", off)      # the explicit swap already
+        self.assertEqual(off, on)
+
+    def test_the_swap_is_REFUSED_when_no_gapmin_can_be_derived(self):
+        """The flag implies the derived Gapmin and refuses to swap without
+        one — the bare swap is measured to ERROR."""
+        res, starter, _e = _convert(_implicit_rigid_ssid_deck(main_solid=False),
+                                    implicit_rigid_secondary_swap=True)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertTrue(_has(res.warnings, "the swap was REFUSED"),
+                        res.warnings)
+        self.assertTrue(_has(res.warnings, "t = 3.0e-4"), res.warnings)
+
+    def test_the_flag_off_arm_is_byte_identical(self):
+        deck = _implicit_rigid_ssid_deck()
+        _r, a, ea = _convert(deck)
+        _r2, b, eb = _convert(deck, implicit_rigid_secondary_swap=False)
+        self.assertEqual(a, b)
+        self.assertEqual(ea, eb)
+
+    def test_the_deformable_contact_recipe_is_NOT_widened(self):
+        """``_recipe_active`` and the recipe's interface set must not change
+        with the flag — its DTSCAL 0.05 drives this class NEGATIVE."""
+        from k2rad.writer.contacts import (_recipe_active,
+                                           deformable_deformable_inter_ids)
+        deck = _implicit_rigid_ssid_deck()
+        for flag in (False, True):
+            with self.subTest(flag=flag):
+                st = _dispatch(deck)
+                st.options.implicit_rigid_secondary_swap = flag
+                st.options.deformable_contact_recipe = True
+                # the interface is rigid-vs-deformable, so it is not in the
+                # recipe's set and the recipe does not arm -- with the flag
+                # ON as well as off. That IS the claim: the flag creates a
+                # contact the recipe still does not reach.
+                self.assertEqual(sorted(deformable_deformable_inter_ids(st)),
+                                 [])
+                self.assertFalse(_recipe_active(st))
+
+    def test_the_drop_message_names_the_flag_only_where_it_can_reach(self):
+        """A named control must reach the branch it controls: the TYPE25 and
+        SOFT=-7 routes have no Gapmin cell, so neither is told to pass a flag
+        that would do nothing for them."""
+        from k2rad.writer.contacts import _implicit_rigid_secondary_note
+        st = _dispatch("*KEYWORD\n*END\n")
+        self.assertIn("Pass --implicit-rigid-secondary-swap",
+                      _implicit_rigid_secondary_note(st))
+        other = _implicit_rigid_secondary_note(st, gapmin_route=False)
+        self.assertIn("does NOT reach this interface", other)
+        self.assertNotIn("Pass --implicit-rigid-secondary-swap", other)
+
+    def test_the_retracted_every_arm_diverges_claim_is_gone(self):
+        retracted = ("every restoration arm measured on implicit",
+                     "EVERY arm that restores the load path diverges",
+                     "with an explicit Gapmin of 0.14986 it reaches")
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in retracted:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+
 if __name__ == "__main__":      # pragma: no cover
     unittest.main()
