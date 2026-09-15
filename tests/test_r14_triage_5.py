@@ -2031,19 +2031,24 @@ class RbodyProducerCountIsStatedOnce(unittest.TestCase):
             # fully prefixed number and swept the rest into a regex applied to
             # the EMPTY STRING, so four of the five were never checked -- and
             # three of them were stale at that very commit (#139).
-            cited = set()
-            for m in re.finditer(
-                    r"writer/rbody\.py:(\d+)((?:[^A-Za-z0-9]{0,16}:\d+)*)",
-                    text):
-                cited.add(int(m.group(1)))
-                cited |= {int(x) for x in re.findall(r":(\d+)", m.group(2))}
-            self.assertTrue(cited, f"{rel} cites no writer/rbody.py line")
-            for line in sorted(cited):
-                with self.subTest(file=rel, line=line):
-                    self.assertIn(line, adds,
-                                  f"{rel} cites writer/rbody.py:{line}, which "
-                                  f"is not a rbody_ids.add line (they are "
-                                  f"{sorted(adds)})")
+            # Every consumer spells the list as ONE comma run —
+            # ``writer/rbody.py:A, :B, :C, :D, :E`` — precisely so this can
+            # read all five. The #139 review round shipped a version that
+            # walked the run only where NO prose separated the numbers, and a
+            # mutation of the first continuation in ``writer/output.py`` (the
+            # one file whose citations were separated by a parenthesis) went
+            # straight through it. The assertion is EQUALITY, so a missing
+            # citation fails as loudly as a stale one.
+            runs = re.findall(
+                r"writer/rbody\.py:(\d+(?:, ?:\d+)*)", text)
+            self.assertTrue(runs, f"{rel} cites no writer/rbody.py line")
+            for run in runs:
+                cited = {int(x) for x in re.findall(r"\d+", run)}
+                with self.subTest(file=rel, run=run):
+                    self.assertEqual(
+                        cited, adds,
+                        f"{rel} cites writer/rbody.py:{run}; the real "
+                        f"rbody_ids.add lines are {sorted(adds)}")
 
 
 class ImplicitProbeRbodyReadsBothRegistries(unittest.TestCase):

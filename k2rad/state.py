@@ -8891,12 +8891,12 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791 *MAT_RIGID parts — which also covers *PART_INERTIA,
-    # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
-    # :1205 *CONSTRAINED_NODAL_RIGID_BODY; :1312 the implicit no-rigid-body
-    # probe; :1498 *CONSTRAINED_SHELL_TO_SOLID; :1651
-    # *CONSTRAINED_GENERALIZED_WELD_BUTT), i.e. six LS-DYNA sources funnelling
-    # through five writers. Round 5 added the last two; every consumer of this
+    # (writer/rbody.py:791, :1205, :1312, :1498, :1651, in that order:
+    # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
+    # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
+    # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
+    # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT),
+    # i.e. six LS-DYNA sources funnelling through five writers. Round 5 added the last two; every consumer of this
     # set was re-read then, which is what the #138 rule asks for.
     # rbody_info cannot stand in for it:
     # the probe body is not in rbody_info at all, a CNRB/part id collision

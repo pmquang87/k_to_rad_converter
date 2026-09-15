@@ -2114,13 +2114,14 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     use (convertrigids.cxx:766-772).
 
     ``state.rbody_ids`` is the set the FIVE Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:791
-    *MAT_RIGID parts (which is also where *PART_INERTIA, element-free CoG
-    masters and *CONSTRAINED_RIGID_BODIES merge masters come out, so four
-    LS-DYNA sources funnel through it), :1205 *CONSTRAINED_NODAL_RIGID_BODY,
-    :1312 the implicit no-rigid-body probe, :1498
-    *CONSTRAINED_SHELL_TO_SOLID and :1651
-    *CONSTRAINED_GENERALIZED_WELD_BUTT (both added in round 5). The two new
+    register into at the line that writes the card — writer/rbody.py:791, :1205, :1312, :1498, :1651,
+    in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
+    element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
+    out, so four LS-DYNA sources funnel through the first one),
+    *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
+    *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT (the
+    last two added in round 5). The citations are written as one comma run on
+    purpose: a guard can only re-measure a list it can read. The two new
     producers run in build_starter BEFORE this registry is walked, so their
     bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
