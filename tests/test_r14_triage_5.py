@@ -296,13 +296,21 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
                              "The full share was taken off 2 of them"))
 
     def test_an_element_free_weld_node_is_guarded_and_named(self):
-        """Subtracting there would leave MS = 0 and the engine divides by it
-        (``rcheckmass.F:126-135`` -> ERROR 1870)."""
+        """Subtracting there would leave MS = 0 and the engine divides by it.
+
+        The check that REACHES a TYPE4/8/13 spring is ``chkmsin.F:52-59``
+        (``NEGATIVE MASS ON NODE ID=``) with ``resol.F:5460``'s
+        ``CALL ARRET(2)``. ``rcheckmass.F``'s ERROR 1870 is NOT it: that whole
+        branch is gated on ``IGTYP==23`` (``:112``) with ``MTN==108``
+        (``:123``). The assertion below names the DISCRIMINATING substrings,
+        so the retracted wording cannot come back through it.
+        """
         result, starter, _e = _convert(_weld_deck(meshed=False))
         self.assertNotIn("/ADMAS", starter)
         self.assertTrue(_has(result.warnings,
                              "carry NO element mass of their own",
-                             "ERROR 1870", "[1, 11]"))
+                             "chkmsin.F:52-59", "resol.F:5460",
+                             "ERROR 1870 is NOT it", "[1, 11]"))
 
     def test_a_zero_density_part_does_not_satisfy_the_guard(self):
         """The screen is incidence AND rho > 0 — a node whose only element
@@ -1961,11 +1969,27 @@ class RbodyProducerCountIsStatedOnce(unittest.TestCase):
                   encoding="utf-8") as fh:
             return fh.read()
 
+    @staticmethod
+    def _add_lines(src: str):
+        """The lines that REGISTER, 1-based. A mention in a comment or a
+        docstring must not vote: the #139 review found the substring count one
+        comment away from being wrong."""
+        return [i + 1 for i, ln in enumerate(src.splitlines())
+                if ln.strip().startswith("state.rbody_ids.add")]
+
     def test_the_number_of_producers_is_what_the_module_actually_has(self):
-        src = self._rbody_src()
-        adds = [i + 1 for i, ln in enumerate(src.splitlines())
-                if "rbody_ids.add" in ln]
+        adds = self._add_lines(self._rbody_src())
         self.assertEqual(len(adds), 5, f"rbody_ids.add sites: {adds}")
+
+    def test_a_comment_mentioning_the_call_does_not_inflate_the_count(self):
+        """The substring form this test used to have counted any line that
+        merely NAMED ``rbody_ids.add``."""
+        src = self._rbody_src() + "\n# state.rbody_ids.add is called 5 times\n"
+        self.assertEqual(len(self._add_lines(src)), 5)
+        self.assertEqual(
+            len([i for i, ln in enumerate(src.splitlines())
+                 if "rbody_ids.add" in ln]), 6,
+            "the substring form must still see six, or this probe is moot")
 
     def test_every_producer_comment_numbers_itself_out_of_that_total(self):
         src = self._rbody_src()
@@ -1990,18 +2014,30 @@ class RbodyProducerCountIsStatedOnce(unittest.TestCase):
     def test_the_cited_registration_lines_are_the_real_ones(self):
         """A line citation is a measurement too. Each number the consumer texts
         quote must really be a ``rbody_ids.add`` line."""
-        src = self._rbody_src().splitlines()
-        adds = {i + 1 for i, ln in enumerate(src) if "rbody_ids.add" in ln}
+        adds = set(self._add_lines(self._rbody_src()))
         root = self._root()
+        # CHANGELOG.md is deliberately NOT in this list: it is history and
+        # carries line citations that were right at the commit they were
+        # written for (``writer/rbody.py:969``, a 2026-07 entry about the
+        # master node's added mass), the same reason the retracted-spelling
+        # guard excludes it.
         for rel in ("k2rad/writer/output.py", "k2rad/state.py",
                     "k2rad/handlers.py"):
             with open(os.path.join(root, rel.replace("/", os.sep)),
                       encoding="utf-8") as fh:
                 text = _collapse(fh.read())
-            cited = {int(m) for m in
-                     re.findall(r"writer/rbody\.py:(\d+)", text)}
-            cited |= {int(m) for m in re.findall(r"(?<=:)(\d{3,4})(?=[ ,)])",
-                                                 "")}
+            # A citation RUN is ``writer/rbody.py:791`` followed by bare
+            # ``:NNN`` continuations. The round-5 form read only the first,
+            # fully prefixed number and swept the rest into a regex applied to
+            # the EMPTY STRING, so four of the five were never checked -- and
+            # three of them were stale at that very commit (#139).
+            cited = set()
+            for m in re.finditer(
+                    r"writer/rbody\.py:(\d+)((?:[^A-Za-z0-9]{0,16}:\d+)*)",
+                    text):
+                cited.add(int(m.group(1)))
+                cited |= {int(x) for x in re.findall(r":(\d+)", m.group(2))}
+            self.assertTrue(cited, f"{rel} cites no writer/rbody.py line")
             for line in sorted(cited):
                 with self.subTest(file=rel, line=line):
                     self.assertIn(line, adds,
@@ -2175,11 +2211,47 @@ _RETRACTED_ROUND_5 = (
     "moves 20 keys / 17 models",
     "20 deck keys on 17 emitted models",
     "20 keys on 17 models",
+    # ── the #139 verification round's own corrections ────────────────────────
+    # An independently rebuilt coupon: at nz = 1 and TSSFAC 0.9 BOTH
+    # formulations blow up and both print NORMAL TERMINATION; at TSSFAC 0.3
+    # both converge. The "24 alone diverges, 17 is stable at 0.238246" half
+    # also contradicted the same warning's own 0.24820 for that point.
+    "is stable at 0.238246",
+    "the 24 arm DIVERGES",
+    # base-paired, twice, nt 4: 51762 cycles on BOTH arms, and the flag arm is
+    # the FASTER one in wall time (93.2/94.6 s against 106.2/107.2 s)
+    "at 5x the wall time",
+    "5x the wall",
+    # the engine prints 0.1017E-16 and 0.1353E+13, i.e. 1.017e-17 and 1.353e12
+    "1.017e-16",
+    "1.353e13",
+    # the converted cylinder_impact_B's ALE bricks are /MAT/VOID rho 1e-12, so
+    # the starter's own Iauto=2 answer is 3.528 -- measured, 0 ERROR
+    "four orders above the 1.0 emitted here",
+    # WHICH condition wins WAS measured after all, and the /BCS is LOST
+    "Radioss applies the rigid body first",
+    # mat_spring.belted-dummy states no *ELEMENT_MASS at all and emits no
+    # /ADMAS; its 15 token nodes are all rigid-body secondaries
+    "its spring end nodes already carry",
+    "spring end nodes already carry an",
+    # hm_read_admas.F has no sign check: keeping the deck's own /ADMAS
+    # positive is a k2rad policy, not a solver rule
+    "an /ADMAS must stay positive",
+    # taking the token off a degenerate node leaves m_own + m_admas > 0
+    "so removing it would drive the nodal mass negative",
+    # only the warnings raised inside lectur.F:5691-9094 are reprinted
+    "so prints every warning twice",
+    # 3 of the 6 are identical arm for arm; the OTHER four is the
+    # SINGLE_SURFACE count
+    "changes NOTHING on 4 of the 6 carriers",
+    # a paraphrase in quotation marks is not a quote
+    "the same material as the material that is being voided",
 )
 
 
 class Round5RetractedStatements(unittest.TestCase):
-    """Fourteen statements round 5 measured to be wrong, guarded as a family.
+    """Every statement rounds 5 and #139 measured to be wrong, guarded
+    as one family.
 
     The matcher is the one the round-4 figure guard established: adjacent
     string literals JOINED and every whitespace run collapsed, over every
@@ -2247,6 +2319,210 @@ class Round5RetractedStatements(unittest.TestCase):
         # the constant-step NO-GO, with the measurement that decided it
         self.assertIn("152 811", text)
         self.assertIn("1 888", text)
+
+
+class EveryParserOptionIsInTheREADME(unittest.TestCase):
+    """The half of the #139 flag-wiring finding that was not applied.
+
+    ``Round5FlagWiring`` asserts membership only for the flags already in its
+    own literal, so a FUTURE flag added to the parser with no README row and no
+    tuple entry ships green. This derives the list from the parser instead. A
+    ``--no-X`` pair counts as documented when EITHER spelling is in the README,
+    because the README names the one a user would type.
+    """
+
+    #: Known gaps, documented rather than hidden. Every one predates round 5.
+    _UNDOCUMENTED = {
+        "--help",
+        "--gapmin-factor", "--ground-spring-k", "--ground-springs",
+        "--soften-stfac", "--tet10-to-tet4",
+    }
+
+    def test_every_option_the_parser_knows_is_named_in_the_README(self):
+        from k2rad import cli
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            readme = fh.read()
+        opts = {s for a in cli.build_parser()._actions
+                for s in a.option_strings if s.startswith("--")}
+        self.assertGreater(len(opts), 40, "the parser lost its options")
+
+        def documented(opt: str) -> bool:
+            twin = ("--" + opt[5:]) if opt.startswith("--no-") \
+                else ("--no-" + opt[2:])
+            return opt in readme or twin in readme
+
+        missing = sorted(o for o in opts
+                         if o not in self._UNDOCUMENTED and not documented(o))
+        self.assertEqual(missing, [],
+                         "parser options with no README row: " + repr(missing))
+
+    def test_the_allow_list_has_no_stale_entry(self):
+        """An allow-list that outlives its gap is a lie of its own."""
+        from k2rad import cli
+        opts = {s for a in cli.build_parser()._actions
+                for s in a.option_strings if s.startswith("--")}
+        self.assertEqual(sorted(self._UNDOCUMENTED - opts), [],
+                         "the allow-list names an option the parser lost")
+
+
+# ── #139 verification round: four branches that had no probe ────────────────
+
+class SpringTokenExactZeroBoundary(unittest.TestCase):
+    """A1 — the ``mass - share > 0.0`` boundary the writer's own docstring
+    names.
+
+    ``_make_added_masses`` subtracts only while the remainder stays strictly
+    positive; at ``mass == share`` the node is DEGENERATE, keeps the deck's own
+    ``/ADMAS`` and takes the full share off on a negative card of its own. The
+    existing degenerate probe uses an ``/ADMAS`` fifty times BELOW the share,
+    so it pinned only the ``<`` side: relaxing the comparison to ``>=`` left
+    the whole suite green (5383 passed) in the #139 mutation pass, while the
+    mutant emitted a single ``/ADMAS`` of literally ``0.0`` and dropped the
+    compensation block altogether.
+    """
+
+    def test_an_admas_exactly_equal_to_the_share_is_degenerate(self):
+        _r, starter, _e = _convert(_weld_deck(admas=_SHARE))
+        self.assertEqual(_admas_cards(starter),
+                         {_SHARE: [1, 11], -_SHARE: [1, 11]})
+
+    def test_just_above_the_share_is_subtracted_instead(self):
+        """The other side of the same boundary, so the probe pins a POINT."""
+        _r, starter, _e = _convert(_weld_deck(admas=_SHARE * 1.02))
+        cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
+        self.assertEqual(sorted(cards), [round(_SHARE * 0.02, 12)], cards)
+
+
+class SpringTokenOrphanBranchIsProbed(unittest.TestCase):
+    """A1 — the fifth list of ``_warn_spring_token_mass``.
+
+    Since round 5 a spring node with no ``/ADMAS`` gets a NEGATIVE one, so
+    "nothing to subtract from" stopped being a terminal class: the only way
+    into ``orphan`` left is a node registered for the token that is not in
+    ``state.nodes`` at all. No deck reaches that — every producer registers at
+    the line that WRITES the ``/SPRING`` row and ``_register_spring_token_mass``
+    refuses a share ``<= 0`` — so the probe calls the writer directly, which is
+    what a defensive branch can be probed with.
+    """
+
+    def test_a_registered_node_outside_state_nodes_is_named_as_internal(self):
+        from k2rad.writer import loads as loads_writer
+        state = ConversionState()
+        state.spring_token_mass_by_node[4242] = _SHARE
+        loads_writer._warn_spring_token_mass(state, set(), [], [])
+        self.assertTrue(_has(state.warnings, "[4242]",
+                             "NOT in the converted model's node set",
+                             "k2rad-internal inconsistency"), state.warnings)
+
+    def test_a_node_the_model_does_have_never_reaches_that_branch(self):
+        """The control arm: the same share on a node that DOES exist is a
+        rigid-body case, never the internal one."""
+        from k2rad.writer import loads as loads_writer
+        state = ConversionState()
+        state.nodes[7] = (0.0, 0.0, 0.0)
+        state.spring_token_mass_by_node[7] = _SHARE
+        loads_writer._warn_spring_token_mass(state, {7}, [], [])
+        self.assertFalse(_has(state.warnings, "k2rad-internal inconsistency"),
+                         state.warnings)
+        self.assertTrue(_has(state.warnings,
+                             "SECONDARY nodes of a rigid body"),
+                        state.warnings)
+
+
+class ImplicitSwapNeedsADeformableMainSide(unittest.TestCase):
+    """B1 — the third precondition of the swap gate, which had no probe.
+
+    ``_rigid_secondary_plan`` needs an implicit deck, a wholly rigid SSID
+    **and a MSID side that still has a deformable node to swap onto**. Dropping
+    that last clause (``and main and (main - rigid_nodes)`` -> ``and main``)
+    left the whole suite green in the #139 mutation pass, while the mutant
+    built a rigid-vs-rigid swapped ``/INTER/TYPE7``.
+    """
+
+    def _both_rigid(self) -> str:
+        """The same implicit deck with the MSID side made rigid too."""
+        deck = _implicit_rigid_ssid_deck()
+        old = "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+        new = ("*MAT_RIGID\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+               + _row(0, 7, 7) + "\n" + _row(0, 0, 0) + "\n")
+        assert deck.count(old) == 1, "the fixture moved"
+        return deck.replace(old, new, 1)
+
+    def test_the_plan_refuses_the_swap_when_the_main_side_is_rigid_too(self):
+        """Straight at the gate: both sides rigid, both flags on."""
+        from k2rad.writer import contacts as contacts_writer
+        state = ConversionState()
+        state.is_implicit = True
+        state.options.implicit_rigid_secondary_swap = True
+        state.nodes.update({i: (float(i), 0.0, 0.0) for i in range(1, 5)})
+        state.node_sets[1] = ("ssid", [1, 2])
+        state.node_sets[2] = ("msid", [3, 4])
+        plan, _s, _m = contacts_writer._rigid_secondary_plan(
+            state, {1, 2, 3, 4}, 1, 4, 2, 4, gapmin_route=True)
+        self.assertEqual(plan, contacts_writer._RS_IMPLICIT)
+        plan2, _s2, _m2 = contacts_writer._rigid_secondary_plan(
+            state, {1, 2}, 1, 4, 2, 4, gapmin_route=True)
+        self.assertNotEqual(
+            plan2, contacts_writer._RS_IMPLICIT,
+            "the control arm: a DEFORMABLE main side must not be refused")
+
+    def test_the_conversion_drops_it_even_with_the_flag(self):
+        res, starter, _e = _convert(self._both_rigid(),
+                                    implicit_rigid_secondary_swap=True)
+        self.assertNotIn("/INTER/TYPE7", starter)
+
+    def test_the_deformable_arm_still_takes_the_swap(self):
+        """The control: with a DEFORMABLE main side the same flag swaps."""
+        _r, starter, _e = _convert(_implicit_rigid_ssid_deck(),
+                                   implicit_rigid_secondary_swap=True)
+        self.assertIn("/INTER/TYPE7", starter)
+
+
+class MassWeightedInivelWritesNoEmptyGroup(unittest.TestCase):
+    """B2 — commit 870c2c5's own guard, which had no probe.
+
+    When every node of an ``*INITIAL_VELOCITY*`` card went to a momentum-
+    averaged body there is nothing left to put in a ``/GRNOD``. Disarming the
+    guard (``if not nids: continue`` -> ``if False:``) left the whole suite
+    green in the #139 mutation pass, while the mutant emitted a fourth
+    ``/GRNOD/NODE`` with no members and wrote an ``/INIVEL`` on it.
+    """
+
+    @staticmethod
+    def _grnod_blocks(starter: str):
+        """{id: [member ids]} over every emitted /GRNOD/NODE."""
+        out = {}
+        lines = starter.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("/GRNOD/NODE/"):
+                gid = int(ln.rsplit("/", 1)[1])
+                nids, j = [], i + 2
+                while j < len(lines) and not lines[j].startswith(("/", "#")):
+                    nids += [int(v) for v in lines[j].split()]
+                    j += 1
+                out[gid] = nids
+        return out
+
+    def test_the_fully_covered_card_writes_no_empty_group(self):
+        _r, starter, _e = _convert(_mixed_inivel_deck(),
+                                   mass_weighted_inivel=True)
+        blocks = self._grnod_blocks(starter)
+        self.assertTrue(blocks, "no /GRNOD at all - the probe is moot")
+        for gid, nids in sorted(blocks.items()):
+            self.assertTrue(nids, f"/GRNOD/NODE/{gid} was emitted EMPTY")
+
+    def test_the_mixed_card_still_writes_the_group_it_needs(self):
+        """The control arm: a card with a leftover deformable node must keep
+        its /GRNOD, or the guard could equally have suppressed every group."""
+        _r, starter, _e = _convert(_mixed_inivel_deck(all_rigid=False),
+                                   mass_weighted_inivel=True)
+        blocks = self._grnod_blocks(starter)
+        for gid, nids in sorted(blocks.items()):
+            self.assertTrue(nids, f"/GRNOD/NODE/{gid} was emitted EMPTY")
+        self.assertTrue(any(nids == [5] for nids in blocks.values()),
+                        "the leftover deformable node lost its group: "
+                        + repr(blocks))
 
 
 if __name__ == "__main__":      # pragma: no cover
