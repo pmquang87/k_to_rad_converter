@@ -1508,9 +1508,24 @@ def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
 
     WHAT IS EMITTED INSTEAD: the collapsed eight-cell hexahedron
     ``n1 n2 n3 n3 | n4 n5 n6 n6`` — the two triangles with their last id
-    repeated, which is the spelling Vol I R17 p.19-124 gives
-    ``*ELEMENT_SOLID`` for a pentahedron and the one all 7417 R14-corpus
-    pentahedra use. Same coupon: ``TOTAL MASS`` 7.8500E-06, exact.
+    repeated, which is the bottom-triangle/top-triangle collapse this card's
+    own six-id ORDER implies (cells 1-3 one triangle, 4-6 the other). Same
+    coupon: ``TOTAL MASS`` 7.8500E-06, exact.
+
+    IT IS NOT THE SPELLING THE CORPUS ITSELF USES, and the round-4 sentence
+    that said so is retracted. The R14 corpus's own eight-field pentahedra
+    collapse the OTHER pair of cells: ``n1 n2 n3 n4 | n5 n5 n7 n7``, a quad
+    bottom face with the top face collapsed to a ridge. Measured by two
+    independent readers over the 375 deck files of
+    ``F:/dynaexamples_r14_ton-mm-s`` — one a plain fixed-column scanner, one
+    driving ``handlers.handle_element_solid`` itself — **all 7417 of them, with
+    no second spelling anywhere** (the per-file table re-sums to 7417; 2668 +
+    2668 on the two Yaris suspension decks, 584 + 79 on the other two Yaris
+    giants, 218 × 5 + 50 across the welding family, 278 in
+    ``4.3_General_Nonlinearity.k``'s ten-node-format block). Both forms are
+    valid degenerate hexes and the reader integrates either correctly; which
+    face collapses is a convention, and a SHORT card carries no cue about it
+    beyond its own node order, which is why the order-implied form is used.
 
     WHY NOT THE NATIVE SIX-CELL FORM, which the reader plainly offers:
     ``/PENTA6`` is accepted on a solid property ONLY at ``Isolid = 24``. The
@@ -1566,8 +1581,13 @@ def _warn_native_pentahedron(state: ConversionState, pid: int,
         f"PART {pid}: {count} solid element(s) are stored with SIX node ids "
         "(a short *ELEMENT_SOLID card, which is not an LS-DYNA spelling — Vol "
         "I R17 p.19-124 gives the card eight node columns) and are emitted as "
-        "the COLLAPSED /BRICK pentahedron n1 n2 n3 n3 n4 n5 n6 n6, the "
-        "spelling every one of the R14 corpus's 7417 pentahedra uses. The "
+        "the COLLAPSED /BRICK pentahedron n1 n2 n3 n3 n4 n5 n6 n6 - the "
+        "bottom-triangle/top-triangle collapse this card's own six-id order "
+        "implies. (The R14 corpus's own eight-field pentahedra collapse the "
+        "other cell pair, n1 n2 n3 n4 n5 n5 n7 n7 - all 7417 of them, measured "
+        "by two independent readers over 375 deck files. Both are valid "
+        "degenerate hexes; a short card carries no cue about which face was "
+        "meant beyond its node order.) The "
         "node ORDER is taken verbatim, so cells 1-3 must be one triangle and "
         "cells 4-6 the other, paired n1-n4, n2-n5, n3-n6. Writing the six ids "
         "into an eight-cell row by repeating the LAST node — what k2rad did "
@@ -2732,7 +2752,10 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "the wall time; ex_14_solid_elform_-1/-2 +313.9/+494.0 % -> "
         "+1373/+2014 %). --assumed-strain-isolid 24 writes the 24 arm on this "
         "section if you want it: 22 deck keys on 18 emitted models state "
-        "ELFORM -1/-2 and the flag moves 20 of them on 17 models. dyna2rad "
+        "ELFORM -1/-2 and the flag moves 19 of them on 16 models (the three "
+        "that do not move already land on Isolid 24 - the ex_12 pair through "
+        "*HOURGLASS IHQ 6, main_fsi.k through *CONTROL_HOURGLASS IHQ 6). "
+        "dyna2rad "
         "makes that same choice for -1 (convertprops.cxx:398-402: -1 -> 24 "
         "and 2/3 -> 18; -2 is not in its table and falls to the /DEF_SOLID "
         "default). Icpre cannot help - "
@@ -2745,7 +2768,14 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
         "0.2072-0.2074) it reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at "
         "1/2/4/8 elements through the depth, i.e. +19.7 % -> -28.8 %, while "
-        "Isolid 24 holds -2.9 % over the same sweep. Or restate the "
+        "Isolid 24 holds -2.9 % over the 2/4/8 points of that sweep. IT DOES "
+        "NOT HOLD AT 1 ELEMENT THROUGH THE DEPTH: Isolid 24 is UNDER-integrated "
+        "where 17 is fully integrated, so switching can introduce hourglass "
+        "modes the deck did not have - on that same coupon at nz = 1 the 24 arm "
+        "DIVERGES (energy error 99.9 % from cycle 39, mean tip displacement "
+        "+8.3e+07 mm at 1.7 % of the load ramp) and still prints NORMAL "
+        "TERMINATION after 109227 cycles, where Isolid 17 on the identical mesh "
+        "is stable at 0.238246. Or restate the "
         "section as ELFORM 2 if the locked answer is what you want. NOTE: the "
         "ELFORM siblings of these examples convert to ONE file "
         "(ex_03_solid_elform_{-1,2,18} share a byte-identical _0000.rad), so "

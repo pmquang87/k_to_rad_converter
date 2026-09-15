@@ -2597,8 +2597,9 @@ def _starter_section_registry():
         # id — on a deck without its keyword, so none can shift the id stream
         # of an existing deck (the #119 fixture rule).
         #   * nodal_force_group expands *SET_NODE and needs nothing else;
-        #   * rbody reads state.rbody_ids, which the three /RBODY producers
-        #     fill in build_starter BEFORE the registry is walked at all;
+        #   * rbody reads state.rbody_ids, which the five /RBODY producers
+        #     fill in build_starter BEFORE the registry is walked at all
+        #     (round 5's shell-to-solid and butt-weld bodies included);
         #   * bndout reads state.imp_motion_nodes, filled by the two
         #     imposed_motions sections far above — the same "registry filled at
         #     the write line, consumed by a later section" ordering the

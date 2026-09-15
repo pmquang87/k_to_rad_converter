@@ -784,7 +784,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # DEFAULTS block says 2, which the reader reads as "no AMS expansion over
         # this rigid body" — the documented route into starter ERROR 1066.
         lines += inertia_extra
-        # The #106 register, /RBODY producer 1 of 3 (*MAT_RIGID parts, and
+        # The #106 register, /RBODY producer 1 of 5 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the
         # *CONSTRAINED_RIGID_BODIES merge masters). *DATABASE_RBDOUT lists this
         # set; rbody_info cannot stand in for it (see _make_starter_th_rbody).
@@ -1202,7 +1202,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # of mass. With _INERTIA, ICoG=4 pins it at the stated centre of mass
         # instead and the mesh contribution is ignored.
         lines += inertia_extra
-        state.rbody_ids.add(ind_node)          # producer 2 of 3 (CNRB)
+        state.rbody_ids.add(ind_node)          # producer 2 of 5 (CNRB)
         lines += [
             f"/RBODY/{ind_node}",
             cnrb.title or f"CNRB_{cnrb.pid}",
@@ -1259,8 +1259,22 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     Validated on the W14 bogie (contact-free /IMPL/LINEAR static + modal
     stiffness export): without the probe the engine segfaults; with it the run
     terminates normally with 0 warnings and the results are unaffected.
+
+    THE GUARD READS BOTH REGISTRIES. ``rbody_info`` alone is not "does this
+    deck have a rigid body": producers 4 and 5 (``_make_shell_to_solid_rbodies``
+    and ``_make_generalized_weld_butt_rbodies``, both added in round 5) emit a
+    real ``/RBODY`` and deliberately do NOT populate that dict — they have no
+    LS-DYNA PART id to key it by. An implicit deck whose only rigid body were a
+    shell-to-solid tie or a butt weld would otherwise get the probe, its three
+    synthesized nodes and its ``/BCS`` on top of a body it already has, under a
+    warning claiming it has none. ``state.rbody_ids`` is the set every producer
+    registers into, so it is read here too. Reach today is 0 — both new
+    carriers are explicit decks — which is why this costs no deck a byte; it is
+    the #138 rule (grep every consumer of a flag you add a producer for)
+    applied before the case exists.
     """
-    if not state.is_implicit or rbody_info or not state.nodes:
+    if (not state.is_implicit or rbody_info or state.rbody_ids
+            or not state.nodes):
         return []
     xs = [nd.x for nd in state.nodes.values()]
     ys = [nd.y for nd in state.nodes.values()]
@@ -1292,7 +1306,7 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     ]
     for k in range(3):
         lines.append(f"{_i(n1 + k)}{_f(x0 + k * spacing)}{_f(y0)}{_f(z0)}")
-    # Producer 3 of 3. This one is NOT in rbody_info at all (it is only
+    # Producer 3 of 5. This one is NOT in rbody_info at all (it is only
     # appended to rbody_lines), so a deck whose only rigid body is the probe
     # would get no /TH/RBODY group if *DATABASE_RBDOUT read that dict instead.
     state.rbody_ids.add(n1)
@@ -1429,10 +1443,19 @@ def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
     deck's 132 stated ``*NODE`` TC/RC constraints were DROPPED** — the
     symmetry conditions on the tied nodes — under a warning that blames a
     ``*CONSTRAINED_RIGID_BODIES`` merge the deck does not contain. Leaving
-    them out keeps every constraint the deck states; Radioss then applies the
-    rigid body FIRST and the redundant ``/BCS`` costs a starter WARNING ID
-    312 and 0 ERRORs, which is what the per-card warning below says and what
-    was measured (60 conditions on the dome).
+    them out keeps every constraint the deck states; the redundant ``/BCS``
+    then costs a starter WARNING ID 312 at 0 ERRORs, which is what the per-card
+    warning below says and what was measured (60 conditions on the dome).
+
+    WHAT THAT CHOICE ALSO COSTS, named rather than left to be found: a tied
+    node is invisible to every other consumer of ``rigid_nodes``. The one that
+    matters is ``_warn_inivel_on_rigid_members`` (``writer/loads.py``) — an
+    ``*INITIAL_VELOCITY`` landing on a tied brick node is emitted with no
+    warning that ``inirby.F:1033-1048`` will overwrite it from the body's main
+    node at t = 0. Reach is 0 on every corpus here (the dome states no
+    ``*INITIAL_VELOCITY``), and the fix, if a carrier ever appears, is a
+    SEPARATE set the TC/RC re-point does not read — not registering these nodes
+    in ``rigid_nodes``, which is the thing measured to drop 12 constraints.
     """
     cards = state.shell_to_solids
     if not cards:
@@ -1511,11 +1534,14 @@ def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
                 + (" ..." if len(hits) > 10 else "")
                 + " also carry a /BCS from *NODE TC/RC or *BOUNDARY_SPC_*, so "
                   "the starter will raise WARNING ID 312 INCOMPATIBLE "
-                  "KINEMATIC CONDITIONS (BOUNDARY CONDITION / RIGID BODY). On "
-                  "the dome that is 60 conditions and 0 ERRORs: Radioss "
-                  "applies the rigid body first, so a symmetry constraint on "
-                  "a tied node is redundant, not contradictory. Check it if "
-                  "the constrained direction is NOT along the fibre.")
+                  "KINEMATIC CONDITIONS (BOUNDARY CONDITION / RIGID BODY). "
+                  "MEASURED on the dome: 60 flagged conditions and 0 ERRORs, "
+                  "NORMAL TERMINATION. WHICH of the two conditions Radioss "
+                  "keeps was NOT measured here - kinchk.F:944-951 raises 312 "
+                  "as a SUMMARY OF POSSIBLE INCOMPATIBLE KINEMATIC CONDITIONS "
+                  "and does not say who wins, and a /BCS the rigid body "
+                  "overrides is LOST rather than redundant. Check it if the "
+                  "constrained direction is NOT along the fibre.")
     return lines if emitted else []
 
 

@@ -761,8 +761,9 @@ def _solid_boundary_faces(state: ConversionState,
     That is a guard against an input shape, not a correction to a measured
     defect, and the round-5 census says how far the guard is from firing. A
     6-field ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling (Vol I R17
-    p.19-124), so there are ZERO short cards on the 901-file corpus and all
-    7417 roster pentahedra arrive on the 8-field collapsed spelling — which
+    p.19-124), so there are ZERO short cards on the 932-file corpus and all
+    7417 roster pentahedra arrive on an 8-field collapsed spelling
+    (``n1 n2 n3 n4 n5 n5 n7 n7``, every one of them) — which
     this function DOES facet, as the degenerate hex the reader also sees. The
     predictor was checked against the starter's own ``GAP MIN`` echo on 6 of
     6 carriers and matched all six, two of them parts that mix hexes with
@@ -1155,9 +1156,16 @@ _RIGID_SECONDARY_REMEDY_IMPLICIT_NOGAP = (
     "to ERROR at t = 3.0e-4 on implicit/basic-examples/contact-i/bumper.k "
     "(ISTOP -2, MESSAGE ID 79), where the swap WITH the derived gap reaches "
     "NORMAL TERMINATION. A swap without it would trade a zero model for a "
-    "dead run. State the gap yourself with --inter-gapmin <id>=VAL (or "
-    "Card-3 SST/MST on the *CONTACT) and the swap has what it needs; or swap "
-    "the sides in the .k."
+    "dead run. Swap the sides in the .k instead — put the DEFORMABLE part on "
+    "the SECONDARY (SSID) side and the rigid part on the MAIN (MSID) side — "
+    "and no swap is needed here at all. --inter-gapmin and Card-3 SST/MST do "
+    "NOT rescue this: both are applied in _make_interfaces to an interface "
+    "that already exists, long after _rigid_secondary_plan has refused to "
+    "create one, so stating a gap there reaches nothing. (The earlier text "
+    "advised exactly that and is retracted; letting a user-stated gap satisfy "
+    "the swap's precondition is a ROADMAP item, not a shipped behaviour.) "
+    "REACH: this branch is not hypothetical — it is what "
+    "implicit/Yaris%20Dynamic%20Roof%20Crush fires, measured."
 )
 
 #: Why an all-rigid secondary side is dropped when the user turned the rule off.
@@ -1527,18 +1535,26 @@ def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
 
 def _drop_interface(state: ConversionState, dropped: Dict[str, List[int]],
                     keyword: str, inter_id: int, cause: str,
-                    remedy: str) -> None:
+                    remedy: str, note: str = "") -> None:
     """Record an interface k2rad refused to emit: loud warning + accounting.
 
     ``dropped`` accumulates ``{keyword: [inter_id, ...]}`` for
     _note_dropped_interfaces, which turns it into the conversion log's
     "Recognized but not emitted" entry. Never drop an interface without going
-    through here."""
+    through here.
+
+    ``cause`` is a CLAUSE — it is followed by ``, so NO /INTER was emitted``, so
+    it must not end in punctuation. ``note`` is a whole sentence or three that
+    belong to this drop but not to that clause; it goes AFTER the clause closes.
+    Concatenating a note onto *cause* instead used to splice it into the middle
+    of its own sentence, which read ``... is the usual cause This is an IMPLICIT
+    deck ... not a restored answer., so NO /INTER was emitted``.
+    """
     kw = keyword or "CONTACT"
-    state.warn(
-        f"*{kw} {inter_id}: {cause}, so NO /INTER was emitted for this "
-        f"contact. {_DROP_CONSEQUENCE} {remedy}"
-    )
+    body = " ".join(part for part in (
+        f"*{kw} {inter_id}: {cause}, so NO /INTER was emitted for this contact.",
+        note.strip(), _DROP_CONSEQUENCE, remedy) if part)
+    state.warn(body)
     dropped.setdefault(kw, []).append(inter_id)
     # Also record it model-wide. /TH/INTER is built from the PARSED contact
     # records, so without this a dropped interface is still listed and the
@@ -1786,12 +1802,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         mast_surf = _resolve_contact_master(state, main_sid, main_styp, lines)
         if not slav_grnod:
             _drop_interface(state, dropped, c.keyword, c.inter_id,
-                            _describe_empty_secondary(diag, sec_sid, sec_styp, state)
-                            + (_implicit_rigid_secondary_note(state)
-                               if plan == _RS_IMPLICIT else ""),
+                            _describe_empty_secondary(diag, sec_sid, sec_styp, state),
                             _rigid_secondary_remedy(plan)
                             if diag.get("raw") else
-                            _secondary_side_remedy(sec_sid, sec_styp))
+                            _secondary_side_remedy(sec_sid, sec_styp),
+                            note=(_implicit_rigid_secondary_note(state)
+                                  if plan == _RS_IMPLICIT else ""))
             continue
         if not mast_surf:
             # After a SWAP the main side is the deck's SSID, so naming the id
@@ -4021,17 +4037,17 @@ def _make_type25_interfaces(state: ConversionState,
             if not grnod:
                 _drop_interface(state, dropped, kw, c.inter_id,
                                 _describe_empty_secondary(diag, sec25_sid,
-                                                          sec25_styp, state)
-                                + (_implicit_rigid_secondary_note(
-                                    state, gapmin_route=False)
-                                   if plan25 == _RS_IMPLICIT else ""),
+                                                          sec25_styp, state),
                                 _rigid_secondary_remedy(plan25) if diag.get("raw") else
                                 "REMEDY: for a node-to-surface contact SSID "
                                 "should name a *SET_NODE_LIST holding every "
                                 "node that may become exposed as elements "
                                 "erode (LS-DYNA Vol I p.11-24); a part or part "
                                 "set works too, but it must exist and carry "
-                                "elements.")
+                                "elements.",
+                                note=(_implicit_rigid_secondary_note(
+                                    state, gapmin_route=False)
+                                    if plan25 == _RS_IMPLICIT else ""))
                 continue
             surf2 = _type25_surface(state, c, main25_sid, main25_styp,
                                     f"contact_{c.inter_id}_main", lines)

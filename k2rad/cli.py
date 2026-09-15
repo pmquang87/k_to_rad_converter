@@ -290,7 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
              "1.0048E-04, LS-DYNA's own to every printed digit, at +1.21 %% cycles "
              "(2646 -> 2678, nt 4). It never writes a non-positive value on "
              "the deck's OWN /ADMAS, and it refuses a spring node that "
-             "carries no element mass of its own (MS = 0 is ERROR 1870).",
+             "carries no element mass of its own (MS <= 0 aborts the engine: "
+             "chkmsin.F:52-59, resol.F:5460).",
     )
     parser.add_argument(
         "--shell-to-solid-rbody",
@@ -697,7 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
              "physical stabilisation) instead, with LS-DYNA's own default "
              "QH 0.1 in the h cell when the deck states no hourglass card. "
              "ELFORM 2 and 3 are NOT touched. Reach: 22 deck keys on 18 "
-             "emitted models state ELFORM -1/-2; the flag moves 20 keys on "
+             "emitted models state ELFORM -1/-2; the flag moves 19 keys on "
              "17 models (the ex_12 pair is already at 24 through its own "
              "*HOURGLASS IHQ 6). OPT-IN because the arms disagree, measured "
              "against each deck's own LS-DYNA reference at nt 4 (17 -> 24): "

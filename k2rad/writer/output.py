@@ -2113,12 +2113,16 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     converted rigid body — the same shape /TH/RWALL, /TH/SECTIO and /TH/INTER
     use (convertrigids.cxx:766-772).
 
-    ``state.rbody_ids`` is the set the THREE Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:645
+    ``state.rbody_ids`` is the set the FIVE Radioss-side /RBODY emission sites
+    register into at the line that writes the card — writer/rbody.py:791
     *MAT_RIGID parts (which is also where *PART_INERTIA, element-free CoG
     masters and *CONSTRAINED_RIGID_BODIES merge masters come out, so four
-    LS-DYNA sources funnel through it), :1004 *CONSTRAINED_NODAL_RIGID_BODY and
-    :1086 the implicit no-rigid-body probe.
+    LS-DYNA sources funnel through it), :1205 *CONSTRAINED_NODAL_RIGID_BODY,
+    :1298 the implicit no-rigid-body probe, :1475
+    *CONSTRAINED_SHELL_TO_SOLID and :1612
+    *CONSTRAINED_GENERALIZED_WELD_BUTT (both added in round 5). The two new
+    producers run in build_starter BEFORE this registry is walked, so their
+    bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
     all (so a deck whose ONLY rigid body is the probe would get no group), a
     CNRB/part id collision drops one record from it, and a

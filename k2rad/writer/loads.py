@@ -6457,9 +6457,21 @@ def _spring_token_own_element_mass(state: ConversionState,
     bricks, /BEAM, /TRUSS) whose part resolves to a material with ``rho > 0``.
     Both halves are needed — a node whose only element sits on a zero-density
     part would pass a bare incidence screen and still land near zero mass,
-    which is the failure this guard exists to prevent
-    (``rcheckmass.F:126-135``: ``MS(N1)==ZERO`` on a spring node is ERROR 1870,
-    and the nodal acceleration divides by that mass).
+    which is the failure this guard exists to prevent: the nodal acceleration
+    divides by that mass, and a share subtracted from a node that has none of
+    its own leaves ``MS <= 0``.
+
+    WHICH CHECK ACTUALLY CATCHES IT. Not ``rcheckmass.F``'s ERROR 1870: that
+    whole mechanism sits inside ``IF(IGTYP==23)`` (``rcheckmass.F:112``) and,
+    for the ``MS`` test, ``IF(MTN == 108)`` (``:123``) — ``IERR2`` can only be
+    set at ``:154``/``:157`` inside that branch — so it covers /PROP/TYPE23
+    (SPR_MAT) on /MAT/LAW108 and inspects no /PROP/TYPE4, TYPE8 or TYPE13
+    spring, which is every producer this compensation registers. The detector
+    that does reach them is the ENGINE's: ``chkmsin.F:52-59`` walks every node,
+    prints ``NEGATIVE MASS ON NODE ID=`` for ``MS(N) < ZERO`` and counts it,
+    and ``resol.F:5460`` does ``IF(NEGMAS/=0) CALL ARRET(2)``. A share that
+    lands the node exactly ON zero is caught by neither — which is why the
+    screen refuses the node instead of relying on a downstream check.
 
     Scoped to *candidates* so the element sweep is one pass with a cheap set
     membership test; on a deck with no spring token at all it never runs.
@@ -6503,9 +6515,13 @@ def _spring_token_negative_admas(
     **2.0048E-04, +99.52 %**.
 
     ``hm_read_admas.F:161-171`` accepts a negative added mass — it raises only
-    ``ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)`` ``NEGATIVE ADDED MASS``, twice per
-    card because the reader runs both FLAG passes — and applies it
-    algebraically at ``:247-248`` (``MS(NOSYS) = MS(NOSYS) + AMAS``). There is
+    ``ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)`` ``NEGATIVE ADDED MASS``, ONCE per
+    card per read of the deck (the check at ``:164-165`` sits inside the
+    ``IF (FLAG == 0)`` block opened at ``:160``, and ``lectur.F:7967-7979``
+    calls ``HM_READ_ADMAS`` with ``FLAGG = 0`` and then ``FLAGG = 1``, so the
+    second pass never reaches it; it is the file's only ``MSGID=476``) — and
+    applies it algebraically at ``:247-248``
+    (``MS(NOSYS) = MS(NOSYS) + AMAS``). There is
     no sign check and no floor, and ``/ADMAS`` is read at ``lectur.F:7969``,
     before the rigid bodies and before ``INITIA``, so the model total
     (``initia.F:2250``) is exactly LS-DYNA's again.
@@ -6652,9 +6668,16 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                         for sh, nids in sorted(neg_groups.items()))
             + f", total {-total:g}, so the model's mass is LS-DYNA's. "
               "hm_read_admas.F:164-170 accepts a negative added mass (WARNING "
-              "ID 476 NEGATIVE ADDED MASS, raised TWICE per card because the "
-              "reader runs both FLAG passes) and adds it algebraically at "
-              ":247. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
+              "ID 476 NEGATIVE ADDED MASS, once per card per read of the deck "
+              "- the check is inside the IF (FLAG == 0) block at :160, so the "
+              "FLAGG=1 pass of lectur.F:7967-7979 never reaches it) and adds "
+              "it algebraically at :247. A starter that runs a SECOND domain "
+              "decomposition reads the deck again and so prints every warning "
+              "twice, this one included: on plates.nrbc the deck's own "
+              "pre-existing WARNING ID 1084 already appears twice on the arm "
+              "that has no negative /ADMAS at all, and the dome deck, which "
+              "runs no second decomposition, prints all nine of its warnings "
+              "once. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
               "TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is LS-DYNA's "
               "own total mass to every printed digit (+99.52 % -> 0.00 %), at "
               "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION. Pass "
@@ -6666,9 +6689,13 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             f"{_fmt_node_list(n for n, _s in guarded)} carry NO element mass "
             "of their own, so k2rad's token was LEFT in place - subtracting "
             "it would leave those nodes with ZERO mass and the engine divides "
-            "the nodal force by it (rcheckmass.F:126-135 answers ERROR 1870, "
-            "SPRING WITH TRANSLATIONAL STIFFNESS AND NULL MASS CONNECTED TO A "
-            "NODE WITH NO MASS). Their mass is HIGH by "
+            "the nodal force by it. The check that reaches a TYPE4/8/13 spring "
+            "is the engine's own: chkmsin.F:52-59 prints NEGATIVE MASS ON NODE "
+            "ID= and resol.F:5460 aborts on it (CALL ARRET(2)); the starter's "
+            "ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that whole "
+            "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
+            "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
+            "is HIGH by "
             f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
             "them an *ELEMENT_MASS if their dynamics matter. The screen is an "
             "element-INCIDENCE test (does the node sit on an emitted "

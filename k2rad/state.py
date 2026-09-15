@@ -7301,9 +7301,14 @@ class ConvertOptions:
     # writer/dbeam (0 roster carriers; LS-DYNA's own RO*A*L / RO*VOL is never
     # compensated) -- and gave the class with NO /ADMAS to subtract from a
     # NEGATIVE /ADMAS of its own. hm_read_admas.F:161-171 accepts one (ANCMSG
-    # MSGID 476 MSGWARNING NEGATIVE ADDED MASS, raised twice per card because
-    # the reader runs both FLAG passes; no sign check, no floor) and adds it
+    # MSGID 476 MSGWARNING NEGATIVE ADDED MASS, once per card per read of the
+    # deck -- the check at :164-165 is inside the IF (FLAG == 0) block at :160
+    # and lectur.F:7967-7979 calls the reader FLAGG=0 then FLAGG=1, so the
+    # second pass never reaches it; no sign check, no floor) and adds it
     # algebraically at :247-248, before the rigid bodies and before INITIA.
+    # A deck whose starter runs a SECOND domain decomposition reads the deck
+    # again and prints EVERY warning twice: on plates.nrbc the deck's own
+    # pre-existing WARNING 1084 doubles on the arm with no negative /ADMAS.
     # MEASURED on intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc at nt 4:
     # the starter's TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is
     # LS-DYNA's own total mass to every printed digit (+99.52 % -> 0.00 %), at
@@ -7312,7 +7317,11 @@ class ConvertOptions:
     #
     # Two classes stay UNCOMPENSATED, each for a measured reason:
     #   * a spring node with NO element mass of its own -- subtracting there
-    #     would leave MS = 0 and rcheckmass.F:126-135 answers ERROR 1870;
+    #     would leave MS <= 0, which the ENGINE aborts on (chkmsin.F:52-59
+    #     NEGATIVE MASS ON NODE ID=, resol.F:5460 CALL ARRET(2)). The starter's
+    #     ERROR 1870 is a different case: rcheckmass.F:112/:123 gate it on
+    #     IGTYP==23 and MTN==108, a /PROP/TYPE23 on /MAT/LAW108, which no
+    #     producer here emits;
     #   * a SECONDARY node of an ICoG = 4 rigid body -- inirby.F:265-266 ("CG
     #     OF THE MAIN NODE (MASS OF SECONDS IGNORED)") discards it anyway.
     #     Measured on mat_spring.belted-dummy (15 token nodes, 0.0108 total):
@@ -7744,9 +7753,15 @@ class ConvertOptions:
     # REACH: 22 deck keys on 18 emitted models state ELFORM -1 or -2 (two
     # independently written scanners over the 356-key R14 roster, one of them
     # *SECTION_SOLID_TITLE-aware -- the census that missed the _TITLE spelling
-    # read 21/17). With the flag ON it moves 20 keys on 17 models: the
-    # ex_12_solid_elform_{-1,-2} pair already lands on Isolid 24 through its
-    # own *HOURGLASS IHQ 6 overlay.
+    # read 21/17). With the flag ON it moves 19 keys on 16 models --
+    # re-measured at the branch head by converting all 22 carriers with the
+    # flag ON and OFF on the same tree. THREE do not move, all three because
+    # they already land on Isolid 24: the ex_12_solid_elform_{-1,-2} pair
+    # through its own *HOURGLASS IHQ 6 overlay, and
+    # icfd/.../Intermediate_fsi_flap/main_fsi.k through *CONTROL_HOURGLASS
+    # IHQ 6 / QH 0.1 -- the *CONTROL* route, which the earlier sentence
+    # attributed to the ex_12 pair alone. (20/17 was the shipped figure and
+    # is retracted.)
     #
     # WHY IT IS OPT-IN -- the arms disagree, measured against each deck's own
     # LS-DYNA reference at nt 4 (Isolid 17 -> 24):
@@ -7790,9 +7805,19 @@ class ConvertOptions:
     #                                       NEGATIVE
     # So the flag buys a load path that is still 94 % short of the reference,
     # and the campaign VERDICT cannot move either way: bumper's LS-DYNA KE is
-    # a structural zero and the benchmark short-circuits on it. It is a byte
-    # mover on 1 deck key / 1 emitted model (plus the Yaris Dynamic Roof
-    # Crush giant, convert-only) and only with the flag ON.
+    # a structural zero and the benchmark short-circuits on it.
+    #
+    # REACH, re-measured at the branch head by converting each carrier with the
+    # flag ON and with it OFF on the SAME tree: a byte mover on exactly
+    # 1 deck key / 1 emitted model (bumper), with the flag ON.
+    # implicit/Yaris%20Dynamic%20Roof%20Crush was previously named here as a
+    # second byte mover; it is NOT one. Both its .rad files are byte-identical
+    # in the two arms (_0000 f7bc05ddcfb44770, _0001 2d69acf6c8d5b369, 1518
+    # warnings each). Its all-rigid-SSID interface takes the swap's
+    # preconditions but no Gapmin can be derived for the main surface it would
+    # create, so the plan returns _RS_IMPLICIT_NOGAP and the drop stands -- the
+    # flag moves only that interface's WARNING TEXT there. It is the only
+    # measured carrier of that branch on any corpus here.
     #
     # _recipe_active and deformable_deformable_inter_ids are deliberately NOT
     # widened: the DTSCAL 0.05 arm above drives the internal energy negative,
@@ -8861,11 +8886,14 @@ class ConversionState:
     # from state.parts + state.shell_elems: a shell whose PID has no *PART
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
-    # Every /RBODY id this conversion wrote. THREE Radioss-side emission sites
-    # (writer/rbody.py:645 *MAT_RIGID parts — which also covers *PART_INERTIA,
+    # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
+    # (writer/rbody.py:791 *MAT_RIGID parts — which also covers *PART_INERTIA,
     # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
-    # :1004 *CONSTRAINED_NODAL_RIGID_BODY; :1086 the implicit no-rigid-body
-    # probe), i.e. four LS-DYNA sources funnelling through three writers.
+    # :1205 *CONSTRAINED_NODAL_RIGID_BODY; :1298 the implicit no-rigid-body
+    # probe; :1475 *CONSTRAINED_SHELL_TO_SOLID; :1612
+    # *CONSTRAINED_GENERALIZED_WELD_BUTT), i.e. six LS-DYNA sources funnelling
+    # through five writers. Round 5 added the last two; every consumer of this
+    # set was re-read then, which is what the #138 rule asks for.
     # rbody_info cannot stand in for it:
     # the probe body is not in rbody_info at all, a CNRB/part id collision
     # drops one record, and a merge aliases several dict keys onto one master.

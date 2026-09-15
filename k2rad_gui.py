@@ -479,7 +479,8 @@ class ConverterGUI:
                      "NEGATIVE /ADMAS (round 5). plates.nrbc TOTAL MASS 2.0048E-04 -> "
                      "1.0048E-04 = LS-DYNA's own, +1.21 % cycles. Never writes a "
                      "non-positive value on the deck's OWN /ADMAS; refuses a spring "
-                     "node with no element mass of its own (ERROR 1870)",
+                     "node with no element mass of its own (MS <= 0 aborts the "
+                     "engine: chkmsin.F:52-59, resol.F:5460)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
 
@@ -663,7 +664,7 @@ class ConverterGUI:
                      "-2.83 % improve, but ex_14 -1/-2 go +314/+494 % \u2192 "
                      "+1373/+2014 %, mainboltaexpl -72.7 \u2192 -81.4 % and "
                      "ex_27_-2_rigidwall loses the class's only match. Reach "
-                     "22 keys / 18 models, 20 / 17 with the flag",
+                     "22 keys / 18 models, 19 / 16 with the flag",
             variable=self.assumed_strain_isolid,
             onvalue="24", offvalue="none").grid(
                 row=29, column=0, columnspan=3, sticky="w", **pad)

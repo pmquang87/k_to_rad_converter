@@ -7803,11 +7803,13 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     (``convertrigids.cxx:766-772`` — ``selDatabaseRbdout.Count()``, then a full
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
-    lists ``state.rbody_ids``, which all THREE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:645,
-    :1004, :1086 — four LS-DYNA sources, since *MAT_RIGID parts, *PART_INERTIA,
-    element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters all
-    come out of the first one).
+    lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
+    sites register into at the line that writes the card (writer/rbody.py:791,
+    :1205, :1298, :1475, :1612 — six LS-DYNA sources, since *MAT_RIGID parts,
+    *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
+    masters all come out of the first one, and round 5 added the
+    *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT
+    producers).
     """
     state.db_rbdout_seen = True
     state.db_rbdout_dt = _handle_db_dt(block, state, "*DATABASE_RBDOUT")

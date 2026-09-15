@@ -461,8 +461,9 @@ def convert(
         ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to every
         figures, at +1.21 % cycles (2646 → 2678), both arms NORMAL. It never
         writes a non-positive value on the deck's OWN ``/ADMAS``, and it
-        refuses a spring node carrying no element mass of its own
-        (``rcheckmass.F:126-135`` = ERROR 1870) and a secondary node of an
+        refuses a spring node carrying no element mass of its own (subtracting
+        there leaves ``MS <= 0``, which the engine aborts on —
+        ``chkmsin.F:52-59`` + ``resol.F:5460``) and a secondary node of an
         ICoG = 4 rigid body (``inirby.F:265-266`` discards that mass anyway —
         measured inert on ``mat_spring.belted-dummy``).
     shell_to_solid_rbody : bool
@@ -696,9 +697,12 @@ def convert(
         is the quadratic hex, for which no Radioss ``Isolid`` exists.
         Reach: **22 deck keys on 18 emitted models** state ELFORM -1/-2 on the
         356-key R14 roster (two independently written scanners, one of them
-        ``*SECTION_SOLID_TITLE``-aware); the flag MOVES **20 keys on 17
-        models** — the ``ex_12_solid_elform_{-1,-2}`` pair already lands on 24
-        through its own ``*HOURGLASS`` IHQ 6 overlay. **Opt-in because the
+        ``*SECTION_SOLID_TITLE``-aware); the flag MOVES **19 keys on 16
+        models** — re-measured by converting all 22 carriers with the flag ON
+        and OFF on the same tree. THREE do not move, all three already on
+        ``Isolid`` 24: the ``ex_12_solid_elform_{-1,-2}`` pair through its
+        own ``*HOURGLASS`` IHQ 6 overlay, and ``main_fsi.k`` through
+        ``*CONTROL_HOURGLASS`` IHQ 6 / QH 0.1. **Opt-in because the
         arms disagree**, each measured against its own LS-DYNA reference at
         nt 4 (``Isolid`` 17 → 24): ``ex_03_solid_elform_-1_4x6x4_mesh``
         −21.72 % → −5.87 % and ``ex_04_solid_elform_-1`` −5.84 % → −2.83 %
