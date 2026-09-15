@@ -1605,7 +1605,7 @@ that decided it and the deck that would decide it next.
    (5, 6.25, 5) — but it is accepted ONLY on a property at `Isolid` 24
    (starter `ERROR ID : 3107`, measured on the coupon), so emitting it would
    couple an element's spelling to a hourglass flag. What would decide it: a
-   deck that actually carries short cards, of which the 901-file corpus has
+   deck that actually carries short cards, of which the 932-file corpus has
    none.
 
 6. **`*CONSTRAINED_TIED_NODES_FAILURE`** (1 682 cards on 2 keys) and the three
