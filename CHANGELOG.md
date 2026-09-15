@@ -11,6 +11,111 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
+  2026-09-15). Sixteen more shipped statements re-measured, three of them by
+  running the arm the claim was made about; four branches given the probe they
+  lacked; one guard that could not fail past its first assertion. No emitted
+  `.rad` byte changes on any corpus deck — proved by a 356-key SHA sweep FROM
+  `F:` against the campaign mirror, not asserted.**
+  - **The `nz = 1` divergence caveat is RETRACTED**, and the caveat it belonged
+    to now ships in BOTH arms of the assumed-strain warning — it was in the arm
+    that fires on the decks the flag does NOT move and absent from the one the
+    flag's own users see. On an independently rebuilt coupon of the same shape:
+    at the deck's own `TSSFAC` 0.9 **both** formulations blow up at one element
+    through the depth and **both** still print NORMAL TERMINATION (`Isolid` 17
+    energy error 99.9 %, IE 1.577e9 against 98.3 of external work, 9950 cycles;
+    the 24 arm's cycle table non-finite at 41 482 cycles), and at `TSSFAC` 0.3
+    both converge at 0.0 % and reproduce the shipped 1/2/4/8 sweep to better
+    than 0.7 %. The retracted claim also contradicted the same warning's own
+    0.24820 for that very point. The caveat is restated for what it is: a TIME
+    STEP cost.
+  - **“`mainboltaexpl` … at 5x the wall time” (5 sites) is RETRACTED** as an
+    unpaired timing claim. Base-paired, back to back, twice, at `nt` 4:
+    **51 762 cycles on BOTH arms** (ratio 1.000), engine `ELAPSED` 93.2 / 94.6 s
+    WITH the flag against 106.2 / 107.2 s without it — the flag arm is the
+    faster one. The energies reproduce exactly.
+  - **The CLIS `Iauto = 2` figure was for a deck the converter does not emit.**
+    Measured on `cylinder_impact_B` AS CONVERTED, with `Iauto` 2 / `Vref` 2e5
+    written into the emitted `/INTER/TYPE18` card by hand (`nt` 4, 0 ERROR):
+    `COMPUTED STIFFNESS VALUE` **3.528**, `USING DENSITY` 1.0000000000000E-12,
+    `USING MEAN AREA` 441.0 — **3.5x** the emitted 1.0, not four orders. The
+    28224 is the same formula once the `*INITIAL_VOLUME_FRACTION_GEOMETRY` fill
+    puts `rho` 8e-9 into those bricks, and that fill is not converted.
+  - **Two ALE energies were one decade out.** The warning read the engine's
+    `0.xxxxE+nn` column as `x.xxxE+nn`. Re-run at `nt` 4, `advection_B` prints
+    `0.1017E-16` and `0.1353E+13`: **1.017e-17 → 1.353e12**. Cycle counts and
+    the 99.9 % unchanged.
+  - **The degenerate-class refusal gave a false reason.** The engine's nodal
+    mass is `m_own + m_admas + token`, so removing the token leaves
+    `m_own + m_admas` — strictly POSITIVE on that class. Coupon with an
+    `*ELEMENT_MASS` exactly equal to the share: the negative card written by
+    hand reads `TOTAL MASS` 1.0000000000000E-04, 0 ERROR, NORMAL TERMINATION.
+    What the element-incidence screen really guards is `m_own = m_admas = 0`,
+    which lands EXACTLY on zero, where `chkmsin.F:53` tests `MS(N) < ZERO`
+    strictly (the same coupon with no element mass at all: `TOTAL MASS`
+    0.000000000000, 0 ERROR, NORMAL). “An `/ADMAS` must stay positive” is named
+    as a k2rad policy, not a solver rule.
+  - **WHICH kinematic condition wins WAS measurable, and the `/BCS` is LOST.**
+    Coupon: a 4-brick column tied to a shell strip, one fibre node carrying
+    `*NODE` TC=7/RC=7, `nt` 2. The tie arm and the same deck with the constraint
+    DELETED are numerically identical (IE 3613, engine energy error −97.9 %,
+    3252 cycles); moving that one `/BCS` onto the rigid body's MAIN node
+    reproduces the `*CONSTRAINED_NODAL_RIGID_BODY` twin exactly (IE 707.4,
+    −0.0 %, 2524 cycles) and `WARNING 312` disappears with it. Both arms:
+    0 ERRORs, NORMAL TERMINATION. So the cost is not only a lost constraint.
+  - **`mat_spring.belted-dummy`'s non-mover reason was wrong.** The deck states
+    **no `*ELEMENT_MASS` at all** (0 cards, 0 `*INCLUDE`) and emits **0
+    `/ADMAS`**; all 15 registered token nodes are rigid-body SECONDARIES, the
+    one class `_spring_token_negative_admas` skips by construction.
+  - **The corpus census had the right number under the wrong scope.** The three
+    corpora measure **925** `.k`/`.key`/`.dyn`/`.inc` files (`F:` 382,
+    `C:/openradioss_run` 507, `E:/foxcore_data` 36); **932** is those plus this
+    repo's own 7 fixtures — under which scope “zero short `*ELEMENT_SOLID`
+    cards” is false, because two of them are in
+    `tests/fixtures/wedge_short_card.k`, written for that item. All four sites
+    now state one scope and both halves. The 16 short
+    `*ELEMENT_SOLID_NURBS_PATCH` rows DO reproduce under the same 8-column
+    reading the short-card detector uses (605 data rows in that block), so that
+    figure stands.
+  - **Smaller corrections.** The `WARNING 476` doubling is scoped to the
+    warnings raised inside `lectur.F:5691-9094` (`IDDLEVEL = 1` at `:9047-9048`,
+    `GOTO 100` at `:9094`), and `KINCHK` is called at `:10568`, so `WARNING 312`
+    does not double · the `/RBODY` `J`-cell ADDITIVITY is re-cited to
+    `inirby.F:166-168` + `:331-339` (`hm_read_rbody.F:276-279` is only where the
+    cells are read), 6 sites · three of the five `writer/rbody.py` registration
+    citations were stale — `:1298`/`:1475`/`:1612` against the measured
+    1312/1498/1651 — because the commit that wrote them added lines above them
+    in the same commit · the partly-rigid remedy's headline now re-sums (3 of
+    the 6 identical arm for arm; the other four is the `SINGLE_SURFACE` count) ·
+    the `*INITIAL_VOID` sentence no longer presents a paraphrase inside
+    quotation marks · the `SOFT=-7` drop prints no implicit note (only TYPE25's
+    does) and a press-fit `*CONTACT_*_INTERFERENCE` is the one case where the
+    implicit swap would ship without the derived `Gapmin` (reach 0, flag default
+    OFF) — both now stated in the docstrings that claimed otherwise · the A2/A3
+    opt-outs are NOT byte-identical to a pre-round-5 conversion (the four-line
+    SKIPPED block disappears; measured, no solver card different) and the README
+    says so, beside A1's opt-out, which IS byte-identical.
+  - **Four branches with no probe, each proved effective by mutation on a
+    throwaway worktree, whole suite per mutation.** A1's exact-zero boundary
+    (`mass - share > 0.0` → `>= 0.0` left 5383 passed / 4912 subtests green
+    while the mutant emitted an `/ADMAS` of literally 0.0); B1's deformable-MSID
+    precondition (the mutant built a rigid-vs-rigid swapped `/INTER/TYPE7`);
+    B2's own empty-`/GRNOD` guard from `870c2c5` (the mutant emitted a fourth
+    `/GRNOD/NODE` with no members); and the unreachable `orphan` branch of
+    `_warn_spring_token_mass`, which now says what it actually catches. Each
+    probe ships with its control arm.
+  - **A guard that could not fail past its first assertion.**
+    `test_the_cited_registration_lines_are_the_real_ones` collected citations
+    with a regex matching only the first, fully prefixed number and applied its
+    compensating second regex to the literal EMPTY STRING — so the set it
+    checked was `{791}` on every run, while three of the four continuations were
+    stale at that very commit. It now reads the whole citation run. The producer
+    count is taken from lines whose stripped form STARTS with
+    `state.rbody_ids.add`, so a comment naming the call cannot vote. A new class
+    derives the flag list from `cli.build_parser()._actions` instead of a
+    hand-maintained literal, with a six-entry documented allow-list that is
+    itself tested for staleness.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5 — VERIFICATION ROUND. Six shipped
   statements re-measured and corrected, two reviewer findings REFUTED by
   measurement, one guard widened, and four new tests for branches the round's
@@ -268,7 +373,9 @@ Prior history (before this changelog was introduced) is summarized in the
   at **nz = 1** on that coupon the 24 arm DIVERGES (energy error 99.9 % from
   cycle 39, mean tip displacement +8.3e+07 mm at 1.7 % of the load ramp) and
   still prints NORMAL TERMINATION after 109 227 cycles, where 17 on the
-  identical mesh is stable at 0.238246;
+  identical mesh is stable at 0.238246 — **both halves RETRACTED in the #139
+  review round, which reproduced neither on an independently rebuilt coupon:
+  at `TSSFAC` 0.9 both arms blow up, at 0.3 both converge**;
   (2) its `24 / 18 / 14` figures were a PRE-round-4 column — re-run here on
   `ex_03` at nt 4 and identically at nt 2, they are **−5.87 / −5.23 / −6.33 %**
   (internal energy 163900 / 165000 / 163100 against the LS-DYNA reference
@@ -338,9 +445,12 @@ Prior history (before this changelog was introduced) is summarized in the
     not have — and **12 of the dome's 132 stated `*NODE` TC/RC constraints
     were silently DROPPED**, under a warning blaming a
     `*CONSTRAINED_RIGID_BODIES` merge the deck does not contain. They are left
-    out instead; Radioss applies the rigid body first and the redundant `/BCS`
-    costs `WARNING ID 312` with 0 ERRORs, which is what the per-card warning
-    says and what the run shows.
+    out instead; the `/BCS` costs `WARNING ID 312` with 0 ERRORs, which is
+    what the per-card warning says and what the run shows. *(This entry also
+    said Radioss applies the rigid body first, so the `/BCS` is redundant.
+    RETRACTED in the #139 review round: on a purpose-built coupon the `/BCS`
+    is LOST, and that costs IE 707.4 → 3613 and an engine energy error of
+    −0.0 % → −97.9 %, at 0 ERRORs and NORMAL TERMINATION on both arms.)*
 
   - **A3 `*CONSTRAINED_GENERALIZED_WELD_BUTT` → one `/RBODY` with `Ifail = 1`
     per card, COINCIDENT pairs only (`--no-generalized-weld-butt`).**
@@ -3035,6 +3145,8 @@ Prior history (before this changelog was introduced) is summarized in the
   - **The partly-rigid-secondary warning's remedy.** It pointed at the obvious
     fix; the obvious fix is measured and mostly useless. Keeping the rigid
     nodes in the secondary group changes NOTHING on 4 of the 6 carriers (`pipe`,
+    **— re-counted in the #139 review round: it is 3 of the 6; the OTHER four
+    is the `SINGLE_SURFACE` count in the same sentence —**
     `doorbeam`, `mat_spring.belted-dummy` identical; 4 of the 6 are
     `SINGLE_SURFACE` contacts whose segments are on the main side already), and
     where it changes something it disagrees with itself — `transducer` IE
