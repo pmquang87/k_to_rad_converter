@@ -52,6 +52,7 @@ from .common import (
 from .loads import (
     SpringDof, _curve_slope_at_origin, _emit_funct, _emit_prop_type8,
     _emit_prop_type13, _plastic_to_total_disp, _pts_slope_at_origin,
+    _register_spring_token_mass,
 )
 
 __all__ = [
@@ -1035,6 +1036,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 mass = rho * sec.ca
         else:
             mass = rho * sec.vol
+        # RO*CA / RO*VOL is LS-DYNA's OWN connector mass — never compensated.
+        # Only the fallback below invents one, so the flag travels with it.
+        token_mass = mass <= 0.0
         if mass <= 0.0:
             if not wrong_section:
                 state.warn(f"{label}: RO={rho:g} x "
@@ -1109,6 +1113,15 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 # never-written element is starter ERROR 69.
                 state.dbeam_spring_eids.add(e.eid)
                 state.spring_elem_ids.add(e.eid)   # producer 3 of 9
+                # The token branch only. With Ileng=1 the property Mass is per
+                # UNIT LENGTH and rinit3.F's UMASS is mass x L_element, so the
+                # share this element really puts on its ends scales with its
+                # own length; n3 is the orientation node and gets nothing.
+                if token_mass:
+                    _register_spring_token_mass(
+                        state, e.n1, e.n2,
+                        _TOKEN_MASS * (_beam_length(state, e) if ileng
+                                       else 1.0))
                 # /PRELOAD/AXIAL property gate (rinit3.F:1627-1690): only
                 # CASE(4,13) with a non-zero axial fct_ID1 AND H in 1..7 is
                 # accepted; a /PROP/TYPE8 connector is ERROR 3053 outright and

@@ -72,6 +72,15 @@ FIXTURES = [
     "rigid_contact",
     "tied_weld",
     "implicit_qstat",
+    # The round-5 pentahedron pair: the SAME 10 mm block meshed as two wedges,
+    # once on a SHORT six-node *ELEMENT_SOLID card and once on the eight-column
+    # collapsed spelling. Their /BRICK blocks must come out as identical text,
+    # which is what pins writer/mesh._brick_row's collapsed form; the short card
+    # used to be padded with its last node and read back at HALF the block's
+    # mass (starter TOTAL MASS 3.9250E-06 against the exact 7.8500E-06). See
+    # tests/test_r14_triage_5.py::ShortCardSolidIsNotPaddedWithItsLastNode.
+    "wedge_short_card",
+    "wedge_collapsed_card",
 ]
 
 UPDATE = os.environ.get("UPDATE_GOLDENS") == "1"
@@ -153,6 +162,43 @@ class GoldenFileTests(unittest.TestCase):
 
     def test_implicit_qstat(self):
         self._check("implicit_qstat")
+
+    def test_wedge_short_card(self):
+        self._check("wedge_short_card")
+
+    def test_wedge_collapsed_card(self):
+        self._check("wedge_collapsed_card")
+
+    def test_the_two_wedge_spellings_emit_the_SAME_brick_block(self):
+        """The whole point of the pair: a pentahedron written on a short
+        six-node ``*ELEMENT_SOLID`` card and the same one written on the
+        eight-column collapsed card must reach the starter as the same
+        element. Compared as TEXT, so a future change to either path that
+        moves only one of them fails here rather than in a solver run.
+
+        MEASURED with OpenRadioss 20260520 at nt 4 on the emitted decks:
+        starter TOTAL MASS 7.8500E-06 (= 1000 mm3 x 7.85e-9, exact) on BOTH,
+        0 ERROR / 0 WARNING, NORMAL TERMINATION. The same short card padded
+        with its last node — what k2rad emitted before 2026-09 — reads
+        3.9250E-06, half the block, also at 0 ERROR / 0 WARNING.
+        """
+        def brick_block(stem: str) -> str:
+            with tempfile.TemporaryDirectory() as tmp:
+                starter, _ = _convert_fixture(stem, tmp)
+            out, keep = [], False
+            for line in _normalize(starter, "").split("\n"):
+                if line.startswith("/BRICK/"):
+                    keep = True
+                elif keep and line.startswith("#"):
+                    break
+                if keep:
+                    out.append(line)
+            return "\n".join(out)
+
+        short = brick_block("wedge_short_card")
+        self.assertIn("/BRICK/1", short)
+        self.assertEqual(len(short.split("\n")), 3)      # header + 2 elements
+        self.assertEqual(short, brick_block("wedge_collapsed_card"))
 
     def test_determinism_second_run_matches_golden(self):
         # Convert every fixture a SECOND time (fresh temp dirs) and confirm the

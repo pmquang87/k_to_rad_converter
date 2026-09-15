@@ -100,6 +100,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          arclength_riks: bool = False,
                          discrete_offset: bool = True,
                          spring_token_mass_compensation: bool = True,
+                         shell_to_solid_rbody: bool = True,
+                         generalized_weld_butt: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -109,6 +111,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          zero_t0_sentinel: bool = True,
                          node_tc_rc_bcs: bool = True,
                          default_hourglass: bool = True,
+                         assumed_strain_isolid: str = "none",
+                         implicit_rigid_secondary_swap: bool = False,
+                         mass_weighted_inivel: bool = False,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
@@ -225,6 +230,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["spring_token_mass_compensation"] = bool(
         spring_token_mass_compensation)
 
+    kwargs["shell_to_solid_rbody"] = bool(shell_to_solid_rbody)
+
+    kwargs["generalized_weld_butt"] = bool(generalized_weld_butt)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -247,6 +256,21 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["node_tc_rc_bcs"] = bool(node_tc_rc_bcs)
 
     kwargs["default_hourglass"] = bool(default_hourglass)
+
+    # A radio pair in the GUI, a {24, none} choice on the CLI -- and nothing
+    # else may reach ConvertOptions, whose __post_init__ refuses any other
+    # value rather than writing it into /PROP/SOLID verbatim.
+    asi = str(assumed_strain_isolid).strip() or "none"
+    if asi not in ("24", "none"):
+        raise ValueError(
+            "assumed_strain_isolid must be '24' or 'none' (got "
+            f"{assumed_strain_isolid!r})")
+    kwargs["assumed_strain_isolid"] = asi
+
+    kwargs["implicit_rigid_secondary_swap"] = bool(
+        implicit_rigid_secondary_swap)
+
+    kwargs["mass_weighted_inivel"] = bool(mass_weighted_inivel)
 
     kwargs["write_restart"] = bool(write_restart)
 
@@ -334,6 +358,8 @@ class ConverterGUI:
         self.arclength_riks = tk.BooleanVar(value=False)
         self.discrete_offset = tk.BooleanVar(value=True)
         self.spring_token_mass_comp = tk.BooleanVar(value=True)
+        self.shell_to_solid_rbody = tk.BooleanVar(value=True)
+        self.generalized_weld_butt = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -342,6 +368,9 @@ class ConverterGUI:
         self.zero_t0_sentinel = tk.BooleanVar(value=True)
         self.node_tc_rc_bcs = tk.BooleanVar(value=True)
         self.default_hourglass = tk.BooleanVar(value=True)
+        self.assumed_strain_isolid = tk.StringVar(value="none")
+        self.implicit_rigid_secondary_swap = tk.BooleanVar(value=False)
+        self.mass_weighted_inivel = tk.BooleanVar(value=False)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
@@ -444,12 +473,37 @@ class ConverterGUI:
                 row=22, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="Subtract k2rad's artificial spring mass (1e-4 per /PROP/TYPE4, "
-                     "half on each end node per element) from those nodes' /ADMAS — ON. "
-                     "Inert on its own; it is what makes the OFFSET fix exact. Never "
-                     "writes a non-positive /ADMAS",
+            io, text="Remove k2rad's artificial spring mass (1e-4 per spring /PROP, "
+                     "half on each end node per element) from those nodes again — ON. "
+                     "Subtracted from an /ADMAS the deck states, else taken off with a "
+                     "NEGATIVE /ADMAS (round 5). plates.nrbc TOTAL MASS 2.0048E-04 -> "
+                     "1.0048E-04 = LS-DYNA's own, +1.21 % cycles. Never writes a "
+                     "non-positive value on the deck's OWN /ADMAS; refuses a spring "
+                     "node with no element mass of its own (MS <= 0 aborts the "
+                     "engine: chkmsin.F:52-59, resol.F:5460)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_SHELL_TO_SOLID → one /RBODY per card (shell "
+                     "node = main, NSID set = secondary, Mass 0, ICoG 3) — ON. "
+                     "LS-DYNA names the substitute itself (Vol I R17 p.10-182). "
+                     "Cost: the brick fibre can no longer stretch. dome: "
+                     "EXT-WORK 1689 vs 1692.55 (−0.21 %), IE 0.6693 → 873.9 "
+                     "(−99.90 % → +36.08 %), KE 1.290e5 → 806.4 "
+                     "(+12299.9 % → −22.49 %)",
+            variable=self.shell_to_solid_rbody).grid(
+                row=27, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_GENERALIZED_WELD_BUTT → one /RBODY with "
+                     "Ifail=1, FN = FT = SIGY·L·D/BETA — ON, coincident pairs "
+                     "only. LS-DYNA's own model of the weld IS a nodal rigid "
+                     "body (p.10-32). butt-weld: NORMAL 2082 cycles, IE −100 % "
+                     "→ +4.70 %, the right two welds off at t 1.272e-3 vs "
+                     "1.26914e-3. EPSF/TFAIL/CID dropped and named",
+            variable=self.generalized_weld_butt).grid(
+                row=28, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="All-rigid SSID contacts: swap the roles instead of losing the "
@@ -602,6 +656,40 @@ class ConverterGUI:
             variable=self.default_hourglass).grid(
                 row=13, column=3, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="ELFORM -1/-2 (assumed-strain hex) \u2192 Isolid 24 instead of "
+                     "17 \u2014 OFF. 17 IS the locking ELFORM-2 element -1/-2 exist "
+                     "to replace (p.41-104 Remark 13). Opt-in because the arms "
+                     "disagree: ex_03 -21.72 % \u2192 -5.87 % and ex_04 -5.84 % \u2192 "
+                     "-2.83 % improve, but ex_14 -1/-2 go +314/+494 % \u2192 "
+                     "+1373/+2014 %, mainboltaexpl -72.7 \u2192 -81.4 % and "
+                     "ex_27_-2_rigidwall loses the class's only match. Reach "
+                     "22 keys / 18 models, 19 / 16 with the flag",
+            variable=self.assumed_strain_isolid,
+            onvalue="24", offvalue="none").grid(
+                row=29, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT deck: swap an all-rigid SSID contact instead of "
+                     "dropping it \u2014 OFF. Implies the derived Gapmin and refuses "
+                     "to swap without one. bumper (nt 2 and 4): the drop is a "
+                     "NORMAL zero model (IE 0 vs 1.23131e7), the bare swap "
+                     "ERRORs at t 3.0e-4, swap + Gapmin 0.1499 reaches NORMAL "
+                     "131 cycles at IE 6.934e5 (-94.4 %). The verdict cannot "
+                     "move \u2014 that deck's LS-DYNA KE is exactly 0",
+            variable=self.implicit_rigid_secondary_swap).grid(
+                row=30, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*INITIAL_VELOCITY on a PARTLY covered rigid body: write "
+                     "the momentum average (p.28-129 Remark 3) on the /RBODY "
+                     "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
+                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %); the "
+                     "residual is the body's own lumped rotary inertia. One "
+                     "carrier with a reference exists, hence opt-in",
+            variable=self.mass_weighted_inivel).grid(
+                row=31, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -716,7 +804,7 @@ class ConverterGUI:
         ttk.Label(fc, text="OFF by default; a warning names the starter-derived GAP MIN either way. "
                            "Gapmin = factor × the smallest main-surface segment side (ceiling 0.5 ×). "
                            "twobar: the starter's own gap is +1151 % vs its LS reference, 0.005 is -5.6 % — "
-                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 13 of the class's "
+                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 8 of the class's "
                            "15 R14-roster interfaces are unmeasured.",
                   foreground="gray").grid(row=22, column=1, columnspan=2, sticky="w", padx=6)
 
@@ -841,6 +929,8 @@ class ConverterGUI:
                 arclength_riks=self.arclength_riks.get(),
                 discrete_offset=self.discrete_offset.get(),
                 spring_token_mass_compensation=self.spring_token_mass_comp.get(),
+                shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
+                generalized_weld_butt=self.generalized_weld_butt.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -850,6 +940,10 @@ class ConverterGUI:
                 zero_t0_sentinel=self.zero_t0_sentinel.get(),
                 node_tc_rc_bcs=self.node_tc_rc_bcs.get(),
                 default_hourglass=self.default_hourglass.get(),
+                assumed_strain_isolid=self.assumed_strain_isolid.get(),
+                implicit_rigid_secondary_swap=(
+                    self.implicit_rigid_secondary_swap.get()),
+                mass_weighted_inivel=self.mass_weighted_inivel.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
@@ -970,6 +1064,12 @@ class ConverterGUI:
         if not kwargs.get("spring_token_mass_compensation", True):
             bits.append("spring token mass left on the nodes "
                         "(--no-spring-token-mass-compensation)")
+        if not kwargs.get("shell_to_solid_rbody", True):
+            bits.append("*CONSTRAINED_SHELL_TO_SOLID dropped "
+                        "(--no-shell-to-solid-rbody)")
+        if not kwargs.get("generalized_weld_butt", True):
+            bits.append("*CONSTRAINED_GENERALIZED_WELD_BUTT dropped "
+                        "(--no-generalized-weld-butt)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")
@@ -992,6 +1092,17 @@ class ConverterGUI:
         if not kwargs.get("default_hourglass", True):
             bits.append("defaulted 1-point solids left at Isolid 17 with no "
                         "hourglass control (--no-default-hourglass)")
+        if kwargs.get("assumed_strain_isolid", "none") != "none":
+            bits.append("ELFORM -1/-2 on Isolid "
+                        f"{kwargs['assumed_strain_isolid']} "
+                        "(--assumed-strain-isolid "
+                        f"{kwargs['assumed_strain_isolid']})")
+        if kwargs.get("implicit_rigid_secondary_swap"):
+            bits.append("implicit all-rigid-SSID contacts SWAPPED with the "
+                        "derived Gapmin (--implicit-rigid-secondary-swap)")
+        if kwargs.get("mass_weighted_inivel"):
+            bits.append("partly covered rigid bodies get the momentum-average "
+                        "initial velocity (--mass-weighted-inivel)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

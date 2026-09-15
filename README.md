@@ -318,12 +318,67 @@ COMPENSATED. LS-DYNA discrete elements are massless (nodal mass comes from
 `*ELEMENT_MASS`), but `hm_read_prop04.F:136-142` refuses a property
 `MASS <= 1e-15` with ERROR 229, so k2rad writes `1e-4` — and `rinit3.F:1926`
 (`EMS = HALF*UMASS`) with `:1937-1939` (`MSR(1..3,I) = EMS(I)`) puts HALF of it
-on EACH end node, PER ELEMENT. That invented mass is now SUBTRACTED from those
+on EACH end node, PER ELEMENT. That invented mass is SUBTRACTED from those
 nodes' `/ADMAS`, per node, splitting one `/ADMAS` group into several when its
-members carry different spring counts. It never writes a non-positive
-`/ADMAS`: a node whose own mass is at or below the token share keeps the deck's
-value and the numbers are named, and a node with no `/ADMAS` at all can only be
-warned about. `--no-spring-token-mass-compensation` restores the pre-round-4
+members carry different spring counts. It never writes a non-positive value on
+the deck's own `/ADMAS`: a node whose own mass is at or below the token share
+keeps the stated value.
+
+**Round 5 closed the classes a subtraction cannot reach** and extended the
+registry to the three producers that invent a token and never declared one —
+`*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` with failure
+forces (the `(stiff weld tie)` `/PROP/TYPE13`, 4 deck keys on 4 emitted
+models), and the `mass <= 0` fallbacks of the `*MAT_SPOTWELD` beam connector
+and of the discrete-beam writer (0 roster carriers; LS-DYNA's own `RO·A·L` /
+`RO·VOL` is never compensated). A node with no `/ADMAS` to subtract from now
+gets the token taken off with a **negative `/ADMAS/0`** of its own:
+`hm_read_admas.F:161-171` accepts one — `ANCMSG(MSGID=476, MSGWARNING)`
+`NEGATIVE ADDED MASS`, raised once per card per read of the deck (the check at
+`:164-165` sits inside the `IF (FLAG == 0)` block opened at `:160`, and
+`lectur.F:7967-7979` calls the reader with `FLAGG = 0` and then `FLAGG = 1`, so
+the second pass never reaches it), no sign check and no floor — and adds it
+algebraically at `:247-248`,
+before the rigid bodies and before `INITIA`. Measured on
+`intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k` (nt 4): the starter's
+`TOTAL MASS` goes **2.0048E-04 → 1.0048E-04**, which is LS-DYNA's own total
+mass to every printed digit (+99.52 % → 0.00 %), at **+1.21 % cycles**
+(2646 → 2678),
+both arms NORMAL. **It is a MASS claim, not an energy claim** — that deck's
+channels are dominated by post-rupture oscillation and stay `deviation` in
+every arm (IE −18.90 % → +23.64 %, KE +161.35 % → +61.93 % against LS's
+5869.61 / 3449.03 at t 1.99882E-03; the weld ruptures at t 3.130E-04 against
+3.033E-04 before). Two classes are still NOT compensated, each for a measured
+reason: a spring node with **no element mass of its own** (subtracting there
+would leave `MS <= 0`, which the ENGINE aborts on — `chkmsin.F:52-59` prints
+`NEGATIVE MASS ON NODE ID=` and `resol.F:5460` does `CALL ARRET(2)`; the
+starter's ERROR 1870 is a different case, gated on `IGTYP==23` with `MTN==108`
+at `rcheckmass.F:112`/`:123`, i.e. a `/PROP/TYPE23` on `/MAT/LAW108`, which no
+producer here emits), and a
+**secondary node of an ICoG = 4 rigid body**, where `inirby.F:265-266`
+discards the secondaries' mass entirely — measured on
+`mat_spring.belted-dummy` (15 token nodes, 0.0108 total), whose starter
+`TOTAL MASS` is `0.3356681850251` with the token, with the token floored to
+1e-12, with a −0.0108 `/ADMAS` and with a +0.0108 one, and whose full 110032-
+cycle run is bit-identical in every arm.
+**Measured reach of the whole item: 7 deck keys on 7 emitted models** — the
+four weld-tie decks, the two Yaris suspension giants (convert-only), and
+`nvh/example-06-07/6.7.spring.psd.k`, a `*ELEMENT_DISCRETE` → `/PROP/TYPE4`
+carrier the round-4 producer reaches (verified against a pristine `76bc193`
+checkout, converting from `F:`). That deck is inert on both sides — OR IE
+2.281e-21 and KE 0 against an LS reference of 2e-20 / 0.0 — so it moves no
+verdict and proves nothing about the rule. `mat_spring.belted-dummy` is NOT a
+mover (`899bc35412d8f730` on both trees), and the reason round 5 first gave
+for that was itself wrong. RE-MEASURED: the deck states **no
+`*ELEMENT_MASS` at all** (0 cards, 0 `*INCLUDE`) and its emitted `_0000.rad`
+carries **0 `/ADMAS`**, so round 4's positive subtraction reaches nothing
+there. All **15** registered token nodes
+(`[1, 129, 235, 479, 545, 611, 689, 767, 873, 983, 1203, 1423, 1505, 1587,
+1675]`) are SECONDARY nodes of rigid bodies — the one class
+`_spring_token_negative_admas` skips by construction, inert under `ICoG 4`
+(`inirby.F:265-266`) and UNMEASURED on `ICoG 1/2/3`, exactly as the runtime
+warning says. The deck emits that RIGID sentence and no other A1 class line.
+
+`--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885
 roster decks: `ex_17_spring_elform_0` IE +0.0074 % / KE +0.039 % and
 `ex_18_spring_elform_0` +0.0064 % / −0.015 % against their own LS-DYNA
@@ -2545,6 +2600,86 @@ failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
 `/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
 exponents are warned)
+`*CONSTRAINED_SHELL_TO_SOLID` → one `/RBODY` per card (default ON,
+`--no-shell-to-solid-rbody`): the card's `NID` — the shell node — is the main
+node, the `NSID` set is the secondary group, `Mass` and every `J` cell are 0 so
+Radioss lumps the body from the nodes, and `ICoG` is **3**
+(`inirby.F`'s `ELSEIF(ICDG==3)` keeps `XG = X(main)`, so a MESHED shell node is
+not relocated to the computed centre of gravity — the reader default would move
+it). LS-DYNA names the substitute in the card's own Purpose sentence,
+Vol I R17 p.10-182: *"Nodal rigid bodies can perform the same function and may
+also be used."* THE COST is on p.10-183 — LS-DYNA lets the brick nodes *"move
+relative to each other in the fiber direction"* and an `/RBODY` cannot, so the
+fibre can no longer stretch. Refusals, by name: a shell node with no
+coordinates, an unresolved or empty `NSID`, and a set of more than nine nodes
+is converted but named (p.10-182: *"A shell node may be tied to up to nine
+brick nodes"*). The tied nodes are deliberately NOT registered in the writer's
+`rigid_nodes` set — that set means "re-point this node's constraints to a
+`/RBODY` main node `rbody_info` knows", and a tie has no LS-DYNA PART id, so
+registering them made `*NODE` TC/RC drop 12 of the dome's 132 stated
+constraints. A `/BCS` on a tied node costs a starter `WARNING ID 312` with 0
+ERRORs, which the per-card warning says — and the `/BCS` is **LOST, not
+redundant**. MEASURED on a purpose-built coupon (a 4-brick column tied to a
+shell strip, one fibre node carrying `*NODE` TC=7/RC=7, nt 2): the tie arm
+and the same deck with that constraint DELETED are numerically identical (IE
+3613, engine energy error −97.9 %, 3252 cycles), while moving that one
+`/BCS` onto the rigid body's MAIN node reproduces the
+`*CONSTRAINED_NODAL_RIGID_BODY` twin exactly (IE 707.4, −0.0 %, 2524 cycles)
+and `WARNING 312` disappears with it. Both arms print 0 ERRORs and NORMAL
+TERMINATION. *(Round 5 published the opposite reading — that the constraint
+is merely redundant — without measuring it; that half is retracted. On the
+dome itself the same 60 conditions cost only −0.5 % of energy error, so the
+range is wide.)* MEASURED on `examples-manual/constrained/shell2solid/
+constrained.shell_solid.dome.k` — **1 deck key on 1 emitted model**, the only
+carrier on any corpus here (7 cards × 5 fibre nodes, nt 4): NORMAL 48190 cycles
+(+0.27 % over the drop arm's 48060), external work 1.290e5 → **1689** against
+LS-DYNA's 1692.55 (**−0.21 %**), IE 0.6693 → **873.9** (−99.90 % → **+36.08 %**
+against 642.206), KE 1.290e5 → **806.4** (+12299.9 % → **−22.49 %** against
+1040.33); starter 0 ERROR / 9 WARNING (7 × ID 448, benign — the master is a
+meshed shell node by construction; 1 × ID 312, the 60 symmetry conditions;
+1 × ID 1084, the deck's own). The campaign row **stays `deviation`** — the
+bands are 10/10/5 and `ke` reads −22.5 %. This is a physics claim, not a fixed
+deck. `--no-shell-to-solid-rbody` goes back to dropping the keyword, but the
+emitted file is **not** byte-identical to a pre-round-5 conversion: the
+keyword is now REGISTERED and routed through `note_recognized_not_emitted`,
+so the four-line `# -- SKIPPED (unsupported) keywords --` block disappears
+(measured: exactly 4 removed lines on the dome, no solver card different).
+`--no-generalized-weld-butt` has the same 4-line shape on the butt-weld deck.
+`--no-spring-token-mass-compensation` *is* byte-identical to master
+(`plates.nrbc` `_0000.rad` md5 `4145e75441f17696627bcc23aaceda21` on both)
+
+`*CONSTRAINED_GENERALIZED_WELD_BUTT` → one `/RBODY` per card with `Ifail = 1`
+(default ON, `--no-generalized-weld-butt`), **coincident node pairs only**:
+`FN = FT = SIGY·L·D/BETA` (`BETA` 0 → 1.0, the card's own Default row),
+`expN = expT = 2`, master = the pair's first node, secondary = the other.
+LS-DYNA's own model of this weld IS a nodal rigid body — *"When the failure
+time, tf, is reached the nodal rigid body becomes inactive"*, Vol I R17
+p.10-32 — and its brittle criterion `β√(σn² + 3(τn² + τt²)) ≥ σf` maps onto
+`rgbodv.F:267`'s `(FN/FNmax)^expN + (FT/FTmax)^expT ≥ 1` with `σ = F/(L·D)`.
+`FT` is `FNmax`, not `FNmax/√3`, because `rgbodv.F:249-256` takes the body's
+normal from the main→secondary GEOMETRY: on a coincident pair that is a ZERO
+vector, `FN` is identically 0 and the whole reaction lands in `FT` — numerically
+LS-DYNA's own `β·σn ≥ σf` for an axial weld, at the price of the normal/shear
+distinction (a weld failing in pure SHEAR fails √3 late). A NON-coincident pair
+is **refused by name** (tolerance `max(1e-6, 1e-9 × mesh diagonal)`): there the
+same vector is an arbitrary geometric offset unrelated to the weld normal `L`
+and `D` define, so any split would be invented — roster reach of the refusal,
+0 cards. A set that does not resolve to exactly two nodes is refused too
+(p.10-32: *"This requires 3 separate `*CONSTRAINED_GENERALIZED_WELD_BUTT`
+definitions, one for each nodal pair"*), and `EPSF`, `TFAIL`, `CID`, `FILTER`,
+`WINDOW`, `NPR` and `NPRT` are dropped and named. MEASURED on
+`examples-manual/constrained/weld/constrained.butt-weld.k` — **1 deck key on 1
+emitted model**, nt 4: NORMAL 2082 cycles (+0.63 % over the drop arm's 2069),
+IE 1.048e-6 → **1.149e4** (−100.00 % → **+4.70 %** against LS-DYNA's 10974.0),
+KE 4.699 → 4.966 (−30.79 % → −26.85 % against 6.78908). Radioss sets off the
+**same two welds** LS-DYNA's own `.messag` records (35 & 23 and 37 & 25): the
+criterion trips at t 1.269e-3 against LS-DYNA's own **1.26914e-3** and the
+bodies are SET OFF at t 1.272e-3; the starter echoes `NORMAL FORCE AT FAILURE
+5556.` / `SHEAR FORCE AT FAILURE 5556.` and the emitted `FNmax` 5555.556 is
+0.099 % below the `xl-force` 5561.04 that `.messag` reports at failure. The
+same deck with `Ifail` forced to 0 reads IE +152.87 %, so the failure model is
+the load-bearing half. The campaign row **stays `deviation`** on KE
+
 `*CONSTRAINED_NODAL_RIGID_BODY` → `/RBODY` (id = the `/RBODY` main node id, as on
 the `*MAT_RIGID` path; `NSID` blank = `PID`), in **all 326 option spellings** —
 `_SPC`, `_INERTIA`, `_OVERRIDE`, `_THERMAL`, `_TITLE` in any order, generated
@@ -2920,12 +3055,21 @@ place
 `*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
 `*SECTION_SOLID` ELFORM **5/6/7** (1-point ALE / Eulerian / Eulerian
 ambient) → `Iale=0`, i.e. a LAGRANGIAN element, and NAMED as such. They are
-deliberately not mapped: `hm_read_prop14.F:264-267` refuses `Iale != 0` on
-any `Isolid` but 0, 1 or 2 (ERROR 131 + 608 — 9 starter errors on `taylor_B`,
-4 on `advection_B`), and with `Isolid` 1 the remap was MEASURED destructive
-(`taylor_B` from IE +5.1 % / KE +4.9 % against its LS-DYNA reference to a
-99.9 % energy error at 198 220 cycles; `channel_A` from −98.9 % / −25.6 % to
-−100 % / −94.3 %). A real ALE conversion also needs an `/ALE/GRID`
+deliberately not mapped, and round 5 corrected WHY. `hm_read_prop14.F:264-267`
+does refuse `Iale != 0` on any `Isolid` but 0, 1 or 2 — but that gate never
+fires on this route, because the `Isolid` these sections emit is 1:
+`advection_B` converts and runs at **0 ERROR / 0 WARNING with `Iale` 1 AND
+with `Iale` 2** (`sgrtails.F:920-926` passes). What the remap costs is the
+ANSWER. On `advection_B` the shipped Lagrangian arm reaches NORMAL in 6 571
+cycles at KE 6.000e7 against its reference's 6.00000e7 (energy error −0.0 %),
+while the `Iale` 2 arm reaches NORMAL in 7 195 cycles with internal energy
+blowing up 1.017e-17 → 1.353e12 and the energy error at **99.9 %** — and its
+`SUM EPSP` going 10.0 → 0.0 is NOT a failure but the expected Eulerian answer
+(the tracer leaves a 3 000 mm FIXED domain at 1e5 mm/s in 0.05 s). On the other
+two carriers `Isolid` 1 + the remap is destructive: `taylor_B` from IE +5.1 % /
+KE +4.9 % against its LS-DYNA reference to a 99.9 % energy error at 198 220
+cycles; `channel_A` from −98.9 % / −25.6 % to −100 % / −94.3 %. dyna2rad makes
+the same Lagrangian choice — there is no `Iale` anywhere in its tree. A real ALE conversion also needs an `/ALE/GRID`
 formulation, an ALE-capable material and the inflow/void boundaries the
 ELFORM cell does not state. They DO take the 1-point hourglass control (see
 *Control tables* below) — the half LS-DYNA's own d3hsp says they carry
@@ -3187,14 +3331,16 @@ LS-DYNA does not initialise them either when `IVATN = 0`. A body the card only
 PARTLY covers takes one of two answers, decided by the REST of the card.
 A body a MIXED card only partly covers is refused and NAMED rather than
 modelled: p.28-129 Remark 3 makes LS-DYNA's answer a MASS-weighted momentum
-average over the whole body, this writer computes no nodal masses, and the
-deformable half of the card still works. A body an ALL-RIGID card only partly
-covers is RE-POINTED anyway with the over-estimate NAMED, because refusing
-there leaves nothing at all: `translat.k`, whose `*INITIAL_VELOCITY_NODE`
-names 2 of rigid part 1's 4 element nodes, reads cycle-0 K-ENERGY **387.9**
-re-pointed against its own LS-DYNA glstat's **189.962** (+104 %) and
-**0.000** refused, with every channel flat for all 13 980 cycles. The
-mass-weighted arm is a round-4 item.
+average over the whole body, and the deformable half of the card still works.
+A body an ALL-RIGID card only partly covers is RE-POINTED anyway with the
+over-estimate NAMED, because refusing there leaves nothing at all:
+`translat.k`, whose `*INITIAL_VELOCITY_NODE` names 2 of rigid part 1's 4
+element nodes, reads cycle-0 K-ENERGY **387.9** re-pointed against its own
+LS-DYNA glstat's **189.962** (+104 %) and **0.000** refused, with every
+channel flat for all 13 980 cycles. Both answers are the flag-off ones:
+[`--mass-weighted-inivel`](#--mass-weighted-inivel--the-momentum-average-for-a-partly-covered-rigid-body)
+forms the momentum average for either kind of card and reads **220.58**
+(+16.12 %) on that deck.
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
 body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
 secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
@@ -5534,21 +5680,150 @@ starter will derive. `--derived-gapmin` writes an explicit
 never a non-positive value, which is `ERROR 785`). Pure standard library,
 unlike `--auto-gapmin`, which needs numpy + scipy.
 
-It is **OFF by default** because the measured arms disagree. On
+It is **OFF by default** because the seven interfaces of the class that have
+a measured arm disagree with each other. On
 `intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm bars, derived
 `GAP MIN` 1.0) the starter's gap costs **+1151 %** internal energy against the
 LS-DYNA reference 3036.17, where the flag's own `0.005 × 10 = 0.05` reads
 **−5.60 %** and KE −6.18 % (factor 0.01 reads +14.45 % and must not be used).
-But the same factor degrades the only other carrier with a measured arm:
-on `sphere1` it writes 0.02921 and internal energy goes −1.66 % → **−7.77 %**
-at 4.1× the cycles. Censused with the writer's own resolver over the 356-key
+But the same factor degrades others: on `sphere1` it writes 0.02921 and
+internal energy goes −1.66 % → **−7.77 %** at 4.1× the cycles, and `bend`
+goes −2.0038 % → −2.8418 % at 4.69× (−2.7860 % at 2.50× with the smaller
+factor). Censused with the writer's own resolver over the 356-key
 R14 roster (the 4 Yaris `*INCLUDE` pullers excluded BY NAME): **15 solid-only-
-main interfaces on 14 deck keys**, one of them created by round 4's
-all-rigid-SSID swap. Exactly **two of the 15** — `twobar` and `sphere1` — have
-a measured solver arm at this factor; the other **13 have none at all**. A
+main interfaces on 14 deck keys and 13 emitted models**, one of them created by
+round 4's all-rigid-SSID swap. **Seven of the 15 now have a measured arm and
+eight are still unjudgeable**, and the seven disagree: `twobar` better,
+`sphere1` and `bend` worse, `4.3_General_Nonlinearity` mixed (energy error
+−99.9 % → −55.2 %, internal energy −98.87 % → −99.92 %), `pend.imp` and
+`06_heating_plate` byte-inert, and `hemi` paying **+47.9 % cycles** to reach
+the same time — cycle inflation measured against a base run in the same
+window, not the lost NORMAL round 4 read it as. A
 press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
 same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
 stabilization stub are excluded from the flag.
+
+### `--assumed-strain-isolid {24,none}` — ELFORM −1/−2 off the locking hex
+
+LS-DYNA's `*SECTION_SOLID` **ELFORM −1 and −2** are the assumed-strain 8-point
+hexes that exist to remove ELFORM 2's shear locking (Vol I R17 p.41-104
+Remark 13: *"Solid formulations -1 and -2 employ an assumed strain approach to
+avoid the shear locking behavior seen in formulation 2 elements with poor
+aspect ratios"*). k2rad ships them on `/PROP/SOLID` `Isolid` **17**, which IS
+the locking ELFORM-2 element — so the converted deck carries no trace of the
+distinction, and a default-ON warning says so on every carrier.
+
+`--assumed-strain-isolid 24` writes **HEPH** instead (one Gauss point with
+physical stabilisation), with LS-DYNA's own default `QH` 0.1 in the `h` cell
+when the deck states no hourglass card — an inert cell, because
+`hm_read_prop14.F:358-361` reads an `Isolid` 24's coefficient from `Dn`, which
+k2rad leaves blank, so the run takes the same 0.1 from the `CVIS` default.
+ELFORM **2 and 3 are not touched**: 2 is the fully-integrated element 17
+reproduces exactly, 3 is the quadratic hex for which no Radioss `Isolid`
+exists. dyna2rad makes the same choice for −1 (`convertprops.cxx:398-402`:
+−1 → 24, 2/3 → 18; −2 is not in its table).
+
+**Reach: 22 deck keys on 18 emitted models** state ELFORM −1/−2 on the 356-key
+R14 roster (two independently written scanners, one of them
+`*SECTION_SOLID_TITLE`-aware — the census that missed the `_TITLE` spelling
+read 21/17). The flag **moves 19 keys on 16 models** — re-measured at the
+branch head by converting all 22 carriers with the flag ON and OFF on the same
+tree. **Three** do not move, all three because they already land on 24: the
+`ex_12_solid_elform_{-1,-2}` pair through its own `*HOURGLASS` IHQ 6 overlay,
+and `icfd/.../Intermediate_fsi_flap/main_fsi.k` through `*CONTROL_HOURGLASS`
+IHQ 6 / QH 0.1 — the `*CONTROL*` route, which the earlier text credited to the
+`ex_12` pair alone. All three verified byte-identical with and without the
+flag. (The shipped 20/17 is retracted.)
+
+It is **OFF by default because the arms disagree**, each measured against its
+own LS-DYNA reference at nt 4 (`Isolid` 17 → 24):
+
+| deck | 17 | 24 |
+|---|---|---|
+| `ex_03_solid_elform_-1_4x6x4_mesh` (LS 174114) | −21.72 % | **−5.87 %** |
+| `ex_04_solid_elform_-1` | −5.84 % | **−2.83 %** |
+| `ex_14_solid_elform_-1` / `-2` | +313.9 / +494.0 % | +1373 / +2014 % |
+| `mainboltaexpl` | −72.72 % | −81.40 % (5× the wall time) |
+| `ex_27_solid_elform_-2_rigidwall` (ke) | +9.75 % — the class's only `match` | +15.43 % — **match lost** |
+
+Two better, four worse. What makes the flag worth having at all is a
+self-built bending coupon (L 120 × b 20 × h 20, E 210000, ν 0.3, P 1000;
+Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D
+0.2072–0.2074): `Isolid` 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at
+1/2/4/8 elements **through the depth** — the error GROWS with refinement, from
++19.7 % to −28.8 % — while 24 holds 0.20540 / 0.20180 / 0.20140 / 0.20140
+(−2.9 %). The remedy for an `Isolid` 17 deck is therefore to refine **along**
+the beam, so the hexes stay near aspect ratio 1 in the bending plane.
+
+Second effect, named because it is not obvious: with the flag ON an ELFORM
+−1/−2 part no longer satisfies `writer/materials._exact_all_ip`, which gates a
+`/FAIL/TAB1` `Ifail_so = 2` (delete when ALL integration points fail) on the
+element really having 8 of them — such a deck erodes on the FIRST failed point
+instead, and its own warning says so.
+
+### `--implicit-rigid-secondary-swap` — the all-rigid SSID swap on an implicit deck
+
+On an EXPLICIT deck k2rad already rescues a `*CONTACT` whose SECONDARY (SSID)
+side is wholly rigid by swapping the roles (`--no-rigid-secondary-swap` opts
+out). On an IMPLICIT deck the interface is DROPPED instead, because every
+restoration arm measured in round 4 diverged. Round 5 found the one that does
+not: the swap **plus the derived Gapmin**.
+
+This flag takes that arm. It reaches exactly the branch the explicit path
+swaps — a rigid SSID against a deformable MSID — it IMPLIES the derived
+`Gapmin` on the interface it creates, and it REFUSES to swap where none can be
+derived (a main surface that is not solid segments only), because the bare
+swap ERRORs. MEASURED on `implicit/basic-examples/contact-i/bumper.k` at nt 2
+AND nt 4, against the LS-DYNA reference IE 1.23131e7:
+
+| arm | result |
+|---|---|
+| shipped drop | NORMAL TERMINATION as a **zero model**, IE 0 (−100 %) |
+| bare swap | **ERROR** at t = 3.0e-4 (ISTOP −2, MESSAGE ID 79) |
+| swap + derived `Gapmin` 0.1499, `Inacti` 0 | NORMAL, **131 cycles** to t = 0.05, IE **6.934e5** (−94.4 %) |
+| the same with `/IMPL/QSTAT/DTSCAL` 1 | IE 1.473e6 (−88.0 %) |
+| the recipe's `DTSCAL` 0.05, hand-set on the same deck | NORMAL, 131 cycles, IE **−7.418e5** — negative |
+
+So it buys a load path that is still 94 % short of the reference, and the
+campaign verdict cannot move either way — that deck's LS-DYNA KE is exactly 0,
+a structural zero the benchmark short-circuits on. `--deformable-contact-recipe`
+is deliberately NOT widened to reach it (the last row is why), which also keeps
+the four `implicit_elevator-linkage` decks it was validated on untouched.
+
+### `--mass-weighted-inivel` — the momentum average for a partly covered rigid body
+
+Vol I R17 p.28-129 Remark 3: *"During initialization, the translational and
+rotational rigid body momentums are computed based on the prescribed nodal
+velocities. From this rigid body motion, the velocities of the nodal points are
+computed and reset to the new values."* k2rad does not form that average: a
+rigid body an `*INITIAL_VELOCITY` / `_NODE` / `_GENERATION` card covers only
+PARTLY gets the card's FULL velocity (an all-rigid card) or nothing at all (a
+mixed card, where such a body is refused and named).
+
+With this flag such a body gets `v_cm` and `omega` from its own lumped nodal
+masses, written as `/INIVEL/TRA` + `/INIVEL/ROT` on the `/RBODY` main node —
+`inirby.F:1032-1048` rebuilds every secondary from it. MEASURED on
+`intro-by-j.-day/joint/joint-ii/translat.k` at nt 4, where 2 of rigid part 1's
+4 element nodes carry `v = (2286, 0, 7620)` and LS-DYNA's own cycle-0
+K-ENERGY is **189.962**: the shipped full-velocity re-point reads 387.9
+(+104.20 %), this rule reads **220.58** (+16.12 %), and the final `ke_dev` goes
++194.03 % → **+47.82 %**. The residual is not the velocity — it is the
+`/RBODY`'s own lumped rotary inertia (starter `NEW INERTIA` 0.2642894E-02
+against LS-DYNA's 0.1977E-02, the difference being exactly
+`4 × (m/4)(A + t²)/12 = 6.65667e-4` per diagonal), which the `/RBODY` `J` cells
+would ADD rather than replace (`inirby.F:166-168` and `:331-339` ADD them;
+`hm_read_rbody.F:276-279` is only where the cells are read): a named follow-up,
+not compensated here.
+
+It is **OFF by default** for an evidence reason, not a physics one: exactly one
+carrier with an LS-DYNA reference exists on this machine, and there is no
+LS-DYNA solver here to make a second. The geometry guard ships with it either
+way — a scale-free rank test on the inertia tensor, a Moore-Penrose
+pseudo-inverse (EXACT here, since the angular momentum of a collinear body is
+perpendicular to its axis), a RELATIVE zero-mass refusal mirroring
+`inirby.F:200-201`, and single-node and coincident-node handling. A body the
+card FULLY covers is untouched by construction: its momentum average IS the
+card's velocity with `omega` 0.
 
 ---
 

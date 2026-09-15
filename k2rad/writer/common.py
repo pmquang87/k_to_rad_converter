@@ -288,7 +288,7 @@ def _elform_to_ishell(elform: int, is_implicit: bool,
     return ISHELL_QEPH if elform in _ELFORM_ALWAYS_QEPH else default_ishell
 
 
-def _elform_to_isolid(elform: int) -> int:
+def _elform_to_isolid(elform: int, assumed_strain_isolid: int = 0) -> int:
     """The Isolid an ELFORM implies BEFORE hourglass control has its say.
 
     This is the *base* of a two-step resolution, not the emitted value. The
@@ -325,7 +325,22 @@ def _elform_to_isolid(elform: int) -> int:
     not the Isolid 1 the hourglass default now selects, which is measured good
     on the same class of deck (``taylor_A`` IE +2.56 % → +0.00 % against its
     own LS-DYNA reference).
+
+    *assumed_strain_isolid* is ``ConvertOptions.assumed_strain_isolid_value``
+    — 24 with ``--assumed-strain-isolid 24``, 0 (the default) otherwise — and
+    reaches ELFORM **-1 and -2 ONLY**, LS-DYNA's assumed-strain 8-point hexes.
+    Not 2, which is the fully-integrated element Isolid 17 reproduces exactly,
+    and not 3, the quadratic hex for which no Radioss Isolid exists at all.
+    Callers that do NOT pass it get the shipped default 17 for all three, so a
+    site that forgets the option cannot silently write a different element
+    than the one the property emitter wrote — the two sites that decide an
+    emitted ``/PROP/SOLID`` and the predicate that reports it
+    (``writer/mesh._effective_solid_isolid``) all read
+    ``options.assumed_strain_isolid_value``. See that option for the measured
+    arms and for why it is opt-in.
     """
+    if assumed_strain_isolid and elform in (-1, -2):
+        return assumed_strain_isolid
     return {0: 17, 1: 17, 2: 17, 10: 14, 13: 14, 16: 17, -1: 17}.get(elform, 17)
 
 

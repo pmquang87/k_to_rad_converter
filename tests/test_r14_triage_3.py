@@ -1265,14 +1265,23 @@ class OnePointAleElformIsNamedNotMapped(unittest.TestCase):
                 self.assertEqual(int(card[20:30]), 0)     # Iale
 
     def test_the_warning_names_the_measurement_and_the_source(self):
+        """Round 5 WITHDREW this sentence's starter-error claim: the
+        ``hm_read_prop14.F:264-267`` gate is real, but it does NOT fire on
+        this route — the Isolid these sections emit is 1, so ``advection_B``
+        converts and runs at 0 ERROR / 0 WARNING with ``Iale`` 1 and 2 alike.
+        What the remap costs is the ANSWER (its energy error goes −0.0 % →
+        99.9 %), and that is what the sentence now carries. The source
+        citations and the ``/ALE/GRID`` prerequisite are unchanged."""
         res, _ = _convert(_hg_deck(elform=5))
         w = [x for x in res.warnings if "ELFORM=5" in x and "LAGRANGIAN" in x]
         self.assertEqual(len(w), 1, res.warnings)
         self.assertIn("hm_read_prop14.F:264-267", w[0])
-        self.assertIn("ERROR 131", w[0])
+        self.assertIn("sgrtails.F:920-926", w[0])
+        self.assertIn("0 ERROR / 0 WARNING", w[0])
         self.assertIn("solid formulation = 11", w[0])
         self.assertIn("/ALE/GRID", w[0])
         self.assertIn("HOURGLASS control IS carried", w[0])
+        self.assertNotIn("9 starter", w[0])
 
     def test_elform_seven_names_its_dropped_ambient_type(self):
         res, _ = _convert(_hg_deck(elform=7))

@@ -1477,6 +1477,136 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
             "directly (or *CONTACT Card 3 SST/MST) if the gap has to change.")
 
 
+def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
+    """One ``/BRICK`` data row for a solid stored with fewer than 8 node ids.
+
+    ``(row, wedge)`` — ``wedge`` is 1 when the row is a six-id pentahedron
+    written as the COLLAPSED hexahedron below, so the caller can name it once
+    per part.
+
+    ``hm_read_solid.F:145-197`` classifies a ``/BRICK`` row by its EMPTY
+    cells, in this order:
+
+    * cells 5-8 all zero/blank -> ``ISOLNOD = 4``, a tetrahedron on cells 1-4;
+    * cells 7-8 zero/blank     -> ``ISOLNOD = 6``, a native ``/PENTA6`` whose
+      bottom triangle is cells 1-3 and whose top triangle is cells 4-6 (the
+      five assignments at :166-176, read in order, expand it to
+      ``n1 n2 n3 n1 | n4 n5 n6 n4``, i.e. the pairing is n1-n4, n2-n5, n3-n6);
+    * anything else            -> ``ISOLNOD = 8``, a hexahedron read verbatim,
+      degenerate node ids included.
+
+    THE DEFECT THIS FIXES. A solid the deck stored with six node ids used to
+    be padded with its LAST node (``nodes += [nodes[-1]] * (8 - len(nodes))``),
+    producing ``n1 n2 n3 n4 n5 n6 n6 n6`` — eight non-blank cells, so the
+    reader takes the THIRD branch and integrates a hexahedron whose bottom
+    face is ``n1 n2 n3 n4`` (a QUAD across the wedge, not its triangle).
+    MEASURED on ``tests/fixtures/wedge_short_card.k`` (a 10 x 10 x 10 mm block
+    as two wedges, rho 7.85e-9): starter ``TOTAL MASS`` **3.9250E-06 against
+    the exact 7.8500E-06 — HALF the block** — with the mass centre at
+    (5, 6.25, 6.25) instead of (5, 5, 5), at 0 ERROR and 0 WARNING. Nothing in
+    the run says so.
+
+    WHAT IS EMITTED INSTEAD: the collapsed eight-cell hexahedron
+    ``n1 n2 n3 n3 | n4 n5 n6 n6`` — the two triangles with their last id
+    repeated, which is the bottom-triangle/top-triangle collapse this card's
+    own six-id ORDER implies (cells 1-3 one triangle, 4-6 the other). Same
+    coupon: ``TOTAL MASS`` 7.8500E-06, exact.
+
+    IT IS NOT THE SPELLING THE CORPUS ITSELF USES, and the round-4 sentence
+    that said so is retracted. The R14 corpus's own eight-field pentahedra
+    collapse the OTHER pair of cells: ``n1 n2 n3 n4 | n5 n5 n7 n7``, a quad
+    bottom face with the top face collapsed to a ridge. Measured by two
+    independent readers over the 375 deck files of
+    ``F:/dynaexamples_r14_ton-mm-s`` — one a plain fixed-column scanner, one
+    driving ``handlers.handle_element_solid`` itself — **all 7417 of them, with
+    no second spelling anywhere** (the per-file table re-sums to 7417; 2668 +
+    2668 on the two Yaris suspension decks, 584 + 79 on the other two Yaris
+    giants, 218 × 5 + 50 across the welding family, 278 in
+    ``4.3_General_Nonlinearity.k``'s ten-node-format block). Both forms are
+    valid degenerate hexes and the reader integrates either correctly; which
+    face collapses is a convention, and a SHORT card carries no cue about it
+    beyond its own node order, which is why the order-implied form is used.
+
+    WHY NOT THE NATIVE SIX-CELL FORM, which the reader plainly offers:
+    ``/PENTA6`` is accepted on a solid property ONLY at ``Isolid = 24``. The
+    same coupon emitted with cells 7-8 blank dies at the starter —
+    ``ERROR ID : 3107 ** ERROR IN 6-NODES PENTAHEDRON PROPERTY DEFINITION /
+    6-NODES PENTAHEDRON (/PENTA6) WITH SOLID PROPERTIES ARE ONLY COMPATIBLE
+    WITH ISOLID = 24 FORMULATION`` — on the ``Isolid = 1`` this deck's ELFORM
+    and hourglass default select. Hand-set to 24 the very same file reaches
+    NORMAL TERMINATION with ``TOTAL MASS`` 7.8500E-06 and the mass centre
+    (5, 5, 5), i.e. a BETTER lumping than the collapsed form's (5, 6.25, 5) —
+    so the native form is the more faithful card and is unusable without also
+    moving the part's formulation. Coupling an element's spelling to a
+    hourglass flag is a surprise this reach does not justify (ROADMAP).
+
+    REACH ON THE R14 ROSTER: ZERO, by construction. A 6-field
+    ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling at all, and a scan of
+    every ``.k``/``.key``/``.dyn``/``.inc`` file here — **932 files**, which
+    is **925 across the three corpora** (``F:`` 382, ``C:/openradioss_run``
+    507 with the two ``combine.key`` ``*INCLUDE`` pullers excluded by name,
+    ``E:/foxcore_data`` 36) **plus this repo's own 7 fixtures** — finds
+    **zero** short ``*ELEMENT_SOLID`` cards on any corpus deck. The only
+    short ``*ELEMENT_SOLID`` cards in the whole 932 are the **two in
+    ``tests/fixtures/wedge_short_card.k``**, written for this item. The only
+    other short rows anywhere are 16 ``*ELEMENT_SOLID_NURBS_PATCH`` rows in
+    ``nvh/example-11-05/11.5.nurbs.k`` under the same 8-column reading (that
+    block has 605 data rows in all), a different keyword with a different
+    card stack that ``handlers._ELEM_NOT_A_MESH_TOKENS`` already screens. This is
+    a correctness fix for a shape k2rad can be handed, not a change to any
+    corpus deck; the two-tree SHA sweep is the proof.
+
+    The other short counts keep the padded row, each for a reader reason:
+
+    * 4 stored nodes never arrive here — four distinct corners are emitted as
+      a ``/TETRA4``, a real tetrahedron rather than a degenerate hex, by the
+      branch above this one;
+    * 5 nodes (a pyramid) have no ``ISOLNOD`` of their own, and padding with
+      the last node IS the degenerate-hex spelling for one:
+      ``n1 n2 n3 n4 n5 n5 n5 n5`` collapses the top face onto the apex;
+    * 7 nodes likewise have no native form, and the padded row is the
+      standard collapsed spelling;
+    * a 6-id card whose ids are NOT all distinct is already degenerate; its
+      intended shape cannot be read off the row, so it is left as it was.
+    """
+    nds = list(nodes)
+    if len(nds) == 6 and len(set(nds)) == 6:
+        nds = [nds[0], nds[1], nds[2], nds[2], nds[3], nds[4], nds[5], nds[5]]
+        return _i(eid) + "".join(_i(n) for n in nds), 1
+    if len(nds) < 8:
+        nds = nds + [nds[-1]] * (8 - len(nds))
+    return _i(eid) + "".join(_i(n) for n in nds[:8]), 0
+
+
+def _warn_native_pentahedron(state: ConversionState, pid: int,
+                             count: int) -> None:
+    """Name the short-card pentahedra of one part, once per part."""
+    state.warn(
+        f"PART {pid}: {count} solid element(s) are stored with SIX node ids "
+        "(a short *ELEMENT_SOLID card, which is not an LS-DYNA spelling — Vol "
+        "I R17 p.19-124 gives the card eight node columns) and are emitted as "
+        "the COLLAPSED /BRICK pentahedron n1 n2 n3 n3 n4 n5 n6 n6 - the "
+        "bottom-triangle/top-triangle collapse this card's own six-id order "
+        "implies. (The R14 corpus's own eight-field pentahedra collapse the "
+        "other cell pair, n1 n2 n3 n4 n5 n5 n7 n7 - all 7417 of them, measured "
+        "by two independent readers over the 375 .k/.key deck files on F:. "
+        "Both are valid "
+        "degenerate hexes; a short card carries no cue about which face was "
+        "meant beyond its node order.) The "
+        "node ORDER is taken verbatim, so cells 1-3 must be one triangle and "
+        "cells 4-6 the other, paired n1-n4, n2-n5, n3-n6. Writing the six ids "
+        "into an eight-cell row by repeating the LAST node — what k2rad did "
+        "before 2026-09 — makes the reader integrate a hexahedron over the "
+        "wrong bottom face: MEASURED on a two-wedge 10 mm block, starter "
+        "TOTAL MASS 3.9250E-06 against the exact 7.8500E-06 (HALF the block, "
+        "mass centre (5, 6.25, 6.25) instead of (5, 5, 5)) at 0 ERROR and 0 "
+        "WARNING. The reader's own six-cell /PENTA6 form is NOT used: "
+        "hm_read_solid.F:166-176 reads it, but a /PENTA6 is accepted only on "
+        "a property at Isolid 24 (starter ERROR 3107 on this coupon's Isolid "
+        "1; hand-set to 24 the same file runs and lumps the mass centre "
+        "exactly). Prefer the eight-column card in the source deck.")
+
+
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
@@ -1776,16 +1906,15 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 lines.append(HDR)
             if bricks:
                 lines.append(f"/BRICK/{pid}")
+                wedges = 0
                 for e in bricks:
-                    nodes = list(e.nodes)
-                    if len(nodes) < 8:
-                        nodes += [nodes[-1]] * (8 - len(nodes))
-                    row = _i(e.eid)
-                    for n in nodes[:8]:
-                        row += _i(n)
+                    row, wedge = _brick_row(e.eid, list(e.nodes))
+                    wedges += wedge
                     lines.append(row)
                     state.solid_elem_ids.add(e.eid)          # #106 register
                     _tick()
+                if wedges:
+                    _warn_native_pentahedron(state, pid, wedges)
                 lines.append(HDR)
         if pid in tshells_by_pid:
             # *ELEMENT_TSHELL → /BRICK with the LS-DYNA n1..n8 order VERBATIM.
@@ -2157,6 +2286,9 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
         return (None, None)
     if sec.elform in _COHESIVE_ELFORMS:
         return (None, None)     # /PROP/TYPE43: 4 mid-plane points, no HG modes
+    # No `assumed_strain_isolid` here on purpose: this asks "is this a tet or
+    # a cohesive", and the only cell the option can produce is 24, which is
+    # neither. Passing it would change no answer and would suggest it could.
     if _elform_to_isolid(sec.elform) in (14, 18):
         return (None, None)     # tet4 (Kessler=14) / cohesive (18): no HG modes
     h: Optional[float] = None
@@ -2316,7 +2448,9 @@ def _effective_solid_isolid(state: ConversionState, pid: int,
     once IHQ remaps a full-integration hex to an under-integrated 1/5/24 (a
     stale Nb_integr is rejected by the starter, MSGID 695)."""
     base = 0 if (sec and sec.iale) else \
-        (_elform_to_isolid(sec.elform) if sec else 17)
+        (_elform_to_isolid(sec.elform,
+                           state.options.assumed_strain_isolid_value)
+         if sec else 17)
     if pid in state.hourglass_prop_ids:
         iso_over = state.hourglass_prop_vals.get(pid, (None, None))[1]
         return iso_over if iso_over is not None else base
@@ -2499,18 +2633,106 @@ def _warn_type43_pairings(state: ConversionState, secid: int,
 _ASSUMED_STRAIN_ELFORMS = frozenset({-1, -2, 3})
 
 
+def _assumed_strain_h(state: ConversionState, sec, isolid: int,
+                      h: Optional[float]) -> Optional[float]:
+    """The ``h`` cell for a section ``--assumed-strain-isolid 24`` moved.
+
+    A deck that states an hourglass coefficient of its own keeps it (``h`` is
+    not None). One that states none gets LS-DYNA's own default QH **0.1**, the
+    same number the default-hourglass synthesis writes beside an ``Isolid``
+    24, so the two routes to that formulation emit the same property.
+
+    The cell is INERT either way, and saying so is the point of writing it
+    from one place: ``hm_read_prop14.F:358-361`` is ``IF (IHBE == 24) THEN IF
+    (CVIS == ZERO) CVIS = EM01; GEO(13) = CVIS; QH = ZERO``, i.e. an Isolid 24
+    takes its coefficient from ``Dn``, which k2rad leaves blank, so the run
+    uses the CVIS default 0.1 — the same number ``h`` states.
+    """
+    if h is not None:
+        return h
+    if (isolid == 24 and sec is not None and sec.elform in (-1, -2)
+            and state.options.assumed_strain_isolid_value):
+        return 0.1
+    return None
+
+
 def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> None:
-    """``ELFORM -1/-2/3`` that ships on ``Isolid`` 17, once per ``*SECTION_SOLID``.
+    """``ELFORM -1/-2/3`` and the ``Isolid`` it ships on, once per section.
 
     It fires at the line that WRITES the property, so the predicate is the
     emitted ``Isolid``, not a re-derivation of it. Deduped per section by
-    construction: ``_make_properties`` walks ``state.sec_solids`` once.
+    construction: ``_make_properties`` walks ``state.sec_solids`` once, and
+    the per-part hourglass split reads the same memo.
+
+    Two arms, because an ELFORM -1/-2 section can now leave here on either of
+    two cells and BOTH are substitutions:
+
+    * ``Isolid`` 17 — the shipped default, and the LOCKING ELFORM-2 element
+      that -1/-2 exist to replace;
+    * ``Isolid`` 24 — HEPH, reached either through the deck's own
+      ``*HOURGLASS`` IHQ 6 overlay (the ``ex_12_solid_elform_*`` family) or
+      through ``--assumed-strain-isolid 24``. An 8-point element becomes a
+      1-POINT one, which is a large substitution in its own right — it is
+      simply the SMALLEST one measured.
     """
-    if sec is None or sec.elform not in _ASSUMED_STRAIN_ELFORMS or isolid != 17:
+    if sec is None or sec.elform not in _ASSUMED_STRAIN_ELFORMS:
+        return
+    if isolid not in (17, 24):
+        return
+    if isolid == 24 and sec.elform == 3:
+        # ELFORM 3 has no measured 24 arm at all — the sentence below is
+        # about the assumed-strain pair, and inventing one for the quadratic
+        # hex would be a claim nothing here measured.
         return
     if sec.secid in state.warned_assumed_strain_secids:
         return
     state.warned_assumed_strain_secids.add(sec.secid)
+    if isolid == 24:
+        state.warn(
+            f"*SECTION_SOLID {sec.secid} ELFORM {sec.elform} is LS-DYNA's "
+            "ASSUMED-STRAIN 8-point hex and this property lands on Isolid 24 "
+            "(HEPH, ONE Gauss point with physical stabilisation, "
+            "sgrtails.F:1107-1123) "
+            + ("because --assumed-strain-isolid 24 was passed"
+               if state.options.assumed_strain_isolid_value == 24 else
+               "through this deck's own *HOURGLASS IHQ 6 overlay")
+            + ". That is still a SUBSTITUTION - an 8-point assumed-strain "
+            "element becomes a 1-point one - and it is the SMALLEST of the "
+            "measured ones, not a faithful mapping. On a self-built bending "
+            "coupon (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; "
+            "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
+            "0.2072-0.2074) Isolid 24 reads 0.20540 / 0.20180 / 0.20140 / "
+            "0.20140 at 1/2/4/8 elements through the depth (-2.9 %) where the "
+            "default Isolid 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 "
+            "(+19.7 % -> -28.8 %, i.e. WORSE with refinement). IT COSTS A "
+            "TIME STEP: Isolid 24 is UNDER-integrated where 17 is fully "
+            "integrated, so a deck that was already marginal can need a "
+            "smaller step than it needed before. RE-MEASURED at 1 element "
+            "through the depth on an independently rebuilt coupon of that "
+            "shape (nt 4): at the deck's own TSSFAC 0.9 BOTH formulations "
+            "blow up on that mesh and BOTH still print NORMAL TERMINATION "
+            "(Isolid 17 reaches the end of the run in 9950 cycles at energy "
+            "error 99.9 %, IE 1.577e9 against 98.3 of external work; the 24 "
+            "arm collapses to IE -5.1e27 / KE 7.5e27 at -99.9 % and STALLS "
+            "at 2.5 % of the run, its step down to 9.5e-12, after 41482 "
+            "cycles), while at TSSFAC 0.3 both converge at 0.0 % "
+            "and reproduce the sweep to better than 0.7 %. Check this deck's "
+            "time-step scale factor before reading the 24 arm's answer. On "
+            "the roster "
+            "the two arms disagree by deck: ex_03_solid_elform_-1_4x6x4_mesh "
+            "-21.72 % -> -5.87 % and ex_04_solid_elform_-1 -5.84 % -> "
+            "-2.83 % improve, while ex_14_solid_elform_-1/-2 go "
+            "+313.9/+494.0 % -> +1373/+2014 %, mainboltaexpl -72.72 % -> "
+            "-81.40 % at the SAME cycle count (51762 both arms, base-paired "
+            "at nt 4) and ex_27_solid_elform_-2_rigidwall "
+            "LOSES the class's only campaign match (ke +9.75 % -> +15.43 %). "
+            "dyna2rad makes the same choice for -1 (convertprops.cxx:398-402: "
+            "-1 -> 24, 2/3 -> 18; -2 is not in its table and falls to the "
+            "/DEF_SOLID default). NOTE the h cell: hm_read_prop14.F:358-361 "
+            "reads an Isolid 24's coefficient from Dn, not h, and k2rad "
+            "leaves Dn blank - so the run uses the CVIS default 0.1 whatever "
+            "h says.")
+        return
     if sec.elform == 3:
         state.warn(
             f"*SECTION_SOLID {sec.secid} ELFORM 3 is LS-DYNA's FULLY "
@@ -2539,14 +2761,54 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "which is the PRE-round-4 column: A1's /IMPL/QSTAT/DTSCAL moved all "
         "four, one of them by a factor 3.4 and one across zero.) "
         "No Radioss Isolid reproduces -1/-2: "
-        "24 / 18 / 14 measure -5.75 / -5.18 / -6.27 % on ex_03 and REGRESS "
-        "four other corpus decks (ex_27_solid_elform_-2_rigidwall loses the "
-        "population's only match, ke +9.75 % -> +15.43 %; mainboltaexpl "
-        "-72.7 -> -81.4 % IE at 5x the wall time; ex_14_solid_elform_-1/-2 "
-        "+314/+494 % -> +1373/+2014 %). Icpre cannot help - "
+        "24 / 18 / 14 measure -5.87 / -5.23 / -6.33 % on ex_03 (internal "
+        "energy 163900 / 165000 / 163100 against the LS-DYNA reference "
+        "174114, re-measured at this branch's head at nt 4 and identical at "
+        "nt 2; the three figures this sentence carried before round 5 were a "
+        "PRE-round-4 column, from before /IMPL/QSTAT/DTSCAL 10 reached the "
+        "deck) and they REGRESS four other corpus decks "
+        "(ex_27_solid_elform_-2_rigidwall loses the population's only match, "
+        "ke +9.75 % -> +15.43 %; mainboltaexpl -72.72 -> -81.40 % IE at the "
+        "SAME cycle count - 51762 on both arms, base-paired back to back at "
+        "nt 4, twice, the flag arm engine ELAPSED 93.2/94.6 s against the "
+        "default's 106.2/107.2 s, so round 5's unpaired wall-time multiple "
+        "is RETRACTED; ex_14_solid_elform_-1/-2 +313.9/+494.0 % -> "
+        "+1373/+2014 %). --assumed-strain-isolid 24 writes the 24 arm on this "
+        "section if you want it: 22 deck keys on 18 emitted models state "
+        "ELFORM -1/-2 and the flag moves 19 of them on 16 models (the three "
+        "that do not move already land on Isolid 24 - the ex_12 pair through "
+        "*HOURGLASS IHQ 6, main_fsi.k through *CONTROL_HOURGLASS IHQ 6). "
+        "dyna2rad "
+        "makes that same choice for -1 (convertprops.cxx:398-402: -1 -> 24 "
+        "and 2/3 -> 18; -2 is not in its table and falls to the /DEF_SOLID "
+        "default). Icpre cannot help - "
         "hm_read_prop14.F:296-303 already FORCES Icpre = 1 on Isolid 17 (the "
         "starter echo prints CONSTANT PRESSURE FLAG = 1) - and Isolid 19 "
-        "diverges by nine orders. Refine through the thickness, or restate the "
+        "diverges by nine orders. REFINE ALONG THE BEAM, so the hexes stay "
+        "near aspect ratio 1 in the bending plane: refining THROUGH THE "
+        "THICKNESS makes Isolid 17 worse, not better - on a self-built "
+        "bending coupon (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; "
+        "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
+        "0.2072-0.2074) it reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at "
+        "1/2/4/8 elements through the depth, i.e. +19.7 % -> -28.8 %, while "
+        "Isolid 24 holds -2.9 % over the 2/4/8 points of that sweep. THE "
+        "SUBSTITUTION COSTS A TIME STEP: Isolid 24 is UNDER-integrated where "
+        "17 is fully integrated, so a deck that was already marginal can need "
+        "a smaller step than it needed before. RE-MEASURED at 1 element "
+        "through the depth on an independently rebuilt coupon of that shape "
+        "(nt 4): at the deck's own TSSFAC 0.9 BOTH formulations blow up on "
+        "that mesh and BOTH still print NORMAL TERMINATION - Isolid 17 ends "
+        "at energy error 99.9 % with IE 1.577e9 against 98.3 of external "
+        "work, having reached the end of the run in 9950 cycles, while the "
+        "24 arm collapses to IE -5.1e27 / KE 7.5e27 at -99.9 % and STALLS "
+        "at t 4.968e-4 of 0.02 (2.5 % of the run) with its step down to "
+        "9.5e-12 after 41482 cycles - while at TSSFAC 0.3 both converge at "
+        "energy error "
+        "0.0 % and reproduce the sweep above to better than 0.7 %. (The "
+        "round 5 published a divergence for the 24 arm alone at this point, "
+        "with a rival Isolid-17 figure beside it; both halves are RETRACTED "
+        "- that rival figure contradicted this warning's own 0.24820 for "
+        "the very same point, and neither reproduces.) Or restate the "
         "section as ELFORM 2 if the locked answer is what you want. NOTE: the "
         "ELFORM siblings of these examples convert to ONE file "
         "(ex_03_solid_elform_{-1,2,18} share a byte-identical _0000.rad), so "
@@ -2960,7 +3222,8 @@ def _make_properties(state: ConversionState) -> List[str]:
         # "INCOMPATIBLE ELEMENT TYPE WITH ALE/EULER FRAMEWORK"). Isolid 0 =
         # the default, which resolves to the co-located ALE brick (the value
         # used by the reference Drop_Container FSI deck).
-        isolid = 0 if sec.iale else _elform_to_isolid(sec.elform)
+        isolid = 0 if sec.iale else _elform_to_isolid(
+            sec.elform, state.options.assumed_strain_isolid_value)
         # /PROP/SOLID card 1 (cfg radioss2022): Isolid Ismstr Iale Icpre Itetra10
         # Inpts Itetra4 Iframe Dn — note the Iale column at 21-30 (the 2022 PDF
         # p.1738 omits it; writing the PDF's 8-field layout shifts Itetra10 into
@@ -3004,7 +3267,8 @@ def _make_properties(state: ConversionState) -> List[str]:
             state.ismstr10_solid_secids.add(sec.secid)
         _warn_assumed_strain_elform(state, sec, isolid)
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
-                                  isolid, sec.iale, itetra10, istrain, hcoef=h,
+                                  isolid, sec.iale, itetra10, istrain,
+                                  hcoef=_assumed_strain_h(state, sec, isolid, h),
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
     _warn_default_solid_hourglass(state, default_hg_moved)
@@ -4451,12 +4715,15 @@ def _assign_hourglass_props(state: ConversionState) -> None:
             if hg is None and state.ctrl_hourglass is not None \
                     and _ihq_to_isolid(state.ctrl_hourglass.ihq) is not None \
                     and base[1] is not None and not ctrl_isolid_warned \
-                    and sec is not None and base[1] != _elform_to_isolid(sec.elform):
+                    and sec is not None and base[1] != _elform_to_isolid(
+                        sec.elform,
+                        state.options.assumed_strain_isolid_value):
                 ctrl_isolid_warned = True
                 state.warn(
                     f"*CONTROL_HOURGLASS IHQ={state.ctrl_hourglass.ihq} is now "
                     "honored (was previously dropped): the shared /PROP/SOLID "
-                    f"Isolid is remapped {_elform_to_isolid(sec.elform)}→"
+                    "Isolid is remapped "
+                    f"{_elform_to_isolid(sec.elform, state.options.assumed_strain_isolid_value)}→"
                     f"{base[1]} (h={base[0]:g}) for parts without a *PART HGID. "
                     "Set HGID or *HOURGLASS per part to override.")
             # Unsupported IHQ (0/8/9/10): h is applied but Isolid is unmapped —
@@ -4593,7 +4860,8 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      phi: float = 0.0, skew_id: int = 0,
                      refpoint=(0.0, 0.0, 0.0),
                      isolid: Optional[int] = None,
-                     ismstr: int = 0) -> List[str]:
+                     ismstr: int = 0,
+                     assumed_strain_isolid: int = 0) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
@@ -4613,9 +4881,14 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     *isolid* None (default) derives the formulation from the section ELFORM
     as everywhere else; an explicit value pins it (the MAT_126 honeycomb
     path passes 1 — with *ismstr* 1 — matching dyna2rad's fixed
-    ISOLID=1/Ismstr=1 for the honeycomb-family TYPE6, CP:404-476)."""
+    ISOLID=1/Ismstr=1 for the honeycomb-family TYPE6, CP:404-476).
+    *assumed_strain_isolid* is ``ConvertOptions.assumed_strain_isolid_value``,
+    threaded in because an ORTHOTROPIC solid section can state ELFORM -1/-2
+    too and must take the same cell the isotropic emitter writes; every caller
+    passes it."""
     if isolid is None:
-        isolid = _elform_to_isolid(sec.elform) if sec else 0
+        isolid = (_elform_to_isolid(sec.elform, assumed_strain_isolid)
+                  if sec else 0)
     vx, vy, vz = (0.0, 0.0, 0.0) if skew_id else refvec
     px, py, pz = (0.0, 0.0, 0.0) if skew_id else refpoint
     if skew_id:
@@ -4769,8 +5042,10 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
                                     (0.0, 0.0, 0.0), axes[0], axes[1])
             sec = state.sec_solids.get(secid)
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
-            lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain,
-                                      skew_id=skew_id)
+            lines += _emit_prop_type6(
+                prop_id, title, sec, itetra10, istrain, skew_id=skew_id,
+                assumed_strain_isolid=(
+                    state.options.assumed_strain_isolid_value))
     return lines
 
 
@@ -4810,7 +5085,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
         if pid in solid_pids:
             sec = state.sec_solids.get(secid)
             isolid = (0 if (sec and sec.iale)
-                      else (_elform_to_isolid(sec.elform) if sec else 17))
+                      else (_elform_to_isolid(
+                          sec.elform,
+                          state.options.assumed_strain_isolid_value)
+                          if sec else 17))
             if iso_over is not None:
                 isolid = iso_over
             iale = sec.iale if sec else 0
@@ -4848,8 +5126,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             # in the file — ex_27_solid_elform_-2_rigidwall emits
             # /PROP/SOLID/90001 at Isolid 17 here and nothing at all above.
             _warn_assumed_strain_elform(state, sec, isolid)
-            lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
-                                      istrain, hcoef=coeff, ismstr=ismstr)
+            lines += _emit_prop_solid(
+                prop_id, title, isolid, iale, itetra10, istrain,
+                hcoef=_assumed_strain_h(state, sec, isolid, coeff),
+                ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)
             ishell = (_elform_to_ishell(sec.elform, state.is_implicit,

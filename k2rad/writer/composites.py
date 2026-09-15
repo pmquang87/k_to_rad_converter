@@ -3104,6 +3104,9 @@ def _emit_mat126_solid_prop(state: ConversionState, prop_id: int, pid: int,
             "1-exp(-x_log) engineering crush. If the curves were really "
             "fitted as log strain, restate them in engineering strain "
             "(x_eng = 1-exp(-x_log)).")
+    # isolid is PINNED to 1 here, so --assumed-strain-isolid cannot reach
+    # this property at all: dyna2rad's honeycomb TYPE6 is ISOLID=1/Ismstr=1
+    # whatever the section says.
     return _emit_prop_type6(prop_id, f"HONEYCOMB_SOLID_PROP_{prop_id} "
                             f"(part {pid})", sec, 1000 if tet10 else 0,
                             istrain, refvec=axis.vec, ip=ip, phi=axis.phi,
@@ -3136,7 +3139,9 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
     return _emit_prop_type6(prop_id, f"COMPOSITE_SOLID_PROP_{prop_id} "
                             f"(part {pid})", sec, 1000 if tet10 else 0, istrain,
                             refvec=axis.vec, ip=ip, phi=axis.phi,
-                            skew_id=axis.skew_id, refpoint=axis.pt)
+                            skew_id=axis.skew_id, refpoint=axis.pt,
+                            assumed_strain_isolid=(
+                                state.options.assumed_strain_isolid_value))
 
 
 def _shell_layer_count(sec: SectionShell, state: ConversionState,

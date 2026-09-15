@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, Curve,
     DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
@@ -19,6 +19,8 @@ from .common import (
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
+from ..lumping import rigid_body_momentum_velocity
+from .sph import _mat_density
 
 __all__ = [
     "_make_rlinks",
@@ -49,6 +51,9 @@ __all__ = [
     "_element_length",
     "_new_ground_node",
     "_emit_spring_part",
+    "_register_spring_token_mass",
+    "_SPRING_TOKEN_MASS",
+    "_SPRING_TOKEN_INERTIA",
     "_make_discrete_springs",
     "PLOTEL_ID",
     "PLOTEL_MASS",
@@ -1331,6 +1336,49 @@ def _element_length(state: ConversionState, e) -> float:
 #: explicit time step needs a finite one.
 _SPRING_TOKEN_MASS = 1.0e-4
 
+#: The companion token INERTIA. /PROP/TYPE8 and /PROP/TYPE13 have no ERROR-229
+#: floor (hm_read_prop08.F / hm_read_prop13.F check only the inertia, WARNING
+#: 445), but a zero rotary inertia on a 6-DOF spring leaves r2len3.F's
+#: rotational branch with no time step of its own. NOT compensated: the /ADMAS
+#: card carries a MASS only (hm_read_admas.F), rotary inertia reaches a node
+#: through /ADMAS/... type 4-6 or a rigid body's J cells, and no consumer of
+#: this writer needs it. Named here so the value is not a bare literal at four
+#: emission sites.
+_SPRING_TOKEN_INERTIA = 1.0e-6
+
+def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
+                                prop_mass: float = _SPRING_TOKEN_MASS) -> None:
+    """Record the invented property mass one emitted /SPRING row puts on its
+    end nodes, for the /ADMAS compensation in :func:`_make_added_masses`.
+
+    ``rinit3.F:1926`` is ``EMS(I) = HALF*UMASS(I)`` and ``:1937-1939`` writes
+    ``MSR(1..3,I)`` onto ``IXR(2,I)`` and ``IXR(3,I)`` only — HALF the property
+    mass on EACH end node, per element, and NOTHING on a TYPE13's third
+    (orientation) node. On an ``Ileng=1`` property ``UMASS = mass x L_element``,
+    so the caller passes the already-scaled value.
+
+    ALWAYS call this at the line that WRITES the /SPRING row, never from the
+    parsed element list: every producer has `continue`s above it that drop
+    elements which never reach the deck, and a compensation for a spring that
+    does not exist would remove real mass.
+
+    Two masses are deliberately NOT registered through here:
+
+    * ``PLOTEL_MASS`` (1.1e-15) — *ELEMENT_PLOTEL is a display-only element and
+      that is the smallest value clearing the ERROR-229 floor at all, i.e. it
+      is already the "no mass" answer rather than an invented one.
+    * ``--ground-springs`` (:func:`_make_grounding_springs`) — an opt-in
+      stabiliser the LS-DYNA deck does not state at all, so "compensating" it
+      would take away mass the USER asked for.
+    """
+    share = 0.5 * prop_mass
+    if share <= 0.0:
+        return
+    for _n in (n1, n2):
+        if _n > 0:
+            state.spring_token_mass_by_node[_n] = (
+                state.spring_token_mass_by_node.get(_n, 0.0) + share)
+
 
 def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
     """The sentence every discrete-spring warning ends with.
@@ -1348,10 +1396,13 @@ def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
             f"{_SPRING_TOKEN_MASS:g} and rinit3.F:1926/1937-1939 puts HALF of "
             f"it on EACH end node, per element.")
     if state.options.spring_token_mass_compensation:
-        return (head + " That token is SUBTRACTED again from those nodes' "
-                "/ADMAS wherever there is one to subtract it from (see the "
-                "*ELEMENT_MASS line below, which names every node that had "
-                "none). Uncompensated it shifts omega by "
+        return (head + " That token is REMOVED again from those nodes - "
+                "subtracted from an /ADMAS the deck already states, else taken "
+                "off with a NEGATIVE /ADMAS of its own (hm_read_admas.F:"
+                "164-170 accepts one, WARNING ID 476). The deck-level "
+                "token-mass line below names every node and every class, "
+                "including the ones no compensation can reach. "
+                "Uncompensated the token shifts omega by "
                 "sqrt(1 + m_token/(2*m_node)) - MEASURED on "
                 "ex_17_spring_elform_0: 41.715 rad/s against LS-DYNA's 43.954, "
                 "a 5.4 % frequency error that reads as IE +10.20 % / KE "
@@ -1459,10 +1510,7 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # synthesized ground node, so the tally is the deck's truth; the ground
         # node is /BCS-fixed and carries no /ADMAS, so nothing is subtracted
         # there and nothing is warned about it (see _spring_token_warn_nodes).
-        for _n in (n1, n2):
-            state.spring_token_mass_by_node[_n] = (
-                state.spring_token_mass_by_node.get(_n, 0.0)
-                + 0.5 * _SPRING_TOKEN_MASS)
+        _register_spring_token_mass(state, n1, n2)
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_grnod_id()
@@ -2749,10 +2797,17 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
         k6 = E * izz / L             # bending Rz
 
         mass = mat.rho * area * L
-        if mass <= 0.0:
-            mass = 1.0e-4
+        # RO*A*L is LS-DYNA's OWN beam mass — it is never compensated. Only the
+        # fallback below invents one, so the flag travels with the branch.
+        token_mass = mass <= 0.0
+        if token_mass:
+            mass = _SPRING_TOKEN_MASS
             state.warn(f"*MAT_SPOTWELD part {pid}: non-positive weld mass "
-                       "(RO or section) — token mass 1e-4 used.")
+                       f"(RO or section) — token mass {_SPRING_TOKEN_MASS:g} "
+                       "used, and removed again from the end nodes with a "
+                       "negative /ADMAS (see the *ELEMENT_DISCRETE token-mass "
+                       "warning; --no-spring-token-mass-compensation keeps "
+                       "it).")
         inertia = max(mass * L * L / 12.0, 1e-20)
 
         # Failure surface (Ifail=1 multi-directional + Ifail2=2 force criteria:
@@ -2824,6 +2879,12 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             # ERROR 69 and the deck is refused outright.
             state.spotweld_spring_eids.add(e.eid)
             state.spring_elem_ids.add(e.eid)  # producer 2 of 9
+            # Only the token branch: with RO*A*L > 0 the property mass is
+            # LS-DYNA's own and compensating it would be a NEW defect. n3 is
+            # the orientation node and gets nothing (rinit3.F:1937-1939 writes
+            # IXR(2,I)/IXR(3,I) only). Ileng is 0 on this property.
+            if token_mass:
+                _register_spring_token_mass(state, e.n1, e.n2)
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -2928,10 +2989,13 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
-        # Token mass/inertia, same rationale as the grounding springs: the tie
-        # itself is massless in LS-DYNA.
+        # Token mass/inertia: the tie itself is massless in LS-DYNA
+        # (*CONSTRAINED_SPOTWELD has no mass cell at all — it is a CONSTRAINT),
+        # so both cells are k2rad's own invention and the mass half is
+        # registered below for the /ADMAS compensation.
         lines += _emit_prop_type13(prop_id, f"{label} (stiff weld tie)",
-                                   1.0e-4, 1.0e-6, 1, 2, dofs)
+                                   _SPRING_TOKEN_MASS, _SPRING_TOKEN_INERTIA,
+                                   1, 2, dofs)
         lines += [
             f"/PART/{part_id}",
             label,
@@ -2942,6 +3006,11 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             HDR,
         ]
         state.spring_elem_ids.add(elem_id)    # producer 6 of 9
+        # Recorded AT the write line, never from `welds`: the four `continue`s
+        # above drop a weld whose node set is not a pair, whose nodes have no
+        # coordinates, or which is coincident — none of those reached the deck.
+        # Ileng is 0 on this property, so UMASS is the property mass itself.
+        _register_spring_token_mass(state, n1, n2)
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -4762,6 +4831,51 @@ def _emit_inivel(kind: str, inivel_id: int, title: str, grnod_id: int,
     ]
 
 
+def _constant_velocity_of(v: Tuple[float, float, float]
+                          ) -> Callable[[int], Tuple[float, float, float]]:
+    """The per-node velocity field of a card that states ONE velocity.
+
+    A named function rather than a lambda at each call site: the two TRA
+    cards and the `_GENERATION` field all hand
+    ``_warn_inivel_on_rigid_members`` the same shape, and this is the one that
+    says so in the type.
+    """
+    def _of(_nid: int) -> Tuple[float, float, float]:
+        return v
+    return _of
+
+
+def _emit_mass_weighted_bodies(state: ConversionState,
+                               bodies: List[_MassWeightedBody],
+                               tag: str) -> List[str]:
+    """One ``/INIVEL/TRA`` (+ ``/INIVEL/ROT``) pair per momentum-averaged body.
+
+    Each pair is written on a one-node ``/GRNOD`` over the body's ``/RBODY``
+    MAIN node — ``hm_read_inivel.F:535-541`` writes the three components
+    straight into that node's ``V``/``VR``, and ``inirby.F:1032-1048`` rebuilds
+    every secondary from it as ``v_N = v_M + omega x (x_N - x_M)``.
+    ``/INIVEL/ROT`` rather than ``/INIVEL/AXIS`` because ``omega`` is an
+    arbitrary 3-vector here, while ``/INIVEL/AXIS`` carries one magnitude about
+    a frame axis — and the manual forbids combining it with TRA/ROT on the same
+    node anyway.
+
+    The ROT block is written even when ``omega`` is all zeros: it is the cell
+    that says the body has no spin, and emitting it on one body and not on
+    another would make the deck depend on round-off.
+    """
+    lines: List[str] = []
+    for main, v_cm, omega in bodies:
+        grnod_id = state.next_grnod_id()
+        lines += _emit_grnod_node(grnod_id, f"{tag}_rb_main_{main}", [main])
+        inivel_id = state.next_id()
+        lines += _emit_inivel("TRA", inivel_id, f"InitVelMW_{inivel_id}",
+                              grnod_id, v_cm)
+        rot_id = state.next_id()
+        lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
+                              grnod_id, omega)
+    return lines
+
+
 def _make_inivel(state: ConversionState, rbody_info: Dict,
                  rigid_nodes: Optional[Set[int]] = None) -> List[str]:
     """Initial velocities → /INIVEL/TRA (+ /INIVEL/ROT for rotational DOFs).
@@ -4779,10 +4893,21 @@ def _make_inivel(state: ConversionState, rbody_info: Dict,
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
-        nids = _warn_inivel_on_rigid_members(
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, 0, sorted(nids), rigid_nodes,
             keyword="*INITIAL_VELOCITY_NODE",
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_constant_velocity_of((vx, vy, vz)),
+            mass_weighted_block=("the card also states NODAL ROTATIONAL velocities "
+                     "(VXR/VYR/VZR), and this rule forms the body's angular "
+                     "momentum from the TRANSLATIONAL velocities alone - "
+                     "folding a prescribed nodal spin into it needs each "
+                     "node's own rotary inertia, which the momentum average "
+                     "does not use"
+                                 if (vxr or vyr or vzr) else ""))
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_nodes")
+        if not nids:
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
@@ -5162,13 +5287,160 @@ def _rbody_coverage_exempt(state: ConversionState) -> Set[int]:
     return exempt
 
 
+#: One partly-covered rigid body the momentum average was formed for:
+#: ``(main node, v_cm, omega)``. ``_make_inivel`` and its two siblings write
+#: one /INIVEL/TRA + /INIVEL/ROT pair per entry on that main node.
+_MassWeightedBody = Tuple[int, Tuple[float, float, float],
+                          Tuple[float, float, float]]
+
+
+#: Cache for the model's lumped nodal masses, keyed by the state object's id.
+#: The lumper walks every element, so a card-by-card re-walk would be O(cards x
+#: elements); one pass per conversion is enough because nothing between the
+#: /INIVEL writers changes the mesh.
+_NODAL_MASS_CACHE: Dict[int, Tuple[Dict[int, float], float]] = {}
+
+
+def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
+                                                          float]:
+    """``(mass by node, the model's total lumped mass)``, computed once.
+
+    The rule is ``k2rad.lumping.nodal_masses_from_state`` — the same one
+    ``tools/modal_solve`` pairs with the engine's exported stiffness matrix,
+    which reproduces the starter's own MS array. Imported INSIDE the function:
+    ``k2rad.lumping`` imports ``writer.beams`` and ``writer.materials``, and a
+    module-level import here would put the writer package in a cycle with
+    itself.
+    """
+    key = id(state)
+    got = _NODAL_MASS_CACHE.get(key)
+    if got is None:
+        from ..lumping import nodal_masses_from_state
+        mass, _inertia = nodal_masses_from_state(state)
+        got = (mass, math.fsum(mass.values()))
+        _NODAL_MASS_CACHE[key] = got
+    return got
+
+
+def _momentum_average_body(state: ConversionState, info: Optional[Dict],
+                           main: int, group: Set[int],
+                           velocity_of: Callable[
+                               [int], Optional[Tuple[float, float, float]]],
+                           keyword: str, where: str
+                           ) -> Optional[_MassWeightedBody]:
+    """The momentum average for ONE partly-covered rigid body, or ``None``.
+
+    ``None`` means "leave this body to the caller's existing behaviour", and
+    every route to it warns with the reason — a guard that refuses in silence
+    is a guard that cannot be audited.
+
+    The arithmetic is :func:`k2rad.lumping.rigid_body_momentum_velocity`;
+    everything here is the bookkeeping around it: which nodes the card
+    prescribes (``group``), what velocity each of them carries
+    (``velocity_of``, a constant for a ``*INITIAL_VELOCITY[_NODE]`` and the
+    ``v + omega x r`` field for an ``_GENERATION``), and whether the body's
+    /RBODY puts its main node where ``v_cm`` acts.
+
+    **Where the velocity is written.** ``/INIVEL/TRA`` + ``/INIVEL/ROT`` on the
+    MAIN node, from which ``inirby.F:1032-1048`` rebuilds every secondary as
+    ``v_N = v_M + omega x (x_N - x_M)``. That is exact when the main node sits
+    at the centre of mass, which is what ``ICoG`` 0/1 does (the starter MOVES
+    it there, ``inirby.F:186-211``; measured on ``translat`` as
+    ``NEW X/Y/Z 12.7 / 12.7 / 4e-15`` against LS-DYNA's 12.7 / 12.7 / 0). A
+    body whose ``ICoG`` KEEPS the main node where it is (3, or 4 on an
+    ``_INERTIA`` body) gets the transport term ``omega x (x_main - x_cm)``
+    added to ``v_cm`` instead, so the rigid field is the same one either way.
+    Any other ``ICoG`` is refused by name rather than guessed at — k2rad emits
+    only 0, 3 and 4 today.
+    """
+    if info is None:
+        return None
+    nodes = sorted(set(info["nodes"]) | {main})
+    mass_by_node, model_mass = _lumped_nodal_masses(state)
+    coords: List[Tuple[float, float, float]] = []
+    masses: List[float] = []
+    vels: List[Optional[Tuple[float, float, float]]] = []
+    for nid in nodes:
+        nd = state.nodes.get(nid)
+        if nd is None:
+            state.warn(
+                f"{keyword} {where}: --mass-weighted-inivel could not form the "
+                f"momentum average for the rigid body on main node {main} - "
+                f"its member node {nid} has no coordinates. The body keeps the "
+                "behaviour it had without the flag.")
+            return None
+        coords.append((nd.x, nd.y, nd.z))
+        masses.append(mass_by_node.get(nid, 0.0))
+        vels.append(velocity_of(nid) if nid in group else None)
+    icog = int(info.get("icog", 0) or 0)
+    if icog not in (0, 1, 3, 4):
+        state.warn(
+            f"{keyword} {where}: --mass-weighted-inivel did not touch the "
+            f"rigid body on main node {main} - its /RBODY carries ICoG "
+            f"{icog}, and where that leaves the main node decides whether "
+            "v_cm may be written there unchanged. k2rad emits only 0, 3 and 4, "
+            "so this is a card no path of this writer produces. The body keeps "
+            "the behaviour it had without the flag.")
+        return None
+    v_cm, omega, cog, refusal = rigid_body_momentum_velocity(
+        coords, masses, vels, model_mass)
+    if v_cm is None or omega is None or cog is None:
+        state.warn(
+            f"{keyword} {where}: --mass-weighted-inivel REFUSED the rigid body "
+            f"on main node {main} - {refusal}. The body keeps the behaviour it "
+            "had without the flag (the card's full velocity when every node of "
+            "the card is a rigid member, nothing otherwise).")
+        return None
+    if icog in (3, 4):
+        # The main node is NOT moved to the centre of mass, so the velocity
+        # written on it is the rigid field's value AT the main node.
+        nd = state.nodes[main]
+        dx, dy, dz = nd.x - cog[0], nd.y - cog[1], nd.z - cog[2]
+        v_cm = (v_cm[0] + omega[1] * dz - omega[2] * dy,
+                v_cm[1] + omega[2] * dx - omega[0] * dz,
+                v_cm[2] + omega[0] * dy - omega[1] * dx)
+    covered = sum(1 for v in vels if v)
+    state.warn(
+        f"{keyword} {where}: --mass-weighted-inivel gave the rigid body on "
+        f"main node {main} the MOMENTUM AVERAGE of the {covered} of its "
+        f"{len(nodes)} /RBODY member node(s) (its secondary group plus "
+        f"the main node) the card names - v_cm = ({v_cm[0]:.6g}, "
+        f"{v_cm[1]:.6g}, {v_cm[2]:.6g}) and omega = ({omega[0]:.6g}, "
+        f"{omega[1]:.6g}, {omega[2]:.6g}) on /INIVEL/TRA + /INIVEL/ROT, from "
+        "which inirby.F:1032-1048 rebuilds every secondary. Vol I R17 "
+        "p.28-129 Remark 3: 'the translational and rotational rigid body "
+        "momentums are computed based on the prescribed nodal velocities. From "
+        "this rigid body motion, the velocities of the nodal points are "
+        "computed and reset to the new values.' Without the flag this body "
+        "gets the card's FULL velocity (when every node of the card is a rigid "
+        "member) or NOTHING at all (a mixed card). MEASURED on "
+        "intro-by-j.-day/joint/joint-ii/translat.k at nt 4, where 2 of rigid "
+        "part 1's 4 element nodes carry v = (2286, 0, 7620) against an LS-DYNA "
+        "glstat cycle-0 K-ENERGY of 189.962: the full-velocity re-point reads "
+        "387.9 (+104.20 %), this rule reads 220.58 (+16.12 %), and the final "
+        "ke_dev goes +194.03 % -> +47.82 %. The residual is NOT the velocity - "
+        "it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
+        "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
+        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), which the "
+        "/RBODY J cells would ADD rather than replace "
+        "(inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 "
+        "is only where the cells are read): not compensated here.")
+    return main, v_cm, omega
+
+
 def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                                   nids: List[int],
                                   rigid_nodes: Optional[Set[int]],
                                   keyword: str = "*INITIAL_VELOCITY",
                                   sid_label: str = "NSID",
                                   rbody_info: Optional[Dict] = None,
-                                  repoint: bool = False) -> List[int]:
+                                  repoint: bool = False,
+                                  velocity_of: Optional[Callable[
+                                      [int], Optional[Tuple[
+                                          float, float, float]]]] = None,
+                                  mass_weighted_block: str = ""
+                                  ) -> Tuple[List[int],
+                                             List[_MassWeightedBody]]:
     """Re-point (or name) the /INIVEL that lands on RIGID-BODY member nodes.
 
     ``inirby.F`` rebuilds every secondary node's velocity from its /RBODY main
@@ -5234,15 +5506,18 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     and each rigid body the card FULLY covers is replaced by its main node.
     Coverage is measured over the body's element nodes only
     (``_rbody_coverage_exempt``). A body a MIXED card only PARTLY covers keeps
-    its nodes and is named: Vol I R17 p.28-129 Remark 3 says LS-DYNA computes
-    the body's translational and rotational MOMENTUM from the prescribed nodal
-    velocities and resets every node from that rigid motion — a mass-weighted
-    average this WRITER does not form: it computes no nodal masses, and
-    inventing one would be a fabricated value in a mandatory slot. The
-    machinery exists elsewhere in the repo (``tools/modal_solve``'s
-    ``nodal_masses_from_state``, which lumps element mass and applies
-    ``*ELEMENT_MASS``), so the arm is DEFERRED for measurement on more than
-    one carrier, not blocked — see ROADMAP.
+    its nodes and is named: Vol I
+    R17 p.28-129 Remark 3 says LS-DYNA computes the body's translational and
+    rotational MOMENTUM from the prescribed nodal velocities and resets every
+    node from that rigid motion. **``--mass-weighted-inivel`` forms exactly
+    that average** (``_momentum_average_body`` →
+    ``k2rad.lumping.rigid_body_momentum_velocity``, on the same lumped nodal
+    masses ``tools/modal_solve`` pairs with the engine's own stiffness export)
+    and writes it as ``/INIVEL/TRA`` + ``/INIVEL/ROT`` on the body's main node.
+    It is OFF by default for an evidence reason, not a physics one: exactly ONE
+    carrier with an LS-DYNA reference exists on this machine, and there is no
+    LS-DYNA solver here to make a second — see
+    ``ConvertOptions.mass_weighted_inivel``.
 
     **But a card that names ONLY rigid nodes re-points its partly-covered
     bodies too.** Refusing there does not fall back on the deformable half —
@@ -5268,12 +5543,15 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     ``1/2 M (v/2)^2 = 97.0``, and the two loaded nodes sit on one edge so the
     body also SPINS — ``L = (M/4)(r3 + r4) x v`` over the lumped corner
     inertia gives ``omega = (300, 0, -45)`` and ``1/2 omega.I.omega = 93.0``;
-    97.0 + 93.0 = 190.0 against the glstat's 189.962. The writer forms neither
-    half - it computes no nodal masses - so it gives the main node the card's
-    FULL velocity and NAMES the over-estimate. Between a model that is 2x too fast
-    and one that does not move at all, the over-estimate is the one whose
-    channels evolve — it is what round 2 shipped, and what the campaign
-    recorded as a cleared zero model. The mass-weighted arm is a round-4 item.
+    97.0 + 93.0 = 190.0 against the glstat's 189.962. By DEFAULT the writer
+    forms neither half — it gives the main node the card's FULL velocity and
+    NAMES the over-estimate. Between a model that is 2x too fast and one that
+    does not move at all, the over-estimate is the one whose channels evolve;
+    it is what round 2 shipped and what the campaign recorded as a cleared zero
+    model. ``--mass-weighted-inivel`` forms BOTH halves and writes them on the
+    main node: on this very deck it emits ``v_cm = (1143, 0, 3810)`` — half the
+    card's ``(2286, 0, 7620)`` — and ``omega = (300, 0, -45)``, the hand values
+    above to every digit, for a cycle-0 K-ENERGY of **220.58** (+16.12 %).
     MEASURED on the two corpus carriers: ``pipe.k`` (IVG over 2 parts of which
     1 is rigid, omega -82) goes from a cycle-0 KE of 8.69749e7 to 8.70569e7
     against the LS-DYNA glstat's 8.70616e7, i.e. -0.100 % to -0.005 %; and
@@ -5293,10 +5571,10 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
     KE 1092.45 — and before this the deck said nothing at all.
     """
     if not rigid_nodes:
-        return list(nids)
+        return list(nids), []
     on_rigid = [n for n in nids if n in rigid_nodes]
     if not on_rigid:
-        return list(nids)
+        return list(nids), []
     where = f"{sid_label}={nsid}" if nsid else "over the whole model"
     named = ", ".join(str(n) for n in on_rigid[:5])
     all_rigid = len(on_rigid) == len(nids)
@@ -5331,6 +5609,43 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             else:
                 partial_mains.append(main)
                 partial_nodes |= hit
+        # --mass-weighted-inivel: a body the card covers only PARTLY gets the
+        # momentum average of Vol I R17 p.28-129 Remark 3 on its main node,
+        # instead of the card's FULL velocity (an all-rigid card, below) or
+        # nothing at all (a mixed card, where it is refused). A body the card
+        # FULLY covers is deliberately NOT routed through here: its momentum
+        # average IS the card's velocity with omega 0, so the existing
+        # re-point already writes the same physics and no deck of that class
+        # changes a byte.
+        mw_bodies: List[_MassWeightedBody] = []
+        mw_dropped: Set[int] = set()
+        if (state.options.mass_weighted_inivel and partial_mains
+                and mass_weighted_block):
+            # The flag is ON and this card HAS the class it targets, but
+            # something about the card puts it out of the rule's scope. Said
+            # out loud: a lever that silently does nothing on the one deck it
+            # was passed for is worse than no lever.
+            state.warn(
+                f"{keyword} {where}: --mass-weighted-inivel did NOT touch the "
+                f"{len(partial_mains)} partly covered rigid body/bodies here - "
+                + mass_weighted_block + ". They keep the behaviour they have "
+                "without the flag.")
+        elif (state.options.mass_weighted_inivel and partial_mains
+                and velocity_of is not None):
+            info_by_main = {i["ind_node"]: i
+                            for i in (rbody_info or {}).values()}
+            still_partial: List[int] = []
+            for main in sorted(partial_mains):
+                got = _momentum_average_body(
+                    state, info_by_main.get(main), main, group, velocity_of,
+                    keyword, where)
+                if got is None:
+                    still_partial.append(main)
+                    continue
+                mw_bodies.append(got)
+                mw_dropped |= set(info_by_main[main]["nodes"]) | {main}
+            partial_mains = still_partial
+            partial_nodes = {n for n in partial_nodes if n not in mw_dropped}
         over_mains: List[int] = []
         if all_rigid and partial_mains:
             # EVERY node the card names is a rigid-body member, so leaving a
@@ -5349,7 +5664,8 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             # main node takes its place. Deformable nodes, and the nodes of a
             # body only partly covered by a MIXED card, stay where they were.
             kept = [n for n in nids
-                    if n not in main_of or main_of[n] in partial_mains]
+                    if (n not in main_of or main_of[n] in partial_mains)
+                    and n not in mw_dropped]
             out = sorted(set(kept) | set(covered_mains))
             if out != sorted(nids):
                 shown = ", ".join(str(m) for m in sorted(covered_mains)[:5])
@@ -5395,9 +5711,14 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
                         "when the card is left on the secondaries. LS-DYNA's "
                         "190.0 is 97.0 translational + 93.0 rotational (hand "
                         "arithmetic on the deck's own geometry at equal "
-                        "corner masses), i.e. the body also SPINS; this "
-                        "writer computes no nodal masses and writes "
-                        "neither the halved velocity nor the spin. State "
+                        "corner masses), i.e. the body also SPINS. PASS "
+                        "--mass-weighted-inivel to write both halves instead "
+                        "of the card's full velocity: on that deck it emits "
+                        "v_cm = (1143, 0, 3810) and omega = (300, 0, -45) on "
+                        "the main node for a cycle-0 K-ENERGY of 220.58 "
+                        "(+16.12 % against 189.962, where this arm reads "
+                        "+104.20 %). It is opt-in because exactly one carrier "
+                        "with an LS-DYNA reference exists. Or state "
                         "*INITIAL_VELOCITY_RIGID_BODY on the part to control "
                         "it exactly."
                         if over_mains else "")
@@ -5405,11 +5726,18 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
             if partial_mains:
                 _warn_inivel_partial_rigid_body(
                     state, keyword, where, partial_mains, partial_nodes)
-            return out
+            return out, mw_bodies
         if partial_mains:
             _warn_inivel_partial_rigid_body(
                 state, keyword, where, partial_mains, partial_nodes)
-            return list(nids)
+        if mw_bodies:
+            # No body was FULLY covered, but at least one partly-covered body
+            # took the momentum average: its nodes leave the group (the
+            # /INIVEL on them would be overwritten from the main node anyway)
+            # and the deformable half of a mixed card stays exactly as it was.
+            return ([n for n in nids if n not in mw_dropped], mw_bodies)
+        if partial_mains:
+            return list(nids), []
 
     state.warn(
         f"{keyword} {where}: {len(on_rigid)} of its {len(nids)} "
@@ -5425,7 +5753,7 @@ def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
         + ("" if all_rigid else
            " The card is left over its stated nodes: re-pointing only the "
            "rigid half would change which nodes it names."))
-    return list(nids)
+    return list(nids), []
 
 
 def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
@@ -5446,8 +5774,10 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
     rigid body motion, the velocities of the nodal points are computed and
     reset to the new values. These new values may or may not be the same as the
     values prescribed for the node."* That is a MASS-weighted average over the
-    whole body, so the body's velocity is smaller than the card's; this writer
-    computes no nodal masses and will not invent one.
+    whole body, so the body's velocity is smaller than the card's.
+    ``--mass-weighted-inivel`` forms it and writes it on the body's main node;
+    this refusal is what happens with the flag OFF, which is the default (one
+    carrier with a reference — see ``ConvertOptions.mass_weighted_inivel``).
     """
     shown = ", ".join(str(m) for m in sorted(mains)[:5])
     state.warn(
@@ -5462,8 +5792,14 @@ def _warn_inivel_partial_rigid_body(state: ConversionState, keyword: str,
         "translational and rotational MOMENTUM from the prescribed nodal "
         "velocities and resets every node from that rigid motion, i.e. a "
         "MASS-weighted average that is smaller than the stated velocity. "
-        "This writer computes no nodal masses and will not invent one. "
-        "Give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
+        "PASS --mass-weighted-inivel and k2rad forms exactly that average "
+        "from the body's own lumped nodal masses and writes it as "
+        "/INIVEL/TRA + /INIVEL/ROT on the /RBODY main node (MEASURED on "
+        "intro-by-j.-day/joint/joint-ii/translat.k at nt 4: cycle-0 K-ENERGY "
+        "220.58 against the LS-DYNA glstat's 189.962, +16.12 %, where the "
+        "full-velocity arm reads 387.9 / +104.20 %); it is OFF by default "
+        "because exactly one carrier with an LS-DYNA reference exists on this "
+        "machine. Or give the body its own *INITIAL_VELOCITY_RIGID_BODY (or "
         "*PART_INERTIA card 5) with the velocity you want, or extend the "
         "card's set to the whole body.")
 
@@ -5529,9 +5865,18 @@ def _make_initial_velocity(state: ConversionState,
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
-        nids = _warn_inivel_on_rigid_members(
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, iv.nsid, nids, rigid_nodes,
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_constant_velocity_of((iv.vx, iv.vy, iv.vz)),
+            mass_weighted_block=("the card also states NODAL ROTATIONAL velocities "
+                     "(VXR/VYR/VZR), and this rule forms the body's angular "
+                     "momentum from the TRANSLATIONAL velocities alone - "
+                     "folding a prescribed nodal spin into it needs each "
+                     "node's own rotary inertia, which the momentum average "
+                     "does not use"
+                                 if (iv.vxr or iv.vyr or iv.vzr) else ""))
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_set")
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
         if iv.irigid:
@@ -5554,6 +5899,12 @@ def _make_initial_velocity(state: ConversionState,
                     "that id - velocity applied in the GLOBAL frame")
 
         # ── emit ────────────────────────────────────────────────────────────
+        if not nids:
+            # Every node this card named went to a momentum-averaged
+            # rigid body above (--mass-weighted-inivel); there is no
+            # group left to write. The lossy-field warnings above still
+            # ran, because what the card STATED is still worth saying.
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_grp_{grnod_id}", nids)
         if has_tra:
@@ -5750,10 +6101,39 @@ def _make_initial_velocity_generation(
                                  origin, fy, fz)
         # The RETURN VALUE is the group: the round-2 site called this helper
         # and threw it away, so flipping repoint would have changed nothing.
-        nids = _warn_inivel_on_rigid_members(
+        # The card's velocity FIELD, per node: the rigid motion
+        # v + omega x (x - O) that hm_read_inivel.F:580-617 writes itself. The
+        # momentum average needs the prescribed velocity of each node, and on
+        # this card that is not one constant.
+        def _gen_velocity_of(nid: int, _o=origin, _n=nhat, _w=vr,
+                             _v=(g.vx, g.vy, g.vz)
+                             ) -> Optional[Tuple[float, float, float]]:
+            nd = state.nodes.get(nid)
+            if nd is None:
+                return None
+            if not _w or _n is None:
+                return _v
+            rx, ry, rz = nd.x - _o[0], nd.y - _o[1], nd.z - _o[2]
+            wx, wy, wz = _w * _n[0], _w * _n[1], _w * _n[2]
+            return (_v[0] + wy * rz - wz * ry,
+                    _v[1] + wz * rx - wx * rz,
+                    _v[2] + wx * ry - wy * rx)
+
+        nids, mw_bodies = _warn_inivel_on_rigid_members(
             state, g.sid, list(nids), rigid_nodes,
             keyword="*INITIAL_VELOCITY_GENERATION", sid_label="SID",
-            rbody_info=rbody_info, repoint=True)
+            rbody_info=rbody_info, repoint=True,
+            velocity_of=_gen_velocity_of)
+        lines += _emit_mass_weighted_bodies(state, mw_bodies, "inivel_gen")
+        if not nids:
+            # Every node of the card went to a momentum-averaged body
+            # (--mass-weighted-inivel), so there is no group left for the
+            # /INIVEL/AXIS. The /FRAME/FIX above stays behind, unused: a
+            # frame is a standalone card (nothing requires it to be
+            # referenced) and it costs one id, which is cheaper than
+            # moving the frame emission below a decision that depends on
+            # the group this very call returns.
+            continue
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()
@@ -6069,8 +6449,134 @@ def _fmt_node_list(nids, cap: int = 20) -> str:
     return f"{nids[:cap]} and {len(nids) - cap} more"
 
 
+def _spring_token_own_element_mass(state: ConversionState,
+                                   candidates: Set[int]) -> Set[int]:
+    """Which of *candidates* carry element mass of their own.
+
+    An INCIDENCE test, not a mass test: the node must appear in at least one
+    emitted structural element (/SHELL, /SH3N, /BRICK, /TETRA*, the thick-shell
+    bricks, /BEAM, /TRUSS) whose part resolves to a material with ``rho > 0``.
+    Both halves are needed — a node whose only element sits on a zero-density
+    part would pass a bare incidence screen and still land near zero mass,
+    which is the failure this guard exists to prevent: the nodal acceleration
+    divides by that mass, and a share subtracted from a node that has none of
+    its own leaves ``MS <= 0``.
+
+    WHICH CHECK ACTUALLY CATCHES IT. Not ``rcheckmass.F``'s ERROR 1870: that
+    whole mechanism sits inside ``IF(IGTYP==23)`` (``rcheckmass.F:112``) and,
+    for the ``MS`` test, ``IF(MTN == 108)`` (``:123``) — ``IERR2`` can only be
+    set at ``:154``/``:157`` inside that branch — so it covers /PROP/TYPE23
+    (SPR_MAT) on /MAT/LAW108 and inspects no /PROP/TYPE4, TYPE8 or TYPE13
+    spring, which is every producer this compensation registers. The detector
+    that does reach them is the ENGINE's: ``chkmsin.F:52-59`` walks every node,
+    prints ``NEGATIVE MASS ON NODE ID=`` for ``MS(N) < ZERO`` and counts it,
+    and ``resol.F:5460`` does ``IF(NEGMAS/=0) CALL ARRET(2)``. A share that
+    lands the node exactly ON zero is caught by neither — which is why the
+    screen refuses the node instead of relying on a downstream check.
+
+    Scoped to *candidates* so the element sweep is one pass with a cheap set
+    membership test; on a deck with no spring token at all it never runs.
+    """
+    if not candidates:
+        return set()
+    rho_ok: Dict[int, bool] = {}
+
+    def _part_has_mass(pid: int) -> bool:
+        hit = rho_ok.get(pid)
+        if hit is None:
+            part = state.parts.get(pid)
+            hit = part is not None and _mat_density(state, part.mid) > 0.0
+            rho_ok[pid] = hit
+        return hit
+
+    found: Set[int] = set()
+    for elems in (state.shell_elems, state.solid_elems, state.tshell_elems,
+                  state.beam_elems):
+        for e in elems:
+            nodes = getattr(e, "nodes", None)
+            if nodes is None:
+                nodes = [getattr(e, "n1", 0), getattr(e, "n2", 0)]
+            hit = [n for n in nodes if n in candidates]
+            if hit and _part_has_mass(e.pid):
+                found.update(hit)
+        if found >= candidates:
+            break
+    return found
+
+
+def _spring_token_negative_admas(
+        state: ConversionState, rigid_nodes: Set[int], compensated,
+        degenerate) -> Tuple[Dict[float, List[int]], List[Tuple[int, float]]]:
+    """The nodes whose token share needs a NEGATIVE ``/ADMAS`` to come off.
+
+    The shipped rule only ever SUBTRACTED from an ``/ADMAS`` the deck already
+    states, so the classes that carry none got nothing — which on
+    ``spotweld-ii/plates.nrbc.k`` is the whole defect: one token of 1e-4 against
+    an LS-DYNA model mass of 1.0048e-4, i.e. the starter's ``TOTAL MASS`` read
+    **2.0048E-04, +99.52 %**.
+
+    ``hm_read_admas.F:161-171`` accepts a negative added mass — it raises only
+    ``ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)`` ``NEGATIVE ADDED MASS``, ONCE per
+    card per read of the deck (the check at ``:164-165`` sits inside the
+    ``IF (FLAG == 0)`` block opened at ``:160``, and ``lectur.F:7967-7979``
+    calls ``HM_READ_ADMAS`` with ``FLAGG = 0`` and then ``FLAGG = 1``, so the
+    second pass never reaches it; it is the file's only ``MSGID=476``) — and
+    applies it algebraically at ``:247-248``
+    (``MS(NOSYS) = MS(NOSYS) + AMAS``). There is
+    no sign check and no floor, and ``/ADMAS`` is read at ``lectur.F:7969``,
+    before the rigid bodies and before ``INITIA``, so the model total
+    (``initia.F:2250``) is exactly LS-DYNA's again.
+
+    Returns ``({share: [nid, ...]}, [(nid, share), ...])`` — the groups to emit
+    and the nodes the element-mass guard REFUSED.
+    """
+    if not state.spring_token_mass_by_node:
+        return {}, []
+    if not state.options.spring_token_mass_compensation:
+        return {}, []
+    done = {nid for nid, _b, _s in compensated}
+    want: Dict[int, float] = {}
+    for nid, share in state.spring_token_mass_by_node.items():
+        # `nid in done` = the share is already off the deck's own /ADMAS.
+        # `nid not in state.nodes` is DEFENSIVE and no deck reaches it: every
+        # registered node was written into a /SPRING row, and the synthesized
+        # ground node is registered in state.nodes by _new_ground_node. It
+        # stays because a /GRNOD naming a node the deck does not define is a
+        # starter error, and a mutation of it is therefore a no-op rather than
+        # an uncaught branch — probed with a *MAT_SPOTWELD beam on a missing
+        # node, which the zero-length screen drops one level up.
+        if share <= 0.0 or nid in done or nid not in state.nodes:
+            continue
+        if nid in state.connector_ground_nodes:
+            continue                     # /BCS 111 111 — mass cannot act
+        if nid in rigid_nodes:
+            continue                     # measured inert; see the warning
+        want[nid] = share
+    # NOTE on the DEGENERATE class (a deck /ADMAS at or below the token share):
+    # it needs NO pass of its own. Such a node is not in `done` — nothing was
+    # subtracted from it — so the loop above already selected it, and the
+    # deck's own /ADMAS value is kept by _make_added_masses while the FULL
+    # share comes off here: m_own + m_admas + token - token. A second loop over
+    # `degenerate` was written here and then removed as dead code; the
+    # parameter is kept because _warn_spring_token_mass needs the list to
+    # choose its wording.
+    del degenerate
+    if not want:
+        return {}, []
+    has_mass = _spring_token_own_element_mass(state, set(want))
+    groups: Dict[float, List[int]] = {}
+    guarded: List[Tuple[int, float]] = []
+    for nid, share in sorted(want.items()):
+        if nid in has_mass:
+            groups.setdefault(share, []).append(nid)
+        else:
+            guarded.append((nid, share))
+    return groups, guarded
+
+
 def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
-                            compensated, degenerate) -> None:
+                            compensated, degenerate, neg_groups=None,
+                            guarded=None) -> None:
     """What happened to k2rad's own artificial spring mass, node by class.
 
     Four classes, and every one of them is named because the mass is INVENTED —
@@ -6079,12 +6585,18 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
 
     * SUBTRACTED — the node has an ``/ADMAS`` big enough to take the token off.
     * DEGENERATE — it has one, but at or below the token share, so subtracting
-      would write a non-positive ``/ADMAS``. The deck's own value is kept.
-    * NO ``/ADMAS`` — nothing to subtract from (``mat_spring.belted-dummy.k``:
-      122 springs, zero ``/ADMAS``).
-    * RIGID — the node belongs to a rigid body, whose mass is folded into the
-      ``/RBODY`` Mass field, not into an ``/ADMAS``; the token rides along
-      there and this writer cannot reach it.
+      would write a non-positive ``/ADMAS``. The deck's own value is kept AND
+      the full share comes off with a negative card (round 5).
+    * NO ``/ADMAS`` — nothing to subtract from. Since round 5 the token is
+      REMOVED from these nodes with a negative ``/ADMAS`` instead
+      (``hm_read_admas.F:164-170`` accepts one, WARNING ID 476), unless the
+      element-incidence screen refuses the node, which the GUARDED sentence
+      names. A fifth list, ``orphan``, catches a registered node that is not
+      in ``state.nodes`` at all — a k2rad-internal inconsistency with reach
+      0 on every corpus here, not a class of deck.
+    * RIGID — the node is a SECONDARY node of a rigid body. Whether the token
+      reaches that body at all depends on its ICoG; on the roster's only
+      carrier it is measurably INERT (see below).
 
     Synthesized ground nodes are excluded: ``_emit_spring_part`` mints them
     fully ``/BCS``-fixed, so a mass on one cannot move anything.
@@ -6095,15 +6607,20 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         # The per-part warnings already said the token was left in place and
         # what it costs; one deck-level line would only repeat them.
         return
+    neg_groups = neg_groups or {}
+    guarded = guarded or []
     done = {nid for nid, _b, _s in compensated}
+    removed = {nid for nids in neg_groups.values() for nid in nids}
     bad = {nid for nid, _m, _s in degenerate}
     rigid: List[int] = []
     orphan: List[int] = []
     for nid in state.spring_token_mass_by_node:
-        if nid in done or nid in bad:
+        if nid in done or nid in bad or nid in removed:
             continue
         if nid in state.connector_ground_nodes:
             continue                     # /BCS 111 111 — mass cannot act
+        if nid in {n for n, _s in guarded}:
+            continue                     # named by its own sentence below
         (rigid if nid in rigid_nodes else orphan).append(nid)
     if compensated:
         total = sum(sh for _n, _b, sh in compensated)
@@ -6121,39 +6638,133 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
     if degenerate:
         detail = ", ".join(f"node {n}: /ADMAS {m:g} vs token share {sh:g}"
                            for n, m, sh in sorted(degenerate)[:5])
+        deg_removed = sorted(n for n, _m, _s in degenerate if n in removed)
+        tail = (
+            f" The full share was taken off {len(deg_removed)} of them "
+            f"{_fmt_node_list(deg_removed)} with a separate NEGATIVE /ADMAS "
+            "instead, so their sum is exact (m_own + m_admas + token - token)."
+            if deg_removed else
+            " NONE of them took a negative /ADMAS either: they carry no "
+            "element mass of their own, so the element-INCIDENCE screen "
+            "below refused them. That refusal is CONSERVATIVE, not forced: "
+            "the engine's nodal mass is m_own + m_admas + token, so taking "
+            "the token off again leaves m_own + m_admas, which on this "
+            "class is the deck's own /ADMAS and strictly POSITIVE - "
+            "MEASURED on a two-node weld coupon whose *ELEMENT_MASS 5e-05 "
+            "equals the token half-share: the negative card written in by "
+            "hand gives starter TOTAL MASS 1.0000000000000E-04 (5e-05 per "
+            "node), 0 ERROR and NORMAL TERMINATION. What the screen really "
+            "guards is m_own = 0 AND m_admas = 0, where the sum lands "
+            "EXACTLY on zero and chkmsin.F:53 tests MS(N) < ZERO strictly, "
+            "so nothing catches it - the same coupon with no element mass "
+            "at all reads TOTAL MASS 0.000000000000 at 0 ERROR and NORMAL "
+            "TERMINATION. Lifting the screen for the class that does carry "
+            "a positive deck /ADMAS is ROADMAP round-5 item 14. The guard "
+            "sentence below names them.")
         state.warn(
             f"*ELEMENT_DISCRETE: {len(degenerate)} node(s) carry LESS /ADMAS "
-            "than k2rad's own token spring mass, so nothing was subtracted "
-            "(an /ADMAS must stay positive) and their mass is HIGH by that "
-            f"share: {detail}"
+            "than k2rad's own token spring mass, so the deck's own /ADMAS "
+            "value was KEPT (k2rad never writes a non-positive /ADMAS on "
+            "the deck's own card - that is a k2rad policy, not a solver "
+            "rule: hm_read_admas.F has no sign check at all): "
+            f"{detail}"
             + (" ..." if len(degenerate) > 5 else "")
-            + ". The local frequency is LOW by sqrt(1 + share/m_node). "
-              "MEASURED on the carrier of this shape, gnonspring.k (/ADMAS "
+            + "." + tail
+            + " MEASURED on the carrier of this shape, gnonspring.k (/ADMAS "
               "1e-6 against a token half of 5e-5, 50x): the arm that floors "
-              "the mass to 1e-12 - the most a compensation could ever remove "
-              "- changes nothing (IE 431.3 either way, 786 cycles both "
-              "times). Give those nodes an *ELEMENT_MASS if their dynamics "
-              "matter.")
+              "the property mass to 1e-12 - the most any compensation could "
+              "ever remove - changes nothing (IE 431.3 either way, 786 cycles "
+              "both times).")
+    if neg_groups:
+        nodes = sorted(n for nids in neg_groups.values() for n in nids)
+        total = sum(sh * len(nids) for sh, nids in neg_groups.items())
+        state.warn(
+            "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
+            f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "
+            "node per element - rinit3.F:1926/1937-1939) was REMOVED again "
+            f"from {len(nodes)} node(s) {_fmt_node_list(nodes)} with a "
+            f"NEGATIVE /ADMAS/0 of "
+            + ", ".join(f"{-sh:g} x {len(nids)}"
+                        for sh, nids in sorted(neg_groups.items()))
+            + f", total {-total:g}, so the model's mass is LS-DYNA's. "
+              "hm_read_admas.F:164-170 accepts a negative added mass (WARNING "
+              "ID 476 NEGATIVE ADDED MASS, once per card per read of the deck "
+              "- the check is inside the IF (FLAG == 0) block at :160, so the "
+              "FLAGG=1 pass of lectur.F:7967-7979 never reaches it) and adds "
+              "it algebraically at :247. A starter that runs a SECOND domain "
+              "decomposition reads the deck again - lectur.F:9047-9048 sets "
+              "IDDLEVEL = 1 and the GOTO 100 at :9094 jumps back to label "
+              "100 at :5691 - and so reprints every warning raised inside "
+              "that span, this one included. (A warning raised OUTSIDE the "
+              "span still prints once: KINCHK is called at lectur.F:10568, "
+              "so WARNING 312 does not double.) On plates.nrbc the deck's own "
+              "pre-existing WARNING ID 1084 already appears twice on the arm "
+              "that has no negative /ADMAS at all, and the dome deck, which "
+              "runs no second decomposition, prints all nine of its warnings "
+              "once. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
+              "TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is LS-DYNA's "
+              "own total mass to every printed digit (+99.52 % -> 0.00 %), at "
+              "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION. Pass "
+              "--no-spring-token-mass-compensation to keep the pre-round-5 "
+              "output.")
+    if guarded:
+        state.warn(
+            f"*ELEMENT_DISCRETE: {len(guarded)} spring node(s) "
+            f"{_fmt_node_list(n for n, _s in guarded)} carry NO element mass "
+            "of their own, so k2rad's token was LEFT in place - subtracting "
+            "it would leave those nodes with ZERO mass and the engine divides "
+            "the nodal force by it. The check that reaches a TYPE4/8/13 spring "
+            "is the engine's own: chkmsin.F:52-59 prints NEGATIVE MASS ON NODE "
+            "ID= and resol.F:5460 aborts on it (CALL ARRET(2)); the starter's "
+            "ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that whole "
+            "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
+            "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
+            "is HIGH by "
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
+            "them an *ELEMENT_MASS if their dynamics matter. The screen is an "
+            "element-INCIDENCE test (does the node sit on an emitted "
+            "/SHELL, /SH3N, /BRICK, /TETRA*, /BEAM or /TRUSS whose part "
+            "resolves to rho > 0?), not a lumped-mass test: a node carrying a "
+            "real but very small element mass passes it, and the compensation "
+            "then leaves that small mass rather than a negative one.")
     if orphan:
+        # Since round 5 a spring node with no /ADMAS gets a NEGATIVE one, so
+        # "no /ADMAS to subtract from" is no longer a terminal class. The
+        # ONLY way into this list left is a registered node that is not in
+        # state.nodes: _register_spring_token_mass refuses a share <= 0, and
+        # done / bad / removed / connector_ground / guarded / rigid cover
+        # every other node _spring_token_negative_admas selects. Reach 0 on
+        # every corpus here; probed by calling this function directly.
         state.warn(
             f"*ELEMENT_DISCRETE: {len(orphan)} spring node(s) "
-            f"{_fmt_node_list(orphan)} carry NO /ADMAS for k2rad's token "
-            f"spring mass to be subtracted from, so their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element and "
-            "their local frequency LOW by sqrt(1 + share/m_node). LS-DYNA's "
-            "discrete elements are massless; the token exists only because "
-            "hm_read_prop04.F:136-142 refuses a property MASS <= 1e-15 "
-            "(ERROR 229). Give those nodes an *ELEMENT_MASS if their dynamics "
-            "matter.")
+            f"{_fmt_node_list(orphan)} were registered for k2rad's token "
+            "spring mass but are NOT in the converted model's node set, so "
+            "no /ADMAS - positive or negative - could be written for them "
+            "and their mass is HIGH by "
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. That "
+            "is a k2rad-internal inconsistency, not a property of the deck: "
+            "every producer registers at the line that WRITES the /SPRING "
+            "row and _new_ground_node adds the synthesized ground node to "
+            "state.nodes, so no deck on any corpus here reaches this "
+            "sentence. Please report the deck that did.")
     if rigid:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
-            f"{_fmt_node_list(rigid)} belong to a RIGID BODY, whose mass is "
-            "folded into the /RBODY Mass field rather than an /ADMAS, so "
-            f"k2rad's token spring mass ({_SPRING_TOKEN_MASS / 2:g} per "
-            "attached element) rides along there UNCOMPENSATED. It is added "
-            "to the body's total mass; a rigid body's own dynamics are paced "
-            "by that total.")
+            f"{_fmt_node_list(rigid)} are SECONDARY nodes of a rigid body. "
+            "Whether k2rad's token spring mass "
+            f"({_SPRING_TOKEN_MASS / 2:g} per attached element) reaches that "
+            "body depends on its ICoG: with ICoG=4 inirby.F:265-266 (\"CG OF "
+            "THE MAIN NODE (MASS OF SECONDS IGNORED)\", MASRB = MS(M)) the "
+            "secondary nodes' mass is discarded, so the token - and any "
+            "/ADMAS compensation of it - is INERT. MEASURED on "
+            "mat_spring.belted-dummy (15 registered token nodes, 0.0108 in "
+            "total, all on ICoG=4 bodies): the starter's TOTAL MASS is "
+            "0.3356681850251 with the token, with the token at 1e-12, with a "
+            "-0.0108 /ADMAS and with a +0.0108 /ADMAS, and the full engine run "
+            "is 110032 cycles with bit-identical energies in every arm. On an "
+            "ICoG 1/2/3 body the members' masses ARE summed "
+            "(inirby.F:186-258) and the token would reach it - UNMEASURED, no "
+            "roster carrier.")
 
 
 def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
@@ -6186,37 +6797,69 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
             else:
                 # NEVER a non-positive /ADMAS. gnonspring.k is the carrier:
                 # 1e-6 of stated nodal mass against a token half of 5e-5, 50x.
-                # Its measured arm says even flooring the value to 1e-12 moves
-                # nothing (IE 431.3 either way), so leaving the deck's own
-                # number and naming the error beats inventing one.
+                # The deck's own number is kept here and the FULL share comes
+                # off below on a negative card of its own, so the sum is exact.
                 degenerate.append((nid, mass, share))
         masses_by_value.setdefault(mass, []).append(nid)
-    _warn_spring_token_mass(state, rigid_nodes, compensated, degenerate)
-    if not masses_by_value:
+    # The classes the SUBTRACTION above cannot reach — a node with no
+    # *ELEMENT_MASS has no /ADMAS to take the token off, and the loop above
+    # never even visits it (it iterates state.added_node_masses).
+    neg_groups, guarded = _spring_token_negative_admas(
+        state, rigid_nodes, compensated, degenerate)
+    _warn_spring_token_mass(state, rigid_nodes, compensated, degenerate,
+                            neg_groups, guarded)
+    if not masses_by_value and not neg_groups:
         return []
-    lines: List[str] = [HDR, "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
+    lines: List[str] = []
     n_nodes = 0
     total = 0.0
-    for mass, nids in sorted(masses_by_value.items()):
-        nids = sorted(nids)
-        n_nodes += len(nids)
-        total += mass * len(nids)
-        grnod_id = state.next_grnod_id()
-        lines += _emit_grnod_node(grnod_id, f"added_mass_{mass:g}_nodes", nids)
-        admas_id = state.next_id()
+    if masses_by_value:
+        lines += [HDR,
+                  "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
+        for mass, nids in sorted(masses_by_value.items()):
+            nids = sorted(nids)
+            n_nodes += len(nids)
+            total += mass * len(nids)
+            grnod_id = state.next_grnod_id()
+            lines += _emit_grnod_node(grnod_id, f"added_mass_{mass:g}_nodes",
+                                      nids)
+            admas_id = state.next_id()
+            lines += [
+                f"/ADMAS/0/{admas_id}",
+                f"added_mass_{mass:g}",
+                "#               MASS   grnd_ID",
+                f"{_f(mass)}{_i(grnod_id)}",
+                HDR,
+            ]
+    # ... then the negative cards, AFTER the positive block so a deck with no
+    # token to compensate keeps its id stream byte-identical.
+    if neg_groups:
         lines += [
-            f"/ADMAS/0/{admas_id}",
-            f"added_mass_{mass:g}",
-            "#               MASS   grnd_ID",
-            f"{_f(mass)}{_i(grnod_id)}",
             HDR,
+            "#-  SPRING TOKEN MASS COMPENSATION (negative /ADMAS - "
+            "hm_read_admas.F:164-170/:247):",
         ]
-    note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_nodes} ordinary node(s) "
-            f"(total added mass {total:g}).")
-    if skipped_rigid:
-        note += (f" {skipped_rigid} mass(es) on rigid-body nodes were left to the "
-                 "/RBODY (master-node mass is folded into its Mass field).")
-    state.warn(note)
+        for share, nids in sorted(neg_groups.items()):
+            nids = sorted(nids)
+            grnod_id = state.next_grnod_id()
+            lines += _emit_grnod_node(
+                grnod_id, f"spring_token_compensation_{share:g}", nids)
+            admas_id = state.next_id()
+            lines += [
+                f"/ADMAS/0/{admas_id}",
+                f"spring_token_compensation_{-share:g}",
+                "#               MASS   grnd_ID",
+                f"{_f(-share)}{_i(grnod_id)}",
+                HDR,
+            ]
+    if n_nodes:
+        note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_nodes} ordinary "
+                f"node(s) (total added mass {total:g}).")
+        if skipped_rigid:
+            note += (f" {skipped_rigid} mass(es) on rigid-body nodes were left "
+                     "to the /RBODY (master-node mass is folded into its Mass "
+                     "field).")
+        state.warn(note)
     return lines
 
 

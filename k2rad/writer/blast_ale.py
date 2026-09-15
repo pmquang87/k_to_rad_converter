@@ -719,8 +719,25 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int) -> None
         ":158-159) and a mesh-derived Gap = 0.5 x the mean brick edge. The "
         "corpus carries the controlled experiment for how much that costs: "
         "quadrature_B and quadrature_C differ in EXACTLY one cell (NQUAD 1 vs "
-        "3) and convert to byte-identical files. Tune Stfval/Gap by hand for "
-        "your coupling.")
+        "3) and convert to byte-identical files. HOW FAR the unit stiffness "
+        "is from the solver's own idea of one: with Iauto = 2 the starter "
+        "computes it itself as SCALE * Vref^2 * rho_max * A_mean / Gap "
+        "(insurf_dx.F:114). MEASURED on cylinder_impact_B AS CONVERTED, with "
+        "Iauto = 2 and Vref 2e5 written into the emitted card by hand (nt 4, "
+        "0 starter ERROR): COMPUTED STIFFNESS VALUE 3.528, USING DENSITY "
+        "1.0000000000000E-12, USING MEAN AREA 441.0 - i.e. 3.5x the 1.0 "
+        "emitted here, not four orders. The rho_max the starter uses is the "
+        "ALE group's, and this deck's ALE bricks are *MAT_VACUUM rho 1e-12: "
+        "the *INITIAL_VOLUME_FRACTION_GEOMETRY fill that would put the "
+        "*MAT_PLASTIC_KINEMATIC rho 8e-9 into them is not converted (see the "
+        "ALE FILL note). WITH that fill present the same formula gives "
+        "1 * (2e5)^2 * 8e-9 * 441 / 5 = 28224, which is the four-orders "
+        "figure this sentence used to publish for the converted deck. NOTE "
+        "ALSO that a NEGATIVE "
+        "PFAC is a LOAD CURVE id, not a scale: cylinder_impact_B states -1 "
+        "and stagnation_B -2, i.e. a penalty-stiffness curve, and "
+        "/INTER/TYPE18 has no field for one at all. Tune Stfval/Gap by hand "
+        "for your coupling.")
 
 
 def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
@@ -772,9 +789,21 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
             "carries the same -5000 velocity). No /INTER/TYPE18 parameter "
             "moves this: Stfval x0.01, x100, the Iauto = 2 / PFAC / Vref form "
             "and a halved impact velocity all end at 99.9 %. THE FSI RESULT ON "
-            "THIS DECK IS NOT VALID. A correct mapping needs a void phase "
-            "(/MAT/LAW51 multi-material + /INIVOL, or a /MAT/VOID region) and "
-            "is not implemented.")
+            "THIS DECK IS NOT VALID. What LS-DYNA means by the card is on Vol "
+            "I R17 p.28-134 (paraphrased, not quoted): evacuated fluid "
+            "elements are approximated as fluid elements at a very low "
+            "density, the void material's constitutive properties must be "
+            "identical to those of the material that will later fill it, and "
+            "the option is incompatible with *ALE_MULTI-MATERIAL_GROUP. A "
+            "correct mapping "
+            "therefore needs a void PHASE (/MAT/LAW51 multi-material + "
+            "/INIVOL, or a /MAT/VOID region) and is not implemented. The "
+            "low-density arm was MEASURED in round 4 and is NOT a substitute: "
+            "at rho = 1e-15 this deck's energies are right - IE 1.080 / KE "
+            "1.530e4 at 0.0 % error - but the time step collapses on the "
+            "near-massless fluid and the run reaches t = 1.949e-3 of 0.07, "
+            "2.8 % of the target, before it is killed. That is a diagnosis, "
+            "not a fix.")
 
 
 def _make_ebcs(state: ConversionState) -> List[str]:

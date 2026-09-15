@@ -82,7 +82,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # k2rad lives one directory up from tools/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -94,13 +94,21 @@ from k2rad.state import ConversionState          # noqa: E402
 # thickness-to-section-constants rule (the /PROP/BEAM the engine's stiffness
 # matrix came from used it) and the converter's own RO <= 0 floor (the .rad it
 # came from carries it). See _beam_section_area and _material_rho.
-from k2rad.writer.beams import _constants_from_thicknesses   # noqa: E402
-from k2rad.writer.materials import _ZERO_DENSITY_FLOOR       # noqa: E402
-
-#: *SECTION_BEAM ELFORMs whose card 2 states THICKNESSES instead of section
-#: constants (Vol I R17 p.41-11: cards 2a and 2e) — the ones
-#: ``_constants_from_thicknesses`` is written for.
-_THICKNESS_BEAM_ELFORMS = frozenset({0, 1, 4, 5, 11})
+from k2rad.writer.beams import _constants_from_thicknesses   # noqa: E402,F401
+from k2rad.writer.materials import _ZERO_DENSITY_FLOOR       # noqa: E402,F401
+# The lumper itself now lives in the PACKAGE (k2rad/lumping.py) because the
+# writer needs it too — see nodal_masses_from_state below. Re-exported here
+# under the names this module has always published, so every caller and test
+# keeps working.
+from k2rad.lumping import (                                  # noqa: E402,F401
+    _HEXA_TETS,
+    _THICKNESS_BEAM_ELFORMS,
+    _beam_section_area,
+    _material_rho,
+    _tet_volume,
+    _tri_area,
+    nodal_masses_from_state as _nodal_masses_from_state,
+)
 
 try:                                             # pragma: no cover - env dependent
     import numpy as np
@@ -189,209 +197,23 @@ def read_stiffness(path: str) -> StiffnessMatrix:
 # Lumped nodal masses from the source .k
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tri_area(p1, p2, p3) -> float:
-    ux, uy, uz = p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]
-    vx, vy, vz = p3[0] - p1[0], p3[1] - p1[1], p3[2] - p1[2]
-    cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
-    return 0.5 * math.sqrt(cx * cx + cy * cy + cz * cz)
-
-
-def _tet_volume(p1, p2, p3, p4) -> float:
-    a = (p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2])
-    b = (p3[0] - p1[0], p3[1] - p1[1], p3[2] - p1[2])
-    c = (p4[0] - p1[0], p4[1] - p1[1], p4[2] - p1[2])
-    det = (a[0] * (b[1] * c[2] - b[2] * c[1])
-           - a[1] * (b[0] * c[2] - b[2] * c[0])
-           + a[2] * (b[0] * c[1] - b[1] * c[0]))
-    return abs(det) / 6.0
-
-
-# Hexa8 split into 6 tets fanned around the 0-6 body diagonal (exact for any
-# hexa whose faces are planar, standard approximation otherwise). NOTE: an
-# earlier corner-based table ended with tet (5,4,6,7) — the four TOP-FACE
-# corners, which are coplanar (zero volume) — so every hexa's volume/mass came
-# out 5/6 of the true value (+9.5% bias on hexa-model eigenfrequencies).
-_HEXA_TETS = ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
-              (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6))
-
-
-def _material_rho(state: ConversionState,
-                  zero_density_floor: bool = True) -> Dict[int, float]:
-    """``mid -> rho`` for every law this module can weigh.
-
-    ``zero_density_floor`` mirrors the CONVERTER's own ``RO <= 0`` floor
-    (``writer/materials._ZERO_DENSITY_FLOOR``). This is not a fabrication and
-    not a modelling choice: the stiffness matrix this module pairs the mass
-    with was exported by the engine from the CONVERTED ``.rad``, in which
-    k2rad has already written ``rho = 1e-24`` for exactly these materials.
-    Building M at ``rho = 0`` while K comes from a model at ``rho = 1e-24``
-    pairs a mass matrix with a stiffness matrix from a DIFFERENT model — and
-    the zero rows are what makes the eigensolve fail (see ``solve_modes``).
-    The substitution is printed the way the converter prints it, and
-    ``--no-zero-density-floor`` turns it off.
-
-    ``nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k`` is the measured carrier:
-    its ``*MAT_ELASTIC`` card 1 parses as ``mid 1 | RO 0.0 | E 68947.5729 |
-    PR 0.33``, so the density really is zero in the source.
-    """
-    rho: Dict[int, float] = {}
-    floored: List[int] = []
-    for mats in (state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
-                 state.mat_rigid, state.mat_null, state.mat_power_law):
-        for mid, m in mats.items():
-            r = m.rho
-            if r <= 0.0 and zero_density_floor:
-                r = _ZERO_DENSITY_FLOOR
-                floored.append(mid)
-            rho[mid] = r
-    if floored:
-        print(f"  NOTE: material(s) {sorted(floored)} state RO <= 0; the mass "
-              f"matrix uses rho = {_ZERO_DENSITY_FLOOR:g}, the same floor "
-              "k2rad wrote into the .rad the stiffness matrix was exported "
-              "from (writer/materials._ZERO_DENSITY_FLOOR). "
-              "--no-zero-density-floor keeps the stated zero.")
-    return rho
-
-
-def _beam_section_area(sec) -> float:
-    """Cross-section AREA of a *SECTION_BEAM that states only thicknesses.
-
-    ELFORM 0/1/4/5/11 carry no A/Iyy/Izz/Ixx at all — their card 2 is
-    ``TS1 TS2 TT1 TT2 ...`` — so ``sec.area`` is 0 and this module weighed the
-    beam at zero. The WRITER already derives the constants for exactly these
-    formulations (``k2rad.writer.beams._constants_from_thicknesses``, CST 0/2
-    rectangular TS1 x TT1, CST 1 tubular with TS1 the OUTER and TT1 the INNER
-    diameter), so the derivation is IMPORTED rather than repeated here: the
-    /PROP/BEAM the engine built its stiffness matrix from used those very
-    numbers, and a second copy of the rule is how the two drift apart.
-
-    MEASURED on ``nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k``: elform 1,
-    area 0.0, ts1 6.35, tt1 50.8, cst 0 ->
-    ``_constants_from_thicknesses(0, 6.35, 50.8) = (322.58, 69371.904,
-    1083.936, 70455.840)``, and I = 50.8*6.35**3/12 = 1083.936 gives
-    k = 3EI/L**3 = 109.4543 and f = 110.5541 Hz against the deck's own
-    ``.eigout`` f1 = 110.4521 Hz (-0.09 %).
-    """
-    if getattr(sec, "elform", -1) not in _THICKNESS_BEAM_ELFORMS:
-        return 0.0
-    got = _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1)
-    return float(got[0]) if got else 0.0
-
-
 def nodal_masses_from_state(
         state: ConversionState, zero_density_floor: bool = True
 ) -> Tuple[Dict[int, float], Dict[int, float]]:
-    """Lumped nodal masses and rotary inertias [deck units] from the parsed deck.
+    """Lumped nodal masses and rotary inertias [deck units] from the deck.
 
-    Returns ``(mass, inertia)``: translational mass and rotational inertia per
-    node.  Element mass is split evenly over the element's nodes (row-sum
-    lumping for the linear elements used here); shell nodes also receive the
-    Radioss rotary-inertia lumping IN = (m_elem/n_nodes)·(A_elem + t²)/12.
-    Both reproduce the OpenRadioss starter's MS/IN nodal arrays to machine
-    precision (verified on the W14 bogie). *ELEMENT_MASS /
-    *ELEMENT_MASS_PART additions are then applied to the masses.
+    MOVED into the package as ``k2rad.lumping.nodal_masses_from_state`` and
+    imported back here, unchanged: ``--mass-weighted-inivel`` needs the same
+    lumping in the WRITER, and the package must never import from ``tools/``.
+    A second copy of the rule is how the two drift apart.
+
+    This wrapper exists for ONE reason: the package function reports the
+    ``RO <= 0`` NOTE through a caller-supplied ``report`` callable and prints
+    nothing by default (a conversion's diagnostics go through ``state.warn``),
+    while this module is a console tool — so it passes ``print`` and the
+    console output is exactly what it was before the move.
     """
-    rho_by_mid = _material_rho(state, zero_density_floor)
-    nodes = state.nodes
-    mass: Dict[int, float] = {}
-    inertia: Dict[int, float] = {}
-
-    def add(nids: Sequence[int], m_elem: float) -> None:
-        share = m_elem / len(nids)
-        for n in nids:
-            mass[n] = mass.get(n, 0.0) + share
-
-    part_mass: Dict[int, float] = {}
-
-    def add_part(pid: int, m_elem: float) -> None:
-        part_mass[pid] = part_mass.get(pid, 0.0) + m_elem
-
-    for e in state.shell_elems:
-        part = state.parts.get(e.pid)
-        if part is None:
-            continue
-        sec = state.sec_shells.get(part.secid)
-        rho = rho_by_mid.get(part.mid, 0.0)
-        if sec is None or rho == 0.0:
-            continue
-        try:
-            p = [ (nodes[n].x, nodes[n].y, nodes[n].z) for n in e.nodes ]
-        except KeyError:
-            continue
-        area = _tri_area(p[0], p[1], p[2])
-        if len(p) == 4:
-            area += _tri_area(p[0], p[2], p[3])
-        m_elem = area * sec.t1 * rho
-        add(e.nodes, m_elem)
-        add_part(e.pid, m_elem)
-        in_share = (m_elem / len(e.nodes)) * (area + sec.t1 ** 2) / 12.0
-        for n in e.nodes:
-            inertia[n] = inertia.get(n, 0.0) + in_share
-
-    for e in state.solid_elems:
-        part = state.parts.get(e.pid)
-        if part is None:
-            continue
-        rho = rho_by_mid.get(part.mid, 0.0)
-        if rho == 0.0:
-            continue
-        try:
-            p = [ (nodes[n].x, nodes[n].y, nodes[n].z) for n in e.nodes ]
-        except KeyError:
-            continue
-        if len(p) >= 8:                       # hexa8 (or degenerate penta/hexa)
-            vol = sum(_tet_volume(p[a], p[b], p[c], p[d])
-                      for a, b, c, d in _HEXA_TETS)
-        else:                                 # tet4 / tet10 (corner volume)
-            vol = _tet_volume(p[0], p[1], p[2], p[3])
-        m_elem = vol * rho
-        add(e.nodes, m_elem)
-        add_part(e.pid, m_elem)
-
-    for e in state.beam_elems:
-        part = state.parts.get(e.pid)
-        if part is None:
-            continue
-        sec = state.sec_beams.get(part.secid)
-        rho = rho_by_mid.get(part.mid, 0.0)
-        if sec is None or rho == 0.0:
-            continue
-        area = sec.area or _beam_section_area(sec)
-        if area <= 0.0:
-            continue
-        try:
-            p1 = nodes[e.n1]; p2 = nodes[e.n2]
-        except KeyError:
-            continue
-        length = math.dist((p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z))
-        m_elem = length * area * rho
-        add((e.n1, e.n2), m_elem)   # rho*A*L/2 per end node
-        add_part(e.pid, m_elem)
-
-    # *ELEMENT_MASS point masses (per node).
-    for nid, m in state.added_node_masses.items():
-        mass[nid] = mass.get(nid, 0.0) + m
-
-    # *ELEMENT_MASS_PART: ADDMASS spread evenly over the part's nodes;
-    # FINMASS = target total -> spread (FINMASS - current part mass).
-    if state.element_mass_parts:
-        part_nodes: Dict[int, set] = {}
-        for e in state.shell_elems:
-            part_nodes.setdefault(e.pid, set()).update(e.nodes)
-        for e in state.solid_elems:
-            part_nodes.setdefault(e.pid, set()).update(e.nodes)
-        for e in state.beam_elems:
-            part_nodes.setdefault(e.pid, set()).update((e.n1, e.n2))
-        for pid, (addmass, finmass) in state.element_mass_parts.items():
-            nids = sorted(part_nodes.get(pid, ()))
-            if not nids:
-                continue
-            extra = (finmass - part_mass.get(pid, 0.0)) if finmass > 0 else addmass
-            if extra:
-                share = extra / len(nids)
-                for n in nids:
-                    mass[n] = mass.get(n, 0.0) + share
-    return mass, inertia
+    return _nodal_masses_from_state(state, zero_density_floor, report=print)
 
 
 def parse_deck(k_path: str) -> ConversionState:

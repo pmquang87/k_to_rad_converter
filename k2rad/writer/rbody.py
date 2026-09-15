@@ -18,11 +18,36 @@ __all__ = [
     "_con2_to_rot",
     "_resolve_cnrb_spc",
     "_make_cnrb_rbodies",
+    "_make_shell_to_solid_rbodies",
+    "_make_generalized_weld_butt_rbodies",
     "_make_probe_rbody",
     "_inertia_element_nodes",
     "_resolve_inertia",
     "ICOG_DEFINED_PROPERTIES",
+    "_RBODY_CARD1_HDR",
+    "_RBODY_IOPTOFF_HDR",
 ]
+
+
+#: The /RBODY card-1 comment, shared by EVERY producer so the shape cannot
+#: drift between them again.
+#:
+#: NINE fields. ``hm_cfg_files/config/CFG/radioss2021/RBODY/rbody.cfg`` card 1
+#: is ``CARD("%10d%10d%10d%10d%20lg%10d%10d%10d%10d", independentnode, ISENSOR,
+#: SKEW_CSID, ISPHERE, MASS, dependentnodeset, IKREM, ICOG, SURF_ID)`` and the
+#: reader stops there (``hm_read_rbody.F:260-274``). ``Ifail`` is NOT a card-1
+#: column: ``hm_read_rbody.F:286-289`` reads ``Ioptoff``, ``Iexpams``, then
+#: ``Ifail`` as the THIRD value of the card below the inertia pair. Between
+#: round 1 and round 5 the CNRB producer wrote a tenth ``Ifail`` column here
+#: and a two-field ``Ioptoff`` card; the fixed-column reader stops at nine, so
+#: the emitted zero was never read and no behaviour changed — but the card was
+#: not the card the cfg describes.
+_RBODY_CARD1_HDR = (
+    "#  node_ID   sens_ID   skew_ID    Ispher                Mass"
+    "   grnd_ID     Ikrem      ICoG   surf_ID")
+
+#: The /RBODY ``Ioptoff`` card comment — THREE fields, ``Ifail`` last.
+_RBODY_IOPTOFF_HDR = "#  Ioptoff   Iexpams     Ifail"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -643,6 +668,13 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             # a whole *MAT_RIGID PART: consumers keyed on the part id (the
             # /GRAV group builder) may swap the part out for its main node
             "kind": "part",
+            # The ICoG cell this body's /RBODY carries, for the ONE consumer
+            # that needs to know WHERE the main node ends up:
+            # --mass-weighted-inivel writes v_cm on it, which is only the
+            # rigid field's value there when the starter has moved the node to
+            # the centre of mass (ICoG 0/1, inirby.F:186-211). Read, never
+            # re-derived -- a second copy of the rule is how the two disagree.
+            "icog": icog,
         }
 
         # /RBODY format: 2 data cards (one per logical record).
@@ -752,7 +784,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # DEFAULTS block says 2, which the reader reads as "no AMS expansion over
         # this rigid body" — the documented route into starter ERROR 1066.
         lines += inertia_extra
-        # The #106 register, /RBODY producer 1 of 3 (*MAT_RIGID parts, and
+        # The #106 register, /RBODY producer 1 of 5 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the
         # *CONSTRAINED_RIGID_BODIES merge masters). *DATABASE_RBDOUT lists this
         # set; rbody_info cannot stand in for it (see _make_starter_th_rbody).
@@ -760,12 +792,12 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
-            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+            _RBODY_CARD1_HDR,
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
         lines += [
-            "#  Ioptoff   Iexpams     Ifail",
+            _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"rb_nodes_pid{pid}", unique_nodes)
@@ -1127,6 +1159,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             # a *CONSTRAINED_NODAL_RIGID_BODY over nodes of DEFORMABLE parts:
             # keyed by the CNRB's own pid, never a whole rigid part
             "kind": "cnrb",
+            "icog": icog,      # see the *MAT_RIGID site for why
+
         }
 
         # Optional added mass on the master node / part (same sources as
@@ -1157,7 +1191,10 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             added_mass = inertia_mass
 
         # /RBODY — same 4-card form as _make_rbodies (Card1 + Jxx Jyy Jzz +
-        # Jxy Jyz Jxz + Ioptoff Iexpams; all four required or np>1 segfaults).
+        # Jxy Jyz Jxz + Ioptoff Iexpams Ifail; all four required or np>1
+        # segfaults). Card 1 and the Ioptoff comment come from the SHARED
+        # constants so this producer's shape cannot drift from the other four
+        # again.
         # Without _INERTIA, ICoG=0 (=default 1, RefGuide p.1879) MOVES the master
         # node to the computed center of gravity, so a /CLOAD force from
         # *LOAD_RIGID_BODY acts through the CoG as a pure force with no spurious
@@ -1165,17 +1202,17 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # of mass. With _INERTIA, ICoG=4 pins it at the stated centre of mass
         # instead and the mesh contribution is ignored.
         lines += inertia_extra
-        state.rbody_ids.add(ind_node)          # producer 2 of 3 (CNRB)
+        state.rbody_ids.add(ind_node)          # producer 2 of 5 (CNRB)
         lines += [
             f"/RBODY/{ind_node}",
             cnrb.title or f"CNRB_{cnrb.pid}",
-            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
-            f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}{_i(0)}",
+            _RBODY_CARD1_HDR,
+            f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
         lines += [
-            "#  Ioptoff   Iexpams",
-            f"{_i(0)}{_i(0)}",
+            _RBODY_IOPTOFF_HDR,
+            f"{_i(0)}{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"cnrb_nodes_pid{cnrb.pid}", secondary_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"cnrb_indnode_pid{cnrb.pid}", [ind_node])
@@ -1222,8 +1259,22 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     Validated on the W14 bogie (contact-free /IMPL/LINEAR static + modal
     stiffness export): without the probe the engine segfaults; with it the run
     terminates normally with 0 warnings and the results are unaffected.
+
+    THE GUARD READS BOTH REGISTRIES. ``rbody_info`` alone is not "does this
+    deck have a rigid body": producers 4 and 5 (``_make_shell_to_solid_rbodies``
+    and ``_make_generalized_weld_butt_rbodies``, both added in round 5) emit a
+    real ``/RBODY`` and deliberately do NOT populate that dict — they have no
+    LS-DYNA PART id to key it by. An implicit deck whose only rigid body were a
+    shell-to-solid tie or a butt weld would otherwise get the probe, its three
+    synthesized nodes and its ``/BCS`` on top of a body it already has, under a
+    warning claiming it has none. ``state.rbody_ids`` is the set every producer
+    registers into, so it is read here too. Reach today is 0 — both new
+    carriers are explicit decks — which is why this costs no deck a byte; it is
+    the #138 rule (grep every consumer of a flag you add a producer for)
+    applied before the case exists.
     """
-    if not state.is_implicit or rbody_info or not state.nodes:
+    if (not state.is_implicit or rbody_info or state.rbody_ids
+            or not state.nodes):
         return []
     xs = [nd.x for nd in state.nodes.values()]
     ys = [nd.y for nd in state.nodes.values()]
@@ -1255,20 +1306,20 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     ]
     for k in range(3):
         lines.append(f"{_i(n1 + k)}{_f(x0 + k * spacing)}{_f(y0)}{_f(z0)}")
-    # Producer 3 of 3. This one is NOT in rbody_info at all (it is only
+    # Producer 3 of 5. This one is NOT in rbody_info at all (it is only
     # appended to rbody_lines), so a deck whose only rigid body is the probe
     # would get no /TH/RBODY group if *DATABASE_RBDOUT read that dict instead.
     state.rbody_ids.add(n1)
     lines += [
         f"/RBODY/{n1}",
         "inert_probe_rbody",
-        "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+        _RBODY_CARD1_HDR,
         f"{_i(n1)}{_i(0)}{_i(0)}{_i(0)}{_f(1e-3)}{_i(slave_grnod)}{_i(0)}{_i(0)}{_i(0)}",
         "#                Jxx                 Jyy                 Jzz",
         f"{_f(1e-3)}{_f(1e-3)}{_f(1e-3)}",
         "#                Jxy                 Jyz                 Jxz",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-        "#  Ioptoff   Iexpams     Ifail",
+        _RBODY_IOPTOFF_HDR,
         f"{_i(0)}{_i(0)}{_i(0)}",
     ]
     lines += _emit_grnod_node(slave_grnod, "inert_probe_slaves", [n1 + 1, n1 + 2])
@@ -1288,3 +1339,391 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
         "zero effect on results. Remove it if you add a real rigid body."
     )
     return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bcs_constrained_nodes(state: ConversionState) -> Set[int]:
+    """Every node this deck puts a /BCS on, from both sources.
+
+    ``*NODE`` TC/RC (``state.node_tc_rc``, the dome's own symmetry planes) and
+    ``*BOUNDARY_SPC_{NODE,SET}`` (``state.bcs_spcs``, resolved through the node
+    sets). Used ONLY to say, before the run, which bodies will make the starter
+    raise WARNING ID 312 INCOMPATIBLE KINEMATIC CONDITIONS.
+    """
+    out: Set[int] = {nid for nid, (tc, rc) in state.node_tc_rc.items()
+                     if tc or rc}
+    for bc in state.bcs_spcs:
+        if not any((bc.dofx, bc.dofy, bc.dofz,
+                    bc.dofrx, bc.dofry, bc.dofrz)):
+            continue
+        entry = state.node_sets.get(bc.nsid)
+        if entry is None:
+            if bc.nsid in state.nodes:
+                out.add(bc.nsid)        # a _NODE card names the node itself
+            continue
+        out.update(n for n in entry[1] if n > 0)
+    return out
+
+
+def _next_rbody_id(state: ConversionState, preferred: int) -> int:
+    """*preferred* if it is free, else a fresh auto id.
+
+    /RBODY has no allocator of its own — its id IS its main node id, the
+    convention all three pre-round-5 producers follow and what
+    ``writer/output._make_starter_th_rbody`` lists. A duplicate is starter
+    ERROR 79, so a collision takes ``next_id()`` instead.
+    """
+    return preferred if preferred not in state.rbody_ids else state.next_id()
+
+
+def _coincidence_tolerance(state: ConversionState) -> float:
+    """``max(1e-6, 1e-9 * mesh bounding-box diagonal)``.
+
+    Absolute PLUS relative, because the criterion's degeneracy is geometric,
+    not unit-dependent: a pair the deck means to be coincident is written at
+    identical coordinates, and the only spread to allow for is the deck's own
+    print precision, which scales with the model.
+    """
+    if not state.nodes:
+        return 1.0e-6
+    xs = [nd.x for nd in state.nodes.values()]
+    ys = [nd.y for nd in state.nodes.values()]
+    zs = [nd.z for nd in state.nodes.values()]
+    diag = ((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2
+            + (max(zs) - min(zs)) ** 2) ** 0.5
+    return max(1.0e-6, 1.0e-9 * diag)
+
+
+def _warn_shell_to_solid_dropped(state: ConversionState) -> None:
+    """--no-shell-to-solid-rbody: say what is lost, once for the deck."""
+    n = len(state.shell_to_solids)
+    state.note_recognized_not_emitted(
+        "CONSTRAINED_SHELL_TO_SOLID",
+        "--no-shell-to-solid-rbody: the shell node and its brick fibre are "
+        "left UNCONNECTED")
+    state.warn(
+        f"*CONSTRAINED_SHELL_TO_SOLID: {n} card(s) were NOT converted "
+        "(--no-shell-to-solid-rbody). The shell node and the brick fibre it "
+        "names are then UNCONNECTED - on constrained.shell_solid.dome that "
+        "arm reads IE 0.6693 against LS-DYNA's 642.206 (-99.90 %) and KE "
+        "1.290e5 against 1040.33 (+12299.9 %), i.e. the shell simply flies "
+        "off the dome. Drop the flag to tie them with an /RBODY.")
+
+
+def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
+    """*CONSTRAINED_SHELL_TO_SOLID -> one /RBODY per card. Producer 4 of 5.
+
+    LS-DYNA names the substitute in the card's own Purpose sentence (Vol I R17
+    p.10-182): *"Define a tie between a shell edge and solid elements. Nodal
+    rigid bodies can perform the same function and may also be used."* The
+    shell node ``NID`` is the main node, the ``NSID`` set is the secondary
+    group, and Mass/Inertia stay 0 so Radioss lumps the body from the nodes.
+
+    ``ICoG = 3`` — NOT the reader default 1. ``inirby.F``'s ``ELSEIF(ICDG==3)``
+    keeps ``XG(J) = X(J,M)``, i.e. the main node stays where the mesh put it;
+    the default MOVES a main node to the computed centre of gravity, which on
+    a general fibre displaces a MESHED shell node at t = 0. (The CNRB producer
+    synthesizes a free centroid node for exactly that reason — here the main
+    node is the card's own, so the flag has to do the work.) MEASURED on
+    ``constrained.shell_solid.dome`` at nt 4: ICoG 3 and ICoG blank give the
+    same 48190 cycles and the same IE/KE/EXT to four significant figures, so
+    the choice costs nothing and removes the hazard.
+
+    THE TIED NODES ARE DELIBERATELY NOT ADDED TO ``rigid_nodes``, and this is
+    a MEASURED decision, not an oversight. That set does not mean "a node of
+    some rigid body"; it means "a node whose constraints, masses and initial
+    velocities must be RE-POINTED to a ``/RBODY`` main node that
+    ``rbody_info`` knows", and ``rbody_info`` is keyed by LS-DYNA PART id —
+    which a shell-to-solid tie does not have. Registering them anyway sends
+    ``_make_node_tc_rc_bcs`` (``writer/loads.py``) down its
+    ``main_of.get(nid) is None`` branch: measured on the dome, **12 of the
+    deck's 132 stated ``*NODE`` TC/RC constraints were DROPPED** — the
+    symmetry conditions on the tied nodes — under a warning that blames a
+    ``*CONSTRAINED_RIGID_BODIES`` merge the deck does not contain. Leaving
+    them out keeps every constraint the deck states; the redundant ``/BCS``
+    then costs a starter WARNING ID 312 at 0 ERRORs, which is what the per-card
+    warning below says and what was measured (60 conditions on the dome).
+
+    WHAT THAT CHOICE ALSO COSTS, named rather than left to be found: a tied
+    node is invisible to every other consumer of ``rigid_nodes``. The one that
+    matters is ``_warn_inivel_on_rigid_members`` (``writer/loads.py``) — an
+    ``*INITIAL_VELOCITY`` landing on a tied brick node is emitted with no
+    warning that ``inirby.F:1033-1048`` will overwrite it from the body's main
+    node at t = 0. Reach is 0 on every corpus here (the dome states no
+    ``*INITIAL_VELOCITY``), and the fix, if a carrier ever appears, is a
+    SEPARATE set the TC/RC re-point does not read — not registering these nodes
+    in ``rigid_nodes``, which is the thing measured to drop 12 constraints.
+    """
+    cards = state.shell_to_solids
+    if not cards:
+        return []
+    if not state.options.shell_to_solid_rbody:
+        _warn_shell_to_solid_dropped(state)
+        return []
+    constrained = _bcs_constrained_nodes(state)
+    lines: List[str] = ["#-  SHELL-TO-SOLID TIES (-> /RBODY):", HDR]
+    emitted = False
+    for c in cards:
+        label = f"*CONSTRAINED_SHELL_TO_SOLID NID={c.nid} NSID={c.nsid}"
+        if c.nid <= 0 or c.nid not in state.nodes:
+            state.warn(f"{label}: the shell node has no coordinates - tie NOT "
+                       "converted.")
+            continue
+        entry = state.node_sets.get(c.nsid) if c.nsid > 0 else None
+        if entry is None:
+            state.warn(f"{label}: node set {c.nsid} not found - tie NOT "
+                       "converted.")
+            continue
+        fibre = [n for n in dict.fromkeys(entry[1])
+                 if n > 0 and n in state.nodes and n != c.nid]
+        if not fibre:
+            state.warn(f"{label}: node set {c.nsid} resolves to no usable "
+                       "fibre node - tie NOT converted.")
+            continue
+        if c.nid in entry[1]:
+            state.warn(f"{label}: the shell node is ALSO a member of the "
+                       "solid node set; it is the /RBODY main node and was "
+                       "removed from the secondary group (a body cannot be "
+                       "its own secondary).")
+        if len(fibre) > 9:
+            state.warn(f"{label}: {len(fibre)} fibre nodes - LS-DYNA states "
+                       "\"A shell node may be tied to up to nine brick "
+                       "nodes\" (Vol I R17 p.10-182). The tie was converted "
+                       "anyway; check that the set really is one fibre.")
+        rb_id = _next_rbody_id(state, c.nid)
+        grnod_id = state.next_grnod_id()
+        state.rbody_ids.add(rb_id)          # producer 4 of 5
+        lines += [
+            f"/RBODY/{rb_id}",
+            c.title or f"shell_to_solid_{c.nid}_set{c.nsid}",
+            _RBODY_CARD1_HDR,
+            f"{_i(c.nid)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}{_i(grnod_id)}"
+            f"{_i(0)}{_i(3)}{_i(0)}",
+        ]
+        lines += _inertia_lines((0.0,) * 6)
+        lines += [
+            _RBODY_IOPTOFF_HDR,
+            f"{_i(0)}{_i(0)}{_i(0)}",
+        ]
+        lines += _emit_grnod_node(grnod_id,
+                                  f"shell_to_solid_fibre_{c.nsid}", fibre)
+        emitted = True
+        state.warn(
+            f"{label}: the shell node is tied to the set's {len(fibre)} fibre "
+            f"node(s) by /RBODY/{rb_id} (Mass 0, ICoG 3, Ifail 0) - LS-DYNA's "
+            "own Purpose sentence names the substitute (\"Nodal rigid bodies "
+            "can perform the same function and may also be used\", Vol I R17 "
+            "p.10-182). WHAT IT COSTS: LS-DYNA lets the brick nodes \"move "
+            "relative to each other in the fiber direction\" while the shell "
+            "node keeps its relative spacing (p.10-183); an /RBODY makes the "
+            "whole fibre rigid, so the fibre can no longer stretch. MEASURED "
+            "on constrained.shell_solid.dome (7 cards, 5 nodes each, nt 4): "
+            "NORMAL 48190 cycles (+0.27 % over the drop arm's 48060), "
+            "external work 1.290e5 -> 1689 against LS-DYNA's 1692.55 "
+            "(-0.21 %), IE 0.6693 -> 873.9 (-99.90 % -> +36.08 % against "
+            "642.206), KE 1.290e5 -> 806.4 (+12299.9 % -> -22.49 % against "
+            "1040.33). Pass --no-shell-to-solid-rbody to go back to dropping "
+            "the keyword.")
+        hits = sorted(n for n in [c.nid] + fibre if n in constrained)
+        if hits:
+            state.warn(
+                f"{label}: {len(hits)} of this body's nodes {hits[:10]}"
+                + (" ..." if len(hits) > 10 else "")
+                + " also carry a /BCS from *NODE TC/RC or *BOUNDARY_SPC_*, so "
+                  "the starter will raise WARNING ID 312 INCOMPATIBLE "
+                  "KINEMATIC CONDITIONS (BOUNDARY CONDITION / RIGID BODY). "
+                  "MEASURED on the dome: 60 flagged conditions and 0 ERRORs, "
+                  "NORMAL TERMINATION. WHICH of the two conditions Radioss "
+                  "keeps was NOT measured here - kinchk.F:944-951 raises 312 "
+                  "as a SUMMARY OF POSSIBLE INCOMPATIBLE KINEMATIC CONDITIONS "
+                  "and does not say who wins. The RIGID BODY does: MEASURED "
+                  "on a purpose-built coupon (a 4-brick column tied to a "
+                  "shell strip, one fibre node carrying *NODE TC=7/RC=7, "
+                  "nt 2) the tie arm and the SAME deck with that constraint "
+                  "DELETED are numerically identical - IE 3613, engine "
+                  "energy error -97.9 %, 3252 cycles in both - so the /BCS "
+                  "is simply gone; moving that one /BCS onto the rigid "
+                  "body's MAIN node instead (ICoG and the member set held "
+                  "fixed) reproduces the *CONSTRAINED_NODAL_RIGID_BODY twin "
+                  "exactly - IE 707.4, energy error -0.0 %, 2524 cycles - "
+                  "and WARNING 312 disappears with it. So the cost is not "
+                  "only a lost constraint: it can be the whole answer, at "
+                  "0 starter ERRORs and NORMAL TERMINATION on both arms. "
+                  "(On the dome itself the same 60 conditions cost -0.5 % of "
+                  "energy error, so the range is wide.) Check it if the "
+                  "constrained direction is NOT along the fibre.")
+    return lines if emitted else []
+
+
+def _warn_generalized_weld_butt_dropped(state: ConversionState) -> None:
+    """--no-generalized-weld-butt: say what is lost, once for the deck."""
+    n = len(state.generalized_weld_butts)
+    state.note_recognized_not_emitted(
+        "CONSTRAINED_GENERALIZED_WELD_BUTT",
+        "--no-generalized-weld-butt: the welded node pairs are left "
+        "UNCONNECTED")
+    state.warn(
+        f"*CONSTRAINED_GENERALIZED_WELD_BUTT: {n} card(s) were NOT converted "
+        "(--no-generalized-weld-butt). The welded node pairs are then "
+        "UNCONNECTED - on constrained.butt-weld that arm reads IE 1.048e-6 "
+        "against LS-DYNA's 10974.0 (-100 %), i.e. the plates carry no load at "
+        "all. Drop the flag to tie them with an /RBODY whose Ifail criterion "
+        "reproduces the weld's own failure force.")
+
+
+def _make_generalized_weld_butt_rbodies(
+        state: ConversionState) -> List[str]:
+    """*CONSTRAINED_GENERALIZED_WELD_BUTT -> one /RBODY with Ifail=1 per card.
+    Producer 5 of 5.
+
+    LS-DYNA's own model of this weld IS a nodal rigid body: *"When the failure
+    time, tf, is reached the nodal rigid body becomes inactive"* (Vol I R17
+    p.10-32), and its brittle criterion is
+    ``beta*sqrt(sig_n^2 + 3*(tau_n^2 + tau_t^2)) >= sig_f`` with *"The
+    component sigma_n is nonzero for tensile values only."*
+
+    ``hm_read_rbody.F:290-300`` reads ``FN FT expN expT`` when ``Ifail == 1``
+    and ``rgbodv.F:249-269`` evaluates
+    ``(FN/FNmax)^expN + (FT/FTmax)^expT >= 1``, with ``FN`` the TENSILE part of
+    the reaction along the main->secondary direction. With ``sig = F/(L*D)``
+    the two criteria agree at ``FNmax = SIGY*L*D/BETA``.
+
+    COINCIDENT PAIRS ONLY. ``rgbodv.F:249-256`` takes the direction from the
+    main->secondary GEOMETRY: on a coincident pair ``NN = 1/EM20`` and
+    ``U = 0``, so ``FN`` is identically 0 and the criterion collapses to
+    ``|R| >= FTmax`` — numerically LS-DYNA's ``beta*sig_n >= sig_f`` for an
+    axial weld, which is why ``FTmax = FNmax`` and not ``FNmax/sqrt(3)``.
+    On an OFFSET pair that vector is an arbitrary geometric offset with no
+    relation to the weld normal ``L x D`` defines, so any normal/shear split
+    k2rad picked there would be invented — such a pair is refused by name.
+    Roster reach of the refusal: 0 cards.
+    """
+    cards = state.generalized_weld_butts
+    if not cards:
+        return []
+    if not state.options.generalized_weld_butt:
+        _warn_generalized_weld_butt_dropped(state)
+        return []
+    tol = _coincidence_tolerance(state)
+    lines: List[str] = ["#-  GENERALIZED BUTT WELDS (-> /RBODY Ifail=1):", HDR]
+    emitted = False
+    for c in cards:
+        label = f"*CONSTRAINED_GENERALIZED_WELD_BUTT NSID={c.nsid}"
+        entry = state.node_sets.get(c.nsid)
+        if entry is None:
+            state.warn(f"{label}: node set not found - weld NOT converted.")
+            continue
+        pair = [n for n in dict.fromkeys(entry[1])
+                if n > 0 and n in state.nodes]
+        if len(pair) != 2:
+            state.warn(
+                f"{label}: the node set resolves to {len(pair)} node(s), and a "
+                "BUTT weld is exactly ONE nodal pair (Vol I R17 p.10-32: "
+                "\"This requires 3 separate *CONSTRAINED_GENERALIZED_WELD_BUTT "
+                "definitions, one for each nodal pair\") - weld NOT "
+                "converted.")
+            continue
+        n1, n2 = pair
+        a, b = state.nodes[n1], state.nodes[n2]
+        d = ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
+        if d > tol:
+            state.warn(
+                f"{label}: the pair {n1}/{n2} is NOT coincident (|dx| = "
+                f"{d:.6G} against a tolerance of {tol:.6G}) - weld NOT "
+                "converted. Radioss's /RBODY failure criterion takes its "
+                "normal direction from the main->secondary vector "
+                "(rgbodv.F:249-256), which on an offset pair is a geometric "
+                "offset unrelated to the weld normal that L and D define, so "
+                "the normal/shear split would be invented. Merge the nodes, "
+                "or tie the pair with *CONSTRAINED_SPOTWELD, which k2rad "
+                "converts to a force-criterion spring.")
+            continue
+        beta = c.beta if c.beta > 0.0 else 1.0
+        fn_max = 0.0
+        if c.sigy > 0.0 and c.length > 0.0 and c.depth > 0.0:
+            fn_max = c.sigy * c.length * c.depth / beta
+        ifail = 1 if fn_max > 0.0 else 0
+        rb_id = _next_rbody_id(state, n1)
+        grnod_id = state.next_grnod_id()
+        state.rbody_ids.add(rb_id)          # producer 5 of 5
+        lines += [
+            f"/RBODY/{rb_id}",
+            c.title or f"gen_weld_butt_{n1}_{n2}",
+            _RBODY_CARD1_HDR,
+            f"{_i(n1)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}{_i(grnod_id)}"
+            f"{_i(0)}{_i(3)}{_i(0)}",
+        ]
+        lines += _inertia_lines((0.0,) * 6)
+        lines += [
+            _RBODY_IOPTOFF_HDR,
+            f"{_i(0)}{_i(0)}{_i(ifail)}",
+        ]
+        if ifail:
+            lines += [
+                "#                 FN                  FT"
+                "                expN                expT",
+                f"{_f(fn_max)}{_f(fn_max)}{_f(2.0)}{_f(2.0)}",
+            ]
+        lines += _emit_grnod_node(grnod_id,
+                                  f"gen_weld_butt_secondary_{n2}", [n2])
+        emitted = True
+        dropped = [nm for nm, v in (("EPSF", c.epsf), ("TFAIL", c.tfail))
+                   if v and 0.0 < v < 1e19]
+        if c.cid:
+            dropped.append("CID")
+        if ifail:
+            state.warn(
+                f"{label} (nodes {n1} & {n2}): converted to /RBODY/{rb_id} "
+                f"with Ifail=1, FN = FT = SIGY*L*D/BETA = {c.sigy:g}*"
+                f"{c.length:g}*{c.depth:g}/{beta:g} = {fn_max:.6G}, "
+                "expN = expT = 2. LS-DYNA's own model of this weld IS a nodal "
+                "rigid body (\"When the failure time is reached the nodal "
+                "rigid body becomes inactive\", Vol I R17 p.10-32), and its "
+                "brittle criterion beta*sqrt(sig_n^2 + 3*(tau_n^2 + tau_t^2)) "
+                ">= sig_f maps onto rgbodv.F:267's (FN/FNmax)^expN + "
+                "(FT/FTmax)^expT >= 1 with sig = F/(L*D). THE PAIR IS "
+                "COINCIDENT, so Radioss takes its normal direction from the "
+                "main->secondary geometry (rgbodv.F:249-256) and gets a ZERO "
+                "vector: FN is identically 0 and the whole reaction lands in "
+                "FT. FT is therefore set to FNmax, not FNmax/sqrt(3) - on an "
+                "axial weld that is LS-DYNA's own beta*sig_n >= sig_f, but "
+                "the normal/shear DISTINCTION is lost, so a weld that fails "
+                "in pure SHEAR fails sqrt(3) late. MEASURED on "
+                "constrained.butt-weld (nt 4): NORMAL 2082 cycles (+0.63 % "
+                "over the drop arm's 2069), IE 1.048e-6 -> 1.149e4 "
+                "(-100.00 % -> +4.70 % against LS-DYNA's 10974.0), KE 4.699 "
+                "-> 4.966 (-30.79 % -> -26.85 % against 6.78908). Radioss "
+                "sets off the SAME two welds LS-DYNA's own .messag records "
+                "(35 & 23 and 37 & 25): the criterion trips at t 1.269e-3 "
+                "(cycle 872) against LS-DYNA's own 1.26914e-3 and the bodies "
+                "are SET OFF at t 1.272e-3 (cycle 874). The starter echoes "
+                "NORMAL FORCE AT FAILURE 5556. / SHEAR FORCE AT FAILURE "
+                "5556., and FNmax 5555.556 is 0.099 % below the xl-force "
+                "5561.04 that .messag reports at failure. Pass "
+                "--no-generalized-weld-butt to go back to dropping the "
+                "keyword.")
+        else:
+            state.warn(
+                f"{label} (nodes {n1} & {n2}): converted to /RBODY/{rb_id} as "
+                f"an UNBREAKABLE tie (Ifail 0) - SIGY={c.sigy:g}, L="
+                f"{c.length:g}, D={c.depth:g} do not give a positive failure "
+                "force, and the card's own Default row makes SIGY 1e16 = "
+                "\"never fails\" (Vol I R17 p.10-31). Fill SIGY/L/D in if the "
+                "weld is meant to break; the same emitted deck with Ifail "
+                "forced to 0 reads IE 2.775e4 = +152.87 % and KE 0.9026 = "
+                "-86.71 % on constrained.butt-weld, against +4.70 % / "
+                "-26.85 % with the failure model, so the criterion is the "
+                "load-bearing half.")
+        if dropped:
+            state.warn(
+                f"{label}: {', '.join(dropped)} have no /RBODY slot and were "
+                "DROPPED. EPSF is the ductile plastic-strain failure strain, "
+                "TFAIL a timed failure and CID the local output system; the "
+                "/RBODY Ifail criterion is force-based only "
+                "(rgbodv.F:249-269), has no time window and no output frame. "
+                "FILTER, WINDOW, NPR and NPRT are force-filtering and "
+                "pair-count cells with no equivalent either.")
+    return lines if emitted else []
