@@ -23,8 +23,10 @@ Prior history (before this changelog was introduced) is summarized in the
     flag's own users see. On an independently rebuilt coupon of the same shape:
     at the deck's own `TSSFAC` 0.9 **both** formulations blow up at one element
     through the depth and **both** still print NORMAL TERMINATION (`Isolid` 17
-    energy error 99.9 %, IE 1.577e9 against 98.3 of external work, 9950 cycles;
-    the 24 arm's cycle table non-finite at 41 482 cycles), and at `TSSFAC` 0.3
+    reaches the end of the run in 9950 cycles at energy error 99.9 %, IE
+    1.577e9 against 98.3 of external work; the 24 arm collapses to IE −5.1e27
+    / KE 7.5e27 at −99.9 % and STALLS at 2.5 % of the run, its step down to
+    9.5e-12, after 41 482 cycles), and at `TSSFAC` 0.3
     both converge at 0.0 % and reproduce the shipped 1/2/4/8 sweep to better
     than 0.7 %. The retracted claim also contradicted the same warning's own
     0.24820 for that very point. The caveat is restated for what it is: a TIME
