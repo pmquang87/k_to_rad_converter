@@ -1542,13 +1542,17 @@ def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
 
     REACH ON THE R14 ROSTER: ZERO, by construction. A 6-field
     ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling at all, and a scan of
-    every ``.k``/``.key``/``.dyn``/``.inc`` file on the three corpora here —
-    **932 files** (``F:``, ``C:/openradioss_run`` with the two ``*INCLUDE``
-    pullers excluded by name, ``E:/foxcore_data``) — finds **zero** short
-    ``*ELEMENT_SOLID`` cards. The only short rows anywhere are 16
-    ``*ELEMENT_SOLID_NURBS_PATCH`` rows in ``nvh/example-11-05/11.5.nurbs.k``,
-    a different keyword with a different card stack that
-    ``handlers._ELEM_NOT_A_MESH_TOKENS`` already screens. This is
+    every ``.k``/``.key``/``.dyn``/``.inc`` file here — **932 files**, which
+    is **925 across the three corpora** (``F:`` 382, ``C:/openradioss_run``
+    507 with the two ``combine.key`` ``*INCLUDE`` pullers excluded by name,
+    ``E:/foxcore_data`` 36) **plus this repo's own 7 fixtures** — finds
+    **zero** short ``*ELEMENT_SOLID`` cards on any corpus deck. The only
+    short ``*ELEMENT_SOLID`` cards in the whole 932 are the **two in
+    ``tests/fixtures/wedge_short_card.k``**, written for this item. The only
+    other short rows anywhere are 16 ``*ELEMENT_SOLID_NURBS_PATCH`` rows in
+    ``nvh/example-11-05/11.5.nurbs.k`` under the same 8-column reading (that
+    block has 605 data rows in all), a different keyword with a different
+    card stack that ``handlers._ELEM_NOT_A_MESH_TOKENS`` already screens. This is
     a correctness fix for a shape k2rad can be handed, not a change to any
     corpus deck; the two-tree SHA sweep is the proof.
 
@@ -1585,7 +1589,8 @@ def _warn_native_pentahedron(state: ConversionState, pid: int,
         "bottom-triangle/top-triangle collapse this card's own six-id order "
         "implies. (The R14 corpus's own eight-field pentahedra collapse the "
         "other cell pair, n1 n2 n3 n4 n5 n5 n7 n7 - all 7417 of them, measured "
-        "by two independent readers over 375 deck files. Both are valid "
+        "by two independent readers over the 375 .k/.key deck files on F:. "
+        "Both are valid "
         "degenerate hexes; a short card carries no cue about which face was "
         "meant beyond its node order.) The "
         "node ORDER is taken verbatim, so cells 1-3 must be one triangle and "
@@ -2699,12 +2704,25 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
             "0.2072-0.2074) Isolid 24 reads 0.20540 / 0.20180 / 0.20140 / "
             "0.20140 at 1/2/4/8 elements through the depth (-2.9 %) where the "
             "default Isolid 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 "
-            "(+19.7 % -> -28.8 %, i.e. WORSE with refinement). On the roster "
+            "(+19.7 % -> -28.8 %, i.e. WORSE with refinement). IT COSTS A "
+            "TIME STEP: Isolid 24 is UNDER-integrated where 17 is fully "
+            "integrated, so a deck that was already marginal can need a "
+            "smaller step than it needed before. RE-MEASURED at 1 element "
+            "through the depth on an independently rebuilt coupon of that "
+            "shape (nt 4): at the deck's own TSSFAC 0.9 BOTH formulations "
+            "blow up on that mesh and BOTH still print NORMAL TERMINATION "
+            "(Isolid 17 at energy error 99.9 %, IE 1.577e9 against 98.3 of "
+            "external work, 9950 cycles; the 24 arm's cycle table non-finite "
+            "at 41482 cycles), while at TSSFAC 0.3 both converge at 0.0 % "
+            "and reproduce the sweep to better than 0.7 %. Check this deck's "
+            "time-step scale factor before reading the 24 arm's answer. On "
+            "the roster "
             "the two arms disagree by deck: ex_03_solid_elform_-1_4x6x4_mesh "
             "-21.72 % -> -5.87 % and ex_04_solid_elform_-1 -5.84 % -> "
             "-2.83 % improve, while ex_14_solid_elform_-1/-2 go "
             "+313.9/+494.0 % -> +1373/+2014 %, mainboltaexpl -72.72 % -> "
-            "-81.40 % at 5x the wall time and ex_27_solid_elform_-2_rigidwall "
+            "-81.40 % at the SAME cycle count (51762 both arms, base-paired "
+            "at nt 4) and ex_27_solid_elform_-2_rigidwall "
             "LOSES the class's only campaign match (ke +9.75 % -> +15.43 %). "
             "dyna2rad makes the same choice for -1 (convertprops.cxx:398-402: "
             "-1 -> 24, 2/3 -> 18; -2 is not in its table and falls to the "
@@ -2748,8 +2766,11 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "PRE-round-4 column, from before /IMPL/QSTAT/DTSCAL 10 reached the "
         "deck) and they REGRESS four other corpus decks "
         "(ex_27_solid_elform_-2_rigidwall loses the population's only match, "
-        "ke +9.75 % -> +15.43 %; mainboltaexpl -72.72 -> -81.40 % IE at 5x "
-        "the wall time; ex_14_solid_elform_-1/-2 +313.9/+494.0 % -> "
+        "ke +9.75 % -> +15.43 %; mainboltaexpl -72.72 -> -81.40 % IE at the "
+        "SAME cycle count - 51762 on both arms, base-paired back to back at "
+        "nt 4, twice, the flag arm engine ELAPSED 93.2/94.6 s against the "
+        "default's 106.2/107.2 s, so round 5's unpaired wall-time multiple "
+        "is RETRACTED; ex_14_solid_elform_-1/-2 +313.9/+494.0 % -> "
         "+1373/+2014 %). --assumed-strain-isolid 24 writes the 24 arm on this "
         "section if you want it: 22 deck keys on 18 emitted models state "
         "ELFORM -1/-2 and the flag moves 19 of them on 16 models (the three "
@@ -2768,14 +2789,21 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
         "Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged 3-D "
         "0.2072-0.2074) it reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at "
         "1/2/4/8 elements through the depth, i.e. +19.7 % -> -28.8 %, while "
-        "Isolid 24 holds -2.9 % over the 2/4/8 points of that sweep. IT DOES "
-        "NOT HOLD AT 1 ELEMENT THROUGH THE DEPTH: Isolid 24 is UNDER-integrated "
-        "where 17 is fully integrated, so switching can introduce hourglass "
-        "modes the deck did not have - on that same coupon at nz = 1 the 24 arm "
-        "DIVERGES (energy error 99.9 % from cycle 39, mean tip displacement "
-        "+8.3e+07 mm at 1.7 % of the load ramp) and still prints NORMAL "
-        "TERMINATION after 109227 cycles, where Isolid 17 on the identical mesh "
-        "is stable at 0.238246. Or restate the "
+        "Isolid 24 holds -2.9 % over the 2/4/8 points of that sweep. THE "
+        "SUBSTITUTION COSTS A TIME STEP: Isolid 24 is UNDER-integrated where "
+        "17 is fully integrated, so a deck that was already marginal can need "
+        "a smaller step than it needed before. RE-MEASURED at 1 element "
+        "through the depth on an independently rebuilt coupon of that shape "
+        "(nt 4): at the deck's own TSSFAC 0.9 BOTH formulations blow up on "
+        "that mesh and BOTH still print NORMAL TERMINATION - Isolid 17 ends "
+        "at energy error 99.9 % with IE 1.577e9 against 98.3 of external "
+        "work (9950 cycles) and the 24 arm's cycle table goes non-finite "
+        "(41482 cycles) - while at TSSFAC 0.3 both converge at energy error "
+        "0.0 % and reproduce the sweep above to better than 0.7 %. (The "
+        "round 5 published a divergence for the 24 arm alone at this point, "
+        "with a rival Isolid-17 figure beside it; both halves are RETRACTED "
+        "- that rival figure contradicted this warning's own 0.24820 for "
+        "the very same point, and neither reproduces.) Or restate the "
         "section as ELFORM 2 if the locked answer is what you want. NOTE: the "
         "ELFORM siblings of these examples convert to ONE file "
         "(ex_03_solid_elform_{-1,2,18} share a byte-identical _0000.rad), so "

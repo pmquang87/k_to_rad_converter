@@ -2118,8 +2118,8 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     *MAT_RIGID parts (which is also where *PART_INERTIA, element-free CoG
     masters and *CONSTRAINED_RIGID_BODIES merge masters come out, so four
     LS-DYNA sources funnel through it), :1205 *CONSTRAINED_NODAL_RIGID_BODY,
-    :1298 the implicit no-rigid-body probe, :1475
-    *CONSTRAINED_SHELL_TO_SOLID and :1612
+    :1312 the implicit no-rigid-body probe, :1498
+    *CONSTRAINED_SHELL_TO_SOLID and :1651
     *CONSTRAINED_GENERALIZED_WELD_BUTT (both added in round 5). The two new
     producers run in build_starter BEFORE this registry is walked, so their
     bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.

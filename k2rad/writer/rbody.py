@@ -1539,8 +1539,21 @@ def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
                   "NORMAL TERMINATION. WHICH of the two conditions Radioss "
                   "keeps was NOT measured here - kinchk.F:944-951 raises 312 "
                   "as a SUMMARY OF POSSIBLE INCOMPATIBLE KINEMATIC CONDITIONS "
-                  "and does not say who wins, and a /BCS the rigid body "
-                  "overrides is LOST rather than redundant. Check it if the "
+                  "and does not say who wins. The RIGID BODY does: MEASURED "
+                  "on a purpose-built coupon (a 4-brick column tied to a "
+                  "shell strip, one fibre node carrying *NODE TC=7/RC=7, "
+                  "nt 2) the tie arm and the SAME deck with that constraint "
+                  "DELETED are numerically identical - IE 3613, engine "
+                  "energy error -97.9 %, 3252 cycles in both - so the /BCS "
+                  "is simply gone; moving that one /BCS onto the rigid "
+                  "body's MAIN node instead (ICoG and the member set held "
+                  "fixed) reproduces the *CONSTRAINED_NODAL_RIGID_BODY twin "
+                  "exactly - IE 707.4, energy error -0.0 %, 2524 cycles - "
+                  "and WARNING 312 disappears with it. So the cost is not "
+                  "only a lost constraint: it can be the whole answer, at "
+                  "0 starter ERRORs and NORMAL TERMINATION on both arms. "
+                  "(On the dome itself the same 60 conditions cost -0.5 % of "
+                  "energy error, so the range is wide.) Check it if the "
                   "constrained direction is NOT along the fibre.")
     return lines if emitted else []
 

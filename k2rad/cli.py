@@ -705,7 +705,8 @@ def build_parser() -> argparse.ArgumentParser:
              "ex_03_solid_elform_-1_4x6x4_mesh -21.72 %% -> -5.87 %% and "
              "ex_04_solid_elform_-1 -5.84 %% -> -2.83 %% get BETTER, while "
              "ex_14_solid_elform_-1/-2 go +313.9/+494.0 %% -> +1373/+2014 %%, "
-             "mainboltaexpl -72.72 %% -> -81.40 %% at 5x the wall time, and "
+             "mainboltaexpl -72.72 %% -> -81.40 %% at the same 51762 cycles "
+             "(base-paired at nt 4), and "
              "ex_27_solid_elform_-2_rigidwall LOSES the class's only match "
              "(ke +9.75 %% -> +15.43 %%). dyna2rad maps -1 -> 24 and 2/3 -> "
              "18 (convertprops.cxx:398-402).",

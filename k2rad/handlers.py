@@ -2265,7 +2265,7 @@ def _warn_section_solid_one_point_ale(state: ConversionState, secid: int,
         "shipped Lagrangian arm reaches NORMAL TERMINATION in 6571 cycles at "
         "KE 6.000e7 against its LS-DYNA reference's 6.00000e7, energy error "
         "-0.0 %, while the Iale 2 arm reaches NORMAL in 7195 cycles with the "
-        "internal energy blowing up from 1.017e-16 to 1.353e13 and the "
+        "internal energy blowing up from 1.017e-17 to 1.353e12 and the "
         "energy error at 99.9 %. (The Eulerian mesh DOES hold still, 5...2995 "
         "like LS-DYNA's own nodout, where the Lagrangian mesh translates 4990 "
         "mm - so the frame is right and the physics is not. And its SUM EPSP "
@@ -7805,7 +7805,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
     sites register into at the line that writes the card (writer/rbody.py:791,
-    :1205, :1298, :1475, :1612 — six LS-DYNA sources, since *MAT_RIGID parts,
+    :1205, :1312, :1498, :1651 — six LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, and round 5 added the
     *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT

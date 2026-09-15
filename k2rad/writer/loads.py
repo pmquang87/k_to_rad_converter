@@ -5423,7 +5423,8 @@ def _momentum_average_body(state: ConversionState, info: Optional[Dict],
         "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
         "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), which the "
         "/RBODY J cells would ADD rather than replace "
-        "(hm_read_rbody.F:276-279): not compensated here.")
+        "(inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 "
+        "is only where the cells are read): not compensated here.")
     return main, v_cm, omega
 
 
@@ -6588,7 +6589,11 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
       the full share comes off with a negative card (round 5).
     * NO ``/ADMAS`` — nothing to subtract from. Since round 5 the token is
       REMOVED from these nodes with a negative ``/ADMAS`` instead
-      (``hm_read_admas.F:164-170`` accepts one, WARNING ID 476).
+      (``hm_read_admas.F:164-170`` accepts one, WARNING ID 476), unless the
+      element-incidence screen refuses the node, which the GUARDED sentence
+      names. A fifth list, ``orphan``, catches a registered node that is not
+      in ``state.nodes`` at all — a k2rad-internal inconsistency with reach
+      0 on every corpus here, not a class of deck.
     * RIGID — the node is a SECONDARY node of a rigid body. Whether the token
       reaches that body at all depends on its ICoG; on the roster's only
       carrier it is measurably INERT (see below).
@@ -6639,14 +6644,29 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             f"{_fmt_node_list(deg_removed)} with a separate NEGATIVE /ADMAS "
             "instead, so their sum is exact (m_own + m_admas + token - token)."
             if deg_removed else
-            " NONE of them could take a negative /ADMAS either: they carry no "
-            "element mass of their own, and m_own + m_admas is BELOW the "
-            "share, so removing it would drive the nodal mass negative. The "
-            "guard sentence below names them.")
+            " NONE of them took a negative /ADMAS either: they carry no "
+            "element mass of their own, so the element-INCIDENCE screen "
+            "below refused them. That refusal is CONSERVATIVE, not forced: "
+            "the engine's nodal mass is m_own + m_admas + token, so taking "
+            "the token off again leaves m_own + m_admas, which on this "
+            "class is the deck's own /ADMAS and strictly POSITIVE - "
+            "MEASURED on a two-node weld coupon whose *ELEMENT_MASS 5e-05 "
+            "equals the token half-share: the negative card written in by "
+            "hand gives starter TOTAL MASS 1.0000000000000E-04 (5e-05 per "
+            "node), 0 ERROR and NORMAL TERMINATION. What the screen really "
+            "guards is m_own = 0 AND m_admas = 0, where the sum lands "
+            "EXACTLY on zero and chkmsin.F:53 tests MS(N) < ZERO strictly, "
+            "so nothing catches it - the same coupon with no element mass "
+            "at all reads TOTAL MASS 0.000000000000 at 0 ERROR and NORMAL "
+            "TERMINATION. Lifting the screen for the class that does carry "
+            "a positive deck /ADMAS is ROADMAP round-5 item 14. The guard "
+            "sentence below names them.")
         state.warn(
             f"*ELEMENT_DISCRETE: {len(degenerate)} node(s) carry LESS /ADMAS "
             "than k2rad's own token spring mass, so the deck's own /ADMAS "
-            "value was KEPT (an /ADMAS must stay positive): "
+            "value was KEPT (k2rad never writes a non-positive /ADMAS on "
+            "the deck's own card - that is a k2rad policy, not a solver "
+            "rule: hm_read_admas.F has no sign check at all): "
             f"{detail}"
             + (" ..." if len(degenerate) > 5 else "")
             + "." + tail
@@ -6672,8 +6692,12 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
               "- the check is inside the IF (FLAG == 0) block at :160, so the "
               "FLAGG=1 pass of lectur.F:7967-7979 never reaches it) and adds "
               "it algebraically at :247. A starter that runs a SECOND domain "
-              "decomposition reads the deck again and so prints every warning "
-              "twice, this one included: on plates.nrbc the deck's own "
+              "decomposition reads the deck again - lectur.F:9047-9048 sets "
+              "IDDLEVEL = 1 and the GOTO 100 at :9094 jumps back to label "
+              "100 at :5691 - and so reprints every warning raised inside "
+              "that span, this one included. (A warning raised OUTSIDE the "
+              "span still prints once: KINCHK is called at lectur.F:10568, "
+              "so WARNING 312 does not double.) On plates.nrbc the deck's own "
               "pre-existing WARNING ID 1084 already appears twice on the arm "
               "that has no negative /ADMAS at all, and the dome deck, which "
               "runs no second decomposition, prints all nine of its warnings "
@@ -6704,16 +6728,25 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "real but very small element mass passes it, and the compensation "
             "then leaves that small mass rather than a negative one.")
     if orphan:
+        # Since round 5 a spring node with no /ADMAS gets a NEGATIVE one, so
+        # "no /ADMAS to subtract from" is no longer a terminal class. The
+        # ONLY way into this list left is a registered node that is not in
+        # state.nodes: _register_spring_token_mass refuses a share <= 0, and
+        # done / bad / removed / connector_ground / guarded / rigid cover
+        # every other node _spring_token_negative_admas selects. Reach 0 on
+        # every corpus here; probed by calling this function directly.
         state.warn(
             f"*ELEMENT_DISCRETE: {len(orphan)} spring node(s) "
-            f"{_fmt_node_list(orphan)} carry NO /ADMAS for k2rad's token "
-            f"spring mass to be subtracted from, so their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element and "
-            "their local frequency LOW by sqrt(1 + share/m_node). LS-DYNA's "
-            "discrete elements are massless; the token exists only because "
-            "hm_read_prop04.F:136-142 refuses a property MASS <= 1e-15 "
-            "(ERROR 229). Give those nodes an *ELEMENT_MASS if their dynamics "
-            "matter.")
+            f"{_fmt_node_list(orphan)} were registered for k2rad's token "
+            "spring mass but are NOT in the converted model's node set, so "
+            "no /ADMAS - positive or negative - could be written for them "
+            "and their mass is HIGH by "
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. That "
+            "is a k2rad-internal inconsistency, not a property of the deck: "
+            "every producer registers at the line that WRITES the /SPRING "
+            "row and _new_ground_node adds the synthesized ground node to "
+            "state.nodes, so no deck on any corpus here reaches this "
+            "sentence. Please report the deck that did.")
     if rigid:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "

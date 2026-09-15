@@ -7770,7 +7770,10 @@ class ConvertOptions:
     #   ex_14_solid_elform_-1/-2          +313.9/+494.0 % -> +1373/+2014 %
     #   ex_27_solid_elform_-2_rigidwall   ke +9.75 % -> +15.43 % (the
     #     population's ONLY match, LOST)
-    #   mainboltaexpl                     IE -72.72 % -> -81.40 %, 5x the wall
+    #   mainboltaexpl                     IE -72.72 % -> -81.40 % at the SAME
+    #     51762 cycles (base-paired at nt 4, twice: engine ELAPSED 93.2/94.6 s
+    #     with the flag against 106.2/107.2 s without it -- round 5's
+    #     unpaired wall-time multiple is retracted)
     # Two better, four worse, and one of the four is the only match in the
     # class -- so the user asks for it explicitly. A self-built bending coupon
     # (L 120 x b 20 x h 20, E 210000, nu 0.3, P 1000; Euler-Bernoulli
@@ -7843,7 +7846,8 @@ class ConvertOptions:
     # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
     # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
     # 0.1977E-02), which the /RBODY J cells would ADD rather than replace
-    # (hm_read_rbody.F:276-279) -- a named follow-up, not compensated here.
+    # (inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 is only where the cells are read)
+    # -- a named follow-up, not compensated here.
     #
     # OPT-IN because exactly ONE carrier with an LS-DYNA reference exists on
     # this machine (translat; Ryan_Lee's W16_SW_door is 3 files on 1 model with
@@ -8889,8 +8893,8 @@ class ConversionState:
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
     # (writer/rbody.py:791 *MAT_RIGID parts — which also covers *PART_INERTIA,
     # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
-    # :1205 *CONSTRAINED_NODAL_RIGID_BODY; :1298 the implicit no-rigid-body
-    # probe; :1475 *CONSTRAINED_SHELL_TO_SOLID; :1612
+    # :1205 *CONSTRAINED_NODAL_RIGID_BODY; :1312 the implicit no-rigid-body
+    # probe; :1498 *CONSTRAINED_SHELL_TO_SOLID; :1651
     # *CONSTRAINED_GENERALIZED_WELD_BUTT), i.e. six LS-DYNA sources funnelling
     # through five writers. Round 5 added the last two; every consumer of this
     # set was re-read then, which is what the #138 rule asks for.

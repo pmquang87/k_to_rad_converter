@@ -761,7 +761,9 @@ def _solid_boundary_faces(state: ConversionState,
     That is a guard against an input shape, not a correction to a measured
     defect, and the round-5 census says how far the guard is from firing. A
     6-field ``*ELEMENT_SOLID`` card is not an LS-DYNA spelling (Vol I R17
-    p.19-124), so there are ZERO short cards on the 932-file corpus and all
+    p.19-124), so there are ZERO short cards on any of the 925 corpus deck
+    files (the 932-file census is those 925 plus this repo's own 7
+    fixtures, two of which DO carry one, written for that item) and all
     7417 roster pentahedra arrive on an 8-field collapsed spelling
     (``n1 n2 n3 n4 n5 n5 n7 n7``, every one of them) — which
     this function DOES facet, as the degenerate hex the reader also sees. The
@@ -829,8 +831,10 @@ def _main_surface_segments(state: ConversionState, sid: int, styp: int
     solids has a shape ``_solid_boundary_faces`` cannot facet (a 6-node
     pentahedron, a 5-node pyramid), because the skin it measured is then only
     part of the real one. The unfaceted shapes need a SHORT ``*ELEMENT_SOLID``
-    card, of which the corpora here have none (0 on 932 scanned files, the
-    only short rows being 16 ``*ELEMENT_SOLID_NURBS_PATCH`` ones), so that
+    card, of which the corpora here have none (0 on the 925 corpus deck
+    files of the 932-file census, whose only short ``*ELEMENT_SOLID`` cards
+    are the two in ``tests/fixtures/wedge_short_card.k``; the only other
+    short rows are 16 ``*ELEMENT_SOLID_NURBS_PATCH`` ones), so that
     third
     clause has never fired on a measured deck: a roster pentahedron arrives as
     an 8-field collapsed hex and IS faceted. See ``_solid_boundary_faces`` for
@@ -980,12 +984,16 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     ``ConvertOptions.derived_gapmin``.
 
     *force* writes the value even with the flag off. Its ONE caller is the
-    interface ``--implicit-rigid-secondary-swap`` creates: that swap is only
-    ever made on a side this rule CAN derive a gap for (the plan function
-    checks with :func:`_derived_gapmin_value` first), because the bare swap
-    ERRORs at t = 3.0e-4 on the only carrier. A press-fit
-    ``*CONTACT_*_INTERFERENCE`` still wins over it — an interference fit needs
-    the large derived gap to engage at all.
+    interface ``--implicit-rigid-secondary-swap`` creates: that swap is made
+    on a side this rule CAN derive a gap for (the plan function checks with
+    :func:`_derived_gapmin_value` first), because the bare swap ERRORs at
+    t = 3.0e-4 on the only carrier. ONE case escapes that pairing and is
+    stated rather than gated: a press-fit ``*CONTACT_*_INTERFERENCE`` returns
+    from this function BEFORE the *force* branch, while
+    :func:`_rigid_secondary_plan` never reads ``c.interference`` — so an
+    implicit deck with an all-rigid SSID, an interference fit and the flag
+    would take the BARE swap. Reach 0 on every corpus here, and the flag is
+    off by default; wiring it is ROADMAP round-5 item 15's neighbour.
     """
     if gapmin > 0.0:
         return gapmin                       # --inter-gapmin / --auto-gapmin / Card-3
@@ -1234,9 +1242,13 @@ def _rigid_secondary_plan(state: ConversionState, rigid_nodes: Set[int],
     the derived ``Gapmin``: the bare swap ERRORs at ``t = 3.0e-4`` on the only
     carrier. The ``SOFT=-7`` sentinel (``Igap = 2``, an element-derived gap)
     and ``/INTER/TYPE25`` (no ``Gapmin`` column at all) therefore keep the
-    drop whatever the flag says, and their drop message says so. Measured
+    drop whatever the flag says. **Only TYPE25's drop message says so** — it
+    passes ``_implicit_rigid_secondary_note(state, gapmin_route=False)``. The
+    ``SOFT=-7`` drop prints the generic empty-side cause and remedy with no
+    implicit note at all, because ``plan7`` is consumed only for ``_RS_SWAP``
+    and ``_RS_KEEP``; that is stated rather than fixed because the measured
     reach of an all-rigid secondary on either of those two routes, over every
-    corpus here: 0 interfaces.
+    corpus here, is 0 interfaces.
     """
     sec = _side_node_ids(state, ssid, sstyp)
     sec = {n for n in sec if n > 0}
@@ -1519,10 +1531,12 @@ def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
         "the converted model. THE OBVIOUS REMEDY IS MEASURED AND MOSTLY "
         "USELESS, so it is not offered as one: keeping the rigid nodes in the "
-        "secondary group changes NOTHING on 4 of the 6 carriers of this class "
+        "secondary group changes NOTHING on 3 of the 6 carriers of this class "
         "(pipe, doorbeam and mat_spring.belted-dummy are identical arm for "
-        "arm, and 4 of the 6 are SINGLE_SURFACE contacts whose segments are "
-        "on the main side already), and where it does change something it "
+        "arm; separately, 4 of the 6 are SINGLE_SURFACE contacts whose "
+        "segments are on the main side already - pipe, transducer, "
+        "mainboltaexpl and EXP_SC_PRELOAD, while doorbeam is NODES_TO_SURFACE "
+        "and belted-dummy SURFACE_TO_SURFACE), and on the other 3 it "
         "disagrees with itself - transducer's internal energy goes -24.10 % "
         "-> +18.31 % against its own LS-DYNA reference, EXP_SC_PRELOAD's "
         "energy error -9.0 % -> -11.2 %, and mainboltaexpl COLLAPSES to "
@@ -1833,8 +1847,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                   gapmin_overrides)
         # The implicit swap IMPLIES the derived Gapmin on the interface it
         # creates: the plan refused to swap without one, so this write cannot
-        # come out empty. An explicit --inter-gapmin / Card-3 value still
-        # wins, the same precedence every other interface has.
+        # come out empty — EXCEPT on a press-fit *CONTACT_*_INTERFERENCE,
+        # which _maybe_derived_gapmin returns from before the force branch
+        # and _rigid_secondary_plan does not test for (reach 0; see that
+        # function's docstring). An explicit --inter-gapmin / Card-3 value
+        # still wins, the same precedence every other interface has.
         gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
                                        main_sid, main_styp,
                                        interference=c.interference,

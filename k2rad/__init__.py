@@ -766,7 +766,9 @@ def convert(
         LS-DYNA's 0.1977E-02, the difference being exactly
         ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal), which the
         ``/RBODY`` ``J`` cells would ADD rather than replace
-        (``hm_read_rbody.F:276-279``): a named follow-up, not compensated
+        (``inirby.F:166-168`` and ``:331-339`` ADD them;
+        ``hm_read_rbody.F:276-279`` is only where the cells are read): a
+        named follow-up, not compensated
         here. **Opt-in** because exactly one carrier with an LS-DYNA reference
         exists on this machine. A body the card FULLY covers is untouched by
         construction: its momentum average IS the card's velocity with
