@@ -2010,6 +2010,48 @@ class RbodyProducerCountIsStatedOnce(unittest.TestCase):
                                   f"{sorted(adds)})")
 
 
+class ImplicitProbeRbodyReadsBothRegistries(unittest.TestCase):
+    """``_make_probe_rbody`` guarded on ``rbody_info`` alone, which producers 4
+    and 5 deliberately do NOT populate — they have no LS-DYNA PART id to key it
+    by. An IMPLICIT deck whose only rigid body is a shell-to-solid tie or a butt
+    weld would therefore have been given the inert probe, its three synthesized
+    nodes and its ``/BCS`` on top of a body it already has, under a warning
+    claiming it has none.
+
+    Reach is 0 on every corpus here (both carriers are explicit decks), which is
+    exactly why nothing caught it: reverting the guard to ``rbody_info`` alone
+    left the whole suite GREEN (5380 passed) in this round's own mutation pass.
+    A guard with no probe is not a guard, so here is the probe.
+    """
+
+    def _implicit(self, deck: str) -> str:
+        return deck.replace(
+            "*CONTROL_TERMINATION\n",
+            "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+            "*CONTROL_TERMINATION\n", 1)
+
+    def test_a_tie_is_a_rigid_body_so_the_probe_stays_away(self):
+        deck = self._implicit(_shell_to_solid_deck())
+        _r, starter, _e = _convert(deck)
+        self.assertIn("/RBODY/5", starter, "the tie body was not emitted")
+        self.assertNotIn("INERT PROBE RIGID BODY", starter)
+
+    def test_the_same_deck_WITHOUT_the_tie_still_gets_the_probe(self):
+        """The control arm the #138 rule asks for: the guard must not have
+        turned the probe off for everyone. With the tie opted out there is no
+        rigid body left, and the probe has to come back."""
+        deck = self._implicit(_shell_to_solid_deck())
+        _r, starter, _e = _convert(deck, shell_to_solid_rbody=False)
+        self.assertNotIn("/RBODY/5", starter)
+        self.assertIn("INERT PROBE RIGID BODY", starter)
+
+    def test_a_butt_weld_counts_as_a_rigid_body_too(self):
+        deck = self._implicit(_butt_deck())
+        _r, starter, _e = _convert(deck)
+        self.assertIn("/RBODY/", starter)
+        self.assertNotIn("INERT PROBE RIGID BODY", starter)
+
+
 class ImplicitNogapRemedyPointsSomewhereReal(unittest.TestCase):
     """The ``_RS_IMPLICIT_NOGAP`` remedy told the user to state a gap with
     ``--inter-gapmin <id>=VAL``. ``_rigid_secondary_plan`` decides the swap
