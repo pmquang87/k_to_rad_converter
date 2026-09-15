@@ -1492,7 +1492,10 @@ that decided it and the deck that would decide it next.
     `*ELEMENT_SOLID_NURBS_PATCH` ones in `11.5.nurbs.k`, a different keyword
     k2rad already screens - and all 7 417 roster
     pentahedra arrive as 8-field collapsed hexes, which this function DOES
-    facet. The predictor was also checked against the starter's own `GAP MIN`
+    facet. (They all use `n1 n2 n3 n4 n5 n5 n7 n7`, not the
+    bottom-triangle/top-triangle `n1 n2 n3 n3 n4 n5 n6 n6` the short-card
+    emitter writes - measured by two independent readers over the 375 F: deck
+    files, 7417 rows and no second spelling. Both are valid degenerate hexes.) The predictor was also checked against the starter's own `GAP MIN`
     echo on **6 of 6** carriers and matched all six, two of them parts that MIX
     hexes with collapsed-card wedges: an unpaired collapsed face adds 2
     spurious ridge-edge entries, and both TIE the true minimum edge
@@ -1657,6 +1660,32 @@ that decided it and the deck that would decide it next.
     partly-rigid KEEP flag and CNRB DOF releases — see items 4, 6, 12 and 14
     of the round-4 list above, each re-measured or re-censused in round 5 and
     each still short of a promotion.
+14. **A LUMPED-MASS screen for the spring token compensation, instead of the
+    element-INCIDENCE + `rho > 0` one it ships.** The verification round
+    confirmed the guard is SAFE on everything measured — over all carriers the
+    registered share equals the negative `/ADMAS` exactly and the compensated
+    node lands on its own lumped element mass, minimum 5.4e-7, never `<= 0` —
+    and the residual case (a node whose only element carries a real but very
+    small mass) is named in the shipped warning rather than silently handled.
+    Part B moved `nodal_masses_from_state` INTO the package as `k2rad/lumping`,
+    so the exact test is now one call away: screen on
+    `nodal_masses_from_state(state)[0].get(nid, 0.0) > share`. NOT done here
+    because it changes a DEFAULT-ON emission on a class with no carrier that
+    would move, at a point in the round with no campaign budget left to re-run
+    it. What would decide it: a deck with a zero-thickness or near-zero-mass
+    shell carrying a spring end node.
+15. **Letting a USER-STATED gap satisfy the implicit swap's precondition.**
+    `_rigid_secondary_plan` decides `--implicit-rigid-secondary-swap` purely
+    from `_derived_gapmin_value`; `--inter-gapmin` and Card-3 `SST`/`MST` are
+    applied later in `_make_interfaces`, to an interface the refusal prevents
+    from existing. The remedy text that advised `--inter-gapmin` is retracted
+    and guarded (a named control must reach the branch it controls). The
+    branch has a real carrier: `implicit/Yaris%20Dynamic%20Roof%20Crush` fires
+    it, and with the flag ON both its `.rad` files stay byte-identical
+    (`_0000` f7bc05ddcfb44770, `_0001` 2d69acf6c8d5b369), so only the warning
+    text moves. Wiring the override into the plan is a behaviour change on an
+    opt-in flag whose only carrier is a convert-only giant with no LS-DYNA
+    reference run here, so it needs a deck that can be SOLVED to decide it.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 

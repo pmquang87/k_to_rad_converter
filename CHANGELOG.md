@@ -11,6 +11,93 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 5 — VERIFICATION ROUND. Six shipped
+  statements re-measured and corrected, two reviewer findings REFUTED by
+  measurement, one guard widened, and four new tests for branches the round's
+  own mutation pass walked straight through. No emitted `.rad` byte changes on
+  any corpus deck — proved by a two-tree SHA sweep, not asserted.**
+  - **WARNING ID 476 is raised ONCE per card per read of the deck, not twice.**
+    Six texts said “because the reader runs both FLAG passes”. The check at
+    `hm_read_admas.F:164-165` sits inside the `IF (FLAG == 0)` block opened at
+    `:160`, and `lectur.F:7967-7979` calls the reader `FLAGG = 0` then
+    `FLAGG = 1`, so the second pass never reaches it (it is the starter's only
+    `MSGID=476`). The real cause of the doubling on `plates.nrbc` is the
+    starter's SECOND domain decomposition, which reprints every warning: on the
+    MASTER arm — which has no negative `/ADMAS` at all — the deck's own
+    `WARNING ID 1084` already appears twice (lines 506 and 584, with
+    `NEW DOMAIN DECOMPOSITION FOR OPTIMIZATION` at 576), while the dome deck
+    runs no second decomposition and prints all nine of its warnings once.
+  - **The spring-mass guard cited a check that cannot see its own springs.**
+    Nine texts pointed at `rcheckmass.F:126-135` / ERROR 1870. That whole
+    branch is gated on `IGTYP==23` (`:112`) with `MTN==108` (`:123`) — a
+    `/PROP/TYPE23` SPR_MAT spring on `/MAT/LAW108` — and `IERR2` can only be
+    set inside it, so it never inspects the `/PROP/TYPE4`, TYPE8 or TYPE13
+    springs this compensation registers. The detector that does reach them is
+    the ENGINE's: `chkmsin.F:52-59` prints `NEGATIVE MASS ON NODE ID=` and
+    `resol.F:5460` does `CALL ARRET(2)`. The guard itself was already correct.
+  - **The corpus does not spell its pentahedra the way five texts said.** The
+    COUNT 7417 is right and reproduces exactly; the SPELLING did not. All 7417
+    use `n1 n2 n3 n4 n5 n5 n7 n7`, not the bottom-triangle/top-triangle
+    `n1 n2 n3 n3 n4 n5 n6 n6` the short-card emitter writes — measured by two
+    independent readers over the 375 `F:` deck files (a fixed-column scanner
+    and one driving `handlers.handle_element_solid` itself), agreeing to the
+    row with a per-file table that re-sums. Both are valid degenerate hexes, so
+    the emission is unchanged; only the sentence justifying it was wrong.
+  - **`state.rbody_ids` has FIVE producers and four texts still said THREE.**
+    Round 5 added `_make_shell_to_solid_rbodies` (`writer/rbody.py:1475`) and
+    `_make_generalized_weld_butt_rbodies` (`:1612`) without re-reading the
+    consumers — the #138 rule. Behaviour was already right (both run before the
+    section registry is walked, so their bodies do reach `/TH/RBODY`); the
+    counts, the stale `:645`/`:1004`/`:1086` line citations and the two
+    `producer N of 3` comments were not. A new test DERIVES the number from the
+    source and checks every cited line really is a `rbody_ids.add` line.
+  - **`_make_probe_rbody` now reads both registries.** It guarded on
+    `rbody_info`, which producers 4 and 5 deliberately do not populate, so an
+    implicit deck whose only rigid body was a shell-to-solid tie or a butt weld
+    would have been given the inert probe on top of a body it already had,
+    under a warning saying it had none. Reach 0 today (both carriers are
+    explicit), so no deck moves a byte — confirmed by the sweep.
+  - **A drop note was spliced into the middle of its own sentence.**
+    `_drop_interface` formats `"{cause}, so NO /INTER was emitted"`, and the
+    implicit note was concatenated onto `cause`, so the shipped text read
+    *“... is the usual cause This is an IMPLICIT deck ... not a restored
+    answer., so NO /INTER was emitted”*. The note now has its own slot after the
+    clause closes.
+  - **A remedy pointed at a flag that cannot reach the decision.**
+    `_RS_IMPLICIT_NOGAP` told the user to *“state the gap yourself with
+    `--inter-gapmin <id>=VAL`”*, but `_rigid_secondary_plan` decides purely from
+    `_derived_gapmin_value` and never reads `inter_gapmin`, `_gapmin_override`
+    or `_sst_mst_to_gapmin` — all evaluated later in `_make_interfaces`, on an
+    interface this refusal prevents from existing. Retracted and guarded; the
+    wiring is ROADMAP item 15. The branch has a real carrier:
+    `implicit/Yaris%20Dynamic%20Roof%20Crush` fires it.
+  - **Two reviewer findings REFUTED by measurement, and recorded as such.**
+    (1) `hm_read_prop14.F:358-361` was called an off-by-one; line 358 IS
+    `IF (IHBE == 24) THEN` and 359-361 the body, so the citation was already
+    exact. (2) A third “unreachable” wording was requested for the implicit
+    drop on the Yaris giant, on the reasoning that its MSID side carries no
+    deformable node; converting that deck with the flag ON shows it prints the
+    `_RS_IMPLICIT_NOGAP` remedy, i.e. every precondition DID hold and the
+    existing wording is the right one. Its warning record does move, so “0
+    warning movers” was wrong too.
+  - **Four reach figures re-measured** (each by converting the carriers with the
+    flag ON and OFF, or against a pristine `76bc193` checkout): the
+    assumed-strain flag moves **19 deck keys on 16 emitted models**, not 20/17
+    — `main_fsi.k` is a third non-mover, already on `Isolid` 24 through
+    `*CONTROL_HOURGLASS` IHQ 6. `--implicit-rigid-secondary-swap` is a byte
+    mover on **1 key / 1 model** (bumper) and NOT on the Yaris giant. The spring
+    token-mass item moves **7 deck keys on 7 emitted models**, including
+    `nvh/example-06-07/6.7.spring.psd.k`, which no shipped text named; and
+    `mat_spring.belted-dummy` is not a mover at all.
+  - **Four tests for branches the mutation pass walked through.** Flipping the
+    sign of `lx` or `lz` in `lumping.rigid_body_momentum_velocity` left the
+    whole suite green (only the `ly` twin was caught) — every B2 probe put the
+    angular momentum on Y, and the deck-level test read only the ROT card's Y
+    cell. A flipped component is a rigid body spinning the wrong way with
+    `v_cm` unchanged, so no energy or mass check notices. Added X- and
+    Z-carrying probes, all three ROT cells asserted, plus a README test that a
+    flag cannot lose its section to a TOC link and an anchor-integrity check.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5, part B item B2 —
   `--mass-weighted-inivel`: the momentum average Vol I R17 p.28-129 Remark 3
   describes, for a rigid body an initial-velocity card covers only PARTLY.
@@ -129,7 +216,7 @@ Prior history (before this changelog was introduced) is summarized in the
 - **R14 CAMPAIGN TRIAGE batch, round 5, part B item B3 —
   `--assumed-strain-isolid {24,none}`: LS-DYNA's assumed-strain ELFORM −1/−2
   off the locking hex they exist to replace. Default `none`; 0 movers by
-  default, 20 deck keys on 17 emitted models with the flag.** `*SECTION_SOLID`
+  default, 19 deck keys on 16 emitted models with the flag.** `*SECTION_SOLID`
   ELFORM **−1 and −2** are the assumed-strain 8-point hexes of Vol I R17
   p.41-104 Remark 13 — *"Solid formulations -1 and -2 employ an assumed strain
   approach to avoid the shear locking behavior seen in formulation 2 elements
@@ -149,11 +236,15 @@ Prior history (before this changelog was introduced) is summarized in the
   take it from there, so a predicate can never disagree with what was written.
   **Reach, from two independently written scanners: 22 deck keys on 18 emitted
   models** state ELFORM −1/−2 on the 356-key R14 roster (the census that missed
-  the `*SECTION_SOLID_TITLE` spelling read 21/17); the flag MOVES **20 keys on
-  17 models**, because `ex_12_solid_elform_{-1,-2}` already lands on 24 through
-  its own `*HOURGLASS` IHQ 6 overlay — verified byte-identical with and without
-  the flag on the real deck, as is `ex_03` with the flag off against a pristine
-  `76bc193` checkout. **Opt-in because the arms disagree**, each measured at
+  the `*SECTION_SOLID_TITLE` spelling read 21/17); the flag MOVES **19 keys on
+  16 models** — re-measured in the verification round by converting all 22
+  carriers with the flag ON and OFF on the same tree (the 20/17 first shipped
+  here is retracted). THREE do not move, all three already on Isolid 24:
+  `ex_12_solid_elform_{-1,-2}` through its own `*HOURGLASS` IHQ 6 overlay, and
+  `icfd/.../Intermediate_fsi_flap/main_fsi.k` through `*CONTROL_HOURGLASS`
+  IHQ 6 / QH 0.1 — the `*CONTROL*` route, which the first text credited to the
+  `ex_12` pair alone. All verified byte-identical with and without the flag, as
+  is `ex_03` with the flag off against a pristine `76bc193` checkout. **Opt-in because the arms disagree**, each measured at
   nt 4 against its own LS-DYNA reference (17 → 24):
   `ex_03_solid_elform_-1_4x6x4_mesh` −21.72 % → **−5.87 %** and
   `ex_04_solid_elform_-1` −5.84 % → −2.83 % improve;
@@ -168,9 +259,15 @@ Prior history (before this changelog was introduced) is summarized in the
   ν 0.3, P 1000; Euler-Bernoulli 0.20571429, Timoshenko 0.21017143, converged
   3-D 0.2072–0.2074) `Isolid` 17 reads 0.24820 / 0.15760 / 0.14942 / 0.14758 at
   1/2/4/8 elements through the depth, i.e. **+19.7 % → −28.8 %, worse with
-  refinement**, while 24 holds −2.9 % over the same sweep; the remedy is now to
-  refine ALONG the beam so the hexes stay near aspect ratio 1 in the bending
-  plane;
+  refinement**, while 24 holds −2.9 % over the **2/4/8** points of that sweep;
+  the remedy is now to refine ALONG the beam so the hexes stay near aspect
+  ratio 1 in the bending plane. The verification round added the caveat the
+  first text lacked: `Isolid` 24 is UNDER-integrated where 17 is fully
+  integrated, so the flag can introduce hourglass modes a deck did not have —
+  at **nz = 1** on that coupon the 24 arm DIVERGES (energy error 99.9 % from
+  cycle 39, mean tip displacement +8.3e+07 mm at 1.7 % of the load ramp) and
+  still prints NORMAL TERMINATION after 109 227 cycles, where 17 on the
+  identical mesh is stable at 0.238246;
   (2) its `24 / 18 / 14` figures were a PRE-round-4 column — re-run here on
   `ex_03` at nt 4 and identically at nt 2, they are **−5.87 / −5.23 / −6.33 %**
   (internal energy 163900 / 165000 / 163100 against the LS-DYNA reference
@@ -321,24 +418,58 @@ Prior history (before this changelog was introduced) is summarized in the
     `mass × L_element`, so the discrete-beam site scales the share by the
     element's own length; a `/PROP/TYPE13`'s third node is the ORIENTATION
     node and gets nothing (`rinit3.F:1937-1939` writes `IXR(2,I)`/`IXR(3,I)`).
+  - **Reach of the item as a whole, re-measured in the verification round**
+    against a pristine `76bc193` checkout, converting every candidate from
+    `F:` with `k2rad.__file__` printed and asserted per child: the item is a
+    byte mover on **7 deck keys on 7 emitted models** — the four weld-tie
+    decks above, the two Yaris suspension giants (convert-only), and
+    **`nvh/example-06-07/6.7.spring.psd.k`**, a `*ELEMENT_DISCRETE` →
+    `/PROP/TYPE4` carrier that the round-4 producer reaches and that a census
+    keyed on TYPE13/TYPE8 could not see. It was named in no shipped text
+    until now, which would have left its mirror `.rad` stale; its campaign
+    row is `normal`/`not_comparable` and both sides of it are inert (OR IE
+    2.281e-21, KE 0; LS `ls_ie_final` 2e-20, `ls_ke_final` 0.0), so no
+    verdict moves and the deck can decide nothing. `mat_spring.belted-dummy`
+    is **not** a mover — `_0000.rad` `899bc35412d8f730` on both trees: its
+    spring end nodes already carry an `/ADMAS`, so round 4's positive
+    subtraction reaches them and the new negative route has nothing to do.
+    The research spec expected the opposite on both counts.
   - **A negative `/ADMAS` for the class a subtraction cannot reach.**
     `hm_read_admas.F:161-171` accepts a negative added mass — it raises only
-    `ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)` `NEGATIVE ADDED MASS` (twice per
-    card, because the reader runs both FLAG passes), with no sign check and no
-    floor — and adds it algebraically at `:247-248`
+    `ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)` `NEGATIVE ADDED MASS` (once per
+    card per read of the deck: the check at `:164-165` is inside the
+    `IF (FLAG == 0)` block opened at `:160`, and `lectur.F:7967-7979` calls the
+    reader with `FLAGG = 0` and then `FLAGG = 1`, so the second pass never
+    reaches it — it is the starter's only `MSGID=476`), with no sign check and
+    no floor — and adds it algebraically at `:247-248`
     (`MS(NOSYS) = MS(NOSYS) + AMAS`). `/ADMAS` is read at `lectur.F:7969`,
     before the rigid bodies and before `INITIA`, so the model total
     (`initia.F:2250`) is LS-DYNA's again. MEASURED on `plates.nrbc` at nt 4,
     base and arm launched in the same window: starter `TOTAL MASS`
     **2.0048000000000E-04 → 1.0048000000000E-04** = LS-DYNA's own total to
     every printed digit; **2646 → 2678 cycles, +1.21 %**; NORMAL TERMINATION
-    on both; starter 0 ERROR on both, 2 → 4 WARNING (the two extra are the one
-    negative card's WARNING 476, raised once per FLAG pass). **This is a MASS
+    on both; starter 0 ERROR on both, 2 → 4 WARNING. The doubling is the DECK's,
+    not the card's: this starter run does a second domain decomposition
+    (`NEW DOMAIN DECOMPOSITION FOR OPTIMIZATION`) and so prints every warning
+    twice — the deck's own pre-existing `WARNING ID 1084` already appears twice
+    on the master arm, which has no negative `/ADMAS` at all, while the dome
+    deck runs no second decomposition and prints all nine of its warnings once.
+    **This is a MASS
     claim, not an energy claim** — that deck's channels are dominated by
     post-rupture oscillation and the campaign row stays `deviation` in every
     arm (IE 4760 → 7257 against LS's 5869.61 = −18.90 % → +23.64 %; KE
     9014 → 5585 against 3449.03 = +161.35 % → +61.93 %; the weld ruptures at
-    t 3.130E-04 against 3.033E-04 before, LS's own 2.41930E-04). The chosen
+    t 3.130E-04 against 3.033E-04 before, LS's own 2.41930E-04). **The cost,
+    measured at matched final time on every weld-tie carrier at nt 4:** the
+    engine's own energy-error column degrades — `plates.nrbc` −1.0 % →
+    −7.2 %, `plates.spot` −1.0 % → −7.2 %, `constrained.spotweld.plates`
+    0.0 % → −2.2 %, and `plates.k`'s `ke_dev` −39.28 % → −52.64 % with its
+    energy error −3.2 % → −11.3 %. All reach NORMAL TERMINATION and all stay
+    `deviation`; the LS-DYNA references for this family are themselves
+    +6.8 to +8.1 % out of balance (total/initial 1.06771 to 1.08112). That is
+    what taking 99.5 % (`plates.nrbc`/`plates.spot`), 868 %
+    (`constrained.spotweld.plates`) or 289 % (`plates.k`) of the model's mass
+    back out costs, and it belongs beside the `+1.21 %` cycle figure. The chosen
     route was measured against the alternative: a token scaled RELATIVE to the
     end nodes' element mass leaves a residual that depends on a free parameter
     (α = 1.0 → `1.0362E-04`, +3.12 %; α = 0.1 → `1.00794E-04`, +0.31 %) and
@@ -346,9 +477,14 @@ Prior history (before this changelog was introduced) is summarized in the
     card restores the mass exactly and leaves the property untouched.
   - **Two classes are NOT compensated, each for a measured reason, and both are
     named in the warning.** A spring node with no element mass of its own is
-    REFUSED — subtracting there would leave `MS = 0` and `rcheckmass.F:126-135`
-    answers ERROR 1870 (`SPRING(S) WITH TRANSLATIONAL STIFFNESS AND NULL MASS
-    IS CONNECTED TO A NODE WITH NO MASS`); the screen is element INCIDENCE plus
+    REFUSED — subtracting there would leave `MS <= 0`, and the check that
+    reaches a TYPE4/8/13 spring is the ENGINE's: `chkmsin.F:52-59` prints
+    `NEGATIVE MASS ON NODE ID=` and `resol.F:5460` does `CALL ARRET(2)`. The
+    starter's ERROR 1870 is NOT that check — `rcheckmass.F:112`/`:123` gate the
+    whole branch on `IGTYP==23` with `MTN==108` (a `/PROP/TYPE23` SPR_MAT
+    spring on `/MAT/LAW108`), and `IERR2` can only be set inside it, so the
+    routine never inspects a TYPE4, TYPE8 or TYPE13; the screen is element
+    INCIDENCE plus
     `rho > 0` on the element's part, and the warning says so, because it is not
     a lumped-mass test. A SECONDARY node of a rigid body is left alone and the
     old sentence — *"It is added to the body's total mass; a rigid body's own
@@ -2956,9 +3092,15 @@ Prior history (before this changelog was introduced) is summarized in the
   rows read starter `TOTAL MASS` **3.9250E-06**, half the block, with the mass
   centre at (5, 6.25, 6.25) instead of (5, 5, 5) — at **0 ERROR and 0
   WARNING**, i.e. nothing in the run says so. What is emitted now is the
-  COLLAPSED eight-cell hexahedron `n1 n2 n3 n3 n4 n5 n6 n6`, the spelling
-  Vol I R17 p.19-124 gives `*ELEMENT_SOLID` for a pentahedron and the one all
-  7417 R14-corpus pentahedra use: same coupon, `TOTAL MASS` **7.8500E-06**,
+  COLLAPSED eight-cell hexahedron `n1 n2 n3 n3 n4 n5 n6 n6`, the
+  bottom-triangle/top-triangle collapse the short card's own six-id order
+  implies. (The verification round re-measured the corpus claim that shipped
+  beside it: the R14 corpus's own eight-field pentahedra collapse the OTHER
+  cell pair, `n1 n2 n3 n4 n5 n5 n7 n7` — **all 7417 of them**, by two
+  independent readers over the 375 `F:` deck files, with no second spelling
+  anywhere. The count 7417 is right; the spelling sentence was not, and is
+  retracted and guarded. Both forms are valid degenerate hexes.) Same coupon,
+  `TOTAL MASS` **7.8500E-06**,
   exact, NORMAL TERMINATION, and byte-identical to what the eight-column twin
   `wedge_collapsed_card.k` produces (both are checked-in goldens, and a third
   test compares the two `/BRICK` blocks as text).

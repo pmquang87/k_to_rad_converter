@@ -333,8 +333,11 @@ and of the discrete-beam writer (0 roster carriers; LS-DYNA's own `RO·A·L` /
 `RO·VOL` is never compensated). A node with no `/ADMAS` to subtract from now
 gets the token taken off with a **negative `/ADMAS/0`** of its own:
 `hm_read_admas.F:161-171` accepts one — `ANCMSG(MSGID=476, MSGWARNING)`
-`NEGATIVE ADDED MASS`, raised twice per card because the reader runs both FLAG
-passes, no sign check and no floor — and adds it algebraically at `:247-248`,
+`NEGATIVE ADDED MASS`, raised once per card per read of the deck (the check at
+`:164-165` sits inside the `IF (FLAG == 0)` block opened at `:160`, and
+`lectur.F:7967-7979` calls the reader with `FLAGG = 0` and then `FLAGG = 1`, so
+the second pass never reaches it), no sign check and no floor — and adds it
+algebraically at `:247-248`,
 before the rigid bodies and before `INITIA`. Measured on
 `intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k` (nt 4): the starter's
 `TOTAL MASS` goes **2.0048E-04 → 1.0048E-04**, which is LS-DYNA's own total
@@ -346,13 +349,27 @@ every arm (IE −18.90 % → +23.64 %, KE +161.35 % → +61.93 % against LS's
 5869.61 / 3449.03 at t 1.99882E-03; the weld ruptures at t 3.130E-04 against
 3.033E-04 before). Two classes are still NOT compensated, each for a measured
 reason: a spring node with **no element mass of its own** (subtracting there
-would leave `MS = 0`, and `rcheckmass.F:126-135` answers ERROR 1870), and a
+would leave `MS <= 0`, which the ENGINE aborts on — `chkmsin.F:52-59` prints
+`NEGATIVE MASS ON NODE ID=` and `resol.F:5460` does `CALL ARRET(2)`; the
+starter's ERROR 1870 is a different case, gated on `IGTYP==23` with `MTN==108`
+at `rcheckmass.F:112`/`:123`, i.e. a `/PROP/TYPE23` on `/MAT/LAW108`, which no
+producer here emits), and a
 **secondary node of an ICoG = 4 rigid body**, where `inirby.F:265-266`
 discards the secondaries' mass entirely — measured on
 `mat_spring.belted-dummy` (15 token nodes, 0.0108 total), whose starter
 `TOTAL MASS` is `0.3356681850251` with the token, with the token floored to
 1e-12, with a −0.0108 `/ADMAS` and with a +0.0108 one, and whose full 110032-
 cycle run is bit-identical in every arm.
+**Measured reach of the whole item: 7 deck keys on 7 emitted models** — the
+four weld-tie decks, the two Yaris suspension giants (convert-only), and
+`nvh/example-06-07/6.7.spring.psd.k`, a `*ELEMENT_DISCRETE` → `/PROP/TYPE4`
+carrier the round-4 producer reaches (verified against a pristine `76bc193`
+checkout, converting from `F:`). That deck is inert on both sides — OR IE
+2.281e-21 and KE 0 against an LS reference of 2e-20 / 0.0 — so it moves no
+verdict and proves nothing about the rule. `mat_spring.belted-dummy` is NOT a
+mover (`899bc35412d8f730` on both trees): its spring end nodes already carry
+an `/ADMAS`, which round 4's positive subtraction already reached.
+
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885
 roster decks: `ex_17_spring_elform_0` IE +0.0074 % / KE +0.039 % and
@@ -5684,9 +5701,14 @@ exists. dyna2rad makes the same choice for −1 (`convertprops.cxx:398-402`:
 **Reach: 22 deck keys on 18 emitted models** state ELFORM −1/−2 on the 356-key
 R14 roster (two independently written scanners, one of them
 `*SECTION_SOLID_TITLE`-aware — the census that missed the `_TITLE` spelling
-read 21/17). The flag **moves 20 keys on 17 models**: the
-`ex_12_solid_elform_{-1,-2}` pair already lands on 24 through its own
-`*HOURGLASS` IHQ 6 overlay, verified byte-identical with and without the flag.
+read 21/17). The flag **moves 19 keys on 16 models** — re-measured at the
+branch head by converting all 22 carriers with the flag ON and OFF on the same
+tree. **Three** do not move, all three because they already land on 24: the
+`ex_12_solid_elform_{-1,-2}` pair through its own `*HOURGLASS` IHQ 6 overlay,
+and `icfd/.../Intermediate_fsi_flap/main_fsi.k` through `*CONTROL_HOURGLASS`
+IHQ 6 / QH 0.1 — the `*CONTROL*` route, which the earlier text credited to the
+`ex_12` pair alone. All three verified byte-identical with and without the
+flag. (The shipped 20/17 is retracted.)
 
 It is **OFF by default because the arms disagree**, each measured against its
 own LS-DYNA reference at nt 4 (`Isolid` 17 → 24):
