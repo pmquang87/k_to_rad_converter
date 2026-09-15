@@ -2,9 +2,11 @@
 $ The SAME 10 x 10 x 10 mm block as tests/fixtures/wedge_short_card.k, meshed as
 $ two pentahedra written the way LS-DYNA spells one: an eight-column
 $ *ELEMENT_SOLID card with the bottom and top triangles each collapsed by
-$ repeating their last node (N1 N2 N3 N3 N5 N6 N7 N7). Every one of the 7417
-$ pentahedra on the R14 corpus uses this spelling. The two decks must produce
-$ the same two wedges and the same starter TOTAL MASS.
+$ repeating their last node (N1 N2 N3 N3 N5 N6 N7 N7) - the collapse the short
+$ card's own six-id order implies, and what the short-card emitter writes. The
+$ R14 corpus's own 7417 pentahedra use the other collapse, N1 N2 N3 N4 N5 N5 N7
+$ N7; both are valid degenerate hexes. The two decks must produce the same two
+$ wedges and the same starter TOTAL MASS.
 *TITLE
 Wedge coupon - collapsed eight-node cards
 *NODE

@@ -778,6 +778,51 @@ class Round5FlagWiring(unittest.TestCase):
                 self.assertIn(flag, opts, f"{flag} is not a parser option")
                 self.assertIn(flag, readme, f"{flag} is not in README.md")
 
+    def test_every_round_5_flag_has_its_OWN_README_SECTION(self):
+        """``assertIn(flag, readme)`` is presence-only, and a flag's whole
+        ``### `--flag``` section can be renamed away while the table-of-contents
+        link still carries the string — a mutation that renamed the
+        ``--mass-weighted-inivel`` heading left the suite green.
+
+        So assert the HEADING, and that the TOC anchor still resolves to a
+        heading that exists.
+        """
+        readme = self._readme()
+        headings = re.findall(r"^#{2,4}\s+(.*)$", readme, re.M)
+        anchors = set()
+        for h in headings:
+            slug = re.sub(r"[^a-z0-9 -]", "", h.lower()).strip().replace(" ", "-")
+            anchors.add(slug)
+
+        # The three OPT-IN levers each own a `###` section a user tunes from.
+        for flag, _attr, _on in self._OPT_IN_FLAGS:
+            with self.subTest(flag=flag, kind="heading"):
+                self.assertTrue(
+                    any(flag in h for h in headings),
+                    f"{flag} has no `### `{flag}`` section of its own in "
+                    f"README.md (presence in a TOC link is not a section)")
+
+        # The default-ON opt-outs are documented as bullets in the keyword
+        # coverage list, so what has to hold for them is weaker but still real:
+        # the flag must appear on a line that is NOT just a table-of-contents
+        # link. That is the mutation this test exists for — renaming a section
+        # away while the TOC entry keeps the string alive.
+        body = [ln for ln in readme.splitlines()
+                if not re.match(r"^\s*[-*]?\s*\[.*\]\(#.*\)\s*$", ln)]
+        for flag in [("--no-" + f[2:]) for f in self._FLAGS]:
+            with self.subTest(flag=flag, kind="body"):
+                self.assertTrue(
+                    any(flag in ln for ln in body),
+                    f"{flag} appears in README.md only inside a "
+                    f"table-of-contents link, not in any prose")
+
+        # every in-page TOC link must point at a heading that exists
+        for target in re.findall(r"\]\(#([a-z0-9-]+)\)", readme):
+            with self.subTest(anchor=target):
+                self.assertIn(target, anchors,
+                              f"README.md links to #{target}, which is no "
+                              f"heading in the file")
+
     def test_the_help_renders_and_carries_the_measured_numbers(self):
         """A bare %% in a help string kills --help at a green suite."""
         from k2rad import cli
@@ -1305,7 +1350,7 @@ class AssumedStrainIsolidFlag(unittest.TestCase):
         hit = next(w for w in res.warnings if "ASSUMED-STRAIN" in w)
         for figure in ("-5.87 / -5.23 / -6.33 %", "163900 / 165000 / 163100",
                        "174114", "22 deck keys on 18 emitted models",
-                       "20 of them on 17 models",
+                       "19 of them on 16 models",
                        "convertprops.cxx:398-402",
                        "REFINE ALONG THE BEAM",
                        "+19.7 % -> -28.8 %"):
@@ -1576,6 +1621,52 @@ class MomentumAverageArithmetic(unittest.TestCase):
         ke = 0.5 * 4.0 * 25.0 + 0.5 * 4.0 * omega[1] ** 2
         self.assertAlmostEqual(ke, 100.0, places=10)
 
+    def test_the_X_and_Z_components_of_L_carry_their_own_sign(self):
+        """Every other probe in this file puts the angular momentum on Y, so a
+        sign error in ``lx`` or ``lz`` shipped invisibly: a whole-suite mutation
+        pass flipping ``lx +=`` to ``-=`` (and the same on ``lz``) left
+        5370 passed / 4124 subtests GREEN, while the ``ly`` twin was caught.
+
+        A flipped component is a rigid body spinning the WRONG WAY with
+        ``v_cm`` unchanged, so no energy or mass check notices it either.
+
+        Both cases are the same square in the z = 0 plane with unit corner
+        masses; only which pair is prescribed, and in which direction, changes.
+
+          * prescribed pair on ``y = +1`` moving in ``+z``  -> spin about +X
+            L_x = sum m (d_y v_z - d_z v_y) = 2 x 1 x (1 x 10) = 20,
+            I_xx = 4 m d_y^2 = 4  ->  omega = (+5, 0, 0)
+          * prescribed pair on ``x = +1`` moving in ``+y``  -> spin about +Z
+            L_z = sum m (d_x v_y - d_y v_x) = 2 x 1 x (1 x 10) = 20,
+            I_zz = 4 m (d_x^2 + d_y^2) / ... = 8  ->  omega = (0, 0, 2.5)
+        """
+        square = [(-1.0, -1.0, 0.0), (1.0, -1.0, 0.0),
+                  (1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)]
+        masses = [1.0, 1.0, 1.0, 1.0]
+
+        # ---- X: the two nodes at y = +1 move in +z ------------------------
+        v_cm, omega, _cog, refusal = self._f()(
+            square, masses,
+            [None, None, (0.0, 0.0, 10.0), (0.0, 0.0, 10.0)],
+            model_mass=4.0)
+        self.assertEqual(refusal, "")
+        self.assertAlmostEqual(v_cm[2], 5.0, places=12)
+        for got, want in zip(omega, (5.0, 0.0, 0.0)):
+            self.assertAlmostEqual(got, want, places=12)
+        # the sign is the assertion: a flipped lx gives (-5, 0, 0)
+        self.assertGreater(omega[0], 0.0)
+
+        # ---- Z: the two nodes at x = +1 move in +y ------------------------
+        v_cm, omega, _cog, refusal = self._f()(
+            square, masses,
+            [None, (0.0, 10.0, 0.0), (0.0, 10.0, 0.0), None],
+            model_mass=4.0)
+        self.assertEqual(refusal, "")
+        self.assertAlmostEqual(v_cm[1], 5.0, places=12)
+        for got, want in zip(omega, (0.0, 0.0, 2.5)):
+            self.assertAlmostEqual(got, want, places=12)
+        self.assertGreater(omega[2], 0.0)
+
     def test_a_fully_covered_body_returns_the_cards_own_velocity(self):
         """The degenerate arm, and the reason no deck of that class moves a
         byte: with every node prescribed the momentum average IS the card's
@@ -1756,7 +1847,12 @@ class MassWeightedInivel(unittest.TestCase):
         self.assertEqual([float(x) for x in tra[3].split()[:3]],
                          [0.0, 0.0, 5.0])
         rot = _block_after(starter, "/INIVEL/ROT/", 4)
-        self.assertAlmostEqual(float(rot[3].split()[1]), -5.0, places=9)
+        # ALL THREE cells, not just the one this deck happens to load: reading
+        # only index 1 is what let a flipped lx/lz ship (see
+        # MomentumAverageArithmetic.test_the_X_and_Z_components_of_L_carry...).
+        cells = [float(x) for x in rot[3].split()[:3]]
+        for got, want in zip(cells, (0.0, -5.0, 0.0)):
+            self.assertAlmostEqual(got, want, places=9)
         self.assertTrue(_has(res.warnings, "MOMENTUM AVERAGE"), res.warnings)
 
     def test_the_MIXED_card_keeps_its_deformable_half(self):
@@ -1845,6 +1941,138 @@ class MassWeightedInivel(unittest.TestCase):
                     self.assertNotIn(_collapse(needle), joined)
 
 
+# ── the verification round's own guards ──────────────────────────────────────
+
+class RbodyProducerCountIsStatedOnce(unittest.TestCase):
+    """Round 5 added /RBODY producers 4 and 5 and four shipped texts still
+    said THREE — the #138 rule ("grep every consumer of a state flag you add a
+    producer for") applied to ``state.rbody_ids``.
+
+    No test pinned the count, so the whole-suite mutation pass could not see
+    it. This one DERIVES the number from the source and makes every text that
+    states it agree, so the next producer cannot be added silently either.
+    """
+
+    def _root(self):
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _rbody_src(self):
+        with open(os.path.join(self._root(), "k2rad", "writer", "rbody.py"),
+                  encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_number_of_producers_is_what_the_module_actually_has(self):
+        src = self._rbody_src()
+        adds = [i + 1 for i, ln in enumerate(src.splitlines())
+                if "rbody_ids.add" in ln]
+        self.assertEqual(len(adds), 5, f"rbody_ids.add sites: {adds}")
+
+    def test_every_producer_comment_numbers_itself_out_of_that_total(self):
+        src = self._rbody_src()
+        # a producer may name itself more than once (docstring + the line that
+        # registers), so the assertion is on the SET of ordinals
+        seen = {int(n) for n, tot in
+                re.findall(r"[Pp]roducer (\d) of (\d)", src) if int(tot) == 5}
+        self.assertEqual(seen, {1, 2, 3, 4, 5},
+                         "each /RBODY producer must number itself 'N of 5'")
+        self.assertEqual(re.findall(r"[Pp]roducer \d of [1-46-9]", src), [],
+                         "a producer comment still counts out of the old total")
+
+    def test_no_shipped_text_still_says_there_are_three(self):
+        """The four consumer texts that named the count."""
+        stale = ("THREE Radioss-side", "three /RBODY producers",
+                 "all THREE Radioss-side", "funnelling through three writers")
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in stale:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+    def test_the_cited_registration_lines_are_the_real_ones(self):
+        """A line citation is a measurement too. Each number the consumer texts
+        quote must really be a ``rbody_ids.add`` line."""
+        src = self._rbody_src().splitlines()
+        adds = {i + 1 for i, ln in enumerate(src) if "rbody_ids.add" in ln}
+        root = self._root()
+        for rel in ("k2rad/writer/output.py", "k2rad/state.py",
+                    "k2rad/handlers.py"):
+            with open(os.path.join(root, rel.replace("/", os.sep)),
+                      encoding="utf-8") as fh:
+                text = _collapse(fh.read())
+            cited = {int(m) for m in
+                     re.findall(r"writer/rbody\.py:(\d+)", text)}
+            cited |= {int(m) for m in re.findall(r"(?<=:)(\d{3,4})(?=[ ,)])",
+                                                 "")}
+            for line in sorted(cited):
+                with self.subTest(file=rel, line=line):
+                    self.assertIn(line, adds,
+                                  f"{rel} cites writer/rbody.py:{line}, which "
+                                  f"is not a rbody_ids.add line (they are "
+                                  f"{sorted(adds)})")
+
+
+class ImplicitNogapRemedyPointsSomewhereReal(unittest.TestCase):
+    """The ``_RS_IMPLICIT_NOGAP`` remedy told the user to state a gap with
+    ``--inter-gapmin <id>=VAL``. ``_rigid_secondary_plan`` decides the swap
+    purely from ``_derived_gapmin_value``; it never reads
+    ``state.options.inter_gapmin``, ``_gapmin_override`` or
+    ``_sst_mst_to_gapmin``, all of which are evaluated later in
+    ``_make_interfaces`` — on an interface this refusal prevents from existing.
+
+    The branch is NOT hypothetical: it is what
+    ``implicit/Yaris%20Dynamic%20Roof%20Crush`` fires (measured — with the flag
+    on, that deck's drop prints this remedy and both its .rad files stay
+    byte-identical).
+    """
+
+    def test_the_plan_reads_no_user_stated_gap(self):
+        import inspect
+        from k2rad.writer import contacts
+        src = inspect.getsource(contacts._rigid_secondary_plan)
+        for name in ("inter_gapmin", "_gapmin_override", "_sst_mst_to_gapmin"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, src)
+
+    def test_the_remedy_no_longer_promises_a_flag_it_cannot_use(self):
+        from k2rad.writer import contacts
+        text = contacts._RIGID_SECONDARY_REMEDY_IMPLICIT_NOGAP
+        self.assertNotIn("State the gap yourself with --inter-gapmin", text)
+        self.assertIn("do NOT rescue this", text)
+        self.assertIn("Swap the sides in the .k", text)
+
+
+class DropInterfaceKeepsItsSentenceWhole(unittest.TestCase):
+    """The implicit note used to be concatenated onto the drop's CAUSE, which
+    is a clause followed by ", so NO /INTER was emitted" — so the note was
+    spliced into the middle of its own sentence and the seam read
+    ``... is the usual cause This is an IMPLICIT deck ... answer., so NO``.
+    """
+
+    def test_the_note_lands_after_the_clause_closes(self):
+        from k2rad.state import ConversionState
+        from k2rad.writer import contacts
+        st = ConversionState()
+        dropped: dict = {}
+        contacts._drop_interface(st, dropped, "CONTACT", 7,
+                                 "the SECONDARY side resolved to no nodes",
+                                 "REMEDY: do the thing.",
+                                 note="This is an IMPLICIT deck. It matters.")
+        msg = st.warnings[-1]
+        self.assertIn("no nodes, so NO /INTER was emitted for this contact. "
+                      "This is an IMPLICIT deck.", msg)
+        self.assertNotIn(".,", msg)
+        self.assertNotIn("cause This is", msg)
+
+    def test_a_drop_without_a_note_is_unchanged(self):
+        from k2rad.state import ConversionState
+        from k2rad.writer import contacts
+        st = ConversionState()
+        contacts._drop_interface(st, {}, "CONTACT", 7, "a cause", "REMEDY: x.")
+        msg = st.warnings[-1]
+        self.assertTrue(msg.startswith(
+            "*CONTACT 7: a cause, so NO /INTER was emitted for this contact."))
+        self.assertNotIn("  ", msg)
+
+
 # ── B6: the corrected statements ─────────────────────────────────────────────
 
 #: Every claim round 5 measured to be WRONG, in every spelling it was ever
@@ -1876,6 +2104,35 @@ _RETRACTED_ROUND_5 = (
     "-5.75 / -5.18 / -6.27",
     "−5.75 / −5.18 / −6.27",
     "Refine through the thickness",
+    # ── the verification round's own five corrections ────────────────────────
+    # WARNING 476 is raised ONCE: the check is inside hm_read_admas.F:160's
+    # IF (FLAG == 0), so the FLAGG=1 pass of lectur.F:7967-7979 never sees it.
+    # The doubling on plates.nrbc is its SECOND domain decomposition, which
+    # reprints every warning -- the deck's own WARNING 1084 doubles on the
+    # master arm too, and the dome (no second decomposition) prints all nine
+    # of its warnings once.
+    "because the reader runs both FLAG passes",
+    "raised TWICE per card",
+    "raised twice per card",
+    "twice per card, because the reader runs both",
+    "raised once per FLAG pass",
+    # rcheckmass.F's ERROR 1870 is gated on IGTYP==23 (:112) and MTN==108
+    # (:123) -- a /PROP/TYPE23 on /MAT/LAW108 -- so it never inspects the
+    # TYPE4/TYPE8/TYPE13 springs this compensation registers. The check that
+    # does reach them is chkmsin.F:52-59 + resol.F:5460.
+    "rcheckmass.F:126-135",
+    "MS = 0 is ERROR 1870",
+    # every one of the corpus's 7417 pentahedra collapses the OTHER cell pair
+    "the spelling every one of the R14 corpus's 7417 pentahedra uses",
+    "the one all 7417 R14-corpus",
+    # the flag is byte-inert on the Yaris giant (measured, both .rad files)
+    "plus the Yaris Dynamic Roof Crush giant, convert-only",
+    # --inter-gapmin is evaluated long after the plan that refuses the swap
+    "State the gap yourself with --inter-gapmin",
+    # the assumed-strain flag moves 19 keys on 16 models, not 20 on 17
+    "moves 20 keys / 17 models",
+    "20 deck keys on 17 emitted models",
+    "20 keys on 17 models",
 )
 
 
