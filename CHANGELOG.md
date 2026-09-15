@@ -44,8 +44,8 @@ Prior history (before this changelog was introduced) is summarized in the
     row with a per-file table that re-sums. Both are valid degenerate hexes, so
     the emission is unchanged; only the sentence justifying it was wrong.
   - **`state.rbody_ids` has FIVE producers and four texts still said THREE.**
-    Round 5 added `_make_shell_to_solid_rbodies` (`writer/rbody.py:1475`) and
-    `_make_generalized_weld_butt_rbodies` (`:1612`) without re-reading the
+    Round 5 added `_make_shell_to_solid_rbodies` (`writer/rbody.py:1498`) and
+    `_make_generalized_weld_butt_rbodies` (`:1651`) without re-reading the
     consumers — the #138 rule. Behaviour was already right (both run before the
     section registry is walked, so their bodies do reach `/TH/RBODY`); the
     counts, the stale `:645`/`:1004`/`:1086` line citations and the two
@@ -133,7 +133,8 @@ Prior history (before this changelog was introduced) is summarized in the
   rotary inertia (starter `NEW INERTIA` 0.2642894E-02 against LS-DYNA's
   0.1977E-02, the difference being exactly `4 × (m/4)(A + t²)/12 = 6.65667e-4`
   per diagonal), which the `/RBODY` `J` cells would ADD rather than replace
-  (`hm_read_rbody.F:276-279`): named, not compensated, and on the ROADMAP.
+  (`inirby.F:166-168` and `:331-339` ADD them; `hm_read_rbody.F:276-279` is
+  only where the cells are read): named, not compensated, and on the ROADMAP.
   **Opt-in for an evidence reason, not a physics one:** exactly ONE carrier
   with an LS-DYNA reference exists on this machine (Ryan_Lee's `W16_SW_door`
   is 3 files on 1 model with no reference; the 19 non-roster F: deck files and
@@ -430,10 +431,14 @@ Prior history (before this changelog was introduced) is summarized in the
     row is `normal`/`not_comparable` and both sides of it are inert (OR IE
     2.281e-21, KE 0; LS `ls_ie_final` 2e-20, `ls_ke_final` 0.0), so no
     verdict moves and the deck can decide nothing. `mat_spring.belted-dummy`
-    is **not** a mover — `_0000.rad` `899bc35412d8f730` on both trees: its
-    spring end nodes already carry an `/ADMAS`, so round 4's positive
-    subtraction reaches them and the new negative route has nothing to do.
-    The research spec expected the opposite on both counts.
+    is **not** a mover — `_0000.rad` `899bc35412d8f730` on both trees. *(The
+    reason first published for that was wrong and is corrected here: the deck
+    states **no `*ELEMENT_MASS` at all** — 0 cards, 0 `*INCLUDE` — and emits
+    **0 `/ADMAS`**, so round 4's subtraction reaches nothing. All 15
+    registered token nodes are SECONDARY nodes of rigid bodies, the one class
+    `_spring_token_negative_admas` skips by construction; the deck emits the
+    RIGID class sentence and no other A1 line.)* The research spec expected
+    the opposite on both counts.
   - **A negative `/ADMAS` for the class a subtraction cannot reach.**
     `hm_read_admas.F:161-171` accepts a negative added mass — it raises only
     `ANCMSG(MSGID=476, MSGTYPE=MSGWARNING)` `NEGATIVE ADDED MASS` (once per
@@ -3011,7 +3016,7 @@ Prior history (before this changelog was introduced) is summarized in the
     `advection_B` converts and runs at **0 ERROR / 0 WARNING with `Iale` 1 AND
     with `Iale` 2** (`sgrtails.F:920-926` passes). What the remap costs is the
     ANSWER — its energy error goes −0.0 % → **99.9 %** with internal energy
-    1.017e-16 → 1.353e13 — and the Eulerian mesh does hold still (5…2995, like
+    1.017e-17 → 1.353e12 — and the Eulerian mesh does hold still (5…2995, like
     LS-DYNA's own `nodout`) where the Lagrangian one translates 4 990 mm. Its
     `SUM EPSP` going 10.0 → 0.0 is NOT cited as a failure any more: the tracer
     leaves a 3 000 mm FIXED domain at 1e5 mm/s in 0.05 s, which is the expected
@@ -3124,11 +3129,17 @@ Prior history (before this changelog was introduced) is summarized in the
   assumed triangle ordering and both measured masses.
   **Reach: 0 deck keys on 0 emitted models.** A six-field `*ELEMENT_SOLID`
   card is not an LS-DYNA spelling, and a scan of every `.k`/`.key`/`.dyn`/
-  `.inc` file on the three corpora here — **932 files**, with the two
-  `*INCLUDE`-pulling `combine.key` roots excluded BY NAME — finds **zero**
-  short `*ELEMENT_SOLID` cards; the 16 short rows it does find are all
-  `*ELEMENT_SOLID_NURBS_PATCH` in `nvh/example-11-05/11.5.nurbs.k`, a
-  different keyword k2rad already screens.
+  `.inc` file here — **932 files**, which is **925 across the three corpora**
+  (`F:` 382, `C:/openradioss_run` 507 with the two `*INCLUDE`-pulling
+  `combine.key` roots excluded BY NAME, `E:/foxcore_data` 36) plus the repo's
+  own 7 fixtures — finds **zero** short `*ELEMENT_SOLID` cards on any CORPUS
+  deck; the only ones in the whole 932 are the two in
+  `tests/fixtures/wedge_short_card.k`, written for this item, and the only
+  other short rows are 16 `*ELEMENT_SOLID_NURBS_PATCH` in
+  `nvh/example-11-05/11.5.nurbs.k`, a different keyword k2rad already
+  screens. *(Round-5 verification: the `932` was right and the scope beside
+  it was not — the three corpora alone measure 925, and under the scope that
+  does give 932 the "zero short cards" is the round's own new fixture.)*
   Two docstring claims in `writer/contacts` were corrected with the same
   census: `_solid_boundary_faces`'s "no carrier of the shipped 15-interface
   class has that shape" and `_main_surface_segments`'s unfaceted-shape clause

@@ -367,8 +367,16 @@ carrier the round-4 producer reaches (verified against a pristine `76bc193`
 checkout, converting from `F:`). That deck is inert on both sides — OR IE
 2.281e-21 and KE 0 against an LS reference of 2e-20 / 0.0 — so it moves no
 verdict and proves nothing about the rule. `mat_spring.belted-dummy` is NOT a
-mover (`899bc35412d8f730` on both trees): its spring end nodes already carry
-an `/ADMAS`, which round 4's positive subtraction already reached.
+mover (`899bc35412d8f730` on both trees), and the reason round 5 first gave
+for that was itself wrong. RE-MEASURED: the deck states **no
+`*ELEMENT_MASS` at all** (0 cards, 0 `*INCLUDE`) and its emitted `_0000.rad`
+carries **0 `/ADMAS`**, so round 4's positive subtraction reaches nothing
+there. All **15** registered token nodes
+(`[1, 129, 235, 479, 545, 611, 689, 767, 873, 983, 1203, 1423, 1505, 1587,
+1675]`) are SECONDARY nodes of rigid bodies — the one class
+`_spring_token_negative_admas` skips by construction, inert under `ICoG 4`
+(`inirby.F:265-266`) and UNMEASURED on `ICoG 1/2/3`, exactly as the runtime
+warning says. The deck emits that RIGID sentence and no other A1 class line.
 
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885
@@ -2609,9 +2617,19 @@ brick nodes"*). The tied nodes are deliberately NOT registered in the writer's
 `rigid_nodes` set — that set means "re-point this node's constraints to a
 `/RBODY` main node `rbody_info` knows", and a tie has no LS-DYNA PART id, so
 registering them made `*NODE` TC/RC drop 12 of the dome's 132 stated
-constraints. Radioss applies the rigid body first and the redundant `/BCS`
-costs a starter `WARNING ID 312` with 0 ERRORs, which the per-card warning
-says. MEASURED on `examples-manual/constrained/shell2solid/
+constraints. A `/BCS` on a tied node costs a starter `WARNING ID 312` with 0
+ERRORs, which the per-card warning says — and the `/BCS` is **LOST, not
+redundant**. MEASURED on a purpose-built coupon (a 4-brick column tied to a
+shell strip, one fibre node carrying `*NODE` TC=7/RC=7, nt 2): the tie arm
+and the same deck with that constraint DELETED are numerically identical (IE
+3613, engine energy error −97.9 %, 3252 cycles), while moving that one
+`/BCS` onto the rigid body's MAIN node reproduces the
+`*CONSTRAINED_NODAL_RIGID_BODY` twin exactly (IE 707.4, −0.0 %, 2524 cycles)
+and `WARNING 312` disappears with it. Both arms print 0 ERRORs and NORMAL
+TERMINATION. *(Round 5 published the opposite reading — that the constraint
+is merely redundant — without measuring it; that half is retracted. On the
+dome itself the same 60 conditions cost only −0.5 % of energy error, so the
+range is wide.)* MEASURED on `examples-manual/constrained/shell2solid/
 constrained.shell_solid.dome.k` — **1 deck key on 1 emitted model**, the only
 carrier on any corpus here (7 cards × 5 fibre nodes, nt 4): NORMAL 48190 cycles
 (+0.27 % over the drop arm's 48060), external work 1.290e5 → **1689** against
@@ -2621,7 +2639,14 @@ against 642.206), KE 1.290e5 → **806.4** (+12299.9 % → **−22.49 %** agains
 meshed shell node by construction; 1 × ID 312, the 60 symmetry conditions;
 1 × ID 1084, the deck's own). The campaign row **stays `deviation`** — the
 bands are 10/10/5 and `ke` reads −22.5 %. This is a physics claim, not a fixed
-deck
+deck. `--no-shell-to-solid-rbody` goes back to dropping the keyword, but the
+emitted file is **not** byte-identical to a pre-round-5 conversion: the
+keyword is now REGISTERED and routed through `note_recognized_not_emitted`,
+so the four-line `# -- SKIPPED (unsupported) keywords --` block disappears
+(measured: exactly 4 removed lines on the dome, no solver card different).
+`--no-generalized-weld-butt` has the same 4-line shape on the butt-weld deck.
+`--no-spring-token-mass-compensation` *is* byte-identical to master
+(`plates.nrbc` `_0000.rad` md5 `4145e75441f17696627bcc23aaceda21` on both)
 
 `*CONSTRAINED_GENERALIZED_WELD_BUTT` → one `/RBODY` per card with `Ifail = 1`
 (default ON, `--no-generalized-weld-butt`), **coincident node pairs only**:
@@ -3038,7 +3063,7 @@ with `Iale` 2** (`sgrtails.F:920-926` passes). What the remap costs is the
 ANSWER. On `advection_B` the shipped Lagrangian arm reaches NORMAL in 6 571
 cycles at KE 6.000e7 against its reference's 6.00000e7 (energy error −0.0 %),
 while the `Iale` 2 arm reaches NORMAL in 7 195 cycles with internal energy
-blowing up 1.017e-16 → 1.353e13 and the energy error at **99.9 %** — and its
+blowing up 1.017e-17 → 1.353e12 and the energy error at **99.9 %** — and its
 `SUM EPSP` going 10.0 → 0.0 is NOT a failure but the expected Eulerian answer
 (the tracer leaves a 3 000 mm FIXED domain at 1e5 mm/s in 0.05 s). On the other
 two carriers `Isolid` 1 + the remap is destructive: `taylor_B` from IE +5.1 % /
@@ -5786,7 +5811,8 @@ K-ENERGY is **189.962**: the shipped full-velocity re-point reads 387.9
 `/RBODY`'s own lumped rotary inertia (starter `NEW INERTIA` 0.2642894E-02
 against LS-DYNA's 0.1977E-02, the difference being exactly
 `4 × (m/4)(A + t²)/12 = 6.65667e-4` per diagonal), which the `/RBODY` `J` cells
-would ADD rather than replace (`hm_read_rbody.F:276-279`): a named follow-up,
+would ADD rather than replace (`inirby.F:166-168` and `:331-339` ADD them;
+`hm_read_rbody.F:276-279` is only where the cells are read): a named follow-up,
 not compensated here.
 
 It is **OFF by default** for an evidence reason, not a physics one: exactly one

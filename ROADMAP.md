@@ -1308,7 +1308,9 @@ that decided it and the deck that would decide it next.
    moved); every alternative regresses more than it gains -
    `Isolid 24` loses the population's only `match`
    (`ex_27_solid_elform_-2_rigidwall`, ke_dev +9.75 % -> +15.43 %), costs
-   `mainboltaexpl` -72.7 % -> -81.4 % at 5x the wall time, and sends
+   `mainboltaexpl` -72.7 % -> -81.4 % at the SAME cycle count (51 762 on both
+   arms, base-paired at nt 4 — round 5's unpaired wall-time multiple for
+   this deck is retracted), and sends
    `ex_14_solid_elform_-1/-2` from +314 % / +494 % to +1373 % / +2014 %. Net 4
    worse, 2 better. The round-5 measurement is NAMED: a **bending coupon meshed
    1/2/4 elements through the depth**, at `Isolid` 17/24/18/14, with a
@@ -1485,11 +1487,15 @@ that decided it and the deck that would decide it next.
     the class silently. Round 5 CENSUSED the reach instead of assuming it, and
     it is 0 by construction: the unfaceted shapes need a SHORT
     `*ELEMENT_SOLID` card, which is not an LS-DYNA spelling at all (Vol I R17
-    p.19-124 gives the card eight node columns), and an independent scan of the
-    932 corpus deck files (`F:`, `C:/openradioss_run` with the two `*INCLUDE`
-    pullers excluded by name, `E:/foxcore_data`, plus the repo's own fixtures)
-    finds **zero** short cards - the only short rows anywhere being 16
-    `*ELEMENT_SOLID_NURBS_PATCH` ones in `11.5.nurbs.k`, a different keyword
+    p.19-124 gives the card eight node columns), and an independent scan of
+    **932** deck files — **925 across the three corpora** (`F:` 382,
+    `C:/openradioss_run` 507 with the two `combine.key` `*INCLUDE` pullers
+    excluded by name, `E:/foxcore_data` 36) plus the repo's own 7 fixtures —
+    finds **zero** short cards on any CORPUS deck; the only short
+    `*ELEMENT_SOLID` cards in the 932 are the two in
+    `tests/fixtures/wedge_short_card.k`, written for this item, and the only
+    other short rows anywhere are 16 `*ELEMENT_SOLID_NURBS_PATCH` ones in
+    `11.5.nurbs.k` (of that block's 605 data rows), a different keyword
     k2rad already screens - and all 7 417 roster
     pentahedra arrive as 8-field collapsed hexes, which this function DOES
     facet. (They all use `n1 n2 n3 n4 n5 n5 n7 n7`, not the
@@ -1585,7 +1591,8 @@ that decided it and the deck that would decide it next.
    Radioss lumps the four shell nodes' own rotary inertia into the body
    (`NEW INERTIA 0.2642894E-02` against LS-DYNA's `0.1977E-02`, the difference
    being exactly `4 x (m/4)(A + t²)/12 = 6.65667e-4` per diagonal), and the
-   `/RBODY` `J` cells are ADDITIVE (`hm_read_rbody.F:276-279`) — writing the
+   `/RBODY` `J` cells are ADDITIVE (`inirby.F:166-168` and `:331-339`;
+   `hm_read_rbody.F:276-279` is only where the cells are read) — writing the
    difference there would double-count, and writing the total needs an `ICoG`
    that also discards the mesh contribution. What would decide it: a coupon
    pairing `ICoG 4` with an explicitly stated `J`.
@@ -1605,8 +1612,8 @@ that decided it and the deck that would decide it next.
    (5, 6.25, 5) — but it is accepted ONLY on a property at `Isolid` 24
    (starter `ERROR ID : 3107`, measured on the coupon), so emitting it would
    couple an element's spelling to a hourglass flag. What would decide it: a
-   deck that actually carries short cards, of which the 932-file corpus has
-   none.
+   deck that actually carries short cards, of which the 925 corpus deck
+   files of the 932-file census have none (only this repo's own fixture).
 
 6. **`*CONSTRAINED_TIED_NODES_FAILURE`** (1 682 cards on 2 keys) and the three
    other unregistered `*CONSTRAINED_*` spellings the round-5 census found —
@@ -2293,7 +2300,7 @@ found and deliberately did NOT close.
   `advection_B` runs at 0 ERROR / 0 WARNING with `Iale` 1 and 2 alike;
   `sgrtails.F:920-926` passes), so what rules the remap out is the ANSWER, not
   the reader: `advection_B`'s energy error goes −0.0 % → **99.9 %** with its
-  internal energy blowing up 1.017e-16 → 1.353e13. With `Isolid` 1 the remap
+  internal energy blowing up 1.017e-17 → 1.353e12. With `Isolid` 1 the remap
   takes `taylor_B` from IE +5.1 % / KE +4.9 % against its LS reference to a
   **99.9 % energy error at 198 220 cycles** and `channel_A` from −98.9 % /
   −25.6 % to **−100 % / −94.3 %**; `Iale = 2` is the same. `taylor_B/_C/_D`
