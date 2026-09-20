@@ -44,6 +44,10 @@ ENV/
 !tests/fixtures/**/*.k
 !tests/fixtures/**/*.rad
 
+# Local lessons-learned file (maintainer's own notes, deliberately not published;
+# the cross-project half lives outside the repo). Do not commit or un-ignore.
+/PROJECT_MISTAKES.md
+
 # OS specific
 .DS_Store
 Thumbs.db
