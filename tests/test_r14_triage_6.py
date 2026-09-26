@@ -1240,7 +1240,21 @@ class ConstrainedLinearMpc(unittest.TestCase):
         self.assertIn("#-- SKIPPED: *CONSTRAINED_LINEAR_LOCAL", starter)
         self.assertEqual(result.skipped_keywords.count(
             "CONSTRAINED_LINEAR_LOCAL"), 1)
-        self.assertTrue(_has(result.warnings, "already in an earlier /MPC"))
+        self.assertTrue(_has(result.warnings, "already in an earlier /MPC",
+                             "the same node AND DOF may not carry two "
+                             "constraint equations", "p.10-135 / p.10-139"))
+
+    def test_a_node_in_two_cards_on_DIFFERENT_DOFs_is_written(self):
+        """Finalization round: the "twice" screen is keyed on the node-DOF
+        PAIR, and its note now says so (it cited p.10-136 for "a node may not
+        be in two constraint equations", which the screen does not test).
+        Node 40 on DOF 3 in one card and DOF 1 in the next: both /MPC."""
+        cards = [("*CONSTRAINED_LINEAR_LOCAL", ("40 3 0 1.0", "42 3 0 -1.0")),
+                 ("*CONSTRAINED_LINEAR_LOCAL", ("40 1 0 1.0", "41 1 0 -1.0"))]
+        result, starter, _e = _convert(_linear_deck(cards=cards))
+        self.assertEqual(len(_mpc_blocks(starter)), 2, starter)
+        self.assertNotIn("#-- SKIPPED: *CONSTRAINED_LINEAR_LOCAL", starter)
+        self.assertFalse(_has(result.warnings, "already in an earlier /MPC"))
 
     def test_the_opt_out(self):
         result, starter, _e = _convert(_linear_deck(),
@@ -3184,6 +3198,28 @@ class ConstrainedGlobalBcs(unittest.TestCase):
             "constrained_global_001_000": ("001 000", list(range(1, 10)))})
         self.assertEqual(sum("the row is NOT converted" in w
                              for w in res.warnings), 2)
+
+    def test_6c_a_zero_or_blank_DIR_is_refused_by_name(self):
+        """Finalization round (the code-sweep mutation that survived: the
+        screen's ``(1, 2, 3)`` widened to ``(0, 1, 2, 3)`` stayed green,
+        because only DIR 4 was probed). DIR has no default on the card: a 0
+        and a BLANK cell - the likeliest input slip - are refused by name
+        and byte-identical to the opt-out arm; under the widened screen DIR 0
+        indexes the coordinate list at -1 and writes a /BCS on a z-plane."""
+        for label, row in (
+                ("DIR 0", (3, 0, 0, "0.0", "0.0", "0.0", "0.0")),
+                ("blank DIR", (3, 0, "", "0.0", "0.0", "0.0", "0.0"))):
+            with self.subTest(row=label):
+                res, s_bad, e_bad = _convert(_grid_deck(rows=(row,)))
+                self.assertTrue(_has(res.warnings, "DIR=0 is not 1, 2 or 3",
+                                     "the row is NOT converted"),
+                                res.warnings)
+                self.assertEqual(_bcs_groups(s_bad), {})
+                self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+                _r, s_off, e_off = _convert(_grid_deck(rows=(row,)),
+                                            constrained_global=False)
+                self.assertEqual(s_bad, s_off)
+                self.assertEqual(e_bad, e_off)
 
     def test_6b_a_plane_that_selects_nothing_is_the_skipped_arm(self):
         res, starter, _e = _convert(_grid_deck(

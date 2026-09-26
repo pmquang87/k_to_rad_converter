@@ -7697,8 +7697,14 @@ _MPC_REFUSAL_NOTES = {
     "kin": "two kinematic conditions on one DOF are starter WARNING 312 "
            "(round 5's joint-screw arm measured an energy error of -30.8 % "
            "with one)",
-    "twice": "Vol I R17 p.10-136: a node may not be in two constraint "
-             "equations on the explicit solver",
+    "twice": "the same node AND DOF may not carry two constraint equations "
+             "(the WARNING box of Vol I R17 p.10-135 / p.10-139 forbids an "
+             "explicit-solver node in two equations at all and allows the "
+             "implicit solver to put equations on different DOFs of one "
+             "node; the /MPC rows are solved by Lagrange multipliers, "
+             "resol.F:7880 -> lag_mult.F, so this screen refuses only the "
+             "repeated node-DOF pair and writes a node that two cards "
+             "constrain on DIFFERENT DOFs)",
 }
 
 
