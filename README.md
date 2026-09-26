@@ -2761,6 +2761,19 @@ in two sets with different weights (`ERROR 705`, de-duplicated first-row-wins), 
 dangling `CIDI` (`ERROR 184`), and the dependent node appearing in its own
 independent list. The `/RBE3` nodes are also excluded from the implicit free-node
 `/BCS` guard, which would otherwise fight the constraint (`WARNING 3115`)
+`*CONSTRAINED_TIED_NODES_FAILURE` — recognized, **NOT converted** and still
+listed as skipped: the coincident nodes stay unconnected, and ONE warning per
+deck names the card count, the node count, the EPPF classes and why. LS-DYNA
+keeps each group tied until the volume-weighted plastic strain of the
+surrounding elements exceeds EPPF (Vol I R17 p.10-226/227, Remark 1); no
+OpenRadioss tie reads an element's strain (`/RBODY` `Ifail` fails on a force,
+`rgbodv.F:248-267`; `/INTER/TYPE2` `Spotflag` 20-22 on a separation,
+`ruptint2.F:138-151`; `/SENSOR` has no element-strain type). The four measured
+substitutes on `contact.n2s-sphere` (nt 4) are quoted in the warning — untied
+IE −71.8 %, merged +333 %, a force-failure `/RBODY` −57 … +117 % with the wrong
+release classes, an erosion emulation −16.9 % with 92 of 900 elements deleted
+that LS-DYNA keeps — and none reproduces the strain-based release, so none is
+written. 2 deck keys on 2 emitted models carry it; 0 bytes move
 
 ### Joints
 `*CONSTRAINED_JOINT_SPHERICAL` / `_REVOLUTE` / `_CYLINDRICAL` / `_PLANAR` /

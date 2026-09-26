@@ -1622,6 +1622,14 @@ that decided it and the deck that would decide it next.
    which round 5 registered the two that LS-DYNA's own manual calls nodal
    rigid bodies. What would decide the rest: a measured arm per spelling, as
    A2 and A3 got.
+   **Round 6:** `*CONSTRAINED_TIED_NODES_FAILURE` is refused BY NAME (one
+   warning per deck, still listed as skipped, 0 bytes — the strain-based
+   release is a SOLVER LIMITATION: no Radioss tie reads an element's strain;
+   the erosion emulation, −16.9 % IE with 92 of 900 elements wrongly deleted,
+   stays an opt-in candidate that needs a loaded carrier);
+   `*CONSTRAINED_LINEAR_LOCAL` converts to `/MPC` (A5); `*CONSTRAINED_GLOBAL`
+   is part B's; `*CONSTRAINED_SHELL_IN_SOLID` stays out (a dead coupling, or
+   4.51× the cycles with the coupling alive).
 
 7. **`*CONSTRAINED_JOINT_SCREW`** — the `/GJOINT/RACK` and `/MPC` arms both
    missed their gates; the numbers are in item 11 above.

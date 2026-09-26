@@ -9874,6 +9874,53 @@ def handle_constrained_generalized_weld_butt(block: Block,
         length=g(4), depth=g(5), title=title))
 
 
+def handle_constrained_tied_nodes_failure(block: Block,
+                                          state: ConversionState) -> None:
+    """``*CONSTRAINED_TIED_NODES_FAILURE`` — RECORDED, refused BY NAME, never
+    converted (R14 triage round 6, A4).
+
+    Card 1 (Vol I R17 p.10-226): ``NSID EPPF ETYPE PID``. LS-DYNA keeps each
+    cluster of coincident nodes tied until the volume-weighted plastic strain
+    (volume strain / damage for some materials) of the surrounding elements
+    exceeds EPPF, then releases the nodes of the elements that exceed it
+    (Remark 1, p.10-226/227). No OpenRadioss tie reads an element's strain,
+    so the card is refused: the record is kept only so ONE warning per deck
+    (``writer/loads._make_tied_nodes_failure_notes``) can name the groups,
+    the EPPF classes and the measured substitutes.
+
+    Still listed as SKIPPED, deliberately — the ``handle_initial_void``
+    precedent: registering a handler normally moves a keyword out of
+    ``skipped_keywords`` and deletes its ``#-- SKIPPED:`` block from the
+    starter (on both corpus carriers that is the deck's whole skipped block),
+    a byte change for an item that converts nothing. The card really is
+    unconverted, so the comment stays true and this item moves no byte. It is
+    NOT also put in ``recognized_not_emitted``: ``ConversionResult`` documents
+    the two registries as disjoint.
+
+    NOTE for any future ``/RBODY`` producer for these ties: it MUST follow
+    ``/RBODY`` producers 4 and 5 (``writer/assembly.py``, the
+    ``*CONSTRAINED_SHELL_TO_SOLID`` / ``_GENERALIZED_WELD_BUTT`` bodies: they
+    contribute neither an ``rbody_info`` record nor members to
+    ``rigid_nodes``), never the ``*CONSTRAINED_NODAL_RIGID_BODY`` producer,
+    whose members are unioned into ``rigid_nodes`` — ``_resolve_contact_slave``
+    then strips every such node from the impact contact's secondary group
+    (``writer/contacts.py``), which on ``contact.n2s-sphere`` is all 3364 tied
+    plate nodes.
+    """
+    state.skipped_keywords.append(block.keyword)
+    for i in range(_title_offset(block), len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=4, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        state.tied_nodes_failures.append((
+            to_int(f[0]),
+            to_float(f[1]) if len(f) > 1 else 0.0,
+            to_int(f[2]) if len(f) > 2 else 0,
+            to_int(f[3]) if len(f) > 3 else 0))
+
+
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
                                 rwid: int, raw, idx: int, family: str) -> None:
     """One guard for both rigid-wall families.
@@ -18508,6 +18555,8 @@ HANDLERS = {
     # below); only the base names are registered.
     "CONSTRAINED_GENERALIZED_WELD_BUTT":      handle_constrained_generalized_weld_butt,
     "CONSTRAINED_SHELL_TO_SOLID":             handle_constrained_shell_to_solid,
+    # Round 6: recorded and refused BY NAME (still listed as skipped).
+    "CONSTRAINED_TIED_NODES_FAILURE":         handle_constrained_tied_nodes_failure,
 
     # Joints. _ID/_TITLE come free via parser._split_keyword; _LOCAL and
     # _FAILURE stay in the base name and need their own literal keys (the same

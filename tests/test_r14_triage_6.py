@@ -820,6 +820,118 @@ class SpringTokenLumpedScreen(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A4 — *CONSTRAINED_TIED_NODES_FAILURE: a named refusal, 0 bytes
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _tied_failure_deck(cards=("101 0.085", "102 0.5"), extra="") -> str:
+    """Two shells sharing an edge by COINCIDENT nodes (2/5 and 3/6), the two
+    coincident pairs as node sets 101 and 102, and one
+    *CONSTRAINED_TIED_NODES_FAILURE card per entry of *cards* ("NSID EPPF
+    [ETYPE PID]")."""
+    pts = {1: (0, 0), 2: (1, 0), 3: (1, 1), 4: (0, 1),
+           5: (1, 0), 6: (1, 1), 7: (2, 0), 8: (2, 1)}
+    deck = ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            "*NODE\n"
+            + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n"
+                      for i, (x, y) in pts.items())
+            + "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 3, 4) + "\n"
+            + _row(2, 1, 5, 7, 8, 6) + "\n"
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + "*SET_NODE_LIST\n" + _row(101) + "\n" + _row(2, 5) + "\n"
+            + "*SET_NODE_LIST\n" + _row(102) + "\n" + _row(3, 6) + "\n")
+    for card in cards:
+        deck += ("*CONSTRAINED_TIED_NODES_FAILURE\n"
+                 + _row(*card.split()) + "\n")
+    return deck + extra + "*END\n"
+
+
+class TiedNodesFailureRefusal(unittest.TestCase):
+    """A4 — LS-DYNA releases a tied group on the surrounding elements'
+    plastic strain (Vol I R17 p.10-226/227); no Radioss tie reads an
+    element's strain, so the card is refused BY NAME: one warning per deck,
+    the keyword still listed as skipped, not one byte moved."""
+
+    def _warnings(self, result):
+        return [w for w in result.warnings
+                if w.startswith("*CONSTRAINED_TIED_NODES_FAILURE:")]
+
+    def test_not_one_byte_moves_against_the_unregistered_keyword(self):
+        """The handler vs no handler at all (the dispatch fall-through the
+        keyword took before this round): identical starter and engine."""
+        from k2rad import handlers
+        _r, s_on, e_on = _convert(_tied_failure_deck())
+        saved = handlers.HANDLERS.pop("CONSTRAINED_TIED_NODES_FAILURE")
+        try:
+            r_off, s_off, e_off = _convert(_tied_failure_deck())
+        finally:
+            handlers.HANDLERS["CONSTRAINED_TIED_NODES_FAILURE"] = saved
+        self.assertEqual(s_on, s_off)
+        self.assertEqual(e_on, e_off)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_TIED_NODES_FAILURE", s_on)
+        for card in ("/RBODY/", "/MERGE", "/INTER/TYPE2/"):
+            self.assertNotIn(card, s_on)
+        self.assertFalse(self._warnings(r_off))
+
+    def test_the_registries(self):
+        result, _s, _e = _convert(_tied_failure_deck())
+        self.assertIn("CONSTRAINED_TIED_NODES_FAILURE",
+                      result.skipped_keywords)
+        self.assertNotIn("CONSTRAINED_TIED_NODES_FAILURE",
+                         [k for k, _w in result.recognized_not_emitted])
+
+    def test_ONE_warning_with_the_rule_and_the_measured_arms(self):
+        result, _s, _e = _convert(_tied_failure_deck())
+        w = self._warnings(result)
+        self.assertEqual(len(w), 1, result.warnings)
+        for needle in ("2 card(s)", "4 nodes", "EPPF 0.085 x1", "0.5 x1",
+                       "ETYPE 0", "p.10-226/227", "rgbodv.F:248-267",
+                       "ruptint2.F:138-151", "hm_read_sensors.F:175-250",
+                       "-71.8 %", "+333 %", "-16.9 %", "NOT converted"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+
+    def test_fifty_cards_are_still_ONE_warning(self):
+        cards = [f"{101 + (k % 2)} {0.1 + k * 0.001:.3f}" for k in range(50)]
+        result, _s, _e = _convert(_tied_failure_deck(cards=cards))
+        w = self._warnings(result)
+        self.assertEqual(len(w), 1)
+        self.assertIn("50 card(s)", w[0])
+
+    def test_the_PID_form_is_named(self):
+        result, _s, _e = _convert(_tied_failure_deck(
+            cards=("101 0.085", "0 0.1 0 7")))
+        w = self._warnings(result)
+        self.assertEqual(len(w), 1)
+        self.assertIn("1 card(s) use the PID form", w[0])
+        self.assertIn("part(s) [7]", w[0])
+
+    def test_an_undefined_node_set_is_counted_not_raised(self):
+        result, _s, _e = _convert(_tied_failure_deck(
+            cards=("101 0.085", "999 0.5")))
+        w = self._warnings(result)
+        self.assertEqual(len(w), 1)
+        self.assertIn("2 card(s) tying 2 nodes", w[0])
+        self.assertIn("(1 card(s) name a node set the deck does not "
+                      "define.)", w[0])
+
+    def test_a_refusal_carries_no_offset_spec(self):
+        """The #130 rule: a keyword that resolves nothing gets no
+        *INCLUDE_TRANSFORM offset spec."""
+        from k2rad.assembly import _OFFSET_SPECS
+        self.assertNotIn("CONSTRAINED_TIED_NODES_FAILURE", _OFFSET_SPECS)
+
+    def test_the_record_is_kept_per_card(self):
+        st = _dispatch(_tied_failure_deck(cards=("101 0.085 0 0",
+                                                 "102 0.5 1 3")))
+        self.assertEqual(st.tied_nodes_failures,
+                         [(101, 0.085, 0, 0), (102, 0.5, 1, 3)])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 

@@ -125,6 +125,7 @@ from .loads import (
     _make_rlinks,
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
+    _make_tied_nodes_failure_notes,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
@@ -2432,6 +2433,12 @@ def _starter_section_registry():
         # refusal quotes a *DEFINE_CURVE that the corpus carrier defines
         # 150 lines AFTER the contact - see state.ContactRefused.
         ("refused_contacts", lambda c: _make_refused_contact_notes(c.state)),
+        # A note-only section (it returns [] and draws no id): the ONE
+        # warning per deck for the *CONSTRAINED_TIED_NODES_FAILURE cards
+        # the handler refused by name (round 6, A4). A writer section rather
+        # than the handler because it counts every card and every node set.
+        ("tied_nodes_failure_notes",
+                              lambda c: _make_tied_nodes_failure_notes(c.state)),
         ("rbodies",           lambda c: c.rbody_lines),
         # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
         # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts

@@ -8892,6 +8892,12 @@ class ConversionState:
     # reason in words ("--no-initial-void-floor" or the refusal clause), so
     # the /INTER/TYPE18 void warning can say why without re-deciding.
     initial_void_floor_refusal: str = ""
+    # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
+    # order (round 6, A4). Refused BY NAME and never converted: kept only so
+    # writer/loads._make_tied_nodes_failure_notes can write ONE warning per
+    # deck. The keyword itself stays in skipped_keywords.
+    tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
+        default_factory=list)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the

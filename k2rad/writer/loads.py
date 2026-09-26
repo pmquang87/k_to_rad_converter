@@ -104,6 +104,7 @@ __all__ = [
     "_shell_load_segments",
     "_make_pressure_loads",
     "_make_added_masses",
+    "_make_tied_nodes_failure_notes",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -6940,6 +6941,74 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
                      "field).")
         state.warn(note)
     return lines
+
+
+def _make_tied_nodes_failure_notes(state: ConversionState) -> List[str]:
+    """ONE warning per deck for every ``*CONSTRAINED_TIED_NODES_FAILURE``
+    card (R14 triage round 6, A4) — a note-only section: it returns ``[]``
+    and draws no id.
+
+    The card is refused BY NAME (``handlers.handle_constrained_tied_nodes_
+    failure``): LS-DYNA releases each coincident group on the volume-weighted
+    plastic strain of the surrounding elements, and no OpenRadioss tie reads
+    an element's strain. Run as a writer section rather than in the handler
+    because the message needs every card's count and every node set, known
+    only after dispatch. The four arms measured on ``contact.n2s-sphere`` are
+    quoted so the reader can see why none of them is written.
+    """
+    cards = state.tied_nodes_failures
+    if not cards:
+        return []
+    hist: Dict[float, int] = {}
+    etypes: Set[int] = set()
+    nodes: Set[int] = set()
+    undefined = 0
+    pid_form: List[int] = []
+    for nsid, eppf, etype, pid in cards:
+        hist[eppf] = hist.get(eppf, 0) + 1
+        etypes.add(etype)
+        if pid > 0:
+            pid_form.append(pid)
+        ns = state.node_sets.get(nsid) if nsid > 0 else None
+        if ns is None:
+            if nsid > 0 or pid <= 0:
+                undefined += 1
+            continue
+        nodes.update(n for n in ns[1] if n > 0)
+    n = len(cards)
+    eppf_txt = ", ".join(f"{e:g} x{k}" for e, k in sorted(hist.items()))
+    tail = ""
+    if undefined:
+        tail += (f" ({undefined} card(s) name a node set the deck does not "
+                 "define.)")
+    if pid_form:
+        tail += (f" {len(pid_form)} card(s) use the PID form, which asks "
+                 f"LS-DYNA to split part(s) {sorted(set(pid_form))} into free "
+                 "elements first - k2rad converts that part as ONE connected "
+                 "mesh, i.e. never separated.")
+    state.warn(
+        f"*CONSTRAINED_TIED_NODES_FAILURE: {n} card(s) tying {len(nodes)} "
+        f"nodes in {n} coincident group(s) (EPPF {eppf_txt}; ETYPE "
+        f"{', '.join(str(e) for e in sorted(etypes))}) are NOT converted, so "
+        "the elements they join are NOT connected at those nodes. LS-DYNA "
+        "keeps each group tied until the volume-weighted plastic strain (or "
+        "volume strain / damage, by material) of the surrounding elements "
+        "exceeds EPPF and then releases the nodes of the elements that "
+        "exceed it (Vol I R17 p.10-226/227, Remark 1). No OpenRadioss tie "
+        "reads an element's strain: /RBODY Ifail 1 fails on a force "
+        "(rgbodv.F:248-267, rbyonf.F:490-498), /INTER/TYPE2 Spotflag 20-22 "
+        "on its own separation (ruptint2.F:138-151), and /SENSOR has no "
+        "element-strain type (hm_read_sensors.F:175-250). MEASURED on "
+        "contact.n2s-sphere (nt 4, against LS-DYNA, which released 78 of the "
+        "841 ties - 5/65/8/0 by EPPF 0.0212/0.085/0.125/0.5 - and eroded "
+        "nothing): left untied, as here, IE -71.8 % / KE +10.6 %; merged "
+        "permanently, IE +333 %; tied by /RBODY with a force failure, IE "
+        "-57 % to +117 % depending on the chosen force scale (diverged at "
+        "4x), with bulk-class releases LS-DYNA never makes; an erosion "
+        "emulation (a /FAIL per EPPF class) IE -16.9 % but 92 of 900 "
+        "elements deleted that LS-DYNA keeps. None of these is the LS-DYNA "
+        "rule, so none is written." + tail)
+    return []
 
 
 def _make_starter_cloads(state: ConversionState) -> List[str]:

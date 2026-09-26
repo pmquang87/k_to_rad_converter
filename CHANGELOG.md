@@ -111,6 +111,21 @@ Prior history (before this changelog was introduced) is summarized in the
     TERMINATION — ROADMAP). Two tests updated deliberately: round 4's
     degenerate-node test (the gnonspring shape now takes the negative card)
     and round 5's orphan-branch test (the new sentence).
+  - **A4 — `*CONSTRAINED_TIED_NODES_FAILURE` is refused BY NAME** (one
+    warning per deck instead of a silent skip; 2 deck keys on 2 emitted
+    models, contact.n2s-sphere and sphere-plate, 841 cards / 3364 nodes each;
+    **0 bytes** — both `.rad` files proved identical). LS-DYNA releases each
+    coincident group on the volume-weighted plastic strain of the surrounding
+    elements (Vol I R17 p.10-226/227 Remark 1); no Radioss tie reads an
+    element's strain (`rgbodv.F:248-267` force, `ruptint2.F:138-151`
+    separation, no element-strain `/SENSOR` in `hm_read_sensors.F:175-250`).
+    The warning carries the four arms measured on contact.n2s-sphere (untied
+    IE −71.8 %, merged +333 %, force-failure `/RBODY` −57 … +117 %, erosion
+    emulation −16.9 % with 92 of 900 elements deleted that LS-DYNA keeps). The
+    keyword stays in `skipped_keywords` (the `*INITIAL_VOID` precedent): moving
+    it to `recognized_not_emitted` would delete the `#-- SKIPPED:` block,
+    which on both carriers is the deck's whole skipped block — the one
+    departure from the decision text, which asked for that registry.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by
