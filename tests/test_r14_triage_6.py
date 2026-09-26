@@ -1282,6 +1282,191 @@ class AnisotropicZeroCouplingRoute(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A7 — --mass-weighted-inivel writes J = -SUM(IN) on the re-pointed /RBODY
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _j_plate_deck(covered=(3, 4), second_rigid=False, icomp=False,
+                  thickness=False) -> str:
+    """G4's rigid 20 x 20 x 2 plate (rho 7.85e-9, m 6.28e-6) plus one elastic
+    shell; an *INITIAL_VELOCITY_NODE of vx 1000 on the plate nodes named in
+    *covered*. With --mass-weighted-inivel the plate's synthesized main node
+    (15) gets /INIVEL/TRA + /INIVEL/ROT (omega -25 about z when 2 of 4 nodes
+    move). Hand: SUM(IN) = 4 x (m/4)(A + t^2)/12 = 6.28e-6 x 404 / 12 =
+    2.114266667e-4."""
+    sec1 = (_row(1, 2, 1.0, 2, 1.0, 0, 1 if icomp else 0, 1) + "\n"
+            + _row(2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0) + "\n"
+            + (_row(0.0, 0.0) + "\n" if icomp else ""))
+    deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-4) + "\n"
+            "*PART\nrigid plate\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + sec1
+            + "*PART\nclock shell\n" + _row(2, 2, 2) + "\n"
+            "*SECTION_SHELL\n" + _row(2, 2, 1.0, 2, 1.0, 0, 0, 1) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0) + "\n"
+            "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0)
+            + "\n" + _row(0.0, 0, 0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            "*NODE\n"
+            + "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n"
+                      for n, x, y in ((1, -10, -10), (2, 10, -10), (3, 10, 10),
+                                      (4, -10, 10), (11, 100, 0), (12, 101, 0),
+                                      (13, 101, 1), (14, 100, 1))))
+    if thickness:
+        deck += ("*ELEMENT_SHELL_THICKNESS\n"
+                 + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n"
+                 + "".join(f"{v:>16}" for v in (2.0, 2.0, 2.0, 2.0)) + "\n")
+    else:
+        deck += ("*ELEMENT_SHELL\n"
+                 + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n")
+    deck += "*ELEMENT_SHELL\n" + "".join(f"{v:>8}" for v in
+                                         (2, 2, 11, 12, 13, 14)) + "\n"
+    if second_rigid:
+        deck += ("*PART\nsecond rigid\n" + _row(3, 1, 1) + "\n"
+                 "*NODE\n"
+                 + "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n"
+                           for n, x, y in ((21, 50, 0), (22, 60, 0),
+                                           (23, 60, 10), (24, 50, 10)))
+                 + "*ELEMENT_SHELL\n"
+                 + "".join(f"{v:>8}" for v in (3, 3, 21, 22, 23, 24)) + "\n")
+    deck += "*INITIAL_VELOCITY_NODE\n" + "".join(
+        _row(n, 1000.0, 0.0, 0.0) + "\n" for n in covered)
+    return deck + "*END\n"
+
+
+def _rbody_j_rows(starter: str, main: int):
+    lines = starter.splitlines()
+    i = lines.index(f"/RBODY/{main}")
+    return lines[i + 3], lines[i + 4], lines[i + 5], lines[i + 7]
+
+
+_J_PLATE = "    -0.0002114266667    -0.0002114266667    -0.0002114266667"
+_J_ZERO_ROW = "                   0                   0                   0"
+
+
+class MassWeightedRbodyInertia(unittest.TestCase):
+    """A7 — the starter ADDS every member's nodal rotary inertia IN to a
+    body's tensor (inirby.F:166-168, :355) and the J cells are additive, while
+    LS-DYNA's rigid-body inertia is the point-mass sum; under
+    --mass-weighted-inivel the re-pointed body's J cells take IN back out."""
+
+    def test_the_plate_coupon_gets_minus_SUM_IN(self):
+        result, starter, _e = _convert(_j_plate_deck(),
+                                       mass_weighted_inivel=True)
+        self.assertIn("/INIVEL/ROT/", starter)
+        card1, hdr, j1, j2 = _rbody_j_rows(starter, 15)
+        self.assertEqual(hdr, "#                Jxx                 Jyy"
+                              "                 Jzz")
+        self.assertEqual(j1, _J_PLATE)
+        self.assertEqual(j2, _J_ZERO_ROW)          # Jxy Jyz Jxz untouched
+        self.assertEqual(card1[70:80].strip(), "0")    # ICoG untouched
+        self.assertTrue(_has(result.warnings, "also wrote J = -0.000211427",
+                             "/RBODY/15", "4 shell node(s)", "0.1977227E-02",
+                             "189.96", "1.156x"), result.warnings)
+
+    def test_the_flag_OFF_arm_is_untouched_and_the_pass_is_gated(self):
+        from k2rad.writer import assembly
+        _r, s_off, _e = _convert(_j_plate_deck())
+        self.assertEqual(_rbody_j_rows(s_off, 15)[2], _J_ZERO_ROW)
+        saved = assembly._apply_mass_weighted_rbody_inertia
+        assembly._apply_mass_weighted_rbody_inertia = (
+            lambda state, lines, rbody_info: None)
+        try:
+            _r2, s_nopass, _e2 = _convert(_j_plate_deck())
+        finally:
+            assembly._apply_mass_weighted_rbody_inertia = saved
+        self.assertEqual(s_off, s_nopass)
+
+    def test_only_the_re_pointed_body_gets_the_cells(self):
+        """Two rigid bodies, the card on the plate only: one J row changes."""
+        _r, starter, _e = _convert(_j_plate_deck(second_rigid=True),
+                                   mass_weighted_inivel=True)
+        mains = [int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                 if ln.startswith("/RBODY/")]
+        self.assertEqual(len(mains), 2, mains)
+        rows = sorted(_rbody_j_rows(starter, m)[2] for m in mains)
+        self.assertEqual(rows, sorted([_J_PLATE, _J_ZERO_ROW]))
+
+    def test_a_fully_covered_body_keeps_its_J(self):
+        _r, starter, _e = _convert(_j_plate_deck(covered=(1, 2, 3, 4)),
+                                   mass_weighted_inivel=True)
+        self.assertNotIn("/INIVEL/ROT/", starter)
+        self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
+
+    def test_a_layered_section_is_skipped_by_name(self):
+        result, starter, _e = _convert(_j_plate_deck(icomp=True),
+                                       mass_weighted_inivel=True)
+        self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
+        self.assertTrue(_has(result.warnings, "/RBODY/15 keeps its J",
+                             "ICOMP 1"), result.warnings)
+
+    def test_an_element_thickness_is_skipped_by_name(self):
+        result, starter, _e = _convert(_j_plate_deck(thickness=True),
+                                       mass_weighted_inivel=True)
+        self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
+        self.assertTrue(_has(result.warnings, "/RBODY/15 keeps its J",
+                             "*ELEMENT_SHELL_THICKNESS"), result.warnings)
+
+    def test_Ishell_below_11_is_skipped_by_name(self):
+        """k2rad only writes Ishell 12 / 24 today (reach 0), so the branch is
+        probed by making the shared mapper answer 1."""
+        from k2rad.writer import common
+        saved = common._elform_to_ishell
+        common._elform_to_ishell = lambda *a, **k: 1
+        try:
+            result, starter, _e = _convert(_j_plate_deck(),
+                                           mass_weighted_inivel=True)
+        finally:
+            common._elform_to_ishell = saved
+        self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
+        self.assertTrue(_has(result.warnings, "Ishell 1 < 11", "FAC 9"),
+                        result.warnings)
+
+    def _direct(self, rec, j_row=None):
+        from k2rad.writer import loads
+        from k2rad.writer.rbody import _inertia_lines
+        state = _dispatch(_j_plate_deck())
+        state.options.mass_weighted_inivel = True
+        state.nodes[15] = state.nodes[1].__class__(0.0, 0.0, 0.0)
+        state.mass_weighted_rot_mains[15] = (0.0, 0.0, -25.0)
+        rows = _inertia_lines(rec["j"])
+        if j_row is not None:
+            rows[1] = j_row
+        lines = ["/RBODY/15", "RBODY_1", "#hdr", "card1"] + rows
+        loads._apply_mass_weighted_rbody_inertia(state, lines, {1: rec})
+        return state, lines
+
+    def test_an_ICoG_4_body_is_skipped_by_name(self):
+        rec = {"ind_node": 15, "nodes": [1, 2, 3, 4], "icog": 4,
+               "j": (1.0, 2.0, 3.0, 0.0, 0.0, 0.0)}
+        state, lines = self._direct(rec)
+        self.assertEqual(lines[5], _inertia_lines_row((1.0, 2.0, 3.0)))
+        self.assertTrue(_has(state.warnings, "ICoG 4", "*PART_INERTIA"),
+                        state.warnings)
+
+    def test_a_row_that_is_not_the_recorded_one_raises(self):
+        rec = {"ind_node": 15, "nodes": [1, 2, 3, 4], "icog": 0,
+               "j": (0.0,) * 6}
+        with self.assertRaises(RuntimeError):
+            self._direct(rec, j_row="   1   2   3")
+
+    def test_a_non_positive_principal_value_is_refused(self):
+        """A J already so negative that -SUM(IN) would drive the tensor
+        indefinite: ERROR 274 (inirby.F:823) is refused before it is
+        written."""
+        rec = {"ind_node": 15, "nodes": [1, 2, 3, 4], "icog": 0,
+               "j": (-1.0, -1.0, -1.0, 0.0, 0.0, 0.0)}
+        state, lines = self._direct(rec)
+        self.assertEqual(lines[5], _inertia_lines_row((-1.0, -1.0, -1.0)))
+        self.assertTrue(_has(state.warnings, "ERROR 274", "<= 0"),
+                        state.warnings)
+
+
+def _inertia_lines_row(j3):
+    from k2rad.writer.rbody import _inertia_lines
+    return _inertia_lines(tuple(j3) + (0.0, 0.0, 0.0))[1]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1304,6 +1489,8 @@ class Round6FlagWiringA(unittest.TestCase):
                              "hm_read_prop13.F:1169-1170"),
         "--constrained-linear": ("NUMMPC 1", "683 rows",
                                  "hm_read_mpc.F:124"),
+        "--mass-weighted-inivel": ("J = -SUM(IN)", "0.1977227E-02",
+                                   "189.96", "1.156x"),
         "--spring-token-mass-compensation": (
             "TOTAL MASS 1.02e-4 -> 2.0e-6", "chkmsin.F:53",
             "accele.F:67-80"),
@@ -1339,7 +1526,9 @@ class Round6FlagWiringA(unittest.TestCase):
         text = cli.build_parser().format_help()
         flat = _collapse(text)
         for flag, figures in self._HELP_FIGURES.items():
-            self.assertIn("--no-" + flag[2:], text)
+            self.assertIn(flag, text)
+            if flag in self._FLAGS:          # the default-ON opt-outs
+                self.assertIn("--no-" + flag[2:], text)
             for figure in figures:
                 with self.subTest(flag=flag, figure=figure):
                     self.assertIn(figure, flat)
@@ -1405,6 +1594,10 @@ _RETRACTED_ROUND_6_A = (
     # true only "in OTHER axes"
     "Inverting C to engineering constants is deliberately NOT attempted",
     "Re-state the material as *MAT_ORTHOTROPIC_ELASTIC",
+    # A7: the J cells ARE written now (J = -SUM(IN)); additivity is why it
+    # works, not a reason against it
+    "not compensated here",
+    "would double-count",
 )
 
 #: The same family as regexes, matched on the collapsed text (a phrase whose
@@ -1481,6 +1674,11 @@ class Round6RetractedStatementsA(unittest.TestCase):
              "those axes (AOPT)"),
             ("README.md", "converted **EXACTLY through the orthotropic path "
              "when all 12 coupling cells are 0 and C is positive definite**"),
+            ("k2rad/writer/loads.py", "so the J cells take the difference "
+             "back out"),
+            ("README.md", "the flag also writes `J = −ΣIN` into every body "
+             "it re-points"),
+            ("ROADMAP.md", "CLOSED under the flag by A7"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

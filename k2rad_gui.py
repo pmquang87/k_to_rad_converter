@@ -697,8 +697,8 @@ class ConverterGUI:
             io, text="*INITIAL_VELOCITY on a PARTLY covered rigid body: write "
                      "the momentum average (p.28-129 Remark 3) on the /RBODY "
                      "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
-                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %); the "
-                     "residual is the body's own lumped rotary inertia. One "
+                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %), and "
+                     "with J = -SUM(IN) on the /RBODY (round 6) 189.96. One "
                      "carrier with a reference exists, hence opt-in",
             variable=self.mass_weighted_inivel).grid(
                 row=31, column=0, columnspan=3, sticky="w", **pad)

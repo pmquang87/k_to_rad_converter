@@ -127,6 +127,7 @@ from .loads import (
     _make_starter_cloads,
     _make_tied_nodes_failure_notes,
     _make_constrained_linear_mpcs,
+    _apply_mass_weighted_rbody_inertia,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
@@ -1531,6 +1532,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     lines: List[str] = []
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
+    # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
+    # sections re-pointed (round 6, A7). A post-pass because those blocks are
+    # built above, before the re-point is decided; id-keyed and
+    # content-asserted, it rewrites one J row per body and draws no id. A
+    # no-op without the flag.
+    _apply_mass_weighted_rbody_inertia(state, lines, rbody_info)
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)

@@ -7930,12 +7930,15 @@ class ConvertOptions:
     # part 1's 4 element nodes carry v = (2286, 0, 7620); LS-DYNA cycle-0
     # K-ENERGY 189.962): the shipped full-velocity re-point reads 387.9
     # (+104.20 %), this rule reads 220.58 (+16.12 %), and the final ke_dev goes
-    # +194.03 % -> +47.82 %. The residual is NOT the velocity: it is the
+    # +194.03 % -> +47.82 %. That residual is NOT the velocity: it is the
     # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
     # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
-    # 0.1977E-02), which the /RBODY J cells would ADD rather than replace
-    # (inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 is only where the cells are read)
-    # -- a named follow-up, not compensated here.
+    # 0.1977E-02). The /RBODY J cells are ADDITIVE (inirby.F:154-168), so
+    # since round 6 (A7) the flag also writes J = -SUM(IN) into every body it
+    # re-points (writer/loads._apply_mass_weighted_rbody_inertia): NEW INERTIA
+    # 0.1977227E-02 = LS-DYNA's, cycle-0 KE 189.96 (LS 189.962), final KE
+    # -1.97 %, 1.156x the cycles; the IE (the joint path's 99.9 % energy
+    # error) is not fixed.
     #
     # OPT-IN because exactly ONE carrier with an LS-DYNA reference exists on
     # this machine (translat; Ryan_Lee's W16_SW_door is 3 files on 1 model with
@@ -8942,6 +8945,13 @@ class ConversionState:
     # deck. The keyword itself stays in skipped_keywords.
     tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
         default_factory=list)
+    # --mass-weighted-inivel: /RBODY main node -> omega, one entry per body
+    # the re-point wrote an /INIVEL/ROT on (writer/loads.
+    # _emit_mass_weighted_bodies, the ONE decision site). Read by the
+    # post-registry pass _apply_mass_weighted_rbody_inertia, which writes
+    # J = J_old - SUM(IN) into exactly those bodies' /RBODY (round 6, A7).
+    mass_weighted_rot_mains: Dict[int, Tuple[float, float, float]] = field(
+        default_factory=dict)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the
@@ -9005,7 +9015,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791, :1205, :1312, :1498, :1651, in that order:
+    # (writer/rbody.py:791, :1210, :1318, :1504, :1657, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

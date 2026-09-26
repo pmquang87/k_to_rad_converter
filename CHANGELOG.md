@@ -172,6 +172,29 @@ Prior history (before this changelog was introduced) is summarized in the
     docstring's "Inverting C … is deliberately NOT attempted" is withdrawn.
     Three `tests/test_composites.py` tests were rewritten deliberately: their
     DECK is exactly this convertible class.
+  - **A7 — under `--mass-weighted-inivel` the re-pointed `/RBODY` gets
+    `J = −ΣIN`**, so its inertia is LS-DYNA's point-mass tensor (opt-in
+    inside the existing flag; 0 default movers). The starter adds every
+    member's nodal rotary inertia `IN` to the body tensor for ICoG 1/2/3
+    (`inirby.F:166-168`, `:322`, `:355`) and the `J` cells are ADDITIVE
+    (`:154-160`), while LS-DYNA's rigid-body inertia is the point-mass sum
+    (Theory R16 eqs 29.21-29.23); `Jxx = Jyy = Jzz = −ΣIN` over the body's
+    shell nodes (the lumper's `IN`, `cinmas.F:1379` at FAC 12) takes it back
+    out, on exactly the bodies the re-point wrote an `/INIVEL/ROT` on. A
+    post-registry pass (the `/RBODY` blocks are built before the re-point is
+    decided): the block is found by exact id, the recorded `J` row asserted,
+    one row replaced; a mismatch raises. Skipped by name: ICoG 4, a layered
+    shell (`*PART_COMPOSITE`, ICOMP 1), an element thickness, Ishell < 11;
+    refused: a principal value `<= 0` (ERROR 274, `inirby.F:823`). Measured on
+    translat (the G4 T1b arm, J on body 105 only = this rule, nt 4): `NEW
+    INERTIA` 0.2642894E-02 → **0.1977227E-02** = LS-DYNA's 0.1977E-02;
+    cycle-0 KE 220.58 → **189.96** (LS 189.962); final KE 139.89 → 92.77 (LS
+    94.6381, −1.97 %); 1.156× the cycles; the IE is NOT fixed (1159 → 1436
+    against 0.1026 — the joint path's 99.9 % energy error). Flag-arm movers:
+    translat (1 J row) and Ryan_Lee `W16_SW_door_*` ×3 (2 J rows each, no
+    reference). The round-5 texts that called the residual "not compensated
+    here" / the J write a "double count" are rewritten; the extension of
+    `lumping._material_rho` (A3) leaves all four flag arms byte-identical.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

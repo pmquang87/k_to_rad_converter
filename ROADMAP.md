@@ -1592,10 +1592,18 @@ that decided it and the deck that would decide it next.
    (`NEW INERTIA 0.2642894E-02` against LS-DYNA's `0.1977E-02`, the difference
    being exactly `4 x (m/4)(A + t²)/12 = 6.65667e-4` per diagonal), and the
    `/RBODY` `J` cells are ADDITIVE (`inirby.F:166-168` and `:331-339`;
-   `hm_read_rbody.F:276-279` is only where the cells are read) — writing the
-   difference there would double-count, and writing the total needs an `ICoG`
-   that also discards the mesh contribution. What would decide it: a coupon
-   pairing `ICoG 4` with an explicitly stated `J`.
+   `hm_read_rbody.F:276-279` is only where the cells are read). Round 5 read
+   that additivity as a reason NOT to write the difference into them, and
+   asked for a coupon pairing `ICoG 4` with an explicitly stated `J`.
+   **Round 6: CLOSED under the flag by A7** — `J = −ΣIN` (the body's shell
+   nodes' lumped rotary inertia) on every body the re-point writes an
+   `/INIVEL/ROT` on reproduces LS-DYNA's tensor to every printed digit
+   (`NEW INERTIA 0.1977227E-02 / 0.3954455E-02` against 0.1977E-02 /
+   0.3954E-02): the J cells ARE additive, which is exactly why a negative J
+   takes the lumped part back out under ICoG 0/1 — no ICoG change needed.
+   translat: cycle-0 KE 189.96 (LS 189.962), final KE −1.97 %, 1.156× the
+   cycles; the joint path's 99.9 % energy error (IE 1159 → 1436 against
+   0.1026) is untouched.
 
 4. **`--assumed-strain-isolid` as a DEFAULT.** The flag ships; the default
    stays `none` because the arms disagree 2 better / 4 worse and one of the

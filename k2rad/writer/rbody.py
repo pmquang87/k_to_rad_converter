@@ -796,6 +796,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
+        # The J cells exactly as written, for the one post-pass that may
+        # rewrite them (--mass-weighted-inivel, loads.
+        # _apply_mass_weighted_rbody_inertia), which asserts the row it
+        # replaces against this record.
+        rbody_info[pid]["j"] = tuple(j_vals)
         lines += [
             _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",
@@ -1210,6 +1215,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
+        rbody_info[cnrb.pid]["j"] = tuple(j_vals)     # see the *MAT_RIGID site
         lines += [
             _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",

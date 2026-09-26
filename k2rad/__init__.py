@@ -809,15 +809,16 @@ def convert(
         LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped full-velocity
         re-point reads 387.9 (+104.20 %), this rule reads **220.58**
         (+16.12 %), and the final ``ke_dev`` goes +194.03 % → **+47.82 %**.
-        The residual is not the velocity — it is the ``/RBODY``'s own lumped
+        That residual is not the velocity — it is the ``/RBODY``'s own lumped
         rotary inertia (starter ``NEW INERTIA`` 0.2642894E-02 against
         LS-DYNA's 0.1977E-02, the difference being exactly
-        ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal), which the
-        ``/RBODY`` ``J`` cells would ADD rather than replace
-        (``inirby.F:166-168`` and ``:331-339`` ADD them;
-        ``hm_read_rbody.F:276-279`` is only where the cells are read): a
-        named follow-up, not compensated
-        here. **Opt-in** because exactly one carrier with an LS-DYNA reference
+        ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal). The ``/RBODY``
+        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so since round 6
+        the flag also writes ``J = −ΣIN`` (the body's shell nodes' lumped
+        rotary inertia) into every body it re-points: ``NEW INERTIA``
+        0.1977227E-02 = LS-DYNA's, cycle-0 KE **189.96** (LS 189.962), final
+        KE −1.97 %, 1.156x the cycles; the IE is not fixed (the joint path's
+        99.9 % energy error). **Opt-in** because exactly one carrier with an LS-DYNA reference
         exists on this machine. A body the card FULLY covers is untouched by
         construction: its momentum average IS the card's velocity with
         ``omega`` 0, so no deck of that class changes a byte.

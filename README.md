@@ -5900,13 +5900,27 @@ masses, written as `/INIVEL/TRA` + `/INIVEL/ROT` on the `/RBODY` main node —
 4 element nodes carry `v = (2286, 0, 7620)` and LS-DYNA's own cycle-0
 K-ENERGY is **189.962**: the shipped full-velocity re-point reads 387.9
 (+104.20 %), this rule reads **220.58** (+16.12 %), and the final `ke_dev` goes
-+194.03 % → **+47.82 %**. The residual is not the velocity — it is the
++194.03 % → **+47.82 %**. That residual is not the velocity — it is the
 `/RBODY`'s own lumped rotary inertia (starter `NEW INERTIA` 0.2642894E-02
 against LS-DYNA's 0.1977E-02, the difference being exactly
-`4 × (m/4)(A + t²)/12 = 6.65667e-4` per diagonal), which the `/RBODY` `J` cells
-would ADD rather than replace (`inirby.F:166-168` and `:331-339` ADD them;
-`hm_read_rbody.F:276-279` is only where the cells are read): a named follow-up,
-not compensated here.
+`4 × (m/4)(A + t²)/12 = 6.65667e-4` per diagonal).
+
+**Round 6: the flag also writes `J = −ΣIN` into every body it re-points.** The
+starter adds every member's nodal rotary inertia `IN` to the body tensor for
+ICoG 1/2/3 (`inirby.F:166-168`, `:322`, `:355`) and the `/RBODY` `J` cells are
+ADDITIVE (`inirby.F:154-160`), while LS-DYNA's rigid-body inertia is the
+point-mass sum (Theory R16 eqs 29.21-29.23) — so `Jxx = Jyy = Jzz = −ΣIN` over
+the body's shell nodes (the lumper's `IN`, the `cinmas.F:1379` value) takes the
+difference back out, on exactly the bodies that get an `/INIVEL/ROT`. Measured
+on translat (nt 4): `NEW INERTIA` 0.2642894E-02 → **0.1977227E-02** = LS-DYNA's
+0.1977E-02, cycle-0 KE 220.58 → **189.96** (LS 189.962), final KE 139.89 →
+92.77 (LS 94.6381, **−1.97 %**), at 1.156× the cycles (the body's main node owns
+the step and its rotational step shrinks with J). The IE is NOT fixed (1159 →
+1436 against LS-DYNA's 0.1026; the engine energy error is 99.9 % from cycle 1
+on every arm — the joint path). Skipped by name: an ICoG 4 body (its J is the
+deck's `*PART_INERTIA` tensor), a body with a layered shell, an element
+thickness or Ishell < 11 (the lumper's `IN` would not be the starter's);
+refused: a principal value `<= 0` (ERROR 274).
 
 It is **OFF by default** for an evidence reason, not a physics one: exactly one
 carrier with an LS-DYNA reference exists on this machine, and there is no

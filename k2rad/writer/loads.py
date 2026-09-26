@@ -106,6 +106,7 @@ __all__ = [
     "_make_added_masses",
     "_make_tied_nodes_failure_notes",
     "_make_constrained_linear_mpcs",
+    "_apply_mass_weighted_rbody_inertia",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -4950,6 +4951,9 @@ def _emit_mass_weighted_bodies(state: ConversionState,
     """
     lines: List[str] = []
     for main, v_cm, omega in bodies:
+        # the ONE record of "this body got an /INIVEL/ROT": the post-registry
+        # rotary-inertia pass (_apply_mass_weighted_rbody_inertia) reads it
+        state.mass_weighted_rot_mains[main] = omega
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"{tag}_rb_main_{main}", [main])
         inivel_id = state.next_id()
@@ -4959,6 +4963,182 @@ def _emit_mass_weighted_bodies(state: ConversionState,
         lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
                               grnod_id, omega)
     return lines
+
+
+def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
+                          ) -> str:
+    """Why ``k2rad.lumping``'s nodal ``IN`` would NOT be the starter's for a
+    body over *nodes*, or ``""``.
+
+    The lumper computes ``IN = (m/n)(A + t^2)/12`` per shell corner — the
+    ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11, ``:919-925``),
+    ``ZSHIFT = 0``, one layer, the SECTION thickness. Any shell on the body
+    that the starter lumps differently makes ``-SUM(IN)`` the wrong amount,
+    so the body is skipped by name: Ishell < 11 (FAC 9), a layered property
+    (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an
+    offset, since a plain shell's NLOC and *ELEMENT_SHELL_OFFSET are dropped
+    at read time), an element-level thickness, or a shell with no
+    *SECTION_SHELL."""
+    from .common import _elform_to_ishell
+    for e in state.shell_elems:
+        if not any(n in nodes for n in e.nodes):
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        if part.secid == 0 and e.pid in state.part_composites:
+            return (f"part {e.pid} is a *PART_COMPOSITE (a layered property: "
+                    "the starter lumps IN per layer, cinmas.F:926-1290)")
+        sec = state.sec_shells.get(part.secid)
+        if sec is None:
+            return f"part {e.pid} has no *SECTION_SHELL"
+        if sec.icomp == 1:
+            return (f"section {sec.secid} is ICOMP 1 (a layered property: the "
+                    "starter lumps IN per layer, cinmas.F:926-1290)")
+        if any(e.thick_nodes):
+            return (f"shell {e.eid} states its own thickness "
+                    "(*ELEMENT_SHELL_THICKNESS; the lumper uses the section's)")
+        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
+                                   state.options.shell_default_ishell)
+        if ishell < 11:
+            return (f"section {sec.secid} is Ishell {ishell} < 11: the starter "
+                    "lumps IN with FAC 9 (cinmas.F:919-925), which k2rad's "
+                    "lumper does not model")
+    return ""
+
+
+def _apply_mass_weighted_rbody_inertia(state: ConversionState,
+                                       lines: List[str],
+                                       rbody_info: Dict) -> None:
+    """``--mass-weighted-inivel``: ``J = J_old - SUM(IN)`` on every ``/RBODY``
+    the re-point wrote an ``/INIVEL/ROT`` on (round 6, A7).
+
+    WHY. The starter assembles a body's inertia tensor in ``inirby.F``: for
+    ICoG 1/2/3 (``:322``) it adds every secondary's ``m r^2`` AND its nodal
+    rotary inertia ``IN`` (``:355``), plus the main node's ``IN``
+    (``:166-168``), plus the ``/RBODY`` ``J`` cells, which are ADDITIVE
+    (``:154-160``); the tensor is printed as ``NEW INERTIA`` (``:708/:712``).
+    LS-DYNA's rigid-body inertia is the point-mass sum — its nodal ``J_i``
+    exclude contributions from and on the rigid body itself (Theory R16
+    eqs 29.21-29.23) — so the lumped shell ``IN`` is a residual the momentum
+    average hands straight to the spin. ``J = -SUM(IN)`` over the SAME nodes
+    ``inirby.F`` adds ``IN`` for (the body's secondaries and its main node;
+    ``k2rad.lumping.nodal_masses_from_state``'s ``IN``, shells only) takes it
+    back out. On translat the starter then prints ``NEW INERTIA
+    0.1977227E-02 / 0.3954455E-02`` = LS-DYNA's 0.1977E-02 / 0.3954E-02.
+
+    WHICH BODIES. Exactly the ones ``_emit_mass_weighted_bodies`` recorded in
+    ``state.mass_weighted_rot_mains`` — the one decision site; a body the
+    card fully covers gets no ``/INIVEL/ROT`` and keeps its J.
+
+    SKIPPED by name: ICoG 4 (``inirby.F:322`` adds no nodal ``IN``; the J is
+    the deck's ``*PART_INERTIA`` tensor) and any body whose shells the lumper
+    does not reproduce (``_rbody_in_skip_reason``). REFUSED by name: a
+    principal value of the corrected tensor ``<= 0`` (starter ERROR 274,
+    ``inirby.F:823``).
+
+    HOW. A POST-REGISTRY pass: every ``/RBODY`` block is built before the
+    inivel sections decide the re-point, and the decision needs
+    ``rbody_info``, so no pre-pass could make it without a second copy of the
+    inivel card-group resolution. The block is located by EXACT line
+    equality on ``/RBODY/<main>`` (the ``/RBODY`` id IS its main node, unique
+    in ``state.rbody_ids``), the ``Jxx Jyy Jzz`` header and row the producer
+    wrote are ASSERTED against ``rbody_info[..]["j"]``, and only that one row
+    is replaced. A failed assertion raises: a k2rad bug, never a silent skip.
+    """
+    mains = state.mass_weighted_rot_mains
+    if not mains or not state.options.mass_weighted_inivel:
+        return
+    from ..lumping import _sym3_eigen, nodal_masses_from_state
+    from .rbody import _inertia_lines
+    mass_by_node, in_by_node = nodal_masses_from_state(state)
+    for main in sorted(mains):
+        rec = next((info for info in rbody_info.values()
+                    if info.get("ind_node") == main), None)
+        if rec is None or "j" not in rec:
+            continue
+        nodes = set(rec["nodes"]) | {main}
+        icog = int(rec.get("icog", 0) or 0)
+        if icog == 4:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - ICoG 4: "
+                "its J is the deck's *PART_INERTIA tensor and inirby.F:322 "
+                "adds no nodal IN to it.")
+            continue
+        why = _rbody_in_skip_reason(state, nodes)
+        if why:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - {why}, "
+                "so -SUM(IN) would take out the wrong amount. Its spin carries "
+                "the lumped rotary-inertia residual.")
+            continue
+        shell_nodes = sorted(n for n in nodes if in_by_node.get(n, 0.0) > 0.0)
+        sum_in = math.fsum(in_by_node.get(n, 0.0) for n in shell_nodes)
+        if sum_in <= 0.0:
+            continue                      # no shell IN on this body at all
+        j_old = tuple(rec["j"])
+        j_new = (j_old[0] - sum_in, j_old[1] - sum_in, j_old[2] - sum_in,
+                 j_old[3], j_old[4], j_old[5])
+        # what inirby.F assembles, about the lumped centre of mass
+        pts = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z,
+                mass_by_node.get(n, 0.0)) for n in sorted(nodes)
+               if n in state.nodes]
+        m_tot = math.fsum(p[3] for p in pts)
+        if m_tot > 0.0:
+            cx = math.fsum(p[0] * p[3] for p in pts) / m_tot
+            cy = math.fsum(p[1] * p[3] for p in pts) / m_tot
+            cz = math.fsum(p[2] * p[3] for p in pts) / m_tot
+        else:
+            cx = cy = cz = 0.0
+        t = [[0.0] * 3 for _ in range(3)]
+        for x, y, z, m in pts:
+            d = (x - cx, y - cy, z - cz)
+            r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+            for a in range(3):
+                for b in range(3):
+                    t[a][b] += m * ((r2 if a == b else 0.0) - d[a] * d[b])
+        for a in range(3):
+            t[a][a] += sum_in + j_new[a]
+        t[0][1] += j_new[3]
+        t[1][0] += j_new[3]
+        t[1][2] += j_new[4]
+        t[2][1] += j_new[4]
+        t[0][2] += j_new[5]
+        t[2][0] += j_new[5]
+        low = min(_sym3_eigen(t)[0])
+        if not low > 0.0:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - with "
+                f"J = {j_new[0]:g} a principal value of the body tensor would "
+                f"be {low:g} <= 0 (starter ERROR 274, inirby.F:823).")
+            continue
+        hits = [i for i, ln in enumerate(lines) if ln == f"/RBODY/{main}"]
+        old = _inertia_lines(j_old)
+        if (len(hits) != 1 or len(lines) <= hits[0] + 5
+                or lines[hits[0] + 4] != old[0]
+                or lines[hits[0] + 5] != old[1]):
+            raise RuntimeError(
+                f"--mass-weighted-inivel: the /RBODY/{main} block is not the "
+                "shape its producer recorded (found "
+                f"{len(hits)} header line(s)); refusing to rewrite a J row "
+                "blind. This is a k2rad bug.")
+        lines[hits[0] + 5] = _inertia_lines(j_new)[1]
+        state.warn(
+            f"--mass-weighted-inivel also wrote J = {j_new[0]:g} (= -SUM of "
+            f"the nodal rotary inertia IN of the body's {len(shell_nodes)} "
+            f"shell node(s)) into /RBODY/{main}: the starter ADDS every "
+            "member's IN to the body tensor for ICoG 1/2/3 (inirby.F:166-168, "
+            ":322, :355), while LS-DYNA's rigid-body inertia is the "
+            "point-mass sum (Theory R16 eqs 29.21-29.23), so the J cells "
+            "take the difference back out. MEASURED on "
+            "intro-by-j.-day/joint/joint-ii/translat.k (nt 4): NEW INERTIA "
+            "0.2642894E-02 -> 0.1977227E-02 = LS-DYNA's 0.1977E-02; cycle-0 "
+            "KE 220.58 -> 189.96 (LS 189.962); final KE 139.89 -> 92.77 (LS "
+            "94.6381, -1.97 %); 1.156x the cycles (the body's main node owns "
+            "the step and its rotational step shrinks with J). The IE is NOT "
+            "fixed by it (1159 -> 1436 against LS-DYNA's 0.1026; the engine "
+            "energy error is 99.9 % from cycle 1 on every arm - the joint "
+            "path).")
 
 
 def _make_inivel(state: ConversionState, rbody_info: Dict,
@@ -5503,13 +5683,13 @@ def _momentum_average_body(state: ConversionState, info: Optional[Dict],
         "part 1's 4 element nodes carry v = (2286, 0, 7620) against an LS-DYNA "
         "glstat cycle-0 K-ENERGY of 189.962: the full-velocity re-point reads "
         "387.9 (+104.20 %), this rule reads 220.58 (+16.12 %), and the final "
-        "ke_dev goes +194.03 % -> +47.82 %. The residual is NOT the velocity - "
-        "it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
+        "ke_dev goes +194.03 % -> +47.82 %. That residual is NOT the velocity "
+        "- it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
         "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
-        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), which the "
-        "/RBODY J cells would ADD rather than replace "
-        "(inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 "
-        "is only where the cells are read): not compensated here.")
+        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), and the "
+        "/RBODY J cells are ADDITIVE (inirby.F:154-168), so the flag also "
+        "writes J = -SUM(IN) into this body's /RBODY to take it back out - "
+        "see the J sentence for this body.")
     return main, v_cm, omega
 
 

@@ -808,10 +808,16 @@ def build_parser() -> argparse.ArgumentParser:
              "LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped "
              "full-velocity re-point reads 387.9 (+104.20 %%), this rule "
              "reads 220.58 (+16.12 %%), and the final ke_dev goes +194.03 %% "
-             "-> +47.82 %%. OPT-IN because exactly ONE carrier with an "
-             "LS-DYNA reference exists on this machine. A body the card FULLY "
-             "covers is untouched by construction (its momentum average IS "
-             "the card's velocity, with omega 0).",
+             "-> +47.82 %%. Since round 6 the flag also writes J = -SUM(IN) "
+             "(the body's shell nodes' lumped rotary inertia, which the "
+             "starter ADDS to the tensor, inirby.F:166-168/:355) into every "
+             "body it re-points: NEW INERTIA 0.1977227E-02 = LS-DYNA's, "
+             "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %%, 1.156x the "
+             "cycles; the IE (the joint path) is not fixed. OPT-IN because "
+             "exactly ONE carrier with an LS-DYNA reference exists on this "
+             "machine. A body the card FULLY covers is untouched by "
+             "construction (its momentum average IS the card's velocity, with "
+             "omega 0).",
     )
     parser.add_argument(
         "--law106-shell-restate",
