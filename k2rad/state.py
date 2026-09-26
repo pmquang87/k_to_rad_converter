@@ -7294,6 +7294,29 @@ class ConvertOptions:
     # ERROR -> NORMAL in 92 cycles at IE -99.87 % (a status-only promotion).
     # OFF restores Itol 2 / Toli 0.01.
     zero_tolerance_ectol: bool = True
+    # --implicit-constant-step: cap the implicit step at the deck's own DT0
+    # (/IMPL/DT/STOP DT_MAX := DT0) where LS-DYNA runs a CONSTANT step (R14
+    # triage round 6, B3).
+    #
+    # OPT-IN, default OFF. Scope: an implicit time-marching deck (not modal,
+    # not --arclength-riks) whose *CONTROL_IMPLICIT_AUTO is absent or states
+    # IAUTO 0 (Vol I R17 p.12-277 "EQ.0: Constant time step size"), with
+    # 0 < DT0 < ENDTIM, no stated DTMAX in (0, DT0] and a DT_MIN below DT0
+    # (writer/assembly._constant_step_scope). Only the second /IMPL/DT/STOP
+    # cell changes: /IMPL/DT/2 can no longer GROW the step above DT0
+    # (imp_dt.F:129 / :167) but still cuts a non-converged increment
+    # (imp_dt.F:107-119) and shrinks after one that needed more than It_w
+    # iterations (:141-150). A PIN (DT_MIN = DT0) ended 3 of 3 NORMAL
+    # quasi-static decks in ERROR and is not offered; /IMPL/DT/1 alone is a
+    # slower adaptive control; L_dtn 165 worsened tensile2. MEASURED at nt 4 =
+    # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles; ex_11 KE
+    # history error 16.07 % -> 1.16 % at 2.86x, but its campaign match turns
+    # deviation under the end-of-run scorer (an artefact of the unprinted last
+    # increment); with the default --zero-tolerance-ectol it costs cycles on
+    # the quasi-static decks and buys nothing (tensile2 75 -> 168 cycles, IE
+    # -0.54 % -> -4.36 %). Reach with the flag: 33 R14 deck keys on 22 emitted
+    # models; 0 without it.
+    implicit_constant_step: bool = False
     # --no-discrete-offset: stop honouring *ELEMENT_DISCRETE's OFFSET cell.
     #
     # ON by default. Vol I R17 p.19-33: OFFSET is "a displacement or rotation

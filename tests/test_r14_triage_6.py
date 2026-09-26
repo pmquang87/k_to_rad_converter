@@ -2228,5 +2228,163 @@ class ZeroToleranceEctol(unittest.TestCase):
         self.assertFalse(_has(res.warnings, _B1_HEAD))
 
 
+
+def _auto_card(iauto=0, iteopt=11, itewin=0, dtmin="0.0", dtmax="0.0") -> str:
+    """``*CONTROL_IMPLICIT_AUTO`` card 1: IAUTO ITEOPT ITEWIN DTMIN DTMAX."""
+    return ("*CONTROL_IMPLICIT_AUTO\n"
+            + _row(iauto, iteopt, itewin, dtmin, dtmax) + "\n")
+
+
+def _dt_stop_row(engine: str) -> str:
+    """The ``DT_MIN DT_MAX`` data line of ``/IMPL/DT/STOP``."""
+    lines = engine.splitlines()
+    return lines[lines.index("/IMPL/DT/STOP") + 1]
+
+
+_B3_ON = "--implicit-constant-step: /IMPL/DT/STOP DT_MAX := DT0"
+_B3_OFF = "--implicit-constant-step was passed but wrote nothing"
+
+_EIGEN_CARD = ("*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(10) + "\n")
+_RIKS_SOLUTION = _row(6, 0, 0, "0.001", "0.01", "1.0E+10")
+
+
+class ImplicitConstantStep(unittest.TestCase):
+    """B3: ``--implicit-constant-step`` writes the deck's own DT0 into the
+    SECOND ``/IMPL/DT/STOP`` cell inside its scope, and nothing else, ever.
+    One fixture per branch; expected rows hand-derived from ``_f``."""
+
+    def _arm(self, deck, **kw):
+        res, _s, engine = _convert(deck, **kw)
+        return res.warnings, engine
+
+    def test_1_no_AUTO_card_gets_the_cap(self):
+        warns, engine = self._arm(_impl_deck(),
+                                  implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                0.01")
+        self.assertTrue(_has(warns, _B3_ON, "DT0 = 0.01",
+                             "IAUTO is 0 by default (no "
+                             "*CONTROL_IMPLICIT_AUTO)", "It_w = 8",
+                             "+74.1 % -> -0.9 %", "75 -> 168",
+                             "-0.54 % -> -4.36 %", "+1343 %"))
+
+    def test_2_the_same_deck_without_the_flag_is_the_golden(self):
+        warns, engine = self._arm(_impl_deck())
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "fixtures", "expected",
+                               "implicit_qstat_0001.rad")) as fh:
+            golden = fh.read()
+        self.assertEqual(engine, golden)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                   0")
+        self.assertFalse(_has(warns, _B3_ON))
+        self.assertFalse(_has(warns, _B3_OFF))
+
+    def test_3_a_stated_DTMAX_below_DT0_already_caps(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.0", "0.005"))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06               0.005")
+        self.assertTrue(_has(warns, _B3_OFF, "already caps the step"))
+        self.assertFalse(_has(warns, _B3_ON))
+
+    def test_4_DT0_zero_is_one_LS_step(self):
+        deck = _impl_deck(general=_row(1, "0.0"))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                   0")
+        self.assertTrue(_has(warns, _B3_OFF, "DT0 = 0: LS-DYNA takes ONE step"))
+
+    def test_5_DT0_at_ENDTIM_is_one_LS_step(self):
+        deck = _impl_deck(general=_row(1, "1.0"))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "              0.0001                   0")
+        self.assertTrue(_has(warns, _B3_OFF, ">= ENDTIM = 1"))
+
+    def test_6_IAUTO_1_is_automatic_control(self):
+        deck = _impl_deck(extra=_auto_card(1))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                   0")
+        self.assertTrue(_has(warns, _B3_OFF, "IAUTO=1"))
+
+    def test_7_a_modal_deck_writes_no_DT_card(self):
+        deck = _impl_deck(extra=_EIGEN_CARD)
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertNotIn("/IMPL/DT/STOP", engine)
+        self.assertTrue(_has(warns, _B3_OFF,
+                             "not an implicit time-marching analysis"))
+
+    def test_8_the_RIKS_arm_is_not_touched(self):
+        deck = _impl_deck(_RIKS_SOLUTION)
+        warns, engine = self._arm(deck, implicit_constant_step=True,
+                                  arclength_riks=True)
+        self.assertIn("/IMPL/DT/3", engine)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                   0")
+        self.assertTrue(_has(warns, _B3_OFF, "--arclength-riks"))
+
+    def test_9_a_dynamic_deck_caps_at_DT0_not_at_DTINI(self):
+        deck = _impl_deck(extra="*CONTROL_IMPLICIT_DYNAMICS\n" + _row(1)
+                          + "\n")
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        lines = engine.splitlines()
+        self.assertEqual(lines[lines.index("/IMPL/DTINI") + 1].strip(),
+                         "0.001")
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-07                0.01")
+        self.assertTrue(_has(warns, _B3_ON, "DT0 = 0.01"))
+
+    def test_10_a_DTMIN_at_or_above_DT0_is_a_pinned_step(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.02", "0.0"))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "                0.02                   0")
+        self.assertTrue(_has(warns, _B3_OFF, "a pinned step"))
+
+    def test_11_a_stated_DTMAX_above_DT0_is_replaced_and_named(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.0", "0.05"))
+        warns, engine = self._arm(deck, implicit_constant_step=True)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                0.01")
+        self.assertTrue(_has(warns, _B3_ON, "IAUTO is 0 (stated)",
+                             "It_w = 11",
+                             "the deck's own DTMAX = 0.05 is replaced by DT0"))
+
+    def test_12_the_same_deck_without_the_flag_keeps_its_DTMAX(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.0", "0.05"))
+        warns, engine = self._arm(deck)
+        self.assertEqual(_dt_stop_row(engine),
+                         "        1.000000E-06                0.05")
+        self.assertFalse(_has(warns, _B3_ON))
+        self.assertFalse(_has(warns, _B3_OFF))
+
+    def test_only_the_second_DT_STOP_cell_moves(self):
+        """Flag ON vs OFF on the golden deck: exactly one line differs."""
+        _w, on = self._arm(_impl_deck(), implicit_constant_step=True)
+        _w, off = self._arm(_impl_deck())
+        diff = [(a, b) for a, b in zip(on.splitlines(), off.splitlines())
+                if a != b]
+        self.assertEqual(len(on.splitlines()), len(off.splitlines()))
+        self.assertEqual(diff, [("        1.000000E-06                0.01",
+                                 "        1.000000E-06                   0")])
+
+    def test_an_explicit_deck_is_silent(self):
+        deck = _fixture_text("shell_explicit.k")
+        warns, _engine = self._arm(deck, implicit_constant_step=True)
+        self.assertFalse(_has(warns, "--implicit-constant-step"))
+
+    def test_the_scope_helper_answers_WOULD_it_act(self):
+        """``assume_flag=True`` is what the absent-card sentence asks."""
+        from k2rad.writer.assembly import _constant_step_scope
+        state = _dispatch(_impl_deck())
+        state.is_implicit = True
+        self.assertEqual(_constant_step_scope(state), (False,
+                                                       "the flag is not set"))
+        self.assertEqual(_constant_step_scope(state, assume_flag=True),
+                         (True, ""))
+
+
 if __name__ == "__main__":
     unittest.main()

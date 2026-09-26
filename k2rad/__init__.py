@@ -225,6 +225,7 @@ def convert(
     qstat_dtscal: Union[str, float] = 10.0,
     arclength_riks: bool = False,
     zero_tolerance_ectol: bool = True,
+    implicit_constant_step: bool = False,
     discrete_offset: bool = True,
     spring_token_mass_compensation: bool = True,
     shell_to_solid_rbody: bool = True,
@@ -443,6 +444,21 @@ def convert(
         ``tensile2`` IE +7.36 % -> -0.54 % at 0.11x the cycles, ``doorbeam``
         +380.25 % -> +582.00 % (a named regression), ``ie_shell`` ERROR ->
         NORMAL at IE -99.87 % (a status-only promotion).
+    implicit_constant_step : bool
+        Cap the implicit step at the deck's own DT0 (``/IMPL/DT/STOP``
+        ``DT_MAX := DT0``) where LS-DYNA runs a CONSTANT step: an implicit
+        deck stating IAUTO 0 or no ``*CONTROL_IMPLICIT_AUTO`` (Vol I R17
+        p.12-277), with ``0 < DT0 < ENDTIM`` and no stated DTMAX <= DT0.
+        **Off by default.** Radioss keeps cutting a non-converged increment
+        (``imp_dt.F:107-119``) where LS-DYNA would stop; a pinned step ended
+        3 of 3 NORMAL quasi-static R14 decks in ERROR and is not offered.
+        MEASURED at nt 4 = nt 2: ``ex_15`` energy error +74.1 % -> -0.9 % at
+        3.81x the cycles; ``ex_11`` KE history error 16.07 % -> 1.16 % at
+        2.86x, but its campaign ``match`` becomes a deviation under the
+        end-of-run scorer (an artefact of the unprinted last increment); with
+        the default ``zero_tolerance_ectol`` it costs cycles on the
+        quasi-static decks and buys nothing (``tensile2`` 75 -> 168 cycles,
+        IE -0.54 % -> -4.36 %). Reach: 33 R14 deck keys on 22 emitted models.
     discrete_offset : bool
         Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
         *"a displacement or rotation at time zero … a positive offset on a
@@ -972,6 +988,7 @@ def convert(
         qstat_dtscal=qstat_dtscal,
         arclength_riks=arclength_riks,
         zero_tolerance_ectol=zero_tolerance_ectol,
+        implicit_constant_step=implicit_constant_step,
         discrete_offset=discrete_offset,
         spring_token_mass_compensation=spring_token_mass_compensation,
         shell_to_solid_rbody=shell_to_solid_rbody,

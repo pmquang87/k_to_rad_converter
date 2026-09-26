@@ -757,6 +757,150 @@ def _warn_implicit_auto_drops(state: ConversionState,
     state.warn(msg.rstrip())
 
 
+def _run_end(state: ConversionState) -> float:
+    """EXACTLY the ``/RUN`` value: :func:`_make_engine_header`'s own
+    expression. ENDTIM is read AFTER ``*PARAMETER`` substitution
+    (``handle_control_termination``), so a deck that states ``&t_ends`` arrives
+    here as its number."""
+    return state.ctrl_termination.endtim if state.ctrl_termination else 1.0
+
+
+def _implicit_dtini_dtmin(state: ConversionState) -> Tuple[float, float]:
+    """``/IMPL/DTINI`` and the ``/IMPL/DT/STOP`` DT_MIN exactly as
+    :func:`_make_engine_implicit` writes them: DT0 (0.01 when DT0 <= 0), capped
+    at 1e-3 on a dynamic deck (the ``K + M/(beta dt^2)`` stabilization comment
+    there), and DT_MIN = the stated ``*CONTROL_IMPLICIT_AUTO`` DTMIN or
+    ``max(1e-4 x DTINI, 1e-10)``. ONE computation, shared by the emitter, the
+    constant-step sentence and the ``--implicit-constant-step`` scope, so a
+    warning and the card it describes cannot read two different numbers."""
+    gen = state.ctrl_implicit_gen
+    dyn = state.ctrl_implicit_dyn
+    auto = state.ctrl_implicit_auto
+    dt0_in = gen.dt0 if gen and gen.dt0 > 0 else 0.01
+    is_dynamic_pre = bool(dyn and dyn.imass > 0)
+    dtini = min(dt0_in, 1e-3) if is_dynamic_pre else dt0_in
+    dtmin = auto.dtmin if auto and auto.dtmin > 0 else max(dtini * 1e-4, 1e-10)
+    return dtini, dtmin
+
+
+def _constant_step_scope(state: ConversionState,
+                         assume_flag: bool = False) -> Tuple[bool, str]:
+    """Does ``--implicit-constant-step`` write DT_MAX := DT0 on this deck?
+
+    ``(True, "")`` or ``(False, <why not>)``. ``assume_flag=True`` answers
+    "WOULD it act?", which the absent-card constant-step sentence asks before
+    naming the flag, so a user is never pointed at a lever that does nothing
+    on the deck. The scope is LS-DYNA's constant-step class that the cap can
+    express: an implicit time-marching deck (not modal, not the
+    ``--arclength-riks`` ``/IMPL/DT/3`` arm) whose ``*CONTROL_IMPLICIT_AUTO``
+    is absent or states IAUTO 0 (Vol I R17 p.12-277 "EQ.0: Constant time step
+    size"), with ``0 < DT0 < ENDTIM`` (DT0 = 0 and DT0 >= ENDTIM are ONE
+    LS-DYNA step; DT0 < 0 is p.12-321's ``|DT0|`` with the geometric-stiffness
+    option - reach 0 of the 136 roster keys that state the card), no stated
+    DTMAX in (0, DT0] (that already caps the step: ex_14_solid_elform_3 is
+    byte-identical) and a DT_MIN below DT0 (a pinned step was measured NO-GO).
+    """
+    if not (assume_flag or state.options.implicit_constant_step):
+        return False, "the flag is not set"
+    if state.is_modal or not state.is_implicit:
+        return False, ("the deck is not an implicit time-marching analysis (a "
+                       "modal deck writes no /IMPL/DT card)")
+    if _arclength_requested(state) and state.options.arclength_riks:
+        return False, ("--arclength-riks writes /IMPL/DT/3, whose arc-length "
+                       "step this flag does not touch")
+    auto, gen = state.ctrl_implicit_auto, state.ctrl_implicit_gen
+    if auto is not None and auto.iauto != 0:
+        return False, (f"*CONTROL_IMPLICIT_AUTO IAUTO={auto.iauto} asks for "
+                       "automatic (or curve-driven) step control")
+    dt0 = gen.dt0 if gen else 0.0
+    end = _run_end(state)
+    if dt0 < 0.0:
+        return False, (f"DT0 = {dt0:g} < 0 is not converted as a step (see the "
+                       "*CONTROL_IMPLICIT_AUTO sentence)")
+    if dt0 == 0.0:
+        return False, "DT0 = 0: LS-DYNA takes ONE step of ENDTIM"
+    if dt0 >= end:
+        return False, (f"DT0 = {dt0:g} >= ENDTIM = {end:g}: LS-DYNA takes ONE "
+                       "step")
+    if auto is not None and 0.0 < auto.dtmax <= dt0:
+        return False, (f"the deck's own DTMAX = {auto.dtmax:g} <= DT0 already "
+                       "caps the step")
+    _dtini, dtmin = _implicit_dtini_dtmin(state)
+    if dtmin >= dt0:
+        return False, (f"the deck's DTMIN = {dtmin:g} is not below DT0 - a "
+                       "pinned step, measured NO-GO")
+    return True, ""
+
+
+def _implicit_step_cells(state: ConversionState) -> Tuple[float, float, float]:
+    """``(DTINI, DT_MIN, DT_MAX)`` exactly as ``/IMPL/DTINI`` +
+    ``/IMPL/DT/STOP`` write them. DT_MAX is the stated
+    ``*CONTROL_IMPLICIT_AUTO`` DTMAX > 0, else 0 (``lectur.F:3546`` reads 0 as
+    1e10, i.e. unbounded) - and, under ``--implicit-constant-step`` inside
+    :func:`_constant_step_scope`, the deck's own DT0 (NOT the dynamic-capped
+    DTINI)."""
+    auto = state.ctrl_implicit_auto
+    dtini, dtmin = _implicit_dtini_dtmin(state)
+    dtmax = auto.dtmax if auto and auto.dtmax > 0 else 0.0
+    applies, _why = _constant_step_scope(state)
+    if applies and state.ctrl_implicit_gen is not None:
+        dtmax = state.ctrl_implicit_gen.dt0
+    return dtini, dtmin, dtmax
+
+
+def _warn_implicit_constant_step(state: ConversionState) -> None:
+    """``--implicit-constant-step``: say what it wrote, or why it wrote nothing
+    (R14 triage round 6, B3). Silent without the flag and on an explicit deck;
+    one warning per implicit or modal deck with it."""
+    if not state.options.implicit_constant_step:
+        return
+    if not (state.is_implicit or state.is_modal):
+        return
+    applies, why = _constant_step_scope(state)
+    if not applies:
+        state.warn("--implicit-constant-step was passed but wrote nothing on "
+                   f"this deck: {why}.")
+        return
+    gen, auto = state.ctrl_implicit_gen, state.ctrl_implicit_auto
+    dt0 = gen.dt0 if gen else 0.0
+    it_w = auto.iteopt if auto and auto.iteopt > 0 else 8
+    iauto = ("0 (stated)" if auto is not None else
+             "0 by default (no *CONTROL_IMPLICIT_AUTO)")
+    replaced = (f"; the deck's own DTMAX = {auto.dtmax:g} is replaced by DT0"
+                if auto is not None and auto.dtmax > dt0 else "")
+    state.warn(
+        f"--implicit-constant-step: /IMPL/DT/STOP DT_MAX := DT0 = {dt0:g}, the "
+        "deck's own *CONTROL_IMPLICIT_GENERAL DT0 - LS-DYNA holds every step "
+        f"there because IAUTO is {iauto} (Vol I R17 p.12-277). /IMPL/DT/2 can "
+        "no longer GROW the step above DT0 (imp_dt.F:129 / :167); it still "
+        "CUTS a non-converged increment (imp_dt.F:107-119) where LS-DYNA would "
+        "end in error (p.12-362 Remark 4), and it still SHRINKS the step after "
+        f"an increment that needed more than It_w = {it_w} iterations "
+        f"(imp_dt.F:141-150){replaced}; a pinned step (DT_MIN = DT0) was "
+        "measured to end 3 of 3 NORMAL quasi-static R14 decks at their first "
+        "non-converged increment and is not offered. MEASURED on the R14 "
+        "roster (nt 4 and nt 2 identical in cycles and steps): the dynamic "
+        "carriers take 2.9x to 5.9x the cycles (ex_11 35 -> 100, ex_15 53 -> "
+        "202, ex_14 34 -> 201) and follow their references closer in time - "
+        "ex_15_thick_shell_elform_2 energy error +74.1 % -> -0.9 %, ex_11 "
+        "kinetic-energy history error (RMS) 16.07 % -> 1.16 %, "
+        "ex_14_solid_elform_2 internal-energy history error 10.56 % -> "
+        "2.93 % - but WORSE against the references of a DIFFERENT LS-DYNA "
+        "element than the one k2rad emits (ex_14_solid_elform_-1/-2/1, ex_15 "
+        "_3/_5). On the quasi-static decks, whose all-zero tolerances now get "
+        "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles "
+        "and buys nothing: tensile2 75 -> 168 cycles with internal energy "
+        "-0.54 % -> -4.36 % against its reference, 4.2.frf.cant-1 70 -> 134 "
+        "(-0.60 % both), 6.5.tbl.psd.prepressure-1 10 -> 11 (-0.50 % -> "
+        "-0.62 %), ie_shell 92 -> 124 (-99.87 % -> -99.95 %). The campaign's "
+        "one constant-step match, ex_11_beam_elform_1, turns into a deviation "
+        "under the end-of-run scorer (KE -2.39 % -> -15.87 %) although its KE "
+        "history error falls 14x: that match was an artefact of the engine "
+        "never printing its last converged increment (the scorer compared t "
+        "0.0922 with LS-DYNA's t 0.1; at matched time the shipped run's KE is "
+        "+1343 %).")
+
+
 #: LS-DYNA's own *CONTROL_IMPLICIT_SOLUTION card-1 defaults (Vol I R17
 #: p.12-354): DCTOL 0.001, ECTOL 0.01, RCTOL 1e10 ("effectively disabled",
 #: p.12-362 Remark 5). ECTOL is the one B1 writes; the other two are named.
@@ -810,18 +954,15 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         if _arclength_requested(state):
             _warn_arclength(state, modal=state.is_modal)
         _warn_implicit_auto_drops(state, modal=state.is_modal)
+        _warn_implicit_constant_step(state)
     if state.is_modal:
         # Normal-modes (/EIG) → one-shot linear eigensolve, not the QSTAT/NONLIN
         # time-marching engine below.
         return _make_engine_modal(state)
     if not state.is_implicit:
         return []
-    gen  = state.ctrl_implicit_gen
     dyn  = state.ctrl_implicit_dyn
     auto = state.ctrl_implicit_auto
-
-    dt0_in = gen.dt0    if gen  and gen.dt0    > 0 else 0.01
-    dtmax  = auto.dtmax if auto and auto.dtmax > 0 else 0.0
     iteopt = auto.iteopt if auto else 0
 
     # For dynamic implicit with rigid bodies that have free DOFs (only contact-
@@ -831,9 +972,10 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # with tiny rigid-body masses (~0.27 g). Use a much smaller initial step
     # so M/(β·Δt²) provides ~2500× more stabilization. The auto time-step
     # control (/IMPL/DT/2) will grow Δt back up as iterations converge.
-    is_dynamic_pre = dyn and dyn.imass > 0
-    dt0 = min(dt0_in, 1e-3) if is_dynamic_pre else dt0_in
-    dtmin  = auto.dtmin if auto and auto.dtmin > 0 else max(dt0 * 1e-4, 1e-10)
+    # (The computation is _implicit_dtini_dtmin: one place, shared with the
+    # constant-step sentence and the --implicit-constant-step scope, which
+    # replaces DT_MAX by the deck's own DT0 inside its scope - round 6, B3.)
+    dt0, dtmin, dtmax = _implicit_step_cells(state)
 
     # /IMPL/NONLIN/N data line (Reference Guide p.2969-2970): L_A  Itol  Toli
     #   L_A  = max iterations between stiffness-matrix reforms (0 -> 6 for the

@@ -261,6 +261,25 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-zero-tolerance-ectol to keep Itol 2.",
     )
     parser.add_argument(
+        "--implicit-constant-step",
+        action="store_true",
+        help="Cap the implicit step at the deck's own DT0 (/IMPL/DT/STOP "
+             "DT_MAX := DT0) where LS-DYNA runs a CONSTANT step - an implicit "
+             "deck stating IAUTO 0 or no *CONTROL_IMPLICIT_AUTO (Vol I R17 "
+             "p.12-277), with 0 < DT0 < ENDTIM and no stated DTMAX <= DT0. "
+             "OFF by default. Radioss keeps cutting a non-converged step "
+             "(imp_dt.F:107-119) where LS-DYNA would stop; a pinned step "
+             "ended 3 of 3 NORMAL quasi-static R14 decks in ERROR and is not "
+             "offered. MEASURED (nt 4 = nt 2): ex_15 energy error +74.1 %% -> "
+             "-0.9 %% at 3.81x the cycles; ex_11 KE history error 16.07 %% -> "
+             "1.16 %% at 2.86x, but its campaign match becomes a deviation "
+             "under the end-of-run scorer (an artefact: the engine never "
+             "prints its last increment); with the default "
+             "--zero-tolerance-ectol, tensile2 75 -> 168 cycles and IE "
+             "-0.54 %% -> -4.36 %%. Reaches 33 R14 deck keys on 22 emitted "
+             "models.",
+    )
+    parser.add_argument(
         "--discrete-offset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1077,6 +1096,7 @@ def main(argv=None) -> int:
         qstat_dtscal=args.qstat_dtscal,
         arclength_riks=args.arclength_riks,
         zero_tolerance_ectol=args.zero_tolerance_ectol,
+        implicit_constant_step=args.implicit_constant_step,
         discrete_offset=args.discrete_offset,
         spring_token_mass_compensation=args.spring_token_mass_compensation,
         shell_to_solid_rbody=args.shell_to_solid_rbody,

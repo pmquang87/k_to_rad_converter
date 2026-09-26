@@ -99,6 +99,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          qstat_dtscal_text: str = "",
                          arclength_riks: bool = False,
                          zero_tolerance_ectol: bool = True,
+                         implicit_constant_step: bool = False,
                          discrete_offset: bool = True,
                          spring_token_mass_compensation: bool = True,
                          shell_to_solid_rbody: bool = True,
@@ -231,6 +232,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["arclength_riks"] = bool(arclength_riks)
 
     kwargs["zero_tolerance_ectol"] = bool(zero_tolerance_ectol)
+
+    kwargs["implicit_constant_step"] = bool(implicit_constant_step)
 
     kwargs["discrete_offset"] = bool(discrete_offset)
 
@@ -372,6 +375,7 @@ class ConverterGUI:
         self.qstat_dtscal = tk.StringVar(value="")
         self.arclength_riks = tk.BooleanVar(value=False)
         self.zero_tolerance_ectol = tk.BooleanVar(value=True)
+        self.implicit_constant_step = tk.BooleanVar(value=False)
         self.discrete_offset = tk.BooleanVar(value=True)
         self.spring_token_mass_comp = tk.BooleanVar(value=True)
         self.shell_to_solid_rbody = tk.BooleanVar(value=True)
@@ -759,6 +763,17 @@ class ConverterGUI:
             variable=self.zero_tolerance_ectol).grid(
                 row=36, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Cap the implicit step at the deck's own DT0 where LS-DYNA "
+                     "runs a CONSTANT step (IAUTO 0 or no *CONTROL_IMPLICIT_AUTO, "
+                     "0 < DT0 < ENDTIM) - OFF. ex_15 energy error +74.1 % -> "
+                     "-0.9 % at 3.81x cycles; on the quasi-static decks it costs "
+                     "cycles and buys nothing (tensile2 75 -> 168, IE -0.54 % "
+                     "-> -4.36 %); ex_11's match turns deviation (a scoring "
+                     "artefact)",
+            variable=self.implicit_constant_step).grid(
+                row=37, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -997,6 +1012,7 @@ class ConverterGUI:
                 qstat_dtscal_text=self.qstat_dtscal.get(),
                 arclength_riks=self.arclength_riks.get(),
                 zero_tolerance_ectol=self.zero_tolerance_ectol.get(),
+                implicit_constant_step=self.implicit_constant_step.get(),
                 discrete_offset=self.discrete_offset.get(),
                 spring_token_mass_compensation=self.spring_token_mass_comp.get(),
                 shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
@@ -1135,6 +1151,9 @@ class ConverterGUI:
         if not kwargs.get("zero_tolerance_ectol", True):
             bits.append("all-zero implicit tolerances keep Itol 2 "
                         "(--no-zero-tolerance-ectol)")
+        if kwargs.get("implicit_constant_step"):
+            bits.append("implicit step capped at DT0 "
+                        "(--implicit-constant-step)")
         if not kwargs.get("discrete_offset", True):
             bits.append("*ELEMENT_DISCRETE OFFSET dropped "
                         "(--no-discrete-offset)")

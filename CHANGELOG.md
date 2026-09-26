@@ -60,6 +60,40 @@ Prior history (before this changelog was introduced) is summarized in the
     `tests/test_converter.py` `test_blank_leading_card_does_not_corrupt_tolerance`
     (a blank tolerance card IS this class) now pins `  2 1 0.01`, beside a new
     twin that pins `2 2 0.01` under `--no-zero-tolerance-ectol`.
+  - **B3 — `--implicit-constant-step`: an OPT-IN growth cap, `/IMPL/DT/STOP`
+    DT_MAX := DT0 (default OFF).** LS-DYNA runs an implicit deck that states
+    `IAUTO 0` or no `*CONTROL_IMPLICIT_AUTO` at a CONSTANT step DT0 (Vol I
+    R17 p.12-277 "EQ.0: Constant time step size"; every reference `d3hsp` of
+    the class echoes control method 0), and k2rad writes `/IMPL/DT/2`
+    (automatic control) on every implicit deck. The flag writes the deck's own
+    DT0 (not the dynamic-capped DTINI) into the second `/IMPL/DT/STOP` cell
+    inside `_constant_step_scope` (`writer/assembly.py`): implicit, not modal,
+    not `--arclength-riks`, IAUTO absent or 0, `0 < DT0 < ENDTIM`, no stated
+    DTMAX in (0, DT0], DT_MIN below DT0; one warning says what it wrote, or
+    why it wrote nothing. DT_MIN, `/IMPL/DTINI`, It_w and L_dtn are
+    unchanged: Radioss keeps cutting a non-converged increment
+    (`imp_dt.F:107-119`) and shrinking after one that needed more than It_w
+    iterations (`:141-150`); only the growth is capped (`:129` / `:167`).
+    The DTINI / DT_MIN / DT_MAX computation is now ONE helper
+    (`_implicit_step_cells`) shared by the emitter, the scope and the
+    constant-step sentence, and it is byte-identical with the flag off (the
+    golden `implicit_qstat` pins it). Measured and NOT shipped: the PIN
+    (DT_MIN = DT0; 3 of 3 NORMAL quasi-static decks → ERROR), `/IMPL/DT/1`
+    alone, the cap + L_dtn 165 (tensile2 +6.30 → +9.80 %); round 5's
+    deleted-card arm was IDTC 0, a halving ratchet. **Reach with the flag 33
+    deck keys on 22 emitted models (`_0001.rad`, one cell); 0 default
+    movers.** MEASURED (nt 4 = nt 2 in cycles and steps): ex_15 energy error
+    +74.1 % → −0.9 % at 3.81× the cycles; ex_14_solid_elform_2 IE history
+    RMS 10.56 → 2.93 % against its own element's reference but WORSE against
+    the references of a DIFFERENT LS-DYNA element (ex_14 −1 / −2 / 1, ex_15
+    3 / 5); ex_11 KE history RMS 16.07 → 1.16 % at 2.86×. On the
+    quasi-static decks the numbers are the COMBINED arm with B1 (the
+    default): tensile2 75 → 168 cycles, IE −0.54 → −4.36 %; 4.2.frf.cant-1
+    70 → 134 (−0.60 % both); 6.5.tbl.psd 10 → 11 (−0.50 → −0.62 %);
+    ie_shell 92 → 124 (−99.87 → −99.95 %). Never a default this round: the
+    class's only `match`, ex_11, turns deviation under the end-of-run scorer
+    (KE −2.39 → −15.87 %) although its history error falls 14× — an artefact
+    of the unprinted last implicit increment (C1).
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a

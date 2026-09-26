@@ -5993,6 +5993,60 @@ perpendicular to its axis), a RELATIVE zero-mass refusal mirroring
 card FULLY covers is untouched by construction: its momentum average IS the
 card's velocity with `omega` 0.
 
+### `--implicit-constant-step` — cap the implicit step at DT0
+
+Vol I R17 p.12-277 defines `*CONTROL_IMPLICIT_AUTO` `IAUTO EQ.0` as
+*"Constant time step size"* — the card's DEFAULT — so an implicit deck that
+states IAUTO 0, **or no `*CONTROL_IMPLICIT_AUTO` at all**, runs LS-DYNA at a
+constant step DT0 (p.12-322 Remark 2: the step changes only when automatic
+control is active; every R14 reference `d3hsp` of the class echoes `time step
+control method 0`). k2rad writes `/IMPL/DT/2` — AUTOMATIC step control — on
+every implicit deck, so the converted deck grows the step above DT0 on easy
+increments. The class is **50 deck keys on 34 emitted models** on the R14
+roster (39 / 28 state no card, 11 / 6 state IAUTO 0).
+
+This flag writes the deck's own DT0 into the SECOND cell of `/IMPL/DT/STOP`
+(DT_MAX — the deck's DT0, not the dynamic-capped `/IMPL/DTINI`), **opt-in,
+OFF by default**, on an implicit time-marching deck (not modal, not
+`--arclength-riks`) whose IAUTO is 0, with `0 < DT0 < ENDTIM`, no stated
+`DTMAX` in (0, DT0] and a `DT_MIN` below DT0. `/IMPL/DT/2` then cannot grow
+the step past DT0 (`imp_dt.F:129` / `:167`), but it still CUTS a
+non-converged increment (`imp_dt.F:107-119`) where LS-DYNA would end in error
+(p.12-362 Remark 4), and it still shrinks the step after an increment that
+needed more than `It_w` iterations (`imp_dt.F:141-150`) — so it reproduces
+LS-DYNA's constant step on every increment that converges within `It_w`.
+Every other cell (`/IMPL/DTINI`, `DT_MIN`, `It_w`, `L_dtn`) is untouched.
+Reach with the flag: **33 deck keys on 22 emitted models**; 0 without it.
+
+Measured and NOT shipped: a PIN (`DT_MIN = DT_MAX = DT0`) stops at the first
+non-converged increment (`imp_solv.F:1850-1855`) — ERROR on 3 of 3 NORMAL
+quasi-static carriers (`4.2.frf.cant-1` at cycle 0, `tensile2` at `t` 0.67,
+`6.5.tbl.psd.prepressure-1` at cycle 0) and on `ex_27` at cycle 0;
+`/IMPL/DT/1` alone is a slower adaptive control, not a constant step; the cap
+plus `L_dtn` 165 worsens `tensile2` (+6.30 → +9.80 %). (Round 5's "card
+deleted" arm was IDTC 0, a one-way halving ratchet, never a constant step.)
+
+MEASURED at `nt` 4 = `nt` 2 (cycles and steps):
+
+| deck | arm | cycles | result against the LS-DYNA reference |
+|---|---|---|---|
+| `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 % |
+| `ex_14_solid_elform_2` | shipped → cap | 34 → 201 (5.91×) | IE history RMS 10.56 → 2.93 % against the ELFORM-2 reference; WORSE against the references of ELFORM −1 / −2 / 1 |
+| `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; end-of-run KE −2.39 → −15.87 % (campaign `match` → deviation) |
+| `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | IE −0.54 → −4.36 % |
+| `4.2.frf.cant-1` | → cap | 70 → 134 | IE −0.60 % both |
+| `6.5.tbl.psd.prepressure-1` | → cap | 10 → 11 | IE −0.50 → −0.62 % |
+| `ie_shell` | → cap | 92 → 124 | IE −99.87 → −99.95 % |
+
+It is off for two measured reasons. On the quasi-static decks, once their
+all-zero tolerances get LS-DYNA's ECTOL (`--zero-tolerance-ectol`, the
+default), the cap costs cycles and buys nothing. And the only constant-step
+`match` on the roster, `ex_11_beam_elform_1`, turns into a deviation under
+the campaign's end-of-run scorer although its KE history error falls 14× —
+because that match was an artefact: the implicit engine never prints its
+last converged increment, so the scorer compared `t` 0.0922 with LS-DYNA's
+`t` 0.1, and at matched time the shipped run's KE is +1343 %.
+
 ---
 
 ## Modal analysis
