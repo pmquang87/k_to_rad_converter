@@ -126,6 +126,28 @@ Prior history (before this changelog was introduced) is summarized in the
     it to `recognized_not_emitted` would delete the `#-- SKIPPED:` block,
     which on both carriers is the deck's whole skipped block — the one
     departure from the decision text, which asked for that registry.
+  - **A5 — `*CONSTRAINED_LINEAR_LOCAL` / `_GLOBAL` (and the legacy
+    `*CONSTRAINED_LINEAR`) → one `/MPC` per card (default ON,
+    `--no-constrained-linear`).** Each term is a row `node_ID = NID`,
+    `Idof = DOF`, `skew_ID` = the `/SKEW` of `CID`, `alpha = COEF`
+    (`radioss110/RBODY/mpc.cfg` FORMAT(radioss90) `%10d%10d%10d%20lg`,
+    `hm_read_mpc.F:119-122`); the engine enforces it by a Lagrange multiplier
+    as the velocity equation `sum alpha_k v_k = 0` (`lag_mpc.F`) — LS-DYNA's
+    `sum C_k u_k = C0` with `C0 = 0` from t = 0 (*"LS-DYNA assumes the
+    constant C0 is zero"*, Vol I R17 p.10-136/139; neither card has a C0
+    cell, so there is nothing to drop). Refused BY NAME, the card left
+    skipped and the deck byte-identical to the opt-out: a DOF that also
+    carries a `/BCS` (a global or skewed `*BOUNDARY_SPC`, a `*NODE` TC/RC) or
+    an imposed motion (starter WARNING 312), a rigid-body node, a node on no
+    element (DOF 4-6: on no shell or beam), a zero `COEF` (`hm_read_mpc.F:124`
+    silently reads 0 as 1), DOF 7 (piezoelectric), an undefined `CID`, a
+    (node, DOF) pair already in an earlier `/MPC`. The section runs last of
+    the id-drawing sections, so an emitted `/MPC` renumbers nothing and its
+    id is drawn only after the last screen. **1 deck key on 1 emitted model**
+    (plates.lce: the `/MPC` block replaces the deck's only `#-- SKIPPED:`
+    block); measured identical to the base on all 683 engine rows (IE
+    4.123e6) — uninformative by symmetry, nodes 40 and 42 flank the driven
+    node 41; the campaign's KE +365.89 % there is not this card.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

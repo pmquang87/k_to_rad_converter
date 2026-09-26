@@ -230,6 +230,7 @@ def convert(
     generalized_weld_butt: bool = True,
     initial_void_floor: bool = True,
     weld_exponents: bool = True,
+    constrained_linear: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -528,6 +529,19 @@ def convert(
         sums the two shear directions). MEASURED at nt 4 on ``plates.nrbc``
         / ``plates.spot`` (N = M = 1): rupture t 3.130e-4 (+29.4 %) →
         2.460e-4 (+1.7 % against LS-DYNA's 2.4193e-4), 0.899x the cycles.
+    constrained_linear : bool
+        Convert ``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` (and the legacy
+        ``*CONSTRAINED_LINEAR``) to one ``/MPC`` per card — node = ``NID``,
+        ``Idof`` = ``DOF``, skew = the ``/SKEW`` of ``CID``, alpha = ``COEF``.
+        **On by default.** The engine enforces it by a Lagrange multiplier as
+        ``sum alpha_k v_k = 0`` (``lag_mpc.F``), LS-DYNA's ``C0 = 0``
+        equation. Refused by name (the card stays skipped): a DOF that also
+        carries a ``/BCS`` or an imposed motion (WARNING 312), a rigid-body
+        node, an element-free node, a zero ``COEF`` (``hm_read_mpc.F:124``
+        reads 0 as 1), DOF 7, an undefined ``CID``, a (node, DOF) pair used
+        twice. MEASURED on ``plates.lce`` (the only carrier): starter
+        ``NUMMPC 1``, 0 errors, engine identical to the base on all 683 rows
+        (the constrained nodes are symmetric about the driven one).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -934,6 +948,7 @@ def convert(
         generalized_weld_butt=generalized_weld_butt,
         initial_void_floor=initial_void_floor,
         weld_exponents=weld_exponents,
+        constrained_linear=constrained_linear,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

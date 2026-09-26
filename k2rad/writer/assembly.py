@@ -126,6 +126,7 @@ from .loads import (
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
     _make_tied_nodes_failure_notes,
+    _make_constrained_linear_mpcs,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
@@ -2632,6 +2633,14 @@ def _starter_section_registry():
         ("starter_th_seatbelt",
                               lambda c: _make_starter_th_seatbelt(c.state)),
         ("starter_th_accel", lambda c: _make_starter_th_accel(c.state)),
+        # *CONSTRAINED_LINEAR_LOCAL/_GLOBAL -> /MPC (round 6, A5). HERE, last
+        # of the id-drawing sections: its screens read every /BCS, imposed
+        # motion, rigid body and free-node pin (all written above), and no
+        # section below draws an id, so an emitted /MPC renumbers nothing.
+        # A no-op, drawing no id, on any deck without the keyword.
+        ("constrained_linear_mpcs",
+                              lambda c: _make_constrained_linear_mpcs(
+                                  c.state, c.rbody_info, c.rigid_nodes)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),

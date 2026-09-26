@@ -105,6 +105,7 @@ __all__ = [
     "_make_pressure_loads",
     "_make_added_masses",
     "_make_tied_nodes_failure_notes",
+    "_make_constrained_linear_mpcs",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -7009,6 +7010,211 @@ def _make_tied_nodes_failure_notes(state: ConversionState) -> List[str]:
         "elements deleted that LS-DYNA keeps. None of these is the LS-DYNA "
         "rule, so none is written." + tail)
     return []
+
+
+#: The /MPC data-row comment (radioss110/RBODY/mpc.cfg, FORMAT(radioss90)).
+_MPC_ROW_HDR = "#  node_ID      Idof   skew_ID               alpha"
+
+
+#: The explanation of each /MPC refusal reason, printed ONCE per card after
+#: the per-term clauses that name the nodes.
+_MPC_REFUSAL_NOTES = {
+    "dof": "DOF 7 is the piezoelectric voltage (Vol I R17 p.10-136) and has "
+           "no /MPC DOF; an /MPC row takes DOF 1-6 only",
+    "coef": "the manual requires a non-zero COEF, and hm_read_mpc.F:124 "
+            "would read 0 as 1",
+    "cid": "no /SKEW of that id is written (starter ERROR 137)",
+    "rigid": "the manual forbids rigid bodies in a constraint equation on the "
+             "explicit solver, and the /RBODY would overwrite the node's "
+             "motion",
+    "mass": "lag_mpc.F divides by the nodal mass",
+    "inertia": "lag_mpc.F divides by the nodal rotary inertia IN, which only a "
+               "shell or a beam carries",
+    "kin": "two kinematic conditions on one DOF are starter WARNING 312 "
+           "(round 5's joint-screw arm measured an energy error of -30.8 % "
+           "with one)",
+    "twice": "Vol I R17 p.10-136: a node may not be in two constraint "
+             "equations on the explicit solver",
+}
+
+
+def _constrained_linear_refusals(
+        state: ConversionState, lin,
+        gspc: Dict[int, Tuple[str, str]], tcrc: Dict[int, Tuple[str, str]],
+        skew_spc: Dict[int, Tuple[str, str]], rigid: Set[int],
+        trans_nodes: Set[int], rot_nodes: Set[int], skews: Set[int],
+        used: Set[Tuple[int, int]]) -> List[str]:
+    """Every reason one ``*CONSTRAINED_LINEAR_*`` card cannot be written as
+    an ``/MPC`` — empty when it can. One clause per term that fails, then the
+    explanation of each reason ONCE. PURE: no id is drawn, nothing is
+    written, so a refused card leaves the deck byte-identical to the
+    ``--no-constrained-linear`` arm."""
+    why: List[str] = []
+    notes: List[str] = []
+
+    def add(clause: str, note: str) -> None:
+        why.append(clause)
+        if note not in notes:
+            notes.append(note)
+
+    if not lin.terms:
+        why.append("the card states no term")
+    seen: Set[Tuple[int, int]] = set()
+    for nid, dof, cid, coef in lin.terms:
+        if dof < 1 or dof > 6:
+            add(f"node {nid}: " + ("DOF 7 (the piezoelectric voltage)"
+                                   if dof == 7 else
+                                   "no DOF stated" if dof == 0 else
+                                   f"DOF {dof}"), "dof")
+            continue
+        if coef == 0.0:
+            add(f"node {nid} DOF {dof}: COEF 0", "coef")
+        if nid not in state.nodes:
+            why.append(f"node {nid} is not defined")
+            continue
+        if cid > 0 and cid not in skews:
+            add(f"node {nid}: CID {cid} is not a *DEFINE_COORDINATE_* of this "
+                "deck", "cid")
+        if nid in rigid:
+            add(f"node {nid} is a rigid-body node", "rigid")
+        rot = dof >= 4
+        if rot and nid not in rot_nodes:
+            add(f"node {nid} DOF {dof} has no rotary inertia", "inertia")
+        elif not rot and nid not in trans_nodes:
+            add(f"node {nid} carries no element and no *ELEMENT_MASS", "mass")
+        k = dof - 4 if rot else dof - 1
+        kind = 1 if rot else 0
+        hits: List[str] = []
+        for label, table in (("*BOUNDARY_SPC", gspc), ("*NODE TC/RC", tcrc)):
+            code = table.get(nid)
+            if code is None:
+                continue
+            digits = code[kind]
+            if (cid == 0 and digits[k] == "1") or (cid > 0 and "1" in digits):
+                hits.append(label + " /BCS")
+        if skew_spc.get(nid, ("000", "000"))[kind] != "000":
+            hits.append("a skewed *BOUNDARY_SPC /BCS")
+        dirs = state.imp_motion_dirs.get(nid, set())
+        mine = (("XX", "YY", "ZZ") if rot else ("X", "Y", "Z"))
+        if (cid == 0 and mine[k] in dirs) or (cid > 0 and set(mine) & dirs):
+            hits.append("an imposed motion")
+        if nid in state.imp_motion_skew_nodes:
+            hits.append("an imposed motion in a local system")
+        if hits:
+            add(f"node {nid} DOF {dof} already carries " + " and ".join(hits),
+                "kin")
+        if (nid, dof) in used:
+            add(f"node {nid} DOF {dof} is already in an earlier /MPC", "twice")
+        elif (nid, dof) in seen:
+            add(f"node {nid} DOF {dof} is named twice on the card", "twice")
+        seen.add((nid, dof))
+    if notes:
+        why.append("(" + "; ".join(_MPC_REFUSAL_NOTES[n] for n in notes)
+                   + ")")
+    return why
+
+
+def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
+                                  rigid_nodes: Set[int]) -> List[str]:
+    """``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` → one ``/MPC`` per card
+    (R14 triage round 6, A5; default ON, ``--no-constrained-linear``).
+
+    ``/MPC`` (``radioss110/RBODY/mpc.cfg`` FORMAT(radioss90): a title card,
+    then a free list of ``%10d%10d%10d%20lg`` rows ``node_ID Idof skew_ID
+    alpha``; ``hm_read_mpc.F:119-122``). Each term is one row: ``node = NID``,
+    ``Idof = DOF``, ``skew = CID`` (every ``*DEFINE_COORDINATE_*`` is written
+    as the ``/SKEW`` of the same id, ``writer/mesh._make_skews``), ``alpha =
+    COEF``. The engine enforces it by a Lagrange multiplier as the VELOCITY
+    equation ``sum alpha_k v_k = 0`` (``lag_mpc.F``, reached from
+    ``resol.F`` through ``lag_mult.F``) — LS-DYNA's ``sum C_k u_k = C0`` with
+    ``C0 = 0`` from ``t = 0``, which is the only C0 LS-DYNA has (*"LS-DYNA
+    assumes the constant C0 is zero"*, Vol I R17 p.10-136 / p.10-139).
+
+    PLACED immediately before the frequency-domain notes: every section that
+    can write a ``/BCS``, an imposed motion, a rigid body or a free-node pin
+    has run, so the screens read complete registries, and no section after it
+    draws an id, so an emitted ``/MPC`` renumbers nothing. The id is drawn
+    only after the last screen, and the keyword leaves ``skipped_keywords``
+    only when its card is emitted: a refused card keeps its ``#-- SKIPPED:``
+    line.
+    """
+    cards = state.constrained_linears
+    if not cards:
+        return []
+    if not state.options.constrained_linear:
+        state.warn(
+            f"--no-constrained-linear: {len(cards)} *CONSTRAINED_LINEAR_* "
+            f"card(s) (LCID {[c.lcid for c in cards]}) left unconverted and "
+            "listed as skipped: the linear constraint between their nodes is "
+            "lost.")
+        return []
+    skew_spc: Dict[int, Tuple[str, str]] = {}
+    for bc in state.bcs_spcs:
+        if not (bc.cid and (bc.cid in state.coord_sys
+                            or bc.cid in state.coord_nodes)):
+            continue
+        tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
+        rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
+        for nid in state.node_sets.get(bc.nsid, ("", []))[1]:
+            old = skew_spc.get(nid, ("000", "000"))
+            skew_spc[nid] = (_or_dof_codes([old[0], tra]),
+                             _or_dof_codes([old[1], rot]))
+    rigid: Set[int] = set(rigid_nodes) | set(state.rbody_ids)
+    rigid |= {info["ind_node"] for info in rbody_info.values()}
+    trans_nodes: Set[int] = {n for n, m in state.added_node_masses.items()
+                             if m > 0.0}
+    rot_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        trans_nodes.update(e.nodes)
+        rot_nodes.update(e.nodes)
+    for elems in (state.solid_elems, state.tshell_elems):
+        for s in elems:
+            trans_nodes.update(s.nodes)
+    for b in state.beam_elems:
+        trans_nodes.update((b.n1, b.n2))
+        rot_nodes.update((b.n1, b.n2))
+    for d in state.discrete_elems:
+        trans_nodes.update((d.n1, d.n2))
+    gspc = _global_spc_dofs(state)
+    skews: Set[int] = (set(state.coord_sys) | set(state.coord_nodes)
+                       | set(state.coord_vectors))
+    used: Set[Tuple[int, int]] = set()
+    lines: List[str] = []
+    emitted: List[Tuple[int, int]] = []
+    for lin in cards:
+        why = _constrained_linear_refusals(
+            state, lin, gspc, state.node_tc_rc_emitted, skew_spc, rigid,
+            trans_nodes, rot_nodes, skews, used)
+        if why:
+            state.warn(
+                f"*{lin.keyword} {lin.lcid}: NOT converted to /MPC - "
+                + "; ".join(dict.fromkeys(why[:-1] if why[-1].startswith("(")
+                                          else why))
+                + (" " + why[-1] if why[-1].startswith("(") else "")
+                + ". The card is listed as skipped and its linear "
+                "constraint is lost.")
+            continue
+        mpc_id = state.next_id()      # AFTER the last screen that can refuse
+        lines += [f"/MPC/{mpc_id}", f"{lin.keyword}_{lin.lcid}", _MPC_ROW_HDR]
+        for nid, dof, cid, coef in lin.terms:
+            lines.append(f"{_i(nid)}{_i(dof)}{_i(cid)}{_f(coef)}")
+            used.add((nid, dof))
+        lines.append(HDR)
+        state.skipped_keywords.remove(lin.keyword)
+        emitted.append((lin.lcid, mpc_id))
+    if emitted:
+        state.warn(
+            f"*CONSTRAINED_LINEAR_LOCAL/_GLOBAL: {len(emitted)} card(s) -> "
+            f"/MPC {[m for _l, m in emitted]} (LCID "
+            f"{[lcid for lcid, _m in emitted]}; a Lagrange multiplier, "
+            "lag_mpc.F; the velocity form sum alpha_k v_k = 0 enforces "
+            "LS-DYNA's sum C_k u_k = C0 with C0 = 0 from t = 0 - Vol I R17 "
+            "p.10-136/139: 'LS-DYNA assumes the constant C0 is zero'). A term "
+            "in a local system is written with skew_ID = its CID (the /SKEW "
+            "of that id). The /MPC makes the engine solve a Lagrange system "
+            "every cycle (resol.F -> lag_mult.F -> lag_mpc.F). Pass "
+            "--no-constrained-linear to leave the card unconverted.")
+    return lines
 
 
 def _make_starter_cloads(state: ConversionState) -> List[str]:

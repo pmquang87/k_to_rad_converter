@@ -2774,6 +2774,25 @@ IE −71.8 %, merged +333 %, a force-failure `/RBODY` −57 … +117 % with the 
 release classes, an erosion emulation −16.9 % with 92 of 900 elements deleted
 that LS-DYNA keeps — and none reproduces the strain-based release, so none is
 written. 2 deck keys on 2 emitted models carry it; 0 bytes move
+`*CONSTRAINED_LINEAR_LOCAL` / `_GLOBAL` (and the legacy `*CONSTRAINED_LINEAR`) →
+one `/MPC` per card (default ON, `--no-constrained-linear`): each term is a
+row `node_ID = NID`, `Idof = DOF`, `skew_ID` = the `/SKEW` of `CID` (0 =
+global), `alpha = COEF` (`radioss110/RBODY/mpc.cfg`, `hm_read_mpc.F:119-122`).
+The engine enforces it by a Lagrange multiplier as the velocity equation
+`sum alpha_k v_k = 0` (`lag_mpc.F`) — LS-DYNA's `sum C_k u_k = C0` with
+`C0 = 0` from t = 0, which is the only C0 LS-DYNA has (*"LS-DYNA assumes the
+constant C0 is zero"*, Vol I R17 p.10-136). Refused BY NAME (the card stays
+skipped, the deck byte-identical to the opt-out): a DOF that also carries a
+`/BCS` or an imposed motion (two kinematic conditions are starter WARNING
+312), a rigid-body node, a node on no element (the multiplier divides by its
+mass; DOF 4-6 needs a shell or beam), a zero `COEF` (`hm_read_mpc.F:124` would
+read it as 1), DOF 7 (the piezoelectric voltage), an undefined `CID`, a
+(node, DOF) pair already in an earlier `/MPC`. Measured on
+`intro-by-k.-weimar/misc/constraints/plates.lce` (1 deck key on 1 emitted
+model): starter `NUMMPC 1`, 0 errors, engine identical to the base on all 683
+rows — uninformative by construction, because nodes 40 and 42 sit
+symmetrically about the driven node 41 (the campaign's +365.89 % KE on that
+deck is not this card)
 
 ### Joints
 `*CONSTRAINED_JOINT_SPHERICAL` / `_REVOLUTE` / `_CYLINDRICAL` / `_PLANAR` /

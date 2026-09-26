@@ -61,6 +61,7 @@ from .state import (
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld, ShellToSolid,
     GeneralizedWeldButt,
+    ConstrainedLinear,
     MatSpringElastoplastic, MatDamperNonlinearViscous,
     MatSpringGeneralNonlinear, MatSpringInelastic,
     MatDiscreteBeamLinear, MatDiscreteBeamNonlinearElastic,
@@ -9874,6 +9875,47 @@ def handle_constrained_generalized_weld_butt(block: Block,
         length=g(4), depth=g(5), title=title))
 
 
+def handle_constrained_linear(block: Block, state: ConversionState) -> None:
+    """``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` / the legacy
+    ``*CONSTRAINED_LINEAR`` — one linear constraint equation (R14 triage
+    round 6, A5; written as ``/MPC`` by
+    ``writer/loads._make_constrained_linear_mpcs``).
+
+    Card 1: ``LCID``; then every data card until the next keyword is ONE term
+    — ``NID DOF CID COEF`` on ``_LOCAL`` (Vol I R17 p.10-138), ``NID DOF
+    COEF`` on ``_GLOBAL`` (p.10-135) and on the legacy spelling (the manual's
+    own example heading, p.10-137). The card is also appended to
+    ``skipped_keywords`` here and taken back out by the writer only when it
+    EMITS the ``/MPC``: a refused or opted-out card keeps its ``#-- SKIPPED:``
+    line, so a refused deck is byte-identical to the ``--no-constrained-linear``
+    arm.
+    """
+    state.skipped_keywords.append(block.keyword)
+    local = block.keyword.endswith("_LOCAL")
+    raw = block.raw
+    lin: Optional[ConstrainedLinear] = None
+    for i in range(_title_offset(block), len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=4 if local else 3, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        if lin is None:
+            lin = ConstrainedLinear(lcid=to_int(f[0]), keyword=block.keyword)
+            continue
+        nid = to_int(f[0])
+        dof = to_int(f[1]) if len(f) > 1 else 0
+        if local:
+            cid = to_int(f[2]) if len(f) > 2 else 0
+            coef = to_float(f[3]) if len(f) > 3 else 0.0
+        else:
+            cid = 0
+            coef = to_float(f[2]) if len(f) > 2 else 0.0
+        lin.terms.append((nid, dof, cid, coef))
+    if lin is not None:
+        state.constrained_linears.append(lin)
+
+
 def handle_constrained_tied_nodes_failure(block: Block,
                                           state: ConversionState) -> None:
     """``*CONSTRAINED_TIED_NODES_FAILURE`` — RECORDED, refused BY NAME, never
@@ -18557,6 +18599,10 @@ HANDLERS = {
     "CONSTRAINED_SHELL_TO_SOLID":             handle_constrained_shell_to_solid,
     # Round 6: recorded and refused BY NAME (still listed as skipped).
     "CONSTRAINED_TIED_NODES_FAILURE":         handle_constrained_tied_nodes_failure,
+    # Round 6: one /MPC per card (writer/loads._make_constrained_linear_mpcs).
+    "CONSTRAINED_LINEAR_LOCAL":               handle_constrained_linear,
+    "CONSTRAINED_LINEAR_GLOBAL":              handle_constrained_linear,
+    "CONSTRAINED_LINEAR":                     handle_constrained_linear,
 
     # Joints. _ID/_TITLE come free via parser._split_keyword; _LOCAL and
     # _FAILURE stay in the base name and need their own literal keys (the same

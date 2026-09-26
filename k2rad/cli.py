@@ -381,6 +381,23 @@ def build_parser() -> argparse.ArgumentParser:
              "blank.",
     )
     parser.add_argument(
+        "--constrained-linear",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_LINEAR_LOCAL / _GLOBAL (and the legacy "
+             "*CONSTRAINED_LINEAR) to one /MPC per card: node = NID, Idof = "
+             "DOF, skew = the /SKEW of CID, alpha = COEF. ON by default. The "
+             "engine enforces sum(alpha_k v_k) = 0 by a Lagrange multiplier "
+             "(lag_mpc.F) - LS-DYNA's equation with C0 = 0. Refused by name "
+             "(the card stays skipped) on a DOF that also carries a /BCS or "
+             "an imposed motion (WARNING 312), a rigid-body node, an "
+             "element-free node, a zero COEF (hm_read_mpc.F:124 reads 0 as 1), "
+             "DOF 7, an undefined CID, a (node, DOF) pair used twice. MEASURED "
+             "on plates.lce (the only carrier): starter NUMMPC 1, 0 errors, "
+             "engine identical to the base on all 683 rows. Use "
+             "--no-constrained-linear to leave the card unconverted.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1025,6 +1042,7 @@ def main(argv=None) -> int:
         generalized_weld_butt=args.generalized_weld_butt,
         initial_void_floor=args.initial_void_floor,
         weld_exponents=args.weld_exponents,
+        constrained_linear=args.constrained_linear,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

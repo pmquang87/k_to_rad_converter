@@ -3875,6 +3875,15 @@ _OFFSET_SPECS: Dict[str, object] = {
     # *CONSTRAINED_SHELL_TO_SOLID: NID (a NODE) + NSID (a node SET), one card
     # per tie and stackable, so the repeating "data" shape rather than "cards".
     "CONSTRAINED_SHELL_TO_SOLID": {"data": (0, [(0, "n"), (1, "s")])},
+    # *CONSTRAINED_LINEAR_*: card 1 LCID (the constraint's own id, IDROFF),
+    # then repeating term cards NID DOF [CID] COEF — NID a node, CID a
+    # coordinate system (the *DEFINE_COORDINATE_* bucket). Round 6, A5.
+    "CONSTRAINED_LINEAR_LOCAL": {"cards": {0: [(0, "r")]},
+                                 "data": (1, [(0, "n"), (2, "d")])},
+    "CONSTRAINED_LINEAR_GLOBAL": {"cards": {0: [(0, "r")]},
+                                  "data": (1, [(0, "n")])},
+    "CONSTRAINED_LINEAR": {"cards": {0: [(0, "r")]},
+                           "data": (1, [(0, "n")])},
     "CONSTRAINED_NODE_SET": {"cards": {0: [(0, "s")]}},
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
     # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option

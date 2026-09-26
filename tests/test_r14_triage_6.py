@@ -932,6 +932,206 @@ class TiedNodesFailureRefusal(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A5 — *CONSTRAINED_LINEAR_LOCAL / _GLOBAL -> /MPC
+# ═════════════════════════════════════════════════════════════════════════════
+
+_MPC_ROW_40 = "        40         3         0                   1"
+_MPC_ROW_42 = "        42         3         0                  -1"
+
+
+def _linear_deck(terms=("40 3 0 1.0", "42 3 0 -1.0"),
+                 kw="*CONSTRAINED_LINEAR_LOCAL", extra="", rigid=False,
+                 tc42=0, cards=None, free_node=False) -> str:
+    """plates.lce's shape: a two-shell strip, nodes 40/41/42 at (15,20) /
+    (20,20) / (25,20), the constraint tying DZ(40) to DZ(42)."""
+    pts = [(40, 15.0, 20.0, 0), (41, 20.0, 20.0, 0), (42, 25.0, 20.0, tc42),
+           (50, 15.0, 25.0, 0), (51, 20.0, 25.0, 0), (52, 25.0, 25.0, 0)]
+    if free_node:
+        pts.append((60, 40.0, 20.0, 0))
+    deck = ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n"
+            + "".join(f"{n:>8}{x:>16.4f}{y:>16.4f}{0.0:>16.4f}{tc:>8}{0:>8}\n"
+                      for n, x, y, tc in pts)
+            + "*ELEMENT_SHELL\n" + _row(1, 1, 40, 41, 51, 50) + "\n"
+            + _row(2, 1, 41, 42, 52, 51) + "\n"
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n")
+    if rigid:
+        deck += "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+    else:
+        deck += "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+    for card in (cards if cards is not None else [(kw, terms)]):
+        ckw, cterms = card
+        deck += ckw + "\n" + _row(1) + "\n"
+        for t in cterms:
+            deck += _row(*t.split()) + "\n"
+    return deck + extra + "*END\n"
+
+
+def _mpc_blocks(starter: str):
+    """[(header, title, [rows])] for every /MPC block."""
+    lines = starter.splitlines()
+    out = []
+    for i, ln in enumerate(lines):
+        if ln.startswith("/MPC/"):
+            rows = []
+            for r in lines[i + 3:]:
+                if r.startswith("#") or r.startswith("/"):
+                    break
+                rows.append(r)
+            out.append((ln, lines[i + 1], rows))
+    return out
+
+
+class ConstrainedLinearMpc(unittest.TestCase):
+    """A5 — one /MPC per *CONSTRAINED_LINEAR_* card, refused BY NAME where
+    it would fight another kinematic condition or divide by nothing."""
+
+    def _refused_is_the_opt_out(self, deck, *needles):
+        r_on, s_on, _e = _convert(deck)
+        _r, s_off, _e2 = _convert(deck, constrained_linear=False)
+        self.assertEqual(s_on, s_off)
+        self.assertNotIn("/MPC/", s_on)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_LINEAR", s_on)
+        self.assertTrue(_has(r_on.warnings, "NOT converted to /MPC",
+                             *needles), r_on.warnings)
+        return r_on
+
+    def test_the_plates_lce_card(self):
+        result, starter, _e = _convert(_linear_deck())
+        blocks = _mpc_blocks(starter)
+        self.assertEqual(len(blocks), 1, starter)
+        head, title, rows = blocks[0]
+        self.assertEqual(title, "CONSTRAINED_LINEAR_LOCAL_1")
+        self.assertEqual(rows, [_MPC_ROW_40, _MPC_ROW_42])
+        for row, alpha in zip(rows, ("1", "-1")):
+            self.assertEqual(len(row), 50)
+            self.assertEqual(row[30:50].strip(), alpha)   # alpha cols 31-50
+        self.assertNotIn("#-- SKIPPED: *CONSTRAINED_LINEAR_LOCAL", starter)
+        self.assertNotIn("CONSTRAINED_LINEAR_LOCAL", result.skipped_keywords)
+        self.assertTrue(_has(result.warnings, "-> /MPC",
+                             "LS-DYNA assumes the constant C0 is zero"))
+
+    def test_the_GLOBAL_and_legacy_spellings(self):
+        for kw in ("*CONSTRAINED_LINEAR_GLOBAL", "*CONSTRAINED_LINEAR"):
+            with self.subTest(kw=kw):
+                _r, starter, _e = _convert(_linear_deck(
+                    kw=kw, terms=("40 3 1.0", "42 3 -1.0")))
+                self.assertEqual(_mpc_blocks(starter)[0][2],
+                                 [_MPC_ROW_40, _MPC_ROW_42])
+
+    def test_a_local_CID_is_the_row_skew(self):
+        csys = ("*DEFINE_COORDINATE_SYSTEM\n"
+                + _row(5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                + _row(0.0, 1.0, 0.0) + "\n")
+        _r, starter, _e = _convert(_linear_deck(
+            terms=("40 3 5 1.0", "42 3 5 -1.0"), extra=csys))
+        rows = _mpc_blocks(starter)[0][2]
+        self.assertEqual([r[20:30].strip() for r in rows], ["5", "5"])
+        self.assertTrue(re.search(r"^/SKEW/\w+/5$", starter, re.M), starter)
+
+    def test_an_undefined_CID_is_refused(self):
+        self._refused_is_the_opt_out(
+            _linear_deck(terms=("40 3 9 1.0", "42 3 9 -1.0")),
+            "CID 9", "ERROR 137")
+
+    def test_a_BCS_on_the_DOF_is_refused(self):
+        spc = ("*BOUNDARY_SPC_NODE\n" + _row(40, 0, 0, 0, 1, 0, 0, 0) + "\n")
+        self._refused_is_the_opt_out(_linear_deck(extra=spc),
+                                     "node 40 DOF 3", "/BCS", "WARNING 312")
+
+    def test_a_BCS_on_ANOTHER_dof_is_not_a_conflict(self):
+        spc = ("*BOUNDARY_SPC_NODE\n" + _row(40, 0, 1, 0, 0, 0, 0, 0) + "\n")
+        _r, starter, _e = _convert(_linear_deck(extra=spc))
+        self.assertEqual(len(_mpc_blocks(starter)), 1)
+
+    def test_a_NODE_TC_on_the_DOF_is_refused(self):
+        self._refused_is_the_opt_out(_linear_deck(tc42=3),
+                                     "node 42 DOF 3", "*NODE TC/RC")
+
+    def test_an_imposed_motion_on_the_DOF_is_refused(self):
+        pm = ("*BOUNDARY_PRESCRIBED_MOTION_NODE\n"
+              + _row(40, 3, 2, 7, 1.0) + "\n"
+              "*DEFINE_CURVE\n" + _row(7) + "\n"
+              + f"{0.0:>20.10G}{0.0:>20.10G}\n{1.0:>20.10G}{1.0:>20.10G}\n")
+        self._refused_is_the_opt_out(_linear_deck(extra=pm),
+                                     "node 40 DOF 3", "imposed motion")
+
+    def test_a_rigid_body_node_is_refused(self):
+        self._refused_is_the_opt_out(_linear_deck(rigid=True),
+                                     "rigid-body node")
+
+    def test_an_element_free_node_is_refused(self):
+        self._refused_is_the_opt_out(
+            _linear_deck(terms=("60 3 0 1.0", "42 3 0 -1.0"),
+                         free_node=True),
+            "node 60 carries no element")
+
+    def test_a_zero_COEF_is_refused(self):
+        self._refused_is_the_opt_out(
+            _linear_deck(terms=("40 3 0 1.0", "42 3 0 0.0")),
+            "COEF 0", "hm_read_mpc.F:124")
+
+    def test_DOF_7_is_refused(self):
+        self._refused_is_the_opt_out(
+            _linear_deck(kw="*CONSTRAINED_LINEAR_GLOBAL",
+                         terms=("40 7 1.0", "42 7 -1.0")),
+            "piezoelectric")
+
+    def test_a_rotation_on_a_solid_only_node_is_refused(self):
+        nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)]
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+                "*NODE\n"
+                + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                          for i, (x, y, z) in enumerate(nodes, start=1))
+                + "*ELEMENT_SOLID\n"
+                + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 4, 3, 5, 6, 8, 7))
+                + "\n*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+                "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                "*CONSTRAINED_LINEAR_GLOBAL\n" + _row(1) + "\n"
+                + _row(1, 5, 1.0) + "\n" + _row(2, 5, -1.0) + "\n*END\n")
+        self._refused_is_the_opt_out(deck, "rotary inertia")
+
+    def test_a_node_DOF_pair_in_two_cards_refuses_the_second(self):
+        cards = [("*CONSTRAINED_LINEAR_LOCAL", ("40 3 0 1.0", "42 3 0 -1.0")),
+                 ("*CONSTRAINED_LINEAR_LOCAL", ("40 3 0 1.0", "41 3 0 -1.0"))]
+        result, starter, _e = _convert(_linear_deck(cards=cards))
+        self.assertEqual(len(_mpc_blocks(starter)), 1)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_LINEAR_LOCAL", starter)
+        self.assertEqual(result.skipped_keywords.count(
+            "CONSTRAINED_LINEAR_LOCAL"), 1)
+        self.assertTrue(_has(result.warnings, "already in an earlier /MPC"))
+
+    def test_the_opt_out(self):
+        result, starter, _e = _convert(_linear_deck(),
+                                       constrained_linear=False)
+        self.assertNotIn("/MPC/", starter)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_LINEAR_LOCAL", starter)
+        opt = [w for w in result.warnings if "--no-constrained-linear:" in w]
+        self.assertEqual(len(opt), 1)
+
+    def test_the_include_transform_offset_specs(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        self.assertEqual(_OFFSET_SPECS["CONSTRAINED_LINEAR_LOCAL"],
+                         {"cards": {0: [(0, "r")]},
+                          "data": (1, [(0, "n"), (2, "d")])})
+        for kw in ("CONSTRAINED_LINEAR_GLOBAL", "CONSTRAINED_LINEAR"):
+            self.assertEqual(_OFFSET_SPECS[kw],
+                             {"cards": {0: [(0, "r")]},
+                              "data": (1, [(0, "n")])})
+
+    def test_no_keyword_no_section(self):
+        from k2rad.writer import loads
+        st = ConversionState()
+        self.assertEqual(loads._make_constrained_linear_mpcs(st, {}, set()),
+                         [])
+        self.assertEqual(st.warnings, [])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -944,6 +1144,7 @@ class Round6FlagWiringA(unittest.TestCase):
     _FLAGS = {
         "--initial-void-floor": "initial_void_floor",
         "--weld-exponents": "weld_exponents",
+        "--constrained-linear": "constrained_linear",
     }
     #: figures each flag's --help must carry (matched on the collapsed render)
     _HELP_FIGURES = {
@@ -951,6 +1152,8 @@ class Round6FlagWiringA(unittest.TestCase):
                                  "hm_read_mat06.F:154"),
         "--weld-exponents": ("2.460e-4", "+29.4 %", "0.899x",
                              "hm_read_prop13.F:1169-1170"),
+        "--constrained-linear": ("NUMMPC 1", "683 rows",
+                                 "hm_read_mpc.F:124"),
         "--spring-token-mass-compensation": (
             "TOTAL MASS 1.02e-4 -> 2.0e-6", "chkmsin.F:53",
             "accele.F:67-80"),

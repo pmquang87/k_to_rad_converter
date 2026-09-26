@@ -832,6 +832,24 @@ class GeneralizedWeldButt:
     title: str = ""
 
 
+@dataclass
+class ConstrainedLinear:
+    """One ``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` (or the legacy
+    ``*CONSTRAINED_LINEAR``) card → one ``/MPC`` (R14 triage round 6, A5).
+
+    Card 1 (Vol I R17 p.10-135 / p.10-138): ``LCID``; then one card per term
+    until the next keyword — ``NID DOF COEF`` on ``_GLOBAL`` (and the legacy
+    spelling, the manual's own example heading), ``NID DOF CID COEF`` on
+    ``_LOCAL``. The equation is ``sum C_k u_k = C0`` with *"LS-DYNA assumes
+    the constant C0 is zero"* (p.10-136, p.10-139): neither card has a C0 cell.
+    ``terms`` is ``[(nid, dof, cid, coef)]`` in deck order, ``cid`` 0 on the
+    global spellings.
+    """
+    lcid: int
+    keyword: str
+    terms: List[Tuple[int, int, int, float]] = field(default_factory=list)
+
+
 #: LS-DYNA *CONSTRAINED_JOINT_<KIND> → the /PROP/TYPE45 ``Type`` integer.
 #: Verified against prop_p45_kjoint2.cfg lines 261-272 (1 Spherical, 2 Revolute,
 #: 3 Cylindrical, 4 Planar, 5 Universal, 6 Translational, 7 Oldham, 8 Fixed,
@@ -7450,6 +7468,25 @@ class ConvertOptions:
     # LS-DYNA's 2.4193e-4) -> 2.460e-4 (+1.7 %), 0.899x the cycles, external
     # work +60.66 -> +7.83 % / +59.99 -> +7.38 %; both rows stay deviation.
     weld_exponents: bool = True
+    # --no-constrained-linear: leave *CONSTRAINED_LINEAR_LOCAL / _GLOBAL
+    # unconverted (R14 triage round 6, A5).
+    #
+    # ON by default. One /MPC per card: node = NID, Idof = DOF, skew = the
+    # /SKEW of CID (0 = global), alpha = COEF (radioss110/RBODY/mpc.cfg
+    # radioss90 %10d%10d%10d%20lg; hm_read_mpc.F:119-122). The engine solves it
+    # by a Lagrange multiplier as a VELOCITY constraint sum(alpha_k v_k) = 0
+    # (lag_mpc.F), i.e. LS-DYNA's sum(C_k u_k) = C0 with C0 = 0 from t = 0.
+    # Refused by name (the card keeps its #-- SKIPPED: line, byte-identical to
+    # this opt-out): a DOF that also carries a /BCS or an imposed motion
+    # (starter WARNING 312), a rigid-body member, a node on no element (the
+    # multiplier divides by its mass), a zero COEF (hm_read_mpc.F:124 reads 0
+    # as 1), DOF 7 (piezoelectric, no /MPC DOF), an undefined CID, a
+    # (node, DOF) pair already used. MEASURED on intro-by-k.-weimar/misc/
+    # constraints/plates.lce (1 deck key on 1 emitted model): starter NUMMPC
+    # 1, 0 errors, engine identical to the base on all 683 rows (nodes 40 /
+    # 42 are symmetric about the driven node, so the card changes nothing
+    # there).
+    constrained_linear: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8830,6 +8867,13 @@ class ConversionState:
     # (writer/rbody._make_generalized_weld_butt_rbodies, /RBODY producer 5 of
     # 5), default ON, --no-generalized-weld-butt.
     generalized_weld_butts: List[GeneralizedWeldButt] = field(
+        default_factory=list)
+    # *CONSTRAINED_LINEAR_LOCAL / _GLOBAL / the legacy *CONSTRAINED_LINEAR
+    # (writer/loads._make_constrained_linear_mpcs, one /MPC per card; default
+    # ON, --no-constrained-linear). Every card also sits in skipped_keywords
+    # until the writer EMITS it, so a refused or opted-out card keeps its
+    # #-- SKIPPED: line and the deck stays byte-identical to the opt-out arm.
+    constrained_linears: List["ConstrainedLinear"] = field(
         default_factory=list)
     # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
     hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)

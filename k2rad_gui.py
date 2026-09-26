@@ -104,6 +104,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          generalized_weld_butt: bool = True,
                          initial_void_floor: bool = True,
                          weld_exponents: bool = True,
+                         constrained_linear: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -240,6 +241,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["weld_exponents"] = bool(weld_exponents)
 
+    kwargs["constrained_linear"] = bool(constrained_linear)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -368,6 +371,7 @@ class ConverterGUI:
         self.generalized_weld_butt = tk.BooleanVar(value=True)
         self.initial_void_floor = tk.BooleanVar(value=True)
         self.weld_exponents = tk.BooleanVar(value=True)
+        self.constrained_linear = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -719,6 +723,15 @@ class ConverterGUI:
             variable=self.weld_exponents).grid(
                 row=33, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_LINEAR_LOCAL/_GLOBAL → one /MPC per card "
+                     "(Lagrange multiplier, C0 = 0 as in LS-DYNA) — ON. Refused "
+                     "by name on a /BCS or imposed-motion DOF, a rigid-body "
+                     "node, an element-free node, COEF 0, DOF 7. plates.lce: "
+                     "NUMMPC 1, 0 errors, identical on all 683 rows",
+            variable=self.constrained_linear).grid(
+                row=34, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -962,6 +975,7 @@ class ConverterGUI:
                 generalized_weld_butt=self.generalized_weld_butt.get(),
                 initial_void_floor=self.initial_void_floor.get(),
                 weld_exponents=self.weld_exponents.get(),
+                constrained_linear=self.constrained_linear.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1107,6 +1121,9 @@ class ConverterGUI:
         if not kwargs.get("weld_exponents", True):
             bits.append("spotweld failure exponents left at 2 "
                         "(--no-weld-exponents)")
+        if not kwargs.get("constrained_linear", True):
+            bits.append("*CONSTRAINED_LINEAR_* left unconverted "
+                        "(--no-constrained-linear)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")
