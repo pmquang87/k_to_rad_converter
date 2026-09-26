@@ -2386,5 +2386,129 @@ class ImplicitConstantStep(unittest.TestCase):
                          (True, ""))
 
 
+
+_B2_ABSENT = "*CONTROL_IMPLICIT_AUTO is ABSENT"
+_B2_STATED = "*CONTROL_IMPLICIT_AUTO: IAUTO=0"
+
+
+class ConstantStepSentence(unittest.TestCase):
+    """B2: the constant-step sentence for an implicit deck with NO
+    ``*CONTROL_IMPLICIT_AUTO`` (IAUTO's default 0), one builder shared with a
+    stated IAUTO 0, keyed on DT0 against ENDTIM. Warning only."""
+
+    def _warns(self, deck, **kw):
+        res, _s, _e = _convert(deck, **kw)
+        return res.warnings
+
+    def _one(self, warns, prefix):
+        hits = [w for w in warns if w.startswith(prefix)]
+        self.assertEqual(len(hits), 1, warns)
+        return hits[0]
+
+    def test_1_the_absent_card_is_named_with_DT0_and_no_byte_moves(self):
+        res, starter, engine = _convert(_fixture_text("implicit_qstat.k"))
+        hit = self._one(res.warnings, _B2_ABSENT)
+        for needle in ("'Constant time step size'", "p.12-277",
+                       "DT0 = 0.01", "100 steps", "ENDTIM = 1",
+                       "/IMPL/DT/2 (AUTOMATIC", "It_w = 8",
+                       "--implicit-constant-step caps"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit)
+        root = os.path.dirname(os.path.abspath(__file__))
+        for text, name in ((starter, "implicit_qstat_0000.rad"),
+                           (engine, "implicit_qstat_0001.rad")):
+            with open(os.path.join(root, "fixtures", "expected", name)) as fh:
+                golden = fh.read()
+            with self.subTest(file=name):
+                self.assertEqual(text, golden)
+
+    def test_2_DT0_zero_is_ONE_step_of_ENDTIM(self):
+        hit = self._one(self._warns(_impl_deck(general=_row(1, "0.0"))),
+                        _B2_ABSENT)
+        self.assertIn("ONE implicit step of ENDTIM = 1", hit)
+        self.assertIn("/IMPL/DTINI 0.01", hit)
+        self.assertNotIn("caps the Radioss step", hit)
+
+    def test_3_DT0_at_ENDTIM_is_one_step_that_Radioss_can_cut(self):
+        hit = self._one(self._warns(_impl_deck(general=_row(1, "1.0"))),
+                        _B2_ABSENT)
+        self.assertIn("ONE implicit step", hit)
+        self.assertIn("imp_init.F:95", hit)
+        self.assertNotIn("caps the Radioss step", hit)
+
+    def test_4_a_dynamic_DT0_above_ENDTIM_marches_under_the_1e_3_cap(self):
+        deck = _impl_deck(general=_row(1, "0.01"), termination="     0.005",
+                          extra="*CONTROL_IMPLICIT_DYNAMICS\n" + _row(1)
+                          + "\n")
+        hit = self._one(self._warns(deck), _B2_ABSENT)
+        self.assertIn("1e-3 cap", hit)
+        self.assertIn("ENDTIM = 0.005", hit)
+
+    def test_5_a_stated_IAUTO_0_shares_the_builder(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.0", "0.0"))
+        warns = self._warns(deck)
+        hit = self._one(warns, _B2_STATED)
+        self.assertIn("DT0 = 0.01", hit)
+        self.assertIn("100 steps", hit)
+        self.assertIn("GROWS the step above DT0", hit)
+        self.assertFalse(any(w.startswith(_B2_ABSENT) for w in warns))
+
+    def test_5b_the_stated_arm_keeps_its_ITEWIN_KFAIL_and_DTMAX_sentences(self):
+        card = ("*CONTROL_IMPLICIT_AUTO\n"
+                + _row(0, 11, 5, "0.0", "-5.0", "", 3) + "\n")
+        hit = self._one(self._warns(_impl_deck(extra=card)), _B2_STATED)
+        for needle in ("ITEWIN=5", "KFAIL=3", "DTMAX=-5 is NEGATIVE",
+                       "DT0 = 0.01"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit)
+
+    def test_5c_a_stated_DTMAX_below_DT0_is_not_told_the_step_GROWS(self):
+        deck = _impl_deck(extra=_auto_card(0, 11, 0, "0.0", "0.001"))
+        hit = self._one(self._warns(deck), _B2_STATED)
+        self.assertIn("the deck's own DTMAX = 0.001 keeps the step at or "
+                      "below DT0", hit)
+        self.assertNotIn("GROWS the step above DT0", hit)
+        self.assertNotIn("--implicit-constant-step", hit)
+
+    def test_5d_under_the_flag_the_sentence_says_the_growth_is_capped(self):
+        warns = self._warns(_fixture_text("implicit_qstat.k"),
+                            implicit_constant_step=True)
+        hit = self._one(warns, _B2_ABSENT)
+        self.assertIn("can no longer GROW the step above DT0", hit)
+        self.assertNotIn("GROWS the step above DT0 on easy", hit)
+
+    def test_6_a_modal_deck_with_no_card_is_silent(self):
+        warns = self._warns(_impl_deck(extra=_EIGEN_CARD))
+        self.assertFalse(any(w.startswith("*CONTROL_IMPLICIT_AUTO")
+                             for w in warns), warns)
+
+    def test_6b_a_modal_deck_stating_IAUTO_0_names_its_own_engine(self):
+        deck = _impl_deck(extra=_EIGEN_CARD + _auto_card(0))
+        hit = self._one(self._warns(deck), _B2_STATED)
+        self.assertIn("ONE /IMPL/LINEAR step", hit)
+        self.assertNotIn("grows", hit.lower())
+
+    def test_7_the_RIKS_arm_names_IMPL_DT_3(self):
+        hit = self._one(self._warns(_impl_deck(_RIKS_SOLUTION),
+                                    arclength_riks=True), _B2_ABSENT)
+        self.assertIn("/IMPL/DT/3", hit)
+        self.assertNotIn("--implicit-constant-step caps", hit)
+
+    def test_a_negative_DT0_is_named_as_the_geometric_stiffness_option(self):
+        """Vol I R17 p.12-321; reach 0 of the 136 roster keys that state the
+        card, so this fixture is the only probe of the arm."""
+        hit = self._one(self._warns(_impl_deck(general=_row(1, "-0.05"))),
+                        _B2_ABSENT)
+        self.assertIn("DT0 = -0.05 is NEGATIVE", hit)
+        self.assertIn("|DT0| = 0.05", hit)
+        self.assertIn("geometric-stiffness option", hit)
+        self.assertIn("/IMPL/DTINI 0.01", hit)
+
+    def test_an_explicit_deck_is_silent(self):
+        warns = self._warns(_fixture_text("shell_explicit.k"))
+        self.assertFalse(any(w.startswith("*CONTROL_IMPLICIT_AUTO")
+                             for w in warns), warns)
+
+
 if __name__ == "__main__":
     unittest.main()

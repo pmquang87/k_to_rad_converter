@@ -60,6 +60,31 @@ Prior history (before this changelog was introduced) is summarized in the
     `tests/test_converter.py` `test_blank_leading_card_does_not_corrupt_tolerance`
     (a blank tolerance card IS this class) now pins `  2 1 0.01`, beside a new
     twin that pins `2 2 0.01` under `--no-zero-tolerance-ectol`.
+  - **B2 — the constant-step sentence for an implicit deck with NO
+    `*CONTROL_IMPLICIT_AUTO` (warning only, 0 bytes).**
+    `_warn_implicit_auto_drops` (`writer/assembly.py`) returned before its
+    IAUTO-0 sentence when the card was absent, so the **39 deck keys on 28
+    emitted models** that state no card were never told that the card's
+    default IAUTO 0 is LS-DYNA's "Constant time step size" (Vol I R17
+    p.12-277; every reference `d3hsp` of the class echoes control method 0)
+    while k2rad writes `/IMPL/DT/2`. Both the absent card and a stated IAUTO 0
+    now use ONE sentence builder (`_constant_step_body`) keyed on DT0 against
+    ENDTIM: DT0 steps to ENDTIM (with the step count, the DTINI k2rad writes
+    and what `/IMPL/DT/2` does instead — grow, shrink after more than It_w
+    iterations, cut, `imp_dt.F:107-174`), ONE step of ENDTIM when DT0 = 0
+    (`ex_01` / `ex_02`: 6 keys / 2 models) or DT0 >= ENDTIM (9 + 1 keys), and
+    p.12-321's `|DT0|` with the geometric-stiffness option for a negative DT0
+    (reach 0; a fixture pins it). The shipped "grows and cuts the implicit
+    step where LS-DYNA holds it at DT0" was wrong for a one-step deck
+    (`tensile1`, DT0 = ENDTIM) and for a modal deck (no `/IMPL/DT` card),
+    and it is re-worded on the 11 keys / 6 models that state IAUTO 0; a stated
+    DTMAX <= DT0 is no longer told its step GROWS. `--implicit-constant-step`
+    is named only where its scope would act. Warning-record movers **50 deck
+    keys on 34 emitted models** (39 new + 11 re-worded), `.rad` byte movers 0
+    (the golden `implicit_qstat` is one of them and stays byte-identical).
+    The round-4 test that pinned silence without the card is renamed to what
+    it asserts (the STATED-card warning stays silent) and now also asserts
+    the absent-card sentence.
   - **B3 — `--implicit-constant-step`: an OPT-IN growth cap, `/IMPL/DT/STOP`
     DT_MAX := DT0 (default OFF).** LS-DYNA runs an implicit deck that states
     `IAUTO 0` or no `*CONTROL_IMPLICIT_AUTO` at a CONSTANT step DT0 (Vol I

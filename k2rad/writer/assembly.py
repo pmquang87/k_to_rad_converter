@@ -682,6 +682,94 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
                           "--arclength-riks to emit it. " + measured)
 
 
+def _written_step_card(state: ConversionState, modal: bool) -> str:
+    """The step card k2rad writes, in words, for the constant-step and
+    ``*CONTROL_IMPLICIT_AUTO`` sentences."""
+    if modal:
+        return ("no /IMPL/DT card at all - a modal deck's engine is "
+                "/IMPL/LINEAR plus the stiffness export")
+    if _arclength_requested(state) and state.options.arclength_riks:
+        return "/IMPL/DT/3 (the arc-length control --arclength-riks asked for)"
+    return ("/IMPL/DT/2 (AUTOMATIC step control) with It_w taken from "
+            "ITEOPT alone")
+
+
+def _constant_step_body(state: ConversionState) -> str:
+    """What LS-DYNA does with IAUTO 0 on THIS deck, and what k2rad writes
+    instead (non-modal implicit decks; R14 triage round 6, B2).
+
+    Keyed on DT0 against ENDTIM - the ``/RUN`` value, read after
+    ``*PARAMETER`` substitution - because LS-DYNA's constant step means four
+    different things: DT0 steps to ENDTIM (0 < DT0 < ENDTIM; 24 + 10 roster
+    keys), ONE step of ENDTIM (DT0 = 0: 6 keys, ``ex_01`` / ``ex_02``; DT0 >=
+    ENDTIM: 9 + 1 keys - the dynamic 1e-3 DTINI sub-arm has reach 0, a
+    fixture pins it) and ``|DT0|`` with the geometric-stiffness option (DT0 <
+    0, Vol I R17 p.12-321; reach 0 of the 136 roster keys that state the
+    card). The numbers are :func:`_implicit_step_cells`' - the ones the
+    ``/IMPL/DTINI`` and ``/IMPL/DT/STOP`` cards carry. ``--implicit-constant-
+    step`` is named only where :func:`_constant_step_scope` says it WOULD act.
+    """
+    gen = state.ctrl_implicit_gen
+    auto = state.ctrl_implicit_auto
+    dt0 = gen.dt0 if gen else 0.0
+    end = _run_end(state)
+    dtini, _dtmin, dtmax = _implicit_step_cells(state)
+    written = _written_step_card(state, False)
+    it_w = auto.iteopt if auto and auto.iteopt > 0 else 8
+    if dt0 < 0.0:
+        return (f"DT0 = {dt0:g} is NEGATIVE: Vol I R17 p.12-321 reads it as an "
+                f"initial step of |DT0| = {abs(dt0):g} with negative principal "
+                "stresses eliminated from the geometric stiffness. k2rad "
+                f"writes /IMPL/DTINI {dtini:g} (it takes 0.01 for any DT0 <= "
+                f"0) and {written}; the geometric-stiffness option has no "
+                "/IMPL counterpart and is DROPPED.")
+    if dt0 == 0.0:
+        return ("DT0 of *CONTROL_IMPLICIT_GENERAL is 0, so LS-DYNA solves the "
+                f"whole run as ONE implicit step of ENDTIM = {end:g} (the R14 "
+                "references of this shape echo 'initial time step for "
+                "implicit solution 0.0000E+00' and print one glstat step of "
+                f"ENDTIM). k2rad writes /IMPL/DTINI {dtini:g} and {written}, "
+                "so the converted deck marches in adaptive steps from "
+                f"{dtini:g} instead. --implicit-constant-step does not act on "
+                "DT0 = 0.")
+    if dt0 >= end:
+        head = (f"DT0 = {dt0:g} is not smaller than ENDTIM = {end:g}, so "
+                "LS-DYNA solves the run in ONE implicit step. k2rad writes "
+                f"/IMPL/DTINI {dtini:g} and {written}; ")
+        if dtini >= end:
+            return head + ("the first Radioss step is the whole run too "
+                           "(imp_init.F:95 takes the remaining time once DTINI "
+                           "reaches it), but a step that does not converge is "
+                           "CUT and retried (imp_dt.F:107-119) where LS-DYNA "
+                           "would stop in error (p.12-362 Remark 4).")
+        return head + ("the 1e-3 cap k2rad puts on a dynamic deck's DTINI "
+                       "makes it march in adaptive steps instead.")
+    lead = (f"LS-DYNA holds every implicit step at DT0 = {dt0:g} of "
+            f"*CONTROL_IMPLICIT_GENERAL ({round(end / dt0)} steps to ENDTIM = "
+            f"{end:g}; p.12-322 Remark 2: the step changes only when "
+            "automatic control is active - every R14 reference d3hsp of this "
+            "class echoes 'time step control method 0'). k2rad writes "
+            f"/IMPL/DTINI {dtini:g} and {written}")
+    tail = (f"SHRINKS it after an increment that needed more than It_w = "
+            f"{it_w} iterations and CUTS it on a non-converged one "
+            "(imp_dt.F:107-174), where LS-DYNA keeps DT0 and ends in error "
+            "(p.12-362 Remark 4).")
+    if _constant_step_scope(state)[0]:
+        return (lead + "; its DT_MAX is DT0 (--implicit-constant-step, see "
+                "its own warning), so the converted deck can no longer GROW "
+                "the step above DT0, but it still " + tail)
+    if 0.0 < dtmax <= dt0:
+        return (lead + f", and the deck's own DTMAX = {dtmax:g} keeps the step "
+                "at or below DT0, but the converted deck still " + tail)
+    flag = ""
+    if _constant_step_scope(state, assume_flag=True)[0]:
+        flag = (" --implicit-constant-step caps the Radioss step at DT0 "
+                "(/IMPL/DT/STOP DT_MAX := DT0; the cut-back stays); it is OFF "
+                "by default - see its --help for the measured cost.")
+    return (lead + ", so the converted deck GROWS the step above DT0 on easy "
+            "increments, " + tail + flag)
+
+
 def _warn_implicit_auto_drops(state: ConversionState,
                               modal: bool = False) -> None:
     """``*CONTROL_IMPLICIT_AUTO``: the cells that reach no ``/IMPL`` card.
@@ -710,27 +798,46 @@ def _warn_implicit_auto_drops(state: ConversionState,
     the cells is not ``/IMPL/DT/2`` — the modal recipe writes no ``/IMPL/DT``
     card at all — so the sentence says that instead of naming a card the deck
     does not carry.
+
+    **The ABSENT card is IAUTO 0 too** (R14 triage round 6, B2). The early
+    return this function used to take when no ``*CONTROL_IMPLICIT_AUTO`` is
+    stated told the 39 deck keys on 28 emitted models of that shape nothing,
+    although the card's default is the same "Constant time step size" and
+    k2rad writes the same ``/IMPL/DT/2``. Both shapes now get ONE sentence
+    builder, :func:`_constant_step_body`, keyed on DT0 against ENDTIM (a
+    constant step, one step of ENDTIM when DT0 = 0 or DT0 >= ENDTIM, and the
+    ``|DT0|`` reading of a negative DT0) and on the card k2rad writes. The
+    shipped "grows and cuts the implicit step where LS-DYNA holds it at DT0"
+    was false for a one-step deck (``tensile1``: DT0 = ENDTIM) and for a
+    modal deck (no ``/IMPL/DT`` card; reach 0 - no modal roster deck states
+    IAUTO 0). Non-modal implicit decks only for the absent card; a modal deck
+    with no card gets nothing. Warning only: no ``.rad`` byte moves.
     """
     auto = state.ctrl_implicit_auto
     if auto is None:
+        if not modal and state.is_implicit:
+            state.warn("*CONTROL_IMPLICIT_AUTO is ABSENT, so IAUTO takes its "
+                       "default 0, which Vol I R17 p.12-277 defines as "
+                       "'Constant time step size'. "
+                       + _constant_step_body(state))
         return
     gloss = {"ITEWIN": "the iteration window",
              "KFAIL": "the number of failed steps before an abort"}
     unused = [(n, v) for n, v in (("ITEWIN", auto.itewin),
                                   ("KFAIL", auto.kfail)) if v]
     neg_dtmax = auto.dtmax < 0.0
-    written = ("no /IMPL/DT card at all - a modal deck's engine is "
-               "/IMPL/LINEAR plus the stiffness export"
-               if modal else
-               "/IMPL/DT/2 (AUTOMATIC step control) with It_w taken from "
-               "ITEOPT alone")
+    written = _written_step_card(state, modal)
     msg = "*CONTROL_IMPLICIT_AUTO: "
     if auto.iauto == 0:
-        msg += ("IAUTO=0 - LS-DYNA's own default, and Vol I R17 p.12-277 "
-                "defines it as 'Constant time step size' - asks for a step "
-                f"that never changes. k2rad writes {written}, so the "
-                "converted deck grows and cuts the implicit step where "
-                "LS-DYNA holds it at DT0. ")
+        if modal:
+            msg += ("IAUTO=0 - LS-DYNA's own default, 'Constant time step "
+                    "size' (Vol I R17 p.12-277). This deck is a NORMAL-MODES "
+                    "analysis whose engine is ONE /IMPL/LINEAR step with no "
+                    "/IMPL/DT card, so no step control applies either way. ")
+        else:
+            msg += ("IAUTO=0 - LS-DYNA's own default, and Vol I R17 p.12-277 "
+                    "defines it as 'Constant time step size'. "
+                    + _constant_step_body(state) + " ")
     elif auto.iauto < 0:
         msg += (f"IAUTO={auto.iauto} is NEGATIVE, i.e. Vol I R17 p.12-277's "
                 "'IAUTO LT.0: Curve ID = (-IAUTO) gives time step size as a "

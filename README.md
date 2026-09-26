@@ -5177,6 +5177,11 @@ cycle 4) → NORMAL in 92 cycles, but at IE **−99.87 %** and KE 0 against the
 reference's 149.9 — a **status-only** promotion (its `IMFLAG −9`
 implicit/explicit switching curve is not converted). A deck with no
 `*CONTROL_IMPLICIT_SOLUTION` at all keeps `2 2 0.01`.
+`*CONTROL_IMPLICIT_AUTO`: `IAUTO`, `ITEWIN`, `KFAIL` and a negative (curve)
+`DTMAX` are NAMED when they reach no `/IMPL` card, and an **absent** card is
+named too (round 6): its default `IAUTO 0` is LS-DYNA's *"Constant time step
+size"* (Vol I R17 p.12-277), which k2rad's `/IMPL/DT/2` does not reproduce —
+see *Implicit dynamic notes* and `--implicit-constant-step`.
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
@@ -5803,6 +5808,17 @@ See [`docs/IMPLICIT.md`](docs/IMPLICIT.md) for the full treatment — the K_eff
 stabilization mechanics, the `/BCS`/`*ELEMENT_MASS_PART` layering, the
 `--auto-gapmin` / `--suggest-gapmin` workflow, and the deformable-contact
 recipe.
+
+**The implicit step.** An implicit deck that states `*CONTROL_IMPLICIT_AUTO`
+`IAUTO 0` — or no `*CONTROL_IMPLICIT_AUTO` at all, whose default is the same
+0 — asks LS-DYNA for a CONSTANT step DT0 (Vol I R17 p.12-277), while k2rad
+writes `/IMPL/DT/2` automatic step control on every implicit deck. Since
+round 6 the converter says so on both shapes (39 + 11 R14 deck keys on 34
+emitted models), with the deck's own DT0 against ENDTIM — DT0 steps to ENDTIM,
+or ONE step when DT0 = 0 or DT0 ≥ ENDTIM — as a warning only (no `.rad` byte
+moves). [`--implicit-constant-step`](#--implicit-constant-step--cap-the-implicit-step-at-dt0)
+caps the Radioss step at DT0 where that is expressible; it is opt-in, for the
+measured reasons in its section.
 
 ### `--derived-gapmin` — an explicit Gapmin for a SOLID-segment main surface
 
