@@ -23,7 +23,7 @@ the momentum average needs is solved with a cyclic Jacobi sweep
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .state import ConversionState
 # The two derivations this module must NOT re-implement: the writer's
@@ -31,7 +31,7 @@ from .state import ConversionState
 # matrix came from used it) and the converter's own RO <= 0 floor (the .rad it
 # came from carries it). See _beam_section_area and _material_rho.
 from .writer.beams import _constants_from_thicknesses
-from .writer.materials import _ZERO_DENSITY_FLOOR
+from .writer.materials import _RHO_ATTRS, _ZERO_DENSITY_FLOOR
 
 #: *SECTION_BEAM ELFORMs whose card 2 states THICKNESSES instead of section
 #: constants (Vol I R17 p.41-11: cards 2a and 2e) -- the ones
@@ -85,6 +85,18 @@ def _material_rho(state: ConversionState,
     ``nvh/example-06-02/6.2.PSD_Beam_Example_LSTC.k`` is the measured carrier:
     its ``*MAT_ELASTIC`` card 1 parses as ``mid 1 | RO 0.0 | E 68947.5729 |
     PR 0.33``, so the density really is zero in the source.
+
+    EVERY material container is weighed (round 6). The six dictionaries below
+    were once the whole list, so a material outside them — an
+    ``*MAT_ORTHOTROPIC_ELASTIC`` pad of ``11.1.sbrake`` once it converts, a
+    foam, a composite law — was weighed at ZERO: a modal mass matrix with
+    missing rows. The six keep their historical order and ``rho`` attribute;
+    every other ``mat_*`` dict is then read generically, with the density
+    spellings the converter's own zero-density scan uses
+    (``writer/materials._RHO_ATTRS``, the first one a record carries decides)
+    and the same ``RO <= 0`` floor. Skipped on purpose: the
+    ``*MAT_THERMAL_*`` dicts (their density is a THERMAL one on the separate
+    TMID namespace) and the ``*MAT_ADD_*`` riders (not materials).
     """
     rho: Dict[int, float] = {}
     floored: List[int] = []
@@ -96,6 +108,25 @@ def _material_rho(state: ConversionState,
                 r = _ZERO_DENSITY_FLOOR
                 floored.append(mid)
             rho[mid] = r
+    for name, mats in vars(state).items():
+        if (not name.startswith("mat_") or name.startswith("mat_thermal")
+                or name.startswith("mat_add_") or not isinstance(mats, dict)):
+            continue
+        for mid, m in mats.items():
+            if mid in rho or not isinstance(mid, int):
+                continue
+            val = None
+            for attr in _RHO_ATTRS:
+                v = getattr(m, attr, None)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    val = float(v)
+                    break
+            if val is None:
+                continue
+            if val <= 0.0 and zero_density_floor:
+                val = _ZERO_DENSITY_FLOOR
+                floored.append(mid)
+            rho[mid] = val
     if floored and report is not None:
         report(f"  NOTE: material(s) {sorted(floored)} state RO <= 0; the mass "
                f"matrix uses rho = {_ZERO_DENSITY_FLOOR:g}, the same floor "
@@ -258,6 +289,138 @@ def nodal_masses_from_state(
                 for n in nids:
                     mass[n] = mass.get(n, 0.0) + share
     return mass, inertia
+
+
+def element_mass_by_node(state: ConversionState, nids: Set[int],
+                         density_of: Callable[[int], float]
+                         ) -> Dict[int, float]:
+    """The ELEMENT mass the engine will hold at each node of *nids* before
+    k2rad's spring token — the spring-token screen's ``m_own`` (round 6, A3).
+
+    From the EMITTED elements only, each element's mass split evenly over its
+    DISTINCT nodes:
+
+    * shells: area x the thickness the ``/SHELL`` row is written with (the
+      element's own ``*ELEMENT_SHELL_THICKNESS`` mean with LS-DYNA's
+      zero-cell rule, ``writer/mesh._shell_element_thickness``, else the
+      section ``T1``) x rho; a ``*PART_COMPOSITE`` part (SECID 0) weighs its
+      ply stack, ``sum(thick x rho)`` over the valid plies (``MID > 0``,
+      ``THICK > 0``);
+    * solids AND thick shells: the 6-tet hexa / corner-tet volume x rho;
+    * beams: L x A x rho, ``A`` from the section or, for a thickness-stated
+      section, from the writer's own rule (``_beam_section_area``).
+
+    NOT counted, and deliberately: ``*ELEMENT_MASS`` (the caller adds it once,
+    as ``m_admas``) and ``*ELEMENT_MASS_PART`` — the writer consumes that ONLY
+    in the ``/RBODY`` Mass field (``writer/rbody.py``), so on a deformable
+    part it never reaches a node and counting it would decide on a mass the
+    engine does not hold.
+
+    *density_of* is ``mid -> rho`` supplied by the caller (the spring screen
+    passes ``writer/sph._mat_density``, which reads every material container
+    and returns 0.0 for a mid the zero-density floor substituted — the record
+    carries 1e-24 by then, and a node on such a part must read as massless).
+    Pure: no id is drawn, nothing is written, nothing is warned.
+    """
+    out: Dict[int, float] = {}
+    if not nids:
+        return out
+    # Imported here, not at module level: writer.mesh imports much of the
+    # writer, and this module's load-time imports stay the two it has.
+    from .writer.mesh import _shell_element_thickness, _unique_node_slots
+    nodes = state.nodes
+
+    def distinct(ids: Sequence[int]) -> List[int]:
+        seen: List[int] = []
+        for n in ids:
+            if n > 0 and n not in seen:
+                seen.append(n)
+        return seen
+
+    def put(ids: List[int], m_elem: float) -> None:
+        if m_elem <= 0.0 or not ids:
+            return
+        share = m_elem / len(ids)
+        for n in ids:
+            if n in nids:
+                out[n] = out.get(n, 0.0) + share
+
+    areal_by_composite: Dict[int, float] = {}
+    for e in state.shell_elems:
+        ids = distinct(e.nodes)
+        if len(ids) < 3 or not any(n in nids for n in ids):
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        comp = state.part_composites.get(e.pid)
+        if part.secid == 0 and comp is not None:
+            areal = areal_by_composite.get(e.pid)
+            if areal is None:
+                areal = sum(p.thick * density_of(p.mid) for p in comp.plies
+                            if p.mid > 0 and p.thick > 0.0)
+                areal_by_composite[e.pid] = areal
+        else:
+            sec = state.sec_shells.get(part.secid)
+            t1 = sec.t1 if sec is not None else 0.0
+            t = _shell_element_thickness(
+                e, _unique_node_slots(e.nodes), t1) or t1
+            areal = t * density_of(part.mid)
+        if areal <= 0.0:
+            continue
+        try:
+            p = [(nodes[n].x, nodes[n].y, nodes[n].z) for n in ids]
+        except KeyError:
+            continue
+        area = _tri_area(p[0], p[1], p[2])
+        if len(p) >= 4:
+            area += _tri_area(p[0], p[2], p[3])
+        put(ids, area * areal)
+
+    for elems in (state.solid_elems, state.tshell_elems):
+        for e in elems:
+            if not any(n in nids for n in e.nodes):
+                continue
+            part = state.parts.get(e.pid)
+            if part is None:
+                continue
+            rho = density_of(part.mid)
+            if rho <= 0.0:
+                continue
+            try:
+                p = [(nodes[n].x, nodes[n].y, nodes[n].z) for n in e.nodes]
+            except KeyError:
+                continue
+            if len(p) >= 8:
+                vol = sum(_tet_volume(p[a], p[b], p[c], p[d])
+                          for a, b, c, d in _HEXA_TETS)
+            elif len(p) >= 4:
+                vol = _tet_volume(p[0], p[1], p[2], p[3])
+            else:
+                continue
+            put(distinct(e.nodes), vol * rho)
+
+    for e in state.beam_elems:
+        if e.n1 not in nids and e.n2 not in nids:
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        sec = state.sec_beams.get(part.secid)
+        rho = density_of(part.mid)
+        if sec is None or rho <= 0.0:
+            continue
+        area = sec.area or _beam_section_area(sec)
+        if area <= 0.0:
+            continue
+        try:
+            p1 = nodes[e.n1]
+            p2 = nodes[e.n2]
+        except KeyError:
+            continue
+        length = math.dist((p1.x, p1.y, p1.z), (p2.x, p2.y, p2.z))
+        put(distinct((e.n1, e.n2)), length * area * rho)
+    return out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The rigid-body momentum average (Vol I R17 p.28-129 Remark 3)

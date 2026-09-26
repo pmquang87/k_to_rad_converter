@@ -348,11 +348,13 @@ channels are dominated by post-rupture oscillation and stay `deviation` in
 every arm (IE −18.90 % → +23.64 %, KE +161.35 % → +61.93 % against LS's
 5869.61 / 3449.03 at t 1.99882E-03; the weld ruptures at t 3.130E-04 against
 3.033E-04 before). Two classes are still NOT compensated, each for a measured
-reason: a spring node with **no element mass of its own** (subtracting there
-would leave `MS <= 0`, which the ENGINE aborts on — `chkmsin.F:52-59` prints
-`NEGATIVE MASS ON NODE ID=` and `resol.F:5460` does `CALL ARRET(2)`; the
-starter's ERROR 1870 is a different case, gated on `IGTYP==23` with `MTN==108`
-at `rcheckmass.F:112`/`:123`, i.e. a `/PROP/TYPE23` on `/MAT/LAW108`, which no
+reason: a spring node that carries **no mass of its own** — no element mass
+and no `*ELEMENT_MASS` — because subtracting there would leave the node at
+EXACTLY `MS = 0`, which nothing catches (`chkmsin.F:53` tests `MS(N) < ZERO`
+strictly and `resol.F:5460` aborts only on that; `accele.F:67-80` then writes
+`A = 0` for `MS = 0`, so the node silently keeps its velocity; the starter's
+ERROR 1870 is a different case, gated on `IGTYP==23` with `MTN==108` at
+`rcheckmass.F:112`/`:123`, i.e. a `/PROP/TYPE23` on `/MAT/LAW108`, which no
 producer here emits), and a
 **secondary node of an ICoG = 4 rigid body**, where `inirby.F:265-266`
 discards the secondaries' mass entirely — measured on
@@ -377,6 +379,24 @@ there. All **15** registered token nodes
 `_spring_token_negative_admas` skips by construction, inert under `ICoG 4`
 (`inirby.F:265-266`) and UNMEASURED on `ICoG 1/2/3`, exactly as the runtime
 warning says. The deck emits that RIGID sentence and no other A1 class line.
+
+**Round 6: the screen is the node's OWN mass, not element incidence.** The
+negative `/ADMAS` goes on every spring end node that carries mass of its own —
+element mass at the emitted thickness and density (every shell, solid, thick
+shell and beam, `*PART_COMPOSITE` plies included, a zero-density part counting
+as massless), or a deck `*ELEMENT_MASS` — and never on a node that would be
+left at exactly zero (`chkmsin.F:53` aborts only on `MS < 0`, and
+`accele.F:67-80` would freeze that node silently). The round-5 screen asked
+whether the node sat on an emitted element, so a node carrying only an
+`*ELEMENT_MASS` was refused: **1 deck key on 1 emitted model moves**,
+`introduction/intro-by-a.-tabiei/elements/spring-iii/gnonspring.k`, whose
+starter `TOTAL MASS` goes 1.02e-4 → **2.0e-6 = LS-DYNA's** (786 cycles and
+IE 431.3 on both arms, nt 4); the 13 other carriers on the roster are
+byte-identical. The residual hole, named in the runtime warning and in ROADMAP:
+the screen reads whether a node HAS mass, not whether the spring stays stable
+on it — a compensated node on a `T = 1e-6` shell (own mass 1.96e-13) passes
+and diverges in 7 cycles under NORMAL TERMINATION; the spring's own step
+uses the PROPERTY mass (`r1def3.F:113`, `r1len3.F:175`), not the node's.
 
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885

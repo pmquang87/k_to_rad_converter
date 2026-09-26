@@ -1695,6 +1695,20 @@ that decided it and the deck that would decide it next.
     would move, at a point in the round with no campaign budget left to re-run
     it. What would decide it: a deck with a zero-thickness or near-zero-mass
     shell carrying a spring end node.
+    **Round 6: CLOSED by A3 — with the OWN-MASS test, not this item's
+    `> share` test.** `m_own + m_admas > 0` (element mass at the emitted
+    thickness and density from every material container, plus the node's
+    `*ELEMENT_MASS`; `lumping.element_mass_by_node`) replaces the incidence
+    screen: gnonspring.k's TOTAL MASS 1.02e-4 → 2.0e-6 = LS-DYNA's, the 13
+    other roster carriers byte-identical. The `> share` test proposed here
+    was measured and REJECTED: it reverts round-5 A1 on 6 deck keys / 6
+    models (plates.nrbc back to 2.0048e-4). What stays open is STABILITY, not
+    mass: a node on a `T = 1e-6` shell (own mass 1.96e-13) passes any
+    has-mass screen and diverges in 7 cycles under NORMAL TERMINATION, because
+    the spring's own step uses the PROPERTY mass (`r1def3.F:113`,
+    `r1len3.F:175`); a per-spring stability rule needs the spring's element
+    dt against the compensated node's critical dt at the registration site
+    (roster reach 0; the i14 coupon reaches it).
 15. **Letting a USER-STATED gap satisfy the implicit swap's precondition.**
     `_rigid_secondary_plan` decides `--implicit-rigid-secondary-swap` purely
     from `_derived_gapmin_value`; `--inter-gapmin` and Card-3 `SST`/`MST` are

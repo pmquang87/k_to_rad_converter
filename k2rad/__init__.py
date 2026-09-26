@@ -463,10 +463,14 @@ def convert(
         ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to every
         figures, at +1.21 % cycles (2646 → 2678), both arms NORMAL. It never
         writes a non-positive value on the deck's OWN ``/ADMAS``, and it
-        refuses a spring node carrying no element mass of its own (subtracting
-        there leaves ``MS <= 0``, which the engine aborts on —
-        ``chkmsin.F:52-59`` + ``resol.F:5460``) and a secondary node of an
-        ICoG = 4 rigid body (``inirby.F:265-266`` discards that mass anyway —
+        refuses a spring node that carries no mass of its own — no element
+        mass and no ``*ELEMENT_MASS`` — because subtracting there would leave
+        the node at EXACTLY ``MS = 0``, which nothing catches
+        (``chkmsin.F:53`` aborts only on ``MS < 0``; ``accele.F:67-80`` then
+        freezes the node's velocity); a node with only an ``*ELEMENT_MASS``
+        (gnonspring: ``TOTAL MASS`` 1.02e-4 → 2.0e-6 = LS-DYNA's, round 6)
+        IS compensated. It also leaves out a secondary node of an ICoG = 4
+        rigid body (``inirby.F:265-266`` discards that mass anyway —
         measured inert on ``mat_spring.belted-dummy``).
     shell_to_solid_rbody : bool
         Convert ``*CONSTRAINED_SHELL_TO_SOLID`` to one ``/RBODY`` per card —

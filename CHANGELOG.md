@@ -82,6 +82,35 @@ Prior history (before this changelog was introduced) is summarized in the
     route are byte-identical. The warning sentence "the converted
     multi-directional criterion is quadratic (N=M=2)" is retired, and README's
     "non-quadratic exponents are warned" with it.
+  - **A3 — the spring-token screen tests the node's OWN mass (element mass +
+    `*ELEMENT_MASS`), not element incidence** (rides the existing
+    `--no-spring-token-mass-compensation`). The round-5 negative `/ADMAS`
+    went only on a node that sat on an emitted element of positive density,
+    so a spring end carrying ONLY an `*ELEMENT_MASS` kept k2rad's token:
+    **1 deck key on 1 emitted model moves** — gnonspring.k, `TOTAL MASS`
+    1.02e-4 → **2.0e-6 = LS-DYNA's**, 786 cycles and IE 431.3 on both arms
+    (nt 4); ke_dev +19776 → +290 % at the current scorer. The other 13
+    carriers of the roster are byte-identical (two independent sweeps in the
+    pre-research). The new pure helper `lumping.element_mass_by_node` weighs
+    every emitted shell (at the thickness the `/SHELL` row is written with;
+    `*PART_COMPOSITE` by its plies), solid, thick shell and beam at the
+    density `sph._mat_density` reads from EVERY material container (0.0 for a
+    zero-density-floored one); `*ELEMENT_MASS_PART` is NOT counted — the
+    writer puts it only into `/RBODY` Mass, so it never reaches a deformable
+    part's nodes. `lumping._material_rho` (the modal chain and
+    `--mass-weighted-inivel`) now weighs every material container too, not
+    six. Two shipped claims were false: "MS <= 0 aborts the engine" (six
+    sites) — `chkmsin.F:53` tests `MS < 0` strictly and `accele.F:67-80`
+    writes `A = 0` for `MS = 0`, so a node left at exactly zero is FROZEN
+    silently; and the orphan sentence's "no deck on any corpus here reaches
+    this sentence" — the two `*INCLUDE` fragments
+    `set-yaris-detailed-v2j.key` / `set-camry-detailed-v5a.key` converted on
+    their own reach it. A new LIGHT clause names every compensated node that
+    keeps less than its share (the screen cannot see stability: a node on a
+    `T = 1e-6` shell passes and diverges in 7 cycles under NORMAL
+    TERMINATION — ROADMAP). Two tests updated deliberately: round 4's
+    degenerate-node test (the gnonspring shape now takes the negative card)
+    and round 5's orphan-branch test (the new sentence).
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

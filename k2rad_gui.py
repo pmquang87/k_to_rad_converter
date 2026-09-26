@@ -487,8 +487,9 @@ class ConverterGUI:
                      "NEGATIVE /ADMAS (round 5). plates.nrbc TOTAL MASS 2.0048E-04 -> "
                      "1.0048E-04 = LS-DYNA's own, +1.21 % cycles. Never writes a "
                      "non-positive value on the deck's OWN /ADMAS; refuses a spring "
-                     "node with no element mass of its own (MS <= 0 aborts the "
-                     "engine: chkmsin.F:52-59, resol.F:5460)",
+                     "node with no mass of its own (no element mass, no "
+                     "*ELEMENT_MASS): it would sit at exactly MS = 0, which "
+                     "nothing catches (chkmsin.F:53 is MS < 0 only)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
 

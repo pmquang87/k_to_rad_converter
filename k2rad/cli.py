@@ -290,8 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
              "1.0048E-04, LS-DYNA's own to every printed digit, at +1.21 %% cycles "
              "(2646 -> 2678, nt 4). It never writes a non-positive value on "
              "the deck's OWN /ADMAS, and it refuses a spring node that "
-             "carries no element mass of its own (MS <= 0 aborts the engine: "
-             "chkmsin.F:52-59, resol.F:5460).",
+             "carries no mass of its own - no element mass and no "
+             "*ELEMENT_MASS - because subtracting there would leave the node "
+             "at EXACTLY MS = 0, which nothing catches (chkmsin.F:53 aborts "
+             "only on MS < 0; accele.F:67-80 then freezes the node's "
+             "velocity); a node with only an *ELEMENT_MASS (gnonspring: "
+             "TOTAL MASS 1.02e-4 -> 2.0e-6 = LS-DYNA's) IS compensated.",
     )
     parser.add_argument(
         "--shell-to-solid-rbody",

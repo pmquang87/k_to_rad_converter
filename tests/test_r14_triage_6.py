@@ -581,6 +581,245 @@ class WeldExponentTests(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A3 — the spring-token screen is the node's OWN mass (element + *ELEMENT_MASS)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: G4's round-6 coupon: four TYPE4 springs K 100 from a driver (node 10,
+#: *ELEMENT_MASS 1e-3); far ends node 20 on a T = 1e-6 shell (own 1.9625e-13),
+#: node 30 bare with *ELEMENT_MASS 2e-5, node 40 bare with nothing, node 50 on
+#: a T = 1.0 shell (own 1.9625e-7). The share is 5e-5 per far node.
+_I14_COUPON = """*KEYWORD
+*CONTROL_TERMINATION
+    2.0E-3         0       0.0       0.0       0.0
+*PART
+normal shell
+         1         1         1         0         0         0         0         0
+*PART
+thin shell
+         2         2         1         0         0         0         0         0
+*PART
+springs
+       100       100       100         0         0         0         0         0
+*SECTION_SHELL
+         1         2       1.0         2       1.0         0         0         1
+       1.0       1.0       1.0       1.0       0.0       0.0       0.0         0
+*SECTION_SHELL
+         2         2       1.0         2       1.0         0         0         1
+    1.0E-6    1.0E-6    1.0E-6    1.0E-6       0.0       0.0       0.0         0
+*SECTION_DISCRETE
+       100         0       0.0       0.0       0.0       0.0
+       0.0       0.0
+*MAT_ELASTIC
+         1   7.85E-9  210000.0       0.3
+*MAT_SPRING_ELASTIC
+       100     100.0
+*NODE
+      10             0.0             0.0             0.0
+      20            10.0             0.0             0.0
+      21            20.0             0.0             0.0
+      22            20.0            10.0             0.0
+      23            10.0            10.0             0.0
+      30            10.0            20.0             0.0
+      40            10.0            30.0             0.0
+      50            10.0            40.0             0.0
+      51            20.0            40.0             0.0
+      52            20.0            50.0             0.0
+      53            10.0            50.0             0.0
+*ELEMENT_SHELL
+       1       2      20      21      22      23
+       2       1      50      51      52      53
+*ELEMENT_DISCRETE
+     101     100      10      20       0             1.0       0             0.0
+     102     100      10      30       0             1.0       0             0.0
+     103     100      10      40       0             1.0       0             0.0
+     104     100      10      50       0             1.0       0             0.0
+*ELEMENT_MASS
+     201      10          1.0E-3       0
+     202      30          2.0E-5       0
+*INITIAL_VELOCITY_NODE
+        10    1000.0       0.0       0.0       0.0       0.0       0.0
+*END
+"""
+
+
+def _admas_cards(starter: str):
+    """{mass value: [node ids]} over every emitted /ADMAS/0."""
+    out = {}
+    lines = starter.splitlines()
+    grnods = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/"):
+            gid = int(ln.rsplit("/", 1)[1])
+            nids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                nids += [int(v) for v in lines[j].split()]
+                j += 1
+            grnods[gid] = nids
+    for i, ln in enumerate(lines):
+        if ln.startswith("/ADMAS/0/"):
+            mass, gid = lines[i + 3].split()
+            out.setdefault(round(float(mass), 12), []).extend(
+                grnods[int(gid)])
+    return {m: sorted(v) for m, v in out.items()}
+
+
+def _tshell_weld_deck() -> str:
+    """Two 8-node THICK-shell plates, node 1 welded to node 11 with failure
+    forces: the weld nodes sit on thick shells ONLY."""
+    pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    nodes = ""
+    for base, z0 in ((1, 0.0), (11, 1.0)):
+        for k, z in enumerate((z0, z0 + 0.5)):
+            for i, (x, y) in enumerate(pts):
+                nodes += f"{base + 4 * k + i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+    return ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            "*NODE\n" + nodes
+            + "*ELEMENT_TSHELL\n"
+            + _row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8) + "\n"
+            + _row(2, 2, 11, 12, 13, 14, 15, 16, 17, 18) + "\n"
+            + "*PART\nplate1\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nplate2\n" + _row(2, 1, 1) + "\n"
+            + "*SECTION_TSHELL\n" + _row(1, 1) + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + "*CONSTRAINED_SPOTWELD\n" + _row(1, 11, 1.0e4, 5.0e4) + "\n"
+            + "*END\n")
+
+
+class SpringTokenLumpedScreen(unittest.TestCase):
+    """A3 — the round-5 screen was an element-INCIDENCE test: a node with
+    only an ``*ELEMENT_MASS`` was refused (gnonspring.k: TOTAL MASS 1.02e-4
+    against LS-DYNA's 2.0e-6). The node's OWN mass decides now."""
+
+    def test_the_four_classes_of_the_i14_coupon(self):
+        result, starter, _e = _convert(_I14_COUPON)
+        cards = _admas_cards(starter)
+        # node 10: its 1e-3 minus four half-shares; node 30 keeps its own
+        # +2e-05 (degenerate) AND takes the full share off; 20 / 30 / 50 get
+        # the negative card; bare node 40 keeps the token
+        self.assertEqual(cards[round(-_SHARE, 12)], [20, 30, 50], cards)
+        self.assertEqual(cards[round(2.0e-5, 12)], [30], cards)
+        self.assertEqual(cards[round(1.0e-3 - 4 * _SHARE, 12)], [10], cards)
+        guarded = [w for w in result.warnings
+                   if "carry NO element mass of their own" in w]
+        self.assertEqual(len(guarded), 1, result.warnings)
+        self.assertIn("[40]", guarded[0])
+        for needle in ("chkmsin.F:52-59", "chkmsin.F:53", "resol.F:5460",
+                       "accele.F:67-80", "ERROR 1870 is NOT it",
+                       "*ELEMENT_MASS if their dynamics matter",
+                       "EXACTLY zero mass"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, guarded[0])
+
+    def test_the_light_clause_names_every_node_below_its_share(self):
+        result, _s, _e = _convert(_I14_COUPON)
+        neg = [w for w in result.warnings if "was REMOVED again" in w]
+        self.assertEqual(len(neg), 1, result.warnings)
+        self.assertIn("3 of these node(s) keep LESS mass", neg[0])
+        for needle in ("node 20: own 1.9625e-13", "node 30: own 2e-05",
+                       "node 50: own 1.9625e-07", "r1def3.F:113",
+                       "r1len3.F:175", "IE 1.58e22 at cycle 7",
+                       "per-spring stability rule"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, neg[0])
+        self.assertNotIn("node 40", neg[0])
+
+    def test_the_opt_out_writes_no_negative_card_and_no_light_clause(self):
+        result, starter, _e = _convert(_I14_COUPON,
+                                       spring_token_mass_compensation=False)
+        cards = _admas_cards(starter)
+        self.assertFalse([m for m in cards if m < 0], cards)
+        self.assertFalse(any("keep LESS mass" in w for w in result.warnings))
+
+    def test_a_material_outside_the_historic_six_is_weighed(self):
+        """*MAT_ORTHOTROPIC_ELASTIC lands in state.mat_orthotropic, which the
+        lumper's six dictionaries never read."""
+        _r, starter, _e = _convert(_weld_deck(plate_mat="orthotropic"))
+        self.assertEqual(_admas_cards(starter),
+                         {round(-_SHARE, 12): [1, 11]})
+
+    def test_a_node_on_a_thick_shell_only_is_weighed(self):
+        _r, starter, _e = _convert(_tshell_weld_deck())
+        self.assertEqual(_admas_cards(starter),
+                         {round(-_SHARE, 12): [1, 11]})
+
+    def test_a_composite_part_is_weighed_by_its_ply_stack(self):
+        _r, starter, _e = _convert(_weld_deck(composite=True))
+        self.assertEqual(_admas_cards(starter),
+                         {round(-_SHARE, 12): [1, 11]})
+
+    def test_ELEMENT_MASS_PART_on_a_deformable_part_does_not_count(self):
+        """The writer puts *ELEMENT_MASS_PART only into /RBODY Mass, so on a
+        deformable part it never reaches a node — a node whose only element is
+        a zero-density (floored) part stays GUARDED however much part mass the
+        deck adds."""
+        result, starter, _e = _convert(_weld_deck(rho=0.0, part_mass=1.0e-3))
+        self.assertNotIn("spring_token_compensation", starter)
+        self.assertTrue(_has(result.warnings,
+                             "carry NO element mass of their own", "[1, 11]"),
+                        result.warnings)
+
+    def test_an_element_free_node_with_an_ELEMENT_MASS_is_compensated(self):
+        """gnonspring.k's shape: both spring ends carry ONLY *ELEMENT_MASS
+        1e-6 (degenerate, 50x below the share)."""
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n*NODE\n"
+                + f"{1:>8}{0.0:>16.4f}{0.0:>16.4f}{0.0:>16.4f}\n"
+                + f"{2:>8}{10.0:>16.4f}{0.0:>16.4f}{0.0:>16.4f}\n"
+                + "*ELEMENT_DISCRETE\n"
+                + f"{1:>8}{1:>8}{1:>8}{2:>8}{0:>8}{1.0:>16.8G}{0:>8}"
+                  f"{0.0:>16.8G}\n"
+                + "*PART\nspring\n" + _row(1, 1, 1) + "\n"
+                  "*SECTION_DISCRETE\n" + _row(1, 0) + "\n"
+                + "*MAT_SPRING_ELASTIC\n" + _row(1, 100.0) + "\n"
+                  "*ELEMENT_MASS\n"
+                + f"{1:>8}{1:>8}{1.0e-6:>16.8G}\n"
+                + f"{2:>8}{2:>8}{1.0e-6:>16.8G}\n"
+                + "*END\n")
+        result, starter, _e = _convert(deck)
+        self.assertEqual(_admas_cards(starter),
+                         {round(1.0e-6, 12): [1, 2],
+                          round(-_SHARE, 12): [1, 2]})
+        deg = [w for w in result.warnings if "LESS /ADMAS" in w]
+        self.assertEqual(len(deg), 1, result.warnings)
+        self.assertIn("The full share was taken off 2 of them", deg[0])
+        self.assertIn("TOTAL MASS 1.02e-4 -> 2.0e-6", deg[0])
+        self.assertNotIn("NONE of them", deg[0])
+
+    def test_the_element_mass_helper_by_hand(self):
+        """lumping.element_mass_by_node on the coupon, against the hand
+        values: a 10 x 10 shell of T 1e-6 / 1.0 at rho 7.85e-9, a quarter per
+        corner."""
+        from k2rad.lumping import element_mass_by_node
+        from k2rad.writer.sph import _mat_density
+        state = _dispatch(_I14_COUPON)
+        got = element_mass_by_node(state, {20, 30, 40, 50},
+                                   lambda mid: _mat_density(state, mid))
+        self.assertAlmostEqual(got[20], 100.0 * 1.0e-6 * 7.85e-9 / 4,
+                               delta=1e-25)
+        self.assertAlmostEqual(got[50], 100.0 * 1.0 * 7.85e-9 / 4,
+                               delta=1e-19)
+        self.assertNotIn(30, got)     # *ELEMENT_MASS is NOT element mass
+        self.assertNotIn(40, got)
+
+    def test_the_lumper_weighs_every_material_container(self):
+        """lumping._material_rho was six dictionaries; an orthotropic plate
+        weighed ZERO in the modal mass matrix."""
+        from k2rad.lumping import _material_rho, nodal_masses_from_state
+        state = _dispatch(_weld_deck(plate_mat="orthotropic"))
+        self.assertIn(1, state.mat_orthotropic)
+        self.assertEqual(_material_rho(state)[1], 7.85e-9)
+        mass, _inertia = nodal_masses_from_state(state)
+        self.assertAlmostEqual(mass[1], 100.0 * 1.0 * 7.85e-9 / 4,
+                               delta=1e-19)
+        # thermal dicts are a separate (TMID) namespace and never weighed
+        import inspect
+        from k2rad import lumping
+        src = inspect.getsource(lumping._material_rho)
+        self.assertIn('name.startswith("mat_thermal")', src)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -600,6 +839,9 @@ class Round6FlagWiringA(unittest.TestCase):
                                  "hm_read_mat06.F:154"),
         "--weld-exponents": ("2.460e-4", "+29.4 %", "0.899x",
                              "hm_read_prop13.F:1169-1170"),
+        "--spring-token-mass-compensation": (
+            "TOTAL MASS 1.02e-4 -> 2.0e-6", "chkmsin.F:53",
+            "accele.F:67-80"),
     }
 
     def _readme(self):
@@ -690,6 +932,16 @@ _RETRACTED_ROUND_6_A = (
     "criterion is quadratic (N=M=2)",
     "is quadratic (N=M=2)",
     "non-quadratic exponents are warned",
+    # A3: two *INCLUDE fragments reach the orphan sentence; MS = 0 is caught
+    # by nothing (chkmsin.F:53 is strict), so "aborts" was false for MS = 0
+    "no deck on any corpus here reaches this",
+    "MS <= 0 aborts the engine",
+)
+
+#: The same family as regexes, matched on the collapsed text (a phrase whose
+#: punctuation drifted between the sites that shipped it).
+_RETRACTED_ROUND_6_A_RE = (
+    r"MS <= 0\W{0,4},? which the engine aborts on",
 )
 
 
@@ -712,6 +964,24 @@ class Round6RetractedStatementsA(unittest.TestCase):
                 self.assertIn(_collapse(needle).lower(), _collapse(
                     re.sub(r'"\s*\n\s*"', "", fake)).lower())
 
+    def test_no_shipped_text_matches_a_retracted_regex(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for pat in _RETRACTED_ROUND_6_A_RE:
+                with self.subTest(file=rel, pattern=pat):
+                    self.assertIsNone(re.search(pat, joined, re.I))
+
+    def test_each_retracted_regex_fires_on_the_spelling_it_retracts(self):
+        samples = (
+            "there leaves ``MS <= 0``, which the engine aborts on",
+            "would leave MS <= 0, which the ENGINE aborts on",
+        )
+        for pat in _RETRACTED_ROUND_6_A_RE:
+            for sample in samples:
+                with self.subTest(pattern=pat, sample=sample):
+                    split = sample.replace(" ", ' "\n            "')
+                    joined = _collapse(re.sub(r'"\s*\n\s*"', "", split))
+                    self.assertIsNotNone(re.search(pat, joined, re.I))
+
     def test_a_PREFIX_of_a_retracted_string_still_fires(self):
         for needle in _RETRACTED_ROUND_6_A:
             with self.subTest(needle=needle):
@@ -729,6 +999,13 @@ class Round6RetractedStatementsA(unittest.TestCase):
             ("ROADMAP.md", "PARTLY closed — the cavitation FLOOR shipped"),
             ("k2rad/writer/loads.py", "beta2 = beta3 = {m:g}, so the Ifail = 1"),
             ("README.md", "`--no-weld-exponents`"),
+            ("k2rad/writer/loads.py", "The deck names these nodes but does "
+             "not define them: it is a fragment"),
+            ("k2rad/cli.py", "which nothing catches (chkmsin.F:53 aborts "
+             "only on MS < 0; accele.F:67-80 then freezes the node's "
+             "velocity)"),
+            ("README.md", "the screen is the node's OWN mass, not element "
+             "incidence"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

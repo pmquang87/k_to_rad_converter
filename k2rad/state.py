@@ -7321,9 +7321,13 @@ class ConvertOptions:
     # MASS claim, not an energy claim: the row stays deviation in both arms.
     #
     # Two classes stay UNCOMPENSATED, each for a measured reason:
-    #   * a spring node with NO element mass of its own -- subtracting there
-    #     would leave MS <= 0, which the ENGINE aborts on (chkmsin.F:52-59
-    #     NEGATIVE MASS ON NODE ID=, resol.F:5460 CALL ARRET(2)). The starter's
+    #   * a spring node that carries no mass of its own -- no element mass
+    #     and no *ELEMENT_MASS (round 6: the screen is the node's OWN mass,
+    #     writer/loads._spring_token_negative_admas). Subtracting there would
+    #     leave the node at EXACTLY MS = 0, which nothing catches:
+    #     chkmsin.F:53 aborts only on MS < 0 (resol.F:5460 CALL ARRET(2)),
+    #     and accele.F:67-80 then freezes the node's velocity. A node with
+    #     only an *ELEMENT_MASS (gnonspring) IS compensated. The starter's
     #     ERROR 1870 is a different case: rcheckmass.F:112/:123 gate it on
     #     IGTYP==23 and MTN==108, a /PROP/TYPE23 on /MAT/LAW108, which no
     #     producer here emits;

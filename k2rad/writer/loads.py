@@ -19,7 +19,7 @@ from .common import (
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
-from ..lumping import rigid_body_momentum_velocity
+from ..lumping import element_mass_by_node, rigid_body_momentum_velocity
 from .sph import _mat_density
 
 __all__ = [
@@ -6532,64 +6532,10 @@ def _fmt_node_list(nids, cap: int = 20) -> str:
     return f"{nids[:cap]} and {len(nids) - cap} more"
 
 
-def _spring_token_own_element_mass(state: ConversionState,
-                                   candidates: Set[int]) -> Set[int]:
-    """Which of *candidates* carry element mass of their own.
-
-    An INCIDENCE test, not a mass test: the node must appear in at least one
-    emitted structural element (/SHELL, /SH3N, /BRICK, /TETRA*, the thick-shell
-    bricks, /BEAM, /TRUSS) whose part resolves to a material with ``rho > 0``.
-    Both halves are needed — a node whose only element sits on a zero-density
-    part would pass a bare incidence screen and still land near zero mass,
-    which is the failure this guard exists to prevent: the nodal acceleration
-    divides by that mass, and a share subtracted from a node that has none of
-    its own leaves ``MS <= 0``.
-
-    WHICH CHECK ACTUALLY CATCHES IT. Not ``rcheckmass.F``'s ERROR 1870: that
-    whole mechanism sits inside ``IF(IGTYP==23)`` (``rcheckmass.F:112``) and,
-    for the ``MS`` test, ``IF(MTN == 108)`` (``:123``) — ``IERR2`` can only be
-    set at ``:154``/``:157`` inside that branch — so it covers /PROP/TYPE23
-    (SPR_MAT) on /MAT/LAW108 and inspects no /PROP/TYPE4, TYPE8 or TYPE13
-    spring, which is every producer this compensation registers. The detector
-    that does reach them is the ENGINE's: ``chkmsin.F:52-59`` walks every node,
-    prints ``NEGATIVE MASS ON NODE ID=`` for ``MS(N) < ZERO`` and counts it,
-    and ``resol.F:5460`` does ``IF(NEGMAS/=0) CALL ARRET(2)``. A share that
-    lands the node exactly ON zero is caught by neither — which is why the
-    screen refuses the node instead of relying on a downstream check.
-
-    Scoped to *candidates* so the element sweep is one pass with a cheap set
-    membership test; on a deck with no spring token at all it never runs.
-    """
-    if not candidates:
-        return set()
-    rho_ok: Dict[int, bool] = {}
-
-    def _part_has_mass(pid: int) -> bool:
-        hit = rho_ok.get(pid)
-        if hit is None:
-            part = state.parts.get(pid)
-            hit = part is not None and _mat_density(state, part.mid) > 0.0
-            rho_ok[pid] = hit
-        return hit
-
-    found: Set[int] = set()
-    for elems in (state.shell_elems, state.solid_elems, state.tshell_elems,
-                  state.beam_elems):
-        for e in elems:
-            nodes = getattr(e, "nodes", None)
-            if nodes is None:
-                nodes = [getattr(e, "n1", 0), getattr(e, "n2", 0)]
-            hit = [n for n in nodes if n in candidates]
-            if hit and _part_has_mass(e.pid):
-                found.update(hit)
-        if found >= candidates:
-            break
-    return found
-
-
 def _spring_token_negative_admas(
         state: ConversionState, rigid_nodes: Set[int], compensated,
-        degenerate) -> Tuple[Dict[float, List[int]], List[Tuple[int, float]]]:
+        degenerate) -> Tuple[Dict[float, List[int]], List[Tuple[int, float]],
+                             List[Tuple[int, float, float]]]:
     """The nodes whose token share needs a NEGATIVE ``/ADMAS`` to come off.
 
     The shipped rule only ever SUBTRACTED from an ``/ADMAS`` the deck already
@@ -6610,13 +6556,41 @@ def _spring_token_negative_admas(
     before the rigid bodies and before ``INITIA``, so the model total
     (``initia.F:2250``) is exactly LS-DYNA's again.
 
-    Returns ``({share: [nid, ...]}, [(nid, share), ...])`` — the groups to emit
-    and the nodes the element-mass guard REFUSED.
+    THE SCREEN (round 6, A3 — the "S2" screen). A node is compensated iff it
+    keeps mass of its OWN once the token is off: ``m_own + m_admas > 0``,
+    where ``m_own`` is the ELEMENT mass the engine will hold there
+    (``lumping.element_mass_by_node``: every emitted shell / solid / thick
+    shell / beam, at the emitted thickness and at the density
+    ``sph._mat_density`` reads from EVERY material container — 0.0 for a
+    zero-density-floored material) and ``m_admas`` is the deck's own
+    ``*ELEMENT_MASS`` on the node. The round-5 screen was an element-INCIDENCE
+    test, which refused a node carrying only an ``*ELEMENT_MASS``
+    (gnonspring.k: TOTAL MASS 1.02e-4 against LS-DYNA's 2.0e-6).
+
+    WHY A NODE MUST NOT BE LEFT AT EXACTLY ZERO. Nothing catches it:
+    ``chkmsin.F:53`` tests ``MS(N) < ZERO`` strictly (``resol.F:5460`` aborts
+    only on that), and ``accele.F:67-80`` then writes ``A = 0`` for
+    ``MS = 0`` — no NaN, the node silently keeps its velocity (a fixed point
+    if it starts at rest). The starter's ERROR 1870 is not it either:
+    ``rcheckmass.F:112``/``:123`` gate that branch on ``IGTYP==23`` with
+    ``MTN==108``. ``m_own = m_admas = 0`` is therefore REFUSED (the token
+    stays and the GUARDED sentence names the node).
+
+    WHAT THE SCREEN CANNOT SEE: whether a node that keeps LESS mass than its
+    share is still STABLE. The spring's own step uses the PROPERTY mass
+    (``r1def3.F:113``, ``r1len3.F:175``), not the node's, so a compensated
+    node on a near-massless shell can go unstable with no element step to
+    stop it (the LIGHT clause names every such node; ROADMAP).
+
+    Returns ``({share: [nid, ...]}, [(nid, share), ...],
+    [(nid, m_own + m_admas, share), ...])`` — the groups to emit, the nodes
+    the screen REFUSED, and the compensated nodes that keep less than their
+    share. ONE mass computation, handed to the warning, never recomputed.
     """
     if not state.spring_token_mass_by_node:
-        return {}, []
+        return {}, [], []
     if not state.options.spring_token_mass_compensation:
-        return {}, []
+        return {}, [], []
     done = {nid for nid, _b, _s in compensated}
     want: Dict[int, float] = {}
     for nid, share in state.spring_token_mass_by_node.items():
@@ -6645,21 +6619,26 @@ def _spring_token_negative_admas(
     # choose its wording.
     del degenerate
     if not want:
-        return {}, []
-    has_mass = _spring_token_own_element_mass(state, set(want))
+        return {}, [], []
+    m_own = element_mass_by_node(state, set(want),
+                                 lambda mid: _mat_density(state, mid))
     groups: Dict[float, List[int]] = {}
     guarded: List[Tuple[int, float]] = []
+    light: List[Tuple[int, float, float]] = []
     for nid, share in sorted(want.items()):
-        if nid in has_mass:
+        own = m_own.get(nid, 0.0) + state.added_node_masses.get(nid, 0.0)
+        if own > 0.0:
             groups.setdefault(share, []).append(nid)
+            if own < share:
+                light.append((nid, own, share))
         else:
             guarded.append((nid, share))
-    return groups, guarded
+    return groups, guarded, light
 
 
 def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                             compensated, degenerate, neg_groups=None,
-                            guarded=None) -> None:
+                            guarded=None, light=None) -> None:
     """What happened to k2rad's own artificial spring mass, node by class.
 
     Four classes, and every one of them is named because the mass is INVENTED —
@@ -6669,14 +6648,19 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
     * SUBTRACTED — the node has an ``/ADMAS`` big enough to take the token off.
     * DEGENERATE — it has one, but at or below the token share, so subtracting
       would write a non-positive ``/ADMAS``. The deck's own value is kept AND
-      the full share comes off with a negative card (round 5).
+      the full share comes off with a negative card (round 5). Under the
+      round-6 own-mass screen that negative card is ALWAYS written: the
+      deck's own ``*ELEMENT_MASS`` is mass of the node's own.
     * NO ``/ADMAS`` — nothing to subtract from. Since round 5 the token is
       REMOVED from these nodes with a negative ``/ADMAS`` instead
       (``hm_read_admas.F:164-170`` accepts one, WARNING ID 476), unless the
-      element-incidence screen refuses the node, which the GUARDED sentence
-      names. A fifth list, ``orphan``, catches a registered node that is not
-      in ``state.nodes`` at all — a k2rad-internal inconsistency with reach
-      0 on every corpus here, not a class of deck.
+      own-mass screen refuses the node (``m_own + m_admas = 0``, see
+      ``_spring_token_negative_admas``), which the GUARDED sentence names; a
+      compensated node that keeps LESS than its share is named by the LIGHT
+      clause. A fifth list, ``orphan``, catches a registered node that is not
+      in ``state.nodes``: a deck FRAGMENT whose *NODE cards live in another
+      file (two *INCLUDE fragments of C:/openradioss_run converted on their
+      own reach it).
     * RIGID — the node is a SECONDARY node of a rigid body. Whether the token
       reaches that body at all depends on its ICoG; on the roster's only
       carrier it is measurably INERT (see below).
@@ -6692,6 +6676,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         return
     neg_groups = neg_groups or {}
     guarded = guarded or []
+    light = light or []
     done = {nid for nid, _b, _s in compensated}
     removed = {nid for nids in neg_groups.values() for nid in nids}
     bad = {nid for nid, _m, _s in degenerate}
@@ -6722,28 +6707,13 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         detail = ", ".join(f"node {n}: /ADMAS {m:g} vs token share {sh:g}"
                            for n, m, sh in sorted(degenerate)[:5])
         deg_removed = sorted(n for n, _m, _s in degenerate if n in removed)
+        # Under the round-6 own-mass screen a degenerate node always carries
+        # m_admas > 0 (its own *ELEMENT_MASS), so it is always compensated and
+        # this is the only arm left.
         tail = (
             f" The full share was taken off {len(deg_removed)} of them "
             f"{_fmt_node_list(deg_removed)} with a separate NEGATIVE /ADMAS "
-            "instead, so their sum is exact (m_own + m_admas + token - token)."
-            if deg_removed else
-            " NONE of them took a negative /ADMAS either: they carry no "
-            "element mass of their own, so the element-INCIDENCE screen "
-            "below refused them. That refusal is CONSERVATIVE, not forced: "
-            "the engine's nodal mass is m_own + m_admas + token, so taking "
-            "the token off again leaves m_own + m_admas, which on this "
-            "class is the deck's own /ADMAS and strictly POSITIVE - "
-            "MEASURED on a two-node weld coupon whose *ELEMENT_MASS 5e-05 "
-            "equals the token half-share: the negative card written in by "
-            "hand gives starter TOTAL MASS 1.0000000000000E-04 (5e-05 per "
-            "node), 0 ERROR and NORMAL TERMINATION. What the screen really "
-            "guards is m_own = 0 AND m_admas = 0, where the sum lands "
-            "EXACTLY on zero and chkmsin.F:53 tests MS(N) < ZERO strictly, "
-            "so nothing catches it - the same coupon with no element mass "
-            "at all reads TOTAL MASS 0.000000000000 at 0 ERROR and NORMAL "
-            "TERMINATION. Lifting the screen for the class that does carry "
-            "a positive deck /ADMAS is ROADMAP round-5 item 14. The guard "
-            "sentence below names them.")
+            "instead, so their sum is exact (m_own + m_admas + token - token).")
         state.warn(
             f"*ELEMENT_DISCRETE: {len(degenerate)} node(s) carry LESS /ADMAS "
             "than k2rad's own token spring mass, so the deck's own /ADMAS "
@@ -6753,14 +6723,33 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             f"{detail}"
             + (" ..." if len(degenerate) > 5 else "")
             + "." + tail
-            + " MEASURED on the carrier of this shape, gnonspring.k (/ADMAS "
-              "1e-6 against a token half of 5e-5, 50x): the arm that floors "
-              "the property mass to 1e-12 - the most any compensation could "
-              "ever remove - changes nothing (IE 431.3 either way, 786 cycles "
-              "both times).")
+            + " MEASURED on the carrier of this shape, gnonspring.k "
+              "(*ELEMENT_MASS 1e-6 on each end node against a token half of "
+              "5e-5, 50x): TOTAL MASS 1.02e-4 -> 2.0e-6, which is LS-DYNA's "
+              "(the two *ELEMENT_MASS), 786 cycles on both arms, IE 431.3 on "
+              "both.")
     if neg_groups:
         nodes = sorted(n for nids in neg_groups.values() for n in nids)
         total = sum(sh * len(nids) for sh, nids in neg_groups.items())
+        light_clause = ""
+        if light:
+            shown = ", ".join(f"node {n}: own {own:g} vs share {sh:g}"
+                              for n, own, sh in sorted(light)[:5])
+            light_clause = (
+                f" {len(light)} of these node(s) keep LESS mass than the token "
+                f"share they lost ({shown}"
+                + (" ..." if len(light) > 5 else "")
+                + "): the screen reads only whether a node has mass, not the "
+                "spring's stiffness, so it cannot tell a stable light node "
+                "from an unstable one. The spring's own step uses the "
+                "PROPERTY mass (r1def3.F:113, r1len3.F:175), not the node's. "
+                "MEASURED: stable on spotweld-ii/plates.nrbc (own 1.57e-6 "
+                "against the share 5e-5; the /PROP/TYPE13 rotational step "
+                "governs, dt 2.110e-7) and on a coupon node with own mass "
+                "1.96e-7; UNSTABLE on the same coupon's node on a T 1e-6 "
+                "shell (own mass 1.96e-13): IE 1.58e22 at cycle 7, a USER "
+                "BREAK - and the engine still printed NORMAL TERMINATION. See "
+                "ROADMAP (the per-spring stability rule).")
         state.warn(
             "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
             f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "
@@ -6787,49 +6776,56 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
               "once. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
               "TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is LS-DYNA's "
               "own total mass to every printed digit (+99.52 % -> 0.00 %), at "
-              "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION. Pass "
-              "--no-spring-token-mass-compensation to keep the pre-round-5 "
-              "output.")
+              "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION."
+            + light_clause
+            + " Pass --no-spring-token-mass-compensation to keep the "
+              "pre-round-5 output.")
     if guarded:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(guarded)} spring node(s) "
             f"{_fmt_node_list(n for n, _s in guarded)} carry NO element mass "
-            "of their own, so k2rad's token was LEFT in place - subtracting "
-            "it would leave those nodes with ZERO mass and the engine divides "
-            "the nodal force by it. The check that reaches a TYPE4/8/13 spring "
-            "is the engine's own: chkmsin.F:52-59 prints NEGATIVE MASS ON NODE "
-            "ID= and resol.F:5460 aborts on it (CALL ARRET(2)); the starter's "
-            "ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that whole "
+            "of their own and no *ELEMENT_MASS, so k2rad's token was LEFT in "
+            "place: subtracting it would leave them at EXACTLY zero mass, "
+            "which nothing catches - chkmsin.F:52-59 prints NEGATIVE MASS ON "
+            "NODE ID= only for MS < 0 (chkmsin.F:53; resol.F:5460 aborts on "
+            "that), and accele.F:67-80 then writes A = 0 for MS = 0, so the "
+            "node silently keeps its velocity (a fixed point if it starts at "
+            "rest; MEASURED on a spring coupon: the unscreened node read "
+            "DX = VX = AX = 0 for the whole run under NORMAL TERMINATION). The "
+            "starter's ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that "
             "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
             "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
             "is HIGH by "
             f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
-            "them an *ELEMENT_MASS if their dynamics matter. The screen is an "
-            "element-INCIDENCE test (does the node sit on an emitted "
-            "/SHELL, /SH3N, /BRICK, /TETRA*, /BEAM or /TRUSS whose part "
-            "resolves to rho > 0?), not a lumped-mass test: a node carrying a "
-            "real but very small element mass passes it, and the compensation "
-            "then leaves that small mass rather than a negative one.")
+            "them an *ELEMENT_MASS if their dynamics matter - any positive "
+            "*ELEMENT_MASS makes the node eligible, and the token then comes "
+            "off. The screen is the node's OWN mass (its element mass at the "
+            "emitted thickness and density, plus *ELEMENT_MASS), and a "
+            "zero-density part counts as massless.")
     if orphan:
         # Since round 5 a spring node with no /ADMAS gets a NEGATIVE one, so
         # "no /ADMAS to subtract from" is no longer a terminal class. The
         # ONLY way into this list left is a registered node that is not in
         # state.nodes: _register_spring_token_mass refuses a share <= 0, and
         # done / bad / removed / connector_ground / guarded / rigid cover
-        # every other node _spring_token_negative_admas selects. Reach 0 on
-        # every corpus here; probed by calling this function directly.
+        # every other node _spring_token_negative_admas selects. MEASURED
+        # reach: the two *INCLUDE fragments set-yaris-detailed-v2j.key (16
+        # nodes) and set-camry-detailed-v5a.key (10 nodes) of
+        # C:/openradioss_run, converted on their own.
         state.warn(
             f"*ELEMENT_DISCRETE: {len(orphan)} spring node(s) "
             f"{_fmt_node_list(orphan)} were registered for k2rad's token "
             "spring mass but are NOT in the converted model's node set, so "
             "no /ADMAS - positive or negative - could be written for them "
             "and their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. That "
-            "is a k2rad-internal inconsistency, not a property of the deck: "
-            "every producer registers at the line that WRITES the /SPRING "
-            "row and _new_ground_node adds the synthesized ground node to "
-            "state.nodes, so no deck on any corpus here reaches this "
-            "sentence. Please report the deck that did.")
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. The "
+            "deck names these nodes but does not define them: it is a "
+            "fragment whose *NODE cards live in another file - MEASURED: the "
+            "*INCLUDE fragments set-yaris-detailed-v2j.key (16 nodes) and "
+            "set-camry-detailed-v5a.key (10 nodes) of C:/openradioss_run, "
+            "converted on their own, land here, and the /SPRING rows that "
+            "name the nodes fail in the starter anyway. Convert the deck that "
+            "includes the fragment.")
     if rigid:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
@@ -6887,10 +6883,10 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     # The classes the SUBTRACTION above cannot reach — a node with no
     # *ELEMENT_MASS has no /ADMAS to take the token off, and the loop above
     # never even visits it (it iterates state.added_node_masses).
-    neg_groups, guarded = _spring_token_negative_admas(
+    neg_groups, guarded, light = _spring_token_negative_admas(
         state, rigid_nodes, compensated, degenerate)
     _warn_spring_token_mass(state, rigid_nodes, compensated, degenerate,
-                            neg_groups, guarded)
+                            neg_groups, guarded, light)
     if not masses_by_value and not neg_groups:
         return []
     lines: List[str] = []
