@@ -2001,9 +2001,12 @@ measurement that decided it and the deck that would decide it next.
     base without them reached NORMAL in 3 of 10 fresh runs this round (two
     of them in the campaign re-run's own window) — a flaky, UNREFERENCED base: LS-DYNA's run
     stopped in its input phase with two fatal errors, so neither arm can be
-    scored. Kept default ON by the round's decision. Next: the GLOBAL arm with
-    the rotational codes stripped, and the same arm explicit, to see which
-    constraint the implicit run cannot carry.
+    scored. Kept default ON by the round's decision. The finalization ran the
+    GLOBAL arm with its rotational codes stripped (`001 000` + `111 000`): it
+    dies at cycle 26 to every printed digit of the full arm (t 6.332e-4, IE
+    110.4, KE 2.459e9, nt 4) — the rotational codes are inert on these solid
+    nodes, and it is the TRANSLATIONAL planes the implicit run cannot carry.
+    Next: the same arm run explicit, and which of the two planes kills it.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 

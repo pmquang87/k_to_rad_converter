@@ -74,7 +74,9 @@ Prior history (before this changelog was introduced) is summarized in the
     frame; and `efg/metal-cutting/main.k`, which loses its NORMAL under B5
     (kept default ON by the round's decision: its base NORMAL in 3 of 10
     fresh runs this round, the GLOBAL arm ERROR at cycle 26 on every run at nt
-    4 and 2, no LS-DYNA energy reference). `doorbeam` (B1, IE +380.25 →
+    4 and 2 — and, measured in the finalization, identically with its
+    rotational codes stripped, so the translational planes are what the
+    implicit run cannot carry — no LS-DYNA energy reference). `doorbeam` (B1, IE +380.25 →
     +582.00 %) and `bird-el` (A1, IE +454.1 → +1134.6 %) stay NAMED channel
     regressions accepted by the decision.
 
