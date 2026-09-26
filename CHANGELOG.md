@@ -14,7 +14,7 @@ Prior history (before this changelog was introduced) is summarized in the
 - **R14 CAMPAIGN TRIAGE batch, round 6 — FINALIZATION ROUND (the four
   validators' findings; resumed after a machine crash from the first
   attempt's uncommitted work, which was re-tested as found — 5609 passed —
-  and split into its findings).** Seven fix commits and two docs commits;
+  and split into its findings).** Seven fix commits, then docs commits;
   **ONE byte mover** on the whole roster (`11.1.sbrake`, measured by a
   two-tree sweep of all 356 keys from `F:`, `e2fc48f` vs the finalization's
   code, porcelain empty on both pristine checkouts); everything else is text
