@@ -148,6 +148,30 @@ Prior history (before this changelog was introduced) is summarized in the
     block); measured identical to the base on all 683 engine rows (IE
     4.123e6) — uninformative by symmetry, nodes 40 and 42 flank the driven
     node 41; the campaign's KE +365.89 % there is not this card.
+  - **A6 — a zero-coupling `*MAT_ANISOTROPIC_ELASTIC` is orthotropic and now
+    converts EXACTLY** (no flag: an exact restatement). When every coupling
+    cell (C14 C15 C16 C24 C25 C26 C34 C35 C36 C45 C46 C56) is 0 and C is
+    positive definite (Sylvester on the normal block, C44/C55/C66 > 0), the
+    3×3 normal block is inverted in closed form to EA/EB/EC and LS-DYNA's
+    MINOR ratios (Vol II R17 p.2-164 Remark 1) with GAB/GBC/GCA =
+    C44/C55/C66, and the record goes through the existing
+    `*MAT_ORTHOTROPIC_ELASTIC` path (`/MAT/LAW93` + `/PROP/TYPE6`). The trap
+    the tests pin: the MAJOR ratio `−S13·EA` handed to that path is rescaled a
+    second time and writes NU13 = NU23 = 1.1234 on sbrake, which the starter
+    does not catch; a closed-loop test rebuilds C from the emitted constants.
+    **1 deck key on 1 emitted model** (`nvh/example-11-01/11.1.sbrake.k`,
+    the pads, MID 3): `/MAT/LAW93/3` E11 = E22 5496.34093, E33 1983.313433,
+    G12 2590, NU12 0.06106967756, G13 = G23 1180, NU13 = NU23 0.4053531788,
+    plus the pads' `/PROP/TYPE6` and downstream renumbering; round-6 arm
+    measured starter 3 ERROR → 0 (2 × WARNING 343, the mortar contacts'
+    initial penetrations), TOTAL MASS 7.3107e-4 = LS-DYNA's, engine NORMAL
+    under the modal recipe — status error_starter → normal expected, the
+    evolve check owed. A coupled or non-positive-definite matrix keeps the
+    refusal by name; the refusal's old advice to re-state the material as
+    `*MAT_ORTHOTROPIC_ELASTIC` is narrowed to "in OTHER axes (AOPT)", and the
+    docstring's "Inverting C … is deliberately NOT attempted" is withdrawn.
+    Three `tests/test_composites.py` tests were rewritten deliberately: their
+    DECK is exactly this convertible class.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

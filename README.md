@@ -1570,11 +1570,21 @@ starter's own fallbacks instead of dyna2rad's unguarded `inf/NaN`, and an
 unstable `NUij·NUji ≥ 1` pair is warned before the starter's ERROR 3068/307.
 
 `*MAT_ANISOTROPIC_ELASTIC` / `*MAT_002_ANIS` (the 6×6 C-matrix dialect) is
-recognized but **deliberately not emitted**: `/MAT/LAW93` carries nine
-engineering constants and has no home for the 12 anisotropic coupling terms.
-dyna2rad converts this dialect to a LAW93 with **all moduli zero and no
+converted **EXACTLY through the orthotropic path when all 12 coupling cells are
+0 and C is positive definite** (round 6): the 3×3 normal block is inverted to
+`EA`/`EB`/`EC` and LS-DYNA's MINOR ratios `PRBA`/`PRCA`/`PRCB` (Vol II R17
+p.2-164 Remark 1: `S12 = −PRBA/EB`, `S13 = −PRCA/EC`, `S23 = −PRCB/EC`), and
+`GAB`/`GBC`/`GCA` = `C44`/`C55`/`C66` (Voigt 4/5/6 = ab/bc/ca), then written by
+the `*MAT_ORTHOTROPIC_ELASTIC` path (`/MAT/LAW93`, `/PROP/TYPE6` on solids,
+which rescales the minor ratios to LAW93's major ones itself). Measured on
+`nvh/example-11-01/11.1.sbrake.k` (the only carrier, 1 deck key on 1 emitted
+model): starter 3 ERROR → 0, `TOTAL MASS` 7.3107e-4 = LS-DYNA's. Any coupling
+term, or a matrix that is not positive definite, is refused by name —
+`/MAT/LAW93` carries nine engineering constants and has no home for a coupling
+term. dyna2rad converts this dialect to a LAW93 with **all moduli zero and no
 warning** — a silently stiffness-free material; k2rad warns loudly, names the
-referencing parts, and reports it under *recognized but not emitted*.
+referencing parts, and reports the refused card under *recognized but not
+emitted*.
 
 `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054 / 055, + numeric aliases) → `/MAT/LAW127`
 (ENHANCED_COMPOSITE) on a `/PROP/TYPE11`. The strengths (`XT/XC/YT/YC/SC`), the

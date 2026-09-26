@@ -3853,8 +3853,59 @@ def handle_mat_orthotropic_elastic(block: Block, state: ConversionState) -> None
         beta=beta, macf=int(macf))
 
 
+#: The 12 coupling cells of the *MAT_ANISOTROPIC_ELASTIC 6x6 matrix, by name,
+#: and their (card, field) position on cards 1b.2 / 1b.3 (Vol II R17
+#: p.2-160/161): C14 C24 C34 C44 C15 C25 C35 C45 / C55 C16 C26 C36 C46 C56
+#: C66 AOPT.
+_ANISO_COUPLING_CELLS = (
+    ("C14", 1, 0), ("C24", 1, 1), ("C34", 1, 2), ("C15", 1, 4),
+    ("C25", 1, 5), ("C35", 1, 6), ("C45", 1, 7), ("C16", 2, 1),
+    ("C26", 2, 2), ("C36", 2, 3), ("C46", 2, 4), ("C56", 2, 5),
+)
+
+
+def _aniso_orthotropic_restatement(c11: float, c12: float, c22: float,
+                                   c13: float, c23: float, c33: float
+                                   ) -> Tuple[Optional[Tuple[float, ...]], str,
+                                              Tuple[float, float, float]]:
+    """``((EA, EB, EC, PRBA, PRCA, PRCB), refusal, minors)`` of a zero-coupling
+    normal block — ``None`` and the failing minor when it is not positive
+    definite.
+
+    Closed-form (no numpy — ``k2rad`` has no import-time numpy): Sylvester's
+    leading minors decide positive definiteness, and ``S = C^-1`` is the
+    adjugate over the determinant. LS-DYNA's own convention (Vol II R17
+    p.2-164 Remark 1: ``S12 = -PRBA/EB``, ``S13 = -PRCA/EC``,
+    ``S23 = -PRCB/EC``) gives the MINOR ratios the *MAT_ORTHOTROPIC_ELASTIC
+    path expects — ``writer/composites._emit_mat_law93`` rescales them to
+    LAW93's ``NU12 = PRBA*EA/EB`` itself. (``-S13*EA`` would be the MAJOR
+    ratio: fed to that path it is rescaled a second time, writes NU13 =
+    NU23 = 1.1234 on 11.1.sbrake, and the starter does NOT catch it.)
+    """
+    m1 = c11
+    m2 = c11 * c22 - c12 * c12
+    det = (c11 * (c22 * c33 - c23 * c23)
+           - c12 * (c12 * c33 - c23 * c13)
+           + c13 * (c12 * c23 - c22 * c13))
+    minors = (m1, m2, det)
+    for name, val in (("C11", m1), ("C11*C22 - C12^2", m2),
+                      ("det(C[1..3,1..3])", det)):
+        if not val > 0.0:
+            return None, f"{name} = {val:g} <= 0", minors
+    s11 = (c22 * c33 - c23 * c23) / det
+    s22 = (c11 * c33 - c13 * c13) / det
+    s33 = (c11 * c22 - c12 * c12) / det
+    s12 = -(c12 * c33 - c13 * c23) / det
+    s13 = (c12 * c23 - c13 * c22) / det
+    s23 = -(c11 * c23 - c12 * c13) / det
+    ea, eb, ec = 1.0 / s11, 1.0 / s22, 1.0 / s33
+    return (ea, eb, ec, -s12 * eb, -s13 * ec, -s23 * ec), "", minors
+
+
 def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None:
-    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — recognized, NOT converted.
+    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — converted EXACTLY when the
+    matrix is really orthotropic, refused by name otherwise (R14 triage
+    round 6, A6).
 
     The ANISOTROPIC dialect replaces cards 1a.1/1a.2 with the 21 constants of
     the full 6×6 constitutive matrix (C11…C66) and leaves EA…GCA empty:
@@ -3863,40 +3914,103 @@ def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None
       Card1b.2: C14 C24 C34 C44 C15 C25 C35 C45
       Card1b.3: C55 C16 C26 C36 C46 C56 C66 AOPT
 
-    /MAT/LAW93 has slots for nine ENGINEERING constants only (E11…NU23) — there
-    is no home for the 12 anisotropic coupling terms. dyna2rad's ``p_ConvertMatL2``
-    never checks the dialect and emits a /MAT/LAW93 with ALL MODULI ZERO, with no
-    warning (a silently massless, stiffness-free material). k2rad refuses to
-    write that: the material is skipped with a loud warning instead, so the
-    failure is impossible to miss rather than impossible to see.
+    followed by the two shared axis cards, one card LATER than on the ORTHO
+    dialect (three constant cards instead of two).
 
-    Inverting C to engineering constants is deliberately NOT attempted — it is
-    only well-defined when every coupling term vanishes (i.e. the material is
-    really orthotropic), and guessing the Voigt shear-index convention would
-    risk a silently wrong material, which is exactly the failure mode being
-    avoided here. Rewrite such a material as *MAT_ORTHOTROPIC_ELASTIC.
+    When every coupling cell (C14 C15 C16 C24 C25 C26 C34 C35 C36 C45 C46
+    C56) is 0 — a blank cell is LS-DYNA's own 0 — and C is positive definite
+    (Sylvester on the normal block, C44/C55/C66 > 0), the material IS
+    orthotropic and is restated EXACTLY: the 3x3 normal block is inverted to
+    EA/EB/EC and LS-DYNA's minor ratios PRBA/PRCA/PRCB (Vol II R17 p.2-164
+    Remark 1), and GAB/GBC/GCA = C44/C55/C66 (Voigt 4/5/6 = ab/bc/ca — the
+    order Remark 1 writes the compliance in; 11.1.sbrake's own
+    C44 = (C11 - C12)/2 = 2590 confirms it). The record lands in
+    ``state.mat_orthotropic`` exactly as ``handle_mat_orthotropic_elastic``
+    would store the restated card, and the existing /MAT/LAW93 + /PROP/TYPE6
+    path does the rest.
+
+    Anything else keeps the refusal: /MAT/LAW93 has slots for nine
+    ENGINEERING constants only (E11…NU23) — no home for a coupling term — and
+    a matrix that is not positive definite is not a valid elastic material.
+    dyna2rad's ``p_ConvertMatL2`` never checks the dialect and emits a
+    /MAT/LAW93 with ALL MODULI ZERO, with no warning; k2rad refuses to write
+    that.
     """
     offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    cards = [_card(raw, offset + k, fixed=True, n=8, w=10) for k in range(3)]
+
+    def cell(card: int, i: int) -> float:
+        f = cards[card]
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    f1 = cards[0]
     mid = to_int(f1[0]) if f1 else 0
     pids = sorted(p.pid for p in state.parts.values() if p.mid == mid)
+    c11, c12, c22 = cell(0, 2), cell(0, 3), cell(0, 4)
+    c13, c23, c33 = cell(0, 5), cell(0, 6), cell(0, 7)
+    c44, c55, c66 = cell(1, 3), cell(2, 0), cell(2, 6)
+    nonzero = [name for name, card, i in _ANISO_COUPLING_CELLS
+               if cell(card, i) != 0.0]
+    refusal = ""
+    ortho: Optional[Tuple[float, ...]] = None
+    minors = (0.0, 0.0, 0.0)
+    if not nonzero:
+        ortho, refusal, minors = _aniso_orthotropic_restatement(
+            c11, c12, c22, c13, c23, c33)
+        if ortho is not None:
+            for name, val in (("C44", c44), ("C55", c55), ("C66", c66)):
+                if not val > 0.0:
+                    ortho, refusal = None, f"{name} = {val:g} <= 0"
+                    break
+    if ortho is not None:
+        ea, eb, ec, prba, prca, prcb = ortho
+        (xp, yp, zp, a1, a2, a3, macf,
+         v1, v2, v3, d1, d2, d3, beta) = _read_axis_cards(raw, offset + 3,
+                                                          offset + 4)
+        state.mat_orthotropic[mid] = MatOrthotropicElastic(
+            mid=mid, title=title, rho=cell(0, 1),
+            ea=ea, eb=eb, ec=ec, prba=prba, prca=prca, prcb=prcb,
+            gab=c44, gbc=c55, gca=c66, aopt=cell(2, 7),
+            xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3,
+            v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3,
+            beta=beta, macf=int(macf))
+        state.warn(
+            f"*MAT_ANISOTROPIC_ELASTIC {mid}: all 12 coupling cells are 0 and "
+            "the 6x6 matrix is positive definite (leading minors "
+            f"{minors[0]:g} / {minors[1]:g} / {minors[2]:g}; C44/C55/C66 > 0), "
+            "so the material IS orthotropic and is converted EXACTLY through "
+            "the *MAT_ORTHOTROPIC_ELASTIC path (/MAT/LAW93): "
+            f"EA {ea:.6g}, EB {eb:.6g}, EC {ec:.6g}, PRBA {prba:.6g}, "
+            f"PRCA {prca:.6g}, PRCB {prcb:.6g} (Vol II R17 p.2-164 Remark 1: "
+            "S12 = -PRBA/EB, S13 = -PRCA/EC, S23 = -PRCB/EC), GAB = C44 "
+            f"{c44:g}, GBC = C55 {c55:g}, GCA = C66 {c66:g} (Voigt 4/5/6 = "
+            "ab/bc/ca). MEASURED on nvh/example-11-01/11.1.sbrake.k: starter "
+            "3 ERROR -> 0, TOTAL MASS 7.3107e-4 = LS-DYNA's.")
+        return
+    if nonzero:
+        why = (f"{len(nonzero)} coupling cell(s) are non-zero "
+               f"({', '.join(nonzero)}). LAW93 holds nine engineering "
+               "constants (E11/E22/E33, G12/G13/G23, NU12/NU13/NU23) and no "
+               "coupling term, so no /MAT is written; if the material is "
+               "orthotropic in OTHER axes, state it as "
+               "*MAT_ORTHOTROPIC_ELASTIC in those axes (AOPT)")
+    else:
+        why = (f"the 6x6 matrix is not positive definite ({refusal}) - not a "
+               "valid elastic material; no /MAT is written")
     state.warn(
-        f"*MAT_ANISOTROPIC_ELASTIC (MAT_002 ANIS dialect) mid={mid}: the full "
-        "6x6 constitutive matrix (C11...C66) has NO /MAT/LAW93 counterpart — "
-        "LAW93 carries nine engineering constants (E11/E22/E33, G12/G13/G23, "
-        "NU12/NU13/NU23) and cannot hold the 12 anisotropic coupling terms. "
-        "The material is NOT emitted. (dyna2rad converts this dialect to a "
-        "/MAT/LAW93 with all moduli ZERO and no warning — a silently "
-        "stiffness-free material; k2rad refuses to write that.) Re-state the "
-        "material as *MAT_ORTHOTROPIC_ELASTIC with EA/EB/EC, GAB/GBC/GCA and "
-        "PRBA/PRCA/PRCB to convert it"
-        + (f"; part(s) {pids} reference it and will have no /MAT."
-           if pids else "."))
+        f"*MAT_ANISOTROPIC_ELASTIC {mid}: {why}. The material is NOT "
+        "emitted. (dyna2rad converts this dialect to a /MAT/LAW93 with all "
+        "moduli ZERO and no warning - a silently stiffness-free material; "
+        "k2rad refuses to write that.)"
+        + (f" Part(s) {pids} reference it and will have no /MAT."
+           if pids else ""))
     state.note_recognized_not_emitted(
         block.keyword,
-        "MAT_002 ANISOTROPIC dialect: the 6x6 C-matrix has no /MAT/LAW93 "
-        "counterpart (see the warning); no /MAT emitted")
+        "MAT_002 ANISOTROPIC dialect: coupled or not positive definite, so "
+        "the 6x6 C-matrix has no /MAT/LAW93 counterpart (see the warning); "
+        "no /MAT emitted")
 
 
 def handle_mat_enhanced_composite_damage(block: Block, state: ConversionState) -> None:

@@ -1132,6 +1132,156 @@ class ConstrainedLinearMpc(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A6 — the zero-coupling *MAT_ANISOTROPIC_ELASTIC is orthotropic: convert it
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _aniso_deck(c=(5940.0, 760.0, 5940.0, 980.0, 980.0, 2270.0),
+                c44=2590.0, c55=1180.0, c66=1180.0, c14=0.0) -> str:
+    """One brick on *MAT_ANISOTROPIC_ELASTIC 3 — 11.1.sbrake's pad by
+    default (C11 = C22 5940, C12 760, C13 = C23 980, C33 2270, C44 2590,
+    C55 = C66 1180, every coupling cell 0, AOPT 0)."""
+    nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)]
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n"
+            + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                      for i, (x, y, z) in enumerate(nodes, start=1))
+            + "*ELEMENT_SOLID\n"
+            + "".join(f"{v:>8}" for v in (1, 5, 1, 2, 4, 3, 5, 6, 8, 7))
+            + "\n*PART\npad\n" + _row(5, 1, 3) + "\n"
+            "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            "*MAT_ANISOTROPIC_ELASTIC_TITLE\npad\n"
+            + _row(3, 2.51e-9, *c) + "\n"
+            + _row(c14, 0.0, 0.0, c44, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(c55, 0.0, 0.0, 0.0, 0.0, 0.0, c66, 0.0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            "*END\n")
+
+
+def _law93_cells(starter: str, mid: int):
+    """{E11, E22, E33, G12, NU12, G13, G23, NU13, NU23} of /MAT/LAW93/<mid>."""
+    block = _mat_block(starter, f"/MAT/LAW93/{mid}")
+    rows = [ln for ln in block if not ln.startswith("#")]
+    # rows: header, title, RHO_I, the E/G/NU row, the G/NU row, ...
+    r1 = [float(rows[3][i:i + 20]) for i in range(0, 100, 20)]
+    r2 = [float(rows[4][i:i + 20]) for i in range(0, 80, 20)]
+    names = ("E11", "E22", "E33", "G12", "NU12", "G13", "G23", "NU13", "NU23")
+    return dict(zip(names, r1 + r2))
+
+
+class AnisotropicZeroCouplingRoute(unittest.TestCase):
+    """A6 — a *MAT_ANISOTROPIC_ELASTIC with every coupling cell 0 and a
+    positive-definite matrix IS orthotropic; the 3x3 normal block inverts to
+    EA/EB/EC and LS-DYNA's MINOR ratios (Vol II R17 p.2-164 Remark 1), and
+    GAB/GBC/GCA = C44/C55/C66. Hand values computed with numpy outside the
+    package (k2rad itself has no import-time numpy)."""
+
+    def test_sbrakes_card_restates_to_the_hand_values(self):
+        st = _dispatch(_aniso_deck())
+        m = st.mat_orthotropic[3]
+        for name, got, want in (
+                ("EA", m.ea, 5496.34093), ("EB", m.eb, 5496.34093),
+                ("EC", m.ec, 1983.31343), ("PRBA", m.prba, 0.0610696776),
+                ("PRCA", m.prca, 0.146268657), ("PRCB", m.prcb, 0.146268657),
+                ("GAB", m.gab, 2590.0), ("GBC", m.gbc, 1180.0),
+                ("GCA", m.gca, 1180.0), ("RHO", m.rho, 2.51e-9)):
+            with self.subTest(cell=name):
+                self.assertAlmostEqual(got / want, 1.0, delta=1e-8)
+        self.assertEqual(m.macf, 1)
+        self.assertNotIn("MAT_ANISOTROPIC_ELASTIC",
+                         [k for k, _w in st.recognized_not_emitted])
+
+    def test_the_emitted_LAW93_carries_the_major_ratios(self):
+        """_emit_mat_law93 rescales the MINOR ratios itself (NU13 = PRCA *
+        EA / EC): the card must read 0.405353, never the double-rescaled
+        1.1234 the naive -S13*EA would give."""
+        result, starter, _e = _convert(_aniso_deck())
+        cells = _law93_cells(starter, 3)
+        for name, want in (("E11", 5496.34093), ("E22", 5496.34093),
+                           ("E33", 1983.31343), ("G12", 2590.0),
+                           ("NU12", 0.0610696776), ("G13", 1180.0),
+                           ("G23", 1180.0), ("NU13", 0.405353179),
+                           ("NU23", 0.405353179)):
+            with self.subTest(cell=name):
+                self.assertAlmostEqual(cells[name] / want, 1.0, delta=1e-8)
+        w = [x for x in result.warnings
+             if x.startswith("*MAT_ANISOTROPIC_ELASTIC 3:")]
+        self.assertEqual(len(w), 1, result.warnings)
+        for needle in ("converted EXACTLY", "EA 5496.34", "EC 1983.31",
+                       "PRBA 0.0610697", "PRCA 0.146269", "GAB = C44 2590",
+                       "p.2-164 Remark 1", "5940 / 3.4706e+07"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+
+    def test_the_closed_loop_rebuilds_the_deck_matrix(self):
+        """C from the EMITTED LAW93 constants (the major ratios, NU21 =
+        NU12*E22/E11 etc.) must give back the deck's normal block."""
+        for c in ((5940.0, 760.0, 5940.0, 980.0, 980.0, 2270.0),
+                  (150000.0, 3000.0, 10000.0, 3000.0, 3000.0, 10000.0)):
+            with self.subTest(c=c):
+                _r, starter, _e = _convert(_aniso_deck(c=c))
+                k = _law93_cells(starter, 3)
+                e1, e2, e3 = k["E11"], k["E22"], k["E33"]
+                n12, n13, n23 = k["NU12"], k["NU13"], k["NU23"]
+                s = [[1 / e1, -n12 / e1, -n13 / e1],
+                     [-n12 / e1, 1 / e2, -n23 / e2],
+                     [-n13 / e1, -n23 / e2, 1 / e3]]
+                a, d, e_ = s[0][0], s[0][1], s[0][2]
+                b, f, cc = s[1][1], s[1][2], s[2][2]
+                det = (a * (b * cc - f * f) - d * (d * cc - f * e_)
+                       + e_ * (d * f - b * e_))
+                c11 = (b * cc - f * f) / det
+                c22 = (a * cc - e_ * e_) / det
+                c33 = (a * b - d * d) / det
+                c12 = -(d * cc - e_ * f) / det
+                c13 = (d * f - e_ * b) / det
+                c23 = -(a * f - d * e_) / det
+                for got, want in ((c11, c[0]), (c12, c[1]), (c22, c[2]),
+                                  (c13, c[3]), (c23, c[4]), (c33, c[5])):
+                    self.assertAlmostEqual(got / want, 1.0, delta=1e-6)
+
+    def test_a_coupling_cell_keeps_the_refusal(self):
+        result, starter, _e = _convert(_aniso_deck(c14=100.0))
+        self.assertNotIn("/MAT/LAW93", starter)
+        self.assertTrue(_has(result.warnings, "1 coupling cell(s) are "
+                             "non-zero (C14)", "NOT emitted"), result.warnings)
+        self.assertIn("MAT_ANISOTROPIC_ELASTIC",
+                      [k for k, _w in result.recognized_not_emitted])
+
+    def test_a_matrix_that_is_not_positive_definite_is_refused(self):
+        result, starter, _e = _convert(_aniso_deck(
+            c=(5940.0, 200000.0, 5940.0, 980.0, 980.0, 2270.0)))
+        self.assertNotIn("/MAT/LAW93", starter)
+        self.assertTrue(_has(result.warnings, "not positive definite",
+                             "C11*C22 - C12^2"), result.warnings)
+
+    def test_a_non_positive_shear_modulus_is_refused(self):
+        result, starter, _e = _convert(_aniso_deck(c44=0.0))
+        self.assertNotIn("/MAT/LAW93", starter)
+        self.assertTrue(_has(result.warnings, "not positive definite",
+                             "C44 = 0 <= 0"), result.warnings)
+
+    def test_the_ORTHO_dialect_is_untouched(self):
+        deck = _aniso_deck().replace(
+            "*MAT_ANISOTROPIC_ELASTIC_TITLE\npad\n"
+            + _row(3, 2.51e-9, 5940.0, 760.0, 5940.0, 980.0, 980.0, 2270.0)
+            + "\n" + _row(0.0, 0.0, 0.0, 2590.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(1180.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1180.0, 0.0) + "\n",
+            "*MAT_ORTHOTROPIC_ELASTIC_TITLE\npad\n"
+            + _row(3, 2.51e-9, 5496.34093, 5496.34093, 1983.31343,
+                   0.06106968, 0.14626866, 0.14626866) + "\n"
+            + _row(2590.0, 1180.0, 1180.0, 0.0) + "\n")
+        self.assertIn("*MAT_ORTHOTROPIC_ELASTIC_TITLE", deck)
+        _r, s_ortho, _e = _convert(deck)
+        _r2, s_aniso, _e2 = _convert(_aniso_deck())
+        a, b = _law93_cells(s_ortho, 3), _law93_cells(s_aniso, 3)
+        for name in a:
+            with self.subTest(cell=name):
+                # the ORTHO card states 10-column (8-digit) cells
+                self.assertAlmostEqual(a[name] / b[name], 1.0, delta=1e-7)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1251,6 +1401,10 @@ _RETRACTED_ROUND_6_A = (
     # by nothing (chkmsin.F:53 is strict), so "aborts" was false for MS = 0
     "no deck on any corpus here reaches this",
     "MS <= 0 aborts the engine",
+    # A6: the zero-coupling class IS inverted now; the re-state advice is
+    # true only "in OTHER axes"
+    "Inverting C to engineering constants is deliberately NOT attempted",
+    "Re-state the material as *MAT_ORTHOTROPIC_ELASTIC",
 )
 
 #: The same family as regexes, matched on the collapsed text (a phrase whose
@@ -1321,6 +1475,12 @@ class Round6RetractedStatementsA(unittest.TestCase):
              "velocity)"),
             ("README.md", "the screen is the node's OWN mass, not element "
              "incidence"),
+            ("k2rad/handlers.py", "the material IS orthotropic and is "
+             "converted EXACTLY through the *MAT_ORTHOTROPIC_ELASTIC path"),
+            ("k2rad/handlers.py", "state it as *MAT_ORTHOTROPIC_ELASTIC in "
+             "those axes (AOPT)"),
+            ("README.md", "converted **EXACTLY through the orthotropic path "
+             "when all 12 coupling cells are 0 and C is positive definite**"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):
