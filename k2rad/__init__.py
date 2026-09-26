@@ -228,6 +228,7 @@ def convert(
     spring_token_mass_compensation: bool = True,
     shell_to_solid_rbody: bool = True,
     generalized_weld_butt: bool = True,
+    initial_void_floor: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -494,6 +495,22 @@ def convert(
         IE −100.00 % → +4.70 %, KE −30.79 % → −26.85 %; the SAME two
         welds LS-DYNA's own ``.messag`` records trip the criterion at
         t 1.269e-3 against its own 1.26914e-3 and are set off at 1.272e-3.
+    initial_void_floor : bool
+        On a deck that states ``*INITIAL_VOID_PART`` / ``_SET`` on an
+        ELFORM-12 part whose material is a ``*MAT_NULL`` + ``*EOS_*`` carrier,
+        write ``Pmin = -1e-20`` on the ``/MAT/HYD_VISC`` of that fluid — the
+        void's own material and every LAW6 material of the deck's ELFORM-12
+        fluid (Vol I R17 p.28-134: one fluid per single-material-and-void
+        mesh). **On by default.** NOT 0: ``hm_read_mat06.F:154`` reads an
+        exact ``Pmin`` 0 as -INFINITY, so the ``Pmin 0`` every
+        ``/MAT/HYD_VISC`` carried was an UNBOUNDED tension in the cells the
+        fluid leaves. A stated PC is overridden and named; refused (nothing
+        written) on a deck with ``*ALE_MULTI-MATERIAL_GROUP`` and for a void
+        that is not ELFORM 12 or not a LAW6 carrier. The void's low density is
+        NOT written. MEASURED at nt 4: quadrature_B timeout → NORMAL in 1095
+        cycles (IE +394.0 %), bird_B timeout → NORMAL in 2936 (IE
+        +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %) —
+        NORMAL, not a match: the void is still full of fluid.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -898,6 +915,7 @@ def convert(
         spring_token_mass_compensation=spring_token_mass_compensation,
         shell_to_solid_rbody=shell_to_solid_rbody,
         generalized_weld_butt=generalized_weld_butt,
+        initial_void_floor=initial_void_floor,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

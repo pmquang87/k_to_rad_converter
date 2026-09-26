@@ -4438,7 +4438,11 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     rho = to_float(f1[1])
     E   = to_float(f1[6]) if len(f1) > 6 else 0.0
     nu  = to_float(f1[7]) if len(f1) > 7 else 0.0
-    state.mat_null[mid] = MatNull(mid, title, rho, E, nu)
+    # PC (field 3) is read so the ELFORM-12 void cavitation floor can NAME a
+    # stated cutoff it overrides; it is written nowhere else. MU (field 4)
+    # stays unread (ROADMAP, the *MAT_NULL PC/MU item).
+    pc  = to_float(f1[2]) if len(f1) > 2 else 0.0
+    state.mat_null[mid] = MatNull(mid, title, rho, E, nu, pc=pc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

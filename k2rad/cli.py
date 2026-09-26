@@ -337,6 +337,27 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-generalized-weld-butt to go back to dropping the keyword.",
     )
     parser.add_argument(
+        "--initial-void-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a deck that states *INITIAL_VOID_PART/_SET on an ELFORM-12 "
+             "part whose material is a *MAT_NULL + *EOS_* carrier, write "
+             "Pmin = -1e-20 on the /MAT/HYD_VISC of that fluid (the void's "
+             "own material and every LAW6 material of the deck's ELFORM-12 "
+             "fluid). ON by default. NOT 0: hm_read_mat06.F:154 reads an "
+             "exact Pmin 0 as -INFINITY, so the Pmin 0 every /MAT/HYD_VISC "
+             "carried was an UNBOUNDED tension in the cells the fluid leaves. "
+             "A stated PC is overridden and named; refused on a deck with "
+             "*ALE_MULTI-MATERIAL_GROUP (Vol I R17 p.28-134) and for a void "
+             "that is not ELFORM 12 or not a LAW6 carrier. The void's low "
+             "density is NOT written. MEASURED at nt 4: quadrature_B timeout "
+             "-> NORMAL in 1095 cycles (IE +394.0 %%), bird_B timeout -> "
+             "NORMAL in 2936 cycles (IE +1484.7 %%), bird-el NORMAL either "
+             "way (IE +454.1 -> +1134.6 %%) - NORMAL, not a match: the void "
+             "is still full of fluid. Use --no-initial-void-floor to keep "
+             "Pmin 0.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -979,6 +1000,7 @@ def main(argv=None) -> int:
         spring_token_mass_compensation=args.spring_token_mass_compensation,
         shell_to_solid_rbody=args.shell_to_solid_rbody,
         generalized_weld_butt=args.generalized_weld_butt,
+        initial_void_floor=args.initial_void_floor,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

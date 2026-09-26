@@ -1645,6 +1645,20 @@ that decided it and the deck that would decide it next.
     incompatible with `*ALE_MULTI-MATERIAL_GROUP`) plus the dt collapse the
     low-density arm dies of. `*INITIAL_VOLUME_FRACTION_GEOMETRY` → `/INIVOL`
     stays blocked at source (LAW51/151 + an EOS are required).
+    **Round 6: PARTLY closed — the cavitation FLOOR shipped, the density did
+    not.** The measured death of every void deck was not the missing density
+    but the `Pmin 0` k2rad wrote on the fluid's `/MAT/HYD_VISC`, which
+    `hm_read_mat06.F:154` reads as −INFINITY: A1 writes `Pmin = −1e-20` on the
+    ELFORM-12 fluid (default ON, `--no-initial-void-floor`), and quadrature_B /
+    quadrature_C and bird_B go timeout → NORMAL (1095 / 2936 cycles, nt 4) —
+    NORMAL, not a match. The density cell (`RHO_I = VFACT × RO`) stays OUT on
+    the combined arms: with the void density the bird-el `Iauto 2` coupling
+    is DEAD (`COMPUTED STIFFNESS VALUE 5.625E-04 … USING DENSITY 1.0E-15`),
+    with the coupling kept alive it costs 4.51× the cycles (11228) for a
+    plate IE of −30.3 %; bird_B STALLS at t 2.227e-4 with the step at 2.15e-18
+    on the `/INTER/TYPE18` SORT step (`intcrit.F:508-518`, one near-massless
+    void node at 3.34e6 mm/s); quadrature_B costs 47.2× the floor-only cycles.
+    What would decide it: a real void PHASE (`/MAT/LAW51` + `/INIVOL`).
 
 11. **`ELFORM 5/6/7` → a real ALE model, and the `/INTER/TYPE18` cell
     mapping.** Both entries were CORRECTED rather than closed: the ALE remap's

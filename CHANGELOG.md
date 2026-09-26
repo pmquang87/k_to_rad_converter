@@ -11,6 +11,49 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
+  spring / modal decks).** One commit per item; every figure below is a
+  measured arm at `nt` 4 against the LS-DYNA reference on `F:` unless it says
+  otherwise, and every reach is stated as `N deck keys on M emitted models`.
+  - **A1 — `*INITIAL_VOID_*` ELFORM-12 decks get a cavitation floor
+    (`Pmin = −1e-20`) on the fluid's `/MAT/HYD_VISC` (default ON,
+    `--no-initial-void-floor`).** `Pmin 0` — what k2rad wrote on every
+    `/MAT/HYD_VISC` — is read as −INFINITY (`hm_read_mat06.F:154`), and
+    `eosmain.F:229` hands that `PM(37)` to every EOS as its pressure floor
+    (`gruneisen.F:129/132/152`, `eospolyno.F:104/113/125`): an UNBOUNDED
+    tension in the cells the fluid advects out of, the measured death of every
+    void deck (energy created from cycle 2, `MESSAGE ID 167`). The floor goes
+    on the void's own LAW6 material AND every LAW6 material of the deck's
+    ELFORM-12 fluid (Vol I R17 p.28-134: one fluid per single-material-and-void
+    mesh); −1e-20 is the zero-pressure cavitation limit `*MAT_NULL` Remark 4
+    describes (Vol II R17 p.2-190). A stated `PC` is overridden and NAMED
+    (`handle_mat_null` now reads PC, card 1 field 3; bird_B's `PC −1` is also
+    named as its linear EOS's own tensile limit, computed from `C1`). Refused
+    by name, nothing written: a deck with `*ALE_MULTI-MATERIAL_GROUP`
+    (p.28-134), a void that is not ELFORM 12, a void whose material is not a
+    `*MAT_NULL` + `*EOS_*` carrier (forging_B, `*MAT_INV_HYPERBOLIC_SIN`).
+    **Reach 5 deck keys on 4 emitted models; bytes move on 4 keys / 3 models**
+    (bird-el `/MAT/HYD_VISC/1` and `/2`, bird_B `/2`, quadrature_B ≡
+    quadrature_C `/1` — one `Pmin` cell each; engine `_0001.rad` unchanged);
+    forging_B is a warning-record mover. MEASURED (round-6 arms, histories
+    checked): **quadrature_B / quadrature_C timeout → NORMAL in 1095 cycles**
+    (IE +394.0 % / KE −40.7 % against its reference, +144.2 % IE against
+    quadrature_C's), **bird_B timeout → NORMAL in 2936 cycles** (IE +1484.7 % /
+    KE +25.9 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %, KE
+    +10856 → −92.1 %: its plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID`
+    is not converted). **Status, not match**: the void's low DENSITY stays
+    out — a dead `/INTER/TYPE18` coupling or 4.51× the cycles on the coupled
+    decks, a stall on bird_B. `underwater_A` / `underwater_B` (the two `match`
+    rows with a `*MAT_NULL` + EOS fluid) state no `*INITIAL_VOID` and are
+    byte-identical. `_warn_initial_void_in_fsi` is REWRITTEN with the measured
+    reasons (the bird_B stall at dt 2.15e-18 on the TYPE18 SORT step,
+    `intcrit.F:508-518`, driven by void node 2029 at 3.34e6 mm/s; 47.2× the
+    cycles on quadrature_B) and reads the floor's ONE decision; its round-4
+    sentence "No /INTER/TYPE18 parameter moves this" is withdrawn — the floor
+    moves quadrature_B from a timeout to NORMAL. The `*MAT_ELASTIC_FLUID`
+    `CP = 0.0` warning and README no longer call a zero-pressure cut-off
+    inexpressible (`Pmin = −1e-20` states it); that mapping is unchanged.
+
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by
   running the arm the claim was made about; four branches given the probe they

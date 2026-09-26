@@ -2460,6 +2460,11 @@ class MatNull:
     rho: float
     E: float
     nu: float
+    # Card 1 field 3, PC: the pressure cutoff (<= 0, default 0.0; Vol II R17
+    # p.2-189). Read so the ELFORM-12 void cavitation floor can NAME the
+    # stated value it overrides (writer/materials._resolve_initial_void_floor);
+    # it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item).
+    pc: float = 0.0
 
 
 @dataclass
@@ -7399,6 +7404,31 @@ class ConvertOptions:
     # 0.9026 = -86.71 %, so the failure model is the load-bearing half. The
     # campaign row stays deviation on KE.
     generalized_weld_butt: bool = True
+    # --no-initial-void-floor: stop writing the ELFORM-12 void cavitation
+    # floor (R14 triage round 6, A1).
+    #
+    # ON by default. On a deck that states *INITIAL_VOID_PART / _SET on an
+    # ELFORM-12 (single material with void) part whose material converts to
+    # /MAT/HYD_VISC (a *MAT_NULL + *EOS_* carrier), k2rad writes
+    # Pmin = -1e-20 on the /MAT/HYD_VISC of that fluid -- the void's own
+    # material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I
+    # R17 p.28-134: one fluid per single-material-and-void mesh). NOT 0:
+    # hm_read_mat06.F:154 reads an exact Pmin 0 as -INFINITY, so the Pmin 0
+    # k2rad wrote on every /MAT/HYD_VISC was an UNBOUNDED tension in the cells
+    # the fluid advects out of (the EOS floors its pressure at PMIN,
+    # gruneisen.F:129/132/152, eospolyno.F:104/113/125). -1e-20 is the
+    # zero-pressure cavitation limit of *MAT_NULL Remark 4 (Vol II R17
+    # p.2-190). A stated PC is OVERRIDDEN and named. Refused (nothing written)
+    # when the deck states *ALE_MULTI-MATERIAL_GROUP (p.28-134 forbids the
+    # pair) and for a void part that is not ELFORM 12 or not a LAW6 carrier.
+    # The void's low DENSITY is NOT written (a dead /INTER/TYPE18 coupling or
+    # 4.51x cycles on the coupled decks; see ROADMAP).
+    #
+    # MEASURED at nt 4 (round-6 arms, against the LS-DYNA references):
+    # quadrature_B timeout -> NORMAL in 1095 cycles, bird_B timeout -> NORMAL
+    # in 2936; bird-el NORMAL either way (IE +454.1 -> +1134.6 %). NORMAL is
+    # not a match: the void is still full of fluid.
+    initial_void_floor: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8826,8 +8856,21 @@ class ConversionState:
     # them (there is no Radioss void phase k2rad can write), but the ids are
     # kept so _warn_initial_void_in_fsi can say when a skipped void sits inside
     # an emitted /INTER/TYPE18 fluid group — the difference between "a cell was
-    # dropped" and "the FSI result on this deck is not valid".
+    # dropped" and "the FSI result on this deck is not valid" — and so the
+    # ELFORM-12 cavitation floor (writer/materials._resolve_initial_void_floor)
+    # can find the void's fluid.
     initial_void_parts: List[Tuple[int, bool]] = field(default_factory=list)
+    # The ONE decision of the ELFORM-12 void cavitation floor: None = not yet
+    # resolved; else {LAW6 carrier mid -> the *MAT_NULL PC the floor
+    # overrides}, empty when nothing is written (no void, refused, opted out).
+    # Memoised by writer/materials._resolve_initial_void_floor so the
+    # materials section and the /INTER/TYPE18 void warning read the SAME
+    # record, never the option twice (the #138 shared-predicate rule).
+    initial_void_floor: Optional[Dict[int, float]] = None
+    # ... and, when that record is empty on a deck that DOES state a void, the
+    # reason in words ("--no-initial-void-floor" or the refusal clause), so
+    # the /INTER/TYPE18 void warning can say why without re-deciding.
+    initial_void_floor_refusal: str = ""
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the

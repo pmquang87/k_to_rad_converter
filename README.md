@@ -737,6 +737,26 @@ lowest-id mesh node as the master (keeps that node id stable for scripts that
 address loads/readouts by it; OpenRadioss then relocates it to the CoM at
 runtime, so it appears to move in post-processing).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
+
+`*INITIAL_VOID_PART` / `_SET` → recognized, **still listed as skipped** (no
+Radioss card empties a region at t = 0). On an ELFORM-12 single-material-and-
+void fluid, the `/MAT/HYD_VISC` of that fluid get the **cavitation floor
+`Pmin = −1e-20`** (default ON, `--no-initial-void-floor`): the void's own
+material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I R17
+p.28-134 allows one fluid per single-material-and-void mesh). Not `0`:
+`hm_read_mat06.F:154` reads an exact `Pmin 0` as −INFINITY, so the `Pmin 0`
+every `/MAT/HYD_VISC` carried was an UNBOUNDED tension in the cells the fluid
+leaves — the measured death of every void deck. A stated `PC` is overridden and
+named; a deck that also states `*ALE_MULTI-MATERIAL_GROUP` (forbidden together,
+p.28-134), a void that is not ELFORM 12 and a void whose material is not a LAW6
+carrier are refused by name and keep `Pmin 0`. The void's low DENSITY is NOT
+written (on the two `/INTER/TYPE18`-coupled carriers it is a dead coupling or
+4.51× the cycles, and it stalls bird_B on the TYPE18 sort step). MEASURED at
+nt 4 against the LS-DYNA references: quadrature_B and quadrature_C (one emitted
+model) timeout → NORMAL in 1095 cycles (IE +394.0 %), bird_B timeout → NORMAL in
+2936 cycles (IE +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %).
+**NORMAL here is not an LS-DYNA match**: the void is still full of fluid.
+
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
 `Bunreacted` 1:1 — Vol II R17 p.2-188 gives the pre-detonation pressure as
 `p = K(1/V − 1)` and `jwl51.F:197` is `Psol = C01 + C11·µ` with
@@ -1491,8 +1511,11 @@ carries the hand-conversion recipe ν ≈ VC·ΔL·a with a = √(K/ρ) already
 evaluated. `CP` (cavitation pressure) → `Pmin` with the sign flipped, but only
 when it is a real limit: LS-DYNA's documented default `CP = 1e20` means "no
 cavitation" and maps to `Pmin = 0` → −INFINITY, not to −1e20 (an explicit
-`CP = 0.0` is the one semantic Radioss cannot state, since `Pmin = 0` is the
-reader's no-cutoff sentinel — reported). That default is a **raw literal**, so
+`CP = 0.0` is still written `Pmin = 0`, which the reader takes as its
+no-cutoff sentinel — reported. The zero-pressure floor itself IS expressible,
+as `Pmin = −1e-20`: round 6 writes exactly that on the `*INITIAL_VOID` fluids
+above and measured it there, but this card's mapping is not changed yet — see
+ROADMAP). That default is a **raw literal**, so
 a unit-converted deck carries it rescaled — the corpus bird-strike fluid reads
 `CP = 1e20` in its kg-m-s copy and `CP = 1e14` in the ton-mm-s one, the same
 material — and testing the literal alone would make the emitted card depend on
