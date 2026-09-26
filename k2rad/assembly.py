@@ -4784,6 +4784,11 @@ _NO_ID_KEYWORDS = frozenset({
     # k2rad does not read on any *DATABASE_ card, so it is not offset here
     # either; every one of the cards above is in this set for the same reason.)
     "DATABASE_SBTOUT",
+    # *CONSTRAINED_GLOBAL (round 6, B5): TC RC DIR X Y Z TOL - no id cell.
+    # Its plane POINT is literal geometry a TRANID would have to move; the
+    # handler REFUSES a card from a transformed include instead (the tag set
+    # in step 4 below), so it is not in _POINT_BEARING.
+    "CONSTRAINED_GLOBAL",
 })
 
 #: Coordinate/point-bearing keywords other than *NODE: literal geometry that a
@@ -5406,6 +5411,12 @@ def finalize(blocks: List[Block]) -> None:
         _transform_rigidwalls(p, aff, warn)
         _transform_beam_orientation(p, aff, warn)
         _warn_coordinate_bearing(p, aff, warn)
+        for b in p.sub_blocks:
+            # A *CONSTRAINED_GLOBAL plane point is NOT moved by the transform;
+            # applied to the MOVED mesh it would select the wrong nodes, so the
+            # handler refuses the card by name (round 6, B5). Reach 0.
+            if b.keyword == "CONSTRAINED_GLOBAL":
+                b.include_transformed = True
 
     # 5. *NODE_TRANSFORM acts on already-transformed geometry, deck order
     #    (LECTRANS runs after the submodel pass; references read CURRENT

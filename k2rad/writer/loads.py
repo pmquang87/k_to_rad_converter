@@ -239,6 +239,75 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 _TC_RC_DIGITS = {0: "000", 1: "100", 2: "010", 3: "001",
                  4: "110", 5: "011", 6: "101", 7: "111"}
 
+#: The inverse of :data:`_TC_RC_DIGITS`: three ``/BCS`` digits -> the
+#: ``*NODE`` TC/RC code. All eight digit patterns have a code (``000`` -> 0 ...
+#: ``101`` -> 6, ``111`` -> 7), so any OR of two codes is a code.
+_TC_RC_CODE = {v: k for k, v in _TC_RC_DIGITS.items()}
+
+
+def _or_code(a: int, b: int) -> int:
+    """The ``*NODE`` TC/RC code whose digits are the OR of codes *a* and *b*
+    (``_or_code(3, 1)`` = 6: z OR x = "z and x")."""
+    return _TC_RC_CODE[_or_dof_codes([_TC_RC_DIGITS[a], _TC_RC_DIGITS[b]])]
+
+
+def _resolve_constrained_globals(state: ConversionState) -> None:
+    """``*CONSTRAINED_GLOBAL`` -> the per-node TC/RC union (R14 triage round 6,
+    B5). Called in ``build_starter`` BEFORE any prepass synthesizes a node, so
+    both the model extent and the candidates are the deck's OWN nodes.
+
+    Per row: every node whose coordinate along the plane normal (DIR 1/2/3 =
+    global x/y/z) is within the row's TOL of the plane point - or, when TOL
+    is 0, within ``1e-6 x`` the model extent (the largest side of the bounding
+    box of the deck's nodes). LS-DYNA's own rule is "the internal mesh-size
+    dependent tolerance" (Vol I R17 p.10-39), which the card does not state,
+    so the default is k2rad's own; it reproduces LS-DYNA's own d3hsp 'nodal
+    spc summary' NODE FOR NODE, id set and codes, on all three R14 carriers
+    (ex_27 constrained twin 305 of 11285 nodes, extent 32.4; efg/metal-cutting
+    54 = 36 x 001/111 + 18 x 111/111 of 4197, extent 24; ale_wavehitcol 24737
+    in 7 codes of 352232, extent 487.68). A node on several planes gets the OR
+    of their codes (``_or_code``); the union with the ``*NODE`` cells and the
+    four screens happen in :func:`_make_node_tc_rc_bcs`.
+
+    Every plane selecting 0 nodes leaves nothing to emit: the keyword goes
+    back into ``skipped_keywords`` (reach 0), the same bookkeeping as a
+    refused card.
+    """
+    if not state.constrained_globals:
+        return
+    extent = 0.0
+    if state.nodes:
+        xs = [n.x for n in state.nodes.values()]
+        ys = [n.y for n in state.nodes.values()]
+        zs = [n.z for n in state.nodes.values()]
+        extent = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    state.constrained_global_extent = extent
+    for g in state.constrained_globals:
+        tol = g.tol if g.tol > 0.0 else 1e-6 * extent
+        k = g.dir - 1
+        c = (g.x, g.y, g.z)[k]
+        sel = [nid for nid, n in state.nodes.items()
+               if abs((n.x, n.y, n.z)[k] - c) <= tol]
+        state.constrained_global_rows.append((g, tol, len(sel)))
+        for nid in sel:
+            t0, r0 = state.constrained_global_tc_rc.get(nid, (0, 0))
+            state.constrained_global_tc_rc[nid] = (_or_code(t0, g.tc),
+                                                   _or_code(r0, g.rc))
+    # a row with TC = RC = 0 selects nodes and constrains nothing
+    state.constrained_global_tc_rc = {
+        n: c for n, c in state.constrained_global_tc_rc.items() if c != (0, 0)}
+    if not state.constrained_global_tc_rc:
+        state.skipped_keywords.append("CONSTRAINED_GLOBAL")
+        state.warn(
+            f"*CONSTRAINED_GLOBAL: none of its {len(state.constrained_globals)}"
+            " plane(s) passes within its tolerance of any node (or every row "
+            "states TC = RC = 0), so NOTHING is converted (the keyword stays in "
+            "the SKIPPED list): "
+            + "; ".join(f"{'xyz'[g.dir - 1]} = {(g.x, g.y, g.z)[g.dir - 1]:g} "
+                        f"within {tol:g}"
+                        for g, tol, _n in state.constrained_global_rows) + ".")
+
+
 #: ``/IMPVEL|/IMPDISP|/IMPACC`` ``Dir`` letter → (0 = translation code /
 #: 1 = rotation code, digit index). The letters are the ones ``_DOF_DIR``
 #: produces, so this cannot drift from what the motion cards actually say.
@@ -262,8 +331,18 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
     inert probe rigid body, the ``*MAT_RIGID`` auto-constraint and the CNRB
     ``_SPC`` card — sits on a node no ``*NODE`` row can name: the first three
     are ids k2rad MINTS, and the last two act on an ``/RBODY`` independent
-    node, whose members rule (a) drops from the TC/RC set anyway. So the map
-    is complete for the purpose it is read for.
+    node. That node is NOT outside the TC/RC pass, though: rule (a) RE-POINTS
+    the members' cells onto it, so a body with a ``*MAT_RIGID`` CON1/CON2
+    auto-constraint AND member TC/RC cells carries its main node in TWO
+    ``/BCS`` groups (``BC_rigid_PID`` and a TC/RC group). MEASURED over the
+    5aef5a0 mirror: 5 roster decks do this today (forging_A, forging_B, bend,
+    ex_16_thin_shell_elform_13, 275key2; 1-4 nodes each), inert by ``MY_OR``
+    (``hm_read_bcs.F:198`` unions the codes) and reported as one starter
+    WARNING 312; round 6's ``*CONSTRAINED_GLOBAL`` adds ale_wavehitcol (1
+    node). Merging the auto-constraint in screen (c) would move those decks'
+    bytes and is a ROADMAP item. ``*CONSTRAINED_GLOBAL`` itself is not in this
+    map: its cells are UNIONED with the ``*NODE`` cells inside
+    :func:`_make_node_tc_rc_bcs`, so they meet every screen there.
 
     A ``*BOUNDARY_SPC`` with a resolvable ``CID`` is deliberately NOT here: its
     ``/BCS`` carries a skew, so its digits are axes of that skew and no global
@@ -477,12 +556,31 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     (``channel_A/B/C``) states ``TC 7`` beside a motion whose ``sf = 1e-8``, so
     its zero reaction work is explained by the scale factor and not by which
     card wins. Rule (b) is chosen on the Radioss measurement above.
+
+    **``*CONSTRAINED_GLOBAL`` (round 6, B5) is a second producer of the same
+    cells.** Its planes' codes (``state.constrained_global_tc_rc``, filled by
+    :func:`_resolve_constrained_globals`) are UNIONED here, per node, with the
+    ``*NODE`` cells, and the union goes through the SAME screens and out as
+    ONE ``/BCS`` per union code - one ``/BCS`` per plane gave starter WARNING
+    312 on the nodes where two planes meet. The two sources keep their own
+    provenance: ``--no-node-tc-rc-bcs`` drops only the ``*NODE`` cells (the
+    planes still convert; ``--no-constrained-global`` is theirs); a group
+    holding at least one ``*NODE``-cell node keeps the ``node_tc_rc_TRA_ROT``
+    title (every pre-round-6 deck is byte-identical) and a GLOBAL-only group
+    is titled ``constrained_global_TRA_ROT``; each source gets its own
+    announcement, counting only its own nodes and screens.
     """
-    if not state.node_tc_rc:
-        return []
-    if not state.options.node_tc_rc_bcs:
+    node_cells: Dict[int, Tuple[int, int]] = (
+        state.node_tc_rc if state.options.node_tc_rc_bcs else {})
+    glob_cells = state.constrained_global_tc_rc
+    if state.node_tc_rc and not state.options.node_tc_rc_bcs:
         _warn_node_tc_rc_dropped(state)
+    if not node_cells and not glob_cells:
         return []
+    cells: Dict[int, Tuple[int, int]] = dict(node_cells)
+    for nid, (tc_g, rc_g) in glob_cells.items():
+        t0, r0 = cells.get(nid, (0, 0))
+        cells[nid] = (_or_code(t0, tc_g), _or_code(r0, rc_g))
 
     spc_dofs = _global_spc_dofs(state)
     rot_capable = _mesh_has_rotational_dof(state, rbody_info)
@@ -490,10 +588,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     stated: Dict[Tuple[int, int], int] = defaultdict(int)
     rigid_dropped: List[int] = []
-    motion_nodes: List[int] = []
-    motion_dofs = 0
-    spc_nodes: List[int] = []
-    spc_dof_count = 0
+    # (node, DOFs cleared) per screen call, in call order - split by source
+    # after the passes
+    motion_hits: List[Tuple[int, int]] = []
+    spc_hits: List[Tuple[int, int]] = []
     rot_inert: List[int] = []
     skewed_motion: List[int] = []
     emptied: List[int] = []
@@ -508,7 +606,6 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         the rigid pass must pass the MAIN node: that is the node
         ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its /IMPVEL against.
         """
-        nonlocal motion_dofs, spc_dof_count
         cleared_here = 0
         for letter in sorted(state.imp_motion_dirs.get(nid, ())):
             which, idx = _IMP_DIR_BIT[letter]
@@ -517,8 +614,7 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 target[idx] = "0"
                 cleared_here += 1
         if cleared_here:
-            motion_nodes.append(nid)
-            motion_dofs += cleared_here
+            motion_hits.append((nid, cleared_here))
         if nid in state.imp_motion_skew_nodes:
             skewed_motion.append(nid)
         spc_tra, spc_rot = spc_dofs.get(nid, ("000", "000"))
@@ -531,8 +627,7 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 rot[i] = "0"
                 merged_here += 1
         if merged_here:
-            spc_nodes.append(nid)
-            spc_dof_count += merged_here
+            spc_hits.append((nid, merged_here))
         if "1" in rot and not rot_capable:
             rot_inert.append(nid)
         return "".join(tra), "".join(rot)
@@ -551,9 +646,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     rigid_orphans: List[int] = []
     rigid_repointed: Dict[int, Tuple[str, str]] = {}
 
-    for nid in sorted(state.node_tc_rc):
-        tc, rc = state.node_tc_rc[nid]
-        stated[(tc, rc)] += 1
+    for nid in sorted(cells):
+        tc, rc = cells[nid]
+        if nid in node_cells:
+            stated[node_cells[nid]] += 1       # the *NODE card's OWN code
         if nid in rigid_nodes:
             main = main_of.get(nid)
             if main is None:
@@ -586,9 +682,21 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         state.node_tc_rc_emitted[main] = (tra_s, rot_s)
         rigid_repointed[main] = (tra_s, rot_s)
 
+    # ── provenance: which source(s) each screened node came from ──
+    node_prov: Set[int] = {n for n in cells if n in node_cells}
+    glob_prov: Set[int] = {n for n in cells if n in glob_cells}
+    for main, members in rigid_members.items():
+        if any(m in node_cells for m in members):
+            node_prov.add(main)
+        if any(m in glob_cells for m in members):
+            glob_prov.add(main)
+
     lines: List[str] = []
     if groups:
-        lines = ["#-  BOUNDARY CONDITIONS (*NODE TC/RC cells):", HDR]
+        head = ("*NODE TC/RC cells" if not glob_cells else
+                "*CONSTRAINED_GLOBAL planes" if not node_cells else
+                "*NODE TC/RC cells + *CONSTRAINED_GLOBAL planes")
+        lines = [f"#-  BOUNDARY CONDITIONS ({head}):", HDR]
     for tra_s, rot_s in sorted(groups):
         nids = groups[(tra_s, rot_s)]
         # next_grnod_id, never a bare next_id: a user *SET_NODE at or above the
@@ -598,7 +706,9 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         # the guarded counter).
         grnod_id = state.next_grnod_id()
         bc_id = state.next_id()
-        title = f"node_tc_rc_{tra_s}_{rot_s}"
+        title = (f"node_tc_rc_{tra_s}_{rot_s}"
+                 if any(n in node_prov for n in nids) else
+                 f"constrained_global_{tra_s}_{rot_s}")
         lines += [
             f"/BCS/{bc_id}",
             title,
@@ -608,15 +718,129 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         ]
         lines += _emit_grnod_node(grnod_id, title, nids)
 
-    _warn_node_tc_rc_converted(
-        state, stated=stated, groups=groups, rigid_dropped=rigid_dropped,
-        rigid_repointed=rigid_repointed, rigid_members=dict(rigid_members),
-        rigid_orphans=rigid_orphans,
-        motion_nodes=motion_nodes, motion_dofs=motion_dofs,
-        spc_nodes=spc_nodes, spc_dof_count=spc_dof_count,
-        rot_inert=rot_inert, skewed_motion=skewed_motion, emptied=emptied)
-    _warn_node_tc_rc_on_null_material(state, groups)
+    def _of(prov: Set[int], raw_cells: Dict[int, Tuple[int, int]]):
+        """Every screen list restricted to one source (a node with both
+        sources counts in both announcements)."""
+        return dict(
+            groups={k: [n for n in v if n in prov] for k, v in groups.items()
+                    if any(n in prov for n in v)},
+            rigid_dropped=[n for n in rigid_dropped if n in raw_cells],
+            rigid_repointed={m: c for m, c in rigid_repointed.items()
+                             if m in prov},
+            rigid_members={m: [n for n in v if n in raw_cells]
+                           for m, v in rigid_members.items() if m in prov},
+            rigid_orphans=[n for n in rigid_orphans if n in raw_cells],
+            motion_nodes=[n for n, _k in motion_hits if n in prov],
+            motion_dofs=sum(k for n, k in motion_hits if n in prov),
+            spc_nodes=[n for n, _k in spc_hits if n in prov],
+            spc_dof_count=sum(k for n, k in spc_hits if n in prov),
+            rot_inert=[n for n in rot_inert if n in prov],
+            skewed_motion=[n for n in skewed_motion if n in prov],
+            emptied=[n for n in emptied if n in prov])
+
+    if node_cells:
+        mine = _of(node_prov, node_cells)
+        _warn_node_tc_rc_converted(state, stated=stated, **mine)
+        _warn_node_tc_rc_on_null_material(state, mine["groups"])
+    if glob_cells:
+        _warn_constrained_global_converted(state, **_of(glob_prov,
+                                                        glob_cells))
     return lines
+
+
+def _warn_constrained_global_converted(
+        state: ConversionState, *,
+        groups: Dict[Tuple[str, str], List[int]],
+        rigid_dropped: List[int],
+        rigid_repointed: Dict[int, Tuple[str, str]],
+        rigid_members: Dict[int, List[int]],
+        rigid_orphans: List[int],
+        motion_nodes: List[int], motion_dofs: int,
+        spc_nodes: List[int], spc_dof_count: int,
+        rot_inert: List[int], skewed_motion: List[int],
+        emptied: List[int]) -> None:
+    """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
+    every screen (the #133 ordering rule), with this source's own counts."""
+    rows = state.constrained_global_rows
+    planes = "; ".join(
+        f"TC {g.tc} RC {g.rc} on {'xyz'[g.dir - 1]} = "
+        f"{(g.x, g.y, g.z)[g.dir - 1]:g} ({n} node(s) within {tol:g})"
+        for g, tol, n in rows)
+    emitted = sum(len(v) for v in groups.values())
+    codes = ("; ".join(f"Tra {t} Rot {r}: {len(groups[(t, r)])}"
+                       for t, r in sorted(groups)) if groups else "none")
+    msg = [
+        f"*CONSTRAINED_GLOBAL: {len(rows)} constraint plane(s) -> /BCS through "
+        "the *NODE TC/RC pass, the constrained DOFs 'held fixed in time' (Vol "
+        f"I R17 p.10-38): {planes}. A node on more than one plane gets ONE "
+        "/BCS carrying the UNION of the planes' codes - "
+        f"{emitted} node(s) in {len(groups)} union code(s): {codes} - "
+        "because one /BCS per plane gives starter WARNING 312 on the shared "
+        "nodes (measured on efg/metal-cutting/main.k)."]
+    if any(g.tol == 0.0 for g, _t, _n in rows):
+        extent = state.constrained_global_extent
+        msg.append(
+            " The node tolerance is k2rad's OWN where a row states TOL = 0: "
+            "LS-DYNA uses 'the internal mesh-size dependent tolerance' "
+            f"(p.10-39), k2rad uses 1e-6 x the model extent ({extent:g}, the "
+            "largest side of the bounding box of the deck's nodes) = "
+            f"{1e-6 * extent:g}; it selects exactly the nodes LS-DYNA's own "
+            "d3hsp 'nodal spc summary' lists on all three R14 carriers "
+            "(ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit "
+            "305 = 305; efg/metal-cutting/main.k 54 = 36 x 001/111 + 18 x "
+            "111/111; ale_wavehitcol 24737 in the same 7 codes).")
+    if rigid_dropped:
+        msg.append(
+            f" {len(rigid_dropped)} node(s) (node {_named(rigid_dropped)}) "
+            "belong to a rigid body and were RE-POINTED onto its /RBODY main "
+            f"node, unioned per body ({len(rigid_repointed)} main node(s)): a "
+            "/BCS on a /RBODY secondary is inert (rgbodv.F:150-155), exactly "
+            "the *NODE TC/RC rule (a).")
+    if rigid_orphans:
+        msg.append(
+            f" {len(rigid_orphans)} node(s) (node {_named(rigid_orphans)}) are "
+            "rigid-body members whose body has no main node, so their codes "
+            "are DROPPED.")
+    if motion_nodes:
+        msg.append(
+            f" {motion_dofs} DOF(s) on {len(motion_nodes)} node(s) (node "
+            f"{_named(motion_nodes)}) already driven by an imposed motion were "
+            "left to it (a /BCS and an /IMPVEL on one DOF give starter WARNING "
+            "312).")
+    if skewed_motion:
+        msg.append(
+            f" {len(skewed_motion)} node(s) (node {_named(skewed_motion)}) also "
+            "carry an imposed motion in a LOCAL system; nothing was cleared for "
+            "them.")
+    if spc_nodes:
+        msg.append(
+            f" {spc_dof_count} DOF(s) on {len(spc_nodes)} node(s) (node "
+            f"{_named(spc_nodes)}) already stated by a *BOUNDARY_SPC were "
+            "merged (hm_read_bcs.F:198 unions the codes).")
+    if rot_inert:
+        msg.append(
+            f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
+            "rotational code on a mesh with no rotational DOF: emitted and "
+            "inert (bcs10.F:66 applies the Rot digits only inside "
+            "IF(IRODDL/=0); LS-DYNA drops them from its echo too).")
+    if emptied:
+        msg.append(
+            f" {len(emptied)} node(s) (node {_named(emptied)}) had every DOF "
+            "screened away, so no /BCS was written for them.")
+    if groups and state.mat_null:
+        part_nodes = _part_node_sets(state)
+        null_nodes: Set[int] = set()
+        for p in state.parts.values():
+            if p.mid in state.mat_null:
+                null_nodes |= part_nodes.get(p.pid, set())
+        n_null = len({n for v in groups.values() for n in v} & null_nodes)
+        if n_null:
+            msg.append(
+                f" {n_null} of these nodes belong to a *MAT_NULL part: the "
+                "/BCS is a wall of that fluid domain, as LS-DYNA applies it.")
+    msg.append(" Pass --no-constrained-global to drop the card (these DOFs "
+               "are then FREE).")
+    state.warn("".join(msg))
 
 
 def _warn_node_tc_rc_on_null_material(
@@ -7265,7 +7489,12 @@ def _constrained_linear_refusals(
         k = dof - 4 if rot else dof - 1
         kind = 1 if rot else 0
         hits: List[str] = []
-        for label, table in (("*BOUNDARY_SPC", gspc), ("*NODE TC/RC", tcrc)):
+        # the TC/RC /BCS map holds both of its producers (round 6, B5)
+        tcrc_label = (
+            "*NODE TC/RC" if nid not in state.constrained_global_tc_rc else
+            "*CONSTRAINED_GLOBAL" if nid not in state.node_tc_rc else
+            "*NODE TC/RC and *CONSTRAINED_GLOBAL")
+        for label, table in (("*BOUNDARY_SPC", gspc), (tcrc_label, tcrc)):
             code = table.get(nid)
             if code is None:
                 continue

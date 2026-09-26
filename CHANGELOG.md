@@ -155,6 +155,58 @@ Prior history (before this changelog was introduced) is summarized in the
     guarded against introducing it. README ("Implicit dynamic notes", "Known
     limitations") and `docs/IMPLICIT.md` gain the SOLVINFO and engine-defect
     sections.
+  - **B5 — `*CONSTRAINED_GLOBAL` → `/BCS` through the TC/RC union (default
+    ON, `--no-constrained-global`).** The keyword was unregistered (a
+    `#-- SKIPPED:` line on all three carriers). `handle_constrained_global`
+    records every valid row (`TC RC DIR X Y Z TOL`, Vol I R17 p.10-38; comment
+    lines between rows are skipped) and refuses by name a TC/RC outside 0-7, a
+    DIR not 1/2/3 (no default) and a negative TOL. The `build_starter`
+    prepass `writer/loads._resolve_constrained_globals` runs on the deck's
+    OWN nodes before any node is synthesized: per row the nodes within TOL of
+    the plane, or within 1e-6 × the model extent (the largest side of the
+    bounding box) when TOL is 0 — k2rad's own tolerance, named in the
+    announcement, since LS-DYNA's is "internal mesh-size dependent"
+    (p.10-39) — with the codes ORed per node into their OWN provenance map,
+    `state.constrained_global_tc_rc`. `_make_node_tc_rc_bcs` then UNIONS
+    them with the `*NODE` cells and writes ONE `/BCS` per union code through
+    the same four screens (one `/BCS` per plane gave starter WARNING 312 on
+    the shared nodes); a GLOBAL-only group is titled
+    `constrained_global_TRA_ROT`, a group with a `*NODE`-cell node keeps
+    `node_tc_rc_TRA_ROT`, and each source gets its own announcement
+    counting only its own nodes, so `--no-node-tc-rc-bcs` drops only the
+    `*NODE` cells and every pre-round-6 deck is byte-identical. The selection
+    reproduces LS-DYNA's own `d3hsp` 'nodal spc summary' NODE FOR NODE (id set
+    and codes) on all three R14 carriers: the `ex_27` constrained twin **305
+    nodes `001 000`** (ids 1-305); `efg/metal-cutting/main.k` **54 = 36 ×
+    `001 111` + 18 × `111 111`** (its LS-DYNA run stopped in the INPUT phase,
+    but the d3hsp was written first); `ale_wavehitcol` **24 737 nodes in 7
+    codes** (169 rigid-member cells re-pointed onto the column's main node
+    4012845, 24 569 emitted). Bookkeeping: the opt-out, a card whose every row
+    is refused, and a card read from a geometrically transformed
+    `*INCLUDE_TRANSFORM` (refused — its plane point is not moved; the include
+    pass tags the block, `Block.include_transformed`; reach 0) keep the keyword
+    in `skipped_keywords`, so those arms are byte-identical to 5aef5a0,
+    `#-- SKIPPED: *CONSTRAINED_GLOBAL` included; an emitted card removes that
+    one line. Every consumer of "does this node carry a /BCS" reads the new
+    producer: the A5 `/MPC` refusal (through `state.node_tc_rc_emitted`, now
+    naming `*CONSTRAINED_GLOBAL` as the source) and the shell-to-solid
+    WARNING-312 pre-warning (`writer/rbody._bcs_constrained_nodes`, whose text
+    names the plane only when a plane node is hit). **Byte movers 3 deck keys
+    on 3 emitted models** (`_0000.rad`). Campaign notes, stated before the
+    re-run: the constrained `ex_27` twin stays `error_engine` (its death moves
+    cycle 1 → cycle 0, ISTOP −2, at nt 4 and 2 — B4's engine defect acts
+    before any wall); **`efg/metal-cutting/main.k` may go normal →
+    error_engine**: the GLOBAL arm ends ERROR at cycle 26 at nt 4 AND nt 2,
+    while its BASE NORMAL (164 cycles, the campaign's nt-4 row) reproduced in
+    only 1 of 5 fresh runs and it has NO LS-DYNA energy reference — a flaky,
+    unreferenced base, not a measured regression; `ale_wavehitcol` is a
+    never-launched giant (`run_pass` 2), re-converted only, its solver row
+    STALE. 0 verdict movers. The `_global_spc_dofs` docstring's completeness
+    claim is corrected (rule (a) RE-POINTS member cells onto the `/RBODY` main
+    node, so a body with a `*MAT_RIGID` CON1/CON2 auto-constraint and member
+    TC/RC cells carries that node in two `/BCS`: 5 roster decks at 5aef5a0,
+    plus ale_wavehitcol now; inert by `MY_OR`, one WARNING 312 — a ROADMAP
+    item, not folded in here because it moves 5 unrelated decks).
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a

@@ -61,6 +61,7 @@ from .state import (
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld, ShellToSolid,
     GeneralizedWeldButt,
+    ConstrainedGlobal,
     ConstrainedLinear,
     MatSpringElastoplastic, MatDamperNonlinearViscous,
     MatSpringGeneralNonlinear, MatSpringInelastic,
@@ -7938,7 +7939,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:791, :1210, :1318, :1504, :1657
+    sites register into at the line that writes the card (writer/rbody.py:791, :1210, :1318, :1507, :1664
     — six LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, and round 5 added the
@@ -10043,6 +10044,84 @@ def handle_constrained_linear(block: Block, state: ConversionState) -> None:
         lin.terms.append((nid, dof, cid, coef))
     if lin is not None:
         state.constrained_linears.append(lin)
+
+
+def handle_constrained_global(block: Block, state: ConversionState) -> None:
+    """``*CONSTRAINED_GLOBAL`` - a global constraint plane, one record per row
+    (R14 triage round 6, B5; written as ``/BCS`` through the ``*NODE`` TC/RC
+    pass by ``writer/loads._make_node_tc_rc_bcs``).
+
+    Card 1 (Vol I R17 p.10-38): ``TC RC DIR X Y Z TOL``, repeated until the
+    next keyword (the carriers state 1, 2 and 5 rows; ``efg/metal-cutting``
+    puts comment lines between its two). A row is REFUSED by name - nothing
+    recorded - when TC or RC is outside 0-7, DIR is not 1/2/3 (the card gives
+    DIR no default) or TOL < 0 (undefined on the card; no value invented).
+
+    Bookkeeping, so a refused card is byte-identical to the opt-out arm (the
+    #138 rule): under ``--no-constrained-global``, when every row of the block
+    is refused, and for a card read from a geometrically transformed
+    ``*INCLUDE_TRANSFORM`` (its plane point is not moved - refused rather than
+    matched against the moved mesh; reach 0), the keyword goes into
+    ``skipped_keywords`` exactly as ``dispatch`` does for an unregistered
+    keyword, so the ``#-- SKIPPED: *CONSTRAINED_GLOBAL`` line stays.
+    """
+    raw = block.raw
+    if not state.options.constrained_global:
+        state.skipped_keywords.append(block.keyword)
+        n = sum(1 for i in range(_title_offset(block), len(raw))
+                if raw[i].strip())
+        state.warn(
+            f"*CONSTRAINED_GLOBAL: {n} constraint plane(s) NOT converted "
+            "(--no-constrained-global): the DOFs they hold fixed ('held fixed "
+            "in time', Vol I R17 p.10-38) are FREE in the converted model; the "
+            "keyword stays in the SKIPPED list exactly as before round 6.")
+        return
+    if block.include_transformed:
+        state.skipped_keywords.append(block.keyword)
+        state.warn(
+            "*CONSTRAINED_GLOBAL inside a geometrically transformed "
+            "*INCLUDE_TRANSFORM: its plane point is literal geometry the TRANID "
+            "transform does NOT move, and matched against the MOVED mesh it "
+            "would select the wrong nodes - the card is NOT converted and its "
+            "DOFs are FREE. State it in the including deck in the final "
+            "position instead.")
+        return
+    kept = 0
+    row_no = 0
+    for i in range(_title_offset(block), len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=7, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        row_no += 1
+        tc = to_int(f[0]) if f[0].strip() else 0
+        rc = to_int(f[1]) if len(f) > 1 and f[1].strip() else 0
+        d = to_int(f[2]) if len(f) > 2 and f[2].strip() else 0
+        tol = to_float(f[6]) if len(f) > 6 and f[6].strip() else 0.0
+        why = []
+        if not 0 <= tc <= 7:
+            why.append(f"TC={tc} is not a Vol I R17 p.10-38 code (0-7)")
+        if not 0 <= rc <= 7:
+            why.append(f"RC={rc} is not a Vol I R17 p.10-38 code (0-7)")
+        if d not in (1, 2, 3):
+            why.append(f"DIR={d} is not 1, 2 or 3 (the card gives DIR no "
+                       "default)")
+        if tol < 0.0:
+            why.append(f"TOL={tol:g} < 0 has no meaning on the card")
+        if why:
+            state.warn(f"*CONSTRAINED_GLOBAL row {row_no} ('{raw[i].strip()}'): "
+                       + "; ".join(why) + " - the row is NOT converted.")
+            continue
+        state.constrained_globals.append(ConstrainedGlobal(
+            tc=tc, rc=rc, dir=d,
+            x=to_float(f[3]) if len(f) > 3 and f[3].strip() else 0.0,
+            y=to_float(f[4]) if len(f) > 4 and f[4].strip() else 0.0,
+            z=to_float(f[5]) if len(f) > 5 and f[5].strip() else 0.0,
+            tol=tol))
+        kept += 1
+    if not kept:
+        state.skipped_keywords.append(block.keyword)
 
 
 def handle_constrained_tied_nodes_failure(block: Block,
@@ -18728,6 +18807,7 @@ HANDLERS = {
     "CONSTRAINED_SHELL_TO_SOLID":             handle_constrained_shell_to_solid,
     # Round 6: recorded and refused BY NAME (still listed as skipped).
     "CONSTRAINED_TIED_NODES_FAILURE":         handle_constrained_tied_nodes_failure,
+    "CONSTRAINED_GLOBAL":                     handle_constrained_global,
     # Round 6: one /MPC per card (writer/loads._make_constrained_linear_mpcs).
     "CONSTRAINED_LINEAR_LOCAL":               handle_constrained_linear,
     "CONSTRAINED_LINEAR_GLOBAL":              handle_constrained_linear,

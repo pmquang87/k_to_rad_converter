@@ -42,6 +42,12 @@ class Block:
     #: ``dispatch`` installs it for the duration of the handler; see
     #: :func:`_current_local_scope`.
     scope: dict | None = None
+    #: True when the block sits inside an ``*INCLUDE_TRANSFORM`` whose TRANID
+    #: resolved to a geometric transform (``assembly.resolve_pending_includes``
+    #: step 4 sets it). Read by handlers whose card carries literal geometry
+    #: the transform does NOT move and which therefore refuse rather than
+    #: apply it to the moved mesh (``*CONSTRAINED_GLOBAL``, R14 round 6 B5).
+    include_transformed: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

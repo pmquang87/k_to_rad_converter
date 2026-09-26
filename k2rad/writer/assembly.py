@@ -127,6 +127,7 @@ from .loads import (
     _make_starter_cloads,
     _make_tied_nodes_failure_notes,
     _make_constrained_linear_mpcs,
+    _resolve_constrained_globals,
     _apply_mass_weighted_rbody_inertia,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
@@ -1475,6 +1476,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # on the 100-200 MB mesh decks in the corpora and nothing would read it.
     if state.boxes:
         state.source_node_ids = set(state.nodes)
+    # *CONSTRAINED_GLOBAL -> the per-node TC/RC union (round 6, B5): here, on
+    # the deck's OWN nodes, before any prepass synthesizes one (the model
+    # extent that sets the default tolerance and the candidate nodes must not
+    # include k2rad's artefacts).
+    _resolve_constrained_globals(state)
     # *SET_<FAMILY>_ADD → plain sets of that family (recursively), BEFORE
     # anything reads state.part_sets / node_sets / the element and segment set
     # containers (contact sides, *CONTACT_INTERIOR, gravity/ALE scopes, /BCS,

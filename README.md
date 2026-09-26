@@ -2803,6 +2803,36 @@ model): starter `NUMMPC 1`, 0 errors, engine identical to the base on all 683
 rows — uninformative by construction, because nodes 40 and 42 sit
 symmetrically about the driven node 41 (the campaign's +365.89 % KE on that
 deck is not this card)
+`*CONSTRAINED_GLOBAL` → `/BCS` through the `*NODE` TC/RC pass (round 6,
+**default ON**, `--no-constrained-global` leaves the card skipped and its DOFs
+FREE). The card is a global constraint plane (Vol I R17 p.10-38: `TC RC DIR X Y
+Z TOL`, DIR 1/2/3 = the plane normal along global x/y/z, the constrained DOFs
+*"held fixed in time"*), several rows per keyword. Each row selects the nodes
+within its `TOL` of the plane — or, where `TOL` is 0, within **1e-6 × the model
+extent** (the largest side of the bounding box of the deck's own nodes; LS-DYNA
+uses *"the internal mesh-size dependent tolerance"*, p.10-39, which the card
+does not state, so this default is k2rad's own). Every row's codes are ORed per
+node, UNIONED with the deck's `*NODE` TC/RC cells, and written as **ONE `/BCS`
+per union code** through the same four screens (rigid members re-pointed onto
+the `/RBODY` main node, imposed-motion DOFs left to the motion, `*BOUNDARY_SPC`
+DOFs merged, inert rotational codes named): one `/BCS` per plane gave starter
+WARNING 312 on the nodes where two planes meet. A group holding a `*NODE`-cell
+node keeps the `node_tc_rc_TRA_ROT` title; a plane-only group is
+`constrained_global_TRA_ROT`. The selection reproduces LS-DYNA's own
+`d3hsp` *nodal spc summary* **node for node** on all three R14 carriers —
+`ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit` 305 nodes `001 000`,
+`efg/metal-cutting/main.k` 54 = 36 × `001 111` + 18 × `111 111`,
+`ale_wavehitcol` 24 737 nodes in the same 7 codes (3 deck keys on 3 emitted
+models). Refused by name: a row whose TC/RC is outside 0-7, whose DIR is not
+1/2/3 (the card gives DIR no default) or whose TOL is negative, and a card
+read from a geometrically transformed `*INCLUDE_TRANSFORM` (its plane point
+is not moved, and matched against the moved mesh it would select the wrong
+nodes; reach 0) — a card with every row refused is byte-identical to the
+opt-out. Two measured caveats, neither a verdict: the constrained `ex_27` twin
+stays `error_engine` (the implicit initial-velocity ENGINE defect acts before
+any wall — see *Implicit dynamic notes*), and `efg/metal-cutting`'s own NORMAL
+is a 1-in-5 outcome on fresh base runs with no LS-DYNA energy reference (its
+LS run stopped at input), so its status may flip either way
 
 ### Joints
 `*CONSTRAINED_JOINT_SPHERICAL` / `_REVOLUTE` / `_CYLINDRICAL` / `_PLANAR` /

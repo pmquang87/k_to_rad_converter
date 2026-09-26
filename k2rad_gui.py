@@ -107,6 +107,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          initial_void_floor: bool = True,
                          weld_exponents: bool = True,
                          constrained_linear: bool = True,
+                         constrained_global: bool = True,
                          shell_offset_gapmin: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -250,6 +251,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["constrained_linear"] = bool(constrained_linear)
 
+    kwargs["constrained_global"] = bool(constrained_global)
+
     kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
 
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
@@ -383,6 +386,7 @@ class ConverterGUI:
         self.initial_void_floor = tk.BooleanVar(value=True)
         self.weld_exponents = tk.BooleanVar(value=True)
         self.constrained_linear = tk.BooleanVar(value=True)
+        self.constrained_global = tk.BooleanVar(value=True)
         self.shell_offset_gapmin = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -774,6 +778,15 @@ class ConverterGUI:
             variable=self.implicit_constant_step).grid(
                 row=37, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_GLOBAL plane -> /BCS on the nodes within TOL "
+                     "(1e-6 x the model extent when TOL is 0), the codes "
+                     "UNIONED per node with the *NODE TC/RC cells - ON. The "
+                     "selection equals LS-DYNA's own spc summary on all 3 R14 "
+                     "carriers (305, 54, 24737 nodes)",
+            variable=self.constrained_global).grid(
+                row=38, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1020,6 +1033,7 @@ class ConverterGUI:
                 initial_void_floor=self.initial_void_floor.get(),
                 weld_exponents=self.weld_exponents.get(),
                 constrained_linear=self.constrained_linear.get(),
+                constrained_global=self.constrained_global.get(),
                 shell_offset_gapmin=self.shell_offset_gapmin.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
@@ -1175,6 +1189,9 @@ class ConverterGUI:
         if not kwargs.get("constrained_linear", True):
             bits.append("*CONSTRAINED_LINEAR_* left unconverted "
                         "(--no-constrained-linear)")
+        if not kwargs.get("constrained_global", True):
+            bits.append("*CONSTRAINED_GLOBAL planes left free "
+                        "(--no-constrained-global)")
         if not kwargs.get("shell_offset_gapmin", True):
             bits.append("starter-derived gap kept against offset shells "
                         "(--no-shell-offset-gapmin)")

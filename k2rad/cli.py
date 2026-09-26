@@ -261,6 +261,19 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-zero-tolerance-ectol to keep Itol 2.",
     )
     parser.add_argument(
+        "--constrained-global",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_GLOBAL (a global constraint plane, Vol I "
+             "R17 p.10-38) to /BCS: the nodes within TOL of the plane (or "
+             "1e-6 x the model extent when TOL is 0) get the row's TC/RC "
+             "codes, UNIONED per node over all rows and with the deck's *NODE "
+             "TC/RC cells, one /BCS per union code. ON by default; the "
+             "selection equals LS-DYNA's own d3hsp spc summary on all 3 R14 "
+             "carriers (305, 54, 24737 nodes). Use --no-constrained-global "
+             "to leave those DOFs free.",
+    )
+    parser.add_argument(
         "--implicit-constant-step",
         action="store_true",
         help="Cap the implicit step at the deck's own DT0 (/IMPL/DT/STOP "
@@ -1104,6 +1117,7 @@ def main(argv=None) -> int:
         initial_void_floor=args.initial_void_floor,
         weld_exponents=args.weld_exponents,
         constrained_linear=args.constrained_linear,
+        constrained_global=args.constrained_global,
         shell_offset_gapmin=args.shell_offset_gapmin,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,

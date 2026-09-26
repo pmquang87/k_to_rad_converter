@@ -233,6 +233,7 @@ def convert(
     initial_void_floor: bool = True,
     weld_exponents: bool = True,
     constrained_linear: bool = True,
+    constrained_global: bool = True,
     shell_offset_gapmin: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
@@ -572,6 +573,17 @@ def convert(
         twice. MEASURED on ``plates.lce`` (the only carrier): starter
         ``NUMMPC 1``, 0 errors, engine identical to the base on all 683 rows
         (the constrained nodes are symmetric about the driven one).
+    constrained_global : bool
+        Convert ``*CONSTRAINED_GLOBAL`` (a global constraint plane, Vol I R17
+        p.10-38) to ``/BCS``: the nodes within the row's TOL of the plane -
+        or ``1e-6 x`` the model extent where TOL is 0 - get the row's TC/RC
+        codes, UNIONED per node over all rows and with the deck's ``*NODE``
+        TC/RC cells, one ``/BCS`` per union code through the ``*NODE`` TC/RC
+        screens. **On by default.** The selection equals LS-DYNA's own d3hsp
+        'nodal spc summary' node for node on all three R14 carriers (305, 54
+        and 24737 nodes). A bad row (TC/RC outside 0-7, DIR not 1/2/3, TOL <
+        0) and a card from a transformed ``*INCLUDE_TRANSFORM`` are refused by
+        name; off, the keyword stays SKIPPED and its DOFs are free.
     shell_offset_gapmin : bool
         On a ``/INTER/TYPE7`` whose main side is SOLID segments only and
         whose secondary is SHELLS that LS-DYNA offsets by half their
@@ -996,6 +1008,7 @@ def convert(
         initial_void_floor=initial_void_floor,
         weld_exponents=weld_exponents,
         constrained_linear=constrained_linear,
+        constrained_global=constrained_global,
         shell_offset_gapmin=shell_offset_gapmin,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,

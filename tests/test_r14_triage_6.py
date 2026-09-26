@@ -2713,5 +2713,345 @@ class SolvinfoRemedyHint(unittest.TestCase):
         self.assertEqual(hits, ["common.py"])
 
 
+
+def _grid_ids():
+    """(x, y, z) -> node id on the 3 x 3 x 2 grid: z = 0 is 1-9, z = 1 is
+    10-18, x fastest."""
+    ids = {}
+    nid = 0
+    for z in (0, 1):
+        for y in (0, 1, 2):
+            for x in (0, 1, 2):
+                nid += 1
+                ids[(x, y, z)] = nid
+    return ids
+
+
+def _grid_deck(rows=((3, 0, 3, "0.0", "0.0", "0.0", "0.0"),
+                     (1, 0, 1, "0.0", "0.0", "0.0", "0.0")),
+               node_tc=None, mat="elastic", extra="", raw_rows=None,
+               zs=None) -> str:
+    """18 nodes on a 3 x 3 x 2 grid (x, y in {0, 1, 2}, z in {0, 1}), 4
+    hexes, one part, and one ``*CONSTRAINED_GLOBAL`` holding *rows*
+    (``TC RC DIR X Y Z TOL``) or the literal *raw_rows*. *node_tc* maps a node
+    id to its ``*NODE`` (TC, RC) cells; *zs* overrides node z coordinates."""
+    ids = _grid_ids()
+    node_tc = node_tc or {}
+    zs = zs or {}
+    nodes = "*NODE\n"
+    for (x, y, z), nid in sorted(ids.items(), key=lambda kv: kv[1]):
+        z = zs.get(nid, z)
+        nodes += f"{nid:>8}{x:>16.1f}{y:>16.1f}{z:>16.8g}"
+        if nid in node_tc:
+            tc, rc = node_tc[nid]
+            nodes += f"{tc:>8}{rc:>8}"
+        nodes += "\n"
+    hexes = "*ELEMENT_SOLID\n"
+    for eid, (i, j) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1)), start=1):
+        ring = [ids[(i, j, 0)], ids[(i + 1, j, 0)], ids[(i + 1, j + 1, 0)],
+                ids[(i, j + 1, 0)]]
+        ring += [ids[(i, j, 1)], ids[(i + 1, j, 1)], ids[(i + 1, j + 1, 1)],
+                 ids[(i, j + 1, 1)]]
+        hexes += f"{eid:>8}{1:>8}" + "".join(f"{n:>8}" for n in ring) + "\n"
+    mcard = ("*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+             if mat == "elastic" else
+             "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+             + _row("0.0", 0, 0) + "\n" + _row("0.0") + "\n")
+    body = (raw_rows if raw_rows is not None else
+            "".join(_row(*r) + "\n" for r in rows))
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row("1.0") + "\n"
+            + nodes + hexes
+            + "*PART\ngrid\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SOLID\n" + _row(1, 1) + "\n" + mcard
+            + ("*CONSTRAINED_GLOBAL\n" + body if body else "")
+            + extra + "*END\n")
+
+
+def _bcs_groups(starter: str):
+    """``{title: (codes, sorted node ids)}`` for every ``/BCS`` whose group is
+    a ``/GRNOD/NODE`` of this deck."""
+    lines = starter.splitlines()
+    grnod = {}
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^/GRNOD/NODE/(\d+)$", lines[i])
+        if m:
+            ids = []
+            j = i + 2
+            while (j < len(lines) and not lines[j].startswith("/")
+                   and not lines[j].startswith("#-")):
+                if not lines[j].startswith("#"):
+                    ids += [int(t) for t in lines[j].split()]
+                j += 1
+            grnod[int(m.group(1))] = ids
+            i = j
+            continue
+        i += 1
+    out = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/BCS/"):
+            data = lines[i + 3].split()
+            out[lines[i + 1]] = (" ".join(data[:2]),
+                                 sorted(grnod.get(int(data[-1]), [])))
+    return out
+
+
+_B5_HEAD = "*CONSTRAINED_GLOBAL: "
+
+
+class ConstrainedGlobalBcs(unittest.TestCase):
+    """B5: ``*CONSTRAINED_GLOBAL`` -> ``/BCS`` through the TC/RC union (default
+    ON, ``--no-constrained-global``). Expectations hand-derived on the grid:
+    extent 2 -> tol 2e-6; z = 0 is nodes 1-9, x = 0 is 1, 4, 7, 10, 13, 16."""
+
+    def test_1_two_planes_sharing_nodes_give_one_BCS_per_union_code(self):
+        res, starter, _e = _convert(_grid_deck())
+        groups = _bcs_groups(starter)
+        self.assertEqual(groups, {
+            "constrained_global_001_000": ("001 000", [2, 3, 5, 6, 8, 9]),
+            "constrained_global_100_000": ("100 000", [10, 13, 16]),
+            "constrained_global_101_000": ("101 000", [1, 4, 7]),
+        })
+        seen = [n for _c, ids in groups.values() for n in ids]
+        self.assertEqual(len(seen), len(set(seen)))   # no node in two /BCS
+        self.assertNotIn("#-- SKIPPED: *CONSTRAINED_GLOBAL", starter)
+        self.assertNotIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        self.assertIn("#-  BOUNDARY CONDITIONS (*CONSTRAINED_GLOBAL planes):",
+                      starter)
+        hit = [w for w in res.warnings if w.startswith(_B5_HEAD)]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("2 constraint plane(s)",
+                       "TC 3 RC 0 on z = 0 (9 node(s) within 2e-06)",
+                       "TC 1 RC 0 on x = 0 (6 node(s) within 2e-06)",
+                       "12 node(s) in 3 union code(s)",
+                       "Tra 101 Rot 000: 3", "WARNING 312",
+                       "1e-6 x the model extent (2,",
+                       "--no-constrained-global"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+
+    def test_2_the_tolerance_default_and_a_stated_TOL(self):
+        from k2rad.writer.loads import _resolve_constrained_globals
+        zs = {1: 0.0, 2: 1.5e-6, 3: 3e-6}          # extent stays 2
+        for tol, expect in (("0.0", [1, 2]), ("1.0E-05", [1, 2, 3])):
+            with self.subTest(tol=tol):
+                state = _dispatch(_grid_deck(
+                    rows=((3, 0, 3, "0.0", "0.0", "0.0", tol),), zs=zs))
+                _resolve_constrained_globals(state)
+                self.assertEqual(
+                    sorted(n for n in state.constrained_global_tc_rc
+                           if n in (1, 2, 3)), expect)
+        warns = _dispatch(_grid_deck(
+            rows=((3, 0, 3, "0.0", "0.0", "0.0", "-1.0"),))).warnings
+        self.assertTrue(_has(warns, "TOL=-1 < 0 has no meaning",
+                             "the row is NOT converted"))
+
+    def test_3_a_NODE_cell_is_unioned_and_keeps_the_old_title(self):
+        res, starter, _e = _convert(_grid_deck(node_tc={2: (2, 0)}))
+        groups = _bcs_groups(starter)
+        self.assertEqual(groups["node_tc_rc_011_000"], ("011 000", [2]))
+        self.assertEqual(groups["constrained_global_001_000"],
+                         ("001 000", [3, 5, 6, 8, 9]))
+        self.assertIn("#-  BOUNDARY CONDITIONS (*NODE TC/RC cells + "
+                      "*CONSTRAINED_GLOBAL planes):", starter)
+        node_w = [w for w in res.warnings if w.startswith("*NODE: ")]
+        glob_w = [w for w in res.warnings if w.startswith(_B5_HEAD)]
+        self.assertEqual(len(node_w), 1)
+        self.assertIn("*NODE: 1 node(s) state a constraint", node_w[0])
+        self.assertIn("TC=2 RC=0: 1 node(s)", node_w[0])
+        self.assertIn("12 node(s) in 4 union code(s)", glob_w[0])
+
+    def test_4_the_opt_out_is_the_pre_round_6_file(self):
+        from k2rad.handlers import HANDLERS
+        deck = _grid_deck()
+        res, s_off, e_off = _convert(deck, constrained_global=False)
+        self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        self.assertNotIn("CONSTRAINED_GLOBAL",
+                         [k for k, _r in res.recognized_not_emitted])
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_GLOBAL", s_off)
+        self.assertEqual(_bcs_groups(s_off), {})
+        self.assertTrue(_has(res.warnings, "NOT converted "
+                             "(--no-constrained-global)", "FREE"))
+        saved = HANDLERS.pop("CONSTRAINED_GLOBAL")
+        try:
+            _r, s_old, e_old = _convert(deck)
+        finally:
+            HANDLERS["CONSTRAINED_GLOBAL"] = saved
+        self.assertEqual(s_off, s_old)
+        self.assertEqual(e_off, e_old)
+
+    def test_4b_node_tc_rc_off_keeps_the_planes(self):
+        res, starter, _e = _convert(_grid_deck(node_tc={2: (2, 0)}),
+                                    node_tc_rc_bcs=False)
+        groups = _bcs_groups(starter)
+        self.assertEqual(groups["constrained_global_001_000"],
+                         ("001 000", [2, 3, 5, 6, 8, 9]))
+        self.assertNotIn("node_tc_rc_011_000", groups)
+        self.assertTrue(_has(res.warnings, "--no-node-tc-rc-bcs",
+                             "FREE in the converted model"))
+
+    def test_5_a_rigid_member_is_re_pointed_onto_its_main_node(self):
+        res, starter, _e = _convert(_grid_deck(mat="rigid"))
+        groups = _bcs_groups(starter)
+        self.assertEqual(len(groups), 1, groups)
+        (title, (codes, ids)), = groups.items()
+        self.assertEqual((title, codes), ("constrained_global_101_000",
+                                          "101 000"))
+        self.assertEqual(len(ids), 1)
+        self.assertNotIn(ids[0], range(1, 19))       # the /RBODY main node
+        self.assertTrue(_has(res.warnings, _B5_HEAD, "12 node(s)",
+                             "RE-POINTED onto its /RBODY main node"))
+
+    def test_6_bad_rows_are_refused_by_name(self):
+        bad = ((3, 0, 4, "0.0", "0.0", "0.0", "0.0"),
+               (8, 0, 3, "0.0", "0.0", "0.0", "0.0"),
+               (3, 0, 3, "0.0", "0.0", "0.0", "-1.0"))
+        res, s_bad, e_bad = _convert(_grid_deck(rows=bad))
+        for needle in ("DIR=4 is not 1, 2 or 3",
+                       "TC=8 is not a Vol I R17 p.10-38 code",
+                       "TOL=-1 < 0"):
+            with self.subTest(needle=needle):
+                self.assertTrue(_has(res.warnings, needle,
+                                     "the row is NOT converted"))
+        self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        _r, s_off, e_off = _convert(_grid_deck(rows=bad),
+                                    constrained_global=False)
+        self.assertEqual(s_bad, s_off)        # refused == the opt-out arm
+        self.assertEqual(e_bad, e_off)
+        res, starter, _e = _convert(_grid_deck(
+            rows=bad[:2] + ((3, 0, 3, "0.0", "0.0", "0.0", "0.0"),)))
+        self.assertEqual(_bcs_groups(starter), {
+            "constrained_global_001_000": ("001 000", list(range(1, 10)))})
+        self.assertEqual(sum("the row is NOT converted" in w
+                             for w in res.warnings), 2)
+
+    def test_6b_a_plane_that_selects_nothing_is_the_skipped_arm(self):
+        res, starter, _e = _convert(_grid_deck(
+            rows=((3, 0, 3, "0.0", "0.0", "5.0", "0.0"),)))
+        self.assertEqual(_bcs_groups(starter), {})
+        self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_GLOBAL", starter)
+        self.assertTrue(_has(res.warnings, "passes within its tolerance of "
+                             "any node", "NOTHING is converted"))
+
+    def test_8_the_registries(self):
+        from k2rad.handlers import HANDLERS
+        from k2rad.assembly import _NO_ID_KEYWORDS, _POINT_BEARING
+        self.assertIn("CONSTRAINED_GLOBAL", HANDLERS)
+        self.assertIn("CONSTRAINED_GLOBAL", _NO_ID_KEYWORDS)
+        # refused under a transform instead (the handler), so not "moved"
+        self.assertNotIn("CONSTRAINED_GLOBAL", _POINT_BEARING)
+
+    def test_8b_a_card_inside_a_transformed_include_is_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = _grid_deck().replace("*KEYWORD\n", "*KEYWORD\n", 1)
+        with open(os.path.join(tmp.name, "child.k"), "w") as fh:
+            fh.write(child.replace("*CONTROL_TERMINATION\n"
+                                   + _row("1.0") + "\n", ""))
+        main = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row("1.0") + "\n"
+                "*DEFINE_TRANSFORMATION\n" + _row(1) + "\n"
+                + f"{'TRANSL':<10}" + "".join(f"{v:>10}" for v in
+                                               ("0.0", "0.0", "5.0")) + "\n"
+                "*INCLUDE_TRANSFORM\nchild.k\n\n\n\n" + _row(1) + "\n*END\n")
+        path = os.path.join(tmp.name, "main.k")
+        with open(path, "w") as fh:
+            fh.write(main)
+        res = convert(path, write_log=False)
+        self.assertTrue(_has(res.warnings, "inside a geometrically "
+                             "transformed *INCLUDE_TRANSFORM", "NOT converted"))
+        self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        with open(res.starter_path) as fh:
+            self.assertEqual(_bcs_groups(fh.read()), {})
+
+    def test_9_comment_rows_between_data_rows(self):
+        raw = (_row(3, 0, 3, "0.0", "0.0", "0.0", "0.0") + "\n$\n"
+               "$--- a comment between the rows\n$\n"
+               + _row(1, 0, 1, "0.0", "0.0", "0.0", "0.0") + "\n")
+        state = _dispatch(_grid_deck(raw_rows=raw))
+        self.assertEqual(len(state.constrained_globals), 2)
+        _res, starter, _e = _convert(_grid_deck(raw_rows=raw))
+        self.assertIn("constrained_global_100_000", _bcs_groups(starter))
+
+    def test_the_MPC_refusal_sees_a_GLOBAL_BCS(self):
+        """A5 x B5: a /BCS from a plane on the MPC's DOF refuses the card,
+        naming its source (grep every consumer of a new producer)."""
+        extra = ("*CONSTRAINED_LINEAR_GLOBAL\n" + _row(1) + "\n"
+                 + _row(2, 3, "1.0") + "\n" + _row(11, 3, "-1.0") + "\n")
+        res, starter, _e = _convert(_grid_deck(extra=extra))
+        self.assertNotIn("/MPC/", starter)
+        self.assertTrue(_has(res.warnings, "NOT converted to /MPC",
+                             "node 2 DOF 3 already carries "
+                             "*CONSTRAINED_GLOBAL /BCS"))
+
+    def test_the_rbody_WARNING_312_note_sees_a_GLOBAL_BCS(self):
+        """The shell-to-solid tie's WARNING-312 pre-warning reads the node
+        set of every /BCS producer; its fibre on a plane must be named, with
+        the plane named as the source - and without the plane, nothing."""
+        pts = {1: (0, 0, 0), 2: (10, 0, 0), 3: (10, 10, 0), 4: (0, 10, 0),
+               11: (0, 0, 10), 12: (10, 0, 10), 13: (10, 10, 10),
+               14: (0, 10, 10), 5: (0, 0, 20), 6: (10, 0, 20),
+               7: (10, 10, 20)}
+
+        def deck(plane):
+            return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+                    "*NODE\n" + "".join(
+                        f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                        for i, (x, y, z) in sorted(pts.items()))
+                    + "*ELEMENT_SOLID\n"
+                    + _row(1, 2, 1, 2, 3, 4, 11, 12, 13, 14) + "\n"
+                    "*ELEMENT_SHELL\n" + _row(2, 1, 5, 6, 7, 7) + "\n"
+                    "*PART\nshell\n" + _row(1, 1, 1) + "\n"
+                    "*PART\nbrick\n" + _row(2, 2, 1) + "\n"
+                    "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                    + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+                    "*SECTION_SOLID\n" + _row(2, 1) + "\n"
+                    "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                    "*SET_NODE_LIST\n" + _row(9) + "\n" + _row(1, 2, 3) + "\n"
+                    "*CONSTRAINED_SHELL_TO_SOLID\n" + _row(5, 9) + "\n"
+                    + ("*CONSTRAINED_GLOBAL\n"
+                       + _row(3, 0, 3, "0.0", "0.0", "0.0", "0.0") + "\n"
+                       if plane else "")
+                    + "*END\n")
+        res, _s, _e = _convert(deck(True))
+        self.assertTrue(_has(res.warnings, "also carry a /BCS from *NODE "
+                             "TC/RC, *CONSTRAINED_GLOBAL or *BOUNDARY_SPC_*",
+                             "WARNING ID 312"))
+        res, _s, _e = _convert(deck(False))
+        self.assertFalse(_has(res.warnings, "WARNING ID 312 INCOMPATIBLE"))
+
+    _F = "F:/dynaexamples_r14_ton-mm-s"
+
+    @unittest.skipUnless(os.path.isdir("F:/dynaexamples_r14_ton-mm-s"),
+                         "the R14 corpus on F: is not mounted")
+    def test_7_the_corpus_carriers_select_LS_DYNAs_own_nodes(self):
+        """Read-only: converted from F: into a temp dir. LS-DYNA's own d3hsp
+        'nodal spc summary' lists ids 1-305 on the ex_27 twin and 36 x
+        001/111 + 18 x 111/111 on metal-cutting."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ex27 = os.path.join(self._F, "introduction", "Introduction",
+                            "example-27", "ex_27_solid_elform_2_rigidwall_"
+                            "constrained_nodes_implicit.k")
+        res = convert(ex27, output_stem=os.path.join(tmp.name, "e27"),
+                      write_log=False)
+        with open(res.starter_path) as fh:
+            groups = _bcs_groups(fh.read())
+        self.assertEqual({t: g for t, g in groups.items()
+                          if t.startswith("constrained_global")},
+                         {"constrained_global_001_000":
+                          ("001 000", list(range(1, 306)))})
+        self.assertIn("inert_probe_fix", groups)      # the implicit probe
+        mc = os.path.join(self._F, "efg", "metal-cutting", "main.k")
+        res = convert(mc, output_stem=os.path.join(tmp.name, "mc"),
+                      write_log=False)
+        with open(res.starter_path) as fh:
+            groups = _bcs_groups(fh.read())
+        self.assertEqual({t: (c, len(ids)) for t, (c, ids) in groups.items()
+                          if t.startswith("constrained_global")},
+                         {"constrained_global_001_111": ("001 111", 36),
+                          "constrained_global_111_111": ("111 111", 18)})
+
+
 if __name__ == "__main__":
     unittest.main()

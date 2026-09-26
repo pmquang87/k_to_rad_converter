@@ -850,6 +850,27 @@ class ConstrainedLinear:
     terms: List[Tuple[int, int, int, float]] = field(default_factory=list)
 
 
+@dataclass
+class ConstrainedGlobal:
+    """One row of ``*CONSTRAINED_GLOBAL`` - a global constraint plane (R14
+    triage round 6, B5; written through the ``*NODE`` TC/RC ``/BCS`` pass).
+
+    Card 1 (Vol I R17 p.10-38/39): ``TC RC DIR X Y Z TOL``. TC / RC are the
+    ``*NODE`` constraint codes 0-7 in the GLOBAL system; DIR 1/2/3 is the
+    plane's NORMAL along global x/y/z (no default); X/Y/Z a point on the
+    plane; TOL "User-defined tolerance in length units. If non-zero, the
+    internal mesh-size dependent tolerance gets replaced by this value". A
+    block may state several rows and LS-DYNA reads all of them.
+    """
+    tc: int
+    rc: int
+    dir: int
+    x: float
+    y: float
+    z: float
+    tol: float
+
+
 #: LS-DYNA *CONSTRAINED_JOINT_<KIND> → the /PROP/TYPE45 ``Type`` integer.
 #: Verified against prop_p45_kjoint2.cfg lines 261-272 (1 Spherical, 2 Revolute,
 #: 3 Cylindrical, 4 Planar, 5 Universal, 6 Translational, 7 Oldham, 8 Fixed,
@@ -7294,6 +7315,27 @@ class ConvertOptions:
     # ERROR -> NORMAL in 92 cycles at IE -99.87 % (a status-only promotion).
     # OFF restores Itol 2 / Toli 0.01.
     zero_tolerance_ectol: bool = True
+    # --no-constrained-global: leave *CONSTRAINED_GLOBAL unconverted (the
+    # keyword stays in the SKIPPED list, byte-identical to the pre-round-6
+    # file) (R14 triage round 6, B5).
+    #
+    # ON by default. Vol I R17 p.10-38/39: a global constraint plane whose
+    # nodes are "held fixed in time" in the row's TC/RC codes; DIR picks the
+    # global axis normal to the plane. k2rad selects the nodes within the
+    # row's TOL of the plane - or, where TOL is 0 (LS-DYNA's "internal
+    # mesh-size dependent tolerance"), within 1e-6 x the model extent (the
+    # largest side of the bounding box of the deck's own nodes) - ORs every
+    # row's codes per node, unions them with the deck's *NODE TC/RC cells and
+    # writes ONE /BCS per union code through the same four screens
+    # (writer/loads._make_node_tc_rc_bcs): one /BCS per plane gave starter
+    # WARNING 312 on the shared nodes. The selection equals LS-DYNA's own
+    # d3hsp 'nodal spc summary' NODE FOR NODE on all three R14 carriers
+    # (ex_27 constrained twin 305; efg/metal-cutting/main.k 54 = 36 x 001/111
+    # + 18 x 111/111; ale_wavehitcol 24737 in 7 codes). Reach: 3 deck keys on
+    # 3 emitted models. A row with TC/RC outside 0-7, DIR not 1/2/3 or TOL < 0
+    # is refused by name; a card inside a geometrically transformed
+    # *INCLUDE_TRANSFORM is refused (its plane point would not be moved).
+    constrained_global: bool = True
     # --implicit-constant-step: cap the implicit step at the deck's own DT0
     # (/IMPL/DT/STOP DT_MAX := DT0) where LS-DYNA runs a CONSTANT step (R14
     # triage round 6, B3).
@@ -8951,6 +8993,23 @@ class ConversionState:
     # #-- SKIPPED: line and the deck stays byte-identical to the opt-out arm.
     constrained_linears: List["ConstrainedLinear"] = field(
         default_factory=list)
+    # *CONSTRAINED_GLOBAL rows (round 6, B5; default ON,
+    # --no-constrained-global). The handler records the valid rows; the
+    # build_starter prepass writer/loads._resolve_constrained_globals selects
+    # the nodes within each row's tolerance and ORs the codes into
+    # `constrained_global_tc_rc` - its OWN provenance map, unioned with the
+    # *NODE cells inside _make_node_tc_rc_bcs (so --no-node-tc-rc-bcs does not
+    # silently drop the planes, and the *NODE announcement does not count
+    # them). `constrained_global_rows` keeps (row, tolerance used, nodes
+    # selected) for the announcement; `constrained_global_extent` the
+    # bounding-box side the default tolerance was taken from.
+    constrained_globals: List["ConstrainedGlobal"] = field(
+        default_factory=list)
+    constrained_global_tc_rc: Dict[int, Tuple[int, int]] = field(
+        default_factory=dict)
+    constrained_global_rows: List[Tuple["ConstrainedGlobal", float, int]] = (
+        field(default_factory=list))
+    constrained_global_extent: float = 0.0
     # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
     hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)
     # (cluster_id, title) of each emitted /CLUSTER/BRICK — set by the writer's
@@ -9088,7 +9147,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791, :1210, :1318, :1504, :1657, in that order:
+    # (writer/rbody.py:791, :1210, :1318, :1507, :1664, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
