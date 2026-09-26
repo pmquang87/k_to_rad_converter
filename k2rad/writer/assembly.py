@@ -749,7 +749,7 @@ def _constant_step_body(state: ConversionState) -> str:
                        "makes it march in adaptive steps instead.")
     lead = (f"LS-DYNA holds every implicit step at DT0 = {dt0:g} of "
             f"*CONTROL_IMPLICIT_GENERAL ({round(end / dt0)} steps to ENDTIM = "
-            f"{end:g}; p.12-322 Remark 2: the step changes only when "
+            f"{end:g}; p.12-323 Remark 2: the step changes only when "
             "automatic control is active - every R14 reference d3hsp of this "
             "class echoes 'time step control method 0'). k2rad writes "
             f"/IMPL/DTINI {dtini:g} and {written}")
@@ -997,7 +997,11 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "ex_14_solid_elform_2 internal-energy history error 10.56 % -> "
         "2.93 % - but WORSE against the references of a DIFFERENT LS-DYNA "
         "element than the one k2rad emits (ex_14_solid_elform_-1/-2/1, ex_15 "
-        "_3/_5). On the quasi-static decks, whose all-zero tolerances now get "
+        "_3/_5). Those history errors are an RMS in % of the reference's "
+        "peak; the END state at matched time reads differently - on "
+        "ex_15_thick_shell_elform_2 the cap trades internal energy +36.2 % -> "
+        "-54.8 % for kinetic energy +132.0 % -> +0.5 %. On the quasi-static "
+        "decks, whose all-zero tolerances now get "
         "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles "
         "and buys nothing: tensile2 75 -> 168 cycles with internal energy "
         "-0.54 % -> -4.36 % against its reference, 4.2.frf.cant-1 70 -> 134 "
@@ -1062,8 +1066,10 @@ def _warn_implicit_dynamic_initial_velocity(state: ConversionState, imass: int,
         "the wall - with the contact deleted, with no wall at all, and with "
         "/INIVEL/AXIS or /INIVEL/TRA alike. With the deck's own first step the "
         "first increment does not converge, every cut-back restarts from the "
-        "corrupted state and the run stops at TIMESTEP LIMIT (cycle 1 / cycle "
-        "3 on the pair). A smaller /IMPL/DTINI is therefore NOT a fix: it "
+        "corrupted state and the run stops at TIMESTEP LIMIT (on the pair at "
+        "nt 4 and nt 2: cycle 3 on the penalty twin, cycle 0 on the "
+        "constrained twin with its *CONSTRAINED_GLOBAL plane converted). A "
+        "smaller /IMPL/DTINI is therefore NOT a fix: it "
         "trades the error termination for a completed run with the wrong "
         "velocity. Run this model EXPLICIT until the engine is fixed "
         "upstream. " + _SOLVINFO_HINT)
@@ -1161,9 +1167,13 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # LS-DYNA's own ECTOL default, Itol 1 / Toli 0.01 (round 6, B1; default
     # ON, --no-zero-tolerance-ectol): every R14 reference d3hsp of that shape
     # echoes DCTOL 0.001 / ECTOL 0.01 / RCTOL 0.999e11 - LS-DYNA applies its
-    # defaults to the stated zeros. L_A is NOT touched (the documented 2
-    # above; L_A 11 = LS-DYNA's ILIMIT default was measured and is not
-    # better). A NEGATIVE cell is a tolerance CURVE id (Vol I R17 p.12-355
+    # defaults to the stated zeros. L_A is NOT touched: the rule is scoped to
+    # the tolerance cell and the documented rigid-contact 2 above stays.
+    # L_A 11 (LS-DYNA's ILIMIT default) was measured beside it at nt 4 and 2
+    # and is MIXED, not better or worse: closer to LS-DYNA on 4 of the 11
+    # carriers (tensile2, 6.5.tbl.psd, doorbeam, rigid_tip), farther on 4
+    # (4.2.frf, ellipse, aellipse, ie_shell), identical on 3, at up to 1.8x
+    # the cycles. A NEGATIVE cell is a tolerance CURVE id (Vol I R17 p.12-355
     # "LT.0: -XCTOL references a curve"), not a stated zero: it keeps the
     # force default and is named as dropped (reach 0 of the 112 parsed
     # roster cards). A deck with NO card keeps "2 2 0.01" - its one roster

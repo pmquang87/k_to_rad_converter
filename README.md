@@ -5279,8 +5279,11 @@ default**, `--no-zero-tolerance-ectol` keeps Itol 2). The keyword's header
 that way: every one of the **11** R14 reference `d3hsp` files of this shape
 echoes `displacement convergence tolerance 0.1000E-02`, `energy convergence
 tolerance 0.1000E-01` and `residual convergence tolerance 0.9990E+11` — the
-p.12-354 defaults DCTOL 0.001 / ECTOL 0.01 / RCTOL 1e10. `L_A` is unchanged
-(LS-DYNA's `ILIMIT` default 11 was measured and is not better); DCTOL is not
+p.12-354 defaults DCTOL 0.001 / ECTOL 0.01 / RCTOL 1e10. `L_A` is unchanged —
+the rule is scoped to the tolerance cell and the documented rigid-contact
+`L_A 2` stays (LS-DYNA's `ILIMIT` default 11 was measured beside it and is
+MIXED: closer to the reference on 4 of the 11 carriers, farther on 4,
+identical on 3, at up to 1.8× the cycles); DCTOL is not
 carried, because LS-DYNA's `DNORM 2` measures the TOTAL displacement and no
 `/IMPL/NONLIN` Itol offers that norm (`nl_solv.F:410-421` is per step — the
 combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
@@ -6169,7 +6172,7 @@ card's velocity with `omega` 0.
 Vol I R17 p.12-277 defines `*CONTROL_IMPLICIT_AUTO` `IAUTO EQ.0` as
 *"Constant time step size"* — the card's DEFAULT — so an implicit deck that
 states IAUTO 0, **or no `*CONTROL_IMPLICIT_AUTO` at all**, runs LS-DYNA at a
-constant step DT0 (p.12-322 Remark 2: the step changes only when automatic
+constant step DT0 (p.12-323 Remark 2: the step changes only when automatic
 control is active; every R14 reference `d3hsp` of the class echoes `time step
 control method 0`). k2rad writes `/IMPL/DT/2` — AUTOMATIC step control — on
 every implicit deck, so the converted deck grows the step above DT0 on easy
@@ -6201,7 +6204,7 @@ MEASURED at `nt` 4 = `nt` 2 (cycles and steps):
 
 | deck | arm | cycles | result against the LS-DYNA reference |
 |---|---|---|---|
-| `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 % |
+| `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 %; the END state at matched time trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 % |
 | `ex_14_solid_elform_2` | shipped → cap | 34 → 201 (5.91×) | IE history RMS 10.56 → 2.93 % against the ELFORM-2 reference; WORSE against the references of ELFORM −1 / −2 / 1 |
 | `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; end-of-run KE −2.39 → −15.87 % (campaign `match` → deviation) |
 | `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | IE −0.54 → −4.36 % |

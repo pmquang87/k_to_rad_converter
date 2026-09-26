@@ -28,8 +28,14 @@ Prior history (before this changelog was introduced) is summarized in the
     0.1000E-02`, `energy convergence tolerance 0.1000E-01` and `residual
     convergence tolerance 0.9990E+11` (`tensile2.d3hsp:1120-1127`). The
     stated-zero card now writes LS-DYNA's ENERGY criterion, Itol 1 / Toli 0.01;
-    `L_A` is unchanged (LS-DYNA's `ILIMIT` default 11 was measured and is not
-    better: tensile2 −0.47 % vs −0.54 %, doorbeam +536.96 % vs +582.00 %);
+    `L_A` is unchanged — the rule is scoped to the tolerance cell and the
+    documented rigid-contact `L_A 2` stays; LS-DYNA's `ILIMIT` default 11 was
+    measured beside it (nt 4 and 2) and is MIXED: closer to the reference on 4
+    of the 11 carriers (tensile2 −0.47 % vs −0.54 %, 6.5.tbl.psd −0.33 % vs
+    −0.50 %, doorbeam +536.96 % vs +582.00 %, rigid_tip −0.49 % vs −0.75 %),
+    farther on 4 (4.2.frf −0.62 % vs −0.60 %, ellipse −18.65 % vs −18.16 %,
+    aellipse −19.14 % vs −18.66 %, ie_shell −99.95 % vs −99.87 %), identical on
+    3, at up to 1.8× the cycles (6.5.tbl.psd 18 vs 10);
     DCTOL is not carried (LS-DYNA's `DNORM 2` is a TOTAL-displacement norm,
     `nl_solv.F:410-421` is per step, and the combined Itol 13 ended 3 of 3
     NORMAL quasi-static decks in ERROR). A NEGATIVE cell is a tolerance CURVE
@@ -108,7 +114,10 @@ Prior history (before this changelog was introduced) is summarized in the
     deleted-card arm was IDTC 0, a halving ratchet. **Reach with the flag 33
     deck keys on 22 emitted models (`_0001.rad`, one cell); 0 default
     movers.** MEASURED (nt 4 = nt 2 in cycles and steps): ex_15 energy error
-    +74.1 % → −0.9 % at 3.81× the cycles; ex_14_solid_elform_2 IE history
+    +74.1 % → −0.9 % at 3.81× the cycles (its END state at matched time
+    trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 %; the history RMS figures
+    are in % of the reference's peak — added in the finalization round);
+    ex_14_solid_elform_2 IE history
     RMS 10.56 → 2.93 % against its own element's reference but WORSE against
     the references of a DIFFERENT LS-DYNA element (ex_14 −1 / −2 / 1, ex_15
     3 / 5); ex_11 KE history RMS 16.07 → 1.16 % at 2.86×. On the
@@ -130,7 +139,9 @@ Prior history (before this changelog was introduced) is summarized in the
     at `/IMPL/DTINI` 1e-8: Z-momentum −2.099317 → +6.297951, KE × 9.00000,
     NORMAL TERMINATION with the bar flying away from the wall — with no wall,
     no contact, and either `/INIVEL` card), so the run either diverges (the
-    shipped first step: TIMESTEP LIMIT at cycle 1 / 3) or completes with the
+    shipped first step: TIMESTEP LIMIT at cycle 3 on the penalty twin and at
+    cycle 0 on the constrained twin once B5 converts its `*CONSTRAINED_GLOBAL`
+    plane — cycle 1 before; nt 4 = nt 2) or completes with the
     wrong velocity; the warning says so, points to an explicit run, and cites
     no source line as the cause (it is not isolated). No small-DTINI "fix"
     ships. Reach **2 deck keys on 2 emitted models** (the `ex_27` twins; the

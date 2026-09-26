@@ -2868,9 +2868,15 @@ class ImplicitDynamicInitialVelocityDefect(unittest.TestCase):
                        "/IMPL/DYNA/2 0.5 0.25", "-3.0000000",
                        "kinetic energy x 9.00000", "Run this model EXPLICIT",
                        "A smaller /IMPL/DTINI is therefore NOT a fix",
-                       "/IMPL/NONLIN/SOLVINFO"):
+                       "/IMPL/NONLIN/SOLVINFO",
+                       # finalization round: the combined B4 x B5 arm - the
+                       # constrained twin now dies at cycle 0, not cycle 1
+                       "cycle 3 on the penalty twin, cycle 0 on the "
+                       "constrained twin with its *CONSTRAINED_GLOBAL plane "
+                       "converted"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
+        self.assertNotIn("cycle 1 / cycle 3", hits[0])
 
     def test_not_one_byte_moves(self):
         """Both .rad files against the same deck with the warning stubbed
@@ -3770,6 +3776,12 @@ _RETRACTED_ROUND_6_B = (
     "ONE walk shared by ``_resolve_contact_slave``, ``_tied_slave_nids``",
     # B5: rule (a) re-points, it does not drop
     "whose members rule (a) drops from the TC/RC set anyway",
+    # finalization round: *CONTROL_IMPLICIT_GENERAL Remark 2 (DT0) is printed
+    # on p.12-323, not p.12-322
+    "p.12-322 Remark 2",
+    # finalization round, B1: L_A 11 was measured MIXED (4 closer / 4
+    # farther / 3 identical), not "not better"
+    "was measured and is not better",
 )
 
 
@@ -3815,6 +3827,22 @@ class Round6RetractedStatementsB(unittest.TestCase):
             ("README.md", "--implicit-constant-step"),
             ("README.md", "--no-constrained-global"),
             ("README.md", "--no-zero-tolerance-ectol"),
+            ("k2rad/writer/contacts.py", "can still trip on a floating-point "
+             "tie and print WARNING 94 - informational, the gap is used as "
+             "written"),
+            ("README.md", "a spelling with any other option suffix"),
+            ("k2rad/writer/assembly.py", "p.12-323 Remark 2: the step "
+             "changes only when"),
+            ("README.md", "p.12-323 Remark 2: the step changes only when"),
+            ("k2rad/writer/assembly.py", "and is MIXED, not better or worse: "
+             "closer to LS-DYNA on 4 of the 11"),
+            ("README.md", "is MIXED: closer to the reference on 4 of the 11 "
+             "carriers, farther on 4"),
+            ("k2rad/writer/assembly.py", "on ex_15_thick_shell_elform_2 the "
+             "cap trades internal energy +36.2 % -> -54.8 % for kinetic "
+             "energy +132.0 % -> +0.5 %"),
+            ("README.md", "the END state at matched time trades IE +36.2 → "
+             "−54.8 % for KE +132.0 → +0.5 %"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

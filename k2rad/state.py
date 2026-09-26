@@ -7371,7 +7371,9 @@ class ConvertOptions:
     # iterations (:141-150). A PIN (DT_MIN = DT0) ended 3 of 3 NORMAL
     # quasi-static decks in ERROR and is not offered; /IMPL/DT/1 alone is a
     # slower adaptive control; L_dtn 165 worsened tensile2. MEASURED at nt 4 =
-    # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles; ex_11 KE
+    # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles (its END
+    # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
+    # +0.5 %); ex_11 KE
     # history error 16.07 % -> 1.16 % at 2.86x, but its campaign match turns
     # deviation under the end-of-run scorer (an artefact of the unprinted last
     # increment); with the default --zero-tolerance-ectol it costs cycles on
