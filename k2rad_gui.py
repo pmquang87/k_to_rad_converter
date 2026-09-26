@@ -924,8 +924,9 @@ class ConverterGUI:
         self._derived_gapmin_entry.pack(side="left", padx=3)
         ttk.Label(fc, text="OFF by default; a warning names the starter-derived GAP MIN either way. "
                            "Gapmin = factor × the smallest main-surface segment side (ceiling 0.5 ×). "
-                           "twobar: the starter's own gap is +1151 % vs its LS reference, 0.005 is -5.6 % — "
-                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 8 of the class's "
+                           "No gap value has promoted a campaign verdict (twobar's end value moves, "
+                           "its history does not; sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles); "
+                           "cycles grow as ~1/Gapmin below a deck-specific knee, and 8 of the class's "
                            "15 R14-roster interfaces are unmeasured.",
                   foreground="gray").grid(row=22, column=1, columnspan=2, sticky="w", padx=6)
 

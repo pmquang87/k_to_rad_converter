@@ -1258,6 +1258,17 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
     return value, True
 
 
+#: The measured cost of a smaller Gapmin (R14 triage round 6, the 16-arm gap
+#: sweep, cycle ratios base-paired). ONE constant so the warning and its
+#: documentation cannot drift; the contact-step line was read in the engine.
+_GAPMIN_COST_LAW = (
+    "below a deck-specific knee the cycle count grows as ~1/Gapmin - "
+    "twobar 2.17x at 0.02 and 7.71x at 0.005, sphere1 3.45x at 0.05 and "
+    "5.48x at 0.02 - because the contact step is 1/2 (GAPV - PENE)/v "
+    "(i7for3.F:762-770), and on a developing contact the cost grows with "
+    "time (hemi at 0.7322: 0.92x at t 0.4158, 1.48x at t 0.8049)")
+
+
 def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
                           gapmin: float, main_sid: int, main_styp: int,
                           interference: bool = False,
@@ -1269,10 +1280,12 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     ``0.1 x min main-surface edge`` itself, and LS-DYNA's own offset on a solid
     segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17 p.11-101 default
     table, p.11-103; ``SAST``/``SBST`` apply to shells and beams only, p.11-33).
-    The FLAG is off by default because the seven interfaces of the class
-    that now HAVE a measured arm disagree with each other (1 better, 3 worse,
-    2 byte-inert, 1 mixed), and 8 of the 15 are still unjudgeable — see
-    ``ConvertOptions.derived_gapmin``.
+    The FLAG is off by default because two rounds of arms - round 6 alone
+    ran 16 gap values on twobar, hemi, sphere1 and bend - found ZERO campaign
+    verdict promotions — on the seven measured interfaces twobar's end value
+    moves while its history does not — and 8 of the 15 (the class before
+    round 6's shell-offset Gapmin took bend's interface) are still
+    unjudgeable — see ``ConvertOptions.derived_gapmin``.
 
     *force* writes the value even with the flag off. Its ONE caller is the
     interface ``--implicit-rigid-secondary-swap`` creates: that swap is made
@@ -1314,15 +1327,15 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         f"{state.options.derived_gapmin_factor:g} x <min edge> on interfaces "
         "like this one (--derived-gapmin-factor F to tune, --inter-gapmin "
         f"{inter_id}=VAL for this one interface). It is OFF by default because "
-        "it is not uniformly good: on sphere1 the same factor writes 0.02921 "
-        "and moves internal energy from -1.66 % to -7.77 % at 4.1x the cycles, "
-        "and of the class's 15 interfaces on the R14 roster 7 now have a "
-        "measured arm and 8 are still UNJUDGEABLE. Of the 7: twobar improves "
-        "(+1151 % -> -5.60 %), sphere1 and bend degrade, 4.3_General_"
-        "Nonlinearity's energy error improves while its internal energy gets "
-        "worse, pend.imp and 06_heating_plate are byte-inert, and hemi pays "
-        "+47.9 % CYCLES to reach the same time. That is 1 better, 3 worse, 2 "
-        "inert, 1 mixed -- not a default.")
+        "two rounds of arms - round 6 alone ran 16 gap values on twobar, hemi, "
+        "sphere1 and bend - found ZERO campaign verdict promotions: of the "
+        "class's 15 interfaces on the R14 roster (counted before round 6's "
+        "shell-offset Gapmin took bend's) 7 now have a measured arm and 8 are "
+        "still UNJUDGEABLE, and among the 7 twobar's end value moves while its "
+        "history does not, sphere1 (the class's only match) goes -1.66 % -> "
+        "-7.77 % at 4.1x the cycles at 0.02921, bend degrades, "
+        "4.3_General_Nonlinearity is mixed, pend.imp and 06_heating_plate are "
+        "byte-inert. THE COST LAW: " + _GAPMIN_COST_LAW + ".")
     state.warn(
         f"/INTER/TYPE7 {inter_id}: the main surface is SOLID segments only and "
         "no Gapmin is stated, so the OpenRadioss starter derives one itself - "
@@ -1334,10 +1347,14 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         "unless SLDTHK > 0 is stated (Vol I R17 p.11-101 default 0.0, p.11-103; "
         "SAST/SBST apply to shells and beams only, p.11-33) - this deck states "
         "none. MEASURED on intro-by-k.-weimar/contact/twobars/twobar.k (10 mm "
-        "bars, derived GAP MIN 1.0): the derived gap gives internal energy "
-        "37 990 against the LS-DYNA reference 3036.17 (+1151 %), where an "
-        "explicit 0.05 mm gives 2 866 (-5.6 %) and KE 1.127e5 against 1.20123e5 "
-        f"(-6.2 %). {flag_note}")
+        "bars, derived GAP MIN 1.0): the derived gap ENDS at internal energy "
+        "37 990 against the LS-DYNA reference 3036.17 (+1151 %). A smaller "
+        "stated gap moves that end value, not the answer: twobar's END value "
+        "moves (0.05 mm ends at -5.60 %) but its history does not - -91 % at "
+        "the first impact (t 3e-4, where the starter's own gap reads +1 %) - "
+        "and its engine energy error stays -7.1 to -8.2 % at every gap from "
+        "0.1 down to 0.005 mm, so no gap value brings this deck inside the "
+        f"campaign's bands. {flag_note}")
     if interference or not (state.options.derived_gapmin or force):
         return gapmin
     factor = state.options.derived_gapmin_factor

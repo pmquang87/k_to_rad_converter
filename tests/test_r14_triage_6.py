@@ -3298,5 +3298,281 @@ class SpotweldOptInPair(unittest.TestCase):
         self.assertIn("since R14 triage round 6 - ``_tied_slave_nids``", doc)
 
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B: wiring and the retracted statements
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Round6FlagWiringB(unittest.TestCase):
+    """Every new Part-B lever reaches the parser, the API, the GUI and the
+    README (the round-5 ``Round5FlagWiring`` checks, for this part's list)."""
+
+    #: default-ON opt-outs (README and the GUI summary carry the --no- form)
+    _FLAGS = {
+        "--zero-tolerance-ectol": "zero_tolerance_ectol",
+        "--constrained-global": "constrained_global",
+    }
+    #: opt-in levers, each with its OWN README heading
+    _OPT_IN_FLAGS = {
+        "--implicit-constant-step": "implicit_constant_step",
+        "--spotweld-node-synthesis": "spotweld_node_synthesis",
+        "--beam-contact-secondary": "beam_contact_secondary",
+    }
+    _HELP_FIGURES = {
+        "--zero-tolerance-ectol": ("+7.36 % -> -0.54 %", "+582.00 %",
+                                   "-99.87 %", "p.12-354"),
+        "--constrained-global": ("305, 54, 24737 nodes", "p.10-38"),
+        "--implicit-constant-step": ("+74.1 % -> -0.9 %", "3.81x",
+                                     "16.07 % -> 1.16 %", "75 -> 168",
+                                     "-0.54 % -> -4.36 %",
+                                     "33 R14 deck keys on 22 emitted models"),
+        "--spotweld-node-synthesis": ("7.64x", "+82.0 %", "p.19-3"),
+        "--beam-contact-secondary": ("4 R14 deck keys on 4 emitted models",),
+        "--derived-gapmin": ("-91 %", "ZERO campaign verdict promotions",
+                             "i7for3.F:762-770"),
+    }
+
+    def _readme(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_flag_is_a_parser_option(self):
+        from k2rad import cli
+        opts = {s for a in cli.build_parser()._actions
+                for s in a.option_strings}
+        for flag in self._FLAGS:
+            with self.subTest(flag=flag):
+                self.assertIn(flag, opts)
+                self.assertIn("--no-" + flag[2:], opts)
+        for flag in self._OPT_IN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertIn(flag, opts)
+
+    def test_README_prose_and_own_headings(self):
+        readme = self._readme()
+        body = [ln for ln in readme.splitlines()
+                if not re.match(r"^\s*[-*]?\s*\[.*\]\(#.*\)\s*$", ln)]
+        for flag in self._FLAGS:
+            neg = "--no-" + flag[2:]
+            with self.subTest(flag=neg):
+                self.assertTrue(any(neg in ln for ln in body))
+        headings = re.findall(r"^#{2,4}\s+(.*)$", readme, re.M)
+        for flag in self._OPT_IN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertTrue(any(flag in h for h in headings),
+                                f"{flag} has no README section of its own")
+
+    def test_the_help_renders_and_carries_the_measured_numbers(self):
+        from k2rad import cli
+        text = cli.build_parser().format_help()
+        flat = _collapse(text)
+        for flag, figures in self._HELP_FIGURES.items():
+            self.assertIn(flag, text)
+            for figure in figures:
+                with self.subTest(flag=flag, figure=figure):
+                    self.assertIn(figure, flat)
+
+    def test_the_gui_wires_every_lever_end_to_end(self):
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        base = dict(ground_springs=False, ground_spring_k_text="",
+                    soften_stfac_text="")
+        cases = ([(f, n, False, "--no-" + f[2:]) for f, n in
+                  self._FLAGS.items()]
+                 + [(f, n, True, f) for f, n in self._OPT_IN_FLAGS.items()])
+        for flag, name, value, spelled in cases:
+            with self.subTest(name=name):
+                kw = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), **base, **{name: value})
+                self.assertIs(kw[name], value)
+                captured = []
+                app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+                app._append = captured.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw)
+                self.assertIn(spelled, "".join(captured))
+                kw_def = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), **base)
+                self.assertIs(kw_def[name], not value)
+                captured_def = []
+                app._append = captured_def.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw_def)
+                self.assertNotIn(spelled, "".join(captured_def))
+
+    def test_every_lever_reaches_convert_and_ConvertOptions(self):
+        import inspect
+        from k2rad.state import ConvertOptions
+        sig = inspect.signature(convert).parameters
+        fields = set(ConvertOptions.__dataclass_fields__)
+        for name, default in ([(n, True) for n in self._FLAGS.values()]
+                              + [(n, False)
+                                 for n in self._OPT_IN_FLAGS.values()]):
+            with self.subTest(name=name):
+                self.assertIn(name, sig)
+                self.assertIs(sig[name].default, default)
+                self.assertIn(name, fields)
+                self.assertIs(getattr(ConvertOptions(), name), default)
+
+
+#: Statements Part B of round 6 measured (or read) to be wrong or retired.
+#: CHANGELOG may quote them (the history); no other shipped text may.
+_RETRACTED_ROUND_6_B = (
+    # B7.4: the constant-step census (98 / 76 counted modal keys)
+    "98 deck keys on 76 emitted models",
+    "81 of the 98",
+    "13 are unmeasured",
+    # B7.5: the ex_02 family's way back is not a step-control cell
+    "the family's way back to NORMAL is the step-scale cell",
+    "the family's way back is the step-SCALE cell",
+    # B7.1: twobar's END value is not an improvement
+    "twobar improves",
+    "twobar better",
+    "`twobar` better",
+    "1 better, 3 worse",
+    "-5.60 % (better)",
+    "The derived `Gapmin` IS.",
+    "was measured down to −5.6 % by changing the derived",
+    "0.005 is -5.6 %",
+    # B4 (preventive): the DOF dump EXISTS (/IMPL/NONLIN/SOLVINFO)
+    "DOF dump is a solver limitation",
+    "DOF dump is a SOLVER LIMITATION",
+    "freimpl.F:250-259",
+    "only imp_solv.F:1978 prints a node",
+    "What is missing is a DOF-level residual dump",
+    # B7.2: the thermal-weld refusal's retired absolutes and count
+    "about 33 on 05_1's 425-element seam",
+    "which every carrier of this keyword hits first",
+    "no Radioss counterpart at all — /HEAT/MAT holds ONE",
+    # B6: the one-walk docstring that was false
+    "ONE walk shared by ``_resolve_contact_slave``, ``_tied_slave_nids``",
+    # B5: rule (a) re-points, it does not drop
+    "whose members rule (a) drops from the TC/RC set anyway",
+)
+
+
+class Round6RetractedStatementsB(unittest.TestCase):
+    """The round-4/5 four-test shape, for Part B's retired spellings."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_6_B:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_6_B:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)))
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_6_B:
+            with self.subTest(needle=needle):
+                self.assertIn(_collapse(needle[:max(8, len(needle) // 2)]),
+                              _collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_SHIPPED_TEXTS())
+        pairs = (
+            ("k2rad/writer/common.py", "/IMPL/NONLIN/SOLVINFO"),
+            ("k2rad/writer/contacts.py", "THE COST LAW"),
+            ("k2rad/writer/contacts.py",
+             "7 now have a measured arm and 8 are still UNJUDGEABLE"),
+            ("k2rad/handlers.py", "/IMPFLUX DOES have a volumetric form"),
+            ("k2rad/handlers.py", "ZERO-HEATING"),
+            ("k2rad/writer/loads.py", "rule (a) RE-POINTS the members' cells"),
+            ("k2rad/writer/contacts.py",
+             "since R14 triage round 6 - ``_tied_slave_nids``"),
+            ("ROADMAP.md", "What round 6 deliberately does NOT close"),
+            ("ROADMAP.md", "50 deck keys on 34 emitted models"),
+            ("ROADMAP.md", "ANSWERED in round 6, and the answer is the ENGINE"),
+            ("ROADMAP.md", "The DOF-level residual dump is "
+             "`/IMPL/NONLIN/SOLVINFO`; round 6 ran it"),
+            ("README.md", "--implicit-constant-step"),
+            ("README.md", "--no-constrained-global"),
+            ("README.md", "--no-zero-tolerance-ectol"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+    def test_the_roadmap_carries_a_round_6_column(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "ROADMAP.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(
+            "| # | class | decks | closed by round 1 | round 2 | round 3 | "
+            "round 4 | round 5 | round 6 |", text)
+        self.assertIn(
+            "| family | decks | death | verdict after round 3 | round 4 | "
+            "round 5 | round 6 |", text)
+        self.assertIn("What round 6 closes, and what it does NOT", text)
+        # the round-5 pins the census correction had to keep
+        self.assertIn("152 811", text)
+        self.assertIn("1 888", text)
+
+
+def _text_units():
+    """``(file, unit)`` for every blank-line-separated unit of every shipped
+    text, adjacent string literals JOINED first and each unit collapsed. A
+    ``#`` comment block (state.py's ConvertOptions notes) is one unit, since
+    its lines are not blank."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rels = ["README.md", "ROADMAP.md", "k2rad_gui.py"]
+    for dirpath, _dirs, files in os.walk(os.path.join(root, "k2rad")):
+        if "__pycache__" in dirpath:
+            continue
+        rels += [os.path.relpath(os.path.join(dirpath, n), root)
+                 for n in sorted(files) if n.endswith(".py")]
+    out = []
+    for rel in rels:
+        with open(os.path.join(root, rel), encoding="utf-8") as fh:
+            text = re.sub(r'"\s*\n\s*"', "", fh.read())
+        for unit in re.split(r"\n\s*\n", text):
+            out.append((rel, _collapse(unit)))
+    return out
+
+
+_END_VALUE = re.compile(r"[-−]5\.60? ?%")
+_HISTORY = re.compile(r"[-−]91 ?%")
+
+
+def _end_value_violations(units):
+    return [(rel, u[:120]) for rel, u in units
+            if "twobar" in u and _END_VALUE.search(u)
+            and not _HISTORY.search(u)]
+
+
+class Round6TwobarEndValueCarriesItsHistory(unittest.TestCase):
+    """The paired-figure rule (B7.1): every shipped text unit that still
+    states twobar's END value (-5.60 % / -5.6 %) states its history (-91 %
+    at the first impact) in the same unit - a final-state number is not
+    evidence without its history. CHANGELOG is the history and excluded."""
+
+    def test_every_unit_pairs_the_end_value_with_its_history(self):
+        units = _text_units()
+        checked = [u for rel, u in units
+                   if "twobar" in u and _END_VALUE.search(u)]
+        self.assertGreaterEqual(len(checked), 8, "the rule matched too little")
+        self.assertEqual(_end_value_violations(units), [])
+
+    def test_the_rule_fails_a_unit_without_the_history(self):
+        bad = [("x", _collapse("twobar reads -5.60 % against its reference."))]
+        good = [("x", _collapse("twobar ends at -5.60 % but reads -91 % at "
+                                "the first impact."))]
+        self.assertEqual(len(_end_value_violations(bad)), 1)
+        self.assertEqual(_end_value_violations(good), [])
+        uni = [("x", "twobar ends at −5.6 % (history −91 %)")]
+        self.assertEqual(_end_value_violations(uni), [])
+
+
 if __name__ == "__main__":
     unittest.main()

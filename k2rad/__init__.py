@@ -325,24 +325,31 @@ def convert(
         on a solid segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17
         p.11-101/103). **Off by default**, with a default-ON warning naming the
         derived value on every carrier. MEASURED on ``twobar`` (10 mm bars,
-        derived ``GAP MIN`` 1.0): the starter's gap costs +1151 % internal
-        energy against the LS-DYNA reference 3036.17 where this rule writes
-        ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
-        other carriers (``sphere1``, where it writes 0.02921 and internal
-        energy goes −1.66 % → −7.77 % at 4.1× the cycles; ``bend``,
-        −2.0038 % → −2.8418 % at 4.69×). Of the class's 15 interfaces on the
-        356-key R14 roster **7 now have a measured arm and 8 are still
-        unjudgeable**, and the 7 disagree: 1 better, 3 worse, 2 byte-inert
-        (``pend.imp``, ``06_heating_plate``) and 1 mixed
-        (``4.3_General_Nonlinearity``, whose energy error improves −99.9 % →
-        −55.2 % while its internal energy gets worse −98.87 % → −99.92 %) —
-        which is why it is opt-in. A press-fit
+        derived ``GAP MIN`` 1.0): the starter's gap ENDS at +1151 % internal
+        energy against the LS-DYNA reference 3036.17 and this rule's
+        ``0.005 × 10 = 0.05`` ends at −5.60 % — an END value: the first impact
+        reads −91 % and the engine energy error stays −7.1 to −8.2 % at every
+        gap. Two rounds of arms — round 6 alone ran 16 gap values on
+        ``twobar``, ``hemi``, ``sphere1`` and ``bend`` — found ZERO campaign
+        verdict promotions (``sphere1``, where it writes 0.02921, goes
+        −1.66 % → −7.77 % at 4.1× the cycles; ``bend`` −2.0038 % → −2.8418 %
+        at 4.69×). Of the class's 15 interfaces on the 356-key R14 roster
+        (counted before round 6's shell-offset Gapmin took ``bend``'s) **7
+        now have a measured arm and 8 are still unjudgeable**: twobar's end
+        value moves while its history does not, ``sphere1`` and ``bend`` are
+        worse, ``pend.imp`` and ``06_heating_plate`` byte-inert,
+        ``4.3_General_Nonlinearity`` mixed (energy error −99.9 % → −55.2 %,
+        internal energy −98.87 % → −99.92 %). And it costs: below a
+        deck-specific knee the cycle count grows as ~1/Gapmin (twobar 2.17× at
+        0.02 and 7.71× at 0.005; the contact step is ½(GAPV − PENE)/v,
+        ``i7for3.F:762-770``) — which is why it is opt-in. A press-fit
         ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
         stabilization stub are excluded.
     derived_gapmin_factor : float
         Fraction of the smallest main-surface segment side used by
-        ``derived_gapmin`` (default 0.005 — measured; 0.01 reads +14.45 % on
-        ``twobar`` and must not be used).
+        ``derived_gapmin`` (default 0.005; every twobar figure is an end
+        state — its first impact reads −91 % at 0.005 — and cycles grow as
+        ~1/factor below the knee).
     rigid_secondary_swap : bool
         On an EXPLICIT deck, rescue a ``*CONTACT`` whose SECONDARY (SSID) side
         is WHOLLY RIGID instead of losing the whole interface: the roles are

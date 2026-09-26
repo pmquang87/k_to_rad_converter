@@ -3749,9 +3749,10 @@ what LS-DYNA fact it could not carry: the non-`AUTOMATIC` spellings are
 ONE-SIDED in LS-DYNA and Radioss has no one-sided segment (p.11-10 item 4 — a
 gain in permissiveness, nothing dropped); the two-way ones are checked from one
 side only by `/INTER/TYPE7` (p.11-8 item 1b — the fact, with NO remedy
-attached for a DEFORMABLE pair: `twobar`'s +1151 % internal energy was measured
-down to −5.6 % by changing the derived `Gapmin`, not by swapping the sides,
-which reads +188 % there. An explicit Gapmin for a solid-segment main is now
+attached for a DEFORMABLE pair: `twobar`'s +1151 % internal energy END value
+moves to −5.6 % with a 0.05 mm `Gapmin` — an end-state coincidence (round 6:
+−91 % at the first impact, energy error −7.5 %) — and swapping the sides reads
++188 % there. An explicit Gapmin for a solid-segment main is now
 available as `--derived-gapmin` (off by default, warned about either way) and
 `--inter-gapmin ID=VAL` still pins one interface); `FORMING` ignores the tooling thickness and, on
 a NEGATIVE `SBST` only, additionally offsets SURFB by `|SBST|/2` (General
@@ -5953,25 +5954,34 @@ does not take, naming the value the starter will derive. `--derived-gapmin` writ
 never a non-positive value, which is `ERROR 785`). Pure standard library,
 unlike `--auto-gapmin`, which needs numpy + scipy.
 
-It is **OFF by default** because the seven interfaces of the class that have
-a measured arm disagree with each other. On
-`intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm bars, derived
-`GAP MIN` 1.0) the starter's gap costs **+1151 %** internal energy against the
-LS-DYNA reference 3036.17, where the flag's own `0.005 × 10 = 0.05` reads
-**−5.60 %** and KE −6.18 % (factor 0.01 reads +14.45 % and must not be used).
-But the same factor degrades others: on `sphere1` it writes 0.02921 and
+It is **OFF by default** because two rounds of arms — round 6 alone ran 16 gap
+values on `twobar`, `hemi`, `sphere1` and `bend` — found **ZERO campaign
+verdict promotions**. On `intro-by-k.-weimar/contact/twobars/twobar.k` (10 mm
+bars, derived `GAP MIN` 1.0) the starter's gap ENDS at **+1151 %** internal
+energy against the LS-DYNA reference 3036.17 and the flag's own
+`0.005 × 10 = 0.05` ends at **−5.60 %** — but `twobar`'s END value moves while
+its history does not: **−91 %** at the first impact (t 3e-4, where the
+starter's own gap reads +1 %), and its engine energy error stays −7.1 to
+−8.2 % at every gap from 0.1 down to 0.005 mm (factor 0.01 ends at +14.45 %).
+The same factor degrades others: on `sphere1` it writes 0.02921 and
 internal energy goes −1.66 % → **−7.77 %** at 4.1× the cycles, and `bend`
 goes −2.0038 % → −2.8418 % at 4.69× (−2.7860 % at 2.50× with the smaller
 factor). Censused with the writer's own resolver over the 356-key
-R14 roster (the 4 Yaris `*INCLUDE` pullers excluded BY NAME): **15 solid-only-
-main interfaces on 14 deck keys and 13 emitted models**, one of them created by
-round 4's all-rigid-SSID swap. **Seven of the 15 now have a measured arm and
-eight are still unjudgeable**, and the seven disagree: `twobar` better,
+R14 roster (the 4 Yaris `*INCLUDE` pullers excluded BY NAME) before round 6's
+shell-offset Gapmin took `bend`'s interface: **15 solid-only-main interfaces
+on 14 deck keys and 13 emitted models**, one of them created by round 4's
+all-rigid-SSID swap. **Seven of the 15 now have a measured arm and eight are
+still unjudgeable**: `twobar`'s end value moves while its history does not,
 `sphere1` and `bend` worse, `4.3_General_Nonlinearity` mixed (energy error
 −99.9 % → −55.2 %, internal energy −98.87 % → −99.92 %), `pend.imp` and
 `06_heating_plate` byte-inert, and `hemi` paying **+47.9 % cycles** to reach
 the same time — cycle inflation measured against a base run in the same
-window, not the lost NORMAL round 4 read it as. A
+window, not the lost NORMAL round 4 read it as. **What it costs:** below a
+deck-specific knee the cycle count grows as ~1/Gapmin — `twobar` 2.17× at 0.02
+and 7.71× at 0.005, `sphere1` 3.45× at 0.05 and 5.48× at 0.02 — because the
+contact step is ½(GAPV − PENE)/v (`i7for3.F:762-770`), and on a developing
+contact the cost grows with time (`hemi` at 0.7322: 0.92× at t 0.4158, 1.48×
+at t 0.8049). A
 press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
 same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
 stabilization stub are excluded from the flag.

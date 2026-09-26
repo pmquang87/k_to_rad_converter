@@ -7690,10 +7690,12 @@ class ConvertOptions:
     #
     # MEASURED, and this is why it is OPT-IN rather than a default. On
     # intro-by-k.-weimar/contact/twobars/twobar.k (10 mm bars, derived
-    # GAP MIN 1.0) the derived gap costs +1151.3 % internal energy against the
-    # LS-DYNA reference 3036.17, where the flag's own 0.005 x 10 = 0.05 reads
-    # -5.60 % and KE -6.18 %; FACTOR 0.01 reads +14.45 %, so 0.005 is the
-    # measured default and 0.01 is NOT. But the same factor degrades OTHER
+    # GAP MIN 1.0) the derived gap ENDS at +1151.3 % internal energy against
+    # the LS-DYNA reference 3036.17 and the flag's own 0.005 x 10 = 0.05 ends
+    # at -5.60 % - twobar's END value moves but its history does not: -91 %
+    # at the first impact, and the engine energy error stays -7.1 to -8.2 %
+    # at every gap (round 6). 0.005 is the flag's default, not a measured
+    # optimum (FACTOR 0.01 ends at +14.45 %). The same factor degrades OTHER
     # carriers: on sphere1 the flag writes 0.005 x 5.84129 = 0.02921 and
     # internal energy goes -1.66 % -> -7.77 % at 4.1x the cycles, and bend
     # goes -2.0038 % -> -2.8418 % at 4.69x (or -2.7860 % at 2.50x with the
@@ -7702,13 +7704,21 @@ class ConvertOptions:
     # NAME), is 15 interfaces on 14 deck keys and 13 emitted models -- one of
     # them created by the round's own all-rigid-SSID swap (sphere1). SEVEN of
     # the fifteen now have a measured solver arm and EIGHT are still
-    # unjudgeable. The seven: twobar better, sphere1 and bend worse,
+    # unjudgeable (both counts taken before round 6's shell-offset Gapmin
+    # took bend's interface). The seven: twobar's end value moves while its
+    # history does not, sphere1 and bend worse,
     # 4.3_General_Nonlinearity mixed (energy error -99.9 % -> -55.2 %,
     # internal energy -98.87 % -> -99.92 %), pend.imp and 06_heating_plate
     # byte-inert, and hemi paying +47.9 % CYCLES to reach the same time
     # (round 4 read that as a lost NORMAL; re-measured under contention it is
     # cycle inflation, not a timeout). The predicted 0.1 x min edge matched
-    # the starter's own GAP MIN echo on 6 of 6 carriers checked. A press-fit *CONTACT_*_INTERFERENCE is
+    # the starter's own GAP MIN echo on 6 of 6 carriers checked. Round 6: two
+    # rounds of arms - round 6 alone ran 16 gap values on twobar, hemi,
+    # sphere1 and bend - found ZERO campaign verdict promotions, and THE COST
+    # LAW: below a deck-specific knee the cycle count grows as ~1/Gapmin
+    # (twobar 2.17x at 0.02, 7.71x at 0.005; sphere1 3.45x at 0.05, 5.48x at
+    # 0.02; the contact step is 1/2 (GAPV - PENE)/v, i7for3.F:762-770; hemi at
+    # 0.7322: 0.92x at t 0.4158, 1.48x at t 0.8049). A press-fit *CONTACT_*_INTERFERENCE is
     # excluded outright: it needs a LARGE gap to engage, which is why k2rad
     # already forces Inacti = 0 on that family. (Reach of that exclusion on
     # this corpus: 0 -- EXP_SC_CONTACT_INTERFERENCE's main surface is SHELL

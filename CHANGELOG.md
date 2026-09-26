@@ -252,6 +252,77 @@ Prior history (before this changelog was introduced) is summarized in the
     2-node arm buys nothing at 18.2× the cycles" was a DIFFERENT arm — the
     orphan pair 213 / 123, L = 1.0, twice rule 1's axial stiffness — and is
     annotated in ROADMAP rather than retracted.)
+  - **B7 — the corrected record (text only, 0 bytes).** (i)
+    **`--derived-gapmin`: twobar's −5.60 % is an END value, not an
+    improvement.** Round 6 measured its history: −91 % internal energy at the
+    first impact (t 3e-4, where the starter's own gap reads +1 %) and an engine
+    energy error of −7.1 to −8.2 % at every gap from 0.1 down to 0.005 mm.
+    Every shipped site that called it better — the default-ON warning and its
+    flag note, the `_maybe_derived_gapmin` docstring, both `cli.py` helps, the
+    `convert()` docstrings, the `ConvertOptions` comment (0.005 is now "the
+    flag's default, not a measured optimum"), the GUI tooltip, the `twoway`
+    note, README ×2 and ROADMAP ×5 — now says the flag is off because two
+    rounds of arms (round 6 alone ran 16 gap values on twobar, hemi, sphere1
+    and bend) found ZERO campaign verdict promotions, and states THE COST LAW,
+    one constant `writer/contacts._GAPMIN_COST_LAW`: below a deck-specific knee
+    the cycle count grows as ~1/Gapmin (twobar 2.17× at 0.02 and 7.71× at
+    0.005, sphere1 3.45× at 0.05 and 5.48× at 0.02), because the contact step
+    is ½(GAPV − PENE)/v (`i7for3.F:762-770`), and on a developing contact the
+    cost grows with time (hemi at 0.7322: 0.92× at t 0.4158, 1.48× at t
+    0.8049). The class census (15 interfaces on 14 deck keys and 13 emitted
+    models; 7 measured, 8 unjudgeable) is labelled as counted before A8 took
+    bend's interface. (ii) **The thermal-weld refusals carry measured facts**
+    (`handlers.py`; `recognized_not_emitted` on 4 deck keys / 4 models: 05_5_1,
+    05_4_1, 05_2, 05_1). `*MAT_THERMAL_CWM`: its one expressible shape (a card
+    born before t = 0 — every R14 carrier's) is the TD_LC material, and
+    converting it ALONE on 05_5_1 clears ERROR 179 (2 → 0) into a ZERO-HEATING
+    run (293.15 K on every weld-path node over 4631 samples; 31 018 explicit
+    conduction cycles to t 46.3 of 99 s at the 600 s cap), because the deck's
+    only heat source does not convert. `*BOUNDARY_THERMAL_WELD`: a hand-built
+    window arm on the first 1.5 s of 05_5_1 (6 windows of 0.25 s, one `/IMPFLUX
+    VOLUME` per Goldak lobe at q = 3FQ/(2πabc), Vol I R17 p.5-176) runs NORMAL
+    in 1005 cycles, +7.3 to +12.4 % hot behind the torch and 5 to 44 % cool at
+    the leading edge; the whole seam needs 53 `/IMPFLUX` + 53 `/GRBRIC` at 0.25
+    s windows (134 + 134 at 0.1 s), and the deck's Ff + Fr = 1.5 delivers 0.75
+    Q. The old per-segment card estimate and the claim that every carrier hits
+    ERROR 179 first are retired (the two coupled carriers give the seam a
+    mechanical `*MAT_CWM`). (iii) **The constant-step census is 50 deck keys on
+    34 emitted models** (39 / 28 state no `*CONTROL_IMPLICIT_AUTO`, 11 / 6
+    state IAUTO 0; 42 of the 50 are normal): round 5's figure counted ~60 MODAL
+    keys that carry no `/IMPL/DT` card and missed the 11. ROADMAP round-5 item
+    1 is rewritten in place (its `152 811` / `1 888` measurements kept) and
+    marked ANSWERED; this file's round-5 entry keeps its figure and gains two
+    in-place italic notes (the re-census, and the −94.69 % of that NORMAL).
+    (iv) **The `ex_02` family is RE-ATTRIBUTED** (ROADMAP round-6 item 11, no
+    code): LS-DYNA solves it LINEARLY in one step (IE_LS(t) = 0.771729 t²), and
+    every converging OpenRadioss arm holds −94.3 … −95.1 % IE at the same t (nt
+    4 and nt 2 agree to 0.1 pp) — round 5's `--qstat-dtscal 0.1` NORMAL
+    included (−94.69 %) — while the starter's WARNING 791 resets the Isolid-14
+    `/PROP/TYPE20` to 2 through-thickness points: a thick-shell stiffness
+    defect, not a step-control one. (v) **ROADMAP:** a `round 6` column in the
+    queue table and in the implicit-residue table; "What round 6 closes, and
+    what it does NOT" with the ledger expectation the campaign validator
+    re-sums (normal 284 → 288 / 289, timeout 18 → 15, error_engine 26 → 25,
+    error_starter 13 → 12, match 27 → 26 BY DEFINITION; `metal-cutting` may
+    move one row from normal to error_engine); "What round 6 deliberately does
+    NOT close", 20 numbered items — item 20 is the vdc = 0 contact-damping
+    remedy that prints on k2rad's OWN injected implicit stub (52 deck keys / 36
+    models of the 68 non-Yaris implicit non-modal roster keys; the one-line
+    gate was deferred, not shipped); and the round-4 / round-5 lists annotated
+    in place (answered, partly answered, re-measured — never deleted). (vi)
+    **Where the two parts meet:** A2's weld exponents do not reach `spotweld.k`
+    (its weld is a `*MAT_SPOTWELD` beam whose NRR … MTT are 0.0, so its
+    `/PROP/TYPE13` carries `Ifail 0`, read on the both-flags arm); round 5's
+    18.2× two-node arm is annotated beside B6's figures, not retracted.
+    **Guards** (`tests/test_r14_triage_6.py`): `Round6RetractedStatementsB`
+    keeps 23 retired spellings out of README, ROADMAP, the GUI and every
+    `k2rad/*.py` in the round-5 four-test shape (absent; found when split
+    across two literals; a prefix fires; 14 replacements present) and pins the
+    two new ROADMAP headers; `Round6TwobarEndValueCarriesItsHistory` requires
+    every shipped text unit that states twobar's −5.60 % / −5.6 % to state its
+    −91 % too (10 units checked, ≥ 8 asserted); `Round6FlagWiringB` wires the
+    five part-B flags through the parser, README, the `--help` figures, the GUI
+    and `convert()` / `ConvertOptions`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a
@@ -3634,11 +3705,17 @@ Prior history (before this changelog was introduced) is summarized in the
     reference); item 17's to 0 BY CONSTRUCTION with the 6-of-6 `GAP MIN` check;
     item 18's carriers to 4 keys on **2 emitted models**; item 10 records the
     one-node spotweld rule (Vol I R17 p.19-3, LS-DYNA synthesizing node 1214,
-    the 2-node arm buying nothing at 18.2× the cycles).
+    the 2-node arm buying nothing at 18.2× the cycles *(that arm used the
+    deck's commented-out orphan pair 213 / 123, L = 1.0; round 6's rule 1
+    places the nodes by the manual's projection, L = 2.0 = LS-DYNA's own swforc
+    length, and costs 7.64× alone, 7.80× with `--beam-contact-secondary`)*).
   - **`--implicit-constant-step` was MEASURED and is a NO-GO**, so it is not
     shipped. 98 deck keys on 76 emitted models state no `*CONTROL_IMPLICIT_AUTO`
     (a blank `IAUTO` is *"Constant time step size"*, Vol I R17 p.12-277) and
-    k2rad writes `/IMPL/DT/2` on every one; 81 are `normal`. On
+    k2rad writes `/IMPL/DT/2` on every one; 81 are `normal` *(Re-censused in
+    round 6: 50 keys / 34 models — this figure counted modal keys that carry
+    no `/IMPL/DT` card and missed the 11 stating IAUTO 0; 42 of the 50 are
+    normal.)*. On
     `ex_02_thick_shell_elform_2` — round 4's own `normal → timeout` family — with
     `/IMPL/DT/2` DELETED, at **nt 4 AND nt 2** with a 600 s budget each: the run
     is killed at the cap at cycle 152 811 / t = 0.7467 and cycle 173 811 /
@@ -3646,6 +3723,7 @@ Prior history (before this changelog was introduced) is summarized in the
     the card does not pin the step — the engine still adapts, and it does not
     finish. The same deck at `--qstat-dtscal 0.1` reaches NORMAL TERMINATION in
     **1 888 cycles / 11 s**, so that family's way back is the step-SCALE cell.
+    *(Round 6: that NORMAL is −94.69 % IE at matched time.)*
 
   Every retracted spelling is pinned out of every shipped text by a regex guard
   over the joined, whitespace-collapsed sources, with three companions: one
