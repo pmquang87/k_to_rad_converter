@@ -765,8 +765,9 @@ void fluid, the `/MAT/HYD_VISC` of that fluid get the **cavitation floor
 material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I R17
 p.28-134 allows one fluid per single-material-and-void mesh). Not `0`:
 `hm_read_mat06.F:154` reads an exact `Pmin 0` as −INFINITY, so the `Pmin 0`
-every `/MAT/HYD_VISC` carried was an UNBOUNDED tension in the cells the fluid
-leaves — the measured death of every void deck. A stated `PC` is overridden and
+every `*MAT_NULL` + `*EOS_*` `/MAT/HYD_VISC` carried (the `*MAT_NULL` PC cell
+is not carried) was an UNBOUNDED tension in the cells the fluid leaves — the
+measured death of every void deck. A stated `PC` is overridden and
 named; a deck that also states `*ALE_MULTI-MATERIAL_GROUP` (forbidden together,
 p.28-134), a void that is not ELFORM 12 and a void whose material is not a LAW6
 carrier are refused by name and keep `Pmin 0`. The void's low DENSITY is NOT

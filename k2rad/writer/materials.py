@@ -820,15 +820,13 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         for pid in members:
             if pid not in void_pids:
                 void_pids.append(pid)
+    law6 = _law6_carrier_mids(state)
     if not state.options.initial_void_floor:
         state.initial_void_floor_refusal = "--no-initial-void-floor"
         state.warn(
             f"--no-initial-void-floor: {kw} {void_pids} is not given the "
-            "cavitation floor; the ELFORM-12 fluid's /MAT/HYD_VISC keep "
-            "Pmin 0, which hm_read_mat06.F:154 reads as -INFINITY (no "
-            "cutoff).")
+            f"cavitation floor; {_void_pmin_state_clause(state, law6)}.")
         return out
-    law6 = _law6_carrier_mids(state)
     good: List[int] = []
     for pid in void_pids:
         part = state.parts.get(pid)
@@ -852,16 +850,14 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         state.initial_void_floor_refusal = why
         state.warn(
             f"{kw} {void_pids}: the cavitation floor was NOT written - {why}. "
-            "Nothing was changed; the fluid's /MAT/HYD_VISC keep Pmin 0 "
-            "(-INFINITY, hm_read_mat06.F:154).")
+            f"Nothing was changed; {_void_pmin_state_clause(state, law6)}.")
         return out
     if refused and not good:
         why = "; ".join(refused)
         state.initial_void_floor_refusal = why
         state.warn(
             f"{kw} {void_pids}: the cavitation floor was NOT written - {why}. "
-            "Nothing was changed; the fluid's /MAT/HYD_VISC keep Pmin 0 "
-            "(-INFINITY, hm_read_mat06.F:154).")
+            f"Nothing was changed; {_void_pmin_state_clause(state, law6)}.")
         return out
     if refused:
         state.warn(
@@ -887,8 +883,9 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         f"fluid (parts {fluid_pids}); Vol I R17 p.28-134 allows one fluid per "
         "single-material-and-void mesh, so every such part is the fluid that "
         "refills the void. Not 0: hm_read_mat06.F:154 reads Pmin 0 as "
-        "-INFINITY, and every /MAT/HYD_VISC k2rad wrote before this carried "
-        "0 - an UNBOUNDED tension in the cells the fluid advects out of (the "
+        "-INFINITY, and every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote "
+        "before this carried 0 (the *MAT_NULL PC cell is not carried) - an "
+        "UNBOUNDED tension in the cells the fluid advects out of (the "
         "EOS floors its pressure at PMIN, gruneisen.F:129/132/152, "
         "eospolyno.F:104/113/125). -1e-20 is the zero-pressure cavitation "
         "limit *MAT_NULL Remark 4 (Vol II R17 p.2-190) describes for PC."
@@ -900,11 +897,37 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "4.587e-3 of 0.07) -> NORMAL in 1095 cycles, IE +394.0 % / KE "
         "-40.7 % / energy error -46.5 % (KE 28-41 % low at each fifth of the "
         "run); bird_B timeout (t 3.223e-5 of 6e-4) -> NORMAL in 2936 cycles, "
-        "IE +1484.7 % / KE +25.9 % / energy error -20.4 %; bird-el NORMAL "
-        "either way, IE +454.1 -> +1134.6 %, KE +10856 -> -92.1 % (its plate "
-        "carries nothing: *CONSTRAINED_SHELL_IN_SOLID is not converted). "
-        "Pass --no-initial-void-floor to keep Pmin 0.")
+        "at the END IE +1484.7 % / KE +25.9 % / energy error -20.4 % - the "
+        "end KE is a coincidence of the history, which reads KE +765 % at "
+        "cycle 0 and +104 / +382 / +337 / +18 / +26 % at the fifths of the "
+        "run (IE +1111..+1525 % from the second fifth on); bird-el NORMAL "
+        "either way, at the end IE +454.1 -> +1134.6 %, KE +10856 -> -92.1 % "
+        "(history with the floor: KE +272 / +398 / +144 / -72 / -92 %, IE "
+        "+1135..+2736 % at every fifth; its plate carries nothing: "
+        "*CONSTRAINED_SHELL_IN_SOLID is not converted). Pass "
+        "--no-initial-void-floor to keep Pmin 0.")
     return out
+
+
+def _void_pmin_state_clause(state: ConversionState, law6: Set[int]) -> str:
+    """What a void deck's Pmin cells ARE when the floor is not written - the
+    tail of the refusal / opt-out sentences. It names the ``/MAT/HYD_VISC``
+    cards that exist and says so when there are none (finalization of round
+    6: ``forging_B``'s void is a ``*MAT_INV_HYPERBOLIC_SIN`` and its converted
+    deck carries no ``/MAT/HYD_VISC`` at all, so "the fluid's /MAT/HYD_VISC
+    keep Pmin 0" named cards that do not exist)."""
+    fluid = sorted({p.mid for p in state.parts.values()
+                    if p.mid in law6 and p.secid in state.sec_solids
+                    and state.sec_solids[p.secid].elform == 12})
+    if fluid:
+        return (f"the ELFORM-12 fluid's /MAT/HYD_VISC {fluid} keep Pmin 0, "
+                "which hm_read_mat06.F:154 reads as -INFINITY (no cutoff)")
+    if law6:
+        return (f"no ELFORM-12 part carries a /MAT/HYD_VISC (the deck's "
+                f"*MAT_NULL + *EOS_* carriers {sorted(law6)} are on other "
+                "sections), so there is no cutoff cell for the rule to write")
+    return ("the deck emits no /MAT/HYD_VISC at all (no *MAT_NULL + *EOS_* "
+            "carrier), so there is no cutoff cell for the rule to write")
 
 
 def _void_null_mids(state: ConversionState) -> set:

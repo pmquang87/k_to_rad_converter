@@ -7549,7 +7549,8 @@ class ConvertOptions:
     # material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I
     # R17 p.28-134: one fluid per single-material-and-void mesh). NOT 0:
     # hm_read_mat06.F:154 reads an exact Pmin 0 as -INFINITY, so the Pmin 0
-    # k2rad wrote on every /MAT/HYD_VISC was an UNBOUNDED tension in the cells
+    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (the *MAT_NULL PC
+    # cell is not carried) was an UNBOUNDED tension in the cells
     # the fluid advects out of (the EOS floors its pressure at PMIN,
     # gruneisen.F:129/132/152, eospolyno.F:104/113/125). -1e-20 is the
     # zero-pressure cavitation limit of *MAT_NULL Remark 4 (Vol II R17

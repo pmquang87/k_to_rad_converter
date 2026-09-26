@@ -331,7 +331,9 @@ Prior history (before this changelog was introduced) is summarized in the
   - **A1 — `*INITIAL_VOID_*` ELFORM-12 decks get a cavitation floor
     (`Pmin = −1e-20`) on the fluid's `/MAT/HYD_VISC` (default ON,
     `--no-initial-void-floor`).** `Pmin 0` — what k2rad wrote on every
-    `/MAT/HYD_VISC` — is read as −INFINITY (`hm_read_mat06.F:154`), and
+    `*MAT_NULL` + `*EOS_*` `/MAT/HYD_VISC` (the `*MAT_NULL` PC cell is not
+    carried; a `*MAT_ELASTIC_FLUID` writes `−CP`) — is read as −INFINITY
+    (`hm_read_mat06.F:154`), and
     `eosmain.F:229` hands that `PM(37)` to every EOS as its pressure floor
     (`gruneisen.F:129/132/152`, `eospolyno.F:104/113/125`): an UNBOUNDED
     tension in the cells the fluid advects out of, the measured death of every
@@ -351,10 +353,15 @@ Prior history (before this changelog was introduced) is summarized in the
     forging_B is a warning-record mover. MEASURED (round-6 arms, histories
     checked): **quadrature_B / quadrature_C timeout → NORMAL in 1095 cycles**
     (IE +394.0 % / KE −40.7 % against its reference, +144.2 % IE against
-    quadrature_C's), **bird_B timeout → NORMAL in 2936 cycles** (IE +1484.7 % /
-    KE +25.9 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %, KE
-    +10856 → −92.1 %: its plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID`
-    is not converted). **Status, not match**: the void's low DENSITY stays
+    quadrature_C's), **bird_B timeout → NORMAL in 2936 cycles** (at the END
+    IE +1484.7 % / KE +25.9 % — the end KE is a coincidence of the history:
+    KE +765 % at cycle 0 and +104 / +382 / +337 / +18 / +26 % at the fifths
+    of the run, IE +1111 … +1525 % from the second fifth on), bird-el NORMAL
+    either way (at the end IE +454.1 → +1134.6 %, KE +10856 → −92.1 %; with
+    the floor KE +272 / +398 / +144 / −72 / −92 % and IE +1135 … +2736 % at
+    the fifths — the OpenRadioss row nearest each fifth, the LS-DYNA glstat
+    interpolated at its time; its plate carries nothing,
+    `*CONSTRAINED_SHELL_IN_SOLID` is not converted). **Status, not match**: the void's low DENSITY stays
     out — a dead `/INTER/TYPE18` coupling or 4.51× the cycles on the coupled
     decks, a stall on bird_B. `underwater_A` / `underwater_B` (the two `match`
     rows with a `*MAT_NULL` + EOS fluid) state no `*INITIAL_VOID` and are

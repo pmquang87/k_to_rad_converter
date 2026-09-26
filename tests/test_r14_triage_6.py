@@ -166,11 +166,15 @@ _ZERO_ROW = "                   0                   0"
 
 
 def _void_deck(pc1=0.0, elform1=12, void_mat="null", shared_mat=False,
-               void=True, ammg=False, coupled=False, void_set=False) -> str:
+               void=True, ammg=False, coupled=False, void_set=False,
+               third_elform=None) -> str:
     """Two unit hexes sharing the x = 1 face: element 1 on part 1 (the void,
     section 1), element 2 on part 2 (the bird, section 2), both ELFORM 12 on
-    a *MAT_NULL + *EOS_GRUNEISEN pair unless a variant says otherwise."""
-    nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1, 2)]
+    a *MAT_NULL + *EOS_GRUNEISEN pair unless a variant says otherwise.
+    ``third_elform`` adds a third hex (x 2..3) on part 3 / section 3 of that
+    ELFORM with its OWN *MAT_NULL 3 + *EOS_GRUNEISEN 3."""
+    xs = (0, 1, 2) if third_elform is None else (0, 1, 2, 3)
+    nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in xs]
     nid = {c: i for i, c in enumerate(nodes, start=1)}
 
     def hexa(x0):
@@ -201,6 +205,15 @@ def _void_deck(pc1=0.0, elform1=12, void_mat="null", shared_mat=False,
     if not shared_mat:
         deck += ("*MAT_NULL\n" + _row(2, 1.0e-9, 0.0, 0.0) + "\n"
                  "*EOS_GRUNEISEN\n" + _row(2, 1.5e6, 1.0, 0.0, 0.0, 0.0,
+                                           0.0, 0.0) + "\n"
+                 + _row(1.0) + "\n")
+    if third_elform is not None:
+        deck += ("*ELEMENT_SOLID\n"
+                 + "".join(f"{v:>8}" for v in [3, 3] + hexa(2)) + "\n"
+                 + "*PART\nthird fluid\n" + _row(3, 3, 3) + "\n"
+                 + "*SECTION_SOLID\n" + _row(3, third_elform) + "\n"
+                 + "*MAT_NULL\n" + _row(3, 1.0e-9, 0.0, 0.0) + "\n"
+                 "*EOS_GRUNEISEN\n" + _row(3, 1.5e6, 1.0, 0.0, 0.0, 0.0,
                                            0.0, 0.0) + "\n"
                  + _row(1.0) + "\n")
     if ammg:
@@ -415,6 +428,68 @@ class InitialVoidFloorTests(unittest.TestCase):
         st = _dispatch(_void_deck(pc1=-7.5))
         m = st.mat_null[1]
         self.assertEqual((m.rho, m.pc, m.E, m.nu), (1.0e-9, -7.5, 0.0, 0.0))
+
+    def test_a_LAW6_fluid_off_ELFORM_12_is_not_floored(self):
+        """Finalization round (the code-sweep mutation that survived: the
+        ``elform == 12`` clause of the fluid set could be deleted with every
+        test green, because every variant paired the void with ONE
+        ELFORM-12 bird). A third *MAT_NULL + EOS fluid on ELFORM 5 is not
+        the void's fluid: its /MAT/HYD_VISC keeps Pmin 0 and the floor
+        warning does not name it."""
+        result, starter, _e = _convert(_void_deck(third_elform=5))
+        self.assertEqual(_pmin_row(starter, 1), _FLOOR_ROW)
+        self.assertEqual(_pmin_row(starter, 2), _FLOOR_ROW)
+        self.assertEqual(_pmin_row(starter, 3), _ZERO_ROW)
+        applied = [w for w in result.warnings
+                   if "cavitation floor Pmin = -1e-20 is written" in w]
+        self.assertEqual(len(applied), 1, result.warnings)
+        self.assertIn("/MAT/HYD_VISC [1, 2]", applied[0])
+        self.assertIn("(parts [1, 2])", applied[0])
+        # the control: the same third fluid ON ELFORM 12 is the fluid
+        result12, starter12, _e = _convert(_void_deck(third_elform=12))
+        self.assertEqual(_pmin_row(starter12, 3), _FLOOR_ROW)
+        self.assertTrue(_has(result12.warnings, "/MAT/HYD_VISC [1, 2, 3]",
+                             "(parts [1, 2, 3])"), result12.warnings)
+
+    def test_a_refusal_names_only_the_Pmin_cells_the_deck_has(self):
+        """Finalization round: forging_B's converted deck has NO
+        /MAT/HYD_VISC at all, and the refusal said "the fluid's
+        /MAT/HYD_VISC keep Pmin 0". The tail now names what exists."""
+        r_none, s_none, _e = _convert(_void_deck(void_mat="elastic",
+                                                  shared_mat=True))
+        self.assertNotIn("/MAT/HYD_VISC/", s_none)
+        refusal = [w for w in r_none.warnings
+                   if "cavitation floor was NOT written" in w]
+        self.assertEqual(len(refusal), 1, r_none.warnings)
+        self.assertIn("the deck emits no /MAT/HYD_VISC at all", refusal[0])
+        self.assertNotIn("keep Pmin 0", refusal[0])
+        r_fl, _s, _e = _convert(_void_deck(void_mat="elastic"))
+        refusal = [w for w in r_fl.warnings
+                   if "cavitation floor was NOT written" in w]
+        self.assertEqual(len(refusal), 1, r_fl.warnings)
+        self.assertIn("the ELFORM-12 fluid's /MAT/HYD_VISC [2] keep Pmin 0",
+                      refusal[0])
+        r_opt, _s, _e = _convert(_void_deck(void_mat="elastic",
+                                            shared_mat=True),
+                                 initial_void_floor=False)
+        self.assertTrue(_has(r_opt.warnings, "--no-initial-void-floor:",
+                             "the deck emits no /MAT/HYD_VISC at all"),
+                        r_opt.warnings)
+
+    def test_the_floor_text_carries_bird_Bs_history(self):
+        """Finalization round: a final-state number is not evidence without
+        its history - bird_B's end KE +25.9 % sits in a history of +104 /
+        +382 / +337 / +18 / +26 % at the fifths."""
+        result, _s, _e = _convert(_void_deck())
+        applied = [w for w in result.warnings
+                   if "cavitation floor Pmin = -1e-20 is written" in w]
+        self.assertEqual(len(applied), 1)
+        for needle in ("+104 / +382 / +337 / +18 / +26 %",
+                       "KE +765 % at cycle 0", "IE +1111..+1525 %",
+                       "KE +272 / +398 / +144 / -72 / -92 %",
+                       "every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, applied[0])
 
 
 # ═════════════════════════════════════════════════════════════════════════════

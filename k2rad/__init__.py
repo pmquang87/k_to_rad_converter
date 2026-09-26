@@ -549,8 +549,8 @@ def convert(
         fluid (Vol I R17 p.28-134: one fluid per single-material-and-void
         mesh). **On by default.** NOT 0: ``hm_read_mat06.F:154`` reads an
         exact ``Pmin`` 0 as -INFINITY, so the ``Pmin 0`` every
-        ``/MAT/HYD_VISC`` carried was an UNBOUNDED tension in the cells the
-        fluid leaves. A stated PC is overridden and named; refused (nothing
+        ``*MAT_NULL`` + ``*EOS_*`` ``/MAT/HYD_VISC`` carried was an UNBOUNDED
+        tension in the cells the fluid leaves. A stated PC is overridden and named; refused (nothing
         written) on a deck with ``*ALE_MULTI-MATERIAL_GROUP`` and for a void
         that is not ELFORM 12 or not a LAW6 carrier. The void's low density is
         NOT written. MEASURED at nt 4: quadrature_B timeout → NORMAL in 1095
