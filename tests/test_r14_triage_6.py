@@ -1885,7 +1885,11 @@ class ShellOffsetGapmin(unittest.TestCase):
                        "CLAMPED to 0.5 x the smallest main-segment side "
                        "0.254", "0.1 x 0.254 = 0.0254", "i7sti3.F:1055-1063",
                        ":1075-1083", "bend.k", "-45.60 %", "0.98x",
-                       "--no-shell-offset-gapmin"):
+                       "--no-shell-offset-gapmin",
+                       # finalization round: the clamp at exactly 0.5 x the
+                       # side still prints WARNING 94 on bend (a float tie)
+                       "can still trip on a floating-point tie and print "
+                       "WARNING 94 - informational"):
             self.assertIn(needle, w[0])
         self.assertFalse(_has(result.warnings, _CLASS), result.warnings)
 
@@ -1910,6 +1914,25 @@ class ShellOffsetGapmin(unittest.TestCase):
         self.assertEqual(len(w), 1, result.warnings)
         self.assertIn("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE always does", w[0])
         self.assertNotIn("CLAMPED", w[0])
+        self.assertNotIn("floating-point tie", w[0])
+
+    def test_an_option_suffix_is_not_a_Remark_12_spelling(self):
+        """Finalization round (the two reviewers' A8 edge case): a Remark-12
+        type with an option suffix is NOT matched as "always offsets" - it
+        takes the SHLTHK / THKOPT rule, the direction that writes nothing new
+        (documented in ``_contact_base_spelling``)."""
+        from k2rad.writer.contacts import _contact_base_spelling
+        self.assertEqual(_contact_base_spelling(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_ID"),
+            "AUTOMATIC_SURFACE_TO_SURFACE_MORTAR")
+        kw = "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_ID"
+        r0, s0, _ = _convert(_offset_deck(shlthk=0, kw=kw, thick=(0.1,)))
+        self.assertEqual(_type7_cells(s0)[0], _G0)
+        self.assertFalse(_has(r0.warnings, _A8), r0.warnings)
+        r2, s2, _ = _convert(_offset_deck(shlthk=2, kw=kw, thick=(0.1,)))
+        self.assertEqual(_type7_cells(s2)[0], "                0.05")
+        self.assertTrue(_has(r2.warnings, _A8, "*CONTROL_CONTACT SHLTHK 2"),
+                        r2.warnings)
 
     def test_SHLTHK_1_excludes_a_rigid_shell_and_SHLTHK_2_includes_it(self):
         """Both sides rigid -> the KEEP arm, so the emitted secondary IS the

@@ -3736,15 +3736,22 @@ silently. A *partially* rigid secondary side keeps its interface and warns
 about the nodes removed from it.
 **A solid main against SHELLS that LS-DYNA offsets gets `Gapmin = t/2`**
 (R14 triage round 6, default ON, `--no-shell-offset-gapmin`). LS-DYNA offsets
-a shell contact surface by half its thickness — always for the `AUTOMATIC_*` /
-`SINGLE_SURFACE` spellings (Vol I R17 p.11-128/129 General Remark 12), for the
-others under `*CONTROL_CONTACT SHLTHK 2`, `SHLTHK 1` on deformable shells
+a shell contact surface by half its thickness — always for the eight bare
+`AUTOMATIC_*` / `SINGLE_SURFACE` / `AIRBAG_SINGLE_SURFACE` types Vol I R17
+p.11-128/129 General Remark 12 lists (`_ID` / `_TITLE` / `_MPP` stripped; a
+spelling with any other option suffix — `_MORTAR`, `_TIEBREAK`, `_THERMAL`,
+`_SMOOTH` … — is not matched and takes the next rule: some of them change the
+formulation, none was measured, and none reaches a shell secondary on any
+corpus here), for the others under `*CONTROL_CONTACT SHLTHK 2`, `SHLTHK 1` on deformable shells
 (p.12-70) or the contact's own Card B `THKOPT 1` (p.11-101/102) — and a solid
 segment by 0 (no `SLDTHK`), while the OpenRadioss starter, given no gap,
 derives `0.1 ×` the smallest main-segment side for a solid main
 (`i7sti3.F:1055-1063`). On the EMITTED sides (after the all-rigid-SSID swap)
 k2rad therefore writes `Gapmin = t/2`, capped at `0.5 ×` that side (above it
-the starter prints `WARNING 94` and does NOT clamp, `:1075-1083`). The
+the starter prints `WARNING 94` and does NOT clamp, `:1075-1083`; at exactly
+the cap its own `GAP > 0.5*GAPMX` test can still trip on a floating-point tie
+and print it — informational, the gap is used as written, and `bend` prints
+it once per domain-decomposition pass). The
 thickness is the one the `/SHELL` row carries (a `*PART_COMPOSITE` part: its
 ply sum). A secondary with several thicknesses is written only when every
 `t/2` is above the cap (each then gives the cap) and is refused by name

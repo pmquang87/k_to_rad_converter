@@ -1091,7 +1091,18 @@ def _contact_base_spelling(keyword: str) -> str:
     """The contact TYPE a *CONTACT keyword names, as General Remark 12 lists
     it: ``CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MPP_ID`` ->
     ``AUTOMATIC_SURFACE_TO_SURFACE`` (``CONTACT_`` and the ``_ID`` /
-    ``_TITLE`` / ``_MPP`` options stripped, in any order)."""
+    ``_TITLE`` / ``_MPP`` options stripped, in any order).
+
+    Only those three are stripped - deliberately. Remark 12 lists eight BARE
+    penalty types; an option suffix (``_MORTAR``, ``_TIEBREAK``, ``_TIED``,
+    ``_THERMAL``, ``_SMOOTH``, ``_ORTHO_FRICTION`` ...) is left on, so such a
+    spelling is not in :data:`_LS_ALWAYS_OFFSETS_SHELLS` and falls back to the
+    Card B ``THKOPT`` / ``*CONTROL_CONTACT SHLTHK`` rule - the direction that
+    writes nothing new. Some of those suffixes change the formulation
+    (``_MORTAR`` is not a penalty contact, a ``_TIEBREAK`` / ``_TIED`` card is
+    a tie) and none of them was measured; on every corpus here each such
+    interface has a solid secondary (both round-6 reviewers' sweeps), so
+    the rule reaches none of them either way (finalization of round 6)."""
     kw = keyword.upper().lstrip("*")
     if kw.startswith("CONTACT_"):
         kw = kw[len("CONTACT_"):]
@@ -1242,7 +1253,11 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
         f"half their thickness here ({reason}), so it engages them at t/2 = "
         f"{_round_sig(half):g} from the solid main; k2rad writes Gapmin = "
         f"{value:g}"
-        + (f", CLAMPED to 0.5 x the smallest main-segment side {edge:g}"
+        + (f", CLAMPED to 0.5 x the smallest main-segment side {edge:g} "
+           "(at exactly that cap the starter's own GAP > 0.5*GAPMX test, "
+           "i7sti3.F:1075, can still trip on a floating-point tie and print "
+           "WARNING 94 - informational, the gap is used as written; bend "
+           "prints it, once per domain-decomposition pass)"
            if clamped else "")
         + (f" (the secondary surface carries shells of thickness {ts}; every "
            "t/2 is above the ceiling, so each gives the same Gapmin)"
