@@ -4176,7 +4176,12 @@ secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k, the
 never-launched `show-cases/contact-overview/main.k` and the two R14 Yaris
 giants) and of the two full-vehicle models in `C:/openradioss_run` (4 489 /
 5 102 spotweld beams), none run but spotweld.k — which is why neither is a
-default.
+default. On the physics validator's one-weld coupon (round 6, finalization)
+rule 1 alone built the connector and still carried no force (the tie stays
+dropped) at 3.16× the cycles (133 → 420), and the `*MAT_SPOTWELD` connector
+k2rad already writes raised starter `WARNING 506` there — the elastic
+stiffness changed against the bilinear yield curve's slope, on that coupon's
+`SIGY 500` / `EH 0`; spotweld.k's both-flags arm prints none.
 
 ### Airbags / monitored volumes
 

@@ -1593,7 +1593,8 @@ that decided it and the deck that would decide it next.
    no `*CONTROL_IMPLICIT_AUTO`, 11 / 6 state IAUTO 0; a blank/zero `IAUTO` is
    *"Constant time step size"*, Vol I R17 p.12-277, and every reference
    d3hsp of the class echoes control method 0), k2rad writes `/IMPL/DT/2` on
-   every one of them, and 42 of the 50 are `normal`. (Round 5's figure
+   every one of them, and 42 of the 50 were `normal` at 5aef5a0 (43 after
+   round 6's campaign re-run: `ie_shell`, B1). (Round 5's figure
    counted every `/IMPL` key without the card — including ~60 MODAL keys
    whose engine is `/IMPL/LINEAR` with no `/IMPL/DT` card at all — and missed
    the 11 that state IAUTO 0; the mirror carries `/IMPL/DT/2` on 72 keys / 56
@@ -1805,7 +1806,11 @@ failure exponents (`plates.nrbc` rupture +29.4 % → +1.7 %), A3 the
 spring-token lumped-mass screen (`gnonspring` TOTAL MASS = LS-DYNA's), A4
 `*CONSTRAINED_TIED_NODES_FAILURE` refused by name, A5 `*CONSTRAINED_LINEAR_*`
 → `/MPC`, A6 the zero-coupling `*MAT_ANISOTROPIC_ELASTIC` (`11.1.sbrake`
-starter 3 ERROR → 0), A7 `J = −ΣIN` under `--mass-weighted-inivel`, A8 the
+starter 3 ERROR → 0; its pads ride on `Isolid 14` since the finalization
+round, because the element-derived `/PROP/TYPE6` frame was MEASURED
+misoriented on `Isolid 17` — 8 of 8 AOPT-0 arms and 4 of 6 AOPT-3 faces on a
+unit cube, `Isolid 14` / `24` right on every arm), A7 `J = −ΣIN` under
+`--mass-weighted-inivel`, A8 the
 shell-offset Gapmin (`bend`); part B: B1 stated-zero implicit tolerances →
 LS-DYNA's ECTOL default (11 keys / 11 models; `ie_shell` a STATUS-ONLY
 promotion at IE −99.87 %; `doorbeam` +380.25 → +582.00 %, named), B2 the
@@ -1953,6 +1958,47 @@ measurement that decided it and the deck that would decide it next.
     36 models of them about the stub injected into a deck that states no
     `*CONTACT` at all. A one-line gate (skip the stub's title, as
     `_maybe_derived_gapmin` already does) moves warnings only; deferred.
+21. **`ie_shell`'s `IMFLAG −9`** — a curve that switches the solution method
+    between explicit and implicit over time (Vol I R17 p.12-323 Remark 1:
+    *"IMFLAG < 0 indicates a curve ID that gives the solution method as a
+    function of time"*) — is not converted: the converted run is implicit
+    throughout, so B1's NORMAL is a STATUS-ONLY promotion (IE −99.87 %, KE 0
+    against LS-DYNA's 149.9; 92 cycles at nt 4 = nt 2). Next: whether an
+    OpenRadioss run can change its solution method mid-run at all; if not, a
+    named refusal on every `IMFLAG < 0` deck.
+22. **The MAT_126 honeycomb `/PROP/TYPE6`** keeps its pinned `Isolid 1`
+    (dyna2rad's value, the engineering-strain yield curves) with the
+    element-derived frame (`Ip 20` for AOPT 0). The finalization round moved
+    only `Isolid 17` bases to `14`; the physics validator measured `Isolid 1`
+    with LAW93 and `Ip 20` wrong on 3 of 3 checks, and LAW50 on it was not
+    measured. Next: the A6 unit-cube coupon with the honeycomb's LAW50, both
+    connectivities, before the pin is weighed against the frame.
+23. **A rigid body the `--mass-weighted-inivel` card FULLY covers** keeps the
+    nodal `IN` residual in its inertia: A7 writes `J = −ΣIN` only on the
+    bodies the re-point writes an `/INIVEL/ROT` on, and a fully covered
+    spinning rigid shell plate reads KE_R 7.337 against the point-mass 6.280
+    (+16.8 %, the physics validator's coupon). Next: the same `J` on every
+    shell-secondary `/RBODY` under the flag, measured on that coupon.
+24. **A Remark-12 contact spelling with an option suffix** (`_MORTAR`,
+    `_TIEBREAK`, `_THERMAL`, `_SMOOTH` …) is not matched by A8's "always
+    offsets" list and takes the Card B `THKOPT` / `SHLTHK` rule — a
+    documented choice (some suffixes change the formulation, none was
+    measured); reach 0, every such interface on the corpora has a solid
+    secondary. Next: a shell-secondary carrier with a reference.
+25. **The orthotropic TETRAHEDRON frame on `/PROP/TYPE6`**: the finalization
+    moved only parts with a `/BRICK` to `Isolid 14`; a tetrahedron-only
+    orthotropic part keeps its element-derived frame unmeasured. Next: the
+    unit-cube coupon meshed as tetrahedra, both connectivities.
+26. **`efg/metal-cutting/main.k` under B5**: `normal → error_engine`, named.
+    LS-DYNA's own d3hsp spc summary lists exactly the 54 nodes and codes B5
+    writes (36 × `001 111` + 18 × `111 111`), yet the converted run with them
+    ends ERROR at cycle 26 on every run (nt 4 and nt 2, identical), while its
+    base without them reached NORMAL in 3 of 10 fresh runs this round (two
+    of them in the campaign re-run's own window) — a flaky, UNREFERENCED base: LS-DYNA's run
+    stopped in its input phase with two fatal errors, so neither arm can be
+    scored. Kept default ON by the round's decision. Next: the GLOBAL arm with
+    the rotational codes stripped, and the same arm explicit, to see which
+    constraint the implicit run cannot carry.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
