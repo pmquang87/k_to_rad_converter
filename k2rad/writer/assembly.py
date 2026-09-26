@@ -757,6 +757,46 @@ def _warn_implicit_auto_drops(state: ConversionState,
     state.warn(msg.rstrip())
 
 
+#: LS-DYNA's own *CONTROL_IMPLICIT_SOLUTION card-1 defaults (Vol I R17
+#: p.12-354): DCTOL 0.001, ECTOL 0.01, RCTOL 1e10 ("effectively disabled",
+#: p.12-362 Remark 5). ECTOL is the one B1 writes; the other two are named.
+_LS_DEFAULT_DCTOL = 0.001
+_LS_DEFAULT_ECTOL = 0.01
+
+
+def _warn_zero_tolerance_ectol(state: ConversionState, sol) -> None:
+    """One warning per deck: the stated-zero ``*CONTROL_IMPLICIT_SOLUTION``
+    got LS-DYNA's own ECTOL default (R14 triage round 6, B1).
+
+    Facts only, and every figure here is a measurement on the R14 roster at
+    nt 4 AND nt 2 (identical final state and cycle count on every pair).
+    """
+    state.warn(
+        "*CONTROL_IMPLICIT_SOLUTION states no usable convergence tolerance "
+        f"(DCTOL={sol.dctol:g}, ECTOL={sol.ectol:g}, RCTOL={sol.rctol:g}: "
+        "none lies in (0, 1)). LS-DYNA runs such a card on its OWN defaults - "
+        "every one of the 11 R14 reference d3hsp files of this shape (all "
+        "three cells 0.0 or blank) echoes 'displacement convergence tolerance "
+        "0.1000E-02', 'energy convergence tolerance 0.1000E-01' and 'residual "
+        "convergence tolerance 0.9990E+11' (Vol I R17 p.12-354: DCTOL 0.001, "
+        "ECTOL 0.01, RCTOL 1e10), although the keyword's header (p.12-353) "
+        "says a stated 0 means zero. k2rad therefore writes LS-DYNA's ENERGY "
+        "criterion, /IMPL/NONLIN/1 Itol 1, Toli 0.01, instead of its own force "
+        "default (Itol 2, Toli 0.01). DCTOL is NOT carried: LS-DYNA measures "
+        "it against the TOTAL displacement (DNORM 2) and no /IMPL/NONLIN Itol "
+        "offers that norm (nl_solv.F:410-421 is per step); the combined Itol "
+        "13 was measured to end 3 of 3 NORMAL quasi-static R14 decks in ERROR. "
+        "MEASURED on the 11 R14 decks of this shape at nt 4 and nt 2 "
+        "(identical): NORMAL kept on all 10 that were NORMAL; tensile2 IE "
+        "+7.36 % -> -0.54 % against its reference at 0.11x the cycles; "
+        "doorbeam +380.25 % -> +582.00 % (a springback deck already ~5x off "
+        "its reference - a named regression); ie_shell ERROR (TIMESTEP LIMIT "
+        "at cycle 4) -> NORMAL in 92 cycles, but at IE -99.87 % and KE 0 "
+        "against the reference's 149.9 - a STATUS change only (its IMFLAG -9 "
+        "implicit/explicit switching curve is not converted). "
+        "--no-zero-tolerance-ectol restores the force default.")
+
+
 def _make_engine_implicit(state: ConversionState) -> List[str]:
     # The two "what this deck asked for and did not get" warnings run for BOTH
     # implicit shapes. They used to sit below the modal early return, so a
@@ -806,8 +846,22 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     #          plateau seen when a free rigid body engages contact.
     # Overridable from LS-DYNA *CONTROL_IMPLICIT_SOLUTION: ilimit -> L_A, and
     # rctol/ectol/dctol -> Itol(2/1/3) + Toli (whichever tolerance the user set).
+    #
+    # A card whose three tolerances are ALL 0.0 / blank (or >= 1) gets
+    # LS-DYNA's own ECTOL default, Itol 1 / Toli 0.01 (round 6, B1; default
+    # ON, --no-zero-tolerance-ectol): every R14 reference d3hsp of that shape
+    # echoes DCTOL 0.001 / ECTOL 0.01 / RCTOL 0.999e11 - LS-DYNA applies its
+    # defaults to the stated zeros. L_A is NOT touched (the documented 2
+    # above; L_A 11 = LS-DYNA's ILIMIT default was measured and is not
+    # better). A NEGATIVE cell is a tolerance CURVE id (Vol I R17 p.12-355
+    # "LT.0: -XCTOL references a curve"), not a stated zero: it keeps the
+    # force default and is named as dropped (reach 0 of the 112 parsed
+    # roster cards). A deck with NO card keeps "2 2 0.01" - its one roster
+    # carrier, nvh/example-11-02/11.3.sqt_iga_s.k, is a refused conversion
+    # with no elements.
     sol = state.ctrl_implicit_sol
     l_a, itol, toli = 2, 2, 0.01
+    zero_tol_ectol = False
     if sol:
         if sol.ilimit and sol.ilimit > 0:
             l_a = sol.ilimit
@@ -826,6 +880,11 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             itol, toli = 1, sol.ectol
         elif sol.dctol and 0.0 < sol.dctol < 1.0:    # displacement (LS-DYNA dctol)
             itol, toli = 3, sol.dctol
+        elif (state.options.zero_tolerance_ectol
+              and min(sol.rctol, sol.ectol, sol.dctol) >= 0.0):
+            # B1: no usable tolerance, and none of the three is a curve id
+            itol, toli = 1, _LS_DEFAULT_ECTOL
+            zero_tol_ectol = True
         for name, val in (("rctol", sol.rctol), ("ectol", sol.ectol), ("dctol", sol.dctol)):
             if val and val >= 1.0:
                 state.warn(
@@ -838,7 +897,22 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
                     "an all-blank leading card shifting the fixed-format "
                     "columns is the other reading, worth a look if the value "
                     "is not 1e10. "
-                    f"Using robust /IMPL/NONLIN default Toli={toli:g}.")
+                    + ("Using LS-DYNA's own ECTOL default instead (Itol 1, "
+                       "Toli 0.01; see the warning below)."
+                       if zero_tol_ectol else
+                       f"Using robust /IMPL/NONLIN default Toli={toli:g}."))
+        for name, val in (("rctol", sol.rctol), ("ectol", sol.ectol), ("dctol", sol.dctol)):
+            if val < 0.0:
+                # reach 0 of the 112 parsed roster cards; a probe pins it
+                state.warn(
+                    f"*CONTROL_IMPLICIT_SOLUTION {name.upper()}={val:g} is "
+                    "NEGATIVE, i.e. Vol I R17 p.12-355's 'LT.0: "
+                    f"-{name.upper()} references a curve that defines "
+                    "tolerance as a function of time'. The curve is DROPPED: "
+                    "/IMPL/NONLIN takes one constant tolerance, here "
+                    f"Itol {itol}, Toli {toli:g}.")
+        if zero_tol_ectol:
+            _warn_zero_tolerance_ectol(state, sol)
     lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
 

@@ -434,13 +434,13 @@ class ImplicitEngineTests(unittest.TestCase):
     """Engine /IMPL generation: QSTAT/DTSCAL + /IMPL/NONLIN defaults and
     *CONTROL_IMPLICIT_SOLUTION overrides."""
 
-    def _engine_for(self, deck: str) -> str:
+    def _engine_for(self, deck: str, **kw) -> str:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = os.path.join(tmp.name, "impl.k")
         with open(path, "w") as fh:
             fh.write(deck)
-        return Path(convert(path).engine_path).read_text()
+        return Path(convert(path, **kw).engine_path).read_text()
 
     def test_qstat_and_nonlin_defaults(self):
         engine = self._engine_for(IMPL_QSTAT_K)
@@ -474,23 +474,38 @@ class ImplicitEngineTests(unittest.TestCase):
         # ilimit=5 -> L_A=5; ectol=0.005 (rctol unset) -> Itol=1 (energy), Toli=0.005.
         self.assertIn("5 1 0.005", engine)
 
+    _BLANK_TOL_CARD = (
+        "*CONTROL_IMPLICIT_SOLUTION\n"
+        "$#  nsolvr    ilimit    maxref     dctol     ectol     rctol\n"
+        "\n"
+        "$#   dnorm    diverg     istif   nlprint\n"
+        "                              2\n"
+        "*CONTROL_TERMINATION")
+
     def test_blank_leading_card_does_not_corrupt_tolerance(self):
         # End-to-end guard for a *CONTROL_IMPLICIT_SOLUTION whose first
         # (nsolvr…abstol) card is blank. The parser now PRESERVES that blank card
         # so card 2's "2" stays in the nlprint column (see
         # BlankCardPreservationTests for the column-level check); the writer's
         # tolerance sanity-check (reject Toli >= 1.0) remains as defense-in-depth.
-        # Either way the engine must keep the robust default, not emit "2 3 2".
-        deck = IMPL_QSTAT_K.replace(
-            "*CONTROL_TERMINATION",
-            "*CONTROL_IMPLICIT_SOLUTION\n"
-            "$#  nsolvr    ilimit    maxref     dctol     ectol     rctol\n"
-            "\n"
-            "$#   dnorm    diverg     istif   nlprint\n"
-            "                              2\n"
-            "*CONTROL_TERMINATION",
-        )
+        # Either way the engine must not emit "2 3 2".
+        #
+        # R14 triage round 6 (B1) changed the EXPECTED line deliberately: a
+        # blank tolerance card is DCTOL = ECTOL = RCTOL = 0.0, i.e. the
+        # stated-zero class, and LS-DYNA runs that on its own ECTOL default
+        # (every R14 reference d3hsp of the shape echoes 0.1000E-01), so the
+        # default arm now writes Itol 1 (energy), Toli 0.01. The twin below
+        # keeps the old force default under --no-zero-tolerance-ectol.
+        deck = IMPL_QSTAT_K.replace("*CONTROL_TERMINATION",
+                                    self._BLANK_TOL_CARD)
         engine = self._engine_for(deck)
+        self.assertIn("  2 1 0.01", engine)
+        self.assertNotIn("2 3 2", engine)
+
+    def test_blank_leading_card_under_the_B1_opt_out_keeps_force(self):
+        deck = IMPL_QSTAT_K.replace("*CONTROL_TERMINATION",
+                                    self._BLANK_TOL_CARD)
+        engine = self._engine_for(deck, zero_tolerance_ectol=False)
         self.assertIn("2 2 0.01", engine)
         self.assertNotIn("2 3 2", engine)
 

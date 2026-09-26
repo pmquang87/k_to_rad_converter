@@ -5154,6 +5154,29 @@ the answer: `ex_07_beam_elform_1` walks from `t = 0.3004` to `t = 1.000` at
 **−1.72 %** of its reference and still exits ERROR on the last increment,
 while `ex_05_beam_elform_3_&_6` turns a ~2 s ERROR into a 600 s timeout —
 which is why it ships off.
+`*CONTROL_IMPLICIT_SOLUTION` whose `DCTOL`/`ECTOL`/`RCTOL` are **all 0 or
+blank** → `/IMPL/NONLIN/1` **Itol 1, Toli 0.01** — LS-DYNA's own ECTOL
+default — instead of k2rad's force default Itol 2 (round 6, **on by
+default**, `--no-zero-tolerance-ectol` keeps Itol 2). The keyword's header
+(Vol I R17 p.12-353) says a stated 0 means zero, but LS-DYNA does not run it
+that way: every one of the **11** R14 reference `d3hsp` files of this shape
+echoes `displacement convergence tolerance 0.1000E-02`, `energy convergence
+tolerance 0.1000E-01` and `residual convergence tolerance 0.9990E+11` — the
+p.12-354 defaults DCTOL 0.001 / ECTOL 0.01 / RCTOL 1e10. `L_A` is unchanged
+(LS-DYNA's `ILIMIT` default 11 was measured and is not better); DCTOL is not
+carried, because LS-DYNA's `DNORM 2` measures the TOTAL displacement and no
+`/IMPL/NONLIN` Itol offers that norm (`nl_solv.F:410-421` is per step — the
+combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
+**negative** cell is a tolerance CURVE (p.12-355), not a stated zero: it keeps
+Itol 2 and is named as dropped. Reach: **11 deck keys on 11 emitted models**
+(`_0001.rad` only). MEASURED at `nt` 4 **and** `nt` 2 (identical): NORMAL kept
+on all 10 that were NORMAL; `tensile2` IE **+7.36 % → −0.54 %** at 0.11× the
+cycles; `doorbeam` **+380.25 % → +582.00 %** (a springback deck already ~5×
+off its reference — a named regression); `ie_shell` ERROR (TIMESTEP LIMIT at
+cycle 4) → NORMAL in 92 cycles, but at IE **−99.87 %** and KE 0 against the
+reference's 149.9 — a **status-only** promotion (its `IMFLAG −9`
+implicit/explicit switching curve is not converted). A deck with no
+`*CONTROL_IMPLICIT_SOLUTION` at all keeps `2 2 0.01`.
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`

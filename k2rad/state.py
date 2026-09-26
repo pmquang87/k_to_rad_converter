@@ -7273,6 +7273,27 @@ class ConvertOptions:
     #     on the last increment (its own RCTOL = 1e-5).
     # It buys the load path, not the answer. Net movers: zero.
     arclength_riks: bool = False
+    # --no-zero-tolerance-ectol: keep k2rad's force default /IMPL/NONLIN
+    # Itol 2 / Toli 0.01 on a *CONTROL_IMPLICIT_SOLUTION whose DCTOL, ECTOL
+    # and RCTOL are ALL 0.0 / blank (R14 triage round 6, B1).
+    #
+    # ON by default. Vol I R17 p.12-354's card-1 defaults are DCTOL 0.001,
+    # ECTOL 0.01, RCTOL 1e10, and although the keyword's header (p.12-353)
+    # says a stated 0 means zero, every one of the 11 R14 reference d3hsp
+    # files of this shape echoes 'displacement convergence tolerance
+    # 0.1000E-02', 'energy convergence tolerance 0.1000E-01' and 'residual
+    # convergence tolerance 0.9990E+11': LS-DYNA applies its defaults to the
+    # stated zeros. So k2rad writes LS-DYNA's ENERGY criterion, Itol 1 /
+    # Toli 0.01, L_A unchanged. DCTOL is not carried (LS-DYNA's DNORM 2 is a
+    # TOTAL-displacement norm; nl_solv.F:410-421 is per step, and the
+    # combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
+    # NEGATIVE cell is a tolerance curve (p.12-355) and keeps the force
+    # default. MEASURED at nt 4 = nt 2 on the 11 keys / 11 models of this
+    # shape: NORMAL kept 10/10; tensile2 IE +7.36 % -> -0.54 % at 0.11x the
+    # cycles; doorbeam +380.25 % -> +582.00 % (named regression); ie_shell
+    # ERROR -> NORMAL in 92 cycles at IE -99.87 % (a status-only promotion).
+    # OFF restores Itol 2 / Toli 0.01.
+    zero_tolerance_ectol: bool = True
     # --no-discrete-offset: stop honouring *ELEMENT_DISCRETE's OFFSET cell.
     #
     # ON by default. Vol I R17 p.19-33: OFFSET is "a displacement or rotation

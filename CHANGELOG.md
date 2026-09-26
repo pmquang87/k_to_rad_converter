@@ -11,6 +11,56 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 6 — PART B (implicit decks, the
+  `*CONSTRAINED_GLOBAL` carriers, the spotweld opt-in pair, and the record).**
+  One commit per item; every implicit figure carries its `nt` (4 AND 2 unless
+  it says otherwise), every reach is stated as `N deck keys on M emitted
+  models`, and no DEFAULT change of this part reaches a `match` row.
+  - **B1 — a `*CONTROL_IMPLICIT_SOLUTION` whose tolerances are all 0 / blank
+    gets LS-DYNA's own ECTOL default (default ON,
+    `--no-zero-tolerance-ectol`).** k2rad wrote its FORCE default
+    `/IMPL/NONLIN/1` `2 2 0.01` whenever none of RCTOL / ECTOL / DCTOL lay in
+    (0, 1) (`writer/assembly.py`, `_make_engine_implicit`). Vol I R17
+    p.12-354's card-1 defaults are DCTOL 0.001 / ECTOL 0.01 / RCTOL 1e10, and
+    although the keyword's header (p.12-353) says a stated zero means zero,
+    LS-DYNA does not run it that way: every one of the 11 R14 reference
+    `d3hsp` files of this shape echoes `displacement convergence tolerance
+    0.1000E-02`, `energy convergence tolerance 0.1000E-01` and `residual
+    convergence tolerance 0.9990E+11` (`tensile2.d3hsp:1120-1127`). The
+    stated-zero card now writes LS-DYNA's ENERGY criterion, Itol 1 / Toli 0.01;
+    `L_A` is unchanged (LS-DYNA's `ILIMIT` default 11 was measured and is not
+    better: tensile2 −0.47 % vs −0.54 %, doorbeam +536.96 % vs +582.00 %);
+    DCTOL is not carried (LS-DYNA's `DNORM 2` is a TOTAL-displacement norm,
+    `nl_solv.F:410-421` is per step, and the combined Itol 13 ended 3 of 3
+    NORMAL quasi-static decks in ERROR). A NEGATIVE cell is a tolerance CURVE
+    (p.12-355 "LT.0: -XCTOL references a curve"), not a stated zero: it keeps
+    `2 2 0.01` and is named as DROPPED (reach 0 of the 112 parsed roster cards;
+    a probe pins it). A value `>= 1` beside the zeros keeps its warning, whose
+    tail now names the ECTOL default the deck gets. **Reach 11 deck keys on 11
+    emitted models, `_0001.rad` only** (aellipse, tensile1, tensile2,
+    rigid_tip, bumper, ie_shell, ellipse, doorbeam, 4.2.frf.cant-1,
+    6.4.tbl.psd.thermal-1, 6.5.tbl.psd.prepressure-1), plus one non-roster
+    default byte mover, `C:/openradioss_run/ls-dyna_example/
+    implicit_general-nonlinearity/4.3_General_Nonlinearity.key` (a blank
+    tolerance line). MEASURED at nt 4 and nt 2 (identical final state and
+    cycle count on every pair): NORMAL kept on all 10 that were NORMAL;
+    **tensile2 IE +7.36 % → −0.54 %** against its reference at 0.11× the
+    cycles (685 → 75); 4.2.frf.cant-1 −0.31 % → −0.60 %; 6.5.tbl.psd +0.03 % →
+    −0.50 % at 0.016× the cycles; rigid_tip / ellipse / aellipse within 0.6 pp;
+    tensile1 / bumper / 6.4.tbl.psd inert. **Named regression: doorbeam
+    +380.25 % → +582.00 %** (a springback deck already ~5× off its reference).
+    **Status-only promotion: ie_shell ERROR (TIMESTEP LIMIT at cycle 4) →
+    NORMAL in 92 cycles, at IE −99.87 % and KE 0 against the reference's
+    149.9** — a NEW near-zero model, not a fix (its `IMFLAG −9`
+    implicit/explicit switching curve is not converted). No verdict can
+    regress: 10 of the rows are `not_comparable` by LS-DYNA's structural-zero
+    KE. A deck with no `*CONTROL_IMPLICIT_SOLUTION` keeps `2 2 0.01`
+    (`11.3.sqt_iga_s`, the one roster key, is a refused conversion). One
+    existing test changed its EXPECTED line on purpose:
+    `tests/test_converter.py` `test_blank_leading_card_does_not_corrupt_tolerance`
+    (a blank tolerance card IS this class) now pins `  2 1 0.01`, beside a new
+    twin that pins `2 2 0.01` under `--no-zero-tolerance-ectol`.
+
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a
   measured arm at `nt` 4 against the LS-DYNA reference on `F:` unless it says

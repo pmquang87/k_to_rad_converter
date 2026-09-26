@@ -1,4 +1,4 @@
-"""Tests for the R14 CAMPAIGN TRIAGE batch, round 6 — PART A:
+"""Tests for the R14 CAMPAIGN TRIAGE batch, round 6 — PART A, and PART B below:
 
   A1  the ELFORM-12 void cavitation floor: ``Pmin = -1e-20`` on the
       ``/MAT/HYD_VISC`` of a ``*INITIAL_VOID`` deck's fluid (default ON,
@@ -16,6 +16,21 @@
   A8  the shell-offset Gapmin: ``t/2`` on a solid-main ``/INTER/TYPE7``
       against shells LS-DYNA offsets (default ON,
       ``--no-shell-offset-gapmin``)
+
+PART B:
+
+  B1  a ``*CONTROL_IMPLICIT_SOLUTION`` whose tolerances are all 0 / blank gets
+      LS-DYNA's own ECTOL default, ``/IMPL/NONLIN`` Itol 1 Toli 0.01 (default
+      ON, ``--no-zero-tolerance-ectol``)
+  B2  the constant-step warning for an implicit deck with no
+      ``*CONTROL_IMPLICIT_AUTO`` (warning only)
+  B3  ``--implicit-constant-step``: ``/IMPL/DT/STOP`` DT_MAX := DT0 (opt-in)
+  B4  the implicit-dynamics + initial-velocity ENGINE-defect warning and the
+      ``/IMPL/NONLIN/SOLVINFO`` remedy sentence
+  B5  ``*CONSTRAINED_GLOBAL`` -> ``/BCS`` through the TC/RC union (default ON,
+      ``--no-constrained-global``)
+  B6  ``--spotweld-node-synthesis`` / ``--beam-contact-secondary`` (opt-in)
+  B7  the corrected records and texts (the retraction guards)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are the round-4/5 ones, copied (not imported) so this module
@@ -2074,6 +2089,143 @@ class Round6RetractedStatementsA(unittest.TestCase):
                             if k.replace("\\", "/") == rel), None)
                 self.assertIsNotNone(key, f"{rel} was not scanned")
                 self.assertIn(_collapse(needle), texts[key])
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _fixture_text(name: str) -> str:
+    root = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(root, "fixtures", name)) as fh:
+        return fh.read()
+
+
+def _impl_deck(solution=None, extra: str = "", general=None,
+               termination=None) -> str:
+    """The ``implicit_qstat`` golden deck (DT0 0.01, ENDTIM 1.0, no
+    ``*CONTROL_IMPLICIT_AUTO``) plus a ``*CONTROL_IMPLICIT_SOLUTION`` whose
+    card 1 is *solution* (a row, or None for no card) and any *extra* cards.
+    *general* / *termination* replace the two data rows when given."""
+    deck = _fixture_text("implicit_qstat.k")
+    if general is not None:
+        deck = deck.replace("         1      0.01\n", general + "\n")
+    if termination is not None:
+        deck = deck.replace("*CONTROL_TERMINATION\n       1.0\n",
+                            "*CONTROL_TERMINATION\n" + termination + "\n")
+    add = ""
+    if solution is not None:
+        add += "*CONTROL_IMPLICIT_SOLUTION\n" + solution + "\n"
+    add += extra
+    return deck.replace("*CONTROL_TERMINATION", add + "*CONTROL_TERMINATION")
+
+
+def _nonlin_row(engine: str) -> str:
+    """The ``L_A Itol Toli`` data line of ``/IMPL/NONLIN/1``."""
+    lines = engine.splitlines()
+    i = lines.index("/IMPL/NONLIN/1")
+    return lines[i + 2]
+
+
+_B1_HEAD = "*CONTROL_IMPLICIT_SOLUTION states no usable convergence tolerance"
+
+
+class ZeroToleranceEctol(unittest.TestCase):
+    """B1: all-zero ``*CONTROL_IMPLICIT_SOLUTION`` tolerances -> LS-DYNA's
+    ECTOL default, and every other branch byte-identical (the spec's table,
+    one row per test; expectations hand-derived from the rule)."""
+
+    def _arm(self, row, **kw):
+        res, _starter, engine = _convert(_impl_deck(row), **kw)
+        return res.warnings, _nonlin_row(engine)
+
+    def test_stated_zeros_get_the_ECTOL_default(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.0", "0.0"))
+        self.assertEqual(line, "  2 1 0.01")
+        self.assertTrue(_has(warns, _B1_HEAD, "0.1000E-01",
+                             "--no-zero-tolerance-ectol", "Itol 1, Toli 0.01",
+                             "-0.54 %", "+582.00 %", "-99.87 %"))
+
+    def test_blank_tolerances_are_the_same_class(self):
+        warns, line = self._arm(_row(12))
+        self.assertEqual(line, "  2 1 0.01")
+        self.assertTrue(_has(warns, _B1_HEAD))
+
+    def test_the_opt_out_keeps_the_force_default(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.0", "0.0"),
+                                zero_tolerance_ectol=False)
+        self.assertEqual(line, "  2 2 0.01")
+        self.assertFalse(_has(warns, _B1_HEAD))
+
+    def test_the_RCTOL_branch_is_unchanged(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.0", "0.005"))
+        self.assertEqual(line, "  2 2 0.005")
+        self.assertFalse(_has(warns, _B1_HEAD))
+
+    def test_the_ECTOL_branch_is_unchanged(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.02", "0.0"))
+        self.assertEqual(line, "  2 1 0.02")
+        self.assertFalse(_has(warns, _B1_HEAD))
+
+    def test_the_DCTOL_branch_is_unchanged(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.003", "0.0", "0.0"))
+        self.assertEqual(line, "  2 3 0.003")
+        self.assertFalse(_has(warns, _B1_HEAD))
+
+    def test_ILIMIT_is_kept_as_L_A(self):
+        warns, line = self._arm(_row(12, 11, 15, "0.0", "0.0", "0.0"))
+        self.assertEqual(line, "  11 1 0.01")
+        self.assertTrue(_has(warns, _B1_HEAD))
+
+    def test_a_value_ge_1_beside_zeros_names_the_ECTOL_default(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.0", "1.0E+10"))
+        self.assertEqual(line, "  2 1 0.01")
+        self.assertTrue(_has(warns, _B1_HEAD))
+        ge1 = [w for w in warns if "rctol=1e+10 is >= 1.0" in w]
+        self.assertEqual(len(ge1), 1, warns)
+        self.assertTrue(ge1[0].endswith(
+            "Using LS-DYNA's own ECTOL default instead (Itol 1, Toli 0.01; "
+            "see the warning below)."), ge1[0])
+
+    def test_a_value_ge_1_beside_a_real_ECTOL_keeps_the_old_text(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "0.01", "1.0E+10"))
+        self.assertEqual(line, "  2 1 0.01")
+        self.assertFalse(_has(warns, _B1_HEAD))
+        ge1 = [w for w in warns if "rctol=1e+10 is >= 1.0" in w]
+        self.assertEqual(len(ge1), 1, warns)
+        self.assertTrue(ge1[0].endswith(
+            "Using robust /IMPL/NONLIN default Toli=0.01."), ge1[0])
+
+    def test_no_card_keeps_the_force_default(self):
+        warns, line = self._arm(None)
+        self.assertEqual(line, "  2 2 0.01")
+        self.assertFalse(_has(warns, _B1_HEAD))
+
+    def test_a_negative_ECTOL_is_a_curve_not_a_stated_zero(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "-7", "0.0"))
+        self.assertEqual(line, "  2 2 0.01")
+        self.assertFalse(_has(warns, _B1_HEAD))
+        self.assertTrue(_has(warns, "ECTOL=-7 is NEGATIVE",
+                             "The curve is DROPPED", "Itol 2, Toli 0.01"))
+
+    def test_a_negative_ECTOL_under_the_opt_out(self):
+        warns, line = self._arm(_row(12, 0, 0, "0.0", "-7", "0.0"),
+                                zero_tolerance_ectol=False)
+        self.assertEqual(line, "  2 2 0.01")
+        self.assertFalse(_has(warns, _B1_HEAD))
+        self.assertTrue(_has(warns, "ECTOL=-7 is NEGATIVE",
+                             "The curve is DROPPED"))
+
+    def test_the_warning_fires_once_per_deck(self):
+        warns, _line = self._arm(_row(12, 0, 0, "0.0", "0.0", "0.0"))
+        self.assertEqual(sum(_B1_HEAD in w for w in warns), 1)
+
+    def test_the_golden_deck_is_not_reached(self):
+        """``implicit_qstat`` states no SOLUTION card: B1's own control."""
+        res, _s, engine = _convert(_fixture_text("implicit_qstat.k"))
+        self.assertEqual(_nonlin_row(engine), "  2 2 0.01")
+        self.assertFalse(_has(res.warnings, _B1_HEAD))
 
 
 if __name__ == "__main__":

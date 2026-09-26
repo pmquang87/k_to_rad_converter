@@ -98,6 +98,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          fixpoint_count_text: str = "",
                          qstat_dtscal_text: str = "",
                          arclength_riks: bool = False,
+                         zero_tolerance_ectol: bool = True,
                          discrete_offset: bool = True,
                          spring_token_mass_compensation: bool = True,
                          shell_to_solid_rbody: bool = True,
@@ -228,6 +229,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             kwargs["qstat_dtscal"] = qd_v
 
     kwargs["arclength_riks"] = bool(arclength_riks)
+
+    kwargs["zero_tolerance_ectol"] = bool(zero_tolerance_ectol)
 
     kwargs["discrete_offset"] = bool(discrete_offset)
 
@@ -368,6 +371,7 @@ class ConverterGUI:
         self.fixpoint_count = tk.StringVar(value="0")
         self.qstat_dtscal = tk.StringVar(value="")
         self.arclength_riks = tk.BooleanVar(value=False)
+        self.zero_tolerance_ectol = tk.BooleanVar(value=True)
         self.discrete_offset = tk.BooleanVar(value=True)
         self.spring_token_mass_comp = tk.BooleanVar(value=True)
         self.shell_to_solid_rbody = tk.BooleanVar(value=True)
@@ -745,6 +749,16 @@ class ConverterGUI:
             variable=self.shell_offset_gapmin).grid(
                 row=35, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*CONTROL_IMPLICIT_SOLUTION with DCTOL/ECTOL/RCTOL all 0 or "
+                     "blank: write LS-DYNA's own ECTOL default (/IMPL/NONLIN "
+                     "Itol 1, Toli 0.01) - ON. Its d3hsp echoes 0.001 / 0.01 on "
+                     "all 11 R14 decks of this shape. tensile2 +7.36 % -> "
+                     "-0.54 %; doorbeam +380 % -> +582 % (named); ie_shell "
+                     "ERROR -> NORMAL at -99.87 % (status only)",
+            variable=self.zero_tolerance_ectol).grid(
+                row=36, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -982,6 +996,7 @@ class ConverterGUI:
                 fixpoint_count_text=self.fixpoint_count.get(),
                 qstat_dtscal_text=self.qstat_dtscal.get(),
                 arclength_riks=self.arclength_riks.get(),
+                zero_tolerance_ectol=self.zero_tolerance_ectol.get(),
                 discrete_offset=self.discrete_offset.get(),
                 spring_token_mass_compensation=self.spring_token_mass_comp.get(),
                 shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
@@ -1117,6 +1132,9 @@ class ConverterGUI:
                                                  else f"{_qd:g}"))
         if kwargs.get("arclength_riks"):
             bits.append("arc-length /IMPL/DT/3 (--arclength-riks)")
+        if not kwargs.get("zero_tolerance_ectol", True):
+            bits.append("all-zero implicit tolerances keep Itol 2 "
+                        "(--no-zero-tolerance-ectol)")
         if not kwargs.get("discrete_offset", True):
             bits.append("*ELEMENT_DISCRETE OFFSET dropped "
                         "(--no-discrete-offset)")

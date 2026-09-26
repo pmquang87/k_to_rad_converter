@@ -224,6 +224,7 @@ def convert(
     fixpoint_count: int = 0,
     qstat_dtscal: Union[str, float] = 10.0,
     arclength_riks: bool = False,
+    zero_tolerance_ectol: bool = True,
     discrete_offset: bool = True,
     spring_token_mass_compensation: bool = True,
     shell_to_solid_rbody: bool = True,
@@ -430,6 +431,18 @@ def convert(
         it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
         ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
         (``lectur.F:3523-3532``).
+    zero_tolerance_ectol : bool
+        On a ``*CONTROL_IMPLICIT_SOLUTION`` whose DCTOL, ECTOL and RCTOL are
+        ALL 0.0 / blank (or >= 1), write LS-DYNA's own ECTOL default -
+        ``/IMPL/NONLIN/1`` Itol 1 (energy), Toli 0.01 - instead of k2rad's
+        force default Itol 2. **On by default.** Every one of the 11 R14
+        reference ``d3hsp`` files of that shape echoes DCTOL 0.001 / ECTOL
+        0.01 / RCTOL 0.999e11 (Vol I R17 p.12-354), i.e. LS-DYNA applies its
+        defaults to the stated zeros. L_A is unchanged; a NEGATIVE cell is a
+        tolerance curve (p.12-355) and keeps Itol 2. MEASURED at nt 4 = nt 2:
+        ``tensile2`` IE +7.36 % -> -0.54 % at 0.11x the cycles, ``doorbeam``
+        +380.25 % -> +582.00 % (a named regression), ``ie_shell`` ERROR ->
+        NORMAL at IE -99.87 % (a status-only promotion).
     discrete_offset : bool
         Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
         *"a displacement or rotation at time zero … a positive offset on a
@@ -958,6 +971,7 @@ def convert(
         fixpoint_count=fixpoint_count,
         qstat_dtscal=qstat_dtscal,
         arclength_riks=arclength_riks,
+        zero_tolerance_ectol=zero_tolerance_ectol,
         discrete_offset=discrete_offset,
         spring_token_mass_compensation=spring_token_mass_compensation,
         shell_to_solid_rbody=shell_to_solid_rbody,

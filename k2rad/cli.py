@@ -245,6 +245,22 @@ def build_parser() -> argparse.ArgumentParser:
              "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
     )
     parser.add_argument(
+        "--zero-tolerance-ectol",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give a *CONTROL_IMPLICIT_SOLUTION whose DCTOL/ECTOL/RCTOL are "
+             "all 0 or blank LS-DYNA's own ECTOL default - /IMPL/NONLIN/1 "
+             "Itol 1 (energy) Toli 0.01 - instead of k2rad's force default "
+             "Itol 2. ON by default: LS-DYNA's own d3hsp echoes DCTOL 0.001 / "
+             "ECTOL 0.01 on all 11 R14 decks of this shape (Vol I R17 "
+             "p.12-354). L_A is unchanged; a NEGATIVE cell is a tolerance "
+             "curve (p.12-355) and keeps Itol 2. MEASURED (nt 4 = nt 2): "
+             "tensile2 IE +7.36 %% -> -0.54 %% at 0.11x the cycles, doorbeam "
+             "+380.25 %% -> +582.00 %% (a named regression), ie_shell ERROR -> "
+             "NORMAL at IE -99.87 %% (status only). Use "
+             "--no-zero-tolerance-ectol to keep Itol 2.",
+    )
+    parser.add_argument(
         "--discrete-offset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1060,6 +1076,7 @@ def main(argv=None) -> int:
         fixpoint_count=args.fixpoint_count,
         qstat_dtscal=args.qstat_dtscal,
         arclength_riks=args.arclength_riks,
+        zero_tolerance_ectol=args.zero_tolerance_ectol,
         discrete_offset=args.discrete_offset,
         spring_token_mass_compensation=args.spring_token_mass_compensation,
         shell_to_solid_rbody=args.shell_to_solid_rbody,
