@@ -1825,6 +1825,11 @@ derived-gapmin cost law, the thermal-weld facts, the constant-step census, the
 validator re-sums it from the database): normal 284 → 288 / 289 (−1 if
 `metal-cutting` dies), timeout 18 → 15, error_engine 26 → 25 (+1 if
 `metal-cutting` dies), error_starter 13 → 12, match 27 → 26 BY DEFINITION.
+MEASURED (the campaign's report §0.25 at `e2fc48f`; the finalization moved
+no status, §0.25.2): normal **288**, timeout **15**, error_engine **26**
+(`ie_shell` out, `metal-cutting` in — the lost NORMAL), error_starter **12**,
+match **26**, deviation **146**, not_comparable **194**; NORMAL zero models 5;
+implicit residue 33 → 32.
 Two ENGINE defects are measured and WARNED, not converted around: the
 implicit Newmark path's ×(−3) initial momentum, and the `/INTER/TYPE18`
 sort-step stall under a near-massless void node.

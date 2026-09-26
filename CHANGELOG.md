@@ -11,6 +11,73 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 6 — FINALIZATION ROUND (the four
+  validators' findings; resumed after a machine crash from the first
+  attempt's uncommitted work, which was re-tested as found — 5609 passed —
+  and split into its findings).** Seven fix commits and two docs commits;
+  **ONE byte mover** on the whole roster (`11.1.sbrake`, measured by a
+  two-tree sweep of all 356 keys from `F:`, `e2fc48f` vs the finalization's
+  code, porcelain empty on both pristine checkouts); everything else is text
+  or tests. Whole-suite mutation checks on a throwaway worktree: 9 of 9
+  caught, including the three the code sweep saw survive.
+  - **A6 — an element-frame orthotropic brick rides on `Isolid 14`**
+    (physics BLOCKER). On a 1 mm cube of `11.1.sbrake`'s MID 3 at 10 MPa (nt
+    4, NORMAL everywhere) the `/PROP/TYPE6` frame on the ELFORM-derived
+    `Isolid 17` put the soft EC axis on the wrong axis in 8 of 8 AOPT-0
+    (`Ip 20`) arms — explicit and implicit, two connectivities — and on 4 of
+    6 AOPT-3 (`Ip 23`) faces against LS-DYNA's frame (Vol II R17 p.2-162);
+    `Isolid 14` and `24` were right on every arm, the skew mode (AOPT 2) was
+    right on `17`. `_connectivity_frame_isolid` now writes `Isolid 14` (HA8,
+    fully integrated) for `Ip 20` / `23` on a brick part whose ELFORM base is
+    17 and names it in a warning; `24`, other bases, the skew mode and
+    tetrahedron-only parts are left alone. The A6 warning says the CONSTANTS
+    are restated exactly. Reach: the two pads of `11.1.sbrake`, the roster's
+    only `/PROP/TYPE6`. Re-run through the campaign (report §0.25.2): normal
+    → normal; the row's one linear step reads IE 169.3 → 10 700 (22 860 at nt
+    2) — a status-only row that measures neither the material nor the
+    element. Tests pin all twelve coupling cells at both signs (the code-sweep
+    mutant `!= 0` → `> 0` survived before).
+  - **A2 — the shear-sum caveat's direction follows M** (fidelity major).
+    With equal components the Radioss term is 2^(1 − M/2) × LS-DYNA's
+    resultant term: conservative for M < 2 (1.414× at M = 1), NON-conservative
+    for M > 2 (0.707× at M = 3), exact at M = 2. Six texts corrected; the
+    runtime warning states the arm that applies. 0 bytes (both carriers
+    state M = 1).
+  - **A1 — the void-floor texts** (fidelity + physics). The refusal /
+    opt-out tail names only the `/MAT/HYD_VISC` the deck has (`forging_B` has
+    none); "every `/MAT/HYD_VISC`" scoped to the `*MAT_NULL` + `*EOS_*`
+    carriers; bird_B's END values carry their history (KE +765 % at cycle 0,
+    +104 / +382 / +337 / +18 / +26 % at the fifths) and bird-el's too. A
+    three-part deck pins the ELFORM-12 clause of the fluid set (the code-sweep
+    mutant that survived).
+  - **A5 / B5.** The `/MPC` repeat note cites the WARNING box on p.10-135 /
+    p.10-139 and says the screen refuses a node-DOF PAIR (a node on two DOFs
+    of two cards is written, tested); a zero and a blank `*CONSTRAINED_GLOBAL`
+    DIR are tested refused and byte-identical to the opt-out (the code-sweep
+    mutant `(1, 2, 3)` → `(0, 1, 2, 3)` survived before).
+  - **A8.** The clamp at exactly 0.5 × the smallest main edge can still print
+    WARNING 94 on a floating-point tie (`bend` prints it once per
+    domain-decomposition pass; informational); option-suffixed Remark-12
+    spellings (`_MORTAR` …) are excluded by name and tested.
+  - **B1 / B3 / B4.** L_A 11 was measured MIXED (4 closer / 4 farther / 3
+    identical), not "not better"; the engine-defect warning quotes the
+    combined B4 × B5 arm (cycle 0 on the constrained twin, cycle 3 on the
+    penalty twin, nt 4 = nt 2); the `--implicit-constant-step` texts add the
+    END state at matched time (ex_15: IE +36.2 → −54.8 %, KE +132.0 → +0.5 %);
+    DT0's Remark 2 is on p.12-323.
+  - **Guards.** The retracted-text scanners read `docs/*.md` and `tools/*.py`
+    too (round 6 wrote two sections into `docs/IMPLICIT.md`).
+  - **Recorded, not changed** (ROADMAP round-6 items 21-26): `ie_shell`'s
+    `IMFLAG −9` switching curve; the MAT_126 honeycomb `/PROP/TYPE6` on its
+    pinned `Isolid 1`; a rigid body the `--mass-weighted-inivel` card fully
+    covers; option-suffixed Remark-12 spellings; the orthotropic tetrahedron
+    frame; and `efg/metal-cutting/main.k`, which loses its NORMAL under B5
+    (kept default ON by the round's decision: its base NORMAL in 3 of 10
+    fresh runs this round, the GLOBAL arm ERROR at cycle 26 on every run at nt
+    4 and 2, no LS-DYNA energy reference). `doorbeam` (B1, IE +380.25 →
+    +582.00 %) and `bird-el` (A1, IE +454.1 → +1134.6 %) stay NAMED channel
+    regressions accepted by the decision.
+
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART B (implicit decks, the
   `*CONSTRAINED_GLOBAL` carriers, the spotweld opt-in pair, and the record).**
   One commit per item; every implicit figure carries its `nt` (4 AND 2 unless
