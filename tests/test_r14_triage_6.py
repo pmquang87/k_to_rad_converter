@@ -107,12 +107,11 @@ def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-def _SHIPPED_TEXTS():
-    """``(relative path, normalized text)`` for every text a figure can ship in
-    (the round-4/5 convention): README, ROADMAP, the GUI and every module of
-    the package, adjacent string literals JOINED before the whitespace
-    collapses. ``CHANGELOG.md`` is the historical record and is excluded."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def _shipped_rels(root: str):
+    """Every shipped text file: README, ROADMAP, the GUI, every module of the
+    package, and - since the finalization round (round 6 added the SOLVINFO
+    and engine-defect sections to docs/IMPLICIT.md) - every ``docs/*.md``
+    and ``tools/*.py``."""
     rels = ["README.md", "ROADMAP.md", "k2rad_gui.py"]
     for dirpath, _dirs, files in os.walk(os.path.join(root, "k2rad")):
         if "__pycache__" in dirpath:
@@ -121,6 +120,21 @@ def _SHIPPED_TEXTS():
             if name.endswith(".py"):
                 rels.append(os.path.relpath(
                     os.path.join(dirpath, name), root))
+    for sub, ext in (("docs", ".md"), ("tools", ".py")):
+        folder = os.path.join(root, sub)
+        if os.path.isdir(folder):
+            rels += [os.path.join(sub, n) for n in sorted(os.listdir(folder))
+                     if n.endswith(ext)]
+    return rels
+
+
+def _SHIPPED_TEXTS():
+    """``(relative path, normalized text)`` for every text a figure can ship in
+    (the round-4/5 convention, widened in round 6's finalization to docs/*.md
+    and tools/*.py): adjacent string literals JOINED before the whitespace
+    collapses. ``CHANGELOG.md`` is the historical record and is excluded."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rels = _shipped_rels(root)
     out = []
     for rel in rels:
         path = os.path.join(root, rel)
@@ -3873,12 +3887,7 @@ def _text_units():
     ``#`` comment block (state.py's ConvertOptions notes) is one unit, since
     its lines are not blank."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    rels = ["README.md", "ROADMAP.md", "k2rad_gui.py"]
-    for dirpath, _dirs, files in os.walk(os.path.join(root, "k2rad")):
-        if "__pycache__" in dirpath:
-            continue
-        rels += [os.path.relpath(os.path.join(dirpath, n), root)
-                 for n in sorted(files) if n.endswith(".py")]
+    rels = _shipped_rels(root)
     out = []
     for rel in rels:
         with open(os.path.join(root, rel), encoding="utf-8") as fh:
@@ -3896,6 +3905,33 @@ def _end_value_violations(units):
     return [(rel, u[:120]) for rel, u in units
             if "twobar" in u and _END_VALUE.search(u)
             and not _HISTORY.search(u)]
+
+
+class Round6ShippedTextScope(unittest.TestCase):
+    """Finalization round (the code sweep): the retracted-text guards read
+    README, ROADMAP, the GUI and the package but NOT docs/*.md or tools/,
+    and round 6 wrote two sections into docs/IMPLICIT.md. Both scanners now
+    read every file of both folders."""
+
+    def test_docs_and_tools_are_scanned_by_both_scanners(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        want = {os.path.join("docs", n) for n in os.listdir(
+            os.path.join(root, "docs")) if n.endswith(".md")}
+        want |= {os.path.join("tools", n) for n in os.listdir(
+            os.path.join(root, "tools")) if n.endswith(".py")}
+        self.assertIn(os.path.join("docs", "IMPLICIT.md"), want)
+        self.assertIn(os.path.join("tools", "modal_solve.py"), want)
+        shipped = {rel for rel, _t in _SHIPPED_TEXTS()}
+        units = {rel for rel, _u in _text_units()}
+        for rel in sorted(want):
+            with self.subTest(file=rel):
+                self.assertIn(rel, shipped)
+                self.assertIn(rel, units)
+
+    def test_the_round_6_docs_section_is_read(self):
+        texts = dict(_SHIPPED_TEXTS())
+        self.assertIn("/IMPL/NONLIN/SOLVINFO",
+                      texts[os.path.join("docs", "IMPLICIT.md")])
 
 
 class Round6TwobarEndValueCarriesItsHistory(unittest.TestCase):
