@@ -51,8 +51,8 @@ from ..state import (
     PartComposite,
     SectionShell,
 )
-from .common import (HDR, _f, _i, _elform_to_ishell, _vcross, _vnorm,
-                     rigid_part_ids)
+from .common import (HDR, _f, _i, _elform_to_ishell, _elform_to_isolid,
+                     _ordered_unique_nodes, _vcross, _vnorm, rigid_part_ids)
 from .materials import _add_auto_curve
 from .mesh import (
     _auto_section_shell,
@@ -3136,12 +3136,97 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
         f"/PROP for composite part {pid}: {law} is orthotropic-class, so the "
         f"solid part is repointed at a synthesized /PROP/TYPE6 (SOL_ORTH) "
         f"{prop_id} rather than the isotropic /PROP/SOLID (starter ERROR 3047).")
+    isolid = _connectivity_frame_isolid(state, prop_id, pid, sec, ip, law)
     return _emit_prop_type6(prop_id, f"COMPOSITE_SOLID_PROP_{prop_id} "
                             f"(part {pid})", sec, 1000 if tet10 else 0, istrain,
                             refvec=axis.vec, ip=ip, phi=axis.phi,
                             skew_id=axis.skew_id, refpoint=axis.pt,
+                            isolid=isolid,
                             assumed_strain_isolid=(
                                 state.options.assumed_strain_isolid_value))
+
+
+#: The /PROP/TYPE6 ``Ip`` modes whose orthotropy frame is built from the
+#: ELEMENT'S OWN geometry: 20 = N1->N2 / N1->N4 (LS-DYNA AOPT 0), 23 = the
+#: vector ``v`` against the element normal (AOPT 3). The skew mode (Ip 0 +
+#: skew_ID, AOPT 2 / a *DEFINE_COORDINATE system) and the point/vector modes
+#: 21 / 24 take GLOBAL directions and are not in the set.
+_CONNECTIVITY_FRAME_IPS = (20, 23)
+
+
+def _connectivity_frame_isolid(state: ConversionState, prop_id: int, pid: int,
+                               sec, ip: int, law: str) -> Optional[int]:
+    """The /PROP/TYPE6 Isolid for an orthotropic brick part whose frame comes
+    from the element connectivity (finalization of R14 triage round 6, the
+    A6 orientation blocker); ``None`` = let the ELFORM decide as before.
+
+    MEASURED (OpenRadioss at nt 4, 0 starter errors, NORMAL on every arm): a
+    1 mm cube of ``11.1.sbrake``'s MID 3 (the zero-coupling
+    ``*MAT_ANISOTROPIC_ELASTIC`` A6 restates as EA = EB 5496.34, EC 1983.31)
+    under a 10 MPa face load, on two connectivities (N1->N2 along x, and a
+    cyclic rotation of it) and two loaded faces. With ``Ip 20`` on
+    ``Isolid 17`` the soft EC axis landed on the WRONG axis in 8 of 8 arms
+    (4 explicit + 4 implicit static): along x where LS-DYNA's AOPT 0 puts it
+    along z on the first connectivity, along z where LS-DYNA puts it along x
+    on the rotated one - not one fixed element-relative swap.
+    ``Isolid 14`` oriented like LS-DYNA in 8 of 8 and ``Isolid 24`` in 4 of
+    4 (explicit). ``Ip 23`` (AOPT 3) was run on the same cube with the
+    constants of the restated card and ``v`` along x (the first
+    connectivity) and along y (the rotated one): LS-DYNA's AOPT 3 frame has
+    ``c`` = the normal of the element's midsurface between its first four
+    and its last four nodes (Vol II R17 p.2-162), which puts the soft axis
+    along z on the first connectivity and along x on the rotated one, and
+    ``Isolid 14`` and ``24`` oriented like that on 6 of 6 loaded faces while
+    ``Isolid 17`` was wrong on 4 of 6. (``v`` along the element normal is
+    starter ERROR 1920, "INVALID ZERO REFERENCE VECTOR WITH IP=23", on every
+    Isolid - that arm did not run.) The SKEW mode (AOPT 2) oriented
+    correctly on ``Isolid 17`` in 8 of 8 - so only the connectivity-derived
+    frames move. The ELFORM-derived ``17`` (ELFORM 0/1/2/-1/-2 and the
+    default) becomes ``14``, OpenRadioss's other fully integrated 8-node
+    hexahedron (HA8, 2x2x2 points by default, ``hm_read_prop06.F:350-355``),
+    so the integration class of the section is kept; its reader default
+    leaves ``Icpre`` 0 where ``Isolid 17``'s turns 0 into 1 (``:336-341``),
+    which matters only near incompressibility, and the cube's internal
+    energy read +0.2 % / +0.5 % against the hand values. A base that is
+    already ``24`` (``--assumed-strain-isolid 24``, right in 4 of 4) or
+    anything but ``17`` is left alone, and so is a part with no /BRICK
+    element (the tetrahedron frame is its own branch, not measured here).
+    Reach on the R14 roster: the two pad parts of
+    ``nvh/example-11-01/11.1.sbrake.k``, the only ``/PROP/TYPE6`` of the
+    356 keys. The mechanism in the solver is not isolated; the measurement
+    is the evidence."""
+    if ip not in _CONNECTIVITY_FRAME_IPS or sec is None:
+        return None
+    base = _elform_to_isolid(sec.elform,
+                             state.options.assumed_strain_isolid_value)
+    if base != 17:
+        return None
+    # A /BRICK in the mesh emitter's own sense (writer/mesh.py: not a 10-node
+    # tetrahedron, and more than 4 distinct nodes - a collapsed hex that is a
+    # tetrahedron is written as /TETRA4 and takes the tetrahedron branch).
+    if not any(e.pid == pid and len(e.nodes) != 10
+               and len(_ordered_unique_nodes(e.nodes)) > 4
+               for e in state.solid_elems):
+        return None
+    mode = ("the element connectivity N1->N2 / N1->N4 (Ip=20, LS-DYNA AOPT 0)"
+            if ip == 20 else
+            "the reference vector against the element normal (Ip=23, LS-DYNA "
+            "AOPT 3)")
+    state.warn(
+        f"/PROP/TYPE6 {prop_id} (part {pid}, {law}): the orthotropy frame is "
+        f"built from {mode}, and on Isolid 17 OpenRadioss was MEASURED to build "
+        "that frame on the wrong axes (a 1 mm cube of 11.1.sbrake's MID 3 at "
+        "10 MPa: the soft EC axis landed on the wrong global axis in 8 of 8 "
+        "Ip=20 arms, explicit and implicit, on two connectivities - x instead "
+        "of z on one, z instead of x on the other; Ip=23 wrong on 4 of 6 "
+        "loaded faces against LS-DYNA's AOPT 3 frame, Vol II R17 p.2-162), "
+        "while Isolid 14 and 24 oriented like LS-DYNA on every arm (the cube's "
+        "internal energy +0.2 % / +0.5 % against the hand values on Isolid "
+        f"14). So the part's ELFORM {sec.elform} is written "
+        "as Isolid 14 (HA8, fully integrated like the Isolid 17 it replaces) "
+        "instead of 17. The skew mode (AOPT 2 or a *DEFINE_COORDINATE system) "
+        "orients correctly on 17 and is left alone.")
+    return 14
 
 
 def _shell_layer_count(sec: SectionShell, state: ConversionState,

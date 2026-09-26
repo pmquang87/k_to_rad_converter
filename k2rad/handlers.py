@@ -3904,9 +3904,10 @@ def _aniso_orthotropic_restatement(c11: float, c12: float, c22: float,
 
 
 def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None:
-    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — converted EXACTLY when the
-    matrix is really orthotropic, refused by name otherwise (R14 triage
-    round 6, A6).
+    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — its constants restated
+    EXACTLY when the matrix is really orthotropic, refused by name otherwise
+    (R14 triage round 6, A6; the orientation of the /PROP/TYPE6 frame it then
+    rides on is ``writer/composites._connectivity_frame_isolid``'s).
 
     The ANISOTROPIC dialect replaces cards 1a.1/1a.2 with the 21 constants of
     the full 6×6 constitutive matrix (C11…C66) and leaves EA…GCA empty:
@@ -3981,14 +3982,18 @@ def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None
             f"*MAT_ANISOTROPIC_ELASTIC {mid}: all 12 coupling cells are 0 and "
             "the 6x6 matrix is positive definite (leading minors "
             f"{minors[0]:g} / {minors[1]:g} / {minors[2]:g}; C44/C55/C66 > 0), "
-            "so the material IS orthotropic and is converted EXACTLY through "
-            "the *MAT_ORTHOTROPIC_ELASTIC path (/MAT/LAW93): "
+            "so the material IS orthotropic and its constants are restated "
+            "EXACTLY through the *MAT_ORTHOTROPIC_ELASTIC path (/MAT/LAW93): "
             f"EA {ea:.6g}, EB {eb:.6g}, EC {ec:.6g}, PRBA {prba:.6g}, "
             f"PRCA {prca:.6g}, PRCB {prcb:.6g} (Vol II R17 p.2-164 Remark 1: "
             "S12 = -PRBA/EB, S13 = -PRCA/EC, S23 = -PRCB/EC), GAB = C44 "
             f"{c44:g}, GBC = C55 {c55:g}, GCA = C66 {c66:g} (Voigt 4/5/6 = "
             "ab/bc/ca). MEASURED on nvh/example-11-01/11.1.sbrake.k: starter "
-            "3 ERROR -> 0, TOTAL MASS 7.3107e-4 = LS-DYNA's.")
+            "3 ERROR -> 0, TOTAL MASS 7.3107e-4 = LS-DYNA's; on a 1 mm cube of "
+            "its MID 3 at 10 MPa (AOPT 0, the part on Isolid 14 - see the "
+            "/PROP/TYPE6 note) the internal energy reads 0.009118 with an a/b "
+            "face loaded and 0.025347 with the c face loaded, against 0.009097 "
+            "/ 0.025210 by hand (+0.2 % / +0.5 %, explicit hold-window mean).")
         return
     if nonzero:
         why = (f"{len(nonzero)} coupling cell(s) are non-zero "

@@ -1272,27 +1272,69 @@ class ConstrainedLinearMpc(unittest.TestCase):
 # A6 — the zero-coupling *MAT_ANISOTROPIC_ELASTIC is orthotropic: convert it
 # ═════════════════════════════════════════════════════════════════════════════
 
+#: The twelve coupling cells of *MAT_ANISOTROPIC_ELASTIC as (name, card,
+#: field), written out from the manual's card layout (Vol II R17: card 2 =
+#: C14 C24 C34 C44 C15 C25 C35 C45, card 3 = C55 C16 C26 C36 C46 C56 C66
+#: AOPT) - NOT imported from the handler, so a wrong table there is caught.
+_COUPLING_POSITIONS = (
+    ("C14", 1, 0), ("C24", 1, 1), ("C34", 1, 2), ("C15", 1, 4),
+    ("C25", 1, 5), ("C35", 1, 6), ("C45", 1, 7),
+    ("C16", 2, 1), ("C26", 2, 2), ("C36", 2, 3), ("C46", 2, 4), ("C56", 2, 5),
+)
+
+
 def _aniso_deck(c=(5940.0, 760.0, 5940.0, 980.0, 980.0, 2270.0),
-                c44=2590.0, c55=1180.0, c66=1180.0, c14=0.0) -> str:
+                c44=2590.0, c55=1180.0, c66=1180.0, c14=0.0,
+                coupling=None, elform=1, aopt=0.0, a=(0.0, 0.0, 0.0),
+                d=(0.0, 0.0, 0.0), tets=False) -> str:
     """One brick on *MAT_ANISOTROPIC_ELASTIC 3 — 11.1.sbrake's pad by
     default (C11 = C22 5940, C12 760, C13 = C23 980, C33 2270, C44 2590,
-    C55 = C66 1180, every coupling cell 0, AOPT 0)."""
+    C55 = C66 1180, every coupling cell 0, AOPT 0, ELFORM 1).
+
+    ``coupling`` is ``{(card, field): value}`` over ``_COUPLING_POSITIONS``;
+    ``aopt`` 2 with ``a``/``d`` gives the global-vector (skew) frame;
+    ``tets`` meshes the part as one four-node tetrahedron instead."""
     nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)]
+    cards = [[0.0, 0.0, 0.0, c44, 0.0, 0.0, 0.0, 0.0],
+             [c55, 0.0, 0.0, 0.0, 0.0, 0.0, c66, aopt]]
+    cards[0][0] = c14
+    for (card, field), val in (coupling or {}).items():
+        cards[card - 1][field] = val
+    elem = ((1, 5, 1, 2, 4, 5, 5, 5, 5, 5) if tets
+            else (1, 5, 1, 2, 4, 3, 5, 6, 8, 7))
     return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
             "*NODE\n"
             + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
                       for i, (x, y, z) in enumerate(nodes, start=1))
             + "*ELEMENT_SOLID\n"
-            + "".join(f"{v:>8}" for v in (1, 5, 1, 2, 4, 3, 5, 6, 8, 7))
+            + "".join(f"{v:>8}" for v in elem)
             + "\n*PART\npad\n" + _row(5, 1, 3) + "\n"
-            "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            "*SECTION_SOLID\n" + _row(1, elform) + "\n"
             "*MAT_ANISOTROPIC_ELASTIC_TITLE\npad\n"
             + _row(3, 2.51e-9, *c) + "\n"
-            + _row(c14, 0.0, 0.0, c44, 0.0, 0.0, 0.0, 0.0) + "\n"
-            + _row(c55, 0.0, 0.0, 0.0, 0.0, 0.0, c66, 0.0) + "\n"
-            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 0) + "\n"
-            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(*cards[0]) + "\n"
+            + _row(*cards[1]) + "\n"
+            + _row(0.0, 0.0, 0.0, *a, 1, 0) + "\n"
+            + _row(0.0, 0.0, 0.0, *d, 0.0, 0.0) + "\n"
             "*END\n")
+
+
+def _type6_cells(starter: str):
+    """``[(prop id, Isolid, Ip, skew_ID)]`` of every /PROP/TYPE6 block."""
+    lines = starter.splitlines()
+    out = []
+    for i, ln in enumerate(lines):
+        if not ln.startswith("/PROP/TYPE6/"):
+            continue
+        rows = []
+        for nxt in lines[i + 2:]:
+            if nxt.startswith("/"):
+                break
+            if not nxt.startswith("#"):
+                rows.append(nxt)
+        out.append((int(ln.split("/")[3]), int(rows[0][0:10]),
+                    int(rows[2][70:80]), int(rows[2][60:70])))
+    return out
 
 
 def _law93_cells(starter: str, mid: int):
@@ -1344,7 +1386,7 @@ class AnisotropicZeroCouplingRoute(unittest.TestCase):
         w = [x for x in result.warnings
              if x.startswith("*MAT_ANISOTROPIC_ELASTIC 3:")]
         self.assertEqual(len(w), 1, result.warnings)
-        for needle in ("converted EXACTLY", "EA 5496.34", "EC 1983.31",
+        for needle in ("restated EXACTLY", "EA 5496.34", "EC 1983.31",
                        "PRBA 0.0610697", "PRCA 0.146269", "GAB = C44 2590",
                        "p.2-164 Remark 1", "5940 / 3.4706e+07"):
             with self.subTest(needle=needle):
@@ -1384,6 +1426,97 @@ class AnisotropicZeroCouplingRoute(unittest.TestCase):
                              "non-zero (C14)", "NOT emitted"), result.warnings)
         self.assertIn("MAT_ANISOTROPIC_ELASTIC",
                       [k for k, _w in result.recognized_not_emitted])
+
+    def test_every_coupling_position_refuses_at_either_sign(self):
+        """Finalization round (the code-sweep mutation that survived: the
+        screen's ``!= 0`` turned into ``> 0`` stayed green because only
+        C14 = +100 was ever probed). Each of the twelve cells, at +100 AND
+        -100, keeps the refusal and names that cell."""
+        for name, card, field in _COUPLING_POSITIONS:
+            for val in (100.0, -100.0):
+                with self.subTest(cell=name, value=val):
+                    st = _dispatch(_aniso_deck(coupling={(card, field): val}))
+                    self.assertNotIn(3, st.mat_orthotropic)
+                    self.assertTrue(_has(st.warnings, "1 coupling cell(s) "
+                                         f"are non-zero ({name})"),
+                                    st.warnings)
+
+    def test_a_negative_coupling_cell_is_refused_end_to_end(self):
+        result, starter, _e = _convert(_aniso_deck(c14=-100.0))
+        self.assertNotIn("/MAT/LAW93", starter)
+        self.assertEqual(_type6_cells(starter), [])
+        self.assertTrue(_has(result.warnings, "non-zero (C14)"),
+                        result.warnings)
+
+
+class OrthotropicConnectivityFrameIsolid(unittest.TestCase):
+    """Finalization round, the A6 orientation blocker: an orthotropic brick
+    whose /PROP/TYPE6 frame comes from the element connectivity (Ip 20 =
+    AOPT 0, Ip 23 = AOPT 3) was MEASURED misoriented on Isolid 17 and right
+    on Isolid 14 / 24 (a 1 mm cube of sbrake's MID 3, 8 of 8 Ip 20 arms
+    explicit + implicit, Ip 23 on 4 of 6 faces); the skew mode (AOPT 2) was
+    right on 17. So Ip 20 / 23 on an ELFORM-derived 17 is written as 14."""
+
+    def test_the_sbrake_card_on_AOPT_0_is_written_on_Isolid_14(self):
+        for elform in (1, 2, 0):
+            with self.subTest(elform=elform):
+                result, starter, _e = _convert(_aniso_deck(elform=elform))
+                cells = _type6_cells(starter)
+                self.assertEqual(len(cells), 1, starter[:2000])
+                _pid, isolid, ip, skew = cells[0]
+                self.assertEqual((isolid, ip, skew), (14, 20, 0))
+                w = [x for x in result.warnings if "Isolid 14 (HA8" in x]
+                self.assertEqual(len(w), 1, result.warnings)
+                for needle in ("(Ip=20, LS-DYNA AOPT 0)", "8 of 8",
+                               f"ELFORM {elform} is written as Isolid 14",
+                               "skew mode (AOPT 2"):
+                    self.assertIn(needle, w[0])
+
+    def test_the_skew_frame_stays_on_Isolid_17(self):
+        result, starter, _e = _convert(_aniso_deck(
+            elform=2, aopt=2.0, a=(1.0, 0.0, 0.0), d=(0.0, 1.0, 0.0)))
+        cells = _type6_cells(starter)
+        self.assertEqual(len(cells), 1)
+        _pid, isolid, ip, skew = cells[0]
+        self.assertEqual((isolid, ip), (17, 0))
+        self.assertGreater(skew, 0)
+        self.assertFalse(_has(result.warnings, "Isolid 14 (HA8"))
+
+    def test_AOPT_3_is_a_connectivity_frame_too(self):
+        deck = _aniso_deck(elform=2).replace(
+            "*MAT_ANISOTROPIC_ELASTIC_TITLE\npad\n"
+            + _row(3, 2.51e-9, 5940.0, 760.0, 5940.0, 980.0, 980.0, 2270.0)
+            + "\n" + _row(0.0, 0.0, 0.0, 2590.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(1180.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1180.0, 0.0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n",
+            "*MAT_ORTHOTROPIC_ELASTIC_TITLE\npad\n"
+            + _row(3, 2.51e-9, 5496.34093, 5496.34093, 1983.31343,
+                   0.06106968, 0.14626866, 0.14626866) + "\n"
+            + _row(2590.0, 1180.0, 1180.0, 3.0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        self.assertIn("*MAT_ORTHOTROPIC_ELASTIC_TITLE", deck)
+        result, starter, _e = _convert(deck)
+        cells = _type6_cells(starter)
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0][1:3], (14, 23))
+        self.assertTrue(_has(result.warnings, "(Ip=23, LS-DYNA AOPT 3)",
+                             "ELFORM 2 is written as Isolid 14"),
+                        result.warnings)
+
+    def test_an_assumed_strain_24_is_left_alone(self):
+        result, starter, _e = _convert(_aniso_deck(elform=-2),
+                                       assumed_strain_isolid="24")
+        self.assertEqual(_type6_cells(starter)[0][1:3], (24, 20))
+        self.assertFalse(_has(result.warnings, "Isolid 14 (HA8"))
+
+    def test_a_part_with_no_eight_node_element_is_left_alone(self):
+        result, starter, _e = _convert(_aniso_deck(elform=2, tets=True))
+        cells = _type6_cells(starter)
+        self.assertEqual(len(cells), 1)
+        self.assertNotEqual(cells[0][1], 14, starter[:3000])
+        self.assertFalse(_has(result.warnings, "Isolid 14 (HA8"))
 
     def test_a_matrix_that_is_not_positive_definite_is_refused(self):
         result, starter, _e = _convert(_aniso_deck(
@@ -2186,11 +2319,17 @@ class Round6RetractedStatementsA(unittest.TestCase):
              "velocity)"),
             ("README.md", "the screen is the node's OWN mass, not element "
              "incidence"),
-            ("k2rad/handlers.py", "the material IS orthotropic and is "
-             "converted EXACTLY through the *MAT_ORTHOTROPIC_ELASTIC path"),
+            ("k2rad/handlers.py", "the material IS orthotropic and its "
+             "constants are restated EXACTLY through the "
+             "*MAT_ORTHOTROPIC_ELASTIC path"),
+            ("README.md", "the `/PROP/TYPE6` is written on **`Isolid 14`** "
+             "(HA8, fully integrated, 2×2×2 points) instead of the "
+             "ELFORM-derived `17`"),
+            ("k2rad/writer/composites.py", "Ip=23 wrong on 4 of 6 loaded "
+             "faces against LS-DYNA's AOPT 3 frame"),
             ("k2rad/handlers.py", "state it as *MAT_ORTHOTROPIC_ELASTIC in "
              "those axes (AOPT)"),
-            ("README.md", "converted **EXACTLY through the orthotropic path "
+            ("README.md", "restated **EXACTLY through the orthotropic path "
              "when all 12 coupling cells are 0 and C is positive definite**"),
             ("k2rad/writer/loads.py", "so the J cells take the difference "
              "back out"),

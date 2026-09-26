@@ -1571,7 +1571,7 @@ starter's own fallbacks instead of dyna2rad's unguarded `inf/NaN`, and an
 unstable `NUij·NUji ≥ 1` pair is warned before the starter's ERROR 3068/307.
 
 `*MAT_ANISOTROPIC_ELASTIC` / `*MAT_002_ANIS` (the 6×6 C-matrix dialect) is
-converted **EXACTLY through the orthotropic path when all 12 coupling cells are
+restated **EXACTLY through the orthotropic path when all 12 coupling cells are
 0 and C is positive definite** (round 6): the 3×3 normal block is inverted to
 `EA`/`EB`/`EC` and LS-DYNA's MINOR ratios `PRBA`/`PRCA`/`PRCB` (Vol II R17
 p.2-164 Remark 1: `S12 = −PRBA/EB`, `S13 = −PRCA/EC`, `S23 = −PRCB/EC`), and
@@ -1586,6 +1586,27 @@ term. dyna2rad converts this dialect to a LAW93 with **all moduli zero and no
 warning** — a silently stiffness-free material; k2rad warns loudly, names the
 referencing parts, and reports the refused card under *recognized but not
 emitted*.
+
+On a BRICK part whose orthotropy frame comes from the element itself — AOPT 0
+(`Ip=20`, N1→N2 / N1→N4) or AOPT 3 (`Ip=23`, `v` against the element normal)
+— the `/PROP/TYPE6` is written on **`Isolid 14`** (HA8, fully integrated,
+2×2×2 points) instead of the ELFORM-derived `17` (round 6, finalization).
+MEASURED on a 1 mm cube of `11.1.sbrake`'s MID 3 at 10 MPa (nt 4, NORMAL on
+every arm): on `Isolid 17` the soft EC axis landed on the wrong global axis in
+8 of 8 AOPT-0 arms (explicit and implicit, two connectivities — x instead of z
+on one, z instead of x on the other) and on 4 of 6 AOPT-3 faces against
+LS-DYNA's AOPT 3 frame (`c` = the normal of the element midsurface, Vol II R17
+p.2-162), while `Isolid 14` and `24` oriented like LS-DYNA on every arm (the
+cube's internal energy +0.2 % / +0.5 % against the hand values on `Isolid
+14`). The skew mode (AOPT 2, or a `*DEFINE_COORDINATE` system) is right on
+`17` and unchanged, and so are a base that is not `17` and a part with no
+`/BRICK`. It applies to every orthotropic brick on this route
+(`*MAT_ORTHOTROPIC_ELASTIC`, the restated `*MAT_ANISOTROPIC_ELASTIC`,
+`*MAT_COMPOSITE_DAMAGE`, `*MAT_ENHANCED_COMPOSITE_DAMAGE`); on the R14 roster
+it reaches `11.1.sbrake`'s two pads only. `Isolid 14`'s reader default keeps
+`Icpre 0` where `17`'s turns it into 1 (`hm_read_prop06.F:336-341`), which
+matters only near incompressibility. The MAT_126 honeycomb `/PROP/TYPE6`
+(pinned `Isolid 1`) is NOT changed — its orientation is unmeasured (ROADMAP).
 
 `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054 / 055, + numeric aliases) → `/MAT/LAW127`
 (ENHANCED_COMPOSITE) on a `/PROP/TYPE11`. The strengths (`XT/XC/YT/YC/SC`), the
