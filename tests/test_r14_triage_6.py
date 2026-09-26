@@ -4,6 +4,18 @@
       ``/MAT/HYD_VISC`` of a ``*INITIAL_VOID`` deck's fluid (default ON,
       ``--no-initial-void-floor``), the AMMG / non-ELFORM-12 / non-LAW6
       refusals, and the rewritten ``/INTER/TYPE18`` void warning
+  A2  the weld failure exponents N / M on ``/PROP/TYPE13`` (default ON,
+      ``--no-weld-exponents``)
+  A3  the spring-token screen tests the node's OWN lumped mass
+  A4  ``*CONSTRAINED_TIED_NODES_FAILURE``: a named refusal, 0 bytes
+  A5  ``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` -> ``/MPC`` (default ON,
+      ``--no-constrained-linear``)
+  A6  the zero-coupling ``*MAT_ANISOTROPIC_ELASTIC`` -> the orthotropic path
+  A7  ``J = -SUM(IN)`` on the re-pointed ``/RBODY`` under
+      ``--mass-weighted-inivel``
+  A8  the shell-offset Gapmin: ``t/2`` on a solid-main ``/INTER/TYPE7``
+      against shells LS-DYNA offsets (default ON,
+      ``--no-shell-offset-gapmin``)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are the round-4/5 ones, copied (not imported) so this module
@@ -1467,6 +1479,371 @@ def _inertia_lines_row(j3):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A8 — the shell-offset Gapmin (a solid main against shells LS-DYNA offsets)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _offset_deck(shlthk=2, kw="*CONTACT_SURFACE_TO_SURFACE_ID",
+                 thick=(0.381,), edge=0.254, implicit=False,
+                 card3=(0, 0, 0, 0), cards_ab="", solid_secondary=False,
+                 rigid=(), composite=False, swap=False, skin=False,
+                 extra_node=False) -> str:
+    """The A8 coupon: a cube of side *edge* (part 1, the MAIN; its smallest
+    segment side is *edge*) and, 0.5 above it, one 4-node shell per entry of
+    *thick* (parts 2, 3, ...; the SECONDARY, a *SET_PART_LIST when there are
+    several) - or, with *solid_secondary*, a second cube (part 2). *rigid*
+    names the parts on *MAT_RIGID; *composite* puts part 2 on a two-ply
+    *PART_COMPOSITE of half its thickness each; *swap* writes the card the
+    sphere1 way round (SSID = the cube, MSID = the shell); *skin* (with
+    *solid_secondary*) adds a shell skin on the upper cube's top face, part 3
+    t *thick[0]*, and makes IT the SSID; *extra_node* makes the SSID a
+    *SET_NODE_LIST of the shell nodes PLUS one node on no element. Card 3 is
+    ``SFS SFM SST MST`` = *card3*; *cards_ab* is appended after it."""
+    a = edge
+    z = a + 0.5
+    nodes = [(0.0, 0.0, 0.0), (a, 0.0, 0.0), (a, a, 0.0), (0.0, a, 0.0),
+             (0.0, 0.0, a), (a, 0.0, a), (a, a, a), (0.0, a, a)]
+    solids = [(1, 1, tuple(range(1, 9)))]
+    shells = []
+    parts = []
+    if solid_secondary:
+        nodes += [(x, y, zz + z) for (x, y, zz) in nodes[:8]]
+        solids.append((2, 2, tuple(range(9, 17))))
+        if skin:
+            shells.append((20, 3, (13, 14, 15, 16)))
+            parts.append((3, thick[0]))
+    else:
+        for k, t in enumerate(thick):
+            x0 = k * a
+            base = len(nodes)
+            nodes += [(x0, 0.0, z), (x0 + a, 0.0, z), (x0 + a, a, z),
+                      (x0, a, z)]
+            shells.append((10 + k, k + 2, tuple(range(base + 1, base + 5))))
+            parts.append((k + 2, t))
+    if extra_node:
+        nodes.append((a / 2.0, a / 2.0, z + 1.0))
+    deck = "*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+    if implicit:
+        deck += "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+    if shlthk is not None:
+        deck += "*CONTROL_CONTACT\n" + _row(0.1, 0.0, 1, shlthk, 1, 0) + "\n"
+    deck += "*NODE\n" + "".join(f"{i:>8}{x:>16}{y:>16}{zz:>16}\n"
+                                for i, (x, y, zz) in enumerate(nodes, start=1))
+    deck += "*ELEMENT_SOLID\n" + "".join(
+        "".join(f"{v:>8}" for v in (eid, pid) + ns) + "\n"
+        for eid, pid, ns in solids)
+    if shells:
+        deck += "*ELEMENT_SHELL\n" + "".join(
+            "".join(f"{v:>8}" for v in (eid, pid) + ns) + "\n"
+            for eid, pid, ns in shells)
+    deck += ("*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+             "*SECTION_SOLID\n" + _row(1, 1) + "\n")
+    mids = [1]
+    if solid_secondary:
+        deck += "*PART\nupper brick\n" + _row(2, 1, 2) + "\n"
+        mids.append(2)
+    for pid, t in parts:
+        if composite and pid == 2:
+            deck += ("*PART_COMPOSITE\nsheet\n"
+                     + _row(pid, 16, 0.0, 0, 0.0, 0, 0, 0) + "\n"
+                     + _row(pid, t / 2.0, 0.0, 0, pid, t / 2.0, 0.0, 0) + "\n")
+        else:
+            deck += (f"*PART\nsheet {pid}\n" + _row(pid, pid, pid) + "\n"
+                     "*SECTION_SHELL\n" + _row(pid, 16) + "\n"
+                     + _row(t, t, t, t) + "\n")
+        mids.append(pid)
+    for mid in mids:
+        card = "*MAT_RIGID\n" if mid in rigid else "*MAT_ELASTIC\n"
+        deck += card + _row(mid, 7.85e-9, 210000.0, 0.3) + "\n"
+    if len(parts) > 1:
+        deck += ("*SET_PART_LIST\n" + _row(200) + "\n"
+                 + _row(*[p for p, _t in parts]) + "\n")
+        ssid, sstyp = 200, 2
+    elif skin:
+        ssid, sstyp = 3, 3
+    elif extra_node:
+        deck += ("*SET_NODE_LIST\n" + _row(300) + "\n"
+                 + _row(9, 10, 11, 12, len(nodes)) + "\n")
+        ssid, sstyp = 300, 4
+    else:
+        ssid, sstyp = 2, 3
+    if swap:
+        ssid, sstyp, msid, mstyp = 1, 3, ssid, sstyp
+    else:
+        msid, mstyp = 1, 3
+    deck += (kw + "\n" + _row(7) + "\n"
+             + _row(ssid, msid, sstyp, mstyp, 0, 0, 0, 0) + "\n"
+             + _row(0.2, 0.1) + "\n" + _row(*card3) + "\n" + cards_ab)
+    return deck + "*END\n"
+
+
+def _type7_cells(starter: str, inter_id: int = 7):
+    """``(Gapmin cell, Inacti)`` of ``/INTER/TYPE7/<inter_id>``: the Gapmin
+    cell is the raw 20-column field (cols 41-60), so a test pins the
+    spelling the card carries."""
+    lines = starter.splitlines()
+    i = lines.index(f"/INTER/TYPE7/{inter_id}")
+    gap = inacti = None
+    for j in range(i + 1, min(i + 20, len(lines) - 1)):
+        if lines[j].startswith("#              Stfac"):
+            gap = lines[j + 1][40:60]
+        if lines[j].startswith("#      IBC") and "Inacti" in lines[j]:
+            inacti = lines[j + 1].split()[1]
+    assert gap is not None and inacti is not None, lines[i:i + 20]
+    return gap, inacti
+
+
+_G0127 = "               0.127"
+_G0 = "                   0"
+_A8 = "LS-DYNA offsets the secondary SHELLS by half their thickness"
+_CLASS = "GAP MIN = 0.1 x"
+
+
+class ShellOffsetGapmin(unittest.TestCase):
+    """A8: Gapmin = t/2 (capped at 0.5 x the smallest main-segment side) on a
+    solid-only-main /INTER/TYPE7 whose EMITTED secondary is shells LS-DYNA
+    offsets (General Remark 12 spelling, SHLTHK 1/2, or Card B THKOPT 1)."""
+
+    def test_SHLTHK_2_writes_the_clamped_half_thickness(self):
+        """bend's shape: t 0.381 -> t/2 0.1905 > 0.5 x 0.254 -> 0.127."""
+        result, starter, _ = _convert(_offset_deck(shlthk=2))
+        self.assertEqual(_type7_cells(starter), (_G0127, "5"))
+        w = [x for x in result.warnings if _A8 in x]
+        self.assertEqual(len(w), 1, result.warnings)
+        for needle in ("*CONTROL_CONTACT SHLTHK 2 (p.12-70)", "t/2 = 0.1905",
+                       "CLAMPED to 0.5 x the smallest main-segment side "
+                       "0.254", "0.1 x 0.254 = 0.0254", "i7sti3.F:1055-1063",
+                       ":1075-1083", "bend.k", "-45.60 %", "0.98x",
+                       "--no-shell-offset-gapmin"):
+            self.assertIn(needle, w[0])
+        self.assertFalse(_has(result.warnings, _CLASS), result.warnings)
+
+    def test_SHLTHK_0_is_unchanged_and_keeps_the_class_warning(self):
+        result, starter, _ = _convert(_offset_deck(shlthk=0))
+        self.assertEqual(_type7_cells(starter), (_G0, "5"))
+        self.assertTrue(_has(result.warnings, _CLASS, "0.254"))
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_no_CONTROL_CONTACT_reads_as_SHLTHK_0(self):
+        result, starter, _ = _convert(_offset_deck(shlthk=None))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_an_AUTOMATIC_spelling_always_offsets(self):
+        """General Remark 12: SHLTHK is ignored for these types."""
+        result, starter, _ = _convert(_offset_deck(
+            shlthk=0, kw="*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID",
+            thick=(0.1,)))
+        self.assertEqual(_type7_cells(starter)[0], "                0.05")
+        w = [x for x in result.warnings if _A8 in x]
+        self.assertEqual(len(w), 1, result.warnings)
+        self.assertIn("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE always does", w[0])
+        self.assertNotIn("CLAMPED", w[0])
+
+    def test_SHLTHK_1_excludes_a_rigid_shell_and_SHLTHK_2_includes_it(self):
+        """Both sides rigid -> the KEEP arm, so the emitted secondary IS the
+        rigid shell: SHLTHK 1 excludes rigid bodies, SHLTHK 2 does not."""
+        one = _convert(_offset_deck(shlthk=1, rigid=(1, 2)))
+        two = _convert(_offset_deck(shlthk=2, rigid=(1, 2)))
+        self.assertEqual(_type7_cells(one[1])[0], _G0)
+        self.assertFalse(_has(one[0].warnings, _A8))
+        # an ALL-rigid surface is a clean exclusion, not the mixed refusal
+        self.assertFalse(_has(one[0].warnings, "mixes"))
+        self.assertTrue(_has(one[0].warnings, _CLASS))
+        self.assertEqual(_type7_cells(two[1])[0], _G0127)
+        # ... and on a DEFORMABLE shell SHLTHK 1 does offset
+        dfm = _convert(_offset_deck(shlthk=1))
+        self.assertEqual(_type7_cells(dfm[1])[0], _G0127)
+        self.assertTrue(_has(dfm[0].warnings, _A8, "SHLTHK 1"))
+
+    def test_a_surface_mixing_rigid_and_deformable_shells_under_SHLTHK_1(self):
+        """Refused as ambiguous. The writer's own route cannot build it (the
+        resolver drops the rigid nodes unless BOTH sides are rigid), so the
+        rule is called directly with the rigid filter off."""
+        from k2rad.writer.contacts import _shell_offset_gapmin
+        state = _dispatch(_offset_deck(shlthk=1, thick=(0.381, 0.381),
+                                       rigid=(2,)))
+        c = state.contacts_surf2surf[0]
+        self.assertEqual(_shell_offset_gapmin(state, c, 0.0, 1, 3, 200, 2,
+                                              set(), True), (0.0, False))
+        self.assertTrue(_has(state.warnings, "mixes 1 rigid and 1 deformable",
+                             "SHLTHK 1"))
+
+    def test_a_solid_secondary_is_unchanged(self):
+        result, starter, _ = _convert(_offset_deck(solid_secondary=True))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertTrue(_has(result.warnings, _CLASS))
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_a_shell_skin_on_a_solid_is_not_a_shell_secondary(self):
+        """Every node of the skin is ALSO a solid node: the surface is not
+        shell-only, so the rule stays out (the solid-node screen, not the
+        coverage one, is what refuses it)."""
+        result, starter, _ = _convert(_offset_deck(solid_secondary=True,
+                                                   skin=True))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+        self.assertTrue(_has(result.warnings, _CLASS))
+
+    def test_a_shell_MAIN_is_never_touched(self):
+        """AUTOMATIC (always offsets), but the main is a shell plate: the
+        starter's own default there is the mean shell thickness."""
+        deck = _offset_deck(kw="*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID",
+                            thick=(0.381, 0.5))
+        # part 3 becomes the MAIN: SSID part 2, MSID part 3, no set
+        deck = deck.replace(_row(200, 1, 2, 3, 0, 0, 0, 0),
+                            _row(2, 3, 3, 3, 0, 0, 0, 0))
+        self.assertIn(_row(2, 3, 3, 3, 0, 0, 0, 0), deck)
+        base = _convert(deck)
+        self.assertEqual(_type7_cells(base[1])[0], _G0)
+        self.assertFalse(_has(base[0].warnings, _A8))
+        self.assertEqual(base[1], _convert(deck, shell_offset_gapmin=False)[1])
+
+    def test_a_node_on_no_shell_keeps_the_rule_out(self):
+        """A node-set SSID: the four shell nodes plus one node on no element.
+        Not every emitted secondary node lies on a shell of the group."""
+        result, starter, _ = _convert(_offset_deck(extra_node=True))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+        # ... the same node set WITHOUT the stray node is a shell surface
+        deck = _offset_deck(extra_node=True).replace(
+            _row(9, 10, 11, 12, 13), _row(9, 10, 11, 12))
+        self.assertEqual(_type7_cells(_convert(deck)[1])[0], _G0127)
+
+    def test_the_rule_reads_the_group_the_resolver_wrote(self):
+        """A partly rigid secondary (deformable t 0.381 + rigid t 0.1): the
+        resolver drops the rigid nodes, so the surface the rule judges is
+        the 0.381 shell alone - not a refused [0.1, 0.381] mix."""
+        result, starter, _ = _convert(_offset_deck(thick=(0.381, 0.1),
+                                                   rigid=(3,)))
+        self.assertEqual(_type7_cells(starter)[0], _G0127)
+        self.assertFalse(_has(result.warnings, "at least one t/2 is below"))
+
+    def test_the_interference_family_is_excluded(self):
+        """A press-fit needs the large derived gap to engage at all."""
+        result, starter, _ = _convert(_offset_deck(
+            kw="*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE_ID"))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_mixed_thicknesses_all_above_the_cap(self):
+        result, starter, _ = _convert(_offset_deck(thick=(0.381, 1.0)))
+        self.assertEqual(_type7_cells(starter)[0], _G0127)
+        w = [x for x in result.warnings if _A8 in x]
+        self.assertEqual(len(w), 1, result.warnings)
+        self.assertIn("CLAMPED", w[0])
+        self.assertIn("carries shells of thickness [0.381, 1.0]; every t/2 "
+                      "is above the ceiling", w[0])
+
+    def test_mixed_thicknesses_one_below_the_cap_is_refused(self):
+        result, starter, _ = _convert(_offset_deck(thick=(0.1, 1.0)))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertTrue(_has(result.warnings, "thickness [0.1, 1.0] and at "
+                             "least one t/2 is below the ceiling",
+                             "no single constant Gapmin"))
+        self.assertFalse(_has(result.warnings, _A8))
+        self.assertTrue(_has(result.warnings, _CLASS))
+
+    def test_a_composite_secondary_offsets_by_its_ply_sum(self):
+        """Ryan_Lee W6's face sheets have no *SECTION_SHELL: the thickness is
+        the ply stack (2 x 0.3 = 0.6 -> t/2 0.3, below the 0.5 x 10 cap)."""
+        result, starter, _ = _convert(_offset_deck(thick=(0.6,), edge=10.0,
+                                                   composite=True))
+        self.assertEqual(_type7_cells(starter)[0], "                 0.3")
+        self.assertTrue(_has(result.warnings, _A8, "t/2 = 0.3"))
+
+    def test_a_stated_SST_wins(self):
+        result, starter, _ = _convert(_offset_deck(card3=(0, 0, 0.2, 0)))
+        self.assertEqual(_type7_cells(starter)[0], "                 0.1")
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_inter_gapmin_wins(self):
+        result, starter, _ = _convert(_offset_deck(), inter_gapmin={7: 0.03})
+        self.assertEqual(_type7_cells(starter)[0], "                0.03")
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_derived_gapmin_yields_to_it(self):
+        result, starter, _ = _convert(_offset_deck(), derived_gapmin=True)
+        self.assertEqual(_type7_cells(starter)[0], _G0127)
+        self.assertTrue(_has(result.warnings, _A8))
+        self.assertFalse(_has(result.warnings, "--derived-gapmin wrote"))
+
+    def test_implicit_keeps_Inacti_5(self):
+        """The PRE-A8 gap (0) reaches _ignore_to_inacti: the implicit
+        "stated engagement gap -> Inacti 0" branch is not taken."""
+        result, starter, _ = _convert(_offset_deck(implicit=True))
+        self.assertEqual(_type7_cells(starter), (_G0127, "5"))
+        self.assertFalse(_has(result.warnings, "explicit engagement Gapmin"))
+
+    def test_the_sphere1_shape_is_the_negative_control(self):
+        """All-rigid SSID cube, deformable shell MSID t 2.5, non-automatic,
+        SHLTHK 0: the swap makes the shell the emitted secondary, and LS-DYNA
+        does NOT offset it - unchanged. Under SHLTHK 2 the same sides give
+        t/2 = 1.25 (below the 0.5 x 10 cap): the SHLTHK test is what holds."""
+        d0 = _offset_deck(shlthk=0, thick=(2.5,), edge=10.0, rigid=(1,),
+                          swap=True)
+        result, starter, _ = _convert(d0)
+        self.assertTrue(_has(result.warnings, "SWAPPED the roles"))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+        self.assertTrue(_has(result.warnings, _CLASS, "0.1 x 10"))
+        d2 = _offset_deck(shlthk=2, thick=(2.5,), edge=10.0, rigid=(1,),
+                          swap=True)
+        self.assertEqual(_type7_cells(_convert(d2)[1])[0],
+                         "                1.25")
+
+    def test_the_opt_out_changes_exactly_the_one_cell(self):
+        on = _convert(_offset_deck())
+        off = _convert(_offset_deck(), shell_offset_gapmin=False)
+        self.assertEqual(_type7_cells(off[1])[0], _G0)
+        self.assertEqual(on[1].replace(_G0127, _G0), off[1])
+        self.assertEqual(off[1], _convert(_offset_deck(shlthk=0))[1])
+        self.assertTrue(_has(off[0].warnings, _CLASS))
+        self.assertFalse(_has(off[0].warnings, _A8))
+
+    def test_Card_B_THKOPT_1_uses_its_own_SHLTHK(self):
+        card_ab = _row(0) + "\n" + _row(0.0, 1, 2) + "\n"
+        result, starter, _ = _convert(_offset_deck(shlthk=0,
+                                                   cards_ab=card_ab))
+        self.assertEqual(_type7_cells(starter)[0], _G0127)
+        self.assertTrue(_has(result.warnings, _A8,
+                             "its own Card B THKOPT 1 / SHLTHK 2"))
+
+    def test_Card_B_THKOPT_2_never_offsets(self):
+        card_ab = _row(0) + "\n" + _row(0.0, 2, 0) + "\n"
+        result, starter, _ = _convert(_offset_deck(shlthk=2,
+                                                   cards_ab=card_ab))
+        self.assertEqual(_type7_cells(starter)[0], _G0)
+        self.assertFalse(_has(result.warnings, _A8))
+
+    def test_the_handler_stores_Card_B(self):
+        card_ab = _row(0) + "\n" + _row(0.0, 1, 2) + "\n"
+        c = _dispatch(_offset_deck(cards_ab=card_ab)).contacts_surf2surf[0]
+        self.assertEqual((c.thkopt, c.shlthk_c), (1, 2))
+        c = _dispatch(_offset_deck()).contacts_surf2surf[0]
+        self.assertEqual((c.thkopt, c.shlthk_c), (0, 0))
+
+    def test_the_base_spelling(self):
+        from k2rad.writer.contacts import (_LS_ALWAYS_OFFSETS_SHELLS,
+                                           _contact_base_spelling)
+        for kw, base in (
+                ("CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
+                 "AUTOMATIC_SURFACE_TO_SURFACE"),
+                ("CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MPP",
+                 "AUTOMATIC_SURFACE_TO_SURFACE"),
+                ("*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID_MPP",
+                 "AUTOMATIC_SINGLE_SURFACE"),
+                ("CONTACT_SURFACE_TO_SURFACE_TITLE", "SURFACE_TO_SURFACE"),
+                ("CONTACT_SURFACE_TO_SURFACE_THERMAL",
+                 "SURFACE_TO_SURFACE_THERMAL")):
+            with self.subTest(kw=kw):
+                self.assertEqual(_contact_base_spelling(kw), base)
+        self.assertEqual(len(_LS_ALWAYS_OFFSETS_SHELLS), 8)
+        self.assertNotIn("SURFACE_TO_SURFACE", _LS_ALWAYS_OFFSETS_SHELLS)
+        self.assertNotIn("AUTOMATIC_SURFACE_TO_SURFACE_MORTAR",
+                         _LS_ALWAYS_OFFSETS_SHELLS)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1480,6 +1857,7 @@ class Round6FlagWiringA(unittest.TestCase):
         "--initial-void-floor": "initial_void_floor",
         "--weld-exponents": "weld_exponents",
         "--constrained-linear": "constrained_linear",
+        "--shell-offset-gapmin": "shell_offset_gapmin",
     }
     #: figures each flag's --help must carry (matched on the collapsed render)
     _HELP_FIGURES = {
@@ -1489,6 +1867,8 @@ class Round6FlagWiringA(unittest.TestCase):
                              "hm_read_prop13.F:1169-1170"),
         "--constrained-linear": ("NUMMPC 1", "683 rows",
                                  "hm_read_mpc.F:124"),
+        "--shell-offset-gapmin": ("the capped 0.127", "-45.60 %", "0.98x",
+                                  "i7sti3.F:1055-1063"),
         "--mass-weighted-inivel": ("J = -SUM(IN)", "0.1977227E-02",
                                    "189.96", "1.156x"),
         "--spring-token-mass-compensation": (
@@ -1598,6 +1978,8 @@ _RETRACTED_ROUND_6_A = (
     # works, not a reason against it
     "not compensated here",
     "would double-count",
+    # A8: a solid main against shells LS-DYNA offsets now gets t/2
+    "on every `/INTER/TYPE7` it emits unless the card states Card-3",
 )
 
 #: The same family as regexes, matched on the collapsed text (a phrase whose
@@ -1679,6 +2061,12 @@ class Round6RetractedStatementsA(unittest.TestCase):
             ("README.md", "the flag also writes `J = −ΣIN` into every body "
              "it re-points"),
             ("ROADMAP.md", "CLOSED under the flag by A7"),
+            ("README.md", "or LS-DYNA offsets a SHELL secondary (the "
+             "shell-offset Gapmin"),
+            ("README.md", "**The shell-offset Gapmin takes precedence**"),
+            ("ROADMAP.md", "Round 6: `bend` left this flag's reach."),
+            ("k2rad/writer/contacts.py", "LS-DYNA offsets the secondary "
+             "SHELLS by"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

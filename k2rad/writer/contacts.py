@@ -6,8 +6,8 @@ import itertools
 import math
 from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
-from ..state import (ConversionState, ContactSpotweld, ContactThermal,
-                     ContactTied, ContactTiebreak, SolidElem,
+from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
+                     ContactThermal, ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
 from ..topology import TET10_EDGEMID
 from .common import (
@@ -967,6 +967,188 @@ def _derived_gapmin_value(state: ConversionState, main_sid: int,
     return min_edge, value, clamped
 
 
+#: The *CONTACT types LS-DYNA ALWAYS offsets a shell surface for, by half its
+#: thickness, whatever *CONTROL_CONTACT SHLTHK says (Vol I R17 p.11-128/129
+#: General Remark 12).
+_LS_ALWAYS_OFFSETS_SHELLS = frozenset({
+    "AIRBAG_SINGLE_SURFACE", "AUTOMATIC_GENERAL", "AUTOMATIC_GENERAL_INTERIOR",
+    "AUTOMATIC_NODES_TO_SURFACE", "AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE",
+    "AUTOMATIC_SINGLE_SURFACE", "AUTOMATIC_SURFACE_TO_SURFACE",
+    "SINGLE_SURFACE",
+})
+
+
+def _contact_base_spelling(keyword: str) -> str:
+    """The contact TYPE a *CONTACT keyword names, as General Remark 12 lists
+    it: ``CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MPP_ID`` ->
+    ``AUTOMATIC_SURFACE_TO_SURFACE`` (``CONTACT_`` and the ``_ID`` /
+    ``_TITLE`` / ``_MPP`` options stripped, in any order)."""
+    kw = keyword.upper().lstrip("*")
+    if kw.startswith("CONTACT_"):
+        kw = kw[len("CONTACT_"):]
+    stripped = True
+    while stripped:
+        stripped = False
+        for opt in ("_TITLE", "_ID", "_MPP"):
+            if kw.endswith(opt):
+                kw = kw[:-len(opt)]
+                stripped = True
+    return kw
+
+
+def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
+                         gapmin: float, main_sid: int, main_styp: int,
+                         sec_sid: int, sec_styp: int, rigid_nodes: Set[int],
+                         keep_rigid: bool) -> Tuple[float, bool]:
+    """The shell-offset Gapmin (R14 triage round 6, A8): ``(gapmin, written)``.
+
+    LS-DYNA offsets a SHELL contact surface by half its thickness and a solid
+    segment by 0 (no SLDTHK is stated on any carrier), so a solid-only-main
+    ``/INTER/TYPE7`` with no stated gap engages a shell secondary at ``t/2``
+    there - and at the starter's own ``0.1 x`` the smallest main-segment side
+    here (``i7sti3.F:1055-1063``). Where LS-DYNA offsets the EMITTED secondary
+    (after the all-rigid-SSID swap), this writes ``Gapmin = t/2``, capped at
+    ``0.5 x`` that side: the :func:`_derived_gapmin_value` ceiling, above
+    which the starter prints WARNING 94 and does NOT clamp (``:1075-1083``).
+
+    LS-DYNA offsets them (Vol I R17): always for a General Remark 12 type
+    (p.11-128/129, :data:`_LS_ALWAYS_OFFSETS_SHELLS`); for any other type
+    when the contact's own optional Card B says ``THKOPT 1`` with its
+    ``SHLTHK`` 1/2 (``THKOPT 2`` = never; p.11-101/102), else when
+    ``*CONTROL_CONTACT SHLTHK`` is 2, or 1 with no rigid shell on the surface
+    (SHLTHK 1 "excludes rigid bodies", p.12-70; a surface MIXING rigid and
+    deformable shells under it is refused as ambiguous).
+
+    *gapmin* comes back unchanged (and ``False``) unless the option is on, no
+    gap is stated (Card-3 SST/MST, ``--inter-gapmin``, ``--auto-gapmin`` all
+    win), the card is neither k2rad's implicit stub nor a press-fit
+    ``INTERFERENCE``, the main is solid-only (the SAME pure predicate the
+    class warning uses), and every node of the group
+    :func:`_resolve_contact_slave` wrote lies on a shell whose nodes are all
+    in that group and on no solid / thick-shell element. The thickness is the
+    one the ``/SHELL`` row carries (``writer/mesh._shell_element_thickness``,
+    else the section ``T1``; a ``*PART_COMPOSITE`` part its valid-ply sum);
+    any ``t <= 0`` is refused. Several thicknesses: written only when EVERY
+    ``t/2`` is above the cap (each then gives the cap), refused by name
+    otherwise. A shell MAIN is a different class - the starter's own default
+    there is the mean shell thickness (``i7sti3.F:1058-1060``) - and is never
+    touched.
+
+    PURE apart from its warnings: no id drawn, no line emitted, so it runs
+    after the resolvers without shifting an auto-id.
+    """
+    if (gapmin != 0.0 or not state.options.shell_offset_gapmin
+            or c.title == AUTO_IMPLICIT_STUB_TITLE or c.interference):
+        return gapmin, False
+    min_edge, _value, _clamped = _derived_gapmin_value(state, main_sid,
+                                                       main_styp)
+    if min_edge <= 0.0:
+        return gapmin, False                    # the main is not solid-only
+    # The group _resolve_contact_slave wrote, filtered exactly as it filters.
+    group = {n for n in _side_node_ids(state, sec_sid, sec_styp)
+             if n > 0 and (keep_rigid or n not in rigid_nodes)}
+    if not group:
+        return gapmin, False
+    for elems in (state.solid_elems, state.tshell_elems):
+        for s in elems:
+            if any(n in group for n in s.nodes):
+                return gapmin, False            # a solid / thick-shell node
+    surface = []
+    covered: Set[int] = set()
+    for e in state.shell_elems:
+        ids = {n for n in e.nodes if n > 0}
+        if ids and ids <= group:
+            surface.append(e)
+            covered |= ids
+    if not surface or covered != group:
+        return gapmin, False                    # not a shell-only surface
+    base = _contact_base_spelling(c.keyword)
+    if base in _LS_ALWAYS_OFFSETS_SHELLS:
+        reason = (f"*CONTACT_{base} always does (Vol I R17 p.11-128/129 "
+                  "Remark 12)")
+    else:
+        if c.thkopt == 2:
+            return gapmin, False                # its own Card B: no offsets
+        if c.thkopt == 1:
+            shlthk = c.shlthk_c
+            reason = (f"its own Card B THKOPT 1 / SHLTHK {shlthk} "
+                      "(p.11-101/102)")
+        else:
+            cc = state.ctrl_contact
+            shlthk = cc.shlthk if cc is not None else 0
+            reason = f"*CONTROL_CONTACT SHLTHK {shlthk} (p.12-70)"
+        if shlthk not in (1, 2):
+            return gapmin, False                # LS-DYNA ignores thickness
+        if shlthk == 1:
+            rigid_pids = rigid_part_ids(state)
+            n_rigid = sum(1 for e in surface if e.pid in rigid_pids)
+            if n_rigid == len(surface):
+                return gapmin, False            # SHLTHK 1 excludes rigid bodies
+            if n_rigid:
+                state.warn(
+                    f"/INTER/TYPE7 {c.inter_id}: the secondary surface mixes "
+                    f"{n_rigid} rigid and {len(surface) - n_rigid} deformable "
+                    f"shells under {reason}, which offsets the deformable ones "
+                    "only - no single constant Gapmin (Igap 0) represents "
+                    "that; the starter's derived gap stands.")
+                return gapmin, False
+    # Imported here, not at module level: writer.mesh imports much of the
+    # writer (lumping.nodal_masses_from_state does the same).
+    from .mesh import _shell_element_thickness, _unique_node_slots
+    thick: List[float] = []
+    for e in surface:
+        part = state.parts.get(e.pid)
+        comp = state.part_composites.get(e.pid)
+        if part is not None and part.secid == 0 and comp is not None:
+            t = sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+        else:
+            sec = state.sec_shells.get(part.secid) if part is not None else None
+            t1 = sec.t1 if sec is not None else 0.0
+            t = _shell_element_thickness(e, _unique_node_slots(e.nodes),
+                                         t1) or t1
+        if not t > 0.0:
+            state.warn(
+                f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary "
+                f"shells here ({reason}), but shell {e.eid} carries no "
+                "positive thickness to offset by; the starter's derived gap "
+                "stands.")
+            return gapmin, False
+        thick.append(t)
+    ts = sorted({_round_sig(t, 6) for t in thick})
+    ceiling = 0.5 * min_edge
+    edge = _round_sig(min_edge)
+    if len(ts) > 1 and any(t / 2.0 <= ceiling for t in ts):
+        state.warn(
+            f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary shells "
+            f"here ({reason}), but the secondary surface carries shells of "
+            f"thickness {ts} and at least one t/2 is below the ceiling "
+            f"0.5 x {edge:g} = {_round_sig(ceiling):g}, so no single constant "
+            "Gapmin (Igap 0) represents it; the starter's derived gap stands.")
+        return gapmin, False
+    half = ts[0] / 2.0
+    clamped = half > ceiling
+    value = _round_sig(ceiling if clamped else half)
+    state.warn(
+        f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary SHELLS by "
+        f"half their thickness here ({reason}), so it engages them at t/2 = "
+        f"{_round_sig(half):g} from the solid main; k2rad writes Gapmin = "
+        f"{value:g}"
+        + (f", CLAMPED to 0.5 x the smallest main-segment side {edge:g}"
+           if clamped else "")
+        + (f" (the secondary surface carries shells of thickness {ts}; every "
+           "t/2 is above the ceiling, so each gives the same Gapmin)"
+           if len(ts) > 1 else "")
+        + f" (the starter would otherwise derive 0.1 x {edge:g} = "
+          f"{_round_sig(0.1 * min_edge):g}, i7sti3.F:1055-1063, and prints "
+          "WARNING 94 without clamping above 0.5 x that side, :1075-1083). "
+          "MEASURED on intro-by-j.-day/adaptive/adaptive-i/bend.k (t 0.381, "
+          "SHLTHK 2, written 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> "
+          "-45.60 % at matched time, closer to LS-DYNA at every sampled time, "
+          "0.98x the cycles; the row stays deviation. Pass "
+          "--no-shell-offset-gapmin to keep the starter's derived gap.")
+    return value, True
+
+
 def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
                           gapmin: float, main_sid: int, main_styp: int,
                           interference: bool = False,
@@ -1845,6 +2027,17 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
+        # The shell-offset Gapmin (round 6, A8), on the EMITTED sides. A value
+        # it writes makes _maybe_derived_gapmin return early - the class
+        # warning then does not print for this interface (the A8 warning
+        # replaces it) and --derived-gapmin / the implicit swap's implied gap
+        # yield to it - while _ignore_to_inacti keeps the PRE-A8 gap, so the
+        # implicit "stated engagement gap -> Inacti 0" branch is never
+        # triggered by it.
+        gap_pre_offset = gapmin
+        gapmin, offset_gap = _shell_offset_gapmin(
+            state, c, gapmin, main_sid, main_styp, sec_sid, sec_styp,
+            rigid_nodes, keep_rigid)
         # The implicit swap IMPLIES the derived Gapmin on the interface it
         # creates: the plan refused to swap without one, so this write cannot
         # come out empty — EXCEPT on a press-fit *CONTACT_*_INTERFERENCE,
@@ -1856,6 +2049,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                        main_sid, main_styp,
                                        interference=c.interference,
                                        force=plan == _RS_IMPLICIT_SWAP)
+        inacti_gap = gap_pre_offset if offset_gap else gapmin
         if c.interference:
             # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
             # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
@@ -1867,7 +2061,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         elif c.inter_id in recipe_inacti_ids:
             inacti = 5
         else:
-            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id,
+                                       inacti_gap)
         fric, fric_id = _contact_friction(
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,

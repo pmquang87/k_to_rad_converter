@@ -3593,6 +3593,13 @@ class ContactAutoSurf2Surf:
     #: IGNORE cell — ``i7pwr3.F:244-258`` makes Inacti 5/6 ACCEPT the overlap as
     #: the new zero-force state, which is the exact opposite of the keyword.
     interference: bool = False
+    #: Optional Card B fields 2-3 (Vol I R17 p.11-101/102): THKOPT (0 = the
+    #: *CONTROL_CONTACT SHLTHK decides, 1 = offsets included with Card B's own
+    #: SHLTHK, 2 = no offsets) and that SHLTHK; 0 / 0 when the card is absent.
+    #: Read for the shell-offset Gapmin (writer/contacts._shell_offset_gapmin,
+    #: R14 triage round 6, A8).
+    thkopt: int = 0
+    shlthk_c: int = 0
 
 
 @dataclass
@@ -7487,6 +7494,26 @@ class ConvertOptions:
     # 42 are symmetric about the driven node, so the card changes nothing
     # there).
     constrained_linear: bool = True
+    # --no-shell-offset-gapmin: keep the starter's own derived gap on a
+    # solid-main /INTER/TYPE7 whose secondary is SHELLS LS-DYNA offsets
+    # (R14 triage round 6, A8).
+    #
+    # ON by default. LS-DYNA offsets a shell contact surface by half its
+    # thickness - always for the AUTOMATIC_* / SINGLE_SURFACE spellings (Vol I
+    # R17 p.11-128/129 General Remark 12), for the others under
+    # *CONTROL_CONTACT SHLTHK 2 or SHLTHK 1 on deformable shells (p.12-70) or
+    # the contact's own Card B THKOPT 1 (p.11-101/102) - and a solid segment
+    # by 0 (no SLDTHK). With no stated gap the OpenRadioss starter derives
+    # 0.1 x the smallest main-segment side for a solid main instead
+    # (i7sti3.F:1055-1063). k2rad writes Gapmin = t_secondary / 2, capped at
+    # 0.5 x that side (above it the starter prints WARNING 94 and does NOT
+    # clamp, :1075-1083). Several secondary thicknesses: written only when
+    # every t/2 is above the cap, refused by name otherwise; a shell MAIN is
+    # never touched. MEASURED on intro-by-j.-day/adaptive/adaptive-i/bend.k
+    # (1 deck key on 1 emitted model; t 0.381 under SHLTHK 2, written the
+    # capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at matched
+    # time, 0.98x the cycles; the row stays deviation.
+    shell_offset_gapmin: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -7587,9 +7614,11 @@ class ConvertOptions:
     # The rule is pure standard library, unlike --auto-gapmin, which needs
     # numpy + scipy (k2rad/gapmin.py, docs/DEPENDENCIES.md) and silently applies
     # nothing without them. Precedence, tightest first: --inter-gapmin ID=VAL >
-    # Card-3 SAST/SBST > --auto-gapmin > --derived-gapmin > 0 (the starter's own
-    # 0.1 x min edge). A default-ON WARNING names the derived value and this
-    # flag on every carrier whether or not the flag is set.
+    # Card-3 SAST/SBST > --auto-gapmin > the shell-offset Gapmin (round 6, A8,
+    # default ON: a SHELL secondary LS-DYNA offsets) > --derived-gapmin > 0
+    # (the starter's own 0.1 x min edge). A default-ON WARNING names the
+    # derived value and this flag on every carrier the shell-offset rule does
+    # not take, whether or not the flag is set.
     derived_gapmin: bool = False
     derived_gapmin_factor: float = 0.005       # Gapmin = factor × min segment side
     # --no-rigid-secondary-swap: turn OFF the all-rigid-SSID remedies on an

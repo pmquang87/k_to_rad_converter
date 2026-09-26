@@ -6353,6 +6353,19 @@ def _read_contact_ignore(raw: List[str], offset: int, extra: int = 0) -> int:
     return to_int(f[1]) if len(f) > 1 else 0
 
 
+def _read_contact_thkopt(raw: List[str], offset: int,
+                         extra: int = 0) -> Tuple[int, int]:
+    """Read LS-DYNA optional Card B fields 2-3 = ``THKOPT SHLTHK`` (Vol I R17
+    p.11-101/102), one card after Card A: the same Cards-A/B/C-present
+    assumption :func:`_read_contact_ignore` makes (Card C at offset+5).
+    ``(0, 0)`` when the card is absent - the *CONTROL_CONTACT SHLTHK decides.
+    """
+    f = _card(raw, offset + 4 + extra, fixed=True, n=8, w=10)
+    thkopt = to_int(f[1]) if len(f) > 1 and f[1].strip() else 0
+    shlthk = to_int(f[2]) if len(f) > 2 and f[2].strip() else 0
+    return thkopt, shlthk
+
+
 def _read_contact_soft(raw: List[str], offset: int, extra: int = 0) -> int:
     """Read LS-DYNA optional Card A field 1 = SOFT (soft-constraint formulation).
 
@@ -6705,13 +6718,15 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     ignore = _read_contact_ignore(raw, offset, extra)
+    thkopt, shlthk_c = _read_contact_thkopt(raw, offset, extra)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs,
                              keyword=block.keyword,
                              thermal=(_read_contact_thermal(raw, offset)
                                       if thermal else None),
-                             interference=interference)
+                             interference=interference,
+                             thkopt=thkopt, shlthk_c=shlthk_c)
     )
 
 

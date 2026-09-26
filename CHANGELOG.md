@@ -195,6 +195,35 @@ Prior history (before this changelog was introduced) is summarized in the
     reference). The round-5 texts that called the residual "not compensated
     here" / the J write a "double count" are rewritten; the extension of
     `lumping._material_rho` (A3) leaves all four flag arms byte-identical.
+  - **A8 — a solid main against a shell secondary that LS-DYNA offsets gets
+    `Gapmin = t/2`** (capped at `0.5 ×` the main edge; default ON,
+    `--no-shell-offset-gapmin`; 1 deck key on 1 emitted model — bend: IE
+    −2.00 → −1.42 %, KE −68.65 → −45.60 % at 0.98× cycles; + Ryan_Lee W6, 6
+    files on 5 models, clamped, unreferenced). LS-DYNA offsets a shell
+    contact surface by half its thickness — always for the General Remark 12
+    spellings (Vol I R17 p.11-128/129), for the others under
+    `*CONTROL_CONTACT SHLTHK 2`, `SHLTHK 1` on deformable shells (p.12-70) or
+    the contact's own Card B `THKOPT 1` (p.11-101/102; the handler now stores
+    Card B `THKOPT` / `SHLTHK`) — and a solid segment by 0, while the starter
+    derives `0.1 ×` the smallest main-segment side for a solid main with no
+    gap (`i7sti3.F:1055-1063`) and prints WARNING 94 without clamping above
+    `0.5 ×` it (`:1075-1083`). The rule reads the EMITTED sides (after the
+    all-rigid-SSID swap, over the group the resolver wrote): every secondary
+    node on a shell of the group and on no solid or thick shell; the
+    thickness the `/SHELL` row carries (a `*PART_COMPOSITE` part: its valid
+    ply sum; any `t <= 0` refused); several thicknesses written only when
+    every `t/2` is above the cap, refused by name otherwise; `SHLTHK 1` on an
+    all-rigid surface excluded, on a rigid/deformable mix refused. Never a
+    shell MAIN, never a solid secondary, never the implicit stub or a
+    press-fit `INTERFERENCE`. Card-3 `SST`/`MST`, `--inter-gapmin` and
+    `--auto-gapmin` win; `--derived-gapmin` and the implicit swap's implied
+    gap yield, and `_ignore_to_inacti` keeps the pre-rule gap (an implicit
+    deck keeps `Inacti 5`). `bend` 90003 (t 0.381, SHLTHK 2): Gapmin 0 →
+    **0.127** (t/2 = 0.1905 CLAMPED at 0.5 × 0.254), the research arm at nt 4:
+    7665 → 7512 cycles, the minimum step moving from `INTER 90003` to `NODE 9`;
+    the row stays deviation (a 1.4-unit KE residual of a 3580-unit problem).
+    The A8 warning replaces the class warning on bend and W6; `sphere1` (the
+    class's only `match`: non-automatic, SHLTHK 0) is not reached.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

@@ -398,6 +398,24 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-constrained-linear to leave the card unconverted.",
     )
     parser.add_argument(
+        "--shell-offset-gapmin",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a /INTER/TYPE7 whose main side is SOLID segments only and "
+             "whose secondary is SHELLS that LS-DYNA offsets by half their "
+             "thickness (the AUTOMATIC_* / SINGLE_SURFACE spellings always, "
+             "Vol I R17 p.11-128/129; the others under *CONTROL_CONTACT "
+             "SHLTHK 2, SHLTHK 1 on deformable shells, or their own Card B "
+             "THKOPT 1), with no stated gap: write Gapmin = t/2 capped at "
+             "0.5 x the smallest main-segment side, instead of the starter's "
+             "derived 0.1 x that side (i7sti3.F:1055-1063). ON by default. "
+             "Several thicknesses: written only when every t/2 is above the "
+             "cap; a shell main is never touched. MEASURED on bend (t 0.381, "
+             "SHLTHK 2, written the capped 0.127): IE -2.00 -> -1.42 %%, KE "
+             "-68.65 -> -45.60 %% at matched time, 0.98x the cycles. Use "
+             "--no-shell-offset-gapmin to keep the starter's derived gap.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1049,6 +1067,7 @@ def main(argv=None) -> int:
         initial_void_floor=args.initial_void_floor,
         weld_exponents=args.weld_exponents,
         constrained_linear=args.constrained_linear,
+        shell_offset_gapmin=args.shell_offset_gapmin,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

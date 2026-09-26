@@ -231,6 +231,7 @@ def convert(
     initial_void_floor: bool = True,
     weld_exponents: bool = True,
     constrained_linear: bool = True,
+    shell_offset_gapmin: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -542,6 +543,20 @@ def convert(
         twice. MEASURED on ``plates.lce`` (the only carrier): starter
         ``NUMMPC 1``, 0 errors, engine identical to the base on all 683 rows
         (the constrained nodes are symmetric about the driven one).
+    shell_offset_gapmin : bool
+        On a ``/INTER/TYPE7`` whose main side is SOLID segments only and
+        whose secondary is SHELLS that LS-DYNA offsets by half their
+        thickness - the ``AUTOMATIC_*`` / ``SINGLE_SURFACE`` spellings always
+        (Vol I R17 p.11-128/129 General Remark 12), the others under
+        ``*CONTROL_CONTACT SHLTHK 2``, ``SHLTHK 1`` on deformable shells, or
+        their own Card B ``THKOPT 1`` - with no stated gap: write
+        ``Gapmin = t/2``, capped at ``0.5 x`` the smallest main-segment side,
+        instead of the starter's derived ``0.1 x`` that side
+        (``i7sti3.F:1055-1063``). **On by default.** Several thicknesses:
+        written only when every ``t/2`` is above the cap. A shell main is
+        never touched. MEASURED on ``bend`` (t 0.381 under SHLTHK 2, written
+        the capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at
+        matched time, 0.98x the cycles; the row stays deviation.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -950,6 +965,7 @@ def convert(
         initial_void_floor=initial_void_floor,
         weld_exponents=weld_exponents,
         constrained_linear=constrained_linear,
+        shell_offset_gapmin=shell_offset_gapmin,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

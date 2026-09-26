@@ -105,6 +105,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          initial_void_floor: bool = True,
                          weld_exponents: bool = True,
                          constrained_linear: bool = True,
+                         shell_offset_gapmin: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -243,6 +244,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["constrained_linear"] = bool(constrained_linear)
 
+    kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -372,6 +375,7 @@ class ConverterGUI:
         self.initial_void_floor = tk.BooleanVar(value=True)
         self.weld_exponents = tk.BooleanVar(value=True)
         self.constrained_linear = tk.BooleanVar(value=True)
+        self.shell_offset_gapmin = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -732,6 +736,15 @@ class ConverterGUI:
             variable=self.constrained_linear).grid(
                 row=34, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Solid main against a SHELL secondary LS-DYNA offsets "
+                     "(AUTOMATIC_*, or SHLTHK 1/2): write Gapmin = t/2, capped "
+                     "at 0.5 x the smallest main edge - ON. The starter would "
+                     "derive 0.1 x that edge (i7sti3.F:1055-1063). bend: KE "
+                     "-68.65 % -> -45.60 % at matched time, 0.98x cycles",
+            variable=self.shell_offset_gapmin).grid(
+                row=35, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -976,6 +989,7 @@ class ConverterGUI:
                 initial_void_floor=self.initial_void_floor.get(),
                 weld_exponents=self.weld_exponents.get(),
                 constrained_linear=self.constrained_linear.get(),
+                shell_offset_gapmin=self.shell_offset_gapmin.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1124,6 +1138,9 @@ class ConverterGUI:
         if not kwargs.get("constrained_linear", True):
             bits.append("*CONSTRAINED_LINEAR_* left unconverted "
                         "(--no-constrained-linear)")
+        if not kwargs.get("shell_offset_gapmin", True):
+            bits.append("starter-derived gap kept against offset shells "
+                        "(--no-shell-offset-gapmin)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

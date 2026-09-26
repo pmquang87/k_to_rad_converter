@@ -1448,6 +1448,12 @@ that decided it and the deck that would decide it next.
     surfaces are SHELL segments. The `*CONTACT_*_INTERFERENCE` exclusion the
     flag carries is therefore a RULE with 0 measured carriers on this corpus,
     not a measured save.
+    **Round 6: `bend` left this flag's reach.** LS-DYNA offsets its 0.381
+    shell secondary (`*CONTROL_CONTACT SHLTHK 2`), so A8's default-ON
+    shell-offset Gapmin writes the capped 0.127 there (IE -2.00 -> -1.42 %,
+    KE -68.65 -> -45.60 % at matched time, 0.98x the cycles), and that takes
+    precedence over `--derived-gapmin`. The flag's bend arm above stays what
+    it measured: the flag against the STARTER's derived gap.
 
 15. **The `*BOUNDARY_THERMAL_*` / `*BOUNDARY_TEMPERATURE_{RSW,TRAJECTORY,
     PERIODIC_SET}` family, as a CONVERSION.** Round 4's finalize round made

@@ -3675,6 +3675,33 @@ names the interface, states the physical consequence and the remedy, and
 reports the loss under "Recognized but not emitted"** rather than dropping it
 silently. A *partially* rigid secondary side keeps its interface and warns
 about the nodes removed from it.
+**A solid main against SHELLS that LS-DYNA offsets gets `Gapmin = t/2`**
+(R14 triage round 6, default ON, `--no-shell-offset-gapmin`). LS-DYNA offsets
+a shell contact surface by half its thickness — always for the `AUTOMATIC_*` /
+`SINGLE_SURFACE` spellings (Vol I R17 p.11-128/129 General Remark 12), for the
+others under `*CONTROL_CONTACT SHLTHK 2`, `SHLTHK 1` on deformable shells
+(p.12-70) or the contact's own Card B `THKOPT 1` (p.11-101/102) — and a solid
+segment by 0 (no `SLDTHK`), while the OpenRadioss starter, given no gap,
+derives `0.1 ×` the smallest main-segment side for a solid main
+(`i7sti3.F:1055-1063`). On the EMITTED sides (after the all-rigid-SSID swap)
+k2rad therefore writes `Gapmin = t/2`, capped at `0.5 ×` that side (above it
+the starter prints `WARNING 94` and does NOT clamp, `:1075-1083`). The
+thickness is the one the `/SHELL` row carries (a `*PART_COMPOSITE` part: its
+ply sum). A secondary with several thicknesses is written only when every
+`t/2` is above the cap (each then gives the cap) and is refused by name
+otherwise; a shell MAIN is never touched (the starter's own default there is
+the mean shell thickness), nor a solid secondary or a shell skin on a solid. A
+Card-3 `SST`/`MST`, `--inter-gapmin` and `--auto-gapmin` still win;
+`--derived-gapmin` and the implicit swap's implied gap yield to it, and the
+`Inacti` mapping keeps the gap the interface had before it. MEASURED on
+`intro-by-j.-day/adaptive/adaptive-i/bend.k` (1 deck key on 1 emitted model:
+t 0.381 under `SHLTHK 2`, written the capped 0.127): IE −2.00 → −1.42 %, KE
+−68.65 → −45.60 % at matched time, closer to LS-DYNA at every sampled time,
+0.98× the cycles — the row stays deviation. `sphere1` (non-`AUTOMATIC`,
+`SHLTHK 0`) is not reached. Beyond the roster it reaches Ryan_Lee
+`W6_SETUP_SandwichImpact` (6 files on 5 emitted models; core t 1.0 and
+composite face sheets 4.0 against a rigid blade, clamped at 0.2609, SI
+0.0002609; no reference).
 `*CONTACT_SURFACE_TO_SURFACE`, `_ONE_WAY_SURFACE_TO_SURFACE`,
 `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
 `_FORMING_SURFACE_TO_SURFACE_MORTAR` and `_SINGLE_SURFACE` (each optionally
@@ -5756,8 +5783,10 @@ recipe.
 
 ### `--derived-gapmin` — an explicit Gapmin for a SOLID-segment main surface
 
-k2rad writes `Igap 0` with `Gapmin 0` on every `/INTER/TYPE7` it emits unless
-the card states Card-3 `SAST`/`SBST`, and the starter then derives one itself:
+k2rad writes `Igap 0` with `Gapmin 0` on a `/INTER/TYPE7` unless the card
+states Card-3 `SAST`/`SBST` or LS-DYNA offsets a SHELL secondary (the
+shell-offset Gapmin, see *Contact* and the end of this section), and the
+starter then derives one itself:
 `i7sti3.F:1055-1063` takes `GAP = 0.1 × GAPMX` whenever no shell thickness was
 accumulated — `DXM` only ever takes `THK` (`:506/592/762/845`) — and `GAPMX` is the
 **smallest side of any main segment** (`i4gmx3.F:58-66`). So a SOLID-segment
@@ -5766,8 +5795,8 @@ LS-DYNA's own offset on a solid segment is **ZERO** unless `SLDTHK > 0` is
 stated (Vol I R17 p.11-101 default table, p.11-103; `SAST`/`SBST` apply to
 shells and beams only, p.11-33).
 
-k2rad **warns by default** on every such interface, naming the value the
-starter will derive. `--derived-gapmin` writes an explicit
+k2rad **warns by default** on every such interface the shell-offset rule
+does not take, naming the value the starter will derive. `--derived-gapmin` writes an explicit
 `--derived-gapmin-factor × min edge` instead (default factor **0.005**, ceiling
 `0.5 × min edge` — the starter's own `WARNING 94` gate at `i7sti3.F:1075` — and
 never a non-positive value, which is `ERROR 785`). Pure standard library,
@@ -5795,6 +5824,15 @@ window, not the lost NORMAL round 4 read it as. A
 press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
 same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
 stabilization stub are excluded from the flag.
+
+**The shell-offset Gapmin takes precedence** (R14 triage round 6, default ON,
+`--no-shell-offset-gapmin`): where LS-DYNA offsets a SHELL secondary against
+the solid main (see *Contact*), that interface gets `t/2`, capped at the same
+`0.5 × min edge` ceiling, and neither this flag nor the class warning touches
+it. That takes `bend`'s interface out of this flag's reach: the −2.0038 % →
+−2.8418 % arm above is the flag against the STARTER's derived gap, and the
+default now writes the capped 0.127 there (IE −2.00 → −1.42 %, KE −68.65 →
+−45.60 % at matched time, 0.98× the cycles).
 
 ### `--assumed-strain-isolid {24,none}` — ELFORM −1/−2 off the locking hex
 
