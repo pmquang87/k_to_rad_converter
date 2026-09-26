@@ -7429,6 +7429,23 @@ class ConvertOptions:
     # in 2936; bird-el NORMAL either way (IE +454.1 -> +1134.6 %). NORMAL is
     # not a match: the void is still full of fluid.
     initial_void_floor: bool = True
+    # --no-weld-exponents: leave the /PROP/TYPE13 alpha/beta cells of the
+    # *CONSTRAINED_SPOTWELD / _GENERALIZED_WELD_SPOT weld tie blank (R14
+    # triage round 6, A2).
+    #
+    # ON by default. LS-DYNA fails the weld at (fn/SN)^N + (fs/SS)^M >= 1
+    # (Vol I R17 p.10-212/213 Remark 2); the TYPE13 Ifail = 1 criterion sums
+    # alpha_i*DLIM^beta_i per DOF (r4def3.F:374, deletion at :819) and the
+    # reader turns a blank alpha into 1 and a blank beta into 2
+    # (hm_read_prop13.F:1169-1170), so the blank card k2rad wrote was always
+    # exponent 2. When N or M differs from 2 the cells become alpha1-3 = 1,
+    # beta1 = N, beta2 = beta3 = M; N = M = 2 writes nothing (byte-identical).
+    # M != 2 is conservative against LS-DYNA's resultant shear (Radioss sums
+    # the two shear directions). MEASURED at nt 4 on plates.nrbc / plates.spot
+    # (N = M = 1, the only carriers): rupture t 3.130e-4 (+29.4 % against
+    # LS-DYNA's 2.4193e-4) -> 2.460e-4 (+1.7 %), 0.899x the cycles, external
+    # work +60.66 -> +7.83 % / +59.99 -> +7.38 %; both rows stay deviation.
+    weld_exponents: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

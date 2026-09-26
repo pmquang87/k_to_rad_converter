@@ -2621,8 +2621,16 @@ they have 0 live cards on 893 corpus files, so no arm could be measured
 `*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` — without
 failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
-`/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
-exponents are warned)
+`/SPRING` connector carrying the failure forces (`TF`/`EP` are warned and
+dropped). The failure exponents `N`/`M` go to the TYPE13 `beta1 = N`,
+`beta2 = beta3 = M` (`alpha1-3 = 1`) when either differs from 2 (default ON,
+`--no-weld-exponents`); a blank cell would be read as 2
+(`hm_read_prop13.F:1169-1170`), so the blank card was always exponent 2. `N =
+M = 2` writes nothing. `M ≠ 2` is conservative against LS-DYNA's RESULTANT
+shear (Radioss sums the two shear directions; at `M = 1` and equal components
+1.414× the resultant). Measured on `plates.nrbc` / `plates.spot` (N = M = 1,
+nt 4): rupture t +29.4 % → +1.7 % against LS-DYNA's 2.4193e-4, external work
++60.66 → +7.83 % / +59.99 → +7.38 %, 0.899× cycles; both rows stay deviation.
 `*CONSTRAINED_SHELL_TO_SOLID` → one `/RBODY` per card (default ON,
 `--no-shell-to-solid-rbody`): the card's `NID` — the shell node — is the main
 node, the `NSID` set is the secondary group, `Mass` and every `J` cell are 0 so

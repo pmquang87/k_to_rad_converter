@@ -53,6 +53,35 @@ Prior history (before this changelog was introduced) is summarized in the
     moves quadrature_B from a timeout to NORMAL. The `*MAT_ELASTIC_FLUID`
     `CP = 0.0` warning and README no longer call a zero-pressure cut-off
     inexpressible (`Pmin = −1e-20` states it); that mapping is unchanged.
+  - **A2 — a failing weld's exponents N / M reach its `/PROP/TYPE13`
+    (default ON, `--no-weld-exponents`).** A `*CONSTRAINED_SPOTWELD` /
+    `*CONSTRAINED_GENERALIZED_WELD_SPOT` with `SN > 0` or `SS > 0` becomes the
+    `(stiff weld tie)` `/PROP/TYPE13` with `Ifail 1` / `Ifail2 2`, and k2rad
+    wrote every `c n alpha beta` cell 0 — which `hm_read_prop13.F:1169-1170`
+    turns into `alpha 1` / `beta 2`, so the converted criterion was ALWAYS
+    exponent 2 (the starter echoed `B1/B2/B3 EXPONENT 2.000`) while LS-DYNA's is
+    `(fn/SN)^N + (fs/SS)^M` (Vol I R17 p.10-213 Remark 2; `r4def3.F:361`,
+    `:374`, deletion at `:819`). The cells become `alpha1-3 = 1`,
+    `beta1 = N`, `beta2 = beta3 = M` when N or M differs from 2; `N = M = 2`
+    writes nothing (the reader's own default IS 2); a stated exponent `<= 0`
+    is not written and named. `M ≠ 2` is CONSERVATIVE against LS-DYNA's
+    resultant shear (Radioss sums the two shear directions; at `M = 1` with
+    equal components 1.414× the resultant) — stated in the warning. dyna2rad
+    writes `beta1 = N` / `beta2 = M` on its `/PROP/TYPE25` route
+    (`convertconstrainedspotwelds.cxx:103-124`). **2 deck keys on 2 emitted
+    models move** (plates.nrbc, plates.spot: N = M = 1, three rows each); the
+    implemented `_0000.rad` files hash to the critic's measured BETA arms
+    (`a266d0cbcaa38675…`, `2fa0cfc193c38b71…`), so those runs ARE the
+    implemented ones: the weld deletes at t 2.460e-4 against LS-DYNA's
+    2.4193e-4 (**+29.4 % → +1.7 %**) in 0.899× the cycles; plates.nrbc IE
+    +23.64 → −18.99 %, KE +61.93 → +12.75 %, external work +60.66 → +7.83 %;
+    plates.spot IE +34.23 → −12.05 %, KE +45.57 → +1.36 %, external work
+    +59.99 → +7.38 %; round 5's `TOTAL MASS 1.0048e-4` untouched; both rows
+    stay deviation. The N = M = 2 carriers (constrained.spotweld.plates, the
+    tabiei plates.k, Ryan_Lee W2_Door_Impact ×5) and the `*MAT_SPOTWELD` beam
+    route are byte-identical. The warning sentence "the converted
+    multi-directional criterion is quadratic (N=M=2)" is retired, and README's
+    "non-quadratic exponents are warned" with it.
 
 - **R14 CAMPAIGN TRIAGE batch, round 5 — REVIEW ROUND (PR #139 review,
   2026-09-15). Sixteen more shipped statements re-measured, three of them by

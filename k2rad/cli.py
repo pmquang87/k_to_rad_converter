@@ -358,6 +358,25 @@ def build_parser() -> argparse.ArgumentParser:
              "Pmin 0.",
     )
     parser.add_argument(
+        "--weld-exponents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a failing *CONSTRAINED_SPOTWELD / "
+             "*CONSTRAINED_GENERALIZED_WELD_SPOT weld's exponents N / M into "
+             "its /PROP/TYPE13 as alpha1-3 = 1, beta1 = N, beta2 = beta3 = M "
+             "when either differs from 2. ON by default. LS-DYNA fails the "
+             "weld at (fn/SN)^N + (fs/SS)^M >= 1 (Vol I R17 p.10-213); a "
+             "blank TYPE13 cell is read as alpha 1 / beta 2 "
+             "(hm_read_prop13.F:1169-1170), so the blank card was always "
+             "exponent 2. N = M = 2 writes nothing. M != 2 is conservative "
+             "(Radioss sums the two shear directions where LS-DYNA uses the "
+             "resultant). MEASURED at nt 4 on plates.nrbc / plates.spot "
+             "(N = M = 1): rupture t 3.130e-4 (+29.4 %%) -> 2.460e-4 (+1.7 %% "
+             "against LS-DYNA's 2.4193e-4), 0.899x the cycles, external work "
+             "+60.66 -> +7.83 %%. Use --no-weld-exponents to leave the cells "
+             "blank.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1001,6 +1020,7 @@ def main(argv=None) -> int:
         shell_to_solid_rbody=args.shell_to_solid_rbody,
         generalized_weld_butt=args.generalized_weld_butt,
         initial_void_floor=args.initial_void_floor,
+        weld_exponents=args.weld_exponents,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

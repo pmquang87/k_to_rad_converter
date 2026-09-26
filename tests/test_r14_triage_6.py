@@ -391,6 +391,196 @@ class InitialVoidFloorTests(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A2 — the weld failure exponents on /PROP/TYPE13
+# ═════════════════════════════════════════════════════════════════════════════
+
+_TOKEN = 1.0e-4
+_SHARE = _TOKEN / 2.0
+
+
+def _plate(nid0=1, z0=0.0, eid=1, pid=1):
+    """Four nodes + one shell, so their nodes carry element mass of their own."""
+    pts = [(0.0, 0.0, z0), (10.0, 0.0, z0), (10.0, 10.0, z0), (0.0, 10.0, z0)]
+    nodes = "".join(f"{nid0 + i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                    for i, (x, y, z) in enumerate(pts))
+    elem = _row(eid, pid, nid0, nid0 + 1, nid0 + 2, nid0 + 3) + "\n"
+    return nodes, elem
+
+
+def _weld_deck(sn=1.0e4, ss=5.0e4, n=None, m=None, gen=False,
+               plate_mat="elastic", tshell=False, composite=False,
+               rho=7.85e-9, part_mass=0.0, admas=0.0) -> str:
+    """Two plates 1 mm apart, node 1 welded to node 11 (a finite length),
+    *CONSTRAINED_SPOTWELD WITH failure forces (or the _GENERALIZED_WELD_SPOT
+    spelling over a two-node set). A blank N/M cell is the reader's 2.0.
+
+    ``plate_mat`` "orthotropic" puts the plates on *MAT_ORTHOTROPIC_ELASTIC
+    (a container outside the lumper's historic six); ``tshell`` meshes them as
+    *ELEMENT_TSHELL; ``composite`` puts them on a two-ply *PART_COMPOSITE;
+    ``part_mass`` adds an *ELEMENT_MASS_PART on both plates; ``admas`` an
+    *ELEMENT_MASS on the two weld nodes."""
+    n1, e1 = _plate(1, 0.0, 1, 1)
+    n2, e2 = _plate(11, 1.0, 2, 2)
+    kw = "*ELEMENT_TSHELL\n" if tshell else "*ELEMENT_SHELL\n"
+    deck = ("*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            "*NODE\n" + n1 + n2 + kw + e1 + e2)
+    if composite:
+        deck += "".join(
+            f"*PART_COMPOSITE\nplate{p}\n"
+            + _row(p, 2, 0.0, 0, 0.0, 0, 0, 0) + "\n"
+            + _row(1, 0.5, 0.0, 0, 1, 0.5, 0.0, 0) + "\n"
+            for p in (1, 2))
+    else:
+        deck += ("*PART\nplate1\n" + _row(1, 1, 1) + "\n"
+                 "*PART\nplate2\n" + _row(2, 1, 1) + "\n")
+        if tshell:
+            deck += "*SECTION_TSHELL\n" + _row(1, 1) + "\n" + _row(1.0) + "\n"
+        else:
+            deck += ("*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                     + _row(1.0, 1.0, 1.0, 1.0) + "\n")
+    if plate_mat == "orthotropic":
+        deck += ("*MAT_ORTHOTROPIC_ELASTIC\n"
+                 + _row(1, rho, 2.0e5, 1.0e5, 1.0e5, 0.1, 0.1, 0.1) + "\n"
+                 + _row(5.0e4, 5.0e4, 5.0e4, 2) + "\n"
+                 + _row(0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                 + _row(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n")
+    else:
+        deck += "*MAT_ELASTIC\n" + _row(1, rho, 210000.0, 0.3) + "\n"
+    cells = [sn, ss] + ["" if v is None else v for v in (n, m)]
+    if gen:
+        deck += ("*SET_NODE_LIST\n" + _row(3) + "\n" + _row(1, 11) + "\n"
+                 "*CONSTRAINED_GENERALIZED_WELD_SPOT\n" + _row(3) + "\n"
+                 + _row(0.0, 0.0, *cells) + "\n")
+    else:
+        deck += "*CONSTRAINED_SPOTWELD\n" + _row(1, 11, *cells) + "\n"
+    if part_mass:
+        deck += "".join("*ELEMENT_MASS_PART\n" + _row(p, part_mass) + "\n"
+                        for p in (1, 2))
+    if admas:
+        deck += ("*ELEMENT_MASS\n"
+                 + "".join(f"{900 + i:>8}{nd:>8}{admas:>16.8G}\n"
+                           for i, nd in enumerate((1, 11))))
+    return deck + "*END\n"
+
+
+def _type13_ab_rows(starter: str):
+    """The six ``c n alpha beta`` data rows of the weld tie's /PROP/TYPE13."""
+    lines = starter.splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("/PROP/TYPE13/")
+                 and "(stiff weld tie)" in lines[i + 1])
+    rows = []
+    for i in range(start, len(lines)):
+        if re.match(r"^#\s+c\d\s+n\d\s+alpha\d\s+beta\d$", lines[i]):
+            rows.append(lines[i + 1])
+        if len(rows) == 6:
+            break
+    assert len(rows) == 6, lines[start:start + 40]
+    return rows
+
+
+_ZERO4 = "                   0" * 4
+_ONE_ONE = ("                   0                   0"
+            "                   1                   1")
+
+
+class WeldExponentTests(unittest.TestCase):
+    """A2 — the TYPE13 ``alpha``/``beta`` cells were always blank, which the
+    reader turns into 1 / 2 (``hm_read_prop13.F:1169-1170``): the converted
+    criterion was exponent 2 whatever N and M the deck stated."""
+
+    def test_N_M_1_writes_the_cells(self):
+        result, starter, _e = _convert(_weld_deck(n=1.0, m=1.0))
+        rows = _type13_ab_rows(starter)
+        self.assertEqual(rows[:3], [_ONE_ONE] * 3)
+        self.assertEqual(rows[3:], [_ZERO4] * 3)
+        for row in rows[:3]:
+            self.assertEqual(len(row), 80)
+            self.assertEqual(row[40:60].strip(), "1")   # alpha, cols 41-60
+            self.assertEqual(row[60:80].strip(), "1")   # beta, cols 61-80
+        w = [x for x in result.warnings if "failure exponents N=1 / M=1" in x]
+        self.assertEqual(len(w), 1, result.warnings)
+        for needle in ("alpha1-3 = 1, beta1 = 1, beta2 = beta3 = 1",
+                       "hm_read_prop13.F:1169-1170", "r4def3.F:361",
+                       "2.460e-4", "0.899x", "--no-weld-exponents",
+                       "1.414x"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+
+    def test_a_mixed_pair_and_the_caveat_only_when_M_is_not_2(self):
+        result, starter, _e = _convert(_weld_deck(n=1.5, m=2.0))
+        rows = _type13_ab_rows(starter)
+        self.assertEqual(rows[0][40:60].strip(), "1")
+        self.assertEqual(rows[0][60:80].strip(), "1.5")
+        for row in rows[1:3]:
+            self.assertEqual(row[40:60].strip(), "1")
+            self.assertEqual(row[60:80].strip(), "2")
+        self.assertTrue(_has(result.warnings, "N=1.5 / M=2"))
+        self.assertFalse(_has(result.warnings, "RESULTANT"))
+        result2, starter2, _e2 = _convert(_weld_deck(n=2.0, m=1.0))
+        rows2 = _type13_ab_rows(starter2)
+        self.assertEqual(rows2[0][60:80].strip(), "2")
+        self.assertEqual(rows2[1][60:80].strip(), "1")
+        self.assertTrue(_has(result2.warnings, "RESULTANT", "1.414x"))
+
+    def test_N_M_2_is_byte_identical_blank_or_stated(self):
+        for n, m in ((None, None), (2.0, 2.0)):
+            with self.subTest(n=n, m=m):
+                r_on, s_on, _e = _convert(_weld_deck(n=n, m=m))
+                _r, s_off, _e2 = _convert(_weld_deck(n=n, m=m),
+                                          weld_exponents=False)
+                self.assertEqual(s_on, s_off)
+                self.assertEqual(_type13_ab_rows(s_on), [_ZERO4] * 6)
+                self.assertFalse(any("failure exponent" in w
+                                     for w in r_on.warnings))
+
+    def test_the_opt_out_leaves_the_cells_blank_and_says_so(self):
+        result, starter, _e = _convert(_weld_deck(n=1.0, m=1.0),
+                                       weld_exponents=False)
+        self.assertEqual(_type13_ab_rows(starter), [_ZERO4] * 6)
+        self.assertTrue(_has(result.warnings, "--no-weld-exponents:",
+                             "exponent 2 in every term"), result.warnings)
+
+    def test_a_non_positive_exponent_is_not_written(self):
+        result, starter, _e = _convert(_weld_deck(n=0.0, m=1.0))
+        self.assertEqual(_type13_ab_rows(starter), [_ZERO4] * 6)
+        self.assertTrue(_has(result.warnings, "N=0 / M=1",
+                             "a failure exponent <= 0 is not written"),
+                        result.warnings)
+
+    def test_the_GENERALIZED_WELD_SPOT_spelling_shares_the_rule(self):
+        result, starter, _e = _convert(_weld_deck(n=1.0, m=1.0, gen=True))
+        self.assertEqual(_type13_ab_rows(starter)[:3], [_ONE_ONE] * 3)
+        self.assertTrue(_has(result.warnings,
+                             "*CONSTRAINED_GENERALIZED_WELD_SPOT",
+                             "failure exponents N=1 / M=1"), result.warnings)
+
+    def test_the_MAT_SPOTWELD_beam_route_is_untouched(self):
+        """MAT_100's own criterion is quadratic in each term: every
+        alpha/beta row of that property stays blank."""
+        deck = (
+            "*KEYWORD\n"
+            "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+            "*NODE\n"
+            + "".join(f"{i:>8}{x:>16.4f}{0.0:>16.4f}{0.0:>16.4f}\n"
+                      for i, x in ((1, 0.0), (2, 2.0), (3, 0.0)))
+            + "*ELEMENT_BEAM\n" + _row(1, 7, 1, 2, 3) + "\n"
+              "*PART\n" "weld\n" + _row(7, 7, 7) + "\n"
+              "*SECTION_BEAM\n" + _row(7, 9) + "\n" + _row(0.0, 3.0, 3.0)
+            + "\n*MAT_SPOTWELD\n" + _row(7, 7.85e-9, 210000.0, 0.3, 300.0)
+            + "\n" + _row(0, 0, 0, 1000.0, 500.0, 500.0) + "\n"
+              "*END\n")
+        _r, starter, _e = _convert(deck)
+        self.assertIn("/PROP/TYPE13/", starter)
+        rows = [starter.splitlines()[i + 1]
+                for i, ln in enumerate(starter.splitlines())
+                if re.match(r"^#\s+c\d\s+n\d\s+alpha\d\s+beta\d$", ln)]
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows, [_ZERO4] * 6)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Wiring and the retracted statements (every Part-A item)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -402,11 +592,14 @@ class Round6FlagWiringA(unittest.TestCase):
     #: is the ``--no-`` one.
     _FLAGS = {
         "--initial-void-floor": "initial_void_floor",
+        "--weld-exponents": "weld_exponents",
     }
     #: figures each flag's --help must carry (matched on the collapsed render)
     _HELP_FIGURES = {
         "--initial-void-floor": ("1095 cycles", "2936 cycles",
                                  "hm_read_mat06.F:154"),
+        "--weld-exponents": ("2.460e-4", "+29.4 %", "0.899x",
+                             "hm_read_prop13.F:1169-1170"),
     }
 
     def _readme(self):
@@ -493,6 +686,10 @@ class Round6FlagWiringA(unittest.TestCase):
 _RETRACTED_ROUND_6_A = (
     # A1: the cavitation floor moves quadrature_B from a timeout to NORMAL
     "No /INTER/TYPE18 parameter moves this",
+    # A2: the TYPE13 alpha/beta cells now carry the deck's N / M
+    "criterion is quadratic (N=M=2)",
+    "is quadratic (N=M=2)",
+    "non-quadratic exponents are warned",
 )
 
 
@@ -530,6 +727,8 @@ class Round6RetractedStatementsA(unittest.TestCase):
              "Remark 4"),
             ("README.md", "--no-initial-void-floor"),
             ("ROADMAP.md", "PARTLY closed — the cavitation FLOOR shipped"),
+            ("k2rad/writer/loads.py", "beta2 = beta3 = {m:g}, so the Ifail = 1"),
+            ("README.md", "`--no-weld-exponents`"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

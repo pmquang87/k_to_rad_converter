@@ -229,6 +229,7 @@ def convert(
     shell_to_solid_rbody: bool = True,
     generalized_weld_butt: bool = True,
     initial_void_floor: bool = True,
+    weld_exponents: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -511,6 +512,18 @@ def convert(
         cycles (IE +394.0 %), bird_B timeout → NORMAL in 2936 (IE
         +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %) —
         NORMAL, not a match: the void is still full of fluid.
+    weld_exponents : bool
+        Write a failing ``*CONSTRAINED_SPOTWELD`` /
+        ``*CONSTRAINED_GENERALIZED_WELD_SPOT`` weld's exponents N / M into its
+        ``/PROP/TYPE13`` as ``alpha1-3 = 1``, ``beta1 = N``,
+        ``beta2 = beta3 = M`` when either differs from 2. **On by default.**
+        A blank cell is read as ``alpha 1`` / ``beta 2``
+        (``hm_read_prop13.F:1169-1170``), so without them the criterion is
+        always exponent 2; ``N = M = 2`` writes nothing (byte-identical).
+        ``M != 2`` is conservative against LS-DYNA's RESULTANT shear (Radioss
+        sums the two shear directions). MEASURED at nt 4 on ``plates.nrbc``
+        / ``plates.spot`` (N = M = 1): rupture t 3.130e-4 (+29.4 %) →
+        2.460e-4 (+1.7 % against LS-DYNA's 2.4193e-4), 0.899x the cycles.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -916,6 +929,7 @@ def convert(
         shell_to_solid_rbody=shell_to_solid_rbody,
         generalized_weld_butt=generalized_weld_butt,
         initial_void_floor=initial_void_floor,
+        weld_exponents=weld_exponents,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

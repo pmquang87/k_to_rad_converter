@@ -103,6 +103,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          shell_to_solid_rbody: bool = True,
                          generalized_weld_butt: bool = True,
                          initial_void_floor: bool = True,
+                         weld_exponents: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -237,6 +238,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["initial_void_floor"] = bool(initial_void_floor)
 
+    kwargs["weld_exponents"] = bool(weld_exponents)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -364,6 +367,7 @@ class ConverterGUI:
         self.shell_to_solid_rbody = tk.BooleanVar(value=True)
         self.generalized_weld_butt = tk.BooleanVar(value=True)
         self.initial_void_floor = tk.BooleanVar(value=True)
+        self.weld_exponents = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -704,6 +708,16 @@ class ConverterGUI:
             variable=self.initial_void_floor).grid(
                 row=32, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Failing *CONSTRAINED_SPOTWELD: write the deck's exponents "
+                     "N / M into the /PROP/TYPE13 alpha/beta cells when either "
+                     "differs from 2 — ON. A blank cell is read as exponent 2 "
+                     "(hm_read_prop13.F:1169-1170). plates.nrbc / plates.spot "
+                     "(N = M = 1): rupture +29.4 % → +1.7 % against LS-DYNA, "
+                     "0.899x cycles",
+            variable=self.weld_exponents).grid(
+                row=33, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -946,6 +960,7 @@ class ConverterGUI:
                 shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
                 generalized_weld_butt=self.generalized_weld_butt.get(),
                 initial_void_floor=self.initial_void_floor.get(),
+                weld_exponents=self.weld_exponents.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1088,6 +1103,9 @@ class ConverterGUI:
         if not kwargs.get("initial_void_floor", True):
             bits.append("*INITIAL_VOID fluids keep Pmin 0 = -INFINITY "
                         "(--no-initial-void-floor)")
+        if not kwargs.get("weld_exponents", True):
+            bits.append("spotweld failure exponents left at 2 "
+                        "(--no-weld-exponents)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

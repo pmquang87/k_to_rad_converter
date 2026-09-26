@@ -1149,7 +1149,9 @@ def _emit_prop_type8(prop_id: int, title: str, mass: float, inertia: float,
 
 def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
                       ifail: int, ifail2: int, dofs, ileng: int = 0,
-                      skew_id: int = 0) -> List[str]:
+                      skew_id: int = 0,
+                      alpha_beta: Optional[List[Tuple[float, float]]] = None
+                      ) -> List[str]:
     """/PROP/TYPE13 (SPR_BEAM). Layout: prop_p13_spr_beam.cfg
     FORMAT(radioss2018), the newest TYPE13 reader format ≤ /BEGIN-2022.
     ``dofs`` is 6 SpringDof (or legacy ``(k, fct_id, hflag, dmin, dmax)``
@@ -1162,7 +1164,17 @@ def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
     node_ID1→node_ID2 and takes the XY plane from node_ID3 (falling back to the
     property skew's Y′). It is the property-driven twin of /PROP/TYPE23 +
     /MAT/LAW113. ``Ileng=1`` makes K, the input curves and the failure limits
-    per unit length (strain based) — what *MAT_CABLE_DISCRETE_BEAM needs."""
+    per unit length (strain based) — what *MAT_CABLE_DISCRETE_BEAM needs.
+
+    ``alpha_beta`` fills the ``alpha_i`` / ``beta_i`` cells of the six
+    trailing ``c n alpha beta`` lines (columns 41-60 / 61-80,
+    ``%20lg%20lg%20lg%20lg``), DOF by DOF; the lines it does not reach stay
+    0. With ``Ifail = 1`` the reader turns a zero ``alpha`` into 1 and a zero
+    ``beta`` into 2 (``hm_read_prop13.F:1169-1170``), so a blank card is a
+    QUADRATIC multi-directional criterion. Only the
+    *CONSTRAINED_SPOTWELD / _GENERALIZED_WELD_SPOT weld tie passes a value
+    (its deck N / M, round 6 A2); every other caller writes zeros, which is
+    byte-identical to before."""
     lines = [
         f"/PROP/TYPE13/{prop_id}",
         title,
@@ -1176,9 +1188,11 @@ def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
     ]
     for i in range(1, 7):
+        a, b = ((alpha_beta[i - 1] if alpha_beta is not None
+                 and i <= len(alpha_beta) else (0.0, 0.0)))
         lines += [
             f"#                 c{i}                  n{i}              alpha{i}               beta{i}",
-            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            f"{_f(0.0)}{_f(0.0)}{_f(a)}{_f(b)}",
         ]
     lines.append(HDR)
     return lines
@@ -2917,6 +2931,79 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     return lines if emitted else []
 
 
+def _weld_failure_exponents(state: ConversionState, w, label: str,
+                            prop_id: int
+                            ) -> Optional[List[Tuple[float, float]]]:
+    """The weld tie's failure exponents N / M -> the TYPE13 ``alpha``/``beta``
+    cells (R14 triage round 6, A2); ``None`` = leave every cell blank.
+
+    LS-DYNA fails the weld when ``(fn/SN)^N + (fs/SS)^M >= 1`` (Vol I R17
+    p.10-212/213, Remark 2; ``fn`` tensile only, ``fs`` the shear resultant).
+    With ``Ifail = 1`` / ``Ifail2 = 2`` the engine sums ``XA*DLIM**XB`` over
+    the DOFs (``r4def3.F:374`` for DOF 1, ``:449`` for DOF 2, ...; ``DLIM`` =
+    force / failure force, ``:361``) and deletes the spring at ``CRIT >= 1``
+    (``:819``), but the reader turns a zero ``alpha`` into 1 and a zero
+    ``beta`` into 2 (``hm_read_prop13.F:1169-1170``): blank cells are always
+    exponent 2. So when N or M differs from 2: ``alpha1-3 = 1``,
+    ``beta1 = N``, ``beta2 = beta3 = M``; rows 4-6 stay blank (the moment
+    DOFs carry the no-failure defaults). ``N = M = 2`` (blank or stated)
+    writes nothing and is byte-identical — the reader's own default IS 2. A
+    stated exponent ``<= 0`` is not written (named). dyna2rad writes
+    ``beta1 = N`` / ``beta2 = M`` with ``Ifail 1`` / ``Ifail2 2`` on its
+    ``/PROP/TYPE25`` route (``convertconstrainedspotwelds.cxx:103-124``).
+
+    Called AFTER every ``continue`` screen of the weld loop and after the
+    property id is drawn, so the message names the card the cells are on."""
+    n, m = w.n, w.m
+    if abs(n - 2.0) <= 1e-9 and abs(m - 2.0) <= 1e-9:
+        return None
+    kw = ("*CONSTRAINED_GENERALIZED_WELD_SPOT" if w.nsid > 0
+          else "*CONSTRAINED_SPOTWELD")
+    if not state.options.weld_exponents:
+        state.warn(
+            f"--no-weld-exponents: {kw} {label} states N={n:g} / M={m:g}; "
+            f"the alpha/beta cells of /PROP/TYPE13/{prop_id} are left blank "
+            "and the starter reads them as alpha 1 / beta 2 "
+            "(hm_read_prop13.F:1169-1170), so this weld fails on exponent 2 "
+            "in every term, not on the deck's N/M.")
+        return None
+    if n <= 0.0 or m <= 0.0:
+        state.warn(
+            f"{kw} {label}: N={n:g} / M={m:g} - a failure exponent <= 0 is "
+            f"not written into /PROP/TYPE13/{prop_id}; the starter reads a "
+            "blank beta cell as 2 (hm_read_prop13.F:1170), so this weld fails "
+            "on exponent 2 in every term.")
+        return None
+    caveat = ""
+    if abs(m - 2.0) > 1e-9:
+        caveat = (
+            " LS-DYNA scores the shear RESULTANT (Vol I R17 p.10-213 Remark "
+            "2); Radioss scores the two shear DIRECTIONS separately. The two "
+            "agree when the shear stays on one local axis, and for any "
+            "direction at M = 2; with both components present Radioss reaches "
+            "1 first (at M = 1 and equal components the sum is 1.414x the "
+            "resultant) - conservative.")
+    state.warn(
+        f"{kw} {label}: failure exponents N={n:g} / M={m:g} written into "
+        f"/PROP/TYPE13/{prop_id} as alpha1-3 = 1, beta1 = {n:g}, "
+        f"beta2 = beta3 = {m:g}, so the Ifail = 1 criterion is "
+        "(fn/SN)^N + (|fy|/SS)^M + (|fz|/SS)^M >= 1, fn tensile only "
+        "(r4def3.F:361, :374 and its per-DOF siblings, deletion at :819). A "
+        "blank alpha/beta cell is read as 1 / 2 (hm_read_prop13.F:1169-1170), "
+        "so without these cells the deck's exponents would be replaced by 2."
+        + caveat +
+        " MEASURED at nt 4 on spotweld-ii/plates.nrbc and "
+        "spotweld-iii/plates.spot (N = M = 1, the only two carriers): the "
+        "weld deletes at t 2.460e-4 against LS-DYNA's 2.4193e-4 (+1.7 %; it "
+        "was 3.130e-4, +29.4 %), in 2407 cycles against 2678 (0.899x); "
+        "plates.nrbc IE +23.64 -> -18.99 %, KE +61.93 -> +12.75 %, external "
+        "work +60.66 -> +7.83 %; plates.spot IE +34.23 -> -12.05 %, KE "
+        "+45.57 -> +1.36 %, external work +59.99 -> +7.38 %; both rows stay "
+        "deviation (IE and the -6.9 % energy error). Pass --no-weld-exponents "
+        "to leave the cells blank.")
+    return [(1.0, n), (1.0, m), (1.0, m)]
+
+
 def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
     """*CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with failure
     forces → one stiff /PROP/TYPE13 /SPRING per weld (Ifail=1/Ifail2=2:
@@ -2971,11 +3058,6 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
                        "coincident — /PROP/TYPE13 needs a finite length; weld "
                        "NOT converted (merge the nodes or use a tied contact).")
             continue
-        if (w.n and abs(w.n - 2.0) > 1e-9) or (w.m and abs(w.m - 2.0) > 1e-9):
-            state.warn(f"*CONSTRAINED_SPOTWELD {label}: failure exponents "
-                       f"N={w.n:g}/M={w.m:g} differ from 2 — the converted "
-                       "multi-directional criterion is quadratic (N=M=2).")
-
         k = 10.0 * e_ref * L
         krot = k * L * L / 12.0
         dofs = [
@@ -2989,13 +3071,14 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
+        exps = _weld_failure_exponents(state, w, label, prop_id)
         # Token mass/inertia: the tie itself is massless in LS-DYNA
         # (*CONSTRAINED_SPOTWELD has no mass cell at all — it is a CONSTRAINT),
         # so both cells are k2rad's own invention and the mass half is
         # registered below for the /ADMAS compensation.
         lines += _emit_prop_type13(prop_id, f"{label} (stiff weld tie)",
                                    _SPRING_TOKEN_MASS, _SPRING_TOKEN_INERTIA,
-                                   1, 2, dofs)
+                                   1, 2, dofs, alpha_beta=exps)
         lines += [
             f"/PART/{part_id}",
             label,
