@@ -551,6 +551,41 @@ class WeldExponentTests(unittest.TestCase):
         self.assertEqual(rows2[1][60:80].strip(), "1")
         self.assertTrue(_has(result2.warnings, "RESULTANT", "1.414x"))
 
+    def test_the_caveat_states_the_direction_that_follows_M(self):
+        """Finalization round: Radioss sums (|fy|/SS)^M + (|fz|/SS)^M per
+        shear DOF (r4def3.F:374 / :449), LS-DYNA scores the resultant; with
+        equal components the ratio is 2^(1 - M/2) - above 1 for M < 2
+        (Radioss fails first, conservative), BELOW 1 for M > 2 (LS-DYNA fails
+        first, the converted weld fails later - NON-conservative)."""
+        r3, s3, _e = _convert(_weld_deck(n=1.0, m=3.0))
+        rows = _type13_ab_rows(s3)
+        for row in rows[1:3]:
+            self.assertEqual(row[60:80].strip(), "3")
+        w3 = [x for x in r3.warnings if "failure exponents N=1 / M=3" in x]
+        self.assertEqual(len(w3), 1, r3.warnings)
+        for needle in ("0.707x", "LS-DYNA reaches 1 first",
+                       "fails LATER than LS-DYNA",
+                       "NON-conservative for M > 2"):
+            with self.subTest(M=3, needle=needle):
+                self.assertIn(needle, w3[0])
+        for needle in ("Radioss reaches 1 first", "EARLIER",
+                       "(conservative for M < 2)"):
+            with self.subTest(M=3, absent=needle):
+                self.assertNotIn(needle, w3[0])
+        r1, _s1, _e1 = _convert(_weld_deck(n=1.0, m=1.0))
+        w1 = [x for x in r1.warnings if "failure exponents N=1 / M=1" in x]
+        self.assertEqual(len(w1), 1, r1.warnings)
+        for needle in ("1.414x", "Radioss reaches 1 first",
+                       "fails EARLIER than LS-DYNA",
+                       "(conservative for M < 2)"):
+            with self.subTest(M=1, needle=needle):
+                self.assertIn(needle, w1[0])
+        self.assertNotIn("NON-conservative", w1[0])
+        # the ratio is 2^(1 - M/2) at a non-integer M as well
+        r15, _s15, _e15 = _convert(_weld_deck(n=1.0, m=1.5))
+        self.assertTrue(_has(r15.warnings, "N=1 / M=1.5", "1.189x",
+                             "EARLIER"), r15.warnings)
+
     def test_N_M_2_is_byte_identical_blank_or_stated(self):
         for n, m in ((None, None), (2.0, 2.0)):
             with self.subTest(n=n, m=m):
@@ -1995,6 +2030,13 @@ _RETRACTED_ROUND_6_A = (
     "would double-count",
     # A8: a solid main against shells LS-DYNA offsets now gets t/2
     "on every `/INTER/TYPE7` it emits unless the card states Card-3",
+    # A2 (finalization round): the direction of the shear-sum difference
+    # follows M - conservative only for M < 2, NON-conservative for M > 2
+    "M != 2 is conservative",
+    "M ≠ 2 is conservative",
+    "`M ≠ 2` is conservative",
+    "resultant) - conservative.",
+    "``M != 2`` is conservative",
 )
 
 #: The same family as regexes, matched on the collapsed text (a phrase whose
@@ -2057,6 +2099,10 @@ class Round6RetractedStatementsA(unittest.TestCase):
             ("README.md", "--no-initial-void-floor"),
             ("ROADMAP.md", "PARTLY closed — the cavitation FLOOR shipped"),
             ("k2rad/writer/loads.py", "beta2 = beta3 = {m:g}, so the Ifail = 1"),
+            ("k2rad/writer/loads.py", "(NON-conservative for M > 2)."),
+            ("README.md", "an `M > 2` weld fails LATER (0.707× at `M = 3`, "
+             "non-conservative)"),
+            ("k2rad/cli.py", "M > 2 weld fails later (non-conservative)"),
             ("README.md", "`--no-weld-exponents`"),
             ("k2rad/writer/loads.py", "The deck names these nodes but does "
              "not define them: it is a fragment"),

@@ -565,8 +565,11 @@ def convert(
         A blank cell is read as ``alpha 1`` / ``beta 2``
         (``hm_read_prop13.F:1169-1170``), so without them the criterion is
         always exponent 2; ``N = M = 2`` writes nothing (byte-identical).
-        ``M != 2`` is conservative against LS-DYNA's RESULTANT shear (Radioss
-        sums the two shear directions). MEASURED at nt 4 on ``plates.nrbc``
+        Radioss sums the two shear directions where LS-DYNA scores the
+        RESULTANT: exact at ``M = 2`` and for shear on one local axis; with
+        both components present an ``M < 2`` weld fails earlier than in
+        LS-DYNA (conservative) and an ``M > 2`` weld fails later
+        (non-conservative). MEASURED at nt 4 on ``plates.nrbc``
         / ``plates.spot`` (N = M = 1): rupture t 3.130e-4 (+29.4 %) →
         2.460e-4 (+1.7 % against LS-DYNA's 2.4193e-4), 0.899x the cycles.
     constrained_linear : bool

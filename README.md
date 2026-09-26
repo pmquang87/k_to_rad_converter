@@ -2656,9 +2656,13 @@ dropped). The failure exponents `N`/`M` go to the TYPE13 `beta1 = N`,
 `beta2 = beta3 = M` (`alpha1-3 = 1`) when either differs from 2 (default ON,
 `--no-weld-exponents`); a blank cell would be read as 2
 (`hm_read_prop13.F:1169-1170`), so the blank card was always exponent 2. `N =
-M = 2` writes nothing. `M ≠ 2` is conservative against LS-DYNA's RESULTANT
-shear (Radioss sums the two shear directions; at `M = 1` and equal components
-1.414× the resultant). Measured on `plates.nrbc` / `plates.spot` (N = M = 1,
+M = 2` writes nothing. Radioss sums the two shear directions where LS-DYNA
+scores the RESULTANT: exact at `M = 2` and for shear on one local axis; with
+both components present the direction of the difference follows `M` — with
+equal components the Radioss term is `2^(1 − M/2)` × the resultant's, so an
+`M < 2` weld fails EARLIER than in LS-DYNA (1.414× at `M = 1`, conservative)
+and an `M > 2` weld fails LATER (0.707× at `M = 3`, non-conservative); the
+warning states the arm that applies. Measured on `plates.nrbc` / `plates.spot` (N = M = 1,
 nt 4): rupture t +29.4 % → +1.7 % against LS-DYNA's 2.4193e-4, external work
 +60.66 → +7.83 % / +59.99 → +7.38 %, 0.899× cycles; both rows stay deviation.
 `*CONSTRAINED_SHELL_TO_SOLID` → one `/RBODY` per card (default ON,

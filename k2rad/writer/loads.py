@@ -3448,13 +3448,28 @@ def _weld_failure_exponents(state: ConversionState, w, label: str,
         return None
     caveat = ""
     if abs(m - 2.0) > 1e-9:
+        # The Radioss/LS ratio of the shear term with two EQUAL components f:
+        # 2 (f/SS)^M against (sqrt(2) f/SS)^M, i.e. 2^(1 - M/2). Above 1 for
+        # M < 2 (Radioss reaches 1 first), below 1 for M > 2 (LS-DYNA does).
+        ratio = 2.0 ** (1.0 - m / 2.0)
         caveat = (
             " LS-DYNA scores the shear RESULTANT (Vol I R17 p.10-213 Remark "
             "2); Radioss scores the two shear DIRECTIONS separately. The two "
             "agree when the shear stays on one local axis, and for any "
-            "direction at M = 2; with both components present Radioss reaches "
-            "1 first (at M = 1 and equal components the sum is 1.414x the "
-            "resultant) - conservative.")
+            "direction at M = 2. With both components present the direction "
+            "of the difference follows M: ")
+        if m < 2.0:
+            caveat += (
+                f"at M = {m:g} and equal components the Radioss sum is "
+                f"{ratio:.3f}x the resultant term, so Radioss reaches 1 first "
+                "- the converted weld fails EARLIER than LS-DYNA "
+                "(conservative for M < 2).")
+        else:
+            caveat += (
+                f"at M = {m:g} and equal components the Radioss sum is only "
+                f"{ratio:.3f}x the resultant term, so LS-DYNA reaches 1 first "
+                "- the converted weld fails LATER than LS-DYNA "
+                "(NON-conservative for M > 2).")
     state.warn(
         f"{kw} {label}: failure exponents N={n:g} / M={m:g} written into "
         f"/PROP/TYPE13/{prop_id} as alpha1-3 = 1, beta1 = {n:g}, "

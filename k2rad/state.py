@@ -7575,8 +7575,12 @@ class ConvertOptions:
     # (hm_read_prop13.F:1169-1170), so the blank card k2rad wrote was always
     # exponent 2. When N or M differs from 2 the cells become alpha1-3 = 1,
     # beta1 = N, beta2 = beta3 = M; N = M = 2 writes nothing (byte-identical).
-    # M != 2 is conservative against LS-DYNA's resultant shear (Radioss sums
-    # the two shear directions). MEASURED at nt 4 on plates.nrbc / plates.spot
+    # Radioss sums the two shear directions where LS-DYNA scores the
+    # resultant: exact at M = 2 and for shear on one local axis; with both
+    # components present an M < 2 weld fails earlier than in LS-DYNA
+    # (conservative) and an M > 2 weld fails later (non-conservative; with
+    # equal components the Radioss term is 2^(1 - M/2) x the resultant's,
+    # 0.707x at M = 3). MEASURED at nt 4 on plates.nrbc / plates.spot
     # (N = M = 1, the only carriers): rupture t 3.130e-4 (+29.4 % against
     # LS-DYNA's 2.4193e-4) -> 2.460e-4 (+1.7 %), 0.899x the cycles, external
     # work +60.66 -> +7.83 % / +59.99 -> +7.38 %; both rows stay deviation.

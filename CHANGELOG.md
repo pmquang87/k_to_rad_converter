@@ -377,9 +377,14 @@ Prior history (before this changelog was introduced) is summarized in the
     `:374`, deletion at `:819`). The cells become `alpha1-3 = 1`,
     `beta1 = N`, `beta2 = beta3 = M` when N or M differs from 2; `N = M = 2`
     writes nothing (the reader's own default IS 2); a stated exponent `<= 0`
-    is not written and named. `M ≠ 2` is CONSERVATIVE against LS-DYNA's
-    resultant shear (Radioss sums the two shear directions; at `M = 1` with
-    equal components 1.414× the resultant) — stated in the warning. dyna2rad
+    is not written and named. Radioss sums the two shear directions where
+    LS-DYNA scores the RESULTANT, so the direction of the difference follows
+    `M` (with equal components the Radioss term is `2^(1 − M/2)` × the
+    resultant's): an `M < 2` weld fails EARLIER than in LS-DYNA (1.414× at
+    `M = 1`, conservative), an `M > 2` weld fails LATER (0.707× at `M = 3`,
+    non-conservative), exact at `M = 2` and for shear on one local axis — the
+    warning states the arm that applies (corrected in the finalization round:
+    the first text called every `M ≠ 2` conservative). dyna2rad
     writes `beta1 = N` / `beta2 = M` on its `/PROP/TYPE25` route
     (`convertconstrainedspotwelds.cxx:103-124`). **2 deck keys on 2 emitted
     models move** (plates.nrbc, plates.spot: N = M = 1, three rows each); the
