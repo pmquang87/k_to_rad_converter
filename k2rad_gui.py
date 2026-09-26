@@ -108,6 +108,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          weld_exponents: bool = True,
                          constrained_linear: bool = True,
                          constrained_global: bool = True,
+                         spotweld_node_synthesis: bool = False,
+                         beam_contact_secondary: bool = False,
                          shell_offset_gapmin: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -253,6 +255,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["constrained_global"] = bool(constrained_global)
 
+    kwargs["spotweld_node_synthesis"] = bool(spotweld_node_synthesis)
+
+    kwargs["beam_contact_secondary"] = bool(beam_contact_secondary)
+
     kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
 
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
@@ -387,6 +393,8 @@ class ConverterGUI:
         self.weld_exponents = tk.BooleanVar(value=True)
         self.constrained_linear = tk.BooleanVar(value=True)
         self.constrained_global = tk.BooleanVar(value=True)
+        self.spotweld_node_synthesis = tk.BooleanVar(value=False)
+        self.beam_contact_secondary = tk.BooleanVar(value=False)
         self.shell_offset_gapmin = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -787,6 +795,22 @@ class ConverterGUI:
             variable=self.constrained_global).grid(
                 row=38, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="One-node ELFORM-9 *MAT_SPOTWELD beam: create its second "
+                     "node on the nearest reference segment on the other side "
+                     "(Vol I R17 p.19-3) - OFF. Alone it only costs cycles "
+                     "(7.64x on spotweld.k); pair it with the next box",
+            variable=self.spotweld_node_synthesis).grid(
+                row=39, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Put beam/truss nodes on a contact side that names their "
+                     "part - OFF. With the box above, spotweld.k goes IE "
+                     "-99.9 % -> +82.0 % at 7.80x cycles (the sign changes, "
+                     "not the size) and the weld never fails",
+            variable=self.beam_contact_secondary).grid(
+                row=40, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1034,6 +1058,8 @@ class ConverterGUI:
                 weld_exponents=self.weld_exponents.get(),
                 constrained_linear=self.constrained_linear.get(),
                 constrained_global=self.constrained_global.get(),
+                spotweld_node_synthesis=self.spotweld_node_synthesis.get(),
+                beam_contact_secondary=self.beam_contact_secondary.get(),
                 shell_offset_gapmin=self.shell_offset_gapmin.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
@@ -1192,6 +1218,12 @@ class ConverterGUI:
         if not kwargs.get("constrained_global", True):
             bits.append("*CONSTRAINED_GLOBAL planes left free "
                         "(--no-constrained-global)")
+        if kwargs.get("spotweld_node_synthesis"):
+            bits.append("one-node spotweld beams get their second node "
+                        "(--spotweld-node-synthesis)")
+        if kwargs.get("beam_contact_secondary"):
+            bits.append("beam and truss nodes join contact sides "
+                        "(--beam-contact-secondary)")
         if not kwargs.get("shell_offset_gapmin", True):
             bits.append("starter-derived gap kept against offset shells "
                         "(--no-shell-offset-gapmin)")

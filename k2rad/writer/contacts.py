@@ -148,11 +148,16 @@ __all__ = [
 # k2rad's own implicit-stabilization stub is ``ssid=0, sstyp=0``.
 
 def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
-    """Every node of *pid* that may sit on a contact SECONDARY side.
+    """Every node of *pid* that may sit on a contact side.
 
-    ONE walk shared by ``_resolve_contact_slave``, ``_tied_slave_nids`` and the
-    styp-0/1 resolvers below — three hand-kept copies of this list is how a
-    family added for one of them goes dead on the others.
+    ONE walk, shared by ``_side_node_ids`` (hence ``_resolve_contact_slave``
+    and the all-rigid-SSID plan's both sides), ``_segment_set_node_ids`` (a
+    ``*SET_SEGMENT_GENERAL`` PART scope) and - since R14 triage round 6 -
+    ``_tied_slave_nids`` (the tied / tiebreak secondary group, the tiebreak's
+    main-node set and the ERROR-556 screen's memo), which until then carried
+    its own inline copy of this list while this docstring said it shared it.
+    Hand-kept copies of this list is how a family added for one of them goes
+    dead on the others.
 
     Thick shells are /BRICK in the emitted deck, so a *PART of them is a
     perfectly good contact side; the container is empty on every deck without
@@ -171,14 +176,20 @@ def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
     (``_solid_contact_master_pids`` / ``_solid_pids_by_part``): a particle has
     no face to build a /SURF from.
 
-    BEAM and TRUSS parts are deliberately NOT walked, and the R14 truss batch
-    left that unchanged rather than "fixing" it in passing. A /TRUSS (or /BEAM)
-    node is a perfectly good contact SECONDARY node in Radioss, so this is a
-    real asymmetry with ``_part_node_ids`` below, which DOES walk
-    ``state.beam_elems`` for the transducer's node inventory — but adding a 1-D
-    family here would change the secondary side of every part-scoped contact on
-    hundreds of corpus decks, which is its own item with its own sweep.
-    Recorded, not silently closed on one side.
+    BEAM and TRUSS parts (``state.beam_elems``: beams, trusses, ``*MAT_SPOTWELD``
+    beams and ELFORM-6 discrete beams) are walked only under
+    ``--beam-contact-secondary`` (round 6, B6; default OFF). A /TRUSS (or
+    /BEAM) node is a perfectly good contact SECONDARY node in Radioss, and
+    LS-DYNA does tie them - on ``spotweld.k`` the weld beam is the tie's SURFA
+    and its swforc records the weld carrying load - but the walk reaches 4 R14
+    deck keys on 4 emitted models by bytes (spotweld.k, the never-launched
+    ``show-cases/contact-overview/main.k`` and the two R14 Yaris giants) and
+    the two full-vehicle models in ``C:/openradioss_run``, none of which but
+    spotweld.k has been run with it, so it stays opt-in. Only ``n1``/``n2``
+    are taken: ``n3`` is an orientation node, never a contact node. Every node
+    the 1-D walk ADDS (one no other family of the part carries) is recorded in
+    ``state.beam_side_gain`` so the resolvers can name the gain on the side
+    they actually EMIT (:func:`_warn_beam_side_gain`).
     """
     nids: Set[int] = set()
     for e in state.shell_elems:
@@ -196,7 +207,92 @@ def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
     for c in state.sph_elems:
         if c.pid == pid:
             nids.update(c.nodes)
+    if state.options.beam_contact_secondary:
+        oned: Set[int] = set()
+        for e in state.beam_elems:
+            if e.pid == pid:
+                oned.update(n for n in (e.n1, e.n2) if n > 0)
+        gained = oned - nids
+        if gained:
+            state.beam_side_gain.setdefault(pid, set()).update(gained)
+        nids |= oned
     return nids
+
+
+def _beam_side_pids(state: ConversionState, sid: int, styp: int) -> Set[int]:
+    """The PART ids a contact side names directly (type 3 part, 2 part set,
+    0 a ``*SET_SEGMENT_GENERAL`` PART scope) - the scope the 1-D walk of
+    ``--beam-contact-secondary`` reaches."""
+    if styp == 3:
+        return {sid}
+    if styp == 2 and sid in state.part_sets:
+        return set(state.part_sets[sid][1])
+    if styp == 0 and sid in state.segment_sets:
+        return set(state.segment_sets[sid].part_scope)
+    return set()
+
+
+def _warn_beam_side_gain(state: ConversionState, sid: int, styp: int,
+                         emitted) -> None:
+    """``--beam-contact-secondary``: name a side whose EMITTED secondary node
+    group - after the rigid-body filter and every other screen - gained 1-D
+    nodes. Once per (sid, styp): the text names the side, not the contact.
+    Keyed on what is emitted, not on the walk: ``mainboltaexpl``'s side gains
+    its 2 bolt-beam nodes in the walk and the rigid filter removes them again
+    (both are ``*CONSTRAINED_NODAL_RIGID_BODY`` members), so that deck gets no
+    gain warning - only its drop text changes."""
+    if not state.options.beam_contact_secondary:
+        return
+    pids = sorted(p for p in _beam_side_pids(state, sid, styp)
+                  if p in state.beam_side_gain)
+    got: Set[int] = set()
+    for p in pids:
+        got |= state.beam_side_gain[p]
+    hit = got & set(emitted)
+    if not hit or (sid, styp) in state.warned_beam_side_gain:
+        return
+    state.warned_beam_side_gain.add((sid, styp))
+    owners = [p for p in pids if state.beam_side_gain[p] & hit]
+    state.warn(
+        f"--beam-contact-secondary: contact side {sid} (type {styp}) gains "
+        f"{len(hit)} node(s) of the *ELEMENT_BEAM element(s) of part(s) "
+        f"{owners} - k2rad leaves 1-D elements off a contact side by default. "
+        "LS-DYNA does tie them: on spotweld.k the weld beam is the tie's SURFA "
+        "and LS-DYNA's swforc records it carrying 55201 (axial) / 46247 "
+        "(shear) at 1.18e-3.")
+
+
+def _beam_secondary_hint(state: ConversionState, sid: int, styp: int,
+                         rigid_nodes: Set[int]) -> str:
+    """Flag OFF: the lever a dropped, EMPTY secondary side would take. Only
+    when the side's parts own beam/truss nodes that are NOT rigid-body nodes -
+    ``mainboltaexpl``'s side owns 2 beam nodes that are both rigid, so the flag
+    would not rescue it and the hint must not fire there. Reach on the R14
+    roster: spotweld.k and the two Yaris giants."""
+    if state.options.beam_contact_secondary:
+        return ""
+    pids = _beam_side_pids(state, sid, styp)
+    if not pids:
+        return ""
+    owners = sorted({e.pid for e in state.beam_elems if e.pid in pids
+                     and any(n > 0 and n not in rigid_nodes
+                             for n in (e.n1, e.n2))})
+    if not owners:
+        return ""
+    return (f" Part(s) {owners} of this side carry only *ELEMENT_BEAM "
+            "elements, whose nodes k2rad does not put on a contact side by "
+            "default; --beam-contact-secondary does (opt-in, see its --help).")
+
+
+def _warn_beam_contact_secondary_unused(state: ConversionState) -> None:
+    """``--beam-contact-secondary`` passed, and no emitted side gained a node:
+    say so once (called after every contact section)."""
+    if state.options.beam_contact_secondary and not state.warned_beam_side_gain:
+        state.warn(
+            "--beam-contact-secondary was passed but no emitted contact side "
+            "of this deck gained a node from it (no side owns a beam/truss "
+            "element, or its beam nodes are rigid-body members that the rigid "
+            "filter removes again); nothing changed.")
 
 
 def _segment_set_node_ids(state: ConversionState, ss) -> Set[int]:
@@ -366,6 +462,7 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         diag["clean"] = len(clean_nids)
     if not clean_nids:
         return 0
+    _warn_beam_side_gain(state, sid, styp, clean_nids)
     grnod_id = state.next_grnod_id()
     out_lines += _emit_grnod_node(grnod_id, f"contact_slave_{sid}", clean_nids)
     return grnod_id
@@ -1956,7 +2053,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                 _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
                                 _RIGID_SECONDARY_REMEDY_SELF
                                 if diag.get("raw") else
-                                _secondary_side_remedy(c.ssid, c.sstyp))
+                                _secondary_side_remedy(c.ssid, c.sstyp)
+                                + _beam_secondary_hint(state, c.ssid, c.sstyp,
+                                                       rigid_nodes))
                 continue
             if not mast_surf:
                 _drop_interface(
@@ -2013,7 +2112,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                             _describe_empty_secondary(diag, sec_sid, sec_styp, state),
                             _rigid_secondary_remedy(plan)
                             if diag.get("raw") else
-                            _secondary_side_remedy(sec_sid, sec_styp),
+                            _secondary_side_remedy(sec_sid, sec_styp)
+                            + _beam_secondary_hint(state, sec_sid, sec_styp,
+                                                   rigid_nodes),
                             note=(_implicit_rigid_secondary_note(state)
                                   if plan == _RS_IMPLICIT else ""))
             continue
@@ -4750,21 +4851,9 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
     nids: Set[int] = set()
 
     def add_part_nodes(pid: int) -> None:
-        for e in state.shell_elems:
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for e in state.solid_elems:
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for e in state.tshell_elems:          # /BRICK too — see above
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for c in state.sph_elems:             # SPH: secondary side only
-            if c.pid == pid:
-                nids.update(c.nodes)
-        for e in state.seatbelt_elems:        # 1D belt: secondary side — above
-            if e.pid == pid and not e.is_2d:
-                nids.update((e.n1, e.n2))
+        # the ONE walk (round 6): the same families, so byte-identical by
+        # construction, plus the opt-in 1-D arm of --beam-contact-secondary
+        nids.update(_contact_part_nodes(state, pid))
 
     if styp == 4:
         if sid in state.node_sets:
@@ -5019,7 +5108,8 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                  "resolved to no nodes at all"
                  + ((" — " + _styp01_missing_note(state, c.ssid, c.sstyp))
                     if c.sstyp in (0, 1) and c.ssid else "")),
-                _secondary_side_remedy(c.ssid, c.sstyp))
+                _secondary_side_remedy(c.ssid, c.sstyp)
+                + _beam_secondary_hint(state, c.ssid, c.sstyp, rigid_nodes))
             continue
         master_lines: List[str] = []
         surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
@@ -5031,6 +5121,7 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 "REMEDY: point MSID at a part, part set or *SET_SEGMENT that "
                 "exists in this deck and carries shell/solid elements.")
             continue
+        _warn_beam_side_gain(state, c.ssid, c.sstyp, clean)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
         lines += master_lines
@@ -5627,6 +5718,7 @@ def _make_tiebreak_interfaces(state: ConversionState,
         # group and the starter aborts the whole deck with ERROR 79
         # (DUPLICATE ID IN NODE GROUP DEFINITION). A no-op vs next_id() on any
         # ordinary deck, so it shifts no ids.
+        _warn_beam_side_gain(state, c.ssid, c.sstyp, clean)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"tiebreak_{c.inter_id}_slave",
                                   clean)

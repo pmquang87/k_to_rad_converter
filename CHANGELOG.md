@@ -207,6 +207,48 @@ Prior history (before this changelog was introduced) is summarized in the
     TC/RC cells carries that node in two `/BCS`: 5 roster decks at 5aef5a0,
     plus ale_wavehitcol now; inert by `MY_OR`, one WARNING 312 — a ROADMAP
     item, not folded in here because it moves 5 unrelated decks).
+  - **B6 — the spotweld.k OPT-IN pair, `--spotweld-node-synthesis` and
+    `--beam-contact-secondary` (both default OFF), and the false "one shared
+    walk" docstring fixed regardless.** Rule 1
+    (`writer/loads._synthesize_spotweld_second_nodes`, a `build_starter`
+    prepass after the beam-orientation nodes): an ELFORM-9 `*MAT_SPOTWELD`
+    beam with `n2 = 0` gets its second node where Vol I R17 p.19-3 puts it —
+    the given node moved onto the nearest segment of the MAIN side of the
+    first tie whose SURFA names the weld part, a new element-free node on the
+    nearest segment strictly on the other side, so the length is the sheet
+    DISTANCE (spotweld.k: 1213 → (60, 20, 0), new 1214 at (60, 20, 2),
+    L 2.0 = LS-DYNA's own d3plot placement and swforc length; the
+    pre-research's "mid-surfaces at z 0.5 / 1.5" were the deck's ORPHAN nodes
+    213 / 123 of a commented-out beam card, and TS1 = thickness = distance on
+    that carrier, so the manual's sentence decides and the test probe is built
+    to tell the rules apart). The node comes from `next_node_id` in the
+    prepass, so under the flag the `/SECT` frame nodes allocated later move up
+    one id (1214-1219 → 1215-1220 on spotweld.k). Refused by name, the weld
+    then kept exactly as before: a node shared with any other element, no
+    tie naming the part, no reference segment, the node ON a sheet, no
+    segment on the other side. Rule 2: `_contact_part_nodes` walks
+    `state.beam_elems` (n1/n2 only) under the flag, and `_tied_slave_nids`
+    now CALLS it instead of carrying its own copy of the family list — which
+    its docstring had claimed it already did (byte-identical by construction,
+    pinned by a structural test over every family); a side whose EMITTED
+    group (after the rigid filter) gains 1-D nodes is named once, keyed on
+    what is emitted — `mainboltaexpl`'s side gains its 2 bolt-beam nodes in
+    the walk and loses them to the rigid filter (both CNRB members), so it is
+    byte-identical and gets no gain warning, only its drop text changes. Flag
+    OFF, an empty-secondary drop whose side owns non-rigid beam nodes now
+    names the lever (spotweld.k and the two Yaris giants; not
+    mainboltaexpl). Why opt-in, MEASURED on spotweld.k (nt 4, LS IE 76 812 at
+    1.18e-3): rule 1 alone costs 7.64× the cycles at IE −99.92 %; the
+    COMBINED arm takes IE −99.9 % → +82.0 % at 7.80× the cycles (639 → 4983)
+    — the error changes SIGN, not size (|IE error| 76 733 → 67 888) — the
+    TYPE13 shear stays elastic (116 300 vs LS's 46 247) and the weld never
+    fails (`*MAT_SPOTWELD` EFAIL has no `/PROP/TYPE13` slot); rule 2 reaches 4
+    R14 deck keys on 4 emitted models by bytes (spotweld.k,
+    `show-cases/contact-overview/main.k`, the two Yaris giants) plus two
+    unreferenced vehicles. 0 default movers. (Round 5's record that "the
+    2-node arm buys nothing at 18.2× the cycles" was a DIFFERENT arm — the
+    orphan pair 213 / 123, L = 1.0, twice rule 1's axial stiffness — and is
+    annotated in ROADMAP rather than retracted.)
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a

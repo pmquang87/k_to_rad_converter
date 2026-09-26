@@ -7336,6 +7336,25 @@ class ConvertOptions:
     # is refused by name; a card inside a geometrically transformed
     # *INCLUDE_TRANSFORM is refused (its plane point would not be moved).
     constrained_global: bool = True
+    # --spotweld-node-synthesis / --beam-contact-secondary: the spotweld.k
+    # OPT-IN pair (R14 triage round 6, B6), both default OFF.
+    #
+    # Rule 1 gives an ELFORM-9 *MAT_SPOTWELD beam that states ONE node its
+    # second one where Vol I R17 p.19-3 puts it - "the nodal points of the spot
+    # weld are located to the two nearest reference surface segments": the
+    # given node moved onto the nearest reference segment of the tie that
+    # names the weld part as its SURFA, a new element-free node on the nearest
+    # segment on the OTHER side (writer/loads._synthesize_spotweld_second_nodes;
+    # spotweld.k: node 1213 -> z 0, new node at z 2, length 2.0 = LS-DYNA's own
+    # d3plot and swforc). Rule 2 puts beam/truss nodes on a contact side
+    # (writer/contacts._contact_part_nodes). MEASURED on spotweld.k (nt 4):
+    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both
+    # take IE -99.9 % -> +82.0 % at 7.80x the cycles - the error changes SIGN,
+    # not size - and the weld never fails (*MAT_SPOTWELD EFAIL has no
+    # /PROP/TYPE13 slot). Rule 2 reaches 4 R14 deck keys on 4 emitted models
+    # and two unreferenced vehicles, none run but spotweld.k. Hence opt-in.
+    spotweld_node_synthesis: bool = False
+    beam_contact_secondary: bool = False
     # --implicit-constant-step: cap the implicit step at the deck's own DT0
     # (/IMPL/DT/STOP DT_MAX := DT0) where LS-DYNA runs a CONSTANT step (R14
     # triage round 6, B3).
@@ -9010,6 +9029,11 @@ class ConversionState:
     constrained_global_rows: List[Tuple["ConstrainedGlobal", float, int]] = (
         field(default_factory=list))
     constrained_global_extent: float = 0.0
+    # --beam-contact-secondary (round 6, B6): per part, the 1-D nodes the
+    # contact walk ADDED (ones no other family of the part carries), and the
+    # (sid, styp) sides already named as having gained some.
+    beam_side_gain: Dict[int, Set[int]] = field(default_factory=dict)
+    warned_beam_side_gain: Set[Tuple[int, int]] = field(default_factory=set)
     # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
     hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)
     # (cluster_id, title) of each emitted /CLUSTER/BRICK — set by the writer's

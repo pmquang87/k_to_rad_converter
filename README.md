@@ -4091,6 +4091,56 @@ splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
 rejects the whole deck
 
+#### `--spotweld-node-synthesis` and `--beam-contact-secondary` — the one-node spotweld beam
+
+Both **opt-in, OFF by default** (round 6). The case they exist for is
+`introduction/intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k`: one
+ELFORM-9 `*MAT_SPOTWELD` beam that names ONE node (`1 100 1213 0`), tied to
+two sheets by a `*CONTACT_TIED_SHELL_EDGE_TO_SURFACE` whose SURFA is the weld
+part. Without the flags the weld is not converted (a node-less spotweld beam
+has no length for `/PROP/TYPE13`) and the tie is dropped (k2rad leaves 1-D
+elements off a contact side), so the two sheets are unconnected — the drop
+warning names `--beam-contact-secondary` where the side's beam nodes are not
+rigid-body nodes.
+
+- `--spotweld-node-synthesis` (rule 1) places the second node where Vol I R17
+  p.19-3 puts it — *"the nodal points of the spot weld are located to the two
+  nearest reference surface segments"*: the given node moves onto the nearest
+  segment of the MAIN side of the tie that names the weld part, and a new
+  element-free node is created on the nearest segment strictly on the OTHER
+  side. The weld length is therefore the distance between the sheets — on
+  spotweld.k node 1213 moves from z 1.0 to z 0.0 and node 1214 is created at
+  z 2.0, exactly LS-DYNA's own d3plot, and its `swforc` prints length 2.0.
+  (TS1, the sheet thickness and the sheet distance are all 2.0 on that one
+  carrier, so the carrier cannot tell those rules apart; the manual's
+  sentence decides, and the test probe is built so they differ. The deck's
+  commented-out beam card names nodes 213 / 123 at z 1.5 / 0.5 — orphans, in
+  no element.) A prepass allocates the node, so the `/SECT` frame nodes
+  allocated later move up by one id. Refused by name, the weld then kept as
+  before: a node shared with another element, no tie naming the part, no
+  reference segment, a node lying ON a sheet, no segment on the other side.
+- `--beam-contact-secondary` (rule 2) puts the nodes of the `*ELEMENT_BEAM`
+  elements (beams, trusses, spotweld and discrete beams) of a part named on a
+  contact side into that side's node group — ONE walk, `_contact_part_nodes`,
+  which the tied / tiebreak resolver now shares (it used to carry its own
+  copy). A side whose EMITTED group gains beam nodes is named; beam nodes that
+  are rigid-body members are removed again by the rigid filter
+  (`mainboltaexpl`: byte-identical, only its drop wording changes).
+
+MEASURED on spotweld.k at `nt` 4 (LS-DYNA internal energy 76 812 at
+1.18e-3; the weld fails there at 1.1876e-3): rule 1 alone costs 7.64× the
+cycles (639 → 4884) at IE −99.92 % — it builds a weld that connects nothing;
+rule 2 alone is identical to the base; **both** take IE −99.9 % → **+82.0 %**
+at 7.80× the cycles (4983) — the error changes SIGN, not size (|IE error|
+76 733 → 67 888). The `/PROP/TYPE13` shear stays elastic (116 300 against
+LS-DYNA's 46 247 at 1.18e-3) and the weld NEVER fails, because
+`*MAT_SPOTWELD` `EFAIL` has no `/PROP/TYPE13` slot. And rule 2 changes the
+secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k, the
+never-launched `show-cases/contact-overview/main.k` and the two R14 Yaris
+giants) and of the two full-vehicle models in `C:/openradioss_run` (4 489 /
+5 102 spotweld beams), none run but spotweld.k — which is why neither is a
+default.
+
 ### Airbags / monitored volumes
 
 | LS-DYNA | OpenRadioss | note |

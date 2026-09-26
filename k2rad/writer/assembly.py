@@ -89,6 +89,7 @@ from .contacts import (
     _make_spotweld_interfaces,
     _make_type25_interfaces,
     _recipe_active,
+    _warn_beam_contact_secondary_unused,
 )
 from .frictions import _make_frictions
 from .rbody import (_make_cnrb_rbodies, _make_generalized_weld_butt_rbodies,
@@ -128,6 +129,7 @@ from .loads import (
     _make_tied_nodes_failure_notes,
     _make_constrained_linear_mpcs,
     _resolve_constrained_globals,
+    _synthesize_spotweld_second_nodes,
     _apply_mass_weighted_rbody_inertia,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
@@ -1825,6 +1827,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # and therefore have to see these ids already registered.
     _synthesize_beam_orientation_nodes(state)
 
+    # --spotweld-node-synthesis (round 6, B6 rule 1): the second node of a
+    # one-node ELFORM-9 *MAT_SPOTWELD beam, before the /NODE section and before
+    # the tied / spotweld sections that name it. A no-op without the flag.
+    _synthesize_spotweld_second_nodes(state)
+
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).
     _synthesize_rwall_moving_nodes(state)
@@ -1928,6 +1935,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # content-asserted, it rewrites one J row per body and draws no id. A
     # no-op without the flag.
     _apply_mass_weighted_rbody_inertia(state, lines, rbody_info)
+    # --beam-contact-secondary with nothing gained: say so once (round 6, B6)
+    _warn_beam_contact_secondary_unused(state)
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)

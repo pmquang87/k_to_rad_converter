@@ -274,6 +274,32 @@ def build_parser() -> argparse.ArgumentParser:
              "to leave those DOFs free.",
     )
     parser.add_argument(
+        "--spotweld-node-synthesis",
+        action="store_true",
+        help="Give an ELFORM-9 *MAT_SPOTWELD beam that states ONE node its "
+             "second one where Vol I R17 p.19-3 puts it - the given node "
+             "moved onto the nearest reference segment of the tie that names "
+             "the weld part, a new node on the nearest segment on the other "
+             "side (spotweld.k: 1213 -> z 0, new node at z 2, length 2.0 = "
+             "LS-DYNA's own d3plot and swforc). OFF by default: alone it only "
+             "costs cycles (7.64x on spotweld.k, IE -99.92 %%); with "
+             "--beam-contact-secondary the error changes sign, not size (IE "
+             "-99.9 %% -> +82.0 %% at 7.80x the cycles) and the weld never "
+             "fails (EFAIL has no /PROP/TYPE13 slot).",
+    )
+    parser.add_argument(
+        "--beam-contact-secondary",
+        action="store_true",
+        help="Put the nodes of *ELEMENT_BEAM elements (beams, trusses, "
+             "spotweld and discrete beams) of a part named on a contact side "
+             "into that side's node group. OFF by default: it changes the "
+             "secondary side of 4 R14 deck keys on 4 emitted models "
+             "(spotweld.k, show-cases/contact-overview/main.k and the two "
+             "Yaris giants) and of the two full-vehicle models in "
+             "C:/openradioss_run (4489 / 5102 spotweld beams), none of which "
+             "but spotweld.k has been run.",
+    )
+    parser.add_argument(
         "--implicit-constant-step",
         action="store_true",
         help="Cap the implicit step at the deck's own DT0 (/IMPL/DT/STOP "
@@ -1118,6 +1144,8 @@ def main(argv=None) -> int:
         weld_exponents=args.weld_exponents,
         constrained_linear=args.constrained_linear,
         constrained_global=args.constrained_global,
+        spotweld_node_synthesis=args.spotweld_node_synthesis,
+        beam_contact_secondary=args.beam_contact_secondary,
         shell_offset_gapmin=args.shell_offset_gapmin,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,

@@ -234,6 +234,8 @@ def convert(
     weld_exponents: bool = True,
     constrained_linear: bool = True,
     constrained_global: bool = True,
+    spotweld_node_synthesis: bool = False,
+    beam_contact_secondary: bool = False,
     shell_offset_gapmin: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
@@ -584,6 +586,24 @@ def convert(
         and 24737 nodes). A bad row (TC/RC outside 0-7, DIR not 1/2/3, TOL <
         0) and a card from a transformed ``*INCLUDE_TRANSFORM`` are refused by
         name; off, the keyword stays SKIPPED and its DOFs are free.
+    spotweld_node_synthesis : bool
+        Give an ELFORM-9 ``*MAT_SPOTWELD`` beam that states ONE node its
+        second one where Vol I R17 p.19-3 puts it: the given node moved onto
+        the nearest reference segment of the tie that names the weld part, a
+        new node on the nearest segment on the other side (spotweld.k: 1213
+        -> z 0, new node at z 2, length 2.0 = LS-DYNA's own d3plot and
+        swforc). **Off by default**: alone it only costs cycles (7.64x on
+        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` the error
+        changes sign, not size (IE -99.9 % -> +82.0 % at 7.80x the cycles)
+        and the weld never fails (EFAIL has no ``/PROP/TYPE13`` slot).
+    beam_contact_secondary : bool
+        Put the nodes of ``*ELEMENT_BEAM`` elements (beams, trusses, spotweld
+        and discrete beams) of a part named on a contact side into that
+        side's node group. **Off by default**: it changes the secondary side
+        of 4 R14 deck keys on 4 emitted models (spotweld.k,
+        ``show-cases/contact-overview/main.k`` and the two Yaris giants) and
+        of the two full-vehicle models in ``C:/openradioss_run``, none of
+        which but spotweld.k has been run.
     shell_offset_gapmin : bool
         On a ``/INTER/TYPE7`` whose main side is SOLID segments only and
         whose secondary is SHELLS that LS-DYNA offsets by half their
@@ -1009,6 +1029,8 @@ def convert(
         weld_exponents=weld_exponents,
         constrained_linear=constrained_linear,
         constrained_global=constrained_global,
+        spotweld_node_synthesis=spotweld_node_synthesis,
+        beam_contact_secondary=beam_contact_secondary,
         shell_offset_gapmin=shell_offset_gapmin,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,

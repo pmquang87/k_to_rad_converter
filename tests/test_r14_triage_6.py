@@ -3053,5 +3053,250 @@ class ConstrainedGlobalBcs(unittest.TestCase):
                           "constrained_global_111_111": ("111 111", 18)})
 
 
+
+def _r1fix(n1=100, n1_xyz=(5.0, 5.0, 1.0), tie=True, second_sheet=True,
+           ts="1.5", extra_elems="") -> str:
+    """The rule-1 probe: sheet part 1 at z 0 and sheet part 2 at z 2 (2 x 2
+    quads of 10 mm each; nodes 1-9 / 11-19, shells 1-4 / 11-14, t 1.0), and a
+    weld part 3 = *SECTION_BEAM ELFORM 9 (TS1 = TS2 = *ts*) + *MAT_SPOTWELD
+    whose ONE beam names node *n1* only. The sheet DISTANCE (2.0), the sheet
+    thickness (1.0) and TS1 (1.5) all differ, so a test tells the manual's
+    projection rule (L = 2.0) from the two alternatives."""
+    nodes = []
+    for base, z in ((0, 0.0), (10, 2.0)):
+        k = 0
+        for y in (0.0, 10.0, 20.0):
+            for x in (0.0, 10.0, 20.0):
+                k += 1
+                nodes.append((base + k, x, y, z))
+    nodes.append((100, *n1_xyz))
+    txt = "*KEYWORD\n*CONTROL_TERMINATION\n" + _row("1.0e-3") + "\n*NODE\n"
+    txt += "".join(f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                   for i, x, y, z in nodes)
+    txt += "*ELEMENT_SHELL\n"
+    for base, pid in ((0, 1), (10, 2)):
+        if pid == 2 and not second_sheet:
+            continue
+        for eid, (a, b, c, d) in enumerate(((1, 2, 5, 4), (2, 3, 6, 5),
+                                             (4, 5, 8, 7), (5, 6, 9, 8)),
+                                            start=1):
+            txt += (f"{base + eid:>8}{pid:>8}{base + a:>8}{base + b:>8}"
+                    f"{base + c:>8}{base + d:>8}\n")
+    txt += extra_elems
+    txt += ("*ELEMENT_BEAM\n" + f"{1:>8}{3:>8}{n1:>8}{0:>8}{0:>8}\n"
+            "*PART\nsheet 1\n" + _row(1, 1, 1) + "\n"
+            "*PART\nsheet 2\n" + _row(2, 1, 1) + "\n"
+            "*PART\nweld\n" + _row(3, 3, 3) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row("1.0", "1.0", "1.0", "1.0") + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*SECTION_BEAM\n" + _row(3, 9, "1.0", 2, 1) + "\n"
+            + _row(ts, ts, "0.0", "0.0") + "\n"
+            "*MAT_SPOTWELD\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+            + _row("0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0") + "\n"
+            "*SET_PART_LIST\n" + _row(200) + "\n" + _row(1, 2) + "\n")
+    if tie:
+        txt += ("*CONTACT_TIED_SHELL_EDGE_TO_SURFACE\n"
+                + _row(3, 200, 3, 2) + "\n" + _row() + "\n" + _row() + "\n")
+    return txt + "*END\n"
+
+
+def _spring_rows(starter: str, sid: int):
+    """The data rows of ``/SPRING/<sid>``."""
+    lines = starter.splitlines()
+    out = []
+    if f"/SPRING/{sid}" not in lines:
+        return out
+    i = lines.index(f"/SPRING/{sid}") + 1
+    while i < len(lines) and not lines[i].startswith(("/", "#-")):
+        if not lines[i].startswith("#"):
+            out.append(lines[i])
+        i += 1
+    return out
+
+
+def _tied_slave_ids(starter: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("tied_") and ln.endswith("_slave"):
+            ids = []
+            j = i + 1
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                ids += [int(t) for t in lines[j].split()]
+                j += 1
+            return ids
+    return None
+
+
+_R1_HEAD = "*ELEMENT_BEAM 1 (part 3: *SECTION_BEAM ELFORM 9, *MAT_SPOTWELD)"
+_R2_HEAD = "--beam-contact-secondary: contact side 3 (type 3) gains"
+
+
+class SpotweldOptInPair(unittest.TestCase):
+    """B6: ``--spotweld-node-synthesis`` (rule 1) and
+    ``--beam-contact-secondary`` (rule 2), both default OFF, on the r1fix
+    probe - the four arms of the spec, hand-derived."""
+
+    def _arm(self, **kw):
+        res, starter, engine = _convert(_r1fix(**kw.pop("fix", {})), **kw)
+        return res.warnings, starter, engine
+
+    def test_both_off_is_todays_refusal_with_the_lever_named(self):
+        warns, starter, _e = self._arm()
+        self.assertTrue(_has(warns, "*MAT_SPOTWELD part 3: zero-length (or "
+                             "node-less) spotweld beams",
+                             "1 weld(s) NOT converted"))
+        self.assertEqual(_spring_rows(starter, 3), [])
+        self.assertIsNone(_tied_slave_ids(starter))
+        self.assertTrue(_has(warns, "ssid=3 sstyp=3 resolved to no nodes at "
+                             "all", "Part(s) [3] of this side carry only "
+                             "*ELEMENT_BEAM elements",
+                             "--beam-contact-secondary does"))
+
+    def test_rule_1_places_the_second_node_by_the_manuals_projection(self):
+        warns, starter, _e = self._arm(spotweld_node_synthesis=True)
+        rows = _spring_rows(starter, 3)
+        self.assertEqual(rows, ["         1       100       101         0"])
+        node_rows = {int(ln[:10]): ln for ln in starter.splitlines()
+                     if re.match(r"^\s+\d+\s+-?[\d.]", ln)
+                     and ln[:10].strip() in ("100", "101")}
+        self.assertEqual(node_rows[100].split()[1:], ["5", "5", "0"])
+        self.assertEqual(node_rows[101].split()[1:], ["5", "5", "2"])
+        hit = [w for w in warns if w.startswith(_R1_HEAD)]
+        self.assertEqual(len(hit), 1, warns)
+        for needle in ("moved from (5, 5, 1) to (5, 5, 0) on shell 1 (part 1)",
+                       "new element-free node 101 created at (5, 5, 2) on "
+                       "shell 11 (part 2)", "weld length 2.",
+                       "WITHOUT --beam-contact-secondary", "7.64x"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+        # L = the sheet distance 2.0, not the thickness 1.0 or TS1 1.5:
+        # K_axial = E*A/L with A = pi*1.5^2/4 = 1.76715
+        self.assertTrue(_has(warns, "K_axial=E·A/L=185550",
+                             "K_shear=G·A/L=71365.5"))
+        self.assertIsNone(_tied_slave_ids(starter))      # the tie still drops
+
+    def test_rule_2_puts_the_beam_node_on_the_tie(self):
+        warns, starter, _e = self._arm(beam_contact_secondary=True)
+        self.assertEqual(_tied_slave_ids(starter), [100])
+        self.assertEqual(_spring_rows(starter, 3), [])
+        self.assertTrue(_has(warns, _R2_HEAD, "1 node(s)", "part(s) [3]"))
+        self.assertFalse(_has(warns, "--beam-contact-secondary does"))
+
+    def test_both_flags(self):
+        warns, starter, _e = self._arm(spotweld_node_synthesis=True,
+                                       beam_contact_secondary=True)
+        self.assertEqual(_spring_rows(starter, 3),
+                         ["         1       100       101         0"])
+        self.assertEqual(_tied_slave_ids(starter), [100, 101])
+        hit = [w for w in warns if w.startswith(_R1_HEAD)]
+        self.assertTrue(hit and "MEASURED with both flags" in hit[0], warns)
+        self.assertTrue(_has(warns, _R2_HEAD, "2 node(s)"))
+
+    def test_every_rule_1_refusal_is_byte_identical_to_rule_1_off(self):
+        shell_node = ("*ELEMENT_SHELL\n" + f"{50:>8}{1:>8}{100:>8}{2:>8}"
+                      f"{5:>8}{4:>8}\n")
+        cases = (
+            ({"extra_elems": shell_node}, "also belongs to another element"),
+            ({"tie": False}, "no *CONTACT_TIED_*/_SPOTWELD names part 3"),
+            ({"n1_xyz": (5.0, 5.0, 0.0)}, "lies ON a reference sheet"),
+            ({"second_sheet": False}, "no reference segment lies on the "
+                                      "other side"),
+        )
+        for fix, needle in cases:
+            with self.subTest(needle=needle):
+                w_on, s_on, e_on = self._arm(fix=dict(fix),
+                                             spotweld_node_synthesis=True)
+                w_off, s_off, e_off = self._arm(fix=dict(fix))
+                self.assertTrue(_has(w_on, "--spotweld-node-synthesis:",
+                                     "was NOT given a second one", needle),
+                                w_on)
+                self.assertEqual(s_on, s_off)
+                self.assertEqual(e_on, e_off)
+
+    def test_rule_2_on_rigid_beam_nodes_changes_nothing(self):
+        """The mainboltaexpl shape: the side's only part is a spotweld beam
+        whose two nodes are *CONSTRAINED_NODAL_RIGID_BODY members. The walk
+        gains them, the rigid filter removes them again: no gain warning, the
+        drop names the rigid nodes, both .rad identical to the flag-off arm,
+        and the flag-off arm is NOT pointed at the flag."""
+        pts = {1: (0, 0, 0), 2: (0, 0, 1), 20: (1, 0, 0), 21: (0, 1, 0),
+               22: (1, 0, 1), 23: (0, 1, 1)}
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row("1.0e-3") + "\n"
+                "*NODE\n" + "".join(f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                                    for i, (x, y, z) in sorted(pts.items()))
+                + "*ELEMENT_BEAM\n" + f"{1:>8}{5:>8}{1:>8}{2:>8}{0:>8}\n"
+                "*PART\nbolt weld\n" + _row(5, 5, 5) + "\n"
+                "*SECTION_BEAM\n" + _row(5, 9, "1.0", 2, 1) + "\n"
+                + _row("1.0", "1.0", "0.0", "0.0") + "\n"
+                "*MAT_SPOTWELD\n" + _row(5, 7.85e-9, 210000.0, 0.3) + "\n"
+                + _row("0.0") + "\n"
+                "*SET_NODE_LIST\n" + _row(110) + "\n" + _row(1, 20, 21) + "\n"
+                "*SET_NODE_LIST\n" + _row(120) + "\n" + _row(2, 22, 23) + "\n"
+                "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(501, 0, 110) + "\n"
+                "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(502, 0, 120) + "\n"
+                "*SET_PART_LIST\n" + _row(10013) + "\n" + _row(5) + "\n"
+                "*CONTACT_AUTOMATIC_GENERAL_ID\n" + _row(10013) + "\n"
+                + _row(10013, 0, 2, 0) + "\n" + _row() + "\n" + _row() + "\n"
+                "*END\n")
+        r_off, s_off, e_off = _convert(deck)
+        r_on, s_on, e_on = _convert(deck, beam_contact_secondary=True)
+        self.assertEqual(s_on, s_off)
+        self.assertEqual(e_on, e_off)
+        self.assertFalse(_has(r_on.warnings,
+                              "--beam-contact-secondary: contact side"))
+        self.assertTrue(_has(r_on.warnings, "ssid=10013 sstyp=2 resolved to 2 "
+                             "node(s) and ALL 2 of them belong to a rigid "
+                             "body"))
+        self.assertTrue(_has(r_on.warnings, "--beam-contact-secondary was "
+                             "passed but no emitted contact side"))
+        self.assertTrue(_has(r_off.warnings, "ssid=10013 sstyp=2 resolved to "
+                             "no nodes at all"))
+        self.assertFalse(_has(r_off.warnings, "--beam-contact-secondary does"))
+
+    def test_rule_2_takes_a_truss_part_too(self):
+        deck = _r1fix().replace(
+            "*SECTION_BEAM\n" + _row(3, 9, "1.0", 2, 1) + "\n"
+            + _row("1.5", "1.5", "0.0", "0.0") + "\n"
+            "*MAT_SPOTWELD\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+            + _row("0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0") + "\n",
+            "*SECTION_BEAM\n" + _row(3, 3, "1.0", 2, 1) + "\n"
+            + _row("1.0") + "\n"
+            "*MAT_ELASTIC\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n").replace(
+            f"{1:>8}{3:>8}{100:>8}{0:>8}{0:>8}\n",
+            f"{1:>8}{3:>8}{100:>8}{5:>8}{0:>8}\n")
+        _r, starter, _e = _convert(deck, beam_contact_secondary=True)
+        self.assertEqual(_tied_slave_ids(starter), [5, 100])
+        _r, starter, _e = _convert(deck)
+        self.assertIsNone(_tied_slave_ids(starter))
+
+    def test_the_tied_walk_IS_the_shared_walk(self):
+        """The refactor's equivalence, flag OFF, over a part holding one
+        element of every family the walk takes (shell, solid, thick shell,
+        1-D seatbelt, SPH) - and a beam, which it must NOT take."""
+        from k2rad.state import (BeamElem, SeatbeltElem, ShellElem, SolidElem,
+                                 SphCell, TshellElem)
+        from k2rad.writer.contacts import _contact_part_nodes, _tied_slave_nids
+        state = ConversionState()
+        state.shell_elems.append(ShellElem(1, 7, [1, 2, 3, 4]))
+        state.solid_elems.append(SolidElem(2, 7, [5, 6, 7, 8, 9, 10, 11, 12]))
+        state.tshell_elems.append(TshellElem(3, 7, [13, 14, 15, 16, 17, 18,
+                                                   19, 20]))
+        state.seatbelt_elems.append(SeatbeltElem(4, 7, 21, 22))
+        state.sph_elems.append(SphCell(23, 7))
+        state.beam_elems.append(BeamElem(5, 7, 24, 25, 0))
+        want = list(range(1, 24))
+        self.assertEqual(_tied_slave_nids(state, 7, 3), want)
+        self.assertEqual(sorted(_contact_part_nodes(state, 7)), want)
+        state.options.beam_contact_secondary = True
+        self.assertEqual(_tied_slave_nids(state, 7, 3), want + [24, 25])
+        self.assertEqual(state.beam_side_gain, {7: {24, 25}})
+
+    def test_the_docstring_no_longer_claims_a_shared_walk_it_did_not_have(self):
+        from k2rad.writer.contacts import _contact_part_nodes
+        doc = _collapse(_contact_part_nodes.__doc__)
+        self.assertIn("since R14 triage round 6 - ``_tied_slave_nids``", doc)
+
+
 if __name__ == "__main__":
     unittest.main()

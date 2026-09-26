@@ -2895,6 +2895,247 @@ def _mean_diameter(d1: float, d2: float) -> float:
     return max(d1, d2, 0.0)
 
 
+Vec3 = Tuple[float, float, float]
+
+
+def _closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3:
+    """The point of triangle *abc* nearest to *p* (the Voronoi-region walk of
+    Ericson, "Real-Time Collision Detection" 5.1.5): a vertex, an edge point
+    or the interior projection, never outside the triangle."""
+    def sub(u: Vec3, v: Vec3) -> Vec3:
+        return (u[0] - v[0], u[1] - v[1], u[2] - v[2])
+
+    def dot(u: Vec3, v: Vec3) -> float:
+        return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+
+    def at(o: Vec3, d: Vec3, t: float) -> Vec3:
+        return (o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2])
+
+    ab, ac, ap = sub(b, a), sub(c, a), sub(p, a)
+    d1, d2 = dot(ab, ap), dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a
+    bp = sub(p, b)
+    d3, d4 = dot(ab, bp), dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        return at(a, ab, d1 / (d1 - d3))
+    cp = sub(p, c)
+    d5, d6 = dot(ab, cp), dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        return at(a, ac, d2 / (d2 - d6))
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        return at(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)))
+    den = va + vb + vc
+    v, w = vb / den, vc / den
+    return (a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w,
+            a[2] + ab[2] * v + ac[2] * w)
+
+
+def _spotweld_reference_faces(state: ConversionState, c
+                              ) -> List[Tuple[Tuple[int, int], str, int,
+                                              List[int]]]:
+    """The reference segments of a weld tie: the faces of its MAIN side, as
+    ``(sort key, label, part id or 0, node ids)``. MSTYP 3 a part, 2 a part
+    set, 1 a ``*SET_SHELL`` (shells), 0 a ``*SET_SEGMENT`` (its segments)."""
+    out: List[Tuple[Tuple[int, int], str, int, List[int]]] = []
+    if c.mstyp in (2, 3):
+        pids = ({c.msid} if c.mstyp == 3 else
+                set(state.part_sets.get(c.msid, ("", []))[1]))
+        for e in state.shell_elems:
+            if e.pid in pids:
+                out.append(((0, e.eid), f"shell {e.eid}", e.pid,
+                            list(e.nodes)))
+    elif c.mstyp == 1:
+        wanted = set(state.shell_sets.get(c.msid, ("", []))[1])
+        for e in state.shell_elems:
+            if e.eid in wanted:
+                out.append(((0, e.eid), f"shell {e.eid}", e.pid,
+                            list(e.nodes)))
+    elif c.mstyp == 0:
+        ss = state.segment_sets.get(c.msid)
+        if ss is not None:
+            for k, seg in enumerate(ss.segments, start=1):
+                out.append(((1, k), f"segment {k} of *SET_SEGMENT {c.msid}", 0,
+                            [n for n in seg if n > 0]))
+    return out
+
+
+def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
+    """``--spotweld-node-synthesis`` (round 6, B6 rule 1; default OFF): an
+    ELFORM-9 ``*MAT_SPOTWELD`` beam that states ONE node gets its second one
+    where Vol I R17 p.19-3 puts it - *"If the PID option is inactive for the
+    type 9 element, the nodal points of the spot weld are located to the two
+    nearest reference surface segments"*.
+
+    The reference surface is the MAIN side of the first ``*CONTACT_TIED_*`` /
+    ``*CONTACT_SPOTWELD`` whose SURFA names the weld part. The given node N1
+    moves to its nearest point q1 on those segments (segment S1; ties -> the
+    lowest id), and a NEW element-free node is created at the nearest point
+    q2 on a segment strictly on the OTHER side of N1 ((q2 - P).(q1 - P) < 0).
+    So the weld length is the distance between the two sheets, whatever the
+    sheet thickness or TS1 - on the only R14 carrier, spotweld.k, the three
+    coincide at 2.0 and cannot tell the rules apart; LS-DYNA's own d3plot
+    there moved node 1213 from z 1.0 to z 0.0 and created node 1214 at z 2.0,
+    and its swforc prints length 2.0. (The deck's commented-out beam card
+    names nodes 213 / 123 at z 1.5 / 0.5: those are ORPHANS, in *NODE and in no
+    element; the sheets are at z 0 and 2.)
+
+    A PREPASS, before the ``/NODE`` section and before the tied / spotweld
+    sections that must name the node; the id comes from ``next_node_id`` (so
+    under the flag the ``/SECT`` frame nodes allocated later move up by one).
+    Refused by name, the weld then kept exactly as before (the connector
+    writer's part-level refusal of a node-less beam): N1 shared with any other
+    element, no tie naming the part, no reference segment, N1 ON a reference
+    sheet (the side of the second sheet is not guessed), no segment on the
+    other side, or coinciding points.
+    """
+    if not state.options.spotweld_node_synthesis:
+        return
+    weld_pids = _spotweld_beam_pids(state)
+    if not weld_pids:
+        return
+    candidates = [e for e in state.beam_elems
+                  if e.pid in weld_pids and e.n2 == 0 and e.n1 > 0]
+    if not candidates:
+        return
+    extent = 0.0
+    if state.nodes:
+        xs = [n.x for n in state.nodes.values()]
+        ys = [n.y for n in state.nodes.values()]
+        zs = [n.z for n in state.nodes.values()]
+        extent = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    ties = list(state.contacts_tied) + list(state.contacts_spotweld)
+    for e in candidates:
+        part = state.parts.get(e.pid)
+        sec = state.sec_beams.get(part.secid if part and part.secid > 0
+                                  else e.pid)
+        if sec is None or sec.elform != 9:
+            continue
+        head = (f"--spotweld-node-synthesis: *ELEMENT_BEAM {e.eid} (part "
+                f"{e.pid}) names ONE node ({e.n1}) and was NOT given a second "
+                "one: ")
+        tail = (". It stays as before: a node-less spotweld beam is not "
+                "converted.")
+        used = any(e.n1 in s.nodes for s in state.shell_elems) or any(
+            e.n1 in s.nodes for s in state.solid_elems) or any(
+            e.n1 in s.nodes for s in state.tshell_elems) or any(
+            e.n1 == c.nid for c in state.sph_elems) or any(
+            e.n1 in (s.n1, s.n2) for s in state.seatbelt_elems) or any(
+            e.n1 in (d.n1, d.n2) for d in state.discrete_elems) or any(
+            b is not e and e.n1 in (b.n1, b.n2) for b in state.beam_elems)
+        if used:
+            state.warn(head + f"node {e.n1} also belongs to another element; "
+                       "moving it would distort that element" + tail)
+            continue
+        if e.n1 not in state.nodes:
+            state.warn(head + f"node {e.n1} is not defined" + tail)
+            continue
+        tie = next((c for c in ties
+                    if (c.sstyp == 3 and c.ssid == e.pid)
+                    or (c.sstyp == 2 and e.pid in
+                        state.part_sets.get(c.ssid, ("", []))[1])), None)
+        if tie is None:
+            state.warn(head + "no *CONTACT_TIED_*/_SPOTWELD names part "
+                       f"{e.pid} as its tracked (SURFA) side, so there is no "
+                       "reference surface to place the second node on" + tail)
+            continue
+        faces = [f for f in _spotweld_reference_faces(state, tie)
+                 if len(f[3]) >= 3 and all(n in state.nodes for n in f[3])]
+        if not faces:
+            state.warn(head + "no shell reference segment on the MAIN side of "
+                       f"that tie ({tie.inter_id})" + tail)
+            continue
+        pn = state.nodes[e.n1]
+        p = (pn.x, pn.y, pn.z)
+        near = []
+        for key, label, fpid, nodes in faces:
+            pts = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z)
+                   for n in nodes]
+            uniq = list(dict.fromkeys(pts))
+            tris = ([(uniq[0], uniq[1], uniq[2])] if len(uniq) == 3 else
+                    [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
+                    if len(uniq) >= 4 else [])
+            best = None
+            for a, b, c3 in tris:
+                q = _closest_on_triangle(p, a, b, c3)
+                d = sum((q[i] - p[i]) ** 2 for i in range(3)) ** 0.5
+                if best is None or d < best[0]:
+                    best = (d, q)
+            if best is not None:
+                near.append((best[0], key, label, fpid, best[1]))
+        if not near:
+            state.warn(head + "no shell reference segment on the MAIN side of "
+                       f"that tie ({tie.inter_id})" + tail)
+            continue
+        near.sort(key=lambda t: (t[0], t[1]))
+        d1, _k1, lab1, pid1, q1 = near[0]
+        if d1 <= 1e-9 * extent:
+            state.warn(head + f"node {e.n1} lies ON a reference sheet ({lab1}), "
+                       "and k2rad does not guess the side of the second sheet"
+                       + tail)
+            continue
+        v1 = tuple(q1[i] - p[i] for i in range(3))
+        other = [t for t in near
+                 if sum((t[4][i] - p[i]) * v1[i] for i in range(3)) < 0.0]
+        if not other:
+            state.warn(head + "no reference segment lies on the other side of "
+                       f"node {e.n1}" + tail)
+            continue
+        _d2, _k2, lab2, pid2, q2 = other[0]
+        length = sum((q2[i] - q1[i]) ** 2 for i in range(3)) ** 0.5
+        if length <= 1e-12:
+            state.warn(head + "the two reference points coincide" + tail)
+            continue
+        n2 = state.next_node_id()
+        state.nodes[e.n1] = NodeData(*q1)
+        state.nodes[n2] = NodeData(*q2)
+        e.n2 = n2
+        kw = getattr(tie, "keyword", "") or (
+            f"CONTACT_TIED_{tie.variant}" if tie in state.contacts_tied
+            else "CONTACT_SPOTWELD")
+
+        def xyz(v) -> str:
+            return f"({v[0]:g}, {v[1]:g}, {v[2]:g})"
+        if state.options.beam_contact_secondary:
+            clause = (
+                " MEASURED with both flags on spotweld.k (nt 4): 4983 cycles "
+                "(7.80x) and internal energy -99.9 % -> +82.0 % of LS-DYNA's "
+                "at t 1.18e-3 - the error changes SIGN, not size (|IE error| "
+                "76733 -> 67888 on LS 76812): the /PROP/TYPE13 shear stays "
+                "elastic (116300 vs LS-DYNA's 46247 at 1.18e-3) and the weld "
+                "never fails (*MAT_SPOTWELD EFAIL has no /PROP/TYPE13 slot) "
+                "where LS-DYNA fails it at 1.1876e-3; the TYPE13 spring also "
+                "owns the time step because MAT_100's DT is dropped.")
+        else:
+            clause = (
+                " WITHOUT --beam-contact-secondary the tie's secondary side "
+                "still resolves to no node, so the weld connects nothing: "
+                "MEASURED on spotweld.k, this flag alone costs 7.64x the "
+                "cycles (639 -> 4884) at IE -99.92 %.")
+        state.warn(
+            f"*ELEMENT_BEAM {e.eid} (part {e.pid}: *SECTION_BEAM ELFORM 9, "
+            f"*MAT_SPOTWELD) names ONE node ({e.n1}; n2 = 0). "
+            "--spotweld-node-synthesis places the weld the way Vol I R17 "
+            "p.19-3 describes - 'the nodal points of the spot weld are "
+            "located to the two nearest reference surface segments': node "
+            f"{e.n1} moved from {xyz(p)} to {xyz(q1)} on {lab1}"
+            + (f" (part {pid1})" if pid1 else "")
+            + f" and a new element-free node {n2} created at {xyz(q2)} on "
+            f"{lab2}" + (f" (part {pid2})" if pid2 else "")
+            + f", the reference surface being the MAIN side of *{kw} "
+            f"{tie.inter_id}; weld length {length:g}. LS-DYNA's own d3plot of "
+            "the only R14 carrier (spotweld.k) shows exactly this placement "
+            "(node 1213 at (60, 20, 0), new node 1214 at (60, 20, 2)) and its "
+            "swforc prints length 2.0." + clause)
+
+
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     """*MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 (SPR_BEAM) /SPRING
     connectors.
