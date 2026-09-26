@@ -13,6 +13,7 @@ from ..topology import TET10_EDGEMID
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
+    _SOLVINFO_HINT,
     _emit_grnod_node,
     _emit_grsh3n,
     _emit_grshel,
@@ -662,6 +663,7 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             "pull through a clearance-fit deformable pin to full load. The "
             "interface keeps its mesh-scale Card-3 SST/MST Gapmin — even with "
             "--auto-gapmin on, the recipe protects it from being shrunk."
+            + _solvinfo_tail(state)
         )
     else:
         state.warn(
@@ -674,7 +676,17 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             "--deformable-contact-recipe (GUI: 'Deformable-deformable contact "
             "recipe') = Inacti=5 + L_dtn=50 + QSTAT/DTSCAL=0.05 with a mesh-scale "
             "(Card-3 SST/MST) Gapmin."
+            + _solvinfo_tail(state)
         )
+
+
+def _solvinfo_tail(state: ConversionState) -> str:
+    """The ``/IMPL/NONLIN/SOLVINFO`` remedy, on a NON-modal deck only: the
+    engine opens its files only for a nonlinear implicit run
+    (``radioss2.F:691`` requires ``ILINE == 0``), and a modal deck's engine is
+    ``/IMPL/LINEAR`` (``11.1.sbrake`` prints the deformable-deformable warning
+    and must not be told to add a card that does nothing there)."""
+    return "" if state.is_modal else " " + _SOLVINFO_HINT
 
 
 def _gapmin_override(state: ConversionState, inter_id: int, base: float,

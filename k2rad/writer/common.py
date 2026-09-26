@@ -191,6 +191,29 @@ def _ams_is_emitted(state: ConversionState) -> bool:
 # Formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: The DOF-level residual dump OpenRadioss HAS (R14 triage round 6, B4): named
+#: in every implicit remedy text that tells a user what to do when THEIR
+#: converted run diverges or stalls - the deformable-deformable contact warning
+#: (non-modal decks only: radioss2.F:691 opens the files only for a NONLINEAR
+#: implicit run), the implicit-dynamics + initial-velocity engine-defect warning
+#: and the --implicit-constant-step warning. Defined ONCE (a test checks no
+#: second copy of its opening exists in the package). Verified against the
+#: OpenRadioss source: freimpl.F:320-321 (KEY3 'SOLVI' -> SOLVNFO = 1),
+#: imp_solv.F:1715-1725 (IF (SOLVNFO > ZERO) ... CALL PR_SOLNFO), radioss2.F:691
+#: (IMPL_S > 0 AND ILINE == 0 AND SOLVNFO > 0) and :739 (the _implicit.info
+#: file name).
+_SOLVINFO_HINT = (
+    "To see WHERE an implicit run diverges, add the engine card "
+    "/IMPL/NONLIN/SOLVINFO (no data line) to the _0001.rad: freimpl.F:320-321 "
+    "sets SOLVNFO, and after every nonlinear iteration imp_solv.F:1715-1725 "
+    "calls PR_SOLNFO, which writes the largest residual force, displacement "
+    "increment and correction - each with its node id and DOF - to the run's "
+    "_implicit.info file (radioss2.F:688-760 opens it beside the .hist, .tpl, "
+    ".monitor and .progress files, named after the run's root and number; "
+    "nonlinear implicit runs only, radioss2.F:691). On the R14 ex_27 pair it "
+    "names the runaway ring (nodes 5244 and 1423/1424).")
+
+
 def _f(v: float, w: int = 20) -> str:
     """Right-aligned float field of width *w*."""
     if v == 0.0:

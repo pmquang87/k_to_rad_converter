@@ -5820,6 +5820,35 @@ moves). [`--implicit-constant-step`](#--implicit-constant-step--cap-the-implicit
 caps the Radioss step at DT0 where that is expressible; it is opt-in, for the
 measured reasons in its section.
 
+**Diagnosing a divergence: `/IMPL/NONLIN/SOLVINFO`.** OpenRadioss has a
+DOF-level residual dump: add the engine card `/IMPL/NONLIN/SOLVINFO` (no data
+line) to the `_0001.rad`. `freimpl.F:320-321` sets `SOLVNFO`, and after every
+nonlinear iteration `imp_solv.F:1715-1725` calls `PR_SOLNFO`, which writes the
+largest residual force, displacement increment and correction — each with its
+node id and DOF — to the run's `_implicit.info` file (`radioss2.F:688-760`
+opens it beside the `.hist`, `.tpl`, `.monitor` and `.progress` files;
+nonlinear implicit runs only, `radioss2.F:691`). Since round 6 the converter's
+implicit remedy warnings name it (the deformable-deformable contact warning on
+a non-modal deck, the engine-defect warning below, `--implicit-constant-step`).
+On the R14 `ex_27` pair it names the runaway ring (nodes 5244 and 1423/1424).
+
+**Known engine defect: implicit dynamics with an initial velocity.** An
+implicit deck with `*CONTROL_IMPLICIT_DYNAMICS` `IMASS > 0` and any
+`*INITIAL_VELOCITY*` card runs OpenRadioss's implicit Newmark path from a
+non-zero initial velocity, and that was MEASURED to be wrong in the ENGINE:
+on the R14 Taylor-bar pair (`ex_27_solid_elform_2_rigidwall_*_implicit`),
+with a first step small enough to converge (`/IMPL/DTINI` 1e-8), the bar's
+momentum at the first converged increment is exactly **−3.0000000** times the
+initial one (Z-momentum −2.099317 → +6.297951, KE × 9.00000), and the run ends
+NORMAL TERMINATION with the bar flying AWAY from the wall — with the contact
+deleted, with no wall at all, and with `/INIVEL/AXIS` or `/INIVEL/TRA` alike.
+With the deck's own first step the first increment does not converge, every
+cut-back restarts from the corrupted state and the run stops at TIMESTEP LIMIT.
+A smaller `/IMPL/DTINI` is therefore NOT a fix. The converter warns on every
+such deck (2 R14 keys on 2 models) and writes nothing different; run the
+model EXPLICIT until the engine is fixed upstream. See
+[`docs/IMPLICIT.md`](docs/IMPLICIT.md).
+
 ### `--derived-gapmin` — an explicit Gapmin for a SOLID-segment main surface
 
 k2rad writes `Igap 0` with `Gapmin 0` on a `/INTER/TYPE7` unless the card
@@ -6232,6 +6261,13 @@ mypy k2rad
   that "diverges" is almost always this and not the keyword under test. Adding
   `TSSFAC = 0.3` makes k2rad emit `/DT  0.3  0` and the same deck reaches
   NORMAL TERMINATION.
+- **Implicit dynamics from an initial velocity is wrong in the OpenRadioss
+  engine** (measured in round 6, not a converter choice): the implicit Newmark
+  path hands back the initial momentum multiplied by exactly −3.0000000 at the
+  first converged increment (KE × 9.00000), so such a run either diverges or
+  completes with the wrong velocity. The converter warns on every
+  `*CONTROL_IMPLICIT_DYNAMICS` + `*INITIAL_VELOCITY*` deck; run it explicit.
+  See *Implicit dynamic notes*.
 
 ---
 

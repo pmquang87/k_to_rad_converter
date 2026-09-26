@@ -128,3 +128,63 @@ python k2rad.py model.k --deformable-contact-recipe
 The recipe is a no-op on a deck without deformable-deformable contact, and the
 `L_dtn`/`QSTAT` engine globals are otherwise left at their defaults (engine
 `L_dtn=20`, `DTSCAL=0.1`).
+
+## Diagnosing a divergence: /IMPL/NONLIN/SOLVINFO
+
+The cycle table says THAT an implicit run diverges, not WHERE. OpenRadioss has
+a DOF-level residual dump for that: add the engine card
+
+```
+/IMPL/NONLIN/SOLVINFO
+```
+
+(no data line) to the `_0001.rad`. `freimpl.F:320-321` sets `SOLVNFO` (the
+`KEY3 = 'SOLVI'` branch), and after every nonlinear iteration
+`imp_solv.F:1715-1725` calls `PR_SOLNFO`, which writes the largest residual
+force, displacement increment and correction — each with its node id and DOF —
+to the run's `_implicit.info` file. `radioss2.F:688-760` opens it beside the
+`.hist`, `.tpl`, `.monitor` and `.progress` files, and only for a NONLINEAR
+implicit run (`radioss2.F:691`: `IMPL_S > 0 .AND. ILINE == 0 .AND.
+SOLVNFO > 0`), so it does nothing on a modal (`/IMPL/LINEAR`) deck — which is
+why the converter names it only on non-modal decks.
+
+What it showed on the R14 `ex_27` Taylor-bar pair (round 6): on the penalty
+twin, cycles 1-3 were accepted "based on small residual energy" with the
+largest residual still 2.1e4-1.5e5 at the interior ring r 2.904; cycle 4's
+attempt maximum grew 1.3e5 → 2.6e8 over 12 cut-backs, node 5244 (x 0,
+y 2.904, z 15.3; DOF 3) in 8 of the 12. On the constrained twin, over cycle
+2's 22 cut-backs it grew 4.2e3 → 2.0e10, node 1423 in 18 of 22. The dump
+located the ring; it did not explain it — the next section does.
+
+## Known engine defect: implicit dynamics with an initial velocity
+
+An implicit deck with `*CONTROL_IMPLICIT_DYNAMICS` `IMASS > 0` (k2rad writes
+`/IMPL/DYNA/2` Newmark) and any `*INITIAL_VELOCITY*` card is wrong in the
+OpenRadioss ENGINE, whatever the converter writes. MEASURED on the R14
+Taylor-bar pair (`ex_27_solid_elform_2_rigidwall_{constrained_nodes,
+penalty}_implicit`):
+
+- With the deck's own first step (`/IMPL/DTINI` 1e-6) the first increment does
+  not converge, every cut-back restarts from a corrupted state (the attempt KE
+  grows × 2.76, 2.55, 2.44 … → 2.25 per cut, i.e. KE ~ 1/dt²) and the run stops
+  at `TIMESTEP LIMIT` — cycle 1 (constrained twin, t 6.667e-7, KE 1.054e13) and
+  cycle 3 (penalty twin, t 9.726e-8, KE 5.819e9), `nt` 4 = `nt` 2 to every
+  printed digit.
+- With a first step small enough to converge (`/IMPL/DTINI` 1e-8) both twins
+  end **NORMAL TERMINATION** (71 cycles, t 7.888e-5) — with the T01 Z-momentum
+  going **−2.099317 → +6.297951 = −3.0000000 × the initial** and KE × 9.00000
+  from the first converged increment on: the bar flies AWAY from the wall, with
+  0 `RIGID WALL IMPACT` lines (7 in the shipped arm).
+- The same with the injected contact stub deleted (no contact of any kind) and
+  with `/INIVEL/TRA` instead of `/INIVEL/AXIS`.
+
+What is known about the cause is negative only: the Newmark cells are not
+swapped (`lectur.F:3432-3434` reads `NEWM_A >= 1/2` as gamma and `NEWM_B` as
+beta), and the engine special-cases exactly this path (`imp_dyna.F`
+`DYNA_INA`'s `IF (NINVEL>0)` block, `INTE_DYNA`, `imp_solv.F:797-807`). The
+faulty line is not isolated, so the converter's warning describes the
+measurement and cites no line as the cause. A smaller `/IMPL/DTINI` is NOT a
+fix — it trades the error termination for a completed run with the wrong
+velocity — so none is shipped. The constrained twin at `/IMPL/DTINI` 1e-8
+(no wall, no contact, 71 cycles, ~60 s) is the upstream reproducer. Run such a
+model EXPLICIT until the engine is fixed.

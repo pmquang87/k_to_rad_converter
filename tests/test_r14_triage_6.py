@@ -2510,5 +2510,208 @@ class ConstantStepSentence(unittest.TestCase):
                              for w in warns), warns)
 
 
+
+_HEX_NODES = ((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+              (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))
+
+
+def _iv_deck(imass=1, iv="node", general=True, modal=False) -> str:
+    """One elastic brick. *imass* None = no ``*CONTROL_IMPLICIT_DYNAMICS``;
+    *general* False = an EXPLICIT deck (no ``*CONTROL_IMPLICIT_GENERAL``);
+    *iv* picks the initial-velocity spelling (one probe per registry) or
+    None for none; *modal* adds ``*CONTROL_IMPLICIT_EIGENVALUE``."""
+    deck = "*KEYWORD\n*NODE\n" + "".join(
+        f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+        for i, (x, y, z) in enumerate(_HEX_NODES, start=1))
+    deck += ("*ELEMENT_SOLID\n"
+             "       1       1       1       2       3       4       5       6"
+             "       7       8\n"
+             "*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+             "*SECTION_SOLID\n" + _row(1, 2) + "\n"
+             "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+             "*CONTROL_TERMINATION\n" + _row("8.0E-05") + "\n")
+    if general:
+        deck += "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, "1.0E-06") + "\n"
+    if imass is not None:
+        deck += "*CONTROL_IMPLICIT_DYNAMICS\n" + _row(imass) + "\n"
+    if modal:
+        deck += _EIGEN_CARD
+    if iv == "node":
+        deck += "*INITIAL_VELOCITY_NODE\n" + "".join(
+            _row(n, "0.0", "0.0", "-1000.0") + "\n" for n in range(1, 9))
+    elif iv == "set":
+        deck += ("*SET_NODE_LIST\n" + _row(7) + "\n"
+                 + _row(1, 2, 3, 4, 5, 6, 7, 8) + "\n"
+                 "*INITIAL_VELOCITY\n" + _row(7) + "\n"
+                 + _row("0.0", "0.0", "-1000.0") + "\n")
+    elif iv == "generation":
+        deck += ("*INITIAL_VELOCITY_GENERATION\n"
+                 + _row(1, 2, "0.0", "0.0", "0.0", "-1000.0") + "\n"
+                 + _row("0.0", "0.0", "0.0", "0.0", "0.0", "1.0") + "\n")
+    elif iv == "rigid":
+        deck += ("*INITIAL_VELOCITY_RIGID_BODY\n"
+                 + _row(1, "0.0", "0.0", "-1000.0") + "\n")
+    return deck + "*END\n"
+
+
+_B4_HEAD = "*CONTROL_IMPLICIT_DYNAMICS IMASS="
+
+
+class ImplicitDynamicInitialVelocityDefect(unittest.TestCase):
+    """B4 (i): the engine-defect warning on the emitter's own branch
+    (non-modal, IMASS > 0, ``/IMPL/DYNA/2`` written) with any registered
+    initial velocity - and not one byte moves."""
+
+    def test_the_warning_describes_the_measurement(self):
+        res, _s, engine = _convert(_iv_deck())
+        self.assertIn("/IMPL/DYNA/2", engine)
+        hits = [w for w in res.warnings if w.startswith(_B4_HEAD)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("IMASS=1", "*INITIAL_VELOCITY_NODE",
+                       "/IMPL/DYNA/2 0.5 0.25", "-3.0000000",
+                       "kinetic energy x 9.00000", "Run this model EXPLICIT",
+                       "A smaller /IMPL/DTINI is therefore NOT a fix",
+                       "/IMPL/NONLIN/SOLVINFO"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_not_one_byte_moves(self):
+        """Both .rad files against the same deck with the warning stubbed
+        out: the warning is text only."""
+        from k2rad.writer import assembly as wa
+        _r, s_on, e_on = _convert(_iv_deck())
+        saved = wa._warn_implicit_dynamic_initial_velocity
+        wa._warn_implicit_dynamic_initial_velocity = (
+            lambda *a, **k: None)
+        try:
+            res_off, s_off, e_off = _convert(_iv_deck())
+        finally:
+            wa._warn_implicit_dynamic_initial_velocity = saved
+        self.assertFalse(_has(res_off.warnings, _B4_HEAD))
+        self.assertEqual(s_on, s_off)
+        self.assertEqual(e_on, e_off)
+
+    def test_absent_on_a_quasi_static_deck(self):
+        res, _s, _e = _convert(_iv_deck(imass=0))
+        self.assertFalse(_has(res.warnings, _B4_HEAD))
+
+    def test_absent_without_an_initial_velocity(self):
+        res, _s, _e = _convert(_iv_deck(iv=None))
+        self.assertFalse(_has(res.warnings, _B4_HEAD))
+
+    def test_absent_on_an_explicit_deck(self):
+        res, _s, engine = _convert(_iv_deck(imass=None, general=False))
+        self.assertNotIn("/IMPL/", engine)
+        self.assertFalse(_has(res.warnings, _B4_HEAD))
+
+    def test_absent_on_a_modal_deck(self):
+        """IMASS 1 beside *CONTROL_IMPLICIT_EIGENVALUE: the modal recipe
+        writes no /IMPL/DYNA/2 (the tire.k / 11.1.sbrake shape)."""
+        res, _s, engine = _convert(_iv_deck(modal=True))
+        self.assertNotIn("/IMPL/DYNA/2", engine)
+        self.assertFalse(_has(res.warnings, _B4_HEAD))
+
+    def test_every_registry_fires_it(self):
+        for iv, kw in (("set", "(*INITIAL_VELOCITY)"),
+                       ("generation", "*INITIAL_VELOCITY_GENERATION"),
+                       ("rigid", "*INITIAL_VELOCITY_RIGID_BODY"),
+                       ("node", "*INITIAL_VELOCITY_NODE")):
+            with self.subTest(iv=iv):
+                res, _s, _e = _convert(_iv_deck(iv=iv))
+                self.assertTrue(_has(res.warnings, _B4_HEAD, kw),
+                                res.warnings)
+
+
+DEFDEF_K = """\
+*KEYWORD
+*TITLE
+deformable-deformable implicit contact
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part A
+         1         1         1
+*PART
+deformable part B
+         2         1         1
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                              defdef
+         1         2         3         3         0         0         0         0
+       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20
+       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0
+*CONTROL_IMPLICIT_GENERAL
+         1      0.01
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+_DEFDEF_HEADS = ("Deformable-deformable contact detected",
+                 "Deformable-deformable contact recipe APPLIED")
+
+
+class SolvinfoRemedyHint(unittest.TestCase):
+    """B4 (ii): ``/IMPL/NONLIN/SOLVINFO`` in the implicit remedy texts, once
+    in the package, and never on a MODAL deck (radioss2.F:691)."""
+
+    def test_both_deformable_arms_carry_it(self):
+        for recipe, head in ((False, _DEFDEF_HEADS[0]),
+                             (True, _DEFDEF_HEADS[1])):
+            with self.subTest(recipe=recipe):
+                res, _s, _e = _convert(DEFDEF_K,
+                                       deformable_contact_recipe=recipe)
+                self.assertTrue(_has(res.warnings, head,
+                                     "/IMPL/NONLIN/SOLVINFO",
+                                     "freimpl.F:320-321",
+                                     "imp_solv.F:1715-1725"), res.warnings)
+
+    def test_the_constant_step_and_the_engine_defect_warnings_carry_it(self):
+        res, _s, _e = _convert(_impl_deck(), implicit_constant_step=True)
+        self.assertTrue(_has(res.warnings, _B3_ON, "/IMPL/NONLIN/SOLVINFO"))
+        res, _s, _e = _convert(_iv_deck())
+        self.assertTrue(_has(res.warnings, _B4_HEAD, "/IMPL/NONLIN/SOLVINFO"))
+
+    def test_a_modal_deck_is_not_told_to_add_it(self):
+        """The 11.1.sbrake shape: the deformable-deformable warning still
+        fires on a modal deck, without the hint."""
+        deck = DEFDEF_K.replace("*CONTROL_TERMINATION",
+                                _EIGEN_CARD + "*CONTROL_TERMINATION")
+        res, _s, engine = _convert(deck)
+        self.assertIn("/IMPL/LINEAR", engine)
+        hits = [w for w in res.warnings if w.startswith(_DEFDEF_HEADS[0])]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertNotIn("/IMPL/NONLIN/SOLVINFO", hits[0])
+
+    def test_the_hint_is_defined_once(self):
+        from k2rad.writer.common import _SOLVINFO_HINT
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        opening = _SOLVINFO_HINT[:40]
+        self.assertTrue(opening.startswith("To see WHERE an implicit run"))
+        hits = []
+        for dirpath, _dirs, files in os.walk(os.path.join(root, "k2rad")):
+            for name in files:
+                if name.endswith(".py"):
+                    with open(os.path.join(dirpath, name),
+                              encoding="utf-8") as fh:
+                        text = _collapse(re.sub(r'"\s*\n\s*"', "", fh.read()))
+                    hits += [name] * text.count(opening)
+        self.assertEqual(hits, ["common.py"])
+
+
 if __name__ == "__main__":
     unittest.main()

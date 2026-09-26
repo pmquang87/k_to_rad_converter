@@ -6,7 +6,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from ..state import ConversionState
 from .beams import _resolve_integration_beams
-from .common import HDR, _ams_is_emitted, _f, _i
+from .common import HDR, _SOLVINFO_HINT, _ams_is_emitted, _f, _i
 from .materials import (
     _apply_zero_density_floor,
     _make_functions,
@@ -1005,7 +1005,65 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "history error falls 14x: that match was an artefact of the engine "
         "never printing its last converged increment (the scorer compared t "
         "0.0922 with LS-DYNA's t 0.1; at matched time the shipped run's KE is "
-        "+1343 %).")
+        "+1343 %). " + _SOLVINFO_HINT)
+
+
+#: The four initial-velocity registries and the keyword each one is filled
+#: from (handlers.py HANDLERS). A spelling that is not one of these four lands
+#: in a drop bucket, emits no /INIVEL and needs no engine-defect warning.
+_INIVEL_REGISTRIES = (
+    ("inivel_nodes", "*INITIAL_VELOCITY_NODE"),
+    ("inivel_rbodies", "*INITIAL_VELOCITY_RIGID_BODY"),
+    ("inivel_general", "*INITIAL_VELOCITY"),
+    ("inivel_generations", "*INITIAL_VELOCITY_GENERATION"),
+)
+
+
+def _warn_implicit_dynamic_initial_velocity(state: ConversionState, imass: int,
+                                            gamma: float, beta: float) -> None:
+    """An implicit-DYNAMIC deck with an initial velocity: the ENGINE defect,
+    measured (R14 triage round 6, B4). Default ON, warning only, 0 bytes.
+
+    Called from the emitter's own branch - where ``/IMPL/DYNA/2`` is written -
+    so it fires exactly when the card it describes is in the deck: non-modal,
+    implicit, ``*CONTROL_IMPLICIT_DYNAMICS`` IMASS > 0, and one of the four
+    registered initial-velocity records. IMASS != 0 holds on 23 R14 keys / 18
+    models, two of them MODAL (``tire.k``, ``11.1.sbrake.k``), where the modal
+    recipe writes no ``/IMPL/DYNA/2`` and no Newmark step exists to warn about;
+    IMASS < 0 (a switching curve) is on 0 keys. Reach: 2 keys / 2 models, the
+    ``ex_27_solid_elform_2_rigidwall_*_implicit`` twins, of the 21 keys / 16
+    models that emit ``/IMPL/DYNA/2``.
+
+    The warning DESCRIBES THE MEASUREMENT and cites no source line as the
+    cause: the faulty line is not isolated. What is known is negative: the
+    Newmark cells are not swapped (``lectur.F:3432-3434`` reads NEWM_A >= 1/2
+    as gamma and NEWM_B as beta), and the engine special-cases exactly this
+    path (``imp_dyna.F`` DYNA_INA's ``IF (NINVEL>0)`` block, INTE_DYNA, and
+    ``imp_solv.F:797-807``). A small-DTINI "fix" is deliberately NOT shipped:
+    it completes the run with the wrong velocity.
+    """
+    kws = [kw for attr, kw in _INIVEL_REGISTRIES if getattr(state, attr)]
+    if not kws:
+        return
+    state.warn(
+        f"*CONTROL_IMPLICIT_DYNAMICS IMASS={imass} with an initial velocity "
+        f"({', '.join(kws)}): this deck runs OpenRadioss's IMPLICIT Newmark "
+        f"path (/IMPL/DYNA/2 {gamma:g} {beta:g}) from a non-zero initial "
+        "velocity, and that combination was MEASURED to be wrong in the "
+        "ENGINE, whatever the converter writes: on the R14 Taylor-bar pair "
+        "(ex_27_solid_elform_2_rigidwall_*_implicit), with a first step small "
+        "enough to converge (/IMPL/DTINI 1e-8), the bar's momentum at the "
+        "first converged increment is exactly -3.0000000 times the initial "
+        "one (Z-momentum -2.099317 -> +6.297951, kinetic energy x 9.00000) "
+        "and the run ends NORMAL TERMINATION with the bar flying AWAY from "
+        "the wall - with the contact deleted, with no wall at all, and with "
+        "/INIVEL/AXIS or /INIVEL/TRA alike. With the deck's own first step the "
+        "first increment does not converge, every cut-back restarts from the "
+        "corrupted state and the run stops at TIMESTEP LIMIT (cycle 1 / cycle "
+        "3 on the pair). A smaller /IMPL/DTINI is therefore NOT a fix: it "
+        "trades the error termination for a completed run with the wrong "
+        "velocity. Run this model EXPLICIT until the engine is fixed "
+        "upstream. " + _SOLVINFO_HINT)
 
 
 #: LS-DYNA's own *CONTROL_IMPLICIT_SOLUTION card-1 defaults (Vol I R17
@@ -1175,6 +1233,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         gamma = dyn.gamma if dyn.gamma > 0 else 0.5
         beta  = dyn.beta  if dyn.beta  > 0 else 0.25
         lines += ["/IMPL/DYNA/2", f" {gamma:.6G}  {beta:.6G}"]
+        # The engine defect on this path with an initial velocity (round 6,
+        # B4) - warned here, in the branch that writes the card it is about.
+        _warn_implicit_dynamic_initial_velocity(state, dyn.imass, gamma, beta)
     else:
         # /IMPL/QSTAT/DTSCAL: the inertia-stabilization scale. imp_dyna.F:351
         # builds S = (1+D_AL)*DY_B*DT2*DT2, :353 multiplies it by SCAL_DTQ^2

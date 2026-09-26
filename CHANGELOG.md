@@ -119,6 +119,42 @@ Prior history (before this changelog was introduced) is summarized in the
     class's only `match`, ex_11, turns deviation under the end-of-run scorer
     (KE −2.39 → −15.87 %) although its history error falls 14× — an artefact
     of the unprinted last implicit increment (C1).
+  - **B4 — the implicit-dynamics + initial-velocity ENGINE-defect warning,
+    `/IMPL/NONLIN/SOLVINFO` in the implicit remedy texts, and the `ex_27`
+    record (warning / text only, 0 bytes).** (i) A default-ON warning, from
+    the branch of `_make_engine_implicit` that writes `/IMPL/DYNA/2`
+    (non-modal, `IMASS > 0`) whenever one of the four initial-velocity
+    registries holds a record: the OpenRadioss implicit Newmark path was
+    MEASURED to hand a free body's initial momentum back multiplied by
+    exactly −3.0000000 at the first converged increment (both `ex_27` twins
+    at `/IMPL/DTINI` 1e-8: Z-momentum −2.099317 → +6.297951, KE × 9.00000,
+    NORMAL TERMINATION with the bar flying away from the wall — with no wall,
+    no contact, and either `/INIVEL` card), so the run either diverges (the
+    shipped first step: TIMESTEP LIMIT at cycle 1 / 3) or completes with the
+    wrong velocity; the warning says so, points to an explicit run, and cites
+    no source line as the cause (it is not isolated). No small-DTINI "fix"
+    ships. Reach **2 deck keys on 2 emitted models** (the `ex_27` twins; the
+    only 2 of the 21 keys / 16 models that emit `/IMPL/DYNA/2` with an
+    initial velocity; IMASS != 0 also holds on the two MODAL decks `tire.k`
+    and `11.1.sbrake`, which write no Newmark card and get no warning). (ii)
+    One constant, `writer/common._SOLVINFO_HINT`, names the DOF-level residual
+    dump OpenRadioss has — `/IMPL/NONLIN/SOLVINFO` (`freimpl.F:320-321`,
+    `imp_solv.F:1715-1725` → `PR_SOLNFO`, `radioss2.F:688-760`) — in the
+    implicit remedy texts: both arms of the deformable-deformable contact
+    warning (NON-modal decks only: `radioss2.F:691` needs `ILINE == 0`, so
+    `11.1.sbrake` is not told to add a card that does nothing there — 4 keys
+    / 4 models get the sentence, the welding decks), the new engine-defect
+    warning and the `--implicit-constant-step` warning. (iii) ROADMAP: the
+    round-4 NOT-closed item 5 and the implicit-residue `ex_27` row are
+    corrected in place — the dump exists, was run and names the ring, and the
+    cause is the engine's × −3; the `nl_solv.F:520` line-search note stays as
+    a code fact that is NOT the cause (the runaway starts in free flight: 7
+    `RIGID WALL IMPACT` lines in the shipped arm, 0 once a 1e-8 first step
+    converges). A round-5 research claim that the dump was unobtainable was
+    never shipped, so nothing shipped is retracted; the round-6 texts are
+    guarded against introducing it. README ("Implicit dynamic notes", "Known
+    limitations") and `docs/IMPLICIT.md` gain the SOLVINFO and engine-defect
+    sections.
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — PART A (explicit / ALE / weld /
   spring / modal decks).** One commit per item; every figure below is a
