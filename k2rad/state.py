@@ -7327,8 +7327,9 @@ class ConvertOptions:
     # largest side of the bounding box of the deck's own nodes) - ORs every
     # row's codes per node, unions them with the deck's *NODE TC/RC cells and
     # writes ONE /BCS per union code through the same four screens
-    # (writer/loads._make_node_tc_rc_bcs): one /BCS per plane gave starter
-    # WARNING 312 on the shared nodes. The selection equals LS-DYNA's own
+    # (writer/loads._make_node_tc_rc_bcs): one /BCS per plane gives starter
+    # WARNING 312 for every DOF two planes both constrain on a shared node
+    # (metal-cutting: 12 = 3 nodes x 4 DOFs). The selection equals LS-DYNA's own
     # d3hsp 'nodal spc summary' NODE FOR NODE on all three R14 carriers
     # (ex_27 constrained twin 305; efg/metal-cutting/main.k 54 = 36 x 001/111
     # + 18 x 111/111; ale_wavehitcol 24737 in 7 codes). Reach: 3 deck keys on

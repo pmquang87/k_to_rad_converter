@@ -169,8 +169,11 @@ Prior history (before this changelog was introduced) is summarized in the
     (p.10-39) — with the codes ORed per node into their OWN provenance map,
     `state.constrained_global_tc_rc`. `_make_node_tc_rc_bcs` then UNIONS
     them with the `*NODE` cells and writes ONE `/BCS` per union code through
-    the same four screens (one `/BCS` per plane gave starter WARNING 312 on
-    the shared nodes); a GLOBAL-only group is titled
+    the same four screens (one `/BCS` per plane gives starter WARNING 312 for
+    every DOF two planes both constrain on a shared node — 12 conditions = 3
+    shared nodes × 4 common DOFs on metal-cutting; a grid probe measured 3 =
+    3 × 1 per plane and 0 for the union, and 0 per plane when the two planes'
+    DOFs are disjoint); a GLOBAL-only group is titled
     `constrained_global_TRA_ROT`, a group with a `*NODE`-cell node keeps
     `node_tc_rc_TRA_ROT`, and each source gets its own announcement
     counting only its own nodes, so `--no-node-tc-rc-bcs` drops only the

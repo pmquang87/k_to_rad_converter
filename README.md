@@ -2815,8 +2815,11 @@ does not state, so this default is k2rad's own). Every row's codes are ORed per
 node, UNIONED with the deck's `*NODE` TC/RC cells, and written as **ONE `/BCS`
 per union code** through the same four screens (rigid members re-pointed onto
 the `/RBODY` main node, imposed-motion DOFs left to the motion, `*BOUNDARY_SPC`
-DOFs merged, inert rotational codes named): one `/BCS` per plane gave starter
-WARNING 312 on the nodes where two planes meet. A group holding a `*NODE`-cell
+DOFs merged, inert rotational codes named): one `/BCS` per plane gives starter
+WARNING 312 for every DOF two planes both constrain on a shared node —
+measured, 12 incompatible conditions = 3 shared nodes × 4 common DOFs on
+`efg/metal-cutting/main.k`, 3 = 3 × 1 on a grid probe, and none when the two
+planes' DOFs are disjoint. A group holding a `*NODE`-cell
 node keeps the `node_tc_rc_TRA_ROT` title; a plane-only group is
 `constrained_global_TRA_ROT`. The selection reproduces LS-DYNA's own
 `d3hsp` *nodal spc summary* **node for node** on all three R14 carriers —

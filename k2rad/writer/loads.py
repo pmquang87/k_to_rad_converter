@@ -561,8 +561,11 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     cells.** Its planes' codes (``state.constrained_global_tc_rc``, filled by
     :func:`_resolve_constrained_globals`) are UNIONED here, per node, with the
     ``*NODE`` cells, and the union goes through the SAME screens and out as
-    ONE ``/BCS`` per union code - one ``/BCS`` per plane gave starter WARNING
-    312 on the nodes where two planes meet. The two sources keep their own
+    ONE ``/BCS`` per union code - one ``/BCS`` per plane gives starter WARNING
+    312 for every DOF two planes BOTH constrain on a shared node (MEASURED:
+    efg/metal-cutting 12 conditions = 3 shared nodes x 4 common DOFs; a grid
+    probe 3 = 3 x 1, and none when the two planes' DOFs are disjoint, where
+    the node in two /BCS is harmless). The two sources keep their own
     provenance: ``--no-node-tc-rc-bcs`` drops only the ``*NODE`` cells (the
     planes still convert; ``--no-constrained-global`` is theirs); a group
     holding at least one ``*NODE``-cell node keeps the ``node_tc_rc_TRA_ROT``
@@ -775,8 +778,9 @@ def _warn_constrained_global_converted(
         f"I R17 p.10-38): {planes}. A node on more than one plane gets ONE "
         "/BCS carrying the UNION of the planes' codes - "
         f"{emitted} node(s) in {len(groups)} union code(s): {codes} - "
-        "because one /BCS per plane gives starter WARNING 312 on the shared "
-        "nodes (measured on efg/metal-cutting/main.k)."]
+        "because one /BCS per plane gives starter WARNING 312 for every DOF "
+        "two planes both constrain on a shared node (measured: 12 conditions "
+        "= 3 shared nodes x 4 common DOFs on efg/metal-cutting/main.k)."]
     if any(g.tol == 0.0 for g, _t, _n in rows):
         extent = state.constrained_global_extent
         msg.append(
