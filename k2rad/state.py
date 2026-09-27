@@ -832,6 +832,45 @@ class GeneralizedWeldButt:
     title: str = ""
 
 
+@dataclass
+class ConstrainedLinear:
+    """One ``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` (or the legacy
+    ``*CONSTRAINED_LINEAR``) card → one ``/MPC`` (R14 triage round 6, A5).
+
+    Card 1 (Vol I R17 p.10-135 / p.10-138): ``LCID``; then one card per term
+    until the next keyword — ``NID DOF COEF`` on ``_GLOBAL`` (and the legacy
+    spelling, the manual's own example heading), ``NID DOF CID COEF`` on
+    ``_LOCAL``. The equation is ``sum C_k u_k = C0`` with *"LS-DYNA assumes
+    the constant C0 is zero"* (p.10-136, p.10-139): neither card has a C0 cell.
+    ``terms`` is ``[(nid, dof, cid, coef)]`` in deck order, ``cid`` 0 on the
+    global spellings.
+    """
+    lcid: int
+    keyword: str
+    terms: List[Tuple[int, int, int, float]] = field(default_factory=list)
+
+
+@dataclass
+class ConstrainedGlobal:
+    """One row of ``*CONSTRAINED_GLOBAL`` - a global constraint plane (R14
+    triage round 6, B5; written through the ``*NODE`` TC/RC ``/BCS`` pass).
+
+    Card 1 (Vol I R17 p.10-38/39): ``TC RC DIR X Y Z TOL``. TC / RC are the
+    ``*NODE`` constraint codes 0-7 in the GLOBAL system; DIR 1/2/3 is the
+    plane's NORMAL along global x/y/z (no default); X/Y/Z a point on the
+    plane; TOL "User-defined tolerance in length units. If non-zero, the
+    internal mesh-size dependent tolerance gets replaced by this value". A
+    block may state several rows and LS-DYNA reads all of them.
+    """
+    tc: int
+    rc: int
+    dir: int
+    x: float
+    y: float
+    z: float
+    tol: float
+
+
 #: LS-DYNA *CONSTRAINED_JOINT_<KIND> → the /PROP/TYPE45 ``Type`` integer.
 #: Verified against prop_p45_kjoint2.cfg lines 261-272 (1 Spherical, 2 Revolute,
 #: 3 Cylindrical, 4 Planar, 5 Universal, 6 Translational, 7 Oldham, 8 Fixed,
@@ -2460,6 +2499,11 @@ class MatNull:
     rho: float
     E: float
     nu: float
+    # Card 1 field 3, PC: the pressure cutoff (<= 0, default 0.0; Vol II R17
+    # p.2-189). Read so the ELFORM-12 void cavitation floor can NAME the
+    # stated value it overrides (writer/materials._resolve_initial_void_floor);
+    # it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item).
+    pc: float = 0.0
 
 
 @dataclass
@@ -3570,6 +3614,13 @@ class ContactAutoSurf2Surf:
     #: IGNORE cell — ``i7pwr3.F:244-258`` makes Inacti 5/6 ACCEPT the overlap as
     #: the new zero-force state, which is the exact opposite of the keyword.
     interference: bool = False
+    #: Optional Card B fields 2-3 (Vol I R17 p.11-101/102): THKOPT (0 = the
+    #: *CONTROL_CONTACT SHLTHK decides, 1 = offsets included with Card B's own
+    #: SHLTHK, 2 = no offsets) and that SHLTHK; 0 / 0 when the card is absent.
+    #: Read for the shell-offset Gapmin (writer/contacts._shell_offset_gapmin,
+    #: R14 triage round 6, A8).
+    thkopt: int = 0
+    shlthk_c: int = 0
 
 
 @dataclass
@@ -7243,6 +7294,101 @@ class ConvertOptions:
     #     on the last increment (its own RCTOL = 1e-5).
     # It buys the load path, not the answer. Net movers: zero.
     arclength_riks: bool = False
+    # --no-zero-tolerance-ectol: keep k2rad's force default /IMPL/NONLIN
+    # Itol 2 / Toli 0.01 on a *CONTROL_IMPLICIT_SOLUTION whose DCTOL, ECTOL
+    # and RCTOL are ALL 0.0 / blank (R14 triage round 6, B1).
+    #
+    # ON by default. Vol I R17 p.12-354's card-1 defaults are DCTOL 0.001,
+    # ECTOL 0.01, RCTOL 1e10, and although the keyword's header (p.12-353)
+    # says a stated 0 means zero, every one of the 11 R14 reference d3hsp
+    # files of this shape echoes 'displacement convergence tolerance
+    # 0.1000E-02', 'energy convergence tolerance 0.1000E-01' and 'residual
+    # convergence tolerance 0.9990E+11': LS-DYNA applies its defaults to the
+    # stated zeros. So k2rad writes LS-DYNA's ENERGY criterion, Itol 1 /
+    # Toli 0.01, L_A unchanged. DCTOL is not carried (LS-DYNA's DNORM 2 is a
+    # TOTAL-displacement norm; nl_solv.F:410-421 is per step, and the
+    # combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
+    # NEGATIVE cell is a tolerance curve (p.12-355) and keeps the force
+    # default. The rule rests on the d3hsp echo, NOT on a measured gain.
+    # MEASURED at nt 4 = nt 2 on the 11 keys / 11 models of this shape:
+    # NORMAL kept 10/10; the IE history (RMS in % of the reference peak) is
+    # closer on 3 by at most 0.03 points, unchanged on 3, farther on 4;
+    # tensile2 ENDS at IE +7.36 % -> -0.54 % at 0.11x the cycles but reads
+    # +53 % at t 0.80 (+14 % before), history RMS 2.00 % -> 2.48 %; doorbeam
+    # +380.25 % -> +582.00 % (named regression, larger mid-run); ie_shell
+    # ERROR -> NORMAL in 92 cycles at IE -99.87 % (a status-only promotion).
+    # OFF restores Itol 2 / Toli 0.01.
+    zero_tolerance_ectol: bool = True
+    # --no-constrained-global: leave *CONSTRAINED_GLOBAL unconverted (the
+    # keyword stays in the SKIPPED list, byte-identical to the pre-round-6
+    # file) (R14 triage round 6, B5).
+    #
+    # ON by default. Vol I R17 p.10-38/39: a global constraint plane whose
+    # nodes are "held fixed in time" in the row's TC/RC codes; DIR picks the
+    # global axis normal to the plane. k2rad selects the nodes within the
+    # row's TOL of the plane - or, where TOL is 0 (LS-DYNA's "internal
+    # mesh-size dependent tolerance"), within 1e-6 x the model extent (the
+    # largest side of the bounding box of the nodes the deck's ELEMENTS
+    # reference; an element-free node outside it is named, post-review round
+    # of #140) - ORs every
+    # row's codes per node, unions them with the deck's *NODE TC/RC cells and
+    # writes ONE /BCS per union code through the same four screens
+    # (writer/loads._make_node_tc_rc_bcs): one /BCS per plane gives starter
+    # WARNING 312 for every DOF two planes both constrain on a shared node
+    # (metal-cutting: 12 = 3 nodes x 4 DOFs). The selection equals LS-DYNA's own
+    # d3hsp 'nodal spc summary' NODE FOR NODE on all three R14 carriers
+    # (ex_27 constrained twin 305; efg/metal-cutting/main.k 54 = 36 x 001/111
+    # + 18 x 111/111; ale_wavehitcol 24737 in 7 codes). Reach: 3 deck keys on
+    # 3 emitted models. A row with TC/RC outside 0-7, DIR not 1/2/3 or TOL < 0
+    # is refused by name; a card inside a geometrically transformed
+    # *INCLUDE_TRANSFORM is refused (its plane point would not be moved).
+    constrained_global: bool = True
+    # --spotweld-node-synthesis / --beam-contact-secondary: the spotweld.k
+    # OPT-IN pair (R14 triage round 6, B6), both default OFF.
+    #
+    # Rule 1 gives an ELFORM-9 *MAT_SPOTWELD beam that states ONE node its
+    # second one where Vol I R17 p.19-3 puts it - "the nodal points of the spot
+    # weld are located to the two nearest reference surface segments": the
+    # given node moved onto the nearest reference segment of the tie that
+    # names the weld part as its SURFA, a new element-free node on the nearest
+    # segment on the OTHER side (writer/loads._synthesize_spotweld_second_nodes;
+    # spotweld.k: node 1213 -> z 0, new node at z 2, length 2.0 = LS-DYNA's own
+    # d3plot and swforc). Rule 2 puts beam/truss nodes on a contact side
+    # (writer/contacts._contact_part_nodes). MEASURED on spotweld.k (nt 4):
+    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both
+    # take IE -99.9 % -> +82.0 % at 7.80x the cycles - the error changes SIGN,
+    # not size - and the weld never fails (*MAT_SPOTWELD EFAIL has no
+    # /PROP/TYPE13 slot). Rule 2 reaches 4 R14 deck keys on 4 emitted models
+    # and two unreferenced vehicles, none run WITH it but spotweld.k (the
+    # three R14 giants have campaign rows from runs without it). Hence opt-in.
+    spotweld_node_synthesis: bool = False
+    beam_contact_secondary: bool = False
+    # --implicit-constant-step: cap the implicit step at the deck's own DT0
+    # (/IMPL/DT/STOP DT_MAX := DT0) where LS-DYNA runs a CONSTANT step (R14
+    # triage round 6, B3).
+    #
+    # OPT-IN, default OFF. Scope: an implicit time-marching deck (not modal,
+    # not --arclength-riks) whose *CONTROL_IMPLICIT_AUTO is absent or states
+    # IAUTO 0 (Vol I R17 p.12-277 "EQ.0: Constant time step size"), with
+    # 0 < DT0 < ENDTIM, no stated DTMAX in (0, DT0] and a DT_MIN below DT0
+    # (writer/assembly._constant_step_scope). Only the second /IMPL/DT/STOP
+    # cell changes: /IMPL/DT/2 can no longer GROW the step above DT0
+    # (imp_dt.F:129 / :167) but still cuts a non-converged increment
+    # (imp_dt.F:107-119) and shrinks after one that needed more than It_w
+    # iterations (:141-150). A PIN (DT_MIN = DT0) ended 3 of 3 NORMAL
+    # quasi-static decks in ERROR and is not offered; /IMPL/DT/1 alone is a
+    # slower adaptive control; L_dtn 165 worsened tensile2. MEASURED at nt 4 =
+    # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles (its END
+    # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
+    # +0.5 %); ex_11 KE
+    # history error 16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 %
+    # where the shipped run reads +1343 % - both deviations); with the
+    # default --zero-tolerance-ectol it costs cycles on the quasi-static decks
+    # - tensile2 75 -> 168 cycles, IE -0.54 % -> -4.36 % at the END but the
+    # closest IE history of the measured arms (RMS 2.48 % -> 1.66 % of the
+    # reference peak). Reach with the flag: 33 R14 deck keys on 22 emitted
+    # models; 0 without it.
+    implicit_constant_step: bool = False
     # --no-discrete-offset: stop honouring *ELEMENT_DISCRETE's OFFSET cell.
     #
     # ON by default. Vol I R17 p.19-33: OFFSET is "a displacement or rotation
@@ -7316,9 +7462,13 @@ class ConvertOptions:
     # MASS claim, not an energy claim: the row stays deviation in both arms.
     #
     # Two classes stay UNCOMPENSATED, each for a measured reason:
-    #   * a spring node with NO element mass of its own -- subtracting there
-    #     would leave MS <= 0, which the ENGINE aborts on (chkmsin.F:52-59
-    #     NEGATIVE MASS ON NODE ID=, resol.F:5460 CALL ARRET(2)). The starter's
+    #   * a spring node that carries no mass of its own -- no element mass
+    #     and no *ELEMENT_MASS (round 6: the screen is the node's OWN mass,
+    #     writer/loads._spring_token_negative_admas). Subtracting there would
+    #     leave the node at EXACTLY MS = 0, which nothing catches:
+    #     chkmsin.F:53 aborts only on MS < 0 (resol.F:5460 CALL ARRET(2)),
+    #     and accele.F:67-80 then freezes the node's velocity. A node with
+    #     only an *ELEMENT_MASS (gnonspring) IS compensated. The starter's
     #     ERROR 1870 is a different case: rcheckmass.F:112/:123 gate it on
     #     IGTYP==23 and MTN==108, a /PROP/TYPE23 on /MAT/LAW108, which no
     #     producer here emits;
@@ -7399,6 +7549,92 @@ class ConvertOptions:
     # 0.9026 = -86.71 %, so the failure model is the load-bearing half. The
     # campaign row stays deviation on KE.
     generalized_weld_butt: bool = True
+    # --no-initial-void-floor: stop writing the ELFORM-12 void cavitation
+    # floor (R14 triage round 6, A1).
+    #
+    # ON by default. On a deck that states *INITIAL_VOID_PART / _SET on an
+    # ELFORM-12 (single material with void) part whose material converts to
+    # /MAT/HYD_VISC (a *MAT_NULL + *EOS_* carrier), k2rad writes
+    # Pmin = -1e-20 on the /MAT/HYD_VISC of that fluid -- the void's own
+    # material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I
+    # R17 p.28-134: one fluid per single-material-and-void mesh). NOT 0:
+    # hm_read_mat06.F:154 reads an exact Pmin 0 as -INFINITY, so the Pmin 0
+    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (the *MAT_NULL PC
+    # cell is not carried) was an UNBOUNDED tension in the cells
+    # the fluid advects out of (the EOS floors its pressure at PMIN,
+    # gruneisen.F:129/132/152, eospolyno.F:104/113/125). -1e-20 is the
+    # zero-pressure cavitation limit of *MAT_NULL Remark 4 (Vol II R17
+    # p.2-190). A stated PC is OVERRIDDEN and named. Refused (nothing written)
+    # when the deck states *ALE_MULTI-MATERIAL_GROUP (p.28-134 forbids the
+    # pair) and for a void part that is not ELFORM 12 or not a LAW6 carrier.
+    # The void's low DENSITY is NOT written (a dead /INTER/TYPE18 coupling or
+    # 4.51x cycles on the coupled decks; see ROADMAP).
+    #
+    # MEASURED at nt 4 (round-6 arms, against the LS-DYNA references):
+    # quadrature_B timeout -> NORMAL in 1095 cycles, bird_B timeout -> NORMAL
+    # in 2936; bird-el NORMAL either way (IE +454.1 -> +1134.6 %). NORMAL is
+    # not a match: the void is still full of fluid.
+    initial_void_floor: bool = True
+    # --no-weld-exponents: leave the /PROP/TYPE13 alpha/beta cells of the
+    # *CONSTRAINED_SPOTWELD / _GENERALIZED_WELD_SPOT weld tie blank (R14
+    # triage round 6, A2).
+    #
+    # ON by default. LS-DYNA fails the weld at (fn/SN)^N + (fs/SS)^M >= 1
+    # (Vol I R17 p.10-212/213 Remark 2); the TYPE13 Ifail = 1 criterion sums
+    # alpha_i*DLIM^beta_i per DOF (r4def3.F:374, deletion at :819) and the
+    # reader turns a blank alpha into 1 and a blank beta into 2
+    # (hm_read_prop13.F:1169-1170), so the blank card k2rad wrote was always
+    # exponent 2. When N or M differs from 2 the cells become alpha1-3 = 1,
+    # beta1 = N, beta2 = beta3 = M; N = M = 2 writes nothing (byte-identical).
+    # Radioss sums the two shear directions where LS-DYNA scores the
+    # resultant: exact at M = 2 and for shear on one local axis; with both
+    # components present an M < 2 weld fails earlier than in LS-DYNA
+    # (conservative) and an M > 2 weld fails later (non-conservative; with
+    # equal components the Radioss term is 2^(1 - M/2) x the resultant's,
+    # 0.707x at M = 3). MEASURED at nt 4 on plates.nrbc / plates.spot
+    # (N = M = 1, the only carriers): rupture t 3.130e-4 (+29.4 % against
+    # LS-DYNA's 2.4193e-4) -> 2.460e-4 (+1.7 %), 0.899x the cycles, external
+    # work +60.66 -> +7.83 % / +59.99 -> +7.38 %; both rows stay deviation.
+    weld_exponents: bool = True
+    # --no-constrained-linear: leave *CONSTRAINED_LINEAR_LOCAL / _GLOBAL
+    # unconverted (R14 triage round 6, A5).
+    #
+    # ON by default. One /MPC per card: node = NID, Idof = DOF, skew = the
+    # /SKEW of CID (0 = global), alpha = COEF (radioss110/RBODY/mpc.cfg
+    # radioss90 %10d%10d%10d%20lg; hm_read_mpc.F:119-122). The engine solves it
+    # by a Lagrange multiplier as a VELOCITY constraint sum(alpha_k v_k) = 0
+    # (lag_mpc.F), i.e. LS-DYNA's sum(C_k u_k) = C0 with C0 = 0 from t = 0.
+    # Refused by name (the card keeps its #-- SKIPPED: line, byte-identical to
+    # this opt-out): a DOF that also carries a /BCS or an imposed motion
+    # (starter WARNING 312), a rigid-body member, a node on no element (the
+    # multiplier divides by its mass), a zero COEF (hm_read_mpc.F:124 reads 0
+    # as 1), DOF 7 (piezoelectric, no /MPC DOF), an undefined CID, a
+    # (node, DOF) pair already used. MEASURED on intro-by-k.-weimar/misc/
+    # constraints/plates.lce (1 deck key on 1 emitted model): starter NUMMPC
+    # 1, 0 errors, engine identical to the base on all 683 rows (nodes 40 /
+    # 42 are symmetric about the driven node, so the card changes nothing
+    # there).
+    constrained_linear: bool = True
+    # --no-shell-offset-gapmin: keep the starter's own derived gap on a
+    # solid-main /INTER/TYPE7 whose secondary is SHELLS LS-DYNA offsets
+    # (R14 triage round 6, A8).
+    #
+    # ON by default. LS-DYNA offsets a shell contact surface by half its
+    # thickness - always for the AUTOMATIC_* / SINGLE_SURFACE spellings (Vol I
+    # R17 p.11-128/129 General Remark 12), for the others under
+    # *CONTROL_CONTACT SHLTHK 2 or SHLTHK 1 on deformable shells (p.12-70) or
+    # the contact's own Card B THKOPT 1 (p.11-101/102) - and a solid segment
+    # by 0 (no SLDTHK). With no stated gap the OpenRadioss starter derives
+    # 0.1 x the smallest main-segment side for a solid main instead
+    # (i7sti3.F:1055-1063). k2rad writes Gapmin = t_secondary / 2, capped at
+    # 0.5 x that side (above it the starter prints WARNING 94 and does NOT
+    # clamp, :1075-1083). Several secondary thicknesses: written only when
+    # every t/2 is above the cap, refused by name otherwise; a shell MAIN is
+    # never touched. MEASURED on intro-by-j.-day/adaptive/adaptive-i/bend.k
+    # (1 deck key on 1 emitted model; t 0.381 under SHLTHK 2, written the
+    # capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at matched
+    # time, 0.98x the cycles; the row stays deviation.
+    shell_offset_gapmin: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -7469,10 +7705,12 @@ class ConvertOptions:
     #
     # MEASURED, and this is why it is OPT-IN rather than a default. On
     # intro-by-k.-weimar/contact/twobars/twobar.k (10 mm bars, derived
-    # GAP MIN 1.0) the derived gap costs +1151.3 % internal energy against the
-    # LS-DYNA reference 3036.17, where the flag's own 0.005 x 10 = 0.05 reads
-    # -5.60 % and KE -6.18 %; FACTOR 0.01 reads +14.45 %, so 0.005 is the
-    # measured default and 0.01 is NOT. But the same factor degrades OTHER
+    # GAP MIN 1.0) the derived gap ENDS at +1151.3 % internal energy against
+    # the LS-DYNA reference 3036.17 and the flag's own 0.005 x 10 = 0.05 ends
+    # at -5.60 % - twobar's END value moves but its history does not: -91 %
+    # at the first impact, and the engine energy error stays -7.1 to -8.2 %
+    # at every gap (round 6). 0.005 is the flag's default, not a measured
+    # optimum (FACTOR 0.01 ends at +14.45 %). The same factor degrades OTHER
     # carriers: on sphere1 the flag writes 0.005 x 5.84129 = 0.02921 and
     # internal energy goes -1.66 % -> -7.77 % at 4.1x the cycles, and bend
     # goes -2.0038 % -> -2.8418 % at 4.69x (or -2.7860 % at 2.50x with the
@@ -7481,13 +7719,21 @@ class ConvertOptions:
     # NAME), is 15 interfaces on 14 deck keys and 13 emitted models -- one of
     # them created by the round's own all-rigid-SSID swap (sphere1). SEVEN of
     # the fifteen now have a measured solver arm and EIGHT are still
-    # unjudgeable. The seven: twobar better, sphere1 and bend worse,
+    # unjudgeable (both counts taken before round 6's shell-offset Gapmin
+    # took bend's interface). The seven: twobar's end value moves while its
+    # history does not, sphere1 and bend worse,
     # 4.3_General_Nonlinearity mixed (energy error -99.9 % -> -55.2 %,
     # internal energy -98.87 % -> -99.92 %), pend.imp and 06_heating_plate
     # byte-inert, and hemi paying +47.9 % CYCLES to reach the same time
     # (round 4 read that as a lost NORMAL; re-measured under contention it is
     # cycle inflation, not a timeout). The predicted 0.1 x min edge matched
-    # the starter's own GAP MIN echo on 6 of 6 carriers checked. A press-fit *CONTACT_*_INTERFERENCE is
+    # the starter's own GAP MIN echo on 6 of 6 carriers checked. Round 6: two
+    # rounds of arms - round 6 alone ran 16 gap values on twobar, hemi,
+    # sphere1 and bend - found ZERO campaign verdict promotions, and THE COST
+    # LAW: below a deck-specific knee the cycle count grows as ~1/Gapmin
+    # (twobar 2.17x at 0.02, 7.71x at 0.005; sphere1 3.45x at 0.05, 5.48x at
+    # 0.02; the contact step is 1/2 (GAPV - PENE)/v, i7for3.F:762-770; hemi at
+    # 0.7322: 0.92x at t 0.4158, 1.48x at t 0.8049). A press-fit *CONTACT_*_INTERFERENCE is
     # excluded outright: it needs a LARGE gap to engage, which is why k2rad
     # already forces Inacti = 0 on that family. (Reach of that exclusion on
     # this corpus: 0 -- EXP_SC_CONTACT_INTERFERENCE's main surface is SHELL
@@ -7499,9 +7745,11 @@ class ConvertOptions:
     # The rule is pure standard library, unlike --auto-gapmin, which needs
     # numpy + scipy (k2rad/gapmin.py, docs/DEPENDENCIES.md) and silently applies
     # nothing without them. Precedence, tightest first: --inter-gapmin ID=VAL >
-    # Card-3 SAST/SBST > --auto-gapmin > --derived-gapmin > 0 (the starter's own
-    # 0.1 x min edge). A default-ON WARNING names the derived value and this
-    # flag on every carrier whether or not the flag is set.
+    # Card-3 SAST/SBST > --auto-gapmin > the shell-offset Gapmin (round 6, A8,
+    # default ON: a SHELL secondary LS-DYNA offsets) > --derived-gapmin > 0
+    # (the starter's own 0.1 x min edge). A default-ON WARNING names the
+    # derived value and this flag on every carrier the shell-offset rule does
+    # not take, whether or not the flag is set.
     derived_gapmin: bool = False
     derived_gapmin_factor: float = 0.005       # Gapmin = factor × min segment side
     # --no-rigid-secondary-swap: turn OFF the all-rigid-SSID remedies on an
@@ -7842,12 +8090,16 @@ class ConvertOptions:
     # part 1's 4 element nodes carry v = (2286, 0, 7620); LS-DYNA cycle-0
     # K-ENERGY 189.962): the shipped full-velocity re-point reads 387.9
     # (+104.20 %), this rule reads 220.58 (+16.12 %), and the final ke_dev goes
-    # +194.03 % -> +47.82 %. The residual is NOT the velocity: it is the
+    # +194.03 % -> +47.82 %. That residual is NOT the velocity: it is the
     # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
     # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
-    # 0.1977E-02), which the /RBODY J cells would ADD rather than replace
-    # (inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 is only where the cells are read)
-    # -- a named follow-up, not compensated here.
+    # 0.1977E-02). The /RBODY J cells are ADDITIVE (inirby.F:154-168), so
+    # since round 6 (A7) the flag also writes J = -SUM(IN) into every body it
+    # re-points (writer/loads._apply_mass_weighted_rbody_inertia): NEW INERTIA
+    # 0.1977227E-02 = LS-DYNA's, cycle-0 KE 189.96 (LS 189.962), final KE
+    # -1.97 % (an end value: the KE history RMS goes 17.5 % -> 11.6 % of the
+    # LS peak), 1.156x the cycles; the IE (the joint path's 99.9 % energy
+    # error) is not fixed.
     #
     # OPT-IN because exactly ONE carrier with an LS-DYNA reference exists on
     # this machine (translat; Ryan_Lee's W16_SW_door is 3 files on 1 model with
@@ -8780,6 +9032,41 @@ class ConversionState:
     # 5), default ON, --no-generalized-weld-butt.
     generalized_weld_butts: List[GeneralizedWeldButt] = field(
         default_factory=list)
+    # *CONSTRAINED_LINEAR_LOCAL / _GLOBAL / the legacy *CONSTRAINED_LINEAR
+    # (writer/loads._make_constrained_linear_mpcs, one /MPC per card; default
+    # ON, --no-constrained-linear). Every card also sits in skipped_keywords
+    # until the writer EMITS it, so a refused or opted-out card keeps its
+    # #-- SKIPPED: line and the deck stays byte-identical to the opt-out arm.
+    constrained_linears: List["ConstrainedLinear"] = field(
+        default_factory=list)
+    # *CONSTRAINED_GLOBAL rows (round 6, B5; default ON,
+    # --no-constrained-global). The handler records the valid rows; the
+    # build_starter prepass writer/loads._resolve_constrained_globals selects
+    # the nodes within each row's tolerance and ORs the codes into
+    # `constrained_global_tc_rc` - its OWN provenance map, unioned with the
+    # *NODE cells inside _make_node_tc_rc_bcs (so --no-node-tc-rc-bcs does not
+    # silently drop the planes, and the *NODE announcement does not count
+    # them). `constrained_global_rows` keeps (row, tolerance used, nodes
+    # selected) for the announcement; `constrained_global_extent` the
+    # bounding-box side the default tolerance was taken from - the box of the
+    # nodes the deck's ELEMENTS reference (post-review round of #140: one
+    # element-free node far away inflated an all-node box, and with it the
+    # tolerance, until a plane swept a whole body);
+    # `constrained_global_extent_outliers` = (element-free nodes outside that
+    # box, the all-node box side) when there are any, for the announcement.
+    constrained_globals: List["ConstrainedGlobal"] = field(
+        default_factory=list)
+    constrained_global_tc_rc: Dict[int, Tuple[int, int]] = field(
+        default_factory=dict)
+    constrained_global_rows: List[Tuple["ConstrainedGlobal", float, int]] = (
+        field(default_factory=list))
+    constrained_global_extent: float = 0.0
+    constrained_global_extent_outliers: Tuple[int, float] = (0, 0.0)
+    # --beam-contact-secondary (round 6, B6): per part, the 1-D nodes the
+    # contact walk ADDED (ones no other family of the part carries), and the
+    # (sid, styp) sides already named as having gained some.
+    beam_side_gain: Dict[int, Set[int]] = field(default_factory=dict)
+    warned_beam_side_gain: Set[Tuple[int, int]] = field(default_factory=set)
     # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
     hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)
     # (cluster_id, title) of each emitted /CLUSTER/BRICK — set by the writer's
@@ -8826,8 +9113,34 @@ class ConversionState:
     # them (there is no Radioss void phase k2rad can write), but the ids are
     # kept so _warn_initial_void_in_fsi can say when a skipped void sits inside
     # an emitted /INTER/TYPE18 fluid group — the difference between "a cell was
-    # dropped" and "the FSI result on this deck is not valid".
+    # dropped" and "the FSI result on this deck is not valid" — and so the
+    # ELFORM-12 cavitation floor (writer/materials._resolve_initial_void_floor)
+    # can find the void's fluid.
     initial_void_parts: List[Tuple[int, bool]] = field(default_factory=list)
+    # The ONE decision of the ELFORM-12 void cavitation floor: None = not yet
+    # resolved; else {LAW6 carrier mid -> the *MAT_NULL PC the floor
+    # overrides}, empty when nothing is written (no void, refused, opted out).
+    # Memoised by writer/materials._resolve_initial_void_floor so the
+    # materials section and the /INTER/TYPE18 void warning read the SAME
+    # record, never the option twice (the #138 shared-predicate rule).
+    initial_void_floor: Optional[Dict[int, float]] = None
+    # ... and, when that record is empty on a deck that DOES state a void, the
+    # reason in words ("--no-initial-void-floor" or the refusal clause), so
+    # the /INTER/TYPE18 void warning can say why without re-deciding.
+    initial_void_floor_refusal: str = ""
+    # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
+    # order (round 6, A4). Refused BY NAME and never converted: kept only so
+    # writer/loads._make_tied_nodes_failure_notes can write ONE warning per
+    # deck. The keyword itself stays in skipped_keywords.
+    tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
+        default_factory=list)
+    # --mass-weighted-inivel: /RBODY main node -> omega, one entry per body
+    # the re-point wrote an /INIVEL/ROT on (writer/loads.
+    # _emit_mass_weighted_bodies, the ONE decision site). Read by the
+    # post-registry pass _apply_mass_weighted_rbody_inertia, which writes
+    # J = J_old - SUM(IN) into exactly those bodies' /RBODY (round 6, A7).
+    mass_weighted_rot_mains: Dict[int, Tuple[float, float, float]] = field(
+        default_factory=dict)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the
@@ -8891,7 +9204,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791, :1205, :1312, :1498, :1651, in that order:
+    # (writer/rbody.py:791, :1210, :1318, :1507, :1664, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

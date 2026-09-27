@@ -19,7 +19,7 @@ from .common import (
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
-from ..lumping import rigid_body_momentum_velocity
+from ..lumping import element_mass_by_node, rigid_body_momentum_velocity
 from .sph import _mat_density
 
 __all__ = [
@@ -104,6 +104,9 @@ __all__ = [
     "_shell_load_segments",
     "_make_pressure_loads",
     "_make_added_masses",
+    "_make_tied_nodes_failure_notes",
+    "_make_constrained_linear_mpcs",
+    "_apply_mass_weighted_rbody_inertia",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -236,6 +239,118 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 _TC_RC_DIGITS = {0: "000", 1: "100", 2: "010", 3: "001",
                  4: "110", 5: "011", 6: "101", 7: "111"}
 
+#: The inverse of :data:`_TC_RC_DIGITS`: three ``/BCS`` digits -> the
+#: ``*NODE`` TC/RC code. All eight digit patterns have a code (``000`` -> 0 ...
+#: ``101`` -> 6, ``111`` -> 7), so any OR of two codes is a code.
+_TC_RC_CODE = {v: k for k, v in _TC_RC_DIGITS.items()}
+
+
+def _or_code(a: int, b: int) -> int:
+    """The ``*NODE`` TC/RC code whose digits are the OR of codes *a* and *b*
+    (``_or_code(3, 1)`` = 6: z OR x = "z and x")."""
+    return _TC_RC_CODE[_or_dof_codes([_TC_RC_DIGITS[a], _TC_RC_DIGITS[b]])]
+
+
+def _element_node_ids(state: ConversionState) -> Set[int]:
+    """The defined nodes the deck's ELEMENTS reference: shells (2-D belts
+    included), solids, thick shells, SPH particles, and the two end nodes of
+    beams, discretes and 1-D belts (never a beam's orientation node n3) - the
+    mesh whose size ``*CONSTRAINED_GLOBAL``'s default tolerance scales with."""
+    ids: Set[int] = set()
+    for elems in (state.shell_elems, state.solid_elems, state.tshell_elems,
+                  state.sph_elems):
+        for e in elems:
+            ids.update(e.nodes)
+    for pairs in (state.beam_elems, state.discrete_elems,
+                  state.seatbelt_elems):
+        for b in pairs:
+            ids.update((b.n1, b.n2))
+    return {n for n in ids if n in state.nodes}
+
+
+def _bounding_box(pts) -> List[Tuple[float, float]]:
+    """``[(xmin, xmax), (ymin, ymax), (zmin, zmax)]`` of a non-empty list of
+    nodes."""
+    return [(min(v), max(v)) for v in ([p.x for p in pts], [p.y for p in pts],
+                                       [p.z for p in pts])]
+
+
+def _resolve_constrained_globals(state: ConversionState) -> None:
+    """``*CONSTRAINED_GLOBAL`` -> the per-node TC/RC union (R14 triage round 6,
+    B5). Called in ``build_starter`` BEFORE any prepass synthesizes a node, so
+    both the model extent and the candidates are the deck's OWN nodes.
+
+    Per row: every node whose coordinate along the plane normal (DIR 1/2/3 =
+    global x/y/z) is within the row's TOL of the plane point - or, when TOL
+    is 0, within ``1e-6 x`` the model extent (the largest side of the bounding
+    box of the nodes the deck's ELEMENTS reference, :func:`_element_node_ids`;
+    every defined node stays a CANDIDATE). LS-DYNA's own rule is "the
+    internal mesh-size dependent tolerance" (Vol I R17 p.10-39), which the
+    card does not state, so the default is k2rad's own; it reproduces
+    LS-DYNA's own d3hsp 'nodal spc summary' NODE FOR NODE, id set and codes,
+    on all three R14 carriers (ex_27 constrained twin 305 of 11285 nodes,
+    extent 32.4; efg/metal-cutting 54 = 36 x 001/111 + 18 x 111/111 of 4197,
+    extent 24; ale_wavehitcol 24737 in 7 codes of 352232, extent 487.68 -
+    the same extents over the element nodes as over all nodes). Until the
+    post-review round of #140 the box was that of ALL nodes, so one
+    element-free node far away (an orientation or reference node) inflated
+    the tolerance: measured on the pre-fix code, a 2 x 2 x 1 hex grid with one
+    such node at x = 1e6 got a tolerance of 1.0, and a plane at z = 0.5
+    through the middle of its elements selected all 18 grid nodes and the
+    stray one. A node on
+    several planes gets the OR of their codes (``_or_code``); the union with
+    the ``*NODE`` cells and the four screens happen in
+    :func:`_make_node_tc_rc_bcs`.
+
+    Every plane selecting 0 nodes leaves nothing to emit: the keyword goes
+    back into ``skipped_keywords`` (reach 0), the same bookkeeping as a
+    refused card.
+    """
+    if not state.constrained_globals:
+        return
+    extent = 0.0
+    if state.nodes:
+        mesh = _element_node_ids(state)
+        pts = [state.nodes[n] for n in sorted(mesh)] or list(
+            state.nodes.values())
+        box = _bounding_box(pts)
+        extent = max(hi - lo for lo, hi in box)
+        if mesh:
+            free_out = [
+                n for nid, n in state.nodes.items() if nid not in mesh
+                and any(not lo <= c <= hi
+                        for c, (lo, hi) in zip((n.x, n.y, n.z), box))]
+            if free_out:
+                all_box = _bounding_box(list(state.nodes.values()))
+                state.constrained_global_extent_outliers = (
+                    len(free_out), max(hi - lo for lo, hi in all_box))
+    state.constrained_global_extent = extent
+    for g in state.constrained_globals:
+        tol = g.tol if g.tol > 0.0 else 1e-6 * extent
+        k = g.dir - 1
+        c = (g.x, g.y, g.z)[k]
+        sel = [nid for nid, n in state.nodes.items()
+               if abs((n.x, n.y, n.z)[k] - c) <= tol]
+        state.constrained_global_rows.append((g, tol, len(sel)))
+        for nid in sel:
+            t0, r0 = state.constrained_global_tc_rc.get(nid, (0, 0))
+            state.constrained_global_tc_rc[nid] = (_or_code(t0, g.tc),
+                                                   _or_code(r0, g.rc))
+    # a row with TC = RC = 0 selects nodes and constrains nothing
+    state.constrained_global_tc_rc = {
+        n: c for n, c in state.constrained_global_tc_rc.items() if c != (0, 0)}
+    if not state.constrained_global_tc_rc:
+        state.skipped_keywords.append("CONSTRAINED_GLOBAL")
+        state.warn(
+            f"*CONSTRAINED_GLOBAL: none of its {len(state.constrained_globals)}"
+            " plane(s) passes within its tolerance of any node (or every row "
+            "states TC = RC = 0), so NOTHING is converted (the keyword stays in "
+            "the SKIPPED list): "
+            + "; ".join(f"{'xyz'[g.dir - 1]} = {(g.x, g.y, g.z)[g.dir - 1]:g} "
+                        f"within {tol:g}"
+                        for g, tol, _n in state.constrained_global_rows) + ".")
+
+
 #: ``/IMPVEL|/IMPDISP|/IMPACC`` ``Dir`` letter → (0 = translation code /
 #: 1 = rotation code, digit index). The letters are the ones ``_DOF_DIR``
 #: produces, so this cannot drift from what the motion cards actually say.
@@ -259,8 +374,18 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
     inert probe rigid body, the ``*MAT_RIGID`` auto-constraint and the CNRB
     ``_SPC`` card — sits on a node no ``*NODE`` row can name: the first three
     are ids k2rad MINTS, and the last two act on an ``/RBODY`` independent
-    node, whose members rule (a) drops from the TC/RC set anyway. So the map
-    is complete for the purpose it is read for.
+    node. That node is NOT outside the TC/RC pass, though: rule (a) RE-POINTS
+    the members' cells onto it, so a body with a ``*MAT_RIGID`` CON1/CON2
+    auto-constraint AND member TC/RC cells carries its main node in TWO
+    ``/BCS`` groups (``BC_rigid_PID`` and a TC/RC group). MEASURED over the
+    5aef5a0 mirror: 5 roster decks do this today (forging_A, forging_B, bend,
+    ex_16_thin_shell_elform_13, 275key2; 1-4 nodes each), inert by ``MY_OR``
+    (``hm_read_bcs.F:198`` unions the codes) and reported as one starter
+    WARNING 312; round 6's ``*CONSTRAINED_GLOBAL`` adds ale_wavehitcol (1
+    node). Merging the auto-constraint in screen (c) would move those decks'
+    bytes and is a ROADMAP item. ``*CONSTRAINED_GLOBAL`` itself is not in this
+    map: its cells are UNIONED with the ``*NODE`` cells inside
+    :func:`_make_node_tc_rc_bcs`, so they meet every screen there.
 
     A ``*BOUNDARY_SPC`` with a resolvable ``CID`` is deliberately NOT here: its
     ``/BCS`` carries a skew, so its digits are axes of that skew and no global
@@ -474,12 +599,34 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     (``channel_A/B/C``) states ``TC 7`` beside a motion whose ``sf = 1e-8``, so
     its zero reaction work is explained by the scale factor and not by which
     card wins. Rule (b) is chosen on the Radioss measurement above.
+
+    **``*CONSTRAINED_GLOBAL`` (round 6, B5) is a second producer of the same
+    cells.** Its planes' codes (``state.constrained_global_tc_rc``, filled by
+    :func:`_resolve_constrained_globals`) are UNIONED here, per node, with the
+    ``*NODE`` cells, and the union goes through the SAME screens and out as
+    ONE ``/BCS`` per union code - one ``/BCS`` per plane gives starter WARNING
+    312 for every DOF two planes BOTH constrain on a shared node (MEASURED:
+    efg/metal-cutting 12 conditions = 3 shared nodes x 4 common DOFs; a grid
+    probe 3 = 3 x 1, and none when the two planes' DOFs are disjoint, where
+    the node in two /BCS is harmless). The two sources keep their own
+    provenance: ``--no-node-tc-rc-bcs`` drops only the ``*NODE`` cells (the
+    planes still convert; ``--no-constrained-global`` is theirs); a group
+    holding at least one ``*NODE``-cell node keeps the ``node_tc_rc_TRA_ROT``
+    title (every pre-round-6 deck is byte-identical) and a GLOBAL-only group
+    is titled ``constrained_global_TRA_ROT``; each source gets its own
+    announcement, counting only its own nodes and screens.
     """
-    if not state.node_tc_rc:
-        return []
-    if not state.options.node_tc_rc_bcs:
+    node_cells: Dict[int, Tuple[int, int]] = (
+        state.node_tc_rc if state.options.node_tc_rc_bcs else {})
+    glob_cells = state.constrained_global_tc_rc
+    if state.node_tc_rc and not state.options.node_tc_rc_bcs:
         _warn_node_tc_rc_dropped(state)
+    if not node_cells and not glob_cells:
         return []
+    cells: Dict[int, Tuple[int, int]] = dict(node_cells)
+    for nid, (tc_g, rc_g) in glob_cells.items():
+        t0, r0 = cells.get(nid, (0, 0))
+        cells[nid] = (_or_code(t0, tc_g), _or_code(r0, rc_g))
 
     spc_dofs = _global_spc_dofs(state)
     rot_capable = _mesh_has_rotational_dof(state, rbody_info)
@@ -487,10 +634,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     stated: Dict[Tuple[int, int], int] = defaultdict(int)
     rigid_dropped: List[int] = []
-    motion_nodes: List[int] = []
-    motion_dofs = 0
-    spc_nodes: List[int] = []
-    spc_dof_count = 0
+    # (node, DOFs cleared) per screen call, in call order - split by source
+    # after the passes
+    motion_hits: List[Tuple[int, int]] = []
+    spc_hits: List[Tuple[int, int]] = []
     rot_inert: List[int] = []
     skewed_motion: List[int] = []
     emptied: List[int] = []
@@ -505,7 +652,6 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         the rigid pass must pass the MAIN node: that is the node
         ``*BOUNDARY_PRESCRIBED_MOTION_RIGID`` registers its /IMPVEL against.
         """
-        nonlocal motion_dofs, spc_dof_count
         cleared_here = 0
         for letter in sorted(state.imp_motion_dirs.get(nid, ())):
             which, idx = _IMP_DIR_BIT[letter]
@@ -514,8 +660,7 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 target[idx] = "0"
                 cleared_here += 1
         if cleared_here:
-            motion_nodes.append(nid)
-            motion_dofs += cleared_here
+            motion_hits.append((nid, cleared_here))
         if nid in state.imp_motion_skew_nodes:
             skewed_motion.append(nid)
         spc_tra, spc_rot = spc_dofs.get(nid, ("000", "000"))
@@ -528,8 +673,7 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 rot[i] = "0"
                 merged_here += 1
         if merged_here:
-            spc_nodes.append(nid)
-            spc_dof_count += merged_here
+            spc_hits.append((nid, merged_here))
         if "1" in rot and not rot_capable:
             rot_inert.append(nid)
         return "".join(tra), "".join(rot)
@@ -548,9 +692,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     rigid_orphans: List[int] = []
     rigid_repointed: Dict[int, Tuple[str, str]] = {}
 
-    for nid in sorted(state.node_tc_rc):
-        tc, rc = state.node_tc_rc[nid]
-        stated[(tc, rc)] += 1
+    for nid in sorted(cells):
+        tc, rc = cells[nid]
+        if nid in node_cells:
+            stated[node_cells[nid]] += 1       # the *NODE card's OWN code
         if nid in rigid_nodes:
             main = main_of.get(nid)
             if main is None:
@@ -583,9 +728,21 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         state.node_tc_rc_emitted[main] = (tra_s, rot_s)
         rigid_repointed[main] = (tra_s, rot_s)
 
+    # ── provenance: which source(s) each screened node came from ──
+    node_prov: Set[int] = {n for n in cells if n in node_cells}
+    glob_prov: Set[int] = {n for n in cells if n in glob_cells}
+    for main, members in rigid_members.items():
+        if any(m in node_cells for m in members):
+            node_prov.add(main)
+        if any(m in glob_cells for m in members):
+            glob_prov.add(main)
+
     lines: List[str] = []
     if groups:
-        lines = ["#-  BOUNDARY CONDITIONS (*NODE TC/RC cells):", HDR]
+        head = ("*NODE TC/RC cells" if not glob_cells else
+                "*CONSTRAINED_GLOBAL planes" if not node_cells else
+                "*NODE TC/RC cells + *CONSTRAINED_GLOBAL planes")
+        lines = [f"#-  BOUNDARY CONDITIONS ({head}):", HDR]
     for tra_s, rot_s in sorted(groups):
         nids = groups[(tra_s, rot_s)]
         # next_grnod_id, never a bare next_id: a user *SET_NODE at or above the
@@ -595,7 +752,9 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         # the guarded counter).
         grnod_id = state.next_grnod_id()
         bc_id = state.next_id()
-        title = f"node_tc_rc_{tra_s}_{rot_s}"
+        title = (f"node_tc_rc_{tra_s}_{rot_s}"
+                 if any(n in node_prov for n in nids) else
+                 f"constrained_global_{tra_s}_{rot_s}")
         lines += [
             f"/BCS/{bc_id}",
             title,
@@ -605,15 +764,138 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         ]
         lines += _emit_grnod_node(grnod_id, title, nids)
 
-    _warn_node_tc_rc_converted(
-        state, stated=stated, groups=groups, rigid_dropped=rigid_dropped,
-        rigid_repointed=rigid_repointed, rigid_members=dict(rigid_members),
-        rigid_orphans=rigid_orphans,
-        motion_nodes=motion_nodes, motion_dofs=motion_dofs,
-        spc_nodes=spc_nodes, spc_dof_count=spc_dof_count,
-        rot_inert=rot_inert, skewed_motion=skewed_motion, emptied=emptied)
-    _warn_node_tc_rc_on_null_material(state, groups)
+    def _of(prov: Set[int], raw_cells: Dict[int, Tuple[int, int]]):
+        """Every screen list restricted to one source (a node with both
+        sources counts in both announcements)."""
+        return dict(
+            groups={k: [n for n in v if n in prov] for k, v in groups.items()
+                    if any(n in prov for n in v)},
+            rigid_dropped=[n for n in rigid_dropped if n in raw_cells],
+            rigid_repointed={m: c for m, c in rigid_repointed.items()
+                             if m in prov},
+            rigid_members={m: [n for n in v if n in raw_cells]
+                           for m, v in rigid_members.items() if m in prov},
+            rigid_orphans=[n for n in rigid_orphans if n in raw_cells],
+            motion_nodes=[n for n, _k in motion_hits if n in prov],
+            motion_dofs=sum(k for n, k in motion_hits if n in prov),
+            spc_nodes=[n for n, _k in spc_hits if n in prov],
+            spc_dof_count=sum(k for n, k in spc_hits if n in prov),
+            rot_inert=[n for n in rot_inert if n in prov],
+            skewed_motion=[n for n in skewed_motion if n in prov],
+            emptied=[n for n in emptied if n in prov])
+
+    if node_cells:
+        mine = _of(node_prov, node_cells)
+        _warn_node_tc_rc_converted(state, stated=stated, **mine)
+        _warn_node_tc_rc_on_null_material(state, mine["groups"])
+    if glob_cells:
+        _warn_constrained_global_converted(state, **_of(glob_prov,
+                                                        glob_cells))
     return lines
+
+
+def _warn_constrained_global_converted(
+        state: ConversionState, *,
+        groups: Dict[Tuple[str, str], List[int]],
+        rigid_dropped: List[int],
+        rigid_repointed: Dict[int, Tuple[str, str]],
+        rigid_members: Dict[int, List[int]],
+        rigid_orphans: List[int],
+        motion_nodes: List[int], motion_dofs: int,
+        spc_nodes: List[int], spc_dof_count: int,
+        rot_inert: List[int], skewed_motion: List[int],
+        emptied: List[int]) -> None:
+    """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
+    every screen (the #133 ordering rule), with this source's own counts."""
+    rows = state.constrained_global_rows
+    planes = "; ".join(
+        f"TC {g.tc} RC {g.rc} on {'xyz'[g.dir - 1]} = "
+        f"{(g.x, g.y, g.z)[g.dir - 1]:g} ({n} node(s) within {tol:g})"
+        for g, tol, n in rows)
+    emitted = sum(len(v) for v in groups.values())
+    codes = ("; ".join(f"Tra {t} Rot {r}: {len(groups[(t, r)])}"
+                       for t, r in sorted(groups)) if groups else "none")
+    msg = [
+        f"*CONSTRAINED_GLOBAL: {len(rows)} constraint plane(s) -> /BCS through "
+        "the *NODE TC/RC pass, the constrained DOFs 'held fixed in time' (Vol "
+        f"I R17 p.10-38): {planes}. A node on more than one plane gets ONE "
+        "/BCS carrying the UNION of the planes' codes - "
+        f"{emitted} node(s) in {len(groups)} union code(s): {codes} - "
+        "because one /BCS per plane gives starter WARNING 312 for every DOF "
+        "two planes both constrain on a shared node (measured: 12 conditions "
+        "= 3 shared nodes x 4 common DOFs on efg/metal-cutting/main.k)."]
+    if any(g.tol == 0.0 for g, _t, _n in rows):
+        extent = state.constrained_global_extent
+        msg.append(
+            " The node tolerance is k2rad's OWN where a row states TOL = 0: "
+            "LS-DYNA uses 'the internal mesh-size dependent tolerance' "
+            f"(p.10-39), k2rad uses 1e-6 x the model extent ({extent:g}, the "
+            "largest side of the bounding box of the nodes the deck's "
+            f"elements reference) = {1e-6 * extent:g}; it selects exactly the "
+            "nodes LS-DYNA's own "
+            "d3hsp 'nodal spc summary' lists on all three R14 carriers "
+            "(ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit "
+            "305 = 305; efg/metal-cutting/main.k 54 = 36 x 001/111 + 18 x "
+            "111/111; ale_wavehitcol 24737 in the same 7 codes).")
+        n_out, all_side = state.constrained_global_extent_outliers
+        if n_out:
+            msg.append(
+                f" {n_out} element-free node(s) lie outside that box and do "
+                "NOT set the tolerance: the box of every *NODE row has side "
+                f"{all_side:g}, which would make it {1e-6 * all_side:g} and "
+                "let a plane sweep nodes far from it.")
+    if rigid_dropped:
+        msg.append(
+            f" {len(rigid_dropped)} node(s) (node {_named(rigid_dropped)}) "
+            "belong to a rigid body and were RE-POINTED onto its /RBODY main "
+            f"node, unioned per body ({len(rigid_repointed)} main node(s)): a "
+            "/BCS on a /RBODY secondary is inert (rgbodv.F:150-155), exactly "
+            "the *NODE TC/RC rule (a).")
+    if rigid_orphans:
+        msg.append(
+            f" {len(rigid_orphans)} node(s) (node {_named(rigid_orphans)}) are "
+            "rigid-body members whose body has no main node, so their codes "
+            "are DROPPED.")
+    if motion_nodes:
+        msg.append(
+            f" {motion_dofs} DOF(s) on {len(motion_nodes)} node(s) (node "
+            f"{_named(motion_nodes)}) already driven by an imposed motion were "
+            "left to it (a /BCS and an /IMPVEL on one DOF give starter WARNING "
+            "312).")
+    if skewed_motion:
+        msg.append(
+            f" {len(skewed_motion)} node(s) (node {_named(skewed_motion)}) also "
+            "carry an imposed motion in a LOCAL system; nothing was cleared for "
+            "them.")
+    if spc_nodes:
+        msg.append(
+            f" {spc_dof_count} DOF(s) on {len(spc_nodes)} node(s) (node "
+            f"{_named(spc_nodes)}) already stated by a *BOUNDARY_SPC were "
+            "merged (hm_read_bcs.F:198 unions the codes).")
+    if rot_inert:
+        msg.append(
+            f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
+            "rotational code on a mesh with no rotational DOF: emitted and "
+            "inert (bcs10.F:66 applies the Rot digits only inside "
+            "IF(IRODDL/=0); LS-DYNA drops them from its echo too).")
+    if emptied:
+        msg.append(
+            f" {len(emptied)} node(s) (node {_named(emptied)}) had every DOF "
+            "screened away, so no /BCS was written for them.")
+    if groups and state.mat_null:
+        part_nodes = _part_node_sets(state)
+        null_nodes: Set[int] = set()
+        for p in state.parts.values():
+            if p.mid in state.mat_null:
+                null_nodes |= part_nodes.get(p.pid, set())
+        n_null = len({n for v in groups.values() for n in v} & null_nodes)
+        if n_null:
+            msg.append(
+                f" {n_null} of these nodes belong to a *MAT_NULL part: the "
+                "/BCS is a wall of that fluid domain, as LS-DYNA applies it.")
+    msg.append(" Pass --no-constrained-global to drop the card (these DOFs "
+               "are then FREE).")
+    state.warn("".join(msg))
 
 
 def _warn_node_tc_rc_on_null_material(
@@ -1149,7 +1431,9 @@ def _emit_prop_type8(prop_id: int, title: str, mass: float, inertia: float,
 
 def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
                       ifail: int, ifail2: int, dofs, ileng: int = 0,
-                      skew_id: int = 0) -> List[str]:
+                      skew_id: int = 0,
+                      alpha_beta: Optional[List[Tuple[float, float]]] = None
+                      ) -> List[str]:
     """/PROP/TYPE13 (SPR_BEAM). Layout: prop_p13_spr_beam.cfg
     FORMAT(radioss2018), the newest TYPE13 reader format ≤ /BEGIN-2022.
     ``dofs`` is 6 SpringDof (or legacy ``(k, fct_id, hflag, dmin, dmax)``
@@ -1162,7 +1446,17 @@ def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
     node_ID1→node_ID2 and takes the XY plane from node_ID3 (falling back to the
     property skew's Y′). It is the property-driven twin of /PROP/TYPE23 +
     /MAT/LAW113. ``Ileng=1`` makes K, the input curves and the failure limits
-    per unit length (strain based) — what *MAT_CABLE_DISCRETE_BEAM needs."""
+    per unit length (strain based) — what *MAT_CABLE_DISCRETE_BEAM needs.
+
+    ``alpha_beta`` fills the ``alpha_i`` / ``beta_i`` cells of the six
+    trailing ``c n alpha beta`` lines (columns 41-60 / 61-80,
+    ``%20lg%20lg%20lg%20lg``), DOF by DOF; the lines it does not reach stay
+    0. With ``Ifail = 1`` the reader turns a zero ``alpha`` into 1 and a zero
+    ``beta`` into 2 (``hm_read_prop13.F:1169-1170``), so a blank card is a
+    QUADRATIC multi-directional criterion. Only the
+    *CONSTRAINED_SPOTWELD / _GENERALIZED_WELD_SPOT weld tie passes a value
+    (its deck N / M, round 6 A2); every other caller writes zeros, which is
+    byte-identical to before."""
     lines = [
         f"/PROP/TYPE13/{prop_id}",
         title,
@@ -1176,9 +1470,11 @@ def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
     ]
     for i in range(1, 7):
+        a, b = ((alpha_beta[i - 1] if alpha_beta is not None
+                 and i <= len(alpha_beta) else (0.0, 0.0)))
         lines += [
             f"#                 c{i}                  n{i}              alpha{i}               beta{i}",
-            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            f"{_f(0.0)}{_f(0.0)}{_f(a)}{_f(b)}",
         ]
     lines.append(HDR)
     return lines
@@ -2654,6 +2950,251 @@ def _mean_diameter(d1: float, d2: float) -> float:
     return max(d1, d2, 0.0)
 
 
+Vec3 = Tuple[float, float, float]
+
+
+def _closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3:
+    """The point of triangle *abc* nearest to *p* (the Voronoi-region walk of
+    Ericson, "Real-Time Collision Detection" 5.1.5): a vertex, an edge point
+    or the interior projection, never outside the triangle."""
+    def sub(u: Vec3, v: Vec3) -> Vec3:
+        return (u[0] - v[0], u[1] - v[1], u[2] - v[2])
+
+    def dot(u: Vec3, v: Vec3) -> float:
+        return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+
+    def at(o: Vec3, d: Vec3, t: float) -> Vec3:
+        return (o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2])
+
+    ab, ac, ap = sub(b, a), sub(c, a), sub(p, a)
+    d1, d2 = dot(ab, ap), dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a
+    bp = sub(p, b)
+    d3, d4 = dot(ab, bp), dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        return at(a, ab, d1 / (d1 - d3))
+    cp = sub(p, c)
+    d5, d6 = dot(ab, cp), dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        return at(a, ac, d2 / (d2 - d6))
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        return at(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)))
+    den = va + vb + vc
+    v, w = vb / den, vc / den
+    return (a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w,
+            a[2] + ab[2] * v + ac[2] * w)
+
+
+def _spotweld_reference_faces(state: ConversionState, c
+                              ) -> List[Tuple[Tuple[int, int], str, int,
+                                              List[int]]]:
+    """The reference segments of a weld tie: the faces of its MAIN side, as
+    ``(sort key, label, part id or 0, node ids)``. MSTYP 3 a part, 2 a part
+    set, 1 a ``*SET_SHELL`` (shells), 0 a ``*SET_SEGMENT`` (its segments)."""
+    out: List[Tuple[Tuple[int, int], str, int, List[int]]] = []
+    if c.mstyp in (2, 3):
+        pids = ({c.msid} if c.mstyp == 3 else
+                set(state.part_sets.get(c.msid, ("", []))[1]))
+        for e in state.shell_elems:
+            if e.pid in pids:
+                out.append(((0, e.eid), f"shell {e.eid}", e.pid,
+                            list(e.nodes)))
+    elif c.mstyp == 1:
+        wanted = set(state.shell_sets.get(c.msid, ("", []))[1])
+        for e in state.shell_elems:
+            if e.eid in wanted:
+                out.append(((0, e.eid), f"shell {e.eid}", e.pid,
+                            list(e.nodes)))
+    elif c.mstyp == 0:
+        ss = state.segment_sets.get(c.msid)
+        if ss is not None:
+            for k, seg in enumerate(ss.segments, start=1):
+                out.append(((1, k), f"segment {k} of *SET_SEGMENT {c.msid}", 0,
+                            [n for n in seg if n > 0]))
+    return out
+
+
+def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
+    """``--spotweld-node-synthesis`` (round 6, B6 rule 1; default OFF): an
+    ELFORM-9 ``*MAT_SPOTWELD`` beam that states ONE node gets its second one
+    where Vol I R17 p.19-3 puts it - *"If the PID option is inactive for the
+    type 9 element, the nodal points of the spot weld are located to the two
+    nearest reference surface segments"*.
+
+    The reference surface is the MAIN side of the first ``*CONTACT_TIED_*`` /
+    ``*CONTACT_SPOTWELD`` whose SURFA names the weld part. The given node N1
+    moves to its nearest point q1 on those segments (segment S1; ties -> the
+    lowest id), and a NEW element-free node is created at the nearest point
+    q2 on a segment strictly on the OTHER side of N1 ((q2 - P).(q1 - P) < 0).
+    So the weld length is the distance between the two sheets, whatever the
+    sheet thickness or TS1 - on the only R14 carrier, spotweld.k, the three
+    coincide at 2.0 and cannot tell the rules apart; LS-DYNA's own d3plot
+    there moved node 1213 from z 1.0 to z 0.0 and created node 1214 at z 2.0,
+    and its swforc prints length 2.0. (The deck's commented-out beam card
+    names nodes 213 / 123 at z 1.5 / 0.5: those are ORPHANS, in *NODE and in no
+    element; the sheets are at z 0 and 2.)
+
+    A PREPASS, before the ``/NODE`` section and before the tied / spotweld
+    sections that must name the node; the id comes from ``next_node_id`` (so
+    under the flag the ``/SECT`` frame nodes allocated later move up by one).
+    Refused by name, the weld then kept exactly as before (the connector
+    writer's part-level refusal of a node-less beam): N1 shared with any other
+    element, no tie naming the part, no reference segment, N1 ON a reference
+    sheet (the side of the second sheet is not guessed), no segment on the
+    other side, or coinciding points.
+    """
+    if not state.options.spotweld_node_synthesis:
+        return
+    weld_pids = _spotweld_beam_pids(state)
+    if not weld_pids:
+        return
+    candidates = [e for e in state.beam_elems
+                  if e.pid in weld_pids and e.n2 == 0 and e.n1 > 0]
+    if not candidates:
+        return
+    extent = 0.0
+    if state.nodes:
+        xs = [n.x for n in state.nodes.values()]
+        ys = [n.y for n in state.nodes.values()]
+        zs = [n.z for n in state.nodes.values()]
+        extent = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    ties = list(state.contacts_tied) + list(state.contacts_spotweld)
+    for e in candidates:
+        part = state.parts.get(e.pid)
+        sec = state.sec_beams.get(part.secid if part and part.secid > 0
+                                  else e.pid)
+        if sec is None or sec.elform != 9:
+            continue
+        head = (f"--spotweld-node-synthesis: *ELEMENT_BEAM {e.eid} (part "
+                f"{e.pid}) names ONE node ({e.n1}) and was NOT given a second "
+                "one: ")
+        tail = (". It stays as before: a node-less spotweld beam is not "
+                "converted.")
+        used = any(e.n1 in s.nodes for s in state.shell_elems) or any(
+            e.n1 in s.nodes for s in state.solid_elems) or any(
+            e.n1 in s.nodes for s in state.tshell_elems) or any(
+            e.n1 == c.nid for c in state.sph_elems) or any(
+            e.n1 in (s.n1, s.n2) for s in state.seatbelt_elems) or any(
+            e.n1 in (d.n1, d.n2) for d in state.discrete_elems) or any(
+            b is not e and e.n1 in (b.n1, b.n2) for b in state.beam_elems)
+        if used:
+            state.warn(head + f"node {e.n1} also belongs to another element; "
+                       "moving it would distort that element" + tail)
+            continue
+        if e.n1 not in state.nodes:
+            state.warn(head + f"node {e.n1} is not defined" + tail)
+            continue
+        tie = next((c for c in ties
+                    if (c.sstyp == 3 and c.ssid == e.pid)
+                    or (c.sstyp == 2 and e.pid in
+                        state.part_sets.get(c.ssid, ("", []))[1])), None)
+        if tie is None:
+            state.warn(head + "no *CONTACT_TIED_*/_SPOTWELD names part "
+                       f"{e.pid} as its tracked (SURFA) side, so there is no "
+                       "reference surface to place the second node on" + tail)
+            continue
+        faces = [f for f in _spotweld_reference_faces(state, tie)
+                 if len(f[3]) >= 3 and all(n in state.nodes for n in f[3])]
+        if not faces:
+            state.warn(head + "no shell reference segment on the MAIN side of "
+                       f"that tie ({tie.inter_id})" + tail)
+            continue
+        pn = state.nodes[e.n1]
+        p = (pn.x, pn.y, pn.z)
+        near = []
+        for key, label, fpid, nodes in faces:
+            pts = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z)
+                   for n in nodes]
+            uniq = list(dict.fromkeys(pts))
+            tris = ([(uniq[0], uniq[1], uniq[2])] if len(uniq) == 3 else
+                    [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
+                    if len(uniq) >= 4 else [])
+            best = None
+            for a, b, c3 in tris:
+                q = _closest_on_triangle(p, a, b, c3)
+                d = sum((q[i] - p[i]) ** 2 for i in range(3)) ** 0.5
+                if best is None or d < best[0]:
+                    best = (d, q)
+            if best is not None:
+                near.append((best[0], key, label, fpid, best[1]))
+        if not near:
+            state.warn(head + "no shell reference segment on the MAIN side of "
+                       f"that tie ({tie.inter_id})" + tail)
+            continue
+        near.sort(key=lambda t: (t[0], t[1]))
+        d1, _k1, lab1, pid1, q1 = near[0]
+        if d1 <= 1e-9 * extent:
+            state.warn(head + f"node {e.n1} lies ON a reference sheet ({lab1}), "
+                       "and k2rad does not guess the side of the second sheet"
+                       + tail)
+            continue
+        v1 = tuple(q1[i] - p[i] for i in range(3))
+        other = [t for t in near
+                 if sum((t[4][i] - p[i]) * v1[i] for i in range(3)) < 0.0]
+        if not other:
+            state.warn(head + "no reference segment lies on the other side of "
+                       f"node {e.n1}" + tail)
+            continue
+        _d2, _k2, lab2, pid2, q2 = other[0]
+        length = sum((q2[i] - q1[i]) ** 2 for i in range(3)) ** 0.5
+        if length <= 1e-12:
+            state.warn(head + "the two reference points coincide" + tail)
+            continue
+        n2 = state.next_node_id()
+        state.nodes[e.n1] = NodeData(*q1)
+        state.nodes[n2] = NodeData(*q2)
+        e.n2 = n2
+        kw = getattr(tie, "keyword", "") or (
+            f"CONTACT_TIED_{tie.variant}" if tie in state.contacts_tied
+            else "CONTACT_SPOTWELD")
+
+        def xyz(v) -> str:
+            return f"({v[0]:g}, {v[1]:g}, {v[2]:g})"
+        if state.options.beam_contact_secondary:
+            clause = (
+                " MEASURED with both flags on spotweld.k (nt 4): 4983 cycles "
+                "(7.80x) and internal energy -99.9 % -> +82.0 % of LS-DYNA's "
+                "at t 1.18e-3 - the error changes SIGN, not size (|IE error| "
+                "76733 -> 67888 on LS 76812): the /PROP/TYPE13 shear stays "
+                "elastic (116300 vs LS-DYNA's 46247 at 1.18e-3) and the weld "
+                "never fails (*MAT_SPOTWELD EFAIL has no /PROP/TYPE13 slot) "
+                "where LS-DYNA fails it at 1.1876e-3; so at the matched END (t "
+                "1.2e-3, after LS-DYNA's failure has dropped its IE to 60028) "
+                "the error GROWS to +141.1 % (the base -99.87 %), and the "
+                "history reads +65 / +82 / +85 / +83 / +141 % at the fifths of "
+                "the run (nt 4 and nt 2 identical); the TYPE13 spring also "
+                "owns the time step because MAT_100's DT is dropped.")
+        else:
+            clause = (
+                " WITHOUT --beam-contact-secondary the tie's secondary side "
+                "still resolves to no node, so the weld connects nothing: "
+                "MEASURED on spotweld.k, this flag alone costs 7.64x the "
+                "cycles (639 -> 4884) at IE -99.92 %.")
+        state.warn(
+            f"*ELEMENT_BEAM {e.eid} (part {e.pid}: *SECTION_BEAM ELFORM 9, "
+            f"*MAT_SPOTWELD) names ONE node ({e.n1}; n2 = 0). "
+            "--spotweld-node-synthesis places the weld the way Vol I R17 "
+            "p.19-3 describes - 'the nodal points of the spot weld are "
+            "located to the two nearest reference surface segments': node "
+            f"{e.n1} moved from {xyz(p)} to {xyz(q1)} on {lab1}"
+            + (f" (part {pid1})" if pid1 else "")
+            + f" and a new element-free node {n2} created at {xyz(q2)} on "
+            f"{lab2}" + (f" (part {pid2})" if pid2 else "")
+            + f", the reference surface being the MAIN side of *{kw} "
+            f"{tie.inter_id}; weld length {length:g}. LS-DYNA's own d3plot of "
+            "the only R14 carrier (spotweld.k) shows exactly this placement "
+            "(node 1213 at (60, 20, 0), new node 1214 at (60, 20, 2)) and its "
+            "swforc prints length 2.0." + clause)
+
+
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     """*MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 (SPR_BEAM) /SPRING
     connectors.
@@ -2917,6 +3458,143 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     return lines if emitted else []
 
 
+#: The welds' exponent records for the per-deck warning: ``(class, N, M) ->
+#: (index in state.warnings of the group's FIRST weld, [(keyword, label,
+#: /PROP/TYPE13 id), ...])``, class "applied" / "optout" / "nonpos"
+#: (post-review round of #140: the measured paragraph was warned once PER
+#: WELD - ~1.6 KB each, thousands of times on a vehicle deck).
+_WeldExpNotes = Dict[Tuple[str, float, float],
+                     Tuple[int, List[Tuple[str, str, int]]]]
+
+
+def _weld_failure_exponents(state: ConversionState, w, label: str,
+                            prop_id: int, notes: _WeldExpNotes
+                            ) -> Optional[List[Tuple[float, float]]]:
+    """The weld tie's failure exponents N / M -> the TYPE13 ``alpha``/``beta``
+    cells (R14 triage round 6, A2); ``None`` = leave every cell blank.
+
+    LS-DYNA fails the weld when ``(fn/SN)^N + (fs/SS)^M >= 1`` (Vol I R17
+    p.10-212/213, Remark 2; ``fn`` tensile only, ``fs`` the shear resultant).
+    With ``Ifail = 1`` / ``Ifail2 = 2`` the engine sums ``XA*DLIM**XB`` over
+    the DOFs (``r4def3.F:374`` for DOF 1, ``:449`` for DOF 2, ...; ``DLIM`` =
+    force / failure force, ``:361``) and deletes the spring at ``CRIT >= 1``
+    (``:819``), but the reader turns a zero ``alpha`` into 1 and a zero
+    ``beta`` into 2 (``hm_read_prop13.F:1169-1170``): blank cells are always
+    exponent 2. So when N or M differs from 2: ``alpha1-3 = 1``,
+    ``beta1 = N``, ``beta2 = beta3 = M``; rows 4-6 stay blank (the moment
+    DOFs carry the no-failure defaults). ``N = M = 2`` (blank or stated)
+    writes nothing and is byte-identical — the reader's own default IS 2. A
+    stated exponent ``<= 0`` is not written (named). dyna2rad writes
+    ``beta1 = N`` / ``beta2 = M`` with ``Ifail 1`` / ``Ifail2 2`` on its
+    ``/PROP/TYPE25`` route (``convertconstrainedspotwelds.cxx:103-124``).
+
+    Called AFTER every ``continue`` screen of the weld loop and after the
+    property id is drawn. The message is NOT warned here: the weld is
+    recorded in *notes* and :func:`_warn_weld_exponents` writes ONE warning
+    per (class, N, M) after the loop - the measured paragraph once, every
+    weld of the group named with its property id (post-review round of #140;
+    a deck with one weld per group reads exactly the one-weld text)."""
+    n, m = w.n, w.m
+    if abs(n - 2.0) <= 1e-9 and abs(m - 2.0) <= 1e-9:
+        return None
+    kw = ("*CONSTRAINED_GENERALIZED_WELD_SPOT" if w.nsid > 0
+          else "*CONSTRAINED_SPOTWELD")
+    cls = ("optout" if not state.options.weld_exponents
+           else "nonpos" if n <= 0.0 or m <= 0.0 else "applied")
+    # the group's warning is inserted where its FIRST weld used to warn
+    notes.setdefault((cls, n, m), (len(state.warnings), []))[1].append(
+        (kw, label, prop_id))
+    if cls != "applied":
+        return None
+    return [(1.0, n), (1.0, m), (1.0, m)]
+
+
+def _warn_weld_exponents(state: ConversionState, notes: _WeldExpNotes) -> None:
+    """One warning per (class, N, M) group of *notes*, inserted into
+    ``state.warnings`` where the group's FIRST weld used to warn - so a deck
+    with one weld per group keeps its warning record byte for byte, order
+    included. A group of ONE weld names it as ``<keyword> <label>`` and its
+    ``/PROP/TYPE13/<id>`` - the text the round shipped per weld; a larger
+    group names every weld with its property id in one list and states the
+    criterion, the caveat and the measurement once."""
+    out: List[Tuple[int, str]] = []
+    for (cls, n, m), (first, welds) in notes.items():
+        one = len(welds) == 1
+        if one:
+            kw, label, pid = welds[0]
+            who = f"{kw} {label}"
+            prop = f"/PROP/TYPE13/{pid}"
+        else:
+            who = (f"{len(welds)} welds ("
+                   + "; ".join(f"{kw} {label} -> /PROP/TYPE13/{pid}"
+                               for kw, label, pid in welds) + ")")
+            prop = "their /PROP/TYPE13"
+        if cls == "optout":
+            out.append((first,
+                f"--no-weld-exponents: {who} "
+                f"{'states' if one else 'state'} N={n:g} / M={m:g}; "
+                f"the alpha/beta cells of {prop} are left blank "
+                "and the starter reads them as alpha 1 / beta 2 "
+                "(hm_read_prop13.F:1169-1170), so "
+                f"{'this weld fails' if one else 'these welds fail'} on "
+                "exponent 2 in every term, not on the deck's N/M."))
+            continue
+        if cls == "nonpos":
+            out.append((first,
+                f"{who}: N={n:g} / M={m:g} - a failure exponent <= 0 is "
+                f"not written into {prop}; the starter reads a "
+                "blank beta cell as 2 (hm_read_prop13.F:1170), so "
+                f"{'this weld fails' if one else 'these welds fail'} on "
+                "exponent 2 in every term."))
+            continue
+        caveat = ""
+        if abs(m - 2.0) > 1e-9:
+            # The Radioss/LS ratio of the shear term with two EQUAL components
+            # f: 2 (f/SS)^M against (sqrt(2) f/SS)^M, i.e. 2^(1 - M/2). Above 1
+            # for M < 2 (Radioss reaches 1 first), below 1 for M > 2 (LS-DYNA
+            # does).
+            ratio = 2.0 ** (1.0 - m / 2.0)
+            caveat = (
+                " LS-DYNA scores the shear RESULTANT (Vol I R17 p.10-213 "
+                "Remark 2); Radioss scores the two shear DIRECTIONS "
+                "separately. The two agree when the shear stays on one local "
+                "axis, and for any direction at M = 2. With both components "
+                "present the direction of the difference follows M: ")
+            if m < 2.0:
+                caveat += (
+                    f"at M = {m:g} and equal components the Radioss sum is "
+                    f"{ratio:.3f}x the resultant term, so Radioss reaches 1 "
+                    "first - the converted weld fails EARLIER than LS-DYNA "
+                    "(conservative for M < 2).")
+            else:
+                caveat += (
+                    f"at M = {m:g} and equal components the Radioss sum is "
+                    f"only {ratio:.3f}x the resultant term, so LS-DYNA "
+                    "reaches 1 first - the converted weld fails LATER than "
+                    "LS-DYNA (NON-conservative for M > 2).")
+        out.append((first,
+            f"{who}: failure exponents N={n:g} / M={m:g} written into "
+            f"{prop} as alpha1-3 = 1, beta1 = {n:g}, "
+            f"beta2 = beta3 = {m:g}, so the Ifail = 1 criterion is "
+            "(fn/SN)^N + (|fy|/SS)^M + (|fz|/SS)^M >= 1, fn tensile only "
+            "(r4def3.F:361, :374 and its per-DOF siblings, deletion at :819). "
+            "A blank alpha/beta cell is read as 1 / 2 "
+            "(hm_read_prop13.F:1169-1170), so without these cells the deck's "
+            "exponents would be replaced by 2."
+            + caveat +
+            " MEASURED at nt 4 on spotweld-ii/plates.nrbc and "
+            "spotweld-iii/plates.spot (N = M = 1, the only two carriers): the "
+            "weld deletes at t 2.460e-4 against LS-DYNA's 2.4193e-4 (+1.7 %; "
+            "it was 3.130e-4, +29.4 %), in 2407 cycles against 2678 (0.899x); "
+            "plates.nrbc IE +23.64 -> -18.99 %, KE +61.93 -> +12.75 %, "
+            "external work +60.66 -> +7.83 %; plates.spot IE +34.23 -> "
+            "-12.05 %, KE +45.57 -> +1.36 %, external work +59.99 -> +7.38 %; "
+            "both rows stay deviation (IE and the -6.9 % energy error). Pass "
+            "--no-weld-exponents to leave the cells blank."))
+    for shift, (idx, msg) in enumerate(sorted(out, key=lambda x: x[0])):
+        state.warnings.insert(idx + shift, msg)
+
+
 def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
     """*CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with failure
     forces → one stiff /PROP/TYPE13 /SPRING per weld (Ifail=1/Ifail2=2:
@@ -2947,6 +3625,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
                    "scale the tie stiffness — defaulted E_ref=210000 (steel, "
                    "N/mm² assumed); check the unit system.")
 
+    exp_notes: _WeldExpNotes = {}
     for w in welds:
         label = w.title or (f"spotweld_{w.n1}_{w.n2}" if w.nsid == 0
                             else f"gen_weld_spot_{w.nsid}")
@@ -2971,11 +3650,6 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
                        "coincident — /PROP/TYPE13 needs a finite length; weld "
                        "NOT converted (merge the nodes or use a tied contact).")
             continue
-        if (w.n and abs(w.n - 2.0) > 1e-9) or (w.m and abs(w.m - 2.0) > 1e-9):
-            state.warn(f"*CONSTRAINED_SPOTWELD {label}: failure exponents "
-                       f"N={w.n:g}/M={w.m:g} differ from 2 — the converted "
-                       "multi-directional criterion is quadratic (N=M=2).")
-
         k = 10.0 * e_ref * L
         krot = k * L * L / 12.0
         dofs = [
@@ -2989,13 +3663,14 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
+        exps = _weld_failure_exponents(state, w, label, prop_id, exp_notes)
         # Token mass/inertia: the tie itself is massless in LS-DYNA
         # (*CONSTRAINED_SPOTWELD has no mass cell at all — it is a CONSTRAINT),
         # so both cells are k2rad's own invention and the mass half is
         # registered below for the /ADMAS compensation.
         lines += _emit_prop_type13(prop_id, f"{label} (stiff weld tie)",
                                    _SPRING_TOKEN_MASS, _SPRING_TOKEN_INERTIA,
-                                   1, 2, dofs)
+                                   1, 2, dofs, alpha_beta=exps)
         lines += [
             f"/PART/{part_id}",
             label,
@@ -3020,6 +3695,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             "tie is penalty-stiff, not rigid — validate the failure load on a "
             "single-weld case.")
 
+    _warn_weld_exponents(state, exp_notes)
     return lines if emitted else []
 
 
@@ -4865,6 +5541,9 @@ def _emit_mass_weighted_bodies(state: ConversionState,
     """
     lines: List[str] = []
     for main, v_cm, omega in bodies:
+        # the ONE record of "this body got an /INIVEL/ROT": the post-registry
+        # rotary-inertia pass (_apply_mass_weighted_rbody_inertia) reads it
+        state.mass_weighted_rot_mains[main] = omega
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"{tag}_rb_main_{main}", [main])
         inivel_id = state.next_id()
@@ -4874,6 +5553,186 @@ def _emit_mass_weighted_bodies(state: ConversionState,
         lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
                               grnod_id, omega)
     return lines
+
+
+def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
+                          ) -> str:
+    """Why ``k2rad.lumping``'s nodal ``IN`` would NOT be the starter's for a
+    body over *nodes*, or ``""``.
+
+    The lumper computes ``IN = (m/n)(A + t^2)/12`` per shell corner — the
+    ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11, ``:919-925``),
+    ``ZSHIFT = 0``, one layer, the SECTION thickness. Any shell on the body
+    that the starter lumps differently makes ``-SUM(IN)`` the wrong amount,
+    so the body is skipped by name: Ishell < 11 (FAC 9), a layered property
+    (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an
+    offset, since a plain shell's NLOC and *ELEMENT_SHELL_OFFSET are dropped
+    at read time), an element-level thickness, or a shell with no
+    *SECTION_SHELL."""
+    from .common import _elform_to_ishell
+    for e in state.shell_elems:
+        if not any(n in nodes for n in e.nodes):
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        if part.secid == 0 and e.pid in state.part_composites:
+            return (f"part {e.pid} is a *PART_COMPOSITE (a layered property: "
+                    "the starter lumps IN per layer, cinmas.F:926-1290)")
+        sec = state.sec_shells.get(part.secid)
+        if sec is None:
+            return f"part {e.pid} has no *SECTION_SHELL"
+        if sec.icomp == 1:
+            return (f"section {sec.secid} is ICOMP 1 (a layered property: the "
+                    "starter lumps IN per layer, cinmas.F:926-1290)")
+        if any(e.thick_nodes):
+            return (f"shell {e.eid} states its own thickness "
+                    "(*ELEMENT_SHELL_THICKNESS; the lumper uses the section's)")
+        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
+                                   state.options.shell_default_ishell)
+        if ishell < 11:
+            return (f"section {sec.secid} is Ishell {ishell} < 11: the starter "
+                    "lumps IN with FAC 9 (cinmas.F:919-925), which k2rad's "
+                    "lumper does not model")
+    return ""
+
+
+def _apply_mass_weighted_rbody_inertia(state: ConversionState,
+                                       lines: List[str],
+                                       rbody_info: Dict) -> None:
+    """``--mass-weighted-inivel``: ``J = J_old - SUM(IN)`` on every ``/RBODY``
+    the re-point wrote an ``/INIVEL/ROT`` on (round 6, A7).
+
+    WHY. The starter assembles a body's inertia tensor in ``inirby.F``: for
+    ICoG 1/2/3 (``:322``) it adds every secondary's ``m r^2`` AND its nodal
+    rotary inertia ``IN`` (``:355``), plus the main node's ``IN``
+    (``:166-168``), plus the ``/RBODY`` ``J`` cells, which are ADDITIVE
+    (``:154-160``); the tensor is printed as ``NEW INERTIA`` (``:708/:712``).
+    LS-DYNA's rigid-body inertia is the point-mass sum — its nodal ``J_i``
+    exclude contributions from and on the rigid body itself (Theory R16
+    eqs 29.21-29.23) — so the lumped shell ``IN`` is a residual the momentum
+    average hands straight to the spin. ``J = -SUM(IN)`` over the SAME nodes
+    ``inirby.F`` adds ``IN`` for (the body's secondaries and its main node;
+    ``k2rad.lumping.nodal_masses_from_state``'s ``IN``, shells only) takes it
+    back out. On translat the starter then prints ``NEW INERTIA
+    0.1977227E-02 / 0.3954455E-02`` = LS-DYNA's 0.1977E-02 / 0.3954E-02.
+
+    WHICH BODIES. Exactly the ones ``_emit_mass_weighted_bodies`` recorded in
+    ``state.mass_weighted_rot_mains`` — the one decision site; a body the
+    card fully covers gets no ``/INIVEL/ROT`` and keeps its J.
+
+    SKIPPED by name: ICoG 4 (``inirby.F:322`` adds no nodal ``IN``; the J is
+    the deck's ``*PART_INERTIA`` tensor) and any body whose shells the lumper
+    does not reproduce (``_rbody_in_skip_reason``). REFUSED by name: a
+    principal value of the corrected tensor ``<= 0`` (starter ERROR 274,
+    ``inirby.F:823``).
+
+    HOW. A POST-REGISTRY pass: every ``/RBODY`` block is built before the
+    inivel sections decide the re-point, and the decision needs
+    ``rbody_info``, so no pre-pass could make it without a second copy of the
+    inivel card-group resolution. The block is located by EXACT line
+    equality on ``/RBODY/<main>`` (the ``/RBODY`` id IS its main node, unique
+    in ``state.rbody_ids``), the ``Jxx Jyy Jzz`` header and row the producer
+    wrote are ASSERTED against ``rbody_info[..]["j"]``, and only that one row
+    is replaced. A failed assertion raises: a k2rad bug, never a silent skip.
+    """
+    mains = state.mass_weighted_rot_mains
+    if not mains or not state.options.mass_weighted_inivel:
+        return
+    from ..lumping import _sym3_eigen, nodal_masses_from_state
+    from .rbody import _inertia_lines
+    mass_by_node, in_by_node = nodal_masses_from_state(state)
+    for main in sorted(mains):
+        rec = next((info for info in rbody_info.values()
+                    if info.get("ind_node") == main), None)
+        if rec is None or "j" not in rec:
+            continue
+        nodes = set(rec["nodes"]) | {main}
+        icog = int(rec.get("icog", 0) or 0)
+        if icog == 4:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - ICoG 4: "
+                "its J is the deck's *PART_INERTIA tensor and inirby.F:322 "
+                "adds no nodal IN to it.")
+            continue
+        why = _rbody_in_skip_reason(state, nodes)
+        if why:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - {why}, "
+                "so -SUM(IN) would take out the wrong amount. Its spin carries "
+                "the lumped rotary-inertia residual.")
+            continue
+        shell_nodes = sorted(n for n in nodes if in_by_node.get(n, 0.0) > 0.0)
+        sum_in = math.fsum(in_by_node.get(n, 0.0) for n in shell_nodes)
+        if sum_in <= 0.0:
+            continue                      # no shell IN on this body at all
+        j_old = tuple(rec["j"])
+        j_new = (j_old[0] - sum_in, j_old[1] - sum_in, j_old[2] - sum_in,
+                 j_old[3], j_old[4], j_old[5])
+        # what inirby.F assembles, about the lumped centre of mass
+        pts = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z,
+                mass_by_node.get(n, 0.0)) for n in sorted(nodes)
+               if n in state.nodes]
+        m_tot = math.fsum(p[3] for p in pts)
+        if m_tot > 0.0:
+            cx = math.fsum(p[0] * p[3] for p in pts) / m_tot
+            cy = math.fsum(p[1] * p[3] for p in pts) / m_tot
+            cz = math.fsum(p[2] * p[3] for p in pts) / m_tot
+        else:
+            cx = cy = cz = 0.0
+        t = [[0.0] * 3 for _ in range(3)]
+        for x, y, z, m in pts:
+            d = (x - cx, y - cy, z - cz)
+            r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+            for a in range(3):
+                for b in range(3):
+                    t[a][b] += m * ((r2 if a == b else 0.0) - d[a] * d[b])
+        for a in range(3):
+            t[a][a] += sum_in + j_new[a]
+        t[0][1] += j_new[3]
+        t[1][0] += j_new[3]
+        t[1][2] += j_new[4]
+        t[2][1] += j_new[4]
+        t[0][2] += j_new[5]
+        t[2][0] += j_new[5]
+        low = min(_sym3_eigen(t)[0])
+        if not low > 0.0:
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - with "
+                f"J = {j_new[0]:g} a principal value of the body tensor would "
+                f"be {low:g} <= 0 (starter ERROR 274, inirby.F:823).")
+            continue
+        hits = [i for i, ln in enumerate(lines) if ln == f"/RBODY/{main}"]
+        old = _inertia_lines(j_old)
+        if (len(hits) != 1 or len(lines) <= hits[0] + 5
+                or lines[hits[0] + 4] != old[0]
+                or lines[hits[0] + 5] != old[1]):
+            raise RuntimeError(
+                f"--mass-weighted-inivel: the /RBODY/{main} block is not the "
+                "shape its producer recorded (found "
+                f"{len(hits)} header line(s)); refusing to rewrite a J row "
+                "blind. This is a k2rad bug.")
+        lines[hits[0] + 5] = _inertia_lines(j_new)[1]
+        state.warn(
+            f"--mass-weighted-inivel also wrote J = {j_new[0]:g} (= -SUM of "
+            f"the nodal rotary inertia IN of the body's {len(shell_nodes)} "
+            f"shell node(s)) into /RBODY/{main}: the starter ADDS every "
+            "member's IN to the body tensor for ICoG 1/2/3 (inirby.F:166-168, "
+            ":322, :355), while LS-DYNA's rigid-body inertia is the "
+            "point-mass sum (Theory R16 eqs 29.21-29.23), so the J cells "
+            "take the difference back out. MEASURED on "
+            "intro-by-j.-day/joint/joint-ii/translat.k (nt 4): NEW INERTIA "
+            "0.2642894E-02 -> 0.1977227E-02 = LS-DYNA's 0.1977E-02; cycle-0 "
+            "KE 220.58 -> 189.96 (LS 189.962); final KE 139.89 -> 92.77 (LS "
+            "94.6381, -1.97 % - an END value: the KE history at the fifths of "
+            "the run reads -7.1 / -5.3 / +2.8 / +26.3 / -2.0 % against "
+            "-13.9 / +22.6 / +2.8 / +39.2 / +47.8 % without the J cells, "
+            "RMS 17.5 -> 11.6 % of the LS peak); 1.156x the cycles (the "
+            "body's main node owns "
+            "the step and its rotational step shrinks with J). The IE is NOT "
+            "fixed by it (1159 -> 1436 against LS-DYNA's 0.1026; the engine "
+            "energy error is 99.9 % from cycle 1 on every arm - the joint "
+            "path).")
 
 
 def _make_inivel(state: ConversionState, rbody_info: Dict,
@@ -5418,13 +6277,13 @@ def _momentum_average_body(state: ConversionState, info: Optional[Dict],
         "part 1's 4 element nodes carry v = (2286, 0, 7620) against an LS-DYNA "
         "glstat cycle-0 K-ENERGY of 189.962: the full-velocity re-point reads "
         "387.9 (+104.20 %), this rule reads 220.58 (+16.12 %), and the final "
-        "ke_dev goes +194.03 % -> +47.82 %. The residual is NOT the velocity - "
-        "it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
+        "ke_dev goes +194.03 % -> +47.82 %. That residual is NOT the velocity "
+        "- it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
         "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
-        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), which the "
-        "/RBODY J cells would ADD rather than replace "
-        "(inirby.F:166-168 and :331-339 ADD them; hm_read_rbody.F:276-279 "
-        "is only where the cells are read): not compensated here.")
+        "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), and the "
+        "/RBODY J cells are ADDITIVE (inirby.F:154-168), so the flag also "
+        "writes J = -SUM(IN) into this body's /RBODY to take it back out - "
+        "see the J sentence for this body.")
     return main, v_cm, omega
 
 
@@ -6449,64 +7308,10 @@ def _fmt_node_list(nids, cap: int = 20) -> str:
     return f"{nids[:cap]} and {len(nids) - cap} more"
 
 
-def _spring_token_own_element_mass(state: ConversionState,
-                                   candidates: Set[int]) -> Set[int]:
-    """Which of *candidates* carry element mass of their own.
-
-    An INCIDENCE test, not a mass test: the node must appear in at least one
-    emitted structural element (/SHELL, /SH3N, /BRICK, /TETRA*, the thick-shell
-    bricks, /BEAM, /TRUSS) whose part resolves to a material with ``rho > 0``.
-    Both halves are needed — a node whose only element sits on a zero-density
-    part would pass a bare incidence screen and still land near zero mass,
-    which is the failure this guard exists to prevent: the nodal acceleration
-    divides by that mass, and a share subtracted from a node that has none of
-    its own leaves ``MS <= 0``.
-
-    WHICH CHECK ACTUALLY CATCHES IT. Not ``rcheckmass.F``'s ERROR 1870: that
-    whole mechanism sits inside ``IF(IGTYP==23)`` (``rcheckmass.F:112``) and,
-    for the ``MS`` test, ``IF(MTN == 108)`` (``:123``) — ``IERR2`` can only be
-    set at ``:154``/``:157`` inside that branch — so it covers /PROP/TYPE23
-    (SPR_MAT) on /MAT/LAW108 and inspects no /PROP/TYPE4, TYPE8 or TYPE13
-    spring, which is every producer this compensation registers. The detector
-    that does reach them is the ENGINE's: ``chkmsin.F:52-59`` walks every node,
-    prints ``NEGATIVE MASS ON NODE ID=`` for ``MS(N) < ZERO`` and counts it,
-    and ``resol.F:5460`` does ``IF(NEGMAS/=0) CALL ARRET(2)``. A share that
-    lands the node exactly ON zero is caught by neither — which is why the
-    screen refuses the node instead of relying on a downstream check.
-
-    Scoped to *candidates* so the element sweep is one pass with a cheap set
-    membership test; on a deck with no spring token at all it never runs.
-    """
-    if not candidates:
-        return set()
-    rho_ok: Dict[int, bool] = {}
-
-    def _part_has_mass(pid: int) -> bool:
-        hit = rho_ok.get(pid)
-        if hit is None:
-            part = state.parts.get(pid)
-            hit = part is not None and _mat_density(state, part.mid) > 0.0
-            rho_ok[pid] = hit
-        return hit
-
-    found: Set[int] = set()
-    for elems in (state.shell_elems, state.solid_elems, state.tshell_elems,
-                  state.beam_elems):
-        for e in elems:
-            nodes = getattr(e, "nodes", None)
-            if nodes is None:
-                nodes = [getattr(e, "n1", 0), getattr(e, "n2", 0)]
-            hit = [n for n in nodes if n in candidates]
-            if hit and _part_has_mass(e.pid):
-                found.update(hit)
-        if found >= candidates:
-            break
-    return found
-
-
 def _spring_token_negative_admas(
         state: ConversionState, rigid_nodes: Set[int], compensated,
-        degenerate) -> Tuple[Dict[float, List[int]], List[Tuple[int, float]]]:
+        degenerate) -> Tuple[Dict[float, List[int]], List[Tuple[int, float]],
+                             List[Tuple[int, float, float]]]:
     """The nodes whose token share needs a NEGATIVE ``/ADMAS`` to come off.
 
     The shipped rule only ever SUBTRACTED from an ``/ADMAS`` the deck already
@@ -6527,13 +7332,41 @@ def _spring_token_negative_admas(
     before the rigid bodies and before ``INITIA``, so the model total
     (``initia.F:2250``) is exactly LS-DYNA's again.
 
-    Returns ``({share: [nid, ...]}, [(nid, share), ...])`` — the groups to emit
-    and the nodes the element-mass guard REFUSED.
+    THE SCREEN (round 6, A3 — the "S2" screen). A node is compensated iff it
+    keeps mass of its OWN once the token is off: ``m_own + m_admas > 0``,
+    where ``m_own`` is the ELEMENT mass the engine will hold there
+    (``lumping.element_mass_by_node``: every emitted shell / solid / thick
+    shell / beam, at the emitted thickness and at the density
+    ``sph._mat_density`` reads from EVERY material container — 0.0 for a
+    zero-density-floored material) and ``m_admas`` is the deck's own
+    ``*ELEMENT_MASS`` on the node. The round-5 screen was an element-INCIDENCE
+    test, which refused a node carrying only an ``*ELEMENT_MASS``
+    (gnonspring.k: TOTAL MASS 1.02e-4 against LS-DYNA's 2.0e-6).
+
+    WHY A NODE MUST NOT BE LEFT AT EXACTLY ZERO. Nothing catches it:
+    ``chkmsin.F:53`` tests ``MS(N) < ZERO`` strictly (``resol.F:5460`` aborts
+    only on that), and ``accele.F:67-80`` then writes ``A = 0`` for
+    ``MS = 0`` — no NaN, the node silently keeps its velocity (a fixed point
+    if it starts at rest). The starter's ERROR 1870 is not it either:
+    ``rcheckmass.F:112``/``:123`` gate that branch on ``IGTYP==23`` with
+    ``MTN==108``. ``m_own = m_admas = 0`` is therefore REFUSED (the token
+    stays and the GUARDED sentence names the node).
+
+    WHAT THE SCREEN CANNOT SEE: whether a node that keeps LESS mass than its
+    share is still STABLE. The spring's own step uses the PROPERTY mass
+    (``r1def3.F:113``, ``r1len3.F:175``), not the node's, so a compensated
+    node on a near-massless shell can go unstable with no element step to
+    stop it (the LIGHT clause names every such node; ROADMAP).
+
+    Returns ``({share: [nid, ...]}, [(nid, share), ...],
+    [(nid, m_own + m_admas, share), ...])`` — the groups to emit, the nodes
+    the screen REFUSED, and the compensated nodes that keep less than their
+    share. ONE mass computation, handed to the warning, never recomputed.
     """
     if not state.spring_token_mass_by_node:
-        return {}, []
+        return {}, [], []
     if not state.options.spring_token_mass_compensation:
-        return {}, []
+        return {}, [], []
     done = {nid for nid, _b, _s in compensated}
     want: Dict[int, float] = {}
     for nid, share in state.spring_token_mass_by_node.items():
@@ -6562,21 +7395,26 @@ def _spring_token_negative_admas(
     # choose its wording.
     del degenerate
     if not want:
-        return {}, []
-    has_mass = _spring_token_own_element_mass(state, set(want))
+        return {}, [], []
+    m_own = element_mass_by_node(state, set(want),
+                                 lambda mid: _mat_density(state, mid))
     groups: Dict[float, List[int]] = {}
     guarded: List[Tuple[int, float]] = []
+    light: List[Tuple[int, float, float]] = []
     for nid, share in sorted(want.items()):
-        if nid in has_mass:
+        own = m_own.get(nid, 0.0) + state.added_node_masses.get(nid, 0.0)
+        if own > 0.0:
             groups.setdefault(share, []).append(nid)
+            if own < share:
+                light.append((nid, own, share))
         else:
             guarded.append((nid, share))
-    return groups, guarded
+    return groups, guarded, light
 
 
 def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                             compensated, degenerate, neg_groups=None,
-                            guarded=None) -> None:
+                            guarded=None, light=None) -> None:
     """What happened to k2rad's own artificial spring mass, node by class.
 
     Four classes, and every one of them is named because the mass is INVENTED —
@@ -6586,14 +7424,19 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
     * SUBTRACTED — the node has an ``/ADMAS`` big enough to take the token off.
     * DEGENERATE — it has one, but at or below the token share, so subtracting
       would write a non-positive ``/ADMAS``. The deck's own value is kept AND
-      the full share comes off with a negative card (round 5).
+      the full share comes off with a negative card (round 5). Under the
+      round-6 own-mass screen that negative card is ALWAYS written: the
+      deck's own ``*ELEMENT_MASS`` is mass of the node's own.
     * NO ``/ADMAS`` — nothing to subtract from. Since round 5 the token is
       REMOVED from these nodes with a negative ``/ADMAS`` instead
       (``hm_read_admas.F:164-170`` accepts one, WARNING ID 476), unless the
-      element-incidence screen refuses the node, which the GUARDED sentence
-      names. A fifth list, ``orphan``, catches a registered node that is not
-      in ``state.nodes`` at all — a k2rad-internal inconsistency with reach
-      0 on every corpus here, not a class of deck.
+      own-mass screen refuses the node (``m_own + m_admas = 0``, see
+      ``_spring_token_negative_admas``), which the GUARDED sentence names; a
+      compensated node that keeps LESS than its share is named by the LIGHT
+      clause. A fifth list, ``orphan``, catches a registered node that is not
+      in ``state.nodes``: a deck FRAGMENT whose *NODE cards live in another
+      file (two *INCLUDE fragments of C:/openradioss_run converted on their
+      own reach it).
     * RIGID — the node is a SECONDARY node of a rigid body. Whether the token
       reaches that body at all depends on its ICoG; on the roster's only
       carrier it is measurably INERT (see below).
@@ -6609,6 +7452,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         return
     neg_groups = neg_groups or {}
     guarded = guarded or []
+    light = light or []
     done = {nid for nid, _b, _s in compensated}
     removed = {nid for nids in neg_groups.values() for nid in nids}
     bad = {nid for nid, _m, _s in degenerate}
@@ -6639,28 +7483,13 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         detail = ", ".join(f"node {n}: /ADMAS {m:g} vs token share {sh:g}"
                            for n, m, sh in sorted(degenerate)[:5])
         deg_removed = sorted(n for n, _m, _s in degenerate if n in removed)
+        # Under the round-6 own-mass screen a degenerate node always carries
+        # m_admas > 0 (its own *ELEMENT_MASS), so it is always compensated and
+        # this is the only arm left.
         tail = (
             f" The full share was taken off {len(deg_removed)} of them "
             f"{_fmt_node_list(deg_removed)} with a separate NEGATIVE /ADMAS "
-            "instead, so their sum is exact (m_own + m_admas + token - token)."
-            if deg_removed else
-            " NONE of them took a negative /ADMAS either: they carry no "
-            "element mass of their own, so the element-INCIDENCE screen "
-            "below refused them. That refusal is CONSERVATIVE, not forced: "
-            "the engine's nodal mass is m_own + m_admas + token, so taking "
-            "the token off again leaves m_own + m_admas, which on this "
-            "class is the deck's own /ADMAS and strictly POSITIVE - "
-            "MEASURED on a two-node weld coupon whose *ELEMENT_MASS 5e-05 "
-            "equals the token half-share: the negative card written in by "
-            "hand gives starter TOTAL MASS 1.0000000000000E-04 (5e-05 per "
-            "node), 0 ERROR and NORMAL TERMINATION. What the screen really "
-            "guards is m_own = 0 AND m_admas = 0, where the sum lands "
-            "EXACTLY on zero and chkmsin.F:53 tests MS(N) < ZERO strictly, "
-            "so nothing catches it - the same coupon with no element mass "
-            "at all reads TOTAL MASS 0.000000000000 at 0 ERROR and NORMAL "
-            "TERMINATION. Lifting the screen for the class that does carry "
-            "a positive deck /ADMAS is ROADMAP round-5 item 14. The guard "
-            "sentence below names them.")
+            "instead, so their sum is exact (m_own + m_admas + token - token).")
         state.warn(
             f"*ELEMENT_DISCRETE: {len(degenerate)} node(s) carry LESS /ADMAS "
             "than k2rad's own token spring mass, so the deck's own /ADMAS "
@@ -6670,14 +7499,33 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             f"{detail}"
             + (" ..." if len(degenerate) > 5 else "")
             + "." + tail
-            + " MEASURED on the carrier of this shape, gnonspring.k (/ADMAS "
-              "1e-6 against a token half of 5e-5, 50x): the arm that floors "
-              "the property mass to 1e-12 - the most any compensation could "
-              "ever remove - changes nothing (IE 431.3 either way, 786 cycles "
-              "both times).")
+            + " MEASURED on the carrier of this shape, gnonspring.k "
+              "(*ELEMENT_MASS 1e-6 on each end node against a token half of "
+              "5e-5, 50x): TOTAL MASS 1.02e-4 -> 2.0e-6, which is LS-DYNA's "
+              "(the two *ELEMENT_MASS), 786 cycles on both arms, IE 431.3 on "
+              "both.")
     if neg_groups:
         nodes = sorted(n for nids in neg_groups.values() for n in nids)
         total = sum(sh * len(nids) for sh, nids in neg_groups.items())
+        light_clause = ""
+        if light:
+            shown = ", ".join(f"node {n}: own {own:g} vs share {sh:g}"
+                              for n, own, sh in sorted(light)[:5])
+            light_clause = (
+                f" {len(light)} of these node(s) keep LESS mass than the token "
+                f"share they lost ({shown}"
+                + (" ..." if len(light) > 5 else "")
+                + "): the screen reads only whether a node has mass, not the "
+                "spring's stiffness, so it cannot tell a stable light node "
+                "from an unstable one. The spring's own step uses the "
+                "PROPERTY mass (r1def3.F:113, r1len3.F:175), not the node's. "
+                "MEASURED: stable on spotweld-ii/plates.nrbc (own 1.57e-6 "
+                "against the share 5e-5; the /PROP/TYPE13 rotational step "
+                "governs, dt 2.110e-7) and on a coupon node with own mass "
+                "1.96e-7; UNSTABLE on the same coupon's node on a T 1e-6 "
+                "shell (own mass 1.96e-13): IE 1.58e22 at cycle 7, a USER "
+                "BREAK - and the engine still printed NORMAL TERMINATION. See "
+                "ROADMAP (the per-spring stability rule).")
         state.warn(
             "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
             f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "
@@ -6704,49 +7552,56 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
               "once. MEASURED on spotweld-ii/plates.nrbc (nt 4): the starter's "
               "TOTAL MASS goes 2.0048E-04 -> 1.0048E-04, which is LS-DYNA's "
               "own total mass to every printed digit (+99.52 % -> 0.00 %), at "
-              "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION. Pass "
-              "--no-spring-token-mass-compensation to keep the pre-round-5 "
-              "output.")
+              "+1.21 % cycles (2646 -> 2678) and NORMAL TERMINATION."
+            + light_clause
+            + " Pass --no-spring-token-mass-compensation to keep the "
+              "pre-round-5 output.")
     if guarded:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(guarded)} spring node(s) "
             f"{_fmt_node_list(n for n, _s in guarded)} carry NO element mass "
-            "of their own, so k2rad's token was LEFT in place - subtracting "
-            "it would leave those nodes with ZERO mass and the engine divides "
-            "the nodal force by it. The check that reaches a TYPE4/8/13 spring "
-            "is the engine's own: chkmsin.F:52-59 prints NEGATIVE MASS ON NODE "
-            "ID= and resol.F:5460 aborts on it (CALL ARRET(2)); the starter's "
-            "ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that whole "
+            "of their own and no *ELEMENT_MASS, so k2rad's token was LEFT in "
+            "place: subtracting it would leave them at EXACTLY zero mass, "
+            "which nothing catches - chkmsin.F:52-59 prints NEGATIVE MASS ON "
+            "NODE ID= only for MS < 0 (chkmsin.F:53; resol.F:5460 aborts on "
+            "that), and accele.F:67-80 then writes A = 0 for MS = 0, so the "
+            "node silently keeps its velocity (a fixed point if it starts at "
+            "rest; MEASURED on a spring coupon: the unscreened node read "
+            "DX = VX = AX = 0 for the whole run under NORMAL TERMINATION). The "
+            "starter's ERROR 1870 is NOT it - rcheckmass.F:112/:123 gate that "
             "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
             "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
             "is HIGH by "
             f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
-            "them an *ELEMENT_MASS if their dynamics matter. The screen is an "
-            "element-INCIDENCE test (does the node sit on an emitted "
-            "/SHELL, /SH3N, /BRICK, /TETRA*, /BEAM or /TRUSS whose part "
-            "resolves to rho > 0?), not a lumped-mass test: a node carrying a "
-            "real but very small element mass passes it, and the compensation "
-            "then leaves that small mass rather than a negative one.")
+            "them an *ELEMENT_MASS if their dynamics matter - any positive "
+            "*ELEMENT_MASS makes the node eligible, and the token then comes "
+            "off. The screen is the node's OWN mass (its element mass at the "
+            "emitted thickness and density, plus *ELEMENT_MASS), and a "
+            "zero-density part counts as massless.")
     if orphan:
         # Since round 5 a spring node with no /ADMAS gets a NEGATIVE one, so
         # "no /ADMAS to subtract from" is no longer a terminal class. The
         # ONLY way into this list left is a registered node that is not in
         # state.nodes: _register_spring_token_mass refuses a share <= 0, and
         # done / bad / removed / connector_ground / guarded / rigid cover
-        # every other node _spring_token_negative_admas selects. Reach 0 on
-        # every corpus here; probed by calling this function directly.
+        # every other node _spring_token_negative_admas selects. MEASURED
+        # reach: the two *INCLUDE fragments set-yaris-detailed-v2j.key (16
+        # nodes) and set-camry-detailed-v5a.key (10 nodes) of
+        # C:/openradioss_run, converted on their own.
         state.warn(
             f"*ELEMENT_DISCRETE: {len(orphan)} spring node(s) "
             f"{_fmt_node_list(orphan)} were registered for k2rad's token "
             "spring mass but are NOT in the converted model's node set, so "
             "no /ADMAS - positive or negative - could be written for them "
             "and their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. That "
-            "is a k2rad-internal inconsistency, not a property of the deck: "
-            "every producer registers at the line that WRITES the /SPRING "
-            "row and _new_ground_node adds the synthesized ground node to "
-            "state.nodes, so no deck on any corpus here reaches this "
-            "sentence. Please report the deck that did.")
+            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. The "
+            "deck names these nodes but does not define them: it is a "
+            "fragment whose *NODE cards live in another file - MEASURED: the "
+            "*INCLUDE fragments set-yaris-detailed-v2j.key (16 nodes) and "
+            "set-camry-detailed-v5a.key (10 nodes) of C:/openradioss_run, "
+            "converted on their own, land here, and the /SPRING rows that "
+            "name the nodes fail in the starter anyway. Convert the deck that "
+            "includes the fragment.")
     if rigid:
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
@@ -6804,10 +7659,10 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     # The classes the SUBTRACTION above cannot reach — a node with no
     # *ELEMENT_MASS has no /ADMAS to take the token off, and the loop above
     # never even visits it (it iterates state.added_node_masses).
-    neg_groups, guarded = _spring_token_negative_admas(
+    neg_groups, guarded, light = _spring_token_negative_admas(
         state, rigid_nodes, compensated, degenerate)
     _warn_spring_token_mass(state, rigid_nodes, compensated, degenerate,
-                            neg_groups, guarded)
+                            neg_groups, guarded, light)
     if not masses_by_value and not neg_groups:
         return []
     lines: List[str] = []
@@ -6860,6 +7715,290 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
                      "to the /RBODY (master-node mass is folded into its Mass "
                      "field).")
         state.warn(note)
+    return lines
+
+
+def _make_tied_nodes_failure_notes(state: ConversionState) -> List[str]:
+    """ONE warning per deck for every ``*CONSTRAINED_TIED_NODES_FAILURE``
+    card (R14 triage round 6, A4) — a note-only section: it returns ``[]``
+    and draws no id.
+
+    The card is refused BY NAME (``handlers.handle_constrained_tied_nodes_
+    failure``): LS-DYNA releases each coincident group on the volume-weighted
+    plastic strain of the surrounding elements, and no OpenRadioss tie reads
+    an element's strain. Run as a writer section rather than in the handler
+    because the message needs every card's count and every node set, known
+    only after dispatch. The four arms measured on ``contact.n2s-sphere`` are
+    quoted so the reader can see why none of them is written.
+    """
+    cards = state.tied_nodes_failures
+    if not cards:
+        return []
+    hist: Dict[float, int] = {}
+    etypes: Set[int] = set()
+    nodes: Set[int] = set()
+    undefined = 0
+    pid_form: List[int] = []
+    for nsid, eppf, etype, pid in cards:
+        hist[eppf] = hist.get(eppf, 0) + 1
+        etypes.add(etype)
+        if pid > 0:
+            pid_form.append(pid)
+        ns = state.node_sets.get(nsid) if nsid > 0 else None
+        if ns is None:
+            if nsid > 0 or pid <= 0:
+                undefined += 1
+            continue
+        nodes.update(n for n in ns[1] if n > 0)
+    n = len(cards)
+    eppf_txt = ", ".join(f"{e:g} x{k}" for e, k in sorted(hist.items()))
+    tail = ""
+    if undefined:
+        tail += (f" ({undefined} card(s) name a node set the deck does not "
+                 "define.)")
+    if pid_form:
+        tail += (f" {len(pid_form)} card(s) use the PID form, which asks "
+                 f"LS-DYNA to split part(s) {sorted(set(pid_form))} into free "
+                 "elements first - k2rad converts that part as ONE connected "
+                 "mesh, i.e. never separated.")
+    state.warn(
+        f"*CONSTRAINED_TIED_NODES_FAILURE: {n} card(s) tying {len(nodes)} "
+        f"nodes in {n} coincident group(s) (EPPF {eppf_txt}; ETYPE "
+        f"{', '.join(str(e) for e in sorted(etypes))}) are NOT converted, so "
+        "the elements they join are NOT connected at those nodes. LS-DYNA "
+        "keeps each group tied until the volume-weighted plastic strain (or "
+        "volume strain / damage, by material) of the surrounding elements "
+        "exceeds EPPF and then releases the nodes of the elements that "
+        "exceed it (Vol I R17 p.10-226/227, Remark 1). No OpenRadioss tie "
+        "reads an element's strain: /RBODY Ifail 1 fails on a force "
+        "(rgbodv.F:248-267, rbyonf.F:490-498), /INTER/TYPE2 Spotflag 20-22 "
+        "on its own separation (ruptint2.F:138-151), and /SENSOR has no "
+        "element-strain type (hm_read_sensors.F:175-250). MEASURED on "
+        "contact.n2s-sphere (nt 4, against LS-DYNA, which released 78 of the "
+        "841 ties - 5/65/8/0 by EPPF 0.0212/0.085/0.125/0.5 - and eroded "
+        "nothing): left untied, as here, IE -71.8 % / KE +10.6 %; merged "
+        "permanently, IE +333 %; tied by /RBODY with a force failure, IE "
+        "-57 % to +117 % depending on the chosen force scale (diverged at "
+        "4x), with bulk-class releases LS-DYNA never makes; an erosion "
+        "emulation (a /FAIL per EPPF class) IE -16.9 % but 92 of 900 "
+        "elements deleted that LS-DYNA keeps. None of these is the LS-DYNA "
+        "rule, so none is written." + tail)
+    return []
+
+
+#: The /MPC data-row comment (radioss110/RBODY/mpc.cfg, FORMAT(radioss90)).
+_MPC_ROW_HDR = "#  node_ID      Idof   skew_ID               alpha"
+
+
+#: The explanation of each /MPC refusal reason, printed ONCE per card after
+#: the per-term clauses that name the nodes.
+_MPC_REFUSAL_NOTES = {
+    "dof": "DOF 7 is the piezoelectric voltage (Vol I R17 p.10-136) and has "
+           "no /MPC DOF; an /MPC row takes DOF 1-6 only",
+    "coef": "the manual requires a non-zero COEF, and hm_read_mpc.F:124 "
+            "would read 0 as 1",
+    "cid": "no /SKEW of that id is written (starter ERROR 137)",
+    "rigid": "the manual forbids rigid bodies in a constraint equation on the "
+             "explicit solver, and the /RBODY would overwrite the node's "
+             "motion",
+    "mass": "lag_mpc.F divides by the nodal mass",
+    "inertia": "lag_mpc.F divides by the nodal rotary inertia IN, which only a "
+               "shell or a beam carries",
+    "kin": "two kinematic conditions on one DOF are starter WARNING 312 "
+           "(round 5's joint-screw arm measured an energy error of -30.8 % "
+           "with one)",
+    "twice": "the same node AND DOF may not carry two constraint equations "
+             "(the WARNING box of Vol I R17 p.10-135 / p.10-139 forbids an "
+             "explicit-solver node in two equations at all and allows the "
+             "implicit solver to put equations on different DOFs of one "
+             "node; the /MPC rows are solved by Lagrange multipliers, "
+             "resol.F:7880 -> lag_mult.F, so this screen refuses only the "
+             "repeated node-DOF pair and writes a node that two cards "
+             "constrain on DIFFERENT DOFs)",
+}
+
+
+def _constrained_linear_refusals(
+        state: ConversionState, lin,
+        gspc: Dict[int, Tuple[str, str]], tcrc: Dict[int, Tuple[str, str]],
+        skew_spc: Dict[int, Tuple[str, str]], rigid: Set[int],
+        trans_nodes: Set[int], rot_nodes: Set[int], skews: Set[int],
+        used: Set[Tuple[int, int]]) -> List[str]:
+    """Every reason one ``*CONSTRAINED_LINEAR_*`` card cannot be written as
+    an ``/MPC`` — empty when it can. One clause per term that fails, then the
+    explanation of each reason ONCE. PURE: no id is drawn, nothing is
+    written, so a refused card leaves the deck byte-identical to the
+    ``--no-constrained-linear`` arm."""
+    why: List[str] = []
+    notes: List[str] = []
+
+    def add(clause: str, note: str) -> None:
+        why.append(clause)
+        if note not in notes:
+            notes.append(note)
+
+    if not lin.terms:
+        why.append("the card states no term")
+    seen: Set[Tuple[int, int]] = set()
+    for nid, dof, cid, coef in lin.terms:
+        if dof < 1 or dof > 6:
+            add(f"node {nid}: " + ("DOF 7 (the piezoelectric voltage)"
+                                   if dof == 7 else
+                                   "no DOF stated" if dof == 0 else
+                                   f"DOF {dof}"), "dof")
+            continue
+        if coef == 0.0:
+            add(f"node {nid} DOF {dof}: COEF 0", "coef")
+        if nid not in state.nodes:
+            why.append(f"node {nid} is not defined")
+            continue
+        if cid > 0 and cid not in skews:
+            add(f"node {nid}: CID {cid} is not a *DEFINE_COORDINATE_* of this "
+                "deck", "cid")
+        if nid in rigid:
+            add(f"node {nid} is a rigid-body node", "rigid")
+        rot = dof >= 4
+        if rot and nid not in rot_nodes:
+            add(f"node {nid} DOF {dof} has no rotary inertia", "inertia")
+        elif not rot and nid not in trans_nodes:
+            add(f"node {nid} carries no element and no *ELEMENT_MASS", "mass")
+        k = dof - 4 if rot else dof - 1
+        kind = 1 if rot else 0
+        hits: List[str] = []
+        # the TC/RC /BCS map holds both of its producers (round 6, B5)
+        tcrc_label = (
+            "*NODE TC/RC" if nid not in state.constrained_global_tc_rc else
+            "*CONSTRAINED_GLOBAL" if nid not in state.node_tc_rc else
+            "*NODE TC/RC and *CONSTRAINED_GLOBAL")
+        for label, table in (("*BOUNDARY_SPC", gspc), (tcrc_label, tcrc)):
+            code = table.get(nid)
+            if code is None:
+                continue
+            digits = code[kind]
+            if (cid == 0 and digits[k] == "1") or (cid > 0 and "1" in digits):
+                hits.append(label + " /BCS")
+        if skew_spc.get(nid, ("000", "000"))[kind] != "000":
+            hits.append("a skewed *BOUNDARY_SPC /BCS")
+        dirs = state.imp_motion_dirs.get(nid, set())
+        mine = (("XX", "YY", "ZZ") if rot else ("X", "Y", "Z"))
+        if (cid == 0 and mine[k] in dirs) or (cid > 0 and set(mine) & dirs):
+            hits.append("an imposed motion")
+        if nid in state.imp_motion_skew_nodes:
+            hits.append("an imposed motion in a local system")
+        if hits:
+            add(f"node {nid} DOF {dof} already carries " + " and ".join(hits),
+                "kin")
+        if (nid, dof) in used:
+            add(f"node {nid} DOF {dof} is already in an earlier /MPC", "twice")
+        elif (nid, dof) in seen:
+            add(f"node {nid} DOF {dof} is named twice on the card", "twice")
+        seen.add((nid, dof))
+    if notes:
+        why.append("(" + "; ".join(_MPC_REFUSAL_NOTES[n] for n in notes)
+                   + ")")
+    return why
+
+
+def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
+                                  rigid_nodes: Set[int]) -> List[str]:
+    """``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` → one ``/MPC`` per card
+    (R14 triage round 6, A5; default ON, ``--no-constrained-linear``).
+
+    ``/MPC`` (``radioss110/RBODY/mpc.cfg`` FORMAT(radioss90): a title card,
+    then a free list of ``%10d%10d%10d%20lg`` rows ``node_ID Idof skew_ID
+    alpha``; ``hm_read_mpc.F:119-122``). Each term is one row: ``node = NID``,
+    ``Idof = DOF``, ``skew = CID`` (every ``*DEFINE_COORDINATE_*`` is written
+    as the ``/SKEW`` of the same id, ``writer/mesh._make_skews``), ``alpha =
+    COEF``. The engine enforces it by a Lagrange multiplier as the VELOCITY
+    equation ``sum alpha_k v_k = 0`` (``lag_mpc.F``, reached from
+    ``resol.F`` through ``lag_mult.F``) — LS-DYNA's ``sum C_k u_k = C0`` with
+    ``C0 = 0`` from ``t = 0``, which is the only C0 LS-DYNA has (*"LS-DYNA
+    assumes the constant C0 is zero"*, Vol I R17 p.10-136 / p.10-139).
+
+    PLACED immediately before the frequency-domain notes: every section that
+    can write a ``/BCS``, an imposed motion, a rigid body or a free-node pin
+    has run, so the screens read complete registries, and no section after it
+    draws an id, so an emitted ``/MPC`` renumbers nothing. The id is drawn
+    only after the last screen, and the keyword leaves ``skipped_keywords``
+    only when its card is emitted: a refused card keeps its ``#-- SKIPPED:``
+    line.
+    """
+    cards = state.constrained_linears
+    if not cards:
+        return []
+    if not state.options.constrained_linear:
+        state.warn(
+            f"--no-constrained-linear: {len(cards)} *CONSTRAINED_LINEAR_* "
+            f"card(s) (LCID {[c.lcid for c in cards]}) left unconverted and "
+            "listed as skipped: the linear constraint between their nodes is "
+            "lost.")
+        return []
+    skew_spc: Dict[int, Tuple[str, str]] = {}
+    for bc in state.bcs_spcs:
+        if not (bc.cid and (bc.cid in state.coord_sys
+                            or bc.cid in state.coord_nodes)):
+            continue
+        tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
+        rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
+        for nid in state.node_sets.get(bc.nsid, ("", []))[1]:
+            old = skew_spc.get(nid, ("000", "000"))
+            skew_spc[nid] = (_or_dof_codes([old[0], tra]),
+                             _or_dof_codes([old[1], rot]))
+    rigid: Set[int] = set(rigid_nodes) | set(state.rbody_ids)
+    rigid |= {info["ind_node"] for info in rbody_info.values()}
+    trans_nodes: Set[int] = {n for n, m in state.added_node_masses.items()
+                             if m > 0.0}
+    rot_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        trans_nodes.update(e.nodes)
+        rot_nodes.update(e.nodes)
+    for elems in (state.solid_elems, state.tshell_elems):
+        for s in elems:
+            trans_nodes.update(s.nodes)
+    for b in state.beam_elems:
+        trans_nodes.update((b.n1, b.n2))
+        rot_nodes.update((b.n1, b.n2))
+    for d in state.discrete_elems:
+        trans_nodes.update((d.n1, d.n2))
+    gspc = _global_spc_dofs(state)
+    skews: Set[int] = (set(state.coord_sys) | set(state.coord_nodes)
+                       | set(state.coord_vectors))
+    used: Set[Tuple[int, int]] = set()
+    lines: List[str] = []
+    emitted: List[Tuple[int, int]] = []
+    for lin in cards:
+        why = _constrained_linear_refusals(
+            state, lin, gspc, state.node_tc_rc_emitted, skew_spc, rigid,
+            trans_nodes, rot_nodes, skews, used)
+        if why:
+            state.warn(
+                f"*{lin.keyword} {lin.lcid}: NOT converted to /MPC - "
+                + "; ".join(dict.fromkeys(why[:-1] if why[-1].startswith("(")
+                                          else why))
+                + (" " + why[-1] if why[-1].startswith("(") else "")
+                + ". The card is listed as skipped and its linear "
+                "constraint is lost.")
+            continue
+        mpc_id = state.next_id()      # AFTER the last screen that can refuse
+        lines += [f"/MPC/{mpc_id}", f"{lin.keyword}_{lin.lcid}", _MPC_ROW_HDR]
+        for nid, dof, cid, coef in lin.terms:
+            lines.append(f"{_i(nid)}{_i(dof)}{_i(cid)}{_f(coef)}")
+            used.add((nid, dof))
+        lines.append(HDR)
+        state.skipped_keywords.remove(lin.keyword)
+        emitted.append((lin.lcid, mpc_id))
+    if emitted:
+        state.warn(
+            f"*CONSTRAINED_LINEAR_LOCAL/_GLOBAL: {len(emitted)} card(s) -> "
+            f"/MPC {[m for _l, m in emitted]} (LCID "
+            f"{[lcid for lcid, _m in emitted]}; a Lagrange multiplier, "
+            "lag_mpc.F; the velocity form sum alpha_k v_k = 0 enforces "
+            "LS-DYNA's sum C_k u_k = C0 with C0 = 0 from t = 0 - Vol I R17 "
+            "p.10-136/139: 'LS-DYNA assumes the constant C0 is zero'). A term "
+            "in a local system is written with skew_ID = its CID (the /SKEW "
+            "of that id). The /MPC makes the engine solve a Lagrange system "
+            "every cycle (resol.F -> lag_mult.F -> lag_mpc.F). Pass "
+            "--no-constrained-linear to leave the card unconverted.")
     return lines
 
 

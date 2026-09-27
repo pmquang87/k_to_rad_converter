@@ -1108,15 +1108,21 @@ class TestFluidCavitation(unittest.TestCase):
             with self.subTest(cp=cp):
                 self.assertEqual(self._pmin((0.0, cp)), want)
 
-    def test_explicit_zero_CP_is_inexpressible_and_warned(self):
+    def test_explicit_zero_CP_is_not_written_and_warned(self):
         # An explicit CP = 0.0 means "cavitate at p = 0", but Pmin = 0 is the
-        # reader's sentinel for NO cut-off -- the one semantic the Radioss
-        # card cannot state. dyna2rad has the same loss, silently.
+        # reader's sentinel for NO cut-off. dyna2rad has the same loss,
+        # silently. Round 6 measured that Pmin = -1e-20 DOES state the
+        # zero-pressure floor (the *INITIAL_VOID fluids), so the warning no
+        # longer calls it inexpressible -- it names the cell to write; the
+        # mapping itself is unchanged (still Pmin 0).
         res, _ = _convert(MESH(3) + _fluid(card2=(0.0, 0.0)) + "*END\n")
         self.assertEqual(self._pmin((0.0, 0.0)), 0.0)
         hits = _warns(res, "CP=0.0 is written explicitly")
         self.assertEqual(len(hits), 1)
-        self.assertIn("NOT EXPRESSIBLE", hits[0])
+        self.assertIn("is NOT WRITTEN here", hits[0])
+        self.assertIn("hm_read_mat06.F:154", hits[0])
+        self.assertIn("Pmin = -1e-20", hits[0])
+        self.assertNotIn("NOT EXPRESSIBLE", hits[0])
 
     def test_negative_CP_is_sign_corrected_and_warned(self):
         self.assertEqual(self._pmin((0.0, "-1.0E6")), -1.0e6)

@@ -2290,7 +2290,10 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
     # a cohesive", and the only cell the option can produce is 24, which is
     # neither. Passing it would change no answer and would suggest it could.
     if _elform_to_isolid(sec.elform) in (14, 18):
-        return (None, None)     # tet4 (Kessler=14) / cohesive (18): no HG modes
+        # the tetrahedron ELFORMs 10/13 (base Isolid 14 - HA8 in Radioss,
+        # fully integrated; a tet's formulation is its Itetra4/Itetra10) or
+        # cohesive (18): no hourglass modes to remap
+        return (None, None)
     h: Optional[float] = None
     iso: Optional[int] = None
     if state.ctrl_hourglass is not None:

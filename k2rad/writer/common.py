@@ -191,6 +191,30 @@ def _ams_is_emitted(state: ConversionState) -> bool:
 # Formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: The DOF-level residual dump OpenRadioss HAS (R14 triage round 6, B4): named
+#: in every implicit remedy text that tells a user what to do when THEIR
+#: converted run diverges or stalls - the deformable-deformable contact warning
+#: (non-modal decks only: radioss2.F:691 opens the files only for a NONLINEAR
+#: implicit run), the implicit-dynamics + initial-velocity engine-defect warning
+#: and the --implicit-constant-step warning. Defined ONCE (a test checks no
+#: second copy of its opening exists in the package). Verified against the
+#: OpenRadioss source: freimpl.F:320-321 (KEY3 'SOLVI' -> SOLVNFO = 1),
+#: imp_solv.F:1715-1725 (IF (SOLVNFO > ZERO) ... CALL PR_SOLNFO), radioss2.F:691
+#: (IMPL_S > 0 AND ILINE == 0 AND SOLVNFO > 0) and :739 (the _implicit.info
+#: file name).
+_SOLVINFO_HINT = (
+    "To see WHERE an implicit run diverges, add the engine card "
+    "/IMPL/NONLIN/SOLVINFO (no data line) to the _0001.rad: freimpl.F:320-321 "
+    "sets SOLVNFO, and after every nonlinear iteration imp_solv.F:1715-1725 "
+    "calls PR_SOLNFO, which writes the largest residual force, displacement "
+    "increment and correction - each with its node id and DOF - to the run's "
+    "_implicit.info file (radioss2.F:688-760 opens it beside the .hist, .tpl, "
+    ".monitor and .progress files, named after the run's root and number; "
+    "nonlinear implicit runs only, radioss2.F:691). On the R14 ex_27 pair it "
+    "names a node of the runaway interior ring r 2.904 - which node, and on "
+    "how many cut-backs, varies from run to run.")
+
+
 def _f(v: float, w: int = 20) -> str:
     """Right-aligned float field of width *w*."""
     if v == 0.0:
@@ -309,10 +333,20 @@ def _elform_to_isolid(elform: int, assumed_strain_isolid: int = 0) -> int:
         physically dead on it. Still the base for every hex here, and the
         EMITTED value wherever the default is screened off (ELFORM -1/-2, a
         preloaded deck, an unmapped IHQ 8/9/10) or the flag is off.
-      * ``14`` tet4 (Kessler). ``24`` HEPH (1 Gauss point with physical
-        stabilisation). ``1`` the Belytschko-orthogonalised viscous 1-point
-        hex; ``2`` the Hallquist viscous 1-point hex without orthogonality,
-        which is never a target here.
+      * ``14`` HA8, the locking-free FULLY integrated 8-node brick ("HA8
+        Locking-Free 8-Node Solid Element, Co-rotational, Full Integration,
+        Variable Number of Gauss Points", ``radioss2022/PROP/
+        prop_p14_solid.cfg:198``; ``hm_read_prop14.F:277`` and
+        ``hm_read_prop06.F:297`` force it co-rotational, JCVT 2). k2rad also
+        writes it as the property Isolid of its
+        tetrahedron ELFORMs 10/13 (a tetrahedron's formulation is picked by
+        the property's ``Itetra4`` / ``Itetra10`` cells), and since round 6 on
+        an element-frame orthotropic brick
+        (``writer/composites._connectivity_frame_isolid``). ``24`` HEPH (1
+        Gauss point with physical stabilisation). ``1`` the
+        Belytschko-orthogonalised viscous 1-point hex; ``2`` the Hallquist
+        viscous 1-point hex without orthogonality, which is never a target
+        here.
 
     LS-DYNA ELFORM 2 is the FULLY-INTEGRATED selective-reduced (S/R) hex, so it
     maps to the full-integration Isolid 17 and STAYS there: it has no hourglass

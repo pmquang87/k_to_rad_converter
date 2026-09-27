@@ -301,9 +301,15 @@ class Law93Tests(unittest.TestCase):
 
 
 class MatAnisotropicElasticTests(unittest.TestCase):
-    """*MAT_ANISOTROPIC_ELASTIC (the 002 ANIS dialect) is recognized but NOT
-    emitted: the 6x6 C-matrix has no /MAT/LAW93 home. dyna2rad writes a LAW93
-    with all moduli zero and no warning."""
+    """*MAT_ANISOTROPIC_ELASTIC (the 002 ANIS dialect).
+
+    UPDATED DELIBERATELY in round 6 (A6). ``DECK`` has every coupling cell 0
+    and a positive-definite matrix, i.e. it IS orthotropic, so it now
+    converts EXACTLY through the *MAT_ORTHOTROPIC_ELASTIC path (the 3x3
+    normal block inverted, LS-DYNA's minor ratios, GAB/GBC/GCA = C44/C55/
+    C66). The refusal these tests pinned stays for a COUPLED matrix — the
+    ``C14 100`` variant below — where /MAT/LAW93 has no home for the term and
+    dyna2rad writes a LAW93 with all moduli zero and no warning."""
 
     DECK = ("*KEYWORD\n" + NODES + SHELL + PART + SECTION
             + "*MAT_ANISOTROPIC_ELASTIC\n"
@@ -312,20 +318,32 @@ class MatAnisotropicElasticTests(unittest.TestCase):
             + _row(0.0, 0.0, 0.0, 5000.0, 0.0, 0.0, 0.0, 0.0) + "\n"
             + _row(4000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4500.0, 0.0) + "\n"
             + _row(0.0) + "\n" + _row(0.0) + "\n" + END)
+    #: the same material with ONE coupling cell, C14 = 100
+    COUPLED = DECK.replace(
+        _row(0.0, 0.0, 0.0, 5000.0, 0.0, 0.0, 0.0, 0.0),
+        _row(100.0, 0.0, 0.0, 5000.0, 0.0, 0.0, 0.0, 0.0))
 
-    def test_no_zero_modulus_law93_is_written(self):
+    def test_the_zero_coupling_deck_converts_to_LAW93(self):
         result, starter = _convert(self.DECK)
+        self.assertIn("/MAT/LAW93/2", starter)
+        self.assertFalse(any(kw == "MAT_ANISOTROPIC_ELASTIC"
+                             for kw, _ in result.recognized_not_emitted))
+
+    def test_no_zero_modulus_law93_is_written_for_a_coupled_matrix(self):
+        self.assertIn(_row(100.0, 0.0, 0.0, 5000.0), self.COUPLED)
+        result, starter = _convert(self.COUPLED)
         self.assertNotIn("/MAT/LAW93", starter)
 
     def test_warns_loudly_and_names_the_referencing_part(self):
-        result, _ = _convert(self.DECK)
+        result, _ = _convert(self.COUPLED)
         hit = [w for w in result.warnings if "ANISOTROPIC_ELASTIC" in w]
         self.assertTrue(hit, result.warnings)
         self.assertIn("NOT emitted", hit[0])
+        self.assertIn("C14", hit[0])
         self.assertIn("[7]", hit[0])          # the part that references it
 
     def test_reported_as_recognized_not_emitted(self):
-        result, _ = _convert(self.DECK)
+        result, _ = _convert(self.COUPLED)
         self.assertTrue(any(kw == "MAT_ANISOTROPIC_ELASTIC"
                             for kw, _ in result.recognized_not_emitted),
                         result.recognized_not_emitted)

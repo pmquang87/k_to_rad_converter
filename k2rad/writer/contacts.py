@@ -6,13 +6,14 @@ import itertools
 import math
 from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
-from ..state import (ConversionState, ContactSpotweld, ContactThermal,
-                     ContactTied, ContactTiebreak, SolidElem,
+from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
+                     ContactThermal, ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
 from ..topology import TET10_EDGEMID
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
+    _SOLVINFO_HINT,
     _emit_grnod_node,
     _emit_grsh3n,
     _emit_grshel,
@@ -147,11 +148,16 @@ __all__ = [
 # k2rad's own implicit-stabilization stub is ``ssid=0, sstyp=0``.
 
 def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
-    """Every node of *pid* that may sit on a contact SECONDARY side.
+    """Every node of *pid* that may sit on a contact side.
 
-    ONE walk shared by ``_resolve_contact_slave``, ``_tied_slave_nids`` and the
-    styp-0/1 resolvers below — three hand-kept copies of this list is how a
-    family added for one of them goes dead on the others.
+    ONE walk, shared by ``_side_node_ids`` (hence ``_resolve_contact_slave``
+    and the all-rigid-SSID plan's both sides), ``_segment_set_node_ids`` (a
+    ``*SET_SEGMENT_GENERAL`` PART scope) and - since R14 triage round 6 -
+    ``_tied_slave_nids`` (the tied / tiebreak secondary group, the tiebreak's
+    main-node set and the ERROR-556 screen's memo), which until then carried
+    its own inline copy of this list while this docstring said it shared it.
+    Hand-kept copies of this list is how a family added for one of them goes
+    dead on the others.
 
     Thick shells are /BRICK in the emitted deck, so a *PART of them is a
     perfectly good contact side; the container is empty on every deck without
@@ -170,14 +176,21 @@ def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
     (``_solid_contact_master_pids`` / ``_solid_pids_by_part``): a particle has
     no face to build a /SURF from.
 
-    BEAM and TRUSS parts are deliberately NOT walked, and the R14 truss batch
-    left that unchanged rather than "fixing" it in passing. A /TRUSS (or /BEAM)
-    node is a perfectly good contact SECONDARY node in Radioss, so this is a
-    real asymmetry with ``_part_node_ids`` below, which DOES walk
-    ``state.beam_elems`` for the transducer's node inventory — but adding a 1-D
-    family here would change the secondary side of every part-scoped contact on
-    hundreds of corpus decks, which is its own item with its own sweep.
-    Recorded, not silently closed on one side.
+    BEAM and TRUSS parts (``state.beam_elems``: beams, trusses, ``*MAT_SPOTWELD``
+    beams and ELFORM-6 discrete beams) are walked only under
+    ``--beam-contact-secondary`` (round 6, B6; default OFF). A /TRUSS (or
+    /BEAM) node is a perfectly good contact SECONDARY node in Radioss, and
+    LS-DYNA does tie them - on ``spotweld.k`` the weld beam is the tie's SURFA
+    and its swforc records the weld carrying load - but the walk reaches 4 R14
+    deck keys on 4 emitted models by bytes (spotweld.k,
+    ``show-cases/contact-overview/main.k`` and the two R14 Yaris giants -
+    all three giants have campaign rows, from runs WITHOUT the flag) and the
+    two full-vehicle models in ``C:/openradioss_run``, none of which but
+    spotweld.k has been run with it, so it stays opt-in. Only ``n1``/``n2``
+    are taken: ``n3`` is an orientation node, never a contact node. Every node
+    the 1-D walk ADDS (one no other family of the part carries) is recorded in
+    ``state.beam_side_gain`` so the resolvers can name the gain on the side
+    they actually EMIT (:func:`_warn_beam_side_gain`).
     """
     nids: Set[int] = set()
     for e in state.shell_elems:
@@ -195,7 +208,92 @@ def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
     for c in state.sph_elems:
         if c.pid == pid:
             nids.update(c.nodes)
+    if state.options.beam_contact_secondary:
+        oned: Set[int] = set()
+        for e in state.beam_elems:
+            if e.pid == pid:
+                oned.update(n for n in (e.n1, e.n2) if n > 0)
+        gained = oned - nids
+        if gained:
+            state.beam_side_gain.setdefault(pid, set()).update(gained)
+        nids |= oned
     return nids
+
+
+def _beam_side_pids(state: ConversionState, sid: int, styp: int) -> Set[int]:
+    """The PART ids a contact side names directly (type 3 part, 2 part set,
+    0 a ``*SET_SEGMENT_GENERAL`` PART scope) - the scope the 1-D walk of
+    ``--beam-contact-secondary`` reaches."""
+    if styp == 3:
+        return {sid}
+    if styp == 2 and sid in state.part_sets:
+        return set(state.part_sets[sid][1])
+    if styp == 0 and sid in state.segment_sets:
+        return set(state.segment_sets[sid].part_scope)
+    return set()
+
+
+def _warn_beam_side_gain(state: ConversionState, sid: int, styp: int,
+                         emitted) -> None:
+    """``--beam-contact-secondary``: name a side whose EMITTED secondary node
+    group - after the rigid-body filter and every other screen - gained 1-D
+    nodes. Once per (sid, styp): the text names the side, not the contact.
+    Keyed on what is emitted, not on the walk: ``mainboltaexpl``'s side gains
+    its 2 bolt-beam nodes in the walk and the rigid filter removes them again
+    (both are ``*CONSTRAINED_NODAL_RIGID_BODY`` members), so that deck gets no
+    gain warning - only its drop text changes."""
+    if not state.options.beam_contact_secondary:
+        return
+    pids = sorted(p for p in _beam_side_pids(state, sid, styp)
+                  if p in state.beam_side_gain)
+    got: Set[int] = set()
+    for p in pids:
+        got |= state.beam_side_gain[p]
+    hit = got & set(emitted)
+    if not hit or (sid, styp) in state.warned_beam_side_gain:
+        return
+    state.warned_beam_side_gain.add((sid, styp))
+    owners = [p for p in pids if state.beam_side_gain[p] & hit]
+    state.warn(
+        f"--beam-contact-secondary: contact side {sid} (type {styp}) gains "
+        f"{len(hit)} node(s) of the *ELEMENT_BEAM element(s) of part(s) "
+        f"{owners} - k2rad leaves 1-D elements off a contact side by default. "
+        "LS-DYNA does tie them: on spotweld.k the weld beam is the tie's SURFA "
+        "and LS-DYNA's swforc records it carrying 55201 (axial) / 46247 "
+        "(shear) at 1.18e-3.")
+
+
+def _beam_secondary_hint(state: ConversionState, sid: int, styp: int,
+                         rigid_nodes: Set[int]) -> str:
+    """Flag OFF: the lever a dropped, EMPTY secondary side would take. Only
+    when the side's parts own beam/truss nodes that are NOT rigid-body nodes -
+    ``mainboltaexpl``'s side owns 2 beam nodes that are both rigid, so the flag
+    would not rescue it and the hint must not fire there. Reach on the R14
+    roster: spotweld.k and the two Yaris giants."""
+    if state.options.beam_contact_secondary:
+        return ""
+    pids = _beam_side_pids(state, sid, styp)
+    if not pids:
+        return ""
+    owners = sorted({e.pid for e in state.beam_elems if e.pid in pids
+                     and any(n > 0 and n not in rigid_nodes
+                             for n in (e.n1, e.n2))})
+    if not owners:
+        return ""
+    return (f" Part(s) {owners} of this side carry only *ELEMENT_BEAM "
+            "elements, whose nodes k2rad does not put on a contact side by "
+            "default; --beam-contact-secondary does (opt-in, see its --help).")
+
+
+def _warn_beam_contact_secondary_unused(state: ConversionState) -> None:
+    """``--beam-contact-secondary`` passed, and no emitted side gained a node:
+    say so once (called after every contact section)."""
+    if state.options.beam_contact_secondary and not state.warned_beam_side_gain:
+        state.warn(
+            "--beam-contact-secondary was passed but no emitted contact side "
+            "of this deck gained a node from it (no side owns a beam/truss "
+            "element, or its beam nodes are rigid-body members that the rigid "
+            "filter removes again); nothing changed.")
 
 
 def _segment_set_node_ids(state: ConversionState, ss) -> Set[int]:
@@ -365,6 +463,7 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         diag["clean"] = len(clean_nids)
     if not clean_nids:
         return 0
+    _warn_beam_side_gain(state, sid, styp, clean_nids)
     grnod_id = state.next_grnod_id()
     out_lines += _emit_grnod_node(grnod_id, f"contact_slave_{sid}", clean_nids)
     return grnod_id
@@ -662,6 +761,7 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             "pull through a clearance-fit deformable pin to full load. The "
             "interface keeps its mesh-scale Card-3 SST/MST Gapmin — even with "
             "--auto-gapmin on, the recipe protects it from being shrunk."
+            + _solvinfo_tail(state)
         )
     else:
         state.warn(
@@ -674,7 +774,17 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             "--deformable-contact-recipe (GUI: 'Deformable-deformable contact "
             "recipe') = Inacti=5 + L_dtn=50 + QSTAT/DTSCAL=0.05 with a mesh-scale "
             "(Card-3 SST/MST) Gapmin."
+            + _solvinfo_tail(state)
         )
+
+
+def _solvinfo_tail(state: ConversionState) -> str:
+    """The ``/IMPL/NONLIN/SOLVINFO`` remedy, on a NON-modal deck only: the
+    engine opens its files only for a nonlinear implicit run
+    (``radioss2.F:691`` requires ``ILINE == 0``), and a modal deck's engine is
+    ``/IMPL/LINEAR`` (``11.1.sbrake`` prints the deformable-deformable warning
+    and must not be told to add a card that does nothing there)."""
+    return "" if state.is_modal else " " + _SOLVINFO_HINT
 
 
 def _gapmin_override(state: ConversionState, inter_id: int, base: float,
@@ -967,6 +1077,214 @@ def _derived_gapmin_value(state: ConversionState, main_sid: int,
     return min_edge, value, clamped
 
 
+#: The *CONTACT types LS-DYNA ALWAYS offsets a shell surface for, by half its
+#: thickness, whatever *CONTROL_CONTACT SHLTHK says (Vol I R17 p.11-128/129
+#: General Remark 12).
+_LS_ALWAYS_OFFSETS_SHELLS = frozenset({
+    "AIRBAG_SINGLE_SURFACE", "AUTOMATIC_GENERAL", "AUTOMATIC_GENERAL_INTERIOR",
+    "AUTOMATIC_NODES_TO_SURFACE", "AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE",
+    "AUTOMATIC_SINGLE_SURFACE", "AUTOMATIC_SURFACE_TO_SURFACE",
+    "SINGLE_SURFACE",
+})
+
+
+def _contact_base_spelling(keyword: str) -> str:
+    """The contact TYPE a *CONTACT keyword names, as General Remark 12 lists
+    it: ``CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MPP_ID`` ->
+    ``AUTOMATIC_SURFACE_TO_SURFACE`` (``CONTACT_`` and the ``_ID`` /
+    ``_TITLE`` / ``_MPP`` options stripped, in any order).
+
+    Only those three are stripped - deliberately. Remark 12 lists eight BARE
+    penalty types; an option suffix (``_MORTAR``, ``_TIEBREAK``, ``_TIED``,
+    ``_THERMAL``, ``_SMOOTH``, ``_ORTHO_FRICTION`` ...) is left on, so such a
+    spelling is not in :data:`_LS_ALWAYS_OFFSETS_SHELLS` and falls back to the
+    Card B ``THKOPT`` / ``*CONTROL_CONTACT SHLTHK`` rule - the direction that
+    writes nothing new. Some of those suffixes change the formulation
+    (``_MORTAR`` is not a penalty contact, a ``_TIEBREAK`` / ``_TIED`` card is
+    a tie) and none of them was measured; on every corpus here each such
+    interface has a solid secondary (both round-6 reviewers' sweeps), so
+    the rule reaches none of them either way (finalization of round 6)."""
+    kw = keyword.upper().lstrip("*")
+    if kw.startswith("CONTACT_"):
+        kw = kw[len("CONTACT_"):]
+    stripped = True
+    while stripped:
+        stripped = False
+        for opt in ("_TITLE", "_ID", "_MPP"):
+            if kw.endswith(opt):
+                kw = kw[:-len(opt)]
+                stripped = True
+    return kw
+
+
+def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
+                         gapmin: float, main_sid: int, main_styp: int,
+                         sec_sid: int, sec_styp: int, rigid_nodes: Set[int],
+                         keep_rigid: bool) -> Tuple[float, bool]:
+    """The shell-offset Gapmin (R14 triage round 6, A8): ``(gapmin, written)``.
+
+    LS-DYNA offsets a SHELL contact surface by half its thickness and a solid
+    segment by 0 (no SLDTHK is stated on any carrier), so a solid-only-main
+    ``/INTER/TYPE7`` with no stated gap engages a shell secondary at ``t/2``
+    there - and at the starter's own ``0.1 x`` the smallest main-segment side
+    here (``i7sti3.F:1055-1063``). Where LS-DYNA offsets the EMITTED secondary
+    (after the all-rigid-SSID swap), this writes ``Gapmin = t/2``, capped at
+    ``0.5 x`` that side: the :func:`_derived_gapmin_value` ceiling, above
+    which the starter prints WARNING 94 and does NOT clamp (``:1075-1083``).
+
+    LS-DYNA offsets them (Vol I R17): always for a General Remark 12 type
+    (p.11-128/129, :data:`_LS_ALWAYS_OFFSETS_SHELLS`); for any other type
+    when the contact's own optional Card B says ``THKOPT 1`` with its
+    ``SHLTHK`` 1/2 (``THKOPT 2`` = never; p.11-101/102), else when
+    ``*CONTROL_CONTACT SHLTHK`` is 2, or 1 with no rigid shell on the surface
+    (SHLTHK 1 "excludes rigid bodies", p.12-70; a surface MIXING rigid and
+    deformable shells under it is refused as ambiguous).
+
+    *gapmin* comes back unchanged (and ``False``) unless the option is on, no
+    gap is stated (Card-3 SST/MST, ``--inter-gapmin``, ``--auto-gapmin`` all
+    win), the card is neither k2rad's implicit stub nor a press-fit
+    ``INTERFERENCE``, the main is solid-only (the SAME pure predicate the
+    class warning uses), and every node of the group
+    :func:`_resolve_contact_slave` wrote lies on a shell whose nodes are all
+    in that group and on no solid / thick-shell element. The thickness is the
+    one the ``/SHELL`` row carries (``writer/mesh._shell_element_thickness``,
+    else the section ``T1``; a ``*PART_COMPOSITE`` part its valid-ply sum);
+    any ``t <= 0`` is refused. Several thicknesses: written only when EVERY
+    ``t/2`` is above the cap (each then gives the cap), refused by name
+    otherwise. A shell MAIN is a different class - the starter's own default
+    there is the mean shell thickness (``i7sti3.F:1058-1060``) - and is never
+    touched.
+
+    PURE apart from its warnings: no id drawn, no line emitted, so it runs
+    after the resolvers without shifting an auto-id.
+    """
+    if (gapmin != 0.0 or not state.options.shell_offset_gapmin
+            or c.title == AUTO_IMPLICIT_STUB_TITLE or c.interference):
+        return gapmin, False
+    min_edge, _value, _clamped = _derived_gapmin_value(state, main_sid,
+                                                       main_styp)
+    if min_edge <= 0.0:
+        return gapmin, False                    # the main is not solid-only
+    # The group _resolve_contact_slave wrote, filtered exactly as it filters.
+    group = {n for n in _side_node_ids(state, sec_sid, sec_styp)
+             if n > 0 and (keep_rigid or n not in rigid_nodes)}
+    if not group:
+        return gapmin, False
+    for elems in (state.solid_elems, state.tshell_elems):
+        for s in elems:
+            if any(n in group for n in s.nodes):
+                return gapmin, False            # a solid / thick-shell node
+    surface = []
+    covered: Set[int] = set()
+    for e in state.shell_elems:
+        ids = {n for n in e.nodes if n > 0}
+        if ids and ids <= group:
+            surface.append(e)
+            covered |= ids
+    if not surface or covered != group:
+        return gapmin, False                    # not a shell-only surface
+    base = _contact_base_spelling(c.keyword)
+    if base in _LS_ALWAYS_OFFSETS_SHELLS:
+        reason = (f"*CONTACT_{base} always does (Vol I R17 p.11-128/129 "
+                  "Remark 12)")
+    else:
+        if c.thkopt == 2:
+            return gapmin, False                # its own Card B: no offsets
+        if c.thkopt == 1:
+            shlthk = c.shlthk_c
+            reason = (f"its own Card B THKOPT 1 / SHLTHK {shlthk} "
+                      "(p.11-101/102)")
+        else:
+            cc = state.ctrl_contact
+            shlthk = cc.shlthk if cc is not None else 0
+            reason = f"*CONTROL_CONTACT SHLTHK {shlthk} (p.12-70)"
+        if shlthk not in (1, 2):
+            return gapmin, False                # LS-DYNA ignores thickness
+        if shlthk == 1:
+            rigid_pids = rigid_part_ids(state)
+            n_rigid = sum(1 for e in surface if e.pid in rigid_pids)
+            if n_rigid == len(surface):
+                return gapmin, False            # SHLTHK 1 excludes rigid bodies
+            if n_rigid:
+                state.warn(
+                    f"/INTER/TYPE7 {c.inter_id}: the secondary surface mixes "
+                    f"{n_rigid} rigid and {len(surface) - n_rigid} deformable "
+                    f"shells under {reason}, which offsets the deformable ones "
+                    "only - no single constant Gapmin (Igap 0) represents "
+                    "that; the starter's derived gap stands.")
+                return gapmin, False
+    # Imported here, not at module level: writer.mesh imports much of the
+    # writer (lumping.nodal_masses_from_state does the same).
+    from .mesh import _shell_element_thickness, _unique_node_slots
+    thick: List[float] = []
+    for e in surface:
+        part = state.parts.get(e.pid)
+        comp = state.part_composites.get(e.pid)
+        if part is not None and part.secid == 0 and comp is not None:
+            t = sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+        else:
+            sec = state.sec_shells.get(part.secid) if part is not None else None
+            t1 = sec.t1 if sec is not None else 0.0
+            t = _shell_element_thickness(e, _unique_node_slots(e.nodes),
+                                         t1) or t1
+        if not t > 0.0:
+            state.warn(
+                f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary "
+                f"shells here ({reason}), but shell {e.eid} carries no "
+                "positive thickness to offset by; the starter's derived gap "
+                "stands.")
+            return gapmin, False
+        thick.append(t)
+    ts = sorted({_round_sig(t, 6) for t in thick})
+    ceiling = 0.5 * min_edge
+    edge = _round_sig(min_edge)
+    if len(ts) > 1 and any(t / 2.0 <= ceiling for t in ts):
+        state.warn(
+            f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary shells "
+            f"here ({reason}), but the secondary surface carries shells of "
+            f"thickness {ts} and at least one t/2 is below the ceiling "
+            f"0.5 x {edge:g} = {_round_sig(ceiling):g}, so no single constant "
+            "Gapmin (Igap 0) represents it; the starter's derived gap stands.")
+        return gapmin, False
+    half = ts[0] / 2.0
+    clamped = half > ceiling
+    value = _round_sig(ceiling if clamped else half)
+    state.warn(
+        f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary SHELLS by "
+        f"half their thickness here ({reason}), so it engages them at t/2 = "
+        f"{_round_sig(half):g} from the solid main; k2rad writes Gapmin = "
+        f"{value:g}"
+        + (f", CLAMPED to 0.5 x the smallest main-segment side {edge:g} "
+           "(at exactly that cap the starter's own GAP > 0.5*GAPMX test, "
+           "i7sti3.F:1075, can still trip on a floating-point tie and print "
+           "WARNING 94 - informational, the gap is used as written; bend "
+           "prints it, once per domain-decomposition pass)"
+           if clamped else "")
+        + (f" (the secondary surface carries shells of thickness {ts}; every "
+           "t/2 is above the ceiling, so each gives the same Gapmin)"
+           if len(ts) > 1 else "")
+        + f" (the starter would otherwise derive 0.1 x {edge:g} = "
+          f"{_round_sig(0.1 * min_edge):g}, i7sti3.F:1055-1063, and prints "
+          "WARNING 94 without clamping above 0.5 x that side, :1075-1083). "
+          "MEASURED on intro-by-j.-day/adaptive/adaptive-i/bend.k (t 0.381, "
+          "SHLTHK 2, written 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> "
+          "-45.60 % at matched time, closer to LS-DYNA at every sampled time, "
+          "0.98x the cycles; the row stays deviation. Pass "
+          "--no-shell-offset-gapmin to keep the starter's derived gap.")
+    return value, True
+
+
+#: The measured cost of a smaller Gapmin (R14 triage round 6, the 16-arm gap
+#: sweep, cycle ratios base-paired). ONE constant so the warning and its
+#: documentation cannot drift; the contact-step line was read in the engine.
+_GAPMIN_COST_LAW = (
+    "below a deck-specific knee the cycle count grows as ~1/Gapmin - "
+    "twobar 2.17x at 0.02 and 7.71x at 0.005, sphere1 3.45x at 0.05 and "
+    "5.48x at 0.02 - because the contact step is 1/2 (GAPV - PENE)/v "
+    "(i7for3.F:762-770), and on a developing contact the cost grows with "
+    "time (hemi at 0.7322: 0.92x at t 0.4158, 1.48x at t 0.8049)")
+
+
 def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
                           gapmin: float, main_sid: int, main_styp: int,
                           interference: bool = False,
@@ -978,10 +1296,12 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     ``0.1 x min main-surface edge`` itself, and LS-DYNA's own offset on a solid
     segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17 p.11-101 default
     table, p.11-103; ``SAST``/``SBST`` apply to shells and beams only, p.11-33).
-    The FLAG is off by default because the seven interfaces of the class
-    that now HAVE a measured arm disagree with each other (1 better, 3 worse,
-    2 byte-inert, 1 mixed), and 8 of the 15 are still unjudgeable — see
-    ``ConvertOptions.derived_gapmin``.
+    The FLAG is off by default because two rounds of arms - round 6 alone
+    ran 16 gap values on twobar, hemi, sphere1 and bend - found ZERO campaign
+    verdict promotions — on the seven measured interfaces twobar's end value
+    moves while its history does not — and 8 of the 15 (the class before
+    round 6's shell-offset Gapmin took bend's interface) are still
+    unjudgeable — see ``ConvertOptions.derived_gapmin``.
 
     *force* writes the value even with the flag off. Its ONE caller is the
     interface ``--implicit-rigid-secondary-swap`` creates: that swap is made
@@ -1023,15 +1343,15 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         f"{state.options.derived_gapmin_factor:g} x <min edge> on interfaces "
         "like this one (--derived-gapmin-factor F to tune, --inter-gapmin "
         f"{inter_id}=VAL for this one interface). It is OFF by default because "
-        "it is not uniformly good: on sphere1 the same factor writes 0.02921 "
-        "and moves internal energy from -1.66 % to -7.77 % at 4.1x the cycles, "
-        "and of the class's 15 interfaces on the R14 roster 7 now have a "
-        "measured arm and 8 are still UNJUDGEABLE. Of the 7: twobar improves "
-        "(+1151 % -> -5.60 %), sphere1 and bend degrade, 4.3_General_"
-        "Nonlinearity's energy error improves while its internal energy gets "
-        "worse, pend.imp and 06_heating_plate are byte-inert, and hemi pays "
-        "+47.9 % CYCLES to reach the same time. That is 1 better, 3 worse, 2 "
-        "inert, 1 mixed -- not a default.")
+        "two rounds of arms - round 6 alone ran 16 gap values on twobar, hemi, "
+        "sphere1 and bend - found ZERO campaign verdict promotions: of the "
+        "class's 15 interfaces on the R14 roster (counted before round 6's "
+        "shell-offset Gapmin took bend's) 7 now have a measured arm and 8 are "
+        "still UNJUDGEABLE, and among the 7 twobar's end value moves while its "
+        "history does not, sphere1 (the class's only match) goes -1.66 % -> "
+        "-7.77 % at 4.1x the cycles at 0.02921, bend degrades, "
+        "4.3_General_Nonlinearity is mixed, pend.imp and 06_heating_plate are "
+        "byte-inert. THE COST LAW: " + _GAPMIN_COST_LAW + ".")
     state.warn(
         f"/INTER/TYPE7 {inter_id}: the main surface is SOLID segments only and "
         "no Gapmin is stated, so the OpenRadioss starter derives one itself - "
@@ -1043,10 +1363,14 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
         "unless SLDTHK > 0 is stated (Vol I R17 p.11-101 default 0.0, p.11-103; "
         "SAST/SBST apply to shells and beams only, p.11-33) - this deck states "
         "none. MEASURED on intro-by-k.-weimar/contact/twobars/twobar.k (10 mm "
-        "bars, derived GAP MIN 1.0): the derived gap gives internal energy "
-        "37 990 against the LS-DYNA reference 3036.17 (+1151 %), where an "
-        "explicit 0.05 mm gives 2 866 (-5.6 %) and KE 1.127e5 against 1.20123e5 "
-        f"(-6.2 %). {flag_note}")
+        "bars, derived GAP MIN 1.0): the derived gap ENDS at internal energy "
+        "37 990 against the LS-DYNA reference 3036.17 (+1151 %). A smaller "
+        "stated gap moves that end value, not the answer: twobar's END value "
+        "moves (0.05 mm ends at -5.60 %) but its history does not - -91 % at "
+        "the first impact (t 3e-4, where the starter's own gap reads +1 %) - "
+        "and its engine energy error stays -7.1 to -8.2 % at every gap from "
+        "0.1 down to 0.005 mm, so no gap value brings this deck inside the "
+        f"campaign's bands. {flag_note}")
     if interference or not (state.options.derived_gapmin or force):
         return gapmin
     factor = state.options.derived_gapmin_factor
@@ -1762,7 +2086,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                 _describe_empty_secondary(diag, c.ssid, c.sstyp, state),
                                 _RIGID_SECONDARY_REMEDY_SELF
                                 if diag.get("raw") else
-                                _secondary_side_remedy(c.ssid, c.sstyp))
+                                _secondary_side_remedy(c.ssid, c.sstyp)
+                                + _beam_secondary_hint(state, c.ssid, c.sstyp,
+                                                       rigid_nodes))
                 continue
             if not mast_surf:
                 _drop_interface(
@@ -1819,7 +2145,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                             _describe_empty_secondary(diag, sec_sid, sec_styp, state),
                             _rigid_secondary_remedy(plan)
                             if diag.get("raw") else
-                            _secondary_side_remedy(sec_sid, sec_styp),
+                            _secondary_side_remedy(sec_sid, sec_styp)
+                            + _beam_secondary_hint(state, sec_sid, sec_styp,
+                                                   rigid_nodes),
                             note=(_implicit_rigid_secondary_note(state)
                                   if plan == _RS_IMPLICIT else ""))
             continue
@@ -1845,6 +2173,17 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
+        # The shell-offset Gapmin (round 6, A8), on the EMITTED sides. A value
+        # it writes makes _maybe_derived_gapmin return early - the class
+        # warning then does not print for this interface (the A8 warning
+        # replaces it) and --derived-gapmin / the implicit swap's implied gap
+        # yield to it - while _ignore_to_inacti keeps the PRE-A8 gap, so the
+        # implicit "stated engagement gap -> Inacti 0" branch is never
+        # triggered by it.
+        gap_pre_offset = gapmin
+        gapmin, offset_gap = _shell_offset_gapmin(
+            state, c, gapmin, main_sid, main_styp, sec_sid, sec_styp,
+            rigid_nodes, keep_rigid)
         # The implicit swap IMPLIES the derived Gapmin on the interface it
         # creates: the plan refused to swap without one, so this write cannot
         # come out empty — EXCEPT on a press-fit *CONTACT_*_INTERFERENCE,
@@ -1856,6 +2195,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                        main_sid, main_styp,
                                        interference=c.interference,
                                        force=plan == _RS_IMPLICIT_SWAP)
+        inacti_gap = gap_pre_offset if offset_gap else gapmin
         if c.interference:
             # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
             # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
@@ -1867,7 +2207,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         elif c.inter_id in recipe_inacti_ids:
             inacti = 5
         else:
-            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id,
+                                       inacti_gap)
         fric, fric_id = _contact_friction(
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
@@ -4543,21 +4884,9 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
     nids: Set[int] = set()
 
     def add_part_nodes(pid: int) -> None:
-        for e in state.shell_elems:
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for e in state.solid_elems:
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for e in state.tshell_elems:          # /BRICK too — see above
-            if e.pid == pid:
-                nids.update(e.nodes)
-        for c in state.sph_elems:             # SPH: secondary side only
-            if c.pid == pid:
-                nids.update(c.nodes)
-        for e in state.seatbelt_elems:        # 1D belt: secondary side — above
-            if e.pid == pid and not e.is_2d:
-                nids.update((e.n1, e.n2))
+        # the ONE walk (round 6): the same families, so byte-identical by
+        # construction, plus the opt-in 1-D arm of --beam-contact-secondary
+        nids.update(_contact_part_nodes(state, pid))
 
     if styp == 4:
         if sid in state.node_sets:
@@ -4812,7 +5141,8 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                  "resolved to no nodes at all"
                  + ((" — " + _styp01_missing_note(state, c.ssid, c.sstyp))
                     if c.sstyp in (0, 1) and c.ssid else "")),
-                _secondary_side_remedy(c.ssid, c.sstyp))
+                _secondary_side_remedy(c.ssid, c.sstyp)
+                + _beam_secondary_hint(state, c.ssid, c.sstyp, rigid_nodes))
             continue
         master_lines: List[str] = []
         surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
@@ -4824,6 +5154,7 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 "REMEDY: point MSID at a part, part set or *SET_SEGMENT that "
                 "exists in this deck and carries shell/solid elements.")
             continue
+        _warn_beam_side_gain(state, c.ssid, c.sstyp, clean)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
         lines += master_lines
@@ -5420,6 +5751,7 @@ def _make_tiebreak_interfaces(state: ConversionState,
         # group and the starter aborts the whole deck with ERROR 79
         # (DUPLICATE ID IN NODE GROUP DEFINITION). A no-op vs next_id() on any
         # ordinary deck, so it shifts no ids.
+        _warn_beam_side_gain(state, c.ssid, c.sstyp, clean)
         grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"tiebreak_{c.inter_id}_slave",
                                   clean)

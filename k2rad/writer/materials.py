@@ -162,6 +162,10 @@ __all__ = [
     "_ZERO_DENSITY_FLOOR",
     "_resolve_ale_submaterials",
     "_submaterial_has_eos",
+    # R14 triage batch, round 6
+    "_VOID_CAVITATION_PMIN",
+    "_law6_carrier_mids",
+    "_resolve_initial_void_floor",
 ]
 
 
@@ -525,12 +529,19 @@ def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
     ]
 
 
-def _emit_mat_law6_carrier(mid: int, title: str, rho: float) -> List[str]:
+def _emit_mat_law6_carrier(mid: int, title: str, rho: float,
+                           pmin: float = 0.0) -> List[str]:
     """A hydrodynamic /MAT/LAW6 (keyword /MAT/HYD_VISC) carrier for an /EOS.
 
     Minimal form (RHO + blank kinematic-viscosity/Pmin card) exactly as the
     official Drop_Container FSI example pairs it with a separate /EOS block of the
     same id.
+
+    *pmin* is the ``Pmin`` cell (columns 21-40 of the ``Nu Pmin`` line,
+    ``radioss2020/MAT/mat_law6.cfg`` ``%20lg%20lg``). The default 0.0 keeps
+    every existing card byte-identical — and that 0 is NOT "no tension":
+    ``hm_read_mat06.F:154`` reads an exact 0 as -INFINITY. Only the ELFORM-12
+    void cavitation floor passes a value (``_VOID_CAVITATION_PMIN``).
     """
     return [
         f"/MAT/HYD_VISC/{mid}",
@@ -538,7 +549,7 @@ def _emit_mat_law6_carrier(mid: int, title: str, rho: float) -> List[str]:
         "#              RHO_I",
         f"{_f(rho)}",
         "#                 Nu                Pmin",
-        f"{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(pmin)}",
     ]
 
 
@@ -700,6 +711,290 @@ def _null_part_eos_bindings(state: ConversionState) -> dict:
     return out
 
 
+#: The cavitation floor written on an ELFORM-12 void deck's LAW6 carriers
+#: (R14 triage round 6, A1). NOT 0: ``hm_read_mat06.F:154`` reads an exact
+#: ``Pmin`` 0 as -INFINITY (no cutoff at all), and ``eosmain.F:229`` hands
+#: ``PM(37)`` to every EOS routine as the floor of its pressure
+#: (``gruneisen.F:129/132/152``, ``eospolyno.F:104/113/125``). -1e-20 is the
+#: zero-pressure cavitation limit *MAT_NULL Remark 4 describes for PC (Vol II
+#: R17 p.2-190: a very small negative value lets the fluid cavitate there).
+_VOID_CAVITATION_PMIN = -1.0e-20
+
+
+def _law6_carrier_mids(state: ConversionState) -> Set[int]:
+    """The *MAT_NULL mids ``_make_explosive_and_eos_materials`` writes as a
+    ``/MAT/HYD_VISC`` (LAW6) carrier: a null that shares its id with a
+    supported *EOS_* (the legacy pairing) or that a *PART binds to one through
+    its EOSID field. The ONE definition both the emitter loop and the void
+    floor read — a screen of "what will this deck emit" must reproduce the
+    emitter (the #138 rule)."""
+    mids = {m for m in state.mat_null if m in state.eos_cards}
+    mids |= set(_null_part_eos_bindings(state))
+    return mids
+
+
+def _void_keyword(records: List[Tuple[int, bool]]) -> str:
+    """The deck's own spelling of the void cards named in one message."""
+    kinds = {is_set for _sid, is_set in records}
+    if kinds == {False}:
+        return "*INITIAL_VOID_PART"
+    if kinds == {True}:
+        return "*INITIAL_VOID_SET"
+    return "*INITIAL_VOID_PART/_SET"
+
+
+def _linear_eos_tensile_limit_clause(state: ConversionState, mid: int,
+                                     pc: float) -> str:
+    """``" (PC -1 is at or below this EOS's own tensile limit -C1 = -1 ...)"``
+    when the carrier's EOS is a LINEAR polynomial ``P = C1*mu`` (C1 > 0, every
+    other coefficient 0) and the stated PC sits at or below ``-C1``: with
+    ``mu > -1`` that EOS can never produce a pressure below ``-C1``, so the
+    stated cutoff cuts nothing. The limit named is ``-C1``, not the PC: the
+    two are equal only when PC = -C1 exactly (``bird_B``; post-review round
+    of #140 - a PC strictly below -C1 was called the EOS's own limit).
+    Computed from the two numbers the deck gives, never assumed."""
+    eos = state.eos_cards.get(mid)
+    if eos is None:
+        ids = _null_part_eos_bindings(state).get(mid)
+        eos = state.eos_cards.get(ids[0]) if ids else None
+    if eos is None or eos.kind != "POLYNOMIAL":
+        return ""
+    c = eos.params
+    c1 = c.get("c1", 0.0)
+    others = [c.get(k, 0.0) for k in ("c0", "c2", "c3", "c4", "c5")]
+    if c1 > 0.0 and not any(others) and pc <= -c1:
+        return (f" (PC {pc:g} is at or below this EOS's own tensile limit "
+                f"-C1 = {-c1:g}: P = C1*mu with C1 = {c1:g} and mu > -1 "
+                "never goes below -C1, i.e. no cutoff at all)")
+    return ""
+
+
+def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
+    """The ELFORM-12 void cavitation floor (R14 triage round 6, A1): the ONE
+    decision, memoised on ``state.initial_void_floor``.
+
+    Returns ``{LAW6 carrier mid -> the *MAT_NULL PC the floor overrides}`` —
+    the mids whose ``/MAT/HYD_VISC`` get ``Pmin = _VOID_CAVITATION_PMIN`` —
+    and ``{}`` when nothing is written. Both the materials section (which
+    writes the cell) and the ``/INTER/TYPE18`` void warning call this; the
+    second call returns the first call's record, so the warning can never
+    describe a different decision than the card carries, and neither reads
+    the option again.
+
+    THE RULE. A void part QUALIFIES when its *PART exists, its section is
+    ELFORM 12 (Vol I R17 p.28-134: ``*INITIAL_VOID`` is valid only with
+    ELFORM 12, single material with void) and its material is a LAW6 carrier
+    (``_law6_carrier_mids``). When one qualifies, the floor goes on the
+    material of EVERY ELFORM-12 part whose material is a LAW6 carrier — the
+    single-material-and-void formulation holds ONE fluid (p.28-134 forbids
+    mixing fluids of different properties), so every such part is the fluid
+    that refills the void. A stated PC is overridden and named.
+
+    REFUSED (warn, write nothing): a deck that states any
+    ``*ALE_MULTI-MATERIAL_GROUP`` (p.28-134: incompatible in the same run —
+    the whole rule stands down); a void part that is not ELFORM 12 or whose
+    material is not a LAW6 carrier (each named; if no void part qualifies,
+    nothing is written). The void's low DENSITY is never written (cell 2 of
+    the round-6 pre-research, refuted on the coupled decks).
+    """
+    if state.initial_void_floor is not None:
+        return state.initial_void_floor
+    out: Dict[int, float] = {}
+    state.initial_void_floor = out
+    records = list(state.initial_void_parts)
+    if not records:
+        return out
+    kw = _void_keyword(records)
+    # the void part ids, in deck order, de-duplicated; a record that expands
+    # to nothing is a refusal clause of its own
+    void_pids: List[int] = []
+    refused: List[str] = []
+    for sid, is_set in records:
+        if is_set:
+            ps = state.part_sets.get(sid)
+            if ps is None:
+                refused.append(f"part set {sid} is not defined")
+                continue
+            members = list(ps[1])
+        else:
+            if sid not in state.parts:
+                refused.append(f"part {sid} has no *PART")
+                continue
+            members = [sid]
+        for pid in members:
+            if pid not in void_pids:
+                void_pids.append(pid)
+    law6 = _law6_carrier_mids(state)
+    if not state.options.initial_void_floor:
+        state.initial_void_floor_refusal = "--no-initial-void-floor"
+        state.warn(
+            f"--no-initial-void-floor: {kw} {void_pids} is not given the "
+            f"cavitation floor; {_void_pmin_state_clause(state, law6)}.")
+        return out
+    good: List[int] = []
+    for pid in void_pids:
+        part = state.parts.get(pid)
+        sec = state.sec_solids.get(part.secid) if part is not None else None
+        if part is None:
+            refused.append(f"part {pid} has no *PART")
+        elif sec is None:
+            refused.append(f"part {pid}: section {part.secid} is not a "
+                           "*SECTION_SOLID")
+        elif sec.elform != 12:
+            refused.append(f"part {pid}: section {part.secid} is ELFORM "
+                           f"{sec.elform}, not 12")
+        elif part.mid not in law6:
+            refused.append(f"part {pid}: material {part.mid} is not a "
+                           "*MAT_NULL + *EOS_* carrier (no /MAT/HYD_VISC)")
+        else:
+            good.append(pid)
+    if state.ale_mmgs:
+        why = ("the deck states *ALE_MULTI-MATERIAL_GROUP, which Vol I R17 "
+               "p.28-134 forbids together with *INITIAL_VOID in the same run")
+        state.initial_void_floor_refusal = why
+        state.warn(
+            f"{kw} {void_pids}: the cavitation floor was NOT written - {why}. "
+            f"Nothing was changed; {_void_pmin_state_clause(state, law6)}.")
+        return out
+    if refused and not good:
+        why = "; ".join(refused)
+        state.initial_void_floor_refusal = why
+        state.warn(
+            f"{kw} {void_pids}: the cavitation floor was NOT written - {why}. "
+            f"Nothing was changed; {_void_pmin_state_clause(state, law6)}.")
+        return out
+    if refused:
+        state.warn(
+            f"{kw}: {'; '.join(refused)} - so those void part(s) do not "
+            "qualify for the cavitation floor; it is written below for the "
+            f"qualifying void part(s) {good} and their ELFORM-12 fluid only.")
+    fluid_pids = sorted(
+        p.pid for p in state.parts.values()
+        if p.mid in law6 and p.secid in state.sec_solids
+        and state.sec_solids[p.secid].elform == 12)
+    for pid in fluid_pids:
+        mid = state.parts[pid].mid
+        out[mid] = state.mat_null[mid].pc
+    overrides = "".join(
+        f" The deck's PC {pc:g} on *MAT_NULL {mid} is OVERRIDDEN: the void "
+        "formulation needs the zero-pressure floor"
+        + _linear_eos_tensile_limit_clause(state, mid, pc) + "."
+        for mid, pc in sorted(out.items()) if pc != 0.0)
+    void_mids = sorted({state.parts[p].mid for p in good})
+    state.warn(
+        f"{kw} {good} (ELFORM 12, single material with void): the cavitation "
+        f"floor Pmin = -1e-20 is written on /MAT/HYD_VISC {sorted(out)} - the "
+        "void's own material and every LAW6 material of the deck's ELFORM-12 "
+        f"fluid (parts {fluid_pids}); "
+        + _void_fluid_identity_clause(state, sorted(out), void_mids) +
+        " Not 0: hm_read_mat06.F:154 reads Pmin 0 as "
+        "-INFINITY, and every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote "
+        "before this carried 0 (the *MAT_NULL PC cell is not carried) - an "
+        "UNBOUNDED tension in the cells the fluid advects out of (the "
+        "EOS floors its pressure at PMIN, gruneisen.F:129/132/152, "
+        "eospolyno.F:104/113/125). -1e-20 is the zero-pressure cavitation "
+        "limit *MAT_NULL Remark 4 (Vol II R17 p.2-190) describes for PC."
+        + overrides +
+        " The void itself is still converted as ORDINARY FLUID at full "
+        "density: its low density is NOT written (see ROADMAP), so NORMAL "
+        "TERMINATION here is not an LS-DYNA match. MEASURED at nt 4 against "
+        "the LS-DYNA references (round-6 arms): quadrature_B timeout (t "
+        "4.587e-3 of 0.07) -> NORMAL in 1095 cycles, IE +394.0 % / KE "
+        "-40.7 % / energy error -46.5 % (KE 28-41 % low at each fifth of the "
+        "run); bird_B timeout (t 3.223e-5 of 6e-4) -> NORMAL in 2936 cycles, "
+        "at the END IE +1484.7 % / KE +25.9 % / energy error -20.4 % - the "
+        "end KE is a coincidence of the history, which reads KE +765 % at "
+        "cycle 0 and +104 / +382 / +337 / +18 / +26 % at the fifths of the "
+        "run (IE +1111..+1525 % from the second fifth on); bird-el NORMAL "
+        "either way, at the end IE +454.1 -> +1134.6 %, KE +10856 -> -92.1 %, "
+        "energy error -17.9 -> -32.6 % (history with the floor: KE +272 / "
+        "+407 / +143 / -73 / -92 %, IE +1135..+2736 % at every fifth of t_end "
+        "- the OpenRadioss row nearest each, the LS-DYNA glstat interpolated "
+        "at its time; its plate carries nothing: "
+        "*CONSTRAINED_SHELL_IN_SOLID is not converted). Pass "
+        "--no-initial-void-floor to keep Pmin 0.")
+    return out
+
+
+def _carrier_fluid_signature(state: ConversionState, mid: int):
+    """``(RO, EOS kind, EOS parameters)`` of a LAW6 carrier - the fluid
+    properties Vol I R17 p.28-134 requires to be identical between a void and
+    the material that fills it. The EOS is the shared-id card or, failing
+    that, the first *PART EOSID binding (``_law6_carrier_mids``' two routes)."""
+    eos = state.eos_cards.get(mid)
+    if eos is None:
+        ids = _null_part_eos_bindings(state).get(mid)
+        eos = state.eos_cards.get(ids[0]) if ids else None
+    null = state.mat_null.get(mid)
+    return (null.rho if null is not None else None,
+            eos.kind if eos is not None else None,
+            tuple(sorted(eos.params.items())) if eos is not None else ())
+
+
+def _void_fluid_identity_clause(state: ConversionState, mids: List[int],
+                                void_mids: List[int]) -> str:
+    """The sentence that says WHY every floored material is the void's fluid
+    - or, when the ELFORM-12 LAW6 carriers do NOT carry one fluid, that they
+    do not (post-review round of #140: the rule floors every ELFORM-12 LAW6
+    carrier, and the warning called each "the fluid that refills the void"
+    without checking; p.28-134 forbids mixing fluids of different
+    properties with this option, so such a deck is outside the rule and is
+    named, not repaired). Reach 0 on the corpora: every void deck's ELFORM-12
+    carriers are identical (bird-el mats 1 and 2: RO 1e-9, the same
+    *EOS_GRUNEISEN) or single."""
+    sigs = {m: _carrier_fluid_signature(state, m) for m in mids}
+    if len(set(sigs.values())) <= 1:
+        return ("Vol I R17 p.28-134 allows one fluid per "
+                "single-material-and-void mesh, so every such part is the "
+                "fluid that refills the void.")
+    # the reference is the (first) void material's own fluid
+    ref_mid = next((m for m in void_mids if m in sigs), mids[0])
+    ref = sigs[ref_mid]
+    diffs = []
+    for m in mids:
+        rho, kind, params = sigs[m]
+        if (rho, kind, params) == ref:
+            continue
+        what = []
+        if rho != ref[0]:
+            what.append(f"RO {rho:g} against {ref[0]:g}")
+        if kind != ref[1]:
+            what.append(f"/EOS/{kind} against /EOS/{ref[1]}")
+        elif params != ref[2]:
+            what.append("different EOS parameters")
+        diffs.append(f"*MAT_NULL {m} ({', '.join(what)})")
+    return ("but these ELFORM-12 LAW6 materials do NOT carry one fluid - "
+            f"against the void's *MAT_NULL {ref_mid}: "
+            f"{'; '.join(diffs)}. Vol I R17 p.28-134 requires a void's "
+            "constitutive properties to be identical to those of the fluid "
+            "that fills it and does not permit mixing two fluids of different "
+            "properties with *INITIAL_VOID, so this deck is outside the rule: "
+            "the floor is written on every one of them, but only a material "
+            f"identical to the void's own ({void_mids}) can be the fluid that "
+            "refills the void.")
+
+
+def _void_pmin_state_clause(state: ConversionState, law6: Set[int]) -> str:
+    """What a void deck's Pmin cells ARE when the floor is not written - the
+    tail of the refusal / opt-out sentences. It names the ``/MAT/HYD_VISC``
+    cards that exist and says so when there are none (finalization of round
+    6: ``forging_B``'s void is a ``*MAT_INV_HYPERBOLIC_SIN`` and its converted
+    deck carries no ``/MAT/HYD_VISC`` at all, so "the fluid's /MAT/HYD_VISC
+    keep Pmin 0" named cards that do not exist)."""
+    fluid = sorted({p.mid for p in state.parts.values()
+                    if p.mid in law6 and p.secid in state.sec_solids
+                    and state.sec_solids[p.secid].elform == 12})
+    if fluid:
+        return (f"the ELFORM-12 fluid's /MAT/HYD_VISC {fluid} keep Pmin 0, "
+                "which hm_read_mat06.F:154 reads as -INFINITY (no cutoff)")
+    if law6:
+        return (f"no ELFORM-12 part carries a /MAT/HYD_VISC (the deck's "
+                f"*MAT_NULL + *EOS_* carriers {sorted(law6)} are on other "
+                "sections), so there is no cutoff cell for the rule to write")
+    return ("the deck emits no /MAT/HYD_VISC at all (no *MAT_NULL + *EOS_* "
+            "carrier), so there is no cutoff cell for the rule to write")
+
+
 def _void_null_mids(state: ConversionState) -> set:
     """*MAT_NULL mids that stay a plain /MAT/VOID — no /EOS attaches to them.
 
@@ -741,6 +1036,11 @@ def _derive_ideal_gas_p0(state: ConversionState, eos: EosCard,
 
 def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     """/MAT/LAW5 explosives and /MAT/LAW6+/EOS fluids for the coupled ALE path."""
+    # The ELFORM-12 void cavitation floor is decided FIRST, before the early
+    # return below: a void deck whose void is refused (no LAW6 carrier at all,
+    # forging_B) must still be told so. A no-op, and silent, on any deck that
+    # states no *INITIAL_VOID_*.
+    floor = _resolve_initial_void_floor(state)
     if not (state.mat_high_explosive or state.eos_cards or state.eos_jwl):
         return []
     lines: List[str] = []
@@ -906,7 +1206,9 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         _derive_ideal_gas_p0(state, eos, state.mat_null[null_mids[0]].rho)
         for mid in null_mids:
             carrier = state.mat_null[mid]
-            lines += _emit_mat_law6_carrier(mid, carrier.title, carrier.rho)
+            lines += _emit_mat_law6_carrier(
+                mid, carrier.title, carrier.rho,
+                pmin=_VOID_CAVITATION_PMIN if mid in floor else 0.0)
             if mid == eosid:
                 lines += _emit_eos(eos)
             else:
@@ -7499,18 +7801,24 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 "Check the sign convention on card 2 field 2.")
         else:
             # An EXPLICIT CP = 0.0 means "cavitate at zero pressure", which is
-            # NOT the same as a blank cell. Radioss cannot say it: Pmin = 0 is
-            # the reader's "no cut-off" sentinel.
+            # NOT the same as a blank cell. Pmin = 0 cannot say it (it is the
+            # reader's "no cut-off" sentinel); Pmin = -1e-20 can, and is what
+            # the ELFORM-12 *INITIAL_VOID floor writes (round 6) -- this
+            # mapping is not changed yet (ROADMAP, the *MAT_NULL PC/MU item).
             mat.pmin = 0.0
             state.warn(
                 f"{tag}: CP=0.0 is written explicitly on card 2, i.e. "
-                "'cavitate as soon as the pressure reaches 0'. That exact "
-                "threshold is NOT EXPRESSIBLE: Radioss reads Pmin = 0 as the "
-                "sentinel for NO cut-off at all (hm_read_mat06.F:154 "
+                "'cavitate as soon as the pressure reaches 0'. That cut-off "
+                "is NOT WRITTEN here: Radioss reads Pmin = 0 as the sentinel "
+                "for NO cut-off at all (hm_read_mat06.F:154 "
                 "IF (PMIN == ZERO) PMIN = -INFINITY), so the converted fluid "
                 "sustains unlimited tension. dyna2rad has the same loss, "
-                "silently. Use a small negative Pmin (a fraction of the bulk "
-                "modulus) on the emitted /MAT/HYD_VISC if the cavitation "
+                "silently. The zero-pressure threshold IS expressible as a "
+                "tiny negative Pmin: k2rad writes Pmin = -1e-20 on the fluid "
+                "of an ELFORM-12 *INITIAL_VOID deck (round 6; it turned the "
+                "quadrature_B and bird_B timeouts into NORMAL runs there), but "
+                "this card's mapping is not changed yet (ROADMAP) - write "
+                "Pmin = -1e-20 on the emitted /MAT/HYD_VISC if the cavitation "
                 "cut-off matters.")
         if mat.da != 0.0 or mat.db != 0.0:
             state.warn(

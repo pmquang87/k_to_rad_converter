@@ -245,6 +245,88 @@ def build_parser() -> argparse.ArgumentParser:
              "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
     )
     parser.add_argument(
+        "--zero-tolerance-ectol",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give a *CONTROL_IMPLICIT_SOLUTION whose DCTOL/ECTOL/RCTOL are "
+             "all 0 or blank LS-DYNA's own ECTOL default - /IMPL/NONLIN/1 "
+             "Itol 1 (energy) Toli 0.01 - instead of k2rad's force default "
+             "Itol 2. ON by default: LS-DYNA's own d3hsp echoes DCTOL 0.001 / "
+             "ECTOL 0.01 on all 11 R14 decks of this shape (Vol I R17 "
+             "p.12-354) - the rule rests on that echo, not on a measured "
+             "gain. L_A is unchanged; a NEGATIVE cell is a tolerance "
+             "curve (p.12-355) and keeps Itol 2. MEASURED (nt 4 = nt 2): the "
+             "IE history is closer on 3 of the 11 carriers by at most 0.03 "
+             "points of the reference peak and farther on 4; tensile2 ENDS at "
+             "IE +7.36 %% -> "
+             "-0.54 %% at 0.11x the cycles, but reads +53 %% at t 0.80 (+14 %% "
+             "before), its history RMS 2.00 %% -> 2.48 %% of the reference "
+             "peak; doorbeam +380.25 %% -> +582.00 %% (a named regression, "
+             "larger mid-run); ie_shell ERROR -> NORMAL at IE -99.87 %% "
+             "(status only). Use --no-zero-tolerance-ectol to keep Itol 2.",
+    )
+    parser.add_argument(
+        "--constrained-global",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_GLOBAL (a global constraint plane, Vol I "
+             "R17 p.10-38) to /BCS: the nodes within TOL of the plane (or "
+             "1e-6 x the model extent when TOL is 0) get the row's TC/RC "
+             "codes, UNIONED per node over all rows and with the deck's *NODE "
+             "TC/RC cells, one /BCS per union code. ON by default; the "
+             "selection equals LS-DYNA's own d3hsp spc summary on all 3 R14 "
+             "carriers (305, 54, 24737 nodes). Use --no-constrained-global "
+             "to leave those DOFs free.",
+    )
+    parser.add_argument(
+        "--spotweld-node-synthesis",
+        action="store_true",
+        help="Give an ELFORM-9 *MAT_SPOTWELD beam that states ONE node its "
+             "second one where Vol I R17 p.19-3 puts it - the given node "
+             "moved onto the nearest reference segment of the tie that names "
+             "the weld part, a new node on the nearest segment on the other "
+             "side (spotweld.k: 1213 -> z 0, new node at z 2, length 2.0 = "
+             "LS-DYNA's own d3plot and swforc). OFF by default: alone it only "
+             "costs cycles (7.64x on spotweld.k, IE -99.92 %%); with "
+             "--beam-contact-secondary the error changes sign, not size (IE "
+             "-99.9 %% -> +82.0 %% at 7.80x the cycles) and the weld never "
+             "fails (EFAIL has no /PROP/TYPE13 slot).",
+    )
+    parser.add_argument(
+        "--beam-contact-secondary",
+        action="store_true",
+        help="Put the nodes of *ELEMENT_BEAM elements (beams, trusses, "
+             "spotweld and discrete beams) of a part named on a contact side "
+             "into that side's node group. OFF by default: it changes the "
+             "secondary side of 4 R14 deck keys on 4 emitted models "
+             "(spotweld.k, show-cases/contact-overview/main.k and the two "
+             "Yaris giants) and of the two full-vehicle models in "
+             "C:/openradioss_run (4489 / 5102 spotweld beams), none of which "
+             "but spotweld.k has been run with it.",
+    )
+    parser.add_argument(
+        "--implicit-constant-step",
+        action="store_true",
+        help="Cap the implicit step at the deck's own DT0 (/IMPL/DT/STOP "
+             "DT_MAX := DT0) where LS-DYNA runs a CONSTANT step - an implicit "
+             "deck stating IAUTO 0 or no *CONTROL_IMPLICIT_AUTO (Vol I R17 "
+             "p.12-277), with 0 < DT0 < ENDTIM and no stated DTMAX <= DT0. "
+             "OFF by default. Radioss keeps cutting a non-converged step "
+             "(imp_dt.F:107-119) where LS-DYNA would stop; a pinned step "
+             "ended 3 of 3 NORMAL quasi-static R14 decks in ERROR and is not "
+             "offered. MEASURED (nt 4 = nt 2): ex_15 energy error +74.1 %% -> "
+             "-0.9 %% at 3.81x the cycles (its end state at matched time: IE "
+             "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%); ex_11 KE history "
+             "error 16.07 %% -> 1.16 %% at 2.86x (at matched time KE +17.9 %% "
+             "where the shipped run reads +1343 %% - both deviations, the "
+             "engine never prints its last increment); with the default "
+             "--zero-tolerance-ectol, tensile2 75 -> 168 cycles and IE "
+             "-0.54 %% -> -4.36 %% at the END, but its IE history is the "
+             "closest of the measured arms (RMS 2.48 %% -> 1.66 %% of the "
+             "reference peak). Reaches 33 R14 deck keys on 22 emitted "
+             "models.",
+    )
+    parser.add_argument(
         "--discrete-offset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -290,8 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
              "1.0048E-04, LS-DYNA's own to every printed digit, at +1.21 %% cycles "
              "(2646 -> 2678, nt 4). It never writes a non-positive value on "
              "the deck's OWN /ADMAS, and it refuses a spring node that "
-             "carries no element mass of its own (MS <= 0 aborts the engine: "
-             "chkmsin.F:52-59, resol.F:5460).",
+             "carries no mass of its own - no element mass and no "
+             "*ELEMENT_MASS - because subtracting there would leave the node "
+             "at EXACTLY MS = 0, which nothing catches (chkmsin.F:53 aborts "
+             "only on MS < 0; accele.F:67-80 then freezes the node's "
+             "velocity); a node with only an *ELEMENT_MASS (gnonspring: "
+             "TOTAL MASS 1.02e-4 -> 2.0e-6 = LS-DYNA's) IS compensated.",
     )
     parser.add_argument(
         "--shell-to-solid-rbody",
@@ -335,6 +421,85 @@ def build_parser() -> argparse.ArgumentParser:
              "trip the criterion at t 1.269e-3 against its 1.26914e-3 and are "
              "set off at 1.272e-3. Use "
              "--no-generalized-weld-butt to go back to dropping the keyword.",
+    )
+    parser.add_argument(
+        "--initial-void-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a deck that states *INITIAL_VOID_PART/_SET on an ELFORM-12 "
+             "part whose material is a *MAT_NULL + *EOS_* carrier, write "
+             "Pmin = -1e-20 on the /MAT/HYD_VISC of that fluid (the void's "
+             "own material and every LAW6 material of the deck's ELFORM-12 "
+             "fluid). ON by default. NOT 0: hm_read_mat06.F:154 reads an "
+             "exact Pmin 0 as -INFINITY, so the Pmin 0 every *MAT_NULL + "
+             "*EOS_* /MAT/HYD_VISC carried was an UNBOUNDED tension in the "
+             "cells the fluid leaves. "
+             "A stated PC is overridden and named; refused on a deck with "
+             "*ALE_MULTI-MATERIAL_GROUP (Vol I R17 p.28-134) and for a void "
+             "that is not ELFORM 12 or not a LAW6 carrier. The void's low "
+             "density is NOT written. MEASURED at nt 4: quadrature_B timeout "
+             "-> NORMAL in 1095 cycles (IE +394.0 %%), bird_B timeout -> "
+             "NORMAL in 2936 cycles (IE +1484.7 %%), bird-el NORMAL either "
+             "way (IE +454.1 -> +1134.6 %%) - NORMAL, not a match: the void "
+             "is still full of fluid. Use --no-initial-void-floor to keep "
+             "Pmin 0.",
+    )
+    parser.add_argument(
+        "--weld-exponents",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a failing *CONSTRAINED_SPOTWELD / "
+             "*CONSTRAINED_GENERALIZED_WELD_SPOT weld's exponents N / M into "
+             "its /PROP/TYPE13 as alpha1-3 = 1, beta1 = N, beta2 = beta3 = M "
+             "when either differs from 2. ON by default. LS-DYNA fails the "
+             "weld at (fn/SN)^N + (fs/SS)^M >= 1 (Vol I R17 p.10-213); a "
+             "blank TYPE13 cell is read as alpha 1 / beta 2 "
+             "(hm_read_prop13.F:1169-1170), so the blank card was always "
+             "exponent 2. N = M = 2 writes nothing. Radioss sums the two shear "
+             "directions where LS-DYNA uses the resultant: exact at M = 2 and "
+             "for shear on one local axis; with both components present an "
+             "M < 2 weld fails earlier than in LS-DYNA (conservative) and an "
+             "M > 2 weld fails later (non-conservative). MEASURED at nt 4 on "
+             "plates.nrbc / plates.spot "
+             "(N = M = 1): rupture t 3.130e-4 (+29.4 %%) -> 2.460e-4 (+1.7 %% "
+             "against LS-DYNA's 2.4193e-4), 0.899x the cycles, external work "
+             "+60.66 -> +7.83 %%. Use --no-weld-exponents to leave the cells "
+             "blank.",
+    )
+    parser.add_argument(
+        "--constrained-linear",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_LINEAR_LOCAL / _GLOBAL (and the legacy "
+             "*CONSTRAINED_LINEAR) to one /MPC per card: node = NID, Idof = "
+             "DOF, skew = the /SKEW of CID, alpha = COEF. ON by default. The "
+             "engine enforces sum(alpha_k v_k) = 0 by a Lagrange multiplier "
+             "(lag_mpc.F) - LS-DYNA's equation with C0 = 0. Refused by name "
+             "(the card stays skipped) on a DOF that also carries a /BCS or "
+             "an imposed motion (WARNING 312), a rigid-body node, an "
+             "element-free node, a zero COEF (hm_read_mpc.F:124 reads 0 as 1), "
+             "DOF 7, an undefined CID, a (node, DOF) pair used twice. MEASURED "
+             "on plates.lce (the only carrier): starter NUMMPC 1, 0 errors, "
+             "engine identical to the base on all 683 rows. Use "
+             "--no-constrained-linear to leave the card unconverted.",
+    )
+    parser.add_argument(
+        "--shell-offset-gapmin",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a /INTER/TYPE7 whose main side is SOLID segments only and "
+             "whose secondary is SHELLS that LS-DYNA offsets by half their "
+             "thickness (the AUTOMATIC_* / SINGLE_SURFACE spellings always, "
+             "Vol I R17 p.11-128/129; the others under *CONTROL_CONTACT "
+             "SHLTHK 2, SHLTHK 1 on deformable shells, or their own Card B "
+             "THKOPT 1), with no stated gap: write Gapmin = t/2 capped at "
+             "0.5 x the smallest main-segment side, instead of the starter's "
+             "derived 0.1 x that side (i7sti3.F:1055-1063). ON by default. "
+             "Several thicknesses: written only when every t/2 is above the "
+             "cap; a shell main is never touched. MEASURED on bend (t 0.381, "
+             "SHLTHK 2, written the capped 0.127): IE -2.00 -> -1.42 %%, KE "
+             "-68.65 -> -45.60 %% at matched time, 0.98x the cycles. Use "
+             "--no-shell-offset-gapmin to keep the starter's derived gap.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -472,19 +637,24 @@ def build_parser() -> argparse.ArgumentParser:
              "stated (Vol I R17 p.11-101/103). A default-ON WARNING names the "
              "derived value on every carrier whether or not this flag is set. "
              "MEASURED on twobar (10 mm bars, derived GAP MIN 1.0): the "
-             "starter's gap costs +1151 %% internal energy against the LS-DYNA "
-             "reference 3036.17, where this flag writes 0.005 x 10 = 0.05 and "
-             "reads -5.60 %% with KE -6.18 %%. It is OPT-IN because the same "
-             "factor DEGRADES other carriers: on sphere1 it writes 0.02921 "
-             "and internal energy goes -1.66 %% -> -7.77 %% at 4.1x the "
-             "cycles, and bend goes -2.0038 %% -> -2.8418 %% at 4.69x. Class "
-             "census with k2rad's own resolver over the 356-key R14 roster: "
-             "15 interfaces on 14 deck keys, of which SEVEN now have a "
-             "measured solver arm (twobar better; sphere1 and bend worse; "
-             "4.3_General_Nonlinearity mixed - energy error -99.9 %% -> "
-             "-55.2 %% but internal energy -98.87 %% -> -99.92 %%; pend.imp "
-             "and 06_heating_plate byte-inert; hemi +47.9 %% CYCLES to the "
-             "same time) and EIGHT are still unjudgeable. "
+             "starter's gap ENDS at +1151 %% internal energy against the "
+             "LS-DYNA reference 3036.17 and this flag's 0.005 x 10 = 0.05 ends "
+             "at -5.60 %%, but that is the last instant: the first impact "
+             "reads -91 %% and the engine energy error stays -7.1 to -8.2 %% "
+             "at every gap. It is OPT-IN because two rounds of arms - round 6 "
+             "alone ran 16 gap values on twobar, hemi, sphere1 and bend - "
+             "found ZERO campaign verdict promotions (sphere1 -1.66 %% -> "
+             "-7.77 %% at 4.1x the cycles; bend worse; "
+             "4.3_General_Nonlinearity mixed; pend.imp and 06_heating_plate "
+             "byte-inert; of the class's 15 interfaces on 14 deck keys, "
+             "counted before round 6's shell-offset Gapmin took bend's, SEVEN "
+             "have a measured arm and EIGHT are unjudgeable). The cost: below "
+             "a deck-specific knee the cycle count grows as ~1/Gapmin - "
+             "twobar 2.17x at 0.02 and 7.71x at 0.005, sphere1 3.45x at 0.05 "
+             "and 5.48x at 0.02 - because the contact step is 1/2 (GAPV - "
+             "PENE)/v (i7for3.F:762-770), and on a developing contact the "
+             "cost grows with time (hemi at 0.7322: 0.92x at t 0.4158, 1.48x "
+             "at t 0.8049). "
              "A press-fit "
              "*CONTACT_*_INTERFERENCE and k2rad's own injected implicit "
              "stabilization stub are excluded.",
@@ -495,10 +665,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.005,
         metavar="F",
         help="Fraction of the smallest main-surface segment side used by "
-             "--derived-gapmin (default 0.005). MEASURED on twobar: 0.005 "
-             "reads -5.60 %% against its LS-DYNA reference, 0.01 reads "
-             "+14.45 %% (do NOT use), 0.001 -15.22 %% and 1e-4 -55.83 %% at "
-             "43x the cycles.",
+             "--derived-gapmin (default 0.005). Every value below is an END "
+             "state, not an answer: on twobar the factors end at -5.60 %% "
+             "(0.005), +14.45 %% (0.01), -15.22 %% (0.001) and -55.83 %% "
+             "(1e-4, at 43x the cycles), while the first impact reads -91 %% "
+             "at 0.005 and the energy error stays -7.1 to -8.2 %%; cycles "
+             "grow as ~1/factor below the deck's knee (twobar 2.17x at "
+             "0.002, 7.71x at 0.0005).",
     )
     fc.add_argument(
         "--suggest-gapmin",
@@ -747,10 +920,17 @@ def build_parser() -> argparse.ArgumentParser:
              "LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped "
              "full-velocity re-point reads 387.9 (+104.20 %%), this rule "
              "reads 220.58 (+16.12 %%), and the final ke_dev goes +194.03 %% "
-             "-> +47.82 %%. OPT-IN because exactly ONE carrier with an "
-             "LS-DYNA reference exists on this machine. A body the card FULLY "
-             "covers is untouched by construction (its momentum average IS "
-             "the card's velocity, with omega 0).",
+             "-> +47.82 %%. Since round 6 the flag also writes J = -SUM(IN) "
+             "(the body's shell nodes' lumped rotary inertia, which the "
+             "starter ADDS to the tensor, inirby.F:166-168/:355) into every "
+             "body it re-points: NEW INERTIA 0.1977227E-02 = LS-DYNA's, "
+             "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %% (an end value: "
+             "the KE history RMS goes 17.5 %% -> 11.6 %% of the LS peak), "
+             "1.156x the cycles; the IE (the joint path) is not fixed. OPT-IN because "
+             "exactly ONE carrier with an LS-DYNA reference exists on this "
+             "machine. A body the card FULLY covers is untouched by "
+             "construction (its momentum average IS the card's velocity, with "
+             "omega 0).",
     )
     parser.add_argument(
         "--law106-shell-restate",
@@ -975,10 +1155,19 @@ def main(argv=None) -> int:
         fixpoint_count=args.fixpoint_count,
         qstat_dtscal=args.qstat_dtscal,
         arclength_riks=args.arclength_riks,
+        zero_tolerance_ectol=args.zero_tolerance_ectol,
+        implicit_constant_step=args.implicit_constant_step,
         discrete_offset=args.discrete_offset,
         spring_token_mass_compensation=args.spring_token_mass_compensation,
         shell_to_solid_rbody=args.shell_to_solid_rbody,
         generalized_weld_butt=args.generalized_weld_butt,
+        initial_void_floor=args.initial_void_floor,
+        weld_exponents=args.weld_exponents,
+        constrained_linear=args.constrained_linear,
+        constrained_global=args.constrained_global,
+        spotweld_node_synthesis=args.spotweld_node_synthesis,
+        beam_contact_secondary=args.beam_contact_secondary,
+        shell_offset_gapmin=args.shell_offset_gapmin,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

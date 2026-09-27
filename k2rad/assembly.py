@@ -3875,6 +3875,15 @@ _OFFSET_SPECS: Dict[str, object] = {
     # *CONSTRAINED_SHELL_TO_SOLID: NID (a NODE) + NSID (a node SET), one card
     # per tie and stackable, so the repeating "data" shape rather than "cards".
     "CONSTRAINED_SHELL_TO_SOLID": {"data": (0, [(0, "n"), (1, "s")])},
+    # *CONSTRAINED_LINEAR_*: card 1 LCID (the constraint's own id, IDROFF),
+    # then repeating term cards NID DOF [CID] COEF — NID a node, CID a
+    # coordinate system (the *DEFINE_COORDINATE_* bucket). Round 6, A5.
+    "CONSTRAINED_LINEAR_LOCAL": {"cards": {0: [(0, "r")]},
+                                 "data": (1, [(0, "n"), (2, "d")])},
+    "CONSTRAINED_LINEAR_GLOBAL": {"cards": {0: [(0, "r")]},
+                                  "data": (1, [(0, "n")])},
+    "CONSTRAINED_LINEAR": {"cards": {0: [(0, "r")]},
+                           "data": (1, [(0, "n")])},
     "CONSTRAINED_NODE_SET": {"cards": {0: [(0, "s")]}},
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
     # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option
@@ -4775,6 +4784,11 @@ _NO_ID_KEYWORDS = frozenset({
     # k2rad does not read on any *DATABASE_ card, so it is not offset here
     # either; every one of the cards above is in this set for the same reason.)
     "DATABASE_SBTOUT",
+    # *CONSTRAINED_GLOBAL (round 6, B5): TC RC DIR X Y Z TOL - no id cell.
+    # Its plane POINT is literal geometry a TRANID would have to move; the
+    # handler REFUSES a card from a transformed include instead (the tag set
+    # in step 4 below), so it is not in _POINT_BEARING.
+    "CONSTRAINED_GLOBAL",
 })
 
 #: Coordinate/point-bearing keywords other than *NODE: literal geometry that a
@@ -5397,6 +5411,12 @@ def finalize(blocks: List[Block]) -> None:
         _transform_rigidwalls(p, aff, warn)
         _transform_beam_orientation(p, aff, warn)
         _warn_coordinate_bearing(p, aff, warn)
+        for b in p.sub_blocks:
+            # A *CONSTRAINED_GLOBAL plane point is NOT moved by the transform;
+            # applied to the MOVED mesh it would select the wrong nodes, so the
+            # handler refuses the card by name (round 6, B5). Reach 0.
+            if b.keyword == "CONSTRAINED_GLOBAL":
+                b.include_transformed = True
 
     # 5. *NODE_TRANSFORM acts on already-transformed geometry, deck order
     #    (LECTRANS runs after the submodel pass; references read CURRENT

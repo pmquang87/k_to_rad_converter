@@ -580,14 +580,29 @@ class ConstrainedSpotweldTests(unittest.TestCase):
         self.assertTrue(any("TF=" in w for w in result.warnings))
         self.assertTrue(any("EP=" in w for w in result.warnings))
 
-    def test_nonquadratic_exponents_warn(self):
+    def test_non_two_exponents_are_written_and_named(self):
+        """UPDATED DELIBERATELY in round 6 (A2): N / M no longer only warn -
+        they go into the TYPE13 alpha/beta cells (alpha1-3 = 1, beta1 = N,
+        beta2 = beta3 = M), because a blank cell is read as exponent 2
+        (hm_read_prop13.F:1169-1170). The round-4 sentence this test pinned
+        is withdrawn."""
         deck = TWO_SHEET_BASE.replace(
             "{WELD}",
             "*CONSTRAINED_SPOTWELD\n"
             "         1         5    4000.0    2500.0       3.0       4.0\n")
-        result, _ = _convert(deck)
-        self.assertTrue(any("N=3" in w and "quadratic" in w
+        result, starter = _convert(deck)
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        rows = [blk[i + 1] for i, ln in enumerate(blk)
+                if ln.startswith("#") and "alpha" in ln and "beta" in ln]
+        self.assertEqual(len(rows), 6, blk)
+        self.assertEqual([r[40:60].strip() for r in rows[:3]], ["1"] * 3)
+        self.assertEqual([r[60:80].strip() for r in rows[:3]],
+                         ["3", "4", "4"])
+        self.assertEqual([r[40:80].split() for r in rows[3:]],
+                         [["0", "0"]] * 3)
+        self.assertTrue(any("N=3 / M=4" in w and "written into" in w
                             for w in result.warnings))
+        self.assertFalse(any("quadratic" in w for w in result.warnings))
 
     def test_coincident_nodes_warn_and_skip(self):
         deck = TWO_SHEET_BASE.replace(

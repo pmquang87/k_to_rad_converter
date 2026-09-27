@@ -2405,10 +2405,12 @@ class SpringTokenOrphanBranchIsProbed(unittest.TestCase):
     Since round 5 a spring node with no ``/ADMAS`` gets a NEGATIVE one, so
     "nothing to subtract from" stopped being a terminal class: the only way
     into ``orphan`` left is a node registered for the token that is not in
-    ``state.nodes`` at all. No deck reaches that — every producer registers at
-    the line that WRITES the ``/SPRING`` row and ``_register_spring_token_mass``
-    refuses a share ``<= 0`` — so the probe calls the writer directly, which is
-    what a defensive branch can be probed with.
+    ``state.nodes`` at all. ROUND 6 corrected who reaches it: a deck FRAGMENT
+    whose ``*NODE`` cards live in another file — the two ``*INCLUDE``
+    fragments ``set-yaris-detailed-v2j.key`` / ``set-camry-detailed-v5a.key``
+    of ``C:/openradioss_run``, converted on their own — so the sentence no
+    longer calls it a k2rad-internal inconsistency (updated deliberately; the
+    probe still calls the writer directly).
     """
 
     def test_a_registered_node_outside_state_nodes_is_named_as_internal(self):
@@ -2418,7 +2420,7 @@ class SpringTokenOrphanBranchIsProbed(unittest.TestCase):
         loads_writer._warn_spring_token_mass(state, set(), [], [])
         self.assertTrue(_has(state.warnings, "[4242]",
                              "NOT in the converted model's node set",
-                             "k2rad-internal inconsistency"), state.warnings)
+                             "does not define them"), state.warnings)
 
     def test_a_node_the_model_does_have_never_reaches_that_branch(self):
         """The control arm: the same share on a node that DOES exist is a
@@ -2428,7 +2430,7 @@ class SpringTokenOrphanBranchIsProbed(unittest.TestCase):
         state.nodes[7] = (0.0, 0.0, 0.0)
         state.spring_token_mass_by_node[7] = _SHARE
         loads_writer._warn_spring_token_mass(state, {7}, [], [])
-        self.assertFalse(_has(state.warnings, "k2rad-internal inconsistency"),
+        self.assertFalse(_has(state.warnings, "does not define them"),
                          state.warnings)
         self.assertTrue(_has(state.warnings,
                              "SECONDARY nodes of a rigid body"),

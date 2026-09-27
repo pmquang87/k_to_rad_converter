@@ -801,12 +801,23 @@ class SpringTokenMassCompensationTests(unittest.TestCase):
 
     def test_the_degenerate_node_keeps_its_own_mass_and_is_named(self):
         """``gnonspring.k``: ``/ADMAS`` 1e-6 against a token half of 5e-5, 50x.
-        An ``/ADMAS`` must stay positive, so nothing is subtracted."""
+
+        The deck's own ``/ADMAS`` is never driven non-positive, so it is kept
+        AS STATED. UPDATED DELIBERATELY in round 6 (A3): the spring-token
+        screen is now the node's OWN mass — element mass plus its
+        ``*ELEMENT_MASS`` — and this node's 1e-6 IS mass of its own, so the
+        FULL share comes off on a negative card of its own and the node is
+        back at the deck's 1e-6 (on gnonspring.k: starter TOTAL MASS 1.02e-4
+        -> 2.0e-6, LS-DYNA's). The round-4 assertion pinned the element-
+        INCIDENCE screen, which refused this node for having no element."""
         result, starter, _e = _convert(_spring_deck(mass=1.0e-6))
-        admas = self._admas(starter)
-        self.assertEqual([round(m, 12) for m in admas], [1.0e-6])
+        admas = {round(m, 12): v for m, v in self._admas(starter).items()}
+        self.assertEqual(sorted(admas), [-5.0e-5, 1.0e-6], admas)
+        self.assertEqual(admas[1.0e-6], [1, 2])
+        self.assertEqual(admas[-5.0e-5], [1, 2])
         self.assertTrue(_has(result.warnings, "LESS /ADMAS",
-                             "token share 5e-05"))
+                             "token share 5e-05",
+                             "The full share was taken off 2 of them"))
 
     def test_a_node_with_no_admas_and_no_element_mass_is_named(self):
         """``mat_spring.belted-dummy.k``: 122 springs, zero ``/ADMAS``.
@@ -1437,6 +1448,10 @@ class ImplicitAutoDroppedCellsWarningTests(unittest.TestCase):
         hit = [w for w in result.warnings if "*CONTROL_IMPLICIT_AUTO:" in w][0]
         self.assertNotIn("ITEWIN", hit)
         self.assertNotIn("KFAIL", hit)
+        # Round 6 (B2): this deck's stated DTMAX 0.001 <= DT0 0.01 already
+        # caps the step, so --implicit-constant-step would write nothing and
+        # the sentence must not point the user at it.
+        self.assertNotIn("--implicit-constant-step", hit)
 
     def test_a_NEGATIVE_IAUTO_gets_the_load_curve_gloss(self):
         """p.12-277 ``IAUTO LT.0: Curve ID = (-IAUTO) gives time step size as a
@@ -1465,10 +1480,18 @@ class ImplicitAutoDroppedCellsWarningTests(unittest.TestCase):
         self.assertNotIn("/IMPL/DT/2", hits[0])
         self.assertNotIn("/IMPL/DT/2", engine)
 
-    def test_it_does_NOT_fire_without_the_card(self):
+    def test_the_STATED_card_warning_does_NOT_fire_without_the_card(self):
+        """Without the card there are no stated cells to name, so the
+        ``*CONTROL_IMPLICIT_AUTO:`` (stated-card) warning stays silent. Round 6
+        (B2) gives the ABSENT card its own sentence - IAUTO's default 0 is
+        LS-DYNA's constant step (Vol I R17 p.12-277) - under a different
+        prefix, asserted beside it."""
         result, _s, _e = _convert(_implicit_deck())
         self.assertFalse(any("*CONTROL_IMPLICIT_AUTO:" in w
                              for w in result.warnings), result.warnings)
+        self.assertEqual(
+            sum(w.startswith("*CONTROL_IMPLICIT_AUTO is ABSENT")
+                for w in result.warnings), 1, result.warnings)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1783,7 +1806,9 @@ class RigidPartPredicateTests(unittest.TestCase):
     #: union-find) and spells the union out, which the source scan above
     #: allowlists BY NAME.
     _PREDICATE_CALLS = {
-        "contacts.py": 2,     # _side_has_deformable_part, all_deformable_nodes
+        # _side_has_deformable_part, all_deformable_nodes, and (round 6 A8)
+        # _shell_offset_gapmin's SHLTHK 1 "rigid bodies excluded" test
+        "contacts.py": 3,
         "loads.py": 2,        # the _LOCAL triads, the *DAMPING_GLOBAL scope
         "inistate.py": 1,     # the /XREF skip
         "composites.py": 1,   # the *INTEGRATION_SHELL layup drop

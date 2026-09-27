@@ -796,6 +796,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
+        # The J cells exactly as written, for the one post-pass that may
+        # rewrite them (--mass-weighted-inivel, loads.
+        # _apply_mass_weighted_rbody_inertia), which asserts the row it
+        # replaces against this record.
+        rbody_info[pid]["j"] = tuple(j_vals)
         lines += [
             _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",
@@ -1210,6 +1215,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             f"{_i(ind_node)}{_i(0)}{_i(skew_id)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(icog)}{_i(0)}",
         ]
         lines += _inertia_lines(j_vals)
+        rbody_info[cnrb.pid]["j"] = tuple(j_vals)     # see the *MAT_RIGID site
         lines += [
             _RBODY_IOPTOFF_HDR,
             f"{_i(0)}{_i(0)}{_i(0)}",
@@ -1355,6 +1361,9 @@ def _bcs_constrained_nodes(state: ConversionState) -> Set[int]:
     """
     out: Set[int] = {nid for nid, (tc, rc) in state.node_tc_rc.items()
                      if tc or rc}
+    # round 6 (B5): *CONSTRAINED_GLOBAL is a second /BCS producer of the same
+    # TC/RC pass
+    out |= set(state.constrained_global_tc_rc)
     for bc in state.bcs_spcs:
         if not any((bc.dofx, bc.dofy, bc.dofz,
                     bc.dofrx, bc.dofry, bc.dofrz)):
@@ -1532,8 +1541,12 @@ def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
             state.warn(
                 f"{label}: {len(hits)} of this body's nodes {hits[:10]}"
                 + (" ..." if len(hits) > 10 else "")
-                + " also carry a /BCS from *NODE TC/RC or *BOUNDARY_SPC_*, so "
-                  "the starter will raise WARNING ID 312 INCOMPATIBLE "
+                + (" also carry a /BCS from *NODE TC/RC, *CONSTRAINED_GLOBAL "
+                   "or *BOUNDARY_SPC_*, so "
+                   if any(n in state.constrained_global_tc_rc for n in hits)
+                   else " also carry a /BCS from *NODE TC/RC or "
+                        "*BOUNDARY_SPC_*, so ")
+                + "the starter will raise WARNING ID 312 INCOMPATIBLE "
                   "KINEMATIC CONDITIONS (BOUNDARY CONDITION / RIGID BODY). "
                   "MEASURED on the dome: 60 flagged conditions and 0 ERRORs, "
                   "NORMAL TERMINATION. WHICH of the two conditions Radioss "

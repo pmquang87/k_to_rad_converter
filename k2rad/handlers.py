@@ -61,6 +61,8 @@ from .state import (
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld, ShellToSolid,
     GeneralizedWeldButt,
+    ConstrainedGlobal,
+    ConstrainedLinear,
     MatSpringElastoplastic, MatDamperNonlinearViscous,
     MatSpringGeneralNonlinear, MatSpringInelastic,
     MatDiscreteBeamLinear, MatDiscreteBeamNonlinearElastic,
@@ -3852,8 +3854,60 @@ def handle_mat_orthotropic_elastic(block: Block, state: ConversionState) -> None
         beta=beta, macf=int(macf))
 
 
+#: The 12 coupling cells of the *MAT_ANISOTROPIC_ELASTIC 6x6 matrix, by name,
+#: and their (card, field) position on cards 1b.2 / 1b.3 (Vol II R17
+#: p.2-160/161): C14 C24 C34 C44 C15 C25 C35 C45 / C55 C16 C26 C36 C46 C56
+#: C66 AOPT.
+_ANISO_COUPLING_CELLS = (
+    ("C14", 1, 0), ("C24", 1, 1), ("C34", 1, 2), ("C15", 1, 4),
+    ("C25", 1, 5), ("C35", 1, 6), ("C45", 1, 7), ("C16", 2, 1),
+    ("C26", 2, 2), ("C36", 2, 3), ("C46", 2, 4), ("C56", 2, 5),
+)
+
+
+def _aniso_orthotropic_restatement(c11: float, c12: float, c22: float,
+                                   c13: float, c23: float, c33: float
+                                   ) -> Tuple[Optional[Tuple[float, ...]], str,
+                                              Tuple[float, float, float]]:
+    """``((EA, EB, EC, PRBA, PRCA, PRCB), refusal, minors)`` of a zero-coupling
+    normal block — ``None`` and the failing minor when it is not positive
+    definite.
+
+    Closed-form (no numpy — ``k2rad`` has no import-time numpy): Sylvester's
+    leading minors decide positive definiteness, and ``S = C^-1`` is the
+    adjugate over the determinant. LS-DYNA's own convention (Vol II R17
+    p.2-164 Remark 1: ``S12 = -PRBA/EB``, ``S13 = -PRCA/EC``,
+    ``S23 = -PRCB/EC``) gives the MINOR ratios the *MAT_ORTHOTROPIC_ELASTIC
+    path expects — ``writer/composites._emit_mat_law93`` rescales them to
+    LAW93's ``NU12 = PRBA*EA/EB`` itself. (``-S13*EA`` would be the MAJOR
+    ratio: fed to that path it is rescaled a second time, writes NU13 =
+    NU23 = 1.1234 on 11.1.sbrake, and the starter does NOT catch it.)
+    """
+    m1 = c11
+    m2 = c11 * c22 - c12 * c12
+    det = (c11 * (c22 * c33 - c23 * c23)
+           - c12 * (c12 * c33 - c23 * c13)
+           + c13 * (c12 * c23 - c22 * c13))
+    minors = (m1, m2, det)
+    for name, val in (("C11", m1), ("C11*C22 - C12^2", m2),
+                      ("det(C[1..3,1..3])", det)):
+        if not val > 0.0:
+            return None, f"{name} = {val:g} <= 0", minors
+    s11 = (c22 * c33 - c23 * c23) / det
+    s22 = (c11 * c33 - c13 * c13) / det
+    s33 = (c11 * c22 - c12 * c12) / det
+    s12 = -(c12 * c33 - c13 * c23) / det
+    s13 = (c12 * c23 - c13 * c22) / det
+    s23 = -(c11 * c23 - c12 * c13) / det
+    ea, eb, ec = 1.0 / s11, 1.0 / s22, 1.0 / s33
+    return (ea, eb, ec, -s12 * eb, -s13 * ec, -s23 * ec), "", minors
+
+
 def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None:
-    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — recognized, NOT converted.
+    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — its constants restated
+    EXACTLY when the matrix is really orthotropic, refused by name otherwise
+    (R14 triage round 6, A6; the orientation of the /PROP/TYPE6 frame it then
+    rides on is ``writer/composites._connectivity_frame_isolid``'s).
 
     The ANISOTROPIC dialect replaces cards 1a.1/1a.2 with the 21 constants of
     the full 6×6 constitutive matrix (C11…C66) and leaves EA…GCA empty:
@@ -3862,40 +3916,107 @@ def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None
       Card1b.2: C14 C24 C34 C44 C15 C25 C35 C45
       Card1b.3: C55 C16 C26 C36 C46 C56 C66 AOPT
 
-    /MAT/LAW93 has slots for nine ENGINEERING constants only (E11…NU23) — there
-    is no home for the 12 anisotropic coupling terms. dyna2rad's ``p_ConvertMatL2``
-    never checks the dialect and emits a /MAT/LAW93 with ALL MODULI ZERO, with no
-    warning (a silently massless, stiffness-free material). k2rad refuses to
-    write that: the material is skipped with a loud warning instead, so the
-    failure is impossible to miss rather than impossible to see.
+    followed by the two shared axis cards, one card LATER than on the ORTHO
+    dialect (three constant cards instead of two).
 
-    Inverting C to engineering constants is deliberately NOT attempted — it is
-    only well-defined when every coupling term vanishes (i.e. the material is
-    really orthotropic), and guessing the Voigt shear-index convention would
-    risk a silently wrong material, which is exactly the failure mode being
-    avoided here. Rewrite such a material as *MAT_ORTHOTROPIC_ELASTIC.
+    When every coupling cell (C14 C15 C16 C24 C25 C26 C34 C35 C36 C45 C46
+    C56) is 0 — a blank cell is LS-DYNA's own 0 — and C is positive definite
+    (Sylvester on the normal block, C44/C55/C66 > 0), the material IS
+    orthotropic and is restated EXACTLY: the 3x3 normal block is inverted to
+    EA/EB/EC and LS-DYNA's minor ratios PRBA/PRCA/PRCB (Vol II R17 p.2-164
+    Remark 1), and GAB/GBC/GCA = C44/C55/C66 (Voigt 4/5/6 = ab/bc/ca — the
+    order Remark 1 writes the compliance in; 11.1.sbrake's own
+    C44 = (C11 - C12)/2 = 2590 confirms it). The record lands in
+    ``state.mat_orthotropic`` exactly as ``handle_mat_orthotropic_elastic``
+    would store the restated card, and the existing /MAT/LAW93 + /PROP/TYPE6
+    path does the rest.
+
+    Anything else keeps the refusal: /MAT/LAW93 has slots for nine
+    ENGINEERING constants only (E11…NU23) — no home for a coupling term — and
+    a matrix that is not positive definite is not a valid elastic material.
+    dyna2rad's ``p_ConvertMatL2`` never checks the dialect and emits a
+    /MAT/LAW93 with ALL MODULI ZERO, with no warning; k2rad refuses to write
+    that.
     """
     offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    cards = [_card(raw, offset + k, fixed=True, n=8, w=10) for k in range(3)]
+
+    def cell(card: int, i: int) -> float:
+        f = cards[card]
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    f1 = cards[0]
     mid = to_int(f1[0]) if f1 else 0
     pids = sorted(p.pid for p in state.parts.values() if p.mid == mid)
+    c11, c12, c22 = cell(0, 2), cell(0, 3), cell(0, 4)
+    c13, c23, c33 = cell(0, 5), cell(0, 6), cell(0, 7)
+    c44, c55, c66 = cell(1, 3), cell(2, 0), cell(2, 6)
+    nonzero = [name for name, card, i in _ANISO_COUPLING_CELLS
+               if cell(card, i) != 0.0]
+    refusal = ""
+    ortho: Optional[Tuple[float, ...]] = None
+    minors = (0.0, 0.0, 0.0)
+    if not nonzero:
+        ortho, refusal, minors = _aniso_orthotropic_restatement(
+            c11, c12, c22, c13, c23, c33)
+        if ortho is not None:
+            for name, val in (("C44", c44), ("C55", c55), ("C66", c66)):
+                if not val > 0.0:
+                    ortho, refusal = None, f"{name} = {val:g} <= 0"
+                    break
+    if ortho is not None:
+        ea, eb, ec, prba, prca, prcb = ortho
+        (xp, yp, zp, a1, a2, a3, macf,
+         v1, v2, v3, d1, d2, d3, beta) = _read_axis_cards(raw, offset + 3,
+                                                          offset + 4)
+        state.mat_orthotropic[mid] = MatOrthotropicElastic(
+            mid=mid, title=title, rho=cell(0, 1),
+            ea=ea, eb=eb, ec=ec, prba=prba, prca=prca, prcb=prcb,
+            gab=c44, gbc=c55, gca=c66, aopt=cell(2, 7),
+            xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3,
+            v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3,
+            beta=beta, macf=int(macf))
+        state.warn(
+            f"*MAT_ANISOTROPIC_ELASTIC {mid}: all 12 coupling cells are 0 and "
+            "the 6x6 matrix is positive definite (leading minors "
+            f"{minors[0]:g} / {minors[1]:g} / {minors[2]:g}; C44/C55/C66 > 0), "
+            "so the material IS orthotropic and its constants are restated "
+            "EXACTLY through the *MAT_ORTHOTROPIC_ELASTIC path (/MAT/LAW93): "
+            f"EA {ea:.6g}, EB {eb:.6g}, EC {ec:.6g}, PRBA {prba:.6g}, "
+            f"PRCA {prca:.6g}, PRCB {prcb:.6g} (Vol II R17 p.2-164 Remark 1: "
+            "S12 = -PRBA/EB, S13 = -PRCA/EC, S23 = -PRCB/EC), GAB = C44 "
+            f"{c44:g}, GBC = C55 {c55:g}, GCA = C66 {c66:g} (Voigt 4/5/6 = "
+            "ab/bc/ca). MEASURED on nvh/example-11-01/11.1.sbrake.k: starter "
+            "3 ERROR -> 0, TOTAL MASS 7.3107e-4 = LS-DYNA's; on a 1 mm cube of "
+            "its MID 3 at 10 MPa (AOPT 0, the part on Isolid 14 - see the "
+            "/PROP/TYPE6 note) the internal energy reads 0.009118 with an a/b "
+            "face loaded and 0.025347 with the c face loaded, against 0.009097 "
+            "/ 0.025210 by hand (+0.2 % / +0.5 %, explicit hold-window mean).")
+        return
+    if nonzero:
+        why = (f"{len(nonzero)} coupling cell(s) are non-zero "
+               f"({', '.join(nonzero)}). LAW93 holds nine engineering "
+               "constants (E11/E22/E33, G12/G13/G23, NU12/NU13/NU23) and no "
+               "coupling term, so no /MAT is written; if the material is "
+               "orthotropic in OTHER axes, state it as "
+               "*MAT_ORTHOTROPIC_ELASTIC in those axes (AOPT)")
+    else:
+        why = (f"the 6x6 matrix is not positive definite ({refusal}) - not a "
+               "valid elastic material; no /MAT is written")
     state.warn(
-        f"*MAT_ANISOTROPIC_ELASTIC (MAT_002 ANIS dialect) mid={mid}: the full "
-        "6x6 constitutive matrix (C11...C66) has NO /MAT/LAW93 counterpart — "
-        "LAW93 carries nine engineering constants (E11/E22/E33, G12/G13/G23, "
-        "NU12/NU13/NU23) and cannot hold the 12 anisotropic coupling terms. "
-        "The material is NOT emitted. (dyna2rad converts this dialect to a "
-        "/MAT/LAW93 with all moduli ZERO and no warning — a silently "
-        "stiffness-free material; k2rad refuses to write that.) Re-state the "
-        "material as *MAT_ORTHOTROPIC_ELASTIC with EA/EB/EC, GAB/GBC/GCA and "
-        "PRBA/PRCA/PRCB to convert it"
-        + (f"; part(s) {pids} reference it and will have no /MAT."
-           if pids else "."))
+        f"*MAT_ANISOTROPIC_ELASTIC {mid}: {why}. The material is NOT "
+        "emitted. (dyna2rad converts this dialect to a /MAT/LAW93 with all "
+        "moduli ZERO and no warning - a silently stiffness-free material; "
+        "k2rad refuses to write that.)"
+        + (f" Part(s) {pids} reference it and will have no /MAT."
+           if pids else ""))
     state.note_recognized_not_emitted(
         block.keyword,
-        "MAT_002 ANISOTROPIC dialect: the 6x6 C-matrix has no /MAT/LAW93 "
-        "counterpart (see the warning); no /MAT emitted")
+        "MAT_002 ANISOTROPIC dialect: coupled or not positive definite, so "
+        "the 6x6 C-matrix has no /MAT/LAW93 counterpart (see the warning); "
+        "no /MAT emitted")
 
 
 def handle_mat_enhanced_composite_damage(block: Block, state: ConversionState) -> None:
@@ -4438,7 +4559,11 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     rho = to_float(f1[1])
     E   = to_float(f1[6]) if len(f1) > 6 else 0.0
     nu  = to_float(f1[7]) if len(f1) > 7 else 0.0
-    state.mat_null[mid] = MatNull(mid, title, rho, E, nu)
+    # PC (field 3) is read so the ELFORM-12 void cavitation floor can NAME a
+    # stated cutoff it overrides; it is written nowhere else. MU (field 4)
+    # stays unread (ROADMAP, the *MAT_NULL PC/MU item).
+    pc  = to_float(f1[2]) if len(f1) > 2 else 0.0
+    state.mat_null[mid] = MatNull(mid, title, rho, E, nu, pc=pc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6234,6 +6359,19 @@ def _read_contact_ignore(raw: List[str], offset: int, extra: int = 0) -> int:
     return to_int(f[1]) if len(f) > 1 else 0
 
 
+def _read_contact_thkopt(raw: List[str], offset: int,
+                         extra: int = 0) -> Tuple[int, int]:
+    """Read LS-DYNA optional Card B fields 2-3 = ``THKOPT SHLTHK`` (Vol I R17
+    p.11-101/102), one card after Card A: the same Cards-A/B/C-present
+    assumption :func:`_read_contact_ignore` makes (Card C at offset+5).
+    ``(0, 0)`` when the card is absent - the *CONTROL_CONTACT SHLTHK decides.
+    """
+    f = _card(raw, offset + 4 + extra, fixed=True, n=8, w=10)
+    thkopt = to_int(f[1]) if len(f) > 1 and f[1].strip() else 0
+    shlthk = to_int(f[2]) if len(f) > 2 and f[2].strip() else 0
+    return thkopt, shlthk
+
+
 def _read_contact_soft(raw: List[str], offset: int, extra: int = 0) -> int:
     """Read LS-DYNA optional Card A field 1 = SOFT (soft-constraint formulation).
 
@@ -6341,12 +6479,15 @@ _CONTACT_SPELLING_NOTES = {
         "79147.3, and boundary_prescribed_motion.blow-mold from a diverging "
         "run killed at 241934 cycles to NORMAL TERMINATION at t = 0.015 in "
         "25675 cycles. The twobar overshoot is NOT the two-way loss - "
-        "the round-3 verification round MEASURED that "
-        "deck's +1151 % internal energy down to -5.6 % by changing ONE cell "
-        "of the emitted card — the Gapmin the starter derives when k2rad "
-        "leaves it 0 (GAP MIN = 1.0 mm on a 10 mm bar; 0.05 gives IE 2866 "
-        "against the LS-DYNA reference 3036.17 and KE 1.127e5 against "
-        "1.20123e5). A one-way check UNDER-transfers load and cannot produce "
+        "the round-3 verification round moved that deck's +1151 % internal "
+        "energy END value to -5.6 % by changing ONE cell of the emitted card "
+        "— the Gapmin the starter derives when k2rad leaves it 0 (GAP MIN = "
+        "1.0 mm on a 10 mm bar; 0.05 gives IE 2866 against the LS-DYNA "
+        "reference 3036.17 and KE 1.127e5 against 1.20123e5) — but round 6 "
+        "measured its history: -91 % internal energy at the first impact and "
+        "an engine energy error of -7.1 to -8.2 % at every gap, so no gap "
+        "value is the answer on that deck either. A one-way check "
+        "UNDER-transfers load and cannot produce "
         "a 12x energy excess, and twobar's own LS-DYNA glstat books only 6.38 "
         "of sliding-interface energy in 125018 total. An explicit Gapmin is "
         "available for every solid-segment /INTER/TYPE7 with --derived-gapmin, "
@@ -6356,10 +6497,11 @@ _CONTACT_SPELLING_NOTES = {
         "ex_26_thin_shell_elform_16), and i7sti3.F:1055-1063 then derives "
         "`GAP = 0.1 * GAPMX` from the MESH SIZE whenever no shell thickness "
         "was accumulated (`DXM` only ever takes THK, i7sti3.F:506/592/762/845). "
-        "The flag is OFF by default because the seven interfaces of the "
-        "class that have a measured arm disagree with each other (1 better, "
-        "3 worse, 2 byte-inert, 1 mixed) and 8 of the 15 are still "
-        "unjudgeable; a default-ON warning names the derived value on every "
+        "The flag is OFF by default because two rounds of arms - round 6 "
+        "alone ran 16 gap values on twobar, hemi, sphere1 and bend - found "
+        "ZERO campaign verdict promotions (twobar's end value moves, its "
+        "history does not) and 8 of the 15 are still unjudgeable; a "
+        "default-ON warning names the derived value on every "
         "carrier either way. Set one interface with --inter-gapmin "
         "<id>=VAL."),
     "forming": (
@@ -6586,13 +6728,15 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     ignore = _read_contact_ignore(raw, offset, extra)
+    thkopt, shlthk_c = _read_contact_thkopt(raw, offset, extra)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs,
                              keyword=block.keyword,
                              thermal=(_read_contact_thermal(raw, offset)
                                       if thermal else None),
-                             interference=interference)
+                             interference=interference,
+                             thkopt=thkopt, shlthk_c=shlthk_c)
     )
 
 
@@ -7804,7 +7948,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:791, :1205, :1312, :1498, :1651
+    sites register into at the line that writes the card (writer/rbody.py:791, :1210, :1318, :1507, :1664
     — six LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, and round 5 added the
@@ -9868,6 +10012,172 @@ def handle_constrained_generalized_weld_butt(block: Block,
     state.generalized_weld_butts.append(GeneralizedWeldButt(
         nsid=nsid, cid=cid, tfail=g(0), epsf=g(1), sigy=g(2), beta=g(3),
         length=g(4), depth=g(5), title=title))
+
+
+def handle_constrained_linear(block: Block, state: ConversionState) -> None:
+    """``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` / the legacy
+    ``*CONSTRAINED_LINEAR`` — one linear constraint equation (R14 triage
+    round 6, A5; written as ``/MPC`` by
+    ``writer/loads._make_constrained_linear_mpcs``).
+
+    Card 1: ``LCID``; then every data card until the next keyword is ONE term
+    — ``NID DOF CID COEF`` on ``_LOCAL`` (Vol I R17 p.10-138), ``NID DOF
+    COEF`` on ``_GLOBAL`` (p.10-135) and on the legacy spelling (the manual's
+    own example heading, p.10-137). The card is also appended to
+    ``skipped_keywords`` here and taken back out by the writer only when it
+    EMITS the ``/MPC``: a refused or opted-out card keeps its ``#-- SKIPPED:``
+    line, so a refused deck is byte-identical to the ``--no-constrained-linear``
+    arm.
+    """
+    state.skipped_keywords.append(block.keyword)
+    local = block.keyword.endswith("_LOCAL")
+    raw = block.raw
+    lin: Optional[ConstrainedLinear] = None
+    for i in range(_title_offset(block), len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=4 if local else 3, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        if lin is None:
+            lin = ConstrainedLinear(lcid=to_int(f[0]), keyword=block.keyword)
+            continue
+        nid = to_int(f[0])
+        dof = to_int(f[1]) if len(f) > 1 else 0
+        if local:
+            cid = to_int(f[2]) if len(f) > 2 else 0
+            coef = to_float(f[3]) if len(f) > 3 else 0.0
+        else:
+            cid = 0
+            coef = to_float(f[2]) if len(f) > 2 else 0.0
+        lin.terms.append((nid, dof, cid, coef))
+    if lin is not None:
+        state.constrained_linears.append(lin)
+
+
+def handle_constrained_global(block: Block, state: ConversionState) -> None:
+    """``*CONSTRAINED_GLOBAL`` - a global constraint plane, one record per row
+    (R14 triage round 6, B5; written as ``/BCS`` through the ``*NODE`` TC/RC
+    pass by ``writer/loads._make_node_tc_rc_bcs``).
+
+    Card 1 (Vol I R17 p.10-38): ``TC RC DIR X Y Z TOL``, repeated until the
+    next keyword (the carriers state 1, 2 and 5 rows; ``efg/metal-cutting``
+    puts comment lines between its two). A row is REFUSED by name - nothing
+    recorded - when TC or RC is outside 0-7, DIR is not 1/2/3 (the card gives
+    DIR no default) or TOL < 0 (undefined on the card; no value invented).
+
+    Bookkeeping, so a refused card is byte-identical to the opt-out arm (the
+    #138 rule): under ``--no-constrained-global``, when every row of the block
+    is refused, and for a card read from a geometrically transformed
+    ``*INCLUDE_TRANSFORM`` (its plane point is not moved - refused rather than
+    matched against the moved mesh; reach 0), the keyword goes into
+    ``skipped_keywords`` exactly as ``dispatch`` does for an unregistered
+    keyword, so the ``#-- SKIPPED: *CONSTRAINED_GLOBAL`` line stays.
+    """
+    raw = block.raw
+    if not state.options.constrained_global:
+        state.skipped_keywords.append(block.keyword)
+        n = sum(1 for i in range(_title_offset(block), len(raw))
+                if raw[i].strip())
+        state.warn(
+            f"*CONSTRAINED_GLOBAL: {n} constraint plane(s) NOT converted "
+            "(--no-constrained-global): the DOFs they hold fixed ('held fixed "
+            "in time', Vol I R17 p.10-38) are FREE in the converted model; the "
+            "keyword stays in the SKIPPED list exactly as before round 6.")
+        return
+    if block.include_transformed:
+        state.skipped_keywords.append(block.keyword)
+        state.warn(
+            "*CONSTRAINED_GLOBAL inside a geometrically transformed "
+            "*INCLUDE_TRANSFORM: its plane point is literal geometry the TRANID "
+            "transform does NOT move, and matched against the MOVED mesh it "
+            "would select the wrong nodes - the card is NOT converted and its "
+            "DOFs are FREE. State it in the including deck in the final "
+            "position instead.")
+        return
+    kept = 0
+    row_no = 0
+    for i in range(_title_offset(block), len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=7, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        row_no += 1
+        tc = to_int(f[0]) if f[0].strip() else 0
+        rc = to_int(f[1]) if len(f) > 1 and f[1].strip() else 0
+        d = to_int(f[2]) if len(f) > 2 and f[2].strip() else 0
+        tol = to_float(f[6]) if len(f) > 6 and f[6].strip() else 0.0
+        why = []
+        if not 0 <= tc <= 7:
+            why.append(f"TC={tc} is not a Vol I R17 p.10-38 code (0-7)")
+        if not 0 <= rc <= 7:
+            why.append(f"RC={rc} is not a Vol I R17 p.10-38 code (0-7)")
+        if d not in (1, 2, 3):
+            why.append(f"DIR={d} is not 1, 2 or 3 (the card gives DIR no "
+                       "default)")
+        if tol < 0.0:
+            why.append(f"TOL={tol:g} < 0 has no meaning on the card")
+        if why:
+            state.warn(f"*CONSTRAINED_GLOBAL row {row_no} ('{raw[i].strip()}'): "
+                       + "; ".join(why) + " - the row is NOT converted.")
+            continue
+        state.constrained_globals.append(ConstrainedGlobal(
+            tc=tc, rc=rc, dir=d,
+            x=to_float(f[3]) if len(f) > 3 and f[3].strip() else 0.0,
+            y=to_float(f[4]) if len(f) > 4 and f[4].strip() else 0.0,
+            z=to_float(f[5]) if len(f) > 5 and f[5].strip() else 0.0,
+            tol=tol))
+        kept += 1
+    if not kept:
+        state.skipped_keywords.append(block.keyword)
+
+
+def handle_constrained_tied_nodes_failure(block: Block,
+                                          state: ConversionState) -> None:
+    """``*CONSTRAINED_TIED_NODES_FAILURE`` — RECORDED, refused BY NAME, never
+    converted (R14 triage round 6, A4).
+
+    Card 1 (Vol I R17 p.10-226): ``NSID EPPF ETYPE PID``. LS-DYNA keeps each
+    cluster of coincident nodes tied until the volume-weighted plastic strain
+    (volume strain / damage for some materials) of the surrounding elements
+    exceeds EPPF, then releases the nodes of the elements that exceed it
+    (Remark 1, p.10-226/227). No OpenRadioss tie reads an element's strain,
+    so the card is refused: the record is kept only so ONE warning per deck
+    (``writer/loads._make_tied_nodes_failure_notes``) can name the groups,
+    the EPPF classes and the measured substitutes.
+
+    Still listed as SKIPPED, deliberately — the ``handle_initial_void``
+    precedent: registering a handler normally moves a keyword out of
+    ``skipped_keywords`` and deletes its ``#-- SKIPPED:`` block from the
+    starter (on both corpus carriers that is the deck's whole skipped block),
+    a byte change for an item that converts nothing. The card really is
+    unconverted, so the comment stays true and this item moves no byte. It is
+    NOT also put in ``recognized_not_emitted``: ``ConversionResult`` documents
+    the two registries as disjoint.
+
+    NOTE for any future ``/RBODY`` producer for these ties: it MUST follow
+    ``/RBODY`` producers 4 and 5 (``writer/assembly.py``, the
+    ``*CONSTRAINED_SHELL_TO_SOLID`` / ``_GENERALIZED_WELD_BUTT`` bodies: they
+    contribute neither an ``rbody_info`` record nor members to
+    ``rigid_nodes``), never the ``*CONSTRAINED_NODAL_RIGID_BODY`` producer,
+    whose members are unioned into ``rigid_nodes`` — ``_resolve_contact_slave``
+    then strips every such node from the impact contact's secondary group
+    (``writer/contacts.py``), which on ``contact.n2s-sphere`` is all 3364 tied
+    plate nodes.
+    """
+    state.skipped_keywords.append(block.keyword)
+    for i in range(_title_offset(block), len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=4, w=10)
+        if not f or not any(x.strip() for x in f):
+            continue
+        state.tied_nodes_failures.append((
+            to_int(f[0]),
+            to_float(f[1]) if len(f) > 1 else 0.0,
+            to_int(f[2]) if len(f) > 2 else 0,
+            to_int(f[3]) if len(f) > 3 else 0))
 
 
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
@@ -18504,6 +18814,13 @@ HANDLERS = {
     # below); only the base names are registered.
     "CONSTRAINED_GENERALIZED_WELD_BUTT":      handle_constrained_generalized_weld_butt,
     "CONSTRAINED_SHELL_TO_SOLID":             handle_constrained_shell_to_solid,
+    # Round 6: recorded and refused BY NAME (still listed as skipped).
+    "CONSTRAINED_TIED_NODES_FAILURE":         handle_constrained_tied_nodes_failure,
+    "CONSTRAINED_GLOBAL":                     handle_constrained_global,
+    # Round 6: one /MPC per card (writer/loads._make_constrained_linear_mpcs).
+    "CONSTRAINED_LINEAR_LOCAL":               handle_constrained_linear,
+    "CONSTRAINED_LINEAR_GLOBAL":              handle_constrained_linear,
+    "CONSTRAINED_LINEAR":                     handle_constrained_linear,
 
     # Joints. _ID/_TITLE come free via parser._split_keyword; _LOCAL and
     # _FAILURE stay in the base name and need their own literal keys (the same
@@ -19375,10 +19692,21 @@ RARE_MATERIAL_KEYWORDS = {
         "a computational-welding-mechanics thermal material: quiet/dead/live "
         "property pairs interpolated by a phase fraction gamma(T_max) with an "
         "element BIRTH time (Vol II R17 pp.3-25..3-27)",
-        "no Radioss counterpart at all — /HEAT/MAT holds ONE (T0, RHO0_CP, "
-        "AS, BS, T1, AL, BL) set with no birth, no ghost properties and no "
-        "history of the peak temperature (re-verified against "
-        "hm_read_therm.F:157-166, which reads exactly those nine cells)"),
+        "no Radioss counterpart for a BIRTH or a phase fraction — /HEAT/MAT "
+        "holds ONE (T0, RHO0_CP, AS, BS, T1, AL, BL) set "
+        "(hm_read_therm.F:157-166) with no birth, no ghost properties and no "
+        "peak-temperature history. The one shape that IS expressible is a "
+        "card born before t = 0 (TISTART, TIEND <= 0 and TLEND below T0, so "
+        "gamma = 1 from the first step, Vol II R17 pp.3-25..3-27 - every R14 "
+        "carrier's card is this shape): it is then the TD_LC material. It is "
+        "NOT converted because it cannot stand alone: MEASURED on 05_5_1, "
+        "converting it clears the starter's ERROR 179 (2 -> 0 errors) and "
+        "yields a ZERO-HEATING run - 293.15 K on every weld-path node over "
+        "4631 samples, 31 018 explicit conduction cycles to t 46.3 of 99 s at "
+        "the 600 s cap (66 332 for the whole 99 s against LS-DYNA's 64 "
+        "implicit steps) - because the deck's only heat source is the "
+        "*BOUNDARY_THERMAL_WELD_TRAJECTORY, which does not convert. It would "
+        "ship only together with that source (ROADMAP)"),
     "LOAD_THERMAL_D3PLOT": _thermal_deferred(
         "LOAD_THERMAL_D3PLOT",
         "nodal temperatures read from an external d3plot file, named by "
@@ -19606,12 +19934,21 @@ RARE_MATERIAL_KEYWORDS = {
         "distribution is expressible; and it DOES have its own time window "
         "(TSTART/TSTOP and a sensor, hm_read_impflux.F:120/129/130, applied "
         "at fixflux.F:100-115). What survives is the motion: a Goldak source "
-        "travelling along a seam would have to be written as N "
-        "time-windowed /IMPFLUX VOLUME cards, one per seam segment - about 33 "
-        "on 05_1's 425-element seam - which is a synthesis, not a mapping, "
-        "and is not implemented. It is also blocked behind ERROR 179 on a "
-        "*MAT_THERMAL_*-only part, which every carrier of this keyword hits "
-        "first"),
+        "travelling along a seam has to be written as time-windowed "
+        "/IMPFLUX VOLUME cards over groups that follow the torch. MEASURED on "
+        "the first 1.5 s of 05_5_1 (a hand-built arm: 6 windows of 0.25 s, "
+        "each a /GRBRIC of the seam bricks inside the front / rear "
+        "quarter-ellipsoid at the window's mid-time torch position + one "
+        "/IMPFLUX VOLUME per lobe at q = 3FQ/(2 pi a b c), Vol I R17 "
+        "p.5-176): NORMAL in 1005 cycles, the path +7.3 to +12.4 % hot "
+        "behind the torch and 5 to 44 % cool at the leading edge (the front "
+        "arrives late); the whole seam needs 53 /IMPFLUX + 53 /GRBRIC at "
+        "0.25 s windows (134 + 134 at 0.1 s), and the deck's Ff + Fr = 1.5 "
+        "delivers 0.75 Q (the manual expects 2). That is a synthesis, not a "
+        "mapping, and is not implemented (ROADMAP). On the two thermal-only "
+        "carriers (05_5_1, 05_4_1) the seam is also a *MAT_THERMAL_CWM-only "
+        "part (ERROR 179 today); the two coupled ones (05_2, 05_1) give the "
+        "seam a mechanical *MAT_CWM and do not hit it"),
     "BOUNDARY_THERMAL_WELD_TRAJECTORY": _thermal_deferred(
         "BOUNDARY_THERMAL_WELD_TRAJECTORY",
         "the nodal-path spelling of the moving welding heat source, with a "
@@ -19620,7 +19957,8 @@ RARE_MATERIAL_KEYWORDS = {
         "*BOUNDARY_THERMAL_WELD: /IMPFLUX has no position argument and "
         "nothing in the engine moves its group. Its volumetric form and its "
         "own time window DO exist - see that entry for the two withdrawn "
-        "claims and for the N-card synthesis this would need. Censused on "
+        "claims and for the measured window synthesis (53 /IMPFLUX + 53 "
+        "/GRBRIC per seam at 0.25 s). Censused on "
         "F:: 4 cards on 4 keys; 05_1 is IFORM 2, Q 5e6, a 3.0 / b 2.5 / "
         "cf 2.0 / cr 8.0, travelling 6 mm/s for 6.8 s along a 425-element "
         "seam"),

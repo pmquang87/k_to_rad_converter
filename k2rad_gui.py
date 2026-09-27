@@ -98,10 +98,19 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          fixpoint_count_text: str = "",
                          qstat_dtscal_text: str = "",
                          arclength_riks: bool = False,
+                         zero_tolerance_ectol: bool = True,
+                         implicit_constant_step: bool = False,
                          discrete_offset: bool = True,
                          spring_token_mass_compensation: bool = True,
                          shell_to_solid_rbody: bool = True,
                          generalized_weld_butt: bool = True,
+                         initial_void_floor: bool = True,
+                         weld_exponents: bool = True,
+                         constrained_linear: bool = True,
+                         constrained_global: bool = True,
+                         spotweld_node_synthesis: bool = False,
+                         beam_contact_secondary: bool = False,
+                         shell_offset_gapmin: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -225,6 +234,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["arclength_riks"] = bool(arclength_riks)
 
+    kwargs["zero_tolerance_ectol"] = bool(zero_tolerance_ectol)
+
+    kwargs["implicit_constant_step"] = bool(implicit_constant_step)
+
     kwargs["discrete_offset"] = bool(discrete_offset)
 
     kwargs["spring_token_mass_compensation"] = bool(
@@ -233,6 +246,20 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["shell_to_solid_rbody"] = bool(shell_to_solid_rbody)
 
     kwargs["generalized_weld_butt"] = bool(generalized_weld_butt)
+
+    kwargs["initial_void_floor"] = bool(initial_void_floor)
+
+    kwargs["weld_exponents"] = bool(weld_exponents)
+
+    kwargs["constrained_linear"] = bool(constrained_linear)
+
+    kwargs["constrained_global"] = bool(constrained_global)
+
+    kwargs["spotweld_node_synthesis"] = bool(spotweld_node_synthesis)
+
+    kwargs["beam_contact_secondary"] = bool(beam_contact_secondary)
+
+    kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
 
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
@@ -356,10 +383,19 @@ class ConverterGUI:
         self.fixpoint_count = tk.StringVar(value="0")
         self.qstat_dtscal = tk.StringVar(value="")
         self.arclength_riks = tk.BooleanVar(value=False)
+        self.zero_tolerance_ectol = tk.BooleanVar(value=True)
+        self.implicit_constant_step = tk.BooleanVar(value=False)
         self.discrete_offset = tk.BooleanVar(value=True)
         self.spring_token_mass_comp = tk.BooleanVar(value=True)
         self.shell_to_solid_rbody = tk.BooleanVar(value=True)
         self.generalized_weld_butt = tk.BooleanVar(value=True)
+        self.initial_void_floor = tk.BooleanVar(value=True)
+        self.weld_exponents = tk.BooleanVar(value=True)
+        self.constrained_linear = tk.BooleanVar(value=True)
+        self.constrained_global = tk.BooleanVar(value=True)
+        self.spotweld_node_synthesis = tk.BooleanVar(value=False)
+        self.beam_contact_secondary = tk.BooleanVar(value=False)
+        self.shell_offset_gapmin = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -479,8 +515,9 @@ class ConverterGUI:
                      "NEGATIVE /ADMAS (round 5). plates.nrbc TOTAL MASS 2.0048E-04 -> "
                      "1.0048E-04 = LS-DYNA's own, +1.21 % cycles. Never writes a "
                      "non-positive value on the deck's OWN /ADMAS; refuses a spring "
-                     "node with no element mass of its own (MS <= 0 aborts the "
-                     "engine: chkmsin.F:52-59, resol.F:5460)",
+                     "node with no mass of its own (no element mass, no "
+                     "*ELEMENT_MASS): it would sit at exactly MS = 0, which "
+                     "nothing catches (chkmsin.F:53 is MS < 0 only)",
             variable=self.spring_token_mass_comp).grid(
                 row=23, column=0, columnspan=3, sticky="w", **pad)
 
@@ -684,11 +721,99 @@ class ConverterGUI:
             io, text="*INITIAL_VELOCITY on a PARTLY covered rigid body: write "
                      "the momentum average (p.28-129 Remark 3) on the /RBODY "
                      "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
-                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %); the "
-                     "residual is the body's own lumped rotary inertia. One "
+                     "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %), and "
+                     "with J = -SUM(IN) on the /RBODY (round 6) 189.96. One "
                      "carrier with a reference exists, hence opt-in",
             variable=self.mass_weighted_inivel).grid(
                 row=31, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*INITIAL_VOID on an ELFORM-12 fluid: write the cavitation "
+                     "floor Pmin = -1e-20 on its /MAT/HYD_VISC — ON. Pmin 0 "
+                     "is read as -INFINITY (hm_read_mat06.F:154), an unbounded "
+                     "tension. quadrature_B / bird_B timeout → NORMAL (1095 / "
+                     "2936 cycles, nt 4) — NORMAL, not a match: the void's "
+                     "low density is not written",
+            variable=self.initial_void_floor).grid(
+                row=32, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Failing *CONSTRAINED_SPOTWELD: write the deck's exponents "
+                     "N / M into the /PROP/TYPE13 alpha/beta cells when either "
+                     "differs from 2 — ON. A blank cell is read as exponent 2 "
+                     "(hm_read_prop13.F:1169-1170). plates.nrbc / plates.spot "
+                     "(N = M = 1): rupture +29.4 % → +1.7 % against LS-DYNA, "
+                     "0.899x cycles",
+            variable=self.weld_exponents).grid(
+                row=33, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_LINEAR_LOCAL/_GLOBAL → one /MPC per card "
+                     "(Lagrange multiplier, C0 = 0 as in LS-DYNA) — ON. Refused "
+                     "by name on a /BCS or imposed-motion DOF, a rigid-body "
+                     "node, an element-free node, COEF 0, DOF 7. plates.lce: "
+                     "NUMMPC 1, 0 errors, identical on all 683 rows",
+            variable=self.constrained_linear).grid(
+                row=34, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Solid main against a SHELL secondary LS-DYNA offsets "
+                     "(AUTOMATIC_*, or SHLTHK 1/2): write Gapmin = t/2, capped "
+                     "at 0.5 x the smallest main edge - ON. The starter would "
+                     "derive 0.1 x that edge (i7sti3.F:1055-1063). bend: KE "
+                     "-68.65 % -> -45.60 % at matched time, 0.98x cycles",
+            variable=self.shell_offset_gapmin).grid(
+                row=35, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONTROL_IMPLICIT_SOLUTION with DCTOL/ECTOL/RCTOL all 0 or "
+                     "blank: write LS-DYNA's own ECTOL default (/IMPL/NONLIN "
+                     "Itol 1, Toli 0.01) - ON. Its d3hsp echoes 0.001 / 0.01 on "
+                     "all 11 R14 decks of this shape (the reason - no carrier's "
+                     "IE history got closer by more than 0.03 % of its peak). "
+                     "tensile2 ends +7.36 % -> -0.54 % "
+                     "but reads +53 % at t 0.80 (history RMS 2.00 -> 2.48 % of "
+                     "peak); doorbeam +380 % -> +582 % (named); ie_shell "
+                     "ERROR -> NORMAL at -99.87 % (status only)",
+            variable=self.zero_tolerance_ectol).grid(
+                row=36, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Cap the implicit step at the deck's own DT0 where LS-DYNA "
+                     "runs a CONSTANT step (IAUTO 0 or no *CONTROL_IMPLICIT_AUTO, "
+                     "0 < DT0 < ENDTIM) - OFF. ex_15 energy error +74.1 % -> "
+                     "-0.9 % at 3.81x cycles; on the quasi-static decks it costs "
+                     "cycles (tensile2 75 -> 168, IE -0.54 % -> -4.36 % at the "
+                     "end, history RMS 2.48 -> 1.66 % of peak, the closest "
+                     "arm); ex_11 KE +17.9 % at matched time (the shipped run "
+                     "+1343 %)",
+            variable=self.implicit_constant_step).grid(
+                row=37, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_GLOBAL plane -> /BCS on the nodes within TOL "
+                     "(1e-6 x the model extent when TOL is 0), the codes "
+                     "UNIONED per node with the *NODE TC/RC cells - ON. The "
+                     "selection equals LS-DYNA's own spc summary on all 3 R14 "
+                     "carriers (305, 54, 24737 nodes)",
+            variable=self.constrained_global).grid(
+                row=38, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="One-node ELFORM-9 *MAT_SPOTWELD beam: create its second "
+                     "node on the nearest reference segment on the other side "
+                     "(Vol I R17 p.19-3) - OFF. Alone it only costs cycles "
+                     "(7.64x on spotweld.k); pair it with the next box",
+            variable=self.spotweld_node_synthesis).grid(
+                row=39, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Put beam/truss nodes on a contact side that names their "
+                     "part - OFF. With the box above, spotweld.k goes IE "
+                     "-99.9 % -> +82.0 % at 7.80x cycles (the sign changes, "
+                     "not the size) and the weld never fails",
+            variable=self.beam_contact_secondary).grid(
+                row=40, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -803,8 +928,9 @@ class ConverterGUI:
         self._derived_gapmin_entry.pack(side="left", padx=3)
         ttk.Label(fc, text="OFF by default; a warning names the starter-derived GAP MIN either way. "
                            "Gapmin = factor × the smallest main-surface segment side (ceiling 0.5 ×). "
-                           "twobar: the starter's own gap is +1151 % vs its LS reference, 0.005 is -5.6 % — "
-                           "but sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles, and 8 of the class's "
+                           "No gap value has promoted a campaign verdict (twobar's end value moves, "
+                           "its history does not; sphere1 goes -1.66 % → -7.77 % at 4.1× the cycles); "
+                           "cycles grow as ~1/Gapmin below a deck-specific knee, and 8 of the class's "
                            "15 R14-roster interfaces are unmeasured.",
                   foreground="gray").grid(row=22, column=1, columnspan=2, sticky="w", padx=6)
 
@@ -927,10 +1053,19 @@ class ConverterGUI:
                 fixpoint_count_text=self.fixpoint_count.get(),
                 qstat_dtscal_text=self.qstat_dtscal.get(),
                 arclength_riks=self.arclength_riks.get(),
+                zero_tolerance_ectol=self.zero_tolerance_ectol.get(),
+                implicit_constant_step=self.implicit_constant_step.get(),
                 discrete_offset=self.discrete_offset.get(),
                 spring_token_mass_compensation=self.spring_token_mass_comp.get(),
                 shell_to_solid_rbody=self.shell_to_solid_rbody.get(),
                 generalized_weld_butt=self.generalized_weld_butt.get(),
+                initial_void_floor=self.initial_void_floor.get(),
+                weld_exponents=self.weld_exponents.get(),
+                constrained_linear=self.constrained_linear.get(),
+                constrained_global=self.constrained_global.get(),
+                spotweld_node_synthesis=self.spotweld_node_synthesis.get(),
+                beam_contact_secondary=self.beam_contact_secondary.get(),
+                shell_offset_gapmin=self.shell_offset_gapmin.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1058,6 +1193,12 @@ class ConverterGUI:
                                                  else f"{_qd:g}"))
         if kwargs.get("arclength_riks"):
             bits.append("arc-length /IMPL/DT/3 (--arclength-riks)")
+        if not kwargs.get("zero_tolerance_ectol", True):
+            bits.append("all-zero implicit tolerances keep Itol 2 "
+                        "(--no-zero-tolerance-ectol)")
+        if kwargs.get("implicit_constant_step"):
+            bits.append("implicit step capped at DT0 "
+                        "(--implicit-constant-step)")
         if not kwargs.get("discrete_offset", True):
             bits.append("*ELEMENT_DISCRETE OFFSET dropped "
                         "(--no-discrete-offset)")
@@ -1070,6 +1211,27 @@ class ConverterGUI:
         if not kwargs.get("generalized_weld_butt", True):
             bits.append("*CONSTRAINED_GENERALIZED_WELD_BUTT dropped "
                         "(--no-generalized-weld-butt)")
+        if not kwargs.get("initial_void_floor", True):
+            bits.append("*INITIAL_VOID fluids keep Pmin 0 = -INFINITY "
+                        "(--no-initial-void-floor)")
+        if not kwargs.get("weld_exponents", True):
+            bits.append("spotweld failure exponents left at 2 "
+                        "(--no-weld-exponents)")
+        if not kwargs.get("constrained_linear", True):
+            bits.append("*CONSTRAINED_LINEAR_* left unconverted "
+                        "(--no-constrained-linear)")
+        if not kwargs.get("constrained_global", True):
+            bits.append("*CONSTRAINED_GLOBAL planes left free "
+                        "(--no-constrained-global)")
+        if kwargs.get("spotweld_node_synthesis"):
+            bits.append("one-node spotweld beams get their second node "
+                        "(--spotweld-node-synthesis)")
+        if kwargs.get("beam_contact_secondary"):
+            bits.append("beam and truss nodes join contact sides "
+                        "(--beam-contact-secondary)")
+        if not kwargs.get("shell_offset_gapmin", True):
+            bits.append("starter-derived gap kept against offset shells "
+                        "(--no-shell-offset-gapmin)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

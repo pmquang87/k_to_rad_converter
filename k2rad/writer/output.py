@@ -2114,7 +2114,7 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     use (convertrigids.cxx:766-772).
 
     ``state.rbody_ids`` is the set the FIVE Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:791, :1205, :1312, :1498, :1651,
+    register into at the line that writes the card — writer/rbody.py:791, :1210, :1318, :1507, :1664,
     in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
     element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
     out, so four LS-DYNA sources funnel through the first one),

@@ -224,10 +224,19 @@ def convert(
     fixpoint_count: int = 0,
     qstat_dtscal: Union[str, float] = 10.0,
     arclength_riks: bool = False,
+    zero_tolerance_ectol: bool = True,
+    implicit_constant_step: bool = False,
     discrete_offset: bool = True,
     spring_token_mass_compensation: bool = True,
     shell_to_solid_rbody: bool = True,
     generalized_weld_butt: bool = True,
+    initial_void_floor: bool = True,
+    weld_exponents: bool = True,
+    constrained_linear: bool = True,
+    constrained_global: bool = True,
+    spotweld_node_synthesis: bool = False,
+    beam_contact_secondary: bool = False,
+    shell_offset_gapmin: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -316,24 +325,31 @@ def convert(
         on a solid segment is ZERO unless ``SLDTHK > 0`` is stated (Vol I R17
         p.11-101/103). **Off by default**, with a default-ON warning naming the
         derived value on every carrier. MEASURED on ``twobar`` (10 mm bars,
-        derived ``GAP MIN`` 1.0): the starter's gap costs +1151 % internal
-        energy against the LS-DYNA reference 3036.17 where this rule writes
-        ``0.005 × 10 = 0.05`` and reads −5.60 %; but the same factor degrades
-        other carriers (``sphere1``, where it writes 0.02921 and internal
-        energy goes −1.66 % → −7.77 % at 4.1× the cycles; ``bend``,
-        −2.0038 % → −2.8418 % at 4.69×). Of the class's 15 interfaces on the
-        356-key R14 roster **7 now have a measured arm and 8 are still
-        unjudgeable**, and the 7 disagree: 1 better, 3 worse, 2 byte-inert
-        (``pend.imp``, ``06_heating_plate``) and 1 mixed
-        (``4.3_General_Nonlinearity``, whose energy error improves −99.9 % →
-        −55.2 % while its internal energy gets worse −98.87 % → −99.92 %) —
-        which is why it is opt-in. A press-fit
+        derived ``GAP MIN`` 1.0): the starter's gap ENDS at +1151 % internal
+        energy against the LS-DYNA reference 3036.17 and this rule's
+        ``0.005 × 10 = 0.05`` ends at −5.60 % — an END value: the first impact
+        reads −91 % and the engine energy error stays −7.1 to −8.2 % at every
+        gap. Two rounds of arms — round 6 alone ran 16 gap values on
+        ``twobar``, ``hemi``, ``sphere1`` and ``bend`` — found ZERO campaign
+        verdict promotions (``sphere1``, where it writes 0.02921, goes
+        −1.66 % → −7.77 % at 4.1× the cycles; ``bend`` −2.0038 % → −2.8418 %
+        at 4.69×). Of the class's 15 interfaces on the 356-key R14 roster
+        (counted before round 6's shell-offset Gapmin took ``bend``'s) **7
+        now have a measured arm and 8 are still unjudgeable**: twobar's end
+        value moves while its history does not, ``sphere1`` and ``bend`` are
+        worse, ``pend.imp`` and ``06_heating_plate`` byte-inert,
+        ``4.3_General_Nonlinearity`` mixed (energy error −99.9 % → −55.2 %,
+        internal energy −98.87 % → −99.92 %). And it costs: below a
+        deck-specific knee the cycle count grows as ~1/Gapmin (twobar 2.17× at
+        0.02 and 7.71× at 0.005; the contact step is ½(GAPV − PENE)/v,
+        ``i7for3.F:762-770``) — which is why it is opt-in. A press-fit
         ``*CONTACT_*_INTERFERENCE`` and k2rad's own injected implicit
         stabilization stub are excluded.
     derived_gapmin_factor : float
         Fraction of the smallest main-surface segment side used by
-        ``derived_gapmin`` (default 0.005 — measured; 0.01 reads +14.45 % on
-        ``twobar`` and must not be used).
+        ``derived_gapmin`` (default 0.005; every twobar figure is an end
+        state — its first impact reads −91 % at 0.005 — and cycles grow as
+        ~1/factor below the knee).
     rigid_secondary_swap : bool
         On an EXPLICIT deck, rescue a ``*CONTACT`` whose SECONDARY (SSID) side
         is WHOLLY RIGID instead of losing the whole interface: the roles are
@@ -426,6 +442,41 @@ def convert(
         it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
         ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
         (``lectur.F:3523-3532``).
+    zero_tolerance_ectol : bool
+        On a ``*CONTROL_IMPLICIT_SOLUTION`` whose DCTOL, ECTOL and RCTOL are
+        ALL 0.0 / blank (or >= 1), write LS-DYNA's own ECTOL default -
+        ``/IMPL/NONLIN/1`` Itol 1 (energy), Toli 0.01 - instead of k2rad's
+        force default Itol 2. **On by default.** Every one of the 11 R14
+        reference ``d3hsp`` files of that shape echoes DCTOL 0.001 / ECTOL
+        0.01 / RCTOL 0.999e11 (Vol I R17 p.12-354), i.e. LS-DYNA applies its
+        defaults to the stated zeros - the rule rests on that echo, not on a
+        measured gain. L_A is unchanged; a NEGATIVE cell is a tolerance curve
+        (p.12-355) and keeps Itol 2. MEASURED at nt 4 = nt 2: the IE history
+        is closer on 3 of the 11 carriers by at most 0.03 points of the
+        reference peak and farther on 4; ``tensile2`` ENDS at IE +7.36 % ->
+        -0.54 % at 0.11x
+        the cycles but reads +53 % at t 0.80 (+14 % before) - its history
+        RMS 2.00 % -> 2.48 % of the reference peak; ``doorbeam`` +380.25 % ->
+        +582.00 % (a named regression, larger mid-run), ``ie_shell`` ERROR ->
+        NORMAL at IE -99.87 % (a status-only promotion).
+    implicit_constant_step : bool
+        Cap the implicit step at the deck's own DT0 (``/IMPL/DT/STOP``
+        ``DT_MAX := DT0``) where LS-DYNA runs a CONSTANT step: an implicit
+        deck stating IAUTO 0 or no ``*CONTROL_IMPLICIT_AUTO`` (Vol I R17
+        p.12-277), with ``0 < DT0 < ENDTIM`` and no stated DTMAX <= DT0.
+        **Off by default.** Radioss keeps cutting a non-converged increment
+        (``imp_dt.F:107-119``) where LS-DYNA would stop; a pinned step ended
+        3 of 3 NORMAL quasi-static R14 decks in ERROR and is not offered.
+        MEASURED at nt 4 = nt 2: ``ex_15`` energy error +74.1 % -> -0.9 % at
+        3.81x the cycles (its END state at matched time trades IE +36.2 % ->
+        -54.8 % for KE +132.0 % -> +0.5 %); ``ex_11`` KE history error
+        16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 % where the
+        shipped run reads +1343 % - both deviations: the engine never prints
+        its last increment); with the default ``zero_tolerance_ectol`` it
+        costs cycles on the quasi-static decks - ``tensile2`` 75 -> 168
+        cycles, IE -0.54 % -> -4.36 % at the END, but the closest IE history
+        of the measured arms (RMS 2.48 % -> 1.66 % of the reference peak).
+        Reach: 33 R14 deck keys on 22 emitted models.
     discrete_offset : bool
         Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
         *"a displacement or rotation at time zero … a positive offset on a
@@ -461,10 +512,14 @@ def convert(
         ``TOTAL MASS`` goes 2.0048E-04 → 1.0048E-04, LS-DYNA's own to every
         figures, at +1.21 % cycles (2646 → 2678), both arms NORMAL. It never
         writes a non-positive value on the deck's OWN ``/ADMAS``, and it
-        refuses a spring node carrying no element mass of its own (subtracting
-        there leaves ``MS <= 0``, which the engine aborts on —
-        ``chkmsin.F:52-59`` + ``resol.F:5460``) and a secondary node of an
-        ICoG = 4 rigid body (``inirby.F:265-266`` discards that mass anyway —
+        refuses a spring node that carries no mass of its own — no element
+        mass and no ``*ELEMENT_MASS`` — because subtracting there would leave
+        the node at EXACTLY ``MS = 0``, which nothing catches
+        (``chkmsin.F:53`` aborts only on ``MS < 0``; ``accele.F:67-80`` then
+        freezes the node's velocity); a node with only an ``*ELEMENT_MASS``
+        (gnonspring: ``TOTAL MASS`` 1.02e-4 → 2.0e-6 = LS-DYNA's, round 6)
+        IS compensated. It also leaves out a secondary node of an ICoG = 4
+        rigid body (``inirby.F:265-266`` discards that mass anyway —
         measured inert on ``mat_spring.belted-dummy``).
     shell_to_solid_rbody : bool
         Convert ``*CONSTRAINED_SHELL_TO_SOLID`` to one ``/RBODY`` per card —
@@ -494,6 +549,94 @@ def convert(
         IE −100.00 % → +4.70 %, KE −30.79 % → −26.85 %; the SAME two
         welds LS-DYNA's own ``.messag`` records trip the criterion at
         t 1.269e-3 against its own 1.26914e-3 and are set off at 1.272e-3.
+    initial_void_floor : bool
+        On a deck that states ``*INITIAL_VOID_PART`` / ``_SET`` on an
+        ELFORM-12 part whose material is a ``*MAT_NULL`` + ``*EOS_*`` carrier,
+        write ``Pmin = -1e-20`` on the ``/MAT/HYD_VISC`` of that fluid — the
+        void's own material and every LAW6 material of the deck's ELFORM-12
+        fluid (Vol I R17 p.28-134: one fluid per single-material-and-void
+        mesh). **On by default.** NOT 0: ``hm_read_mat06.F:154`` reads an
+        exact ``Pmin`` 0 as -INFINITY, so the ``Pmin 0`` every
+        ``*MAT_NULL`` + ``*EOS_*`` ``/MAT/HYD_VISC`` carried was an UNBOUNDED
+        tension in the cells the fluid leaves. A stated PC is overridden and named; refused (nothing
+        written) on a deck with ``*ALE_MULTI-MATERIAL_GROUP`` and for a void
+        that is not ELFORM 12 or not a LAW6 carrier. The void's low density is
+        NOT written. MEASURED at nt 4: quadrature_B timeout → NORMAL in 1095
+        cycles (IE +394.0 %), bird_B timeout → NORMAL in 2936 (IE
+        +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %) —
+        NORMAL, not a match: the void is still full of fluid.
+    weld_exponents : bool
+        Write a failing ``*CONSTRAINED_SPOTWELD`` /
+        ``*CONSTRAINED_GENERALIZED_WELD_SPOT`` weld's exponents N / M into its
+        ``/PROP/TYPE13`` as ``alpha1-3 = 1``, ``beta1 = N``,
+        ``beta2 = beta3 = M`` when either differs from 2. **On by default.**
+        A blank cell is read as ``alpha 1`` / ``beta 2``
+        (``hm_read_prop13.F:1169-1170``), so without them the criterion is
+        always exponent 2; ``N = M = 2`` writes nothing (byte-identical).
+        Radioss sums the two shear directions where LS-DYNA scores the
+        RESULTANT: exact at ``M = 2`` and for shear on one local axis; with
+        both components present an ``M < 2`` weld fails earlier than in
+        LS-DYNA (conservative) and an ``M > 2`` weld fails later
+        (non-conservative). MEASURED at nt 4 on ``plates.nrbc``
+        / ``plates.spot`` (N = M = 1): rupture t 3.130e-4 (+29.4 %) →
+        2.460e-4 (+1.7 % against LS-DYNA's 2.4193e-4), 0.899x the cycles.
+    constrained_linear : bool
+        Convert ``*CONSTRAINED_LINEAR_LOCAL`` / ``_GLOBAL`` (and the legacy
+        ``*CONSTRAINED_LINEAR``) to one ``/MPC`` per card — node = ``NID``,
+        ``Idof`` = ``DOF``, skew = the ``/SKEW`` of ``CID``, alpha = ``COEF``.
+        **On by default.** The engine enforces it by a Lagrange multiplier as
+        ``sum alpha_k v_k = 0`` (``lag_mpc.F``), LS-DYNA's ``C0 = 0``
+        equation. Refused by name (the card stays skipped): a DOF that also
+        carries a ``/BCS`` or an imposed motion (WARNING 312), a rigid-body
+        node, an element-free node, a zero ``COEF`` (``hm_read_mpc.F:124``
+        reads 0 as 1), DOF 7, an undefined ``CID``, a (node, DOF) pair used
+        twice. MEASURED on ``plates.lce`` (the only carrier): starter
+        ``NUMMPC 1``, 0 errors, engine identical to the base on all 683 rows
+        (the constrained nodes are symmetric about the driven one).
+    constrained_global : bool
+        Convert ``*CONSTRAINED_GLOBAL`` (a global constraint plane, Vol I R17
+        p.10-38) to ``/BCS``: the nodes within the row's TOL of the plane -
+        or ``1e-6 x`` the model extent where TOL is 0 - get the row's TC/RC
+        codes, UNIONED per node over all rows and with the deck's ``*NODE``
+        TC/RC cells, one ``/BCS`` per union code through the ``*NODE`` TC/RC
+        screens. **On by default.** The selection equals LS-DYNA's own d3hsp
+        'nodal spc summary' node for node on all three R14 carriers (305, 54
+        and 24737 nodes). A bad row (TC/RC outside 0-7, DIR not 1/2/3, TOL <
+        0) and a card from a transformed ``*INCLUDE_TRANSFORM`` are refused by
+        name; off, the keyword stays SKIPPED and its DOFs are free.
+    spotweld_node_synthesis : bool
+        Give an ELFORM-9 ``*MAT_SPOTWELD`` beam that states ONE node its
+        second one where Vol I R17 p.19-3 puts it: the given node moved onto
+        the nearest reference segment of the tie that names the weld part, a
+        new node on the nearest segment on the other side (spotweld.k: 1213
+        -> z 0, new node at z 2, length 2.0 = LS-DYNA's own d3plot and
+        swforc). **Off by default**: alone it only costs cycles (7.64x on
+        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` the error
+        changes sign, not size (IE -99.9 % -> +82.0 % at 7.80x the cycles)
+        and the weld never fails (EFAIL has no ``/PROP/TYPE13`` slot).
+    beam_contact_secondary : bool
+        Put the nodes of ``*ELEMENT_BEAM`` elements (beams, trusses, spotweld
+        and discrete beams) of a part named on a contact side into that
+        side's node group. **Off by default**: it changes the secondary side
+        of 4 R14 deck keys on 4 emitted models (spotweld.k,
+        ``show-cases/contact-overview/main.k`` and the two Yaris giants) and
+        of the two full-vehicle models in ``C:/openradioss_run``, none of
+        which but spotweld.k has been run WITH it (the three R14 giants have
+        campaign rows from runs without it).
+    shell_offset_gapmin : bool
+        On a ``/INTER/TYPE7`` whose main side is SOLID segments only and
+        whose secondary is SHELLS that LS-DYNA offsets by half their
+        thickness - the ``AUTOMATIC_*`` / ``SINGLE_SURFACE`` spellings always
+        (Vol I R17 p.11-128/129 General Remark 12), the others under
+        ``*CONTROL_CONTACT SHLTHK 2``, ``SHLTHK 1`` on deformable shells, or
+        their own Card B ``THKOPT 1`` - with no stated gap: write
+        ``Gapmin = t/2``, capped at ``0.5 x`` the smallest main-segment side,
+        instead of the starter's derived ``0.1 x`` that side
+        (``i7sti3.F:1055-1063``). **On by default.** Several thicknesses:
+        written only when every ``t/2`` is above the cap. A shell main is
+        never touched. MEASURED on ``bend`` (t 0.381 under SHLTHK 2, written
+        the capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at
+        matched time, 0.98x the cycles; the row stays deviation.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -761,15 +904,17 @@ def convert(
         LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped full-velocity
         re-point reads 387.9 (+104.20 %), this rule reads **220.58**
         (+16.12 %), and the final ``ke_dev`` goes +194.03 % → **+47.82 %**.
-        The residual is not the velocity — it is the ``/RBODY``'s own lumped
+        That residual is not the velocity — it is the ``/RBODY``'s own lumped
         rotary inertia (starter ``NEW INERTIA`` 0.2642894E-02 against
         LS-DYNA's 0.1977E-02, the difference being exactly
-        ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal), which the
-        ``/RBODY`` ``J`` cells would ADD rather than replace
-        (``inirby.F:166-168`` and ``:331-339`` ADD them;
-        ``hm_read_rbody.F:276-279`` is only where the cells are read): a
-        named follow-up, not compensated
-        here. **Opt-in** because exactly one carrier with an LS-DYNA reference
+        ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal). The ``/RBODY``
+        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so since round 6
+        the flag also writes ``J = −ΣIN`` (the body's shell nodes' lumped
+        rotary inertia) into every body it re-points: ``NEW INERTIA``
+        0.1977227E-02 = LS-DYNA's, cycle-0 KE **189.96** (LS 189.962), final
+        KE −1.97 % (an END value: the KE history RMS goes 17.5 % → 11.6 % of
+        the LS peak), 1.156x the cycles; the IE is not fixed (the joint path's
+        99.9 % energy error). **Opt-in** because exactly one carrier with an LS-DYNA reference
         exists on this machine. A body the card FULLY covers is untouched by
         construction: its momentum average IS the card's velocity with
         ``omega`` 0, so no deck of that class changes a byte.
@@ -894,10 +1039,19 @@ def convert(
         fixpoint_count=fixpoint_count,
         qstat_dtscal=qstat_dtscal,
         arclength_riks=arclength_riks,
+        zero_tolerance_ectol=zero_tolerance_ectol,
+        implicit_constant_step=implicit_constant_step,
         discrete_offset=discrete_offset,
         spring_token_mass_compensation=spring_token_mass_compensation,
         shell_to_solid_rbody=shell_to_solid_rbody,
         generalized_weld_butt=generalized_weld_butt,
+        initial_void_floor=initial_void_floor,
+        weld_exponents=weld_exponents,
+        constrained_linear=constrained_linear,
+        constrained_global=constrained_global,
+        spotweld_node_synthesis=spotweld_node_synthesis,
+        beam_contact_secondary=beam_contact_secondary,
+        shell_offset_gapmin=shell_offset_gapmin,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -750,6 +750,15 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
     FSI penalty then loads that body from cycle 0 against material that should
     not be there, and the run is not a wrong number, it is a different model.
 
+    What k2rad DOES write on such a deck is the ELFORM-12 cavitation floor
+    (``Pmin = -1e-20`` on the fluid's ``/MAT/HYD_VISC``, round 6), decided ONCE
+    by ``materials._resolve_initial_void_floor``; this warning reads that
+    record (never the option) and names it. The floor turns quadrature_B's
+    timeout into a NORMAL run — the void's low density does NOT, on either
+    coupled carrier: it STALLS bird_B on the /INTER/TYPE18 SORT step
+    (``intcrit.F:508-518``) and costs quadrature_B 47.2x the cycles, both on
+    near-massless void nodes, so it is not written.
+
     The predicate is the INTERSECTION, not the presence of either card, and
     BOTH controls are measured. A void with no coupling (``bird-el.k``) is a
     dropped cell and nothing more, and stays silent. A coupling with no void —
@@ -766,44 +775,57 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
     if not state.initial_void_parts:
         return
     mset = set(mpids)
-    hit: List[int] = []
+    hit: List[tuple] = []
     for sid, is_set in state.initial_void_parts:
         if set(_part_pids(state, sid, not is_set)) & mset:
-            hit.append(sid)
+            if (sid, is_set) not in hit:
+                hit.append((sid, is_set))
     if not hit:
         return
-    for sid in sorted(set(hit)):
+    # The floor is decided ONCE; a direct caller of _make_fsi_coupling (no
+    # materials section before it) still sees the same decision. Imported
+    # here because materials.py imports this module at load time.
+    from .materials import _resolve_initial_void_floor
+    floor = _resolve_initial_void_floor(state)
+    if floor:
+        floor_clause = ("k2rad writes the cavitation floor Pmin = -1e-20 on "
+                        f"/MAT/HYD_VISC {sorted(floor)}.")
+    else:
+        floor_clause = ("The cavitation floor is NOT written: "
+                        + (state.initial_void_floor_refusal
+                           or "no qualifying ELFORM-12 void") + ".")
+    for sid, is_set in sorted(hit):
+        kw = "*INITIAL_VOID_SET" if is_set else "*INITIAL_VOID_PART"
         state.warn(
-            f"*INITIAL_VOID_PART {sid} is SKIPPED, and that part is the ALE "
-            f"fluid group of an emitted /INTER/TYPE18 coupling (interface "
-            f"{inter_id}). The region LS-DYNA empties is therefore converted "
-            "as ORDINARY FLUID: a Lagrangian body that starts inside it is "
-            "loaded by the FSI penalty from cycle 0. MEASURED on quadrature_B "
-            "(a rigid impactor at vy = -5000 mm/s starting inside part 1, "
-            "y in [500,700]): the converted deck reaches KE 1.029e6 and IE "
-            "1.115e6 against the LS-DYNA reference's IE 166.47 / KE 1.24046e4 "
-            "- a 99.9 % energy error - while the same deck with part 1 given a "
-            "near-vacuum density BY HAND reads IE 1.080 / KE 1.530e4 at 0.0 % "
-            "error, and with the coupling deleted terminates NORMAL in 1051 "
-            "cycles exactly like its Lagrangian sibling quadrature_A (which "
-            "carries the same -5000 velocity). No /INTER/TYPE18 parameter "
-            "moves this: Stfval x0.01, x100, the Iauto = 2 / PFAC / Vref form "
-            "and a halved impact velocity all end at 99.9 %. THE FSI RESULT ON "
-            "THIS DECK IS NOT VALID. What LS-DYNA means by the card is on Vol "
-            "I R17 p.28-134 (paraphrased, not quoted): evacuated fluid "
-            "elements are approximated as fluid elements at a very low "
-            "density, the void material's constitutive properties must be "
-            "identical to those of the material that will later fill it, and "
-            "the option is incompatible with *ALE_MULTI-MATERIAL_GROUP. A "
-            "correct mapping "
-            "therefore needs a void PHASE (/MAT/LAW51 multi-material + "
-            "/INIVOL, or a /MAT/VOID region) and is not implemented. The "
-            "low-density arm was MEASURED in round 4 and is NOT a substitute: "
-            "at rho = 1e-15 this deck's energies are right - IE 1.080 / KE "
-            "1.530e4 at 0.0 % error - but the time step collapses on the "
-            "near-massless fluid and the run reaches t = 1.949e-3 of 0.07, "
-            "2.8 % of the target, before it is killed. That is a diagnosis, "
-            "not a fix.")
+            f"{kw} {sid} is the ALE fluid group of the emitted /INTER/TYPE18 "
+            f"coupling (interface {inter_id}). {floor_clause} The region "
+            "LS-DYNA empties is still converted as ORDINARY FLUID at full "
+            "density, so a Lagrangian body that starts inside it is loaded by "
+            "the FSI penalty from cycle 0: THE FSI RESULT ON THIS DECK IS NOT "
+            "VALID. MEASURED on quadrature_B (a rigid impactor at vy = -5000 "
+            "mm/s starting inside part 1), floor written: NORMAL in 1095 "
+            "cycles, IE 820.4 against the LS-DYNA reference's 166.47 "
+            "(+394 %), KE 7359 against 1.24046e4 (-40.7 %), engine energy "
+            "error -46.5 %. The void's own low density is NOT written on a "
+            "void that is a TYPE18 fluid group, because both coupled carriers "
+            "measure it worse: on bird_B it fixes the initial state (cycle-0 "
+            "KE 11.74 against LS-DYNA's 11.737) and then STALLS at t 2.227e-4 "
+            "of 6e-4 with the step at 2.15e-18 - the /INTER/TYPE18 SORT step "
+            "(intcrit.F:508-518, 0.9 x Gap over the spread of the fluid-node "
+            "velocities, i7buce_crit.F:85-101; TYPE18's own kinematic step is "
+            "commented out, i18for3.F:296-309, and /DT/INTER/DEL keeps a "
+            "deleted node in that spread, i18for3.F:607-617) follows one "
+            "near-massless void node (node 2029 at 3.34e6 mm/s against the "
+            "bird's 5.1e4); on quadrature_B it costs 47.2x the floor-only "
+            "cycles (51673 against 1095) on the TYPE18 nodal step of the "
+            "near-massless void nodes. A correct mapping needs a void PHASE "
+            "(/MAT/LAW51 multi-material + /INIVOL, or a /MAT/VOID region); "
+            "not implemented. What LS-DYNA means by the card is on Vol I R17 "
+            "p.28-134 (paraphrased, not quoted): evacuated fluid elements are "
+            "approximated as fluid elements at a very low density, the void "
+            "material's constitutive properties must be identical to those "
+            "of the material that will later fill it, and the option is "
+            "incompatible with *ALE_MULTI-MATERIAL_GROUP.")
 
 
 def _make_ebcs(state: ConversionState) -> List[str]:
