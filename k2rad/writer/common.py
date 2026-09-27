@@ -332,10 +332,20 @@ def _elform_to_isolid(elform: int, assumed_strain_isolid: int = 0) -> int:
         physically dead on it. Still the base for every hex here, and the
         EMITTED value wherever the default is screened off (ELFORM -1/-2, a
         preloaded deck, an unmapped IHQ 8/9/10) or the flag is off.
-      * ``14`` tet4 (Kessler). ``24`` HEPH (1 Gauss point with physical
-        stabilisation). ``1`` the Belytschko-orthogonalised viscous 1-point
-        hex; ``2`` the Hallquist viscous 1-point hex without orthogonality,
-        which is never a target here.
+      * ``14`` HA8, the locking-free FULLY integrated 8-node brick ("HA8
+        Locking-Free 8-Node Solid Element, Co-rotational, Full Integration,
+        Variable Number of Gauss Points", ``radioss2022/PROP/
+        prop_p14_solid.cfg:198``; ``hm_read_prop14.F:277`` and
+        ``hm_read_prop06.F:297`` force it co-rotational, JCVT 2). k2rad also
+        writes it as the property Isolid of its
+        tetrahedron ELFORMs 10/13 (a tetrahedron's formulation is picked by
+        the property's ``Itetra4`` / ``Itetra10`` cells), and since round 6 on
+        an element-frame orthotropic brick
+        (``writer/composites._connectivity_frame_isolid``). ``24`` HEPH (1
+        Gauss point with physical stabilisation). ``1`` the
+        Belytschko-orthogonalised viscous 1-point hex; ``2`` the Hallquist
+        viscous 1-point hex without orthogonality, which is never a target
+        here.
 
     LS-DYNA ELFORM 2 is the FULLY-INTEGRATED selective-reduced (S/R) hex, so it
     maps to the full-integration Isolid 17 and STAYS there: it has no hourglass

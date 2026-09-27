@@ -766,8 +766,12 @@ material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I R17
 p.28-134 allows one fluid per single-material-and-void mesh). Not `0`:
 `hm_read_mat06.F:154` reads an exact `Pmin 0` as −INFINITY, so the `Pmin 0`
 every `*MAT_NULL` + `*EOS_*` `/MAT/HYD_VISC` carried (the `*MAT_NULL` PC cell
-is not carried) was an UNBOUNDED tension in the cells the fluid leaves — the
-measured death of every void deck. A stated `PC` is overridden and
+is not carried) was an UNBOUNDED tension in the cells the fluid leaves — what
+the three void TIMEOUTS died of (`quadrature_B/C`, `bird_B`: 3 deck keys on 2
+emitted models); `bird-el` ended NORMAL with it, and `forging_B` stops in the
+starter first. Carriers that differ in RO or EOS — a second fluid, which
+p.28-134 does not permit with this option — are floored too and NAMED (reach
+0). A stated `PC` is overridden and
 named; a deck that also states `*ALE_MULTI-MATERIAL_GROUP` (forbidden together,
 p.28-134), a void that is not ELFORM 12 and a void whose material is not a LAW6
 carrier are refused by name and keep `Pmin 0`. The void's low DENSITY is NOT
@@ -775,7 +779,9 @@ written (on the two `/INTER/TYPE18`-coupled carriers it is a dead coupling or
 4.51× the cycles, and it stalls bird_B on the TYPE18 sort step). MEASURED at
 nt 4 against the LS-DYNA references: quadrature_B and quadrature_C (one emitted
 model) timeout → NORMAL in 1095 cycles (IE +394.0 %), bird_B timeout → NORMAL in
-2936 cycles (IE +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %).
+2936 cycles (IE +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %
+and energy error −17.9 → −32.6 % WORSE, KE +10 856 → −92.1 % at the end; its
+plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID` is not converted).
 **NORMAL here is not an LS-DYNA match**: the void is still full of fluid.
 
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
@@ -1605,8 +1611,19 @@ cube's internal energy +0.2 % / +0.5 % against the hand values on `Isolid
 `*MAT_COMPOSITE_DAMAGE`, `*MAT_ENHANCED_COMPOSITE_DAMAGE`); on the R14 roster
 it reaches `11.1.sbrake`'s two pads only. `Isolid 14`'s reader default keeps
 `Icpre 0` where `17`'s turns it into 1 (`hm_read_prop06.F:336-341`), which
-matters only near incompressibility. The MAT_126 honeycomb `/PROP/TYPE6`
-(pinned `Isolid 1`) is NOT changed — its orientation is unmeasured (ROADMAP).
+matters only near incompressibility. **The mechanism** (post-review round,
+read in the starter and measured): the fault follows the CO-ROTATIONAL flag,
+not the Isolid — `smorth3.F:282-291` (Ip 20) / `:380-389` (Ip 23) project the
+connectivity frame onto the element frame only on a co-rotational property
+and otherwise store its GLOBAL components; `Iframe 0` is the `/DEF_SOLID`
+default 1, not co-rotational (`hm_read_prop06.F:296`, `defaults_mod.F90:176`),
+and `:297-298` force co-rotation on Isolid 14/18/24 only. On the same cube,
+`Isolid 17` and `Isolid 1` with `Iframe 0` were wrong in 4 of 4 loadings and
+right with `Iframe 2`. The MAT_126 honeycomb `/PROP/TYPE6` (pinned `Isolid 1`,
+`Iframe 0`) therefore carries the same fault on an element frame (AOPT 0 / 3;
+the verification round measured it on a `/MAT/LAW50` cube) — it is NOT changed
+(its crush under a co-rotational frame has no reference here), a warning names
+it, and a skew frame (AOPT 2) orients correctly (ROADMAP).
 
 `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054 / 055, + numeric aliases) → `/MAT/LAW127`
 (ENHANCED_COMPOSITE) on a `/PROP/TYPE11`. The strengths (`XT/XC/YT/YC/SC`), the
@@ -2835,7 +2852,10 @@ FREE). The card is a global constraint plane (Vol I R17 p.10-38: `TC RC DIR X Y
 Z TOL`, DIR 1/2/3 = the plane normal along global x/y/z, the constrained DOFs
 *"held fixed in time"*), several rows per keyword. Each row selects the nodes
 within its `TOL` of the plane — or, where `TOL` is 0, within **1e-6 × the model
-extent** (the largest side of the bounding box of the deck's own nodes; LS-DYNA
+extent** (the largest side of the bounding box of the nodes the deck's
+ELEMENTS reference — every defined node stays a candidate, but an element-free
+node far away no longer widens the tolerance, and is named when it lies
+outside the box; LS-DYNA
 uses *"the internal mesh-size dependent tolerance"*, p.10-39, which the card
 does not state, so this default is k2rad's own). Every row's codes are ORed per
 node, UNIONED with the deck's `*NODE` TC/RC cells, and written as **ONE `/BCS`
@@ -2859,9 +2879,14 @@ is not moved, and matched against the moved mesh it would select the wrong
 nodes; reach 0) — a card with every row refused is byte-identical to the
 opt-out. Two measured caveats, neither a verdict: the constrained `ex_27` twin
 stays `error_engine` (the implicit initial-velocity ENGINE defect acts before
-any wall — see *Implicit dynamic notes*), and `efg/metal-cutting`'s own NORMAL
-is a 1-in-5 outcome on fresh base runs with no LS-DYNA energy reference (its
-LS run stopped at input), so its status may flip either way
+any wall — see *Implicit dynamic notes*), and **`efg/metal-cutting/main.k`
+loses its NORMAL** under this default: the constrained run ends ERROR at cycle
+26 at `nt` 4 and 2 (identically with its rotational codes stripped — the
+translational planes are what the implicit run cannot carry), where the
+unconstrained base reached NORMAL in 3 of 10 fresh runs in round 6 and has no
+LS-DYNA energy reference (its LS run stopped at input; its d3hsp spc summary
+lists exactly the 54 nodes written). `--no-constrained-global` restores the
+old deck (ROADMAP R14 round-6 item 26)
 
 ### Joints
 `*CONSTRAINED_JOINT_SPHERICAL` / `_REVOLUTE` / `_CYLINDRICAL` / `_PLANAR` /
@@ -4128,7 +4153,7 @@ splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
 rejects the whole deck
 
-#### `--spotweld-node-synthesis` and `--beam-contact-secondary` — the one-node spotweld beam
+#### The one-node spotweld beam: two opt-in flags
 
 Both **opt-in, OFF by default** (round 6). The case they exist for is
 `introduction/intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k`: one
@@ -4140,7 +4165,9 @@ elements off a contact side), so the two sheets are unconnected — the drop
 warning names `--beam-contact-secondary` where the side's beam nodes are not
 rigid-body nodes.
 
-- `--spotweld-node-synthesis` (rule 1) places the second node where Vol I R17
+#### `--spotweld-node-synthesis` (rule 1)
+
+`--spotweld-node-synthesis` places the second node where Vol I R17
   p.19-3 puts it — *"the nodal points of the spot weld are located to the two
   nearest reference surface segments"*: the given node moves onto the nearest
   segment of the MAIN side of the tie that names the weld part, and a new
@@ -4156,7 +4183,10 @@ rigid-body nodes.
   allocated later move up by one id. Refused by name, the weld then kept as
   before: a node shared with another element, no tie naming the part, no
   reference segment, a node lying ON a sheet, no segment on the other side.
-- `--beam-contact-secondary` (rule 2) puts the nodes of the `*ELEMENT_BEAM`
+
+#### `--beam-contact-secondary` (rule 2)
+
+`--beam-contact-secondary` puts the nodes of the `*ELEMENT_BEAM`
   elements (beams, trusses, spotweld and discrete beams) of a part named on a
   contact side into that side's node group — ONE walk, `_contact_part_nodes`,
   which the tied / tiebreak resolver now shares (it used to carry its own
@@ -4164,18 +4194,24 @@ rigid-body nodes.
   are rigid-body members are removed again by the rigid filter
   (`mainboltaexpl`: byte-identical, only its drop wording changes).
 
+#### Both flags, measured
+
 MEASURED on spotweld.k at `nt` 4 (LS-DYNA internal energy 76 812 at
 1.18e-3; the weld fails there at 1.1876e-3): rule 1 alone costs 7.64× the
 cycles (639 → 4884) at IE −99.92 % — it builds a weld that connects nothing;
 rule 2 alone is identical to the base; **both** take IE −99.9 % → **+82.0 %**
-at 7.80× the cycles (4983) — the error changes SIGN, not size (|IE error|
-76 733 → 67 888). The `/PROP/TYPE13` shear stays elastic (116 300 against
+at 1.18e-3, at 7.80× the cycles (4983) — the error changes SIGN, not size
+(|IE error| 76 733 → 67 888) there, and GROWS after LS-DYNA's weld fails: at
+the matched end (t 1.2e-3, LS IE 60 028) it is **+141.1 %** against the base's
+−99.87 % (history +65 / +82 / +85 / +83 / +141 % at the fifths of the run,
+`nt` 4 = `nt` 2). The `/PROP/TYPE13` shear stays elastic (116 300 against
 LS-DYNA's 46 247 at 1.18e-3) and the weld NEVER fails, because
 `*MAT_SPOTWELD` `EFAIL` has no `/PROP/TYPE13` slot. And rule 2 changes the
-secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k, the
-never-launched `show-cases/contact-overview/main.k` and the two R14 Yaris
-giants) and of the two full-vehicle models in `C:/openradioss_run` (4 489 /
-5 102 spotweld beams), none run but spotweld.k — which is why neither is a
+secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k,
+`show-cases/contact-overview/main.k` and the two R14 Yaris giants — the three
+giants have campaign rows from 2026-09-06 runs WITHOUT the flag) and of the
+two full-vehicle models in `C:/openradioss_run` (4 489 / 5 102 spotweld
+beams), none run with it but spotweld.k — which is why neither is a
 default. On the physics validator's one-weld coupon (round 6, finalization)
 rule 1 alone built the connector and still carried no force (the tie stays
 dropped) at 3.16× the cycles (133 → 420), and the `*MAT_SPOTWELD` connector
@@ -5294,13 +5330,27 @@ carried, because LS-DYNA's `DNORM 2` measures the TOTAL displacement and no
 combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
 **negative** cell is a tolerance CURVE (p.12-355), not a stated zero: it keeps
 Itol 2 and is named as dropped. Reach: **11 deck keys on 11 emitted models**
-(`_0001.rad` only). MEASURED at `nt` 4 **and** `nt` 2 (identical): NORMAL kept
-on all 10 that were NORMAL; `tensile2` IE **+7.36 % → −0.54 %** at 0.11× the
-cycles; `doorbeam` **+380.25 % → +582.00 %** (a springback deck already ~5×
-off its reference — a named regression); `ie_shell` ERROR (TIMESTEP LIMIT at
-cycle 4) → NORMAL in 92 cycles, but at IE **−99.87 %** and KE 0 against the
-reference's 149.9 — a **status-only** promotion (its `IMFLAG −9`
-implicit/explicit switching curve is not converted). A deck with no
+(`_0001.rad` only). **The rule rests on that echo — it is the criterion
+LS-DYNA runs — not on a measured gain.** MEASURED at `nt` 4 **and** `nt` 2
+(identical): NORMAL kept on all 10 that were NORMAL; the internal-energy
+HISTORY (RMS over the reference's output times, in % of its peak) is closer to
+the reference on 3 of the 11 by at most 0.03 points (`rigid_tip` 0.78 → 0.75;
+`aellipse` and `ellipse` by less than 0.01), unchanged on 3 (`tensile1`,
+`bumper`, `6.4.tbl.psd.thermal-1`) and farther on 4 — `tensile2` 2.00 → 2.48,
+`doorbeam` 189 → 393, `4.2.frf.cant-1` 0.30 → 0.59,
+`6.5.tbl.psd.prepressure-1` 0.03 → 0.39 — and `ie_shell`'s is a status change
+(below). `tensile2`'s END
+value reads **+7.36 % → −0.54 %** at 0.11× the cycles, a coincidence of its
+history: at `t` 0.76 / 0.80 the run reads **−64 % / +53 %** where the force
+criterion reads +18 % / +14 %. `doorbeam` **+380.25 % → +582.00 %** at the
+end and +668 / +1086 / +973 / +842 % at the four earlier fifths where the
+force criterion reads +476 / +353 / +361 / +349 % (a springback deck already
+~5× off its reference — a named regression, larger mid-run); `ie_shell` ERROR
+(TIMESTEP LIMIT at cycle 4) → NORMAL in 92 cycles, but at IE **−99.87 %** and
+KE 0 against the reference's 149.9 — a **status-only** promotion (its
+`IMFLAG −9` implicit/explicit switching curve is not converted). A card that
+STATES an ECTOL ≥ 1 beside the zeros is named: that value is LS-DYNA's own,
+not its default, and a relative tolerance ≥ 1 is not carried. A deck with no
 `*CONTROL_IMPLICIT_SOLUTION` at all keeps `2 2 0.01`.
 `*CONTROL_IMPLICIT_AUTO`: `IAUTO`, `ITEWIN`, `KFAIL` and a negative (curve)
 `DTMAX` are NAMED when they reach no `/IMPL` card, and an **absent** card is
@@ -5955,7 +6005,8 @@ opens it beside the `.hist`, `.tpl`, `.monitor` and `.progress` files;
 nonlinear implicit runs only, `radioss2.F:691`). Since round 6 the converter's
 implicit remedy warnings name it (the deformable-deformable contact warning on
 a non-modal deck, the engine-defect warning below, `--implicit-constant-step`).
-On the R14 `ex_27` pair it names the runaway ring (nodes 5244 and 1423/1424).
+On the R14 `ex_27` pair it names a node of the runaway interior ring
+`r` 2.904 (which node, and on how many cut-backs, varies from run to run).
 
 **Known engine defect: implicit dynamics with an initial velocity.** An
 implicit deck with `*CONTROL_IMPLICIT_DYNAMICS` `IMASS > 0` and any
@@ -5967,6 +6018,11 @@ momentum at the first converged increment is exactly **−3.0000000** times the
 initial one (Z-momentum −2.099317 → +6.297951, KE × 9.00000), and the run ends
 NORMAL TERMINATION with the bar flying AWAY from the wall — with the contact
 deleted, with no wall at all, and with `/INIVEL/AXIS` or `/INIVEL/TRA` alike.
+That is the FREE bar: the penalty twin, and the constrained twin without its
+`*CONSTRAINED_GLOBAL` plane (`--no-constrained-global`); with the plane
+converted the constrained twin reads −2.94× (KE × 8.81) at the first
+time-history sample and ends with its base held by the plane (72 cycles,
+`nt` 4 = `nt` 2).
 With the deck's own first step the first increment does not converge, every
 cut-back restarts from the corrupted state and the run stops at TIMESTEP LIMIT.
 A smaller `/IMPL/DTINI` is therefore NOT a fix. The converter warns on every
@@ -6154,7 +6210,10 @@ the body's shell nodes (the lumper's `IN`, the `cinmas.F:1379` value) takes the
 difference back out, on exactly the bodies that get an `/INIVEL/ROT`. Measured
 on translat (nt 4): `NEW INERTIA` 0.2642894E-02 → **0.1977227E-02** = LS-DYNA's
 0.1977E-02, cycle-0 KE 220.58 → **189.96** (LS 189.962), final KE 139.89 →
-92.77 (LS 94.6381, **−1.97 %**), at 1.156× the cycles (the body's main node owns
+92.77 (LS 94.6381, **−1.97 %** — an END value: the KE history at the fifths of
+the run reads −7.1 / −5.3 / +2.8 / +26.3 / −2.0 % against −13.9 / +22.6 / +2.8 /
++39.2 / +47.8 % without the `J` cells, RMS 17.5 → 11.6 % of the LS peak), at
+1.156× the cycles (the body's main node owns
 the step and its rotational step shrinks with J). The IE is NOT fixed (1159 →
 1436 against LS-DYNA's 0.1026; the engine energy error is 99.9 % from cycle 1
 on every arm — the joint path). Skipped by name: an ICoG 4 body (its J is the
@@ -6211,20 +6270,24 @@ MEASURED at `nt` 4 = `nt` 2 (cycles and steps):
 |---|---|---|---|
 | `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 %; the END state at matched time trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 % |
 | `ex_14_solid_elform_2` | shipped → cap | 34 → 201 (5.91×) | IE history RMS 10.56 → 2.93 % against the ELFORM-2 reference; WORSE against the references of ELFORM −1 / −2 / 1 |
-| `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; end-of-run KE −2.39 → −15.87 % (campaign `match` → deviation) |
-| `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | IE −0.54 → −4.36 % |
+| `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; at matched time KE +1343 → **+17.9 %** (both deviations; −2.39 → −15.87 % under the retired end-of-run scorer) |
+| `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | END IE −0.54 → −4.36 %, but the IE history is the closest of the four measured arms: RMS 2.48 → **1.66 %** of the reference peak (force criterion 2.00, the cap alone 1.83); at `t` 0.76 / 0.80 +13 / +14 % where the ECTOL arm alone reads −64 / +53 % |
 | `4.2.frf.cant-1` | → cap | 70 → 134 | IE −0.60 % both |
 | `6.5.tbl.psd.prepressure-1` | → cap | 10 → 11 | IE −0.50 → −0.62 % |
 | `ie_shell` | → cap | 92 → 124 | IE −99.87 → −99.95 % |
 
-It is off for two measured reasons. On the quasi-static decks, once their
-all-zero tolerances get LS-DYNA's ECTOL (`--zero-tolerance-ectol`, the
-default), the cap costs cycles and buys nothing. And the only constant-step
-`match` on the roster, `ex_11_beam_elform_1`, turns into a deviation under
-the campaign's end-of-run scorer although its KE history error falls 14× —
-because that match was an artefact: the implicit engine never prints its
-last converged increment, so the scorer compared `t` 0.0922 with LS-DYNA's
-`t` 0.1, and at matched time the shipped run's KE is +1343 %.
+It is off because its evidence is mixed, not because it measured worse. On
+the quasi-static decks, once their all-zero tolerances get LS-DYNA's ECTOL
+(`--zero-tolerance-ectol`, the default), the cap costs cycles; on `tensile2`
+it moves the END value away from the reference (−0.54 → −4.36 %) while
+bringing the history closer (RMS 2.48 → 1.66 % of the peak). On the dynamic
+carriers it follows the references closer in time but WORSE against the
+references of a different LS-DYNA element. And the only constant-step deck
+that was a campaign `match`, `ex_11_beam_elform_1`, is a deviation at matched
+time either way: that match was an artefact — the implicit engine never
+prints its last converged increment, so the end-of-run scorer compared `t`
+0.0922 with LS-DYNA's `t` 0.1 — and at matched time the shipped run's KE is
++1343 %, the flag's +17.9 %.
 
 ---
 
@@ -6397,8 +6460,10 @@ mypy k2rad
   NORMAL TERMINATION.
 - **Implicit dynamics from an initial velocity is wrong in the OpenRadioss
   engine** (measured in round 6, not a converter choice): the implicit Newmark
-  path hands back the initial momentum multiplied by exactly −3.0000000 at the
-  first converged increment (KE × 9.00000), so such a run either diverges or
+  path hands back a free body's initial momentum multiplied by exactly
+  −3.0000000 at the first converged increment (KE × 9.00000; −2.94× on the
+  `ex_27` twin whose base a converted plane holds), so such a run either
+  diverges or
   completes with the wrong velocity. The converter warns on every
   `*CONTROL_IMPLICIT_DYNAMICS` + `*INITIAL_VELOCITY*` deck; run it explicit.
   See *Implicit dynamic notes*.

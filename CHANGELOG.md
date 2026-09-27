@@ -35,7 +35,9 @@ Prior history (before this changelog was introduced) is summarized in the
     only `/PROP/TYPE6`. Re-run through the campaign (report §0.25.2): normal
     → normal; the row's one linear step reads IE 169.3 → 10 700 (22 860 at nt
     2) — a status-only row that measures neither the material nor the
-    element. Tests pin all twelve coupling cells at both signs (the code-sweep
+    element. *(Post-review: the nt-2 figure is not even stable at a fixed
+    `nt` — repeated nt-2 runs of the same `.rad` read 15 610 or 22 860, nt 4
+    reads 10 700 on every run.)* Tests pin all twelve coupling cells at both signs (the code-sweep
     mutant `!= 0` → `> 0` survived before).
   - **A2 — the shear-sum caveat's direction follows M** (fidelity major).
     With equal components the Radioss term is 2^(1 − M/2) × LS-DYNA's
@@ -47,7 +49,9 @@ Prior history (before this changelog was introduced) is summarized in the
     opt-out tail names only the `/MAT/HYD_VISC` the deck has (`forging_B` has
     none); "every `/MAT/HYD_VISC`" scoped to the `*MAT_NULL` + `*EOS_*`
     carriers; bird_B's END values carry their history (KE +765 % at cycle 0,
-    +104 / +382 / +337 / +18 / +26 % at the fifths) and bird-el's too. A
+    +104 / +382 / +337 / +18 / +26 % at the fifths) and bird-el's too
+    *(re-sampled at the fifths of t_end in the post-review round: KE +272 /
+    +407 / +143 / −73 / −92 %)*. A
     three-part deck pins the ELFORM-12 clause of the fluid set (the code-sweep
     mutant that survived).
   - **A5 / B5.** The `/MPC` repeat note cites the WARNING box on p.10-135 /
@@ -120,7 +124,10 @@ Prior history (before this changelog was introduced) is summarized in the
     tolerance line). MEASURED at nt 4 and nt 2 (identical final state and
     cycle count on every pair): NORMAL kept on all 10 that were NORMAL;
     **tensile2 IE +7.36 % → −0.54 %** against its reference at 0.11× the
-    cycles (685 → 75); 4.2.frf.cant-1 −0.31 % → −0.60 %; 6.5.tbl.psd +0.03 % →
+    cycles (685 → 75) *(post-review: an END value — at t 0.80 the run reads
+    +53 % where the force criterion reads +14 %, and the IE history RMS is
+    2.00 → 2.48 % of the reference peak; B1 rests on the d3hsp echo, not on a
+    measured gain)*; 4.2.frf.cant-1 −0.31 % → −0.60 %; 6.5.tbl.psd +0.03 % →
     −0.50 % at 0.016× the cycles; rigid_tip / ellipse / aellipse within 0.6 pp;
     tensile1 / bumper / 6.4.tbl.psd inert. **Named regression: doorbeam
     +380.25 % → +582.00 %** (a springback deck already ~5× off its reference).
@@ -191,12 +198,16 @@ Prior history (before this changelog was introduced) is summarized in the
     the references of a DIFFERENT LS-DYNA element (ex_14 −1 / −2 / 1, ex_15
     3 / 5); ex_11 KE history RMS 16.07 → 1.16 % at 2.86×. On the
     quasi-static decks the numbers are the COMBINED arm with B1 (the
-    default): tensile2 75 → 168 cycles, IE −0.54 → −4.36 %; 4.2.frf.cant-1
+    default): tensile2 75 → 168 cycles, IE −0.54 → −4.36 % *(post-review: at
+    the END; its IE history is the closest of the four measured arms, RMS
+    2.48 → 1.66 % of the reference peak)*; 4.2.frf.cant-1
     70 → 134 (−0.60 % both); 6.5.tbl.psd 10 → 11 (−0.50 → −0.62 %);
     ie_shell 92 → 124 (−99.87 → −99.95 %). Never a default this round: the
     class's only `match`, ex_11, turns deviation under the end-of-run scorer
     (KE −2.39 → −15.87 %) although its history error falls 14× — an artefact
-    of the unprinted last implicit increment (C1).
+    of the unprinted last implicit increment (C1) *(post-review: at matched
+    time the flag's run reads KE +17.9 % and the shipped run +1343 % — both
+    deviations)*.
   - **B4 — the implicit-dynamics + initial-velocity ENGINE-defect warning,
     `/IMPL/NONLIN/SOLVINFO` in the implicit remedy texts, and the `ex_27`
     record (warning / text only, 0 bytes).** (i) A default-ON warning, from
@@ -281,10 +292,12 @@ Prior history (before this changelog was introduced) is summarized in the
     before any wall); **`efg/metal-cutting/main.k` may go normal →
     error_engine**: the GLOBAL arm ends ERROR at cycle 26 at nt 4 AND nt 2,
     while its BASE NORMAL (164 cycles, the campaign's nt-4 row) reproduced in
-    only 1 of 5 fresh runs and it has NO LS-DYNA energy reference — a flaky,
-    unreferenced base, not a measured regression; `ale_wavehitcol` is a
-    never-launched giant (`run_pass` 2), re-converted only, its solver row
-    STALE. 0 verdict movers. The `_global_spc_dofs` docstring's completeness
+    only 1 of 5 fresh runs *(the implement round's sample; 3 of 10 after the
+    campaign re-run and the finalization)* and it has NO LS-DYNA energy
+    reference — a flaky, unreferenced base, not a measured regression; the
+    campaign re-run then made it the round's lost NORMAL (report §0.25);
+    `ale_wavehitcol` is a `run_pass`-2 giant whose solver row (a 2026-09-05
+    run, normal) is STALE, re-converted only. 0 verdict movers. The `_global_spc_dofs` docstring's completeness
     claim is corrected (rule (a) RE-POINTS member cells onto the `/RBODY` main
     node, so a body with a `*MAT_RIGID` CON1/CON2 auto-constraint and member
     TC/RC cells carries that node in two `/BCS`: 5 roster decks at 5aef5a0,
@@ -323,7 +336,9 @@ Prior history (before this changelog was introduced) is summarized in the
     mainboltaexpl). Why opt-in, MEASURED on spotweld.k (nt 4, LS IE 76 812 at
     1.18e-3): rule 1 alone costs 7.64× the cycles at IE −99.92 %; the
     COMBINED arm takes IE −99.9 % → +82.0 % at 7.80× the cycles (639 → 4983)
-    — the error changes SIGN, not size (|IE error| 76 733 → 67 888) — the
+    — the error changes SIGN, not size (|IE error| 76 733 → 67 888) at
+    1.18e-3 *(post-review: and GROWS to +141.1 % at the matched end t 1.2e-3,
+    after LS-DYNA's weld failure)* — the
     TYPE13 shear stays elastic (116 300 vs LS's 46 247) and the weld never
     fails (`*MAT_SPOTWELD` EFAIL has no `/PROP/TYPE13` slot); rule 2 reaches 4
     R14 deck keys on 4 emitted models by bytes (spotweld.k,
@@ -368,7 +383,8 @@ Prior history (before this changelog was introduced) is summarized in the
     ERROR 179 first are retired (the two coupled carriers give the seam a
     mechanical `*MAT_CWM`). (iii) **The constant-step census is 50 deck keys on
     34 emitted models** (39 / 28 state no `*CONTROL_IMPLICIT_AUTO`, 11 / 6
-    state IAUTO 0; 42 of the 50 are normal): round 5's figure counted ~60 MODAL
+    state IAUTO 0; 42 of the 50 were normal at 5aef5a0, 43 after round 6's
+    campaign re-run): round 5's figure counted ~60 MODAL
     keys that carry no `/IMPL/DT` card and missed the 11. ROADMAP round-5 item
     1 is rewritten in place (its `152 811` / `1 888` measurements kept) and
     marked ANSWERED; this file's round-5 entry keeps its figure and gains two
@@ -416,8 +432,11 @@ Prior history (before this changelog was introduced) is summarized in the
     (`hm_read_mat06.F:154`), and
     `eosmain.F:229` hands that `PM(37)` to every EOS as its pressure floor
     (`gruneisen.F:129/132/152`, `eospolyno.F:104/113/125`): an UNBOUNDED
-    tension in the cells the fluid advects out of, the measured death of every
-    void deck (energy created from cycle 2, `MESSAGE ID 167`). The floor goes
+    tension in the cells the fluid advects out of — what the three void
+    TIMEOUTS died of (`quadrature_B/C`, `bird_B`; `bird-el` ends NORMAL with
+    it and `forging_B` stops in the starter) *(post-review: this sentence
+    first read "the measured death of every void deck", with an energy-from-
+    cycle-2 figure no arm reproduces)*. The floor goes
     on the void's own LAW6 material AND every LAW6 material of the deck's
     ELFORM-12 fluid (Vol I R17 p.28-134: one fluid per single-material-and-void
     mesh); −1e-20 is the zero-pressure cavitation limit `*MAT_NULL` Remark 4
@@ -440,7 +459,11 @@ Prior history (before this changelog was introduced) is summarized in the
     either way (at the end IE +454.1 → +1134.6 %, KE +10856 → −92.1 %; with
     the floor KE +272 / +398 / +144 / −72 / −92 % and IE +1135 … +2736 % at
     the fifths — the OpenRadioss row nearest each fifth, the LS-DYNA glstat
-    interpolated at its time; its plate carries nothing,
+    interpolated at its time *(post-review: sampled at the fifths of t_end
+    the KE reads +272 / +407 / +143 / −73 / −92 % — the second fifth sits on
+    a steep rise, 398 / 402 / 407 by the sampling rule; the warning now
+    ships the t_end reading and the energy error −17.9 → −32.6 %)*; its plate
+    carries nothing,
     `*CONSTRAINED_SHELL_IN_SOLID` is not converted). **Status, not match**: the void's low DENSITY stays
     out — a dead `/INTER/TYPE18` coupling or 4.51× the cycles on the coupled
     decks, a stall on bird_B. `underwater_A` / `underwater_B` (the two `match`
@@ -494,7 +517,10 @@ Prior history (before this changelog was introduced) is summarized in the
     so a spring end carrying ONLY an `*ELEMENT_MASS` kept k2rad's token:
     **1 deck key on 1 emitted model moves** — gnonspring.k, `TOTAL MASS`
     1.02e-4 → **2.0e-6 = LS-DYNA's**, 786 cycles and IE 431.3 on both arms
-    (nt 4); ke_dev +19776 → +290 % at the current scorer. The other 13
+    (nt 4); ke_dev +19776 → +290 % at the current scorer *(post-review: that
+    is the retired END-of-run scorer's figure; the campaign database, under
+    this PR's matched-time rule, reads +8385.96 % (C1 alone) → +66.39 %,
+    report §0.25)*. The other 13
     carriers of the roster are byte-identical (two independent sweeps in the
     pre-research). The new pure helper `lumping.element_mass_by_node` weighs
     every emitted shell (at the thickness the `/SHELL` row is written with;
@@ -594,7 +620,8 @@ Prior history (before this changelog was introduced) is summarized in the
     translat (the G4 T1b arm, J on body 105 only = this rule, nt 4): `NEW
     INERTIA` 0.2642894E-02 → **0.1977227E-02** = LS-DYNA's 0.1977E-02;
     cycle-0 KE 220.58 → **189.96** (LS 189.962); final KE 139.89 → 92.77 (LS
-    94.6381, −1.97 %); 1.156× the cycles; the IE is NOT fixed (1159 → 1436
+    94.6381, −1.97 % — an END value: the KE history RMS goes 17.5 → 11.6 % of
+    the LS peak, post-review); 1.156× the cycles; the IE is NOT fixed (1159 → 1436
     against 0.1026 — the joint path's 99.9 % energy error). Flag-arm movers:
     translat (1 J row) and Ryan_Lee `W16_SW_door_*` ×3 (2 J rows each, no
     reference). The round-5 texts that called the residual "not compensated
@@ -3806,8 +3833,8 @@ Prior history (before this changelog was introduced) is summarized in the
     (a blank `IAUTO` is *"Constant time step size"*, Vol I R17 p.12-277) and
     k2rad writes `/IMPL/DT/2` on every one; 81 are `normal` *(Re-censused in
     round 6: 50 keys / 34 models — this figure counted modal keys that carry
-    no `/IMPL/DT` card and missed the 11 stating IAUTO 0; 42 of the 50 are
-    normal.)*. On
+    no `/IMPL/DT` card and missed the 11 stating IAUTO 0; 42 of the 50 were
+    normal at 5aef5a0, 43 after round 6's campaign re-run.)*. On
     `ex_02_thick_shell_elform_2` — round 4's own `normal → timeout` family — with
     `/IMPL/DT/2` DELETED, at **nt 4 AND nt 2** with a 600 s budget each: the run
     is killed at the cap at cycle 152 811 / t = 0.7467 and cycle 173 811 /

@@ -7309,9 +7309,13 @@ class ConvertOptions:
     # TOTAL-displacement norm; nl_solv.F:410-421 is per step, and the
     # combined Itol 13 ended 3 of 3 NORMAL quasi-static decks in ERROR). A
     # NEGATIVE cell is a tolerance curve (p.12-355) and keeps the force
-    # default. MEASURED at nt 4 = nt 2 on the 11 keys / 11 models of this
-    # shape: NORMAL kept 10/10; tensile2 IE +7.36 % -> -0.54 % at 0.11x the
-    # cycles; doorbeam +380.25 % -> +582.00 % (named regression); ie_shell
+    # default. The rule rests on the d3hsp echo, NOT on a measured gain.
+    # MEASURED at nt 4 = nt 2 on the 11 keys / 11 models of this shape:
+    # NORMAL kept 10/10; the IE history (RMS in % of the reference peak) is
+    # closer on 3 by at most 0.03 points, unchanged on 3, farther on 4;
+    # tensile2 ENDS at IE +7.36 % -> -0.54 % at 0.11x the cycles but reads
+    # +53 % at t 0.80 (+14 % before), history RMS 2.00 % -> 2.48 %; doorbeam
+    # +380.25 % -> +582.00 % (named regression, larger mid-run); ie_shell
     # ERROR -> NORMAL in 92 cycles at IE -99.87 % (a status-only promotion).
     # OFF restores Itol 2 / Toli 0.01.
     zero_tolerance_ectol: bool = True
@@ -7353,7 +7357,8 @@ class ConvertOptions:
     # take IE -99.9 % -> +82.0 % at 7.80x the cycles - the error changes SIGN,
     # not size - and the weld never fails (*MAT_SPOTWELD EFAIL has no
     # /PROP/TYPE13 slot). Rule 2 reaches 4 R14 deck keys on 4 emitted models
-    # and two unreferenced vehicles, none run but spotweld.k. Hence opt-in.
+    # and two unreferenced vehicles, none run WITH it but spotweld.k (the
+    # three R14 giants have campaign rows from runs without it). Hence opt-in.
     spotweld_node_synthesis: bool = False
     beam_contact_secondary: bool = False
     # --implicit-constant-step: cap the implicit step at the deck's own DT0
@@ -7374,11 +7379,12 @@ class ConvertOptions:
     # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles (its END
     # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
     # +0.5 %); ex_11 KE
-    # history error 16.07 % -> 1.16 % at 2.86x, but its campaign match turns
-    # deviation under the end-of-run scorer (an artefact of the unprinted last
-    # increment); with the default --zero-tolerance-ectol it costs cycles on
-    # the quasi-static decks and buys nothing (tensile2 75 -> 168 cycles, IE
-    # -0.54 % -> -4.36 %). Reach with the flag: 33 R14 deck keys on 22 emitted
+    # history error 16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 %
+    # where the shipped run reads +1343 % - both deviations); with the
+    # default --zero-tolerance-ectol it costs cycles on the quasi-static decks
+    # - tensile2 75 -> 168 cycles, IE -0.54 % -> -4.36 % at the END but the
+    # closest IE history of the measured arms (RMS 2.48 % -> 1.66 % of the
+    # reference peak). Reach with the flag: 33 R14 deck keys on 22 emitted
     # models; 0 without it.
     implicit_constant_step: bool = False
     # --no-discrete-offset: stop honouring *ELEMENT_DISCRETE's OFFSET cell.
@@ -8089,7 +8095,8 @@ class ConvertOptions:
     # since round 6 (A7) the flag also writes J = -SUM(IN) into every body it
     # re-points (writer/loads._apply_mass_weighted_rbody_inertia): NEW INERTIA
     # 0.1977227E-02 = LS-DYNA's, cycle-0 KE 189.96 (LS 189.962), final KE
-    # -1.97 %, 1.156x the cycles; the IE (the joint path's 99.9 % energy
+    # -1.97 % (an end value: the KE history RMS goes 17.5 % -> 11.6 % of the
+    # LS peak), 1.156x the cycles; the IE (the joint path's 99.9 % energy
     # error) is not fixed.
     #
     # OPT-IN because exactly ONE carrier with an LS-DYNA reference exists on
@@ -9039,7 +9046,12 @@ class ConversionState:
     # silently drop the planes, and the *NODE announcement does not count
     # them). `constrained_global_rows` keeps (row, tolerance used, nodes
     # selected) for the announcement; `constrained_global_extent` the
-    # bounding-box side the default tolerance was taken from.
+    # bounding-box side the default tolerance was taken from - the box of the
+    # nodes the deck's ELEMENTS reference (post-review round of #140: one
+    # element-free node far away inflated an all-node box, and with it the
+    # tolerance, until a plane swept a whole body);
+    # `constrained_global_extent_outliers` = (element-free nodes outside that
+    # box, the all-node box side) when there are any, for the announcement.
     constrained_globals: List["ConstrainedGlobal"] = field(
         default_factory=list)
     constrained_global_tc_rc: Dict[int, Tuple[int, int]] = field(
@@ -9047,6 +9059,7 @@ class ConversionState:
     constrained_global_rows: List[Tuple["ConstrainedGlobal", float, int]] = (
         field(default_factory=list))
     constrained_global_extent: float = 0.0
+    constrained_global_extent_outliers: Tuple[int, float] = (0, 0.0)
     # --beam-contact-secondary (round 6, B6): per part, the 1-D nodes the
     # contact walk ADDED (ones no other family of the part carries), and the
     # (sid, styp) sides already named as having gained some.

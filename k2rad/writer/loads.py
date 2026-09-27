@@ -251,6 +251,30 @@ def _or_code(a: int, b: int) -> int:
     return _TC_RC_CODE[_or_dof_codes([_TC_RC_DIGITS[a], _TC_RC_DIGITS[b]])]
 
 
+def _element_node_ids(state: ConversionState) -> Set[int]:
+    """The defined nodes the deck's ELEMENTS reference: shells (2-D belts
+    included), solids, thick shells, SPH particles, and the two end nodes of
+    beams, discretes and 1-D belts (never a beam's orientation node n3) - the
+    mesh whose size ``*CONSTRAINED_GLOBAL``'s default tolerance scales with."""
+    ids: Set[int] = set()
+    for elems in (state.shell_elems, state.solid_elems, state.tshell_elems,
+                  state.sph_elems):
+        for e in elems:
+            ids.update(e.nodes)
+    for pairs in (state.beam_elems, state.discrete_elems,
+                  state.seatbelt_elems):
+        for b in pairs:
+            ids.update((b.n1, b.n2))
+    return {n for n in ids if n in state.nodes}
+
+
+def _bounding_box(pts) -> List[Tuple[float, float]]:
+    """``[(xmin, xmax), (ymin, ymax), (zmin, zmax)]`` of a non-empty list of
+    nodes."""
+    return [(min(v), max(v)) for v in ([p.x for p in pts], [p.y for p in pts],
+                                       [p.z for p in pts])]
+
+
 def _resolve_constrained_globals(state: ConversionState) -> None:
     """``*CONSTRAINED_GLOBAL`` -> the per-node TC/RC union (R14 triage round 6,
     B5). Called in ``build_starter`` BEFORE any prepass synthesizes a node, so
@@ -259,15 +283,24 @@ def _resolve_constrained_globals(state: ConversionState) -> None:
     Per row: every node whose coordinate along the plane normal (DIR 1/2/3 =
     global x/y/z) is within the row's TOL of the plane point - or, when TOL
     is 0, within ``1e-6 x`` the model extent (the largest side of the bounding
-    box of the deck's nodes). LS-DYNA's own rule is "the internal mesh-size
-    dependent tolerance" (Vol I R17 p.10-39), which the card does not state,
-    so the default is k2rad's own; it reproduces LS-DYNA's own d3hsp 'nodal
-    spc summary' NODE FOR NODE, id set and codes, on all three R14 carriers
-    (ex_27 constrained twin 305 of 11285 nodes, extent 32.4; efg/metal-cutting
-    54 = 36 x 001/111 + 18 x 111/111 of 4197, extent 24; ale_wavehitcol 24737
-    in 7 codes of 352232, extent 487.68). A node on several planes gets the OR
-    of their codes (``_or_code``); the union with the ``*NODE`` cells and the
-    four screens happen in :func:`_make_node_tc_rc_bcs`.
+    box of the nodes the deck's ELEMENTS reference, :func:`_element_node_ids`;
+    every defined node stays a CANDIDATE). LS-DYNA's own rule is "the
+    internal mesh-size dependent tolerance" (Vol I R17 p.10-39), which the
+    card does not state, so the default is k2rad's own; it reproduces
+    LS-DYNA's own d3hsp 'nodal spc summary' NODE FOR NODE, id set and codes,
+    on all three R14 carriers (ex_27 constrained twin 305 of 11285 nodes,
+    extent 32.4; efg/metal-cutting 54 = 36 x 001/111 + 18 x 111/111 of 4197,
+    extent 24; ale_wavehitcol 24737 in 7 codes of 352232, extent 487.68 -
+    the same extents over the element nodes as over all nodes). Until the
+    post-review round of #140 the box was that of ALL nodes, so one
+    element-free node far away (an orientation or reference node) inflated
+    the tolerance: measured on the pre-fix code, a 2 x 2 x 1 hex grid with one
+    such node at x = 1e6 got a tolerance of 1.0, and a plane at z = 0.5
+    through the middle of its elements selected all 18 grid nodes and the
+    stray one. A node on
+    several planes gets the OR of their codes (``_or_code``); the union with
+    the ``*NODE`` cells and the four screens happen in
+    :func:`_make_node_tc_rc_bcs`.
 
     Every plane selecting 0 nodes leaves nothing to emit: the keyword goes
     back into ``skipped_keywords`` (reach 0), the same bookkeeping as a
@@ -277,10 +310,20 @@ def _resolve_constrained_globals(state: ConversionState) -> None:
         return
     extent = 0.0
     if state.nodes:
-        xs = [n.x for n in state.nodes.values()]
-        ys = [n.y for n in state.nodes.values()]
-        zs = [n.z for n in state.nodes.values()]
-        extent = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+        mesh = _element_node_ids(state)
+        pts = [state.nodes[n] for n in sorted(mesh)] or list(
+            state.nodes.values())
+        box = _bounding_box(pts)
+        extent = max(hi - lo for lo, hi in box)
+        if mesh:
+            free_out = [
+                n for nid, n in state.nodes.items() if nid not in mesh
+                and any(not lo <= c <= hi
+                        for c, (lo, hi) in zip((n.x, n.y, n.z), box))]
+            if free_out:
+                all_box = _bounding_box(list(state.nodes.values()))
+                state.constrained_global_extent_outliers = (
+                    len(free_out), max(hi - lo for lo, hi in all_box))
     state.constrained_global_extent = extent
     for g in state.constrained_globals:
         tol = g.tol if g.tol > 0.0 else 1e-6 * extent
@@ -787,12 +830,20 @@ def _warn_constrained_global_converted(
             " The node tolerance is k2rad's OWN where a row states TOL = 0: "
             "LS-DYNA uses 'the internal mesh-size dependent tolerance' "
             f"(p.10-39), k2rad uses 1e-6 x the model extent ({extent:g}, the "
-            "largest side of the bounding box of the deck's nodes) = "
-            f"{1e-6 * extent:g}; it selects exactly the nodes LS-DYNA's own "
+            "largest side of the bounding box of the nodes the deck's "
+            f"elements reference) = {1e-6 * extent:g}; it selects exactly the "
+            "nodes LS-DYNA's own "
             "d3hsp 'nodal spc summary' lists on all three R14 carriers "
             "(ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit "
             "305 = 305; efg/metal-cutting/main.k 54 = 36 x 001/111 + 18 x "
             "111/111; ale_wavehitcol 24737 in the same 7 codes).")
+        n_out, all_side = state.constrained_global_extent_outliers
+        if n_out:
+            msg.append(
+                f" {n_out} element-free node(s) lie outside that box and do "
+                "NOT set the tolerance: the box of every *NODE row has side "
+                f"{all_side:g}, which would make it {1e-6 * all_side:g} and "
+                "let a plane sweep nodes far from it.")
     if rigid_dropped:
         msg.append(
             f" {len(rigid_dropped)} node(s) (node {_named(rigid_dropped)}) "
@@ -3115,7 +3166,11 @@ def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
                 "76733 -> 67888 on LS 76812): the /PROP/TYPE13 shear stays "
                 "elastic (116300 vs LS-DYNA's 46247 at 1.18e-3) and the weld "
                 "never fails (*MAT_SPOTWELD EFAIL has no /PROP/TYPE13 slot) "
-                "where LS-DYNA fails it at 1.1876e-3; the TYPE13 spring also "
+                "where LS-DYNA fails it at 1.1876e-3; so at the matched END (t "
+                "1.2e-3, after LS-DYNA's failure has dropped its IE to 60028) "
+                "the error GROWS to +141.1 % (the base -99.87 %), and the "
+                "history reads +65 / +82 / +85 / +83 / +141 % at the fifths of "
+                "the run (nt 4 and nt 2 identical); the TYPE13 spring also "
                 "owns the time step because MAT_100's DT is dropped.")
         else:
             clause = (
@@ -3403,8 +3458,17 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     return lines if emitted else []
 
 
+#: The welds' exponent records for the per-deck warning: ``(class, N, M) ->
+#: (index in state.warnings of the group's FIRST weld, [(keyword, label,
+#: /PROP/TYPE13 id), ...])``, class "applied" / "optout" / "nonpos"
+#: (post-review round of #140: the measured paragraph was warned once PER
+#: WELD - ~1.6 KB each, thousands of times on a vehicle deck).
+_WeldExpNotes = Dict[Tuple[str, float, float],
+                     Tuple[int, List[Tuple[str, str, int]]]]
+
+
 def _weld_failure_exponents(state: ConversionState, w, label: str,
-                            prop_id: int
+                            prop_id: int, notes: _WeldExpNotes
                             ) -> Optional[List[Tuple[float, float]]]:
     """The weld tie's failure exponents N / M -> the TYPE13 ``alpha``/``beta``
     cells (R14 triage round 6, A2); ``None`` = leave every cell blank.
@@ -3425,70 +3489,110 @@ def _weld_failure_exponents(state: ConversionState, w, label: str,
     ``/PROP/TYPE25`` route (``convertconstrainedspotwelds.cxx:103-124``).
 
     Called AFTER every ``continue`` screen of the weld loop and after the
-    property id is drawn, so the message names the card the cells are on."""
+    property id is drawn. The message is NOT warned here: the weld is
+    recorded in *notes* and :func:`_warn_weld_exponents` writes ONE warning
+    per (class, N, M) after the loop - the measured paragraph once, every
+    weld of the group named with its property id (post-review round of #140;
+    a deck with one weld per group reads exactly the one-weld text)."""
     n, m = w.n, w.m
     if abs(n - 2.0) <= 1e-9 and abs(m - 2.0) <= 1e-9:
         return None
     kw = ("*CONSTRAINED_GENERALIZED_WELD_SPOT" if w.nsid > 0
           else "*CONSTRAINED_SPOTWELD")
-    if not state.options.weld_exponents:
-        state.warn(
-            f"--no-weld-exponents: {kw} {label} states N={n:g} / M={m:g}; "
-            f"the alpha/beta cells of /PROP/TYPE13/{prop_id} are left blank "
-            "and the starter reads them as alpha 1 / beta 2 "
-            "(hm_read_prop13.F:1169-1170), so this weld fails on exponent 2 "
-            "in every term, not on the deck's N/M.")
+    cls = ("optout" if not state.options.weld_exponents
+           else "nonpos" if n <= 0.0 or m <= 0.0 else "applied")
+    # the group's warning is inserted where its FIRST weld used to warn
+    notes.setdefault((cls, n, m), (len(state.warnings), []))[1].append(
+        (kw, label, prop_id))
+    if cls != "applied":
         return None
-    if n <= 0.0 or m <= 0.0:
-        state.warn(
-            f"{kw} {label}: N={n:g} / M={m:g} - a failure exponent <= 0 is "
-            f"not written into /PROP/TYPE13/{prop_id}; the starter reads a "
-            "blank beta cell as 2 (hm_read_prop13.F:1170), so this weld fails "
-            "on exponent 2 in every term.")
-        return None
-    caveat = ""
-    if abs(m - 2.0) > 1e-9:
-        # The Radioss/LS ratio of the shear term with two EQUAL components f:
-        # 2 (f/SS)^M against (sqrt(2) f/SS)^M, i.e. 2^(1 - M/2). Above 1 for
-        # M < 2 (Radioss reaches 1 first), below 1 for M > 2 (LS-DYNA does).
-        ratio = 2.0 ** (1.0 - m / 2.0)
-        caveat = (
-            " LS-DYNA scores the shear RESULTANT (Vol I R17 p.10-213 Remark "
-            "2); Radioss scores the two shear DIRECTIONS separately. The two "
-            "agree when the shear stays on one local axis, and for any "
-            "direction at M = 2. With both components present the direction "
-            "of the difference follows M: ")
-        if m < 2.0:
-            caveat += (
-                f"at M = {m:g} and equal components the Radioss sum is "
-                f"{ratio:.3f}x the resultant term, so Radioss reaches 1 first "
-                "- the converted weld fails EARLIER than LS-DYNA "
-                "(conservative for M < 2).")
-        else:
-            caveat += (
-                f"at M = {m:g} and equal components the Radioss sum is only "
-                f"{ratio:.3f}x the resultant term, so LS-DYNA reaches 1 first "
-                "- the converted weld fails LATER than LS-DYNA "
-                "(NON-conservative for M > 2).")
-    state.warn(
-        f"{kw} {label}: failure exponents N={n:g} / M={m:g} written into "
-        f"/PROP/TYPE13/{prop_id} as alpha1-3 = 1, beta1 = {n:g}, "
-        f"beta2 = beta3 = {m:g}, so the Ifail = 1 criterion is "
-        "(fn/SN)^N + (|fy|/SS)^M + (|fz|/SS)^M >= 1, fn tensile only "
-        "(r4def3.F:361, :374 and its per-DOF siblings, deletion at :819). A "
-        "blank alpha/beta cell is read as 1 / 2 (hm_read_prop13.F:1169-1170), "
-        "so without these cells the deck's exponents would be replaced by 2."
-        + caveat +
-        " MEASURED at nt 4 on spotweld-ii/plates.nrbc and "
-        "spotweld-iii/plates.spot (N = M = 1, the only two carriers): the "
-        "weld deletes at t 2.460e-4 against LS-DYNA's 2.4193e-4 (+1.7 %; it "
-        "was 3.130e-4, +29.4 %), in 2407 cycles against 2678 (0.899x); "
-        "plates.nrbc IE +23.64 -> -18.99 %, KE +61.93 -> +12.75 %, external "
-        "work +60.66 -> +7.83 %; plates.spot IE +34.23 -> -12.05 %, KE "
-        "+45.57 -> +1.36 %, external work +59.99 -> +7.38 %; both rows stay "
-        "deviation (IE and the -6.9 % energy error). Pass --no-weld-exponents "
-        "to leave the cells blank.")
     return [(1.0, n), (1.0, m), (1.0, m)]
+
+
+def _warn_weld_exponents(state: ConversionState, notes: _WeldExpNotes) -> None:
+    """One warning per (class, N, M) group of *notes*, inserted into
+    ``state.warnings`` where the group's FIRST weld used to warn - so a deck
+    with one weld per group keeps its warning record byte for byte, order
+    included. A group of ONE weld names it as ``<keyword> <label>`` and its
+    ``/PROP/TYPE13/<id>`` - the text the round shipped per weld; a larger
+    group names every weld with its property id in one list and states the
+    criterion, the caveat and the measurement once."""
+    out: List[Tuple[int, str]] = []
+    for (cls, n, m), (first, welds) in notes.items():
+        one = len(welds) == 1
+        if one:
+            kw, label, pid = welds[0]
+            who = f"{kw} {label}"
+            prop = f"/PROP/TYPE13/{pid}"
+        else:
+            who = (f"{len(welds)} welds ("
+                   + "; ".join(f"{kw} {label} -> /PROP/TYPE13/{pid}"
+                               for kw, label, pid in welds) + ")")
+            prop = "their /PROP/TYPE13"
+        if cls == "optout":
+            out.append((first,
+                f"--no-weld-exponents: {who} "
+                f"{'states' if one else 'state'} N={n:g} / M={m:g}; "
+                f"the alpha/beta cells of {prop} are left blank "
+                "and the starter reads them as alpha 1 / beta 2 "
+                "(hm_read_prop13.F:1169-1170), so "
+                f"{'this weld fails' if one else 'these welds fail'} on "
+                "exponent 2 in every term, not on the deck's N/M."))
+            continue
+        if cls == "nonpos":
+            out.append((first,
+                f"{who}: N={n:g} / M={m:g} - a failure exponent <= 0 is "
+                f"not written into {prop}; the starter reads a "
+                "blank beta cell as 2 (hm_read_prop13.F:1170), so "
+                f"{'this weld fails' if one else 'these welds fail'} on "
+                "exponent 2 in every term."))
+            continue
+        caveat = ""
+        if abs(m - 2.0) > 1e-9:
+            # The Radioss/LS ratio of the shear term with two EQUAL components
+            # f: 2 (f/SS)^M against (sqrt(2) f/SS)^M, i.e. 2^(1 - M/2). Above 1
+            # for M < 2 (Radioss reaches 1 first), below 1 for M > 2 (LS-DYNA
+            # does).
+            ratio = 2.0 ** (1.0 - m / 2.0)
+            caveat = (
+                " LS-DYNA scores the shear RESULTANT (Vol I R17 p.10-213 "
+                "Remark 2); Radioss scores the two shear DIRECTIONS "
+                "separately. The two agree when the shear stays on one local "
+                "axis, and for any direction at M = 2. With both components "
+                "present the direction of the difference follows M: ")
+            if m < 2.0:
+                caveat += (
+                    f"at M = {m:g} and equal components the Radioss sum is "
+                    f"{ratio:.3f}x the resultant term, so Radioss reaches 1 "
+                    "first - the converted weld fails EARLIER than LS-DYNA "
+                    "(conservative for M < 2).")
+            else:
+                caveat += (
+                    f"at M = {m:g} and equal components the Radioss sum is "
+                    f"only {ratio:.3f}x the resultant term, so LS-DYNA "
+                    "reaches 1 first - the converted weld fails LATER than "
+                    "LS-DYNA (NON-conservative for M > 2).")
+        out.append((first,
+            f"{who}: failure exponents N={n:g} / M={m:g} written into "
+            f"{prop} as alpha1-3 = 1, beta1 = {n:g}, "
+            f"beta2 = beta3 = {m:g}, so the Ifail = 1 criterion is "
+            "(fn/SN)^N + (|fy|/SS)^M + (|fz|/SS)^M >= 1, fn tensile only "
+            "(r4def3.F:361, :374 and its per-DOF siblings, deletion at :819). "
+            "A blank alpha/beta cell is read as 1 / 2 "
+            "(hm_read_prop13.F:1169-1170), so without these cells the deck's "
+            "exponents would be replaced by 2."
+            + caveat +
+            " MEASURED at nt 4 on spotweld-ii/plates.nrbc and "
+            "spotweld-iii/plates.spot (N = M = 1, the only two carriers): the "
+            "weld deletes at t 2.460e-4 against LS-DYNA's 2.4193e-4 (+1.7 %; "
+            "it was 3.130e-4, +29.4 %), in 2407 cycles against 2678 (0.899x); "
+            "plates.nrbc IE +23.64 -> -18.99 %, KE +61.93 -> +12.75 %, "
+            "external work +60.66 -> +7.83 %; plates.spot IE +34.23 -> "
+            "-12.05 %, KE +45.57 -> +1.36 %, external work +59.99 -> +7.38 %; "
+            "both rows stay deviation (IE and the -6.9 % energy error). Pass "
+            "--no-weld-exponents to leave the cells blank."))
+    for shift, (idx, msg) in enumerate(sorted(out, key=lambda x: x[0])):
+        state.warnings.insert(idx + shift, msg)
 
 
 def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
@@ -3521,6 +3625,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
                    "scale the tie stiffness — defaulted E_ref=210000 (steel, "
                    "N/mm² assumed); check the unit system.")
 
+    exp_notes: _WeldExpNotes = {}
     for w in welds:
         label = w.title or (f"spotweld_{w.n1}_{w.n2}" if w.nsid == 0
                             else f"gen_weld_spot_{w.nsid}")
@@ -3558,7 +3663,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
-        exps = _weld_failure_exponents(state, w, label, prop_id)
+        exps = _weld_failure_exponents(state, w, label, prop_id, exp_notes)
         # Token mass/inertia: the tie itself is massless in LS-DYNA
         # (*CONSTRAINED_SPOTWELD has no mass cell at all — it is a CONSTRAINT),
         # so both cells are k2rad's own invention and the mass half is
@@ -3590,6 +3695,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             "tie is penalty-stiff, not rigid — validate the failure load on a "
             "single-weld case.")
 
+    _warn_weld_exponents(state, exp_notes)
     return lines if emitted else []
 
 
@@ -5618,7 +5724,11 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
             "intro-by-j.-day/joint/joint-ii/translat.k (nt 4): NEW INERTIA "
             "0.2642894E-02 -> 0.1977227E-02 = LS-DYNA's 0.1977E-02; cycle-0 "
             "KE 220.58 -> 189.96 (LS 189.962); final KE 139.89 -> 92.77 (LS "
-            "94.6381, -1.97 %); 1.156x the cycles (the body's main node owns "
+            "94.6381, -1.97 % - an END value: the KE history at the fifths of "
+            "the run reads -7.1 / -5.3 / +2.8 / +26.3 / -2.0 % against "
+            "-13.9 / +22.6 / +2.8 / +39.2 / +47.8 % without the J cells, "
+            "RMS 17.5 -> 11.6 % of the LS peak); 1.156x the cycles (the "
+            "body's main node owns "
             "the step and its rotational step shrinks with J). The IE is NOT "
             "fixed by it (1159 -> 1436 against LS-DYNA's 0.1026; the engine "
             "energy error is 99.9 % from cycle 1 on every arm - the joint "

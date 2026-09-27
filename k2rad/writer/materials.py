@@ -745,10 +745,13 @@ def _void_keyword(records: List[Tuple[int, bool]]) -> str:
 
 def _linear_eos_tensile_limit_clause(state: ConversionState, mid: int,
                                      pc: float) -> str:
-    """``" (-1 is this EOS's own tensile limit ...)"`` when the carrier's EOS
-    is a LINEAR polynomial ``P = C1*mu`` (C1 > 0, every other coefficient 0)
-    and the stated PC sits at or below ``-C1``: with ``mu > -1`` that EOS can
-    never produce a pressure below ``-C1``, so the stated cutoff cuts nothing.
+    """``" (PC -1 is at or below this EOS's own tensile limit -C1 = -1 ...)"``
+    when the carrier's EOS is a LINEAR polynomial ``P = C1*mu`` (C1 > 0, every
+    other coefficient 0) and the stated PC sits at or below ``-C1``: with
+    ``mu > -1`` that EOS can never produce a pressure below ``-C1``, so the
+    stated cutoff cuts nothing. The limit named is ``-C1``, not the PC: the
+    two are equal only when PC = -C1 exactly (``bird_B``; post-review round
+    of #140 - a PC strictly below -C1 was called the EOS's own limit).
     Computed from the two numbers the deck gives, never assumed."""
     eos = state.eos_cards.get(mid)
     if eos is None:
@@ -760,8 +763,9 @@ def _linear_eos_tensile_limit_clause(state: ConversionState, mid: int,
     c1 = c.get("c1", 0.0)
     others = [c.get(k, 0.0) for k in ("c0", "c2", "c3", "c4", "c5")]
     if c1 > 0.0 and not any(others) and pc <= -c1:
-        return (f" ({pc:g} is this EOS's own tensile limit, P = C1*mu with "
-                f"C1 = {c1:g} and mu > -1, i.e. no cutoff at all)")
+        return (f" (PC {pc:g} is at or below this EOS's own tensile limit "
+                f"-C1 = {-c1:g}: P = C1*mu with C1 = {c1:g} and mu > -1 "
+                "never goes below -C1, i.e. no cutoff at all)")
     return ""
 
 
@@ -876,13 +880,14 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "formulation needs the zero-pressure floor"
         + _linear_eos_tensile_limit_clause(state, mid, pc) + "."
         for mid, pc in sorted(out.items()) if pc != 0.0)
+    void_mids = sorted({state.parts[p].mid for p in good})
     state.warn(
         f"{kw} {good} (ELFORM 12, single material with void): the cavitation "
         f"floor Pmin = -1e-20 is written on /MAT/HYD_VISC {sorted(out)} - the "
         "void's own material and every LAW6 material of the deck's ELFORM-12 "
-        f"fluid (parts {fluid_pids}); Vol I R17 p.28-134 allows one fluid per "
-        "single-material-and-void mesh, so every such part is the fluid that "
-        "refills the void. Not 0: hm_read_mat06.F:154 reads Pmin 0 as "
+        f"fluid (parts {fluid_pids}); "
+        + _void_fluid_identity_clause(state, sorted(out), void_mids) +
+        " Not 0: hm_read_mat06.F:154 reads Pmin 0 as "
         "-INFINITY, and every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote "
         "before this carried 0 (the *MAT_NULL PC cell is not carried) - an "
         "UNBOUNDED tension in the cells the fluid advects out of (the "
@@ -901,12 +906,72 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "end KE is a coincidence of the history, which reads KE +765 % at "
         "cycle 0 and +104 / +382 / +337 / +18 / +26 % at the fifths of the "
         "run (IE +1111..+1525 % from the second fifth on); bird-el NORMAL "
-        "either way, at the end IE +454.1 -> +1134.6 %, KE +10856 -> -92.1 % "
-        "(history with the floor: KE +272 / +398 / +144 / -72 / -92 %, IE "
-        "+1135..+2736 % at every fifth; its plate carries nothing: "
+        "either way, at the end IE +454.1 -> +1134.6 %, KE +10856 -> -92.1 %, "
+        "energy error -17.9 -> -32.6 % (history with the floor: KE +272 / "
+        "+407 / +143 / -73 / -92 %, IE +1135..+2736 % at every fifth of t_end "
+        "- the OpenRadioss row nearest each, the LS-DYNA glstat interpolated "
+        "at its time; its plate carries nothing: "
         "*CONSTRAINED_SHELL_IN_SOLID is not converted). Pass "
         "--no-initial-void-floor to keep Pmin 0.")
     return out
+
+
+def _carrier_fluid_signature(state: ConversionState, mid: int):
+    """``(RO, EOS kind, EOS parameters)`` of a LAW6 carrier - the fluid
+    properties Vol I R17 p.28-134 requires to be identical between a void and
+    the material that fills it. The EOS is the shared-id card or, failing
+    that, the first *PART EOSID binding (``_law6_carrier_mids``' two routes)."""
+    eos = state.eos_cards.get(mid)
+    if eos is None:
+        ids = _null_part_eos_bindings(state).get(mid)
+        eos = state.eos_cards.get(ids[0]) if ids else None
+    null = state.mat_null.get(mid)
+    return (null.rho if null is not None else None,
+            eos.kind if eos is not None else None,
+            tuple(sorted(eos.params.items())) if eos is not None else ())
+
+
+def _void_fluid_identity_clause(state: ConversionState, mids: List[int],
+                                void_mids: List[int]) -> str:
+    """The sentence that says WHY every floored material is the void's fluid
+    - or, when the ELFORM-12 LAW6 carriers do NOT carry one fluid, that they
+    do not (post-review round of #140: the rule floors every ELFORM-12 LAW6
+    carrier, and the warning called each "the fluid that refills the void"
+    without checking; p.28-134 forbids mixing fluids of different
+    properties with this option, so such a deck is outside the rule and is
+    named, not repaired). Reach 0 on the corpora: every void deck's ELFORM-12
+    carriers are identical (bird-el mats 1 and 2: RO 1e-9, the same
+    *EOS_GRUNEISEN) or single."""
+    sigs = {m: _carrier_fluid_signature(state, m) for m in mids}
+    if len(set(sigs.values())) <= 1:
+        return ("Vol I R17 p.28-134 allows one fluid per "
+                "single-material-and-void mesh, so every such part is the "
+                "fluid that refills the void.")
+    # the reference is the (first) void material's own fluid
+    ref_mid = next((m for m in void_mids if m in sigs), mids[0])
+    ref = sigs[ref_mid]
+    diffs = []
+    for m in mids:
+        rho, kind, params = sigs[m]
+        if (rho, kind, params) == ref:
+            continue
+        what = []
+        if rho != ref[0]:
+            what.append(f"RO {rho:g} against {ref[0]:g}")
+        if kind != ref[1]:
+            what.append(f"/EOS/{kind} against /EOS/{ref[1]}")
+        elif params != ref[2]:
+            what.append("different EOS parameters")
+        diffs.append(f"*MAT_NULL {m} ({', '.join(what)})")
+    return ("but these ELFORM-12 LAW6 materials do NOT carry one fluid - "
+            f"against the void's *MAT_NULL {ref_mid}: "
+            f"{'; '.join(diffs)}. Vol I R17 p.28-134 requires a void's "
+            "constitutive properties to be identical to those of the fluid "
+            "that fills it and does not permit mixing two fluids of different "
+            "properties with *INITIAL_VOID, so this deck is outside the rule: "
+            "the floor is written on every one of them, but only a material "
+            f"identical to the void's own ({void_mids}) can be the fluid that "
+            "refills the void.")
 
 
 def _void_pmin_state_clause(state: ConversionState, law6: Set[int]) -> str:

@@ -1002,17 +1002,21 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "ex_15_thick_shell_elform_2 the cap trades internal energy +36.2 % -> "
         "-54.8 % for kinetic energy +132.0 % -> +0.5 %. On the quasi-static "
         "decks, whose all-zero tolerances now get "
-        "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles "
-        "and buys nothing: tensile2 75 -> 168 cycles with internal energy "
-        "-0.54 % -> -4.36 % against its reference, 4.2.frf.cant-1 70 -> 134 "
-        "(-0.60 % both), 6.5.tbl.psd.prepressure-1 10 -> 11 (-0.50 % -> "
-        "-0.62 %), ie_shell 92 -> 124 (-99.87 % -> -99.95 %). The campaign's "
-        "one constant-step match, ex_11_beam_elform_1, turns into a deviation "
-        "under the end-of-run scorer (KE -2.39 % -> -15.87 %) although its KE "
-        "history error falls 14x: that match was an artefact of the engine "
-        "never printing its last converged increment (the scorer compared t "
-        "0.0922 with LS-DYNA's t 0.1; at matched time the shipped run's KE is "
-        "+1343 %). " + _SOLVINFO_HINT)
+        "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles: "
+        "tensile2 75 -> 168 (2.24x), its END internal energy -0.54 % -> "
+        "-4.36 % against its reference but its HISTORY the closest of the "
+        "four measured arms (RMS 2.48 -> 1.66 % of the reference's peak; the "
+        "force criterion alone 2.00, the cap alone 1.83; at t 0.76 / 0.80 "
+        "+13 % / +14 % where --zero-tolerance-ectol alone reads -64 % / "
+        "+53 %); 4.2.frf.cant-1 70 -> 134 (-0.60 % both), "
+        "6.5.tbl.psd.prepressure-1 10 -> 11 (-0.50 % -> -0.62 %), ie_shell "
+        "92 -> 124 (-99.87 % -> -99.95 %). The campaign's one constant-step "
+        "deck that was a match, ex_11_beam_elform_1, is a deviation at "
+        "matched time either way - the shipped run's KE reads +1343 % there "
+        "(its match compared t 0.0922 with LS-DYNA's t 0.1: the engine never "
+        "prints its last converged increment), the flag's run +17.9 % at t "
+        "0.099 (-15.87 % under the retired end-of-run scorer) - while its KE "
+        "history error falls 14x. " + _SOLVINFO_HINT)
 
 
 #: The four initial-velocity registries and the keyword each one is filled
@@ -1064,7 +1068,13 @@ def _warn_implicit_dynamic_initial_velocity(state: ConversionState, imass: int,
         "one (Z-momentum -2.099317 -> +6.297951, kinetic energy x 9.00000) "
         "and the run ends NORMAL TERMINATION with the bar flying AWAY from "
         "the wall - with the contact deleted, with no wall at all, and with "
-        "/INIVEL/AXIS or /INIVEL/TRA alike. With the deck's own first step the "
+        "/INIVEL/AXIS or /INIVEL/TRA alike. That is the free bar: the penalty "
+        "twin, and the constrained twin WITHOUT its *CONSTRAINED_GLOBAL plane "
+        "(--no-constrained-global); with the plane converted the constrained "
+        "twin reads -2.94x (KE x 8.81) at the first time-history sample (t "
+        "1.69e-7) and ends with its base held by the plane (Z-momentum "
+        "8.8e-4 at t 7.59e-5; nt 4 and nt 2 identical, 72 cycles). With the "
+        "deck's own first step the "
         "first increment does not converge, every cut-back restarts from the "
         "corrupted state and the run stops at TIMESTEP LIMIT (on the pair at "
         "nt 4 and nt 2: cycle 3 on the penalty twin, cycle 0 on the "
@@ -1088,31 +1098,64 @@ def _warn_zero_tolerance_ectol(state: ConversionState, sol) -> None:
 
     Facts only, and every figure here is a measurement on the R14 roster at
     nt 4 AND nt 2 (identical final state and cycle count on every pair).
+    The rule rests on the reference d3hsp echo, NOT on a measured
+    improvement: post-review round of #140, the internal-energy HISTORY of the
+    11 carriers (RMS over the reference's glstat times, in % of its peak) is
+    closer to LS-DYNA on 3 by at most 0.03 points, unchanged on 3, farther on
+    4 (ie_shell a status change) - tensile2's -0.54 % END value is a
+    coincidence of a
+    history that reads -64 % at t 0.76 and +53 % at t 0.80. A cell stated
+    >= 1 beside the zeros is LS-DYNA's own value, not its default, and is
+    named: only a stated ECTOL changes what LS-DYNA would run against the
+    Toli written here (a DCTOL is not carried anyway, and RCTOL >= 1 is
+    LS-DYNA's own "criterion disabled", p.12-362 Remark 5).
     """
+    stated = ""
+    if sol.ectol >= 1.0:
+        stated = (
+            f" This card STATES ECTOL={sol.ectol:g}: that is LS-DYNA's own "
+            "value, not its default, and a relative tolerance >= 1 is not "
+            "carried (the warning above), so the Toli 0.01 written here is "
+            f"NOT the energy tolerance LS-DYNA runs on this card "
+            f"({sol.ectol:g}).")
     state.warn(
         "*CONTROL_IMPLICIT_SOLUTION states no usable convergence tolerance "
         f"(DCTOL={sol.dctol:g}, ECTOL={sol.ectol:g}, RCTOL={sol.rctol:g}: "
-        "none lies in (0, 1)). LS-DYNA runs such a card on its OWN defaults - "
-        "every one of the 11 R14 reference d3hsp files of this shape (all "
-        "three cells 0.0 or blank) echoes 'displacement convergence tolerance "
-        "0.1000E-02', 'energy convergence tolerance 0.1000E-01' and 'residual "
-        "convergence tolerance 0.9990E+11' (Vol I R17 p.12-354: DCTOL 0.001, "
-        "ECTOL 0.01, RCTOL 1e10), although the keyword's header (p.12-353) "
-        "says a stated 0 means zero. k2rad therefore writes LS-DYNA's ENERGY "
-        "criterion, /IMPL/NONLIN/1 Itol 1, Toli 0.01, instead of its own force "
-        "default (Itol 2, Toli 0.01). DCTOL is NOT carried: LS-DYNA measures "
-        "it against the TOTAL displacement (DNORM 2) and no /IMPL/NONLIN Itol "
-        "offers that norm (nl_solv.F:410-421 is per step); the combined Itol "
-        "13 was measured to end 3 of 3 NORMAL quasi-static R14 decks in ERROR. "
-        "MEASURED on the 11 R14 decks of this shape at nt 4 and nt 2 "
-        "(identical): NORMAL kept on all 10 that were NORMAL; tensile2 IE "
-        "+7.36 % -> -0.54 % against its reference at 0.11x the cycles; "
-        "doorbeam +380.25 % -> +582.00 % (a springback deck already ~5x off "
-        "its reference - a named regression); ie_shell ERROR (TIMESTEP LIMIT "
-        "at cycle 4) -> NORMAL in 92 cycles, but at IE -99.87 % and KE 0 "
-        "against the reference's 149.9 - a STATUS change only (its IMFLAG -9 "
-        "implicit/explicit switching curve is not converted). "
-        "--no-zero-tolerance-ectol restores the force default.")
+        "none lies in (0, 1)). LS-DYNA runs a 0.0 or blank cell of this card "
+        "on its OWN default - every one of the 11 R14 reference d3hsp files "
+        "of this shape (all three cells 0.0 or blank) echoes 'displacement "
+        "convergence tolerance 0.1000E-02', 'energy convergence tolerance "
+        "0.1000E-01' and 'residual convergence tolerance 0.9990E+11' (Vol I "
+        "R17 p.12-354: DCTOL 0.001, ECTOL 0.01, RCTOL 1e10), although the "
+        "keyword's header (p.12-353) says a stated 0 means zero. k2rad "
+        "therefore writes LS-DYNA's ENERGY criterion, /IMPL/NONLIN/1 Itol 1, "
+        "Toli 0.01, instead of its own force default (Itol 2, Toli 0.01) - "
+        "because it is the criterion LS-DYNA runs, NOT because it was "
+        "measured closer." + stated + " DCTOL is NOT carried: LS-DYNA "
+        "measures it against the TOTAL displacement (DNORM 2) and no "
+        "/IMPL/NONLIN Itol offers that norm (nl_solv.F:410-421 is per step); "
+        "the combined Itol 13 was measured to end 3 of 3 NORMAL quasi-static "
+        "R14 decks in ERROR. MEASURED on the 11 R14 decks of this shape at "
+        "nt 4 and nt 2 (identical): NORMAL kept on all 10 that were NORMAL; "
+        "the internal-energy HISTORY (RMS over the reference's output times, "
+        "in % of its peak) is closer to the reference on 3 of the 11 by at "
+        "most 0.03 points (rigid_tip 0.78 -> 0.75; aellipse and ellipse by "
+        "less than 0.01), unchanged on 3 (tensile1, bumper, "
+        "6.4.tbl.psd.thermal-1) and farther on 4 - tensile2 2.00 -> 2.48, "
+        "doorbeam 189 -> 393, 4.2.frf.cant-1 0.30 -> 0.59, "
+        "6.5.tbl.psd.prepressure-1 0.03 -> 0.39 - and ie_shell's is a status "
+        "change (below). tensile2's "
+        "END value reads +7.36 % -> -0.54 % at 0.11x the cycles, a "
+        "coincidence of its history: at t 0.76 / 0.80 the run reads -64 % / "
+        "+53 % where the force criterion reads +18 % / +14 %. doorbeam reads "
+        "+380.25 % -> +582.00 % at the end and +668 / +1086 / +973 / +842 % "
+        "at the four earlier fifths of the run where the force criterion "
+        "reads +476 / +353 / +361 / +349 % (a springback deck already ~5x "
+        "off its reference - a named regression, larger mid-run); ie_shell "
+        "ERROR (TIMESTEP LIMIT at cycle 4) -> NORMAL in 92 cycles, but at IE "
+        "-99.87 % and KE 0 against the reference's 149.9 - a STATUS change "
+        "only (its IMFLAG -9 implicit/explicit switching curve is not "
+        "converted). --no-zero-tolerance-ectol restores the force default.")
 
 
 def _make_engine_implicit(state: ConversionState) -> List[str]:

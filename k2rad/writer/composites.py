@@ -3104,6 +3104,31 @@ def _emit_mat126_solid_prop(state: ConversionState, prop_id: int, pid: int,
             "1-exp(-x_log) engineering crush. If the curves were really "
             "fitted as log strain, restate them in engineering strain "
             "(x_eng = 1-exp(-x_log)).")
+    if ip in _CONNECTIVITY_FRAME_IPS:
+        # Post-review round of #140: the pinned Isolid 1 with Iframe 0 is a
+        # NON-co-rotational property, and on those the starter stores a
+        # connectivity frame's GLOBAL components (smorth3.F:282-291 Ip 20,
+        # :380-389 Ip 23) - measured misoriented (see
+        # _connectivity_frame_isolid's MECHANISM note). Named, not changed:
+        # the honeycomb's crush under Iframe 2 has no LS-DYNA reference here
+        # (ROADMAP R14 round-6 item 22); reach 0 on the corpora.
+        state.warn(
+            f"/PROP for part {pid}: the honeycomb's orthotropy frame comes "
+            f"from the element connectivity (Ip={ip}, LS-DYNA AOPT "
+            f"{0 if ip == 20 else 3}) and this pinned Isolid 1 property "
+            "states Iframe 0, i.e. the /DEF_SOLID default 1, NOT "
+            "co-rotational (hm_read_prop06.F:296, defaults_mod.F90:176): "
+            "there the starter stores the frame's GLOBAL components "
+            "(smorth3.F:282-291 / :380-389) and the frame was MEASURED on the "
+            "wrong axes - an orthotropic (/MAT/LAW93) unit cube on Isolid 1 "
+            "and 17 with Iframe 0 put its soft axis on the wrong axis in 4 of "
+            "4 loadings, on the right one with Iframe 2 and on Isolid 14 (the "
+            "post-review verification of round 6 measured the same on a "
+            "*MAT_MODIFIED_HONEYCOMB /MAT/LAW50 cube). The card "
+            "is left as dyna2rad writes it, because the honeycomb's crush "
+            "under a co-rotational frame has no LS-DYNA reference here "
+            "(ROADMAP R14 round-6 item 22): a skew frame (AOPT 2, or a "
+            "*DEFINE_COORDINATE_* system) orients correctly on any Isolid.")
     # isolid is PINNED to 1 here, so --assumed-strain-isolid cannot reach
     # this property at all: dyna2rad's honeycomb TYPE6 is ISOLID=1/Ismstr=1
     # whatever the section says.
@@ -3193,8 +3218,24 @@ def _connectivity_frame_isolid(state: ConversionState, prop_id: int, pid: int,
     element (the tetrahedron frame is its own branch, not measured here).
     Reach on the R14 roster: the two pad parts of
     ``nvh/example-11-01/11.1.sbrake.k``, the only ``/PROP/TYPE6`` of the
-    356 keys. The mechanism in the solver is not isolated; the measurement
-    is the evidence."""
+    356 keys.
+
+    THE MECHANISM (post-review round of #140, read in the starter and
+    measured): the fault follows the CO-ROTATIONAL flag, not the Isolid.
+    ``smorth3.F:282-291`` (Ip 20) and ``:380-389`` (Ip 23) project the
+    connectivity frame onto the element frame only when the property is
+    co-rotational (``JCVT > 0``) and otherwise store its GLOBAL components
+    (``GAMA(I,1:6) = SK(1:6)``), while the skew branch (``:131-146``) always
+    projects. A ``/PROP/TYPE6`` ``Iframe`` of 0 takes the ``/DEF_SOLID``
+    default, 1 = NOT co-rotational (``hm_read_prop06.F:296``,
+    ``defaults_mod.F90:176``), and ``:297-298`` force ``JCVT = 2`` on Isolid
+    14, 18 and 24 only - which is why 14 and 24 orient and 17 does not.
+    MEASURED on the same cube (nt 4, NORMAL on all 20 arms, the soft axis
+    loaded and unloaded on both connectivities): Isolid 17 and Isolid 1 with
+    ``Iframe 0`` wrong in 4 of 4, the same two with ``Iframe 2`` right in 4
+    of 4, Isolid 14 right in 4 of 4. Isolid 14 was kept as the route (the
+    finalization's measured choice); the honeycomb route's pinned Isolid 1 /
+    ``Iframe 0`` is the same fault, left as ROADMAP R14 round-6 item 22."""
     if ip not in _CONNECTIVITY_FRAME_IPS or sec is None:
         return None
     base = _elform_to_isolid(sec.elform,

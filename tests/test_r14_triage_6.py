@@ -500,7 +500,8 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertEqual(len(applied), 1)
         for needle in ("+104 / +382 / +337 / +18 / +26 %",
                        "KE +765 % at cycle 0", "IE +1111..+1525 %",
-                       "KE +272 / +398 / +144 / -72 / -92 %",
+                       "KE +272 / +407 / +143 / -73 / -92 %",
+                       "energy error -17.9 -> -32.6 %",
                        "every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, applied[0])
@@ -3699,8 +3700,15 @@ class Round6FlagWiringB(unittest.TestCase):
         headings = re.findall(r"^#{2,4}\s+(.*)$", readme, re.M)
         for flag in self._OPT_IN_FLAGS:
             with self.subTest(flag=flag):
-                self.assertTrue(any(flag in h for h in headings),
-                                f"{flag} has no README section of its own")
+                # its OWN heading: one that names this opt-in flag and no
+                # other (post-review round of #140 - the two B6 flags shared
+                # one heading and the check could not tell)
+                own = [h for h in headings if flag in h and not any(
+                    other in h for other in self._OPT_IN_FLAGS
+                    if other != flag)]
+                self.assertTrue(own, f"{flag} has no README heading of its "
+                                "own (one naming it and no other opt-in "
+                                "flag)")
 
     def test_the_help_renders_and_carries_the_measured_numbers(self):
         from k2rad import cli
@@ -3955,6 +3963,511 @@ class Round6TwobarEndValueCarriesItsHistory(unittest.TestCase):
         self.assertEqual(_end_value_violations(good), [])
         uni = [("x", "twobar ends at −5.6 % (history −91 %)")]
         self.assertEqual(_end_value_violations(uni), [])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The post-review round of #140: the validators' findings, pinned
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _odd_third_fluid(rho=1.2e-12, c=1.0e5) -> str:
+    """``_void_deck(third_elform=12)`` with the third ELFORM-12 fluid's RO
+    and / or Gruneisen C changed - a second fluid of different properties,
+    which Vol I R17 p.28-134 does not permit beside ``*INITIAL_VOID``."""
+    base = _void_deck(third_elform=12)
+    old_mat = "*MAT_NULL\n" + _row(3, 1.0e-9, 0.0, 0.0)
+    old_eos = ("*EOS_GRUNEISEN\n" + _row(3, 1.5e6, 1.0, 0.0, 0.0, 0.0, 0.0,
+                                         0.0))
+    assert base.count(old_mat) == 1 and base.count(old_eos) == 1
+    return (base.replace(old_mat, "*MAT_NULL\n" + _row(3, rho, 0.0, 0.0))
+            .replace(old_eos, "*EOS_GRUNEISEN\n" + _row(3, c, 1.0, 0.0, 0.0,
+                                                        0.0, 0.0, 0.0)))
+
+
+def _floor_warning(result):
+    hit = [w for w in result.warnings
+           if "cavitation floor Pmin = -1e-20 is written" in w]
+    assert len(hit) == 1, result.warnings
+    return hit[0]
+
+
+class PostReviewVoidFluidIdentity(unittest.TestCase):
+    """A1: the floor goes on EVERY ELFORM-12 LAW6 carrier, and the warning
+    called each one "the fluid that refills the void" without checking.
+    Carriers that differ in RO or EOS are now NAMED (reach 0 on the
+    corpora), the identical ones keep the one-fluid sentence."""
+
+    _ONE_FLUID = "so every such part is the fluid that refills the void"
+
+    def test_a_second_fluid_is_named_and_still_floored(self):
+        result, starter, _e = _convert(_odd_third_fluid())
+        for mid in (1, 2, 3):
+            with self.subTest(mid=mid):
+                self.assertEqual(_pmin_row(starter, mid), _FLOOR_ROW)
+        w = _floor_warning(result)
+        for needle in ("do NOT carry one fluid",
+                       "against the void's *MAT_NULL 1: *MAT_NULL 3 (RO "
+                       "1.2e-12 against 1e-09, different EOS parameters)",
+                       "identical to the void's own ([1])",
+                       "does not permit mixing two fluids"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w)
+        self.assertNotIn(self._ONE_FLUID, w)
+
+    def test_an_EOS_alone_that_differs_is_named(self):
+        result, _s, _e = _convert(_odd_third_fluid(rho=1.0e-9))
+        w = _floor_warning(result)
+        self.assertIn("*MAT_NULL 3 (different EOS parameters)", w)
+        self.assertNotIn("RO 1e-09 against", w)
+
+    def test_identical_carriers_keep_the_one_fluid_sentence(self):
+        """The control: the same third fluid with the void's own RO and EOS
+        (and bird-el's shape, two identical carriers) is one fluid."""
+        for deck in (_void_deck(third_elform=12), _void_deck()):
+            with self.subTest(parts=deck.count("*PART")):
+                w = _floor_warning(_convert(deck)[0])
+                self.assertIn(self._ONE_FLUID, w)
+                self.assertNotIn("do NOT carry one fluid", w)
+
+    def test_the_tensile_limit_clause_names_minus_C1(self):
+        """A PC strictly below -C1 is not "this EOS's own tensile limit":
+        the limit is -C1 (the clause said "-2 is this EOS's own tensile
+        limit" for PC -2 on C1 1)."""
+        base = _void_deck(shared_mat=True)
+        lin = base.replace(
+            "*EOS_GRUNEISEN\n" + _row(1, 1.5e6, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            + "\n" + _row(1.0) + "\n",
+            "*EOS_LINEAR_POLYNOMIAL\n" + _row(1, 0.0, 1.0, 0.0, 0.0, 0.0,
+                                              0.0, 0.0) + "\n"
+            + _row(0.0, 1.0) + "\n")
+        self.assertIn("*EOS_LINEAR_POLYNOMIAL", lin)
+        for pc in (-1.0, -2.0):
+            deck = lin.replace("*MAT_NULL\n" + _row(1, 1.0e-9, 0.0, 0.0),
+                               "*MAT_NULL\n" + _row(1, 1.0e-9, pc, 0.0))
+            with self.subTest(pc=pc):
+                w = _floor_warning(_convert(deck)[0])
+                self.assertIn(f"(PC {pc:g} is at or below this EOS's own "
+                              "tensile limit -C1 = -1:", w)
+                self.assertNotIn(f"({pc:g} is this EOS's own tensile", w)
+
+
+def _two_weld_deck(n1=1.0, m1=1.0, n2=1.0, m2=1.0) -> str:
+    """``_weld_deck`` with a SECOND *CONSTRAINED_SPOTWELD, node 3 to 13."""
+    deck = _weld_deck(n=n1, m=m1)
+    second = ("*CONSTRAINED_SPOTWELD\n"
+              + _row(3, 13, 1.0e4, 5.0e4, n2, m2) + "\n")
+    return deck.replace("*END\n", second + "*END\n")
+
+
+class PostReviewWeldExponentWarningOncePerGroup(unittest.TestCase):
+    """A2: the ~1.6 KB measured paragraph was warned once PER WELD. It is
+    now one warning per (N, M) group naming every weld with its
+    /PROP/TYPE13 id; a one-weld group keeps the one-weld text AND its place
+    in the warning list."""
+
+    def test_two_welds_of_one_pair_give_ONE_warning_naming_both(self):
+        result, starter, _e = _convert(_two_weld_deck())
+        hits = [w for w in result.warnings if "failure exponents N=1 / M=1"
+                in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        lines = starter.splitlines()
+        props = [int(ln.split("/")[-1]) for i, ln in enumerate(lines)
+                 if ln.startswith("/PROP/TYPE13/")
+                 and "(stiff weld tie)" in lines[i + 1]]
+        self.assertEqual(len(props), 2, props)
+        for needle in ("2 welds (*CONSTRAINED_SPOTWELD spotweld_1_11 -> "
+                       f"/PROP/TYPE13/{props[0]}; *CONSTRAINED_SPOTWELD "
+                       f"spotweld_3_13 -> /PROP/TYPE13/{props[1]})",
+                       "written into their /PROP/TYPE13",
+                       "MEASURED at nt 4 on spotweld-ii/plates.nrbc"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertEqual(sum("MEASURED at nt 4 on spotweld-ii/plates.nrbc"
+                             in w for w in result.warnings), 1)
+
+    def test_two_pairs_give_two_warnings_with_their_own_caveat(self):
+        result, _s, _e = _convert(_two_weld_deck(m2=3.0))
+        one = [w for w in result.warnings if "N=1 / M=1" in w]
+        three = [w for w in result.warnings if "N=1 / M=3" in w]
+        self.assertEqual((len(one), len(three)), (1, 1), result.warnings)
+        self.assertIn("(conservative for M < 2)", one[0])
+        self.assertIn("(NON-conservative for M > 2)", three[0])
+        self.assertIn("*CONSTRAINED_SPOTWELD spotweld_3_13:", three[0])
+
+    def test_the_opt_out_of_two_welds_is_one_warning(self):
+        result, _s, _e = _convert(_two_weld_deck(), weld_exponents=False)
+        hits = [w for w in result.warnings if "--no-weld-exponents:" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("2 welds (", hits[0])
+        self.assertIn("these welds fail on exponent 2", hits[0])
+
+    def test_a_one_weld_deck_keeps_its_text_and_its_place(self):
+        """plates.nrbc's shape: the exponent warning still comes right
+        BEFORE the weld's own "converted to a stiff" warning."""
+        result, _s, _e = _convert(_weld_deck(n=1.0, m=1.0))
+        w = result.warnings
+        i = next(k for k, x in enumerate(w)
+                 if x.startswith("*CONSTRAINED_SPOTWELD spotweld_1_11: "
+                                 "failure exponents N=1 / M=1 written into "
+                                 "/PROP/TYPE13/"))
+        self.assertTrue(w[i + 1].startswith(
+            "*CONSTRAINED_SPOTWELD spotweld_1_11: converted to a stiff "
+            "/PROP/TYPE13/"), w[i:i + 2])
+
+
+class PostReviewSpringScreenSolidNode(unittest.TestCase):
+    """A3: the lumper's SOLID branch was unpinned - dropping solids from
+    ``lumping.element_mass_by_node`` left the whole suite green. A spring
+    whose ends are corners of ONE ELFORM-1 hex: each end's own mass is the
+    hex's rho V / 8, so each gets the negative /ADMAS and no guarded
+    sentence."""
+
+    _DECK = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n*NODE\n"
+             + "".join(f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                       for i, (x, y, z) in enumerate(
+                           [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+                            (0, 0, 10), (10, 0, 10), (10, 10, 10),
+                            (0, 10, 10)], start=1))
+             + "*ELEMENT_SOLID\n"
+             + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8))
+             + "\n*PART\nhex\n" + _row(1, 1, 1) + "\n"
+             + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+             + "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+             + "*ELEMENT_DISCRETE\n"
+             + f"{9:>8}{2:>8}{1:>8}{7:>8}{0:>8}{1.0:>16.8G}{0:>8}"
+               f"{0.0:>16.8G}\n"
+             + "*PART\nspring\n" + _row(2, 2, 2) + "\n"
+             + "*SECTION_DISCRETE\n" + _row(2, 0) + "\n"
+             + "*MAT_SPRING_ELASTIC\n" + _row(2, 100.0) + "\n"
+             + "*END\n")
+
+    def test_a_node_on_a_solid_only_is_compensated(self):
+        result, starter, _e = _convert(self._DECK)
+        self.assertEqual(_admas_cards(starter), {round(-_SHARE, 12): [1, 7]})
+        self.assertFalse(any("carry NO element mass of their own" in w
+                             for w in result.warnings), result.warnings)
+
+    def test_the_own_mass_is_rho_V_over_8_by_hand(self):
+        from k2rad.lumping import element_mass_by_node
+        from k2rad.writer.sph import _mat_density
+        state = _dispatch(self._DECK)
+        got = element_mass_by_node(state, {1, 7},
+                                   lambda mid: _mat_density(state, mid))
+        for nid in (1, 7):
+            with self.subTest(node=nid):
+                self.assertAlmostEqual(got[nid], 1000.0 * 7.85e-9 / 8,
+                                       delta=1e-18)
+
+
+class PostReviewAnisotropicShearCells(unittest.TestCase):
+    """A6: every test deck had C55 = C66 = 1180, so swapping GBC and GCA
+    stayed green. Vol II R17 p.2-164 Remark 1: the diagonal of C_L^-1 is
+    1/Gab, 1/Gbc, 1/Gca at Voigt 4/5/6, so C44 -> GAB -> LAW93 G12, C55 ->
+    GBC -> G23, C66 -> GCA -> G13."""
+
+    def test_three_different_shear_cells_land_in_their_own_slots(self):
+        st = _dispatch(_aniso_deck(c44=2590.0, c55=1000.0, c66=2000.0))
+        m = st.mat_orthotropic[3]
+        self.assertEqual((m.gab, m.gbc, m.gca), (2590.0, 1000.0, 2000.0))
+        _r, starter, _e = _convert(_aniso_deck(c44=2590.0, c55=1000.0,
+                                               c66=2000.0))
+        cells = _law93_cells(starter, 3)
+        self.assertEqual((cells["G12"], cells["G23"], cells["G13"]),
+                         (2590.0, 1000.0, 2000.0))
+
+
+def _penalty_beam_side_deck() -> str:
+    """A 20 x 10 shell plate (part 1, the main surface) and a two-node BEAM
+    part 2 (nodes 11 / 12) just above it, tied by a PENALTY
+    *CONTACT_AUTOMATIC_NODES_TO_SURFACE whose SSID is the beam part
+    (SSTYP 3)."""
+    pts = {1: (0.0, 0.0, 0.0), 2: (10.0, 0.0, 0.0), 3: (20.0, 0.0, 0.0),
+           4: (0.0, 10.0, 0.0), 5: (10.0, 10.0, 0.0), 6: (20.0, 10.0, 0.0),
+           11: (5.0, 5.0, 0.5), 12: (15.0, 5.0, 0.5)}
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n*NODE\n"
+            + "".join(f"{i:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}\n"
+                      for i, (x, y, z) in sorted(pts.items()))
+            + "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 5, 4) + "\n"
+            + _row(2, 1, 2, 3, 6, 5) + "\n"
+            + "*ELEMENT_BEAM\n" + f"{5:>8}{2:>8}{11:>8}{12:>8}{0:>8}\n"
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            + "*PART\nrod\n" + _row(2, 2, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            + "*SECTION_BEAM\n" + _row(2, 3, "1.0", 2, 1) + "\n"
+            + _row("1.0") + "\n"
+            + "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + "*CONTACT_AUTOMATIC_NODES_TO_SURFACE\n" + _row(2, 1, 3, 3)
+            + "\n" + _row() + "\n" + _row() + "\n*END\n")
+
+
+def _grnod_by_title(starter: str, title: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/") and lines[i + 1] == title:
+            ids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                ids += [int(t) for t in lines[j].split()]
+                j += 1
+            return ids
+    return None
+
+
+class PostReviewBeamSecondaryOnAPenaltySide(unittest.TestCase):
+    """B6 rule 2 on a PENALTY contact side (``_side_node_ids`` ->
+    ``_resolve_contact_slave``): every rule-2 test used a tied contact, so
+    dropping the beam nodes from the penalty walk stayed green."""
+
+    def test_the_flag_puts_the_beam_nodes_on_the_penalty_side(self):
+        res, starter, _e = _convert(_penalty_beam_side_deck(),
+                                    beam_contact_secondary=True)
+        self.assertEqual(_grnod_by_title(starter, "contact_slave_2"),
+                         [11, 12])
+        self.assertTrue(_has(res.warnings,
+                             "--beam-contact-secondary: contact side 2 (type "
+                             "3) gains 2 node(s)", "part(s) [2]"),
+                        res.warnings)
+
+    def test_without_the_flag_the_side_is_empty_and_dropped(self):
+        """The control: the same deck without the flag - the side (an
+        AUTOMATIC_NODES_TO_SURFACE, the TYPE25 route) resolves to no node and
+        the interface is dropped by name."""
+        res, starter, _e = _convert(_penalty_beam_side_deck())
+        self.assertIsNone(_grnod_by_title(starter, "contact_slave_2"))
+        self.assertTrue(_has(res.warnings, "ssid=2 sstyp=3 resolved to no "
+                             "nodes at all"), res.warnings)
+
+
+class PostReviewConstrainedGlobalExtent(unittest.TestCase):
+    """B5: the default tolerance was 1e-6 x the box of ALL nodes, so one
+    element-free node far away inflated it (measured on the pre-fix code
+    with this very probe: tolerance 1.0, the z = 0.5 plane selected all 18
+    grid nodes and the stray one). The box is now that of the nodes the
+    ELEMENTS reference; every node stays a candidate."""
+
+    _STRAY = ("*NODE\n" + f"{99:>8}{1.0e6:>16.1f}{0.0:>16.1f}{0.25:>16.2f}"
+              "\n")
+
+    def _groups(self, starter):
+        return {t: v for t, v in _bcs_groups(starter).items()
+                if t.startswith("constrained_global")}
+
+    def test_a_far_element_free_node_does_not_widen_the_tolerance(self):
+        res, starter, _e = _convert(_grid_deck(
+            rows=((3, 0, 3, "0.0", "0.0", "0.5", "0.0"),), extra=self._STRAY))
+        self.assertEqual(self._groups(starter), {})
+        self.assertIn("CONSTRAINED_GLOBAL", res.skipped_keywords)
+        self.assertTrue(_has(res.warnings, "within 2e-06"), res.warnings)
+
+    def test_the_face_plane_still_selects_its_nodes_and_names_the_node(self):
+        res, starter, _e = _convert(_grid_deck(
+            rows=((3, 0, 3, "0.0", "0.0", "0.0", "0.0"),), extra=self._STRAY))
+        self.assertEqual(self._groups(starter),
+                         {"constrained_global_001_000":
+                          ("001 000", list(range(1, 10)))})
+        hit = [w for w in res.warnings if w.startswith(_B5_HEAD)]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("1e-6 x the model extent (2,",
+                       "the nodes the deck's elements reference",
+                       "1 element-free node(s) lie outside that box",
+                       "side 1e+06, which would make it 1"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+
+    def test_no_outlier_no_outlier_sentence(self):
+        res, _s, _e = _convert(_grid_deck())
+        hit = [w for w in res.warnings if w.startswith(_B5_HEAD)]
+        self.assertNotIn("element-free node(s) lie outside", hit[0])
+
+
+class PostReviewZeroToleranceHistory(unittest.TestCase):
+    """B1: tensile2's -0.54 % END value was the headline, and its history
+    runs the other way (-64 % at t 0.76, +53 % at t 0.80 against +18 / +14 %
+    for the force criterion; RMS 2.00 -> 2.48 % of the reference peak). The
+    warning now rests the rule on the d3hsp echo and carries the histories;
+    a stated ECTOL >= 1 is named as LS-DYNA's own value, not its default."""
+
+    def test_the_warning_carries_the_histories(self):
+        res, _s, _e = _convert(_impl_deck(_row(12, 0, 0, "0.0", "0.0",
+                                                "0.0")))
+        w = [x for x in res.warnings if x.startswith(_B1_HEAD)]
+        self.assertEqual(len(w), 1, res.warnings)
+        for needle in ("NOT because it was measured closer",
+                       "closer to the reference on 3 of the 11 by at most "
+                       "0.03 points (rigid_tip 0.78 -> 0.75;",
+                       "unchanged on 3 (tensile1, bumper, "
+                       "6.4.tbl.psd.thermal-1)",
+                       "tensile2 2.00 -> 2.48", "doorbeam 189 -> 393",
+                       "-64 % / +53 % where the force criterion reads "
+                       "+18 % / +14 %",
+                       "+668 / +1086 / +973 / +842 %",
+                       "a 0.0 or blank cell of this card on its OWN default"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+        self.assertNotIn("STATES ECTOL", w[0])
+
+    def test_a_stated_ECTOL_ge_1_is_named_as_LS_DYNAs_own_value(self):
+        res, _s, engine = _convert(_impl_deck(_row(12, 0, 0, "0.0", "5.0",
+                                                   "0.0")))
+        self.assertEqual(_nonlin_row(engine), "  2 1 0.01")
+        w = [x for x in res.warnings if x.startswith(_B1_HEAD)]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("This card STATES ECTOL=5: that is LS-DYNA's own value, "
+                      "not its default", w[0])
+        self.assertIn("NOT the energy tolerance LS-DYNA runs on this card "
+                      "(5)", w[0])
+
+    def test_the_B3_warning_restates_tensile2_and_ex_11(self):
+        res, _s, _e = _convert(_impl_deck(), implicit_constant_step=True)
+        w = [x for x in res.warnings
+             if x.startswith("--implicit-constant-step: /IMPL/DT/STOP")]
+        self.assertEqual(len(w), 1, res.warnings)
+        for needle in ("tensile2 75 -> 168 (2.24x)",
+                       "RMS 2.48 -> 1.66 % of the reference's peak",
+                       "the flag's run +17.9 % at t 0.099"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+        self.assertNotIn("buys nothing", w[0])
+
+
+_T2_END = re.compile(r"[-−]0\.54 ?%")
+_T2_HISTORY = re.compile(r"\+53 ?%|2\.48")
+
+
+def _tensile2_end_value_violations(units):
+    return [(rel, u[:140]) for rel, u in units
+            if "tensile2" in u and _T2_END.search(u)
+            and not _T2_HISTORY.search(u)]
+
+
+class PostReviewTensile2EndValueCarriesItsHistory(unittest.TestCase):
+    """The twobar rule for tensile2 (the post-review round of #140): every
+    shipped text unit that states tensile2's -0.54 % END value states its
+    history (+53 % at t 0.80, or the RMS 2.48 %) in the same unit.
+    CHANGELOG is the history and excluded."""
+
+    def test_every_unit_pairs_the_end_value_with_its_history(self):
+        units = _text_units()
+        checked = [u for rel, u in units
+                   if "tensile2" in u and _T2_END.search(u)]
+        self.assertGreaterEqual(len(checked), 8, "the rule matched too little")
+        self.assertEqual(_tensile2_end_value_violations(units), [])
+
+    def test_the_rule_fails_a_unit_without_the_history(self):
+        bad = [("x", _collapse("tensile2 IE +7.36 % -> -0.54 % at 0.11x"))]
+        good = [("x", _collapse("tensile2 ends -0.54 % but reads +53 % at "
+                                "t 0.80"))]
+        self.assertEqual(len(_tensile2_end_value_violations(bad)), 1)
+        self.assertEqual(_tensile2_end_value_violations(good), [])
+
+
+class PostReviewShippedTexts(unittest.TestCase):
+    """Record errors and one-sided figures the verification round found in
+    shipped texts: the retired spellings stay out, the replacements ship."""
+
+    _RETIRED = (
+        "never-launched",
+        "KE +272 / +398 / +144 / -72 / -92 %",
+        "(-1 is this EOS's own tensile limit",
+        "it costs cycles and buys nothing",
+        "costs cycles and buys nothing",
+        "the measured death of every void deck",
+        "none run but spotweld.k",
+        "is a 1-in-5 outcome",
+    )
+
+    def test_no_shipped_text_carries_a_retired_spelling(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in self._RETIRED:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle), joined)
+
+    def test_the_guard_fires_on_each_retired_spelling(self):
+        for needle in self._RETIRED:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_SHIPPED_TEXTS())
+        pairs = (
+            ("k2rad/writer/materials.py",
+             "KE +272 / +407 / +143 / -73 / -92 %"),
+            ("k2rad/writer/materials.py", "energy error -17.9 -> -32.6 %"),
+            ("k2rad/writer/loads.py", "the error GROWS to +141.1 %"),
+            ("k2rad/writer/loads.py", "RMS 17.5 -> 11.6 % of the LS peak"),
+            ("k2rad/writer/assembly.py", "reads -2.94x (KE x 8.81) at the "
+             "first time-history sample"),
+            ("k2rad/writer/composites.py", "THE MECHANISM (post-review round "
+             "of #140"),
+            ("k2rad/writer/composites.py", "the honeycomb's orthotropy frame "
+             "comes"),
+            ("k2rad/writer/contacts.py", "all three giants have campaign "
+             "rows, from runs WITHOUT the flag"),
+            ("docs/IMPLICIT.md", "cycle 0 (the constrained twin with its "
+             "`*CONSTRAINED_GLOBAL` plane"),
+            ("docs/IMPLICIT.md", "--no-constrained-global"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+
+def _honeycomb_deck(aopt=0.0) -> str:
+    """One brick on *MAT_MODIFIED_HONEYCOMB 7 (EAAU = EBBU 100, ECCU 10),
+    AOPT 0 (the element frame) or 2 (a global vector frame), in the
+    manual's card order (Vol II R17 *MAT_126: card 1 MID RO E PR SIGY VF MU
+    BULK, card 2 LCA LCB LCC LCS LCAB LCBC LCCA LCSR, card 3 EAAU EBBU ECCU
+    GABU GBCU GCAU AOPT MACF, card 4 XP YP ZP A1 A2 A3, card 5 D1 D2 D3
+    TSEF SSEF V1 V2 V3)."""
+    nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)]
+    a, d = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)) if aopt == 2.0 else (
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n"
+            + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                      for i, (x, y, z) in enumerate(nodes, start=1))
+            + "*ELEMENT_SOLID\n"
+            + "".join(f"{v:>8}" for v in (1, 5, 1, 2, 4, 3, 5, 6, 8, 7))
+            + "\n*PART\ncore\n" + _row(5, 1, 7) + "\n"
+            "*SECTION_SOLID\n" + _row(1, 0) + "\n"
+            "*MAT_MODIFIED_HONEYCOMB\n"
+            + _row(7, 1.0e-10, 1000.0, 0.0, 1.0, 0.2, 0.05, 0.0) + "\n"
+            + _row(11, 11, 11, 11, 0, 0, 0, 0) + "\n"
+            + _row(100.0, 100.0, 10.0, 50.0, 50.0, 50.0, aopt, 0) + "\n"
+            + _row(0.0, 0.0, 0.0, *a) + "\n"
+            + _row(*d, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            "*DEFINE_CURVE\n" + _row(11) + "\n"
+            + _row("0.0", "1.0") + "\n" + _row("1.0", "1.0") + "\n"
+            "*END\n")
+
+
+class PostReviewHoneycombFrameNamed(unittest.TestCase):
+    """The MAT_126 honeycomb's pinned Isolid 1 / Iframe 0 /PROP/TYPE6 is
+    NOT co-rotational, so a connectivity frame (Ip 20 / 23) is stored in
+    global components (smorth3.F:282-291 / :380-389) and was measured
+    misoriented. Named - not changed - on the element-frame arms only."""
+
+    def test_an_element_frame_honeycomb_is_warned(self):
+        res, starter, _e = _convert(_honeycomb_deck(aopt=0.0))
+        self.assertIn("/MAT/LAW50/7", starter)
+        hit = [w for w in res.warnings if "the honeycomb's orthotropy frame "
+               "comes from the element connectivity" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("(Ip=20, LS-DYNA AOPT 0)", "Iframe 0",
+                       "smorth3.F:282-291", "ROADMAP R14 round-6 item 22"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+
+    def test_a_skew_frame_honeycomb_is_not(self):
+        res, _s, _e = _convert(_honeycomb_deck(aopt=2.0))
+        self.assertFalse(_has(res.warnings, "the honeycomb's orthotropy frame "
+                              "comes from the element connectivity"),
+                         res.warnings)
 
 
 if __name__ == "__main__":

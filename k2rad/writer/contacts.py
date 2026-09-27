@@ -182,9 +182,10 @@ def _contact_part_nodes(state: ConversionState, pid: int) -> Set[int]:
     /BEAM) node is a perfectly good contact SECONDARY node in Radioss, and
     LS-DYNA does tie them - on ``spotweld.k`` the weld beam is the tie's SURFA
     and its swforc records the weld carrying load - but the walk reaches 4 R14
-    deck keys on 4 emitted models by bytes (spotweld.k, the never-launched
-    ``show-cases/contact-overview/main.k`` and the two R14 Yaris giants) and
-    the two full-vehicle models in ``C:/openradioss_run``, none of which but
+    deck keys on 4 emitted models by bytes (spotweld.k,
+    ``show-cases/contact-overview/main.k`` and the two R14 Yaris giants -
+    all three giants have campaign rows, from runs WITHOUT the flag) and the
+    two full-vehicle models in ``C:/openradioss_run``, none of which but
     spotweld.k has been run with it, so it stays opt-in. Only ``n1``/``n2``
     are taken: ``n3`` is an orientation node, never a contact node. Every node
     the 1-D walk ADDS (one no other family of the part carries) is recorded in

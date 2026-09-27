@@ -253,12 +253,17 @@ def build_parser() -> argparse.ArgumentParser:
              "Itol 1 (energy) Toli 0.01 - instead of k2rad's force default "
              "Itol 2. ON by default: LS-DYNA's own d3hsp echoes DCTOL 0.001 / "
              "ECTOL 0.01 on all 11 R14 decks of this shape (Vol I R17 "
-             "p.12-354). L_A is unchanged; a NEGATIVE cell is a tolerance "
-             "curve (p.12-355) and keeps Itol 2. MEASURED (nt 4 = nt 2): "
-             "tensile2 IE +7.36 %% -> -0.54 %% at 0.11x the cycles, doorbeam "
-             "+380.25 %% -> +582.00 %% (a named regression), ie_shell ERROR -> "
-             "NORMAL at IE -99.87 %% (status only). Use "
-             "--no-zero-tolerance-ectol to keep Itol 2.",
+             "p.12-354) - the rule rests on that echo, not on a measured "
+             "gain. L_A is unchanged; a NEGATIVE cell is a tolerance "
+             "curve (p.12-355) and keeps Itol 2. MEASURED (nt 4 = nt 2): the "
+             "IE history is closer on 3 of the 11 carriers by at most 0.03 "
+             "points of the reference peak and farther on 4; tensile2 ENDS at "
+             "IE +7.36 %% -> "
+             "-0.54 %% at 0.11x the cycles, but reads +53 %% at t 0.80 (+14 %% "
+             "before), its history RMS 2.00 %% -> 2.48 %% of the reference "
+             "peak; doorbeam +380.25 %% -> +582.00 %% (a named regression, "
+             "larger mid-run); ie_shell ERROR -> NORMAL at IE -99.87 %% "
+             "(status only). Use --no-zero-tolerance-ectol to keep Itol 2.",
     )
     parser.add_argument(
         "--constrained-global",
@@ -297,7 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
              "(spotweld.k, show-cases/contact-overview/main.k and the two "
              "Yaris giants) and of the two full-vehicle models in "
              "C:/openradioss_run (4489 / 5102 spotweld beams), none of which "
-             "but spotweld.k has been run.",
+             "but spotweld.k has been run with it.",
     )
     parser.add_argument(
         "--implicit-constant-step",
@@ -312,12 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
              "offered. MEASURED (nt 4 = nt 2): ex_15 energy error +74.1 %% -> "
              "-0.9 %% at 3.81x the cycles (its end state at matched time: IE "
              "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%); ex_11 KE history "
-             "error 16.07 %% -> "
-             "1.16 %% at 2.86x, but its campaign match becomes a deviation "
-             "under the end-of-run scorer (an artefact: the engine never "
-             "prints its last increment); with the default "
+             "error 16.07 %% -> 1.16 %% at 2.86x (at matched time KE +17.9 %% "
+             "where the shipped run reads +1343 %% - both deviations, the "
+             "engine never prints its last increment); with the default "
              "--zero-tolerance-ectol, tensile2 75 -> 168 cycles and IE "
-             "-0.54 %% -> -4.36 %%. Reaches 33 R14 deck keys on 22 emitted "
+             "-0.54 %% -> -4.36 %% at the END, but its IE history is the "
+             "closest of the measured arms (RMS 2.48 %% -> 1.66 %% of the "
+             "reference peak). Reaches 33 R14 deck keys on 22 emitted "
              "models.",
     )
     parser.add_argument(
@@ -918,8 +924,9 @@ def build_parser() -> argparse.ArgumentParser:
              "(the body's shell nodes' lumped rotary inertia, which the "
              "starter ADDS to the tensor, inirby.F:166-168/:355) into every "
              "body it re-points: NEW INERTIA 0.1977227E-02 = LS-DYNA's, "
-             "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %%, 1.156x the "
-             "cycles; the IE (the joint path) is not fixed. OPT-IN because "
+             "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %% (an end value: "
+             "the KE history RMS goes 17.5 %% -> 11.6 %% of the LS peak), "
+             "1.156x the cycles; the IE (the joint path) is not fixed. OPT-IN because "
              "exactly ONE carrier with an LS-DYNA reference exists on this "
              "machine. A body the card FULLY covers is untouched by "
              "construction (its momentum average IS the card's velocity, with "

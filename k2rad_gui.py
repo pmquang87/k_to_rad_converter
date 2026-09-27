@@ -769,8 +769,11 @@ class ConverterGUI:
             io, text="*CONTROL_IMPLICIT_SOLUTION with DCTOL/ECTOL/RCTOL all 0 or "
                      "blank: write LS-DYNA's own ECTOL default (/IMPL/NONLIN "
                      "Itol 1, Toli 0.01) - ON. Its d3hsp echoes 0.001 / 0.01 on "
-                     "all 11 R14 decks of this shape. tensile2 +7.36 % -> "
-                     "-0.54 %; doorbeam +380 % -> +582 % (named); ie_shell "
+                     "all 11 R14 decks of this shape (the reason - no carrier's "
+                     "IE history got closer by more than 0.03 % of its peak). "
+                     "tensile2 ends +7.36 % -> -0.54 % "
+                     "but reads +53 % at t 0.80 (history RMS 2.00 -> 2.48 % of "
+                     "peak); doorbeam +380 % -> +582 % (named); ie_shell "
                      "ERROR -> NORMAL at -99.87 % (status only)",
             variable=self.zero_tolerance_ectol).grid(
                 row=36, column=0, columnspan=3, sticky="w", **pad)
@@ -780,9 +783,10 @@ class ConverterGUI:
                      "runs a CONSTANT step (IAUTO 0 or no *CONTROL_IMPLICIT_AUTO, "
                      "0 < DT0 < ENDTIM) - OFF. ex_15 energy error +74.1 % -> "
                      "-0.9 % at 3.81x cycles; on the quasi-static decks it costs "
-                     "cycles and buys nothing (tensile2 75 -> 168, IE -0.54 % "
-                     "-> -4.36 %); ex_11's match turns deviation (a scoring "
-                     "artefact)",
+                     "cycles (tensile2 75 -> 168, IE -0.54 % -> -4.36 % at the "
+                     "end, history RMS 2.48 -> 1.66 % of peak, the closest "
+                     "arm); ex_11 KE +17.9 % at matched time (the shipped run "
+                     "+1343 %)",
             variable=self.implicit_constant_step).grid(
                 row=37, column=0, columnspan=3, sticky="w", **pad)
 

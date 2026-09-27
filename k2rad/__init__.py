@@ -449,10 +449,15 @@ def convert(
         force default Itol 2. **On by default.** Every one of the 11 R14
         reference ``d3hsp`` files of that shape echoes DCTOL 0.001 / ECTOL
         0.01 / RCTOL 0.999e11 (Vol I R17 p.12-354), i.e. LS-DYNA applies its
-        defaults to the stated zeros. L_A is unchanged; a NEGATIVE cell is a
-        tolerance curve (p.12-355) and keeps Itol 2. MEASURED at nt 4 = nt 2:
-        ``tensile2`` IE +7.36 % -> -0.54 % at 0.11x the cycles, ``doorbeam``
-        +380.25 % -> +582.00 % (a named regression), ``ie_shell`` ERROR ->
+        defaults to the stated zeros - the rule rests on that echo, not on a
+        measured gain. L_A is unchanged; a NEGATIVE cell is a tolerance curve
+        (p.12-355) and keeps Itol 2. MEASURED at nt 4 = nt 2: the IE history
+        is closer on 3 of the 11 carriers by at most 0.03 points of the
+        reference peak and farther on 4; ``tensile2`` ENDS at IE +7.36 % ->
+        -0.54 % at 0.11x
+        the cycles but reads +53 % at t 0.80 (+14 % before) - its history
+        RMS 2.00 % -> 2.48 % of the reference peak; ``doorbeam`` +380.25 % ->
+        +582.00 % (a named regression, larger mid-run), ``ie_shell`` ERROR ->
         NORMAL at IE -99.87 % (a status-only promotion).
     implicit_constant_step : bool
         Cap the implicit step at the deck's own DT0 (``/IMPL/DT/STOP``
@@ -465,12 +470,13 @@ def convert(
         MEASURED at nt 4 = nt 2: ``ex_15`` energy error +74.1 % -> -0.9 % at
         3.81x the cycles (its END state at matched time trades IE +36.2 % ->
         -54.8 % for KE +132.0 % -> +0.5 %); ``ex_11`` KE history error
-        16.07 % -> 1.16 % at
-        2.86x, but its campaign ``match`` becomes a deviation under the
-        end-of-run scorer (an artefact of the unprinted last increment); with
-        the default ``zero_tolerance_ectol`` it costs cycles on the
-        quasi-static decks and buys nothing (``tensile2`` 75 -> 168 cycles,
-        IE -0.54 % -> -4.36 %). Reach: 33 R14 deck keys on 22 emitted models.
+        16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 % where the
+        shipped run reads +1343 % - both deviations: the engine never prints
+        its last increment); with the default ``zero_tolerance_ectol`` it
+        costs cycles on the quasi-static decks - ``tensile2`` 75 -> 168
+        cycles, IE -0.54 % -> -4.36 % at the END, but the closest IE history
+        of the measured arms (RMS 2.48 % -> 1.66 % of the reference peak).
+        Reach: 33 R14 deck keys on 22 emitted models.
     discrete_offset : bool
         Honour ``*ELEMENT_DISCRETE``'s ``OFFSET`` cell (Vol I R17 p.19-33:
         *"a displacement or rotation at time zero … a positive offset on a
@@ -615,7 +621,8 @@ def convert(
         of 4 R14 deck keys on 4 emitted models (spotweld.k,
         ``show-cases/contact-overview/main.k`` and the two Yaris giants) and
         of the two full-vehicle models in ``C:/openradioss_run``, none of
-        which but spotweld.k has been run.
+        which but spotweld.k has been run WITH it (the three R14 giants have
+        campaign rows from runs without it).
     shell_offset_gapmin : bool
         On a ``/INTER/TYPE7`` whose main side is SOLID segments only and
         whose secondary is SHELLS that LS-DYNA offsets by half their
@@ -905,7 +912,8 @@ def convert(
         the flag also writes ``J = −ΣIN`` (the body's shell nodes' lumped
         rotary inertia) into every body it re-points: ``NEW INERTIA``
         0.1977227E-02 = LS-DYNA's, cycle-0 KE **189.96** (LS 189.962), final
-        KE −1.97 %, 1.156x the cycles; the IE is not fixed (the joint path's
+        KE −1.97 % (an END value: the KE history RMS goes 17.5 % → 11.6 % of
+        the LS peak), 1.156x the cycles; the IE is not fixed (the joint path's
         99.9 % energy error). **Opt-in** because exactly one carrier with an LS-DYNA reference
         exists on this machine. A body the card FULLY covers is untouched by
         construction: its momentum average IS the card's velocity with

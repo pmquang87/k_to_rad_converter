@@ -151,10 +151,15 @@ why the converter names it only on non-modal decks.
 What it showed on the R14 `ex_27` Taylor-bar pair (round 6): on the penalty
 twin, cycles 1-3 were accepted "based on small residual energy" with the
 largest residual still 2.1e4-1.5e5 at the interior ring r 2.904; cycle 4's
-attempt maximum grew 1.3e5 → 2.6e8 over 12 cut-backs, node 5244 (x 0,
-y 2.904, z 15.3; DOF 3) in 8 of the 12. On the constrained twin, over cycle
-2's 22 cut-backs it grew 4.2e3 → 2.0e10, node 1423 in 18 of 22. The dump
-located the ring; it did not explain it — the next section does.
+attempt maximum grew by three to four orders of magnitude over 12-13
+cut-backs (1.3e5 → 2.6e8 in round 6's run, 1.31e5 → 5.91e8 in the post-review
+re-run), on node 5244 (x 0, y 2.904, z 15.3; DOF 3) in 8 of 12 and 9 of 13
+attempts. On the constrained twin WITHOUT its `*CONSTRAINED_GLOBAL` plane (the
+pre-round-6 deck, or `--no-constrained-global`), cycle 2's cut-backs grew it
+to 2.0e10 / 9.1e9, on node 1423 in 18 of 22 and 16 of 21 attempts. Which node,
+and on how many cut-backs, varies from run to run; the ring does not — every
+named node sits on r 2.904. The dump located the ring; it did not explain it —
+the next section does.
 
 ## Known engine defect: implicit dynamics with an initial velocity
 
@@ -167,14 +172,21 @@ penalty}_implicit`):
 - With the deck's own first step (`/IMPL/DTINI` 1e-6) the first increment does
   not converge, every cut-back restarts from a corrupted state (the attempt KE
   grows × 2.76, 2.55, 2.44 … → 2.25 per cut, i.e. KE ~ 1/dt²) and the run stops
-  at `TIMESTEP LIMIT` — cycle 1 (constrained twin, t 6.667e-7, KE 1.054e13) and
-  cycle 3 (penalty twin, t 9.726e-8, KE 5.819e9), `nt` 4 = `nt` 2 to every
-  printed digit.
-- With a first step small enough to converge (`/IMPL/DTINI` 1e-8) both twins
-  end **NORMAL TERMINATION** (71 cycles, t 7.888e-5) — with the T01 Z-momentum
-  going **−2.099317 → +6.297951 = −3.0000000 × the initial** and KE × 9.00000
-  from the first converged increment on: the bar flies AWAY from the wall, with
-  0 `RIGID WALL IMPACT` lines (7 in the shipped arm).
+  at `TIMESTEP LIMIT` — cycle 0 (the constrained twin with its
+  `*CONSTRAINED_GLOBAL` plane converted, as k2rad ships it since round 6: 23
+  cut-back rows, KE 2.383e5 → 1.297e6), cycle 1 (the same twin without the
+  plane, t 6.667e-7, KE 1.054e13) and cycle 3 (penalty twin, t 9.726e-8, KE
+  5.819e9), `nt` 4 = `nt` 2 to every printed digit.
+- With a first step small enough to converge (`/IMPL/DTINI` 1e-8) the FREE bar
+  — the penalty twin, and the constrained twin without its plane
+  (`--no-constrained-global`) — ends **NORMAL TERMINATION** (72 cycles,
+  t 7.888e-5) with the T01 Z-momentum going **−2.099317 → +6.297951 =
+  −3.0000000 × the initial** and KE × 9.00000 from the first converged
+  increment on: the bar flies AWAY from the wall, with 0 `RIGID WALL IMPACT`
+  lines (7 in the shipped arm). The constrained twin WITH its plane also ends
+  NORMAL in 72 cycles (t 7.593e-5), but reads −2.9445759 × (KE × 8.806619) at
+  the first T01 sample (t 1.694e-7) and its base is HELD by the plane
+  (Z-momentum 8.8e-4 at the end, IE 4 291); `nt` 4 = `nt` 2 on all three.
 - The same with the injected contact stub deleted (no contact of any kind) and
   with `/INIVEL/TRA` instead of `/INIVEL/AXIS`.
 
@@ -185,6 +197,7 @@ beta), and the engine special-cases exactly this path (`imp_dyna.F`
 faulty line is not isolated, so the converter's warning describes the
 measurement and cites no line as the cause. A smaller `/IMPL/DTINI` is NOT a
 fix — it trades the error termination for a completed run with the wrong
-velocity — so none is shipped. The constrained twin at `/IMPL/DTINI` 1e-8
-(no wall, no contact, 71 cycles, ~60 s) is the upstream reproducer. Run such a
-model EXPLICIT until the engine is fixed.
+velocity — so none is shipped. The upstream reproducer is the free bar at
+`/IMPL/DTINI` 1e-8 with no wall and no contact: the penalty twin, or the
+constrained twin converted with `--no-constrained-global` (72 cycles). Run
+such a model EXPLICIT until the engine is fixed.
