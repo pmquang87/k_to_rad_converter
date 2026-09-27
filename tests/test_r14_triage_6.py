@@ -4374,6 +4374,7 @@ class PostReviewShippedTexts(unittest.TestCase):
         "the measured death of every void deck",
         "none run but spotweld.k",
         "is a 1-in-5 outcome",
+        "nodes 5244 and 1423/1424",
     )
 
     def test_no_shipped_text_carries_a_retired_spelling(self):
@@ -4408,6 +4409,9 @@ class PostReviewShippedTexts(unittest.TestCase):
             ("docs/IMPLICIT.md", "cycle 0 (the constrained twin with its "
              "`*CONSTRAINED_GLOBAL` plane"),
             ("docs/IMPLICIT.md", "--no-constrained-global"),
+            ("k2rad/writer/common.py", "names a node of the runaway interior "
+             "ring r 2.904 - which node, and on how many cut-backs, varies "
+             "from run to run"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

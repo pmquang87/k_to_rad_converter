@@ -211,7 +211,8 @@ _SOLVINFO_HINT = (
     "_implicit.info file (radioss2.F:688-760 opens it beside the .hist, .tpl, "
     ".monitor and .progress files, named after the run's root and number; "
     "nonlinear implicit runs only, radioss2.F:691). On the R14 ex_27 pair it "
-    "names the runaway ring (nodes 5244 and 1423/1424).")
+    "names a node of the runaway interior ring r 2.904 - which node, and on "
+    "how many cut-backs, varies from run to run.")
 
 
 def _f(v: float, w: int = 20) -> str:

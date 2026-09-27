@@ -7328,7 +7328,9 @@ class ConvertOptions:
     # global axis normal to the plane. k2rad selects the nodes within the
     # row's TOL of the plane - or, where TOL is 0 (LS-DYNA's "internal
     # mesh-size dependent tolerance"), within 1e-6 x the model extent (the
-    # largest side of the bounding box of the deck's own nodes) - ORs every
+    # largest side of the bounding box of the nodes the deck's ELEMENTS
+    # reference; an element-free node outside it is named, post-review round
+    # of #140) - ORs every
     # row's codes per node, unions them with the deck's *NODE TC/RC cells and
     # writes ONE /BCS per union code through the same four screens
     # (writer/loads._make_node_tc_rc_bcs): one /BCS per plane gives starter
