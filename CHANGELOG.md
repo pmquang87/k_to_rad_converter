@@ -15,12 +15,14 @@ Prior history (before this changelog was introduced) is summarized in the
   round's findings).** No blocker was found; the four majors were three
   branches whose mutants survived the whole suite and one headline END value
   whose history runs the other way; the rest were texts, two small converter
-  rules and one campaign bookkeeping rule. The last code commit is `0b48bae`.
-  A two-tree sweep of all 356 keys from `F:` (`c87c6b2` vs `0b48bae`, pristine
-  detached checkouts, porcelain empty before and after) finds **0 byte
-  movers**; 19 keys on 18 models move their warning text only (the A1 floor
-  text 4 keys on 3 models, the B1 text 11 on 11, the B4 text 2 on 2, the B5
-  announcement 3 on 3); 0 drop-bucket movers — so no campaign row is
+  rules and one campaign bookkeeping rule. The last code commit is `0922f37`.
+  A two-tree sweep of all 356 keys from `F:` (`c87c6b2` vs `0b48bae`, then
+  `0922f37` re-swept; pristine detached checkouts, porcelain empty before and
+  after) finds **0 byte movers**; 23 keys on 22 models move their warning
+  text only (the A1 floor text 4 keys on 3 models, the B1 text 11 on 11, the
+  B4 text and the SOLVINFO hint 2 on 2, the B5 announcement 3 on 3, the
+  SOLVINFO hint alone on the 4 welding decks); 0 drop-bucket movers — so no
+  campaign row is
   re-converted or re-run (report §0.26). Every figure below is measured from `F:`, at nt 4
   AND nt 2 where implicit (identical on every pair), base-paired, and sampled
   at the fifths of t_end (the OpenRadioss row nearest each, the LS glstat
@@ -51,7 +53,9 @@ Prior history (before this changelog was introduced) is summarized in the
     `docs/IMPLICIT.md`: cycle 0 on the shipped constrained twin; the upstream
     reproducer is the free bar (the penalty twin, or `--no-constrained-global`);
     the SOLVINFO node ids vary from run to run (a re-run named 5244 in 9 of 13
-    attempts and 1423 in 16 of 21, all on the ring r 2.904).
+    attempts and 1423 in 16 of 21, all on the ring r 2.904) — and the runtime
+    SOLVINFO hint (`writer/common._SOLVINFO_HINT`, printed by three warnings)
+    now names the ring instead of node ids.
   - **A1.** ELFORM-12 LAW6 carriers that differ in RO or EOS are NAMED instead
     of being called one fluid (Vol I R17 p.28-134 does not permit the mix;
     reach 0 — bird-el's two carriers are identical); the linear-EOS clause
@@ -107,12 +111,12 @@ Prior history (before this changelog was introduced) is summarized in the
     BACKWARD UNMATCHED by name (`ex_05_beam_elform_3_&_6` 642 backward steps of
     5470 blocks, `ex_07_beam_elform_1` 70 of 208; both `error_engine`): 0
     verdicts, 2 rows' numbers (report §0.26, campaign README §7 / §9.1 / §10).
-  - **Verified** on the round's final head (its code is `0b48bae`'s): pytest
-    5395 / 2 / 5557 (master) → 5640 passed / 2 skipped / 8668 subtests; mypy
+  - **Verified** on the round's final head (its code is `0922f37`'s): pytest
+    5395 / 2 / 5557 (master) → 5640 passed / 2 skipped / 8723 subtests; mypy
     2.3.1 0 issues in the dev venv and with `--no-site-packages`; ruff clean;
-    `--help` renders (908 lines); 18 of 18 whole-suite mutations caught
-    on a throwaway worktree, including the three the verification round saw
-    survive.
+    `--help` renders (908 lines); 19 of 19 whole-suite mutations caught
+    on a throwaway worktree (18 at `0b48bae`, the SOLVINFO one at `0922f37`),
+    including the three the verification round saw survive.
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — FINALIZATION ROUND (the four
   validators' findings; resumed after a machine crash from the first
