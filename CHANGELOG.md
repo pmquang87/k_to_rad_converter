@@ -11,6 +11,109 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
+  round's findings).** No blocker was found; the four majors were three
+  branches whose mutants survived the whole suite and one headline END value
+  whose history runs the other way; the rest were texts, two small converter
+  rules and one campaign bookkeeping rule. The last code commit is `0b48bae`.
+  A two-tree sweep of all 356 keys from `F:` (`c87c6b2` vs `0b48bae`, pristine
+  detached checkouts, porcelain empty before and after) finds **0 byte
+  movers**; 19 keys on 18 models move their warning text only (the A1 floor
+  text 4 keys on 3 models, the B1 text 11 on 11, the B4 text 2 on 2, the B5
+  announcement 3 on 3); 0 drop-bucket movers — so no campaign row is
+  re-converted or re-run (report §0.26). Every figure below is measured from `F:`, at nt 4
+  AND nt 2 where implicit (identical on every pair), base-paired, and sampled
+  at the fifths of t_end (the OpenRadioss row nearest each, the LS glstat
+  interpolated at its time) with an RMS over the LS output times in % of the
+  LS peak.
+  - **B1 — the default rests on LS-DYNA's d3hsp echo, not on `tensile2`'s end
+    value.** `tensile2`'s −0.54 % is an END value: at t 0.76 / 0.80 the B1 arm
+    reads −64.0 / +53.2 % where the force criterion reads +18.4 / +13.5 %, and
+    its IE history RMS is 2.00 → 2.48 % of the reference peak. Over the 11
+    carriers the history is closer on 3 by at most 0.03 points (`rigid_tip`
+    0.78 → 0.75; `aellipse`, `ellipse` by < 0.01), unchanged on 3, farther on 4
+    (`tensile2`; `doorbeam` 189 → 393, +668 / +1086 / +973 / +842 % at the four
+    earlier fifths against +476 / +353 / +361 / +349 %; `4.2.frf.cant-1` 0.30 →
+    0.59; `6.5.tbl.psd.prepressure-1` 0.03 → 0.39); `ie_shell`'s is a status
+    change. Eleven texts carry the history; a stated ECTOL ≥ 1 beside the zeros
+    is named as LS-DYNA's own value (reach 0). A guard requires every shipped
+    unit that states `tensile2`'s −0.54 % to state its history (the twobar rule).
+  - **B3.** With B1, `tensile2`'s cap arm (75 → 168 cycles, 2.24×) has the
+    closest history of the four measured arms (RMS 1.66 %; the cap alone
+    1.83); `ex_11`'s flag arm reads KE +17.9 % at matched time (t 0.099, 100
+    cycles) against the shipped run's +1343 % — both deviations. "Buys
+    nothing" is retired from every text.
+  - **B4 — the ×−3.0000000 is the FREE bar.** At `/IMPL/DTINI` 1e-8: the penalty
+    twin and the constrained twin without its plane end NORMAL in 72 cycles
+    with Z-momentum ×−3.0000001 / KE ×9.000000; the branch-converted
+    constrained twin, with its B5 plane, reads ×−2.9445759 / KE ×8.806619 at the
+    first T01 sample and is held at its base (Z-momentum 8.8e-4 at the end).
+    `docs/IMPLICIT.md`: cycle 0 on the shipped constrained twin; the upstream
+    reproducer is the free bar (the penalty twin, or `--no-constrained-global`);
+    the SOLVINFO node ids vary from run to run (a re-run named 5244 in 9 of 13
+    attempts and 1423 in 16 of 21, all on the ring r 2.904).
+  - **A1.** ELFORM-12 LAW6 carriers that differ in RO or EOS are NAMED instead
+    of being called one fluid (Vol I R17 p.28-134 does not permit the mix;
+    reach 0 — bird-el's two carriers are identical); the linear-EOS clause
+    names −C1, not the PC; bird-el's floor history is re-sampled at the fifths
+    of t_end, KE +272 / +407 / +143 / −73 / −92 % (the second fifth sits on a
+    rise of ~1.7 % per cycle: 398 / 402 / 407 by the sampling rule), with its
+    energy error −17.9 → −32.6 %; README and ROADMAP scope the old "death of
+    every void deck" sentence to the three void timeouts.
+  - **A2.** One exponent warning per (class, N, M) group, inserted where the
+    group's first weld warned: a one-weld deck keeps its record byte for byte
+    (both carriers), a vehicle deck no longer prints the ~1.6 KB paragraph per
+    weld.
+  - **A3 / A6 / B6 — the three mutants that survived the whole suite are
+    pinned**: a spring end on a solid only (the lumper's solid branch; own
+    mass ρV/8 by hand), C44 / C55 / C66 all different (GBC → LAW93 G23, GCA →
+    G13), and a penalty `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` on a beam part
+    under `--beam-contact-secondary` (its styp-3-only mutant is caught by it).
+  - **A6 — the orientation mechanism, traced and measured.** The fault follows
+    the co-rotational flag, not the Isolid: `smorth3.F:282-291` (Ip 20) /
+    `:380-389` (Ip 23) store a connectivity frame's GLOBAL components on a
+    non-co-rotational property; `Iframe 0` is the `/DEF_SOLID` default 1
+    (`hm_read_prop06.F:296`, `defaults_mod.F90:176`) and `:297-298` force
+    co-rotation on Isolid 14/18/24 only. On the unit cube (LAW93, nt 4, 20
+    arms, NORMAL): `Isolid 17` and `1` with `Iframe 0` wrong in 4 of 4 loadings,
+    right with `Iframe 2`; `Isolid 14` right. The A6 route stays on `Isolid 14`;
+    the MAT_126 honeycomb's pinned `Isolid 1` / `Iframe 0` carries the same
+    fault on an element frame and is now NAMED in a warning (not changed: its
+    crush under a co-rotational frame has no reference; ROADMAP 22).
+  - **A7 / B6 — end values with their histories.** `translat` (flag arms): KE
+    −7.1 / −5.3 / +2.8 / +26.3 / −2.0 % at the fifths against −13.9 / +22.6 /
+    +2.8 / +39.2 / +47.8 % without the J cells, RMS 17.5 → 11.6 % of the LS
+    peak. `spotweld.k` with both flags (nt 4 = nt 2, 4983 cycles, 7.80× the
+    base's 639): +82.0 % at 1.18e-3 but +141.1 % at the matched end t 1.2e-3,
+    after LS-DYNA's weld failure (history +65 / +82 / +85 / +83 / +141 %).
+  - **B5 — the default tolerance takes the box of the nodes the ELEMENTS
+    reference**, every node staying a candidate; an element-free node outside
+    that box is named instead of widening the plane (measured on the pre-fix
+    code: one node at x 1e6 made the tolerance 1.0 and a mid-plane selected all
+    18 grid nodes and the stray one). The three carriers print the same extents
+    as before (32.4, 24, 487.68); 0 byte movers.
+  - **A5.** An `/MPC` term on a tied-interface node is recorded as ROADMAP item
+    27 (the WARNING box of p.10-135 / p.10-139; reach 0).
+  - **Texts.** The run states (`contact-overview/main.k` ran on 2026-09-06;
+    `ale_wavehitcol`'s 2026-09-05 row is stale; "none run WITH it but
+    spotweld.k"), metal-cutting's "1-in-5 … may flip" (it LOST its NORMAL; 3 of
+    10 fresh bases in round 6), gnonspring's "+290 %" (+66.39 % at matched
+    time, report §0.25), the sbrake nt-2 figure (15 610 or 22 860 on repeated
+    nt-2 runs, 10 700 at nt 4), and the two Isolid-14 comments; README gives
+    each opt-in B6 flag its own heading and the test now checks that; ROADMAP
+    items 4 and 22 rewritten, 27 added; the round-6 entries below are corrected
+    in place, marked *(post-review)*.
+  - **Campaign.** The matched-time rule records a row whose LS time axis steps
+    BACKWARD UNMATCHED by name (`ex_05_beam_elform_3_&_6` 642 backward steps of
+    5470 blocks, `ex_07_beam_elform_1` 70 of 208; both `error_engine`): 0
+    verdicts, 2 rows' numbers (report §0.26, campaign README §7 / §9.1 / §10).
+  - **Verified** on the round's final head (its code is `0b48bae`'s): pytest
+    5395 / 2 / 5557 (master) → 5640 passed / 2 skipped / 8668 subtests; mypy
+    2.3.1 0 issues in the dev venv and with `--no-site-packages`; ruff clean;
+    `--help` renders (908 lines); 18 of 18 whole-suite mutations caught
+    on a throwaway worktree, including the three the verification round saw
+    survive.
+
 - **R14 CAMPAIGN TRIAGE batch, round 6 — FINALIZATION ROUND (the four
   validators' findings; resumed after a machine crash from the first
   attempt's uncommitted work, which was re-tested as found — 5609 passed —
@@ -218,7 +321,10 @@ Prior history (before this changelog was introduced) is summarized in the
     exactly −3.0000000 at the first converged increment (both `ex_27` twins
     at `/IMPL/DTINI` 1e-8: Z-momentum −2.099317 → +6.297951, KE × 9.00000,
     NORMAL TERMINATION with the bar flying away from the wall — with no wall,
-    no contact, and either `/INIVEL` card), so the run either diverges (the
+    no contact, and either `/INIVEL` card *(post-review: that is the FREE bar
+    — the penalty twin, and the constrained twin without its plane; the
+    branch-converted constrained twin, with its B5 plane, reads −2.94× and is
+    held at its base)*), so the run either diverges (the
     shipped first step: TIMESTEP LIMIT at cycle 3 on the penalty twin and at
     cycle 0 on the constrained twin once B5 converts its `*CONSTRAINED_GLOBAL`
     plane — cycle 1 before; nt 4 = nt 2) or completes with the
