@@ -1648,9 +1648,16 @@ class MassWeightedRbodyInertia(unittest.TestCase):
     LS-DYNA's rigid-body inertia is the point-mass sum; under
     --mass-weighted-inivel the re-pointed body's J cells take IN back out."""
 
+    # Round 7 (A2) writes J = -SUM(IN) on every *MAT_RIGID part body BY
+    # DEFAULT, and this pass then skips a body the producer corrected (guard
+    # 2). The four tests below are about THIS pass's own selection and its
+    # sentence, so they run on the arm where it still acts:
+    # rigid_shell_rotary_inertia=False (the round-6 behaviour, exactly). The
+    # default arm is pinned in tests/test_r14_triage_7.py.
     def test_the_plate_coupon_gets_minus_SUM_IN(self):
         result, starter, _e = _convert(_j_plate_deck(),
-                                       mass_weighted_inivel=True)
+                                       mass_weighted_inivel=True,
+                                       rigid_shell_rotary_inertia=False)
         self.assertIn("/INIVEL/ROT/", starter)
         card1, hdr, j1, j2 = _rbody_j_rows(starter, 15)
         self.assertEqual(hdr, "#                Jxx                 Jyy"
@@ -1664,13 +1671,15 @@ class MassWeightedRbodyInertia(unittest.TestCase):
 
     def test_the_flag_OFF_arm_is_untouched_and_the_pass_is_gated(self):
         from k2rad.writer import assembly
-        _r, s_off, _e = _convert(_j_plate_deck())
+        _r, s_off, _e = _convert(_j_plate_deck(),
+                                 rigid_shell_rotary_inertia=False)
         self.assertEqual(_rbody_j_rows(s_off, 15)[2], _J_ZERO_ROW)
         saved = assembly._apply_mass_weighted_rbody_inertia
         assembly._apply_mass_weighted_rbody_inertia = (
             lambda state, lines, rbody_info: None)
         try:
-            _r2, s_nopass, _e2 = _convert(_j_plate_deck())
+            _r2, s_nopass, _e2 = _convert(_j_plate_deck(),
+                                          rigid_shell_rotary_inertia=False)
         finally:
             assembly._apply_mass_weighted_rbody_inertia = saved
         self.assertEqual(s_off, s_nopass)
@@ -1678,7 +1687,8 @@ class MassWeightedRbodyInertia(unittest.TestCase):
     def test_only_the_re_pointed_body_gets_the_cells(self):
         """Two rigid bodies, the card on the plate only: one J row changes."""
         _r, starter, _e = _convert(_j_plate_deck(second_rigid=True),
-                                   mass_weighted_inivel=True)
+                                   mass_weighted_inivel=True,
+                                   rigid_shell_rotary_inertia=False)
         mains = [int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
                  if ln.startswith("/RBODY/")]
         self.assertEqual(len(mains), 2, mains)
@@ -1687,7 +1697,8 @@ class MassWeightedRbodyInertia(unittest.TestCase):
 
     def test_a_fully_covered_body_keeps_its_J(self):
         _r, starter, _e = _convert(_j_plate_deck(covered=(1, 2, 3, 4)),
-                                   mass_weighted_inivel=True)
+                                   mass_weighted_inivel=True,
+                                   rigid_shell_rotary_inertia=False)
         self.assertNotIn("/INIVEL/ROT/", starter)
         self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
 

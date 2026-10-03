@@ -1983,7 +1983,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
     # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
-    # sections re-pointed (round 6, A7). A post-pass because those blocks are
+    # sections re-pointed (round 6, A7) - since round 7 only where the
+    # *MAT_RIGID producer did not already write it by default (A2; the
+    # pass skips a record whose j_in is "applied" or "refused", and never
+    # touches a CNRB). A post-pass because those blocks are
     # built above, before the re-point is decided; id-keyed and
     # content-asserted, it rewrites one J row per body and draws no id. A
     # no-op without the flag.

@@ -48,6 +48,56 @@ Prior history (before this changelog was introduced) is summarized in the
     the CNRB skew-0 and skewed arms, the GLOBAL provenance, which screen
     fired, the opt-out, the control arm, the record reset and the emitted
     digits).
+  - **A2 — `J = −ΣIN` on every `*MAT_RIGID` / `*DEFORMABLE_TO_RIGID` part
+    `/RBODY` carrying shell rotary inertia (default ON,
+    `--no-rigid-shell-rotary-inertia`).** The starter ADDS every shell node's
+    lumped rotary inertia `IN = (m/n)(A + t²)/12` (`cinmas.F:1379`, FAC 12)
+    to a rigid body's tensor for ICoG 1/2/3 (`inirby.F:166-168` the main
+    node, `:355-363` the secondaries) and the `/RBODY` J cells are additive
+    (`:154-160`), while LS-DYNA's rigid-part inertia is the point-mass sum of
+    the nodal masses (Theory R16 eqs 29.21-29.23; the reference `d3hsp`
+    tensor equals it on 18 of 18 measured bodies within 0.04 %). The producer
+    `_make_rbodies` now writes `Jxx = Jyy = Jzz = J − ΣIN` (`Jxy/Jyz/Jxz`
+    untouched; ΣIN summed ONCE over the body's nodes — secondaries, main node,
+    merged deformable shells, a `*CONSTRAINED_RIGID_BODIES` union), BEFORE
+    `rbody_info` meets the CNRB records, so a CNRB PID that shadows the part
+    id (doorbeam's part 4) no longer hides the body. Skipped by name where
+    the lumper is not the starter's (`_rbody_in_skip_reason`, moved from
+    `loads.py` to `rbody.py`, one function for both callers: a layered
+    section, an element thickness, Ishell < 11, no `*SECTION_SHELL`; 0 of
+    the roster's bodies); refused by name, `J` kept, when the corrected
+    tensor's smallest principal value is not above `1e-6` × its largest
+    (`RIGID_IN_MARGIN`; ERROR 274 fires at ≤ 0, `inirby.F:823-830`, and the
+    lumper is not the starter on every body; reach 0 — a collinear probe, a
+    near-collinear probe and their control pin it); a body with no shell IN
+    (icfd's `main_fsi.k`, `t1 = 0.0`) gets nothing; never on a CNRB, a weld /
+    tie / probe body or ICoG 4. `--mass-weighted-inivel` (round 6, A7) gains
+    two guards: it never subtracts on a body the producer corrected or
+    refused (it would have written −2 ΣIN) and never writes `J` on a CNRB
+    (LS-DYNA keeps the nodal inertia there: rigid_tip CNRB 99, −7.36 % →
+    −25.08 % with the subtraction); its momentum-average warning now says
+    who wrote `J`. MEASURED (nt 4): a spun 20 × 20 × 2 mm rigid plate's
+    rotational KE +16.83 % (normal axis) / +33.66 % (in-plane) → 0.00 %;
+    `revo-stiff` deviation → match, its starter tensor = LS-DYNA's d3hsp
+    (0.1977E-02 / 0.2636E-02), IE / KE history RMS 4.96 / 2.94 → 0.78 / 0.73 %
+    of the LS peak at 1.156× the cycles. **Byte movers 56 deck keys on 53
+    emitted models (153 bodies), one J row each, `_0000.rad` only, no id
+    shift**; `pipe` and `wood-post` stay `match`; the pendulum pair (1 model)
+    flips on its END value only (IE −19.39 → +5.37 % with the IE RMS 50.64 →
+    51.61 %: annotated, never a fix). Named costs: `brake` (KE 0.4-0.7
+    points lower at every fifth, RMS 2.62 → 2.85 %, while its IE RMS 814.68 →
+    692.64 % and its start becomes exact), `transducer` (END IE −18.08 →
+    +39.12 % on a small oscillating contact IE; KE RMS 20.85 → 15.19 %),
+    `translat` (worse on a run whose energy error is 99.9 % from the first
+    rows — the joint path); doorbeam's round-6 +582.00 % is unchanged (its
+    rotation-fixed body; every printed row identical at nt 4 and 2). Tests
+    that changed their EXPECTED value: four round-6 A7 tests
+    (`tests/test_r14_triage_6.py` `MassWeightedRbodyInertia`: the flag's own
+    pass is now tested on the `rigid_shell_rotary_inertia=False` arm, where
+    it still acts) and the golden `rigid_contact_0000.rad` (`/RBODY/9` "rigid
+    pin": its J row `0 0 0` → `−1.310000E-09` ×3 = by hand 4 × (7.86e-9/4)
+    (1 + 1)/12; nothing else in the file moves). New tests:
+    `RigidShellRotaryInertiaDefault` (16) and `Round7FlagWiringA`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three

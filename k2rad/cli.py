@@ -502,6 +502,26 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-shell-offset-gapmin to keep the starter's derived gap.",
     )
     parser.add_argument(
+        "--rigid-shell-rotary-inertia",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write J = -SUM(IN) into the Jxx/Jyy/Jzz cells of every "
+             "*MAT_RIGID / *DEFORMABLE_TO_RIGID part /RBODY (ICoG != 4) whose "
+             "nodes carry lumped shell rotary inertia: the starter ADDS every "
+             "shell node's IN = (m/n)(A + t^2)/12 (cinmas.F:1379) to a rigid "
+             "body's tensor (inirby.F:166-168, inirby.F:355-363), while "
+             "LS-DYNA's rigid-part inertia is the point-mass sum (18 of 18 "
+             "reference d3hsp tensors within 0.04 %%). ON by default. Skipped "
+             "by name where the lumper is not the starter's (layered, element "
+             "thickness, Ishell < 11, no section), refused by name below a "
+             "relative 1e-6 margin (ERROR 274), never on CNRB / weld / tie / "
+             "probe bodies. MEASURED (nt 4): a spun rigid plate's rotational "
+             "KE +16.83 / +33.66 %% -> 0.00 %%; revo-stiff IE / KE history "
+             "RMS 4.96 / 2.94 -> 0.78 / 0.73 %% of the LS peak at 1.156x "
+             "the cycles, its LS d3hsp tensor 0.1977227E-02 reproduced. Use "
+             "--no-rigid-shell-rotary-inertia to keep J = 0.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -920,10 +940,13 @@ def build_parser() -> argparse.ArgumentParser:
              "LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped "
              "full-velocity re-point reads 387.9 (+104.20 %%), this rule "
              "reads 220.58 (+16.12 %%), and the final ke_dev goes +194.03 %% "
-             "-> +47.82 %%. Since round 6 the flag also writes J = -SUM(IN) "
-             "(the body's shell nodes' lumped rotary inertia, which the "
-             "starter ADDS to the tensor, inirby.F:166-168/:355) into every "
-             "body it re-points: NEW INERTIA 0.1977227E-02 = LS-DYNA's, "
+             "-> +47.82 %%. J = -SUM(IN) (the body's shell nodes' lumped "
+             "rotary inertia, which the starter ADDS to the tensor, "
+             "inirby.F:166-168/:355) is written BY DEFAULT since round 7 "
+             "(--rigid-shell-rotary-inertia); this flag adds it only where "
+             "the default did not (--no-rigid-shell-rotary-inertia restores "
+             "the round-6 pass on every body it re-points): NEW INERTIA "
+             "0.1977227E-02 = LS-DYNA's, "
              "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %% (an end value: "
              "the KE history RMS goes 17.5 %% -> 11.6 %% of the LS peak), "
              "1.156x the cycles; the IE (the joint path) is not fixed. OPT-IN because "
@@ -1168,6 +1191,7 @@ def main(argv=None) -> int:
         spotweld_node_synthesis=args.spotweld_node_synthesis,
         beam_contact_secondary=args.beam_contact_secondary,
         shell_offset_gapmin=args.shell_offset_gapmin,
+        rigid_shell_rotary_inertia=args.rigid_shell_rotary_inertia,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

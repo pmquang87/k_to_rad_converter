@@ -756,6 +756,32 @@ set) disappear, and the deck is AMS-compatible (a mesh-node master trips AMS
 lowest-id mesh node as the master (keeps that node id stable for scripts that
 address loads/readouts by it; OpenRadioss then relocates it to the CoM at
 runtime, so it appears to move in post-processing).
+**The `/RBODY` inertia cells carry `Jxx = Jyy = Jzz = −ΣIN`** (round 7, default
+ON, `--no-rigid-shell-rotary-inertia` keeps `J = 0`) on every `*MAT_RIGID` /
+`*DEFORMABLE_TO_RIGID` part body without `*PART_INERTIA` whose nodes carry
+lumped shell rotary inertia: the starter ADDS every shell node's
+`IN = (m/n)(A + t²)/12` (`cinmas.F:1379`, FAC 12) to the body tensor for ICoG
+1/2/3 (`inirby.F:166-168` the main node, `:355-363` the secondaries), while
+LS-DYNA's rigid-part inertia is the point-mass sum of the nodal masses (Theory
+R16 eqs 29.21-29.23 — the reference `d3hsp` tensor equals it on 18 of 18
+measured bodies within 0.04 %). `ΣIN` is summed once over the body's nodes
+(its secondaries, its main node, merged deformable shells and a
+`*CONSTRAINED_RIGID_BODIES` union). Skipped by name where the lumper is not the
+starter's (a layered section, an element thickness, Ishell < 11, no
+`*SECTION_SHELL`); refused by name, `J` kept, when the corrected tensor's
+smallest principal value is not above `1e-6` × its largest (ERROR 274 fires at
+≤ 0, `inirby.F:823-830`; reach 0); never on a `*CONSTRAINED_NODAL_RIGID_BODY`
+(LS-DYNA keeps the nodal inertia there), a weld / tie / probe body or an ICoG 4
+body. Measured (nt 4): a spun 20 × 20 × 2 mm rigid plate's rotational KE
++16.83 % (normal axis) / +33.66 % (in-plane) → 0.00 %;
+`intro-by-j.-day/joint/joint-i/revo-stiff.k` goes deviation → match, its
+starter tensor = LS-DYNA's d3hsp 0.1977E-02 / 0.2636E-02 and its IE / KE
+history RMS 4.96 / 2.94 → 0.78 / 0.73 % of the LS peak at 1.156× the cycles
+(the main node's rotational step shrinks with `J`). Reach 56 deck keys on 53
+emitted models (153 bodies); named costs on `brake` (KE 0.4-0.7 points lower
+at every fifth while its start becomes exact), `transducer` (an oscillating
+contact IE's end value) and `translat` (a run whose energy error is 99.9 % from
+the first rows — the joint path); `pipe` and `wood-post` stay `match`.
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 
 `*INITIAL_VOID_PART` / `_SET` → recognized, **still listed as skipped** (no
@@ -6228,6 +6254,17 @@ on every arm — the joint path). Skipped by name: an ICoG 4 body (its J is the
 deck's `*PART_INERTIA` tensor), a body with a layered shell, an element
 thickness or Ishell < 11 (the lumper's `IN` would not be the starter's);
 refused: a principal value `<= 0` (ERROR 274).
+
+**Round 7: `J = −ΣIN` is the DEFAULT on every `*MAT_RIGID` /
+`*DEFORMABLE_TO_RIGID` part body** (`--rigid-shell-rotary-inertia`, see
+`*MAT_RIGID` above), written by the producer itself. This flag therefore only
+re-points the velocities on such a body: its own `J` pass skips a body the
+default already corrected (it never subtracts twice) or refused, and never
+writes `J` on a `*CONSTRAINED_NODAL_RIGID_BODY` (LS-DYNA keeps the nodal rotary
+inertia in a nodal rigid body: rigid_tip CNRB 99 reads point mass + 1.373e-4 on
+every axis, and the subtraction would take it from −7.36 % to −25.08 %). With
+`--no-rigid-shell-rotary-inertia` the paragraph above holds exactly as in
+round 6.
 
 It is **OFF by default** for an evidence reason, not a physics one: exactly one
 carrier with an LS-DYNA reference exists on this machine, and there is no

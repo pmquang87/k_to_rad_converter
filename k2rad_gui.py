@@ -111,6 +111,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          spotweld_node_synthesis: bool = False,
                          beam_contact_secondary: bool = False,
                          shell_offset_gapmin: bool = True,
+                         rigid_shell_rotary_inertia: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -261,6 +262,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
 
+    kwargs["rigid_shell_rotary_inertia"] = bool(rigid_shell_rotary_inertia)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -396,6 +399,7 @@ class ConverterGUI:
         self.spotweld_node_synthesis = tk.BooleanVar(value=False)
         self.beam_contact_secondary = tk.BooleanVar(value=False)
         self.shell_offset_gapmin = tk.BooleanVar(value=True)
+        self.rigid_shell_rotary_inertia = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -722,7 +726,8 @@ class ConverterGUI:
                      "the momentum average (p.28-129 Remark 3) on the /RBODY "
                      "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
                      "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %), and "
-                     "with J = -SUM(IN) on the /RBODY (round 6) 189.96. One "
+                     "with J = -SUM(IN) on the /RBODY (the default since "
+                     "round 7) 189.96. One "
                      "carrier with a reference exists, hence opt-in",
             variable=self.mass_weighted_inivel).grid(
                 row=31, column=0, columnspan=3, sticky="w", **pad)
@@ -814,6 +819,16 @@ class ConverterGUI:
                      "not the size) and the weld never fails",
             variable=self.beam_contact_secondary).grid(
                 row=40, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_RIGID / *DEFORMABLE_TO_RIGID part body: write "
+                     "J = -SUM(IN) so the starter's tensor is LS-DYNA's "
+                     "point-mass sum (it ADDS every shell node's IN, "
+                     "inirby.F:355) - ON. Spun plate KE_R +16.83 % -> 0.00 %; "
+                     "revo-stiff IE / KE RMS 4.96 / 2.94 -> 0.78 / 0.73 % at "
+                     "1.156x cycles",
+            variable=self.rigid_shell_rotary_inertia).grid(
+                row=41, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1066,6 +1081,8 @@ class ConverterGUI:
                 spotweld_node_synthesis=self.spotweld_node_synthesis.get(),
                 beam_contact_secondary=self.beam_contact_secondary.get(),
                 shell_offset_gapmin=self.shell_offset_gapmin.get(),
+                rigid_shell_rotary_inertia=(
+                    self.rigid_shell_rotary_inertia.get()),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1232,6 +1249,9 @@ class ConverterGUI:
         if not kwargs.get("shell_offset_gapmin", True):
             bits.append("starter-derived gap kept against offset shells "
                         "(--no-shell-offset-gapmin)")
+        if not kwargs.get("rigid_shell_rotary_inertia", True):
+            bits.append("rigid part bodies keep J = 0 "
+                        "(--no-rigid-shell-rotary-inertia)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

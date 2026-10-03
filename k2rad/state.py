@@ -7643,6 +7643,25 @@ class ConvertOptions:
     # capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at matched
     # time, 0.98x the cycles; the row stays deviation.
     shell_offset_gapmin: bool = True
+    # --no-rigid-shell-rotary-inertia: keep J = 0 in the /RBODY inertia cells
+    # of every *MAT_RIGID / *DEFORMABLE_TO_RIGID part body (R14 triage round
+    # 7, A2).
+    #
+    # ON by default. The starter ADDS every shell node's lumped rotary
+    # inertia IN = (m/n)(A + t^2)/12 (cinmas.F:1379, FAC 12) to a rigid body's
+    # tensor for ICoG 1/2/3 (inirby.F:166-168 the main node, :355-363 the
+    # secondaries) and the J cells are additive, while LS-DYNA's rigid-part
+    # inertia is the point-mass sum of the nodal masses (Theory R16 eqs
+    # 29.21-29.23; its d3hsp tensor equals it on 18 of 18 measured bodies
+    # within 0.04 %). So the producer (writer/rbody._make_rbodies) writes
+    # Jxx = Jyy = Jzz = -SUM(IN) over the body's nodes; skipped by name where
+    # the lumper is not the starter's (layered, element thickness, Ishell <
+    # 11, no section), refused by name below a relative 1e-6 margin (ERROR
+    # 274), never on CNRB / weld / tie / probe bodies or ICoG 4. MEASURED: a
+    # spun rigid plate's rotational KE +16.83 / +33.66 % -> 0.00 %;
+    # revo-stiff deviation -> match (writer/rbody._A2_REVO_RMS). Reach: 56
+    # deck keys on 53 emitted models (153 bodies).
+    rigid_shell_rotary_inertia: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8102,8 +8121,12 @@ class ConvertOptions:
     # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
     # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
     # 0.1977E-02). The /RBODY J cells are ADDITIVE (inirby.F:154-168), so
-    # since round 6 (A7) the flag also writes J = -SUM(IN) into every body it
-    # re-points (writer/loads._apply_mass_weighted_rbody_inertia): NEW INERTIA
+    # J = -SUM(IN) is written BY DEFAULT since round 7 (A2,
+    # rigid_shell_rotary_inertia, in writer/rbody._make_rbodies), and this
+    # flag's own pass (round 6, A7; writer/loads.
+    # _apply_mass_weighted_rbody_inertia) writes it only on a body the
+    # default did not correct - with --no-rigid-shell-rotary-inertia, every
+    # body it re-points, as in round 6: NEW INERTIA
     # 0.1977227E-02 = LS-DYNA's, cycle-0 KE 189.96 (LS 189.962), final KE
     # -1.97 % (an end value: the KE history RMS goes 17.5 % -> 11.6 % of the
     # LS peak), 1.156x the cycles; the IE (the joint path's 99.9 % energy
@@ -9212,7 +9235,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:795, :1226, :1338, :1527, :1684, in that order:
+    # (writer/rbody.py:1014, :1446, :1558, :1747, :1904, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

@@ -338,6 +338,195 @@ def _inertia_lines(j: Tuple[float, ...]) -> List[str]:
     ]
 
 
+#: The relative margin of the ``J = -SUM(IN)`` correction (round 7, A2): the
+#: corrected tensor's smallest principal value must exceed ``RIGID_IN_MARGIN``
+#: x its largest, or the body keeps ``J = 0`` and is named. The starter's own
+#: threshold is ``<= 0`` (ERROR 274, ``inirby.F:823-830``), but k2rad's lumper
+#: is not the starter on every body (foam.k's CHEXA body differs by 14.1 % on
+#: its minimum axis, a solid-lumping difference), so a body near 0 is refused
+#: on a RELATIVE margin. It is not ``lumping._INERTIA_RANK_TOL``: that one
+#: guards a division in the momentum average, this one a negative starter
+#: eigenvalue. Reach on the 356 roster keys: 0 of the rule's bodies (the
+#: smallest ratio among them is 3.1e-4, forging_A/B).
+RIGID_IN_MARGIN = 1.0e-6
+
+
+def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
+                          ) -> str:
+    """Why ``k2rad.lumping``'s nodal ``IN`` would NOT be the starter's for a
+    body over *nodes*, or ``""``.
+
+    The lumper computes ``IN = (m/n)(A + t^2)/12`` per shell corner — the
+    ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11, ``:919-925``),
+    ``ZSHIFT = 0``, one layer, the SECTION thickness. Any shell on the body
+    that the starter lumps differently makes ``-SUM(IN)`` the wrong amount,
+    so the body is skipped by name: Ishell < 11 (FAC 9), a layered property
+    (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an
+    offset, since a plain shell's NLOC and *ELEMENT_SHELL_OFFSET are dropped
+    at read time), an element-level thickness, or a shell with no
+    *SECTION_SHELL.
+
+    ONE function for both callers - the default ``J = -SUM(IN)`` of
+    :func:`_make_rbodies` (round 7, A2) and ``--mass-weighted-inivel``'s pass
+    ``loads._apply_mass_weighted_rbody_inertia`` (round 6, A7). The
+    ``_elform_to_ishell`` import stays a CALL-time import: a test probes the
+    unreachable Ishell < 11 arm by patching ``common._elform_to_ishell``
+    (k2rad writes Ishell 12 / 24 only)."""
+    from .common import _elform_to_ishell
+    for e in state.shell_elems:
+        if not any(n in nodes for n in e.nodes):
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        if part.secid == 0 and e.pid in state.part_composites:
+            return (f"part {e.pid} is a *PART_COMPOSITE (a layered property: "
+                    "the starter lumps IN per layer, cinmas.F:926-1290)")
+        sec = state.sec_shells.get(part.secid)
+        if sec is None:
+            return f"part {e.pid} has no *SECTION_SHELL"
+        if sec.icomp == 1:
+            return (f"section {sec.secid} is ICOMP 1 (a layered property: the "
+                    "starter lumps IN per layer, cinmas.F:926-1290)")
+        if any(e.thick_nodes):
+            return (f"shell {e.eid} states its own thickness "
+                    "(*ELEMENT_SHELL_THICKNESS; the lumper uses the section's)")
+        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
+                                   state.options.shell_default_ishell)
+        if ishell < 11:
+            return (f"section {sec.secid} is Ishell {ishell} < 11: the starter "
+                    "lumps IN with FAC 9 (cinmas.F:919-925), which k2rad's "
+                    "lumper does not model")
+    return ""
+
+
+def _body_tensor(state: ConversionState, nodes: Set[int],
+                 mass_by_node: Dict[int, float]) -> List[List[float]]:
+    """The point-mass inertia tensor of the lumped masses on *nodes*, about
+    their lumped centre of mass - what ``inirby.F`` sums for ICoG 1/2/3
+    before the nodal ``IN`` and the ``/RBODY`` J cells are added."""
+    import math
+    pts = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z,
+            mass_by_node.get(n, 0.0)) for n in sorted(nodes)
+           if n in state.nodes]
+    m_tot = math.fsum(p[3] for p in pts)
+    if m_tot > 0.0:
+        cx = math.fsum(p[0] * p[3] for p in pts) / m_tot
+        cy = math.fsum(p[1] * p[3] for p in pts) / m_tot
+        cz = math.fsum(p[2] * p[3] for p in pts) / m_tot
+    else:
+        cx = cy = cz = 0.0
+    t = [[0.0] * 3 for _ in range(3)]
+    for x, y, z, m in pts:
+        d = (x - cx, y - cy, z - cz)
+        r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+        for a in range(3):
+            for b in range(3):
+                t[a][b] += m * ((r2 if a == b else 0.0) - d[a] * d[b])
+    return t
+
+
+def _rigid_shell_in_correction(
+        state: ConversionState, nodes: Set[int], j_old: Tuple[float, ...],
+        lumped: Tuple[Dict[int, float], Dict[int, float]]
+) -> Tuple[Tuple[float, ...], str, Dict]:
+    """``J = J_old - SUM(IN)`` on the diagonal of ONE ``*MAT_RIGID`` /
+    ``*DEFORMABLE_TO_RIGID`` part body (round 7, A2) -> ``(J, status,
+    facts)``.
+
+    *status* is ``"applied"`` (J written), ``"skipped"`` (the lumper is not
+    the starter's for this body: ``facts["reason"]``), ``"refused"`` (the
+    corrected tensor's smallest principal value is not above
+    ``RIGID_IN_MARGIN`` x the largest) or ``""`` (no shell IN on the body at
+    all - nothing is written, no ``-0`` either: icfd's main_fsi.k states
+    ``*SECTION_SHELL t1 = 0.0`` on its rigid shells). ``SUM(IN)`` is the
+    lumper's ``IN`` (``k2rad.lumping.nodal_masses_from_state``, shells only,
+    the ``cinmas.F:1379`` value) summed ONCE over *nodes* - the body's
+    secondaries and its main node, i.e. every node the starter adds ``IN``
+    for (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
+    merged deformable shells and a ``*CONSTRAINED_RIGID_BODIES`` union
+    included. The off-diagonal cells are left as they were."""
+    import math
+    from ..lumping import _sym3_eigen
+    mass_by_node, in_by_node = lumped
+    shell_nodes = sorted(n for n in nodes if in_by_node.get(n, 0.0) > 0.0)
+    sum_in = math.fsum(in_by_node[n] for n in shell_nodes)
+    facts: Dict = {"sum_in": sum_in, "n_shell": len(shell_nodes)}
+    if sum_in <= 0.0:
+        return j_old, "", facts
+    why = _rbody_in_skip_reason(state, nodes)
+    if why:
+        facts["reason"] = why
+        return j_old, "skipped", facts
+    j_new = (j_old[0] - sum_in, j_old[1] - sum_in, j_old[2] - sum_in,
+             j_old[3], j_old[4], j_old[5])
+    # the tensor the starter will assemble with j_new: the point masses, the
+    # nodal IN it adds on the diagonal, and the J cells
+    t = _body_tensor(state, nodes, mass_by_node)
+    for a in range(3):
+        t[a][a] += sum_in + j_new[a]
+    t[0][1] += j_new[3]
+    t[1][0] += j_new[3]
+    t[1][2] += j_new[4]
+    t[2][1] += j_new[4]
+    t[0][2] += j_new[5]
+    t[2][0] += j_new[5]
+    ev = sorted(_sym3_eigen(t)[0])
+    facts["ev_min"], facts["ev_max"] = ev[0], ev[-1]
+    if not (ev[-1] > 0.0 and ev[0] > RIGID_IN_MARGIN * ev[-1]):
+        return j_old, "refused", facts
+    return j_new, "applied", facts
+
+
+def _warn_rigid_shell_in(state: ConversionState,
+                         applied: List[Tuple[int, int]],
+                         skipped: List[Tuple[str, int, int, str]],
+                         refused: List[Tuple[str, int, int, Dict]]) -> None:
+    """The A2 warnings (round 7): ONE line per deck for the bodies that were
+    written (with the measured evidence), one line per body kept by name."""
+    if applied:
+        ids = [main for _pid, main in applied]
+        shown = ", ".join(f"/RBODY/{m}" for m in ids[:5]) + (
+            f" and {len(ids) - 5} more" if len(ids) > 5 else "")
+        state.warn(
+            "*MAT_RIGID / *DEFORMABLE_TO_RIGID: J = -SUM(IN) written into the "
+            f"Jxx/Jyy/Jzz cells of {len(ids)} /RBODY block(s) ({shown}): the "
+            "starter ADDS every shell node's lumped rotary inertia IN = "
+            "(m/n)(A + t^2)/12 (cinmas.F:1379, FAC 12) to a rigid body's "
+            "tensor for ICoG 1/2/3 (inirby.F:166-168 for the main node, "
+            ":355-363 for the secondaries), while LS-DYNA's rigid-part inertia "
+            "is the point-mass sum of the nodal masses (Theory Manual R16 eqs "
+            "29.21-29.23; the reference d3hsp tensor equals it on 18 of 18 "
+            "measured bodies within 0.04 %). MEASURED (nt 4): a spun 20 x 20 x "
+            "2 mm rigid plate's rotational KE +16.83 % (normal axis) / +33.66 % "
+            "(in-plane) -> 0.00 % against the closed form; "
+            "intro-by-j.-day/joint/joint-i/revo-stiff.k IE / KE history RMS "
+            f"{_A2_REVO_RMS} % of the LS peak at {_A2_REVO_CYCLES} the cycles "
+            "(the main node's rotational step shrinks with J). Pass "
+            "--no-rigid-shell-rotary-inertia to keep J = 0.")
+    for kw, pid, main, why in skipped:
+        state.warn(
+            f"{kw} pid={pid}: /RBODY/{main} keeps J = 0 - {why}, so -SUM(IN) "
+            "would take out the wrong amount; its spin carries the lumped "
+            "rotary-inertia residual.")
+    for kw, pid, main, facts in refused:
+        state.warn(
+            f"{kw} pid={pid}: /RBODY/{main} keeps J = 0 - with J = -SUM(IN) = "
+            f"{-facts['sum_in']:g} its point-mass tensor's smallest principal "
+            f"value {facts['ev_min']:g} would not exceed {RIGID_IN_MARGIN:g} x "
+            f"the largest {facts['ev_max']:g} (a collinear or near-collinear "
+            "body: starter ERROR 274 at <= 0, inirby.F:823-830).")
+
+
+#: The revo-stiff figures the A2 warning quotes, ONE copy (the same
+#: measurement must not ship as two numbers): IE / KE history RMS in % of the
+#: LS peak, base -> J arm, scored over the LS glstat blocks up to the last
+#: printed OpenRadioss cycle (OR interpolated at each LS time), nt 4; and the
+#: base-paired cycle ratio of the same window.
+_A2_REVO_RMS = "4.96 / 2.94 -> 0.78 / 0.73"
+_A2_REVO_CYCLES = "1.156x"
+
+
 def _warn_unapplied_part_inertias(state: ConversionState, applied: Set[int],
                                   rigid_pids: Set[int],
                                   merge_root: Dict[int, int],
@@ -562,6 +751,12 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                             if state.part_inertias else set())
 
     emitted_pids: Set[int] = set()
+    # J = -SUM(IN) (round 7, A2): the lumper runs once, lazily, and the three
+    # outcomes are reported after the loop
+    lumped: Optional[Tuple[Dict[int, float], Dict[int, float]]] = None
+    a2_applied: List[Tuple[int, int]] = []
+    a2_skipped: List[Tuple[str, int, int, str]] = []
+    a2_refused: List[Tuple[str, int, int, Dict]] = []
     for pid, all_nodes in sorted(nodes_by_pid.items()):
         part = state.parts.get(pid)
         if not part: continue
@@ -787,6 +982,30 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # Ioptoff=Iexpams=Ifail=0 = defaults. Iexpams MUST stay 0/blank: the cfg
         # DEFAULTS block says 2, which the reader reads as "no AMS expansion over
         # this rigid body" — the documented route into starter ERROR 1066.
+        #
+        # J = -SUM(IN) (round 7, A2, default ON; --no-rigid-shell-rotary-
+        # inertia keeps J = 0): the starter ADDS every shell node's lumped
+        # rotary inertia to the body tensor for ICoG 1/2/3 (inirby.F:166-168,
+        # :355-363), LS-DYNA's rigid-part inertia is the point-mass sum. Written
+        # HERE, in the producer, before rbody_info meets the CNRB records: a
+        # CNRB PID equal to this part id replaces the part's record in the
+        # merge (doorbeam's part 4), so a post-pass keyed on the merged dict
+        # would never see this body. ICoG 4 (props) keeps the deck's tensor:
+        # inirby.F:266-280 adds no secondary IN there.
+        j_status = ""
+        if props is None and state.options.rigid_shell_rotary_inertia:
+            if lumped is None:
+                from ..lumping import nodal_masses_from_state
+                lumped = nodal_masses_from_state(state)
+            j_vals, j_status, j_facts = _rigid_shell_in_correction(
+                state, set(unique_nodes) | {ind_node}, j_vals, lumped)
+            if j_status == "applied":
+                a2_applied.append((pid, ind_node))
+            elif j_status == "skipped":
+                a2_skipped.append((kw, pid, ind_node, j_facts["reason"]))
+            elif j_status == "refused":
+                a2_refused.append((kw, pid, ind_node, j_facts))
+        rbody_info[pid]["j_in"] = j_status
         lines += inertia_extra
         # The #106 register, /RBODY producer 1 of 5 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the
@@ -898,6 +1117,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
 
     _warn_unapplied_part_inertias(state, inertia_applied, rigid_pids, merge_root,
                                   rbody_info)
+    _warn_rigid_shell_in(state, a2_applied, a2_skipped, a2_refused)
 
     # *CONSTRAINED_RIGID_BODIES: repoint each merged slave pid at its master's
     # rigid-body info so a *LOAD_RIGID_BODY / *BOUNDARY_PRESCRIBED_MOTION_RIGID /

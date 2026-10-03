@@ -237,6 +237,7 @@ def convert(
     spotweld_node_synthesis: bool = False,
     beam_contact_secondary: bool = False,
     shell_offset_gapmin: bool = True,
+    rigid_shell_rotary_inertia: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -637,6 +638,26 @@ def convert(
         never touched. MEASURED on ``bend`` (t 0.381 under SHLTHK 2, written
         the capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at
         matched time, 0.98x the cycles; the row stays deviation.
+    rigid_shell_rotary_inertia : bool
+        Write ``J = -SUM(IN)`` into the ``Jxx/Jyy/Jzz`` cells of every
+        ``*MAT_RIGID`` / ``*DEFORMABLE_TO_RIGID`` part ``/RBODY`` (ICoG != 4)
+        whose nodes carry lumped shell rotary inertia (round 7, A2). The
+        starter ADDS every shell node's ``IN = (m/n)(A + t^2)/12``
+        (``cinmas.F:1379``, FAC 12) to a rigid body's tensor
+        (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
+        while LS-DYNA's rigid-part inertia is the point-mass sum (Theory R16
+        eqs 29.21-29.23; 18 of 18 reference d3hsp tensors within 0.04 %).
+        **On by default.** Written in the producer (a CNRB PID that shadows a
+        part id no longer hides the body), skipped by name where the lumper
+        is not the starter's, refused by name below a relative ``1e-6``
+        margin (ERROR 274), never on CNRB / weld / tie / probe bodies.
+        MEASURED (nt 4): a spun rigid plate's rotational KE +16.83 / +33.66 %
+        -> 0.00 %; ``revo-stiff`` IE / KE history RMS
+        4.96 / 2.94 -> 0.78 / 0.73 % of the LS peak at 1.156x the cycles
+        (deviation -> match).
+        Reach 56 deck keys on 53 emitted models (153 bodies).
+        ``--mass-weighted-inivel`` no longer subtracts on a body the
+        producer already corrected.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -908,9 +929,12 @@ def convert(
         rotary inertia (starter ``NEW INERTIA`` 0.2642894E-02 against
         LS-DYNA's 0.1977E-02, the difference being exactly
         ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal). The ``/RBODY``
-        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so since round 6
-        the flag also writes ``J = −ΣIN`` (the body's shell nodes' lumped
-        rotary inertia) into every body it re-points: ``NEW INERTIA``
+        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so ``J = −ΣIN`` (the
+        body's shell nodes' lumped rotary inertia) is written BY DEFAULT
+        since round 7 (``rigid_shell_rotary_inertia``); the flag's own pass
+        writes it only where the default did not (with
+        ``rigid_shell_rotary_inertia=False``, on every body it re-points, as
+        in round 6): ``NEW INERTIA``
         0.1977227E-02 = LS-DYNA's, cycle-0 KE **189.96** (LS 189.962), final
         KE −1.97 % (an END value: the KE history RMS goes 17.5 % → 11.6 % of
         the LS peak), 1.156x the cycles; the IE is not fixed (the joint path's
@@ -1052,6 +1076,7 @@ def convert(
         spotweld_node_synthesis=spotweld_node_synthesis,
         beam_contact_secondary=beam_contact_secondary,
         shell_offset_gapmin=shell_offset_gapmin,
+        rigid_shell_rotary_inertia=rigid_shell_rotary_inertia,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -7948,7 +7948,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:795, :1226, :1338, :1527, :1684
+    sites register into at the line that writes the card (writer/rbody.py:1014, :1446, :1558, :1747, :1904
     — six LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, and round 5 added the

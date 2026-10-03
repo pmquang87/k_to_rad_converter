@@ -20,6 +20,9 @@ from .common import (
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
                    _target_mat_law)
 from ..lumping import element_mass_by_node, rigid_body_momentum_velocity
+# ONE skip predicate for the default J = -SUM(IN) (round 7, A2) and this
+# module's --mass-weighted-inivel pass (round 6, A7); it moved to rbody.py
+from .rbody import _rbody_in_skip_reason
 from .sph import _mat_density
 
 __all__ = [
@@ -5662,48 +5665,6 @@ def _emit_mass_weighted_bodies(state: ConversionState,
     return lines
 
 
-def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
-                          ) -> str:
-    """Why ``k2rad.lumping``'s nodal ``IN`` would NOT be the starter's for a
-    body over *nodes*, or ``""``.
-
-    The lumper computes ``IN = (m/n)(A + t^2)/12`` per shell corner — the
-    ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11, ``:919-925``),
-    ``ZSHIFT = 0``, one layer, the SECTION thickness. Any shell on the body
-    that the starter lumps differently makes ``-SUM(IN)`` the wrong amount,
-    so the body is skipped by name: Ishell < 11 (FAC 9), a layered property
-    (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an
-    offset, since a plain shell's NLOC and *ELEMENT_SHELL_OFFSET are dropped
-    at read time), an element-level thickness, or a shell with no
-    *SECTION_SHELL."""
-    from .common import _elform_to_ishell
-    for e in state.shell_elems:
-        if not any(n in nodes for n in e.nodes):
-            continue
-        part = state.parts.get(e.pid)
-        if part is None:
-            continue
-        if part.secid == 0 and e.pid in state.part_composites:
-            return (f"part {e.pid} is a *PART_COMPOSITE (a layered property: "
-                    "the starter lumps IN per layer, cinmas.F:926-1290)")
-        sec = state.sec_shells.get(part.secid)
-        if sec is None:
-            return f"part {e.pid} has no *SECTION_SHELL"
-        if sec.icomp == 1:
-            return (f"section {sec.secid} is ICOMP 1 (a layered property: the "
-                    "starter lumps IN per layer, cinmas.F:926-1290)")
-        if any(e.thick_nodes):
-            return (f"shell {e.eid} states its own thickness "
-                    "(*ELEMENT_SHELL_THICKNESS; the lumper uses the section's)")
-        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
-                                   state.options.shell_default_ishell)
-        if ishell < 11:
-            return (f"section {sec.secid} is Ishell {ishell} < 11: the starter "
-                    "lumps IN with FAC 9 (cinmas.F:919-925), which k2rad's "
-                    "lumper does not model")
-    return ""
-
-
 def _apply_mass_weighted_rbody_inertia(state: ConversionState,
                                        lines: List[str],
                                        rbody_info: Dict) -> None:
@@ -5726,7 +5687,13 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
 
     WHICH BODIES. Exactly the ones ``_emit_mass_weighted_bodies`` recorded in
     ``state.mass_weighted_rot_mains`` — the one decision site; a body the
-    card fully covers gets no ``/INIVEL/ROT`` and keeps its J.
+    card fully covers gets no ``/INIVEL/ROT`` and keeps its J. SINCE ROUND 7
+    the ``*MAT_RIGID`` producer writes ``J = -SUM(IN)`` on every part body BY
+    DEFAULT (A2, ``rbody._rigid_shell_in_correction``), so this pass adds it
+    only where the producer did not: guard (2) skips a body whose record says
+    ``j_in`` "applied" or "refused" (never subtract twice), and guard (1)
+    never writes J on a ``*CONSTRAINED_NODAL_RIGID_BODY``. With
+    ``--no-rigid-shell-rotary-inertia`` it behaves exactly as in round 6.
 
     SKIPPED by name: ICoG 4 (``inirby.F:322`` adds no nodal ``IN``; the J is
     the deck's ``*PART_INERTIA`` tensor) and any body whose shells the lumper
@@ -5753,6 +5720,28 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
         rec = next((info for info in rbody_info.values()
                     if info.get("ind_node") == main), None)
         if rec is None or "j" not in rec:
+            continue
+        # guard (1), round 7: never on a *CONSTRAINED_NODAL_RIGID_BODY. LS-DYNA
+        # KEEPS the nodal rotary inertia in a nodal rigid body - MEASURED on
+        # implicit/basic-examples/basics-iii/rigid_tip.k CNRB 99: LS reads
+        # point mass + 1.373e-4 on every axis, and the subtraction would take
+        # it from -7.36 % to -25.08 %.
+        if rec.get("kind") == "cnrb":
+            state.warn(
+                f"--mass-weighted-inivel: /RBODY/{main} keeps its J - it is a "
+                "*CONSTRAINED_NODAL_RIGID_BODY: LS-DYNA keeps the nodal rotary "
+                "inertia in a nodal rigid body (rigid_tip CNRB 99: LS = point "
+                "mass + 1.373e-4 on every axis); J = -SUM(IN) would take it "
+                "from -7.36 % to -25.08 %.")
+            continue
+        # guard (2), round 7: the *MAT_RIGID producer already wrote J =
+        # -SUM(IN) on this body by default (A2), or refused it on the same
+        # relative margin - subtracting here again would write -2 SUM(IN). A
+        # body the producer SKIPPED reaches the skip check below (the same
+        # function) and is named there again; with
+        # --no-rigid-shell-rotary-inertia every record carries j_in "" and
+        # this pass behaves exactly as in round 6.
+        if rec.get("j_in") in ("applied", "refused"):
             continue
         nodes = set(rec["nodes"]) | {main}
         icog = int(rec.get("icog", 0) or 0)
@@ -6388,10 +6377,29 @@ def _momentum_average_body(state: ConversionState, info: Optional[Dict],
         "- it is the /RBODY's own lumped rotary inertia (starter NEW INERTIA "
         "0.2642894E-02 against LS-DYNA's 0.1977E-02, the difference being "
         "exactly 4 x (m/4)(A + t^2)/12 = 6.65667e-4 per diagonal), and the "
-        "/RBODY J cells are ADDITIVE (inirby.F:154-168), so the flag also "
-        "writes J = -SUM(IN) into this body's /RBODY to take it back out - "
-        "see the J sentence for this body.")
+        "/RBODY J cells are ADDITIVE (inirby.F:154-168), "
+        + _mass_weighted_j_clause(info))
     return main, v_cm, omega
+
+
+def _mass_weighted_j_clause(info: Dict) -> str:
+    """The momentum-average warning's last clause: WHO takes the lumped IN
+    back out of this body (round 7, A2). Since round 7 the ``*MAT_RIGID``
+    producer writes ``J = -SUM(IN)`` by default and records it in
+    ``info["j_in"]``; the flag's own J pass then leaves the body alone, so
+    the round-6 wording ("the flag also writes ...") would be false on the
+    default arm."""
+    status = info.get("j_in", "")
+    if status == "applied":
+        return ("and k2rad already wrote J = -SUM(IN) into this body's /RBODY "
+                "by default (round 7; --no-rigid-shell-rotary-inertia leaves "
+                "it to this flag) to take it back out.")
+    if status == "refused":
+        return ("and the J = -SUM(IN) that would take it back out was REFUSED "
+                "for this body (see its refusal line): its spin carries the "
+                "lumped residual.")
+    return ("so the flag also writes J = -SUM(IN) into this body's /RBODY to "
+            "take it back out - see the J sentence for this body.")
 
 
 def _warn_inivel_on_rigid_members(state: ConversionState, nsid: int,
@@ -10112,7 +10120,9 @@ def _resolve_damping_relative(state: ConversionState,
         # (convertdampings.cxx:274-293) and, when several parts share one
         # *MAT_RIGID, its loop lets the LAST /RBODY win, which is generally not
         # PIDRB's. k2rad keys rbody_info by part id, so the lookup is direct.
-        # The emitted /RBODY id is the main node id (writer/rbody.py:624).
+        # The emitted /RBODY id is the main node id (writer/rbody.py
+        # _make_rbodies writes f"/RBODY/{ind_node}"; a line number here went
+        # stale with every edit above it, so the function is named instead).
         rbody_id = 0
         if dr.pidrb <= 0:
             state.warn(
