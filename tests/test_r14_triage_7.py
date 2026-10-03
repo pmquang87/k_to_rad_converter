@@ -755,6 +755,38 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
         res4, _s4, _e4 = _convert(_j_plate_deck())
         self.assertFalse(_has(res4.warnings, "are /SH3N"), res4.warnings)
 
+    def test_19_the_flag_pass_refuses_at_the_same_margin(self):
+        """--mass-weighted-inivel's own J pass (round 6, A7) refused only at
+        '<= 0' (ERROR 274); since the validation round it refuses at the
+        producer's RIGID_IN_MARGIN, the starter's WARNING-275 threshold. A
+        sliver body at a point-mass ratio of 7.5e-5 keeps its J; at 1.87e-3
+        the pass writes it (the control)."""
+        from k2rad.writer import loads
+        from k2rad.writer.rbody import _inertia_lines
+        for dy, refused in ((0.01, True), (0.05, False)):
+            with self.subTest(dy=dy):
+                state = _dispatch(_j_plate_deck(extra=_sliver(dy)))
+                state.options.mass_weighted_inivel = True
+                state.nodes[15] = state.nodes[1].__class__(0.0, 0.0, 0.0)
+                state.mass_weighted_rot_mains[15] = (0.0, 0.0, -25.0)
+                rec = {"ind_node": 15, "nodes": [31, 32, 33], "icog": 0,
+                       "kind": "part", "j": (0.0,) * 6}
+                lines = (["/RBODY/15", "RBODY_6", "#hdr", "card1"]
+                         + _inertia_lines(rec["j"]))
+                loads._apply_mass_weighted_rbody_inertia(state, lines,
+                                                         {6: rec})
+                if refused:
+                    self.assertEqual(lines[5], _J_ZERO_ROW)
+                    self.assertTrue(_has(state.warnings,
+                                         "/RBODY/15 keeps its J",
+                                         "would not exceed 0.001 x the "
+                                         "largest", "WARNING 275"),
+                                    state.warnings)
+                else:
+                    self.assertNotEqual(lines[5], _J_ZERO_ROW)
+                    self.assertFalse(_has(state.warnings,
+                                          "/RBODY/15 keeps its J"))
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A3 — the MAT_100 weld: the yielding TYPE13 shear and EFAIL -> displacement
