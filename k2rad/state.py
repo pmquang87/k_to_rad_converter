@@ -9910,6 +9910,14 @@ class ConversionState:
     # keyword).
     type2_secondary: Dict[int, Tuple[int, FrozenSet[int]]] = field(
         default_factory=dict)
+    # ... and every EMITTED /INTER/TYPE2's MAIN side as the record states it:
+    # {inter_id -> (MSID, MSTYP)}, filled by the same recorder at the same
+    # four write lines. The /MPC screen resolves it to node ids only when a
+    # deck has *CONSTRAINED_LINEAR_* cards (writer/contacts._tied_slave_nids,
+    # the resolution the deck-wide ERROR-556 pass uses) and refuses a term on
+    # any of those nodes too (the post-review round: an /MPC on main-side
+    # nodes measured as divergent as on the secondary ones).
+    type2_main_side: Dict[int, Tuple[int, int]] = field(default_factory=dict)
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)

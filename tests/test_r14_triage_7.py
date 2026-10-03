@@ -1959,9 +1959,12 @@ def _tied_plates(tie: str = "NODES", terms=((20, 3, 1.0), (5, 3, -1.0)),
     *tie*: ``NODES`` -> *CONTACT_TIED_NODES_TO_SURFACE (Spotflag 28),
     ``SURFACE`` -> *CONTACT_TIED_SURFACE_TO_SURFACE on the same node set (27),
     ``CCRIT`` -> an AUTOMATIC tiebreak OPTION 6 with CCRIT 0.005 on part 2
-    (the rupture tie, Spotflag 21 on a shell secondary side), ``SPOTWELD`` ->
-    *CONTACT_SPOTWELD on the node set (28). *terms* = the
-    *CONSTRAINED_LINEAR_GLOBAL 1 rows (NID, DOF, COEF)."""
+    (the rupture tie, Spotflag 21 on a shell secondary side), ``TIEBREAK1``
+    -> the same tiebreak at OPTION 1 (a bond that never fails: the PERMANENT
+    tie's own write line, Spotflag 27), ``SPOTWELD`` -> *CONTACT_SPOTWELD on
+    the node set (28). The MAIN side is part 1 (plate A, nodes 1-15) for
+    every kind. *terms* = the *CONSTRAINED_LINEAR_GLOBAL 1 rows (NID, DOF,
+    COEF)."""
     out = ["*KEYWORD", "*CONTROL_TERMINATION", "    3.0E-3"]
     for pid in (1, 2):
         out += ["*PART", f"plate{pid}", _row(pid, 1, 1)]
@@ -1995,12 +1998,13 @@ def _tied_plates(tie: str = "NODES", terms=((20, 3, 1.0), (5, 3, -1.0)),
                 _row(0.0, 0.0), ""]
     elif tie == "SPOTWELD":
         out += ["*CONTACT_SPOTWELD", _row(10, 1, 4, 3), _row(0.0, 0.0), ""]
-    elif tie == "CCRIT":
+    elif tie in ("CCRIT", "TIEBREAK1"):
         out += ["*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID",
                 f"{20:>10}glue joint", _row(2, 1, 3, 3, 0, 0, 0, 0),
                 _row(0.3, 0.2, 0.0, 0.0, 0.0, 0, 0.0, 0.0),
                 _row(1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                _row(6, 50.0, 20.0, 0.005, 0.0, 0.0, 0.0, 0.0)]
+                _row(6 if tie == "CCRIT" else 1, 50.0, 20.0, 0.005, 0.0, 0.0,
+                     0.0, 0.0)]
     else:
         raise ValueError(tie)
     out += ["*SET_NODE_LIST", _row(20), _row(28, 29, 30),
@@ -2048,16 +2052,27 @@ _MPC_OTHER_NOTES = ("WARNING 312 (round 5", "rigid bodies in a constraint",
                     "divides by the nodal mass", "rotary inertia IN",
                     "would read 0 as 1", "starter ERROR 137",
                     "piezoelectric voltage", "may not carry two constraint")
+#: one fragment of each side's tied note, so each probe can assert that the
+#: OTHER side's refusal did not fire
+_MPC_SECONDARY_NOTE = "a tied-interface secondary node may not carry"
+_MPC_MAIN_NOTE = "a node of a tied interface's MAIN side may not carry"
 
 
 class MpcOnTiedSecondaryNode(unittest.TestCase):
     """B4 — a ``*CONSTRAINED_LINEAR_*`` term on a SECONDARY node of ANY emitted
     ``/INTER/TYPE2`` refuses the card, whatever the Spotflag (the critic
     refuted 'Spotflag 27/28 are safe': Spotflag 28 + a conflicting OR a
-    redundant /MPC ran NORMAL at ERR 99.9 %). Reach 0 on every corpus, so the
-    probes are hand-built, each with its control."""
+    redundant /MPC ran NORMAL at ERR 99.9 %) - and, since the post-review
+    round, a term on a node of its MAIN side too (the same probe with the
+    /MPC on two plate-A nodes: ERR 99.9 % on Spotflag 28 AND 27; Vol I R17
+    p.10-135 names tied-interface MEMBERS, not one side). Reach 0 on every
+    corpus, so the probes are hand-built, each with its control. Every kind
+    of _tied_plates reaches one of the four TYPE2 write lines: NODES /
+    SURFACE the *CONTACT_TIED_* line, TIEBREAK1 the permanent-tie line,
+    CCRIT the rupture line, SPOTWELD the *CONTACT_SPOTWELD line."""
 
-    _SPOT = {"NODES": 28, "SURFACE": 27, "CCRIT": 21, "SPOTWELD": 28}
+    _SPOT = {"NODES": 28, "SURFACE": 27, "CCRIT": 21, "TIEBREAK1": 27,
+             "SPOTWELD": 28}
 
     def _tied_sentence(self, result):
         hits = [w for w in result.warnings if "NOT converted to /MPC" in w]
@@ -2065,9 +2080,12 @@ class MpcOnTiedSecondaryNode(unittest.TestCase):
         return hits[0]
 
     def test_a_term_on_a_tied_secondary_node_is_refused(self):
+        """Node 20 is a secondary node of every kind; node 26 (plate B at
+        x 25) is on neither side of the node-set ties and a secondary node
+        of the two part-2 tiebreaks - never a main-side node."""
         for tie, sp in self._SPOT.items():
             with self.subTest(tie=tie):
-                deck = _tied_plates(tie)
+                deck = _tied_plates(tie, terms=((20, 3, 1.0), (26, 3, -1.0)))
                 r_on, s_on, _e = _convert(deck)
                 _r, s_off, _e2 = _convert(deck, constrained_linear=False)
                 # (a) the probe REACHES the Spotflag it names
@@ -2086,33 +2104,57 @@ class MpcOnTiedSecondaryNode(unittest.TestCase):
                         f"(Spotflag {sp})", "p.10-135", "itagsl2.F:92",
                         "6237", "19.6 %", "no Spotflag is exempt"):
                     self.assertIn(needle, why)
-                # (e) and NO other reason's note
-                for other in _MPC_OTHER_NOTES:
+                # (e) and NO other reason's note - the main side's included
+                for other in _MPC_OTHER_NOTES + (_MPC_MAIN_NOTE,
+                                                 "MAIN-side node"):
                     self.assertNotIn(other, why)
 
-    def test_a_term_on_main_side_nodes_only_is_converted(self):
-        """Nodes 8 and 5 are plate-A (main side) nodes, neither clamped."""
-        for tie in ("NODES", "CCRIT"):
+    def test_a_term_on_main_side_nodes_is_refused(self):
+        """Nodes 8 and 5 are plate-A (main side) nodes, neither clamped -
+        the post-review round's main28 probe, which round 7 converted:
+        NORMAL in 6604 cycles at a 99.9 % energy error from cycle 1000, IE
+        1.25e6 against external work -3.9 (nt 4 = nt 2), where the same
+        deck without the /MPC balances (IE 20.27 against 20.28)."""
+        for tie, sp in self._SPOT.items():
             with self.subTest(tie=tie):
-                r, s, _e = _convert(_tied_plates(
-                    tie, terms=((8, 3, 1.0), (5, 3, -1.0))))
-                blocks = _mpc_rows(s)
-                self.assertEqual(len(blocks), 1, s)
-                self.assertEqual(blocks[0][1], [
-                    "         8         3         0                   1",
-                    "         5         3         0                  -1"])
-                self.assertTrue(_has(r.warnings, "-> /MPC"))
-                self.assertFalse(_has(r.warnings, "NOT converted to /MPC"))
+                deck = _tied_plates(tie, terms=((8, 3, 1.0), (5, 3, -1.0)))
+                r_on, s_on, _e = _convert(deck)
+                _r, s_off, _e2 = _convert(deck, constrained_linear=False)
+                (iid, (got_sp, _g)), = _type2_cards(s_on).items()
+                self.assertEqual(got_sp, sp)
+                self.assertEqual(_mpc_rows(s_on), [])
+                self.assertEqual(s_on, s_off)
+                why = self._tied_sentence(r_on)
+                for needle in (
+                        f"node 8 is a MAIN-side node of /INTER/TYPE2/{iid} "
+                        f"(Spotflag {sp})",
+                        f"node 5 is a MAIN-side node of /INTER/TYPE2/{iid}",
+                        _MPC_MAIN_NOTE, "MEMBERS, not one side",
+                        "IE 1.25e6 against external work -3.9",
+                        "IE 3.83e4 against 48.2", "IE 1.80e6",
+                        "IE 20.27 against 20.28", "20.35 against 20.36",
+                        "can only refuse more"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, why)
+                for other in _MPC_OTHER_NOTES + (_MPC_SECONDARY_NOTE,
+                                                 "is a secondary node of"):
+                    self.assertNotIn(other, why)
 
     def test_a_node_on_neither_side_is_converted(self):
-        """Node 26 = plate B at x 25: outside the tie set, not pushed."""
+        """Nodes 25 and 27 = plate B at x 25: outside the tie set, not on the
+        main side, not pushed - the post-review round's nei28 probe, which
+        balances (IE 20.35 against external work 20.36, nt 4)."""
         r, s, _e = _convert(_tied_plates(
-            "NODES", terms=((26, 3, 1.0), (5, 3, -1.0))))
-        self.assertEqual(len(_mpc_rows(s)), 1, s)
+            "NODES", terms=((25, 3, 1.0), (27, 3, -1.0))))
+        self.assertEqual(_mpc_rows(s), [(
+            "CONSTRAINED_LINEAR_GLOBAL_1",
+            ["        25         3         0                   1",
+             "        27         3         0                  -1"])])
         self.assertFalse(_has(r.warnings, "NOT converted to /MPC"))
 
     def test_the_registry_holds_every_emitted_TYPE2(self):
         from k2rad.writer.assembly import build_starter
+        from k2rad.writer.contacts import _tied_slave_nids
         for tie, sp in self._SPOT.items():
             with self.subTest(tie=tie):
                 state = _dispatch(_tied_plates(tie))
@@ -2120,9 +2162,14 @@ class MpcOnTiedSecondaryNode(unittest.TestCase):
                 self.assertEqual(len(state.type2_secondary), 1)
                 (iid, (got_sp, nodes)), = state.type2_secondary.items()
                 self.assertEqual(got_sp, sp)
-                want = (set(range(16, 31)) if tie == "CCRIT"
+                want = (set(range(16, 31)) if tie in ("CCRIT", "TIEBREAK1")
                         else set(range(16, 25)))
                 self.assertEqual(set(nodes), want)
+                # the MAIN side as the record states it: part 1, MSTYP 3,
+                # which resolves to plate A's 15 nodes
+                self.assertEqual(state.type2_main_side, {iid: (1, 3)})
+                self.assertEqual(set(_tied_slave_nids(state, 1, 3)),
+                                 set(range(1, 16)))
 
     def test_every_TYPE2_write_line_records_its_secondary_group(self):
         """A SOURCE guard: a fifth /INTER/TYPE2 producer without the recorder
@@ -2137,14 +2184,19 @@ class MpcOnTiedSecondaryNode(unittest.TestCase):
         self.assertEqual(n_rec, n_emit)
 
     def test_no_tie_no_refusal(self):
-        """The control: without a tie the same term is converted."""
-        deck = _tied_plates("NODES").replace(
-            "*CONTACT_TIED_NODES_TO_SURFACE\n" + _row(10, 1, 4, 3) + "\n"
-            + _row(0.0, 0.0) + "\n\n", "")
-        self.assertNotIn("*CONTACT_TIED", deck)
-        r, s, _e = _convert(deck)
-        self.assertEqual(len(_mpc_rows(s)), 1, s)
-        self.assertNotIn("/INTER/TYPE2/", s)
+        """The control: without a tie the same terms are converted - the
+        secondary-side pair and the main-side pair alike."""
+        for terms in (((20, 3, 1.0), (5, 3, -1.0)),
+                      ((8, 3, 1.0), (5, 3, -1.0))):
+            with self.subTest(terms=terms):
+                deck = _tied_plates("NODES", terms=terms).replace(
+                    "*CONTACT_TIED_NODES_TO_SURFACE\n" + _row(10, 1, 4, 3)
+                    + "\n" + _row(0.0, 0.0) + "\n\n", "")
+                self.assertNotIn("*CONTACT_TIED", deck)
+                r, s, _e = _convert(deck)
+                self.assertEqual(len(_mpc_rows(s)), 1, s)
+                self.assertNotIn("/INTER/TYPE2/", s)
+                self.assertFalse(_has(r.warnings, "NOT converted to /MPC"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

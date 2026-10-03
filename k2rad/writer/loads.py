@@ -8314,6 +8314,21 @@ _MPC_REFUSAL_NOTES = {
             "19.6 % at 3000); Spotflag 27 held on that probe (-0.2 / "
             "-0.4 %), but the Spotflag-28 mechanism is not characterised, so "
             "no Spotflag is exempt",
+    "tied_main": "a node of a tied interface's MAIN side may not carry one "
+                 "either - the same WARNING box names tied-interface "
+                 "MEMBERS, not one side; MEASURED (nt 4 = nt 2) on the same "
+                 "two-plate probe: an /MPC between two main-plate nodes ends "
+                 "NORMAL at a 99.9 % energy error from cycle 1000 on the "
+                 "Spotflag-28 tie (IE 1.25e6 against external work -3.9) and "
+                 "on the Spotflag-27 tie (IE 3.83e4 against 48.2), and "
+                 "between two main-plate nodes at x 5, outside the tied "
+                 "strip x 10..20, at 99.9 % from cycle 3000 (IE 1.80e6 "
+                 "against 196), while the tie without the /MPC (IE 20.27 "
+                 "against 20.28) and the /MPC on two plate-B nodes outside "
+                 "the tie (20.35 against 20.36) balance; the main side is "
+                 "the MSID side's nodes, which for a part side includes a "
+                 "solid's interior nodes (an over-approximation that can only "
+                 "refuse more)",
 }
 
 
@@ -8323,7 +8338,8 @@ def _constrained_linear_refusals(
         skew_spc: Dict[int, Tuple[str, str]], rigid: Set[int],
         trans_nodes: Set[int], rot_nodes: Set[int], skews: Set[int],
         used: Set[Tuple[int, int]],
-        tied: Optional[Dict[int, Tuple[int, int]]] = None) -> List[str]:
+        tied: Optional[Dict[int, Tuple[int, int]]] = None,
+        tied_main: Optional[Dict[int, Tuple[int, int]]] = None) -> List[str]:
     """Every reason one ``*CONSTRAINED_LINEAR_*`` card cannot be written as
     an ``/MPC`` — empty when it can. One clause per term that fails, then the
     explanation of each reason ONCE. PURE: no id is drawn, nothing is
@@ -8332,11 +8348,15 @@ def _constrained_linear_refusals(
 
     *tied* maps every SECONDARY node of an emitted ``/INTER/TYPE2`` to
     ``(inter_id, Spotflag)`` (round 7, B4; built from
-    ``state.type2_secondary``): a term on such a node is refused whatever the
-    Spotflag. A term on a MAIN-side node only is not screened (the starter's
-    tag loop ``itagsl2.F:95-96`` and the kinematic elimination act on the
-    secondary nodes; a main-node-only ``/MPC`` was not probed)."""
+    ``state.type2_secondary``) and *tied_main* every node of its MAIN side
+    (the post-review round; built from ``state.type2_main_side``): a term on
+    either is refused whatever the Spotflag. Round 7 first screened the
+    secondary side only, reasoning from the starter's tag loop
+    (``itagsl2.F:95-96``), which decides the penalty switch and is no
+    stability argument; the main-side probe then measured the same 99.9 %
+    energy error (``_MPC_REFUSAL_NOTES["tied_main"]``)."""
     tied = tied or {}
+    tied_main = tied_main or {}
     why: List[str] = []
     notes: List[str] = []
 
@@ -8367,6 +8387,10 @@ def _constrained_linear_refusals(
             iid, sp = tied[nid]
             add(f"node {nid} is a secondary node of /INTER/TYPE2/{iid} "
                 f"(Spotflag {sp})", "tied")
+        if nid in tied_main:
+            iid, sp = tied_main[nid]
+            add(f"node {nid} is a MAIN-side node of /INTER/TYPE2/{iid} "
+                f"(Spotflag {sp})", "tied_main")
         if nid in rigid:
             add(f"node {nid} is a rigid-body node", "rigid")
         rot = dof >= 4
@@ -8430,8 +8454,10 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
     PLACED immediately before the frequency-domain notes: every section that
     can write a ``/BCS``, an imposed motion, a rigid body, a free-node pin or
     an ``/INTER/TYPE2`` has run, so the screens read complete registries
-    (``state.type2_secondary`` included: a term on a tied-interface SECONDARY
-    node is refused whatever the Spotflag, round 7 B4), and no section after
+    (``state.type2_secondary`` and ``state.type2_main_side`` included: a term
+    on a node of either side of a tied interface is refused whatever the
+    Spotflag - round 7 B4, the main side since the post-review round), and no
+    section after
     it draws an id, so an emitted ``/MPC`` renumbers nothing. The id is drawn
     only after the last screen, and the keyword leaves ``skipped_keywords``
     only when its card is emitted: a refused card keeps its ``#-- SKIPPED:``
@@ -8483,13 +8509,28 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
     for iid, (sp, tnodes) in sorted(state.type2_secondary.items()):
         for n in tnodes:
             tied.setdefault(n, (iid, sp))
+    # ... and every node of each one's MAIN side -> (inter_id, Spotflag),
+    # resolved here (only a deck with *CONSTRAINED_LINEAR_* cards gets this
+    # far) with the resolution the deck-wide ERROR-556 pass uses
+    # (contacts._emitted_type2_mains): exact for a *SET_SEGMENT / *SET_SHELL
+    # side, every node of the parts for a part side (a solid's interior nodes
+    # included - an over-approximation that can only refuse more)
+    from .contacts import _tied_slave_nids
+    tied_main: Dict[int, Tuple[int, int]] = {}
+    side_nodes: Dict[Tuple[int, int], List[int]] = {}
+    for iid, side in sorted(state.type2_main_side.items()):
+        sp = state.type2_secondary[iid][0]
+        if side not in side_nodes:
+            side_nodes[side] = _tied_slave_nids(state, *side)
+        for n in side_nodes[side]:
+            tied_main.setdefault(n, (iid, sp))
     used: Set[Tuple[int, int]] = set()
     lines: List[str] = []
     emitted: List[Tuple[int, int]] = []
     for lin in cards:
         why = _constrained_linear_refusals(
             state, lin, gspc, state.node_tc_rc_emitted, skew_spc, rigid,
-            trans_nodes, rot_nodes, skews, used, tied)
+            trans_nodes, rot_nodes, skews, used, tied, tied_main)
         if why:
             state.warn(
                 f"*{lin.keyword} {lin.lcid}: NOT converted to /MPC - "
