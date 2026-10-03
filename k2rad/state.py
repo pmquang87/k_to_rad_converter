@@ -9703,6 +9703,17 @@ class ConversionState:
     # reader at does not exist — and with no rupturing tie in the deck the
     # channel would be state after state of exactly 0.0 (the #122 rule).
     tiebreak_rupture_inter_ids: List[int] = field(default_factory=list)
+    # Every EMITTED /INTER/TYPE2's secondary node group: {inter_id ->
+    # (Spotflag, frozenset of the /GRNOD/NODE nodes written for it)}. Filled
+    # by writer/contacts._record_type2_secondary at each of the four
+    # _emit_inter_type2 write lines (the *CONTACT_TIED_* tie, the tiebreak
+    # permanent tie, the CCRIT rupture tie, *CONTACT_SPOTWELD) and read by
+    # writer/loads._make_constrained_linear_mpcs, the LAST id-drawing
+    # section, which refuses an /MPC term on any of these nodes (R14 triage
+    # round 7, B4: the screen reads what the emitter EMITTED, never the deck
+    # keyword).
+    type2_secondary: Dict[int, Tuple[int, FrozenSet[int]]] = field(
+        default_factory=dict)
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)

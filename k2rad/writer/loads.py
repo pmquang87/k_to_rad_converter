@@ -8242,6 +8242,19 @@ _MPC_REFUSAL_NOTES = {
              "resol.F:7880 -> lag_mult.F, so this screen refuses only the "
              "repeated node-DOF pair and writes a node that two cards "
              "constrain on DIFFERENT DOFs)",
+    "tied": "a tied-interface secondary node may not carry a constraint "
+            "equation - Vol I R17 p.10-135 / p.10-139 (the explicit-solver "
+            "WARNING box names tied interfaces); MEASURED on two hand-built "
+            "two-plate probes at nt 4: a kinematic tie (Spotflag 0, 1 or "
+            "k2rad's rupture 21) gives starter WARNING 312 and NaN from "
+            "cycle 0 under NORMAL TERMINATION, and Spotflag 28 - which the "
+            "starter switches to a penalty tie for that node (WARNING 1179, "
+            "itagsl2.F:92 / :99-104) - still ends NORMAL with a 99.9 % "
+            "energy error, with a CONFLICTING /MPC (IE 6237 against external "
+            "work 44.35) and with a REDUNDANT one (0.1 % at cycle 1000, "
+            "19.6 % at 3000); Spotflag 27 held on that probe (-0.2 / "
+            "-0.4 %), but the Spotflag-28 mechanism is not characterised, so "
+            "no Spotflag is exempt",
 }
 
 
@@ -8250,12 +8263,21 @@ def _constrained_linear_refusals(
         gspc: Dict[int, Tuple[str, str]], tcrc: Dict[int, Tuple[str, str]],
         skew_spc: Dict[int, Tuple[str, str]], rigid: Set[int],
         trans_nodes: Set[int], rot_nodes: Set[int], skews: Set[int],
-        used: Set[Tuple[int, int]]) -> List[str]:
+        used: Set[Tuple[int, int]],
+        tied: Optional[Dict[int, Tuple[int, int]]] = None) -> List[str]:
     """Every reason one ``*CONSTRAINED_LINEAR_*`` card cannot be written as
     an ``/MPC`` — empty when it can. One clause per term that fails, then the
     explanation of each reason ONCE. PURE: no id is drawn, nothing is
     written, so a refused card leaves the deck byte-identical to the
-    ``--no-constrained-linear`` arm."""
+    ``--no-constrained-linear`` arm.
+
+    *tied* maps every SECONDARY node of an emitted ``/INTER/TYPE2`` to
+    ``(inter_id, Spotflag)`` (round 7, B4; built from
+    ``state.type2_secondary``): a term on such a node is refused whatever the
+    Spotflag. A term on a MAIN-side node only is not screened (the starter's
+    tag loop ``itagsl2.F:95-96`` and the kinematic elimination act on the
+    secondary nodes; a main-node-only ``/MPC`` was not probed)."""
+    tied = tied or {}
     why: List[str] = []
     notes: List[str] = []
 
@@ -8282,6 +8304,10 @@ def _constrained_linear_refusals(
         if cid > 0 and cid not in skews:
             add(f"node {nid}: CID {cid} is not a *DEFINE_COORDINATE_* of this "
                 "deck", "cid")
+        if nid in tied:
+            iid, sp = tied[nid]
+            add(f"node {nid} is a secondary node of /INTER/TYPE2/{iid} "
+                f"(Spotflag {sp})", "tied")
         if nid in rigid:
             add(f"node {nid} is a rigid-body node", "rigid")
         rot = dof >= 4
@@ -8343,9 +8369,11 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
     assumes the constant C0 is zero"*, Vol I R17 p.10-136 / p.10-139).
 
     PLACED immediately before the frequency-domain notes: every section that
-    can write a ``/BCS``, an imposed motion, a rigid body or a free-node pin
-    has run, so the screens read complete registries, and no section after it
-    draws an id, so an emitted ``/MPC`` renumbers nothing. The id is drawn
+    can write a ``/BCS``, an imposed motion, a rigid body, a free-node pin or
+    an ``/INTER/TYPE2`` has run, so the screens read complete registries
+    (``state.type2_secondary`` included: a term on a tied-interface SECONDARY
+    node is refused whatever the Spotflag, round 7 B4), and no section after
+    it draws an id, so an emitted ``/MPC`` renumbers nothing. The id is drawn
     only after the last screen, and the keyword leaves ``skipped_keywords``
     only when its card is emitted: a refused card keeps its ``#-- SKIPPED:``
     line.
@@ -8390,13 +8418,19 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
     gspc = _global_spc_dofs(state)
     skews: Set[int] = (set(state.coord_sys) | set(state.coord_nodes)
                        | set(state.coord_vectors))
+    # every emitted /INTER/TYPE2 secondary node -> (inter_id, Spotflag); the
+    # lowest interface id names a node two ties share
+    tied: Dict[int, Tuple[int, int]] = {}
+    for iid, (sp, tnodes) in sorted(state.type2_secondary.items()):
+        for n in tnodes:
+            tied.setdefault(n, (iid, sp))
     used: Set[Tuple[int, int]] = set()
     lines: List[str] = []
     emitted: List[Tuple[int, int]] = []
     for lin in cards:
         why = _constrained_linear_refusals(
             state, lin, gspc, state.node_tc_rc_emitted, skew_spc, rigid,
-            trans_nodes, rot_nodes, skews, used)
+            trans_nodes, rot_nodes, skews, used, tied)
         if why:
             state.warn(
                 f"*{lin.keyword} {lin.lcid}: NOT converted to /MPC - "

@@ -2935,7 +2935,12 @@ skipped, the deck byte-identical to the opt-out): a DOF that also carries a
 312), a rigid-body node, a node on no element (the multiplier divides by its
 mass; DOF 4-6 needs a shell or beam), a zero `COEF` (`hm_read_mpc.F:124` would
 read it as 1), DOF 7 (the piezoelectric voltage), an undefined `CID`, a
-(node, DOF) pair already in an earlier `/MPC`. Measured on
+(node, DOF) pair already in an earlier `/MPC`, and (since round 7) a term on a
+SECONDARY node of any emitted `/INTER/TYPE2`, whatever the Spotflag (Vol I R17
+p.10-135 / p.10-139 names tied interfaces; on two hand-built two-plate probes
+at nt 4 a kinematic tie gave WARNING 312 and NaN from cycle 0, and Spotflag 28
+ended NORMAL at a 99.9 % energy error with a conflicting and with a redundant
+`/MPC` — 0 decks on any corpus carry the pair). Measured on
 `intro-by-k.-weimar/misc/constraints/plates.lce` (1 deck key on 1 emitted
 model): starter `NUMMPC 1`, 0 errors, engine identical to the base on all 683
 rows — uninformative by construction, because nodes 40 and 42 sit

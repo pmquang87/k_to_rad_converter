@@ -4561,6 +4561,21 @@ _TIED_DSEARCH_MARGIN = 1.2
 _TIED_RUPTURE_SPOTFLAGS = (20, 21, 22)
 
 
+def _record_type2_secondary(state: ConversionState, inter_id: int,
+                            spotflag: int, nids) -> None:
+    """Register an EMITTED /INTER/TYPE2's secondary node group (R14 triage
+    round 7, B4): ``state.type2_secondary[inter_id] = (Spotflag,
+    frozenset(nodes))``. Called right after each of the four
+    ``lines += _emit_inter_type2(...)`` write lines with the SAME node list
+    ``_emit_grnod_node`` wrote for the tie, so the registry holds exactly what
+    the starter reads. The ``*CONSTRAINED_LINEAR_*`` -> ``/MPC`` screen
+    (``writer/loads._make_constrained_linear_mpcs``, the last id-drawing
+    section) refuses a term on any of these nodes, whatever the Spotflag.
+    ``_emit_inter_type2`` itself stays a pure card writer (three tests call it
+    directly)."""
+    state.type2_secondary[inter_id] = (spotflag, frozenset(nids))
+
+
 def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
                       spotflag: int, dsearch: float, idel2: int = 0,
                       rupture: Optional[Tuple[int, int, float, float, float]] = None,
@@ -5238,6 +5253,7 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
         lines += _emit_inter_type2(c.inter_id, c.title, grnod_id, surf_id,
                                    spotflag, dsearch,
                                    kthe=None if kthe is None else kthe.kthe)
+        _record_type2_secondary(state, c.inter_id, spotflag, clean)
         rot_note = (
             " Note: TYPE2 also ties the secondary nodes' ROTATIONS to the main "
             "segment (a moment-carrying weld); the LS-DYNA keyword tied "
@@ -5776,6 +5792,7 @@ def _make_tiebreak_interfaces(state: ConversionState,
             spotflag = _TIEBREAK_TIE_SPOTFLAG[c.family]
             lines += _emit_inter_type2(c.inter_id, title, grnod_id, surf_id,
                                        spotflag, dsearch)
+            _record_type2_secondary(state, c.inter_id, spotflag, clean)
             # The consequence text is NOT the same for every class. For
             # OPTION 1/-1 LS-DYNA's bond never fails either, so a permanent tie
             # loses NOTHING about the failure — saying "the failure is dropped,
@@ -5843,6 +5860,7 @@ def _make_tiebreak_interfaces(state: ConversionState,
         lines += _emit_inter_type2(
             c.inter_id, title, grnod_id, surf_id, spotflag, dsearch,
             rupture=(fct_sn, fct_st, c.nfls, ccrit, ccrit))
+        _record_type2_secondary(state, c.inter_id, spotflag, clean)
         # Gates /ANIM/NODA/DAMA2 in the engine deck (build_starter runs first,
         # so the flag is set by the time _make_engine_anim reads it).
         state.tiebreak_rupture_inter_ids.append(c.inter_id)
@@ -6570,6 +6588,7 @@ def _make_spotweld_interfaces(state: ConversionState,
                                    grnod_id, surf_id,
                                    _SPOTWELD_SPOTFLAG, dsearch,
                                    idel2=_SPOTWELD_IDEL2)
+        _record_type2_secondary(state, c.inter_id, _SPOTWELD_SPOTFLAG, clean)
         where = (f"dsearch={dsearch:g} from the Card-3 SST/MST"
                  if dsearch > 0.0 else
                  "dsearch=0, so the starter uses its own average-main-segment "

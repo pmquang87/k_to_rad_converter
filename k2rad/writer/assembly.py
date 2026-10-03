@@ -3102,7 +3102,8 @@ def _starter_section_registry():
         ("starter_th_accel", lambda c: _make_starter_th_accel(c.state)),
         # *CONSTRAINED_LINEAR_LOCAL/_GLOBAL -> /MPC (round 6, A5). HERE, last
         # of the id-drawing sections: its screens read every /BCS, imposed
-        # motion, rigid body and free-node pin (all written above), and no
+        # motion, rigid body, free-node pin and /INTER/TYPE2 secondary group
+        # (all written above; the tied-node refusal is round 7, B4), and no
         # section below draws an id, so an emitted /MPC renumbers nothing.
         # A no-op, drawing no id, on any deck without the keyword.
         ("constrained_linear_mpcs",

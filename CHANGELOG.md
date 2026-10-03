@@ -11,6 +11,41 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 7 — PART B (fluids, materials, frames,
+  joints and the docs).** One commit per item; every figure below is a
+  measured arm against the LS-DYNA reference on `F:` or a hand-built coupon
+  against its closed form unless it says otherwise (`nt` beside every
+  figure), and every reach is stated as `N deck keys on M emitted models`
+  (356 keys = 312 models).
+  - **B4 — `/MPC` refused on a tied-interface secondary node** (the
+    `--constrained-linear` screen, no new flag). A `*CONSTRAINED_LINEAR_*`
+    term on a SECONDARY node of any emitted `/INTER/TYPE2` — whatever the
+    Spotflag — now refuses the card by name (Vol I R17 p.10-135 / p.10-139:
+    the explicit-solver WARNING box names tied interfaces). The screen reads
+    what the emitter EMITTED: each of the four `_emit_inter_type2` write
+    lines (the `*CONTACT_TIED_*` tie, the tiebreak permanent tie, the CCRIT
+    rupture tie, `*CONTACT_SPOTWELD`) records its secondary node group in
+    `state.type2_secondary` (`writer/contacts._record_type2_secondary`), and
+    `_make_constrained_linear_mpcs` — the last id-drawing section — refuses
+    before it draws the `/MPC` id, so a refused card is byte-identical to the
+    `--no-constrained-linear` arm. A term on a MAIN-side node only is not
+    screened (a stated scope: the starter's tag loop `itagsl2.F:95-96` and
+    the kinematic elimination act on the secondary nodes). Measured on two
+    hand-built two-plate probes at nt 4: kinematic ties (Spotflag 0 / 1 /
+    21) give WARNING 312 and NaN from cycle 0 under NORMAL TERMINATION;
+    Spotflag 28 (WARNING 1179, the starter's penalty switch,
+    `itagsl2.F:92` / `:99-104`) still ends NORMAL at a 99.9 % energy error
+    with a conflicting (IE 6237 against external work 44.35) OR a redundant
+    `/MPC` (0.1 % at cycle 1000, 19.6 % at 3000); Spotflag 27 held
+    (-0.2 / -0.4 %), on one geometry — not enough to exempt it, so the
+    round-6 census claim that the auto-penalty Spotflags are safe is not
+    used. Reach 0 on every corpus (the roster's emitted TYPE2 Spotflags are
+    28 x7 and 27 x2, and its only `/MPC`, `plates.lce`, has no tie). Tests:
+    `MpcOnTiedSecondaryNode` (the probe with Spotflag 28 / 27 / 21 / 28
+    spot-weld: refused, byte-identical to the opt-out, the tied sentence and
+    no other reason's note; a main-side term and a node on neither side
+    converted; the registry and a source guard that every TYPE2 write line
+    records its group).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
   welds, the implicit thick shell and the implicit texts).** One commit per
   item; every figure below is a measured arm against the LS-DYNA reference on
