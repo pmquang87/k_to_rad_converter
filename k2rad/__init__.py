@@ -242,6 +242,7 @@ def convert(
     spotweld_efail_displacement: bool = True,
     implicit_tshell_solid: bool = True,
     corotational_orthotropic: bool = True,
+    mat_null_pc_mu: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -712,6 +713,20 @@ def convert(
         Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6; the plateau unchanged (RMS
         0.164 %). Element-frame tetrahedra are named, never changed. Reach 0
         on every corpus.
+    mat_null_pc_mu : bool
+        Write the ``*MAT_NULL`` PC and MU cells on the ``/MAT/HYD_VISC`` of
+        every ``*MAT_NULL`` + ``*EOS_*`` carrier (round 7, B1): ``Pmin`` = PC
+        (PC 0.0 or blank -> ``-1e-20``: LS-DYNA cuts at zero, while
+        ``hm_read_mat06.F:154`` reads ``Pmin 0`` as -INFINITY; PC > 0 refused
+        by name) and ``Nu = MU / RO`` (kinematic, ``m6law.F:98``) only where
+        every part of the material is a ``*SECTION_SOLID`` ELFORM 6 on a deck
+        without ``*INITIAL_VOID`` (the measured channel family; elsewhere MU
+        is named and not carried). The ELFORM-12 void floor keeps
+        precedence; with ``initial_void_floor=False`` alone a PC-0 void gets
+        ``-1e-20`` from this rule. **On by default.** MEASURED at nt 4:
+        sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 ->
+        -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay within
+        1 %. Byte reach: 20 deck keys, 17 emitted models.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1135,6 +1150,7 @@ def convert(
         spotweld_efail_displacement=spotweld_efail_displacement,
         implicit_tshell_solid=implicit_tshell_solid,
         corotational_orthotropic=corotational_orthotropic,
+        mat_null_pc_mu=mat_null_pc_mu,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -116,6 +116,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          spotweld_efail_displacement: bool = True,
                          implicit_tshell_solid: bool = True,
                          corotational_orthotropic: bool = True,
+                         mat_null_pc_mu: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -276,6 +277,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["corotational_orthotropic"] = bool(corotational_orthotropic)
 
+    kwargs["mat_null_pc_mu"] = bool(mat_null_pc_mu)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -416,6 +419,7 @@ class ConverterGUI:
         self.spotweld_efail_displacement = tk.BooleanVar(value=True)
         self.implicit_tshell_solid = tk.BooleanVar(value=True)
         self.corotational_orthotropic = tk.BooleanVar(value=True)
+        self.mat_null_pc_mu = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -883,6 +887,14 @@ class ConverterGUI:
             variable=self.corotational_orthotropic).grid(
                 row=45, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*MAT_NULL PC / MU -> /MAT/HYD_VISC Pmin / Nu - ON. "
+                     "PC 0 -> -1e-20 (LS cuts at zero); Nu = MU/RO on "
+                     "ELFORM-6 fluids only. sph/bird IE +69.4 -> +4.5 %, "
+                     "channel_B -98.9 -> -0.1 %",
+            variable=self.mat_null_pc_mu).grid(
+                row=46, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1142,6 +1154,7 @@ class ConverterGUI:
                 implicit_tshell_solid=self.implicit_tshell_solid.get(),
                 corotational_orthotropic=(
                     self.corotational_orthotropic.get()),
+                mat_null_pc_mu=self.mat_null_pc_mu.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1288,7 +1301,7 @@ class ConverterGUI:
             bits.append("*CONSTRAINED_GENERALIZED_WELD_BUTT dropped "
                         "(--no-generalized-weld-butt)")
         if not kwargs.get("initial_void_floor", True):
-            bits.append("*INITIAL_VOID fluids keep Pmin 0 = -INFINITY "
+            bits.append("*INITIAL_VOID fluids get no cavitation floor "
                         "(--no-initial-void-floor)")
         if not kwargs.get("weld_exponents", True):
             bits.append("spotweld failure exponents left at 2 "
@@ -1323,6 +1336,9 @@ class ConverterGUI:
         if not kwargs.get("corotational_orthotropic", True):
             bits.append("element-frame /PROP/TYPE6 left as 65ff389 "
                         "(--no-corotational-orthotropic)")
+        if not kwargs.get("mat_null_pc_mu", True):
+            bits.append("*MAT_NULL PC / MU cells not carried: Pmin 0 = "
+                        "-INFINITY, Nu 0 (--no-mat-null-pc-mu)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

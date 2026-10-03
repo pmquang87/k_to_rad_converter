@@ -827,8 +827,9 @@ void fluid, the `/MAT/HYD_VISC` of that fluid get the **cavitation floor
 material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I R17
 p.28-134 allows one fluid per single-material-and-void mesh). Not `0`:
 `hm_read_mat06.F:154` reads an exact `Pmin 0` as −INFINITY, so the `Pmin 0`
-every `*MAT_NULL` + `*EOS_*` `/MAT/HYD_VISC` carried (the `*MAT_NULL` PC cell
-is not carried) was an UNBOUNDED tension in the cells the fluid leaves — what
+every `*MAT_NULL` + `*EOS_*` `/MAT/HYD_VISC` carried (before round 7 the
+`*MAT_NULL` PC cell was not carried — see the `--no-mat-null-pc-mu` paragraph)
+was an UNBOUNDED tension in the cells the fluid leaves — what
 the three void TIMEOUTS died of (`quadrature_B/C`, `bird_B`: 3 deck keys on 2
 emitted models); `bird-el` ended NORMAL with it, and `forging_B` stops in the
 starter first. Carriers that differ in RO or EOS — a second fluid, which
@@ -836,7 +837,9 @@ p.28-134 does not permit with this option — are floored too and NAMED (reach
 0). A stated `PC` is overridden and
 named; a deck that also states `*ALE_MULTI-MATERIAL_GROUP` (forbidden together,
 p.28-134), a void that is not ELFORM 12 and a void whose material is not a LAW6
-carrier are refused by name and keep `Pmin 0`. The void's low DENSITY is NOT
+carrier are refused by name: their carriers get the `*MAT_NULL` PC cell
+(`Pmin −1e-20` for PC 0; `--no-mat-null-pc-mu` keeps `Pmin 0`). The void's low
+DENSITY is NOT
 written (on the two `/INTER/TYPE18`-coupled carriers it is a dead coupling or
 4.51× the cycles, and it stalls bird_B on the TYPE18 sort step). MEASURED at
 nt 4 against the LS-DYNA references: quadrature_B and quadrature_C (one emitted
@@ -845,6 +848,40 @@ model) timeout → NORMAL in 1095 cycles (IE +394.0 %), bird_B timeout → NORMA
 and energy error −17.9 → −32.6 % WORSE, KE +10 856 → −92.1 % at the end; its
 plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID` is not converted).
 **NORMAL here is not an LS-DYNA match**: the void is still full of fluid.
+
+**Since round 7 the `*MAT_NULL` PC and MU cells are carried on the
+`/MAT/HYD_VISC` carrier** (default ON, `--no-mat-null-pc-mu`, one flag for both
+cells). `Pmin` = PC on every `*MAT_NULL` + `*EOS_*` carrier the void floor does
+not cover: PC 0.0 or blank → `−1e-20` (LS-DYNA cuts a PC 0 AT zero — 0 tension
+samples in the 884 340 element-states of the `underwater_A/B` reference
+d3plots — while `hm_read_mat06.F:154` reads `Pmin 0` as −INFINITY), a negative
+PC as stated, a positive PC refused by name (Vol II R17 p.2-189 defines PC ≤ 0).
+`Nu = MU / RO` (the LAW6 cell is KINEMATIC: `mat_law6.cfg:26`, `m6law.F:98`
+`VIS = Nu·RHO`; dyna2rad `convertmats.cxx:300`) ONLY where every part of the
+material is a `*SECTION_SOLID` ELFORM 6 on a deck without `*INITIAL_VOID` and
+outside any `*ALE_MULTI-MATERIAL_GROUP` — the measured channel family. ELFORM 6
+is emitted as a Lagrangian one-point solid (round 5), so the scope is the deck's
+statement, not an ALE formulation. Elsewhere MU is named and not carried:
+`impact.k`'s Lagrangian bar nearly triples its IE under the cell (10.3 → 29.6
+against LS-DYNA's 15.7) and `bird_B` CREATES energy (energy error 99.9 %, END
+IE +1484.66 → +20691.23 %, mechanism not found); SPH, ELFORM 5 / 7 / 11 / 12 and
+mixed materials are named too (a Couette coupon decides them, ROADMAP). TEROD /
+CEROD have no LAW6 cell and are named. The rule is keyed on the `*MAT_NULL`
+record: the 4 `*MAT_ELASTIC_FLUID` acoustic compartments (nvh 8.7 / 9.1 / 9.2 /
+9.4) write the same keyword from another record and do not move. The void floor
+keeps precedence; with `--no-initial-void-floor` alone a PC-0 void now gets
+`−1e-20` from this rule and a stated negative PC is written as stated — only
+both opt-outs restore `Pmin 0`. MEASURED at nt 4 (the round-7 pre-research,
+base-paired, OpenRadioss's last printed row against the LS-DYNA glstat
+interpolated there, fifths nearest-row, RMS in % of the LS-DYNA peak):
+`sph/bird` (PC cell) IE +69.44 → +4.50 %, fifths +2.87 / +2.98 / +1.52 / +2.57 /
++4.50 %, RMS 44.37 → 2.10 at 0.832× the cycles; `channel_B` (Nu cell) IE
+−98.89 → −0.09 %, RMS 57.05 → 0.03 at 0.987×; `channel_C` RMS 0.02; `channel_A`
+−98.88 → −4.03 %, RMS 1.72 at 0.831× — all four deviation → match; `underwater_A`
+/ `underwater_B` stay match (−0.85 / +0.97 % and −0.37 / +0.49 %); `impact`
+improves under the PC cell alone (+58.98 → +51.91 %, RMS 32.60 → 29.94, though
+its first fifth worsens +3.2 → −19.0 %). Byte reach: 20 deck keys, 17 emitted
+models (the 3 Nu keys among them); the 4 void-floor keys are byte-identical.
 
 `*CONSTRAINED_SHELL_IN_SOLID` (and `_PENALTY`) → recorded, **not converted**,
 still listed as skipped, with ONE named warning per deck (round 7, 0 bytes, no

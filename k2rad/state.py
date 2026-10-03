@@ -2504,11 +2504,17 @@ class MatNull:
     rho: float
     E: float
     nu: float
-    # Card 1 field 3, PC: the pressure cutoff (<= 0, default 0.0; Vol II R17
-    # p.2-189). Read so the ELFORM-12 void cavitation floor can NAME the
-    # stated value it overrides (writer/materials._resolve_initial_void_floor);
-    # it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item).
+    # Card 1 fields 3-6 (Vol II R17 p.2-189): PC the pressure cutoff (<= 0,
+    # default 0.0), MU the dynamic viscosity, TEROD / CEROD the relative
+    # volumes of erosion in tension / compression. PC and MU map to the
+    # /MAT/HYD_VISC Pmin / Nu cells of a LAW6 carrier (R14 triage round 7,
+    # B1: writer/materials._resolve_mat_null_cells; the ELFORM-12 void
+    # cavitation floor of round 6 keeps precedence on Pmin and NAMES the PC
+    # it overrides); TEROD / CEROD have no LAW6 cell and are named.
     pc: float = 0.0
+    mu: float = 0.0
+    terod: float = 0.0
+    cerod: float = 0.0
 
 
 @dataclass
@@ -7598,8 +7604,8 @@ class ConvertOptions:
     # material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I
     # R17 p.28-134: one fluid per single-material-and-void mesh). NOT 0:
     # hm_read_mat06.F:154 reads an exact Pmin 0 as -INFINITY, so the Pmin 0
-    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (the *MAT_NULL PC
-    # cell is not carried) was an UNBOUNDED tension in the cells
+    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (before round 7
+    # the *MAT_NULL PC cell was not carried) was an UNBOUNDED tension in the cells
     # the fluid advects out of (the EOS floors its pressure at PMIN,
     # gruneisen.F:129/132/152, eospolyno.F:104/113/125). -1e-20 is the
     # zero-pressure cavitation limit of *MAT_NULL Remark 4 (Vol II R17
@@ -7758,6 +7764,31 @@ class ConvertOptions:
     # unchanged (RMS 0.164 %); LAW93 Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6.
     # Reach 0 on every corpus (sbrake's two TYPE6 are Isolid 14 already).
     corotational_orthotropic: bool = True
+    # --no-mat-null-pc-mu: keep Pmin 0 and Nu 0 on every *MAT_NULL + *EOS_*
+    # /MAT/HYD_VISC carrier the round-6 void floor does not cover (R14 triage
+    # round 7, B1; ONE flag for both cells).
+    #
+    # ON by default. Pmin (columns 21-40): PC < 0 -> PC as stated; PC 0.0 or
+    # blank -> -1e-20 (LS-DYNA cuts a PC 0 AT zero: 0 tension samples in the
+    # 884 340 element-states of the underwater_A/B reference d3plots, while
+    # hm_read_mat06.F:154 reads Pmin 0 as -INFINITY); PC > 0 refused by name
+    # (Vol II R17 p.2-189 defines PC <= 0). The ELFORM-12 void floor keeps
+    # precedence. Nu (columns 1-20) = MU / RO - the LAW6 cell is KINEMATIC
+    # (mat_law6.cfg:26, m6law.F:98 VIS = Nu x RHO; dyna2rad convertmats.cxx:
+    # 300) - ONLY where every part of the material is a *SECTION_SOLID
+    # ELFORM 6 (emitted as a Lagrangian one-point solid, Iale 0, since round
+    # 5) on a deck without *INITIAL_VOID and outside any
+    # *ALE_MULTI-MATERIAL_GROUP: the measured channel family. Elsewhere MU is
+    # named and not carried: impact.k's Lagrangian bar triples its IE under
+    # the cell (10.3 -> 29.6 against LS-DYNA's 15.7) and bird_B CREATES
+    # energy (energy error 99.9 %). TEROD / CEROD are named (no LAW6 cell).
+    # MEASURED at nt 4 (round-7 pre-research, base-paired): sph/bird IE
+    # +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 -> -0.09 %,
+    # channel_A -98.88 -> -4.03 %; underwater_A/B stay within 1 %. The 4
+    # *MAT_ELASTIC_FLUID acoustic carriers write the same keyword from
+    # another record and are untouched. Byte reach: 20 deck keys, 17
+    # emitted models (the 3 Nu keys among them).
+    mat_null_pc_mu: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9267,6 +9298,11 @@ class ConversionState:
     # reason in words ("--no-initial-void-floor" or the refusal clause), so
     # the /INTER/TYPE18 void warning can say why without re-deciding.
     initial_void_floor_refusal: str = ""
+    # The ONE decision of the *MAT_NULL PC / MU cells (R14 triage round 7,
+    # B1): None = not yet resolved; else {LAW6 carrier mid -> (Nu, Pmin)}.
+    # Memoised by writer/materials._resolve_mat_null_cells so the A1 opt-out
+    # clause and the emitter read ONE decision, never the option twice.
+    mat_null_cells: Optional[Dict[int, Tuple[float, float]]] = None
     # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
     # order (round 6, A4). Refused BY NAME and never converted: kept only so
     # writer/loads._make_tied_nodes_failure_notes can write ONE warning per

@@ -530,18 +530,20 @@ def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
 
 
 def _emit_mat_law6_carrier(mid: int, title: str, rho: float,
-                           pmin: float = 0.0) -> List[str]:
+                           pmin: float = 0.0, nu: float = 0.0) -> List[str]:
     """A hydrodynamic /MAT/LAW6 (keyword /MAT/HYD_VISC) carrier for an /EOS.
 
-    Minimal form (RHO + blank kinematic-viscosity/Pmin card) exactly as the
+    Minimal form (RHO + the kinematic-viscosity/Pmin card) exactly as the
     official Drop_Container FSI example pairs it with a separate /EOS block of the
     same id.
 
-    *pmin* is the ``Pmin`` cell (columns 21-40 of the ``Nu Pmin`` line,
-    ``radioss2020/MAT/mat_law6.cfg`` ``%20lg%20lg``). The default 0.0 keeps
-    every existing card byte-identical — and that 0 is NOT "no tension":
-    ``hm_read_mat06.F:154`` reads an exact 0 as -INFINITY. Only the ELFORM-12
-    void cavitation floor passes a value (``_VOID_CAVITATION_PMIN``).
+    *nu* / *pmin* are the ``Nu`` / ``Pmin`` cells (columns 1-20 / 21-40 of
+    the ``Nu Pmin`` line, ``radioss2020/MAT/mat_law6.cfg`` ``%20lg%20lg``).
+    A ``Pmin`` of 0 is NOT "no tension": ``hm_read_mat06.F:154`` reads an
+    exact 0 as -INFINITY; ``Nu`` is KINEMATIC (``m6law.F:98`` VIS = Nu x
+    RHO). Two callers' values: the ELFORM-12 void cavitation floor
+    (``_VOID_CAVITATION_PMIN``, round 6 A1) and the ``*MAT_NULL`` PC / MU
+    cells (``_resolve_mat_null_cells``, round 7 B1).
     """
     return [
         f"/MAT/HYD_VISC/{mid}",
@@ -549,7 +551,7 @@ def _emit_mat_law6_carrier(mid: int, title: str, rho: float,
         "#              RHO_I",
         f"{_f(rho)}",
         "#                 Nu                Pmin",
-        f"{_f(0.0)}{_f(pmin)}",
+        f"{_f(nu)}{_f(pmin)}",
     ]
 
 
@@ -889,7 +891,8 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         + _void_fluid_identity_clause(state, sorted(out), void_mids) +
         " Not 0: hm_read_mat06.F:154 reads Pmin 0 as "
         "-INFINITY, and every *MAT_NULL + *EOS_* /MAT/HYD_VISC k2rad wrote "
-        "before this carried 0 (the *MAT_NULL PC cell is not carried) - an "
+        "before this carried 0 (before round 7 the *MAT_NULL PC cell was not "
+        "carried at all) - an "
         "UNBOUNDED tension in the cells the fluid advects out of (the "
         "EOS floors its pressure at PMIN, gruneisen.F:129/132/152, "
         "eospolyno.F:104/113/125). -1e-20 is the zero-pressure cavitation "
@@ -912,7 +915,9 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "- the OpenRadioss row nearest each, the LS-DYNA glstat interpolated "
         "at its time; its plate carries nothing: "
         "*CONSTRAINED_SHELL_IN_SOLID is not converted). Pass "
-        "--no-initial-void-floor to keep Pmin 0.")
+        "--no-initial-void-floor to fall back to the *MAT_NULL PC cell (PC 0 "
+        "-> Pmin -1e-20, a stated PC as stated), and --no-mat-null-pc-mu as "
+        "well to keep Pmin 0.")
     return out
 
 
@@ -980,10 +985,27 @@ def _void_pmin_state_clause(state: ConversionState, law6: Set[int]) -> str:
     cards that exist and says so when there are none (finalization of round
     6: ``forging_B``'s void is a ``*MAT_INV_HYPERBOLIC_SIN`` and its converted
     deck carries no ``/MAT/HYD_VISC`` at all, so "the fluid's /MAT/HYD_VISC
-    keep Pmin 0" named cards that do not exist)."""
+    keep Pmin 0" named cards that do not exist). Since round 7 (B1) those
+    cards carry the ``*MAT_NULL`` PC cell instead, unless
+    ``--no-mat-null-pc-mu`` is passed too; computed by the PURE
+    ``_mat_null_pc_pmin`` (this clause runs INSIDE
+    ``_resolve_initial_void_floor``, so it must not re-enter the B1
+    decision)."""
     fluid = sorted({p.mid for p in state.parts.values()
                     if p.mid in law6 and p.secid in state.sec_solids
                     and state.sec_solids[p.secid].elform == 12})
+    if fluid and state.options.mat_null_pc_mu:
+        cells = []
+        for mid in fluid:
+            pc = state.mat_null[mid].pc
+            pmin = _mat_null_pc_pmin(pc)
+            cells.append(
+                f"/MAT/HYD_VISC/{mid} "
+                + ("Pmin 0 (PC " + f"{pc:g}" + " refused)" if pmin is None
+                   else f"Pmin {pmin:g} (PC 0)" if pc == 0.0
+                   else f"Pmin {pmin:g} (the stated PC)"))
+        return ("the ELFORM-12 fluid's /MAT/HYD_VISC carry the *MAT_NULL PC "
+                "cell instead: " + "; ".join(cells))
     if fluid:
         return (f"the ELFORM-12 fluid's /MAT/HYD_VISC {fluid} keep Pmin 0, "
                 "which hm_read_mat06.F:154 reads as -INFINITY (no cutoff)")
@@ -993,6 +1015,318 @@ def _void_pmin_state_clause(state: ConversionState, law6: Set[int]) -> str:
                 "sections), so there is no cutoff cell for the rule to write")
     return ("the deck emits no /MAT/HYD_VISC at all (no *MAT_NULL + *EOS_* "
             "carrier), so there is no cutoff cell for the rule to write")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The *MAT_NULL PC / MU cells on /MAT/HYD_VISC (R14 triage round 7, B1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mat_null_pc_pmin(pc: float) -> Optional[float]:
+    """The ``Pmin`` cell a ``*MAT_NULL`` PC maps to (R14 triage round 7, B1),
+    the ELFORM-12 void floor aside: ``None`` = REFUSED (PC > 0: Vol II R17
+    p.2-189 defines PC <= 0); ``_VOID_CAVITATION_PMIN`` (-1e-20) for PC 0 -
+    a stated 0.0 or a blank field (``to_float("")`` is 0.0) - because LS-DYNA
+    cuts a PC 0 AT zero (0 tension samples in the 884 340 element-states of
+    the underwater_A/B reference d3plots) while ``hm_read_mat06.F:154`` reads
+    a ``Pmin`` of exactly 0 as -INFINITY; a negative PC as stated. PURE: the
+    void-floor refusal clause calls it from inside
+    ``_resolve_initial_void_floor``."""
+    if pc > 0.0:
+        return None
+    if pc == 0.0:
+        return _VOID_CAVITATION_PMIN
+    return pc
+
+
+def _carrier_eos(state: ConversionState, mid: int) -> Optional[EosCard]:
+    """The ``*EOS_*`` a LAW6 carrier writes: the shared-id card, else the
+    first ``*PART`` EOSID binding (``_law6_carrier_mids``' two routes)."""
+    eos = state.eos_cards.get(mid)
+    if eos is None:
+        ids = _null_part_eos_bindings(state).get(mid)
+        eos = state.eos_cards.get(ids[0]) if ids else None
+    return eos
+
+
+def _eos_tension_floor(state: ConversionState, mid: int,
+                       rho: float) -> Tuple[str, Optional[float]]:
+    """``(EOS kind, the pressure the carrier's EOS reaches at mu -> -1 with
+    E = 0)`` - what decides whether a ``Pmin`` can act at all (the EOS floors
+    its pressure at PMIN, ``gruneisen.F:129/132/152``,
+    ``eospolyno.F:104/113/125``). GRUNEISEN: ``-rho0 C^2`` (the expanded
+    branch ``P = rho0 C^2 mu + (gamma0 + a mu) E``); POLYNOMIAL:
+    ``C0 - C1 - C3`` (LS-DYNA drops the C2 mu^2 and C6 mu^2 E terms in
+    tension); IDEAL-GAS: 0 (no tension); any other kind: ``None``."""
+    eos = _carrier_eos(state, mid)
+    if eos is None:
+        return "", None
+    c = eos.params
+    if eos.kind == "GRUNEISEN":
+        return eos.kind, -rho * c.get("c", 0.0) ** 2
+    if eos.kind == "POLYNOMIAL":
+        return eos.kind, (c.get("c0", 0.0) - c.get("c1", 0.0)
+                          - c.get("c3", 0.0))
+    if eos.kind == "IDEAL-GAS":
+        return eos.kind, 0.0
+    return eos.kind, None
+
+
+def _ammg_part_ids(state: ConversionState) -> Set[int]:
+    """Every part id named by an ``*ALE_MULTI-MATERIAL_GROUP`` entry (idtype
+    1 = a part, 0 = a part set expanded to its members)."""
+    out: Set[int] = set()
+    for group in state.ale_mmgs:
+        for sid, idtype in group.entries:
+            if idtype == 1:
+                out.add(sid)
+            else:
+                ps = state.part_sets.get(sid)
+                if ps is not None:
+                    out.update(ps[1])
+    return out
+
+
+def _mat_null_user_class(state: ConversionState, part,
+                         sph_pids: Set[int]) -> str:
+    """The section class of one part of a ``*MAT_NULL`` carrier, in the
+    words the B1 warnings print (the Nu scope is a DECK-STATEMENT predicate:
+    ELFORM 6 is emitted as a Lagrangian one-point solid since round 5)."""
+    if part.secid in state.sec_sph or part.pid in sph_pids:
+        return "SPH"
+    sec = state.sec_solids.get(part.secid)
+    if sec is None:
+        return "no solid or SPH section"
+    return {5: "ELFORM 5 (1-point ALE, emitted Lagrangian)",
+            6: "ELFORM 6",
+            7: "ELFORM 7",
+            11: "ELFORM 11 (multi-material ALE)",
+            12: "ELFORM 12"}.get(sec.elform,
+                                 f"Lagrangian solid (ELFORM {sec.elform})")
+
+
+#: The W-N2 fact for each class outside the Nu scope (every number the
+#: round-7 pre-research's, nt 4, base-paired).
+_NU_LAGRANGIAN_FACT = (
+    " On a Lagrangian solid it was measured WRONG: impact.k's *MAT_NULL bar "
+    "(ELFORM 1, nt 4) goes IE 10.3 -> 29.6 against LS-DYNA's 15.7, the deck "
+    "IE +58.98 -> +76.80 % (RMS 32.60 -> 42.51 % of the LS-DYNA peak).")
+_NU_SPH_FACT = (
+    " On SPH parts it is not measured beyond sph/bird, where Nu 1 moved "
+    "nothing (IE RMS 44.15 % on both arms).")
+_NU_MIXED_FACT = (
+    " A material whose parts mix ELFORM 6 with another class is not carried "
+    "either: the cell is per MATERIAL, so it would reach the other parts "
+    "too.")
+
+
+def _resolve_mat_null_cells(
+        state: ConversionState) -> Dict[int, Tuple[float, float]]:
+    """``{carrier mid -> (Nu, Pmin)}`` for every ``*MAT_NULL`` + ``*EOS_*``
+    ``/MAT/HYD_VISC`` carrier (``_law6_carrier_mids``, both EOS attachment
+    routes) - the ONE decision of R14 triage round 7, B1, memoised on
+    ``state.mat_null_cells`` and made AFTER the round-6 void floor.
+
+    Pmin (columns 21-40): a carrier the void floor covers keeps
+    ``_VOID_CAVITATION_PMIN`` (A1 precedence; A1's own warning names a PC it
+    overrides); else ``_mat_null_pc_pmin`` (PC 0 / blank -> -1e-20, PC < 0
+    as stated, PC > 0 refused by name -> 0).
+
+    Nu (columns 1-20) = MU / RO (the LAW6 cell is KINEMATIC:
+    ``mat_law6.cfg:26``, ``m6law.F:98`` VIS = Nu x RHO; dyna2rad
+    ``convertmats.cxx:300``) ONLY when MU > 0, RO > 0, the deck states no
+    ``*INITIAL_VOID``, no user part is in an ``*ALE_MULTI-MATERIAL_GROUP``
+    and EVERY user part is a ``*SECTION_SOLID`` ELFORM 6 - the measured
+    channel family. Every excluded class is NAMED. Keyed on the
+    ``*MAT_NULL`` record, never on the emitted card: ``*MAT_ELASTIC_FLUID``
+    writes the same ``/MAT/HYD_VISC`` keyword from another record and is
+    untouched. ``--no-mat-null-pc-mu`` restores the 65ff389 cells (Pmin = the
+    void floor or 0, Nu 0). TEROD / CEROD are named in both arms."""
+    if state.mat_null_cells is not None:
+        return state.mat_null_cells
+    out: Dict[int, Tuple[float, float]] = {}
+    state.mat_null_cells = out
+    carriers = _law6_carrier_mids(state)
+    if not carriers:
+        return out
+    floor = _resolve_initial_void_floor(state)        # A1 first (memoised)
+    on = state.options.mat_null_pc_mu
+    void_deck = bool(state.initial_void_parts)
+    ammg = _ammg_part_ids(state)
+    sph_pids = {c.pid for c in state.sph_elems}
+    w_p: List[str] = []
+    w_n1: List[str] = []
+    w_n2: List[str] = []
+    w_n2_classes: List[str] = []
+    w_n3: List[str] = []
+    w_n4: List[str] = []
+    refusals: List[str] = []
+    changed: List[int] = []
+    for mid in sorted(carriers):
+        n = state.mat_null[mid]
+        if n.terod != 0.0 or n.cerod != 0.0:
+            state.warn(
+                f"*MAT_NULL {mid}: TEROD {n.terod:g} / CEROD {n.cerod:g} "
+                "(element erosion at a relative volume, in tension / "
+                "compression) is DROPPED - /MAT/HYD_VISC has no erosion cell "
+                f"(mat_law6.cfg), so no element of /MAT/HYD_VISC/{mid} is "
+                "ever deleted.")
+        pmin_a1 = _VOID_CAVITATION_PMIN if mid in floor else None
+        pmin_off = pmin_a1 if pmin_a1 is not None else 0.0
+        # ---- the default decision (computed in both arms) ----------------
+        pmin_rule = (pmin_a1 if pmin_a1 is not None
+                     else _mat_null_pc_pmin(n.pc))
+        pmin = pmin_rule if pmin_rule is not None else 0.0
+        users = sorted((p for p in state.parts.values() if p.mid == mid),
+                       key=lambda q: q.pid)
+        pids = [p.pid for p in users]
+        classes = sorted({_mat_null_user_class(state, p, sph_pids)
+                          for p in users})
+        nu = 0.0
+        nclass = ""
+        if n.mu > 0.0:
+            # a stated RO <= 0 is floored at 1e-24 by _apply_zero_density_floor
+            # before this runs - test the STATEMENT, never the floored record
+            if n.rho <= 0.0 or mid in state.zero_density_floored:
+                nclass = "rho"
+            elif void_deck:
+                nclass = "void"
+            elif any(p.pid in ammg for p in users):
+                nclass = "ammg"
+            elif users and classes == ["ELFORM 6"]:
+                nu = n.mu / n.rho
+            elif "ELFORM 12" in classes:
+                nclass = "void"
+            else:
+                nclass = "other"
+        elif n.mu < 0.0:
+            nclass = "negative"
+        if not on:
+            out[mid] = (0.0, pmin_off)
+            if (nu, pmin) != (0.0, pmin_off):
+                changed.append(mid)
+            continue
+        out[mid] = (nu, pmin)
+        # ---- the warning clauses (default arm only) ----------------------
+        if pmin_rule is None:
+            refusals.append(
+                f"*MAT_NULL {mid}: PC {n.pc:g} is POSITIVE - Vol II R17 "
+                "p.2-189 defines PC <= 0 (a tension cutoff), so it is not "
+                "written: Pmin stays 0, which hm_read_mat06.F:154 reads as "
+                "-INFINITY (no cutoff).")
+        elif pmin_a1 is None:
+            kind, efloor = _eos_tension_floor(state, mid, n.rho)
+            if efloor is None:
+                bind = (f"the /EOS/{kind or '?'} tension floor is not "
+                        "computed")
+            elif pmin > efloor:
+                bind = (f"it can act: the /EOS/{kind} pressure reaches "
+                        f"{efloor:g} at mu -> -1, E 0")
+            else:
+                bind = (f"it cannot act: the /EOS/{kind} pressure never goes "
+                        f"below {efloor:g} (mu -> -1, E 0), so the cell "
+                        "changes no result")
+            w_p.append(f"/MAT/HYD_VISC/{mid} Pmin {pmin:g} (PC {n.pc:g}; "
+                       f"{bind})")
+        if nu > 0.0:
+            w_n1.append(f"/MAT/HYD_VISC/{mid} Nu {nu:g} (MU {n.mu:g} / RO "
+                        f"{n.rho:g}, parts {pids})")
+        clause = (f"/MAT/HYD_VISC/{mid} (MU {n.mu:g}; "
+                  + (f"parts {pids}: {', '.join(classes)})" if users
+                     else "no *PART uses it)"))
+        if nclass == "rho":
+            refusals.append(
+                f"*MAT_NULL {mid}: RO <= 0 as stated - Nu = MU / RO cannot be "
+                "formed; Nu 0.")
+        elif nclass == "negative":
+            refusals.append(
+                f"*MAT_NULL {mid}: MU {n.mu:g} is negative - a viscosity "
+                "cannot be; Nu 0.")
+        elif nclass == "void":
+            w_n3.append(clause)
+        elif nclass == "ammg":
+            w_n4.append(clause)
+        elif nclass == "other":
+            w_n2.append(clause)
+            w_n2_classes += classes if users else ["no *PART uses it"]
+    if not on:
+        if changed:
+            state.warn(
+                "--no-mat-null-pc-mu: the *MAT_NULL PC / MU cells are not "
+                f"carried on /MAT/HYD_VISC {changed}: Pmin 0, which "
+                "hm_read_mat06.F:154 reads as -INFINITY (no cutoff - LS-DYNA "
+                "cuts a PC 0.0 at zero), and Nu 0 (no viscous stress).")
+        return out
+    for text in refusals:
+        state.warn(text)
+    if w_p:
+        state.warn(
+            "*MAT_NULL PC -> /MAT/HYD_VISC Pmin: " + "; ".join(w_p) + ". "
+            "LS-DYNA applies a stated PC 0.0 (or a blank PC) as a pressure "
+            "cutoff AT zero - 0 tension samples in the 884 340 "
+            "element-states of the underwater_A/B reference d3plots (Vol II "
+            "R17 p.2-190, Remark 4) - while hm_read_mat06.F:154 reads a Pmin "
+            "of exactly 0 as -INFINITY (no cutoff at all), so PC 0 is "
+            "written as Pmin -1e-20 and a negative PC as stated (the EOS "
+            "floors its pressure at Pmin: gruneisen.F:129/132/152, "
+            "eospolyno.F:104/113/125). Pass --no-mat-null-pc-mu to keep Pmin "
+            "0 and Nu 0.")
+    if w_n1:
+        state.warn(
+            "*MAT_NULL MU -> /MAT/HYD_VISC Nu: " + "; ".join(w_n1) + " - Nu "
+            "= MU / RO: the LAW6 cell is a KINEMATIC viscosity "
+            "(mat_law6.cfg:26 'Kinematic Viscosity'; m6law.F:98 VIS = Nu x "
+            "RHO; dyna2rad convertmats.cxx:300 MU/RHO). Written only where "
+            "every part of the material is a *SECTION_SOLID ELFORM 6 "
+            "(LS-DYNA's 1-point Eulerian solid, which k2rad emits as a "
+            "Lagrangian one-point /PROP/SOLID, Iale 0) on a deck without "
+            "*INITIAL_VOID - the family where it was measured: in LS-DYNA "
+            "that pipe flow's internal energy is viscous dissipation "
+            "(channel_B: IE 2.146 against external work 2.230), and at nt 4 "
+            "channel_B goes IE -98.89 -> -0.09 % (RMS 57.05 -> 0.03 % of the "
+            "LS-DYNA peak, 0.987x cycles), channel_A -98.88 -> -4.03 % (RMS "
+            "1.72 %, 0.831x cycles). Pass --no-mat-null-pc-mu to keep Nu 0.")
+    if w_n2:
+        facts = ""
+        present = set(w_n2_classes)
+        if any(c.startswith("Lagrangian solid") for c in present):
+            facts += _NU_LAGRANGIAN_FACT
+        if "SPH" in present:
+            facts += _NU_SPH_FACT
+        for cname in sorted(present):
+            if (cname.startswith("Lagrangian solid") or cname == "SPH"
+                    or cname == "ELFORM 6"):
+                continue
+            if cname == "no solid or SPH section":
+                facts += (" On parts with no solid or SPH section it is "
+                          "unmeasured.")
+            elif cname == "no *PART uses it":
+                facts += " A carrier no *PART uses carries no Nu either."
+            else:
+                facts += f" On {cname} parts it is unmeasured."
+        if "ELFORM 6" in present:
+            facts += _NU_MIXED_FACT
+        state.warn(
+            "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n2) + ": "
+            "the Nu = MU / RO cell is written only where every part of the "
+            "material is a *SECTION_SOLID ELFORM 6 on a deck without "
+            "*INITIAL_VOID, the one family where it was measured right."
+            + facts + " A Couette coupon (a sheared slab against its "
+            "analytic profile) decides these cases (ROADMAP).")
+    if w_n3:
+        state.warn(
+            "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3) + ": "
+            "on the ELFORM-12 fluid of a *INITIAL_VOID deck the cell CREATES "
+            "energy - bird_B with Nu 12804 (nt 4): energy error 99.9 % from "
+            "about cycle 500, END IE +1484.66 -> +20691.23 % - by a mechanism "
+            "not found (it is not a viscous step violation: h^2 / (6 Nu) = "
+            "1.75e-6 s is above the step 2.04e-7 s). ROADMAP: the bird_B "
+            "mechanism first.")
+    if w_n4:
+        state.warn(
+            "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n4) + ": "
+            "the material's parts are in an *ALE_MULTI-MATERIAL_GROUP; the "
+            "cell is unmeasured there.")
+    return out
 
 
 def _void_null_mids(state: ConversionState) -> set:
@@ -1040,9 +1374,12 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     # return below: a void deck whose void is refused (no LAW6 carrier at all,
     # forging_B) must still be told so. A no-op, and silent, on any deck that
     # states no *INITIAL_VOID_*.
-    floor = _resolve_initial_void_floor(state)
+    _resolve_initial_void_floor(state)
     if not (state.mat_high_explosive or state.eos_cards or state.eos_jwl):
         return []
+    # The *MAT_NULL PC / MU cells (round 7, B1): ONE decision per deck, made
+    # after the void floor (whose carriers keep precedence on Pmin).
+    cells = _resolve_mat_null_cells(state)
     lines: List[str] = []
     # An *EOS_* consumed by a *MAT_JOHNSON_COOK /MAT/LAW4 route is emitted
     # there (rebound to the mat id) — not as a standalone LAW6-carrier fluid.
@@ -1206,9 +1543,9 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         _derive_ideal_gas_p0(state, eos, state.mat_null[null_mids[0]].rho)
         for mid in null_mids:
             carrier = state.mat_null[mid]
+            nu, pmin = cells.get(mid, (0.0, 0.0))
             lines += _emit_mat_law6_carrier(
-                mid, carrier.title, carrier.rho,
-                pmin=_VOID_CAVITATION_PMIN if mid in floor else 0.0)
+                mid, carrier.title, carrier.rho, pmin=pmin, nu=nu)
             if mid == eosid:
                 lines += _emit_eos(eos)
             else:
@@ -7803,8 +8140,12 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
             # An EXPLICIT CP = 0.0 means "cavitate at zero pressure", which is
             # NOT the same as a blank cell. Pmin = 0 cannot say it (it is the
             # reader's "no cut-off" sentinel); Pmin = -1e-20 can, and is what
-            # the ELFORM-12 *INITIAL_VOID floor writes (round 6) -- this
-            # mapping is not changed yet (ROADMAP, the *MAT_NULL PC/MU item).
+            # the ELFORM-12 *INITIAL_VOID floor writes (round 6) and the
+            # *MAT_NULL PC cell writes for a PC 0 (round 7, B1) -- this
+            # *MAT_ELASTIC_FLUID mapping is deliberately not changed (B1 is
+            # keyed on the *MAT_NULL record; the 4 nvh acoustic compartments
+            # stay byte-identical; ROADMAP, the *MAT_ELASTIC_FLUID CP 0.0
+            # item).
             mat.pmin = 0.0
             state.warn(
                 f"{tag}: CP=0.0 is written explicitly on card 2, i.e. "

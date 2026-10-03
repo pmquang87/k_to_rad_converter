@@ -308,46 +308,106 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertTrue(_has(result.warnings, "*INITIAL_VOID_SET [1]",
                              "is written"), result.warnings)
 
+    # ROUND 7 (B1, the *MAT_NULL PC cell, default ON): every carrier of
+    # _void_deck states PC 0.0, which B1 writes as Pmin -1e-20 wherever the
+    # void floor does NOT - so the A1 controls below that pinned Pmin 0 now
+    # run TWO arms: (a) with mat_null_pc_mu=False, the original assertion
+    # (the pure A1 control, meaning unchanged), and (b) the default, where
+    # the -1e-20 comes FROM B1 (its "*MAT_NULL PC -> /MAT/HYD_VISC Pmin"
+    # sentence names the mid) and A1's applied sentence stays absent (or its
+    # refusal stays present). A mutation that deletes either decision fails.
+
+    def _b1_wrote(self, result, *mids):
+        """B1's Pmin sentence names each mid as PC 0 -> -1e-20."""
+        hits = [w for w in result.warnings
+                if w.startswith("*MAT_NULL PC -> /MAT/HYD_VISC Pmin")]
+        self.assertEqual(len(hits), 1, result.warnings)
+        for mid in mids:
+            self.assertIn(f"/MAT/HYD_VISC/{mid} Pmin -1e-20 (PC 0;", hits[0])
+        self.assertFalse(_has(result.warnings,
+                              "cavitation floor Pmin = -1e-20 is written"))
+
     def test_AMMG_refuses_and_the_deck_is_the_opt_out_arm(self):
-        r_on, s_on, _e = _convert(_void_deck(ammg=True))
+        r_on, s_on, _e = _convert(_void_deck(ammg=True), mat_null_pc_mu=False)
         _r_off, s_off, _e2 = _convert(_void_deck(ammg=True),
-                                      initial_void_floor=False)
+                                      initial_void_floor=False,
+                                      mat_null_pc_mu=False)
         self.assertEqual(s_on, s_off)
         self.assertEqual(_pmin_row(s_on, 1), _ZERO_ROW)
         self.assertTrue(_has(r_on.warnings, "NOT written",
                              "*ALE_MULTI-MATERIAL_GROUP", "p.28-134"),
                         r_on.warnings)
+        # (b) the default: A1 still refuses by name, B1 writes the PC cell
+        r_b1, s_b1, _e3 = _convert(_void_deck(ammg=True))
+        self.assertEqual(_pmin_row(s_b1, 1), _FLOOR_ROW)
+        self.assertTrue(_has(r_b1.warnings, "NOT written",
+                             "*ALE_MULTI-MATERIAL_GROUP"), r_b1.warnings)
+        self._b1_wrote(r_b1, 1, 2)
 
     def test_a_void_that_is_not_ELFORM_12_is_refused(self):
-        result, starter, _e = _convert(_void_deck(elform1=11))
+        result, starter, _e = _convert(_void_deck(elform1=11),
+                                       mat_null_pc_mu=False)
         self.assertEqual(_pmin_row(starter, 2), _ZERO_ROW)
         self.assertEqual(_pmin_row(starter, 1), _ZERO_ROW)
         self.assertTrue(_has(result.warnings, "NOT written", "ELFORM 11",
                              "not 12"), result.warnings)
+        r_b1, s_b1, _e2 = _convert(_void_deck(elform1=11))
+        self.assertEqual(_pmin_row(s_b1, 2), _FLOOR_ROW)
+        self.assertEqual(_pmin_row(s_b1, 1), _FLOOR_ROW)
+        self.assertTrue(_has(r_b1.warnings, "NOT written", "ELFORM 11",
+                             "not 12"), r_b1.warnings)
+        self._b1_wrote(r_b1, 1, 2)
 
     def test_a_non_LAW6_void_is_refused(self):
         """forging_B's shape: the void part's material has no LAW6 carrier."""
-        result, starter, _e = _convert(_void_deck(void_mat="elastic"))
+        result, starter, _e = _convert(_void_deck(void_mat="elastic"),
+                                       mat_null_pc_mu=False)
         self.assertNotIn("/MAT/HYD_VISC/1", starter)
         self.assertEqual(_pmin_row(starter, 2), _ZERO_ROW)
         self.assertTrue(_has(result.warnings, "NOT written", "material 1",
                              "not a *MAT_NULL + *EOS_* carrier"),
                         result.warnings)
+        r_b1, s_b1, _e2 = _convert(_void_deck(void_mat="elastic"))
+        self.assertNotIn("/MAT/HYD_VISC/1", s_b1)
+        self.assertEqual(_pmin_row(s_b1, 2), _FLOOR_ROW)
+        self.assertTrue(_has(r_b1.warnings, "NOT written", "material 1"))
+        self._b1_wrote(r_b1, 2)
 
     def test_no_void_no_change_and_no_warning(self):
-        result, starter, _e = _convert(_void_deck(void=False))
+        result, starter, _e = _convert(_void_deck(void=False),
+                                       mat_null_pc_mu=False)
         self.assertEqual(_pmin_row(starter, 1), _ZERO_ROW)
         self.assertEqual(_pmin_row(starter, 2), _ZERO_ROW)
         self.assertFalse(any("INITIAL_VOID" in w or "cavitation" in w
                              for w in result.warnings), result.warnings)
+        # (b) the default: B1 writes the PC cell; still no A1 text at all
+        r_b1, s_b1, _e2 = _convert(_void_deck(void=False))
+        self.assertEqual(_pmin_row(s_b1, 1), _FLOOR_ROW)
+        self.assertEqual(_pmin_row(s_b1, 2), _FLOOR_ROW)
+        self._b1_wrote(r_b1, 1, 2)
+        self.assertFalse(any("INITIAL_VOID" in w or "cavitation floor" in w
+                             for w in r_b1.warnings), r_b1.warnings)
 
-    def test_the_opt_out_keeps_Pmin_0_and_says_so_once(self):
-        result, starter, _e = _convert(_void_deck(), initial_void_floor=False)
+    def test_the_opt_out_falls_back_to_the_PC_cell_and_says_so_once(self):
+        """Round 6 named this test ..._keeps_Pmin_0_...: with BOTH opt-outs
+        that is still the card; with --no-initial-void-floor alone the
+        PC-0 carriers get -1e-20 from B1 (the stated LS-DYNA semantics), and
+        the opt-out sentence says so instead of 'keep Pmin 0'."""
+        result, starter, _e = _convert(_void_deck(), initial_void_floor=False,
+                                       mat_null_pc_mu=False)
         self.assertEqual(_pmin_row(starter, 1), _ZERO_ROW)
         self.assertEqual(_pmin_row(starter, 2), _ZERO_ROW)
         opt = [w for w in result.warnings if "--no-initial-void-floor:" in w]
         self.assertEqual(len(opt), 1, result.warnings)
         self.assertIn("-INFINITY", opt[0])
+        r_b1, s_b1, _e2 = _convert(_void_deck(), initial_void_floor=False)
+        self.assertEqual(_pmin_row(s_b1, 1), _FLOOR_ROW)
+        self.assertEqual(_pmin_row(s_b1, 2), _FLOOR_ROW)
+        opt = [w for w in r_b1.warnings if "--no-initial-void-floor:" in w]
+        self.assertEqual(len(opt), 1, r_b1.warnings)
+        self.assertIn("carry the *MAT_NULL PC cell instead", opt[0])
+        self.assertNotIn("keep Pmin 0", opt[0])
+        self._b1_wrote(r_b1, 1, 2)
 
     def test_refusal_and_opt_out_texts_never_say_NOT_VALID(self):
         """Round 4's controls assert no warning says NOT VALID on a deck
@@ -448,9 +508,13 @@ class InitialVoidFloorTests(unittest.TestCase):
         ``elform == 12`` clause of the fluid set could be deleted with every
         test green, because every variant paired the void with ONE
         ELFORM-12 bird). A third *MAT_NULL + EOS fluid on ELFORM 5 is not
-        the void's fluid: its /MAT/HYD_VISC keeps Pmin 0 and the floor
-        warning does not name it."""
-        result, starter, _e = _convert(_void_deck(third_elform=5))
+        the void's fluid: the floor warning does not name it. ROUND 7 (B1):
+        its Pmin row is the pure A1 control only with mat_null_pc_mu=False
+        (Pmin 0); by default it states PC 0, which B1 writes as -1e-20 - the
+        witness that keeps the round-6 mutation dead is A1's applied
+        sentence naming [1, 2] only, in both arms."""
+        result, starter, _e = _convert(_void_deck(third_elform=5),
+                                       mat_null_pc_mu=False)
         self.assertEqual(_pmin_row(starter, 1), _FLOOR_ROW)
         self.assertEqual(_pmin_row(starter, 2), _FLOOR_ROW)
         self.assertEqual(_pmin_row(starter, 3), _ZERO_ROW)
@@ -459,6 +523,18 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertEqual(len(applied), 1, result.warnings)
         self.assertIn("/MAT/HYD_VISC [1, 2]", applied[0])
         self.assertIn("(parts [1, 2])", applied[0])
+        r_b1, s_b1, _e = _convert(_void_deck(third_elform=5))
+        self.assertEqual(_pmin_row(s_b1, 3), _FLOOR_ROW)
+        applied = [w for w in r_b1.warnings
+                   if "cavitation floor Pmin = -1e-20 is written" in w]
+        self.assertEqual(len(applied), 1, r_b1.warnings)
+        self.assertIn("/MAT/HYD_VISC [1, 2]", applied[0])
+        self.assertIn("(parts [1, 2])", applied[0])
+        b1 = [w for w in r_b1.warnings
+              if w.startswith("*MAT_NULL PC -> /MAT/HYD_VISC Pmin")]
+        self.assertEqual(len(b1), 1, r_b1.warnings)
+        self.assertIn("/MAT/HYD_VISC/3 Pmin -1e-20 (PC 0;", b1[0])
+        self.assertNotIn("/MAT/HYD_VISC/1 ", b1[0])     # A1's, not B1's
         # the control: the same third fluid ON ELFORM 12 is the fluid
         result12, starter12, _e = _convert(_void_deck(third_elform=12))
         self.assertEqual(_pmin_row(starter12, 3), _FLOOR_ROW)
@@ -477,12 +553,22 @@ class InitialVoidFloorTests(unittest.TestCase):
         self.assertEqual(len(refusal), 1, r_none.warnings)
         self.assertIn("the deck emits no /MAT/HYD_VISC at all", refusal[0])
         self.assertNotIn("keep Pmin 0", refusal[0])
-        r_fl, _s, _e = _convert(_void_deck(void_mat="elastic"))
+        r_fl, _s, _e = _convert(_void_deck(void_mat="elastic"),
+                                mat_null_pc_mu=False)
         refusal = [w for w in r_fl.warnings
                    if "cavitation floor was NOT written" in w]
         self.assertEqual(len(refusal), 1, r_fl.warnings)
         self.assertIn("the ELFORM-12 fluid's /MAT/HYD_VISC [2] keep Pmin 0",
                       refusal[0])
+        # ROUND 7 (B1): by default that card carries the *MAT_NULL PC cell
+        r_b1, _s, _e = _convert(_void_deck(void_mat="elastic"))
+        refusal = [w for w in r_b1.warnings
+                   if "cavitation floor was NOT written" in w]
+        self.assertEqual(len(refusal), 1, r_b1.warnings)
+        self.assertIn("the ELFORM-12 fluid's /MAT/HYD_VISC carry the "
+                      "*MAT_NULL PC cell instead: /MAT/HYD_VISC/2 Pmin -1e-20 "
+                      "(PC 0)", refusal[0])
+        self.assertNotIn("keep Pmin 0", refusal[0])
         r_opt, _s, _e = _convert(_void_deck(void_mat="elastic",
                                             shared_mat=True),
                                  initial_void_floor=False)

@@ -110,6 +110,55 @@ Prior history (before this changelog was introduced) is summarized in the
     skew twin's needle widened to the round-7 sentence (it could no longer
     fail), and `test_a_part_with_no_eight_node_element_is_left_alone` gains
     the R3 assertion.
+  - **B1 — `*MAT_NULL` PC / MU → `/MAT/HYD_VISC` Pmin / Nu** (default ON,
+    `--no-mat-null-pc-mu`, one flag for both cells). Every `*MAT_NULL` +
+    `*EOS_*` carrier the round-6 void floor does not cover gets
+    `Pmin = PC` (PC 0.0 or blank → `-1e-20`: LS-DYNA cuts at zero — 0
+    tension samples in 884 340 reference element-states of underwater_A/B
+    — while `hm_read_mat06.F:154` reads `Pmin 0` as -INFINITY; PC > 0
+    refused by name) and, only where every part of the material is a
+    `*SECTION_SOLID` ELFORM 6 on a deck without `*INITIAL_VOID` and outside
+    any `*ALE_MULTI-MATERIAL_GROUP`, `Nu = MU / RO` (`m6law.F:98`: the cell
+    is kinematic). ELFORM 6 is emitted as a Lagrangian one-point solid
+    (round 5), so the scope is the deck's statement — the measured channel
+    family. Elsewhere MU is named and not carried: impact.k's Lagrangian bar
+    nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) and
+    bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
+    mixed materials are named too. TEROD / CEROD are named (no LAW6 cell). A
+    stated RO ≤ 0 is tested on the statement, not on the zero-density
+    floor's 1e-24. ONE decision per deck (`_resolve_mat_null_cells`,
+    memoised on `state.mat_null_cells`, made after the void floor, which
+    keeps precedence — the 4 void decks bird-el / bird_B / quadrature_B /
+    quadrature_C are byte-identical), keyed on the `*MAT_NULL` record: the 4
+    `*MAT_ELASTIC_FLUID` acoustic keys (nvh 8.7 / 9.1 / 9.2 / 9.4) write the
+    same keyword from another record and do not move. Every warning names
+    whether the cell can act at all (the pressure the carrier's EOS reaches
+    at mu → -1: `-RO C²` for Gruneisen, `C0 - C1 - C3` for the polynomial —
+    inert on channel_A/B/C, -1e4 against -2250, and sloshing, -1e5 against
+    -10). Byte movers 20 keys / 17 models (the 3 Nu keys among them; the
+    decision text's "21 / 18" counted channel_A/B/C twice); measured at nt 4
+    in the round-7 pre-research (base-paired, matched-time END, fifths
+    nearest-row, RMS in % of the LS peak), deviation → match: sph/bird (IE
+    +69.44 → +4.50 %, RMS 44.37 → 2.10, 0.832× cycles), channel_B (−98.89 →
+    −0.09 %, RMS 57.05 → 0.03, 0.987×), channel_C, channel_A (−98.88 →
+    −4.03 %, RMS 1.72, 0.831×); underwater_A/B stay match; impact improves
+    (+58.98 → +51.91 %) with a worse first fifth (+3.2 → −19.0 %). With
+    `--no-initial-void-floor` alone a PC-0 void now gets `-1e-20` from this
+    rule; both opt-outs restore `Pmin 0`. The A1 texts that called the PC
+    cell "not carried" or said the floor's opt-out keeps Pmin 0 are
+    restated (their four decks' warning records move, not their bytes).
+    Tests: `MatNullPcMu` (PC 0 / blank / negative / positive; the polynomial
+    floor; both EOS routes; MU / RO on ELFORM 6; every excluded Nu class by
+    its own sentence; A1 precedence and its opt-out; MU / TEROD / CEROD read;
+    negative MU and RO ≤ 0 in both arms of the density floor; the opt-out =
+    exactly one line; `*MAT_ELASTIC_FLUID` byte-identical; the
+    underwater_A / channel_B golden blocks). EXPECTED VALUES MOVED in
+    `tests/test_r14_triage_6.py` `InitialVoidFloorTests` (the 9 A1 controls
+    that pinned `Pmin 0` on a PC-0 carrier now run two arms: with
+    `mat_null_pc_mu=False` the original pure-A1 assertion, by default the
+    `-1e-20` from B1 with B1's sentence naming the mid; the refusal-text test
+    gains the B1 arm; `test_the_opt_out_keeps_Pmin_0_and_says_so_once` is
+    now `test_the_opt_out_falls_back_to_the_PC_cell_and_says_so_once`).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
   welds, the implicit thick shell and the implicit texts).** One commit per
   item; every figure below is a measured arm against the LS-DYNA reference on

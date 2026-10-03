@@ -447,8 +447,9 @@ def build_parser() -> argparse.ArgumentParser:
              "-> NORMAL in 1095 cycles (IE +394.0 %%), bird_B timeout -> "
              "NORMAL in 2936 cycles (IE +1484.7 %%), bird-el NORMAL either "
              "way (IE +454.1 -> +1134.6 %%) - NORMAL, not a match: the void "
-             "is still full of fluid. Use --no-initial-void-floor to keep "
-             "Pmin 0.",
+             "is still full of fluid. Use --no-initial-void-floor to fall "
+             "back to the *MAT_NULL PC cell (--no-mat-null-pc-mu as well "
+             "keeps Pmin 0).",
     )
     parser.add_argument(
         "--weld-exponents",
@@ -594,6 +595,23 @@ def build_parser() -> argparse.ArgumentParser:
              "2 -> 6 of 6; the plateau unchanged (RMS 0.164 %%). Tetrahedra "
              "are named, not changed. Use --no-corotational-orthotropic for "
              "the 65ff389 cards.",
+    )
+    parser.add_argument(
+        "--mat-null-pc-mu",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write the *MAT_NULL PC and MU cells on the /MAT/HYD_VISC of "
+             "every *MAT_NULL + *EOS_* carrier: Pmin = PC (PC 0.0 or blank "
+             "-> -1e-20: LS-DYNA cuts at zero, hm_read_mat06.F:154 reads "
+             "Pmin 0 as -INFINITY; PC > 0 refused) and Nu = MU / RO "
+             "(kinematic, m6law.F:98) only where every part of the material "
+             "is a *SECTION_SOLID ELFORM 6 on a deck without *INITIAL_VOID. "
+             "The ELFORM-12 void floor keeps precedence; with "
+             "--no-initial-void-floor alone a PC-0 void gets -1e-20 from "
+             "this rule. ON by default. MEASURED at nt 4: sph/bird IE "
+             "+69.44 -> +4.50 %% (0.832x cycles), channel_B -98.89 -> "
+             "-0.09 %%, channel_A -98.88 -> -4.03 %%; underwater_A/B stay "
+             "within 1 %%. Use --no-mat-null-pc-mu to keep Pmin 0 and Nu 0.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1270,6 +1288,7 @@ def main(argv=None) -> int:
         spotweld_efail_displacement=args.spotweld_efail_displacement,
         implicit_tshell_solid=args.implicit_tshell_solid,
         corotational_orthotropic=args.corotational_orthotropic,
+        mat_null_pc_mu=args.mat_null_pc_mu,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

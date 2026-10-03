@@ -2358,6 +2358,335 @@ class CorotationalOrthotropicFrame(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B1 — the *MAT_NULL PC / MU cells on /MAT/HYD_VISC
+# ═════════════════════════════════════════════════════════════════════════════
+
+_NU_PMIN_FLOOR = "                   0       -1.000000E-20"    # A1's row
+_NU_PMIN_ZERO = "                   0                   0"
+_GRUNEISEN_1 = ("*EOS_GRUNEISEN\n" + _row(1, 1.5e6, 1.0, 0.0, 0.0, 0.0, 0.0,
+                                          0.0) + "\n" + _row(1.0) + "\n")
+
+
+def _hex_nodes_x(nx: int) -> str:
+    nodes = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in range(nx + 1)]
+    return "*NODE\n" + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                               for i, (x, y, z) in enumerate(nodes, start=1))
+
+
+def _hex_x(eid: int, pid: int, x0: int, nx: int) -> str:
+    """One unit hex at x0..x0+1 of a lattice _hex_nodes_x(nx) numbered x
+    fastest, then y, then z."""
+    def nid(x, y, z):
+        return 1 + x + (nx + 1) * (y + 2 * z)
+    n = [nid(x0, 0, 0), nid(x0 + 1, 0, 0), nid(x0 + 1, 1, 0), nid(x0, 1, 0),
+         nid(x0, 0, 1), nid(x0 + 1, 0, 1), nid(x0 + 1, 1, 1), nid(x0, 1, 1)]
+    return "".join(f"{v:>8}" for v in [eid, pid] + n) + "\n"
+
+
+def _null_card(mid: int, ro, pc: str, mu, terod="", cerod="") -> str:
+    """*MAT_NULL card 1 with PC as TEXT, so a blank field can be written."""
+    return ("*MAT_NULL\n" + f"{mid:>10}{ro:>10}{pc:>10}{mu:>10}{terod:>10}"
+            f"{cerod:>10}" + "\n")
+
+
+def _null_fluid_deck(pc: str = "0.0", mu="0.0", ro=1.0e-9, elform=1,
+                     sph: bool = False, void: str = "", ammg: bool = False,
+                     eos: str = "gruneisen", terod="", cerod="",
+                     second_part_elform=None, no_part: bool = False) -> str:
+    """Part 1 = one unit hex (x 0..1) on *SECTION_SOLID 1 ELFORM *elform*,
+    material *MAT_NULL 1 + its EOS: ``gruneisen`` = *EOS_GRUNEISEN 1 (C 1.5e6:
+    with RO 1e-9 the tension floor -RO C^2 is -2250), ``linpoly`` =
+    *EOS_LINEAR_POLYNOMIAL 1 (C0 0, C1 1, C3 0: floor -1), ``eosid`` = the
+    material is *MAT_NULL 3 bound to *EOS_GRUNEISEN 1 by the *PART EOSID
+    field (sph/bird's route).
+    ``second_part_elform`` adds part 2 (x 1..2, section 2) on the SAME
+    material; ``sph`` moves part 1 onto an SPH section (8 particles);
+    ``void`` = "self" states *INITIAL_VOID_PART 1, "other" adds part 9 (x
+    2..3, ELFORM 12, *MAT_NULL 9 + *EOS_GRUNEISEN 9) as the void;
+    ``ammg`` adds an *ALE_MULTI-MATERIAL_GROUP over part 1; ``no_part``
+    leaves *MAT_NULL 1 unused (part 1 goes to a *MAT_ELASTIC 5)."""
+    mid = 3 if eos == "eosid" else 1
+    out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(1.0e-3), _hex_nodes_x(3)]
+    if sph:
+        out += ["*ELEMENT_SPH"] + [f"{n:>8}{1:>8}" for n in (1, 2, 5, 6, 9, 10,
+                                                          13, 14)]
+        out += ["*SECTION_SPH", _row(1, 1.2, 0.2, 2.0)]
+    else:
+        out += ["*ELEMENT_SOLID", _hex_x(1, 1, 0, 3).rstrip("\n"),
+                "*SECTION_SOLID", _row(1, elform)]
+    part_mid = 5 if no_part else mid
+    out += ["*PART", "fluid",
+            _row(1, 1, part_mid, 1 if eos == "eosid" else 0)]
+    if no_part:
+        out += ["*MAT_ELASTIC", _row(5, 7.85e-9, 210000.0, 0.3)]
+    if second_part_elform is not None:
+        out += ["*ELEMENT_SOLID", _hex_x(2, 2, 1, 3).rstrip("\n"),
+                "*SECTION_SOLID", _row(2, second_part_elform),
+                "*PART", "fluid 2", _row(2, 2, mid)]
+    out.append(_null_card(mid, ro, pc, mu, terod, cerod).rstrip("\n"))
+    if eos == "linpoly":
+        out += ["*EOS_LINEAR_POLYNOMIAL",
+                _row(1, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _row(0.0, 1.0)]
+    else:
+        out.append(_GRUNEISEN_1.rstrip("\n"))
+    if void == "self":
+        out += ["*INITIAL_VOID_PART", _row(1)]
+    elif void == "other":
+        out += ["*ELEMENT_SOLID", _hex_x(9, 9, 2, 3).rstrip("\n"),
+                "*SECTION_SOLID", _row(9, 12), "*PART", "void",
+                _row(9, 9, 9), _null_card(9, 1.0e-9, "0.0", "0.0").rstrip(),
+                _GRUNEISEN_1.replace(_row(1, 1.5e6), _row(9, 1.5e6)).rstrip(),
+                "*INITIAL_VOID_PART", _row(9)]
+    if ammg:
+        out += ["*ALE_MULTI-MATERIAL_GROUP", _row(1, 1)]
+    out.append("*END")
+    return "\n".join(out) + "\n"
+
+
+def _hyd_block(starter: str, mid: int):
+    lines = starter.splitlines()
+    i = lines.index(f"/MAT/HYD_VISC/{mid}")
+    return lines[i:i + 6]
+
+
+def _nu_pmin(starter: str, mid: int = 1) -> str:
+    return _hyd_block(starter, mid)[5]
+
+
+def _w(result, head: str):
+    return [w for w in result.warnings if w.startswith(head)]
+
+
+_WP = "*MAT_NULL PC -> /MAT/HYD_VISC Pmin"
+_WN1 = "*MAT_NULL MU -> /MAT/HYD_VISC Nu"
+_WN = "*MAT_NULL MU is NOT carried (Nu 0)"
+
+
+class MatNullPcMu(unittest.TestCase):
+    """B1 — every *MAT_NULL + *EOS_* /MAT/HYD_VISC carrier the void floor does
+    not cover gets Pmin = PC (PC 0 / blank -> -1e-20, LS-DYNA cuts at zero;
+    PC > 0 refused), and Nu = MU / RO only where every part of the material
+    is a *SECTION_SOLID ELFORM 6 on a deck without *INITIAL_VOID; every
+    excluded class is named. Keyed on the *MAT_NULL record, never on the
+    emitted card. --no-mat-null-pc-mu restores the 65ff389 cells."""
+
+    def test_PC_zero_is_written_minus_1e_20(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="0.0"))
+        self.assertEqual(_nu_pmin(s), _NU_PMIN_FLOOR)
+        hit = _w(r, _WP)
+        self.assertEqual(len(hit), 1, r.warnings)
+        for needle in ("/MAT/HYD_VISC/1 Pmin -1e-20 (PC 0; it can act",
+                       "-2250", "884 340", "hm_read_mat06.F:154",
+                       "--no-mat-null-pc-mu"):
+            self.assertIn(needle, hit[0])
+        for w in r.warnings:
+            self.assertNotIn("cavitation floor", w)
+            self.assertNotIn("INITIAL_VOID", w)
+
+    def test_PC_blank_is_the_same_rule(self):
+        r, s, _e = _convert(_null_fluid_deck(pc=""))
+        self.assertEqual(_nu_pmin(s), _NU_PMIN_FLOOR)
+        self.assertTrue(_has(r.warnings, "/MAT/HYD_VISC/1 Pmin -1e-20 (PC 0;"))
+
+    def test_a_negative_PC_is_written_as_stated(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-0.1"))
+        self.assertEqual(_nu_pmin(s), "                   0                -0.1")
+        r2, s2, _e2 = _convert(_null_fluid_deck(pc="-1.0E4"))
+        self.assertEqual(_nu_pmin(s2),
+                         "                   0              -10000")
+        self.assertTrue(_has(r2.warnings, "/MAT/HYD_VISC/1 Pmin -10000 (PC "
+                             "-10000; it cannot act: the /EOS/GRUNEISEN "
+                             "pressure never goes below -2250"), r2.warnings)
+
+    def test_a_positive_PC_is_refused_by_name(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="5.0"))
+        self.assertEqual(_nu_pmin(s), _NU_PMIN_ZERO)
+        self.assertTrue(_has(r.warnings, "*MAT_NULL 1: PC 5 is POSITIVE",
+                             "p.2-189"), r.warnings)
+        self.assertEqual(_w(r, _WP), [])
+
+    def test_the_linear_polynomial_floor(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", eos="linpoly"))
+        self.assertEqual(_nu_pmin(s), "                   0                  -1")
+        self.assertTrue(_has(r.warnings, "/EOS/POLYNOMIAL pressure never goes "
+                             "below -1"), r.warnings)
+        r2, _s2, _e2 = _convert(_null_fluid_deck(pc="-0.5", eos="linpoly"))
+        self.assertTrue(_has(r2.warnings, "Pmin -0.5 (PC -0.5; it can act: the "
+                             "/EOS/POLYNOMIAL pressure reaches -1"),
+                        r2.warnings)
+
+    def test_both_EOS_routes(self):
+        for route, mid in (("gruneisen", 1), ("eosid", 3)):
+            with self.subTest(route=route):
+                r, s, _e = _convert(_null_fluid_deck(pc="-1.0", eos=route))
+                self.assertEqual(_nu_pmin(s, mid),
+                                 "                   0                  -1")
+                self.assertTrue(_has(r.warnings, f"/MAT/HYD_VISC/{mid} Pmin -1 "
+                                     "(PC -1; it can act: the /EOS/GRUNEISEN "
+                                     "pressure reaches -2250"), r.warnings)
+
+    def test_MU_over_RO_on_ELFORM_6(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0E4", mu="1.0E-6",
+                                             elform=6))
+        self.assertEqual(_nu_pmin(s), "                1000              -10000")
+        hit = _w(r, _WN1)
+        self.assertEqual(len(hit), 1, r.warnings)
+        for needle in ("Nu 1000 (MU 1e-06 / RO 1e-09, parts [1])",
+                       "m6law.F:98", "channel_B goes IE -98.89 -> -0.09 %",
+                       "emits as a Lagrangian one-point /PROP/SOLID"):
+            self.assertIn(needle, hit[0])
+        self.assertEqual(_w(r, _WN), [])
+
+    def test_the_Nu_scope_names_every_excluded_class(self):
+        cases = (
+            ("ELFORM 1", {"elform": 1}, "Lagrangian solid (ELFORM 1)",
+             "10.3 -> 29.6"),
+            ("SPH", {"sph": True}, "parts [1]: SPH", "sph/bird"),
+            ("ELFORM 12, no void", {"elform": 12}, "ELFORM 12", "+20691.23 %"),
+            ("ELFORM 6 + a void elsewhere", {"elform": 6, "void": "other"},
+             "parts [1]: ELFORM 6", "+20691.23 %"),
+            ("ELFORM 11 + AMMG", {"elform": 11, "ammg": True},
+             "ELFORM 11 (multi-material ALE)", "*ALE_MULTI-MATERIAL_GROUP"),
+            ("ELFORM 6 + ELFORM 1 (mixed)",
+             {"elform": 6, "second_part_elform": 1},
+             "parts [1, 2]: ELFORM 6, Lagrangian solid (ELFORM 1)",
+             "the cell is per MATERIAL"),
+            ("no part", {"no_part": True}, "no *PART uses it",
+             "carries no Nu either"),
+        )
+        heads = {"+20691.23 %": "on the ELFORM-12 fluid of a *INITIAL_VOID",
+                 "*ALE_MULTI-MATERIAL_GROUP": "the cell is unmeasured there"}
+        for name, kw, cls, fact in cases:
+            with self.subTest(case=name):
+                r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
+                                                     **kw))
+                self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+                hits = _w(r, _WN)
+                self.assertEqual(len(hits), 1, r.warnings)
+                self.assertIn("/MAT/HYD_VISC/1 (MU 1e-06;", hits[0])
+                self.assertIn(cls, hits[0])
+                self.assertIn(fact, hits[0])
+                # WHICH sentence fired: the void / AMMG / class ones differ
+                want = heads.get(fact, "the one family where it was "
+                                       "measured right")
+                self.assertIn(want, hits[0])
+                self.assertEqual(_w(r, _WN1), [])
+
+    def test_A1_keeps_precedence(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="0.0", elform=12, void="self"))
+        self.assertEqual(_nu_pmin(s), _NU_PMIN_FLOOR)
+        self.assertTrue(_has(r.warnings,
+                             "cavitation floor Pmin = -1e-20 is written"))
+        self.assertEqual(_w(r, _WP), [])      # no non-A1 carrier
+        r2, s2, _e2 = _convert(_null_fluid_deck(pc="-7.5", elform=12,
+                                                void="self"))
+        self.assertEqual(_nu_pmin(s2), _NU_PMIN_FLOOR)
+        self.assertTrue(_has(r2.warnings, "The deck's PC -7.5 on *MAT_NULL 1 "
+                             "is OVERRIDDEN"), r2.warnings)
+        self.assertEqual(_w(r2, _WP), [])
+
+    def test_the_A1_opt_out_falls_back_to_the_PC_cell(self):
+        deck = _null_fluid_deck(pc="0.0", elform=12, void="self")
+        r, s, _e = _convert(deck, initial_void_floor=False)
+        self.assertEqual(_nu_pmin(s), _NU_PMIN_FLOOR)
+        self.assertTrue(_has(r.warnings, _WP, "/MAT/HYD_VISC/1 Pmin -1e-20"))
+        self.assertTrue(_has(r.warnings, "--no-initial-void-floor:",
+                             "carry the *MAT_NULL PC cell instead"))
+        self.assertFalse(_has(r.warnings, "--no-initial-void-floor:",
+                              "keep Pmin 0"))
+        r2, s2, _e2 = _convert(_null_fluid_deck(pc="-7.5", elform=12,
+                                                void="self"),
+                               initial_void_floor=False)
+        self.assertEqual(_nu_pmin(s2), "                   0                -7.5")
+        self.assertTrue(_has(r2.warnings, "/MAT/HYD_VISC/1 Pmin -7.5 (the "
+                             "stated PC)"), r2.warnings)
+        r3, s3, _e3 = _convert(deck, initial_void_floor=False,
+                               mat_null_pc_mu=False)
+        self.assertEqual(_nu_pmin(s3), _NU_PMIN_ZERO)
+        self.assertTrue(_has(r3.warnings, "--no-initial-void-floor:",
+                             "keep Pmin 0", "-INFINITY"), r3.warnings)
+
+    def test_MAT_NULL_reads_MU_TEROD_CEROD(self):
+        st = _dispatch(_null_card(1, 1.0e-9, "-7.5", 1.0e-6, 1.1, 0.8)
+                       .replace("*MAT_NULL", "*KEYWORD\n*MAT_NULL") + "*END\n")
+        m = st.mat_null[1]
+        self.assertEqual((m.pc, m.mu, m.terod, m.cerod),
+                         (-7.5, 1.0e-6, 1.1, 0.8))
+        for on in (True, False):
+            with self.subTest(on=on):
+                r, _s, _e = _convert(_null_fluid_deck(terod=1.1, cerod=0.8),
+                                     mat_null_pc_mu=on)
+                self.assertTrue(_has(r.warnings, "*MAT_NULL 1: TEROD 1.1 / "
+                                     "CEROD 0.8", "is DROPPED"), r.warnings)
+
+    def test_negative_MU_and_zero_RO_are_refused(self):
+        r, s, _e = _convert(_null_fluid_deck(mu="-1.0E-6", elform=6))
+        self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+        self.assertTrue(_has(r.warnings, "*MAT_NULL 1: MU -1e-06 is negative"))
+        r2, s2, _e2 = _convert(_null_fluid_deck(mu="1.0E-6", ro=0.0,
+                                                elform=6))
+        self.assertEqual(_nu_pmin(s2)[:20], " " * 19 + "0")
+        self.assertTrue(_has(r2.warnings, "*MAT_NULL 1: RO <= 0 as stated - "
+                             "Nu = MU / RO cannot be formed"), r2.warnings)
+        # the zero-density floor's 1e-24 is not a density to divide by: the
+        # refusal holds in both arms of that floor
+        r3, s3, _e3 = _convert(_null_fluid_deck(mu="1.0E-6", ro=0.0,
+                                                elform=6),
+                               zero_density_floor=False)
+        self.assertEqual(_nu_pmin(s3)[:20], " " * 19 + "0")
+        self.assertTrue(_has(r3.warnings, "RO <= 0 as stated"), r3.warnings)
+
+    def test_the_opt_out_restores_the_65ff389_cells(self):
+        deck = _null_fluid_deck(pc="-1.0E4", mu="1.0E-6", elform=6)
+        r_on, s_on, e_on = _convert(deck)
+        r_off, s_off, e_off = _convert(deck, mat_null_pc_mu=False)
+        self.assertEqual(_nu_pmin(s_off), _NU_PMIN_ZERO)
+        self.assertEqual(e_on, e_off)
+        a, b = s_on.splitlines(), s_off.splitlines()
+        self.assertEqual(len(a), len(b))
+        diff = [(x, y) for x, y in zip(a, b) if x != y]
+        self.assertEqual(diff, [("                1000              -10000",
+                                 _NU_PMIN_ZERO)])
+        self.assertTrue(_has(r_off.warnings, "--no-mat-null-pc-mu: the "
+                             "*MAT_NULL PC / MU cells are not carried on "
+                             "/MAT/HYD_VISC [1]"), r_off.warnings)
+        self.assertEqual(_w(r_off, _WP) + _w(r_off, _WN1), [])
+
+    def test_MAT_ELASTIC_FLUID_is_untouched(self):
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+                + _hex_nodes_x(1) + "*ELEMENT_SOLID\n" + _hex_x(1, 1, 0, 1)
+                + "*SECTION_SOLID\n" + _row(3, 2) + "\n"
+                "*PART\nair\n" + _row(1, 3, 3) + "\n"
+                "*MAT_ELASTIC_FLUID\n"
+                + _row(3, 1.22, 0.0, 0.0, 0.0, 0.0, 141.03, 0) + "\n"
+                + _row(0.0, 0.0) + "\n*END\n")
+        r_on, s_on, e_on = _convert(deck)
+        _r, s_off, e_off = _convert(deck, mat_null_pc_mu=False)
+        self.assertIn("/MAT/HYD_VISC/3", s_on)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+        self.assertFalse(any(w.startswith("*MAT_NULL") for w in r_on.warnings))
+
+    def test_golden_underwater_A_and_channel_B_cards(self):
+        """The two corpus carriers' own cards: underwater_A (*MAT_NULL 1 RO
+        1E-09 PC 0.0 MU 0.0, *EOS_GRUNEISEN C 15000000, ELFORM 1) and channel_B
+        (RO 1E-09 PC -10000 MU 1E-06, *EOS_GRUNEISEN C 1500000, ELFORM 6)."""
+        uw = _null_fluid_deck(pc="0.0", elform=1).replace(
+            _row(1, 1.5e6), _row(1, 1.5e7))
+        ch = _null_fluid_deck(pc="-10000", mu="1E-06", elform=6)
+        for deck, row in ((uw, _NU_PMIN_FLOOR),
+                          (ch, "                1000              -10000")):
+            with self.subTest(row=row):
+                _r, s, _e = _convert(deck)
+                self.assertEqual(_hyd_block(s, 1), [
+                    "/MAT/HYD_VISC/1", "FLUID_1", "#              RHO_I",
+                    "        1.000000E-09",
+                    "#                 Nu                Pmin", row])
+        r_uw, _s, _e = _convert(uw)
+        self.assertTrue(_has(r_uw.warnings, "/EOS/GRUNEISEN pressure reaches "
+                             "-225000"), r_uw.warnings)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The flags of part B reach the parser, the API, the GUI and the README
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2368,10 +2697,13 @@ class Round7FlagWiringB(Round7FlagWiringA):
 
     _FLAGS = {
         "--corotational-orthotropic": "corotational_orthotropic",
+        "--mat-null-pc-mu": "mat_null_pc_mu",
     }
     _HELP_FIGURES = {
         "--corotational-orthotropic": ("6.0047", "1.5049",
                                        "smorth3.F:324-327", "0.164 %"),
+        "--mat-null-pc-mu": ("hm_read_mat06.F:154", "m6law.F:98", "+4.50 %",
+                             "-0.09 %", "0.832x"),
     }
 
 
@@ -2389,7 +2721,16 @@ _RETRACTED_ROUND_7_B = (
     "the set",
     "it is NOT changed (its crush under a co-rotational frame has no "
     "reference here)",
+    # B1: the *MAT_NULL PC / MU cells are carried since round 7
+    "Only the ELFORM-12 void cavitation floor passes a value",
+    "MU (field 4) stays unread",
+    "it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item)",
+    "--no-initial-void-floor to keep Pmin 0",
+    "*INITIAL_VOID fluids keep Pmin 0",
 )
+
+#: The README spells the cell with backticks; one regex for both spellings.
+_RETRACTED_ROUND_7_B_RE = (r"\*MAT_NULL`? PC cell is not carried",)
 
 
 class Round7RetractedStatementsB(unittest.TestCase):
@@ -2403,6 +2744,17 @@ class Round7RetractedStatementsB(unittest.TestCase):
                 with self.subTest(file=rel, needle=needle):
                     self.assertNotIn(_collapse(needle).lower(),
                                      joined.lower())
+            for pattern in _RETRACTED_ROUND_7_B_RE:
+                with self.subTest(file=rel, pattern=pattern):
+                    self.assertIsNone(re.search(pattern, joined), rel)
+
+    def test_the_regex_fires_on_both_spellings(self):
+        for pattern in _RETRACTED_ROUND_7_B_RE:
+            for text in ("(the *MAT_NULL PC cell is not carried)",
+                         "(the `*MAT_NULL` PC cell is not carried)"):
+                with self.subTest(pattern=pattern, text=text):
+                    self.assertIsNotNone(re.search(pattern, _collapse(
+                        re.sub(r'"\s*\n\s*"', "", text))))
 
     def test_the_guard_fires_on_each_retracted_spelling(self):
         for needle in _RETRACTED_ROUND_7_B:
@@ -2427,6 +2779,19 @@ class Round7RetractedStatementsB(unittest.TestCase):
              "_ELEMENT_FRAME_IPS_ALL = (20, 21, 23, 24)"),
             ("README.md", "Since round 7 every element-frame orthotropic "
              "`/PROP/TYPE6` is written CO-ROTATIONAL"),
+            ("k2rad/writer/materials.py", "Two callers' values: the "
+             "ELFORM-12 void cavitation floor"),
+            ("k2rad/writer/materials.py", "carry the *MAT_NULL PC cell "
+             "instead: "),
+            ("k2rad/writer/materials.py", "--no-initial-void-floor to fall "
+             "back to the *MAT_NULL PC cell"),
+            ("k2rad/handlers.py", "# PC / MU / TEROD / CEROD: card 1 fields "
+             "3-6."),
+            ("k2rad/cli.py", "Use --no-initial-void-floor to fall back to "
+             "the *MAT_NULL PC cell"),
+            ("k2rad_gui.py", "*INITIAL_VOID fluids get no cavitation floor"),
+            ("README.md", "before round 7 the `*MAT_NULL` PC cell was not "
+             "carried"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):
