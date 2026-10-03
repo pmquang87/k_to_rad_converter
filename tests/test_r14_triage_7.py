@@ -1082,6 +1082,21 @@ class ImplicitThickShellSolidRoute(unittest.TestCase):
         self.assertTrue(_has(res.warnings, _TS_KEPT, "/MAT/LAW1",
                              "kept on /PROP/TYPE20"), res.warnings)
 
+    def test_10_the_routed_elements_stay_thick_shells_for_every_walk(self):
+        """The route changes the PROPERTY only: the elements stay in
+        tshell_elems, so a thick-shell walk still reaches them. Pinned on
+        the history walk: a *DATABASE_HISTORY_TSHELL_SET over a *SET_PART
+        holding the routed part expands through tshell_elems
+        (writer/output._TH_SET_SOURCES) and must still list both elements in
+        /TH/BRIC. Moving the routed elements into solid_elems empties it."""
+        extra = ("*SET_PART_LIST\n" + _row(9) + "\n" + _row(1) + "\n"
+                 "*DATABASE_HISTORY_TSHELL_SET\n" + _row(9) + "\n")
+        _r, starter, _e = _convert(_ts_deck(extra=extra))
+        self.assertIn("/PROP/SOLID/1", starter)
+        th = _block_lines(starter, "/TH/BRIC/")
+        ids = [int(ln) for ln in th if ln.strip().isdigit()]
+        self.assertEqual(ids, [1, 2], th)
+
 
 class LumperCountsThickShells(unittest.TestCase):
     """A4 (ii) — ``lumping.nodal_masses_from_state`` lumps thick shells like

@@ -201,8 +201,10 @@ Prior history (before this changelog was introduced) is summarized in the
     is) and a FINMASS on a thick-shell part reaches its nodes; IN stays
     shell-only. 0 default `.rad` bytes (in the writer this function feeds only
     `--mass-weighted-inivel` and A2's refusal tensor; no roster rigid body is
-    made of thick shells). New tests: `ImplicitThickShellSolidRoute` (9) and
-    `LumperCountsThickShells` (3).
+    made of thick shells). New tests: `ImplicitThickShellSolidRoute` (10;
+    the tenth pins that the routed elements stay thick shells for every
+    walk - a `*DATABASE_HISTORY_TSHELL_SET` over a `*SET_PART` still lists
+    them in `/TH/BRIC`) and `LumperCountsThickShells` (3).
   - **A5 — the implicit and spring texts (no flag, 0 `.rad` bytes).**
     (i) The `vdc = 0 → VisS = 0 … set vdc on *CONTACT Card2` remedy is no
     longer printed about k2rad's OWN injected implicit stub
