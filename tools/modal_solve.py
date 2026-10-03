@@ -60,7 +60,9 @@ identical to machine precision):
   volume×rho, beam length×A×rho) split evenly over its nodes, plus
   *ELEMENT_MASS / *ELEMENT_MASS_PART additions;
 * rotational DOFs of shell nodes: the Radioss shell lumping
-  IN = Σ_elems (m_elem/n_nodes)·(A_elem + t²)/12;
+  IN = Σ_elems (m_elem/4)·(A_elem + t²)/12 over the /SHELL corners
+  (cinmas.F:1379) and, for a /SH3N, the whole element's
+  m_elem·(A_elem/4.5 + t²/12) spread by its corner angles (c3inmas.F:1111);
 * rotational DOFs of solid/beam-only nodes: zero (solid nodes have no
   rotational stiffness so those DOFs never appear in K; beam rotary inertia
   is not modeled — shift-invert eigsh accepts the semi-definite M).

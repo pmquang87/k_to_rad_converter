@@ -340,15 +340,22 @@ def _inertia_lines(j: Tuple[float, ...]) -> List[str]:
 
 #: The relative margin of the ``J = -SUM(IN)`` correction (round 7, A2): the
 #: corrected tensor's smallest principal value must exceed ``RIGID_IN_MARGIN``
-#: x its largest, or the body keeps ``J = 0`` and is named. The starter's own
-#: threshold is ``<= 0`` (ERROR 274, ``inirby.F:823-830``), but k2rad's lumper
-#: is not the starter on every body (foam.k's CHEXA body differs by 14.1 % on
-#: its minimum axis, a solid-lumping difference), so a body near 0 is refused
-#: on a RELATIVE margin. It is not ``lumping._INERTIA_RANK_TOL``: that one
-#: guards a division in the momentum average, this one a negative starter
-#: eigenvalue. Reach on the 356 roster keys: 0 of the rule's bodies (the
-#: smallest ratio among them is 3.1e-4, forging_A/B).
-RIGID_IN_MARGIN = 1.0e-6
+#: x its largest, or the body keeps ``J = 0`` and is named. The margin is the
+#: starter's own threshold on its DEFAULT path (the round-7 validation round;
+#: it was 1e-6, set against ERROR 274): k2rad writes Ispher 0, which
+#: ``hm_read_rbody.F:243`` reads as 2, and ``inirby.F:753-758`` then raises
+#: every principal value at or below 1e-3 x the largest by 0.1 x the largest
+#: (WARNING 275) before ERROR 274 tests ``<= 0`` (``:823-830``) - so a
+#: corrected tensor under 1e-3 does not reach LS-DYNA's point-mass value, it
+#: gets 10 % of the largest. MEASURED (starter only): a sliver body at a
+#: point-mass ratio of 7.5e-5 passed the old margin and read 1.31e-8 on its
+#: minimum axis, 1334x LS-DYNA's point-mass 9.8e-12, where J = 0 gives
+#: 9.9e-10. It is not ``lumping._INERTIA_RANK_TOL``: that one guards a
+#: division in the momentum average. Reach on the 356 roster keys: 2 deck
+#: keys on 2 emitted models, one body each (forging_A, forging_B: ratio
+#: 3.12e-4; both stop at starter ERROR 179 first); the next smallest ratio
+#: among the rule's bodies is 1.73e-3 (the Yaris suspension giants).
+RIGID_IN_MARGIN = 1.0e-3
 
 
 def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
@@ -356,11 +363,16 @@ def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
     """Why ``k2rad.lumping``'s nodal ``IN`` would NOT be the starter's for a
     body over *nodes*, or ``""``.
 
-    The lumper computes ``IN = (m/n)(A + t^2)/12`` per shell corner — the
-    ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11, ``:919-925``),
-    ``ZSHIFT = 0``, one layer, the SECTION thickness. Any shell on the body
-    that the starter lumps differently makes ``-SUM(IN)`` the wrong amount,
-    so the body is skipped by name: Ishell < 11 (FAC 9), a layered property
+    The lumper computes ``IN = (m/4)(A + t^2)/12`` per ``/SHELL`` corner —
+    the ``cinmas.F:1379`` value at ``FAC = 12`` (Ishell >= 11,
+    ``:919-925``), ``ZSHIFT = 0``, one layer, the SECTION thickness — and
+    for a ``/SH3N`` (three distinct corners) the whole-element
+    ``m (A/4.5 + t^2/12)`` of ``c3inmas.F:1111``, spread by the corner
+    angles (the round-7 validation round; before it a triangle got the quad
+    formula and 41 of the rule's 153 bodies on 15 roster keys kept up to
+    9.2 % of their SUM(IN)). Any shell on the body that the starter lumps
+    differently makes ``-SUM(IN)`` the wrong amount, so the body is skipped
+    by name: Ishell < 11 (FAC 9), a layered property
     (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an
     offset, since a plain shell's NLOC and *ELEMENT_SHELL_OFFSET are dropped
     at read time), an element-level thickness, or a shell with no
@@ -428,7 +440,8 @@ def _body_tensor(state: ConversionState, nodes: Set[int],
 
 def _rigid_shell_in_correction(
         state: ConversionState, nodes: Set[int], j_old: Tuple[float, ...],
-        lumped: Tuple[Dict[int, float], Dict[int, float]]
+        lumped: Tuple[Dict[int, float], Dict[int, float]],
+        tri_nodes: Optional[Set[int]] = None
 ) -> Tuple[Tuple[float, ...], str, Dict]:
     """``J = J_old - SUM(IN)`` on the diagonal of ONE ``*MAT_RIGID`` /
     ``*DEFORMABLE_TO_RIGID`` part body (round 7, A2) -> ``(J, status,
@@ -440,18 +453,22 @@ def _rigid_shell_in_correction(
     ``RIGID_IN_MARGIN`` x the largest) or ``""`` (no shell IN on the body at
     all - nothing is written, no ``-0`` either: icfd's main_fsi.k states
     ``*SECTION_SHELL t1 = 0.0`` on its rigid shells). ``SUM(IN)`` is the
-    lumper's ``IN`` (``k2rad.lumping.nodal_masses_from_state``, shells only,
-    the ``cinmas.F:1379`` value) summed ONCE over *nodes* - the body's
+    lumper's ``IN`` (``k2rad.lumping.nodal_masses_from_state``, shells only:
+    the ``cinmas.F:1379`` value for a ``/SHELL``, the ``c3inmas.F:1111`` one
+    for a ``/SH3N``) summed ONCE over *nodes* - the body's
     secondaries and its main node, i.e. every node the starter adds ``IN``
     for (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
     merged deformable shells and a ``*CONSTRAINED_RIGID_BODIES`` union
-    included. The off-diagonal cells are left as they were."""
+    included. The off-diagonal cells are left as they were. *tri_nodes*
+    (``lumping.triangle_shell_nodes``) only counts the body's ``/SH3N``
+    corners into ``facts["n_tri"]`` for the warning."""
     import math
     from ..lumping import _sym3_eigen
     mass_by_node, in_by_node = lumped
     shell_nodes = sorted(n for n in nodes if in_by_node.get(n, 0.0) > 0.0)
     sum_in = math.fsum(in_by_node[n] for n in shell_nodes)
-    facts: Dict = {"sum_in": sum_in, "n_shell": len(shell_nodes)}
+    facts: Dict = {"sum_in": sum_in, "n_shell": len(shell_nodes),
+                   "n_tri": len(nodes & tri_nodes) if tri_nodes else 0}
     if sum_in <= 0.0:
         return j_old, "", facts
     why = _rbody_in_skip_reason(state, nodes)
@@ -479,15 +496,22 @@ def _rigid_shell_in_correction(
 
 
 def _warn_rigid_shell_in(state: ConversionState,
-                         applied: List[Tuple[int, int]],
+                         applied: List[Tuple[int, int, int]],
                          skipped: List[Tuple[str, int, int, str]],
                          refused: List[Tuple[str, int, int, Dict]]) -> None:
     """The A2 warnings (round 7): ONE line per deck for the bodies that were
-    written (with the measured evidence), one line per body kept by name."""
+    written (with the measured evidence; *applied* rows are ``(pid, main,
+    /SH3N corners on the body)``), one line per body kept by name."""
     if applied:
-        ids = [main for _pid, main in applied]
+        ids = [main for _pid, main, _ntri in applied]
         shown = ", ".join(f"/RBODY/{m}" for m in ids[:5]) + (
             f" and {len(ids) - 5} more" if len(ids) > 5 else "")
+        n_tri = sum(1 for _pid, _main, ntri in applied if ntri)
+        tri = (f" On {n_tri} of these bodies some shells are /SH3N, whose "
+               "IN the starter takes from c3inmas.F:1111 instead: the whole "
+               "element's m (A/4.5 + t^2/12), spread by the corner angles / "
+               "pi (spmd_msin.F:555-556) - and so does the subtraction."
+               if n_tri else "")
         state.warn(
             "*MAT_RIGID / *DEFORMABLE_TO_RIGID: J = -SUM(IN) written into the "
             f"Jxx/Jyy/Jzz cells of {len(ids)} /RBODY block(s) ({shown}): the "
@@ -502,7 +526,7 @@ def _warn_rigid_shell_in(state: ConversionState,
             "(in-plane) -> 0.00 % against the closed form; "
             "intro-by-j.-day/joint/joint-i/revo-stiff.k IE / KE history RMS "
             f"{_A2_REVO_RMS} % of the LS peak at {_A2_REVO_CYCLES} the cycles "
-            "(the main node's rotational step shrinks with J). Pass "
+            "(the main node's rotational step shrinks with J)." + tri + " Pass "
             "--no-rigid-shell-rotary-inertia to keep J = 0.")
     for kw, pid, main, why in skipped:
         state.warn(
@@ -514,8 +538,13 @@ def _warn_rigid_shell_in(state: ConversionState,
             f"{kw} pid={pid}: /RBODY/{main} keeps J = 0 - with J = -SUM(IN) = "
             f"{-facts['sum_in']:g} its point-mass tensor's smallest principal "
             f"value {facts['ev_min']:g} would not exceed {RIGID_IN_MARGIN:g} x "
-            f"the largest {facts['ev_max']:g} (a collinear or near-collinear "
-            "body: starter ERROR 274 at <= 0, inirby.F:823-830).")
+            f"the largest {facts['ev_max']:g} (a near-collinear or sliver "
+            "body). At the default Ispher (0, read as 2: hm_read_rbody.F:243) "
+            "the starter raises every principal value at or below 1e-3 x the "
+            "largest by 0.1 x the largest (WARNING 275, inirby.F:753-758), "
+            "far above the point-mass value LS-DYNA uses, so the shell IN "
+            "the starter adds is kept instead; ERROR 274 (inirby.F:823-830) "
+            "fires only below -0.1 x the largest.")
 
 
 #: The revo-stiff figures the A2 warning quotes, ONE copy (the same
@@ -756,7 +785,8 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     # J = -SUM(IN) (round 7, A2): the lumper runs once, lazily, and the three
     # outcomes are reported after the loop
     lumped: Optional[Tuple[Dict[int, float], Dict[int, float]]] = None
-    a2_applied: List[Tuple[int, int]] = []
+    tri_nodes: Set[int] = set()
+    a2_applied: List[Tuple[int, int, int]] = []
     a2_skipped: List[Tuple[str, int, int, str]] = []
     a2_refused: List[Tuple[str, int, int, Dict]] = []
     for pid, all_nodes in sorted(nodes_by_pid.items()):
@@ -997,12 +1027,15 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         j_status = ""
         if props is None and state.options.rigid_shell_rotary_inertia:
             if lumped is None:
-                from ..lumping import nodal_masses_from_state
+                from ..lumping import (nodal_masses_from_state,
+                                       triangle_shell_nodes)
                 lumped = nodal_masses_from_state(state)
+                tri_nodes = triangle_shell_nodes(state)
             j_vals, j_status, j_facts = _rigid_shell_in_correction(
-                state, set(unique_nodes) | {ind_node}, j_vals, lumped)
+                state, set(unique_nodes) | {ind_node}, j_vals, lumped,
+                tri_nodes)
             if j_status == "applied":
-                a2_applied.append((pid, ind_node))
+                a2_applied.append((pid, ind_node, j_facts["n_tri"]))
             elif j_status == "skipped":
                 a2_skipped.append((kw, pid, ind_node, j_facts["reason"]))
             elif j_status == "refused":
@@ -2001,7 +2034,7 @@ def _make_screw_carriage_rbodies(state: ConversionState,
     secondaries ``0.1 x |N1N3|`` off it along the two global axes normal to
     the screw axis (in increasing order - a stated geometric convention),
     Mass 1e-6, J 1e-6 x 3, ICoG 3 (the centre of gravity at the main node,
-    ``radioss2021/RBODY/rbody.cfg:126-133``). The three nodes are drawn from
+    ``radioss2021/RBODY/rbody.cfg:135-139``). The three nodes are drawn from
     ``state.next_node_id()`` and registered in ``state.nodes`` BEFORE the
     /NODE section is written. Registered in ``state.rbody_ids`` (the #106
     register) but NOT in ``rbody_info`` / ``rigid_nodes`` - producers 4 and

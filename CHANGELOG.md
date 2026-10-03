@@ -318,7 +318,9 @@ Prior history (before this changelog was introduced) is summarized in the
   - **A2 — `J = −ΣIN` on every `*MAT_RIGID` / `*DEFORMABLE_TO_RIGID` part
     `/RBODY` carrying shell rotary inertia (default ON,
     `--no-rigid-shell-rotary-inertia`).** The starter ADDS every shell node's
-    lumped rotary inertia `IN = (m/n)(A + t²)/12` (`cinmas.F:1379`, FAC 12)
+    lumped rotary inertia — `IN = (m/4)(A + t²)/12` per `/SHELL` corner
+    (`cinmas.F:1379`, FAC 12); a `/SH3N`'s is `c3inmas.F:1111`'s, which part
+    A's lumper did not have (the validation round's entry) —
     to a rigid body's tensor for ICoG 1/2/3 (`inirby.F:166-168` the main
     node, `:355-363` the secondaries) and the `/RBODY` J cells are additive
     (`:154-160`), while LS-DYNA's rigid-part inertia is the point-mass sum of
@@ -333,10 +335,11 @@ Prior history (before this changelog was introduced) is summarized in the
     `loads.py` to `rbody.py`, one function for both callers: a layered
     section, an element thickness, Ishell < 11, no `*SECTION_SHELL`; 0 of
     the roster's bodies); refused by name, `J` kept, when the corrected
-    tensor's smallest principal value is not above `1e-6` × its largest
-    (`RIGID_IN_MARGIN`; ERROR 274 fires at ≤ 0, `inirby.F:823-830`, and the
-    lumper is not the starter on every body; reach 0 — a collinear probe, a
-    near-collinear probe and their control pin it); a body with no shell IN
+    tensor's smallest principal value is not above `RIGID_IN_MARGIN` × its
+    largest (`1e-6` at part A's commit, set against ERROR 274's `≤ 0`;
+    `1e-3` since the validation round, the starter's own WARNING-275
+    threshold on its default path — see that round's entry; a collinear
+    probe, a near-collinear probe and their control pin it); a body with no shell IN
     (icfd's `main_fsi.k`, `t1 = 0.0`) gets nothing; never on a CNRB, a weld /
     tie / probe body or ICoG 4. `--mass-weighted-inivel` (round 6, A7) gains
     two guards: it never subtracts on a body the producer corrected or

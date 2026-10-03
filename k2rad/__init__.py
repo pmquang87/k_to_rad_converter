@@ -659,15 +659,18 @@ def convert(
         Write ``J = -SUM(IN)`` into the ``Jxx/Jyy/Jzz`` cells of every
         ``*MAT_RIGID`` / ``*DEFORMABLE_TO_RIGID`` part ``/RBODY`` (ICoG != 4)
         whose nodes carry lumped shell rotary inertia (round 7, A2). The
-        starter ADDS every shell node's ``IN = (m/n)(A + t^2)/12``
-        (``cinmas.F:1379``, FAC 12) to a rigid body's tensor
+        starter ADDS every shell node's ``IN`` - ``(m/4)(A + t^2)/12`` per
+        ``/SHELL`` corner (``cinmas.F:1379``, FAC 12), ``m(A/4.5 + t^2/12)``
+        per ``/SH3N`` spread by the corner angles (``c3inmas.F:1111``) - to a
+        rigid body's tensor
         (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
         while LS-DYNA's rigid-part inertia is the point-mass sum (Theory R16
         eqs 29.21-29.23; 18 of 18 reference d3hsp tensors within 0.04 %).
         **On by default.** Written in the producer (a CNRB PID that shadows a
         part id no longer hides the body), skipped by name where the lumper
-        is not the starter's, refused by name below a relative ``1e-6``
-        margin (ERROR 274), never on CNRB / weld / tie / probe bodies.
+        is not the starter's, refused by name at or below a relative
+        ``1e-3`` margin (the starter's WARNING 275 threshold,
+        ``inirby.F:753-758``), never on CNRB / weld / tie / probe bodies.
         MEASURED (nt 4): a spun rigid plate's rotational KE +16.83 / +33.66 %
         -> 0.00 %; ``revo-stiff`` IE / KE history RMS
         4.96 / 2.94 -> 0.78 / 0.73 % of the LS peak at 1.156x the cycles

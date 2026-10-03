@@ -472,7 +472,8 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
     * the drive: ``/IMPVEL/LAGMUL`` Dir XX / YY / ZZ on A's main, on the
       differentiated displacement curve (VAD 2) or the deck's own velocity
       curve (VAD 0), ``Ascale_x 1`` / ``Fscale_y SF`` (the radioss110 card
-      the /BEGIN 2022 deck reads; ``read_impvel_lagmul.F:192-194``);
+      the /BEGIN 2022 deck reads; ``read_impvel_lagmul.F:160-161``, zeros
+      defaulted at ``:181-187``);
     * ``/GJOINT/RACK``: node_ID0 = the carriage, FscaleV = -1/PARM (the
       reader inverts the cell, ``hm_read_gjoint.F:221``), node_ID1 = A's main
       (the spinning body), node_ID2 = B's main, r1 = r2 = the unit screw axis

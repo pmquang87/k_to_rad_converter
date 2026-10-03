@@ -1770,7 +1770,8 @@ def _spring_kc(dofs, l13: float = 0.0
     C_r))``. An Ileng 1 property divides all four by the length afterwards
     (``r4def3.F:870-875``); the caller does that. The PRINTED K is used:
     where a force curve is steeper the starter raises K to its slope
-    (``rkini3.F:50``) and the true step is shorter."""
+    (``rkini3.F:73-80``, ``XK = MAX(XK, LSCALE*(B2-B1)/(A2-A1))`` at
+    ``:79``) and the true step is shorter."""
     ds = [_as_spring_dof(d) for d in dofs]
     k_s = max([d.k for d in ds[1:3]] + [0.0])
     c_s = max([d.c for d in ds[1:3]] + [0.0])
@@ -5940,9 +5941,13 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
 
     SKIPPED by name: ICoG 4 (``inirby.F:322`` adds no nodal ``IN``; the J is
     the deck's ``*PART_INERTIA`` tensor) and any body whose shells the lumper
-    does not reproduce (``_rbody_in_skip_reason``). REFUSED by name: a
-    principal value of the corrected tensor ``<= 0`` (starter ERROR 274,
-    ``inirby.F:823``).
+    does not reproduce (``_rbody_in_skip_reason``). REFUSED by name: the
+    corrected tensor's smallest principal value not above
+    ``rbody.RIGID_IN_MARGIN`` (1e-3) x its largest - the A2 producer's
+    margin, the starter's own default-path threshold (WARNING 275 raises
+    such a value by 0.1 x the largest, ``inirby.F:753-758``; ERROR 274 is
+    ``<= 0``, ``inirby.F:823``; this pass refused at ``<= 0`` until the
+    round-7 validation round).
 
     HOW. A POST-REGISTRY pass: every ``/RBODY`` block is built before the
     inivel sections decide the re-point, and the decision needs
@@ -5957,7 +5962,7 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
     if not mains or not state.options.mass_weighted_inivel:
         return
     from ..lumping import _sym3_eigen, nodal_masses_from_state
-    from .rbody import _inertia_lines
+    from .rbody import RIGID_IN_MARGIN, _inertia_lines
     mass_by_node, in_by_node = nodal_masses_from_state(state)
     for main in sorted(mains):
         rec = next((info for info in rbody_info.values()
@@ -6034,12 +6039,19 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
         t[2][1] += j_new[4]
         t[0][2] += j_new[5]
         t[2][0] += j_new[5]
-        low = min(_sym3_eigen(t)[0])
-        if not low > 0.0:
+        evs = _sym3_eigen(t)[0]
+        low, high = min(evs), max(evs)
+        # the A2 producer's margin, the starter's own default-path threshold
+        # (round-7 validation round: WARNING 275 raises a principal value at
+        # or below 1e-3 x the largest long before ERROR 274's <= 0)
+        if not (high > 0.0 and low > RIGID_IN_MARGIN * high):
             state.warn(
                 f"--mass-weighted-inivel: /RBODY/{main} keeps its J - with "
-                f"J = {j_new[0]:g} a principal value of the body tensor would "
-                f"be {low:g} <= 0 (starter ERROR 274, inirby.F:823).")
+                f"J = {j_new[0]:g} the body tensor's smallest principal value "
+                f"{low:g} would not exceed {RIGID_IN_MARGIN:g} x the largest "
+                f"{high:g} (starter WARNING 275 raises it by 0.1 x the "
+                "largest, inirby.F:753-758; ERROR 274 at <= 0, "
+                "inirby.F:823).")
             continue
         hits = [i for i, ln in enumerate(lines) if ln == f"/RBODY/{main}"]
         old = _inertia_lines(j_old)

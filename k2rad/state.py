@@ -7756,7 +7756,9 @@ class ConvertOptions:
     # 7, A2).
     #
     # ON by default. The starter ADDS every shell node's lumped rotary
-    # inertia IN = (m/n)(A + t^2)/12 (cinmas.F:1379, FAC 12) to a rigid body's
+    # inertia IN - (m/4)(A + t^2)/12 per /SHELL corner (cinmas.F:1379, FAC
+    # 12), m(A/4.5 + t^2/12) per /SH3N spread by the corner angles
+    # (c3inmas.F:1111) - to a rigid body's
     # tensor for ICoG 1/2/3 (inirby.F:166-168 the main node, :355-363 the
     # secondaries) and the J cells are additive, while LS-DYNA's rigid-part
     # inertia is the point-mass sum of the nodal masses (Theory R16 eqs
@@ -7764,8 +7766,9 @@ class ConvertOptions:
     # within 0.04 %). So the producer (writer/rbody._make_rbodies) writes
     # Jxx = Jyy = Jzz = -SUM(IN) over the body's nodes; skipped by name where
     # the lumper is not the starter's (layered, element thickness, Ishell <
-    # 11, no section), refused by name below a relative 1e-6 margin (ERROR
-    # 274), never on CNRB / weld / tie / probe bodies or ICoG 4. MEASURED: a
+    # 11, no section), refused by name at or below a relative 1e-3 margin
+    # (the starter's WARNING 275 threshold, inirby.F:753-758), never on CNRB
+    # / weld / tie / probe bodies or ICoG 4. MEASURED: a
     # spun rigid plate's rotational KE +16.83 / +33.66 % -> 0.00 %;
     # revo-stiff deviation -> match (writer/rbody._A2_REVO_RMS). Reach: 56
     # deck keys on 53 emitted models (153 bodies).
@@ -9477,7 +9480,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1016, :1452, :1564, :1753, :1910, :2034, in that order:
+    # (writer/rbody.py:1049, :1485, :1597, :1786, :1943, :2067, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

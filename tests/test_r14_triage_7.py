@@ -532,8 +532,9 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
 
     def test_7_the_margin_is_RELATIVE(self):
         """A NEARLY collinear body (ev_min ~1e-10 x ev_max, positive): the
-        starter's own '<= 0' would write it, the 1e-6 margin refuses it. The
-        probe proves it reaches that window before asserting the refusal."""
+        ERROR-274 test '<= 0' would write it, the relative margin refuses it
+        (1e-3 since the validation round, test 17). The probe proves it
+        reaches that window before asserting the refusal."""
         from k2rad.lumping import _sym3_eigen, nodal_masses_from_state
         from k2rad.writer.rbody import RIGID_IN_MARGIN, _body_tensor
         deck = _j_plate_deck(extra=_sliver() + _floating_rigid((31, 32, 33)))
@@ -546,7 +547,7 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
         main = _rbody_main_by_title(starter, "floating rigid")
         self.assertEqual(_rbody_j_rows(starter, main)[2], _J_ZERO_ROW)
         self.assertTrue(_has(res.warnings, f"/RBODY/{main} keeps J = 0",
-                             "would not exceed 1e-06 x the largest"),
+                             "would not exceed 0.001 x the largest"),
                         res.warnings)
         # the plate beside it is still corrected (the refusal is per body)
         plate = _rbody_main_by_title(starter, "rigid plate")
@@ -671,6 +672,88 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
         res, starter, _e = _convert(deck)
         self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
         self.assertFalse(_has(res.warnings, _A2_APPLIED), res.warnings)
+
+    def test_17_the_margin_sits_at_the_starters_WARNING_275_threshold(self):
+        """The validation round: at k2rad's Ispher 0 (read as 2,
+        hm_read_rbody.F:243) the starter raises every principal value at or
+        below 1e-3 x the largest by 0.1 x the largest (WARNING 275,
+        inirby.F:753-758) before ERROR 274 tests <= 0, so the old 1e-6
+        margin handed it a sliver tensor it inflates. A sliver body at a
+        point-mass ratio of 7.5e-5 is refused; the same body at 1.87e-3 is
+        written (the control)."""
+        from k2rad.lumping import _sym3_eigen, nodal_masses_from_state
+        from k2rad.writer.rbody import RIGID_IN_MARGIN, _body_tensor
+        self.assertEqual(RIGID_IN_MARGIN, 1.0e-3)
+        for dy, refused in ((0.01, True), (0.05, False)):
+            with self.subTest(dy=dy):
+                deck = _j_plate_deck(extra=_sliver(dy)
+                                     + _floating_rigid((31, 32, 33)))
+                state = _dispatch(deck)
+                mass, _in = nodal_masses_from_state(state)
+                ev = sorted(_sym3_eigen(
+                    _body_tensor(state, {31, 32, 33}, mass))[0])
+                ratio = ev[0] / ev[-1]
+                res, starter, _e = _convert(deck)
+                main = _rbody_main_by_title(starter, "floating rigid")
+                j = _rbody_j_rows(starter, main)[2]
+                if refused:
+                    self.assertTrue(1.0e-6 < ratio < 1.0e-3, ratio)
+                    self.assertEqual(j, _J_ZERO_ROW)
+                    self.assertTrue(_has(res.warnings,
+                                         f"/RBODY/{main} keeps J = 0",
+                                         "WARNING 275", "inirby.F:753-758",
+                                         "hm_read_rbody.F:243"), res.warnings)
+                else:
+                    self.assertGreater(ratio, 1.0e-3)
+                    self.assertNotEqual(j, _J_ZERO_ROW)
+                    self.assertFalse(_has(res.warnings,
+                                          f"/RBODY/{main} keeps J = 0"))
+
+    def test_18_a_triangle_body_subtracts_the_starters_c3inmas_IN(self):
+        """A /SH3N carries the starter's c3inmas.F:1111 rotary inertia: the
+        WHOLE element's XI = m (A/4.5 + t^2/12), spread by the corner angles
+        / pi (c3inmas.F:1138-1143, spmd_msin.F:555-556) - the validation
+        round; the quad formula (m/n)(A + t^2)/12 left up to 9.2 % of SUM(IN)
+        on 41 roster bodies. Hand: a right triangle with 20 mm legs, t 2, RO
+        7.85e-9 -> A 200, m 3.14e-6, XI = 3.14e-6 x (200/4.5 + 4/12) =
+        1.4060222e-4 (the quad formula: 3.14e-6 x 204 / 12 = 5.338e-5);
+        shares 0.5 / 0.25 / 0.25 at the 90 / 45 / 45 degree corners. Both
+        LS-DYNA spellings of a triangle (a collapsed quad, three ids)."""
+        from k2rad.lumping import nodal_masses_from_state
+        xi = 3.14e-6 * (200.0 / 4.5 + 4.0 / 12.0)
+        for name, ids in (("collapsed quad", (1, 2, 3, 3)),
+                          ("three ids", (1, 2, 3))):
+            with self.subTest(spelling=name):
+                deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-4)
+                        + "\n*PART\nrigid tri\n" + _row(1, 1, 1) + "\n"
+                        "*SECTION_SHELL\n" + _row(1, 2, 1.0, 2) + "\n"
+                        + _row(2.0, 2.0, 2.0, 2.0) + "\n"
+                        "*MAT_RIGID\n"
+                        + _row(1, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0)
+                        + "\n" + _row(0.0, 0, 0) + "\n"
+                        + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n*NODE\n"
+                        + "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n"
+                                  for n, x, y in ((1, 0, 0), (2, 20, 0),
+                                                  (3, 0, 20)))
+                        + "*ELEMENT_SHELL\n"
+                        + "".join(f"{v:>8}" for v in (1, 1) + ids) + "\n"
+                        "*END\n")
+                state = _dispatch(deck)
+                _mass, inertia = nodal_masses_from_state(state)
+                for n, share in ((1, 0.5), (2, 0.25), (3, 0.25)):
+                    self.assertAlmostEqual(inertia[n] / (xi * share), 1.0,
+                                           places=12)
+                res, starter, _e = _convert(deck)
+                self.assertIn("/SH3N/1", starter)
+                main = _rbody_main_by_title(starter, "rigid tri")
+                for v in _floats(_rbody_j_rows(starter, main)[2]):
+                    self.assertAlmostEqual(v / -xi, 1.0, places=9)
+                self.assertTrue(_has(res.warnings, _A2_APPLIED, "On 1 of "
+                                     "these bodies some shells are /SH3N",
+                                     "c3inmas.F:1111"), res.warnings)
+        # a quad-only deck does not carry the /SH3N clause
+        res4, _s4, _e4 = _convert(_j_plate_deck())
+        self.assertFalse(_has(res4.warnings, "are /SH3N"), res4.warnings)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

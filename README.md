@@ -795,8 +795,12 @@ runtime, so it appears to move in post-processing).
 **The `/RBODY` inertia cells carry `Jxx = Jyy = Jzz = −ΣIN`** (round 7, default
 ON, `--no-rigid-shell-rotary-inertia` keeps `J = 0`) on every `*MAT_RIGID` /
 `*DEFORMABLE_TO_RIGID` part body without `*PART_INERTIA` whose nodes carry
-lumped shell rotary inertia: the starter ADDS every shell node's
-`IN = (m/n)(A + t²)/12` (`cinmas.F:1379`, FAC 12) to the body tensor for ICoG
+lumped shell rotary inertia: the starter ADDS every shell node's `IN` —
+`(m/4)(A + t²)/12` per `/SHELL` corner (`cinmas.F:1379`, FAC 12) and, for a
+`/SH3N`, the whole element's `m(A/4.5 + t²/12)` spread by the corner angles
+(`c3inmas.F:1111`, `spmd_msin.F:555-556`; the round-7 validation round — the
+quad formula had left up to 9.2 % of `ΣIN` on 41 of the rule's 153 bodies on
+15 roster keys) — to the body tensor for ICoG
 1/2/3 (`inirby.F:166-168` the main node, `:355-363` the secondaries), while
 LS-DYNA's rigid-part inertia is the point-mass sum of the nodal masses (Theory
 R16 eqs 29.21-29.23 — the reference `d3hsp` tensor equals it on 18 of 18
@@ -805,8 +809,15 @@ measured bodies within 0.04 %). `ΣIN` is summed once over the body's nodes
 `*CONSTRAINED_RIGID_BODIES` union). Skipped by name where the lumper is not the
 starter's (a layered section, an element thickness, Ishell < 11, no
 `*SECTION_SHELL`); refused by name, `J` kept, when the corrected tensor's
-smallest principal value is not above `1e-6` × its largest (ERROR 274 fires at
-≤ 0, `inirby.F:823-830`; reach 0); never on a `*CONSTRAINED_NODAL_RIGID_BODY`
+smallest principal value is not above `1e-3` × its largest — the starter's own
+threshold on its default path: k2rad writes Ispher 0, read as 2
+(`hm_read_rbody.F:243`), and `inirby.F:753-758` raises every principal value at
+or below `1e-3` × the largest by `0.1` × the largest (WARNING 275) before ERROR
+274 tests `≤ 0` (`inirby.F:823-830`), so a smaller margin hands the starter a
+tensor it inflates far above LS-DYNA's point-mass value (the round-7 validation
+round raised it from `1e-6`; reach 2 deck keys on 2 emitted models, one body
+each: `forging_A` / `forging_B`, both stopped at starter ERROR 179 first);
+never on a `*CONSTRAINED_NODAL_RIGID_BODY`
 (LS-DYNA keeps the nodal inertia there), a weld / tie / probe body or an ICoG 4
 body. Measured (nt 4): a spun 20 × 20 × 2 mm rigid plate's rotational KE
 +16.83 % (normal axis) / +33.66 % (in-plane) → 0.00 %;
