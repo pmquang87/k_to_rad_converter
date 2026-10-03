@@ -46,6 +46,172 @@ Prior history (before this changelog was introduced) is summarized in the
     29 (the rule: not `normal` among the 135 `/IMPL` emitters). The giants
     are re-converted, never launched (no `--allow-giants`);
     EXP_SC_JOINT_SCREW must run `-np 1` (the Lagrange joint is SMP only).
+- **R14 CAMPAIGN TRIAGE batch, round 7 — VALIDATION-FIX ROUND (the four
+  validators' findings).** No blocker was found; the code reviewer's three
+  majors were test gaps (three mutations no test caught), and every minor
+  below was verified against the source or the run files before it was
+  acted on. No new flag.
+  - **The three majors, pinned:** A5-4 — the LIGHT clause's pair numbers
+    belong to the LIGHT arm only; a compensated carrier whose node keeps
+    more own mass than its token share (the shape of the roster's
+    `nvh/example-06-07/6.7.spring.psd.k`) now asserts the shared sentence
+    carries no pair clause. A1-5b — A1's `rigid_auto_bcs` record must equal
+    the `BC_rigid` cards the producer WRITES (an invariant test, both arms of
+    `--no-joint-screw-gjoint`); since refusal 11 below, a converted screw can
+    no longer carry a member TC/RC, so the mutant is unreachable through a
+    deck and the invariant is what pins it. B2-9 — the CNRB-shared-node arm
+    of the screw's refusal 5 had no probe (the "deformable under a CNRB"
+    case is refused earlier, as not `*MAT_RIGID`); a probe keeps A on
+    `*MAT_RIGID` with its nodes in a CNRB.
+  - **B2 refusal 11** (both reviewers): a screw whose body carries another
+    STANDARD kinematic condition — a `*NODE` TC/RC cell, a `*BOUNDARY_SPC`,
+    a `*CONSTRAINED_GLOBAL` plane, a nodal `*BOUNDARY_PRESCRIBED_MOTION` —
+    keeps the 65ff389 skip by name: rule (a) of the TC/RC pass and
+    `_make_bcs` re-point a member's code onto the Lagrange-held main node as
+    a standard card, which the starter reports as WARNING 312. The
+    validators' two probes with a REDUNDANT code ended NORMAL at 21626 /
+    21627 cycles with the END IE −0.1 % / +2.6 % against the clean arm (nt
+    4); a conflicting code is unmeasured. The predicate mirrors what is
+    written (`--no-node-tc-rc-bcs`, `--no-constrained-global`). Reach 0.
+  - **A2 on `/SH3N`** (the fidelity reviewer, confirmed at source): the
+    starter lumps a triangle with `c3inmas.F` — `EM = RHO·THK·AREA` (`:593`),
+    `XI = EM·(AREA/4.5 + THK²/12)` (`:1111`), spread with the mass by the
+    corner angles / π (`:1138-1143`, `spmd_msin.F:555-556`) — where the
+    lumper used the quad's `(m/n)(A + t²)/12`, an in-plane term `A/12` where
+    the starter's is `A/4.5`. The lumper now gives every shell with three
+    distinct corners (what `writer/mesh` writes as `/SH3N`) the starter's
+    inertia; the triangle MASS split is unchanged (equal shares; the
+    starter's angle split, the same totals). It reached 41 of A2's bodies
+    on 15 roster keys (the leftover was up to 9.2 % of their `ΣIN`); A2's
+    warning names the `/SH3N` rule on the decks that carry one.
+  - **A2's refusal margin `1e-6` → `1e-3`** (the physics reviewer,
+    confirmed at source): k2rad writes Ispher 0, read as 2
+    (`hm_read_rbody.F:243`), and `inirby.F:753-758` raises every principal
+    value at or below `1e-3` × the largest by `0.1` × the largest (WARNING
+    275) before ERROR 274 tests `≤ 0` — a sliver body at a point-mass ratio
+    of 7.5e-5 passed the old margin and the starter put 1334× LS-DYNA's
+    point-mass value on its minimum axis. The `--mass-weighted-inivel` pass
+    refuses at the same margin (it refused at `≤ 0`). Reach 2 deck keys on 2
+    emitted models (`forging_A`, `forging_B`, one body each; both stop at
+    starter ERROR 179 first).
+  - **Text fixes, 0 `.rad` bytes:** a stated `*MAT_SPOTWELD` SIGY 0 names
+    LS-DYNA's default (Vol II R17 p.2-697: "EQ.0: Default to 1% of E") that
+    is not converted (`MatSpotweld.sigy_stated`: a negative SIGY, a yield
+    curve, is the handler's own sentence); B1's polynomial EOS floor takes
+    the minimum of `C0 + C1 μ + C3 μ³` over −1 ≤ μ ≤ 0 (with `C3 < 0` and
+    `C1 < 3|C3|` it sits inside: C1 1 / C3 −1 bottoms out at −0.385 where
+    the end value reads 0); B1's void Nu sentence splits by case (an
+    ELFORM-12 part on a deck without `*INITIAL_VOID`, a non-ELFORM-12 part
+    on a deck that states it; `bird_B`'s shape keeps its sentence).
+  - **The fidelity reviewer's two nits, text only:** A1's merge sentence
+    names k2rad's own stabilisation of an unloaded free translation of a
+    loaded body where a merged DOF IS one of its digits (on an implicit deck
+    the `BC_rigid` card can carry them; `state.rigid_auto_stab` records
+    them, `_rigid_auto_merge_sentence(..., stab=)`). A first version keyed
+    the clause on the deck being implicit, on the reviewer's premise that
+    every A1 mover is explicit; the sweep at that commit (`431f8cb`) showed
+    `ex_16_thin_shell_elform_13` — implicit, an A1 mover — gaining the
+    clause although its merged DOFs are its CON1 6 / CON2 7 digits, so the
+    clause now keys on the recorded digits and ex_16's record is back to its
+    text. W-N2's SPH clause no longer says Nu 1 "moved nothing" on `sph/bird`: its
+    IE RMS stayed 44.15 % on both arms while the END IE moved +69.44 →
+    +69.28 % and the cycles 1942 → 1917. The third nit (B4 screens a tied
+    interface's SECONDARY nodes only, where the manual's box names any
+    member) keeps its stated scope: the starter's tag loop and the kinematic
+    elimination act on the secondary nodes (`itagsl2.F:95-96`).
+  - **A4's flag texts re-measured on the routed card** (the coordinator's
+    decision, which part A had left undone): the cap takes
+    `ex_15_thick_shell_elform_2` from 34 to 202 cycles (5.94×), energy error
+    −0.7 % → −1.8 %, END IE +72.81 % → −55.94 %, KE +27.37 % → +0.12 %,
+    history RMS IE 8.06 → 3.19 / KE 9.52 → 7.45 % of the LS peak;
+    `--qstat-dtscal 0.1` is inert on the routed `ex_02` (28 cycles, the same
+    IE); nt 4 = nt 2 on all four arms. The shipped "`--qstat-dtscal 0.1`
+    reproduces the pre-round-4 file byte for byte" went stale with A4:
+    converted from `F:`, ex_02 at 0.1 alone differs from `5110a9b`'s
+    `_0000.rad`, and 0.1 together with `--no-implicit-tshell-solid` equals
+    it on both files.
+  - **Record corrections:** doorbeam prints 41 energy rows (cycles 0..38,
+    cycle 10 three times), all identical across the four re-measure arms —
+    the "33" came from a row filter that kept a row only when its element
+    token is alphabetic, dropping the 8 `SH_3N` rows, and the round's scorer
+    carries the same filter: over every row the shipped arm's IE RMS is
+    393.31 and the stub-removed arm's 313.05 (END and fifths unchanged; no
+    other figure-bearing arm of the round prints an `SH_3N` row).
+    `mainboltaexpl` moves by run sensitivity, not by A3's yield: its weld
+    shear never exceeds 13789 against the new yield 29021, both arms are
+    nt-deterministic and part at cycle 5484 in the 4th digit, and the 65ff389
+    card with only `K2` changed by `1e-8` moves it the same way (END −80.35 /
+    −73.95 %, RMS 30.46 / 29.08). The screw's carriage (1e-6 t) moves with
+    body A: 1e-5 of the R14 screw, 12.7 % of a 7.85e-6 t coupon body.
+    `brake_debug` (A2) joins the named costs from the campaign re-run: its
+    END KE went +900.40 → +36222.56 % against an LS KE of 2.84e-4 at t_end
+    (its peak is 8933) while its KE history did not move (RMS 298.22 →
+    296.35 % of the LS peak) — an END value on a near-zero reference, in a
+    debug deck whose energy error is 99.9 % on both arms. The pendulum
+    pair's IE RMS, `brake`'s and `transducer`'s history figures now quote
+    the campaign re-run, nt 4 (pendulum 50.87 → 51.85 %, 0.98 of the
+    `end_value_flip` rule's 1-point threshold; the pre-research arm's 50.64
+    → 51.61 is retired), the figures the campaign report carries. Three
+    stale source citations re-pointed (`rkini3.F:73-80`,
+    `read_impvel_lagmul.F:160-161` / `:181-187`, `rbody.cfg:135-139`).
+  - **Two-tree sweeps, measured after the last code commit** (`c17386e`;
+    the 356 joblist keys opened on `F:`, both `%20` spellings tried, 0
+    unreachable; pristine detached checkouts, `k2rad.__file__` asserted;
+    0 convert errors): against the campaign validator's `032303d`, **17
+    byte movers on 17 emitted models**, `_0000.rad` only, every changed
+    line an `/RBODY` J row — 41 rows more negative on the 15 triangle keys
+    (the `/SH3N` inertia: `eigenvalue/tire`, `blow-mold`, the two
+    `tire-compression`, `8.12.incident.wave`, `EXP_SC_JOINT_REV_TRANS`,
+    `EXP_SC_DROP`, `EXP_SC_PRELOAD`, `EXP_SC_CONTACT_INTERFERENCE`, the
+    anisotropic `cup-draw` and five
+    giants: `DEM_workshop_injection`, `self-piercing-riveting` and three
+    Yaris decks) and one row back to 0 on `forging_A` and on `forging_B`
+    (the margin); 2 warning-only movers on 2 models, `sph/bird` and
+    `sph/bar-iii/impact` (the SPH clause; the refusal 11, SIGY, EOS and
+    void-sentence changes have reach 0 on the roster); 337 keys identical.
+    The keys converted at `05fce4a`, `b6b4318`, `431f8cb` and `c17386e`
+    are identical in every `.rad` byte; `05fce4a` → `b6b4318` moves no
+    warning record either (docstrings only), and `431f8cb`'s one extra
+    record (`ex_16_thin_shell_elform_13`, above) is back to `b6b4318`'s at
+    `c17386e`. Against `65ff389` the round's union stays 91 keys / 79
+    models (all 17 were A2 movers already).
+  - **Campaign (report §0.28.3), run on the `b6b4318` bytes** (= the last
+    code commit's): the 17 byte movers re-converted with `convert_all.py
+    --tree` (the branch worktree's porcelain empty before and after, quoted
+    there; mirror 712 `.rad`, 0 MISMATCH before and after the run) and the
+    12 `run_pass = 1` rows re-run at nt 4 in one batch; the 5 giants
+    re-converted only, never launched. **0 status and 0 verdict moves.**
+    The END values, fifths and history RMS of the 7 NORMAL rows equal round
+    7's to the printed digit: 3 print every cycle row identically
+    (`tire-compression` (Reid), `EXP_SC_DROP`, the anisotropic `cup-draw`)
+    and 4 differ only in the controlling element id, the rigid body's
+    rotational KE (at most 0.15 %, `airbag-iii tire-compression`, whose END
+    KE moves −16.6890 → −16.6888 %) and round-off columns.
+    `EXP_SC_JOINT_REV_TRANS` stays a timeout (its wall-clock budget reached
+    t 0.1679 where round 7's memory-starved run reached 0.1439; the common
+    rows agree to the 4th digit); `forging_A` / `forging_B` stop at the
+    same starter errors (179, 760). Ledger unchanged (normal 291 /
+    error_engine 26 / error_starter 12 / timeout 12 / pending 7; match 34 /
+    deviation 138 / not_comparable 194); `verify_runs.py` PROBLEMS 0,
+    `xcheck_counts.py` 0 disagree, `rescore_benchmark.py --dry-run` 0
+    changes; `_meta.k2rad_sha` stays `65ff389`. The report corrects round
+    7's §0.28 in three marked places (doorbeam's all-rows RMS, the
+    `mainboltaexpl` attribution, the pendulum flip's 0.02-point margin).
+  - **Tests:** 5782 → **5793 passed** / 2 skipped / 10756 subtests at
+    `c17386e` (+11: the LIGHT scope, refusal 11's mirror, A1's record
+    invariant, the interior polynomial minimum, A2's band probe, triangle
+    coupon and A7 margin, the A1 stabilisation's three arms, and the
+    validation-round guard's three; the B2-9 probe and the split Nu
+    sentences are subtests of existing tests). EXPECTED VALUES MOVED, all
+    in this round's own tests: `RigidShellRotaryInertiaDefault.test_7`'s
+    margin needle `1e-06` → `0.001` (the margin moved), and
+    `MatNullPcMu`'s Nu-scope cases re-pointed to the split void sentences.
+    mypy 0 in the dev venv and with `--no-site-packages`; ruff clean;
+    `--help` renders (1044 lines). **Mutations, the whole suite each on a
+    throwaway worktree: 19 of 19 caught by the test written for them**
+    (F16 on `431f8cb`, whose clause `c17386e` replaced; F18 / F19 pin the
+    replacement), including the code validator's three surviving mutants
+    (A5-4, A1-5b, B2-9).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART B (fluids, materials, frames,
   joints and the docs).** One commit per item; every figure below is a
   measured arm against the LS-DYNA reference on `F:` or a hand-built coupon
