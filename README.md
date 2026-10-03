@@ -2859,9 +2859,11 @@ outside the box; LS-DYNA
 uses *"the internal mesh-size dependent tolerance"*, p.10-39, which the card
 does not state, so this default is k2rad's own). Every row's codes are ORed per
 node, UNIONED with the deck's `*NODE` TC/RC cells, and written as **ONE `/BCS`
-per union code** through the same four screens (rigid members re-pointed onto
+per union code** through the same screens (rigid members re-pointed onto
 the `/RBODY` main node, imposed-motion DOFs left to the motion, `*BOUNDARY_SPC`
-DOFs merged, inert rotational codes named): one `/BCS` per plane gives starter
+DOFs merged, DOFs the rigid body's own `BC_rigid_<pid>` / `BC_cnrb_<pid>` card
+fixes merged into it — round 7, ale_wavehitcol's node 4012845 —, inert
+rotational codes named): one `/BCS` per plane gives starter
 WARNING 312 for every DOF two planes both constrain on a shared node —
 measured, 12 incompatible conditions = 3 shared nodes × 4 common DOFs on
 `efg/metal-cutting/main.k`, 3 = 3 × 1 on a grid probe, and none when the two
@@ -2962,7 +2964,13 @@ message on 1 of the 16 carriers. A DOF a
 `*BOUNDARY_PRESCRIBED_MOTION` already drives is **left to it** (measured: the
 same DOF pinned twice gives starter `WARNING 312` and a 99.9 % engine energy
 error), a DOF a `*BOUNDARY_SPC` already states is **merged, not restated**
-(`hm_read_bcs.F:198` unions the codes), and a rotational code on a mesh with no
+(`hm_read_bcs.F:198` unions the codes), a DOF the rigid body's OWN `/BCS`
+already fixes on its main node (`BC_rigid_<pid>` from `*MAT_RIGID` CMO 1
+CON1/CON2, or `BC_cnrb_<pid>` from the CNRB `_SPC` option at skew 0) is
+**merged into that card** (round 7; a partial overlap keeps the remainder in
+its own group; 0 physics by the same `MY_OR`, it only removes starter WARNING
+312 — 6 deck keys on 6 emitted models moved, among them bend, 275key2 and
+ex_16), and a rotational code on a mesh with no
 rotational DOF is **emitted and named inert** (`bcs10.F:66`'s `IRODDL` guard;
 LS-DYNA drops it too). Measured on the 356-deck dynaexamples R14 campaign: 137
 decks carry a non-zero cell, 119 of them have no `*BOUNDARY_SPC` at all, and

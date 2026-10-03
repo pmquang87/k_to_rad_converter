@@ -375,17 +375,24 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
     ``_SPC`` card — sits on a node no ``*NODE`` row can name: the first three
     are ids k2rad MINTS, and the last two act on an ``/RBODY`` independent
     node. That node is NOT outside the TC/RC pass, though: rule (a) RE-POINTS
-    the members' cells onto it, so a body with a ``*MAT_RIGID`` CON1/CON2
-    auto-constraint AND member TC/RC cells carries its main node in TWO
-    ``/BCS`` groups (``BC_rigid_PID`` and a TC/RC group). MEASURED over the
-    5aef5a0 mirror: 5 roster decks do this today (forging_A, forging_B, bend,
-    ex_16_thin_shell_elform_13, 275key2; 1-4 nodes each), inert by ``MY_OR``
-    (``hm_read_bcs.F:198`` unions the codes) and reported as one starter
-    WARNING 312; round 6's ``*CONSTRAINED_GLOBAL`` adds ale_wavehitcol (1
-    node). Merging the auto-constraint in screen (c) would move those decks'
-    bytes and is a ROADMAP item. ``*CONSTRAINED_GLOBAL`` itself is not in this
-    map: its cells are UNIONED with the ``*NODE`` cells inside
-    :func:`_make_node_tc_rc_bcs`, so they meet every screen there.
+    the members' cells onto it. The last two are therefore merged too, but
+    from their OWN source, :func:`_rigid_auto_spc_dofs` (``state.rigid_auto_bcs``
+    and the skew-0 ``state.cnrb_spc_bcs``), in screen (c') of
+    :func:`_make_node_tc_rc_bcs` (round 7, A1) — with their own counter and
+    their own sentence, because the digits are the rigid body's and not a
+    ``*BOUNDARY_SPC``'s. They are deliberately NOT in this map: its two other
+    consumers would gain nothing (the ``*CONSTRAINED_LINEAR`` screen already
+    refuses every rigid-body node and labels its hits as a ``*BOUNDARY_SPC``;
+    the modal dummy-load screen never sees a rigid node). Before round 7 the
+    main node landed in TWO ``/BCS`` groups (``BC_rigid_PID`` and a TC/RC or
+    ``*CONSTRAINED_GLOBAL`` group) on 6 roster keys / 6 models (bend,
+    275key2, ex_16_thin_shell_elform_13, forging_A, forging_B,
+    ale_wavehitcol), inert by ``MY_OR`` (``hm_read_bcs.F:198`` unions the
+    codes) and reported as starter WARNING 312, one condition per DOF both
+    cards fix: MEASURED 275key2 20 -> none, ex_16 5 -> none, bend 33 -> 30
+    (its other 30 are boundary condition + rigid wall). ``*CONSTRAINED_GLOBAL``
+    itself is not in this map: its cells are UNIONED with the ``*NODE`` cells
+    inside :func:`_make_node_tc_rc_bcs`, so they meet every screen there.
 
     A ``*BOUNDARY_SPC`` with a resolvable ``CID`` is deliberately NOT here: its
     ``/BCS`` carries a skew, so its digits are axes of that skew and no global
@@ -421,6 +428,44 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
             continue
         for nid in state.node_sets.get(pm.nsid, ("", []))[1]:
             _add(nid, mapped[0], mapped[1])
+    return out
+
+
+def _rigid_auto_spc_dofs(state: ConversionState
+                         ) -> Dict[int, Tuple[str, str, List[str]]]:
+    """``/RBODY main node -> (Tra, Rot, [card titles])`` of the ``/BCS`` the
+    rigid-body producers themselves write there (round 7, A1).
+
+    Two sources, unioned (OR) per node:
+
+      * ``state.rigid_auto_bcs`` — ``BC_rigid_<pid>``, the ``*MAT_RIGID``
+        CMO 1 CON1/CON2 code plus the implicit stabilisation of an unloaded
+        free translation, exactly the digits ``_make_rbodies`` emitted;
+      * ``state.cnrb_spc_bcs`` with ``skew == 0`` — ``BC_cnrb_<pid>``, the
+        ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` code. A skewed card's digits are
+        axes of that skew, so no global TC/RC bit can be cancelled against
+        them (the rule :func:`_global_spc_dofs` applies to a ``*BOUNDARY_SPC``
+        with a CID).
+
+    Kept apart from :func:`_global_spc_dofs` on purpose: screen (c') gives
+    these hits their own counter and sentence (the code is the rigid body's,
+    not a ``*BOUNDARY_SPC``'s), and that map's other two consumers would only
+    gain a false label.
+    """
+    out: Dict[int, Tuple[str, str, List[str]]] = {}
+
+    def _add(nid: int, tra: str, rot: str, title: str) -> None:
+        old = out.get(nid, ("000", "000", []))
+        out[nid] = (_or_dof_codes([old[0], tra]), _or_dof_codes([old[1], rot]),
+                    old[2] + [title])
+
+    for nid, (tra, rot, title) in sorted(state.rigid_auto_bcs.items()):
+        _add(nid, tra, rot, title)
+    for cbc in state.cnrb_spc_bcs:
+        if cbc.skew:
+            continue                      # a skewed /BCS: not a global bit
+        _add(cbc.ind_node, cbc.tra, cbc.rot,
+             cbc.title or f"/BCS/{cbc.bc_id}")
     return out
 
 
@@ -574,6 +619,13 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
          are exact duplication and lose the node entirely, while ``ex_09``
          (26 DOFs) and ``ex_10`` (32) are PARTIAL and keep a ``/BCS`` for the
          DOFs their SPC does not state.
+      c'. *A DOF the rigid body's OWN /BCS fixes is merged into it* (round 7,
+         A1): ``BC_rigid_<pid>`` (``*MAT_RIGID`` CMO 1 CON1/CON2) and
+         ``BC_cnrb_<pid>`` (the CNRB ``_SPC`` option, skew 0 only) sit on the
+         very main node rule (a) re-points the members' cells onto — see
+         :func:`_rigid_auto_spc_dofs`. Applied after (c), with its own counter
+         and sentence; a partial overlap keeps the REMAINDER in its own group
+         (disjoint codes raise no WARNING 312). 0 physics by ``MY_OR``.
       d. *Rotational codes on a mesh with no rotational DOF are EMITTED and
          named.* See :func:`_mesh_has_rotational_dof`.
 
@@ -629,6 +681,9 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         cells[nid] = (_or_code(t0, tc_g), _or_code(r0, rc_g))
 
     spc_dofs = _global_spc_dofs(state)
+    # the /BCS the rigid-body producers write on their own main nodes (round 7,
+    # A1): a SEPARATE source with its own counter, see _rigid_auto_spc_dofs
+    auto_dofs = _rigid_auto_spc_dofs(state)
     rot_capable = _mesh_has_rotational_dof(state, rbody_info)
 
     groups: Dict[Tuple[str, str], List[int]] = defaultdict(list)
@@ -638,6 +693,8 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     # after the passes
     motion_hits: List[Tuple[int, int]] = []
     spc_hits: List[Tuple[int, int]] = []
+    # screen (c'): (node, DOFs merged, the rigid body's own card titles)
+    auto_hits: List[Tuple[int, int, List[str]]] = []
     rot_inert: List[int] = []
     skewed_motion: List[int] = []
     emptied: List[int] = []
@@ -674,6 +731,22 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 merged_here += 1
         if merged_here:
             spc_hits.append((nid, merged_here))
+        # (c') the /BCS the rigid body itself writes on its main node
+        # (BC_rigid_<pid> from *MAT_RIGID CMO 1 CON1/CON2, BC_cnrb_<pid> from
+        # the CNRB _SPC option at skew 0): merged rather than written a second
+        # time. AFTER rule (c), so a digit a *BOUNDARY_SPC states keeps that
+        # attribution. Only a main node can hit: the map holds main nodes.
+        a_tra, a_rot, a_titles = auto_dofs.get(nid, ("000", "000", []))
+        merged_auto = 0
+        for i in range(3):
+            if a_tra[i] == "1" and tra[i] == "1":
+                tra[i] = "0"
+                merged_auto += 1
+            if a_rot[i] == "1" and rot[i] == "1":
+                rot[i] = "0"
+                merged_auto += 1
+        if merged_auto:
+            auto_hits.append((nid, merged_auto, a_titles))
         if "1" in rot and not rot_capable:
             rot_inert.append(nid)
         return "".join(tra), "".join(rot)
@@ -780,6 +853,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
             motion_dofs=sum(k for n, k in motion_hits if n in prov),
             spc_nodes=[n for n, _k in spc_hits if n in prov],
             spc_dof_count=sum(k for n, k in spc_hits if n in prov),
+            auto_nodes=[n for n, _k, _t in auto_hits if n in prov],
+            auto_dof_count=sum(k for n, k, _t in auto_hits if n in prov),
+            auto_titles=sorted({t for n, _k, ts in auto_hits if n in prov
+                                for t in ts}),
             rot_inert=[n for n in rot_inert if n in prov],
             skewed_motion=[n for n in skewed_motion if n in prov],
             emptied=[n for n in emptied if n in prov])
@@ -803,6 +880,7 @@ def _warn_constrained_global_converted(
         rigid_orphans: List[int],
         motion_nodes: List[int], motion_dofs: int,
         spc_nodes: List[int], spc_dof_count: int,
+        auto_nodes: List[int], auto_dof_count: int, auto_titles: List[str],
         rot_inert: List[int], skewed_motion: List[int],
         emptied: List[int]) -> None:
     """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
@@ -872,6 +950,9 @@ def _warn_constrained_global_converted(
             f" {spc_dof_count} DOF(s) on {len(spc_nodes)} node(s) (node "
             f"{_named(spc_nodes)}) already stated by a *BOUNDARY_SPC were "
             "merged (hm_read_bcs.F:198 unions the codes).")
+    if auto_nodes:
+        msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
+                                              auto_titles))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -985,6 +1066,27 @@ def _named(nids: List[int], cap: int = 5) -> str:
     return shown + (f" and {rest} more" if rest > 0 else "")
 
 
+def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
+                               auto_titles: List[str]) -> str:
+    """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
+    ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
+
+    Facts only: the merged code is the RIGID BODY's own /BCS. Attributing it to
+    a ``*BOUNDARY_SPC`` would be false - on bend.k node 125's code is the
+    ``*MAT_RIGID`` CON1/CON2 of body 2 and the deck states no SPC at all.
+    """
+    shown = ", ".join(auto_titles[:5]) + (
+        f" and {len(auto_titles) - 5} more" if len(auto_titles) > 5 else "")
+    return (
+        f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
+        f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
+        f"the rigid body itself writes there ({shown}: *MAT_RIGID CMO 1 "
+        "CON1/CON2, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) and were "
+        "merged into it rather than written a second time: hm_read_bcs.F:198 "
+        "unions the codes (MY_OR), so the second /BCS changed no physics and "
+        "only added starter WARNING 312, one condition per DOF both cards fix.")
+
+
 def _warn_node_tc_rc_converted(state: ConversionState, *,
                                stated: Dict[Tuple[int, int], int],
                                groups: Dict[Tuple[str, str], List[int]],
@@ -994,6 +1096,8 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                rigid_orphans: List[int],
                                motion_nodes: List[int], motion_dofs: int,
                                spc_nodes: List[int], spc_dof_count: int,
+                               auto_nodes: List[int], auto_dof_count: int,
+                               auto_titles: List[str],
                                rot_inert: List[int],
                                skewed_motion: List[int],
                                emptied: List[int]) -> None:
@@ -1082,6 +1186,9 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
             "zero-scale *BOUNDARY_PRESCRIBED_MOTION) on the same node and were "
             "merged rather than restated: hm_read_bcs.F:198 unions the codes, "
             "so a second /BCS only adds starter WARNING 312.")
+    if auto_nodes:
+        msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
+                                              auto_titles))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "

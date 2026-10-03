@@ -463,6 +463,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     lines: List[str] = []
     rigid_nodes: Set[int] = set()
     rbody_info: Dict = {}
+    # The BC_rigid_<pid> /BCS records (round 7, A1) mirror the cards this
+    # function emits, so a second call must not keep the first call's: reset
+    # BEFORE the early returns below.
+    state.rigid_auto_bcs = {}
 
     # *MAT_RIGID parts AND *DEFORMABLE_TO_RIGID parts, through the ONE
     # predicate — see writer.common.rigid_part_ids for why a consumer left on
@@ -860,6 +864,18 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         rot = "".join(rot_chars)
         if tra != "000" or rot != "000":
             bc_id_auto = state.next_id()
+            # The EMITTED digits (CON1/CON2 OR the implicit stabilisation
+            # above), at skew 0: screen (c') of loads._make_node_tc_rc_bcs
+            # merges a member TC/RC code re-pointed onto this main node into
+            # this card instead of writing a second /BCS (round 7, A1).
+            _old = state.rigid_auto_bcs.get(ind_node)
+            state.rigid_auto_bcs[ind_node] = (
+                (tra, rot, f"BC_rigid_{pid}") if _old is None else
+                ("".join("1" if "1" in (a, b) else "0"
+                         for a, b in zip(_old[0], tra)),
+                 "".join("1" if "1" in (a, b) else "0"
+                         for a, b in zip(_old[1], rot)),
+                 f"{_old[2]}, BC_rigid_{pid}"))
             lines += [
                 f"/BCS/{bc_id_auto}",
                 f"BC_rigid_{pid}",
@@ -1239,8 +1255,12 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
                 # is a SECOND source of /BCS besides *BOUNDARY_SPC_* — the card
                 # above is written inline here, so it must not go into
                 # state.bcs_spcs (_make_bcs would emit it a second time). The
-                # reaction consumers read both lists; see CnrbSpcBc.
-                state.cnrb_spc_bcs.append(CnrbSpcBc(bc_id, ind_node, tra, rot))
+                # reaction consumers read both lists; see CnrbSpcBc. The skew
+                # and the title let the *NODE TC/RC pass merge a member code
+                # into a skew-0 card (round 7, A1).
+                state.cnrb_spc_bcs.append(CnrbSpcBc(
+                    bc_id, ind_node, tra, rot, skew=skew,
+                    title=f"BC_cnrb_{cnrb.pid}"))
 
     return lines, rigid_nodes, rbody_info
 

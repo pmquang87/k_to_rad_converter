@@ -11,6 +11,44 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
+  welds, the implicit thick shell and the implicit texts).** One commit per
+  item; every figure below is a measured arm against the LS-DYNA reference on
+  `F:` unless it says otherwise (`nt` beside every implicit figure), and every
+  reach is stated as `N deck keys on M emitted models` (356 keys = 312
+  models).
+  - **A1 — the rigid body's own `/BCS` absorbs a member TC/RC code
+    re-pointed onto its main node (no flag: a screen of the TC/RC
+    conversion).** Rule (a) of `_make_node_tc_rc_bcs` re-points a rigid
+    member's `*NODE` TC/RC (or `*CONSTRAINED_GLOBAL`) cell onto the `/RBODY`
+    main node, where `_make_rbodies` already writes `BC_rigid_<pid>`
+    (`*MAT_RIGID` CMO 1 CON1/CON2, plus the implicit stabilisation of an
+    unloaded free translation) and `_make_cnrb_rbodies` `BC_cnrb_<pid>` (the
+    CNRB `_SPC` option): the main node sat in TWO `/BCS` groups. A new screen
+    (c') — after rule (c), from its OWN source `_rigid_auto_spc_dofs`
+    (`state.rigid_auto_bcs` + the skew-0 `state.cnrb_spc_bcs`; a skewed CNRB
+    code's digits are axes of its skew and are not merged) — clears every DOF
+    the rigid body's card already fixes; a partial overlap keeps the
+    REMAINDER in its own group (disjoint codes). 0 physics:
+    `hm_read_bcs.F:198` unions the codes (`MY_OR`), so the second `/BCS` only
+    added starter WARNING 312, one condition per DOF both cards fix. Its own
+    counter and sentence, which names the rigid body's card — the
+    pre-research patch's sentence blamed a `*BOUNDARY_SPC`, which bend.k does
+    not have (node 125's code is body 2's CON1/CON2). **Byte movers 6 deck
+    keys on 6 emitted models, `_0000.rad` only**: bend, 275key2,
+    ex_16_thin_shell_elform_13, forging_A, forging_B, ale_wavehitcol (the
+    GLOBAL provenance); ex_16 renumbers its later auto ids by −2 (its TC/RC
+    group held only the main node and disappears), forging_A/B by +2 (a
+    remainder group `node_tc_rc_001_000`). `--no-node-tc-rc-bcs` /
+    `--no-constrained-global` drop the cells as before (no new flag). The
+    `_global_spc_dofs` docstring, which called the merge a ROADMAP item, is
+    rewritten; the `rbody_ids.add` citation run in `handlers.py`, `state.py`
+    and `writer/output.py` is re-derived. New tests:
+    `tests/test_r14_triage_7.py` `RigidOwnBcsAbsorbsMemberTcRc` (P1 / P2,
+    the CNRB skew-0 and skewed arms, the GLOBAL provenance, which screen
+    fired, the opt-out, the control arm, the record reset and the emitted
+    digits).
+
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three
   branches whose mutants survived the whole suite and one headline END value

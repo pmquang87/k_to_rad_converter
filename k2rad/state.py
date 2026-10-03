@@ -3278,11 +3278,19 @@ class CnrbSpcBc:
     twice). They are recorded here instead, so the reaction-output consumers —
     /TH/NODE REAC* and /ANIM/VECT/FREAC for *DATABASE_SPCFORC — can see that the
     deck really does SPC-constrain nodes.
+
+    ``skew`` and ``title`` (round 7, A1) are the emitted card's skew_ID and
+    title. The *NODE TC/RC pass merges a re-pointed member code into this card
+    only when ``skew == 0``: a skewed card's digits are axes of that skew, the
+    same reason ``_global_spc_dofs`` skips a ``*BOUNDARY_SPC`` with a CID.
+    Their defaults keep every other constructor call valid.
     """
     bc_id: int
     ind_node: int       # /RBODY master node the /BCS acts on
     tra: str            # "111"-style translational mask, as emitted
     rot: str            # "111"-style rotational mask, as emitted
+    skew: int = 0       # the /BCS skew_ID as emitted (0 = global system)
+    title: str = ""     # the /BCS title as emitted (BC_cnrb_<pid>)
 
 
 #: *BOUNDARY_PRESCRIBED_MOTION VAD -> the OpenRadioss keyword that carries it.
@@ -9204,7 +9212,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791, :1210, :1318, :1507, :1664, in that order:
+    # (writer/rbody.py:795, :1226, :1338, :1527, :1684, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -9405,6 +9413,13 @@ class ConversionState:
     # /BCS written by the CNRB _SPC path (see CnrbSpcBc). Rebuilt from scratch
     # on every _make_cnrb_rbodies call, so re-running the writer is idempotent.
     cnrb_spc_bcs: List[CnrbSpcBc] = field(default_factory=list)
+    # The /BCS the *MAT_RIGID producer writes on an /RBODY main node from the
+    # card's CMO 1 CON1/CON2 (plus the implicit stabilisation of an unloaded
+    # free translation): main node -> (Tra, Rot, title), the EMITTED digits at
+    # skew 0. Rebuilt on every _make_rbodies call. ONE consumer: screen (c')
+    # of loads._make_node_tc_rc_bcs (round 7, A1), which merges a re-pointed
+    # member TC/RC code into it instead of writing it a second time.
+    rigid_auto_bcs: Dict[int, Tuple[str, str, str]] = field(default_factory=dict)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
     # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: pid → the three synthesized nodes
