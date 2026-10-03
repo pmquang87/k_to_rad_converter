@@ -2204,7 +2204,7 @@ that decided it and the deck that would decide it next.
    deck-statement scope. Next: a Couette coupon (a sheared null-material slab
    against the analytic velocity profile) on a Lagrangian and an SPH part, and
    the `bird_B` mechanism. Reach 4 keys / 4 models (`impact`, `sph/bird` —
-   near-inert there: Nu 1 left the IE history where it was, IE RMS 44.15 % on
+   near-inert there: Nu 1 left the IE history where it was, IE RMS 44.37 % on
    both arms, END IE +69.44 → +69.28 %, 1942 → 1917 cycles —, `bird_A`,
    `bird_B`).
 2. **The `*CONSTRAINED_SHELL_IN_SOLID` → `/INTER/TYPE18` EMISSION** (round-6

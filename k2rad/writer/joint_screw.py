@@ -417,7 +417,8 @@ def _resolve_joint_screws(state: ConversionState) -> List[JointScrewPlan]:
             "*CONSTRAINED_JOINT_SCREW card(s) left unconverted (listed as "
             "skipped, as before round 7): the screw relation between the two "
             "rigid bodies is lost (EXP_SC_JOINT_SCREW: nut travel 0 against "
-            "LS-DYNA's 183.59 mm).")
+            "LS-DYNA's 183.59 mm at the converted run's last sample, t "
+            "0.09995).")
         return plans
     node_parts = _node_parts(state)
     cnrb_nodes = _cnrb_nodes(state)
@@ -560,16 +561,20 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
             f"Lagrange node is incompatible){drive_clause}. This joint is "
             "EXACT, where LS-DYNA's default joint (no *CONTROL_RIGID: LMF 0) "
             f"is a PENALTY joint that yields (RPS {s.rps:g} is not used): on "
-            "EXP_SC_JOINT_SCREW LS-DYNA's nut moved 12.25-12.34 mm/rad "
-            "against the exact 12.5, so the converted nut runs +1.15 % ahead "
-            "at t_end (185.70 vs 183.59 mm; travel RMS 0.88 % of the LS-DYNA "
-            "peak) and meets the shells about 0.6 ms early (IE +42.76 % at "
-            "the end, from -100 %; nt 4, 0.9998x cycles) - no penalty screw "
-            "exists in OpenRadioss (/PROP/TYPE45 Types 1-9, "
-            "prop_p45_kjoint2.cfg). SMP ONLY: with -np > 1 the engine stops "
-            "at cycle 1, '** ERROR: JOINT WITH LAGRANGE MULTIPLIER NOT "
-            "ENABLED FOR NSPMD > 1' (lag_mult.F:682-686) - run -np 1 with "
-            "threads. On this path EXT-WORK prints 0 and the energy error "
+            "EXP_SC_JOINT_SCREW LS-DYNA's nut moved 12.08-12.35 mm/rad at "
+            "the fifths of the run (12.25 at its t_end) against the exact "
+            "12.5, so the converted nut runs +1.15 % ahead at its last "
+            "sample (185.70 vs LS-DYNA's 183.59 mm at the same instant, t "
+            "0.09995; travel RMS 0.88 % of the LS-DYNA peak) and meets the "
+            "shells about 0.6 ms early (IE +42.76 % at the end, from -100 %; "
+            "nt 4, 0.9998x cycles) - no penalty screw exists in OpenRadioss "
+            "(/PROP/TYPE45 Types 1-9, prop_p45_kjoint2.cfg). SMP ONLY: with "
+            "-np > 1 the engine stops in its first cycle, before any row is "
+            "printed, with '** ERROR: BCS WITH LAGRANGE MULTIPLIER NOT "
+            "ENABLED FOR NSPMD > 1' (lag_mult.F:667-671, the two "
+            "/BCS/LAGMUL; the JOINT check at :682-686 would follow) - run "
+            "-np 1 with threads. On this path EXT-WORK prints 0 and the "
+            "energy error "
             "0.0 % (LAG_MULT runs after the REAC* bracket, resol.F:7305 / "
             ":7386 / :7901): the drive's work is E(t) - E(0) of the global "
             "energies.")

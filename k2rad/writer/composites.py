@@ -1740,7 +1740,7 @@ def _emit_mat_law93(mat: MatOrthotropicElastic,
             "AOPT vectors by hand if the swap matters. (dyna2rad never reads "
             "MACF either.)")
     # R14 triage round 7, B3 (R2): on Ip 21 (AOPT 1 + P) Radioss builds b =
-    # e_z x a (smorth3.F:324-327) where LS-DYNA builds b = (a x e_z) x a, so
+    # e_z x a (smorth3.F:326-328) where LS-DYNA builds b = (a x e_z) x a, so
     # (b, c)_Radioss = (-c, b)_LS-DYNA: exchange the 2 and 3 constants. AFTER
     # the stability screen above - its products are a permutation of the
     # same set, so its verdict is the same.
@@ -1754,7 +1754,7 @@ def _emit_mat_law93(mat: MatOrthotropicElastic,
             nu23 = nu23p
             state.warn(
                 f"/MAT/LAW93/{mat.mid}: AOPT 1 -> /PROP/TYPE6 Ip 21 builds b "
-                "= e_z x a (smorth3.F:324-327) where LS-DYNA builds b = (a x "
+                "= e_z x a (smorth3.F:326-328) where LS-DYNA builds b = (a x "
                 "e_z) x a (Vol II R17 Fig. M2-1), i.e. Radioss's (b, c) is "
                 "LS-DYNA's (-c, b); so the 2 and 3 constants are exchanged on "
                 "the card: E22 <-> E33, G12 <-> G13, NU12 <-> NU13, NU23 -> "
@@ -1767,14 +1767,14 @@ def _emit_mat_law93(mat: MatOrthotropicElastic,
                 f"--no-corotational-orthotropic: /MAT/LAW93/{mat.mid} keeps "
                 "its 2 / 3 constants on the /PROP/TYPE6 Ip 21 of part(s) "
                 f"{eligible}, so LS-DYNA's AOPT 1 b and c axes act on each "
-                "other's constants (Radioss b = e_z x a, smorth3.F:324-327; "
+                "other's constants (Radioss b = e_z x a, smorth3.F:326-328; "
                 "the LAW93 cube read 2 of 6 right).")
         else:
             state.warn(
                 f"*MAT_ORTHOTROPIC_ELASTIC {mat.mid}: AOPT 1 -> Ip 21 on "
                 f"part(s) {eligible}, but the material is also used by "
                 f"{', '.join(other)}: the b / c exchange Radioss's Ip 21 "
-                "needs (b = e_z x a, smorth3.F:324-327, against LS-DYNA's b "
+                "needs (b = e_z x a, smorth3.F:326-328, against LS-DYNA's b "
                 "= (a x e_z) x a) is NOT written, because the material card "
                 "is shared; the 2 and 3 axes of the Ip-21 parts are "
                 "exchanged.")
@@ -3276,7 +3276,7 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
         # /MAT/LAW93 only - every other law keeps its cells and is named.
         state.warn(
             f"/PROP/TYPE6 {prop_id} (part {pid}, {law}): AOPT 1 -> Ip 21: "
-            "Radioss's b and c axes are LS-DYNA's c and b (smorth3.F:324-327 "
+            "Radioss's b and c axes are LS-DYNA's c and b (smorth3.F:326-328 "
             f"against Vol II R17 Fig. M2-1), and {law}'s 2 / 3 cells are NOT "
             "exchanged (the permutation is measured for /MAT/LAW93 only), so "
             "this material's b and c properties act on each other's axes. "
@@ -3315,7 +3315,7 @@ _IP_AOPT = {20: 0, 21: 1, 23: 3, 24: 4}
 #: permuted (the exchange is measured for /MAT/LAW93 only).
 _IP21_LAW50_CLAUSE = (
     " LS-DYNA's AOPT 1 b and c axes are EXCHANGED in Radioss's Ip 21 (b = e_z "
-    "x a, smorth3.F:324-327, against LS-DYNA's b = (a x e_z) x a) and "
+    "x a, smorth3.F:326-328, against LS-DYNA's b = (a x e_z) x a) and "
     "/MAT/LAW50's b / c cells are NOT permuted (unmeasured): the b and c "
     "curves act on each other's axes.")
 

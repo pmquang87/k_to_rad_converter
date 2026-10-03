@@ -1135,7 +1135,7 @@ _NU_LAGRANGIAN_FACT = (
     "IE +58.98 -> +76.80 % (RMS 32.62 -> 42.53 % of the LS-DYNA peak).")
 _NU_SPH_FACT = (
     " On SPH parts it is not measured beyond sph/bird, where Nu 1 left the "
-    "IE history where it was (IE RMS 44.15 % on both arms; END IE +69.44 -> "
+    "IE history where it was (IE RMS 44.37 % on both arms; END IE +69.44 -> "
     "+69.28 %, 1942 -> 1917 cycles).")
 _NU_MIXED_FACT = (
     " A material whose parts mix ELFORM 6 with another class is not carried "

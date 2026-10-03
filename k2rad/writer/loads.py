@@ -701,6 +701,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     # ... and the nodes where a merged digit is k2rad's implicit
     # stabilisation (state.rigid_auto_stab), so the sentence names it there
     auto_stab_hits: Set[int] = set()
+    # ... and the nodes whose rigid-body card is that stabilisation ALONE (a
+    # CMO 0 body, or CON1 / CON2 0): the sentence must not name a *MAT_RIGID
+    # CON1/CON2 code the deck does not state there (the post-review round)
+    auto_stab_only: Set[int] = set()
     rot_inert: List[int] = []
     skewed_motion: List[int] = []
     emptied: List[int] = []
@@ -756,6 +760,8 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                 merged_auto += 1
         if merged_auto:
             auto_hits.append((nid, merged_auto, a_titles))
+            if a_rot == "000" and a_tra == a_stab:
+                auto_stab_only.add(nid)
         if "1" in rot and not rot_capable:
             rot_inert.append(nid)
         return "".join(tra), "".join(rot)
@@ -809,6 +815,20 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         groups[(tra_s, rot_s)].append(main)
         state.node_tc_rc_emitted[main] = (tra_s, rot_s)
         rigid_repointed[main] = (tra_s, rot_s)
+
+    # ── ERROR 148 (the post-review round; reach 0, pre-existing): a skewed
+    # CNRB _SPC code is never merged (its digits are axes of its skew), and a
+    # skew-0 group written on the SAME main node makes the starter stop -
+    # hm_read_bcs.F:199-205 accepts one skew per node across /BCS cards.
+    # Named, not refused: which of the two conditions should win is the
+    # deck author's call.
+    skewed_cnrb: Dict[int, List[str]] = defaultdict(list)
+    for cbc in state.cnrb_spc_bcs:
+        if cbc.skew:
+            skewed_cnrb[cbc.ind_node].append(
+                f"{cbc.title or f'/BCS/{cbc.bc_id}'} at skew {cbc.skew}")
+    skew148: List[int] = sorted({n for nids in groups.values() for n in nids
+                                 if n in skewed_cnrb})
 
     # ── provenance: which source(s) each screened node came from ──
     node_prov: Set[int] = {n for n in cells if n in node_cells}
@@ -868,6 +888,12 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                                 for t in ts}),
             auto_stab=any(n in auto_stab_hits
                           for n, _k, _t in auto_hits if n in prov),
+            auto_stab_only=bool([n for n, _k, _t in auto_hits if n in prov])
+            and all(n in auto_stab_only
+                    for n, _k, _t in auto_hits if n in prov),
+            skew148=[n for n in skew148 if n in prov],
+            skew148_cards=sorted({c for n in skew148 if n in prov
+                                  for c in skewed_cnrb[n]}),
             rot_inert=[n for n in rot_inert if n in prov],
             skewed_motion=[n for n in skewed_motion if n in prov],
             emptied=[n for n in emptied if n in prov])
@@ -892,7 +918,8 @@ def _warn_constrained_global_converted(
         motion_nodes: List[int], motion_dofs: int,
         spc_nodes: List[int], spc_dof_count: int,
         auto_nodes: List[int], auto_dof_count: int, auto_titles: List[str],
-        auto_stab: bool,
+        auto_stab: bool, auto_stab_only: bool,
+        skew148: List[int], skew148_cards: List[str],
         rot_inert: List[int], skewed_motion: List[int],
         emptied: List[int]) -> None:
     """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
@@ -965,7 +992,11 @@ def _warn_constrained_global_converted(
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
-                                              stab=auto_stab))
+                                              stab=auto_stab,
+                                              stab_only=auto_stab_only))
+    if skew148:
+        msg.append(_skew148_sentence(skew148, skew148_cards,
+                                     "--no-constrained-global"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1081,7 +1112,8 @@ def _named(nids: List[int], cap: int = 5) -> str:
 
 def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
-                               stab: bool = False) -> str:
+                               stab: bool = False,
+                               stab_only: bool = False) -> str:
     """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
     ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
 
@@ -1093,21 +1125,50 @@ def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
     and *stab* names it where a merged DOF IS one of those digits
     (``state.rigid_auto_stab``; the validation round). The roster's one
     implicit A1 mover, ex_16_thin_shell_elform_13, merges CON1 6 / CON2 7
-    digits only, so its sentence does not name it.
+    digits only, so its sentence does not name it. *stab_only* (the
+    post-review round): every merged node's card is that stabilisation
+    ALONE (``state.rigid_auto_stab`` equals the card's digits - a CMO 0 body,
+    or CON1 / CON2 0), so the sentence names no *MAT_RIGID CON1/CON2 code.
     """
     shown = ", ".join(auto_titles[:5]) + (
         f" and {len(auto_titles) - 5} more" if len(auto_titles) > 5 else "")
     named = (" - and the stabilisation k2rad adds on this implicit deck to "
              "an unloaded free translation of a loaded body -" if stab else "")
+    what = ("the stabilisation k2rad adds on this implicit deck to an "
+            "unloaded free translation of a loaded body - the body states no "
+            "*MAT_RIGID CON1/CON2 digit there" if stab_only else
+            f"*MAT_RIGID CMO 1 CON1/CON2{named}, or the "
+            "*CONSTRAINED_NODAL_RIGID_BODY _SPC option")
     return (
         f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
         f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
-        f"the rigid body itself writes there ({shown}: *MAT_RIGID CMO 1 "
-        f"CON1/CON2{named}, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) "
+        f"the rigid body itself writes there ({shown}: {what}) "
         "and were "
         "merged into it rather than written a second time: hm_read_bcs.F:198 "
         "unions the codes (MY_OR), so the second /BCS changed no physics and "
         "only added starter WARNING 312, one condition per DOF both cards fix.")
+
+
+def _skew148_sentence(nodes: List[int], cards: List[str],
+                      opt_out: str) -> str:
+    """The ERROR-148 clause of the TC/RC announcements (the post-review
+    round, A1's skew rule; reach 0 on every corpus, the same bytes as
+    65ff389): a skewed *CONSTRAINED_NODAL_RIGID_BODY_SPC code is never merged,
+    so a re-pointed member code keeps its own skew-0 /BCS on the same main
+    node - which the starter refuses. Measured on a starter probe (the
+    skewed-CNRB test deck): ERROR 148 + WARNING 312 at 65ff389 and at the
+    round-7 head; without the member code, 0 errors."""
+    return (
+        f" {len(nodes)} /RBODY main node(s) (node {_named(nodes)}) carry "
+        "this skew-0 /BCS AND the SKEWED /BCS a "
+        "*CONSTRAINED_NODAL_RIGID_BODY_SPC writes there ("
+        + ", ".join(cards[:5]) + (" ..." if len(cards) > 5 else "")
+        + "), whose digits are axes of that skew and so were not merged: the "
+        "starter accepts ONE skew per node across /BCS cards and STOPS with "
+        "ERROR 148 'A SKEW IS ALREADY DEFINED WITH THE NODE' "
+        "(hm_read_bcs.F:199-205). REMEDY: state the code in that CNRB's own "
+        f"CON2 (its local system) instead, or drop the cells ({opt_out} drops "
+        "them here).")
 
 
 def _warn_node_tc_rc_converted(state: ConversionState, *,
@@ -1121,7 +1182,8 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                spc_nodes: List[int], spc_dof_count: int,
                                auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
-                               auto_stab: bool,
+                               auto_stab: bool, auto_stab_only: bool,
+                               skew148: List[int], skew148_cards: List[str],
                                rot_inert: List[int],
                                skewed_motion: List[int],
                                emptied: List[int]) -> None:
@@ -1213,7 +1275,11 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
-                                              stab=auto_stab))
+                                              stab=auto_stab,
+                                              stab_only=auto_stab_only))
+    if skew148:
+        msg.append(_skew148_sentence(skew148, skew148_cards,
+                                     "--no-node-tc-rc-bcs"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -3407,7 +3473,7 @@ _SPOTWELD_EFAIL_EVIDENCE = (
     "MEASURED on intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k with "
     "--spotweld-node-synthesis --beam-contact-secondary (nt 4): the weld "
     "fails at 1.12650e-3 s where LS-DYNA's last intact output is 1.17969e-3 s "
-    "and its first failed one 1.19792e-3 s (4.6-6.0 % early); IE -33.00 % / "
+    "and its first failed one 1.19792e-3 s (4.5-6.0 % early); IE -33.00 % / "
     "KE +38.90 % at the end, RMS 6.65 / 23.09 % of the LS peak.")
 
 
@@ -5942,9 +6008,10 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
     rotary inertia ``IN`` (``:355``), plus the main node's ``IN``
     (``:166-168``), plus the ``/RBODY`` ``J`` cells, which are ADDITIVE
     (``:154-160``); the tensor is printed as ``NEW INERTIA`` (``:708/:712``).
-    LS-DYNA's rigid-body inertia is the point-mass sum — its nodal ``J_i``
-    exclude contributions from and on the rigid body itself (Theory R16
-    eqs 29.21-29.23) — so the lumped shell ``IN`` is a residual the momentum
+    LS-DYNA's rigid-body inertia is the point-mass sum - MEASURED: the
+    reference d3hsp tensor equals it (revo-stiff 0.1977E-02, the point-mass
+    value, where Theory R16 eq. 29.23's density integral J_rho gives 6.66e-4)
+    - so the lumped shell ``IN`` is a residual the momentum
     average hands straight to the spin. ``J = -SUM(IN)`` over the SAME nodes
     ``inirby.F`` adds ``IN`` for (the body's secondaries and its main node;
     ``k2rad.lumping.nodal_masses_from_state``'s ``IN``, shells only) takes it
@@ -6092,7 +6159,7 @@ def _apply_mass_weighted_rbody_inertia(state: ConversionState,
             f"shell node(s)) into /RBODY/{main}: the starter ADDS every "
             "member's IN to the body tensor for ICoG 1/2/3 (inirby.F:166-168, "
             ":322, :355), while LS-DYNA's rigid-body inertia is the "
-            "point-mass sum (Theory R16 eqs 29.21-29.23), so the J cells "
+            "point-mass sum (measured on the reference d3hsp tensors), so the J cells "
             "take the difference back out. MEASURED on "
             "intro-by-j.-day/joint/joint-ii/translat.k (nt 4): NEW INERTIA "
             "0.2642894E-02 -> 0.1977227E-02 = LS-DYNA's 0.1977E-02; cycle-0 "
@@ -7855,10 +7922,17 @@ def _light_pair_clause(state: ConversionState,
         return m + guarded_share.get(n, 0.0)
 
     pairs: List[Tuple[float, int, int, float, float, float]] = []
+    # a light node whose own three translations are fixed cannot move, so it
+    # has no critical step to compare (the post-review round: gnonspring's
+    # node 1, *BOUNDARY_SPC_NODE 111111, printed UNPROTECTED); named HELD
+    held: List[Tuple[int, int]] = []
     for n, m_n, _sh in light:
         for eid, n1, n2, mass, inertia, k_t, k_r, c_t, c_r in \
                 state.spring_token_springs:
             if n not in (n1, n2) or k_t <= 0.0:
+                continue
+            if n in fixed:
+                held.append((n, eid))
                 continue
             m_f = _far_mass(n2 if n == n1 else n1)
             mu = m_n if m_f == inf else m_n * m_f / (m_n + m_f)
@@ -7868,19 +7942,39 @@ def _light_pair_clause(state: ConversionState,
                     if inertia > 0.0 and (k_r > 0.0 or c_r > 0.0) else inf)
             dt_s = min(dt_t, dt_r)
             pairs.append((crit / (tsca * dt_s), n, eid, crit, dt_s, mass))
+    held_txt = "; ".join(
+        f"node {n} on spring {eid}: HELD (its three translations are fixed "
+        "by the deck's own *BOUNDARY_SPC or zero-scale prescribed motion, so "
+        "it has no critical step to compare)" for n, eid in held[:5]) + (
+        " ..." if len(held) > 5 else "")
     if not pairs:
-        return ""
+        return " Per pair: " + held_txt + "." if held else ""
     pairs.sort()
+
+    def _prescribed(n: int) -> str:
+        """A translation an imposed motion drives (gnonspring's node 2 is
+        driven along its spring's axis): named beside the label."""
+        dirs = sorted(d for d in state.imp_motion_dirs.get(n, ())
+                      if d in ("X", "Y", "Z"))
+        return (f" (its {'/'.join(dirs)} "
+                f"{'is' if len(dirs) == 1 else 'are'} prescribed by an "
+                "imposed motion)" if dirs else "")
+
     shown = "; ".join(
         f"node {n} on spring {eid}: {crit:.3g} s vs {tsca:g} x {dt_s:.3g} s"
         f" -> {'PROTECTED' if ratio >= 1.0 else 'UNPROTECTED'}"
+        + _prescribed(n)
         for ratio, n, eid, crit, dt_s, _m in pairs[:5])
+    if len(pairs) > 5:
+        shown += " ..."
+    if held:
+        shown += "; " + held_txt
     token = pairs[0][5]
     text = (
         " Per pair, the two-mass critical step 2 sqrt(mu / K) against Tsca x "
         "the spring's own step (r1len3.F:175 / r2len3.F:182-186, which read "
         "the PROPERTY mass and inertia; a TYPE13's rotational K includes its "
-        "shear K x L^2, r4def3.F:173): " + shown + (" ..." if len(pairs) > 5 else "") + ". An UNPROTECTED node "
+        "shear K x L^2, r4def3.F:173): " + shown + ". An UNPROTECTED node "
         "is stable only while the model's governing element step stays below "
         "its critical step; nothing else catches it: the run ends NORMAL "
         "TERMINATION with the energy ERROR column at 99.9 % (MEASURED on a "

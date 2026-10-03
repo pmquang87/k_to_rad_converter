@@ -1339,6 +1339,22 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
             nodes.append(nd)
     if not nodes:
         return []
+    # Round 7 (B2): a converted *CONSTRAINED_JOINT_SCREW re-writes its drive
+    # as /IMPVEL/LAGMUL, which sets no kinematic code on the body's main node
+    # - and thbcs.F:62 / :77 accumulate REAC* only where one is set - so that
+    # node's REACX/Y/Z channel reads identically zero. Named (the BNDOUT
+    # sibling is, since 0cb0877); the card is kept for its live DX/Y/Z.
+    screw_nodes = sorted(
+        {rbody_info[pm.pid]["ind_node"] for pm in screw_drives(state)
+         if rbody_info.get(pm.pid)} & set(nodes))
+    screw_note = (
+        f" On node(s) {screw_nodes} - the drive of a converted "
+        "*CONSTRAINED_JOINT_SCREW, written as /IMPVEL/LAGMUL - REACX/Y/Z "
+        "read identically 0: a Lagrange-multiplier drive sets no kinematic "
+        "code, and the engine accumulates REAC* only on nodes that carry one "
+        "(thbcs.F:62 / :77); their DX/Y/Z channels are live. "
+        "--no-joint-screw-gjoint keeps the /IMPDISP and its reaction (and "
+        "loses the screw)." if screw_nodes else "")
     # This block pairs REACX/Y/Z with DX/Y/Z on the same node, which is exactly
     # the shape of a force-vs-displacement extraction — and exactly the plot
     # that silently goes wrong if REAC is used raw. The deck comment says so,
@@ -1354,7 +1370,7 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
         "channel rises monotonically under a steady load, so an untreated "
         "REAC-vs-DX curve has a meaningless slope and a meaningless enclosed "
         "area (it is not the work done). The DX/Y/Z channels alongside it are "
-        "ordinary displacements and need no such treatment.")
+        "ordinary displacements and need no such treatment." + screw_note)
     th_id = state.next_id()
     lines = [
         "#-  TIME HISTORY (imposed-motion reaction impulse on rigid-body master):", HDR,
@@ -2115,7 +2131,7 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     use (convertrigids.cxx:766-772).
 
     ``state.rbody_ids`` is the set the SIX Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:1049, :1492, :1604, :1793, :1950, :2074,
+    register into at the line that writes the card — writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077,
     in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
     element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
     out, so four LS-DYNA sources funnel through the first one),

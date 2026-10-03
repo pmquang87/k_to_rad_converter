@@ -664,8 +664,9 @@ def convert(
         per ``/SH3N`` spread by the corner angles (``c3inmas.F:1111``) - to a
         rigid body's tensor
         (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
-        while LS-DYNA's rigid-part inertia is the point-mass sum (Theory R16
-        eqs 29.21-29.23; 18 of 18 reference d3hsp tensors within 0.04 %).
+        while LS-DYNA's rigid-part inertia is the point-mass sum (MEASURED:
+        18 of 18 reference d3hsp tensors within 0.04 %; not Theory R16
+        eq. 29.23's density integral).
         **On by default.** Written in the producer (a CNRB PID that shadows a
         part id no longer hides the body), skipped by name where the lumper
         is not the starter's, refused by name at or below a relative
@@ -718,7 +719,7 @@ def convert(
         Ismstr 1 and gets ``Iframe 2`` on a /BRICK part, an Ip 21 / 24
         orthotropic brick on Isolid 17 takes the round-6 Isolid-14 route like
         Ip 20 / 23, and on Ip 21 ``/MAT/LAW93``'s 2 / 3 constants are
-        exchanged (Radioss b = e_z x a, ``smorth3.F:324-327``). **On by
+        exchanged (Radioss b = e_z x a, ``smorth3.F:326-328``). **On by
         default.** MEASURED on one-hex coupons at nt 4: MAT_126 crush 0 -> 12
         of 12 cases right (sigma(0.10) 6.0047 -> 1.5049 against 1.5), LAW93
         Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6; the plateau unchanged (RMS
@@ -747,9 +748,11 @@ def convert(
         re-written as ``/BCS/LAGMUL`` + ``/IMPVEL/LAGMUL`` (a VAD 2 curve
         differentiated) and the rigid pair split out of an all-parts
         self-contact. **On by default.** MEASURED on EXP_SC_JOINT_SCREW at
-        nt 4: nut travel 0 -> 185.70 mm against LS-DYNA's 183.59, IE -100 ->
+        nt 4: nut travel 0 -> 185.70 mm against LS-DYNA's 183.59 at the same
+        instant (t 0.09995), IE -100 ->
         +42.76 % (the exact joint against LS-DYNA's yielding penalty joint),
-        0.9998x cycles. SMP only (``-np > 1`` stops at cycle 1). Anything
+        0.9998x cycles. SMP only (``-np > 1`` stops in its first cycle,
+        ``lag_mult.F:667-671``). Anything
         outside the pattern keeps the skip with a named reason.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into

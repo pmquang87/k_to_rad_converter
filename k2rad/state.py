@@ -7761,9 +7761,10 @@ class ConvertOptions:
     # (c3inmas.F:1111) - to a rigid body's
     # tensor for ICoG 1/2/3 (inirby.F:166-168 the main node, :355-363 the
     # secondaries) and the J cells are additive, while LS-DYNA's rigid-part
-    # inertia is the point-mass sum of the nodal masses (Theory R16 eqs
-    # 29.21-29.23; its d3hsp tensor equals it on 18 of 18 measured bodies
-    # within 0.04 %). So the producer (writer/rbody._make_rbodies) writes
+    # inertia is the point-mass sum of the nodal masses (MEASURED: its d3hsp
+    # tensor equals it on 18 of 18 bodies within 0.04 %; Theory R16 eq. 29.23
+    # writes the part's own term as a density integral, which the printed
+    # tensor does not follow). So the producer (writer/rbody._make_rbodies) writes
     # Jxx = Jyy = Jzz = -SUM(IN) over the body's nodes; skipped by name where
     # the lumper is not the starter's (layered, element thickness, Ishell <
     # 11, no section), refused by name at or below a relative 1e-3 margin
@@ -7786,7 +7787,7 @@ class ConvertOptions:
     # 26.74 % at 1.107x the cycles (deviation -> match). mainboltaexpl moves
     # too, by run sensitivity and not by the yield (the round-7 validation
     # round: its weld shear never exceeds 13789 against the new yield 29021,
-    # and the 65ff389 card with only K2 changed by 1e-8 moves its END and
+    # and the 65ff389 card with K2 and K3 scaled by (1 - 1e-8) moves its END and
     # RMS as much; its preloaded bolt spring collapses on every arm). Reach: 4
     # deck keys on 4 emitted models (2 of them giants).
     spotweld_shear_yield: bool = True
@@ -7832,7 +7833,7 @@ class ConvertOptions:
     # state dyna2rad reaches through /DEF_SOLID Iframe -2), and an Ip 21 / 24
     # orthotropic brick on an ELFORM-derived Isolid 17 takes the round-6
     # Isolid-14 route like Ip 20 / 23. R2: on Ip 21 Radioss builds b = e_z x a
-    # (smorth3.F:324-327) where LS-DYNA builds b = (a x e_z) x a, so
+    # (smorth3.F:326-328) where LS-DYNA builds b = (a x e_z) x a, so
     # /MAT/LAW93's 2 / 3 constants are exchanged (E22 <-> E33, G12 <-> G13,
     # NU12 <-> NU13, NU23 -> NU23 E33 / E22); other laws are named. Element-
     # frame tetrahedra are NAMED, never changed (R3: OpenRadioss never
@@ -7883,9 +7884,11 @@ class ConvertOptions:
     # an all-parts self-contact (a contact force on a Lagrange-held rigid body
     # slips its mesh off its main node: 178.67 mm measured with the pair
     # kept). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut travel 0 -> 185.70 mm
-    # against LS-DYNA's 183.59, IE -100 -> +42.76 % (the exact joint against
+    # against LS-DYNA's 183.59 at the same instant (t 0.09995), IE -100 ->
+    # +42.76 % (the exact joint against
     # LS-DYNA's yielding penalty joint: a solver limitation), 0.9998x cycles.
-    # SMP only (-np > 1 stops at cycle 1). Anything outside the pattern keeps
+    # SMP only (-np > 1 stops in its first cycle, starter-clean: lag_mult.F
+    # :667-671). Anything outside the pattern keeps
     # the skip with a named reason. Reach 1 deck key on 1 emitted model.
     joint_screw_gjoint: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
@@ -9484,7 +9487,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1049, :1492, :1604, :1793, :1950, :2074, in that order:
+    # (writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

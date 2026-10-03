@@ -284,6 +284,41 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         main = groups["BC_cnrb_50"][1]
         self.assertEqual(groups["node_tc_rc_001_000"], ("001 000", main))
         self.assertFalse(_has(res.warnings, _A1_NEW), res.warnings)
+        # ... and the pair the starter then REJECTS is named (the
+        # post-review round: ERROR 148 + WARNING 312 on this very deck at
+        # 65ff389 and at the round-7 head; 0 errors without the member TC)
+        w = _node_warning(res)
+        for needle in (f"(node {main[0]}) carry this skew-0 /BCS AND the "
+                       "SKEWED /BCS", "BC_cnrb_50 at skew 5", "ERROR 148",
+                       "hm_read_bcs.F:199-205", "--no-node-tc-rc-bcs drops"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w)
+        # control: the same CNRB at skew 0 merges, and nothing is named
+        r0, _s0, _e0 = _convert(_a1_deck(tc=0, elastic_tc=(3, 0), extra=(
+            "*SET_NODE_LIST\n" + _row(7) + "\n"
+            + _row(10, 11, 12, 13, 14, 15, 16, 17) + "\n" + _row(18)
+            + "\n*CONSTRAINED_NODAL_RIGID_BODY_SPC\n" + _row(50, 0, 7)
+            + "\n" + _row(1.0, 7, 0) + "\n")))
+        self.assertFalse(_has(r0.warnings, "ERROR 148"), r0.warnings)
+
+    def test_4b_a_card_that_is_the_stabilisation_alone_names_only_it(self):
+        """The post-review round: on an implicit deck a CMO 0 body loaded in
+        y gets BC_rigid_1 Tra 101 from k2rad's stabilisation ALONE; a member
+        TC 3 merged into it must not be attributed to a '*MAT_RIGID CMO 1
+        CON1/CON2' code the deck does not state."""
+        imp = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 1.0e-4) + "\n"
+        load = ("*LOAD_RIGID_BODY\n" + _row(1, 2, 7, 1.0) + "\n"
+                "*DEFINE_CURVE\n" + _row(7) + "\n"
+                f"{0.0:>20.6f}{1.0:>20.6f}\n{1.0:>20.6f}{1.0:>20.6f}\n")
+        res, starter, _e = _convert(_a1_deck(cmo=0.0, con1=0, con2=0, tc=3,
+                                             extra=imp + load))
+        self.assertEqual(_bcs_groups(starter)["BC_rigid_1"][0], "101 000")
+        w = _node_warning(res)
+        self.assertIn("(BC_rigid_1: the stabilisation k2rad adds on this "
+                      "implicit deck to an unloaded free translation of a "
+                      "loaded body - the body states no *MAT_RIGID CON1/CON2 "
+                      "digit there) and were merged", w)
+        self.assertNotIn("CMO 1 CON1/CON2", w)
 
     def test_5_the_CONSTRAINED_GLOBAL_provenance_prints_its_own_sentence(self):
         extra = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 0.0, 0.0) + "\n"
@@ -803,7 +838,7 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
     def test_18_a_triangle_body_subtracts_the_starters_c3inmas_IN(self):
         """A /SH3N carries the starter's c3inmas.F:1111 rotary inertia: the
         WHOLE element's XI = m (A/4.5 + t^2/12), spread by the corner angles
-        / pi (c3inmas.F:1138-1143, spmd_msin.F:555-556) - the validation
+        / pi (c3inmas.F:1138-1143, spmd_msin.F:556-557) - the validation
         round; the quad formula (m/n)(A + t^2)/12 left up to 9.2 % of SUM(IN)
         on 41 roster bodies. Hand: a right triangle with 20 mm legs, t 2, RO
         7.85e-9 -> A 200, m 3.14e-6, XI = 3.14e-6 x (200/4.5 + 4/12) =
@@ -1782,6 +1817,53 @@ class LightClauseNumbers(unittest.TestCase):
         self.assertIn("node 50 on spring 104",
                       _token_warning(_convert(_spring_coupon())[0]))
 
+    def test_8_a_held_light_node_is_HELD_and_a_prescribed_axis_is_named(self):
+        """gnonspring's shape (the post-review round's physics verifier):
+        spring 1 (K 100, token mass 1e-4 -> dt_s = 1e-3 s) between node 1,
+        fully fixed by *BOUNDARY_SPC_NODE 111111, and node 2, driven along
+        the spring axis by *BOUNDARY_PRESCRIBED_MOTION_NODE dof 1; both
+        carry *ELEMENT_MASS 1e-6, below their token share 5e-5, so both are
+        LIGHT. Node 1 cannot move: HELD, never 'UNPROTECTED' (the shipped
+        clause printed 4e-05 s -> UNPROTECTED for gnonspring's node 1). Node
+        2's far end is the fixed node 1 (infinite mass): mu = 1e-6 ->
+        2 sqrt(1e-6 / 100) = 2e-4 s < 0.9 x 1e-3 -> UNPROTECTED, with its
+        prescribed X named. 0 bytes."""
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(2.0e-3) + "\n"
+                "*PART\nspring\n" + _row(100, 100, 100) + "\n"
+                "*SECTION_DISCRETE\n" + _row(100, 0) + "\n" + _row() + "\n"
+                "*MAT_SPRING_ELASTIC\n" + _row(100, 100.0) + "\n"
+                "*NODE\n" + f"{1:>8}{0.0:>16.1f}{0.0:>16.1f}{0.0:>16.1f}\n"
+                + f"{2:>8}{1000.0:>16.1f}{0.0:>16.1f}{0.0:>16.1f}\n"
+                "*ELEMENT_DISCRETE\n"
+                + "".join(f"{v:>8}" for v in (1, 100, 1, 2)) + "\n"
+                "*ELEMENT_MASS\n"
+                + "".join(f"{v:>8}" for v in (2, 1)) + f"{1.0e-6:>16}\n"
+                + "".join(f"{v:>8}" for v in (3, 2)) + f"{1.0e-6:>16}\n"
+                "*BOUNDARY_SPC_NODE\n" + _row(1, 0, 1, 1, 1, 1, 1, 1) + "\n"
+                "*BOUNDARY_PRESCRIBED_MOTION_NODE\n"
+                + _row(2, 1, 2, 99, -1.0) + "\n"
+                "*DEFINE_CURVE\n" + _row(99) + "\n"
+                + f"{0.0:>20}{0.0:>20}\n{2.0e-3:>20}{1.0:>20}\n"
+                + "*END\n")
+        res, starter, engine = _convert(deck)
+        w = _token_warning(res)
+        for needle in (
+                "node 1 on spring 1: HELD (its three translations are fixed",
+                "node 2 on spring 1: 0.0002 s vs 0.9 x 0.001 s -> "
+                "UNPROTECTED (its X is prescribed by an imposed motion)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w)
+        self.assertNotRegex(w, r"node 1 on spring 1: [0-9]")
+        # 0 bytes: the clause is text
+        from k2rad.writer import loads
+        saved = loads._light_pair_clause
+        loads._light_pair_clause = lambda *a, **k: ""
+        try:
+            _r0, s0, e0 = _convert(deck)
+        finally:
+            loads._light_pair_clause = saved
+        self.assertEqual((starter, engine), (s0, e0))
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # The flags of part A reach the parser, the API, the GUI and the README
@@ -1815,7 +1897,7 @@ class Round7FlagWiringA(unittest.TestCase):
         "--spotweld-shear-yield": ("20374..20408", "= 20405",
                                    "8.58 / 26.74 %", "1.107x",
                                    "mainboltaexpl"),
-        "--spotweld-efail-displacement": ("1.12650e-3", "4.6-6.0 %",
+        "--spotweld-efail-displacement": ("1.12650e-3", "4.5-6.0 %",
                                           "sqrt(eps^2 + gamma^2/3)",
                                           "1e19"),
         "--implicit-tshell-solid": ("28 cycles", "100 624",
@@ -3514,6 +3596,46 @@ class JointScrewGjoint(unittest.TestCase):
         self.assertFalse(_has(r0.warnings, "/IMPVEL/LAGMUL and are NOT"),
                          r0.warnings)
 
+    def test_th_reaction_names_the_lagmul_drive_zero_channel(self):
+        """The BNDOUT sibling of the post-review round: the /TH/NODE
+        TH_reaction block still lists the screw body's main node (its DX/Y/Z
+        are live), but its REACX/Y/Z read identically 0 once the drive is
+        /IMPVEL/LAGMUL (no kinematic code, thbcs.F:62 / :77) - said, 0
+        bytes; the opt-out's /IMPDISP keeps a real reaction and no note."""
+        r, s, _e = _convert(_screw_deck())
+        lines = s.splitlines()
+        i = lines.index("TH_reaction")
+        j = next(k for k in range(i, len(lines))
+                 if lines[k].split() == ["DX", "DY", "DZ", "REACX", "REACY",
+                                         "REACZ"])
+        nodes = []
+        for ln in lines[j + 1:]:
+            if ln.startswith("#") or ln.startswith("/"):
+                break
+            nodes += [int(t) for t in ln.split()]
+        self.assertEqual(len(nodes), 1, nodes)
+        hits = [w for w in r.warnings if w.startswith(
+            "*BOUNDARY_PRESCRIBED_MOTION_RIGID -> /TH/NODE TH_reaction")]
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in (f"On node(s) [{nodes[0]}] - the drive of a converted "
+                       "*CONSTRAINED_JOINT_SCREW", "read identically 0",
+                       "thbcs.F:62 / :77", "DX/Y/Z channels are live"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        r0, s0, _e0 = _convert(_screw_deck(), joint_screw_gjoint=False)
+        self.assertIn("TH_reaction", s0)
+        self.assertFalse(_has(r0.warnings, "read identically 0"),
+                         r0.warnings)
+        # 0 bytes: the note alone
+        from k2rad.writer import output
+        saved = output.screw_drives
+        output.screw_drives = lambda state: []
+        try:
+            _r1, s1, _e1 = _convert(_screw_deck())
+        finally:
+            output.screw_drives = saved
+        self.assertEqual(s1, s)
+
     def test_the_axis_sign_is_immaterial(self):
         _r, s, _e = _convert(_screw_deck())
         _r2, s2, _e2 = _convert(_screw_deck(swap_axis=True))
@@ -3570,7 +3692,7 @@ class Round7FlagWiringB(Round7FlagWiringA):
     _HELP_FIGURES = {
         "--joint-screw-gjoint": ("-1/PARM", "185.70", "183.59", "0.9998x"),
         "--corotational-orthotropic": ("6.0047", "1.5049",
-                                       "smorth3.F:324-327", "0.164 %"),
+                                       "smorth3.F:326-328", "0.164 %"),
         "--mat-null-pc-mu": ("hm_read_mat06.F:154", "m6law.F:98", "+4.50 %",
                              "-0.09 %", "0.832x"),
     }
@@ -3821,7 +3943,7 @@ _RETRACTED_ROUND_7_V = (
     "RMS 393.30",
     "RMS 313.17",
     # mainboltaexpl's END / RMS move by run sensitivity, not by the yield
-    # (its shear stays below it; a 1e-8 change of K2 alone moves it as much)
+    # (its shear stays below it; a 1e-8 change of K2 and K3 moves it as much)
     "Named cost: mainboltaexpl",
     "named cost `mainboltaexpl`",
     "A3 makes that row worse",
@@ -3834,7 +3956,8 @@ _RETRACTED_ROUND_7_V = (
     # nt 4) reads 50.87 -> 51.85; the pre-research arm's pair is retired
     "50.64 → 51.61",
     # sph/bird's Nu-1 arm moved the cycles and the END (1942 -> 1917,
-    # +69.44 -> +69.28 %); only its IE RMS stayed (44.15 %)
+    # +69.44 -> +69.28 %); only its IE RMS stayed (44.37 % by the round's
+    # scorer - the post-review round retired the pre-research scorer's 44.15)
     "Nu 1 moved nothing",
 )
 
@@ -3909,10 +4032,10 @@ class Round7ValidationRound(unittest.TestCase):
             ("ROADMAP.md", "the IE RMS moves 50.87 → 51.85 % in the campaign "
              "re-run, nt 4 — 0.98 of the 1-point threshold"),
             ("k2rad/writer/materials.py", "where Nu 1 left the IE history "
-             "where it was (IE RMS 44.15 % on both arms; END IE +69.44 -> "
+             "where it was (IE RMS 44.37 % on both arms; END IE +69.44 -> "
              "+69.28 %, 1942 -> 1917 cycles)"),
             ("ROADMAP.md", "Nu 1 left the IE history where it was, IE RMS "
-             "44.15 % on both arms, END IE +69.44 → +69.28 %"),
+             "44.37 % on both arms, END IE +69.44 → +69.28 %"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

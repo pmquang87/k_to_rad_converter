@@ -211,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
              "which k2rad wrote before round 7: the default "
              "--implicit-tshell-solid route now ends the family NORMAL in 28 "
              "cycles at this default (nt 4 and 2), and the value is inert "
-             "there: 0.1 ends it in the same 28 cycles at the same IE "
+             "there: 0.1 ends it in the same 28 cycles at the same END IE "
              "(nt 4 and 2). Pass 0.1 to restore the old default on such a "
              "deck; on THAT family 0.1 together with "
              "--no-implicit-tshell-solid reproduces the pre-round-4 file "
@@ -569,7 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
              "default; beside resultant cells EFAIL is named, not converted. "
              "MEASURED on spotweld.k with --spotweld-node-synthesis "
              "--beam-contact-secondary (nt 4): rupture 1.12650e-3 s vs "
-             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.6-6.0 %% early). Its only "
+             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.5-6.0 %% early). Its only "
              "default mover is a giant the campaign does not run (measurable "
              "default effect nil). Use --no-spotweld-efail-displacement to "
              "keep EFAIL dropped.",
@@ -602,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
              "orthotropic brick on Isolid 17 is written as Isolid 14 like "
              "Ip 20 / 23 since round 6; on Ip 21 /MAT/LAW93's 2 / 3 "
              "constants are exchanged (Radioss b = e_z x a, "
-             "smorth3.F:324-327). ON by default. MEASURED on one-hex coupons "
+             "smorth3.F:326-328). ON by default. MEASURED on one-hex coupons "
              "at nt 4: MAT_126 crush 0 -> 12 of 12 cases right (sigma(0.10) "
              "6.0047 -> 1.5049 against 1.5), LAW93 Ip 24 0 -> 6 of 6, Ip 21 "
              "2 -> 6 of 6; the plateau unchanged (RMS 0.164 %%). Tetrahedra "
@@ -637,7 +637,8 @@ def build_parser() -> argparse.ArgumentParser:
              "split out of an all-parts self-contact. ON by default. The "
              "joint is exact where LS-DYNA's default penalty joint yields; "
              "SMP only (-np 1). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut "
-             "travel 0 -> 185.70 mm against LS-DYNA's 183.59, IE -100 -> "
+             "travel 0 -> 185.70 mm against LS-DYNA's 183.59 at the same "
+             "instant, IE -100 -> "
              "+42.76 %%, 0.9998x cycles. Use --no-joint-screw-gjoint to keep "
              "the joint skipped.",
     )

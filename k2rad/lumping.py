@@ -52,7 +52,7 @@ def _corner_angle_fractions(p) -> List[float]:
     """The three corner angles of triangle *p* divided by pi - the shares
     the starter spreads a /SH3N's mass and rotary inertia with
     (``c3inmas.F:1138-1143`` P1..P3 = ACOS(...) / PI, applied in
-    ``spmd_msin.F:555-556``). They sum to 1. A degenerate triangle (a
+    ``spmd_msin.F:556-557``). They sum to 1. A degenerate triangle (a
     zero-length edge) gets equal thirds."""
     out: List[float] = []
     for k in range(3):
@@ -211,7 +211,7 @@ def nodal_masses_from_state(
     with three DISTINCT corners - which ``writer/mesh`` writes as ``/SH3N``
     - the whole-element XI = m_elem·(A_elem/4.5 + t²/12) (``c3inmas.F:1111``)
     spread by the corner angles / pi (``c3inmas.F:1138-1143``,
-    ``spmd_msin.F:555-556``), its geometry taken from the three distinct
+    ``spmd_msin.F:556-557``), its geometry taken from the three distinct
     corners. Until the round-7 validation round a triangle got the quad's
     (m/n)(A + t²)/12, an in-plane term A/12 where the starter's is A/4.5.
     The quad values reproduce the OpenRadioss starter's MS/IN nodal arrays
