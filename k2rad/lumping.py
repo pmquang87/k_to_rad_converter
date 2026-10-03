@@ -23,10 +23,9 @@ the momentum average needs is solved with a cyclic Jacobi sweep
 from __future__ import annotations
 
 import math
-from itertools import chain
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from .state import ConversionState
+from .state import ConversionState, SolidElem, TshellElem
 # The two derivations this module must NOT re-implement: the writer's
 # thickness-to-section-constants rule (the /PROP/BEAM the engine's stiffness
 # matrix came from used it) and the converter's own RO <= 0 floor (the .rad it
@@ -235,7 +234,9 @@ def nodal_masses_from_state(
     # zero"). A degenerate 6-node thick shell is written n1 n2 n3 n3 n5 n6 n7
     # n7, which the same _HEXA_TETS split measures as the wedge it is.
     # element_mass_by_node below has always counted them.
-    for e in chain(state.solid_elems, state.tshell_elems):
+    vol_elems: List[Union[SolidElem, TshellElem]] = [
+        *state.solid_elems, *state.tshell_elems]
+    for e in vol_elems:
         part = state.parts.get(e.pid)
         if part is None:
             continue
@@ -285,7 +286,7 @@ def nodal_masses_from_state(
         part_nodes: Dict[int, set] = {}
         for e in state.shell_elems:
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
-        for e in chain(state.solid_elems, state.tshell_elems):
+        for e in vol_elems:
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
         for e in state.beam_elems:
             part_nodes.setdefault(e.pid, set()).update((e.n1, e.n2))
