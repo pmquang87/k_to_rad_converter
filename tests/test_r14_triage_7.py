@@ -3602,6 +3602,17 @@ _RETRACTED_ROUND_7_V = (
     "`--qstat-dtscal 0.1` reproduces the pre-round-4 file",
     "``--qstat-dtscal 0.1`` reproduces the pre-round-4 file",
     "--qstat-dtscal 0.1 # reproduces the pre-round-4 file",
+    # doorbeam prints 41 energy rows (cycles 0..38, cycle 10 three times);
+    # the 33 came from a row filter that dropped the SH_3N-controlled rows,
+    # which also moved its IE RMS by 0.01 and the stub-removed arm's by 0.12
+    "all 33 printed rows",
+    "RMS 393.30",
+    "RMS 313.17",
+    # mainboltaexpl's END / RMS move by run sensitivity, not by the yield
+    # (its shear stays below it; a 1e-8 change of K2 alone moves it as much)
+    "Named cost: mainboltaexpl",
+    "named cost `mainboltaexpl`",
+    "A3 makes that row worse",
 )
 
 
@@ -3653,6 +3664,17 @@ class Round7ValidationRound(unittest.TestCase):
              "--no-implicit-tshell-solid reproduces the pre-round-4 file"),
             ("k2rad/state.py", "0.1 together with --no-implicit-tshell-solid "
              "reproduces # the pre-round-4 file BYTE FOR BYTE"),
+            ("ROADMAP.md", "all 41 printed rows at nt 4 and 2"),
+            ("ROADMAP.md", "RMS 393.31; stub removed 33 cycles +689.08 %, "
+             "RMS 313.05 (the RMS over every printed row"),
+            ("k2rad/cli.py", "mainboltaexpl moves too, by run sensitivity "
+             "and not by the yield"),
+            ("README.md", "by run sensitivity, not by the yield: its weld "
+             "shear never exceeds 13789 against the new yield 29021"),
+            ("ROADMAP.md", "by run sensitivity, not by the yield"),
+            ("k2rad/__init__.py", "``mainboltaexpl`` moves by run "
+             "sensitivity, not by the yield"),
+            ("README.md", "but 12.7 % of a 7.85e-6 t coupon body"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

@@ -550,10 +550,12 @@ def build_parser() -> argparse.ArgumentParser:
              "G·EH/(3G+EH)·A/L. ON by default. MEASURED on plates.mat100 "
              "(nt 4): LS-DYNA's weld shear plateaus at 20374..20408 = "
              "(SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> "
-             "8.58 / 26.74 %% of the LS peak at 1.107x the cycles. Named "
-             "cost: mainboltaexpl (its preloaded bolt spring collapses "
-             "either way). Use --no-spotweld-shear-yield to keep the shear "
-             "elastic.",
+             "8.58 / 26.74 %% of the LS peak at 1.107x the cycles. "
+             "mainboltaexpl moves too, by run sensitivity and not by the "
+             "yield: its weld shear stays below it, and a 1e-8 change of K2 "
+             "alone moves that row as much (its preloaded bolt spring "
+             "collapses on every arm). Use --no-spotweld-shear-yield to keep "
+             "the shear elastic.",
     )
     parser.add_argument(
         "--spotweld-efail-displacement",

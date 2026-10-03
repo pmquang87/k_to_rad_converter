@@ -26,10 +26,11 @@ Prior history (before this changelog was introduced) is summarized in the
   50.64 → 51.61 %). Status movers: ex_02_thick_shell_elform_{2,3,5} timeout
   → normal under A4 (28 cycles at nt 4 and 2; not_comparable stays). Named
   history costs printed beside their improvements: ex_15 ×3 (A4), brake /
-  transducer / translat (A2), mainboltaexpl (A3), impact.k's first fifth and
+  transducer / translat (A2), mainboltaexpl (A3; re-attributed by the
+  validation round to run sensitivity, not the yield), impact.k's first fifth and
   underwater_A's END sign (B1), EXP_SC_JOINT_SCREW's exact joint (B2: IE
   −100 → +42.76 %, it stays a deviation); doorbeam re-measured on the A2
-  arm: identical (39 cycles, +582.00 %, all 33 printed rows at nt 4 and nt
+  arm: identical (39 cycles, +582.00 %, all 41 printed rows at nt 4 and nt
   2; its runtime sentence keeps the round-6 figures). **Byte movers** (two-tree
   sweeps of the 356 roster keys from `F:`, 0 convert errors, only
   `_0000.rad` moves): part A 70 deck keys / 61 emitted models, part B 21 / 18
@@ -388,11 +389,16 @@ Prior history (before this changelog was introduced) is summarized in the
     20374..20408 between 1.9e-4 and 2.9e-4 s = `(SIGY/√3)·A` = 20405 to 0.1 %.
     MEASURED (nt 4, base-paired): plates.mat100 deviation → match, IE / KE
     history RMS 23.53 / 62.56 → 8.58 / 26.74 % of the LS peak at 1.107× the
-    cycles. Named cost: `mainboltaexpl` (worse, 51762 = 51762 cycles: END IE
+    cycles. `mainboltaexpl` moves too (51762 = 51762 cycles: END IE
     / KE −72.72 / −11.18 → −81.87 / −83.15 %, IE / KE history RMS 26.69 /
     24.32 → 31.32 / 28.24 % of the LS peak, re-measured on the implementation,
     nt 4; its `/PRELOAD/AXIAL` bolt spring collapses to ~zero
-    length on both arms — a separate defect, ROADMAP). **Byte movers 4 deck
+    length on both arms — a separate defect, ROADMAP); the validation round
+    re-attributes it to RUN SENSITIVITY, not the yield: the weld shear never
+    exceeds 13789 against the new yield 29021, both arms are nt-deterministic
+    (nt 2 = nt 4 to every printed row) and part at cycle 5484 in the 4th
+    digit, and the 65ff389 card with only `K2` changed by `1e-8` moves it
+    the same way (END −80.35 / −73.95 %, RMS 30.46 / 29.08). **Byte movers 4 deck
     keys on 4 emitted models** (plates.mat100, mainboltaexpl, the Yaris roof
     crush and door sag giants, convert-only), later auto ids +1; `spotweld.k`
     moves only under the round-6 opt-in pair.

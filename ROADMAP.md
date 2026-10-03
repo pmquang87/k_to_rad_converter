@@ -1822,7 +1822,7 @@ LS-DYNA's ECTOL default (11 keys / 11 models, resting on LS-DYNA's own
 d3hsp echo: the IE history is closer on no carrier by more than 0.03 points;
 `ie_shell` a STATUS-ONLY promotion at IE −99.87 %; `doorbeam` +380.25 →
 +582.00 %, named; round 7: re-measured on the A2 arm — identical, 39
-cycles, all 33 printed rows at nt 4 and 2), B2 the
+cycles, all 41 printed rows at nt 4 and 2), B2 the
 constant-step warning (39 + 11 keys, warning only), B3
 `--implicit-constant-step` (opt-in, 33 keys / 22 models), B4 the
 implicit-dynamics + initial-velocity ENGINE-defect warning and
@@ -2171,10 +2171,11 @@ named warning (0 bytes, 1 warning record). The two halves are byte-disjoint:
 70 / 61 + 21 / 18 = 91 deck keys / 79 emitted models against 65ff389 (two-tree
 sweeps of the 356 keys from `F:`; only `_0000.rad` moves). Named costs:
 `ex_15` ×3 (A4), `brake` / `transducer` / `translat` (A2), `mainboltaexpl`
-(A3), `impact.k`'s first fifth (B1: +3.20 → −18.98 %, while its END +58.98 →
+(A3 — by run sensitivity, not the yield: a `1e-8` change of `K2` alone moves
+it as much), `impact.k`'s first fifth (B1: +3.20 → −18.98 %, while its END +58.98 →
 +51.91 % and its IE RMS 32.62 → 29.96 % improve), `underwater_A`'s END sign
 within 1 % (B1; it stays match). `doorbeam`'s round-6 +582.00 % was
-re-measured on the A2 arm: identical (39 cycles, all 33 printed rows at nt 4
+re-measured on the A2 arm: identical (39 cycles, all 41 printed rows at nt 4
 and nt 2). Ledger expectation (the campaign validator re-sums it from the
 database): normal 288 → 291, timeout 15 → 12, error_engine 26, error_starter
 12, pending 7, skipped 25; match 26 → 32 (+ up to 2 END-value flips,
@@ -2248,8 +2249,9 @@ that decided it and the deck that would decide it next.
    the implicit contact-stub guard ignores `contacts_type25`, so a deck whose
    only contact takes the TYPE25 route gets the stub too; on `doorbeam` the
    stub is NOT inert (at 65ff389, nt 4 = nt 2: shipped 39 cycles +582.00 %,
-   fifths +667.62 / +1086.39 / +972.69 / +841.87 / +582.00, RMS 393.30; stub
-   removed 33 cycles +689.08 %, RMS 313.17 — better on the RMS, worse at the
+   fifths +667.62 / +1086.39 / +972.69 / +841.87 / +582.00, RMS 393.31; stub
+   removed 33 cycles +689.08 %, RMS 313.05 (the RMS over every printed row,
+   the SH_3N-controlled ones included) — better on the RMS, worse at the
    end; no GO either way; the shipped arm re-measured identical on the A2
    arm); the reach beyond `doorbeam` is not censused.
 8. **The tetrahedron orthotropy frame as a per-element `/INIBRI/ORTHO`**
@@ -2284,9 +2286,11 @@ that decided it and the deck that would decide it next.
     1 + 2 as DEFAULTS (no runnable rule-2 carrier with a reference beyond
     `spotweld.k`; rule 2 would reconnect ~4100-5100 floating weld beams on
     each of four unmeasurable vehicle models); the `mainboltaexpl`
-    `/PRELOAD/AXIAL` bolt spring that collapses to ~zero length on both arms
-    (A3 makes that row worse: IE / KE history RMS 26.69 / 24.32 → 31.32 /
-    28.24 %, nt 4).
+    `/PRELOAD/AXIAL` bolt spring that collapses to ~zero length on every arm
+    (the row moves under A3 — IE / KE history RMS 26.69 / 24.32 → 31.32 /
+    28.24 %, nt 4 — by run sensitivity, not by the yield: its weld shear
+    never exceeds 13789 against 29021, and the 65ff389 card with only `K2`
+    changed by `1e-8` reads RMS 30.46 / 29.08; the collapse is the defect).
 12. **The `status_only` verdict_override class** (round-6 item 17): 63 keys /
     52 models censused (modal 53 / 42, non-modal 10 / 10); it would widen
     NORMAL_ALLOWED, the one guard that stops an override from hiding a live
@@ -3179,7 +3183,7 @@ must never be added together.
 | `ex_27` implicit Taylor bar ×2 | 2 | cycle 1 / 3, t ≈ 1e-7 of 8e-5 | **NOT fixed**, byte-identical with and without the grid. **The "rigid-wall class" attribution this row used to carry is WRONG and was corrected in round 4**: `ex_27_solid_elform_2_rigidwall_constrained_nodes_implicit.k` has **no `*RIGIDWALL` keyword at all** (`grep -c '^\*RIGIDWALL'` = 0; its keyword list carries `*CONSTRAINED_GLOBAL` instead) while only the `_penalty_` twin has `*RIGIDWALL_PLANAR_ID` (`grep -c '^\*RIGIDWALL'` = 1). *Anchor the pattern: an unanchored case-INSENSITIVE grep returns 1 on the constrained deck too, matching its title line "Copper Bar Impacting a Rigidwall"*. Both are the SAME Taylor copper bar at 227 000 mm/s under Newmark trapezoidal at `DT0 = 1e-6`, both diverge from cycle 1 (`RELATIVE R` to 2.3e15), cutting Δt 22 times to `DT_MIN = 1e-10` where `\|r\|/\|r0\|` still sits at ≈ 5.0; the arm `DT_MAX 0 → 1e-6` (LS's own constant step) changes nothing. A real code fact for the `_penalty_` twin, and NOT the cause (round 6: the runaway starts in FREE FLIGHT — 7 `RIGID WALL IMPACT` lines in the shipped arm, 0 once a first step of 1e-8 converges): `nl_solv.F:520` `IF (ILINE_S>0.AND.ISIGN>=0.AND.IRWALL==0)` — the line search is bypassed outright whenever a rigid wall is active — and `imp_solv.F:673-700` forces a full stiffness reform on every rigid-wall impact. The DOF-level residual dump is `/IMPL/NONLIN/SOLVINFO`; round 6 ran it (see that column). Note the grouping: `ex_27_-1_rigidwall` ≡ `ex_27_-2_rigidwall` is ONE emitted model on 2 deck keys, one row a `match` and one a `deviation` | attribution corrected (see the round-3 cell); the divergence is UNTOUCHED and is item 5 of the round-4 NOT-closed list | unchanged; still the round-6 pair | **ENGINE DEFECT, measured — no converter arm.** The free bar's momentum × −3.0000000 at the first converged increment (a first step of 1e-8: NORMAL, KE × 9.00000, the bar flying away; the same with no contact and with either `/INIVEL` card); SOLVINFO names a node of the ring `r` 2.904 (5244; 1423 — which node varies from run to run). B5 now emits the constrained twin's `*CONSTRAINED_GLOBAL` plane (`/BCS 001 000` on 305 nodes = LS-DYNA's own spc summary), which moves its death from cycle 1 to cycle 0 (ISTOP −2) at nt 4 AND 2 — the engine defect acts first. B4's warning fires on both twins; the FREE bar at DTINI 1e-8 (the penalty twin, or the constrained twin with `--no-constrained-global`; no wall, no contact, 72 cycles) is the upstream reproducer — with its plane the constrained twin reads −2.94× and is held at its base | unchanged; the upstream reproducer is packaged (round-7 item 15) |
 | Salzburg `4.1` / `4.3` | 2 | 4.1 timeout at 0.3 % of target; 4.3 cycle 56 | **NOT fixed**. `4.3` is also the one roster deck with an `*INITIAL_STRESS_SECTION`, and its solids are ELFORM −1, so neither item B nor item F reaches it | A1 carriers; `4.3` is also one of the 15 `--derived-gapmin` carriers (derived `GAP MIN` 0.0657821), unmeasured | unchanged. `4.3_General_Nonlinearity` is one of the seven derived-Gapmin interfaces that now HAVE a measured arm (energy error −99.9 % → −55.2 %, internal energy −98.87 % → −99.92 %) — mixed, and not a promotion | unchanged | unchanged |
 | `tensile2` | 1 | cycle 349, t = 0.7701 of 1.0 | marginal (t → 0.7804): genuine near-completion nonlinearity, plus `Warning: MUMPS workspace too small. Retry` | A1 carrier, expected to move — its own arm is +7.36 %; re-run by the campaign | unchanged | B1: ENDS +7.36 → −0.54 % at 0.11× the cycles (75, nt 4 = nt 2), but reads +53 % at `t` 0.80 (+14 % before) — its IE history RMS 2.00 → 2.48 % of the peak; with `--implicit-constant-step` 168 cycles, −4.36 % at the end and RMS 1.66 % (the closest arm) | unchanged |
-| `doorbeam` | 1 | cycle 6, t = 2.6e-7 of 0.0011 | **NOT fixed**, byte-identical death | **A1 x the implicit TYPE25 drop, a COMBINED arm.** NORMAL with A1, at +380 % — which is that deck's dropped implicit interface, not A1's error. Not counted as a fix | byte-mover by A4's `/RBODY` card shape only: 0 ERROR / 3 WARNING on both arms, the two starter listings differing in one line (the host's free-RAM readout) and `_0001.rad` SHA-identical | B1: +380.25 → +582.00 % (a named regression; 39 cycles) | A2 moves its CNRB-shadowed part body's J row; **re-measured on the A2 arm: identical** (39 cycles, +582.00 %, all 33 printed rows at nt 4 and nt 2); the TYPE25-only stub question is round-7 item 7 |
+| `doorbeam` | 1 | cycle 6, t = 2.6e-7 of 0.0011 | **NOT fixed**, byte-identical death | **A1 x the implicit TYPE25 drop, a COMBINED arm.** NORMAL with A1, at +380 % — which is that deck's dropped implicit interface, not A1's error. Not counted as a fix | byte-mover by A4's `/RBODY` card shape only: 0 ERROR / 3 WARNING on both arms, the two starter listings differing in one line (the host's free-RAM readout) and `_0001.rad` SHA-identical | B1: +380.25 → +582.00 % (a named regression; 39 cycles) | A2 moves its CNRB-shadowed part body's J row; **re-measured on the A2 arm: identical** (39 cycles, +582.00 %, all 41 printed rows at nt 4 and nt 2); the TYPE25-only stub question is round-7 item 7 |
 | `bumper` | 1 | cycle 1 | an **item A** deck (`*CONTACT_SURFACE_TO_SURFACE`, its only contact). It now reaches NORMAL — as a zero model, because its rigid SSID side still drops the interface. Re-measure after the rigid-secondary item, not here | **NOT fixed, and now NAMED rather than deferred.** B2 gates the all-rigid-SSID swap to EXPLICIT decks: six restoration arms at nt 2 AND nt 4 all die `ISTOP = -2`, and `--deformable-contact-recipe` is a byte-identical no-op because `_recipe_active` excludes a rigid-MAIN interface. `bumper` stays a NORMAL **zero model**. Item 3 of the round-4 NOT-closed list | **the one implicit lever of the round, opt-in.** `--implicit-rigid-secondary-swap` restores the load path: NORMAL **131 cycles** at t = 0.05 with IE **6.934e5** against the LS-DYNA reference's 1.23131e7 (−94.4 %), at nt 4 AND nt 2, where the shipped drop reads IE 0. The VERDICT still cannot move — this deck's LS-DYNA KE is exactly 0 and `build_benchmark` short-circuits on a structural zero — so the row stays what it is by default | B1 inert (IE 0 both) | an A2 byte mover (its rigid shell body's J row); J enters only the dynamic implicit mass matrix — unmeasured here, the campaign re-run measures it |
 | `eigenvalue/tire.k` | 1 | cycle 0, `** ERROR: SOLVER IMPLICIT STOPPED DUE TO LOADING DATA **` (`tire/tire_0001.out:199` in the campaign mirror, nt 4) | not in the round-3 census | — | — | — | **NEW row, named in round 7**: the modal recipe (`/IMPL/LINEAR` + `/IMPL/PRINT/STIF`) stops on LOADING DATA after the stiffness export (`stiffness_matrix_1_SPMD` present); an A2 byte mover (J row); NEEDS MORE (the modal recipe's dummy-load path) |
 | `05_1` / `05_2` welding | 2 | cycle 26 / cycle 0 | **items A + D.** Re-measure after the campaign re-run | **re-verdicted `not_comparable` BY CONSTRUCTION** (campaign bookkeeping, a DEFINITION change and not a fix): `*LOAD_THERMAL_D3PLOT` has no Radioss counterpart, the LS-DYNA reference internal energy is identically 0 on all four rows, and the `nt` flip is OpenMP nondeterminism — `05_4_2` terminates NORMAL only at `nt = 3`, and three identical `nt = 3` runs give IE 1.611e4 / 2.428e4 / 2.217e4, a 51 % spread. `openradioss.status` is UNTOUCHED. The same four rows are A1 carriers and their A1 result is reported separately — never added to the −4 | unchanged. The `*BOUNDARY_THERMAL_WELD` refusal's two FALSE facts are corrected (`/IMPFLUX` HAS a volumetric form and HAS its own time window; only “no position argument” survives) | unchanged; the CWM / weld-source facts measured (B7); the deformable-contact warning names `/IMPL/NONLIN/SOLVINFO` on the non-modal welding decks | unchanged |

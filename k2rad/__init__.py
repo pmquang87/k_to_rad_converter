@@ -686,7 +686,8 @@ def convert(
         **On by default.** MEASURED on plates.mat100 (nt 4): LS-DYNA's weld
         shear plateaus at 20374..20408 = (SIGY/sqrt3)·A = 20405; IE / KE
         history RMS 23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x
-        the cycles (deviation -> match). Named cost: mainboltaexpl.
+        the cycles (deviation -> match). ``mainboltaexpl`` moves by run
+        sensitivity, not by the yield (its weld shear stays below it).
     spotweld_efail_displacement : bool
         A ``*MAT_SPOTWELD`` ``EFAIL`` below the 1e19 'never' idiom on a card
         with NO resultant failure cell -> ``Ifail 1`` / ``Ifail2 0``

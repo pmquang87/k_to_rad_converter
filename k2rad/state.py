@@ -7782,8 +7782,11 @@ class ConvertOptions:
     # yield (SIGY/sqrt3)·A and the hardening G·EH/(3G+EH)·A/L, H2 = H3 = 1.
     # MEASURED on plates.mat100: LS-DYNA's weld shear plateaus at 20374..20408
     # = (SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> 8.58 /
-    # 26.74 % at 1.107x the cycles (deviation -> match). Named cost:
-    # mainboltaexpl (its preloaded bolt spring collapses either way). Reach: 4
+    # 26.74 % at 1.107x the cycles (deviation -> match). mainboltaexpl moves
+    # too, by run sensitivity and not by the yield (the round-7 validation
+    # round: its weld shear never exceeds 13789 against the new yield 29021,
+    # and the 65ff389 card with only K2 changed by 1e-8 moves its END and
+    # RMS as much; its preloaded bolt spring collapses on every arm). Reach: 4
     # deck keys on 4 emitted models (2 of them giants).
     spotweld_shear_yield: bool = True
     # --no-spotweld-efail-displacement: keep a *MAT_SPOTWELD EFAIL dropped

@@ -600,8 +600,13 @@ plasticity in axial AND shear (Vol II R17 p.2-708), so the shear yield force is
 `(SIGY/√3)·A` and the hardening `G·EH/(3G+EH)·A/L` — LS-DYNA's own `swforc` on
 `plates.mat100` plateaus at 20374..20408 = `(SIGY/√3)·A` = 20405, and the
 converted weld goes deviation → match (IE / KE history RMS 23.53 / 62.56 →
-8.58 / 26.74 % of the LS peak at 1.107× the cycles; named cost
-`mainboltaexpl`, whose preloaded bolt spring collapses either way). The yield
+8.58 / 26.74 % of the LS peak at 1.107× the cycles). `mainboltaexpl` moves too
+(END IE / KE −72.72 / −11.18 → −81.87 / −83.15 %, history RMS 26.69 / 24.32 →
+31.32 / 28.24 %, nt 4) — by run sensitivity, not by the yield: its weld shear
+never exceeds 13789 against the new yield 29021, and the 65ff389 card with only
+`K2` changed by `1e-8` (the size of the curve's slope nudge) moves it the same
+way (−80.35 / −73.95 %, RMS 30.46 / 29.08); its preloaded bolt spring collapses
+on every arm (the round-7 validation round's re-attribution). The yield
 displacement carries a `1e-8` relative nudge so the printed curve's slope stays
 below the printed `K2` (starter WARNING 506 otherwise). A card that states
 `EFAIL` (below LS-DYNA's 1e19 "never" idiom) and **no** resultant failure cell
@@ -3109,7 +3114,10 @@ against a reference `node_ID0`. When `N1`/`N3`/`N5` lie on one `*MAT_RIGID` body
 screw's own `*MAT_RIGID` CMO constraints and a rotation drive on A: `node_ID0` is a
 synthesized carriage `/RBODY` (element-free, at A's main node, Mass and inertia
 1e-6, its two massless secondaries 0.1 × |N1N3| off the axis — a geometric
-convention), `FscaleV = −1/PARM` (the reader inverts the cell,
+convention; the carriage's 1e-6 t moves with A, 1e-5 of `EXP_SC_JOINT_SCREW`'s
+0.0976 t screw but 12.7 % of a 7.85e-6 t coupon body, whose travel matches the
+closed form only with the carriage counted — measured by the round-7
+validation), `FscaleV = −1/PARM` (the reader inverts the cell,
 `hm_read_gjoint.F:221`), `node_ID1` = A's main, `node_ID2` = B's, `r1 = r2` =
 the unit axis (N3 → N1); A's and B's CMO `/BCS` become a `/BCS/LAGMUL` on the
 carriage (it may only slide along the axis) and on A (it may only spin about it);
