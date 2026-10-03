@@ -207,7 +207,10 @@ def build_parser() -> argparse.ArgumentParser:
              "against a run still going at the 600 s campaign cap at 10, having "
              "reached t = 0.44 / 0.49 / 0.59 there and t = 0.32 on an "
              "independent quiet-machine repeat, at nt 3 AND nt 4 - the verdict "
-             "does not flip with nt. Pass 0.1 to "
+             "does not flip with nt. That cost is the /PROP/TYPE20 card's, "
+             "which k2rad wrote before round 7: the default "
+             "--implicit-tshell-solid route now ends the family NORMAL in 28 "
+             "cycles at this default (nt 4 and 2). Pass 0.1 to "
              "restore the old default on such a deck; on THAT family it "
              "reproduces the pre-round-4 file BYTE FOR BYTE. 'none' emits no card "
              "at all - measured WORSE than either (ex_02 dies at cycle 0 and "
@@ -316,7 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
              "ended 3 of 3 NORMAL quasi-static R14 decks in ERROR and is not "
              "offered. MEASURED (nt 4 = nt 2): ex_15 energy error +74.1 %% -> "
              "-0.9 %% at 3.81x the cycles (its end state at matched time: IE "
-             "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%); ex_11 KE history "
+             "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%; measured on the "
+             "/PROP/TYPE20 card k2rad wrote before round 7 - the default "
+             "--implicit-tshell-solid route closes ex_15's energy balance by "
+             "itself, -0.7 %%); ex_11 KE history "
              "error 16.07 %% -> 1.16 %% at 2.86x (at matched time KE +17.9 %% "
              "where the shipped run reads +1343 %% - both deviations, the "
              "engine never prints its last increment); with the default "
@@ -553,6 +559,24 @@ def build_parser() -> argparse.ArgumentParser:
              "default mover is a giant the campaign does not run (measurable "
              "default effect nil). Use --no-spotweld-efail-displacement to "
              "keep EFAIL dropped.",
+    )
+    parser.add_argument(
+        "--implicit-tshell-solid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an IMPLICIT deck (the modal path included), write an "
+             "isotropic *SECTION_TSHELL whose parts are all *MAT_ELASTIC as "
+             "/PROP/SOLID Isolid 14 (Inpts 222) on the same /BRICK rows "
+             "instead of /PROP/TYPE20: the implicit thick-shell tangent "
+             "integrates the thickness with ONE mid-plane point "
+             "(s8cke3.F:354-364) and 80 + 4 coupon runs stop at cycle 0. ON "
+             "by default; explicit decks keep TYPE20, other laws and "
+             "TYPE21 / TYPE22 keep their card with a named warning. "
+             "MEASURED: ex_02_thick_shell_elform_{2,3,5} timeout (cycle "
+             "100 624) -> NORMAL in 28 cycles (nt 4 and 2); ex_15 energy "
+             "error 74.1 -> -0.7 %% at 0.64x the cycles (named cost: END IE "
+             "+0.03 -> +36.49 %%). Use --no-implicit-tshell-solid to keep "
+             "/PROP/TYPE20.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1227,6 +1251,7 @@ def main(argv=None) -> int:
         rigid_shell_rotary_inertia=args.rigid_shell_rotary_inertia,
         spotweld_shear_yield=args.spotweld_shear_yield,
         spotweld_efail_displacement=args.spotweld_efail_displacement,
+        implicit_tshell_solid=args.implicit_tshell_solid,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

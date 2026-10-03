@@ -2822,21 +2822,24 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
                      itetra10: int, istrain: int,
                      hcoef: Optional[float] = None,
-                     ismstr: int = 0) -> List[str]:
+                     ismstr: int = 0, inpts: int = 0) -> List[str]:
     """/PROP/SOLID (TYPE14), byte-identical to the historical inline block.
     *hcoef* None → card-2 field 3 (h) stays 0 (Radioss default 1.1/0.05/0.10
     for qa/qb/h); otherwise the hourglass coefficient. *ismstr* 0 (default,
     unchanged output) leaves the strain formulation to the starter; 10 =
     total-strain large deformation — required by /XREF reference-geometry
     parts (starter ERROR 2013 rejects /XREF on a fully-integrated solid at
-    small strain). Shared by the per-section and per-part paths so the
-    100-column layout cannot drift."""
+    small strain). *inpts* 0 (default, unchanged output) leaves the Inpts
+    cell blank; the implicit thick-shell route (round 7, A4) writes 222, the
+    value the starter applies to a blank on Isolid 14
+    (hm_read_prop14.F:312-318). Shared by the per-section and per-part paths
+    so the 100-column layout cannot drift."""
     h_field = _f(hcoef if hcoef is not None else 0.0)
     return [
         f"/PROP/SOLID/{prop_id}",
         title,
         "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}{_i(ismstr)}{_i(iale)}         0{_i(itetra10)}         0         0         0",
+        f"{_i(isolid)}{_i(ismstr)}{_i(iale)}         0{_i(itetra10)}{_i(inpts)}         0         0",
         "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
         f"{_f(0.0)}{_f(0.0)}{h_field}{_f(0.0)}{_f(0.0)}",
         "#             dt_min   istrain      IHKT",
@@ -3383,7 +3386,9 @@ def _make_properties(state: ConversionState) -> List[str]:
     _warn_truss_section_cells(state, emitted_truss_secs)
     _warn_truss_material(state, part_secids, truss_pids, truss_secids)
     # Thick shells: /PROP/TYPE20 (iso) / TYPE21 (ortho) / TYPE22 (composite),
-    # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup.
+    # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup
+    # (an IMPLICIT deck's *MAT_ELASTIC section: /PROP/SOLID Isolid 14 under
+    # the same id instead, round 7 A4 - see _make_tshell_properties).
     # Local import: writer/tshell.py reuses the #90 AOPT machinery out of
     # writer/composites.py, which imports THIS module at load time, so a
     # top-level import here would close the cycle (same rule as

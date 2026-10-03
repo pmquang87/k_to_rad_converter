@@ -2003,6 +2003,36 @@ section splits on whether the PART's material is orthotropic. The property sits
 under the **SECID verbatim**, exactly where `/PROP/SOLID` would, so no `/PART`
 repoint is needed.
 
+**On an IMPLICIT deck a `*MAT_ELASTIC` thick shell is written as `/PROP/SOLID`
+Isolid 14** (round 7, default ON, `--no-implicit-tshell-solid` keeps
+`/PROP/TYPE20`): an isotropic section whose live parts are all `*MAT_ELASTIC`
+gets `/PROP/SOLID` Isolid 14, Inpts 222 (the 2 × 2 × 2 Gauss rule the starter
+applies to a blank Inpts on Isolid 14 and forces on a LAW1 thick shell anyway,
+`sgrtails.F:694-704`), Ismstr / Icpre / Iframe 0, under the same id and on the
+SAME `/BRICK` rows — the modal path (`*CONTROL_IMPLICIT_EIGENVALUE`) included.
+The reason is a solver limitation: the implicit thick-shell tangent integrates
+the thickness with ONE mid-plane point (`imp_glob_k.F:266-275` → `S8CKE3`,
+`s8cke3.F:354-364`, NPTT = 1), and Isolid 15 has no 8-node tangent at all
+(`imp_glob_k.F:286-288`) — 80 + 4 implicit thick-shell coupon runs stopped at
+cycle 0 (nt 4 and 2), while in explicit the two properties give the same answer
+to the printed digits. Measured: `ex_02_thick_shell_elform_{2,3,5}` (3 deck
+keys on 1 emitted model) go from a timeout at cycle 100 624 to NORMAL in 28
+cycles (nt 4 and 2; IE 0.04124 = −94.66 % against LS-DYNA's ELFORM 2 — the
+extruded-shell class below, not the property); `ex_15_thick_shell_elform_*`
+(3 / 1) close their energy balance (energy error 74.1 % → −0.7 %, KE history
+RMS 17.46 → 6.30 %) at the named cost of their END IE (+0.03 → +36.49 %, IE RMS
+3.79 → 5.31 % against the ELFORM 5 reference: the shipped +0.03 % was a phase
+coincidence of a run that created 74 % energy — the TYPE20 base is not even
+reproducible across `nt`, its END IE reads +0.03 % at `nt` 2 and −0.04 % at
+`nt` 4, while the route is identical at both); `ex_13_*` (modal) stay
+status-only. Explicit decks keep
+TYPE20; a non-LAW1 law on an implicit deck, and `/PROP/TYPE21` / `TYPE22`,
+keep their card with a named warning — no plastic or orthotropic thick-shell
+coupon has been measured, so the route is never widened past LAW1. The
+elements stay thick shells to every other pass (the solid hourglass remap does
+not touch the card; the contact stub, the free-node guard, the mass and output
+walks still see them).
+
 **Connectivity is copied 1:1 and `Icstr` is written explicitly as `010`.** That
 pair is what carries the thickness direction: LS-DYNA's "nodes n1 to n4 define
 the lower surface, and nodes n5 to n8 define the upper surface" (Vol I R16
@@ -2033,7 +2063,10 @@ dyna2rad's own total map. What that costs is named per section: ELFORM 5 and 6
 lose their REDUCED integration, and ELFORM 1/2/6 lose their PLANE-STRESS
 treatment, because they are extruded thin shells with an uncoupled
 thickness-direction stiffness (Vol I R16 p.3717 Remark 1) while **every** Radioss
-thick shell is a 3D-stress element. A **blank** `ELFORM` is LS-DYNA's default 1,
+thick shell is a 3D-stress element — measured on
+`ex_02_thick_shell_elform_2.k`, LS-DYNA's ELFORM 2 internal energy 0.771729 is
+18.7× the 8-node brick answer 0.04124 that both `/PROP/TYPE20` (explicit) and
+`/PROP/SOLID` Isolid 14 (implicit) give. A **blank** `ELFORM` is LS-DYNA's default 1,
 not 0 — dyna2rad reads the blank as 0 and lands on the full-integration HA8,
 i.e. the opposite element class from the one the deck asked for by leaving the
 field empty. An out-of-range value (there is no ELFORM 4) is warned and mapped
@@ -5348,7 +5381,9 @@ cycles at `t = 1.000`, IE 7922 against the reference
 cost, named:** `ex_02_thick_shell_elform_{2,3,5}` — 3 deck keys on ONE emitted
 file — go `normal → timeout`; the campaign rows read 1899 / 1896 / 1903 cycles
 at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (`nt` 4) against a run still going at
-the 600 s campaign cap at 10. The verdict does not flip with `nt`, all three
+the 600 s campaign cap at 10 — on the `/PROP/TYPE20` card k2rad wrote before
+round 7; round 7's default `/PROP/SOLID` route (see *Thick shells*) ends the
+family NORMAL in 28 cycles at this default. The verdict does not flip with `nt`, all three
 rows are `not_comparable` both ways (their LS reference **kinetic** energy is
 a structural zero), and `--qstat-dtscal 0.1` reproduces the pre-round-4 file
 **byte for byte** on that family. `none` — emitting no `/IMPL/QSTAT` at all,
@@ -6337,7 +6372,7 @@ MEASURED at `nt` 4 = `nt` 2 (cycles and steps):
 
 | deck | arm | cycles | result against the LS-DYNA reference |
 |---|---|---|---|
-| `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 %; the END state at matched time trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 % |
+| `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 %; the END state at matched time trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 % (on the `/PROP/TYPE20` card k2rad wrote before round 7; round 7's default `/PROP/SOLID` route closes the energy balance by itself, −0.7 %) |
 | `ex_14_solid_elform_2` | shipped → cap | 34 → 201 (5.91×) | IE history RMS 10.56 → 2.93 % against the ELFORM-2 reference; WORSE against the references of ELFORM −1 / −2 / 1 |
 | `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; at matched time KE +1343 → **+17.9 %** (both deviations; −2.39 → −15.87 % under the retired end-of-run scorer) |
 | `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | END IE −0.54 → −4.36 %, but the IE history is the closest of the four measured arms: RMS 2.48 → **1.66 %** of the reference peak (force criterion 2.00, the cap alone 1.83); at `t` 0.76 / 0.80 +13 / +14 % where the ECTOL arm alone reads −64 / +53 % |
@@ -6378,6 +6413,14 @@ See [`docs/MODAL.md`](docs/MODAL.md) for the full chain — the export recipe,
 drilling-stiffness parity (`--drill`), stock-engine caveats and 1-line patches,
 the inert probe rigid body, mode-shape viewing, random vibration & fatigue, and
 GUI integration.
+
+**Thick shells carry their mass in the offline solve** (round 7): the lumper
+(`k2rad.lumping.nodal_masses_from_state`) skipped `*ELEMENT_TSHELL`, so
+`tools/modal_solve.py` gave `ex_13_thick_shell_elform_*` a total mass of 0 and
+ARPACK stopped with "error -9: Starting vector is zero"; a thick shell is now
+lumped exactly like the hexa it is emitted as (a degenerate 6-node one as the
+wedge it is), and a `*ELEMENT_MASS_PART` FINMASS on a thick-shell part reaches
+its nodes. The converter's own `.rad` output does not change.
 
 The mass arm weighs a `*SECTION_BEAM` that states only THICKNESSES (ELFORM
 0/1/4/5/11, whose card 2 is `TS1 TS2 TT1 TT2 …`): the area is taken from the

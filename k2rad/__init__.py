@@ -240,6 +240,7 @@ def convert(
     rigid_shell_rotary_inertia: bool = True,
     spotweld_shear_yield: bool = True,
     spotweld_efail_displacement: bool = True,
+    implicit_tshell_solid: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -419,7 +420,10 @@ def convert(
         +380 % is a separate, named ``/INTER/TYPE25``-under-implicit drop, not
         a match). The cost is ``ex_02_thick_shell_elform_{2,3,5}`` — 3 deck
         keys on ONE emitted file, all three ``not_comparable`` BOTH WAYS —
-        going ``normal`` → ``timeout``; ``--qstat-dtscal 0.1`` reproduces the
+        going ``normal`` → ``timeout`` on the ``/PROP/TYPE20`` card k2rad
+        wrote before round 7 (round 7's default ``implicit_tshell_solid``
+        route ends the family NORMAL in 28 cycles at this default);
+        ``--qstat-dtscal 0.1`` reproduces the
         pre-round-4 file byte for byte on that family. ``"none"``
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
@@ -472,7 +476,10 @@ def convert(
         3 of 3 NORMAL quasi-static R14 decks in ERROR and is not offered.
         MEASURED at nt 4 = nt 2: ``ex_15`` energy error +74.1 % -> -0.9 % at
         3.81x the cycles (its END state at matched time trades IE +36.2 % ->
-        -54.8 % for KE +132.0 % -> +0.5 %); ``ex_11`` KE history error
+        -54.8 % for KE +132.0 % -> +0.5 %; on the ``/PROP/TYPE20`` card k2rad
+        wrote before round 7 - the default ``implicit_tshell_solid`` route
+        closes ex_15's energy balance by itself, -0.7 %); ``ex_11`` KE
+        history error
         16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 % where the
         shipped run reads +1343 % - both deviations: the engine never prints
         its last increment); with the default ``zero_tolerance_ectol`` it
@@ -679,6 +686,18 @@ def convert(
         1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. The measurable default
         effect is nil (its one default mover is a giant the campaign does
         not run).
+    implicit_tshell_solid : bool
+        On an IMPLICIT deck (the modal path included), write an isotropic
+        ``*SECTION_TSHELL`` whose live parts are all ``*MAT_ELASTIC`` as
+        ``/PROP/SOLID`` Isolid 14 (Inpts 222) on the same ``/BRICK`` rows
+        instead of ``/PROP/TYPE20`` (round 7, A4): the implicit thick-shell
+        tangent integrates the thickness with ONE mid-plane point
+        (``s8cke3.F:354-364``) and 80 + 4 coupon runs stop at cycle 0.
+        **On by default**; explicit decks keep TYPE20, other laws and
+        TYPE21 / TYPE22 keep their card with a named warning. MEASURED:
+        ``ex_02_thick_shell_elform_{2,3,5}`` timeout -> NORMAL in 28 cycles
+        (nt 4 and 2); ``ex_15`` energy error 74.1 -> -0.7 % (named cost: END
+        IE +0.03 -> +36.49 %).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1100,6 +1119,7 @@ def convert(
         rigid_shell_rotary_inertia=rigid_shell_rotary_inertia,
         spotweld_shear_yield=spotweld_shear_yield,
         spotweld_efail_displacement=spotweld_efail_displacement,
+        implicit_tshell_solid=implicit_tshell_solid,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

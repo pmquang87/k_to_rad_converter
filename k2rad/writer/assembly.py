@@ -1000,7 +1000,10 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "_3/_5). Those history errors are an RMS in % of the reference's "
         "peak; the END state at matched time reads differently - on "
         "ex_15_thick_shell_elform_2 the cap trades internal energy +36.2 % -> "
-        "-54.8 % for kinetic energy +132.0 % -> +0.5 %. On the quasi-static "
+        "-54.8 % for kinetic energy +132.0 % -> +0.5 %. (The ex_15 figures "
+        "are the /PROP/TYPE20 card's, which k2rad wrote before round 7; the "
+        "default --implicit-tshell-solid route closes its energy balance by "
+        "itself, -0.7 %.) On the quasi-static "
         "decks, whose all-zero tolerances now get "
         "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles: "
         "tensile2 75 -> 168 (2.24x), its END internal energy -0.54 % -> "
@@ -1309,8 +1312,10 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # tensile2, 6.5.tbl.psd and doorbeam move error_engine -> normal, at
         # the cost of the ex_02_thick_shell_elform_{2,3,5} family (3 keys on
         # one emitted file, all three not_comparable both ways) going
-        # normal -> timeout; --qstat-dtscal 0.1 reproduces the pre-round-4
-        # file byte for byte on that family.
+        # normal -> timeout on the /PROP/TYPE20 card k2rad wrote before round
+        # 7 (round 7's default /PROP/SOLID route, writer/tshell.py, ends the
+        # family NORMAL in 28 cycles at this default); --qstat-dtscal 0.1
+        # reproduces the pre-round-4 file byte for byte on that family.
         #
         # The deformable-deformable contact recipe keeps 0.05 (=> x400) and
         # IGNORES the option: a compliant contact under force control adds a

@@ -728,14 +728,17 @@ def _section_parts(state: ConversionState, secid: int) -> List[int]:
 
 
 def _warn_dropped_fields(state: ConversionState, sec: SectionTshell,
-                         prop_type: int) -> None:
+                         prop_type: int, card: str = "") -> None:
     """PROPT / QR / TSHEAR / SHRF — the *SECTION_TSHELL cells with no Radioss
-    home. dyna2rad drops all four without a message."""
+    home. dyna2rad drops all four without a message. *card* names the
+    property actually written when it is not ``/PROP/TYPE<prop_type>`` (the
+    implicit ``/PROP/SOLID`` route, round 7 A4)."""
+    card = card or f"/PROP/TYPE{prop_type}"
     notes = []
     if sec.shrf and prop_type != 22:
         notes.append(
-            f"SHRF={sec.shrf:g} (transverse-shear scale) — /PROP/TYPE"
-            f"{prop_type} has no shear column at all; only the composite "
+            f"SHRF={sec.shrf:g} (transverse-shear scale) — {card} "
+            "has no shear column at all; only the composite "
             "TYPE22 does (Ashear), so the shear stiffness is Radioss's own")
     if sec.tshear:
         notes.append(
@@ -757,8 +760,57 @@ def _warn_dropped_fields(state: ConversionState, sec: SectionTshell,
         notes.append("QR=1.0 (trapezoidal quadrature) — Radioss thick shells "
                      "integrate Gauss only")
     if notes:
-        state.warn(f"*SECTION_TSHELL {sec.secid} → /PROP/TYPE{prop_type}. "
+        state.warn(f"*SECTION_TSHELL {sec.secid} → {card}. "
                    "Dropped: " + "; ".join(notes) + ".")
+
+
+#: The measured facts the implicit thick-shell warnings quote (round 7, A4),
+#: ONE copy: the coupons are the part-A pre-research's (G2 e, nt 4 and 2);
+#: ex_02 re-measured on the implementation's emitted card.
+_IMPLICIT_TSHELL_TANGENT = (
+    "the implicit thick-shell tangent integrates the thickness with ONE "
+    "mid-plane point (s8cke3.F:354-364; Isolid 15 has no 8-node tangent at "
+    "all, imp_glob_k.F:286-288), so the implicit solve of a thick shell does "
+    "not converge — MEASURED: 80 + 4 implicit thick-shell coupon runs stop at "
+    "cycle 0 at nt 4 and 2, while in explicit the two properties give the same "
+    "answer to the printed digits")
+
+
+def _warn_implicit_tshell_routed(state: ConversionState, sec: SectionTshell,
+                                 pids: List[int], prop_id: int) -> None:
+    """The implicit /PROP/SOLID route's warning (round 7, A4). It REPLACES
+    ``_warn_mat_compat``'s LAW1 WARNING-791 note on this section: the routed
+    card is a /PROP/SOLID, whose Isolid 14 + Inpts 222 raises nothing."""
+    nip = sec.nip
+    state.warn(
+        f"*SECTION_TSHELL {sec.secid}: IMPLICIT deck, *MAT_ELASTIC on part(s) "
+        f"{pids} — written as /PROP/SOLID/{prop_id} Isolid 14 (2 x 2 x 2 Gauss "
+        "points) on the SAME /BRICK rows instead of /PROP/TYPE20: "
+        + _IMPLICIT_TSHELL_TANGENT + ". On "
+        "introduction/Introduction/example-02/ex_02_thick_shell_elform_"
+        "{2,3,5}.k the route ends NORMAL in 28 cycles (nt 4 and 2) where the "
+        "TYPE20 deck timed out at cycle 100 624. The deck's "
+        f"NIP={nip} through-thickness points are not carried (the TYPE20 card "
+        "would have been reset to 222 too, WARNING 791). "
+        "--no-implicit-tshell-solid keeps /PROP/TYPE20.")
+
+
+def _warn_implicit_tshell_kept(state: ConversionState, sec: SectionTshell,
+                               pids: List[int], laws: List[int],
+                               prop_type: int) -> None:
+    """An implicit thick-shell section the /PROP/SOLID route does NOT take:
+    a non-LAW1 law on the isotropic TYPE20, or the orthotropic TYPE21 /
+    composite TYPE22 (round 7, A4). Its card is kept, and the tangent fact is
+    said, with the reason the route stops at LAW1."""
+    shown = ", ".join(f"/MAT/LAW{ln}" for ln in sorted(set(laws))) or \
+        "a material k2rad does not emit"
+    state.warn(
+        f"*SECTION_TSHELL {sec.secid}: IMPLICIT deck, {shown} on part(s) "
+        f"{pids} — kept on /PROP/TYPE{prop_type}. "
+        + _IMPLICIT_TSHELL_TANGENT[0].upper() + _IMPLICIT_TSHELL_TANGENT[1:]
+        + " (those coupons are *MAT_ELASTIC); the /PROP/SOLID Isolid 14 "
+        "route is applied to *MAT_ELASTIC only — no plastic or orthotropic "
+        "thick-shell coupon has been measured.")
 
 
 #: Radioss puts exactly ONE integration point per /PROP/TYPE22 layer, at the
@@ -886,7 +938,12 @@ def _warn_elform_value(state: ConversionState, label: str, elform: int,
                     "extruded thin shells with an uncoupled thickness-"
                     "direction stiffness (Vol I R16 p.3717 Remark 1), while "
                     "EVERY Radioss thick shell is a 3D-stress element, so the "
-                    "part comes out stiffer through the thickness")
+                    "part comes out stiffer through the thickness (MEASURED "
+                    "on introduction/Introduction/example-02/"
+                    "ex_02_thick_shell_elform_2.k: LS-DYNA's ELFORM 2 "
+                    "internal energy 0.771729 is 18.7x the 8-node brick "
+                    "answer 0.04124, which both /PROP/TYPE20 in explicit and "
+                    "/PROP/SOLID Isolid 14 in implicit give)")
     if lost:
         state.warn(
             f"{label}: ELFORM={elform} loses "
@@ -1057,8 +1114,12 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
     Section properties sit under the SECID VERBATIM — the /PROP/TYPE43 shape, so
     no /PART repoint is needed — while a per-part layup gets a synthesized id
     from ``state.tshell_prop_ids`` and the /PART is repointed at it.
+
+    Round 7 (A4): on an IMPLICIT deck an isotropic section whose live parts
+    are all ``*MAT_ELASTIC`` is written as ``/PROP/SOLID`` Isolid 14 instead
+    of ``/PROP/TYPE20`` (``--no-implicit-tshell-solid`` keeps TYPE20).
     """
-    from .mesh import _target_mat_law
+    from .mesh import _emit_prop_solid, _target_mat_law
     lines: List[str] = []
     tshell_pids = _tshell_part_ids(state)
     if not tshell_pids and not state.sec_tshells:
@@ -1145,10 +1206,48 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
                 "material only. dyna2rad would emit a separate property per "
                 "material; give each material its own *SECTION_TSHELL to get "
                 "that here.")
-        _warn_dropped_fields(state, sec, prop_type)
-        _warn_mat_compat(state, sec.secid, prop_type, live, inpts, isolid)
+        # The implicit route (round 7, A4): an IMPLICIT deck (the modal path
+        # included) whose isotropic section carries *MAT_ELASTIC on EVERY live
+        # part goes to /PROP/SOLID Isolid 14 on the SAME /BRICK rows - the
+        # implicit thick-shell tangent integrates the thickness with ONE
+        # point (s8cke3.F:354-364) and never converged. Every live part's law
+        # must be KNOWN and LAW1 (`laws` drops a part with no /MAT), so no
+        # part changes its material class; no plastic or orthotropic
+        # thick-shell coupon exists, so the route is never widened past LAW1.
+        routed = (prop_type == 20 and state.options.implicit_tshell_solid
+                  and state.is_implicit and bool(laws)
+                  and len(laws) == len(mids)
+                  and all(ln == _LAW1 for ln in laws))
+        _warn_dropped_fields(state, sec, prop_type,
+                             "/PROP/SOLID" if routed else "")
+        if not routed:
+            _warn_mat_compat(state, sec.secid, prop_type, live, inpts,
+                             isolid)
         title = sec.title or f"PROP_{sec.secid}"
         fold = state.tshell_beta_fold.get(sec.secid, 0.0)
+        if routed:
+            if fold:
+                state.warn(
+                    f"*SECTION_TSHELL {sec.secid}: the folded "
+                    f"*ELEMENT_TSHELL_BETA angle {fold:g} deg is DROPPED — "
+                    "the section's material is isotropic, so it converts to "
+                    "the isotropic /PROP/SOLID, which has no material "
+                    "direction to rotate.")
+            # (no _warn_type20_axis_drop: a *MAT_ELASTIC states no AOPT)
+            _warn_implicit_tshell_routed(state, sec, live, prop_id)
+            # The SAME prop id (/PROP ids are one namespace across types, so
+            # the /PART needs no repoint) and Isolid 14 whatever the ELFORM:
+            # Isolid 15 has no 8-node implicit tangent at all
+            # (imp_glob_k.F:286-288). Ismstr / Icpre / Iframe 0 (Iframe is
+            # forced to 2 on Isolid 14, hm_read_prop14.F:277), h 0 as TYPE20
+            # wrote; the elements STAY in tshell_elems, so the solid
+            # hourglass remap (which walks solid_elems only) never touches
+            # this card, and every thick-shell walk still sees them.
+            lines += _emit_prop_solid(prop_id, title, 14, 0, 0, istrain,
+                                      inpts=222)
+            continue
+        if state.is_implicit and state.options.implicit_tshell_solid:
+            _warn_implicit_tshell_kept(state, sec, live, laws, prop_type)
         if prop_type == 20:
             if fold:
                 state.warn(

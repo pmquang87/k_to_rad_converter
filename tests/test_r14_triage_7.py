@@ -13,6 +13,9 @@
       --no-spotweld-shear-yield); (ii) EFAIL with no resultant cell ->
       Ifail 1 / Ifail2 0 displacement failure (default ON,
       --no-spotweld-efail-displacement)
+  A4  the implicit *MAT_ELASTIC thick shell -> /PROP/SOLID Isolid 14 on the
+      same /BRICK rows (default ON, --no-implicit-tshell-solid) and the
+      lumper that skipped thick shells
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are the round-4/5/6 ones, copied (not imported) so this
@@ -897,6 +900,221 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A4 — the implicit LAW1 thick shell -> /PROP/SOLID Isolid 14; the lumper
+# ═════════════════════════════════════════════════════════════════════════════
+
+_TS_NODES = "*NODE\n" + "".join(
+    f"{n:>8}{x:>16}{y:>16}{z:>16}\n" for n, x, y, z in (
+        (1, 0.0, 0.0, 0.0), (2, 10.0, 0.0, 0.0),
+        (3, 10.0, 10.0, 0.0), (4, 0.0, 10.0, 0.0),
+        (5, 0.0, 0.0, 2.0), (6, 10.0, 0.0, 2.0),
+        (7, 10.0, 10.0, 2.0), (8, 0.0, 10.0, 2.0),
+        (9, 20.0, 0.0, 0.0), (10, 20.0, 10.0, 0.0),
+        (11, 20.0, 0.0, 2.0), (12, 20.0, 10.0, 2.0)))
+_TS_TWO = ("*ELEMENT_TSHELL\n"
+           + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8)) + "\n"
+           + "".join(f"{v:>8}" for v in (2, 1, 2, 9, 10, 3, 6, 11, 12, 7))
+           + "\n")
+_TS_ELASTIC = "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+_TS_IMPLICIT = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+                "*CONTROL_TERMINATION\n" + _row(1.0) + "\n")
+_TS_EXPLICIT = "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"
+
+
+def _ts_deck(control=_TS_IMPLICIT, elform=2, nip=5, icomp="", shrf=0.833,
+             mat=_TS_ELASTIC, part="*PART\ntshell part\n" + _row(1, 1, 1)
+             + "\n", elem=_TS_TWO, extra="") -> str:
+    """The A4 coupon: two 10 x 10 x 2 thick shells (part 1, nodes 1-12) on
+    *SECTION_TSHELL 1 (ELFORM *elform*, NIP *nip*, SHRF *shrf*)."""
+    sec = ("*SECTION_TSHELL\n" + _row(1, elform, shrf, nip, "", "", icomp, "")
+           + "\n" + ("".join(_row(0.0, 0.0) for _ in range(1)) + "\n"
+                     if icomp == 1 else ""))
+    return ("*KEYWORD\n" + control + _TS_NODES + elem + part + sec + mat
+            + extra + "*END\n")
+
+
+def _block_lines(text: str, head: str):
+    """The lines of the card block whose header line starts with *head* (up
+    to the next ``/`` card or ``#---`` separator)."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith(head):
+            out = [ln]
+            for nxt in lines[i + 1:]:
+                if nxt.startswith("/") or nxt.startswith("#---"):
+                    break
+                out.append(nxt)
+            return out
+    raise AssertionError(f"{head!r} not in the emitted deck")
+
+
+def _brick_rows(text: str):
+    return [ln for ln in _block_lines(text, "/BRICK/1")[1:]
+            if not ln.startswith("#")]
+
+
+_TS_ROUTED = "IMPLICIT deck, *MAT_ELASTIC on part(s) [1] — written as /PROP/SOLID"
+_TS_KEPT = "IMPLICIT deck,"
+_TS_791 = "force-RESETS the through-thickness integration"   # the 791 note
+
+
+class ImplicitThickShellSolidRoute(unittest.TestCase):
+    """A4 (i) — the implicit thick-shell tangent integrates the thickness
+    with ONE mid-plane point (s8cke3.F:354-364; Isolid 15 has no 8-node
+    tangent): on an IMPLICIT deck a *MAT_ELASTIC *SECTION_TSHELL becomes
+    /PROP/SOLID Isolid 14 Inpts 222 on the SAME /BRICK rows (default ON,
+    --no-implicit-tshell-solid). Explicit decks keep TYPE20."""
+
+    def _card(self, starter):
+        blk = _block_lines(starter, "/PROP/SOLID/1")
+        self.assertEqual(blk[1], "PROP_1")
+        return blk
+
+    def test_1_the_implicit_LAW1_section_is_routed(self):
+        res, starter, _e = _convert(_ts_deck())
+        self.assertNotIn("/PROP/TYPE20", starter)
+        blk = self._card(starter)
+        c1 = blk[3]
+        self.assertEqual(c1[0:10].strip(), "14")       # Isolid
+        self.assertEqual(c1[10:20].strip(), "0")       # Ismstr
+        self.assertEqual(c1[30:40].strip(), "0")       # Icpre
+        self.assertEqual(c1[50:60].strip(), "222")     # Inpts
+        self.assertEqual(c1[70:80].strip(), "0")       # Iframe
+        self.assertEqual(blk[5][40:60].strip(), "0")   # h
+        _r2, s_exp, _e2 = _convert(_ts_deck(control=_TS_EXPLICIT))
+        self.assertEqual(_brick_rows(starter), _brick_rows(s_exp))
+        self.assertTrue(_has(res.warnings, _TS_ROUTED, "s8cke3.F:354-364",
+                             "28 cycles", "100 624", "NIP=5",
+                             "--no-implicit-tshell-solid"), res.warnings)
+        self.assertFalse(_has(res.warnings, _TS_791), res.warnings)
+        self.assertTrue(_has(res.warnings, "*SECTION_TSHELL 1 → /PROP/SOLID. "
+                             "Dropped: SHRF=0.833"), res.warnings)
+
+    def test_2_an_explicit_deck_keeps_TYPE20(self):
+        res, starter, _e = _convert(_ts_deck(control=_TS_EXPLICIT))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertTrue(_has(res.warnings, _TS_791))
+        self.assertFalse(_has(res.warnings, _TS_KEPT))
+        _r2, s_off, _e2 = _convert(_ts_deck(control=_TS_EXPLICIT),
+                                   implicit_tshell_solid=False)
+        self.assertEqual(starter, s_off)
+
+    def test_3_ELFORM_1_is_routed_to_Isolid_14_too(self):
+        _r, starter, _e = _convert(_ts_deck(elform=1))
+        self.assertEqual(self._card(starter)[3][0:10].strip(), "14")
+        _r2, s_off, _e2 = _convert(_ts_deck(elform=1),
+                                   implicit_tshell_solid=False)
+        self.assertEqual(_block_lines(s_off, "/PROP/TYPE20/1")[3][0:10]
+                         .strip(), "15")
+
+    def test_4_the_modal_path_is_routed(self):
+        modal = ("*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
+                 + _TS_EXPLICIT)
+        res, starter, _e = _convert(_ts_deck(control=modal))
+        self.assertIn("/PROP/SOLID/1", starter)
+        self.assertTrue(_has(res.warnings, _TS_ROUTED))
+
+    def test_5_the_opt_out_keeps_TYPE20_and_its_791_note(self):
+        res, starter, _e = _convert(_ts_deck(), implicit_tshell_solid=False)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        c1 = _block_lines(starter, "/PROP/TYPE20/1")[3]
+        self.assertEqual(c1[0:10].strip(), "14")
+        self.assertEqual(c1[50:60].strip(), "252")     # 2 j 2, j = NIP 5
+        self.assertTrue(_has(res.warnings, _TS_791))
+        self.assertFalse(_has(res.warnings, _TS_KEPT))
+        self.assertTrue(_has(res.warnings, "→ /PROP/TYPE20. Dropped: SHRF"))
+
+    def test_6_TYPE22_and_TYPE21_keep_their_card_and_are_named(self):
+        res, starter, _e = _convert(_ts_deck(icomp=1, nip=2))
+        self.assertIn("/PROP/TYPE22/", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertTrue(_has(res.warnings, _TS_KEPT, "kept on /PROP/TYPE22",
+                             "s8cke3.F:354-364"), res.warnings)
+        ortho = ("*MAT_ORTHOTROPIC_ELASTIC\n"
+                 + _row(1, 7.85e-9, 200000.0, 10000.0, 10000.0, 0.3, 0.3, 0.3)
+                 + "\n" + _row(5000.0, 5000.0, 5000.0, 2.0, 0.0, 0.0) + "\n"
+                 + _row(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0) + "\n"
+                 + _row(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        res2, s2, _e2 = _convert(_ts_deck(mat=ortho))
+        self.assertIn("/PROP/TYPE21/1", s2)
+        self.assertTrue(_has(res2.warnings, _TS_KEPT, "kept on /PROP/TYPE21"),
+                        res2.warnings)
+
+    def test_7_a_plastic_law_keeps_TYPE20_and_is_named(self):
+        plp = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+               + _row(1, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0) + "\n"
+               + _row(0.0, 0.0, 0.0) + "\n" + _row() + "\n" + _row() + "\n")
+        res, starter, _e = _convert(_ts_deck(mat=plp))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertTrue(_has(res.warnings, _TS_KEPT, "kept on /PROP/TYPE20",
+                             "*MAT_ELASTIC only"), res.warnings)
+
+    def test_8_the_solid_hourglass_remap_never_touches_the_card(self):
+        hg = ("*CONTROL_HOURGLASS\n" + _row(6, 0.1) + "\n"
+              "*HOURGLASS\n" + _row(7, 6, 0.1) + "\n")
+        part = "*PART\ntshell part\n" + _row(1, 1, 1, 0, 7) + "\n"
+        _r, starter, _e = _convert(_ts_deck(part=part, extra=hg))
+        blk = self._card(starter)
+        self.assertEqual(blk[5][40:60].strip(), "0")   # h stays 0
+        solids = [ln for ln in starter.splitlines()
+                  if ln.startswith("/PROP/SOLID/")]
+        self.assertEqual(solids, ["/PROP/SOLID/1"])
+        part_card = _block_lines(starter, "/PART/1")
+        self.assertEqual(int(part_card[2][0:10]), 1)   # prop_ID = the SECID
+
+    def test_9_mixed_laws_on_one_section_are_not_routed(self):
+        two = (_TS_TWO.replace("       2       1       2       9",
+                               "       2       2       2       9"))
+        parts = ("*PART\ntshell part\n" + _row(1, 1, 1) + "\n"
+                 "*PART\nplastic part\n" + _row(2, 1, 2) + "\n")
+        plp = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+               + _row(2, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0) + "\n"
+               + _row(0.0, 0.0, 0.0) + "\n" + _row() + "\n" + _row() + "\n")
+        res, starter, _e = _convert(_ts_deck(elem=two, part=parts,
+                                             mat=_TS_ELASTIC + plp))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertTrue(_has(res.warnings, _TS_KEPT, "/MAT/LAW1",
+                             "kept on /PROP/TYPE20"), res.warnings)
+
+
+class LumperCountsThickShells(unittest.TestCase):
+    """A4 (ii) — ``lumping.nodal_masses_from_state`` lumps thick shells like
+    the hexa they are emitted as (tools/modal_solve.py gave ex_13 a total
+    mass of 0 and ARPACK stopped with error -9)."""
+
+    def test_an_8_node_thick_shell_gets_rho_V(self):
+        from k2rad.lumping import nodal_masses_from_state
+        one = ("*ELEMENT_TSHELL\n" + "".join(f"{v:>8}" for v in
+               (1, 1, 1, 2, 3, 4, 5, 6, 7, 8)) + "\n")
+        state = _dispatch(_ts_deck(elem=one))
+        mass, inertia = nodal_masses_from_state(state)
+        self.assertAlmostEqual(sum(mass.values()) / 1.57e-6, 1.0, places=12)
+        for n in range(1, 9):
+            self.assertAlmostEqual(mass[n] / 1.9625e-7, 1.0, places=12)
+        self.assertEqual(inertia, {})                  # IN stays shell-only
+
+    def test_a_degenerate_6_node_wedge_gets_half(self):
+        from k2rad.lumping import nodal_masses_from_state
+        wedge = ("*ELEMENT_TSHELL\n" + "".join(f"{v:>8}" for v in
+                 (1, 1, 1, 2, 3, 3, 5, 6, 7, 7)) + "\n")
+        state = _dispatch(_ts_deck(elem=wedge))
+        mass, _in = nodal_masses_from_state(state)
+        self.assertAlmostEqual(sum(mass.values()) / 7.85e-7, 1.0, places=12)
+
+    def test_a_FINMASS_on_a_thick_shell_part_reaches_its_nodes(self):
+        from k2rad.lumping import nodal_masses_from_state
+        one = ("*ELEMENT_TSHELL\n" + "".join(f"{v:>8}" for v in
+               (1, 1, 1, 2, 3, 4, 5, 6, 7, 8)) + "\n")
+        fin = "*ELEMENT_MASS_PART\n" + _row(1, 0.0, 2.0e-6) + "\n"
+        state = _dispatch(_ts_deck(elem=one, extra=fin))
+        mass, _in = nodal_masses_from_state(state)
+        self.assertAlmostEqual(sum(mass.values()) / 2.0e-6, 1.0, places=12)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The flags of part A reach the parser, the API, the GUI and the README
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -917,6 +1135,7 @@ class Round7FlagWiringA(unittest.TestCase):
         "--rigid-shell-rotary-inertia": "rigid_shell_rotary_inertia",
         "--spotweld-shear-yield": "spotweld_shear_yield",
         "--spotweld-efail-displacement": "spotweld_efail_displacement",
+        "--implicit-tshell-solid": "implicit_tshell_solid",
     }
     #: figures each flag's --help must carry (matched on the collapsed render)
     _HELP_FIGURES = {
@@ -930,6 +1149,9 @@ class Round7FlagWiringA(unittest.TestCase):
         "--spotweld-efail-displacement": ("1.12650e-3", "4.6-6.0 %",
                                           "sqrt(eps^2 + gamma^2/3)",
                                           "1e19"),
+        "--implicit-tshell-solid": ("28 cycles", "100 624",
+                                    "s8cke3.F:354-364", "74.1 -> -0.7 %",
+                                    "+0.03 -> +36.49 %"),
     }
 
     def _readme(self):

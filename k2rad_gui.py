@@ -114,6 +114,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          rigid_shell_rotary_inertia: bool = True,
                          spotweld_shear_yield: bool = True,
                          spotweld_efail_displacement: bool = True,
+                         implicit_tshell_solid: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -270,6 +271,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["spotweld_efail_displacement"] = bool(spotweld_efail_displacement)
 
+    kwargs["implicit_tshell_solid"] = bool(implicit_tshell_solid)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -408,6 +411,7 @@ class ConverterGUI:
         self.rigid_shell_rotary_inertia = tk.BooleanVar(value=True)
         self.spotweld_shear_yield = tk.BooleanVar(value=True)
         self.spotweld_efail_displacement = tk.BooleanVar(value=True)
+        self.implicit_tshell_solid = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -496,7 +500,9 @@ class ConverterGUI:
                            "4.2.frf.cant-1 goes 4 cycles+ERROR -> 104 cycles, "
                            "t=1.000, IE -0.31 %; the cost is the "
                            "ex_02_thick_shell family (3 keys, one file) going "
-                           "normal -> timeout. 'none' emits no card (measured "
+                           "normal -> timeout on the pre-round-7 /PROP/TYPE20 "
+                           "card (NORMAL in 28 cycles on the round-7 "
+                           "/PROP/SOLID route). 'none' emits no card (measured "
                            "worse). The deformable-contact recipe keeps 0.05.",
                   foreground="gray", wraplength=620, justify="left").pack(side="left")
 
@@ -795,7 +801,9 @@ class ConverterGUI:
             io, text="Cap the implicit step at the deck's own DT0 where LS-DYNA "
                      "runs a CONSTANT step (IAUTO 0 or no *CONTROL_IMPLICIT_AUTO, "
                      "0 < DT0 < ENDTIM) - OFF. ex_15 energy error +74.1 % -> "
-                     "-0.9 % at 3.81x cycles; on the quasi-static decks it costs "
+                     "-0.9 % at 3.81x cycles (pre-round-7 /PROP/TYPE20 card; "
+                     "the round-7 /PROP/SOLID route alone gives -0.7 %); on "
+                     "the quasi-static decks it costs "
                      "cycles (tensile2 75 -> 168, IE -0.54 % -> -4.36 % at the "
                      "end, history RMS 2.48 -> 1.66 % of peak, the closest "
                      "arm); ex_11 KE +17.9 % at matched time (the shipped run "
@@ -853,6 +861,15 @@ class ConverterGUI:
                      "vs LS 1.17969e-3..1.19792e-3 s",
             variable=self.spotweld_efail_displacement).grid(
                 row=43, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT deck: a *MAT_ELASTIC thick shell goes to "
+                     "/PROP/SOLID Isolid 14 instead of /PROP/TYPE20 (its "
+                     "implicit tangent has ONE through-thickness point) - ON. "
+                     "ex_02 timeout -> NORMAL in 28 cycles; ex_15 energy "
+                     "error 74.1 -> -0.7 %",
+            variable=self.implicit_tshell_solid).grid(
+                row=44, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1110,6 +1127,7 @@ class ConverterGUI:
                 spotweld_shear_yield=self.spotweld_shear_yield.get(),
                 spotweld_efail_displacement=(
                     self.spotweld_efail_displacement.get()),
+                implicit_tshell_solid=self.implicit_tshell_solid.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1285,6 +1303,9 @@ class ConverterGUI:
         if not kwargs.get("spotweld_efail_displacement", True):
             bits.append("spotweld EFAIL kept dropped "
                         "(--no-spotweld-efail-displacement)")
+        if not kwargs.get("implicit_tshell_solid", True):
+            bits.append("implicit thick shells kept on /PROP/TYPE20 "
+                        "(--no-implicit-tshell-solid)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

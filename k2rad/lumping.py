@@ -23,6 +23,7 @@ the momentum average needs is solved with a cyclic Jacobi sweep
 from __future__ import annotations
 
 import math
+from itertools import chain
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .state import ConversionState
@@ -182,11 +183,13 @@ def nodal_masses_from_state(
     passes ``print`` so its console output is exactly what it was before this
     function moved into the package.
 
-    TWO CONSUMERS now: ``tools/modal_solve`` builds the modal mass matrix from
-    it, and ``writer/loads``'s ``--mass-weighted-inivel`` builds the momentum
-    average of Vol I R17 p.28-129 Remark 3 from it. It lives here rather than
-    in ``tools/`` because the package must never import from ``tools/``, and
-    a second copy of the rule is how the two drift apart.
+    THREE CONSUMERS now: ``tools/modal_solve`` builds the modal mass matrix
+    from it, ``writer/loads``'s ``--mass-weighted-inivel`` builds the momentum
+    average of Vol I R17 p.28-129 Remark 3 from it, and (round 7, A2)
+    ``writer/rbody``'s default ``J = -SUM(IN)`` takes its ``IN`` - and the
+    point-mass tensor of its refusal margin - from it. It lives here rather
+    than in ``tools/`` because the package must never import from ``tools/``,
+    and a second copy of the rule is how the two drift apart.
     """
     rho_by_mid = _material_rho(state, zero_density_floor, report)
     nodes = state.nodes
@@ -225,7 +228,14 @@ def nodal_masses_from_state(
         for n in e.nodes:
             inertia[n] = inertia.get(n, 0.0) + in_share
 
-    for e in state.solid_elems:
+    # Thick shells (*ELEMENT_TSHELL, emitted as /BRICK) are 8-node volumes
+    # too: lumped exactly like a hexa (round 7, A4 (ii) - this loop used to
+    # skip them, so tools/modal_solve.py gave ex_13_thick_shell_elform_* a
+    # total mass of 0 and ARPACK stopped with "error -9: Starting vector is
+    # zero"). A degenerate 6-node thick shell is written n1 n2 n3 n3 n5 n6 n7
+    # n7, which the same _HEXA_TETS split measures as the wedge it is.
+    # element_mass_by_node below has always counted them.
+    for e in chain(state.solid_elems, state.tshell_elems):
         part = state.parts.get(e.pid)
         if part is None:
             continue
@@ -275,7 +285,7 @@ def nodal_masses_from_state(
         part_nodes: Dict[int, set] = {}
         for e in state.shell_elems:
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
-        for e in state.solid_elems:
+        for e in chain(state.solid_elems, state.tshell_elems):
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
         for e in state.beam_elems:
             part_nodes.setdefault(e.pid, set()).update((e.n1, e.n2))

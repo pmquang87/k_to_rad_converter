@@ -151,6 +151,58 @@ Prior history (before this changelog was introduced) is summarized in the
     defaults (ROADMAP). New tests: `SpotweldShearYieldAndEfail` (9, hand
     values of the part-A spec A3.3) and the two flags in
     `Round7FlagWiringA`.
+  - **A4 (i) — an IMPLICIT deck's `*MAT_ELASTIC` thick shell is written as
+    `/PROP/SOLID` Isolid 14 (default ON, `--no-implicit-tshell-solid`).** The
+    implicit thick-shell tangent integrates the thickness with ONE mid-plane
+    point (`imp_glob_k.F:266-275` → `S8CKE3`, `s8cke3.F:354-364`, NPTT = 1
+    from `deallocate_buffer.F:194-224`) and Isolid 15 has no 8-node tangent
+    at all (`imp_glob_k.F:286-288`): 80 + 4 implicit thick-shell coupon runs
+    stopped at cycle 0 (nt 4 and 2). On an implicit deck (`state.is_implicit`,
+    the modal path included) an isotropic `*SECTION_TSHELL` (ICOMP 0, any
+    ELFORM) whose live parts are ALL `*MAT_ELASTIC` (every law known, so no
+    part changes its material class) is emitted as `/PROP/SOLID/<secid>`
+    Isolid 14, Ismstr 0, Icpre 0, Inpts 222, Iframe 0, istrain carried, on the
+    SAME `/BRICK` rows (`_emit_prop_solid` gains an `inpts` cell, default 0 =
+    byte-identical). Explicit decks keep `/PROP/TYPE20` (equal to the printed
+    digits there); a non-LAW1 law on an implicit deck and `/PROP/TYPE21` /
+    `TYPE22` keep their card with a named warning (no plastic or orthotropic
+    thick-shell coupon exists; reach 0). Interactions settled and each pinned
+    by a test: the solid hourglass remap never touches the routed card (the
+    elements stay in `tshell_elems`), `--assumed-strain-isolid` does not
+    apply (ELFORM −1/−2 of `*SECTION_SOLID` only), Iframe is inert (forced to
+    2 on Isolid 14, `hm_read_prop14.F:277`), and every thick-shell walk (the
+    contact stub, the free-reference-node guard, the mass and output walks)
+    still sees the elements. The routed warning replaces the LAW1 WARNING-791
+    note; the dropped-fields line names `/PROP/SOLID`; the ELFORM 1/2/6
+    plane-stress note now states its measured size (ex_02's LS-DYNA ELFORM 2
+    IE 0.771729 = 18.7× the 8-node brick answer 0.04124). MEASURED (nt 4 and
+    2): `ex_02_thick_shell_elform_{2,3,5}` (3 deck keys on 1 emitted model)
+    timeout (cycle 100 624, 607 s) → NORMAL in 28 cycles, IE 0.04124
+    (−94.66 % against LS-DYNA's ELFORM 2 — the extruded-shell class, not the
+    property; the verdict stays `not_comparable` on LS's structural-zero
+    KE); `ex_15_thick_shell_elform_{2,3,5}` (3 / 1) 53 → 34 cycles, energy
+    error 74.1 → −0.7 %, KE RMS 17.46 → 6.30 % — at the NAMED COST of the END
+    IE (+0.03 → +36.49 % against the ELFORM 5 reference, IE RMS 3.79 → 5.31 %;
+    the shipped +0.03 % was a phase coincidence of a run that created 74 %
+    energy, and the TYPE20 base is not reproducible across `nt`: its END IE
+    reads +0.03 % at nt 2 and −0.04 % at nt 4, the route is identical at
+    both; base figures nt 2, route nt 4 = nt 2, one window); `ex_13_*`
+    (modal, 3 / 1) stay status-only. The round-4
+    `--qstat-dtscal` "normal → timeout" cost and the round-6
+    `--implicit-constant-step` ex_15 figures are now scoped to the
+    `/PROP/TYPE20` card they were measured on. **Byte movers 9 deck keys on
+    3 emitted models, `_0000.rad` only** (`/PROP/TYPE20/1` → `/PROP/SOLID/1`).
+  - **A4 (ii) — `lumping.nodal_masses_from_state` counts thick shells.** Its
+    solid loop skipped `state.tshell_elems` (the other lumper,
+    `element_mass_by_node`, has always had them), so `tools/modal_solve.py`
+    gave `ex_13_thick_shell_elform_*` a total mass of 0 and ARPACK stopped
+    with "error -9: Starting vector is zero". A thick shell is now lumped
+    like the hexa it is emitted as (a degenerate 6-node one as the wedge it
+    is) and a FINMASS on a thick-shell part reaches its nodes; IN stays
+    shell-only. 0 default `.rad` bytes (in the writer this function feeds only
+    `--mass-weighted-inivel` and A2's refusal tensor; no roster rigid body is
+    made of thick shells). New tests: `ImplicitThickShellSolidRoute` (9) and
+    `LumperCountsThickShells` (3).
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three

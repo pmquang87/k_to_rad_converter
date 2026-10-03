@@ -213,8 +213,13 @@ class TshellElem:
     count (4 → /TETRA4, 10 → /TETRA10, else /BRICK), which would turn a
     degenerate 6-node thick shell — written ``n1 n2 n3 n3 n5 n6 n7 n7`` — into
     something it is not; and the property a thick shell needs is
-    /PROP/TYPE20|21|22, never /PROP/SOLID (starter ERROR 3047 the moment the
-    material is orthotropic, and no through-thickness layers either way).
+    /PROP/TYPE20|21|22 (starter ERROR 3047 the moment the material is
+    orthotropic on /PROP/SOLID, and no through-thickness layers either way) -
+    with ONE deliberate exception since round 7 (A4): an IMPLICIT deck's
+    *MAT_ELASTIC section goes to /PROP/SOLID Isolid 14, because the implicit
+    thick-shell tangent integrates the thickness with one point. The elements
+    stay in this container on that route too, so the /BRICK rows and every
+    thick-shell walk are unchanged.
 
     ``nodes`` is the LS-DYNA n1..n8 order VERBATIM. LS-DYNA's convention is
     "nodes n1 to n4 define the lower surface, and nodes n5 to n8 define the
@@ -7254,7 +7259,10 @@ class ConvertOptions:
     # 1903 cycles at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (nt 4); at 10 the run
     # is still going at the 600 s campaign cap, having reached t = 0.44 / 0.49
     # / 0.59 of 1.0 there and t = 0.32 on an independent quiet-machine repeat,
-    # at nt 3 AND nt 4 -- the verdict does not flip with nt. All three keys
+    # at nt 3 AND nt 4 -- the verdict does not flip with nt. (Round 7: that
+    # cost is the /PROP/TYPE20 card's; the default implicit_tshell_solid
+    # route writes /PROP/SOLID Isolid 14 and the family ends NORMAL in 28
+    # cycles at this default, nt 4 and 2.) All three keys
     # are `not_comparable` BOTH WAYS, but say WHY: their LS reference KINETIC
     # energy is 0.0, a structural zero, which is what each row's own
     # benchmark note names ("absolute pair: KE (LS 0.0 vs OR 0.0)"). The LS
@@ -7388,7 +7396,9 @@ class ConvertOptions:
     # slower adaptive control; L_dtn 165 worsened tensile2. MEASURED at nt 4 =
     # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles (its END
     # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
-    # +0.5 %); ex_11 KE
+    # +0.5 %; the /PROP/TYPE20 card's figures - round 7's default
+    # implicit_tshell_solid route closes ex_15's energy balance by itself,
+    # -0.7 %); ex_11 KE
     # history error 16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 %
     # where the shipped run reads +1343 % - both deviations); with the
     # default --zero-tolerance-ectol it costs cycles on the quasi-static decks
@@ -7688,6 +7698,22 @@ class ConvertOptions:
     # re-converts but does not run (its row is a stale 2026-09-06
     # error_engine run): the measurable default effect is nil.
     spotweld_efail_displacement: bool = True
+    # --no-implicit-tshell-solid: keep /PROP/TYPE20 on an IMPLICIT deck's
+    # *MAT_ELASTIC thick shells (R14 triage round 7, A4).
+    #
+    # ON by default. The implicit thick-shell tangent integrates the
+    # thickness with ONE mid-plane point (imp_glob_k.F:266-275 -> S8CKE3,
+    # s8cke3.F:354-364; Isolid 15 has no 8-node tangent at all,
+    # imp_glob_k.F:286-288): 80 + 4 implicit thick-shell coupon runs stop at
+    # cycle 0 (nt 4 and 2). On an implicit deck (the modal path included) an
+    # isotropic *SECTION_TSHELL whose live parts are all *MAT_ELASTIC is
+    # written as /PROP/SOLID Isolid 14 Inpts 222 on the same /BRICK rows
+    # (explicit decks keep TYPE20, equal to the printed digits there; other
+    # laws and TYPE21 / TYPE22 keep their card with a named warning).
+    # ex_02_thick_shell_elform_{2,3,5}: timeout -> NORMAL in 28 cycles; ex_15:
+    # energy error 74.1 -> -0.7 % (named cost: END IE +0.03 -> +36.49 %).
+    # Reach: 9 deck keys on 3 emitted models.
+    implicit_tshell_solid: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
