@@ -16046,9 +16046,10 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
     pressure on that face TWICE (measured against a one-row twin on a free
     plate, both 0 ERROR / NORMAL TERMINATION / 67 cycles: EXT-WORK 18.35 ->
     73.39 and K-ENERGY 17.68 -> 70.73, a factor of 4.0005, i.e. impulse
-    x2.0001). It is also the same normalisation ``_shell_load_segments``
-    (``writer/loads.py:4415``) already does on the *LOAD_SHELL path, where the
-    collapse is spelled ``if len(nodes) >= 4 and nodes[3] == nodes[2]``.
+    x2.0001). It is also the same normalisation
+    ``writer.loads._shell_load_segments`` already does on the *LOAD_SHELL
+    path, where the collapse is spelled ``if len(nodes) >= 4 and nodes[3] ==
+    nodes[2]``.
 
     Stored on state.segment_sets for later /SURF/SEG emission.
     """

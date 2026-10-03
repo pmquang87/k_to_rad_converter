@@ -2229,8 +2229,9 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
 
       * LS-DYNA does not put a rigid wall in bndout. Wall reactions are the
         ``rwforc`` file, which is *DATABASE_RWFORC -> /TH/RWALL here;
-      * those carrier nodes are SYNTHESIZED by the converter (loads.py:4980,
-        one per distinct face base point). They carry ids that appear in no
+      * those carrier nodes are SYNTHESIZED by the converter
+        (``loads._resolve_geometric_rigid_walls``, one per distinct face base
+        point). They carry ids that appear in no
         LS-DYNA deck, so a channel labelled "bndout" keyed on them names
         something the deck author never wrote;
       * they are free nodes with zero mass and no element, so their REAC* is
