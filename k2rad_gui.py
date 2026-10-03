@@ -112,6 +112,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          beam_contact_secondary: bool = False,
                          shell_offset_gapmin: bool = True,
                          rigid_shell_rotary_inertia: bool = True,
+                         spotweld_shear_yield: bool = True,
+                         spotweld_efail_displacement: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -264,6 +266,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_shell_rotary_inertia"] = bool(rigid_shell_rotary_inertia)
 
+    kwargs["spotweld_shear_yield"] = bool(spotweld_shear_yield)
+
+    kwargs["spotweld_efail_displacement"] = bool(spotweld_efail_displacement)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -400,6 +406,8 @@ class ConverterGUI:
         self.beam_contact_secondary = tk.BooleanVar(value=False)
         self.shell_offset_gapmin = tk.BooleanVar(value=True)
         self.rigid_shell_rotary_inertia = tk.BooleanVar(value=True)
+        self.spotweld_shear_yield = tk.BooleanVar(value=True)
+        self.spotweld_efail_displacement = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -830,6 +838,22 @@ class ConverterGUI:
             variable=self.rigid_shell_rotary_inertia).grid(
                 row=41, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD weld: a bilinear SHEAR curve on Ty/Tz at "
+                     "the von Mises shear yield (SIGY/sqrt3)·A - ON. "
+                     "plates.mat100 IE / KE RMS 23.53 / 62.56 -> 8.58 / 26.74 % "
+                     "at 1.107x cycles (LS's shear plateau 20405)",
+            variable=self.spotweld_shear_yield).grid(
+                row=42, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD EFAIL with no resultant cell: Ifail 1 / "
+                     "Ifail2 0 displacement failure (delta_y + EFAIL·L, "
+                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12650e-3 s "
+                     "vs LS 1.17969e-3..1.19792e-3 s",
+            variable=self.spotweld_efail_displacement).grid(
+                row=43, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1083,6 +1107,9 @@ class ConverterGUI:
                 shell_offset_gapmin=self.shell_offset_gapmin.get(),
                 rigid_shell_rotary_inertia=(
                     self.rigid_shell_rotary_inertia.get()),
+                spotweld_shear_yield=self.spotweld_shear_yield.get(),
+                spotweld_efail_displacement=(
+                    self.spotweld_efail_displacement.get()),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1252,6 +1279,12 @@ class ConverterGUI:
         if not kwargs.get("rigid_shell_rotary_inertia", True):
             bits.append("rigid part bodies keep J = 0 "
                         "(--no-rigid-shell-rotary-inertia)")
+        if not kwargs.get("spotweld_shear_yield", True):
+            bits.append("spotweld shear kept elastic "
+                        "(--no-spotweld-shear-yield)")
+        if not kwargs.get("spotweld_efail_displacement", True):
+            bits.append("spotweld EFAIL kept dropped "
+                        "(--no-spotweld-efail-displacement)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

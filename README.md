@@ -577,10 +577,30 @@ LAW36 rate-curve family (one function per table strain rate)
 `*MAT_SPOTWELD` (100) on beam weld parts → `/PROP/TYPE13` (SPR_BEAM) `/SPRING`
 connectors — stiffnesses from the beam section, `NRR/NRS/NRT/MRR/MSS/MTT` →
 the TYPE13 force/moment failure criteria, `SIGY/EH` → a bilinear axial
-force-displacement function. (Deliberately not `/MAT/LAW59`, which binds to
-`/PROP/TYPE43` connection *solids*, not springs.) Validate on a single-weld
-pull / lap-shear coupon; non-beam MAT_100 parts fall back to elastic with a
-loud warning
+force-displacement function **and** (round 7, default ON,
+`--no-spotweld-shear-yield` keeps the shear elastic) a bilinear SHEAR function
+on Ty/Tz (`fct_ID12 = fct_ID13`, `H2 = H3 = 1`): MAT_100 is von Mises
+plasticity in axial AND shear (Vol II R17 p.2-708), so the shear yield force is
+`(SIGY/√3)·A` and the hardening `G·EH/(3G+EH)·A/L` — LS-DYNA's own `swforc` on
+`plates.mat100` plateaus at 20374..20408 = `(SIGY/√3)·A` = 20405, and the
+converted weld goes deviation → match (IE / KE history RMS 23.53 / 62.56 →
+8.58 / 26.74 % of the LS peak at 1.107× the cycles; named cost
+`mainboltaexpl`, whose preloaded bolt spring collapses either way). The yield
+displacement carries a `1e-8` relative nudge so the printed curve's slope stays
+below the printed `K2` (starter WARNING 506 otherwise). A card that states
+`EFAIL` (below LS-DYNA's 1e19 "never" idiom) and **no** resultant failure cell
+gets the `Ifail 1` / `Ifail2 0` DISPLACEMENT criterion (round 7, default ON,
+`--no-spotweld-efail-displacement` keeps it dropped): `DeltaMax1 = δy + EFAIL·L`
+(tension only), `DeltaMax2,3 = ±(δy,s + √3·EFAIL·L)` — the effective plastic
+strain `√(ε² + γ²/3)` of a proportional path reaching `EFAIL` on the quadratic
+surface `Ifail 1` applies; measured on `spotweld.k` with
+`--spotweld-node-synthesis --beam-contact-secondary`: rupture 1.12650e-3 s
+against LS-DYNA's 1.17969e-3..1.19792e-3 s (4.6-6.0 % early). Beside resultant
+cells `EFAIL` is named, not converted (TYPE13 carries ONE criterion type per
+property); a 1e20-class `EFAIL` writes nothing. (Deliberately not `/MAT/LAW59`,
+which binds to `/PROP/TYPE43` connection *solids*, not springs.) Validate on a
+single-weld pull / lap-shear coupon; non-beam MAT_100 parts fall back to
+elastic with a loud warning
 `*MAT_187` / `*MAT_SAMP-1` → `/MAT/LAW76` (SAMP-1 polymer; the tension/
 compression/shear yield curves become `/TABLE/1` cards)
 Material failure strain (MAT_003 `FS` / MAT_024 `FAIL` / MAT_018 `EPSF`) →
@@ -4240,7 +4260,11 @@ the matched end (t 1.2e-3, LS IE 60 028) it is **+141.1 %** against the base's
 −99.87 % (history +65 / +82 / +85 / +83 / +141 % at the fifths of the run,
 `nt` 4 = `nt` 2). The `/PROP/TYPE13` shear stays elastic (116 300 against
 LS-DYNA's 46 247 at 1.18e-3) and the weld NEVER fails, because
-`*MAT_SPOTWELD` `EFAIL` has no `/PROP/TYPE13` slot. And rule 2 changes the
+`*MAT_SPOTWELD` `EFAIL` had no `/PROP/TYPE13` slot. **Round 7:** the default
+shear curve and the `EFAIL` displacement criterion (see `*MAT_SPOTWELD`) now
+reach that arm — the weld fails at 1.12650e-3 s (LS-DYNA between 1.17969e-3
+and 1.19792e-3 s), IE −33.00 % / KE +38.90 % at the end, RMS 6.65 / 23.09 % of
+the LS peak. And rule 2 changes the
 secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k,
 `show-cases/contact-overview/main.k` and the two R14 Yaris giants — the three
 giants have campaign rows from 2026-09-06 runs WITHOUT the flag) and of the

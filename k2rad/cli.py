@@ -522,6 +522,39 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-rigid-shell-rotary-inertia to keep J = 0.",
     )
     parser.add_argument(
+        "--spotweld-shear-yield",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give the *MAT_SPOTWELD weld's /PROP/TYPE13 a bilinear SHEAR "
+             "curve on Ty/Tz (fct_ID12 = fct_ID13, H2 = H3 = 1): yield "
+             "(SIGY/sqrt3)·A, the von Mises shear yield of MAT_100's "
+             "axial-and-shear plasticity (Vol II R17 p.2-708), hardening "
+             "G·EH/(3G+EH)·A/L. ON by default. MEASURED on plates.mat100 "
+             "(nt 4): LS-DYNA's weld shear plateaus at 20374..20408 = "
+             "(SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> "
+             "8.58 / 26.74 %% of the LS peak at 1.107x the cycles. Named "
+             "cost: mainboltaexpl (its preloaded bolt spring collapses "
+             "either way). Use --no-spotweld-shear-yield to keep the shear "
+             "elastic.",
+    )
+    parser.add_argument(
+        "--spotweld-efail-displacement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="A *MAT_SPOTWELD EFAIL (0 < EFAIL < 1e19) on a card with NO "
+             "resultant failure cell -> /PROP/TYPE13 Ifail 1 / Ifail2 0 "
+             "displacement failure, DeltaMax1 = delta_y + EFAIL·L, "
+             "DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L (the effective plastic "
+             "strain sqrt(eps^2 + gamma^2/3) on a proportional path). ON by "
+             "default; beside resultant cells EFAIL is named, not converted. "
+             "MEASURED on spotweld.k with --spotweld-node-synthesis "
+             "--beam-contact-secondary (nt 4): rupture 1.12650e-3 s vs "
+             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.6-6.0 %% early). Its only "
+             "default mover is a giant the campaign does not run (measurable "
+             "default effect nil). Use --no-spotweld-efail-displacement to "
+             "keep EFAIL dropped.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1192,6 +1225,8 @@ def main(argv=None) -> int:
         beam_contact_secondary=args.beam_contact_secondary,
         shell_offset_gapmin=args.shell_offset_gapmin,
         rigid_shell_rotary_inertia=args.rigid_shell_rotary_inertia,
+        spotweld_shear_yield=args.spotweld_shear_yield,
+        spotweld_efail_displacement=args.spotweld_efail_displacement,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

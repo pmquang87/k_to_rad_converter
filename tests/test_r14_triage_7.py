@@ -9,12 +9,17 @@
       carrying shell rotary inertia (default ON,
       --no-rigid-shell-rotary-inertia) + the two --mass-weighted-inivel
       guards
+  A3  the *MAT_SPOTWELD weld: (i) a yielding TYPE13 shear (default ON,
+      --no-spotweld-shear-yield); (ii) EFAIL with no resultant cell ->
+      Ifail 1 / Ifail2 0 displacement failure (default ON,
+      --no-spotweld-efail-displacement)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are the round-4/5/6 ones, copied (not imported) so this
 module runs on its own.
 """
 
+import math
 import os
 import re
 import tempfile
@@ -663,6 +668,235 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A3 — the MAT_100 weld: the yielding TYPE13 shear and EFAIL -> displacement
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _weld_deck(efail=10.0, resultants=(1.0e4, 5.0e4, 5.0e4, 99999.0, 99999.0,
+                                      99999.0), sigy=5000.0, eh=1000.0) -> str:
+    """plates.mat100's weld on two 1-element plates: ONE 2-node ELFORM-9
+    beam (part 10, nodes 1 -> 5, L = 2.0), *SECTION_BEAM TS1 = TS2 = 3.0
+    (A = 7.0685835), *MAT_SPOTWELD RO 7.85e-9 E 210000 PR 0.3 SIGY / EH, DT
+    1e-9, card 2 = EFAIL + *resultants* (NRR NRS NRT MRR MSS MTT)."""
+    nodes = "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n" for n, x, y, z in
+                    ((1, 0, 0, 0), (2, 5, 0, 0), (3, 5, 5, 0), (4, 0, 5, 0),
+                     (5, 0, 0, 2), (6, 5, 0, 2), (7, 5, 5, 2), (8, 0, 5, 2)))
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n" + nodes
+            + "*PART\nlower\n" + _row(1, 1, 1) + "\n"
+            "*PART\nupper\n" + _row(2, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*ELEMENT_SHELL\n"
+            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n"
+            + "".join(f"{v:>8}" for v in (2, 2, 5, 6, 7, 8)) + "\n"
+            "*PART\nweld\n" + _row(10, 10, 10) + "\n"
+            "*SECTION_BEAM\n" + _row(10, 9, 1.0, 4, 1) + "\n"
+            + _row(3.0, 3.0, 0.0, 0.0) + "\n"
+            "*MAT_SPOTWELD\n"
+            + _row(10, 7.85e-9, 210000.0, 0.3, sigy, eh, 1.0e-9, 0.0) + "\n"
+            + _row(efail, *resultants, 0.0) + "\n"
+            "*ELEMENT_BEAM\n" + "".join(f"{v:>8}" for v in (10, 10, 1, 5))
+            + "\n*END\n")
+
+
+#: hand values of the plates.mat100 weld (part-A spec A3.3)
+_W_A = math.pi * 9.0 / 4.0
+_W_L = 2.0
+_W_G = 210000.0 / 2.6
+_W_K23 = _W_G * _W_A / _W_L                       # 285462.0247733033
+_W_K1 = 210000.0 * _W_A / _W_L
+_W_FYS = 5000.0 / math.sqrt(3.0) * _W_A           # 20405.24284763495
+_W_DYS = _W_FYS / _W_K23 * (1.0 + 1e-8)           # 0.07148146261
+_W_KTS = _W_G * 1000.0 / (3.0 * _W_G + 1000.0) * _W_A / _W_L
+
+
+def _type13_cards(starter: str):
+    """(card 1, [(K card, delta card) for the 6 DOFs]) of the ONE MAT_100
+    /PROP/TYPE13 block."""
+    lines = starter.splitlines()
+    heads = [i for i, ln in enumerate(lines) if ln.startswith("/PROP/TYPE13/")
+             and "(MAT_100 spotweld)" in lines[i + 1]]
+    assert len(heads) == 1, heads
+    i = heads[0]
+    card1 = lines[i + 3]
+    dofs = [(lines[i + 5 + 6 * k], lines[i + 7 + 6 * k]) for k in range(6)]
+    return card1, dofs
+
+
+def _funct_points(starter: str, title: str):
+    """(id, [(x, y), ...]) of the /FUNCT titled *title*."""
+    lines = starter.splitlines()
+    hit = [i for i, ln in enumerate(lines)
+           if ln.startswith("/FUNCT/") and lines[i + 1] == title]
+    assert len(hit) == 1, (title, hit)
+    i = hit[0]
+    pts = []
+    for ln in lines[i + 3:]:
+        if ln.startswith(("#", "/")):
+            break
+        pts.append((float(ln[0:20]), float(ln[20:40])))
+    return int(lines[i].rsplit("/", 1)[1]), pts
+
+
+def _close(a: float, b: float, rel: float = 2e-9) -> bool:
+    return abs(a - b) <= rel * max(abs(a), abs(b), 1e-300)
+
+
+_W_SHEAR_ON = "and a bilinear SHEAR /FUNCT/"
+_W_EFAIL_ON = "-> /PROP/TYPE13 Ifail 1 / Ifail2 0 displacement failure"
+_W_OLD_SHEAR = "Shear/bending DOFs stay elastic up to the failure surface"
+
+
+class SpotweldShearYieldAndEfail(unittest.TestCase):
+    """A3 — (i) every 2-node *MAT_SPOTWELD beam's /PROP/TYPE13 gets a
+    bilinear SHEAR curve on Ty / Tz (yield (SIGY/sqrt3) A, the von Mises
+    shear yield; hardening G EH / (3G + EH) A / L; H2 = H3 = 1); (ii) EFAIL
+    with no resultant cells -> Ifail 1 / Ifail2 0 displacement failure."""
+
+    def test_1_the_mixed_plates_mat100_weld(self):
+        res, starter, _e = _convert(_weld_deck())
+        card1, dofs = _type13_cards(starter)
+        fid, pts = _funct_points(starter, "spotweld_shear_bilinear_pid10")
+        for k in (1, 2):                                   # Ty, Tz
+            with self.subTest(dof=k + 1):
+                self.assertEqual(int(dofs[k][1][0:10]), fid)
+                self.assertEqual(dofs[k][1][10:20].strip(), "1")
+        dend = 101.0 * _W_DYS
+        fend = _W_FYS + _W_KTS * (dend - _W_DYS)
+        want = [(-dend, -fend), (-_W_DYS, -_W_FYS), (0.0, 0.0),
+                (_W_DYS, _W_FYS), (dend, fend)]
+        self.assertEqual(len(pts), 5)
+        for (x, y), (wx, wy) in zip(pts, want):
+            self.assertTrue(_close(x, wx) and _close(y, wy), (x, y, wx, wy))
+        # rkini3.F:70-99: WARNING 506 when the printed K is below the
+        # steepest segment of the printed function - check the PRINTED card
+        k2 = float(dofs[1][0][0:20])
+        slopes = [(y2 - y1) / (x2 - x1)
+                  for (x1, y1), (x2, y2) in zip(pts, pts[1:])]
+        self.assertLessEqual(max(slopes), k2)
+        self.assertEqual(card1[70:80].strip(), "1")        # Ifail 1
+        self.assertEqual(card1[90:100].strip(), "2")       # Ifail2 2 (force)
+        self.assertEqual(dofs[1][1][80:100].strip(), "50000")
+        self.assertTrue(_has(res.warnings, "EFAIL=10 is NOT converted",
+                             "Ifail2 = 2 force criteria"), res.warnings)
+        self.assertTrue(_has(res.warnings, _W_SHEAR_ON, "20405.2"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, _W_OLD_SHEAR))
+        self.assertFalse(_has(res.warnings, _W_EFAIL_ON))
+
+    def test_2_an_EFAIL_only_weld_fails_on_displacement(self):
+        res, starter, _e = _convert(_weld_deck(efail=0.3,
+                                               resultants=(0.0,) * 6))
+        card1, dofs = _type13_cards(starter)
+        self.assertEqual(card1[70:80].strip(), "1")        # Ifail 1
+        self.assertEqual(card1[90:100].strip(), "0")       # Ifail2 0 (disp.)
+        self.assertEqual(dofs[0][1][60:80].strip(), "0")   # tension only
+        d1 = float(dofs[0][1][80:100])
+        self.assertTrue(_close(d1, 5000.0 * 2.0 / 210000.0 + 0.3 * 2.0),
+                        d1)                                # 0.6476190476
+        _fid, pts = _funct_points(starter, "spotweld_shear_bilinear_pid10")
+        dys_printed = pts[3][0]
+        d2 = dys_printed + math.sqrt(3.0) * 0.3 * 2.0      # 1.110711947
+        for k in (1, 2):
+            with self.subTest(dof=k + 1):
+                self.assertTrue(_close(float(dofs[k][1][60:80]), -d2, 1e-9))
+                self.assertTrue(_close(float(dofs[k][1][80:100]), d2, 1e-9))
+        for k in (3, 4, 5):
+            with self.subTest(dof=k + 1):
+                self.assertEqual(dofs[k][1][60:80].strip(), "0")
+                self.assertEqual(dofs[k][1][80:100].strip(), "0")
+        self.assertTrue(_has(res.warnings, "EFAIL=0.3", _W_EFAIL_ON,
+                             "sqrt(eps^2 + gamma^2/3)"), res.warnings)
+        self.assertFalse(_has(res.warnings, "plastic-strain failure"),
+                         res.warnings)
+
+    def test_3_a_1e20_class_EFAIL_is_no_failure_and_writes_nothing(self):
+        """LS-DYNA's 'never' idiom (the Yaris door sag states 2e20): the
+        threshold is the dropped-field filter's 1e19 - ONE number."""
+        deck = _weld_deck(efail=2.0e20, resultants=(0.0,) * 6)
+        res, starter, _e = _convert(deck)
+        card1, dofs = _type13_cards(starter)
+        self.assertEqual(card1[70:80].strip(), "0")
+        self.assertEqual(card1[90:100].strip(), "0")
+        for k in range(6):
+            self.assertEqual(dofs[k][1][60:80].strip(), "0")
+            self.assertEqual(dofs[k][1][80:100].strip(), "0")
+        self.assertFalse(_has(res.warnings, _W_EFAIL_ON))
+        self.assertFalse(_has(res.warnings, "EFAIL"), res.warnings)
+        _r2, s_off, _e2 = _convert(deck, spotweld_efail_displacement=False)
+        self.assertEqual(starter, s_off)
+
+    def test_4_SIGY_0_writes_no_curve_and_the_strain_alone(self):
+        res, starter, _e = _convert(_weld_deck(efail=0.3,
+                                               resultants=(0.0,) * 6,
+                                               sigy=0.0))
+        self.assertNotIn("spotweld_shear_bilinear", starter)
+        self.assertNotIn("spotweld_axial_bilinear", starter)
+        _card1, dofs = _type13_cards(starter)
+        for k in (1, 2):
+            self.assertEqual(dofs[k][1][0:20].split(), ["0", "0"])
+            self.assertTrue(_close(float(dofs[k][1][80:100]),
+                                   math.sqrt(3.0) * 0.3 * 2.0, 1e-9))
+        self.assertTrue(_close(float(dofs[0][1][80:100]), 0.6, 1e-9))
+
+    def test_5_EH_0_falls_back_like_the_axial_curve(self):
+        _r, starter, _e = _convert(_weld_deck(eh=0.0))
+        _fid, pts = _funct_points(starter, "spotweld_shear_bilinear_pid10")
+        want = _W_FYS + 1e-4 * _W_K23 * (101.0 - 1.0) * _W_DYS
+        self.assertTrue(_close(pts[4][1], want, 1e-8), (pts[4], want))
+
+    def test_6_the_shear_opt_out_restores_the_elastic_shear(self):
+        from k2rad.writer.loads import _emit_spring_dof
+        res, starter, _e = _convert(_weld_deck(), spotweld_shear_yield=False)
+        self.assertNotIn("spotweld_shear_bilinear", starter)
+        _card1, dofs = _type13_cards(starter)
+        for k, cell in ((1, 5.0e4), (2, 5.0e4)):
+            want = _emit_spring_dof(k + 1, (_W_K23, 0, 0, -cell, cell))
+            self.assertEqual(list(dofs[k]), [want[1], want[3]])
+        self.assertTrue(_has(res.warnings, _W_OLD_SHEAR), res.warnings)
+        self.assertFalse(_has(res.warnings, _W_SHEAR_ON))
+
+    def test_7_the_efail_opt_out_keeps_EFAIL_dropped(self):
+        res, starter, _e = _convert(_weld_deck(efail=0.3,
+                                               resultants=(0.0,) * 6),
+                                    spotweld_efail_displacement=False)
+        card1, dofs = _type13_cards(starter)
+        self.assertEqual(card1[70:80].strip(), "0")
+        self.assertEqual(card1[90:100].strip(), "0")
+        self.assertEqual(dofs[0][1][80:100].strip(), "0")
+        self.assertTrue(_has(res.warnings, "DT, EFAIL have no /PROP/TYPE13 "
+                             "slot", "plastic-strain failure"), res.warnings)
+        self.assertFalse(_has(res.warnings, _W_EFAIL_ON))
+
+    def test_8_piece_ii_without_piece_i_names_the_unreached_criterion(self):
+        """--no-spotweld-shear-yield + EFAIL: the cells are written with the
+        same delta_y,s but the shear stays elastic, which G4 measured never
+        reaches them on spotweld.k - the sentence says so on that arm."""
+        res, starter, _e = _convert(_weld_deck(efail=0.3,
+                                               resultants=(0.0,) * 6),
+                                    spotweld_shear_yield=False)
+        card1, dofs = _type13_cards(starter)
+        self.assertEqual(card1[90:100].strip(), "0")
+        d2 = _W_DYS + math.sqrt(3.0) * 0.3 * 2.0
+        self.assertTrue(_close(float(dofs[1][1][80:100]), d2, 1e-8))
+        self.assertTrue(_has(res.warnings, _W_EFAIL_ON,
+                             "--no-spotweld-shear-yield"), res.warnings)
+
+    def test_9_the_shear_curve_draws_a_FUNCT_TABLE_free_id(self):
+        """next_curve_id, not the raw counter: a user *DEFINE_TABLE at the
+        id the counter would hand out next must not collide (ERROR 79)."""
+        from k2rad.writer import loads
+        state = _dispatch(_weld_deck())
+        state._auto_id = 91000
+        state.define_tables[91001] = object()      # the shear curve's id
+        lines = loads._make_spotweld_beam_connectors(state)
+        ids = [int(ln.rsplit("/", 1)[1]) for ln in lines
+               if ln.startswith("/FUNCT/")]
+        self.assertEqual(len(ids), 2, ids)
+        self.assertNotIn(91001, ids)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The flags of part A reach the parser, the API, the GUI and the README
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -681,6 +915,8 @@ class Round7FlagWiringA(unittest.TestCase):
     #: is the ``--no-`` one.
     _FLAGS = {
         "--rigid-shell-rotary-inertia": "rigid_shell_rotary_inertia",
+        "--spotweld-shear-yield": "spotweld_shear_yield",
+        "--spotweld-efail-displacement": "spotweld_efail_displacement",
     }
     #: figures each flag's --help must carry (matched on the collapsed render)
     _HELP_FIGURES = {
@@ -688,6 +924,12 @@ class Round7FlagWiringA(unittest.TestCase):
                                          "4.96 / 2.94 -> 0.78 / 0.73 %",
                                          "1.156x", "inirby.F:355-363",
                                          "0.1977227E-02"),
+        "--spotweld-shear-yield": ("20374..20408", "= 20405",
+                                   "8.58 / 26.74 %", "1.107x",
+                                   "mainboltaexpl"),
+        "--spotweld-efail-displacement": ("1.12650e-3", "4.6-6.0 %",
+                                          "sqrt(eps^2 + gamma^2/3)",
+                                          "1e19"),
     }
 
     def _readme(self):

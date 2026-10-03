@@ -7662,6 +7662,32 @@ class ConvertOptions:
     # revo-stiff deviation -> match (writer/rbody._A2_REVO_RMS). Reach: 56
     # deck keys on 53 emitted models (153 bodies).
     rigid_shell_rotary_inertia: bool = True
+    # --no-spotweld-shear-yield: keep the *MAT_SPOTWELD weld's /PROP/TYPE13
+    # shear DOFs (Ty/Tz) elastic (R14 triage round 7, A3 piece (i)).
+    #
+    # ON by default. MAT_100 is von Mises plasticity in axial AND shear (Vol
+    # II R17 p.2-697, Remark 1 p.2-708); k2rad wrote only the AXIAL bilinear
+    # curve. Ty/Tz now get fct_ID12 = fct_ID13 = a bilinear curve with the
+    # yield (SIGY/sqrt3)·A and the hardening G·EH/(3G+EH)·A/L, H2 = H3 = 1.
+    # MEASURED on plates.mat100: LS-DYNA's weld shear plateaus at 20374..20408
+    # = (SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> 8.58 /
+    # 26.74 % at 1.107x the cycles (deviation -> match). Named cost:
+    # mainboltaexpl (its preloaded bolt spring collapses either way). Reach: 4
+    # deck keys on 4 emitted models (2 of them giants).
+    spotweld_shear_yield: bool = True
+    # --no-spotweld-efail-displacement: keep a *MAT_SPOTWELD EFAIL dropped
+    # (R14 triage round 7, A3 piece (ii)).
+    #
+    # ON by default. EFAIL (0 < EFAIL < 1e19) on a card with NO resultant
+    # failure cell -> /PROP/TYPE13 Ifail 1 / Ifail2 0 displacement failure,
+    # DeltaMax1 = delta_y + EFAIL·L, DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L
+    # (the effective plastic strain sqrt(eps^2 + gamma^2/3) on a proportional
+    # path). Measured on spotweld.k under the round-6 opt-in pair: rupture
+    # 1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. Its only DEFAULT mover is
+    # the Yaris roof crush (EFAIL 0.8), a run_pass = 2 giant the campaign
+    # re-converts but does not run (its row is a stale 2026-09-06
+    # error_engine run): the measurable default effect is nil.
+    spotweld_efail_displacement: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

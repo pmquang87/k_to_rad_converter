@@ -238,6 +238,8 @@ def convert(
     beam_contact_secondary: bool = False,
     shell_offset_gapmin: bool = True,
     rigid_shell_rotary_inertia: bool = True,
+    spotweld_shear_yield: bool = True,
+    spotweld_efail_displacement: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -658,6 +660,25 @@ def convert(
         Reach 56 deck keys on 53 emitted models (153 bodies).
         ``--mass-weighted-inivel`` no longer subtracts on a body the
         producer already corrected.
+    spotweld_shear_yield : bool
+        Give every ``*MAT_SPOTWELD`` weld's ``/PROP/TYPE13`` a bilinear SHEAR
+        curve on Ty/Tz (round 7, A3 piece (i)): yield ``(SIGY/sqrt3)·A`` (the
+        von Mises shear yield - MAT_100 is axial-and-shear plasticity, Vol
+        II R17 p.2-708), hardening ``G·EH/(3G+EH)·A/L``, ``H2 = H3 = 1``.
+        **On by default.** MEASURED on plates.mat100 (nt 4): LS-DYNA's weld
+        shear plateaus at 20374..20408 = (SIGY/sqrt3)·A = 20405; IE / KE
+        history RMS 23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x
+        the cycles (deviation -> match). Named cost: mainboltaexpl.
+    spotweld_efail_displacement : bool
+        A ``*MAT_SPOTWELD`` ``EFAIL`` below the 1e19 'never' idiom on a card
+        with NO resultant failure cell -> ``Ifail 1`` / ``Ifail2 0``
+        displacement failure, ``DeltaMax1 = delta_y + EFAIL·L``,
+        ``DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L`` (round 7, A3 piece
+        (ii)). **On by default**; beside resultant cells EFAIL is named.
+        Measured on spotweld.k with the round-6 opt-in pair: rupture
+        1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. The measurable default
+        effect is nil (its one default mover is a giant the campaign does
+        not run).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1077,6 +1098,8 @@ def convert(
         beam_contact_secondary=beam_contact_secondary,
         shell_offset_gapmin=shell_offset_gapmin,
         rigid_shell_rotary_inertia=rigid_shell_rotary_inertia,
+        spotweld_shear_yield=spotweld_shear_yield,
+        spotweld_efail_displacement=spotweld_efail_displacement,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

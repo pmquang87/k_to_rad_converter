@@ -3305,6 +3305,31 @@ def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
             "swforc prints length 2.0." + clause)
 
 
+#: LS-DYNA's "never" idiom on a *MAT_SPOTWELD cell: a value at or above this
+#: is "not stated" - both for the dropped-field clause and for the EFAIL ->
+#: displacement-failure rule (round 7, A3), ONE threshold. The Yaris door sag
+#: states EFAIL 2e20 and converts to no failure (0 bytes).
+_SPOTWELD_NEVER = 1.0e19
+
+#: The measured evidence the A3 warnings quote, ONE copy each (part-A spec
+#: A3.4; plates.mat100 re-measured on the implementation, nt 4, base-paired
+#: in one window; history RMS in % of the LS peak, the LS glstat blocks up to
+#: the last printed OpenRadioss cycle).
+_SPOTWELD_SHEAR_EVIDENCE = (
+    "MEASURED on intro-by-k.-weimar/spotweld/spotweld-i/plates.mat100.k "
+    "(nt 4): LS-DYNA's weld shear force plateaus at 20374..20408 between "
+    "1.9e-4 and 2.9e-4 s = (SIGY/sqrt3)·A = 20405 to 0.1 %; with the curve "
+    "the converted weld reads 20450 / 20597 at 1.6e-4 / 2.4e-4 s (LS 17872 / "
+    "20389; elastic shear 23958 / 34213), and the IE / KE history RMS goes "
+    "23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x the cycles.")
+_SPOTWELD_EFAIL_EVIDENCE = (
+    "MEASURED on intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k with "
+    "--spotweld-node-synthesis --beam-contact-secondary (nt 4): the weld "
+    "fails at 1.12650e-3 s where LS-DYNA's last intact output is 1.17969e-3 s "
+    "and its first failed one 1.19792e-3 s (4.6-6.0 % early); IE -33.00 % / "
+    "KE +38.90 % at the end, RMS 6.65 / 23.09 % of the LS peak.")
+
+
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     """*MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 (SPR_BEAM) /SPRING
     connectors.
@@ -3319,7 +3344,15 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     (NRR NRS NRT MRR MSS MTT) becomes the Ifail=1/Ifail2=2 multi-directional
     FORCE failure surface — the same quadratic resultant criterion LS-DYNA
     applies. SIGY/EH give a bilinear axial force function (H=1 elastic-plastic)
-    when SIGY > 0.
+    when SIGY > 0, and (round 7, A3, default ON) a bilinear SHEAR function on
+    Ty / Tz at the von Mises shear yield (SIGY/sqrt3)·A with the hardening
+    G·EH/(3G+EH)·A/L (``--no-spotweld-shear-yield`` keeps the shear elastic).
+    A card that states EFAIL (below the 1e19 'never' idiom) and NO resultant
+    cell gets the Ifail 1 / Ifail2 0 DISPLACEMENT criterion DeltaMax1 =
+    delta_y + EFAIL·L, DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L
+    (``--no-spotweld-efail-displacement`` keeps EFAIL dropped); beside
+    resultant cells EFAIL is named, not converted (one criterion type per
+    TYPE13).
     """
     pids = sorted(_spotweld_beam_pids(state))
     if not pids:
@@ -3468,11 +3501,28 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
         has_fail = any(v > 0.0 for v in (mat.nrr, mat.nrs, mat.nrt,
                                          mat.mrr, mat.mss, mat.mtt))
         ifail, ifail2 = (1, 2) if has_fail else (0, 0)
+        # EFAIL (round 7, A3 piece (ii)): a stated value below LS-DYNA's 1e19
+        # 'never' idiom (the dropped-field filter's own threshold - ONE
+        # number), converted ONLY where the card states no resultant cell at
+        # all; beside resultants it is named (TYPE13 carries ONE criterion
+        # type per property).
+        efail_given = 0.0 < mat.efail < _SPOTWELD_NEVER
+        efail_on = state.options.spotweld_efail_displacement and efail_given
+        efail_disp = efail_on and all(
+            v == 0.0 for v in (mat.nrr, mat.nrs, mat.nrt,
+                               mat.mrr, mat.mss, mat.mtt))
+        efail_mixed = efail_on and has_fail
 
         # Axial elastic-plastic bilinear force function from SIGY/EH.
         fct1 = 0
         h1 = 0
         funct_lines: List[str] = []
+        # The yielding SHEAR (round 7, A3 piece (i)): the shear curve's id
+        # and H, and its yield displacement (also the base of piece (ii)'s
+        # shear cells, so it is computed even with the curve switched off).
+        fs = 0
+        hs = 0
+        dy_s = 0.0
         if mat.sigy > 0.0:
             fy = mat.sigy * area
             dy = fy / k1
@@ -3496,20 +3546,103 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 f"{_f(dend)}{_f(fend)}",
                 HDR,
             ]
-            state.warn(f"*MAT_SPOTWELD part {pid}: SIGY={mat.sigy:g}/EH="
-                       f"{mat.et:g} sampled into a bilinear axial "
-                       f"force-displacement /FUNCT/{fct1} (yield force "
-                       f"SIGY·A={fy:.6G}, H=1 elastic-plastic). Shear/bending "
-                       "DOFs stay elastic up to the failure surface.")
+            # MAT_100 is von Mises plasticity in axial AND shear (Vol II R17
+            # p.2-697, Remark 1 p.2-708): the shear yield force is
+            # (SIGY/sqrt3)·A, and LS-DYNA's own swforc shows it - plates.
+            # mat100's weld shear plateaus at 20374..20408 = 20405. The
+            # 1e-8 nudge keeps the PRINTED slope below the PRINTED K2: at
+            # dy_s = fy_s / k23 the 10-digit print made it exceed K2 by
+            # 1.77e-11 and the starter warned WARNING 506 (rkini3.F:70-99).
+            fy_s = mat.sigy / math.sqrt(3.0) * area
+            dy_s = fy_s / k23 * (1.0 + 1.0e-8)
+            if state.options.spotweld_shear_yield:
+                # the shear tangent of a von Mises material with plastic
+                # modulus EH (d tau / d gamma_p = EH / 3); EH <= 0 falls back
+                # like the axial curve
+                kt_s = ((G * mat.et / (3.0 * G + mat.et)) * area / L
+                        if mat.et > 0.0 else k23 * 1e-4)
+                dend_s = 101.0 * dy_s      # the axial curve's end-point rule
+                fend_s = fy_s + kt_s * (dend_s - dy_s)
+                # a /FUNCT AND /TABLE free id (hm_read_table.F:88 checks both
+                # in one scan); the axial curve above keeps the raw counter it
+                # has always drawn, so no existing MAT_100 deck renumbers
+                fs = state.next_curve_id()
+                hs = 1
+                funct_lines += [
+                    f"/FUNCT/{fs}",
+                    f"spotweld_shear_bilinear_pid{pid}",
+                    "#                  X                   Y",
+                    f"{_f(-dend_s)}{_f(-fend_s)}",
+                    f"{_f(-dy_s)}{_f(-fy_s)}",
+                    f"{_f(0.0)}{_f(0.0)}",
+                    f"{_f(dy_s)}{_f(fy_s)}",
+                    f"{_f(dend_s)}{_f(fend_s)}",
+                    HDR,
+                ]
+                state.warn(
+                    f"*MAT_SPOTWELD part {pid}: SIGY={mat.sigy:g}/EH="
+                    f"{mat.et:g} sampled into a bilinear AXIAL /FUNCT/{fct1} "
+                    f"(yield SIGY·A = {fy:.6G}) and a bilinear SHEAR "
+                    f"/FUNCT/{fs} on Ty/Tz (yield (SIGY/sqrt3)·A = "
+                    f"{fy_s:.6G}, the von Mises shear yield; hardening "
+                    f"G·EH/(3G+EH)·A/L = {kt_s:.6G} per unit displacement), "
+                    "H = 1 elastic-plastic; bending and torsion stay elastic "
+                    "up to the failure surface. " + _SPOTWELD_SHEAR_EVIDENCE
+                    + " --no-spotweld-shear-yield keeps the shear elastic.")
+            else:
+                state.warn(f"*MAT_SPOTWELD part {pid}: SIGY={mat.sigy:g}/EH="
+                           f"{mat.et:g} sampled into a bilinear axial "
+                           f"force-displacement /FUNCT/{fct1} (yield force "
+                           f"SIGY·A={fy:.6G}, H=1 elastic-plastic). "
+                           "Shear/bending DOFs stay elastic up to the failure "
+                           "surface.")
 
         dofs = [
             (k1, fct1, h1, 0.0, mat.nrr),          # Tx: tension-only failure
-            (k23, 0, 0, -mat.nrs, mat.nrs),        # Ty
-            (k23, 0, 0, -mat.nrt, mat.nrt),        # Tz
+            (k23, fs, hs, -mat.nrs, mat.nrs),      # Ty
+            (k23, fs, hs, -mat.nrt, mat.nrt),      # Tz
             (k4, 0, 0, -mat.mrr, mat.mrr),         # Rx torsion
             (k5, 0, 0, -mat.mss, mat.mss),         # Ry bending
             (k6, 0, 0, -mat.mtt, mat.mtt),         # Rz bending
         ]
+        if efail_disp:
+            # EFAIL -> a DISPLACEMENT criterion (Ifail 1 / Ifail2 0: XA 1,
+            # XB 2, r4def3.F:342-375; CRIT >= 1 deletes, :819-820). For a
+            # proportional path with plastic >> elastic strain the effective
+            # plastic strain sqrt(eps^2 + gamma^2/3), eps = d_a/L,
+            # gamma = d_s/L, reaches EFAIL exactly on (d1/D1)^2 + (d2/D2)^2 +
+            # (d3/D3)^2 = 1 with D1 = EFAIL·L and D2,3 = sqrt3·EFAIL·L; the
+            # yield displacements are added. Tension only on Tx (DeltaMin 0 =
+            # the reader's -1e30), rotations never fail. dyna2rad's strain
+            # form (Ileng 1, +-EFAIL on all six DOFs) is NOT used: measured
+            # 45 % early on spotweld.k.
+            dy_a = (mat.sigy * area) / k1 if mat.sigy > 0.0 else 0.0
+            d1 = dy_a + mat.efail * L
+            d2 = dy_s + math.sqrt(3.0) * mat.efail * L
+            ifail, ifail2 = 1, 0
+            dofs[0] = (k1, fct1, h1, 0.0, d1)
+            dofs[1] = (k23, fs, hs, -d2, d2)
+            dofs[2] = (k23, fs, hs, -d2, d2)
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: EFAIL={mat.efail:g} (no resultant "
+                "failure cells) -> /PROP/TYPE13 Ifail 1 / Ifail2 0 displacement "
+                f"failure: DeltaMax1 = delta_y + EFAIL·L = {d1:.6G}, "
+                f"DeltaMax2,3 = +-(delta_y,s + sqrt3·EFAIL·L) = {d2:.6G} "
+                f"(L = {L:g}, the mean weld length): for a proportional path "
+                "the effective plastic strain sqrt(eps^2 + gamma^2/3) reaches "
+                "EFAIL exactly on the quadratic surface (d1/D1)^2 + (d2/D2)^2 "
+                "+ (d3/D3)^2 = 1 that Ifail 1 / Ifail2 0 applies (r4def3.F). "
+                "NOT carried: the path history (LS integrates the plastic "
+                "strain), the elastic share of the displacement, the plastic "
+                "strain from bending and torsion (TYPE13's rotations stay "
+                "elastic), and LS's per-integration-point deletion. "
+                + _SPOTWELD_EFAIL_EVIDENCE
+                + (" With --no-spotweld-shear-yield the shear stays ELASTIC "
+                   "and these shear cells are measured never to be reached "
+                   "on spotweld.k (the weld does not fail)."
+                   if mat.sigy > 0.0 and not state.options.spotweld_shear_yield
+                   else "")
+                + " --no-spotweld-efail-displacement keeps EFAIL dropped.")
         prop_id = state.next_prop_id()
         lines += funct_lines
         lines += _emit_prop_type13(
@@ -3547,21 +3680,42 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
         lines.append(HDR)
         emitted = True
 
-        dropped = [name for name, v in (("DT", mat.dt), ("TFAIL", mat.tfail),
-                                        ("EFAIL", mat.efail), ("NF", mat.nf))
-                   if v and 0.0 < v < 1e19]
-        if dropped:
+        cells = [("DT", mat.dt), ("TFAIL", mat.tfail), ("EFAIL", mat.efail),
+                 ("NF", mat.nf)]
+        if efail_disp or efail_mixed:
+            # EFAIL is converted (piece ii) or named by its own sentence below
+            # (the mixed card): the dropped clause leaves it out
+            cells = [c for c in cells if c[0] != "EFAIL"]
+        dropped = [name for name, v in cells
+                   if v and 0.0 < v < _SPOTWELD_NEVER]
+        if dropped and (efail_disp or efail_mixed):
+            meaning = {"DT": "weld time-step mass scaling",
+                       "TFAIL": "timed failure", "NF": "force filtering"}
+            state.warn(f"*MAT_SPOTWELD part {pid}: {', '.join(dropped)} have no "
+                       "/PROP/TYPE13 slot — dropped (no "
+                       + " / ".join(meaning[n] for n in dropped) + ").")
+        elif dropped:
             state.warn(f"*MAT_SPOTWELD part {pid}: {', '.join(dropped)} have no "
                        "/PROP/TYPE13 slot — dropped (no weld time-step mass "
                        "scaling / timed failure / plastic-strain failure / "
                        "force filtering).")
+        if efail_mixed:
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: EFAIL={mat.efail:g} is NOT "
+                "converted: the card also states resultant failure cells "
+                "(NRR..MTT), which are written as the Ifail2 = 2 force "
+                "criteria, and /PROP/TYPE13 carries ONE criterion type per "
+                "property; LS-DYNA applies both.")
         if has_fail and abs(mat.nf) > 0.0:
             pass  # NF already reported above
         state.warn(
             f"*MAT_SPOTWELD part {pid} ({len(beams)} weld beam(s)) -> "
             f"/PROP/TYPE13/{prop_id} SPR_BEAM /SPRING connectors "
-            f"(K_axial=E·A/L={k1:.6G}, K_shear=G·A/L={k23:.6G}, failure "
-            f"forces/moments from MAT_100 card 2 via Ifail2=2). APPROXIMATE "
+            f"(K_axial=E·A/L={k1:.6G}, K_shear=G·A/L={k23:.6G}, "
+            + ("failure displacements from EFAIL via Ifail2=0"
+               if efail_disp else
+               "failure forces/moments from MAT_100 card 2 via Ifail2=2")
+            + "). APPROXIMATE "
             "mapping: validate against LS-DYNA on a single-weld pull and "
             "lap-shear coupon before trusting a full-vehicle result.")
 

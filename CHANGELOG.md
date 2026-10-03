@@ -98,6 +98,57 @@ Prior history (before this changelog was introduced) is summarized in the
     pin": its J row `0 0 0` → `−1.310000E-09` ×3 = by hand 4 × (7.86e-9/4)
     (1 + 1)/12; nothing else in the file moves). New tests:
     `RigidShellRotaryInertiaDefault` (16) and `Round7FlagWiringA`.
+  - **A3 (i) — the `*MAT_SPOTWELD` weld's `/PROP/TYPE13` gets a yielding
+    SHEAR (default ON, `--no-spotweld-shear-yield`).** MAT_100 is von Mises
+    plasticity in axial AND shear (Vol II R17 p.2-697, Remark 1 p.2-708);
+    k2rad wrote only the axial bilinear curve, so the weld's shear stayed
+    elastic up to the failure surface. Ty / Tz now carry `fct_ID12 =
+    fct_ID13` = one bilinear `/FUNCT` per weld part (yield `(SIGY/√3)·A`, the
+    von Mises shear yield; hardening `G·EH/(3G+EH)·A/L`, the shear tangent of
+    a von Mises material with plastic modulus EH; `EH ≤ 0` falls back to
+    `1e-4·K2` like the axial curve; end point at 101 δy,s), `H2 = H3 = 1`;
+    its id comes from `next_curve_id` (the merged FUNCT + TABLE namespace;
+    the axial curve keeps the raw counter it has always drawn, so no MAT_100
+    deck renumbers below it), drawn after the axial curve and before the
+    property id. δy,s carries a `1e-8` relative nudge: at `F_y,s / K2` the
+    10-digit print made the curve's elastic slope exceed the printed `K2` by
+    1.77e-11 and the starter printed WARNING 506 (`rkini3.F:70-99`); the
+    test asserts the PARSED card. LS-DYNA's own `swforc` on
+    `intro-by-k.-weimar/spotweld/spotweld-i/plates.mat100.k` plateaus at
+    20374..20408 between 1.9e-4 and 2.9e-4 s = `(SIGY/√3)·A` = 20405 to 0.1 %.
+    MEASURED (nt 4, base-paired): plates.mat100 deviation → match, IE / KE
+    history RMS 23.53 / 62.56 → 8.58 / 26.74 % of the LS peak at 1.107× the
+    cycles. Named cost: `mainboltaexpl` (worse: IE / KE RMS 26.69 / 24.31 →
+    30.86 / 30.94 %; its `/PRELOAD/AXIAL` bolt spring collapses to ~zero
+    length on both arms — a separate defect, ROADMAP). **Byte movers 4 deck
+    keys on 4 emitted models** (plates.mat100, mainboltaexpl, the Yaris roof
+    crush and door sag giants, convert-only), later auto ids +1; `spotweld.k`
+    moves only under the round-6 opt-in pair.
+  - **A3 (ii) — a `*MAT_SPOTWELD` `EFAIL` with no resultant cell fails the
+    weld on displacement (default ON, `--no-spotweld-efail-displacement`).**
+    `0 < EFAIL < 1e19` (LS-DYNA's "never" idiom; the dropped-field filter's
+    own threshold, one constant `_SPOTWELD_NEVER`) and `NRR..MTT` all 0 →
+    `Ifail 1` / `Ifail2 0` (XA 1, XB 2, `r4def3.F:342-375`, deletion at
+    `:819-820`), `DeltaMax1 = δy + EFAIL·L` (tension only),
+    `DeltaMax2,3 = ±(δy,s + √3·EFAIL·L)`, rotations never fail: for a
+    proportional path the effective plastic strain `√(ε² + γ²/3)` reaches
+    EFAIL exactly on that quadratic surface. NOT carried and named: the path
+    history, the elastic share, bending / torsion plastic strain, LS's
+    per-point deletion. A card that also states resultant cells keeps
+    `Ifail2 2` and names the EFAIL drop (plates.mat100: EFAIL 10 beside NRR
+    1e4 / NRS 5e4 …); a 1e20-class EFAIL writes nothing (the Yaris door sag's
+    2e20, pinned by a test); dyna2rad's strain form (Ileng 1, ±EFAIL on six
+    DOFs) is NOT used (45 % early on spotweld.k). MEASURED on spotweld.k
+    with `--spotweld-node-synthesis --beam-contact-secondary` (nt 4): the
+    weld fails at 1.12650e-3 s where LS-DYNA's last intact output is
+    1.17969e-3 s and its first failed one 1.19792e-3 s; IE −33.00 % / KE
+    +38.90 % at the end, RMS 6.65 / 23.09 %. **Default byte movers: 1 deck
+    key on 1 model, the Yaris roof crush (EFAIL 0.8), a run_pass 2 giant the
+    campaign re-converts but does not run — the measurable default effect is
+    nil.** Not in this round: MAT_100 `DT` → mass scaling, rules 1 + 2 as
+    defaults (ROADMAP). New tests: `SpotweldShearYieldAndEfail` (9, hand
+    values of the part-A spec A3.3) and the two flags in
+    `Round7FlagWiringA`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three
