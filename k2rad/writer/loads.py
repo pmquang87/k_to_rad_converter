@@ -3680,7 +3680,11 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 kt = k1 * 1e-4       # near-perfectly-plastic fallback
             dend = dy * 101.0        # 100·δy of plastic range; Radioss
             fend = fy + kt * (dend - dy)   # extrapolates the last segment
-            fct1 = state.next_id()
+            # a /FUNCT AND /TABLE free id (the post-review round): the raw
+            # counter collided with a user curve id in the auto range (starter
+            # ERROR 79 at 65ff389 and round 7 alike); next_curve_id is the
+            # same id on every deck without such a collision
+            fct1 = state.next_curve_id()
             h1 = 1                   # elastic-plastic, unloading with K1
             funct_lines = [
                 f"/FUNCT/{fct1}",
@@ -3711,8 +3715,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 dend_s = 101.0 * dy_s      # the axial curve's end-point rule
                 fend_s = fy_s + kt_s * (dend_s - dy_s)
                 # a /FUNCT AND /TABLE free id (hm_read_table.F:88 checks both
-                # in one scan); the axial curve above keeps the raw counter it
-                # has always drawn, so no existing MAT_100 deck renumbers
+                # in one scan), like the axial curve above
                 fs = state.next_curve_id()
                 hs = 1
                 funct_lines += [

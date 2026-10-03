@@ -1182,6 +1182,32 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
         self.assertEqual(len(ids), 2, ids)
         self.assertNotIn(91001, ids)
 
+    def test_10_the_axial_curve_draws_a_FUNCT_TABLE_free_id_too(self):
+        """The post-review round: the AXIAL curve kept the raw counter, and a
+        user *DEFINE_CURVE at the id it handed out next gave a second
+        /FUNCT of that id - starter ERROR 79 'DUPLICATE ID IN FUNCTION &
+        TABLE DEFINITION' at 65ff389 and at the round-7 head alike (the
+        physics verifier's AXC probe). next_curve_id is the same id on every
+        deck without such a collision."""
+        from k2rad.writer import loads
+        state = _dispatch(_weld_deck())
+        state._auto_id = 91000
+        state.curves[91000] = object()             # the axial curve's id
+        lines = loads._make_spotweld_beam_connectors(state)
+        ids = [int(ln.rsplit("/", 1)[1]) for ln in lines
+               if ln.startswith("/FUNCT/")]
+        self.assertEqual(len(ids), 2, ids)
+        self.assertEqual(len(set(ids)), 2, ids)
+        self.assertNotIn(91000, ids)
+        # control: with no user id there, the axial curve takes 91000 as
+        # before (no deck without a collision renumbers)
+        state2 = _dispatch(_weld_deck())
+        state2._auto_id = 91000
+        lines2 = loads._make_spotweld_beam_connectors(state2)
+        ids2 = [int(ln.rsplit("/", 1)[1]) for ln in lines2
+                if ln.startswith("/FUNCT/")]
+        self.assertEqual(ids2[0], 91000, ids2)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A4 — the implicit LAW1 thick shell -> /PROP/SOLID Isolid 14; the lumper
