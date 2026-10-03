@@ -203,6 +203,55 @@ Prior history (before this changelog was introduced) is summarized in the
     `--mass-weighted-inivel` and A2's refusal tensor; no roster rigid body is
     made of thick shells). New tests: `ImplicitThickShellSolidRoute` (9) and
     `LumperCountsThickShells` (3).
+  - **A5 — the implicit and spring texts (no flag, 0 `.rad` bytes).**
+    (i) The `vdc = 0 → VisS = 0 … set vdc on *CONTACT Card2` remedy is no
+    longer printed about k2rad's OWN injected implicit stub
+    (`_vdc_to_viss` gains the contact title and gates on
+    `AUTO_IMPLICIT_STUB_TITLE`, exactly as `_maybe_derived_gapmin` does; all
+    four callers pass it): it told the user to edit a card the deck does not
+    have. Warning movers 53 deck keys / 37 emitted models by the sentence's
+    interface id (52 / 36 by the deck statement — doorbeam's TYPE25-only
+    contact also gets the stub, the open "TYPE25-only stub question"). The
+    optional rewording of the real-contact sentence ("Implicit dynamic
+    penalty contact" → "Implicit penalty contact") was NOT applied, so its
+    12 / 12 records do not move. (ii) `*SECTION_SOLID_EFG` /
+    `*SECTION_SHELL_EFG` get a recorder (`handle_section_efg`) that appends
+    the SAME `skipped_keywords` entry the unknown-keyword path wrote (the
+    `#-- SKIPPED:` line and both `.rad` files byte-identical, pinned against
+    the recorder-removed read) and records `SECID → (keyword, ELFORM)`; the
+    missing-section auto-create then NAMES the placeholder the part lands on
+    (`AutoPropSolid_<secid>`, on metal-cutting Isolid 24 with a blank Itetra4
+    = the one-point linear `/TETRA4`), the dropped `*CONTROL_ADAPTIVE` /
+    `*CONTROL_REMESHING_EFG`, LS-DYNA's formulation from its own d3hsp echo
+    (ELFORM 42 "efg 3d for 4-noded background") and the measured
+    consequence (the implicit run cannot carry the constrained cutting:
+    ERROR at cycle 26 on 4 of 4 runs; Itetra4 3 ends NORMAL at ERR 91.2 %
+    without a cutting result — not shipped, ROADMAP). 1 key / 1 model.
+    (iii) A named warning for `*CONTROL_IMPLICIT_GENERAL` IMFLAG < 0 (its
+    curve's schedule, from the new pure `imflag_segments`, against
+    OpenRadioss's one-method-per-engine-file rule, `freimpl.F:82`,
+    `:127-129`, with ie_shell's measured cost: IE −1.52 / −2.36 / −99.48 /
+    −98.77 / −99.87 % at the fifths, KE 0 against 149.9, NORMAL in 92
+    cycles), a constant-0 curve named as an explicit run emitted implicit,
+    and a text-only sentence for IMFLAG 2 / 4 / 5 / 6 (0 roster carriers, 11
+    Ryan_Lee files at IMFLAG 4). Called once from `build_engine`, above any
+    early return. 1 key / 1 model (`ie_shell`). The `state.py` IMFLAG
+    comment ("4=implicit") is corrected. The opt-in two-engine-file
+    emission is NOT shipped this round (see ROADMAP). (iv) The spring-token
+    warning's LIGHT clause gains, per light node and spring, the two-mass
+    critical step `2 sqrt(mu / K)` against `Tsca ×` the spring's own step
+    (`r1len3.F:175`), PROTECTED / UNPROTECTED, the silent symptom and the
+    remedies — inside the LIGHT arm only (a sentence in the shared token
+    text would move all 14 carriers). The springs are recorded at their
+    four registration sites (`state.spring_token_springs`: eid, ends, M, I,
+    K_t, K_r, C; Ileng 1 scaled). The far end's mass is its engine mass
+    after compensation (a compensated node holds exactly the deck's mass,
+    so the coupon's node 10 is 1e-3, not the 8e-4 the part-A spec used); a
+    ground, rigid or fully fixed far end is infinite. 7 keys / 7 models,
+    0 bytes; gnonspring's TOTAL MASS stays 2.0e-6 (the adaptive token is not
+    shipped). New tests: `VdcRemedyNotAboutTheStub` (3),
+    `EfgPlaceholderNamed` (2), `ImflagNamed` (5), `LightClauseNumbers` (4,
+    G3's four-spring coupon with its PROTECTED twin).
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three

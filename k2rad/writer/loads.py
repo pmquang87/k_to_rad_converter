@@ -1752,10 +1752,29 @@ _SPRING_TOKEN_MASS = 1.0e-4
 #: emission sites.
 _SPRING_TOKEN_INERTIA = 1.0e-6
 
+def _spring_kc(dofs) -> Tuple[float, float, float]:
+    """``(K_t, K_r, C)`` of a six-DOF spring property: the largest
+    translational and rotational stiffness and the largest translational
+    damping (SpringDof objects or the legacy 5-tuples)."""
+    ds = [_as_spring_dof(d) for d in dofs]
+    return (max([d.k for d in ds[:3]] + [0.0]),
+            max([d.k for d in ds[3:6]] + [0.0]),
+            max([d.c for d in ds[:3]] + [0.0]))
+
+
 def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
-                                prop_mass: float = _SPRING_TOKEN_MASS) -> None:
+                                prop_mass: float = _SPRING_TOKEN_MASS,
+                                spring: Optional[Tuple[int, float, float,
+                                                       float, float]] = None
+                                ) -> None:
     """Record the invented property mass one emitted /SPRING row puts on its
     end nodes, for the /ADMAS compensation in :func:`_make_added_masses`.
+
+    *spring* = ``(eid, I, K_t, K_r, C)`` of the row's property (round 7, A5
+    (iv)): recorded in ``state.spring_token_springs`` so the LIGHT clause of
+    :func:`_warn_spring_token_mass` can state each light node's two-mass
+    critical step against the spring's own step. Every registration site
+    passes it; ``None`` records nothing (no clause numbers for that row).
 
     ``rinit3.F:1926`` is ``EMS(I) = HALF*UMASS(I)`` and ``:1937-1939`` writes
     ``MSR(1..3,I)`` onto ``IXR(2,I)`` and ``IXR(3,I)`` only — HALF the property
@@ -1784,6 +1803,10 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
         if _n > 0:
             state.spring_token_mass_by_node[_n] = (
                 state.spring_token_mass_by_node.get(_n, 0.0) + share)
+    if spring is not None:
+        eid, inertia, k_t, k_r, c = spring
+        state.spring_token_springs.append(
+            (eid, n1, n2, prop_mass, inertia, k_t, k_r, c))
 
 
 def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
@@ -1878,10 +1901,14 @@ def _new_ground_node(state: ConversionState, at: NodeData) -> int:
 
 def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
                       title: str, g_elems, pid: int,
-                      spring_kind_label: str = "TYPE4") -> List[str]:
+                      spring_kind_label: str = "TYPE4",
+                      spring_kc: Optional[Tuple[float, float, float,
+                                                float]] = None) -> List[str]:
     """Emit /PART + /SPRING for a group of discrete elements on *prop_id*,
     synthesizing a fixed ground node (+ /BCS 111 111) for each grounded element
-    (N2=0). Shared by the axial /PROP/TYPE4 and the oriented /PROP/TYPE8 paths."""
+    (N2=0). Shared by the axial /PROP/TYPE4 and the oriented /PROP/TYPE8 paths.
+    *spring_kc* = ``(I, K_t, K_r, C)`` of *prop_id*, recorded per row for the
+    LIGHT clause of the token warning (round 7, A5 (iv))."""
     lines = [
         f"/PART/{part_id}",
         title,
@@ -1916,7 +1943,9 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # synthesized ground node, so the tally is the deck's truth; the ground
         # node is /BCS-fixed and carries no /ADMAS, so nothing is subtracted
         # there and nothing is warned about it (see _spring_token_warn_nodes).
-        _register_spring_token_mass(state, n1, n2)
+        _register_spring_token_mass(
+            state, n1, n2,
+            spring=((e.eid,) + spring_kc) if spring_kc is not None else None)
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_grnod_id()
@@ -2779,19 +2808,23 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             if torsional:
                 dofs = [SpringDof(), SpringDof(), SpringDof(),
                         _dof(s, eff_fct), SpringDof(), SpringDof()]
+                tors_i = _connector_inertia(state, g_elems)
                 lines += _emit_prop_type13(
                     prop_id, f"{title} ({kind}, torsional DRO=1)",
-                    _SPRING_TOKEN_MASS, _connector_inertia(state, g_elems),
+                    _SPRING_TOKEN_MASS, tors_i,
                     0, 0, dofs)
+                kc = (tors_i,) + _spring_kc(dofs)
             else:
                 k_s, c_s, a_coef, h_s = _scaled(s, eff_fct)
                 lines += _emit_prop_type4(
                     prop_id, f"{title} ({kind})", _SPRING_TOKEN_MASS, k_s, c_s,
                     a_coef, eff_fct, hflag, dmin, dmax, fct2=fct2, fct3=fct3,
                     fct4=fct4, b=b_coef, d=d_coef, e=e_coef, hscale=h_s)
+                kc = (0.0, k_s, 0.0, c_s)
             lines += _emit_spring_part(
                 state, part_id, prop_id, title, g_elems, pid,
-                spring_kind_label="TYPE13" if torsional else "TYPE4")
+                spring_kind_label="TYPE13" if torsional else "TYPE4",
+                spring_kc=kc)
             emitted = pid_emitted = True
             state.warn(f"*ELEMENT_DISCRETE part {pid} ({kind}, "
                        f"{len(g_elems)} element(s)) -> "
@@ -2852,8 +2885,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 "#  Fsmooth                Fcut",
                 f"{_i(0)}{_f(0.0)}",
             ]
-            lines += _emit_spring_part(state, part_id, prop_id, title,
-                                       g_elems, pid, spring_kind_label="TYPE8")
+            ori_i = _connector_inertia(state, g_elems)
+            lines += _emit_spring_part(
+                state, part_id, prop_id, title, g_elems, pid,
+                spring_kind_label="TYPE8",
+                spring_kc=((ori_i, 0.0, k_s, c_s) if slot == 4 else
+                           (ori_i, k_s, 0.0, c_s)))
             emitted = pid_emitted = True
             state.warn(
                 f"*ELEMENT_DISCRETE part {pid} ({kind}, {len(g_elems)} "
@@ -3668,7 +3705,9 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             # the orientation node and gets nothing (rinit3.F:1937-1939 writes
             # IXR(2,I)/IXR(3,I) only). Ileng is 0 on this property.
             if token_mass:
-                _register_spring_token_mass(state, e.n1, e.n2)
+                _register_spring_token_mass(
+                    state, e.n1, e.n2,
+                    spring=(e.eid, inertia) + _spring_kc(dofs))
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -3949,7 +3988,9 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         # above drop a weld whose node set is not a pair, whose nodes have no
         # coordinates, or which is coincident — none of those reached the deck.
         # Ileng is 0 on this property, so UMASS is the property mass itself.
-        _register_spring_token_mass(state, n1, n2)
+        _register_spring_token_mass(
+            state, n1, n2,
+            spring=(elem_id, _SPRING_TOKEN_INERTIA) + _spring_kc(dofs))
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -7681,6 +7722,94 @@ def _spring_token_negative_admas(
     return groups, guarded, light
 
 
+def _light_pair_clause(state: ConversionState,
+                       light: List[Tuple[int, float, float]],
+                       rigid_nodes: Set[int],
+                       guarded: List[Tuple[int, float]]) -> str:
+    """The LIGHT clause's per-pair numbers (round 7, A5 (iv); text only).
+
+    For a light node n on a recorded spring s whose far end is f: the
+    two-mass critical step ``2 sqrt(mu / K_t)`` with ``mu = m_n m_f /
+    (m_n + m_f)`` (LS-DYNA Theory R16 eq. 26.25 / 26.27, the real nodal
+    masses), against ``Tsca x`` the spring's OWN step ``dt_s = min(M /
+    (sqrt(C^2 + M K_t) + C), I / sqrt(I K_r))`` (r1len3.F:175-177, which
+    reads the PROPERTY mass, never the node's). PROTECTED iff ``crit >=
+    Tsca x dt_s``. ``m_n`` is the light node's own mass; ``m_f`` the far
+    end's engine mass after compensation - its element mass plus its
+    *ELEMENT_MASS (the compensation restores exactly that), or that plus
+    the token share left on a GUARDED node, and infinite for a connector
+    ground node, a rigid-body node or a node whose GLOBAL ``/BCS`` from the
+    deck's own cards (:func:`_global_spc_dofs`: ``*BOUNDARY_SPC`` and the
+    ``SF = 0`` prescribed motions) fixes all three translations. ``Tsca``
+    is the deck's TSSFAC (0.9 when it states
+    none). The two-mass form decided 8 of 8 cases of a boundary sweep right
+    (the engine's limit between 2.05e-5 and 2.08e-5 against the closed form
+    2.0668e-5). A spring with no translational stiffness is skipped (its
+    pair has no translational critical step)."""
+    if not light or not state.spring_token_springs:
+        return ""
+    ts = state.ctrl_timestep
+    tsca = ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0) else 0.9
+    ends = {n for rec in state.spring_token_springs for n in rec[1:3]}
+    m_el = element_mass_by_node(state, ends,
+                                lambda mid: _mat_density(state, mid))
+    fixed = {n for n, (tra, _rot) in _global_spc_dofs(state).items()
+             if tra == "111"}
+    guarded_share = dict(guarded)
+    own_of = {n: own for n, own, _sh in light}
+    inf = float("inf")
+
+    def _far_mass(n: int) -> float:
+        if (n in state.connector_ground_nodes or n in rigid_nodes
+                or n in fixed):
+            return inf
+        if n in own_of:
+            return own_of[n]
+        m = m_el.get(n, 0.0) + state.added_node_masses.get(n, 0.0)
+        return m + guarded_share.get(n, 0.0)
+
+    pairs: List[Tuple[float, int, int, float, float, float]] = []
+    for n, m_n, _sh in light:
+        for eid, n1, n2, mass, inertia, k_t, k_r, c in \
+                state.spring_token_springs:
+            if n not in (n1, n2) or k_t <= 0.0:
+                continue
+            m_f = _far_mass(n2 if n == n1 else n1)
+            mu = m_n if m_f == inf else m_n * m_f / (m_n + m_f)
+            crit = 2.0 * math.sqrt(mu / k_t)
+            dt_t = mass / (math.sqrt(c * c + mass * k_t) + c)
+            dt_r = (inertia / math.sqrt(inertia * k_r)
+                    if k_r > 0.0 and inertia > 0.0 else inf)
+            dt_s = min(dt_t, dt_r)
+            pairs.append((crit / (tsca * dt_s), n, eid, crit, dt_s, mass))
+    if not pairs:
+        return ""
+    pairs.sort()
+    shown = "; ".join(
+        f"node {n} on spring {eid}: {crit:.3g} s vs {tsca:g} x {dt_s:.3g} s"
+        f" -> {'PROTECTED' if ratio >= 1.0 else 'UNPROTECTED'}"
+        for ratio, n, eid, crit, dt_s, _m in pairs[:5])
+    token = pairs[0][5]
+    text = (
+        " Per pair, the two-mass critical step 2 sqrt(mu / K) against Tsca x "
+        "the spring's own step (r1len3.F:175, which reads the PROPERTY mass): "
+        + shown + (" ..." if len(pairs) > 5 else "") + ". An UNPROTECTED node "
+        "is stable only while the model's governing element step stays below "
+        "its critical step; nothing else catches it: the run ends NORMAL "
+        "TERMINATION with the energy ERROR column at 99.9 % (MEASURED on a "
+        "four-spring coupon: node 20, own mass 1.96e-13, diverged in 6 cycles "
+        "at nt 4 and 2; a two-mass sweep put the engine's limit between "
+        "2.05e-5 and 2.08e-5 against the closed form 2.0668e-5). Remedies: an "
+        "*ELEMENT_MASS that lifts mu above (Tsca^2 / 4) x M (M = the spring's "
+        f"token mass {token:g}), /DT/NODA on the engine deck (the step then "
+        "comes from the real nodal masses), or "
+        "--no-spring-token-mass-compensation (keeps the token on the node).")
+    if state.is_implicit:
+        text += (" This deck runs implicit: no explicit element step applies, "
+                 "the comparison is stated for an explicit run only.")
+    return text
+
+
 def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                             compensated, degenerate, neg_groups=None,
                             guarded=None, light=None) -> None:
@@ -7794,7 +7923,8 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                 "1.96e-7; UNSTABLE on the same coupon's node on a T 1e-6 "
                 "shell (own mass 1.96e-13): IE 1.58e22 at cycle 7, a USER "
                 "BREAK - and the engine still printed NORMAL TERMINATION. See "
-                "ROADMAP (the per-spring stability rule).")
+                "ROADMAP (the per-spring stability rule)."
+                + _light_pair_clause(state, light, rigid_nodes, guarded))
         state.warn(
             "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
             f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "

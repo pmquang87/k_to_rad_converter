@@ -16,6 +16,9 @@
   A4  the implicit *MAT_ELASTIC thick shell -> /PROP/SOLID Isolid 14 on the
       same /BRICK rows (default ON, --no-implicit-tshell-solid) and the
       lumper that skipped thick shells
+  A5  the implicit / spring texts (0 bytes): the vdc remedy is not about
+      k2rad's own stub; the EFG placeholder is named; IMFLAG < 0 and
+      2/4/5/6 are named; the LIGHT clause states its per-pair numbers
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are the round-4/5/6 ones, copied (not imported) so this
@@ -1112,6 +1115,305 @@ class LumperCountsThickShells(unittest.TestCase):
         state = _dispatch(_ts_deck(elem=one, extra=fin))
         mass, _in = nodal_masses_from_state(state)
         self.assertAlmostEqual(sum(mass.values()) / 2.0e-6, 1.0, places=12)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A5 — the implicit / spring texts (0 .rad bytes)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _shell_plate(control: str, extra: str = "") -> str:
+    """A 2 x 1 elastic shell plate (part 1, nodes 1-6) under *control*."""
+    nodes = "*NODE\n" + "".join(
+        f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n" for n, x, y in
+        ((1, 0, 0), (2, 10, 0), (3, 20, 0), (4, 0, 10), (5, 10, 10),
+         (6, 20, 10)))
+    return ("*KEYWORD\n" + control + nodes
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*ELEMENT_SHELL\n"
+            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 5, 4)) + "\n"
+            + "".join(f"{v:>8}" for v in (2, 1, 2, 3, 6, 5)) + "\n"
+            + extra + "*END\n")
+
+
+_IMPL1 = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+          "*CONTROL_TERMINATION\n" + _row(0.01) + "\n")
+_VDC_RE = re.compile(r"^CONTACT \d+: vdc=0 -> VisS=0")
+
+
+class VdcRemedyNotAboutTheStub(unittest.TestCase):
+    """A5 (i) — the 'set vdc on *CONTACT Card2' remedy is not printed about
+    k2rad's own injected implicit stub (the deck states no *CONTACT at all);
+    gated on the stub title exactly as _maybe_derived_gapmin is."""
+
+    def test_1_a_contact_free_implicit_deck_gets_no_remedy(self):
+        res, starter, _e = _convert(_shell_plate(_IMPL1))
+        self.assertTrue(_has(res.warnings, "Injected an inert all-parts "
+                             "self-contact"), res.warnings)
+        self.assertEqual([w for w in res.warnings if _VDC_RE.match(w)], [])
+        self.assertIn("auto_implicit_stabilization_self_contact", starter)
+
+    def test_2_a_stated_vdc_0_contact_still_gets_it(self):
+        extra = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID\n" + _row(77) + "\n"
+                 + _row(1, 0, 3, 0) + "\n" + _row(0.1, 0.0, 0.0, 0.0, 0.0)
+                 + "\n" + _row() + "\n")
+        res, _s, _e = _convert(_shell_plate(_IMPL1, extra))
+        hits = [w for w in res.warnings if _VDC_RE.match(w)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertTrue(hits[0].startswith("CONTACT 77: vdc=0 -> VisS=0"))
+
+    def test_3_a_TYPE25_only_deck_gets_the_stub_and_no_stub_sentence(self):
+        """doorbeam's shape: its one contact takes the TYPE25 route and the
+        stub is injected beside it (the stub guard does not read
+        contacts_type25 - ROADMAP); no vdc sentence names the stub."""
+        extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
+                 "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
+                 + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
+        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
+        stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
+                    for i, ln in enumerate(starter.splitlines())
+                    if ln == "auto_implicit_stabilization_self_contact"]
+        self.assertEqual(len(stub_ids), 1, starter)     # the stub IS there
+        self.assertIn("/INTER/TYPE25/78", starter)
+        self.assertFalse(_has(res.warnings, f"CONTACT {stub_ids[0]}: vdc=0"),
+                         res.warnings)
+
+
+def _efg_deck(title: bool = False) -> str:
+    """efg/metal-cutting's card shape: *SECTION_SOLID_EFG SECID 3 ELFORM 42
+    (+ its two EFG cards) under part 3 with three tetrahedra written
+    n4 = ... = n8, plus *CONTROL_ADAPTIVE and *CONTROL_REMESHING_EFG."""
+    nodes = "*NODE\n" + "".join(
+        f"{n:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n" for n, x, y, z in
+        ((1, 0, 0, 0), (2, 1, 0, 0), (3, 0, 1, 0), (4, 0, 0, 1),
+         (5, 1, 1, 0), (6, 1, 0, 1)))
+    tets = "".join(
+        "".join(f"{v:>8}" for v in (eid, 3, a, b, c, d, d, d, d, d)) + "\n"
+        for eid, (a, b, c, d) in ((1, (1, 2, 3, 4)), (2, (2, 5, 3, 4)),
+                                  (3, (2, 6, 5, 4))))
+    sec = ("*SECTION_SOLID_EFG" + ("_TITLE\nworkpiece efg\n" if title else
+                                   "\n")
+           + _row(3, 42, 0) + "\n"
+           + _row(1.25, 1.25, 1.25, 0, 0, 3, 2, 0.01) + "\n"
+           + _row(1, 1.0e20, 0, 0.0, 0, 1, 0.01, 0.01) + "\n")
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(0.001) + "\n"
+            "*CONTROL_ADAPTIVE\n" + _row(0.001, 0, 7) + "\n" + _row(1) + "\n"
+            "*CONTROL_REMESHING_EFG\n" + _row(0.15, 2.25, 1.0) + "\n"
+            + _row(1) + "\n" + nodes
+            + "*PART\nWorkpiece\n" + _row(3, 3, 3, 0, 0, 0, 2) + "\n" + sec
+            + "*MAT_ELASTIC\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*ELEMENT_SOLID\n" + tets + "*END\n")
+
+
+class EfgPlaceholderNamed(unittest.TestCase):
+    """A5 (ii) — a skipped *SECTION_SOLID_EFG's part lands on k2rad's
+    placeholder /PROP/SOLID; it is now NAMED (0 bytes)."""
+
+    def test_1_the_metal_cutting_shape_is_named(self):
+        res, starter, engine = _convert(_efg_deck())
+        hit = [w for w in res.warnings if w.startswith("*SECTION_SOLID_EFG 3")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("(ELFORM 42)", "part(s) [3] (3 element(s))",
+                       "'AutoPropSolid_3'", "*CONTROL_ADAPTIVE",
+                       "*CONTROL_REMESHING_EFG",
+                       "'efg 3d for 4-noded background'",
+                       "efg/metal-cutting/main.k"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+        for kw in ("SECTION_SOLID_EFG", "CONTROL_ADAPTIVE",
+                   "CONTROL_REMESHING_EFG"):
+            self.assertIn(kw, res.skipped_keywords)
+        self.assertIn("#-- SKIPPED: *SECTION_SOLID_EFG", starter)
+        # the control: the recorder removed = the pre-round-7 read
+        from k2rad.handlers import HANDLERS
+        saved = {k: HANDLERS.pop(k) for k in list(HANDLERS)
+                 if k.startswith(("SECTION_SOLID_EFG", "SECTION_SHELL_EFG"))}
+        try:
+            res0, s0, e0 = _convert(_efg_deck())
+        finally:
+            HANDLERS.update(saved)
+        self.assertEqual(starter, s0)
+        self.assertEqual(engine, e0)
+        self.assertEqual(res.skipped_keywords, res0.skipped_keywords)
+        self.assertFalse(_has(res0.warnings, "*SECTION_SOLID_EFG 3"))
+
+    def test_2_the_TITLE_spelling_records_the_right_SECID(self):
+        state = _dispatch(_efg_deck(title=True))
+        self.assertEqual(state.efg_sections,
+                         {3: ("SECTION_SOLID_EFG", 42)})
+
+
+_IE_CURVE = ("*DEFINE_CURVE\n" + _row(9) + "\n"
+             + "".join(f"{x:>20}{y:>20}\n" for x, y in
+                       ((0.0, 1.0), (0.00999, 1.0), (0.01, 0.0), (1.0, 0.0))))
+
+
+def _imflag_control(imflag: int, endtim: float = 0.025) -> str:
+    return ("*CONTROL_IMPLICIT_GENERAL\n" + _row(imflag, 0.001) + "\n"
+            "*CONTROL_TERMINATION\n" + _row(endtim) + "\n")
+
+
+class ImflagNamed(unittest.TestCase):
+    """A5 (iii) — IMFLAG < 0 (a method-switching curve) and IMFLAG 2/4/5/6
+    are named; the deck is emitted implicit throughout (0 bytes)."""
+
+    def test_1_the_segmentation(self):
+        from k2rad.writer.assembly import imflag_segments as seg
+        cases = (
+            ([(0, 1), (0.00999, 1), (0.01, 0), (1.0, 0)], 0.025,
+             [(0.0, 0.01, "implicit"), (0.01, 0.025, "explicit")]),
+            ([(0, 0), (0.005, 1), (1, 1)], 0.02,
+             [(0.0, 0.005, "explicit"), (0.005, 0.02, "implicit")]),
+            ([(0, 1), (0.01, 0), (0.02, 1), (1, 1)], 0.03,
+             [(0.0, 0.01, "implicit"), (0.01, 0.02, "explicit"),
+              (0.02, 0.03, "implicit")]),
+            ([(0, 0), (1, 0)], 0.02, [(0.0, 0.02, "explicit")]),
+            ([(0, 1), (1, 1)], 0.02, [(0.0, 0.02, "implicit")]),
+            ([(0, 1), (0.03, 0)], 0.025, [(0.0, 0.025, "implicit")]),
+            ([(0, 0), (0, 1), (1, 1)], 0.02, [(0.0, 0.02, "implicit")]),
+        )
+        for pts, endtim, want in cases:
+            with self.subTest(pts=pts):
+                self.assertEqual(seg(pts, endtim), want)
+
+    def test_2_the_ie_shell_curve_is_named_and_0_bytes(self):
+        from k2rad.writer import assembly
+        deck = _shell_plate(_imflag_control(-9), _IE_CURVE)
+        res, starter, engine = _convert(deck)
+        hit = [w for w in res.warnings if "IMFLAG=-9" in w]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("curve 9", "implicit 0 -> 0.01, explicit 0.01 -> "
+                       "0.025", "freimpl.F:82", "-99.87", "92 cycles",
+                       "IMPLICIT THROUGHOUT"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+        saved = assembly._warn_imflag
+        assembly._warn_imflag = lambda state: None
+        try:
+            _r0, s0, e0 = _convert(deck)
+        finally:
+            assembly._warn_imflag = saved
+        self.assertEqual((starter, engine), (s0, e0))
+
+    def test_3_IMFLAG_4_gets_the_text_only_sentence(self):
+        res, _s, _e = _convert(_shell_plate(_imflag_control(4)))
+        self.assertTrue(_has(res.warnings, "IMFLAG=4", "IMPLICIT THROUGHOUT",
+                             "freimpl.F:82"), res.warnings)
+
+    def test_4_IMFLAG_1_gets_neither(self):
+        res, _s, _e = _convert(_shell_plate(_imflag_control(1)))
+        self.assertFalse(_has(res.warnings, "*CONTROL_IMPLICIT_GENERAL "
+                              "IMFLAG"), res.warnings)
+
+    def test_5_a_constant_0_curve_says_explicit_whole_run(self):
+        curve = ("*DEFINE_CURVE\n" + _row(9) + "\n"
+                 + "".join(f"{x:>20}{y:>20}\n" for x, y in
+                           ((0.0, 0.0), (1.0, 0.0))))
+        res, _s, _e = _convert(_shell_plate(_imflag_control(-9), curve))
+        self.assertTrue(_has(res.warnings, "selects EXPLICIT for the whole "
+                             "run"), res.warnings)
+
+
+def _spring_coupon(m30: float = 2.0e-5, implicit: bool = False) -> str:
+    """G3's i14 coupon (round-7 pre-research): node 10 (*ELEMENT_MASS 1e-3)
+    tied by four *MAT_SPRING_ELASTIC K = 100 springs to node 20 (a corner of
+    a T 1e-6 shell: own 1.9625e-13), node 30 (*ELEMENT_MASS *m30*), node 40
+    (no mass: GUARDED) and node 50 (a corner of a 1 mm shell: own
+    1.9625e-7); TSSFAC 0.9."""
+    control = ("*CONTROL_TERMINATION\n" + _row(2.0e-3) + "\n"
+               "*CONTROL_TIMESTEP\n" + _row(0.0, 0.9) + "\n")
+    if implicit:
+        control = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 1.0e-4) + "\n"
+                   + control)
+    nodes = "*NODE\n" + "".join(
+        f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n" for n, x, y in
+        ((10, 0, 0), (20, 10, 0), (21, 20, 0), (22, 20, 10), (23, 10, 10),
+         (30, 10, 20), (40, 10, 30), (50, 10, 40), (51, 20, 40), (52, 20, 50),
+         (53, 10, 50)))
+    return ("*KEYWORD\n" + control
+            + "*PART\nnormal shell\n" + _row(1, 1, 1) + "\n"
+            "*PART\nthin shell\n" + _row(2, 2, 1) + "\n"
+            "*PART\nsprings\n" + _row(100, 100, 100) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2, 1.0, 2) + "\n" + _row(1.0) + "\n"
+            "*SECTION_SHELL\n" + _row(2, 2, 1.0, 2) + "\n" + _row(1.0e-6)
+            + "\n*SECTION_DISCRETE\n" + _row(100, 0) + "\n" + _row() + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*MAT_SPRING_ELASTIC\n" + _row(100, 100.0) + "\n" + nodes
+            + "*ELEMENT_SHELL\n"
+            + "".join(f"{v:>8}" for v in (1, 2, 20, 21, 22, 23)) + "\n"
+            + "".join(f"{v:>8}" for v in (2, 1, 50, 51, 52, 53)) + "\n"
+            "*ELEMENT_DISCRETE\n"
+            + "".join("".join(f"{v:>8}" for v in (eid, 100, 10, n2)) + "\n"
+                      for eid, n2 in ((101, 20), (102, 30), (103, 40),
+                                      (104, 50)))
+            + "*ELEMENT_MASS\n"
+            + "".join(f"{v:>8}" for v in (201, 10)) + f"{1.0e-3:>16}\n"
+            + "".join(f"{v:>8}" for v in (202, 30)) + f"{m30:>16}\n"
+            + "*END\n")
+
+
+def _token_warning(res):
+    hit = [w for w in res.warnings if "was REMOVED again" in w]
+    assert len(hit) == 1, res.warnings
+    return hit[0]
+
+
+class LightClauseNumbers(unittest.TestCase):
+    """A5 (iv) — inside the LIGHT arm only: per light node and spring, the
+    two-mass critical step 2 sqrt(mu / K) against Tsca x the spring's own
+    step. Hand values: dt_s = sqrt(M / K) = sqrt(1e-4 / 100) = 1e-3 s; node
+    10's engine mass is its *ELEMENT_MASS 1e-3 (the compensation subtracts
+    the four token halves from its /ADMAS and the engine puts them back, so
+    the node holds exactly the deck's mass - the part-A spec's 8e-4 left the
+    halves out; its PROTECTED / UNPROTECTED labels are the same either way).
+    node 20: mu ~ 1.9625e-13 -> 2 sqrt(1.9625e-15) = 8.86e-8 s;
+    node 50: mu = 1.9625e-7 x 1e-3 / (1e-3 + 1.9625e-7) -> 8.86e-5 s;
+    node 30: mu = 2e-5 x 1e-3 / 1.02e-3 = 1.9608e-5 -> 8.86e-4 s;
+    all three < 0.9 x 1e-3 -> UNPROTECTED."""
+
+    def test_1_the_coupon_pairs(self):
+        res, starter, _e = _convert(_spring_coupon())
+        w = _token_warning(res)
+        for needle in (
+                "node 20 on spring 101: 8.86e-08 s vs 0.9 x 0.001 s -> "
+                "UNPROTECTED",
+                "node 50 on spring 104: 8.86e-05 s vs 0.9 x 0.001 s -> "
+                "UNPROTECTED",
+                "node 30 on spring 102: 0.000886 s vs 0.9 x 0.001 s -> "
+                "UNPROTECTED",
+                "r1len3.F:175", "ERROR column at 99.9 %",
+                "(Tsca^2 / 4) x M", "token mass 0.0001", "/DT/NODA",
+                "--no-spring-token-mass-compensation"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w)
+        self.assertNotIn("node 40 on spring", w)      # GUARDED, not LIGHT
+        self.assertTrue(_has(res.warnings, "spring node(s) [40]"),
+                        res.warnings)
+        self.assertNotIn("This deck runs implicit", w)
+
+    def test_2_the_PROTECTED_arm_is_reached(self):
+        """node 30 at 4.5e-5 (still below its 5e-5 share, so still LIGHT):
+        mu = 4.5e-5 x 1e-3 / 1.045e-3 = 4.306e-5 -> 1.31e-3 s >= 9e-4."""
+        res, _s, _e = _convert(_spring_coupon(m30=4.5e-5))
+        w = _token_warning(res)
+        self.assertIn("node 30 on spring 102: 0.00131 s vs 0.9 x 0.001 s -> "
+                      "PROTECTED", w)
+
+    def test_3_an_implicit_deck_says_the_comparison_is_explicit_only(self):
+        res, _s, _e = _convert(_spring_coupon(implicit=True))
+        self.assertIn("This deck runs implicit", _token_warning(res))
+
+    def test_4_the_numbers_move_no_byte(self):
+        from k2rad.writer import loads
+        _r, s1, e1 = _convert(_spring_coupon())
+        saved = loads._light_pair_clause
+        loads._light_pair_clause = lambda *a, **k: ""
+        try:
+            _r0, s0, e0 = _convert(_spring_coupon())
+        finally:
+            loads._light_pair_clause = saved
+        self.assertEqual((s1, e1), (s0, e0))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

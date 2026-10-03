@@ -202,7 +202,10 @@ material angles, and a negative card-1 field 6 `QR/IRID` binds an
 thickness `WF_i`, material `PID_i`, `ESOP = 0/1` — see **Composites**),
 `*SECTION_SOLID` (+ `_TITLE`; every card SET under one header, striding over the
 `_EFG`/`_SPG`/`_MISC` option cards and the ELFORM 101–105 user-solid cards
-3/4/5; cohesive ELFORM ±19/20/±21/22 → `/PROP/TYPE43`, and `_MISC` is now a
+3/4/5; `*SECTION_SOLID_EFG` / `*SECTION_SHELL_EFG` themselves stay SKIPPED —
+there is no OpenRadioss meshfree element — but since round 7 they are recorded
+so the placeholder property their parts land on is NAMED, with the measured
+consequence on `efg/metal-cutting/main.k`; cohesive ELFORM ±19/20/±21/22 → `/PROP/TYPE43`, and `_MISC` is now a
 registered spelling whose card-2c `COHTHK` becomes TYPE43's `True_thickness` —
 see **Adhesives / cohesives** under Materials), `*SECTION_BEAM` (+ `_TITLE`; every card SET under one header, with the
 card-2 dialect — `2a` thicknesses, `2b` named `SECTION_nn`, `2c` `A/ISS/ITT/J`,
@@ -397,6 +400,15 @@ the screen reads whether a node HAS mass, not whether the spring stays stable
 on it — a compensated node on a `T = 1e-6` shell (own mass 1.96e-13) passes
 and diverges in 7 cycles under NORMAL TERMINATION; the spring's own step
 uses the PROPERTY mass (`r1def3.F:113`, `r1len3.F:175`), not the node's.
+Since round 7 the warning's LIGHT clause states, per light node and spring,
+the two-mass critical step `2√(μ/K)` (μ from the node's and the far end's real
+masses; a ground, rigid or fully fixed far end counts as infinite) against
+`Tsca ×` the spring's own step, marks the pair PROTECTED or UNPROTECTED, and
+names the symptom (NORMAL TERMINATION with the energy ERROR column at 99.9 %)
+and the remedies (an `*ELEMENT_MASS` lifting μ above `(Tsca²/4)·M`,
+`/DT/NODA`, or this flag). Text only — 7 roster deck keys on 7 emitted models
+print the clause, 0 bytes move; the adaptive token was measured and NOT
+shipped (its only mover paid 9.997× the cycles for a history-neutral result).
 
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885
@@ -5441,7 +5453,10 @@ force criterion reads +476 / +353 / +361 / +349 % (a springback deck already
 ~5× off its reference — a named regression, larger mid-run); `ie_shell` ERROR
 (TIMESTEP LIMIT at cycle 4) → NORMAL in 92 cycles, but at IE **−99.87 %** and
 KE 0 against the reference's 149.9 — a **status-only** promotion (its
-`IMFLAG −9` implicit/explicit switching curve is not converted). A card that
+`IMFLAG −9` implicit/explicit switching curve is not converted — named by a
+warning since round 7: OpenRadioss fixes the solution method per engine file,
+`freimpl.F:82` / `:127-129`, so the deck runs implicit throughout; the
+IMFLAG 2 / 4 / 5 / 6 forms get the same named sentence). A card that
 STATES an ECTOL ≥ 1 beside the zeros is named: that value is LS-DYNA's own,
 not its default, and a relative tolerance ≥ 1 is not carried. A deck with no
 `*CONTROL_IMPLICIT_SOLUTION` at all keeps `2 2 0.01`.
@@ -6174,7 +6189,11 @@ contact the cost grows with time (`hemi` at 0.7322: 0.92× at t 0.4158, 1.48×
 at t 0.8049). A
 press-fit `*CONTACT_*_INTERFERENCE` (which needs a large gap to engage — the
 same reason k2rad forces `Inacti = 0` there) and k2rad's own injected implicit
-stabilization stub are excluded from the flag.
+stabilization stub are excluded from the flag. Since round 7 that stub is also
+no longer the subject of the implicit `vdc = 0 → VisS = 0` remedy ("set vdc on
+`*CONTACT` Card2"): the stub is k2rad's own interface, not a card in the deck,
+so there is no Card 2 to edit. The stub keeps its own injection notice and its
+`VisS = 0`.
 
 **The shell-offset Gapmin takes precedence** (R14 triage round 6, default ON,
 `--no-shell-offset-gapmin`): where LS-DYNA offsets a SHELL secondary against

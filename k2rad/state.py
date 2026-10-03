@@ -6086,7 +6086,12 @@ class ControlSolid:
 
 @dataclass
 class ControlImplicitGeneral:
-    imflag: int         # 0=explicit,4=implicit,5=implicit springback
+    # 0 explicit, 1 implicit, 2 explicit then one implicit step, 4 / 5
+    # implicit with automatic implicit -> explicit switching, 6 explicit with
+    # intermittent eigenvalue extraction, < 0: |IMFLAG| is a curve that
+    # switches the method in time (Vol I R17 p.12-321; any value != 0 makes
+    # k2rad emit an implicit deck - writer/assembly._warn_imflag names it)
+    imflag: int
     dt0: float          # initial time step
     imform: int
     nsbs: int           # subcycles
@@ -9188,6 +9193,16 @@ class ConversionState:
     # _make_added_masses subtracts these values from the nodes' /ADMAS (option
     # spring_token_mass_compensation) and names every node it could not.
     spring_token_mass_by_node: Dict[int, float] = field(default_factory=dict)
+    # ... and the springs that put it there, recorded at the same write line
+    # (round 7, A5 (iv)): (eid, n1, n2, M, I, K_t, K_r, C) - the property
+    # mass / inertia as written (Ileng 1 scaled by the element length), the
+    # largest translational / rotational stiffness and the damping. ONE
+    # consumer: the LIGHT clause of loads._warn_spring_token_mass, which
+    # states each light node's two-mass critical step against the spring's
+    # own step (r1len3.F:175 reads the PROPERTY mass).
+    spring_token_springs: List[Tuple[int, int, int, float, float, float,
+                                     float, float]] = field(
+        default_factory=list)
     # *SECTION_SOLID secids already named by _warn_assumed_strain_elform, so a
     # section reached from two writer passes warns once (the #129 dedup rule:
     # one message per distinct SOURCE CARD, not per part or per element).
@@ -9495,6 +9510,13 @@ class ConversionState:
     # of loads._make_node_tc_rc_bcs (round 7, A1), which merges a re-pointed
     # member TC/RC code into it instead of writing it a second time.
     rigid_auto_bcs: Dict[int, Tuple[str, str, str]] = field(default_factory=dict)
+    # *SECTION_SOLID_EFG / *SECTION_SHELL_EFG: RECORDED but still SKIPPED
+    # (round 7, A5 (ii)) - secid -> (the keyword as skipped, ELFORM). ONE
+    # consumer: the missing-section auto-create of writer/mesh.
+    # _make_properties, which names the placeholder it writes for such a
+    # part instead of converting it silently. OpenRadioss has no meshfree
+    # element, so no property is ever built from it.
+    efg_sections: Dict[int, Tuple[str, int]] = field(default_factory=dict)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
     # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: pid → the three synthesized nodes

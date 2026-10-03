@@ -2911,6 +2911,55 @@ def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
     ]
 
 
+#: LS-DYNA's own name for each solid EFG formulation, as its d3hsp echoes it
+#: (efg/metal-cutting/main.d3hsp, the *SECTION_SOLID ELFORM table).
+_EFG_SOLID_ELFORM_NAMES = {41: "efg 3d", 42: "efg 3d for 4-noded background",
+                           43: "mesh-free enriched finite element"}
+
+
+def _warn_efg_placeholder(state: ConversionState, secid: int,
+                          part_secids: Dict[int, int]) -> None:
+    """Name the placeholder a skipped meshfree section's parts get (round 7,
+    A5 (ii)): before, the only trace was the keyword in the SKIPPED list.
+
+    The measured consequence is metal-cutting's (the one carrier on every
+    corpus); refusing *CONSTRAINED_GLOBAL on such a part was measured NO-GO
+    (LS-DYNA's own d3hsp lists the same 54 nodes, and without them the
+    explicit base is a free body), and the Itetra4 3 arm is not shipped."""
+    keyword, elform = state.efg_sections[secid]
+    shell = keyword.startswith("SECTION_SHELL")
+    elems = state.shell_elems if shell else state.solid_elems
+    pids = sorted({e.pid for e in elems if part_secids.get(e.pid) == secid})
+    n_el = sum(1 for e in elems if part_secids.get(e.pid) == secid)
+    name = (f"/PROP/SHELL/{secid} 'AutoPropShell_{secid}'" if shell else
+            f"/PROP/SOLID/{secid} 'AutoPropSolid_{secid}' (an ELFORM-1 "
+            "section; on efg/metal-cutting/main.k Isolid 24 with a blank "
+            "Itetra4, i.e. the one-point linear /TETRA4)")
+    what = _EFG_SOLID_ELFORM_NAMES.get(elform) if not shell else None
+    lsdyna = (f"LS-DYNA's formulation: '{what}' (its own d3hsp echo)"
+              if what else "an LS-DYNA mesh-free (EFG) formulation")
+    dropped = [k for k in ("CONTROL_ADAPTIVE", "CONTROL_REMESHING_EFG",
+                           "CONTROL_EFG")
+               if k in state.skipped_keywords]
+    state.warn(
+        f"*{keyword} {secid} (ELFORM {elform}) is not converted — OpenRadioss "
+        f"has no meshfree (EFG) element: part(s) {pids} ({n_el} element(s)) "
+        f"are written on k2rad's placeholder {name}"
+        + (", and " + " / ".join("*" + k for k in dropped)
+           + " are dropped (listed as skipped)" if dropped else "")
+        + ", so neither the meshfree interpolation nor the adaptive "
+        f"re-meshing LS-DYNA uses on this part is in the converted model "
+        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit, nt 4 "
+        "and 2, round-7 pre-research): the converted run cannot carry the "
+        "constrained cutting at the tool contact - ERROR TERMINATION at cycle "
+        "26 (t 6.332e-4, KE 2.459e9) on 4 of 4 runs, the largest residuals on "
+        "the workpiece top surface under the tool; changing the placeholder "
+        "to Itetra4 3 ends NORMAL in 197 cycles on 3 of 3 runs but with an "
+        "energy error of 91.2 % and a flat internal energy - not a cutting "
+        "result. That row has no LS-DYNA reference (its LS run stopped in the "
+        "input phase).")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starter: properties
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3121,6 +3170,11 @@ def _make_properties(state: ConversionState) -> List[str]:
         state.sec_shells[ms] = _auto_section_shell(ms)
     for ms in missing_solids:
         state.sec_solids[ms] = _auto_section_solid(ms)
+    # A meshfree section is skipped (no OpenRadioss EFG element) and its
+    # parts land in the placeholders above - say so, by name (round 7, A5).
+    for ms in sorted((missing_solids | missing_shells)
+                     & set(state.efg_sections)):
+        _warn_efg_placeholder(state, ms, part_secids)
     for ms in missing_beams:
         # ELFORM 2, never 3: a section the deck never DEFINES states no
         # formulation, so it cannot be known to be a truss — and because it is

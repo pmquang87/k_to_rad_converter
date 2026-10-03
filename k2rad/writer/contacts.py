@@ -2068,7 +2068,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state,
                                                          c.inter_id, gapmin),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
         else:
@@ -2109,7 +2109,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state,
                                                          c.inter_id, gapmin),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
 
@@ -2213,7 +2213,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
-                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                    fric_id=fric_id, state=state,
                                    thermal=_contact_thermal_cells(
@@ -3101,9 +3101,21 @@ def _make_refused_contact_notes(state: ConversionState) -> List[str]:
     return []
 
 
-def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
+def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int,
+                 title: str = "") -> float:
     """Map LS-DYNA *CONTACT Card2 vdc (viscous damping, % of critical) →
     OpenRadioss /INTER/TYPE7 VisS (fraction of critical, normal direction).
+
+    The ``vdc = 0`` remedy ("set vdc on *CONTACT Card2") is NOT printed about
+    k2rad's own injected implicit stub (*title* ==
+    ``AUTO_IMPLICIT_STUB_TITLE``, the same gate ``_maybe_derived_gapmin``
+    applies): that interface is k2rad's own, not a card of the deck (on 52
+    of the 53 measured keys the deck states no *CONTACT at all; doorbeam's
+    TYPE25-only contact gets the stub beside it), so the sentence told the
+    user to edit a card the deck does not have — measured on 53 R14 deck
+    keys / 37 emitted models by the sentence's interface id (round 7, A5
+    (i)). The stub keeps its own injection notice,
+    and its VisS stays 0 (no byte moves).
 
     Undamped penalty contact (VisS=0) in implicit dynamic analysis is prone to
     a chattering limit cycle: the active contact set flips every Newton
@@ -3119,7 +3131,7 @@ def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
         state.warn(f"CONTACT {inter_id}: vdc={vdc:g} (% critical) -> "
                    f"/INTER/TYPE7 VisS={viss:g} (normal contact damping).")
         return viss
-    if state.is_implicit:
+    if state.is_implicit and title != AUTO_IMPLICIT_STUB_TITLE:
         state.warn(f"CONTACT {inter_id}: vdc=0 -> VisS=0 (no contact damping). "
                    "Implicit dynamic penalty contact often chatters without it; "
                    "set vdc (% of critical, e.g. 20-100) on *CONTACT Card2 if the "
@@ -3688,7 +3700,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
-        viss = _vdc_to_viss(c.vdc, state, c.inter_id)
+        viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
         stfac = _stfac_for(state, c.sfs, c.inter_id)
         # All three sentinel routes can hold a /FRICTION binding: TYPE7,
         # TYPE11 and TYPE19 each carry fric_ID in cols 91-100 of their last

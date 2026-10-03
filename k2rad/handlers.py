@@ -2438,6 +2438,31 @@ _TSHELL_PLANE_STRESS_ELFORMS = frozenset({1, 2, 6})
 _TSHELL_REDUCED_ELFORMS = frozenset({1, 5, 6})
 
 
+def handle_section_efg(block: Block, state: ConversionState) -> None:
+    """*SECTION_SOLID_EFG / *SECTION_SHELL_EFG (+ _TITLE) — RECORDED, still
+    SKIPPED (round 7, A5 (ii)).
+
+    OpenRadioss has no meshfree (EFG) element, so nothing is converted: the
+    keyword is appended to ``skipped_keywords`` EXACTLY as the unknown-keyword
+    path of :func:`dispatch` appends it (the same string, at the same point
+    of the read), so the ``#-- SKIPPED:`` line, the skipped report and both
+    ``.rad`` files are byte-identical to a deck read without this handler.
+    What it adds is the record ``state.efg_sections[SECID] = (keyword,
+    ELFORM)`` from card 1 of the first card set (title line first under
+    _TITLE), which lets the missing-section auto-create name the placeholder
+    it writes for such a part instead of writing it silently. Measured reach:
+    1 deck key on 1 emitted model (efg/metal-cutting/main.k, SECID 3, ELFORM
+    42); *SECTION_SHELL_EFG 0."""
+    state.skipped_keywords.append(block.keyword)
+    f1 = _card(block.raw, _title_offset(block), fixed=True, n=2, w=10)
+    if not f1:
+        return
+    secid = to_int(f1[0])
+    elform = to_int(f1[1]) if len(f1) > 1 else 0
+    if secid > 0:
+        state.efg_sections[secid] = (block.keyword, elform)
+
+
 def handle_section_tshell(block: Block, state: ConversionState) -> None:
     """*SECTION_TSHELL (+ _TITLE/_ID) — every card SET under the header.
 
@@ -18359,6 +18384,13 @@ HANDLERS = {
     # CARDS), so registering the spelling is what turns it from a
     # skipped_keywords entry (part loses its whole property) into a parse.
     "SECTION_SOLID_MISC":                     handle_section_solid,
+    # The meshfree sections: recorded and STILL skipped (the same
+    # skipped_keywords entry the unknown-keyword path writes), so the
+    # placeholder k2rad builds for their parts can be named (round 7, A5).
+    "SECTION_SOLID_EFG":                      handle_section_efg,
+    "SECTION_SOLID_EFG_TITLE":                handle_section_efg,
+    "SECTION_SHELL_EFG":                      handle_section_efg,
+    "SECTION_SHELL_EFG_TITLE":                handle_section_efg,
     # *SECTION_TSHELL takes no option suffix of its own (only the universal
     # _TITLE / _ID, which the parser strips), so one exact key covers it.
     "SECTION_TSHELL":                         handle_section_tshell,

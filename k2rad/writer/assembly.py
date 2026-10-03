@@ -3731,7 +3731,115 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
     return lines
 
 
+def imflag_segments(pts: List[Tuple[float, float]], endtim: float
+                    ) -> List[Tuple[float, float, str]]:
+    """The solution-method schedule of an IMFLAG < 0 curve (round 7, A5):
+    ``[(t_start, t_end, "implicit" | "explicit"), ...]`` up to *endtim*.
+
+    A point's method is implicit when its ordinate is >= 0.5 (the curve
+    states 1 / 0), else explicit. The points are walked in abscissa order
+    from the first point's method; a segment boundary is the abscissa of the
+    FIRST point that carries the new method (LS-DYNA's ie_shell messag reads
+    "formulation switch at time = 1.0000E-02" for the points (0.00999, 1)
+    (0.01, 0)). A boundary at or before the current segment's start is
+    absorbed (a vertical step at t 0 just sets the starting method); one at
+    or beyond *endtim* ends the walk."""
+    if not pts:
+        return []
+    ordered = sorted(pts, key=lambda p: p[0])      # stable: equal x kept
+
+    def _meth(y: float) -> str:
+        return "implicit" if y >= 0.5 else "explicit"
+
+    start = 0.0
+    method = _meth(ordered[0][1])
+    segs: List[Tuple[float, float, str]] = []
+    for x, y in ordered[1:]:
+        m = _meth(y)
+        if m == method:
+            continue
+        if x <= start:
+            method = m
+            continue
+        if x >= endtim:
+            break
+        segs.append((start, x, method))
+        start, method = x, m
+    segs.append((start, endtim, method))
+    return segs
+
+
+#: IMFLAG values whose in-run behaviour OpenRadioss has no mode for (Vol I R17
+#: p.12-321 / 12-322); converted implicit throughout, named.
+_IMFLAG_TEXT_ONLY = {
+    2: "explicit followed by one implicit step",
+    4: "implicit that switches to explicit when the equilibrium iterations "
+       "fail",
+    5: "implicit that switches to explicit when the equilibrium iterations "
+       "fail, with a mandatory implicit finish",
+    6: "explicit with intermittent eigenvalue extraction",
+}
+
+
+def _warn_imflag(state: ConversionState) -> None:
+    """``*CONTROL_IMPLICIT_GENERAL`` IMFLAG < 0 (a method-switching curve) and
+    the IMFLAG 2 / 4 / 5 / 6 forms, named (round 7, A5 (iii)). Called ONCE
+    from :func:`build_engine` - not from ``_make_engine_implicit``, whose
+    modal early return would hide it (a warning below an early return covers
+    one branch). 0 bytes: the deck is emitted implicit throughout either way.
+    """
+    g = state.ctrl_implicit_gen
+    if g is None:
+        return
+    imflag = g.imflag
+    switch = ("OpenRadioss fixes the solution method per ENGINE FILE (engine "
+              "input/freimpl.F:82, :127-129: implicit iff the file holds an "
+              "/IMPL card)")
+    if imflag in _IMFLAG_TEXT_ONLY:
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag} "
+            f"({_IMFLAG_TEXT_ONLY[imflag]}, Vol I R17 p.12-321 / 12-322): "
+            "converted IMPLICIT THROUGHOUT - " + switch + ", so there is no "
+            "such mode inside one engine run.")
+        return
+    if imflag >= 0:
+        return
+    lcid = -imflag
+    curve = state.curves.get(lcid)
+    if curve is None or not curve.pts:
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} is not "
+            "defined in the deck, so its implicit/explicit schedule cannot be "
+            "read; the deck is emitted IMPLICIT THROUGHOUT (" + switch + ").")
+        return
+    term = state.ctrl_termination
+    endtim = term.endtim if term is not None and term.endtim > 0.0 else \
+        max(p[0] for p in curve.pts)
+    segs = imflag_segments(curve.pts, endtim)
+    if all(m == "explicit" for _a, _b, m in segs):
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} selects "
+            "EXPLICIT for the whole run, which LS-DYNA runs explicit; k2rad "
+            "emits it IMPLICIT (any IMFLAG != 0 makes the deck implicit) - "
+            "state IMFLAG 0 to convert it as the explicit run it is.")
+        return
+    if len(segs) < 2:
+        return                     # implicit throughout: nothing is lost
+    sched = ", ".join(f"{m} {a:g} -> {b:g}" for a, b, m in segs)
+    state.warn(
+        f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} switches "
+        f"the solution method in time ({sched}); LS-DYNA switches inside one "
+        "run (Vol I R17 p.12-321 / p.12-323 Remark 1). " + switch + ", and "
+        "this deck is emitted IMPLICIT THROUGHOUT. MEASURED on "
+        "implicit/basic-examples/impl-expl-switch/ie_shell.k (nt 4 = nt 2): "
+        "the released strip does not vibrate - internal energy -1.52 / -2.36 "
+        "/ -99.48 / -98.77 / -99.87 % against LS-DYNA at the fifths of the "
+        "run, kinetic energy 0 against 149.9 at the end - while the run ends "
+        "NORMAL in 92 cycles (a status, not a result).")
+
+
 def build_engine(state: ConversionState) -> str:
+    _warn_imflag(state)
     sections = [
         _make_engine_header(state),
         _make_engine_restart(state),
