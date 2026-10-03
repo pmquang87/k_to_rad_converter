@@ -189,7 +189,14 @@ Prior history (before this changelog was introduced) is summarized in the
     −16.51 % (the drive curve's 250 → 170 rad/s corner at t_end on both
     arms; one printed cycle earlier +0.17 %), 21626 vs 21630 cycles
     (0.9998×); the verdict stays deviation. SMP only (`-np > 1` stops at cycle
-    1). Anything outside the pattern keeps the skip with a named reason —
+    1). A `*DATABASE_BNDOUT` `/TH/NODE` no longer covers the screw's drive:
+    a Lagrange drive sets no kinematic code and the engine accumulates
+    REAC* only on nodes that carry one (`thbcs.F:62` / `:77`; no `FTHREAC`
+    in `tools/lagmul/`), so its channel would read identically zero — the
+    BNDOUT warning names the drive instead of saying the deck "drives no
+    node" (found by the part-B sweep on EXP_SC_JOINT_SCREW, whose shipped
+    `.rad` carried that channel on the `/IMPDISP` node).
+    Anything outside the pattern keeps the skip with a named reason —
     the `_COOR_SCREW` / `_LOCAL` / `_FAILURE` spellings, an implicit deck,
     PARM 0, a body that is not a lone `*MAT_RIGID` part (CNRB, merge, extra
     nodes, `*DEFORMABLE_TO_RIGID`), a non-coaxial or off-global axis, other CMO

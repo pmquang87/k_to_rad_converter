@@ -2701,7 +2701,7 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
                 implicit: bool = False, s2s: bool = False,
                 n5_on_plate: bool = False, n2_off_axis: bool = False,
                 diagonal: bool = False, swap_axis: bool = False,
-                a_elastic_cnrb: bool = False) -> str:
+                a_elastic_cnrb: bool = False, bndout: bool = False) -> str:
     """The B2 mini screw (ton-mm-s, explicit, ENDTIM 0.1): part 2 "screw out"
     (A) = one hex x 10..20, y 0..10, z 0..10 on *MAT_RIGID 2 (CMO 1, CON1 5,
     CON2 *con2_a*); part 1 "screw in" (B) = one hex x -15..-5 on *MAT_RIGID 1
@@ -2792,6 +2792,8 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
                 _row(1, 2, 3, 3), _row(0.1, 0.0), ""]
     if implicit:
         out += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 0.01)]
+    if bndout:
+        out += ["*DATABASE_BNDOUT", _row(1e-4)]
     out += [keyword, _row(9) + "screw",
             _row(n1, n2, n3, n4, n5, n6, 1.0, 0.0), _row(parm, 0, 0, 0.0),
             "*END"]
@@ -3022,6 +3024,27 @@ class JointScrewGjoint(unittest.TestCase):
         self.assertTrue(_has(r.warnings, "--no-joint-screw-gjoint: 1 "
                              "*CONSTRAINED_JOINT_SCREW card(s) left "
                              "unconverted"), r.warnings)
+
+    def test_bndout_names_the_lagmul_drive_instead_of_no_drive(self):
+        # The /IMPVEL/LAGMUL drive registers no BNDOUT node (a Lagrange
+        # drive has no REAC*), so the old "drives no node" sentence would be
+        # false: the deck does drive one. Found by the part-B sweep on
+        # EXP_SC_JOINT_SCREW.
+        r, s, _e = _convert(_screw_deck(bndout=True))
+        self.assertNotIn("TH_NODE_BNDOUT", s)
+        hits = [w for w in r.warnings if w.startswith("*DATABASE_BNDOUT")]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn("1 *BOUNDARY_PRESCRIBED_MOTION_RIGID drive(s) of a "
+                      "converted *CONSTRAINED_JOINT_SCREW are written as "
+                      "/IMPVEL/LAGMUL", hits[0])
+        self.assertIn("thbcs.F:62 / :77", hits[0])
+        self.assertFalse(_has(r.warnings, "drives no node"), r.warnings)
+        # the opt-out keeps the /IMPDISP, so its channel comes back
+        r0, s0, _e0 = _convert(_screw_deck(bndout=True),
+                               joint_screw_gjoint=False)
+        self.assertIn("TH_NODE_BNDOUT", s0)
+        self.assertFalse(_has(r0.warnings, "/IMPVEL/LAGMUL and are NOT"),
+                         r0.warnings)
 
     def test_the_axis_sign_is_immaterial(self):
         _r, s, _e = _convert(_screw_deck())
