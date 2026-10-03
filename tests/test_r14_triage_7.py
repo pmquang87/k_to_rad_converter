@@ -3479,5 +3479,81 @@ class Round7RoadmapRecord(unittest.TestCase):
         self.assertNotRegex("\n".join(self.lines[s:e]), r"<[a-z_ ]+>")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# The validation round: statements the round-7 validators showed stale or
+# wrong, and the re-measured replacements
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Retracted by the validation round. CHANGELOG may quote them; no other
+#: shipped text may.
+_RETRACTED_ROUND_7_V = (
+    # A4 made it false at the default: 0.1 alone no longer restores the
+    # pre-round-4 ex_02 file (the starter now carries /PROP/SOLID); measured
+    # equal to 5110a9b's only with --no-implicit-tshell-solid as well
+    "on THAT family it reproduces the pre-round-4 file",
+    "on THIS family it reproduces the pre-round-4 file",
+    "`--qstat-dtscal 0.1` reproduces the pre-round-4 file",
+    "``--qstat-dtscal 0.1`` reproduces the pre-round-4 file",
+    "--qstat-dtscal 0.1 # reproduces the pre-round-4 file",
+)
+
+
+class Round7ValidationRound(unittest.TestCase):
+    """The round-4/5/6 shape for the validation round's text fixes: no
+    retracted spelling ships, the guard fires on a split spelling, and the
+    re-measured replacements ARE shipped."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_7_V:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_7_V:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle).lower(), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        """The A4 flag arms re-measured on the routed /PROP/SOLID card (the
+        coordinator's decision for the two flag texts A4 left scoped to the
+        /PROP/TYPE20 card): nt 4 = nt 2, one window, the critic's scorer
+        with SH_3N rows kept."""
+        texts = dict(_SHIPPED_TEXTS())
+        cap = ("from 34 to 202 cycles (5.94x), energy error -0.7 % -> -1.8 "
+               "%")
+        pairs = (
+            ("k2rad/cli.py", cap.replace("%", "%%")),
+            ("k2rad/cli.py", "+0.12 %%, history RMS IE 8.06 -> 3.19 / KE "
+             "9.52 -> 7.45 %%"),
+            ("k2rad/writer/assembly.py", cap),
+            ("k2rad/state.py", "(5.94x), energy error -0.7 % -> -1.8 %"),
+            ("k2rad/__init__.py", cap),
+            ("k2rad_gui.py", "capped -1.8 % at 5.94x"),
+            ("README.md", "| route → cap | 34 → 202 (5.94×) | energy error "
+             "−0.7 % → −1.8 %"),
+            ("k2rad/cli.py", "0.1 together with --no-implicit-tshell-solid "
+             "reproduces the pre-round-4 file BYTE FOR BYTE"),
+            ("README.md", "`--qstat-dtscal 0.1` together with "
+             "`--no-implicit-tshell-solid` reproduces the pre-round-4 file "
+             "**byte for byte**"),
+            ("k2rad/__init__.py", "``--qstat-dtscal 0.1`` with "
+             "``--no-implicit-tshell-solid`` reproduces the pre-round-4 file"),
+            ("k2rad/writer/assembly.py", "--qstat-dtscal 0.1 with # "
+             "--no-implicit-tshell-solid reproduces the pre-round-4 file"),
+            ("k2rad/state.py", "0.1 together with --no-implicit-tshell-solid "
+             "reproduces # the pre-round-4 file BYTE FOR BYTE"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+
 if __name__ == "__main__":
     unittest.main()

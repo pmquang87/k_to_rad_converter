@@ -425,9 +425,11 @@ def convert(
         keys on ONE emitted file, all three ``not_comparable`` BOTH WAYS —
         going ``normal`` → ``timeout`` on the ``/PROP/TYPE20`` card k2rad
         wrote before round 7 (round 7's default ``implicit_tshell_solid``
-        route ends the family NORMAL in 28 cycles at this default);
-        ``--qstat-dtscal 0.1`` reproduces the
-        pre-round-4 file byte for byte on that family. ``"none"``
+        route ends the family NORMAL in 28 cycles at this default, and at
+        0.1 too: the value is inert on the routed card);
+        ``--qstat-dtscal 0.1`` with ``--no-implicit-tshell-solid``
+        reproduces the pre-round-4 file byte for byte on that family (0.1
+        alone does not since round 7). ``"none"``
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
         validated 0.05 and ignores this.
@@ -481,8 +483,11 @@ def convert(
         3.81x the cycles (its END state at matched time trades IE +36.2 % ->
         -54.8 % for KE +132.0 % -> +0.5 %; on the ``/PROP/TYPE20`` card k2rad
         wrote before round 7 - the default ``implicit_tshell_solid`` route
-        closes ex_15's energy balance by itself, -0.7 %); ``ex_11`` KE
-        history error
+        closes ex_15's energy balance by itself, -0.7 %, and on that routed
+        card the cap takes ex_15 from 34 to 202 cycles (5.94x), energy error
+        -0.7 % -> -1.8 %, END IE +72.81 % -> -55.94 % and KE +27.37 % ->
+        +0.12 %, history RMS IE 8.06 -> 3.19 / KE 9.52 -> 7.45 % of the
+        reference peak); ``ex_11`` KE history error
         16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 % where the
         shipped run reads +1343 % - both deviations: the engine never prints
         its last increment); with the default ``zero_tolerance_ectol`` it

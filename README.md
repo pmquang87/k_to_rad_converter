@@ -5517,10 +5517,13 @@ file — go `normal → timeout`; the campaign rows read 1899 / 1896 / 1903 cycl
 at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (`nt` 4) against a run still going at
 the 600 s campaign cap at 10 — on the `/PROP/TYPE20` card k2rad wrote before
 round 7; round 7's default `/PROP/SOLID` route (see *Thick shells*) ends the
-family NORMAL in 28 cycles at this default. The verdict does not flip with `nt`, all three
+family NORMAL in 28 cycles at this default — and at 0.1 too: the value is inert
+on the routed card (the same 28 cycles and IE, `nt` 4 and 2). The verdict does not flip with `nt`, all three
 rows are `not_comparable` both ways (their LS reference **kinetic** energy is
-a structural zero), and `--qstat-dtscal 0.1` reproduces the pre-round-4 file
-**byte for byte** on that family. `none` — emitting no `/IMPL/QSTAT` at all,
+a structural zero), and `--qstat-dtscal 0.1` together with
+`--no-implicit-tshell-solid` reproduces the pre-round-4 file **byte for byte**
+on that family (both files; 0.1 alone does not since round 7, whose route
+rewrites the property card). `none` — emitting no `/IMPL/QSTAT` at all,
 which is Radioss's own default — was measured and is WORSE than either
 (`ex_02` dies at cycle 0, `tensile2` at `t = 0.746`), so it is an escape and
 not a recommendation. `--deformable-contact-recipe` keeps its separately
@@ -6514,6 +6517,7 @@ MEASURED at `nt` 4 = `nt` 2 (cycles and steps):
 | deck | arm | cycles | result against the LS-DYNA reference |
 |---|---|---|---|
 | `ex_15_thick_shell_elform_{2,3,5}` (1 model) | shipped → cap | 53 → 202 (3.81×) | energy error +74.1 % → −0.9 %; the END state at matched time trades IE +36.2 → −54.8 % for KE +132.0 → +0.5 % (on the `/PROP/TYPE20` card k2rad wrote before round 7; round 7's default `/PROP/SOLID` route closes the energy balance by itself, −0.7 %) |
+| `ex_15_thick_shell_elform_2` on the round-7 `/PROP/SOLID` route | route → cap | 34 → 202 (5.94×) | energy error −0.7 % → −1.8 %; the END state at matched time IE +72.81 → −55.94 %, KE +27.37 → +0.12 %; history RMS IE 8.06 → 3.19 / KE 9.52 → 7.45 % of the reference peak |
 | `ex_14_solid_elform_2` | shipped → cap | 34 → 201 (5.91×) | IE history RMS 10.56 → 2.93 % against the ELFORM-2 reference; WORSE against the references of ELFORM −1 / −2 / 1 |
 | `ex_11_beam_elform_1` | shipped → cap | 35 → 100 (2.86×) | KE history RMS 16.07 → 1.16 %; at matched time KE +1343 → **+17.9 %** (both deviations; −2.39 → −15.87 % under the retired end-of-run scorer) |
 | `tensile2` (with the default `--zero-tolerance-ectol`) | → cap | 75 → 168 (2.24×) | END IE −0.54 → −4.36 %, but the IE history is the closest of the four measured arms: RMS 2.48 → **1.66 %** of the reference peak (force criterion 2.00, the cap alone 1.83); at `t` 0.76 / 0.80 +13 / +14 % where the ECTOL arm alone reads −64 / +53 % |

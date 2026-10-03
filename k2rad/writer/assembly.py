@@ -1006,7 +1006,11 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "-54.8 % for kinetic energy +132.0 % -> +0.5 %. (The ex_15 figures "
         "are the /PROP/TYPE20 card's, which k2rad wrote before round 7; the "
         "default --implicit-tshell-solid route closes its energy balance by "
-        "itself, -0.7 %.) On the quasi-static "
+        "itself, -0.7 %, and on that routed card the cap takes ex_15 from 34 "
+        "to 202 cycles (5.94x), energy error -0.7 % -> -1.8 %, END internal "
+        "energy +72.81 % -> -55.94 % and kinetic energy +27.37 % -> +0.12 %, "
+        "history RMS IE 8.06 -> 3.19 / KE 9.52 -> 7.45 % of the reference's "
+        "peak, nt 4 = nt 2.) On the quasi-static "
         "decks, whose all-zero tolerances now get "
         "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles: "
         "tensile2 75 -> 168 (2.24x), its END internal energy -0.54 % -> "
@@ -1317,8 +1321,10 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # one emitted file, all three not_comparable both ways) going
         # normal -> timeout on the /PROP/TYPE20 card k2rad wrote before round
         # 7 (round 7's default /PROP/SOLID route, writer/tshell.py, ends the
-        # family NORMAL in 28 cycles at this default); --qstat-dtscal 0.1
-        # reproduces the pre-round-4 file byte for byte on that family.
+        # family NORMAL in 28 cycles at this default, and at 0.1 too - the
+        # value is inert on the routed card); --qstat-dtscal 0.1 with
+        # --no-implicit-tshell-solid reproduces the pre-round-4 file byte for
+        # byte on that family (0.1 alone does not since round 7).
         #
         # The deformable-deformable contact recipe keeps 0.05 (=> x400) and
         # IGNORES the option: a compliant contact under force control adds a

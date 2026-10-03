@@ -7358,8 +7358,11 @@ class ConvertOptions:
     # -30.1133 -> -83.0829, -59.3528 -> -91.8985. The VERDICT label does not
     # move; the benchmark number on that channel does. Pass 0.1 to restore
     # the old default on such a deck --
-    # on THIS family it reproduces the pre-round-4 file BYTE FOR BYTE, so the
-    # escape costs nothing else. Note also that the 600 s budget is the
+    # on THIS family 0.1 together with --no-implicit-tshell-solid reproduces
+    # the pre-round-4 file BYTE FOR BYTE (measured at the round-7 head: both
+    # files' SHA-256 equal 5110a9b's), so the escape costs nothing else; on
+    # the round-7 /PROP/SOLID route 0.1 is inert there (28 cycles and the
+    # same IE as at 10, nt 4 and 2). Note also that the 600 s budget is the
     # clamp's FLOOR: joblist_or.csv derives it as clamp(4 x lsdyna_elapsed_s,
     # 600, 2700) and this deck's LS-DYNA implicit solve takes 2 s, which says
     # nothing about the explicit OpenRadioss cost of the same model.
@@ -7484,7 +7487,10 @@ class ConvertOptions:
     # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
     # +0.5 %; the /PROP/TYPE20 card's figures - round 7's default
     # implicit_tshell_solid route closes ex_15's energy balance by itself,
-    # -0.7 %); ex_11 KE
+    # -0.7 %, and on that routed card the cap takes ex_15 from 34 to 202
+    # cycles (5.94x), energy error -0.7 % -> -1.8 %, END IE +72.81 % ->
+    # -55.94 % and KE +27.37 % -> +0.12 %, history RMS IE 8.06 -> 3.19 / KE
+    # 9.52 -> 7.45 % of the reference peak); ex_11 KE
     # history error 16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 %
     # where the shipped run reads +1343 % - both deviations); with the
     # default --zero-tolerance-ectol it costs cycles on the quasi-static decks
