@@ -319,6 +319,16 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
                       "loaded body - the body states no *MAT_RIGID CON1/CON2 "
                       "digit there) and were merged", w)
         self.assertNotIn("CMO 1 CON1/CON2", w)
+        # control: CMO 1 CON1 1 (x) CON2 0 under the same load -> the card
+        # reads 101 000 too, but its x is the body's own CON1 digit, so the
+        # same merged z names the stabilisation AND the *MAT_RIGID code
+        r1, s1, _e1 = _convert(_a1_deck(cmo=1.0, con1=1, con2=0, tc=3,
+                                        extra=imp + load))
+        self.assertEqual(_bcs_groups(s1)["BC_rigid_1"][0], "101 000")
+        w1 = _node_warning(r1)
+        self.assertIn("*MAT_RIGID CMO 1 CON1/CON2 - and the stabilisation "
+                      "k2rad adds", w1)
+        self.assertNotIn("the body states no *MAT_RIGID CON1/CON2 digit", w1)
 
     def test_5_the_CONSTRAINED_GLOBAL_provenance_prints_its_own_sentence(self):
         extra = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 0.0, 0.0) + "\n"
