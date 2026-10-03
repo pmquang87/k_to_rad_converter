@@ -46,6 +46,31 @@ Prior history (before this changelog was introduced) is summarized in the
     no other reason's note; a main-side term and a node on neither side
     converted; the registry and a source guard that every TYPE2 write line
     records its group).
+  - **B5 — `*CONSTRAINED_SHELL_IN_SOLID` named** (0 bytes, no flag). The
+    card (and `_PENALTY`, `_ID` / `_TITLE`) is now RECORDED by
+    `handlers.handle_constrained_shell_in_solid` and stays listed as skipped
+    — its `#-- SKIPPED:` line is part of the `.rad`, and the record is NOT
+    put in `recognized_not_emitted` (the two registries are disjoint) — and
+    `writer/blast_ale._make_shell_in_solid_notes` writes ONE warning per deck
+    naming every card's shell and solid parts: the embedded shells receive
+    nothing (OpenRadioss has no embedded-shell constraint; dyna2rad does not
+    convert it either). The warning carries the round-7 critic's measured
+    arms on `bird-el` (nt 4): the plate's IE 0 against LS-DYNA's 4.9377e5
+    (−100 %), the deck IE +1134.62 % / KE −92.06 % (RMS 1102.65 / 162.68 % of
+    the LS-DYNA peak; KE 1.125e7 at cycle 0 from the full-density void);
+    the two substitutes and why neither is written (an `/INTER/TYPE18` with
+    a stated `Stfval` 562.5 alone: plate +195.21 % at 1.016× cycles; with
+    the void density: deck IE +37.77 / KE −34.27 %, plate −30.29 % at 4.506×
+    cycles — the density cell was refuted as a general rule in round 6 and
+    the `Vref` stiffness is a one-deck calibration). Its two ids travel
+    through `*INCLUDE_TRANSFORM` in the bucket the type cell beside them
+    names (`assembly._off_constrained_shell_in_solid`).
+    `*CONSTRAINED_BEAM_IN_SOLID` stays a plain skip (reach 0). Reach 1 deck
+    key on 1 emitted model (`bird-el`, a warning-record mover only). Tests:
+    `ShellInSolidNamed` (one warning, still skipped, byte-identical to an
+    unregistered spelling but the `#-- SKIPPED:` line; `_PENALTY` / `_TITLE`;
+    two cards = one warning; the part / part-set sides; the offset buckets;
+    `_BEAM_IN_SOLID`).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
   welds, the implicit thick shell and the implicit texts).** One commit per
   item; every figure below is a measured arm against the LS-DYNA reference on

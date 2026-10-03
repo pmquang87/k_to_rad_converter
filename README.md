@@ -846,6 +846,18 @@ and energy error −17.9 → −32.6 % WORSE, KE +10 856 → −92.1 % at the en
 plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID` is not converted).
 **NORMAL here is not an LS-DYNA match**: the void is still full of fluid.
 
+`*CONSTRAINED_SHELL_IN_SOLID` (and `_PENALTY`) → recorded, **not converted**,
+still listed as skipped, with ONE named warning per deck (round 7, 0 bytes, no
+flag): OpenRadioss has no embedded-shell constraint (no radioss2022-2026 CFG
+card; dyna2rad does not convert it either), so the embedded shells receive
+nothing from the solids they sit in. MEASURED on `bird-el` (1 deck key on 1
+emitted model, nt 4): the plate's IE is 0 against LS-DYNA's 4.9377e5 (−100 %);
+an `/INTER/TYPE18` with a stated `Stfval` 562.5 alone gives the plate +195.21 %
+at 1.016× the cycles, and with the void density as well the deck reads IE
++37.77 % at 4.506× — neither is written (the density cell was refuted as a
+general rule in round 6, and the `Vref` stiffness is a one-deck calibration).
+`*CONSTRAINED_BEAM_IN_SOLID` stays a plain skipped keyword (reach 0).
+
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
 `Bunreacted` 1:1 — Vol II R17 p.2-188 gives the pre-detonation pressure as
 `p = K(1/V − 1)` and `jwl51.F:197` is `Psol = C01 + C11·µ` with

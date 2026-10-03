@@ -2626,6 +2626,22 @@ class ConstrainedLagrangeInSolid:
 
 
 @dataclass
+class ShellInSolidCard:
+    """*CONSTRAINED_SHELL_IN_SOLID[_PENALTY][_ID|_TITLE] — RECORDED, never
+    converted (R14 triage round 7, B5): card 1 ``SHSID SSID SHSTYP SSTYP``
+    (Vol I R17 p.10-179; SHSTYP / SSTYP 0 = a *SET_PART id, 1 = a *PART
+    id), ``coupid`` the ``_ID`` heading's COUPID (0 when absent). Kept only so
+    ``writer/blast_ale._make_shell_in_solid_notes`` can write ONE named
+    warning per deck; the keyword itself stays in ``skipped_keywords``."""
+    coupid: int
+    shsid: int
+    ssid: int
+    shstyp: int = 0
+    sstyp: int = 0
+    penalty: bool = False
+
+
+@dataclass
 class InitialVolumeFraction:
     """*INITIAL_VOLUME_FRACTION_GEOMETRY — initial ALE fill → /INIVOL.
 
@@ -9233,6 +9249,12 @@ class ConversionState:
     # writer/loads._make_tied_nodes_failure_notes can write ONE warning per
     # deck. The keyword itself stays in skipped_keywords.
     tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
+        default_factory=list)
+    # *CONSTRAINED_SHELL_IN_SOLID[_PENALTY] cards in deck order (round 7,
+    # B5). Never converted (OpenRadioss has no embedded-shell constraint):
+    # kept only so writer/blast_ale._make_shell_in_solid_notes can write ONE
+    # named warning per deck. The keyword itself stays in skipped_keywords.
+    shell_in_solid_cards: List[ShellInSolidCard] = field(
         default_factory=list)
     # --mass-weighted-inivel: /RBODY main node -> omega, one entry per body
     # the re-point wrote an /INIVEL/ROT on (writer/loads.

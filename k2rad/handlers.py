@@ -87,7 +87,8 @@ from .state import (
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
     LoadBody, LoadBodyVector, LoadBodyRot, ShellPressureLoad,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
-    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
+    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, ShellInSolidCard,
+    InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, HourglassDef, ControlImplicitAuto, ControlImplicitDynamics,
@@ -10205,6 +10206,41 @@ def handle_constrained_tied_nodes_failure(block: Block,
             to_int(f[3]) if len(f) > 3 else 0))
 
 
+def handle_constrained_shell_in_solid(block: Block,
+                                      state: ConversionState) -> None:
+    """``*CONSTRAINED_SHELL_IN_SOLID[_PENALTY][_ID|_TITLE]`` — RECORDED, never
+    converted (R14 triage round 7, B5).
+
+    LS-DYNA constrains shells embedded in solids to move with the solids
+    (Vol I R17 p.10-179: an optional ``COUPID TITLE`` heading under ``_ID``,
+    card 1 ``SHSID SSID SHSTYP SSTYP`` with 0 = a ``*SET_PART`` id and 1 = a
+    ``*PART`` id; ``_PENALTY`` adds PSSF). OpenRadioss has no embedded-shell
+    constraint (no radioss2022-2026 CFG card; dyna2rad does not convert it
+    either), so the card is not converted and the record is kept only so ONE
+    named warning per deck (``writer/blast_ale._make_shell_in_solid_notes``)
+    can name the parts and the measured substitutes.
+
+    Still listed as SKIPPED, deliberately — the ``handle_initial_void``
+    precedent: registering a handler would move the keyword out of
+    ``skipped_keywords`` and delete its ``#-- SKIPPED:`` line, a byte change
+    for an item that converts nothing. NOT also put in
+    ``recognized_not_emitted``: the two registries are disjoint
+    (``ConversionResult``)."""
+    state.skipped_keywords.append(block.keyword)
+    off = _title_offset(block)
+    coupid = (to_int(block.raw[0][:10]) if _has_id(block) and block.raw
+              else 0)
+    f = _card(block.raw, off, fixed=True, n=4, w=10)
+    if not f or not f[0].strip():
+        return
+    state.shell_in_solid_cards.append(ShellInSolidCard(
+        coupid=coupid, shsid=to_int(f[0]),
+        ssid=to_int(f[1]) if len(f) > 1 else 0,
+        shstyp=to_int(f[2]) if len(f) > 2 else 0,
+        sstyp=to_int(f[3]) if len(f) > 3 else 0,
+        penalty=block.keyword.endswith("_PENALTY")))
+
+
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
                                 rwid: int, raw, idx: int, family: str) -> None:
     """One guard for both rigid-wall families.
@@ -18818,6 +18854,12 @@ HANDLERS = {
     # and an invalid FSI answer.
     "INITIAL_VOID_PART":                      handle_initial_void,
     "INITIAL_VOID_SET":                       handle_initial_void,
+    # RECORDED, not converted (round 7, B5) — see
+    # handle_constrained_shell_in_solid: the keyword stays in skipped_keywords
+    # (its '#-- SKIPPED:' line is part of the .rad) and the record feeds ONE
+    # named warning per deck. *CONSTRAINED_BEAM_IN_SOLID stays a plain skip.
+    "CONSTRAINED_SHELL_IN_SOLID":             handle_constrained_shell_in_solid,
+    "CONSTRAINED_SHELL_IN_SOLID_PENALTY":     handle_constrained_shell_in_solid,
     # Coupled ALE / fluid-structure coupling / boundaries
     "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
     "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,

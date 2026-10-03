@@ -143,6 +143,7 @@ from .blast_ale import (
     _make_ebcs,
     _make_fsi_coupling,
     _make_inivol_notes,
+    _make_shell_in_solid_notes,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -2952,6 +2953,10 @@ def _starter_section_registry():
         ("blast_loads",       lambda c: _make_blast_loads(c.state)),
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        # *CONSTRAINED_SHELL_IN_SOLID: ONE named warning per deck (round 7,
+        # B5); writes no card and draws no id - the keyword stays skipped.
+        ("shell_in_solid_notes",
+                              lambda c: _make_shell_in_solid_notes(c.state)),
         ("ebcs",              lambda c: _make_ebcs(c.state)),
         # Monitored volumes. AFTER parts_elements, whose write line fills
         # state.shell_elem_ids / sh3n_elem_ids — the /SURF is screened against

@@ -3210,6 +3210,27 @@ def _off_initial_volume_fraction_geometry(b: Block, offsets: Dict[str, int],
         raw[toff] = new
 
 
+def _off_constrained_shell_in_solid(b: Block, offsets: Dict[str, int],
+                                    warn) -> None:
+    """*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]: card 1 ``SHSID SSID SHSTYP
+    SSTYP``, each id bucketed by the type cell beside it (the #125 class:
+    0 = a ``*SET_PART`` id -> IDSOFF, 1 = a ``*PART`` id -> IDPOFF). The card
+    is never converted (round 7, B5), but its warning names the parts, and an
+    un-offset id would name the wrong ones."""
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff >= len(raw):
+        return
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    shstyp = to_int(cells[2]) if len(cells) > 2 else 0
+    sstyp = to_int(cells[3]) if len(cells) > 3 else 0
+    new = _rewrite_line(raw[toff], [(0, "p" if shstyp == 1 else "s"),
+                                    (1, "p" if sstyp == 1 else "s")],
+                        offsets)
+    if new is not None:
+        raw[toff] = new
+
+
 def _off_database_cross_section_plane(b: Block, offsets: Dict[str, int],
                                       warn) -> None:
     """*DATABASE_CROSS_SECTION_PLANE: PSID -> IDSOFF, and XCT/XCH -> IDNOFF
@@ -3847,6 +3868,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     # #130 shape).
     "INITIAL_VOID_PART": {"data": (0, [(0, "p")])},
     "INITIAL_VOID_SET": {"data": (0, [(0, "s")])},
+    # *CONSTRAINED_SHELL_IN_SOLID — recorded for a named warning only (round
+    # 7, B5); its two ids are bucketed by the type cells beside them.
+    "CONSTRAINED_SHELL_IN_SOLID": _off_constrained_shell_in_solid,
+    "CONSTRAINED_SHELL_IN_SOLID_PENALTY": _off_constrained_shell_in_solid,
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)

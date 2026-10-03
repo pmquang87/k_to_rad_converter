@@ -1934,5 +1934,165 @@ class MpcOnTiedSecondaryNode(unittest.TestCase):
         self.assertNotIn("/INTER/TYPE2/", s)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B5 — *CONSTRAINED_SHELL_IN_SOLID: one named warning, still skipped, 0 bytes
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _shell_in_solid_deck(option: str = "_ID", n_cards: int = 1,
+                         shstyp: int = 0, sstyp: int = 0,
+                         keyword: str = "CONSTRAINED_SHELL_IN_SOLID") -> str:
+    """Two unit hexes (part 1, *SECTION_SOLID ELFORM 1) with one shell (part
+    3, ELFORM 2, t 0.1) at z 0.5 inside them; *SET_PART_LIST 1 = {3},
+    *SET_PART_LIST 2 = {1}; *n_cards* *CONSTRAINED_SHELL_IN_SOLID cards
+    (SHSID 1 SSID 2 by default, or the part ids 3 / 1 when the type cells
+    say 1)."""
+    out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.001),
+           "*PART", "solid", _row(1, 1, 1),
+           "*PART", "plate", _row(3, 3, 1),
+           "*SECTION_SOLID", _row(1, 1),
+           "*SECTION_SHELL", _row(3, 2), _row(0.1, 0.1, 0.1, 0.1),
+           "*MAT_ELASTIC", _row(1, 7.85e-9, 210000.0, 0.3), "*NODE"]
+    nid = 0
+    for k in range(2):
+        for j in range(2):
+            for i in range(3):
+                nid += 1
+                out.append(f"{nid:>8}{float(i):>16.6f}{float(j):>16.6f}"
+                           f"{float(k):>16.6f}")
+    for x, y in ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)):
+        nid += 1
+        out.append(f"{nid:>8}{x:>16.6f}{y:>16.6f}{0.5:>16.6f}")
+    out += ["*ELEMENT_SOLID",
+            "       1       1       1       2       5       4       7       8"
+            "      11      10",
+            "       2       1       2       3       6       5       8       9"
+            "      12      11",
+            "*ELEMENT_SHELL", "       3       3      13      14      15      16",
+            "*SET_PART_LIST", _row(1), _row(3),
+            "*SET_PART_LIST", _row(2), _row(1)]
+    shsid = 3 if shstyp == 1 else 1
+    ssid = 1 if sstyp == 1 else 2
+    for c in range(n_cards):
+        out.append(f"*{keyword}{option}")
+        if option == "_ID":
+            out.append(_row(c + 1))
+        elif option == "_TITLE":
+            out.append("embedded plate")
+        out.append(_row(shsid, ssid, shstyp, sstyp))
+    out.append("*END")
+    return "\n".join(out) + "\n"
+
+
+def _sis_warnings(result):
+    return [w for w in result.warnings
+            if w.startswith("*CONSTRAINED_SHELL_IN_SOLID:")]
+
+
+class ShellInSolidNamed(unittest.TestCase):
+    """B5 — the card is recorded for ONE named warning per deck and stays in
+    ``skipped_keywords`` (its ``#-- SKIPPED:`` line is part of the .rad), so
+    the item moves 0 bytes. bird-el (1 deck key on 1 emitted model) is the
+    only corpus carrier."""
+
+    def test_one_named_warning_and_still_skipped(self):
+        r, s, e = _convert(_shell_in_solid_deck())
+        hits = _sis_warnings(r)
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in ("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)",
+                       "1 - shell part(s) [3] in solid part(s) [1]",
+                       "NOT converted", "p.10-179", "4.9377e5 (-100 %)",
+                       "+1134.62 %", "+195.21 %", "1.016x", "4.506x",
+                       "refuted as a general rule in round 6"):
+            self.assertIn(needle, hits[0])
+        self.assertIn("CONSTRAINED_SHELL_IN_SOLID", r.skipped_keywords)
+        self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID",
+                         [k for k, _r in r.recognized_not_emitted])
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", s)
+        self.assertNotIn("/INTER/TYPE18", s)
+        self.assertNotIn("/INTER/TYPE18", e)
+
+    def test_zero_bytes(self):
+        """The record adds a warning and not one byte: the deck converts to
+        the same .rad as the same deck with an UNREGISTERED spelling, except
+        the one '#-- SKIPPED:' line that names the keyword."""
+        r_on, s_on, e_on = _convert(_shell_in_solid_deck())
+        r_off, s_off, e_off = _convert(_shell_in_solid_deck(
+            keyword="CONSTRAINED_SHELL_IN_SOLIDX"))
+        self.assertEqual(e_on, e_off)
+        a, b = s_on.splitlines(), s_off.splitlines()
+        self.assertEqual(len(a), len(b))
+        diff = [(x, y) for x, y in zip(a, b) if x != y]
+        self.assertEqual(diff, [("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID",
+                                 "#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLIDX")])
+        self.assertEqual(len(_sis_warnings(r_on)), 1)
+        self.assertEqual(_sis_warnings(r_off), [])
+
+    def test_the_PENALTY_and_TITLE_spellings_share_the_handler(self):
+        r, _s, _e = _convert(_shell_in_solid_deck(
+            keyword="CONSTRAINED_SHELL_IN_SOLID_PENALTY"))
+        hits = _sis_warnings(r)
+        self.assertEqual(len(hits), 1, r.warnings)
+        self.assertIn("in solid part(s) [1] (_PENALTY)", hits[0])
+        self.assertIn("CONSTRAINED_SHELL_IN_SOLID_PENALTY", r.skipped_keywords)
+        r2, _s2, _e2 = _convert(_shell_in_solid_deck(option="_TITLE"))
+        hits2 = _sis_warnings(r2)
+        self.assertEqual(len(hits2), 1, r2.warnings)
+        self.assertIn("(no id) - shell part(s) [3] in solid part(s) [1]",
+                      hits2[0])
+        r3, _s3, _e3 = _convert(_shell_in_solid_deck(option=""))
+        self.assertIn("(no id) - shell part(s) [3]", _sis_warnings(r3)[0])
+
+    def test_two_cards_are_ONE_warning(self):
+        r, _s, _e = _convert(_shell_in_solid_deck(n_cards=2))
+        hits = _sis_warnings(r)
+        self.assertEqual(len(hits), 1, r.warnings)
+        self.assertIn("2 card(s) (1 - shell part(s) [3] in solid part(s) [1]; "
+                      "2 - shell part(s) [3] in solid part(s) [1])", hits[0])
+
+    def test_part_type_sides(self):
+        r, _s, _e = _convert(_shell_in_solid_deck(shstyp=1, sstyp=1))
+        self.assertIn("1 - shell part(s) [3] in solid part(s) [1]",
+                      _sis_warnings(r)[0])
+        deck = _shell_in_solid_deck().replace(
+            _row(1, 2, 0, 0), _row(9, 2, 0, 0))
+        r2, _s2, _e2 = _convert(deck)
+        self.assertIn("shell part(s) (set 9 not defined) in solid part(s) [1]",
+                      _sis_warnings(r2)[0])
+
+    def test_the_card_is_read_where_the_record_says(self):
+        """SHSID / SSID are not swapped: a deck whose shell set and solid set
+        differ reads each on its own side."""
+        state = _dispatch(_shell_in_solid_deck(shstyp=1, sstyp=0))
+        (c,) = state.shell_in_solid_cards
+        self.assertEqual((c.coupid, c.shsid, c.ssid, c.shstyp, c.sstyp,
+                          c.penalty), (1, 3, 2, 1, 0, False))
+
+    def test_an_include_transform_offsets_each_id_in_its_bucket(self):
+        """SHSTYP / SSTYP pick the namespace of the id beside them (the #125
+        class): a part id moves by IDPOFF, a part-set id by IDSOFF."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "child.k"), "w") as fh:
+            fh.write("*KEYWORD\n*CONSTRAINED_SHELL_IN_SOLID\n"
+                     + _row(7, 2, 1, 0) + "\n*END\n")
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
+                     + _row(0, 0, 100, 0, 1000, 0) + "\n*END\n")
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        (c,) = state.shell_in_solid_cards
+        self.assertEqual((c.shsid, c.ssid), (107, 1002))
+
+    def test_BEAM_IN_SOLID_stays_a_plain_skip(self):
+        r, s, _e = _convert(_shell_in_solid_deck(
+            keyword="CONSTRAINED_BEAM_IN_SOLID"))
+        self.assertIn("CONSTRAINED_BEAM_IN_SOLID", r.skipped_keywords)
+        self.assertEqual(_sis_warnings(r), [])
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_BEAM_IN_SOLID", s)
+
+
 if __name__ == "__main__":
     unittest.main()
