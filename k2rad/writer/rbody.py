@@ -681,10 +681,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     lines: List[str] = []
     rigid_nodes: Set[int] = set()
     rbody_info: Dict = {}
-    # The BC_rigid_<pid> /BCS records (round 7, A1) mirror the cards this
-    # function emits, so a second call must not keep the first call's: reset
-    # BEFORE the early returns below.
+    # The BC_rigid_<pid> records (round 7, A1) and their stabilisation digits
+    # mirror the cards emitted below: reset BEFORE the early returns.
     state.rigid_auto_bcs = {}
+    state.rigid_auto_stab = {}
     from .joint_screw import screw_cmo_skip_pids
     screw_skip = screw_cmo_skip_pids(state)
 
@@ -1095,10 +1095,12 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # no user-added mass — the user is responsible for stabilization once
         # they explicitly add mass)
         added_stab = False
+        stab_chars = ["0", "0", "0"]      # the digits ONLY this rule adds
         if state.is_implicit and loaded_tra_idx and user_added_mass <= 0:
             for i in (0, 1, 2):
                 if tra_chars[i] == "0" and i not in loaded_tra_idx:
                     tra_chars[i] = "1"
+                    stab_chars[i] = "1"
                     added_stab = True
         if added_stab:
             free_axes = [("X","Y","Z")[i] for i in range(3) if tra_chars[i] == "1"
@@ -1134,6 +1136,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                  "".join("1" if "1" in (a, b) else "0"
                          for a, b in zip(_old[1], rot)),
                  f"{_old[2]}, BC_rigid_{pid}"))
+            if added_stab:
+                _st = state.rigid_auto_stab.get(ind_node, "000")
+                state.rigid_auto_stab[ind_node] = "".join(
+                    "1" if "1" in (a, b) else "0"
+                    for a, b in zip(_st, stab_chars))
             lines += [
                 f"/BCS/{bc_id_auto}",
                 f"BC_rigid_{pid}",

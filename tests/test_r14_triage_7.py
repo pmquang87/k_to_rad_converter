@@ -179,22 +179,41 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         self.assertIn("hm_read_bcs.F:198 unions the codes (MY_OR)", w)
         self.assertNotIn(_A1_SPC, w)
 
-    def test_1b_an_implicit_deck_names_the_stabilisation_source_too(self):
+    def test_1b_the_stabilisation_is_named_only_where_a_merged_DOF_is_its(self):
         """On an implicit deck BC_rigid can also carry k2rad's stabilisation
-        of an unloaded free translation (rbody._make_rbodies), so the merge
-        sentence names it there - and only there (the validation round; every
-        A1 mover on the roster is explicit, test 1 pins its text)."""
+        of an unloaded free translation of a loaded body
+        (rbody._make_rbodies); the merge sentence names it only where a
+        merged DOF IS one of those digits (state.rigid_auto_stab; the
+        validation round - the roster's one implicit A1 mover,
+        ex_16_thin_shell_elform_13, merges CON1 6 / CON2 7 digits only).
+        Body 1: CON1 1 (x), CON2 7 and a *LOAD_RIGID_BODY in y, so the
+        stabilisation adds z: BC_rigid 101 111."""
         imp = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 1.0e-4) + "\n"
-        res, _s, _e = _convert(_a1_deck(extra=imp))
+        load = ("*LOAD_RIGID_BODY\n" + _row(1, 2, 7, 1.0) + "\n"
+                "*DEFINE_CURVE\n" + _row(7) + "\n"
+                f"{0.0:>20.6f}{1.0:>20.6f}\n{1.0:>20.6f}{1.0:>20.6f}\n")
+        named = ("CON1/CON2 - and the stabilisation k2rad adds on this "
+                 "implicit deck to an unloaded free translation of a loaded "
+                 "body -, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option)")
+        plain = ("(BC_rigid_1: *MAT_RIGID CMO 1 CON1/CON2, or the "
+                 "*CONSTRAINED_NODAL_RIGID_BODY _SPC option) and were merged")
+        # a member TC 3 (z) merges the stabilisation's own digit: named
+        res, starter, _e = _convert(_a1_deck(con1=1, tc=3, extra=imp + load))
+        self.assertEqual(_bcs_groups(starter)["BC_rigid_1"][0], "101 111")
         w = _node_warning(res)
-        self.assertIn("(BC_rigid_1: *MAT_RIGID CMO 1 CON1/CON2 - and, on this "
-                      "implicit deck, any stabilisation k2rad adds to an "
-                      "unloaded free translation -, or the "
-                      "*CONSTRAINED_NODAL_RIGID_BODY _SPC option)", w)
-        res0, _s0, _e0 = _convert(_a1_deck())
-        self.assertIn("(BC_rigid_1: *MAT_RIGID CMO 1 CON1/CON2, or the "
-                      "*CONSTRAINED_NODAL_RIGID_BODY _SPC option) and were "
-                      "merged", _node_warning(res0))
+        self.assertIn(named, w)
+        self.assertNotIn(plain, w)
+        # a member TC 1 (x) merges CON1's digit only: not named
+        res1, _s1, _e1 = _convert(_a1_deck(con1=1, tc=1, extra=imp + load))
+        w1 = _node_warning(res1)
+        self.assertIn(plain, w1)
+        self.assertNotIn("stabilisation k2rad adds", w1)
+        # an implicit deck whose body is not loaded (no stabilisation): the
+        # explicit deck's text
+        res2, _s2, _e2 = _convert(_a1_deck(extra=imp))
+        w2 = _node_warning(res2)
+        self.assertIn(plain, w2)
+        self.assertNotIn("stabilisation k2rad adds", w2)
 
     def test_2_P2_keeps_the_disjoint_remainder(self):
         res, starter, _e = _convert(_a1_deck(con1=1, con2=7, tc=6, rc=7))

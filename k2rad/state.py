@@ -9484,7 +9484,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1049, :1485, :1597, :1786, :1943, :2067, in that order:
+    # (writer/rbody.py:1049, :1492, :1604, :1793, :1950, :2074, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -9702,6 +9702,12 @@ class ConversionState:
     # of loads._make_node_tc_rc_bcs (round 7, A1), which merges a re-pointed
     # member TC/RC code into it instead of writing it a second time.
     rigid_auto_bcs: Dict[int, Tuple[str, str, str]] = field(default_factory=dict)
+    # The Tra digits of rigid_auto_bcs that ONLY the implicit stabilisation
+    # added (an unloaded free translation of a loaded body, see
+    # _make_rbodies): main node -> "010". Rebuilt with rigid_auto_bcs. ONE
+    # consumer: A1's merge sentence names the stabilisation only where a
+    # merged DOF is one of these digits (round 7, the validation round).
+    rigid_auto_stab: Dict[int, str] = field(default_factory=dict)
     # *SECTION_SOLID_EFG / *SECTION_SHELL_EFG: RECORDED but still SKIPPED
     # (round 7, A5 (ii)) - secid -> (the keyword as skipped, ELFORM). ONE
     # consumer: the missing-section auto-create of writer/mesh.

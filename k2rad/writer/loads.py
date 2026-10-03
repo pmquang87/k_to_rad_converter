@@ -698,6 +698,9 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     spc_hits: List[Tuple[int, int]] = []
     # screen (c'): (node, DOFs merged, the rigid body's own card titles)
     auto_hits: List[Tuple[int, int, List[str]]] = []
+    # ... and the nodes where a merged digit is k2rad's implicit
+    # stabilisation (state.rigid_auto_stab), so the sentence names it there
+    auto_stab_hits: Set[int] = set()
     rot_inert: List[int] = []
     skewed_motion: List[int] = []
     emptied: List[int] = []
@@ -740,11 +743,14 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         # time. AFTER rule (c), so a digit a *BOUNDARY_SPC states keeps that
         # attribution. Only a main node can hit: the map holds main nodes.
         a_tra, a_rot, a_titles = auto_dofs.get(nid, ("000", "000", []))
+        a_stab = state.rigid_auto_stab.get(nid, "000")
         merged_auto = 0
         for i in range(3):
             if a_tra[i] == "1" and tra[i] == "1":
                 tra[i] = "0"
                 merged_auto += 1
+                if a_stab[i] == "1":
+                    auto_stab_hits.add(nid)
             if a_rot[i] == "1" and rot[i] == "1":
                 rot[i] = "0"
                 merged_auto += 1
@@ -860,6 +866,8 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
             auto_dof_count=sum(k for n, k, _t in auto_hits if n in prov),
             auto_titles=sorted({t for n, _k, ts in auto_hits if n in prov
                                 for t in ts}),
+            auto_stab=any(n in auto_stab_hits
+                          for n, _k, _t in auto_hits if n in prov),
             rot_inert=[n for n in rot_inert if n in prov],
             skewed_motion=[n for n in skewed_motion if n in prov],
             emptied=[n for n in emptied if n in prov])
@@ -884,6 +892,7 @@ def _warn_constrained_global_converted(
         motion_nodes: List[int], motion_dofs: int,
         spc_nodes: List[int], spc_dof_count: int,
         auto_nodes: List[int], auto_dof_count: int, auto_titles: List[str],
+        auto_stab: bool,
         rot_inert: List[int], skewed_motion: List[int],
         emptied: List[int]) -> None:
     """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
@@ -956,7 +965,7 @@ def _warn_constrained_global_converted(
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
-                                              implicit=state.is_implicit))
+                                              stab=auto_stab))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1072,7 +1081,7 @@ def _named(nids: List[int], cap: int = 5) -> str:
 
 def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
-                               implicit: bool = False) -> str:
+                               stab: bool = False) -> str:
     """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
     ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
 
@@ -1081,18 +1090,20 @@ def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
     ``*MAT_RIGID`` CON1/CON2 of body 2 and the deck states no SPC at all. On
     an *implicit* deck the ``BC_rigid`` card can also carry k2rad's own
     stabilisation of an unloaded free translation (``rbody._make_rbodies``),
-    and the sentence names it there (the validation round; every A1 mover on
-    the roster is explicit, so no corpus record moves).
+    and *stab* names it where a merged DOF IS one of those digits
+    (``state.rigid_auto_stab``; the validation round). The roster's one
+    implicit A1 mover, ex_16_thin_shell_elform_13, merges CON1 6 / CON2 7
+    digits only, so its sentence does not name it.
     """
     shown = ", ".join(auto_titles[:5]) + (
         f" and {len(auto_titles) - 5} more" if len(auto_titles) > 5 else "")
-    stab = (" - and, on this implicit deck, any stabilisation k2rad adds to "
-            "an unloaded free translation -" if implicit else "")
+    named = (" - and the stabilisation k2rad adds on this implicit deck to "
+             "an unloaded free translation of a loaded body -" if stab else "")
     return (
         f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
         f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
         f"the rigid body itself writes there ({shown}: *MAT_RIGID CMO 1 "
-        f"CON1/CON2{stab}, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) "
+        f"CON1/CON2{named}, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) "
         "and were "
         "merged into it rather than written a second time: hm_read_bcs.F:198 "
         "unions the codes (MY_OR), so the second /BCS changed no physics and "
@@ -1110,6 +1121,7 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                spc_nodes: List[int], spc_dof_count: int,
                                auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
+                               auto_stab: bool,
                                rot_inert: List[int],
                                skewed_motion: List[int],
                                emptied: List[int]) -> None:
@@ -1201,7 +1213,7 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
-                                              implicit=state.is_implicit))
+                                              stab=auto_stab))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
