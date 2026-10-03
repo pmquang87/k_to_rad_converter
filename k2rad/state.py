@@ -763,6 +763,12 @@ class MatSpotweld:
     mss: float          # bending failure moment (s)     → ±Delta5
     mtt: float          # bending failure moment (t)     → ±Delta6
     nf: float = 0.0     # force-filter count (dropped, warned)
+    # The SIGY the card STATES (the handler zeroes a negative one - a yield
+    # curve / table it does not convert - and names it there), so the writer
+    # can name LS-DYNA's own default for a stated 0 ('EQ.0: Default to 1%
+    # of E', Vol II R17 p.2-697) without misnaming a dropped curve. None =
+    # the same as ``sigy``.
+    sigy_stated: Optional[float] = None
 
 
 @dataclass

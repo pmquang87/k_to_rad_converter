@@ -833,6 +833,11 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
         self.assertEqual(starter, s_off)
 
     def test_4_SIGY_0_writes_no_curve_and_the_strain_alone(self):
+        """SIGY 0 is NOT 'no yield' in LS-DYNA: Vol II R17 p.2-697 makes it
+        'EQ.0: Default to 1% of E'. The weld stays elastic here (no curve,
+        EFAIL without a yield displacement) - and since the validation round
+        the dropped default is NAMED, with its value (2100 for E 210000).
+        The pre-round-7 bytes are kept (reach 0 on the R14 roster)."""
         res, starter, _e = _convert(_weld_deck(efail=0.3,
                                                resultants=(0.0,) * 6,
                                                sigy=0.0))
@@ -844,6 +849,25 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
             self.assertTrue(_close(float(dofs[k][1][80:100]),
                                    math.sqrt(3.0) * 0.3 * 2.0, 1e-9))
         self.assertTrue(_close(float(dofs[0][1][80:100]), 0.6, 1e-9))
+        self.assertTrue(_has(res.warnings, "*MAT_SPOTWELD part 10: SIGY=0 - "
+                             "LS-DYNA's default yield stress 1 % of E = 2100 "
+                             "(Vol II R17 p.2-697", "is NOT converted: the "
+                             "weld is written ELASTIC in axial and shear",
+                             "EFAIL displacement criterion gets no yield "
+                             "displacement"), res.warnings)
+        # a negative SIGY (a yield curve / table) is named by the handler,
+        # which zeroes it: the writer must not call it LS-DYNA's 1 % default
+        r2, s2, _e2 = _convert(_weld_deck(sigy=-7.0))
+        self.assertNotIn("spotweld_axial_bilinear", s2)
+        self.assertTrue(_has(r2.warnings, "*MAT_SPOTWELD mid=10: SIGY<0 (yield "
+                             "stress from a curve) is not supported"),
+                        r2.warnings)
+        self.assertFalse(_has(r2.warnings, "default yield stress 1 % of E"),
+                         r2.warnings)
+        # control: a stated SIGY > 0 draws neither sentence
+        r3, _s3, _e3 = _convert(_weld_deck())
+        self.assertFalse(_has(r3.warnings, "is NOT converted: the weld is "
+                              "written ELASTIC"), r3.warnings)
 
     def test_5_EH_0_falls_back_like_the_axial_curve(self):
         _r, starter, _e = _convert(_weld_deck(eh=0.0))

@@ -3654,6 +3654,23 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                            f"SIGY·A={fy:.6G}, H=1 elastic-plastic). "
                            "Shear/bending DOFs stay elastic up to the failure "
                            "surface.")
+        elif (mat.sigy if mat.sigy_stated is None
+              else mat.sigy_stated) == 0.0:
+            # A field the deck leaves at 0 still has a solver default (the
+            # validation round): Vol II R17 p.2-697 defines SIGY 'EQ.0:
+            # Default to 1% of E'. It is not converted - named, 0 bytes
+            # (reach 0 on the R14 roster: every *MAT_SPOTWELD there states
+            # SIGY > 0). A NEGATIVE SIGY (a yield curve / table) is named by
+            # the handler, which zeroes it - hence the stated value here.
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: SIGY=0 - LS-DYNA's default "
+                f"yield stress 1 % of E = {0.01 * abs(E):.6G} (Vol II R17 "
+                "p.2-697, 'EQ.0: Default to 1% of E') is NOT converted: "
+                "the weld is written ELASTIC in axial and shear (no "
+                "bilinear /FUNCT)"
+                + (" and the EFAIL displacement criterion gets no yield "
+                   "displacement" if efail_disp else "")
+                + ".")
 
         dofs = [
             (k1, fct1, h1, 0.0, mat.nrr),          # Tx: tension-only failure

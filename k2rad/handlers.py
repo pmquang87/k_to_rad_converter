@@ -15438,6 +15438,7 @@ def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
     g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
     efail, nrr, nrs, nrt = g(0), g(1), g(2), g(3)
     mrr, mss, mtt, nf = g(4), g(5), g(6), g(7)
+    sigy_stated = sigy
     if sigy < 0.0:
         state.warn(f"*MAT_SPOTWELD mid={mid}: SIGY<0 (yield stress from a curve) "
                    "is not supported — yield dropped (elastic weld until failure).")
@@ -15452,7 +15453,8 @@ def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
         mrr, mss, mtt = max(mrr, 0.0), max(mss, 0.0), max(mtt, 0.0)
     state.mat_spotweld[mid] = MatSpotweld(mid, title, rho, E, nu, sigy, et, dt,
                                           tfail, efail, nrr, nrs, nrt,
-                                          mrr, mss, mtt, nf)
+                                          mrr, mss, mtt, nf,
+                                          sigy_stated=sigy_stated)
 
 
 def _num_ok(s: str) -> bool:
