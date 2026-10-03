@@ -4106,5 +4106,127 @@ class Round7ValidationRound(unittest.TestCase):
                 self.assertIn(_collapse(needle), texts[key])
 
 
+#: Statements the post-review round (the four verifiers of b483b12) found
+#: wrong or stale. CHANGELOG may quote them (it is the history); no other
+#: shipped text may.
+_RETRACTED_ROUND_7_PR = (
+    # the screw at -np > 1 hits the /BCS/LAGMUL check (lag_mult.F:667-671)
+    # BEFORE the JOINT one, and stops before any cycle row is printed
+    "JOINT WITH LAGRANGE MULTIPLIER",
+    "(-np > 1 stops at cycle 1)",
+    "``-np > 1`` stops at cycle 1)",
+    "the engine stops at cycle 1 (",
+    # LS-DYNA's nut per radian read from the reference nodout at the fifths:
+    # 12.08 / 12.35 / 12.35 / 12.34 / 12.25; 183.59 is LS-DYNA at the
+    # converted run's last sample (t 0.09995), not at its own t_end (183.72)
+    "12.34 mm/rad",
+    "at t_end (185.70",
+    # the spotweld rupture from its own times: 4.51 / 5.96 % early
+    "4.6-6.0",
+    # sph/bird's Nu-1 arm IE RMS by the round's scorer is 44.37
+    "44.15 % on both arms",
+    # channel_C's campaign re-run RMS 0.03 / 0.10
+    "`channel_C` RMS 0.02",
+    # :555 is N = IXTG(K+1,I); the MS / IN spread lines are :556-557
+    "spmd_msin.F:555-556",
+    # :323-325 normalise a; b = SK(4..6) at :326-328
+    "smorth3.F:324-327",
+    # Theory R16 eq. 29.23's own term is a density integral J_rho; the
+    # point-mass claim rests on the d3hsp measurement
+    "eqs 29.21-29.23",
+    # B5's density arm stated the EOS RHO_0 cell too
+    "(RHO_I 1e-15)",
+    # mainboltaexpl's control scaled K2 AND K3 by (1 - 1e-8)
+    "only K2 changed",
+    "only `K2` changed",
+    "`K2` alone moves",
+    # ex_15's TYPE20 base varies RUN TO RUN (nine of ten runs +0.03 %), and
+    # its KE RMS is the campaign's 17.45
+    "base is not even reproducible across",
+    "17.46 → 6.30",
+    "KE RMS 17.46",
+    # the routed ex_02 at 0.1: the same END IE, its rows 1-19 differ
+    "the same 28 cycles at the same IE (",
+    # B4 refuses the MAIN side too since the post-review round
+    "A term on a MAIN-side node only is not",
+    "names tied interfaces;",
+    "refusal on a tied secondary node (0 / 0",
+    # ROADMAP item 13's four rotating keys were measured by the re-run
+    "rotate but are unmeasured",
+)
+
+
+class Round7PostReviewRound(unittest.TestCase):
+    """The round-4/5/6/7 shape for the post-review round's text fixes: no
+    retracted spelling ships, the guard fires on a split spelling, and the
+    re-derived replacements ARE shipped."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_7_PR:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_7_PR:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle).lower(), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_SHIPPED_TEXTS())
+        pairs = (
+            ("k2rad/writer/joint_screw.py", "nut moved 12.08-12.35 mm/rad at "
+             "the fifths of the run (12.25 at its t_end)"),
+            ("k2rad/writer/joint_screw.py", "185.70 vs LS-DYNA's 183.59 mm at "
+             "the same instant, t 0.09995"),
+            ("k2rad/writer/joint_screw.py", "'** ERROR: BCS WITH LAGRANGE "
+             "MULTIPLIER NOT ENABLED FOR NSPMD > 1' (lag_mult.F:667-671"),
+            ("README.md", "(`BCS WITH LAGRANGE MULTIPLIER NOT ENABLED FOR "
+             "NSPMD > 1`, `lag_mult.F:667-671`"),
+            ("README.md", "its nut 12.08-12.35 mm/rad at the fifths, 12.25 at "
+             "its t_end"),
+            ("ROADMAP.md", "`BCS WITH LAGRANGE MULTIPLIER NOT ENABLED FOR "
+             "NSPMD > 1`, `lag_mult.F:667-671`"),
+            ("k2rad/writer/loads.py", "1.19792e-3 s (4.5-6.0 % early)"),
+            ("k2rad/cli.py", "1.19792e-3 s (4.5-6.0 %% early)"),
+            ("README.md", "1.19792e-3 s (4.5-6.0 % early)"),
+            ("k2rad/writer/materials.py", "IE RMS 44.37 % on both arms"),
+            ("ROADMAP.md", "IE RMS 44.37 % on both arms"),
+            ("README.md", "`channel_C` RMS 0.03 / 0.10 (the campaign re-run"),
+            ("k2rad/writer/rbody.py", "spmd_msin.F:556-557"),
+            ("k2rad/lumping.py", "spmd_msin.F:556-557"),
+            ("README.md", "spmd_msin.F:556-557"),
+            ("k2rad/writer/composites.py", "smorth3.F:326-328"),
+            ("README.md", "smorth3.F:326-328"),
+            ("k2rad/writer/rbody.py", "MEASURED, not quoted: the reference "
+             "d3hsp tensor equals it on 18 of 18 bodies within 0.04 %"),
+            ("README.md", "MEASURED, not quoted: the reference `d3hsp` tensor "
+             "equals it on 18 of 18 bodies"),
+            ("k2rad/writer/blast_ale.py", "(RHO_I 1e-15, with the "
+             "/EOS/GRUNEISEN RHO_0 cell stated as 1e-9, the deck's density)"),
+            ("README.md", "`K2` and `K3` scaled by `(1 − 1e-8)`"),
+            ("ROADMAP.md", "`K2` and `K3` scaled by `(1 − 1e-8)`"),
+            ("k2rad/state.py", "K2 and K3 scaled by (1 - 1e-8)"),
+            ("README.md", "17.45 → 6.30"),
+            ("README.md", "reproducible run to run: of ten fresh base runs"),
+            ("k2rad/cli.py", "0.1 ends it in the same 28 cycles at the same "
+             "END IE"),
+            ("README.md", "node of EITHER side of any emitted `/INTER/TYPE2`"),
+            ("ROADMAP.md", "match 26 → 34"),
+            ("ROADMAP.md", "`2Dlag`, `ale_wavehitcol`, the Yaris roof crush "
+             "and door sag"),
+            ("ROADMAP.md", "the campaign re-run measured them"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+
 if __name__ == "__main__":
     unittest.main()

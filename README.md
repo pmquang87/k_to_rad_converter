@@ -603,8 +603,8 @@ converted weld goes deviation → match (IE / KE history RMS 23.53 / 62.56 →
 8.58 / 26.74 % of the LS peak at 1.107× the cycles). `mainboltaexpl` moves too
 (END IE / KE −72.72 / −11.18 → −81.87 / −83.15 %, history RMS 26.69 / 24.32 →
 31.32 / 28.24 %, nt 4) — by run sensitivity, not by the yield: its weld shear
-never exceeds 13789 against the new yield 29021, and the 65ff389 card with only
-`K2` changed by `1e-8` (the size of the curve's slope nudge) moves it the same
+never exceeds 13789 against the new yield 29021, and the 65ff389 card with `K2`
+and `K3` scaled by `(1 − 1e-8)` (the size of the curve's slope nudge) moves it the same
 way (−80.35 / −73.95 %, RMS 30.46 / 29.08); its preloaded bolt spring collapses
 on every arm (the round-7 validation round's re-attribution). The yield
 displacement carries a `1e-8` relative nudge so the printed curve's slope stays
@@ -616,7 +616,7 @@ gets the `Ifail 1` / `Ifail2 0` DISPLACEMENT criterion (round 7, default ON,
 strain `√(ε² + γ²/3)` of a proportional path reaching `EFAIL` on the quadratic
 surface `Ifail 1` applies; measured on `spotweld.k` with
 `--spotweld-node-synthesis --beam-contact-secondary`: rupture 1.12650e-3 s
-against LS-DYNA's 1.17969e-3..1.19792e-3 s (4.6-6.0 % early). Beside resultant
+against LS-DYNA's 1.17969e-3..1.19792e-3 s (4.5-6.0 % early). Beside resultant
 cells `EFAIL` is named, not converted (TYPE13 carries ONE criterion type per
 property); a 1e20-class `EFAIL` writes nothing. (Deliberately not `/MAT/LAW59`,
 which binds to `/PROP/TYPE43` connection *solids*, not springs.) Validate on a
@@ -803,13 +803,16 @@ ON, `--no-rigid-shell-rotary-inertia` keeps `J = 0`) on every `*MAT_RIGID` /
 lumped shell rotary inertia: the starter ADDS every shell node's `IN` —
 `(m/4)(A + t²)/12` per `/SHELL` corner (`cinmas.F:1379`, FAC 12) and, for a
 `/SH3N`, the whole element's `m(A/4.5 + t²/12)` spread by the corner angles
-(`c3inmas.F:1111`, `spmd_msin.F:555-556`; the round-7 validation round — the
+(`c3inmas.F:1111`, `spmd_msin.F:556-557`; the round-7 validation round — the
 quad formula had left up to 9.2 % of `ΣIN` on 41 of the 153 bodies the rule
 then wrote, on 15 roster keys) — to the body tensor for ICoG
 1/2/3 (`inirby.F:166-168` the main node, `:355-363` the secondaries), while
-LS-DYNA's rigid-part inertia is the point-mass sum of the nodal masses (Theory
-R16 eqs 29.21-29.23 — the reference `d3hsp` tensor equals it on 18 of 18
-measured bodies within 0.04 %). `ΣIN` is summed once over the body's nodes
+LS-DYNA's rigid-part inertia is the point-mass sum of the nodal masses —
+MEASURED, not quoted: the reference `d3hsp` tensor equals it on 18 of 18 bodies
+within 0.04 % (Theory R16 eq. 29.23 writes the part's own term as a density
+integral `J_ρ`, which the printed tensor does not follow: `revo-stiff`'s
+one-shell body prints 0.1977E-02, the point-mass value, where the integral gives
+6.66e-4). `ΣIN` is summed once over the body's nodes
 (its secondaries, its main node, merged deformable shells and a
 `*CONSTRAINED_RIGID_BODIES` union). Skipped by name where the lumper is not the
 starter's (a layered section, an element thickness, Ishell < 11, no
@@ -891,11 +894,12 @@ keeps precedence; with `--no-initial-void-floor` alone a PC-0 void now gets
 both opt-outs restore `Pmin 0`. RE-MEASURED on the implementation at nt 4
 (base-paired in one window, OpenRadioss's last printed row against the LS-DYNA
 glstat interpolated there, fifths nearest-row, RMS in % of the LS-DYNA peak;
-`channel_A` / `channel_C` are the round-7 pre-research arms):
+`channel_A` is the round-7 pre-research arm, equal to the campaign's re-run):
 `sph/bird` (PC cell) IE +69.44 → +4.50 %, fifths +2.87 / +2.98 / +1.52 / +2.57 /
 +4.50 %, RMS 44.37 → 2.10 at 0.832× the cycles; `channel_B` (Nu cell) IE
 −98.89 → −0.09 %, RMS 57.05 → 0.03 at 0.987× (the starter echoes `VISCOSITY`
-1000); `channel_C` RMS 0.02; `channel_A`
+1000); `channel_C` RMS 0.03 / 0.10 (the campaign re-run, report §0.28; the
+pre-research arm's 0.02 is retired); `channel_A`
 −98.88 → −4.03 %, RMS 1.72 at 0.831× — all four deviation → match; `underwater_A`
 / `underwater_B` stay match (−0.85 / +0.97 % and −0.37 / +0.49 %; the starter
 echoes `PRESSURE CUTOFF` −1.0E-20); `impact`
@@ -1762,7 +1766,7 @@ mode ends in the same `IF (JCVT > 0)` projection, `smorth3.F:282-291` /
 the element frame, `mmain.F90:2106-2113` → `mreploc.F:132-140`); and on `Ip 21`
 `/MAT/LAW93`'s 2 / 3 constants are exchanged (`E22 ↔ E33`, `G12 ↔ G13`,
 `NU12 ↔ NU13`, `NU23 → NU23·E33/E22`), because Radioss builds b = e_z × a
-(`smorth3.F:324-327`) where LS-DYNA builds b = (a × e_z) × a — other laws on
+(`smorth3.F:326-328`) where LS-DYNA builds b = (a × e_z) × a — other laws on
 `Ip 21` keep their cells and are named. MEASURED on one-hex coupons at nt 4
 against closed forms: MAT_126 crush 0 → 12 of 12 cases right (σ(0.10) 6.0047 →
 1.5049 against 1.5), shear 0 → 6 of 6, the plateau unchanged (IE at the fifths
@@ -2126,11 +2130,12 @@ keys on 1 emitted model) go from a timeout at cycle 100 624 to NORMAL in 28
 cycles (nt 4 and 2; IE 0.04124 = −94.66 % against LS-DYNA's ELFORM 2 — the
 extruded-shell class below, not the property); `ex_15_thick_shell_elform_*`
 (3 / 1) close their energy balance (energy error 74.1 % → −0.7 %, KE history
-RMS 17.46 → 6.30 %) at the named cost of their END IE (+0.03 → +36.49 %, IE RMS
+RMS 17.45 → 6.30 %) at the named cost of their END IE (+0.03 → +36.49 %, IE RMS
 3.79 → 5.31 % against the ELFORM 5 reference: the shipped +0.03 % was a phase
-coincidence of a run that created 74 % energy — the TYPE20 base is not even
-reproducible across `nt`, its END IE reads +0.03 % at `nt` 2 and −0.04 % at
-`nt` 4, while the route is identical at both); `ex_13_*` (modal) stay
+coincidence of a run that created 74 % energy — and the TYPE20 base is not even
+reproducible run to run: of ten fresh base runs (six at `nt` 4, four at `nt` 2)
+nine end at +0.03 % and one `nt`-4 run at −0.04 % (energy error 73.8 %), while
+the route is identical at `nt` 4 and 2); `ex_13_*` (modal) stay
 status-only. Explicit decks keep
 TYPE20; a non-LAW1 law on an implicit deck, and `/PROP/TYPE21` / `TYPE22`,
 keep their card with a named warning — no plastic or orthotropic thick-shell
@@ -3026,11 +3031,18 @@ skipped, the deck byte-identical to the opt-out): a DOF that also carries a
 mass; DOF 4-6 needs a shell or beam), a zero `COEF` (`hm_read_mpc.F:124` would
 read it as 1), DOF 7 (the piezoelectric voltage), an undefined `CID`, a
 (node, DOF) pair already in an earlier `/MPC`, and (since round 7) a term on a
-SECONDARY node of any emitted `/INTER/TYPE2`, whatever the Spotflag (Vol I R17
-p.10-135 / p.10-139 names tied interfaces; on two hand-built two-plate probes
-at nt 4 a kinematic tie gave WARNING 312 and NaN from cycle 0, and Spotflag 28
-ended NORMAL at a 99.9 % energy error with a conflicting and with a redundant
-`/MPC` — 0 decks on any corpus carry the pair). Measured on
+node of EITHER side of any emitted `/INTER/TYPE2`, whatever the Spotflag (Vol I
+R17 p.10-135 / p.10-139 names tied-interface members, not one side; on two
+hand-built two-plate probes at nt 4 a kinematic tie gave WARNING 312 and NaN
+from cycle 0 with a term on a SECONDARY node, and Spotflag 28 ended NORMAL at a
+99.9 % energy error with a conflicting and with a redundant `/MPC`; the
+post-review round measured the MAIN side the same way — an `/MPC` between two
+main-plate nodes ends NORMAL at 99.9 % from cycle 1000 on Spotflag 28 (IE
+1.25e6 against external work −3.9) and on Spotflag 27 (IE 3.83e4 against
+48.2), nt 4 = nt 2, while the tie alone (IE 20.27 against 20.28) and an `/MPC`
+on two nodes outside the tie (20.35 against 20.36) balance; the main side is
+resolved as the MSID side's nodes, a solid's interior nodes included — 0 decks
+on any corpus carry the pair). Measured on
 `intro-by-k.-weimar/misc/constraints/plates.lce` (1 deck key on 1 emitted
 model): starter `NUMMPC 1`, 0 errors, engine identical to the base on all 683
 rows — uninformative by construction, because nodes 40 and 42 sit
@@ -3128,16 +3140,22 @@ of an all-parts self-contact into its own two-surface `/INTER/TYPE25` (a contact
 force on a Lagrange-held rigid body is cancelled on its main node alone — RBYVIT,
 `resol.F:7572`, runs before LAG_MULT, `:7901` — and its mesh slips off the main
 node: 178.67 mm measured with the pair kept). MEASURED on `EXP_SC_JOINT_SCREW`
-at nt 4: nut travel 0 → 185.70 mm against LS-DYNA's 183.59 (travel RMS 0.88 % of
-the LS-DYNA peak), IE −100 → +42.76 %, 0.9998× the cycles; the joint is EXACT
-where LS-DYNA's default joint (LMF 0) is a yielding PENALTY joint (its nut 12.25-
-12.34 mm/rad against 12.5), so the converted nut runs ahead and meets the shells
-about 0.6 ms early — a solver limitation, not a tuning knob. **SMP only**: with
-`-np > 1` the engine stops at cycle 1 (`JOINT WITH LAGRANGE MULTIPLIER NOT
-ENABLED FOR NSPMD > 1`). On this path EXT-WORK prints 0 and the engine
-accumulates no REAC* on a Lagrange drive (`thbcs.F:62` / `:77` count only nodes
-with a kinematic code), so a `*DATABASE_BNDOUT` `/TH/NODE` does not cover the
-screw's drive and the BNDOUT warning says so. A screw outside the
+at nt 4: nut travel 0 → 185.70 mm against LS-DYNA's 183.59 at the same instant
+(t 0.09995, the converted run's last sample; 183.72 at LS-DYNA's own t_end;
+travel RMS 0.88 % of the LS-DYNA peak), IE −100 → +42.76 %, 0.9998× the cycles;
+the joint is EXACT where LS-DYNA's default joint (LMF 0) is a yielding PENALTY
+joint (its nut 12.08-12.35 mm/rad at the fifths, 12.25 at its t_end, against
+12.5), so the converted nut runs ahead and meets the shells about 0.6 ms early —
+a solver limitation, not a tuning knob. **SMP only**: with `-np > 1` the engine
+stops in its first cycle, before any row is printed (`BCS WITH LAGRANGE
+MULTIPLIER NOT ENABLED FOR NSPMD > 1`, `lag_mult.F:667-671` — the two
+`/BCS/LAGMUL`; the JOINT check at `:682-686` would follow). On this path
+EXT-WORK prints 0 and the engine accumulates no REAC* on a Lagrange drive
+(`thbcs.F:62` / `:77` count only nodes with a kinematic code), so a
+`*DATABASE_BNDOUT` `/TH/NODE` does not cover the screw's drive and the BNDOUT
+warning says so; the `/TH/NODE` `TH_reaction` block keeps the drive's main node
+for its live DX/Y/Z, and its warning names the REACX/Y/Z there as identically
+0. A screw outside the
 pattern (`_COOR_SCREW`, `_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a
 deformable / CNRB / merged body, a non-coaxial or off-global axis, other CMO
 codes, a missing or windowed drive, VAD 1/3, a drive on B, a contact the split
@@ -6462,7 +6480,8 @@ against LS-DYNA's 0.1977E-02, the difference being exactly
 starter adds every member's nodal rotary inertia `IN` to the body tensor for
 ICoG 1/2/3 (`inirby.F:166-168`, `:322`, `:355`) and the `/RBODY` `J` cells are
 ADDITIVE (`inirby.F:154-160`), while LS-DYNA's rigid-body inertia is the
-point-mass sum (Theory R16 eqs 29.21-29.23) — so `Jxx = Jyy = Jzz = −ΣIN` over
+point-mass sum (measured on the reference `d3hsp` tensors — not Theory R16
+eq. 29.23's density integral) — so `Jxx = Jyy = Jzz = −ΣIN` over
 the body's shell nodes (the lumper's `IN`: the `cinmas.F:1379` value, and
 `c3inmas.F:1111`'s on a `/SH3N` since the round-7 validation round) takes the
 difference back out, on exactly the bodies that get an `/INIVEL/ROT`. Measured
