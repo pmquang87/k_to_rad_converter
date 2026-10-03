@@ -241,6 +241,7 @@ def convert(
     spotweld_shear_yield: bool = True,
     spotweld_efail_displacement: bool = True,
     implicit_tshell_solid: bool = True,
+    corotational_orthotropic: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -698,6 +699,19 @@ def convert(
         ``ex_02_thick_shell_elform_{2,3,5}`` timeout -> NORMAL in 28 cycles
         (nt 4 and 2); ``ex_15`` energy error 74.1 -> -0.7 % (named cost: END
         IE +0.03 -> +36.49 %).
+    corotational_orthotropic : bool
+        Write an element-frame orthotropic ``/PROP/TYPE6`` (Ip 20 / 21 / 23 /
+        24, LS-DYNA AOPT 0 / 1 / 3 / 4) co-rotational (round 7, B3): the
+        ``*MAT_MODIFIED_HONEYCOMB`` property keeps its pinned Isolid 1 /
+        Ismstr 1 and gets ``Iframe 2`` on a /BRICK part, an Ip 21 / 24
+        orthotropic brick on Isolid 17 takes the round-6 Isolid-14 route like
+        Ip 20 / 23, and on Ip 21 ``/MAT/LAW93``'s 2 / 3 constants are
+        exchanged (Radioss b = e_z x a, ``smorth3.F:324-327``). **On by
+        default.** MEASURED on one-hex coupons at nt 4: MAT_126 crush 0 -> 12
+        of 12 cases right (sigma(0.10) 6.0047 -> 1.5049 against 1.5), LAW93
+        Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6; the plateau unchanged (RMS
+        0.164 %). Element-frame tetrahedra are named, never changed. Reach 0
+        on every corpus.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1120,6 +1134,7 @@ def convert(
         spotweld_shear_yield=spotweld_shear_yield,
         spotweld_efail_displacement=spotweld_efail_displacement,
         implicit_tshell_solid=implicit_tshell_solid,
+        corotational_orthotropic=corotational_orthotropic,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

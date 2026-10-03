@@ -4923,7 +4923,8 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      refpoint=(0.0, 0.0, 0.0),
                      isolid: Optional[int] = None,
                      ismstr: int = 0,
-                     assumed_strain_isolid: int = 0) -> List[str]:
+                     assumed_strain_isolid: int = 0,
+                     iframe: int = 0) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
@@ -4947,7 +4948,11 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     *assumed_strain_isolid* is ``ConvertOptions.assumed_strain_isolid_value``,
     threaded in because an ORTHOTROPIC solid section can state ELFORM -1/-2
     too and must take the same cell the isotropic emitter writes; every caller
-    passes it."""
+    passes it. *iframe* is card 1's ``Iframe`` (columns 71-80): 0 (default)
+    takes the ``/DEF_SOLID`` value, 1 = NOT co-rotational
+    (``hm_read_prop06.F:296``, ``defaults_mod.F90:176``); the MAT_126
+    honeycomb path passes 2 (co-rotational) for an element-derived frame on a
+    /BRICK part (R14 triage round 7, B3), every other caller writes 0."""
     if isolid is None:
         isolid = (_elform_to_isolid(sec.elform, assumed_strain_isolid)
                   if sec else 0)
@@ -4960,7 +4965,7 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
         f"/PROP/TYPE6/{prop_id}",
         title,
         "#   Isolid    Ismstr               Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}{_i(ismstr)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        f"{_i(isolid)}{_i(ismstr)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(iframe)}{_f(0.0)}",
         "#                 qa                  qb                   h",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",

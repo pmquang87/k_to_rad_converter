@@ -2094,5 +2094,347 @@ class ShellInSolidNamed(unittest.TestCase):
         self.assertIn("#-- SKIPPED: *CONSTRAINED_BEAM_IN_SOLID", s)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B3 — the element-frame orthotropic /PROP/TYPE6 written co-rotational
+# ═════════════════════════════════════════════════════════════════════════════
+
+_CUBE8 = [(x, y, z) for z in (0, 1) for y in (0, 1) for x in (0, 1)]
+_CUBE_HEX = (1, 5, 1, 2, 4, 3, 5, 6, 8, 7)
+_CUBE_TET = (1, 5, 1, 2, 4, 5, 5, 5, 5, 5)        # a hex collapsed to 4 nodes
+#: the reference point of the AOPT 1 / 4 probes: element centre - P = +x
+_P = (-10.0, 0.5, 0.5)
+
+
+def _cube_mesh(tets: bool = False) -> str:
+    return ("*NODE\n"
+            + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                      for i, (x, y, z) in enumerate(_CUBE8, start=1))
+            + "*ELEMENT_SOLID\n"
+            + "".join(f"{v:>8}" for v in (_CUBE_TET if tets else _CUBE_HEX))
+            + "\n")
+
+
+def _hc126_deck(aopt: float = 0.0, p=(0.0, 0.0, 0.0), a=(0.0, 0.0, 0.0),
+                d=(0.0, 0.0, 0.0), v=(0.0, 0.0, 0.0),
+                tets: bool = False) -> str:
+    """One cube on *MAT_MODIFIED_HONEYCOMB 7 in the manual's card order
+    (Vol II R17 *MAT_126; card 3 EAAU..GCAU AOPT MACF, card 4 XP YP ZP A1 A2
+    A3 RFAC PRU, card 5 D1 D2 D3 TSEF SSEF VREF TREF SHDFLG, and card 6 V1
+    V2 V3 only when AOPT is 3 or 4)."""
+    out = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+           + _cube_mesh(tets)
+           + "*PART\ncore\n" + _row(5, 1, 7) + "\n"
+           "*SECTION_SOLID\n" + _row(1, 0) + "\n"
+           "*MAT_MODIFIED_HONEYCOMB\n"
+           + _row(7, 1.0e-10, 1000.0, 0.0, 1.0, 0.2, 0.05, 0.0) + "\n"
+           + _row(11, 11, 11, 11, 0, 0, 0, 0) + "\n"
+           + _row(100.0, 100.0, 10.0, 50.0, 50.0, 50.0, aopt, 0) + "\n"
+           + _row(*p, *a) + "\n"
+           + _row(*d, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+    if int(aopt) in (3, 4):
+        out += _row(*v) + "\n"
+    return (out + "*DEFINE_CURVE\n" + _row(11) + "\n"
+            + _row("0.0", "1.0") + "\n" + _row("1.0", "1.0") + "\n*END\n")
+
+
+def _ortho93_deck(aopt: float = 1.0, p=_P, v=(0.0, 0.0, 0.0), elform=2,
+                  shell_part: bool = False, tets: bool = False) -> str:
+    """One cube on *MAT_ORTHOTROPIC_ELASTIC 3 - the B3.2 worked card (EA
+    6000, EB 3000, EC 1500, PRBA = PRCA = PRCB 0.05, GAB 800, GBC 400, GCA
+    200); *shell_part* adds a shell part 6 on the SAME material."""
+    out = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+           + _cube_mesh(tets)
+           + "*PART\npad\n" + _row(5, 1, 3) + "\n"
+           "*SECTION_SOLID\n" + _row(1, elform) + "\n"
+           "*MAT_ORTHOTROPIC_ELASTIC\n"
+           + _row(3, 2.51e-9, 6000.0, 3000.0, 1500.0, 0.05, 0.05, 0.05) + "\n"
+           + _row(800.0, 400.0, 200.0, aopt) + "\n"
+           + _row(*p, 0.0, 0.0, 0.0, 0.0) + "\n"
+           + _row(*v, 0.0, 0.0, 0.0, 0.0) + "\n")
+    if shell_part:
+        out += ("*PART\nskin\n" + _row(6, 2, 3) + "\n"
+                "*SECTION_SHELL\n" + _row(2, 2) + "\n"
+                + _row(0.5, 0.5, 0.5, 0.5) + "\n"
+                "*NODE\n"
+                + "".join(f"{i:>8}{x:>16.1f}{y:>16.1f}{5.0:>16.1f}\n"
+                          for i, (x, y) in ((9, (0.0, 0.0)), (10, (1.0, 0.0)),
+                                            (11, (1.0, 1.0)), (12, (0.0, 1.0))))
+                + "*ELEMENT_SHELL\n" + "".join(
+                    f"{q:>8}" for q in (2, 6, 9, 10, 11, 12)) + "\n")
+    return out + "*END\n"
+
+
+def _ecd054_deck(aopt: float = 1.0, p=_P) -> str:
+    """One cube on *MAT_ENHANCED_COMPOSITE_DAMAGE 4 (-> /MAT/LAW127)."""
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            + _cube_mesh()
+            + "*PART\nply\n" + _row(5, 1, 4) + "\n"
+            "*SECTION_SOLID\n" + _row(1, 2) + "\n"
+            "*MAT_ENHANCED_COMPOSITE_DAMAGE\n"
+            + _row(4, 1.6e-9, 135000.0, 9000.0, 9000.0, 0.02, 0.02, 0.4) + "\n"
+            + _row(4700.0, 3200.0, 4100.0, "", aopt, 1, 2) + "\n"
+            + _row(*p, 0.0, 0.0, 0.0, 0.0) + "\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.033, 0.044) + "\n"
+            + _row(0.0, 0.2, 0.8, 0.5, 2.5, 0.02, -0.015, 0.06) + "\n"
+            + _row(1500.0, 2000.0, 200.0, 50.0, 70.0, 54.0, 0.5) + "\n"
+            "*END\n")
+
+
+def _type6_card(starter: str):
+    """``(card-1 row, Ip, skew_ID)`` of the one /PROP/TYPE6 block."""
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/TYPE6/"))
+    rows = [r for r in lines[i + 2:i + 10] if not r.startswith("#")]
+    return rows[0], int(rows[2][70:80]), int(rows[2][60:70])
+
+
+def _law93_rows(starter: str, mid: int = 3):
+    lines = starter.splitlines()
+    i = lines.index(f"/MAT/LAW93/{mid}")
+    return lines[i + 5], lines[i + 7]
+
+
+#: card 1 of the honeycomb TYPE6: Isolid 1, Ismstr 1 pinned, Iframe 2
+_HC_IFRAME2 = ("         1         1                   0         0         0"
+               "         0         2                   0")
+_HC_IFRAME0 = ("         1         1                   0         0         0"
+               "         0         0                   0")
+_L93_SWAPPED = ("                6000                1500                3000"
+                "                 200                 0.2",
+                "                 800                 400                 0.1"
+                "                0.05")
+_L93_ASIS = ("                6000                3000                1500"
+             "                 800                 0.1",
+             "                 200                 400                 0.2"
+             "                 0.1")
+
+
+class CorotationalOrthotropicFrame(unittest.TestCase):
+    """B3 — R1: an element-frame /PROP/TYPE6 (Ip 20 / 21 / 23 / 24) is
+    written CO-ROTATIONAL: the MAT_126 honeycomb's pinned Isolid 1 gets
+    Iframe 2 on a brick part, an Ip 21 / 24 orthotropic brick on Isolid 17
+    takes the round-6 Isolid-14 route. R2: on Ip 21 /MAT/LAW93's 2 / 3
+    constants are exchanged (Radioss b = e_z x a). R3: element-frame
+    tetrahedra are NAMED, cells unchanged. ``--no-corotational-orthotropic``
+    restores the 65ff389 cells. Reach 0 on every corpus, so every case is a
+    hand-built cube with hand-pinned rows."""
+
+    def _r1(self, warnings, ip):
+        hit = [w for w in warnings if "written CO-ROTATIONAL (Iframe 2)" in w]
+        self.assertEqual(len(hit), 1, warnings)
+        self.assertIn(f"(Ip={ip}, LS-DYNA AOPT", hit[0])
+        return hit[0]
+
+    def test_MAT_126_on_a_brick_gets_Iframe_2(self):
+        for aopt, kw, ip in ((0.0, {}, 20),
+                             (3.0, {"v": (0.0, 1.0, 0.0)}, 23),
+                             (1.0, {"p": _P}, 21),
+                             (4.0, {"p": _P, "v": (0.0, 0.0, 1.0)}, 24)):
+            with self.subTest(aopt=aopt):
+                r, s, _e = _convert(_hc126_deck(aopt, **kw))
+                row, got_ip, skew = _type6_card(s)
+                self.assertEqual((row, got_ip, skew), (_HC_IFRAME2, ip, 0))
+                w = self._r1(r.warnings, ip)
+                for needle in ("mmain.F90:2106-2113", "6.0047", "1.5049",
+                               "RMS 0.164 %", "/DEF_SOLID Iframe -2"):
+                    self.assertIn(needle, w)
+                # the Ip-21 clause belongs to the Ip-21 arm only
+                self.assertEqual("/MAT/LAW50's b / c cells are NOT permuted"
+                                 in w, ip == 21)
+
+    def test_the_skew_frame_honeycomb_is_untouched(self):
+        r, s, _e = _convert(_hc126_deck(2.0, a=(1.0, 0.0, 0.0),
+                                        d=(0.0, 1.0, 0.0)))
+        row, ip, skew = _type6_card(s)
+        self.assertEqual((row, ip), (_HC_IFRAME0, 0))
+        self.assertGreater(skew, 0)
+        self.assertFalse(_has(r.warnings, "CO-ROTATIONAL (Iframe 2)"))
+        self.assertFalse(_has(r.warnings, "never co-rotates a tetrahedron"))
+
+    def test_MAT_126_on_tetrahedra_is_named_not_changed(self):
+        for aopt, kw, ip in ((0.0, {}, 20), (3.0, {"v": (0.0, 1.0, 0.0)}, 23)):
+            for on in (True, False):
+                with self.subTest(aopt=aopt, on=on):
+                    r, s, _e = _convert(_hc126_deck(aopt, tets=True, **kw),
+                                        corotational_orthotropic=on)
+                    row, got_ip, _sk = _type6_card(s)
+                    self.assertEqual((row, got_ip), (_HC_IFRAME0, ip))
+                    hit = [w for w in r.warnings
+                           if "never co-rotates a tetrahedron" in w]
+                    self.assertEqual(len(hit), 1, r.warnings)
+                    for needle in (f"(Ip={ip}, LS-DYNA AOPT {int(aopt)})",
+                                   "holds 1 tetrahedra",
+                                   "-40.88 .. +23.48 %", "/INIBRI/ORTHO",
+                                   "sgrtails.F:972-1008"):
+                        self.assertIn(needle, hit[0])
+                    self.assertEqual("ERROR 1920" in hit[0], ip == 23)
+                    self.assertFalse(_has(r.warnings, "CO-ROTATIONAL"))
+
+    def test_LAW93_on_Ip_21_exchanges_b_and_c(self):
+        r, s, _e = _convert(_ortho93_deck())
+        self.assertEqual(_law93_rows(s), _L93_SWAPPED)
+        row, ip, _sk = _type6_card(s)
+        self.assertEqual((int(row[0:10]), ip), (14, 21))
+        self.assertTrue(_has(r.warnings, "/MAT/LAW93/3: AOPT 1 -> /PROP/TYPE6 "
+                             "Ip 21 builds b = e_z x a",
+                             "NU23 x E33 / E22 = 0.05", "2 of 6 right",
+                             "E 5996 / 1499.4 / 2998"), r.warnings)
+        self.assertTrue(_has(r.warnings, "(Ip=21, LS-DYNA AOPT 1)",
+                             "ELFORM 2 is written as Isolid 14"), r.warnings)
+        r0, s0, _e0 = _convert(_ortho93_deck(), corotational_orthotropic=False)
+        self.assertEqual(_law93_rows(s0), _L93_ASIS)
+        self.assertEqual(int(_type6_card(s0)[0][0:10]), 17)
+        self.assertTrue(_has(r0.warnings, "--no-corotational-orthotropic: "
+                             "/MAT/LAW93/3 keeps its 2 / 3 constants"))
+        self.assertFalse(_has(r0.warnings, "Ip 21 builds b = e_z x a"))
+
+    def test_a_shared_material_is_not_exchanged(self):
+        r, s, _e = _convert(_ortho93_deck(shell_part=True))
+        self.assertEqual(_law93_rows(s), _L93_ASIS)
+        self.assertTrue(_has(r.warnings, "*MAT_ORTHOTROPIC_ELASTIC 3: AOPT 1 "
+                             "-> Ip 21 on part(s) [5]",
+                             "part 6 (shell elements)",
+                             "the material card is shared"), r.warnings)
+        self.assertFalse(_has(r.warnings, "Ip 21 builds b = e_z x a"))
+
+    def test_a_tetrahedron_part_blocks_the_exchange(self):
+        r, s, _e = _convert(_ortho93_deck(tets=True))
+        self.assertEqual(_law93_rows(s), _L93_ASIS)
+        self.assertTrue(_has(r.warnings, "never co-rotates a tetrahedron",
+                             "(Ip=21, LS-DYNA AOPT 1)"), r.warnings)
+
+    def test_LAW127_on_Ip_21_keeps_its_cells_and_is_named(self):
+        r, s, _e = _convert(_ecd054_deck())
+        r0, s0, _e0 = _convert(_ecd054_deck(), corotational_orthotropic=False)
+        law = [ln for ln in s.splitlines() if ln.startswith("/MAT/LAW127/")]
+        self.assertEqual(len(law), 1, s[:3000])
+
+        def block(text):
+            lines = text.splitlines()
+            i = lines.index(law[0])
+            return lines[i:i + 30]
+        self.assertEqual(block(s), block(s0))
+        self.assertTrue(_has(r.warnings, "(part 5, /MAT/LAW127): AOPT 1 -> "
+                             "Ip 21", "/MAT/LAW127's 2 / 3 cells are NOT "
+                             "exchanged"), r.warnings)
+        self.assertFalse(_has(r.warnings, "Ip 21 builds b = e_z x a"))
+
+    def test_AOPT_4_takes_the_Isolid_14_route(self):
+        r, s, _e = _convert(_ortho93_deck(aopt=4.0, v=(0.0, 0.0, 1.0)))
+        row, ip, _sk = _type6_card(s)
+        self.assertEqual((int(row[0:10]), ip), (14, 24))
+        self.assertEqual(_law93_rows(s), _L93_ASIS)     # no exchange on 24
+        self.assertTrue(_has(r.warnings, "(Ip=24, LS-DYNA AOPT 4)",
+                             "on Isolid 14 right on 6 of 6"), r.warnings)
+        r0, s0, _e0 = _convert(_ortho93_deck(aopt=4.0, v=(0.0, 0.0, 1.0)),
+                               corotational_orthotropic=False)
+        self.assertEqual(int(_type6_card(s0)[0][0:10]), 17)
+        r24, s24, _e24 = _convert(
+            _ortho93_deck(aopt=4.0, v=(0.0, 0.0, 1.0), elform=-2),
+            assumed_strain_isolid="24")
+        self.assertEqual(int(_type6_card(s24)[0][0:10]), 24)
+
+    def test_the_opt_out_restores_the_65ff389_cards(self):
+        for aopt, kw, ip in ((0.0, {}, 20), (1.0, {"p": _P}, 21),
+                             (3.0, {"v": (0.0, 1.0, 0.0)}, 23),
+                             (4.0, {"p": _P, "v": (0.0, 0.0, 1.0)}, 24)):
+            with self.subTest(aopt=aopt):
+                r, s, _e = _convert(_hc126_deck(aopt, **kw),
+                                    corotational_orthotropic=False)
+                self.assertEqual(_type6_card(s)[:2], (_HC_IFRAME0, ip))
+                self.assertTrue(_has(r.warnings,
+                                     "--no-corotational-orthotropic: "
+                                     "/PROP/TYPE6", f"(Ip={ip})"))
+
+    def test_the_sbrake_shape_is_byte_identical_in_both_arms(self):
+        """Isolid 14 is already co-rotational (the reader forces JCVT 2,
+        hm_read_prop06.F:297-298), so R1 leaves the round-6 card alone."""
+        deck = _ortho93_deck(aopt=0.0, p=(0.0, 0.0, 0.0), elform=1)
+        _r, s_on, e_on = _convert(deck)
+        _r0, s_off, e_off = _convert(deck, corotational_orthotropic=False)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+        row, ip, _sk = _type6_card(s_on)
+        self.assertEqual((int(row[0:10]), int(row[70:80]), ip), (14, 0, 20))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The flags of part B reach the parser, the API, the GUI and the README
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Round7FlagWiringB(Round7FlagWiringA):
+    """Every new Part-B lever reaches the parser, the API, the GUI and the
+    README - the ``Round7FlagWiringA`` checks, inherited, over part B's
+    list."""
+
+    _FLAGS = {
+        "--corotational-orthotropic": "corotational_orthotropic",
+    }
+    _HELP_FIGURES = {
+        "--corotational-orthotropic": ("6.0047", "1.5049",
+                                       "smorth3.F:324-327", "0.164 %"),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Retracted spellings (part B): measured wrong, or superseded by a measurement
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Part B statements a round-7 change made false. CHANGELOG may quote them
+#: (it is the history); no other shipped text may.
+_RETRACTED_ROUND_7_B = (
+    # B3: the honeycomb TYPE6 is written co-rotational since round 7
+    "The card is left as dyna2rad writes it, because the honeycomb's crush "
+    "under a co-rotational frame has no LS-DYNA reference here",
+    "the point/vector modes 21 / 24 take GLOBAL directions and are not in "
+    "the set",
+    "it is NOT changed (its crush under a co-rotational frame has no "
+    "reference here)",
+)
+
+
+class Round7RetractedStatementsB(unittest.TestCase):
+    """The round-4/5/6 shape: no needle in any shipped text; the guard fires
+    on each needle split across two adjacent literals; a PREFIX still fires;
+    the replacement text IS shipped."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_7_B:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_7_B:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "') + ' y')
+                self.assertIn(_collapse(needle).lower(), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_7_B:
+            with self.subTest(needle=needle):
+                self.assertIn(_collapse(needle[:max(8, len(needle) // 2)]),
+                              _collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_SHIPPED_TEXTS())
+        pairs = (
+            ("k2rad/writer/composites.py",
+             "so the pinned Isolid 1 property is written CO-ROTATIONAL "
+             "(Iframe 2)"),
+            ("k2rad/writer/composites.py",
+             "_ELEMENT_FRAME_IPS_ALL = (20, 21, 23, 24)"),
+            ("README.md", "Since round 7 every element-frame orthotropic "
+             "`/PROP/TYPE6` is written CO-ROTATIONAL"),
+        )
+        for rel, needle in pairs:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_collapse(needle), texts[key])
+
+
 if __name__ == "__main__":
     unittest.main()

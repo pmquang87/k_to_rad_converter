@@ -1546,6 +1546,9 @@ class OrthotropicConnectivityFrameIsolid(unittest.TestCase):
         self.assertEqual(len(cells), 1)
         self.assertNotEqual(cells[0][1], 14, starter[:3000])
         self.assertFalse(_has(result.warnings, "Isolid 14 (HA8"))
+        # round 7 (B3, R3): the tetrahedron's element frame is NAMED
+        self.assertTrue(_has(result.warnings, "never co-rotates a tetrahedron",
+                             "(Ip=20, LS-DYNA AOPT 0)"), result.warnings)
 
     def test_a_matrix_that_is_not_positive_definite_is_refused(self):
         result, starter, _e = _convert(_aniso_deck(
@@ -4461,28 +4464,51 @@ def _honeycomb_deck(aopt=0.0) -> str:
             "*END\n")
 
 
+def _type6_iframe(starter: str) -> int:
+    """Card 1's Iframe cell (columns 71-80) of the one /PROP/TYPE6 block."""
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/TYPE6/"))
+    return int(lines[i + 3][70:80])
+
+
 class PostReviewHoneycombFrameNamed(unittest.TestCase):
-    """The MAT_126 honeycomb's pinned Isolid 1 / Iframe 0 /PROP/TYPE6 is
-    NOT co-rotational, so a connectivity frame (Ip 20 / 23) is stored in
-    global components (smorth3.F:282-291 / :380-389) and was measured
-    misoriented. Named - not changed - on the element-frame arms only."""
+    """The MAT_126 honeycomb's pinned Isolid 1 /PROP/TYPE6 with Iframe 0 is
+    NOT co-rotational, so an element frame (Ip 20 / 23) is stored in global
+    components (smorth3.F:282-291 / :380-389) and was measured misoriented.
+    Round 6 NAMED it; round 7 (B3, R1) WRITES the property co-rotational
+    (Iframe 2) by default, and ``--no-corotational-orthotropic`` restores
+    the round-6 card (Iframe 0) with its own sentence. EXPECTED VALUES MOVED
+    in round 7: the default arm's Iframe cell 0 -> 2 and the warning's
+    needles (the round-6 ones - 'element connectivity', 'Iframe 0', the
+    ROADMAP item 22 pointer - described the defect the default now fixes);
+    the opt-out arm keeps the round-6 card."""
 
     def test_an_element_frame_honeycomb_is_warned(self):
         res, starter, _e = _convert(_honeycomb_deck(aopt=0.0))
         self.assertIn("/MAT/LAW50/7", starter)
+        self.assertEqual(_type6_iframe(starter), 2)
         hit = [w for w in res.warnings if "the honeycomb's orthotropy frame "
-               "comes from the element connectivity" in w]
+               "comes from the element (Ip=" in w]
         self.assertEqual(len(hit), 1, res.warnings)
-        for needle in ("(Ip=20, LS-DYNA AOPT 0)", "Iframe 0",
-                       "smorth3.F:282-291", "ROADMAP R14 round-6 item 22"):
+        for needle in ("(Ip=20, LS-DYNA AOPT 0)",
+                       "written CO-ROTATIONAL (Iframe 2)",
+                       "smorth3.F:282-291", "6.0047", "1.5049",
+                       "--no-corotational-orthotropic"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hit[0])
+        res0, s0, _e0 = _convert(_honeycomb_deck(aopt=0.0),
+                                 corotational_orthotropic=False)
+        self.assertEqual(_type6_iframe(s0), 0)
+        self.assertTrue(_has(res0.warnings, "--no-corotational-orthotropic: "
+                             "/PROP/TYPE6", "keeps Iframe 0"), res0.warnings)
+        self.assertFalse(_has(res0.warnings, "written CO-ROTATIONAL"))
 
     def test_a_skew_frame_honeycomb_is_not(self):
-        res, _s, _e = _convert(_honeycomb_deck(aopt=2.0))
+        res, starter, _e = _convert(_honeycomb_deck(aopt=2.0))
         self.assertFalse(_has(res.warnings, "the honeycomb's orthotropy frame "
-                              "comes from the element connectivity"),
+                              "comes from the element"),
                          res.warnings)
+        self.assertEqual(_type6_iframe(starter), 0)
 
 
 if __name__ == "__main__":

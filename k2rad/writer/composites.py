@@ -37,7 +37,7 @@ the starter.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..state import (
     ConversionState,
@@ -1611,6 +1611,55 @@ def _make_composite_materials(state: ConversionState) -> List[str]:
     return lines
 
 
+def _law93_ip21_split(state: ConversionState,
+                      mid: int) -> Tuple[List[int], List[str]]:
+    """``(eligible part ids, the other users in words)`` of an orthotropic
+    material whose axes resolve to ``/PROP/TYPE6`` Ip 21 (AOPT 1 with a
+    non-null point P — the ``_composite_ref_axis`` solid branch). A user part
+    is ELIGIBLE when it is a solid-only part on the TYPE6 route (claimed by
+    ``_assign_composite_props``) whose elements include a /BRICK and no
+    tetrahedron; every other user is named. PURE: reads the deck only, never
+    calls ``_composite_ref_axis`` (which warns and reserves skew ids). Empty
+    eligible list when the material does not resolve to Ip 21."""
+    mat = state.mat_orthotropic.get(mid)
+    if mat is None:
+        return [], []
+    raw = mat.aopt
+    if abs(raw - round(raw)) >= 1e-9 or int(round(raw)) != 1 \
+            or not any((mat.xp, mat.yp, mat.zp)):
+        return [], []
+    shell_pids = {e.pid for e in state.shell_elems}
+    tshell_pids = {e.pid for e in state.tshell_elems}
+    eligible: List[int] = []
+    other: List[str] = []
+    for pid in sorted(p for p, part in state.parts.items() if part.mid == mid):
+        n_brick, n_tet = _part_solid_shapes(state, pid)
+        if pid in shell_pids:
+            other.append(f"part {pid} (shell elements)")
+        elif pid in tshell_pids:
+            other.append(f"part {pid} (thick shells)")
+        elif n_tet:
+            other.append(f"part {pid} ({n_tet} tetrahedra)")
+        elif not n_brick or pid not in state.composite_prop_ids:
+            other.append(f"part {pid} (not on the /PROP/TYPE6 brick route)")
+        else:
+            eligible.append(pid)
+    return eligible, other
+
+
+def _law93_bc_exchange(state: ConversionState, mid: int) -> bool:
+    """The ONE decision of R14 triage round 7, B3 (R2), read by
+    ``_emit_mat_law93`` (which permutes the cells) and nowhere else: exchange
+    the /MAT/LAW93 2 / 3 constants iff the material resolves to Ip 21, EVERY
+    part using it is eligible (``_law93_ip21_split``: the cell is per
+    MATERIAL, so a shared card reaches the other parts too) and
+    ``--corotational-orthotropic`` is on."""
+    if not state.options.corotational_orthotropic:
+        return False
+    eligible, other = _law93_ip21_split(state, mid)
+    return bool(eligible) and not other
+
+
 def _emit_mat_law93(mat: MatOrthotropicElastic,
                     state: ConversionState) -> List[str]:
     """*MAT_ORTHOTROPIC_ELASTIC (002) → /MAT/LAW93 (ORTH_HILL).
@@ -1690,6 +1739,45 @@ def _emit_mat_law93(mat: MatOrthotropicElastic,
             "orthotropy axes are NOT permuted. Re-order EA/EB/EC and the "
             "AOPT vectors by hand if the swap matters. (dyna2rad never reads "
             "MACF either.)")
+    # R14 triage round 7, B3 (R2): on Ip 21 (AOPT 1 + P) Radioss builds b =
+    # e_z x a (smorth3.F:324-327) where LS-DYNA builds b = (a x e_z) x a, so
+    # (b, c)_Radioss = (-c, b)_LS-DYNA: exchange the 2 and 3 constants. AFTER
+    # the stability screen above - its products are a permutation of the
+    # same set, so its verdict is the same.
+    eligible, other = _law93_ip21_split(state, mat.mid)
+    if eligible:
+        if _law93_bc_exchange(state, mat.mid):
+            nu23p = nu23 * ec / eb if eb else 0.0
+            eb, ec = ec, eb
+            g12, g13 = g13, g12
+            nu12, nu13 = nu13, nu12
+            nu23 = nu23p
+            state.warn(
+                f"/MAT/LAW93/{mat.mid}: AOPT 1 -> /PROP/TYPE6 Ip 21 builds b "
+                "= e_z x a (smorth3.F:324-327) where LS-DYNA builds b = (a x "
+                "e_z) x a (Vol II R17 Fig. M2-1), i.e. Radioss's (b, c) is "
+                "LS-DYNA's (-c, b); so the 2 and 3 constants are exchanged on "
+                "the card: E22 <-> E33, G12 <-> G13, NU12 <-> NU13, NU23 -> "
+                f"NU23 x E33 / E22 = {nu23p:g}. MEASURED on a one-hex LAW93 "
+                "cube at nt 4 (two connectivities, every axis, against EA / "
+                "EB / EC): 2 of 6 right without the exchange, 6 of 6 with it "
+                "(E 5996 / 1499.4 / 2998 against 6000 / 1500 / 3000).")
+        elif not state.options.corotational_orthotropic:
+            state.warn(
+                f"--no-corotational-orthotropic: /MAT/LAW93/{mat.mid} keeps "
+                "its 2 / 3 constants on the /PROP/TYPE6 Ip 21 of part(s) "
+                f"{eligible}, so LS-DYNA's AOPT 1 b and c axes act on each "
+                "other's constants (Radioss b = e_z x a, smorth3.F:324-327; "
+                "the LAW93 cube read 2 of 6 right).")
+        else:
+            state.warn(
+                f"*MAT_ORTHOTROPIC_ELASTIC {mat.mid}: AOPT 1 -> Ip 21 on "
+                f"part(s) {eligible}, but the material is also used by "
+                f"{', '.join(other)}: the b / c exchange Radioss's Ip 21 "
+                "needs (b = e_z x a, smorth3.F:324-327, against LS-DYNA's b "
+                "= (a x e_z) x a) is NOT written, because the material card "
+                "is shared; the 2 and 3 axes of the Ip-21 parts are "
+                "exchanged.")
     return [
         f"/MAT/LAW93/{mat.mid}",
         mat.title or f"MAT_{mat.mid}",
@@ -3104,31 +3192,51 @@ def _emit_mat126_solid_prop(state: ConversionState, prop_id: int, pid: int,
             "1-exp(-x_log) engineering crush. If the curves were really "
             "fitted as log strain, restate them in engineering strain "
             "(x_eng = 1-exp(-x_log)).")
-    if ip in _CONNECTIVITY_FRAME_IPS:
-        # Post-review round of #140: the pinned Isolid 1 with Iframe 0 is a
-        # NON-co-rotational property, and on those the starter stores a
-        # connectivity frame's GLOBAL components (smorth3.F:282-291 Ip 20,
-        # :380-389 Ip 23) - measured misoriented (see
-        # _connectivity_frame_isolid's MECHANISM note). Named, not changed:
-        # the honeycomb's crush under Iframe 2 has no LS-DYNA reference here
-        # (ROADMAP R14 round-6 item 22); reach 0 on the corpora.
-        state.warn(
-            f"/PROP for part {pid}: the honeycomb's orthotropy frame comes "
-            f"from the element connectivity (Ip={ip}, LS-DYNA AOPT "
-            f"{0 if ip == 20 else 3}) and this pinned Isolid 1 property "
-            "states Iframe 0, i.e. the /DEF_SOLID default 1, NOT "
-            "co-rotational (hm_read_prop06.F:296, defaults_mod.F90:176): "
-            "there the starter stores the frame's GLOBAL components "
-            "(smorth3.F:282-291 / :380-389) and the frame was MEASURED on the "
-            "wrong axes - an orthotropic (/MAT/LAW93) unit cube on Isolid 1 "
-            "and 17 with Iframe 0 put its soft axis on the wrong axis in 4 of "
-            "4 loadings, on the right one with Iframe 2 and on Isolid 14 (the "
-            "post-review verification of round 6 measured the same on a "
-            "*MAT_MODIFIED_HONEYCOMB /MAT/LAW50 cube). The card "
-            "is left as dyna2rad writes it, because the honeycomb's crush "
-            "under a co-rotational frame has no LS-DYNA reference here "
-            "(ROADMAP R14 round-6 item 22): a skew frame (AOPT 2, or a "
-            "*DEFINE_COORDINATE_* system) orients correctly on any Isolid.")
+    # R14 triage round 7, B3 (R1): the pinned Isolid 1 property is NOT
+    # co-rotational by default (Iframe 0 = the /DEF_SOLID default 1,
+    # hm_read_prop06.F:296, defaults_mod.F90:176), and on such a property the
+    # starter stores an element-derived frame's GLOBAL components while the
+    # engine reads it in the element frame - so the frame is written
+    # CO-ROTATIONAL (Iframe 2) wherever the part holds a /BRICK. A
+    # tetrahedron is never co-rotated (sgrtails.F:972-1008), so Iframe does
+    # nothing there: the tetrahedra are NAMED (R3) and keep today's cells.
+    iframe = 0
+    n_brick, n_tet = _part_solid_shapes(state, pid)
+    if ip in _ELEMENT_FRAME_IPS_ALL and n_brick:
+        if state.options.corotational_orthotropic:
+            iframe = 2
+            state.warn(
+                f"/PROP/TYPE6 {prop_id} (part {pid}, *MAT_MODIFIED_HONEYCOMB "
+                "-> /MAT/LAW50): the honeycomb's orthotropy frame comes from "
+                f"the element (Ip={ip}, LS-DYNA AOPT {_IP_AOPT[ip]}), so the "
+                "pinned Isolid 1 property is written CO-ROTATIONAL (Iframe 2): "
+                "the starter projects such a frame onto the element frame "
+                "only on a co-rotational property (smorth3.F:282-291) and "
+                "otherwise stores its GLOBAL components, while the engine "
+                "always reads it in the element frame (mmain.F90:2106-2113, "
+                "mreploc.F:132-140); dyna2rad reaches the same state through "
+                "/DEF_SOLID Iframe -2. MEASURED on a one-hex MAT_126 crush "
+                "cube at nt 4 (two connectivities, every axis, against the "
+                "closed form): with Iframe 0 the a-direction crush read the "
+                "c-curve (sigma(0.10) 6.0047 against 1.5; 0 of 12 crush and 0 "
+                "of 6 shear cases right), with Iframe 2 1.5049 (12 of 12, 6 "
+                "of 6); the plateau is unchanged (IE at the fifths of the run "
+                "+0.43 / +0.39 / +0.31 / +0.26 / +0.27 % against the closed "
+                "form, RMS 0.164 %) at the same cycle count. Pass "
+                "--no-corotational-orthotropic for the 65ff389 card "
+                "(Iframe 0)."
+                + (_IP21_LAW50_CLAUSE if ip == 21 else ""))
+        else:
+            state.warn(
+                f"--no-corotational-orthotropic: /PROP/TYPE6 {prop_id} (part "
+                f"{pid}) keeps Iframe 0 with an element frame (Ip={ip}): the "
+                "frame is stored in GLOBAL components (smorth3.F:282-291) and "
+                "was measured misoriented on the MAT_126 cube (0 of 12 crush "
+                "cases).")
+    if ip in _ELEMENT_FRAME_IPS_ALL and n_tet:
+        _warn_tetra_element_frame(state, prop_id, pid,
+                                  "*MAT_MODIFIED_HONEYCOMB -> /MAT/LAW50",
+                                  ip, n_tet)
     # isolid is PINNED to 1 here, so --assumed-strain-isolid cannot reach
     # this property at all: dyna2rad's honeycomb TYPE6 is ISOLID=1/Ismstr=1
     # whatever the section says.
@@ -3136,7 +3244,7 @@ def _emit_mat126_solid_prop(state: ConversionState, prop_id: int, pid: int,
                             f"(part {pid})", sec, 1000 if tet10 else 0,
                             istrain, refvec=axis.vec, ip=ip, phi=axis.phi,
                             skew_id=axis.skew_id, refpoint=axis.pt,
-                            isolid=1, ismstr=1)
+                            isolid=1, ismstr=1, iframe=iframe)
 
 
 def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
@@ -3162,6 +3270,20 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
         f"solid part is repointed at a synthesized /PROP/TYPE6 (SOL_ORTH) "
         f"{prop_id} rather than the isotropic /PROP/SOLID (starter ERROR 3047).")
     isolid = _connectivity_frame_isolid(state, prop_id, pid, sec, ip, law)
+    _n_brick, n_tet = _part_solid_shapes(state, pid)
+    if ip == 21 and law != "/MAT/LAW93":
+        # R14 triage round 7, B3 (R2): the b / c exchange is measured for
+        # /MAT/LAW93 only - every other law keeps its cells and is named.
+        state.warn(
+            f"/PROP/TYPE6 {prop_id} (part {pid}, {law}): AOPT 1 -> Ip 21: "
+            "Radioss's b and c axes are LS-DYNA's c and b (smorth3.F:324-327 "
+            f"against Vol II R17 Fig. M2-1), and {law}'s 2 / 3 cells are NOT "
+            "exchanged (the permutation is measured for /MAT/LAW93 only), so "
+            "this material's b and c properties act on each other's axes. "
+            "Restate the axes as AOPT 2 (a skew frame orients correctly on "
+            "every Isolid) if b and c differ.")
+    if ip in _ELEMENT_FRAME_IPS_ALL and n_tet:
+        _warn_tetra_element_frame(state, prop_id, pid, law, ip, n_tet)
     return _emit_prop_type6(prop_id, f"COMPOSITE_SOLID_PROP_{prop_id} "
                             f"(part {pid})", sec, 1000 if tet10 else 0, istrain,
                             refvec=axis.vec, ip=ip, phi=axis.phi,
@@ -3171,12 +3293,85 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
                                 state.options.assumed_strain_isolid_value))
 
 
-#: The /PROP/TYPE6 ``Ip`` modes whose orthotropy frame is built from the
-#: ELEMENT'S OWN geometry: 20 = N1->N2 / N1->N4 (LS-DYNA AOPT 0), 23 = the
-#: vector ``v`` against the element normal (AOPT 3). The skew mode (Ip 0 +
-#: skew_ID, AOPT 2 / a *DEFINE_COORDINATE system) and the point/vector modes
-#: 21 / 24 take GLOBAL directions and are not in the set.
-_CONNECTIVITY_FRAME_IPS = (20, 23)
+#: The /PROP/TYPE6 ``Ip`` modes whose frame the starter stores in GLOBAL
+#: components on a NON-co-rotational property (smorth3.F:282-291 Ip 20 /
+#: :329-339 Ip 21 / :380-389 Ip 23 / :442-452 Ip 24 - every one ends in the
+#: same ``IF (JCVT > 0)`` projection) while the engine reads it in the
+#: element frame (mmain.F90:2106-2113 -> mreploc.F:132-140): 20 = N1->N2 /
+#: N1->N4 (LS-DYNA AOPT 0), 21 = element centre minus the point P (AOPT 1),
+#: 23 = the vector ``v`` against the element normal (AOPT 3), 24 = the
+#: cylindrical system v through P (AOPT 4). The skew mode (Ip 0 + skew_ID,
+#: AOPT 2 / a *DEFINE_COORDINATE system) projects on every Isolid
+#: (smorth3.F:131-146) and is not in the set. R14 triage round 7, B3 (R1)
+#: widened the round-6 route from (20, 23) to all four;
+#: ``--no-corotational-orthotropic`` keeps the round-6 set.
+_ELEMENT_FRAME_IPS_ALL = (20, 21, 23, 24)
+_ELEMENT_FRAME_IPS_ROUND6 = (20, 23)
+
+#: The LS-DYNA AOPT each element-frame Ip is written from (_composite_ref_axis).
+_IP_AOPT = {20: 0, 21: 1, 23: 3, 24: 4}
+
+#: The Ip-21 clause of the honeycomb's R1 warning: LAW50's b / c cells are not
+#: permuted (the exchange is measured for /MAT/LAW93 only).
+_IP21_LAW50_CLAUSE = (
+    " LS-DYNA's AOPT 1 b and c axes are EXCHANGED in Radioss's Ip 21 (b = e_z "
+    "x a, smorth3.F:324-327, against LS-DYNA's b = (a x e_z) x a) and "
+    "/MAT/LAW50's b / c cells are NOT permuted (unmeasured): the b and c "
+    "curves act on each other's axes.")
+
+
+def _element_frame_ips(state: ConversionState) -> Tuple[int, ...]:
+    """The Ip set the Isolid-14 route covers: all four element-frame modes by
+    default (round 7, B3 R1), the round-6 pair under
+    ``--no-corotational-orthotropic``."""
+    return (_ELEMENT_FRAME_IPS_ALL if state.options.corotational_orthotropic
+            else _ELEMENT_FRAME_IPS_ROUND6)
+
+
+def _part_solid_shapes(state: ConversionState, pid: int) -> Tuple[int, int]:
+    """``(bricks, tetrahedra)`` of a part's solid elements in the mesh
+    emitter's own sense (writer/mesh.py): a /BRICK is not a 10-node
+    tetrahedron and has more than 4 distinct nodes; everything else (a
+    10-node element, or a hex collapsed to <= 4 distinct nodes) is written as
+    a tetrahedron."""
+    n_brick = n_tet = 0
+    for e in state.solid_elems:
+        if e.pid != pid:
+            continue
+        if len(e.nodes) != 10 and len(_ordered_unique_nodes(e.nodes)) > 4:
+            n_brick += 1
+        else:
+            n_tet += 1
+    return n_brick, n_tet
+
+
+def _warn_tetra_element_frame(state: ConversionState, prop_id: int, pid: int,
+                              law: str, ip: int, n_tet: int) -> None:
+    """R14 triage round 7, B3 (R3): an element-frame /PROP/TYPE6 on a part
+    that holds tetrahedra is NAMED, never changed (today's cells; prints in
+    both arms of --corotational-orthotropic, since it changes no cell)."""
+    state.warn(
+        f"/PROP/TYPE6 {prop_id} (part {pid}, {law}): the orthotropy frame "
+        f"comes from the element (Ip={ip}, LS-DYNA AOPT {_IP_AOPT[ip]}) and "
+        f"the part holds {n_tet} tetrahedra, whose frame OpenRadioss cannot "
+        "build like LS-DYNA: it never co-rotates a tetrahedron "
+        "(sgrtails.F:972-1008 sets JCVT 0 on every 4- and 10-node "
+        "tetrahedron, so Iframe changes nothing there) and takes a "
+        "tetrahedron's element frame from its edges X3-X4 / X1-X4 "
+        "(smorth3.F:251-256) after the reader's N2 <-> N4 swap "
+        "(hm_read_solid.F:286-293). MEASURED on a 6-tetrahedron cube at nt 4 "
+        "against the closed form (two connectivities, every axis): the "
+        "written frame reads -40.88 .. +23.48 % (0 of 12 right; Iframe 2 "
+        "identical to the digit), while a per-element /INIBRI/ORTHO carrying "
+        "each tetrahedron's LS-DYNA a / b frame reads within 0.06 % (12 of "
+        "12) - that route is not written yet (ROADMAP). A skew frame (AOPT 2 "
+        "or a *DEFINE_COORDINATE system) orients a tetrahedron correctly."
+        + (" AOPT 3 has no LS-DYNA definition on a tetrahedron (Vol II R17 "
+           "p.2-160: 'only available for hexahedrons'), and the starter "
+           "refuses Ip 23 with ERROR 1920 ('INVALID ZERO REFERENCE VECTOR "
+           "WITH IP=23') whenever v is parallel to an X2-X4 edge (24 of 24 "
+           "axis-aligned cube cases); the card is written as before."
+           if ip == 23 else ""))
 
 
 def _connectivity_frame_isolid(state: ConversionState, prop_id: int, pid: int,
@@ -3234,9 +3429,14 @@ def _connectivity_frame_isolid(state: ConversionState, prop_id: int, pid: int,
     loaded and unloaded on both connectivities): Isolid 17 and Isolid 1 with
     ``Iframe 0`` wrong in 4 of 4, the same two with ``Iframe 2`` right in 4
     of 4, Isolid 14 right in 4 of 4. Isolid 14 was kept as the route (the
-    finalization's measured choice); the honeycomb route's pinned Isolid 1 /
-    ``Iframe 0`` is the same fault, left as ROADMAP R14 round-6 item 22."""
-    if ip not in _CONNECTIVITY_FRAME_IPS or sec is None:
+    finalization's measured choice). Round 7 (B3, R1) widened the route to
+    the point / cylindrical modes Ip 21 / 24, whose frame ends in the same
+    ``IF (JCVT > 0)`` projection (smorth3.F:329-339 / :442-452; a LAW93 cube
+    at nt 4: Ip 24 on Isolid 17 / Iframe 0 wrong on 6 of 6, on Isolid 14
+    right on 6 of 6), and writes the honeycomb route's pinned Isolid 1 with
+    ``Iframe 2`` (``_emit_mat126_solid_prop``); ``--no-corotational-
+    orthotropic`` keeps the round-6 pair (20, 23)."""
+    if ip not in _element_frame_ips(state) or sec is None:
         return None
     base = _elform_to_isolid(sec.elform,
                              state.options.assumed_strain_isolid_value)
@@ -3249,21 +3449,44 @@ def _connectivity_frame_isolid(state: ConversionState, prop_id: int, pid: int,
                and len(_ordered_unique_nodes(e.nodes)) > 4
                for e in state.solid_elems):
         return None
-    mode = ("the element connectivity N1->N2 / N1->N4 (Ip=20, LS-DYNA AOPT 0)"
-            if ip == 20 else
-            "the reference vector against the element normal (Ip=23, LS-DYNA "
-            "AOPT 3)")
+    if ip in (20, 23):
+        mode = ("the element connectivity N1->N2 / N1->N4 (Ip=20, LS-DYNA "
+                "AOPT 0)" if ip == 20 else
+                "the reference vector against the element normal (Ip=23, "
+                "LS-DYNA AOPT 3)")
+        why = (
+            "and on Isolid 17 OpenRadioss was MEASURED to build "
+            "that frame on the wrong axes (a 1 mm cube of 11.1.sbrake's MID 3 at "
+            "10 MPa: the soft EC axis landed on the wrong global axis in 8 of 8 "
+            "Ip=20 arms, explicit and implicit, on two connectivities - x instead "
+            "of z on one, z instead of x on the other; Ip=23 wrong on 4 of 6 "
+            "loaded faces against LS-DYNA's AOPT 3 frame, Vol II R17 p.2-162), "
+            "while Isolid 14 and 24 oriented like LS-DYNA on every arm (the cube's "
+            "internal energy +0.2 % / +0.5 % against the hand values on Isolid "
+            "14)")
+    elif ip == 24:
+        mode = "the cylindrical axis v through P (Ip=24, LS-DYNA AOPT 4)"
+        why = ("which OpenRadioss stores in GLOBAL components on a "
+               "non-co-rotational property such as Isolid 17 (round 7: "
+               "smorth3.F:442-452 ends in the same IF (JCVT > 0) projection as "
+               "Ip 20 / 23), and MEASURED on a 1 mm LAW93 cube at nt 4 (two "
+               "connectivities, every axis): Ip 24 on Isolid 17 / Iframe 0 "
+               "wrong on 6 of 6, on Isolid 14 right on 6 of 6")
+    else:
+        mode = "the reference point P (Ip=21, LS-DYNA AOPT 1)"
+        why = ("which OpenRadioss stores in GLOBAL components on a "
+               "non-co-rotational property such as Isolid 17 (round 7: "
+               "smorth3.F:329-339 ends in the same IF (JCVT > 0) projection as "
+               "Ip 20 / 23); the 1 mm LAW93 cube at nt 4 (two connectivities, "
+               "every axis) read 2 of 6 on Isolid 17 / Iframe 0 and on Isolid "
+               "14 alike - the axis-aligned cube does not separate the two "
+               "frames, and LS-DYNA's b and c axes are exchanged on both - and "
+               "6 of 6 on Isolid 14 with the b / c constants exchanged "
+               "(/MAT/LAW93 only)")
     state.warn(
         f"/PROP/TYPE6 {prop_id} (part {pid}, {law}): the orthotropy frame is "
-        f"built from {mode}, and on Isolid 17 OpenRadioss was MEASURED to build "
-        "that frame on the wrong axes (a 1 mm cube of 11.1.sbrake's MID 3 at "
-        "10 MPa: the soft EC axis landed on the wrong global axis in 8 of 8 "
-        "Ip=20 arms, explicit and implicit, on two connectivities - x instead "
-        "of z on one, z instead of x on the other; Ip=23 wrong on 4 of 6 "
-        "loaded faces against LS-DYNA's AOPT 3 frame, Vol II R17 p.2-162), "
-        "while Isolid 14 and 24 oriented like LS-DYNA on every arm (the cube's "
-        "internal energy +0.2 % / +0.5 % against the hand values on Isolid "
-        f"14). So the part's ELFORM {sec.elform} is written "
+        f"built from {mode}, {why}. So the part's ELFORM {sec.elform} is "
+        "written "
         "as Isolid 14 (HA8, fully integrated like the Isolid 17 it replaces) "
         "instead of 17. The skew mode (AOPT 2 or a *DEFINE_COORDINATE system) "
         "orients correctly on 17 and is left alone.")

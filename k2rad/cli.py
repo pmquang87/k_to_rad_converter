@@ -579,6 +579,23 @@ def build_parser() -> argparse.ArgumentParser:
              "/PROP/TYPE20.",
     )
     parser.add_argument(
+        "--corotational-orthotropic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an element-frame orthotropic /PROP/TYPE6 (Ip 20 / 21 / 23 "
+             "/ 24, LS-DYNA AOPT 0 / 1 / 3 / 4) co-rotational: the MAT_126 "
+             "honeycomb's pinned Isolid 1 gets Iframe 2, and an Ip 21 / 24 "
+             "orthotropic brick on Isolid 17 is written as Isolid 14 like "
+             "Ip 20 / 23 since round 6; on Ip 21 /MAT/LAW93's 2 / 3 "
+             "constants are exchanged (Radioss b = e_z x a, "
+             "smorth3.F:324-327). ON by default. MEASURED on one-hex coupons "
+             "at nt 4: MAT_126 crush 0 -> 12 of 12 cases right (sigma(0.10) "
+             "6.0047 -> 1.5049 against 1.5), LAW93 Ip 24 0 -> 6 of 6, Ip 21 "
+             "2 -> 6 of 6; the plateau unchanged (RMS 0.164 %%). Tetrahedra "
+             "are named, not changed. Use --no-corotational-orthotropic for "
+             "the 65ff389 cards.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1252,6 +1269,7 @@ def main(argv=None) -> int:
         spotweld_shear_yield=args.spotweld_shear_yield,
         spotweld_efail_displacement=args.spotweld_efail_displacement,
         implicit_tshell_solid=args.implicit_tshell_solid,
+        corotational_orthotropic=args.corotational_orthotropic,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

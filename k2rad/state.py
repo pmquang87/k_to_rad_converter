@@ -7735,6 +7735,29 @@ class ConvertOptions:
     # energy error 74.1 -> -0.7 % (named cost: END IE +0.03 -> +36.49 %).
     # Reach: 9 deck keys on 3 emitted models.
     implicit_tshell_solid: bool = True
+    # --no-corotational-orthotropic: keep the 65ff389 cells of an
+    # element-frame orthotropic /PROP/TYPE6 (R14 triage round 7, B3).
+    #
+    # ON by default. The starter projects an element-derived orthotropy frame
+    # (Ip 20 / 21 / 23 / 24 = LS-DYNA AOPT 0 / 1 / 3 / 4) onto the element
+    # frame only on a CO-ROTATIONAL property and otherwise stores its GLOBAL
+    # components (smorth3.F:282-291 / :329-339 / :380-389 / :442-452), while
+    # the engine always reads it in the element frame (mmain.F90:2106-2113
+    # -> mreploc.F:132-140). R1: the *MAT_MODIFIED_HONEYCOMB TYPE6 keeps its
+    # pinned Isolid 1 / Ismstr 1 and gets Iframe 2 on a /BRICK part (the
+    # state dyna2rad reaches through /DEF_SOLID Iframe -2), and an Ip 21 / 24
+    # orthotropic brick on an ELFORM-derived Isolid 17 takes the round-6
+    # Isolid-14 route like Ip 20 / 23. R2: on Ip 21 Radioss builds b = e_z x a
+    # (smorth3.F:324-327) where LS-DYNA builds b = (a x e_z) x a, so
+    # /MAT/LAW93's 2 / 3 constants are exchanged (E22 <-> E33, G12 <-> G13,
+    # NU12 <-> NU13, NU23 -> NU23 E33 / E22); other laws are named. Element-
+    # frame tetrahedra are NAMED, never changed (R3: OpenRadioss never
+    # co-rotates a tetrahedron, sgrtails.F:972-1008). MEASURED on one-hex
+    # coupons at nt 4 against closed forms: MAT_126 crush 0 -> 12 of 12
+    # (sigma(0.10) 6.0047 -> 1.5049 against 1.5), shear 0 -> 6 of 6, plateau
+    # unchanged (RMS 0.164 %); LAW93 Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6.
+    # Reach 0 on every corpus (sbrake's two TYPE6 are Isolid 14 already).
+    corotational_orthotropic: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

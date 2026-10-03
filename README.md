@@ -1693,11 +1693,32 @@ and otherwise store its GLOBAL components; `Iframe 0` is the `/DEF_SOLID`
 default 1, not co-rotational (`hm_read_prop06.F:296`, `defaults_mod.F90:176`),
 and `:297-298` force co-rotation on Isolid 14/18/24 only. On the same cube,
 `Isolid 17` and `Isolid 1` with `Iframe 0` were wrong in 4 of 4 loadings and
-right with `Iframe 2`. The MAT_126 honeycomb `/PROP/TYPE6` (pinned `Isolid 1`,
-`Iframe 0`) therefore carries the same fault on an element frame (AOPT 0 / 3;
-the verification round measured it on a `/MAT/LAW50` cube) — it is NOT changed
-(its crush under a co-rotational frame has no reference here), a warning names
-it, and a skew frame (AOPT 2) orients correctly (ROADMAP).
+right with `Iframe 2`. **Since round 7 every element-frame orthotropic
+`/PROP/TYPE6` is written CO-ROTATIONAL** (default ON,
+`--no-corotational-orthotropic` restores the 65ff389 cards): the MAT_126
+honeycomb `/PROP/TYPE6` keeps its pinned `Isolid 1` / `Ismstr 1` and gets
+`Iframe 2` on a part that holds a `/BRICK` (the state dyna2rad reaches through
+`/DEF_SOLID Iframe -2`); an orthotropic brick on the point / cylindrical modes
+`Ip 21` / `24` (AOPT 1 / 4) takes the `Isolid 14` route of `Ip 20` / `23` (every
+mode ends in the same `IF (JCVT > 0)` projection, `smorth3.F:282-291` /
+`:329-339` / `:380-389` / `:442-452`, and the engine always reads the frame in
+the element frame, `mmain.F90:2106-2113` → `mreploc.F:132-140`); and on `Ip 21`
+`/MAT/LAW93`'s 2 / 3 constants are exchanged (`E22 ↔ E33`, `G12 ↔ G13`,
+`NU12 ↔ NU13`, `NU23 → NU23·E33/E22`), because Radioss builds b = e_z × a
+(`smorth3.F:324-327`) where LS-DYNA builds b = (a × e_z) × a — other laws on
+`Ip 21` keep their cells and are named. MEASURED on one-hex coupons at nt 4
+against closed forms: MAT_126 crush 0 → 12 of 12 cases right (σ(0.10) 6.0047 →
+1.5049 against 1.5), shear 0 → 6 of 6, the plateau unchanged (IE at the fifths
++0.43 / +0.39 / +0.31 / +0.26 / +0.27 %, RMS 0.164 %) at the same cycle count;
+LAW93 `Ip 24` 0 → 6 of 6, `Ip 21` 2 → 6 of 6 (E 5996 / 1499.4 / 2998 against
+6000 / 1500 / 3000). Element-frame **tetrahedra are NAMED, never changed**:
+OpenRadioss never co-rotates a tetrahedron (`sgrtails.F:972-1008`) and builds
+its element frame from the edges X3-X4 / X1-X4 (`smorth3.F:251-256`); a
+6-tetrahedron cube reads −40.88 … +23.48 % (a per-element `/INIBRI/ORTHO` reads
+within 0.06 %, a ROADMAP route), and AOPT 3 on a tetrahedron risks starter
+ERROR 1920. A skew frame (AOPT 2) orients correctly on every element. Reach 0
+deck keys on every corpus (`11.1.sbrake`'s two pads are `Isolid 14` already, so
+its bytes do not move).
 
 `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054 / 055, + numeric aliases) → `/MAT/LAW127`
 (ENHANCED_COMPOSITE) on a `/PROP/TYPE11`. The strengths (`XT/XC/YT/YC/SC`), the

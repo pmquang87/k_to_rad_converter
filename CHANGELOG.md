@@ -71,6 +71,45 @@ Prior history (before this changelog was introduced) is summarized in the
     unregistered spelling but the `#-- SKIPPED:` line; `_PENALTY` / `_TITLE`;
     two cards = one warning; the part / part-set sides; the offset buckets;
     `_BEAM_IN_SOLID`).
+  - **B3 — element-frame orthotropic `/PROP/TYPE6` written co-rotational**
+    (default ON, `--no-corotational-orthotropic`). The starter projects an
+    element-derived orthotropy frame (Ip 20 / 21 / 23 / 24) onto the element
+    only on a co-rotational property and the engine always reads it there
+    (`smorth3.F:282-291`, `mreploc.F:132-140`). R1: the
+    `*MAT_MODIFIED_HONEYCOMB` TYPE6 keeps its pinned Isolid 1 / Ismstr 1 and
+    gets `Iframe 2` (card 1 columns 71-80; the state dyna2rad reaches through
+    `/DEF_SOLID Iframe -2`) on a part that holds a `/BRICK`, and an Ip 21 /
+    24 orthotropic brick takes the round-6 Isolid-14 route (the constant
+    `_ELEMENT_FRAME_IPS_ALL = (20, 21, 23, 24)`; the opt-out keeps the
+    round-6 pair). R2: on Ip 21 `/MAT/LAW93`'s 2 / 3 constants are exchanged
+    (`E22 <-> E33`, `G12 <-> G13`, `NU12 <-> NU13`, `NU23 -> NU23 E33 / E22`;
+    Radioss b = e_z x a, `smorth3.F:324-327`, against LS-DYNA's b = (a x
+    e_z) x a) when EVERY part of the material is an eligible brick part
+    (`_law93_bc_exchange`, the one decision); a shared material, LAW127 /
+    LAW22-25 / LAW50 on Ip 21 keep their cells and are named. R3:
+    element-frame tetrahedra are NAMED, cells unchanged (OpenRadioss never
+    co-rotates a tetrahedron, `sgrtails.F:972-1008`; the 6-tetrahedron cube
+    reads −40.88 .. +23.48 %; AOPT 3 on a tetrahedron risks ERROR 1920; the
+    per-element `/INIBRI/ORTHO` route is ROADMAP). Measured on one-hex coupons
+    at nt 4 against closed forms (round-7 pre-research G3 (j)): MAT_126 crush
+    0 → 12 of 12 (σ(0.10) 6.0047 → 1.5049 against 1.5), shear 0 → 6 of 6,
+    plateau unchanged (IE at the fifths +0.43 / +0.39 / +0.31 / +0.26 /
+    +0.27 %, RMS 0.164 %, the same cycle count on every arm); LAW93 Ip 24 0 →
+    6 of 6, Ip 21 2 → 6 of 6. Reach 0 on every corpus (`11.1.sbrake`'s
+    Isolid-14 pads are already co-rotational and stay byte-identical).
+    Tests: `CorotationalOrthotropicFrame` (AOPT 0 / 1 / 3 / 4 honeycomb
+    bricks → Iframe 2; the skew frame untouched; tetrahedra named in both
+    arms; the LAW93 exchange's exact rows and its opt-out; a shared
+    material; LAW127 unchanged; AOPT 4 → Isolid 14 and `--assumed-strain-
+    isolid 24` left alone; the sbrake shape byte-identical);
+    `Round7FlagWiringB`; `Round7RetractedStatementsB`. EXPECTED VALUES
+    MOVED: `tests/test_r14_triage_6.py`
+    `PostReviewHoneycombFrameNamed.test_an_element_frame_honeycomb_is_warned`
+    (the round-6 warning NAMED the Iframe-0 fault; the default now fixes it:
+    Iframe 0 → 2 and the new needles, the opt-out arm keeps Iframe 0), its
+    skew twin's needle widened to the round-7 sentence (it could no longer
+    fail), and `test_a_part_with_no_eight_node_element_is_left_alone` gains
+    the R3 assertion.
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
   welds, the implicit thick shell and the implicit texts).** One commit per
   item; every figure below is a measured arm against the LS-DYNA reference on
