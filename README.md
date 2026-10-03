@@ -403,12 +403,16 @@ uses the PROPERTY mass (`r1def3.F:113`, `r1len3.F:175`), not the node's.
 Since round 7 the warning's LIGHT clause states, per light node and spring,
 the two-mass critical step `2√(μ/K)` (μ from the node's and the far end's real
 masses; a ground, rigid or fully fixed far end counts as infinite) against
-`Tsca ×` the spring's own step, marks the pair PROTECTED or UNPROTECTED, and
+`Tsca ×` the spring's own step (the engine's form: on a `/PROP/TYPE13` the
+rotational step stiffness includes the shear springs' `K·L²`,
+`r4def3.F:173`), marks the pair PROTECTED or UNPROTECTED, and
 names the symptom (NORMAL TERMINATION with the energy ERROR column at 99.9 %)
 and the remedies (an `*ELEMENT_MASS` lifting μ above `(Tsca²/4)·M`,
 `/DT/NODA`, or this flag). Text only — 7 roster deck keys on 7 emitted models
-print the clause, 0 bytes move; the adaptive token was measured and NOT
-shipped (its only mover paid 9.997× the cycles for a history-neutral result).
+print the clause (4 PROTECTED: the spotweld plates; 3 UNPROTECTED:
+`gnonspring` and the two Yaris suspension decks), 0 bytes move; the adaptive
+token was measured and NOT shipped (its only mover paid 9.997× the cycles for
+a history-neutral result).
 
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885

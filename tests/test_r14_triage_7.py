@@ -1415,6 +1415,53 @@ class LightClauseNumbers(unittest.TestCase):
             loads._light_pair_clause = saved
         self.assertEqual((s1, e1), (s0, e0))
 
+    def test_5_a_TYPE13_weld_tie_steps_on_its_shear_K_times_L2(self):
+        """The R14 spotweld plates' shape: a *CONSTRAINED_SPOTWELD stiff
+        tie (TYPE13, K = 10 E L = 4.2e6, K_rot = K L^2 / 12 = 1.4e6, I =
+        1e-6) between two 10 x 10 x 1 shells 2 mm apart (own 1.9625e-7 per
+        corner, both LIGHT). The engine's rotational step stiffness adds
+        the shear K x L^2 (r4def3.F:173): 1.4e6 + 4.2e6 x 4 = 1.82e7, so
+        dt_r = sqrt(1e-6 / 1.82e7) = 2.344e-7 governs (dt_t 4.88e-6).
+        mu = 1.9625e-7 / 2 -> crit 2 sqrt(9.8125e-8 / 4.2e6) = 3.057e-7
+        >= 0.9 x 2.344e-7 -> PROTECTED. Without the L^2 term dt_r would
+        read 8.45e-7 and the pair UNPROTECTED - the label plates.nrbc and
+        the constrained plates keys printed before the fix."""
+        def plate(nid0, z0, eid, pid):
+            pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+            nodes = "".join(f"{nid0 + i:>8}{x:>16.4f}{y:>16.4f}{z0:>16.4f}\n"
+                            for i, (x, y) in enumerate(pts))
+            return nodes, _row(eid, pid, nid0, nid0 + 1, nid0 + 2,
+                               nid0 + 3) + "\n"
+
+        n1, e1 = plate(1, 0.0, 1, 1)
+        n2, e2 = plate(11, 2.0, 2, 2)
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+                "*NODE\n" + n1 + n2 + "*ELEMENT_SHELL\n" + e1 + e2
+                + "*PART\nplate1\n" + _row(1, 1, 1) + "\n"
+                "*PART\nplate2\n" + _row(2, 1, 1) + "\n"
+                "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+                "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+                "*CONSTRAINED_SPOTWELD\n" + _row(1, 11, 1.0e4, 5.0e4) + "\n"
+                "*END\n")
+        res, starter, _e = _convert(deck)
+        w = _token_warning(res)
+        for node in (1, 11):
+            with self.subTest(node=node):
+                self.assertRegex(
+                    w, rf"node {node} on spring \d+: 3\.06e-07 s vs 0\.9 x "
+                       r"2\.34e-07 s -> PROTECTED")
+        self.assertNotIn("8.45e-07", w)
+        self.assertIn("r4def3.F:173", w)
+
+    def test_6_spring_kc_adds_the_shear_term_on_TYPE13_only(self):
+        from k2rad.writer.loads import _spring_kc
+        dofs = [(4.2e6, 0, 0, 0.0, 0.0)] * 3 + [(1.4e6, 0, 0, 0.0, 0.0)] * 3
+        self.assertEqual(_spring_kc(dofs), (4.2e6, 1.4e6, 0.0, 0.0))
+        k_t, k_r, c_t, c_r = _spring_kc(dofs, l13=2.0)
+        self.assertEqual((k_t, c_t, c_r), (4.2e6, 0.0, 0.0))
+        self.assertAlmostEqual(k_r / 1.82e7, 1.0, places=12)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # The flags of part A reach the parser, the API, the GUI and the README

@@ -1119,13 +1119,16 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 # own length; n3 is the orientation node and gets nothing.
                 if token_mass:
                     # Ileng 1: mass and inertia per unit length (x L), the
-                    # stiffness and damping per unit STRAIN (/ L)
+                    # stiffness and damping per unit STRAIN (/ L), applied
+                    # after a TYPE13's shear K x L^2 joins its rotational K
+                    # (r4def3.F:173, :870-875)
                     el_len = _beam_length(state, e) if ileng else 1.0
-                    k_t, k_r, c_t = _spring_kc(dofs)
+                    k_t, k_r, c_t, c_r = _spring_kc(
+                        dofs, l13=_beam_length(state, e) if use13 else 0.0)
                     _register_spring_token_mass(
                         state, e.n1, e.n2, _TOKEN_MASS * el_len,
                         spring=(e.eid, inertia * el_len, k_t / el_len,
-                                k_r / el_len, c_t / el_len))
+                                k_r / el_len, c_t / el_len, c_r / el_len))
                 # /PRELOAD/AXIAL property gate (rinit3.F:1627-1690): only
                 # CASE(4,13) with a non-zero axial fct_ID1 AND H in 1..7 is
                 # accepted; a /PROP/TYPE8 connector is ERROR 3053 outright and

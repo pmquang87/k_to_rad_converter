@@ -9194,14 +9194,16 @@ class ConversionState:
     # spring_token_mass_compensation) and names every node it could not.
     spring_token_mass_by_node: Dict[int, float] = field(default_factory=dict)
     # ... and the springs that put it there, recorded at the same write line
-    # (round 7, A5 (iv)): (eid, n1, n2, M, I, K_t, K_r, C) - the property
-    # mass / inertia as written (Ileng 1 scaled by the element length), the
-    # largest translational / rotational stiffness and the damping. ONE
-    # consumer: the LIGHT clause of loads._warn_spring_token_mass, which
-    # states each light node's two-mass critical step against the spring's
-    # own step (r1len3.F:175 reads the PROPERTY mass).
+    # (round 7, A5 (iv)): (eid, n1, n2, M, I, K_t, K_r, C_t, C_r) - the
+    # property mass / inertia as written (Ileng 1 scaled by the element
+    # length) and the stiffness / damping the engine's own step reads
+    # (loads._spring_kc: on a TYPE13 the rotational pair includes the shear
+    # springs' value x L^2, r4def3.F:173-174). ONE consumer: the LIGHT
+    # clause of loads._warn_spring_token_mass, which states each light
+    # node's two-mass critical step against the spring's own step
+    # (r1len3.F:175 / r2len3.F:182-186 read the PROPERTY mass).
     spring_token_springs: List[Tuple[int, int, int, float, float, float,
-                                     float, float]] = field(
+                                     float, float, float]] = field(
         default_factory=list)
     # *SECTION_SOLID secids already named by _warn_assumed_strain_elform, so a
     # section reached from two writer passes warns once (the #129 dedup rule:

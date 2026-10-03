@@ -240,18 +240,27 @@ Prior history (before this changelog was introduced) is summarized in the
     emission is NOT shipped this round (see ROADMAP). (iv) The spring-token
     warning's LIGHT clause gains, per light node and spring, the two-mass
     critical step `2 sqrt(mu / K)` against `Tsca ×` the spring's own step
-    (`r1len3.F:175`), PROTECTED / UNPROTECTED, the silent symptom and the
-    remedies — inside the LIGHT arm only (a sentence in the shared token
-    text would move all 14 carriers). The springs are recorded at their
-    four registration sites (`state.spring_token_springs`: eid, ends, M, I,
-    K_t, K_r, C; Ileng 1 scaled). The far end's mass is its engine mass
-    after compensation (a compensated node holds exactly the deck's mass,
-    so the coupon's node 10 is 1e-3, not the 8e-4 the part-A spec used); a
-    ground, rigid or fully fixed far end is infinite. 7 keys / 7 models,
-    0 bytes; gnonspring's TOTAL MASS stays 2.0e-6 (the adaptive token is not
-    shipped). New tests: `VdcRemedyNotAboutTheStub` (3),
-    `EfgPlaceholderNamed` (2), `ImflagNamed` (5), `LightClauseNumbers` (4,
-    G3's four-spring coupon with its PROTECTED twin).
+    (`r1len3.F:175` for a TYPE4, `r2len3.F:182-186` for a TYPE8 / TYPE13),
+    PROTECTED / UNPROTECTED, the silent symptom and the remedies — inside
+    the LIGHT arm only (a sentence in the shared token text would move all
+    14 carriers). The springs are recorded at their four registration
+    sites (`state.spring_token_springs`: eid, ends, M, I, K_t, K_r, C_t,
+    C_r; Ileng 1 scaled) with the stiffness and damping the engine's step
+    reads (`_spring_kc`): on a TYPE13 the rotational pair includes the
+    shear springs' K × L² and C × L² (`r4def3.F:173-174`), which makes the
+    rotation the governing step on the R14 spotweld plates. The far end's
+    mass is its engine mass after compensation (a compensated node holds
+    exactly the deck's mass, so the coupon's node 10 is 1e-3, not the 8e-4
+    the part-A spec used); a ground, rigid or fully fixed far end is
+    infinite. 7 keys / 7 models, 0 bytes; the labels match the part-A
+    spec's table: PROTECTED on `plates.nrbc` / `plates.spot` (margin 4.11)
+    and `constrained.spotweld.plates` / `plates.k` (2.40), UNPROTECTED on
+    `gnonspring` (0.157) and the two Yaris suspension giants (0.116, with
+    the implicit sentence). gnonspring's TOTAL MASS stays 2.0e-6 (the
+    adaptive token is not shipped). New tests: `VdcRemedyNotAboutTheStub`
+    (3), `EfgPlaceholderNamed` (2), `ImflagNamed` (5), `LightClauseNumbers`
+    (6: G3's four-spring coupon with its PROTECTED twin, and a TYPE13 weld
+    tie whose rotational step carries the shear K × L²).
 
 - **R14 CAMPAIGN TRIAGE batch, round 6 — POST-REVIEW ROUND (the verification
   round's findings).** No blocker was found; the four majors were three

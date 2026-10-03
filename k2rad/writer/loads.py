@@ -1752,25 +1752,45 @@ _SPRING_TOKEN_MASS = 1.0e-4
 #: emission sites.
 _SPRING_TOKEN_INERTIA = 1.0e-6
 
-def _spring_kc(dofs) -> Tuple[float, float, float]:
-    """``(K_t, K_r, C)`` of a six-DOF spring property: the largest
-    translational and rotational stiffness and the largest translational
-    damping (SpringDof objects or the legacy 5-tuples)."""
+def _spring_kc(dofs, l13: float = 0.0
+               ) -> Tuple[float, float, float, float]:
+    """``(K_t, K_r, C_t, C_r)`` of a six-DOF spring property, as the ENGINE
+    builds them for the element's own time step (SpringDof objects or the
+    legacy 5-tuples).
+
+    ``K_t`` / ``C_t``: the largest translational stiffness / damping
+    (``r4def3.F:165-171``, ``r2def3.F:157-163``: ``XKM = MAX(XKA, YKA,
+    ZKA)``). ``K_r`` / ``C_r``: the largest rotational ones, PLUS, on a
+    ``/PROP/TYPE13`` (*l13* = the element length, 0 for any other type),
+    the larger shear stiffness / damping times the length squared
+    (``r4def3.F:173-174``, added at ``:545-548``: ``XKR = MAX(K4..K6) +
+    MAX(K2, K3) * ALDP**2``) - the bending stiffness the two shear springs
+    give the element. ``r2len3.F:182-186`` then takes
+    ``min(M / (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) +
+    C_r))``. An Ileng 1 property divides all four by the length afterwards
+    (``r4def3.F:870-875``); the caller does that. The PRINTED K is used:
+    where a force curve is steeper the starter raises K to its slope
+    (``rkini3.F:50``) and the true step is shorter."""
     ds = [_as_spring_dof(d) for d in dofs]
+    k_s = max([d.k for d in ds[1:3]] + [0.0])
+    c_s = max([d.c for d in ds[1:3]] + [0.0])
     return (max([d.k for d in ds[:3]] + [0.0]),
-            max([d.k for d in ds[3:6]] + [0.0]),
-            max([d.c for d in ds[:3]] + [0.0]))
+            max([d.k for d in ds[3:6]] + [0.0]) + k_s * l13 * l13,
+            max([d.c for d in ds[:3]] + [0.0]),
+            max([d.c for d in ds[3:6]] + [0.0]) + c_s * l13 * l13)
 
 
 def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
                                 prop_mass: float = _SPRING_TOKEN_MASS,
                                 spring: Optional[Tuple[int, float, float,
-                                                       float, float]] = None
+                                                       float, float,
+                                                       float]] = None
                                 ) -> None:
     """Record the invented property mass one emitted /SPRING row puts on its
     end nodes, for the /ADMAS compensation in :func:`_make_added_masses`.
 
-    *spring* = ``(eid, I, K_t, K_r, C)`` of the row's property (round 7, A5
+    *spring* = ``(eid, I, K_t, K_r, C_t, C_r)`` of the row's property, the
+    step quantities :func:`_spring_kc` builds (round 7, A5
     (iv)): recorded in ``state.spring_token_springs`` so the LIGHT clause of
     :func:`_warn_spring_token_mass` can state each light node's two-mass
     critical step against the spring's own step. Every registration site
@@ -1804,9 +1824,9 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
             state.spring_token_mass_by_node[_n] = (
                 state.spring_token_mass_by_node.get(_n, 0.0) + share)
     if spring is not None:
-        eid, inertia, k_t, k_r, c = spring
+        eid, inertia, k_t, k_r, c_t, c_r = spring
         state.spring_token_springs.append(
-            (eid, n1, n2, prop_mass, inertia, k_t, k_r, c))
+            (eid, n1, n2, prop_mass, inertia, k_t, k_r, c_t, c_r))
 
 
 def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
@@ -1903,12 +1923,13 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
                       title: str, g_elems, pid: int,
                       spring_kind_label: str = "TYPE4",
                       spring_kc: Optional[Tuple[float, float, float,
-                                                float]] = None) -> List[str]:
+                                                float, float]] = None
+                      ) -> List[str]:
     """Emit /PART + /SPRING for a group of discrete elements on *prop_id*,
     synthesizing a fixed ground node (+ /BCS 111 111) for each grounded element
     (N2=0). Shared by the axial /PROP/TYPE4 and the oriented /PROP/TYPE8 paths.
-    *spring_kc* = ``(I, K_t, K_r, C)`` of *prop_id*, recorded per row for the
-    LIGHT clause of the token warning (round 7, A5 (iv))."""
+    *spring_kc* = ``(I, K_t, K_r, C_t, C_r)`` of *prop_id*, recorded per row
+    for the LIGHT clause of the token warning (round 7, A5 (iv))."""
     lines = [
         f"/PART/{part_id}",
         title,
@@ -2820,7 +2841,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                     prop_id, f"{title} ({kind})", _SPRING_TOKEN_MASS, k_s, c_s,
                     a_coef, eff_fct, hflag, dmin, dmax, fct2=fct2, fct3=fct3,
                     fct4=fct4, b=b_coef, d=d_coef, e=e_coef, hscale=h_s)
-                kc = (0.0, k_s, 0.0, c_s)
+                kc = (0.0, k_s, 0.0, c_s, 0.0)
             lines += _emit_spring_part(
                 state, part_id, prop_id, title, g_elems, pid,
                 spring_kind_label="TYPE13" if torsional else "TYPE4",
@@ -2889,8 +2910,8 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             lines += _emit_spring_part(
                 state, part_id, prop_id, title, g_elems, pid,
                 spring_kind_label="TYPE8",
-                spring_kc=((ori_i, 0.0, k_s, c_s) if slot == 4 else
-                           (ori_i, k_s, 0.0, c_s)))
+                spring_kc=((ori_i, 0.0, k_s, 0.0, c_s) if slot == 4 else
+                           (ori_i, k_s, 0.0, c_s, 0.0)))
             emitted = pid_emitted = True
             state.warn(
                 f"*ELEMENT_DISCRETE part {pid} ({kind}, {len(g_elems)} "
@@ -3707,7 +3728,8 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             if token_mass:
                 _register_spring_token_mass(
                     state, e.n1, e.n2,
-                    spring=(e.eid, inertia) + _spring_kc(dofs))
+                    spring=(e.eid, inertia) + _spring_kc(
+                        dofs, l13=_element_length(state, e)))
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -3990,7 +4012,8 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         # Ileng is 0 on this property, so UMASS is the property mass itself.
         _register_spring_token_mass(
             state, n1, n2,
-            spring=(elem_id, _SPRING_TOKEN_INERTIA) + _spring_kc(dofs))
+            spring=(elem_id, _SPRING_TOKEN_INERTIA) + _spring_kc(dofs,
+                                                                 l13=L))
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -7732,8 +7755,12 @@ def _light_pair_clause(state: ConversionState,
     two-mass critical step ``2 sqrt(mu / K_t)`` with ``mu = m_n m_f /
     (m_n + m_f)`` (LS-DYNA Theory R16 eq. 26.25 / 26.27, the real nodal
     masses), against ``Tsca x`` the spring's OWN step ``dt_s = min(M /
-    (sqrt(C^2 + M K_t) + C), I / sqrt(I K_r))`` (r1len3.F:175-177, which
-    reads the PROPERTY mass, never the node's). PROTECTED iff ``crit >=
+    (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) + C_r))``
+    (r1len3.F:175 for a TYPE4, r2len3.F:182-186 for a TYPE8 / TYPE13; both
+    read the PROPERTY mass and inertia, never the node's), with K / C as
+    :func:`_spring_kc` builds them - on a TYPE13 the rotational K includes
+    the shear springs' K x L^2 (r4def3.F:173), which on the R14 spotweld
+    plates makes the rotation the governing step. PROTECTED iff ``crit >=
     Tsca x dt_s``. ``m_n`` is the light node's own mass; ``m_f`` the far
     end's engine mass after compensation - its element mass plus its
     *ELEMENT_MASS (the compensation restores exactly that), or that plus
@@ -7770,16 +7797,16 @@ def _light_pair_clause(state: ConversionState,
 
     pairs: List[Tuple[float, int, int, float, float, float]] = []
     for n, m_n, _sh in light:
-        for eid, n1, n2, mass, inertia, k_t, k_r, c in \
+        for eid, n1, n2, mass, inertia, k_t, k_r, c_t, c_r in \
                 state.spring_token_springs:
             if n not in (n1, n2) or k_t <= 0.0:
                 continue
             m_f = _far_mass(n2 if n == n1 else n1)
             mu = m_n if m_f == inf else m_n * m_f / (m_n + m_f)
             crit = 2.0 * math.sqrt(mu / k_t)
-            dt_t = mass / (math.sqrt(c * c + mass * k_t) + c)
-            dt_r = (inertia / math.sqrt(inertia * k_r)
-                    if k_r > 0.0 and inertia > 0.0 else inf)
+            dt_t = mass / (math.sqrt(c_t * c_t + mass * k_t) + c_t)
+            dt_r = (inertia / (math.sqrt(c_r * c_r + inertia * k_r) + c_r)
+                    if inertia > 0.0 and (k_r > 0.0 or c_r > 0.0) else inf)
             dt_s = min(dt_t, dt_r)
             pairs.append((crit / (tsca * dt_s), n, eid, crit, dt_s, mass))
     if not pairs:
@@ -7792,8 +7819,9 @@ def _light_pair_clause(state: ConversionState,
     token = pairs[0][5]
     text = (
         " Per pair, the two-mass critical step 2 sqrt(mu / K) against Tsca x "
-        "the spring's own step (r1len3.F:175, which reads the PROPERTY mass): "
-        + shown + (" ..." if len(pairs) > 5 else "") + ". An UNPROTECTED node "
+        "the spring's own step (r1len3.F:175 / r2len3.F:182-186, which read "
+        "the PROPERTY mass and inertia; a TYPE13's rotational K includes its "
+        "shear K x L^2, r4def3.F:173): " + shown + (" ..." if len(pairs) > 5 else "") + ". An UNPROTECTED node "
         "is stable only while the model's governing element step stays below "
         "its critical step; nothing else catches it: the run ends NORMAL "
         "TERMINATION with the energy ERROR column at 99.9 % (MEASURED on a "
