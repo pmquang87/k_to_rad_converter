@@ -871,16 +871,19 @@ record: the 4 `*MAT_ELASTIC_FLUID` acoustic compartments (nvh 8.7 / 9.1 / 9.2 /
 9.4) write the same keyword from another record and do not move. The void floor
 keeps precedence; with `--no-initial-void-floor` alone a PC-0 void now gets
 `−1e-20` from this rule and a stated negative PC is written as stated — only
-both opt-outs restore `Pmin 0`. MEASURED at nt 4 (the round-7 pre-research,
-base-paired, OpenRadioss's last printed row against the LS-DYNA glstat
-interpolated there, fifths nearest-row, RMS in % of the LS-DYNA peak):
+both opt-outs restore `Pmin 0`. RE-MEASURED on the implementation at nt 4
+(base-paired in one window, OpenRadioss's last printed row against the LS-DYNA
+glstat interpolated there, fifths nearest-row, RMS in % of the LS-DYNA peak;
+`channel_A` / `channel_C` are the round-7 pre-research arms):
 `sph/bird` (PC cell) IE +69.44 → +4.50 %, fifths +2.87 / +2.98 / +1.52 / +2.57 /
 +4.50 %, RMS 44.37 → 2.10 at 0.832× the cycles; `channel_B` (Nu cell) IE
-−98.89 → −0.09 %, RMS 57.05 → 0.03 at 0.987×; `channel_C` RMS 0.02; `channel_A`
+−98.89 → −0.09 %, RMS 57.05 → 0.03 at 0.987× (the starter echoes `VISCOSITY`
+1000); `channel_C` RMS 0.02; `channel_A`
 −98.88 → −4.03 %, RMS 1.72 at 0.831× — all four deviation → match; `underwater_A`
-/ `underwater_B` stay match (−0.85 / +0.97 % and −0.37 / +0.49 %); `impact`
-improves under the PC cell alone (+58.98 → +51.91 %, RMS 32.60 → 29.94, though
-its first fifth worsens +3.2 → −19.0 %). Byte reach: 20 deck keys, 17 emitted
+/ `underwater_B` stay match (−0.85 / +0.97 % and −0.37 / +0.49 %; the starter
+echoes `PRESSURE CUTOFF` −1.0E-20); `impact`
+improves under the PC cell alone (+58.98 → +51.91 %, RMS 32.62 → 29.96, though
+its first fifth worsens +3.20 → −18.98 %). Byte reach: 20 deck keys, 17 emitted
 models (the 3 Nu keys among them); the 4 void-floor keys are byte-identical.
 
 `*CONSTRAINED_SHELL_IN_SOLID` (and `_PENALTY`) → recorded, **not converted**,
@@ -3111,7 +3114,10 @@ where LS-DYNA's default joint (LMF 0) is a yielding PENALTY joint (its nut 12.25
 12.34 mm/rad against 12.5), so the converted nut runs ahead and meets the shells
 about 0.6 ms early — a solver limitation, not a tuning knob. **SMP only**: with
 `-np > 1` the engine stops at cycle 1 (`JOINT WITH LAGRANGE MULTIPLIER NOT
-ENABLED FOR NSPMD > 1`). On this path EXT-WORK prints 0. A screw outside the
+ENABLED FOR NSPMD > 1`). On this path EXT-WORK prints 0 and the engine
+accumulates no REAC* on a Lagrange drive (`thbcs.F:62` / `:77` count only nodes
+with a kinematic code), so a `*DATABASE_BNDOUT` `/TH/NODE` does not cover the
+screw's drive and the BNDOUT warning says so. A screw outside the
 pattern (`_COOR_SCREW`, `_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a
 deformable / CNRB / merged body, a non-coaxial or off-global axis, other CMO
 codes, a missing or windowed drive, VAD 1/3, a drive on B, a contact the split

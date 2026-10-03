@@ -1104,12 +1104,14 @@ def _mat_null_user_class(state: ConversionState, part,
                                  f"Lagrangian solid (ELFORM {sec.elform})")
 
 
-#: The W-N2 fact for each class outside the Nu scope (every number the
-#: round-7 pre-research's, nt 4, base-paired).
+#: The W-N2 fact for each class outside the Nu scope (nt 4, base-paired; the
+#: deck pair re-measured on the implementation, one window: 2432 -> 2482
+#: cycles; the bar's per-part IE and the SPH pair are the round-7
+#: pre-research's).
 _NU_LAGRANGIAN_FACT = (
     " On a Lagrangian solid it was measured WRONG: impact.k's *MAT_NULL bar "
     "(ELFORM 1, nt 4) goes IE 10.3 -> 29.6 against LS-DYNA's 15.7, the deck "
-    "IE +58.98 -> +76.80 % (RMS 32.60 -> 42.51 % of the LS-DYNA peak).")
+    "IE +58.98 -> +76.80 % (RMS 32.62 -> 42.53 % of the LS-DYNA peak).")
 _NU_SPH_FACT = (
     " On SPH parts it is not measured beyond sph/bird, where Nu 1 moved "
     "nothing (IE RMS 44.15 % on both arms).")

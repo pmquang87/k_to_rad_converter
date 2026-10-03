@@ -11,6 +11,39 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
+  DEFAULT changes move campaign VERDICTS by measurement, not by definition:
+  six deviation → match movers (sph/bird, channel_A, channel_B, channel_C
+  by B1; revo-stiff by A2; plates.mat100 by A3), each measured on fresh
+  conversions at nt 4, base-paired in one window as a cycle ratio, with its
+  history at the fifths and an RMS in % of the LS peak — and re-measured on
+  the implementation where quoted below (sph/bird, channel_B, and revo-stiff
+  and plates.mat100 again on the combined arm: every figure equal to its
+  half's own; channel_A / channel_C are the pre-research arms); two
+  END-value flips annotated, never counted
+  (`intro-by-j.-reid/pendulum/pendulum.k` + `deformable_to_rigid.pendulum.k`,
+  one emitted model, under A2: IE −19.39 → +5.37 % while the IE RMS moves
+  50.64 → 51.61 %). Status movers: ex_02_thick_shell_elform_{2,3,5} timeout
+  → normal under A4 (28 cycles at nt 4 and 2; not_comparable stays). Named
+  history costs printed beside their improvements: ex_15 ×3 (A4), brake /
+  transducer / translat (A2), mainboltaexpl (A3), impact.k's first fifth and
+  underwater_A's END sign (B1), EXP_SC_JOINT_SCREW's exact joint (B2: IE
+  −100 → +42.76 %, it stays a deviation); doorbeam re-measured on the A2
+  arm: identical (39 cycles, +582.00 %, all 33 printed rows at nt 4 and nt
+  2; its runtime sentence keeps the round-6 figures). **Byte movers** (two-tree
+  sweeps of the 356 roster keys from `F:`, 0 convert errors, only
+  `_0000.rad` moves): part A 70 deck keys / 61 emitted models, part B 21 / 18
+  (B1 20 / 17, B2 1 / 1; B3, B4 and B5 0), round 7 91 / 79 against 65ff389,
+  the halves disjoint; part B's warning-record-only movers are the 4 A1 void
+  decks (bird-el, bird_B, quadrature_B, quadrature_C).
+  - **Campaign bookkeeping** (code-side facts only; C1-C3 are the campaign
+    validator's): the expected ledger after the re-run — normal 288 → 291,
+    timeout 15 → 12, error_engine 26, error_starter 12; match 26 → 32 (+ up
+    to 2 END-value flips, annotated), deviation 146 → 140, not_comparable
+    194; NORMAL zero models 5; implicit residue 32 keys / 30 models → 29 /
+    29 (the rule: not `normal` among the 135 `/IMPL` emitters). The giants
+    are re-converted, never launched (no `--allow-giants`);
+    EXP_SC_JOINT_SCREW must run `-np 1` (the Lagrange joint is SMP only).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART B (fluids, materials, frames,
   joints and the docs).** One commit per item; every figure below is a
   measured arm against the LS-DYNA reference on `F:` or a hand-built coupon
@@ -39,8 +72,11 @@ Prior history (before this changelog was introduced) is summarized in the
     `/MPC` (0.1 % at cycle 1000, 19.6 % at 3000); Spotflag 27 held
     (-0.2 / -0.4 %), on one geometry — not enough to exempt it, so the
     round-6 census claim that the auto-penalty Spotflags are safe is not
-    used. Reach 0 on every corpus (the roster's emitted TYPE2 Spotflags are
-    28 x7 and 27 x2, and its only `/MPC`, `plates.lce`, has no tie). Tests:
+    used. The critic's two probe decks re-converted on the implementation:
+    refused with the tied sentence, byte-identical to
+    `--no-constrained-linear` (0 `/MPC`; 65ff389 wrote 1). Reach 0 on every
+    corpus (the roster's emitted TYPE2 Spotflags are 28 x7 and 27 x2, and
+    its only `/MPC`, `plates.lce`, has no tie). Tests:
     `MpcOnTiedSecondaryNode` (the probe with Spotflag 28 / 27 / 21 / 28
     spot-weld: refused, byte-identical to the opt-out, the tied sentence and
     no other reason's note; a main-side term and a node on neither side
@@ -95,7 +131,12 @@ Prior history (before this changelog was introduced) is summarized in the
     0 → 12 of 12 (σ(0.10) 6.0047 → 1.5049 against 1.5), shear 0 → 6 of 6,
     plateau unchanged (IE at the fifths +0.43 / +0.39 / +0.31 / +0.26 /
     +0.27 %, RMS 0.164 %, the same cycle count on every arm); LAW93 Ip 24 0 →
-    6 of 6, Ip 21 2 → 6 of 6. Reach 0 on every corpus (`11.1.sbrake`'s
+    6 of 6, Ip 21 2 → 6 of 6. RE-MEASURED on the implementation (the
+    critic's MAT_126 crush cube, closed form 0.2995 / 1.198 mJ, nt 4, 4368
+    cycles each): IE 0.3044 / 1.203 on the two connectivities by default
+    (the starter echoes COROTATIONAL SYSTEM FLAG 2) against 1.203 / 0.3044 —
+    the wrong curve — with `--no-corotational-orthotropic`, whose cards are
+    byte-identical to 65ff389's. Reach 0 on every corpus (`11.1.sbrake`'s
     Isolid-14 pads are already co-rotational and stay byte-identical).
     Tests: `CorotationalOrthotropicFrame` (AOPT 0 / 1 / 3 / 4 honeycomb
     bricks → Iframe 2; the skew frame untouched; tetrahedra named in both
@@ -136,13 +177,23 @@ Prior history (before this changelog was introduced) is summarized in the
     at mu → -1: `-RO C²` for Gruneisen, `C0 - C1 - C3` for the polynomial —
     inert on channel_A/B/C, -1e4 against -2250, and sloshing, -1e5 against
     -10). Byte movers 20 keys / 17 models (the 3 Nu keys among them; the
-    decision text's "21 / 18" counted channel_A/B/C twice); measured at nt 4
-    in the round-7 pre-research (base-paired, matched-time END, fifths
-    nearest-row, RMS in % of the LS peak), deviation → match: sph/bird (IE
-    +69.44 → +4.50 %, RMS 44.37 → 2.10, 0.832× cycles), channel_B (−98.89 →
-    −0.09 %, RMS 57.05 → 0.03, 0.987×), channel_C, channel_A (−98.88 →
-    −4.03 %, RMS 1.72, 0.831×); underwater_A/B stay match; impact improves
-    (+58.98 → +51.91 %) with a worse first fifth (+3.2 → −19.0 %). With
+    decision text's "21 / 18" counted channel_A/B/C twice). RE-MEASURED on
+    the implementation (nt 4, base-paired in one window, matched-time END,
+    fifths nearest-row, RMS in % of the LS peak; every figure equal to the
+    pre-research arm), deviation → match: sph/bird (IE +69.44 → +4.50 %, RMS
+    44.37 → 2.10, 1942 → 1616 cycles = 0.832×; starter `PRESSURE CUTOFF`
+    −1.0), channel_B (−98.89 → −0.09 %, RMS 57.05 → 0.03, 82566 → 81506
+    cycles = 0.987×; the starter echoes `VISCOSITY` 1000); channel_C and
+    channel_A (−98.88 → −4.03 %, RMS 1.72, 0.831×) are the pre-research
+    arms; underwater_B stays match (232 = 232 cycles, +2.57 / −1.78 → −0.37 /
+    +0.49 %, IE RMS 0.22 → 0.08; `PRESSURE CUTOFF` −1.0E-20 where the base
+    echoes −1.0E+20) and so does underwater_A (104 = 104, +0.55 / −0.23 →
+    −0.85 / +0.97 %, IE RMS 0.09 → 0.06); impact improves (2432 → 2437
+    cycles, +58.98 → +51.91 %, IE RMS 32.62 → 29.96) with a worse first
+    fifth (+3.20 → −18.98 %), its Nu refused by name — the refusal's
+    sentence quotes the Nu arm re-measured in the same window (the base
+    card with Nu 1000: 2482 cycles, +76.80 %, IE RMS 42.53; with the PC cell
+    too: 2509 cycles, +71.13 %, RMS 40.13). With
     `--no-initial-void-floor` alone a PC-0 void now gets `-1e-20` from this
     rule; both opt-outs restore `Pmin 0`. The A1 texts that called the PC
     cell "not carried" or said the floor's opt-out keeps Pmin 0 are
@@ -181,10 +232,14 @@ Prior history (before this changelog was introduced) is summarized in the
     carriage, the split, the imposed-motion skip and the joint section; the
     keyword leaves `skipped_keywords` only at the `/GJOINT` write line. The
     screw axis is `r = unit(N3 → N1)` (the measured card's +1; the rack
-    relation is odd in the common axis, pinned by a sign test). Measured
-    (the round-7 critic's arm built from this card description, nt 4, np 1):
-    EXP_SC_JOINT_SCREW nut travel 0 → 185.70 mm vs LS-DYNA 183.59 (travel
-    RMS 0.88 % of the LS peak), IE −100 → +42.76 % (the exact joint against
+    relation is odd in the common axis, pinned by a sign test). RE-MEASURED
+    on the implementation (nt 4, np 1, base-paired in one window; equal to
+    the round-7 critic's arm built from this card description to every
+    printed digit; starter 0 ERROR, its one WARNING 774 belongs to the
+    measurement's own `/TH/NODE`): EXP_SC_JOINT_SCREW nut travel 0 → 185.70
+    mm vs LS-DYNA 183.59 (+3.49 / +1.25 / +1.21 / +1.27 / +1.15 % at the
+    fifths, travel RMS 0.88 % of the LS peak, the nut 0.025 mm at most off
+    its main node), IE −100 → +42.76 % (the exact joint against
     LS-DYNA's yielding penalty joint, a solver limitation), KE −54.26 →
     −16.51 % (the drive curve's 250 → 170 rad/s corner at t_end on both
     arms; one printed cycle earlier +0.17 %), 21626 vs 21630 cycles

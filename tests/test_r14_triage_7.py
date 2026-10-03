@@ -3205,5 +3205,130 @@ class Round7RetractedStatementsB(unittest.TestCase):
                 self.assertIn(_collapse(needle), texts[key])
 
 
+# ── B6: the round's record (CHANGELOG re-sums, ROADMAP completeness) ─────────
+
+_ROOT7 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _read7(rel: str) -> str:
+    with open(os.path.join(_ROOT7, rel), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _md_cells(row: str) -> int:
+    """The unescaped pipes of a Markdown table row (a ``\\|`` inside a code
+    span is not a cell border)."""
+    return len(re.findall(r"(?<!\\)\|", row))
+
+
+class Round7ChangelogReSums(unittest.TestCase):
+    """B6.6 — the "re-add every headline total" rule (rounds 5 and 6): the
+    round-7 header bullet's byte-mover counts must add up (the halves are
+    disjoint, so part A + part B = the round; B1 + B2 = part B; B3, B4 and
+    B5 move nothing) and equal the two-tree sweeps' labelled totals: part A
+    70 / 61 (its sweep at 564d179), part B 21 / 18 (0c82dbe against part A's
+    head), 91 / 79 against 65ff389."""
+
+    def _head(self) -> str:
+        text = _collapse(_read7("CHANGELOG.md"))
+        i = text.index("- **R14 CAMPAIGN TRIAGE batch, round 7** —")
+        j = text.index("- **R14 CAMPAIGN TRIAGE batch, round 7 — PART B", i)
+        return text[i:j]
+
+    def test_the_halves_add_up_to_the_round(self):
+        m = re.search(
+            r"part A (\d+) deck keys / (\d+) emitted models, part B (\d+) / "
+            r"(\d+) \(B1 (\d+) / (\d+), B2 (\d+) / (\d+); B3, B4 and B5 0\), "
+            r"round 7 (\d+) / (\d+) against 65ff389", self._head())
+        self.assertIsNotNone(m, self._head())
+        a_k, a_m, b_k, b_m, b1_k, b1_m, b2_k, b2_m, r_k, r_m = map(
+            int, m.groups())
+        self.assertEqual((b1_k + b2_k, b1_m + b2_m), (b_k, b_m))
+        self.assertEqual((a_k + b_k, a_m + b_m), (r_k, r_m))
+        self.assertEqual((a_k, a_m, b_k, b_m, r_k, r_m),
+                         (70, 61, 21, 18, 91, 79))
+
+    def test_the_item_entries_state_the_same_counts(self):
+        text = _collapse(_read7("CHANGELOG.md"))
+        self.assertIn("Byte movers 20 keys / 17 models (the 3 Nu keys among "
+                      "them", text)
+        self.assertIn("Reach 1 deck key on 1 emitted model. Tests: "
+                      "`JointScrewGjoint`", text)
+        roadmap = _collapse(_read7("ROADMAP.md"))
+        self.assertIn("70 / 61 + 21 / 18 = 91 deck keys / 79 emitted models "
+                      "against 65ff389", roadmap)
+
+
+class Round7RoadmapRecord(unittest.TestCase):
+    """B6.3 — the ROADMAP record of round 7 is complete: a round-7 column in
+    the R14 defect-queue table and in the implicit residue table (every row
+    as wide as its header), the `tire.k` residue row, one ``**Round 7:**``
+    line on each of the 27 round-6 items, the round-7 NOT list numbered 1-22
+    with no unfilled placeholder, and the residue restated with its rule."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lines = _read7("ROADMAP.md").splitlines()
+
+    def _at(self, prefix: str) -> int:
+        hits = [k for k, ln in enumerate(self.lines) if ln.startswith(prefix)]
+        self.assertEqual(len(hits), 1, prefix)
+        return hits[0]
+
+    def _table(self, header_prefix: str):
+        rows = []
+        for ln in self.lines[self._at(header_prefix):]:
+            if not ln.startswith("|"):
+                break
+            rows.append(ln)
+        return rows
+
+    def _same_width(self, rows):
+        width = _md_cells(rows[0])
+        for r in rows[1:]:
+            with self.subTest(row=r[:48]):
+                self.assertEqual(_md_cells(r), width)
+
+    def test_the_queue_table_has_a_round_7_column(self):
+        rows = self._table("| # | class | decks | closed by round 1 |")
+        self.assertTrue(rows[0].endswith("| round 6 | round 7 |"), rows[0])
+        self.assertEqual(len(rows), 10)          # header, separator, 8 rows
+        self._same_width(rows)
+
+    def test_the_residue_table_has_a_round_7_column_and_the_tire_row(self):
+        rows = self._table("| family | decks | death | verdict after round 3 |")
+        self.assertTrue(rows[0].endswith("| round 6 | round 7 |"), rows[0])
+        self.assertEqual(len(rows), 18)          # 15 families + tire.k
+        self._same_width(rows)
+        tire = [r for r in rows if r.startswith("| `eigenvalue/tire.k`")]
+        self.assertEqual(len(tire), 1)
+        self.assertIn("STOPPED DUE TO LOADING DATA", tire[0])
+        text = _collapse("\n".join(self.lines))
+        self.assertIn("the residue is the set of `/IMPL` emitters that are "
+                      "NOT `normal` — **32 keys / 30 models at 65ff389**", text)
+        self.assertIn("after A4, **29 keys / 29 models**", text)
+
+    def test_every_round_6_item_carries_one_round_7_line(self):
+        s = self._at("**What round 6 deliberately does NOT close**")
+        e = self._at("**What round 7 closes, and what it does NOT.**")
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        self.assertEqual(len(starts), 27)
+        for n, (a, b) in enumerate(zip(starts, starts[1:] + [e]), 1):
+            with self.subTest(item=n):
+                self.assertTrue(self.lines[a].startswith(f"{n}. **"))
+                self.assertEqual(
+                    sum("**Round 7:**" in ln for ln in self.lines[a:b]), 1)
+
+    def test_the_round_7_not_list_is_numbered_1_to_22(self):
+        s = self._at("**What round 7 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        nums = [int(m.group(1)) for m in
+                (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
+                if m]
+        self.assertEqual(nums, list(range(1, 23)))
+        self.assertNotRegex("\n".join(self.lines[s:e]), r"<[a-z_ ]+>")
+
+
 if __name__ == "__main__":
     unittest.main()

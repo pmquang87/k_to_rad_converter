@@ -7841,9 +7841,11 @@ class ConvertOptions:
     # named and not carried: impact.k's Lagrangian bar triples its IE under
     # the cell (10.3 -> 29.6 against LS-DYNA's 15.7) and bird_B CREATES
     # energy (energy error 99.9 %). TEROD / CEROD are named (no LAW6 cell).
-    # MEASURED at nt 4 (round-7 pre-research, base-paired): sph/bird IE
-    # +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 -> -0.09 %,
-    # channel_A -98.88 -> -4.03 %; underwater_A/B stay within 1 %. The 4
+    # MEASURED at nt 4 (base-paired; sph/bird, channel_B and underwater_A/B
+    # re-measured on the implementation, channel_A the round-7 pre-research
+    # arm): sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B
+    # -98.89 -> -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay
+    # within 1 %. The 4
     # *MAT_ELASTIC_FLUID acoustic carriers write the same keyword from
     # another record and are untouched. Byte reach: 20 deck keys, 17
     # emitted models (the 3 Nu keys among them).
