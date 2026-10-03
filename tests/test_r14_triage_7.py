@@ -1477,6 +1477,44 @@ class LightClauseNumbers(unittest.TestCase):
         self.assertEqual((k_t, c_t, c_r), (4.2e6, 0.0, 0.0))
         self.assertAlmostEqual(k_r / 1.82e7, 1.0, places=12)
 
+    def test_7_a_compensated_carrier_with_no_LIGHT_node_prints_no_pairs(self):
+        """The pair numbers live INSIDE the LIGHT arm only. Node 60 is a
+        corner of a 10 x 10 x 1 shell of RO 7.85e-6 (own 1.9625e-4, above
+        its token share 5e-5): its token is removed with a negative /ADMAS
+        and it is NOT light, so the shared 'REMOVED again' sentence carries
+        no per-pair clause - the shape of the roster's non-LIGHT carrier
+        nvh/example-06-07/6.7.spring.psd.k. The code validator's mutation
+        A5-4 computed the clause for every compensated node and the whole
+        suite stayed green."""
+        nodes = "*NODE\n" + "".join(
+            f"{n:>8}{x:>16.1f}{y:>16.1f}{0.0:>16.1f}\n" for n, x, y in
+            ((10, 0, 0), (60, 10, 0), (61, 20, 0), (62, 20, 10),
+             (63, 10, 10)))
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(2.0e-3) + "\n"
+                "*PART\nheavy shell\n" + _row(1, 1, 1) + "\n"
+                "*PART\nspring\n" + _row(100, 100, 100) + "\n"
+                "*SECTION_SHELL\n" + _row(1, 2, 1.0, 2) + "\n" + _row(1.0)
+                + "\n*SECTION_DISCRETE\n" + _row(100, 0) + "\n" + _row()
+                + "\n*MAT_ELASTIC\n" + _row(1, 7.85e-6, 210000.0, 0.3) + "\n"
+                "*MAT_SPRING_ELASTIC\n" + _row(100, 100.0) + "\n" + nodes
+                + "*ELEMENT_SHELL\n"
+                + "".join(f"{v:>8}" for v in (1, 1, 60, 61, 62, 63)) + "\n"
+                + "*ELEMENT_DISCRETE\n"
+                + "".join(f"{v:>8}" for v in (101, 100, 10, 60)) + "\n"
+                + "*ELEMENT_MASS\n"
+                + "".join(f"{v:>8}" for v in (201, 10)) + f"{1.0e-3:>16}\n"
+                + "*END\n")
+        res, _s, _e = _convert(deck)
+        w = _token_warning(res)
+        self.assertIn("REMOVED again from 1 node(s) [60]", w)
+        for needle in ("Per pair", "two-mass critical step", "PROTECTED",
+                       "keep LESS mass"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, w)
+        # control: node 50 of the coupon IS light, and its pair is printed
+        self.assertIn("node 50 on spring 104",
+                      _token_warning(_convert(_spring_coupon())[0]))
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # The flags of part A reach the parser, the API, the GUI and the README
