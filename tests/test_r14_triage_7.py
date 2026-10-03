@@ -214,6 +214,24 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         w2 = _node_warning(res2)
         self.assertIn(plain, w2)
         self.assertNotIn("stabilisation k2rad adds", w2)
+        # the *CONSTRAINED_GLOBAL announcement prints the SAME sentence from
+        # its own call (the code verifier's mutant A1-8, 'stab=auto_stab' ->
+        # 'stab=False' there, survived the whole suite): a z-plane through
+        # the rigid plate re-points TC 3 onto node 19, into the
+        # stabilisation's z digit -> named; an x code on the same plane
+        # merges CON1's digit -> not named
+        for tc, want, unwanted in ((3, named, plain), (1, plain, named)):
+            with self.subTest(constrained_global_tc=tc):
+                cg = ("*CONSTRAINED_GLOBAL\n"
+                      + _row(tc, 0, 3, 0.0, 0.0, 0.0, 0.0) + "\n")
+                r_g, s_g, _e_g = _convert(_a1_deck(con1=1, tc=0,
+                                                   extra=imp + load + cg))
+                self.assertEqual(_bcs_groups(s_g)["BC_rigid_1"][0], "101 111")
+                g = [w for w in r_g.warnings
+                     if w.startswith("*CONSTRAINED_GLOBAL: ")]
+                self.assertEqual(len(g), 1, r_g.warnings)
+                self.assertIn(want, g[0])
+                self.assertNotIn(unwanted, g[0])
 
     def test_2_P2_keeps_the_disjoint_remainder(self):
         res, starter, _e = _convert(_a1_deck(con1=1, con2=7, tc=6, rc=7))
@@ -708,6 +726,43 @@ class RigidShellRotaryInertiaDefault(unittest.TestCase):
         res, starter, _e = _convert(deck)
         self.assertEqual(_rbody_j_rows(starter, 15)[2], _J_ZERO_ROW)
         self.assertFalse(_has(res.warnings, _A2_APPLIED), res.warnings)
+        # ... and nothing is SAID about it either: a massless body's zero
+        # tensor must not reach the margin test (the post-review round's
+        # code verifier: 'sum_in <= 0.0' -> '< 0.0' printed a 'keeps J = 0
+        # ... smallest principal value 0' refusal here)
+        self.assertFalse(_has(res.warnings, "keeps J = 0"), res.warnings)
+
+    def test_20_a_solid_only_rigid_body_writes_and_says_nothing(self):
+        """A *MAT_RIGID hexahedron (part 1, nodes 1-8; its synthesized main
+        node is 9) carries no shell node, so its SUM(IN) is exactly 0: no J
+        cell, no 'written into' line, no 'keeps J = 0' line. The code
+        verifier's mutant A2-13 ('sum_in <= 0.0' -> '< 0.0') survived the
+        whole suite: it passed this body through the margin test as
+        'applied' (J - 0 = J, the same bytes) and listed it in the 'written
+        into' line - on the roster, the two solid rigid bodies of
+        EXP_SC_JOINT_SCREW."""
+        corners = ((0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0),
+                   (0, 0, 10), (10, 0, 10), (10, 10, 10), (0, 10, 10))
+        deck = ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-4) + "\n"
+                "*PART\nrigid block\n" + _row(1, 1, 1) + "\n"
+                "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+                "*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3, 0.0, 0.0,
+                                      0.0)
+                + "\n" + _row(0.0, 0, 0) + "\n"
+                + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                "*NODE\n"
+                + "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n"
+                          for n, (x, y, z) in enumerate(corners, 1))
+                + "*ELEMENT_SOLID\n" + f"{1:>8}{1:>8}"
+                + "".join(f"{v:>8}" for v in range(1, 9)) + "\n"
+                + "*END\n")
+        res, starter, _e = _convert(deck)
+        heads = [ln for ln in starter.splitlines()
+                 if ln.startswith("/RBODY/")]
+        self.assertEqual(heads, ["/RBODY/9"], heads)
+        self.assertEqual(_rbody_j_rows(starter, 9)[2], _J_ZERO_ROW)
+        self.assertFalse(_has(res.warnings, _A2_APPLIED), res.warnings)
+        self.assertFalse(_has(res.warnings, "keeps J = 0"), res.warnings)
 
     def test_17_the_margin_sits_at_the_starters_WARNING_275_threshold(self):
         """The validation round: at k2rad's Ispher 0 (read as 2,
@@ -982,6 +1037,22 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "EFAIL"), res.warnings)
         _r2, s_off, _e2 = _convert(deck, spotweld_efail_displacement=False)
         self.assertEqual(starter, s_off)
+
+    def test_3b_the_1e19_threshold_is_pinned_from_below_too(self):
+        """test_3 pins the 'never' threshold from ABOVE only (2e20); the code
+        verifier's mutant A3-12 (_SPOTWELD_NEVER 1e19 -> 1e18) survived the
+        whole suite. 5e18 lies inside 0 < EFAIL < 1e19 with no resultant
+        cell: Ifail 1 / Ifail2 0, axial DeltaMax = SIGY L / E + EFAIL L."""
+        res, starter, _e = _convert(_weld_deck(efail=5.0e18,
+                                               resultants=(0.0,) * 6))
+        card1, dofs = _type13_cards(starter)
+        self.assertEqual(card1[70:80].strip(), "1")
+        self.assertEqual(card1[90:100].strip(), "0")
+        d1 = float(dofs[0][1][80:100])
+        self.assertTrue(_close(d1, 5000.0 * 2.0 / 210000.0 + 5.0e18 * 2.0),
+                        d1)
+        self.assertTrue(_has(res.warnings, "EFAIL=5e+18", _W_EFAIL_ON),
+                        res.warnings)
 
     def test_4_SIGY_0_writes_no_curve_and_the_strain_alone(self):
         """SIGY 0 is NOT 'no yield' in LS-DYNA: Vol II R17 p.2-697 makes it
@@ -1503,6 +1574,27 @@ class ImflagNamed(unittest.TestCase):
         res, _s, _e = _convert(_shell_plate(_imflag_control(-9), curve))
         self.assertTrue(_has(res.warnings, "selects EXPLICIT for the whole "
                              "run"), res.warnings)
+
+    def test_6_a_switch_exactly_at_ENDTIM_switches_nothing(self):
+        """The rule 'one at or beyond endtim ends the walk' AT the boundary:
+        test_1 probed a switch BEYOND ENDTIM only, and the code verifier's
+        mutant A5-10 ('x >= endtim' -> '>') survived the whole suite, adding
+        a zero-length segment and printing a false switch sentence."""
+        from k2rad.writer.assembly import imflag_segments as seg
+        self.assertEqual(seg([(0, 1), (0.025, 0)], 0.025),
+                         [(0.0, 0.025, "implicit")])
+        self.assertEqual(seg([(0, 1), (0.01, 0), (0.025, 1)], 0.025),
+                         [(0.0, 0.01, "implicit"), (0.01, 0.025, "explicit")])
+        curve = ("*DEFINE_CURVE\n" + _row(9) + "\n"
+                 + "".join(f"{x:>20}{y:>20}\n" for x, y in
+                           ((0.0, 1.0), (0.025, 0.0))))
+        res, _s, _e = _convert(_shell_plate(_imflag_control(-9), curve))
+        self.assertFalse(_has(res.warnings, "IMFLAG=-9"), res.warnings)
+        # control: the same switch one step earlier IS inside the run
+        early = curve.replace(f"{0.025:>20}", f"{0.02:>20}")
+        res2, _s2, _e2 = _convert(_shell_plate(_imflag_control(-9), early))
+        self.assertTrue(_has(res2.warnings, "IMFLAG=-9", "implicit 0 -> "
+                             "0.02, explicit 0.02 -> 0.025"), res2.warnings)
 
 
 def _spring_coupon(m30: float = 2.0e-5, implicit: bool = False) -> str:
