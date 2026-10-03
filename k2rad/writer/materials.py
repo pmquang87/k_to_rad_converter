@@ -1134,8 +1134,9 @@ _NU_LAGRANGIAN_FACT = (
     "(ELFORM 1, nt 4) goes IE 10.3 -> 29.6 against LS-DYNA's 15.7, the deck "
     "IE +58.98 -> +76.80 % (RMS 32.62 -> 42.53 % of the LS-DYNA peak).")
 _NU_SPH_FACT = (
-    " On SPH parts it is not measured beyond sph/bird, where Nu 1 moved "
-    "nothing (IE RMS 44.15 % on both arms).")
+    " On SPH parts it is not measured beyond sph/bird, where Nu 1 left the "
+    "IE history where it was (IE RMS 44.15 % on both arms; END IE +69.44 -> "
+    "+69.28 %, 1942 -> 1917 cycles).")
 _NU_MIXED_FACT = (
     " A material whose parts mix ELFORM 6 with another class is not carried "
     "either: the cell is per MATERIAL, so it would reach the other parts "

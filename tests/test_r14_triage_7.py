@@ -179,6 +179,23 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         self.assertIn("hm_read_bcs.F:198 unions the codes (MY_OR)", w)
         self.assertNotIn(_A1_SPC, w)
 
+    def test_1b_an_implicit_deck_names_the_stabilisation_source_too(self):
+        """On an implicit deck BC_rigid can also carry k2rad's stabilisation
+        of an unloaded free translation (rbody._make_rbodies), so the merge
+        sentence names it there - and only there (the validation round; every
+        A1 mover on the roster is explicit, test 1 pins its text)."""
+        imp = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 1.0e-4) + "\n"
+        res, _s, _e = _convert(_a1_deck(extra=imp))
+        w = _node_warning(res)
+        self.assertIn("(BC_rigid_1: *MAT_RIGID CMO 1 CON1/CON2 - and, on this "
+                      "implicit deck, any stabilisation k2rad adds to an "
+                      "unloaded free translation -, or the "
+                      "*CONSTRAINED_NODAL_RIGID_BODY _SPC option)", w)
+        res0, _s0, _e0 = _convert(_a1_deck())
+        self.assertIn("(BC_rigid_1: *MAT_RIGID CMO 1 CON1/CON2, or the "
+                      "*CONSTRAINED_NODAL_RIGID_BODY _SPC option) and were "
+                      "merged", _node_warning(res0))
+
     def test_2_P2_keeps_the_disjoint_remainder(self):
         res, starter, _e = _convert(_a1_deck(con1=1, con2=7, tc=6, rc=7))
         groups = _bcs_groups(starter)
@@ -3650,6 +3667,12 @@ _RETRACTED_ROUND_7_V = (
     "emitted models (153 bodies)",
     "refused: a principal value `<= 0` (ERROR 274)",
     "relative 1e-6 margin",
+    # the pendulum pair's IE RMS: the campaign re-run (the implementation,
+    # nt 4) reads 50.87 -> 51.85; the pre-research arm's pair is retired
+    "50.64 → 51.61",
+    # sph/bird's Nu-1 arm moved the cycles and the END (1942 -> 1917,
+    # +69.44 -> +69.28 %); only its IE RMS stayed (44.15 %)
+    "Nu 1 moved nothing",
 )
 
 
@@ -3720,6 +3743,13 @@ class Round7ValidationRound(unittest.TestCase):
              "name at the margin"),
             ("k2rad/cli.py", "refused by name at or below a relative 1e-3 "
              "margin"),
+            ("ROADMAP.md", "the IE RMS moves 50.87 → 51.85 % in the campaign "
+             "re-run, nt 4 — 0.98 of the 1-point threshold"),
+            ("k2rad/writer/materials.py", "where Nu 1 left the IE history "
+             "where it was (IE RMS 44.15 % on both arms; END IE +69.44 -> "
+             "+69.28 %, 1942 -> 1917 cycles)"),
+            ("ROADMAP.md", "Nu 1 left the IE history where it was, IE RMS "
+             "44.15 % on both arms, END IE +69.44 → +69.28 %"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

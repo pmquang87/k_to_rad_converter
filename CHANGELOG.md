@@ -23,7 +23,8 @@ Prior history (before this changelog was introduced) is summarized in the
   END-value flips annotated, never counted
   (`intro-by-j.-reid/pendulum/pendulum.k` + `deformable_to_rigid.pendulum.k`,
   one emitted model, under A2: IE −19.39 → +5.37 % while the IE RMS moves
-  50.64 → 51.61 %). Status movers: ex_02_thick_shell_elform_{2,3,5} timeout
+  50.87 → 51.85 % in the campaign re-run, nt 4 — 0.98 of the rule's
+  1-point threshold). Status movers: ex_02_thick_shell_elform_{2,3,5} timeout
   → normal under A4 (28 cycles at nt 4 and 2; not_comparable stays). Named
   history costs printed beside their improvements: ex_15 ×3 (A4), brake /
   transducer / translat (A2), mainboltaexpl (A3; re-attributed by the
@@ -355,11 +356,12 @@ Prior history (before this changelog was introduced) is summarized in the
     emitted models (153 bodies), one J row each, `_0000.rad` only, no id
     shift** (151 bodies since the validation round's margin: `forging_A` /
     `forging_B` keep `J = 0` on one body each); `pipe` and `wood-post` stay `match`; the pendulum pair (1 model)
-    flips on its END value only (IE −19.39 → +5.37 % with the IE RMS 50.64 →
-    51.61 %: annotated, never a fix). Named costs: `brake` (KE 0.4-0.7
-    points lower at every fifth, RMS 2.62 → 2.85 %, while its IE RMS 814.68 →
-    692.64 % and its start becomes exact), `transducer` (END IE −18.08 →
-    +39.12 % on a small oscillating contact IE; KE RMS 20.85 → 15.19 %),
+    flips on its END value only (IE −19.39 → +5.37 % with the IE RMS 50.87 →
+    51.85 % in the campaign re-run: annotated, never a fix). Named costs: `brake` (KE 0.4-0.7
+    points lower at every fifth, RMS 2.63 → 2.85 %, while its IE RMS 814.86 →
+    692.82 % and its start becomes exact; the campaign re-run's figures,
+    nt 4), `transducer` (END IE −18.08 →
+    +39.12 % on a small oscillating contact IE; KE RMS 20.86 → 15.19 %),
     `translat` (worse on a run whose energy error is 99.9 % from the first
     rows — the joint path); doorbeam's round-6 +582.00 % is unchanged (its
     rotation-fixed body; every printed row identical at nt 4 and 2). Tests

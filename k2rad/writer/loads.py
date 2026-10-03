@@ -955,7 +955,8 @@ def _warn_constrained_global_converted(
             "merged (hm_read_bcs.F:198 unions the codes).")
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
-                                              auto_titles))
+                                              auto_titles,
+                                              implicit=state.is_implicit))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1070,21 +1071,29 @@ def _named(nids: List[int], cap: int = 5) -> str:
 
 
 def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
-                               auto_titles: List[str]) -> str:
+                               auto_titles: List[str],
+                               implicit: bool = False) -> str:
     """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
     ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
 
     Facts only: the merged code is the RIGID BODY's own /BCS. Attributing it to
     a ``*BOUNDARY_SPC`` would be false - on bend.k node 125's code is the
-    ``*MAT_RIGID`` CON1/CON2 of body 2 and the deck states no SPC at all.
+    ``*MAT_RIGID`` CON1/CON2 of body 2 and the deck states no SPC at all. On
+    an *implicit* deck the ``BC_rigid`` card can also carry k2rad's own
+    stabilisation of an unloaded free translation (``rbody._make_rbodies``),
+    and the sentence names it there (the validation round; every A1 mover on
+    the roster is explicit, so no corpus record moves).
     """
     shown = ", ".join(auto_titles[:5]) + (
         f" and {len(auto_titles) - 5} more" if len(auto_titles) > 5 else "")
+    stab = (" - and, on this implicit deck, any stabilisation k2rad adds to "
+            "an unloaded free translation -" if implicit else "")
     return (
         f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
         f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
         f"the rigid body itself writes there ({shown}: *MAT_RIGID CMO 1 "
-        "CON1/CON2, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) and were "
+        f"CON1/CON2{stab}, or the *CONSTRAINED_NODAL_RIGID_BODY _SPC option) "
+        "and were "
         "merged into it rather than written a second time: hm_read_bcs.F:198 "
         "unions the codes (MY_OR), so the second /BCS changed no physics and "
         "only added starter WARNING 312, one condition per DOF both cards fix.")
@@ -1191,7 +1200,8 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
             "so a second /BCS only adds starter WARNING 312.")
     if auto_nodes:
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
-                                              auto_titles))
+                                              auto_titles,
+                                              implicit=state.is_implicit))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "

@@ -2156,8 +2156,9 @@ arms), `revo-stiff` (A2: IE / KE history RMS 4.96 / 2.94 → 0.78 / 0.73 at
 1.156× cycles) and `plates.mat100` (A3: −9.27 / +51.74 → −3.21 / +4.22 %, IE
 RMS 23.53 → 8.58, 1.107×); two END-value flips
 (`intro-by-j.-reid/pendulum/pendulum.k` and `deformable_to_rigid.pendulum.k`,
-one emitted model, under A2: IE −19.39 → +5.37 % while the IE RMS moves 50.64
-→ 51.61 %) are annotated, never counted. Landed, part A: A1 the rigid body's
+one emitted model, under A2: IE −19.39 → +5.37 % while the IE RMS moves 50.87
+→ 51.85 % in the campaign re-run, nt 4 — 0.98 of the 1-point threshold) are
+annotated, never counted. Landed, part A: A1 the rigid body's
 own `/BCS` absorbs a re-pointed member TC/RC code (6 deck keys / 6 emitted
 models; 0 physics, `bend` WARNING 312 33 → 30), A2 `J = −ΣIN` on every
 `*MAT_RIGID` / `*DEFORMABLE_TO_RIGID` part shell `/RBODY` (56 / 53), A3 the
@@ -2203,7 +2204,8 @@ that decided it and the deck that would decide it next.
    deck-statement scope. Next: a Couette coupon (a sheared null-material slab
    against the analytic velocity profile) on a Lagrangian and an SPH part, and
    the `bird_B` mechanism. Reach 4 keys / 4 models (`impact`, `sph/bird` —
-   inert there: Nu 1 moved nothing, IE RMS 44.15 % on both arms —, `bird_A`,
+   near-inert there: Nu 1 left the IE history where it was, IE RMS 44.15 % on
+   both arms, END IE +69.44 → +69.28 %, 1942 → 1917 cycles —, `bird_A`,
    `bird_B`).
 2. **The `*CONSTRAINED_SHELL_IN_SOLID` → `/INTER/TYPE18` EMISSION** (round-6
    item 2; B5 names the card): the coupling alone with a stated `Stfval` 562.5
