@@ -2430,7 +2430,8 @@ def _null_card(mid: int, ro, pc: str, mu, terod="", cerod="") -> str:
 def _null_fluid_deck(pc: str = "0.0", mu="0.0", ro=1.0e-9, elform=1,
                      sph: bool = False, void: str = "", ammg: bool = False,
                      eos: str = "gruneisen", terod="", cerod="",
-                     second_part_elform=None, no_part: bool = False) -> str:
+                     second_part_elform=None, no_part: bool = False,
+                     c3: float = 0.0) -> str:
     """Part 1 = one unit hex (x 0..1) on *SECTION_SOLID 1 ELFORM *elform*,
     material *MAT_NULL 1 + its EOS: ``gruneisen`` = *EOS_GRUNEISEN 1 (C 1.5e6:
     with RO 1e-9 the tension floor -RO C^2 is -2250), ``linpoly`` =
@@ -2464,7 +2465,7 @@ def _null_fluid_deck(pc: str = "0.0", mu="0.0", ro=1.0e-9, elform=1,
     out.append(_null_card(mid, ro, pc, mu, terod, cerod).rstrip("\n"))
     if eos == "linpoly":
         out += ["*EOS_LINEAR_POLYNOMIAL",
-                _row(1, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _row(0.0, 1.0)]
+                _row(1, 0.0, 1.0, 0.0, c3, 0.0, 0.0, 0.0), _row(0.0, 1.0)]
     else:
         out.append(_GRUNEISEN_1.rstrip("\n"))
     if void == "self":
@@ -2553,6 +2554,30 @@ class MatNullPcMu(unittest.TestCase):
                              "/EOS/POLYNOMIAL pressure reaches -1"),
                         r2.warnings)
 
+    def test_the_polynomial_floor_finds_an_interior_minimum(self):
+        """In tension at E 0 the polynomial EOS is P = C0 + C1 mu + C3 mu^3
+        (eosmain.F:214 MU2 = MAX(0, MU)^2; eospolyno.F:99). With C1 1 and C3
+        -1 its minimum sits INSIDE the interval, at mu* = -sqrt(1/3): P =
+        -(2/3) sqrt(1/3) = -0.3849 - below the end value C0 - C1 - C3 = 0
+        the text quoted before the validation round, which called a PC of
+        -0.2 'cannot act'."""
+        from k2rad.writer.materials import _poly_tension_min
+        low, mu = _poly_tension_min(0.0, 1.0, -1.0)
+        self.assertAlmostEqual(mu, -math.sqrt(1.0 / 3.0), places=12)
+        self.assertAlmostEqual(low, -2.0 / 3.0 * math.sqrt(1.0 / 3.0),
+                               places=12)
+        # the end governs when mu* falls outside (C3 -1/6: mu* = -sqrt(2)),
+        # or C3 is 0 or positive; a tie keeps mu -> -1
+        self.assertEqual(_poly_tension_min(0.0, 1.0, -1.0 / 6.0)[1], -1.0)
+        self.assertEqual(_poly_tension_min(0.0, 1.0, 0.0), (-1.0, -1.0))
+        self.assertEqual(_poly_tension_min(2.0, 1.0, 0.5), (0.5, -1.0))
+        self.assertEqual(_poly_tension_min(0.0, 1.0, -1.0 / 3.0)[1], -1.0)
+        r, _s, _e = _convert(_null_fluid_deck(pc="-0.2", eos="linpoly",
+                                              c3=-1.0))
+        self.assertTrue(_has(r.warnings, "Pmin -0.2 (PC -0.2; it can act: the "
+                             "/EOS/POLYNOMIAL pressure reaches -0.3849 at mu "
+                             "= -0.5774, E 0)"), r.warnings)
+
     def test_both_EOS_routes(self):
         for route, mid in (("gruneisen", 1), ("eosid", 3)):
             with self.subTest(route=route):
@@ -2580,9 +2605,17 @@ class MatNullPcMu(unittest.TestCase):
             ("ELFORM 1", {"elform": 1}, "Lagrangian solid (ELFORM 1)",
              "10.3 -> 29.6"),
             ("SPH", {"sph": True}, "parts [1]: SPH", "sph/bird"),
-            ("ELFORM 12, no void", {"elform": 12}, "ELFORM 12", "+20691.23 %"),
+            # the validation round split the old void sentence, which named
+            # an ELFORM-12 fluid AND a *INITIAL_VOID deck for either half
+            # (EXPECTED VALUES MOVED: these two cases pinned that wording)
+            ("ELFORM 12, no void", {"elform": 12}, "ELFORM 12",
+             "without *INITIAL_VOID the cell is unmeasured"),
             ("ELFORM 6 + a void elsewhere", {"elform": 6, "void": "other"},
-             "parts [1]: ELFORM 6", "+20691.23 %"),
+             "parts [1]: ELFORM 6", "on a *INITIAL_VOID deck, the cell is "
+             "unmeasured"),
+            # bird_B's shape (both halves) keeps the measured sentence
+            ("ELFORM 12 + a void elsewhere", {"elform": 12, "void": "other"},
+             "parts [1]: ELFORM 12", "+20691.23 %"),
             ("ELFORM 11 + AMMG", {"elform": 11, "ammg": True},
              "ELFORM 11 (multi-material ALE)", "*ALE_MULTI-MATERIAL_GROUP"),
             ("ELFORM 6 + ELFORM 1 (mixed)",
@@ -2593,6 +2626,12 @@ class MatNullPcMu(unittest.TestCase):
              "carries no Nu either"),
         )
         heads = {"+20691.23 %": "on the ELFORM-12 fluid of a *INITIAL_VOID",
+                 "without *INITIAL_VOID the cell is unmeasured":
+                     "an ELFORM-12 (single material with void) part is "
+                     "outside the Nu cell's scope",
+                 "on a *INITIAL_VOID deck, the cell is unmeasured":
+                     "the deck states *INITIAL_VOID, which the Nu cell's "
+                     "scope excludes",
                  "*ALE_MULTI-MATERIAL_GROUP": "the cell is unmeasured there"}
         for name, kw, cls, fact in cases:
             with self.subTest(case=name):

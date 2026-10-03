@@ -1048,27 +1048,48 @@ def _carrier_eos(state: ConversionState, mid: int) -> Optional[EosCard]:
     return eos
 
 
-def _eos_tension_floor(state: ConversionState, mid: int,
-                       rho: float) -> Tuple[str, Optional[float]]:
-    """``(EOS kind, the pressure the carrier's EOS reaches at mu -> -1 with
-    E = 0)`` - what decides whether a ``Pmin`` can act at all (the EOS floors
-    its pressure at PMIN, ``gruneisen.F:129/132/152``,
-    ``eospolyno.F:104/113/125``). GRUNEISEN: ``-rho0 C^2`` (the expanded
-    branch ``P = rho0 C^2 mu + (gamma0 + a mu) E``); POLYNOMIAL:
-    ``C0 - C1 - C3`` (LS-DYNA drops the C2 mu^2 and C6 mu^2 E terms in
-    tension); IDEAL-GAS: 0 (no tension); any other kind: ``None``."""
+def _poly_tension_min(c0: float, c1: float, c3: float
+                      ) -> Tuple[float, float]:
+    """``(the lowest pressure, the mu it is reached at)`` of the polynomial
+    EOS in tension at E = 0: ``P(mu) = C0 + C1 mu + C3 mu^3`` on
+    ``-1 <= mu <= 0`` (``eosmain.F:214`` writes MU2 = MAX(0, MU)^2, so the
+    C2 and C6 terms vanish in tension; ``eospolyno.F:99``). The minimum sits
+    at an end of the interval or, when ``C1 / C3 < 0``, at the stationary
+    point ``mu* = -sqrt(-C1 / (3 C3))`` if it lies inside: with C3 < 0 and
+    C1 < 3 |C3| that point is BELOW the end value ``C0 - C1 - C3`` (C1 = 1,
+    C3 = -1: C0 - 0.385 against C0)."""
+    import math
+    cands = [(c0 - c1 - c3, -1.0), (c0, 0.0)]
+    if c3 != 0.0 and -c1 / (3.0 * c3) > 0.0:
+        mu = -math.sqrt(-c1 / (3.0 * c3))
+        if -1.0 < mu < 0.0:
+            cands.append((c0 + c1 * mu + c3 * mu ** 3, mu))
+    return min(cands)
+
+
+def _eos_tension_floor(state: ConversionState, mid: int, rho: float
+                       ) -> Tuple[str, Optional[float], float]:
+    """``(EOS kind, the lowest pressure the carrier's EOS reaches in tension
+    with E = 0, the mu it is reached at)`` - what decides whether a ``Pmin``
+    can act at all (the EOS floors its pressure at PMIN,
+    ``gruneisen.F:129/132/152``, ``eospolyno.F:104/113/125``). GRUNEISEN:
+    ``-rho0 C^2`` at mu -> -1 (the expanded branch ``P = rho0 C^2 mu +
+    (gamma0 + a mu) E``); POLYNOMIAL: :func:`_poly_tension_min` - ``C0 - C1 -
+    C3`` at mu -> -1 unless a negative C3 puts the minimum inside the
+    interval; IDEAL-GAS: 0 (no tension); any other kind: ``None``."""
     eos = _carrier_eos(state, mid)
     if eos is None:
-        return "", None
+        return "", None, -1.0
     c = eos.params
     if eos.kind == "GRUNEISEN":
-        return eos.kind, -rho * c.get("c", 0.0) ** 2
+        return eos.kind, -rho * c.get("c", 0.0) ** 2, -1.0
     if eos.kind == "POLYNOMIAL":
-        return eos.kind, (c.get("c0", 0.0) - c.get("c1", 0.0)
-                          - c.get("c3", 0.0))
+        low, mu = _poly_tension_min(c.get("c0", 0.0), c.get("c1", 0.0),
+                                    c.get("c3", 0.0))
+        return eos.kind, low, mu
     if eos.kind == "IDEAL-GAS":
-        return eos.kind, 0.0
-    return eos.kind, None
+        return eos.kind, 0.0, -1.0
+    return eos.kind, None, -1.0
 
 
 def _ammg_part_ids(state: ConversionState) -> Set[int]:
@@ -1160,6 +1181,8 @@ def _resolve_mat_null_cells(
     w_n2: List[str] = []
     w_n2_classes: List[str] = []
     w_n3: List[str] = []
+    w_n3_deck: List[str] = []
+    w_n3_e12: List[str] = []
     w_n4: List[str] = []
     refusals: List[str] = []
     changed: List[int] = []
@@ -1191,13 +1214,16 @@ def _resolve_mat_null_cells(
             if n.rho <= 0.0 or mid in state.zero_density_floored:
                 nclass = "rho"
             elif void_deck:
-                nclass = "void"
+                # the measured carrier (bird_B) is BOTH: an ELFORM-12 fluid
+                # on a deck that states *INITIAL_VOID - each half alone gets
+                # its own sentence (the validation round)
+                nclass = "void" if "ELFORM 12" in classes else "void_deck"
             elif any(p.pid in ammg for p in users):
                 nclass = "ammg"
             elif users and classes == ["ELFORM 6"]:
                 nu = n.mu / n.rho
             elif "ELFORM 12" in classes:
-                nclass = "void"
+                nclass = "elform12"
             else:
                 nclass = "other"
         elif n.mu < 0.0:
@@ -1216,16 +1242,18 @@ def _resolve_mat_null_cells(
                 "written: Pmin stays 0, which hm_read_mat06.F:154 reads as "
                 "-INFINITY (no cutoff).")
         elif pmin_a1 is None:
-            kind, efloor = _eos_tension_floor(state, mid, n.rho)
+            kind, efloor, mu_at = _eos_tension_floor(state, mid, n.rho)
+            where = ("mu -> -1" if mu_at == -1.0
+                     else f"mu = {mu_at:.4g}")
             if efloor is None:
                 bind = (f"the /EOS/{kind or '?'} tension floor is not "
                         "computed")
             elif pmin > efloor:
                 bind = (f"it can act: the /EOS/{kind} pressure reaches "
-                        f"{efloor:g} at mu -> -1, E 0")
+                        f"{efloor:g} at {where}, E 0")
             else:
                 bind = (f"it cannot act: the /EOS/{kind} pressure never goes "
-                        f"below {efloor:g} (mu -> -1, E 0), so the cell "
+                        f"below {efloor:g} ({where}, E 0), so the cell "
                         "changes no result")
             w_p.append(f"/MAT/HYD_VISC/{mid} Pmin {pmin:g} (PC {n.pc:g}; "
                        f"{bind})")
@@ -1245,6 +1273,10 @@ def _resolve_mat_null_cells(
                 "cannot be; Nu 0.")
         elif nclass == "void":
             w_n3.append(clause)
+        elif nclass == "void_deck":
+            w_n3_deck.append(clause)
+        elif nclass == "elform12":
+            w_n3_e12.append(clause)
         elif nclass == "ammg":
             w_n4.append(clause)
         elif nclass == "other":
@@ -1323,6 +1355,23 @@ def _resolve_mat_null_cells(
             "not found (it is not a viscous step violation: h^2 / (6 Nu) = "
             "1.75e-6 s is above the step 2.04e-7 s). ROADMAP: the bird_B "
             "mechanism first.")
+    if w_n3_deck:
+        state.warn(
+            "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_deck)
+            + ": the deck states *INITIAL_VOID, which the Nu cell's scope "
+            "excludes - its only measured carrier on such a deck, bird_B "
+            "(an ELFORM-12 fluid), CREATES energy under Nu 12804 (nt 4: "
+            "energy error 99.9 % from about cycle 500); on these parts, on "
+            "a *INITIAL_VOID deck, the cell is unmeasured.")
+    if w_n3_e12:
+        state.warn(
+            "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_e12)
+            + ": an ELFORM-12 (single material with void) part is outside "
+            "the Nu cell's scope - its only measured carrier, bird_B, is an "
+            "ELFORM-12 fluid that CREATES energy under Nu 12804 (nt 4: "
+            "energy error 99.9 % from about cycle 500) on a deck that "
+            "states *INITIAL_VOID; without *INITIAL_VOID the cell is "
+            "unmeasured.")
     if w_n4:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n4) + ": "

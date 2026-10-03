@@ -165,7 +165,11 @@ Prior history (before this changelog was introduced) is summarized in the
     family. Elsewhere MU is named and not carried: impact.k's Lagrangian bar
     nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) and
     bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
-    mixed materials are named too. TEROD / CEROD are named (no LAW6 cell). A
+    mixed materials are named too (the validation round gave the two halves
+    of bird_B's class their own sentences: an ELFORM-12 part on a deck
+    without `*INITIAL_VOID`, and a non-ELFORM-12 part on a deck that states
+    it, had both been described as "the ELFORM-12 fluid of a
+    `*INITIAL_VOID` deck"). TEROD / CEROD are named (no LAW6 cell). A
     stated RO ≤ 0 is tested on the statement, not on the zero-density
     floor's 1e-24. ONE decision per deck (`_resolve_mat_null_cells`,
     memoised on `state.mat_null_cells`, made after the void floor, which
@@ -173,10 +177,14 @@ Prior history (before this changelog was introduced) is summarized in the
     quadrature_C are byte-identical), keyed on the `*MAT_NULL` record: the 4
     `*MAT_ELASTIC_FLUID` acoustic keys (nvh 8.7 / 9.1 / 9.2 / 9.4) write the
     same keyword from another record and do not move. Every warning names
-    whether the cell can act at all (the pressure the carrier's EOS reaches
-    at mu → -1: `-RO C²` for Gruneisen, `C0 - C1 - C3` for the polynomial —
-    inert on channel_A/B/C, -1e4 against -2250, and sloshing, -1e5 against
-    -10). Byte movers 20 keys / 17 models (the 3 Nu keys among them; the
+    whether the cell can act at all (the lowest pressure the carrier's EOS
+    reaches in tension at E 0: `-RO C²` for Gruneisen at mu → -1; for the
+    polynomial the minimum of `C0 + C1 mu + C3 mu³` over −1 ≤ mu ≤ 0, which
+    is `C0 - C1 - C3` at mu → -1 unless a negative C3 puts it inside the
+    interval — the validation round's correction: C1 1 / C3 −1 bottoms out
+    at −0.385 at mu −0.577, where the end value reads 0 — inert on
+    channel_A/B/C, -1e4 against -2250, and sloshing, -1e5 against -10).
+    Byte movers 20 keys / 17 models (the 3 Nu keys among them; the
     decision text's "21 / 18" counted channel_A/B/C twice). RE-MEASURED on
     the implementation (nt 4, base-paired in one window, matched-time END,
     fifths nearest-row, RMS in % of the LS peak; every figure equal to the
