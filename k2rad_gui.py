@@ -117,6 +117,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          implicit_tshell_solid: bool = True,
                          corotational_orthotropic: bool = True,
                          mat_null_pc_mu: bool = True,
+                         joint_screw_gjoint: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -279,6 +280,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["mat_null_pc_mu"] = bool(mat_null_pc_mu)
 
+    kwargs["joint_screw_gjoint"] = bool(joint_screw_gjoint)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -420,6 +423,7 @@ class ConverterGUI:
         self.implicit_tshell_solid = tk.BooleanVar(value=True)
         self.corotational_orthotropic = tk.BooleanVar(value=True)
         self.mat_null_pc_mu = tk.BooleanVar(value=True)
+        self.joint_screw_gjoint = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -895,6 +899,14 @@ class ConverterGUI:
             variable=self.mat_null_pc_mu).grid(
                 row=46, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (Lagrange, "
+                     "carriage /RBODY, contact split; SMP only, -np 1) - ON. "
+                     "EXP_SC_JOINT_SCREW nut travel 0 -> 185.70 mm vs LS "
+                     "183.59",
+            variable=self.joint_screw_gjoint).grid(
+                row=47, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1155,6 +1167,7 @@ class ConverterGUI:
                 corotational_orthotropic=(
                     self.corotational_orthotropic.get()),
                 mat_null_pc_mu=self.mat_null_pc_mu.get(),
+                joint_screw_gjoint=self.joint_screw_gjoint.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1339,6 +1352,9 @@ class ConverterGUI:
         if not kwargs.get("mat_null_pc_mu", True):
             bits.append("*MAT_NULL PC / MU cells not carried: Pmin 0 = "
                         "-INFINITY, Nu 0 (--no-mat-null-pc-mu)")
+        if not kwargs.get("joint_screw_gjoint", True):
+            bits.append("*CONSTRAINED_JOINT_SCREW left skipped "
+                        "(--no-joint-screw-gjoint)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

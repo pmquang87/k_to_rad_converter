@@ -2687,6 +2687,382 @@ class MatNullPcMu(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B2 — *CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK + the contact split
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: EXP_SC_JOINT_SCREW's drive curve LCID 10000007 (its six points)
+_SCREW_CURVE = ((0.0, 0.0), (0.006, 1.0), (0.03, 5.0), (0.06, 5.0),
+                (0.1, 15.0), (0.6, 100.0))
+
+
+def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
+                con2_a: int = 5, vad: int = 2, sf=1.0, birth=0.0,
+                drive: bool = True, drive_on_b: bool = False,
+                implicit: bool = False, s2s: bool = False,
+                n5_on_plate: bool = False, n2_off_axis: bool = False,
+                diagonal: bool = False, swap_axis: bool = False,
+                a_elastic_cnrb: bool = False) -> str:
+    """The B2 mini screw (ton-mm-s, explicit, ENDTIM 0.1): part 2 "screw out"
+    (A) = one hex x 10..20, y 0..10, z 0..10 on *MAT_RIGID 2 (CMO 1, CON1 5,
+    CON2 *con2_a*); part 1 "screw in" (B) = one hex x -15..-5 on *MAT_RIGID 1
+    (CMO 1, CON1 5, CON2 7); part 3 = a 2 x 2 *ELEMENT_SHELL plate at x 30
+    (*MAT_ELASTIC). N1 (20, 0, 0) / N3 (10, 0, 0) / N5 (20, 0, 10) on A, N2
+    (-5, 0, 0) / N4 (-15, 0, 0) / N6 (-5, 0, 10) on B; PARM 25; the drive
+    *BOUNDARY_PRESCRIBED_MOTION_RIGID pid 2 DOF 5 VAD *vad* LCID 7 on the
+    deck's six points; *CONTACT_AUTOMATIC_SINGLE_SURFACE SSID 0. A's nodal
+    centroid (the element-free /RBODY main) is (15, 5, 5); |N1N3| = 10, so
+    the carriage offset is 1.0. *diagonal* moves B to y -25..-15 and puts
+    N1 on (20, 10, 0): the axis is (1, 1, 0)."""
+    by = -25.0 if diagonal else 0.0
+    pts = {}
+    nid = 0
+
+    def hexa(x0, y0):
+        nonlocal nid
+        ids = []
+        for z in (0.0, 10.0):
+            for y, x in ((y0, x0), (y0, x0 + 10.0), (y0 + 10.0, x0 + 10.0),
+                         (y0 + 10.0, x0)):
+                nid += 1
+                pts[nid] = (x, y, z)
+                ids.append(nid)
+        return ids
+    a_ids = hexa(10.0, 0.0)        # nodes 1-8: A
+    b_ids = hexa(-15.0, by)        # nodes 9-16: B
+    plate = {}
+    for j, z in enumerate((0.0, 5.0, 10.0)):
+        for i, y in enumerate((0.0, 5.0, 10.0)):
+            nid += 1
+            pts[nid] = (30.0, y, z)
+            plate[(i, j)] = nid
+
+    def node_at(xyz):
+        return next(k for k, v in pts.items() if v == xyz)
+    n1 = node_at((20.0, 10.0 if diagonal else 0.0, 0.0))
+    n3 = node_at((10.0, 0.0, 0.0))
+    n5 = (plate[(0, 0)] if n5_on_plate
+          else node_at((20.0, 10.0 if diagonal else 0.0, 10.0)))
+    n2 = node_at((-5.0, 10.0, 0.0) if n2_off_axis
+                 else (-5.0, -15.0 if diagonal else 0.0, 0.0))
+    n4 = node_at((-15.0, -25.0 if diagonal else 0.0, 0.0))
+    n6 = node_at((-5.0, -15.0 if diagonal else 0.0, 10.0))
+    if swap_axis:
+        n1, n3, n2, n4 = n3, n1, n4, n2
+    out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.1), "*NODE"]
+    out += [f"{k:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}"
+            for k, (x, y, z) in sorted(pts.items())]
+    out += ["*ELEMENT_SOLID",
+            "".join(f"{v:>8}" for v in [1, 2] + a_ids),
+            "".join(f"{v:>8}" for v in [2, 1] + b_ids),
+            "*ELEMENT_SHELL"]
+    eid = 2
+    for j in range(2):
+        for i in range(2):
+            eid += 1
+            out.append("".join(f"{v:>8}" for v in (
+                eid, 3, plate[(i, j)], plate[(i + 1, j)],
+                plate[(i + 1, j + 1)], plate[(i, j + 1)])))
+    out += ["*PART", "screw in", _row(1, 1, 1),
+            "*PART", "screw out", _row(2, 1, 2),
+            "*PART", "plate", _row(3, 3, 3),
+            "*SECTION_SOLID", _row(1, 1),
+            "*SECTION_SHELL", _row(3, 2), _row(1.0, 1.0, 1.0, 1.0),
+            "*MAT_RIGID", _row(1, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0),
+            _row(1.0, 5, 7), _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    if a_elastic_cnrb:
+        out += ["*MAT_ELASTIC", _row(2, 7.85e-9, 210000.0, 0.3),
+                "*SET_NODE_LIST", _row(77), _row(*a_ids),
+                "*CONSTRAINED_NODAL_RIGID_BODY", _row(88, 0, 77)]
+    else:
+        out += ["*MAT_RIGID", _row(2, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0),
+                _row(1.0, 5, con2_a), _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    out += ["*MAT_ELASTIC", _row(3, 7.85e-9, 210000.0, 0.3),
+            "*DEFINE_CURVE", _row(7)]
+    out += [f"{x:>20}{y:>20}" for x, y in _SCREW_CURVE]
+    if drive:
+        out += ["*BOUNDARY_PRESCRIBED_MOTION_RIGID",
+                _row(2, 5, vad, 7, sf, 0, 1e25, birth)]
+    if drive_on_b:
+        out += ["*BOUNDARY_PRESCRIBED_MOTION_RIGID",
+                _row(1, 1, 0, 7, 1.0, 0, 1e25, 0.0)]
+    out += ["*CONTACT_AUTOMATIC_SINGLE_SURFACE",
+            _row(0, 0, 5, 0), _row(0.1, 0.0, 0.0, 0.0), ""]
+    if s2s:
+        out += ["*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
+                _row(1, 2, 3, 3), _row(0.1, 0.0), ""]
+    if implicit:
+        out += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 0.01)]
+    out += [keyword, _row(9) + "screw",
+            _row(n1, n2, n3, n4, n5, n6, 1.0, 0.0), _row(parm, 0, 0, 0.0),
+            "*END"]
+    return "\n".join(out) + "\n"
+
+
+def _block_after(text: str, head_prefix: str, n: int):
+    """The *n* lines after the first line starting with *head_prefix*."""
+    lines = text.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith(head_prefix))
+    return lines[i:i + n]
+
+
+def _rbody_main(starter: str, part: int) -> int:
+    """The main node of the /RBODY whose secondary group is
+    rb_nodes_pid<part> (the *MAT_RIGID producer's naming)."""
+    lines = starter.splitlines()
+    grnods = {int(lines[i].split("/")[3]): lines[i + 1]
+              for i, ln in enumerate(lines) if ln.startswith("/GRNOD/NODE/")}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/RBODY/"):
+            g = int(lines[i + 3][60:70])      # grnd_ID, cols 61-70
+            if grnods.get(g) == f"rb_nodes_pid{part}":
+                return int(ln.split("/")[2])
+    raise AssertionError(f"no /RBODY for part {part}")
+
+
+def _surf_parts(starter: str, title: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/SURF/PART/EXT/") and lines[i + 1] == title:
+            return [int(t) for t in lines[i + 2].split()]
+    raise AssertionError(f"no surface titled {title}")
+
+
+class JointScrewGjoint(unittest.TestCase):
+    """B2 — a *CONSTRAINED_JOINT_SCREW between two *MAT_RIGID bodies on a
+    global axis -> /GJOINT/RACK on a synthesized carriage, the bodies' CMO
+    /BCS and drive re-written as /BCS/LAGMUL + /IMPVEL/LAGMUL, the rigid pair
+    split out of the all-parts self-contact; anything else keeps the 65ff389
+    skip with a named reason."""
+
+    def test_the_rack_card(self):
+        _r, s, _e = _convert(_screw_deck())
+        a_main, b_main = _rbody_main(s, 2), _rbody_main(s, 1)
+        rack = [ln for ln in _block_after(s, "/GJOINT/RACK/", 10)
+                if not ln.startswith("#")]
+        self.assertEqual(rack[1], "SCREW_9")
+        row0 = rack[2]
+        self.assertEqual(row0[10:30], "               -0.04")
+        self.assertEqual(row0[30:70], "                   0" * 2)
+        self.assertEqual((int(row0[70:80]), int(row0[80:90]),
+                          int(row0[90:100])), (a_main, b_main, 0))
+        axis = ("                   0                   0                   1"
+                "                   0                   0")
+        self.assertEqual(rack[3:5], [axis, axis])
+        self.assertEqual(rack[5], "                   0" * 5)
+        self.assertEqual(s.count("/GJOINT/RACK/"), 1)
+
+    def test_the_carriage(self):
+        r, s, _e = _convert(_screw_deck())
+        rack = [ln for ln in _block_after(s, "/GJOINT/RACK/", 6)
+                if not ln.startswith("#")]
+        n0 = int(rack[2][0:10])
+        body = _block_after(s, f"/RBODY/{n0}", 9)
+        self.assertEqual(body[1], "SCREW_9_CARRIAGE")
+        # node_ID sens skew Ispher (4 x 10) | Mass (20) | grnd Ikrem ICoG surf
+        self.assertEqual(body[3][40:60], "        1.000000E-06")   # Mass
+        self.assertEqual(int(body[3][80:90]), 3)                  # ICoG
+        self.assertEqual(body[5], "        1.000000E-06" * 3)
+        g = int(body[3][60:70])
+        grp = _block_after(s, f"/GRNOD/NODE/{g}", 3)
+        self.assertEqual(grp[1], "SCREW_9_carriage_secondaries")
+        n1, n2 = (int(t) for t in grp[2].split())
+        st = _dispatch(_screw_deck())
+        from k2rad.writer.assembly import build_starter
+        build_starter(st)
+        self.assertEqual([(st.nodes[n].x, st.nodes[n].y, st.nodes[n].z)
+                          for n in (n0, n1, n2)],
+                         [(15.0, 5.0, 5.0), (15.0, 6.0, 5.0),
+                          (15.0, 5.0, 6.0)])
+        self.assertIn(n0, st.rbody_ids)
+        self.assertTrue(_has(r.warnings, "a synthesized carriage /RBODY/"))
+
+    def test_the_two_BCS_LAGMUL(self):
+        _r, s, _e = _convert(_screw_deck())
+        lag = [_block_after(s, ln, 4) for ln in s.splitlines()
+               if ln.startswith("/BCS/LAGMUL/")]
+        self.assertEqual(len(lag), 2)
+        rows = {b[1]: b[3] for b in lag}
+        car = rows["SCREW_9_carriage"]
+        self.assertEqual(car[:20], "   011 111         0")
+        a_ind = [ln for ln in s.splitlines()]
+        a_grp = next(int(a_ind[i].split("/")[3]) for i in range(len(a_ind))
+                     if a_ind[i].startswith("/GRNOD/NODE/")
+                     and a_ind[i + 1] == "rb_indnode_pid2")
+        self.assertEqual(rows["SCREW_9_body_A"],
+                         f"   000 011         0{a_grp:>10}")
+        self.assertNotIn("BC_rigid_1", s)
+        self.assertNotIn("BC_rigid_2", s)
+        self.assertNotIn("/IMPDISP/", s)
+
+    def test_the_differentiated_drive(self):
+        _r, s, _e = _convert(_screw_deck())
+        imp = _block_after(s, "/IMPVEL/LAGMUL/", 6)
+        fid = int(imp[3][0:10])
+        self.assertEqual(imp[3][10:20], "        XX")
+        self.assertEqual(imp[5], "                   1                   1")
+        fn = _block_after(s, f"/FUNCT/{fid}", 12)
+        self.assertEqual(fn[1], "SCREW_9_dTHETA_dt_7")
+        rows = [ln for ln in fn[3:11] if not ln.startswith("#")]
+        self.assertEqual(rows, [
+            "                   0         166.6666667",
+            "                0.03         166.6666667",
+            "           0.0300001                   0",
+            "                0.06                   0",
+            "           0.0600001                 250",
+            "                 0.1                 250",
+            "           0.1000001                 170",
+            "                 0.6                 170"])
+        self.assertTrue(fn[11].startswith("#---"), fn)   # exactly 8 rows
+        # VAD 0: the deck's own velocity curve, no new /FUNCT
+        _r0, s0, _e0 = _convert(_screw_deck(vad=0))
+        imp0 = _block_after(s0, "/IMPVEL/LAGMUL/", 6)
+        self.assertEqual(int(imp0[3][0:10]), 7)
+        self.assertNotIn("dTHETA_dt", s0)
+        # SF 2: Fscale_y, the points unchanged
+        _r2, s2, _e2 = _convert(_screw_deck(sf=2.0))
+        imp2 = _block_after(s2, "/IMPVEL/LAGMUL/", 6)
+        self.assertEqual(imp2[5], "                   1                   2")
+        fid2 = int(imp2[3][0:10])
+        self.assertEqual(_block_after(s2, f"/FUNCT/{fid2}", 5)[3:5],
+                         rows[:2])
+
+    def test_the_derivative_merges_equal_slopes(self):
+        from k2rad.writer.joint_screw import screw_drive_derivative
+        out = screw_drive_derivative(_SCREW_CURVE)
+        self.assertEqual(len(out), 8)
+        self.assertAlmostEqual(out[0][1], 1.0 / 0.006)
+        self.assertEqual([round(x, 9) for x, _y in out],
+                         [0.0, 0.03, 0.0300001, 0.06, 0.0600001, 0.1,
+                          0.1000001, 0.6])
+
+    def test_the_split(self):
+        _r, s, _e = _convert(_screw_deck())
+        self.assertEqual(_surf_parts(s, "contact_90001_self"), [1, 3])
+        self.assertEqual(_surf_parts(s, "contact_90001_screw_9_rest"), [3])
+        self.assertEqual(_surf_parts(s, "contact_90001_screw_9_body_A"), [2])
+        lines = s.splitlines()
+        inters = [i for i, ln in enumerate(lines)
+                  if ln.startswith("/INTER/TYPE25/")]
+        self.assertEqual(len(inters), 2)
+        a = lines[inters[0]:inters[0] + 15]
+        b = lines[inters[1]:inters[1] + 15]
+        self.assertEqual(b[1], "CONTACT_90001_screw_9_body_A")
+        for k, (x, y) in enumerate(zip(a, b)):
+            if k in (0, 1):
+                continue
+            if k == 3:
+                self.assertEqual(x[20:], y[20:])
+                self.assertNotEqual(int(y[10:20]), 0)
+                continue
+            self.assertEqual(x, y)
+
+    def test_the_keyword_leaves_the_skip_bucket(self):
+        r, s, _e = _convert(_screw_deck())
+        self.assertNotIn("CONSTRAINED_JOINT_SCREW", r.skipped_keywords)
+        self.assertNotIn("#-- SKIPPED: *CONSTRAINED_JOINT_SCREW", s)
+        self.assertTrue(_has(r.warnings, "*CONSTRAINED_JOINT_SCREW 9 -> "
+                             "/GJOINT/RACK/", "-1/PARM = -0.04",
+                             "NSPMD > 1", "185.70", "183.59"), r.warnings)
+        self.assertTrue(_has(r.warnings, "the rigid pair of "
+                             "*CONSTRAINED_JOINT_SCREW 9 is split out",
+                             "resol.F:7572", "178.67 mm"), r.warnings)
+
+    def test_every_refusal_class_keeps_the_65ff389_bytes(self):
+        cases = (
+            ("_COOR_SCREW", {"keyword": "*CONSTRAINED_JOINT_COOR_SCREW_ID"},
+             "_COOR_SCREW / _LOCAL / _FAILURE spelling"),
+            ("_LOCAL", {"keyword": "*CONSTRAINED_JOINT_SCREW_LOCAL_ID"},
+             "_COOR_SCREW / _LOCAL / _FAILURE spelling"),
+            ("_FAILURE", {"keyword": "*CONSTRAINED_JOINT_SCREW_FAILURE_ID"},
+             "_COOR_SCREW / _LOCAL / _FAILURE spelling"),
+            ("implicit", {"implicit": True}, "the deck is implicit"),
+            ("PARM 0", {"parm": 0.0}, "PARM is 0"),
+            ("N5 on the plate", {"n5_on_plate": True},
+             "not on two different rigid parts"),
+            ("A deformable under a CNRB", {"a_elastic_cnrb": True},
+             "is not a *MAT_RIGID part"),
+            ("N2 off the axis", {"n2_off_axis": True}, "are not coaxial"),
+            ("diagonal axis", {"diagonal": True},
+             "is not along a global axis"),
+            ("A's CON2 7", {"con2_a": 7},
+             "constraints are not the screw's own"),
+            ("a drive on B", {"drive_on_b": True}, "is driven too"),
+            ("VAD 1", {"vad": 1}, "VAD 1 is not converted"),
+            # VAD 3 never reaches state.prescribed_motions (the handler
+            # refuses it by name, _pm_vad_supported): the screw has no drive
+            ("VAD 3", {"vad": 3}, "a VAD 3 / 4 card is not converted at all"),
+            ("a birth window", {"birth": 0.01}, "has a time window"),
+            ("no drive", {"drive": False}, "there is none"),
+            ("an unsplittable contact", {"s2s": True},
+             "which the split does not handle"),
+        )
+        for name, kw, reason in cases:
+            with self.subTest(case=name):
+                deck = _screw_deck(**kw)
+                r_on, s_on, e_on = _convert(deck)
+                _r_off, s_off, e_off = _convert(deck, joint_screw_gjoint=False)
+                self.assertEqual(s_on, s_off)
+                self.assertEqual(e_on, e_off)
+                self.assertNotIn("/GJOINT/", s_on)
+                hits = [w for w in r_on.warnings if ": NOT converted - " in w
+                        and "SCREW" in w]
+                self.assertEqual(len(hits), 1, r_on.warnings)
+                self.assertIn(reason, hits[0])
+
+    def test_the_opt_out_restores_65ff389(self):
+        r, s, _e = _convert(_screw_deck(), joint_screw_gjoint=False)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_JOINT_SCREW", s)
+        self.assertIn("BC_rigid_1", s)
+        self.assertIn("BC_rigid_2", s)
+        self.assertIn("/IMPDISP/1", s)
+        self.assertEqual(_surf_parts(s, "contact_90001_self"), [1, 2, 3])
+        for absent in ("/GJOINT/", "/BCS/LAGMUL/", "/IMPVEL/LAGMUL/",
+                       "SCREW_9_CARRIAGE"):
+            self.assertNotIn(absent, s)
+        self.assertTrue(_has(r.warnings, "--no-joint-screw-gjoint: 1 "
+                             "*CONSTRAINED_JOINT_SCREW card(s) left "
+                             "unconverted"), r.warnings)
+
+    def test_the_axis_sign_is_immaterial(self):
+        _r, s, _e = _convert(_screw_deck())
+        _r2, s2, _e2 = _convert(_screw_deck(swap_axis=True))
+        a, b = s.splitlines(), s2.splitlines()
+        self.assertEqual(len(a), len(b))
+        diff = [(x, y) for x, y in zip(a, b) if x != y]
+        neg = ("                   0                   0                  -1"
+               "                   0                   0")
+        pos = ("                   0                   0                   1"
+               "                   0                   0")
+        self.assertEqual(diff, [(pos, neg), (pos, neg)])
+
+    def test_the_F_deck(self):
+        path = ("F:/dynaexamples_r14_ton-mm-s/show-cases/joint-screw/"
+                "EXP_SC_JOINT_SCREW.k")
+        if not os.path.isfile(path):
+            self.skipTest("F: corpus not mounted")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        res = convert(path, output_stem=os.path.join(tmp.name, "scr"),
+                      write_log=False)
+        with open(res.starter_path) as fh:
+            s = fh.read()
+        rack = [ln for ln in _block_after(s, "/GJOINT/RACK/", 6)
+                if not ln.startswith("#")]
+        self.assertEqual(rack[2][10:30], "               -0.04")
+        self.assertEqual((int(rack[2][70:80]), int(rack[2][80:90])),
+                         (10059663, 10059662))
+        self.assertEqual(_surf_parts(s, "contact_90001_self"),
+                         [1000000, 1000001, 1000002, 1000003, 1000004,
+                          1000005, 1000006, 1000007, 10000045])
+        self.assertEqual(_surf_parts(s, "contact_90001_screw_9000002_rest"),
+                         [1000000, 1000001, 1000002, 1000003, 1000004,
+                          1000005, 1000006, 1000007])
+        self.assertEqual(
+            _surf_parts(s, "contact_90001_screw_9000002_body_A"), [10000046])
+        self.assertIn("SCREW_9000002_dTHETA_dt_10000007", s)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The flags of part B reach the parser, the API, the GUI and the README
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2698,8 +3074,10 @@ class Round7FlagWiringB(Round7FlagWiringA):
     _FLAGS = {
         "--corotational-orthotropic": "corotational_orthotropic",
         "--mat-null-pc-mu": "mat_null_pc_mu",
+        "--joint-screw-gjoint": "joint_screw_gjoint",
     }
     _HELP_FIGURES = {
+        "--joint-screw-gjoint": ("-1/PARM", "185.70", "183.59", "0.9998x"),
         "--corotational-orthotropic": ("6.0047", "1.5049",
                                        "smorth3.F:324-327", "0.164 %"),
         "--mat-null-pc-mu": ("hm_read_mat06.F:154", "m6law.F:98", "+4.50 %",
@@ -2727,6 +3105,9 @@ _RETRACTED_ROUND_7_B = (
     "it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item)",
     "--no-initial-void-floor to keep Pmin 0",
     "*INITIAL_VOID fluids keep Pmin 0",
+    # B2: the screw has its own route since round 7
+    "rack-and-pinion / pulley / screw / constant-velocity joints have no "
+    "OpenRadioss counterpart",
 )
 
 #: The README spells the cell with backticks; one regex for both spellings.

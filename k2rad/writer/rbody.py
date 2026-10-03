@@ -656,6 +656,8 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     # function emits, so a second call must not keep the first call's: reset
     # BEFORE the early returns below.
     state.rigid_auto_bcs = {}
+    from .joint_screw import screw_cmo_skip_pids
+    screw_skip = screw_cmo_skip_pids(state)
 
     # *MAT_RIGID parts AND *DEFORMABLE_TO_RIGID parts, through the ONE
     # predicate — see writer.common.rigid_part_ids for why a consumer left on
@@ -1007,7 +1009,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 a2_refused.append((kw, pid, ind_node, j_facts))
         rbody_info[pid]["j_in"] = j_status
         lines += inertia_extra
-        # The #106 register, /RBODY producer 1 of 5 (*MAT_RIGID parts, and
+        # The #106 register, /RBODY producer 1 of 6 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the
         # *CONSTRAINED_RIGID_BODIES merge masters). *DATABASE_RBDOUT lists this
         # set; rbody_info cannot stand in for it (see _make_starter_th_rbody).
@@ -1081,7 +1083,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             )
         tra = "".join(tra_chars)
         rot = "".join(rot_chars)
-        if tra != "000" or rot != "000":
+        # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) re-writes both
+        # bodies' constraints as /BCS/LAGMUL: a standard /BCS on a node the
+        # Lagrange joint holds is incompatible, so neither the card nor A1's
+        # record of it is written (ONE predicate, screw_cmo_skip_pids).
+        if (tra != "000" or rot != "000") and pid not in screw_skip:
             bc_id_auto = state.next_id()
             # The EMITTED digits (CON1/CON2 OR the implicit stabilisation
             # above), at skew 0: screen (c') of loads._make_node_tc_rc_bcs
@@ -1443,7 +1449,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # of mass. With _INERTIA, ICoG=4 pins it at the stated centre of mass
         # instead and the mesh contribution is ignored.
         lines += inertia_extra
-        state.rbody_ids.add(ind_node)          # producer 2 of 5 (CNRB)
+        state.rbody_ids.add(ind_node)          # producer 2 of 6 (CNRB)
         lines += [
             f"/RBODY/{ind_node}",
             cnrb.title or f"CNRB_{cnrb.pid}",
@@ -1552,7 +1558,7 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     ]
     for k in range(3):
         lines.append(f"{_i(n1 + k)}{_f(x0 + k * spacing)}{_f(y0)}{_f(z0)}")
-    # Producer 3 of 5. This one is NOT in rbody_info at all (it is only
+    # Producer 3 of 6. This one is NOT in rbody_info at all (it is only
     # appended to rbody_lines), so a deck whose only rigid body is the probe
     # would get no /TH/RBODY group if *DATABASE_RBDOUT read that dict instead.
     state.rbody_ids.add(n1)
@@ -1663,7 +1669,7 @@ def _warn_shell_to_solid_dropped(state: ConversionState) -> None:
 
 
 def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
-    """*CONSTRAINED_SHELL_TO_SOLID -> one /RBODY per card. Producer 4 of 5.
+    """*CONSTRAINED_SHELL_TO_SOLID -> one /RBODY per card. Producer 4 of 6.
 
     LS-DYNA names the substitute in the card's own Purpose sentence (Vol I R17
     p.10-182): *"Define a tie between a shell edge and solid elements. Nodal
@@ -1744,7 +1750,7 @@ def _make_shell_to_solid_rbodies(state: ConversionState) -> List[str]:
                        "anyway; check that the set really is one fibre.")
         rb_id = _next_rbody_id(state, c.nid)
         grnod_id = state.next_grnod_id()
-        state.rbody_ids.add(rb_id)          # producer 4 of 5
+        state.rbody_ids.add(rb_id)          # producer 4 of 6
         lines += [
             f"/RBODY/{rb_id}",
             c.title or f"shell_to_solid_{c.nid}_set{c.nsid}",
@@ -1830,7 +1836,7 @@ def _warn_generalized_weld_butt_dropped(state: ConversionState) -> None:
 def _make_generalized_weld_butt_rbodies(
         state: ConversionState) -> List[str]:
     """*CONSTRAINED_GENERALIZED_WELD_BUTT -> one /RBODY with Ifail=1 per card.
-    Producer 5 of 5.
+    Producer 5 of 6.
 
     LS-DYNA's own model of this weld IS a nodal rigid body: *"When the failure
     time, tf, is reached the nodal rigid body becomes inactive"* (Vol I R17
@@ -1901,7 +1907,7 @@ def _make_generalized_weld_butt_rbodies(
         ifail = 1 if fn_max > 0.0 else 0
         rb_id = _next_rbody_id(state, n1)
         grnod_id = state.next_grnod_id()
-        state.rbody_ids.add(rb_id)          # producer 5 of 5
+        state.rbody_ids.add(rb_id)          # producer 5 of 6
         lines += [
             f"/RBODY/{rb_id}",
             c.title or f"gen_weld_butt_{n1}_{n2}",
@@ -1980,3 +1986,62 @@ def _make_generalized_weld_butt_rbodies(
                 "FILTER, WINDOW, NPR and NPRT are force-filtering and "
                 "pair-count cells with no equivalent either.")
     return lines if emitted else []
+
+
+def _make_screw_carriage_rbodies(state: ConversionState,
+                                 rbody_info: Dict) -> List[str]:
+    """The CARRIAGE of every converted *CONSTRAINED_JOINT_SCREW (R14 triage
+    round 7, B2): /RBODY producer 6 of 6.
+
+    The ``/GJOINT/RACK`` node_ID0 must be a node with a mass and an inertia
+    (the Lagrange joint refuses a null one, ``lgmini_gj.F:74`` / ``:87``,
+    ERROR 535 / 536 - the card's own Mass / Inertia cells do not satisfy it,
+    measured in round 5), so the reference is a tiny element-free /RBODY: its
+    main node at A's main-node position, two massless element-free
+    secondaries ``0.1 x |N1N3|`` off it along the two global axes normal to
+    the screw axis (in increasing order - a stated geometric convention),
+    Mass 1e-6, J 1e-6 x 3, ICoG 3 (the centre of gravity at the main node,
+    ``radioss2021/RBODY/rbody.cfg:126-133``). The three nodes are drawn from
+    ``state.next_node_id()`` and registered in ``state.nodes`` BEFORE the
+    /NODE section is written. Registered in ``state.rbody_ids`` (the #106
+    register) but NOT in ``rbody_info`` / ``rigid_nodes`` - producers 4 and
+    5's rule: a carriage has no LS-DYNA PART id. Appended after the probe
+    body; the joint section (``writer/joint_screw._make_joint_screws``)
+    reads the node ids from the plan."""
+    from .joint_screw import _CARRIAGE_MASS, _CARRIAGE_OFFSET
+    lines: List[str] = []
+    for plan in state.joint_screw_plan or []:
+        info_a = rbody_info.get(plan.a_pid)
+        info_b = rbody_info.get(plan.b_pid)
+        if info_a is None or info_b is None:      # the plan checked both
+            continue
+        plan.a_main = info_a["ind_node"]
+        plan.b_main = info_b["ind_node"]
+        plan.a_ind_grnod = info_a["ind_grnod_id"]
+        p = state.nodes[plan.a_main]
+        off = _CARRIAGE_OFFSET * plan.length
+        others = [i for i in range(3) if i != plan.axis]
+        ids: List[int] = []
+        for dx in ((0.0, 0.0, 0.0),
+                   tuple(off if i == others[0] else 0.0 for i in range(3)),
+                   tuple(off if i == others[1] else 0.0 for i in range(3))):
+            nid = state.next_node_id()
+            state.nodes[nid] = NodeData(p.x + dx[0], p.y + dx[1], p.z + dx[2])
+            ids.append(nid)
+        plan.n0, plan.n1, plan.n2 = ids
+        g_car = state.next_grnod_id()
+        jid = plan.screw.jid
+        state.rbody_ids.add(plan.n0)          # producer 6 of 6 (carriage)
+        lines += [
+            f"/RBODY/{plan.n0}",
+            f"SCREW_{jid}_CARRIAGE",
+            _RBODY_CARD1_HDR,
+            f"{_i(plan.n0)}{_i(0)}{_i(0)}{_i(0)}{_f(_CARRIAGE_MASS)}"
+            f"{_i(g_car)}{_i(0)}{_i(3)}{_i(0)}",
+        ]
+        lines += _inertia_lines((_CARRIAGE_MASS, _CARRIAGE_MASS,
+                                 _CARRIAGE_MASS, 0.0, 0.0, 0.0))
+        lines += [_RBODY_IOPTOFF_HDR, f"{_i(0)}{_i(0)}{_i(0)}", HDR]
+        lines += _emit_grnod_node(g_car, f"SCREW_{jid}_carriage_secondaries",
+                                  [plan.n1, plan.n2])
+    return lines

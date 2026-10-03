@@ -993,6 +993,65 @@ class ConstrainedJoint:
 
 
 @dataclass
+class ConstrainedJointScrew:
+    """*CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE] / *CONSTRAINED_JOINT_COOR_SCREW
+    (+ _ID / _TITLE) - recorded by ``handlers.handle_constrained_joint_screw``
+    and converted, where the pattern holds, into ``/GJOINT/RACK`` by
+    ``writer/joint_screw.py`` (R14 triage round 7, B2).
+
+    Card 1 ``N1 N2 N3 N4 N5 N6 RPS DAMP`` (RPS / DAMP default 1.0); the
+    screw's own card ``PARM LCID TYPE R1`` follows card 1 on the plain
+    spelling (Vol I R17 p.10-61..76: PARM = "Screw: Define x_dot / omega").
+    ``keyword`` is the block keyword with ``_ID`` / ``_TITLE`` stripped, so a
+    ``_LOCAL`` / ``_FAILURE`` / ``_COOR_`` spelling is visible to the
+    pattern's spelling condition."""
+    keyword: str
+    jid: int = 0
+    title: str = ""
+    n1: int = 0
+    n2: int = 0
+    n3: int = 0
+    n4: int = 0
+    n5: int = 0
+    n6: int = 0
+    rps: float = 1.0
+    damp: float = 1.0
+    parm: float = 0.0
+    lcid: int = 0
+    jtype: int = 0
+    r1: float = 0.0
+
+
+@dataclass
+class JointScrewPlan:
+    """One CONVERTED ``*CONSTRAINED_JOINT_SCREW`` (round 7, B2): decided ONCE
+    by ``writer/joint_screw._resolve_joint_screws`` (a ``build_starter``
+    prepass, before the /RBODY producers), read by every section that the
+    conversion touches - the *MAT_RIGID CMO /BCS skip, the carriage /RBODY
+    (producer 6), the contact split, the imposed-motion skip and the joint
+    section itself - so none of them re-decides. ``axis`` is the global axis
+    index of the screw axis ``r = unit(N3 -> N1)``; ``drive`` is the rotation
+    drive on part A (``state.prescribed_motions`` member, matched by
+    identity); ``split_inter_ids`` are the all-parts self-contacts the split
+    rewrites; ``n0`` / ``n1`` / ``n2`` and the main nodes are filled by the
+    carriage producer."""
+    screw: ConstrainedJointScrew
+    a_pid: int
+    b_pid: int
+    axis: int
+    r: Tuple[float, float, float]
+    length: float
+    drive: "PrescribedMotionRigid"
+    split_inter_ids: List[int] = field(default_factory=list)
+    a_main: int = 0
+    b_main: int = 0
+    a_ind_grnod: int = 0
+    n0: int = 0
+    n1: int = 0
+    n2: int = 0
+
+
+@dataclass
 class JointStiffness:
     """*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
     stiffness / damping / friction / stop blocks of a joint's /PROP/TYPE45.
@@ -7789,6 +7848,25 @@ class ConvertOptions:
     # another record and are untouched. Byte reach: 20 deck keys, 17
     # emitted models (the 3 Nu keys among them).
     mat_null_pc_mu: bool = True
+    # --no-joint-screw-gjoint: leave *CONSTRAINED_JOINT_SCREW skipped, as
+    # before round 7 (R14 triage round 7, B2).
+    #
+    # ON by default. A *CONSTRAINED_JOINT_SCREW whose N1/N3/N5 lie on one
+    # *MAT_RIGID body A (the spinning one) and N2/N4/N6 on another, B, on a
+    # global axis, with the screw's own *MAT_RIGID CMO constraints and a
+    # rotation drive on A, becomes /GJOINT/RACK (Lagrange multipliers;
+    # FscaleV = -1/PARM - the reader inverts the cell, hm_read_gjoint.F:221)
+    # on a synthesized carriage /RBODY; the bodies' CMO /BCS and the drive are
+    # re-written as /BCS/LAGMUL and /IMPVEL/LAGMUL (a VAD 2 displacement curve
+    # differentiated into a velocity /FUNCT), and the A-B pair is split out of
+    # an all-parts self-contact (a contact force on a Lagrange-held rigid body
+    # slips its mesh off its main node: 178.67 mm measured with the pair
+    # kept). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut travel 0 -> 185.70 mm
+    # against LS-DYNA's 183.59, IE -100 -> +42.76 % (the exact joint against
+    # LS-DYNA's yielding penalty joint: a solver limitation), 0.9998x cycles.
+    # SMP only (-np > 1 stops at cycle 1). Anything outside the pattern keeps
+    # the skip with a named reason. Reach 1 deck key on 1 emitted model.
+    joint_screw_gjoint: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9182,7 +9260,7 @@ class ConversionState:
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
     constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
     # *CONSTRAINED_SHELL_TO_SOLID → one /RBODY per card (writer/rbody
-    # ._make_shell_to_solid_rbodies, /RBODY producer 4 of 5), default ON,
+    # ._make_shell_to_solid_rbodies, /RBODY producer 4 of 6), default ON,
     # --no-shell-to-solid-rbody.
     shell_to_solids: List[ShellToSolid] = field(default_factory=list)
     # *CONSTRAINED_GENERALIZED_WELD_BUTT → one /RBODY with Ifail=1 per card
@@ -9384,13 +9462,15 @@ class ConversionState:
     # from state.parts + state.shell_elems: a shell whose PID has no *PART
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
-    # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:1014, :1446, :1558, :1747, :1904, in that order:
+    # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
+    # (writer/rbody.py:1016, :1452, :1564, :1753, :1910, :2034, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
-    # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT),
-    # i.e. six LS-DYNA sources funnelling through five writers. Round 5 added the last two; every consumer of this
+    # *CONSTRAINED_SHELL_TO_SOLID, *CONSTRAINED_GENERALIZED_WELD_BUTT and the
+    # *CONSTRAINED_JOINT_SCREW carriage), i.e. seven LS-DYNA sources
+    # funnelling through six writers. Round 5 added the fourth and fifth and
+    # round 7 the sixth; every consumer of this
     # set was re-read then, which is what the #138 rule asks for.
     # rbody_info cannot stand in for it:
     # the probe body is not in rbody_info at all, a CNRB/part id collision
@@ -9429,6 +9509,14 @@ class ConversionState:
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
+    # *CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE] / _COOR_SCREW cards in deck
+    # order (round 7, B2). The keyword stays in skipped_keywords until the
+    # joint section writes the /GJOINT/RACK (a refused screw keeps its
+    # '#-- SKIPPED:' line, byte-identical to --no-joint-screw-gjoint).
+    joint_screws: List[ConstrainedJointScrew] = field(default_factory=list)
+    # The ONE decision over them: None = not yet resolved; else the
+    # converted screws (writer/joint_screw._resolve_joint_screws).
+    joint_screw_plan: Optional[List[JointScrewPlan]] = None
     # *CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
     # stiffness/damping/friction/stop blocks of the matched joint's /PROP/TYPE45
     joint_stiffnesses: List[JointStiffness] = field(default_factory=list)

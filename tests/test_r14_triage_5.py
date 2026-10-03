@@ -944,10 +944,26 @@ class JointScrewIsStillRefused(unittest.TestCase):
     best −324.4 mm), so the keyword is NOT converted this round and the
     numbers are recorded in ROADMAP.md. What is pinned here is that it is
     still REFUSED rather than silently read as some other joint.
+
+    Round 7 (B2) moved the first expected value on purpose: the keyword is
+    now registered — to its OWN handler, which converts it to
+    ``/GJOINT/RACK`` by default (``tests/test_r14_triage_7.py``
+    ``JointScrewGjoint``). The pin that survives is the one this class
+    exists for: it is never read as some other joint — not the generic
+    ``*CONSTRAINED_JOINT_*`` handler, never a ``constrained_joints`` entry,
+    and the keyword is still listed in ``skipped_keywords`` until a writer
+    actually emits the joint.
     """
 
-    def test_the_keyword_is_not_registered(self):
-        self.assertNotIn("CONSTRAINED_JOINT_SCREW", HANDLERS)
+    def test_the_keyword_is_registered_to_its_own_handler_not_the_joint_one(self):
+        from k2rad.handlers import (handle_constrained_joint,
+                                    handle_constrained_joint_screw)
+        for kw in ("CONSTRAINED_JOINT_SCREW", "CONSTRAINED_JOINT_SCREW_LOCAL",
+                   "CONSTRAINED_JOINT_SCREW_FAILURE",
+                   "CONSTRAINED_JOINT_SCREW_LOCAL_FAILURE"):
+            with self.subTest(kw=kw):
+                self.assertIs(HANDLERS[kw], handle_constrained_joint_screw)
+                self.assertIsNot(HANDLERS[kw], handle_constrained_joint)
 
     def test_it_lands_in_skipped_keywords_rather_than_another_joint(self):
         deck = ("*KEYWORD\n"
@@ -1977,29 +1993,35 @@ class RbodyProducerCountIsStatedOnce(unittest.TestCase):
         return [i + 1 for i, ln in enumerate(src.splitlines())
                 if ln.strip().startswith("state.rbody_ids.add")]
 
+    # EXPECTED VALUE MOVED in R14 round 7 (B2): the *CONSTRAINED_JOINT_SCREW
+    # carriage is /RBODY producer 6 (writer/rbody._make_screw_carriage_
+    # rbodies), so the count this class derives from the source is 6, every
+    # producer comment numbers itself "N of 6", and the cited runs carry six
+    # lines.
+
     def test_the_number_of_producers_is_what_the_module_actually_has(self):
         adds = self._add_lines(self._rbody_src())
-        self.assertEqual(len(adds), 5, f"rbody_ids.add sites: {adds}")
+        self.assertEqual(len(adds), 6, f"rbody_ids.add sites: {adds}")
 
     def test_a_comment_mentioning_the_call_does_not_inflate_the_count(self):
         """The substring form this test used to have counted any line that
         merely NAMED ``rbody_ids.add``."""
-        src = self._rbody_src() + "\n# state.rbody_ids.add is called 5 times\n"
-        self.assertEqual(len(self._add_lines(src)), 5)
+        src = self._rbody_src() + "\n# state.rbody_ids.add is called 6 times\n"
+        self.assertEqual(len(self._add_lines(src)), 6)
         self.assertEqual(
             len([i for i, ln in enumerate(src.splitlines())
-                 if "rbody_ids.add" in ln]), 6,
-            "the substring form must still see six, or this probe is moot")
+                 if "rbody_ids.add" in ln]), 7,
+            "the substring form must still see seven, or this probe is moot")
 
     def test_every_producer_comment_numbers_itself_out_of_that_total(self):
         src = self._rbody_src()
         # a producer may name itself more than once (docstring + the line that
         # registers), so the assertion is on the SET of ordinals
         seen = {int(n) for n, tot in
-                re.findall(r"[Pp]roducer (\d) of (\d)", src) if int(tot) == 5}
-        self.assertEqual(seen, {1, 2, 3, 4, 5},
-                         "each /RBODY producer must number itself 'N of 5'")
-        self.assertEqual(re.findall(r"[Pp]roducer \d of [1-46-9]", src), [],
+                re.findall(r"[Pp]roducer (\d) of (\d)", src) if int(tot) == 6}
+        self.assertEqual(seen, {1, 2, 3, 4, 5, 6},
+                         "each /RBODY producer must number itself 'N of 6'")
+        self.assertEqual(re.findall(r"[Pp]roducer \d of [1-57-9]", src), [],
                          "a producer comment still counts out of the old total")
 
     def test_no_shipped_text_still_says_there_are_three(self):

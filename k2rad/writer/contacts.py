@@ -10,6 +10,7 @@ from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
                      ContactThermal, ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
 from ..topology import TET10_EDGEMID
+from .joint_screw import screw_splits
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
@@ -2032,15 +2033,63 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     "→ /INTER/TYPE25 all-parts self-contact (matches the native "
                     "OpenRadioss reader; TYPE7 node→surface is kept for implicit only)."
                 )
+                # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) takes its
+                # spinning body A out of this self-surface and gives it ONE
+                # two-surface /INTER/TYPE25 against every other part except B
+                # (every cell copied): a contact force on a rigid body whose
+                # main node a Lagrange condition holds is cancelled on the
+                # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
+                # :7901), so the A-B pair slips the mesh off its main node.
+                splits = screw_splits(state, c.inter_id)
+                a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
-                lines += _emit_surf_part(self_surf, f"contact_{c.inter_id}_self", all_pids)
+                lines += _emit_surf_part(
+                    self_surf, f"contact_{c.inter_id}_self",
+                    [p for p in all_pids if p not in a_parts])
                 fric, fric_id = _contact_friction(
                     state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
+                inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
+                stfac = _stfac_for(state, c.sfs, c.inter_id) or 1.0
                 lines += _emit_inter_type25_self(
-                    c.inter_id, c.title, self_surf, fric,
-                    _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0),
-                    _stfac_for(state, c.sfs, c.inter_id) or 1.0,
+                    c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id)
+                for plan in splits:
+                    jid = plan.screw.jid
+                    rest = [p for p in all_pids
+                            if p not in (plan.a_pid, plan.b_pid)]
+                    s_rest = state.next_id()
+                    s_a = state.next_id()
+                    split_iid = state.next_id()
+                    lines += _emit_surf_part(
+                        s_rest, f"contact_{c.inter_id}_screw_{jid}_rest", rest)
+                    lines += _emit_surf_part(
+                        s_a, f"contact_{c.inter_id}_screw_{jid}_body_A",
+                        [plan.a_pid])
+                    lines += _emit_inter_type25_self(
+                        split_iid, f"CONTACT_{c.inter_id}_screw_{jid}_body_A",
+                        s_rest, fric, inacti, stfac, fric_id=fric_id,
+                        surf_id2=s_a)
+                    # minted beside the converted contact: /TH/INTER and the
+                    # other registry walks must be told (companion_inter_ids)
+                    state.companion_inter_ids.append(split_iid)
+                    state.warn(
+                        f"*{c.keyword or 'CONTACT_AUTOMATIC_SINGLE_SURFACE'} "
+                        f"(/INTER/TYPE25/{c.inter_id}): the rigid pair of "
+                        f"*CONSTRAINED_JOINT_SCREW {jid} is split out - part "
+                        f"{plan.a_pid} leaves the all-parts self-surface and "
+                        f"gets its own two-surface /INTER/TYPE25/{split_iid} "
+                        f"against every other part except {plan.b_pid} "
+                        f"(every cell copied from /INTER/TYPE25/{c.inter_id}), "
+                        "so every rigid-deformable pair stays and only the "
+                        f"{plan.a_pid}-{plan.b_pid} pair is gone. A contact "
+                        "force on a rigid body whose main node a Lagrange "
+                        "condition holds is cancelled on the main node alone "
+                        "(RBYVIT, resol.F:7572, runs before LAG_MULT, :7901) "
+                        "and the mesh slips off its main node - MEASURED with "
+                        "the pair kept: 178.67 mm at t_end, IE -100 %. LS-DYNA "
+                        "keeps the pair (on EXP_SC_JOINT_SCREW 99.1 % of its "
+                        "external work is sliding-interface energy between the "
+                        "two screws), which no Lagrange joint can reproduce.")
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_grnod_id()
@@ -3277,7 +3326,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
 
 def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
                             inacti: int = 5, stfac: float = 1.0,
-                            fric_id: int = 0) -> List[str]:
+                            fric_id: int = 0, surf_id2: int = 0) -> List[str]:
     """*CONTACT_AUTOMATIC_SINGLE_SURFACE → /INTER/TYPE25 self-contact (explicit).
 
     surf_id is ONE surface (surf_ID1); surf_ID2=0 → self-impact, so every segment
@@ -3301,12 +3350,17 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
     ways), but KEEP THEM IN SYNC: a column added to one belongs in the other.
     They stay separate only because merging them would rewrite the bytes of the
     solver-validated *CONTACT_AUTOMATIC_SINGLE_SURFACE path for no gain.
+
+    *surf_id2* (default 0 = the self-impact above, byte-identical for every
+    existing caller) makes it a two-surface interface with every other cell
+    unchanged: the *CONSTRAINED_JOINT_SCREW split (round 7, B2) writes the
+    spinning body's parts there against the rest of the self-surface.
     """
     return [
         f"/INTER/TYPE25/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2                Idel     Iedge    IPSTIF",
-        f"{_i(surf_id)}         0         4         0         2         0                   2      1000         0",
+        f"{_i(surf_id)}{_i(surf_id2)}         4         0         2         0                   2      1000         0",
         "# grnd_IDs                     Gap_scale          %mesh_size           Gap_max_s           Gap_max_m",
         "         0                           1.0                   0                1e30                1e30",
         "#              Stmin               Stmax     Igap0    Ishape          Edge_angle          STFAC_MDT",

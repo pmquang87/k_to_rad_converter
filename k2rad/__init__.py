@@ -243,6 +243,7 @@ def convert(
     implicit_tshell_solid: bool = True,
     corotational_orthotropic: bool = True,
     mat_null_pc_mu: bool = True,
+    joint_screw_gjoint: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -727,6 +728,19 @@ def convert(
         sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 ->
         -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay within
         1 %. Byte reach: 20 deck keys, 17 emitted models.
+    joint_screw_gjoint : bool
+        Convert ``*CONSTRAINED_JOINT_SCREW`` between two ``*MAT_RIGID``
+        bodies on a global axis into ``/GJOINT/RACK`` (round 7, B2;
+        Lagrange multipliers, ``FscaleV = -1/PARM`` because
+        ``hm_read_gjoint.F:221`` inverts the cell) on a synthesized carriage
+        ``/RBODY``, with the bodies' ``*MAT_RIGID`` constraints and drive
+        re-written as ``/BCS/LAGMUL`` + ``/IMPVEL/LAGMUL`` (a VAD 2 curve
+        differentiated) and the rigid pair split out of an all-parts
+        self-contact. **On by default.** MEASURED on EXP_SC_JOINT_SCREW at
+        nt 4: nut travel 0 -> 185.70 mm against LS-DYNA's 183.59, IE -100 ->
+        +42.76 % (the exact joint against LS-DYNA's yielding penalty joint),
+        0.9998x cycles. SMP only (``-np > 1`` stops at cycle 1). Anything
+        outside the pattern keeps the skip with a named reason.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1151,6 +1165,7 @@ def convert(
         implicit_tshell_solid=implicit_tshell_solid,
         corotational_orthotropic=corotational_orthotropic,
         mat_null_pc_mu=mat_null_pc_mu,
+        joint_screw_gjoint=joint_screw_gjoint,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -614,6 +614,21 @@ def build_parser() -> argparse.ArgumentParser:
              "within 1 %%. Use --no-mat-null-pc-mu to keep Pmin 0 and Nu 0.",
     )
     parser.add_argument(
+        "--joint-screw-gjoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_JOINT_SCREW between two *MAT_RIGID bodies "
+             "into /GJOINT/RACK (Lagrange multipliers; FscaleV = -1/PARM) "
+             "with a synthesized carriage, the bodies' constraints and drive "
+             "re-written as /BCS/LAGMUL + /IMPVEL/LAGMUL, and the rigid pair "
+             "split out of an all-parts self-contact. ON by default. The "
+             "joint is exact where LS-DYNA's default penalty joint yields; "
+             "SMP only (-np 1). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut "
+             "travel 0 -> 185.70 mm against LS-DYNA's 183.59, IE -100 -> "
+             "+42.76 %%, 0.9998x cycles. Use --no-joint-screw-gjoint to keep "
+             "the joint skipped.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1289,6 +1304,7 @@ def main(argv=None) -> int:
         implicit_tshell_solid=args.implicit_tshell_solid,
         corotational_orthotropic=args.corotational_orthotropic,
         mat_null_pc_mu=args.mat_null_pc_mu,
+        joint_screw_gjoint=args.joint_screw_gjoint,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

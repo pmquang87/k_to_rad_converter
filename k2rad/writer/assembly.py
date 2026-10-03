@@ -94,9 +94,11 @@ from .contacts import (
 from .frictions import _make_frictions
 from .rbody import (_make_cnrb_rbodies, _make_generalized_weld_butt_rbodies,
                     _make_probe_rbody, _make_rbodies,
+                    _make_screw_carriage_rbodies,
                     _make_shell_to_solid_rbodies)
 from .rbe3 import _make_rbe3
 from .joints import _make_joints, _resolve_joints
+from .joint_screw import _make_joint_screws, _resolve_joint_screws
 from .dbeam import _make_discrete_beam_connectors
 from .loads import (
     _make_added_masses,
@@ -1923,6 +1925,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # regardless of section order.
     _resolve_joints(state)
 
+    # *CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (round 7, B2): the ONE decision
+    # over every screw, BEFORE the /RBODY producers (which skip the bodies'
+    # CMO /BCS and build the carriage from it) and before the contact section
+    # (which splits the pair out of an all-parts self-contact). Draws no id.
+    _resolve_joint_screws(state)
+
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
     # namespaces and Radioss in one. Report the overlap here rather than letting
@@ -1969,6 +1977,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Implicit deck without any rigid body: the engine segfaults at solver init
     # (MESSAGE ID 44) — give it an inert fully-fixed probe rigid body.
     rbody_lines = rbody_lines + _make_probe_rbody(state, rbody_info)
+    # /RBODY producer 6: the carriage of every converted *CONSTRAINED_JOINT_
+    # SCREW (round 7, B2) - after the probe, its nodes registered in
+    # state.nodes before the /NODE section is written. A no-op (no id
+    # drawn) on any deck without a converted screw.
+    rbody_lines = rbody_lines + _make_screw_carriage_rbodies(state, rbody_info)
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
     state.rbody_ind_grnods = {pid: info["ind_grnod_id"] for pid, info in rbody_info.items()}
 
@@ -2909,6 +2922,12 @@ def _starter_section_registry():
         ("tied_nodes_failure_notes",
                               lambda c: _make_tied_nodes_failure_notes(c.state)),
         ("rbodies",           lambda c: c.rbody_lines),
+        # *CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (round 7, B2): right after
+        # the /RBODY cards whose main nodes (and carriage) it ties; every id
+        # it draws is drawn here. A no-op on any deck without a converted
+        # screw.
+        ("joint_screws",      lambda c: _make_joint_screws(c.state,
+                                                           c.rbody_info)),
         # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
         # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts
         # (starter ERROR 810 / WARNING 3104), and its dependent node has to be in
@@ -3077,9 +3096,10 @@ def _starter_section_registry():
         # id — on a deck without its keyword, so none can shift the id stream
         # of an existing deck (the #119 fixture rule).
         #   * nodal_force_group expands *SET_NODE and needs nothing else;
-        #   * rbody reads state.rbody_ids, which the five /RBODY producers
+        #   * rbody reads state.rbody_ids, which the six /RBODY producers
         #     fill in build_starter BEFORE the registry is walked at all
-        #     (round 5's shell-to-solid and butt-weld bodies included);
+        #     (round 5's shell-to-solid and butt-weld bodies and round 7's
+        #     screw carriage included);
         #   * bndout reads state.imp_motion_nodes, filled by the two
         #     imposed_motions sections far above — the same "registry filled at
         #     the write line, consumed by a later section" ordering the

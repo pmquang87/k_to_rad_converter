@@ -69,7 +69,7 @@ from .state import (
     MatDiscreteBeamNonlinearPlastic, MatCableDiscreteBeam,
     MatElasticSpringDiscreteBeam, MatGeneralNonlinear6dof,
     MatGeneralNonlinear1dof, MatGeneralSpringDiscreteBeam,
-    ConstrainedJoint, JointStiffness, JOINT_TYPE45,
+    ConstrainedJoint, ConstrainedJointScrew, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     RigidInertia, PartContact,
@@ -7979,13 +7979,13 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     (``convertrigids.cxx:766-772`` — ``selDatabaseRbdout.Count()``, then a full
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
-    lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:1014, :1446, :1558, :1747, :1904
-    — six LS-DYNA sources, since *MAT_RIGID parts,
+    lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
+    sites register into at the line that writes the card (writer/rbody.py:1016, :1452, :1564, :1753, :1910, :2034
+    — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
-    masters all come out of the first one, and round 5 added the
+    masters all come out of the first one, round 5 added the
     *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT
-    producers).
+    producers and round 7 the *CONSTRAINED_JOINT_SCREW carriage).
     """
     state.db_rbdout_seen = True
     state.db_rbdout_dt = _handle_db_dt(block, state, "*DATABASE_RBDOUT")
@@ -9745,10 +9745,12 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
     why neither maps onto /PROP/TYPE45.
 
     Dispatch is exact-match, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR (and the
-    other motor/gear/pulley/screw joints) can never reach this handler and be
+    other motor/gear/pulley joints) can never reach this handler and be
     misread as a plain TRANSLATIONAL — the substring test dyna2rad uses
     (keyWord.find("TRANS")) does exactly that. The kind is re-checked below
-    anyway so a future registration cannot re-open the hole.
+    anyway so a future registration cannot re-open the hole. The SCREW joint
+    has its own handler and route since round 7
+    (``handle_constrained_joint_screw``, ``writer/joint_screw.py``).
     """
     rest = block.keyword[len("CONSTRAINED_JOINT_"):]
     parts = rest.split("_")
@@ -9758,8 +9760,9 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
         state.warn(
             f"*{block.keyword}: not one of the seven joint kinds k2rad converts "
             f"({', '.join(sorted(JOINT_TYPE45))}) — no /PROP/TYPE45 emitted. "
-            "The motor / gears / rack-and-pinion / pulley / screw / "
-            "constant-velocity joints have no OpenRadioss counterpart.")
+            "The motor / gears / rack-and-pinion / pulley / constant-velocity "
+            "joints have no OpenRadioss counterpart (the screw has its own "
+            "route, round 7).")
         return
 
     off = _title_offset(block)
@@ -9802,6 +9805,51 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
         has_failure="FAILURE" in opts,
     )
     state.constrained_joints.append(jnt)
+
+
+def handle_constrained_joint_screw(block: Block,
+                                   state: ConversionState) -> None:
+    """``*CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE]`` and
+    ``*CONSTRAINED_JOINT_COOR_SCREW`` (+ ``_ID`` / ``_TITLE``) - RECORDED for
+    ``writer/joint_screw.py`` (R14 triage round 7, B2), which converts the
+    pattern it can (two ``*MAT_RIGID`` bodies on a global axis -> a
+    ``/GJOINT/RACK``) and names every other screw.
+
+    The keyword is appended to ``skipped_keywords`` like every recorded-not-
+    yet-emitted card: the joint section removes it at the line that writes the
+    ``/GJOINT``, so a refused (or opted-out) screw keeps its ``#-- SKIPPED:``
+    line and its deck stays byte-identical to the 65ff389 output.
+
+    Card 1: ``N1 N2 N3 N4 N5 N6 RPS DAMP`` (RPS / DAMP default 1.0, read with
+    ``_ffield``); the plain spelling's next card is ``PARM LCID TYPE R1``
+    (Vol I R17 p.10-61..76). The ``_ID`` heading is read the way
+    ``handle_constrained_joint`` reads it."""
+    state.skipped_keywords.append(block.keyword)
+    off = _title_offset(block)
+    jid, title = 0, _read_title(block, block.keyword)
+    if _has_id(block) and block.raw:
+        head = block.raw[0][:10].strip()
+        if head and " " not in head and "," not in head:
+            jid = to_int(head)
+            title = block.raw[0][10:].strip() or title
+        else:
+            toks = parse_free(block.raw[0])
+            jid = to_int(toks[0]) if toks else 0
+    f = _card(block.raw, off, fixed=True, n=8, w=10)
+    p = _card(block.raw, off + 1, fixed=True, n=8, w=10)
+
+    def _int(fields: List[str], i: int) -> int:
+        return to_int(fields[i]) if len(fields) > i else 0
+
+    def _flt(fields: List[str], i: int) -> float:
+        return to_float(fields[i]) if len(fields) > i else 0.0
+
+    state.joint_screws.append(ConstrainedJointScrew(
+        keyword=block.keyword, jid=jid, title=title,
+        n1=_int(f, 0), n2=_int(f, 1), n3=_int(f, 2), n4=_int(f, 3),
+        n5=_int(f, 4), n6=_int(f, 5),
+        rps=_ffield(f, 6, 1.0), damp=_ffield(f, 7, 1.0),
+        parm=_flt(p, 0), lcid=_int(p, 1), jtype=_int(p, 2), r1=_flt(p, 3)))
 
 
 def handle_constrained_joint_stiffness(block: Block,
@@ -18907,9 +18955,10 @@ HANDLERS = {
     # _FAILURE stay in the base name and need their own literal keys (the same
     # rule *DEFINE_BOX_LOCAL follows). Registering exact keywords is also the
     # guard against dyna2rad's substring misclassification: the motor / gears /
-    # rack-and-pinion / pulley / screw / constant-velocity joints are absent
-    # here, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR cannot be read as a plain
-    # TRANSLATIONAL joint — it lands in skipped_keywords instead.
+    # rack-and-pinion / pulley / constant-velocity joints are absent here, so
+    # *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR cannot be read as a plain
+    # TRANSLATIONAL joint — it lands in skipped_keywords instead. The SCREW
+    # joint has its own handler and route since round 7 (B2, listed below).
     "CONSTRAINED_JOINT_SPHERICAL":                 handle_constrained_joint,
     "CONSTRAINED_JOINT_SPHERICAL_LOCAL":           handle_constrained_joint,
     "CONSTRAINED_JOINT_SPHERICAL_FAILURE":         handle_constrained_joint,
@@ -18938,6 +18987,14 @@ HANDLERS = {
     "CONSTRAINED_JOINT_LOCKING_LOCAL":             handle_constrained_joint,
     "CONSTRAINED_JOINT_LOCKING_FAILURE":           handle_constrained_joint,
     "CONSTRAINED_JOINT_LOCKING_LOCAL_FAILURE":     handle_constrained_joint,
+    # Round 7, B2: the screw -> /GJOINT/RACK where the pattern holds
+    # (writer/joint_screw.py); every spelling is recorded so a refused one is
+    # NAMED - the keyword stays skipped until the /GJOINT is written.
+    "CONSTRAINED_JOINT_SCREW":                     handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_LOCAL":               handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_FAILURE":             handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_LOCAL_FAILURE":       handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_COOR_SCREW":                handle_constrained_joint_screw,
     "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED":     handle_constrained_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL":   handle_constrained_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_FLEXION-TORSION": handle_constrained_joint_stiffness,

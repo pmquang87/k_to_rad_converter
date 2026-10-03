@@ -159,6 +159,52 @@ Prior history (before this changelog was introduced) is summarized in the
     `-1e-20` from B1 with B1's sentence naming the mid; the refusal-text test
     gains the B1 arm; `test_the_opt_out_keeps_Pmin_0_and_says_so_once` is
     now `test_the_opt_out_falls_back_to_the_PC_cell_and_says_so_once`).
+  - **B2 — `*CONSTRAINED_JOINT_SCREW` → `/GJOINT/RACK` + the contact split**
+    (default ON, `--no-joint-screw-gjoint`). Between two `*MAT_RIGID` bodies
+    on a global axis with the screw's own CMO constraints and a rotation
+    drive on the spinning body: `/GJOINT/RACK` (FscaleV = −1/PARM — the
+    reader inverts it, `hm_read_gjoint.F:221`) on a synthesized carriage
+    `/RBODY` (`/RBODY` producer 6 of 6, `writer/rbody._make_screw_carriage_
+    rbodies`: Mass and inertia 1e-6, two massless secondaries 0.1 × |N1N3|
+    off the axis — a stated geometric convention), the bodies' constraints
+    and drive re-written as `/BCS/LAGMUL` / `/IMPVEL/LAGMUL` (a VAD 2 drive
+    differentiated into a velocity `/FUNCT`, equal-slope breakpoints merged,
+    slope steps as 1e-7-wide ramps; the radioss110 card with both `Ascale_x
+    1` and `Fscale_y SF` — the measured arm's single field landed in the
+    TIME scale, harmless only at SF 1), and the rigid pair split out of an
+    all-parts self-contact into one two-surface `/INTER/TYPE25` with every
+    cell copied (a contact on a Lagrange-held rigid body slips its mesh:
+    178.67 mm measured with the pair kept). ONE decision per deck
+    (`writer/joint_screw._resolve_joint_screws`, memoised on
+    `state.joint_screw_plan`, before the `/RBODY` producers), read by the CMO
+    `/BCS` skip (A1's `rigid_auto_bcs` record skips the same bodies), the
+    carriage, the split, the imposed-motion skip and the joint section; the
+    keyword leaves `skipped_keywords` only at the `/GJOINT` write line. The
+    screw axis is `r = unit(N3 → N1)` (the measured card's +1; the rack
+    relation is odd in the common axis, pinned by a sign test). Measured
+    (the round-7 critic's arm built from this card description, nt 4, np 1):
+    EXP_SC_JOINT_SCREW nut travel 0 → 185.70 mm vs LS-DYNA 183.59 (travel
+    RMS 0.88 % of the LS peak), IE −100 → +42.76 % (the exact joint against
+    LS-DYNA's yielding penalty joint, a solver limitation), KE −54.26 →
+    −16.51 % (the drive curve's 250 → 170 rad/s corner at t_end on both
+    arms; one printed cycle earlier +0.17 %), 21626 vs 21630 cycles
+    (0.9998×); the verdict stays deviation. SMP only (`-np > 1` stops at cycle
+    1). Anything outside the pattern keeps the skip with a named reason —
+    the `_COOR_SCREW` / `_LOCAL` / `_FAILURE` spellings, an implicit deck,
+    PARM 0, a body that is not a lone `*MAT_RIGID` part (CNRB, merge, extra
+    nodes, `*DEFORMABLE_TO_RIGID`), a non-coaxial or off-global axis, other CMO
+    codes, a drive that is missing, windowed, VAD 1 / 3 or also on B, a
+    contact the split cannot handle — each reach 0. NOT built: the pair kept
+    in the self-contact (M2: mesh 178.67 mm behind its main node), the pair as
+    `/INTER/LAGMUL/TYPE7` (M3: drift −76.71 mm), one merged `/RBODY` (the helix
+    DOF is gone). Reach 1 deck key on 1 emitted model. Tests:
+    `JointScrewGjoint` (the rack card, the carriage, the two LAGMUL, the
+    differentiated drive with VAD 0 and SF 2, the split line by line, the
+    skip bucket, sixteen refusal classes each byte-identical to the opt-out,
+    the opt-out, the axis sign, the F: deck). EXPECTED VALUE MOVED:
+    `tests/test_r14_triage_5.py` `RbodyProducerCountIsStatedOnce` counts six
+    `/RBODY` producers (the carriage is the sixth), and the producer comments
+    and the three cited line runs carry six.
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART A (rigid bodies, constraints,
   welds, the implicit thick shell and the implicit texts).** One commit per
   item; every figure below is a measured arm against the LS-DYNA reference on

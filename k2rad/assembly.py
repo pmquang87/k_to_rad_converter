@@ -3913,13 +3913,17 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
     # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option
     # combination (the _LOCAL and _FAILURE cards follow it), so one spec covers
-    # all 28 registered keywords. The _ID heading's JID goes to IDROFF, the same
+    # all 32 registered keywords (28 + the 4 SCREW spellings of round 7). The
+    # _ID heading's JID goes to IDROFF, the same
     # bucket *CONSTRAINED_JOINT_STIFFNESS's JID field uses, so the reference
-    # between them survives the include.
+    # between them survives the include. The SCREW (round 7, B2) has the same
+    # card 1; its PARM card carries no id. (*CONSTRAINED_JOINT_COOR_SCREW is
+    # recorded only to be NAMED - refused - and its coordinate cards hold no
+    # node id.)
     **{f"CONSTRAINED_JOINT_{_k}{_o}":
        {"cards": {0: [(_i, "n") for _i in range(6)]}, "idhdr": "r"}
        for _k in ("SPHERICAL", "REVOLUTE", "CYLINDRICAL", "PLANAR",
-                  "UNIVERSAL", "TRANSLATIONAL", "LOCKING")
+                  "UNIVERSAL", "TRANSLATIONAL", "LOCKING", "SCREW")
        for _o in ("", "_LOCAL", "_FAILURE", "_LOCAL_FAILURE")},
     "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED": _off_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL": _off_joint_stiffness,

@@ -4599,7 +4599,13 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
     """*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] -> /IMPVEL | /IMPACC | /IMPDISP
     on the rigid body's /RBODY main node."""
     lines: List[str] = []
-    if not state.prescribed_motions:
+    # A converted *CONSTRAINED_JOINT_SCREW's drive is re-written as
+    # /IMPVEL/LAGMUL by the joint section (round 7, B2): skip it here,
+    # matched by identity, without drawing a counter value.
+    from .joint_screw import screw_drives
+    lagmul_drives = {id(pm) for pm in screw_drives(state)}
+    if not [pm for pm in state.prescribed_motions
+            if id(pm) not in lagmul_drives]:
         return lines
     lines.append("#-  IMPOSED MOTIONS:")
 
@@ -4617,6 +4623,8 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
     # /SKEW+/FRAME table, no restart file).
     skews_written: Set[int] = set()
     for pm in state.prescribed_motions:
+        if id(pm) in lagmul_drives:
+            continue
         keyword = ("BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL" if pm.local
                    else "BOUNDARY_PRESCRIBED_MOTION_RIGID")
         info = rbody_info.get(pm.pid)

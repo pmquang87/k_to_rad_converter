@@ -3086,6 +3086,37 @@ with nothing to pace the engine time step are each warned about by name.
 instantaneous forces and moments: `thres.F:355-361` writes `GBUF%FOR` and
 `GBUF%MOM` straight out, with no `dt` factor and no accumulator.
 
+`*CONSTRAINED_JOINT_SCREW` (+ `_ID`) → **`/GJOINT/RACK`** (round 7, default ON,
+`--no-joint-screw-gjoint` keeps the joint skipped as before). OpenRadioss has no
+screw joint (`/PROP/TYPE45` Types 1-9), but its Lagrange-multiplier rack relates
+the rotation of `node_ID1` about `r1` to the translation of `node_ID2` along `r2`
+against a reference `node_ID0`. When `N1`/`N3`/`N5` lie on one `*MAT_RIGID` body A
+(the spinning one) and `N2`/`N4`/`N6` on another, B, on a global axis, with the
+screw's own `*MAT_RIGID` CMO constraints and a rotation drive on A: `node_ID0` is a
+synthesized carriage `/RBODY` (element-free, at A's main node, Mass and inertia
+1e-6, its two massless secondaries 0.1 × |N1N3| off the axis — a geometric
+convention), `FscaleV = −1/PARM` (the reader inverts the cell,
+`hm_read_gjoint.F:221`), `node_ID1` = A's main, `node_ID2` = B's, `r1 = r2` =
+the unit axis (N3 → N1); A's and B's CMO `/BCS` become a `/BCS/LAGMUL` on the
+carriage (it may only slide along the axis) and on A (it may only spin about it);
+A's drive becomes `/IMPVEL/LAGMUL` (a VAD 2 displacement curve differentiated into
+a velocity `/FUNCT`, slope steps as 1e-7-wide ramps); and the A-B pair is split out
+of an all-parts self-contact into its own two-surface `/INTER/TYPE25` (a contact
+force on a Lagrange-held rigid body is cancelled on its main node alone — RBYVIT,
+`resol.F:7572`, runs before LAG_MULT, `:7901` — and its mesh slips off the main
+node: 178.67 mm measured with the pair kept). MEASURED on `EXP_SC_JOINT_SCREW`
+at nt 4: nut travel 0 → 185.70 mm against LS-DYNA's 183.59 (travel RMS 0.88 % of
+the LS-DYNA peak), IE −100 → +42.76 %, 0.9998× the cycles; the joint is EXACT
+where LS-DYNA's default joint (LMF 0) is a yielding PENALTY joint (its nut 12.25-
+12.34 mm/rad against 12.5), so the converted nut runs ahead and meets the shells
+about 0.6 ms early — a solver limitation, not a tuning knob. **SMP only**: with
+`-np > 1` the engine stops at cycle 1 (`JOINT WITH LAGRANGE MULTIPLIER NOT
+ENABLED FOR NSPMD > 1`). On this path EXT-WORK prints 0. A screw outside the
+pattern (`_COOR_SCREW`, `_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a
+deformable / CNRB / merged body, a non-coaxial or off-global axis, other CMO
+codes, a missing or windowed drive, VAD 1/3, a drive on B, a contact the split
+cannot handle) keeps the skip with a named reason. 1 deck key on 1 emitted model.
+
 `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` / `_TRANSLATIONAL` → the matched
 joint's per-DOF stiffness / damping / friction / stop blocks (`LCID*`→`fct_K*`,
 `DLCID*`→`fct_C*`, `ES*`→`Kfr*`/`Kft*`, `FM*`/`FF*`→the friction limit or, when
