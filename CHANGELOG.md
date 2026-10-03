@@ -118,8 +118,10 @@ Prior history (before this changelog was introduced) is summarized in the
     20374..20408 between 1.9e-4 and 2.9e-4 s = `(SIGY/√3)·A` = 20405 to 0.1 %.
     MEASURED (nt 4, base-paired): plates.mat100 deviation → match, IE / KE
     history RMS 23.53 / 62.56 → 8.58 / 26.74 % of the LS peak at 1.107× the
-    cycles. Named cost: `mainboltaexpl` (worse: IE / KE RMS 26.69 / 24.31 →
-    30.86 / 30.94 %; its `/PRELOAD/AXIAL` bolt spring collapses to ~zero
+    cycles. Named cost: `mainboltaexpl` (worse, 51762 = 51762 cycles: END IE
+    / KE −72.72 / −11.18 → −81.87 / −83.15 %, IE / KE history RMS 26.69 /
+    24.32 → 31.32 / 28.24 % of the LS peak, re-measured on the implementation,
+    nt 4; its `/PRELOAD/AXIAL` bolt spring collapses to ~zero
     length on both arms — a separate defect, ROADMAP). **Byte movers 4 deck
     keys on 4 emitted models** (plates.mat100, mainboltaexpl, the Yaris roof
     crush and door sag giants, convert-only), later auto ids +1; `spotweld.k`
