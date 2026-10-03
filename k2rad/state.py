@@ -7771,7 +7771,8 @@ class ConvertOptions:
     # / weld / tie / probe bodies or ICoG 4. MEASURED: a
     # spun rigid plate's rotational KE +16.83 / +33.66 % -> 0.00 %;
     # revo-stiff deviation -> match (writer/rbody._A2_REVO_RMS). Reach: 56
-    # deck keys on 53 emitted models (153 bodies).
+    # deck keys on 53 emitted models (151 bodies written; 2 more refused by
+    # name at the margin, one each on forging_A / forging_B).
     rigid_shell_rotary_inertia: bool = True
     # --no-spotweld-shear-yield: keep the *MAT_SPOTWELD weld's /PROP/TYPE13
     # shear DOFs (Ty/Tz) elastic (R14 triage round 7, A3 piece (i)).

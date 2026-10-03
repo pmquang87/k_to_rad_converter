@@ -2087,7 +2087,11 @@ measurement that decided it and the deck that would decide it next.
     `J = −ΣIN` on every `*MAT_RIGID` / `*DEFORMABLE_TO_RIGID` part shell
     `/RBODY` (ICoG ≠ 4) — the coupon's rotational KE +16.83 / +33.66 % → 0.00
     %; `--mass-weighted-inivel`'s own J pass now acts only where the producer
-    did not (one subtraction) and never on a CNRB.
+    did not (one subtraction) and never on a CNRB. The validation round gave
+    a `/SH3N` the starter's own inertia (`c3inmas.F:1111`: 41 bodies on 15
+    keys had kept up to 9.2 % of their `ΣIN`) and moved both passes' refusal
+    margin to the starter's WARNING-275 threshold, `1e-3` (2 bodies, one
+    each on `forging_A` / `forging_B`, keep `J = 0` by name).
 24. **A Remark-12 contact spelling with an option suffix** (`_MORTAR`,
     `_TIEBREAK`, `_THERMAL`, `_SMOOTH` …) is not matched by A8's "always
     offsets" list and takes the Card B `THKOPT` / `SHLTHK` rule — a

@@ -369,8 +369,8 @@ def _rbody_in_skip_reason(state: ConversionState, nodes: Set[int]
     for a ``/SH3N`` (three distinct corners) the whole-element
     ``m (A/4.5 + t^2/12)`` of ``c3inmas.F:1111``, spread by the corner
     angles (the round-7 validation round; before it a triangle got the quad
-    formula and 41 of the rule's 153 bodies on 15 roster keys kept up to
-    9.2 % of their SUM(IN)). Any shell on the body that the starter lumps
+    formula and 41 of the 153 bodies the rule then wrote, on 15 roster keys,
+    kept up to 9.2 % of their SUM(IN)). Any shell on the body that the starter lumps
     differently makes ``-SUM(IN)`` the wrong amount, so the body is skipped
     by name: Ishell < 11 (FAC 9), a layered property
     (``*PART_COMPOSITE``, ``ICOMP = 1``; the only shells k2rad writes with an

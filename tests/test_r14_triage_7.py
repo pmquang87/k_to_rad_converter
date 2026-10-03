@@ -3645,6 +3645,11 @@ _RETRACTED_ROUND_7_V = (
     "Named cost: mainboltaexpl",
     "named cost `mainboltaexpl`",
     "A3 makes that row worse",
+    # A2's reach after the margin moved to the starter's WARNING-275
+    # threshold: 151 bodies written, 2 refused (forging_A / forging_B)
+    "emitted models (153 bodies)",
+    "refused: a principal value `<= 0` (ERROR 274)",
+    "relative 1e-6 margin",
 )
 
 
@@ -3707,6 +3712,14 @@ class Round7ValidationRound(unittest.TestCase):
             ("k2rad/__init__.py", "``mainboltaexpl`` moves by run "
              "sensitivity, not by the yield"),
             ("README.md", "but 12.7 % of a 7.85e-6 t coupon body"),
+            ("README.md", "emitted models (151 bodies written, 2 refused at "
+             "the margin"),
+            ("k2rad/state.py", "(151 bodies written; 2 more refused by # "
+             "name at the margin"),
+            ("k2rad/__init__.py", "(151 bodies written; 2 more refused by "
+             "name at the margin"),
+            ("k2rad/cli.py", "refused by name at or below a relative 1e-3 "
+             "margin"),
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):

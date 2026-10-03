@@ -675,7 +675,8 @@ def convert(
         -> 0.00 %; ``revo-stiff`` IE / KE history RMS
         4.96 / 2.94 -> 0.78 / 0.73 % of the LS peak at 1.156x the cycles
         (deviation -> match).
-        Reach 56 deck keys on 53 emitted models (153 bodies).
+        Reach 56 deck keys on 53 emitted models (151 bodies written; 2 more
+        refused by name at the margin, one each on forging_A / forging_B).
         ``--mass-weighted-inivel`` no longer subtracts on a body the
         producer already corrected.
     spotweld_shear_yield : bool

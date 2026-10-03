@@ -804,8 +804,8 @@ lumped shell rotary inertia: the starter ADDS every shell node's `IN` —
 `(m/4)(A + t²)/12` per `/SHELL` corner (`cinmas.F:1379`, FAC 12) and, for a
 `/SH3N`, the whole element's `m(A/4.5 + t²/12)` spread by the corner angles
 (`c3inmas.F:1111`, `spmd_msin.F:555-556`; the round-7 validation round — the
-quad formula had left up to 9.2 % of `ΣIN` on 41 of the rule's 153 bodies on
-15 roster keys) — to the body tensor for ICoG
+quad formula had left up to 9.2 % of `ΣIN` on 41 of the 153 bodies the rule
+then wrote, on 15 roster keys) — to the body tensor for ICoG
 1/2/3 (`inirby.F:166-168` the main node, `:355-363` the secondaries), while
 LS-DYNA's rigid-part inertia is the point-mass sum of the nodal masses (Theory
 R16 eqs 29.21-29.23 — the reference `d3hsp` tensor equals it on 18 of 18
@@ -830,7 +830,8 @@ body. Measured (nt 4): a spun 20 × 20 × 2 mm rigid plate's rotational KE
 starter tensor = LS-DYNA's d3hsp 0.1977E-02 / 0.2636E-02 and its IE / KE
 history RMS 4.96 / 2.94 → 0.78 / 0.73 % of the LS peak at 1.156× the cycles
 (the main node's rotational step shrinks with `J`). Reach 56 deck keys on 53
-emitted models (153 bodies); named costs on `brake` (KE 0.4-0.7 points lower
+emitted models (151 bodies written, 2 refused at the margin — one each on
+`forging_A` / `forging_B`); named costs on `brake` (KE 0.4-0.7 points lower
 at every fifth while its start becomes exact), `transducer` (an oscillating
 contact IE's end value) and `translat` (a run whose energy error is 99.9 % from
 the first rows — the joint path); `pipe` and `wood-post` stay `match`.
@@ -6462,7 +6463,8 @@ starter adds every member's nodal rotary inertia `IN` to the body tensor for
 ICoG 1/2/3 (`inirby.F:166-168`, `:322`, `:355`) and the `/RBODY` `J` cells are
 ADDITIVE (`inirby.F:154-160`), while LS-DYNA's rigid-body inertia is the
 point-mass sum (Theory R16 eqs 29.21-29.23) — so `Jxx = Jyy = Jzz = −ΣIN` over
-the body's shell nodes (the lumper's `IN`, the `cinmas.F:1379` value) takes the
+the body's shell nodes (the lumper's `IN`: the `cinmas.F:1379` value, and
+`c3inmas.F:1111`'s on a `/SH3N` since the round-7 validation round) takes the
 difference back out, on exactly the bodies that get an `/INIVEL/ROT`. Measured
 on translat (nt 4): `NEW INERTIA` 0.2642894E-02 → **0.1977227E-02** = LS-DYNA's
 0.1977E-02, cycle-0 KE 220.58 → **189.96** (LS 189.962), final KE 139.89 →
@@ -6475,7 +6477,9 @@ the step and its rotational step shrinks with J). The IE is NOT fixed (1159 →
 on every arm — the joint path). Skipped by name: an ICoG 4 body (its J is the
 deck's `*PART_INERTIA` tensor), a body with a layered shell, an element
 thickness or Ishell < 11 (the lumper's `IN` would not be the starter's);
-refused: a principal value `<= 0` (ERROR 274).
+refused: a smallest principal value not above `1e-3` × the largest — the A2
+producer's margin, the starter's own WARNING-275 threshold (`<= 0`, ERROR
+274, until the round-7 validation round).
 
 **Round 7: `J = −ΣIN` is the DEFAULT on every `*MAT_RIGID` /
 `*DEFORMABLE_TO_RIGID` part body** (`--rigid-shell-rotary-inertia`, see

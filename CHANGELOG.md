@@ -353,7 +353,8 @@ Prior history (before this changelog was introduced) is summarized in the
     (0.1977E-02 / 0.2636E-02), IE / KE history RMS 4.96 / 2.94 → 0.78 / 0.73 %
     of the LS peak at 1.156× the cycles. **Byte movers 56 deck keys on 53
     emitted models (153 bodies), one J row each, `_0000.rad` only, no id
-    shift**; `pipe` and `wood-post` stay `match`; the pendulum pair (1 model)
+    shift** (151 bodies since the validation round's margin: `forging_A` /
+    `forging_B` keep `J = 0` on one body each); `pipe` and `wood-post` stay `match`; the pendulum pair (1 model)
     flips on its END value only (IE −19.39 → +5.37 % with the IE RMS 50.64 →
     51.61 %: annotated, never a fix). Named costs: `brake` (KE 0.4-0.7
     points lower at every fifth, RMS 2.62 → 2.85 %, while its IE RMS 814.68 →
