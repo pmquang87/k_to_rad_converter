@@ -2344,7 +2344,16 @@ New items found while doing round 7 — each with its reach and the next step:
     0): an axis off the global axes (a `/SKEW`-frame carriage and a local CMO
     pattern), a screw with NO drive (free-free under other loads — the next
     carrier to measure), `_LOCAL` / `_FAILURE` / `_COOR_SCREW`, an implicit
-    deck, a body that is not a lone `*MAT_RIGID` part. The residual is a
+    deck, a body that is not a lone `*MAT_RIGID` part, and a body that
+    carries another standard kinematic condition (refusal 11, added by the
+    validation round: a `*NODE` TC/RC, `*BOUNDARY_SPC`, `*CONSTRAINED_GLOBAL`
+    or nodal prescribed motion would land on the Lagrange-held main node as
+    a standard card — the starter's WARNING 312; the validators' two probes
+    with a REDUNDANT code (a `*BOUNDARY_SPC` DOFY on N1, a `*NODE` TC 3 on
+    a member of A) ended NORMAL at 21626 / 21627 cycles with the END IE
+    −0.1 % / +2.6 % against the clean arm (nt 4), a conflicting code is
+    unmeasured; the next step is to fold a redundant code into the
+    Lagrange conditions instead of refusing). The residual is a
     SOLVER LIMITATION: the exact Lagrange joint against LS-DYNA's yielding
     penalty joint (IE +42.76 %, the nut meets the shells ~0.6 ms early) — no
     penalty screw exists in OpenRadioss (`/PROP/TYPE45` Types 1-9). The

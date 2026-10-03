@@ -256,14 +256,17 @@ Prior history (before this changelog was introduced) is summarized in the
     PARM 0, a body that is not a lone `*MAT_RIGID` part (CNRB, merge, extra
     nodes, `*DEFORMABLE_TO_RIGID`), a non-coaxial or off-global axis, other CMO
     codes, a drive that is missing, windowed, VAD 1 / 3 or also on B, a
-    contact the split cannot handle — each reach 0. NOT built: the pair kept
+    contact the split cannot handle, and (the validation round, refusal 11)
+    any other standard kinematic condition on either body — each reach 0.
+    NOT built: the pair kept
     in the self-contact (M2: mesh 178.67 mm behind its main node), the pair as
     `/INTER/LAGMUL/TYPE7` (M3: drift −76.71 mm), one merged `/RBODY` (the helix
     DOF is gone). Reach 1 deck key on 1 emitted model. Tests:
     `JointScrewGjoint` (the rack card, the carriage, the two LAGMUL, the
     differentiated drive with VAD 0 and SF 2, the split line by line, the
-    skip bucket, sixteen refusal classes each byte-identical to the opt-out,
-    the opt-out, the axis sign, the F: deck). EXPECTED VALUE MOVED:
+    skip bucket, twenty-one refusal classes each byte-identical to the
+    opt-out — sixteen at part B's commit, five added by the validation round
+    — the opt-out, the axis sign, the F: deck). EXPECTED VALUE MOVED:
     `tests/test_r14_triage_5.py` `RbodyProducerCountIsStatedOnce` counts six
     `/RBODY` producers (the carriage is the sixth), and the producer comments
     and the three cited line runs carry six.

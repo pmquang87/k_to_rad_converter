@@ -3121,7 +3121,13 @@ screw's drive and the BNDOUT warning says so. A screw outside the
 pattern (`_COOR_SCREW`, `_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a
 deformable / CNRB / merged body, a non-coaxial or off-global axis, other CMO
 codes, a missing or windowed drive, VAD 1/3, a drive on B, a contact the split
-cannot handle) keeps the skip with a named reason. 1 deck key on 1 emitted model.
+cannot handle, and — since the validation round — any other standard kinematic
+condition on either body: a `*NODE` TC/RC cell, a `*BOUNDARY_SPC`, a
+`*CONSTRAINED_GLOBAL` plane or a `*BOUNDARY_PRESCRIBED_MOTION_NODE` / `_SET`
+on one of its nodes, which k2rad would write as a standard card on the
+Lagrange-held main node, the incompatible kinematic condition the starter
+reports as WARNING 312) keeps the skip with a named reason. 1 deck key on 1
+emitted model.
 
 `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` / `_TRANSLATIONAL` → the matched
 joint's per-DOF stiffness / damping / friction / stop blocks (`LCID*`→`fct_K*`,

@@ -31,7 +31,7 @@ ONE decision per deck (``_resolve_joint_screws``, memoised on
   curve DIFFERENTIATED into a velocity /FUNCT) and the ``/GJOINT/RACK``.
 
 A screw outside the pattern keeps today's skip (its ``#-- SKIPPED:`` line,
-0 bytes) and gets ONE named warning; the pattern's ten conditions are in
+0 bytes) and gets ONE named warning; the pattern's eleven conditions are in
 ``_screw_refusal``.
 """
 
@@ -209,14 +209,61 @@ def _cnrb_nodes(state: ConversionState) -> Set[int]:
     return out
 
 
+def _body_condition(state: ConversionState, nodes: Set[int]) -> Optional[str]:
+    """The first STANDARD kinematic condition the deck states on a body's
+    element *nodes*, in words, or None. Every one of them reaches the body's
+    /RBODY main node as a standard card - rule (a) of the ``*NODE`` TC/RC
+    pass and ``_make_bcs`` re-point a member's code onto it, and a nodal
+    prescribed motion is written on the member it names - where the starter
+    reports it beside the joint's ``/BCS/LAGMUL`` as an incompatible
+    kinematic condition (WARNING 312, BOUNDARY CONDITION / LAGRANGE
+    MULTIPLIERS: measured with a redundant ``*BOUNDARY_SPC`` and a redundant
+    ``*NODE`` TC on EXP_SC_JOINT_SCREW; a conflicting code is unmeasured).
+    Mirrors what is WRITTEN: ``--no-node-tc-rc-bcs`` drops the ``*NODE``
+    cells (no condition), and ``--no-constrained-global`` leaves
+    ``state.constrained_global_tc_rc`` empty. A rigid wall is not screened
+    (it is not a /BCS; unmeasured)."""
+    if state.options.node_tc_rc_bcs:
+        hit = sorted(n for n in nodes
+                     if state.node_tc_rc.get(n, (0, 0)) != (0, 0))
+        if hit:
+            tc, rc = state.node_tc_rc[hit[0]]
+            return f"the *NODE TC {tc} / RC {rc} of its node {hit[0]}"
+    hit = sorted(n for n in nodes if n in state.constrained_global_tc_rc)
+    if hit:
+        return f"a *CONSTRAINED_GLOBAL plane through its node {hit[0]}"
+    for bc in state.bcs_spcs:
+        hit = sorted(set(state.node_sets.get(bc.nsid, ("", []))[1]) & nodes)
+        if hit:
+            return (f"the *BOUNDARY_SPC (/BCS/{bc.bc_id}) of its node "
+                    f"{hit[0]}")
+    from .loads import _box_contains          # local: loads imports us
+    for pm in state.prescribed_motion_sets:
+        cand = (set(state.node_sets.get(pm.nsid, ("", []))[1]) & nodes
+                if pm.nsid else set(nodes))
+        if pm.boxid:
+            box = state.boxes.get(pm.boxid)
+            cand = {n for n in cand if box is not None and n in state.nodes
+                    and _box_contains(box, state.nodes[n].x,
+                                      state.nodes[n].y, state.nodes[n].z)}
+        elif not pm.nsid:
+            continue
+        if cand:
+            return ("a *BOUNDARY_PRESCRIBED_MOTION_NODE / _SET on its node "
+                    f"{min(cand)}")
+    return None
+
+
 def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
                    node_parts: Dict[int, Set[int]], cnrb_nodes: Set[int],
                    taken: Set[int]
                    ) -> Tuple[Optional[str], Optional[JointScrewPlan]]:
     """``(the reason the screw is NOT converted, None)`` or ``(None, the
-    plan)``. The ten conditions of the round-7 B2 spec, in order; every one
-    has reach 0 on every corpus (the only carrier, EXP_SC_JOINT_SCREW, passes
-    all ten), so each is pinned by a hand-built probe."""
+    plan)``. The ten conditions of the round-7 B2 spec, in order, and an
+    eleventh from the validation round (no other kinematic condition on
+    either body, :func:`_body_condition`); every one has reach 0 on every
+    corpus (the only carrier, EXP_SC_JOINT_SCREW, passes all eleven), so each
+    is pinned by a hand-built probe."""
     # 2. the plain spelling only
     if s.keyword != _PLAIN_SCREW:
         return ("the _COOR_SCREW / _LOCAL / _FAILURE spelling is not converted "
@@ -337,6 +384,17 @@ def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
     if conflict is not None:
         return (f"parts {a} and {b} share contact {conflict}, which the split "
                 "does not handle"), None
+    # 11. no other kinematic condition on either body: it would land on a
+    #     Lagrange-held main node as a standard card (round-7 fix round, from
+    #     the validators' probes)
+    for label, pid in (("A", a), ("B", b)):
+        cond = _body_condition(state, pid_nodes[pid])
+        if cond is not None:
+            return (f"body {label} (part {pid}) carries {cond}, which k2rad "
+                    "writes as a standard condition on the body's /RBODY "
+                    "main node beside the joint's Lagrange conditions (an "
+                    "incompatible kinematic condition: starter WARNING "
+                    "312)"), None
     return None, JointScrewPlan(
         screw=s, a_pid=a, b_pid=b, axis=axis,
         r=(float(r[0]), float(r[1]), float(r[2])), length=l13, drive=pm,

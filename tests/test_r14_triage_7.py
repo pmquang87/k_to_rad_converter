@@ -2739,7 +2739,10 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
                 implicit: bool = False, s2s: bool = False,
                 n5_on_plate: bool = False, n2_off_axis: bool = False,
                 diagonal: bool = False, swap_axis: bool = False,
-                a_elastic_cnrb: bool = False, bndout: bool = False) -> str:
+                a_elastic_cnrb: bool = False, bndout: bool = False,
+                a_rigid_cnrb: bool = False, a_node_tc: int = 0,
+                b_spc: bool = False, b_global: bool = False,
+                a_node_motion: bool = False) -> str:
     """The B2 mini screw (ton-mm-s, explicit, ENDTIM 0.1): part 2 "screw out"
     (A) = one hex x 10..20, y 0..10, z 0..10 on *MAT_RIGID 2 (CMO 1, CON1 5,
     CON2 *con2_a*); part 1 "screw in" (B) = one hex x -15..-5 on *MAT_RIGID 1
@@ -2750,7 +2753,15 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
     deck's six points; *CONTACT_AUTOMATIC_SINGLE_SURFACE SSID 0. A's nodal
     centroid (the element-free /RBODY main) is (15, 5, 5); |N1N3| = 10, so
     the carriage offset is 1.0. *diagonal* moves B to y -25..-15 and puts
-    N1 on (20, 10, 0): the axis is (1, 1, 0)."""
+    N1 on (20, 10, 0): the axis is (1, 1, 0). The validation round's probes
+    (each a standard condition on a body, refusal 11, or the CNRB case of
+    refusal 5): *a_rigid_cnrb* puts A's eight nodes in a
+    *CONSTRAINED_NODAL_RIGID_BODY while A stays *MAT_RIGID; *a_node_tc*
+    writes that *NODE TC on A's member node 3 (20, 10, 0); *b_spc* a
+    *BOUNDARY_SPC_NODE (DOFY) on B's member node 11 (-5, 10, 0); *b_global*
+    a *CONSTRAINED_GLOBAL plane x = -15 (TC 1) through B's face; and
+    *a_node_motion* a *BOUNDARY_PRESCRIBED_MOTION_NODE (DOF 3, VAD 2,
+    LCID 7) on A's node 3."""
     by = -25.0 if diagonal else 0.0
     pts = {}
     nid = 0
@@ -2788,6 +2799,7 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
         n1, n3, n2, n4 = n3, n1, n4, n2
     out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.1), "*NODE"]
     out += [f"{k:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}"
+            + (f"{a_node_tc:>8}{0:>8}" if a_node_tc and k == 3 else "")
             for k, (x, y, z) in sorted(pts.items())]
     out += ["*ELEMENT_SOLID",
             "".join(f"{v:>8}" for v in [1, 2] + a_ids),
@@ -2814,6 +2826,16 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
     else:
         out += ["*MAT_RIGID", _row(2, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0),
                 _row(1.0, 5, con2_a), _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    if a_rigid_cnrb:
+        out += ["*SET_NODE_LIST", _row(77), _row(*a_ids),
+                "*CONSTRAINED_NODAL_RIGID_BODY", _row(88, 0, 77)]
+    if b_spc:
+        out += ["*BOUNDARY_SPC_NODE", _row(11, 0, 0, 1, 0, 0, 0, 0)]
+    if b_global:
+        out += ["*CONSTRAINED_GLOBAL", _row(1, 0, 1, -15.0, 0.0, 0.0, 0.0)]
+    if a_node_motion:
+        out += ["*BOUNDARY_PRESCRIBED_MOTION_NODE",
+                _row(3, 3, 2, 7, 1.0, 0, 1e25, 0.0)]
     out += ["*MAT_ELASTIC", _row(3, 7.85e-9, 210000.0, 0.3),
             "*DEFINE_CURVE", _row(7)]
     out += [f"{x:>20}{y:>20}" for x, y in _SCREW_CURVE]
@@ -3021,6 +3043,21 @@ class JointScrewGjoint(unittest.TestCase):
              "not on two different rigid parts"),
             ("A deformable under a CNRB", {"a_elastic_cnrb": True},
              "is not a *MAT_RIGID part"),
+            # the validation round: A stays *MAT_RIGID, so only the
+            # shared-node arm of refusal 5 can fire (mutation B2-9)
+            ("A rigid, its nodes in a CNRB", {"a_rigid_cnrb": True},
+             "part 2 shares nodes with a *CONSTRAINED_NODAL_RIGID_BODY"),
+            # refusal 11: a standard condition on either body
+            ("a *NODE TC on A", {"a_node_tc": 3},
+             "body A (part 2) carries the *NODE TC 3 / RC 0 of its node 3"),
+            ("a *BOUNDARY_SPC on B", {"b_spc": True},
+             "body B (part 1) carries the *BOUNDARY_SPC (/BCS/"),
+            ("a *CONSTRAINED_GLOBAL plane through B", {"b_global": True},
+             "body B (part 1) carries a *CONSTRAINED_GLOBAL plane through "
+             "its node 9"),
+            ("a nodal prescribed motion on A", {"a_node_motion": True},
+             "body A (part 2) carries a *BOUNDARY_PRESCRIBED_MOTION_NODE / "
+             "_SET on its node 3"),
             ("N2 off the axis", {"n2_off_axis": True}, "are not coaxial"),
             ("diagonal axis", {"diagonal": True},
              "is not along a global axis"),
@@ -3048,6 +3085,41 @@ class JointScrewGjoint(unittest.TestCase):
                         and "SCREW" in w]
                 self.assertEqual(len(hits), 1, r_on.warnings)
                 self.assertIn(reason, hits[0])
+
+    def test_refusal_11_mirrors_what_is_written(self):
+        """A *NODE TC cell that --no-node-tc-rc-bcs drops is written
+        nowhere, so it conflicts with nothing: the screw converts. The
+        refused arm's member code is then merged by A1 into the body's own
+        BC_rigid card (no node_tc_rc group of its own)."""
+        r, s, _e = _convert(_screw_deck(a_node_tc=3), node_tc_rc_bcs=False)
+        self.assertIn("/GJOINT/RACK/", s)
+        self.assertFalse(_has(r.warnings, ": NOT converted - "), r.warnings)
+        r1, s1, _e1 = _convert(_screw_deck(a_node_tc=3))
+        self.assertNotIn("/GJOINT/RACK/", s1)
+        self.assertIn("BC_rigid_2", s1)
+        self.assertNotIn("node_tc_rc_", s1)
+
+    def test_the_A1_record_mirrors_the_written_cards(self):
+        """A1's state.rigid_auto_bcs records exactly the BC_rigid cards the
+        /RBODY producer writes (ONE predicate, screw_cmo_skip_pids, gates
+        both): a record without its card would merge a member TC/RC code
+        into a card that never reaches the deck. The code validator's
+        mutation A1-5b kept the record and dropped the card on the screw
+        bodies, and the whole suite stayed green."""
+        from k2rad.writer.assembly import build_starter
+        for on, want in ((True, set()),
+                         (False, {"BC_rigid_1", "BC_rigid_2"})):
+            with self.subTest(joint_screw_gjoint=on):
+                st = _dispatch(_screw_deck())
+                st.options.joint_screw_gjoint = on
+                s = build_starter(st)
+                written = set(re.findall(r"^/BCS/\d+\r?\n(BC_rigid_\d+)\r?$",
+                                         s, re.M))
+                recorded = {t.strip() for _tra, _rot, title
+                            in st.rigid_auto_bcs.values()
+                            for t in title.split(",")}
+                self.assertEqual(written, want)
+                self.assertEqual(recorded, written)
 
     def test_the_opt_out_restores_65ff389(self):
         r, s, _e = _convert(_screw_deck(), joint_screw_gjoint=False)
