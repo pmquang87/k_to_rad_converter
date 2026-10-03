@@ -300,6 +300,18 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
             + "\n*CONSTRAINED_NODAL_RIGID_BODY_SPC\n" + _row(50, 0, 7)
             + "\n" + _row(1.0, 7, 0) + "\n")))
         self.assertFalse(_has(r0.warnings, "ERROR 148"), r0.warnings)
+        # the *CONSTRAINED_GLOBAL announcement names it too: a z-plane
+        # through the elastic plate (z = 5, the CNRB's members) instead of
+        # their *NODE TC cells
+        cg = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 5.0, 0.0) + "\n"
+        r_g, _s_g, _e_g = _convert(_a1_deck(tc=0, extra=extra + cg))
+        g = [w for w in r_g.warnings
+             if w.startswith("*CONSTRAINED_GLOBAL: ")]
+        self.assertEqual(len(g), 1, r_g.warnings)
+        for needle in ("BC_cnrb_50 at skew 5", "ERROR 148",
+                       "--no-constrained-global drops"):
+            with self.subTest(constrained_global=needle):
+                self.assertIn(needle, g[0])
 
     def test_4b_a_card_that_is_the_stabilisation_alone_names_only_it(self):
         """The post-review round: on an implicit deck a CMO 0 body loaded in
@@ -329,6 +341,19 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         self.assertIn("*MAT_RIGID CMO 1 CON1/CON2 - and the stabilisation "
                       "k2rad adds", w1)
         self.assertNotIn("the body states no *MAT_RIGID CON1/CON2 digit", w1)
+        # the *CONSTRAINED_GLOBAL announcement's own call: a z-plane through
+        # the CMO 0 rigid plate (z = 0) merges into the stabilisation-only
+        # card the same way
+        cg = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 0.0, 0.0) + "\n"
+        r_g, s_g, _e_g = _convert(_a1_deck(cmo=0.0, con1=0, con2=0, tc=0,
+                                           extra=imp + load + cg))
+        self.assertEqual(_bcs_groups(s_g)["BC_rigid_1"][0], "101 000")
+        g = [w for w in r_g.warnings
+             if w.startswith("*CONSTRAINED_GLOBAL: ")]
+        self.assertEqual(len(g), 1, r_g.warnings)
+        self.assertIn("the body states no *MAT_RIGID CON1/CON2 digit there",
+                      g[0])
+        self.assertNotIn("CMO 1 CON1/CON2", g[0])
 
     def test_5_the_CONSTRAINED_GLOBAL_provenance_prints_its_own_sentence(self):
         extra = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 0.0, 0.0) + "\n"
