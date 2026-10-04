@@ -10,6 +10,7 @@ from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
                      ContactThermal, ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
 from ..topology import TET10_EDGEMID
+from .joint_screw import screw_splits
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
@@ -2032,15 +2033,63 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     "→ /INTER/TYPE25 all-parts self-contact (matches the native "
                     "OpenRadioss reader; TYPE7 node→surface is kept for implicit only)."
                 )
+                # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) takes its
+                # spinning body A out of this self-surface and gives it ONE
+                # two-surface /INTER/TYPE25 against every other part except B
+                # (every cell copied): a contact force on a rigid body whose
+                # main node a Lagrange condition holds is cancelled on the
+                # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
+                # :7901), so the A-B pair slips the mesh off its main node.
+                splits = screw_splits(state, c.inter_id)
+                a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
-                lines += _emit_surf_part(self_surf, f"contact_{c.inter_id}_self", all_pids)
+                lines += _emit_surf_part(
+                    self_surf, f"contact_{c.inter_id}_self",
+                    [p for p in all_pids if p not in a_parts])
                 fric, fric_id = _contact_friction(
                     state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
+                inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
+                stfac = _stfac_for(state, c.sfs, c.inter_id) or 1.0
                 lines += _emit_inter_type25_self(
-                    c.inter_id, c.title, self_surf, fric,
-                    _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0),
-                    _stfac_for(state, c.sfs, c.inter_id) or 1.0,
+                    c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id)
+                for plan in splits:
+                    jid = plan.screw.jid
+                    rest = [p for p in all_pids
+                            if p not in (plan.a_pid, plan.b_pid)]
+                    s_rest = state.next_id()
+                    s_a = state.next_id()
+                    split_iid = state.next_id()
+                    lines += _emit_surf_part(
+                        s_rest, f"contact_{c.inter_id}_screw_{jid}_rest", rest)
+                    lines += _emit_surf_part(
+                        s_a, f"contact_{c.inter_id}_screw_{jid}_body_A",
+                        [plan.a_pid])
+                    lines += _emit_inter_type25_self(
+                        split_iid, f"CONTACT_{c.inter_id}_screw_{jid}_body_A",
+                        s_rest, fric, inacti, stfac, fric_id=fric_id,
+                        surf_id2=s_a)
+                    # minted beside the converted contact: /TH/INTER and the
+                    # other registry walks must be told (companion_inter_ids)
+                    state.companion_inter_ids.append(split_iid)
+                    state.warn(
+                        f"*{c.keyword or 'CONTACT_AUTOMATIC_SINGLE_SURFACE'} "
+                        f"(/INTER/TYPE25/{c.inter_id}): the rigid pair of "
+                        f"*CONSTRAINED_JOINT_SCREW {jid} is split out - part "
+                        f"{plan.a_pid} leaves the all-parts self-surface and "
+                        f"gets its own two-surface /INTER/TYPE25/{split_iid} "
+                        f"against every other part except {plan.b_pid} "
+                        f"(every cell copied from /INTER/TYPE25/{c.inter_id}), "
+                        "so every rigid-deformable pair stays and only the "
+                        f"{plan.a_pid}-{plan.b_pid} pair is gone. A contact "
+                        "force on a rigid body whose main node a Lagrange "
+                        "condition holds is cancelled on the main node alone "
+                        "(RBYVIT, resol.F:7572, runs before LAG_MULT, :7901) "
+                        "and the mesh slips off its main node - MEASURED with "
+                        "the pair kept: 178.67 mm at t_end, IE -100 %. LS-DYNA "
+                        "keeps the pair (on EXP_SC_JOINT_SCREW 99.1 % of its "
+                        "external work is sliding-interface energy between the "
+                        "two screws), which no Lagrange joint can reproduce.")
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_grnod_id()
@@ -2068,7 +2117,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state,
                                                          c.inter_id, gapmin),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
         else:
@@ -2109,7 +2158,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state,
                                                          c.inter_id, gapmin),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                        fric_id=fric_id, state=state)
 
@@ -2213,7 +2262,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
-                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                    fric_id=fric_id, state=state,
                                    thermal=_contact_thermal_cells(
@@ -3101,9 +3150,21 @@ def _make_refused_contact_notes(state: ConversionState) -> List[str]:
     return []
 
 
-def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
+def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int,
+                 title: str = "") -> float:
     """Map LS-DYNA *CONTACT Card2 vdc (viscous damping, % of critical) →
     OpenRadioss /INTER/TYPE7 VisS (fraction of critical, normal direction).
+
+    The ``vdc = 0`` remedy ("set vdc on *CONTACT Card2") is NOT printed about
+    k2rad's own injected implicit stub (*title* ==
+    ``AUTO_IMPLICIT_STUB_TITLE``, the same gate ``_maybe_derived_gapmin``
+    applies): that interface is k2rad's own, not a card of the deck (on 52
+    of the 53 measured keys the deck states no *CONTACT at all; doorbeam's
+    TYPE25-only contact gets the stub beside it), so the sentence told the
+    user to edit a card the deck does not have — measured on 53 R14 deck
+    keys / 37 emitted models by the sentence's interface id (round 7, A5
+    (i)). The stub keeps its own injection notice,
+    and its VisS stays 0 (no byte moves).
 
     Undamped penalty contact (VisS=0) in implicit dynamic analysis is prone to
     a chattering limit cycle: the active contact set flips every Newton
@@ -3119,7 +3180,7 @@ def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
         state.warn(f"CONTACT {inter_id}: vdc={vdc:g} (% critical) -> "
                    f"/INTER/TYPE7 VisS={viss:g} (normal contact damping).")
         return viss
-    if state.is_implicit:
+    if state.is_implicit and title != AUTO_IMPLICIT_STUB_TITLE:
         state.warn(f"CONTACT {inter_id}: vdc=0 -> VisS=0 (no contact damping). "
                    "Implicit dynamic penalty contact often chatters without it; "
                    "set vdc (% of critical, e.g. 20-100) on *CONTACT Card2 if the "
@@ -3265,7 +3326,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
 
 def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
                             inacti: int = 5, stfac: float = 1.0,
-                            fric_id: int = 0) -> List[str]:
+                            fric_id: int = 0, surf_id2: int = 0) -> List[str]:
     """*CONTACT_AUTOMATIC_SINGLE_SURFACE → /INTER/TYPE25 self-contact (explicit).
 
     surf_id is ONE surface (surf_ID1); surf_ID2=0 → self-impact, so every segment
@@ -3289,12 +3350,17 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
     ways), but KEEP THEM IN SYNC: a column added to one belongs in the other.
     They stay separate only because merging them would rewrite the bytes of the
     solver-validated *CONTACT_AUTOMATIC_SINGLE_SURFACE path for no gain.
+
+    *surf_id2* (default 0 = the self-impact above, byte-identical for every
+    existing caller) makes it a two-surface interface with every other cell
+    unchanged: the *CONSTRAINED_JOINT_SCREW split (round 7, B2) writes the
+    spinning body's parts there against the rest of the self-surface.
     """
     return [
         f"/INTER/TYPE25/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2                Idel     Iedge    IPSTIF",
-        f"{_i(surf_id)}         0         4         0         2         0                   2      1000         0",
+        f"{_i(surf_id)}{_i(surf_id2)}         4         0         2         0                   2      1000         0",
         "# grnd_IDs                     Gap_scale          %mesh_size           Gap_max_s           Gap_max_m",
         "         0                           1.0                   0                1e30                1e30",
         "#              Stmin               Stmax     Igap0    Ishape          Edge_angle          STFAC_MDT",
@@ -3688,7 +3754,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
-        viss = _vdc_to_viss(c.vdc, state, c.inter_id)
+        viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
         stfac = _stfac_for(state, c.sfs, c.inter_id)
         # All three sentinel routes can hold a /FRICTION binding: TYPE7,
         # TYPE11 and TYPE19 each carry fric_ID in cols 91-100 of their last
@@ -4549,6 +4615,26 @@ _TIED_DSEARCH_MARGIN = 1.2
 _TIED_RUPTURE_SPOTFLAGS = (20, 21, 22)
 
 
+def _record_type2_secondary(state: ConversionState, inter_id: int,
+                            spotflag: int, nids, msid: int,
+                            mstyp: int) -> None:
+    """Register an EMITTED /INTER/TYPE2's secondary node group (R14 triage
+    round 7, B4): ``state.type2_secondary[inter_id] = (Spotflag,
+    frozenset(nodes))``, and its MAIN side as the record states it,
+    ``state.type2_main_side[inter_id] = (MSID, MSTYP)`` (the post-review
+    round). Called right after each of the four
+    ``lines += _emit_inter_type2(...)`` write lines with the SAME node list
+    ``_emit_grnod_node`` wrote for the tie, so the registry holds exactly what
+    the starter reads. The ``*CONSTRAINED_LINEAR_*`` -> ``/MPC`` screen
+    (``writer/loads._make_constrained_linear_mpcs``, the last id-drawing
+    section) refuses a term on any of these nodes, whatever the Spotflag, and
+    on any node of the main side (resolved there, by :func:`_tied_slave_nids`,
+    only when the deck has such a card). ``_emit_inter_type2`` itself stays a
+    pure card writer (three tests call it directly)."""
+    state.type2_secondary[inter_id] = (spotflag, frozenset(nids))
+    state.type2_main_side[inter_id] = (msid, mstyp)
+
+
 def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
                       spotflag: int, dsearch: float, idel2: int = 0,
                       rupture: Optional[Tuple[int, int, float, float, float]] = None,
@@ -5226,6 +5312,8 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
         lines += _emit_inter_type2(c.inter_id, c.title, grnod_id, surf_id,
                                    spotflag, dsearch,
                                    kthe=None if kthe is None else kthe.kthe)
+        _record_type2_secondary(state, c.inter_id, spotflag, clean,
+                                c.msid, c.mstyp)
         rot_note = (
             " Note: TYPE2 also ties the secondary nodes' ROTATIONS to the main "
             "segment (a moment-carrying weld); the LS-DYNA keyword tied "
@@ -5764,6 +5852,8 @@ def _make_tiebreak_interfaces(state: ConversionState,
             spotflag = _TIEBREAK_TIE_SPOTFLAG[c.family]
             lines += _emit_inter_type2(c.inter_id, title, grnod_id, surf_id,
                                        spotflag, dsearch)
+            _record_type2_secondary(state, c.inter_id, spotflag, clean,
+                                    c.msid, c.mstyp)
             # The consequence text is NOT the same for every class. For
             # OPTION 1/-1 LS-DYNA's bond never fails either, so a permanent tie
             # loses NOTHING about the failure — saying "the failure is dropped,
@@ -5831,6 +5921,8 @@ def _make_tiebreak_interfaces(state: ConversionState,
         lines += _emit_inter_type2(
             c.inter_id, title, grnod_id, surf_id, spotflag, dsearch,
             rupture=(fct_sn, fct_st, c.nfls, ccrit, ccrit))
+        _record_type2_secondary(state, c.inter_id, spotflag, clean,
+                                c.msid, c.mstyp)
         # Gates /ANIM/NODA/DAMA2 in the engine deck (build_starter runs first,
         # so the flag is set by the time _make_engine_anim reads it).
         state.tiebreak_rupture_inter_ids.append(c.inter_id)
@@ -6558,6 +6650,8 @@ def _make_spotweld_interfaces(state: ConversionState,
                                    grnod_id, surf_id,
                                    _SPOTWELD_SPOTFLAG, dsearch,
                                    idel2=_SPOTWELD_IDEL2)
+        _record_type2_secondary(state, c.inter_id, _SPOTWELD_SPOTFLAG, clean,
+                                c.msid, c.mstyp)
         where = (f"dsearch={dsearch:g} from the Card-3 SST/MST"
                  if dsearch > 0.0 else
                  "dsearch=0, so the starter uses its own average-main-segment "

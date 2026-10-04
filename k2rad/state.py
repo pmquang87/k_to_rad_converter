@@ -213,8 +213,13 @@ class TshellElem:
     count (4 → /TETRA4, 10 → /TETRA10, else /BRICK), which would turn a
     degenerate 6-node thick shell — written ``n1 n2 n3 n3 n5 n6 n7 n7`` — into
     something it is not; and the property a thick shell needs is
-    /PROP/TYPE20|21|22, never /PROP/SOLID (starter ERROR 3047 the moment the
-    material is orthotropic, and no through-thickness layers either way).
+    /PROP/TYPE20|21|22 (starter ERROR 3047 the moment the material is
+    orthotropic on /PROP/SOLID, and no through-thickness layers either way) -
+    with ONE deliberate exception since round 7 (A4): an IMPLICIT deck's
+    *MAT_ELASTIC section goes to /PROP/SOLID Isolid 14, because the implicit
+    thick-shell tangent integrates the thickness with one point. The elements
+    stay in this container on that route too, so the /BRICK rows and every
+    thick-shell walk are unchanged.
 
     ``nodes`` is the LS-DYNA n1..n8 order VERBATIM. LS-DYNA's convention is
     "nodes n1 to n4 define the lower surface, and nodes n5 to n8 define the
@@ -758,6 +763,12 @@ class MatSpotweld:
     mss: float          # bending failure moment (s)     → ±Delta5
     mtt: float          # bending failure moment (t)     → ±Delta6
     nf: float = 0.0     # force-filter count (dropped, warned)
+    # The SIGY the card STATES (the handler zeroes a negative one - a yield
+    # curve / table it does not convert - and names it there), so the writer
+    # can name LS-DYNA's own default for a stated 0 ('EQ.0: Default to 1%
+    # of E', Vol II R17 p.2-697) without misnaming a dropped curve. None =
+    # the same as ``sigy``.
+    sigy_stated: Optional[float] = None
 
 
 @dataclass
@@ -985,6 +996,65 @@ class ConstrainedJoint:
             slots = (1, 2, 4)
         vals = (0, self.n1, self.n2, self.n3, self.n4, self.n5, self.n6)
         return [vals[s] for s in slots if vals[s] > 0]
+
+
+@dataclass
+class ConstrainedJointScrew:
+    """*CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE] / *CONSTRAINED_JOINT_COOR_SCREW
+    (+ _ID / _TITLE) - recorded by ``handlers.handle_constrained_joint_screw``
+    and converted, where the pattern holds, into ``/GJOINT/RACK`` by
+    ``writer/joint_screw.py`` (R14 triage round 7, B2).
+
+    Card 1 ``N1 N2 N3 N4 N5 N6 RPS DAMP`` (RPS / DAMP default 1.0); the
+    screw's own card ``PARM LCID TYPE R1`` follows card 1 on the plain
+    spelling (Vol I R17 p.10-61..76: PARM = "Screw: Define x_dot / omega").
+    ``keyword`` is the block keyword with ``_ID`` / ``_TITLE`` stripped, so a
+    ``_LOCAL`` / ``_FAILURE`` / ``_COOR_`` spelling is visible to the
+    pattern's spelling condition."""
+    keyword: str
+    jid: int = 0
+    title: str = ""
+    n1: int = 0
+    n2: int = 0
+    n3: int = 0
+    n4: int = 0
+    n5: int = 0
+    n6: int = 0
+    rps: float = 1.0
+    damp: float = 1.0
+    parm: float = 0.0
+    lcid: int = 0
+    jtype: int = 0
+    r1: float = 0.0
+
+
+@dataclass
+class JointScrewPlan:
+    """One CONVERTED ``*CONSTRAINED_JOINT_SCREW`` (round 7, B2): decided ONCE
+    by ``writer/joint_screw._resolve_joint_screws`` (a ``build_starter``
+    prepass, before the /RBODY producers), read by every section that the
+    conversion touches - the *MAT_RIGID CMO /BCS skip, the carriage /RBODY
+    (producer 6), the contact split, the imposed-motion skip and the joint
+    section itself - so none of them re-decides. ``axis`` is the global axis
+    index of the screw axis ``r = unit(N3 -> N1)``; ``drive`` is the rotation
+    drive on part A (``state.prescribed_motions`` member, matched by
+    identity); ``split_inter_ids`` are the all-parts self-contacts the split
+    rewrites; ``n0`` / ``n1`` / ``n2`` and the main nodes are filled by the
+    carriage producer."""
+    screw: ConstrainedJointScrew
+    a_pid: int
+    b_pid: int
+    axis: int
+    r: Tuple[float, float, float]
+    length: float
+    drive: "PrescribedMotionRigid"
+    split_inter_ids: List[int] = field(default_factory=list)
+    a_main: int = 0
+    b_main: int = 0
+    a_ind_grnod: int = 0
+    n0: int = 0
+    n1: int = 0
+    n2: int = 0
 
 
 @dataclass
@@ -2499,11 +2569,17 @@ class MatNull:
     rho: float
     E: float
     nu: float
-    # Card 1 field 3, PC: the pressure cutoff (<= 0, default 0.0; Vol II R17
-    # p.2-189). Read so the ELFORM-12 void cavitation floor can NAME the
-    # stated value it overrides (writer/materials._resolve_initial_void_floor);
-    # it is mapped nowhere else (see ROADMAP, the *MAT_NULL PC/MU item).
+    # Card 1 fields 3-6 (Vol II R17 p.2-189): PC the pressure cutoff (<= 0,
+    # default 0.0), MU the dynamic viscosity, TEROD / CEROD the relative
+    # volumes of erosion in tension / compression. PC and MU map to the
+    # /MAT/HYD_VISC Pmin / Nu cells of a LAW6 carrier (R14 triage round 7,
+    # B1: writer/materials._resolve_mat_null_cells; the ELFORM-12 void
+    # cavitation floor of round 6 keeps precedence on Pmin and NAMES the PC
+    # it overrides); TEROD / CEROD have no LAW6 cell and are named.
     pc: float = 0.0
+    mu: float = 0.0
+    terod: float = 0.0
+    cerod: float = 0.0
 
 
 @dataclass
@@ -2618,6 +2694,22 @@ class ConstrainedLagrangeInSolid:
     pfac: float = 0.1
     start: float = 0.0
     end: float = 0.0
+
+
+@dataclass
+class ShellInSolidCard:
+    """*CONSTRAINED_SHELL_IN_SOLID[_PENALTY][_ID|_TITLE] — RECORDED, never
+    converted (R14 triage round 7, B5): card 1 ``SHSID SSID SHSTYP SSTYP``
+    (Vol I R17 p.10-179; SHSTYP / SSTYP 0 = a *SET_PART id, 1 = a *PART
+    id), ``coupid`` the ``_ID`` heading's COUPID (0 when absent). Kept only so
+    ``writer/blast_ale._make_shell_in_solid_notes`` can write ONE named
+    warning per deck; the keyword itself stays in ``skipped_keywords``."""
+    coupid: int
+    shsid: int
+    ssid: int
+    shstyp: int = 0
+    sstyp: int = 0
+    penalty: bool = False
 
 
 @dataclass
@@ -3278,11 +3370,19 @@ class CnrbSpcBc:
     twice). They are recorded here instead, so the reaction-output consumers —
     /TH/NODE REAC* and /ANIM/VECT/FREAC for *DATABASE_SPCFORC — can see that the
     deck really does SPC-constrain nodes.
+
+    ``skew`` and ``title`` (round 7, A1) are the emitted card's skew_ID and
+    title. The *NODE TC/RC pass merges a re-pointed member code into this card
+    only when ``skew == 0``: a skewed card's digits are axes of that skew, the
+    same reason ``_global_spc_dofs`` skips a ``*BOUNDARY_SPC`` with a CID.
+    Their defaults keep every other constructor call valid.
     """
     bc_id: int
     ind_node: int       # /RBODY master node the /BCS acts on
     tra: str            # "111"-style translational mask, as emitted
     rot: str            # "111"-style rotational mask, as emitted
+    skew: int = 0       # the /BCS skew_ID as emitted (0 = global system)
+    title: str = ""     # the /BCS title as emitted (BC_cnrb_<pid>)
 
 
 #: *BOUNDARY_PRESCRIBED_MOTION VAD -> the OpenRadioss keyword that carries it.
@@ -6073,7 +6173,12 @@ class ControlSolid:
 
 @dataclass
 class ControlImplicitGeneral:
-    imflag: int         # 0=explicit,4=implicit,5=implicit springback
+    # 0 explicit, 1 implicit, 2 explicit then one implicit step, 4 / 5
+    # implicit with automatic implicit -> explicit switching, 6 explicit with
+    # intermittent eigenvalue extraction, < 0: |IMFLAG| is a curve that
+    # switches the method in time (Vol I R17 p.12-321; any value != 0 makes
+    # k2rad emit an implicit deck - writer/assembly._warn_imflag names it)
+    imflag: int
     dt0: float          # initial time step
     imform: int
     nsbs: int           # subcycles
@@ -7246,7 +7351,10 @@ class ConvertOptions:
     # 1903 cycles at 24.1 / 24.8 / 33.6 s NORMAL at 0.1 (nt 4); at 10 the run
     # is still going at the 600 s campaign cap, having reached t = 0.44 / 0.49
     # / 0.59 of 1.0 there and t = 0.32 on an independent quiet-machine repeat,
-    # at nt 3 AND nt 4 -- the verdict does not flip with nt. All three keys
+    # at nt 3 AND nt 4 -- the verdict does not flip with nt. (Round 7: that
+    # cost is the /PROP/TYPE20 card's; the default implicit_tshell_solid
+    # route writes /PROP/SOLID Isolid 14 and the family ends NORMAL in 28
+    # cycles at this default, nt 4 and 2.) All three keys
     # are `not_comparable` BOTH WAYS, but say WHY: their LS reference KINETIC
     # energy is 0.0, a structural zero, which is what each row's own
     # benchmark note names ("absolute pair: KE (LS 0.0 vs OR 0.0)"). The LS
@@ -7256,8 +7364,11 @@ class ConvertOptions:
     # -30.1133 -> -83.0829, -59.3528 -> -91.8985. The VERDICT label does not
     # move; the benchmark number on that channel does. Pass 0.1 to restore
     # the old default on such a deck --
-    # on THIS family it reproduces the pre-round-4 file BYTE FOR BYTE, so the
-    # escape costs nothing else. Note also that the 600 s budget is the
+    # on THIS family 0.1 together with --no-implicit-tshell-solid reproduces
+    # the pre-round-4 file BYTE FOR BYTE (measured at the round-7 head: both
+    # files' SHA-256 equal 5110a9b's), so the escape costs nothing else; on
+    # the round-7 /PROP/SOLID route 0.1 is inert there (28 cycles and the
+    # same IE as at 10, nt 4 and 2). Note also that the 600 s budget is the
     # clamp's FLOOR: joblist_or.csv derives it as clamp(4 x lsdyna_elapsed_s,
     # 600, 2700) and this deck's LS-DYNA implicit solve takes 2 s, which says
     # nothing about the explicit OpenRadioss cost of the same model.
@@ -7380,7 +7491,12 @@ class ConvertOptions:
     # slower adaptive control; L_dtn 165 worsened tensile2. MEASURED at nt 4 =
     # nt 2: ex_15 energy error +74.1 % -> -0.9 % at 3.81x the cycles (its END
     # state at matched time trades IE +36.2 % -> -54.8 % for KE +132.0 % ->
-    # +0.5 %); ex_11 KE
+    # +0.5 %; the /PROP/TYPE20 card's figures - round 7's default
+    # implicit_tshell_solid route closes ex_15's energy balance by itself,
+    # -0.7 %, and on that routed card the cap takes ex_15 from 34 to 202
+    # cycles (5.94x), energy error -0.7 % -> -1.8 %, END IE +72.81 % ->
+    # -55.94 % and KE +27.37 % -> +0.12 %, history RMS IE 8.06 -> 3.19 / KE
+    # 9.52 -> 7.45 % of the reference peak); ex_11 KE
     # history error 16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 %
     # where the shipped run reads +1343 % - both deviations); with the
     # default --zero-tolerance-ectol it costs cycles on the quasi-static decks
@@ -7559,8 +7675,8 @@ class ConvertOptions:
     # material and every LAW6 material of the deck's ELFORM-12 fluid (Vol I
     # R17 p.28-134: one fluid per single-material-and-void mesh). NOT 0:
     # hm_read_mat06.F:154 reads an exact Pmin 0 as -INFINITY, so the Pmin 0
-    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (the *MAT_NULL PC
-    # cell is not carried) was an UNBOUNDED tension in the cells
+    # k2rad wrote on every *MAT_NULL + *EOS_* /MAT/HYD_VISC (before round 7
+    # the *MAT_NULL PC cell was not carried) was an UNBOUNDED tension in the cells
     # the fluid advects out of (the EOS floors its pressure at PMIN,
     # gruneisen.F:129/132/152, eospolyno.F:104/113/125). -1e-20 is the
     # zero-pressure cavitation limit of *MAT_NULL Remark 4 (Vol II R17
@@ -7635,6 +7751,146 @@ class ConvertOptions:
     # capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at matched
     # time, 0.98x the cycles; the row stays deviation.
     shell_offset_gapmin: bool = True
+    # --no-rigid-shell-rotary-inertia: keep J = 0 in the /RBODY inertia cells
+    # of every *MAT_RIGID / *DEFORMABLE_TO_RIGID part body (R14 triage round
+    # 7, A2).
+    #
+    # ON by default. The starter ADDS every shell node's lumped rotary
+    # inertia IN - (m/4)(A + t^2)/12 per /SHELL corner (cinmas.F:1379, FAC
+    # 12), m(A/4.5 + t^2/12) per /SH3N spread by the corner angles
+    # (c3inmas.F:1111) - to a rigid body's
+    # tensor for ICoG 1/2/3 (inirby.F:166-168 the main node, :355-363 the
+    # secondaries) and the J cells are additive, while LS-DYNA's rigid-part
+    # inertia is the point-mass sum of the nodal masses (MEASURED: its d3hsp
+    # tensor equals it on 18 of 18 bodies within 0.04 %; Theory R16 eq. 29.23
+    # writes the part's own term as a density integral, which the printed
+    # tensor does not follow). So the producer (writer/rbody._make_rbodies) writes
+    # Jxx = Jyy = Jzz = -SUM(IN) over the body's nodes; skipped by name where
+    # the lumper is not the starter's (layered, element thickness, Ishell <
+    # 11, no section), refused by name at or below a relative 1e-3 margin
+    # (the starter's WARNING 275 threshold, inirby.F:753-758), never on CNRB
+    # / weld / tie / probe bodies or ICoG 4. MEASURED: a
+    # spun rigid plate's rotational KE +16.83 / +33.66 % -> 0.00 %;
+    # revo-stiff deviation -> match (writer/rbody._A2_REVO_RMS). Reach: 56
+    # deck keys on 53 emitted models (151 bodies written; 2 more refused by
+    # name at the margin, one each on forging_A / forging_B).
+    rigid_shell_rotary_inertia: bool = True
+    # --no-spotweld-shear-yield: keep the *MAT_SPOTWELD weld's /PROP/TYPE13
+    # shear DOFs (Ty/Tz) elastic (R14 triage round 7, A3 piece (i)).
+    #
+    # ON by default. MAT_100 is von Mises plasticity in axial AND shear (Vol
+    # II R17 p.2-697, Remark 1 p.2-708); k2rad wrote only the AXIAL bilinear
+    # curve. Ty/Tz now get fct_ID12 = fct_ID13 = a bilinear curve with the
+    # yield (SIGY/sqrt3)·A and the hardening G·EH/(3G+EH)·A/L, H2 = H3 = 1.
+    # MEASURED on plates.mat100: LS-DYNA's weld shear plateaus at 20374..20408
+    # = (SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> 8.58 /
+    # 26.74 % at 1.107x the cycles (deviation -> match). mainboltaexpl moves
+    # too, by run sensitivity and not by the yield (the round-7 validation
+    # round: its weld shear never exceeds 13789 against the new yield 29021,
+    # and the 65ff389 card with K2 and K3 scaled by (1 - 1e-8) moves its END and
+    # RMS as much; its preloaded bolt spring collapses on every arm). Reach: 4
+    # deck keys on 4 emitted models (2 of them giants).
+    spotweld_shear_yield: bool = True
+    # --no-spotweld-efail-displacement: keep a *MAT_SPOTWELD EFAIL dropped
+    # (R14 triage round 7, A3 piece (ii)).
+    #
+    # ON by default. EFAIL (0 < EFAIL < 1e19) on a card with NO resultant
+    # failure cell -> /PROP/TYPE13 Ifail 1 / Ifail2 0 displacement failure,
+    # DeltaMax1 = delta_y + EFAIL·L, DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L
+    # (the effective plastic strain sqrt(eps^2 + gamma^2/3) on a proportional
+    # path). Measured on spotweld.k under the round-6 opt-in pair: rupture
+    # 1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. Its only DEFAULT mover is
+    # the Yaris roof crush (EFAIL 0.8), a run_pass = 2 giant the campaign
+    # re-converts but does not run (its row is a stale 2026-09-06
+    # error_engine run): the measurable default effect is nil.
+    spotweld_efail_displacement: bool = True
+    # --no-implicit-tshell-solid: keep /PROP/TYPE20 on an IMPLICIT deck's
+    # *MAT_ELASTIC thick shells (R14 triage round 7, A4).
+    #
+    # ON by default. The implicit thick-shell tangent integrates the
+    # thickness with ONE mid-plane point (imp_glob_k.F:266-275 -> S8CKE3,
+    # s8cke3.F:354-364; Isolid 15 has no 8-node tangent at all,
+    # imp_glob_k.F:286-288): 80 + 4 implicit thick-shell coupon runs stop at
+    # cycle 0 (nt 4 and 2). On an implicit deck (the modal path included) an
+    # isotropic *SECTION_TSHELL whose live parts are all *MAT_ELASTIC is
+    # written as /PROP/SOLID Isolid 14 Inpts 222 on the same /BRICK rows
+    # (explicit decks keep TYPE20, equal to the printed digits there; other
+    # laws and TYPE21 / TYPE22 keep their card with a named warning).
+    # ex_02_thick_shell_elform_{2,3,5}: timeout -> NORMAL in 28 cycles; ex_15:
+    # energy error 74.1 -> -0.7 % (named cost: END IE +0.03 -> +36.49 %).
+    # Reach: 9 deck keys on 3 emitted models.
+    implicit_tshell_solid: bool = True
+    # --no-corotational-orthotropic: keep the 65ff389 cells of an
+    # element-frame orthotropic /PROP/TYPE6 (R14 triage round 7, B3).
+    #
+    # ON by default. The starter projects an element-derived orthotropy frame
+    # (Ip 20 / 21 / 23 / 24 = LS-DYNA AOPT 0 / 1 / 3 / 4) onto the element
+    # frame only on a CO-ROTATIONAL property and otherwise stores its GLOBAL
+    # components (smorth3.F:282-291 / :329-339 / :380-389 / :442-452), while
+    # the engine always reads it in the element frame (mmain.F90:2106-2113
+    # -> mreploc.F:132-140). R1: the *MAT_MODIFIED_HONEYCOMB TYPE6 keeps its
+    # pinned Isolid 1 / Ismstr 1 and gets Iframe 2 on a /BRICK part (the
+    # state dyna2rad reaches through /DEF_SOLID Iframe -2), and an Ip 21 / 24
+    # orthotropic brick on an ELFORM-derived Isolid 17 takes the round-6
+    # Isolid-14 route like Ip 20 / 23. R2: on Ip 21 Radioss builds b = e_z x a
+    # (smorth3.F:326-328) where LS-DYNA builds b = (a x e_z) x a, so
+    # /MAT/LAW93's 2 / 3 constants are exchanged (E22 <-> E33, G12 <-> G13,
+    # NU12 <-> NU13, NU23 -> NU23 E33 / E22); other laws are named. Element-
+    # frame tetrahedra are NAMED, never changed (R3: OpenRadioss never
+    # co-rotates a tetrahedron, sgrtails.F:972-1008). MEASURED on one-hex
+    # coupons at nt 4 against closed forms: MAT_126 crush 0 -> 12 of 12
+    # (sigma(0.10) 6.0047 -> 1.5049 against 1.5), shear 0 -> 6 of 6, plateau
+    # unchanged (RMS 0.164 %); LAW93 Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6.
+    # Reach 0 on every corpus (sbrake's two TYPE6 are Isolid 14 already).
+    corotational_orthotropic: bool = True
+    # --no-mat-null-pc-mu: keep Pmin 0 and Nu 0 on every *MAT_NULL + *EOS_*
+    # /MAT/HYD_VISC carrier the round-6 void floor does not cover (R14 triage
+    # round 7, B1; ONE flag for both cells).
+    #
+    # ON by default. Pmin (columns 21-40): PC < 0 -> PC as stated; PC 0.0 or
+    # blank -> -1e-20 (LS-DYNA cuts a PC 0 AT zero: 0 tension samples in the
+    # 884 340 element-states of the underwater_A/B reference d3plots, while
+    # hm_read_mat06.F:154 reads Pmin 0 as -INFINITY); PC > 0 refused by name
+    # (Vol II R17 p.2-189 defines PC <= 0). The ELFORM-12 void floor keeps
+    # precedence. Nu (columns 1-20) = MU / RO - the LAW6 cell is KINEMATIC
+    # (mat_law6.cfg:26, m6law.F:98 VIS = Nu x RHO; dyna2rad convertmats.cxx:
+    # 300) - ONLY where every part of the material is a *SECTION_SOLID
+    # ELFORM 6 (emitted as a Lagrangian one-point solid, Iale 0, since round
+    # 5) on a deck without *INITIAL_VOID and outside any
+    # *ALE_MULTI-MATERIAL_GROUP: the measured channel family. Elsewhere MU is
+    # named and not carried: impact.k's Lagrangian bar triples its IE under
+    # the cell (10.3 -> 29.6 against LS-DYNA's 15.7) and bird_B CREATES
+    # energy (energy error 99.9 %). TEROD / CEROD are named (no LAW6 cell).
+    # MEASURED at nt 4 (base-paired; sph/bird, channel_B and underwater_A/B
+    # re-measured on the implementation, channel_A the round-7 pre-research
+    # arm): sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B
+    # -98.89 -> -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay
+    # within 1 %. The 4
+    # *MAT_ELASTIC_FLUID acoustic carriers write the same keyword from
+    # another record and are untouched. Byte reach: 20 deck keys, 17
+    # emitted models (the 3 Nu keys among them).
+    mat_null_pc_mu: bool = True
+    # --no-joint-screw-gjoint: leave *CONSTRAINED_JOINT_SCREW skipped, as
+    # before round 7 (R14 triage round 7, B2).
+    #
+    # ON by default. A *CONSTRAINED_JOINT_SCREW whose N1/N3/N5 lie on one
+    # *MAT_RIGID body A (the spinning one) and N2/N4/N6 on another, B, on a
+    # global axis, with the screw's own *MAT_RIGID CMO constraints and a
+    # rotation drive on A, becomes /GJOINT/RACK (Lagrange multipliers;
+    # FscaleV = -1/PARM - the reader inverts the cell, hm_read_gjoint.F:221)
+    # on a synthesized carriage /RBODY; the bodies' CMO /BCS and the drive are
+    # re-written as /BCS/LAGMUL and /IMPVEL/LAGMUL (a VAD 2 displacement curve
+    # differentiated into a velocity /FUNCT), and the A-B pair is split out of
+    # an all-parts self-contact (a contact force on a Lagrange-held rigid body
+    # slips its mesh off its main node: 178.67 mm measured with the pair
+    # kept). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut travel 0 -> 185.70 mm
+    # against LS-DYNA's 183.59 at the same instant (t 0.09995), IE -100 ->
+    # +42.76 % (the exact joint against
+    # LS-DYNA's yielding penalty joint: a solver limitation), 0.9998x cycles.
+    # SMP only (-np > 1 stops in its first cycle, starter-clean: lag_mult.F
+    # :667-671). Anything outside the pattern keeps
+    # the skip with a named reason. Reach 1 deck key on 1 emitted model.
+    joint_screw_gjoint: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8094,8 +8350,12 @@ class ConvertOptions:
     # /RBODY's own lumped rotary inertia, 4 x (m/4)(A + t^2)/12 = 6.65667e-4
     # per diagonal (starter NEW INERTIA 0.2642894E-02 against LS-DYNA's
     # 0.1977E-02). The /RBODY J cells are ADDITIVE (inirby.F:154-168), so
-    # since round 6 (A7) the flag also writes J = -SUM(IN) into every body it
-    # re-points (writer/loads._apply_mass_weighted_rbody_inertia): NEW INERTIA
+    # J = -SUM(IN) is written BY DEFAULT since round 7 (A2,
+    # rigid_shell_rotary_inertia, in writer/rbody._make_rbodies), and this
+    # flag's own pass (round 6, A7; writer/loads.
+    # _apply_mass_weighted_rbody_inertia) writes it only on a body the
+    # default did not correct - with --no-rigid-shell-rotary-inertia, every
+    # body it re-points, as in round 6: NEW INERTIA
     # 0.1977227E-02 = LS-DYNA's, cycle-0 KE 189.96 (LS 189.962), final KE
     # -1.97 % (an end value: the KE history RMS goes 17.5 % -> 11.6 % of the
     # LS peak), 1.156x the cycles; the IE (the joint path's 99.9 % energy
@@ -9024,7 +9284,7 @@ class ConversionState:
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
     constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
     # *CONSTRAINED_SHELL_TO_SOLID → one /RBODY per card (writer/rbody
-    # ._make_shell_to_solid_rbodies, /RBODY producer 4 of 5), default ON,
+    # ._make_shell_to_solid_rbodies, /RBODY producer 4 of 6), default ON,
     # --no-shell-to-solid-rbody.
     shell_to_solids: List[ShellToSolid] = field(default_factory=list)
     # *CONSTRAINED_GENERALIZED_WELD_BUTT → one /RBODY with Ifail=1 per card
@@ -9105,6 +9365,18 @@ class ConversionState:
     # _make_added_masses subtracts these values from the nodes' /ADMAS (option
     # spring_token_mass_compensation) and names every node it could not.
     spring_token_mass_by_node: Dict[int, float] = field(default_factory=dict)
+    # ... and the springs that put it there, recorded at the same write line
+    # (round 7, A5 (iv)): (eid, n1, n2, M, I, K_t, K_r, C_t, C_r) - the
+    # property mass / inertia as written (Ileng 1 scaled by the element
+    # length) and the stiffness / damping the engine's own step reads
+    # (loads._spring_kc: on a TYPE13 the rotational pair includes the shear
+    # springs' value x L^2, r4def3.F:173-174). ONE consumer: the LIGHT
+    # clause of loads._warn_spring_token_mass, which states each light
+    # node's two-mass critical step against the spring's own step
+    # (r1len3.F:175 / r2len3.F:182-186 read the PROPERTY mass).
+    spring_token_springs: List[Tuple[int, int, int, float, float, float,
+                                     float, float, float]] = field(
+        default_factory=list)
     # *SECTION_SOLID secids already named by _warn_assumed_strain_elform, so a
     # section reached from two writer passes warns once (the #129 dedup rule:
     # one message per distinct SOURCE CARD, not per part or per element).
@@ -9128,11 +9400,22 @@ class ConversionState:
     # reason in words ("--no-initial-void-floor" or the refusal clause), so
     # the /INTER/TYPE18 void warning can say why without re-deciding.
     initial_void_floor_refusal: str = ""
+    # The ONE decision of the *MAT_NULL PC / MU cells (R14 triage round 7,
+    # B1): None = not yet resolved; else {LAW6 carrier mid -> (Nu, Pmin)}.
+    # Memoised by writer/materials._resolve_mat_null_cells so the A1 opt-out
+    # clause and the emitter read ONE decision, never the option twice.
+    mat_null_cells: Optional[Dict[int, Tuple[float, float]]] = None
     # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
     # order (round 6, A4). Refused BY NAME and never converted: kept only so
     # writer/loads._make_tied_nodes_failure_notes can write ONE warning per
     # deck. The keyword itself stays in skipped_keywords.
     tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
+        default_factory=list)
+    # *CONSTRAINED_SHELL_IN_SOLID[_PENALTY] cards in deck order (round 7,
+    # B5). Never converted (OpenRadioss has no embedded-shell constraint):
+    # kept only so writer/blast_ale._make_shell_in_solid_notes can write ONE
+    # named warning per deck. The keyword itself stays in skipped_keywords.
+    shell_in_solid_cards: List[ShellInSolidCard] = field(
         default_factory=list)
     # --mass-weighted-inivel: /RBODY main node -> omega, one entry per body
     # the re-point wrote an /INIVEL/ROT on (writer/loads.
@@ -9203,13 +9486,15 @@ class ConversionState:
     # from state.parts + state.shell_elems: a shell whose PID has no *PART
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
-    # Every /RBODY id this conversion wrote. FIVE Radioss-side emission sites
-    # (writer/rbody.py:791, :1210, :1318, :1507, :1664, in that order:
+    # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
+    # (writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
-    # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT),
-    # i.e. six LS-DYNA sources funnelling through five writers. Round 5 added the last two; every consumer of this
+    # *CONSTRAINED_SHELL_TO_SOLID, *CONSTRAINED_GENERALIZED_WELD_BUTT and the
+    # *CONSTRAINED_JOINT_SCREW carriage), i.e. seven LS-DYNA sources
+    # funnelling through six writers. Round 5 added the fourth and fifth and
+    # round 7 the sixth; every consumer of this
     # set was re-read then, which is what the #138 rule asks for.
     # rbody_info cannot stand in for it:
     # the probe body is not in rbody_info at all, a CNRB/part id collision
@@ -9248,6 +9533,14 @@ class ConversionState:
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
+    # *CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE] / _COOR_SCREW cards in deck
+    # order (round 7, B2). The keyword stays in skipped_keywords until the
+    # joint section writes the /GJOINT/RACK (a refused screw keeps its
+    # '#-- SKIPPED:' line, byte-identical to --no-joint-screw-gjoint).
+    joint_screws: List[ConstrainedJointScrew] = field(default_factory=list)
+    # The ONE decision over them: None = not yet resolved; else the
+    # converted screws (writer/joint_screw._resolve_joint_screws).
+    joint_screw_plan: Optional[List[JointScrewPlan]] = None
     # *CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
     # stiffness/damping/friction/stop blocks of the matched joint's /PROP/TYPE45
     joint_stiffnesses: List[JointStiffness] = field(default_factory=list)
@@ -9405,6 +9698,26 @@ class ConversionState:
     # /BCS written by the CNRB _SPC path (see CnrbSpcBc). Rebuilt from scratch
     # on every _make_cnrb_rbodies call, so re-running the writer is idempotent.
     cnrb_spc_bcs: List[CnrbSpcBc] = field(default_factory=list)
+    # The /BCS the *MAT_RIGID producer writes on an /RBODY main node from the
+    # card's CMO 1 CON1/CON2 (plus the implicit stabilisation of an unloaded
+    # free translation): main node -> (Tra, Rot, title), the EMITTED digits at
+    # skew 0. Rebuilt on every _make_rbodies call. ONE consumer: screen (c')
+    # of loads._make_node_tc_rc_bcs (round 7, A1), which merges a re-pointed
+    # member TC/RC code into it instead of writing it a second time.
+    rigid_auto_bcs: Dict[int, Tuple[str, str, str]] = field(default_factory=dict)
+    # The Tra digits of rigid_auto_bcs that ONLY the implicit stabilisation
+    # added (an unloaded free translation of a loaded body, see
+    # _make_rbodies): main node -> "010". Rebuilt with rigid_auto_bcs. ONE
+    # consumer: A1's merge sentence names the stabilisation only where a
+    # merged DOF is one of these digits (round 7, the validation round).
+    rigid_auto_stab: Dict[int, str] = field(default_factory=dict)
+    # *SECTION_SOLID_EFG / *SECTION_SHELL_EFG: RECORDED but still SKIPPED
+    # (round 7, A5 (ii)) - secid -> (the keyword as skipped, ELFORM). ONE
+    # consumer: the missing-section auto-create of writer/mesh.
+    # _make_properties, which names the placeholder it writes for such a
+    # part instead of converting it silently. OpenRadioss has no meshfree
+    # element, so no property is ever built from it.
+    efg_sections: Dict[int, Tuple[str, int]] = field(default_factory=dict)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
     # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: pid → the three synthesized nodes
@@ -9589,6 +9902,25 @@ class ConversionState:
     # reader at does not exist — and with no rupturing tie in the deck the
     # channel would be state after state of exactly 0.0 (the #122 rule).
     tiebreak_rupture_inter_ids: List[int] = field(default_factory=list)
+    # Every EMITTED /INTER/TYPE2's secondary node group: {inter_id ->
+    # (Spotflag, frozenset of the /GRNOD/NODE nodes written for it)}. Filled
+    # by writer/contacts._record_type2_secondary at each of the four
+    # _emit_inter_type2 write lines (the *CONTACT_TIED_* tie, the tiebreak
+    # permanent tie, the CCRIT rupture tie, *CONTACT_SPOTWELD) and read by
+    # writer/loads._make_constrained_linear_mpcs, the LAST id-drawing
+    # section, which refuses an /MPC term on any of these nodes (R14 triage
+    # round 7, B4: the screen reads what the emitter EMITTED, never the deck
+    # keyword).
+    type2_secondary: Dict[int, Tuple[int, FrozenSet[int]]] = field(
+        default_factory=dict)
+    # ... and every EMITTED /INTER/TYPE2's MAIN side as the record states it:
+    # {inter_id -> (MSID, MSTYP)}, filled by the same recorder at the same
+    # four write lines. The /MPC screen resolves it to node ids only when a
+    # deck has *CONSTRAINED_LINEAR_* cards (writer/contacts._tied_slave_nids,
+    # the resolution the deck-wide ERROR-556 pass uses) and refuses a term on
+    # any of those nodes too (the post-review round: an /MPC on main-side
+    # nodes measured as divergent as on the secondary ones).
+    type2_main_side: Dict[int, Tuple[int, int]] = field(default_factory=dict)
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)

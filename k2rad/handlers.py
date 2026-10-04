@@ -69,7 +69,7 @@ from .state import (
     MatDiscreteBeamNonlinearPlastic, MatCableDiscreteBeam,
     MatElasticSpringDiscreteBeam, MatGeneralNonlinear6dof,
     MatGeneralNonlinear1dof, MatGeneralSpringDiscreteBeam,
-    ConstrainedJoint, JointStiffness, JOINT_TYPE45,
+    ConstrainedJoint, ConstrainedJointScrew, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     RigidInertia, PartContact,
@@ -87,7 +87,8 @@ from .state import (
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
     LoadBody, LoadBodyVector, LoadBodyRot, ShellPressureLoad,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
-    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
+    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, ShellInSolidCard,
+    InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, HourglassDef, ControlImplicitAuto, ControlImplicitDynamics,
@@ -2438,6 +2439,31 @@ _TSHELL_PLANE_STRESS_ELFORMS = frozenset({1, 2, 6})
 _TSHELL_REDUCED_ELFORMS = frozenset({1, 5, 6})
 
 
+def handle_section_efg(block: Block, state: ConversionState) -> None:
+    """*SECTION_SOLID_EFG / *SECTION_SHELL_EFG (+ _TITLE) — RECORDED, still
+    SKIPPED (round 7, A5 (ii)).
+
+    OpenRadioss has no meshfree (EFG) element, so nothing is converted: the
+    keyword is appended to ``skipped_keywords`` EXACTLY as the unknown-keyword
+    path of :func:`dispatch` appends it (the same string, at the same point
+    of the read), so the ``#-- SKIPPED:`` line, the skipped report and both
+    ``.rad`` files are byte-identical to a deck read without this handler.
+    What it adds is the record ``state.efg_sections[SECID] = (keyword,
+    ELFORM)`` from card 1 of the first card set (title line first under
+    _TITLE), which lets the missing-section auto-create name the placeholder
+    it writes for such a part instead of writing it silently. Measured reach:
+    1 deck key on 1 emitted model (efg/metal-cutting/main.k, SECID 3, ELFORM
+    42); *SECTION_SHELL_EFG 0."""
+    state.skipped_keywords.append(block.keyword)
+    f1 = _card(block.raw, _title_offset(block), fixed=True, n=2, w=10)
+    if not f1:
+        return
+    secid = to_int(f1[0])
+    elform = to_int(f1[1]) if len(f1) > 1 else 0
+    if secid > 0:
+        state.efg_sections[secid] = (block.keyword, elform)
+
+
 def handle_section_tshell(block: Block, state: ConversionState) -> None:
     """*SECTION_TSHELL (+ _TITLE/_ID) — every card SET under the header.
 
@@ -4559,11 +4585,17 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     rho = to_float(f1[1])
     E   = to_float(f1[6]) if len(f1) > 6 else 0.0
     nu  = to_float(f1[7]) if len(f1) > 7 else 0.0
-    # PC (field 3) is read so the ELFORM-12 void cavitation floor can NAME a
-    # stated cutoff it overrides; it is written nowhere else. MU (field 4)
-    # stays unread (ROADMAP, the *MAT_NULL PC/MU item).
+    # PC / MU / TEROD / CEROD: card 1 fields 3-6. PC and MU map to the
+    # /MAT/HYD_VISC Pmin / Nu cells of a LAW6 carrier (R14 triage round 7,
+    # B1, writer/materials._resolve_mat_null_cells; the ELFORM-12 void floor
+    # keeps precedence on Pmin); TEROD / CEROD have no LAW6 cell and are
+    # named there.
     pc  = to_float(f1[2]) if len(f1) > 2 else 0.0
-    state.mat_null[mid] = MatNull(mid, title, rho, E, nu, pc=pc)
+    mu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    terod = to_float(f1[4]) if len(f1) > 4 else 0.0
+    cerod = to_float(f1[5]) if len(f1) > 5 else 0.0
+    state.mat_null[mid] = MatNull(mid, title, rho, E, nu, pc=pc, mu=mu,
+                                  terod=terod, cerod=cerod)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7947,13 +7979,13 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     (``convertrigids.cxx:766-772`` — ``selDatabaseRbdout.Count()``, then a full
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
-    lists ``state.rbody_ids``, which all FIVE Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:791, :1210, :1318, :1507, :1664
-    — six LS-DYNA sources, since *MAT_RIGID parts,
+    lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
+    sites register into at the line that writes the card (writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077
+    — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
-    masters all come out of the first one, and round 5 added the
+    masters all come out of the first one, round 5 added the
     *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT
-    producers).
+    producers and round 7 the *CONSTRAINED_JOINT_SCREW carriage).
     """
     state.db_rbdout_seen = True
     state.db_rbdout_dt = _handle_db_dt(block, state, "*DATABASE_RBDOUT")
@@ -9713,10 +9745,12 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
     why neither maps onto /PROP/TYPE45.
 
     Dispatch is exact-match, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR (and the
-    other motor/gear/pulley/screw joints) can never reach this handler and be
+    other motor/gear/pulley joints) can never reach this handler and be
     misread as a plain TRANSLATIONAL — the substring test dyna2rad uses
     (keyWord.find("TRANS")) does exactly that. The kind is re-checked below
-    anyway so a future registration cannot re-open the hole.
+    anyway so a future registration cannot re-open the hole. The SCREW joint
+    has its own handler and route since round 7
+    (``handle_constrained_joint_screw``, ``writer/joint_screw.py``).
     """
     rest = block.keyword[len("CONSTRAINED_JOINT_"):]
     parts = rest.split("_")
@@ -9726,8 +9760,9 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
         state.warn(
             f"*{block.keyword}: not one of the seven joint kinds k2rad converts "
             f"({', '.join(sorted(JOINT_TYPE45))}) — no /PROP/TYPE45 emitted. "
-            "The motor / gears / rack-and-pinion / pulley / screw / "
-            "constant-velocity joints have no OpenRadioss counterpart.")
+            "The motor / gears / rack-and-pinion / pulley / constant-velocity "
+            "joints have no OpenRadioss counterpart (the screw has its own "
+            "route, round 7).")
         return
 
     off = _title_offset(block)
@@ -9770,6 +9805,51 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
         has_failure="FAILURE" in opts,
     )
     state.constrained_joints.append(jnt)
+
+
+def handle_constrained_joint_screw(block: Block,
+                                   state: ConversionState) -> None:
+    """``*CONSTRAINED_JOINT_SCREW[_LOCAL][_FAILURE]`` and
+    ``*CONSTRAINED_JOINT_COOR_SCREW`` (+ ``_ID`` / ``_TITLE``) - RECORDED for
+    ``writer/joint_screw.py`` (R14 triage round 7, B2), which converts the
+    pattern it can (two ``*MAT_RIGID`` bodies on a global axis -> a
+    ``/GJOINT/RACK``) and names every other screw.
+
+    The keyword is appended to ``skipped_keywords`` like every recorded-not-
+    yet-emitted card: the joint section removes it at the line that writes the
+    ``/GJOINT``, so a refused (or opted-out) screw keeps its ``#-- SKIPPED:``
+    line and its deck stays byte-identical to the 65ff389 output.
+
+    Card 1: ``N1 N2 N3 N4 N5 N6 RPS DAMP`` (RPS / DAMP default 1.0, read with
+    ``_ffield``); the plain spelling's next card is ``PARM LCID TYPE R1``
+    (Vol I R17 p.10-61..76). The ``_ID`` heading is read the way
+    ``handle_constrained_joint`` reads it."""
+    state.skipped_keywords.append(block.keyword)
+    off = _title_offset(block)
+    jid, title = 0, _read_title(block, block.keyword)
+    if _has_id(block) and block.raw:
+        head = block.raw[0][:10].strip()
+        if head and " " not in head and "," not in head:
+            jid = to_int(head)
+            title = block.raw[0][10:].strip() or title
+        else:
+            toks = parse_free(block.raw[0])
+            jid = to_int(toks[0]) if toks else 0
+    f = _card(block.raw, off, fixed=True, n=8, w=10)
+    p = _card(block.raw, off + 1, fixed=True, n=8, w=10)
+
+    def _int(fields: List[str], i: int) -> int:
+        return to_int(fields[i]) if len(fields) > i else 0
+
+    def _flt(fields: List[str], i: int) -> float:
+        return to_float(fields[i]) if len(fields) > i else 0.0
+
+    state.joint_screws.append(ConstrainedJointScrew(
+        keyword=block.keyword, jid=jid, title=title,
+        n1=_int(f, 0), n2=_int(f, 1), n3=_int(f, 2), n4=_int(f, 3),
+        n5=_int(f, 4), n6=_int(f, 5),
+        rps=_ffield(f, 6, 1.0), damp=_ffield(f, 7, 1.0),
+        parm=_flt(p, 0), lcid=_int(p, 1), jtype=_int(p, 2), r1=_flt(p, 3)))
 
 
 def handle_constrained_joint_stiffness(block: Block,
@@ -10178,6 +10258,41 @@ def handle_constrained_tied_nodes_failure(block: Block,
             to_float(f[1]) if len(f) > 1 else 0.0,
             to_int(f[2]) if len(f) > 2 else 0,
             to_int(f[3]) if len(f) > 3 else 0))
+
+
+def handle_constrained_shell_in_solid(block: Block,
+                                      state: ConversionState) -> None:
+    """``*CONSTRAINED_SHELL_IN_SOLID[_PENALTY][_ID|_TITLE]`` — RECORDED, never
+    converted (R14 triage round 7, B5).
+
+    LS-DYNA constrains shells embedded in solids to move with the solids
+    (Vol I R17 p.10-179: an optional ``COUPID TITLE`` heading under ``_ID``,
+    card 1 ``SHSID SSID SHSTYP SSTYP`` with 0 = a ``*SET_PART`` id and 1 = a
+    ``*PART`` id; ``_PENALTY`` adds PSSF). OpenRadioss has no embedded-shell
+    constraint (no radioss2022-2026 CFG card; dyna2rad does not convert it
+    either), so the card is not converted and the record is kept only so ONE
+    named warning per deck (``writer/blast_ale._make_shell_in_solid_notes``)
+    can name the parts and the measured substitutes.
+
+    Still listed as SKIPPED, deliberately — the ``handle_initial_void``
+    precedent: registering a handler would move the keyword out of
+    ``skipped_keywords`` and delete its ``#-- SKIPPED:`` line, a byte change
+    for an item that converts nothing. NOT also put in
+    ``recognized_not_emitted``: the two registries are disjoint
+    (``ConversionResult``)."""
+    state.skipped_keywords.append(block.keyword)
+    off = _title_offset(block)
+    coupid = (to_int(block.raw[0][:10]) if _has_id(block) and block.raw
+              else 0)
+    f = _card(block.raw, off, fixed=True, n=4, w=10)
+    if not f or not f[0].strip():
+        return
+    state.shell_in_solid_cards.append(ShellInSolidCard(
+        coupid=coupid, shsid=to_int(f[0]),
+        ssid=to_int(f[1]) if len(f) > 1 else 0,
+        shstyp=to_int(f[2]) if len(f) > 2 else 0,
+        sstyp=to_int(f[3]) if len(f) > 3 else 0,
+        penalty=block.keyword.endswith("_PENALTY")))
 
 
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
@@ -15323,6 +15438,7 @@ def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
     g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
     efail, nrr, nrs, nrt = g(0), g(1), g(2), g(3)
     mrr, mss, mtt, nf = g(4), g(5), g(6), g(7)
+    sigy_stated = sigy
     if sigy < 0.0:
         state.warn(f"*MAT_SPOTWELD mid={mid}: SIGY<0 (yield stress from a curve) "
                    "is not supported — yield dropped (elastic weld until failure).")
@@ -15337,7 +15453,8 @@ def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
         mrr, mss, mtt = max(mrr, 0.0), max(mss, 0.0), max(mtt, 0.0)
     state.mat_spotweld[mid] = MatSpotweld(mid, title, rho, E, nu, sigy, et, dt,
                                           tfail, efail, nrr, nrs, nrt,
-                                          mrr, mss, mtt, nf)
+                                          mrr, mss, mtt, nf,
+                                          sigy_stated=sigy_stated)
 
 
 def _num_ok(s: str) -> bool:
@@ -16021,9 +16138,10 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
     pressure on that face TWICE (measured against a one-row twin on a free
     plate, both 0 ERROR / NORMAL TERMINATION / 67 cycles: EXT-WORK 18.35 ->
     73.39 and K-ENERGY 17.68 -> 70.73, a factor of 4.0005, i.e. impulse
-    x2.0001). It is also the same normalisation ``_shell_load_segments``
-    (``writer/loads.py:4415``) already does on the *LOAD_SHELL path, where the
-    collapse is spelled ``if len(nodes) >= 4 and nodes[3] == nodes[2]``.
+    x2.0001). It is also the same normalisation
+    ``writer.loads._shell_load_segments`` already does on the *LOAD_SHELL
+    path, where the collapse is spelled ``if len(nodes) >= 4 and nodes[3] ==
+    nodes[2]``.
 
     Stored on state.segment_sets for later /SURF/SEG emission.
     """
@@ -18359,6 +18477,13 @@ HANDLERS = {
     # CARDS), so registering the spelling is what turns it from a
     # skipped_keywords entry (part loses its whole property) into a parse.
     "SECTION_SOLID_MISC":                     handle_section_solid,
+    # The meshfree sections: recorded and STILL skipped (the same
+    # skipped_keywords entry the unknown-keyword path writes), so the
+    # placeholder k2rad builds for their parts can be named (round 7, A5).
+    "SECTION_SOLID_EFG":                      handle_section_efg,
+    "SECTION_SOLID_EFG_TITLE":                handle_section_efg,
+    "SECTION_SHELL_EFG":                      handle_section_efg,
+    "SECTION_SHELL_EFG_TITLE":                handle_section_efg,
     # *SECTION_TSHELL takes no option suffix of its own (only the universal
     # _TITLE / _ID, which the parser strips), so one exact key covers it.
     "SECTION_TSHELL":                         handle_section_tshell,
@@ -18785,6 +18910,12 @@ HANDLERS = {
     # and an invalid FSI answer.
     "INITIAL_VOID_PART":                      handle_initial_void,
     "INITIAL_VOID_SET":                       handle_initial_void,
+    # RECORDED, not converted (round 7, B5) — see
+    # handle_constrained_shell_in_solid: the keyword stays in skipped_keywords
+    # (its '#-- SKIPPED:' line is part of the .rad) and the record feeds ONE
+    # named warning per deck. *CONSTRAINED_BEAM_IN_SOLID stays a plain skip.
+    "CONSTRAINED_SHELL_IN_SOLID":             handle_constrained_shell_in_solid,
+    "CONSTRAINED_SHELL_IN_SOLID_PENALTY":     handle_constrained_shell_in_solid,
     # Coupled ALE / fluid-structure coupling / boundaries
     "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
     "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,
@@ -18826,9 +18957,10 @@ HANDLERS = {
     # _FAILURE stay in the base name and need their own literal keys (the same
     # rule *DEFINE_BOX_LOCAL follows). Registering exact keywords is also the
     # guard against dyna2rad's substring misclassification: the motor / gears /
-    # rack-and-pinion / pulley / screw / constant-velocity joints are absent
-    # here, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR cannot be read as a plain
-    # TRANSLATIONAL joint — it lands in skipped_keywords instead.
+    # rack-and-pinion / pulley / constant-velocity joints are absent here, so
+    # *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR cannot be read as a plain
+    # TRANSLATIONAL joint — it lands in skipped_keywords instead. The SCREW
+    # joint has its own handler and route since round 7 (B2, listed below).
     "CONSTRAINED_JOINT_SPHERICAL":                 handle_constrained_joint,
     "CONSTRAINED_JOINT_SPHERICAL_LOCAL":           handle_constrained_joint,
     "CONSTRAINED_JOINT_SPHERICAL_FAILURE":         handle_constrained_joint,
@@ -18857,6 +18989,14 @@ HANDLERS = {
     "CONSTRAINED_JOINT_LOCKING_LOCAL":             handle_constrained_joint,
     "CONSTRAINED_JOINT_LOCKING_FAILURE":           handle_constrained_joint,
     "CONSTRAINED_JOINT_LOCKING_LOCAL_FAILURE":     handle_constrained_joint,
+    # Round 7, B2: the screw -> /GJOINT/RACK where the pattern holds
+    # (writer/joint_screw.py); every spelling is recorded so a refused one is
+    # NAMED - the keyword stays skipped until the /GJOINT is written.
+    "CONSTRAINED_JOINT_SCREW":                     handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_LOCAL":               handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_FAILURE":             handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_SCREW_LOCAL_FAILURE":       handle_constrained_joint_screw,
+    "CONSTRAINED_JOINT_COOR_SCREW":                handle_constrained_joint_screw,
     "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED":     handle_constrained_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL":   handle_constrained_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_FLEXION-TORSION": handle_constrained_joint_stiffness,

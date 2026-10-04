@@ -2822,21 +2822,24 @@ def _warn_assumed_strain_elform(state: ConversionState, sec, isolid: int) -> Non
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
                      itetra10: int, istrain: int,
                      hcoef: Optional[float] = None,
-                     ismstr: int = 0) -> List[str]:
+                     ismstr: int = 0, inpts: int = 0) -> List[str]:
     """/PROP/SOLID (TYPE14), byte-identical to the historical inline block.
     *hcoef* None → card-2 field 3 (h) stays 0 (Radioss default 1.1/0.05/0.10
     for qa/qb/h); otherwise the hourglass coefficient. *ismstr* 0 (default,
     unchanged output) leaves the strain formulation to the starter; 10 =
     total-strain large deformation — required by /XREF reference-geometry
     parts (starter ERROR 2013 rejects /XREF on a fully-integrated solid at
-    small strain). Shared by the per-section and per-part paths so the
-    100-column layout cannot drift."""
+    small strain). *inpts* 0 (default, unchanged output) leaves the Inpts
+    cell blank; the implicit thick-shell route (round 7, A4) writes 222, the
+    value the starter applies to a blank on Isolid 14
+    (hm_read_prop14.F:312-318). Shared by the per-section and per-part paths
+    so the 100-column layout cannot drift."""
     h_field = _f(hcoef if hcoef is not None else 0.0)
     return [
         f"/PROP/SOLID/{prop_id}",
         title,
         "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}{_i(ismstr)}{_i(iale)}         0{_i(itetra10)}         0         0         0",
+        f"{_i(isolid)}{_i(ismstr)}{_i(iale)}         0{_i(itetra10)}{_i(inpts)}         0         0",
         "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
         f"{_f(0.0)}{_f(0.0)}{h_field}{_f(0.0)}{_f(0.0)}",
         "#             dt_min   istrain      IHKT",
@@ -2906,6 +2909,55 @@ def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
         f"{_i(nip)}{_i(istrain)}{_f(thick)}                   0                   0         0",
         HDR,
     ]
+
+
+#: LS-DYNA's own name for each solid EFG formulation, as its d3hsp echoes it
+#: (efg/metal-cutting/main.d3hsp, the *SECTION_SOLID ELFORM table).
+_EFG_SOLID_ELFORM_NAMES = {41: "efg 3d", 42: "efg 3d for 4-noded background",
+                           43: "mesh-free enriched finite element"}
+
+
+def _warn_efg_placeholder(state: ConversionState, secid: int,
+                          part_secids: Dict[int, int]) -> None:
+    """Name the placeholder a skipped meshfree section's parts get (round 7,
+    A5 (ii)): before, the only trace was the keyword in the SKIPPED list.
+
+    The measured consequence is metal-cutting's (the one carrier on every
+    corpus); refusing *CONSTRAINED_GLOBAL on such a part was measured NO-GO
+    (LS-DYNA's own d3hsp lists the same 54 nodes, and without them the
+    explicit base is a free body), and the Itetra4 3 arm is not shipped."""
+    keyword, elform = state.efg_sections[secid]
+    shell = keyword.startswith("SECTION_SHELL")
+    elems = state.shell_elems if shell else state.solid_elems
+    pids = sorted({e.pid for e in elems if part_secids.get(e.pid) == secid})
+    n_el = sum(1 for e in elems if part_secids.get(e.pid) == secid)
+    name = (f"/PROP/SHELL/{secid} 'AutoPropShell_{secid}'" if shell else
+            f"/PROP/SOLID/{secid} 'AutoPropSolid_{secid}' (an ELFORM-1 "
+            "section; on efg/metal-cutting/main.k Isolid 24 with a blank "
+            "Itetra4, i.e. the one-point linear /TETRA4)")
+    what = _EFG_SOLID_ELFORM_NAMES.get(elform) if not shell else None
+    lsdyna = (f"LS-DYNA's formulation: '{what}' (its own d3hsp echo)"
+              if what else "an LS-DYNA mesh-free (EFG) formulation")
+    dropped = [k for k in ("CONTROL_ADAPTIVE", "CONTROL_REMESHING_EFG",
+                           "CONTROL_EFG")
+               if k in state.skipped_keywords]
+    state.warn(
+        f"*{keyword} {secid} (ELFORM {elform}) is not converted — OpenRadioss "
+        f"has no meshfree (EFG) element: part(s) {pids} ({n_el} element(s)) "
+        f"are written on k2rad's placeholder {name}"
+        + (", and " + " / ".join("*" + k for k in dropped)
+           + " are dropped (listed as skipped)" if dropped else "")
+        + ", so neither the meshfree interpolation nor the adaptive "
+        f"re-meshing LS-DYNA uses on this part is in the converted model "
+        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit, nt 4 "
+        "and 2, round-7 pre-research): the converted run cannot carry the "
+        "constrained cutting at the tool contact - ERROR TERMINATION at cycle "
+        "26 (t 6.332e-4, KE 2.459e9) on 4 of 4 runs, the largest residuals on "
+        "the workpiece top surface under the tool; changing the placeholder "
+        "to Itetra4 3 ends NORMAL in 197 cycles on 3 of 3 runs but with an "
+        "energy error of 91.2 % and a flat internal energy - not a cutting "
+        "result. That row has no LS-DYNA reference (its LS run stopped in the "
+        "input phase).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3118,6 +3170,11 @@ def _make_properties(state: ConversionState) -> List[str]:
         state.sec_shells[ms] = _auto_section_shell(ms)
     for ms in missing_solids:
         state.sec_solids[ms] = _auto_section_solid(ms)
+    # A meshfree section is skipped (no OpenRadioss EFG element) and its
+    # parts land in the placeholders above - say so, by name (round 7, A5).
+    for ms in sorted((missing_solids | missing_shells)
+                     & set(state.efg_sections)):
+        _warn_efg_placeholder(state, ms, part_secids)
     for ms in missing_beams:
         # ELFORM 2, never 3: a section the deck never DEFINES states no
         # formulation, so it cannot be known to be a truss — and because it is
@@ -3383,7 +3440,9 @@ def _make_properties(state: ConversionState) -> List[str]:
     _warn_truss_section_cells(state, emitted_truss_secs)
     _warn_truss_material(state, part_secids, truss_pids, truss_secids)
     # Thick shells: /PROP/TYPE20 (iso) / TYPE21 (ortho) / TYPE22 (composite),
-    # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup.
+    # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup
+    # (an IMPLICIT deck's *MAT_ELASTIC section: /PROP/SOLID Isolid 14 under
+    # the same id instead, round 7 A4 - see _make_tshell_properties).
     # Local import: writer/tshell.py reuses the #90 AOPT machinery out of
     # writer/composites.py, which imports THIS module at load time, so a
     # top-level import here would close the cycle (same rule as
@@ -4864,7 +4923,8 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      refpoint=(0.0, 0.0, 0.0),
                      isolid: Optional[int] = None,
                      ismstr: int = 0,
-                     assumed_strain_isolid: int = 0) -> List[str]:
+                     assumed_strain_isolid: int = 0,
+                     iframe: int = 0) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
@@ -4888,7 +4948,11 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     *assumed_strain_isolid* is ``ConvertOptions.assumed_strain_isolid_value``,
     threaded in because an ORTHOTROPIC solid section can state ELFORM -1/-2
     too and must take the same cell the isotropic emitter writes; every caller
-    passes it."""
+    passes it. *iframe* is card 1's ``Iframe`` (columns 71-80): 0 (default)
+    takes the ``/DEF_SOLID`` value, 1 = NOT co-rotational
+    (``hm_read_prop06.F:296``, ``defaults_mod.F90:176``); the MAT_126
+    honeycomb path passes 2 (co-rotational) for an element-derived frame on a
+    /BRICK part (R14 triage round 7, B3), every other caller writes 0."""
     if isolid is None:
         isolid = (_elform_to_isolid(sec.elform, assumed_strain_isolid)
                   if sec else 0)
@@ -4901,7 +4965,7 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
         f"/PROP/TYPE6/{prop_id}",
         title,
         "#   Isolid    Ismstr               Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}{_i(ismstr)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        f"{_i(isolid)}{_i(ismstr)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(iframe)}{_f(0.0)}",
         "#                 qa                  qb                   h",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",

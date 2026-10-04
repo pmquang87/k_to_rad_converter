@@ -237,6 +237,13 @@ def convert(
     spotweld_node_synthesis: bool = False,
     beam_contact_secondary: bool = False,
     shell_offset_gapmin: bool = True,
+    rigid_shell_rotary_inertia: bool = True,
+    spotweld_shear_yield: bool = True,
+    spotweld_efail_displacement: bool = True,
+    implicit_tshell_solid: bool = True,
+    corotational_orthotropic: bool = True,
+    mat_null_pc_mu: bool = True,
+    joint_screw_gjoint: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -416,8 +423,13 @@ def convert(
         +380 % is a separate, named ``/INTER/TYPE25``-under-implicit drop, not
         a match). The cost is ``ex_02_thick_shell_elform_{2,3,5}`` — 3 deck
         keys on ONE emitted file, all three ``not_comparable`` BOTH WAYS —
-        going ``normal`` → ``timeout``; ``--qstat-dtscal 0.1`` reproduces the
-        pre-round-4 file byte for byte on that family. ``"none"``
+        going ``normal`` → ``timeout`` on the ``/PROP/TYPE20`` card k2rad
+        wrote before round 7 (round 7's default ``implicit_tshell_solid``
+        route ends the family NORMAL in 28 cycles at this default, and at
+        0.1 too: the value is inert on the routed card);
+        ``--qstat-dtscal 0.1`` with ``--no-implicit-tshell-solid``
+        reproduces the pre-round-4 file byte for byte on that family (0.1
+        alone does not since round 7). ``"none"``
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
         validated 0.05 and ignores this.
@@ -469,7 +481,13 @@ def convert(
         3 of 3 NORMAL quasi-static R14 decks in ERROR and is not offered.
         MEASURED at nt 4 = nt 2: ``ex_15`` energy error +74.1 % -> -0.9 % at
         3.81x the cycles (its END state at matched time trades IE +36.2 % ->
-        -54.8 % for KE +132.0 % -> +0.5 %); ``ex_11`` KE history error
+        -54.8 % for KE +132.0 % -> +0.5 %; on the ``/PROP/TYPE20`` card k2rad
+        wrote before round 7 - the default ``implicit_tshell_solid`` route
+        closes ex_15's energy balance by itself, -0.7 %, and on that routed
+        card the cap takes ex_15 from 34 to 202 cycles (5.94x), energy error
+        -0.7 % -> -1.8 %, END IE +72.81 % -> -55.94 % and KE +27.37 % ->
+        +0.12 %, history RMS IE 8.06 -> 3.19 / KE 9.52 -> 7.45 % of the
+        reference peak); ``ex_11`` KE history error
         16.07 % -> 1.16 % at 2.86x (at matched time KE +17.9 % where the
         shipped run reads +1343 % - both deviations: the engine never prints
         its last increment); with the default ``zero_tolerance_ectol`` it
@@ -637,6 +655,105 @@ def convert(
         never touched. MEASURED on ``bend`` (t 0.381 under SHLTHK 2, written
         the capped 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> -45.60 % at
         matched time, 0.98x the cycles; the row stays deviation.
+    rigid_shell_rotary_inertia : bool
+        Write ``J = -SUM(IN)`` into the ``Jxx/Jyy/Jzz`` cells of every
+        ``*MAT_RIGID`` / ``*DEFORMABLE_TO_RIGID`` part ``/RBODY`` (ICoG != 4)
+        whose nodes carry lumped shell rotary inertia (round 7, A2). The
+        starter ADDS every shell node's ``IN`` - ``(m/4)(A + t^2)/12`` per
+        ``/SHELL`` corner (``cinmas.F:1379``, FAC 12), ``m(A/4.5 + t^2/12)``
+        per ``/SH3N`` spread by the corner angles (``c3inmas.F:1111``) - to a
+        rigid body's tensor
+        (``inirby.F:166-168`` the main node, ``:355-363`` the secondaries),
+        while LS-DYNA's rigid-part inertia is the point-mass sum (MEASURED:
+        18 of 18 reference d3hsp tensors within 0.04 %; not Theory R16
+        eq. 29.23's density integral).
+        **On by default.** Written in the producer (a CNRB PID that shadows a
+        part id no longer hides the body), skipped by name where the lumper
+        is not the starter's, refused by name at or below a relative
+        ``1e-3`` margin (the starter's WARNING 275 threshold,
+        ``inirby.F:753-758``), never on CNRB / weld / tie / probe bodies.
+        MEASURED (nt 4): a spun rigid plate's rotational KE +16.83 / +33.66 %
+        -> 0.00 %; ``revo-stiff`` IE / KE history RMS
+        4.96 / 2.94 -> 0.78 / 0.73 % of the LS peak at 1.156x the cycles
+        (deviation -> match).
+        Reach 56 deck keys on 53 emitted models (151 bodies written; 2 more
+        refused by name at the margin, one each on forging_A / forging_B).
+        ``--mass-weighted-inivel`` no longer subtracts on a body the
+        producer already corrected.
+    spotweld_shear_yield : bool
+        Give every ``*MAT_SPOTWELD`` weld's ``/PROP/TYPE13`` a bilinear SHEAR
+        curve on Ty/Tz (round 7, A3 piece (i)): yield ``(SIGY/sqrt3)·A`` (the
+        von Mises shear yield - MAT_100 is axial-and-shear plasticity, Vol
+        II R17 p.2-708), hardening ``G·EH/(3G+EH)·A/L``, ``H2 = H3 = 1``.
+        **On by default.** MEASURED on plates.mat100 (nt 4): LS-DYNA's weld
+        shear plateaus at 20374..20408 = (SIGY/sqrt3)·A = 20405; IE / KE
+        history RMS 23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x
+        the cycles (deviation -> match). ``mainboltaexpl`` moves by run
+        sensitivity, not by the yield (its weld shear stays below it).
+    spotweld_efail_displacement : bool
+        A ``*MAT_SPOTWELD`` ``EFAIL`` below the 1e19 'never' idiom on a card
+        with NO resultant failure cell -> ``Ifail 1`` / ``Ifail2 0``
+        displacement failure, ``DeltaMax1 = delta_y + EFAIL·L``,
+        ``DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L`` (round 7, A3 piece
+        (ii)). **On by default**; beside resultant cells EFAIL is named.
+        Measured on spotweld.k with the round-6 opt-in pair: rupture
+        1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. The measurable default
+        effect is nil (its one default mover is a giant the campaign does
+        not run).
+    implicit_tshell_solid : bool
+        On an IMPLICIT deck (the modal path included), write an isotropic
+        ``*SECTION_TSHELL`` whose live parts are all ``*MAT_ELASTIC`` as
+        ``/PROP/SOLID`` Isolid 14 (Inpts 222) on the same ``/BRICK`` rows
+        instead of ``/PROP/TYPE20`` (round 7, A4): the implicit thick-shell
+        tangent integrates the thickness with ONE mid-plane point
+        (``s8cke3.F:354-364``) and 80 + 4 coupon runs stop at cycle 0.
+        **On by default**; explicit decks keep TYPE20, other laws and
+        TYPE21 / TYPE22 keep their card with a named warning. MEASURED:
+        ``ex_02_thick_shell_elform_{2,3,5}`` timeout -> NORMAL in 28 cycles
+        (nt 4 and 2); ``ex_15`` energy error 74.1 -> -0.7 % (named cost: END
+        IE +0.03 -> +36.49 %).
+    corotational_orthotropic : bool
+        Write an element-frame orthotropic ``/PROP/TYPE6`` (Ip 20 / 21 / 23 /
+        24, LS-DYNA AOPT 0 / 1 / 3 / 4) co-rotational (round 7, B3): the
+        ``*MAT_MODIFIED_HONEYCOMB`` property keeps its pinned Isolid 1 /
+        Ismstr 1 and gets ``Iframe 2`` on a /BRICK part, an Ip 21 / 24
+        orthotropic brick on Isolid 17 takes the round-6 Isolid-14 route like
+        Ip 20 / 23, and on Ip 21 ``/MAT/LAW93``'s 2 / 3 constants are
+        exchanged (Radioss b = e_z x a, ``smorth3.F:326-328``). **On by
+        default.** MEASURED on one-hex coupons at nt 4: MAT_126 crush 0 -> 12
+        of 12 cases right (sigma(0.10) 6.0047 -> 1.5049 against 1.5), LAW93
+        Ip 24 0 -> 6 of 6, Ip 21 2 -> 6 of 6; the plateau unchanged (RMS
+        0.164 %). Element-frame tetrahedra are named, never changed. Reach 0
+        on every corpus.
+    mat_null_pc_mu : bool
+        Write the ``*MAT_NULL`` PC and MU cells on the ``/MAT/HYD_VISC`` of
+        every ``*MAT_NULL`` + ``*EOS_*`` carrier (round 7, B1): ``Pmin`` = PC
+        (PC 0.0 or blank -> ``-1e-20``: LS-DYNA cuts at zero, while
+        ``hm_read_mat06.F:154`` reads ``Pmin 0`` as -INFINITY; PC > 0 refused
+        by name) and ``Nu = MU / RO`` (kinematic, ``m6law.F:98``) only where
+        every part of the material is a ``*SECTION_SOLID`` ELFORM 6 on a deck
+        without ``*INITIAL_VOID`` (the measured channel family; elsewhere MU
+        is named and not carried). The ELFORM-12 void floor keeps
+        precedence; with ``initial_void_floor=False`` alone a PC-0 void gets
+        ``-1e-20`` from this rule. **On by default.** MEASURED at nt 4:
+        sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 ->
+        -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay within
+        1 %. Byte reach: 20 deck keys, 17 emitted models.
+    joint_screw_gjoint : bool
+        Convert ``*CONSTRAINED_JOINT_SCREW`` between two ``*MAT_RIGID``
+        bodies on a global axis into ``/GJOINT/RACK`` (round 7, B2;
+        Lagrange multipliers, ``FscaleV = -1/PARM`` because
+        ``hm_read_gjoint.F:221`` inverts the cell) on a synthesized carriage
+        ``/RBODY``, with the bodies' ``*MAT_RIGID`` constraints and drive
+        re-written as ``/BCS/LAGMUL`` + ``/IMPVEL/LAGMUL`` (a VAD 2 curve
+        differentiated) and the rigid pair split out of an all-parts
+        self-contact. **On by default.** MEASURED on EXP_SC_JOINT_SCREW at
+        nt 4: nut travel 0 -> 185.70 mm against LS-DYNA's 183.59 at the same
+        instant (t 0.09995), IE -100 ->
+        +42.76 % (the exact joint against LS-DYNA's yielding penalty joint),
+        0.9998x cycles. SMP only (``-np > 1`` stops in its first cycle,
+        ``lag_mult.F:667-671``). Anything
+        outside the pattern keeps the skip with a named reason.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -908,9 +1025,12 @@ def convert(
         rotary inertia (starter ``NEW INERTIA`` 0.2642894E-02 against
         LS-DYNA's 0.1977E-02, the difference being exactly
         ``4 × (m/4)(A + t²)/12 = 6.65667e-4`` per diagonal). The ``/RBODY``
-        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so since round 6
-        the flag also writes ``J = −ΣIN`` (the body's shell nodes' lumped
-        rotary inertia) into every body it re-points: ``NEW INERTIA``
+        ``J`` cells are ADDITIVE (``inirby.F:154-168``), so ``J = −ΣIN`` (the
+        body's shell nodes' lumped rotary inertia) is written BY DEFAULT
+        since round 7 (``rigid_shell_rotary_inertia``); the flag's own pass
+        writes it only where the default did not (with
+        ``rigid_shell_rotary_inertia=False``, on every body it re-points, as
+        in round 6): ``NEW INERTIA``
         0.1977227E-02 = LS-DYNA's, cycle-0 KE **189.96** (LS 189.962), final
         KE −1.97 % (an END value: the KE history RMS goes 17.5 % → 11.6 % of
         the LS peak), 1.156x the cycles; the IE is not fixed (the joint path's
@@ -1052,6 +1172,13 @@ def convert(
         spotweld_node_synthesis=spotweld_node_synthesis,
         beam_contact_secondary=beam_contact_secondary,
         shell_offset_gapmin=shell_offset_gapmin,
+        rigid_shell_rotary_inertia=rigid_shell_rotary_inertia,
+        spotweld_shear_yield=spotweld_shear_yield,
+        spotweld_efail_displacement=spotweld_efail_displacement,
+        implicit_tshell_solid=implicit_tshell_solid,
+        corotational_orthotropic=corotational_orthotropic,
+        mat_null_pc_mu=mat_null_pc_mu,
+        joint_screw_gjoint=joint_screw_gjoint,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

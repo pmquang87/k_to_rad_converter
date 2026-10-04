@@ -8,6 +8,7 @@ from .common import (
     HDR, _ams_is_emitted, _f, _i, _spotweld_beam_pids,
 )
 from .contacts import _select_parent_interface
+from .joint_screw import screw_drives
 # The _LOCAL route synthesizes a frozen /SKEW/FIX from a co-rotating
 # *DEFINE_COORDINATE_NODES, using the very axes builder /SKEW emission uses, so
 # the two can never disagree about what "the system at t=0" means.
@@ -1338,6 +1339,22 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
             nodes.append(nd)
     if not nodes:
         return []
+    # Round 7 (B2): a converted *CONSTRAINED_JOINT_SCREW re-writes its drive
+    # as /IMPVEL/LAGMUL, which sets no kinematic code on the body's main node
+    # - and thbcs.F:62 / :77 accumulate REAC* only where one is set - so that
+    # node's REACX/Y/Z channel reads identically zero. Named (the BNDOUT
+    # sibling is, since 0cb0877); the card is kept for its live DX/Y/Z.
+    screw_nodes = sorted(
+        {rbody_info[pm.pid]["ind_node"] for pm in screw_drives(state)
+         if rbody_info.get(pm.pid)} & set(nodes))
+    screw_note = (
+        f" On node(s) {screw_nodes} - the drive of a converted "
+        "*CONSTRAINED_JOINT_SCREW, written as /IMPVEL/LAGMUL - REACX/Y/Z "
+        "read identically 0: a Lagrange-multiplier drive sets no kinematic "
+        "code, and the engine accumulates REAC* only on nodes that carry one "
+        "(thbcs.F:62 / :77); their DX/Y/Z channels are live. "
+        "--no-joint-screw-gjoint keeps the /IMPDISP and its reaction (and "
+        "loses the screw)." if screw_nodes else "")
     # This block pairs REACX/Y/Z with DX/Y/Z on the same node, which is exactly
     # the shape of a force-vs-displacement extraction — and exactly the plot
     # that silently goes wrong if REAC is used raw. The deck comment says so,
@@ -1353,7 +1370,7 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
         "channel rises monotonically under a steady load, so an untreated "
         "REAC-vs-DX curve has a meaningless slope and a meaningless enclosed "
         "area (it is not the work done). The DX/Y/Z channels alongside it are "
-        "ordinary displacements and need no such treatment.")
+        "ordinary displacements and need no such treatment." + screw_note)
     th_id = state.next_id()
     lines = [
         "#-  TIME HISTORY (imposed-motion reaction impulse on rigid-body master):", HDR,
@@ -2113,15 +2130,16 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     converted rigid body — the same shape /TH/RWALL, /TH/SECTIO and /TH/INTER
     use (convertrigids.cxx:766-772).
 
-    ``state.rbody_ids`` is the set the FIVE Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:791, :1210, :1318, :1507, :1664,
+    ``state.rbody_ids`` is the set the SIX Radioss-side /RBODY emission sites
+    register into at the line that writes the card — writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077,
     in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
     element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
     out, so four LS-DYNA sources funnel through the first one),
     *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
-    *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT (the
-    last two added in round 5). The citations are written as one comma run on
-    purpose: a guard can only re-measure a list it can read. The two new
+    *CONSTRAINED_SHELL_TO_SOLID, *CONSTRAINED_GENERALIZED_WELD_BUTT (those
+    two added in round 5) and the *CONSTRAINED_JOINT_SCREW carriage (round
+    7). The citations are written as one comma run on
+    purpose: a guard can only re-measure a list it can read. The newer
     producers run in build_starter BEFORE this registry is walked, so their
     bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
@@ -2229,8 +2247,9 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
 
       * LS-DYNA does not put a rigid wall in bndout. Wall reactions are the
         ``rwforc`` file, which is *DATABASE_RWFORC -> /TH/RWALL here;
-      * those carrier nodes are SYNTHESIZED by the converter (loads.py:4980,
-        one per distinct face base point). They carry ids that appear in no
+      * those carrier nodes are SYNTHESIZED by the converter
+        (``loads._resolve_geometric_rigid_walls``, one per distinct face base
+        point). They carry ids that appear in no
         LS-DYNA deck, so a channel labelled "bndout" keyed on them names
         something the deck author never wrote;
       * they are free nodes with zero mass and no element, so their REAC* is
@@ -2254,7 +2273,26 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
                 state, "*DATABASE_BNDOUT",
                 "/TH/NODE 'TH_NODE_BNDOUT' over the prescribed-motion nodes")
         return []
+    # Round 7 (B2): a converted *CONSTRAINED_JOINT_SCREW re-writes its drive
+    # as /IMPVEL/LAGMUL, which registers no node here - and must not: a
+    # Lagrange drive sets no ICODT / ICODR, the only nodes thbcs.F:62 / :77
+    # accumulate REAC* on (tools/lagmul/ has no FTHREAC), so its channel
+    # would read identically zero. Said, instead of "drives no node".
+    n_screw = len(screw_drives(state))
+    if n_screw:
+        state.warn(
+            f"*DATABASE_BNDOUT: {n_screw} *BOUNDARY_PRESCRIBED_MOTION_RIGID "
+            "drive(s) of a converted *CONSTRAINED_JOINT_SCREW are written as "
+            "/IMPVEL/LAGMUL and are NOT in the TH_NODE_BNDOUT scope: a "
+            "Lagrange-multiplier drive sets no kinematic code, and the "
+            "engine accumulates REAC* only on nodes that carry one "
+            "(thbcs.F:62 / :77, called at resol.F:7060, before LAG_MULT at "
+            ":7901), so the channel would read identically zero. "
+            "--no-joint-screw-gjoint keeps the /IMPDISP and its channel "
+            "(and loses the screw).")
     if not state.imp_motion_nodes:
+        if n_screw:
+            return []
         state.warn(
             "*DATABASE_BNDOUT requested but this deck drives no node with a "
             "*BOUNDARY_PRESCRIBED_MOTION — there is no boundary-condition "

@@ -111,6 +111,13 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          spotweld_node_synthesis: bool = False,
                          beam_contact_secondary: bool = False,
                          shell_offset_gapmin: bool = True,
+                         rigid_shell_rotary_inertia: bool = True,
+                         spotweld_shear_yield: bool = True,
+                         spotweld_efail_displacement: bool = True,
+                         implicit_tshell_solid: bool = True,
+                         corotational_orthotropic: bool = True,
+                         mat_null_pc_mu: bool = True,
+                         joint_screw_gjoint: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -261,6 +268,20 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["shell_offset_gapmin"] = bool(shell_offset_gapmin)
 
+    kwargs["rigid_shell_rotary_inertia"] = bool(rigid_shell_rotary_inertia)
+
+    kwargs["spotweld_shear_yield"] = bool(spotweld_shear_yield)
+
+    kwargs["spotweld_efail_displacement"] = bool(spotweld_efail_displacement)
+
+    kwargs["implicit_tshell_solid"] = bool(implicit_tshell_solid)
+
+    kwargs["corotational_orthotropic"] = bool(corotational_orthotropic)
+
+    kwargs["mat_null_pc_mu"] = bool(mat_null_pc_mu)
+
+    kwargs["joint_screw_gjoint"] = bool(joint_screw_gjoint)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -396,6 +417,13 @@ class ConverterGUI:
         self.spotweld_node_synthesis = tk.BooleanVar(value=False)
         self.beam_contact_secondary = tk.BooleanVar(value=False)
         self.shell_offset_gapmin = tk.BooleanVar(value=True)
+        self.rigid_shell_rotary_inertia = tk.BooleanVar(value=True)
+        self.spotweld_shear_yield = tk.BooleanVar(value=True)
+        self.spotweld_efail_displacement = tk.BooleanVar(value=True)
+        self.implicit_tshell_solid = tk.BooleanVar(value=True)
+        self.corotational_orthotropic = tk.BooleanVar(value=True)
+        self.mat_null_pc_mu = tk.BooleanVar(value=True)
+        self.joint_screw_gjoint = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -484,7 +512,9 @@ class ConverterGUI:
                            "4.2.frf.cant-1 goes 4 cycles+ERROR -> 104 cycles, "
                            "t=1.000, IE -0.31 %; the cost is the "
                            "ex_02_thick_shell family (3 keys, one file) going "
-                           "normal -> timeout. 'none' emits no card (measured "
+                           "normal -> timeout on the pre-round-7 /PROP/TYPE20 "
+                           "card (NORMAL in 28 cycles on the round-7 "
+                           "/PROP/SOLID route). 'none' emits no card (measured "
                            "worse). The deformable-contact recipe keeps 0.05.",
                   foreground="gray", wraplength=620, justify="left").pack(side="left")
 
@@ -722,7 +752,8 @@ class ConverterGUI:
                      "the momentum average (p.28-129 Remark 3) on the /RBODY "
                      "main node \u2014 OFF. translat cycle-0 KE 387.9 \u2192 220.58 "
                      "against LS-DYNA's 189.962 (+104.20 % \u2192 +16.12 %), and "
-                     "with J = -SUM(IN) on the /RBODY (round 6) 189.96. One "
+                     "with J = -SUM(IN) on the /RBODY (the default since "
+                     "round 7) 189.96. One "
                      "carrier with a reference exists, hence opt-in",
             variable=self.mass_weighted_inivel).grid(
                 row=31, column=0, columnspan=3, sticky="w", **pad)
@@ -782,7 +813,10 @@ class ConverterGUI:
             io, text="Cap the implicit step at the deck's own DT0 where LS-DYNA "
                      "runs a CONSTANT step (IAUTO 0 or no *CONTROL_IMPLICIT_AUTO, "
                      "0 < DT0 < ENDTIM) - OFF. ex_15 energy error +74.1 % -> "
-                     "-0.9 % at 3.81x cycles; on the quasi-static decks it costs "
+                     "-0.9 % at 3.81x cycles (pre-round-7 /PROP/TYPE20 card; "
+                     "the round-7 /PROP/SOLID route alone gives -0.7 %, "
+                     "capped -1.8 % at 5.94x); on "
+                     "the quasi-static decks it costs "
                      "cycles (tensile2 75 -> 168, IE -0.54 % -> -4.36 % at the "
                      "end, history RMS 2.48 -> 1.66 % of peak, the closest "
                      "arm); ex_11 KE +17.9 % at matched time (the shipped run "
@@ -814,6 +848,65 @@ class ConverterGUI:
                      "not the size) and the weld never fails",
             variable=self.beam_contact_secondary).grid(
                 row=40, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_RIGID / *DEFORMABLE_TO_RIGID part body: write "
+                     "J = -SUM(IN) so the starter's tensor is LS-DYNA's "
+                     "point-mass sum (it ADDS every shell node's IN, "
+                     "inirby.F:355) - ON. Spun plate KE_R +16.83 % -> 0.00 %; "
+                     "revo-stiff IE / KE RMS 4.96 / 2.94 -> 0.78 / 0.73 % at "
+                     "1.156x cycles",
+            variable=self.rigid_shell_rotary_inertia).grid(
+                row=41, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD weld: a bilinear SHEAR curve on Ty/Tz at "
+                     "the von Mises shear yield (SIGY/sqrt3)·A - ON. "
+                     "plates.mat100 IE / KE RMS 23.53 / 62.56 -> 8.58 / 26.74 % "
+                     "at 1.107x cycles (LS's shear plateau 20405)",
+            variable=self.spotweld_shear_yield).grid(
+                row=42, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD EFAIL with no resultant cell: Ifail 1 / "
+                     "Ifail2 0 displacement failure (delta_y + EFAIL·L, "
+                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12650e-3 s "
+                     "vs LS 1.17969e-3..1.19792e-3 s",
+            variable=self.spotweld_efail_displacement).grid(
+                row=43, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT deck: a *MAT_ELASTIC thick shell goes to "
+                     "/PROP/SOLID Isolid 14 instead of /PROP/TYPE20 (its "
+                     "implicit tangent has ONE through-thickness point) - ON. "
+                     "ex_02 timeout -> NORMAL in 28 cycles; ex_15 energy "
+                     "error 74.1 -> -0.7 %",
+            variable=self.implicit_tshell_solid).grid(
+                row=44, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Element-frame orthotropic /PROP/TYPE6 co-rotational "
+                     "(honeycomb Iframe 2, Ip 21/24 -> Isolid 14, LAW93 b/c "
+                     "on Ip 21) - ON. MAT_126 crush cube 0 -> 12 of 12 "
+                     "cases right",
+            variable=self.corotational_orthotropic).grid(
+                row=45, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_NULL PC / MU -> /MAT/HYD_VISC Pmin / Nu - ON. "
+                     "PC 0 -> -1e-20 (LS cuts at zero); Nu = MU/RO on "
+                     "ELFORM-6 fluids only. sph/bird IE +69.4 -> +4.5 %, "
+                     "channel_B -98.9 -> -0.1 %",
+            variable=self.mat_null_pc_mu).grid(
+                row=46, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (Lagrange, "
+                     "carriage /RBODY, contact split; SMP only, -np 1) - ON. "
+                     "EXP_SC_JOINT_SCREW nut travel 0 -> 185.70 mm vs LS "
+                     "183.59",
+            variable=self.joint_screw_gjoint).grid(
+                row=47, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1066,6 +1159,16 @@ class ConverterGUI:
                 spotweld_node_synthesis=self.spotweld_node_synthesis.get(),
                 beam_contact_secondary=self.beam_contact_secondary.get(),
                 shell_offset_gapmin=self.shell_offset_gapmin.get(),
+                rigid_shell_rotary_inertia=(
+                    self.rigid_shell_rotary_inertia.get()),
+                spotweld_shear_yield=self.spotweld_shear_yield.get(),
+                spotweld_efail_displacement=(
+                    self.spotweld_efail_displacement.get()),
+                implicit_tshell_solid=self.implicit_tshell_solid.get(),
+                corotational_orthotropic=(
+                    self.corotational_orthotropic.get()),
+                mat_null_pc_mu=self.mat_null_pc_mu.get(),
+                joint_screw_gjoint=self.joint_screw_gjoint.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1212,7 +1315,7 @@ class ConverterGUI:
             bits.append("*CONSTRAINED_GENERALIZED_WELD_BUTT dropped "
                         "(--no-generalized-weld-butt)")
         if not kwargs.get("initial_void_floor", True):
-            bits.append("*INITIAL_VOID fluids keep Pmin 0 = -INFINITY "
+            bits.append("*INITIAL_VOID fluids get no cavitation floor "
                         "(--no-initial-void-floor)")
         if not kwargs.get("weld_exponents", True):
             bits.append("spotweld failure exponents left at 2 "
@@ -1232,6 +1335,27 @@ class ConverterGUI:
         if not kwargs.get("shell_offset_gapmin", True):
             bits.append("starter-derived gap kept against offset shells "
                         "(--no-shell-offset-gapmin)")
+        if not kwargs.get("rigid_shell_rotary_inertia", True):
+            bits.append("rigid part bodies keep J = 0 "
+                        "(--no-rigid-shell-rotary-inertia)")
+        if not kwargs.get("spotweld_shear_yield", True):
+            bits.append("spotweld shear kept elastic "
+                        "(--no-spotweld-shear-yield)")
+        if not kwargs.get("spotweld_efail_displacement", True):
+            bits.append("spotweld EFAIL kept dropped "
+                        "(--no-spotweld-efail-displacement)")
+        if not kwargs.get("implicit_tshell_solid", True):
+            bits.append("implicit thick shells kept on /PROP/TYPE20 "
+                        "(--no-implicit-tshell-solid)")
+        if not kwargs.get("corotational_orthotropic", True):
+            bits.append("element-frame /PROP/TYPE6 left as 65ff389 "
+                        "(--no-corotational-orthotropic)")
+        if not kwargs.get("mat_null_pc_mu", True):
+            bits.append("*MAT_NULL PC / MU cells not carried: Pmin 0 = "
+                        "-INFINITY, Nu 0 (--no-mat-null-pc-mu)")
+        if not kwargs.get("joint_screw_gjoint", True):
+            bits.append("*CONSTRAINED_JOINT_SCREW left skipped "
+                        "(--no-joint-screw-gjoint)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

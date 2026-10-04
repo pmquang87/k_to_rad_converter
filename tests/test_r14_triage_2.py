@@ -830,6 +830,16 @@ def _gruneisen(a, gamma0) -> str:
             + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n*END\n")
 
 
+def _gruneisen_a_warnings(warnings):
+    """The warnings about the Gruneisen card. EXPECTED VALUE MOVED in R14
+    round 7 (B1): the carrier's *MAT_NULL PC 0 is now written as Pmin -1e-20,
+    and that sentence names the EOS it floors ("/EOS/GRUNEISEN pressure
+    reaches ..."), so it is excluded here by its own head - every other
+    warning naming GRUNEISEN is still counted."""
+    return [x for x in warnings if "GRUNEISEN" in x
+            and not x.startswith("*MAT_NULL PC -> /MAT/HYD_VISC Pmin")]
+
+
 class GruneisenZeroA(unittest.TestCase):
     """`hm_read_eos_gruneisen.F:102` is `IF(A == ZERO) A=GAMA0` — the only
     test on A in that file — and LS-DYNA states no Default for A (Vol II R17
@@ -852,7 +862,7 @@ class GruneisenZeroA(unittest.TestCase):
 
     def test_the_warning_names_the_reader_line_and_the_size(self):
         st, _starter = _state_and_starter(_gruneisen(0.0, 2.0))
-        w = [x for x in st.warnings if "GRUNEISEN" in x]
+        w = _gruneisen_a_warnings(st.warnings)
         self.assertEqual(len(w), 1, st.warnings)
         self.assertIn("hm_read_eos_gruneisen.F:102", w[0])
         self.assertIn("IF(A == ZERO) A=GAMA0", w[0])
@@ -869,14 +879,14 @@ class GruneisenZeroA(unittest.TestCase):
         — "never fabricate an unstated value"."""
         st, starter = _state_and_starter(_gruneisen(0.0, 0.0))
         self.assertEqual(st.eos_cards[2].params["a"], 0.0)
-        self.assertEqual([x for x in st.warnings if "GRUNEISEN" in x], [])
+        self.assertEqual(_gruneisen_a_warnings(st.warnings), [])
         self.assertNotIn("E-20", "\n".join(_block(starter, "/EOS/GRUNEISEN/2")
                                            or []))
 
     def test_a_stated_a_passes_through_untouched(self):
         st, _starter = _state_and_starter(_gruneisen(0.47, 2.0))
         self.assertEqual(st.eos_cards[2].params["a"], 0.47)
-        self.assertEqual([x for x in st.warnings if "GRUNEISEN" in x], [])
+        self.assertEqual(_gruneisen_a_warnings(st.warnings), [])
 
     def test_the_substitution_size_is_derived_from_the_cards_own_gamma0(self):
         """Only the ENERGY half is card-independent (`BB = g0 + a*mu` makes it

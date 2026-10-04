@@ -94,9 +94,11 @@ from .contacts import (
 from .frictions import _make_frictions
 from .rbody import (_make_cnrb_rbodies, _make_generalized_weld_butt_rbodies,
                     _make_probe_rbody, _make_rbodies,
+                    _make_screw_carriage_rbodies,
                     _make_shell_to_solid_rbodies)
 from .rbe3 import _make_rbe3
 from .joints import _make_joints, _resolve_joints
+from .joint_screw import _make_joint_screws, _resolve_joint_screws
 from .dbeam import _make_discrete_beam_connectors
 from .loads import (
     _make_added_masses,
@@ -143,6 +145,7 @@ from .blast_ale import (
     _make_ebcs,
     _make_fsi_coupling,
     _make_inivol_notes,
+    _make_shell_in_solid_notes,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -1000,7 +1003,14 @@ def _warn_implicit_constant_step(state: ConversionState) -> None:
         "_3/_5). Those history errors are an RMS in % of the reference's "
         "peak; the END state at matched time reads differently - on "
         "ex_15_thick_shell_elform_2 the cap trades internal energy +36.2 % -> "
-        "-54.8 % for kinetic energy +132.0 % -> +0.5 %. On the quasi-static "
+        "-54.8 % for kinetic energy +132.0 % -> +0.5 %. (The ex_15 figures "
+        "are the /PROP/TYPE20 card's, which k2rad wrote before round 7; the "
+        "default --implicit-tshell-solid route closes its energy balance by "
+        "itself, -0.7 %, and on that routed card the cap takes ex_15 from 34 "
+        "to 202 cycles (5.94x), energy error -0.7 % -> -1.8 %, END internal "
+        "energy +72.81 % -> -55.94 % and kinetic energy +27.37 % -> +0.12 %, "
+        "history RMS IE 8.06 -> 3.19 / KE 9.52 -> 7.45 % of the reference's "
+        "peak, nt 4 = nt 2.) On the quasi-static "
         "decks, whose all-zero tolerances now get "
         "LS-DYNA's ECTOL (--zero-tolerance-ectol, default), it costs cycles: "
         "tensile2 75 -> 168 (2.24x), its END internal energy -0.54 % -> "
@@ -1309,8 +1319,12 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # tensile2, 6.5.tbl.psd and doorbeam move error_engine -> normal, at
         # the cost of the ex_02_thick_shell_elform_{2,3,5} family (3 keys on
         # one emitted file, all three not_comparable both ways) going
-        # normal -> timeout; --qstat-dtscal 0.1 reproduces the pre-round-4
-        # file byte for byte on that family.
+        # normal -> timeout on the /PROP/TYPE20 card k2rad wrote before round
+        # 7 (round 7's default /PROP/SOLID route, writer/tshell.py, ends the
+        # family NORMAL in 28 cycles at this default, and at 0.1 too - the
+        # value is inert on the routed card); --qstat-dtscal 0.1 with
+        # --no-implicit-tshell-solid reproduces the pre-round-4 file byte for
+        # byte on that family (0.1 alone does not since round 7).
         #
         # The deformable-deformable contact recipe keeps 0.05 (=> x400) and
         # IGNORES the option: a compliant contact under force control adds a
@@ -1917,6 +1931,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # regardless of section order.
     _resolve_joints(state)
 
+    # *CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (round 7, B2): the ONE decision
+    # over every screw, BEFORE the /RBODY producers (which skip the bodies'
+    # CMO /BCS and build the carriage from it) and before the contact section
+    # (which splits the pair out of an all-parts self-contact). Draws no id.
+    _resolve_joint_screws(state)
+
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
     # namespaces and Radioss in one. Report the overlap here rather than letting
@@ -1963,6 +1983,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Implicit deck without any rigid body: the engine segfaults at solver init
     # (MESSAGE ID 44) — give it an inert fully-fixed probe rigid body.
     rbody_lines = rbody_lines + _make_probe_rbody(state, rbody_info)
+    # /RBODY producer 6: the carriage of every converted *CONSTRAINED_JOINT_
+    # SCREW (round 7, B2) - after the probe, its nodes registered in
+    # state.nodes before the /NODE section is written. A no-op (no id
+    # drawn) on any deck without a converted screw.
+    rbody_lines = rbody_lines + _make_screw_carriage_rbodies(state, rbody_info)
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
     state.rbody_ind_grnods = {pid: info["ind_grnod_id"] for pid, info in rbody_info.items()}
 
@@ -1983,7 +2008,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
     # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
-    # sections re-pointed (round 6, A7). A post-pass because those blocks are
+    # sections re-pointed (round 6, A7) - since round 7 only where the
+    # *MAT_RIGID producer did not already write it by default (A2; the
+    # pass skips a record whose j_in is "applied" or "refused", and never
+    # touches a CNRB). A post-pass because those blocks are
     # built above, before the re-point is decided; id-keyed and
     # content-asserted, it rewrites one J row per body and draws no id. A
     # no-op without the flag.
@@ -2900,6 +2928,12 @@ def _starter_section_registry():
         ("tied_nodes_failure_notes",
                               lambda c: _make_tied_nodes_failure_notes(c.state)),
         ("rbodies",           lambda c: c.rbody_lines),
+        # *CONSTRAINED_JOINT_SCREW -> /GJOINT/RACK (round 7, B2): right after
+        # the /RBODY cards whose main nodes (and carriage) it ties; every id
+        # it draws is drawn here. A no-op on any deck without a converted
+        # screw.
+        ("joint_screws",      lambda c: _make_joint_screws(c.state,
+                                                           c.rbody_info)),
         # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
         # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts
         # (starter ERROR 810 / WARNING 3104), and its dependent node has to be in
@@ -2944,6 +2978,10 @@ def _starter_section_registry():
         ("blast_loads",       lambda c: _make_blast_loads(c.state)),
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        # *CONSTRAINED_SHELL_IN_SOLID: ONE named warning per deck (round 7,
+        # B5); writes no card and draws no id - the keyword stays skipped.
+        ("shell_in_solid_notes",
+                              lambda c: _make_shell_in_solid_notes(c.state)),
         ("ebcs",              lambda c: _make_ebcs(c.state)),
         # Monitored volumes. AFTER parts_elements, whose write line fills
         # state.shell_elem_ids / sh3n_elem_ids — the /SURF is screened against
@@ -3064,9 +3102,10 @@ def _starter_section_registry():
         # id — on a deck without its keyword, so none can shift the id stream
         # of an existing deck (the #119 fixture rule).
         #   * nodal_force_group expands *SET_NODE and needs nothing else;
-        #   * rbody reads state.rbody_ids, which the five /RBODY producers
+        #   * rbody reads state.rbody_ids, which the six /RBODY producers
         #     fill in build_starter BEFORE the registry is walked at all
-        #     (round 5's shell-to-solid and butt-weld bodies included);
+        #     (round 5's shell-to-solid and butt-weld bodies and round 7's
+        #     screw carriage included);
         #   * bndout reads state.imp_motion_nodes, filled by the two
         #     imposed_motions sections far above — the same "registry filled at
         #     the write line, consumed by a later section" ordering the
@@ -3094,7 +3133,8 @@ def _starter_section_registry():
         ("starter_th_accel", lambda c: _make_starter_th_accel(c.state)),
         # *CONSTRAINED_LINEAR_LOCAL/_GLOBAL -> /MPC (round 6, A5). HERE, last
         # of the id-drawing sections: its screens read every /BCS, imposed
-        # motion, rigid body and free-node pin (all written above), and no
+        # motion, rigid body, free-node pin and /INTER/TYPE2 secondary group
+        # (all written above; the tied-node refusal is round 7, B4), and no
         # section below draws an id, so an emitted /MPC renumbers nothing.
         # A no-op, drawing no id, on any deck without the keyword.
         ("constrained_linear_mpcs",
@@ -3723,7 +3763,115 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
     return lines
 
 
+def imflag_segments(pts: List[Tuple[float, float]], endtim: float
+                    ) -> List[Tuple[float, float, str]]:
+    """The solution-method schedule of an IMFLAG < 0 curve (round 7, A5):
+    ``[(t_start, t_end, "implicit" | "explicit"), ...]`` up to *endtim*.
+
+    A point's method is implicit when its ordinate is >= 0.5 (the curve
+    states 1 / 0), else explicit. The points are walked in abscissa order
+    from the first point's method; a segment boundary is the abscissa of the
+    FIRST point that carries the new method (LS-DYNA's ie_shell messag reads
+    "formulation switch at time = 1.0000E-02" for the points (0.00999, 1)
+    (0.01, 0)). A boundary at or before the current segment's start is
+    absorbed (a vertical step at t 0 just sets the starting method); one at
+    or beyond *endtim* ends the walk."""
+    if not pts:
+        return []
+    ordered = sorted(pts, key=lambda p: p[0])      # stable: equal x kept
+
+    def _meth(y: float) -> str:
+        return "implicit" if y >= 0.5 else "explicit"
+
+    start = 0.0
+    method = _meth(ordered[0][1])
+    segs: List[Tuple[float, float, str]] = []
+    for x, y in ordered[1:]:
+        m = _meth(y)
+        if m == method:
+            continue
+        if x <= start:
+            method = m
+            continue
+        if x >= endtim:
+            break
+        segs.append((start, x, method))
+        start, method = x, m
+    segs.append((start, endtim, method))
+    return segs
+
+
+#: IMFLAG values whose in-run behaviour OpenRadioss has no mode for (Vol I R17
+#: p.12-321 / 12-322); converted implicit throughout, named.
+_IMFLAG_TEXT_ONLY = {
+    2: "explicit followed by one implicit step",
+    4: "implicit that switches to explicit when the equilibrium iterations "
+       "fail",
+    5: "implicit that switches to explicit when the equilibrium iterations "
+       "fail, with a mandatory implicit finish",
+    6: "explicit with intermittent eigenvalue extraction",
+}
+
+
+def _warn_imflag(state: ConversionState) -> None:
+    """``*CONTROL_IMPLICIT_GENERAL`` IMFLAG < 0 (a method-switching curve) and
+    the IMFLAG 2 / 4 / 5 / 6 forms, named (round 7, A5 (iii)). Called ONCE
+    from :func:`build_engine` - not from ``_make_engine_implicit``, whose
+    modal early return would hide it (a warning below an early return covers
+    one branch). 0 bytes: the deck is emitted implicit throughout either way.
+    """
+    g = state.ctrl_implicit_gen
+    if g is None:
+        return
+    imflag = g.imflag
+    switch = ("OpenRadioss fixes the solution method per ENGINE FILE (engine "
+              "input/freimpl.F:82, :127-129: implicit iff the file holds an "
+              "/IMPL card)")
+    if imflag in _IMFLAG_TEXT_ONLY:
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag} "
+            f"({_IMFLAG_TEXT_ONLY[imflag]}, Vol I R17 p.12-321 / 12-322): "
+            "converted IMPLICIT THROUGHOUT - " + switch + ", so there is no "
+            "such mode inside one engine run.")
+        return
+    if imflag >= 0:
+        return
+    lcid = -imflag
+    curve = state.curves.get(lcid)
+    if curve is None or not curve.pts:
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} is not "
+            "defined in the deck, so its implicit/explicit schedule cannot be "
+            "read; the deck is emitted IMPLICIT THROUGHOUT (" + switch + ").")
+        return
+    term = state.ctrl_termination
+    endtim = term.endtim if term is not None and term.endtim > 0.0 else \
+        max(p[0] for p in curve.pts)
+    segs = imflag_segments(curve.pts, endtim)
+    if all(m == "explicit" for _a, _b, m in segs):
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} selects "
+            "EXPLICIT for the whole run, which LS-DYNA runs explicit; k2rad "
+            "emits it IMPLICIT (any IMFLAG != 0 makes the deck implicit) - "
+            "state IMFLAG 0 to convert it as the explicit run it is.")
+        return
+    if len(segs) < 2:
+        return                     # implicit throughout: nothing is lost
+    sched = ", ".join(f"{m} {a:g} -> {b:g}" for a, b, m in segs)
+    state.warn(
+        f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} switches "
+        f"the solution method in time ({sched}); LS-DYNA switches inside one "
+        "run (Vol I R17 p.12-321 / p.12-323 Remark 1). " + switch + ", and "
+        "this deck is emitted IMPLICIT THROUGHOUT. MEASURED on "
+        "implicit/basic-examples/impl-expl-switch/ie_shell.k (nt 4 = nt 2): "
+        "the released strip does not vibrate - internal energy -1.52 / -2.36 "
+        "/ -99.48 / -98.77 / -99.87 % against LS-DYNA at the fifths of the "
+        "run, kinetic energy 0 against 149.9 at the end - while the run ends "
+        "NORMAL in 92 cycles (a status, not a result).")
+
+
 def build_engine(state: ConversionState) -> str:
+    _warn_imflag(state)
     sections = [
         _make_engine_header(state),
         _make_engine_restart(state),

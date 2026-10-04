@@ -3210,6 +3210,27 @@ def _off_initial_volume_fraction_geometry(b: Block, offsets: Dict[str, int],
         raw[toff] = new
 
 
+def _off_constrained_shell_in_solid(b: Block, offsets: Dict[str, int],
+                                    warn) -> None:
+    """*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]: card 1 ``SHSID SSID SHSTYP
+    SSTYP``, each id bucketed by the type cell beside it (the #125 class:
+    0 = a ``*SET_PART`` id -> IDSOFF, 1 = a ``*PART`` id -> IDPOFF). The card
+    is never converted (round 7, B5), but its warning names the parts, and an
+    un-offset id would name the wrong ones."""
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff >= len(raw):
+        return
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    shstyp = to_int(cells[2]) if len(cells) > 2 else 0
+    sstyp = to_int(cells[3]) if len(cells) > 3 else 0
+    new = _rewrite_line(raw[toff], [(0, "p" if shstyp == 1 else "s"),
+                                    (1, "p" if sstyp == 1 else "s")],
+                        offsets)
+    if new is not None:
+        raw[toff] = new
+
+
 def _off_database_cross_section_plane(b: Block, offsets: Dict[str, int],
                                       warn) -> None:
     """*DATABASE_CROSS_SECTION_PLANE: PSID -> IDSOFF, and XCT/XCH -> IDNOFF
@@ -3847,6 +3868,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     # #130 shape).
     "INITIAL_VOID_PART": {"data": (0, [(0, "p")])},
     "INITIAL_VOID_SET": {"data": (0, [(0, "s")])},
+    # *CONSTRAINED_SHELL_IN_SOLID — recorded for a named warning only (round
+    # 7, B5); its two ids are bucketed by the type cells beside them.
+    "CONSTRAINED_SHELL_IN_SOLID": _off_constrained_shell_in_solid,
+    "CONSTRAINED_SHELL_IN_SOLID_PENALTY": _off_constrained_shell_in_solid,
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)
@@ -3888,13 +3913,17 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
     # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option
     # combination (the _LOCAL and _FAILURE cards follow it), so one spec covers
-    # all 28 registered keywords. The _ID heading's JID goes to IDROFF, the same
+    # all 32 registered keywords (28 + the 4 SCREW spellings of round 7). The
+    # _ID heading's JID goes to IDROFF, the same
     # bucket *CONSTRAINED_JOINT_STIFFNESS's JID field uses, so the reference
-    # between them survives the include.
+    # between them survives the include. The SCREW (round 7, B2) has the same
+    # card 1; its PARM card carries no id. (*CONSTRAINED_JOINT_COOR_SCREW is
+    # recorded only to be NAMED - refused - and its coordinate cards hold no
+    # node id.)
     **{f"CONSTRAINED_JOINT_{_k}{_o}":
        {"cards": {0: [(_i, "n") for _i in range(6)]}, "idhdr": "r"}
        for _k in ("SPHERICAL", "REVOLUTE", "CYLINDRICAL", "PLANAR",
-                  "UNIVERSAL", "TRANSLATIONAL", "LOCKING")
+                  "UNIVERSAL", "TRANSLATIONAL", "LOCKING", "SCREW")
        for _o in ("", "_LOCAL", "_FAILURE", "_LOCAL_FAILURE")},
     "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED": _off_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL": _off_joint_stiffness,

@@ -207,9 +207,16 @@ def build_parser() -> argparse.ArgumentParser:
              "against a run still going at the 600 s campaign cap at 10, having "
              "reached t = 0.44 / 0.49 / 0.59 there and t = 0.32 on an "
              "independent quiet-machine repeat, at nt 3 AND nt 4 - the verdict "
-             "does not flip with nt. Pass 0.1 to "
-             "restore the old default on such a deck; on THAT family it "
-             "reproduces the pre-round-4 file BYTE FOR BYTE. 'none' emits no card "
+             "does not flip with nt. That cost is the /PROP/TYPE20 card's, "
+             "which k2rad wrote before round 7: the default "
+             "--implicit-tshell-solid route now ends the family NORMAL in 28 "
+             "cycles at this default (nt 4 and 2), and the value is inert "
+             "there: 0.1 ends it in the same 28 cycles at the same END IE "
+             "(nt 4 and 2). Pass 0.1 to restore the old default on such a "
+             "deck; on THAT family 0.1 together with "
+             "--no-implicit-tshell-solid reproduces the pre-round-4 file "
+             "BYTE FOR BYTE (both files; 0.1 alone does not since round "
+             "7). 'none' emits no card "
              "at all - measured WORSE than either (ex_02 dies at cycle 0 and "
              "tensile2 at t = 0.746). --deformable-contact-recipe keeps its "
              "separately validated 0.05 and ignores this flag.",
@@ -316,7 +323,14 @@ def build_parser() -> argparse.ArgumentParser:
              "ended 3 of 3 NORMAL quasi-static R14 decks in ERROR and is not "
              "offered. MEASURED (nt 4 = nt 2): ex_15 energy error +74.1 %% -> "
              "-0.9 %% at 3.81x the cycles (its end state at matched time: IE "
-             "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%); ex_11 KE history "
+             "+36.2 %% -> -54.8 %%, KE +132.0 %% -> +0.5 %%; measured on the "
+             "/PROP/TYPE20 card k2rad wrote before round 7 - the default "
+             "--implicit-tshell-solid route closes ex_15's energy balance by "
+             "itself, -0.7 %%, and on that routed card the cap takes ex_15 "
+             "from 34 to 202 cycles (5.94x), energy error -0.7 %% -> -1.8 "
+             "%%, end state IE +72.81 %% -> -55.94 %%, KE +27.37 %% -> "
+             "+0.12 %%, history RMS IE 8.06 -> 3.19 / KE 9.52 -> 7.45 %% of "
+             "the reference peak); ex_11 KE history "
              "error 16.07 %% -> 1.16 %% at 2.86x (at matched time KE +17.9 %% "
              "where the shipped run reads +1343 %% - both deviations, the "
              "engine never prints its last increment); with the default "
@@ -441,8 +455,9 @@ def build_parser() -> argparse.ArgumentParser:
              "-> NORMAL in 1095 cycles (IE +394.0 %%), bird_B timeout -> "
              "NORMAL in 2936 cycles (IE +1484.7 %%), bird-el NORMAL either "
              "way (IE +454.1 -> +1134.6 %%) - NORMAL, not a match: the void "
-             "is still full of fluid. Use --no-initial-void-floor to keep "
-             "Pmin 0.",
+             "is still full of fluid. Use --no-initial-void-floor to fall "
+             "back to the *MAT_NULL PC cell (--no-mat-null-pc-mu as well "
+             "keeps Pmin 0).",
     )
     parser.add_argument(
         "--weld-exponents",
@@ -500,6 +515,132 @@ def build_parser() -> argparse.ArgumentParser:
              "SHLTHK 2, written the capped 0.127): IE -2.00 -> -1.42 %%, KE "
              "-68.65 -> -45.60 %% at matched time, 0.98x the cycles. Use "
              "--no-shell-offset-gapmin to keep the starter's derived gap.",
+    )
+    parser.add_argument(
+        "--rigid-shell-rotary-inertia",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write J = -SUM(IN) into the Jxx/Jyy/Jzz cells of every "
+             "*MAT_RIGID / *DEFORMABLE_TO_RIGID part /RBODY (ICoG != 4) whose "
+             "nodes carry lumped shell rotary inertia: the starter ADDS every "
+             "shell node's IN - (m/4)(A + t^2)/12 per /SHELL corner "
+             "(cinmas.F:1379), m(A/4.5 + t^2/12) per /SH3N spread by the "
+             "corner angles (c3inmas.F:1111) - to a rigid "
+             "body's tensor (inirby.F:166-168, inirby.F:355-363), while "
+             "LS-DYNA's rigid-part inertia is the point-mass sum (18 of 18 "
+             "reference d3hsp tensors within 0.04 %%). ON by default. Skipped "
+             "by name where the lumper is not the starter's (layered, element "
+             "thickness, Ishell < 11, no section), refused by name at or "
+             "below a relative 1e-3 margin (the starter's WARNING 275 "
+             "threshold, inirby.F:753-758), never on CNRB / weld / tie / "
+             "probe bodies. MEASURED (nt 4): a spun rigid plate's rotational "
+             "KE +16.83 / +33.66 %% -> 0.00 %%; revo-stiff IE / KE history "
+             "RMS 4.96 / 2.94 -> 0.78 / 0.73 %% of the LS peak at 1.156x "
+             "the cycles, its LS d3hsp tensor 0.1977227E-02 reproduced. Use "
+             "--no-rigid-shell-rotary-inertia to keep J = 0.",
+    )
+    parser.add_argument(
+        "--spotweld-shear-yield",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Give the *MAT_SPOTWELD weld's /PROP/TYPE13 a bilinear SHEAR "
+             "curve on Ty/Tz (fct_ID12 = fct_ID13, H2 = H3 = 1): yield "
+             "(SIGY/sqrt3)·A, the von Mises shear yield of MAT_100's "
+             "axial-and-shear plasticity (Vol II R17 p.2-708), hardening "
+             "G·EH/(3G+EH)·A/L. ON by default. MEASURED on plates.mat100 "
+             "(nt 4): LS-DYNA's weld shear plateaus at 20374..20408 = "
+             "(SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> "
+             "8.58 / 26.74 %% of the LS peak at 1.107x the cycles. "
+             "mainboltaexpl moves too, by run sensitivity and not by the "
+             "yield: its weld shear stays below it, and a 1e-8 change of K2 "
+             "alone moves that row as much (its preloaded bolt spring "
+             "collapses on every arm). Use --no-spotweld-shear-yield to keep "
+             "the shear elastic.",
+    )
+    parser.add_argument(
+        "--spotweld-efail-displacement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="A *MAT_SPOTWELD EFAIL (0 < EFAIL < 1e19) on a card with NO "
+             "resultant failure cell -> /PROP/TYPE13 Ifail 1 / Ifail2 0 "
+             "displacement failure, DeltaMax1 = delta_y + EFAIL·L, "
+             "DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L (the effective plastic "
+             "strain sqrt(eps^2 + gamma^2/3) on a proportional path). ON by "
+             "default; beside resultant cells EFAIL is named, not converted. "
+             "MEASURED on spotweld.k with --spotweld-node-synthesis "
+             "--beam-contact-secondary (nt 4): rupture 1.12650e-3 s vs "
+             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.5-6.0 %% early). Its only "
+             "default mover is a giant the campaign does not run (measurable "
+             "default effect nil). Use --no-spotweld-efail-displacement to "
+             "keep EFAIL dropped.",
+    )
+    parser.add_argument(
+        "--implicit-tshell-solid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an IMPLICIT deck (the modal path included), write an "
+             "isotropic *SECTION_TSHELL whose parts are all *MAT_ELASTIC as "
+             "/PROP/SOLID Isolid 14 (Inpts 222) on the same /BRICK rows "
+             "instead of /PROP/TYPE20: the implicit thick-shell tangent "
+             "integrates the thickness with ONE mid-plane point "
+             "(s8cke3.F:354-364) and 80 + 4 coupon runs stop at cycle 0. ON "
+             "by default; explicit decks keep TYPE20, other laws and "
+             "TYPE21 / TYPE22 keep their card with a named warning. "
+             "MEASURED: ex_02_thick_shell_elform_{2,3,5} timeout (cycle "
+             "100 624) -> NORMAL in 28 cycles (nt 4 and 2); ex_15 energy "
+             "error 74.1 -> -0.7 %% at 0.64x the cycles (named cost: END IE "
+             "+0.03 -> +36.49 %%). Use --no-implicit-tshell-solid to keep "
+             "/PROP/TYPE20.",
+    )
+    parser.add_argument(
+        "--corotational-orthotropic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an element-frame orthotropic /PROP/TYPE6 (Ip 20 / 21 / 23 "
+             "/ 24, LS-DYNA AOPT 0 / 1 / 3 / 4) co-rotational: the MAT_126 "
+             "honeycomb's pinned Isolid 1 gets Iframe 2, and an Ip 21 / 24 "
+             "orthotropic brick on Isolid 17 is written as Isolid 14 like "
+             "Ip 20 / 23 since round 6; on Ip 21 /MAT/LAW93's 2 / 3 "
+             "constants are exchanged (Radioss b = e_z x a, "
+             "smorth3.F:326-328). ON by default. MEASURED on one-hex coupons "
+             "at nt 4: MAT_126 crush 0 -> 12 of 12 cases right (sigma(0.10) "
+             "6.0047 -> 1.5049 against 1.5), LAW93 Ip 24 0 -> 6 of 6, Ip 21 "
+             "2 -> 6 of 6; the plateau unchanged (RMS 0.164 %%). Tetrahedra "
+             "are named, not changed. Use --no-corotational-orthotropic for "
+             "the 65ff389 cards.",
+    )
+    parser.add_argument(
+        "--mat-null-pc-mu",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write the *MAT_NULL PC and MU cells on the /MAT/HYD_VISC of "
+             "every *MAT_NULL + *EOS_* carrier: Pmin = PC (PC 0.0 or blank "
+             "-> -1e-20: LS-DYNA cuts at zero, hm_read_mat06.F:154 reads "
+             "Pmin 0 as -INFINITY; PC > 0 refused) and Nu = MU / RO "
+             "(kinematic, m6law.F:98) only where every part of the material "
+             "is a *SECTION_SOLID ELFORM 6 on a deck without *INITIAL_VOID. "
+             "The ELFORM-12 void floor keeps precedence; with "
+             "--no-initial-void-floor alone a PC-0 void gets -1e-20 from "
+             "this rule. ON by default. MEASURED at nt 4: sph/bird IE "
+             "+69.44 -> +4.50 %% (0.832x cycles), channel_B -98.89 -> "
+             "-0.09 %%, channel_A -98.88 -> -4.03 %%; underwater_A/B stay "
+             "within 1 %%. Use --no-mat-null-pc-mu to keep Pmin 0 and Nu 0.",
+    )
+    parser.add_argument(
+        "--joint-screw-gjoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *CONSTRAINED_JOINT_SCREW between two *MAT_RIGID bodies "
+             "into /GJOINT/RACK (Lagrange multipliers; FscaleV = -1/PARM) "
+             "with a synthesized carriage, the bodies' constraints and drive "
+             "re-written as /BCS/LAGMUL + /IMPVEL/LAGMUL, and the rigid pair "
+             "split out of an all-parts self-contact. ON by default. The "
+             "joint is exact where LS-DYNA's default penalty joint yields; "
+             "SMP only (-np 1). MEASURED on EXP_SC_JOINT_SCREW at nt 4: nut "
+             "travel 0 -> 185.70 mm against LS-DYNA's 183.59 at the same "
+             "instant, IE -100 -> "
+             "+42.76 %%, 0.9998x cycles. Use --no-joint-screw-gjoint to keep "
+             "the joint skipped.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -920,10 +1061,13 @@ def build_parser() -> argparse.ArgumentParser:
              "LS-DYNA's own cycle-0 K-ENERGY is 189.962: the shipped "
              "full-velocity re-point reads 387.9 (+104.20 %%), this rule "
              "reads 220.58 (+16.12 %%), and the final ke_dev goes +194.03 %% "
-             "-> +47.82 %%. Since round 6 the flag also writes J = -SUM(IN) "
-             "(the body's shell nodes' lumped rotary inertia, which the "
-             "starter ADDS to the tensor, inirby.F:166-168/:355) into every "
-             "body it re-points: NEW INERTIA 0.1977227E-02 = LS-DYNA's, "
+             "-> +47.82 %%. J = -SUM(IN) (the body's shell nodes' lumped "
+             "rotary inertia, which the starter ADDS to the tensor, "
+             "inirby.F:166-168/:355) is written BY DEFAULT since round 7 "
+             "(--rigid-shell-rotary-inertia); this flag adds it only where "
+             "the default did not (--no-rigid-shell-rotary-inertia restores "
+             "the round-6 pass on every body it re-points): NEW INERTIA "
+             "0.1977227E-02 = LS-DYNA's, "
              "cycle-0 KE 189.96 (LS 189.962), final KE -1.97 %% (an end value: "
              "the KE history RMS goes 17.5 %% -> 11.6 %% of the LS peak), "
              "1.156x the cycles; the IE (the joint path) is not fixed. OPT-IN because "
@@ -1168,6 +1312,13 @@ def main(argv=None) -> int:
         spotweld_node_synthesis=args.spotweld_node_synthesis,
         beam_contact_secondary=args.beam_contact_secondary,
         shell_offset_gapmin=args.shell_offset_gapmin,
+        rigid_shell_rotary_inertia=args.rigid_shell_rotary_inertia,
+        spotweld_shear_yield=args.spotweld_shear_yield,
+        spotweld_efail_displacement=args.spotweld_efail_displacement,
+        implicit_tshell_solid=args.implicit_tshell_solid,
+        corotational_orthotropic=args.corotational_orthotropic,
+        mat_null_pc_mu=args.mat_null_pc_mu,
+        joint_screw_gjoint=args.joint_screw_gjoint,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

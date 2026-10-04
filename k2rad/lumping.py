@@ -11,8 +11,10 @@ Two consumers, ONE rule:
 
 The lumper used to live in ``tools/modal_solve``; a writer may not import from
 ``tools/``, so it moved here and ``tools/modal_solve`` imports it back. Nothing
-about its arithmetic changed — see :func:`nodal_masses_from_state` for the
-reporter argument, which is the only new parameter.
+about its arithmetic changed in the move — see :func:`nodal_masses_from_state`
+for the reporter argument, which is the only new parameter. (Round 7's
+validation round then gave a triangle shell the starter's own rotary inertia,
+``c3inmas.F:1111``, in place of the quad formula.)
 
 PURE STANDARD LIBRARY. No numpy, no scipy: this module is imported by the
 writer, and ``k2rad`` must run without either. The 3x3 symmetric eigenproblem
@@ -23,9 +25,9 @@ the momentum average needs is solved with a cyclic Jacobi sweep
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from .state import ConversionState
+from .state import ConversionState, SolidElem, TshellElem
 # The two derivations this module must NOT re-implement: the writer's
 # thickness-to-section-constants rule (the /PROP/BEAM the engine's stiffness
 # matrix came from used it) and the converter's own RO <= 0 floor (the .rad it
@@ -44,6 +46,40 @@ def _tri_area(p1, p2, p3) -> float:
     vx, vy, vz = p3[0] - p1[0], p3[1] - p1[1], p3[2] - p1[2]
     cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
     return 0.5 * math.sqrt(cx * cx + cy * cy + cz * cz)
+
+
+def _corner_angle_fractions(p) -> List[float]:
+    """The three corner angles of triangle *p* divided by pi - the shares
+    the starter spreads a /SH3N's mass and rotary inertia with
+    (``c3inmas.F:1138-1143`` P1..P3 = ACOS(...) / PI, applied in
+    ``spmd_msin.F:556-557``). They sum to 1. A degenerate triangle (a
+    zero-length edge) gets equal thirds."""
+    out: List[float] = []
+    for k in range(3):
+        a, b, c = p[k], p[(k + 1) % 3], p[(k + 2) % 3]
+        u = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+        v = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+        nu = math.sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2])
+        nv = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if nu == 0.0 or nv == 0.0:
+            return [1.0 / 3.0] * 3
+        cosang = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (nu * nv)
+        out.append(math.acos(max(-1.0, min(1.0, cosang))) / math.pi)
+    return out
+
+
+def triangle_shell_nodes(state: ConversionState) -> Set[int]:
+    """The corner nodes of every shell with exactly three DISTINCT corners -
+    a 3-node ``*ELEMENT_SHELL`` or a collapsed / bowtie quad, all of which
+    ``writer/mesh`` writes as ``/SH3N`` (the starter lumps those with
+    ``c3inmas.F``, not ``cinmas.F``)."""
+    from .writer.mesh import _unique_node_slots
+    out: Set[int] = set()
+    for e in state.shell_elems:
+        slots = _unique_node_slots(e.nodes)
+        if len(slots) == 3:
+            out.update(e.nodes[s] for s in slots)
+    return out
 
 
 def _tet_volume(p1, p2, p3, p4) -> float:
@@ -170,9 +206,18 @@ def nodal_masses_from_state(
     Returns ``(mass, inertia)``: translational mass and rotational inertia per
     node.  Element mass is split evenly over the element's nodes (row-sum
     lumping for the linear elements used here); shell nodes also receive the
-    Radioss rotary-inertia lumping IN = (m_elem/n_nodes)·(A_elem + t²)/12.
-    Both reproduce the OpenRadioss starter's MS/IN nodal arrays to machine
-    precision (verified on the W14 bogie). *ELEMENT_MASS /
+    Radioss rotary-inertia lumping: a 4-node ``/SHELL`` corner IN =
+    (m_elem/4)·(A_elem + t²)/12 (``cinmas.F:1379``, FAC 12), and a shell
+    with three DISTINCT corners - which ``writer/mesh`` writes as ``/SH3N``
+    - the whole-element XI = m_elem·(A_elem/4.5 + t²/12) (``c3inmas.F:1111``)
+    spread by the corner angles / pi (``c3inmas.F:1138-1143``,
+    ``spmd_msin.F:556-557``), its geometry taken from the three distinct
+    corners. Until the round-7 validation round a triangle got the quad's
+    (m/n)(A + t²)/12, an in-plane term A/12 where the starter's is A/4.5.
+    The quad values reproduce the OpenRadioss starter's MS/IN nodal arrays
+    to machine precision (verified on the W14 bogie); a triangle's MASS is
+    still split in equal shares over its listed nodes where the starter
+    uses the same angle fractions (the totals agree). *ELEMENT_MASS /
     *ELEMENT_MASS_PART additions are then applied to the masses.
 
     *report* takes the one NOTE this pass can print (a material stating
@@ -182,11 +227,13 @@ def nodal_masses_from_state(
     passes ``print`` so its console output is exactly what it was before this
     function moved into the package.
 
-    TWO CONSUMERS now: ``tools/modal_solve`` builds the modal mass matrix from
-    it, and ``writer/loads``'s ``--mass-weighted-inivel`` builds the momentum
-    average of Vol I R17 p.28-129 Remark 3 from it. It lives here rather than
-    in ``tools/`` because the package must never import from ``tools/``, and
-    a second copy of the rule is how the two drift apart.
+    THREE CONSUMERS now: ``tools/modal_solve`` builds the modal mass matrix
+    from it, ``writer/loads``'s ``--mass-weighted-inivel`` builds the momentum
+    average of Vol I R17 p.28-129 Remark 3 from it, and (round 7, A2)
+    ``writer/rbody``'s default ``J = -SUM(IN)`` takes its ``IN`` - and the
+    point-mass tensor of its refusal margin - from it. It lives here rather
+    than in ``tools/`` because the package must never import from ``tools/``,
+    and a second copy of the rule is how the two drift apart.
     """
     rho_by_mid = _material_rho(state, zero_density_floor, report)
     nodes = state.nodes
@@ -203,6 +250,7 @@ def nodal_masses_from_state(
     def add_part(pid: int, m_elem: float) -> None:
         part_mass[pid] = part_mass.get(pid, 0.0) + m_elem
 
+    from .writer.mesh import _unique_node_slots
     for e in state.shell_elems:
         part = state.parts.get(e.pid)
         if part is None:
@@ -211,21 +259,40 @@ def nodal_masses_from_state(
         rho = rho_by_mid.get(part.mid, 0.0)
         if sec is None or rho == 0.0:
             continue
+        uniq = [e.nodes[s] for s in _unique_node_slots(e.nodes)]
         try:
-            p = [ (nodes[n].x, nodes[n].y, nodes[n].z) for n in e.nodes ]
+            p = [(nodes[n].x, nodes[n].y, nodes[n].z) for n in uniq]
         except KeyError:
             continue
+        if len(p) < 3:
+            continue                     # zero area: the writer drops it
         area = _tri_area(p[0], p[1], p[2])
         if len(p) == 4:
             area += _tri_area(p[0], p[2], p[3])
         m_elem = area * sec.t1 * rho
         add(e.nodes, m_elem)
         add_part(e.pid, m_elem)
+        if len(p) == 3:
+            # a /SH3N: c3inmas.F:1111 over the whole element, spread by the
+            # corner angles (round-7 validation round)
+            xi = m_elem * (area / 4.5 + sec.t1 ** 2 / 12.0)
+            for n, frac in zip(uniq, _corner_angle_fractions(p)):
+                inertia[n] = inertia.get(n, 0.0) + xi * frac
+            continue
         in_share = (m_elem / len(e.nodes)) * (area + sec.t1 ** 2) / 12.0
         for n in e.nodes:
             inertia[n] = inertia.get(n, 0.0) + in_share
 
-    for e in state.solid_elems:
+    # Thick shells (*ELEMENT_TSHELL, emitted as /BRICK) are 8-node volumes
+    # too: lumped exactly like a hexa (round 7, A4 (ii) - this loop used to
+    # skip them, so tools/modal_solve.py gave ex_13_thick_shell_elform_* a
+    # total mass of 0 and ARPACK stopped with "error -9: Starting vector is
+    # zero"). A degenerate 6-node thick shell is written n1 n2 n3 n3 n5 n6 n7
+    # n7, which the same _HEXA_TETS split measures as the wedge it is.
+    # element_mass_by_node below has always counted them.
+    vol_elems: List[Union[SolidElem, TshellElem]] = [
+        *state.solid_elems, *state.tshell_elems]
+    for e in vol_elems:
         part = state.parts.get(e.pid)
         if part is None:
             continue
@@ -275,7 +342,7 @@ def nodal_masses_from_state(
         part_nodes: Dict[int, set] = {}
         for e in state.shell_elems:
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
-        for e in state.solid_elems:
+        for e in vol_elems:
             part_nodes.setdefault(e.pid, set()).update(e.nodes)
         for e in state.beam_elems:
             part_nodes.setdefault(e.pid, set()).update((e.n1, e.n2))

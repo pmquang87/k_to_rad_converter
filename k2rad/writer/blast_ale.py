@@ -890,6 +890,63 @@ def _make_inivol_notes(state: ConversionState) -> List[str]:
     return []
 
 
+def _shell_in_solid_side(state: ConversionState, sid: int, styp: int) -> str:
+    """One side of a *CONSTRAINED_SHELL_IN_SOLID card in words: STYP 1 = a
+    *PART id, 0 (default) = a *SET_PART id; an undefined set is named."""
+    if styp == 1:
+        return str([sid])
+    ps = state.part_sets.get(sid)
+    if ps is None:
+        return f"(set {sid} not defined)"
+    return str(sorted(ps[1]))
+
+
+def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
+    """``*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]`` → ONE named warning per deck
+    (R14 triage round 7, B5; 0 bytes, no flag, draws no id).
+
+    The card is recorded by ``handlers.handle_constrained_shell_in_solid`` and
+    stays in ``skipped_keywords`` (its ``#-- SKIPPED:`` line is part of the
+    ``.rad``). OpenRadioss has no embedded-shell constraint, so the embedded
+    shells receive nothing from the solids they sit in. The measured arms are
+    the round-7 critic's on ``bird-el`` (nt 4, base-paired, scored at the
+    LS-DYNA glstat interpolated at OpenRadioss's printed times): the shipped
+    deck 2492 cycles; an ``/INTER/TYPE18`` with a stated ``Stfval`` alone 2531
+    (1.016x); the coupling with the void density 11228 (4.506x). The
+    emission stays a ROADMAP item (the round-7 'does NOT close' list)."""
+    cards = state.shell_in_solid_cards
+    if not cards:
+        return []
+    per_card = "; ".join(
+        f"{c.coupid or '(no id)'} - shell part(s) "
+        f"{_shell_in_solid_side(state, c.shsid, c.shstyp)} in solid part(s) "
+        f"{_shell_in_solid_side(state, c.ssid, c.sstyp)}"
+        + (" (_PENALTY)" if c.penalty else "")
+        for c in cards)
+    state.warn(
+        f"*CONSTRAINED_SHELL_IN_SOLID: {len(cards)} card(s) ({per_card}) are "
+        "NOT converted and stay listed as skipped: OpenRadioss has no "
+        "embedded-shell constraint (no radioss2022-2026 CFG card; dyna2rad "
+        "does not convert it either), so those shells receive nothing from "
+        "the solids they sit in, where LS-DYNA constrains them to move with "
+        "them (Vol I R17 p.10-179). MEASURED on bird-el (nt 4, against "
+        "LS-DYNA, the round-6 floored void deck): the plate's internal energy "
+        "is 0 against LS-DYNA's 4.9377e5 (-100 %), and the deck ends IE "
+        "+1134.62 % / KE -92.06 % (RMS 1102.65 / 162.68 % of the LS-DYNA "
+        "peak) - mostly from the void, which is converted as full-density "
+        "fluid (its part carries KE 1.125e7 at cycle 0, LS-DYNA's 10.2). Two "
+        "substitutes were measured and neither is written: an /INTER/TYPE18 "
+        "with a stated Stfval 562.5 (= Vref^2 RO A / Gap on this deck) alone "
+        "gives the plate +195.21 % (RMS 144.85 %) at 1.016x the cycles; with "
+        "the void density as well (RHO_I 1e-15, with the /EOS/GRUNEISEN RHO_0 "
+        "cell stated as 1e-9, the deck's density) the deck reads IE +37.77 / "
+        "KE -34.27 % and the plate -30.29 % at 4.506x the cycles. A default "
+        "would need that density cell, refuted as a general rule in round 6, "
+        "and a stiffness that is not a one-deck calibration (a host with no "
+        "initial velocity gets none) - see ROADMAP.")
+    return []
+
+
 def _make_control_ale_notes(state: ConversionState) -> List[str]:
     """*CONTROL_ALE → an informational note (advection defaults are kept)."""
     if state.control_ale is None:
