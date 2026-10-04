@@ -2019,7 +2019,16 @@ measurement that decided it and the deck that would decide it next.
     **Round 7:** CLOSED (A1, no flag): the rigid body's own `/BCS` absorbs the
     re-pointed member code (6 deck keys / 6 emitted models — the five above
     and `ale_wavehitcol`; 0 physics by `MY_OR`; `bend` WARNING 312 33 → 30,
-    7512 = 7512 cycles, every printed row identical).
+    7512 = 7512 cycles, every printed row identical). NOT merged, by
+    design: a SKEWED `*CONSTRAINED_NODAL_RIGID_BODY_SPC` code (CMO −1),
+    whose digits are axes of its skew — and the starter rejects the pair
+    that leaves: a skew-0 TC/RC `/BCS` on the same main node is ERROR 148
+    (`hm_read_bcs.F:199-205`, one skew per node across `/BCS` cards;
+    measured on the A1 test deck: ERROR 148 + WARNING 312 at `65ff389` and
+    `b483b12`, 0 errors without the member code). The post-review round
+    NAMES it in both announcements (reach 0, the same bytes); next: state
+    the member code in the CNRB's own local system, which needs a deck that
+    carries the pair and a reference.
 19. **A `*CONTROL_IMPLICIT_GENERAL` DT0 < 0** is `|DT0|` with the
     geometric-stiffness option (Vol I R17 p.12-321: *"LT.0.0: Eliminate
     negative principal stresses in geometric (initial stress) stiffness.
