@@ -224,6 +224,124 @@ Prior history (before this changelog was introduced) is summarized in the
     (F16 on `431f8cb`, whose clause `c17386e` replaced; F18 / F19 pin the
     replacement), including the code validator's three surviving mutants
     (A5-4, A1-5b, B2-9).
+- **R14 CAMPAIGN TRIAGE batch, round 7 — POST-REVIEW ROUND (the four
+  verifiers of `b483b12`: code, two physics-at-source, campaign evidence).**
+  One major in the conversion, five test gaps, the rest text; every finding
+  checked against the source or a measurement before it was acted on. No
+  new flag.
+  - **B4 covers the MAIN side of a tied interface** (the physics-B verifier's
+    major, re-measured): round 7 refused an `/MPC` term on a SECONDARY node
+    of any emitted `/INTER/TYPE2` and left main-side terms out of scope on
+    the starter's tag loop (`itagsl2.F:95-96`), which decides the penalty
+    switch, not stability. The same two-plate probe with the `/MPC` on two
+    main-plate nodes ends NORMAL at a 99.9 % energy error from cycle 1000 on
+    Spotflag 28 (IE 1.25e6 against external work −3.9) and on Spotflag 27
+    (IE 3.83e4 against 48.2), and two main-plate nodes at x 5, outside the
+    tied strip, reach 99.9 % by cycle 3000 (IE 1.80e6 against 196); the tie
+    alone balances (IE 20.27 against 20.28), and so does an `/MPC` on two
+    nodes outside the tie (20.35 against 20.36); explicit, nt 4 = nt 2 on
+    the Spotflag-28 arms. Vol I R17 p.10-135's WARNING box names
+    tied-interface MEMBERS. The recorder now also stores each emitted
+    TYPE2's main side as the record states it (`state.type2_main_side`, the
+    same four write lines); the `/MPC` screen resolves it with
+    `_tied_slave_nids` — the resolution the deck-wide ERROR-556 pass uses,
+    a solid's interior nodes included (an over-approximation that can only
+    refuse more) — only when the deck has a `*CONSTRAINED_LINEAR_*` card.
+    Reach 0 (the roster's one `/MPC` carrier, `plates.lce`, has no TYPE2).
+  - **The five test gaps** (the code verifier's surviving non-equivalent
+    mutants, each proven behavioural by its probe): `A2-13` (`sum_in <= 0`
+    → `< 0` listed a solid-only rigid body as "written" — test_20, and
+    test_16 asserts no "keeps J = 0" line), `B4-3` (the tiebreak
+    PERMANENT-tie write line's recorded group blanked — `_tied_plates`
+    gains `TIEBREAK1`, OPTION 1 → Spotflag 27), `A5-10` (`x >= endtim` →
+    `>` added a zero-length IMFLAG segment — test_6 probes the switch AT
+    ENDTIM), `A1-8` (the `*CONSTRAINED_GLOBAL` announcement's
+    stabilisation argument — test_1b's CG arm and control), `A3-12` (the
+    `1e19` "never" threshold pinned from below — test_3b, EFAIL 5e18).
+  - **Conversion fixes with reach 0:** the AXIAL `*MAT_SPOTWELD` curve draws
+    `next_curve_id()` like the shear curve beside it — the raw counter wrote a
+    second `/FUNCT` over a user `*DEFINE_CURVE` in the auto range (starter
+    ERROR 79 at 65ff389 and `b483b12` alike, the physics-A verifier's AXC
+    probe); `next_curve_id()` is the same id on every deck without that
+    collision.
+  - **Named, 0 bytes:** A1's skewed-CNRB arm — a skew-0 TC/RC `/BCS` on a
+    main node that also carries a SKEWED `BC_cnrb` `/BCS` makes the starter
+    stop with ERROR 148 (`hm_read_bcs.F:199-205`; ERROR 148 + WARNING 312 on
+    the test's own deck at 65ff389 and `b483b12`, 0 errors without the member
+    code), now named in both announcements (not refused: which condition wins
+    is the deck author's call); a merge whose `BC_rigid` card is k2rad's
+    stabilisation ALONE (a CMO 0 body) names only the stabilisation; the
+    LIGHT clause names a light node whose three translations are fixed HELD
+    (gnonspring's node 1 printed "UNPROTECTED") and a translation an imposed
+    motion drives; the `/TH/NODE` `TH_reaction` warning names the screw
+    drive's REACX/Y/Z as identically 0 (`thbcs.F:62` / `:77`), like the
+    BNDOUT sibling.
+  - **Text corrections, each re-derived:** the screw's `-np > 1` stop is
+    `BCS WITH LAGRANGE MULTIPLIER NOT ENABLED FOR NSPMD > 1`
+    (`lag_mult.F:667-671`, the `/BCS/LAGMUL` check before the JOINT one at
+    `:682-686`; re-run `-Both -Np 2 -Nt 4`: no cycle row printed); LS-DYNA's
+    nut moved 12.08-12.35 mm/rad at the fifths (12.25 at its t_end; the
+    reference `nodout`), and 183.59 mm is LS-DYNA at the converted run's last
+    sample (t 0.09995) — 183.72 at its own t_end; the spotweld rupture
+    4.5-6.0 % early (from its own times); `sph/bird`'s Nu-1 arm IE RMS 44.37
+    % on both arms (the round's scorer); `channel_C` RMS 0.03 / 0.10 (the
+    campaign re-run); `mainboltaexpl`'s control scaled `K2` AND `K3`; B5's
+    density arm also stated the `/EOS/GRUNEISEN` RHO_0 cell; the routed
+    `ex_02` at `--qstat-dtscal 0.1` reaches the same END IE (its rows 1-19
+    differ by up to 0.8 %, re-measured nt 4); `ex_15`'s TYPE20 base is not
+    reproducible RUN TO RUN — of ten fresh base runs nine end at +0.03 % and
+    one nt-4 run at −0.04 % — not "across nt"; its KE RMS is the campaign's
+    17.45; the LIGHT margin on `plates.nrbc` is 4.10; citations re-pointed
+    (`spmd_msin.F:556-557`, `smorth3.F:326-328`; the rigid-part point-mass
+    claim cites its `d3hsp` measurement, not Theory R16 eq. 29.23, whose own
+    term is a density integral — in A2's texts and round 6's A7 texts);
+    the ledger in this round's header and in ROADMAP is labelled the
+    EXPECTATION and followed by the MEASURED one (match 34 with the 2
+    `end_value_flip` rows, deviation 138); ROADMAP item 13's four rotating
+    keys are measured (report §0.28); the two moved expectations the round-7
+    list missed are named (`JointScrewIsStillRefused`, `GruneisenZeroA`).
+  - **Sweep, measured at the last code commit `d0ea87e`** (the 356
+    joblist keys from `F:`, a pristine detached checkout, `k2rad.__file__`
+    asserted per child, `PYTHONDONTWRITEBYTECODE=1`, porcelain `--ignored`
+    empty before and after): **0 byte movers** — the campaign
+    mirror equals the head's bytes on 356 / 356 keys (712 `.rad`), and a
+    second pass at `b483b12` agrees (356 / 356), so every campaign figure
+    covers this head; **61 warning-only movers on 58 emitted models**
+    against `b483b12`, every changed sentence attributed — A2's point-mass
+    sentence on its 56 keys / 53 models (15 of them with the re-pointed
+    `/SH3N` citation), the SPH Nu clause (`sph/bird`, `impact`), the EFAIL
+    range (the Yaris roof crush giant), B5's density arm (`bird-el`), the
+    LIGHT clause (`gnonspring`) and the screw texts with the TH_reaction
+    note (`EXP_SC_JOINT_SCREW`); 0 warning-COUNT movers. The B4 main side,
+    the axial curve id, ERROR 148 and the stabilisation-only sentence reach
+    no roster key. Nothing is re-converted or re-run: the campaign report's
+    §0.29 records the sweep and corrects §0.28 / §0.28.1 / §0.28.3 in five
+    marked places (`EXP_SC_JOINT_REV_TRANS`'s superseded row, the
+    `stagnation_A/B` windows, the 183.59 label, `mainboltaexpl`'s `K2` and
+    `K3`, the two mirror logs); the ledger and `db.json` are unchanged.
+  - **Tests:** 5793 → **5803 passed** / 2 skipped /
+    12179 subtests at the head (+10: test_20, `ImflagNamed.test_6`,
+    test_3b, test_4b, `LightClauseNumbers.test_8`,
+    `test_th_reaction_names_the_lagmul_drive_zero_channel`,
+    `SpotweldShearYieldAndEfail.test_10`, and the post-review guard's
+    three). EXPECTED VALUES MOVED: `MpcOnTiedSecondaryNode`'s
+    `test_a_term_on_main_side_nodes_only_is_converted` is now
+    `test_a_term_on_main_side_nodes_is_refused` (the scope changed), its
+    neither-side probe moved to plate-B nodes 25 / 27 (node 5 is a main
+    node) and its secondary-side probe pairs node 20 with node 26; round
+    5's `RbodyProducerCountIsStatedOnce` citation run re-derived after
+    `rbody.py` grew (1052 / 1495 / 1607 / 1796 / 1953 / 2077); the
+    validation round's guard needles 44.15 → 44.37 and the A3 help needle
+    4.6-6.0 → 4.5-6.0. mypy 0 in the dev venv and with
+    `--no-site-packages`; ruff clean; `--help` renders. **Mutations, the whole suite each on a throwaway
+    detached worktree, line-count preserving:** **19 of 19 caught**, each by the test written for it — nine on the
+    code verifier's survivors and B4's new screen (the tiebreak line
+    blanked; the main-side screen off, swapped, unresolved, keyed on the
+    SSID; `A2-13`, `A5-10`, `A1-8`, `A3-12`) and ten on this round's own
+    changes (the HELD check, the prescribed note, the ERROR-148 clause on
+    each announcement and its node set, the stabilisation-only flag on
+    each call and its digit test, the TH_reaction note, the axial curve
+    back on the raw counter).
 - **R14 CAMPAIGN TRIAGE batch, round 7 — PART B (fluids, materials, frames,
   joints and the docs).** One commit per item; every figure below is a
   measured arm against the LS-DYNA reference on `F:` or a hand-built coupon
