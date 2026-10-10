@@ -9115,9 +9115,13 @@ _MPC_REFUSAL_NOTES = {
             "itagsl2.F:92 / :99-104) - still ends NORMAL with a 99.9 % "
             "energy error, with a CONFLICTING /MPC (IE 6237 against external "
             "work 44.35) and with a REDUNDANT one (0.1 % at cycle 1000, "
-            "19.6 % at 3000); Spotflag 27 held on that probe (-0.2 / "
-            "-0.4 %), but the Spotflag-28 mechanism is not characterised, so "
-            "no Spotflag is exempt",
+            "19.6 % at 3000): the redundant term is not redundant on "
+            "Spotflag 28, because the tie point follows its main facet's "
+            "rigid fit (i2vit3.F:386-389), so the term reaches the main "
+            "nodes - and a plain /INTER/TYPE2 is outside the Lagrange "
+            "system (lag_ntag.F:131): INTTI2 overwrites the secondaries "
+            "(resol.F:7675) before LAG_MULT corrects the main nodes "
+            "(:7901); no Spotflag is exempt",
     "tied_main": "a node of a tied interface's MAIN side may not carry one "
                  "either - the same WARNING box names tied-interface "
                  "MEMBERS, not one side; MEASURED (nt 4 = nt 2) on the same "
@@ -9132,7 +9136,23 @@ _MPC_REFUSAL_NOTES = {
                  "the tie (20.35 against 20.36) balance; the main side is "
                  "the MSID side's nodes, which for a part side includes a "
                  "solid's interior nodes (an over-approximation that can only "
-                 "refuse more)",
+                 "refuse more); the mechanism, READ from the code order (not "
+                 "instrumented): a plain /INTER/TYPE2 is outside the Lagrange "
+                 "system (lag_ntag.F:131 admits a TYPE2 only when IPARI(33) "
+                 "= 1, which only /INTER/LAGMUL/TYPE2 sets), and every cycle "
+                 "INTTI2 (resol.F:7675) overwrites each kinematic secondary's "
+                 "velocity and acceleration with its main facet's motion "
+                 "(i2vit3.F:504-509 / :810-815) before LAG_MULT (resol.F:7901) "
+                 "corrects the main node - a non-zero multiplier on a main "
+                 "node never reaches the secondaries on its facets, and the "
+                 "next reset creates energy. MEASURED on second geometries "
+                 "(nt 4 = nt 2, window 0..3 ms): two solid blocks, an /MPC on "
+                 "two main nodes, IE 4.005e4 against external work 306.1 "
+                 "(x130.9) on Spotflag 28 and 1.899e4 against 375.7 (x50.54) "
+                 "on Spotflag 27; a shell edge tied to a solid face x1983 on "
+                 "Spotflag 27; a term between a secondary and nodes outside "
+                 "every tie balances (-0.01 % with the tie's contact energy "
+                 "counted)",
 }
 
 

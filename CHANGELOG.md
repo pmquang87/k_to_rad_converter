@@ -305,6 +305,27 @@ Prior history (before this changelog was introduced) is summarized in the
     (its refused arm takes TC 1, a free DOF, since TC 3 is held) and
     `test_the_F_deck` → `test_the_synthetic_deck`; the three
     `writer/rbody.py:` registration-line citations moved with the pad hook.
+  - **B9 — B4's tied-node refusal notes now state the measured mechanism
+    (text only).** A plain `/INTER/TYPE2` is outside OpenRadioss's Lagrange
+    system (`lag_ntag.F:131` admits a TYPE2 only when `IPARI(33) = 1`, which
+    only `/INTER/LAGMUL/TYPE2` sets, `hm_read_inter_lagmul.F:92-93`), and
+    every cycle INTTI2 (`resol.F:7675`) overwrites the kinematic secondaries
+    with their main facet's motion (`i2vit3.F:504-509` / `:810-815`) before
+    LAG_MULT (`:7901`) corrects their main node — a reading of the code
+    order, not instrumented. On second geometries (the round-8 critic's G4
+    S / U arms, nt 4 = nt 2, window 0..3 ms; the ratios re-read here from
+    their T01 GLOBAL groups at the last fifth) an `/MPC` on main nodes creates
+    energy on BOTH Spotflags (solid blocks: IE + KE x130.9 the external work
+    on 28, x50.54 on 27; a shell edge on a solid face x1983 on 27), while a
+    term between a secondary and nodes outside every tie balances (−0.003 /
+    −0.006 / −0.009 / −0.011 / −0.011 % at the fifths with the tie's contact
+    energy counted; the listing's ERROR column, which leaves it out, prints
+    −1.1 %). The round-7 note called the mechanism "not characterised" and
+    implied Spotflag 27 was safe ("held on that probe"): both are corrected,
+    here and in ROADMAP (round-7 item 14 and the B4 record); B4 keeps
+    refusing every Spotflag, both sides. 0 movers (B4 never fires on a
+    corpus). The 'tied' needle `no Spotflag is exempt` survives on purpose:
+    it now closes the new sentence.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

@@ -2150,8 +2150,9 @@ measurement that decided it and the deck that would decide it next.
     a term on a SECONDARY node of any emitted `/INTER/TYPE2` refuses the card
     by name, whatever the Spotflag — the auto-penalty exemption was REFUTED on
     the round-7 critic's two-plate probe (Spotflag 28 ends NORMAL at a 99.9 %
-    energy error with a conflicting or a redundant `/MPC`; Spotflag 27 held on
-    that one geometry), round-7 item 14; the refused card is byte-identical to
+    energy error with a conflicting or a redundant `/MPC`; Spotflag 27
+    balanced on that one geometry only — round 8 measured it diverging on
+    two others), round-7 item 14; the refused card is byte-identical to
     `--no-constrained-linear` (re-checked on the probe); reach 0. The
     post-review round extended it to the MAIN side: round 7 had kept
     main-side terms out of scope on the starter's tag loop (`itagsl2.F:95-96`,
@@ -2391,11 +2392,18 @@ that decided it and the deck that would decide it next.
     a conflicting OR a redundant `/MPC` ends NORMAL at a 99.9 % energy error
     on the critic's Ishell-12 two-plate probe (IE 6237 against external work
     44.35; the redundant one 0.1 % at cycle 1000, 19.6 % at 3000); Spotflag 27
-    held on that one geometry; uncharacterised — B4 refuses on every Spotflag
-    regardless; a second geometry or element would characterise it. The
-    post-review round measured the MAIN side on the same probe (99.9 % on
-    Spotflag 28 AND 27, B4 now refuses it too); a term on a node NEAR a tie
-    but on neither side balanced on that probe (IE 20.35 against 20.36).
+    balanced on that one geometry only. **Characterised in round 8** (a
+    reading of the code order, not instrumented): the plain `/INTER/TYPE2` is
+    outside the Lagrange system (`lag_ntag.F:131`) and INTTI2
+    (`resol.F:7675`) overwrites the kinematic secondaries before LAG_MULT
+    (`:7901`) corrects their main node; the second geometries diverge on BOTH
+    Spotflags (solid blocks x130.9 on 28 and x50.54 on 27, a shell edge on a
+    solid face x1983 on 27) while a secondary-to-free-node term balances
+    (−0.01 %, the tie's contact energy counted) — B4 stays as shipped
+    (round-8 NOT list entry 26). The post-review round measured the MAIN side
+    on the same probe (99.9 % on Spotflag 28 AND 27, B4 now refuses it too);
+    a term on a node NEAR a tie but on neither side balanced on that probe
+    (IE 20.35 against 20.36).
 15. **The engine's ×(−3) initial momentum on the implicit dynamic path**
     (round-6 item 12): the upstream reproducer is packaged (Z-momentum
     −2.0993170 → +6.2979510 at the first converged increment on one starter

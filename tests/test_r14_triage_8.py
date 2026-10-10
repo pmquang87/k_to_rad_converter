@@ -3225,6 +3225,59 @@ class JointScrewRound8(unittest.TestCase):
         self.assertNotIn(ids["N1"], _standard_bcs_nodes(s2))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B9 — B4's two tied-node refusal notes state the measured mechanism
+# ═════════════════════════════════════════════════════════════════════════════
+
+_tied_plates = _t7._tied_plates
+
+
+class MpcTiedNotesRound8(unittest.TestCase):
+    """B9 (text only, 0 bytes): the 'tied' note no longer implies a
+    Spotflag-27 exemption nor calls the mechanism uncharacterised; the
+    'tied_main' note carries the mechanism read from the code order and the
+    second geometries (the round-8 critic's G4 S / U arms, nt 4 = nt 2)."""
+
+    def _sentence(self, deck):
+        res, starter, _e = _convert(deck)
+        self.assertNotIn("/MPC/", starter)
+        hits = [w for w in res.warnings if "NOT converted to /MPC" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        return hits[0]
+
+    def test_the_secondary_note(self):
+        """Node 20 is a secondary node of the Spotflag-28 tie, node 26 on
+        neither side: only the 'tied' note fires."""
+        why = self._sentence(_tied_plates(
+            "NODES", terms=((20, 3, 1.0), (26, 3, -1.0))))
+        for needle in ("i2vit3.F:386-389", "lag_ntag.F:131",
+                       "the redundant term is not redundant on Spotflag 28",
+                       "p.10-135", "itagsl2.F:92", "6237", "19.6 %",
+                       "no Spotflag is exempt"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, why)
+        for gone in ("held on that probe", "not characterised"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, why)
+
+    def test_the_main_side_note(self):
+        why = self._sentence(_tied_plates(
+            "NODES", terms=((8, 3, 1.0), (5, 3, -1.0))))
+        for needle in ("READ from the code order", "lag_ntag.F:131",
+                       "resol.F:7675", "resol.F:7901", "i2vit3.F:504-509",
+                       "x130.9", "x50.54", "x1983",
+                       "-0.01 % with the tie's contact energy counted",
+                       # the round-7 needles, every one kept
+                       "MEMBERS, not one side",
+                       "IE 1.25e6 against external work -3.9",
+                       "IE 3.83e4 against 48.2", "IE 1.80e6",
+                       "IE 20.27 against 20.28", "20.35 against 20.36",
+                       "can only refuse more"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, why)
+        self.assertNotIn("held on that probe", why)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
