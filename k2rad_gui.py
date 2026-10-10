@@ -119,6 +119,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          mat_null_pc_mu: bool = True,
                          joint_screw_gjoint: bool = True,
                          rigid_local_constraints: bool = True,
+                         bcs_union: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -285,6 +286,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_local_constraints"] = bool(rigid_local_constraints)
 
+    kwargs["bcs_union"] = bool(bcs_union)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -428,6 +431,7 @@ class ConverterGUI:
         self.mat_null_pc_mu = tk.BooleanVar(value=True)
         self.joint_screw_gjoint = tk.BooleanVar(value=True)
         self.rigid_local_constraints = tk.BooleanVar(value=True)
+        self.bcs_union = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -918,6 +922,12 @@ class ConverterGUI:
             variable=self.rigid_local_constraints).grid(
                 row=48, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_SPC union: no DOF restated in a second /BCS "
+                     "(P1-P3) - ON. Removes starter WARNING 312, 0 physics",
+            variable=self.bcs_union).grid(
+                row=49, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1180,6 +1190,7 @@ class ConverterGUI:
                 mat_null_pc_mu=self.mat_null_pc_mu.get(),
                 joint_screw_gjoint=self.joint_screw_gjoint.get(),
                 rigid_local_constraints=self.rigid_local_constraints.get(),
+                bcs_union=self.bcs_union.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1370,6 +1381,9 @@ class ConverterGUI:
         if not kwargs.get("rigid_local_constraints", True):
             bits.append("*MAT_RIGID CMO -1 written as nothing "
                         "(--no-rigid-local-constraints)")
+        if not kwargs.get("bcs_union", True):
+            bits.append("every *BOUNDARY_SPC card and the free-node guard written "
+                        "as before (--no-bcs-union)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

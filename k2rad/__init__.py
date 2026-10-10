@@ -245,6 +245,7 @@ def convert(
     mat_null_pc_mu: bool = True,
     joint_screw_gjoint: bool = True,
     rigid_local_constraints: bool = True,
+    bcs_union: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -777,6 +778,24 @@ def convert(
         both at 1.000x cycles; reach 3 deck keys on 3 emitted models
         (the Yaris roof crush giant convert-only). False restores the
         4f5b6e8 bytes and warnings.
+    bcs_union : bool
+        Write a node that two or more ``*BOUNDARY_SPC`` cards constrain
+        as ONE union per ``(node, skew)`` (round 8, A3 P1): a later
+        card no longer restates a DOF an earlier card fixes, a node
+        whose card adds new DOFs keeps them in a
+        ``BC_<id>_<Tra>_<Rot>`` card, a card left with no node writes
+        no ``/BCS``; and (P2 / P3) the implicit free-node guard writes
+        on a free node only the DOFs its global SPC / *NODE TC/RC
+        ``/BCS`` leaves free
+        (``fix_free_reference_nodes_<Tra>_<Rot>``). LS-DYNA keeps one
+        constraint per node and the starter ORs two ``/BCS``
+        (``hm_read_bcs.F:198`` ``MY_OR``), so the second card only fed
+        starter WARNING 312 - 0 physics: sphere1 1592 = 1592 cycles,
+        every printed row identical at nt 4 and nt 2; WARNING 312 24 /
+        339 / 4 / 30 / 449 / 486 -> none on sphere1 / ex_20 /
+        6.1.test13r / ex_08 / 11.2-11.3 / 11.5. Two skews never merge.
+        **On by default.** Reach 9 deck keys on 9 emitted models. False
+        writes every card as before (the 4f5b6e8 bytes).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1203,6 +1222,7 @@ def convert(
         mat_null_pc_mu=mat_null_pc_mu,
         joint_screw_gjoint=joint_screw_gjoint,
         rigid_local_constraints=rigid_local_constraints,
+        bcs_union=bcs_union,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

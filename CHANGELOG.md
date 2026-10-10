@@ -76,6 +76,38 @@ Prior history (before this changelog was introduced) is summarized in the
     — the member code is now DROPPED and named by default (the probe's CNRB
     states CON2 111000, so the drop is exact); round 7's assertions are kept
     verbatim under `rigid_local_constraints=False`.
+  - **A3 — a node that two SPC sources constrain was written in two `/BCS`;
+    now ONE union per skew (default ON, `--no-bcs-union`, one flag for
+    P1-P3).** P1 (`loads._make_bcs`): per `(node, skew)` a `*BOUNDARY_SPC`
+    card no longer restates a DOF an earlier card states — remainders in a
+    `BC_<id>_<Tra>_<Rot>` card, the card's other nodes in a
+    `BC_<id>_not_restated` group, a card left with no node writes no `/BCS`,
+    two skews never merged (named, ERROR 148). P2 / P3
+    (`loads._make_free_node_constraints`): the implicit free-node guard
+    writes on a free node only NOT(global SPC OR its `*NODE` TC/RC /
+    `*CONSTRAINED_GLOBAL` `/BCS`), the `111 111` group first under its old
+    titles (byte identity without a hit); a skewed SPC is not subtracted
+    (the guard's global card there is ERROR 148, named, reach 0). 0 physics
+    by `hm_read_bcs.F:198` `MY_OR` (LS-DYNA keeps one constraint per node:
+    sphere1.d3hsp 120 SPC nodes for 124 rows); starter WARNING 312 (one
+    condition per DOF both cards fix, `kinchk.F:945-947`) 24 / 339 / 4 /
+    30 x3 / 449 / 449 / 486 -> none on sphere1 / ex_20 / 6.1.test13r / ex_08
+    x3 / 11.2 / 11.3 / 11.5 (measured, starter at nt 4). Base-paired engine
+    runs: sphere1 (MATCH) 1592 = 1592 cycles, every printed row identical at
+    nt 4 AND nt 2 (END IE -1.66 / KE -1.73 % at LS t 9.99563e-4 on both);
+    ex_20 12 = 12 cycles, MUMPS FINAL ND / NZ 4396 / 54549 on both;
+    6.1.test13r 2 = 2, 19039 / 242287 (the rows differ only in the printed
+    controlling shell, an argmin tie); ex_08_beam_elform_1 2 = 2, 83 / 315.
+    The `.rad` bytes equal the pre-research patch arm's
+    (`r8pre/g4t/t_union_patch_v1.diff`) on all nine movers. Reach 9 deck
+    keys on 9 emitted models (514 nodes / 1841 DOFs; `_0000.rad` only; 11.2
+    / 11.3 / 11.5 are refused rows, re-converted only); non-roster 22 keys
+    on 10 models (Ryan_Lee W12 / W9 / W7_3P_Bending, Model-318_Achshebel);
+    the id shift on ex_20 re-texts its /IMPTEMP sentence (90014 -> 90015).
+    Starter probes (nt 4): the union probes 0 errors and no WARNING 312, their
+    opt-out arms WARNING 312 (2 / 2 / 1 conditions); the two-skew probe and
+    the skewed-SPC free node ERROR 148 on both arms (the deck's own clash,
+    named). No existing test changed its expected value.
 
 - **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
   DEFAULT changes move campaign VERDICTS by measurement, not by definition:

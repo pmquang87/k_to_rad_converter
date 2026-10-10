@@ -2,6 +2,8 @@
 
   A1  *MAT_RIGID CMO -1 -> /BCS in the /SKEW of CON1, one skew per node
       (default ON, --no-rigid-local-constraints)
+  A3  the non-rigid double /BCS union: P1 BC_n + BC_n, P2 BC_n + the
+      free-node guard, P3 the guard + *NODE TC/RC (default ON, --no-bcs-union)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are imported from tests/test_r14_triage_7.py (functions only,
@@ -425,6 +427,198 @@ class RigidLocalConstraints(unittest.TestCase):
         self.assertFalse(_has(r_off.warnings, "constrains the body at XSPC"))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# A3 — the non-rigid double /BCS union (P1 BC_n + BC_n, P2 BC_n + fix_free,
+#      P3 fix_free + node_tc_rc)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _digits(code: str):
+    return [int(c) for c in code]
+
+
+def _spc_node(nid: int, cid: int, code: str) -> str:
+    return "*BOUNDARY_SPC_NODE\n" + _row(nid, cid, *_digits(code)) + "\n"
+
+
+def _spc_set(sid: int, cid: int, code: str) -> str:
+    return "*BOUNDARY_SPC_SET\n" + _row(sid, cid, *_digits(code)) + "\n"
+
+
+def _nset(sid: int, nodes) -> str:
+    return "*SET_NODE_LIST\n" + _row(sid) + "\n" + _row(*nodes) + "\n"
+
+
+_IMP = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+
+
+def _free_node(tc: int = 0, rc: int = 0) -> str:
+    """Node 50, attached to nothing: the implicit free-node guard's node."""
+    return ("*NODE\n" + f"{50:>8}{100.0:>16.6f}{100.0:>16.6f}{0.0:>16.6f}"
+            f"{tc:>8}{rc:>8}\n")
+
+
+def _plates(extra: str) -> str:
+    """round 7's probe pair with a CMO-0 *MAT_RIGID plate (nodes 1-9, main 19)
+    and the elastic plate (nodes 10-18) - the A3 probes' carrier."""
+    return _a1_deck(cmo=0.0, con1=0, con2=0, tc=0, extra=extra)
+
+
+_P2_SHARED = (_nset(101, [10, 11]) + _nset(102, [10, 12]) + _nset(103, [10, 13])
+              + _spc_set(101, 0, "110001") + _spc_set(102, 0, "011100")
+              + _spc_set(103, 0, "001010"))
+_WT1 = "are stated by two or more *BOUNDARY_SPC cards in one system"
+
+
+class NonRigidBcsUnion(unittest.TestCase):
+    """A3 (round 8): a node that two *BOUNDARY_SPC cards (P1), a global deck
+    SPC and the implicit free-node guard (P2), or a *NODE TC/RC code and the
+    guard (P3) constrain was written in TWO /BCS. LS-DYNA keeps ONE
+    constraint per node and the starter ORs the cards (hm_read_bcs.F:198
+    MY_OR), so the second card only fed starter WARNING 312 (one condition
+    per DOF both cards fix). Now one union per (node, skew).
+
+    Starter runs (nt 4, rcv_r8i_implA_a3_<x>, harvested into
+    implA_out/runs/): recorded in each test."""
+
+    def test_1_two_identical_cards_on_one_node(self):
+        res, starter, _e = _convert(_plates(_spc_node(14, 0, "111111")
+                                            + _spc_node(14, 0, "111111")))
+        self.assertEqual(_bcs_card(starter, "BC_1")[:2], ("111", "111"))
+        self.assertIsNone(_bcs_card(starter, "BC_2"))
+        self.assertTrue(_has(res.warnings, "*BOUNDARY_SPC: 6 DOF(s) on 1 "
+                             "node(s) (node 14)", _WT1,
+                             "1 card(s) write no /BCS (BC_2)"), res.warnings)
+
+    def test_2_three_sets_on_one_corner_keep_the_union(self):
+        """Hand derivation: card 2 (011 100) meets 110 001 on Ty -> corner 10
+        keeps z + rx in BC_2_001_100, node 12 stays on BC_2 in a
+        not_restated group; card 3 (001 010) meets 111 101 on Tz -> 10 keeps
+        ry in BC_3_000_010. The union on 10 is 111 111. Starter (a3_2): 0
+        errors, no WARNING 312; the opt-out arm (a3_2off): WARNING 312, '2
+        INCOMPATIBLE KINEMATIC CONDITIONS' (Ty and Tz restated)."""
+        res, starter, _e = _convert(_plates(_P2_SHARED))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["BC_1"], ("110 001", [10, 11]))
+        self.assertEqual(g["BC_2"], ("011 100", [12]))
+        self.assertEqual(g["BC_2_001_100"], ("001 100", [10]))
+        self.assertEqual(g["BC_3"], ("001 010", [13]))
+        self.assertEqual(g["BC_3_000_010"], ("000 010", [10]))
+        self.assertIn("\nBC_2_not_restated\n", starter)
+        union = ["0"] * 6
+        for t in ("BC_1", "BC_2_001_100", "BC_3_000_010"):
+            for i, c in enumerate(g[t][0].replace(" ", "")):
+                if c == "1":
+                    union[i] = "1"
+        self.assertEqual("".join(union), "111111")
+        self.assertTrue(_has(res.warnings, "2 DOF(s) on 1 node(s) (node 10)",
+                             "0 card(s) write no /BCS",
+                             "1 node(s) keep the remaining DOFs"),
+                        res.warnings)
+
+    def test_3_two_skews_are_never_merged(self):
+        """A SYSTEM-CID card and a global card on one node: both written and
+        named. Starter (a3_3 and a3_3off): ERROR 148 on BOTH arms - the
+        deck's own clash, which the union neither causes nor hides."""
+        res, starter, _e = _convert(_plates(_SYS5 + _spc_node(14, 5, "100000")
+                                            + _spc_node(14, 0, "010000")))
+        self.assertEqual(_bcs_card(starter, "BC_1")[:3], ("100", "000", 5))
+        self.assertEqual(_bcs_card(starter, "BC_2")[:3], ("010", "000", 0))
+        self.assertTrue(_has(res.warnings, "node(s) 14 are constrained in "
+                             "two different systems (skews 0, 5)", "ERROR 148"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, _WT1), res.warnings)
+
+    def test_4_no_shared_node_is_byte_identical(self):
+        deck = _plates(_spc_node(14, 0, "111000") + _spc_node(15, 0, "000111"))
+        res, s_on, e_on = _convert(deck)
+        _r, s_off, e_off = _convert(deck, bcs_union=False)
+        self.assertEqual(s_on, s_off)
+        self.assertEqual(e_on, e_off)
+        self.assertFalse(_has(res.warnings, _WT1))
+
+    def test_5_P2_the_guard_skips_what_the_SPC_fixes(self):
+        res, starter, _e = _convert(_plates(_IMP + _free_node()
+                                            + _spc_node(50, 0, "110001")))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["fix_free_reference_nodes_001_110"],
+                         ("001 110", [50]))
+        self.assertNotIn("fix_free_reference_nodes", g)
+        self.assertTrue(_has(res.warnings, "Free-node guard x *BOUNDARY_SPC: "
+                             "3 DOF(s) on 1 free node(s) (node 50)",
+                             "0 node(s) need no guard /BCS"), res.warnings)
+        res6, s6, _e6 = _convert(_plates(_IMP + _free_node()
+                                         + _spc_node(50, 0, "111111")))
+        self.assertEqual([t for t in _bcs_groups(s6)
+                          if t.startswith("fix_free_reference")], [])
+        self.assertTrue(_has(res6.warnings, "6 DOF(s) on 1 free node(s) "
+                             "(node 50)", "1 node(s) need no guard /BCS"))
+
+    def test_6_P3_the_guard_skips_what_the_TC_RC_code_fixes(self):
+        """*NODE TC 4 (x, y) on the free node. Starter (a3_6): 0 errors, no
+        WARNING 312 (the opt-out arm a3_6off: WARNING 312, 2 conditions)."""
+        res, starter, _e = _convert(_plates(_IMP + _free_node(tc=4)))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["node_tc_rc_110_000"], ("110 000", [50]))
+        self.assertEqual(g["fix_free_reference_nodes_001_111"],
+                         ("001 111", [50]))
+        self.assertTrue(_has(res.warnings, "Free-node guard x *NODE TC/RC: "
+                             "2 DOF(s) on 1 free node(s) (node 50)",
+                             "(0 need none)"), res.warnings)
+
+    def test_7_a_rigid_main_node_takes_the_union_too(self):
+        """The W7_3P_Bending shape (two SPC cards on members of one rigid
+        indenter, re-pointed onto its main node): 010 000 then 011 000 ->
+        the second restates Ty, its remainder 001 000 stays. *MAT_RIGID body
+        (main 19) and a CNRB over the elastic plate (its synthesized main).
+        Starter (a3_7): 0 errors, no WARNING 312 (opt-out a3_7off: WARNING
+        312, 1 condition)."""
+        res, starter, _e = _convert(_plates(_spc_node(1, 0, "010000")
+                                            + _spc_node(2, 0, "011000")))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["BC_1"], ("010 000", [19]))
+        self.assertNotIn("BC_2", g)
+        self.assertEqual(g["BC_2_001_000"], ("001 000", [19]))
+        self.assertTrue(_has(res.warnings, "1 DOF(s) on 1 node(s) (node 19)",
+                             "1 card(s) write no /BCS (BC_2)"), res.warnings)
+        cnrb = (_nset(7, [10, 11, 12, 13, 14, 15, 16, 17, 18])
+                + "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(50, 0, 7) + "\n"
+                + _spc_node(10, 0, "010000") + _spc_node(11, 0, "011000"))
+        rc, sc, _ec = _convert(_plates(cnrb))
+        gc = _bcs_groups(sc)
+        main = gc["BC_1"][1]
+        self.assertEqual(len(main), 1)
+        self.assertEqual(gc["BC_2_001_000"], ("001 000", main))
+        self.assertNotIn("BC_2", gc)
+
+    def test_8_a_skewed_SPC_on_a_free_node_is_named(self):
+        """The guard cannot subtract a skewed SPC (its digits are axes of the
+        skew) and keeps 111 111 at skew 0 - ERROR 148, named (reach 0).
+        Starter (a3_8): ERROR 148 on both arms."""
+        res, starter, _e = _convert(_plates(_IMP + _SYS5 + _free_node()
+                                            + _spc_node(50, 5, "110000")))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["fix_free_reference_nodes"], ("111 111", [50]))
+        self.assertTrue(_has(res.warnings, "Free-node guard: free node(s) 50 "
+                             "carry a *BOUNDARY_SPC in /SKEW 5", "ERROR 148"),
+                        res.warnings)
+
+    def test_9_the_opt_out_restores_the_4f5b6e8_bytes(self):
+        """--no-bcs-union on probes 1, 2, 5, 6, 7 = the pristine 4f5b6e8
+        starter file (SHA measured from the pristine checkout)."""
+        for key, deck in _A3_DECKS().items():
+            with self.subTest(probe=key):
+                _r, starter, _e = _convert(deck, bcs_union=False)
+                self.assertEqual(_sha(starter), _PR8_SHA[key])
+
+
+def _A3_DECKS():
+    return {"t1": _plates(_spc_node(14, 0, "111111") + _spc_node(14, 0, "111111")),
+            "t2": _plates(_P2_SHARED),
+            "t5": _plates(_IMP + _free_node() + _spc_node(50, 0, "110001")),
+            "t6": _plates(_IMP + _free_node(tc=4)),
+            "t7": _plates(_spc_node(1, 0, "010000") + _spc_node(2, 0, "011000"))}
+
+
 def _OPT_OUT_DECKS():
     """The (l) probes, keyed like _PR8_SHA."""
     cnrb = _a1_deck(tc=0, extra=_VEC3 + (
@@ -451,6 +645,11 @@ _PR8_SHA = {
     "o": "8c3d5135082bf7ea3a345ba3a7bca07e1ad1e53c33901b700a5070819b10bee8",
     "p1": "ac5e5999f2e6d2f30573a6394fe0a13170ebeb86499c5dfd3b55671856e0f7bb",
     "p2": "e590033746a3c2519a1afc298c208cec7621a397010195f10934d1a5585801d2",
+    "t1": "1a7619913c039e8af216b50dbaca64b291a9b3f0206b86c0775ea5d2f0ce151f",
+    "t2": "9f219b9a06fffd711d7d0f69691480ba5df8fb9b525ca2fc749d1b3558cce203",
+    "t5": "8db993b10febc693848c688d07b6d3ebeab8a3c4f0db63bd9e3c9afc4675656d",
+    "t6": "71c4891f4964f5e3cf349de4222351ab0043b41141757559db5caa1ccf7f41dc",
+    "t7": "748a64ea6d848388762e6cfcbeb7fc5f5db1dd9e0cac352580b4b45342fe2cc0",
 }
 _PR8_WARN_SHA = {
     "a": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",

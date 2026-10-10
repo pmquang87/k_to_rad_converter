@@ -7907,6 +7907,20 @@ class ConvertOptions:
     # 41.95 -> 0.056 %, 150 LS blocks), cycles 1.000x. Reach 3 deck keys on 3
     # emitted models.
     rigid_local_constraints: bool = True
+    # --no-bcs-union: write every *BOUNDARY_SPC card and the implicit
+    # free-node guard's 111 111 card as before round 8 (R14 triage round 8,
+    # A3).
+    #
+    # ON by default. P1: per (node, skew) a *BOUNDARY_SPC card does not
+    # restate a DOF an earlier card states (remainders in
+    # BC_<id>_<Tra>_<Rot>, a card left with no node writes no /BCS); P2 / P3:
+    # the free-node guard writes NOT(global SPC OR TC/RC) per free node.
+    # LS-DYNA keeps one constraint per node; the starter ORs the cards
+    # (hm_read_bcs.F:198 MY_OR), so the second /BCS only fed WARNING 312,
+    # which counts the DOFs both cards fix. 0 physics: sphere1 1592 = 1592
+    # cycles, every printed row identical at nt 4 and nt 2. Reach 9 deck keys
+    # on 9 emitted models (514 nodes / 1841 DOFs).
+    bcs_union: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

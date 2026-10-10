@@ -171,10 +171,40 @@ def _make_rlinks(state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """``*BOUNDARY_SPC_NODE`` / ``_SET`` -> one ``/BCS`` ``BC_<id>`` per card,
+    on the card's own node set (``/GRNOD/NODE/<nsid>``, shared by every card
+    on that set and written once).
+
+    In this order, per card:
+
+      1. a rigid-body member is RE-POINTED onto its ``/RBODY`` main node
+         (``node_to_ind``; a ``/BCS`` on a secondary is inert,
+         ``rgbodv.F:150-155``);
+      2. a resolvable CID (``*DEFINE_COORDINATE_SYSTEM`` / ``_NODES``) becomes
+         the card's skew; anything else is written in the GLOBAL system, named;
+      3. (round 8, A1) a main node that carries its body's own SKEWED card
+         (``*MAT_RIGID`` CMO -1, a skewed CNRB ``_SPC`` card) leaves a card in
+         ANOTHER skew - the starter accepts one skew per node
+         (``hm_read_bcs.F:199-205``, ERROR 148) - and is named;
+      4. (round 8, A3 P1; ``--bcs-union``, default ON) the UNION per
+         ``(node, skew)``: a DOF an EARLIER card already states on that node
+         in that skew is not restated. LS-DYNA keeps ONE constraint per node
+         (sphere1.d3hsp prints 120 SPC nodes for its 124 deck rows) and the
+         starter ORs two ``/BCS`` into the same union (``hm_read_bcs.F:198``
+         ``MY_OR``), so a second card on a common DOF only fed starter
+         WARNING 312 - which counts the DOFs both cards fix
+         (``kinchk.F:945-947``), not nodes. A node whose card adds new DOFs
+         keeps them in a ``BC_<id>_<Tra>_<Rot>`` remainder card and group;
+         the card's other nodes go to a ``BC_<id>_not_restated`` group; a
+         card left with no node writes no ``/BCS`` at all (its set's
+         ``/GRNOD`` is still written). Two skews never merge (a digit is an
+         axis of its own skew) and a node in two skews is named. When no node
+         is shared the cards are byte-identical to 4f5b6e8.
+    """
     if not state.bcs_spcs:
         return []
     lines = ["#-  BOUNDARY CONDITIONS:", HDR]
-    
+
     node_to_ind = {}
     for pid, info in rbody_info.items():
         ind_node = info["ind_node"]
@@ -185,6 +215,13 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     # own body (empty under --no-rigid-local-constraints)
     skewed_cards = _rigid_skewed_cards(state)
     skew_drops: Dict[int, Tuple[str, str, int]] = {}
+    # round 8, A3 P1: (node, skew) -> the six digits an EARLIER card states
+    union = state.options.bcs_union
+    stated: Dict[Tuple[int, int], str] = {}
+    skews_of: Dict[int, Set[int]] = defaultdict(set)
+    merged_dofs: Dict[int, int] = defaultdict(int)
+    cards_gone: List[int] = []
+    rest_nodes: Set[int] = set()
     emitted_grnods: Set[int] = set()
     for bc in state.bcs_spcs:
         nsid = bc.nsid
@@ -225,29 +262,60 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
             for m in gone:
                 skew_drops[m] = (tra, rot, skew_id)
             card_nids = mapped_nids - gone
-        if not card_nids:
-            continue
-        if card_nids != mapped_nids:
-            grp = state.next_grnod_id()
-            set_title = state.node_sets.get(nsid, ("", []))[0]
+        # round 8, A3 P1: the union per (node, skew), in deck order
+        code = tra + rot
+        keep: List[int] = []
+        rest: Dict[str, List[int]] = defaultdict(list)
+        for n in sorted(card_nids):
+            skews_of[n].add(skew_id)
+            if not union:
+                keep.append(n)
+                continue
+            prev = stated.get((n, skew_id), "000000")
+            hit = sum(1 for c, p in zip(code, prev) if c == "1" and p == "1")
+            stated[(n, skew_id)] = "".join(
+                "1" if "1" in (c, p) else "0" for c, p in zip(code, prev))
+            if not hit:
+                keep.append(n)
+                continue
+            merged_dofs[n] += hit
+            new = "".join("1" if (c == "1" and p == "0") else "0"
+                          for c, p in zip(code, prev))
+            if "1" in new:
+                rest[new].append(n)
+                rest_nodes.add(n)
+        if keep:
+            if len(keep) == len(mapped_nids):
+                grnod = nsid               # nothing shared: the 4f5b6e8 card
+            else:
+                grnod = state.next_grnod_id()
             lines += [
                 f"/BCS/{bc.bc_id}",
                 f"BC_{bc.bc_id}",
                 "#  Tra rot   skew_ID  grnod_ID",
-                f"   {tra} {rot}{_i(skew_id)}{_i(grp)}",
+                f"   {tra} {rot}{_i(skew_id)}{_i(grnod)}",
                 HDR,
             ]
-            lines += _emit_grnod_node(
-                grp, f"{set_title or f'SET_{nsid}'}_one_skew",
-                sorted(card_nids))
-            continue
-        lines += [
-            f"/BCS/{bc.bc_id}",
-            f"BC_{bc.bc_id}",
-            "#  Tra rot   skew_ID  grnod_ID",
-            f"   {tra} {rot}{_i(skew_id)}{_i(nsid)}",
-            HDR,
-        ]
+            if grnod != nsid:
+                restated = len(keep) < len(card_nids)
+                set_title = state.node_sets.get(nsid, ("", []))[0]
+                lines += _emit_grnod_node(
+                    grnod, (f"BC_{bc.bc_id}_not_restated" if restated else
+                            f"{set_title or f'SET_{nsid}'}_one_skew"), keep)
+        elif card_nids:
+            cards_gone.append(bc.bc_id)
+        for new in sorted(rest):
+            rid = state.next_id()
+            gid = state.next_grnod_id()
+            rtitle = f"BC_{bc.bc_id}_{new[:3]}_{new[3:]}"
+            lines += [
+                f"/BCS/{rid}",
+                rtitle,
+                "#  Tra rot   skew_ID  grnod_ID",
+                f"   {new[:3]} {new[3:]}{_i(skew_id)}{_i(gid)}",
+                HDR,
+            ]
+            lines += _emit_grnod_node(gid, rtitle, rest[new])
         if nsid in emitted_grnods:
             continue          # several SPC cards on one set share the /GRNOD
         emitted_grnods.add(nsid)
@@ -256,6 +324,34 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     if skew_drops:
         state.warn("*BOUNDARY_SPC:" + _skew_drop_sentence(
             skew_drops, skewed_cards, "*BOUNDARY_SPC"))
+    if merged_dofs:
+        nn = sorted(merged_dofs)
+        state.warn(
+            f"*BOUNDARY_SPC: {sum(merged_dofs.values())} DOF(s) on {len(nn)} "
+            f"node(s) (node {_named(nn)}) are stated by two or more "
+            "*BOUNDARY_SPC cards in one system; LS-DYNA keeps ONE constraint "
+            "per node, the union of the DOFs, and the starter ORs two /BCS the "
+            "same way (hm_read_bcs.F:198 MY_OR), so a later card no longer "
+            "restates a DOF an earlier card fixes (the second /BCS only fed "
+            "starter WARNING 312, one condition per DOF both cards fix). "
+            f"{len(cards_gone)} card(s) write no /BCS"
+            + (" (" + ", ".join(f"BC_{c}" for c in cards_gone[:8])
+               + (" ..." if len(cards_gone) > 8 else "") + ")"
+               if cards_gone else "")
+            + f"; {len(rest_nodes)} node(s) keep the remaining DOFs in a "
+            "BC_<id>_<Tra>_<Rot> group. MEASURED on intro-by-j.-day sphere1 "
+            "(nt 4 and nt 2): 1592 = 1592 cycles, every printed row "
+            "identical, WARNING 312 24 -> none. --no-bcs-union writes every "
+            "card as before (round 8).")
+    cross = sorted(n for n, s in skews_of.items() if len(s) > 1)
+    if union and cross:
+        sk = sorted({s for n in cross for s in skews_of[n]})
+        state.warn(
+            f"*BOUNDARY_SPC: node(s) {_named(cross)} are constrained in two "
+            f"different systems (skews {', '.join(str(s) for s in sk)}); not "
+            "merged (a digit is an axis of its own skew), and the starter "
+            "accepts ONE skew per node: ERROR 148 (hm_read_bcs.F:199-205) will "
+            "stop it - state both in one system.")
     return lines
 
 
@@ -747,9 +843,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
 
     The implicit free-node guard is the fifth interaction, and it is resolved
     from the OTHER side: :func:`_make_free_node_constraints` runs later, drops
-    from its own ``111 111`` group any node this pass has already pinned in all
-    six DOFs, and keeps the rest (its mask is the superset, so a partially
-    pinned free node must still reach it).
+    any node this pass has already pinned in all six DOFs, and (round 8, A3
+    P3; ``--bcs-union``) writes on a partially pinned free node only the DOFs
+    this pass leaves free, in a ``fix_free_reference_nodes_<Tra>_<Rot>`` group
+    - the node is still fixed in all six (``MY_OR``) and no DOF twice.
 
     **Rule (b)'s reach is bounded by what registers itself.**
     ``state.imp_motion_dirs`` is filled by ``_register_imp_motion_nodes``,
@@ -11081,13 +11178,16 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # A node the *NODE TC/RC pass has ALREADY pinned in all six DOFs needs
     # nothing from this guard, and a second /BCS on it is starter WARNING 312
     # (INCOMPATIBLE KINEMATIC CONDITIONS — measured, 1 warning / 8 conditions
-    # on a two-/BCS coupon). Only the exact `111 111` case is subtracted: this
-    # guard's mask is the SUPERSET, so a free node the TC/RC pass pinned only
-    # partially must still arrive here or its remaining DOFs stay zero rows in
-    # the implicit tangent. The subtraction is done HERE rather than in the
-    # TC/RC pass because only this side knows the finished free set — the
-    # element walk above depends on registries (state.rbe3_nodes,
-    # state.connector_ground_nodes) that later sections fill.
+    # on a two-/BCS coupon). That exact `111 111` case leaves the free set
+    # here. A node pinned only PARTIALLY - by its TC/RC (or *CONSTRAINED_GLOBAL)
+    # /BCS or by a global *BOUNDARY_SPC / zero-scale prescribed motion - still
+    # arrives, and since round 8 (A3 P2 / P3, --bcs-union) the guard writes
+    # only the DOFs those cards leave free, so no DOF is fixed twice and every
+    # free node is still fixed in all six (MY_OR). The subtraction is done
+    # HERE rather than in the TC/RC pass because only this side knows the
+    # finished free set — the element walk above depends on registries
+    # (state.rbe3_nodes, state.connector_ground_nodes) that later sections
+    # fill.
     fully_pinned = {n for n, (tra, rot) in state.node_tc_rc_emitted.items()
                     if tra == "111" and rot == "111"}
     free = sorted(n for n in state.nodes
@@ -11104,15 +11204,99 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         "constraint holds them where they were placed and changes nothing "
         "that moves."
     )
-    bc_id = state.next_id()
-    grnod_id = state.next_grnod_id()
-    lines = [
-        "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
-        f"/BCS/{bc_id}",
-        "fix_free_reference_nodes",
-        "#  Tra rot   skew_ID  grnod_ID",
-        f"   111 111         0{_i(grnod_id)}",
-        HDR,
-    ]
-    lines += _emit_grnod_node(grnod_id, "free_reference_nodes", free)
+    if not state.options.bcs_union:
+        bc_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        lines = [
+            "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
+            f"/BCS/{bc_id}",
+            "fix_free_reference_nodes",
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   111 111         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(grnod_id, "free_reference_nodes", free)
+        return lines
+    # round 8, A3 P2 / P3: per free node the guard writes NOT(global SPC OR
+    # TC/RC) - the two sources are disjoint by screen (c) of the TC/RC pass.
+    # A *BOUNDARY_SPC with a CID is NOT subtracted (its digits are axes of its
+    # skew): the guard keeps 111 111 at skew 0 there, which the starter stops
+    # with ERROR 148 - named below (reach 0).
+    spc6 = {n: t + r for n, (t, r) in _global_spc_dofs(state).items()}
+    tcrc6 = {n: t + r for n, (t, r) in state.node_tc_rc_emitted.items()}
+    skewed_spc: Dict[int, int] = {}
+    for bc in state.bcs_spcs:
+        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+            for n in state.node_sets.get(bc.nsid, ("", []))[1]:
+                skewed_spc[n] = bc.cid
+    rem_groups: Dict[str, List[int]] = defaultdict(list)
+    spc_hit: Dict[int, int] = {}
+    tcrc_hit: Dict[int, int] = {}
+    spc_gone: List[int] = []
+    tcrc_gone: List[int] = []
+    for n in free:
+        s = spc6.get(n, "000000")
+        t = tcrc6.get(n, "000000")
+        both = "".join("1" if "1" in (a, b) else "0" for a, b in zip(s, t))
+        if "1" in s:
+            spc_hit[n] = sum(1 for a in s if a == "1")
+        if "1" in t:
+            tcrc_hit[n] = sum(1 for a, b in zip(t, s) if a == "1" and b == "0")
+        rem = "".join("0" if c == "1" else "1" for c in both)
+        if rem == "000000":
+            (spc_gone if "1" in s else tcrc_gone).append(n)
+            continue
+        rem_groups[rem].append(n)
+    lines = ["#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR]
+    # the 111 111 group FIRST and under today's titles (byte identity without a
+    # hit), then each remainder code; ids drawn only for a written card
+    for rem in sorted(rem_groups, key=lambda c: (c != "111111", c)):
+        bc_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        title = ("fix_free_reference_nodes" if rem == "111111" else
+                 f"fix_free_reference_nodes_{rem[:3]}_{rem[3:]}")
+        lines += [
+            f"/BCS/{bc_id}",
+            title,
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   {rem[:3]} {rem[3:]}         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(
+            grnod_id, "free_reference_nodes" if rem == "111111" else title,
+            rem_groups[rem])
+    if spc_hit:
+        nn = sorted(spc_hit)
+        state.warn(
+            f"Free-node guard x *BOUNDARY_SPC: {sum(spc_hit.values())} DOF(s) "
+            f"on {len(nn)} free node(s) (node {_named(nn)}) are already fixed "
+            "by the deck's global *BOUNDARY_SPC (or a zero-scale prescribed "
+            f"motion); the guard does not fix them again: {len(spc_gone)} "
+            "node(s) need no guard /BCS, the rest keep the remaining DOFs in a "
+            "fix_free_reference_nodes_<Tra>_<Rot> group. Every free node stays "
+            "fixed in all six DOFs (hm_read_bcs.F:198 MY_OR); MEASURED on "
+            "ex_08_beam_elform_1 (nt 4): 2 = 2 cycles, identical rows, MUMPS "
+            "83 / 315 on both, WARNING 312 30 -> none. --no-bcs-union writes "
+            "the guard's 111 111 card as before (round 8).")
+    if tcrc_hit:
+        nn = sorted(tcrc_hit)
+        state.warn(
+            f"Free-node guard x *NODE TC/RC: {sum(tcrc_hit.values())} DOF(s) "
+            f"on {len(nn)} free node(s) (node {_named(nn)}) are already fixed "
+            "by their TC/RC (or *CONSTRAINED_GLOBAL) /BCS; the guard writes "
+            "only the DOFs left free, in a fix_free_reference_nodes_<Tra>_<Rot> "
+            f"group ({len(tcrc_gone)} need none). Every free node stays fixed "
+            "in all six DOFs (hm_read_bcs.F:198 MY_OR); on 11.2.sqt_iga starter "
+            "WARNING 312 goes 449 -> none. --no-bcs-union writes the guard's "
+            "111 111 card as before (round 8).")
+    skw = sorted(n for n in free if n in skewed_spc)
+    if skw:
+        state.warn(
+            f"Free-node guard: free node(s) {_named(skw)} carry a *BOUNDARY_SPC "
+            f"in /SKEW {', '.join(str(s) for s in sorted({skewed_spc[n] for n in skw}))}; "
+            "the guard's global card on them makes the starter stop with ERROR "
+            "148 (one skew per node, hm_read_bcs.F:199-205) - give the node an "
+            "element or state its SPC globally.")
+    if len(lines) == 2:
+        return []
     return lines

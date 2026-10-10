@@ -3227,7 +3227,31 @@ honoured only for `_TRANSLATIONAL`, per the manual. `_FLEXION-TORSION` and
 and are reported as recognized-but-not-emitted (the joint itself still converts).
 
 ### Boundary conditions / motion
-`*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
+`*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`. **A node that two or more cards
+constrain is written as ONE union per skew** (round 8, default ON,
+`--no-bcs-union` restores the previous cards): a later card no longer restates
+a DOF an earlier card already fixes on that node in that skew — a node whose
+card adds new DOFs keeps them in a `BC_<id>_<Tra>_<Rot>` card and group, the
+card's other nodes move to a `BC_<id>_not_restated` group, a card left with no
+node writes no `/BCS` (its set's `/GRNOD` is still written), and two skews are
+never merged (a digit is an axis of its own skew; a node in two skews is
+starter ERROR 148 and named). The implicit free-node guard does the same
+against the deck's global SPC and the `*NODE` TC/RC / `*CONSTRAINED_GLOBAL`
+`/BCS`: it writes on a free node only the DOFs they leave free
+(`fix_free_reference_nodes_<Tra>_<Rot>`), so every free node is still fixed in
+all six DOFs and none twice. LS-DYNA keeps one constraint per node (sphere1's
+d3hsp lists 120 SPC nodes for its 124 deck rows) and the starter ORs two `/BCS`
+the same way (`hm_read_bcs.F:198`, `MY_OR`), so the second card only fed
+starter WARNING 312 — which counts the DOFs both cards fix, not nodes:
+sphere1 24, ex_20_thin_shell_elform_16 339, 6.1.test13r 4, ex_08_beam_elform_1
+/ _2 / _13 30 each, 11.2.sqt_iga and 11.3.sqt_iga_s 449, 11.5.nurbs 486 →
+none. 0 physics, measured at nt 4 base-paired with 4f5b6e8:
+`intro-by-j.-day/contact/sphere/sphere1.k` (a `match` row) 1592 = 1592 cycles
+with every printed row identical at nt 4 AND nt 2; ex_20 12 = 12 cycles,
+MUMPS FINAL ND / NZ 4396 / 54549 on both; 6.1.test13r 2 = 2 cycles, 19039 /
+242287 (the two rows differ only in which tied shell is printed as
+controlling); ex_08_beam_elform_1 2 = 2 cycles, 83 / 315. Reach 9 deck keys on
+9 emitted models (514 nodes / 1841 DOFs).
 `*NODE` card 1's own `TC`/`RC` cells → one `/GRNOD/NODE` + `/BCS` per distinct
 `(TC, RC)` pair, **on by default** (`--no-node-tc-rc-bcs` /
 `convert(node_tc_rc_bcs=False)` restores the old drop). Vol I R17 p.35-2 makes

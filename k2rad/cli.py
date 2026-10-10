@@ -661,6 +661,21 @@ def build_parser() -> argparse.ArgumentParser:
              "bytes.",
     )
     parser.add_argument(
+        "--bcs-union",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a node that two or more *BOUNDARY_SPC cards (or a global "
+             "deck SPC / a *NODE TC/RC code and the implicit free-node guard) "
+             "constrain as ONE union per skew instead of restating a DOF in a "
+             "second /BCS: LS-DYNA keeps one constraint per node and the starter "
+             "ORs the cards (hm_read_bcs.F:198 MY_OR), so the second /BCS only "
+             "fed starter WARNING 312 (sphere1 24, ex_20 339, ex_08 30, "
+             "11.2.sqt_iga 449 -> none). 0 physics: sphere1 1592 = 1592 cycles, "
+             "every printed row identical at nt 4 and nt 2. Different skews "
+             "never merge. ON by default; --no-bcs-union restores the previous "
+             "cards.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1338,6 +1353,7 @@ def main(argv=None) -> int:
         mat_null_pc_mu=args.mat_null_pc_mu,
         joint_screw_gjoint=args.joint_screw_gjoint,
         rigid_local_constraints=args.rigid_local_constraints,
+        bcs_union=args.bcs_union,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
