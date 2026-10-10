@@ -216,6 +216,37 @@ negative card-1 field 4 `QR/IRID` binds an `*INTEGRATION_BEAM` rule — see
 `*INTEGRATION_BEAM` (user cross-section integration rules: the `ICST = 0`
 `S/T/WF` cell cloud → `/PROP/TYPE18` integration points, or `ICST = 1..22`
 standard shapes → `Isect = ICST + 9` — see **Integrated beams**)
+**`*SECTION_SHELL` Card 2's `T1..T4` → their MEAN** (round 8, default ON,
+`--no-section-nodal-thickness-mean` writes `T1` alone, as before): Card 2 is
+the thickness at the element's four nodes (`T2..T4` default to `T1`), and
+LS-DYNA's d3hsp reproduces mean(T1..T4) on every element —
+`mat_transversely_anisotropic.cup-draw` (T 1000 / 1 / 1 / 1 → 250.75): its
+three rigid tools weigh 0.0223 / 0.0164 / 0.0139 in the starter with the
+mean, LS-DYNA's echo to the printed digit, and 0.0888 / 0.0655 / 0.0555 with
+`T1`. A card with one of `T2..T4` written, nonzero and different from `T1`
+writes the mean (blank or 0.0 = `T1`, the card default); the one cell feeds
+every consumer (the mass, round 7's `J` row, the lumper, offsets). MEASURED
+on cup-draw (nt 4, base-paired with 4f5b6e8, 150 LS blocks 0 < t ≤ 0.015):
+IE / KE history RMS 7.54 / 65.93 → 2.89 / 29.15 % of the LS peak, IE END
++11.90 → +6.09 %, 70686 → 70734 cycles — and the NAMED COST, printed in the
+same warning: OpenRadioss's own energy error grows, mean −4.39 → −17.88 %,
+rows below −20 %: 3857 → 18456 (mechanism not closed; the row stays
+deviation). `section_shell.hourglassing` moves 4.7625 → 4.762125: 6682 = 6682
+cycles, IE END +60.53 % on both arms (46 of 6682 printed rows differ, in the
+4th digit). Reach 2 deck keys on 2 emitted models.
+**A plane-strain `*SECTION_SHELL` (ELFORM 13 / 43 / 52 / 55) → thickness
+1.0** (round 8, default ON, `--no-plane-strain-unit-thickness` keeps `T1` and
+says so): Remark 6 of `*SECTION_SHELL` — formulations 13, 14, 15, 43, 44, 52
+and 55 ignore Card 2's thickness — and a plane-strain element integrates a
+unit depth: `ex_16_thin_shell_elform_13`'s rigid disk (T 25.4) weighs
+0.003447366 in the starter = LS-DYNA's 0.34473655E-02 (0.08756308 with `T1`),
+inertia 0.02225525 ×2 / 0.04451050 = LS-DYNA's. The element stays a 3-D
+shell, plane-STRESS through its thickness — the warning names that.
+Axisymmetric ELFORM 14 / 15 / 44 integrate per radian, which no thickness
+reproduces (`2Dlag`: LS-DYNA 2.1994e-4 against 0.0346368 here, ×157.5):
+named, never changed. Reach 1 deck key on 1 emitted model (`ex_16`, still
+stopped by its own starter ERRORs 274 / 314-317 — the same 10 lines on both
+arms) + 4 text movers.
 `*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
 `_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
 element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with
@@ -602,11 +633,13 @@ plasticity in axial AND shear (Vol II R17 p.2-708), so the shear yield force is
 converted weld goes deviation → match (IE / KE history RMS 23.53 / 62.56 →
 8.58 / 26.74 % of the LS peak at 1.107× the cycles). `mainboltaexpl` moves too
 (END IE / KE −72.72 / −11.18 → −81.87 / −83.15 %, history RMS 26.69 / 24.32 →
-31.32 / 28.24 %, nt 4) — by run sensitivity, not by the yield: its weld shear
-never exceeds 13789 against the new yield 29021, and the 65ff389 card with `K2`
-and `K3` scaled by `(1 − 1e-8)` (the size of the curve's slope nudge) moves it the same
-way (−80.35 / −73.95 %, RMS 30.46 / 29.08); its preloaded bolt spring collapses
-on every arm (the round-7 validation round's re-attribution). The yield
+31.32 / 28.24 %, nt 4) — not by the yield: its weld shear never exceeds 13789
+against the new yield 29021, and the 65ff389 card with `K2` and `K3` scaled by
+`(1 − 1e-8)` (the size of the curve's slope nudge) moved it the same way
+(−80.35 / −73.95 %, RMS 30.46 / 29.08): the row was hypersensitive because its
+`/PRELOAD/AXIAL` bolt collapsed. Round 8's A2 (`--bolt-rigid-contact`,
+`--fixed-curve-columns`) holds the bolt, and then the same cell moves only the
+4th KE digit on 60 of 58550 rows. The yield
 displacement carries a `1e-8` relative nudge so the printed curve's slope stays
 below the printed `K2` (starter WARNING 506 otherwise). A card that states
 `EFAIL` (below LS-DYNA's 1e19 "never" idiom) and **no** resultant failure cell
@@ -618,7 +651,22 @@ surface `Ifail 1` applies; measured on `spotweld.k` with
 `--spotweld-node-synthesis --beam-contact-secondary`: rupture 1.12650e-3 s
 against LS-DYNA's 1.17969e-3..1.19792e-3 s (4.5-6.0 % early). Beside resultant
 cells `EFAIL` is named, not converted (TYPE13 carries ONE criterion type per
-property); a 1e20-class `EFAIL` writes nothing. (Deliberately not `/MAT/LAW59`,
+property); a 1e20-class `EFAIL` writes nothing. **`DT` scales the weld UP to
+a step of DT** (round 8, default ON, `--no-spotweld-dt-mass-scaling` drops it
+as before): Remark 4 of `*MAT_SPOTWELD` scales the weld inertias in the first
+step so that their stable step is DT, and the TYPE13 step is
+`0.9·min(√(Mass/max K1..3), √(Inertia/(max K4..6 + max K2,3·L²)))`
+(`r2len3.F:226-246`, `STI = XM/DT²` at `:233`), so
+Mass′ = max(Mass, max K1..3·DT²) and
+Inertia′ = max(Inertia, (max K4..6 + max K2,3·L_max²)·DT²) start the weld at
+0.9 DT — up only, `L_max` the property's longest weld. MEASURED on
+`spotweld.k` under the opt-in rules 1 + 2 (nt 4, base-paired): Mass ×2.5
+(LS-DYNA's own factor), Inertia ×13.41, first step 9.000E-07 on the spring,
+last cycle 4791 → 1332 = LS-DYNA's problem cycle 1332, model mass +7.0 %,
+IE END −33.00 → −31.18 %. No default byte mover: `plates.mat100`'s DT 1e-9
+is below its weld's own step, and its warning now says the DT is inert.
+Round 7's ×13.42 factor applied the inertia factor to the mass as well
+(+58 % model mass) and is retracted. (Deliberately not `/MAT/LAW59`,
 which binds to `/PROP/TYPE43` connection *solids*, not springs.) Validate on a
 single-weld pull / lap-shear coupon; non-beam MAT_100 parts fall back to
 elastic with a loud warning
@@ -876,6 +924,27 @@ named — for the `*MAT_RIGID` card and the skewed CNRB `_SPC` card alike
 both cards ERROR 148); the implicit stabilisation of an unloaded free
 translation is never added to a skewed card, and a merged
 `*CONSTRAINED_RIGID_BODIES` slave's different code is named.
+**An `*ELEMENT_MASS` on a rigid body's SECONDARY node → `/ADMAS` on that
+node** (round 8, default ON, `--no-rigid-element-mass-admas` restores the fold
+and the drop): the starter adds an `/ADMAS` to its node before the rigid
+bodies (`hm_read_admas.F:247-248`), so the mass counts at its position in the
+body's centre of mass and inertia — LS-DYNA keeps a discrete mass at its
+node. Before, a `*MAT_RIGID` body folded every member's `*ELEMENT_MASS` into
+the `/RBODY` Mass field, which the starter places at the main node it moves
+to the centre of mass of the secondaries WITHOUT that mass, and a
+`*CONSTRAINED_NODAL_RIGID_BODY` secondary's mass was dropped altogether
+(neither the Mass field nor an `/ADMAS`). MEASURED (nt 4, base-paired):
+`sph/foam/foam.k`'s body CoG z 121.4891 → 150.9633 and xx / yy 1.922978 →
+2.238421 (LS-DYNA 150.96326 / 2.238), NEW MASS 0.02035675 on both, 12030 =
+12030 cycles, IE END +311.22 → +311.27 % (inert on that axial fall); a
+`--mass-weighted-inivel` probe (a rigid plate with 1e-4 on one corner and a
+velocity on one other node) starts at the rotational KE 8.094e-3 that
+LS-DYNA's momentum average gives, against 2.754e-3 (−66 %) with the fold —
+the written omega acts about the starter's own centre of mass. The Yaris
+roof crush's 12 CNRB bodies were 38-86 % light against LS-DYNA's d3hsp — the
+dropped masses exactly. The main node's own mass stays in the Mass field; an
+ICoG-4 body (`*PART_INERTIA`: TM supersedes) is unchanged. Reach 5 deck keys
+on 5 emitted models (foam + 4 Yaris giants, convert-only).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 
 `*INITIAL_VOID_PART` / `_SET` → recognized, **still listed as skipped** (no
@@ -2747,6 +2816,15 @@ nudge 9801.60 (+42.90 %), re-sorting by abscissa 4907.19 (−28.46 %). A reversa
 with no later point beyond `prev` is dropped, because LS-DYNA cannot evaluate it
 either. Every repair is warned, naming the point index and both values; a
 non-monotone `(x, y)` data set must state `DATTYP = 1` (Vol I R17 p.17-106)
+**A point line that a whitespace split cannot read as two numbers is read in
+LS-DYNA's fixed 2E20.0 columns** (round 8, default ON, `--no-fixed-curve-columns`
+restores the split alone): a blank field is 0.0, a comma line keeps the free
+read, and a line the split DOES read as two numbers keeps it (a misaligned
+free-format line is never re-read). `mainboltaexpl`'s fused `0.0055.0` /
+`0.005055.0` lines were dropped, so its `/FUNCT/11` kept 2 of its 4 points and
+the bolt never pulled (see `*INITIAL_AXIAL_FORCE_BEAM`); reach 1 deck key on 1
+emitted model (+ `camry-detailed-v5a`, 12 blank-abscissa lines). Not the
+`_SMOOTH` card and not `*DEFINE_FUNCTION`.
 `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)
@@ -4020,7 +4098,24 @@ without one is silently uncounted and produces zero force) and is truncated to i
 leading non-decreasing run — where LS-DYNA stops the initialization, and where
 Radioss releases the element into free elastic response *about* the plateau rather
 than snapping back (measured). `KBEND` is warned + dropped; `Damp` and `sens_id`
-are 0 because LS-DYNA states neither
+are 0 because LS-DYNA states neither. **The members of a rigid body holding an
+end node of the bolt stay on every penalty contact's secondary side** (round 8,
+default ON, `--no-bolt-rigid-contact` removes them as before): k2rad drops every
+rigid member from a contact's secondary node group, but LS-DYNA keeps them —
+`mainboltaexpl`'s d3hsp counts 1601 nodes for interface 1 (984 hex faces + 556
+shells) including the 68 CNRB 110 / 120 members k2rad removed — and these carry
+the clamp: without them the bolt collapsed to 0.00043 mm. Only the bodies
+holding a bolt end, only the penalty builders (`/INTER/TYPE7`, the general and
+`/INTER/TYPE25` routes; a tied `TYPE2` side and a force transducer keep the
+filter). Shipped together with the fixed-column curve read (`*DEFINE_CURVE`
+above), because each alone is worse on `mainboltaexpl` (the curve alone creates
+energy, IE END +19.20 %; the nodes alone never pull, IE −62.05 N.mm): with both,
+IE END −81.87 % → −8.49 %, history RMS IE / KE 31.32 / 28.24 → 9.19 / 10.22 %
+of the LS peak (1000 LS blocks, t ≤ 5e-3), the plates' IE against `matsum` RMS
+36.39 → 0.65 %, the bolt force against `swforc` RMS 29.11 → 0.91 %, at 1.131×
+the cycles (nt 4); the row stays deviation (KE END +11.86 %). Not closed: before
+the pull the bolt stays 2.196 mm long against LS-DYNA's 1.817 (`Inacti 5`
+keeps the 0.2 mm patch gap)
 
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`) → `/INTER/TYPE25` self-contact

@@ -4,6 +4,17 @@
       (default ON, --no-rigid-local-constraints)
   A3  the non-rigid double /BCS union: P1 BC_n + BC_n, P2 BC_n + the
       free-node guard, P3 the guard + *NODE TC/RC (default ON, --no-bcs-union)
+  A2  mainboltaexpl: the bolt-end rigid members stay on the penalty secondary
+      sides (--no-bolt-rigid-contact) + the fixed 2E20.0 *DEFINE_CURVE read
+      (--no-fixed-curve-columns)
+  A4  *SECTION_SHELL Card 2 T1..T4 -> their mean, with its named energy-error
+      cost (--no-section-nodal-thickness-mean)
+  A7  plane-strain ELFORM 13 / 43 / 52 / 55 -> thickness 1.0, axisymmetric
+      named (--no-plane-strain-unit-thickness)
+  A8  *ELEMENT_MASS on a rigid SECONDARY node -> /ADMAS on that node, both
+      producers (--no-rigid-element-mass-admas)
+  A6  *MAT_SPOTWELD DT -> the TYPE13 Mass / Inertia closed form
+      (--no-spotweld-dt-mass-scaling)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are imported from tests/test_r14_triage_7.py (functions only,
@@ -15,6 +26,7 @@ named outcome is recorded in the test's docstring.
 """
 
 import hashlib
+import math
 import unittest
 
 import test_r14_triage_7 as _t7
@@ -611,6 +623,738 @@ class NonRigidBcsUnion(unittest.TestCase):
                 self.assertEqual(_sha(starter), _PR8_SHA[key])
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# A2 — mainboltaexpl: the bolt clamp (l)-2 and the fixed-column curve (l)-3
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _curve_state(lines, header=None, **opts):
+    """Dispatch a lone *DEFINE_CURVE 11 with the given point lines; return the
+    state (``opts`` set on ConvertOptions before dispatch)."""
+    deck = ("*KEYWORD\n*DEFINE_CURVE\n" + (header or _row(11)) + "\n"
+            + "\n".join(lines) + "\n*END\n")
+    import os
+    import tempfile
+    from k2rad.handlers import dispatch
+    from k2rad.parser import parse_k_file
+    from k2rad.state import ConversionState
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "c.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    st = ConversionState()
+    for k, v in opts.items():
+        setattr(st.options, k, v)
+    for block in parse_k_file(path):
+        dispatch(block, st)
+    tmp.cleanup()
+    return st
+
+
+_MB_LINES = ["                 0.0                 0.0",
+             "              0.0025                 0.0",
+             "               0.0055.0",
+             "             0.005055.0"]
+
+
+def _grid(base: int, z: float):
+    """A 4 x 4 node grid (10 mm pitch) and its 3 x 3 quads: ids base+1..+16."""
+    nodes = [(base + 1 + j * 4 + i, 10.0 * i, 10.0 * j, z)
+             for j in range(4) for i in range(4)]
+    quads = []
+    for j in range(3):
+        for i in range(3):
+            n1 = base + 1 + j * 4 + i
+            quads.append((n1, n1 + 1, n1 + 5, n1 + 4))
+    return nodes, quads
+
+
+def _bolt_deck(cnrb120=True, tied=False, rigid20=False, extra="") -> str:
+    """The (i) probe: plates 10 (z 0, nodes 1001-1016) and 20 (z 2, nodes
+    2001-2016) in ONE *CONTACT_AUTOMATIC_SINGLE_SURFACE on a part set; an
+    ELFORM-9 *MAT_SPOTWELD bolt (beam 900, nodes 1 -> 2) under
+    *INITIAL_AXIAL_FORCE_BEAM; CNRB 110 = 4 plate-10 nodes + bolt end 1, CNRB
+    120 = 4 plate-20 nodes + bolt end 2, CNRB 130 = 4 OTHER plate-10 nodes.
+    ``rigid20``: plate 20 is a *MAT_RIGID part with bolt end 2 as an extra
+    node instead of CNRB 120; ``tied``: a *CONTACT_TIED_SURFACE_TO_SURFACE
+    (plate 10 on plate 20) instead of the single-surface contact."""
+    n10, q10 = _grid(1000, 0.0)
+    n20, q20 = _grid(2000, 2.0)
+    lines = ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.001), "*NODE"]
+    for nid, x, y, z in n10 + n20 + [(1, 15.0, 15.0, -1.0),
+                                     (2, 15.0, 15.0, 3.0),
+                                     (3, 15.0, 25.0, -1.0)]:
+        lines.append(f"{nid:>8}{x:>16.6f}{y:>16.6f}{z:>16.6f}")
+    lines += ["*PART", "plate 10", _row(10, 10, 10),
+              "*PART", "plate 20", _row(20, 10, 21 if rigid20 else 10),
+              "*PART", "bolt", _row(30, 30, 30),
+              "*SECTION_SHELL", _row(10, 2, 1.0, 2), _row(1.0, 1.0, 1.0, 1.0),
+              "*MAT_ELASTIC", _row(10, 7.85e-9, 210000.0, 0.3),
+              "*SECTION_BEAM", _row(30, 9), _row(10.0, 10.0, 0.0, 0.0),
+              "*MAT_SPOTWELD", _row(30, 7.85e-9, 210000.0, 0.3, 640.0, 9500.0),
+              "*ELEMENT_SHELL"]
+    eid = 0
+    for pid, quads in ((10, q10), (20, q20)):
+        for q in quads:
+            eid += 1
+            lines.append("".join(f"{v:>8}" for v in (eid, pid) + q))
+    lines += ["*ELEMENT_BEAM", "".join(f"{v:>8}" for v in (900, 30, 1, 2, 3)),
+              "*SET_BEAM", _row(100), _row(900),
+              "*DEFINE_CURVE", _row(9), f"{0.0:>20.6f}{0.0:>20.6f}",
+              f"{0.001:>20.6f}{1000.0:>20.6f}",
+              "*INITIAL_AXIAL_FORCE_BEAM", _row(100, 9, 1.0, 0),
+              "*SET_NODE_LIST", _row(110), _row(1006, 1007, 1010, 1011, 1),
+              "*SET_NODE_LIST", _row(130), _row(1001, 1002, 1005, 1013),
+              "*CONSTRAINED_NODAL_RIGID_BODY", _row(110, 0, 110),
+              "*CONSTRAINED_NODAL_RIGID_BODY", _row(130, 0, 130)]
+    if rigid20:
+        lines += ["*MAT_RIGID", _row(21, 7.85e-9, 210000.0, 0.3),
+                  _row(0.0, 0, 0), _row(0.0),
+                  "*CONSTRAINED_EXTRA_NODES_NODE", _row(20, 2)]
+    elif cnrb120:
+        lines += ["*SET_NODE_LIST", _row(120), _row(2006, 2007, 2010, 2011, 2),
+                  "*CONSTRAINED_NODAL_RIGID_BODY", _row(120, 0, 120)]
+    if tied:
+        lines += ["*CONTACT_TIED_SURFACE_TO_SURFACE", _row(10, 20, 3, 3),
+                  _row(0.0), _row(0.0)]
+    else:
+        lines += ["*SET_PART_LIST", _row(1), _row(10, 20),
+                  "*CONTACT_AUTOMATIC_SINGLE_SURFACE", _row(1, 0, 2, 0),
+                  _row(0.1, 0.1), _row(0.0)]
+    return "\n".join(lines) + "\n" + extra + "*END\n"
+
+
+def _single_surface_group(starter: str):
+    """Node ids of the single-surface contact's secondary /GRNOD."""
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/") and lines[i + 1].startswith(
+                "contact_slave_"):
+            ids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                ids += [int(t) for t in lines[j].split()]
+                j += 1
+            return ids
+    return None
+
+
+class BoltClampAndFixedCurveColumns(unittest.TestCase):
+    """A2 (round 8): mainboltaexpl lost its bolt clamp and its pull. (l)-2: the
+    TYPE7 secondary side dropped every rigid member, incl. the 68 CNRB 110 /
+    120 members holding the bolt's ends (LS-DYNA counts them: 1601 nodes);
+    (l)-3: *DEFINE_CURVE read point lines by a whitespace split only, so the
+    fused '0.0055.0' lines LS-DYNA reads in 2E20.0 columns were dropped
+    (/FUNCT/11 kept 2 of 4 points)."""
+
+    def test_a_the_fused_lines_are_read_in_2E20_columns(self):
+        st = _curve_state(_MB_LINES)
+        self.assertEqual(st.curves[11].pts, [(0.0, 0.0), (0.0025, 0.0),
+                                             (0.005, 5.0), (0.00505, 5.0)])
+        self.assertTrue(_has(st.warnings, "*DEFINE_CURVE 11: 2 point line(s)",
+                             "= (0.005, 5)",
+                             "the curve keeps 4 points (the split kept 2)"),
+                        st.warnings)
+        off = _curve_state(_MB_LINES, fixed_curve_columns=False)
+        self.assertEqual(off.curves[11].pts, [(0.0, 0.0), (0.0025, 0.0)])
+        self.assertFalse(_has(off.warnings, "2E20.0"))
+
+    def test_b_a_blank_abscissa_is_zero(self):
+        st = _curve_state([" " * 20 + "               180.0"])
+        self.assertEqual(st.curves[11].pts, [(0.0, 180.0)])
+
+    def test_c_comma_lines_keep_the_split(self):
+        st = _curve_state(["0.0,1.0", "0.0, 1.0", "5.0,"])
+        self.assertEqual(st.curves[11].pts, [(0.0, 1.0), (0.0, 1.0),
+                                             (5.0, 0.0)])
+        self.assertFalse(_has(st.warnings, "2E20.0"))
+
+    def test_d_two_tokens_keep_the_split_and_garbage_is_no_point(self):
+        """Decision D4: a misaligned two-token line (here straddling column
+        20) keeps the free read - a fixed-first read would misread it."""
+        st = _curve_state(["   1.0e-3    5.0",
+                           " " * 21 + "0.0" + " " * 17 + "900.",
+                           "abc", "&undefined_param"])
+        self.assertEqual(st.curves[11].pts, [(0.001, 5.0), (0.0, 900.0)])
+        self.assertFalse(_has(st.warnings, "2E20.0"))
+
+    def test_e_a_parameter_in_a_fixed_column(self):
+        lines = ["               &tend5.0"]
+        deck_params = "*PARAMETER\n" + "R tend    0.005\n"
+        import os
+        import tempfile
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        from k2rad.state import ConversionState
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "c.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n" + deck_params + "*DEFINE_CURVE\n" + _row(11)
+                     + "\n" + "\n".join(lines) + "\n*END\n")
+        st = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, st)
+        tmp.cleanup()
+        self.assertEqual(st.curves[11].pts, [(0.005, 5.0)])
+
+    def test_f_a_blank_line_is_no_point(self):
+        st = _curve_state(["", "                 1.0                 2.0"])
+        self.assertEqual(st.curves[11].pts, [(1.0, 2.0)])
+
+    def test_g_SFA_and_OFFA_apply_to_a_fixed_line(self):
+        st = _curve_state(["               0.0055.0"],
+                          header=_row(11, 0, 2.0, 3.0, 0.001, 1.0))
+        a, o = st.curves[11].pts[0]
+        self.assertAlmostEqual(a, (0.005 + 0.001) * 2.0)
+        self.assertAlmostEqual(o, (5.0 + 1.0) * 3.0)
+
+    def test_h_smooth_and_function_curves_are_untouched(self):
+        deck = ("*KEYWORD\n*DEFINE_CURVE_SMOOTH\n"
+                + _row(12, 0, 1.0, 1.0, 0.0, 0.01, 0.002) + "\n"
+                "*DEFINE_FUNCTION\n" + _row(13) + "\nf(t)=t\n"
+                + _plates("").split("*KEYWORD\n", 1)[1])
+        _r, s_on, e_on = _convert(deck)
+        _r2, s_off, e_off = _convert(deck, fixed_curve_columns=False)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+
+    def test_i_the_bolt_end_bodies_keep_their_members(self):
+        """CNRB 110 / 120 hold the bolt's ends: their plate nodes stay on the
+        single-surface secondary side; CNRB 130's are still removed and named
+        by the partial-rigid sentence. Starter (a2_i): 0 errors."""
+        res, starter, _e = _convert(_bolt_deck())
+        ids = set(_single_surface_group(starter))
+        self.assertTrue({1006, 1007, 1010, 1011, 2006, 2007, 2010,
+                         2011} <= ids)
+        self.assertFalse({1001, 1002, 1005, 1013} & ids)
+        self.assertEqual(len(ids), 28)
+        self.assertTrue(_has(res.warnings, "8 member node(s) of the rigid "
+                             "body(ies) 110, 120 holding an end node of the "
+                             "*INITIAL_AXIAL_FORCE_BEAM bolt (BSID 100) were "
+                             "KEPT"), res.warnings)
+        self.assertTrue(_has(res.warnings, "4 of the 32 node(s) on the "
+                             "SECONDARY side"), res.warnings)
+        # the opt-out removes all twelve, as 4f5b6e8
+        r0, s0, _e0 = _convert(_bolt_deck(), bolt_rigid_contact=False)
+        self.assertEqual(len(_single_surface_group(s0)), 20)
+        self.assertTrue(_has(r0.warnings, "12 of the 32 node(s)"))
+        self.assertFalse(_has(r0.warnings, "were KEPT on the secondary"))
+
+    def test_j_a_rigid_part_with_the_end_as_an_extra_node(self):
+        """Plate 20 is a *MAT_RIGID part holding bolt end 2 through
+        *CONSTRAINED_EXTRA_NODES: all 16 of its nodes stay."""
+        res, starter, _e = _convert(_bolt_deck(rigid20=True))
+        ids = set(_single_surface_group(starter))
+        self.assertTrue(set(range(2001, 2017)) <= ids)
+        self.assertTrue(_has(res.warnings, "20 member node(s) of the rigid "
+                             "body(ies) 20, 110"), res.warnings)
+
+    def test_k_a_tied_contact_keeps_the_filter(self):
+        """Decision D5: only the penalty builders keep the members; a TYPE2
+        tied side still drops every rigid member."""
+        res, starter, _e = _convert(_bolt_deck(tied=True))
+        self.assertFalse(_has(res.warnings, "were KEPT on the secondary"),
+                         res.warnings)
+        r0, s0, _e0 = _convert(_bolt_deck(tied=True),
+                               bolt_rigid_contact=False)
+        self.assertEqual(starter, s0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A4 / A7 — the *SECTION_SHELL Card-2 thickness: the nodal mean (A4) and the
+#           plane-strain unit depth (A7)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _quad_deck(elform=2, t=(1.0, "", "", ""), rigid=False) -> str:
+    """One 10 x 10 mm quad (nodes 1-4) on *SECTION_SHELL 1 with Card 2 = *t*
+    ('' = blank), RO 7.85e-9, *MAT_RIGID (CMO 0) when *rigid*."""
+    mat = ("*MAT_RIGID\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+           + _row(0.0, 0, 0) + "\n" + _row(0.0) + "\n") if rigid else (
+        "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n")
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(0.001) + "\n"
+            "*PART\nquad\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, elform, 1.0, 2) + "\n" + _row(*t)
+            + "\n" + mat + "*NODE\n"
+            + "".join(f"{n:>8}{x:>16.6f}{y:>16.6f}{0.0:>16.6f}\n"
+                      for n, x, y in ((1, 0.0, 0.0), (2, 10.0, 0.0),
+                                      (3, 10.0, 10.0), (4, 0.0, 10.0)))
+            + "*ELEMENT_SHELL\n" + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4))
+            + "\n*END\n")
+
+
+def _prop_thick(starter: str, pid: int = 1) -> float:
+    lines = starter.splitlines()
+    i = lines.index(f"/PROP/SHELL/{pid}")
+    data = [ln for ln in lines[i + 2:i + 9] if not ln.startswith("#")]
+    return float(data[2].split()[2])
+
+
+def _j_row(starter: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/RBODY/"):
+            data = [x for x in lines[i + 1:i + 9] if not x.startswith("#")]
+            return [float(v) for v in data[2].split()]
+    return None
+
+
+_WA4 = "the /PROP/SHELL thickness is their MEAN"
+_WA7A = "is a 2-D PLANE-STRAIN formulation; LS-DYNA ignores Card 2's"
+_WA7B = "is a 2-D AXISYMMETRIC formulation"
+
+
+class SectionNodalThicknessMean(unittest.TestCase):
+    """A4 (round 8): *SECTION_SHELL Card 2's T1..T4 are the thickness at the
+    nodes; k2rad read T1 only. LS-DYNA's d3hsp reproduces mean(T1..T4) on
+    every element (cup-draw's rigid tools to the printed digit), so a card
+    with a written, nonzero T2..T4 different from T1 writes the mean (blank
+    / 0.0 = T1) - with its named energy-error cost on cup-draw."""
+
+    def test_1_the_mean_and_its_blank_and_zero_readings(self):
+        for t, want, warned in (((1000.0, 1.0, 1.0, 1.0), 250.75, True),
+                                ((4.7625, 4.762, 4.762, 4.762), 4.762125,
+                                 True),
+                                ((2.0, "", "", ""), 2.0, False),
+                                ((2.0, 0.0, 0.0, 0.0), 2.0, False),
+                                ((2.0, 4.0, "", 0.0), 2.5, True),
+                                ((1.5, 1.5, 1.5, 1.5), 1.5, False)):
+            with self.subTest(card2=t):
+                res, starter, _e = _convert(_quad_deck(t=t))
+                self.assertAlmostEqual(_prop_thick(starter), want, places=9)
+                self.assertEqual(_has(res.warnings, _WA4), warned)
+        res, _s, _e = _convert(_quad_deck(t=(2.0, 4.0, "", 0.0)))
+        self.assertTrue(_has(res.warnings, "Card 2 states T1..T4 = 2 / 4 / "
+                             "blank / 0; the /PROP/SHELL thickness is their "
+                             "MEAN 2.5", "-4.39 -> -17.88 %"), res.warnings)
+        _r, s_u, _e2 = _convert(_quad_deck(t=(1.5, 1.5, 1.5, 1.5)))
+        self.assertEqual(_sha(s_u), _PR8_SHA["a4_uniform"])
+
+    def test_2_the_2D_formulations_are_A7s(self):
+        _r, s13, _e = _convert(_quad_deck(elform=13, t=(25.4, 1.0, 1.0, 1.0)))
+        self.assertEqual(_prop_thick(s13), 1.0)
+        r15, s15, _e15 = _convert(_quad_deck(elform=15,
+                                              t=(25.4, 1.0, 1.0, 1.0)))
+        self.assertEqual(_prop_thick(s15), 25.4)
+        self.assertFalse(_has(r15.warnings, _WA4))
+
+    def test_3_a_rigid_body_takes_the_mean_thickness(self):
+        """Rigid quad, T 4 / 1 / 1 / 1 -> 1.75: mass 7.85e-9 x 100 x 1.75 =
+        1.37375e-6, IN per node (m/4)(100 + 1.75^2)/12 = 2.949627e-6, J =
+        -SUM(IN) = -1.179851e-5. Starter (a4_3): NEW MASS 0.1373750E-05,
+        the point-mass tensor xx = yy = 3.434375e-5, zz = 6.868750e-5."""
+        _r, starter, _e = _convert(_quad_deck(t=(4.0, 1.0, 1.0, 1.0),
+                                              rigid=True))
+        self.assertAlmostEqual(_prop_thick(starter), 1.75)
+        j = _j_row(starter)
+        for v in j:
+            self.assertAlmostEqual(v / -1.179851e-5, 1.0, places=5)
+
+    def test_4_the_opt_out_keeps_T1(self):
+        _r, starter, _e = _convert(_quad_deck(t=(4.0, 1.0, 1.0, 1.0),
+                                              rigid=True),
+                                   section_nodal_thickness_mean=False)
+        self.assertEqual(_prop_thick(starter), 4.0)
+        self.assertEqual(_sha(starter), _PR8_SHA["a4_rigid"])
+
+
+class TwoDimensionalShellThickness(unittest.TestCase):
+    """A7 (round 8): Vol I R17 *SECTION_SHELL Remark 6 - formulations 13,
+    14, 15, 43, 44, 52 and 55 ignore Card 2's thickness. The plane-strain
+    ones (13 / 43 / 52 / 55) integrate a UNIT depth, so
+    the /PROP/SHELL thickness is 1.0; the axisymmetric ones (14 / 15 / 44)
+    integrate per radian, which no thickness reproduces - named."""
+
+    def test_1_plane_strain_gets_a_unit_thickness(self):
+        for e in (13, 43, 52, 55):
+            with self.subTest(elform=e):
+                res, starter, _e = _convert(_quad_deck(elform=e,
+                                                       t=(25.4, "", "", "")))
+                self.assertEqual(_prop_thick(starter), 1.0)
+                self.assertTrue(_has(res.warnings, _WA7A,
+                                     "(the card states 25.4)"), res.warnings)
+        for e in (12, 2):
+            with self.subTest(elform=e):
+                res, starter, _e = _convert(_quad_deck(elform=e,
+                                                       t=(25.4, "", "", "")))
+                self.assertEqual(_prop_thick(starter), 25.4)
+                self.assertFalse(_has(res.warnings, "PLANE-STRAIN"))
+
+    def test_2_axisymmetric_is_named_never_changed(self):
+        for e in (14, 15, 44):
+            with self.subTest(elform=e):
+                deck = _quad_deck(elform=e, t=(1000.0, "", "", ""))
+                res, starter, _e = _convert(deck)
+                self.assertEqual(_prop_thick(starter), 1000.0)
+                _r0, s0, _e0 = _convert(deck,
+                                        plane_strain_unit_thickness=False)
+                self.assertEqual(starter, s0)
+                self.assertTrue(_has(res.warnings, _WA7B, "Remark 6",
+                                     "NOT LS-DYNA's"), res.warnings)
+                self.assertTrue(_has(_r0.warnings, _WA7B))
+
+    def test_3_a_rigid_plane_strain_body(self):
+        """Rigid ELFORM-13 quad, T 25.4 -> 1: mass 7.85e-7, IN per node
+        (7.85e-7 / 4)(100 + 1)/12 = 1.651771e-6, J = -6.607083e-6. Starter
+        (a7_3): NEW MASS 0.7850000E-06, xx = yy = 1.9625e-5, zz = 3.925e-5."""
+        _r, starter, _e = _convert(_quad_deck(elform=13, t=(25.4, "", "", ""),
+                                              rigid=True))
+        for v in _j_row(starter):
+            self.assertAlmostEqual(v / -6.607083e-6, 1.0, places=5)
+
+    def test_4_the_opt_out_keeps_T1_and_says_so(self):
+        res, starter, _e = _convert(_quad_deck(elform=13,
+                                               t=(25.4, "", "", ""),
+                                               rigid=True),
+                                    plane_strain_unit_thickness=False)
+        self.assertEqual(_prop_thick(starter), 25.4)
+        self.assertEqual(_sha(starter), _PR8_SHA["a7_rigid"])
+        self.assertTrue(_has(res.warnings, "the card's T1 25.4 is written",
+                             "integrates a unit thickness"), res.warnings)
+
+    def test_5_a_plane_strain_card_never_takes_the_mean(self):
+        res, starter, _e = _convert(_quad_deck(elform=13,
+                                               t=(25.4, 1.0, 1.0, 1.0)))
+        self.assertEqual(_prop_thick(starter), 1.0)
+        self.assertFalse(_has(res.warnings, _WA4))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A8 — *ELEMENT_MASS on a rigid SECONDARY node -> /ADMAS on that node
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _emass(nid: int, mass: float, eid: int = 1) -> str:
+    return ("*ELEMENT_MASS\n" + f"{eid:>8}{nid:>8}{mass:>16.8g}{0:>8}\n")
+
+
+def _admas(starter: str):
+    """{mass: sorted node ids} of every /ADMAS/0 card."""
+    lines = starter.splitlines()
+    groups = {}
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("/GRNOD/NODE/"):
+            gid = int(lines[i].split("/")[-1])
+            ids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                ids += [int(t) for t in lines[j].split()]
+                j += 1
+            groups[gid] = ids
+            i = j
+            continue
+        i += 1
+    out = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/ADMAS/0/"):
+            m, g = lines[i + 3].split()
+            out[float(m)] = sorted(groups[int(g)])
+    return out
+
+
+def _rbody_mass(starter: str, rid: int) -> float:
+    lines = starter.splitlines()
+    i = lines.index(f"/RBODY/{rid}")
+    return float(lines[i + 3].split()[4])
+
+
+_WA8 = "sit on SECONDARY nodes"
+
+
+class RigidSecondaryElementMass(unittest.TestCase):
+    """A8 (round 8): an *ELEMENT_MASS on a rigid body's SECONDARY node was
+    folded into the /RBODY Mass field (a *MAT_RIGID body, which the starter
+    places at the CoG of the secondaries WITHOUT it) or dropped (a CNRB
+    secondary). Now /ADMAS/0 on its node; the main node's own mass stays in
+    the Mass field; ICoG-4 bodies are unchanged."""
+
+    def test_1_a_part_body_writes_the_mass_on_its_node(self):
+        """Rigid 2 x 2 plate (20 x 20 mm, T 1, RO 7.85e-9: 3.14e-6) + 0.01 on
+        corner 9 (20, 20): the body's CoG x = y = (3.14e-6 x 10 + 0.01 x 20)
+        / 0.01000314 = 19.99686. Starter (a8_1): NEW MASS 0.1000314E-01 and
+        the CoG at 19.99686 (the opt-out arm a8_1off: the same mass at
+        (10, 10))."""
+        res, starter, _e = _convert(_plates(_emass(9, 0.01)))
+        self.assertEqual(_rbody_mass(starter, 19), 0.0)
+        self.assertEqual(_admas(starter), {0.01: [9]})
+        self.assertTrue(_has(res.warnings, "*ELEMENT_MASS: 1 nodal mass(es) "
+                             "on 1 rigid body/bodies", _WA8, "(node 9)",
+                             "folded into the /RBODY Mass field"),
+                        res.warnings)
+        r0, s0, _e0 = _convert(_plates(_emass(9, 0.01)),
+                               rigid_element_mass_admas=False)
+        self.assertEqual(_rbody_mass(s0, 19), 0.01)
+        self.assertEqual(_admas(s0), {})
+        self.assertEqual(_sha(s0), _PR8_SHA["a8_1"])
+
+    def test_2_the_main_node_mass_stays_in_the_Mass_field(self):
+        """--no-rigid-cog-master makes the lowest mesh node (1) the main:
+        its own mass stays in Mass, the mass on node 9 moves to /ADMAS (it
+        was DROPPED before)."""
+        res, starter, _e = _convert(_plates(_emass(1, 0.02) + _emass(9, 0.01, 2)),
+                                    rigid_cog_master=False)
+        self.assertEqual(_rbody_mass(starter, 1), 0.02)
+        self.assertEqual(_admas(starter), {0.01: [9]})
+        self.assertTrue(_has(res.warnings, _WA8, "being DROPPED (1"),
+                        res.warnings)
+
+    def test_3_a_CNRB_secondary_mass_is_no_longer_lost(self):
+        """A CNRB over elastic-plate nodes 10-13 with 0.01 on node 12: the
+        mass was neither folded nor written (TOTAL MASS lacked it). Starter
+        (a8_3, nt 4, 0 errors): the CNRB body 20's NEW MASS 0.1000118E-01,
+        CoG (19.99843, 0.0003925, 5) - the 0.01 at node 12 (20, 0, 5)
+        included; a8_3off: 0.1177500E-05 at (6.666667, 3.333333, 5)."""
+        cnrb = (_nset(7, [10, 11, 12, 13])
+                + "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(50, 0, 7) + "\n"
+                + _emass(12, 0.01))
+        res, starter, _e = _convert(_plates(cnrb))
+        self.assertEqual(_admas(starter), {0.01: [12]})
+        self.assertTrue(_has(res.warnings, _WA8, "LOST before",
+                             "being DROPPED"), res.warnings)
+        r0, s0, _e0 = _convert(_plates(cnrb), rigid_element_mass_admas=False)
+        self.assertEqual(_admas(s0), {})
+        self.assertEqual(_sha(s0), _PR8_SHA["a8_3"])
+
+    def test_4_an_ICoG_4_body_is_unchanged(self):
+        """*PART_INERTIA: TM supersedes every lumped mass (the SUPERSEDED
+        sentence as before), no /ADMAS."""
+        pin = ("*PART_INERTIA\nrigid plate\n" + _row(1, 1, 1) + "\n"
+               + _row(10.0, 10.0, 0.0, 0.01) + "\n"
+               + _row(1.0, 0.0, 0.0, 1.0, 0.0, 1.0) + "\n"
+               + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        deck = _plates(_emass(9, 0.01)).replace(
+            "*PART\nrigid plate\n" + _row(1, 1, 1) + "\n", pin)
+        res, starter, _e = _convert(deck)
+        self.assertEqual(_admas(starter), {})
+        self.assertTrue(_has(res.warnings, "is SUPERSEDED by TM=0.01"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, _WA8))
+        _r0, s0, _e0 = _convert(deck, rigid_element_mass_admas=False)
+        self.assertEqual(starter, s0)
+
+    def test_5_the_momentum_average_acts_at_the_true_centre_of_mass(self):
+        """A8.3: --mass-weighted-inivel forms v_cm / omega from the lumped
+        masses, *ELEMENT_MASS included (the TRUE centre of mass), and the
+        starter rebuilds the body about ITS centre of mass - which the fold
+        put elsewhere. Rigid plate (3.14e-6) + 1e-4 on corner node 9 (20,
+        20): M = 1.0314e-4, CoG x = y = 19.695559. *INITIAL_VELOCITY_NODE
+        names rigid node 1 (vx 1000; the body's other nodes at rest -
+        UNEQUAL nodal velocities) and the elastic nodes 10-18 (vx 1000):
+        v_cm = 1.9625e-7 x 1000 / M = 1.902754, L_z = 1.9625e-7 x 19.695559
+        x 1000 = 3.865254e-3, I_zz (point masses about the CoG) =
+        9.228811e-4, omega_z = 4.188246; LS-DYNA's rotational KE L_z^2 /
+        (2 I_zz) = 8.0943e-3. Starter + engine (a8iv_on / a8iv_off, nt 4,
+        0 errors, NORMAL TERMINATION): the default's NEW X,Y 19.69556, NEW
+        INERTIA zz 0.9228811E-03 and cycle-0 K-ENERGY R 0.8094E-02 = the
+        closed form; the opt-out (the fold) NEW X,Y 10.0, zz 0.3140000E-03,
+        K-ENERGY R 0.2754E-02 (-66 %) from the same written omega. K-ENERGY
+        T 1.570 on both (the elastic plate's 1.57 + the body's 1.867e-4)."""
+        mc, me, mm = 1.9625e-7, 3.925e-7, 7.85e-7
+        pts = [(0.0, 0.0, mc), (10.0, 0.0, me), (20.0, 0.0, mc),
+               (0.0, 10.0, me), (10.0, 10.0, mm), (20.0, 10.0, me),
+               (0.0, 20.0, mc), (10.0, 20.0, me), (20.0, 20.0, mc + 1.0e-4)]
+        big_m = sum(p[2] for p in pts)
+        c = sum(p[0] * p[2] for p in pts) / big_m
+        izz = sum(p[2] * ((p[0] - c) ** 2 + (p[1] - c) ** 2) for p in pts)
+        v_cm = mc * 1000.0 / big_m
+        omega = mc * c * 1000.0 / izz
+        self.assertAlmostEqual(c, 19.695559, places=5)
+        self.assertAlmostEqual(0.5 * (mc * c * 1000.0) ** 2 / izz / 8.0943e-3,
+                               1.0, places=4)
+        deck = _plates(_emass(9, 1.0e-4) + _IV_PROBE)
+        for kw, mass, admas in (({}, 0.0, {1.0e-4: [9]}),
+                                ({"rigid_element_mass_admas": False}, 1.0e-4,
+                                 {})):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(deck, mass_weighted_inivel=True,
+                                            **kw)
+                tra, rot = _inivel_mw(starter)
+                self.assertAlmostEqual(tra[0] / v_cm, 1.0, places=6)
+                self.assertEqual(tra[1:], (0.0, 0.0))
+                self.assertEqual(rot[:2], (0.0, 0.0))
+                self.assertAlmostEqual(rot[2] / omega, 1.0, places=6)
+                self.assertEqual(_rbody_mass(starter, 19), mass)
+                self.assertEqual(_admas(starter), admas)
+                self.assertTrue(_has(res.warnings, "MOMENTUM AVERAGE"),
+                                res.warnings)
+
+    def test_6_two_bodies_share_one_ADMAS_group(self):
+        """sph/foam's shape (conventions spec 0.2: BOTH foam bodies move):
+        two rigid plates, 0.02 on a corner of the first (node 9) and on the
+        centre of the second (node 14, its CoG). Both Mass fields 0, ONE
+        /ADMAS/0 0.02 on [9, 14]. Starter (a8_6, nt 4, 0 errors): body 19
+        NEW MASS 0.2000314E-01 at CoG 19.99843, body 20 0.2000314E-01 at
+        (10, 10, 5) - unchanged by the move (a8_6off: 10.0 / 10.0)."""
+        deck = _two_rigid_plates(_emass(9, 0.02) + _emass(14, 0.02, 2))
+        res, starter, _e = _convert(deck)
+        self.assertEqual(_rbody_masses(starter), [0.0, 0.0])
+        self.assertEqual(_admas(starter), {0.02: [9, 14]})
+        self.assertTrue(_has(res.warnings, "*ELEMENT_MASS: 2 nodal mass(es) "
+                             "on 2 rigid body/bodies", _WA8), res.warnings)
+        _r0, s0, _e0 = _convert(deck, rigid_element_mass_admas=False)
+        self.assertEqual(_rbody_masses(s0), [0.02, 0.02])
+        self.assertEqual(_admas(s0), {})
+
+
+def _two_rigid_plates(extra: str) -> str:
+    """_plates with the elastic plate (nodes 10-18) a second *MAT_RIGID body
+    on its own material 3 (not merged)."""
+    mat3 = ("*MAT_RIGID\n" + _row(3, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0)
+            + "\n" + f"{0.0:10.1f}{0:10d}{0:10d}\n"
+            + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+    return _plates(extra).replace(
+        "*PART\nelastic plate\n" + _row(2, 1, 2),
+        "*PART\nrigid plate 2\n" + _row(2, 1, 3)).replace(
+        "*MAT_ELASTIC", mat3 + "*MAT_ELASTIC")
+
+
+def _rbody_masses(starter: str):
+    """The Mass field of every /RBODY, in file order."""
+    lines = starter.splitlines()
+    return [float(lines[i + 3].split()[4]) for i, ln in enumerate(lines)
+            if ln.startswith("/RBODY/")]
+
+
+_IV_PROBE = ("*INITIAL_VELOCITY_NODE\n" + "".join(
+    f"{n:>10}{1000.0:>10.1f}{0.0:>10.1f}{0.0:>10.1f}\n"
+    for n in [1] + list(range(10, 19))))
+
+
+def _inivel_mw(starter: str):
+    """The value triples of the momentum-average /INIVEL/TRA and /ROT."""
+    lines = starter.splitlines()
+    out = {}
+    for i, ln in enumerate(lines):
+        for kind in ("TRA", "ROT"):
+            if (ln.startswith(f"/INIVEL/{kind}/")
+                    and lines[i + 1].startswith("InitVelMW")):
+                out[kind] = tuple(float(v) for v in lines[i + 3].split()[:3])
+    return out.get("TRA"), out.get("ROT")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A6 — *MAT_SPOTWELD DT -> the TYPE13 Mass / Inertia closed form
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _dt_weld_deck(dt=1.0e-6, ts=2.0, e=1.0e7, ro=1.0e-6, lengths=(2.0,),
+                  tfail=0.0, plate_e=210.0, endtim=1.0e-5) -> str:
+    """spotweld.k's weld on soft plates: *MAT_SPOTWELD E *e*, PR 0.3, RO *ro*,
+    DT *dt*, SIGY 0 (elastic), *SECTION_BEAM TS1 = TS2 = *ts*; one ELFORM-9
+    beam per entry of *lengths* (from z = 0 to z = L). The plates are soft
+    (E *plate_e*) so the WELD controls the time step."""
+    base = [(1, 0.0, 0.0, 0.0), (2, 5.0, 0.0, 0.0), (3, 5.0, 5.0, 0.0),
+            (4, 0.0, 5.0, 0.0)]
+    nodes = list(base)
+    beams = []
+    for k, ln in enumerate(lengths):
+        # top plate k (ids 10(k+1)..+3) at z = L_k; weld k from base node
+        # k+1 straight up to the top node above it: length exactly L_k
+        top = [(10 * (k + 1) + i, x, y, ln) for i, (_n, x, y, _z)
+               in enumerate(base)]
+        nodes += top
+        beams.append((100 + k, base[k][0], top[k][0]))
+    lines = ["*KEYWORD", "*CONTROL_TERMINATION", _row(endtim), "*NODE"]
+    lines += [f"{n:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}" for n, x, y, z in nodes]
+    lines += ["*PART", "plates", _row(1, 1, 1),
+              "*SECTION_SHELL", _row(1, 2), _row(1.0),
+              "*MAT_ELASTIC", _row(1, 7.85e-9, plate_e, 0.3), "*ELEMENT_SHELL",
+              "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4))]
+    for k in range(len(lengths)):
+        b = 10 + 10 * k
+        lines.append("".join(f"{v:>8}" for v in (2 + k, 1, b, b + 1, b + 2,
+                                                  b + 3)))
+    lines += ["*PART", "weld", _row(10, 10, 10),
+              "*SECTION_BEAM", _row(10, 9, 1.0, 4, 1), _row(ts, ts, 0.0, 0.0),
+              "*MAT_SPOTWELD", _row(10, ro, e, 0.3, 0.0, 0.0, dt, tfail),
+              _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), "*ELEMENT_BEAM"]
+    for k, (eid, n1, n2) in enumerate(beams):
+        lines.append("".join(f"{v:>8}" for v in (eid, 10, n1, n2)))
+    return "\n".join(lines) + "\n*END\n"
+
+
+def _type13_mass_inertia(starter: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/PROP/TYPE13/"):
+            v = lines[i + 3].split()
+            return float(v[0]), float(v[1])
+    return None
+
+
+class SpotweldDtClosedForm(unittest.TestCase):
+    """A6 (round 8): *MAT_SPOTWELD DT was dropped ('no /PROP/TYPE13 slot').
+    Vol II R17 *MAT_SPOTWELD Remark 4 scales the weld inertias UP so the
+    stable step is DT; the TYPE13 step is 0.9 min(sqrt(M / max K1..3),
+    sqrt(I / (max K4..6 + max K2,3 L^2))) (r2len3.F:226-246, STI = XM/DT^2 at
+    :233), so Mass' = max(M, max K1..3 DT^2) and Inertia' = max(I, (max K4..6
+    + max K2,3 L_max^2) DT^2)."""
+
+    def test_1_spotweld_k_weld(self):
+        """A = pi (d 2), L 2, E 1e7, nu 0.3, RO 1e-6, DT 1e-6: K1 15707963.3,
+        K2 = K3 6041524.3, K4 3020762.1, K5 = K6 3926990.8; Mass 6.283185e-6
+        -> K1 DT^2 = 1.570796e-5 (x2.5), Inertia 2.094395e-6 -> (3926990.8 +
+        6041524.3 x 4) 1e-12 = 2.809309e-5 (x13.41). Starter + engine
+        (a6_coupon_br, nt 4, 0 errors, NORMAL TERMINATION): the starter's
+        SPRING time step 9.9999990E-07 for element 100 (= DT), the engine's
+        step 0.9000E-06 on SPRING 100 on all 12 printed cycles (0..11),
+        TOTAL MASS 0.1610E-04."""
+        res, starter, _e = _convert(_dt_weld_deck())
+        m, i = _type13_mass_inertia(starter)
+        self.assertAlmostEqual(m / 1.570796e-5, 1.0, places=6)
+        self.assertAlmostEqual(i / 2.809309e-5, 1.0, places=6)
+        self.assertIn("        1.570796E-05        2.809309E-05", starter)
+        self.assertTrue(_has(res.warnings, "DT=1e-06 -> /PROP/TYPE13/",
+                             "Mass x 2.5, Inertia x 13.41", "r2len3.F:226-246",
+                             "starts at 0.9 DT"), res.warnings)
+        self.assertFalse(_has(res.warnings, "have no /PROP/TYPE13 slot"))
+
+    def test_2_an_inert_DT_changes_no_byte(self):
+        """plates.mat100's weld card (DT 1e-9): both factors stay 1, the
+        bytes equal the opt-out's, and the sentence says inert."""
+        deck = _t7._weld_deck()
+        res, starter, _e = _convert(deck)
+        _r0, s0, _e0 = _convert(deck, spotweld_dt_mass_scaling=False)
+        self.assertEqual(starter, s0)
+        self.assertTrue(_has(res.warnings, "DT=1e-09 is inert",
+                             "2.99951e-7 s with DT 1e-9"), res.warnings)
+        self.assertTrue(_has(_r0.warnings, "DT have no /PROP/TYPE13 slot"))
+
+    def test_3_the_longest_weld_sets_the_inertia(self):
+        """Welds 2.0 and 3.0 on one part: K from the MEAN length 2.5, the
+        rotational term from L_max = 3.0."""
+        res, starter, _e = _convert(_dt_weld_deck(lengths=(2.0, 3.0)))
+        a = math.pi
+        g = 1.0e7 / 2.6
+        k23 = g * a / 2.5
+        k56 = 1.0e7 * (math.pi / 4.0) / 2.5
+        k4 = g * (math.pi / 2.0) / 2.5
+        _m, i = _type13_mass_inertia(starter)
+        want = (max(k4, k56) + k23 * 3.0 ** 2) * 1.0e-12
+        self.assertAlmostEqual(i / want, 1.0, places=6)
+        self.assertNotAlmostEqual(
+            i / ((max(k4, k56) + k23 * 2.5 ** 2) * 1.0e-12), 1.0, places=3)
+
+    def test_4_a_token_weld_takes_the_closed_form_too(self):
+        """RO 0 (no density floor): the 1e-4 token weld; with DT 1e-5 the
+        closed form raises it to K1 DT^2 = 1.570796e-3 (decision D11), and
+        the weld stays a token property (its 1e-4 still comes off its ends
+        as before; the added DT mass stays). With DT 1e-6 (K1 DT^2 =
+        1.57e-5 < 1e-4) the token already exceeds it: inert."""
+        res, starter, _e = _convert(_dt_weld_deck(ro=0.0, dt=1.0e-5),
+                                    zero_density_floor=False)
+        m, _i = _type13_mass_inertia(starter)
+        self.assertAlmostEqual(m / 1.570796e-3, 1.0, places=6)
+        self.assertTrue(_has(res.warnings, "DT=1e-05 -> /PROP/TYPE13/"))
+        r6, _s6, _e6 = _convert(_dt_weld_deck(ro=0.0),
+                                zero_density_floor=False)
+        self.assertTrue(_has(r6.warnings, "DT=1e-06 is inert"), r6.warnings)
+        self.assertTrue(_has(res.warnings, "token mass 0.0001 used"),
+                        res.warnings)
+
+    def test_5_the_opt_out_drops_DT_as_4f5b6e8(self):
+        res, starter, _e = _convert(_dt_weld_deck(),
+                                    spotweld_dt_mass_scaling=False)
+        self.assertEqual(_sha(starter), _PR8_SHA["a6_off"])
+        self.assertTrue(_has(res.warnings, "DT have no /PROP/TYPE13 slot"))
+
+
 def _A3_DECKS():
     return {"t1": _plates(_spc_node(14, 0, "111111") + _spc_node(14, 0, "111111")),
             "t2": _plates(_P2_SHARED),
@@ -650,6 +1394,12 @@ _PR8_SHA = {
     "t5": "8db993b10febc693848c688d07b6d3ebeab8a3c4f0db63bd9e3c9afc4675656d",
     "t6": "71c4891f4964f5e3cf349de4222351ab0043b41141757559db5caa1ccf7f41dc",
     "t7": "748a64ea6d848388762e6cfcbeb7fc5f5db1dd9e0cac352580b4b45342fe2cc0",
+    "a4_uniform": "e4d1017e1bde702f54c51eafd66b994945a9287a9b9d8ebc4bd9e9b9b2c2c382",
+    "a4_rigid": "9ce06be37a721237c58e1df030acf1f45595ad19fe037a7d62568fec28463dc4",
+    "a7_rigid": "a500d7f4cc93b80a80f91986eabc07b14d8e7982e5c647416a14551b7efaa001",
+    "a8_1": "feb58b9abe31c1bbd111ba949ad80ef936aca3f9de8fed087ffd394dde68291d",
+    "a8_3": "241040e6b0db056d11d4de8656eee7dfd50c2d5c892ac854ddb18b1646e44324",
+    "a6_off": "64223e00c130ddcb62abf0c71ef419539eeb107864555ca1d35ed2ea5ab0dcbb",
 }
 _PR8_WARN_SHA = {
     "a": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",

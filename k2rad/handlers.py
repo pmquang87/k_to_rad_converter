@@ -26,6 +26,7 @@ from .parser import (
     to_float, to_int,
 )
 from .state import (
+    PLANE_STRAIN_ELFORMS, TWO_D_SHELL_ELFORMS,
     ConversionState,
     SET_ADD_FAMILIES,
     SET_RANGE_FAMILIES,
@@ -1919,7 +1920,28 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
                 "deck meant a user rule, move the negative value to field 6.")
             nip = abs(nip)
         t1 = to_float(f2[0]) if f2 else 0.0
+        # Card 2's T2..T4, the thickness at nodes n2..n4 (blank = T1, the
+        # card's default) - recorded raw for the writer's sentences.
+        t_raw: List[Optional[float]] = [
+            to_float(f2[k]) if len(f2) > k and f2[k].strip() else None
+            for k in (1, 2, 3)]
+        if elform in PLANE_STRAIN_ELFORMS and \
+                state.options.plane_strain_unit_thickness:
+            # round 8, A7: LS-DYNA ignores Card 2's thickness on a 2-D
+            # plane-strain shell and integrates a UNIT depth (Vol I R17
+            # *SECTION_SHELL Remark 6); the stated T1 stays in sec.card2
+            t1 = 1.0
+        elif (elform not in TWO_D_SHELL_ELFORMS
+              and state.options.section_nodal_thickness_mean
+              and any(v not in (None, 0.0) and v != t1 for v in t_raw)):
+            # round 8, A4: T1..T4 are the thickness at the four nodes and
+            # LS-DYNA's d3hsp reproduces their MEAN on every element
+            # (blank / 0.0 = T1); every consumer of sec.t1 follows
+            t1 = (t1 + sum(v if v not in (None, 0.0) else t1
+                           for v in t_raw)) / 4.0
         sec = SectionShell(secid, title, elform, nip, t1)
+        sec.card2 = (to_float(f2[0]) if f2 else 0.0, t_raw[0], t_raw[1],
+                     t_raw[2])
         # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
         # node set. Only writer/seatbelts.py reads it, to report it as dropped.
         sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
@@ -4932,6 +4954,17 @@ def _clear_smooth_flag_on_redefinition(state: ConversionState, lcid: int,
         "is emitted as an ordinary /FUNCT; renumber one of the two cards.")
 
 
+def _fixed_curve_field(text: str) -> Optional[float]:
+    """One 20-column field of a *DEFINE_CURVE point card (round 8, A2 (l)-3):
+    blank -> 0.0 (the field's default), a number (or a *PARAMETER reference)
+    -> its value, anything else -> None (the line is not a point)."""
+    t = text.strip()
+    if not t:
+        return 0.0
+    v = to_float(t, _math.nan)
+    return None if _math.isnan(v) else v
+
+
 def handle_define_curve(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -4945,13 +4978,41 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     offa = to_float(f1[4]) if len(f1) > 4 else 0.0
     offo = to_float(f1[5]) if len(f1) > 5 else 0.0
     pts: list = []
+    fixed_read: List[Tuple[str, float, float]] = []
     # LS-DYNA R16: "Abscissa value = SFA·(Defined value + OFFA)" — the offset is
     # applied BEFORE the scale factor (same for SFO/OFFO on the ordinate).
     for line in raw[offset + 1:]:
         f = parse_free(line)
+        pt: Optional[Tuple[float, float]] = None
         if len(f) >= 2:
-            pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
-                        (to_float(f[1]) + offo) * (sfo or 1.0)))
+            pt = (to_float(f[0]), to_float(f[1]))
+        elif state.options.fixed_curve_columns:
+            # round 8, A2 (l)-3: LS-DYNA reads a point card in fixed 2E20.0
+            # columns; a comma-free line the whitespace split cannot read as
+            # two numbers (a fused '0.0055.0', a blank abscissa) is re-read
+            # there, blank = 0.0. ONLY where the split fails (decision D4):
+            # a two-token line keeps the split, so a misaligned free-format
+            # line is never re-read.
+            data = _strip_inline_comment(line)
+            if "," not in data and data.strip():
+                a = _fixed_curve_field(data[0:20])
+                o = _fixed_curve_field(data[20:40])
+                if a is not None and o is not None:
+                    pt = (a, o)
+                    fixed_read.append((line, a, o))
+        if pt is not None:
+            pts.append(((pt[0] + offa) * (sfa or 1.0),
+                        (pt[1] + offo) * (sfo or 1.0)))
+    if fixed_read:
+        first, fa, fo = fixed_read[0]
+        state.warn(
+            f"*DEFINE_CURVE {lcid}: {len(fixed_read)} point line(s) that a "
+            "whitespace split reads as fewer than two numbers were read in "
+            "LS-DYNA's fixed 2E20.0 columns (blank = 0.0) - e.g. "
+            f"'{first[:40].strip()}' = ({fa:g}, {fo:g}); the curve keeps "
+            f"{len(pts)} points (the split kept {len(pts) - len(fixed_read)}). "
+            "Two-number and comma lines keep the split. "
+            "--no-fixed-curve-columns restores the split alone (round 8).")
     # A *DEFINE_CURVE_SMOOTH may have claimed this id first. LS-DYNA's curve
     # ids are unique across both keywords, so such a deck is malformed — but
     # the emitted CARD KIND must still match the points that survive.
@@ -7980,7 +8041,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:1057, :1741, :1855, :2044, :2201, :2325
+    sites register into at the line that writes the card (writer/rbody.py:1083, :1778, :1892, :2081, :2238, :2362
     — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, round 5 added the

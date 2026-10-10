@@ -462,6 +462,15 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         diag["raw"] = len(raw_nids)
         diag["rigid_removed"] = len(raw_nids) - len(clean_nids)
         diag["clean"] = len(clean_nids)
+    # round 8, A2 (l)-2: the bolt-end rigid members this side kept (the
+    # penalty builders pass a rigid set without them), for the interface's
+    # own sentence (_warn_bolt_rigid_kept)
+    if state.bolt_rigid_keep and not keep_rigid:
+        kept = [n for n in clean_nids if n in state.bolt_rigid_keep]
+        if kept:
+            state.bolt_kept_by_side[(sid, styp)] = kept
+            if diag is not None:
+                diag["bolt_kept"] = len(kept)
     if not clean_nids:
         return 0
     _warn_beam_side_gain(state, sid, styp, clean_nids)
@@ -1854,22 +1863,93 @@ def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
         "belong to a rigid body and were removed from the secondary node "
         f"group; the interface is emitted with the remaining "
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
-        "the converted model. THE OBVIOUS REMEDY IS MEASURED AND MOSTLY "
-        "USELESS, so it is not offered as one: keeping the rigid nodes in the "
-        "secondary group changes NOTHING on 3 of the 6 carriers of this class "
-        "(pipe, doorbeam and mat_spring.belted-dummy are identical arm for "
-        "arm; separately, 4 of the 6 are SINGLE_SURFACE contacts whose "
-        "segments are on the main side already - pipe, transducer, "
-        "mainboltaexpl and EXP_SC_PRELOAD, while doorbeam is NODES_TO_SURFACE "
-        "and belted-dummy SURFACE_TO_SURFACE), and on the other 3 it "
-        "disagrees with itself - transducer's internal energy goes -24.10 % "
-        "-> +18.31 % against its own LS-DYNA reference, EXP_SC_PRELOAD's "
-        "energy error -9.0 % -> -11.2 %, and mainboltaexpl COLLAPSES to "
-        "-62.05 % under a NORMAL TERMINATION banner. What DOES fix a "
+        "the converted model. Keeping them is not offered as a general "
+        "remedy: on the six carriers of this class it changes nothing on "
+        "pipe, doorbeam and mat_spring.belted-dummy (identical arm for arm), "
+        "transducer's internal energy goes -24.10 % -> +18.31 % against its "
+        "LS-DYNA reference and EXP_SC_PRELOAD's energy error -9.0 % -> "
+        "-11.2 %. The members of a rigid body holding an end node of an "
+        "*INITIAL_AXIAL_FORCE_BEAM bolt ARE kept by default (round 8, "
+        "--no-bolt-rigid-contact): they carry the clamp. What DOES fix a "
         "load-bearing rigid surface is to make it the MAIN (MSID) side of its "
         "own contact, where /INTER/TYPE7's asymmetry puts the segments it can "
         "actually carry."
     )
+
+
+def _bolt_end_rigid_members(state: ConversionState, rbody_info: Dict
+                            ) -> Dict[int, Tuple[int, int]]:
+    """``member node -> (body key, BSID)`` for every rigid body holding an END
+    node of an ``*INITIAL_AXIAL_FORCE_BEAM`` bolt (round 8, A2 (l)-2).
+
+    The bolt's ends are ``n1`` / ``n2`` of the ``*SET_BEAM`` elements the card
+    names, read from the DECK's records (whether or not the ``/PRELOAD/AXIAL``
+    card is emitted: it is written after the interfaces). A body - a
+    ``*MAT_RIGID`` part, a CNRB, extra nodes, a merged union (``rbody_info``,
+    where a merged slave shares its lead's record) - holds an end when the
+    end is one of its members or its main node; then all its members are
+    kept. LS-DYNA keeps every rigid member in a contact (mainboltaexpl's
+    d3hsp counts 1601 nodes for interface 1 = 984 hex faces + 556 shells
+    including the 68 CNRB 110 / 120 members), and these carry the bolt's
+    clamp.
+    """
+    out: Dict[int, Tuple[int, int]] = {}
+    if not state.ini_axial_force_beams or not rbody_info:
+        return out
+    beams = {e.eid: e for e in state.beam_elems}
+    ends: Dict[int, int] = {}
+    for rec in state.ini_axial_force_beams:
+        entry = state.beam_sets.get(rec.bsid)
+        if entry is None:
+            continue
+        for eid in entry[1]:
+            e = beams.get(eid)
+            if e is None:
+                continue
+            for n in (e.n1, e.n2):
+                if n > 0:
+                    ends.setdefault(n, rec.bsid)
+    if not ends:
+        return out
+    seen: Set[int] = set()
+    for key, info in rbody_info.items():
+        if id(info) in seen:
+            continue                  # a merged slave's shared record
+        members = set(info["nodes"]) | {info["ind_node"]}
+        hit = sorted({ends[n] for n in members if n in ends})
+        if not hit:
+            continue
+        seen.add(id(info))
+        for n in info["nodes"]:
+            out.setdefault(n, (key, hit[0]))
+    return out
+
+
+def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
+                          sid: int, styp: int) -> None:
+    """W-l2 (round 8, A2 (l)-2): the bolt-end rigid members a penalty
+    contact's secondary side KEPT."""
+    kept = state.bolt_kept_by_side.get((sid, styp))
+    if not kept:
+        return
+    bodies = sorted({state.bolt_rigid_keep[n][0] for n in kept})
+    bsids = sorted({state.bolt_rigid_keep[n][1] for n in kept})
+    state.warn(
+        f"*{keyword or 'CONTACT'} {inter_id}: {len(kept)} member node(s) of "
+        f"the rigid body(ies) {', '.join(str(b) for b in bodies)} holding an "
+        "end node of the *INITIAL_AXIAL_FORCE_BEAM bolt (BSID "
+        f"{', '.join(str(b) for b in bsids)}) were KEPT on the secondary "
+        "side; every other rigid member is still removed. LS-DYNA keeps them "
+        "(mainboltaexpl: 1601 surface nodes incl. the 68 CNRB 110 / 120 "
+        "members) and they carry the clamp - without them the bolt collapsed "
+        "to 0.00043 mm. MEASURED there with the fixed-column pull curve (nt "
+        "4): IE END -81.87 -> -8.49 %, RMS IE / KE 31.32 / 28.24 -> 9.19 / "
+        "10.22 % (1000 LS blocks, t <= 5e-3), plates IE vs matsum RMS 36.39 "
+        "-> 0.65 %, bolt force vs swforc RMS 29.11 -> 0.91 %, 1.131x the "
+        "cycles. Without the curve fix the run never pulls (IE END -62.05 "
+        "N.mm). Before the pull the bolt stays 2.196 mm against LS-DYNA's "
+        "1.817 (Inacti 5 keeps the 0.2 mm gap; not closed). "
+        "--no-bolt-rigid-contact removes them as before (round 8).")
 
 
 def _drop_interface(state: ConversionState, dropped: Dict[str, List[int]],
@@ -2148,6 +2228,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     _main_side_remedy(state, c.ssid, c.sstyp))
                 continue
             _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
+            _warn_bolt_rigid_kept(state, c.keyword, c.inter_id, c.ssid, c.sstyp)
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
@@ -2219,6 +2300,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         _warn_partial_rigid_secondary(
             state, c.keyword, c.inter_id, diag, sec_sid,
             "msid (swapped)" if plan in _RS_SWAPPED else "ssid")
+        _warn_bolt_rigid_kept(state, c.keyword, c.inter_id, sec_sid, sec_styp)
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
@@ -3793,6 +3875,8 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -7 route), or use SOFT=-11 for an edge "
                     "contact built from a segment set.")
                 continue
+            _warn_bolt_rigid_kept(state, "CONTACT_AUTOMATIC_GENERAL",
+                                  c.inter_id, sec7_sid, sec7_styp)
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
                                        istf=2, igap=2, fric_id=fric_id, state=state)
@@ -4488,6 +4572,8 @@ def _make_type25_interfaces(state: ConversionState,
             _warn_partial_rigid_secondary(
                 state, kw, c.inter_id, diag, sec25_sid,
                 "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
+            _warn_bolt_rigid_kept(state, kw, c.inter_id, sec25_sid,
+                                  sec25_styp)
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "

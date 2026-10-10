@@ -551,11 +551,13 @@ def build_parser() -> argparse.ArgumentParser:
              "(nt 4): LS-DYNA's weld shear plateaus at 20374..20408 = "
              "(SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> "
              "8.58 / 26.74 %% of the LS peak at 1.107x the cycles. "
-             "mainboltaexpl moves too, by run sensitivity and not by the "
-             "yield: its weld shear stays below it, and a 1e-8 change of K2 "
-             "alone moves that row as much (its preloaded bolt spring "
-             "collapses on every arm). Use --no-spotweld-shear-yield to keep "
-             "the shear elastic.",
+             "mainboltaexpl moves too, and not by the yield (its weld shear "
+             "never exceeds 13789 against the new yield 29021): the row was "
+             "hypersensitive because its /PRELOAD/AXIAL bolt collapsed - a "
+             "K2 = K3 x (1 - 1e-8) cell moves 46343 of 51762 rows on 4f5b6e8 "
+             "and only the 4th KE digit on 60 of 58550 rows once "
+             "--bolt-rigid-contact and --fixed-curve-columns hold the bolt. "
+             "Use --no-spotweld-shear-yield to keep the shear elastic.",
     )
     parser.add_argument(
         "--spotweld-efail-displacement",
@@ -674,6 +676,89 @@ def build_parser() -> argparse.ArgumentParser:
              "every printed row identical at nt 4 and nt 2. Different skews "
              "never merge. ON by default; --no-bcs-union restores the previous "
              "cards.",
+    )
+    parser.add_argument(
+        "--bolt-rigid-contact",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the members of a rigid body holding an end node of an "
+             "*INITIAL_AXIAL_FORCE_BEAM bolt on every PENALTY contact's "
+             "secondary side (LS-DYNA keeps all rigid members: mainboltaexpl's "
+             "68 CNRB 110 / 120 members were the surface nodes missing from its "
+             "TYPE7 group); they carry the clamp. Every other rigid member is "
+             "still removed; tied / TYPE2 contacts are unchanged. MEASURED on "
+             "mainboltaexpl with --fixed-curve-columns (nt 4): IE END -81.87 %% "
+             "-> -8.49 %%, history RMS IE / KE 31.32 / 28.24 -> 9.19 / 10.22 %% "
+             "of the LS peak, 1.131x the cycles; without the curve fix the deck "
+             "never pulls. ON by default; --no-bolt-rigid-contact removes them "
+             "as before.",
+    )
+    parser.add_argument(
+        "--fixed-curve-columns",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Read a comma-free *DEFINE_CURVE point line that a whitespace split "
+             "cannot read as two numbers in LS-DYNA's fixed 2E20.0 columns "
+             "(blank = 0.0): mainboltaexpl's fused '0.0055.0' lines were "
+             "dropped, so its /FUNCT/11 kept 2 of 4 points and the bolt never "
+             "pulled. Two-number and comma lines keep the split. Alone (without "
+             "--bolt-rigid-contact) it creates energy on mainboltaexpl: IE END "
+             "+19.20 %%. ON by default; --no-fixed-curve-columns restores the "
+             "split alone.",
+    )
+    parser.add_argument(
+        "--section-nodal-thickness-mean",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a *SECTION_SHELL whose Card 2 states different nodal "
+             "thicknesses T1..T4 with their MEAN (blank / 0.0 = T1), as "
+             "LS-DYNA's d3hsp reproduces: "
+             "mat_transversely_anisotropic.cup-draw's rigid tools weigh 0.0888 / "
+             "0.0655 / 0.0555 -> 0.0223 / 0.0164 / 0.0139 = LS-DYNA, its IE / KE "
+             "history RMS 7.54 / 65.93 -> 2.89 / 29.15 %% of the LS peak - but "
+             "OpenRadioss's own energy error grows there, mean -4.39 -> -17.88 "
+             "%% (named cost, mechanism not closed). ON by default; "
+             "--no-section-nodal-thickness-mean keeps T1.",
+    )
+    parser.add_argument(
+        "--plane-strain-unit-thickness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a plane-strain *SECTION_SHELL (ELFORM 13 / 43 / 52 / 55) "
+             "with thickness 1.0: LS-DYNA ignores Card 2's thickness there and "
+             "integrates a unit depth (Vol I R17 *SECTION_SHELL Remark 6) - "
+             "ex_16_thin_shell_elform_13's rigid disk 0.08756308 -> 0.003447366 "
+             "= LS-DYNA's d3hsp. The element stays a 3-D (plane-stress) shell, "
+             "which the warning names; axisymmetric ELFORM 14 / 15 / 44 are "
+             "named, not changed. ON by default; "
+             "--no-plane-strain-unit-thickness keeps T1.",
+    )
+    parser.add_argument(
+        "--rigid-element-mass-admas",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an *ELEMENT_MASS on a rigid body's SECONDARY node as /ADMAS "
+             "on that node (the main node's own mass stays in the /RBODY Mass "
+             "field; ICoG-4 bodies are unchanged): a *MAT_RIGID body folded it "
+             "into the Mass field at its centre of mass (sph/foam CoG z 121.4891 "
+             "-> 150.9633, LS-DYNA 150.96326) and a "
+             "*CONSTRAINED_NODAL_RIGID_BODY dropped it (Yaris roof crush CNRB "
+             "2300387: LS-DYNA 2.3367e-4 vs 3.3799e-5). ON by default; "
+             "--no-rigid-element-mass-admas restores the fold and the drop.",
+    )
+    parser.add_argument(
+        "--spotweld-dt-mass-scaling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert *MAT_SPOTWELD DT (Remark 4: the weld inertias are scaled "
+             "UP so their stable step is DT): raise the weld's /PROP/TYPE13 Mass "
+             "to max K1..3 x DT^2 and Inertia to (max K4..6 + max K2,3 x "
+             "L_max^2) x DT^2 when larger, so its step starts at 0.9 DT "
+             "(r2len3.F:226-246, STI = XM/DT^2 at :233). spotweld.k (opt-in "
+             "rules 1 + 2): Mass x2.5 and Inertia x13.41, last cycle 1332 = "
+             "LS-DYNA's 1332. A DT the weld's own step already exceeds is named "
+             "inert (plates.mat100). No default byte mover. ON by default; "
+             "--no-spotweld-dt-mass-scaling drops DT.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1354,6 +1439,12 @@ def main(argv=None) -> int:
         joint_screw_gjoint=args.joint_screw_gjoint,
         rigid_local_constraints=args.rigid_local_constraints,
         bcs_union=args.bcs_union,
+        bolt_rigid_contact=args.bolt_rigid_contact,
+        fixed_curve_columns=args.fixed_curve_columns,
+        section_nodal_thickness_mean=args.section_nodal_thickness_mean,
+        plane_strain_unit_thickness=args.plane_strain_unit_thickness,
+        rigid_element_mass_admas=args.rigid_element_mass_admas,
+        spotweld_dt_mass_scaling=args.spotweld_dt_mass_scaling,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

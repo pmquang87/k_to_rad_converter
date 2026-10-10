@@ -2200,8 +2200,9 @@ named warning (0 bytes, 1 warning record). The two halves are byte-disjoint:
 70 / 61 + 21 / 18 = 91 deck keys / 79 emitted models against 65ff389 (two-tree
 sweeps of the 356 keys from `F:`; only `_0000.rad` moves). Named costs:
 `ex_15` ×3 (A4), `brake` / `transducer` / `translat` (A2), `mainboltaexpl`
-(A3 — by run sensitivity, not the yield: `K2` and `K3` scaled by `(1 − 1e-8)`
-move it as much), `impact.k`'s first fifth (B1: +3.20 → −18.98 %, while its END +58.98 →
+(A3 — not by the yield: the row was hypersensitive because its bolt
+collapsed, and `K2` and `K3` scaled by `(1 − 1e-8)` move it as much — round 8
+(l)-4), `impact.k`'s first fifth (B1: +3.20 → −18.98 %, while its END +58.98 →
 +51.91 % and its IE RMS 32.62 → 29.96 % improve), `underwater_A`'s END sign
 within 1 % (B1; it stays match). `doorbeam`'s round-6 +582.00 % was
 re-measured on the A2 arm: identical (39 cycles, all 41 printed rows at nt 4
@@ -2319,17 +2320,27 @@ that decided it and the deck that would decide it next.
     error_engine (A5 (ii) names the placeholder). Refusing GLOBAL on EFG parts
     is NO-GO.
 11. **The spotweld pieces beyond A3** (round-6 item 6): piece 3 (MAT_100 DT →
-    TYPE13 mass scaling: a measured calibration ×13.42 reaches LS-DYNA's step
-    count, 1339 against 1332, with identical physics until failure; the
-    engine's STI formula was not located; only `spotweld.k` reaches it); rules
+    TYPE13 mass scaling) is **closed in round 8 by the closed form** (A6,
+    `r2len3.F:233` STI = XM/DT²): Mass ×2.5 (LS-DYNA's own factor) and
+    Inertia ×13.41 end `spotweld.k` (opt-in rules 1 + 2) at cycle 1332 =
+    LS-DYNA's problem cycle, IE END −31.18 % (unscaled −33.00 %); round 7's
+    ×13.42 factor was the INERTIA factor applied to the mass as well (+58 %
+    model mass, KE first fifth +101 %), and the IE END it read at the matched
+    end was an artefact of that mass — retracted; only `spotweld.k` and
+    `plates.mat100` (factors 1) carry DT > 0; rules
     1 + 2 as DEFAULTS (no runnable rule-2 carrier with a reference beyond
     `spotweld.k`; rule 2 would reconnect ~4100-5100 floating weld beams on
     each of four unmeasurable vehicle models); the `mainboltaexpl`
     `/PRELOAD/AXIAL` bolt spring that collapses to ~zero length on every arm
     (the row moves under A3 — IE / KE history RMS 26.69 / 24.32 → 31.32 /
-    28.24 %, nt 4 — by run sensitivity, not by the yield: its weld shear
-    never exceeds 13789 against 29021, and the 65ff389 card with `K2` and `K3`
-    scaled by `(1 − 1e-8)` reads RMS 30.46 / 29.08; the collapse is the defect).
+    28.24 %, nt 4 — not by the yield: its weld shear never exceeds 13789
+    against 29021, and the 65ff389 card with `K2` and `K3` scaled by
+    `(1 − 1e-8)` reads RMS 30.46 / 29.08; the row was hypersensitive because
+    the bolt collapsed). **Round 8 closes the collapse** (A2: the bolt-end
+    rigid bodies' members stay on the contact's secondary side and the fused
+    `*DEFINE_CURVE` lines are read in 2E20.0 columns — IE END −81.87 → −8.49 %,
+    RMS 31.32 / 28.24 → 9.19 / 10.22 %, nt 4); the pre-pull clamp (2.196 vs
+    LS-DYNA's 1.817 mm) stays open.
 12. **The `status_only` verdict_override class** (round-6 item 17): 63 keys /
     52 models censused (modal 53 / 42, non-modal 10 / 10); it would widen
     NORMAL_ALLOWED, the one guard that stops an override from hiding a live

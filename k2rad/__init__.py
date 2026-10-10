@@ -246,6 +246,12 @@ def convert(
     joint_screw_gjoint: bool = True,
     rigid_local_constraints: bool = True,
     bcs_union: bool = True,
+    bolt_rigid_contact: bool = True,
+    fixed_curve_columns: bool = True,
+    section_nodal_thickness_mean: bool = True,
+    plane_strain_unit_thickness: bool = True,
+    rigid_element_mass_admas: bool = True,
+    spotweld_dt_mass_scaling: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -690,8 +696,12 @@ def convert(
         **On by default.** MEASURED on plates.mat100 (nt 4): LS-DYNA's weld
         shear plateaus at 20374..20408 = (SIGY/sqrt3)·A = 20405; IE / KE
         history RMS 23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x
-        the cycles (deviation -> match). ``mainboltaexpl`` moves by run
-        sensitivity, not by the yield (its weld shear stays below it).
+        the cycles (deviation -> match). ``mainboltaexpl`` moves too, and
+        not by the yield (its weld shear stays below it): the row was
+        hypersensitive because its bolt collapsed - with
+        ``bolt_rigid_contact`` and ``fixed_curve_columns`` (round 8) a
+        K2 = K3 x (1 - 1e-8) cell moves only the 4th KE digit on 60 of 58550
+        rows.
     spotweld_efail_displacement : bool
         A ``*MAT_SPOTWELD`` ``EFAIL`` below the 1e19 'never' idiom on a card
         with NO resultant failure cell -> ``Ifail 1`` / ``Ifail2 0``
@@ -796,6 +806,89 @@ def convert(
         6.1.test13r / ex_08 / 11.2-11.3 / 11.5. Two skews never merge.
         **On by default.** Reach 9 deck keys on 9 emitted models. False
         writes every card as before (the 4f5b6e8 bytes).
+    bolt_rigid_contact : bool
+        Keep the members of a rigid body holding an END node of an
+        ``*INITIAL_AXIAL_FORCE_BEAM`` bolt on every PENALTY contact's
+        secondary side (round 8, A2 (l)-2; the TYPE7 / general / TYPE25
+        builders, never the TYPE2 family or the force transducers).
+        LS-DYNA keeps every rigid member in a contact (mainboltaexpl's
+        d3hsp counts 1601 nodes for interface 1, including the 68 CNRB
+        110 / 120 members k2rad removed), and these carry the bolt's
+        clamp. **On by default.** MEASURED on mainboltaexpl with
+        ``fixed_curve_columns`` (nt 4): IE END -81.87 -> -8.49 %,
+        history RMS IE / KE 31.32 / 28.24 -> 9.19 / 10.22 % of the LS
+        peak (1000 LS blocks, t <= 5e-3), plates IE RMS 36.39 -> 0.65
+        %, bolt force RMS 29.11 -> 0.91 %, 1.131x the cycles; each rule
+        alone is worse. Reach 1 deck key on 1 emitted model.
+    fixed_curve_columns : bool
+        Read a comma-free ``*DEFINE_CURVE`` point line that a
+        whitespace split cannot read as two numbers in LS-DYNA's fixed
+        2E20.0 columns, blank = 0.0 (round 8, A2 (l)-3) - only where
+        the split FAILS (decision D4), so a two-token line keeps the
+        free read. mainboltaexpl's fused ``0.0055.0`` / ``0.005055.0``
+        lines were dropped: its /FUNCT/11 kept 2 of 4 points and the
+        bolt never pulled. ``*DEFINE_CURVE_SMOOTH`` and
+        ``*DEFINE_FUNCTION`` are not touched. **On by default.**
+        Shipped with ``bolt_rigid_contact``: alone it creates energy on
+        mainboltaexpl (IE END +19.20 %). Reach 1 deck key on 1 emitted
+        model (+ camry-detailed-v5a, 12 lines).
+    section_nodal_thickness_mean : bool
+        Write a ``*SECTION_SHELL`` whose Card 2 states T1..T4 with one
+        written, nonzero and different from T1 with the MEAN of the
+        four (blank / 0.0 = T1; round 8, A4). LS-DYNA integrates the
+        thickness at the nodes and its d3hsp reproduces mean(T1..T4) on
+        every element: mat_transversely_anisotropic.cup-draw's rigid
+        tools weigh 0.0888 / 0.0655 / 0.0555 with T1 and 0.0223 /
+        0.0164 / 0.0139 with the mean = LS-DYNA. The one cell feeds
+        every consumer (mass, the J row, the lumper, offsets). The 2-D
+        ELFORMs are A7's. **On by default.** MEASURED on cup-draw (nt
+        4, 150 LS blocks 0 < t <= 0.015): IE / KE history RMS 7.54 /
+        65.93 -> 2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 %,
+        1.0007x the cycles - the NAMED COST: OpenRadioss's energy error
+        grows, mean -4.39 -> -17.88 % (mechanism not closed). Reach 2
+        deck keys on 2 emitted models.
+    plane_strain_unit_thickness : bool
+        Write a plane-strain ``*SECTION_SHELL`` (ELFORM 13 / 43 / 52 /
+        55) with thickness 1.0 (round 8, A7): LS-DYNA ignores Card 2's
+        thickness on those formulations and integrates a unit depth
+        (Vol I R17 *SECTION_SHELL Remark 6); every consumer of the cell
+        follows. **On by default.** MEASURED (starter, nt 4):
+        ex_16_thin_shell_elform_13's rigid disk 0.08756308 ->
+        0.003447366 = LS-DYNA's 0.34473655E-02, its inertia 0.02225525
+        x2 / 0.04451050 = LS-DYNA; the element stays a 3-D plane-stress
+        shell (named). Axisymmetric ELFORM 14 / 15 / 44 are named
+        whatever the flag (LS-DYNA's per-radian mass, 2Dlag x157.5).
+        Reach 1 deck key on 1 emitted model (bytes) + 4 / 4 by text.
+    rigid_element_mass_admas : bool
+        Write an ``*ELEMENT_MASS`` on a rigid body's SECONDARY node as
+        ``/ADMAS/0`` on that node (round 8, A8): the starter counts it
+        at its position, so the body's centre of mass and inertia
+        include it. Before, a ``*MAT_RIGID`` body folded every member's
+        mass into the ``/RBODY`` Mass field at its main node, which the
+        starter moves to the CoG of the secondaries WITHOUT it
+        (sph/foam: CoG z 121.4891 vs LS-DYNA's 150.96326, xx / yy
+        1.922978 vs 2.238), and a ``*CONSTRAINED_NODAL_RIGID_BODY``
+        secondary's mass was dropped altogether. The main node's own
+        mass stays in the Mass field; ICoG-4 bodies (TM supersedes) are
+        unchanged. **On by default.** MEASURED (starter, nt 4): foam
+        CoG z 150.9633, xx / yy 2.238421 = LS-DYNA, mass unchanged,
+        engine 12030 = 12030 cycles (inert there); the Yaris roof
+        crush's 12 CNRB bodies -38..-86 % -> within 0.54 % of LS-DYNA's
+        d3hsp. Reach 5 deck keys on 5 emitted models (foam + 4 Yaris
+        giants).
+    spotweld_dt_mass_scaling : bool
+        Convert ``*MAT_SPOTWELD`` ``DT`` (round 8, A6): Vol II R17
+        *MAT_SPOTWELD Remark 4 scales the weld inertias in the first
+        step so that their stable step is DT (up only). The TYPE13 step
+        is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max K4..6 +
+        max K2,3 L^2))) (``r2len3.F:226-246``, STI = XM/DT^2 at
+        ``:233``), so Mass' = max(Mass, max K1..3 DT^2) and Inertia' =
+        max(Inertia, (max K4..6 + max K2,3 L_max^2) DT^2) start the
+        weld at 0.9 DT. **On by default.** MEASURED on spotweld.k under
+        the opt-in rules 1 + 2 (nt 4): Mass x2.5 (LS-DYNA's own
+        factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
+        cycle-0 step 9.000e-7, IE END -31.18 %. Default byte movers 0
+        (plates.mat100's DT is inert: its warning says so).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1223,6 +1316,12 @@ def convert(
         joint_screw_gjoint=joint_screw_gjoint,
         rigid_local_constraints=rigid_local_constraints,
         bcs_union=bcs_union,
+        bolt_rigid_contact=bolt_rigid_contact,
+        fixed_curve_columns=fixed_curve_columns,
+        section_nodal_thickness_mean=section_nodal_thickness_mean,
+        plane_strain_unit_thickness=plane_strain_unit_thickness,
+        rigid_element_mass_admas=rigid_element_mass_admas,
+        spotweld_dt_mass_scaling=spotweld_dt_mass_scaling,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -602,8 +602,20 @@ rigid brick
     def test_element_mass_without_inertia_still_reports_the_mass_field(self):
         """The negative control: without `_INERTIA` the lumped mass really IS what
         the Mass field holds, and that message must survive."""
+        # EXPECTED VALUE MOVED in R14 round 8 (A8): node 11 is a SECONDARY
+        # node of the rigid part, so by default its mass is /ADMAS/0 on node
+        # 11 and the Mass field holds 0 - still no SUPERSEDED; the round-7
+        # assertions are kept verbatim under --no-rigid-element-mass-admas.
+        res8, st8 = _convert(_deck(PART_SHELL, PART_RIGID,
+                                   "*ELEMENT_MASS\n       1      11      0.05\n"))
+        (_rid8, rb8), = _rbody_cards(st8)
+        self.assertEqual(rb8["Mass"], 0.0)
+        self.assertIn("/ADMAS/0/", st8)
+        self.assertTrue(_warned(res8, "sit on SECONDARY nodes (node 11)"))
+        self.assertFalse(_warned(res8, "SUPERSEDED"))
         res, st = _convert(_deck(PART_SHELL, PART_RIGID,
-                                 "*ELEMENT_MASS\n       1      11      0.05\n"))
+                                 "*ELEMENT_MASS\n       1      11      0.05\n"),
+                           rigid_element_mass_admas=False)
         (_rid, rb), = _rbody_cards(st)
         self.assertEqual(rb["Mass"], 0.05)
         self.assertTrue(_warned(res, "placed in /RBODY Mass field"))

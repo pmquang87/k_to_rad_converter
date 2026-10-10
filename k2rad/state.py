@@ -1157,6 +1157,21 @@ class SectionShell:
     # 2D-belt property writer (writer/seatbelts.py), which reports it as
     # dropped; 0 = none.
     nsid: int = 0
+    # Card 2 as STATED: (T1, T2, T3, T4) with None for a blank T2..T4 (round
+    # 8, A4 / A7). ``t1`` above is the thickness WRITTEN - the mean of a
+    # non-uniform card (A4) or 1.0 on a plane-strain ELFORM (A7); this keeps
+    # the deck's own values for the writer's sentences. None = never read.
+    card2: Optional[Tuple[float, Optional[float], Optional[float],
+                          Optional[float]]] = None
+
+
+#: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
+#: *SECTION_SHELL Remark 6): the 2-D PLANE-STRAIN formulations integrate a
+#: unit depth (round 8, A7 writes Thick 1.0), the AXISYMMETRIC ones integrate
+#: per radian (named, no thickness reproduces it).
+PLANE_STRAIN_ELFORMS = frozenset({13, 43, 52, 55})
+AXISYMMETRIC_ELFORMS = frozenset({14, 15, 44})
+TWO_D_SHELL_ELFORMS = PLANE_STRAIN_ELFORMS | AXISYMMETRIC_ELFORMS
 
 
 @dataclass
@@ -7785,11 +7800,13 @@ class ConvertOptions:
     # MEASURED on plates.mat100: LS-DYNA's weld shear plateaus at 20374..20408
     # = (SIGY/sqrt3)·A = 20405; IE / KE history RMS 23.53 / 62.56 -> 8.58 /
     # 26.74 % at 1.107x the cycles (deviation -> match). mainboltaexpl moves
-    # too, by run sensitivity and not by the yield (the round-7 validation
-    # round: its weld shear never exceeds 13789 against the new yield 29021,
-    # and the 65ff389 card with K2 and K3 scaled by (1 - 1e-8) moves its END and
-    # RMS as much; its preloaded bolt spring collapses on every arm). Reach: 4
-    # deck keys on 4 emitted models (2 of them giants).
+    # too, and not by the yield (the round-7 validation round: its weld shear
+    # never exceeds 13789 against the new yield 29021, and the 65ff389 card
+    # with K2 and K3 scaled by (1 - 1e-8) moves its END and RMS as much): the
+    # row was hypersensitive because its /PRELOAD/AXIAL bolt collapsed (round
+    # 8, A2: with --bolt-rigid-contact and --fixed-curve-columns holding the
+    # bolt, the same cell moves only the 4th KE digit on 60 of 58550 rows).
+    # Reach: 4 deck keys on 4 emitted models (2 of them giants).
     spotweld_shear_yield: bool = True
     # --no-spotweld-efail-displacement: keep a *MAT_SPOTWELD EFAIL dropped
     # (R14 triage round 7, A3 piece (ii)).
@@ -7921,6 +7938,77 @@ class ConvertOptions:
     # cycles, every printed row identical at nt 4 and nt 2. Reach 9 deck keys
     # on 9 emitted models (514 nodes / 1841 DOFs).
     bcs_union: bool = True
+    # --no-bolt-rigid-contact: remove the bolt-end rigid bodies' members from
+    # the penalty contacts' secondary sides, as before round 8 (R14 triage
+    # round 8, A2 (l)-2).
+    #
+    # ON by default. The members of a rigid body (part / CNRB / extra nodes)
+    # holding an end node of an *INITIAL_AXIAL_FORCE_BEAM bolt stay on the
+    # TYPE7 / general / TYPE25 secondary sides (decision D5: not the TYPE2
+    # family, not the force transducers). LS-DYNA keeps every rigid member
+    # (mainboltaexpl d3hsp: 1601 nodes incl. the 68 CNRB 110 / 120 members);
+    # they carry the clamp. MEASURED with --fixed-curve-columns on
+    # mainboltaexpl (nt 4): IE END -81.87 -> -8.49 %, RMS IE / KE 31.32 /
+    # 28.24 -> 9.19 / 10.22 %, 1.131x the cycles. Reach 1 deck key on 1
+    # emitted model.
+    bolt_rigid_contact: bool = True
+    # --no-fixed-curve-columns: read *DEFINE_CURVE point lines by the
+    # whitespace split alone, as before round 8 (R14 triage round 8, A2
+    # (l)-3).
+    #
+    # ON by default. A comma-free point line the split cannot read as two
+    # numbers is re-read in LS-DYNA's fixed 2E20.0 columns (blank = 0.0),
+    # only where the split fails (decision D4: 284 suite tests write
+    # misaligned two-token lines a fixed-first read would misread).
+    # mainboltaexpl's /FUNCT/11 keeps 4 of 4 points instead of 2. Reach 1
+    # deck key on 1 emitted model (+ camry-detailed-v5a non-roster, 12
+    # lines).
+    fixed_curve_columns: bool = True
+    # --no-section-nodal-thickness-mean: write a *SECTION_SHELL's T1 alone,
+    # as before round 8 (R14 triage round 8, A4).
+    #
+    # ON by default. Card 2's T1..T4 are the thickness at the nodes (default
+    # T1); when one is written, nonzero and different from T1 the /PROP/SHELL
+    # thickness is mean(T1..T4) with blank / 0.0 = T1 - LS-DYNA's d3hsp
+    # reproduces it (cup-draw's rigid tools 0.0223 / 0.0164 / 0.0139 = LS).
+    # The 2-D ELFORMs 13 / 14 / 15 / 43 / 44 / 52 / 55 are A7's. MEASURED on
+    # cup-draw (nt 4): IE / KE RMS 7.54 / 65.93 -> 2.89 / 29.15 %, and the
+    # named cost: OpenRadioss's energy error mean -4.39 -> -17.88 %. Reach 2
+    # deck keys on 2 emitted models.
+    section_nodal_thickness_mean: bool = True
+    # --no-plane-strain-unit-thickness: write a plane-strain *SECTION_SHELL's
+    # stated T1, as before round 8 (R14 triage round 8, A7).
+    #
+    # ON by default. ELFORM 13 / 43 / 52 / 55 get thickness 1.0: LS-DYNA
+    # ignores Card 2 there and integrates a unit depth (Remark 6). MEASURED
+    # (starter): ex_16's rigid disk 0.08756308 -> 0.003447366 = LS-DYNA
+    # 0.34473655E-02. The element stays a 3-D plane-stress shell (named);
+    # axisymmetric ELFORM 14 / 15 / 44 are named, never changed. Reach 1 deck
+    # key on 1 emitted model.
+    plane_strain_unit_thickness: bool = True
+    # --no-rigid-element-mass-admas: fold every rigid member's *ELEMENT_MASS
+    # into the /RBODY Mass field (and drop a CNRB secondary's), as before
+    # round 8 (R14 triage round 8, A8).
+    #
+    # ON by default. A mass on a rigid SECONDARY node becomes /ADMAS/0 on
+    # that node (the starter counts it at its position); the main node's own
+    # mass stays in the Mass field; ICoG-4 bodies are unchanged. Both
+    # producers (*MAT_RIGID parts folded it at the CoG, CNRB dropped it -
+    # decision D6). MEASURED: foam CoG z 121.4891 -> 150.9633 (LS-DYNA
+    # 150.96326); the Yaris roof crush's 12 CNRB bodies within 0.54 % of
+    # LS-DYNA. Reach 5 deck keys on 5 emitted models.
+    rigid_element_mass_admas: bool = True
+    # --no-spotweld-dt-mass-scaling: drop a *MAT_SPOTWELD DT, as before round
+    # 8 (R14 triage round 8, A6).
+    #
+    # ON by default. Remark 4 scales the weld UP to a step of DT: Mass' =
+    # max(M, max K1..3 DT^2), Inertia' = max(I, (max K4..6 + max K2,3
+    # L_max^2) DT^2) (r2len3.F:226-246, STI = XM/DT^2 at :233). MEASURED on
+    # spotweld.k (opt-in rules 1 + 2): Mass x2.5, Inertia x13.41, last cycle
+    # 1332 = LS-DYNA's 1332. Round 7's x13.42 'calibration' applied the inertia
+    # factor to the mass as well and is retracted. Default byte movers 0 deck
+    # keys.
+    spotweld_dt_mass_scaling: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9517,7 +9605,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1057, :1741, :1855, :2044, :2201, :2325, in that order:
+    # (writer/rbody.py:1083, :1778, :1892, :2081, :2238, :2362, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -9756,6 +9844,31 @@ class ConversionState:
     # CMO -1 card with CON1 0 (round 8, A1), so screen (c')'s sentence names
     # that code too. Rebuilt with rigid_auto_bcs.
     rigid_auto_cmo_neg: Set[int] = field(default_factory=set)
+    # round 8, A2 (l)-2 (--bolt-rigid-contact): the members of every rigid
+    # body (part / CNRB / extra nodes, the merged rbody_info) holding an END
+    # node of an *INITIAL_AXIAL_FORCE_BEAM bolt: member node -> (body key,
+    # BSID). The penalty contact builders keep them on a secondary side
+    # (LS-DYNA keeps all rigid members; these carry the bolt's clamp). Filled
+    # by assembly.build_starter after the rigid bodies are merged; empty with
+    # the flag off.
+    bolt_rigid_keep: Dict[int, Tuple[int, int]] = field(default_factory=dict)
+    # ... and, per secondary side resolved by a penalty builder, the kept
+    # members that reached its /GRNOD: (sid, styp) -> node ids. Read by
+    # contacts._warn_bolt_rigid_kept for the interface's own sentence.
+    bolt_kept_by_side: Dict[Tuple[int, int], List[int]] = field(
+        default_factory=dict)
+    # round 8, A8 (--rigid-element-mass-admas): the rigid-body nodes whose
+    # *ELEMENT_MASS stays in an /RBODY Mass field - every main node, and every
+    # member of an ICoG-4 (*PART_INERTIA / CNRB _INERTIA) body, whose TM
+    # supersedes the lumped masses. _make_added_masses skips exactly these;
+    # a mass on any other rigid member becomes /ADMAS/0 on its node. Reset by
+    # _make_rbodies, appended by _make_cnrb_rbodies.
+    rbody_folded_mass_nodes: Set[int] = field(default_factory=set)
+    # ... and the SECONDARY-node masses that move: node -> (body key, how the
+    # previous converter handled it: "folded" into the Mass field at the
+    # centre of mass, or "dropped"). Read by _make_added_masses' sentence.
+    rbody_secondary_masses: Dict[int, Tuple[int, str]] = field(
+        default_factory=dict)
     # *SECTION_SOLID_EFG / *SECTION_SHELL_EFG: RECORDED but still SKIPPED
     # (round 7, A5 (ii)) - secid -> (the keyword as skipped, ELFORM). ONE
     # consumer: the missing-section auto-create of writer/mesh.

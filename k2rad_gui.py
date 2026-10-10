@@ -120,6 +120,12 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          joint_screw_gjoint: bool = True,
                          rigid_local_constraints: bool = True,
                          bcs_union: bool = True,
+                         bolt_rigid_contact: bool = True,
+                         fixed_curve_columns: bool = True,
+                         section_nodal_thickness_mean: bool = True,
+                         plane_strain_unit_thickness: bool = True,
+                         rigid_element_mass_admas: bool = True,
+                         spotweld_dt_mass_scaling: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -288,6 +294,18 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["bcs_union"] = bool(bcs_union)
 
+    kwargs["bolt_rigid_contact"] = bool(bolt_rigid_contact)
+
+    kwargs["fixed_curve_columns"] = bool(fixed_curve_columns)
+
+    kwargs["section_nodal_thickness_mean"] = bool(section_nodal_thickness_mean)
+
+    kwargs["plane_strain_unit_thickness"] = bool(plane_strain_unit_thickness)
+
+    kwargs["rigid_element_mass_admas"] = bool(rigid_element_mass_admas)
+
+    kwargs["spotweld_dt_mass_scaling"] = bool(spotweld_dt_mass_scaling)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -432,6 +450,12 @@ class ConverterGUI:
         self.joint_screw_gjoint = tk.BooleanVar(value=True)
         self.rigid_local_constraints = tk.BooleanVar(value=True)
         self.bcs_union = tk.BooleanVar(value=True)
+        self.bolt_rigid_contact = tk.BooleanVar(value=True)
+        self.fixed_curve_columns = tk.BooleanVar(value=True)
+        self.section_nodal_thickness_mean = tk.BooleanVar(value=True)
+        self.plane_strain_unit_thickness = tk.BooleanVar(value=True)
+        self.rigid_element_mass_admas = tk.BooleanVar(value=True)
+        self.spotweld_dt_mass_scaling = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -928,6 +952,46 @@ class ConverterGUI:
             variable=self.bcs_union).grid(
                 row=49, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Bolt-end rigid bodies keep their members on penalty "
+                     "contact secondary sides - ON. mainboltaexpl IE -81.87 -> "
+                     "-8.49 % (with the curve fix)",
+            variable=self.bolt_rigid_contact).grid(
+                row=50, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*DEFINE_CURVE: read an unsplittable point line in fixed "
+                     "2E20.0 columns - ON. mainboltaexpl /FUNCT/11 2 -> 4 points",
+            variable=self.fixed_curve_columns).grid(
+                row=51, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*SECTION_SHELL T1..T4 -> their mean thickness - ON. "
+                     "cup-draw tool masses = LS-DYNA; OR energy error -4.4 -> "
+                     "-17.9 % (named cost)",
+            variable=self.section_nodal_thickness_mean).grid(
+                row=52, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Plane-strain *SECTION_SHELL (ELFORM 13/43/52/55) -> "
+                     "thickness 1.0 - ON. ex_16 disk mass = LS-DYNA",
+            variable=self.plane_strain_unit_thickness).grid(
+                row=53, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*ELEMENT_MASS on a rigid SECONDARY node -> /ADMAS on that "
+                     "node - ON. foam CoG = LS-DYNA; CNRB masses no longer "
+                     "dropped",
+            variable=self.rigid_element_mass_admas).grid(
+                row=54, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD DT -> TYPE13 Mass / Inertia so the weld "
+                     "steps at 0.9 DT - ON. spotweld.k last cycle 1332 = "
+                     "LS-DYNA's 1332",
+            variable=self.spotweld_dt_mass_scaling).grid(
+                row=55, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1191,6 +1255,12 @@ class ConverterGUI:
                 joint_screw_gjoint=self.joint_screw_gjoint.get(),
                 rigid_local_constraints=self.rigid_local_constraints.get(),
                 bcs_union=self.bcs_union.get(),
+                bolt_rigid_contact=self.bolt_rigid_contact.get(),
+                fixed_curve_columns=self.fixed_curve_columns.get(),
+                section_nodal_thickness_mean=self.section_nodal_thickness_mean.get(),
+                plane_strain_unit_thickness=self.plane_strain_unit_thickness.get(),
+                rigid_element_mass_admas=self.rigid_element_mass_admas.get(),
+                spotweld_dt_mass_scaling=self.spotweld_dt_mass_scaling.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1384,6 +1454,23 @@ class ConverterGUI:
         if not kwargs.get("bcs_union", True):
             bits.append("every *BOUNDARY_SPC card and the free-node guard written "
                         "as before (--no-bcs-union)")
+        if not kwargs.get("bolt_rigid_contact", True):
+            bits.append("bolt-end rigid members removed from contact secondary "
+                        "sides (--no-bolt-rigid-contact)")
+        if not kwargs.get("fixed_curve_columns", True):
+            bits.append("*DEFINE_CURVE read by the whitespace split alone "
+                        "(--no-fixed-curve-columns)")
+        if not kwargs.get("section_nodal_thickness_mean", True):
+            bits.append("*SECTION_SHELL written with T1 only "
+                        "(--no-section-nodal-thickness-mean)")
+        if not kwargs.get("plane_strain_unit_thickness", True):
+            bits.append("plane-strain *SECTION_SHELL written with its stated T1 "
+                        "(--no-plane-strain-unit-thickness)")
+        if not kwargs.get("rigid_element_mass_admas", True):
+            bits.append("rigid secondary *ELEMENT_MASS folded / dropped as before "
+                        "(--no-rigid-element-mass-admas)")
+        if not kwargs.get("spotweld_dt_mass_scaling", True):
+            bits.append("*MAT_SPOTWELD DT dropped (--no-spotweld-dt-mass-scaling)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

@@ -80,6 +80,7 @@ from .monvol import _make_monvols, _resolve_airbags
 from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
+    _bolt_end_rigid_members,
     _make_force_transducers,
     _make_refused_contact_notes,
     _make_general_interfaces,
@@ -2003,7 +2004,21 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # carries the state plus the three values threaded across sections
     # (rbody_info, rigid_nodes, the pre-built rbody_lines) and the progress
     # reporter. Output is byte-identical to the previous fixed sequence.
-    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep)
+    # round 8, A2 (l)-2 (--bolt-rigid-contact, default ON): the members of a
+    # rigid body holding an end node of an *INITIAL_AXIAL_FORCE_BEAM bolt stay
+    # on every PENALTY contact's secondary side - the three builders below
+    # read ctx.contact_rigid_nodes; the TYPE2 family and the force
+    # transducers keep the full rigid set (decision D5). Computed once, after
+    # the rigid bodies are merged, before any interface is built.
+    state.bolt_rigid_keep = {}
+    state.bolt_kept_by_side = {}
+    contact_rigid_nodes = rigid_nodes
+    if state.options.bolt_rigid_contact:
+        state.bolt_rigid_keep = _bolt_end_rigid_members(state, rbody_info)
+        if state.bolt_rigid_keep:
+            contact_rigid_nodes = rigid_nodes - set(state.bolt_rigid_keep)
+    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep,
+                          contact_rigid_nodes)
     lines: List[str] = []
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
@@ -2830,14 +2845,20 @@ class _StarterContext:
     """Values threaded across the starter section builders (see
     _starter_section_registry). ``rep(frac, label)`` forwards to the progress
     callback."""
-    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep")
+    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep",
+                 "contact_rigid_nodes")
 
-    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep):
+    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep,
+                 contact_rigid_nodes=None):
         self.state = state
         self.rbody_info = rbody_info
         self.rigid_nodes = rigid_nodes
         self.rbody_lines = rbody_lines
         self.rep = rep
+        # round 8, A2 (l)-2: the rigid set the PENALTY contact builders filter
+        # a secondary side by (rigid_nodes minus the bolt-end bodies' members)
+        self.contact_rigid_nodes = (rigid_nodes if contact_rigid_nodes is None
+                                    else contact_rigid_nodes)
 
 
 def _progress_marker(ctx: "_StarterContext", frac: float, label: str) -> List[str]:
@@ -2906,9 +2927,12 @@ def _starter_section_registry():
         # LS-DYNA-side) ids away from the state.next_id() stream the surfaces
         # below draw from.
         ("frictions",         lambda c: _make_frictions(c.state)),
-        ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
-        ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
-        ("type25_interfaces", lambda c: _make_type25_interfaces(c.state, c.rigid_nodes)),
+        ("interfaces",        lambda c: _make_interfaces(c.state,
+                                                     c.contact_rigid_nodes)),
+        ("general_interfaces", lambda c: _make_general_interfaces(
+            c.state, c.contact_rigid_nodes)),
+        ("type25_interfaces", lambda c: _make_type25_interfaces(
+            c.state, c.contact_rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
         ("tiebreak_interfaces",
                               lambda c: _make_tiebreak_interfaces(c.state, c.rigid_nodes)),

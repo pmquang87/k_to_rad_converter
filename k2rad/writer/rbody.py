@@ -693,6 +693,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     state.rigid_skewed_bcs = {}
     state.rigid_auto_cmo_neg = set()
     t0_cache: Dict[int, int] = {}
+    # round 8, A8: which rigid nodes keep their *ELEMENT_MASS in a Mass field
+    # (main nodes, ICoG-4 members) and which secondary masses move to /ADMAS
+    state.rbody_folded_mass_nodes = set()
+    state.rbody_secondary_masses = {}
     from .joint_screw import screw_cmo_skip_pids
     screw_skip = screw_cmo_skip_pids(state)
 
@@ -938,7 +942,24 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         #     they need exact total control.
         # This is the primary stabilization mechanism for implicit analyses
         # where the inherent rigid-body mass is too small.
-        if state.options.rigid_cog_master:
+        a8 = state.options.rigid_element_mass_admas and props is None
+        if a8:
+            # round 8, A8 (default ON, --no-rigid-element-mass-admas): only the
+            # MAIN node's own *ELEMENT_MASS stays in the Mass field. A mass on
+            # any other member becomes /ADMAS/0 on its node
+            # (_make_added_masses): the starter counts it there, so the body's
+            # centre of mass and inertia include it - folded into Mass it sat
+            # at the main node, which the starter moves to the CoG of the
+            # secondaries WITHOUT it (foam: CoG z 121.4891 vs LS-DYNA's
+            # 150.96326); under --no-rigid-cog-master it was dropped.
+            node_added = state.added_node_masses.get(ind_node, 0.0)
+            state.rbody_folded_mass_nodes.add(ind_node)
+            for n in unique_nodes:
+                if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
+                    state.rbody_secondary_masses[n] = (
+                        pid, "folded" if state.options.rigid_cog_master
+                        else "dropped")
+        elif state.options.rigid_cog_master:
             # The synthesized master carries no *ELEMENT_MASS of its own, and
             # _make_added_masses skips rigid-body nodes (their /ADMAS belongs to
             # the /RBODY) — so fold the *ELEMENT_MASS of ALL of the part's nodes
@@ -947,6 +968,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                              for n in unique_nodes)
         else:
             node_added = state.added_node_masses.get(ind_node, 0.0)
+        if props is not None:
+            # ICoG 4: TM supersedes every lumped mass of the body (round 8,
+            # A8 leaves these bodies as they were)
+            state.rbody_folded_mass_nodes.update(unique_nodes)
+            state.rbody_folded_mass_nodes.add(ind_node)
         part_add, part_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
         if part_fin > 0:
             # FINMASS specified — treat as added mass (OpenRadioss /RBODY Mass
@@ -963,7 +989,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             sources = []
             if node_added > 0:
                 where = ("the part's nodes" if state.options.rigid_cog_master
-                         else f"node {ind_node}")
+                         and not a8 else f"node {ind_node}")
                 sources.append(f"*ELEMENT_MASS on {where}={node_added:.6G}")
             if part_add > 0:
                 sources.append(f"*ELEMENT_MASS_PART ADDMASS={part_add:.6G}")
@@ -1703,6 +1729,17 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # _make_rbodies): *ELEMENT_MASS[_NODE_SET] on the master node and
         # *ELEMENT_MASS_PART[_SET] on this part go into the /RBODY Mass field.
         node_added = state.added_node_masses.get(ind_node, 0.0)
+        # round 8, A8: a mass on a SECONDARY node of this body was dropped
+        # (neither folded here nor written by _make_added_masses, which
+        # skipped every rigid node); it becomes /ADMAS/0 on its node now.
+        # An ICoG-4 body keeps every lumped mass out (TM supersedes them).
+        state.rbody_folded_mass_nodes.add(ind_node)
+        if props is not None:
+            state.rbody_folded_mass_nodes.update(secondary_nodes)
+        elif state.options.rigid_element_mass_admas:
+            for n in secondary_nodes:
+                if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
+                    state.rbody_secondary_masses[n] = (cnrb.pid, "dropped")
         part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
         added_mass = node_added + (part_fin if part_fin > 0 else part_add)
         # `props is None` — see the matching gate in _make_rbodies: with _INERTIA

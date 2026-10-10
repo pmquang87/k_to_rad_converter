@@ -1225,6 +1225,11 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
         self.assertFalse(_has(res.warnings, _W_SHEAR_ON))
 
     def test_7_the_efail_opt_out_keeps_EFAIL_dropped(self):
+        # EXPECTED VALUE MOVED in R14 round 8 (A6): this weld's DT 1e-9 is
+        # INERT under the closed form (max K1..3 DT^2 and the rotational term
+        # stay below the weld's own Mass / Inertia), so DT leaves the dropped
+        # sentence and gets its own 'inert' sentence; the round-7 assertion
+        # is kept under --no-spotweld-dt-mass-scaling below.
         res, starter, _e = _convert(_weld_deck(efail=0.3,
                                                resultants=(0.0,) * 6),
                                     spotweld_efail_displacement=False)
@@ -1232,9 +1237,16 @@ class SpotweldShearYieldAndEfail(unittest.TestCase):
         self.assertEqual(card1[70:80].strip(), "0")
         self.assertEqual(card1[90:100].strip(), "0")
         self.assertEqual(dofs[0][1][80:100].strip(), "0")
-        self.assertTrue(_has(res.warnings, "DT, EFAIL have no /PROP/TYPE13 "
+        self.assertTrue(_has(res.warnings, "EFAIL have no /PROP/TYPE13 "
                              "slot", "plastic-strain failure"), res.warnings)
+        self.assertFalse(_has(res.warnings, "DT, EFAIL have no"))
+        self.assertTrue(_has(res.warnings, "DT=1e-09 is inert"), res.warnings)
         self.assertFalse(_has(res.warnings, _W_EFAIL_ON))
+        r0, _s0, _e0 = _convert(_weld_deck(efail=0.3, resultants=(0.0,) * 6),
+                                spotweld_efail_displacement=False,
+                                spotweld_dt_mass_scaling=False)
+        self.assertTrue(_has(r0.warnings, "DT, EFAIL have no /PROP/TYPE13 "
+                             "slot", "plastic-strain failure"), r0.warnings)
 
     def test_8_piece_ii_without_piece_i_names_the_unreached_criterion(self):
         """--no-spotweld-shear-yield + EFAIL: the cells are written with the
@@ -4120,13 +4132,21 @@ class Round7ValidationRound(unittest.TestCase):
             ("ROADMAP.md", "all 41 printed rows at nt 4 and 2"),
             ("ROADMAP.md", "RMS 393.31; stub removed 33 cycles +689.08 %, "
              "RMS 313.05 (the RMS over every printed row"),
-            ("k2rad/cli.py", "mainboltaexpl moves too, by run sensitivity "
-             "and not by the yield"),
-            ("README.md", "by run sensitivity, not by the yield: its weld "
-             "shear never exceeds 13789 against the new yield 29021"),
-            ("ROADMAP.md", "by run sensitivity, not by the yield"),
-            ("k2rad/__init__.py", "``mainboltaexpl`` moves by run "
-             "sensitivity, not by the yield"),
+            # EXPECTED VALUE MOVED in R14 round 8 (A2 (l)-4): 'by run
+            # sensitivity' is retracted - the row was hypersensitive because
+            # its /PRELOAD/AXIAL bolt collapsed (with round 8's A2 holding the
+            # bolt, the K2 = K3 x (1 - 1e-8) cell moves only the 4th KE digit
+            # on 60 of 58550 rows); the four sites keep the 'not by the
+            # yield' fact with the cause named
+            ("k2rad/cli.py", "mainboltaexpl moves too, and not by the yield "
+             "(its weld shear never exceeds 13789 against the new yield "
+             "29021)"),
+            ("README.md", "not by the yield: its weld shear never exceeds "
+             "13789 against the new yield 29021"),
+            ("ROADMAP.md", "not by the yield: its weld shear never exceeds "
+             "13789 against 29021"),
+            ("k2rad/__init__.py", "``mainboltaexpl`` moves too, and not by "
+             "the yield"),
             ("README.md", "but 12.7 % of a 7.85e-6 t coupon body"),
             ("README.md", "emitted models (151 bodies written, 2 refused at "
              "the margin"),

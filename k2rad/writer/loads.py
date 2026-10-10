@@ -4067,11 +4067,59 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                    if mat.sigy > 0.0 and not state.options.spotweld_shear_yield
                    else "")
                 + " --no-spotweld-efail-displacement keeps EFAIL dropped.")
+        # round 8, A6 (default ON, --no-spotweld-dt-mass-scaling): *MAT_100
+        # DT -> the TYPE13 Mass / Inertia closed form. Vol II R17
+        # *MAT_SPOTWELD Remark 4 scales the weld inertias in the first step so
+        # that their stable step is DT - UP only. The TYPE13 step is
+        # DTFAC1(6) min(XM / (sqrt(XCM^2 + XM XKM) + XCM), the rotational one)
+        # (r2len3.F:226-246; STI = XM/DT^2 at :233) with XKM = max(K1..K3)
+        # (r4def3.F:165) and XKR = max(K2, K3) ALDP^2 + max(K4..K6) (:173,
+        # :545-547): undamped, dt = 0.9 min(sqrt(M / max K1..3),
+        # sqrt(I / (max K4..6 + max K2,3 L^2))). L_max = the LONGEST weld of
+        # the property (the smallest rotational step).
+        dt_scaled = False
+        dt_inert = False
+        f_m = f_i = 1.0
+        if (state.options.spotweld_dt_mass_scaling
+                and 0.0 < mat.dt < _SPOTWELD_NEVER):
+            l_max = max(lens) if lens else L
+            m_dt = max(k1, k23) * mat.dt ** 2
+            i_dt = (max(k4, k5, k6) + k23 * l_max ** 2) * mat.dt ** 2
+            new_mass, new_inertia = max(mass, m_dt), max(inertia, i_dt)
+            if new_mass > mass or new_inertia > inertia:
+                f_m, f_i = new_mass / mass, new_inertia / inertia
+                dt_added = (new_mass - mass) * len(beams)
+                mass, inertia = new_mass, new_inertia
+                dt_scaled = True
+            else:
+                dt_inert = True
         prop_id = state.next_prop_id()
         lines += funct_lines
         lines += _emit_prop_type13(
             prop_id, (part.title or f"SPOTWELD_{pid}") + " (MAT_100 spotweld)",
             mass, inertia, ifail, ifail2, dofs)
+        if dt_scaled:
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: DT={mat.dt:g} -> "
+                f"/PROP/TYPE13/{prop_id} Mass x {f_m:.4g}, Inertia x "
+                f"{f_i:.4g} (Vol II R17 *MAT_SPOTWELD Remark 4: the weld "
+                "inertias are scaled so that their stable step is DT), added "
+                f"mass {dt_added:.6G} on {len(beams)} weld(s): the TYPE13 "
+                "step is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max "
+                "K4..6 + max K2,3 L^2))) (r2len3.F:226-246, STI = XM/DT^2 at "
+                ":233), so it starts at 0.9 DT; a lengthening weld pulls it "
+                "below. MEASURED on spotweld.k under the opt-in rules 1 + 2 "
+                "(nt 4): last cycle 1332 = LS-DYNA's 1332 (4791 unscaled), cycle-0 "
+                "step 9.000e-7, "
+                "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %). "
+                "--no-spotweld-dt-mass-scaling drops DT as before (round 8).")
+        elif dt_inert:
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: DT={mat.dt:g} is inert: the "
+                "weld's own TYPE13 step already exceeds it (Remark 4 scales a "
+                "weld UP to DT, never down - LS-DYNA runs plates.mat100 at its "
+                "beam step 2.99951e-7 s with DT 1e-9). "
+                "--no-spotweld-dt-mass-scaling names DT as dropped (round 8).")
         lines += [
             f"/PART/{pid}",
             part.title or f"SPOTWELD_{pid}",
@@ -4109,6 +4157,9 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
 
         cells = [("DT", mat.dt), ("TFAIL", mat.tfail), ("EFAIL", mat.efail),
                  ("NF", mat.nf)]
+        if dt_scaled or dt_inert:
+            # A6 (round 8): DT is converted (or named inert) above
+            cells = [c for c in cells if c[0] != "DT"]
         if efail_disp or efail_mixed:
             # EFAIL is converted (piece ii) or named by its own sentence below
             # (the mixed card): the dropped clause leaves it out
@@ -8465,10 +8516,14 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
 def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     """*ELEMENT_MASS lumped masses on ORDINARY nodes → /ADMAS/0.
 
-    state.added_node_masses holds every *ELEMENT_MASS nodal mass. Masses on
-    rigid-body nodes are already accounted for via the /RBODY Mass field
-    (_make_rbodies folds the master-node mass), so /ADMAS is emitted only for
-    nodes that are NOT part of any rigid body. /ADMAS/0 adds its Mass value to
+    state.added_node_masses holds every *ELEMENT_MASS nodal mass. A mass on an
+    /RBODY MAIN node (or on any member of an ICoG-4 body) is accounted for in
+    the /RBODY Mass field (_make_rbodies / _make_cnrb_rbodies), so /ADMAS is
+    not emitted there. Since round 8 (A8, --rigid-element-mass-admas) a mass
+    on a rigid SECONDARY node IS emitted here, on its node: the starter counts
+    it at its position (centre of mass and inertia), where the fold put it at
+    the body's main node and a CNRB secondary's mass was dropped; the opt-out
+    restores the old rule (every rigid node skipped). /ADMAS/0 adds its Mass value to
     EACH node of the referenced /GRNOD, so nodes are grouped by identical mass
     value (one /GRNOD + /ADMAS/0 per distinct value). Before this, ordinary-node
     *ELEMENT_MASS was silently dropped (writer consumed added_node_masses only
@@ -8478,12 +8533,22 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     degenerate: List[Tuple[int, float, float]] = []      # (nid, m_node, share)
     masses_by_value: Dict[float, List[int]] = {}
     skipped_rigid = 0
+    # round 8, A8 (--rigid-element-mass-admas): only the masses an /RBODY
+    # Mass field keeps (main nodes, ICoG-4 members) are skipped; a mass on a
+    # rigid SECONDARY node is written here, on its node
+    a8 = state.options.rigid_element_mass_admas
+    skip = state.rbody_folded_mass_nodes if a8 else rigid_nodes
+    moved: Dict[int, Tuple[int, str]] = {}
     for nid, mass in state.added_node_masses.items():
         if mass <= 0 or nid not in state.nodes:
             continue
-        if nid in rigid_nodes:
+        if nid in skip:
             skipped_rigid += 1          # folded into its /RBODY already
             continue
+        if a8 and nid in rigid_nodes:
+            moved[nid] = state.rbody_secondary_masses.get(nid, (0, "dropped"))
+            masses_by_value.setdefault(mass, []).append(nid)
+            continue                    # a rigid end is never compensated (S2)
         share = state.spring_token_mass_by_node.get(nid, 0.0)
         if share > 0.0 and state.options.spring_token_mass_compensation:
             if mass - share > 0.0:
@@ -8510,7 +8575,9 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     total = 0.0
     if masses_by_value:
         lines += [HDR,
-                  "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
+                  "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes"
+                  + (" and rigid-body secondary nodes" if moved else "")
+                  + "):"]
         for mass, nids in sorted(masses_by_value.items()):
             nids = sorted(nids)
             n_nodes += len(nids)
@@ -8548,14 +8615,51 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
                 HDR,
             ]
     if n_nodes:
-        note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_nodes} ordinary "
-                f"node(s) (total added mass {total:g}).")
+        n_ord = n_nodes - len(moved)
+        note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_ord} ordinary "
+                f"node(s)" + (f" and {len(moved)} rigid-body SECONDARY "
+                              "node(s)" if moved else "")
+                + f" (total added mass {total:g}).")
         if skipped_rigid:
             note += (f" {skipped_rigid} mass(es) on rigid-body nodes were left "
-                     "to the /RBODY (master-node mass is folded into its Mass "
-                     "field).")
+                     "to the /RBODY (" + ("main-node mass folded into its Mass "
+                                          "field" if a8 else
+                                          "master-node mass is folded into its "
+                                          "Mass field") + ").")
         state.warn(note)
+    if moved:
+        _warn_rigid_secondary_element_mass(state, moved)
     return lines
+
+
+def _warn_rigid_secondary_element_mass(state: ConversionState,
+                                       moved: Dict[int, Tuple[int, str]]
+                                       ) -> None:
+    """W-A8 (round 8): the *ELEMENT_MASS on rigid SECONDARY nodes that is
+    now /ADMAS on its node - named with what the previous converter did."""
+    nodes = sorted(moved)
+    bodies = sorted({b for b, _h in moved.values()})
+    folded = [n for n in nodes if moved[n][1] == "folded"]
+    dropped = [n for n in nodes if moved[n][1] != "folded"]
+    was = []
+    if folded:
+        was.append(f"folded into the /RBODY Mass field at the centre of mass "
+                   f"({len(folded)}, *MAT_RIGID part bodies)")
+    if dropped:
+        was.append(f"being DROPPED ({len(dropped)}: *CONSTRAINED_NODAL_RIGID_"
+                   "BODY secondaries, or part bodies under "
+                   "--no-rigid-cog-master)")
+    state.warn(
+        f"*ELEMENT_MASS: {len(nodes)} nodal mass(es) on {len(bodies)} rigid "
+        f"body/bodies sit on SECONDARY nodes (node {_named(nodes)}); they are "
+        "written as /ADMAS on their nodes, where the starter counts them at "
+        "their position, instead of " + " or ".join(was) + " as before round "
+        "8. LS-DYNA keeps a discrete mass at its node: on sph/foam/foam.k the "
+        "body's CoG moves z 121.4891 -> 150.9633 and xx / yy 1.922978 -> "
+        "2.238421 (LS-DYNA 150.96326 / 2.238), mass unchanged; a mass on a "
+        "*CONSTRAINED_NODAL_RIGID_BODY secondary was LOST before (Yaris roof "
+        "crush CNRB 2300387: LS-DYNA 2.3367e-4 vs 3.3799e-5). "
+        "--no-rigid-element-mass-admas restores the previous fold (and drop).")
 
 
 def _make_tied_nodes_failure_notes(state: ConversionState) -> List[str]:
