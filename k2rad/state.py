@@ -8009,6 +8009,20 @@ class ConvertOptions:
     # factor to the mass as well and is retracted. Default byte movers 0 deck
     # keys.
     spotweld_dt_mass_scaling: bool = True
+    # --no-adaptive-spring-token: keep k2rad's fixed 1e-4 spring token MASS
+    # on every token /PROP, as before round 8 (R14 triage round 8, A5).
+    #
+    # ON by default. Each token /PROP (TYPE4 / TYPE8 / TYPE13) gets MASS =
+    # max(1.1e-15, min(1e-4, 2 mu min(1, 2/n))), mu from the end nodes' own
+    # masses, n the busier end's token-spring count (per unit length on Ileng
+    # 1); a rigid, connector-ground or DRIVEN end (held or imposed along the
+    # spring for the whole run) counts infinitely heavy, a spring with both
+    # ends infinite keeps the token. The fixed token was killed by the
+    # energy-error limit within 3-6 cycles on three coupons, each behind a
+    # NORMAL TERMINATION banner (the spring step reads the
+    # PROPERTY mass, r1len3.F:175). Reach 6 deck keys on 6 emitted models,
+    # one cell each; the runnable movers' rows identical at 1.000x.
+    adaptive_spring_token: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9495,6 +9509,23 @@ class ConversionState:
     spring_token_springs: List[Tuple[int, int, int, float, float, float,
                                      float, float, float]] = field(
         default_factory=list)
+    # round 8, A5 (--adaptive-spring-token): index into spring_token_springs
+    # -> (/PROP id, "TYPE4" | "TYPE8" | "TYPE13", Ileng, element length),
+    # recorded by the four token producers at the same write line, so the
+    # adaptive-token pass (loads._adaptive_spring_token) knows which emitted
+    # /PROP MASS cell each spring's token lives in.
+    spring_token_props: Dict[int, Tuple[int, str, int, float]] = field(
+        default_factory=dict)
+    # ... and the eids of the token springs that pass found with BOTH ends
+    # counted infinitely heavy and at least one end DRIVEN (held or imposed
+    # along the spring for the whole run): they keep the token, and the
+    # LIGHT clause labels their light end DRIVEN. Reset by the pass.
+    spring_token_both_driven: Set[int] = field(default_factory=set)
+    # ... and the /PROP MASS cells it rewrote: /PROP id -> (old, printed new).
+    # Empty = no cell moved, and every token sentence keeps its fixed-token
+    # wording (the opt-out's text, byte for byte).
+    adaptive_token_changed: Dict[int, Tuple[float, float]] = field(
+        default_factory=dict)
     # *SECTION_SOLID secids already named by _warn_assumed_strain_elform, so a
     # section reached from two writer passes warns once (the #129 dedup rule:
     # one message per distinct SOURCE CARD, not per part or per element).
@@ -9641,6 +9672,14 @@ class ConversionState:
     #: can be matched against it. Named in the TC/RC report rather than
     #: screened, so the reader can judge the overlap.
     imp_motion_skew_nodes: Set[int] = field(default_factory=set)
+    #: round 8, A5: ``node id -> [(Dir letter, tstart, tstop, sensor id)]``
+    #: of every GLOBAL (skew_ID 0) /IMPVEL | /IMPDISP | /IMPACC written for
+    #: the node - the card's own window (``tstop`` 0 = to the end of the run;
+    #: no producer gates one on a sensor today, so the id is 0). Read by the
+    #: adaptive spring token: an end is DRIVEN only by a motion that holds it
+    #: for the WHOLE run (``imp_motion_dirs`` above keeps no window).
+    imp_motion_windows: Dict[int, List[Tuple[str, float, float, int]]] = (
+        field(default_factory=dict))
     # *ELEMENT_DISCRETE eids carrying PF=1, the deforc PRINT flag: "EQ.1: forces
     # are not printed DEFORC file" (Vol I R16 p.19-32), and p.1944 names it as
     # one of the two ways a deck narrows the deforc selection. It is an OUTPUT

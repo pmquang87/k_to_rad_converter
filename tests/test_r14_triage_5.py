@@ -44,6 +44,15 @@ def _row(*vals) -> str:
     return "".join(f"{v:>10}" for v in vals)
 
 
+def _token_mass_cells(starter: str):
+    """Round 8, A5: the printed MASS cell of every /PROP/TYPE4 | TYPE8 |
+    TYPE13 block, in file order (the adaptive spring token rewrites it)."""
+    lines = starter.splitlines()
+    return [lines[i + 3][:20].strip() for i, ln in enumerate(lines)
+            if ln.startswith(("/PROP/TYPE4/", "/PROP/TYPE8/",
+                              "/PROP/TYPE13/"))]
+
+
 def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text, engine_text)."""
     tmp = tempfile.TemporaryDirectory()
@@ -253,17 +262,40 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
     """
 
     def test_one_weld_with_no_admas_gets_a_negative_card_of_half_the_token(self):
-        """Hand: one element, 0.5 x 1e-4 = 5e-05 on EACH of its two ends."""
-        _r, starter, _e = _convert(_weld_deck())
+        """Hand: one element, 0.5 x 1e-4 = 5e-05 on EACH of its two ends.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: each weld end is the corner of one 10 x 10 x
+        1 shell at 7.85e-9 (own 1.9625e-7), n = 1 -> MASS 2 mu = 1.9625e-7,
+        share 9.8125e-8 off each end."""
+        _r, starter, _e = _convert(_weld_deck(), adaptive_spring_token=False)
         cards = _admas_cards(starter)
         self.assertEqual(sorted(cards), [-_SHARE], cards)
         self.assertEqual(sorted(cards[-_SHARE]), [1, 11])
         self.assertIn("       -5.000000E-05", starter)
+        _r8, s8, _e8 = _convert(_weld_deck())
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-07"])
+        self.assertEqual(_admas_cards(s8), {-9.8125e-08: [1, 11]})
+        self.assertIn("       -9.812500E-08", s8)
 
     def test_k_welds_on_one_node_scale_the_share(self):
-        """Hand: node 1 sits on three welds -> 3 x 5e-05 = 1.5e-04."""
+        """Hand: node 1 sits on three welds -> 3 x 5e-05 = 1.5e-04.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: n = 3 at node 1, every end own 1.9625e-7 ->
+        MASS 2 mu x 2/3 = 1.308333e-7 on each of the three /PROPs; node 1
+        sheds 3 x 6.541665e-8 = 1.962499e-7 (the printed value, summed),
+        nodes 11 / 12 / 13 one half each."""
         deck = _weld_deck(pairs=[(1, 11), (1, 12), (1, 13)])
-        _r, starter, _e = _convert(deck)
+        _r8, s8, _e8 = _convert(deck)
+        self.assertEqual(_token_mass_cells(s8), ["1.308333E-07"] * 3)
+        self.assertEqual(_admas_cards(s8), {-1.962499e-07: [1],
+                                            -6.541665e-08: [11, 12, 13]})
+        _r, starter, _e = _convert(deck, adaptive_spring_token=False)
         cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
         self.assertEqual(sorted(cards), [-1.5e-4, -_SHARE], cards)
         self.assertEqual(cards[-1.5e-4], [1])
@@ -286,13 +318,36 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
         The deck's own /ADMAS stays exactly as stated (an /ADMAS must be
         positive) and the FULL share comes off on a card of its own, so the
         sum is m_own + m_admas + token - token.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: own 1.9625e-7 + 1e-6 = 1.19625e-6 on each
+        end -> MASS 1.19625e-6, share 5.98125e-7 < 1e-6 -> ONE subtracted
+        /ADMAS 4.01875e-7 on [1, 11]. The degenerate class stays reachable on
+        the default where the token is kept: both weld ends held (SPC 111,
+        all three translations of a TYPE13) keep 0.0001 and the 'LESS /ADMAS'
+        sentence.
         """
-        _r, starter, _e = _convert(_weld_deck(admas=1.0e-6))
+        _r, starter, _e = _convert(_weld_deck(admas=1.0e-6),
+                                   adaptive_spring_token=False)
         cards = _admas_cards(starter)
         self.assertEqual(sorted(cards), [-_SHARE, 1.0e-6], cards)
         self.assertEqual(sorted(cards[1.0e-6]), [1, 11])
         self.assertEqual(sorted(cards[-_SHARE]), [1, 11])
         self.assertTrue(_has(_r.warnings, "LESS /ADMAS",
+                             "The full share was taken off 2 of them"))
+        _r8, s8, _e8 = _convert(_weld_deck(admas=1.0e-6))
+        self.assertEqual(_token_mass_cells(s8), ["1.196250E-06"])
+        self.assertEqual(_admas_cards(s8), {4.01875e-07: [1, 11]})
+        held = _weld_deck(admas=1.0e-6).replace(
+            "*END\n", "*BOUNDARY_SPC_NODE\n" + _row(1, 0, 1, 1, 1) + "\n"
+            + _row(11, 0, 1, 1, 1) + "\n*END\n")
+        r3, s3, _e3 = _convert(held)
+        self.assertEqual(_token_mass_cells(s3), ["0.0001"])
+        self.assertEqual(_admas_cards(s3), {1.0e-6: [1, 11],
+                                            -_SHARE: [1, 11]})
+        self.assertTrue(_has(r3.warnings, "LESS /ADMAS",
                              "The full share was taken off 2 of them"))
 
     def test_an_element_free_weld_node_is_guarded_and_named(self):
@@ -342,7 +397,12 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
                 + _row(0.0, 1.0, 0.0, 0.0) + "\n"
                   "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
                   "*MAT_SPRING_ELASTIC\n" + _row(2, 100.0) + "\n*END\n")
-        result, starter, _e = _convert(deck)
+        # EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        # the token cell this probe pins; the fixed-token assertion is kept
+        # under --no-adaptive-spring-token and the default's cell is pinned
+        # beside it. Hand: node 1 own 1.9625e-7, the ground end infinite ->
+        # MASS 2 x 1.9625e-7 = 3.925e-7, share 1.9625e-7 off node 1 only.
+        result, starter, _e = _convert(deck, adaptive_spring_token=False)
         cards = _admas_cards(starter)
         self.assertEqual(sorted(cards), [-_SHARE], cards)
         self.assertEqual(cards[-_SHARE], [1],
@@ -350,6 +410,11 @@ class SpringTokenNegativeAdmas(unittest.TestCase):
         self.assertFalse(_has(result.warnings,
                               "carry NO element mass of their own"),
                          "the synthesized ground node must not be named")
+        r8, s8, _e8 = _convert(deck)
+        self.assertEqual(_token_mass_cells(s8), ["3.925000E-07"])
+        self.assertEqual(_admas_cards(s8), {-1.9625e-07: [1]})
+        self.assertFalse(_has(r8.warnings,
+                              "carry NO element mass of their own"))
 
     def test_a_rigid_body_secondary_node_gets_no_negative_admas(self):
         """MEASURED inert on the roster's only carrier: with ``ICoG = 4``
@@ -458,13 +523,25 @@ class DiscreteBeamTokenIsLengthScaled(unittest.TestCase):
         self.assertNotIn("spring_token_compensation", starter)
 
     def test_the_fallback_token_is_scaled_by_the_element_length(self):
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        the token cell this probe pins; the fixed-token assertion is kept
+        under --no-adaptive-spring-token and the default's cell is pinned
+        beside it. Hand: both cable ends are corners of the 5 x 10 x 1 shell
+        (own 9.8125e-8), mu = 4.90625e-8, cap 2 mu = 9.8125e-8 per ELEMENT ->
+        per unit length / L 10 = 9.8125e-9; each end sheds 0.5 x 9.8125e-9
+        x 10 = 4.90625e-8."""
         r, starter, _e = _convert(
             _CABLE_DECK.replace("%RO%", "      0.0"),
-            zero_density_floor=False)
+            zero_density_floor=False, adaptive_spring_token=False)
         self.assertTrue(_has(r.warnings, "non-positive connector mass"))
         cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
         self.assertEqual(sorted(cards), [-5.0e-4], cards)
         self.assertEqual(sorted(cards[-5.0e-4]), [1, 2])
+        r8, s8, _e8 = _convert(_CABLE_DECK.replace("%RO%", "      0.0"),
+                               zero_density_floor=False)
+        self.assertTrue(_has(r8.warnings, "non-positive connector mass"))
+        self.assertEqual(_token_mass_cells(s8), ["9.812500E-09"])
+        self.assertEqual(_admas_cards(s8), {-4.90625e-08: [1, 2]})
 
 
 class SpringTokenIsRegisteredOnlyWhereItIsInvented(unittest.TestCase):
@@ -2410,15 +2487,35 @@ class SpringTokenExactZeroBoundary(unittest.TestCase):
     """
 
     def test_an_admas_exactly_equal_to_the_share_is_degenerate(self):
-        _r, starter, _e = _convert(_weld_deck(admas=_SHARE))
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        the token cell this probe pins; the fixed-token assertion is kept
+        under --no-adaptive-spring-token (the boundary stays pinned there)
+        and the default's cell is pinned beside it. Hand: own 1.9625e-7 +
+        5e-5 = 5.019625e-5 per end -> MASS 5.019625e-5, share 2.5098125e-5
+        < 5e-5 -> ONE subtracted /ADMAS 2.4901875e-5 (printed
+        2.490188E-05)."""
+        _r, starter, _e = _convert(_weld_deck(admas=_SHARE),
+                                   adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
                          {_SHARE: [1, 11], -_SHARE: [1, 11]})
+        _r8, s8, _e8 = _convert(_weld_deck(admas=_SHARE))
+        self.assertEqual(_token_mass_cells(s8), ["5.019625E-05"])
+        self.assertEqual(_admas_cards(s8), {2.490188e-05: [1, 11]})
 
     def test_just_above_the_share_is_subtracted_instead(self):
-        """The other side of the same boundary, so the probe pins a POINT."""
-        _r, starter, _e = _convert(_weld_deck(admas=_SHARE * 1.02))
+        """The other side of the same boundary, so the probe pins a POINT.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the fixed-token assertion
+        is kept under --no-adaptive-spring-token. Hand on the default: own
+        1.9625e-7 + 5.1e-5 = 5.119625e-5 -> MASS 5.119625e-5, /ADMAS 5.1e-5
+        - 2.5598125e-5 = 2.5401875e-5 (printed 2.540187E-05)."""
+        _r, starter, _e = _convert(_weld_deck(admas=_SHARE * 1.02),
+                                   adaptive_spring_token=False)
         cards = {round(m, 12): v for m, v in _admas_cards(starter).items()}
         self.assertEqual(sorted(cards), [round(_SHARE * 0.02, 12)], cards)
+        _r8, s8, _e8 = _convert(_weld_deck(admas=_SHARE * 1.02))
+        self.assertEqual(_token_mass_cells(s8), ["5.119625E-05"])
+        self.assertEqual(_admas_cards(s8), {2.540187e-05: [1, 11]})
 
 
 class SpringTokenOrphanBranchIsProbed(unittest.TestCase):

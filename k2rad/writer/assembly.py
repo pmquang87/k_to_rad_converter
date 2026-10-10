@@ -2020,6 +2020,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep,
                           contact_rigid_nodes)
     lines: List[str] = []
+    ctx.lines = lines
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
     # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
@@ -2846,7 +2847,7 @@ class _StarterContext:
     _starter_section_registry). ``rep(frac, label)`` forwards to the progress
     callback."""
     __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep",
-                 "contact_rigid_nodes")
+                 "contact_rigid_nodes", "lines")
 
     def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep,
                  contact_rigid_nodes=None):
@@ -2859,6 +2860,10 @@ class _StarterContext:
         # a secondary side by (rigid_nodes minus the bolt-end bodies' members)
         self.contact_rigid_nodes = (rigid_nodes if contact_rigid_nodes is None
                                     else contact_rigid_nodes)
+        # round 8, A5: the starter lines accumulated so far (build_starter
+        # binds its list here) - the adaptive spring token rewrites the
+        # token /PROP MASS cells the connector sections emitted earlier
+        self.lines = None
 
 
 def _progress_marker(ctx: "_StarterContext", frac: float, label: str) -> List[str]:
@@ -3056,7 +3061,10 @@ def _starter_section_registry():
         ("joints",            lambda c: _make_joints(c.state, c.rigid_nodes,
                                                      set(c.rbody_info))),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
-        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
+        # round 8, A5: the adaptive spring token runs first inside it and
+        # rewrites the token /PROP MASS cells already in c.lines
+        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes,
+                                                           c.lines)),
         ("xref",              lambda c: _make_xref(c.state)),
         # /EREF is the per-ELEMENT twin of /XREF. AFTER it, because the
         # two are mutually exclusive per node (starter ERROR 1098) and

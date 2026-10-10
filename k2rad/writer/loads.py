@@ -2130,7 +2130,9 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
                                 prop_mass: float = _SPRING_TOKEN_MASS,
                                 spring: Optional[Tuple[int, float, float,
                                                        float, float,
-                                                       float]] = None
+                                                       float]] = None,
+                                prop: Optional[Tuple[int, str, int,
+                                                     float]] = None
                                 ) -> None:
     """Record the invented property mass one emitted /SPRING row puts on its
     end nodes, for the /ADMAS compensation in :func:`_make_added_masses`.
@@ -2141,6 +2143,12 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
     :func:`_warn_spring_token_mass` can state each light node's two-mass
     critical step against the spring's own step. Every registration site
     passes it; ``None`` records nothing (no clause numbers for that row).
+
+    *prop* = ``(/PROP id, "TYPE4" | "TYPE8" | "TYPE13", Ileng, element
+    length)`` of the row's token property (round 8, A5): recorded with the
+    spring in ``state.spring_token_props``, so the adaptive-token pass
+    (:func:`_adaptive_spring_token`) knows which emitted MASS cell carries
+    this spring's token. The four token producers pass it.
 
     ``rinit3.F:1926`` is ``EMS(I) = HALF*UMASS(I)`` and ``:1937-1939`` writes
     ``MSR(1..3,I)`` onto ``IXR(2,I)`` and ``IXR(3,I)`` only — HALF the property
@@ -2173,6 +2181,8 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
         eid, inertia, k_t, k_r, c_t, c_r = spring
         state.spring_token_springs.append(
             (eid, n1, n2, prop_mass, inertia, k_t, k_r, c_t, c_r))
+        if prop is not None:
+            state.spring_token_props[len(state.spring_token_springs) - 1] = prop
 
 
 def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
@@ -2312,7 +2322,8 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # there and nothing is warned about it (see _spring_token_warn_nodes).
         _register_spring_token_mass(
             state, n1, n2,
-            spring=((e.eid,) + spring_kc) if spring_kc is not None else None)
+            spring=((e.eid,) + spring_kc) if spring_kc is not None else None,
+            prop=(prop_id, spring_kind_label, 0, 1.0))
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_grnod_id()
@@ -4143,7 +4154,8 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 _register_spring_token_mass(
                     state, e.n1, e.n2,
                     spring=(e.eid, inertia) + _spring_kc(
-                        dofs, l13=_element_length(state, e)))
+                        dofs, l13=_element_length(state, e)),
+                    prop=(prop_id, "TYPE13", 0, 1.0))
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -4430,7 +4442,8 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         _register_spring_token_mass(
             state, n1, n2,
             spring=(elem_id, _SPRING_TOKEN_INERTIA) + _spring_kc(dofs,
-                                                                 l13=L))
+                                                                 l13=L),
+            prop=(prop_id, "TYPE13", 0, 1.0))
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -4826,7 +4839,8 @@ _IMP_COMMENT2 = ("#           Ascale_x            Fscale_Y"
 
 
 def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
-                               skew_id: int = 0) -> None:
+                               skew_id: int = 0, tstart: float = 0.0,
+                               tstop: float = 0.0, sensor_id: int = 0) -> None:
     """Record the nodes an /IMPDISP | /IMPVEL | /IMPACC was just written for.
 
     This is the *DATABASE_BNDOUT scope. dyna2rad builds it by re-walking the
@@ -4847,6 +4861,11 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
     TC/RC bit can be compared against; a motion written in a LOCAL system
     lands in ``state.imp_motion_skew_nodes`` instead, where the TC/RC pass
     NAMES it rather than guessing which global bits the skew axis touches.
+
+    ``tstart`` / ``tstop`` / ``sensor_id`` are the card's own window (round 8,
+    A5): a GLOBAL motion is also recorded with it in
+    ``state.imp_motion_windows``, because the adaptive spring token counts an
+    end DRIVEN only when a motion holds it for the WHOLE run.
     """
     real = [n for n in nids if n in state.nodes]
     state.imp_motion_nodes.update(real)
@@ -4857,6 +4876,8 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
         return
     for n in real:
         state.imp_motion_dirs.setdefault(n, set()).add(dir_str)
+        state.imp_motion_windows.setdefault(n, []).append(
+            (dir_str, tstart, tstop, sensor_id))
 
 
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
@@ -5084,7 +5105,8 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                 pm.lcid, base_dir, grnod_id, pm.sf,
                                 tstart, tstop, skew_id, state=state)
         motion_counter += 1
-        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id)
+        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id,
+                                   tstart, tstop)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -5093,7 +5115,8 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
             motion_counter += 1
-            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir, skew_id)
+            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir,
+                                       skew_id, tstart, tstop)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
     # the pid — an element-free rigid part, or a *CONSTRAINED_RIGID_BODIES slave
     # whose nodes were merged into its master) still has its three nodes in /NODE
@@ -5511,7 +5534,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
                                 skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
-        _register_imp_motion_nodes(state, nids, base_dir, skew_id)
+        _register_imp_motion_nodes(state, nids, base_dir, skew_id, tstart,
+                                   tstop)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -5519,7 +5543,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
-            _register_imp_motion_nodes(state, nids, lock_dir, skew_id)
+            _register_imp_motion_nodes(state, nids, lock_dir, skew_id, tstart,
+                                       tstop)
 
     return lines
 
@@ -8237,6 +8262,10 @@ def _light_pair_clause(state: ConversionState,
     # has no critical step to compare (the post-review round: gnonspring's
     # node 1, *BOUNDARY_SPC_NODE 111111, printed UNPROTECTED); named HELD
     held: List[Tuple[int, int]] = []
+    # round 8, A5: a spring whose two ends are both held or driven along it
+    # for the whole run kept the token (the adaptive-token pass recorded it);
+    # its light end is labelled DRIVEN, not compared (gnonspring's node 2)
+    driven: List[Tuple[int, int]] = []
     for n, m_n, _sh in light:
         for eid, n1, n2, mass, inertia, k_t, k_r, c_t, c_r in \
                 state.spring_token_springs:
@@ -8244,6 +8273,9 @@ def _light_pair_clause(state: ConversionState,
                 continue
             if n in fixed:
                 held.append((n, eid))
+                continue
+            if eid in state.spring_token_both_driven:
+                driven.append((n, eid))
                 continue
             m_f = _far_mass(n2 if n == n1 else n1)
             mu = m_n if m_f == inf else m_n * m_f / (m_n + m_f)
@@ -8258,8 +8290,18 @@ def _light_pair_clause(state: ConversionState,
         "by the deck's own *BOUNDARY_SPC or zero-scale prescribed motion, so "
         "it has no critical step to compare)" for n, eid in held[:5]) + (
         " ..." if len(held) > 5 else "")
+    driven_txt = "; ".join(
+        f"node {n} on spring {eid}: DRIVEN (both ends of spring {eid} are "
+        "held along its axis for the whole run: bcs1.F:56-89 / "
+        "fixvel.F:370-372 overwrite the acceleration there, so no "
+        "instability can grow along it; the token is kept)"
+        for n, eid in driven[:5]) + (" ..." if len(driven) > 5 else "")
+    if held and driven:
+        held_txt = held_txt + "; " + driven_txt
+    elif driven:
+        held_txt = driven_txt
     if not pairs:
-        return " Per pair: " + held_txt + "." if held else ""
+        return " Per pair: " + held_txt + "." if held_txt else ""
     pairs.sort()
 
     def _prescribed(n: int) -> str:
@@ -8278,7 +8320,7 @@ def _light_pair_clause(state: ConversionState,
         for ratio, n, eid, crit, dt_s, _m in pairs[:5])
     if len(pairs) > 5:
         shown += " ..."
-    if held:
+    if held_txt:
         shown += "; " + held_txt
     token = pairs[0][5]
     text = (
@@ -8343,6 +8385,21 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
     neg_groups = neg_groups or {}
     guarded = guarded or []
     light = light or []
+    # round 8, A5: where the adaptive token rewrote a /PROP the share a node
+    # carries is no longer the fixed token's half, so the sentences below
+    # name the share itself (and keep their fixed-token wording otherwise)
+    adapted = bool(state.adaptive_token_changed)
+    per_prop = (f"{_SPRING_TOKEN_MASS:g} per /PROP"
+                + (", or the smaller MASS the adaptive token wrote on "
+                   f"{len(state.adaptive_token_changed)} /PROP(s)"
+                   if adapted else ""))
+
+    def _left(nodes: List[int]) -> str:
+        shown = ", ".join(
+            f"node {n}: {state.spring_token_mass_by_node.get(n, 0.0):g}"
+            for n in nodes[:5]) + (" ..." if len(nodes) > 5 else "")
+        return f"the token share left on them ({shown})"
+
     done = {nid for nid, _b, _s in compensated}
     removed = {nid for nids in neg_groups.values() for nid in nids}
     bad = {nid for nid, _m, _s in degenerate}
@@ -8360,7 +8417,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         total = sum(sh for _n, _b, sh in compensated)
         state.warn(
             f"*ELEMENT_DISCRETE: k2rad's token spring mass "
-            f"({_SPRING_TOKEN_MASS:g} per /PROP, half on each end node per "
+            f"({per_prop}, half on each end node per "
             f"element - rinit3.F:1926/1937-1939) was SUBTRACTED from the "
             f"/ADMAS of {len(compensated)} node(s) {_fmt_node_list(done)}, "
             f"{total:g} in total, so the model's mass and its natural "
@@ -8419,7 +8476,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                 + _light_pair_clause(state, light, rigid_nodes, guarded))
         state.warn(
             "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
-            f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "
+            f"spring mass ({per_prop}, half on each end "
             "node per element - rinit3.F:1926/1937-1939) was REMOVED again "
             f"from {len(nodes)} node(s) {_fmt_node_list(nodes)} with a "
             f"NEGATIVE /ADMAS/0 of "
@@ -8463,7 +8520,9 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
             "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
             "is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
+            + (_left(sorted(n for n, _s in guarded)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element")
+            + "; give "
             "them an *ELEMENT_MASS if their dynamics matter - any positive "
             "*ELEMENT_MASS makes the node eligible, and the token then comes "
             "off. The screen is the node's OWN mass (its element mass at the "
@@ -8485,7 +8544,9 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "spring mass but are NOT in the converted model's node set, so "
             "no /ADMAS - positive or negative - could be written for them "
             "and their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. The "
+            + (_left(sorted(orphan)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element")
+            + ". The "
             "deck names these nodes but does not define them: it is a "
             "fragment whose *NODE cards live in another file - MEASURED: the "
             "*INCLUDE fragments set-yaris-detailed-v2j.key (16 nodes) and "
@@ -8497,8 +8558,10 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
             f"{_fmt_node_list(rigid)} are SECONDARY nodes of a rigid body. "
-            "Whether k2rad's token spring mass "
-            f"({_SPRING_TOKEN_MASS / 2:g} per attached element) reaches that "
+            "Whether k2rad's token spring mass ("
+            + (_left(sorted(rigid)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached element")
+            + ") reaches that "
             "body depends on its ICoG: with ICoG=4 inirby.F:265-266 (\"CG OF "
             "THE MAIN NODE (MASS OF SECONDS IGNORED)\", MASRB = MS(M)) the "
             "secondary nodes' mass is discarded, so the token - and any "
@@ -8513,8 +8576,273 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "roster carrier.")
 
 
-def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+#: The smallest MASS the adaptive token writes: hm_read_prop04.F:136-142
+#: refuses a /PROP/TYPE4 MASS <= 1e-15 (ERROR 229), the floor the PLOTEL
+#: mass already uses.
+_ADAPTIVE_TOKEN_FLOOR = 1.1e-15
+
+
+def _adaptive_spring_token(state: ConversionState, rigid_nodes: Set[int],
+                           acc_lines: Optional[List[str]]) -> None:
+    """The ADAPTIVE spring token MASS (R14 triage round 8, A5;
+    ``--adaptive-spring-token``, default ON).
+
+    WHY. A token ``/PROP`` (k2rad's 1e-4 on a massless LS-DYNA discrete
+    element) steps on its PROPERTY mass: ``r1len3.F:175`` ``sqrt(M / K)`` for
+    a TYPE4, ``r2len3.F:182-186`` for a TYPE8 / TYPE13 - never on the nodes'.
+    The S2 screen then takes the token back off the end nodes, so a light
+    compensated end can sit far below what that step assumes, and nothing
+    stops it: no nodal step without ``/DT/NODA``, and the run diverges
+    behind a NORMAL TERMINATION banner (measured on three coupons: the
+    energy-error limit, MESSAGE 205, killed them within 3-6 cycles).
+    LS-DYNA steps a discrete element on the REAL nodal masses (Theory R16
+    eq. 26.27, the two-mass ``2 sqrt(mu / K)``).
+
+    THE RULE. Per token ``/PROP`` (TYPE4 / TYPE8 / TYPE13, recorded by its
+    producer in ``state.spring_token_props``; never a property whose mass is
+    LS-DYNA's own ``RO A L``)::
+
+        MASS := max(1.1e-15, min(current, min over its springs s of cap_s))
+        cap_s = 2 mu_s min(1, 2 / n_s) / (L_s if Ileng 1 else 1)
+        mu_s  = m_a m_b / (m_a + m_b)   (one end infinite -> the other end)
+        n_s   = the larger token-spring count of its two end nodes
+
+    ``m_e`` = the end's own mass as the S2 screen counts it (element mass +
+    ``*ELEMENT_MASS``), or INFINITE for a rigid-body node, a connector ground
+    node, or an end DRIVEN along the spring for the WHOLE run: its GLOBAL
+    fixed or imposed translations (``_global_spc_dofs`` = the deck's
+    ``*BOUNDARY_SPC`` + the ``SF = 0`` motions, the emitted ``*NODE`` TC /
+    ``*CONSTRAINED_GLOBAL`` codes, and every skew-0 ``/IMP*`` direction whose
+    window is the whole run - ``state.imp_motion_windows``: sensor 0,
+    ``tstart <= 0``, ``tstop`` 0 or at / after ENDTIM) cover the spring's stiff
+    directions - on a TYPE4 every axis component on a FREE direction is at
+    most 1e-6 (a zero-length spring: all three), on a TYPE8 / TYPE13 all
+    three. NOT driven: a skewed SPC, a local-system motion, a windowed or
+    sensor-gated motion, a tied secondary node. A spring with both ends
+    infinite sets no cap (the token is kept; with a driven end it is
+    recorded in ``state.spring_token_both_driven`` for the LIGHT clause's
+    DRIVEN label); a GUARDED end (own mass 0, not driven) sets no cap
+    either - the S2 screen leaves its token in place. ONE MASS per ``/PROP``
+    (decision D7): a guarded spring sharing a rewritten ``/PROP`` carries
+    its smaller MASS, and W-A5 says so.
+
+    A ``/PROP`` whose printed MASS is not the token its springs registered -
+    a token weld whose ``*MAT_SPOTWELD`` DT raised it (A6, decision D11) - is
+    left alone: its step is already 0.9 DT, and the raised part stays on its
+    end nodes as LS-DYNA's own added mass.
+
+    HOW. The MASS cell of each moving ``/PROP`` is rewritten in the already
+    emitted lines (located by its exact ``/PROP/TYPEn/<id>`` header, the
+    comment row and the old value ASSERTED - a k2rad bug raises, never a
+    silent skip), printed with ``_f``; the shares in
+    ``state.spring_token_mass_by_node`` and the spring records are then
+    moved by the PRINTED value, so the S2 compensation that runs next
+    removes exactly what ``rinit3.F:1926/1937-1939`` adds. Inert under
+    ``--no-spring-token-mass-compensation``; ``--no-adaptive-spring-token``
+    keeps the fixed token (4f5b6e8 bytes).
+    """
+    state.spring_token_both_driven = set()
+    state.adaptive_token_changed = {}
+    if not (state.options.adaptive_spring_token
+            and state.options.spring_token_mass_compensation):
+        return
+    if not state.spring_token_springs or not state.spring_token_props:
+        return
+    if acc_lines is None:
+        return
+    inf = float("inf")
+    recs = state.spring_token_springs
+    props = state.spring_token_props
+    ends = {n for rec in recs for n in rec[1:3] if n > 0}
+    m_el = element_mass_by_node(state, ends,
+                                lambda mid: _mat_density(state, mid))
+    count: Dict[int, int] = {}
+    for rec in recs:
+        for n in rec[1:3]:
+            if n > 0:
+                count[n] = count.get(n, 0) + 1
+    held: Dict[int, Set[int]] = {}
+
+    def _hold(nid: int, tra: str) -> None:
+        got = held.setdefault(nid, set())
+        for k, ch in enumerate(tra[:3]):
+            if ch == "1":
+                got.add(k)
+
+    for nid, (tra, _rot) in _global_spc_dofs(state).items():
+        _hold(nid, tra)
+    for nid, (tra, _rot) in state.node_tc_rc_emitted.items():
+        _hold(nid, tra)
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 0.0
+    for nid, wins in state.imp_motion_windows.items():
+        for d, t0, t1, sensor in wins:
+            if d not in ("X", "Y", "Z") or sensor or t0 > 0.0:
+                continue
+            if t1 != 0.0 and not (endtim > 0.0 and t1 >= endtim):
+                continue
+            held.setdefault(nid, set()).add("XYZ".index(d))
+
+    def _axis(a: int, b: int) -> Optional[Tuple[float, float, float]]:
+        na, nb = state.nodes.get(a), state.nodes.get(b)
+        if na is None or nb is None:
+            return None
+        d = (nb.x - na.x, nb.y - na.y, nb.z - na.z)
+        ln = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+        if ln <= 0.0:
+            return None
+        return (d[0] / ln, d[1] / ln, d[2] / ln)
+
+    def _end(n: int, ptype: str,
+             axis: Optional[Tuple[float, float, float]]) -> Tuple[float, str]:
+        """``(mass counted, why)``: why is '', 'ground', 'rigid', 'driven'
+        or 'guarded'."""
+        if n <= 0 or n in state.connector_ground_nodes:
+            return inf, "ground"
+        if n in rigid_nodes:
+            return inf, "rigid"
+        c = held.get(n)
+        if c:
+            if ptype == "TYPE4" and axis is not None:
+                if all(abs(axis[k]) <= 1.0e-6 for k in range(3)
+                       if k not in c):
+                    return inf, "driven"
+            elif c >= {0, 1, 2}:
+                return inf, "driven"
+        own = m_el.get(n, 0.0) + state.added_node_masses.get(n, 0.0)
+        if own <= 0.0:
+            return 0.0, "guarded"
+        return own, ""
+
+    cap_of: Dict[int, float] = {}
+    springs_of: Dict[int, List[int]] = {}
+    guarded_idx: Set[int] = set()
+    for idx, rec in enumerate(recs):
+        prop = props.get(idx)
+        if prop is None:
+            continue
+        pid, ptype, ileng, length = prop
+        springs_of.setdefault(pid, []).append(idx)
+        n1, n2 = rec[1], rec[2]
+        axis = _axis(n1, n2)
+        m1, why1 = _end(n1, ptype, axis)
+        m2, why2 = _end(n2, ptype, axis)
+        if "guarded" in (why1, why2):
+            guarded_idx.add(idx)
+            continue
+        if m1 == inf and m2 == inf:
+            if "driven" in (why1, why2):
+                state.spring_token_both_driven.add(rec[0])
+            continue
+        mu = m2 if m1 == inf else (m1 if m2 == inf else m1 * m2 / (m1 + m2))
+        cap = 2.0 * mu * min(1.0, 2.0 / max(count.get(n1, 1),
+                                            count.get(n2, 1)))
+        if ileng == 1 and length > 0.0:
+            cap /= length
+        cap_of[pid] = min(cap_of.get(pid, inf), cap)
+    if not cap_of:
+        return
+    # the emitted /PROP blocks: header, title, comment, the MASS row
+    where: Dict[int, int] = {}
+    want = {f"/PROP/{props[springs_of[pid][0]][1]}/{pid}": pid for pid in cap_of}
+    for i, ln in enumerate(acc_lines):
+        pid_hit = want.get(ln)
+        if pid_hit is not None:
+            assert pid_hit not in where, f"two {ln} blocks"
+            where[pid_hit] = i + 3
+    changed: Dict[int, Tuple[float, float]] = {}
+    for pid in sorted(cap_of):
+        j = where.get(pid)
+        assert j is not None and j < len(acc_lines), (
+            f"adaptive token: /PROP {pid} was registered but not emitted")
+        assert acc_lines[j - 1].startswith("#"), acc_lines[j - 1]
+        old = float(acc_lines[j][:20])
+        # the printed cell must BE the token its springs registered (x L on
+        # Ileng 1): a DT-raised token weld (A6) is left alone
+        if any(abs(old * (props[k][3] if props[k][2] == 1 else 1.0)
+                   - recs[k][3]) > 1.0e-9 * recs[k][3]
+               for k in springs_of[pid]):
+            continue
+        new = max(min(old, cap_of[pid]), _ADAPTIVE_TOKEN_FLOOR)
+        if not new < old * (1.0 - 1.0e-9):
+            continue
+        txt = _f(new)
+        acc_lines[j] = txt + acc_lines[j][20:]
+        changed[pid] = (old, float(txt))
+    if not changed:
+        return
+    state.adaptive_token_changed = dict(changed)
+    n_guarded = 0
+    for pid, (_old, newp) in changed.items():
+        for k in springs_of[pid]:
+            rec = recs[k]
+            _p, _t, ileng, length = props[k]
+            new_pm = newp * (length if ileng == 1 else 1.0)
+            dsh = 0.5 * (new_pm - rec[3])
+            for n in rec[1:3]:
+                if n > 0:
+                    state.spring_token_mass_by_node[n] = (
+                        state.spring_token_mass_by_node.get(n, 0.0) + dsh)
+            recs[k] = (rec[0], rec[1], rec[2], new_pm, rec[4], rec[5], rec[6],
+                       rec[7], rec[8])
+            if k in guarded_idx:
+                n_guarded += 1
+    _warn_adaptive_spring_token(state, changed, springs_of, n_guarded)
+
+
+def _warn_adaptive_spring_token(state: ConversionState,
+                                changed: Dict[int, Tuple[float, float]],
+                                springs_of: Dict[int, List[int]],
+                                n_guarded: int) -> None:
+    """W-A5: one sentence per deck where a token MASS cell moved."""
+    inf = float("inf")
+    low_pid = min(changed, key=lambda p: (changed[p][1], p))
+    low_dt = inf
+    for k in springs_of[low_pid]:
+        _e, _a, _b, mass, inertia, k_t, k_r, c_t, c_r = \
+            state.spring_token_springs[k]
+        dt_t = (mass / (math.sqrt(c_t * c_t + mass * k_t) + c_t)
+                if k_t > 0.0 or c_t > 0.0 else inf)
+        dt_r = (inertia / (math.sqrt(c_r * c_r + inertia * k_r) + c_r)
+                if inertia > 0.0 and (k_r > 0.0 or c_r > 0.0) else inf)
+        low_dt = min(low_dt, dt_t, dt_r)
+    shown = ", ".join(f"{p}: {o:g} -> {n:.7g}"
+                      for p, (o, n) in sorted(changed.items())[:8])
+    if len(changed) > 8:
+        shown += ", ..."
+    n_both = len(state.spring_token_both_driven)
+    state.warn(
+        "*ELEMENT_DISCRETE / *CONSTRAINED_SPOTWELD spring token: MASS set from "
+        f"the end-node masses on {len(changed)} /PROP(s) ({shown}): min(1e-4, "
+        "2 m_a m_b / (m_a + m_b) x min(1, 2/n)), n the busier end's "
+        "token-spring count, per unit length on an Ileng 1 property, floor "
+        "1.1e-15; a rigid, ground or DRIVEN end (held or imposed along the "
+        "spring for the whole run) counts infinitely heavy, so the spring's "
+        "own step sqrt(M/K) (r1len3.F:175; r2len3.F:182-186 on a TYPE8 / "
+        "TYPE13, both on the PROPERTY mass) stays inside LS-DYNA's two-mass "
+        "step on the real nodal masses (Theory R16 eq. 26.27). "
+        f"{n_both} spring(s) with both ends driven kept the token. A skewed "
+        "SPC, a local, windowed or sensor-gated motion and a tied end are NOT "
+        f"driven. {n_guarded} guarded spring(s) (an end with no own mass) "
+        "share a rewritten /PROP and carry its smaller MASS. The token still "
+        "comes off both ends exactly (the shares follow the PRINTED value). "
+        f"Smallest MASS {changed[low_pid][1]:.7g} on /PROP {low_pid} -> spring "
+        f"step {low_dt:.3g} s. MEASURED (nt 4): the fixed token was killed "
+        "by the engine's energy-error limit (MESSAGE 205) within 3-6 cycles "
+        "on three coupons, each behind a NORMAL TERMINATION banner (D4 at "
+        "cycle 3, D2 at 5, i14 at 6 with IE 1.578e22); the rule runs D2 / "
+        "D4 4970 cycles and i14 50163 cycles, IE + KE 499.96 of the "
+        "launched 500. "
+        "--no-adaptive-spring-token keeps the fixed token (round 8).")
+
+
+def _make_added_masses(state: ConversionState, rigid_nodes: Set[int],
+                       acc_lines: Optional[List[str]] = None) -> List[str]:
     """*ELEMENT_MASS lumped masses on ORDINARY nodes → /ADMAS/0.
+
+    *acc_lines* = the starter lines emitted so far (round 8, A5): the
+    adaptive spring token (:func:`_adaptive_spring_token`) runs FIRST and
+    rewrites the token /PROP MASS cells there, before the S2 compensation
+    below reads the shares.
 
     state.added_node_masses holds every *ELEMENT_MASS nodal mass. A mass on an
     /RBODY MAIN node (or on any member of an ICoG-4 body) is accounted for in
@@ -8529,6 +8857,7 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     *ELEMENT_MASS was silently dropped (writer consumed added_node_masses only
     for rigid masters) — a real mass/dynamics error on any deck with point masses.
     """
+    _adaptive_spring_token(state, rigid_nodes, acc_lines)
     compensated: List[Tuple[int, float, float]] = []     # (nid, before, share)
     degenerate: List[Tuple[int, float, float]] = []      # (nid, m_node, share)
     masses_by_value: Dict[float, List[int]] = {}

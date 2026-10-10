@@ -252,6 +252,7 @@ def convert(
     plane_strain_unit_thickness: bool = True,
     rigid_element_mass_admas: bool = True,
     spotweld_dt_mass_scaling: bool = True,
+    adaptive_spring_token: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -889,6 +890,27 @@ def convert(
         factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
         cycle-0 step 9.000e-7, IE END -31.18 %. Default byte movers 0
         (plates.mat100's DT is inert: its warning says so).
+    adaptive_spring_token : bool
+        Set each spring token ``/PROP`` MASS (TYPE4 / TYPE8 / TYPE13,
+        k2rad's fixed 1e-4) to ``max(1.1e-15, min(1e-4, 2 mu min(1,
+        2/n)))`` (round 8, A5), ``mu = m_a m_b / (m_a + m_b)`` the end
+        nodes' own masses (the S2 screen's: element mass +
+        ``*ELEMENT_MASS``), ``n`` the busier end's token-spring count,
+        per unit length on an Ileng 1 property; a rigid,
+        connector-ground or DRIVEN end (its GLOBAL fixed / imposed
+        translations cover the spring's stiff directions for the WHOLE
+        run) counts infinitely heavy, a spring with both ends infinite
+        keeps the token, a GUARDED end (no own mass) sets no cap. The
+        spring's own step sqrt(M/K) (``r1len3.F:175``) reads the
+        PROPERTY mass, so a light compensated end could outrun it
+        silently: the fixed token was killed by the energy-error limit
+        within 3-6 cycles on three coupons, each behind a NORMAL
+        TERMINATION banner. **On by default.** Reach 6
+        deck keys on 6 emitted models, one cell each (the Yaris static
+        suspension ``/PROP/TYPE4/107020`` 1e-4 -> 5.483321e-7); the 4
+        runnable movers' printed rows identical at 1.000x the cycles;
+        ex_17 / ex_18 (match) byte-identical. Inert under
+        ``--no-spring-token-mass-compensation``.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1322,6 +1344,7 @@ def convert(
         plane_strain_unit_thickness=plane_strain_unit_thickness,
         rigid_element_mass_admas=rigid_element_mass_admas,
         spotweld_dt_mass_scaling=spotweld_dt_mass_scaling,
+        adaptive_spring_token=adaptive_spring_token,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

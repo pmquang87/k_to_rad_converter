@@ -442,8 +442,47 @@ and the remedies (an `*ELEMENT_MASS` lifting μ above `(Tsca²/4)·M`,
 `/DT/NODA`, or this flag). Text only — 7 roster deck keys on 7 emitted models
 print the clause (4 PROTECTED: the spotweld plates; 3 UNPROTECTED:
 `gnonspring` and the two Yaris suspension decks), 0 bytes move; the adaptive
-token was measured and NOT shipped (its only mover paid 9.997× the cycles for
-a history-neutral result).
+token was measured and NOT shipped in round 7 (its only mover paid 9.997× the
+cycles for a history-neutral result) — round 8 ships it with the driven-end
+skip that keeps that mover byte-identical (next paragraph).
+
+**Round 8: the token MASS adapts to the end-node masses** (default ON,
+`--no-adaptive-spring-token` keeps the fixed 1e-4). The spring's own step
+`√(M/K)` (`r1len3.F:175`; `r2len3.F:182-186` on a TYPE8 / TYPE13) reads the
+PROPERTY mass while the compensation above takes the token back off the end
+nodes, so a light end could sit far below what that step assumes, with
+nothing to stop it: MEASURED (nt 4), the fixed token was killed by the
+engine's energy-error limit (MESSAGE 205) within 3-6 cycles on three coupons,
+each behind a NORMAL TERMINATION banner. Each token `/PROP` now gets
+MASS = max(1.1e-15, min(1e-4, 2μ·min(1, 2/n))), μ = m_a·m_b/(m_a + m_b) from
+the ends' own masses (the screen's: element mass + `*ELEMENT_MASS`) and n the
+busier end's token-spring count, per unit length on an Ileng 1 property —
+LS-DYNA steps a discrete element on the real nodal masses (Theory R16
+eq. 26.27). A rigid, connector-ground or DRIVEN end counts infinitely heavy:
+driven = its GLOBAL fixed or imposed translations (a `*BOUNDARY_SPC`, an
+`SF = 0` motion, a `*NODE` TC or `*CONSTRAINED_GLOBAL` code, a skew-0
+`/IMPVEL` / `/IMPDISP` / `/IMPACC` holding for the whole run) cover the
+spring's stiff directions (a TYPE4's free axis components ≤ 1e-6; all three
+on a TYPE8 / TYPE13); a skewed SPC, a local, windowed or sensor-gated motion
+and a tied secondary are NOT driven. A spring with both ends infinite keeps
+the token — `gnonspring` stays byte-identical, and its LIGHT clause labels the
+driven end DRIVEN (`bcs1.F:56-89` / `fixvel.F:370-372` overwrite the
+acceleration there). A guarded end sets no cap; a guarded spring sharing a
+rewritten `/PROP` carries its smaller MASS (one MASS per `/PROP`, named). The
+shares follow the PRINTED value, so the compensation stays exact; a token
+weld whose `DT` raised its Mass (A6) is left alone. MEASURED (nt 4): the
+coupon with one end driven and the other 1e-9 runs 4970 cycles NORMAL where
+the fixed token was killed at cycle 5, the same spring at 45° (its far end
+driven along x only, so NOT along the spring) 4970 where it was killed at
+cycle 3, and round 6's i14 coupon 50163 cycles with IE + KE 499.96 of the
+launched 500 where it was killed at cycle 6 (IE 1.578e22). 6 deck keys on 6
+emitted models move one cell — `plates.nrbc` / `plates.spot` 1e-4 → 1.57e-6,
+`constrained.spotweld.plates` (×3) / `plates.k` → 5.4e-7, the two Yaris
+suspension giants `/PROP/TYPE4/107020` → 5.483321e-7 (convert-only) — and the
+4 runnable movers' printed rows are identical at 1.000× the cycles (2407 /
+2407 / 18133 / 14968; on the constrained plates 40 rows differ only in which
+of three identical weld springs is printed as controlling); the `match` rows
+`ex_17` / `ex_18` are byte-identical (cap 9.06e-4 > 1e-4).
 
 `--no-spring-token-mass-compensation` restores the pre-round-4
 output. Measured with the `OFFSET` fix above on the only two carriers of 885

@@ -2311,7 +2311,17 @@ that decided it and the deck that would decide it next.
    byte-identical was not measured. The per-spring REFUSAL stays NO-GO (it
    re-adds the token: `gnonspring` KE RMS 1.43 → 2160 %, TOTAL MASS ×51). A5
    (iv) ships the per-pair numbers in the LIGHT clause instead (7 keys / 7
-   models).
+   models). **Closed in round 8** (A5, default ON,
+   `--no-adaptive-spring-token`): the rule ships WITH the driven-end skip (a
+   rigid, ground or whole-run driven end counts infinitely heavy; a spring
+   with both ends driven keeps the token), so `gnonspring` is byte-identical;
+   the fixed token was killed within 3-6 cycles on three coupons behind
+   NORMAL TERMINATION and the rule runs them NORMAL (4970 / 4970 / 50163
+   cycles); 6 deck keys on 6 emitted models move one cell, the 4 runnable
+   movers' printed rows identical at 1.000× the cycles. Still open: a
+   guarded spring sharing a `/PROP` takes its smaller MASS rather than a
+   split, a tied end is never driven, and the per-spring `n` is the busier
+   end's count.
 10. **Itetra4 3 on EFG tetrahedron parts** (round-6 item 26): turns the GLOBAL
     arm NORMAL on 3 of 3 runs (197 cycles) but with no reference, an energy
     error of 91.2 % and a flat mid-run IE (the implicit contact is not

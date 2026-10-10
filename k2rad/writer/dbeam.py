@@ -1128,7 +1128,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                     _register_spring_token_mass(
                         state, e.n1, e.n2, _TOKEN_MASS * el_len,
                         spring=(e.eid, inertia * el_len, k_t / el_len,
-                                k_r / el_len, c_t / el_len, c_r / el_len))
+                                k_r / el_len, c_t / el_len, c_r / el_len),
+                        prop=(prop_id, "TYPE13" if use13 else "TYPE8",
+                              1 if ileng else 0, el_len))
                 # /PRELOAD/AXIAL property gate (rinit3.F:1627-1690): only
                 # CASE(4,13) with a non-zero axial fct_ID1 AND H in 1..7 is
                 # accepted; a /PROP/TYPE8 connector is ERROR 3053 outright and

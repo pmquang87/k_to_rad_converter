@@ -15,10 +15,12 @@
       producers (--no-rigid-element-mass-admas)
   A6  *MAT_SPOTWELD DT -> the TYPE13 Mass / Inertia closed form
       (--no-spotweld-dt-mass-scaling)
+  A5  the adaptive spring token MASS with the driven-end skip
+      (--no-adaptive-spring-token)
 
 Kept in its own module, the repo's one-module-per-batch convention. The
-harness helpers are imported from tests/test_r14_triage_7.py (functions only,
-so no round-7 TestCase runs twice).
+harness helpers are imported from tests/test_r14_triage_5.py / _6.py / _7.py
+(functions and deck constants only, so no earlier TestCase runs twice).
 
 Every byte-pinning probe deck below was run through the OpenRadioss starter
 once (nt 4, C:/Users/pmqua/rcv_r8i_implA_<name>, harvested and deleted); the
@@ -29,6 +31,8 @@ import hashlib
 import math
 import unittest
 
+import test_r14_triage_5 as _t5
+import test_r14_triage_6 as _t6
 import test_r14_triage_7 as _t7
 
 _row = _t7._row
@@ -1355,6 +1359,268 @@ class SpotweldDtClosedForm(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "DT have no /PROP/TYPE13 slot"))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# A5 — the adaptive spring token MASS with the driven-end skip
+# ═════════════════════════════════════════════════════════════════════════════
+
+_BIG = 1.0e28
+
+
+def _a5_coupon(m1=1.0e-9, m2=1.0e-9, p2=(10.0, 0.0), extra="", n2=2,
+               tc1=0) -> str:
+    """The g3n coupon P: one *ELEMENT_DISCRETE 101 (K 100,
+    *MAT_SPRING_ELASTIC) from node 1 (0, 0, 0; *NODE TC *tc1*) to node *n2*
+    at *p2* (n2 = 0: grounded), *ELEMENT_MASS m1 / m2 on nodes 1 / 2, TSSFAC
+    0.9, t_end 0.02, GLSTAT every 1e-4; curve 1 = 100 (the motions' speed);
+    *extra* carries the end conditions."""
+    return ("*KEYWORD\n*TITLE\nA5 adaptive token coupon\n"
+            "*CONTROL_TERMINATION\n" + _row(0.02) + "\n"
+            "*CONTROL_TIMESTEP\n" + _row(0.0, 0.9) + "\n"
+            "*DATABASE_GLSTAT\n" + _row(1.0e-4) + "\n"
+            "*PART\nsprings\n" + _row(100, 100, 100) + "\n"
+            "*SECTION_DISCRETE\n" + _row(100, 0) + "\n" + _row(0.0, 0.0) + "\n"
+            "*MAT_SPRING_ELASTIC\n" + _row(100, 100.0) + "\n"
+            "*DEFINE_CURVE\n" + _row(1) + "\n"
+            + f"{0.0:>20.1f}{100.0:>20.1f}\n{1.0:>20.1f}{100.0:>20.1f}\n"
+            "*NODE\n"
+            + f"{1:>8}{0.0:>16.7f}{0.0:>16.7f}{0.0:>16.7f}{tc1:>8}{0:>8}\n"
+            + f"{2:>8}{p2[0]:>16.7f}{p2[1]:>16.7f}{0.0:>16.7f}\n"
+            "*ELEMENT_DISCRETE\n"
+            + f"{101:>8}{100:>8}{1:>8}{n2:>8}{0:>8}{1.0:>16.1f}{0:>8}"
+              f"{0.0:>16.1f}\n"
+            "*ELEMENT_MASS\n"
+            + f"{201:>8}{1:>8}{m1:>16.6E}{0:>8}\n"
+            + f"{202:>8}{2:>8}{m2:>16.6E}{0:>8}\n"
+            + extra + "*END\n")
+
+
+def _pm(nid, dof=1, vad=0, sf=1.0, vid=0, death=_BIG, birth=0.0) -> str:
+    """*BOUNDARY_PRESCRIBED_MOTION_NODE on curve 1."""
+    return ("*BOUNDARY_PRESCRIBED_MOTION_NODE\n"
+            + f"{nid:>10}{dof:>10}{vad:>10}{1:>10}{sf:>10.1f}{vid:>10}"
+              f"{death:>10.3G}{birth:>10.3G}\n")
+
+
+def _spcn(nid, code="111", cid=0) -> str:
+    """*BOUNDARY_SPC_NODE: the translations of *code*, no rotation."""
+    return ("*BOUNDARY_SPC_NODE\n"
+            + f"{nid:>10}{cid:>10}" + "".join(f"{int(c):>10}" for c in code)
+            + f"{0:>10}{0:>10}{0:>10}\n")
+
+
+_D_COUPONS = {
+    # g3n: D1 node 1 driven (light), node 2 heavy; D2 both light; D3 both
+    # ends driven (gnonspring's class); D4 the spring at 45 degrees, node 2
+    # driven along x only, so NOT along the spring
+    "D1": dict(m1=1.0e-9, m2=1.0e-3, extra=_pm(1)),
+    "D2": dict(m1=1.0e-9, m2=1.0e-9, extra=_pm(1)),
+    "D3": dict(m1=1.0e-6, m2=1.0e-6, extra=_spcn(1) + _pm(2)),
+    "D4": dict(m1=1.0e-9, m2=1.0e-9, p2=(10.0 / 2 ** 0.5, 10.0 / 2 ** 0.5),
+               extra=_spcn(1) + _pm(2)),
+}
+
+# one source per row: (name, coupon kwargs, the cell)
+_A5_SOURCES = (
+    ("global SPC", dict(extra=_spcn(1, "100")), "2.000000E-09"),
+    ("*NODE TC", dict(tc1=1), "2.000000E-09"),
+    ("*CONSTRAINED_GLOBAL", dict(extra="*CONSTRAINED_GLOBAL\n"
+                                 + _row(1, 0, 1, 0.0, 0.0, 0.0, 0.01) + "\n"),
+     "2.000000E-09"),
+    ("SF-0 motion", dict(extra=_pm(1, sf=0.0)), "2.000000E-09"),
+    ("/IMPVEL whole run", dict(extra=_pm(1, vad=0)), "2.000000E-09"),
+    ("/IMPDISP whole run", dict(extra=_pm(1, vad=2)), "2.000000E-09"),
+    ("/IMPACC whole run", dict(extra=_pm(1, vad=1)), "2.000000E-09"),
+    ("rigid member", dict(extra=(
+        "*NODE\n" + f"{3:>8}{0.0:>16.7f}{5.0:>16.7f}{0.0:>16.7f}\n"
+        "*SET_NODE_LIST\n" + _row(77) + "\n" + _row(1, 3) + "\n"
+        "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(88, 0, 77) + "\n")),
+     "2.000000E-09"),
+    # PNODE 1: node 1 IS the CNRB's main node (/RBODY/1); nodes 3 / 4 carry
+    # 1e-6 each so the body's inertia is not degenerate (starter ERROR 274
+    # without them)
+    ("CNRB main", dict(extra=(
+        "*NODE\n" + "".join(f"{n:>8}{x:>16.7f}{5.0:>16.7f}{0.0:>16.7f}\n"
+                            for n, x in ((3, 0.0), (4, 5.0)))
+        + "*ELEMENT_MASS\n" + f"{203:>8}{3:>8}{1.0e-6:>16.6E}{0:>8}\n"
+        + f"{204:>8}{4:>8}{1.0e-6:>16.6E}{0:>8}\n"
+        + "*SET_NODE_LIST\n" + _row(77) + "\n" + _row(3, 4) + "\n"
+        "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(88, 0, 77, 1) + "\n")),
+     "2.000000E-09"),
+    ("ground (N2 = 0)", dict(n2=0), "2.000000E-09"),
+    ("SYSTEM-CID SPC", dict(extra=(
+        "*DEFINE_COORDINATE_SYSTEM\n" + _row(5, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+        + "\n" + _row(-1.0, 1.0, 0.0) + "\n" + _spcn(1, "111", cid=5))),
+     "1.000000E-09"),
+    # DOF 4 along *DEFINE_VECTOR 7 = the vector's own /SKEW: a LOCAL motion,
+    # not counted even though this vector IS the spring's axis (the rule
+    # never reads a skew's axes - conservative)
+    ("local motion", dict(extra=(
+        "*DEFINE_VECTOR\n" + _row(7, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+        + _pm(1, dof=4, vid=7))), "1.000000E-09"),
+    ("tied secondary", dict(extra=(
+        "*NODE\n" + "".join(f"{n:>8}{x:>16.7f}{y:>16.7f}{0.0:>16.7f}\n"
+                            for n, x, y in ((3, -5.0, -5.0), (4, 5.0, -5.0),
+                                            (5, 5.0, 5.0), (6, -5.0, 5.0)))
+        + "*PART\nplate\n" + _row(9, 9, 9) + "\n"
+        "*SECTION_SHELL\n" + _row(9, 2) + "\n" + _row(1.0, 1.0, 1.0, 1.0)
+        + "\n*MAT_ELASTIC\n" + _row(9, 7.85e-9, 210000.0, 0.3) + "\n"
+        "*ELEMENT_SHELL\n" + _row(9, 9, 3, 4, 5, 6) + "\n"
+        "*SET_NODE_LIST\n" + _row(66) + "\n" + _row(1) + "\n"
+        "*CONTACT_TIED_NODES_TO_SURFACE\n" + _row(66, 9, 4, 3) + "\n"
+        + _row() + "\n" + _row() + "\n")), "1.000000E-09"),
+)
+
+
+def _weld_tie_deck(spc: str = "") -> str:
+    """LightClauseNumbers test_5's shape: a *CONSTRAINED_SPOTWELD tie
+    (TYPE13) between corners 1 / 11 of two 10 x 10 x 1 shells 2 mm apart
+    (own 1.9625e-7 each); *spc* = node 1's SPC translation code."""
+    def plate(nid0, z0, eid, pid):
+        pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        nodes = "".join(f"{nid0 + i:>8}{x:>16.4f}{y:>16.4f}{z0:>16.4f}\n"
+                        for i, (x, y) in enumerate(pts))
+        return nodes, _row(eid, pid, nid0, nid0 + 1, nid0 + 2,
+                           nid0 + 3) + "\n"
+
+    n1, e1 = plate(1, 0.0, 1, 1)
+    n2, e2 = plate(11, 2.0, 2, 2)
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-3) + "\n"
+            "*NODE\n" + n1 + n2 + "*ELEMENT_SHELL\n" + e1 + e2
+            + "*PART\nplate1\n" + _row(1, 1, 1) + "\n"
+            "*PART\nplate2\n" + _row(2, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*CONSTRAINED_SPOTWELD\n" + _row(1, 11, 1.0e4, 5.0e4) + "\n"
+            + (_spcn(1, spc) if spc else "") + "*END\n")
+
+
+def _token_cells(starter: str):
+    """The printed MASS cell of every /PROP/TYPE4 | TYPE8 | TYPE13 block."""
+    lines = starter.splitlines()
+    return [lines[i + 3][:20].strip() for i, ln in enumerate(lines)
+            if ln.startswith(("/PROP/TYPE4/", "/PROP/TYPE8/",
+                              "/PROP/TYPE13/"))]
+
+
+_WA5 = "spring token: MASS set from the end-node masses"
+
+
+class AdaptiveSpringToken(unittest.TestCase):
+    """A5 (round 8): a token /PROP steps on its PROPERTY mass (r1len3.F:175
+    sqrt(M / K)), and the S2 screen takes the token back off light ends, so
+    a light compensated end could outrun it silently. MASS := max(1.1e-15,
+    min(1e-4, 2 mu min(1, 2/n))) per /PROP from the end-node masses; a
+    rigid, ground or DRIVEN end (held or imposed along the spring for the
+    whole run) counts infinitely heavy, a spring with both ends infinite
+    keeps the token, a guarded end sets no cap. Starter + engine runs in
+    each docstring (nt 4, rcv_r8i_implA_<name>, harvested and deleted)."""
+
+    def test_1_the_g3n_coupons(self):
+        """D1 (driven light end + free heavy end, cap 2e-3) and D3 (both
+        driven) keep 0.0001; D2 (driven + free 1e-9) and D4 (node 2 driven
+        along x, the spring at 45 degrees: not along it) -> 2 x 1e-9.
+        ENGINE RECORDS: see the a5_* rows of the report."""
+        for name, want in (("D1", "0.0001"), ("D2", "2.000000E-09"),
+                           ("D3", "0.0001"), ("D4", "2.000000E-09")):
+            with self.subTest(coupon=name):
+                _r, starter, _e = _convert(_a5_coupon(**_D_COUPONS[name]))
+                self.assertEqual(_token_cells(starter), [want])
+
+    def test_1b_the_i14_coupon_and_its_guarded_spring(self):
+        """Round 6's i14 coupon: node 20 (own 1.9625e-13, n 4 at node 10)
+        bounds the shared /PROP 90003 -> 1.9625e-13; node 40 (no own mass)
+        is GUARDED and its spring carries the smaller MASS (decision D7):
+        the share left on it 9.8125e-14, named."""
+        res, starter, _e = _convert(_t6._I14_COUPON)
+        self.assertEqual(_token_cells(starter), ["1.962500E-13"])
+        self.assertIn("/PROP/TYPE4/90003", starter)
+        self.assertTrue(_has(res.warnings, _WA5, "(90003: 0.0001 -> "
+                             "1.9625e-13)", "1 guarded spring(s)"),
+                        res.warnings)
+        self.assertTrue(_has(res.warnings, "carry NO element mass of their "
+                             "own", "the token share left on them (node 40: "
+                             "9.8125e-14)"), res.warnings)
+
+    def test_2_one_probe_per_driven_source(self):
+        for name, kw, want in _A5_SOURCES:
+            with self.subTest(source=name):
+                res, starter, _e = _convert(_a5_coupon(**kw))
+                self.assertEqual(_token_cells(starter), [want], res.warnings)
+
+    def test_3_the_axis_tolerance(self):
+        """Node 1 held in x only: the spring's free-direction components
+        must stay <= 1e-6 (1e-7 drives, 1e-5 does not)."""
+        for y2, want in ((1.0e-6, "2.000000E-09"), (1.0e-4, "1.000000E-09")):
+            with self.subTest(y2=y2):
+                _r, starter, _e = _convert(_a5_coupon(
+                    p2=(10.0, y2), extra=_spcn(1, "100")))
+                self.assertEqual(_token_cells(starter), [want])
+
+    def test_4_a_TYPE13_needs_all_three_translations(self):
+        """The weld tie (TYPE13): node 1 SPC 110 is not driven (mu =
+        1.9625e-7 / 2 -> 1.9625e-7), 111 is (mu = 1.9625e-7 -> 3.925e-7)."""
+        for spc, want in (("110", "1.962500E-07"), ("111", "3.925000E-07")):
+            with self.subTest(spc=spc):
+                _r, starter, _e = _convert(_weld_tie_deck(spc))
+                self.assertEqual(_token_cells(starter), [want])
+
+    def test_5_Ileng_1_is_per_unit_length(self):
+        """T5's cable (Ileng 1, L 10): cap 9.8125e-8 per element -> 9.8125e-9
+        per unit length; each end sheds 0.5 x 9.8125e-9 x 10."""
+        _r, starter, _e = _convert(_t5._CABLE_DECK.replace("%RO%",
+                                                           "      0.0"),
+                                   zero_density_floor=False)
+        self.assertEqual(_token_cells(starter), ["9.812500E-09"])
+        self.assertEqual(_t5._admas_cards(starter), {-4.90625e-08: [1, 2]})
+
+    def test_6_the_floor(self):
+        _r, starter, _e = _convert(_a5_coupon(m1=1.0e-16, m2=1.0e-16))
+        self.assertEqual(_token_cells(starter), ["1.100000E-15"])
+
+    def test_7_inert_without_compensation_and_the_opt_out(self):
+        deck = _a5_coupon(**_D_COUPONS["D2"])
+        _r, starter, _e = _convert(deck,
+                                   spring_token_mass_compensation=False)
+        self.assertEqual(_token_cells(starter), ["0.0001"])
+        res, s0, _e0 = _convert(deck, adaptive_spring_token=False)
+        self.assertEqual(_token_cells(s0), ["0.0001"])
+        self.assertEqual(_sha(s0), _PR8_SHA["a5_d2"])
+        self.assertEqual(_sha("\n".join(res.warnings)), _PR8_WARN_SHA["a5_d2"])
+        self.assertFalse(_has(res.warnings, _WA5))
+
+    def test_8_a_windowed_motion_is_not_driving(self):
+        """BIRTH 0.005 or DEATH 0.01 inside t_end 0.02 -> not driven
+        (1e-9); the whole run -> 2e-9. ENGINE RECORDS: see the report."""
+        for kw, want in ((dict(birth=0.005), "1.000000E-09"),
+                         (dict(death=0.01), "1.000000E-09"),
+                         (dict(), "2.000000E-09")):
+            with self.subTest(**kw):
+                _r, starter, _e = _convert(_a5_coupon(extra=_pm(1, **kw)))
+                self.assertEqual(_token_cells(starter), [want])
+
+    def test_9_a_both_driven_spring_is_DRIVEN_in_the_light_clause(self):
+        """D3: both ends held along the spring for the whole run -> the token
+        is kept and the light end is labelled DRIVEN, never compared."""
+        res, _s, _e = _convert(_a5_coupon(**_D_COUPONS["D3"]))
+        w = [x for x in res.warnings if "was REMOVED again" in x]
+        self.assertEqual(len(w), 1, res.warnings)
+        self.assertIn("DRIVEN (both ends of spring 101", w[0])
+        self.assertIn("bcs1.F:56-89 / fixvel.F:370-372", w[0])
+        self.assertNotIn("UNPROTECTED", w[0])
+
+    def test_10_a_DT_raised_token_weld_is_left_alone(self):
+        """A token weld (RO 0) whose *MAT_SPOTWELD DT raised its Mass (A6,
+        decision D11) is not a token any more: its step is 0.9 DT and the
+        raised part stays on its ends as LS-DYNA's added mass, so A5 does not
+        rewrite it (the cell differs from the token its springs
+        registered)."""
+        res, starter, _e = _convert(_dt_weld_deck(ro=0.0, dt=1.0e-5),
+                                    zero_density_floor=False)
+        self.assertEqual(_token_cells(starter), ["0.001570796327"])
+        self.assertFalse(_has(res.warnings, _WA5))
+
+
 def _A3_DECKS():
     return {"t1": _plates(_spc_node(14, 0, "111111") + _spc_node(14, 0, "111111")),
             "t2": _plates(_P2_SHARED),
@@ -1400,6 +1666,7 @@ _PR8_SHA = {
     "a8_1": "feb58b9abe31c1bbd111ba949ad80ef936aca3f9de8fed087ffd394dde68291d",
     "a8_3": "241040e6b0db056d11d4de8656eee7dfd50c2d5c892ac854ddb18b1646e44324",
     "a6_off": "64223e00c130ddcb62abf0c71ef419539eeb107864555ca1d35ed2ea5ab0dcbb",
+    "a5_d2": "5594ae707bfb4b925e9ef81034f93e0fb6644f4a060b364d4953350421f5fd2b",
 }
 _PR8_WARN_SHA = {
     "a": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",
@@ -1407,6 +1674,7 @@ _PR8_WARN_SHA = {
     "e": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",
     "j": "2e5113acdacb3e65d25737a27722e6b42670d61fa0bad24c1483c8ef51059258",
     "o": "cbee9879c41b3e6d9c1c3664ee4c4f17406477c9b2e2a27f4a02a31ba1dcc09a",
+    "a5_d2": "cfa0c72ad12c7fdc53e990d1d8dc26bfb17bca097a01386008263cfbbd8ada20",
 }
 
 

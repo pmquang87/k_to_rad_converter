@@ -126,6 +126,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          plane_strain_unit_thickness: bool = True,
                          rigid_element_mass_admas: bool = True,
                          spotweld_dt_mass_scaling: bool = True,
+                         adaptive_spring_token: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -306,6 +307,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["spotweld_dt_mass_scaling"] = bool(spotweld_dt_mass_scaling)
 
+    kwargs["adaptive_spring_token"] = bool(adaptive_spring_token)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -456,6 +459,7 @@ class ConverterGUI:
         self.plane_strain_unit_thickness = tk.BooleanVar(value=True)
         self.rigid_element_mass_admas = tk.BooleanVar(value=True)
         self.spotweld_dt_mass_scaling = tk.BooleanVar(value=True)
+        self.adaptive_spring_token = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -992,6 +996,13 @@ class ConverterGUI:
             variable=self.spotweld_dt_mass_scaling).grid(
                 row=55, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Spring token MASS from the end-node masses (2 mu min(1, "
+                     "2/n)) - ON. the fixed 1e-4 token was killed within 3-6 "
+                     "cycles on 3 coupons",
+            variable=self.adaptive_spring_token).grid(
+                row=56, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1261,6 +1272,7 @@ class ConverterGUI:
                 plane_strain_unit_thickness=self.plane_strain_unit_thickness.get(),
                 rigid_element_mass_admas=self.rigid_element_mass_admas.get(),
                 spotweld_dt_mass_scaling=self.spotweld_dt_mass_scaling.get(),
+                adaptive_spring_token=self.adaptive_spring_token.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1471,6 +1483,9 @@ class ConverterGUI:
                         "(--no-rigid-element-mass-admas)")
         if not kwargs.get("spotweld_dt_mass_scaling", True):
             bits.append("*MAT_SPOTWELD DT dropped (--no-spotweld-dt-mass-scaling)")
+        if not kwargs.get("adaptive_spring_token", True):
+            bits.append("fixed 1e-4 spring token MASS "
+                        "(--no-adaptive-spring-token)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

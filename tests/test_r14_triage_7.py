@@ -44,6 +44,37 @@ def _row(*vals) -> str:
     return "".join(f"{v:>10}" for v in vals)
 
 
+def _token_mass_cells(starter: str):
+    """Round 8, A5: the printed MASS cell of every /PROP/TYPE4 | TYPE8 |
+    TYPE13 block, in file order (the adaptive spring token rewrites it)."""
+    lines = starter.splitlines()
+    return [lines[i + 3][:20].strip() for i, ln in enumerate(lines)
+            if ln.startswith(("/PROP/TYPE4/", "/PROP/TYPE8/",
+                              "/PROP/TYPE13/"))]
+
+
+def _admas_text(starter: str):
+    """Round 8, A5: ``{printed MASS text: sorted node ids}`` over every
+    /ADMAS/0 - the adaptive token's cells sit below the 12-decimal rounding
+    _admas_cards keys by."""
+    lines = starter.splitlines()
+    groups = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/"):
+            nids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                nids += [int(v) for v in lines[j].split()]
+                j += 1
+            groups[int(ln.rsplit("/", 1)[1])] = nids
+    out = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/ADMAS/0/"):
+            mass, gid = lines[i + 3].split()
+            out.setdefault(mass, []).extend(groups[int(gid)])
+    return {m: sorted(v) for m, v in out.items()}
+
+
 def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text, engine_text)."""
     tmp = tempfile.TemporaryDirectory()
@@ -1809,7 +1840,23 @@ class LightClauseNumbers(unittest.TestCase):
     all three < 0.9 x 1e-3 -> UNPROTECTED."""
 
     def test_1_the_coupon_pairs(self):
-        res, starter, _e = _convert(_spring_coupon())
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. On the default the shared /PROP is bounded by
+        node 20 (own 1.9625e-13, n 4): MASS 1.9625e-13, no compensated end
+        keeps less than its share, so the 'REMOVED again' sentence carries
+        no pair clause and W-A5 names the cell."""
+        r8, s8, _e8 = _convert(_spring_coupon())
+        w8 = _token_warning(r8)
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-13"])
+        self.assertNotIn("Per pair", w8)
+        self.assertNotIn("keep LESS mass", w8)
+        self.assertTrue(_has(r8.warnings, "on 1 /PROP(s) (90001: 0.0001 -> "
+                             "1.9625e-13)", "Smallest MASS 1.9625e-13 on "
+                             "/PROP 90001"), r8.warnings)
+        res, starter, _e = _convert(_spring_coupon(),
+                                    adaptive_spring_token=False)
         w = _token_warning(res)
         for needle in (
                 "node 20 on spring 101: 8.86e-08 s vs 0.9 x 0.001 s -> "
@@ -1830,14 +1877,33 @@ class LightClauseNumbers(unittest.TestCase):
 
     def test_2_the_PROTECTED_arm_is_reached(self):
         """node 30 at 4.5e-5 (still below its 5e-5 share, so still LIGHT):
-        mu = 4.5e-5 x 1e-3 / 1.045e-3 = 4.306e-5 -> 1.31e-3 s >= 9e-4."""
-        res, _s, _e = _convert(_spring_coupon(m30=4.5e-5))
+        mu = 4.5e-5 x 1e-3 / 1.045e-3 = 4.306e-5 -> 1.31e-3 s >= 9e-4.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. The default: MASS 1.9625e-13, node 30's 4.5e-5
+        minus a 9.8125e-14 half (printed 4.500000E-05), no pair clause."""
+        _r8, s8, _e8 = _convert(_spring_coupon(m30=4.5e-5))
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-13"])
+        self.assertEqual(_admas_text(s8).get("4.500000E-05"), [30])
+        res, _s, _e = _convert(_spring_coupon(m30=4.5e-5),
+                               adaptive_spring_token=False)
         w = _token_warning(res)
         self.assertIn("node 30 on spring 102: 0.00131 s vs 0.9 x 0.001 s -> "
                       "PROTECTED", w)
 
     def test_3_an_implicit_deck_says_the_comparison_is_explicit_only(self):
-        res, _s, _e = _convert(_spring_coupon(implicit=True))
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. The rule ignores the step mode: the implicit
+        coupon's cell is 1.962500E-13 too, and the clause stays under the
+        opt-out."""
+        _r8, s8, _e8 = _convert(_spring_coupon(implicit=True))
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-13"])
+        res, _s, _e = _convert(_spring_coupon(implicit=True),
+                               adaptive_spring_token=False)
         self.assertIn("This deck runs implicit", _token_warning(res))
 
     def test_4_the_numbers_move_no_byte(self):
@@ -1880,7 +1946,16 @@ class LightClauseNumbers(unittest.TestCase):
                 "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
                 "*CONSTRAINED_SPOTWELD\n" + _row(1, 11, 1.0e4, 5.0e4) + "\n"
                 "*END\n")
-        res, starter, _e = _convert(deck)
+        # EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        # the token cell this probe pins; the fixed-token assertion is kept
+        # under --no-adaptive-spring-token and the default's cell is pinned
+        # beside it. Hand: both ends own 1.9625e-7 -> MASS 1.9625e-7, share
+        # 9.8125e-8, neither end light: no pair clause.
+        r8, s8, _e8 = _convert(deck)
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-07"])
+        self.assertEqual(_admas_text(s8), {"-9.812500E-08": [1, 11]})
+        self.assertNotIn("Per pair", _token_warning(r8))
+        res, starter, _e = _convert(deck, adaptive_spring_token=False)
         w = _token_warning(res)
         for node in (1, 11):
             with self.subTest(node=node):
@@ -1932,9 +2007,19 @@ class LightClauseNumbers(unittest.TestCase):
                        "keep LESS mass"):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, w)
-        # control: node 50 of the coupon IS light, and its pair is printed
+        # EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        # the token cell of the control coupon; its fixed-token pair is kept
+        # under --no-adaptive-spring-token and the default's cell is pinned
+        # beside it (call 1's own cell does not move: node 60 is heavy, cap
+        # 3.28e-4 > 1e-4). control: node 50 of the coupon IS light, and its
+        # pair is printed
+        self.assertEqual(_token_mass_cells(_convert(deck)[1]), ["0.0001"])
         self.assertIn("node 50 on spring 104",
-                      _token_warning(_convert(_spring_coupon())[0]))
+                      _token_warning(_convert(
+                          _spring_coupon(), adaptive_spring_token=False)[0]))
+        r8, s8, _e8 = _convert(_spring_coupon())
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-13"])
+        self.assertNotIn("Per pair", _token_warning(r8))
 
     def test_8_a_held_light_node_is_HELD_and_a_prescribed_axis_is_named(self):
         """gnonspring's shape (the post-review round's physics verifier):
@@ -1964,7 +2049,22 @@ class LightClauseNumbers(unittest.TestCase):
                 "*DEFINE_CURVE\n" + _row(99) + "\n"
                 + f"{0.0:>20}{0.0:>20}\n{2.0e-3:>20}{1.0:>20}\n"
                 + "*END\n")
-        res, starter, engine = _convert(deck)
+        # EXPECTED VALUE MOVED in R14 round 8 (A5): both ends of spring 1
+        # are held along it for the whole run, so the adaptive token keeps
+        # the token (0 bytes: the default's starter equals the opt-out's) and
+        # the LIGHT clause labels node 2 DRIVEN instead of comparing it; the
+        # round-7 UNPROTECTED needle is kept under --no-adaptive-spring-token.
+        r8, s8, e8 = _convert(deck)
+        w8 = _token_warning(r8)
+        self.assertIn("node 1 on spring 1: HELD (its three translations are "
+                      "fixed", w8)
+        self.assertIn("node 2 on spring 1: DRIVEN (both ends of spring 1 are "
+                      "held along its axis for the whole run: bcs1.F:56-89 / "
+                      "fixvel.F:370-372 overwrite the acceleration there", w8)
+        self.assertNotIn("UNPROTECTED", w8)
+        self.assertEqual(_token_mass_cells(s8), ["0.0001"])
+        res, starter, engine = _convert(deck, adaptive_spring_token=False)
+        self.assertEqual((s8, e8), (starter, engine))
         w = _token_warning(res)
         for needle in (
                 "node 1 on spring 1: HELD (its three translations are fixed",

@@ -280,6 +280,69 @@ Prior history (before this changelog was introduced) is summarized in the
     dropped sentence naming TFAIL alone) and `tests/test_r14_triage_7.py`
     `test_7_the_efail_opt_out_keeps_EFAIL_dropped` (+ the inert sentence);
     the old assertions kept under `spotweld_dt_mass_scaling=False`.
+  - **A5 — the spring token MASS adapts to the end-node masses, with the
+    driven-end skip (default ON, `--no-adaptive-spring-token`).** A token
+    `/PROP` (TYPE4 / TYPE8 / TYPE13, k2rad's 1e-4 on a massless LS-DYNA
+    discrete element) steps on its PROPERTY mass (`r1len3.F:175`,
+    `r2len3.F:182-186`) while round 6's S2 compensation takes the token back
+    off the ends, so a light end could outrun the spring's own step with
+    nothing to stop it. `loads._adaptive_spring_token`, a post-pass at the
+    start of `_make_added_masses` (the four token producers record their
+    `/PROP` id, type, Ileng and element length in
+    `state.spring_token_props`; `_register_imp_motion_nodes` records each
+    global motion's window in `state.imp_motion_windows`), writes MASS =
+    max(1.1e-15, min(1e-4, 2 mu min(1, 2/n))) per `/PROP`, mu from the ends'
+    own masses (the S2 screen's), n the busier end's token-spring count, per
+    unit length on Ileng 1; a rigid, connector-ground or DRIVEN end (global
+    SPC, `SF = 0` motion, emitted `*NODE` TC / `*CONSTRAINED_GLOBAL` code,
+    a skew-0 `/IMP*` with sensor 0, `tstart <= 0` and `tstop` 0 or >= ENDTIM,
+    covering the spring's stiff directions: a TYPE4's free axis components
+    <= 1e-6, all three on a TYPE8 / TYPE13) counts infinitely heavy; a
+    spring with both ends infinite keeps the token; a guarded end sets no
+    cap and a guarded spring sharing a rewritten `/PROP` carries its smaller
+    MASS (decision D7, named); a token weld whose `*MAT_SPOTWELD` DT raised
+    its Mass (A6) is left alone (its cell is no longer the token its springs
+    registered). The MASS cell is rewritten in the emitted lines (header,
+    comment row and old value asserted) and the shares move by the PRINTED
+    value, so the negative `/ADMAS` stays exact. The LIGHT clause labels a
+    both-driven spring's light end DRIVEN (`bcs1.F:56-89` BCS1V via
+    `bcs10.F:62`, `fixvel.F:370-372` overwrite the acceleration there) - the
+    part-A spec's `bcs2.F:145-199` is BCS2V, the ALE grid routine, corrected
+    here; the token sentences name the share actually left on a guarded,
+    orphan or rigid node once a cell moved (W-A5 names the cells). MEASURED
+    (nt 4, starter + engine): the fixed token was killed by the energy-error
+    limit (MESSAGE 205) behind a NORMAL TERMINATION banner on the g3n coupons
+    D2 (cycle 5, I-ENERGY 0.7503E+39) and D4 (cycle 3) and on round 6's i14
+    (cycle 6, IE 1.578e22); the rule runs D2 / D4 4970 cycles and i14 50163
+    cycles (first step 3.987e-8, IE + KE 499.96 of the launched 500), NORMAL,
+    no MESSAGE 205; D1 / D3 keep the token (23 = 23 cycles); a whole-run
+    motion drives, a BIRTH 0.005 one does not (7028 cycles NORMAL, the fixed
+    token killed at cycle 11). Base-paired movers: `plates.nrbc` 2407 = 2407
+    and `plates.spot` 2407 = 2407 (every printed row identical; plates.nrbc
+    IE / KE END -18.99 / +12.75 % at t 0.001999 on both arms),
+    `constrained.spotweld.plates` 18133 = 18133 (40 rows differ only in
+    which of its three identical weld springs is printed controlling),
+    `plates.k` 14968 = 14968 - 1.000x. Byte signature (two-tree, from F:):
+    the MASS cell + the S2 compensation group's title and its negative
+    `/ADMAS` value (`plates.nrbc` `-5.000000E-05` -> `-7.850000E-07`);
+    `gnonspring`, `ex_16`, the match rows `ex_17` / `ex_18` byte-identical
+    (gnonspring's REMOVED sentence gains the DRIVEN label). Reach 6 deck keys
+    on 6 emitted models (the 4 above + the 2 Yaris suspension giants,
+    `/PROP/TYPE4/107020` 1e-4 -> 5.483321e-7, convert-only). EXPECTED VALUES
+    MOVED (the 29 tests of the part-A spec + one subtest): the adaptive token
+    moves the token cell each probe pins; the fixed-token assertions are kept
+    VERBATIM under `adaptive_spring_token=False` and the default's cells are
+    pinned beside them, each re-derived by hand in its docstring -
+    `test_r14_triage_4` `SpringTokenMassCompensationTests`
+    `test_the_degenerate_node_keeps_its_own_mass_and_is_named` (+ a
+    both-driven probe that keeps the degenerate class reachable);
+    `test_r14_triage_5` `SpringTokenNegativeAdmas` x4 (+ a held-weld probe),
+    `DiscreteBeamTokenIsLengthScaled`, `SpringTokenExactZeroBoundary` x2;
+    `test_r14_triage_6` `SpringTokenLumpedScreen` x6,
+    `PostReviewSpringScreenSolidNode`; `test_r14_triage_7`
+    `LightClauseNumbers` test_1 (8 subtests), test_2, test_3, test_5 (+ 2
+    subtests), test_7 and test_8's prescribed-axis subtest (the DRIVEN
+    label; bytes identical to the opt-out's).
 
 - **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
   DEFAULT changes move campaign VERDICTS by measurement, not by definition:

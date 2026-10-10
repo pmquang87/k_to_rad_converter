@@ -761,6 +761,25 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-spotweld-dt-mass-scaling drops DT.",
     )
     parser.add_argument(
+        "--adaptive-spring-token",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Set each spring token /PROP MASS (k2rad's fixed 1e-4) to min(1e-4, "
+             "2 mu min(1, 2/n)), mu = m_a m_b / (m_a + m_b) from the end-node "
+             "masses and n the busier end's token-spring count (per unit length "
+             "on an Ileng 1 property, floor 1.1e-15), a rigid, ground or DRIVEN "
+             "end (held or imposed along the spring for the whole run) counted "
+             "infinitely heavy: the spring's own step sqrt(M/K) (r1len3.F:175) "
+             "reads the PROPERTY mass, and the fixed token was killed by the "
+             "energy-error limit within 3-6 cycles on three coupons, each "
+             "behind a NORMAL TERMINATION banner. A spring with "
+             "both ends driven keeps the token. 6 deck keys on 6 models move one "
+             "cell (the Yaris static suspension /PROP/TYPE4/107020 1e-4 -> "
+             "5.483321e-7); the 4 runnable movers' printed rows are identical at "
+             "1.000x the cycles. ON by default; --no-adaptive-spring-token keeps "
+             "the fixed token.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1445,6 +1464,7 @@ def main(argv=None) -> int:
         plane_strain_unit_thickness=args.plane_strain_unit_thickness,
         rigid_element_mass_admas=args.rigid_element_mass_admas,
         spotweld_dt_mass_scaling=args.spotweld_dt_mass_scaling,
+        adaptive_spring_token=args.adaptive_spring_token,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

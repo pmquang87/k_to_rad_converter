@@ -55,6 +55,37 @@ def _row(*vals) -> str:
     return "".join(f"{v:>10}" for v in vals)
 
 
+def _token_mass_cells(starter: str):
+    """Round 8, A5: the printed MASS cell of every /PROP/TYPE4 | TYPE8 |
+    TYPE13 block, in file order (the adaptive spring token rewrites it)."""
+    lines = starter.splitlines()
+    return [lines[i + 3][:20].strip() for i, ln in enumerate(lines)
+            if ln.startswith(("/PROP/TYPE4/", "/PROP/TYPE8/",
+                              "/PROP/TYPE13/"))]
+
+
+def _admas_text(starter: str):
+    """Round 8, A5: ``{printed MASS text: sorted node ids}`` over every
+    /ADMAS/0 - the adaptive token's cells sit below the 12-decimal rounding
+    _admas_cards keys by."""
+    lines = starter.splitlines()
+    groups = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/GRNOD/NODE/"):
+            nids = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith(("/", "#")):
+                nids += [int(v) for v in lines[j].split()]
+                j += 1
+            groups[int(ln.rsplit("/", 1)[1])] = nids
+    out = {}
+    for i, ln in enumerate(lines):
+        if ln.startswith("/ADMAS/0/"):
+            mass, gid = lines[i + 3].split()
+            out.setdefault(mass, []).extend(groups[int(gid)])
+    return {m: sorted(v) for m, v in out.items()}
+
+
 def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text, engine_text)."""
     tmp = tempfile.TemporaryDirectory()
@@ -931,7 +962,29 @@ class SpringTokenLumpedScreen(unittest.TestCase):
     against LS-DYNA's 2.0e-6). The node's OWN mass decides now."""
 
     def test_the_four_classes_of_the_i14_coupon(self):
-        result, starter, _e = _convert(_I14_COUPON)
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand on the default: node 20 (a corner of the T
+        1e-6 shell, own 1.9625e-13) bounds the shared /PROP: n = 4 at node
+        10, mu ~ 1.9625e-13 -> 2 mu x 2/4 = 1.9625e-13; the four springs
+        then shed 9.8125e-14 per end: node 10's 1e-3 minus four halves
+        (printed 0.0009999999996), node 30's 2e-5 minus one half (subtracted,
+        not degenerate any more), nodes 20 / 50 a negative card, the bare
+        node 40 GUARDED as before (its spring shares the /PROP and carries
+        the smaller MASS, decision D7)."""
+        r8, s8, _e8 = _convert(_I14_COUPON)
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-13"])
+        self.assertEqual(_admas_text(s8), {"2.000000E-05": [30],
+                                           "0.0009999999996": [10],
+                                           "-9.812500E-14": [20, 50]})
+        self.assertTrue(_has(r8.warnings, "carry NO element mass of their "
+                             "own", "[40]"), r8.warnings)
+        self.assertTrue(_has(r8.warnings, "spring token: MASS set from the "
+                             "end-node masses on 1 /PROP(s)",
+                             "1 guarded spring(s)"), r8.warnings)
+        result, starter, _e = _convert(_I14_COUPON,
+                                       adaptive_spring_token=False)
         cards = _admas_cards(starter)
         # node 10: its 1e-3 minus four half-shares; node 30 keeps its own
         # +2e-05 (degenerate) AND takes the full share off; 20 / 30 / 50 get
@@ -951,7 +1004,18 @@ class SpringTokenLumpedScreen(unittest.TestCase):
                 self.assertIn(needle, guarded[0])
 
     def test_the_light_clause_names_every_node_below_its_share(self):
-        result, _s, _e = _convert(_I14_COUPON)
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. On the default no node is LIGHT any more (every
+        compensated end keeps at least its share), so the 'REMOVED again'
+        sentence names nodes 20 / 50 with no LIGHT clause."""
+        r8, _s8, _e8 = _convert(_I14_COUPON)
+        neg8 = [w for w in r8.warnings if "was REMOVED again" in w]
+        self.assertEqual(len(neg8), 1, r8.warnings)
+        self.assertIn("from 2 node(s) [20, 50]", neg8[0])
+        self.assertNotIn("keep LESS mass", neg8[0])
+        result, _s, _e = _convert(_I14_COUPON, adaptive_spring_token=False)
         neg = [w for w in result.warnings if "was REMOVED again" in w]
         self.assertEqual(len(neg), 1, result.warnings)
         self.assertIn("3 of these node(s) keep LESS mass", neg[0])
@@ -972,20 +1036,50 @@ class SpringTokenLumpedScreen(unittest.TestCase):
 
     def test_a_material_outside_the_historic_six_is_weighed(self):
         """*MAT_ORTHOTROPIC_ELASTIC lands in state.mat_orthotropic, which the
-        lumper's six dictionaries never read."""
-        _r, starter, _e = _convert(_weld_deck(plate_mat="orthotropic"))
+        lumper's six dictionaries never read.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: each weld end own 1.9625e-7 (a corner of a
+        10 x 10 x 1 plate at 7.85e-9) -> MASS 1.9625e-7, share 9.8125e-8 -
+        the screen still weighs the orthotropic plate (a zero there would
+        make the end GUARDED and keep the token)."""
+        _r, starter, _e = _convert(_weld_deck(plate_mat="orthotropic"),
+                                   adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
                          {round(-_SHARE, 12): [1, 11]})
+        _r8, s8, _e8 = _convert(_weld_deck(plate_mat="orthotropic"))
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-07"])
+        self.assertEqual(_admas_text(s8), {"-9.812500E-08": [1, 11]})
 
     def test_a_node_on_a_thick_shell_only_is_weighed(self):
-        _r, starter, _e = _convert(_tshell_weld_deck())
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: each end own 9.8125e-8 on the thick-shell
+        stack -> MASS 9.8125e-8 / 2 x 2 = 4.90625e-8, share 2.453125e-8."""
+        _r, starter, _e = _convert(_tshell_weld_deck(),
+                                   adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
                          {round(-_SHARE, 12): [1, 11]})
+        _r8, s8, _e8 = _convert(_tshell_weld_deck())
+        self.assertEqual(_token_mass_cells(s8), ["4.906250E-08"])
+        self.assertEqual(_admas_text(s8), {"-2.453125E-08": [1, 11]})
 
     def test_a_composite_part_is_weighed_by_its_ply_stack(self):
-        _r, starter, _e = _convert(_weld_deck(composite=True))
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: each end own 1.9625e-7 from the ply stack
+        -> MASS 1.9625e-7, share 9.8125e-8."""
+        _r, starter, _e = _convert(_weld_deck(composite=True),
+                                   adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
                          {round(-_SHARE, 12): [1, 11]})
+        _r8, s8, _e8 = _convert(_weld_deck(composite=True))
+        self.assertEqual(_token_mass_cells(s8), ["1.962500E-07"])
+        self.assertEqual(_admas_text(s8), {"-9.812500E-08": [1, 11]})
 
     def test_ELEMENT_MASS_PART_on_a_deformable_part_does_not_count(self):
         """The writer puts *ELEMENT_MASS_PART only into /RBODY Mass, so on a
@@ -1014,7 +1108,16 @@ class SpringTokenLumpedScreen(unittest.TestCase):
                 + f"{1:>8}{1:>8}{1.0e-6:>16.8G}\n"
                 + f"{2:>8}{2:>8}{1.0e-6:>16.8G}\n"
                 + "*END\n")
-        result, starter, _e = _convert(deck)
+        # EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token moves
+        # the token cell this probe pins; the fixed-token assertion is kept
+        # under --no-adaptive-spring-token and the default's cell is pinned
+        # beside it. Hand: both ends own 1e-6 -> MASS 1e-6, share 5e-7 <
+        # 1e-6 -> ONE subtracted /ADMAS 5e-7 on [1, 2], nothing degenerate.
+        r8, s8, _e8 = _convert(deck)
+        self.assertEqual(_token_mass_cells(s8), ["1.000000E-06"])
+        self.assertEqual(_admas_text(s8), {"5.000000E-07": [1, 2]})
+        self.assertFalse(any("LESS /ADMAS" in w for w in r8.warnings))
+        result, starter, _e = _convert(deck, adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
                          {round(1.0e-6, 12): [1, 2],
                           round(-_SHARE, 12): [1, 2]})
@@ -4241,10 +4344,21 @@ class PostReviewSpringScreenSolidNode(unittest.TestCase):
              + "*END\n")
 
     def test_a_node_on_a_solid_only_is_compensated(self):
-        result, starter, _e = _convert(self._DECK)
+        """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: each end own rho V / 8 = 9.8125e-7 ->
+        MASS 9.8125e-7, share 4.90625e-7."""
+        result, starter, _e = _convert(self._DECK,
+                                       adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter), {round(-_SHARE, 12): [1, 7]})
         self.assertFalse(any("carry NO element mass of their own" in w
                              for w in result.warnings), result.warnings)
+        r8, s8, _e8 = _convert(self._DECK)
+        self.assertEqual(_token_mass_cells(s8), ["9.812500E-07"])
+        self.assertEqual(_admas_text(s8), {"-4.906250E-07": [1, 7]})
+        self.assertFalse(any("carry NO element mass of their own" in w
+                             for w in r8.warnings), r8.warnings)
 
     def test_the_own_mass_is_rho_V_over_8_by_hand(self):
         from k2rad.lumping import element_mass_by_node
