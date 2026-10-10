@@ -22,7 +22,7 @@ from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
 from .writer.common import AUTO_IMPLICIT_STUB_TITLE, SHELL_FORMULATIONS
-from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
+from .writer import (build_starter, build_engines, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active)
 
@@ -193,10 +193,21 @@ class ConversionResult:
     # (keyword, reason) for keywords that were recognized — they have a handler,
     # so they are NOT in skipped_keywords — but produced no card in either deck.
     recognized_not_emitted: List[Tuple[str, str]] = field(default_factory=list)
+    # Every engine file in RUN ORDER (round 8, B3 h.2): [engine_path] for
+    # every deck but an IMFLAG < 0 one under --imflag-curve-restart, which
+    # gets <stem>_0001.rad, <stem>_0002.rad, ... (run them in order from one
+    # directory). Never empty.
+    engine_paths: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.engine_paths:
+            self.engine_paths = [self.engine_path]
 
 
 def _write_conversion_log(output_stem: str, input_path: str,
-                          state: ConversionState) -> Optional[str]:
+                          state: ConversionState,
+                          engine_paths: Optional[List[str]] = None
+                          ) -> Optional[str]:
     """Save the conversion's warnings + skipped keywords to ``<stem>_conversion.log``
     so they survive for later investigation (the console scrolls them away on a
     large deck).  Written only when there is something to record; returns the log
@@ -212,7 +223,10 @@ def _write_conversion_log(output_stem: str, input_path: str,
         "k2rad conversion log",
         f"  generated : {datetime.now().isoformat(timespec='seconds')}",
         f"  input     : {input_path}",
-        f"  output    : {output_stem}_0000.rad / _0001.rad",
+        (f"  output    : {output_stem}_0000.rad / _0001.rad"
+         if not engine_paths or len(engine_paths) < 2 else
+         f"  output    : {output_stem}_0000.rad / "
+         + " / ".join(Path(p).name for p in engine_paths)),
         f"  warnings  : {len(state.warnings)}",
         f"  skipped   : {len(skipped)} unsupported keyword(s)",
         f"  not emitted: {len(not_emitted)} recognized keyword(s) that "
@@ -299,6 +313,7 @@ def convert(
     elastic_fluid_cp_cutoff: bool = True,
     implicit_stub_with_type25: bool = False,
     shell_in_solid_coupling: bool = False,
+    imflag_curve_restart: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1019,6 +1034,14 @@ def convert(
         -> -28.26 %, the deck IE +1134.62 -> +42.28 % / KE -92.06 ->
         -38.13 % at 8.936x the cycles. Default False: the density half
         fails on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
+    imflag_curve_restart : bool
+        Write one engine file per method segment of an IMFLAG < 0 curve
+        (R14 triage round 8, B3 h.2): <stem>_000k.rad carries
+        /RUN/<title>/k to the segment's end, /IMPL only in implicit
+        segments, /DT only in explicit ones, /RFILE/OFF only in the
+        last file; run them in order from one directory (each restarts
+        from the previous run's .rst). ConversionResult.engine_paths
+        lists them. Default False.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1458,6 +1481,7 @@ def convert(
         elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
         implicit_stub_with_type25=implicit_stub_with_type25,
         shell_in_solid_coupling=shell_in_solid_coupling,
+        imflag_curve_restart=imflag_curve_restart,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
@@ -1610,7 +1634,16 @@ def convert(
     starter_text = build_starter(
         state, progress=lambda fr, label: _report(0.36 + 0.61 * fr, label))
     _report(0.97, "Writing engine deck")
-    engine_text  = build_engine(state)
+    # round 8, B3 (h.2): one engine text per run - several only for an
+    # IMFLAG < 0 deck under --imflag-curve-restart
+    engine_texts = build_engines(state)
+    engine_paths = [engine_path] + [f"{output_stem}_{k:04d}.rad"
+                                    for k in range(2, len(engine_texts) + 1)]
+    if len(engine_texts) == 1 and Path(f"{output_stem}_0002.rad").exists():
+        state.warn(
+            f"A stale {Path(output_stem).name}_0002.rad from an earlier "
+            "--imflag-curve-restart conversion sits beside this single-file "
+            "output; delete it before running the chain by hand.")
 
     # 4. Write files. utf-8 regardless of locale (an ASCII/C locale would
     # UnicodeEncodeError on a non-ASCII part title); create the output
@@ -1621,12 +1654,15 @@ def convert(
         out_dir.mkdir(parents=True, exist_ok=True)
     with open(starter_path, "w", newline="\n", encoding="utf-8") as fh:
         fh.write(starter_text)
-    with open(engine_path, "w", newline="\n", encoding="utf-8") as fh:
-        fh.write(engine_text)
+    for path, text in zip(engine_paths, engine_texts):
+        with open(path, "w", newline="\n", encoding="utf-8") as fh:
+            fh.write(text)
 
     # 5. Auto-save warnings/skips for later investigation (large decks scroll the
     #    console). Written next to the output as <stem>_conversion.log.
-    log_path = _write_conversion_log(output_stem, input_path, state) if write_log else None
+    log_path = (_write_conversion_log(output_stem, input_path, state,
+                                      engine_paths)
+                if write_log else None)
 
     _report(1.0, "Done")
     return ConversionResult(
@@ -1636,6 +1672,7 @@ def convert(
         skipped_keywords=sorted(set(state.skipped_keywords)),
         recognized_not_emitted=sorted(state.recognized_not_emitted),
         log_path=log_path,
+        engine_paths=engine_paths,
     )
 
 

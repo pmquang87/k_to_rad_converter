@@ -846,6 +846,20 @@ def build_parser() -> argparse.ArgumentParser:
              "IE +1134.62 -> +42.28 %%, at 8.936x the cycles.",
     )
     parser.add_argument(
+        "--imflag-curve-restart",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="For *CONTROL_IMPLICIT_GENERAL IMFLAG < 0 (a curve that switches "
+             "implicit / explicit in time): write ONE ENGINE FILE PER SEGMENT, "
+             "<stem>_0001.rad, <stem>_0002.rad, ..., because OpenRadioss fixes "
+             "the method per engine file (freimpl.F:82); every file but the last "
+             "keeps its restart file, and the files must be run in order from "
+             "one directory. OFF by default (the campaign runner reads one "
+             "engine file). MEASURED on ie_shell (nt 4 = nt 2): 92 -> 18 + 11 "
+             "127 cycles, END IE -99.87 -> -4.54 %%, RMS 58.96 / 58.79 -> 12.07 "
+             "/ 12.04 %% of the LS peak.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1536,6 +1550,7 @@ def main(argv=None) -> int:
         elastic_fluid_cp_cutoff=args.elastic_fluid_cp_cutoff,
         implicit_stub_with_type25=args.implicit_stub_with_type25,
         shell_in_solid_coupling=args.shell_in_solid_coupling,
+        imflag_curve_restart=args.imflag_curve_restart,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
@@ -1561,7 +1576,13 @@ def main(argv=None) -> int:
     )
 
     print(f"  Starter -> {result.starter_path}")
-    print(f"  Engine  -> {result.engine_path}")
+    # round 8, B3 (h.2): every engine file, in run order
+    paths = getattr(result, "engine_paths", None) or [result.engine_path]
+    for p in paths:
+        print(f"  Engine  -> {p}")
+    if len(paths) > 1:
+        print("  Run the engine files IN ORDER from one directory (each "
+              "restarts from the previous run's .rst).")
     if result.log_path:
         print(f"  Log     -> {result.log_path}")
 

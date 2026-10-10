@@ -356,6 +356,31 @@ Prior history (before this changelog was introduced) is summarized in the
     that moved: `test_r14_triage_7` `ShellInSolidNamed`
     `test_one_named_warning_and_still_skipped` (its round-7 needles became
     the flag-OFF text's 2812.5 / -28.26 % / 8.936x / 2.227e-4).
+  - **B3 (h.2) — `--imflag-curve-restart` (opt-in): an IMFLAG < 0 deck whose
+    curve switches the solution method is written as ONE ENGINE FILE PER
+    SEGMENT.** OpenRadioss fixes the method per engine file (`freimpl.F:82`,
+    `:127-129`), so round 7 emitted such a deck implicit throughout and
+    named the cost. With the flag, `<stem>_000k.rad` carries
+    `/RUN/<title>/k` to the segment's end, `/IMPL` only in implicit
+    segments, `/DT` cards only in explicit ones, and `/RFILE/OFF` (and
+    `/DYNAIN`) only in the last file (run k restarts from run k-1's `.rst`,
+    `radioss2.F:817-830`); `ConversionResult.engine_paths` lists them in run
+    order, the CLI / GUI print every file and the run-order line, the
+    conversion log names them; a warning a per-file builder repeats is kept
+    once. Measured on `implicit/basic-examples/impl-expl-switch/ie_shell.k`
+    with this branch's two files (nt 4 = nt 2, the threads read in both
+    files): 92 -> 18 + 11 127 cycles, file 2 restarting at cycle 0 at t
+    0.01 from `ie_shell_0001_0001.rst`; END IE -99.87 -> -4.54 %, KE -100.0
+    -> +248.43 % (LS's end KE is 1.9 % of its peak); IE at the fifths of
+    t_end 0.025 -1.52 / +1.17 / -41.73 / +84.55 / -4.54 % (the last row of
+    each printed time); RMS 58.96 / 58.79 -> 12.07 / 12.04 % of the LS peak
+    over the 320 LS times (the campaign scorer, both engine `.out`s); the
+    post-release energy +0.09 % and the 0.270 / 0.239 ms lead at the tip
+    minima are the round-8 pre-research arms'. The synthetic strip of the
+    tests runs the same way (nt 4: 22 + 10 259 cycles, both NORMAL). Unmeasured
+    and named in the warning: an implicit dynamic segment after an explicit
+    one. Default bytes: 0 movers (ie_shell SHA-identical; its sentence gains
+    the opt-in's tail). Reach 1 key / 1 model.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

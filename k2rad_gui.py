@@ -132,6 +132,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          elastic_fluid_cp_cutoff: bool = True,
                          implicit_stub_with_type25: bool = False,
                          shell_in_solid_coupling: bool = False,
+                         imflag_curve_restart: bool = False,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -324,6 +325,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["shell_in_solid_coupling"] = bool(shell_in_solid_coupling)
 
+    kwargs["imflag_curve_restart"] = bool(imflag_curve_restart)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -480,6 +483,7 @@ class ConverterGUI:
         self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
         self.implicit_stub_with_type25 = tk.BooleanVar(value=False)
         self.shell_in_solid_coupling = tk.BooleanVar(value=False)
+        self.imflag_curve_restart = tk.BooleanVar(value=False)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1058,6 +1062,13 @@ class ConverterGUI:
             variable=self.shell_in_solid_coupling).grid(
                 row=61, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="IMFLAG < 0 curve: one engine file per implicit / explicit "
+                     "segment (run them in order) - OFF. ie_shell END IE -99.9 "
+                     "-> -4.5 %",
+            variable=self.imflag_curve_restart).grid(
+                row=62, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1333,6 +1344,7 @@ class ConverterGUI:
                 elastic_fluid_cp_cutoff=self.elastic_fluid_cp_cutoff.get(),
                 implicit_stub_with_type25=self.implicit_stub_with_type25.get(),
                 shell_in_solid_coupling=self.shell_in_solid_coupling.get(),
+                imflag_curve_restart=self.imflag_curve_restart.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1410,7 +1422,13 @@ class ConverterGUI:
     def _show_result(self, result) -> None:
         self._last_out_dir = str(Path(result.starter_path).resolve().parent)
         self._append(f"\n  Starter -> {result.starter_path}\n")
-        self._append(f"  Engine  -> {result.engine_path}\n")
+        # round 8, B3 (h.2): every engine file, in run order
+        paths = getattr(result, "engine_paths", None) or [result.engine_path]
+        for p in paths:
+            self._append(f"  Engine  -> {p}\n")
+        if len(paths) > 1:
+            self._append("  Run the engine files IN ORDER from one directory "
+                         "(each restarts from the previous run's .rst).\n")
         if getattr(result, "log_path", None):
             self._append(f"  Log     -> {result.log_path}\n")
         if result.skipped_keywords:
@@ -1561,6 +1579,9 @@ class ConverterGUI:
         if kwargs.get("shell_in_solid_coupling"):
             bits.append("*CONSTRAINED_SHELL_IN_SOLID coupled as /INTER/TYPE18 "
                         "(--shell-in-solid-coupling)")
+        if kwargs.get("imflag_curve_restart"):
+            bits.append("one engine file per IMFLAG segment "
+                        "(--imflag-curve-restart)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

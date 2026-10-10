@@ -5886,7 +5886,10 @@ KE 0 against the reference's 149.9 — a **status-only** promotion (its
 `IMFLAG −9` implicit/explicit switching curve is not converted — named by a
 warning since round 7: OpenRadioss fixes the solution method per engine file,
 `freimpl.F:82` / `:127-129`, so the deck runs implicit throughout; the
-IMFLAG 2 / 4 / 5 / 6 forms get the same named sentence). A card that
+IMFLAG 2 / 4 / 5 / 6 forms get the same named sentence; since round 8 the
+opt-in
+[`--imflag-curve-restart`](#--imflag-curve-restart--one-engine-file-per-imflag-segment)
+writes one engine file per segment instead). A card that
 STATES an ECTOL ≥ 1 beside the zeros is named: that value is LS-DYNA's own,
 not its default, and a relative tolerance ≥ 1 is not carried. A deck with no
 `*CONTROL_IMPLICIT_SOLUTION` at all keeps `2 2 0.01`.
@@ -6908,6 +6911,33 @@ density half fails on both `*CONSTRAINED_LAGRANGE_IN_SOLID` void hosts (bird_B
 stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its
 run in 600 s), so the density is written only on a shell-in-solid host — the
 CLIS decks are byte-identical under the flag.
+
+### `--imflag-curve-restart` — one engine file per IMFLAG segment
+
+`*CONTROL_IMPLICIT_GENERAL` IMFLAG < 0 names a curve that switches the solution
+method in time (LS-DYNA switches inside one run, Vol I R17 p.12-321 / p.12-323
+Remark 1). OpenRadioss fixes the method per ENGINE FILE (`freimpl.F:82`,
+`:127-129`: implicit iff the file holds an `/IMPL` card), so by default such a
+deck is emitted implicit throughout and named. `--imflag-curve-restart`
+(opt-in, round 8) writes ONE ENGINE FILE PER SEGMENT of the curve
+(`<stem>_0001.rad`, `<stem>_0002.rad`, …; `ConversionResult.engine_paths` lists
+them in run order): each carries `/RUN/<title>/k` to its segment's end, the
+`/IMPL` block only in an implicit segment, the deck's `/DT` cards only in an
+explicit one, and `/RFILE/OFF` only in the last file — run k restarts from the
+`<stem>_<k-1>_0001.rst` that run k-1 wrote (`radioss2.F:817-830`), so the files
+must be run IN ORDER from ONE directory (the starter is the implicit one
+throughout; with the run-openradioss skill: `-Both` on `_0000.rad`, then
+`-Deck <stem>_0002.rad`, and so on). A one-segment curve, an all-explicit
+curve, IMFLAG 2 / 4 / 5 / 6 and a modal deck keep the single file. MEASURED on
+`implicit/basic-examples/impl-expl-switch/ie_shell.k` (nt 4 = nt 2): NORMAL in
+18 + 11 127 cycles where the single implicit file took 92; against LS-DYNA at
+t 0.025 internal energy −99.87 → −4.54 %, kinetic −100.0 → +248.43 % (LS's end
+KE is 1.9 % of its peak); internal energy at the fifths −1.52 / +1.17 / −41.73
+/ +84.55 / −4.54 % (the last row of each printed time); RMS 58.96 / 58.79 →
+12.07 / 12.04 % of the LS peak over the 320 LS times. Not measured on any deck:
+an implicit DYNAMIC segment after an explicit one; an implicit STATIC segment
+after an explicit one drops the explicit kinetic energy (a coupon: KE 316.1 →
+0); more than 9 segments (the skill's deck pattern stops at `_0009`).
 
 ---
 

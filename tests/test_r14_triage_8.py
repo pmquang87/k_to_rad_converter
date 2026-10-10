@@ -3588,6 +3588,262 @@ class ShellInSolidCoupling(unittest.TestCase):
         self.assertEqual(_hyd_visc(s_on, 1)[0], _f(1.0e-9))
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B3 (h.2) — --imflag-curve-restart: one engine file per IMFLAG segment
+# ═════════════════════════════════════════════════════════════════════════════
+
+_IE_POINTS = ((0.0, 1.0), (0.00999, 1.0), (0.01, 0.0), (1.0, 0.0))
+
+
+def _ie_strip_deck(curve_pts=_IE_POINTS, endtim: float = 0.025,
+                   dt0: float = 5.0e-4, timestep: bool = False,
+                   sfa: float = 1.0, imflag: int = -9) -> str:
+    """ie_shell's shape, by hand (no repo copy of the LS-DYNA example): a 10
+    x 1 strip of 10 mm shells (22 nodes, ELFORM 16, t 1, *MAT_ELASTIC) on
+    x 0..100, its root edge (x 0) held by *NODE TC 7 / RC 7, a
+    *LOAD_NODE_POINT on the two tip nodes along z with curve 98 = ie_shell's
+    (0, 0) (0.01, 5) (0.01001, 0) (1, 0); *CONTROL_IMPLICIT_GENERAL IMFLAG
+    *imflag* DT0 *dt0* (IMFORM 2, NSBS 1, IGS 2 as ie_shell) and ie_shell's
+    *CONTROL_IMPLICIT_SOLUTION NSOLVR 12 / NLNORM 2 (without them the
+    converted /IMPL/NONLIN's Itol 2 diverges on this strip from cycle 0 -
+    measured, the B3 evidence), curve 9 = *curve_pts* (SFA *sfa*), ENDTIM
+    *endtim*, and *CONTROL_TIMESTEP DT2MS -1e-6 when *timestep*."""
+    out = ["*KEYWORD", "*TITLE", "ie strip", "*CONTROL_TERMINATION",
+           _row(endtim), "*CONTROL_IMPLICIT_GENERAL",
+           _row(imflag, dt0, 2, 1, 2),
+           "*CONTROL_IMPLICIT_SOLUTION", _row(12), _row(0, 1, 0, 0, 2)]
+    if timestep:
+        out += ["*CONTROL_TIMESTEP", _row(0.0, 0.9, 0, 0.0, -1.0e-6)]
+    out.append("*NODE")
+    for j in range(2):
+        for i in range(11):
+            nid = 1 + i + 11 * j
+            tail = f"{7:>8}{7:>8}" if i == 0 else ""
+            out.append(f"{nid:>8}{10.0 * i:>16.4f}{10.0 * j:>16.4f}"
+                       f"{0.0:>16.4f}" + tail)
+    out.append("*ELEMENT_SHELL")
+    for i in range(10):
+        out.append("".join(f"{v:>8}" for v in (
+            i + 1, 1, 1 + i, 2 + i, 13 + i, 12 + i)))
+    out += ["*PART", "strip", _row(1, 1, 1),
+            "*SECTION_SHELL", _row(1, 16), _row(1.0, 1.0, 1.0, 1.0),
+            "*MAT_ELASTIC", _row(1, 7.85e-9, 210000.0, 0.3),
+            "*LOAD_NODE_POINT", _row(11, 3, 98, 1.0), _row(22, 3, 98, 1.0),
+            "*DEFINE_CURVE", _row(98)]
+    out += [f"{x:>20}{y:>20}" for x, y in
+            ((0.0, 0.0), (0.01, 5.0), (0.01001, 0.0), (1.0, 0.0))]
+    out += ["*DEFINE_CURVE", _row(9, 0, sfa)]
+    out += [f"{x:>20}{y:>20}" for x, y in curve_pts]
+    out.append("*END")
+    return "\n".join(out) + "\n"
+
+
+def _convert_files(deck: str, **kw):
+    """convert() a deck; return (result, starter, [engine texts in run
+    order])."""
+    import tempfile
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "deck.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    res = convert(path, write_log=False, **kw)
+    with open(res.starter_path) as fh:
+        starter = fh.read()
+    engines = []
+    for p in res.engine_paths:
+        with open(p) as fh:
+            engines.append(fh.read())
+    names = [os.path.basename(p) for p in res.engine_paths]
+    tmp.cleanup()
+    return res, starter, engines, names
+
+
+from k2rad import convert  # noqa: E402
+
+#: the two engine files of the strip deck under the flag, as the
+#: implementation writes them (pinned on the round-8 branch)
+_IE_STRIP_PINS = (
+    "6795df969a38908f5639ed2d0131608d735e4a338986292bb9b2550f2f285701",
+    "77a88e5d53781e2477c8b9b3cf107c0c1df0ca587edb9a98470fb8788f840da4")
+
+
+class ImflagCurveRestart(unittest.TestCase):
+    """B3 (h.2): --imflag-curve-restart writes an IMFLAG < 0 deck whose curve
+    switches the method as ONE ENGINE FILE PER SEGMENT; the flag off (the
+    default) is the single implicit file of 4f5b6e8."""
+
+    def test_segments_through_the_restart_rule(self):
+        from k2rad.writer.assembly import imflag_restart_segments
+        st = _dispatch(_ie_strip_deck())
+        self.assertEqual(imflag_restart_segments(st), [])
+        st.options.imflag_curve_restart = True
+        segs = imflag_restart_segments(st)
+        self.assertEqual([(s.run, s.t_stop, s.implicit, s.last,
+                           s.first_implicit) for s in segs],
+                         [(1, 0.01, True, False, True),
+                          (2, 0.025, False, True, False)])
+
+    def test_two_files_under_the_flag(self):
+        res, s_on, eng, names = _convert_files(_ie_strip_deck(),
+                                               imflag_curve_restart=True)
+        _r0, s_off, eng_off, names_off = _convert_files(_ie_strip_deck())
+        self.assertEqual(names, ["deck_0001.rad", "deck_0002.rad"])
+        self.assertEqual(names_off, ["deck_0001.rad"])
+        self.assertEqual(s_on, s_off)
+        f1, f2 = (e.splitlines() for e in eng)
+        self.assertEqual(f1[:2], ["/RUN/ie_strip/1", "0.01"])
+        self.assertNotIn("/RFILE/OFF", f1)
+        self.assertIn("/IMPL/NONLIN/1", f1)
+        self.assertEqual(f1[f1.index("/IMPL/DTINI") + 1].strip(), "0.0005")
+        self.assertEqual(f2[:2], ["/RUN/ie_strip/2", "0.025"])
+        self.assertIn("/RFILE/OFF", f2)
+        self.assertFalse([ln for ln in f2 if ln.startswith("/IMPL")])
+        self.assertEqual((_sha(eng[0]), _sha(eng[1])), _IE_STRIP_PINS)
+        # the flag-off file is the single implicit one, ENDTIM and all
+        self.assertEqual(eng_off[0].splitlines()[:4],
+                         ["/RUN/ie_strip/1", "0.025", "#", "/RFILE/OFF"])
+
+    def test_explicit_first_curve(self):
+        pts = ((0.0, 0.0), (0.00999, 0.0), (0.01, 1.0), (1.0, 1.0))
+        _r, _s, eng, _n = _convert_files(_ie_strip_deck(pts, timestep=True),
+                                         imflag_curve_restart=True)
+        f1, f2 = eng
+        self.assertNotIn("/IMPL", f1)
+        self.assertNotIn("/RFILE/OFF", f1)
+        self.assertIn("/DT/NODA/CST/0", f1)
+        self.assertIn("/IMPL/NONLIN/1", f2)
+        self.assertIn("/RFILE/OFF", f2)
+        self.assertNotIn("/DT/NODA/CST", f2)
+
+    def test_three_segments(self):
+        pts = ((0.0, 1.0), (0.00499, 1.0), (0.005, 0.0), (0.00999, 0.0),
+               (0.01, 1.0), (1.0, 1.0))
+        res, _s, eng, names = _convert_files(_ie_strip_deck(pts),
+                                             imflag_curve_restart=True)
+        self.assertEqual(len(eng), 3)
+        self.assertEqual(["/RFILE/OFF" in e for e in eng],
+                         [False, False, True])
+        self.assertEqual(["/IMPL/NONLIN" in e for e in eng],
+                         [True, False, True])
+        self.assertEqual([e.splitlines()[1] for e in eng],
+                         ["0.005", "0.01", "0.025"])
+        # the per-deck warnings print once, not once per file
+        self.assertEqual(len(res.warnings), len(set(res.warnings)))
+        hits = [w for w in res.warnings if "IAUTO" in w]
+        self.assertLessEqual(len(hits), 1, hits)
+        # two EXPLICIT segments build the /DT cards twice; the deck's
+        # *CONTROL_TIMESTEP sentence still prints once (mutation target:
+        # the de-duplication in build_engines)
+        pts2 = ((0.0, 0.0), (0.00499, 0.0), (0.005, 1.0), (0.00999, 1.0),
+                (0.01, 0.0), (1.0, 0.0))
+        r2, _s2, eng2, _n2 = _convert_files(_ie_strip_deck(pts2,
+                                                           timestep=True),
+                                            imflag_curve_restart=True)
+        self.assertEqual(["/DT/NODA/CST/0" in e for e in eng2],
+                         [True, False, True])
+        self.assertEqual(len(r2.warnings), len(set(r2.warnings)),
+                         r2.warnings)
+
+    def test_sfa_scales_the_boundary(self):
+        """The curve's points are scaled at parse time (SFA 2: the switch at
+        0.01 becomes 0.02)."""
+        from k2rad.writer.assembly import imflag_restart_segments
+        st = _dispatch(_ie_strip_deck(sfa=2.0))
+        st.options.imflag_curve_restart = True
+        self.assertEqual([(s.t_stop, s.implicit)
+                          for s in imflag_restart_segments(st)],
+                         [(0.02, True), (0.025, False)])
+
+    def test_one_segment_is_todays_file(self):
+        cases = (("constant 1", ((0.0, 1.0), (1.0, 1.0))),
+                 ("switch at ENDTIM", ((0.0, 1.0), (0.025, 0.0))),
+                 ("constant 0", ((0.0, 0.0), (1.0, 0.0))))
+        for name, pts in cases:
+            with self.subTest(case=name):
+                deck = _ie_strip_deck(pts)
+                r_on, s_on, e_on, n_on = _convert_files(
+                    deck, imflag_curve_restart=True)
+                _r, s_off, e_off, _n = _convert_files(deck)
+                self.assertEqual(n_on, ["deck_0001.rad"])
+                self.assertEqual((s_on, e_on), (s_off, e_off))
+                if name == "constant 0":
+                    self.assertTrue(_has(r_on.warnings, "state IMFLAG 0"))
+
+    def test_flag_off_is_byte_identical(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "fixtures", "implicit_qstat.k")) as fh:
+            qstat = fh.read()
+        for name, deck in (("implicit_qstat", qstat),
+                           ("IMFLAG 4", _ie_strip_deck(imflag=4))):
+            with self.subTest(deck=name):
+                _r1, s1, e1, n1 = _convert_files(deck,
+                                                 imflag_curve_restart=True)
+                _r0, s0, e0, n0 = _convert_files(deck)
+                self.assertEqual((s1, e1, n1), (s0, e0, n0))
+                self.assertEqual(len(n1), 1)
+
+    def test_the_warning_names_the_order_and_the_unmeasured_branches(self):
+        res, _s, _e, _n = _convert_files(_ie_strip_deck(),
+                                         imflag_curve_restart=True)
+        hits = [w for w in res.warnings if "IMFLAG=-9" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("_0001.rad (implicit to 0.01, restart written)",
+                       "_0002.rad (explicit to 0.025)", "run k restarts",
+                       "IN ORDER", "implicit DYNAMIC segment after an "
+                       "explicit one", "KE 316.1 -> 0", "_0009",
+                       "18 + 11 127 cycles", "-4.54 %", "12.07 / 12.04 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("IMPLICIT THROUGHOUT", hits[0])
+        r0, _s0, _e0, _n0 = _convert_files(_ie_strip_deck())
+        hits0 = [w for w in r0.warnings if "IMFLAG=-9" in w]
+        self.assertEqual(len(hits0), 1, r0.warnings)
+        self.assertIn("IMPLICIT THROUGHOUT", hits0[0])
+        self.assertIn("--imflag-curve-restart writes one engine file per "
+                      "segment", hits0[0])
+
+    def test_write_restart_keeps_every_rst(self):
+        _r, _s, eng, _n = _convert_files(_ie_strip_deck(),
+                                         imflag_curve_restart=True,
+                                         write_restart=True)
+        self.assertEqual(len(eng), 2)
+        self.assertFalse(any("/RFILE/OFF" in e for e in eng))
+
+    def test_conversion_log_and_cli_list_every_file(self):
+        import contextlib
+        import io
+        import tempfile
+        from k2rad import cli
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "strip.k")
+        with open(path, "w") as fh:
+            fh.write(_ie_strip_deck())
+        res = convert(path, imflag_curve_restart=True)
+        with open(res.log_path, encoding="utf-8") as fh:
+            log = fh.read()
+        self.assertIn("_0000.rad / strip_0001.rad / strip_0002.rad", log)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.main([path, "--imflag-curve-restart"])
+        printed = buf.getvalue()
+        self.assertEqual(printed.count("  Engine  -> "), 2, printed)
+        self.assertIn("Run the engine files IN ORDER", printed)
+
+    def test_build_engine_direct_caller_unchanged(self):
+        from k2rad.writer.assembly import build_engine, build_starter
+        for flag in (False, True):
+            with self.subTest(flag=flag):
+                st = _dispatch(_ie_strip_deck())
+                st.options.imflag_curve_restart = flag
+                build_starter(st)
+                text = build_engine(st)
+                self.assertEqual(text.splitlines()[:4],
+                                 ["/RUN/ie_strip/1", "0.025", "#",
+                                  "/RFILE/OFF"])
+                self.assertIn("/IMPL/NONLIN/1", text)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3602,8 +3858,12 @@ class Round8OptInWiringB(unittest.TestCase):
     _OPT_IN = {
         "--implicit-stub-with-type25": "implicit_stub_with_type25",
         "--shell-in-solid-coupling": "shell_in_solid_coupling",
+        "--imflag-curve-restart": "imflag_curve_restart",
     }
     _HELP_FIGURES = {
+        "--imflag-curve-restart": ("freimpl.F:82", "18 + 11 127 cycles",
+                                   "-99.87 -> -4.54 %",
+                                   "58.96 / 58.79 -> 12.07 / 12.04 %"),
         "--implicit-stub-with-type25": ("+582.00 -> +689.08 %",
                                         "393.31 -> 313.05 %",
                                         "imp_int_k.F:847"),

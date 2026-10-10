@@ -425,6 +425,7 @@ from .assembly import (
     _make_engine_restart,
     _make_engine_timestep,
     build_engine,
+    build_engines,
 )
 __all__ = [
     "HDR",
@@ -787,4 +788,5 @@ __all__ = [
     "_make_engine_restart",
     "_make_engine_timestep",
     "build_engine",
+    "build_engines",
 ]

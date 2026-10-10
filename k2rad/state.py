@@ -6255,6 +6255,21 @@ class ControlSolid:
 
 
 @dataclass
+class EngineSegment:
+    """One engine file of an IMFLAG < 0 deck under ``--imflag-curve-restart``
+    (R14 triage round 8, B3 h.2): ``run`` = its number (1..N, the
+    ``<stem>_000k.rad`` and the ``/RUN/<title>/k``), ``t_stop`` = its
+    ``/RUN`` end, ``implicit`` = the segment's method, ``last`` = run N (the
+    only file with ``/RFILE/OFF`` and ``/DYNAIN``), ``first_implicit`` = the
+    first implicit segment (the implicit warnings print once)."""
+    run: int
+    t_stop: float
+    implicit: bool
+    last: bool
+    first_implicit: bool
+
+
+@dataclass
 class ControlImplicitGeneral:
     # 0 explicit, 1 implicit, 2 explicit then one implicit step, 4 / 5
     # implicit with automatic implicit -> explicit switching, 6 explicit with
@@ -8148,6 +8163,11 @@ class ConvertOptions:
     # /INTER/TYPE18 (Stfval = 0.1 K A^2 / V) + the void density on an
     # *INITIAL_VOID host (B10, round 8; opt-in: one carrier).
     shell_in_solid_coupling: bool = False
+    # --imflag-curve-restart: an IMFLAG < 0 deck whose curve switches the
+    # method gets ONE ENGINE FILE PER SEGMENT (OpenRadioss fixes the method
+    # per engine file, freimpl.F:82); run them in order from one directory
+    # (R14 triage round 8, B3 h.2).
+    imflag_curve_restart: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8939,6 +8959,11 @@ class ConversionState:
     # (its sentence is printed once).
     implicit_general_imflag_nonzero: bool = False
     imflag0_eigen_explicit_route: bool = False
+    # R14 triage round 8, B3 (h.2): the engine file BEING BUILT under
+    # --imflag-curve-restart (writer/assembly.build_engines sets it per
+    # segment and clears it after); None = the one engine file of every
+    # other deck. An engine-build context, never set by a handler.
+    engine_segment: Optional["EngineSegment"] = None
     _auto_id: int = 90001               # counter for auto-generated IDs
     # Unit system written to the /BEGIN header (mass, length, time).
     # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
