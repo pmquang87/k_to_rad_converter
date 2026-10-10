@@ -4209,6 +4209,34 @@ _REPLACEMENTS_ROUND_8_B = (
 )
 
 
+class NodalMassMemoIsPerState(unittest.TestCase):
+    """The --mass-weighted-inivel lumped masses are memoised ON the state:
+    the old module dict keyed by id(state) returned a freed state's masses
+    to a new state (CPython reuses ids; 53 of 150 alternating conversions
+    wrote the other deck's /INIVEL/TRA)."""
+
+    def test_the_memo_lives_on_the_state(self):
+        from k2rad.writer import loads
+        self.assertFalse(hasattr(loads, "_NODAL_MASS_CACHE"))
+        st = _dispatch(_plates(_emass(9, 1.0e-4)))
+        self.assertIsNone(st.lumped_nodal_masses_memo)
+        got = loads._lumped_nodal_masses(st)
+        self.assertIs(st.lumped_nodal_masses_memo, got)
+        self.assertIs(loads._lumped_nodal_masses(st), got)
+
+    def test_alternating_conversions_keep_their_own_masses(self):
+        mc = 1.9625e-7
+        v_cm = mc * 1000.0 / (3.14e-6 + 1.0e-4)
+        deck_y = _plates(_emass(9, 1.0e-4) + _IV_PROBE)
+        deck_x = _plates(_emass(9, 5.0e-4) + _IV_PROBE)
+        for i in range(30):
+            _convert(deck_x, mass_weighted_inivel=True)
+            _r, starter, _e = _convert(deck_y, mass_weighted_inivel=True)
+            tra, _rot = _inivel_mw(starter)
+            self.assertAlmostEqual(tra[0] / v_cm, 1.0, places=6,
+                                   msg=f"iteration {i}")
+
+
 class Round8RetractedStatementsB(unittest.TestCase):
     """B12.6, the round-7 four-test shape: no retracted spelling in any
     shipped text; the guard fires on a spelling split across adjacent

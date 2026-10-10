@@ -6946,13 +6946,6 @@ _MassWeightedBody = Tuple[int, Tuple[float, float, float],
                           Tuple[float, float, float]]
 
 
-#: Cache for the model's lumped nodal masses, keyed by the state object's id.
-#: The lumper walks every element, so a card-by-card re-walk would be O(cards x
-#: elements); one pass per conversion is enough because nothing between the
-#: /INIVEL writers changes the mesh.
-_NODAL_MASS_CACHE: Dict[int, Tuple[Dict[int, float], float]] = {}
-
-
 def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
                                                           float]:
     """``(mass by node, the model's total lumped mass)``, computed once.
@@ -6963,14 +6956,23 @@ def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
     ``k2rad.lumping`` imports ``writer.beams`` and ``writer.materials``, and a
     module-level import here would put the writer package in a cycle with
     itself.
+
+    The lumper walks every element, so the result is memoised ON the state
+    (``state.lumped_nodal_masses_memo``): one pass per conversion, since
+    nothing between the /INIVEL writers changes the mesh. It used to live
+    in a module dict keyed by ``id(state)`` that was never cleared - CPython
+    reuses the id of a freed state, so a later conversion in the same
+    process (the GUI, the test suite, a script calling ``convert()`` in a
+    loop) could read an EARLIER model's masses: measured, 53 of 150
+    alternating conversions of two element-mass variants wrote the other
+    deck's /INIVEL/TRA.
     """
-    key = id(state)
-    got = _NODAL_MASS_CACHE.get(key)
+    got = state.lumped_nodal_masses_memo
     if got is None:
         from ..lumping import nodal_masses_from_state
         mass, _inertia = nodal_masses_from_state(state)
         got = (mass, math.fsum(mass.values()))
-        _NODAL_MASS_CACHE[key] = got
+        state.lumped_nodal_masses_memo = got
     return got
 
 

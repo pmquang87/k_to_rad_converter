@@ -9723,6 +9723,12 @@ class ConversionState:
     # /PROP/SOLID ids whose h the F1 guard divided (its sentence prints once
     # per prop).
     mat_null_h_guarded_props: Set[int] = field(default_factory=set)
+    # writer/loads._lumped_nodal_masses' memo: (mass by node, the model's
+    # total lumped mass), one lumping pass per conversion. Kept on the
+    # state - a module dict keyed by id(state) handed a freed state's
+    # masses to a new one (CPython reuses ids).
+    lumped_nodal_masses_memo: Optional[
+        Tuple[Dict[int, float], float]] = None
     # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
     # order (round 6, A4). Refused BY NAME and never converted: kept only so
     # writer/loads._make_tied_nodes_failure_notes can write ONE warning per
