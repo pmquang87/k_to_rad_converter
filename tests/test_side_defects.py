@@ -1653,7 +1653,12 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
         from the eids directly rather than from a part scope
         (``_resolve_contact_master``), so it allocates its own /GRSHEL/SHEL and
         /GRSH3N/SH3N — through the guarded allocator, because a deck stating a
-        *SET_SHELL puts a group of that number in the element-set registry."""
+        *SET_SHELL puts a group of that number in the element-set registry.
+
+        21 -> 22 with R14 triage round 8 (B10): the opt-in
+        ``--shell-in-solid-coupling`` writes its ALE host as a second
+        /GRBRIC/PART (``blast_ale._make_shell_in_solid_coupling``), through
+        the guarded allocator like the FSI one."""
         import re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
@@ -1663,7 +1668,7 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
                 # Skip prose: only count real call sites.
                 if re.search(r"state\.next_elem_group_id\(\)", ln):
                     n += 1
-        self.assertEqual(n, 21)
+        self.assertEqual(n, 22)
 
 
 class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):

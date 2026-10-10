@@ -2750,13 +2750,46 @@ class ShellInSolidCard:
     (Vol I R17 p.10-179; SHSTYP / SSTYP 0 = a *SET_PART id, 1 = a *PART
     id), ``coupid`` the ``_ID`` heading's COUPID (0 when absent). Kept only so
     ``writer/blast_ale._make_shell_in_solid_notes`` can write ONE named
-    warning per deck; the keyword itself stays in ``skipped_keywords``."""
+    warning per deck; the keyword itself stays in ``skipped_keywords``.
+    Round 8 (B10) also reads card 2 - ``START`` (cols 1-10), ``END`` (11-20)
+    and ``PSSF`` (51-60), defaults 0 / 1e20 / 0.1 (Vol I R17 p.10-180/181) -
+    and the keyword spelling, for ``--shell-in-solid-coupling``."""
     coupid: int
     shsid: int
     ssid: int
     shstyp: int = 0
     sstyp: int = 0
     penalty: bool = False
+    start: float = 0.0
+    end: float = 1.0e20
+    pssf: float = 0.1
+    keyword: str = "CONSTRAINED_SHELL_IN_SOLID"
+
+
+@dataclass
+class ShellInSolidPlan:
+    """One ``*CONSTRAINED_SHELL_IN_SOLID`` card CONVERTED under
+    ``--shell-in-solid-coupling`` (R14 triage round 8, B10): decided ONCE by
+    ``writer/blast_ale._resolve_shell_in_solid`` (a ``build_starter``
+    prepass, before the materials and the parts are written), read by the
+    ``/INTER/TYPE18`` writer, the materials writer (the void density cells)
+    and the ``/PART`` writer (a copy MID). ``fraction`` is 0.1 for the
+    constraint form, PSSF for ``_PENALTY``; ``k_host`` the host's bulk
+    modulus (RO C^2 or C1); ``a_seg`` / ``v_host`` the mean shell-segment area
+    and the mean host-brick volume; ``void_parts`` the ``*INITIAL_VOID`` host
+    parts that get the void density."""
+    card: ShellInSolidCard
+    shell_pids: List[int]
+    host_pids: List[int]
+    fraction: float
+    k_host: float
+    a_seg: float
+    v_host: float
+    stfval: float
+    gap: float
+    tstart: float
+    tstop: float
+    void_parts: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -2790,6 +2823,9 @@ class ControlAle:
     """
     meth: int = 1
     afac: float = 0.0
+    # card 2 field 4 (round 8, B10): the void density factor, default 1e-6
+    # (Vol I R17 *CONTROL_ALE); read only by --shell-in-solid-coupling
+    vfact: float = 1.0e-6
 
 
 @dataclass
@@ -8108,6 +8144,10 @@ class ConvertOptions:
     # doorbeam (nt 4 = nt 2): END +582.00 -> +689.08 % with RMS 393.31 ->
     # 313.05 % - MIXED.
     implicit_stub_with_type25: bool = False
+    # --shell-in-solid-coupling: write *CONSTRAINED_SHELL_IN_SOLID as
+    # /INTER/TYPE18 (Stfval = 0.1 K A^2 / V) + the void density on an
+    # *INITIAL_VOID host (B10, round 8; opt-in: one carrier).
+    shell_in_solid_coupling: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9663,11 +9703,23 @@ class ConversionState:
     tied_nodes_failures: List[Tuple[int, float, int, int]] = field(
         default_factory=list)
     # *CONSTRAINED_SHELL_IN_SOLID[_PENALTY] cards in deck order (round 7,
-    # B5). Never converted (OpenRadioss has no embedded-shell constraint):
-    # kept only so writer/blast_ale._make_shell_in_solid_notes can write ONE
-    # named warning per deck. The keyword itself stays in skipped_keywords.
+    # B5). Not converted by default (OpenRadioss has no embedded-shell
+    # constraint): kept so writer/blast_ale._make_shell_in_solid_notes can
+    # write ONE named warning per deck. The keyword stays in skipped_keywords
+    # unless --shell-in-solid-coupling converts the card (round 8, B10).
     shell_in_solid_cards: List[ShellInSolidCard] = field(
         default_factory=list)
+    # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
+    # not yet resolved; else the converted cards
+    # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.
+    shell_in_solid_plan: Optional[List[ShellInSolidPlan]] = None
+    # ... and what it decides for the materials and the parts: the void
+    # density cells per written /MAT/HYD_VISC id (mid -> (RHO_I, the /EOS
+    # RHO_0)), the copy MIDs (copy -> the original *MAT_NULL mid) and the
+    # void parts re-pointed onto a copy (pid -> copy mid)
+    sis_density: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    sis_copy_mids: Dict[int, int] = field(default_factory=dict)
+    sis_part_mids: Dict[int, int] = field(default_factory=dict)
     # --mass-weighted-inivel: /RBODY main node -> omega, one entry per body
     # the re-point wrote an /INIVEL/ROT on (writer/loads.
     # _emit_mass_weighted_bodies, the ONE decision site). Read by the

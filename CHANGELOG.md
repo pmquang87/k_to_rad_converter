@@ -326,6 +326,36 @@ Prior history (before this changelog was introduced) is summarized in the
     refusing every Spotflag, both sides. 0 movers (B4 never fires on a
     corpus). The 'tied' needle `no Spotflag is exempt` survives on purpose:
     it now closes the new sentence.
+  - **B10 — `*CONSTRAINED_SHELL_IN_SOLID` can be written as an
+    `/INTER/TYPE18` penalty coupling (opt-in `--shell-in-solid-coupling`,
+    default OFF).** OpenRadioss has no embedded-shell constraint; TYPE18 is
+    penalty-only (`i18for3.F:273-290`), so the stiffness is a stated
+    choice: `Stfval = 0.1 x K_host x A_seg^2 / V_host` (LS-DYNA's default
+    coupling fraction of the solid-segment stiffness; PSSF on the
+    `_PENALTY` form, card 2 now read: START / END / PSSF), `Gap` = half the
+    mean host edge, plus — on an `*INITIAL_VOID` host of the card only —
+    the void density (`RHO_I = VFACT x RO` from `*CONTROL_ALE` card 2, now
+    read; the EOS `RHO_0 = RO`; a copy MID when another part shares the
+    `*MAT_NULL`). Every id is drawn after the last refusal screen (a
+    Lagrangian host, another EOS, RO / C <= 0, no shell, START < 0, END <
+    0), and a refused card keeps the default bytes plus one named sentence
+    (each refusal probe and the coupled probe pass the starter at nt 4 with
+    0 errors). Measured on bird-el (nt 4, the only carrier on five
+    corpora): the plate -100 -> -28.26 %, the deck IE +1134.62 -> +42.28 %
+    / KE -92.06 -> -38.13 % (RMS 1102.65 / 162.68 -> 30.51 / 4.88 % of the
+    LS peak), at 8.936x the cycles; insensitive to Stfval x0.5 / x2. Not the
+    default: the density half fails on both `*CONSTRAINED_LAGRANGE_IN_SOLID`
+    void hosts (bird_B stalls on the TYPE18 sort step at t 2.227e-4;
+    quadrature_B reaches 3.6 % of its run in 600 s), so the scope has one
+    member, and the CLIS decks (bird_B, quadrature_B / _C, ale_wavehitcol,
+    forging_B, stagnation_A / _B, cylinder_impact_B and the four Ryan_Lee
+    W12 copies) are byte-identical under the flag. The default warning now
+    quotes this arm instead of round 7's Vref-calibrated ones (+195.21 % /
+    1.016x / 4.506x, and "refuted as a general rule in round 6"). Default
+    bytes: 0 movers (bird-el SHA-identical, its sentence re-texted). Test
+    that moved: `test_r14_triage_7` `ShellInSolidNamed`
+    `test_one_named_warning_and_still_skipped` (its round-7 needles became
+    the flag-OFF text's 2812.5 / -28.26 % / 8.936x / 2.227e-4).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

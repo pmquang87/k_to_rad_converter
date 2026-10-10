@@ -1805,21 +1805,48 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         for mid in null_mids:
             carrier = state.mat_null[mid]
             nu, pmin = cells.get(mid, (0.0, 0.0))
+            # round 8, B10 (--shell-in-solid-coupling): the void density of
+            # an *INITIAL_VOID host of a converted *CONSTRAINED_SHELL_IN_SOLID
+            # - RHO_I = VFACT x RO, the /EOS RHO_0 = RO (empty by default)
+            dens = state.sis_density.get(mid)
             lines += _emit_mat_law6_carrier(
-                mid, carrier.title, carrier.rho, pmin=pmin, nu=nu)
+                mid, carrier.title, dens[0] if dens else carrier.rho,
+                pmin=pmin, nu=nu)
             if mid == eosid:
-                lines += _emit_eos(eos)
+                lines += _emit_eos(_sis_eos(eos, mid, dens)
+                                   if dens else eos)
             else:
                 state.warn(
                     f"{eos.label()}: bound to *MAT_NULL {mid} via "
                     f"a *PART EOSID — emitted as /EOS/{eos.kind}/{mid} on "
                     "the /MAT/LAW6 carrier of that id (Radioss binds an "
                     "/EOS to the material of the SAME id).")
-                lines += _emit_eos(EosCard(eosid=mid, kind=eos.kind,
+                lines += _emit_eos(_sis_eos(eos, mid, dens) if dens else
+                                   EosCard(eosid=mid, kind=eos.kind,
                                            params=eos.params, rho0=eos.rho0,
                                            note=eos.note,
                                            keyword=eos.keyword))
+            # ... and its COPY when a non-void part shares the *MAT_NULL
+            for copy, orig in sorted(state.sis_copy_mids.items()):
+                if orig != mid:
+                    continue
+                cdens = state.sis_density[copy]
+                lines += _emit_mat_law6_carrier(
+                    copy, f"{carrier.title or f'FLUID_{mid}'} (void copy)",
+                    cdens[0], pmin=pmin, nu=nu)
+                lines += _emit_eos(_sis_eos(eos, copy, cdens))
     return lines
+
+
+def _sis_eos(eos: EosCard, mid: int, dens: Tuple[float, float]) -> EosCard:
+    """*eos* re-emitted under material *mid* with its ``RHO_0`` cell = the
+    deck density (round 8, B10: a void host's reference density, so a
+    RHO_I of VFACT x RO does not become the EOS's reference,
+    ``hm_read_mat06.F:155-157`` / ``hm_read_eos_gruneisen.F:117-123``)."""
+    params = dict(eos.params)
+    params["rho0"] = dens[1]
+    return EosCard(eosid=mid, kind=eos.kind, params=params, rho0=eos.rho0,
+                   note=eos.note, keyword=eos.keyword)
 
 
 def _emit_mat_elastic(mat: MatElastic) -> List[str]:

@@ -1069,17 +1069,19 @@ improves under the PC cell alone (+58.98 → +51.91 %, RMS 32.62 → 29.96, thou
 its first fifth worsens +3.20 → −18.98 %). Byte reach: 20 deck keys, 17 emitted
 models (the 3 Nu keys among them); the 4 void-floor keys are byte-identical.
 
-`*CONSTRAINED_SHELL_IN_SOLID` (and `_PENALTY`) → recorded, **not converted**,
-still listed as skipped, with ONE named warning per deck (round 7, 0 bytes, no
-flag): OpenRadioss has no embedded-shell constraint (no radioss2022-2026 CFG
+`*CONSTRAINED_SHELL_IN_SOLID` (and `_PENALTY`) → recorded, **not converted by
+default**, still listed as skipped, with ONE named warning per deck (round 7, 0
+bytes): OpenRadioss has no embedded-shell constraint (no radioss2022-2026 CFG
 card; dyna2rad does not convert it either), so the embedded shells receive
 nothing from the solids they sit in. MEASURED on `bird-el` (1 deck key on 1
-emitted model, nt 4): the plate's IE is 0 against LS-DYNA's 4.9377e5 (−100 %);
-an `/INTER/TYPE18` with a stated `Stfval` 562.5 alone gives the plate +195.21 %
-at 1.016× the cycles, and with the void density as well the deck reads IE
-+37.77 % at 4.506× — neither is written (the density cell was refuted as a
-general rule in round 6, and the `Vref` stiffness is a one-deck calibration).
-`*CONSTRAINED_BEAM_IN_SOLID` stays a plain skipped keyword (reach 0).
+emitted model, nt 4): the plate's IE is 0 against LS-DYNA's 4.9377e5 (−100 %),
+the deck IE +1134.62 % / KE −92.06 % (RMS 1102.65 / 162.68 % of the LS peak).
+Since round 8 the opt-in
+[`--shell-in-solid-coupling`](#--shell-in-solid-coupling--the-embedded-shells-as-an-intertype18-penalty-coupling)
+writes the card as an `/INTER/TYPE18` (Stfval = 0.1 K A² / V) plus the void
+density on an `*INITIAL_VOID` host of the card: the plate −28.26 %, the deck IE
++42.28 % at 8.936× the cycles. `*CONSTRAINED_BEAM_IN_SOLID` stays a plain
+skipped keyword (reach 0).
 
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
 `Bunreacted` 1:1 — Vol II R17 p.2-188 gives the pre-detonation pressure as
@@ -6876,6 +6878,36 @@ the LS peak over the 25 LS blocks in (0, 0.0011]; without it 33 cycles, END
 +689.08 % (worse), RMS 313.05 % (better) — MIXED, both arms 5-13× LS from the
 first fifth (that deviation is the deck's own). `--implicit-stub-with-type25`
 (opt-in) keeps the stub, byte for byte the 4f5b6e8 deck.
+
+### `--shell-in-solid-coupling` — the embedded shells as an /INTER/TYPE18 penalty coupling
+
+`*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]` is not converted by default (see the
+keyword row above). `--shell-in-solid-coupling` (opt-in, round 8) writes each
+card whose shells and ALE host it can resolve as an `/INTER/TYPE18`:
+`/SURF/PART/EXT` over the shell parts, `/GRBRIC/PART` over the host parts
+(ELFORM 11 / 12 on a `*MAT_NULL` with `*EOS_GRUNEISEN` or
+`*EOS_LINEAR_POLYNOMIAL`), Gap = half the mean host edge (the
+`*CONSTRAINED_LAGRANGE_IN_SOLID` rule), Tstart / Tstop from START / END, and a
+CONSTANT stiffness `Stfval = F × K_host × A_seg² / V_host` — TYPE18 is
+penalty-only (`i18for3.F:273-290`, `STIF = STFVAL*PENE/GAP`), so the stiffness
+is a stated choice: the solid-segment stiffness `K A² / V` (for a cube cell
+`RO c² h`, the one-step critical stiffness of a full-density host node) times
+LS-DYNA's own default coupling fraction 0.1 (PSSF on the `_PENALTY` form). When
+a host part is an `*INITIAL_VOID` part of the card, its `/MAT/HYD_VISC` gets
+`RHO_I = VFACT × RO` (`*CONTROL_ALE` VFACT, default 1e-6) and its `/EOS` the
+`RHO_0 = RO` cell (`hm_read_mat06.F:155-157`, `hm_read_eos_gruneisen.F:117-123`);
+a host `*MAT_NULL` another part shares gets a copy. A card it cannot resolve
+(a Lagrangian host, another EOS, RO / C ≤ 0, no shell, START < 0, END < 0)
+keeps the skip with a named reason. MEASURED on
+`intro-by-j.-day/misc/bird-ale/bird-el.k` (nt 4; Stfval 2812.5, Gap 6.25): the
+plate's IE −100 % → −28.26 % against LS-DYNA (RMS 83.14 → 24.53 %), the deck END
+IE +1134.62 → +42.28 % / KE −92.06 → −38.13 % (RMS 1102.65 / 162.68 → 30.51 /
+4.88 % of the LS peak), at 8.936× the cycles (the step falls to a void node);
+Stfval × 0.5 / × 2 moves the plate by under 1 point. Not the default: the
+density half fails on both `*CONSTRAINED_LAGRANGE_IN_SOLID` void hosts (bird_B
+stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its
+run in 600 s), so the density is written only on a shell-in-solid host — the
+CLIS decks are byte-identical under the flag.
 
 ---
 

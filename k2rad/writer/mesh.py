@@ -1748,6 +1748,10 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # SPH-declared and one /MAT id cannot be two laws (writer/sph.py
         # ::_resolve_sph_materials). Empty on every other deck.
         mat_ref = state.sph_mat_ids.get(pid, part.mid)
+        # round 8, B10 (--shell-in-solid-coupling): an *INITIAL_VOID host
+        # whose *MAT_NULL another part shares points at the void copy (empty
+        # by default)
+        mat_ref = state.sis_part_mids.get(pid, mat_ref)
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",

@@ -2241,16 +2241,17 @@ that decided it and the deck that would decide it next.
    1616 = 1616 cycles, END +4.50 % on both arms (round 8) —, `bird_A`,
    `bird_B`).
 2. **The `*CONSTRAINED_SHELL_IN_SOLID` → `/INTER/TYPE18` EMISSION** (round-6
-   item 2; B5 names the card): the coupling alone with a stated `Stfval` 562.5
-   (= Vref² RO A / Gap) trades the plate's −100 % for +195.21 % (RMS 144.85)
-   at 1.016× cycles; with the void density (RHO_I 1e-15, with the
-   `/EOS/GRUNEISEN` RHO_0 cell stated as 1e-9, the deck's density) the deck reads +37.77
-   / −34.27 %, the plate −30.29 % (RMS 27.33) at 4.506× cycles and an energy
-   error of −35.3 %; the `Vref` stiffness is a one-deck calibration (a host
-   with no initial velocity gets 0); nobody has measured the density + a
-   stated stiffness on `bird_B` / `quadrature_B`. An opt-in
-   `--shell-in-solid-coupling` could follow that measurement. 1 key / 1 model
-   (`bird-el`); `*CONSTRAINED_BEAM_IN_SOLID`: reach 0, a plain skip.
+   item 2; B5 names the card): the coupling needs a stated stiffness (TYPE18
+   is penalty-only) and, on `bird-el`, the void density. Measured in round 8
+   with the deck rule `Stfval = 0.1 K A² / V` (2812.5 on `bird-el`) and the
+   void density on the `*INITIAL_VOID` host (RHO_I 1e-15, the
+   `/EOS/GRUNEISEN` RHO_0 cell 1e-9, the deck's density): the plate −100 →
+   −28.26 % (RMS 83.14 → 24.53), the deck IE +1134.62 → +42.28 % / KE
+   −92.06 → −38.13 % at 8.936× cycles; the coupling without the density
+   gives the plate +284.04 %, and the same density cell fails on the
+   `*CONSTRAINED_LAGRANGE_IN_SOLID` void hosts `bird_B` / `quadrature_B`
+   (round 8). 1 key / 1 model (`bird-el`); `*CONSTRAINED_BEAM_IN_SOLID`:
+   reach 0, a plain skip.
 3. **The ELFORM 1/2/6 extruded-thin-shell class as a mid-surface `/SHELL`**
    (round-6 item 11's −94.66 %): `ex_02`'s shell twin reads −8.93 % against
    ELFORM 2 (fifths −11.06 / −10.71 / −10.62 / −10.55 / −8.93 %) but +1101 % /

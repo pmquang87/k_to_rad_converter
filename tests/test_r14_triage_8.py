@@ -3278,6 +3278,316 @@ class MpcTiedNotesRound8(unittest.TestCase):
         self.assertNotIn("held on that probe", why)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B10 — *CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 (opt-in
+# --shell-in-solid-coupling) + the rewritten default warning
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _sis_ale_deck(card2: str = "", void: bool = True, host_iale: bool = True,
+                  eos: str = "gruneisen", shstyp: int = 0, sstyp: int = 0,
+                  shared_mid: bool = False, no_shells: bool = False,
+                  ro: float = 1.0e-9, c: float = 1.5e6, penalty: bool = False,
+                  host=(12.5, 12.5, 12.5), plate: float = 12.5,
+                  clis: bool = False, vfact: str = "1.0E-6",
+                  extra: str = "") -> str:
+    """bird-el's shape, by hand: part 1 = a 2 x 2 x 2 block of *host* bricks
+    (ELFORM 12, or 1 when not *host_iale*) on *MAT_NULL 1 (RO *ro*) + its EOS
+    (``gruneisen`` C *c*, ``linpoly`` C1 = RO C^2, ``ideal_gas``); part 3 = a
+    2 x 2 plate of *plate* squares (ELFORM 2, t 1, *MAT_ELASTIC 3) at the
+    block's mid-height; *INITIAL_VOID_PART 1 when *void*; *CONTROL_ALE with
+    VFACT *vfact*; *SET_PART_LIST 1 = {3}, 2 = {1}; one
+    *CONSTRAINED_SHELL_IN_SOLID[_PENALTY]_ID 1 (SHSID / SSID the sets, or
+    the part ids when the type cells say 1) with *card2* as its card 2.
+    *shared_mid* adds part 2 = one more brick column on the SAME *MAT_NULL 1
+    (not a void); *no_shells* makes SHSID name the host; *clis* writes a
+    *CONSTRAINED_LAGRANGE_IN_SOLID (structure part 3, fluid part 1) instead
+    of the shell-in-solid card; *extra* goes before *END."""
+    dx, dy, dz = host
+    out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(1.0e-3),
+           "*CONTROL_ALE", _row(3, 1, 1, 0.0),
+           _row(0.0, 0.0, 0.0) + f"{vfact:>10}", "*NODE"]
+    nid = 0
+    ids = {}
+    for k in range(3):
+        for j in range(3):
+            for i in range(3 + (1 if shared_mid else 0)):
+                nid += 1
+                ids[(i, j, k)] = nid
+                out.append(f"{nid:>8}{dx * i:>16.4f}{dy * j:>16.4f}"
+                           f"{dz * k:>16.4f}")
+    plate_ids = {}
+    for j in range(3):
+        for i in range(3):
+            nid += 1
+            plate_ids[(i, j)] = nid
+            out.append(f"{nid:>8}{plate * i:>16.4f}{plate * j:>16.4f}"
+                       f"{dz:>16.4f}")
+    out.append("*ELEMENT_SOLID")
+    eid = 0
+    for k in range(2):
+        for j in range(2):
+            for i in range(3 if shared_mid else 2):
+                eid += 1
+                hx = [ids[(i, j, k)], ids[(i + 1, j, k)],
+                      ids[(i + 1, j + 1, k)], ids[(i, j + 1, k)],
+                      ids[(i, j, k + 1)], ids[(i + 1, j, k + 1)],
+                      ids[(i + 1, j + 1, k + 1)], ids[(i, j + 1, k + 1)]]
+                pid = 2 if i == 2 else 1
+                out.append("".join(f"{v:>8}" for v in [eid, pid] + hx))
+    out.append("*ELEMENT_SHELL")
+    for j in range(2):
+        for i in range(2):
+            eid += 1
+            out.append("".join(f"{v:>8}" for v in (
+                eid, 3, plate_ids[(i, j)], plate_ids[(i + 1, j)],
+                plate_ids[(i + 1, j + 1)], plate_ids[(i, j + 1)])))
+    out += ["*PART", "host", _row(1, 1, 1, 1),
+            "*PART", "plate", _row(3, 3, 3)]
+    if shared_mid:
+        out += ["*PART", "fluid 2", _row(2, 1, 1, 1)]
+    out += ["*SECTION_SOLID", _row(1, 12 if host_iale else 1),
+            "*SECTION_SHELL", _row(3, 2), _row(1.0, 1.0, 1.0, 1.0),
+            "*MAT_NULL", _row(1, ro, 0.0, 0.0),
+            "*MAT_ELASTIC", _row(3, 7.85e-9, 210000.0, 0.3)]
+    if eos == "gruneisen":
+        out += ["*EOS_GRUNEISEN", _row(1, c, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                _row(0.0)]
+    elif eos == "linpoly":
+        out += ["*EOS_LINEAR_POLYNOMIAL",
+                _row(1, 0.0, ro * c * c, 0.0, 0.0, 0.0, 0.0, 0.0),
+                _row(0.0, 1.0)]
+    elif eos == "ideal_gas":
+        out += ["*EOS_IDEAL_GAS", _row(1, 718.0, 1005.0, 0.0, 0.0, 293.0)]
+    out += ["*SET_PART_LIST", _row(1), _row(3),
+            "*SET_PART_LIST", _row(2), _row(1)]
+    if void:
+        out += ["*INITIAL_VOID_PART", _row(1)]
+    if clis:
+        out += ["*CONSTRAINED_LAGRANGE_IN_SOLID", _row(3, 1, 1, 1, 0, 4),
+                _row(0.0, 0.0, 0.1), ""]
+    else:
+        shsid = (1 if shstyp == 1 else 2) if no_shells else (
+            3 if shstyp == 1 else 1)
+        ssid = 1 if sstyp == 1 else 2
+        out += ["*CONSTRAINED_SHELL_IN_SOLID"
+                + ("_PENALTY" if penalty else "") + "_ID",
+                _row(1), _row(shsid, ssid, shstyp, sstyp)]
+        if card2:
+            out.append(card2)
+    if extra:
+        out.append(extra.rstrip("\n"))
+    out.append("*END")
+    return "\n".join(out) + "\n"
+
+
+def _type18(starter: str):
+    """``(surf parts, grbric parts, line-2 text)`` of the one
+    /INTER/TYPE18, or None."""
+    lines = starter.splitlines()
+    heads = [i for i, ln in enumerate(lines) if ln.startswith("/INTER/TYPE18/")]
+    if not heads:
+        return None
+    i = heads[0]
+    data = [ln for ln in lines[i + 2:i + 7] if not ln.startswith("#")]
+    surf, grb = int(data[0][10:20]), int(data[0][20:30])
+
+    def members(prefix, gid):
+        k = lines.index(f"{prefix}{gid}")
+        return [int(t) for t in lines[k + 2].split()]
+    return (members("/SURF/PART/EXT/", surf), members("/GRBRIC/PART/", grb),
+            data[1])
+
+
+def _hyd_visc(starter: str, mid: int):
+    """``(RHO_I text, Pmin text)`` of /MAT/HYD_VISC/<mid>."""
+    lines = starter.splitlines()
+    i = lines.index(f"/MAT/HYD_VISC/{mid}")
+    return lines[i + 3], lines[i + 5]
+
+
+def _eos_rho0(starter: str, kind: str, mid: int) -> str:
+    lines = starter.splitlines()
+    i = lines.index(f"/EOS/{kind}/{mid}")
+    return lines[i + 5][-20:]
+
+
+_SIS_ON = "(--shell-in-solid-coupling): shell part(s)"
+_SIS_LINE2 = _f(2812.5) + _f(0.0) + _f(6.25) + _f(0.0) + _f(0.0)
+
+
+class ShellInSolidCoupling(unittest.TestCase):
+    """B10: the opt-in writes *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18
+    with Stfval = 0.1 K A^2 / V (PSSF on _PENALTY), Gap = half the mean host
+    edge, and the void density on an *INITIAL_VOID host of the card only;
+    the default is the 4f5b6e8 deck with the rewritten warning."""
+
+    def test_flag_off_is_the_4f5b6e8_deck(self):
+        res, starter, _e = _convert(_sis_ale_deck())
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", starter)
+        self.assertNotIn("/INTER/TYPE18", starter)
+        hits = [w for w in res.warnings
+                if w.startswith("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)")]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("2812.5", "-28.26 %", "8.936x", "30.51 / 4.88",
+                       "2.227e-4", "3.6 %", "--shell-in-solid-coupling"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertEqual(_hyd_visc(starter, 1)[0], _f(1.0e-9))
+        self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(0.0))
+
+    def test_flag_on_writes_the_coupling(self):
+        """Stfval 0.1 x 2250 x 156.25^2 / 1953.125 = 2812.5; Gap 6.25. A
+        starter run of this deck (nt 4) reads 0 errors (B10 evidence).
+        Mutation target: Stfval without the 0.1."""
+        res, starter, _e = _convert(_sis_ale_deck(),
+                                    shell_in_solid_coupling=True)
+        surf, grb, line2 = _type18(starter)
+        self.assertEqual((surf, grb, line2), ([3], [1], _SIS_LINE2))
+        self.assertEqual(_hyd_visc(starter, 1)[0], _f(1.0e-15))
+        self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(1.0e-9))
+        self.assertNotIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", starter)
+        self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID", res.skipped_keywords)
+        hits = [w for w in res.warnings if _SIS_ON in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("Stfval = 0.1 x K 2250 x A^2 156.25^2 / V 1953.12",
+                       "= 2812.5", "Gap 6.25", "RHO_I 1e-15 (VFACT x RO)",
+                       "-28.26 %", "8.936x", "+284.04 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertFalse(_has(res.warnings,
+                              "*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)"))
+
+    def test_stfval_on_a_non_cubic_host(self):
+        """Host bricks 10 x 10 x 20, plate squares 10 x 10: Stfval = 0.1 x
+        2250 x 100^2 / 2000 = 1125; Gap = 0.5 x the mean FIRST edge = 5."""
+        _r, starter, _e = _convert(_sis_ale_deck(host=(10.0, 10.0, 20.0),
+                                                 plate=10.0),
+                                   shell_in_solid_coupling=True)
+        self.assertEqual(_type18(starter)[2],
+                         _f(1125.0) + _f(0.0) + _f(5.0) + _f(0.0) + _f(0.0))
+
+    def test_penalty_pssf(self):
+        res, starter, _e = _convert(
+            _sis_ale_deck(penalty=True, card2=_row(0.0, 0.0, 0, 0, 0, 0.05)),
+            shell_in_solid_coupling=True)
+        self.assertEqual(_type18(starter)[2][:20], _f(1406.25))
+        self.assertTrue(_has(res.warnings, _SIS_ON, "_PENALTY PSSF 0.05"),
+                        res.warnings)
+        self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID_PENALTY",
+                         res.skipped_keywords)
+
+    def test_start_and_end(self):
+        """START 1e-4 -> Tstart; END 5e-4 -> Tstop; END 0 / 1e20 -> 0
+        (never, the starter's 1e30)."""
+        _r, s1, _e = _convert(_sis_ale_deck(card2=_row(1.0e-4, 5.0e-4)),
+                              shell_in_solid_coupling=True)
+        self.assertEqual(_type18(s1)[2][60:],
+                         _f(1.0e-4) + _f(5.0e-4))
+        _r, s2, _e = _convert(_sis_ale_deck(card2=_row(0.0, 0.0)),
+                              shell_in_solid_coupling=True)
+        self.assertEqual(_type18(s2)[2][60:], _f(0.0) + _f(0.0))
+
+    def test_linear_polynomial_host(self):
+        _r, starter, _e = _convert(_sis_ale_deck(eos="linpoly"),
+                                   shell_in_solid_coupling=True)
+        self.assertEqual(_type18(starter)[2], _SIS_LINE2)
+        lines = starter.splitlines()
+        i = lines.index("/EOS/POLYNOMIAL/1")
+        self.assertEqual(lines[i + 5][-20:], _f(1.0e-9))
+        self.assertEqual(_hyd_visc(starter, 1)[0], _f(1.0e-15))
+
+    def test_set_types(self):
+        for shstyp in (0, 1):
+            for sstyp in (0, 1):
+                with self.subTest(shstyp=shstyp, sstyp=sstyp):
+                    _r, starter, _e = _convert(
+                        _sis_ale_deck(shstyp=shstyp, sstyp=sstyp),
+                        shell_in_solid_coupling=True)
+                    self.assertEqual(_type18(starter)[:2], ([3], [1]))
+
+    def test_non_void_host_gets_no_density(self):
+        _r, starter, _e = _convert(_sis_ale_deck(void=False),
+                                   shell_in_solid_coupling=True)
+        self.assertEqual(_type18(starter)[2], _SIS_LINE2)
+        self.assertEqual(_hyd_visc(starter, 1)[0], _f(1.0e-9))
+        self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(0.0))
+
+    def test_shared_mid_gets_a_copy(self):
+        res, starter, _e = _convert(_sis_ale_deck(shared_mid=True),
+                                    shell_in_solid_coupling=True)
+        lines = starter.splitlines()
+        part1 = lines[lines.index("/PART/1") + 2]
+        part2 = lines[lines.index("/PART/2") + 2]
+        copy = int(part1[10:20])
+        self.assertNotEqual(copy, 1)
+        self.assertEqual(int(part2[10:20]), 1)
+        self.assertEqual(_hyd_visc(starter, copy)[0], _f(1.0e-15))
+        self.assertEqual(_eos_rho0(starter, "GRUNEISEN", copy), _f(1.0e-9))
+        self.assertEqual(_hyd_visc(starter, 1)[0], _f(1.0e-9))
+        self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(0.0))
+        # the copy keeps the original's Pmin cell (the void floor)
+        self.assertEqual(_hyd_visc(starter, copy)[1],
+                         _hyd_visc(starter, 1)[1])
+        self.assertTrue(_has(res.warnings, _SIS_ON,
+                             "a copy of *MAT_NULL 1"), res.warnings)
+
+    def test_every_refusal_class(self):
+        """Each refused card keeps the flag-OFF bytes (no id drawn before
+        the last screen) plus ONE refusal sentence. Every probe passed a
+        starter run (nt 4, 0 errors; B10 evidence). Mutation target: an id
+        drawn before the refusal screen."""
+        cases = (
+            ("an ELFORM 1 host", {"host_iale": False},
+             "is not an ALE solid"),
+            ("an ideal-gas host", {"eos": "ideal_gas"},
+             "its EOS is *EOS_IDEAL_GAS"),
+            ("RO 0", {"ro": 0.0}, "RO 0 / C 1.5e+06"),
+            ("C 0", {"c": 0.0}, "C 0 - the stiffness RO C^2"),
+            ("no shells", {"no_shells": True},
+             "names no part with shell elements"),
+            ("START < 0", {"card2": _row(-0.1)}, "START < 0"),
+            ("END -9999", {"card2": _row(0.0, -9999.0)}, "END -9999"),
+            ("END < 0", {"card2": _row(0.0, -0.5)}, "END < 0"))
+        # an all-parts self-contact draws auto ids AFTER the prepass, so an
+        # id drawn before the last screen would shift its bytes
+        contact = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(0, 0, 5, 0)
+                   + "\n" + _row(0.1, 0.0) + "\n")
+        for name, kw, needle in cases:
+            with self.subTest(case=name):
+                deck = _sis_ale_deck(**kw)
+                r_on, s_on, e_on = _convert(deck,
+                                            shell_in_solid_coupling=True)
+                _r0, s_off, e_off = _convert(deck)
+                self.assertEqual(s_on, s_off)
+                self.assertEqual(e_on, e_off)
+                deck_c = _sis_ale_deck(extra=contact, **kw)
+                _r1, s1_on, _e1 = _convert(deck_c,
+                                           shell_in_solid_coupling=True)
+                _r2, s1_off, _e2 = _convert(deck_c)
+                self.assertIn("/INTER/", s1_on)
+                self.assertEqual(s1_on, s1_off)
+                self.assertNotIn("/INTER/TYPE18", s_on)
+                hits = [w for w in r_on.warnings
+                        if "not converted under --shell-in-solid-coupling"
+                        in w]
+                self.assertEqual(len(hits), 1, r_on.warnings)
+                self.assertIn(needle, hits[0])
+                self.assertIn("CONSTRAINED_SHELL_IN_SOLID",
+                              r_on.skipped_keywords)
+
+    def test_clis_void_decks_unchanged_under_the_flag(self):
+        """The density gate is the SIS card, never *INITIAL_VOID alone: a
+        CLIS + *INITIAL_VOID deck (bird_B's shape) is byte-identical with
+        and without the flag. Mutation target: the density written on a
+        CLIS host."""
+        deck = _sis_ale_deck(clis=True)
+        r_on, s_on, e_on = _convert(deck, shell_in_solid_coupling=True)
+        _r0, s_off, e_off = _convert(deck)
+        self.assertEqual(s_on, s_off)
+        self.assertEqual(e_on, e_off)
+        self.assertEqual(_hyd_visc(s_on, 1)[0], _f(1.0e-9))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3291,11 +3601,14 @@ class Round8OptInWiringB(unittest.TestCase):
 
     _OPT_IN = {
         "--implicit-stub-with-type25": "implicit_stub_with_type25",
+        "--shell-in-solid-coupling": "shell_in_solid_coupling",
     }
     _HELP_FIGURES = {
         "--implicit-stub-with-type25": ("+582.00 -> +689.08 %",
                                         "393.31 -> 313.05 %",
                                         "imp_int_k.F:847"),
+        "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -28.26 %",
+                                      "+1134.62 -> +42.28 %", "8.936x"),
     }
 
     def _readme(self):

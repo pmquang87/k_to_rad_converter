@@ -146,7 +146,9 @@ from .blast_ale import (
     _make_ebcs,
     _make_fsi_coupling,
     _make_inivol_notes,
+    _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
+    _resolve_shell_in_solid,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -1973,6 +1975,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # (which splits the pair out of an all-parts self-contact). Draws no id.
     _resolve_joint_screws(state)
 
+    # *CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 under
+    # --shell-in-solid-coupling (round 8, B10): the ONE decision, BEFORE the
+    # materials (the void density cells) and the parts (a copy MID). Draws
+    # no id unless a void host shares its *MAT_NULL; empty by default.
+    _resolve_shell_in_solid(state)
+
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
     # namespaces and Radioss in one. Report the overlap here rather than letting
@@ -3042,6 +3050,10 @@ def _starter_section_registry():
         ("blast_loads",       lambda c: _make_blast_loads(c.state)),
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        # --shell-in-solid-coupling (round 8, B10): the converted cards'
+        # /INTER/TYPE18; empty (no id drawn) by default
+        ("shell_in_solid_coupling",
+                              lambda c: _make_shell_in_solid_coupling(c.state)),
         # *CONSTRAINED_SHELL_IN_SOLID: ONE named warning per deck (round 7,
         # B5); writes no card and draws no id - the keyword stays skipped.
         ("shell_in_solid_notes",

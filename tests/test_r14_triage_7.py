@@ -2672,11 +2672,15 @@ class ShellInSolidNamed(unittest.TestCase):
         r, s, e = _convert(_shell_in_solid_deck())
         hits = _sis_warnings(r)
         self.assertEqual(len(hits), 1, r.warnings)
+        # round 8 (B10) rewrote the default sentence with the deck rule's
+        # measurement: round 7's +195.21 % / 1.016x / 4.506x / "refuted as
+        # a general rule in round 6" became the opt-in's 2812.5 / -28.26 % /
+        # 8.936x and the CLIS stall at t 2.227e-4
         for needle in ("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)",
                        "1 - shell part(s) [3] in solid part(s) [1]",
                        "NOT converted", "p.10-179", "4.9377e5 (-100 %)",
-                       "+1134.62 %", "+195.21 %", "1.016x", "4.506x",
-                       "refuted as a general rule in round 6"):
+                       "+1134.62 %", "2812.5", "-28.26 %", "8.936x",
+                       "2.227e-4"):
             self.assertIn(needle, hits[0])
         self.assertIn("CONSTRAINED_SHELL_IN_SOLID", r.skipped_keywords)
         self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID",
@@ -4417,8 +4421,13 @@ class Round7PostReviewRound(unittest.TestCase):
              "d3hsp tensor equals it on 18 of 18 bodies within 0.04 %"),
             ("README.md", "MEASURED, not quoted: the reference `d3hsp` tensor "
              "equals it on 18 of 18 bodies"),
-            ("k2rad/writer/blast_ale.py", "(RHO_I 1e-15, with the "
-             "/EOS/GRUNEISEN RHO_0 cell stated as 1e-9, the deck's density)"),
+            # (round 8, B10: the default sentence quotes the deck rule's arm
+            # now; the density statement moved into the opt-in's sentence -
+            # "RHO_I {..} (VFACT x RO) with its /EOS RHO_0 cell {..} (the deck
+            # density)" - and into ROADMAP round-7 item 2)
+            ("k2rad/writer/blast_ale.py", "(VFACT x RO) with its"),
+            ("ROADMAP.md", "`/EOS/GRUNEISEN` RHO_0 cell 1e-9, the deck's "
+             "density"),
             ("README.md", "`K2` and `K3` scaled by `(1 − 1e-8)`"),
             ("ROADMAP.md", "`K2` and `K3` scaled by `(1 − 1e-8)`"),
             ("k2rad/state.py", "K2 and K3 scaled by (1 - 1e-8)"),

@@ -298,6 +298,7 @@ def convert(
     implicit_smooth_curve_sampling: bool = True,
     elastic_fluid_cp_cutoff: bool = True,
     implicit_stub_with_type25: bool = False,
+    shell_in_solid_coupling: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1006,6 +1007,18 @@ def convert(
         skipping it moves the END +582.00 -> +689.08 % (worse) and the
         RMS 393.31 -> 313.05 % of the LS peak (better) - MIXED. Reach 1
         deck key on 1 emitted model. Default False.
+    shell_in_solid_coupling : bool
+        Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty
+        coupling (R14 triage round 8, B10): /SURF/PART/EXT over the
+        embedded shell parts, /GRBRIC/PART over the ALE host, Stfval =
+        0.1 x K_host x A_seg^2 / V_host (PSSF on the _PENALTY form),
+        Gap = half the mean host edge, and - on an *INITIAL_VOID host
+        of the card only - the void density (RHO_I = VFACT x RO, the
+        EOS RHO_0 = RO). MEASURED on
+        intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate -100
+        -> -28.26 %, the deck IE +1134.62 -> +42.28 % / KE -92.06 ->
+        -38.13 % at 8.936x the cycles. Default False: the density half
+        fails on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1444,6 +1457,7 @@ def convert(
         implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
         elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
         implicit_stub_with_type25=implicit_stub_with_type25,
+        shell_in_solid_coupling=shell_in_solid_coupling,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

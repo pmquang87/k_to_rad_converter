@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
-from ..state import ConversionState
+import math
+from typing import Dict, List, Optional, Set, Tuple
+from ..state import ConversionState, ShellInSolidPlan
 from .common import (HDR, _emit_surf_part, _emit_surf_seg, _f, _i,
                      _part_scoped_segment_set)
 
@@ -21,6 +22,8 @@ __all__ = [
     "_make_ale_multimaterial",
     "_mean_brick_edge",
     "_make_fsi_coupling",
+    "_resolve_shell_in_solid",
+    "_make_shell_in_solid_coupling",
     "_make_ebcs",
     "_make_inivol_notes",
     "_make_control_ale_notes",
@@ -901,20 +904,339 @@ def _shell_in_solid_side(state: ConversionState, sid: int, styp: int) -> str:
     return str(sorted(ps[1]))
 
 
+#: the fraction of the solid-segment stiffness K A^2 / V the constraint form
+#: of *CONSTRAINED_SHELL_IN_SOLID takes (LS-DYNA's own default coupling
+#: fraction: PSSF, Vol I R17 p.10-181, and *CONSTRAINED_LAGRANGE_IN_SOLID
+#: PFAC, p.10-117, both default 0.1)
+_SIS_FRACTION = 0.1
+
+
+def _sis_side_pids(state: ConversionState, sid: int,
+                   styp: int) -> Optional[List[int]]:
+    """The part ids one side of a *CONSTRAINED_SHELL_IN_SOLID card names
+    (STYP 1 = a *PART id, 0 = a *SET_PART id), or None when it names
+    nothing the deck defines."""
+    if styp == 1:
+        return [sid] if sid in state.parts else None
+    ps = state.part_sets.get(sid)
+    return sorted(ps[1]) if ps is not None else None
+
+
+def _sis_host_modulus(state: ConversionState, pid: int
+                      ) -> Tuple[float, float, str]:
+    """``(K, RO, '')`` of one ALE host part, or ``(0, 0, the refusal)``: an
+    ELFORM 11 / 12 solid (k2rad writes Iale 1) on a ``*MAT_NULL`` whose EOS
+    is ``*EOS_GRUNEISEN`` (K = RO C^2) or ``*EOS_LINEAR_POLYNOMIAL`` (K =
+    C1), the EOS found the way the materials writer binds it (the same-id
+    EOS, else the *PART EOSID)."""
+    part = state.parts[pid]
+    sec = state.sec_solids.get(part.secid)
+    if sec is None or not sec.iale:
+        return 0.0, 0.0, (
+            f"host part {pid} is not an ALE solid (k2rad writes it with Iale "
+            "0, and an /INTER/TYPE18 couples to ALE cells)")
+    mat = state.mat_null.get(part.mid)
+    eos = state.eos_cards.get(part.mid)
+    if eos is None and part.eosid:
+        eos = state.eos_cards.get(part.eosid)
+    if mat is None or eos is None:
+        return 0.0, 0.0, (f"host part {pid} is not a *MAT_NULL fluid with an "
+                          "*EOS_GRUNEISEN / *EOS_LINEAR_POLYNOMIAL")
+    # the deck's own RO: a stated RO <= 0 was floored to 1e-24 by
+    # materials._apply_zero_density_floor, which records the mid
+    ro = 0.0 if part.mid in state.zero_density_floored else mat.rho
+    if eos.keyword == "EOS_GRUNEISEN":
+        c = eos.params.get("c", 0.0)
+        if ro <= 0.0 or c <= 0.0:
+            return 0.0, 0.0, (
+                f"host part {pid}: RO {ro:g} / C {c:g} - the stiffness "
+                "RO C^2 would not be positive (starter ERROR 1115)")
+        return ro * c * c, ro, ""
+    if eos.keyword == "EOS_LINEAR_POLYNOMIAL":
+        c1 = eos.params.get("c1", 0.0)
+        if ro <= 0.0 or c1 <= 0.0:
+            return 0.0, 0.0, (
+                f"host part {pid}: RO {ro:g} / C1 {c1:g} - the stiffness "
+                "C1 would not be positive (starter ERROR 1115)")
+        return c1, ro, ""
+    return 0.0, 0.0, (f"host part {pid}: its EOS is *{eos.keyword}, not "
+                      "*EOS_GRUNEISEN / *EOS_LINEAR_POLYNOMIAL (no bulk "
+                      "modulus k2rad reads)")
+
+
+def _sis_brick_volume(state: ConversionState, e) -> float:
+    """One host brick's volume: the 6-tet split of an 8-node element (a
+    degenerate hexa by its distinct nodes), the corner tet otherwise - the
+    lumper's own rule (``lumping._HEXA_TETS``)."""
+    from ..lumping import _HEXA_TETS, _tet_volume
+    try:
+        p = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z)
+             for n in e.nodes]
+    except KeyError:
+        return 0.0
+    if len(p) >= 8:
+        return math.fsum(_tet_volume(p[a], p[b], p[c], p[d])
+                         for a, b, c, d in _HEXA_TETS)
+    if len(p) >= 4:
+        return _tet_volume(p[0], p[1], p[2], p[3])
+    return 0.0
+
+
+def _sis_shell_area(state: ConversionState, e) -> float:
+    """One shell segment's area: a quad 0.5 |d13 x d24|, a triangle (three
+    distinct corners) 0.5 |e12 x e13|."""
+    ids = [n for n in e.nodes if n > 0]
+    distinct = list(dict.fromkeys(ids))
+    try:
+        p = [(state.nodes[n].x, state.nodes[n].y, state.nodes[n].z)
+             for n in distinct]
+    except KeyError:
+        return 0.0
+
+    def cross(u, v):
+        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0])
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+    if len(p) >= 4:
+        c = cross(sub(p[2], p[0]), sub(p[3], p[1]))
+    elif len(p) == 3:
+        c = cross(sub(p[1], p[0]), sub(p[2], p[0]))
+    else:
+        return 0.0
+    return 0.5 * math.sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2])
+
+
+def _sis_refusal(state: ConversionState, card) -> Tuple[str, Optional[Dict]]:
+    """``('', the measured cells)`` for a card ``--shell-in-solid-coupling``
+    converts, or ``(the refusal in words, None)``. Draws no id."""
+    if card.start < 0.0:
+        return ("START < 0 (the coupling is followed during dynamic "
+                "relaxation; k2rad converts no dynamic-relaxation phase)",
+                None)
+    if card.end == -9999.0:
+        return ("END -9999 (START names a curve / table: not converted)",
+                None)
+    if card.end < 0.0:
+        return ("END < 0 (a dynamic-relaxation statement; k2rad converts no "
+                "dynamic-relaxation phase)", None)
+    shell_side = _sis_side_pids(state, card.shsid, card.shstyp)
+    host_side = _sis_side_pids(state, card.ssid, card.sstyp)
+    if shell_side is None:
+        return (f"SHSID {card.shsid} is not a defined "
+                + ("*PART" if card.shstyp == 1 else "*SET_PART"), None)
+    if host_side is None:
+        return (f"SSID {card.ssid} is not a defined "
+                + ("*PART" if card.sstyp == 1 else "*SET_PART"), None)
+    shell_parts = {e.pid for e in state.shell_elems}
+    shell_pids = [p for p in shell_side if p in shell_parts]
+    if not shell_pids:
+        return (f"SHSID {card.shsid} names no part with shell elements "
+                f"({shell_side})", None)
+    hosts = [p for p in host_side if p in state.parts]
+    if not hosts:
+        return f"SSID {card.ssid} names no defined part ({host_side})", None
+    k_by: Dict[int, float] = {}
+    ro_by: Dict[int, float] = {}
+    for pid in hosts:
+        k, ro, why = _sis_host_modulus(state, pid)
+        if why:
+            return why, None
+        k_by[pid], ro_by[pid] = k, ro
+    vols: Dict[int, List[float]] = {p: [] for p in hosts}
+    for e in state.solid_elems:
+        if e.pid in vols:
+            vols[e.pid].append(_sis_brick_volume(state, e))
+    all_vols = [v for p in hosts for v in vols[p]]
+    if not all_vols or math.fsum(all_vols) <= 0.0:
+        return (f"SSID {card.ssid}: the host part(s) {hosts} carry no solid "
+                "element", None)
+    areas = [_sis_shell_area(state, e) for e in state.shell_elems
+             if e.pid in set(shell_pids)]
+    a_seg = math.fsum(areas) / len(areas)
+    v_host = math.fsum(all_vols) / len(all_vols)
+    # several host parts: the volume-weighted mean bulk modulus
+    w = {p: math.fsum(vols[p]) for p in hosts}
+    k_host = math.fsum(k_by[p] * w[p] for p in hosts) / math.fsum(w.values())
+    edge = _mean_brick_edge(state, set(hosts))
+    if a_seg <= 0.0 or edge <= 0.0:
+        return (f"the shell segments of {shell_pids} or the host bricks of "
+                f"{hosts} have no size", None)
+    fraction = card.pssf if card.penalty else _SIS_FRACTION
+    return "", {
+        "shell_pids": shell_pids, "host_pids": hosts, "fraction": fraction,
+        "k_host": k_host, "a_seg": a_seg, "v_host": v_host,
+        "stfval": fraction * k_host * a_seg * a_seg / v_host,
+        "gap": 0.5 * edge, "ro": ro_by,
+        "tstart": card.start,
+        "tstop": card.end if 0.0 < card.end < 1.0e20 else 0.0}
+
+
+def _resolve_shell_in_solid(state: ConversionState) -> List[ShellInSolidPlan]:
+    """The ONE decision of ``--shell-in-solid-coupling`` (R14 triage round 8,
+    B10), memoised on ``state.shell_in_solid_plan``; a ``build_starter``
+    prepass, BEFORE the materials and the parts are written (both read its
+    void density). Draws no id except a COPY MID for a void host whose
+    ``*MAT_NULL`` another part shares. Empty under the default, so a
+    default deck is byte-identical to 4f5b6e8.
+
+    The void density is written ONLY on an ``*INITIAL_VOID`` host of a
+    converted card - never on a ``*CONSTRAINED_LAGRANGE_IN_SOLID`` host,
+    where the same cell was measured to fail (round 8: bird_B stalls on the
+    TYPE18 sort step at t 2.227e-4, quadrature_B reaches 3.6 % of its run in
+    600 s): ``RHO_I = VFACT x RO`` (``*CONTROL_ALE`` VFACT, default 1e-6) with
+    the ``/EOS`` ``RHO_0`` cell stated as RO (without it the reference
+    density IS RHO_I, ``hm_read_mat06.F:155-157``; a positive EOS RHO_0
+    overrides it, ``hm_read_eos_gruneisen.F:117-123``)."""
+    if state.shell_in_solid_plan is not None:
+        return state.shell_in_solid_plan
+    plans: List[ShellInSolidPlan] = []
+    state.shell_in_solid_plan = plans
+    if not state.options.shell_in_solid_coupling:
+        return plans
+    void_pids: Set[int] = set()
+    for sid, is_set in state.initial_void_parts:
+        if is_set:
+            ps = state.part_sets.get(sid)
+            if ps is not None:
+                void_pids.update(ps[1])
+        else:
+            void_pids.add(sid)
+    vfact = (state.control_ale.vfact if state.control_ale is not None
+             else 1.0e-6)
+    for card in state.shell_in_solid_cards:
+        why, cells = _sis_refusal(state, card)
+        if cells is None:
+            state.warn(
+                f"*CONSTRAINED_SHELL_IN_SOLID {card.coupid or '(no id)'}: not "
+                f"converted under --shell-in-solid-coupling - {why}; it stays "
+                "listed as skipped.")
+            continue
+        plans.append(ShellInSolidPlan(
+            card=card, shell_pids=cells["shell_pids"],
+            host_pids=cells["host_pids"], fraction=cells["fraction"],
+            k_host=cells["k_host"], a_seg=cells["a_seg"],
+            v_host=cells["v_host"], stfval=cells["stfval"],
+            gap=cells["gap"], tstart=cells["tstart"], tstop=cells["tstop"],
+            void_parts=[p for p in cells["host_pids"] if p in void_pids]))
+    # the void density: one cell pair per *MAT_NULL id, a copy MID when a
+    # part outside the void hosts shares it
+    dense = {p for plan in plans for p in plan.void_parts}
+    for pid in sorted(dense):
+        mid = state.parts[pid].mid
+        ro = state.mat_null[mid].rho
+        cells_pair = (vfact * ro, ro)
+        sharers = {q for q, part in state.parts.items()
+                   if part.mid == mid and q not in dense}
+        if sharers:
+            copy = next((c for c, m in state.sis_copy_mids.items()
+                         if m == mid), 0)
+            if not copy:
+                copy = state.next_mat_id()
+                state.sis_copy_mids[copy] = mid
+                state.sis_density[copy] = cells_pair
+            state.sis_part_mids[pid] = copy
+        else:
+            state.sis_density[mid] = cells_pair
+    return plans
+
+
+def _make_shell_in_solid_coupling(state: ConversionState) -> List[str]:
+    """The ``/INTER/TYPE18`` of every card ``--shell-in-solid-coupling``
+    converted (R14 triage round 8, B10): ``/SURF/PART/EXT`` over the shell
+    parts, ``/GRBRIC/PART`` over the ALE host parts, line 1 written exactly
+    as ``_make_fsi_coupling`` writes it (Igap 0, Ipres 0, Idel 0, Iauto
+    blank = ISTIFF 1, a constant Stfval, ``hm_read_inter_type18.F:158``),
+    ``Stfval = F x K A^2 / V``, Vref 0, Gap = half the mean host edge (the
+    CLIS rule), Tstart = START, Tstop = END when 0 < END < 1e20, else 0 (the
+    starter's 1e30, ``:250``). Every id is drawn here, after the last
+    refusal screen; the keyword leaves ``skipped_keywords`` at the line that
+    writes the card."""
+    plans = _resolve_shell_in_solid(state)
+    if not plans:
+        return []
+    lines: List[str] = []
+    for k, plan in enumerate(plans):
+        card = plan.card
+        tag = str(card.coupid) if card.coupid else str(k + 1)
+        surf_id = state.next_id()
+        lines += _emit_surf_part(surf_id, f"shell_in_solid_{tag}_shells",
+                                 plan.shell_pids)
+        grbric_id = state.next_elem_group_id()
+        lines += _emit_grbric_part(grbric_id, f"shell_in_solid_{tag}_host",
+                                   plan.host_pids)
+        inter_id = state.next_id()
+        lines += [
+            f"/INTER/TYPE18/{inter_id}",
+            f"shell_in_solid_{tag}",
+            "#            surf_ID grbric_id                Igap               Ipres      Idel",
+            (" " * 10 + _i(surf_id) + _i(grbric_id) + " " * 10 + _i(0)
+             + " " * 10 + _i(0) + _i(0)),
+            "#             Stfval                Vref                 Gap              Tstart               Tstop",
+            _f(plan.stfval) + _f(0.0) + _f(plan.gap) + _f(plan.tstart)
+            + _f(plan.tstop),
+            HDR,
+        ]
+        state.skipped_keywords.remove(card.keyword)
+        pssf = (f"; _PENALTY PSSF {plan.fraction:g}" if card.penalty else "")
+        dens = []
+        for pid in plan.void_parts:
+            mid = state.sis_part_mids.get(pid, state.parts[pid].mid)
+            rho_i, rho0 = state.sis_density[mid]
+            copy = (f", a copy of *MAT_NULL {state.sis_copy_mids[mid]} that "
+                    f"part {pid} now points at (the material is shared)"
+                    if mid in state.sis_copy_mids else "")
+            dens.append(
+                f" The *INITIAL_VOID host part {pid} gets the void density: "
+                f"/MAT/HYD_VISC/{mid} RHO_I {rho_i:g} (VFACT x RO) with its "
+                f"/EOS RHO_0 cell {rho0:g} (the deck density){copy}.")
+        state.warn(
+            f"*CONSTRAINED_SHELL_IN_SOLID {card.coupid or '(no id)'} -> "
+            f"/INTER/TYPE18/{inter_id} (--shell-in-solid-coupling): shell "
+            f"part(s) {plan.shell_pids} coupled to ALE host part(s) "
+            f"{plan.host_pids} by a penalty interface - OpenRadioss has no "
+            "embedded-shell constraint and TYPE18 is penalty-only, so the "
+            f"stiffness is a stated choice: Stfval = {plan.fraction:g} x K "
+            f"{plan.k_host:g} x A^2 {plan.a_seg:g}^2 / V {plan.v_host:g} = "
+            f"{plan.stfval:g} (LS-DYNA's own default coupling fraction 0.1 of "
+            f"the solid-segment stiffness K A^2 / V{pssf}), Gap "
+            f"{plan.gap:g} = 0.5 x the mean host edge."
+            + "".join(dens) + " " + _SIS_MEASURED)
+    return lines
+
+
+#: the measured flag arm on the one carrier (round 8, B10; the campaign
+#: rule, README 9.1; the plate by /TH/PART against LS-DYNA's matsum)
+_SIS_MEASURED = (
+    "MEASURED on intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate's "
+    "internal energy -100 % -> -28.26 % against LS-DYNA (RMS 83.14 -> "
+    "24.53 %), the deck END IE +1134.62 -> +42.28 % and KE -92.06 -> "
+    "-38.13 % (RMS 1102.65 / 162.68 -> 30.51 / 4.88 % of the LS peak over "
+    "the 500 LS times to t 2.5e-3), at 8.936x the cycles - the step falls "
+    "to a void node; Stfval x0.5 / x2 moves the plate by under 1 point. The "
+    "coupling needs the void density on this deck (without it the plate "
+    "reads +284.04 %); the same density cell FAILS on a "
+    "*CONSTRAINED_LAGRANGE_IN_SOLID void host (bird_B stalls on the TYPE18 "
+    "sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its run in "
+    "600 s), so it is written only on an *INITIAL_VOID host of this card.")
+
+
 def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
     """``*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]`` → ONE named warning per deck
-    (R14 triage round 7, B5; 0 bytes, no flag, draws no id).
+    over the cards NOT converted (R14 triage round 7, B5; 0 bytes, draws no
+    id; round 8, B10: a card ``--shell-in-solid-coupling`` converts is named
+    by its own sentence instead).
 
     The card is recorded by ``handlers.handle_constrained_shell_in_solid`` and
     stays in ``skipped_keywords`` (its ``#-- SKIPPED:`` line is part of the
     ``.rad``). OpenRadioss has no embedded-shell constraint, so the embedded
     shells receive nothing from the solids they sit in. The measured arms are
-    the round-7 critic's on ``bird-el`` (nt 4, base-paired, scored at the
-    LS-DYNA glstat interpolated at OpenRadioss's printed times): the shipped
-    deck 2492 cycles; an ``/INTER/TYPE18`` with a stated ``Stfval`` alone 2531
-    (1.016x); the coupling with the void density 11228 (4.506x). The
-    emission stays a ROADMAP item (the round-7 'does NOT close' list)."""
-    cards = state.shell_in_solid_cards
+    round 8's on ``bird-el`` (nt 4, the campaign rule): the shipped deck 2492
+    cycles; the opt-in's ``/INTER/TYPE18`` (Stfval = 0.1 K A^2 / V) with the
+    void density 22269 (8.936x)."""
+    converted = {id(p.card) for p in (state.shell_in_solid_plan or [])}
+    cards = [c for c in state.shell_in_solid_cards if id(c) not in converted]
     if not cards:
         return []
     per_card = "; ".join(
@@ -934,16 +1256,15 @@ def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
         "is 0 against LS-DYNA's 4.9377e5 (-100 %), and the deck ends IE "
         "+1134.62 % / KE -92.06 % (RMS 1102.65 / 162.68 % of the LS-DYNA "
         "peak) - mostly from the void, which is converted as full-density "
-        "fluid (its part carries KE 1.125e7 at cycle 0, LS-DYNA's 10.2). Two "
-        "substitutes were measured and neither is written: an /INTER/TYPE18 "
-        "with a stated Stfval 562.5 (= Vref^2 RO A / Gap on this deck) alone "
-        "gives the plate +195.21 % (RMS 144.85 %) at 1.016x the cycles; with "
-        "the void density as well (RHO_I 1e-15, with the /EOS/GRUNEISEN RHO_0 "
-        "cell stated as 1e-9, the deck's density) the deck reads IE +37.77 / "
-        "KE -34.27 % and the plate -30.29 % at 4.506x the cycles. A default "
-        "would need that density cell, refuted as a general rule in round 6, "
-        "and a stiffness that is not a one-deck calibration (a host with no "
-        "initial velocity gets none) - see ROADMAP.")
+        "fluid (its part carries KE 1.125e7 at cycle 0, LS-DYNA's 10.2). "
+        "--shell-in-solid-coupling (opt-in) writes the card as an "
+        "/INTER/TYPE18 with Stfval = 0.1 K A^2 / V (2812.5 on this deck) "
+        "plus the void density on the *INITIAL_VOID host: the plate -28.26 % "
+        "(RMS 24.53 %), the deck IE +42.28 / KE -38.13 % (RMS 30.51 / 4.88 %) "
+        "at 8.936x the cycles. It is not the default because the density "
+        "half has one member on five corpora and fails on both "
+        "*CONSTRAINED_LAGRANGE_IN_SOLID void hosts (bird_B stalls at t "
+        "2.227e-4; quadrature_B reaches 3.6 % of its run in 600 s).")
     return []
 
 

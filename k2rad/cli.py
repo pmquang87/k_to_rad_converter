@@ -834,6 +834,18 @@ def build_parser() -> argparse.ArgumentParser:
              "313.05 %% of the LS peak (better) - MIXED, both 5-13x LS.",
     )
     parser.add_argument(
+        "--shell-in-solid-coupling",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty "
+             "coupling of the embedded shells to their ALE host (Stfval = 0.1 K "
+             "A^2 / V, Gap = half the mean host edge) and, when the host is an "
+             "*INITIAL_VOID part, the void density (RHO_I = VFACT x RO, the EOS "
+             "RHO_0 = RO). OFF by default (one carrier on five corpora). "
+             "MEASURED on bird-el (nt 4): the plate -100 -> -28.26 %%, the deck "
+             "IE +1134.62 -> +42.28 %%, at 8.936x the cycles.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1523,6 +1535,7 @@ def main(argv=None) -> int:
         implicit_smooth_curve_sampling=args.implicit_smooth_curve_sampling,
         elastic_fluid_cp_cutoff=args.elastic_fluid_cp_cutoff,
         implicit_stub_with_type25=args.implicit_stub_with_type25,
+        shell_in_solid_coupling=args.shell_in_solid_coupling,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

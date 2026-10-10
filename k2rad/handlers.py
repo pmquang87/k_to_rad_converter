@@ -4919,9 +4919,15 @@ def handle_control_ale(block: Block, state: ConversionState) -> None:
     f = _card(block.raw, offset, fixed=True, n=8, w=10)
     if not f:
         return
+    # card 2 field 4 = VFACT (round 8, B10; read only by
+    # --shell-in-solid-coupling): blank or <= 0 keeps the 1e-6 default
+    f2 = (_card(block.raw, offset + 1, fixed=True, n=8, w=10)
+          if offset + 1 < len(block.raw) else [])
+    vfact = to_float(f2[3]) if len(f2) > 3 and f2[3].strip() else 0.0
     state.control_ale = ControlAle(
         meth=to_int(f[2]) if len(f) > 2 else 1,
-        afac=to_float(f[3]) if len(f) > 3 else 0.0)
+        afac=to_float(f[3]) if len(f) > 3 else 0.0,
+        vfact=vfact if vfact > 0.0 else 1.0e-6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10422,12 +10428,24 @@ def handle_constrained_shell_in_solid(block: Block,
     f = _card(block.raw, off, fixed=True, n=4, w=10)
     if not f or not f[0].strip():
         return
+    # card 2 (round 8, B10): START cols 1-10, END 11-20, PSSF 51-60; a
+    # blank cell keeps its default (0 / 1e20 / 0.1, Vol I R17 p.10-180/181)
+    f2 = (_card(block.raw, off + 1, fixed=True, n=8, w=10)
+          if off + 1 < len(block.raw) else [])
+
+    def _cell(i: int, default: float) -> float:
+        if len(f2) > i and f2[i].strip():
+            return to_float(f2[i])
+        return default
+    pssf = _cell(5, 0.1)
     state.shell_in_solid_cards.append(ShellInSolidCard(
         coupid=coupid, shsid=to_int(f[0]),
         ssid=to_int(f[1]) if len(f) > 1 else 0,
         shstyp=to_int(f[2]) if len(f) > 2 else 0,
         sstyp=to_int(f[3]) if len(f) > 3 else 0,
-        penalty=block.keyword.endswith("_PENALTY")))
+        penalty=block.keyword.endswith("_PENALTY"),
+        start=_cell(0, 0.0), end=_cell(1, 1.0e20),
+        pssf=pssf if pssf > 0.0 else 0.1, keyword=block.keyword))
 
 
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
