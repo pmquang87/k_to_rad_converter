@@ -7823,6 +7823,24 @@ def _emit_mat224_tab1(mat: MatTabulatedJC) -> List[str]:
 # (written as a blank 0, hm_read_mat06.F:154) rather than to -1e20.
 _LSD_CP_NO_CAVITATION = 1.0e20
 
+#: R14 triage round 8, B5: the sentence of a *MAT_ELASTIC_FLUID stated CP
+#: 0.0 written as a cut-off at zero ({tag} = the card's label). Decided on
+#: consistency: no reference in the corpora exercises the cell.
+_ELASTIC_FLUID_CP0_SENTENCE = (
+    "{tag}: CP=0.0 is stated on card 2: written as /MAT/HYD_VISC Pmin = "
+    "-1e-20, a cut-off at zero pressure. LS-DYNA keeps a stated CP 0 as its "
+    "cavitation pressure (the nvh 9.1 / 9.4 reference d3hsp echo 'cavitation "
+    "pressure = 0.00000E+00', 9.1.acoustic.compartment.hex.d3hsp:3471, not "
+    "its 1e20 default), while the Radioss reader takes a Pmin of exactly 0 "
+    "as -INFINITY (hm_read_mat06.F:154) and the EOS clamps its pressure at "
+    "Pmin (eospolyno.F:104 / 113 / 125); *MAT_NULL PC 0 gets the same -1e-20 "
+    "(round 7). The cell rests on that consistency: no reference in the "
+    "corpora exercises it - its four carriers are frequency-domain acoustic "
+    "decks (nvh 8.7 / 9.1 / 9.2 / 9.4), and on the one that runs (9.4: 18 "
+    "cycles at nt 4) both cells give 18 identical rows with zero energy. "
+    "--no-elastic-fluid-cp-cutoff keeps Pmin 0."
+)
+
 # ...but the literal 1e20 is a RAW NUMBER, so testing it alone is unit-system
 # dependent. The corpus proves it on one material: the W11 bird-strike "Head"
 # fluid writes CP = 1.0e20 in its SI (kg-m-s) copy and CP = 1e14 in the
@@ -8397,16 +8415,16 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 "pressure falls below it); the Radioss Pmin cut-off is the "
                 f"negative-going one, so this is written Pmin = {mat.pmin:g}. "
                 "Check the sign convention on card 2 field 2.")
+        elif state.options.elastic_fluid_cp_cutoff:
+            # An EXPLICIT CP = 0.0: LS-DYNA keeps the stated 0 as its cut-off
+            # (9.1...d3hsp:3471 'cavitation pressure = 0.00000E+00'); Pmin 0
+            # would be the reader's NO-cut-off sentinel (hm_read_mat06.F:154).
+            # R14 triage round 8, B5 -- the same cell *MAT_NULL PC 0 gets
+            # (round 7, B1); round 7's "deliberately not changed" is reversed.
+            mat.pmin = _VOID_CAVITATION_PMIN
+            state.warn(_ELASTIC_FLUID_CP0_SENTENCE.format(tag=tag))
         else:
-            # An EXPLICIT CP = 0.0 means "cavitate at zero pressure", which is
-            # NOT the same as a blank cell. Pmin = 0 cannot say it (it is the
-            # reader's "no cut-off" sentinel); Pmin = -1e-20 can, and is what
-            # the ELFORM-12 *INITIAL_VOID floor writes (round 6) and the
-            # *MAT_NULL PC cell writes for a PC 0 (round 7, B1) -- this
-            # *MAT_ELASTIC_FLUID mapping is deliberately not changed (B1 is
-            # keyed on the *MAT_NULL record; the 4 nvh acoustic compartments
-            # stay byte-identical; ROADMAP, the *MAT_ELASTIC_FLUID CP 0.0
-            # item).
+            # --no-elastic-fluid-cp-cutoff: the 4f5b6e8 cell (Pmin 0).
             mat.pmin = 0.0
             state.warn(
                 f"{tag}: CP=0.0 is written explicitly on card 2, i.e. "
@@ -8418,10 +8436,11 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 "silently. The zero-pressure threshold IS expressible as a "
                 "tiny negative Pmin: k2rad writes Pmin = -1e-20 on the fluid "
                 "of an ELFORM-12 *INITIAL_VOID deck (round 6; it turned the "
-                "quadrature_B and bird_B timeouts into NORMAL runs there), but "
-                "this card's mapping is not changed yet (ROADMAP) - write "
-                "Pmin = -1e-20 on the emitted /MAT/HYD_VISC if the cavitation "
-                "cut-off matters.")
+                "quadrature_B and bird_B timeouts into NORMAL runs there) and "
+                "on this card by default since round 8 - not here, because "
+                "--no-elastic-fluid-cp-cutoff was passed - write Pmin = -1e-20 "
+                "on the emitted /MAT/HYD_VISC if the cavitation cut-off "
+                "matters.")
         if mat.da != 0.0 or mat.db != 0.0:
             state.warn(
                 f"{tag}: DA={mat.da:g} / DB={mat.db:g} (axial and bending "

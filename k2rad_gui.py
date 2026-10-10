@@ -129,6 +129,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          adaptive_spring_token: bool = True,
                          imflag0_eigen_explicit: bool = True,
                          implicit_smooth_curve_sampling: bool = True,
+                         elastic_fluid_cp_cutoff: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -315,6 +316,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["implicit_smooth_curve_sampling"] = bool(implicit_smooth_curve_sampling)
 
+    kwargs["elastic_fluid_cp_cutoff"] = bool(elastic_fluid_cp_cutoff)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -468,6 +471,7 @@ class ConverterGUI:
         self.adaptive_spring_token = tk.BooleanVar(value=True)
         self.imflag0_eigen_explicit = tk.BooleanVar(value=True)
         self.implicit_smooth_curve_sampling = tk.BooleanVar(value=True)
+        self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1026,6 +1030,12 @@ class ConverterGUI:
             variable=self.implicit_smooth_curve_sampling).grid(
                 row=58, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*MAT_ELASTIC_FLUID stated CP 0.0 -> Pmin -1e-20 (a cut-off "
+                     "at zero, as *MAT_NULL PC 0) - ON",
+            variable=self.elastic_fluid_cp_cutoff).grid(
+                row=59, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1298,6 +1308,7 @@ class ConverterGUI:
                 adaptive_spring_token=self.adaptive_spring_token.get(),
                 imflag0_eigen_explicit=self.imflag0_eigen_explicit.get(),
                 implicit_smooth_curve_sampling=self.implicit_smooth_curve_sampling.get(),
+                elastic_fluid_cp_cutoff=self.elastic_fluid_cp_cutoff.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1517,6 +1528,9 @@ class ConverterGUI:
         if not kwargs.get("implicit_smooth_curve_sampling", True):
             bits.append("implicit smooth curves kept as /FUNCT_SMOOTH "
                         "(--no-implicit-smooth-curve-sampling)")
+        if not kwargs.get("elastic_fluid_cp_cutoff", True):
+            bits.append("*MAT_ELASTIC_FLUID CP 0.0 kept at Pmin 0 "
+                        "(--no-elastic-fluid-cp-cutoff)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

@@ -113,13 +113,13 @@ from k2rad.writer.common import _ref_flag_materials   # noqa: E402
 
 # ── Harness (same shape as tests/test_tabulated_jc.py) ───────────────────────
 
-def _convert(deck: str):
+def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -1082,8 +1082,8 @@ class TestFluidViscosity(unittest.TestCase):
 
 
 class TestFluidCavitation(unittest.TestCase):
-    def _pmin(self, card2):
-        _, starter = _convert(MESH(3) + _fluid(card2=card2) + "*END\n")
+    def _pmin(self, card2, **kw):
+        _, starter = _convert(MESH(3) + _fluid(card2=card2) + "*END\n", **kw)
         return _col_f(_cards(_block(starter, "/MAT/HYD_VISC/3"))[1], 21, 40)
 
     def test_default_CP_1e20_means_NO_cutoff_not_minus_1e20(self):
@@ -1108,15 +1108,19 @@ class TestFluidCavitation(unittest.TestCase):
             with self.subTest(cp=cp):
                 self.assertEqual(self._pmin((0.0, cp)), want)
 
-    def test_explicit_zero_CP_is_not_written_and_warned(self):
+    def test_explicit_zero_CP_opt_out_is_not_written_and_warned(self):
         # An explicit CP = 0.0 means "cavitate at p = 0", but Pmin = 0 is the
         # reader's sentinel for NO cut-off. dyna2rad has the same loss,
         # silently. Round 6 measured that Pmin = -1e-20 DOES state the
         # zero-pressure floor (the *INITIAL_VOID fluids), so the warning no
-        # longer calls it inexpressible -- it names the cell to write; the
-        # mapping itself is unchanged (still Pmin 0).
-        res, _ = _convert(MESH(3) + _fluid(card2=(0.0, 0.0)) + "*END\n")
-        self.assertEqual(self._pmin((0.0, 0.0)), 0.0)
+        # longer calls it inexpressible -- it names the cell to write. Since
+        # R14 triage round 8 (B5) that cell is the DEFAULT
+        # (test_r14_triage_8.ElasticFluidCpCutoff); the round-7 behaviour
+        # (Pmin 0 + this sentence) lives on under --no-elastic-fluid-cp-cutoff.
+        res, _ = _convert(MESH(3) + _fluid(card2=(0.0, 0.0)) + "*END\n",
+                          elastic_fluid_cp_cutoff=False)
+        self.assertEqual(self._pmin((0.0, 0.0),
+                                    elastic_fluid_cp_cutoff=False), 0.0)
         hits = _warns(res, "CP=0.0 is written explicitly")
         self.assertEqual(len(hits), 1)
         self.assertIn("is NOT WRITTEN here", hits[0])

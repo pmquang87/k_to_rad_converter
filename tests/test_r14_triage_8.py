@@ -2609,6 +2609,95 @@ class MatNullSphNuAndRGuard(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# B5 - *MAT_ELASTIC_FLUID stated CP 0.0 -> /MAT/HYD_VISC Pmin -1e-20
+#      (default ON, --no-elastic-fluid-cp-cutoff)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import test_impact_mats as _tim  # noqa: E402
+
+
+def _ef_deck(card2) -> str:
+    return _tim.MESH(3) + _tim._fluid(card2=card2) + "*END\n"
+
+
+def _ef_pmin_cell(starter: str) -> str:
+    """The Pmin cell (card 2 columns 21-40) of /MAT/HYD_VISC/3, as text."""
+    return _tim._cards(_tim._block(starter, "/MAT/HYD_VISC/3"))[1][20:40]
+
+
+_B5_HEAD = "CP=0.0 is stated on card 2"
+
+
+class ElasticFluidCpCutoff(unittest.TestCase):
+    """B5: LS-DYNA keeps a stated CP 0.0 as its cavitation pressure
+    (9.1.acoustic.compartment.hex.d3hsp:3471 'cavitation pressure =
+    0.00000E+00'), the Radioss reader takes a Pmin of exactly 0 as -INFINITY
+    (hm_read_mat06.F:154): the explicit-0.0 branch writes -1e-20 (the cell
+    *MAT_NULL PC 0 gets). Every other CP branch is unchanged in both arms.
+
+    Starter probe (this class's CP 0.0 deck, nt 4,
+    rcv_r8i_implB_b5_probe, harvested and deleted): 0 ERROR, the echo
+    PRESSURE CUTOFF -1.0000000000000E-20 (see the implement report B5)."""
+
+    def test_stated_zero_cp_is_minus_1e_20(self):
+        res, starter = _tim._convert(_ef_deck((0.0, 0.0)))
+        self.assertEqual(_ef_pmin_cell(starter), _f(-1.0e-20))
+        self.assertEqual(_ef_pmin_cell(starter), _t7._NU_PMIN_FLOOR[20:40])
+        hits = [w for w in res.warnings if _B5_HEAD in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("hm_read_mat06.F:154", "0.00000E+00",
+                       "d3hsp:3471", "eospolyno.F:104",
+                       "--no-elastic-fluid-cp-cutoff", "18 identical rows"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertEqual(_tim._warns(res, "CP=0.0 is written explicitly"), [])
+
+    def test_opt_out_keeps_pmin_0(self):
+        res, starter = _tim._convert(_ef_deck((0.0, 0.0)),
+                                     elastic_fluid_cp_cutoff=False)
+        self.assertEqual(_tim._col_f(
+            _tim._cards(_tim._block(starter, "/MAT/HYD_VISC/3"))[1], 21, 40),
+            0.0)
+        hits = _tim._warns(res, "CP=0.0 is written explicitly")
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("is NOT WRITTEN here", hits[0])
+        self.assertIn("--no-elastic-fluid-cp-cutoff was passed", hits[0])
+        self.assertNotIn("this card's mapping is not changed yet", hits[0])
+        self.assertFalse(_has(res.warnings, _B5_HEAD))
+
+    def test_every_other_branch_unchanged_in_both_arms(self):
+        cases = ((("0.0", ""), 0.0), (("0.0", "1.0E20"), 0.0),
+                 (("0.0", "1.0E6"), -1.0e6), (("0.0", "-1.0E6"), -1.0e6))
+        for card2, want in cases:
+            for on in (True, False):
+                with self.subTest(card2=card2, on=on):
+                    res, starter = _tim._convert(
+                        _ef_deck(card2), elastic_fluid_cp_cutoff=on)
+                    self.assertEqual(_tim._col_f(_tim._cards(_tim._block(
+                        starter, "/MAT/HYD_VISC/3"))[1], 21, 40), want)
+                    self.assertFalse(_has(res.warnings, _B5_HEAD))
+
+    def test_the_unit_screen_branch_unchanged(self):
+        """CP 1e14 with K 2200: the 'rescaled default' screen (|CP| >= 1e6
+        K) -> Pmin 0 in both arms."""
+        for on in (True, False):
+            with self.subTest(on=on):
+                deck = (_tim.MESH(3) + _tim._fluid(k="2200.0",
+                                                   card2=(0.0, "1.0E14"))
+                        + "*END\n")
+                res, starter = _tim._convert(deck,
+                                             elastic_fluid_cp_cutoff=on)
+                self.assertEqual(_tim._col_f(_tim._cards(_tim._block(
+                    starter, "/MAT/HYD_VISC/3"))[1], 21, 40), 0.0)
+                self.assertFalse(_has(res.warnings, _B5_HEAD))
+
+    def test_mat_null_flag_does_not_touch_it(self):
+        res, starter = _tim._convert(_ef_deck((0.0, 0.0)),
+                                     mat_null_pc_mu=False)
+        self.assertEqual(_ef_pmin_cell(starter), _f(-1.0e-20))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2622,8 +2711,11 @@ class Round8FlagWiringB(_t7.Round7FlagWiringA):
     _FLAGS = {
         "--imflag0-eigen-explicit": "imflag0_eigen_explicit",
         "--implicit-smooth-curve-sampling": "implicit_smooth_curve_sampling",
+        "--elastic-fluid-cp-cutoff": "elastic_fluid_cp_cutoff",
     }
     _HELP_FIGURES = {
+        "--elastic-fluid-cp-cutoff": ("0.00000E+00", "hm_read_mat06.F:154",
+                                      "18 rows"),
         "--imflag0-eigen-explicit": ("24329 cycles", "+3.93 %", "-18.30 %",
                                      "2.06 / 2.23 %",
                                      "tire.d3hsp:1056-1057"),

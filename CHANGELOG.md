@@ -139,6 +139,34 @@ Prior history (before this changelog was introduced) is summarized in the
     four pins of the pre-PC-cell sph/bird arm in `Round7ValidationRound` /
     `Round7PostReviewRound` were retired with the text they pinned (that
     arm measured a deck the shipped PC cell no longer produces).
+  - **B5 — `*MAT_ELASTIC_FLUID` stated CP 0.0 is written `/MAT/HYD_VISC`
+    Pmin -1e-20, a cut-off at zero (default ON,
+    `--no-elastic-fluid-cp-cutoff`).** LS-DYNA keeps a stated CP 0 as its
+    cavitation pressure (`9.1.acoustic.compartment.hex.d3hsp:3471` and the
+    9.4 d3hsp echo `cavitation pressure = 0.00000E+00`, not the 1e20
+    default) while the reader takes a Pmin of exactly 0 as -INFINITY
+    (`hm_read_mat06.F:154`; the EOS clamps at Pmin, `eospolyno.F:104` /
+    `113` / `125`), so k2rad's Pmin 0 was the opposite of the stated card;
+    `_resolve_mat_elastic_fluid`'s explicit-0.0 branch now writes
+    `_VOID_CAVITATION_PMIN` (`-1.000000E-20`, the cell `*MAT_NULL` PC 0 gets
+    since round 7). **This reverses round 7's B7.4.4 decision** ("CP 0.0
+    keeps Pmin 0 on the 4 nvh keys", kept then as a deliberate
+    inconsistency): the two emitters now agree. Decided on consistency - no
+    reference in the corpora exercises the cell. Measured (nt 4): the four
+    carriers move one cell each (`nvh` 8.7 / 9.1 / 9.2 / 9.4, 4 deck keys on
+    4 emitted models), the starter echo `PRESSURE CUTOFF`
+    -1.0000000200409E+20 -> -1.0000000000000E-20; 9.4 runs 18 = 18 cycles
+    with every printed row identical and IE / KE 0 throughout; 8.7 / 9.1 /
+    9.2 end after 1 cycle on either cell (their step exceeds t_end, not a
+    Pmin effect); all stay not_comparable. Blank, >= 1e20, the rescaled-
+    default screen, > 0 and < 0 are unchanged in both arms; the opt-out
+    keeps Pmin 0 and its sentence (now naming the flag). Tests that changed
+    their expected value: `test_impact_mats`
+    `test_explicit_zero_CP_is_not_written_and_warned` became
+    `test_explicit_zero_CP_opt_out_is_not_written_and_warned` under
+    `elastic_fluid_cp_cutoff=False` (its assertions hold there; the default
+    lives in `ElasticFluidCpCutoff`); its `_convert` / `_pmin` helpers take
+    `**kw`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

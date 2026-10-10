@@ -1049,7 +1049,8 @@ Couette coupon R 3.16 is unstable at h 0.1 and analytic at h / R); R stays
 0.0117 on the channel family, whose bytes do not move. TEROD / CEROD have no
 LAW6 cell and are named. The rule is keyed on the `*MAT_NULL`
 record: the 4 `*MAT_ELASTIC_FLUID` acoustic compartments (nvh 8.7 / 9.1 / 9.2 /
-9.4) write the same keyword from another record and do not move. The void floor
+9.4) write the same keyword from another record and are not moved by this rule
+(round 8 moves their stated CP 0.0 by its own rule, `--no-elastic-fluid-cp-cutoff`). The void floor
 keeps precedence; with `--no-initial-void-floor` alone a PC-0 void now gets
 `−1e-20` from this rule and a stated negative PC is written as stated — only
 both opt-outs restore `Pmin 0`. RE-MEASURED on the implementation at nt 4
@@ -1834,11 +1835,14 @@ carries the hand-conversion recipe ν ≈ VC·ΔL·a with a = √(K/ρ) already
 evaluated. `CP` (cavitation pressure) → `Pmin` with the sign flipped, but only
 when it is a real limit: LS-DYNA's documented default `CP = 1e20` means "no
 cavitation" and maps to `Pmin = 0` → −INFINITY, not to −1e20 (an explicit
-`CP = 0.0` is still written `Pmin = 0`, which the reader takes as its
-no-cutoff sentinel — reported. The zero-pressure floor itself IS expressible,
-as `Pmin = −1e-20`: round 6 writes exactly that on the `*INITIAL_VOID` fluids
-above and measured it there, but this card's mapping is not changed yet — see
-ROADMAP). That default is a **raw literal**, so
+`CP = 0.0` is written `Pmin = −1e-20` since round 8, a cut-off at zero:
+LS-DYNA keeps the stated 0 — its nvh 9.1 d3hsp echoes `cavitation pressure =
+0.00000E+00` — and `Pmin = 0` would be the reader's no-cutoff sentinel
+(`hm_read_mat06.F:154`); the same cell `*MAT_NULL` PC 0 gets and round 6 writes
+on the `*INITIAL_VOID` fluids above; `--no-elastic-fluid-cp-cutoff` keeps
+`Pmin 0`. Decided on consistency: the four carriers, nvh 8.7 / 9.1 / 9.2 / 9.4,
+are frequency-domain decks — on 9.4 both cells give the same 18 rows with zero
+energy). That default is a **raw literal**, so
 a unit-converted deck carries it rescaled — the corpus bird-strike fluid reads
 `CP = 1e20` in its kg-m-s copy and `CP = 1e14` in the ton-mm-s one, the same
 material — and testing the literal alone would make the emitted card depend on

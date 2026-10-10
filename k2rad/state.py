@@ -8054,6 +8054,17 @@ class ConvertOptions:
     # straight-ramp runs -> NORMAL in 202 cycles on 7 of 7 sine runs (a
     # status).
     implicit_smooth_curve_sampling: bool = True
+    # --no-elastic-fluid-cp-cutoff: write a *MAT_ELASTIC_FLUID stated CP 0.0
+    # as Pmin 0 (= -INFINITY, hm_read_mat06.F:154) as before round 8.
+    #
+    # ON by default (R14 triage round 8, B5):
+    # writer/materials._resolve_mat_elastic_fluid writes
+    # _VOID_CAVITATION_PMIN (-1e-20) for an EXPLICIT CP 0.0 - LS-DYNA keeps
+    # the stated 0 (9.1.acoustic.compartment.hex.d3hsp:3471) and *MAT_NULL PC
+    # 0 gets the same cell. A blank CP, CP >= 1e20, CP > 0 and CP < 0 are
+    # unchanged. Round 7's 'deliberately not changed' is reversed on
+    # consistency (no time-domain reference).
+    elastic_fluid_cp_cutoff: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

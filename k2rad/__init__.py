@@ -255,6 +255,7 @@ def convert(
     adaptive_spring_token: bool = True,
     imflag0_eigen_explicit: bool = True,
     implicit_smooth_curve_sampling: bool = True,
+    elastic_fluid_cp_cutoff: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -939,6 +940,18 @@ def convert(
         cycle 26 on 13 of 13 straight-ramp runs -> NORMAL in 202 cycles
         on 7 of 7 sine runs - a status, not a score. Reach 1 deck key
         on 1 emitted model. False keeps /FUNCT_SMOOTH.
+    elastic_fluid_cp_cutoff : bool
+        Write a *MAT_ELASTIC_FLUID stated CP 0.0 as /MAT/HYD_VISC Pmin
+        -1e-20, a cut-off at zero (round 8, B5): LS-DYNA keeps the
+        stated 0 as its cavitation pressure
+        (9.1.acoustic.compartment.hex.d3hsp:3471 'cavitation pressure =
+        0.00000E+00') while hm_read_mat06.F:154 reads a Pmin of exactly
+        0 as -INFINITY; *MAT_NULL PC 0 gets the same cell (round 7).
+        **On by default.** Decided on consistency - the four carriers
+        (nvh 8.7 / 9.1 / 9.2 / 9.4) are frequency-domain acoustic
+        decks; on 9.4 (nt 4) both cells give the same 18 rows with zero
+        energy. Reach 4 deck keys on 4 emitted models. False keeps Pmin
+        0 (= -INFINITY), the 4f5b6e8 cell.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1375,6 +1388,7 @@ def convert(
         adaptive_spring_token=adaptive_spring_token,
         imflag0_eigen_explicit=imflag0_eigen_explicit,
         implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
+        elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

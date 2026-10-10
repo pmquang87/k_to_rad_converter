@@ -808,6 +808,19 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-implicit-smooth-curve-sampling to keep /FUNCT_SMOOTH.",
     )
     parser.add_argument(
+        "--elastic-fluid-cp-cutoff",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a *MAT_ELASTIC_FLUID stated CP 0.0 as /MAT/HYD_VISC Pmin "
+             "-1e-20, a cut-off at zero: LS-DYNA keeps the stated 0 (nvh 9.1 "
+             "d3hsp: cavitation pressure = 0.00000E+00) while the reader takes "
+             "Pmin 0 as -INFINITY (hm_read_mat06.F:154) - the same cell "
+             "*MAT_NULL PC 0 gets. ON by default. Decided on consistency: the "
+             "four carriers (nvh 8.7 / 9.1 / 9.2 / 9.4) are frequency-domain "
+             "decks with no energy to score; on 9.4 both cells give the same 18 "
+             "rows. Use --no-elastic-fluid-cp-cutoff to keep Pmin 0.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1495,6 +1508,7 @@ def main(argv=None) -> int:
         adaptive_spring_token=args.adaptive_spring_token,
         imflag0_eigen_explicit=args.imflag0_eigen_explicit,
         implicit_smooth_curve_sampling=args.implicit_smooth_curve_sampling,
+        elastic_fluid_cp_cutoff=args.elastic_fluid_cp_cutoff,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
