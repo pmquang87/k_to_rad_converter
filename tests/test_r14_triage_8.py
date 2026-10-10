@@ -566,7 +566,9 @@ class NonRigidBcsUnion(unittest.TestCase):
         # the same digit in two skews is two DIFFERENT axes: never a restated
         # DOF (a union keyed by node alone would drop BC_2 here - the
         # mutation pass's survivor A3-01). Starter (a3_3b, nt 4): ERROR 148,
-        # the deck's own two-skew clash, as on a3_3.
+        # the deck's own two-skew clash, as on a3_3 - plus one WARNING 312
+        # (incompatible kinematic conditions) that a3_3 does not print: here
+        # both cards state x.
         r2, s2, _e2 = _convert(_plates(_SYS5 + _spc_node(14, 5, "110000")
                                        + _spc_node(14, 0, "100000")))
         self.assertEqual(_bcs_card(s2, "BC_1")[:3], ("110", "000", 5))
