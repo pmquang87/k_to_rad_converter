@@ -4151,14 +4151,16 @@ class Round7RoadmapRecord(unittest.TestCase):
 
     def test_the_queue_table_has_a_round_7_column(self):
         rows = self._table("| # | class | decks | closed by round 1 |")
-        self.assertTrue(rows[0].endswith("| round 6 | round 7 |"), rows[0])
+        # round 8 appends its column; this test keeps asserting its own
+        self.assertIn("| round 6 | round 7 |", rows[0])
         self.assertEqual(len(rows), 10)          # header, separator, 8 rows
         self._same_width(rows)
 
     def test_the_residue_table_has_a_round_7_column_and_the_tire_row(self):
         rows = self._table("| family | decks | death | verdict after round 3 |")
-        self.assertTrue(rows[0].endswith("| round 6 | round 7 |"), rows[0])
-        self.assertEqual(len(rows), 18)          # 15 families + tire.k
+        # round 8 appends its column and the efg/metal-cutting row
+        self.assertIn("| round 6 | round 7 |", rows[0])
+        self.assertGreaterEqual(len(rows), 18)   # 15 families + tire.k
         self._same_width(rows)
         tire = [r for r in rows if r.startswith("| `eigenvalue/tire.k`")]
         self.assertEqual(len(tire), 1)
@@ -4182,7 +4184,9 @@ class Round7RoadmapRecord(unittest.TestCase):
 
     def test_the_round_7_not_list_is_numbered_1_to_22(self):
         s = self._at("**What round 7 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # round 8's sections sit between this list and the starter-failure
+        # paragraph
+        e = self._at("**What round 8 closes, and what it does NOT.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]

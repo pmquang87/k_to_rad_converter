@@ -21,7 +21,14 @@ Prior history (before this changelog was introduced) is summarized in the
   with round 8's tie rule (the LAST row of a printed time; an equidistant
   fifth takes the earlier time; the RMS over the LS blocks 0 < t <=
   OpenRadioss's last row in % of the LS peak, the window named); every reach
-  as `N deck keys on M emitted models` (356 keys = 312 models).
+  as `N deck keys on M emitted models` (356 keys = 312 models). Part B's
+  default bytes move 8 deck keys / 8 emitted models (B1 1 / 1, B2 1 / 1, B4
+  1 / 1, B5 4 / 4, B6 1 / 1; B3 h.2, B7, B8, B9 and B10 0; the h.3 default
+  flip, its own last commit, adds `ie_shell` 1 / 1 if it is kept). B11 (the
+  opt-in `--weld-trajectory-impflux`) was specified and NOT built. ROADMAP:
+  the round-8 columns, the round-7 list annotated (one `**Round 8:**` line
+  per item), the round-8 NOT list (26 entries); the retracted spellings are
+  guarded by `Round8RetractedStatementsB` (only CHANGELOG quotes them).
   - **B1 — `*CONTROL_IMPLICIT_GENERAL` IMFLAG 0 beside
     `*CONTROL_IMPLICIT_EIGENVALUE` NEIG 0 converts on the EXPLICIT route
     (default ON, `--no-imflag0-eigen-explicit`).** LS-DYNA runs such a deck
@@ -272,7 +279,12 @@ Prior history (before this changelog was introduced) is summarized in the
     plus the 1e-6 t carriage, m_B 6.28e-5; −1.1e-10 relative) and holds it to
     t 0.0999 (+1.9e-9), NORMAL in 69627 cycles — the projection removes
     51.0 % of the initial kinetic energy at cycle 1, which the listing
-    prints as its ERROR. A driven screw gets no pad (EXP_SC_JOINT_SCREW and
+    prints as its ERROR. The pad's own effect, on a FLAT twin of A (2 mm
+    along the axis, I_axis 6.28e-4 against a transverse 3.17e-4; nt 4,
+    NORMAL in 69627 cycles on both arms): 20.019806 rad/s against the
+    closed form 20.019807 with the pad, 10.825171 without it (-45.9 %, the
+    closed form with the smallest principal inertia standing in, which is
+    what the Lagrange solver uses). A driven screw gets no pad (EXP_SC_JOINT_SCREW and
     the driven mini screw keep their 4f5b6e8 bytes). (q-ii) Refusal 11 by
     DOF class: a `*NODE` TC/RC, `*BOUNDARY_SPC` or `*CONSTRAINED_GLOBAL`
     code on a body node that acts only on DOFs the converted joint already
@@ -1134,7 +1146,9 @@ Prior history (before this changelog was introduced) is summarized in the
     a stated `Stfval` 562.5 alone: plate +195.21 % at 1.016× cycles; with
     the void density: deck IE +37.77 / KE −34.27 %, plate −30.29 % at 4.506×
     cycles — the density cell was refuted as a general rule in round 6 and
-    the `Vref` stiffness is a one-deck calibration). Its two ids travel
+    the `Vref` stiffness is a one-deck calibration) [superseded in round 8:
+    the deck rule Stfval = 0.1 K A²/V and its measured arm, see the round-8
+    B10 entry]. Its two ids travel
     through `*INCLUDE_TRANSFORM` in the bucket the type cell beside them
     names (`assembly._off_constrained_shell_in_solid`).
     `*CONSTRAINED_BEAM_IN_SOLID` stays a plain skip (reach 0). Reach 1 deck

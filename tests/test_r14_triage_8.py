@@ -4008,5 +4008,217 @@ class Round8FlagWiringB(_t7.Round7FlagWiringA):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B12 — the round-8 record (ROADMAP, CHANGELOG) and part B's retracted
+# spellings
+# ═════════════════════════════════════════════════════════════════════════════
+
+_read7 = _t7._read7
+_md_cells = _t7._md_cells
+_collapse = _t7._collapse
+_SHIPPED_TEXTS = _t7._SHIPPED_TEXTS
+
+
+class Round8RoadmapRecord(unittest.TestCase):
+    """B12.3 / B12.5: the ROADMAP record of round 8 - a round-8 column in the
+    queue table and in the implicit residue table (every row as wide as its
+    header), the `efg/metal-cutting` residue row, the residue restated, ONE
+    ``**Round 8:**`` line on each round-7 NOT item 1-22, the round-8 NOT list
+    numbered 1-26 with no placeholder, and the closes paragraph's ledger
+    marked EXPECTED (the campaign validator re-sums it)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lines = _read7("ROADMAP.md").splitlines()
+
+    def _at(self, prefix: str) -> int:
+        hits = [k for k, ln in enumerate(self.lines) if ln.startswith(prefix)]
+        self.assertEqual(len(hits), 1, prefix)
+        return hits[0]
+
+    def _table(self, header_prefix: str):
+        rows = []
+        for ln in self.lines[self._at(header_prefix):]:
+            if not ln.startswith("|"):
+                break
+            rows.append(ln)
+        return rows
+
+    def _same_width(self, rows):
+        width = _md_cells(rows[0])
+        for r in rows[1:]:
+            with self.subTest(row=r[:48]):
+                self.assertEqual(_md_cells(r), width)
+
+    def test_the_queue_table_has_a_round_8_column(self):
+        rows = self._table("| # | class | decks | closed by round 1 |")
+        self.assertTrue(rows[0].endswith("| round 7 | round 8 |"), rows[0])
+        self.assertEqual(len(rows), 10)
+        self._same_width(rows)
+
+    def test_the_residue_table_has_a_round_8_column_and_its_rows(self):
+        rows = self._table("| family | decks | death | verdict after round 3 |")
+        self.assertTrue(rows[0].endswith("| round 7 | round 8 |"), rows[0])
+        self.assertEqual(len(rows), 19)
+        self._same_width(rows)
+        mc = [r for r in rows if r.startswith("| `efg/metal-cutting`")]
+        self.assertEqual(len(mc), 1)
+        tire = [r for r in rows if r.startswith("| `eigenvalue/tire.k`")]
+        self.assertEqual(len(tire), 1)
+        last = tire[0].rstrip(" |").rsplit("|", 1)[1]
+        self.assertIn("explicit route", last)
+        self.assertIn("24329", last)
+        text = _collapse("\n".join(self.lines))
+        self.assertIn("**27 keys / 27 models**", text)
+        self.assertIn("134 / 107", text)
+
+    def test_every_round_7_item_carries_one_round_8_line(self):
+        s = self._at("**What round 7 deliberately does NOT close**")
+        e = self._at("**What round 8 closes, and what it does NOT.**")
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        self.assertEqual(len(starts), 22)
+        for n, (a, b) in enumerate(zip(starts, starts[1:] + [e]), 1):
+            with self.subTest(item=n):
+                self.assertTrue(self.lines[a].startswith(f"{n}. **"))
+                self.assertEqual(
+                    sum("**Round 8:**" in ln for ln in self.lines[a:b]), 1)
+
+    def test_the_round_8_not_list_is_numbered_1_to_26(self):
+        s = self._at("**What round 8 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        nums = [int(m.group(1)) for m in
+                (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
+                if m]
+        self.assertEqual(nums, list(range(1, 27)))
+        self.assertNotRegex("\n".join(self.lines[s:e]), r"<[a-z_ ]+>")
+
+    def test_the_closes_paragraph_states_an_EXPECTED_ledger(self):
+        s = self._at("**What round 8 closes, and what it does NOT.**")
+        e = self._at("**What round 8 deliberately does NOT close**")
+        para = _collapse("\n".join(self.lines[s:e]))
+        self.assertIn("EXPECTATION", para)
+        self.assertIn("normal 291 → 293", para)
+        self.assertIn("8 deck keys on 8 emitted models", para)
+
+
+class Round8ChangelogReSums(unittest.TestCase):
+    """B12.2: the "re-add every headline total" rule - part B's header
+    bullet's byte-mover count re-sums from its per-item counts, and every
+    per-item bullet states the same count."""
+
+    def _text(self) -> str:
+        return _collapse(_read7("CHANGELOG.md"))
+
+    def test_the_part_B_total_re_sums(self):
+        m = re.search(
+            r"Part B's default bytes move (\d+) deck keys / (\d+) emitted "
+            r"models \(B1 (\d+) / (\d+), B2 (\d+) / (\d+), B4 (\d+) / (\d+), "
+            r"B5 (\d+) / (\d+), B6 (\d+) / (\d+); B3 h\.2, B7, B8, B9 and B10 "
+            r"0;", self._text())
+        self.assertIsNotNone(m)
+        tot_k, tot_m, *items = map(int, m.groups())
+        self.assertEqual((sum(items[0::2]), sum(items[1::2])),
+                         (tot_k, tot_m))
+        self.assertEqual((tot_k, tot_m), (8, 8))
+
+    def test_the_item_bullets_state_the_same_counts(self):
+        text = self._text()
+        for needle in (
+                # B1 tire.k, B2 metal-cutting, B6 doorbeam
+                "Reach 1 deck key on 1 emitted model; the",
+                "Reach 1 deck key on 1 emitted model (0 explicit carriers)",
+                "Reach 1 deck key on 1 emitted model (the only stub carrier",
+                # B4 sph/bird, B5 the four nvh keys
+                "bytes 1 deck key on 1 emitted model (`sph/bird`, one cell)",
+                "`nvh` 8.7 / 9.1 / 9.2 / 9.4, 4 deck keys on",
+                # B7, B8, B10 and h.2 move no default byte
+                "Reach 0 deck keys on 0 emitted models (every implicit "
+                "thick-shell carrier",
+                "Reach: 0 byte movers; EXP_SC_JOINT_SCREW SHA-identical",
+                "bytes: 0 movers (bird-el SHA-identical",
+                "Default bytes: 0 movers (ie_shell SHA-identical"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+
+#: Part B statements a round-8 measurement made false (B12.6). CHANGELOG may
+#: quote them (it is the history); no other shipped text may.
+_RETRACTED_ROUND_8_B = (
+    # B2 - the A5 placeholder sentence (91.2 % is one run of seven)
+    "energy error of 91.2 %", "ERR 91.2 %", "a flat internal energy",
+    "a flat mid-run IE", "That row has no LS-DYNA reference",
+    "on 3 of 3 runs but with an energy error",
+    # B4 - the no-PC-cell pair, the pre-PC-cell sph/bird arm, the mechanism
+    "10.3 -> 29.6", "10.3 → 29.6", "IE 10.3 ", "1942 -> 1917", "1942 → 1917",
+    "IE RMS 44.37 % on both arms", "mechanism not found",
+    "ROADMAP: the bird_B mechanism first", "+ sph/boot",
+    # B5 - the CP 0.0 mapping
+    "this card's mapping is not changed yet", "is still written `Pmin = 0`",
+    # B7 - (f') and the LAW1-only route
+    "stiffer through the thickness", "-78.88", "−78.88", "-2.63 %", "−2.63 %",
+    "HA8, locking-free full integration", "applied to *MAT_ELASTIC only",
+    "so the route is never widened past LAW1",
+    # B8 - the screw's round-7 open points
+    "a screw without a drive is unmeasured", "a conflicting code is unmeasured",
+    "the next step is to fold a redundant code",
+    # B9 - the /MPC notes
+    "not characterised", "uncharacterised", "uncharacterized",
+    "Spotflag 27 held on that", "Spotflag-28 mechanism is not",
+    # B10 - round 7's SIS arms
+    "refuted as a general rule in round 6", "+195.21 %", "1.016x", "1.016×",
+    "4.506x", "4.506×",
+)
+
+#: ... and their replacements, which ARE shipped: (file, text).
+_REPLACEMENTS_ROUND_8_B = (
+    ("k2rad/writer/mesh.py", "13 of 13"),
+    ("k2rad/writer/materials.py", "29.58"),
+    ("k2rad/writer/materials.py", "-1e-20"),
+    ("k2rad/writer/tshell.py", "distortion"),
+    ("k2rad/writer/joint_screw.py", "has NO drive: converted without"),
+    ("k2rad/writer/loads.py", "READ from the code order"),
+    ("k2rad/writer/blast_ale.py", "2812.5 on this deck"),
+    ("ROADMAP.md", "**Characterised in round 8**"),
+    ("README.md", "`--shell-in-solid-coupling` — the embedded shells"),
+)
+
+
+class Round8RetractedStatementsB(unittest.TestCase):
+    """B12.6, the round-7 four-test shape: no retracted spelling in any
+    shipped text; the guard fires on a spelling split across adjacent
+    literals; the replacements ARE shipped; CHANGELOG still quotes each old
+    spelling that ever shipped, as its history."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_8_B:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_8_B:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_collapse(needle).lower(), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = {k.replace("\\", "/"): v for k, v in _SHIPPED_TEXTS()}
+        for rel, needle in _REPLACEMENTS_ROUND_8_B:
+            with self.subTest(file=rel, needle=needle):
+                self.assertIn(_collapse(needle), texts[rel])
+
+    def test_the_changelog_keeps_the_history(self):
+        text = _collapse(_read7("CHANGELOG.md"))
+        for needle in ("91.2 %", "10.3 → 29.6", "+195.21 %", "1.016×",
+                       "4.506×", "refuted as a general rule in round 6",
+                       "not characterised"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,7 +71,10 @@ that parses as a plain real number is taken as the conversion factor directly
 (`1.0E-6` works), and a blank one is `ERROR 574 UNIT NOT DEFINED`.
 
 Output is written as `<stem>_0000.rad` (starter) and `<stem>_0001.rad`
-(engine) next to the input file by default.
+(engine) next to the input file by default (with `--imflag-curve-restart` an
+IMFLAG < 0 deck whose curve switches the method gets one engine file per
+segment, `<stem>_0001.rad`, `<stem>_0002.rad`, ..., to be run in order from one
+directory).
 
 ### Python API
 
