@@ -546,6 +546,15 @@ class NonRigidBcsUnion(unittest.TestCase):
                              "two different systems (skews 0, 5)", "ERROR 148"),
                         res.warnings)
         self.assertFalse(_has(res.warnings, _WT1), res.warnings)
+        # the same digit in two skews is two DIFFERENT axes: never a restated
+        # DOF (a union keyed by node alone would drop BC_2 here - the
+        # mutation pass's survivor A3-01). Starter (a3_3b, nt 4): ERROR 148,
+        # the deck's own two-skew clash, as on a3_3.
+        r2, s2, _e2 = _convert(_plates(_SYS5 + _spc_node(14, 5, "110000")
+                                       + _spc_node(14, 0, "100000")))
+        self.assertEqual(_bcs_card(s2, "BC_1")[:3], ("110", "000", 5))
+        self.assertEqual(_bcs_card(s2, "BC_2")[:3], ("100", "000", 0))
+        self.assertFalse(_has(r2.warnings, _WT1), r2.warnings)
 
     def test_4_no_shared_node_is_byte_identical(self):
         deck = _plates(_spc_node(14, 0, "111000") + _spc_node(15, 0, "000111"))

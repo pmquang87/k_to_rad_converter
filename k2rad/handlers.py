@@ -4992,9 +4992,11 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
             # two numbers (a fused '0.0055.0', a blank abscissa) is re-read
             # there, blank = 0.0. ONLY where the split fails (decision D4):
             # a two-token line keeps the split, so a misaligned free-format
-            # line is never re-read.
+            # line is never re-read. A comma line never gets here:
+            # parse_free keeps an empty comma segment as a field, so it always
+            # yields two (the comma line keeps the free read by construction).
             data = _strip_inline_comment(line)
-            if "," not in data and data.strip():
+            if data.strip():
                 a = _fixed_curve_field(data[0:20])
                 o = _fixed_curve_field(data[20:40])
                 if a is not None and o is not None:

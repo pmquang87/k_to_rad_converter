@@ -1057,8 +1057,9 @@ class SpringTokenLumpedScreen(unittest.TestCase):
         """EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
         A5) moves the token cell this probe pins; the fixed-token assertion
         is kept under --no-adaptive-spring-token and the default's cell is
-        pinned beside it. Hand: each end own 9.8125e-8 on the thick-shell
-        stack -> MASS 9.8125e-8 / 2 x 2 = 4.90625e-8, share 2.453125e-8."""
+        pinned beside it. Hand: each end own 4.90625e-8 (7.85e-9 x 10 x 10
+        x 0.5 over the 8 thick-shell corners), mu 2.453125e-8 -> MASS 2 mu =
+        4.90625e-8, share 2.453125e-8."""
         _r, starter, _e = _convert(_tshell_weld_deck(),
                                    adaptive_spring_token=False)
         self.assertEqual(_admas_cards(starter),
