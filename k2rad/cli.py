@@ -780,6 +780,20 @@ def build_parser() -> argparse.ArgumentParser:
              "the fixed token.",
     )
     parser.add_argument(
+        "--imflag0-eigen-explicit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert a deck that states *CONTROL_IMPLICIT_GENERAL IMFLAG 0 and "
+             "*CONTROL_IMPLICIT_EIGENVALUE NEIG 0 on the EXPLICIT route: LS-DYNA "
+             "reads IMFLAG 0 as an explicit analysis and extracts no eigenvalue "
+             "(tire.d3hsp:1056-1057, :1316). ON by default. MEASURED on tire.k "
+             "at nt 4: the modal recipe stops at cycle 0 (LOADING DATA); the "
+             "explicit route ends NORMAL in 24329 cycles, END IE +3.93 %% / KE "
+             "-18.30 %%, RMS 2.06 / 2.23 %% of the LS peak (500 LS times to t "
+             "0.1). Use --no-imflag0-eigen-explicit to keep the modal K-export "
+             "route.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1465,6 +1479,7 @@ def main(argv=None) -> int:
         rigid_element_mass_admas=args.rigid_element_mass_admas,
         spotweld_dt_mass_scaling=args.spotweld_dt_mass_scaling,
         adaptive_spring_token=args.adaptive_spring_token,
+        imflag0_eigen_explicit=args.imflag0_eigen_explicit,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

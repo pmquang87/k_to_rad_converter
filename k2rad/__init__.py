@@ -253,6 +253,7 @@ def convert(
     rigid_element_mass_admas: bool = True,
     spotweld_dt_mass_scaling: bool = True,
     adaptive_spring_token: bool = True,
+    imflag0_eigen_explicit: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -911,6 +912,20 @@ def convert(
         runnable movers' printed rows identical at 1.000x the cycles;
         ex_17 / ex_18 (match) byte-identical. Inert under
         ``--no-spring-token-mass-compensation``.
+    imflag0_eigen_explicit : bool
+        Convert a deck whose *CONTROL_IMPLICIT_GENERAL states IMFLAG 0
+        and whose *CONTROL_IMPLICIT_EIGENVALUE states NEIG 0 on the
+        EXPLICIT route (round 8, B1): LS-DYNA runs it explicit
+        (tire.d3hsp:1056-1057 'eq.0: explicit analysis', :1316 NEIG 0).
+        The route is decided in handlers._resolve_eigen_route, called
+        by both handlers, so the cards' order does not matter. **On by
+        default.** MEASURED on
+        implicit/basic-examples/eigenvalue/tire.k (nt 4): the modal
+        recipe stopped at cycle 0 (LOADING DATA); the explicit route
+        ends NORMAL in 24329 cycles, END IE +3.93 % / KE -18.30 %, RMS
+        2.06 / 2.23 % of the LS peak over the 500 LS times to t 0.1.
+        Reach 1 deck key on 1 emitted model. False keeps the modal
+        K-export route of 4f5b6e8.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1345,6 +1360,7 @@ def convert(
         rigid_element_mass_admas=rigid_element_mass_admas,
         spotweld_dt_mass_scaling=spotweld_dt_mass_scaling,
         adaptive_spring_token=adaptive_spring_token,
+        imflag0_eigen_explicit=imflag0_eigen_explicit,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

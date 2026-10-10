@@ -5833,7 +5833,17 @@ named too (round 6): its default `IAUTO 0` is LS-DYNA's *"Constant time step
 size"* (Vol I R17 p.12-277), which k2rad's `/IMPL/DT/2` does not reproduce —
 see *Implicit dynamic notes* and `--implicit-constant-step`.
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
-(`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
+(`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`; **since
+round 8 a deck that states `*CONTROL_IMPLICIT_GENERAL` IMFLAG 0 and NEIG 0
+converts on the EXPLICIT route** (no `/IMPL`, no `/EIG`, no stiffness export):
+LS-DYNA reads IMFLAG 0 as an explicit analysis and extracts no eigenvalue
+(`tire.d3hsp:1056-1057`, `:1316`; its glstat is an explicit run). Measured on
+`implicit/basic-examples/eigenvalue/tire.k` (nt 4): the modal recipe's
+LOADING-DATA stop at cycle 0 → NORMAL in 24329 cycles, END IE +3.93 % / KE
+−18.30 %, RMS 2.06 / 2.23 % of the LS peak over the 500 LS times to t 0.1 (the
+campaign rule, the last row of a printed time). The route is decided after both
+cards are read, in either order; NEIG 0 without a `*CONTROL_IMPLICIT_GENERAL`
+keeps the modal route. `--no-imflag0-eigen-explicit` keeps the modal route.
 `*CONTROL_TERMINATION` → engine `/RUN/...`
 Engine restart (`.rst`) files are **off by default** (`/RFILE/OFF` in the engine
 deck) — they are only needed for `/RERUN`/crash recovery and are large; pass

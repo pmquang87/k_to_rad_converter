@@ -1941,5 +1941,200 @@ _PR8_WARN_SHA = {
 }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B (implement agent B)
+# ═════════════════════════════════════════════════════════════════════════════
+
+from k2rad import handlers as _handlers  # noqa: E402
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B1 - *CONTROL_IMPLICIT_GENERAL IMFLAG 0 + *CONTROL_IMPLICIT_EIGENVALUE NEIG 0
+#      -> the EXPLICIT route (default ON, --no-imflag0-eigen-explicit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _eig_deck(imflag="0", neig="0", order="eig_first", general=True,
+              extra="", n_general=1, first_imflag="1") -> str:
+    """Four ELFORM-2 *MAT_ELASTIC shells on a 3 x 3 node grid (10 mm), the
+    x = 0 edge held, a *LOAD_NODE_POINT on the far corner, t_end 0.001,
+    *CONTROL_IMPLICIT_EIGENVALUE with NEIG as TEXT (a blank can be written)
+    and, when *general*, *CONTROL_IMPLICIT_GENERAL with IMFLAG as text in
+    the given card order (*n_general* 2 states ``first_imflag`` first)."""
+    nodes = "*NODE\n" + "".join(
+        f"{3 * j + i + 1:>8}{10.0 * i:>16.1f}{10.0 * j:>16.1f}{0.0:>16.1f}\n"
+        for j in range(3) for i in range(3))
+    shells = "*ELEMENT_SHELL\n" + "".join(
+        "".join(f"{v:>8}" for v in (e, 1, n, n + 1, n + 4, n + 3)) + "\n"
+        for e, n in ((1, 1), (2, 2), (3, 4), (4, 5)))
+    eig = ("*CONTROL_IMPLICIT_EIGENVALUE\n" + f"{neig:>10}"
+           + _row(0.0, 0, 0.0, 0, 0.0, 2) + "\n")
+    gen = ""
+    if general:
+        if n_general == 2:
+            gen += ("*CONTROL_IMPLICIT_GENERAL\n" + f"{first_imflag:>10}"
+                    + _row(0.001) + "\n")
+        gen += ("*CONTROL_IMPLICIT_GENERAL\n" + f"{imflag:>10}"
+                + _row(0.001) + "\n")
+    controls = eig + gen if order == "eig_first" else gen + eig
+    return ("*KEYWORD\n" + controls
+            + "*CONTROL_TERMINATION\n" + _row(0.001) + "\n" + nodes
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            + shells
+            + "*SET_NODE_LIST\n" + _row(1) + "\n" + _row(1, 4, 7) + "\n"
+            "*BOUNDARY_SPC_SET\n" + _row(1, 0, 1, 1, 1, 1, 1, 1) + "\n"
+            "*DEFINE_CURVE\n" + _row(5) + "\n"
+            + f"{0.0:>20}{0.0:>20}\n{0.001:>20}{1.0:>20}\n"
+            "*LOAD_NODE_POINT\n" + _row(9, 3, 5, 10.0) + "\n"
+            + extra + "*END\n")
+
+
+def _ishell(starter: str, pid: int = 1) -> int:
+    """The Ishell field (first 10 columns of the first data row) of
+    /PROP/SHELL/<pid>."""
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines)
+             if ln.startswith(f"/PROP/SHELL/{pid}"))
+    row = next(ln for ln in lines[i + 2:] if not ln.startswith("#"))
+    return int(row[:10])
+
+
+_B1_S = _handlers._IMFLAG0_EIGEN_SENTENCE
+
+
+class Imflag0EigenExplicit(unittest.TestCase):
+    """B1: LS-DYNA runs a deck that states IMFLAG 0 and NEIG 0 EXPLICIT
+    (tire.d3hsp:1056-1057 'eq.0: explicit analysis', :1316 NEIG 0); k2rad
+    routes it explicit whatever the card order, once, with one sentence.
+    Every other eigen deck keeps the modal K-export route.
+
+    Starter + engine of the (0, 0) probe (nt 4, rcv_r8i_implB_b1_00,
+    harvested and deleted): 0 starter ERROR, NORMAL TERMINATION (see the
+    implement report B1)."""
+
+    def _assert_explicit(self, res, starter, engine):
+        self.assertNotIn("/IMPL", engine)
+        self.assertNotIn("/EIG", engine)
+        self.assertNotIn("/IMPL/PRINT/STIF", engine)
+        self.assertEqual(_ishell(starter), 12)
+        self.assertEqual(sum(w == _B1_S for w in res.warnings), 1,
+                         res.warnings)
+
+    def test_imflag0_neig0_converts_explicit(self):
+        for order in ("eig_first", "general_first"):
+            with self.subTest(order=order):
+                self._assert_explicit(*_convert(_eig_deck(order=order)))
+
+    def test_the_state_flags_follow_the_route(self):
+        for order in ("eig_first", "general_first"):
+            with self.subTest(order=order):
+                st = _dispatch(_eig_deck(order=order))
+                self.assertFalse(st.is_modal)
+                self.assertFalse(st.is_implicit)
+                self.assertTrue(st.imflag0_eigen_explicit_route)
+
+    def test_imflag0_neig0_equals_its_twin(self):
+        """M8, synthetic: the deck as stated vs the deck minus its
+        EIGENVALUE block - identical starter AND engine; the warning lists
+        differ by exactly the B1 sentence."""
+        res, starter, engine = _convert(_eig_deck())
+        twin = _eig_deck().replace(
+            "*CONTROL_IMPLICIT_EIGENVALUE\n" + f"{'0':>10}"
+            + _row(0.0, 0, 0.0, 0, 0.0, 2) + "\n", "")
+        self.assertNotIn("EIGENVALUE", twin)
+        res_t, starter_t, engine_t = _convert(twin)
+        self.assertEqual(starter, starter_t)
+        self.assertEqual(engine, engine_t)
+        self.assertEqual([w for w in res.warnings if w != _B1_S],
+                         list(res_t.warnings))
+        self.assertEqual(len(res.warnings), len(res_t.warnings) + 1)
+
+    def test_imflag1_neig0_stays_modal(self):
+        """The 12 ex_19 meshes' shape: IMFLAG 1 + NEIG 0 has LS eigen
+        products, so it stays modal."""
+        res, starter, engine = _convert(_eig_deck(imflag="1"))
+        self.assertIn("/IMPL/PRINT/STIF", engine)
+        self.assertNotIn(_B1_S, res.warnings)
+
+    def test_imflag0_neig5_stays_modal(self):
+        res, starter, engine = _convert(_eig_deck(neig="5"))
+        self.assertIn("/IMPL/PRINT/STIF", engine)
+        self.assertNotIn(_B1_S, res.warnings)
+
+    def test_blank_imflag_and_blank_neig_read_zero(self):
+        for imflag, neig in ((" ", "0"), ("0", " "), (" ", " ")):
+            with self.subTest(imflag=imflag, neig=neig):
+                self._assert_explicit(*_convert(_eig_deck(imflag=imflag,
+                                                          neig=neig)))
+
+    def test_no_general_card_stays_modal(self):
+        """DECISION B1-a: NEIG 0 with no *CONTROL_IMPLICIT_GENERAL keeps the
+        modal route (0 carriers on five corpora)."""
+        res, starter, engine = _convert(_eig_deck(general=False))
+        self.assertIn("/IMPL/PRINT/STIF", engine)
+        self.assertNotIn(_B1_S, res.warnings)
+        st = _dispatch(_eig_deck(general=False))
+        self.assertTrue(st.is_modal and st.is_implicit)
+
+    def test_two_general_cards_one_nonzero_stays_modal(self):
+        """IMFLAG 1 then 0 (NEIG 0): the LAST card reads 0, but a card
+        stated IMFLAG 1 - the guard reads every card, not
+        ``ctrl_implicit_gen`` (mutation target: ``gen.imflag == 0`` alone
+        fails this test)."""
+        for order in ("eig_first", "general_first"):
+            with self.subTest(order=order):
+                res, starter, engine = _convert(_eig_deck(
+                    n_general=2, first_imflag="1", order=order))
+                self.assertIn("/IMPL/PRINT/STIF", engine)
+                self.assertNotIn(_B1_S, res.warnings)
+
+    def test_opt_out_keeps_the_modal_route(self):
+        res, starter, engine = _convert(_eig_deck(),
+                                        imflag0_eigen_explicit=False)
+        res_g, starter_g, engine_g = _convert(_eig_deck(
+            order="general_first"), imflag0_eigen_explicit=False)
+        for r, s, e in ((res, starter, engine), (res_g, starter_g, engine_g)):
+            self.assertIn("/IMPL/PRINT/STIF", e)
+            self.assertEqual(_ishell(s), 24)
+            self.assertNotIn(_B1_S, r.warnings)
+
+    def test_negative_neig_is_not_zero(self):
+        res, starter, engine = _convert(_eig_deck(neig="-3"))
+        self.assertIn("/IMPL/PRINT/STIF", engine)
+        self.assertNotIn(_B1_S, res.warnings)
+
+    def test_the_sentence_carries_its_facts(self):
+        for needle in ("tire.d3hsp:1056-1057", "(:1316)", "24329 cycles",
+                       "+3.68 / -0.35 / -3.58 / -3.89 / +3.93 %",
+                       "-1.18 / -4.86 / +0.95 / -0.90 / -18.30 %",
+                       "END +3.93 / -18.30 %", "RMS 2.06 / 2.23 %",
+                       "the last row of a printed time",
+                       "--no-imflag0-eigen-explicit"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, _B1_S)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Part B's flags at every wiring site
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class Round8FlagWiringB(_t7.Round7FlagWiringA):
+    """B12.1: every round-8 part-B DEFAULT-ON lever reaches the parser (with
+    its --no- twin), the README prose, the --help render with its measured
+    figures, the GUI end to end, convert() / ConvertOptions (default True)
+    and cli.main()'s call - the round-7 checks, for this half's flags."""
+
+    _FLAGS = {
+        "--imflag0-eigen-explicit": "imflag0_eigen_explicit",
+    }
+    _HELP_FIGURES = {
+        "--imflag0-eigen-explicit": ("24329 cycles", "+3.93 %", "-18.30 %",
+                                     "2.06 / 2.23 %",
+                                     "tire.d3hsp:1056-1057"),
+    }
+
+
 if __name__ == "__main__":
     unittest.main()

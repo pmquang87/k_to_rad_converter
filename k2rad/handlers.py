@@ -8204,6 +8204,69 @@ def handle_contact_force_transducer(block: Block, state: ConversionState) -> Non
 # Control – Implicit
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: R14 triage round 8, B1: the sentence of the IMFLAG-0 + NEIG-0 explicit
+#: route (tests import it). Every figure is the tire.k run of the rule's own
+#: bytes (nt 4), scored by the campaign rule: the fifths take the OR row
+#: nearest k x t_end / 5 (the last row of a printed time), LS interpolated at
+#: that row's time; the RMS runs over the LS times 0 < t <= OR's last row.
+_IMFLAG0_EIGEN_SENTENCE = (
+    "*CONTROL_IMPLICIT_GENERAL IMFLAG 0 beside *CONTROL_IMPLICIT_EIGENVALUE "
+    "NEIG 0: converted on the EXPLICIT route (no /IMPL, no /EIG, no modal "
+    "stiffness export). LS-DYNA reads IMFLAG 0 as 'Explicit analysis' (Vol I "
+    "R17 *CONTROL_IMPLICIT_GENERAL) and NEIG 0 extracts no eigenvalue: the "
+    "reference d3hsp of implicit/basic-examples/eigenvalue/tire.k echoes "
+    "'implicit/explicit switching flag ... 0 / eq.0: explicit analysis' "
+    "(tire.d3hsp:1056-1057) and 'number of eigenvalues to extract ... 0' "
+    "(:1316), and its glstat is an explicit run (501 blocks to t 0.0999987 at "
+    "dt 4.004e-6). MEASURED on that deck at nt 4: the modal recipe stopped at "
+    "cycle 0 (SOLVER IMPLICIT STOPPED DUE TO LOADING DATA); the explicit route "
+    "ends NORMAL in 24329 cycles at t 0.1, internal / kinetic energy at the "
+    "fifths of t_end 0.1 +3.68 / -0.35 / -3.58 / -3.89 / +3.93 % and -1.18 / "
+    "-4.86 / +0.95 / -0.90 / -18.30 % against the LS glstat interpolated at "
+    "each row's time (the last row of a printed time), END +3.93 / -18.30 % "
+    "(LS at its last block t 0.0999987), RMS 2.06 / 2.23 % of the LS peak "
+    "over the 500 LS times 0 < t <= 0.1. The deck's other *CONTROL_IMPLICIT_* "
+    "cards are inert, as in LS-DYNA. --no-imflag0-eigen-explicit keeps the "
+    "modal route."
+)
+
+
+def _resolve_eigen_route(state: ConversionState) -> None:
+    """R14 triage round 8, B1: decide the route of a deck that states
+    ``*CONTROL_IMPLICIT_EIGENVALUE``.
+
+    Called at the END of both handlers, so the order of the two cards in the
+    deck does not matter (and a direct ``dispatch()`` caller gets the same
+    route). The deck goes EXPLICIT (``is_modal`` / ``is_implicit`` False: no
+    ``/IMPL``, no ``/EIG``, no modal stiffness export, no implicit element
+    formulations, no stub) only when NEIG reads 0 AND a
+    ``*CONTROL_IMPLICIT_GENERAL`` is present whose every card reads IMFLAG 0
+    AND the option is on. Every other eigen deck keeps the modal route of
+    4f5b6e8 (``is_modal`` / ``is_implicit`` True), including NEIG 0 with no
+    GENERAL card (0 carriers on five corpora: more likely a hand-trimmed
+    modal deck). The guard reads ``implicit_general_imflag_nonzero`` because
+    ``ctrl_implicit_gen`` keeps only the LAST card.
+    """
+    eig = state.ctrl_implicit_eig
+    if eig is None:
+        return
+    gen = state.ctrl_implicit_gen
+    explicit = (state.options.imflag0_eigen_explicit
+                and gen is not None
+                and not state.implicit_general_imflag_nonzero
+                and gen.imflag == 0
+                and eig.neig == 0)
+    if explicit:
+        state.is_modal = False
+        state.is_implicit = False
+        if not state.imflag0_eigen_explicit_route:
+            state.imflag0_eigen_explicit_route = True
+            state.warn(_IMFLAG0_EIGEN_SENTENCE)
+    else:
+        state.is_modal = True
+        state.is_implicit = True
+
+
 def handle_control_implicit_general(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
@@ -8216,7 +8279,9 @@ def handle_control_implicit_general(block: Block, state: ConversionState) -> Non
     nsbs   = to_int(f[3])
     if imflag != 0:
         state.is_implicit = True
+        state.implicit_general_imflag_nonzero = True
     state.ctrl_implicit_gen = ControlImplicitGeneral(imflag, dt0, imform, nsbs)
+    _resolve_eigen_route(state)
 
 
 def handle_control_implicit_solution(block: Block, state: ConversionState) -> None:
@@ -8470,7 +8535,9 @@ def handle_control_implicit_eigenvalue(block: Block, state: ConversionState) -> 
                uses ±1e29 sentinels for "no bound"; only a flagged, finite,
                positive bound is forwarded to /EIG Freqmin/Cutfreq.
     Sets state.is_modal (engine switches to /IMPL/LINEAR) and is_implicit (modal
-    IS an implicit analysis — keeps the implicit element formulations).
+    IS an implicit analysis — keeps the implicit element formulations) through
+    _resolve_eigen_route: an IMFLAG-0 + NEIG-0 deck is an LS-DYNA explicit run
+    (B1, round 8).
     """
     raw = block.raw
     if not raw:
@@ -8486,8 +8553,7 @@ def handle_control_implicit_eigenvalue(block: Block, state: ConversionState) -> 
     state.ctrl_implicit_eig = ControlImplicitEigenvalue(
         neig=abs(neig), freqmin=freqmin, cutfreq=cutfreq
     )
-    state.is_modal = True
-    state.is_implicit = True
+    _resolve_eigen_route(state)
 
 
 def handle_control_implicit_dynamics(block: Block, state: ConversionState) -> None:

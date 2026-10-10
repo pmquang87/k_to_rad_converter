@@ -11,6 +11,41 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 8 — PART B (implicit routing, curves,
+  the contact stub, the thick shell, `*MAT_NULL` / acoustic fluids, the screw
+  joint, the `/MPC` text, the opt-in couplings).** One commit per item, its
+  tests, README row and this sub-bullet in the same commit; every figure is a
+  measured arm against the LS-DYNA reference on `F:` (the LS instant named),
+  base-paired in one window with the 4f5b6e8 conversion from a pristine
+  checkout, `nt 4` unless stated; histories by the campaign rule (README 9.1)
+  with round 8's tie rule (the LAST row of a printed time; an equidistant
+  fifth takes the earlier time; the RMS over the LS blocks 0 < t <=
+  OpenRadioss's last row in % of the LS peak, the window named); every reach
+  as `N deck keys on M emitted models` (356 keys = 312 models).
+  - **B1 — `*CONTROL_IMPLICIT_GENERAL` IMFLAG 0 beside
+    `*CONTROL_IMPLICIT_EIGENVALUE` NEIG 0 converts on the EXPLICIT route
+    (default ON, `--no-imflag0-eigen-explicit`).** LS-DYNA runs such a deck
+    explicit (`tire.d3hsp:1056-1057` 'eq.0: explicit analysis', `:1316`
+    NEIG 0; its glstat has 501 explicit blocks to t 0.0999987 at dt
+    4.004e-6); k2rad sent it to the modal K-export recipe, which stopped at
+    cycle 0 on LOADING DATA (`handle_control_implicit_eigenvalue` set
+    `is_modal` / `is_implicit` unconditionally). The route is now decided
+    in `handlers._resolve_eigen_route`, called at the end of both handlers,
+    so the cards' order does not matter; the sentence prints once. Measured
+    on `implicit/basic-examples/eigenvalue/tire.k` (nt 4; the rule's bytes
+    = the hand twin's, F: tire.k minus lines 11-17, shown on the branch
+    before any number was quoted): NORMAL in 24329 cycles (modal: 0), IE /
+    KE at the fifths of t_end 0.1 +3.68 / -0.35 / -3.58 / -3.89 / +3.93 %
+    and -1.18 / -4.86 / +0.95 / -0.90 / -18.30 %, END +3.93 / -18.30 % (LS
+    at its last block t 0.0999987), RMS 2.06 / 2.23 % of the LS peak over
+    the 500 LS times 0 < t <= 0.1. Reach 1 deck key on 1 emitted model; the
+    62 IMFLAG-1 eigen keys are byte-identical. A deck with NEIG 0 and no
+    `*CONTROL_IMPLICIT_GENERAL` keeps the modal route (0 carriers); two
+    GENERAL cards of which one states IMFLAG != 0 keep it too. No existing
+    test changed its expected value (every test eigen card states NEIG 3 /
+    5 / 10); one docstring (`test_r14_triage_6`
+    `test_absent_on_a_modal_deck`) drops tire.k from its "modal shape".
+
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8
   and A6 share one: their flags are wired at the same sites); every figure below

@@ -3128,7 +3128,8 @@ class ImplicitDynamicInitialVelocityDefect(unittest.TestCase):
 
     def test_absent_on_a_modal_deck(self):
         """IMASS 1 beside *CONTROL_IMPLICIT_EIGENVALUE: the modal recipe
-        writes no /IMPL/DYNA/2 (the tire.k / 11.1.sbrake shape)."""
+        writes no /IMPL/DYNA/2 (the 11.1.sbrake shape; tire.k, IMFLAG 0 +
+        NEIG 0, is explicit since round 8)."""
         res, _s, engine = _convert(_iv_deck(modal=True))
         self.assertNotIn("/IMPL/DYNA/2", engine)
         self.assertFalse(_has(res.warnings, _B4_HEAD))

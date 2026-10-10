@@ -6192,7 +6192,9 @@ class ControlImplicitGeneral:
     # implicit with automatic implicit -> explicit switching, 6 explicit with
     # intermittent eigenvalue extraction, < 0: |IMFLAG| is a curve that
     # switches the method in time (Vol I R17 p.12-321; any value != 0 makes
-    # k2rad emit an implicit deck - writer/assembly._warn_imflag names it)
+    # k2rad emit an implicit deck - writer/assembly._warn_imflag names it).
+    # IMFLAG 0 beside an eigenvalue card with NEIG 0 = explicit (B1, round 8:
+    # handlers._resolve_eigen_route).
     imflag: int
     dt0: float          # initial time step
     imform: int
@@ -8023,6 +8025,18 @@ class ConvertOptions:
     # PROPERTY mass, r1len3.F:175). Reach 6 deck keys on 6 emitted models,
     # one cell each; the runnable movers' rows identical at 1.000x.
     adaptive_spring_token: bool = True
+    # --no-imflag0-eigen-explicit: keep the modal K-export route on a deck
+    # whose *CONTROL_IMPLICIT_GENERAL states IMFLAG 0 and whose
+    # *CONTROL_IMPLICIT_EIGENVALUE states NEIG 0. LS-DYNA runs that deck
+    # EXPLICIT (tire.d3hsp:1056-1057 'eq.0: explicit analysis', :1316 NEIG
+    # 0).
+    #
+    # ON by default (R14 triage round 8, B1). The route is decided in
+    # handlers._resolve_eigen_route at the end of BOTH handlers; NEIG 0
+    # without a *CONTROL_IMPLICIT_GENERAL keeps the modal route. MEASURED on
+    # tire.k (nt 4): cycle-0 LOADING DATA stop -> NORMAL in 24329 cycles, END
+    # IE +3.93 % / KE -18.30 %.
+    imflag0_eigen_explicit: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8808,6 +8822,12 @@ class ConversionState:
     # the inert contact stub (the eigen path ignores contact, and the stub
     # crashes the implicit-eigen setup).
     is_modal: bool = False
+    # R14 triage round 8, B1: any *CONTROL_IMPLICIT_GENERAL card stated
+    # IMFLAG != 0 (ctrl_implicit_gen keeps only the LAST card), and whether
+    # handlers._resolve_eigen_route took the IMFLAG-0 + NEIG-0 explicit route
+    # (its sentence is printed once).
+    implicit_general_imflag_nonzero: bool = False
+    imflag0_eigen_explicit_route: bool = False
     _auto_id: int = 90001               # counter for auto-generated IDs
     # Unit system written to the /BEGIN header (mass, length, time).
     # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().

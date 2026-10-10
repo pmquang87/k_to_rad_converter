@@ -127,6 +127,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          rigid_element_mass_admas: bool = True,
                          spotweld_dt_mass_scaling: bool = True,
                          adaptive_spring_token: bool = True,
+                         imflag0_eigen_explicit: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -309,6 +310,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["adaptive_spring_token"] = bool(adaptive_spring_token)
 
+    kwargs["imflag0_eigen_explicit"] = bool(imflag0_eigen_explicit)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -460,6 +463,7 @@ class ConverterGUI:
         self.rigid_element_mass_admas = tk.BooleanVar(value=True)
         self.spotweld_dt_mass_scaling = tk.BooleanVar(value=True)
         self.adaptive_spring_token = tk.BooleanVar(value=True)
+        self.imflag0_eigen_explicit = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1003,6 +1007,13 @@ class ConverterGUI:
             variable=self.adaptive_spring_token).grid(
                 row=56, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="IMFLAG 0 + NEIG 0 eigenvalue deck -> EXPLICIT route "
+                     "(LS-DYNA runs it explicit) - ON. tire.k cycle-0 stop -> "
+                     "NORMAL in 24329 cycles",
+            variable=self.imflag0_eigen_explicit).grid(
+                row=57, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1273,6 +1284,7 @@ class ConverterGUI:
                 rigid_element_mass_admas=self.rigid_element_mass_admas.get(),
                 spotweld_dt_mass_scaling=self.spotweld_dt_mass_scaling.get(),
                 adaptive_spring_token=self.adaptive_spring_token.get(),
+                imflag0_eigen_explicit=self.imflag0_eigen_explicit.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1486,6 +1498,9 @@ class ConverterGUI:
         if not kwargs.get("adaptive_spring_token", True):
             bits.append("fixed 1e-4 spring token MASS "
                         "(--no-adaptive-spring-token)")
+        if not kwargs.get("imflag0_eigen_explicit", True):
+            bits.append("IMFLAG-0 / NEIG-0 eigen deck kept on the modal route "
+                        "(--no-imflag0-eigen-explicit)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")
