@@ -202,6 +202,48 @@ Prior history (before this changelog was introduced) is summarized in the
     expected value: `test_r14_triage_7` `VdcRemedyNotAboutTheStub.test_3`
     is now `test_3_with_the_opt_in_a_TYPE25_only_deck_gets_the_stub_and_
     no_stub_sentence` (the round-7 shape lives on under the opt-in).
+  - **B7 (f') — the ELFORM 1 / 2 / 6 thick-shell sentence and README now
+    name the measured mechanism: distortion locking of the 8-node brick on a
+    thin single layer, not "stiffer through the thickness".** On a simply
+    supported 8 x 8 plate coupon against the Navier closed form (the
+    round-8 pre-research, nt 4 = nt 2) the brick route is exact on a
+    regular mesh (a/t 100 -0.18 %, a/t 10 +4.61 %; a mid-surface shell
+    -0.22 / +4.87 %) and locks on a distorted thin layer: -78.75 % at the
+    scored node against its own closed form 0.210006 mm, a mid-surface
+    shell -2.01 % (the pre-research's -78.88 / -2.63 % compared the node
+    with the CENTRE's closed form, 37.5 mm away); ex_02's 30 / 150-degree
+    parallelograms are that case (LS-DYNA ELFORM 2 IE 18.7x the brick
+    answer), and LS-DYNA calls its own layered-brick forms "distortion
+    sensitive" (Vol I R17 p.41-116 Remark 1). README's "locking-free" is
+    now attributed to the CFG label it comes from (`prop_p20_tshell.cfg:136`
+    / `prop_p14_solid.cfg:198`) with the distortion caveat. Text only: the
+    3 `_elform_2` keys on 3 emitted models re-texted, all 9 thick-shell keys
+    byte-identical.
+  - **B7 (g) — the implicit thick-shell `/PROP/SOLID` route (round 7, A4)
+    also takes LAW2 / LAW36 / LAW44 and carries the deck's NIP (`Inpts
+    2*100 + NIP*10 + 2`, `_tshell_inpts(14, NIP)` whatever the ELFORM;
+    LAW1 stays 222), under the existing `--no-implicit-tshell-solid`.**
+    Measured on a plastic thick-shell cantilever coupon (the round-8
+    pre-research: L/t 100, one element through the thickness,
+    elastic-perfectly-plastic, nt 4 = nt 2): `/PROP/TYPE20` stops at cycle 0
+    on all three laws (the `S8CKE3` tangent integrates the thickness with
+    one point, `s8cke3.F:354-364`); Inpts 222 runs but never yields
+    (plastic work 0); Inpts 252 ends NORMAL in 21 cycles (the coupon
+    converted here: 21 cycles, nt 4) with the tip -3.64 % against the
+    closed form at 0.9 M_p (-2.54 % against the TYPE20 thick shell run
+    quasi-statically in explicit: the constant-thickness-stress step is
+    off on `/PROP/SOLID`, `hm_read_prop14.F:305`). A LAW1 part sharing a
+    routed section is reset to 222 by the starter (WARNING 791,
+    `sgrtails.F:694-704`; measured on a mixed probe, 0 errors), which the
+    warning names; other laws and TYPE21 / TYPE22 keep their card with a
+    reworded warning; the NIP > 9 clamp sentence names the routed Inpts
+    292. Reach 0 deck keys on 0 emitted models (every implicit thick-shell
+    carrier is `*MAT_ELASTIC`; the 9 keys byte-identical, the LAW1 probe's
+    card pinned at 222 by its 4f5b6e8 SHA). Tests that changed their
+    expected value: `test_r14_triage_7` `ImplicitThickShellSolidRoute`
+    test_7 (a plastic law is now routed with Inpts 252 - "*MAT_ELASTIC
+    only" is retired) and test_9 (a mixed LAW1 + plastic section is routed
+    with 252 and the 791 sentence).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

@@ -2302,9 +2302,15 @@ reproducible run to run: of ten fresh base runs (six at `nt` 4, four at `nt` 2)
 nine end at +0.03 % and one `nt`-4 run at −0.04 % (energy error 73.8 %), while
 the route is identical at `nt` 4 and 2); `ex_13_*` (modal) stay
 status-only. Explicit decks keep
-TYPE20; a non-LAW1 law on an implicit deck, and `/PROP/TYPE21` / `TYPE22`,
-keep their card with a named warning — no plastic or orthotropic thick-shell
-coupon has been measured, so the route is never widened past LAW1. The
+TYPE20; the plastic laws LAW2 / LAW36 / LAW44 take the route too since round 8
+with the deck's NIP carried (`Inpts 2·100 + NIP·10 + 2`; LAW1 stays 222): on a
+plastic thick-shell cantilever coupon `/PROP/TYPE20` stops at cycle 0 and the
+route ends NORMAL in 21 cycles at −3.64 % against the closed form at 0.9 M_p
+(−2.54 % against the thick shell run quasi-statically in explicit; the
+constant-thickness-stress step is off on `/PROP/SOLID`); other laws,
+`/PROP/TYPE21` and `TYPE22` keep their card with a named warning (no coupon);
+a LAW1 part sharing a routed plastic section is reset to 222 by the starter
+(WARNING 791), which the warning names. The
 elements stay thick shells to every other pass (the solid hourglass remap does
 not touch the card; the contact stub, the free-node guard, the mass and output
 walks still see them).
@@ -2334,15 +2340,22 @@ volume (measured 1.950E-10 against the correct 3.900E-10, with the starter
 reporting NORMAL TERMINATION and 0 ERRORS); all three spellings now give ρ·V.
 
 `ELFORM` → `Isolid`: **1 → 15** (HSEPH, under-integrated + physical
-stabilization), **everything else → 14** (HA8, locking-free full integration) —
-dyna2rad's own total map. What that costs is named per section: ELFORM 5 and 6
-lose their REDUCED integration, and ELFORM 1/2/6 lose their PLANE-STRESS
-treatment, because they are extruded thin shells with an uncoupled
-thickness-direction stiffness (Vol I R16 p.3717 Remark 1) while **every** Radioss
-thick shell is a 3D-stress element — measured on
-`ex_02_thick_shell_elform_2.k`, LS-DYNA's ELFORM 2 internal energy 0.771729 is
-18.7× the 8-node brick answer 0.04124 that both `/PROP/TYPE20` (explicit) and
-`/PROP/SOLID` Isolid 14 (implicit) give. A **blank** `ELFORM` is LS-DYNA's default 1,
+stabilization), **everything else → 14** (HA8 full integration — "Locking-Free"
+is the solver CFG's own label for Isolid 14, `prop_p20_tshell.cfg:136` /
+`prop_p14_solid.cfg:198`; it holds on a regular mesh, and the element LOCKS on a
+distorted thin single layer: −78.75 % at the scored node of a distorted 8 × 8
+plate coupon, where a mid-surface shell reads −2.01 %) — dyna2rad's own total
+map. What that costs is named per section: ELFORM 5 and 6 lose their REDUCED
+integration, and ELFORM 1/2/6 lose their PLANE-STRESS treatment, because they
+are extruded thin shells with an uncoupled thickness-direction stiffness (Vol I
+R16 p.3717 Remark 1) while **every** Radioss thick shell is a 3D-stress 8-node
+element, which reproduces a plate on a regular mesh (a/t 100 −0.18 %, a/t 10
++4.61 % against the closed form) but locks on a distorted thin layer — on
+`ex_02_thick_shell_elform_2.k` (30 / 150-degree parallelograms, one 10 mm
+layer) LS-DYNA's ELFORM 2 internal energy 0.771729 is 18.7× the 8-node brick
+answer 0.04124 that both `/PROP/TYPE20` (explicit) and `/PROP/SOLID` Isolid 14
+(implicit) give; LS-DYNA calls its own layered-brick forms "distortion
+sensitive" (Vol I R17 p.41-116 Remark 1). A **blank** `ELFORM` is LS-DYNA's default 1,
 not 0 — dyna2rad reads the blank as 0 and lands on the full-integration HA8,
 i.e. the opposite element class from the one the deck asked for by leaving the
 field empty. An out-of-range value (there is no ELFORM 4) is warned and mapped

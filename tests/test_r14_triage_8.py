@@ -2815,6 +2815,147 @@ class ImplicitStubWithType25(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# B7 - (f') the ELFORM 1 / 2 / 6 thick-shell text, (g) the implicit
+#      /PROP/SOLID route widened to LAW2 / LAW36 / LAW44 with the NIP
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ts_deck = _t7._ts_deck
+_TS_TWO = _t7._TS_TWO
+_TS_ELASTIC = _t7._TS_ELASTIC
+_TS_EXPLICIT = _t7._TS_EXPLICIT
+_block_lines = _t7._block_lines
+_PLP = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+        + _row(1, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0) + "\n"
+        + _row(0.0, 0.0, 0.0) + "\n" + _row() + "\n" + _row() + "\n")
+_B7_ROUTED = "Isolid 14 with Inpts"
+#: sha256 of the 4f5b6e8 starter of _ts_deck() (the all-LAW1 routed card,
+#: Inpts 222) - converted from the pristine checkout through
+#: test_r14_triage_7._convert; B7 (g) must not move it
+_B7_LAW1_4F5B6E8_SHA = (
+    "bfb14bbfa5ebd7d7fb0e324bbb715289a2db7474ff341bdddcc23d774263a1c0")
+
+
+def _solid_card(starter: str, prop: int = 1):
+    """(Isolid, Icpre, Inpts) of /PROP/SOLID/<prop>."""
+    row = _block_lines(starter, f"/PROP/SOLID/{prop}")[3]
+    return int(row[0:10]), int(row[30:40]), int(row[50:60])
+
+
+class TshellTextAndPlasticRoute(unittest.TestCase):
+    """B7: (f') the ELFORM 1 / 2 / 6 sentence names distortion locking (the
+    plate coupons, scored AT the node); (g) the implicit route takes the
+    plastic laws a coupon measured, LAW2 / LAW36 / LAW44, with Inpts
+    _tshell_inpts(14, NIP) = 2*100 + NIP*10 + 2 (LAW1 stays 222).
+
+    Starter + engine runs (nt 4, rcv_r8i_implB_b7_probe{2,9}, harvested
+    and deleted): test 2's deck (LAW36, Inpts 252) 0 ERROR, no WARNING 791,
+    NORMAL in 101 cycles; the mixed LAW1 + LAW36 deck 0 ERROR with WARNING
+    791 on the LAW1 group ('... NOT EQUAL TO 2, SET IT TO 2'), NORMAL in 101
+    cycles; the pre-research's free-root plastic cantilever converted here
+    ends NORMAL in 21 cycles."""
+
+    def test_f_prime_sentence(self):
+        res, _s, _e = _convert(_ts_deck(control=_TS_EXPLICIT))
+        hits = [w for w in res.warnings if "PLANE-STRESS" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("-78.75 %", "0.210006 mm", "-2.01 %", "-0.18 %",
+                       "+4.61 %", "distortion sensitive", "p.41-116",
+                       "0.771729", "18.7x"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        for gone in ("stiffer through the thickness", "-78.88", "-2.63"):
+            self.assertNotIn(gone, hits[0])
+
+    def test_plastic_law_is_routed_with_nip(self):
+        res, starter, _e = _convert(_ts_deck(mat=_PLP))
+        self.assertNotIn("/PROP/TYPE20/1", starter)
+        self.assertEqual(_solid_card(starter), (14, 0, 2 * 100 + 5 * 10 + 2))
+        hits = [w for w in res.warnings if _B7_ROUTED in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("/MAT/LAW36", "Inpts 252", "NIP=5", "21 cycles",
+                       "-3.64 %", "-2.54 %", "hm_read_prop14.F:305",
+                       "--no-implicit-tshell-solid"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("WARNING 791", hits[0])
+        self.assertFalse(_has(res.warnings, "kept on /PROP/TYPE20"))
+
+    def test_law2_and_law44_routed(self):
+        mats = {
+            "*MAT_ISOTROPIC_ELASTIC_PLASTIC": (
+                "*MAT_ISOTROPIC_ELASTIC_PLASTIC\n"
+                + _row(1, 7.85e-9, 80000.0, 250.0, 1000.0, 160000.0) + "\n"),
+            "*MAT_PLASTIC_KINEMATIC": (
+                "*MAT_PLASTIC_KINEMATIC\n"
+                + _row(1, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0, 0.0) + "\n"
+                + _row(0.0, 0.0, 0.0) + "\n"),
+        }
+        for name, card in mats.items():
+            with self.subTest(mat=name):
+                res, starter, _e = _convert(_ts_deck(mat=card))
+                self.assertNotIn("/PROP/TYPE20/1", starter)
+                self.assertEqual(_solid_card(starter)[2], 252)
+                hits = [w for w in res.warnings if _B7_ROUTED in w]
+                self.assertEqual(len(hits), 1, res.warnings)
+                self.assertTrue(any(f"/MAT/LAW{n}" in hits[0]
+                                    for n in (2, 44)), hits[0])
+
+    def test_nip_digit(self):
+        res3, s3, _e = _convert(_ts_deck(mat=_PLP, nip=3))
+        self.assertEqual(_solid_card(s3)[2], 232)
+        res12, s12, _e = _convert(_ts_deck(mat=_PLP, nip=12))
+        self.assertEqual(_solid_card(s12)[2], 292)
+        self.assertTrue(_has(res12.warnings, "NIP=12 exceeds",
+                             "/PROP/SOLID Inpts on the implicit route, 292"),
+                        res12.warnings)
+
+    def test_unmeasured_law_keeps_type20(self):
+        foam = ("*MAT_LOW_DENSITY_FOAM\n"
+                + _row(1, 1.0e-10, 1.0, 9) + "\n" + _row() + "\n"
+                "*DEFINE_CURVE\n" + _row(9) + "\n"
+                + f"{0.0:>20}{0.0:>20}\n{0.5:>20}{1.0:>20}\n")
+        res, starter, _e = _convert(_ts_deck(mat=foam))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertTrue(_has(res.warnings, "kept on /PROP/TYPE20",
+                             "LAW2 / LAW36 / LAW44 a coupon measured"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, "applied to *MAT_ELASTIC only"))
+
+    def test_explicit_plastic_keeps_type20(self):
+        res, starter, _e = _convert(_ts_deck(control=_TS_EXPLICIT, mat=_PLP))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertFalse(_has(res.warnings, _B7_ROUTED))
+
+    def test_opt_out_keeps_type20_on_plastic(self):
+        res, starter, _e = _convert(_ts_deck(mat=_PLP),
+                                    implicit_tshell_solid=False)
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertFalse(_has(res.warnings, _B7_ROUTED))
+
+    def test_law1_byte_pinned(self):
+        res, starter, _e = _convert(_ts_deck())
+        self.assertEqual(_solid_card(starter), (14, 0, 222))
+        self.assertTrue(_has(res.warnings, _t7._TS_ROUTED), res.warnings)
+        self.assertFalse(_has(res.warnings, _B7_ROUTED))
+        self.assertEqual(_sha(starter), _B7_LAW1_4F5B6E8_SHA)
+
+    def test_mixed_law1_and_plastic_names_the_791_reset(self):
+        two = (_TS_TWO.replace("       2       1       2       9",
+                               "       2       2       2       9"))
+        parts = ("*PART\ntshell part\n" + _row(1, 1, 1) + "\n"
+                 "*PART\nplastic part\n" + _row(2, 1, 2) + "\n")
+        plp2 = _PLP.replace(_row(1, 7.85e-9), _row(2, 7.85e-9), 1)
+        res, starter, _e = _convert(_ts_deck(elem=two, part=parts,
+                                             mat=_TS_ELASTIC + plp2))
+        self.assertEqual(_solid_card(starter)[2], 252)
+        hits = [w for w in res.warnings if _B7_ROUTED in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("reset to 222 per element group", hits[0])
+        self.assertIn("WARNING 791, sgrtails.F:694-704", hits[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
 

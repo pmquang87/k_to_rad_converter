@@ -1475,15 +1475,23 @@ class ImplicitThickShellSolidRoute(unittest.TestCase):
         self.assertTrue(_has(res2.warnings, _TS_KEPT, "kept on /PROP/TYPE21"),
                         res2.warnings)
 
-    def test_7_a_plastic_law_keeps_TYPE20_and_is_named(self):
+    def test_7_a_plastic_law_is_routed_with_its_NIP(self):
+        """Round 8, B7 (g) widens the route to the plastic laws the coupon
+        measured (EXPECTED VALUE MOVED: "*MAT_ELASTIC only" is retired) -
+        LAW36 on NIP 5 goes to /PROP/SOLID Isolid 14 Inpts 2*100 + 5*10 + 2
+        = 252 (the round-7 shape lives on under --no-implicit-tshell-solid,
+        test_r14_triage_8.TshellTextAndPlasticRoute)."""
         plp = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
                + _row(1, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0) + "\n"
                + _row(0.0, 0.0, 0.0) + "\n" + _row() + "\n" + _row() + "\n")
         res, starter, _e = _convert(_ts_deck(mat=plp))
-        self.assertIn("/PROP/TYPE20/1", starter)
-        self.assertNotIn("/PROP/SOLID/1", starter)
-        self.assertTrue(_has(res.warnings, _TS_KEPT, "kept on /PROP/TYPE20",
-                             "*MAT_ELASTIC only"), res.warnings)
+        self.assertNotIn("/PROP/TYPE20/1", starter)
+        blk = self._card(starter)
+        self.assertEqual(int(blk[3][0:10]), 14)
+        self.assertEqual(int(blk[3][50:60]), 252)
+        self.assertTrue(_has(res.warnings, "IMPLICIT deck, /MAT/LAW36",
+                             "Inpts 252", "21 cycles"), res.warnings)
+        self.assertFalse(_has(res.warnings, _TS_KEPT, "kept on /PROP/TYPE20"))
 
     def test_8_the_solid_hourglass_remap_never_touches_the_card(self):
         hg = ("*CONTROL_HOURGLASS\n" + _row(6, 0.1) + "\n"
@@ -1498,7 +1506,11 @@ class ImplicitThickShellSolidRoute(unittest.TestCase):
         part_card = _block_lines(starter, "/PART/1")
         self.assertEqual(int(part_card[2][0:10]), 1)   # prop_ID = the SECID
 
-    def test_9_mixed_laws_on_one_section_are_not_routed(self):
+    def test_9_mixed_laws_are_routed_with_252_and_the_791_sentence(self):
+        """Round 8, B7 (g): LAW1 + LAW36 on one section is routed with the
+        NIP digit (EXPECTED VALUE MOVED: round 7 kept such a section on
+        TYPE20); the starter resets the LAW1 element group to 222 with
+        WARNING 791 (sgrtails.F:694-704), which the sentence names."""
         two = (_TS_TWO.replace("       2       1       2       9",
                                "       2       2       2       9"))
         parts = ("*PART\ntshell part\n" + _row(1, 1, 1) + "\n"
@@ -1508,10 +1520,11 @@ class ImplicitThickShellSolidRoute(unittest.TestCase):
                + _row(0.0, 0.0, 0.0) + "\n" + _row() + "\n" + _row() + "\n")
         res, starter, _e = _convert(_ts_deck(elem=two, part=parts,
                                              mat=_TS_ELASTIC + plp))
-        self.assertIn("/PROP/TYPE20/1", starter)
-        self.assertNotIn("/PROP/SOLID/1", starter)
-        self.assertTrue(_has(res.warnings, _TS_KEPT, "/MAT/LAW1",
-                             "kept on /PROP/TYPE20"), res.warnings)
+        self.assertNotIn("/PROP/TYPE20/1", starter)
+        blk = self._card(starter)
+        self.assertEqual(int(blk[3][50:60]), 252)
+        self.assertTrue(_has(res.warnings, "/MAT/LAW1, /MAT/LAW36",
+                             "Inpts 252", "WARNING 791"), res.warnings)
 
     def test_10_the_routed_elements_stay_thick_shells_for_every_walk(self):
         """The route changes the PROPERTY only: the elements stay in
