@@ -53,7 +53,7 @@ from .common import (
     _vsub,
 )
 # One-way: materials imports .common and .blast_ale only, never .mesh.
-from .materials import _null_part_eos_bindings
+from .materials import _null_part_eos_bindings, guarded_prop_h
 # One-way: truss imports .common and ..state only; its ONE reference back into
 # this module (_target_mat_law, for the /TRUSS material gate) is a local import
 # inside the function, the same shape as _plas_kin_law2_eligible's.
@@ -3338,9 +3338,16 @@ def _make_properties(state: ConversionState) -> List[str]:
             # formulation these parts were given is taken away again.
             state.ismstr10_solid_secids.add(sec.secid)
         _warn_assumed_strain_elform(state, sec, isolid)
+        # Round 8, B4 (F1): a viscous (*MAT_NULL MU) brick part on this prop
+        # whose R = 10 Nu / (c0 dmin) > 1 gets h / R (materials.guarded_prop_h).
+        prop_pids = [pid for pid, sid in part_secids.items()
+                     if sid == sec.secid and pid not in split_pids]
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain,
-                                  hcoef=_assumed_strain_h(state, sec, isolid, h),
+                                  hcoef=guarded_prop_h(
+                                      state, sec.secid, prop_pids, isolid,
+                                      _assumed_strain_h(state, sec, isolid,
+                                                        h)),
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
     _warn_default_solid_hourglass(state, default_hg_moved)
@@ -5281,7 +5288,9 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             _warn_assumed_strain_elform(state, sec, isolid)
             lines += _emit_prop_solid(
                 prop_id, title, isolid, iale, itetra10, istrain,
-                hcoef=_assumed_strain_h(state, sec, isolid, coeff),
+                hcoef=guarded_prop_h(          # round 8, B4 (F1)
+                    state, prop_id, siblings, isolid,
+                    _assumed_strain_h(state, sec, isolid, coeff)),
                 ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)

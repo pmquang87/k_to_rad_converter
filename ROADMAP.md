@@ -2225,20 +2225,19 @@ that decided it and the deck that would decide it next.
 
 1. **The `*MAT_NULL` MU → Nu cell on Lagrangian solids, SPH parts, ELFORM-12 /
    `*INITIAL_VOID` decks and AMMG parts** (round-6 item 4, the part B1 does
-   not carry): `impact.k`'s Lagrangian bar IE 10.3 → 29.6 against LS-DYNA's
-   15.7 under Nu 1000 (deck IE +58.98 → +76.80 %, RMS 32.62 → 42.53 %, 2432
-   → 2482 cycles; with the PC cell as well +71.13 %, RMS 40.13, 2509 cycles;
-   nt 4, re-measured on the implementation); `bird_B` under Nu 12804 CREATES
-   energy (energy error 99.9 % from ~cycle 500, END IE +1484.66 → +20691.23 %,
-   IE RMS 12094.85 %) with no mechanism found (not a viscous step violation:
-   h²/(6ν) = 1.75e-6 s above the step 2.04e-7 s). The channel decks and
-   `impact.k`'s bar are the SAME OpenRadioss element (Isolid 1, Iale 0: ELFORM
-   6 is converted Lagrangian since round 5), so B1's Nu scope is a
-   deck-statement scope. Next: a Couette coupon (a sheared null-material slab
-   against the analytic velocity profile) on a Lagrangian and an SPH part, and
-   the `bird_B` mechanism. Reach 4 keys / 4 models (`impact`, `sph/bird` —
-   near-inert there: Nu 1 left the IE history where it was, IE RMS 44.37 % on
-   both arms, END IE +69.44 → +69.28 %, 1942 → 1917 cycles —, `bird_A`,
+   not carry): `impact.k`'s Lagrangian bar IE 16.60 → 29.58 mJ against
+   LS-DYNA's 15.67 under Nu 1000 with the PC cell (+5.92 → +88.77 %; deck
+   +51.91 → +71.13 %, RMS 29.94 → 40.11, 2437 → 2509 cycles; nt 4, the
+   round-8 critic); `bird_B` under Nu 12804 CREATES energy (energy error
+   99.9 % from ~cycle 500, END IE +1484.66 → +20691.23 %, IE RMS 12094.85 %)
+   through the converted deck's open fixed-grid ALE faces (measured in round
+   8: walled −0.1 %). The channel decks and `impact.k`'s bar are the SAME
+   OpenRadioss element (Isolid 1, Iale 0: ELFORM 6 is converted Lagrangian
+   since round 5), so B1's Nu scope is a deck-statement scope. Next: a
+   Couette coupon (a sheared null-material slab against the analytic
+   velocity profile) on a Lagrangian and an SPH part, and the `bird_B`
+   mechanism. Reach 4 keys / 4 models (`impact`, `sph/bird` — inert there:
+   1616 = 1616 cycles, END +4.50 % on both arms (round 8) —, `bird_A`,
    `bird_B`).
 2. **The `*CONSTRAINED_SHELL_IN_SOLID` → `/INTER/TYPE18` EMISSION** (round-6
    item 2; B5 names the card): the coupling alone with a stated `Stfval` 562.5

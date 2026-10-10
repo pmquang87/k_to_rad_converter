@@ -1029,15 +1029,25 @@ d3plots — while `hm_read_mat06.F:154` reads `Pmin 0` as −INFINITY), a negati
 PC as stated, a positive PC refused by name (Vol II R17 p.2-189 defines PC ≤ 0).
 `Nu = MU / RO` (the LAW6 cell is KINEMATIC: `mat_law6.cfg:26`, `m6law.F:98`
 `VIS = Nu·RHO`; dyna2rad `convertmats.cxx:300`) ONLY where every part of the
-material is a `*SECTION_SOLID` ELFORM 6 on a deck without `*INITIAL_VOID` and
-outside any `*ALE_MULTI-MATERIAL_GROUP` — the measured channel family. ELFORM 6
-is emitted as a Lagrangian one-point solid (round 5), so the scope is the deck's
-statement, not an ALE formulation. Elsewhere MU is named and not carried:
-`impact.k`'s Lagrangian bar nearly triples its IE under the cell (10.3 → 29.6
-against LS-DYNA's 15.7) and `bird_B` CREATES energy (energy error 99.9 %, END
-IE +1484.66 → +20691.23 %, mechanism not found); SPH, ELFORM 5 / 7 / 11 / 12 and
-mixed materials are named too (a Couette coupon decides them, ROADMAP). TEROD /
-CEROD have no LAW6 cell and are named. The rule is keyed on the `*MAT_NULL`
+material is a `*SECTION_SOLID` ELFORM 6, or every part is SPH (round 8), on a
+deck without `*INITIAL_VOID` and outside any `*ALE_MULTI-MATERIAL_GROUP` — the
+channel family, and the SPH family whose Couette coupon converges to the
+analytic flow (9.9 → 6.0 % of U from a 1 mm to a 0.5 mm spacing; `sph/bird`
+inert, 1616 = 1616 cycles). ELFORM 6 is emitted as a Lagrangian one-point solid
+(round 5), so the scope is the deck's statement, not an ALE formulation.
+Elsewhere MU is named and not carried: `impact.k`'s Lagrangian bar goes IE
+16.60 → 29.58 mJ against LS-DYNA's 15.67 under the cell (+5.92 → +88.77 %; the
+deck +51.91 → +71.13 %) and `bird_B` CREATES energy (energy error 99.9 %, END
+IE +1484.66 → +20691.23 %) through its converted open fixed-grid ALE faces
+(walled −0.1 %; LS-DYNA moves that mesh with the bird,
+`*ALE_REFERENCE_SYSTEM_GROUP`, which k2rad skips); ELFORM 5 / 7 / 11 / 12 and
+mixed materials are named too. Since round 8 a `/PROP/SOLID` that carries a
+Nu > 0 brick part with `R = 10·Nu / (c0·dmin) > 1` is written with `h / R`
+(with Nu > 0 the fluid hourglass force of a brick is `10·(h/4)·VIS·dx` instead
+of `(h/4)·RHO·c·dx²`, `shvis3.F:182` / `:185` — R times the Nu-0 value; on the
+Couette coupon R 3.16 is unstable at h 0.1 and analytic at h / R); R stays
+0.0117 on the channel family, whose bytes do not move. TEROD / CEROD have no
+LAW6 cell and are named. The rule is keyed on the `*MAT_NULL`
 record: the 4 `*MAT_ELASTIC_FLUID` acoustic compartments (nvh 8.7 / 9.1 / 9.2 /
 9.4) write the same keyword from another record and do not move. The void floor
 keeps precedence; with `--no-initial-void-floor` alone a PC-0 void now gets

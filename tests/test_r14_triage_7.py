@@ -3222,9 +3222,12 @@ class MatNullPcMu(unittest.TestCase):
 
     def test_the_Nu_scope_names_every_excluded_class(self):
         cases = (
+            # round 8, B4: the bar pair re-measured at the shipped PC cell
+            # (EXPECTED VALUE MOVED: "10.3 -> 29.6" mixed two arms), and
+            # the SPH-only case left this test - an SPH-only material carries
+            # Nu since round 8 (test_r14_triage_8.MatNullSphNuAndRGuard)
             ("ELFORM 1", {"elform": 1}, "Lagrangian solid (ELFORM 1)",
-             "10.3 -> 29.6"),
-            ("SPH", {"sph": True}, "parts [1]: SPH", "sph/bird"),
+             "16.60 -> 29.58"),
             # the validation round split the old void sentence, which named
             # an ELFORM-12 fluid AND a *INITIAL_VOID deck for either half
             # (EXPECTED VALUES MOVED: these two cases pinned that wording)
@@ -3264,7 +3267,8 @@ class MatNullPcMu(unittest.TestCase):
                 self.assertIn(cls, hits[0])
                 self.assertIn(fact, hits[0])
                 # WHICH sentence fired: the void / AMMG / class ones differ
-                want = heads.get(fact, "the one family where it was "
+                # (round 8, B4: the scope clause names two families now)
+                want = heads.get(fact, "the two families where it was "
                                        "measured right")
                 self.assertIn(want, hits[0])
                 self.assertEqual(_w(r, _WN1), [])
@@ -4258,11 +4262,10 @@ class Round7ValidationRound(unittest.TestCase):
              "margin"),
             ("ROADMAP.md", "the IE RMS moves 50.87 → 51.85 % in the campaign "
              "re-run, nt 4 — 0.98 of the 1-point threshold"),
-            ("k2rad/writer/materials.py", "where Nu 1 left the IE history "
-             "where it was (IE RMS 44.37 % on both arms; END IE +69.44 -> "
-             "+69.28 %, 1942 -> 1917 cycles)"),
-            ("ROADMAP.md", "Nu 1 left the IE history where it was, IE RMS "
-             "44.37 % on both arms, END IE +69.44 → +69.28 %"),
+            # (round 8, B4: the sph/bird pair of the pre-PC-cell arm left
+            # materials.py and ROADMAP - it measured a deck the shipped PC
+            # cell no longer produces; its replacement "1616 = 1616 cycles"
+            # is pinned by test_r14_triage_8.MatNullSphNuAndRGuard)
         )
         for rel, needle in pairs:
             with self.subTest(file=rel, needle=needle):
@@ -4359,8 +4362,8 @@ class Round7PostReviewRound(unittest.TestCase):
             ("k2rad/writer/loads.py", "1.19792e-3 s (4.5-6.0 % early)"),
             ("k2rad/cli.py", "1.19792e-3 s (4.5-6.0 %% early)"),
             ("README.md", "1.19792e-3 s (4.5-6.0 % early)"),
-            ("k2rad/writer/materials.py", "IE RMS 44.37 % on both arms"),
-            ("ROADMAP.md", "IE RMS 44.37 % on both arms"),
+            # (round 8, B4: "IE RMS 44.37 % on both arms" left materials.py
+            # and ROADMAP with the pre-PC-cell sph/bird arm it described)
             ("README.md", "`channel_C` RMS 0.03 / 0.10 (the campaign re-run"),
             ("k2rad/writer/rbody.py", "spmd_msin.F:556-557"),
             ("k2rad/lumping.py", "spmd_msin.F:556-557"),

@@ -84,6 +84,61 @@ Prior history (before this changelog was introduced) is summarized in the
     A holds six d3plot states to 3.6 % of t_end. No existing test changed
     its expected value (`test_rare_cards.py`'s `/FUNCT_SMOOTH` decks are
     explicit; the round-7 A5 needles sit in the sentence's unchanged head).
+  - **B4 — the `*MAT_NULL` MU package (under the existing
+    `--no-mat-null-pc-mu`).** (F5) `Nu = MU / RO` is written on an
+    SPH-ONLY material too (`writer/materials._resolve_mat_null_cells`: the
+    scope `classes in (["ELFORM 6"], ["SPH"])`; the RO / `*INITIAL_VOID` /
+    AMMG exclusions stay ahead): the SPH stress takes the same LAW6 routine
+    (`spstres.F:250`, the viscous term in its step `mdtsph.F:126`), an SPH
+    Couette coupon goes from no flow at Nu 0 to the analytic profile (steady
+    error 9.9 -> 6.0 % of U from a 1 mm to a 0.5 mm spacing), and `sph/bird`
+    (MATCH) is inert - measured on the implementation's bytes, base-paired
+    in one window (nt 4): 1616 = 1616 cycles, IE fifths +2.87 / +2.98 /
+    +1.52 / +2.57 / +4.50 % -> +2.87 / +3.00 / +1.52 / +2.56 / +4.50 %, END
+    +4.50 / KE -0.48 % on both, IE RMS 2.10 -> 2.07 % over 100 / 99 LS times
+    (the run's last printed row lands one LS sample earlier: MIXED windows),
+    the starter's `VISCOSITY` 0 -> 1; it stays match. A material MIXING SPH
+    with another class (impact.k's SPH bar beside its Lagrangian plate)
+    keeps Nu 0 and its sentence; the ELFORM-6 sentence keeps its bytes (the
+    clauses are split by family: `channel_A / B / C`'s warning records are
+    identical). (F1) a `/PROP/SOLID` (Isolid 1 / 2 / 24, `GEO(13) > 0`)
+    carrying a Nu > 0 brick part with `R = 10 Nu / (c0 dmin) > 1` is written
+    with `h / R` (`materials.guarded_prop_h` at both `/PROP/SOLID` emission
+    sites): with Nu > 0 the fluid hourglass force of a brick is `10 (h/4)
+    VIS dx` instead of `(h/4) RHO c dx^2` (`shvis3.F:182` / `:185`) - R
+    times the Nu-0 value; `c0` = the emitted GRUNEISEN C or sqrt(C1 / RO)
+    of a POLYNOMIAL (another kind is named, no R), `dmin` the shortest
+    brick edge; a graded part is guarded at its smallest edge and the cost
+    named; h is never raised. Measured on a Lagrangian Couette coupon
+    (ELFORM 6, Isolid 1, /DT 0.9, nt 4; the round-8 pre-research's sweep:
+    stable at R 0.95 / 1.58 / 2.21, unstable at R 3.16 and 6.32) - the
+    implementation's bytes (= the spec's guard arm byte for byte) end NORMAL
+    in 1352 cycles at the analytic profile (0.191 / 0.078 / 0.0 / 0.0 % of
+    U at 0.1 / 0.2 / 1 / 2 t_d, IE -4.40 .. -1.16 % of the analytic
+    dissipation at the fifths, hourglass energy 3.8e-11 mJ) where h 0.1
+    ran +2980 .. +731 % with 368.3 mJ of hourglass energy. Reach 0 / 0
+    today (the channel family reads R 0.0117 and is byte-identical). (Texts)
+    `_NU_LAGRANGIAN_FACT` re-measured at the shipped PC cell (the round-8
+    critic, nt 4: impact.k's bar 16.60 -> 29.58 mJ against LS-DYNA's 15.67
+    = +5.92 -> +88.77 %, the deck +51.91 -> +71.13 %; the plate the bar
+    strikes - part 1, under the bar by geometry although titled 'plaque
+    sous SPH' - +32.37 -> +69.91 %), `_NU_SPH_FACT` (now printed for a
+    mixed material's SPH parts only) re-measured (impact's SPH bar alone
+    inert, +51.91 -> +52.61 %, 2437 = 2437 cycles), and the bird_B
+    sentences name the measured condition (the converted deck's OPEN
+    fixed-grid ALE faces: walled -0.1 %, +2.4 % at the void density; the
+    void density alone 99.9 %; LS-DYNA moves that mesh with the bird,
+    `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4, which k2rad skips). Reach:
+    bytes 1 deck key on 1 emitted model (`sph/bird`, one cell) + the
+    non-roster Ryan_Lee W11 SPH birds (12 files = 3 models); text 3 / 3
+    (`impact`, `bird_A`, `bird_B`; SHA-identical). Tests that changed
+    their expected value: `test_r14_triage_7` `MatNullPcMu.
+    test_the_Nu_scope_names_every_excluded_class` (the ELFORM-1 needle
+    "16.60 -> 29.58"; the SPH case left it - SPH-only is carried, re-homed
+    in `MatNullSphNuAndRGuard`; the scope clause names two families), and
+    four pins of the pre-PC-cell sph/bird arm in `Round7ValidationRound` /
+    `Round7PostReviewRound` were retired with the text they pinned (that
+    arm measured a deck the shipped PC cell no longer produces).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8
@@ -902,8 +957,10 @@ Prior history (before this changelog was introduced) is summarized in the
     is kinematic). ELFORM 6 is emitted as a Lagrangian one-point solid
     (round 5), so the scope is the deck's statement — the measured channel
     family. Elsewhere MU is named and not carried: impact.k's Lagrangian bar
-    nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) and
-    bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
+    nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) [corrected
+    in round 8: that pair mixed a no-PC-cell base with a PC + Nu arm; at the
+    shipped PC cell the bar is 16.60 → 29.58 mJ, see the round-8 B4 entry]
+    and bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
     mixed materials are named too (the validation round gave the two halves
     of bird_B's class their own sentences: an ELFORM-12 part on a deck
     without `*INITIAL_VOID`, and a non-ELFORM-12 part on a deck that states

@@ -7875,11 +7875,15 @@ class ConvertOptions:
     # (mat_law6.cfg:26, m6law.F:98 VIS = Nu x RHO; dyna2rad convertmats.cxx:
     # 300) - ONLY where every part of the material is a *SECTION_SOLID
     # ELFORM 6 (emitted as a Lagrangian one-point solid, Iale 0, since round
-    # 5) on a deck without *INITIAL_VOID and outside any
-    # *ALE_MULTI-MATERIAL_GROUP: the measured channel family. Elsewhere MU is
-    # named and not carried: impact.k's Lagrangian bar triples its IE under
-    # the cell (10.3 -> 29.6 against LS-DYNA's 15.7) and bird_B CREATES
-    # energy (energy error 99.9 %). TEROD / CEROD are named (no LAW6 cell).
+    # 5), or every part is SPH (round 8), on a deck without *INITIAL_VOID and
+    # outside any *ALE_MULTI-MATERIAL_GROUP: the measured channel family.
+    # Elsewhere MU is named and not carried: impact.k's Lagrangian bar goes
+    # IE 16.60 -> 29.58 mJ against LS-DYNA's 15.67 under the cell (+5.92 ->
+    # +88.77 %) and bird_B CREATES energy through its converted open
+    # fixed-grid ALE faces (energy error 99.9 %; walled -0.1 %). Round 8: Nu
+    # is written on SPH-only materials too (F5), and a /PROP/SOLID whose
+    # R = 10 Nu / (c0 dmin) exceeds 1 gets h / R (F1). TEROD / CEROD are
+    # named (no LAW6 cell).
     # MEASURED at nt 4 (base-paired; sph/bird, channel_B and underwater_A/B
     # re-measured on the implementation, channel_A the round-7 pre-research
     # arm): sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B
@@ -7887,7 +7891,8 @@ class ConvertOptions:
     # within 1 %. The 4
     # *MAT_ELASTIC_FLUID acoustic carriers write the same keyword from
     # another record and are untouched. Byte reach: 20 deck keys, 17
-    # emitted models (the 3 Nu keys among them).
+    # emitted models (the 3 Nu keys among them). Round 8 adds sph/bird (Nu 1,
+    # SPH-only): 1 key / 1 model.
     mat_null_pc_mu: bool = True
     # --no-joint-screw-gjoint: leave *CONSTRAINED_JOINT_SCREW skipped, as
     # before round 7 (R14 triage round 7, B2).
@@ -9586,6 +9591,17 @@ class ConversionState:
     # Memoised by writer/materials._resolve_mat_null_cells so the A1 opt-out
     # clause and the emitter read ONE decision, never the option twice.
     mat_null_cells: Optional[Dict[int, Tuple[float, float]]] = None
+    # R14 triage round 8, B4 (F1): {part id -> (R, dmin, Nu, c0, EOS kind)}
+    # for every brick part of a Nu > 0 LAW6 carrier, R = 10 Nu / (c0 dmin)
+    # (shvis3.F:182 / :185: with Nu > 0 a fluid brick's hourglass force is
+    # 10 (h/4) VIS dx instead of (h/4) RHO c dx^2). None = not yet resolved;
+    # memoised by writer/materials._mat_null_h_guard. Empty under
+    # --no-mat-null-pc-mu (the cells carry Nu 0 there).
+    mat_null_h_guard: Optional[
+        Dict[int, Tuple[float, float, float, float, str]]] = None
+    # /PROP/SOLID ids whose h the F1 guard divided (its sentence prints once
+    # per prop).
+    mat_null_h_guarded_props: Set[int] = field(default_factory=set)
     # *CONSTRAINED_TIED_NODES_FAILURE cards, (NSID, EPPF, ETYPE, PID) in deck
     # order (round 6, A4). Refused BY NAME and never converted: kept only so
     # writer/loads._make_tied_nodes_failure_notes can write ONE warning per

@@ -1946,6 +1946,7 @@ _PR8_WARN_SHA = {
 # ═════════════════════════════════════════════════════════════════════════════
 
 from k2rad import handlers as _handlers  # noqa: E402
+from k2rad.writer.common import _f  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # B1 - *CONTROL_IMPLICIT_GENERAL IMFLAG 0 + *CONTROL_IMPLICIT_EIGENVALUE NEIG 0
@@ -2367,6 +2368,244 @@ class ImplicitSmoothCurveSampling(unittest.TestCase):
             self.assertAlmostEqual(
                 pts[41 + k][1], 180.0 * (1.0 + math.cos(math.pi * k / 40)),
                 places=9)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B4 - the *MAT_NULL MU package: F5 Nu on SPH-only materials, F1 the R guard,
+#      the F2 / F3 / _NU_SPH_FACT texts (under --no-mat-null-pc-mu)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_null_fluid_deck = _t7._null_fluid_deck
+_nu_pmin = _t7._nu_pmin
+_w = _t7._w
+_WN1 = _t7._WN1
+_WN = _t7._WN
+_WN1_SPH = "*MAT_NULL MU -> /MAT/HYD_VISC Nu on SPH parts: "
+_WR = "*MAT_NULL MU -> Nu on /PROP/SOLID/"
+#: sha256 of the ELFORM-6 Nu sentence 4f5b6e8 prints on
+#: _null_fluid_deck(pc="-1.0E4", mu="1.0E-6", elform=6) - converted from the
+#: pristine checkout (B4-a: the w_n1 family split keeps its bytes)
+_WN1_4F5B6E8_SHA = (
+    "86d1b36070e872ed0db2ffe2e53de8514989a44fd9c9a30e628dde624fdff8d2")
+
+
+def _visc_brick_deck(sizes=(1.0, 1.0), c="31622.7766", mu="1.0E-5",
+                     eos="gruneisen", hourglass="", ro="1.0E-9") -> str:
+    """Part 1 = one cubic *SECTION_SOLID ELFORM-6 brick per entry of
+    *sizes* (edge s mm, each on its own 8 nodes, side by side along x), on
+    *MAT_NULL 1 (RO 1e-9, PC -1, MU *mu*) + *EOS_GRUNEISEN 1 C *c* (or
+    *EOS_LINEAR_POLYNOMIAL C1 = *c*, or *EOS_IDEAL_GAS); *hourglass* = a
+    QH cell puts the part on *HOURGLASS 1 IHQ 1 (the split /PROP site)."""
+    nodes, elems, x0, nid = [], [], 0.0, 1
+    for eid, s in enumerate(sizes, start=1):
+        ids = []
+        for z in (0.0, s):
+            for y, x in ((0.0, 0.0), (0.0, s), (s, s), (s, 0.0)):
+                nodes.append(f"{nid:>8}{x0 + x:>16.4f}{y:>16.4f}{z:>16.4f}")
+                ids.append(nid)
+                nid += 1
+        elems.append("".join(f"{v:>8}" for v in [eid, 1] + ids))
+        x0 += s + 1.0
+    if eos == "gruneisen":
+        eos_card = ("*EOS_GRUNEISEN\n" + _row(1) + f"{c:>10}"
+                    + _row(1.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n" + _row(1.0)
+                    + "\n")
+    elif eos == "linpoly":
+        eos_card = ("*EOS_LINEAR_POLYNOMIAL\n" + _row(1, 0.0) + f"{c:>10}"
+                    + _row(0.0, 0.0, 0.0, 0.0, 0.0) + "\n" + _row(0.0, 1.0)
+                    + "\n")
+    else:
+        eos_card = ("*EOS_IDEAL_GAS\n" + _row(1, 718.0, 1005.0, 0.0, 0.0,
+                                               293.0, 1.0) + "\n")
+    hg = ""
+    hgid = 0
+    if hourglass:
+        hg = "*HOURGLASS\n" + _row(1, 1) + f"{hourglass:>10}" + "\n"
+        hgid = 1
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(0.02) + "\n*NODE\n"
+            + "\n".join(nodes) + "\n*ELEMENT_SOLID\n" + "\n".join(elems)
+            + "\n*PART\nviscous fluid\n" + _row(1, 1, 1, 1, hgid) + "\n"
+            "*SECTION_SOLID\n" + _row(1, 6) + "\n"
+            + f"*MAT_NULL\n{1:>10}{ro:>10}{'-1.0':>10}{mu:>10}\n"
+            + eos_card + hg + "*END\n")
+
+
+def _prop_h(starter: str, prop: int) -> str:
+    """The h cell (card 2, columns 41-60) of /PROP/SOLID/<prop>."""
+    lines = starter.splitlines()
+    i = lines.index(f"/PROP/SOLID/{prop}")
+    return lines[i + 5][40:60]
+
+
+def _prop_isolid(starter: str, prop: int) -> int:
+    lines = starter.splitlines()
+    i = lines.index(f"/PROP/SOLID/{prop}")
+    return int(lines[i + 3][:10])
+
+
+class MatNullSphNuAndRGuard(unittest.TestCase):
+    """B4: F5 writes Nu = MU / RO on an SPH-ONLY *MAT_NULL material (the SPH
+    stress takes the same LAW6 routine, spstres.F:250; the SPH Couette
+    coupon converges, sph/bird inert); F1 divides a /PROP/SOLID's hourglass
+    coefficient by R = 10 Nu / (c0 dmin) when R > 1 (shvis3.F:182 / :185);
+    the F2 / F3 / SPH texts carry the round-8 measurements. Hand values: Nu
+    1e-5 / 1e-9 = 1e4, R = 10 x 1e4 / (31622.7766 x 1) = 3.16228, h = 0.1 /
+    R = 0.0316227766.
+
+    R > 1 probe (the critic's Couette coupon couc_M1 converted on this
+    code: only its /PROP/SOLID/1 h moves, 0.1 -> 0.0316227766; starter +
+    engine, nt 4, rcv_r8i_implB_b4_cM1g, harvested and deleted): 0 starter
+    ERROR / 0 WARNING, NORMAL in 1352 cycles, the analytic profile to 0.191
+    / 0.078 / 0 / 0 % of U at 0.1 / 0.2 / 1 / 2 t_d, hourglass energy
+    3.8e-11 mJ."""
+
+    def test_sph_only_writes_nu(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-9",
+                                             ro=1.0e-9, sph=True))
+        self.assertEqual(_nu_pmin(s), "                   1                  -1")
+        hits = _w(r, _WN1_SPH)
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in ("Nu 1 (MU 1e-09 / RO 1e-09, parts [1])",
+                       "spstres.F:250", "mdtsph.F:126", "9.9 -> 6.0 % of U",
+                       "1616 = 1616 cycles"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertEqual([w for w in r.warnings
+                          if w.startswith(_WN1) and not w.startswith(
+                              _WN1_SPH)], [])
+        self.assertEqual(_w(r, _WN), [])
+
+    def test_sph_plus_elform1_keeps_nu_0(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
+                                             sph=True, second_part_elform=1))
+        self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+        hits = _w(r, _WN)
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in ("16.60 -> 29.58", "'plaque sous SPH'",
+                       "+51.91 -> +52.61 %", "or every part is SPH",
+                       "the two families where it was measured right"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        for gone in ("44.37", "1942", "10.3 -> 29.6"):
+            self.assertNotIn(gone, hits[0])
+        self.assertEqual(_w(r, _WN1_SPH), [])
+
+    def test_sph_on_a_void_deck_keeps_nu_0(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
+                                             sph=True, void="other"))
+        self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+        self.assertEqual(_w(r, _WN1_SPH), [])
+        self.assertTrue(_has(r.warnings, "the deck states *INITIAL_VOID, "
+                             "which the Nu cell's scope excludes",
+                             "open fixed-grid ALE faces (walled: -0.1 %)"))
+
+    def test_elform6_sentence_unchanged(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0E4", mu="1.0E-6",
+                                             elform=6))
+        hit = _w(r, _WN1)
+        self.assertEqual(len(hit), 1, r.warnings)
+        self.assertEqual(hashlib.sha256(hit[0].encode("utf-8")).hexdigest(),
+                         _WN1_4F5B6E8_SHA)
+        self.assertEqual(_w(r, _WN1_SPH), [])
+
+    def test_opt_out_writes_nu_0_on_sph(self):
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-9",
+                                             sph=True), mat_null_pc_mu=False)
+        self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+        self.assertEqual(_w(r, _WN1_SPH), [])
+
+    def test_the_bird_B_and_void_texts_name_the_open_faces(self):
+        r, _s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
+                                              elform=12, void="other"))
+        hits = [w for w in r.warnings
+                if w.startswith(_WN) and "+20691.23 %" in w]
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in ("OPEN fixed-grid ALE faces", "-0.1 %", "+2.4 %",
+                       "*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4",
+                       "the reference-system item first"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("mechanism not found", hits[0])
+
+    # ---- F1: the R guard ------------------------------------------------
+
+    def _guarded(self, deck, prop=1):
+        r, s, _e = _convert(deck)
+        return r, s, _w(r, f"{_WR}{prop} ")
+
+    def test_R_guard_gruneisen(self):
+        r, s, hits = self._guarded(_visc_brick_deck())
+        self.assertEqual(_prop_h(s, 1), _f(0.1 / (1.0e5 / 31622.7766)))
+        self.assertEqual(_prop_h(s, 1), "        0.0316227766")
+        self.assertEqual(len(hits), 1, r.warnings)
+        for needle in ("(parts [1])", "R = 10 Nu / (c0 dmin) = 3.16 > 1",
+                       "Nu 10000", "c0 31622.8 from /EOS/GRUNEISEN",
+                       "dmin 1,", "0.0316228 = 0.1 / R",
+                       "shvis3.F:182 / :185", "--no-mat-null-pc-mu"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("graded part", hits[0])
+
+    def test_R_guard_linear_polynomial(self):
+        """C1 1.0 (= K) with RO 1e-9: c0 = sqrt(1 / 1e-9) = 31622.7766."""
+        r, s, hits = self._guarded(_visc_brick_deck(c="1.0", eos="linpoly"))
+        self.assertEqual(_prop_h(s, 1), "        0.0316227766")
+        self.assertEqual(len(hits), 1, r.warnings)
+        self.assertIn("c0 31622.8 from /EOS/POLYNOMIAL", hits[0])
+
+    def test_R_below_one_untouched(self):
+        """The channel family: Nu 1000, C 1.5e6, a 0.5714 mm cube: R =
+        10 x 1000 / (1.5e6 x 0.5714) = 0.011667 -> today's cell."""
+        r, s, hits = self._guarded(_visc_brick_deck(
+            sizes=(0.5714,), c="1500000.0", mu="1.0E-6"))
+        r0, s0, _e0 = _convert(_visc_brick_deck(
+            sizes=(0.5714,), c="1500000.0", mu="1.0E-6"),
+            mat_null_pc_mu=False)
+        self.assertEqual(_prop_h(s, 1), _prop_h(s0, 1))
+        self.assertEqual(hits, [])
+
+    def test_graded_part_uses_dmin(self):
+        """1 mm + 0.5 mm cubes on one part: dmin 0.5, R = 6.32456, h =
+        0.1 / R = 0.0158113883; the graded caveat is named."""
+        r, s, hits = self._guarded(_visc_brick_deck(sizes=(1.0, 0.5)))
+        self.assertEqual(_prop_h(s, 1), _f(0.1 / (1.0e5 / (31622.7766 * 0.5))))
+        self.assertEqual(_prop_h(s, 1), "        0.0158113883")
+        self.assertEqual(len(hits), 1, r.warnings)
+        self.assertIn("dmin 0.5,", hits[0])
+        self.assertIn("On a graded part h / R_max also weakens", hits[0])
+
+    def test_stated_h_is_divided_on_the_split_prop(self):
+        """*HOURGLASS IHQ 1 QH 0.05: the split /PROP/SOLID (mesh.py's second
+        emission site) gets 0.05 / R."""
+        r, s, _e = _convert(_visc_brick_deck(hourglass="0.05"))
+        props = [ln for ln in s.splitlines() if ln.startswith("/PROP/SOLID/")]
+        self.assertEqual(len(props), 1, props)
+        pid = int(props[0].rsplit("/", 1)[1])
+        self.assertIn(_prop_isolid(s, pid), (1, 2, 24))
+        r_val = 1.0e5 / 31622.7766
+        self.assertEqual(_prop_h(s, pid), _f(0.05 / r_val))
+        self.assertEqual(len(_w(r, f"{_WR}{pid} ")), 1, r.warnings)
+
+    def test_unsupported_eos_kind_named(self):
+        r, s, _e = _convert(_visc_brick_deck(eos="ideal"))
+        r0, s0, _e0 = _convert(_visc_brick_deck(eos="ideal"),
+                               mat_null_pc_mu=False)
+        if "/PROP/SOLID/1" in s:
+            self.assertEqual(_prop_h(s, 1), _prop_h(s0, 1))
+        self.assertTrue(_has(r.warnings, "*MAT_NULL 1: the Nu cell's "
+                             "hourglass guard", "/EOS/IDEAL-GAS"),
+                        r.warnings)
+
+    def test_opt_out_removes_the_guard(self):
+        r, s, _e = _convert(_visc_brick_deck(), mat_null_pc_mu=False)
+        self.assertEqual(_w(r, _WR), [])
+        self.assertNotEqual(_prop_h(s, 1), "        0.0316227766")
+
+    def test_the_texts_carry_the_round_8_figures(self):
+        from k2rad.writer import materials as m
+        self.assertIn("16.60 -> 29.58 mJ", m._NU_LAGRANGIAN_FACT)
+        self.assertIn("+51.91 -> +52.61 %", m._NU_SPH_FACT)
+        self.assertIn("1616 = 1616 cycles", m._NU_SPH_WRITTEN_FACTS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
