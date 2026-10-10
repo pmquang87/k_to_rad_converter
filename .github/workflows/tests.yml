@@ -48,8 +48,11 @@ jobs:
         # missing numpy+scipy skips 61 more tests: 63 measured at fcf0989 with
         # neither numpy, scipy nor lasso, the two lasso tests among them).
         # The threshold is the Windows count, and every skip in it is NAMED
-        # here - none of them is a numpy/scipy gate (16 = 2 + 13 + 1, measured
-        # in run 37147823345):
+        # here - none of them is a numpy/scipy gate (15 = 2 + 13; it was
+        # 16 = 2 + 13 + 1 in run 37147823345, until R14 round 8 moved the
+        # F:-gated screw test onto a synthetic fixture,
+        # tests/fixtures/screw_synthetic.py - 15 measured on Windows with the
+        # corpora and lasso-python hidden, `unittest discover -s tests`):
         #   2 lasso-python-gated (lasso is deliberately not installed on Windows):
         #     test_converter.ModalShapesExportTests.test_d3plot_roundtrip
         #     test_converter.ModalShapesExportTests.test_rewrite_does_not_append_states
@@ -60,17 +63,15 @@ jobs:
         #     test_rare_materials.CorpusCarrierTests (2)
         #     test_side_defects.TestTwoDLagCarrier (4)
         #     test_tiebreak_rupture.CorpusCarriers (2)
-        #   1 F:-gated (R14 round 7; EXP_SC_JOINT_SCREW.k is 699 KB, no fixture):
-        #     test_r14_triage_7.JointScrewGjoint.test_the_F_deck
-        # lasso-python installs on ubuntu, so the count there is 14. A NEW
-        # corpus- or package-gated test pushes Windows over 16: give it a
+        # lasso-python installs on ubuntu, so the count there is 13. A NEW
+        # corpus- or package-gated test pushes Windows over 15: give it a
         # repo-local fixture to run on in CI, or raise the threshold AND add
         # the test to this list - never raise the number alone.
         run: |
           skips=$(python -m unittest discover -s tests 2>&1 | grep -oE 'skipped=[0-9]+' | grep -oE '[0-9]+' || echo 0)
           echo "skipped tests: ${skips:-0}"
-          if [ "${skips:-0}" -gt 16 ]; then
-            echo "::error::${skips} tests skipped (>16) — scientific dependencies may be missing, or a new corpus-gated test needs a fixture (see the list above)"
+          if [ "${skips:-0}" -gt 15 ]; then
+            echo "::error::${skips} tests skipped (>15) — scientific dependencies may be missing, or a new corpus-gated test needs a fixture (see the list above)"
             exit 1
           fi
 

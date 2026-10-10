@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple, Union
+from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
 
 
 #: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
@@ -1028,6 +1028,23 @@ class ConstrainedJointScrew:
     r1: float = 0.0
 
 
+class BodyCondition(NamedTuple):
+    """One STANDARD kinematic condition a deck states on a screw body's
+    element nodes (round 8, B8 q-ii; ``writer/joint_screw._body_conditions``):
+    *kind* ``node_tc_rc`` / ``constrained_global`` / ``bcs_spc`` /
+    ``node_motion``; *node* the first body node it names; *tra* / *rot* the
+    three-digit codes the writers would put on the body's /RBODY main node
+    (``000`` / ``000`` for a nodal prescribed motion); *skew* the /BCS skew
+    of a ``*BOUNDARY_SPC`` with a resolvable CID (0 otherwise); *text* the
+    condition in words."""
+    kind: str
+    node: int
+    tra: str
+    rot: str
+    text: str
+    skew: int = 0
+
+
 @dataclass
 class JointScrewPlan:
     """One CONVERTED ``*CONSTRAINED_JOINT_SCREW`` (round 7, B2): decided ONCE
@@ -1038,16 +1055,26 @@ class JointScrewPlan:
     section itself - so none of them re-decides. ``axis`` is the global axis
     index of the screw axis ``r = unit(N3 -> N1)``; ``drive`` is the rotation
     drive on part A (``state.prescribed_motions`` member, matched by
-    identity); ``split_inter_ids`` are the all-parts self-contacts the split
-    rewrites; ``n0`` / ``n1`` / ``n2`` and the main nodes are filled by the
-    carriage producer."""
+    identity), or None for an UNDRIVEN screw (round 8, B8 q-i: the deck
+    states no *BOUNDARY_PRESCRIBED_MOTION_RIGID on either body);
+    ``split_inter_ids`` are the all-parts self-contacts the split rewrites;
+    ``n0`` / ``n1`` / ``n2`` and the main nodes are filled by the carriage
+    producer. ``merged`` (round 8, B8 q-ii) holds ``(label, pid, condition)``
+    for every standard condition on a body that acts only on DOFs the joint
+    already holds - written nowhere, named by the joint section;
+    ``body_nodes`` are the element nodes of A and B whose conditions were
+    classified (the writers skip a code re-pointed from one of them). ``pad`` /
+    ``i_axis`` / ``padded_min`` (an undriven screw only) are filled by the
+    /RBODY producer that writes A's J row: the inertia added about the two
+    axes normal to the screw axis, A's screw-axis inertia, and the smallest
+    principal value of A's padded tensor."""
     screw: ConstrainedJointScrew
     a_pid: int
     b_pid: int
     axis: int
     r: Tuple[float, float, float]
     length: float
-    drive: "PrescribedMotionRigid"
+    drive: Optional["PrescribedMotionRigid"]
     split_inter_ids: List[int] = field(default_factory=list)
     a_main: int = 0
     b_main: int = 0
@@ -1055,6 +1082,11 @@ class JointScrewPlan:
     n0: int = 0
     n1: int = 0
     n2: int = 0
+    merged: List[Tuple[str, int, BodyCondition]] = field(default_factory=list)
+    body_nodes: FrozenSet[int] = frozenset()
+    pad: Optional[Tuple[float, float, float]] = None
+    i_axis: float = 0.0
+    padded_min: float = 0.0
 
 
 @dataclass
@@ -9706,7 +9738,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1083, :1778, :1892, :2081, :2238, :2362, in that order:
+    # (writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -9986,6 +10018,12 @@ class ConversionState:
     # element, so no property is ever built from it.
     efg_sections: Dict[int, Tuple[str, int]] = field(default_factory=dict)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
+    # Every PID a *BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] record line STATES
+    # (round 8, B8 q-i): recorded before the VAD screen, so a refused VAD 3 /
+    # 4 drive still counts - the deck's statement, not the converted
+    # registry above. The screw joint reads it to tell "no drive" from "a
+    # drive stated and refused".
+    pm_rigid_stated_pids: Set[int] = field(default_factory=set)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
     # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: pid → the three synthesized nodes
     # that carry the body's co-rotating /SKEW/MOV triad. Filled by

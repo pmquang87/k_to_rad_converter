@@ -697,8 +697,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     # (main nodes, ICoG-4 members) and which secondary masses move to /ADMAS
     state.rbody_folded_mass_nodes = set()
     state.rbody_secondary_masses = {}
-    from .joint_screw import screw_cmo_skip_pids
+    from .joint_screw import screw_cmo_skip_pids, screw_pad, screw_pad_pids
     screw_skip = screw_cmo_skip_pids(state)
+    # round 8, B8 (q-i): part A of an UNDRIVEN screw -> its plan (the pad)
+    screw_pads = screw_pad_pids(state)
 
     # *MAT_RIGID parts AND *DEFORMABLE_TO_RIGID parts, through the ONE
     # predicate — see writer.common.rigid_part_ids for why a consumer left on
@@ -1075,6 +1077,20 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             elif j_status == "refused":
                 a2_refused.append((kw, pid, ind_node, j_facts))
         rbody_info[pid]["j_in"] = j_status
+        # round 8, B8 (q-i): the spinning body of an UNDRIVEN screw gets its
+        # screw-axis inertia ADDED about the two axes normal to the axis, on
+        # top of whatever the row holds (A2's -SUM(IN) included), so the main
+        # node's IN - its smallest principal inertia, inirby.F:838, the ONE
+        # scalar lag_mult_solv.F:393 divides by - is the axis inertia
+        if pid in screw_pads:
+            if lumped is None:
+                from ..lumping import (nodal_masses_from_state,
+                                       triangle_shell_nodes)
+                lumped = nodal_masses_from_state(state)
+                tri_nodes = triangle_shell_nodes(state)
+            j_vals = screw_pad(state, screw_pads[pid],
+                               set(unique_nodes) | {ind_node}, j_vals,
+                               lumped, props is not None)
         lines += inertia_extra
         # The #106 register, /RBODY producer 1 of 6 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the

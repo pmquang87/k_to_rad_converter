@@ -3342,17 +3342,46 @@ EXT-WORK prints 0 and the engine accumulates no REAC* on a Lagrange drive
 `*DATABASE_BNDOUT` `/TH/NODE` does not cover the screw's drive and the BNDOUT
 warning says so; the `/TH/NODE` `TH_reaction` block keeps the drive's main node
 for its live DX/Y/Z, and its warning names the REACX/Y/Z there as identically
-0. A screw outside the
-pattern (`_COOR_SCREW`, `_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a
-deformable / CNRB / merged body, a non-coaxial or off-global axis, other CMO
-codes, a missing or windowed drive, VAD 1/3, a drive on B, a contact the split
-cannot handle, and — since the validation round — any other standard kinematic
-condition on either body: a `*NODE` TC/RC cell, a `*BOUNDARY_SPC`, a
-`*CONSTRAINED_GLOBAL` plane or a `*BOUNDARY_PRESCRIBED_MOTION_NODE` / `_SET`
-on one of its nodes, which k2rad would write as a standard card on the
-Lagrange-held main node, the incompatible kinematic condition the starter
-reports as WARNING 312) keeps the skip with a named reason. 1 deck key on 1
-emitted model.
+0. Since round 8 (B8, the same flag): a screw whose deck states NO
+`*BOUNDARY_PRESCRIBED_MOTION_RIGID` on either body is converted without
+`/IMPVEL/LAGMUL` — the rack alone ties A's spin to B's travel — and A's `/RBODY`
+gets its screw-axis inertia `I_axis` added to the two J cells normal to the axis
+(a refused VAD 3 / 4 drive is not "no drive": that screw still refuses).
+OpenRadioss's Lagrange solver divides a rotational acceleration by ONE scalar per
+node, the main node's `IN` = the body's smallest principal inertia
+(`inirby.F:838`, `lag_mult_solv.F:393`); the pad makes that scalar `I_axis`, and
+it acts on locked DOFs only (A's transverse rotations are held by its
+`/BCS/LAGMUL`). MEASURED on `EXP_SC_JOINT_SCREW` without its drive (nt 4): a
+free spin of 150 rad/s projects to 147.716 rad/s, the closed form
+`I ω0 / (I + PARM² μ)` (145.989 without the pad); under a constant axial load
+pair the spin follows its closed form within 0.05 % before contact with a 0.0 %
+energy error (+75.5 % too fast and a +75.6 % energy error without the pad). A
+`*NODE` TC/RC, `*BOUNDARY_SPC` or `*CONSTRAINED_GLOBAL` code on a body node that
+acts only on DOFs the converted joint already HOLDS (the two translations normal
+to the axis on both bodies, A's two rotations normal to it, all three of B's) is
+written nowhere and named: a second, standard condition on the Lagrange-held
+main node is starter WARNING 312, and such a redundant code moved the result only
+inside the deck's null band (the internal energy at the last fifth moves 0 ..
++2.59 % under physically empty edits; a kept `*BOUNDARY_SPC` DOFY −0.07 %, a
+kept `*NODE` TC 3 +2.57 %). The split's warning names what stays: the
+rigid-to-deformable pairs of A and B, whose contact force a Lagrange condition
+cancels on the main node only, so the mesh drifts off it by the cancelled
+impulse — on `EXP_SC_JOINT_SCREW` at most 0.0560 mm (a screw node) and
+0.0250 mm (a nut node) after its shell contact, against the one-cycle output
+lag of 0.0145 mm before it. A screw outside the pattern (`_COOR_SCREW`,
+`_LOCAL`, `_FAILURE`, an implicit deck, PARM 0, a deformable / CNRB / merged
+body, a non-coaxial or off-global axis, other CMO codes, a stated drive that is
+not converted or is windowed, VAD 1/3, a drive on B, a contact the split cannot
+handle, and any standard condition on either body that the joint does NOT hold —
+a code on the drive's DOF, on a free DOF (the axial translation; A's spin on an
+undriven screw) or in a local system, or a `*BOUNDARY_PRESCRIBED_MOTION_NODE` /
+`_SET` on one of its nodes) keeps the skip with a named reason: a kept
+conflicting RC 1 left the screw unturned while the nut travelled 186.06 mm
+behind NORMAL TERMINATION, and folded into the Lagrange row it stopped at cycle
+3 (MESSAGE 110, RIGID BODY UNSTABLE). 1 deck key on 1 emitted model. The CI
+runs the round-7 checks on a SYNTHETIC look-alike of the show-case built by
+`tests/fixtures/screw_synthetic.py` (the same part, joint, curve and contact ids
+and top node id; no DYNAmore data).
 
 `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` / `_TRANSLATIONAL` → the matched
 joint's per-DOF stiffness / damping / friction / stop blocks (`LCID*`→`fct_K*`,

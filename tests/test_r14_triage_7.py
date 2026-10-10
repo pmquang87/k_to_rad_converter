@@ -3421,7 +3421,7 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
                 a_elastic_cnrb: bool = False, bndout: bool = False,
                 a_rigid_cnrb: bool = False, a_node_tc: int = 0,
                 b_spc: bool = False, b_global: bool = False,
-                a_node_motion: bool = False) -> str:
+                a_node_motion: bool = False, a_node_rc: int = 0) -> str:
     """The B2 mini screw (ton-mm-s, explicit, ENDTIM 0.1): part 2 "screw out"
     (A) = one hex x 10..20, y 0..10, z 0..10 on *MAT_RIGID 2 (CMO 1, CON1 5,
     CON2 *con2_a*); part 1 "screw in" (B) = one hex x -15..-5 on *MAT_RIGID 1
@@ -3440,7 +3440,8 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
     *BOUNDARY_SPC_NODE (DOFY) on B's member node 11 (-5, 10, 0); *b_global*
     a *CONSTRAINED_GLOBAL plane x = -15 (TC 1) through B's face; and
     *a_node_motion* a *BOUNDARY_PRESCRIBED_MOTION_NODE (DOF 3, VAD 2,
-    LCID 7) on A's node 3."""
+    LCID 7) on A's node 3; *a_node_rc* (round 8, B8) that *NODE RC on A's
+    member node 3."""
     by = -25.0 if diagonal else 0.0
     pts = {}
     nid = 0
@@ -3478,7 +3479,8 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
         n1, n3, n2, n4 = n3, n1, n4, n2
     out = ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.1), "*NODE"]
     out += [f"{k:>8}{x:>16.4f}{y:>16.4f}{z:>16.4f}"
-            + (f"{a_node_tc:>8}{0:>8}" if a_node_tc and k == 3 else "")
+            + (f"{a_node_tc:>8}{a_node_rc:>8}"
+               if (a_node_tc or a_node_rc) and k == 3 else "")
             for k, (x, y, z) in sorted(pts.items())]
     out += ["*ELEMENT_SOLID",
             "".join(f"{v:>8}" for v in [1, 2] + a_ids),
@@ -3537,6 +3539,19 @@ def _screw_deck(keyword: str = "*CONSTRAINED_JOINT_SCREW_ID", parm=25.0,
             _row(n1, n2, n3, n4, n5, n6, 1.0, 0.0), _row(parm, 0, 0, 0.0),
             "*END"]
     return "\n".join(out) + "\n"
+
+
+def _screw_synthetic():
+    """tests/fixtures/screw_synthetic.py, loaded by path (the fixtures
+    directory is not a package)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "screw_synthetic.py")
+    spec = importlib.util.spec_from_file_location("screw_synthetic", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _block_after(text: str, head_prefix: str, n: int):
@@ -3726,17 +3741,17 @@ class JointScrewGjoint(unittest.TestCase):
             # shared-node arm of refusal 5 can fire (mutation B2-9)
             ("A rigid, its nodes in a CNRB", {"a_rigid_cnrb": True},
              "part 2 shares nodes with a *CONSTRAINED_NODAL_RIGID_BODY"),
-            # refusal 11: a standard condition on either body
-            ("a *NODE TC on A", {"a_node_tc": 3},
-             "body A (part 2) carries the *NODE TC 3 / RC 0 of its node 3"),
-            ("a *BOUNDARY_SPC on B", {"b_spc": True},
-             "body B (part 1) carries the *BOUNDARY_SPC (/BCS/"),
+            # refusal 11: a standard condition on either body that the joint
+            # does not hold (round 8, B8 q-ii: a held code - the *NODE TC 3
+            # on A, the *BOUNDARY_SPC DOFY on B - converts, merged; see
+            # test_r14_triage_8.JointScrewRound8.test_refusal_11_by_class)
             ("a *CONSTRAINED_GLOBAL plane through B", {"b_global": True},
              "body B (part 1) carries a *CONSTRAINED_GLOBAL plane through "
-             "its node 9"),
+             "its node 9 (and 3 more node(s)), on a free DOF of the joint "
+             "(the axial translation)"),
             ("a nodal prescribed motion on A", {"a_node_motion": True},
              "body A (part 2) carries a *BOUNDARY_PRESCRIBED_MOTION_NODE / "
-             "_SET on its node 3"),
+             "_SET on its node 3, a nodal prescribed motion"),
             ("N2 off the axis", {"n2_off_axis": True}, "are not coaxial"),
             ("diagonal axis", {"diagonal": True},
              "is not along a global axis"),
@@ -3745,10 +3760,12 @@ class JointScrewGjoint(unittest.TestCase):
             ("a drive on B", {"drive_on_b": True}, "is driven too"),
             ("VAD 1", {"vad": 1}, "VAD 1 is not converted"),
             # VAD 3 never reaches state.prescribed_motions (the handler
-            # refuses it by name, _pm_vad_supported): the screw has no drive
+            # refuses it by name, _pm_vad_supported), but the deck STATES a
+            # drive (state.pm_rigid_stated_pids): refused, not "no drive"
+            # (round 8, B8 q-i; the undriven screw converts, see
+            # test_r14_triage_8.JointScrewRound8)
             ("VAD 3", {"vad": 3}, "a VAD 3 / 4 card is not converted at all"),
             ("a birth window", {"birth": 0.01}, "has a time window"),
-            ("no drive", {"drive": False}, "there is none"),
             ("an unsplittable contact", {"s2s": True},
              "which the split does not handle"),
         )
@@ -3767,16 +3784,21 @@ class JointScrewGjoint(unittest.TestCase):
 
     def test_refusal_11_mirrors_what_is_written(self):
         """A *NODE TC cell that --no-node-tc-rc-bcs drops is written
-        nowhere, so it conflicts with nothing: the screw converts. The
-        refused arm's member code is then merged by A1 into the body's own
-        BC_rigid card (no node_tc_rc group of its own)."""
-        r, s, _e = _convert(_screw_deck(a_node_tc=3), node_tc_rc_bcs=False)
+        nowhere, so it conflicts with nothing: the screw converts. Round 8
+        (B8 q-ii): the refused arm takes a code the joint does NOT hold - TC
+        1, A's axial translation, a free DOF (TC 3 on A is held and now
+        converts, merged) - and the refused screw's member code is written
+        as today, in its own node_tc_rc group beside the body's BC_rigid
+        card (the two codes share no digit)."""
+        r, s, _e = _convert(_screw_deck(a_node_tc=1), node_tc_rc_bcs=False)
         self.assertIn("/GJOINT/RACK/", s)
         self.assertFalse(_has(r.warnings, ": NOT converted - "), r.warnings)
-        r1, s1, _e1 = _convert(_screw_deck(a_node_tc=3))
+        r1, s1, _e1 = _convert(_screw_deck(a_node_tc=1))
         self.assertNotIn("/GJOINT/RACK/", s1)
+        self.assertTrue(_has(r1.warnings, ": NOT converted - ",
+                             "on a free DOF of the joint"), r1.warnings)
         self.assertIn("BC_rigid_2", s1)
-        self.assertNotIn("node_tc_rc_", s1)
+        self.assertIn("node_tc_rc_100_000", s1)
 
     def test_the_A1_record_mirrors_the_written_cards(self):
         """A1's state.rigid_auto_bcs records exactly the BC_rigid cards the
@@ -3887,13 +3909,18 @@ class JointScrewGjoint(unittest.TestCase):
                "                   0                   0")
         self.assertEqual(diff, [(pos, neg), (pos, neg)])
 
-    def test_the_F_deck(self):
-        path = ("F:/dynaexamples_r14_ton-mm-s/show-cases/joint-screw/"
-                "EXP_SC_JOINT_SCREW.k")
-        if not os.path.isfile(path):
-            self.skipTest("F: corpus not mounted")
+    def test_the_synthetic_deck(self):
+        """The six assertions the round-7 test made on the F: show-case
+        (EXP_SC_JOINT_SCREW.k), on its SYNTHETIC look-alike built by
+        tests/fixtures/screw_synthetic.py (round 8, B8 q-iv: the same part /
+        joint / curve / contact ids and top node id, no DYNAmore data) - so
+        it runs on every machine, CI included."""
+        ss = _screw_synthetic()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "synth.k")
+        with open(path, "w", newline="\n") as fh:
+            fh.write(ss.build_deck())
         res = convert(path, output_stem=os.path.join(tmp.name, "scr"),
                       write_log=False)
         with open(res.starter_path) as fh:

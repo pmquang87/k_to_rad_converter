@@ -10,7 +10,7 @@ from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
                      ContactThermal, ContactTied, ContactTiebreak, SolidElem,
                      TshellElem)
 from ..topology import TET10_EDGEMID
-from .joint_screw import screw_splits
+from .joint_screw import lagrange_held_pairs
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
@@ -2120,7 +2120,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 # main node a Lagrange condition holds is cancelled on the
                 # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
                 # :7901), so the A-B pair slips the mesh off its main node.
-                splits = screw_splits(state, c.inter_id)
+                splits = lagrange_held_pairs(state, c.inter_id)
                 a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
                 lines += _emit_surf_part(
@@ -2134,19 +2134,19 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id)
                 for plan in splits:
-                    jid = plan.screw.jid
+                    tag = plan.tag
                     rest = [p for p in all_pids
                             if p not in (plan.a_pid, plan.b_pid)]
                     s_rest = state.next_id()
                     s_a = state.next_id()
                     split_iid = state.next_id()
                     lines += _emit_surf_part(
-                        s_rest, f"contact_{c.inter_id}_screw_{jid}_rest", rest)
+                        s_rest, f"contact_{c.inter_id}_{tag}_rest", rest)
                     lines += _emit_surf_part(
-                        s_a, f"contact_{c.inter_id}_screw_{jid}_body_A",
+                        s_a, f"contact_{c.inter_id}_{tag}_body_A",
                         [plan.a_pid])
                     lines += _emit_inter_type25_self(
-                        split_iid, f"CONTACT_{c.inter_id}_screw_{jid}_body_A",
+                        split_iid, f"CONTACT_{c.inter_id}_{tag}_body_A",
                         s_rest, fric, inacti, stfac, fric_id=fric_id,
                         surf_id2=s_a)
                     # minted beside the converted contact: /TH/INTER and the
@@ -2155,7 +2155,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     state.warn(
                         f"*{c.keyword or 'CONTACT_AUTOMATIC_SINGLE_SURFACE'} "
                         f"(/INTER/TYPE25/{c.inter_id}): the rigid pair of "
-                        f"*CONSTRAINED_JOINT_SCREW {jid} is split out - part "
+                        f"{plan.label} is split out - part "
                         f"{plan.a_pid} leaves the all-parts self-surface and "
                         f"gets its own two-surface /INTER/TYPE25/{split_iid} "
                         f"against every other part except {plan.b_pid} "
@@ -2169,7 +2169,18 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                         "the pair kept: 178.67 mm at t_end, IE -100 %. LS-DYNA "
                         "keeps the pair (on EXP_SC_JOINT_SCREW 99.1 % of its "
                         "external work is sliding-interface energy between the "
-                        "two screws), which no Lagrange joint can reproduce.")
+                        "two screws), which no Lagrange joint can reproduce. "
+                        # round 8, B8 (q-iii): the pairs that stay
+                        "The rigid-to-deformable pairs of part "
+                        f"{plan.a_pid} and part {plan.b_pid} stay: a Lagrange "
+                        "condition cancels their contact force on the body's "
+                        "main node only (RBYVIT, resol.F:7572, runs before "
+                        "LAG_MULT, :7901), so the mesh drifts off its main "
+                        "node by the cancelled impulse - on EXP_SC_JOINT_SCREW "
+                        "at most 0.0560 mm (a node of the screw) and 0.0250 "
+                        "mm (the nut) after its shell contact, against the "
+                        "one-cycle output lag of 0.0145 mm before it and "
+                        "178.67 mm of slip with the screw-nut pair kept.")
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_grnod_id()

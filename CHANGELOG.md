@@ -244,6 +244,67 @@ Prior history (before this changelog was introduced) is summarized in the
     test_7 (a plastic law is now routed with Inpts 252 - "*MAT_ELASTIC
     only" is retired) and test_9 (a mixed LAW1 + plastic section is routed
     with 252 and the 791 sentence).
+  - **B8 — `*CONSTRAINED_JOINT_SCREW` without a drive is converted, with a
+    transverse inertia pad; a redundant standard code on a screw body is
+    merged instead of refusing the joint; the contact split names its
+    residual drift (under `--no-joint-screw-gjoint`, default ON; no new
+    flag).** (q-i) A screw whose deck states no
+    `*BOUNDARY_PRESCRIBED_MOTION_RIGID` on either body (recorded before the
+    VAD screen, `state.pm_rigid_stated_pids`: a refused VAD 3 / 4 drive is
+    not "no drive" and still refuses) is converted without
+    `/IMPVEL/LAGMUL` and without its `/FUNCT`; OpenRadioss's Lagrange solver
+    divides a rotational acceleration by ONE scalar per node, the main
+    node's `IN` = the body's smallest principal inertia (`inirby.F:838`,
+    `lag_mult_solv.F:393`), so A's `/RBODY` gets its screw-axis inertia
+    `I_axis` added to the two J cells normal to the axis (on top of A2's
+    `-SUM(IN)`; locked by `/BCS/LAGMUL`). Measured on EXP_SC_JOINT_SCREW
+    minus its drive (nt 4, the round-8 critic's `scN1p` / `scN1` T01s, read
+    again here): a 150 rad/s spin projects to 147.716 rad/s, the closed form
+    `I ω0 / (I + PARM² μ)` (145.989 without the pad), and an axial load pair
+    follows its closed form within 0.05 % with a 0.0 % energy error (+75.5 %
+    and +75.6 % without the pad; the critic's arms, not re-read here). On
+    the synthetic fixture (nt 4, the branch): the
+    driven deck ends NORMAL in 69627 cycles (starter 0 errors) with
+    `x_B - x_A = 25 θ` at every fifth to −0.009 mm (one cycle of the
+    6250 mm/s relative speed: the output lag); its undriven twin under an
+    `*INITIAL_VELOCITY_RIGID_BODY` spin of 150 rad/s projects at cycle 1 to
+    73.449550 rad/s against the closed form 73.449550 (I 0.0314, m_A 3.14e-4
+    plus the 1e-6 t carriage, m_B 6.28e-5; −1.1e-10 relative) and holds it to
+    t 0.0999 (+1.9e-9), NORMAL in 69627 cycles — the projection removes
+    51.0 % of the initial kinetic energy at cycle 1, which the listing
+    prints as its ERROR. A driven screw gets no pad (EXP_SC_JOINT_SCREW and
+    the driven mini screw keep their 4f5b6e8 bytes). (q-ii) Refusal 11 by
+    DOF class: a `*NODE` TC/RC, `*BOUNDARY_SPC` or `*CONSTRAINED_GLOBAL`
+    code on a body node that acts only on DOFs the converted joint already
+    holds (both bodies' translations normal to the axis, A's two rotations
+    normal to it, all three of B's) is written nowhere (the member is
+    skipped by `_make_bcs` and the TC/RC pass, ONE predicate
+    `screw_merged_members`) and named; one on the drive's DOF, on a free DOF
+    (the axial translation; A's spin on an undriven screw), in a local
+    system, or a nodal prescribed motion still refuses (a kept conflicting
+    RC 1 left the screw unturned while the nut travelled 186.06 mm behind
+    NORMAL TERMINATION; folded into the Lagrange row it stopped at cycle 3,
+    MESSAGE 110 RIGID BODY UNSTABLE — the critic's `scRC1k` and g3q's
+    `RC1f` run dirs). (q-iii) The split's warning names the residual drift
+    of the rigid-deformable pairs (at most 0.0560 mm on a screw node and
+    0.0250 mm on a nut node after the shell contact, against the one-cycle
+    output lag of 0.0145 mm before it, read from the critic's `scB0` T01 at
+    `t <= 0.085` / `> 0.085`); the pair predicate is now
+    `joint_screw.lagrange_held_pairs`, which a future Lagrange emitter on
+    rigid bodies inherits. (q-iv) `test_the_F_deck` runs on a SYNTHETIC
+    look-alike built by `tests/fixtures/screw_synthetic.py` (the same part,
+    joint, curve and contact ids and top node id; no DYNAmore data), so the
+    Windows CI skip guard tightens 16 → 15 (15 measured on Windows with the
+    corpora and lasso-python hidden). Reach: 0 byte movers;
+    EXP_SC_JOINT_SCREW SHA-identical, its split sentence re-texted (1 deck
+    key on 1 emitted model). Tests that moved: `test_r14_triage_7`
+    `JointScrewGjoint.test_every_refusal_class_keeps_the_65ff389_bytes` (the
+    held `*NODE` TC 3 and `*BOUNDARY_SPC` DOFY subtests and "no drive" now
+    convert - re-homed in `JointScrewRound8`; the GLOBAL and nodal-motion
+    needles carry the class words), `test_refusal_11_mirrors_what_is_written`
+    (its refused arm takes TC 1, a free DOF, since TC 3 is held) and
+    `test_the_F_deck` → `test_the_synthetic_deck`; the three
+    `writer/rbody.py:` registration-line citations moved with the pad hook.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

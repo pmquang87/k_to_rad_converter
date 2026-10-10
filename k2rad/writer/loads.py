@@ -210,6 +210,11 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         ind_node = info["ind_node"]
         for node in info["nodes"]:
             node_to_ind[node] = ind_node
+    # round 8, B8 (q-ii): a member of a converted screw body is HELD by the
+    # joint in every DOF the card states (any other code refused the joint):
+    # the code is written nowhere - the joint section names it
+    from .joint_screw import screw_merged_members
+    screw_members = screw_merged_members(state)
 
     # round 8, A1: the rigid-body main nodes that carry a SKEWED /BCS of their
     # own body (empty under --no-rigid-local-constraints)
@@ -226,6 +231,11 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     for bc in state.bcs_spcs:
         nsid = bc.nsid
         raw_nids = state.node_sets.get(nsid, ("", []))[1]
+        if screw_members:
+            kept_raw = [n for n in raw_nids if n not in screw_members]
+            if raw_nids and not kept_raw:
+                continue          # merged into a screw joint (its sentence)
+            raw_nids = kept_raw
 
         mapped_nids = set()
         for n in raw_nids:
@@ -989,11 +999,18 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     rigid_members: Dict[int, List[int]] = defaultdict(list)
     rigid_orphans: List[int] = []
     rigid_repointed: Dict[int, Tuple[str, str]] = {}
+    # round 8, B8 (q-ii): a code on a converted screw body's member is HELD
+    # by the joint (any other code refused it) - written nowhere, named by
+    # the joint section
+    from .joint_screw import screw_merged_members
+    screw_members = screw_merged_members(state)
 
     for nid in sorted(cells):
         tc, rc = cells[nid]
         if nid in node_cells:
             stated[node_cells[nid]] += 1       # the *NODE card's OWN code
+        if nid in screw_members:
+            continue
         if nid in rigid_nodes:
             main = main_of.get(nid)
             if main is None:

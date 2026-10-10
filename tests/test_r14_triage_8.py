@@ -34,6 +34,7 @@ import math
 import os
 import re
 import unittest
+from typing import Dict, List, Set, Tuple
 
 import test_r14_triage_5 as _t5
 import test_r14_triage_6 as _t6
@@ -2953,6 +2954,275 @@ class TshellTextAndPlasticRoute(unittest.TestCase):
         self.assertEqual(len(hits), 1, res.warnings)
         self.assertIn("reset to 222 per element group", hits[0])
         self.assertIn("WARNING 791, sgrtails.F:694-704", hits[0])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B8 — the screw joint: the undriven screw + its inertia pad, refusal 11 by
+# DOF class, the Lagrange-held contact sentence, the synthetic CI fixture
+# ═════════════════════════════════════════════════════════════════════════════
+
+_screw_deck = _t7._screw_deck
+_rbody_main = _t7._rbody_main
+_screw_synthetic = _t7._screw_synthetic
+
+#: the 4f5b6e8 starter of the DRIVEN mini screw (_screw_deck()), measured
+#: through the round-7 harness with the PRISTINE k2rad: a driven screw gets
+#: no pad and its bodies carry no standard code, so B8 moves no byte of it
+_B8_DRIVEN_4F5B6E8_SHA = (
+    "2a0af96aa06a437ceaf145306413fb0a8eaa73b6112dfb829f68953010facac1")
+
+#: the undriven sentence's needle and the merge sentence's
+_B8_UNDRIVEN = "has NO drive: converted without /IMPVEL/LAGMUL"
+_B8_MERGED = "acts on DOFs the converted joint already holds"
+
+
+def _rbody_j(starter: str, main: int) -> Tuple[float, float, float]:
+    """``(Jxx, Jyy, Jzz)`` of ``/RBODY/<main>`` (its card 2)."""
+    lines = starter.splitlines()
+    i = lines.index(f"/RBODY/{main}")
+    row = lines[i + 5]
+    return (float(row[0:20]), float(row[20:40]), float(row[40:60]))
+
+
+def _standard_bcs_nodes(starter: str) -> Set[int]:
+    """Every node a STANDARD /BCS card (not /BCS/LAGMUL) holds."""
+    lines = starter.splitlines()
+    groups: Dict[int, List[int]] = {}
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^/GRNOD/NODE/(\d+)$", lines[i])
+        if m:
+            ids: List[int] = []
+            j = i + 2
+            while (j < len(lines) and not lines[j].startswith("/")
+                   and not lines[j].startswith("#-")):
+                if not lines[j].startswith("#"):
+                    ids += [int(t) for t in lines[j].split()]
+                j += 1
+            groups[int(m.group(1))] = ids
+            i = j
+            continue
+        i += 1
+    out: Set[int] = set()
+    for i, ln in enumerate(lines):
+        if re.match(r"^/BCS/\d+$", ln):
+            out.update(groups.get(int(lines[i + 3].split()[-1]), []))
+    return out
+
+
+def _flat_a(deck: str) -> str:
+    """The mini screw with A FLAT: its hex 2 mm along the axis (x 18 .. 20)
+    and 20 x 20 mm across (y / z 0 .. 20) - N3 (node 1) moves to (18, 0, 0),
+    N1 stays at (20, 0, 0), so the axis runs along an edge of the hex. About
+    the lumped CoG (19, 10, 10): I_axis = 200 m > I_t = 101 m."""
+    out = []
+    for ln in deck.splitlines():
+        if (len(ln) == 56 and ln[:8].strip().isdigit()
+                and 1 <= int(ln[:8]) <= 8):
+            x, y, z = (float(ln[8:24]), float(ln[24:40]), float(ln[40:56]))
+            ln = (f"{ln[:8]}{18.0 + 0.2 * (x - 10.0):>16.4f}"
+                  f"{2.0 * y:>16.4f}{2.0 * z:>16.4f}")
+        out.append(ln)
+    return "\n".join(out) + "\n"
+
+
+class JointScrewRound8(unittest.TestCase):
+    """B8 (round 8; under the existing --no-joint-screw-gjoint, no new flag):
+    (q-i) a screw whose deck states NO drive converts without
+    /IMPVEL/LAGMUL and pads A's J row so the Lagrange solver's ONE scalar
+    (the main node's smallest principal inertia, inirby.F:838 /
+    lag_mult_solv.F:393) is A's screw-axis inertia; (q-ii) refusal 11 by DOF
+    class - a code on DOFs the joint holds is merged (written nowhere); (q-iii)
+    the split names the residual drift; (q-iv) the synthetic CI fixture."""
+
+    def test_undriven_screw_converts_with_the_pad(self):
+        res, starter, _e = _convert(_screw_deck(drive=False))
+        self.assertIn("/GJOINT/RACK/", starter)
+        self.assertEqual(starter.count("/BCS/LAGMUL/"), 2)
+        self.assertNotIn("/IMPVEL/LAGMUL/", starter)
+        self.assertNotIn("SCREW_9_dTHETA_dt", starter)
+        self.assertFalse(_has(res.warnings, ": NOT converted - "),
+                         res.warnings)
+        # A = one 10 mm hex (x 10 .. 20, y / z 0 .. 10): 8 lumped corner
+        # masses m/8 at (y, z) = (5 +- 5, 5 +- 5) about the CoG (15, 5, 5)
+        m = 7.85e-9 * 1000.0
+        d_j = 8 * (m / 8.0) * (25.0 + 25.0)          # = 50 m
+        jxx, jyy, jzz = _rbody_j(starter, _rbody_main(starter, 2))
+        self.assertEqual(jxx, 0.0)
+        self.assertAlmostEqual(jyy / d_j, 1.0, delta=1e-9)
+        self.assertAlmostEqual(jzz / d_j, 1.0, delta=1e-9)
+        hits = [w for w in res.warnings if _B8_UNDRIVEN in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("147.716", "145.989", "+75.5 %", "inirby.F:838",
+                       "lag_mult_solv.F:393", f"added inertia {d_j:g}"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        # the rack sentence no longer claims a drive it does not write
+        self.assertNotIn("the drive are re-written", hits[0])
+
+    def test_flat_A_pad_makes_the_axis_the_smallest_principal(self):
+        """Mutation target: a pad of 0.5 (I_axis - I_t,min) leaves the
+        transverse value at 150.5 m < 200 m and fails this test."""
+        from k2rad.lumping import _sym3_eigen
+        res, starter, _e = _convert(_flat_a(_screw_deck(drive=False)))
+        self.assertIn("/GJOINT/RACK/", starter)
+        m = 7.85e-9 * 2.0 * 20.0 * 20.0
+        # the point-mass tensor about the CoG (19, 10, 10): d = (+-1, +-10,
+        # +-10), every product of inertia 0 by symmetry
+        t = [[200.0 * m, 0.0, 0.0], [0.0, 101.0 * m, 0.0],
+             [0.0, 0.0, 101.0 * m]]
+        j = _rbody_j(starter, _rbody_main(starter, 2))
+        self.assertEqual(j[0], 0.0)
+        self.assertAlmostEqual(j[1] / (200.0 * m), 1.0, delta=1e-9)
+        for k in range(3):
+            t[k][k] += j[k]
+        smallest = min(_sym3_eigen(t)[0])
+        self.assertAlmostEqual(smallest / (200.0 * m), 1.0, delta=1e-9)
+        hits = [w for w in res.warnings if _B8_UNDRIVEN in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertNotIn("below it", hits[0])
+
+    def test_a_refused_vad3_drive_is_not_no_drive(self):
+        """Mutation target: testing the converted registry (on_a) instead of
+        state.pm_rigid_stated_pids converts this deck as undriven."""
+        res, starter, _e = _convert(_screw_deck(vad=3))
+        self.assertNotIn("/GJOINT/", starter)
+        hits = [w for w in res.warnings if ": NOT converted - " in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("is not converted (a VAD 3 / 4 card is not converted "
+                      "at all; a refused drive is not 'no drive')", hits[0])
+        st = _t7._dispatch(_screw_deck(vad=3))
+        self.assertEqual(st.pm_rigid_stated_pids, {2})
+        self.assertEqual(st.prescribed_motions, [])
+
+    def test_driven_screw_bytes_unchanged(self):
+        res, starter, _e = _convert(_screw_deck())
+        self.assertEqual(_rbody_j(starter, _rbody_main(starter, 2)),
+                         (0.0, 0.0, 0.0))
+        self.assertIn("/IMPVEL/LAGMUL/", starter)
+        self.assertFalse(_has(res.warnings, _B8_UNDRIVEN), res.warnings)
+        self.assertEqual(_sha(starter), _B8_DRIVEN_4F5B6E8_SHA)
+
+    def test_refusal_11_by_class(self):
+        """Mutation targets: a merge that writes the card (the 'no standard
+        /BCS' assertion fails); a drive-DOF code that merges (the RC 1
+        subtest fails)."""
+        held = (("a *NODE TC 3 on A (A's z: held)", {"a_node_tc": 3}, 2,
+                 "the *NODE TC 3 / RC 0 of its node 3 on body A (part 2)"),
+                ("a *BOUNDARY_SPC DOFY on B (B's y: held)", {"b_spc": True},
+                 1, "on body B (part 1)"))
+        for name, kw, part, needle in held:
+            with self.subTest(case=name):
+                res, starter, _e = _convert(_screw_deck(**kw))
+                self.assertIn("/GJOINT/RACK/", starter)
+                hits = [w for w in res.warnings if _B8_MERGED in w]
+                self.assertEqual(len(hits), 1, res.warnings)
+                self.assertIn(needle, hits[0])
+                self.assertIn("-0.07 %", hits[0])
+                self.assertIn("+2.57 %", hits[0])
+                main = _rbody_main(starter, part)
+                self.assertNotIn(main, _standard_bcs_nodes(starter))
+        refused = (
+            ("a *CONSTRAINED_GLOBAL TC 1 through B (axial: free)",
+             {"b_global": True},
+             "on a free DOF of the joint (the axial translation)"),
+            ("a nodal prescribed motion on A", {"a_node_motion": True},
+             "a nodal prescribed motion"),
+            ("a *NODE RC 1 on A (the drive's DOF)", {"a_node_rc": 1},
+             "on the drive's DOF (A's rotation about the screw axis)"),
+            ("a *NODE RC 1 on an undriven A (its spin: free)",
+             {"a_node_rc": 1, "drive": False},
+             "on a free DOF of the joint (A's spin about the screw axis)"),
+            ("a *NODE TC 1 on A (axial: free)", {"a_node_tc": 1},
+             "on a free DOF of the joint (the axial translation)"))
+        for name, kw, needle in refused:
+            with self.subTest(case=name):
+                res, starter, _e = _convert(_screw_deck(**kw))
+                self.assertNotIn("/GJOINT/", starter)
+                hits = [w for w in res.warnings if ": NOT converted - " in w]
+                self.assertEqual(len(hits), 1, res.warnings)
+                self.assertIn(needle, hits[0])
+                if "motion" not in name:
+                    self.assertIn("starter WARNING 312", hits[0])
+
+    def test_round7_refusal_list_moves(self):
+        """The round-7 refusal list keeps every class the joint still
+        refuses; the two held codes and 'no drive' left it (re-homed in the
+        tests above) and VAD 3's needle names the stated drive."""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "test_r14_triage_7.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        for gone in ('("a *NODE TC on A"', '("a *BOUNDARY_SPC on B"',
+                     '("no drive"'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, src)
+        for kept in ('("a *CONSTRAINED_GLOBAL plane through B"',
+                     '("a nodal prescribed motion on A"', '("VAD 3"'):
+            with self.subTest(kept=kept):
+                self.assertIn(kept, src)
+
+    def test_the_split_sentence_names_the_drift(self):
+        res, _s, _e = _convert(_screw_deck())
+        hits = [w for w in res.warnings if "is split out" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("drifts off its main node by the cancelled impulse",
+                       "0.0560 mm", "0.0250 mm", "0.0145 mm", "178.67 mm",
+                       "The rigid-to-deformable pairs of part 2 and part 1 "
+                       "stay"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_the_lagrange_pair_helper_is_the_split_predicate(self):
+        from k2rad.writer.joint_screw import lagrange_held_pairs
+        from k2rad.writer.assembly import build_starter
+        st = _t7._dispatch(_screw_deck())
+        build_starter(st)
+        pairs = lagrange_held_pairs(st, 90001)
+        self.assertEqual([(p.a_pid, p.b_pid, p.tag, p.label) for p in pairs],
+                         [(2, 1, "screw_9", "*CONSTRAINED_JOINT_SCREW 9")])
+        self.assertEqual(lagrange_held_pairs(st, 90002), [])
+
+    def test_the_synthetic_deck(self):
+        """B8.5 (q-iv): the opt-out, the undriven and the merge variants of
+        the synthetic look-alike (its six round-7 assertions are
+        test_r14_triage_7.JointScrewGjoint.test_the_synthetic_deck)."""
+        ss = _screw_synthetic()
+        ids = ss.node_ids()
+        # the opt-out: the 65ff389 skip
+        r0, s0, _e0 = _convert(ss.build_deck(), joint_screw_gjoint=False)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_JOINT_SCREW", s0)
+        self.assertNotIn("/GJOINT/", s0)
+        self.assertTrue(_has(r0.warnings, "--no-joint-screw-gjoint: 1 "
+                             "*CONSTRAINED_JOINT_SCREW card(s) left "
+                             "unconverted"), r0.warnings)
+        # the undriven variant: no drive, A's J row (0, dJ, dJ) with dJ the
+        # lumped Ixx of A's 27-node block (x 4000 .. 4100 in 2 x 50 mm,
+        # y / z -10 .. 10 in 2 x 10 mm): a node at index (i, j, k) carries
+        # c(i) c(j) c(k) / 8 of a hex's mass, c = 1 at an end, 2 in the middle
+        r1, s1, _e1 = _convert(ss.build_deck(drive=False))
+        self.assertIn("/GJOINT/RACK/", s1)
+        self.assertNotIn("/IMPVEL/LAGMUL/", s1)
+        self.assertNotIn("SCREW_9000002_dTHETA_dt", s1)
+        m_hex = ss.RO * 50.0 * 10.0 * 10.0
+        c = (1, 2, 1)
+        d_j = math.fsum(c[i] * c[j] * c[k] * m_hex / 8.0
+                        * ((-10.0 + 10.0 * j) ** 2 + (-10.0 + 10.0 * k) ** 2)
+                        for i in range(3) for j in range(3) for k in range(3))
+        jxx, jyy, jzz = _rbody_j(s1, 10059663)
+        self.assertEqual(jxx, 0.0)
+        self.assertAlmostEqual(jyy / d_j, 1.0, delta=1e-9)
+        self.assertAlmostEqual(jzz / d_j, 1.0, delta=1e-9)
+        self.assertTrue(_has(r1.warnings, _B8_UNDRIVEN), r1.warnings)
+        # the merge variant: a *BOUNDARY_SPC DOFY on N1 (A's y: held)
+        spc = "*BOUNDARY_SPC_NODE\n" + ss._row(ids["N1"], 0, 0, 1, 0, 0, 0, 0)
+        r2, s2, _e2 = _convert(ss.build_deck(extra=spc))
+        self.assertIn("/GJOINT/RACK/", s2)
+        self.assertTrue(_has(r2.warnings, _B8_MERGED,
+                             f"its node {ids['N1']} on body A (part "
+                             "10000046)"), r2.warnings)
+        self.assertNotIn(10059663, _standard_bcs_nodes(s2))
+        self.assertNotIn(ids["N1"], _standard_bcs_nodes(s2))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

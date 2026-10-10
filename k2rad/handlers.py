@@ -6080,6 +6080,11 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
     keyword = block.keyword
     local = keyword.endswith("_LOCAL")
     for f, _box in _bpm_walk(block):
+        # round 8, B8 (q-i): the deck's STATEMENT, recorded before any screen
+        # (a short line, a refused VAD) - the screw joint must tell "no drive"
+        # from "a drive stated and not converted"
+        if f and to_int(f[0]):
+            state.pm_rigid_stated_pids.add(to_int(f[0]))
         if len(f) < 4:
             continue
         pid   = to_int(f[0])
@@ -8044,7 +8049,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:1083, :1778, :1892, :2081, :2238, :2362
+    sites register into at the line that writes the card (writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378
     — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, round 5 added the
