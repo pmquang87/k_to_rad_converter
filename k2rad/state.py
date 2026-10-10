@@ -8037,6 +8037,18 @@ class ConvertOptions:
     # tire.k (nt 4): cycle-0 LOADING DATA stop -> NORMAL in 24329 cycles, END
     # IE +3.93 % / KE -18.30 %.
     imflag0_eigen_explicit: bool = True
+    # --no-implicit-smooth-curve-sampling: keep /FUNCT_SMOOTH on an implicit
+    # deck, where FV_IMP -> DINTERI (fv_imp0.F:209 / :333) reads it as the
+    # straight trapezoid.
+    #
+    # ON by default (R14 triage round 8, B2):
+    # writer/assembly._sample_implicit_smooth_curves re-samples every
+    # well-formed *DEFINE_CURVE_SMOOTH of an implicit, non-modal deck as a
+    # sine ramp (handlers.sampled_smooth_points) written as a plain /FUNCT.
+    # MEASURED on efg/metal-cutting (nt 4 and 2): cycle-26 ERROR on 13 of 13
+    # straight-ramp runs -> NORMAL in 202 cycles on 7 of 7 sine runs (a
+    # status).
+    implicit_smooth_curve_sampling: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -10372,6 +10384,15 @@ class ConversionState:
     #: existing "is this LCID defined?" membership test resolve them, with no
     #: new registry to forget (the #111 lesson).
     funct_smooth_ids: Set[int] = field(default_factory=set)
+    #: R14 triage round 8, B2: ``{lcid: (TSTART, TRISE, TEND, VMAX)}`` - the
+    #: back-solved cells of every WELL-FORMED ``*DEFINE_CURVE_SMOOTH``
+    #: trapezoid (TRISE > 0, 2 TRISE <= TEND - TSTART), recorded by
+    #: ``handle_define_curve_smooth`` and read by the implicit sampling pass
+    #: (``writer/assembly._sample_implicit_smooth_curves``); a redefinition
+    #: pops it. ``smooth_curves_sampled`` makes the pass idempotent.
+    smooth_curve_params: Dict[int, Tuple[float, float, float, float]] = field(
+        default_factory=dict)
+    smooth_curves_sampled: bool = False
     #: ``{keyword: {ids}}`` for every ``/IMPVEL`` / ``/IMPACC`` / ``/IMPDISP``
     #: card the writers emitted, filled AT the line that writes each card.
     #: THREE producers record here — ``loads._emit_imp_card`` (the

@@ -2322,13 +2322,14 @@ that decided it and the deck that would decide it next.
    guarded spring sharing a `/PROP` takes its smaller MASS rather than a
    split, a tied end is never driven, and the per-spring `n` is the busier
    end's count.
-10. **Itetra4 3 on EFG tetrahedron parts** (round-6 item 26): turns the GLOBAL
-    arm NORMAL on 3 of 3 runs (197 cycles) but with no reference, an energy
-    error of 91.2 % and a flat mid-run IE (the implicit contact is not
-    cutting) — a status-only promotion of an unscorable row; next: the first
-    states' global KE / IE in the LS-DYNA run's `main.d3plot01`. The row stays
-    error_engine (A5 (ii) names the placeholder). Refusing GLOBAL on EFG parts
-    is NO-GO.
+10. **Itetra4 3 on EFG tetrahedron parts** (round-6 item 26): ends NORMAL in
+    197 cycles on 10 of 10 runs but reads 802× / 49.8× the LS internal energy
+    at LS run A's last two d3plot states (t 9.02e-4 / 1.07344e-3; the
+    reference is those six states to 3.6 % of t_end beside a header-only
+    glstat) — the implicit tangent stays S4KE3 (`imp_glob_k.F:176-193`); the
+    energy error is run noise (52.9 .. 99.9 %) and the internal energy CLIMBS
+    after ~6e-3 s. The row stays error_engine on this lever (A5 (ii) names the
+    placeholder). Refusing GLOBAL on EFG parts is NO-GO.
 11. **The spotweld pieces beyond A3** (round-6 item 6): piece 3 (MAT_100 DT →
     TYPE13 mass scaling) is **closed in round 8 by the closed form** (A6,
     `r2len3.F:233` STI = XM/DT²): Mass ×2.5 (LS-DYNA's own factor) and

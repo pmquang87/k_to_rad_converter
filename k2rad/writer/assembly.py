@@ -1532,6 +1532,38 @@ def _warn_orphan_elements(state: ConversionState) -> None:
         "delete the elements.")
 
 
+def _sample_implicit_smooth_curves(state: ConversionState) -> None:
+    """R14 triage round 8, B2: on an IMPLICIT, non-modal deck every
+    well-formed ``*DEFINE_CURVE_SMOOTH`` (``state.smooth_curve_params``) is
+    re-sampled as a sine ramp (``handlers.sampled_smooth_points``) and loses
+    its ``/FUNCT_SMOOTH`` flag, so every emitter (``_make_functions``,
+    ``_emit_funct``, the FGEO BIRTH copy) writes a plain ``/FUNCT`` under the
+    same id: the implicit imposed-motion path reads a curve's points
+    piecewise-linearly whatever the flag (``fv_imp0.F:209`` -> ``:333``
+    DINTERI). Explicit and modal decks, a degenerate shape and
+    ``--no-implicit-smooth-curve-sampling`` keep today's /FUNCT_SMOOTH.
+    Idempotent (``state.smooth_curves_sampled``)."""
+    if state.smooth_curves_sampled:
+        return
+    state.smooth_curves_sampled = True
+    if (not state.options.implicit_smooth_curve_sampling
+            or not state.is_implicit or state.is_modal):
+        return
+    from ..handlers import sampled_smooth_points, smooth_sampling_sentence
+    term = state.ctrl_termination
+    endtim = term.endtim if term is not None else None
+    for lcid in sorted(state.funct_smooth_ids):     # sorted() = a copy
+        params = state.smooth_curve_params.get(lcid)
+        curve = state.curves.get(lcid)
+        if params is None or curve is None:
+            continue
+        tstart, trise, tend, vmax = params
+        curve.pts = sampled_smooth_points(tstart, trise, tend, vmax, endtim)
+        state.funct_smooth_ids.discard(lcid)
+        state.warn(smooth_sampling_sentence(
+            lcid, len(curve.pts), vmax * (tend - tstart - trise)))
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
     # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
     # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
@@ -1565,6 +1597,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # containers, and the tet10->tet4 prune (further down) mutates node_sets.
     _expand_set_ranges_and_generals(state)
     _flatten_set_adds(state)
+    # R14 triage round 8, B2: an implicit deck's *DEFINE_CURVE_SMOOTH -> a
+    # sampled sine /FUNCT, before any emitter reads funct_smooth_ids.
+    _sample_implicit_smooth_curves(state)
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)

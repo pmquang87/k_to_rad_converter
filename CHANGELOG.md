@@ -45,6 +45,45 @@ Prior history (before this changelog was introduced) is summarized in the
     test changed its expected value (every test eigen card states NEIG 3 /
     5 / 10); one docstring (`test_r14_triage_6`
     `test_absent_on_a_modal_deck`) drops tire.k from its "modal shape".
+  - **B2 — an implicit deck's `*DEFINE_CURVE_SMOOTH` is a sampled sine
+    `/FUNCT` (default ON, `--no-implicit-smooth-curve-sampling`).** The
+    implicit solver reads the smoothing flag nowhere: the imposed-motion
+    path integrates a curve's raw points piecewise-linearly (`fv_imp0.F:209`
+    FV_IMP -> `:333` DINTERI, which also extrapolates the end segments
+    linearly; no ISMOOTH branch there or in `force_imp.F`), while the
+    explicit `fixvel.F:224-238` blends it - so `/FUNCT_SMOOTH` was a
+    STRAIGHT ramp on every implicit deck. `writer/assembly.
+    _sample_implicit_smooth_curves` now writes every well-formed card of an
+    implicit, non-modal deck as `/FUNCT/<LCID>` (same id) sampling `0.5 VMAX
+    (1 - cos(pi (t - TSTART) / TRISE))`, 41 points per ramp, the plateau
+    between, the mirrored decay (`handlers.sampled_smooth_points`; area =
+    DIST to 3e-12), with a `(0, 0)` / `(TEND + TRISE, 0)` guard point where
+    the run reaches past the curve. LS-DYNA states no ramp formula (Vol I
+    R17 p.17-153/154); its tool travel on `efg/metal-cutting` grows as
+    t^2.68 .. t^2.89 over the first d3plot states, closest to the sine.
+    MEASURED: on a one-brick implicit probe (nt 4) the driven node follows
+    the integral of the emitted points to 2e-7 at every step on both arms -
+    the 4-point `/FUNCT_SMOOTH` as a straight ramp (DX = 5000 t^2) that runs
+    the node BACKWARDS past TEND (2.782 at t 0.0466 against DIST 3), the
+    sampled `/FUNCT` held at DIST; on `efg/metal-cutting/main.k` (its
+    `/FUNCT/1` = the pre-research's sine arm byte for byte, 82 rows) the
+    straight ramp ends ERROR TERMINATION at cycle 26 (t 6.332e-4, KE
+    2.459e9) on 13 of 13 runs and the sine NORMAL in 202 cycles on 7 of 7
+    runs at nt 4 and nt 2 (this round's pair: IE at LS run A's six d3plot
+    states 0 / 0.01324 / 0.2811 / 1.176 / 11.59 / 82.60 mJ against 0 / 0 /
+    0 / 0 / 0.0308 / 0.4908 at t 0 .. 1.07344e-3) - a STATUS mover, not a
+    score: the late phase does not repeat even on the same bytes at one nt
+    (END IE 1.48e5 .. 2.75e5 mJ over the seven runs), the energy error is
+    unbalanced, and the verdict stays not_comparable (header-only glstat).
+    Reach 1 deck key on 1 emitted model (0 explicit carriers). The round-7
+    A5 placeholder sentence (`writer/mesh.py`) is corrected at its three
+    sites (the warning, ROADMAP round-7 item 10, a bracketed note on the
+    round-7 entry below): the 91.2 % was one run of seven (52.9 .. 99.9 %),
+    the internal energy climbs after ~6e-3 s (Itetra4 3: 24.37 / 2.525e4 /
+    8.82e4 / 1.719e5 / 2.391e5 mJ at the fifths of t_end) and LS-DYNA's run
+    A holds six d3plot states to 3.6 % of t_end. No existing test changed
+    its expected value (`test_rare_cards.py`'s `/FUNCT_SMOOTH` decks are
+    explicit; the round-7 A5 needles sit in the sentence's unchanged head).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8
@@ -1215,7 +1254,11 @@ Prior history (before this changelog was introduced) is summarized in the
     (ELFORM 42 "efg 3d for 4-noded background") and the measured
     consequence (the implicit run cannot carry the constrained cutting:
     ERROR at cycle 26 on 4 of 4 runs; Itetra4 3 ends NORMAL at ERR 91.2 %
-    without a cutting result — not shipped, ROADMAP). 1 key / 1 model.
+    without a cutting result — not shipped, ROADMAP). [Corrected in round 8:
+    the 91.2 % was one run's energy error (52.9 .. 99.9 % over seven runs),
+    the internal energy climbs after ~6e-3 s, and LS-DYNA's run A holds six
+    d3plot states to 3.6 % of t_end — see the round-8 B2 entry.] 1 key / 1
+    model.
     (iii) A named warning for `*CONTROL_IMPLICIT_GENERAL` IMFLAG < 0 (its
     curve's schedule, from the new pure `imflag_segments`, against
     OpenRadioss's one-method-per-engine-file rule, `freimpl.F:82`,

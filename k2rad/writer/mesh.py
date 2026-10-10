@@ -2950,15 +2950,25 @@ def _warn_efg_placeholder(state: ConversionState, secid: int,
            + " are dropped (listed as skipped)" if dropped else "")
         + ", so neither the meshfree interpolation nor the adaptive "
         f"re-meshing LS-DYNA uses on this part is in the converted model "
-        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit, nt 4 "
-        "and 2, round-7 pre-research): the converted run cannot carry the "
-        "constrained cutting at the tool contact - ERROR TERMINATION at cycle "
-        "26 (t 6.332e-4, KE 2.459e9) on 4 of 4 runs, the largest residuals on "
-        "the workpiece top surface under the tool; changing the placeholder "
-        "to Itetra4 3 ends NORMAL in 197 cycles on 3 of 3 runs but with an "
-        "energy error of 91.2 % and a flat internal energy - not a cutting "
-        "result. That row has no LS-DYNA reference (its LS run stopped in the "
-        "input phase).")
+        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit; nt 4 "
+        "and 2): its LS-DYNA reference is run A's six d3plot states to t "
+        "1.07344e-3 s (3.6 % of t_end 0.03: global internal energy 0 to t "
+        "6.27e-4, then 0.0308 / 0.4908 mJ at t 9.02e-4 / 1.07344e-3) beside a "
+        "header-only glstat. With the tool's *DEFINE_CURVE_SMOOTH read as the "
+        "straight ramp the implicit solver makes of /FUNCT_SMOOTH "
+        "(--no-implicit-smooth-curve-sampling) the run ends ERROR TERMINATION "
+        "at cycle 26 (t 6.332e-4, KE 2.459e9) on 13 of 13 runs; with the "
+        "sampled sine ramp (the default since round 8) it ends NORMAL in 202 "
+        "cycles on 7 of 7 runs, but the placeholder already carries 11.59 / "
+        "82.60 mJ at t 9.02e-4 / 1.07344e-3 (LS 0.0308 / 0.4908) and its late "
+        "phase does not repeat between runs. Changing the placeholder to "
+        "Itetra4 3 (not shipped) ends NORMAL in 197 cycles on 10 of 10 runs "
+        "and reads 802x / 49.8x the LS internal energy at those two instants: "
+        "the implicit tangent of a 4-node tetrahedron stays the one-point "
+        "S4KE3 (imp_glob_k.F:176-193, solver warning 1006). In every cutting "
+        "arm the internal energy stays near its early level from ~1e-3 to "
+        "~6e-3 s and then CLIMBS (Itetra4 3 at nt 4: 24.37 / 2.525e4 / 8.82e4 "
+        "/ 1.719e5 / 2.391e5 mJ at the fifths of t_end).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

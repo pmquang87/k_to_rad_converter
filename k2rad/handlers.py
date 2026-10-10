@@ -4945,6 +4945,7 @@ def _clear_smooth_flag_on_redefinition(state: ConversionState, lcid: int,
     if lcid not in state.funct_smooth_ids:
         return
     state.funct_smooth_ids.discard(lcid)
+    state.smooth_curve_params.pop(lcid, None)       # round 8, B2
     state.warn(
         f"{keyword} LCID {lcid}: a *DEFINE_CURVE_SMOOTH already "
         "defined this id. LS-DYNA shares one load-curve id namespace "
@@ -17988,6 +17989,93 @@ def smooth_curve_points(dist: float, tstart: float, tend: float,
     return _strictly_increasing(pts), vmax, tend, note
 
 
+#: R14 triage round 8, B2: intervals per sampled ramp (41 points a ramp).
+_SMOOTH_SAMPLES = 40
+
+
+def sampled_smooth_points(tstart: float, trise: float, tend: float,
+                          vmax: float, endtim: Optional[float]):
+    """R14 triage round 8, B2: a well-formed ``*DEFINE_CURVE_SMOOTH`` as the
+    points of a SINE ramp, for an IMPLICIT deck.
+
+    The implicit imposed-motion path integrates a curve's raw points
+    piecewise-linearly (``fv_imp0.F:209`` FV_IMP -> ``:333`` DINTERI; the
+    file has no ISMOOTH branch, nor has ``force_imp.F``), so a
+    ``/FUNCT_SMOOTH`` there acts as the STRAIGHT trapezoid, while the
+    explicit ``fixvel.F:224-238`` blends it. LS-DYNA states no ramp formula
+    (Vol I R17 p.17-153/154); on efg/metal-cutting its tool travel grows as
+    t^2.68 .. t^2.89 over the first d3plot states, closest to the sine (t^3;
+    straight t^2, the explicit quintic t^4).
+
+    Rise ``0.5 VMAX (1 - cos(pi k / 40))`` at ``TSTART + TRISE k / 40``
+    (k = 0..40), the plateau between, the mirrored decay ``0.5 VMAX (1 +
+    cos(pi k / 40))`` from ``TEND - TRISE``; a zero-width plateau keeps the
+    shared vertex once (81 points). Each ramp integrates to VMAX TRISE / 2,
+    so the area stays DIST. Two guard points, each only when the run
+    reaches past the range, because DINTERI extrapolates the end segments
+    linearly (``fv_imp0.F:684-703``) where LS-DYNA's curve is 0: ``(0, 0)``
+    first when TSTART > 0, ``(TEND + TRISE, 0)`` last when ENDTIM > TEND.
+    """
+    n = _SMOOTH_SAMPLES
+    pts: List[Tuple[float, float]] = []
+    if tstart > 0.0:
+        pts.append((0.0, 0.0))
+    for k in range(n + 1):
+        pts.append((tstart + trise * k / n,
+                    0.5 * vmax * (1.0 - _math.cos(_math.pi * k / n))))
+    t2 = tend - trise
+    for k in range(n + 1):
+        x = t2 + trise * k / n
+        if k == 0 and abs(x - pts[-1][0]) <= 1.0e-12 * max(1.0, abs(x)):
+            continue                        # zero-width plateau: one vertex
+        pts.append((x, 0.5 * vmax * (1.0 + _math.cos(_math.pi * k / n))))
+    if endtim is not None and endtim > tend * (1.0 + 1.0e-9):
+        pts.append((tend + trise, 0.0))
+    return _strictly_increasing(pts)
+
+
+#: R14 triage round 8, B2: the constant core of the sampling sentence
+#: (tests import it). The metal-cutting tallies include the
+#: implementation's own arms (nt 4 and nt 2, the bytes of the pre-research's
+#: sine arm); the probe is a one-brick implicit deck (nt 4) whose driven
+#: node follows the integral of the emitted points on both arms.
+_SMOOTH_SAMPLING_CORE = (
+    "instead of /FUNCT_SMOOTH, because this deck is IMPLICIT and the implicit "
+    "solver reads the smoothing flag nowhere: the imposed-motion path "
+    "integrates the raw points piecewise-linearly (fv_imp0.F:209 FV_IMP -> "
+    ":333 DINTERI, which also extrapolates the end segments linearly) and "
+    "the implicit load path has no smooth branch (force_imp.F), so "
+    "/FUNCT_SMOOTH acts as a STRAIGHT ramp there, while the explicit "
+    "fixvel.F:224-238 blends it. MEASURED on a one-brick implicit probe (nt "
+    "4): the driven node's displacement follows the integral of the emitted "
+    "points to 2e-7 at every step on both arms - the 4-point /FUNCT_SMOOTH "
+    "as a straight ramp that runs the node BACKWARDS past TEND (2.782 at t "
+    "0.0466 against DIST 3), the sampled /FUNCT as the sine, held at DIST by "
+    "its end point. LS-DYNA states no ramp formula (Vol I R17 "
+    "p.17-153/154); on efg/metal-cutting/main.k its tool travel grows as "
+    "t^2.68 .. t^2.89 over the first five d3plot states, closest to the sine "
+    "(t^3; straight t^2, the explicit quintic t^4). MEASURED on that deck at "
+    "nt 4 and nt 2: the straight ramp ends ERROR TERMINATION at cycle 26 (t "
+    "6.332e-4) on 13 of 13 runs; the sampled sine ends NORMAL in 202 cycles "
+    "on 7 of 7 runs, its imposed tool travel at the last LS state t "
+    "1.07344e-3 being 0.01431 mm against LS 0.014681 (straight 0.04148) - a "
+    "STATUS, not a score: the late phase does not repeat, not even on the "
+    "same bytes at one nt (END internal energy 1.48e5 .. 2.75e5 mJ over the "
+    "seven runs, 1.48e5 and 2.54e5 at nt 4), and the energy error is "
+    "unbalanced (+-99.9 % at nine of the ten fifths of t_end of an nt-4 / "
+    "nt-2 pair, 38.4 % at the tenth). --no-implicit-smooth-curve-sampling "
+    "keeps /FUNCT_SMOOTH."
+)
+
+
+def smooth_sampling_sentence(lcid: int, n_points: int, dist: float) -> str:
+    """R14 triage round 8, B2: the sentence of one sampled curve."""
+    return (f"*DEFINE_CURVE_SMOOTH LCID {lcid}: written as /FUNCT/{lcid} "
+            "sampling a SINE ramp 0.5 VMAX (1 - cos(pi (t - TSTART) / "
+            f"TRISE)) ({n_points} points: 41 per ramp, the plateau between "
+            f"them; area {dist:g} = DIST) " + _SMOOTH_SAMPLING_CORE)
+
+
 def _card_abscissa(v: float) -> float:
     """The abscissa the starter reads back from a ``_f`` field (%.10G, or
     %.6E outside 1e-4..1e15) — the value ``hm_read_funct.F:240`` compares.
@@ -18184,6 +18272,15 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
             "*DEFINE_CURVE_SMOOTH (tables share it too, p.17-445: 'Tables and "
             "Load curves may not share common IDs'). The smooth curve below "
             "replaces the earlier definition; renumber one of the cards.")
+    # R14 triage round 8, B2: the back-solved ramp cells of a WELL-FORMED
+    # trapezoid, for the implicit sampling pass (writer/assembly.
+    # _sample_implicit_smooth_curves); a degenerate shape (TRISE <= 0, or the
+    # rise and the fall overlapping) keeps its /FUNCT_SMOOTH and a
+    # redefinition must not keep a stale entry.
+    if trise > 0.0 and 2.0 * trise <= (tend - tstart) * (1.0 + 1.0e-9):
+        state.smooth_curve_params[lcid] = (tstart, trise, tend, vmax)
+    else:
+        state.smooth_curve_params.pop(lcid, None)
     state.curves[lcid] = Curve(lcid, title, 1.0, 1.0, 0.0, 0.0, pts)
     # NOT appended to state.curve_order. That list is the *DEFINE_CURVE
     # ORDERING used to resolve the legacy positional *DEFINE_TABLE form, and

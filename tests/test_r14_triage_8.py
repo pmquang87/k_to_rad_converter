@@ -2116,6 +2116,260 @@ class Imflag0EigenExplicit(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# B2 - implicit *DEFINE_CURVE_SMOOTH -> a sampled sine /FUNCT (default ON,
+#      --no-implicit-smooth-curve-sampling)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _smooth_deck(implicit=True, modal=False, tstart="0.0", tend="0.03",
+                 trise="0.005", dist="9.0", vmax="", endtim="0.03",
+                 consumer="motion", extra="") -> str:
+    """One ELFORM-1 *MAT_ELASTIC brick (10 mm, nodes 1-8), y / z held, its
+    x = 0 face held in x and its x = 10 face (nodes 2, 3, 6, 7) driven
+    along x by *DEFINE_CURVE_SMOOTH 1 (``*BOUNDARY_PRESCRIBED_MOTION_SET``
+    VAD 0, or ``*LOAD_NODE_SET`` when *consumer* is "load"). Implicit:
+    GENERAL IMFLAG 1 DT0 0.001 + DYNAMICS IMASS 1 (+ EIGENVALUE NEIG 5 when
+    *modal*)."""
+    pts = ((1, 0, 0, 0), (2, 10, 0, 0), (3, 10, 10, 0), (4, 0, 10, 0),
+           (5, 0, 0, 10), (6, 10, 0, 10), (7, 10, 10, 10), (8, 0, 10, 10))
+    nodes = "*NODE\n" + "".join(
+        f"{n:>8}{x:>16.1f}{y:>16.1f}{z:>16.1f}\n" for n, x, y, z in pts)
+    ctrl = ""
+    if implicit:
+        ctrl = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+                "*CONTROL_IMPLICIT_DYNAMICS\n" + _row(1) + "\n")
+        if modal:
+            ctrl += "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
+    smooth = ("*DEFINE_CURVE_SMOOTH\n" + _row(1, 0) + f"{dist:>10}"
+              + f"{tstart:>10}{tend:>10}{trise:>10}{vmax:>10}" + "\n")
+    if consumer == "motion":
+        drive = ("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                 + _row(2, 1, 0, 1, 1.0) + "\n")
+    else:
+        drive = "*LOAD_NODE_SET\n" + _row(2, 1, 1, 1.0) + "\n"
+    return ("*KEYWORD\n" + ctrl + "*CONTROL_TERMINATION\n"
+            + f"{endtim:>10}" + "\n" + nodes
+            + "*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+            "*ELEMENT_SOLID\n"
+            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8))
+            + "\n"
+            "*SET_NODE_LIST\n" + _row(1) + "\n" + _row(1, 4, 5, 8) + "\n"
+            "*SET_NODE_LIST\n" + _row(2) + "\n" + _row(2, 3, 6, 7) + "\n"
+            "*SET_NODE_LIST\n" + _row(3) + "\n"
+            + _row(1, 2, 3, 4, 5, 6, 7, 8) + "\n"
+            "*BOUNDARY_SPC_SET\n" + _row(1, 0, 1, 0, 0, 0, 0, 0) + "\n"
+            "*BOUNDARY_SPC_SET\n" + _row(3, 0, 0, 1, 1, 0, 0, 0) + "\n"
+            + smooth + drive + extra + "*END\n")
+
+
+def _funct_rows(starter: str, fid: int, kind: str = "/FUNCT/"):
+    """The (X, Y) text cells of /FUNCT/<fid> (or /FUNCT_SMOOTH/<fid>)."""
+    lines = starter.splitlines()
+    i = lines.index(f"{kind}{fid}")
+    j = i + 1
+    while not lines[j].startswith("#                  X"):
+        j += 1
+    rows = []
+    for ln in lines[j + 1:]:
+        if ln.startswith(("/", "#")) or not ln.strip():
+            break
+        rows.append((ln[:20].strip(), ln[20:40].strip()))
+    return rows
+
+
+def _area(rows):
+    pts = [(float(a), float(o)) for a, o in rows]
+    return sum((b[0] - a[0]) * (a[1] + b[1]) / 2.0
+               for a, b in zip(pts, pts[1:]))
+
+
+_B2_HEAD = "*DEFINE_CURVE_SMOOTH LCID 1: written as /FUNCT/1 sampling a SINE"
+
+
+class ImplicitSmoothCurveSampling(unittest.TestCase):
+    """B2: the implicit solver integrates a /FUNCT_SMOOTH's raw points
+    piecewise-linearly (fv_imp0.F:209 FV_IMP -> :333 DINTERI; no implicit
+    path dispatches on ISMOOTH), so an implicit, non-modal deck gets the
+    sine ramp sampled into a plain /FUNCT under the same id. Hand values:
+    41 points per ramp at TSTART + TRISE k / 40 with 0.5 VMAX (1 -/+ cos(pi
+    k / 40)); VMAX 360 = 9 / (0.03 - 0.005), metal-cutting's own cells.
+
+    Solver probe (_smooth_deck(trise 0.01, tend 0.04, dist 3.0, endtim
+    0.05) + node 2's history; S default / L opt-out, starter + engine, nt
+    4, rcv_r8i_implB_b2_probe_{S,L}, harvested and deleted): 0 starter
+    ERROR and NORMAL in 20 cycles on both; node 2's DX equals the integral
+    of the emitted points to 1.6e-7 (S) / 1.2e-7 (L) at every printed step
+    - S the sampled sine, held at DIST 3.0 past TEND by its end point; L the
+    STRAIGHT 4-point ramp (DX 0.0928805 = 5000 t^2 at t 0.00431), run back
+    to 2.782 at t 0.0466 by DINTERI's linear extrapolation."""
+
+    def test_implicit_writes_the_sampled_funct(self):
+        res, starter, _e = _convert(_smooth_deck())
+        self.assertNotIn("/FUNCT_SMOOTH", starter)
+        rows = _funct_rows(starter, 1)
+        self.assertEqual(len(rows), 82)
+        self.assertEqual(rows[0], ("0", "0"))
+        self.assertEqual(rows[1], ("0.000125", "0.554879928"))
+        self.assertEqual(rows[2], ("0.00025", "2.216098693"))
+        self.assertEqual(rows[40], ("0.005", "360"))
+        self.assertEqual(rows[41], ("0.025", "360"))
+        self.assertEqual(rows[42], ("0.025125", "359.4451201"))
+        self.assertEqual(rows[80], ("0.029875", "0.554879928"))
+        self.assertEqual(rows[81], ("0.03", "0"))
+        xs = [float(a) for a, _o in rows]
+        self.assertTrue(all(b > a for a, b in zip(xs, xs[1:])))
+        hits = [w for w in res.warnings if w.startswith(_B2_HEAD)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("(82 points: 41 per ramp", "area 9 = DIST",
+                       "fv_imp0.F:209", ":333 DINTERI", "fixvel.F:224-238",
+                       "--no-implicit-smooth-curve-sampling"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_area_is_dist(self):
+        """The printed trapezoid area is DIST to 1e-9 (measured 3.2e-12);
+        the VMAX-stated card gives the same 82 rows."""
+        _r, starter, _e = _convert(_smooth_deck())
+        rows = _funct_rows(starter, 1)
+        self.assertAlmostEqual(_area(rows) / 9.0, 1.0, places=9)
+        _r2, starter2, _e2 = _convert(_smooth_deck(vmax="360.0", tend=""))
+        self.assertEqual(_funct_rows(starter2, 1), rows)
+
+    def test_explicit_twin_unchanged(self):
+        res, starter, _e = _convert(_smooth_deck(implicit=False))
+        self.assertEqual(len(_funct_rows(starter, 1, "/FUNCT_SMOOTH/")), 4)
+        self.assertNotIn("\n/FUNCT/1\n", starter)
+        self.assertFalse(_has(res.warnings, _B2_HEAD))
+
+    def test_modal_unchanged(self):
+        res, starter, _e = _convert(_smooth_deck(modal=True))
+        self.assertIn("/FUNCT_SMOOTH/1", starter)
+        self.assertFalse(_has(res.warnings, _B2_HEAD))
+
+    def test_opt_out_keeps_funct_smooth(self):
+        res, starter, _e = _convert(_smooth_deck(),
+                                    implicit_smooth_curve_sampling=False)
+        _rx, starter_x, _ex = _convert(_smooth_deck(implicit=False))
+        self.assertEqual(_funct_rows(starter, 1, "/FUNCT_SMOOTH/"),
+                         _funct_rows(starter_x, 1, "/FUNCT_SMOOTH/"))
+        self.assertFalse(_has(res.warnings, _B2_HEAD))
+
+    def test_tstart_guard(self):
+        """TSTART 0.002: (0, 0) first, then (0.002, 0); 83 points; area
+        9.0."""
+        _r, starter, _e = _convert(_smooth_deck(tstart="0.002"))
+        rows = _funct_rows(starter, 1)
+        self.assertEqual(len(rows), 83)
+        self.assertEqual(rows[:2], [("0", "0"), ("0.002", "0")])
+        self.assertAlmostEqual(_area(rows) / 9.0, 1.0, places=9)
+
+    def test_endtim_guard(self):
+        """ENDTIM 0.05 > TEND: the last point (TEND + TRISE, 0) = (0.035,
+        0); at ENDTIM = TEND none (82)."""
+        _r, starter, _e = _convert(_smooth_deck(endtim="0.05"))
+        rows = _funct_rows(starter, 1)
+        self.assertEqual(len(rows), 83)
+        self.assertEqual(rows[-2:], [("0.03", "0"), ("0.035", "0")])
+        _r2, starter2, _e2 = _convert(_smooth_deck(endtim="0.03"))
+        self.assertEqual(len(_funct_rows(starter2, 1)), 82)
+
+    def test_zero_width_plateau(self):
+        """TRISE 0.015 = half the window: the shared vertex (0.015, VMAX
+        600) once, 81 points."""
+        _r, starter, _e = _convert(_smooth_deck(trise="0.015"))
+        rows = _funct_rows(starter, 1)
+        self.assertEqual(len(rows), 81)
+        self.assertEqual(sum(a == "0.015" for a, _o in rows), 1)
+        self.assertIn(("0.015", "600"), rows)
+        self.assertAlmostEqual(_area(rows) / 9.0, 1.0, places=9)
+
+    def test_degenerate_shapes_keep_funct_smooth(self):
+        for trise in ("0.0", "0.02"):
+            with self.subTest(trise=trise):
+                res, starter, _e = _convert(_smooth_deck(trise=trise))
+                self.assertIn("/FUNCT_SMOOTH/1", starter)
+                self.assertFalse(_has(res.warnings, _B2_HEAD))
+
+    def test_load_consumer_sampled_too(self):
+        res, starter, _e = _convert(_smooth_deck(consumer="load"))
+        self.assertNotIn("/FUNCT_SMOOTH", starter)
+        self.assertEqual(len(_funct_rows(starter, 1)), 82)
+        self.assertTrue(_has(res.warnings, _B2_HEAD))
+
+    def test_sampler_is_idempotent(self):
+        from k2rad.writer import assembly
+        state = _dispatch(_smooth_deck())
+        assembly._sample_implicit_smooth_curves(state)
+        pts = list(state.curves[1].pts)
+        n_warn = len(state.warnings)
+        self.assertEqual(len(pts), 82)
+        assembly._sample_implicit_smooth_curves(state)
+        self.assertEqual(state.curves[1].pts, pts)
+        self.assertEqual(len(state.warnings), n_warn)
+        self.assertNotIn(1, state.funct_smooth_ids)
+
+    def test_redefinition_drops_stale_params(self):
+        """A smooth LCID 1 redefined by a degenerate smooth card (TRISE 0)
+        keeps no stale ramp: /FUNCT_SMOOTH, no B2 sentence."""
+        extra = ("*DEFINE_CURVE_SMOOTH\n" + _row(1, 0) + f"{'9.0':>10}"
+                 + f"{'0.0':>10}{'0.03':>10}{'0.0':>10}{'':>10}" + "\n")
+        state = _dispatch(_smooth_deck(extra=extra))
+        self.assertNotIn(1, state.smooth_curve_params)
+        res, starter, _e = _convert(_smooth_deck(extra=extra))
+        self.assertIn("/FUNCT_SMOOTH/1", starter)
+        self.assertFalse(_has(res.warnings, _B2_HEAD))
+
+    def test_a_plain_curve_redefinition_drops_the_params_too(self):
+        extra = ("*DEFINE_CURVE\n" + _row(1) + "\n"
+                 + f"{0.0:>20}{0.0:>20}\n{0.03:>20}{1.0:>20}\n")
+        state = _dispatch(_smooth_deck(extra=extra))
+        self.assertNotIn(1, state.smooth_curve_params)
+        self.assertNotIn(1, state.funct_smooth_ids)
+
+    def test_the_sentence_carries_the_measured_tallies(self):
+        for needle in ("on 13 of 13 runs", "on 7 of 7 runs",
+                       "1.48e5 .. 2.75e5 mJ over the seven runs",
+                       "0.01431 mm against LS 0.014681",
+                       "2.782 at t 0.0466 against DIST 3",
+                       "t^2.68 .. t^2.89"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, _handlers._SMOOTH_SAMPLING_CORE)
+
+    def test_the_A5_placeholder_sentence_is_corrected(self):
+        """B2.4 (b): the EFG placeholder sentence quotes the status split,
+        the climbing IE and LS-DYNA's six d3plot states (the round-7
+        needles of EfgPlaceholderNamed sit in its unchanged head)."""
+        res, _s, _e = _convert(_t7._efg_deck())
+        hit = [w for w in res.warnings if w.startswith("*SECTION_SOLID_EFG 3")]
+        self.assertEqual(len(hit), 1, res.warnings)
+        for needle in ("six d3plot states to t 1.07344e-3 s",
+                       "header-only glstat", "on 13 of 13 runs",
+                       "on 7 of 7 runs", "11.59 / 82.60 mJ",
+                       "on 10 of 10 runs", "802x / 49.8x",
+                       "imp_glob_k.F:176-193", "then CLIMBS",
+                       "2.391e5 mJ"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hit[0])
+
+    def test_the_sampler_against_its_hand_points(self):
+        pts = _handlers.sampled_smooth_points(0.0, 0.005, 0.03, 360.0, 0.03)
+        self.assertEqual(len(pts), 82)
+        for k in (0, 7, 23, 40):
+            self.assertAlmostEqual(pts[k][0], 0.005 * k / 40, places=15)
+            self.assertAlmostEqual(
+                pts[k][1], 180.0 * (1.0 - math.cos(math.pi * k / 40)),
+                places=9)
+        for k in (0, 13, 40):
+            self.assertAlmostEqual(pts[41 + k][0], 0.025 + 0.005 * k / 40,
+                                   places=15)
+            self.assertAlmostEqual(
+                pts[41 + k][1], 180.0 * (1.0 + math.cos(math.pi * k / 40)),
+                places=9)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2128,11 +2382,14 @@ class Round8FlagWiringB(_t7.Round7FlagWiringA):
 
     _FLAGS = {
         "--imflag0-eigen-explicit": "imflag0_eigen_explicit",
+        "--implicit-smooth-curve-sampling": "implicit_smooth_curve_sampling",
     }
     _HELP_FIGURES = {
         "--imflag0-eigen-explicit": ("24329 cycles", "+3.93 %", "-18.30 %",
                                      "2.06 / 2.23 %",
                                      "tire.d3hsp:1056-1057"),
+        "--implicit-smooth-curve-sampling": ("13 of 13", "7 of 7",
+                                             "202 cycles", "fv_imp0.F:209"),
     }
 
 

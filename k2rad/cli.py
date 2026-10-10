@@ -794,6 +794,20 @@ def build_parser() -> argparse.ArgumentParser:
              "route.",
     )
     parser.add_argument(
+        "--implicit-smooth-curve-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an IMPLICIT, non-modal deck write every *DEFINE_CURVE_SMOOTH as "
+             "a /FUNCT (same id) sampling the sine ramp 0.5 VMAX (1 - cos(pi (t "
+             "- TSTART) / TRISE)), 41 points per ramp, area = DIST: the implicit "
+             "solver integrates /FUNCT_SMOOTH as a straight ramp (fv_imp0.F:209 "
+             "-> DINTERI :333) where explicit blends it. ON by default. MEASURED "
+             "on efg/metal-cutting (nt 4 and 2): ERROR at cycle 26 on 13 of 13 "
+             "straight-ramp runs -> NORMAL in 202 cycles on 7 of 7 sine runs (a "
+             "status, not a score: the late phase does not repeat). Use "
+             "--no-implicit-smooth-curve-sampling to keep /FUNCT_SMOOTH.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1480,6 +1494,7 @@ def main(argv=None) -> int:
         spotweld_dt_mass_scaling=args.spotweld_dt_mass_scaling,
         adaptive_spring_token=args.adaptive_spring_token,
         imflag0_eigen_explicit=args.imflag0_eigen_explicit,
+        implicit_smooth_curve_sampling=args.implicit_smooth_curve_sampling,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

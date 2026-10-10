@@ -254,6 +254,7 @@ def convert(
     spotweld_dt_mass_scaling: bool = True,
     adaptive_spring_token: bool = True,
     imflag0_eigen_explicit: bool = True,
+    implicit_smooth_curve_sampling: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -926,6 +927,18 @@ def convert(
         2.06 / 2.23 % of the LS peak over the 500 LS times to t 0.1.
         Reach 1 deck key on 1 emitted model. False keeps the modal
         K-export route of 4f5b6e8.
+    implicit_smooth_curve_sampling : bool
+        On an implicit, non-modal deck write every well-formed
+        *DEFINE_CURVE_SMOOTH as a /FUNCT (same id) sampling a sine ramp
+        (41 points per ramp, area = DIST) (round 8, B2): the implicit
+        imposed-motion path integrates a curve's points
+        piecewise-linearly whatever the smoothing flag (fv_imp0.F:209
+        FV_IMP -> :333 DINTERI), so /FUNCT_SMOOTH acts as a straight
+        ramp there. **On by default.** MEASURED on
+        efg/metal-cutting/main.k (nt 4 and 2): ERROR TERMINATION at
+        cycle 26 on 13 of 13 straight-ramp runs -> NORMAL in 202 cycles
+        on 7 of 7 sine runs - a status, not a score. Reach 1 deck key
+        on 1 emitted model. False keeps /FUNCT_SMOOTH.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1361,6 +1374,7 @@ def convert(
         spotweld_dt_mass_scaling=spotweld_dt_mass_scaling,
         adaptive_spring_token=adaptive_spring_token,
         imflag0_eigen_explicit=imflag0_eigen_explicit,
+        implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
