@@ -821,6 +821,19 @@ def build_parser() -> argparse.ArgumentParser:
              "rows. Use --no-elastic-fluid-cp-cutoff to keep Pmin 0.",
     )
     parser.add_argument(
+        "--implicit-stub-with-type25",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Keep the inert all-parts implicit contact stub on an implicit deck "
+             "whose only contacts take the TYPE25 route "
+             "(*CONTACT_NODES_TO_SURFACE, *CONTACT_ERODING_*), as before round "
+             "8. By default the stub is skipped there: the deck already has an "
+             "/INTER, and the stub would be its only implicit contact stiffness "
+             "(imp_int_k.F:847). MEASURED on doorbeam (nt 4 = nt 2): skipping it "
+             "moves the END +582.00 -> +689.08 %% (worse) and the RMS 393.31 -> "
+             "313.05 %% of the LS peak (better) - MIXED, both 5-13x LS.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1509,6 +1522,7 @@ def main(argv=None) -> int:
         imflag0_eigen_explicit=args.imflag0_eigen_explicit,
         implicit_smooth_curve_sampling=args.implicit_smooth_curve_sampling,
         elastic_fluid_cp_cutoff=args.elastic_fluid_cp_cutoff,
+        implicit_stub_with_type25=args.implicit_stub_with_type25,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

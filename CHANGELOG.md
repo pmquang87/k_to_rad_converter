@@ -167,6 +167,41 @@ Prior history (before this changelog was introduced) is summarized in the
     `elastic_fluid_cp_cutoff=False` (its assertions hold there; the default
     lives in `ElasticFluidCpCutoff`); its `_convert` / `_pmin` helpers take
     `**kw`.
+  - **B6 — the implicit contact stub is no longer injected beside a
+    TYPE25-route contact (default: skip; opt-in
+    `--implicit-stub-with-type25` keeps it).** `_inject_implicit_contact_stub`
+    never read `state.contacts_type25`, so an implicit deck whose only
+    contact takes the TYPE25 route (`*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE`,
+    `*CONTACT_ERODING_*`) got the inert all-parts `/INTER/TYPE7` beside it -
+    and there it is not inert: OpenRadioss builds implicit contact
+    stiffness only for TYPE 7 / 10 / 11 (`imp_int_k.F:847`; a TYPE25 acts
+    through the residual alone, `intfop2.F:595`), so the stub was the deck's
+    only implicit contact stiffness, an all-parts self-contact LS-DYNA does
+    not have. The new return sits after every other early return (a tied or
+    SOFT-routed general contact returns first, silently, as before) and
+    before the stub's id is drawn; if the writer then drops every TYPE25, a
+    second sentence says the implicit deck carries NO `/INTER` (recorded at
+    the TYPE25 write line, `state.type25_emitted_ids`). MEASURED on
+    `implicit/basic-examples/springback-i/doorbeam.k`, base-paired at nt 4
+    AND nt 2 (identical to the printed digit; the campaign rule, the last
+    row of a printed time): with the stub 39 cycles, END +582.00 % (LS IE
+    2.17595e6 at t 0.0011), fifths +667.62 / +1086.39 / +972.69 / +841.87 /
+    +582.00 %, RMS 393.31 % of the LS peak over the 25 LS blocks in (0,
+    0.0011], and the stub's starter WARNING 343; without it 33 cycles
+    (0.846x), END +689.08 %, fifths +1206.19 / +1002.88 / +690.05 / +531.38
+    / +689.08 %, RMS 313.05 %, no WARNING 343 - MIXED: the END is worse and
+    the RMS better, both arms 5-13x LS from the first fifth (the deck's own
+    deviation, round-8 NOT list). Reach 1 deck key on 1 emitted model (the
+    only stub carrier with a TYPE25: injected on 55 keys / 39 models,
+    emitted on 53 / 37); doorbeam's `_0000.rad` loses the stub block and its
+    groups, every later auto id shifts down, its warning record 18 -> 16
+    (the stub's three sentences out, the skip sentence in, two id-carrying
+    sentences re-numbered); `_0001.rad` identical; the opt-in reproduces the
+    4f5b6e8 deck byte for byte. A synthetic TYPE25-only implicit probe
+    starts with 0 errors and runs NORMAL (nt 4). Tests that changed their
+    expected value: `test_r14_triage_7` `VdcRemedyNotAboutTheStub.test_3`
+    is now `test_3_with_the_opt_in_a_TYPE25_only_deck_gets_the_stub_and_
+    no_stub_sentence` (the round-7 shape lives on under the opt-in).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

@@ -31,6 +31,7 @@ named outcome is recorded in the test's docstring.
 
 import hashlib
 import math
+import os
 import re
 import unittest
 
@@ -2698,8 +2699,254 @@ class ElasticFluidCpCutoff(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# B6 - the implicit contact stub skipped beside a TYPE25-route contact
+#      (default skip; opt-in --implicit-stub-with-type25)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_shell_plate = _t7._shell_plate
+_IMPL1 = _t7._IMPL1
+_STUB_TITLE = "auto_implicit_stabilization_self_contact"
+_B6_HEAD = "Implicit deck with TYPE25-route contact(s)"
+_N2S_78 = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
+           "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
+           + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
+#: sha256 of the 4f5b6e8 starter of _shell_plate(_IMPL1, _N2S_78) - the stub
+#: beside the TYPE25 (converted from the pristine checkout through
+#: test_r14_triage_7._convert; the opt-in must reproduce it byte for byte)
+_B6_OPT_IN_4F5B6E8_SHA = (
+    "ec7e3d3fa5ca310d70c6045f96fd15ff97fc1457d03862f87b85f079ec305892")
+
+
+class ImplicitStubWithType25(unittest.TestCase):
+    """B6: OpenRadioss builds implicit contact stiffness only for TYPE 7 /
+    10 / 11 (imp_int_k.F:847; a TYPE25 acts through the residual,
+    intfop2.F:595), so on an implicit deck whose contacts take the TYPE25
+    route the all-parts stub would be the deck's only implicit contact
+    stiffness: it is skipped (after every other early return, before its
+    id is drawn) and the skip is named once.
+
+    Starter + engine of test 1's deck (nt 4, rcv_r8i_implB_b6_t25,
+    harvested and deleted): see the implement report B6."""
+
+    def test_type25_only_deck_gets_no_stub(self):
+        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78))
+        self.assertIn("/INTER/TYPE25/78", starter)
+        self.assertNotIn(_STUB_TITLE, starter)
+        self.assertFalse(_has(res.warnings, "Injected an inert all-parts"))
+        hits = [w for w in res.warnings if w.startswith(_B6_HEAD)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("[78]", "imp_int_k.F:847", "intfop2.F:595",
+                       "+689.08", "313.05", "+582.00", "393.31", "MIXED",
+                       "--implicit-stub-with-type25"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertFalse(_has(res.warnings, "carries NO /INTER"))
+
+    def test_opt_in_keeps_the_stub(self):
+        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
+                                    implicit_stub_with_type25=True)
+        self.assertIn(_STUB_TITLE, starter)
+        self.assertTrue(_has(res.warnings, "Injected an inert all-parts"))
+        self.assertFalse(_has(res.warnings, _B6_HEAD))
+        self.assertEqual(_sha(starter), _B6_OPT_IN_4F5B6E8_SHA)
+
+    def test_contact_free_implicit_deck_keeps_the_stub(self):
+        res, starter, _e = _convert(_shell_plate(_IMPL1))
+        self.assertIn(_STUB_TITLE, starter)
+        self.assertFalse(_has(res.warnings, _B6_HEAD))
+
+    def test_modal_and_explicit_decks_unchanged(self):
+        modal = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+                 "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
+                 "*CONTROL_TERMINATION\n" + _row(0.01) + "\n")
+        explicit = "*CONTROL_TERMINATION\n" + _row(0.01) + "\n"
+        for name, ctrl in (("modal", modal), ("explicit", explicit)):
+            with self.subTest(deck=name):
+                res, starter, _e = _convert(_shell_plate(ctrl, _N2S_78))
+                self.assertNotIn(_STUB_TITLE, starter)
+                self.assertFalse(_has(res.warnings, _B6_HEAD))
+                self.assertIn("/INTER/TYPE25/78", starter)
+
+    def test_soft_minus7_eroding_single_surface_unchanged(self):
+        """dyna2rad's SOFT -7 sentinel routes an ERODING_SINGLE_SURFACE to
+        contacts_general, whose own guard returns first: no stub, no B6
+        sentence, the /INTER/TYPE7 of the contact itself."""
+        extra = ("*CONTACT_ERODING_SINGLE_SURFACE_ID\n" + _row(77) + "\n"
+                 + _row(0, 0, 0, 0) + "\n" + _row(0.1) + "\n" + _row() + "\n"
+                 + _row(0, 1, 0) + "\n" + _row(-7) + "\n")
+        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
+        self.assertNotIn(_STUB_TITLE, starter)
+        self.assertFalse(_has(res.warnings, _B6_HEAD))
+        self.assertTrue(_has(res.warnings, "SOFT=-7"), res.warnings)
+
+    def test_tied_plus_type25_keeps_todays_silence(self):
+        """DECISION B6-a: a tied + TYPE25 deck returns at the tied guard,
+        silently, as at 4f5b6e8."""
+        extra = _N2S_78 + ("*CONTACT_TIED_NODES_TO_SURFACE_ID\n" + _row(79)
+                           + "\n" + _row(5, 1, 4, 3) + "\n" + _row() + "\n"
+                           + _row() + "\n")
+        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
+        self.assertNotIn(_STUB_TITLE, starter)
+        self.assertFalse(_has(res.warnings, _B6_HEAD))
+
+    def test_dropped_type25_is_named(self):
+        """The TYPE25's secondary node set does not exist: the writer drops
+        it, the skip's premise is false and the deck carries NO /INTER."""
+        extra = ("*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
+                 + _row(99, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row()
+                 + "\n")
+        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
+        self.assertEqual([ln for ln in starter.splitlines()
+                          if ln.startswith("/INTER/")], [])
+        self.assertTrue(_has(res.warnings, _B6_HEAD), res.warnings)
+        self.assertTrue(_has(res.warnings, "carries NO /INTER",
+                             "--implicit-stub-with-type25"), res.warnings)
+
+    def test_the_skip_draws_no_id(self):
+        """B6-a: the return sits before the stub's id is drawn, so the
+        default's auto ids equal the opt-in's minus the stub's one."""
+        st_off = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+        from k2rad import _inject_implicit_contact_stub
+        st_off.options.implicit_stub_with_type25 = False
+        before = st_off._auto_id
+        _inject_implicit_contact_stub(st_off)
+        self.assertEqual(st_off._auto_id, before)
+        self.assertEqual(st_off.implicit_stub_skipped_for, [78])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Part B's flags at every wiring site
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class Round8OptInWiringB(unittest.TestCase):
+    """B12.1: every round-8 part-B OPT-IN lever (default OFF) reaches the
+    parser (with its --no- twin), the README prose (its POSITIVE spelling),
+    the --help render with its measured figures, the GUI end to end,
+    convert() / ConvertOptions (default False) and cli.main()'s call."""
+
+    _OPT_IN = {
+        "--implicit-stub-with-type25": "implicit_stub_with_type25",
+    }
+    _HELP_FIGURES = {
+        "--implicit-stub-with-type25": ("+582.00 -> +689.08 %",
+                                        "393.31 -> 313.05 %",
+                                        "imp_int_k.F:847"),
+    }
+
+    def _readme(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "README.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_flag_is_a_parser_option_with_its_no_twin(self):
+        from k2rad import cli
+        opts = {s for a in cli.build_parser()._actions
+                for s in a.option_strings}
+        for flag in self._OPT_IN:
+            with self.subTest(flag=flag):
+                self.assertIn(flag, opts)
+                self.assertIn("--no-" + flag[2:], opts)
+
+    def test_every_positive_spelling_is_in_README_prose(self):
+        readme = self._readme()
+        body = [ln for ln in readme.splitlines()
+                if not re.match(r"^\s*[-*]?\s*\[.*\]\(#.*\)\s*$", ln)]
+        for flag in self._OPT_IN:
+            with self.subTest(flag=flag):
+                self.assertTrue(any(flag in ln for ln in body),
+                                f"{flag} is not in README.md prose")
+
+    def test_every_opt_in_has_its_OWN_README_SECTION_and_its_links_resolve(self):
+        """The round-5 rule: a ``### `--flag``` heading of its own (a renamed
+        heading leaves a presence check green), and every in-README link to
+        an opt-in section resolves to a heading that exists."""
+        readme = self._readme()
+        headings = re.findall(r"^#{2,4}\s+(.*)$", readme, re.M)
+        anchors = {re.sub(r"[^a-z0-9 -]", "", h.lower()).strip()
+                   .replace(" ", "-") for h in headings}
+        for flag in self._OPT_IN:
+            with self.subTest(flag=flag):
+                self.assertTrue(any(h.startswith(f"`{flag}`")
+                                    for h in headings), flag)
+                for link in re.findall(r"\]\(#(" + re.escape(flag) + r"[^)]*)\)",
+                                       readme):
+                    self.assertIn(link, anchors)
+
+    def test_the_help_renders_and_carries_the_measured_numbers(self):
+        from k2rad import cli
+        flat = _t7._collapse(cli.build_parser().format_help())
+        for flag, figures in self._HELP_FIGURES.items():
+            for figure in figures:
+                with self.subTest(flag=flag, figure=figure):
+                    self.assertIn(figure, flat)
+
+    def test_convert_and_ConvertOptions_default_off(self):
+        import inspect
+        from k2rad import convert
+        from k2rad.state import ConvertOptions
+        sig = inspect.signature(convert).parameters
+        for name in self._OPT_IN.values():
+            with self.subTest(name=name):
+                self.assertIs(sig[name].default, False)
+                self.assertIs(getattr(ConvertOptions(), name), False)
+
+    def test_the_gui_wires_every_lever_end_to_end(self):
+        import tempfile
+        import k2rad_gui
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        for flag, name in self._OPT_IN.items():
+            with self.subTest(name=name):
+                kw = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), ground_springs=False,
+                    ground_spring_k_text="", soften_stfac_text="",
+                    **{name: True})
+                self.assertIs(kw[name], True)
+                captured = []
+                app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+                app._append = captured.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw)
+                self.assertIn(flag, "".join(captured))
+                kw_off = k2rad_gui.build_convert_kwargs(
+                    path, "", ("Mg", "mm", "s"), ground_springs=False,
+                    ground_spring_k_text="", soften_stfac_text="")
+                self.assertIs(kw_off[name], False)
+                captured_off = []
+                app._append = captured_off.append
+                k2rad_gui.ConverterGUI._describe_options(app, kw_off)
+                self.assertNotIn(flag, "".join(captured_off))
+        tmp.cleanup()
+
+    def test_the_cli_passes_the_flag_through(self):
+        import tempfile
+        from k2rad import cli
+        import k2rad
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        for flag, name in self._OPT_IN.items():
+            for argv, want in (([path, flag], True), ([path], False),
+                               ([path, "--no-" + flag[2:]], False)):
+                with self.subTest(flag=flag, argv=argv[1:]):
+                    seen = {}
+
+                    def fake_convert(*a, **kw):
+                        seen.update(kw)
+                        raise SystemExit(0)
+
+                    saved = k2rad.convert
+                    k2rad.convert = fake_convert
+                    try:
+                        with self.assertRaises(SystemExit):
+                            cli.main(argv)
+                    finally:
+                        k2rad.convert = saved
+                    self.assertIs(seen.get(name), want, seen)
+        tmp.cleanup()
 
 
 class Round8FlagWiringB(_t7.Round7FlagWiringA):

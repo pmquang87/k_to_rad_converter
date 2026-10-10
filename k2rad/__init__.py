@@ -27,6 +27,34 @@ from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_n
                      deformable_deformable_inter_ids, _recipe_active)
 
 
+#: R14 triage round 8, B6: the sentence of the implicit stub SKIPPED beside a
+#: TYPE25-route contact ({ids}). The doorbeam figures are the
+#: implementation's own pair (nt 4 and nt 2, base-paired with 4f5b6e8), by
+#: the campaign rule (the last row of a printed time).
+_STUB_TYPE25_SENTENCE = (
+    "Implicit deck with TYPE25-route contact(s) {ids} and no other converted "
+    "contact: the inert all-parts self-contact (/INTER/TYPE7 "
+    "'auto_implicit_stabilization_self_contact') k2rad injects into a "
+    "contact-free implicit deck is NOT injected - the deck already has an "
+    "/INTER, which is what the stub exists to provide. It would not be inert "
+    "here: OpenRadioss builds implicit contact stiffness only for TYPE 7 / "
+    "10 / 11 (imp_int_k.F:847), a TYPE25 acts through the residual alone "
+    "(intfop2.F:595), so the stub would be the deck's only implicit contact "
+    "stiffness - an all-parts self-contact LS-DYNA does not have, alive past "
+    "the deck's own contact death time. MEASURED on "
+    "implicit/basic-examples/springback-i/doorbeam.k (nt 4 = nt 2 to the "
+    "printed digit): with the stub 39 cycles, internal energy at the fifths "
+    "of t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % "
+    "against LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
+    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
+    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
+    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - MIXED: the END is worse "
+    "and the RMS better, and both arms sit 5-13x LS from the first fifth "
+    "(that deviation is the deck's own, not the stub's). "
+    "--implicit-stub-with-type25 keeps the stub."
+)
+
+
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
     """Work around an OpenRadioss engine crash.
 
@@ -93,6 +121,19 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # implicit deck is outside what this stub can help with; it is also
         # outside what OpenRadioss SPH supports, and every SPH deck in the
         # corpus is explicit.
+        return
+    if state.contacts_type25 and not state.options.implicit_stub_with_type25:
+        # R14 triage round 8, B6: a deck with a TYPE25-route contact already
+        # has the /INTER the stub exists to provide; the stub would be the
+        # deck's only implicit contact STIFFNESS (imp_int_k.F:847: TYPE 7 /
+        # 10 / 11 only) and an all-parts self-contact LS-DYNA does not have.
+        # Placed after every other early return, so the sentence fires
+        # exactly where a stub WOULD have been injected (B6-a), and before
+        # the stub's id is drawn.
+        state.implicit_stub_skipped_for = sorted(
+            c.inter_id for c in state.contacts_type25)
+        state.warn(_STUB_TYPE25_SENTENCE.format(
+            ids=state.implicit_stub_skipped_for))
         return
     inter_id = state.next_id()
     state.contacts_single.append(
@@ -256,6 +297,7 @@ def convert(
     imflag0_eigen_explicit: bool = True,
     implicit_smooth_curve_sampling: bool = True,
     elastic_fluid_cp_cutoff: bool = True,
+    implicit_stub_with_type25: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -952,6 +994,18 @@ def convert(
         decks; on 9.4 (nt 4) both cells give the same 18 rows with zero
         energy. Reach 4 deck keys on 4 emitted models. False keeps Pmin
         0 (= -INFINITY), the 4f5b6e8 cell.
+    implicit_stub_with_type25 : bool
+        Keep injecting the inert all-parts implicit contact stub on an
+        implicit deck whose only contacts take the TYPE25 route (round
+        8, B6; the 4f5b6e8 behaviour). By default the stub is skipped
+        there: the deck already has an /INTER, and OpenRadioss builds
+        implicit contact stiffness only for TYPE 7 / 10 / 11
+        (imp_int_k.F:847), so the stub would be the deck's only
+        implicit contact stiffness. MEASURED on
+        implicit/basic-examples/springback-i/doorbeam.k (nt 4 = nt 2):
+        skipping it moves the END +582.00 -> +689.08 % (worse) and the
+        RMS 393.31 -> 313.05 % of the LS peak (better) - MIXED. Reach 1
+        deck key on 1 emitted model. Default False.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1389,6 +1443,7 @@ def convert(
         imflag0_eigen_explicit=imflag0_eigen_explicit,
         implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
         elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
+        implicit_stub_with_type25=implicit_stub_with_type25,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

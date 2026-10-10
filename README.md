@@ -4617,7 +4617,12 @@ ordinary `Inacti = 5` plus that `Fpenmax`. It stated `Inacti = 1` for one
 round; measured, that zeroes the stiffness of every initially penetrating node
 and cost `efg/metal-cutting/main.k` its NORMAL termination (218 cycles to
 t = 0.03 became a TIMESTEP-LIMIT death at t = 0.0084), so the lever is Fpenmax
-and not Inacti. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
+and not Inacti. Since round 8 the stub is NOT injected when the deck's only
+contacts take the TYPE25 route (an `/INTER` already exists; the stub would be
+its only implicit contact stiffness, `imp_int_k.F:847`): on `doorbeam` the END
+moves +582.00 → +689.08 % and the RMS 393.31 → 313.05 % of the LS peak — MIXED;
+[`--implicit-stub-with-type25`](#--implicit-stub-with-type25--the-implicit-stub-beside-a-type25-route-contact)
+keeps it. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
 (`hm_read_inter_type10.F:94`) and clears the same refusal with `Itied = 1`
 ("TIED AFTER IMPACT NO REBOUND AUTORIZED", `:188`), which is what a
 `*CONTACT_TIED_*` without `_FAILURE` means anyway — measured, 310 × ERROR 612
@@ -6807,6 +6812,28 @@ time either way: that match was an artefact — the implicit engine never
 prints its last converged increment, so the end-of-run scorer compared `t`
 0.0922 with LS-DYNA's `t` 0.1 — and at matched time the shipped run's KE is
 +1343 %, the flag's +17.9 %.
+
+### `--implicit-stub-with-type25` — the implicit stub beside a TYPE25-route contact
+
+k2rad injects an inert all-parts `/INTER/TYPE7`
+(`auto_implicit_stabilization_self_contact`) into a CONTACT-FREE implicit deck,
+because the engine's implicit setup needs an interface. Since round 8 a deck
+whose only contacts take the TYPE25 route (`*CONTACT_NODES_TO_SURFACE`,
+`*CONTACT_AUTOMATIC_NODES_TO_SURFACE`, `*CONTACT_ERODING_*`) does NOT get it:
+the deck already has an `/INTER`, and the stub would not be inert there —
+OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11
+(`imp_int_k.F:847`; a TYPE25 acts through the residual alone, `intfop2.F:595`),
+so the stub would be the deck's only implicit contact stiffness, an all-parts
+self-contact LS-DYNA does not have. The skip sits after every other early
+return of the injector (a tied or a SOFT-routed general contact returns first,
+as before) and before the stub's id is drawn; if every TYPE25 is then dropped
+by the writer, a second sentence says the deck carries NO `/INTER`. MEASURED on
+`implicit/basic-examples/springback-i/doorbeam.k` (nt 4 = nt 2 to the printed
+digit, base-paired): with the stub 39 cycles, END +582.00 %, RMS 393.31 % of
+the LS peak over the 25 LS blocks in (0, 0.0011]; without it 33 cycles, END
++689.08 % (worse), RMS 313.05 % (better) — MIXED, both arms 5-13× LS from the
+first fifth (that deviation is the deck's own). `--implicit-stub-with-type25`
+(opt-in) keeps the stub, byte for byte the 4f5b6e8 deck.
 
 ---
 

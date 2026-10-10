@@ -8065,6 +8065,17 @@ class ConvertOptions:
     # unchanged. Round 7's 'deliberately not changed' is reversed on
     # consistency (no time-domain reference).
     elastic_fluid_cp_cutoff: bool = True
+    # --implicit-stub-with-type25: keep injecting the implicit contact stub
+    # on a deck whose only contacts take the TYPE25 route (the 4f5b6e8
+    # behaviour; R14 triage round 8, B6).
+    #
+    # OFF by default: __init__._inject_implicit_contact_stub returns before
+    # drawing the stub's id when state.contacts_type25 is not empty
+    # (imp_int_k.F:847 builds implicit contact stiffness for TYPE 7 / 10 / 11
+    # only; a TYPE25 acts through the residual, intfop2.F:595). MEASURED on
+    # doorbeam (nt 4 = nt 2): END +582.00 -> +689.08 % with RMS 393.31 ->
+    # 313.05 % - MIXED.
+    implicit_stub_with_type25: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -10180,6 +10191,13 @@ class ConversionState:
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)
+    # R14 triage round 8, B6: the TYPE25-route ids beside which
+    # __init__._inject_implicit_contact_stub SKIPPED the implicit stub, and
+    # the TYPE25 ids writer/contacts._make_type25_interfaces really wrote
+    # (recorded at the write line) - a skip whose TYPE25s were all dropped
+    # leaves an implicit deck with NO /INTER, and is named.
+    implicit_stub_skipped_for: List[int] = field(default_factory=list)
+    type25_emitted_ids: Set[int] = field(default_factory=set)
     # *DEFINE_FRICTION tables → /FRICTION, keyed by their (preserved) id and
     # kept in deck order so "exactly one table in the model" is decidable.
     define_frictions: Dict[int, DefineFriction] = field(default_factory=dict)

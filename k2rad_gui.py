@@ -130,6 +130,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          imflag0_eigen_explicit: bool = True,
                          implicit_smooth_curve_sampling: bool = True,
                          elastic_fluid_cp_cutoff: bool = True,
+                         implicit_stub_with_type25: bool = False,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -318,6 +319,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["elastic_fluid_cp_cutoff"] = bool(elastic_fluid_cp_cutoff)
 
+    kwargs["implicit_stub_with_type25"] = bool(implicit_stub_with_type25)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -472,6 +475,7 @@ class ConverterGUI:
         self.imflag0_eigen_explicit = tk.BooleanVar(value=True)
         self.implicit_smooth_curve_sampling = tk.BooleanVar(value=True)
         self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
+        self.implicit_stub_with_type25 = tk.BooleanVar(value=False)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1036,6 +1040,13 @@ class ConverterGUI:
             variable=self.elastic_fluid_cp_cutoff).grid(
                 row=59, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Implicit TYPE25-only deck: keep the inert all-parts "
+                     "contact stub (as before round 8) - OFF. doorbeam END +582 "
+                     "-> +689 %, RMS 393 -> 313 % without it",
+            variable=self.implicit_stub_with_type25).grid(
+                row=60, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1309,6 +1320,7 @@ class ConverterGUI:
                 imflag0_eigen_explicit=self.imflag0_eigen_explicit.get(),
                 implicit_smooth_curve_sampling=self.implicit_smooth_curve_sampling.get(),
                 elastic_fluid_cp_cutoff=self.elastic_fluid_cp_cutoff.get(),
+                implicit_stub_with_type25=self.implicit_stub_with_type25.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1531,6 +1543,9 @@ class ConverterGUI:
         if not kwargs.get("elastic_fluid_cp_cutoff", True):
             bits.append("*MAT_ELASTIC_FLUID CP 0.0 kept at Pmin 0 "
                         "(--no-elastic-fluid-cp-cutoff)")
+        if kwargs.get("implicit_stub_with_type25"):
+            bits.append("implicit stub kept beside TYPE25 contacts "
+                        "(--implicit-stub-with-type25)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

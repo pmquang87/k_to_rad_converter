@@ -4627,6 +4627,20 @@ def _make_type25_interfaces(state: ConversionState,
             igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,
             tstart=c.bt, tstop=tstop, inacti=inacti, viss=viss,
             fric_id=fric_id)
+        state.type25_emitted_ids.add(c.inter_id)        # round 8, B6
+
+    if state.implicit_stub_skipped_for and not state.type25_emitted_ids:
+        # Round 8, B6: the implicit stub was skipped FOR these TYPE25s, but
+        # the writer dropped every one of them - a second registry must not
+        # make the skip's premise silently false.
+        state.warn(
+            f"*CONTACT ids {state.implicit_stub_skipped_for}: the implicit "
+            "contact stub was skipped for these TYPE25-route contacts (round "
+            "8), but none of them reached the deck (see the drop sentences "
+            "above), so this implicit deck carries NO /INTER; the stub's own "
+            "W14 note says the probe /RBODY alone has run such a deck - if "
+            "the engine stops in implicit setup, re-convert with "
+            "--implicit-stub-with-type25.")
 
     if any(c.eroding for c in state.contacts_type25):
         state.warn(
