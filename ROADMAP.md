@@ -2365,13 +2365,28 @@ that decided it and the deck that would decide it next.
     END IE +7.06 → +5.99 % (KE RMS 6.18 → 6.48 %), `ex_26` (10409 cycles) and
     `billet-forge` (12501) unchanged to the printed history; 5 rule keys with no rotational driver found; the
     large J_min drops on rotation-fixed error_starter bodies (`2Dlag` 6.2e3,
-    `cup-draw` 219, `forging_A/B` 33.4, `ex_16` 9.33) — re-check the main-node
-    step if their starter errors clear; the rigid-tool MASS of `ex_16` (25×)
-    and `cup-draw` (4×) disagrees with LS-DYNA's d3hsp (its own item); a
-    `*CONSTRAINED_RIGID_BODIES` merge takes ΣIN once over the union (asserted
-    by a test, not measured on a deck); the implicit rule keys (`bumper`,
-    `tire.k`, the Yaris) are unmeasured (J enters only the dynamic implicit
-    mass matrix).
+    `cup-draw` 219, `forging_A/B` 33.4, `ex_16` 9.33; round 8: recomputed at
+    the LS-DYNA thickness) — re-check the main-node step if their starter
+    errors clear; the rigid-tool MASS of `ex_16` (25×: ELFORM 13 ignores
+    Card 2, round 8 A7 writes 1.0) and `cup-draw` (4×: T2..T4 = 1 beside T1
+    1000, round 8 A4 writes the mean 250.75) now equals LS-DYNA's d3hsp to
+    the printed digit; cup-draw's OpenRadioss energy error worsens with it
+    (mean −4.39 → −17.88 %, not closed); a `*CONSTRAINED_RIGID_BODIES` merge
+    takes ΣIN once over the union — MEASURED (round 8): the starter's NEW
+    INERTIA equals the point-mass tensor to the 7 printed digits on the
+    two-plate merge probe (`tests/test_r14_triage_8.py` `Round8Records`,
+    flat: 0.6280000E-03 / 0.1884000E-02 / 0.2512000E-02), and the round-8
+    pre-research measured its right-angle (xz −3.140000E-04) and
+    no-shared-node twins (J −1.088533e-4 on all three; a per-body sum would
+    read −1.360667e-4 and miss xx by −4.3 %), the Yaris suspension merged
+    bodies within +0.10..+0.20 % of LS-DYNA's d3hsp (converted only) and the
+    roof crush's merged body equal to LS to every printed digit; the implicit
+    rule keys are MEASURED inert (round-8 pre-research): `bumper` 502 = 502
+    rows with IE / KE / EXT-WORK 0 and 0 of 263 T01 channels different with
+    and without J at nt 4 and nt 2; `tire.k` is not implicit in LS-DYNA
+    (IMFLAG 0 + NEIG 0, round 8 B1 routes it explicit) and on its explicit
+    twin J moves only the 4th digit (RMS IE 2.05 vs 2.04 %); the Yaris giants
+    are never launched.
 14. **The Spotflag-28 `/MPC` mechanism** (B4's cause): a Spotflag-28 tie with
     a conflicting OR a redundant `/MPC` ends NORMAL at a 99.9 % energy error
     on the critic's Ishell-12 two-plate probe (IE 6237 against external work

@@ -343,6 +343,28 @@ Prior history (before this changelog was introduced) is summarized in the
     `LightClauseNumbers` test_1 (8 subtests), test_2, test_3, test_5 (+ 2
     subtests), test_7 and test_8's prescribed-axis subtest (the DRIVEN
     label; bytes identical to the opt-out's).
+  - **A9 — the half-A records and guards (text and tests only).** ROADMAP
+    round-7 item 13: the rigid-tool masses of `ex_16` / `cup-draw` now equal
+    LS-DYNA's d3hsp (A7 / A4, with cup-draw's energy-error cost), and the
+    `*CONSTRAINED_RIGID_BODIES` merge is MEASURED - the two-plate merge probe
+    (`Round8Records`, g3o's `mrg_flat.k` inlined: one `/RBODY`, J
+    -1.088533e-4 x3) starts at NEW MASS 0.1256000E-04, NEW INERTIA
+    0.6280000E-03 / 0.1884000E-02 / 0.2512000E-02 with zero products, the
+    point-mass tensor to the 7 printed digits (starter, nt 4, 0 errors); the
+    pre-research's right-angle / no-shared-node twins, Yaris merged bodies
+    and the implicit rule keys are quoted as theirs. `Round8FlagWiringA`
+    checks the nine part-A flags at every wiring site (parser + `--no-`
+    twin, README prose, the `--help` render with its measured figures, the
+    GUI end to end, `convert()` / `ConvertOptions` default True,
+    `cli.main()`'s call); `Round8RetractedStatementsA` keeps the retracted
+    spellings out of every shipped text but this file (round 7's
+    "calibration ×13.42" / "×13.42 reaches" / "STI formula was not located"
+    / "+7.85 % at the matched end", the "run sensitivity" readings of
+    mainboltaexpl, the partial-rigid sentence's "MOSTLY USELESS" /
+    "COLLAPSES to -62.05" / "-62.05 %", and the critic's "not caused by the
+    cell" / "the mass cell does not create it" / "pre-existing balance
+    problem" on cup-draw), fires on each split across two literals and on a
+    prefix, and asserts the replacements are shipped.
 
 - **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
   DEFAULT changes move campaign VERDICTS by measurement, not by definition:

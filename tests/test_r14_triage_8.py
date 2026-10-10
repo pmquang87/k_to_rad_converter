@@ -17,6 +17,8 @@
       (--no-spotweld-dt-mass-scaling)
   A5  the adaptive spring token MASS with the driven-end skip
       (--no-adaptive-spring-token)
+  A9  the records (the merge probe's starter echo) and the part-A guards:
+      the nine flags' wiring and the retracted spellings
 
 Kept in its own module, the repo's one-module-per-batch convention. The
 harness helpers are imported from tests/test_r14_triage_5.py / _6.py / _7.py
@@ -29,6 +31,7 @@ named outcome is recorded in the test's docstring.
 
 import hashlib
 import math
+import re
 import unittest
 
 import test_r14_triage_5 as _t5
@@ -1619,6 +1622,203 @@ class AdaptiveSpringToken(unittest.TestCase):
                                     zero_density_floor=False)
         self.assertEqual(_token_cells(starter), ["0.001570796327"])
         self.assertFalse(_has(res.warnings, _WA5))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A9 — records and the part-A guards
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: g3o's PREV8/r8pre/g3o/probe/mrg_flat.k, inlined: two *MAT_RIGID 20 x 20
+#: plates (2 x 2 quads, T 2.0, RO 7.85e-9) side by side, sharing the nodes at
+#: x = 20, merged by *CONSTRAINED_RIGID_BODIES 1 2.
+_MRG_FLAT = """*KEYWORD
+*TITLE
+g3o merge probe flat
+*CONTROL_TERMINATION
+    1.0E-6
+*DATABASE_GLSTAT
+    1.0E-7
+*PART
+plate A
+         1         1         1
+*PART
+plate B
+         2         1         2
+*SECTION_SHELL
+         1         2       1.0         2
+    2.0000    2.0000    2.0000    2.0000
+*MAT_RIGID
+         1 7.850E-09  200000.0       0.3
+       0.0         0         0
+       0.0       0.0       0.0       0.0       0.0       0.0
+*MAT_RIGID
+         2 7.850E-09  200000.0       0.3
+       0.0         0         0
+       0.0       0.0       0.0       0.0       0.0       0.0
+*CONSTRAINED_RIGID_BODIES
+         1         2         0
+*NODE
+       1        0.000000        0.000000        0.000000       0       0
+       2       10.000000        0.000000        0.000000       0       0
+       3       20.000000        0.000000        0.000000       0       0
+       4        0.000000       10.000000        0.000000       0       0
+       5       10.000000       10.000000        0.000000       0       0
+       6       20.000000       10.000000        0.000000       0       0
+       7        0.000000       20.000000        0.000000       0       0
+       8       10.000000       20.000000        0.000000       0       0
+       9       20.000000       20.000000        0.000000       0       0
+     101       30.000000        0.000000        0.000000       0       0
+     102       40.000000        0.000000        0.000000       0       0
+     103       30.000000       10.000000        0.000000       0       0
+     104       40.000000       10.000000        0.000000       0       0
+     105       30.000000       20.000000        0.000000       0       0
+     106       40.000000       20.000000        0.000000       0       0
+*ELEMENT_SHELL
+       1       1       1       2       5       4
+       2       1       2       3       6       5
+       3       1       4       5       8       7
+       4       1       5       6       9       8
+       5       2       3     101     103       6
+       6       2     101     102     104     103
+       7       2       6     103     105       9
+       8       2     103     104     106     105
+*END
+"""
+
+
+class Round8Records(unittest.TestCase):
+    """A9.3: round 7's merge byte test (T7
+    RigidShellRotaryInertiaDefault.test_5) pins bytes only; this one carries
+    the starter record of the same rule."""
+
+    def test_a_merged_body_takes_SUM_IN_once_over_the_union(self):
+        """ONE /RBODY for the merged pair, J = -SUM(IN) over the union =
+        -1.088533e-4 on all three (a per-body sum would read -1.360667e-4:
+        the shared x = 20 nodes counted twice). Starter (a9_mrg, nt 4, 0
+        errors): NEW MASS 0.1256000E-04, NEW INERTIA 0.6280000E-03 /
+        0.1884000E-02 / 0.2512000E-02 with zero products = the point-mass
+        tensor to the 7 printed digits."""
+        _r, starter, _e = _convert(_MRG_FLAT)
+        self.assertEqual(starter.count("\n/RBODY/"), 1)
+        for v in _j_row(starter):
+            self.assertAlmostEqual(v / -1.088533333e-4, 1.0, places=8)
+
+
+class Round8FlagWiringA(_t7.Round7FlagWiringA):
+    """A9.4: every round-8 part-A lever reaches the parser (with its --no-
+    twin), the README prose, the --help render with its measured figures,
+    the GUI end to end, convert() / ConvertOptions (default True) and
+    cli.main()'s call - the round-7 checks, for this round's nine flags."""
+
+    _FLAGS = {
+        "--rigid-local-constraints": "rigid_local_constraints",
+        "--bcs-union": "bcs_union",
+        "--bolt-rigid-contact": "bolt_rigid_contact",
+        "--fixed-curve-columns": "fixed_curve_columns",
+        "--section-nodal-thickness-mean": "section_nodal_thickness_mean",
+        "--plane-strain-unit-thickness": "plane_strain_unit_thickness",
+        "--rigid-element-mass-admas": "rigid_element_mass_admas",
+        "--spotweld-dt-mass-scaling": "spotweld_dt_mass_scaling",
+        "--adaptive-spring-token": "adaptive_spring_token",
+    }
+    _HELP_FIGURES = {
+        "--rigid-local-constraints": ("+100.10 % -> +0.05 %",
+                                      "RMS 44.81 -> 0.006 %", "CON1",
+                                      "hm_read_bcs.F:199-205", "ERROR 148",
+                                      "-99.97 % -> +0.13 %"),
+        "--bcs-union": ("WARNING 312", "1592 = 1592", "hm_read_bcs.F:198",
+                        "MY_OR"),
+        "--bolt-rigid-contact": ("-81.87 % -> -8.49 %", "1.131x",
+                                 "68 CNRB 110 / 120 members",
+                                 "31.32 / 28.24 -> 9.19 / 10.22 %"),
+        "--fixed-curve-columns": ("2E20.0", "/FUNCT/11 kept 2 of 4 points",
+                                  "IE END +19.20 %"),
+        "--section-nodal-thickness-mean": (
+            "0.0888 / 0.0655 / 0.0555 -> 0.0223 / 0.0164 / 0.0139",
+            "7.54 / 65.93 -> 2.89 / 29.15 %", "-4.39 -> -17.88 %"),
+        "--plane-strain-unit-thickness": ("0.08756308 -> 0.003447366",
+                                          "Remark 6"),
+        "--rigid-element-mass-admas": ("121.4891 -> 150.9633", "150.96326"),
+        "--spotweld-dt-mass-scaling": ("r2len3.F:226-246", ":233",
+                                       "0.9 DT", "x2.5", "x13.41",
+                                       "last cycle 1332"),
+        "--adaptive-spring-token": ("2 mu min(1, 2/n)", "1.1e-15",
+                                    "1e-4 -> 5.483321e-7", "1.000x",
+                                    "3-6 cycles", "r1len3.F:175"),
+    }
+
+
+#: Part-A statements a round-8 measurement superseded. CHANGELOG may quote
+#: them (it is the history); no other shipped text may.
+_RETRACTED_ROUND_8_A = (
+    # A2 (l)-4: the partial-rigid sentence and the 'run sensitivity' texts
+    "MOSTLY USELESS",
+    "COLLAPSES to -62.05",
+    "-62.05 %",
+    "moves too, by run sensitivity",
+    "by run sensitivity, not by the yield",
+    "moves by run sensitivity",
+    # A6.5: round 7's x13.42 'calibration' and its STI claim
+    "calibration ×13.42",
+    "×13.42 reaches",
+    "STI formula was not located",
+    "+7.85 % at the matched end",
+    # A4: the critic's attributions of cup-draw's energy error
+    "not caused by the cell",
+    "the mass cell does not create it",
+    "pre-existing balance problem",
+)
+
+#: ... and the new spellings, which ARE shipped: (file, text).
+_REPLACEMENTS_ROUND_8_A = (
+    ("k2rad/cli.py", "the row was hypersensitive because its /PRELOAD/AXIAL "
+                     "bolt collapsed"),
+    ("README.md", "the row was hypersensitive because its"),
+    ("ROADMAP.md", "**closed in round 8 by the closed form**"),
+    ("ROADMAP.md", "the IE END it read at the matched end was an artefact "
+                   "of that mass"),
+    ("ROADMAP.md", "takes ΣIN once over the union — MEASURED (round 8)"),
+    ("k2rad/writer/mesh.py", "OpenRadioss's energy error grows: mean -4.39 "
+                             "-> -17.88 %"),
+)
+
+
+class Round8RetractedStatementsA(unittest.TestCase):
+    """A9.4: no shipped text (README, ROADMAP, the GUI, every package
+    module, docs/*.md, tools/*.py; CHANGELOG exempt) carries a retracted
+    part-A spelling; the guard fires on each needle split across two
+    adjacent literals; a PREFIX still fires; the replacements ARE
+    shipped."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_8_A:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_8_A:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_8_A:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle[:max(8, len(needle) // 2)]),
+                              _t7._collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_8_A:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
 
 
 def _A3_DECKS():
