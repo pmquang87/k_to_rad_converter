@@ -1740,9 +1740,12 @@ class ImflagNamed(unittest.TestCase):
                 self.assertEqual(seg(pts, endtim), want)
 
     def test_2_the_ie_shell_curve_is_named_and_0_bytes(self):
+        """Round 8 (h.3) splits such a deck into one engine file per
+        segment by default; this round-7 test keeps measuring the single
+        implicit file, now under ``--no-imflag-curve-restart``."""
         from k2rad.writer import assembly
         deck = _shell_plate(_imflag_control(-9), _IE_CURVE)
-        res, starter, engine = _convert(deck)
+        res, starter, engine = _convert(deck, imflag_curve_restart=False)
         hit = [w for w in res.warnings if "IMFLAG=-9" in w]
         self.assertEqual(len(hit), 1, res.warnings)
         for needle in ("curve 9", "implicit 0 -> 0.01, explicit 0.01 -> "
@@ -1753,7 +1756,7 @@ class ImflagNamed(unittest.TestCase):
         saved = assembly._warn_imflag
         assembly._warn_imflag = lambda state: None
         try:
-            _r0, s0, e0 = _convert(deck)
+            _r0, s0, e0 = _convert(deck, imflag_curve_restart=False)
         finally:
             assembly._warn_imflag = saved
         self.assertEqual((starter, engine), (s0, e0))

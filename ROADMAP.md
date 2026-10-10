@@ -2307,7 +2307,8 @@ that decided it and the deck that would decide it next.
    a reference; none exists in the five corpora. 1 key / 1 model (`ie_shell`).
    **Round 8:** h.2 ships `--imflag-curve-restart` (one engine file per
    segment; `ie_shell` END IE −99.87 → −4.54 %, RMS 58.96 / 58.79 → 12.07 /
-   12.04 %); IMFLAG 4 / 5 stays a SOLVER LIMITATION.
+   12.04 %); h.3 shipped: the default, gated by C3 (b); IMFLAG 4 / 5 stays
+   a SOLVER LIMITATION.
 7. **The `doorbeam` TYPE25-only stub question** (round-6 item 20's neighbour):
    the implicit contact-stub guard ignores `contacts_type25`, so a deck whose
    only contact takes the TYPE25 route gets the stub too; on `doorbeam` the
@@ -2559,9 +2560,9 @@ energy-error cost, −4.39 → −17.88 % beside its IE / KE RMS gain); A5 the
 adaptive spring token; A6 spotweld piece 3; A7 plane-strain unit thickness; A8
 a secondary rigid node's `*ELEMENT_MASS` as `/ADMAS`; A9 the records. Half B:
 B1 `tire.k` IMFLAG 0 + NEIG 0 routed explicit (1 / 1); B2 the sampled
-`*DEFINE_CURVE_SMOOTH` on implicit decks (1 / 1) + the A5 text; B3 h.2 the
-opt-in `--imflag-curve-restart` (h.3, the default, is the last commit, gated on
-the campaign runner chain); B4 Nu on SPH-only `*MAT_NULL` (1 / 1 + Ryan_Lee W11
+`*DEFINE_CURVE_SMOOTH` on implicit decks (1 / 1) + the A5 text; B3 h.2
+`--imflag-curve-restart` and h.3 its default (`ie_shell` 1 / 1; the last
+commit, kept only if the campaign runner chain passes C3 (b)); B4 Nu on SPH-only `*MAT_NULL` (1 / 1 + Ryan_Lee W11
 3 models), the hourglass R guard (0 / 0) and the texts (3 / 3); B5 the
 `*MAT_ELASTIC_FLUID` CP 0.0 cutoff (4 / 4); B6 the stub skipped beside a TYPE25
 contact (1 / 1, MIXED: doorbeam's END +582.00 → +689.08 % beside its RMS 393.31

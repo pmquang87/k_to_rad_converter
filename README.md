@@ -71,8 +71,8 @@ that parses as a plain real number is taken as the conversion factor directly
 (`1.0E-6` works), and a blank one is `ERROR 574 UNIT NOT DEFINED`.
 
 Output is written as `<stem>_0000.rad` (starter) and `<stem>_0001.rad`
-(engine) next to the input file by default (with `--imflag-curve-restart` an
-IMFLAG < 0 deck whose curve switches the method gets one engine file per
+(engine) next to the input file by default (since round 8, an IMFLAG < 0
+deck whose curve switches the method gets one engine file per
 segment, `<stem>_0001.rad`, `<stem>_0002.rad`, ..., to be run in order from one
 directory).
 
@@ -5889,8 +5889,8 @@ KE 0 against the reference's 149.9 — a **status-only** promotion (its
 `IMFLAG −9` implicit/explicit switching curve is not converted — named by a
 warning since round 7: OpenRadioss fixes the solution method per engine file,
 `freimpl.F:82` / `:127-129`, so the deck runs implicit throughout; the
-IMFLAG 2 / 4 / 5 / 6 forms get the same named sentence; since round 8 the
-opt-in
+IMFLAG 2 / 4 / 5 / 6 forms get the same named sentence; since round 8
+(default ON)
 [`--imflag-curve-restart`](#--imflag-curve-restart--one-engine-file-per-imflag-segment)
 writes one engine file per segment instead). A card that
 STATES an ECTOL ≥ 1 beside the zeros is named: that value is LS-DYNA's own,
@@ -6921,8 +6921,10 @@ CLIS decks are byte-identical under the flag.
 method in time (LS-DYNA switches inside one run, Vol I R17 p.12-321 / p.12-323
 Remark 1). OpenRadioss fixes the method per ENGINE FILE (`freimpl.F:82`,
 `:127-129`: implicit iff the file holds an `/IMPL` card), so by default such a
-deck is emitted implicit throughout and named. `--imflag-curve-restart`
-(opt-in, round 8) writes ONE ENGINE FILE PER SEGMENT of the curve
+deck was emitted implicit throughout and named. Since round 8 k2rad writes
+ONE ENGINE FILE PER SEGMENT of the curve by default (h.3, gated on the
+campaign's runner chain; `--no-imflag-curve-restart` keeps the single
+implicit file)
 (`<stem>_0001.rad`, `<stem>_0002.rad`, …; `ConversionResult.engine_paths` lists
 them in run order): each carries `/RUN/<title>/k` to its segment's end, the
 `/IMPL` block only in an implicit segment, the deck's `/DT` cards only in an

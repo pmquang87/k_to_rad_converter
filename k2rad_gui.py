@@ -132,7 +132,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          elastic_fluid_cp_cutoff: bool = True,
                          implicit_stub_with_type25: bool = False,
                          shell_in_solid_coupling: bool = False,
-                         imflag_curve_restart: bool = False,
+                         imflag_curve_restart: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -483,7 +483,7 @@ class ConverterGUI:
         self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
         self.implicit_stub_with_type25 = tk.BooleanVar(value=False)
         self.shell_in_solid_coupling = tk.BooleanVar(value=False)
-        self.imflag_curve_restart = tk.BooleanVar(value=False)
+        self.imflag_curve_restart = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1064,7 +1064,7 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="IMFLAG < 0 curve: one engine file per implicit / explicit "
-                     "segment (run them in order) - OFF. ie_shell END IE -99.9 "
+                     "segment (run them in order) - ON. ie_shell END IE -99.9 "
                      "-> -4.5 %",
             variable=self.imflag_curve_restart).grid(
                 row=62, column=0, columnspan=3, sticky="w", **pad)
@@ -1579,9 +1579,9 @@ class ConverterGUI:
         if kwargs.get("shell_in_solid_coupling"):
             bits.append("*CONSTRAINED_SHELL_IN_SOLID coupled as /INTER/TYPE18 "
                         "(--shell-in-solid-coupling)")
-        if kwargs.get("imflag_curve_restart"):
-            bits.append("one engine file per IMFLAG segment "
-                        "(--imflag-curve-restart)")
+        if not kwargs.get("imflag_curve_restart", True):
+            bits.append("IMFLAG < 0 deck kept in ONE implicit engine file "
+                        "(--no-imflag-curve-restart)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

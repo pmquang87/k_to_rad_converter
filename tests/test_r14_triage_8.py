@@ -3669,12 +3669,14 @@ _IE_STRIP_PINS = (
 
 class ImflagCurveRestart(unittest.TestCase):
     """B3 (h.2): --imflag-curve-restart writes an IMFLAG < 0 deck whose curve
-    switches the method as ONE ENGINE FILE PER SEGMENT; the flag off (the
-    default) is the single implicit file of 4f5b6e8."""
+    switches the method as ONE ENGINE FILE PER SEGMENT; the flag off
+    (``--no-imflag-curve-restart``; ON by default since h.3) is the single
+    implicit file of 4f5b6e8."""
 
     def test_segments_through_the_restart_rule(self):
         from k2rad.writer.assembly import imflag_restart_segments
         st = _dispatch(_ie_strip_deck())
+        st.options.imflag_curve_restart = False
         self.assertEqual(imflag_restart_segments(st), [])
         st.options.imflag_curve_restart = True
         segs = imflag_restart_segments(st)
@@ -3686,7 +3688,8 @@ class ImflagCurveRestart(unittest.TestCase):
     def test_two_files_under_the_flag(self):
         res, s_on, eng, names = _convert_files(_ie_strip_deck(),
                                                imflag_curve_restart=True)
-        _r0, s_off, eng_off, names_off = _convert_files(_ie_strip_deck())
+        _r0, s_off, eng_off, names_off = _convert_files(
+            _ie_strip_deck(), imflag_curve_restart=False)
         self.assertEqual(names, ["deck_0001.rad", "deck_0002.rad"])
         self.assertEqual(names_off, ["deck_0001.rad"])
         self.assertEqual(s_on, s_off)
@@ -3763,7 +3766,8 @@ class ImflagCurveRestart(unittest.TestCase):
                 deck = _ie_strip_deck(pts)
                 r_on, s_on, e_on, n_on = _convert_files(
                     deck, imflag_curve_restart=True)
-                _r, s_off, e_off, _n = _convert_files(deck)
+                _r, s_off, e_off, _n = _convert_files(
+                    deck, imflag_curve_restart=False)
                 self.assertEqual(n_on, ["deck_0001.rad"])
                 self.assertEqual((s_on, e_on), (s_off, e_off))
                 if name == "constant 0":
@@ -3778,7 +3782,8 @@ class ImflagCurveRestart(unittest.TestCase):
             with self.subTest(deck=name):
                 _r1, s1, e1, n1 = _convert_files(deck,
                                                  imflag_curve_restart=True)
-                _r0, s0, e0, n0 = _convert_files(deck)
+                _r0, s0, e0, n0 = _convert_files(
+                    deck, imflag_curve_restart=False)
                 self.assertEqual((s1, e1, n1), (s0, e0, n0))
                 self.assertEqual(len(n1), 1)
 
@@ -3795,7 +3800,8 @@ class ImflagCurveRestart(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
         self.assertNotIn("IMPLICIT THROUGHOUT", hits[0])
-        r0, _s0, _e0, _n0 = _convert_files(_ie_strip_deck())
+        r0, _s0, _e0, _n0 = _convert_files(_ie_strip_deck(),
+                                           imflag_curve_restart=False)
         hits0 = [w for w in r0.warnings if "IMFLAG=-9" in w]
         self.assertEqual(len(hits0), 1, r0.warnings)
         self.assertIn("IMPLICIT THROUGHOUT", hits0[0])
@@ -3830,6 +3836,13 @@ class ImflagCurveRestart(unittest.TestCase):
         self.assertEqual(printed.count("  Engine  -> "), 2, printed)
         self.assertIn("Run the engine files IN ORDER", printed)
 
+    def test_default_writes_the_chain(self):
+        """h.3 (round 8): ON by default - no kwarg, two engine files,
+        the same bytes as the explicit opt-in."""
+        _r, _s, eng, names = _convert_files(_ie_strip_deck())
+        self.assertEqual(names, ["deck_0001.rad", "deck_0002.rad"])
+        self.assertEqual((_sha(eng[0]), _sha(eng[1])), _IE_STRIP_PINS)
+
     def test_build_engine_direct_caller_unchanged(self):
         from k2rad.writer.assembly import build_engine, build_starter
         for flag in (False, True):
@@ -3858,12 +3871,8 @@ class Round8OptInWiringB(unittest.TestCase):
     _OPT_IN = {
         "--implicit-stub-with-type25": "implicit_stub_with_type25",
         "--shell-in-solid-coupling": "shell_in_solid_coupling",
-        "--imflag-curve-restart": "imflag_curve_restart",
     }
     _HELP_FIGURES = {
-        "--imflag-curve-restart": ("freimpl.F:82", "18 + 11 127 cycles",
-                                   "-99.87 -> -4.54 %",
-                                   "58.96 / 58.79 -> 12.07 / 12.04 %"),
         "--implicit-stub-with-type25": ("+582.00 -> +689.08 %",
                                         "393.31 -> 313.05 %",
                                         "imp_int_k.F:847"),
@@ -3996,10 +4005,15 @@ class Round8FlagWiringB(_t7.Round7FlagWiringA):
         "--imflag0-eigen-explicit": "imflag0_eigen_explicit",
         "--implicit-smooth-curve-sampling": "implicit_smooth_curve_sampling",
         "--elastic-fluid-cp-cutoff": "elastic_fluid_cp_cutoff",
+        # h.3 (round 8): ON by default
+        "--imflag-curve-restart": "imflag_curve_restart",
     }
     _HELP_FIGURES = {
         "--elastic-fluid-cp-cutoff": ("0.00000E+00", "hm_read_mat06.F:154",
                                       "18 rows"),
+        "--imflag-curve-restart": ("freimpl.F:82", "18 + 11 127 cycles",
+                                   "-99.87 -> -4.54 %",
+                                   "58.96 / 58.79 -> 12.07 / 12.04 %"),
         "--imflag0-eigen-explicit": ("24329 cycles", "+3.93 %", "-18.30 %",
                                      "2.06 / 2.23 %",
                                      "tire.d3hsp:1056-1057"),
@@ -4138,6 +4152,17 @@ class Round8ChangelogReSums(unittest.TestCase):
                 "Reach: 0 byte movers; EXP_SC_JOINT_SCREW SHA-identical",
                 "bytes: 0 movers (bird-el SHA-identical",
                 "Default bytes: 0 movers (ie_shell SHA-identical"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_the_h3_bullet_states_its_count(self):
+        """h.3 (the gated default flip) moves exactly `ie_shell`, and the
+        header announces that it adds 1 / 1 outside the re-summed 8 / 8."""
+        text = self._text()
+        for needle in (
+                "Default bytes: 1 deck key on 1 emitted model (`ie_shell`",
+                "the h.3 default flip, its own last commit, adds "
+                "`ie_shell` 1 / 1 if it is kept"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 

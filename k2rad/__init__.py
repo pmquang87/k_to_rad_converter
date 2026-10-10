@@ -313,7 +313,7 @@ def convert(
     elastic_fluid_cp_cutoff: bool = True,
     implicit_stub_with_type25: bool = False,
     shell_in_solid_coupling: bool = False,
-    imflag_curve_restart: bool = False,
+    imflag_curve_restart: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1041,7 +1041,8 @@ def convert(
         segments, /DT only in explicit ones, /RFILE/OFF only in the
         last file; run them in order from one directory (each restarts
         from the previous run's .rst). ConversionResult.engine_paths
-        lists them. Default False.
+        lists them. Default True since round 8 (gated on the campaign
+        runner chain); False keeps one implicit engine file.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution

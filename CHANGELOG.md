@@ -393,6 +393,25 @@ Prior history (before this changelog was introduced) is summarized in the
     and named in the warning: an implicit dynamic segment after an explicit
     one. Default bytes: 0 movers (ie_shell SHA-identical; its sentence gains
     the opt-in's tail). Reach 1 key / 1 model.
+  - **h.3 — `--imflag-curve-restart` is ON by default
+    (`--no-imflag-curve-restart` keeps one implicit engine file).**
+    `ie_shell`'s two files, run in order on this branch (nt 4 = nt 2), end
+    NORMAL in 18 + 11 127 cycles with END IE -4.54 % (B3 above); the
+    default is kept only because the campaign's chain runner reproduced
+    that chain (part C, C3 gate (b)) — the PR body states the gate result;
+    otherwise this commit is reverted. Default bytes: 1 deck key on 1
+    emitted model (`ie_shell`: `_0000.rad` SHA-identical, `_0001.rad` and
+    the new `_0002.rad` = B3's flag-on files byte for byte, the warnings
+    identical to that arm's); a scan of the 382 input files of the
+    R14 corpus finds IMFLAG < 0 on `ie_shell.k` only (136
+    `*CONTROL_IMPLICIT_GENERAL` cards: IMFLAG 1 x133, 0 x2, -9 x1). The
+    opt-out is the 4f5b6e8 file byte for byte. Tests that moved:
+    `test_r14_triage_7` `ImflagNamed`
+    `test_2_the_ie_shell_curve_is_named_and_0_bytes` measures the single
+    implicit file under `imflag_curve_restart=False`; in
+    `test_r14_triage_8` the flag moves from `Round8OptInWiringB` to
+    `Round8FlagWiringB` and `ImflagCurveRestart`'s flag-off arms pass
+    `imflag_curve_restart=False`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
   springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8

@@ -848,14 +848,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--imflag-curve-restart",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="For *CONTROL_IMPLICIT_GENERAL IMFLAG < 0 (a curve that switches "
              "implicit / explicit in time): write ONE ENGINE FILE PER SEGMENT, "
              "<stem>_0001.rad, <stem>_0002.rad, ..., because OpenRadioss fixes "
              "the method per engine file (freimpl.F:82); every file but the last "
              "keeps its restart file, and the files must be run in order from "
-             "one directory. OFF by default (the campaign runner reads one "
-             "engine file). MEASURED on ie_shell (nt 4 = nt 2): 92 -> 18 + 11 "
+             "one directory. ON by default since round 8; "
+             "--no-imflag-curve-restart keeps one implicit engine file. "
+             "MEASURED on ie_shell (nt 4 = nt 2): 92 -> 18 + 11 "
              "127 cycles, END IE -99.87 -> -4.54 %%, RMS 58.96 / 58.79 -> 12.07 "
              "/ 12.04 %% of the LS peak.",
     )
