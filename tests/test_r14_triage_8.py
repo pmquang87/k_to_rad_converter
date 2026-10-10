@@ -534,6 +534,23 @@ class NonRigidBcsUnion(unittest.TestCase):
                              "1 node(s) keep the remaining DOFs"),
                         res.warnings)
 
+    def test_2b_the_union_carries_every_earlier_card(self):
+        """Card 3 (100 010) restates x, which only card 1 (110 001) stated:
+        the union carries card 1 past card 2 (011 100), so corner 10 keeps
+        only ry in BC_3_000_010 (a union keyed on the last card alone would
+        write BC_3 on node 10 again - the mutation pass's survivor A3-04).
+        Starter (a3_2b, nt 4): 0 errors."""
+        res, starter, _e = _convert(_plates(
+            _nset(101, [10, 11]) + _nset(102, [10, 12]) + _nset(103, [10, 13])
+            + _spc_set(101, 0, "110001") + _spc_set(102, 0, "011100")
+            + _spc_set(103, 0, "100010")))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["BC_3"], ("100 010", [13]))
+        self.assertEqual(g["BC_3_000_010"], ("000 010", [10]))
+        # card 2 restates y (card 1's), card 3 restates x (card 1's only)
+        self.assertTrue(_has(res.warnings, "2 DOF(s) on 1 node(s) (node 10)"),
+                        res.warnings)
+
     def test_3_two_skews_are_never_merged(self):
         """A SYSTEM-CID card and a global card on one node: both written and
         named. Starter (a3_3 and a3_3off): ERROR 148 on BOTH arms - the
@@ -580,6 +597,27 @@ class NonRigidBcsUnion(unittest.TestCase):
                           if t.startswith("fix_free_reference")], [])
         self.assertTrue(_has(res6.warnings, "6 DOF(s) on 1 free node(s) "
                              "(node 50)", "1 node(s) need no guard /BCS"))
+
+    def test_5b_the_111_111_group_comes_first(self):
+        """Free node 51 (nothing fixed) and free node 50 (SPC 110 001): the
+        guard writes the 111 111 card FIRST under its old title (the byte
+        identity of every deck without a hit), then the remainder (the
+        mutation pass's survivor A3-10 reversed them). Starter (a3_5b, nt 4):
+        0 errors."""
+        free51 = ("*NODE\n" + f"{51:>8}{120.0:>16.6f}{100.0:>16.6f}"
+                  f"{0.0:>16.6f}{0:>8}{0:>8}\n")
+        res, starter, _e = _convert(_plates(_IMP + _free_node() + free51
+                                            + _spc_node(50, 0, "110001")))
+        g = _bcs_groups(starter)
+        self.assertEqual(g["fix_free_reference_nodes"], ("111 111", [51]))
+        self.assertEqual(g["fix_free_reference_nodes_001_110"],
+                         ("001 110", [50]))
+        lines = starter.splitlines()
+        first = lines.index("fix_free_reference_nodes")
+        rem = lines.index("fix_free_reference_nodes_001_110")
+        self.assertLess(first, rem)
+        self.assertLess(int(lines[first - 1].split("/")[-1]),
+                        int(lines[rem - 1].split("/")[-1]))
 
     def test_6_P3_the_guard_skips_what_the_TC_RC_code_fixes(self):
         """*NODE TC 4 (x, y) on the free node. Starter (a3_6): 0 errors, no
@@ -1127,6 +1165,20 @@ class RigidSecondaryElementMass(unittest.TestCase):
         r0, s0, _e0 = _convert(_plates(cnrb), rigid_element_mass_admas=False)
         self.assertEqual(_admas(s0), {})
         self.assertEqual(_sha(s0), _PR8_SHA["a8_3"])
+
+    def test_3b_two_CNRBs_are_counted_as_two_bodies(self):
+        """Two CNRBs over the elastic plate (nodes 10-13 and 14-17), 0.01 on a
+        secondary of each: W-A8 counts 2 masses on 2 bodies (without the
+        per-body record both read as one - the mutation pass's survivor
+        A8-10). Starter (a8_3b, nt 4): 0 errors."""
+        cnrb = (_nset(7, [10, 11, 12, 13]) + _nset(8, [14, 15, 16, 17])
+                + "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(50, 0, 7) + "\n"
+                + "*CONSTRAINED_NODAL_RIGID_BODY\n" + _row(51, 0, 8) + "\n"
+                + _emass(12, 0.01) + _emass(16, 0.01, 2))
+        res, starter, _e = _convert(_plates(cnrb))
+        self.assertEqual(_admas(starter), {0.01: [12, 16]})
+        self.assertTrue(_has(res.warnings, "*ELEMENT_MASS: 2 nodal mass(es) "
+                             "on 2 rigid body/bodies", _WA8), res.warnings)
 
     def test_4_an_ICoG_4_body_is_unchanged(self):
         """*PART_INERTIA: TM supersedes every lumped mass (the SUPERSEDED
