@@ -949,7 +949,10 @@ the GLOBAL frame stays at +100.10 %, so it is the frame that does it;
 t 0.0015; RMS 41.95 → 0.056 % over 150 LS blocks; OpenRadioss energy error
 −24.1 → −3.7 %), 12501 = 12501 cycles, its KE END stays +16.99 % (deviation).
 Reach 3 deck keys on 3 emitted models (the Yaris Dynamic Roof Crush giant
-converts to `011 111` in skew 1, never run). The
+converts to `011 111` in skew 1, never run; its starter at nt 4 reads 0
+errors and ONE new WARNING 312 — this `/BCS` beside the deck's own `/IMPDISP`
+in `/SKEW/MOV/91965` on the same main node, whose Fscale is the deck's
+`SF = 0`, a separate open item). The
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO −1 card shares the rule (a VECTOR CON1
 no longer prints a false "skew_ID will dangle"). **One skew per node**: the
 starter accepts ONE skew per node across every `/BCS` (`hm_read_bcs.F:199-205`,
@@ -981,7 +984,9 @@ velocity on one other node) starts at the rotational KE 8.094e-3 that
 LS-DYNA's momentum average gives, against 2.754e-3 (−66 %) with the fold —
 the written omega acts about the starter's own centre of mass. The Yaris
 roof crush's 12 CNRB bodies were 38-86 % light against LS-DYNA's d3hsp — the
-dropped masses exactly. The main node's own mass stays in the Mass field; an
+dropped masses exactly — and are within 0.54 % of it with the rule (the
+branch's starter, nt 4: TOTAL MASS 0.3755060564528 → 0.3761061164528). The
+main node's own mass stays in the Mass field; an
 ICoG-4 body (`*PART_INERTIA`: TM supersedes) is unchanged. Reach 5 deck keys
 on 5 emitted models (foam + 4 Yaris giants, convert-only).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)

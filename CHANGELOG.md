@@ -68,7 +68,9 @@ Prior history (before this changelog was introduced) is summarized in the
     +16.99 % (deviation). Reach 3 deck keys on 3 emitted models
     (block-slide, billet-forge and the Yaris Dynamic Roof Crush giant,
     convert-only: `011 111` in skew 1 beside its own `/IMPDISP` on
-    `/SKEW/MOV/91965`); 0 status / verdict moves; every CMO +1 card is
+    `/SKEW/MOV/91965` - its starter at nt 4 reads 0 errors and ONE new
+    WARNING 312 for that pair on main node 4478473); 0 status / verdict
+    moves; every CMO +1 card is
     byte-identical. NOT fixed: an implicit CMO -1 (source-only,
     `bc_imp0.F`), "CON1 0 is global" rests on billet-forge alone, the roof
     crush's SF = 0 motion (its own item). EXPECTED VALUE MOVED:
@@ -240,7 +242,11 @@ Prior history (before this changelog was introduced) is summarized in the
     0.3140000E-03, K-ENERGY R 0.2754E-02 (-66 %) from the same written
     omega. Starter probes (0 errors): the part body NEW MASS 0.1000314E-01
     at CoG 19.99686 (opt-out 10.0), the CNRB body 0.1000118E-01 (opt-out
-    0.1177500E-05). Reach 5 deck keys on 5 emitted models (foam + the 4
+    0.1177500E-05). The Yaris roof crush (starter only, nt 4, both arms 0
+    errors): its 12 CNRB bodies' NEW MASS against LS-DYNA's d3hsp -38.2 ..
+    -85.5 % -> within 0.54 % (2300387 -85.536 -> +0.064 %, the largest
+    residual 2301751 +0.542 %), TOTAL MASS 0.3755060564528 -> 0.3761061164528
+    (+6.0006e-4). Reach 5 deck keys on 5 emitted models (foam + the 4
     Yaris giants, convert-only). EXPECTED VALUES MOVED:
     `tests/test_converter.py`
     `RigidCogMasterTests.test_flag_folds_secondary_element_mass` and
