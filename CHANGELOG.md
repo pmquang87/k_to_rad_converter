@@ -11,6 +11,72 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
+  springs, welds, shell thickness).** One commit per item; every figure below
+  is a measured arm against the LS-DYNA reference on `F:` (the LS instant
+  named), base-paired in one window with the 4f5b6e8 conversion from a
+  pristine checkout, `nt 4` unless stated; histories by the campaign rule
+  (README 9.1) with round 8's tie rule — the LAST row of a printed time, an
+  equidistant fifth takes the earlier time, the RMS over the LS blocks
+  0 < t <= OpenRadioss's last row in % of the LS peak; every reach as
+  `N deck keys on M emitted models` (356 keys = 312 models).
+  - **A1 — `*MAT_RIGID` CMO = -1 was written as nothing; CON2 now becomes a
+    `/BCS` on the `/RBODY` main node in the `/SKEW` of CON1 (default ON,
+    `--no-rigid-local-constraints`).** `rbody._make_rbodies` read CON1 /
+    CON2 only for CMO +1. Vol II R17 `*MAT_RIGID`: CMO -1 makes CON1 the
+    local coordinate system ("fixed in time") and CON2 a six-digit code
+    (100000 = x translation ... 000001 = z rotation); LCO plays no part. The
+    starter reads the digits as axes of the `/BCS` skew
+    (`radioss51/LOADS/bcs.cfg:98`; `hm_read_bcs.F:164-172` the skew lookup,
+    ERROR 137; `:179-185` a digit >= 2, ERROR 1051). One helper,
+    `rbody._local_constraint`, serves the `*MAT_RIGID` card and the
+    `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO -1 card: CON1 0 = global
+    (billet-forge's results hold the code although its d3hsp prints the
+    processed constraint as 000000); a `*DEFINE_COORDINATE_SYSTEM` /
+    `_VECTOR` / FLAG-0 `_NODES` frame = its own `/SKEW/FIX` (the CNRB path's
+    false "skew_ID will dangle" on a VECTOR frame is gone); a FLAG-1 `_NODES`
+    frame = a NEW `/SKEW/FIX` at its t = 0 axes (reach 0, by the manual);
+    a code with a digit >= 2 or a seventh digit, an undefined CON1 or a
+    degenerate node frame = NO card, named, and no skew id drawn; CMO +-2 on
+    `*MAT_RIGID` named (an `/RBODY` holds a `/BCS` on its main node only).
+    **One skew per node** (`hm_read_bcs.F:199-205`, ERROR 148 'A SKEW IS
+    ALREADY DEFINED WITH THE NODE'; the same skew twice is fine, skew 0
+    counts): a `*NODE` TC/RC, `*CONSTRAINED_GLOBAL` or `*BOUNDARY_SPC` code
+    that lands on such a main node in another skew is DROPPED and named
+    (exact when the kept card states `111` for every kind it would have
+    duplicated, otherwise the lost global digits are named), for the
+    `*MAT_RIGID` and the skewed CNRB card alike — round 7's "named, not
+    refused" ERROR-148 clause (`loads._skew148_sentence`) now speaks only
+    under the opt-out; the implicit stabilisation of an unloaded free
+    translation is never added to a skewed card; a merged
+    `*CONSTRAINED_RIGID_BODIES` slave's different code is named. Starter
+    probes (nt 4): every byte-pinning probe 0 errors; the clash probe 0
+    errors, its two-skew control (the same `.rad` with the dropped code
+    written back at skew 0) ERROR 148 on node 19. MEASURED, base-paired:
+    `mat_rigid.block-slide` (3cc9d16c5e15; `/BCS` `100 111` in the VECTOR
+    `/SKEW/FIX/1`) KE END +100.10 % -> +0.05 % (LS 35982.5 at t 0.01),
+    fifths +99.96 / +100.02 / +100.01 / +99.97 / +100.10 -> -0.02 / +0.01 /
+    +0.00 / -0.01 / +0.05 %, RMS 44.81 -> 0.006 % of the LS peak (500 LS
+    blocks 0 < t <= 0.01), 2512 = 2512 cycles; the same code in the GLOBAL
+    frame (the critic's skew-0 control) stays +100.10 %;
+    `control_timestep.billet-forge` (92f0eb81c2e5; `110 111` at skew 0 on
+    the press) IE END -99.97 % -> +0.13 % (LS 995458 at t 0.0015), fifths
+    -99.91 / -99.99 / -100.00 / -99.95 / -99.97 -> +8.59 / +0.74 / -0.14 /
+    -0.00 / +0.13 %, RMS 41.95 -> 0.056 % (150 LS blocks), OpenRadioss
+    energy error -24.1 -> -3.7 %, 12501 = 12501 cycles; its KE END stays
+    +16.99 % (deviation). Reach 3 deck keys on 3 emitted models
+    (block-slide, billet-forge and the Yaris Dynamic Roof Crush giant,
+    convert-only: `011 111` in skew 1 beside its own `/IMPDISP` on
+    `/SKEW/MOV/91965`); 0 status / verdict moves; every CMO +1 card is
+    byte-identical. NOT fixed: an implicit CMO -1 (source-only,
+    `bc_imp0.F`), "CON1 0 is global" rests on billet-forge alone, the roof
+    crush's SF = 0 motion (its own item). EXPECTED VALUE MOVED:
+    `tests/test_r14_triage_7.py`
+    `RigidOwnBcsAbsorbsMemberTcRc.test_4_a_skewed_CNRB_SPC_card_is_NOT_merged`
+    — the member code is now DROPPED and named by default (the probe's CNRB
+    states CON2 111000, so the drop is exact); round 7's assertions are kept
+    verbatim under `rigid_local_constraints=False`.
+
 - **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
   DEFAULT changes move campaign VERDICTS by measurement, not by definition:
   six deviation → match movers (sph/bird, channel_A, channel_B, channel_C

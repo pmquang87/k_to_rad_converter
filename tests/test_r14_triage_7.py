@@ -270,7 +270,14 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
     def test_4_a_skewed_CNRB_SPC_card_is_NOT_merged(self):
         """CMO -1: CON1 is a local system, CON2 a 6-digit code - its digits
         are axes of that skew, so no global TC/RC bit can be cancelled
-        against them (reach 0; this pins the skew rule)."""
+        against them (reach 0; this pins the skew rule).
+
+        EXPECTED VALUE MOVED in R14 round 8 (A1, decision D1): the skew-0
+        TC/RC group on that main node is starter ERROR 148 (one skew per
+        node, hm_read_bcs.F:199-205 - measured on this very deck), so by
+        default the member code is DROPPED and named and the skewed CNRB
+        card kept; round 7's "named, not refused" layout is pinned verbatim
+        under --no-rigid-local-constraints below."""
         extra = ("*DEFINE_COORDINATE_SYSTEM\n"
                  + _row(5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
                  + _row(0.0, 1.0, 0.0) + "\n"
@@ -278,8 +285,32 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
                  + _row(10, 11, 12, 13, 14, 15, 16, 17) + "\n" + _row(18)
                  + "\n*CONSTRAINED_NODAL_RIGID_BODY_SPC\n" + _row(50, 0, 7)
                  + "\n" + _row(-1.0, 5, 111000) + "\n")
+        # the round-8 default: the code leaves the main node, named
+        res8, starter8, _e8 = _convert(_a1_deck(tc=0, elastic_tc=(3, 0),
+                                                extra=extra))
+        groups8 = _bcs_groups(starter8)
+        main8 = groups8["BC_cnrb_50"][1]
+        self.assertEqual(groups8["BC_cnrb_50"][0], "111 000")
+        self.assertEqual([t for t, (_c, ids) in groups8.items()
+                          if t.startswith("node_tc_rc_") and main8[0] in ids],
+                         [], groups8)
+        w8 = _node_warning(res8)
+        # EXACT here: the kept CNRB card states Tra 111 (CON2 111000), so the
+        # dropped global z is still held (the 'not exact' arm is pinned by
+        # tests/test_r14_triage_8.py RigidLocalConstraints, CON2 100000)
+        for needle in (f"(node {main8[0]}) carry the SKEWED /BCS of their "
+                       "rigid body (BC_cnrb_50 at skew 5)", "DROPPED",
+                       "'001 000' (skew 0)",
+                       "exact: the kept card's Tra / Rot is 111",
+                       "ERROR 148", "hm_read_bcs.F:199-205"):
+            with self.subTest(round8_needle=needle):
+                self.assertIn(needle, w8)
+        self.assertNotIn("not exact", w8)
+        self.assertNotIn("carry this skew-0 /BCS AND the SKEWED /BCS", w8)
+        # the round-7 assertions, verbatim, under the opt-out
         res, starter, _e = _convert(_a1_deck(tc=0, elastic_tc=(3, 0),
-                                             extra=extra))
+                                             extra=extra),
+                                    rigid_local_constraints=False)
         groups = _bcs_groups(starter)
         main = groups["BC_cnrb_50"][1]
         self.assertEqual(groups["node_tc_rc_001_000"], ("001 000", main))
@@ -304,7 +335,8 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
         # through the elastic plate (z = 5, the CNRB's members) instead of
         # their *NODE TC cells
         cg = "*CONSTRAINED_GLOBAL\n" + _row(3, 0, 3, 0.0, 0.0, 5.0, 0.0) + "\n"
-        r_g, _s_g, _e_g = _convert(_a1_deck(tc=0, extra=extra + cg))
+        r_g, _s_g, _e_g = _convert(_a1_deck(tc=0, extra=extra + cg),
+                                   rigid_local_constraints=False)
         g = [w for w in r_g.warnings
              if w.startswith("*CONSTRAINED_GLOBAL: ")]
         self.assertEqual(len(g), 1, r_g.warnings)
@@ -312,6 +344,20 @@ class RigidOwnBcsAbsorbsMemberTcRc(unittest.TestCase):
                        "--no-constrained-global drops"):
             with self.subTest(constrained_global=needle):
                 self.assertIn(needle, g[0])
+        # ... and by default (round 8) the plane's code is DROPPED there too
+        r_g8, s_g8, _e_g8 = _convert(_a1_deck(tc=0, extra=extra + cg))
+        g8 = [w for w in r_g8.warnings
+              if w.startswith("*CONSTRAINED_GLOBAL: ")]
+        self.assertEqual(len(g8), 1, r_g8.warnings)
+        for needle in ("BC_cnrb_50 at skew 5", "the *CONSTRAINED_GLOBAL "
+                       "code(s) '001 000' (skew 0)", "DROPPED", "ERROR 148"):
+            with self.subTest(constrained_global_round8=needle):
+                self.assertIn(needle, g8[0])
+        self.assertNotIn("--no-constrained-global drops", g8[0])
+        main_g8 = _bcs_groups(s_g8)["BC_cnrb_50"][1]
+        self.assertEqual([t for t, (_c, ids) in _bcs_groups(s_g8).items()
+                          if t.startswith("constrained_global_")
+                          and main_g8[0] in ids], [])
 
     def test_4b_a_card_that_is_the_stabilisation_alone_names_only_it(self):
         """The post-review round: on an implicit deck a CMO 0 body loaded in

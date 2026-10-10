@@ -181,6 +181,10 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         for node in info["nodes"]:
             node_to_ind[node] = ind_node
 
+    # round 8, A1: the rigid-body main nodes that carry a SKEWED /BCS of their
+    # own body (empty under --no-rigid-local-constraints)
+    skewed_cards = _rigid_skewed_cards(state)
+    skew_drops: Dict[int, Tuple[str, str, int]] = {}
     emitted_grnods: Set[int] = set()
     for bc in state.bcs_spcs:
         nsid = bc.nsid
@@ -211,6 +215,32 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
+        # round 8, A1 consumer (b): a member re-pointed onto a main node that
+        # carries its body's SKEWED /BCS leaves this card when the card is in
+        # another skew (ONE skew per node, ERROR 148); the same skew stays
+        card_nids = mapped_nids
+        if skewed_cards:
+            gone = {m for m in mapped_nids if m in skewed_cards
+                    and any(s != skew_id for s, _t, _a, _b in skewed_cards[m])}
+            for m in gone:
+                skew_drops[m] = (tra, rot, skew_id)
+            card_nids = mapped_nids - gone
+        if not card_nids:
+            continue
+        if card_nids != mapped_nids:
+            grp = state.next_grnod_id()
+            set_title = state.node_sets.get(nsid, ("", []))[0]
+            lines += [
+                f"/BCS/{bc.bc_id}",
+                f"BC_{bc.bc_id}",
+                "#  Tra rot   skew_ID  grnod_ID",
+                f"   {tra} {rot}{_i(skew_id)}{_i(grp)}",
+                HDR,
+            ]
+            lines += _emit_grnod_node(
+                grp, f"{set_title or f'SET_{nsid}'}_one_skew",
+                sorted(card_nids))
+            continue
         lines += [
             f"/BCS/{bc.bc_id}",
             f"BC_{bc.bc_id}",
@@ -223,6 +253,9 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         emitted_grnods.add(nsid)
         set_title = state.node_sets.get(nsid, ("", []))[0]
         lines += _emit_grnod_node(nsid, set_title or f"SET_{nsid}", sorted(mapped_nids))
+    if skew_drops:
+        state.warn("*BOUNDARY_SPC:" + _skew_drop_sentence(
+            skew_drops, skewed_cards, "*BOUNDARY_SPC"))
     return lines
 
 
@@ -470,6 +503,86 @@ def _rigid_auto_spc_dofs(state: ConversionState
         _add(cbc.ind_node, cbc.tra, cbc.rot,
              cbc.title or f"/BCS/{cbc.bc_id}")
     return out
+
+
+def _rigid_skewed_cards(state: ConversionState
+                        ) -> Dict[int, List[Tuple[int, str, str, str]]]:
+    """``/RBODY main node -> [(skew_ID, title, Tra, Rot)]`` of the SKEWED
+    ``/BCS`` the rigid-body producers write there (round 8, A1): the
+    ``*MAT_RIGID`` CMO -1 cards (``state.rigid_skewed_bcs``) and the
+    ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` cards with a skew
+    (``state.cnrb_spc_bcs``).
+
+    The ONE predicate of the one-skew-per-node rule: the starter accepts ONE
+    skew per node across every /BCS (``hm_read_bcs.F:199-205``, ERROR 148 'A
+    SKEW IS ALREADY DEFINED WITH THE NODE'; the same skew twice is fine and
+    skew 0 counts), so a code on such a node in ANOTHER skew - a re-pointed
+    member *NODE TC/RC or *CONSTRAINED_GLOBAL code, or a *BOUNDARY_SPC - is
+    dropped and named (:func:`_skew_drop_sentence`) instead of making the
+    starter stop. Empty under ``--no-rigid-local-constraints``, which keeps
+    round 7's behaviour (the clash is named, not resolved).
+    """
+    out: Dict[int, List[Tuple[int, str, str, str]]] = {}
+    if not state.options.rigid_local_constraints:
+        return out
+    for nid, cards in sorted(state.rigid_skewed_bcs.items()):
+        for tra, rot, skew, title in cards:
+            out.setdefault(nid, []).append((skew, title, tra, rot))
+    for cbc in state.cnrb_spc_bcs:
+        if cbc.skew:
+            out.setdefault(cbc.ind_node, []).append(
+                (cbc.skew, cbc.title or f"/BCS/{cbc.bc_id}", cbc.tra,
+                 cbc.rot))
+    return out
+
+
+def _skew_drop_sentence(drops: Dict[int, Tuple[str, str, int]],
+                        cards: Dict[int, List[Tuple[int, str, str, str]]],
+                        source: str) -> str:
+    """W7 of round 8 A1: the codes the one-skew-per-node rule DROPPED.
+
+    *drops* maps a main node to the dropped code ``(Tra, Rot, skew)``;
+    *cards* is :func:`_rigid_skewed_cards`. The drop is EXACT where every
+    dropped digit is still held by the kept card: a global digit is held by a
+    skewed card only when that card fixes all three of its kind (``111``), so
+    exact iff (no dropped translation or kept Tra 111) and (no dropped rotation
+    or kept Rot 111)."""
+    if not drops:
+        return ""
+    nodes = sorted(drops)
+    kept_desc = sorted({f"{t} at skew {s}" for n in nodes
+                        for s, t, _a, _b in cards.get(n, [])})
+    codes = sorted({f"'{d[0]} {d[1]}' (skew {d[2]})" for d in drops.values()})
+    lost: List[str] = []
+    for n in nodes:
+        tra, rot, _s = drops[n]
+        k_tra = _or_dof_codes([c[2] for c in cards.get(n, [])] or ["000"])
+        k_rot = _or_dof_codes([c[3] for c in cards.get(n, [])] or ["000"])
+        miss = []
+        if "1" in tra and k_tra != "111":
+            miss += [ax for ax, d in zip(("x", "y", "z"), tra) if d == "1"]
+        if "1" in rot and k_rot != "111":
+            miss += [ax for ax, d in zip(("rx", "ry", "rz"), rot) if d == "1"]
+        if miss:
+            lost.append(f"node {n} no longer holds global {'/'.join(miss)}")
+    if lost:
+        tail = ("not exact: " + "; ".join(lost[:5])
+                + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")
+                + " - state them in the body's own CON2 (its local system)")
+    else:
+        tail = ("exact: the kept card's Tra / Rot is 111, so every dropped "
+                "digit is still held")
+    return (
+        f" {len(nodes)} /RBODY main node(s) (node {_named(nodes)}) carry the "
+        "SKEWED /BCS of their rigid body ("
+        + ", ".join(kept_desc[:5]) + (" ..." if len(kept_desc) > 5 else "")
+        + f"); the {source} code(s) " + ", ".join(codes[:5])
+        + (" ..." if len(codes) > 5 else "")
+        + " on the same node were DROPPED: the starter accepts ONE skew per "
+        "node (ERROR 148 'A SKEW IS ALREADY DEFINED WITH THE NODE', "
+        "hm_read_bcs.F:199-205; measured on a starter probe). LS-DYNA applies "
+        f"both; {tail} (round 8; --no-rigid-local-constraints keeps the old "
+        "pair and its ERROR 148).")
 
 
 def _mesh_has_rotational_dof(state: ConversionState,
@@ -816,6 +929,28 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         state.node_tc_rc_emitted[main] = (tra_s, rot_s)
         rigid_repointed[main] = (tra_s, rot_s)
 
+    # ── round 8, A1: ONE skew per node. A main node that carries a SKEWED
+    # /BCS of its own rigid body (a *MAT_RIGID CMO -1 card or a skewed CNRB
+    # _SPC card) LEAVES its skew-0 TC/RC group: the pair is starter ERROR 148
+    # (hm_read_bcs.F:199-205), so the rigid body's card is kept and this code
+    # dropped and named (_skew_drop_sentence). Empty without
+    # --rigid-local-constraints, where the clash is only named (below).
+    skewed_cards = _rigid_skewed_cards(state)
+    skew_drops: Dict[int, Tuple[str, str, int]] = {}
+    if skewed_cards:
+        for key in sorted(groups):
+            hit = [n for n in groups[key] if n in skewed_cards]
+            if not hit:
+                continue
+            for n in hit:
+                skew_drops[n] = (key[0], key[1], 0)
+                state.node_tc_rc_emitted.pop(n, None)
+            keep = [n for n in groups[key] if n not in skewed_cards]
+            if keep:
+                groups[key] = keep
+            else:
+                del groups[key]
+
     # ── ERROR 148 (the post-review round; reach 0, pre-existing): a skewed
     # CNRB _SPC code is never merged (its digits are axes of its skew), and a
     # skew-0 group written on the SAME main node makes the starter stop -
@@ -888,12 +1023,16 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                                 for t in ts}),
             auto_stab=any(n in auto_stab_hits
                           for n, _k, _t in auto_hits if n in prov),
+            auto_cmo_neg=any(n in state.rigid_auto_cmo_neg
+                             for n, _k, _t in auto_hits if n in prov),
             auto_stab_only=bool([n for n, _k, _t in auto_hits if n in prov])
             and all(n in auto_stab_only
                     for n, _k, _t in auto_hits if n in prov),
             skew148=[n for n in skew148 if n in prov],
             skew148_cards=sorted({c for n in skew148 if n in prov
                                   for c in skewed_cnrb[n]}),
+            skew_drop={n: c for n, c in skew_drops.items() if n in prov},
+            skew_cards=skewed_cards,
             rot_inert=[n for n in rot_inert if n in prov],
             skewed_motion=[n for n in skewed_motion if n in prov],
             emptied=[n for n in emptied if n in prov])
@@ -919,9 +1058,13 @@ def _warn_constrained_global_converted(
         spc_nodes: List[int], spc_dof_count: int,
         auto_nodes: List[int], auto_dof_count: int, auto_titles: List[str],
         auto_stab: bool, auto_stab_only: bool,
+        auto_cmo_neg: bool,
         skew148: List[int], skew148_cards: List[str],
         rot_inert: List[int], skewed_motion: List[int],
-        emptied: List[int]) -> None:
+        emptied: List[int],
+        skew_drop: Optional[Dict[int, Tuple[str, str, int]]] = None,
+        skew_cards: Optional[Dict[int, List[Tuple[int, str, str, str]]]] = None
+        ) -> None:
     """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
     every screen (the #133 ordering rule), with this source's own counts."""
     rows = state.constrained_global_rows
@@ -993,10 +1136,14 @@ def _warn_constrained_global_converted(
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
                                               stab=auto_stab,
-                                              stab_only=auto_stab_only))
+                                              stab_only=auto_stab_only,
+                                              cmo_neg=auto_cmo_neg))
     if skew148:
         msg.append(_skew148_sentence(skew148, skew148_cards,
                                      "--no-constrained-global"))
+    if skew_drop:
+        msg.append(_skew_drop_sentence(skew_drop, skew_cards or {},
+                                       "*CONSTRAINED_GLOBAL"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1113,7 +1260,8 @@ def _named(nids: List[int], cap: int = 5) -> str:
 def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
                                stab: bool = False,
-                               stab_only: bool = False) -> str:
+                               stab_only: bool = False,
+                               cmo_neg: bool = False) -> str:
     """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
     ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
 
@@ -1138,7 +1286,9 @@ def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
             "unloaded free translation of a loaded body - the body states no "
             "*MAT_RIGID CON1/CON2 digit there" if stab_only else
             f"*MAT_RIGID CMO 1 CON1/CON2{named}, or the "
-            "*CONSTRAINED_NODAL_RIGID_BODY _SPC option")
+            "*CONSTRAINED_NODAL_RIGID_BODY _SPC option"
+            + (", or *MAT_RIGID CMO -1 CON2 in the global frame (CON1 0)"
+               if cmo_neg else ""))
     return (
         f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
         f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
@@ -1183,10 +1333,16 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
                                auto_stab: bool, auto_stab_only: bool,
+                               auto_cmo_neg: bool,
                                skew148: List[int], skew148_cards: List[str],
                                rot_inert: List[int],
                                skewed_motion: List[int],
-                               emptied: List[int]) -> None:
+                               emptied: List[int],
+                               skew_drop: Optional[
+                                   Dict[int, Tuple[str, str, int]]] = None,
+                               skew_cards: Optional[Dict[
+                                   int, List[Tuple[int, str, str, str]]]]
+                               = None) -> None:
     """Announce the ``*NODE`` TC/RC conversion once per deck, AFTER every
     screen has run and with each screen's own count.
 
@@ -1276,10 +1432,14 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
                                               stab=auto_stab,
-                                              stab_only=auto_stab_only))
+                                              stab_only=auto_stab_only,
+                                              cmo_neg=auto_cmo_neg))
     if skew148:
         msg.append(_skew148_sentence(skew148, skew148_cards,
                                      "--no-node-tc-rc-bcs"))
+    if skew_drop:
+        msg.append(_skew_drop_sentence(skew_drop, skew_cards or {},
+                                       "*NODE TC/RC"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "

@@ -838,6 +838,44 @@ emitted models (151 bodies written, 2 refused at the margin — one each on
 at every fifth while its start becomes exact), `transducer` (an oscillating
 contact IE's end value) and `translat` (a run whose energy error is 99.9 % from
 the first rows — the joint path); `pipe` and `wood-post` stay `match`.
+**`*MAT_RIGID` CMO = −1 → a `/BCS` on the `/RBODY` main node in the `/SKEW` of
+CON1** (round 8, default ON, `--no-rigid-local-constraints` writes nothing as
+before). Vol II R17 `*MAT_RIGID`: with CMO −1 CON1 is the local coordinate
+system ("fixed in time") and CON2 a six-digit code (100000 = x translation …
+000001 = z rotation); `LCO` plays no part. The digits become the `/BCS` Tra/Rot
+in the skew of CON1 (`radioss51/LOADS/bcs.cfg:98`; `hm_read_bcs.F:164-172`
+resolves the skew, `:179-185` refuses a digit ≥ 2): CON1 0 is the global frame
+(`control_timestep.billet-forge`: LS-DYNA's d3hsp prints the processed code as
+000000 but its `matsum` holds the press at x-rbv = y-rbv = 0.0 at all 151
+outputs); a `*DEFINE_COORDINATE_SYSTEM` / `_VECTOR` / FLAG-0 `_NODES` frame is
+its own `/SKEW/FIX`; a FLAG-1 `_NODES` frame (k2rad's co-rotating `/SKEW/MOV`)
+gets a NEW `/SKEW/FIX` at its t = 0 axes; a code with a digit ≥ 2 or a seventh
+digit, an undefined CON1 or a degenerate node frame writes NO card and is
+named; CMO ±2 is named (an `/RBODY` holds a `/BCS` on its main node only, not at
+XSPC/YSPC/ZSPC). Before round 8 the card was dropped silently. MEASURED at
+nt 4, base-paired with 4f5b6e8: `mat_rigid.block-slide` KE END +100.10 % →
++0.05 % (LS 35982.5 at t 0.01; fifths +99.96 / +100.02 / +100.01 / +99.97 /
++100.10 → −0.02 / +0.01 / +0.00 / −0.01 / +0.05 %; RMS 44.81 → 0.006 % of the
+LS peak over 500 LS blocks 0 < t ≤ 0.01), 2512 = 2512 cycles — the same code in
+the GLOBAL frame stays at +100.10 %, so it is the frame that does it;
+`control_timestep.billet-forge` IE END −99.97 % → +0.13 % (LS 995458 at
+t 0.0015; RMS 41.95 → 0.056 % over 150 LS blocks; OpenRadioss energy error
+−24.1 → −3.7 %), 12501 = 12501 cycles, its KE END stays +16.99 % (deviation).
+Reach 3 deck keys on 3 emitted models (the Yaris Dynamic Roof Crush giant
+converts to `011 111` in skew 1, never run). The
+`*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO −1 card shares the rule (a VECTOR CON1
+no longer prints a false "skew_ID will dangle"). **One skew per node**: the
+starter accepts ONE skew per node across every `/BCS` (`hm_read_bcs.F:199-205`,
+ERROR 148 "A SKEW IS ALREADY DEFINED WITH THE NODE"; the same skew twice is
+fine, skew 0 counts), so a `*NODE` TC/RC, `*CONSTRAINED_GLOBAL` or
+`*BOUNDARY_SPC` code that lands on such a main node in another skew is
+**dropped and named** — exact when the kept card fixes all three translations
+(rotations) it would have duplicated, otherwise the lost global digits are
+named — for the `*MAT_RIGID` card and the skewed CNRB `_SPC` card alike
+(measured on a starter probe: the rule's output 0 errors, the same `.rad` with
+both cards ERROR 148); the implicit stabilisation of an unloaded free
+translation is never added to a skewed card, and a merged
+`*CONSTRAINED_RIGID_BODIES` slave's different code is named.
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 
 `*INITIAL_VOID_PART` / `_SET` → recognized, **still listed as skipped** (no
@@ -3221,7 +3259,10 @@ CON1/CON2, or `BC_cnrb_<pid>` from the CNRB `_SPC` option at skew 0) is
 **merged into that card** (round 7; a partial overlap keeps the remainder in
 its own group; 0 physics by the same `MY_OR`, it only removes starter WARNING
 312 — 6 deck keys on 6 emitted models moved, among them bend, 275key2 and
-ex_16), and a rotational code on a mesh with no
+ex_16), a code that would put a SECOND skew on a main node whose own card is
+skewed (`*MAT_RIGID` CMO −1, a skewed CNRB `_SPC` card) is **dropped and
+named** (round 8: ERROR 148, one skew per node — see `*MAT_RIGID` above;
+`--no-rigid-local-constraints` keeps round 7's named pair), and a rotational code on a mesh with no
 rotational DOF is **emitted and named inert** (`bcs10.F:66`'s `IRODDL` guard;
 LS-DYNA drops it too). Measured on the 356-deck dynaexamples R14 campaign: 137
 decks carry a non-zero cell, 119 of them have no `*BOUNDARY_SPC` at all, and

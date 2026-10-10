@@ -118,6 +118,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          corotational_orthotropic: bool = True,
                          mat_null_pc_mu: bool = True,
                          joint_screw_gjoint: bool = True,
+                         rigid_local_constraints: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -282,6 +283,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["joint_screw_gjoint"] = bool(joint_screw_gjoint)
 
+    kwargs["rigid_local_constraints"] = bool(rigid_local_constraints)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -424,6 +427,7 @@ class ConverterGUI:
         self.corotational_orthotropic = tk.BooleanVar(value=True)
         self.mat_null_pc_mu = tk.BooleanVar(value=True)
         self.joint_screw_gjoint = tk.BooleanVar(value=True)
+        self.rigid_local_constraints = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -908,6 +912,12 @@ class ConverterGUI:
             variable=self.joint_screw_gjoint).grid(
                 row=47, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*MAT_RIGID CMO -1 -> /BCS in the /SKEW of CON1 (one skew "
+                     "per node) - ON. block-slide KE +100.10 -> +0.05 %",
+            variable=self.rigid_local_constraints).grid(
+                row=48, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1169,6 +1179,7 @@ class ConverterGUI:
                     self.corotational_orthotropic.get()),
                 mat_null_pc_mu=self.mat_null_pc_mu.get(),
                 joint_screw_gjoint=self.joint_screw_gjoint.get(),
+                rigid_local_constraints=self.rigid_local_constraints.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1356,6 +1367,9 @@ class ConverterGUI:
         if not kwargs.get("joint_screw_gjoint", True):
             bits.append("*CONSTRAINED_JOINT_SCREW left skipped "
                         "(--no-joint-screw-gjoint)")
+        if not kwargs.get("rigid_local_constraints", True):
+            bits.append("*MAT_RIGID CMO -1 written as nothing "
+                        "(--no-rigid-local-constraints)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

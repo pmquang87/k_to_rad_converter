@@ -7891,6 +7891,22 @@ class ConvertOptions:
     # :667-671). Anything outside the pattern keeps
     # the skip with a named reason. Reach 1 deck key on 1 emitted model.
     joint_screw_gjoint: bool = True
+    # --no-rigid-local-constraints: write nothing for a *MAT_RIGID CMO -1
+    # card, as before round 8 (R14 triage round 8, A1).
+    #
+    # ON by default. CMO -1 makes CON1 the local system ("fixed in time") and
+    # CON2 a six-digit code (Vol II R17 *MAT_RIGID); the code becomes /BCS
+    # 'Tra Rot' in the /SKEW of CON1 on the /RBODY main node (CON1 0 =
+    # global, a FLAG-1 CON1 a new /SKEW/FIX at its t = 0 axes, a bad code /
+    # undefined CON1 / degenerate node frame = no card + a warning). The CNRB
+    # _SPC CMO -1 card shares the helper. ONE skew per node
+    # (hm_read_bcs.F:199-205, ERROR 148): a TC/RC, *CONSTRAINED_GLOBAL or
+    # *BOUNDARY_SPC code in another skew on such a node is dropped and named.
+    # MEASURED at nt 4: block-slide KE END +100.10 -> +0.05 % (RMS 44.81 ->
+    # 0.006 %, 500 LS blocks), billet-forge IE END -99.97 -> +0.13 % (RMS
+    # 41.95 -> 0.056 %, 150 LS blocks), cycles 1.000x. Reach 3 deck keys on 3
+    # emitted models.
+    rigid_local_constraints: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9487,7 +9503,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077, in that order:
+    # (writer/rbody.py:1057, :1741, :1855, :2044, :2201, :2325, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -9711,6 +9727,21 @@ class ConversionState:
     # consumer: A1's merge sentence names the stabilisation only where a
     # merged DOF is one of these digits (round 7, the validation round).
     rigid_auto_stab: Dict[int, str] = field(default_factory=dict)
+    # The SKEWED /BCS the *MAT_RIGID producer writes on an /RBODY main node
+    # from a CMO -1 card (round 8, A1: CON2's six-digit code in the /SKEW of
+    # CON1): main node -> [(Tra, Rot, skew_ID, title)], the emitted cards.
+    # Kept apart from rigid_auto_bcs (whose 3-tuple pins skew 0) because a
+    # skewed card's digits are axes of its skew: no global code may be merged
+    # into it, and the starter accepts ONE skew per node across every /BCS
+    # (ERROR 148, hm_read_bcs.F:199-205). Rebuilt on every _make_rbodies call.
+    # Consumers: loads._rigid_skewed_cards (the TC/RC pass and _make_bcs drop
+    # a code in another skew on that node and name it).
+    rigid_skewed_bcs: Dict[int, List[Tuple[str, str, int, str]]] = field(
+        default_factory=dict)
+    # The main nodes whose skew-0 rigid_auto_bcs card comes from a *MAT_RIGID
+    # CMO -1 card with CON1 0 (round 8, A1), so screen (c')'s sentence names
+    # that code too. Rebuilt with rigid_auto_bcs.
+    rigid_auto_cmo_neg: Set[int] = field(default_factory=set)
     # *SECTION_SOLID_EFG / *SECTION_SHELL_EFG: RECORDED but still SKIPPED
     # (round 7, A5 (ii)) - secid -> (the keyword as skipped, ELFORM). ONE
     # consumer: the missing-section auto-create of writer/mesh.

@@ -643,6 +643,24 @@ def build_parser() -> argparse.ArgumentParser:
              "the joint skipped.",
     )
     parser.add_argument(
+        "--rigid-local-constraints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write *MAT_RIGID CMO -1 (and the *CONSTRAINED_NODAL_RIGID_BODY_SPC "
+             "CMO -1 card, through the same rule) as a /BCS on the /RBODY main "
+             "node in the /SKEW of CON1, not LCO: CON1 0 = global, a FLAG-1 "
+             "*DEFINE_COORDINATE_NODES frame gets a /SKEW/FIX at its t = 0 axes, "
+             "a bad code or an undefined CON1 writes nothing and is named. "
+             "Before round 8 the *MAT_RIGID card was dropped silently. One skew "
+             "per node (ERROR 148, hm_read_bcs.F:199-205): a *NODE TC/RC, "
+             "*CONSTRAINED_GLOBAL or *BOUNDARY_SPC code on that node in another "
+             "skew is dropped and named. MEASURED at nt 4: mat_rigid.block-slide "
+             "KE END +100.10 %% -> +0.05 %% (RMS 44.81 -> 0.006 %% of the LS "
+             "peak), control_timestep.billet-forge IE END -99.97 %% -> +0.13 %%. "
+             "ON by default; --no-rigid-local-constraints restores the 4f5b6e8 "
+             "bytes.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1319,6 +1337,7 @@ def main(argv=None) -> int:
         corotational_orthotropic=args.corotational_orthotropic,
         mat_null_pc_mu=args.mat_null_pc_mu,
         joint_screw_gjoint=args.joint_screw_gjoint,
+        rigid_local_constraints=args.rigid_local_constraints,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

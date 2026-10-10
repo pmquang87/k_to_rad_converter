@@ -244,6 +244,7 @@ def convert(
     corotational_orthotropic: bool = True,
     mat_null_pc_mu: bool = True,
     joint_screw_gjoint: bool = True,
+    rigid_local_constraints: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -754,6 +755,28 @@ def convert(
         0.9998x cycles. SMP only (``-np > 1`` stops in its first cycle,
         ``lag_mult.F:667-671``). Anything
         outside the pattern keeps the skip with a named reason.
+    rigid_local_constraints : bool
+        Write a ``*MAT_RIGID`` CMO -1 card as a ``/BCS`` on the
+        ``/RBODY`` main node in the ``/SKEW`` of CON1 (round 8, A1):
+        CON2 is the six-digit local code, CON1 the local system, "fixed
+        in time" (Vol II R17 *MAT_RIGID); LCO plays no part. CON1 0 =
+        the global frame; a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
+        gets a ``/SKEW/FIX`` at its t = 0 axes; a code with a digit >=
+        2 or more than six digits, an undefined CON1 or a degenerate
+        node frame writes NO card and is named. The
+        ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` CMO -1 card shares the
+        helper (a VECTOR CON1 no longer prints a false 'will dangle').
+        ONE skew per node (``hm_read_bcs.F:199-205``, ERROR 148): a
+        ``*NODE`` TC/RC, ``*CONSTRAINED_GLOBAL`` or ``*BOUNDARY_SPC``
+        code on such a main node in another skew is DROPPED and named,
+        for the ``*MAT_RIGID`` and the skewed CNRB card alike. **On by
+        default.** MEASURED at nt 4: mat_rigid.block-slide KE END
+        +100.10 -> +0.05 % (RMS 44.81 -> 0.006 % of the LS peak over
+        500 LS blocks 0 < t <= 0.01), control_timestep.billet-forge IE
+        END -99.97 -> +0.13 % (RMS 41.95 -> 0.056 %, 150 LS blocks),
+        both at 1.000x cycles; reach 3 deck keys on 3 emitted models
+        (the Yaris roof crush giant convert-only). False restores the
+        4f5b6e8 bytes and warnings.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1179,6 +1202,7 @@ def convert(
         corotational_orthotropic=corotational_orthotropic,
         mat_null_pc_mu=mat_null_pc_mu,
         joint_screw_gjoint=joint_screw_gjoint,
+        rigid_local_constraints=rigid_local_constraints,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
