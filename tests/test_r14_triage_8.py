@@ -4949,6 +4949,24 @@ class MassWeightedInivelOnePairPerBody(unittest.TestCase):
         self.assertEqual(self._pairs(starter), [])
         self.assertFalse(_has(res.warnings, "SUMMED into ONE pair"))
 
+    def test_the_pair_record_is_per_build(self):
+        """state.mass_weighted_pairs is reset at the start of build_starter: a
+        second build of the SAME state writes its own first pair with the
+        sums again (its ids run on - build_starter draws ids from the state's
+        counters), not a share summed into the previous build's record, which
+        would emit no pair and then stop the content-asserted pass."""
+        from k2rad.writer.assembly import build_starter
+        st = _dispatch(_mw_cube(_iv_node_rows(_MW_TWO_GROUPS)))
+        st.options.mass_weighted_inivel = True
+        for build in (1, 2):
+            with self.subTest(build=build):
+                pairs = self._pairs(build_starter(st))
+                self.assertEqual([k for k, _v in pairs], ["TRA", "ROT"], pairs)
+                for (kind, got), want in zip(pairs, _MW_SUM):
+                    for g, w in zip(got, want):
+                        self.assertAlmostEqual(g, w,
+                                               delta=1e-9 * max(1.0, abs(w)))
+
 
 class Round8RetractedStatementsB(unittest.TestCase):
     """B12.6, the round-7 four-test shape: no retracted spelling in any

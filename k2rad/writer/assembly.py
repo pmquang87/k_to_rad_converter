@@ -2082,6 +2082,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # the rigid bodies are merged, before any interface is built.
     state.bolt_rigid_keep = {}
     state.bolt_kept_by_side = {}
+    # --mass-weighted-inivel's one-pair-per-body record is a PER-BUILD
+    # registry (the round-8 post-review verification): a second build of the
+    # same state must emit its own first pair, not sum into the last build's
+    state.mass_weighted_pairs = {}
     contact_rigid_nodes = rigid_nodes
     if state.options.bolt_rigid_contact:
         state.bolt_rigid_keep = _bolt_end_rigid_members(state, rbody_info)
