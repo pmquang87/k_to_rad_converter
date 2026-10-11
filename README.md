@@ -1048,13 +1048,18 @@ deck +51.91 → +71.13 %) and `bird_B` CREATES energy (energy error 99.9 %, END
 IE +1484.66 → +20691.23 %) through its converted open fixed-grid ALE faces
 (walled −0.1 %; LS-DYNA moves that mesh with the bird,
 `*ALE_REFERENCE_SYSTEM_GROUP`, which k2rad skips); ELFORM 5 / 7 / 11 / 12 and
-mixed materials are named too. Since round 8 a `/PROP/SOLID` that carries a
+mixed materials are named too. Since round 8 a `/PROP/SOLID` (Isolid 1 / 2)
+that carries a
 Nu > 0 brick part with `R = 10·Nu / (c0·dmin) > 1` is written with `h / R`
 (with Nu > 0 the fluid hourglass force of a brick is `10·(h/4)·VIS·dx` instead
 of `(h/4)·RHO·c·dx²`, `shvis3.F:182` / `:185` — R times the Nu-0 value; on the
 Couette coupon R 3.16 is unstable at h 0.1 and analytic at h / R); R stays
 0.0117 on the channel family, whose bytes do not move. TEROD / CEROD have no
-LAW6 cell and are named. The rule is keyed on the `*MAT_NULL`
+LAW6 cell and are named. Round 8's SPH-only Nu cell has NO opt-out of its own:
+`--no-mat-null-pc-mu` writes the 65ff389 cells (Nu 0 AND Pmin 0), which is not
+the `4f5b6e8` file where a stated PC was carried (`sph/bird`: `4f5b6e8` Nu 0 /
+Pmin −1, the default Nu 1 / Pmin −1, the flag Nu 0 / Pmin 0 — measured by the
+post-review verification). The rule is keyed on the `*MAT_NULL`
 record: the 4 `*MAT_ELASTIC_FLUID` acoustic compartments (nvh 8.7 / 9.1 / 9.2 /
 9.4) write the same keyword from another record and are not moved by this rule
 (round 8 moves their stated CP 0.0 by its own rule, `--no-elastic-fluid-cp-cutoff`). The void floor

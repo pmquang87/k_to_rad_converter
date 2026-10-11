@@ -11,6 +11,70 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
+  round.** Four verifiers (two solver-physics, code, evidence) checked the
+  branch at `f79d8b7`; every finding was re-checked against the code, the
+  source and a measurement before it was acted on. The code, tests and texts
+  are `07897e7`, plus `549af70` (the record below is reset per build - the
+  last code commit; it writes the same bytes and warning lists as `07897e7`
+  on all 356 roster keys); default bytes move on 0 of the 356 keys (the
+  sweep at `07897e7` against `f79d8b7`: 0 byte movers, 12 warning-only
+  movers, 344 identical).
+  - **`--mass-weighted-inivel` writes ONE `/INIVEL` pair per rigid body** (a
+    pre-existing defect since `02e5335`, round 5; opt-in, so 0 default
+    bytes): a body partly covered by several velocity groups or cards (the
+    rows of an `*INITIAL_VELOCITY_NODE` grouped by velocity value, several
+    `*INITIAL_VELOCITY` cards) got a pair per group on its main node, each
+    the group's momentum share over the whole body mass, and the starter
+    overwrites card by card (`hm_read_inivel.F:524-526` / `:538-540`), so
+    only the LAST share survived. The shares are now summed into the first
+    pair (`state.mass_weighted_pairs`, reset at the start of every
+    `build_starter`, + the content-asserted post-registry pass
+    `loads._merge_mass_weighted_pairs`). Two-group rigid cube (vx 100 /
+    300, `*ELEMENT_MASS` on a corner; starter + engine, nt 4): cycle-0
+    K-ENERGY T 0.3974 -> 0.4906 = 0.5 M 250^2 and R 0.06939 -> 0.03084 = the
+    closed form 0.5 omega.I.omega of the summed shares.
+  - **Seven whole-suite mutation survivors pinned** (the code verifier's): B8's
+    held set gains its ROTATION members (B's spin and transverse rotations,
+    A's transverse ones: B8-M1 / -M3); the B8 inertia pad on a y- and a z-axis
+    screw (B8-M2: every screw deck had an x axis, where the pad's first cell
+    is 0); A2's bolt keep on the TYPE25 route (`*CONTACT_NODES_TO_SURFACE`,
+    A2-M2) and on the SOFT -7 general builder (measured: a plain
+    `*CONTACT_AUTOMATIC_GENERAL` takes the single-surface builder); B1's NEIG 1
+    stays modal (B1-M1); B3's stale-file list asserted whole, plus a
+    pre-existing own-name `_0001.rad` that is never named (B3-M1, a suffix
+    match); B7's "every live part's law known" clause (an undefined material
+    keeps `/PROP/TYPE20`; the starter rejects that deck, ERROR 179: B7-M1).
+    The whole suite now kills all 18 mutants of this round: 17 at `07897e7`
+    (the 7 + A2's general builder + 3 on the pair fix + 6 on the corrected
+    texts) and the per-build reset removed at `549af70`.
+  - **Runtime texts corrected**: the W7 drop sentence's opt-out clause is keyed
+    on the producer (a `*MAT_RIGID` CMO -1 body: no CMO -1 card, the other
+    code stays, 0 starter errors; a skewed CNRB `_SPC` card: the old pair and
+    its ERROR 148 - both starter-measured); A6's spotweld sentence names its
+    MIXED history (IE END -33.00 -> -31.18 %, but RMS IE 6.65 -> 6.82 % and
+    RMS KE 23.09 -> 23.66 % over the 1331 LS times; README, ROADMAP and the
+    `convert()` docstring too); B2's metal-cutting tool travel is the integral
+    of the emitted points, 0.01441 mm (the exact sine 0.01432; LS 0.014681,
+    the mean of the tool's 3978 float32 d3plot nodes); the round-6 ECTOL
+    sentence names ie_shell's h.3 chain (18 + 11 127 cycles, END IE -4.54 %);
+    `--mat-null-pc-mu`'s help and GUI row name B4's SPH-only Nu and the h / R
+    guard on Isolid 1 / 2; two stale `__init__.py` line citations re-worded.
+  - **Records**: ROADMAP's doorbeam cell (B6 inverted: the default keeps the
+    stub), the roof-crush cell (A1 + A8), the giants' row-state words (5 of
+    them carry STALE runs of 2026-09-05 / -06: "not re-run", not "never
+    launched"), A6's MIXED pair, the round-5 `--mass-weighted-inivel` item;
+    README: B4's SPH-only Nu has no opt-out of its own (`--no-mat-null-pc-mu`
+    writes the 65ff389 cells, not the `4f5b6e8` `sph/bird` file); this
+    CHANGELOG's A2 entry annotated (the beam hint reverted by `523c6a9`; the
+    partial-rigid sentence prints on 9 keys by default, 10 under
+    `--no-bolt-rigid-contact`), B1's eigen-key sentence scoped to B1 (6 of
+    the 62 move by A3), A6's base RMS (6.65, the campaign's rule).
+  - **Campaign side** (report section 0.31.2, the user's tracking database):
+    the 12 warning-only movers re-converted (not re-run, 0 giants launched);
+    the two Yaris suspension giants' notes re-pointed at their own conversion;
+    `xcheck_counts.py`'s WARN label "not re-run"; a `verify_warnings.py`
+    `NOTE_SHA_STALE` check (50 hermetic tests). The ledger does not move.
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the validation-fix round.** Four
   validators (fidelity, code sweep, solver physics, campaign) reviewed the
   branch at `7cfeba4`; every finding below was re-checked against the code
