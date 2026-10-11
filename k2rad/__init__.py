@@ -138,6 +138,29 @@ class ConversionResult:
             self.engine_paths = [self.engine_path]
 
 
+def _stale_engine_files(output_stem: str, n_engine: int) -> List[str]:
+    """The ``<stem>_k.rad`` files (k a 4-digit number > *n_engine*) already
+    beside the output - engine files an earlier, longer
+    ``--imflag-curve-restart`` chain wrote, which this conversion does not
+    overwrite. ``_0000.rad`` is the starter and ``_0001`` .. ``_000N`` are
+    this conversion's own, so only k > N is stale. Sorted by k; names only."""
+    stem = Path(output_stem)
+    folder = stem.parent if str(stem.parent) else Path(".")
+    if not folder.is_dir():
+        return []
+    prefix = stem.name + "_"
+    out = []
+    for p in folder.iterdir():
+        name = p.name
+        if (name.startswith(prefix) and name.endswith(".rad")
+                and len(name) == len(prefix) + 8
+                and name[len(prefix):len(prefix) + 4].isdigit()
+                and int(name[len(prefix):len(prefix) + 4]) > n_engine
+                and p.is_file()):
+            out.append((int(name[len(prefix):len(prefix) + 4]), name))
+    return [name for _k, name in sorted(out)]
+
+
 def _write_conversion_log(output_stem: str, input_path: str,
                           state: ConversionState,
                           engine_paths: Optional[List[str]] = None
@@ -1579,11 +1602,17 @@ def convert(
     engine_texts = build_engines(state)
     engine_paths = [engine_path] + [f"{output_stem}_{k:04d}.rad"
                                     for k in range(2, len(engine_texts) + 1)]
-    if len(engine_texts) == 1 and Path(f"{output_stem}_0002.rad").exists():
+    stale = _stale_engine_files(output_stem, len(engine_texts))
+    if stale:
+        # Named, never deleted (B3-b). Every <stem>_k.rad with k past this
+        # conversion's last engine file, not only _0002 (the fix round,
+        # code-sweep F9): an earlier, LONGER chain leaves _0003 and up, and
+        # a loop over every engine file present would run them.
         state.warn(
-            f"A stale {Path(output_stem).name}_0002.rad from an earlier "
-            "--imflag-curve-restart conversion sits beside this single-file "
-            "output; delete it before running the chain by hand.")
+            f"Stale engine file(s) {', '.join(stale)} from an earlier "
+            "--imflag-curve-restart conversion sit beside this "
+            f"{len(engine_texts)}-engine-file output; delete them before "
+            "running the engine files by hand.")
 
     # 4. Write files. utf-8 regardless of locale (an ASCII/C locale would
     # UnicodeEncodeError on a non-ASCII part title); create the output

@@ -3988,6 +3988,45 @@ class ImflagCurveRestart(unittest.TestCase):
         self.assertEqual(len(r2.warnings), len(set(r2.warnings)),
                          r2.warnings)
 
+    def test_every_stale_engine_file_is_named(self):
+        """The fix round (code-sweep F9): an earlier, LONGER chain leaves
+        <stem>_0003.rad and up, which the old check (a stale _0002 beside a
+        ONE-file output only) never named. Every <stem>_k.rad with k past
+        this conversion's last engine file is named - never deleted (B3-b);
+        the conversion's own files and other names are not."""
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            path = os.path.join(tmp.name, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(_ie_strip_deck())
+            stem = os.path.join(tmp.name, "out")
+            for name in ("out_0002.rad", "out_0003.rad", "out_0010.rad",
+                         "out_00x3.rad", "outer_0004.rad", "out_0004.k"):
+                with open(os.path.join(tmp.name, name), "w") as fh:
+                    fh.write("#stale\n")
+            for flag, n, named in ((False, 1, "out_0002.rad, out_0003.rad, "
+                                   "out_0010.rad"),
+                                   (True, 2, "out_0003.rad, out_0010.rad")):
+                with self.subTest(imflag_curve_restart=flag):
+                    res = convert(path, output_stem=stem, write_log=False,
+                                  imflag_curve_restart=flag)
+                    self.assertEqual(len(res.engine_paths), n)
+                    hits = [w for w in res.warnings
+                            if w.startswith("Stale engine file(s)")]
+                    self.assertEqual(len(hits), 1, res.warnings)
+                    self.assertIn(named + " from an earlier", hits[0])
+                    self.assertIn(f"this {n}-engine-file output", hits[0])
+                    for other in ("out_00x3", "outer_0004", "out_0004.k"):
+                        self.assertNotIn(other, hits[0])
+            self.assertTrue(os.path.exists(
+                os.path.join(tmp.name, "out_0010.rad")))
+            clean = os.path.join(tmp.name, "fresh")
+            res = convert(path, output_stem=clean, write_log=False)
+            self.assertFalse(_has(res.warnings, "Stale engine file"))
+        finally:
+            tmp.cleanup()
+
     def test_sfa_scales_the_boundary(self):
         """The curve's points are scaled at parse time (SFA 2: the switch at
         0.01 becomes 0.02)."""
