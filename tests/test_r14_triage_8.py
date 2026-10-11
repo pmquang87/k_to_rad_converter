@@ -896,6 +896,29 @@ class BoltClampAndFixedCurveColumns(unittest.TestCase):
         self.assertTrue(_has(r0.warnings, "12 of the 32 node(s)"))
         self.assertFalse(_has(r0.warnings, "were KEPT on the secondary"))
 
+    def test_l_the_beam_hint_stays_silent_on_a_bolt_end(self):
+        """The fix round (code-sweep F7 = the campaign validator's
+        mainboltaexpl contact 10013): a contact whose secondary side is the
+        bolt's beam-only part is dropped (its main side, the same beam part,
+        has no surface either). The bolt's end nodes are CNRB members that
+        A2 keeps on the penalty contacts, but they are rigid-body members:
+        the --beam-contact-secondary hint must not promise the flag rescues
+        the side (with it the side gains the two ends and the contact is
+        still dropped) - the hint reads the FULL rigid set, as at 4f5b6e8."""
+        extra = ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n" + _row(77)
+                 + "\n" + _row(30, 30, 3, 3) + "\n" + _row(0.1, 0.1) + "\n"
+                 + _row() + "\n")
+        for kw in ({}, {"bolt_rigid_contact": False}):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_bolt_deck(extra=extra), **kw)
+                drops = [w for w in res.warnings
+                         if w.startswith("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"
+                                         " 77:")
+                         and "NO /INTER was emitted" in w]
+                self.assertEqual(len(drops), 1, res.warnings)
+                self.assertNotIn("--beam-contact-secondary does", drops[0])
+                self.assertNotIn("/INTER/TYPE7/77", starter)
+
     def test_j_a_rigid_part_with_the_end_as_an_extra_node(self):
         """Plate 20 is a *MAT_RIGID part holding bolt end 2 through
         *CONSTRAINED_EXTRA_NODES: all 16 of its nodes stay."""

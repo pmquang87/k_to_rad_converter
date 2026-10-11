@@ -273,14 +273,23 @@ def _beam_secondary_hint(state: ConversionState, sid: int, styp: int,
     when the side's parts own beam/truss nodes that are NOT rigid-body nodes -
     ``mainboltaexpl``'s side owns 2 beam nodes that are both rigid, so the flag
     would not rescue it and the hint must not fire there. Reach on the R14
-    roster: spotweld.k and the two Yaris giants."""
+    roster: spotweld.k and the two Yaris giants.
+
+    The test reads the FULL rigid set: the penalty builders pass the set
+    WITHOUT round 8's bolt-kept members (A2 (l)-2), and those are rigid-body
+    members all the same - on mainboltaexpl's contact 10013 they are the
+    bolt's two ends, so A2 made the hint fire there although, with the flag,
+    the side gains the two ends and the contact is still dropped (its main
+    side resolves to no surface either; measured by the campaign
+    validator). Fixed in the round-8 fix round."""
     if state.options.beam_contact_secondary:
         return ""
     pids = _beam_side_pids(state, sid, styp)
     if not pids:
         return ""
+    rigid = set(rigid_nodes) | set(state.bolt_rigid_keep)
     owners = sorted({e.pid for e in state.beam_elems if e.pid in pids
-                     and any(n > 0 and n not in rigid_nodes
+                     and any(n > 0 and n not in rigid
                              for n in (e.n1, e.n2))})
     if not owners:
         return ""
