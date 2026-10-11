@@ -1003,8 +1003,9 @@ def convert(
         segments, /DT only in explicit ones, /RFILE/OFF only in the
         last file; run them in order from one directory (each restarts
         from the previous run's .rst). ConversionResult.engine_paths
-        lists them. Default True since round 8 (gated on the campaign
-        runner chain); False keeps one implicit engine file.
+        lists them. Default True since round 8 (kept after the campaign
+        runner's chain passed gate (b) on ie_shell); False keeps one
+        implicit engine file.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution

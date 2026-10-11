@@ -11,6 +11,54 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 8 — the validation-fix round.** Four
+  validators (fidelity, code sweep, solver physics, campaign) reviewed the
+  branch at `7cfeba4`; every finding below was re-checked against the code
+  and the solver source before it was acted on, each fix is its own commit
+  with a test that fails without it.
+  - **A pre-existing wrong-output defect, found by the round-8 CI
+    emulation:** `writer/loads._NODAL_MASS_CACHE` was keyed by `id(state)`
+    and never cleared, so a later conversion in the same process (the GUI,
+    `unittest discover`, a script calling `convert()` in a loop) could read
+    an earlier model's lumped masses and `--mass-weighted-inivel` wrote a
+    wrong `/INIVEL` (in code since `02e5335`, 2026-09-14). Memoised on the
+    state now; the five mass-weighted test classes in discover order, 100
+    rounds in one process: 0 red (93 of 100 before).
+  - **B6's default inverted** (see the B6 bullet below): the implicit stub
+    stays beside a TYPE25-route contact; `--skip-implicit-stub-with-type25`
+    is the opt-in, keyed on the WRITTEN TYPE25 set.
+  - **Source citations corrected**: `r2len3.F:221-247` (the default element
+    step; `:182-186` is the nodal-step / AMS branch and `:226-246` left out
+    `:224` and `:247`), `fixvel.F:248-268` (the sensor-0 pass every k2rad
+    `/IMP*` takes), LS-DYNA's "thick-shell forms 3, 5 and 6" (form 6 is an
+    extruded thin shell), A4's energy-error thirds named "by row"; the h.3
+    warning no longer points a k2rad user at a personal launcher script; the
+    retraction notes outside this file no longer quote the retracted numbers.
+  - **The `*MAT_NULL` Nu hourglass guard covers Isolid 1 and 2 only**:
+    Isolid 24's hourglass is SZHOUR3's (`szhour3.F:158-160`, no VIS in its
+    damping), not SHVIS3's, which R describes (0 bytes: the Nu cell's
+    ELFORM-6 bricks are Isolid 1).
+  - **The `--beam-contact-secondary` hint reads the full rigid set again**,
+    so A2's bolt-kept members no longer make it fire on mainboltaexpl's
+    dropped contact 10013 (warning text only).
+  - **Every stale `<stem>_kkkk.rad` past the new last engine file is named**,
+    not only `_0002` beside a one-file output.
+  - **B10 (opt-in) names its two measured limits**: the mid-cell blind spot
+    (a plate exactly at mid-cell is never coupled) and the void-node step
+    (~1/600 of the fluid step until the fluid arrives).
+  - **Five whole-suite mutation survivors pinned** (A3-01, B4-01, S-B3-05,
+    S-B8-05, S-B7-04/-05): each forbidden class gets its second member.
+  - **ROADMAP**: the round-8 NOT list gains entry 27 (D13, the
+    `*BOUNDARY_SPC` VECTOR-CID fallback, re-measured: 48 warnings on
+    `control_adaptive.cylinder.k`), entry 18 the Yaris roof crush's new
+    starter WARNING 312, round-7 item 7 stays OPEN; the closes paragraph
+    and the residue line carry the MEASURED ledger (campaign report §0.31)
+    and h.3's gate (b) result (11 145 = 18 + 11 127 cycles, END IE
+    -4.5418 %).
+  - **Rejected, with the reason**: the B10 `_PENALTY_ID` / `_PENALTY_TITLE`
+    finding (the parser strips `_ID` / `_TITLE` from the keyword before the
+    handler reads it; `_PENALTY_ID` and `_PENALTY_TITLE` both write the PSSF
+    stiffness, re-measured 1406.25).
 - **R14 CAMPAIGN TRIAGE batch, round 8 — PART B (implicit routing, curves,
   the contact stub, the thick shell, `*MAT_NULL` / acoustic fluids, the screw
   joint, the `/MPC` text, the opt-in couplings).** One commit per item, its
@@ -25,10 +73,11 @@ Prior history (before this changelog was introduced) is summarized in the
   default bytes move 7 deck keys / 7 emitted models (B1 1 / 1, B2 1 / 1, B4
   1 / 1, B5 4 / 4; B3 h.2, B6, B7, B8, B9 and B10 0 - B6's default was
   inverted by the round's validation, so the stub stays; the h.3 default
-  flip, its own last commit, adds `ie_shell` 1 / 1 if it is kept). B11 (the
+  flip, its own last commit, adds `ie_shell` 1 / 1 - kept: the campaign's
+  gate (b) passed). B11 (the
   opt-in `--weld-trajectory-impflux`) was specified and NOT built. ROADMAP:
   the round-8 columns, the round-7 list annotated (one `**Round 8:**` line
-  per item), the round-8 NOT list (26 entries); the retracted spellings are
+  per item), the round-8 NOT list (27 entries: the fix round added D13); the retracted spellings are
   guarded by `Round8RetractedStatementsB` (only CHANGELOG quotes them).
   - **B1 — `*CONTROL_IMPLICIT_GENERAL` IMFLAG 0 beside
     `*CONTROL_IMPLICIT_EIGENVALUE` NEIG 0 converts on the EXPLICIT route
@@ -419,9 +468,11 @@ Prior history (before this changelog was introduced) is summarized in the
     (`--no-imflag-curve-restart` keeps one implicit engine file).**
     `ie_shell`'s two files, run in order on this branch (nt 4 = nt 2), end
     NORMAL in 18 + 11 127 cycles with END IE -4.54 % (B3 above); the
-    default is kept only because the campaign's chain runner reproduced
-    that chain (part C, C3 gate (b)) — the PR body states the gate result;
-    otherwise this commit is reverted. Default bytes: 1 deck key on 1
+    default is kept because the campaign's chain runner reproduced that
+    chain (part C, C3 gate (b)): PASSED - `final_cycle` 11 145 = 18 + 11 127,
+    `engine_files` [`_0001` implicit normal 18, `_0002` explicit normal
+    11 127] at nt 4, END IE -4.5418 % / KE +248.4268 %, a hand arm at nt 2
+    every cycle row identical, 17 / 17 gate checks (campaign report §0.31). Default bytes: 1 deck key on 1
     emitted model (`ie_shell`: `_0000.rad` SHA-identical, `_0001.rad` and
     the new `_0002.rad` = B3's flag-on files byte for byte, the warnings
     identical to that arm's); a scan of the 382 input files of the

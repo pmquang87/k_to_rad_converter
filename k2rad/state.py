@@ -8172,9 +8172,9 @@ class ConvertOptions:
     # --imflag-curve-restart: an IMFLAG < 0 deck whose curve switches the
     # method gets ONE ENGINE FILE PER SEGMENT (OpenRadioss fixes the method
     # per engine file, freimpl.F:82); run them in order from one directory
-    # (R14 triage round 8, B3 h.2). ON by default since h.3 (gated on the
-    # campaign's runner chain); --no-imflag-curve-restart keeps one
-    # implicit engine file.
+    # (R14 triage round 8, B3 h.2). ON by default since h.3 (kept after
+    # the campaign runner's chain passed gate (b) on ie_shell);
+    # --no-imflag-curve-restart keeps one implicit engine file.
     imflag_curve_restart: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.

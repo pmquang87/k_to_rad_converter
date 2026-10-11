@@ -6961,9 +6961,9 @@ method in time (LS-DYNA switches inside one run, Vol I R17 p.12-321 / p.12-323
 Remark 1). OpenRadioss fixes the method per ENGINE FILE (`freimpl.F:82`,
 `:127-129`: implicit iff the file holds an `/IMPL` card), so by default such a
 deck was emitted implicit throughout and named. Since round 8 k2rad writes
-ONE ENGINE FILE PER SEGMENT of the curve by default (h.3, gated on the
-campaign's runner chain; `--no-imflag-curve-restart` keeps the single
-implicit file)
+ONE ENGINE FILE PER SEGMENT of the curve by default (h.3, kept after the
+campaign's runner ran `ie_shell`'s chain: gate (b) passed, 11 145 = 18 +
+11 127 cycles; `--no-imflag-curve-restart` keeps the single implicit file)
 (`<stem>_0001.rad`, `<stem>_0002.rad`, …; `ConversionResult.engine_paths` lists
 them in run order): each carries `/RUN/<title>/k` to its segment's end, the
 `/IMPL` block only in an implicit segment, the deck's `/DT` cards only in an

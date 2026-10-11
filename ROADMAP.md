@@ -2307,7 +2307,10 @@ that decided it and the deck that would decide it next.
    a reference; none exists in the five corpora. 1 key / 1 model (`ie_shell`).
    **Round 8:** h.2 ships `--imflag-curve-restart` (one engine file per
    segment; `ie_shell` END IE −99.87 → −4.54 %, RMS 58.96 / 58.79 → 12.07 /
-   12.04 %); h.3 shipped: the default, gated by C3 (b); IMFLAG 4 / 5 stays
+   12.04 %); h.3 shipped: the default, kept after the campaign's gate (b)
+   passed (`ie_shell`'s chain through the real runner: 11 145 = 18 + 11 127
+   cycles, END IE −4.5418 % / KE +248.4268 %, nt 2 every row identical;
+   report §0.31); IMFLAG 4 / 5 stays
    a SOLVER LIMITATION.
 7. **The `doorbeam` TYPE25-only stub question** (round-6 item 20's neighbour):
    the implicit contact-stub guard ignores `contacts_type25`, so a deck whose
@@ -2434,7 +2437,9 @@ that decided it and the deck that would decide it next.
     rows with IE / KE / EXT-WORK 0 and 0 of 263 T01 channels different with
     and without J at nt 4 and nt 2; `tire.k` is not implicit in LS-DYNA
     (IMFLAG 0 + NEIG 0, round 8 B1 routes it explicit) and on its explicit
-    twin J moves only the 4th digit (RMS IE 2.05 vs 2.04 %); the Yaris giants
+    twin J moves only the 4th digit (RMS IE 2.05 % with J vs 2.04 % without,
+    both by the pre-research's first-row rule; the shipped arm, without J,
+    reads 2.06 % by the campaign's last-row rule); the Yaris giants
     are never launched.
     **Round 8:** A9: the `*CONSTRAINED_RIGID_BODIES` merge takes ΣIN once over
     the union (starter = PM to 7 digits); J on the implicit rule keys inert
@@ -2571,7 +2576,8 @@ a secondary rigid node's `*ELEMENT_MASS` as `/ADMAS`; A9 the records. Half B:
 B1 `tire.k` IMFLAG 0 + NEIG 0 routed explicit (1 / 1); B2 the sampled
 `*DEFINE_CURVE_SMOOTH` on implicit decks (1 / 1) + the A5 text; B3 h.2
 `--imflag-curve-restart` and h.3 its default (`ie_shell` 1 / 1; the last
-commit, kept only if the campaign runner chain passes C3 (b)); B4 Nu on SPH-only `*MAT_NULL` (1 / 1 + Ryan_Lee W11
+commit, kept: the campaign runner's chain passed gate (b), 11 145 = 18 + 11 127
+cycles); B4 Nu on SPH-only `*MAT_NULL` (1 / 1 + Ryan_Lee W11
 3 models), the hourglass R guard (0 / 0) and the texts (3 / 3); B5 the
 `*MAT_ELASTIC_FLUID` CP 0.0 cutoff (4 / 4); B6 the opt-in
 `--skip-implicit-stub-with-type25` (its first default, the skip, inverted by
@@ -2582,10 +2588,11 @@ opt-in is MIXED on doorbeam, END +582.00 → +689.08 % beside its RMS 393.31 →
 (0); B10 the opt-in `--shell-in-solid-coupling` (default: the warning text);
 B11 (`--weld-trajectory-impflux`) was specified and not built. Half B's default
 bytes move 8 deck keys on 8 emitted models (B1 1, B2 1, B4 1, B5 4, and h.3's
-`ie_shell` 1 if it is kept; B6 0). The retracted spellings are guarded by
+`ie_shell` 1, kept; B6 0). The retracted spellings are guarded by
 `Round8RetractedStatementsA` / `B` (only CHANGELOG quotes them). The ledger
-EXPECTATION (before the re-run; the campaign validator re-sums it from
-db.json): normal 291 → 293 (`tire.k`, `metal-cutting`), error_engine 26 → 24,
+as MEASURED by the campaign re-run (report §0.31 at `7cfeba4`, re-summed from
+db.json; equal to the pre-run expectation in every cell; the fix round's
+§0.31.1 moves no status and no verdict): normal 291 → 293 (`tire.k`, `metal-cutting`), error_engine 26 → 24,
 error_starter 12, timeout 12, pending 7, skipped 25 (roster 8); match 34 (30
 models) unchanged; deviation 138 → 139 (`tire.k`, on its END KE −18.30 %);
 not_comparable 194 → 193 (roster 177 → 176); the implicit residue 29 / 29 → 27
@@ -2687,8 +2694,12 @@ models on the 356-key / 312-model roster.
     real 2-D route, its own item. 3 keys / 3 models.
 18. **CMO −1 beyond the measured pattern** (A1 ships): implicit CMO −1 exists
     by source only; 'CON1 = 0 is global' rests on billet-forge alone; the Yaris
-    roof crush is unmeasurable (giant). Next: an implicit CMO −1 coupon; a
-    second CON1 = 0 carrier. 3 keys / 3 models.
+    roof crush is unmeasurable (giant) - A1 writes `011 111` in skew 1 on its
+    main node 4478473 beside the deck's own `/IMPDISP` in `/SKEW/MOV/91965`
+    with Fscale 0 (entry 19), and its starter prints one NEW WARNING 312
+    (incompatible kinematic conditions; part A's starter run, both arms 0
+    errors; never launched). Next: an implicit CMO −1 coupon; a second CON1 =
+    0 carrier. 3 keys / 3 models.
 19. **SF = 0 on `*BOUNDARY_PRESCRIBED_MOTION_RIGID` written as Fscale 0**
     (new): a stated 0.0 is kept where Vol I gives the default 1.0. Next: a
     two-scanner census of the SF blank / 0 class and a named fix; the only
@@ -2726,6 +2737,16 @@ models on the 356-key / 312-model roster.
     (bumper 502 = 502 rows); the `*CONSTRAINED_RIGID_BODIES` merge takes ΣIN
     once over the union; round 7's stale list (the tetrahedron `/INIBRI/ORTHO`,
     the ×(−3) momentum, round-6 item 17's list).
+27. **`*BOUNDARY_SPC` on a `*DEFINE_COORDINATE_VECTOR` CID falls back to the
+    GLOBAL system** (new, the part-A spec's side finding D13, ratified as a
+    round-9 item): `_make_bcs` and `_global_spc_dofs` resolve a CID only
+    among `*DEFINE_COORDINATE_SYSTEM` / `_NODES` frames, so a VECTOR CID is
+    written in the global system with a FALSE "not found" warning. Re-measured
+    by the fix round on `control_adaptive.cylinder.k`: 48 SPC rows on rotated
+    sector frames (nine `*DEFINE_COORDINATE_VECTOR` cards), 48 such warnings.
+    Next: give both tests the VECTOR frames (A1's CMO −1 helper already
+    resolves them for `*MAT_RIGID`), measure at nt 4, behind its own opt-out.
+    1 key / 1 model; 0 non-roster.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
@@ -3505,7 +3526,8 @@ that count (33 − `ie_shell` − `11.1.sbrake` + `metal-cutting`); after A4, **
 keys / 29 models** (`ex_02` ×3 normal). The round-3 population rule above
 (error_engine + timeout only) gives 24 keys / 22 models. The rows below are
 families, not the residue's members one by one.
-**Round 8** (EXPECTED before the campaign re-run): `tire.k` leaves the `/IMPL`
+**Round 8** (MEASURED by the campaign re-run, report §0.31 at `7cfeba4`,
+equal to the pre-run expectation): `tire.k` leaves the `/IMPL`
 population (B1: an LS-DYNA explicit run; `/IMPL` emitters 135 / 108 → 134 /
 107) and `efg/metal-cutting` becomes `normal` (B2), so the residue is **27 keys
 / 27 models** by the same rule.

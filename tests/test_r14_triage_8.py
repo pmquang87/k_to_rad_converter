@@ -4384,8 +4384,9 @@ class Round8RoadmapRecord(unittest.TestCase):
     queue table and in the implicit residue table (every row as wide as its
     header), the `efg/metal-cutting` residue row, the residue restated, ONE
     ``**Round 8:**`` line on each round-7 NOT item 1-22, the round-8 NOT list
-    numbered 1-26 with no placeholder, and the closes paragraph's ledger
-    marked EXPECTED (the campaign validator re-sums it)."""
+    numbered 1-27 with no placeholder (the fix round added D13 as entry 27),
+    and the closes paragraph's ledger MEASURED (the campaign re-run replaced
+    the expectation)."""
 
     @classmethod
     def setUpClass(cls):
@@ -4444,20 +4445,23 @@ class Round8RoadmapRecord(unittest.TestCase):
                 self.assertEqual(
                     sum("**Round 8:**" in ln for ln in self.lines[a:b]), 1)
 
-    def test_the_round_8_not_list_is_numbered_1_to_26(self):
+    def test_the_round_8_not_list_is_numbered_1_to_27(self):
         s = self._at("**What round 8 deliberately does NOT close**")
         e = self._at("**52 of the 59 starter failures.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]
-        self.assertEqual(nums, list(range(1, 27)))
+        self.assertEqual(nums, list(range(1, 28)))
         self.assertNotRegex("\n".join(self.lines[s:e]), r"<[a-z_ ]+>")
 
-    def test_the_closes_paragraph_states_an_EXPECTED_ledger(self):
+    def test_the_closes_paragraph_states_the_MEASURED_ledger(self):
+        """The expectation the closes paragraph carried before the campaign
+        re-run is replaced by the MEASURED ledger (report section 0.31)."""
         s = self._at("**What round 8 closes, and what it does NOT.**")
         e = self._at("**What round 8 deliberately does NOT close**")
         para = _collapse("\n".join(self.lines[s:e]))
-        self.assertIn("EXPECTATION", para)
+        self.assertIn("as MEASURED by the campaign re-run", para)
+        self.assertNotIn("EXPECTATION", para)
         self.assertIn("normal 291 → 293", para)
         self.assertIn("8 deck keys on 8 emitted models", para)
 
@@ -4514,7 +4518,7 @@ class Round8ChangelogReSums(unittest.TestCase):
         for needle in (
                 "Default bytes: 1 deck key on 1 emitted model (`ie_shell`",
                 "the h.3 default flip, its own last commit, adds "
-                "`ie_shell` 1 / 1 if it is kept"):
+                "`ie_shell` 1 / 1 - kept: the campaign's gate (b) passed"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 
