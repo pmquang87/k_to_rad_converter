@@ -109,7 +109,7 @@ Prior history (before this changelog was introduced) is summarized in the
     with another class (impact.k's SPH bar beside its Lagrangian plate)
     keeps Nu 0 and its sentence; the ELFORM-6 sentence keeps its bytes (the
     clauses are split by family: `channel_A / B / C`'s warning records are
-    identical). (F1) a `/PROP/SOLID` (Isolid 1 / 2 / 24, `GEO(13) > 0`)
+    identical). (F1) a `/PROP/SOLID` (Isolid 1 / 2, `GEO(13) > 0` - the fix round took Isolid 24 out: its hourglass is SZHOUR3's, not SHVIS3's)
     carrying a Nu > 0 brick part with `R = 10 Nu / (c0 dmin) > 1` is written
     with `h / R` (`materials.guarded_prop_h` at both `/PROP/SOLID` emission
     sites): with Nu > 0 the fluid hourglass force of a brick is `10 (h/4)

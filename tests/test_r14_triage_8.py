@@ -2593,10 +2593,43 @@ class MatNullSphNuAndRGuard(unittest.TestCase):
         props = [ln for ln in s.splitlines() if ln.startswith("/PROP/SOLID/")]
         self.assertEqual(len(props), 1, props)
         pid = int(props[0].rsplit("/", 1)[1])
-        self.assertIn(_prop_isolid(s, pid), (1, 2, 24))
+        self.assertIn(_prop_isolid(s, pid), (1, 2))
         r_val = 1.0e5 / 31622.7766
         self.assertEqual(_prop_h(s, pid), _f(0.05 / r_val))
         self.assertEqual(len(_w(r, f"{_WR}{pid} ")), 1, r.warnings)
+
+    def test_an_isolid_24_prop_is_not_guarded(self):
+        """The fix round (fidelity minor): the R ratio describes SHVIS3's
+        fluid hourglass term (shvis3.F:182 / :185), and SHVIS3 is called
+        only from SFORC3 (sforc3.F:1250, forint.F's JHBE 1 / 2 / 101 / 102
+        branch); Isolid 24 runs SZFORC3 -> SZHOUR3 (forint.F:1090-1096,
+        szforc3.F:962), whose LAW6 hourglass is GG = MAX(G0, VIS)
+        (szhour3.F:158-160) with no VIS in its damping term (:238-240). So
+        the guard's set is Isolid 1 and 2. Unreachable through a deck today
+        - the Nu cell is written on ELFORM-6 bricks, which get Isolid 1
+        whatever the *HOURGLASS IHQ or the analysis (probed below) - so the
+        set is pinned and the rule called directly with Isolid 24."""
+        from k2rad.writer import materials
+        self.assertEqual(materials._HG_GUARD_ISOLIDS, (1, 2))
+        deck = _visc_brick_deck(hourglass="0.05")
+        for d in (deck, deck.replace("*HOURGLASS\n" + _row(1, 1),
+                                     "*HOURGLASS\n" + _row(1, 6)),
+                  deck.replace("*CONTROL_TERMINATION",
+                               "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001)
+                               + "\n*CONTROL_TERMINATION")):
+            with self.subTest(deck=d[:60]):
+                _r, s, _e = _convert(d)
+                props = [ln for ln in s.splitlines()
+                         if ln.startswith("/PROP/SOLID/")]
+                self.assertEqual(len(props), 1, props)
+                pid = int(props[0].rsplit("/", 1)[1])
+                self.assertEqual(_prop_isolid(s, pid), 1)
+        st = _dispatch(_visc_brick_deck())
+        r_val = 1.0e5 / 31622.7766
+        self.assertAlmostEqual(materials.guarded_prop_h(st, 1, [1], 1, None),
+                               0.1 / r_val, places=9)
+        self.assertIsNone(materials.guarded_prop_h(st, 1, [1], 24, None))
+        self.assertEqual(materials.guarded_prop_h(st, 1, [1], 24, 0.05), 0.05)
 
     def test_unsupported_eos_kind_named(self):
         r, s, _e = _convert(_visc_brick_deck(eos="ideal"))

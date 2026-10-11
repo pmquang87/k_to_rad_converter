@@ -1432,10 +1432,17 @@ def _resolve_mat_null_cells(
     return out
 
 
-#: R14 triage round 8, B4 (F1): the /PROP/SOLID formulations whose
-#: hourglass coefficient GEO(13) is > 0 by default (hm_read_prop14.F:357-370:
-#: Isolid 24 CVIS 0.1, Isolid 1 / 2 QH 0.1) - the only ones shvis3.F reads.
-_HG_GUARD_ISOLIDS = (1, 2, 24)
+#: R14 triage round 8, B4 (F1): the /PROP/SOLID formulations whose fluid
+#: hourglass force is SHVIS3's (shvis3.F:182 / :185), the term R describes:
+#: SHVIS3 is called only from SFORC3 (sforc3.F:1250), forint.F's JHBE 1 / 2
+#: / 101 / 102 branch, with GEO(13) = QH 0.1 by default
+#: (hm_read_prop14.F:357-370). Isolid 24 is NOT here (the fix round, after
+#: the fidelity review): it runs SZFORC3 -> SZHOUR3 (forint.F:1090-1096,
+#: szforc3.F:962), whose LAW6 hourglass is GG = MAX(G0, VIS)
+#: (szhour3.F:158-160) with no VIS in its damping term (:238-240), so
+#: h / R would weaken a force R does not describe. Unreachable today: the
+#: Nu cell is written on ELFORM-6 bricks, which get Isolid 1.
+_HG_GUARD_ISOLIDS = (1, 2)
 #: the starter's default h for those formulations (a blank / 0 cell)
 _HG_DEFAULT_H = 0.1
 
@@ -1517,8 +1524,9 @@ def _mat_null_h_guard(state: ConversionState
 def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
                    isolid: int, hcoef: Optional[float]) -> Optional[float]:
     """R14 triage round 8, B4 (F1): the hourglass coefficient a /PROP/SOLID
-    is written with. Unchanged unless the prop is an Isolid 1 / 2 / 24 one
-    (GEO(13) > 0) carrying a Nu > 0 brick part with R = 10 Nu / (c0 dmin)
+    is written with. Unchanged unless the prop is an Isolid 1 / 2 one
+    (SHVIS3's hourglass; GEO(13) > 0) carrying a Nu > 0 brick part with
+    R = 10 Nu / (c0 dmin)
     > 1: then ``h = h_eff / R_max`` (h_eff = the stated h, else the
     starter's default 0.1) and the prop is named once. h is never raised
     (R <= 1 keeps today's bytes: the channel family reads R 0.0117)."""
