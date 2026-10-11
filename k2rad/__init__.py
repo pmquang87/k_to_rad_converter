@@ -877,7 +877,7 @@ def convert(
         *MAT_SPOTWELD Remark 4 scales the weld inertias in the first
         step so that their stable step is DT (up only). The TYPE13 step
         is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max K4..6 +
-        max K2,3 L^2))) (``r2len3.F:226-246``, STI = XM/DT^2 at
+        max K2,3 L^2))) (``r2len3.F:221-247``, STI = XM/DT^2 at
         ``:233``), so Mass' = max(Mass, max K1..3 DT^2) and Inertia' =
         max(Inertia, (max K4..6 + max K2,3 L_max^2) DT^2) start the
         weld at 0.9 DT. **On by default.** MEASURED on spotweld.k under

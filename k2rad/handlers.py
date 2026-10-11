@@ -18025,7 +18025,7 @@ def sampled_smooth_points(tstart: float, trise: float, tend: float,
     piecewise-linearly (``fv_imp0.F:209`` FV_IMP -> ``:333`` DINTERI; the
     file has no ISMOOTH branch, nor has ``force_imp.F``), so a
     ``/FUNCT_SMOOTH`` there acts as the STRAIGHT trapezoid, while the
-    explicit ``fixvel.F:224-238`` blends it. LS-DYNA states no ramp formula
+    explicit ``fixvel.F:248-268`` blends it. LS-DYNA states no ramp formula
     (Vol I R17 p.17-153/154); on efg/metal-cutting its tool travel grows as
     t^2.68 .. t^2.89 over the first d3plot states, closest to the sine (t^3;
     straight t^2, the explicit quintic t^4).
@@ -18069,7 +18069,7 @@ _SMOOTH_SAMPLING_CORE = (
     ":333 DINTERI, which also extrapolates the end segments linearly) and "
     "the implicit load path has no smooth branch (force_imp.F), so "
     "/FUNCT_SMOOTH acts as a STRAIGHT ramp there, while the explicit "
-    "fixvel.F:224-238 blends it. MEASURED on a one-brick implicit probe (nt "
+    "fixvel.F:248-268 blends it. MEASURED on a one-brick implicit probe (nt "
     "4): the driven node's displacement follows the integral of the emitted "
     "points to 2e-7 at every step on both arms - the 4-point /FUNCT_SMOOTH "
     "as a straight ramp that runs the node BACKWARDS past TEND (2.782 at t "

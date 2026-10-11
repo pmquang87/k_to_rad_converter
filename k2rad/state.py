@@ -8093,9 +8093,9 @@ class ConvertOptions:
     #
     # ON by default. Remark 4 scales the weld UP to a step of DT: Mass' =
     # max(M, max K1..3 DT^2), Inertia' = max(I, (max K4..6 + max K2,3
-    # L_max^2) DT^2) (r2len3.F:226-246, STI = XM/DT^2 at :233). MEASURED on
+    # L_max^2) DT^2) (r2len3.F:221-247, STI = XM/DT^2 at :233). MEASURED on
     # spotweld.k (opt-in rules 1 + 2): Mass x2.5, Inertia x13.41, last cycle
-    # 1332 = LS-DYNA's 1332. Round 7's x13.42 'calibration' applied the inertia
+    # 1332 = LS-DYNA's 1332. Round 7's 'calibration' factor applied the inertia
     # factor to the mass as well and is retracted. Default byte movers 0 deck
     # keys.
     spotweld_dt_mass_scaling: bool = True
@@ -9669,7 +9669,7 @@ class ConversionState:
     # springs' value x L^2, r4def3.F:173-174). ONE consumer: the LIGHT
     # clause of loads._warn_spring_token_mass, which states each light
     # node's two-mass critical step against the spring's own step
-    # (r1len3.F:175 / r2len3.F:182-186 read the PROPERTY mass).
+    # (r1len3.F:175 / r2len3.F:221-247 read the PROPERTY mass).
     spring_token_springs: List[Tuple[int, int, int, float, float, float,
                                      float, float, float]] = field(
         default_factory=list)

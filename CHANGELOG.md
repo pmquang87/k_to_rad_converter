@@ -59,7 +59,7 @@ Prior history (before this changelog was introduced) is summarized in the
     path integrates a curve's raw points piecewise-linearly (`fv_imp0.F:209`
     FV_IMP -> `:333` DINTERI, which also extrapolates the end segments
     linearly; no ISMOOTH branch there or in `force_imp.F`), while the
-    explicit `fixvel.F:224-238` blends it - so `/FUNCT_SMOOTH` was a
+    explicit `fixvel.F:248-268` blends it - so `/FUNCT_SMOOTH` was a
     STRAIGHT ramp on every implicit deck. `writer/assembly.
     _sample_implicit_smooth_curves` now writes every well-formed card of an
     implicit, non-modal deck as `/FUNCT/<LCID>` (same id) sampling `0.5 VMAX
@@ -242,7 +242,7 @@ Prior history (before this changelog was introduced) is summarized in the
     shell -2.01 % (the pre-research's -78.88 / -2.63 % compared the node
     with the CENTRE's closed form, 37.5 mm away); ex_02's 30 / 150-degree
     parallelograms are that case (LS-DYNA ELFORM 2 IE 18.7x the brick
-    answer), and LS-DYNA calls its own layered-brick forms "distortion
+    answer), and LS-DYNA calls its thick-shell forms 3, 5 and 6 "distortion
     sensitive" (Vol I R17 p.41-116 Remark 1). README's "locking-free" is
     now attributed to the CFG label it comes from (`prop_p20_tshell.cfg:136`
     / `prop_p14_solid.cfg:198`) with the distortion caveat. Text only: the
@@ -684,7 +684,7 @@ Prior history (before this changelog was introduced) is summarized in the
     ("no /PROP/TYPE13 slot"). Vol II R17 `*MAT_SPOTWELD` Remark 4 scales the
     weld inertias UP so that their stable step is DT; the TYPE13 step is 0.9
     min(sqrt(M / max K1..3), sqrt(I / (max K4..6 + max K2,3 L^2)))
-    (`r2len3.F:226-246`, STI = XM/DT^2 at `:233`; `r4def3.F:165`, `:173`,
+    (`r2len3.F:221-247`, STI = XM/DT^2 at `:233`; `r4def3.F:165`, `:173`,
     `:545-547`). Mass' = max(M, max K1..3 DT^2), Inertia' = max(I, (max
     K4..6 + max K2,3 L_max^2) DT^2), `L_max` the property's longest weld
     (the K's keep the mean length); the token branch takes it too and stays
@@ -714,7 +714,7 @@ Prior history (before this changelog was introduced) is summarized in the
     driven-end skip (default ON, `--no-adaptive-spring-token`).** A token
     `/PROP` (TYPE4 / TYPE8 / TYPE13, k2rad's 1e-4 on a massless LS-DYNA
     discrete element) steps on its PROPERTY mass (`r1len3.F:175`,
-    `r2len3.F:182-186`) while round 6's S2 compensation takes the token back
+    `r2len3.F:221-247`) while round 6's S2 compensation takes the token back
     off the ends, so a light end could outrun the spring's own step with
     nothing to stop it. `loads._adaptive_spring_token`, a post-pass at the
     start of `_make_added_masses` (the four token producers record their
@@ -1626,7 +1626,7 @@ Prior history (before this changelog was introduced) is summarized in the
     emission is NOT shipped this round (see ROADMAP). (iv) The spring-token
     warning's LIGHT clause gains, per light node and spring, the two-mass
     critical step `2 sqrt(mu / K)` against `Tsca ×` the spring's own step
-    (`r1len3.F:175` for a TYPE4, `r2len3.F:182-186` for a TYPE8 / TYPE13),
+    (`r1len3.F:175` for a TYPE4, `r2len3.F:221-247` for a TYPE8 / TYPE13 [round 8: corrected from `:182-186`, the nodal-step / AMS branch a default run never takes]),
     PROTECTED / UNPROTECTED, the silent symptom and the remedies — inside
     the LIGHT arm only (a sentence in the shared token text would move all
     14 carriers). The springs are recorded at their four registration
@@ -10516,7 +10516,7 @@ Prior history (before this changelog was introduced) is summarized in the
       owning an element), the `*INITIAL_VELOCITY_GENERATION` part scope (a sled
       test scopes by part set, and leaving the belt out would yank it taut at
       t=0), the joint pacing census (a belt has a time step of its own,
-      `r2len3.F:182`) and the implicit free-node guard's `elem_nodes` (a belt
+      `r2len3.F:224` [round 8: corrected from `:182`, the nodal-step branch]) and the implicit free-node guard's `elem_nodes` (a belt
       carries stiffness; a `/BCS 111 111` there would weld it to ground). It is
       NOT added to `--auto-gapmin`'s faceting or part-node map, to the contact
       scoping, or to `keep_free`: a 2-node spring has no face, and the device

@@ -3983,9 +3983,9 @@ def _warn_imflag(state: ConversionState,
             f"files, one per segment: {files}. Run them IN ORDER from ONE "
             "directory - run k restarts from the <stem>_<k-1>_0001.rst that "
             "run k-1 wrote (radioss2.F:817-830; every file but the last omits "
-            "/RFILE/OFF for that): the run_or.ps1 skill's -Both runs the "
-            "starter and _0001 only, then -Deck <stem>_0002.rad, and so on; "
-            "never run a renamed copy. The starter is the implicit one "
+            "/RFILE/OFF for that): run the starter, then <stem>_0001.rad, "
+            "<stem>_0002.rad and so on, each under its own name; never run "
+            "a renamed copy. The starter is the implicit one "
             "throughout. " + _IMFLAG_RESTART_MEASURED)
         return
     state.warn(
@@ -4021,8 +4021,8 @@ _IMFLAG_RESTART_MEASURED = (
     "-3 momentum class of round 6); an implicit STATIC segment after an "
     "explicit one drops the explicit kinetic energy and re-bases its "
     "external work (a coupon: KE 316.1 -> 0, EXT-WORK 7096 -> 6783), so the "
-    "last file's energy error cannot see the switch; more than 9 segments "
-    "(the run_or.ps1 deck pattern stops at _0009).")
+    "last file's energy error cannot see the switch; a chain of more than "
+    "two engine files (every measured chain has two).")
 
 
 def imflag_restart_segments(state: ConversionState) -> List[EngineSegment]:

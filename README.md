@@ -451,7 +451,7 @@ skip that keeps that mover byte-identical (next paragraph).
 
 **Round 8: the token MASS adapts to the end-node masses** (default ON,
 `--no-adaptive-spring-token` keeps the fixed 1e-4). The spring's own step
-`√(M/K)` (`r1len3.F:175`; `r2len3.F:182-186` on a TYPE8 / TYPE13) reads the
+`√(M/K)` (`r1len3.F:175`; `r2len3.F:221-247` on a TYPE8 / TYPE13) reads the
 PROPERTY mass while the compensation above takes the token back off the end
 nodes, so a light end could sit far below what that step assumes, with
 nothing to stop it: MEASURED (nt 4), the fixed token was killed by the
@@ -698,7 +698,7 @@ a step of DT** (round 8, default ON, `--no-spotweld-dt-mass-scaling` drops it
 as before): Remark 4 of `*MAT_SPOTWELD` scales the weld inertias in the first
 step so that their stable step is DT, and the TYPE13 step is
 `0.9·min(√(Mass/max K1..3), √(Inertia/(max K4..6 + max K2,3·L²)))`
-(`r2len3.F:226-246`, `STI = XM/DT²` at `:233`), so
+(`r2len3.F:221-247`, `STI = XM/DT²` at `:233`), so
 Mass′ = max(Mass, max K1..3·DT²) and
 Inertia′ = max(Inertia, (max K4..6 + max K2,3·L_max²)·DT²) start the weld at
 0.9 DT — up only, `L_max` the property's longest weld. MEASURED on
@@ -707,7 +707,7 @@ Inertia′ = max(Inertia, (max K4..6 + max K2,3·L_max²)·DT²) start the weld 
 last cycle 4791 → 1332 = LS-DYNA's problem cycle 1332, model mass +7.0 %,
 IE END −33.00 → −31.18 %. No default byte mover: `plates.mat100`'s DT 1e-9
 is below its weld's own step, and its warning now says the DT is inert.
-Round 7's ×13.42 factor applied the inertia factor to the mass as well
+Round 7's spotweld calibration factor was the inertia factor applied to the mass as well
 (+58 % model mass) and is retracted. (Deliberately not `/MAT/LAW59`,
 which binds to `/PROP/TYPE43` connection *solids*, not springs.) Validate on a
 single-weld pull / lap-shear coupon; non-beam MAT_100 parts fall back to
@@ -2359,7 +2359,7 @@ element, which reproduces a plate on a regular mesh (a/t 100 −0.18 %, a/t 10
 `ex_02_thick_shell_elform_2.k` (30 / 150-degree parallelograms, one 10 mm
 layer) LS-DYNA's ELFORM 2 internal energy 0.771729 is 18.7× the 8-node brick
 answer 0.04124 that both `/PROP/TYPE20` (explicit) and `/PROP/SOLID` Isolid 14
-(implicit) give; LS-DYNA calls its own layered-brick forms "distortion
+(implicit) give; LS-DYNA calls its thick-shell forms 3, 5 and 6 "distortion
 sensitive" (Vol I R17 p.41-116 Remark 1). A **blank** `ELFORM` is LS-DYNA's default 1,
 not 0 — dyna2rad reads the blank as 0 and lands on the full-integration HA8,
 i.e. the opposite element class from the one the deck asked for by leaving the
@@ -6938,6 +6938,22 @@ stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its
 run in 600 s), so the density is written only on a shell-in-solid host — the
 CLIS decks are byte-identical under the flag.
 
+Two limits the coupling's sentence names, measured on the solver-physics
+validator's hand-built coupons (nt 4):
+
+- **the mid-cell blind spot** — a shell plate exactly at mid-cell has both
+  neighbouring host node planes at distance = Gap (0.5 × the mean host edge)
+  and is never coupled: the fluid column passes through with 0 plate impulse;
+  the same plate at x 20.25 in 1 mm cells couples (first-event impulse
+  1.57 P0, inside [P0, 2 P0]; momentum balance within 3 %). Place the plate
+  off the host mid-plane, or raise the gap factor (0.51-0.6 × the edge is the
+  round-9 measurement on bird-el);
+- **the void-node step** — a coupled host node that is still void sets the
+  interface step to about 1/600 of the fluid step (4.743e-10 against
+  3.0e-7 s with the plate 10 mm ahead of the fluid front: 124 184 cycles
+  reached 2 % of the run in 10 minutes) until fluid reaches the plate;
+  bird-el's 8.936× is the measured carrier, not the bound.
+
 ### `--imflag-curve-restart` — one engine file per IMFLAG segment
 
 `*CONTROL_IMPLICIT_GENERAL` IMFLAG < 0 names a curve that switches the solution
@@ -6954,8 +6970,8 @@ them in run order): each carries `/RUN/<title>/k` to its segment's end, the
 explicit one, and `/RFILE/OFF` only in the last file — run k restarts from the
 `<stem>_<k-1>_0001.rst` that run k-1 wrote (`radioss2.F:817-830`), so the files
 must be run IN ORDER from ONE directory (the starter is the implicit one
-throughout; with the run-openradioss skill: `-Both` on `_0000.rad`, then
-`-Deck <stem>_0002.rad`, and so on). A one-segment curve, an all-explicit
+throughout: run it, then `<stem>_0001.rad`, `<stem>_0002.rad` and so on, each
+under its own name). A one-segment curve, an all-explicit
 curve, IMFLAG 2 / 4 / 5 / 6 and a modal deck keep the single file. MEASURED on
 `implicit/basic-examples/impl-expl-switch/ie_shell.k` (nt 4 = nt 2): NORMAL in
 18 + 11 127 cycles where the single implicit file took 92; against LS-DYNA at
@@ -6965,7 +6981,7 @@ KE is 1.9 % of its peak); internal energy at the fifths −1.52 / +1.17 / −41.
 12.07 / 12.04 % of the LS peak over the 320 LS times. Not measured on any deck:
 an implicit DYNAMIC segment after an explicit one; an implicit STATIC segment
 after an explicit one drops the explicit kinetic energy (a coupon: KE 316.1 →
-0); more than 9 segments (the skill's deck pattern stops at `_0009`).
+0); a chain of more than two engine files (every measured chain has two).
 
 ---
 

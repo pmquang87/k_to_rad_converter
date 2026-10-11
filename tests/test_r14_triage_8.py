@@ -1354,7 +1354,7 @@ class SpotweldDtClosedForm(unittest.TestCase):
     """A6 (round 8): *MAT_SPOTWELD DT was dropped ('no /PROP/TYPE13 slot').
     Vol II R17 *MAT_SPOTWELD Remark 4 scales the weld inertias UP so the
     stable step is DT; the TYPE13 step is 0.9 min(sqrt(M / max K1..3),
-    sqrt(I / (max K4..6 + max K2,3 L^2))) (r2len3.F:226-246, STI = XM/DT^2 at
+    sqrt(I / (max K4..6 + max K2,3 L^2))) (r2len3.F:221-247, STI = XM/DT^2 at
     :233), so Mass' = max(M, max K1..3 DT^2) and Inertia' = max(I, (max K4..6
     + max K2,3 L_max^2) DT^2)."""
 
@@ -1373,7 +1373,7 @@ class SpotweldDtClosedForm(unittest.TestCase):
         self.assertAlmostEqual(i / 2.809309e-5, 1.0, places=6)
         self.assertIn("        1.570796E-05        2.809309E-05", starter)
         self.assertTrue(_has(res.warnings, "DT=1e-06 -> /PROP/TYPE13/",
-                             "Mass x 2.5, Inertia x 13.41", "r2len3.F:226-246",
+                             "Mass x 2.5, Inertia x 13.41", "r2len3.F:221-247",
                              "starts at 0.9 DT"), res.warnings)
         self.assertFalse(_has(res.warnings, "have no /PROP/TYPE13 slot"))
 
@@ -1654,7 +1654,14 @@ class AdaptiveSpringToken(unittest.TestCase):
         res, s0, _e0 = _convert(deck, adaptive_spring_token=False)
         self.assertEqual(_token_cells(s0), ["0.0001"])
         self.assertEqual(_sha(s0), _PR8_SHA["a5_d2"])
-        self.assertEqual(_sha("\n".join(res.warnings)), _PR8_WARN_SHA["a5_d2"])
+        # the 4f5b6e8 warnings but for the r2len3.F citation the fix round
+        # corrected (:182-186 is the nodal-step / AMS branch; the default
+        # element step is :221-247)
+        joined = "\n".join(res.warnings)
+        self.assertIn("r2len3.F:221-247", joined)
+        self.assertEqual(
+            _sha(joined.replace("r2len3.F:221-247", "r2len3.F:182-186")),
+            _PR8_WARN_SHA["a5_d2"])
         self.assertFalse(_has(res.warnings, _WA5))
 
     def test_8_a_windowed_motion_is_not_driving(self):
@@ -1804,7 +1811,7 @@ class Round8FlagWiringA(_t7.Round7FlagWiringA):
         "--plane-strain-unit-thickness": ("0.08756308 -> 0.003447366",
                                           "Remark 6"),
         "--rigid-element-mass-admas": ("121.4891 -> 150.9633", "150.96326"),
-        "--spotweld-dt-mass-scaling": ("r2len3.F:226-246", ":233",
+        "--spotweld-dt-mass-scaling": ("r2len3.F:221-247", ":233",
                                        "0.9 DT", "x2.5", "x13.41",
                                        "last cycle 1332"),
         "--adaptive-spring-token": ("2 mu min(1, 2/n)", "1.1e-15",
@@ -1828,6 +1835,9 @@ _RETRACTED_ROUND_8_A = (
     "×13.42 reaches",
     "STI formula was not located",
     "+7.85 % at the matched end",
+    # the fix round: the retraction NOTES may not re-ship the number either
+    # (README / ROADMAP / state.py quoted it; only CHANGELOG may)
+    "×13.42", "x13.42", "13.42 was", "the 91.2 % was",
     # A4: the critic's attributions of cup-draw's energy error
     "not caused by the cell",
     "the mass cell does not create it",
@@ -2226,7 +2236,7 @@ class ImplicitSmoothCurveSampling(unittest.TestCase):
         hits = [w for w in res.warnings if w.startswith(_B2_HEAD)]
         self.assertEqual(len(hits), 1, res.warnings)
         for needle in ("(82 points: 41 per ramp", "area 9 = DIST",
-                       "fv_imp0.F:209", ":333 DINTERI", "fixvel.F:224-238",
+                       "fv_imp0.F:209", ":333 DINTERI", "fixvel.F:248-268",
                        "--no-implicit-smooth-curve-sampling"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
@@ -3970,7 +3980,7 @@ class ImflagCurveRestart(unittest.TestCase):
         for needle in ("_0001.rad (implicit to 0.01, restart written)",
                        "_0002.rad (explicit to 0.025)", "run k restarts",
                        "IN ORDER", "implicit DYNAMIC segment after an "
-                       "explicit one", "KE 316.1 -> 0", "_0009",
+                       "explicit one", "KE 316.1 -> 0", "more than two engine files",
                        "18 + 11 127 cycles", "-4.54 %", "12.07 / 12.04 %"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])

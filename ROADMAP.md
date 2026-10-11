@@ -2371,13 +2371,13 @@ that decided it and the deck that would decide it next.
     **Round 8:** Measured NO-GO (the implicit tangent stays S4KE3,
     `imp_glob_k.F:176-193`; 802× / 49.8× the LS IE at its last two d3plot
     states); B2's sampled smooth curve makes the row NORMAL as a status; the A5
-    text corrected (the 91.2 % was one run of seven); NOT list 12.
+    text corrected (its single-run energy-error percentage was one run of seven); NOT list 12.
 11. **The spotweld pieces beyond A3** (round-6 item 6): piece 3 (MAT_100 DT →
     TYPE13 mass scaling) is **closed in round 8 by the closed form** (A6,
     `r2len3.F:233` STI = XM/DT²): Mass ×2.5 (LS-DYNA's own factor) and
     Inertia ×13.41 end `spotweld.k` (opt-in rules 1 + 2) at cycle 1332 =
     LS-DYNA's problem cycle, IE END −31.18 % (unscaled −33.00 %); round 7's
-    ×13.42 factor was the INERTIA factor applied to the mass as well (+58 %
+    calibration factor was the INERTIA factor applied to the mass as well (+58 %
     model mass, KE first fifth +101 %), and the IE END it read at the matched
     end was an artefact of that mass — retracted; only `spotweld.k` and
     `plates.mat100` (factors 1) carry DT > 0; rules
@@ -2395,7 +2395,7 @@ that decided it and the deck that would decide it next.
     RMS 31.32 / 28.24 → 9.19 / 10.22 %, nt 4); the pre-pull clamp (2.196 vs
     LS-DYNA's 1.817 mm) stays open.
     **Round 8:** A6 ships piece 3 (DT by the TYPE13 closed form,
-    `--no-spotweld-dt-mass-scaling`; round 7's ×13.42 figure retracted: 13.42
+    `--no-spotweld-dt-mass-scaling`; round 7's calibration figure retracted: it
     was the inertia factor applied to the mass as well), and A2 (l)-4 closes
     the bolt collapse (the rigid-patch contact + the fixed-column curve read);
     rules 1 + 2 as defaults are NOT list 21.
@@ -2618,8 +2618,16 @@ models on the 356-key / 312-model roster.
    opt-in): bird-el IE +1134.62 → +42.28 %, the plate −100 → −28.26 % at 8.936×
    cycles, but the density half fails on both CLIS void hosts (bird_B stall at
    t 2.227e-4; quadrature_B 3.6 % of the run in 600 s), so the scope has one
-   member; the campaign cannot score an opt-in (entry 24). Next: a second SIS
-   carrier; never the density cell on a CLIS host. 1 key / 1 model.
+   member; the campaign cannot score an opt-in (entry 24). Two limits of the
+   opt-in, named in its sentence and README (the solver-physics validator's
+   coupons, nt 4): a plate exactly at mid-cell is never coupled (Gap = 0.5 ×
+   the mean edge puts both node planes at distance = Gap: 0 plate impulse;
+   at x 20.25 in 1 mm cells the first-event impulse is 1.57 P0 and the
+   momentum balance within 3 %), and a still-void coupled host node sets the
+   interface step to ~1/600 of the fluid step (4.743e-10 vs 3.0e-7; 124 184
+   cycles for 2 % of t_end). Next: a second SIS carrier; never the density
+   cell on a CLIS host; a Gap factor 0.51-0.6 re-measured on bird-el (the
+   mid-cell blind spot). 1 key / 1 model.
 5. **The LAW51 void route and the `*INITIAL_VOLUME_FRACTION_GEOMETRY` fill**
    (round-7 item 4): SOLVER LIMITATION — `srho3.F:199-213` STOPs 167 on every
    ALE / Euler element with RHON <= 0 unless IPARG(64) = 1; `cylinder_impact_B`

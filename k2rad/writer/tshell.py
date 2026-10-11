@@ -996,7 +996,7 @@ def _warn_elform_value(state: ConversionState, label: str, elform: int,
                     "internal energy 0.771729 is 18.7x the 8-node brick "
                     "answer 0.04124, which both /PROP/TYPE20 in explicit and "
                     "/PROP/SOLID Isolid 14 in implicit give. LS-DYNA calls "
-                    "its own layered-brick forms 3 / 5 / 6 'distortion "
+                    "its thick-shell forms 3, 5 and 6 'distortion "
                     "sensitive' (Vol I R17 p.41-116 Remark 1): check the "
                     "mesh of a thin thick-shell layer; a mid-surface "
                     "*SECTION_SHELL is the robust model")

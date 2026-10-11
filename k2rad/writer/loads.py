@@ -2127,7 +2127,7 @@ def _spring_kc(dofs, l13: float = 0.0
     the larger shear stiffness / damping times the length squared
     (``r4def3.F:173-174``, added at ``:545-548``: ``XKR = MAX(K4..K6) +
     MAX(K2, K3) * ALDP**2``) - the bending stiffness the two shear springs
-    give the element. ``r2len3.F:182-186`` then takes
+    give the element. ``r2len3.F:221-247`` then takes
     ``min(M / (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) +
     C_r))``. An Ileng 1 property divides all four by the length afterwards
     (``r4def3.F:870-875``); the caller does that. The PRINTED K is used:
@@ -4100,7 +4100,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
         # *MAT_SPOTWELD Remark 4 scales the weld inertias in the first step so
         # that their stable step is DT - UP only. The TYPE13 step is
         # DTFAC1(6) min(XM / (sqrt(XCM^2 + XM XKM) + XCM), the rotational one)
-        # (r2len3.F:226-246; STI = XM/DT^2 at :233) with XKM = max(K1..K3)
+        # (r2len3.F:221-247; STI = XM/DT^2 at :233) with XKM = max(K1..K3)
         # (r4def3.F:165) and XKR = max(K2, K3) ALDP^2 + max(K4..K6) (:173,
         # :545-547): undamped, dt = 0.9 min(sqrt(M / max K1..3),
         # sqrt(I / (max K4..6 + max K2,3 L^2))). L_max = the LONGEST weld of
@@ -4134,7 +4134,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 "inertias are scaled so that their stable step is DT), added "
                 f"mass {dt_added:.6G} on {len(beams)} weld(s): the TYPE13 "
                 "step is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max "
-                "K4..6 + max K2,3 L^2))) (r2len3.F:226-246, STI = XM/DT^2 at "
+                "K4..6 + max K2,3 L^2))) (r2len3.F:221-247, STI = XM/DT^2 at "
                 ":233), so it starts at 0.9 DT; a lengthening weld pulls it "
                 "below. MEASURED on spotweld.k under the opt-in rules 1 + 2 "
                 "(nt 4): last cycle 1332 = LS-DYNA's 1332 (4791 unscaled), cycle-0 "
@@ -8237,7 +8237,7 @@ def _light_pair_clause(state: ConversionState,
     (m_n + m_f)`` (LS-DYNA Theory R16 eq. 26.25 / 26.27, the real nodal
     masses), against ``Tsca x`` the spring's OWN step ``dt_s = min(M /
     (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) + C_r))``
-    (r1len3.F:175 for a TYPE4, r2len3.F:182-186 for a TYPE8 / TYPE13; both
+    (r1len3.F:175 for a TYPE4, r2len3.F:221-247 for a TYPE8 / TYPE13; both
     read the PROPERTY mass and inertia, never the node's), with K / C as
     :func:`_spring_kc` builds them - on a TYPE13 the rotational K includes
     the shear springs' K x L^2 (r4def3.F:173), which on the R14 spotweld
@@ -8344,7 +8344,7 @@ def _light_pair_clause(state: ConversionState,
     token = pairs[0][5]
     text = (
         " Per pair, the two-mass critical step 2 sqrt(mu / K) against Tsca x "
-        "the spring's own step (r1len3.F:175 / r2len3.F:182-186, which read "
+        "the spring's own step (r1len3.F:175 / r2len3.F:221-247, which read "
         "the PROPERTY mass and inertia; a TYPE13's rotational K includes its "
         "shear K x L^2, r4def3.F:173): " + shown + ". An UNPROTECTED node "
         "is stable only while the model's governing element step stays below "
@@ -8608,7 +8608,7 @@ def _adaptive_spring_token(state: ConversionState, rigid_nodes: Set[int],
 
     WHY. A token ``/PROP`` (k2rad's 1e-4 on a massless LS-DYNA discrete
     element) steps on its PROPERTY mass: ``r1len3.F:175`` ``sqrt(M / K)`` for
-    a TYPE4, ``r2len3.F:182-186`` for a TYPE8 / TYPE13 - never on the nodes'.
+    a TYPE4, ``r2len3.F:221-247`` for a TYPE8 / TYPE13 - never on the nodes'.
     The S2 screen then takes the token back off the end nodes, so a light
     compensated end can sit far below what that step assumes, and nothing
     stops it: no nodal step without ``/DT/NODA``, and the run diverges
@@ -8836,7 +8836,7 @@ def _warn_adaptive_spring_token(state: ConversionState,
         "token-spring count, per unit length on an Ileng 1 property, floor "
         "1.1e-15; a rigid, ground or DRIVEN end (held or imposed along the "
         "spring for the whole run) counts infinitely heavy, so the spring's "
-        "own step sqrt(M/K) (r1len3.F:175; r2len3.F:182-186 on a TYPE8 / "
+        "own step sqrt(M/K) (r1len3.F:175; r2len3.F:221-247 on a TYPE8 / "
         "TYPE13, both on the PROPERTY mass) stays inside LS-DYNA's two-mass "
         "step on the real nodal masses (Theory R16 eq. 26.27). "
         f"{n_both} spring(s) with both ends driven kept the token. A skewed "

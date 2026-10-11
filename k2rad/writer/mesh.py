@@ -4935,7 +4935,7 @@ def _warn_section_card2(state: ConversionState) -> None:
                 "4, 150 LS blocks 0 < t <= 0.015): IE / KE RMS 7.54 / 65.93 -> "
                 "2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 % - but "
                 "OpenRadioss's energy error grows: mean -4.39 -> -17.88 %, "
-                "thirds -7.20 / -3.62 / -2.35 -> -22.11 / -19.08 / -12.45 %, "
+                "thirds by row -7.20 / -3.62 / -2.35 -> -22.11 / -19.08 / -12.45 %, "
                 "rows below -20 %: 3857 -> 18456 (mechanism not closed). "
                 "--no-section-nodal-thickness-mean keeps T1 (round 8).")
 

@@ -1744,7 +1744,7 @@ class TestRegistries(unittest.TestCase):
 
     def test_a_belt_only_deck_paces_the_time_step(self):
         """A /SPRING with stiffness and mass has a time step of its own
-        (r2len3.F:182), so a belt-only restraint model must not get the flat
+        (r2len3.F:224), so a belt-only restraint model must not get the flat
         "every element in this deck belongs to a rigid part"."""
         deck = _deck(_BELT_PART, _SECTION, _mat(), _belts(),
                      "*CONSTRAINED_JOINT_SPHERICAL\n" + _card(1, 2, 3, 4))

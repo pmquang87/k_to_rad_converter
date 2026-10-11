@@ -1219,7 +1219,18 @@ _SIS_MEASURED = (
     "reads +284.04 %); the same density cell FAILS on a "
     "*CONSTRAINED_LAGRANGE_IN_SOLID void host (bird_B stalls on the TYPE18 "
     "sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its run in "
-    "600 s), so it is written only on an *INITIAL_VOID host of this card.")
+    "600 s), so it is written only on an *INITIAL_VOID host of this card. "
+    "Two limits, measured on the solver-physics validator's coupons (nt 4): "
+    "a shell plate exactly at mid-cell has both neighbouring host node "
+    "planes at distance = Gap and is never coupled (the fluid column "
+    "passes through with 0 plate impulse; the same plate at x 20.25 in "
+    "1 mm cells couples, first-event impulse 1.57 P0 in [P0, 2 P0], "
+    "momentum balance within 3 %) - place the plate off the host "
+    "mid-plane or raise the gap factor; and a coupled host node that is "
+    "still void sets the interface step to about 1/600 of the fluid step "
+    "(4.743e-10 against 3.0e-7 with the plate 10 mm ahead of the fluid "
+    "front: 124 184 cycles for 2 % of the run) until fluid reaches the "
+    "plate - bird-el's 8.936x is the measured carrier, not the bound.")
 
 
 def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:

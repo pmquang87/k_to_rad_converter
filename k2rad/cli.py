@@ -754,7 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
              "UP so their stable step is DT): raise the weld's /PROP/TYPE13 Mass "
              "to max K1..3 x DT^2 and Inertia to (max K4..6 + max K2,3 x "
              "L_max^2) x DT^2 when larger, so its step starts at 0.9 DT "
-             "(r2len3.F:226-246, STI = XM/DT^2 at :233). spotweld.k (opt-in "
+             "(r2len3.F:221-247, STI = XM/DT^2 at :233). spotweld.k (opt-in "
              "rules 1 + 2): Mass x2.5 and Inertia x13.41, last cycle 1332 = "
              "LS-DYNA's 1332. A DT the weld's own step already exceeds is named "
              "inert (plates.mat100). No default byte mover. ON by default; "
