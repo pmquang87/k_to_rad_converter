@@ -18,12 +18,16 @@ ONE decision per deck (``_resolve_joint_screws``, memoised on
 * ``writer/rbody._make_rbodies`` - the *MAT_RIGID CMO ``/BCS`` of A and B is
   not written (a standard condition on a Lagrange-held node is incompatible;
   the rack's links carry it), and A1's ``rigid_auto_bcs`` record skips them
-  by the same predicate;
+  by the same predicate; on an UNDRIVEN screw (round 8, B8 q-i) A's J row
+  gets the transverse inertia pad (``screw_pad``);
+* ``writer/loads._make_bcs`` and the ``*NODE`` TC/RC pass - a code a body
+  member states on DOFs the joint already holds is written nowhere (round
+  8, B8 q-ii; ``screw_merged_members``);
 * ``writer/rbody._make_screw_carriage_rbodies`` - /RBODY producer 6 of 6, the
   carriage (an element-free /RBODY at A's main node with two massless
   element-free secondaries, Mass 1e-6, J 1e-6 x 3, ICoG 3);
 * ``writer/contacts._make_interfaces`` - the A-B pair is split out of an
-  all-parts self-contact;
+  all-parts self-contact (``lagrange_held_pairs``, round 8);
 * ``writer/loads._make_imposed_motions`` - A's drive is not written as an
   /IMPDISP;
 * ``_make_joint_screws`` (this module) - the carriage main group, the two
@@ -38,11 +42,11 @@ A screw outside the pattern keeps today's skip (its ``#-- SKIPPED:`` line,
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
-from ..state import (ConversionState, ConstrainedJointScrew, JointScrewPlan,
-                     PrescribedMotionRigid)
-from .common import HDR, _f, _i, _emit_grnod_node
+from ..state import (BodyCondition, ConversionState, ConstrainedJointScrew,
+                     JointScrewPlan, PrescribedMotionRigid)
+from .common import HDR, _dof_string, _f, _i, _emit_grnod_node
 
 #: the spelling the pattern converts; _LOCAL / _FAILURE / _COOR_ are named
 _PLAIN_SCREW = "CONSTRAINED_JOINT_SCREW"
@@ -209,35 +213,60 @@ def _cnrb_nodes(state: ConversionState) -> Set[int]:
     return out
 
 
-def _body_condition(state: ConversionState, nodes: Set[int]) -> Optional[str]:
-    """The first STANDARD kinematic condition the deck states on a body's
-    element *nodes*, in words, or None. Every one of them reaches the body's
-    /RBODY main node as a standard card - rule (a) of the ``*NODE`` TC/RC
-    pass and ``_make_bcs`` re-point a member's code onto it, and a nodal
-    prescribed motion is written on the member it names - where the starter
-    reports it beside the joint's ``/BCS/LAGMUL`` as an incompatible
-    kinematic condition (WARNING 312, BOUNDARY CONDITION / LAGRANGE
-    MULTIPLIERS: measured with a redundant ``*BOUNDARY_SPC`` and a redundant
-    ``*NODE`` TC on EXP_SC_JOINT_SCREW; a conflicting code is unmeasured).
-    Mirrors what is WRITTEN: ``--no-node-tc-rc-bcs`` drops the ``*NODE``
-    cells (no condition), and ``--no-constrained-global`` leaves
+def _more(nodes: List[int]) -> str:
+    return "" if len(nodes) < 2 else f" (and {len(nodes) - 1} more node(s))"
+
+
+def _body_conditions(state: ConversionState, nodes: Set[int]
+                     ) -> List[BodyCondition]:
+    """EVERY standard kinematic condition the deck states on a body's element
+    *nodes* (round 8, B8 q-ii; round 7 stopped at the first), one per
+    ``*NODE`` TC/RC code, per ``*CONSTRAINED_GLOBAL`` code, per
+    ``*BOUNDARY_SPC`` card and per nodal prescribed motion. The codes reach
+    the body's /RBODY main node as standard cards - rule (a) of the ``*NODE``
+    TC/RC pass and ``_make_bcs`` re-point a member's code onto it (and unite
+    the codes of all members) - where the starter reports one beside the
+    joint's ``/BCS/LAGMUL`` as an incompatible kinematic condition (WARNING
+    312, BOUNDARY CONDITION / LAGRANGE MULTIPLIERS: measured with a redundant
+    ``*BOUNDARY_SPC`` and a redundant ``*NODE`` TC on EXP_SC_JOINT_SCREW); a
+    nodal prescribed motion is written on the member it names. Mirrors what
+    is WRITTEN: ``--no-node-tc-rc-bcs`` drops the ``*NODE`` cells (no
+    condition), and ``--no-constrained-global`` leaves
     ``state.constrained_global_tc_rc`` empty. A rigid wall is not screened
     (it is not a /BCS; unmeasured)."""
+    from .loads import _TC_RC_DIGITS, _box_contains   # local: loads imports us
+    out: List[BodyCondition] = []
     if state.options.node_tc_rc_bcs:
-        hit = sorted(n for n in nodes
-                     if state.node_tc_rc.get(n, (0, 0)) != (0, 0))
-        if hit:
-            tc, rc = state.node_tc_rc[hit[0]]
-            return f"the *NODE TC {tc} / RC {rc} of its node {hit[0]}"
-    hit = sorted(n for n in nodes if n in state.constrained_global_tc_rc)
-    if hit:
-        return f"a *CONSTRAINED_GLOBAL plane through its node {hit[0]}"
+        by_code: Dict[Tuple[int, int], List[int]] = {}
+        for n in sorted(nodes):
+            code = state.node_tc_rc.get(n, (0, 0))
+            if code != (0, 0):
+                by_code.setdefault(code, []).append(n)
+        for (tc, rc), ns in sorted(by_code.items(), key=lambda kv: kv[1][0]):
+            out.append(BodyCondition(
+                "node_tc_rc", ns[0], _TC_RC_DIGITS[tc], _TC_RC_DIGITS[rc],
+                f"the *NODE TC {tc} / RC {rc} of its node {ns[0]}"
+                + _more(ns)))
+    g_code: Dict[Tuple[int, int], List[int]] = {}
+    for n in sorted(nodes):
+        if n in state.constrained_global_tc_rc:
+            g_code.setdefault(state.constrained_global_tc_rc[n], []).append(n)
+    for (tc, rc), ns in sorted(g_code.items(), key=lambda kv: kv[1][0]):
+        out.append(BodyCondition(
+            "constrained_global", ns[0], _TC_RC_DIGITS[tc], _TC_RC_DIGITS[rc],
+            f"a *CONSTRAINED_GLOBAL plane through its node {ns[0]}"
+            + _more(ns)))
     for bc in state.bcs_spcs:
         hit = sorted(set(state.node_sets.get(bc.nsid, ("", []))[1]) & nodes)
         if hit:
-            return (f"the *BOUNDARY_SPC (/BCS/{bc.bc_id}) of its node "
-                    f"{hit[0]}")
-    from .loads import _box_contains          # local: loads imports us
+            skew = (bc.cid if bc.cid and (bc.cid in state.coord_sys
+                                          or bc.cid in state.coord_nodes)
+                    else 0)
+            out.append(BodyCondition(
+                "bcs_spc", hit[0], _dof_string(bc.dofx, bc.dofy, bc.dofz),
+                _dof_string(bc.dofrx, bc.dofry, bc.dofrz),
+                f"the *BOUNDARY_SPC (/BCS/{bc.bc_id}) of its node {hit[0]}"
+                + _more(hit), skew))
     for pm in state.prescribed_motion_sets:
         cand = (set(state.node_sets.get(pm.nsid, ("", []))[1]) & nodes
                 if pm.nsid else set(nodes))
@@ -249,9 +278,74 @@ def _body_condition(state: ConversionState, nodes: Set[int]) -> Optional[str]:
         elif not pm.nsid:
             continue
         if cand:
-            return ("a *BOUNDARY_PRESCRIBED_MOTION_NODE / _SET on its node "
-                    f"{min(cand)}")
-    return None
+            out.append(BodyCondition(
+                "node_motion", min(cand), "000", "000",
+                "a *BOUNDARY_PRESCRIBED_MOTION_NODE / _SET on its node "
+                f"{min(cand)}"))
+    return out
+
+
+def _held_dofs(label: str, axis: int) -> Set[int]:
+    """The DOFs (0-2 the translations, 3-5 the rotations, global axes) the
+    converted joint HOLDS on body *label* (round 8, B8 q-ii): on both bodies
+    the two translations normal to the screw axis (A's by its
+    ``/BCS/LAGMUL``, B's by the rack against the carriage, whose own
+    ``/BCS/LAGMUL`` holds it on the axis), the two rotations normal to the
+    axis on A, all three rotations on B. Free: the axial translation of both
+    bodies, and A's spin on an UNDRIVEN screw (on a driven one the spin is
+    the drive's DOF)."""
+    normal = {i for i in range(3) if i != axis}
+    if label == "A":
+        return normal | {3 + i for i in normal}
+    return normal | {3, 4, 5}
+
+
+def _condition_class(cond: BodyCondition, held: Set[int], label: str,
+                     axis: int, driven: bool) -> str:
+    """``held`` (every DOF of the code is held: merged, written nowhere),
+    ``motion`` (a nodal prescribed motion), ``skew`` (a code in a local
+    system: its digits are not the joint's global DOFs), ``drive`` (the
+    code touches A's rotation about the axis on a DRIVEN screw) or ``free``
+    (it touches a DOF the joint leaves free) - the last four refuse the
+    joint."""
+    if cond.kind == "node_motion":
+        return "motion"
+    if cond.skew:
+        return "skew"
+    dofs = {i for i, c in enumerate(cond.tra + cond.rot) if c == "1"}
+    if dofs <= held:
+        return "held"
+    if label == "A" and driven and (3 + axis) in dofs:
+        return "drive"
+    return "free"
+
+
+def _class_why(cls: str, cond: BodyCondition, label: str, axis: int,
+               driven: bool) -> str:
+    """The class in words, for refusal 11's sentence."""
+    if cls == "motion":
+        return ("a nodal prescribed motion (written on the member node it "
+                "names; the joint's Lagrange conditions on the same body are "
+                "not combined with it - unmeasured)")
+    if cls == "skew":
+        return (f"in a local system (/SKEW {cond.skew}: its digits are not "
+                "the joint's global DOFs) - which k2rad writes as a standard "
+                "condition on the body's /RBODY main node beside the joint's "
+                "Lagrange conditions (an incompatible kinematic condition: "
+                "starter WARNING 312)")
+    if cls == "drive":
+        what = "on the drive's DOF (A's rotation about the screw axis)"
+    else:
+        dofs = {i for i, c in enumerate(cond.tra + cond.rot) if c == "1"}
+        free = []
+        if axis in dofs:
+            free.append("the axial translation")
+        if label == "A" and not driven and (3 + axis) in dofs:
+            free.append("A's spin about the screw axis")
+        what = ("on a free DOF of the joint (" + " and ".join(free) + ")")
+    return (what + " - which k2rad writes as a standard condition on the "
+            "body's /RBODY main node beside the joint's Lagrange conditions "
+            "(an incompatible kinematic condition: starter WARNING 312)")
 
 
 def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
@@ -261,9 +355,11 @@ def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
     """``(the reason the screw is NOT converted, None)`` or ``(None, the
     plan)``. The ten conditions of the round-7 B2 spec, in order, and an
     eleventh from the validation round (no other kinematic condition on
-    either body, :func:`_body_condition`); every one has reach 0 on every
+    either body, :func:`_body_conditions`); every one has reach 0 on every
     corpus (the only carrier, EXP_SC_JOINT_SCREW, passes all eleven), so each
-    is pinned by a hand-built probe."""
+    is pinned by a hand-built probe. Round 8 (B8) widens two of them: 9
+    accepts a screw whose deck states NO drive on either body (q-i), and 11
+    merges a code on DOFs the joint already holds instead of refusing (q-ii)."""
     # 2. the plain spelling only
     if s.keyword != _PLAIN_SCREW:
         return ("the _COOR_SCREW / _LOCAL / _FAILURE spelling is not converted "
@@ -345,38 +441,45 @@ def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
         return (f"the *MAT_RIGID constraints are not the screw's own (A "
                 f"{_cmo(a)}, B {_cmo(b)}; expected A {want_a}, B "
                 f"{want_b})"), None
-    # 9. the drive: one rotation about the axis on A, nothing on B
+    # 9. the drive: one rotation about the axis on A, nothing on B - or, since
+    #    round 8 (B8 q-i), NO drive stated on either body: the UNDRIVEN screw
+    #    (the deck's statement, state.pm_rigid_stated_pids, not the converted
+    #    registry - a refused VAD 3 / 4 drive is not "no drive")
     on_a = [pm for pm in state.prescribed_motions if pm.pid == a]
     on_b = [pm for pm in state.prescribed_motions if pm.pid == b]
-    if on_b:
+    if on_b or b in state.pm_rigid_stated_pids:
         return f"the drive: part {b} (the translating body) is driven too", None
-    if len(on_a) != 1:
+    pm: Optional[PrescribedMotionRigid] = None
+    if a not in state.pm_rigid_stated_pids:
+        pass                                    # the UNDRIVEN screw
+    elif len(on_a) != 1:
         return ("the drive: " + (
-            f"there is none on part {a} (no converted "
-            "*BOUNDARY_PRESCRIBED_MOTION_RIGID - a VAD 3 / 4 card is not "
-            "converted at all; a screw without a drive is unmeasured)"
-            if not on_a else
+            f"the *BOUNDARY_PRESCRIBED_MOTION_RIGID on part {a} is not "
+            "converted (a VAD 3 / 4 card is not converted at all; a refused "
+            "drive is not 'no drive')" if not on_a else
             f"part {a} carries {len(on_a)} prescribed motions"), None)
-    pm = on_a[0]
-    endtim = (state.ctrl_termination.endtim
-              if state.ctrl_termination is not None else 0.0)
-    if pm.local:
-        return "the drive is _LOCAL (unmeasured)", None
-    if pm.dof != 5 + axis or pm.vid:
-        return (f"the drive: DOF {pm.dof} is not the rotation about the screw "
-                f"axis (DOF {5 + axis})"), None
-    if pm.vad not in (0, 2):
-        return f"the drive: VAD {pm.vad} is not converted (unmeasured)", None
-    if pm.birth != 0.0 or (0.0 < pm.death < endtim):
-        return (f"the drive has a time window (birth {pm.birth:g}, death "
-                f"{pm.death:g})"), None
-    curve = state.curves.get(pm.lcid)
-    if (curve is None or pm.lcid in state.funct_smooth_ids
-            or len(curve.pts) < 2
-            or any(curve.pts[i + 1][0] <= curve.pts[i][0]
-                   for i in range(len(curve.pts) - 1))):
-        return (f"the drive's curve {pm.lcid} is not a plain *DEFINE_CURVE "
-                "with two or more increasing abscissae"), None
+    else:
+        pm = on_a[0]
+        endtim = (state.ctrl_termination.endtim
+                  if state.ctrl_termination is not None else 0.0)
+        if pm.local:
+            return "the drive is _LOCAL (unmeasured)", None
+        if pm.dof != 5 + axis or pm.vid:
+            return (f"the drive: DOF {pm.dof} is not the rotation about the "
+                    f"screw axis (DOF {5 + axis})"), None
+        if pm.vad not in (0, 2):
+            return (f"the drive: VAD {pm.vad} is not converted (unmeasured)",
+                    None)
+        if pm.birth != 0.0 or (0.0 < pm.death < endtim):
+            return (f"the drive has a time window (birth {pm.birth:g}, death "
+                    f"{pm.death:g})"), None
+        curve = state.curves.get(pm.lcid)
+        if (curve is None or pm.lcid in state.funct_smooth_ids
+                or len(curve.pts) < 2
+                or any(curve.pts[i + 1][0] <= curve.pts[i][0]
+                       for i in range(len(curve.pts) - 1))):
+            return (f"the drive's curve {pm.lcid} is not a plain "
+                    "*DEFINE_CURVE with two or more increasing abscissae"), None
     # 10. contacts: the pair may sit only in an explicit all-parts
     #     self-contact (the split handles it)
     conflict, split = _contact_conflict(state, a, b, pid_nodes[a],
@@ -384,21 +487,29 @@ def _screw_refusal(state: ConversionState, s: ConstrainedJointScrew,
     if conflict is not None:
         return (f"parts {a} and {b} share contact {conflict}, which the split "
                 "does not handle"), None
-    # 11. no other kinematic condition on either body: it would land on a
-    #     Lagrange-held main node as a standard card (round-7 fix round, from
-    #     the validators' probes)
+    # 11. no other kinematic condition on either body that the joint does not
+    #     already hold: it would land on a Lagrange-held main node as a
+    #     standard card (round-7 fix round, from the validators' probes).
+    #     Round 8 (B8 q-ii): split by DOF class - a code on DOFs the joint
+    #     HOLDS is merged (written nowhere, named by the joint section); one
+    #     on the drive's DOF, on a free DOF, in a local system, or a nodal
+    #     prescribed motion still refuses.
+    driven = pm is not None
+    merged: List[Tuple[str, int, BodyCondition]] = []
     for label, pid in (("A", a), ("B", b)):
-        cond = _body_condition(state, pid_nodes[pid])
-        if cond is not None:
-            return (f"body {label} (part {pid}) carries {cond}, which k2rad "
-                    "writes as a standard condition on the body's /RBODY "
-                    "main node beside the joint's Lagrange conditions (an "
-                    "incompatible kinematic condition: starter WARNING "
-                    "312)"), None
+        held = _held_dofs(label, axis)
+        for cond in _body_conditions(state, pid_nodes[pid]):
+            cls = _condition_class(cond, held, label, axis, driven)
+            if cls == "held":
+                merged.append((label, pid, cond))
+                continue
+            return (f"body {label} (part {pid}) carries {cond.text}, "
+                    + _class_why(cls, cond, label, axis, driven)), None
     return None, JointScrewPlan(
         screw=s, a_pid=a, b_pid=b, axis=axis,
         r=(float(r[0]), float(r[1]), float(r[2])), length=l13, drive=pm,
-        split_inter_ids=split)
+        split_inter_ids=split, merged=merged,
+        body_nodes=frozenset(pid_nodes[a] | pid_nodes[b]))
 
 
 def _resolve_joint_screws(state: ConversionState) -> List[JointScrewPlan]:
@@ -446,14 +557,103 @@ def screw_cmo_skip_pids(state: ConversionState) -> Set[int]:
 
 def screw_drives(state: ConversionState) -> List[PrescribedMotionRigid]:
     """The rotation drives the joint section re-writes as /IMPVEL/LAGMUL (the
-    imposed-motion section skips them, by identity)."""
-    return [plan.drive for plan in (state.joint_screw_plan or [])]
+    imposed-motion section skips them, by identity). An undriven screw (round
+    8, B8 q-i) has none."""
+    return [plan.drive for plan in (state.joint_screw_plan or [])
+            if plan.drive is not None]
 
 
-def screw_splits(state: ConversionState, inter_id: int) -> List[JointScrewPlan]:
-    """The converted screws whose A-B pair the all-parts self-contact
-    *inter_id* must split out."""
-    return [plan for plan in (state.joint_screw_plan or [])
+def screw_merged_members(state: ConversionState) -> Set[int]:
+    """The element nodes of both bodies of every converted screw (round 8, B8
+    q-ii): every standard code the deck states on one of them was classified
+    by refusal 11 and is HELD by the joint (any other code refused it), so
+    the writers that re-point a member's code onto the body's /RBODY main
+    node - ``_make_bcs`` and the ``*NODE`` TC/RC pass (which also carries the
+    ``*CONSTRAINED_GLOBAL`` cells) - write it nowhere. The ONE predicate
+    both read, at the member, before the re-point (a member, not the main
+    node: a node the classification did not see keeps today's card)."""
+    return {n for plan in (state.joint_screw_plan or [])
+            for n in plan.body_nodes}
+
+
+def screw_pad_pids(state: ConversionState) -> Dict[int, JointScrewPlan]:
+    """Part A of every converted UNDRIVEN screw (round 8, B8 q-i) -> its
+    plan: the /RBODY producer pads that body's J row (:func:`screw_pad`)."""
+    return {plan.a_pid: plan for plan in (state.joint_screw_plan or [])
+            if plan.drive is None}
+
+
+def screw_pad(state: ConversionState, plan: JointScrewPlan, nodes: Set[int],
+              j_vals: Tuple[float, ...],
+              lumped: Tuple[Dict[int, float], Dict[int, float]],
+              icog4: bool) -> Tuple[float, ...]:
+    """A's J row plus the transverse inertia pad of an UNDRIVEN screw (round
+    8, B8 q-i), recorded on the plan for the joint's sentence.
+
+    OpenRadioss's Lagrange solver corrects a rotational acceleration with
+    ONE scalar per node, ``AR = AR - XLL / IN`` (``lag_mult_solv.F:393``),
+    and the starter sets a rigid body's main-node ``IN`` to its SMALLEST
+    principal inertia (``inirby.F:838``). Without a drive the rack turns A
+    about the screw axis, so the scalar must be A's inertia about THAT axis:
+    ``dJ = I_axis`` is added to the two diagonal J cells normal to it (the
+    J cells ADD to the tensor ``inirby.F`` assembles). ``I_axis`` is the
+    starter's tensor on the axis: the point masses of the lumped masses about
+    their centre of mass (``rbody._body_tensor``), the nodal ``IN`` and the
+    J cells already in the row (A2's ``-SUM(IN)`` included) - or the J
+    cells alone under ``*PART_INERTIA`` (ICoG 4: the deck's tensor). A's
+    transverse rotations are held by its ``/BCS/LAGMUL``, so the pad acts on
+    locked DOFs only."""
+    from ..lumping import _sym3_eigen
+    from .rbody import _body_tensor           # local: rbody imports us
+    mass_by_node, in_by_node = lumped
+    if icog4:
+        t = [[0.0] * 3 for _ in range(3)]
+    else:
+        t = _body_tensor(state, nodes, mass_by_node)
+        sum_in = math.fsum(in_by_node.get(n, 0.0) for n in sorted(nodes))
+        for i in range(3):
+            t[i][i] += sum_in
+    for i in range(3):
+        t[i][i] += j_vals[i]
+    for (p, q), v in (((0, 1), j_vals[3]), ((1, 2), j_vals[4]),
+                      ((0, 2), j_vals[5])):
+        t[p][q] += v
+        t[q][p] += v
+    k = plan.axis
+    i_axis = t[k][k]
+    pad = (i_axis if k != 0 else 0.0, i_axis if k != 1 else 0.0,
+           i_axis if k != 2 else 0.0)
+    for i in range(3):
+        t[i][i] += pad[i]
+    plan.pad = pad
+    plan.i_axis = i_axis
+    plan.padded_min = min(_sym3_eigen(t)[0])
+    return (j_vals[0] + pad[0], j_vals[1] + pad[1], j_vals[2] + pad[2],
+            j_vals[3], j_vals[4], j_vals[5])
+
+
+class LagrangePair(NamedTuple):
+    """Two rigid bodies whose RELATIVE motion an emitted Lagrange set
+    prescribes (round 8, B8 q-iii): *tag* names the split's surfaces and
+    interface, *label* the joint in the warning."""
+    a_pid: int
+    b_pid: int
+    tag: str
+    label: str
+
+
+def lagrange_held_pairs(state: ConversionState,
+                        inter_id: int) -> List[LagrangePair]:
+    """The rigid pairs the all-parts self-contact *inter_id* must split out
+    (round 8, B8 q-iii; round 7's ``screw_splits`` predicate, moved here): a
+    contact force on a rigid body whose main node a Lagrange condition holds
+    is cancelled on the main node alone (RBYVIT, ``resol.F:7572``, runs
+    before LAG_MULT, ``:7901``). Today the converted screws' pairs only; a
+    future ``/GJOINT`` gear / pulley / rack-and-pinion or an ``/MPC`` on
+    rigid nodes inherits the split by registering its pairs here."""
+    return [LagrangePair(plan.a_pid, plan.b_pid, f"screw_{plan.screw.jid}",
+                         f"*CONSTRAINED_JOINT_SCREW {plan.screw.jid}")
+            for plan in (state.joint_screw_plan or [])
             if inter_id in plan.split_inter_ids]
 
 
@@ -470,7 +670,8 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
       Rot 111 - it may only slide along the axis;
     * ``/BCS/LAGMUL`` on A's main: Tra 000, Rot '1' except '0' on the axis -
       A may only spin about it;
-    * the drive: ``/IMPVEL/LAGMUL`` Dir XX / YY / ZZ on A's main, on the
+    * the drive (none on an undriven screw, round 8):
+      ``/IMPVEL/LAGMUL`` Dir XX / YY / ZZ on A's main, on the
       differentiated displacement curve (VAD 2) or the deck's own velocity
       curve (VAD 0), ``Ascale_x 1`` / ``Fscale_y SF`` (the radioss110 card
       the /BEGIN 2022 deck reads; ``read_impvel_lagmul.F:160-161``, zeros
@@ -505,30 +706,34 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
                   "#  Tra rot   skew_ID  grnod_ID",
                   f"   000 {_code(k, '0')}{_i(0)}{_i(plan.a_ind_grnod)}", HDR]
         drive_clause = ""
-        if pm.vad == 2:
-            fid = state.next_curve_id()
-            pts = state.curves[pm.lcid].pts
-            deriv = screw_drive_derivative(pts)
-            w = min(_RAMP, 0.01 * min(pts[i + 1][0] - pts[i][0]
-                                      for i in range(len(pts) - 1)))
-            lines += _emit_drive_funct(
-                fid, f"SCREW_{jid}_dTHETA_dt_{pm.lcid}", deriv)
-            drive_clause = (
-                f"; the drive's VAD 2 displacement curve {pm.lcid} is "
-                f"DIFFERENTIATED into /FUNCT/{fid} (slope steps as {w:g}-wide "
-                "ramps), so a slope corner at the termination time moves the "
-                "last cycle's kinetic energy (EXP_SC_JOINT_SCREW: the 250 -> "
-                "170 rad/s corner sits exactly at t_end 0.1; one printed cycle "
-                "earlier the KE reads +0.17 % where the last reads -16.51 %)")
-        else:
-            fid = pm.lcid
-        imp = state.next_id()
-        lines += [f"/IMPVEL/LAGMUL/{imp}", f"SCREW_{jid}_drive",
-                  "#  fct_IDT       Dir   Skew_ID             grnd_ID",
-                  f"{_i(fid)}{_DIRS[k]:>10}{_i(0)}{'':10}"
-                  f"{_i(plan.a_ind_grnod)}",
-                  "#           Ascale_x            Fscale_y",
-                  f"{_f(1.0)}{_f(pm.sf)}", HDR]
+        # an UNDRIVEN screw (round 8, B8 q-i) writes no drive and no /FUNCT,
+        # and draws no id for them
+        if pm is not None:
+            if pm.vad == 2:
+                fid = state.next_curve_id()
+                pts = state.curves[pm.lcid].pts
+                deriv = screw_drive_derivative(pts)
+                w = min(_RAMP, 0.01 * min(pts[i + 1][0] - pts[i][0]
+                                          for i in range(len(pts) - 1)))
+                lines += _emit_drive_funct(
+                    fid, f"SCREW_{jid}_dTHETA_dt_{pm.lcid}", deriv)
+                drive_clause = (
+                    f"; the drive's VAD 2 displacement curve {pm.lcid} is "
+                    f"DIFFERENTIATED into /FUNCT/{fid} (slope steps as "
+                    f"{w:g}-wide ramps), so a slope corner at the termination "
+                    "time moves the last cycle's kinetic energy "
+                    "(EXP_SC_JOINT_SCREW: the 250 -> 170 rad/s corner sits "
+                    "exactly at t_end 0.1; one printed cycle earlier the KE "
+                    "reads +0.17 % where the last reads -16.51 %)")
+            else:
+                fid = pm.lcid
+            imp = state.next_id()
+            lines += [f"/IMPVEL/LAGMUL/{imp}", f"SCREW_{jid}_drive",
+                      "#  fct_IDT       Dir   Skew_ID             grnd_ID",
+                      f"{_i(fid)}{_DIRS[k]:>10}{_i(0)}{'':10}"
+                      f"{_i(plan.a_ind_grnod)}",
+                      "#           Ascale_x            Fscale_y",
+                      f"{_f(1.0)}{_f(pm.sf)}", HDR]
         gid = state.next_id()
         fs = -1.0 / s.parm
         lines += [f"/GJOINT/RACK/{gid}", f"SCREW_{jid}",
@@ -547,6 +752,15 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
                   f"{_f(0.0)}{_f(0.0)}{_vec_row((0.0, 0.0, 0.0))}", HDR]
         state.skipped_keywords.remove(s.keyword)
         rr = "(" + ", ".join(f"{v:g}" for v in plan.r) + ")"
+        rewritten = ("the bodies' *MAT_RIGID constraints and the drive are "
+                     "re-written as /BCS/LAGMUL and /IMPVEL/LAGMUL"
+                     if pm is not None else
+                     "the bodies' *MAT_RIGID constraints are re-written as "
+                     "/BCS/LAGMUL")
+        work = (" On this path EXT-WORK prints 0 and the energy error "
+                "0.0 % (LAG_MULT runs after the REAC* bracket, resol.F:7305 / "
+                ":7386 / :7901): the drive's work is E(t) - E(0) of the global "
+                "energies." if pm is not None else "")
         state.warn(
             f"*CONSTRAINED_JOINT_SCREW {jid} -> /GJOINT/RACK/{gid} (Lagrange "
             f"multipliers): node_ID1 = the spinning body {plan.a_pid}'s main "
@@ -555,9 +769,8 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
             "inertia 1e-6; its two massless secondaries sit 0.1 x |N1N3| off "
             "the axis - a geometric convention) that translates with "
             f"{plan.a_pid} along the screw axis {rr}; FscaleV = -1/PARM = "
-            f"{fs:g} (the reader inverts it, hm_read_gjoint.F:221); the "
-            "bodies' *MAT_RIGID constraints and the drive are re-written as "
-            "/BCS/LAGMUL and /IMPVEL/LAGMUL (a standard condition on a "
+            f"{fs:g} (the reader inverts it, hm_read_gjoint.F:221); "
+            f"{rewritten} (a standard condition on a "
             f"Lagrange node is incompatible){drive_clause}. This joint is "
             "EXACT, where LS-DYNA's default joint (no *CONTROL_RIGID: LMF 0) "
             f"is a PENALTY joint that yields (RPS {s.rps:g} is not used): on "
@@ -573,12 +786,60 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
             "printed, with '** ERROR: BCS WITH LAGRANGE MULTIPLIER NOT "
             "ENABLED FOR NSPMD > 1' (lag_mult.F:667-671, the two "
             "/BCS/LAGMUL; the JOINT check at :682-686 would follow) - run "
-            "-np 1 with threads. On this path EXT-WORK prints 0 and the "
-            "energy error "
-            "0.0 % (LAG_MULT runs after the REAC* bracket, resol.F:7305 / "
-            ":7386 / :7901): the drive's work is E(t) - E(0) of the global "
-            "energies.")
+            f"-np 1 with threads.{work}"
+            + ("" if pm is not None else " " + _undriven_sentence(plan)))
+        for label, pid, cond in plan.merged:
+            state.warn(
+                f"*CONSTRAINED_JOINT_SCREW {jid}: {cond.text} on body {label} "
+                f"(part {pid}) acts on DOFs the converted joint already holds "
+                "(its /BCS/LAGMUL and /GJOINT/RACK links): not written - a "
+                "second, standard condition on the Lagrange-held main node is "
+                "starter WARNING 312. MEASURED on EXP_SC_JOINT_SCREW (nt 4): "
+                "such a redundant code moves the result only inside the "
+                "deck's null band (the internal energy at the last fifth "
+                "moves 0 .. +2.59 % under physically empty edits of the "
+                "joint; a kept *BOUNDARY_SPC DOFY -0.07 %, a kept *NODE TC 3 "
+                "+2.57 %).")
     return lines
+
+
+def _undriven_sentence(plan: JointScrewPlan) -> str:
+    """The undriven screw's sentence (round 8, B8 q-i), appended to the rack
+    sentence; the pad's figures come from the /RBODY producer's record."""
+    jid = plan.screw.jid
+    head = (f"*CONSTRAINED_JOINT_SCREW {jid} has NO drive: converted without "
+            "/IMPVEL/LAGMUL - the rack alone ties A's spin to B's travel "
+            "(x_B - x_A = PARM x theta, PARM = x_dot / omega per radian, "
+            "Vol I R17 p.10-65 / Figure 10-29). ")
+    if plan.pad is None:
+        return head + (
+            f"A's /RBODY (part {plan.a_pid}) was not written by the part "
+            "producer, so no inertia pad was added: OpenRadioss's Lagrange "
+            "solver divides a rotational acceleration by the main node's IN "
+            "= the smallest principal inertia (inirby.F:838; "
+            "lag_mult_solv.F:393), which then stands in for the screw-axis "
+            "inertia.")
+    d_j = max(plan.pad)
+    below = ""
+    if plan.padded_min < plan.i_axis * (1.0 - 1e-6):
+        pct = 100.0 * (plan.i_axis - plan.padded_min) / plan.i_axis
+        below = (f", {pct:.3g} % below it: A's products of inertia couple "
+                 "the screw axis to its normals")
+    return head + (
+        f"A's /RBODY gets an added inertia {d_j:g} about the two axes normal "
+        "to the screw axis, so that its smallest principal inertia is its "
+        f"screw-axis inertia {plan.i_axis:g} (now {plan.padded_min:g}{below}): "
+        "OpenRadioss's Lagrange solver divides a rotational acceleration by "
+        "ONE scalar, the main node's IN = the smallest principal inertia "
+        "(inirby.F:838; lag_mult_solv.F:393), and A's transverse rotations "
+        "are held by /BCS/LAGMUL, so the pad acts on locked DOFs only. "
+        "MEASURED on EXP_SC_JOINT_SCREW without its drive (nt 4): a free "
+        "spin of 150 rad/s projects to 147.716 rad/s, the closed form "
+        "(145.989 rad/s = -1.17 % without the pad, the smallest principal "
+        "inertia 1110.2 standing in for 1972.3); under a constant axial load "
+        "pair the spin follows its closed form within 0.05 % before contact "
+        "with a 0.0 % energy error (+75.5 % too fast and a +75.6 % energy "
+        "error behind NORMAL TERMINATION without the pad).")
 
 
 def _emit_drive_funct(fid: int, title: str,

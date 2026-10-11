@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Dict, List, Optional, Tuple
-from ..state import ConversionState
+from ..state import ConversionState, EngineSegment
 from .beams import _resolve_integration_beams
 from .common import HDR, _SOLVINFO_HINT, _ams_is_emitted, _f, _i
 from .materials import (
@@ -80,6 +80,7 @@ from .monvol import _make_monvols, _resolve_airbags
 from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
+    _bolt_end_rigid_members,
     _make_force_transducers,
     _make_refused_contact_notes,
     _make_general_interfaces,
@@ -88,6 +89,7 @@ from .contacts import (
     _make_tiebreak_interfaces,
     _make_spotweld_interfaces,
     _make_type25_interfaces,
+    _make_deferred_implicit_stub,
     _recipe_active,
     _warn_beam_contact_secondary_unused,
 )
@@ -133,6 +135,7 @@ from .loads import (
     _resolve_constrained_globals,
     _synthesize_spotweld_second_nodes,
     _apply_mass_weighted_rbody_inertia,
+    _merge_mass_weighted_pairs,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
@@ -145,7 +148,9 @@ from .blast_ale import (
     _make_ebcs,
     _make_fsi_coupling,
     _make_inivol_notes,
+    _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
+    _resolve_shell_in_solid,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -261,7 +266,22 @@ def _make_engine_header(state: ConversionState) -> List[str]:
     import re as _re
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     safe_title = _re.sub(r"[^A-Za-z0-9_-]", "_", state.model_title)[:40]
-    return [f"/RUN/{safe_title}/1", f"{endtim:.6G}", "#"]
+    # round 8, B3 (h.2): one engine file per IMFLAG segment - its own run
+    # number (the FILE number, get_file_name_info.F:63) and its own end
+    seg = state.engine_segment
+    run = seg.run if seg is not None else 1
+    stop = seg.t_stop if seg is not None else endtim
+    return [f"/RUN/{safe_title}/{run}", f"{stop:.6G}", "#"]
+
+
+def _engine_implicit(state: ConversionState) -> bool:
+    """The method of the engine file BEING BUILT (round 8, B3 h.2): the
+    segment's under ``--imflag-curve-restart``, else the deck's. Every
+    ENGINE-side read of ``state.is_implicit`` goes through it; the starter
+    keeps ``state.is_implicit`` (the starter is the implicit one
+    throughout)."""
+    seg = state.engine_segment
+    return seg.implicit if seg is not None else state.is_implicit
 
 
 #: *CONTROL_TERMINATION ENDTIM at or above this is treated as a SENTINEL ("run
@@ -326,8 +346,9 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                # 118 *DATABASE_BNDOUT decks in the corpus carry no
                # *BOUNDARY_PRESCRIBED_MOTION at all.
                #
-               # build_starter runs before build_engine (k2rad/__init__.py:486),
-               # so all three registries are filled by the time this is read.
+               # convert() (k2rad/__init__.py, step 3) calls build_starter before
+               # build_engines, so all three registries are filled by the time
+               # this is read.
                #   BNDOUT  -> /TH/NODE 'TH_NODE_BNDOUT' on the driven nodes
                #   RBDOUT  -> /TH/RBODY over every converted rigid body
                #   NODFOR  -> the interval of the *DATABASE_NODAL_FORCE_GROUP
@@ -1164,8 +1185,12 @@ def _warn_zero_tolerance_ectol(state: ConversionState, sol) -> None:
         "off its reference - a named regression, larger mid-run); ie_shell "
         "ERROR (TIMESTEP LIMIT at cycle 4) -> NORMAL in 92 cycles, but at IE "
         "-99.87 % and KE 0 against the reference's 149.9 - a STATUS change "
-        "only (its IMFLAG -9 implicit/explicit switching curve is not "
-        "converted). --no-zero-tolerance-ectol restores the force default.")
+        "only, measured on the ONE implicit engine file that "
+        "--no-imflag-curve-restart still writes; by default (round 8, h.3) "
+        "its IMFLAG -9 implicit/explicit switching curve converts as a "
+        "two-engine-file chain (18 implicit + 11 127 explicit cycles, END IE "
+        "-4.54 %, RMS IE 12.07 % of the LS peak over 320 LS times). "
+        "--no-zero-tolerance-ectol restores the force default.")
 
 
 def _make_engine_implicit(state: ConversionState) -> List[str]:
@@ -1177,7 +1202,12 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # modal recipe ignores those cells exactly as /IMPL/DT/2 does. Each warning
     # is told which shape it is on, so neither names a card the deck will not
     # carry.
-    if state.is_modal or state.is_implicit:
+    # round 8, B3 (h.2): under --imflag-curve-restart the warnings run on the
+    # FIRST implicit segment only (once per deck), and an explicit segment
+    # gets no /IMPL block
+    seg = state.engine_segment
+    if (state.is_modal or state.is_implicit) and (
+            seg is None or seg.first_implicit):
         if _arclength_requested(state):
             _warn_arclength(state, modal=state.is_modal)
         _warn_implicit_auto_drops(state, modal=state.is_modal)
@@ -1186,7 +1216,7 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # Normal-modes (/EIG) → one-shot linear eigensolve, not the QSTAT/NONLIN
         # time-marching engine below.
         return _make_engine_modal(state)
-    if not state.is_implicit:
+    if not _engine_implicit(state):
         return []
     dyn  = state.ctrl_implicit_dyn
     auto = state.ctrl_implicit_auto
@@ -1531,6 +1561,38 @@ def _warn_orphan_elements(state: ConversionState) -> None:
         "delete the elements.")
 
 
+def _sample_implicit_smooth_curves(state: ConversionState) -> None:
+    """R14 triage round 8, B2: on an IMPLICIT, non-modal deck every
+    well-formed ``*DEFINE_CURVE_SMOOTH`` (``state.smooth_curve_params``) is
+    re-sampled as a sine ramp (``handlers.sampled_smooth_points``) and loses
+    its ``/FUNCT_SMOOTH`` flag, so every emitter (``_make_functions``,
+    ``_emit_funct``, the FGEO BIRTH copy) writes a plain ``/FUNCT`` under the
+    same id: the implicit imposed-motion path reads a curve's points
+    piecewise-linearly whatever the flag (``fv_imp0.F:209`` -> ``:333``
+    DINTERI). Explicit and modal decks, a degenerate shape and
+    ``--no-implicit-smooth-curve-sampling`` keep today's /FUNCT_SMOOTH.
+    Idempotent (``state.smooth_curves_sampled``)."""
+    if state.smooth_curves_sampled:
+        return
+    state.smooth_curves_sampled = True
+    if (not state.options.implicit_smooth_curve_sampling
+            or not state.is_implicit or state.is_modal):
+        return
+    from ..handlers import sampled_smooth_points, smooth_sampling_sentence
+    term = state.ctrl_termination
+    endtim = term.endtim if term is not None else None
+    for lcid in sorted(state.funct_smooth_ids):     # sorted() = a copy
+        params = state.smooth_curve_params.get(lcid)
+        curve = state.curves.get(lcid)
+        if params is None or curve is None:
+            continue
+        tstart, trise, tend, vmax = params
+        curve.pts = sampled_smooth_points(tstart, trise, tend, vmax, endtim)
+        state.funct_smooth_ids.discard(lcid)
+        state.warn(smooth_sampling_sentence(
+            lcid, len(curve.pts), vmax * (tend - tstart - trise)))
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
     # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
     # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
@@ -1564,6 +1626,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # containers, and the tet10->tet4 prune (further down) mutates node_sets.
     _expand_set_ranges_and_generals(state)
     _flatten_set_adds(state)
+    # R14 triage round 8, B2: an implicit deck's *DEFINE_CURVE_SMOOTH -> a
+    # sampled sine /FUNCT, before any emitter reads funct_smooth_ids.
+    _sample_implicit_smooth_curves(state)
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -1937,6 +2002,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # (which splits the pair out of an all-parts self-contact). Draws no id.
     _resolve_joint_screws(state)
 
+    # *CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 under
+    # --shell-in-solid-coupling (round 8, B10): the ONE decision, BEFORE the
+    # materials (the void density cells) and the parts (a copy MID). Draws
+    # no id unless a void host shares its *MAT_NULL; empty by default.
+    _resolve_shell_in_solid(state)
+
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
     # namespaces and Radioss in one. Report the overlap here rather than letting
@@ -2003,10 +2074,37 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # carries the state plus the three values threaded across sections
     # (rbody_info, rigid_nodes, the pre-built rbody_lines) and the progress
     # reporter. Output is byte-identical to the previous fixed sequence.
-    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep)
+    # round 8, A2 (l)-2 (--bolt-rigid-contact, default ON): the members of a
+    # rigid body holding an end node of an *INITIAL_AXIAL_FORCE_BEAM bolt stay
+    # on every PENALTY contact's secondary side - the three builders below
+    # read ctx.contact_rigid_nodes; the TYPE2 family and the force
+    # transducers keep the full rigid set (decision D5). Computed once, after
+    # the rigid bodies are merged, before any interface is built.
+    state.bolt_rigid_keep = {}
+    state.bolt_kept_by_side = {}
+    # --mass-weighted-inivel's one-pair-per-body record is a PER-BUILD
+    # registry (the round-8 post-review verification): a second build of the
+    # same state must emit its own first pair, not sum into the last build's
+    state.mass_weighted_pairs = {}
+    contact_rigid_nodes = rigid_nodes
+    if state.options.bolt_rigid_contact:
+        state.bolt_rigid_keep = _bolt_end_rigid_members(state, rbody_info)
+        if state.bolt_rigid_keep:
+            contact_rigid_nodes = rigid_nodes - set(state.bolt_rigid_keep)
+    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep,
+                          contact_rigid_nodes)
     lines: List[str] = []
+    ctx.lines = lines
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
+    # --mass-weighted-inivel: ONE /INIVEL/TRA + /ROT pair per /RBODY main
+    # node - a body partly covered by several velocity groups / cards gets
+    # the SUM of its momentum shares in the first pair written on it (the
+    # starter overwrites a node's velocity card by card; round-8 post-review
+    # verification). A post-pass because the shares can come from three
+    # sections; content-asserted, it rewrites two rows per such body and
+    # draws no id. A no-op without the flag.
+    _merge_mass_weighted_pairs(state, lines)
     # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
     # sections re-pointed (round 6, A7) - since round 7 only where the
     # *MAT_RIGID producer did not already write it by default (A2; the
@@ -2231,8 +2329,9 @@ def _warn_duplicate_th_group_ids(state: ConversionState,
     # Same scan, second consumer: build_engine's /TFILE fallback needs to know
     # whether ANY /TH group reached the deck, and this is the one place that
     # counts what was actually emitted rather than what each builder intended.
-    # build_starter runs before build_engine (k2rad/__init__.py:470-473), so
-    # the count is set by the time _make_engine_output reads it.
+    # convert() (k2rad/__init__.py, step 3) calls build_starter before
+    # build_engines, so the count is set by the time _make_engine_output
+    # reads it.
     state.th_groups_emitted = sum(len(t) for t in seen.values())
     for tid, types in sorted(seen.items()):
         if len(types) > 1:
@@ -2830,14 +2929,24 @@ class _StarterContext:
     """Values threaded across the starter section builders (see
     _starter_section_registry). ``rep(frac, label)`` forwards to the progress
     callback."""
-    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep")
+    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep",
+                 "contact_rigid_nodes", "lines")
 
-    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep):
+    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep,
+                 contact_rigid_nodes=None):
         self.state = state
         self.rbody_info = rbody_info
         self.rigid_nodes = rigid_nodes
         self.rbody_lines = rbody_lines
         self.rep = rep
+        # round 8, A2 (l)-2: the rigid set the PENALTY contact builders filter
+        # a secondary side by (rigid_nodes minus the bolt-end bodies' members)
+        self.contact_rigid_nodes = (rigid_nodes if contact_rigid_nodes is None
+                                    else contact_rigid_nodes)
+        # round 8, A5: the starter lines accumulated so far (build_starter
+        # binds its list here) - the adaptive spring token rewrites the
+        # token /PROP MASS cells the connector sections emitted earlier
+        self.lines = None
 
 
 def _progress_marker(ctx: "_StarterContext", frac: float, label: str) -> List[str]:
@@ -2906,9 +3015,17 @@ def _starter_section_registry():
         # LS-DYNA-side) ids away from the state.next_id() stream the surfaces
         # below draw from.
         ("frictions",         lambda c: _make_frictions(c.state)),
-        ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
-        ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
-        ("type25_interfaces", lambda c: _make_type25_interfaces(c.state, c.rigid_nodes)),
+        ("interfaces",        lambda c: _make_interfaces(c.state,
+                                                     c.contact_rigid_nodes)),
+        ("general_interfaces", lambda c: _make_general_interfaces(
+            c.state, c.contact_rigid_nodes)),
+        ("type25_interfaces", lambda c: _make_type25_interfaces(
+            c.state, c.contact_rigid_nodes)),
+        # Round 8, B6: --skip-implicit-stub-with-type25 keyed on the WRITTEN
+        # TYPE25 set - right after the TYPE25 writer, which records it. A
+        # no-op that draws no id unless the flag deferred the stub.
+        ("deferred_implicit_stub", lambda c: _make_deferred_implicit_stub(
+            c.state, c.contact_rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
         ("tiebreak_interfaces",
                               lambda c: _make_tiebreak_interfaces(c.state, c.rigid_nodes)),
@@ -2978,6 +3095,10 @@ def _starter_section_registry():
         ("blast_loads",       lambda c: _make_blast_loads(c.state)),
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        # --shell-in-solid-coupling (round 8, B10): the converted cards'
+        # /INTER/TYPE18; empty (no id drawn) by default
+        ("shell_in_solid_coupling",
+                              lambda c: _make_shell_in_solid_coupling(c.state)),
         # *CONSTRAINED_SHELL_IN_SOLID: ONE named warning per deck (round 7,
         # B5); writes no card and draws no id - the keyword stays skipped.
         ("shell_in_solid_notes",
@@ -3032,7 +3153,10 @@ def _starter_section_registry():
         ("joints",            lambda c: _make_joints(c.state, c.rigid_nodes,
                                                      set(c.rbody_info))),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
-        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
+        # round 8, A5: the adaptive spring token runs first inside it and
+        # rewrites the token /PROP MASS cells already in c.lines
+        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes,
+                                                           c.lines)),
         ("xref",              lambda c: _make_xref(c.state)),
         # /EREF is the per-ELEMENT twin of /XREF. AFTER it, because the
         # two are mutually exclusive per node (starter ERROR 1098) and
@@ -3241,7 +3365,7 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     the value — it carries TSLIMT, or the number the user passed.
     """
     ts = state.ctrl_timestep
-    if state.is_implicit or state.is_modal:
+    if _engine_implicit(state) or state.is_modal:
         return []
     explicit = state.options.dt_del
     tmin = None
@@ -3305,7 +3429,7 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     DT2MS >= 0 means no mass scaling, but TSSFAC still applies and is handled by
     _make_engine_timestep_scale below — it used to be dropped on the floor."""
     ts = state.ctrl_timestep
-    if ts is None or state.is_implicit or state.is_modal:
+    if ts is None or _engine_implicit(state) or state.is_modal:
         return []
     if ts.dt2ms >= 0.0:
         return _make_engine_timestep_scale(state, ts)
@@ -3607,7 +3731,7 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
     tsf = ct.tsf if ct is not None else 0.0
     want_dt_therm = (state.ctrl_solution_soln == 1
                      and _thermal_solve_active(state)
-                     and not state.is_implicit and not state.is_modal)
+                     and not _engine_implicit(state) and not state.is_modal)
     if state.ctrl_solution_soln == 1 and not want_dt_therm:
         state.warn(
             "*CONTROL_SOLUTION SOLN=1 selects a THERMAL-ONLY analysis, and "
@@ -3626,7 +3750,7 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
                "'** THERMAL ANALYSIS **' block shows plausible imposed / "
                "convection / radiation heat beside a HEAT STORED of exactly "
                "zero, and only that last number tells the story"
-               if state.is_implicit or state.is_modal else
+               if _engine_implicit(state) or state.is_modal else
                "this deck arms no thermal solve: /DT/THERM without a "
                "/HEAT/MAT and a temperature-moving card would freeze the whole "
                "model and integrate nothing (GLOB_THERM%ITHERM_FE gates every "
@@ -3718,7 +3842,7 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
         # HEAT_STORED. So THEACCFACT scales sources that never reach a node:
         # an emitted-and-inert card, the #122 case. (The #129 lesson: a true,
         # measured conclusion resting on a false premise still misinforms.)
-        if _thermal_solve_active(state) and not state.is_implicit \
+        if _thermal_solve_active(state) and not _engine_implicit(state) \
                 and not state.is_modal:
             lines += [
                 "#-  THERMAL SPEED-UP (*CONTROL_THERMAL_SOLVER TSF)",
@@ -3755,7 +3879,7 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
                    "nodal accumulation that resol.F:6547's 'GOTO 111' skips, "
                    "by jumping over the block that holds the single CALL "
                    "TEMPUR at :6736 — so the card would be emitted-and-inert"
-                   if state.is_implicit or state.is_modal else
+                   if _engine_implicit(state) or state.is_modal else
                    "this deck arms no thermal solve — no material gets a "
                    "/HEAT/MAT and/or no temperature-moving card is emitted, "
                    "so there is nothing for it to speed up")
@@ -3813,12 +3937,18 @@ _IMFLAG_TEXT_ONLY = {
 }
 
 
-def _warn_imflag(state: ConversionState) -> None:
+def _warn_imflag(state: ConversionState,
+                 restart: Optional[List[EngineSegment]] = None) -> None:
     """``*CONTROL_IMPLICIT_GENERAL`` IMFLAG < 0 (a method-switching curve) and
     the IMFLAG 2 / 4 / 5 / 6 forms, named (round 7, A5 (iii)). Called ONCE
-    from :func:`build_engine` - not from ``_make_engine_implicit``, whose
-    modal early return would hide it (a warning below an early return covers
-    one branch). 0 bytes: the deck is emitted implicit throughout either way.
+    from :func:`build_engines` / :func:`build_engine` - not from
+    ``_make_engine_implicit``, whose modal early return would hide it (a
+    warning below an early return covers one branch). 0 bytes. Round 8 (B3
+    h.2): *restart* = the engine files ``--imflag-curve-restart`` writes
+    (None: computed here; ``[]`` from ``build_engine``, the single-file
+    entry), and the sentence names them and their run order; without them
+    the deck is emitted implicit throughout and the sentence names the
+    opt-in.
     """
     g = state.ctrl_implicit_gen
     if g is None:
@@ -3858,6 +3988,25 @@ def _warn_imflag(state: ConversionState) -> None:
     if len(segs) < 2:
         return                     # implicit throughout: nothing is lost
     sched = ", ".join(f"{m} {a:g} -> {b:g}" for a, b, m in segs)
+    if restart is None:
+        restart = imflag_restart_segments(state)
+    if restart:
+        files = ", ".join(
+            f"_{s.run:04d}.rad ({'implicit' if s.implicit else 'explicit'} "
+            f"to {s.t_stop:g}{'' if s.last else ', restart written'})"
+            for s in restart)
+        state.warn(
+            f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} "
+            f"switches the solution method in time ({sched}); " + switch
+            + f", so --imflag-curve-restart wrote {len(restart)} engine "
+            f"files, one per segment: {files}. Run them IN ORDER from ONE "
+            "directory - run k restarts from the <stem>_<k-1>_0001.rst that "
+            "run k-1 wrote (radioss2.F:817-830; every file but the last omits "
+            "/RFILE/OFF for that): run the starter, then <stem>_0001.rad, "
+            "<stem>_0002.rad and so on, each under its own name; never run "
+            "a renamed copy. The starter is the implicit one "
+            "throughout. " + _IMFLAG_RESTART_MEASURED)
+        return
     state.warn(
         f"*CONTROL_IMPLICIT_GENERAL IMFLAG={imflag}: curve {lcid} switches "
         f"the solution method in time ({sched}); LS-DYNA switches inside one "
@@ -3867,14 +4016,108 @@ def _warn_imflag(state: ConversionState) -> None:
         "the released strip does not vibrate - internal energy -1.52 / -2.36 "
         "/ -99.48 / -98.77 / -99.87 % against LS-DYNA at the fifths of the "
         "run, kinetic energy 0 against 149.9 at the end - while the run ends "
-        "NORMAL in 92 cycles (a status, not a result).")
+        "NORMAL in 92 cycles (a status, not a result). "
+        "--imflag-curve-restart writes one engine file per segment "
+        "(MEASURED on this deck: END IE -4.54 %, RMS 12.07 / 12.04 % of the "
+        "LS peak; run the files in order).")
+
+
+#: the measured chain of --imflag-curve-restart (round 8, B3 h.2): ie_shell's
+#: two files run in order, scored by the campaign rule (the LAST row of a
+#: printed time)
+_IMFLAG_RESTART_MEASURED = (
+    "MEASURED on implicit/basic-examples/impl-expl-switch/ie_shell.k (nt 4 "
+    "= nt 2): NORMAL in 18 + 11 127 cycles; against LS-DYNA at t 0.025 (its "
+    "last block 0.0249996) internal energy -4.54 %, kinetic +248.43 % (LS's "
+    "end KE is 1.9 % of its 8059.66 peak); internal energy at the fifths of "
+    "t_end 0.025 -1.52 / +1.17 / -41.73 / +84.55 / -4.54 % (the last row of "
+    "each printed time); RMS 12.07 / 12.04 % of the LS peak over the 320 LS "
+    "times 0 < t <= 0.025, where the single implicit file reads 58.96 / "
+    "58.79; energy after the release +0.09 % against LS; the free vibration "
+    "leads LS-DYNA by 0.270 / 0.239 ms at the tip minima. NOT MEASURED on any "
+    "deck: an implicit DYNAMIC segment after an explicit one (ZERO_V is not "
+    "carried; an implicit dynamic restart that carries a velocity is the x "
+    "-3 momentum class of round 6); an implicit STATIC segment after an "
+    "explicit one drops the explicit kinetic energy and re-bases its "
+    "external work (a coupon: KE 316.1 -> 0, EXT-WORK 7096 -> 6783), so the "
+    "last file's energy error cannot see the switch; a chain of more than "
+    "two engine files (every measured chain has two).")
+
+
+def imflag_restart_segments(state: ConversionState) -> List[EngineSegment]:
+    """The engine files of ``--imflag-curve-restart`` (round 8, B3 h.2), or
+    ``[]`` when its rule does not fire: the flag on, an implicit non-modal
+    deck, ``*CONTROL_IMPLICIT_GENERAL`` IMFLAG < 0 whose curve exists, and
+    ``imflag_segments`` returning two or more segments that are not all
+    explicit. The curve's points are already scaled (SFA / OFFA at parse
+    time), so the boundaries are the scaled abscissae."""
+    if (not state.options.imflag_curve_restart or state.is_modal
+            or not state.is_implicit):
+        return []
+    g = state.ctrl_implicit_gen
+    if g is None or g.imflag >= 0:
+        return []
+    curve = state.curves.get(-g.imflag)
+    if curve is None or not curve.pts:
+        return []
+    term = state.ctrl_termination
+    endtim = term.endtim if term is not None and term.endtim > 0.0 else \
+        max(p[0] for p in curve.pts)
+    segs = imflag_segments(curve.pts, endtim)
+    if len(segs) < 2 or all(m == "explicit" for _a, _b, m in segs):
+        return []
+    first_impl = next(i for i, s in enumerate(segs) if s[2] == "implicit")
+    return [EngineSegment(run=i + 1, t_stop=b, implicit=(m == "implicit"),
+                          last=(i == len(segs) - 1),
+                          first_implicit=(i == first_impl))
+            for i, (_a, b, m) in enumerate(segs)]
+
+
+def build_engines(state: ConversionState) -> List[str]:
+    """One engine text per run (round 8, B3 h.2): ``[build_engine(state)]``
+    for every deck but an IMFLAG < 0 one under ``--imflag-curve-restart``,
+    which gets one file per method segment, in run order. A warning the
+    per-file builders repeat is kept once."""
+    _warn_imflag(state)
+    segs = imflag_restart_segments(state)
+    if not segs:
+        return [_build_engine_text(state)]
+    w0 = len(state.warnings)
+    out: List[str] = []
+    for seg in segs:
+        state.engine_segment = seg
+        try:
+            out.append(_build_engine_text(state))
+        finally:
+            state.engine_segment = None
+    seen = set(state.warnings[:w0])
+    kept: List[str] = []
+    for w in state.warnings[w0:]:
+        if w not in seen:
+            seen.add(w)
+            kept.append(w)
+    state.warnings[w0:] = kept
+    return out
 
 
 def build_engine(state: ConversionState) -> str:
-    _warn_imflag(state)
+    """The ONE engine file (today's entry for its direct callers): the
+    IMFLAG warning and the engine text, whatever --imflag-curve-restart
+    says (``build_engines`` is what ``convert`` uses)."""
+    _warn_imflag(state, [])
+    return _build_engine_text(state)
+
+
+def _build_engine_text(state: ConversionState) -> str:
+    """The engine text of the file being built (``state.engine_segment``
+    names the IMFLAG segment under --imflag-curve-restart, else None)."""
+    seg = state.engine_segment
+    not_last = seg is not None and not seg.last
     sections = [
         _make_engine_header(state),
-        _make_engine_restart(state),
+        # round 8, B3 (h.2): every file but the last keeps its restart file -
+        # run k+1 restarts from the .rst run k writes (radioss2.F:817-830)
+        [] if not_last else _make_engine_restart(state),
         # /PARITH is a global run flag like /RFILE, and is emitted ONLY when
         # the deck carries a *CONTROL_PARALLEL — see _make_engine_parith for
         # why the unconditional /PARITH/OFF dyna2rad writes is not neutral.
@@ -3886,7 +4129,8 @@ def build_engine(state: ConversionState) -> str:
         # by build_starter, which k2rad/__init__.py runs BEFORE build_engine,
         # and because check_dynain.F re-parses this file from inside the
         # STARTER — see _make_engine_dynain for the two measured traps.
-        _make_engine_dynain(state),
+        # Round 8, B3 (h.2): a dynain belongs to the END state, the last file.
+        [] if not_last else _make_engine_dynain(state),
         _make_engine_timestep(state),
         # /DT/THERM is a /DT sub-card, so it sits with its siblings — and it
         # must run AFTER _make_engine_timestep, which is what decides whether

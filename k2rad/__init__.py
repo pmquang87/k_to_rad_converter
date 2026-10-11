@@ -20,11 +20,12 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
-from .state import ConversionState, ContactAutoSingle, ConvertOptions
-from .writer.common import AUTO_IMPLICIT_STUB_TITLE, SHELL_FORMULATIONS
-from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
+from .state import ConversionState, ConvertOptions
+from .writer.common import SHELL_FORMULATIONS
+from .writer import (build_starter, build_engines, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
-                     deformable_deformable_inter_ids, _recipe_active)
+                     deformable_deformable_inter_ids, _recipe_active,
+                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -94,52 +95,26 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # outside what OpenRadioss SPH supports, and every SPH deck in the
         # corpus is explicit.
         return
-    inter_id = state.next_id()
-    state.contacts_single.append(
-        ContactAutoSingle(
-            inter_id=inter_id,
-            title=AUTO_IMPLICIT_STUB_TITLE,
-            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
-            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
-            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
-            # stated Inacti = 1 here to dodge starter ERROR 611 on
-            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
-            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
-            # initially penetrating secondary node for the whole run, not just
-            # the ones that cannot be depenetrated. On
-            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
-            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
-            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
-            # putting Inacti back to 5 restored the 218-cycle run exactly.
-            # ERROR 611 is cleared by the Fpenmax cell that
-            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
-            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
-            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
-            # zero-normal ones).
-        )
-    )
-    state.warn(
-        "Implicit model has no contact interface — the OpenRadioss engine "
-        "segfaults in implicit setup without one. Injected an inert all-parts "
-        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
-        "(variable gap: an initially touching node gets a gap reduced to its "
-        "own penetration, so the stub carries no load at t=0) plus "
-        "Fpenmax=0.999999, which "
-        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
-        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
-        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
-        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
-        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
-        "TERMINATION. What the stub does AFTER t=0 depends on the mesh, "
-        "measured on a two-block implicit coupon: with a 0.5 mm physical gap "
-        "(0 nodes deactivated) it resists further interpenetration (I-ENERGY "
-        "1.636E+05 with the block, 4.469 without); on COINCIDENT non-merged "
-        "faces (24 nodes deactivated by Fpenmax) it is fully inert — the run "
-        "is identical to one with the whole /INTER/TYPE7 block deleted, "
-        "I-ENERGY = EXT-WORK matching at every cycle. Fpenmax buys the "
-        "refusal-free start by removing the resistance on exactly the meshes "
-        "that need Fpenmax. Remove the interface if you define real contact."
-    )
+    if state.contacts_type25 and state.options.skip_implicit_stub_with_type25:
+        # R14 triage round 8, B6 (inverted by the round's validation): under
+        # the opt-in the stub is left out only where a TYPE25-route contact
+        # is actually WRITTEN, which the writer knows and this pass does not
+        # - so the decision is deferred to
+        # writer/contacts._make_deferred_implicit_stub (right after the
+        # TYPE25 section), before any id is drawn here. Placed after every
+        # other early return, so it fires exactly where a stub WOULD have
+        # been injected.
+        state.implicit_stub_deferred_for = sorted(
+            c.inter_id for c in state.contacts_type25)
+        return
+    inter_id = add_implicit_contact_stub(state)
+    if state.contacts_type25:
+        # The default since the round-8 validation round: the stub STAYS
+        # beside a TYPE25-route contact (the 4f5b6e8 deck byte for byte);
+        # the sentence names both measured arms and the opt-in.
+        state.warn(_STUB_TYPE25_KEPT_SENTENCE.format(
+            ids=sorted(c.inter_id for c in state.contacts_type25),
+            stub=inter_id))
 
 
 @dataclass
@@ -152,10 +127,44 @@ class ConversionResult:
     # (keyword, reason) for keywords that were recognized — they have a handler,
     # so they are NOT in skipped_keywords — but produced no card in either deck.
     recognized_not_emitted: List[Tuple[str, str]] = field(default_factory=list)
+    # Every engine file in RUN ORDER (round 8, B3 h.2): [engine_path] for
+    # every deck but an IMFLAG < 0 one under --imflag-curve-restart, which
+    # gets <stem>_0001.rad, <stem>_0002.rad, ... (run them in order from one
+    # directory). Never empty.
+    engine_paths: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.engine_paths:
+            self.engine_paths = [self.engine_path]
+
+
+def _stale_engine_files(output_stem: str, n_engine: int) -> List[str]:
+    """The ``<stem>_k.rad`` files (k a 4-digit number > *n_engine*) already
+    beside the output - engine files an earlier, longer
+    ``--imflag-curve-restart`` chain wrote, which this conversion does not
+    overwrite. ``_0000.rad`` is the starter and ``_0001`` .. ``_000N`` are
+    this conversion's own, so only k > N is stale. Sorted by k; names only."""
+    stem = Path(output_stem)
+    folder = stem.parent if str(stem.parent) else Path(".")
+    if not folder.is_dir():
+        return []
+    prefix = stem.name + "_"
+    out = []
+    for p in folder.iterdir():
+        name = p.name
+        if (name.startswith(prefix) and name.endswith(".rad")
+                and len(name) == len(prefix) + 8
+                and name[len(prefix):len(prefix) + 4].isdigit()
+                and int(name[len(prefix):len(prefix) + 4]) > n_engine
+                and p.is_file()):
+            out.append((int(name[len(prefix):len(prefix) + 4]), name))
+    return [name for _k, name in sorted(out)]
 
 
 def _write_conversion_log(output_stem: str, input_path: str,
-                          state: ConversionState) -> Optional[str]:
+                          state: ConversionState,
+                          engine_paths: Optional[List[str]] = None
+                          ) -> Optional[str]:
     """Save the conversion's warnings + skipped keywords to ``<stem>_conversion.log``
     so they survive for later investigation (the console scrolls them away on a
     large deck).  Written only when there is something to record; returns the log
@@ -171,7 +180,10 @@ def _write_conversion_log(output_stem: str, input_path: str,
         "k2rad conversion log",
         f"  generated : {datetime.now().isoformat(timespec='seconds')}",
         f"  input     : {input_path}",
-        f"  output    : {output_stem}_0000.rad / _0001.rad",
+        (f"  output    : {output_stem}_0000.rad / _0001.rad"
+         if not engine_paths or len(engine_paths) < 2 else
+         f"  output    : {output_stem}_0000.rad / "
+         + " / ".join(Path(p).name for p in engine_paths)),
         f"  warnings  : {len(state.warnings)}",
         f"  skipped   : {len(skipped)} unsupported keyword(s)",
         f"  not emitted: {len(not_emitted)} recognized keyword(s) that "
@@ -244,6 +256,21 @@ def convert(
     corotational_orthotropic: bool = True,
     mat_null_pc_mu: bool = True,
     joint_screw_gjoint: bool = True,
+    rigid_local_constraints: bool = True,
+    bcs_union: bool = True,
+    bolt_rigid_contact: bool = True,
+    fixed_curve_columns: bool = True,
+    section_nodal_thickness_mean: bool = True,
+    plane_strain_unit_thickness: bool = True,
+    rigid_element_mass_admas: bool = True,
+    spotweld_dt_mass_scaling: bool = True,
+    adaptive_spring_token: bool = True,
+    imflag0_eigen_explicit: bool = True,
+    implicit_smooth_curve_sampling: bool = True,
+    elastic_fluid_cp_cutoff: bool = True,
+    skip_implicit_stub_with_type25: bool = False,
+    shell_in_solid_coupling: bool = False,
+    imflag_curve_restart: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -688,8 +715,12 @@ def convert(
         **On by default.** MEASURED on plates.mat100 (nt 4): LS-DYNA's weld
         shear plateaus at 20374..20408 = (SIGY/sqrt3)·A = 20405; IE / KE
         history RMS 23.53 / 62.56 -> 8.58 / 26.74 % of the LS peak at 1.107x
-        the cycles (deviation -> match). ``mainboltaexpl`` moves by run
-        sensitivity, not by the yield (its weld shear stays below it).
+        the cycles (deviation -> match). ``mainboltaexpl`` moves too, and
+        not by the yield (its weld shear stays below it): the row was
+        hypersensitive because its bolt collapsed - with
+        ``bolt_rigid_contact`` and ``fixed_curve_columns`` (round 8) a
+        K2 = K3 x (1 - 1e-8) cell moves only the 4th KE digit on 60 of 58550
+        rows.
     spotweld_efail_displacement : bool
         A ``*MAT_SPOTWELD`` ``EFAIL`` below the 1e19 'never' idiom on a card
         with NO resultant failure cell -> ``Ifail 1`` / ``Ifail2 0``
@@ -754,6 +785,229 @@ def convert(
         0.9998x cycles. SMP only (``-np > 1`` stops in its first cycle,
         ``lag_mult.F:667-671``). Anything
         outside the pattern keeps the skip with a named reason.
+    rigid_local_constraints : bool
+        Write a ``*MAT_RIGID`` CMO -1 card as a ``/BCS`` on the
+        ``/RBODY`` main node in the ``/SKEW`` of CON1 (round 8, A1):
+        CON2 is the six-digit local code, CON1 the local system, "fixed
+        in time" (Vol II R17 *MAT_RIGID); LCO plays no part. CON1 0 =
+        the global frame; a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
+        gets a ``/SKEW/FIX`` at its t = 0 axes; a code with a digit >=
+        2 or more than six digits, an undefined CON1 or a degenerate
+        node frame writes NO card and is named. The
+        ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` CMO -1 card shares the
+        helper (a VECTOR CON1 no longer prints a false 'will dangle').
+        ONE skew per node (``hm_read_bcs.F:199-205``, ERROR 148): a
+        ``*NODE`` TC/RC, ``*CONSTRAINED_GLOBAL`` or ``*BOUNDARY_SPC``
+        code on such a main node in another skew is DROPPED and named,
+        for the ``*MAT_RIGID`` and the skewed CNRB card alike. **On by
+        default.** MEASURED at nt 4: mat_rigid.block-slide KE END
+        +100.10 -> +0.05 % (RMS 44.81 -> 0.006 % of the LS peak over
+        500 LS blocks 0 < t <= 0.01), control_timestep.billet-forge IE
+        END -99.97 -> +0.13 % (RMS 41.95 -> 0.056 %, 150 LS blocks),
+        both at 1.000x cycles; reach 3 deck keys on 3 emitted models
+        (the Yaris roof crush giant convert-only). False restores the
+        4f5b6e8 bytes and warnings.
+    bcs_union : bool
+        Write a node that two or more ``*BOUNDARY_SPC`` cards constrain
+        as ONE union per ``(node, skew)`` (round 8, A3 P1): a later
+        card no longer restates a DOF an earlier card fixes, a node
+        whose card adds new DOFs keeps them in a
+        ``BC_<id>_<Tra>_<Rot>`` card, a card left with no node writes
+        no ``/BCS``; and (P2 / P3) the implicit free-node guard writes
+        on a free node only the DOFs its global SPC / *NODE TC/RC
+        ``/BCS`` leaves free
+        (``fix_free_reference_nodes_<Tra>_<Rot>``). LS-DYNA keeps one
+        constraint per node and the starter ORs two ``/BCS``
+        (``hm_read_bcs.F:198`` ``MY_OR``), so the second card only fed
+        starter WARNING 312 - 0 physics: sphere1 1592 = 1592 cycles,
+        every printed row identical at nt 4 and nt 2; WARNING 312 24 /
+        339 / 4 / 30 / 449 / 486 -> none on sphere1 / ex_20 /
+        6.1.test13r / ex_08 / 11.2-11.3 / 11.5. Two skews never merge.
+        **On by default.** Reach 9 deck keys on 9 emitted models. False
+        writes every card as before (the 4f5b6e8 bytes).
+    bolt_rigid_contact : bool
+        Keep the members of a rigid body holding an END node of an
+        ``*INITIAL_AXIAL_FORCE_BEAM`` bolt on every PENALTY contact's
+        secondary side (round 8, A2 (l)-2; the TYPE7 / general / TYPE25
+        builders, never the TYPE2 family or the force transducers).
+        LS-DYNA keeps every rigid member in a contact (mainboltaexpl's
+        d3hsp counts 1601 nodes for interface 1, including the 68 CNRB
+        110 / 120 members k2rad removed), and these carry the bolt's
+        clamp. **On by default.** MEASURED on mainboltaexpl with
+        ``fixed_curve_columns`` (nt 4): IE END -81.87 -> -8.49 %,
+        history RMS IE / KE 31.32 / 28.24 -> 9.19 / 10.22 % of the LS
+        peak (1000 LS blocks, t <= 5e-3), plates IE RMS 36.39 -> 0.65
+        %, bolt force RMS 29.11 -> 0.91 %, 1.131x the cycles; each rule
+        alone is worse. Reach 1 deck key on 1 emitted model.
+    fixed_curve_columns : bool
+        Read a comma-free ``*DEFINE_CURVE`` point line that a
+        whitespace split cannot read as two numbers in LS-DYNA's fixed
+        2E20.0 columns, blank = 0.0 (round 8, A2 (l)-3) - only where
+        the split FAILS (decision D4), so a two-token line keeps the
+        free read. mainboltaexpl's fused ``0.0055.0`` / ``0.005055.0``
+        lines were dropped: its /FUNCT/11 kept 2 of 4 points and the
+        bolt never pulled. ``*DEFINE_CURVE_SMOOTH`` and
+        ``*DEFINE_FUNCTION`` are not touched. **On by default.**
+        Shipped with ``bolt_rigid_contact``: alone it creates energy on
+        mainboltaexpl (IE END +19.20 %). Reach 1 deck key on 1 emitted
+        model (+ camry-detailed-v5a, 12 lines).
+    section_nodal_thickness_mean : bool
+        Write a ``*SECTION_SHELL`` whose Card 2 states T1..T4 with one
+        written, nonzero and different from T1 with the MEAN of the
+        four (blank / 0.0 = T1; round 8, A4). LS-DYNA integrates the
+        thickness at the nodes and its d3hsp reproduces mean(T1..T4) on
+        every element: mat_transversely_anisotropic.cup-draw's rigid
+        tools weigh 0.0888 / 0.0655 / 0.0555 with T1 and 0.0223 /
+        0.0164 / 0.0139 with the mean = LS-DYNA. The one cell feeds
+        every consumer (mass, the J row, the lumper, offsets). The 2-D
+        ELFORMs are A7's. **On by default.** MEASURED on cup-draw (nt
+        4, 150 LS blocks 0 < t <= 0.015): IE / KE history RMS 7.54 /
+        65.93 -> 2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 %,
+        1.0007x the cycles - the NAMED COST: OpenRadioss's energy error
+        grows, mean -4.39 -> -17.88 % (mechanism not closed). Reach 2
+        deck keys on 2 emitted models.
+    plane_strain_unit_thickness : bool
+        Write a plane-strain ``*SECTION_SHELL`` (ELFORM 13 / 43 / 52 /
+        55) with thickness 1.0 (round 8, A7): LS-DYNA ignores Card 2's
+        thickness on those formulations and integrates a unit depth
+        (Vol I R17 *SECTION_SHELL Remark 6); every consumer of the cell
+        follows. **On by default.** MEASURED (starter, nt 4):
+        ex_16_thin_shell_elform_13's rigid disk 0.08756308 ->
+        0.003447366 = LS-DYNA's 0.34473655E-02, its inertia 0.02225525
+        x2 / 0.04451050 = LS-DYNA; the element stays a 3-D plane-stress
+        shell (named). Axisymmetric ELFORM 14 / 15 / 44 are named
+        whatever the flag (LS-DYNA's per-radian mass, 2Dlag x157.5).
+        Reach 1 deck key on 1 emitted model (bytes) + 4 / 4 by text.
+    rigid_element_mass_admas : bool
+        Write an ``*ELEMENT_MASS`` on a rigid body's SECONDARY node as
+        ``/ADMAS/0`` on that node (round 8, A8): the starter counts it
+        at its position, so the body's centre of mass and inertia
+        include it. Before, a ``*MAT_RIGID`` body folded every member's
+        mass into the ``/RBODY`` Mass field at its main node, which the
+        starter moves to the CoG of the secondaries WITHOUT it
+        (sph/foam: CoG z 121.4891 vs LS-DYNA's 150.96326, xx / yy
+        1.922978 vs 2.238), and a ``*CONSTRAINED_NODAL_RIGID_BODY``
+        secondary's mass was dropped altogether. The main node's own
+        mass stays in the Mass field; ICoG-4 bodies (TM supersedes) are
+        unchanged. **On by default.** MEASURED (starter, nt 4): foam
+        CoG z 150.9633, xx / yy 2.238421 = LS-DYNA, mass unchanged,
+        engine 12030 = 12030 cycles (inert there); the Yaris roof
+        crush's 12 CNRB bodies -38..-86 % -> within 0.54 % of LS-DYNA's
+        d3hsp. Reach 5 deck keys on 5 emitted models (foam + 4 Yaris
+        giants).
+    spotweld_dt_mass_scaling : bool
+        Convert ``*MAT_SPOTWELD`` ``DT`` (round 8, A6): Vol II R17
+        *MAT_SPOTWELD Remark 4 scales the weld inertias in the first
+        step so that their stable step is DT (up only). The TYPE13 step
+        is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max K4..6 +
+        max K2,3 L^2))) (``r2len3.F:221-247``, STI = XM/DT^2 at
+        ``:233``), so Mass' = max(Mass, max K1..3 DT^2) and Inertia' =
+        max(Inertia, (max K4..6 + max K2,3 L_max^2) DT^2) start the
+        weld at 0.9 DT. **On by default.** MEASURED on spotweld.k under
+        the opt-in rules 1 + 2 (nt 4): Mass x2.5 (LS-DYNA's own
+        factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
+        cycle-0 step 9.000e-7, IE END -33.00 -> -31.18 % - MIXED: RMS
+        IE 6.65 -> 6.82 % and RMS KE 23.09 -> 23.66 % of the LS peak
+        (1331 LS times to t 0.00119792) are worse. Default byte movers 0
+        (plates.mat100's DT is inert: its warning says so).
+    adaptive_spring_token : bool
+        Set each spring token ``/PROP`` MASS (TYPE4 / TYPE8 / TYPE13,
+        k2rad's fixed 1e-4) to ``max(1.1e-15, min(1e-4, 2 mu min(1,
+        2/n)))`` (round 8, A5), ``mu = m_a m_b / (m_a + m_b)`` the end
+        nodes' own masses (the S2 screen's: element mass +
+        ``*ELEMENT_MASS``), ``n`` the busier end's token-spring count,
+        per unit length on an Ileng 1 property; a rigid,
+        connector-ground or DRIVEN end (its GLOBAL fixed / imposed
+        translations cover the spring's stiff directions for the WHOLE
+        run) counts infinitely heavy, a spring with both ends infinite
+        keeps the token, a GUARDED end (no own mass) sets no cap. The
+        spring's own step sqrt(M/K) (``r1len3.F:175``) reads the
+        PROPERTY mass, so a light compensated end could outrun it
+        silently: the fixed token was killed by the energy-error limit
+        within 3-6 cycles on three coupons, each behind a NORMAL
+        TERMINATION banner. **On by default.** Reach 6
+        deck keys on 6 emitted models, one cell each (the Yaris static
+        suspension ``/PROP/TYPE4/107020`` 1e-4 -> 5.483321e-7); the 4
+        runnable movers' printed rows identical at 1.000x the cycles;
+        ex_17 / ex_18 (match) byte-identical. Inert under
+        ``--no-spring-token-mass-compensation``.
+    imflag0_eigen_explicit : bool
+        Convert a deck whose *CONTROL_IMPLICIT_GENERAL states IMFLAG 0
+        and whose *CONTROL_IMPLICIT_EIGENVALUE states NEIG 0 on the
+        EXPLICIT route (round 8, B1): LS-DYNA runs it explicit
+        (tire.d3hsp:1056-1057 'eq.0: explicit analysis', :1316 NEIG 0).
+        The route is decided in handlers._resolve_eigen_route, called
+        by both handlers, so the cards' order does not matter. **On by
+        default.** MEASURED on
+        implicit/basic-examples/eigenvalue/tire.k (nt 4): the modal
+        recipe stopped at cycle 0 (LOADING DATA); the explicit route
+        ends NORMAL in 24329 cycles, END IE +3.93 % / KE -18.30 %, RMS
+        2.06 / 2.23 % of the LS peak over the 500 LS times to t 0.1.
+        Reach 1 deck key on 1 emitted model. False keeps the modal
+        K-export route of 4f5b6e8.
+    implicit_smooth_curve_sampling : bool
+        On an implicit, non-modal deck write every well-formed
+        *DEFINE_CURVE_SMOOTH as a /FUNCT (same id) sampling a sine ramp
+        (41 points per ramp, area = DIST) (round 8, B2): the implicit
+        imposed-motion path integrates a curve's points
+        piecewise-linearly whatever the smoothing flag (fv_imp0.F:209
+        FV_IMP -> :333 DINTERI), so /FUNCT_SMOOTH acts as a straight
+        ramp there. **On by default.** MEASURED on
+        efg/metal-cutting/main.k (nt 4 and 2): ERROR TERMINATION at
+        cycle 26 on 13 of 13 straight-ramp runs -> NORMAL in 202 cycles
+        on 7 of 7 sine runs - a status, not a score. Reach 1 deck key
+        on 1 emitted model. False keeps /FUNCT_SMOOTH.
+    elastic_fluid_cp_cutoff : bool
+        Write a *MAT_ELASTIC_FLUID stated CP 0.0 as /MAT/HYD_VISC Pmin
+        -1e-20, a cut-off at zero (round 8, B5): LS-DYNA keeps the
+        stated 0 as its cavitation pressure
+        (9.1.acoustic.compartment.hex.d3hsp:3471 'cavitation pressure =
+        0.00000E+00') while hm_read_mat06.F:154 reads a Pmin of exactly
+        0 as -INFINITY; *MAT_NULL PC 0 gets the same cell (round 7).
+        **On by default.** Decided on consistency - the four carriers
+        (nvh 8.7 / 9.1 / 9.2 / 9.4) are frequency-domain acoustic
+        decks; on 9.4 (nt 4) both cells give the same 18 rows with zero
+        energy. Reach 4 deck keys on 4 emitted models. False keeps Pmin
+        0 (= -INFINITY), the 4f5b6e8 cell.
+    skip_implicit_stub_with_type25 : bool
+        Leave out the inert all-parts implicit contact stub on an
+        implicit deck whose only contacts take the TYPE25 route, wherever
+        a TYPE25 contact is actually WRITTEN (round 8, B6; opt-in since
+        the round's validation inverted the default). By default the
+        stub stays there, the 4f5b6e8 deck: OpenRadioss builds implicit
+        contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847)
+        and a TYPE25 acts through the residual alone (intfop2.F:595), so
+        the stub is the deck's only implicit contact stiffness. MEASURED
+        (nt 4 = nt 2): on a two-block coupon whose TYPE25 contact must
+        carry load the skip turns NORMAL in 11 cycles into ERROR
+        TERMINATION at cycle 9 (23 ITERATION DIVERGE, then MESSAGE 79);
+        on implicit/basic-examples/springback-i/doorbeam.k it moves the
+        END +582.00 -> +689.08 % (worse) and the RMS 393.31 -> 313.05 %
+        of the LS peak (better) - MIXED. Reach 1 deck key on 1 emitted
+        model. When the writer drops every TYPE25 the stub is written
+        after all. Default False.
+    shell_in_solid_coupling : bool
+        Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty
+        coupling (R14 triage round 8, B10): /SURF/PART/EXT over the
+        embedded shell parts, /GRBRIC/PART over the ALE host, Stfval =
+        0.1 x K_host x A_seg^2 / V_host (PSSF on the _PENALTY form),
+        Gap = half the mean host edge, and - on an *INITIAL_VOID host
+        of the card only - the void density (RHO_I = VFACT x RO, the
+        EOS RHO_0 = RO). MEASURED on
+        intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate -100
+        -> -28.26 %, the deck IE +1134.62 -> +42.28 % / KE -92.06 ->
+        -38.13 % at 8.936x the cycles. Default False: the density half
+        fails on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
+    imflag_curve_restart : bool
+        Write one engine file per method segment of an IMFLAG < 0 curve
+        (R14 triage round 8, B3 h.2): <stem>_000k.rad carries
+        /RUN/<title>/k to the segment's end, /IMPL only in implicit
+        segments, /DT only in explicit ones, /RFILE/OFF only in the
+        last file; run them in order from one directory (each restarts
+        from the previous run's .rst). ConversionResult.engine_paths
+        lists them. Default True since round 8 (kept after the campaign
+        runner's chain passed gate (b) on ie_shell); False keeps one
+        implicit engine file.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1179,6 +1433,21 @@ def convert(
         corotational_orthotropic=corotational_orthotropic,
         mat_null_pc_mu=mat_null_pc_mu,
         joint_screw_gjoint=joint_screw_gjoint,
+        rigid_local_constraints=rigid_local_constraints,
+        bcs_union=bcs_union,
+        bolt_rigid_contact=bolt_rigid_contact,
+        fixed_curve_columns=fixed_curve_columns,
+        section_nodal_thickness_mean=section_nodal_thickness_mean,
+        plane_strain_unit_thickness=plane_strain_unit_thickness,
+        rigid_element_mass_admas=rigid_element_mass_admas,
+        spotweld_dt_mass_scaling=spotweld_dt_mass_scaling,
+        adaptive_spring_token=adaptive_spring_token,
+        imflag0_eigen_explicit=imflag0_eigen_explicit,
+        implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
+        elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
+        skip_implicit_stub_with_type25=skip_implicit_stub_with_type25,
+        shell_in_solid_coupling=shell_in_solid_coupling,
+        imflag_curve_restart=imflag_curve_restart,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
@@ -1331,7 +1600,22 @@ def convert(
     starter_text = build_starter(
         state, progress=lambda fr, label: _report(0.36 + 0.61 * fr, label))
     _report(0.97, "Writing engine deck")
-    engine_text  = build_engine(state)
+    # round 8, B3 (h.2): one engine text per run - several only for an
+    # IMFLAG < 0 deck under --imflag-curve-restart
+    engine_texts = build_engines(state)
+    engine_paths = [engine_path] + [f"{output_stem}_{k:04d}.rad"
+                                    for k in range(2, len(engine_texts) + 1)]
+    stale = _stale_engine_files(output_stem, len(engine_texts))
+    if stale:
+        # Named, never deleted (B3-b). Every <stem>_k.rad with k past this
+        # conversion's last engine file, not only _0002 (the fix round,
+        # code-sweep F9): an earlier, LONGER chain leaves _0003 and up, and
+        # a loop over every engine file present would run them.
+        state.warn(
+            f"Stale engine file(s) {', '.join(stale)} from an earlier "
+            "--imflag-curve-restart conversion sit beside this "
+            f"{len(engine_texts)}-engine-file output; delete them before "
+            "running the engine files by hand.")
 
     # 4. Write files. utf-8 regardless of locale (an ASCII/C locale would
     # UnicodeEncodeError on a non-ASCII part title); create the output
@@ -1342,12 +1626,15 @@ def convert(
         out_dir.mkdir(parents=True, exist_ok=True)
     with open(starter_path, "w", newline="\n", encoding="utf-8") as fh:
         fh.write(starter_text)
-    with open(engine_path, "w", newline="\n", encoding="utf-8") as fh:
-        fh.write(engine_text)
+    for path, text in zip(engine_paths, engine_texts):
+        with open(path, "w", newline="\n", encoding="utf-8") as fh:
+            fh.write(text)
 
     # 5. Auto-save warnings/skips for later investigation (large decks scroll the
     #    console). Written next to the output as <stem>_conversion.log.
-    log_path = _write_conversion_log(output_stem, input_path, state) if write_log else None
+    log_path = (_write_conversion_log(output_stem, input_path, state,
+                                      engine_paths)
+                if write_log else None)
 
     _report(1.0, "Done")
     return ConversionResult(
@@ -1357,6 +1644,7 @@ def convert(
         skipped_keywords=sorted(set(state.skipped_keywords)),
         recognized_not_emitted=sorted(state.recognized_not_emitted),
         log_path=log_path,
+        engine_paths=engine_paths,
     )
 
 

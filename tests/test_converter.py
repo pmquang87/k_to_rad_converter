@@ -6234,7 +6234,23 @@ class RigidCogMasterTests(unittest.TestCase):
         deck = FORCE_RB_K.replace(
             "*CONTROL_TERMINATION",
             "*ELEMENT_MASS\n       1       6           0.005\n*CONTROL_TERMINATION")
-        _r, starter = self._convert(deck, rigid_cog_master=True)
+        # EXPECTED VALUE MOVED in R14 round 8 (A8): node 6 is a SECONDARY
+        # node, so its *ELEMENT_MASS is written as /ADMAS/0 on node 6 (the
+        # starter then counts it at its position: CoG and inertia right) and
+        # leaves the Mass field; the round-7 fold is kept verbatim under
+        # --no-rigid-element-mass-admas below.
+        _r8, starter8 = self._convert(deck, rigid_cog_master=True)
+        lines8 = starter8.splitlines()
+        i8 = next(k for k, ln in enumerate(lines8) if ln.startswith("/RBODY/9"))
+        self.assertAlmostEqual(float(lines8[i8 + 3][40:60]), 0.0)
+        j = next(k for k, ln in enumerate(lines8) if ln.startswith("/ADMAS/0/"))
+        m, grp = lines8[j + 3].split()
+        self.assertAlmostEqual(float(m), 0.005)
+        g = next(k for k, ln in enumerate(lines8)
+                 if ln == f"/GRNOD/NODE/{grp}")
+        self.assertEqual(lines8[g + 2].split(), ["6"])
+        _r, starter = self._convert(deck, rigid_cog_master=True,
+                                    rigid_element_mass_admas=False)
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/RBODY/9"))
         card1 = lines[i + 3]                        # node sens skew Ispher Mass...

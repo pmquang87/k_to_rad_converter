@@ -688,8 +688,19 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     # mirror the cards emitted below: reset BEFORE the early returns.
     state.rigid_auto_bcs = {}
     state.rigid_auto_stab = {}
-    from .joint_screw import screw_cmo_skip_pids
+    # ... and round 8's CMO -1 records (A1): the skewed cards and the CON1-0
+    # main nodes, with the t = 0 /SKEW/FIX of a FLAG-1 CON1 drawn once per call
+    state.rigid_skewed_bcs = {}
+    state.rigid_auto_cmo_neg = set()
+    t0_cache: Dict[int, int] = {}
+    # round 8, A8: which rigid nodes keep their *ELEMENT_MASS in a Mass field
+    # (main nodes, ICoG-4 members) and which secondary masses move to /ADMAS
+    state.rbody_folded_mass_nodes = set()
+    state.rbody_secondary_masses = {}
+    from .joint_screw import screw_cmo_skip_pids, screw_pad, screw_pad_pids
     screw_skip = screw_cmo_skip_pids(state)
+    # round 8, B8 (q-i): part A of an UNDRIVEN screw -> its plan (the pad)
+    screw_pads = screw_pad_pids(state)
 
     # *MAT_RIGID parts AND *DEFORMABLE_TO_RIGID parts, through the ONE
     # predicate — see writer.common.rigid_part_ids for why a consumer left on
@@ -933,7 +944,24 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         #     they need exact total control.
         # This is the primary stabilization mechanism for implicit analyses
         # where the inherent rigid-body mass is too small.
-        if state.options.rigid_cog_master:
+        a8 = state.options.rigid_element_mass_admas and props is None
+        if a8:
+            # round 8, A8 (default ON, --no-rigid-element-mass-admas): only the
+            # MAIN node's own *ELEMENT_MASS stays in the Mass field. A mass on
+            # any other member becomes /ADMAS/0 on its node
+            # (_make_added_masses): the starter counts it there, so the body's
+            # centre of mass and inertia include it - folded into Mass it sat
+            # at the main node, which the starter moves to the CoG of the
+            # secondaries WITHOUT it (foam: CoG z 121.4891 vs LS-DYNA's
+            # 150.96326); under --no-rigid-cog-master it was dropped.
+            node_added = state.added_node_masses.get(ind_node, 0.0)
+            state.rbody_folded_mass_nodes.add(ind_node)
+            for n in unique_nodes:
+                if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
+                    state.rbody_secondary_masses[n] = (
+                        pid, "folded" if state.options.rigid_cog_master
+                        else "dropped")
+        elif state.options.rigid_cog_master:
             # The synthesized master carries no *ELEMENT_MASS of its own, and
             # _make_added_masses skips rigid-body nodes (their /ADMAS belongs to
             # the /RBODY) — so fold the *ELEMENT_MASS of ALL of the part's nodes
@@ -942,6 +970,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                              for n in unique_nodes)
         else:
             node_added = state.added_node_masses.get(ind_node, 0.0)
+        if props is not None:
+            # ICoG 4: TM supersedes every lumped mass of the body (round 8,
+            # A8 leaves these bodies as they were)
+            state.rbody_folded_mass_nodes.update(unique_nodes)
+            state.rbody_folded_mass_nodes.add(ind_node)
         part_add, part_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
         if part_fin > 0:
             # FINMASS specified — treat as added mass (OpenRadioss /RBODY Mass
@@ -958,7 +991,7 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             sources = []
             if node_added > 0:
                 where = ("the part's nodes" if state.options.rigid_cog_master
-                         else f"node {ind_node}")
+                         and not a8 else f"node {ind_node}")
                 sources.append(f"*ELEMENT_MASS on {where}={node_added:.6G}")
             if part_add > 0:
                 sources.append(f"*ELEMENT_MASS_PART ADDMASS={part_add:.6G}")
@@ -1044,6 +1077,20 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             elif j_status == "refused":
                 a2_refused.append((kw, pid, ind_node, j_facts))
         rbody_info[pid]["j_in"] = j_status
+        # round 8, B8 (q-i): the spinning body of an UNDRIVEN screw gets its
+        # screw-axis inertia ADDED about the two axes normal to the axis, on
+        # top of whatever the row holds (A2's -SUM(IN) included), so the main
+        # node's IN - its smallest principal inertia, inirby.F:838, the ONE
+        # scalar lag_mult_solv.F:393 divides by - is the axis inertia
+        if pid in screw_pads:
+            if lumped is None:
+                from ..lumping import (nodal_masses_from_state,
+                                       triangle_shell_nodes)
+                lumped = nodal_masses_from_state(state)
+                tri_nodes = triangle_shell_nodes(state)
+            j_vals = screw_pad(state, screw_pads[pid],
+                               set(unique_nodes) | {ind_node}, j_vals,
+                               lumped, props is not None)
         lines += inertia_extra
         # The #106 register, /RBODY producer 1 of 6 (*MAT_RIGID parts, and
         # with them *PART_INERTIA, the element-free CoG masters and the
@@ -1084,6 +1131,28 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                          if mat is not None and mat.cmo == 1.0 else "000")
         rot_chars = list(_con2_to_rot(mat.con2)
                          if mat is not None and mat.cmo == 1.0 else "000")
+        # CMO -1 (round 8, A1; default ON, --no-rigid-local-constraints writes
+        # nothing as before): CON2's six-digit code in the /SKEW of CON1, by
+        # the helper the CNRB _SPC option shares. A screw body's constraints
+        # are re-written by the joint, so the helper is not even asked there
+        # (a refused or skipped card allocates no skew id).
+        local: Optional[Tuple[str, str, int, List[str], str]] = None
+        skew_bc = 0
+        if (mat is not None and state.options.rigid_local_constraints
+                and pid not in screw_skip):
+            if mat.cmo == -1.0:
+                local = _local_constraint(
+                    state, f"*MAT_RIGID mid={mat.mid} (part {pid})",
+                    mat.con1, mat.con2, t0_cache)
+                if local is not None:
+                    tra_chars, rot_chars = list(local[0]), list(local[1])
+                    skew_bc = local[2]
+            elif abs(mat.cmo) == 2.0:
+                state.warn(
+                    f"*MAT_RIGID mid={mat.mid} (part {pid}): CMO {mat.cmo:g} "
+                    "constrains the body at XSPC/YSPC/ZSPC or node SPCNID, not "
+                    "its centre of mass; an /RBODY holds a /BCS on its main "
+                    "node only, so NO /BCS is written (as before, now said).")
         # Determine which translation DOFs this rigid body is loaded on.
         # /LOAD_RIGID_BODY dof: 1=Fx, 2=Fy, 3=Fz, 5=Mx, 6=My, 7=Mz
         loaded_tra_idx: set = set()
@@ -1099,16 +1168,35 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # they explicitly add mass)
         added_stab = False
         stab_chars = ["0", "0", "0"]      # the digits ONLY this rule adds
-        if state.is_implicit and loaded_tra_idx and user_added_mass <= 0:
+        if (state.is_implicit and loaded_tra_idx and user_added_mass <= 0
+                and skew_bc != 0):
+            # round 8, A1: a CMO -1 card in a skew - its digits are axes of
+            # that skew and the node takes ONE skew (ERROR 148), so a global
+            # stabilisation digit can be neither merged into it nor written
+            # beside it
+            if any(tra_chars[i] == "0" and i not in loaded_tra_idx
+                   for i in (0, 1, 2)):
+                state.warn(
+                    f"{kw} pid={pid}: implicit deck: the stabilisation of an "
+                    "unloaded free translation is NOT added to "
+                    f"BC_rigid_{pid}, whose /BCS sits in /SKEW/{skew_bc} (one "
+                    "node takes one skew, ERROR 148, hm_read_bcs.F:199-205); "
+                    "state the free translation in the body's own CON2 if the "
+                    "implicit stiffness needs it.")
+        elif state.is_implicit and loaded_tra_idx and user_added_mass <= 0:
             for i in (0, 1, 2):
                 if tra_chars[i] == "0" and i not in loaded_tra_idx:
                     tra_chars[i] = "1"
                     stab_chars[i] = "1"
                     added_stab = True
-        if added_stab:
+        if added_stab and local is not None:
+            free_axes = [("X", "Y", "Z")[i] for i in range(3)
+                         if stab_chars[i] == "1"]
+        elif added_stab:
             free_axes = [("X","Y","Z")[i] for i in range(3) if tra_chars[i] == "1"
                          and (mat is None or mat.con1 == 0
                               or _con1_to_tra(mat.con1)[i] == "0")]
+        if added_stab:
             state.warn(
                 f"{kw} pid={pid}: auto-constrained non-loaded free "
                 f"translation(s) {','.join(free_axes)} on rigid body master "
@@ -1126,19 +1214,31 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # Lagrange joint holds is incompatible, so neither the card nor A1's
         # record of it is written (ONE predicate, screw_cmo_skip_pids).
         if (tra != "000" or rot != "000") and pid not in screw_skip:
+            if local is not None:
+                lines += local[3]          # a FLAG-1 CON1's t = 0 /SKEW/FIX
             bc_id_auto = state.next_id()
-            # The EMITTED digits (CON1/CON2 OR the implicit stabilisation
-            # above), at skew 0: screen (c') of loads._make_node_tc_rc_bcs
-            # merges a member TC/RC code re-pointed onto this main node into
-            # this card instead of writing a second /BCS (round 7, A1).
-            _old = state.rigid_auto_bcs.get(ind_node)
-            state.rigid_auto_bcs[ind_node] = (
-                (tra, rot, f"BC_rigid_{pid}") if _old is None else
-                ("".join("1" if "1" in (a, b) else "0"
-                         for a, b in zip(_old[0], tra)),
-                 "".join("1" if "1" in (a, b) else "0"
-                         for a, b in zip(_old[1], rot)),
-                 f"{_old[2]}, BC_rigid_{pid}"))
+            if skew_bc:
+                # round 8, A1: a SKEWED card - its own record (the round-7
+                # 3-tuple pins skew 0); the TC/RC pass and _make_bcs drop a
+                # code in another skew on this node (ERROR 148)
+                state.rigid_skewed_bcs.setdefault(ind_node, []).append(
+                    (tra, rot, skew_bc, f"BC_rigid_{pid}"))
+            else:
+                # The EMITTED digits (CON1/CON2 OR the implicit stabilisation
+                # above), at skew 0: screen (c') of loads._make_node_tc_rc_bcs
+                # merges a member TC/RC code re-pointed onto this main node
+                # into this card instead of writing a second /BCS (round 7,
+                # A1).
+                _old = state.rigid_auto_bcs.get(ind_node)
+                state.rigid_auto_bcs[ind_node] = (
+                    (tra, rot, f"BC_rigid_{pid}") if _old is None else
+                    ("".join("1" if "1" in (a, b) else "0"
+                             for a, b in zip(_old[0], tra)),
+                     "".join("1" if "1" in (a, b) else "0"
+                             for a, b in zip(_old[1], rot)),
+                     f"{_old[2]}, BC_rigid_{pid}"))
+                if local is not None:
+                    state.rigid_auto_cmo_neg.add(ind_node)
             if added_stab:
                 _st = state.rigid_auto_stab.get(ind_node, "000")
                 state.rigid_auto_stab[ind_node] = "".join(
@@ -1148,9 +1248,16 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 f"/BCS/{bc_id_auto}",
                 f"BC_rigid_{pid}",
                 "#  Tra rot   skew_ID  grnod_ID",
-                f"   {tra} {rot}         0{_i(ind_grnod_id)}",
+                f"   {tra} {rot}{_i(skew_bc)}{_i(ind_grnod_id)}",
                 HDR,
             ]
+            if local is not None and mat is not None:
+                state.warn(_cmo_neg_sentence(
+                    f"*MAT_RIGID mid={mat.mid} (part {pid})",
+                    f"{abs(int(mat.con2)):06d}", bc_id_auto,
+                    "".join(local[0]), "".join(local[1]), skew_bc, ind_node,
+                    int(mat.con1), local[4],
+                    state.coord_nodes.get(int(mat.con1))))
 
     # A *DEFORMABLE_TO_RIGID part whose elements never reached a /RBODY is NOT
     # rigid in the converted model, and that has to be said: LS-DYNA deactivates
@@ -1167,6 +1274,24 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     _warn_unapplied_part_inertias(state, inertia_applied, rigid_pids, merge_root,
                                   rbody_info)
     _warn_rigid_shell_in(state, a2_applied, a2_skipped, a2_refused)
+    # round 8, A1: a merged slave's own CMO -1 / +-2 code is not written - the
+    # merged /RBODY carries the lead's card only (the loop above reads the
+    # lead's material). Said where the two codes differ (reach 0).
+    if state.options.rigid_local_constraints:
+        for slave, lead in sorted(merge_root.items()):
+            sp, lp = state.parts.get(slave), state.parts.get(lead)
+            sm = state.mat_rigid.get(sp.mid) if sp is not None else None
+            lm = state.mat_rigid.get(lp.mid) if lp is not None else None
+            if sm is None or sm.cmo not in (-1.0, 2.0, -2.0):
+                continue
+            if lm is not None and (lm.cmo, lm.con1, lm.con2) == (
+                    sm.cmo, sm.con1, sm.con2):
+                continue
+            state.warn(
+                f"*CONSTRAINED_RIGID_BODIES: part {slave} (mid {sm.mid}, CMO "
+                f"{sm.cmo:g} CON1 {sm.con1} CON2 {sm.con2}) is merged into "
+                f"part {lead}; the merged /RBODY carries only the lead's "
+                "code, so the slave's constraint is NOT written.")
 
     # *CONSTRAINED_RIGID_BODIES: repoint each merged slave pid at its master's
     # rigid-body info so a *LOAD_RIGID_BODY / *BOUNDARY_PRESCRIBED_MOTION_RIGID /
@@ -1232,6 +1357,125 @@ def _con2_to_rot(con2: int) -> str:
     return {0: "000", 1: "100", 2: "010", 3: "001", 4: "110", 5: "011", 6: "101", 7: "111"}.get(con2, "000")
 
 
+def _local_constraint(state: ConversionState, label: str, con1: int,
+                      con2: int, t0_cache: Dict[int, int]
+                      ) -> Optional[Tuple[str, str, int, List[str], str]]:
+    """A CMO = -1 constraint (``*MAT_RIGID`` and the CNRB ``_SPC`` option alike,
+    round 8 A1) -> ``(Tra, Rot, skew_ID, extra_lines, frame)``, or None when
+    no ``/BCS`` may be written.
+
+    Vol II R17 *MAT_RIGID: with CMO -1, CON1 is the local coordinate system
+    ("This coordinate system is fixed in time") and CON2 a six-digit code,
+    100000 = x translation ... 000001 = z rotation; LCO plays no part. The
+    starter reads the digits as axes of the /BCS skew
+    (``radioss51/LOADS/bcs.cfg:98``; ``hm_read_bcs.F:164-172`` resolves the
+    skew, ERROR 137 when it is missing; ``:179-185`` refuses a digit >= 2,
+    ERROR 1051). So:
+
+      * more than six digits or a digit outside {0, 1} -> None + a warning;
+        ``000000`` -> None silently (nothing is constrained);
+      * CON1 0 -> the GLOBAL frame (skew 0);
+      * a ``*DEFINE_COORDINATE_SYSTEM`` / ``_VECTOR`` -> its own /SKEW/FIX;
+      * a ``*DEFINE_COORDINATE_NODES`` FLAG 0 -> its /SKEW/FIX; FLAG 1 (the
+        co-rotating /SKEW/MOV) -> a NEW /SKEW/FIX at the t = 0 axes, because
+        the manual fixes the CMO -1 frame in time (one per CON1 per producer
+        call, ``t0_cache``); missing or collinear nodes -> None + a warning;
+      * an undefined CON1 -> None + a warning (ERROR 137 otherwise).
+
+    The skew id of a FLAG-1 frame is drawn AFTER every refusal, so a refused
+    card allocates nothing. *frame* names the class for the caller's
+    sentence (``global`` / ``SYSTEM`` / ``VECTOR`` / ``NODES FLAG 0`` /
+    ``NODES FLAG 1``).
+    """
+    v = abs(int(con2))
+    code = f"{v:06d}"
+    if len(code) > 6 or set(code) - {"0", "1"}:
+        state.warn(
+            f"{label}: CMO -1 CON2 {con2} is not a six-digit 0/1 code "
+            "(100000 = x translation ... 000001 = z rotation, Vol II R17 "
+            "*MAT_RIGID): the starter refuses a digit >= 2 (ERROR 1051, "
+            "hm_read_bcs.F:179-185) and cannot read a seventh - NO /BCS "
+            "written, the body is free in every DOF this card meant to fix.")
+        return None
+    if code == "000000":
+        return None
+    tra, rot, cid = code[:3], code[3:], int(con1)
+    if cid == 0:
+        return tra, rot, 0, [], "global"
+    if cid in state.coord_sys:
+        return tra, rot, cid, [], "SYSTEM"
+    if cid in state.coord_vectors:
+        return tra, rot, cid, [], "VECTOR"
+    cn = state.coord_nodes.get(cid)
+    if cn is None:
+        state.warn(
+            f"{label}: CMO -1 CON1 {cid} names no *DEFINE_COORDINATE_* system "
+            "(a /BCS in a missing skew is starter ERROR 137, "
+            "hm_read_bcs.F:164-172) - NO /BCS written, the body is free in "
+            f"every DOF of CON2 {code}.")
+        return None
+    from .mesh import _skew_axes_from_nodes
+    axes = _skew_axes_from_nodes(state, cn)
+    if axes is None:
+        state.warn(
+            f"{label}: CMO -1 CON1 {cid} is a *DEFINE_COORDINATE_NODES whose "
+            f"nodes {cn.n1}/{cn.n2}/{cn.n3} are missing or collinear at t = 0, "
+            "so the local frame of CON2 is undefined - NO /BCS written, the "
+            f"body is free in every DOF of CON2 {code}.")
+        return None
+    if cn.flag != 1:
+        return tra, rot, cid, [], "NODES FLAG 0"
+    sid = t0_cache.get(cid)
+    extra: List[str] = []
+    if sid is None:
+        sid = state.reserve_skew_id(state.next_id())
+        origin, X, Y = axes
+        extra = _emit_skew_fix(sid, f"SKEW_CON1_T0_{cid}", origin, Y,
+                               _vcross(X, Y))
+        t0_cache[cid] = sid
+    return tra, rot, sid, extra, "NODES FLAG 1"
+
+
+def _cmo_neg_sentence(label: str, code: str, bc_id: int, tra: str, rot: str,
+                      skew: int, ind: int, con1: int, frame: str,
+                      cn=None) -> str:
+    """W1 / W2 / W3 of round 8 A1: what the CMO -1 card became, with the LS-DYNA
+    fact it follows and the measured effect."""
+    head = (f"{label}: CMO -1 CON2 {code} written as /BCS/{bc_id} "
+            f"'{tra} {rot}'")
+    if frame == "global":
+        return (
+            f"{head} in the GLOBAL frame on the /RBODY main node {ind}: CON1 "
+            "is 0. LS-DYNA's d3hsp prints the processed constraint of such a "
+            "card as 000000, but its results hold the code "
+            "(control_timestep.billet-forge: x-rbv = y-rbv = 0.0 at all 151 "
+            "matsum outputs). Before round 8 nothing was written. MEASURED "
+            "there (nt 4): IE END -99.97 -> +0.13 %, history RMS 41.95 -> "
+            "0.056 % of the LS peak (150 LS blocks 0 < t <= 0.0015, the "
+            "last row of a printed time), energy error -24.1 -> -3.7 %, "
+            "12501 = 12501 cycles. --no-rigid-local-constraints writes "
+            "nothing.")
+    if frame == "NODES FLAG 1":
+        nodes = f" (nodes {cn.n1}/{cn.n2}/{cn.n3})" if cn is not None else ""
+        return (
+            f"{head} on the /RBODY main node {ind}: CON1 {con1} is a "
+            "*DEFINE_COORDINATE_NODES with FLAG 1 (the co-rotating "
+            f"/SKEW/MOV/{con1}), but the CMO -1 frame is fixed in time (Vol "
+            "II R17 *MAT_RIGID CON1), so the code is written in a NEW "
+            f"/SKEW/FIX/{skew} at that frame's t = 0 axes{nodes}. No corpus "
+            "deck carries this case; the rule follows the manual. "
+            "--no-rigid-local-constraints writes nothing.")
+    return (
+        f"{head} in /SKEW/{skew} on the /RBODY main node {ind}: the frame is "
+        f"CON1 {con1} ({frame}), not LCO, fixed in time (Vol II R17 "
+        "*MAT_RIGID CON1). Before round 8 nothing was written. MEASURED on "
+        "mat_rigid.block-slide (nt 4): KE END +100.10 -> +0.05 % (fifths "
+        "within 0.05 %), history RMS 44.81 -> 0.006 % of the LS peak (500 "
+        "LS blocks 0 < t <= 0.01), 2512 = 2512 cycles; the same code in "
+        "the GLOBAL frame stays at +100.10 %. --no-rigid-local-constraints "
+        "writes nothing.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starter: constrained nodal rigid bodies
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1247,14 +1491,56 @@ def _resolve_cnrb_spc(state: ConversionState, cnrb) -> Tuple[str, str, int]:
     |CMO|=2 also moves the constraint point to XSPC/YSPC/ZSPC or SPCNID; for a
            rigid body the whole body shares each DOF, so that offset is reported
            but not applied (the /BCS acts through the master node).
+
+    The FLAG-1 /SKEW/FIX lines a CMO < 0 card may need are returned by
+    :func:`_resolve_cnrb_spc_lines`, which the producer calls.
+    """
+    tra, rot, skew, _extra = _resolve_cnrb_spc_lines(state, cnrb, {})
+    return tra, rot, skew
+
+
+def _resolve_cnrb_spc_lines(state: ConversionState, cnrb,
+                            t0_cache: Dict[int, int]
+                            ) -> Tuple[str, str, int, List[str]]:
+    """:func:`_resolve_cnrb_spc` plus the extra lines (round 8, A1).
+
+    With ``--rigid-local-constraints`` (the default) a CMO < 0 card goes
+    through :func:`_local_constraint`, the helper the ``*MAT_RIGID`` producer
+    shares: a ``*DEFINE_COORDINATE_VECTOR`` CON1 is a real /SKEW/FIX (no
+    false "will dangle" warning), a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
+    gets a /SKEW/FIX at its t = 0 axes (CON1 is "fixed in time"), and a code
+    with more than six digits or a digit >= 2, an undefined CON1 or a
+    degenerate node frame writes NO card (and no record). Without it, the
+    4f5b6e8 branch below runs unchanged.
     """
     cmo = cnrb.cmo
+    extra: List[str] = []
     if cmo == 0.0:
-        return "000", "000", 0
+        return "000", "000", 0, extra
     if cmo > 0.0:
         tra = _con1_to_tra(cnrb.con1)
         rot = _con2_to_rot(cnrb.con2)
         skew = 0
+    elif state.options.rigid_local_constraints:
+        label = f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}"
+        res = _local_constraint(state, label, cnrb.con1, cnrb.con2, t0_cache)
+        if res is None:
+            tra, rot, skew = "000", "000", 0
+        else:
+            tra, rot, skew, extra, frame = res
+            if frame == "NODES FLAG 1" and extra:
+                cn = state.coord_nodes.get(int(cnrb.con1))
+                state.warn(
+                    f"{label}: CMO -1 CON1 {cnrb.con1} is a "
+                    "*DEFINE_COORDINATE_NODES with FLAG 1 (the co-rotating "
+                    f"/SKEW/MOV/{cnrb.con1}), but the CMO -1 frame is fixed in "
+                    "time (Vol II R17 *MAT_RIGID CON1), so CON2 "
+                    f"{abs(int(cnrb.con2)):06d} is written in a NEW "
+                    f"/SKEW/FIX/{skew} at that frame's t = 0 axes"
+                    + (f" (nodes {cn.n1}/{cn.n2}/{cn.n3})" if cn else "")
+                    + ". No corpus deck carries this case; the rule follows "
+                    "the manual. --no-rigid-local-constraints keeps the "
+                    "moving skew.")
     else:
         skew = cnrb.con1
         code = f"{abs(cnrb.con2):06d}"[-6:]
@@ -1271,7 +1557,7 @@ def _resolve_cnrb_spc(state: ConversionState, cnrb) -> Tuple[str, str, int]:
             "(constraint at XSPC/YSPC/ZSPC or SPCNID) — the offset point is not "
             "applied; the /BCS acts on the rigid body's master node."
         )
-    return tra, rot, skew
+    return tra, rot, skew, extra
 
 
 def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
@@ -1299,6 +1585,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
     state.cnrb_spc_bcs = []
     if not state.cnrbs:
         return lines, rigid_nodes, rbody_info
+    # one t = 0 /SKEW/FIX per FLAG-1 CON1 in this call (round 8, A1)
+    t0_cache: Dict[int, int] = {}
 
     # Nodes that belong to at least one element. A /RBODY main node is moved to
     # the centre of gravity (ICoG, RefGuide p.1879); if that node is attached to
@@ -1457,6 +1745,17 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # _make_rbodies): *ELEMENT_MASS[_NODE_SET] on the master node and
         # *ELEMENT_MASS_PART[_SET] on this part go into the /RBODY Mass field.
         node_added = state.added_node_masses.get(ind_node, 0.0)
+        # round 8, A8: a mass on a SECONDARY node of this body was dropped
+        # (neither folded here nor written by _make_added_masses, which
+        # skipped every rigid node); it becomes /ADMAS/0 on its node now.
+        # An ICoG-4 body keeps every lumped mass out (TM supersedes them).
+        state.rbody_folded_mass_nodes.add(ind_node)
+        if props is not None:
+            state.rbody_folded_mass_nodes.update(secondary_nodes)
+        elif state.options.rigid_element_mass_admas:
+            for n in secondary_nodes:
+                if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
+                    state.rbody_secondary_masses[n] = (cnrb.pid, "dropped")
         part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
         added_mass = node_added + (part_fin if part_fin > 0 else part_add)
         # `props is None` — see the matching gate in _make_rbodies: with _INERTIA
@@ -1510,8 +1809,10 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
 
         # _SPC constraint → /BCS on the master node (global or local skew).
         if cnrb.has_spc:
-            tra, rot, skew = _resolve_cnrb_spc(state, cnrb)
+            tra, rot, skew, extra = _resolve_cnrb_spc_lines(state, cnrb,
+                                                            t0_cache)
             if tra != "000" or rot != "000":
+                lines += extra            # a FLAG-1 CON1's t = 0 /SKEW/FIX
                 bc_id = state.next_id()
                 lines += [
                     f"/BCS/{bc_id}",

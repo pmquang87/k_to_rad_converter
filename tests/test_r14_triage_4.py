@@ -61,6 +61,15 @@ def _row(*vals) -> str:
     return "".join(f"{v:>10}" for v in vals)
 
 
+def _token_mass_cells(starter: str):
+    """Round 8, A5: the printed MASS cell of every /PROP/TYPE4 | TYPE8 |
+    TYPE13 block, in file order (the adaptive spring token rewrites it)."""
+    lines = starter.splitlines()
+    return [lines[i + 3][:20].strip() for i, ln in enumerate(lines)
+            if ln.startswith(("/PROP/TYPE4/", "/PROP/TYPE8/",
+                              "/PROP/TYPE13/"))]
+
+
 def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text, engine_text)."""
     tmp = tempfile.TemporaryDirectory()
@@ -809,14 +818,43 @@ class SpringTokenMassCompensationTests(unittest.TestCase):
         FULL share comes off on a negative card of its own and the node is
         back at the deck's 1e-6 (on gnonspring.k: starter TOTAL MASS 1.02e-4
         -> 2.0e-6, LS-DYNA's). The round-4 assertion pinned the element-
-        INCIDENCE screen, which refused this node for having no element."""
-        result, starter, _e = _convert(_spring_deck(mass=1.0e-6))
+        INCIDENCE screen, which refused this node for having no element.
+
+        EXPECTED VALUE MOVED in R14 round 8 (A5): the adaptive token (round 8
+        A5) moves the token cell this probe pins; the fixed-token assertion
+        is kept under --no-adaptive-spring-token and the default's cell is
+        pinned beside it. Hand: both ends own 1e-6
+        (*ELEMENT_MASS only), n = 1, mu = 5e-7 -> MASS 2 mu = 1e-6, share
+        5e-7 < 1e-6 -> ONE subtracted /ADMAS 5e-7 on [1, 2] and no
+        degenerate node. The degenerate class stays reachable on the default
+        where the token is kept: the D3-shape probe (node 1 SPC 111, node 2
+        driven along the spring by a whole-run prescribed velocity) keeps
+        0.0001 and the 'LESS /ADMAS' sentence."""
+        result, starter, _e = _convert(_spring_deck(mass=1.0e-6),
+                                       adaptive_spring_token=False)
         admas = {round(m, 12): v for m, v in self._admas(starter).items()}
         self.assertEqual(sorted(admas), [-5.0e-5, 1.0e-6], admas)
         self.assertEqual(admas[1.0e-6], [1, 2])
         self.assertEqual(admas[-5.0e-5], [1, 2])
         self.assertTrue(_has(result.warnings, "LESS /ADMAS",
                              "token share 5e-05",
+                             "The full share was taken off 2 of them"))
+        # the round-8 default
+        r8, s8, _e8 = _convert(_spring_deck(mass=1.0e-6))
+        self.assertEqual(_token_mass_cells(s8), ["1.000000E-06"])
+        self.assertEqual(self._admas(s8), {5.0e-7: [1, 2]})
+        self.assertFalse(_has(r8.warnings, "LESS /ADMAS"))
+        d3 = _spring_deck(mass=1.0e-6, extra=(
+            "*BOUNDARY_SPC_NODE\n" + _row(1, 0, 1, 1, 1, 0, 0, 0) + "\n"
+            "*DEFINE_CURVE\n" + _row(9) + "\n"
+            + f"{0.0:>20.1f}{100.0:>20.1f}\n{1.0:>20.1f}{100.0:>20.1f}\n"
+            "*BOUNDARY_PRESCRIBED_MOTION_NODE\n" + _row(2, 1, 0, 9, 1.0)
+            + "\n"))
+        r3, s3, _e3 = _convert(d3)
+        self.assertEqual(_token_mass_cells(s3), ["0.0001"])
+        self.assertEqual({round(m, 12): v for m, v in self._admas(s3).items()},
+                         {1.0e-6: [1, 2], -5.0e-5: [1, 2]})
+        self.assertTrue(_has(r3.warnings, "LESS /ADMAS", "token share 5e-05",
                              "The full share was taken off 2 of them"))
 
     def test_a_node_with_no_admas_and_no_element_mass_is_named(self):

@@ -11,6 +11,915 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
+  round.** Four verifiers (two solver-physics, code, evidence) checked the
+  branch at `f79d8b7`; every finding was re-checked against the code, the
+  source and a measurement before it was acted on. The code, tests and texts
+  are `07897e7`, plus `549af70` (the record below is reset per build - the
+  last code commit; it writes the same bytes and warning lists as `07897e7`
+  on all 356 roster keys); default bytes move on 0 of the 356 keys (the
+  sweep at `07897e7` against `f79d8b7`: 0 byte movers, 12 warning-only
+  movers, 344 identical).
+  - **`--mass-weighted-inivel` writes ONE `/INIVEL` pair per rigid body** (a
+    pre-existing defect since `02e5335`, round 5; opt-in, so 0 default
+    bytes): a body partly covered by several velocity groups or cards (the
+    rows of an `*INITIAL_VELOCITY_NODE` grouped by velocity value, several
+    `*INITIAL_VELOCITY` cards) got a pair per group on its main node, each
+    the group's momentum share over the whole body mass, and the starter
+    overwrites card by card (`hm_read_inivel.F:524-526` / `:538-540`), so
+    only the LAST share survived. The shares are now summed into the first
+    pair (`state.mass_weighted_pairs`, reset at the start of every
+    `build_starter`, + the content-asserted post-registry pass
+    `loads._merge_mass_weighted_pairs`). Two-group rigid cube (vx 100 /
+    300, `*ELEMENT_MASS` on a corner; starter + engine, nt 4): cycle-0
+    K-ENERGY T 0.3974 -> 0.4906 = 0.5 M 250^2 and R 0.06939 -> 0.03084 = the
+    closed form 0.5 omega.I.omega of the summed shares.
+  - **Seven whole-suite mutation survivors pinned** (the code verifier's): B8's
+    held set gains its ROTATION members (B's spin and transverse rotations,
+    A's transverse ones: B8-M1 / -M3); the B8 inertia pad on a y- and a z-axis
+    screw (B8-M2: every screw deck had an x axis, where the pad's first cell
+    is 0); A2's bolt keep on the TYPE25 route (`*CONTACT_NODES_TO_SURFACE`,
+    A2-M2) and on the SOFT -7 general builder (measured: a plain
+    `*CONTACT_AUTOMATIC_GENERAL` takes the single-surface builder); B1's NEIG 1
+    stays modal (B1-M1); B3's stale-file list asserted whole, plus a
+    pre-existing own-name `_0001.rad` that is never named (B3-M1, a suffix
+    match); B7's "every live part's law known" clause (an undefined material
+    keeps `/PROP/TYPE20`; the starter rejects that deck, ERROR 179: B7-M1).
+    The whole suite now kills all 18 mutants of this round: 17 at `07897e7`
+    (the 7 + A2's general builder + 3 on the pair fix + 6 on the corrected
+    texts) and the per-build reset removed at `549af70`.
+  - **Runtime texts corrected**: the W7 drop sentence's opt-out clause is keyed
+    on the producer (a `*MAT_RIGID` CMO -1 body: no CMO -1 card, the other
+    code stays, 0 starter errors; a skewed CNRB `_SPC` card: the old pair and
+    its ERROR 148 - both starter-measured); A6's spotweld sentence names its
+    MIXED history (IE END -33.00 -> -31.18 %, but RMS IE 6.65 -> 6.82 % and
+    RMS KE 23.09 -> 23.66 % over the 1331 LS times; README, ROADMAP and the
+    `convert()` docstring too); B2's metal-cutting tool travel is the integral
+    of the emitted points, 0.01441 mm (the exact sine 0.01432; LS 0.014681,
+    the mean of the tool's 3978 float32 d3plot nodes); the round-6 ECTOL
+    sentence names ie_shell's h.3 chain (18 + 11 127 cycles, END IE -4.54 %);
+    `--mat-null-pc-mu`'s help and GUI row name B4's SPH-only Nu and the h / R
+    guard on Isolid 1 / 2; two stale `__init__.py` line citations re-worded.
+  - **Records**: ROADMAP's doorbeam cell (B6 inverted: the default keeps the
+    stub), the roof-crush cell (A1 + A8), the giants' row-state words (5 of
+    them carry STALE runs of 2026-09-05 / -06: "not re-run", not "never
+    launched"), A6's MIXED pair, the round-5 `--mass-weighted-inivel` item;
+    README: B4's SPH-only Nu has no opt-out of its own (`--no-mat-null-pc-mu`
+    writes the 65ff389 cells, not the `4f5b6e8` `sph/bird` file); this
+    CHANGELOG's A2 entry annotated (the beam hint reverted by `523c6a9`; the
+    partial-rigid sentence prints on 9 keys by default, 10 under
+    `--no-bolt-rigid-contact`), B1's eigen-key sentence scoped to B1 (6 of
+    the 62 move by A3), A6's base RMS (6.65, the campaign's rule).
+  - **Campaign side** (report section 0.31.2, the user's tracking database):
+    the 12 warning-only movers re-converted (not re-run, 0 giants launched);
+    the two Yaris suspension giants' notes re-pointed at their own conversion;
+    `xcheck_counts.py`'s WARN label "not re-run"; a `verify_warnings.py`
+    `NOTE_SHA_STALE` check (50 hermetic tests). The ledger does not move.
+- **R14 CAMPAIGN TRIAGE batch, round 8 — the validation-fix round.** Four
+  validators (fidelity, code sweep, solver physics, campaign) reviewed the
+  branch at `7cfeba4`; every finding below was re-checked against the code
+  and the solver source before it was acted on, each fix is its own commit
+  with a test that fails without it.
+  - **A pre-existing wrong-output defect, found by the round-8 CI
+    emulation:** `writer/loads._NODAL_MASS_CACHE` was keyed by `id(state)`
+    and never cleared, so a later conversion in the same process (the GUI,
+    `unittest discover`, a script calling `convert()` in a loop) could read
+    an earlier model's lumped masses and `--mass-weighted-inivel` wrote a
+    wrong `/INIVEL` (in code since `02e5335`, 2026-09-14). Memoised on the
+    state now; the five mass-weighted test classes in discover order, 100
+    rounds in one process: 0 red (93 of 100 before).
+  - **B6's default inverted** (see the B6 bullet below): the implicit stub
+    stays beside a TYPE25-route contact; `--skip-implicit-stub-with-type25`
+    is the opt-in, keyed on the WRITTEN TYPE25 set.
+  - **Source citations corrected**: `r2len3.F:221-247` (the default element
+    step; `:182-186` is the nodal-step / AMS branch and `:226-246` left out
+    `:224` and `:247`), `fixvel.F:248-268` (the sensor-0 pass every k2rad
+    `/IMP*` takes), LS-DYNA's "thick-shell forms 3, 5 and 6" (form 6 is an
+    extruded thin shell), A4's energy-error thirds named "by row"; the h.3
+    warning no longer points a k2rad user at a personal launcher script; the
+    retraction notes outside this file no longer quote the retracted numbers.
+  - **The `*MAT_NULL` Nu hourglass guard covers Isolid 1 and 2 only**:
+    Isolid 24's hourglass is SZHOUR3's (`szhour3.F:158-160`, no VIS in its
+    damping), not SHVIS3's, which R describes (0 bytes: the Nu cell's
+    ELFORM-6 bricks are Isolid 1).
+  - **The `--beam-contact-secondary` hint reads the full rigid set again**,
+    so A2's bolt-kept members no longer make it fire on mainboltaexpl's
+    dropped contact 10013 (warning text only).
+  - **Every stale `<stem>_kkkk.rad` past the new last engine file is named**,
+    not only `_0002` beside a one-file output.
+  - **B10 (opt-in) names its two measured limits**: the mid-cell blind spot
+    (a plate exactly at mid-cell is never coupled) and the void-node step
+    (~1/600 of the fluid step until the fluid arrives).
+  - **Five whole-suite mutation survivors pinned** (A3-01, B4-01, S-B3-05,
+    S-B8-05, S-B7-04/-05): each forbidden class gets its second member.
+  - **ROADMAP**: the round-8 NOT list gains entry 27 (D13, the
+    `*BOUNDARY_SPC` VECTOR-CID fallback, re-measured: 48 warnings on
+    `control_adaptive.cylinder.k`), entry 18 the Yaris roof crush's new
+    starter WARNING 312, round-7 item 7 stays OPEN; the closes paragraph
+    and the residue line carry the MEASURED ledger (campaign report §0.31)
+    and h.3's gate (b) result (11 145 = 18 + 11 127 cycles, END IE
+    -4.5418 %).
+  - **Rejected, with the reason**: the B10 `_PENALTY_ID` / `_PENALTY_TITLE`
+    finding (the parser strips `_ID` / `_TITLE` from the keyword before the
+    handler reads it; `_PENALTY_ID` and `_PENALTY_TITLE` both write the PSSF
+    stiffness, re-measured 1406.25).
+- **R14 CAMPAIGN TRIAGE batch, round 8 — PART B (implicit routing, curves,
+  the contact stub, the thick shell, `*MAT_NULL` / acoustic fluids, the screw
+  joint, the `/MPC` text, the opt-in couplings).** One commit per item, its
+  tests, README row and this sub-bullet in the same commit; every figure is a
+  measured arm against the LS-DYNA reference on `F:` (the LS instant named),
+  base-paired in one window with the 4f5b6e8 conversion from a pristine
+  checkout, `nt 4` unless stated; histories by the campaign rule (README 9.1)
+  with round 8's tie rule (the LAST row of a printed time; an equidistant
+  fifth takes the earlier time; the RMS over the LS blocks 0 < t <=
+  OpenRadioss's last row in % of the LS peak, the window named); every reach
+  as `N deck keys on M emitted models` (356 keys = 312 models). Part B's
+  default bytes move 7 deck keys / 7 emitted models (B1 1 / 1, B2 1 / 1, B4
+  1 / 1, B5 4 / 4; B3 h.2, B6, B7, B8, B9 and B10 0 - B6's default was
+  inverted by the round's validation, so the stub stays; the h.3 default
+  flip, its own last commit, adds `ie_shell` 1 / 1 - kept: the campaign's
+  gate (b) passed). B11 (the
+  opt-in `--weld-trajectory-impflux`) was specified and NOT built. ROADMAP:
+  the round-8 columns, the round-7 list annotated (one `**Round 8:**` line
+  per item), the round-8 NOT list (27 entries: the fix round added D13); the retracted spellings are
+  guarded by `Round8RetractedStatementsB` (only CHANGELOG quotes them).
+  - **B1 — `*CONTROL_IMPLICIT_GENERAL` IMFLAG 0 beside
+    `*CONTROL_IMPLICIT_EIGENVALUE` NEIG 0 converts on the EXPLICIT route
+    (default ON, `--no-imflag0-eigen-explicit`).** LS-DYNA runs such a deck
+    explicit (`tire.d3hsp:1056-1057` 'eq.0: explicit analysis', `:1316`
+    NEIG 0; its glstat has 501 explicit blocks to t 0.0999987 at dt
+    4.004e-6); k2rad sent it to the modal K-export recipe, which stopped at
+    cycle 0 on LOADING DATA (`handle_control_implicit_eigenvalue` set
+    `is_modal` / `is_implicit` unconditionally). The route is now decided
+    in `handlers._resolve_eigen_route`, called at the end of both handlers,
+    so the cards' order does not matter; the sentence prints once. Measured
+    on `implicit/basic-examples/eigenvalue/tire.k` (nt 4; the rule's bytes
+    = the hand twin's, F: tire.k minus lines 11-17, shown on the branch
+    before any number was quoted): NORMAL in 24329 cycles (modal: 0), IE /
+    KE at the fifths of t_end 0.1 +3.68 / -0.35 / -3.58 / -3.89 / +3.93 %
+    and -1.18 / -4.86 / +0.95 / -0.90 / -18.30 %, END +3.93 / -18.30 % (LS
+    at its last block t 0.0999987), RMS 2.06 / 2.23 % of the LS peak over
+    the 500 LS times 0 < t <= 0.1. Reach 1 deck key on 1 emitted model; B1
+    moves none of the 62 IMFLAG-1 eigen keys (56 are byte-identical; 6 of
+    them - ex_08 x3, 6.1.test13r, 11.2, 11.5 - move by A3's /BCS union, part
+    A; corrected by the post-review verification). A deck with NEIG 0 and no
+    `*CONTROL_IMPLICIT_GENERAL` keeps the modal route (0 carriers); two
+    GENERAL cards of which one states IMFLAG != 0 keep it too. No existing
+    test changed its expected value (every test eigen card states NEIG 3 /
+    5 / 10); one docstring (`test_r14_triage_6`
+    `test_absent_on_a_modal_deck`) drops tire.k from its "modal shape".
+  - **B2 — an implicit deck's `*DEFINE_CURVE_SMOOTH` is a sampled sine
+    `/FUNCT` (default ON, `--no-implicit-smooth-curve-sampling`).** The
+    implicit solver reads the smoothing flag nowhere: the imposed-motion
+    path integrates a curve's raw points piecewise-linearly (`fv_imp0.F:209`
+    FV_IMP -> `:333` DINTERI, which also extrapolates the end segments
+    linearly; no ISMOOTH branch there or in `force_imp.F`), while the
+    explicit `fixvel.F:248-268` blends it - so `/FUNCT_SMOOTH` was a
+    STRAIGHT ramp on every implicit deck. `writer/assembly.
+    _sample_implicit_smooth_curves` now writes every well-formed card of an
+    implicit, non-modal deck as `/FUNCT/<LCID>` (same id) sampling `0.5 VMAX
+    (1 - cos(pi (t - TSTART) / TRISE))`, 41 points per ramp, the plateau
+    between, the mirrored decay (`handlers.sampled_smooth_points`; area =
+    DIST to 3e-12), with a `(0, 0)` / `(TEND + TRISE, 0)` guard point where
+    the run reaches past the curve. LS-DYNA states no ramp formula (Vol I
+    R17 p.17-153/154); its tool travel on `efg/metal-cutting` grows as
+    t^2.68 .. t^2.89 over the first d3plot states, closest to the sine.
+    MEASURED: on a one-brick implicit probe (nt 4) the driven node follows
+    the integral of the emitted points to 2e-7 at every step on both arms -
+    the 4-point `/FUNCT_SMOOTH` as a straight ramp (DX = 5000 t^2) that runs
+    the node BACKWARDS past TEND (2.782 at t 0.0466 against DIST 3), the
+    sampled `/FUNCT` held at DIST; on `efg/metal-cutting/main.k` (its
+    `/FUNCT/1` = the pre-research's sine arm byte for byte, 82 rows) the
+    straight ramp ends ERROR TERMINATION at cycle 26 (t 6.332e-4, KE
+    2.459e9) on 13 of 13 runs and the sine NORMAL in 202 cycles on 7 of 7
+    runs at nt 4 and nt 2 (this round's pair: IE at LS run A's six d3plot
+    states 0 / 0.01324 / 0.2811 / 1.176 / 11.59 / 82.60 mJ against 0 / 0 /
+    0 / 0 / 0.0308 / 0.4908 at t 0 .. 1.07344e-3) - a STATUS mover, not a
+    score: the late phase does not repeat even on the same bytes at one nt
+    (END IE 1.48e5 .. 2.75e5 mJ over the seven runs), the energy error is
+    unbalanced, and the verdict stays not_comparable (header-only glstat).
+    Reach 1 deck key on 1 emitted model (0 explicit carriers). The round-7
+    A5 placeholder sentence (`writer/mesh.py`) is corrected at its three
+    sites (the warning, ROADMAP round-7 item 10, a bracketed note on the
+    round-7 entry below): the 91.2 % was one run of seven (52.9 .. 99.9 %),
+    the internal energy climbs after ~6e-3 s (Itetra4 3: 24.37 / 2.525e4 /
+    8.82e4 / 1.719e5 / 2.391e5 mJ at the fifths of t_end) and LS-DYNA's run
+    A holds six d3plot states to 3.6 % of t_end. No existing test changed
+    its expected value (`test_rare_cards.py`'s `/FUNCT_SMOOTH` decks are
+    explicit; the round-7 A5 needles sit in the sentence's unchanged head).
+  - **B4 — the `*MAT_NULL` MU package (under the existing
+    `--no-mat-null-pc-mu`).** (F5) `Nu = MU / RO` is written on an
+    SPH-ONLY material too (`writer/materials._resolve_mat_null_cells`: the
+    scope `classes in (["ELFORM 6"], ["SPH"])`; the RO / `*INITIAL_VOID` /
+    AMMG exclusions stay ahead): the SPH stress takes the same LAW6 routine
+    (`spstres.F:250`, the viscous term in its step `mdtsph.F:126`), an SPH
+    Couette coupon goes from no flow at Nu 0 to the analytic profile (steady
+    error 9.9 -> 6.0 % of U from a 1 mm to a 0.5 mm spacing), and `sph/bird`
+    (MATCH) is inert - measured on the implementation's bytes, base-paired
+    in one window (nt 4): 1616 = 1616 cycles, IE fifths +2.87 / +2.98 /
+    +1.52 / +2.57 / +4.50 % -> +2.87 / +3.00 / +1.52 / +2.56 / +4.50 %, END
+    +4.50 / KE -0.48 % on both, IE RMS 2.10 -> 2.07 % over 100 / 99 LS times
+    (the run's last printed row lands one LS sample earlier: MIXED windows),
+    the starter's `VISCOSITY` 0 -> 1; it stays match. A material MIXING SPH
+    with another class (impact.k's SPH bar beside its Lagrangian plate)
+    keeps Nu 0 and its sentence; the ELFORM-6 sentence keeps its bytes (the
+    clauses are split by family: `channel_A / B / C`'s warning records are
+    identical). (F1) a `/PROP/SOLID` (Isolid 1 / 2, `GEO(13) > 0` - the fix round took Isolid 24 out: its hourglass is SZHOUR3's, not SHVIS3's)
+    carrying a Nu > 0 brick part with `R = 10 Nu / (c0 dmin) > 1` is written
+    with `h / R` (`materials.guarded_prop_h` at both `/PROP/SOLID` emission
+    sites): with Nu > 0 the fluid hourglass force of a brick is `10 (h/4)
+    VIS dx` instead of `(h/4) RHO c dx^2` (`shvis3.F:182` / `:185`) - R
+    times the Nu-0 value; `c0` = the emitted GRUNEISEN C or sqrt(C1 / RO)
+    of a POLYNOMIAL (another kind is named, no R), `dmin` the shortest
+    brick edge; a graded part is guarded at its smallest edge and the cost
+    named; h is never raised. Measured on a Lagrangian Couette coupon
+    (ELFORM 6, Isolid 1, /DT 0.9, nt 4; the round-8 pre-research's sweep:
+    stable at R 0.95 / 1.58 / 2.21, unstable at R 3.16 and 6.32) - the
+    implementation's bytes (= the spec's guard arm byte for byte) end NORMAL
+    in 1352 cycles at the analytic profile (0.191 / 0.078 / 0.0 / 0.0 % of
+    U at 0.1 / 0.2 / 1 / 2 t_d, IE -4.40 .. -1.16 % of the analytic
+    dissipation at the fifths, hourglass energy 3.8e-11 mJ) where h 0.1
+    ran +2980 .. +731 % with 368.3 mJ of hourglass energy. Reach 0 / 0
+    today (the channel family reads R 0.0117 and is byte-identical). (Texts)
+    `_NU_LAGRANGIAN_FACT` re-measured at the shipped PC cell (the round-8
+    critic, nt 4: impact.k's bar 16.60 -> 29.58 mJ against LS-DYNA's 15.67
+    = +5.92 -> +88.77 %, the deck +51.91 -> +71.13 %; the plate the bar
+    strikes - part 1, under the bar by geometry although titled 'plaque
+    sous SPH' - +32.37 -> +69.91 %), `_NU_SPH_FACT` (now printed for a
+    mixed material's SPH parts only) re-measured (impact's SPH bar alone
+    inert, +51.91 -> +52.61 %, 2437 = 2437 cycles), and the bird_B
+    sentences name the measured condition (the converted deck's OPEN
+    fixed-grid ALE faces: walled -0.1 %, +2.4 % at the void density; the
+    void density alone 99.9 %; LS-DYNA moves that mesh with the bird,
+    `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4, which k2rad skips). Reach:
+    bytes 1 deck key on 1 emitted model (`sph/bird`, one cell) + the
+    non-roster Ryan_Lee W11 SPH birds (12 files = 3 models); text 3 / 3
+    (`impact`, `bird_A`, `bird_B`; SHA-identical). Tests that changed
+    their expected value: `test_r14_triage_7` `MatNullPcMu.
+    test_the_Nu_scope_names_every_excluded_class` (the ELFORM-1 needle
+    "16.60 -> 29.58"; the SPH case left it - SPH-only is carried, re-homed
+    in `MatNullSphNuAndRGuard`; the scope clause names two families), and
+    four pins of the pre-PC-cell sph/bird arm in `Round7ValidationRound` /
+    `Round7PostReviewRound` were retired with the text they pinned (that
+    arm measured a deck the shipped PC cell no longer produces).
+  - **B5 — `*MAT_ELASTIC_FLUID` stated CP 0.0 is written `/MAT/HYD_VISC`
+    Pmin -1e-20, a cut-off at zero (default ON,
+    `--no-elastic-fluid-cp-cutoff`).** LS-DYNA keeps a stated CP 0 as its
+    cavitation pressure (`9.1.acoustic.compartment.hex.d3hsp:3471` and the
+    9.4 d3hsp echo `cavitation pressure = 0.00000E+00`, not the 1e20
+    default) while the reader takes a Pmin of exactly 0 as -INFINITY
+    (`hm_read_mat06.F:154`; the EOS clamps at Pmin, `eospolyno.F:104` /
+    `113` / `125`), so k2rad's Pmin 0 was the opposite of the stated card;
+    `_resolve_mat_elastic_fluid`'s explicit-0.0 branch now writes
+    `_VOID_CAVITATION_PMIN` (`-1.000000E-20`, the cell `*MAT_NULL` PC 0 gets
+    since round 7). **This reverses round 7's B7.4.4 decision** ("CP 0.0
+    keeps Pmin 0 on the 4 nvh keys", kept then as a deliberate
+    inconsistency): the two emitters now agree. Decided on consistency - no
+    reference in the corpora exercises the cell. Measured (nt 4): the four
+    carriers move one cell each (`nvh` 8.7 / 9.1 / 9.2 / 9.4, 4 deck keys on
+    4 emitted models), the starter echo `PRESSURE CUTOFF`
+    -1.0000000200409E+20 -> -1.0000000000000E-20; 9.4 runs 18 = 18 cycles
+    with every printed row identical and IE / KE 0 throughout; 8.7 / 9.1 /
+    9.2 end after 1 cycle on either cell (their step exceeds t_end, not a
+    Pmin effect); all stay not_comparable. Blank, >= 1e20, the rescaled-
+    default screen, > 0 and < 0 are unchanged in both arms; the opt-out
+    keeps Pmin 0 and its sentence (now naming the flag). Tests that changed
+    their expected value: `test_impact_mats`
+    `test_explicit_zero_CP_is_not_written_and_warned` became
+    `test_explicit_zero_CP_opt_out_is_not_written_and_warned` under
+    `elastic_fluid_cp_cutoff=False` (its assertions hold there; the default
+    lives in `ElasticFluidCpCutoff`); its `_convert` / `_pmin` helpers take
+    `**kw`.
+  - **B6 — the implicit contact stub beside a TYPE25-route contact: the
+    stub STAYS by default; the opt-in `--skip-implicit-stub-with-type25`
+    leaves it out where a TYPE25 contact is written (the round's
+    validation inverted the default this item first shipped).**
+    `_inject_implicit_contact_stub` never read `state.contacts_type25`, so
+    an implicit deck whose only contact takes the TYPE25 route
+    (`*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE`, `*CONTACT_ERODING_*`) gets the
+    inert all-parts `/INTER/TYPE7` beside it - and there it is not inert:
+    OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11
+    (`imp_int_k.F:847`; a TYPE25 acts through the residual alone,
+    `intfop2.F:595`; MESSAGE 232 on every such engine), so the stub is the
+    deck's only implicit contact stiffness, an all-parts self-contact
+    LS-DYNA does not have. Commit `a834fbc` skipped it by DEFAULT (the
+    opt-in `--implicit-stub-with-type25` kept it). **Validation finding:**
+    the solver-physics validator's coupon b6t (an implicit two-block deck
+    whose only contact is a `*CONTACT_NODES_TO_SURFACE`: a 0.1 mm gap that
+    closes at a third of the run, then carries the load), re-run by the fix
+    round at nt 4 AND nt 2 (every printed cycle row identical but the
+    controlling-node label), ends NORMAL in 11 cycles WITH the stub (IE
+    311.5 at t 0.1 -> 1.189e5 at t 1.0; starter WARNING 343) and in ERROR
+    TERMINATION at cycle 9 WITHOUT it (IE 0 to t 0.4, then 391.5 / 2469 /
+    4225 / 7953 / 1.145e4 at t 0.5 .. 0.9, 23 ITERATION DIVERGE, MESSAGE 79
+    'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT') - the TYPE25 force has
+    no tangent, so the Newton loop diverges once the contact must carry
+    load; and the only roster carrier is MIXED (below). A default with no
+    roster gain that turns a converging coupon into a diverging one does
+    not ship: the stub stays (the 4f5b6e8 deck byte for byte) and its one
+    sentence names both arms and the opt-in. The opt-in keys on the WRITTEN
+    TYPE25 set (the fidelity review: the first version keyed on the parsed
+    records): the injector defers the decision to a writer section right
+    after the TYPE25 writer (`_make_deferred_implicit_stub`), which leaves
+    the stub out when a TYPE25 was written and writes it after all (its id
+    drawn after the TYPE25 section, named) when the writer dropped every
+    one - the first version's "the deck carries NO `/INTER`" case is gone.
+    MEASURED on `implicit/basic-examples/springback-i/doorbeam.k`,
+    base-paired at nt 4 AND nt 2 (identical to the printed digit; the
+    campaign rule, the last row of a printed time): with the stub 39
+    cycles, END +582.00 % (LS IE 2.17595e6 at t 0.0011), fifths +667.62 /
+    +1086.39 / +972.69 / +841.87 / +582.00 %, RMS 393.31 % of the LS peak
+    over the 25 LS blocks in (0, 0.0011], and the stub's starter WARNING
+    343; without it 33 cycles (0.846x), END +689.08 %, fifths +1206.19 /
+    +1002.88 / +690.05 / +531.38 / +689.08 %, RMS 313.05 %, no WARNING 343 -
+    MIXED: the END is worse and the RMS better, both arms 5-13x LS from the
+    first fifth (the deck's own deviation, round-8 NOT list). Default
+    bytes: 0 movers (doorbeam's `_0000.rad` = the 4f5b6e8 deck
+    `a7e19c8328ea`; its warning record gains the one B6 sentence). Reach of
+    the opt-in 1 deck key on 1 emitted model (the only stub carrier with a
+    TYPE25: injected on 55 keys / 39 models, emitted on 53 / 37). Tests
+    that changed their expected value: `test_r14_triage_7`
+    `VdcRemedyNotAboutTheStub.test_3` (renamed
+    `test_3_a_TYPE25_only_deck_gets_the_stub_and_no_stub_sentence`: the
+    round-7 shape is the default again, no flag); `test_r14_triage_8`
+    `ImplicitStubWithType25` re-derived for the inverted default (the
+    default pinned to the 4f5b6e8 SHA, the opt-in on the written set, the
+    all-dropped arm, the coupon's two starters) and the part-B header's
+    byte-mover total 8 / 8 -> 7 / 7.
+  - **B7 (f') — the ELFORM 1 / 2 / 6 thick-shell sentence and README now
+    name the measured mechanism: distortion locking of the 8-node brick on a
+    thin single layer, not "stiffer through the thickness".** On a simply
+    supported 8 x 8 plate coupon against the Navier closed form (the
+    round-8 pre-research, nt 4 = nt 2) the brick route is exact on a
+    regular mesh (a/t 100 -0.18 %, a/t 10 +4.61 %; a mid-surface shell
+    -0.22 / +4.87 %) and locks on a distorted thin layer: -78.75 % at the
+    scored node against its own closed form 0.210006 mm, a mid-surface
+    shell -2.01 % (the pre-research's -78.88 / -2.63 % compared the node
+    with the CENTRE's closed form, 37.5 mm away); ex_02's 30 / 150-degree
+    parallelograms are that case (LS-DYNA ELFORM 2 IE 18.7x the brick
+    answer), and LS-DYNA calls its thick-shell forms 3, 5 and 6 "distortion
+    sensitive" (Vol I R17 p.41-116 Remark 1). README's "locking-free" is
+    now attributed to the CFG label it comes from (`prop_p20_tshell.cfg:136`
+    / `prop_p14_solid.cfg:198`) with the distortion caveat. Text only: the
+    3 `_elform_2` keys on 3 emitted models re-texted, all 9 thick-shell keys
+    byte-identical.
+  - **B7 (g) — the implicit thick-shell `/PROP/SOLID` route (round 7, A4)
+    also takes LAW2 / LAW36 / LAW44 and carries the deck's NIP (`Inpts
+    2*100 + NIP*10 + 2`, `_tshell_inpts(14, NIP)` whatever the ELFORM;
+    LAW1 stays 222), under the existing `--no-implicit-tshell-solid`.**
+    Measured on a plastic thick-shell cantilever coupon (the round-8
+    pre-research: L/t 100, one element through the thickness,
+    elastic-perfectly-plastic, nt 4 = nt 2): `/PROP/TYPE20` stops at cycle 0
+    on all three laws (the `S8CKE3` tangent integrates the thickness with
+    one point, `s8cke3.F:354-364`); Inpts 222 runs but never yields
+    (plastic work 0); Inpts 252 ends NORMAL in 21 cycles (the coupon
+    converted here: 21 cycles, nt 4) with the tip -3.64 % against the
+    closed form at 0.9 M_p (-2.54 % against the TYPE20 thick shell run
+    quasi-statically in explicit: the constant-thickness-stress step is
+    off on `/PROP/SOLID`, `hm_read_prop14.F:305`). A LAW1 part sharing a
+    routed section is reset to 222 by the starter (WARNING 791,
+    `sgrtails.F:694-704`; measured on a mixed probe, 0 errors), which the
+    warning names; other laws and TYPE21 / TYPE22 keep their card with a
+    reworded warning; the NIP > 9 clamp sentence names the routed Inpts
+    292. Reach 0 deck keys on 0 emitted models (every implicit thick-shell
+    carrier is `*MAT_ELASTIC`; the 9 keys byte-identical, the LAW1 probe's
+    card pinned at 222 by its 4f5b6e8 SHA). Tests that changed their
+    expected value: `test_r14_triage_7` `ImplicitThickShellSolidRoute`
+    test_7 (a plastic law is now routed with Inpts 252 - "*MAT_ELASTIC
+    only" is retired) and test_9 (a mixed LAW1 + plastic section is routed
+    with 252 and the 791 sentence).
+  - **B8 — `*CONSTRAINED_JOINT_SCREW` without a drive is converted, with a
+    transverse inertia pad; a redundant standard code on a screw body is
+    merged instead of refusing the joint; the contact split names its
+    residual drift (under `--no-joint-screw-gjoint`, default ON; no new
+    flag).** (q-i) A screw whose deck states no
+    `*BOUNDARY_PRESCRIBED_MOTION_RIGID` on either body (recorded before the
+    VAD screen, `state.pm_rigid_stated_pids`: a refused VAD 3 / 4 drive is
+    not "no drive" and still refuses) is converted without
+    `/IMPVEL/LAGMUL` and without its `/FUNCT`; OpenRadioss's Lagrange solver
+    divides a rotational acceleration by ONE scalar per node, the main
+    node's `IN` = the body's smallest principal inertia (`inirby.F:838`,
+    `lag_mult_solv.F:393`), so A's `/RBODY` gets its screw-axis inertia
+    `I_axis` added to the two J cells normal to the axis (on top of A2's
+    `-SUM(IN)`; locked by `/BCS/LAGMUL`). Measured on EXP_SC_JOINT_SCREW
+    minus its drive (nt 4, the round-8 critic's `scN1p` / `scN1` T01s, read
+    again here): a 150 rad/s spin projects to 147.716 rad/s, the closed form
+    `I ω0 / (I + PARM² μ)` (145.989 without the pad), and an axial load pair
+    follows its closed form within 0.05 % with a 0.0 % energy error (+75.5 %
+    and +75.6 % without the pad; the critic's arms, not re-read here). On
+    the synthetic fixture (nt 4, the branch): the
+    driven deck ends NORMAL in 69627 cycles (starter 0 errors) with
+    `x_B - x_A = 25 θ` at every fifth to −0.009 mm (one cycle of the
+    6250 mm/s relative speed: the output lag); its undriven twin under an
+    `*INITIAL_VELOCITY_RIGID_BODY` spin of 150 rad/s projects at cycle 1 to
+    73.449550 rad/s against the closed form 73.449550 (I 0.0314, m_A 3.14e-4
+    plus the 1e-6 t carriage, m_B 6.28e-5; −1.1e-10 relative) and holds it to
+    t 0.0999 (+1.9e-9), NORMAL in 69627 cycles — the projection removes
+    51.0 % of the initial kinetic energy at cycle 1, which the listing
+    prints as its ERROR. The pad's own effect, on a FLAT twin of A (2 mm
+    along the axis, I_axis 6.28e-4 against a transverse 3.17e-4; nt 4,
+    NORMAL in 69627 cycles on both arms): 20.019806 rad/s against the
+    closed form 20.019807 with the pad, 10.825171 without it (-45.9 %, the
+    closed form with the smallest principal inertia standing in, which is
+    what the Lagrange solver uses). A driven screw gets no pad (EXP_SC_JOINT_SCREW and
+    the driven mini screw keep their 4f5b6e8 bytes). (q-ii) Refusal 11 by
+    DOF class: a `*NODE` TC/RC, `*BOUNDARY_SPC` or `*CONSTRAINED_GLOBAL`
+    code on a body node that acts only on DOFs the converted joint already
+    holds (both bodies' translations normal to the axis, A's two rotations
+    normal to it, all three of B's) is written nowhere (the member is
+    skipped by `_make_bcs` and the TC/RC pass, ONE predicate
+    `screw_merged_members`) and named; one on the drive's DOF, on a free DOF
+    (the axial translation; A's spin on an undriven screw), in a local
+    system, or a nodal prescribed motion still refuses (a kept conflicting
+    RC 1 left the screw unturned while the nut travelled 186.06 mm behind
+    NORMAL TERMINATION; folded into the Lagrange row it stopped at cycle 3,
+    MESSAGE 110 RIGID BODY UNSTABLE — the critic's `scRC1k` and g3q's
+    `RC1f` run dirs). (q-iii) The split's warning names the residual drift
+    of the rigid-deformable pairs (at most 0.0560 mm on a screw node and
+    0.0250 mm on a nut node after the shell contact, against the one-cycle
+    output lag of 0.0145 mm before it, read from the critic's `scB0` T01 at
+    `t <= 0.085` / `> 0.085`); the pair predicate is now
+    `joint_screw.lagrange_held_pairs`, which a future Lagrange emitter on
+    rigid bodies inherits. (q-iv) `test_the_F_deck` runs on a SYNTHETIC
+    look-alike built by `tests/fixtures/screw_synthetic.py` (the same part,
+    joint, curve and contact ids and top node id; no DYNAmore data), so the
+    Windows CI skip guard tightens 16 → 15 (15 measured on Windows with the
+    corpora and lasso-python hidden). Reach: 0 byte movers;
+    EXP_SC_JOINT_SCREW SHA-identical, its split sentence re-texted (1 deck
+    key on 1 emitted model). Tests that moved: `test_r14_triage_7`
+    `JointScrewGjoint.test_every_refusal_class_keeps_the_65ff389_bytes` (the
+    held `*NODE` TC 3 and `*BOUNDARY_SPC` DOFY subtests and "no drive" now
+    convert - re-homed in `JointScrewRound8`; the GLOBAL and nodal-motion
+    needles carry the class words), `test_refusal_11_mirrors_what_is_written`
+    (its refused arm takes TC 1, a free DOF, since TC 3 is held) and
+    `test_the_F_deck` → `test_the_synthetic_deck`; the three
+    `writer/rbody.py:` registration-line citations moved with the pad hook.
+  - **B9 — B4's tied-node refusal notes now state the measured mechanism
+    (text only).** A plain `/INTER/TYPE2` is outside OpenRadioss's Lagrange
+    system (`lag_ntag.F:131` admits a TYPE2 only when `IPARI(33) = 1`, which
+    only `/INTER/LAGMUL/TYPE2` sets, `hm_read_inter_lagmul.F:92-93`), and
+    every cycle INTTI2 (`resol.F:7675`) overwrites the kinematic secondaries
+    with their main facet's motion (`i2vit3.F:504-509` / `:810-815`) before
+    LAG_MULT (`:7901`) corrects their main node — a reading of the code
+    order, not instrumented. On second geometries (the round-8 critic's G4
+    S / U arms, nt 4 = nt 2, window 0..3 ms; the ratios re-read here from
+    their T01 GLOBAL groups at the last fifth) an `/MPC` on main nodes creates
+    energy on BOTH Spotflags (solid blocks: IE + KE x130.9 the external work
+    on 28, x50.54 on 27; a shell edge on a solid face x1983 on 27), while a
+    term between a secondary and nodes outside every tie balances (−0.003 /
+    −0.006 / −0.009 / −0.011 / −0.011 % at the fifths with the tie's contact
+    energy counted; the listing's ERROR column, which leaves it out, prints
+    −1.1 %). The round-7 note called the mechanism "not characterised" and
+    implied Spotflag 27 was safe ("held on that probe"): both are corrected,
+    here and in ROADMAP (round-7 item 14 and the B4 record); B4 keeps
+    refusing every Spotflag, both sides. 0 movers (B4 never fires on a
+    corpus). The 'tied' needle `no Spotflag is exempt` survives on purpose:
+    it now closes the new sentence.
+  - **B10 — `*CONSTRAINED_SHELL_IN_SOLID` can be written as an
+    `/INTER/TYPE18` penalty coupling (opt-in `--shell-in-solid-coupling`,
+    default OFF).** OpenRadioss has no embedded-shell constraint; TYPE18 is
+    penalty-only (`i18for3.F:273-290`), so the stiffness is a stated
+    choice: `Stfval = 0.1 x K_host x A_seg^2 / V_host` (LS-DYNA's default
+    coupling fraction of the solid-segment stiffness; PSSF on the
+    `_PENALTY` form, card 2 now read: START / END / PSSF), `Gap` = half the
+    mean host edge, plus — on an `*INITIAL_VOID` host of the card only —
+    the void density (`RHO_I = VFACT x RO` from `*CONTROL_ALE` card 2, now
+    read; the EOS `RHO_0 = RO`; a copy MID when another part shares the
+    `*MAT_NULL`). Every id is drawn after the last refusal screen (a
+    Lagrangian host, another EOS, RO / C <= 0, no shell, START < 0, END <
+    0), and a refused card keeps the default bytes plus one named sentence
+    (each refusal probe and the coupled probe pass the starter at nt 4 with
+    0 errors). Measured on bird-el (nt 4, the only carrier on five
+    corpora): the plate -100 -> -28.26 %, the deck IE +1134.62 -> +42.28 %
+    / KE -92.06 -> -38.13 % (RMS 1102.65 / 162.68 -> 30.51 / 4.88 % of the
+    LS peak), at 8.936x the cycles; insensitive to Stfval x0.5 / x2. Not the
+    default: the density half fails on both `*CONSTRAINED_LAGRANGE_IN_SOLID`
+    void hosts (bird_B stalls on the TYPE18 sort step at t 2.227e-4;
+    quadrature_B reaches 3.6 % of its run in 600 s), so the scope has one
+    member, and the CLIS decks (bird_B, quadrature_B / _C, ale_wavehitcol,
+    forging_B, stagnation_A / _B, cylinder_impact_B and the four Ryan_Lee
+    W12 copies) are byte-identical under the flag. The default warning now
+    quotes this arm instead of round 7's Vref-calibrated ones (+195.21 % /
+    1.016x / 4.506x, and "refuted as a general rule in round 6"). Default
+    bytes: 0 movers (bird-el SHA-identical, its sentence re-texted). Test
+    that moved: `test_r14_triage_7` `ShellInSolidNamed`
+    `test_one_named_warning_and_still_skipped` (its round-7 needles became
+    the flag-OFF text's 2812.5 / -28.26 % / 8.936x / 2.227e-4).
+  - **B3 (h.2) — `--imflag-curve-restart` (opt-in): an IMFLAG < 0 deck whose
+    curve switches the solution method is written as ONE ENGINE FILE PER
+    SEGMENT.** OpenRadioss fixes the method per engine file (`freimpl.F:82`,
+    `:127-129`), so round 7 emitted such a deck implicit throughout and
+    named the cost. With the flag, `<stem>_000k.rad` carries
+    `/RUN/<title>/k` to the segment's end, `/IMPL` only in implicit
+    segments, `/DT` cards only in explicit ones, and `/RFILE/OFF` (and
+    `/DYNAIN`) only in the last file (run k restarts from run k-1's `.rst`,
+    `radioss2.F:817-830`); `ConversionResult.engine_paths` lists them in run
+    order, the CLI / GUI print every file and the run-order line, the
+    conversion log names them; a warning a per-file builder repeats is kept
+    once. Measured on `implicit/basic-examples/impl-expl-switch/ie_shell.k`
+    with this branch's two files (nt 4 = nt 2, the threads read in both
+    files): 92 -> 18 + 11 127 cycles, file 2 restarting at cycle 0 at t
+    0.01 from `ie_shell_0001_0001.rst`; END IE -99.87 -> -4.54 %, KE -100.0
+    -> +248.43 % (LS's end KE is 1.9 % of its peak); IE at the fifths of
+    t_end 0.025 -1.52 / +1.17 / -41.73 / +84.55 / -4.54 % (the last row of
+    each printed time); RMS 58.96 / 58.79 -> 12.07 / 12.04 % of the LS peak
+    over the 320 LS times (the campaign scorer, both engine `.out`s); the
+    post-release energy +0.09 % and the 0.270 / 0.239 ms lead at the tip
+    minima are the round-8 pre-research arms'. The synthetic strip of the
+    tests runs the same way (nt 4: 22 + 10 259 cycles, both NORMAL). Unmeasured
+    and named in the warning: an implicit dynamic segment after an explicit
+    one. Default bytes: 0 movers (ie_shell SHA-identical; its sentence gains
+    the opt-in's tail). Reach 1 key / 1 model.
+  - **h.3 — `--imflag-curve-restart` is ON by default
+    (`--no-imflag-curve-restart` keeps one implicit engine file).**
+    `ie_shell`'s two files, run in order on this branch (nt 4 = nt 2), end
+    NORMAL in 18 + 11 127 cycles with END IE -4.54 % (B3 above); the
+    default is kept because the campaign's chain runner reproduced that
+    chain (part C, C3 gate (b)): PASSED - `final_cycle` 11 145 = 18 + 11 127,
+    `engine_files` [`_0001` implicit normal 18, `_0002` explicit normal
+    11 127] at nt 4, END IE -4.5418 % / KE +248.4268 %, a hand arm at nt 2
+    every cycle row identical, 17 / 17 gate checks (campaign report §0.31). Default bytes: 1 deck key on 1
+    emitted model (`ie_shell`: `_0000.rad` SHA-identical, `_0001.rad` and
+    the new `_0002.rad` = B3's flag-on files byte for byte, the warnings
+    identical to that arm's); a scan of the 382 input files of the
+    R14 corpus finds IMFLAG < 0 on `ie_shell.k` only (136
+    `*CONTROL_IMPLICIT_GENERAL` cards: IMFLAG 1 x133, 0 x2, -9 x1). The
+    opt-out is the 4f5b6e8 file byte for byte. Tests that moved:
+    `test_r14_triage_7` `ImflagNamed`
+    `test_2_the_ie_shell_curve_is_named_and_0_bytes` measures the single
+    implicit file under `imflag_curve_restart=False`; in
+    `test_r14_triage_8` the flag moves from `Round8OptInWiringB` to
+    `Round8FlagWiringB` and `ImflagCurveRestart`'s flag-off arms pass
+    `imflag_curve_restart=False`.
+
+- **R14 CAMPAIGN TRIAGE batch, round 8 — PART A (rigid bodies, constraints,
+  springs, welds, shell thickness).** One commit per item (A2, A4, A7, A8
+  and A6 share one: their flags are wired at the same sites); every figure below
+  is a measured arm against the LS-DYNA reference on `F:` (the LS instant
+  named), base-paired in one window with the 4f5b6e8 conversion from a
+  pristine checkout, `nt 4` unless stated; histories by the campaign rule
+  (README 9.1) with round 8's tie rule — the LAST row of a printed time, an
+  equidistant fifth takes the earlier time, the RMS over the LS blocks
+  0 < t <= OpenRadioss's last row in % of the LS peak; every reach as
+  `N deck keys on M emitted models` (356 keys = 312 models).
+  - **A1 — `*MAT_RIGID` CMO = -1 was written as nothing; CON2 now becomes a
+    `/BCS` on the `/RBODY` main node in the `/SKEW` of CON1 (default ON,
+    `--no-rigid-local-constraints`).** `rbody._make_rbodies` read CON1 /
+    CON2 only for CMO +1. Vol II R17 `*MAT_RIGID`: CMO -1 makes CON1 the
+    local coordinate system ("fixed in time") and CON2 a six-digit code
+    (100000 = x translation ... 000001 = z rotation); LCO plays no part. The
+    starter reads the digits as axes of the `/BCS` skew
+    (`radioss51/LOADS/bcs.cfg:98`; `hm_read_bcs.F:164-172` the skew lookup,
+    ERROR 137; `:179-185` a digit >= 2, ERROR 1051). One helper,
+    `rbody._local_constraint`, serves the `*MAT_RIGID` card and the
+    `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO -1 card: CON1 0 = global
+    (billet-forge's results hold the code although its d3hsp prints the
+    processed constraint as 000000); a `*DEFINE_COORDINATE_SYSTEM` /
+    `_VECTOR` / FLAG-0 `_NODES` frame = its own `/SKEW/FIX` (the CNRB path's
+    false "skew_ID will dangle" on a VECTOR frame is gone); a FLAG-1 `_NODES`
+    frame = a NEW `/SKEW/FIX` at its t = 0 axes (reach 0, by the manual);
+    a code with a digit >= 2 or a seventh digit, an undefined CON1 or a
+    degenerate node frame = NO card, named, and no skew id drawn; CMO +-2 on
+    `*MAT_RIGID` named (an `/RBODY` holds a `/BCS` on its main node only).
+    **One skew per node** (`hm_read_bcs.F:199-205`, ERROR 148 'A SKEW IS
+    ALREADY DEFINED WITH THE NODE'; the same skew twice is fine, skew 0
+    counts): a `*NODE` TC/RC, `*CONSTRAINED_GLOBAL` or `*BOUNDARY_SPC` code
+    that lands on such a main node in another skew is DROPPED and named
+    (exact when the kept card states `111` for every kind it would have
+    duplicated, otherwise the lost global digits are named), for the
+    `*MAT_RIGID` and the skewed CNRB card alike — round 7's "named, not
+    refused" ERROR-148 clause (`loads._skew148_sentence`) now speaks only
+    under the opt-out; the implicit stabilisation of an unloaded free
+    translation is never added to a skewed card; a merged
+    `*CONSTRAINED_RIGID_BODIES` slave's different code is named. Starter
+    probes (nt 4): every byte-pinning probe 0 errors; the clash probe 0
+    errors, its two-skew control (the same `.rad` with the dropped code
+    written back at skew 0) ERROR 148 on node 19. MEASURED, base-paired:
+    `mat_rigid.block-slide` (3cc9d16c5e15; `/BCS` `100 111` in the VECTOR
+    `/SKEW/FIX/1`) KE END +100.10 % -> +0.05 % (LS 35982.5 at t 0.01),
+    fifths +99.96 / +100.02 / +100.01 / +99.97 / +100.10 -> -0.02 / +0.01 /
+    +0.00 / -0.01 / +0.05 %, RMS 44.81 -> 0.006 % of the LS peak (500 LS
+    blocks 0 < t <= 0.01), 2512 = 2512 cycles; the same code in the GLOBAL
+    frame (the critic's skew-0 control) stays +100.10 %;
+    `control_timestep.billet-forge` (92f0eb81c2e5; `110 111` at skew 0 on
+    the press) IE END -99.97 % -> +0.13 % (LS 995458 at t 0.0015), fifths
+    -99.91 / -99.99 / -100.00 / -99.95 / -99.97 -> +8.59 / +0.74 / -0.14 /
+    -0.00 / +0.13 %, RMS 41.95 -> 0.056 % (150 LS blocks), OpenRadioss
+    energy error -24.1 -> -3.7 %, 12501 = 12501 cycles; its KE END stays
+    +16.99 % (deviation). Reach 3 deck keys on 3 emitted models
+    (block-slide, billet-forge and the Yaris Dynamic Roof Crush giant,
+    convert-only: `011 111` in skew 1 beside its own `/IMPDISP` on
+    `/SKEW/MOV/91965` - its starter at nt 4 reads 0 errors and ONE new
+    WARNING 312 for that pair on main node 4478473); 0 status / verdict
+    moves; every CMO +1 card is
+    byte-identical. NOT fixed: an implicit CMO -1 (source-only,
+    `bc_imp0.F`), "CON1 0 is global" rests on billet-forge alone, the roof
+    crush's SF = 0 motion (its own item). EXPECTED VALUE MOVED:
+    `tests/test_r14_triage_7.py`
+    `RigidOwnBcsAbsorbsMemberTcRc.test_4_a_skewed_CNRB_SPC_card_is_NOT_merged`
+    — the member code is now DROPPED and named by default (the probe's CNRB
+    states CON2 111000, so the drop is exact); round 7's assertions are kept
+    verbatim under `rigid_local_constraints=False`.
+  - **A3 — a node that two SPC sources constrain was written in two `/BCS`;
+    now ONE union per skew (default ON, `--no-bcs-union`, one flag for
+    P1-P3).** P1 (`loads._make_bcs`): per `(node, skew)` a `*BOUNDARY_SPC`
+    card no longer restates a DOF an earlier card states — remainders in a
+    `BC_<id>_<Tra>_<Rot>` card, the card's other nodes in a
+    `BC_<id>_not_restated` group, a card left with no node writes no `/BCS`,
+    two skews never merged (named, ERROR 148). P2 / P3
+    (`loads._make_free_node_constraints`): the implicit free-node guard
+    writes on a free node only NOT(global SPC OR its `*NODE` TC/RC /
+    `*CONSTRAINED_GLOBAL` `/BCS`), the `111 111` group first under its old
+    titles (byte identity without a hit); a skewed SPC is not subtracted
+    (the guard's global card there is ERROR 148, named, reach 0). 0 physics
+    by `hm_read_bcs.F:198` `MY_OR` (LS-DYNA keeps one constraint per node:
+    sphere1.d3hsp 120 SPC nodes for 124 rows); starter WARNING 312 (one
+    condition per DOF both cards fix, `kinchk.F:945-947`) 24 / 339 / 4 /
+    30 x3 / 449 / 449 / 486 -> none on sphere1 / ex_20 / 6.1.test13r / ex_08
+    x3 / 11.2 / 11.3 / 11.5 (measured, starter at nt 4). Base-paired engine
+    runs: sphere1 (MATCH) 1592 = 1592 cycles, every printed row identical at
+    nt 4 AND nt 2 (END IE -1.66 / KE -1.73 % at LS t 9.99563e-4 on both);
+    ex_20 12 = 12 cycles, MUMPS FINAL ND / NZ 4396 / 54549 on both;
+    6.1.test13r 2 = 2, 19039 / 242287 (the rows differ only in the printed
+    controlling shell, an argmin tie); ex_08_beam_elform_1 2 = 2, 83 / 315.
+    The `.rad` bytes equal the pre-research patch arm's
+    (`r8pre/g4t/t_union_patch_v1.diff`) on all nine movers. Reach 9 deck
+    keys on 9 emitted models (514 nodes / 1841 DOFs; `_0000.rad` only; 11.2
+    / 11.3 / 11.5 are refused rows, re-converted only); non-roster 22 keys
+    on 10 models (Ryan_Lee W12 / W9 / W7_3P_Bending, Model-318_Achshebel);
+    the id shift on ex_20 re-texts its /IMPTEMP sentence (90014 -> 90015).
+    Starter probes (nt 4): the union probes 0 errors and no WARNING 312, their
+    opt-out arms WARNING 312 (2 / 2 / 1 conditions); the two-skew probe and
+    the skewed-SPC free node ERROR 148 on both arms (the deck's own clash,
+    named). No existing test changed its expected value.
+  - **A2 — mainboltaexpl's bolt no longer collapses: the bolt-end rigid
+    bodies' members stay on the contact's secondary side ((l)-2, default ON,
+    `--no-bolt-rigid-contact`) and a `*DEFINE_CURVE` point line a
+    whitespace split cannot read is read in LS-DYNA's 2E20.0 columns ((l)-3,
+    default ON, `--no-fixed-curve-columns`).** (l)-2: `_resolve_contact_slave`
+    drops every rigid member from a secondary group; LS-DYNA keeps them
+    (mainboltaexpl's d3hsp: 1601 nodes for interface 1 = 984 hex faces + 556
+    shells, incl. the 68 CNRB 110 / 120 members k2rad removed from group
+    90005), and those members carry the clamp. Now the members of every rigid
+    body (part / CNRB / extra nodes, the merged `rbody_info`) holding an END
+    node of an `*INITIAL_AXIAL_FORCE_BEAM` bolt stay on the PENALTY builders'
+    sides (`/INTER/TYPE7`, the general and `/INTER/TYPE25` routes; the TYPE2
+    family and the force transducers keep the filter — decision D5);
+    `assembly.build_starter` computes them once
+    (`contacts._bolt_end_rigid_members`) and the interface names them.
+    (l)-3: `handle_define_curve` read point lines by the whitespace split
+    only, so mainboltaexpl's fused `'               0.0055.0'` /
+    `'             0.005055.0'` were dropped and `/FUNCT/11` kept 2 of 4
+    points — the deck never pulled. A comma-free line the split reads as
+    FEWER than two numbers is now re-read in fixed 20-column fields, blank =
+    0.0 (decision D4: only where the split fails — a fixed-first read would
+    misread the misaligned two-token lines 284 suite tests write); one
+    warning per curve. Shipped together: each alone is worse (the curve alone
+    IE END +19.20 % with energy created; the nodes alone IE −62.05 N.mm, no
+    pull). MEASURED on mainboltaexpl ALONE at nt 4, base-paired with 4f5b6e8
+    (LS glstat 1000 blocks t <= 5e-3, matsum, swforc): 51762 -> 58550 cycles
+    (1.131x), IE END -81.87 % -> -8.49 % at t 5e-3 (LS 44322.1, clamped at
+    its last block 4.99988e-3), fifths +75.75 / +80.94 / -31.45 / -70.55 /
+    -81.87 -> -101.42 / -101.42 / -35.45 / -14.20 / -8.49 %
+    (the first two read -101.4 % because the codes book the preload
+    differently; the plates are the fair channel), RMS IE / KE 31.32 / 28.24
+    -> 9.19 / 10.22 % of the LS peak, the plates' IE against matsum RMS 36.39
+    -> 0.65 %, the bolt force against swforc RMS 29.11 -> 0.91 %; KE END
+    +11.86 % (the row stays deviation). The K2 = K3 x (1 - 1e-8) control on
+    the branch bytes moves only the 4th KE digit. Named residual (not
+    closed): before the pull the bolt stays 2.196 mm against LS-DYNA's 1.817
+    and the plates carry IE 1.3 vs 245.9 N.mm (Inacti 5 keeps the 0.2 mm patch
+    gap). Reach 1 deck key on 1 emitted model (`.rad`: `/FUNCT/11` +2 rows,
+    group 90005 1875 -> 1943 nodes, no id shift; `_0001.rad` identical);
+    non-roster `camry-detailed-v5a` ((l)-3: 12 blank-abscissa lines);
+    `*DEFINE_CURVE_SMOOTH` (efg/metal-cutting) and `*DEFINE_FUNCTION`
+    untouched. The empty-secondary sentence of mainboltaexpl's beam contact
+    10013 gains the `--beam-contact-secondary` hint (its bolt's end nodes are
+    no longer counted rigid on penalty sides) [REVERTED by the fix round's
+    523c6a9: the hint reads the full rigid set again and is silent on 10013].
+    (l)-4 TEXTS: the partial-rigid secondary sentence
+    (`contacts._warn_partial_rigid_secondary`, re-texted on 10 roster keys /
+    10 models incl. pipe and doorbeam, + 5 Ryan_Lee files) [the post-review
+    verification: on the shipped default it PRINTS on 9 keys - mainboltaexpl
+    prints the KEPT sentence instead, as every rigid member it removed was a
+    bolt-end one; 10 under --no-bolt-rigid-contact]
+    no longer calls keeping the rigid nodes "mostly useless" nor reads
+    mainboltaexpl's −62.05 as a percent (it is an IE in N.mm on a run without
+    the pull); round 7's "moves by run sensitivity" (cli / state / __init__ /
+    README / ROADMAP x2) now names the cause — the row was hypersensitive
+    because its bolt collapsed (a K2 = K3 x (1 − 1e-8) cell moves 46343 of
+    51762 rows on 4f5b6e8, the 4th KE digit on 60 of 58550 with both rules).
+    EXPECTED VALUE MOVED: `tests/test_r14_triage_7.py`
+    `Round7ValidationRound.test_the_replacements_really_are_shipped` — its
+    four 'by run sensitivity' needles re-pointed to the new spellings
+    (retracted spellings guarded in `tests/test_r14_triage_8.py`).
+  - **A4 — `*SECTION_SHELL` Card 2's `T2..T4` are read: a card with one of
+    them written, nonzero and different from `T1` is written with
+    mean(T1..T4) (blank / 0.0 = `T1`), with its NAMED energy-error cost
+    (default ON, `--no-section-nodal-thickness-mean`).**
+    `handlers.handle_section_shell` read `T1` only; LS-DYNA's d3hsp
+    reproduces the mean on every element (cup-draw, secid 2, T 1000 / 1 / 1 /
+    1 → 250.75: the rigid tools echo 0.22256585E-01 / 0.16423579E-01 /
+    0.13927504E-01; the starter now prints 0.2225658E-01 / 0.1642358E-01 /
+    0.1392750E-01, against 0.8876006E-01 / 0.6549782E-01 / 0.5554339E-01
+    with `T1`). The raw card is kept (`SectionShell.card2`) and
+    `mesh._warn_section_card2` names it once per used section, the cost in
+    the same sentence; the 2-D ELFORMs are A7's. MEASURED on cup-draw (nt 4,
+    base-paired; LS 7120.49 at t 0.015): 70686 → 70734 cycles (1.0007x), IE
+    END +11.90 → +6.09 %, IE fifths +243.89 / +718.34 / +92.05 / +23.99 /
+    +11.90 → +94.45 / +73.79 / +40.19 / +8.79 / +6.09 %, KE fifths +11.08 /
+    +315.84 / +265.13 / +88.44 / +111.44 → -75.31 / +211.55 / +6.38 / -53.55
+    / -40.31 % (the KE END is a phase sample of the bouncing holder), RMS IE
+    / KE 7.54 / 65.93 → 2.89 / 29.15 % of the LS peak (150 LS blocks 0 < t
+    <= 0.015) — and OpenRadioss's energy-error column: mean -4.39 → -17.88
+    %, thirds by row -7.20 / -3.62 / -2.35 → -22.11 / -19.08 / -12.45 %,
+    rows below -20 %: 3857 → 18456, END -0.9 → -14.1 % (mechanism not
+    closed). `section_shell.hourglassing` (4.7625 → 4.762125): 6682 = 6682
+    cycles, IE END +60.53 % on both, 46 of 6682 printed rows differ in a
+    value column (the 4th digit; 243 more only in the controlling element
+    id). Reach 2 deck keys on 2 emitted models (`.rad`: cup-draw's Thick +
+    its three `/RBODY` J rows, hourglassing's Thick; `_0001.rad` identical);
+    both rows stay deviation. Starter probe (rigid 10 x 10 quad, T 4 / 1 /
+    1 / 1 → 1.75): NEW MASS 0.1373750E-05, xx = yy = 0.3434375E-04, zz =
+    0.6868750E-04, 0 errors.
+  - **A7 — a plane-strain `*SECTION_SHELL` (ELFORM 13 / 43 / 52 / 55) is
+    written with thickness 1.0 (default ON, `--no-plane-strain-unit-thickness`);
+    axisymmetric ELFORM 14 / 15 / 44 are named.** Vol I R17 `*SECTION_SHELL`
+    Remark 6: formulations 13, 14, 15, 43, 44, 52 and 55 ignore Card 2's
+    thickness, and a plane-strain element integrates a unit depth.
+    `ex_16_thin_shell_elform_13` (rigid disk, T 25.4), starter at nt 4: NEW
+    MASS 0.8756308E-01 → 0.3447366E-02 = LS-DYNA's 0.34473655E-02, NEW
+    INERTIA 0.5652833 / 0.5652835 / 1.130567 → 0.2225525E-01 x2 /
+    0.4451050E-01, xy -0.1145887E-09 → -0.4511368E-11 (LS -0.4511E-11); the
+    same 10 ERROR lines (IDs 274, 314-317) on both arms — the row stays
+    error_starter. The element stays a 3-D shell, plane-STRESS through its
+    thickness: the plane-strain warning says so on every such section, and
+    the axisymmetric one names the per-radian mass no thickness reproduces
+    (2Dlag x157.5) whatever the flag. Reach 1 deck key on 1 emitted model
+    (`.rad`: Thick + the `/RBODY/1005` J row) + 4 text movers (bar2.k the
+    plane-strain sentence; 2Dlag.k, main_selfforgingrivet.k and
+    metal-forming.k the axisymmetric one). Starter probe (rigid ELFORM-13
+    quad, T 25.4 → 1): NEW MASS 0.7850000E-06, xx = yy = 0.1962500E-04, zz =
+    0.3925000E-04, 0 errors.
+  - **A8 — an `*ELEMENT_MASS` on a rigid body's SECONDARY node is written as
+    `/ADMAS/0` on that node, for both producers (default ON,
+    `--no-rigid-element-mass-admas`).** (i) `rbody._make_rbodies` folded
+    every member's `*ELEMENT_MASS` into the `/RBODY` Mass field, which the
+    starter places at the main node it moves to the CoG of the secondaries
+    without that mass; (ii) `_make_cnrb_rbodies` folded only the main
+    node's, so a CNRB secondary's mass was LOST (neither the Mass field nor
+    an `/ADMAS`; the "left to the /RBODY" sentence was false), as was a
+    `*MAT_RIGID` member's under `--no-rigid-cog-master`. Now
+    `state.rbody_folded_mass_nodes` (every main node + every ICoG-4 member)
+    is the one set `_make_added_masses` skips; a secondary's mass becomes
+    `/ADMAS/0` (`hm_read_admas.F:247-248` adds it before the rigid bodies,
+    so it counts at its position); ICoG-4 bodies are unchanged
+    (`inirby.F:265-266`, TM supersedes); one warning per deck names the
+    nodes and what each had (folded / dropped). MEASURED (nt 4,
+    base-paired): sph/foam/foam.k body 1001001 CoG z 121.4891 → 150.9633,
+    xx / yy 1.922978 → 2.238421 (LS-DYNA 150.96326 / 2.238), NEW MASS
+    0.2035675E-01 on both; engine 12030 = 12030 cycles, IE END +311.22 →
+    +311.27 %, RMS IE / KE 106.69 / 18.76 → 106.70 / 18.76 % (50 LS blocks)
+    — inert on that axial fall. The `--mass-weighted-inivel` probe (A8.3: a
+    rigid plate with 1e-4 on corner node 9, `*INITIAL_VELOCITY_NODE` on its
+    node 1 and on the elastic nodes): the default's starter CoG 19.69556
+    (the true one), zz 0.9228811E-03, cycle-0 K-ENERGY R 0.8094E-02 =
+    LS-DYNA's momentum average L^2 / (2 I); the fold's CoG 10.0, zz
+    0.3140000E-03, K-ENERGY R 0.2754E-02 (-66 %) from the same written
+    omega. Starter probes (0 errors): the part body NEW MASS 0.1000314E-01
+    at CoG 19.99686 (opt-out 10.0), the CNRB body 0.1000118E-01 (opt-out
+    0.1177500E-05). The Yaris roof crush (starter only, nt 4, both arms 0
+    errors): its 12 CNRB bodies' NEW MASS against LS-DYNA's d3hsp -38.2 ..
+    -85.5 % -> within 0.54 % (2300387 -85.536 -> +0.064 %, the largest
+    residual 2301751 +0.542 %), TOTAL MASS 0.3755060564528 -> 0.3761061164528
+    (+6.0006e-4). Reach 5 deck keys on 5 emitted models (foam + the 4
+    Yaris giants, convert-only). EXPECTED VALUES MOVED:
+    `tests/test_converter.py`
+    `RigidCogMasterTests.test_flag_folds_secondary_element_mass` and
+    `tests/test_rigid_inertia_rbe3.py`
+    `PartInertiaTests.test_element_mass_without_inertia_still_reports_the_mass_field`
+    — default Mass 0 + `/ADMAS` on the secondary node; the old assertions
+    kept under `rigid_element_mass_admas=False`.
+  - **A6 — `*MAT_SPOTWELD` DT is converted by the TYPE13 closed form
+    (default ON, `--no-spotweld-dt-mass-scaling`); round 7's x13.42
+    statements retracted.** `loads._make_spotweld_beam_connectors` dropped DT
+    ("no /PROP/TYPE13 slot"). Vol II R17 `*MAT_SPOTWELD` Remark 4 scales the
+    weld inertias UP so that their stable step is DT; the TYPE13 step is 0.9
+    min(sqrt(M / max K1..3), sqrt(I / (max K4..6 + max K2,3 L^2)))
+    (`r2len3.F:221-247`, STI = XM/DT^2 at `:233`; `r4def3.F:165`, `:173`,
+    `:545-547`). Mass' = max(M, max K1..3 DT^2), Inertia' = max(I, (max
+    K4..6 + max K2,3 L_max^2) DT^2), `L_max` the property's longest weld
+    (the K's keep the mean length); the token branch takes it too and stays
+    a token property (decision D11); DT leaves the dropped list; a DT the
+    weld's own step already exceeds is named inert. MEASURED on spotweld.k
+    under the opt-in rules 1 + 2 (nt 4, base-paired; LS problem cycle 1332):
+    Mass 6.283185E-06 → 1.570796E-05 (x2.5, LS-DYNA's own factor), Inertia
+    2.094395E-06 → 2.809309E-05 (x13.41), first step 0.2457E-06 →
+    0.9000E-06 on SPRING 1, last cycle 4791 → 1332 = LS-DYNA's, model mass
+    0.1343E-03 → 0.1437E-03 (+7.0 %), IE END -33.00 → -31.18 %, RMS IE 6.66
+    → 6.82 % (1331 LS blocks) [the post-review verification, the campaign's
+    history rule: RMS IE 6.65 → 6.82 % and RMS KE 23.09 → 23.66 % - a MIXED
+    pair, the histories worse]. Coupon (test 1): the starter's SPRING step
+    9.9999990E-07 (= DT), the engine's 0.9000E-06 on all 12 cycles. Default
+    byte movers 0 deck keys (MAT_100 with DT > 0 on the roster:
+    plates.mat100 — factors 1, SHA-identical, its DT sentence now says
+    inert — and spotweld.k under rule 1 only). RETRACTED (ROADMAP item 11):
+    round 7's "calibration ×13.42 reaches LS-DYNA's step count, 1339
+    against 1332" (the INERTIA factor applied to the mass as well: +58 %
+    model mass, KE first fifth +101 %), its "+7.85 % at the matched end" (an
+    artefact of that mass) and "the engine's STI formula was not located";
+    guarded. EXPECTED VALUES MOVED: `tests/test_connectors.py`
+    `SpotweldBeamTests.test_dropped_fields_warn` (DT 1e-6 + TFAIL: now the
+    converted sentence, Mass x 6.731 / Inertia x 37.12 by hand, and a
+    dropped sentence naming TFAIL alone) and `tests/test_r14_triage_7.py`
+    `test_7_the_efail_opt_out_keeps_EFAIL_dropped` (+ the inert sentence);
+    the old assertions kept under `spotweld_dt_mass_scaling=False`.
+  - **A5 — the spring token MASS adapts to the end-node masses, with the
+    driven-end skip (default ON, `--no-adaptive-spring-token`).** A token
+    `/PROP` (TYPE4 / TYPE8 / TYPE13, k2rad's 1e-4 on a massless LS-DYNA
+    discrete element) steps on its PROPERTY mass (`r1len3.F:175`,
+    `r2len3.F:221-247`) while round 6's S2 compensation takes the token back
+    off the ends, so a light end could outrun the spring's own step with
+    nothing to stop it. `loads._adaptive_spring_token`, a post-pass at the
+    start of `_make_added_masses` (the four token producers record their
+    `/PROP` id, type, Ileng and element length in
+    `state.spring_token_props`; `_register_imp_motion_nodes` records each
+    global motion's window in `state.imp_motion_windows`), writes MASS =
+    max(1.1e-15, min(1e-4, 2 mu min(1, 2/n))) per `/PROP`, mu from the ends'
+    own masses (the S2 screen's), n the busier end's token-spring count, per
+    unit length on Ileng 1; a rigid, connector-ground or DRIVEN end (global
+    SPC, `SF = 0` motion, emitted `*NODE` TC / `*CONSTRAINED_GLOBAL` code,
+    a skew-0 `/IMP*` with sensor 0, `tstart <= 0` and `tstop` 0 or >= ENDTIM,
+    covering the spring's stiff directions: a TYPE4's free axis components
+    <= 1e-6, all three on a TYPE8 / TYPE13) counts infinitely heavy; a
+    spring with both ends infinite keeps the token; a guarded end sets no
+    cap and a guarded spring sharing a rewritten `/PROP` carries its smaller
+    MASS (decision D7, named); a token weld whose `*MAT_SPOTWELD` DT raised
+    its Mass (A6) is left alone (its cell is no longer the token its springs
+    registered). The MASS cell is rewritten in the emitted lines (header,
+    comment row and old value asserted) and the shares move by the PRINTED
+    value, so the negative `/ADMAS` stays exact. The LIGHT clause labels a
+    both-driven spring's light end DRIVEN (`bcs1.F:56-89` BCS1V via
+    `bcs10.F:62`, `fixvel.F:370-372` overwrite the acceleration there) - the
+    part-A spec's `bcs2.F:145-199` is BCS2V, the ALE grid routine, corrected
+    here; the token sentences name the share actually left on a guarded,
+    orphan or rigid node once a cell moved (W-A5 names the cells). MEASURED
+    (nt 4, starter + engine): the fixed token was killed by the energy-error
+    limit (MESSAGE 205) behind a NORMAL TERMINATION banner on the g3n coupons
+    D2 (cycle 5, I-ENERGY 0.7503E+39) and D4 (cycle 3) and on round 6's i14
+    (cycle 6, IE 1.578e22); the rule runs D2 / D4 4970 cycles and i14 50163
+    cycles (first step 3.987e-8, IE + KE 499.96 of the launched 500), NORMAL,
+    no MESSAGE 205; D1 / D3 keep the token (23 = 23 cycles); a whole-run
+    motion drives, a BIRTH 0.005 one does not (7028 cycles NORMAL, the fixed
+    token killed at cycle 11). Base-paired movers: `plates.nrbc` 2407 = 2407
+    and `plates.spot` 2407 = 2407 (every printed row identical; plates.nrbc
+    IE / KE END -18.99 / +12.75 % at t 0.001999 on both arms),
+    `constrained.spotweld.plates` 18133 = 18133 (40 rows differ only in
+    which of its three identical weld springs is printed controlling),
+    `plates.k` 14968 = 14968 - 1.000x. Byte signature (two-tree, from F:):
+    the MASS cell + the S2 compensation group's title and its negative
+    `/ADMAS` value (`plates.nrbc` `-5.000000E-05` -> `-7.850000E-07`);
+    `gnonspring`, `ex_16`, the match rows `ex_17` / `ex_18` byte-identical
+    (gnonspring's REMOVED sentence gains the DRIVEN label). Reach 6 deck keys
+    on 6 emitted models (the 4 above + the 2 Yaris suspension giants,
+    `/PROP/TYPE4/107020` 1e-4 -> 5.483321e-7, convert-only). EXPECTED VALUES
+    MOVED (the 29 tests of the part-A spec + one subtest): the adaptive token
+    moves the token cell each probe pins; the fixed-token assertions are kept
+    VERBATIM under `adaptive_spring_token=False` and the default's cells are
+    pinned beside them, each re-derived by hand in its docstring -
+    `test_r14_triage_4` `SpringTokenMassCompensationTests`
+    `test_the_degenerate_node_keeps_its_own_mass_and_is_named` (+ a
+    both-driven probe that keeps the degenerate class reachable);
+    `test_r14_triage_5` `SpringTokenNegativeAdmas` x4 (+ a held-weld probe),
+    `DiscreteBeamTokenIsLengthScaled`, `SpringTokenExactZeroBoundary` x2;
+    `test_r14_triage_6` `SpringTokenLumpedScreen` x6,
+    `PostReviewSpringScreenSolidNode`; `test_r14_triage_7`
+    `LightClauseNumbers` test_1 (8 subtests), test_2, test_3, test_5 (+ 2
+    subtests), test_7 and test_8's prescribed-axis subtest (the DRIVEN
+    label; bytes identical to the opt-out's).
+  - **A9 — the half-A records and guards (text and tests only).** ROADMAP
+    round-7 item 13: the rigid-tool masses of `ex_16` / `cup-draw` now equal
+    LS-DYNA's d3hsp (A7 / A4, with cup-draw's energy-error cost), and the
+    `*CONSTRAINED_RIGID_BODIES` merge is MEASURED - the two-plate merge probe
+    (`Round8Records`, g3o's `mrg_flat.k` inlined: one `/RBODY`, J
+    -1.088533e-4 x3) starts at NEW MASS 0.1256000E-04, NEW INERTIA
+    0.6280000E-03 / 0.1884000E-02 / 0.2512000E-02 with zero products, the
+    point-mass tensor to the 7 printed digits (starter, nt 4, 0 errors); the
+    pre-research's right-angle / no-shared-node twins, Yaris merged bodies
+    and the implicit rule keys are quoted as theirs. `Round8FlagWiringA`
+    checks the nine part-A flags at every wiring site (parser + `--no-`
+    twin, README prose, the `--help` render with its measured figures, the
+    GUI end to end, `convert()` / `ConvertOptions` default True,
+    `cli.main()`'s call); `Round8RetractedStatementsA` keeps the retracted
+    spellings out of every shipped text but this file (round 7's
+    "calibration ×13.42" / "×13.42 reaches" / "STI formula was not located"
+    / "+7.85 % at the matched end", the "run sensitivity" readings of
+    mainboltaexpl, the partial-rigid sentence's "MOSTLY USELESS" /
+    "COLLAPSES to -62.05" / "-62.05 %", and the critic's "not caused by the
+    cell" / "the mass cell does not create it" / "pre-existing balance
+    problem" on cup-draw), fires on each split across two literals and on a
+    prefix, and asserts the replacements are shipped.
+
 - **R14 CAMPAIGN TRIAGE batch, round 7** — the first round since #138 whose
   DEFAULT changes move campaign VERDICTS by measurement, not by definition:
   six deviation → match movers (sph/bird, channel_A, channel_B, channel_C
@@ -29,7 +938,9 @@ Prior history (before this changelog was introduced) is summarized in the
   → normal under A4 (28 cycles at nt 4 and 2; not_comparable stays). Named
   history costs printed beside their improvements: ex_15 ×3 (A4), brake /
   transducer / translat (A2), mainboltaexpl (A3; re-attributed by the
-  validation round to run sensitivity, not the yield), impact.k's first fifth and
+  validation round to run sensitivity, not the yield — corrected in round 8:
+  the row was hypersensitive because its bolt collapsed, which round 8's A2
+  closes), impact.k's first fifth and
   underwater_A's END sign (B1), EXP_SC_JOINT_SCREW's exact joint (B2: IE
   −100 → +42.76 %, it stays a deviation); doorbeam re-measured on the A2
   arm: identical (39 cycles, +582.00 %, all 41 printed rows at nt 4 and nt
@@ -149,7 +1060,9 @@ Prior history (before this changelog was introduced) is summarized in the
     carries the same filter: over every row the shipped arm's IE RMS is
     393.31 and the stub-removed arm's 313.05 (END and fifths unchanged; no
     other figure-bearing arm of the round prints an `SH_3N` row).
-    `mainboltaexpl` moves by run sensitivity, not by A3's yield: its weld
+    `mainboltaexpl` moves by run sensitivity, not by A3's yield (corrected
+    in round 8: hypersensitive because its bolt collapsed - with round 8's A2
+    the same 1e-8 cell moves only the 4th KE digit on 60 of 58550 rows): its weld
     shear never exceeds 13789 against the new yield 29021, both arms are
     nt-deterministic and part at cycle 5484 in the 4th digit, and the 65ff389
     card with `K2` and `K3` scaled by `(1 − 1e-8)` moves it the same way (END −80.35 /
@@ -398,7 +1311,9 @@ Prior history (before this changelog was introduced) is summarized in the
     a stated `Stfval` 562.5 alone: plate +195.21 % at 1.016× cycles; with
     the void density: deck IE +37.77 / KE −34.27 %, plate −30.29 % at 4.506×
     cycles — the density cell was refuted as a general rule in round 6 and
-    the `Vref` stiffness is a one-deck calibration). Its two ids travel
+    the `Vref` stiffness is a one-deck calibration) [superseded in round 8:
+    the deck rule Stfval = 0.1 K A²/V and its measured arm, see the round-8
+    B10 entry]. Its two ids travel
     through `*INCLUDE_TRANSFORM` in the bucket the type cell beside them
     names (`assembly._off_constrained_shell_in_solid`).
     `*CONSTRAINED_BEAM_IN_SOLID` stays a plain skip (reach 0). Reach 1 deck
@@ -463,8 +1378,10 @@ Prior history (before this changelog was introduced) is summarized in the
     is kinematic). ELFORM 6 is emitted as a Lagrangian one-point solid
     (round 5), so the scope is the deck's statement — the measured channel
     family. Elsewhere MU is named and not carried: impact.k's Lagrangian bar
-    nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) and
-    bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
+    nearly triples its IE under the cell (10.3 → 29.6 vs LS 15.7) [corrected
+    in round 8: that pair mixed a no-PC-cell base with a PC + Nu arm; at the
+    shipped PC cell the bar is 16.60 → 29.58 mJ, see the round-8 B4 entry]
+    and bird_B creates energy (ERR 99.9 %); SPH, ELFORM 5 / 7 / 11 / 12, AMMG and
     mixed materials are named too (the validation round gave the two halves
     of bird_B's class their own sentences: an ELFORM-12 part on a deck
     without `*INITIAL_VOID`, and a non-ELFORM-12 part on a deck that states
@@ -815,7 +1732,11 @@ Prior history (before this changelog was introduced) is summarized in the
     (ELFORM 42 "efg 3d for 4-noded background") and the measured
     consequence (the implicit run cannot carry the constrained cutting:
     ERROR at cycle 26 on 4 of 4 runs; Itetra4 3 ends NORMAL at ERR 91.2 %
-    without a cutting result — not shipped, ROADMAP). 1 key / 1 model.
+    without a cutting result — not shipped, ROADMAP). [Corrected in round 8:
+    the 91.2 % was one run's energy error (52.9 .. 99.9 % over seven runs),
+    the internal energy climbs after ~6e-3 s, and LS-DYNA's run A holds six
+    d3plot states to 3.6 % of t_end — see the round-8 B2 entry.] 1 key / 1
+    model.
     (iii) A named warning for `*CONTROL_IMPLICIT_GENERAL` IMFLAG < 0 (its
     curve's schedule, from the new pure `imflag_segments`, against
     OpenRadioss's one-method-per-engine-file rule, `freimpl.F:82`,
@@ -829,7 +1750,7 @@ Prior history (before this changelog was introduced) is summarized in the
     emission is NOT shipped this round (see ROADMAP). (iv) The spring-token
     warning's LIGHT clause gains, per light node and spring, the two-mass
     critical step `2 sqrt(mu / K)` against `Tsca ×` the spring's own step
-    (`r1len3.F:175` for a TYPE4, `r2len3.F:182-186` for a TYPE8 / TYPE13),
+    (`r1len3.F:175` for a TYPE4, `r2len3.F:221-247` for a TYPE8 / TYPE13 [round 8: corrected from `:182-186`, the nodal-step / AMS branch a default run never takes]),
     PROTECTED / UNPROTECTED, the silent symptom and the remedies — inside
     the LIGHT arm only (a sentence in the shared token text would move all
     14 carriers). The springs are recorded at their four registration
@@ -4749,7 +5670,9 @@ Prior history (before this changelog was introduced) is summarized in the
     `SINGLE_SURFACE` contacts whose segments are on the main side already), and
     where it changes something it disagrees with itself — `transducer` IE
     −24.10 % → +18.31 %, `EXP_SC_PRELOAD` energy error −9.0 % → −11.2 %,
-    `mainboltaexpl` COLLAPSING to −62.05 % under a NORMAL banner.
+    `mainboltaexpl` COLLAPSING to −62.05 % under a NORMAL banner (corrected
+    in round 8: −62.05 was an IE in N.mm on a run without the pull, not a
+    percent; round 8's A2 keeps the bolt-end bodies' members).
   - **The `*INITIAL_VOID` warning** gains the manual's own definition (Vol I
     R17 p.28-134: a void is *"the same material … but with a very low
     density"*, incompatible with `*ALE_MULTI-MATERIAL_GROUP`) and round 4's
@@ -9717,7 +10640,7 @@ Prior history (before this changelog was introduced) is summarized in the
       owning an element), the `*INITIAL_VELOCITY_GENERATION` part scope (a sled
       test scopes by part set, and leaving the belt out would yank it taut at
       t=0), the joint pacing census (a belt has a time step of its own,
-      `r2len3.F:182`) and the implicit free-node guard's `elem_nodes` (a belt
+      `r2len3.F:224` [round 8: corrected from `:182`, the nodal-step branch]) and the implicit free-node guard's `elem_nodes` (a belt
       carries stiffness; a `/BCS 111 111` there would weld it to ground). It is
       NOT added to `--auto-gapmin`'s faceting or part-node map, to the contact
       scoping, or to `keep_free`: a 2-node spring has no face, and the device

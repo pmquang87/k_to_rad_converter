@@ -22,13 +22,14 @@ from k2rad.handlers import dispatch
 from k2rad.state import ConversionState
 
 
-def _convert(deck: str):
-    """convert() a deck string; return (result, starter_text)."""
+def _convert(deck: str, **kw):
+    """convert() a deck string; return (result, starter_text). ``kw`` go to
+    convert() (round 8: the A6 opt-out arm)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -301,8 +302,25 @@ class SpotweldBeamTests(unittest.TestCase):
             "         9    7.8E-9  210000.0       0.3     300.0    1000.0\n",
             "         9    7.8E-9  210000.0       0.3     300.0    1000.0"
             "   1.0E-06      0.01\n")
-        result, _ = _convert(deck)
-        self.assertTrue(any("DT" in w and "TFAIL" in w for w in result.warnings))
+        # EXPECTED VALUE MOVED in R14 round 8 (A6): DT is CONVERTED by
+        # default - the closed form, hand-derived: A 4, L 2, E 210000,
+        # nu 0.3 -> K1 420000, K2 = K3 161538.46, K5 = K6 126000; Mass
+        # 6.24e-8 -> max(M, K1 DT^2) = 4.2e-7 (x6.731), Inertia 2.08e-8 ->
+        # (126000 + 161538.46 x 2^2) DT^2 = 7.721538e-7 (x37.12) - so DT
+        # leaves the dropped sentence and TFAIL stays in it. The 4f5b6e8
+        # assertion is kept under --no-spotweld-dt-mass-scaling.
+        result, starter = _convert(deck)
+        self.assertTrue(any("DT=1e-06 -> /PROP/TYPE13/" in w
+                            and "Mass x 6.731" in w and "Inertia x 37.12" in w
+                            for w in result.warnings), result.warnings)
+        self.assertTrue(any("TFAIL have no /PROP/TYPE13 slot" in w
+                            for w in result.warnings), result.warnings)
+        self.assertFalse(any("DT, TFAIL have no" in w
+                             for w in result.warnings))
+        self.assertIn("        4.200000E-07        7.721538E-07", starter)
+        result_off, _ = _convert(deck, spotweld_dt_mass_scaling=False)
+        self.assertTrue(any("DT" in w and "TFAIL" in w
+                            for w in result_off.warnings))
 
     def test_mat100_on_shell_part_falls_back_to_elast(self):
         deck = (

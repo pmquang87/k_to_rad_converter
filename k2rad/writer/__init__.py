@@ -183,6 +183,9 @@ from .contacts import (
     _type25_surface,
     _warn_eroding_card4,
     _make_type25_interfaces,
+    add_implicit_contact_stub,
+    _make_deferred_implicit_stub,
+    _STUB_TYPE25_KEPT_SENTENCE,
     _TIED_SPOTFLAG,
     _TIED_DSEARCH_MARGIN,
     _emit_inter_type2,
@@ -425,6 +428,7 @@ from .assembly import (
     _make_engine_restart,
     _make_engine_timestep,
     build_engine,
+    build_engines,
 )
 __all__ = [
     "HDR",
@@ -591,6 +595,9 @@ __all__ = [
     "_type25_surface",
     "_warn_eroding_card4",
     "_make_type25_interfaces",
+    "add_implicit_contact_stub",
+    "_make_deferred_implicit_stub",
+    "_STUB_TYPE25_KEPT_SENTENCE",
     "_FRICTION_IFRIC_DARMSTAD",
     "_FRICTION_IFORM_STIFFNESS",
     "_friction_coeffs",
@@ -787,4 +794,5 @@ __all__ = [
     "_make_engine_restart",
     "_make_engine_timestep",
     "build_engine",
+    "build_engines",
 ]

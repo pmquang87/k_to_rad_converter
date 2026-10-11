@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
+    AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS,
     ConversionState,
     SET_ADD_ADVANCED_TYPES,
     SET_ADD_FAMILIES,
@@ -52,7 +53,7 @@ from .common import (
     _vsub,
 )
 # One-way: materials imports .common and .blast_ale only, never .mesh.
-from .materials import _null_part_eos_bindings
+from .materials import _null_part_eos_bindings, guarded_prop_h
 # One-way: truss imports .common and ..state only; its ONE reference back into
 # this module (_target_mat_law, for the /TRUSS material gate) is a local import
 # inside the function, the same shape as _plas_kin_law2_eligible's.
@@ -1747,6 +1748,10 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # SPH-declared and one /MAT id cannot be two laws (writer/sph.py
         # ::_resolve_sph_materials). Empty on every other deck.
         mat_ref = state.sph_mat_ids.get(pid, part.mid)
+        # round 8, B10 (--shell-in-solid-coupling): an *INITIAL_VOID host
+        # whose *MAT_NULL another part shares points at the void copy (empty
+        # by default)
+        mat_ref = state.sis_part_mids.get(pid, mat_ref)
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",
@@ -2949,15 +2954,25 @@ def _warn_efg_placeholder(state: ConversionState, secid: int,
            + " are dropped (listed as skipped)" if dropped else "")
         + ", so neither the meshfree interpolation nor the adaptive "
         f"re-meshing LS-DYNA uses on this part is in the converted model "
-        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit, nt 4 "
-        "and 2, round-7 pre-research): the converted run cannot carry the "
-        "constrained cutting at the tool contact - ERROR TERMINATION at cycle "
-        "26 (t 6.332e-4, KE 2.459e9) on 4 of 4 runs, the largest residuals on "
-        "the workpiece top surface under the tool; changing the placeholder "
-        "to Itetra4 3 ends NORMAL in 197 cycles on 3 of 3 runs but with an "
-        "energy error of 91.2 % and a flat internal energy - not a cutting "
-        "result. That row has no LS-DYNA reference (its LS run stopped in the "
-        "input phase).")
+        f"({lsdyna}). MEASURED on efg/metal-cutting/main.k (implicit; nt 4 "
+        "and 2): its LS-DYNA reference is run A's six d3plot states to t "
+        "1.07344e-3 s (3.6 % of t_end 0.03: global internal energy 0 to t "
+        "6.27e-4, then 0.0308 / 0.4908 mJ at t 9.02e-4 / 1.07344e-3) beside a "
+        "header-only glstat. With the tool's *DEFINE_CURVE_SMOOTH read as the "
+        "straight ramp the implicit solver makes of /FUNCT_SMOOTH "
+        "(--no-implicit-smooth-curve-sampling) the run ends ERROR TERMINATION "
+        "at cycle 26 (t 6.332e-4, KE 2.459e9) on 13 of 13 runs; with the "
+        "sampled sine ramp (the default since round 8) it ends NORMAL in 202 "
+        "cycles on 7 of 7 runs, but the placeholder already carries 11.59 / "
+        "82.60 mJ at t 9.02e-4 / 1.07344e-3 (LS 0.0308 / 0.4908) and its late "
+        "phase does not repeat between runs. Changing the placeholder to "
+        "Itetra4 3 (not shipped) ends NORMAL in 197 cycles on 10 of 10 runs "
+        "and reads 802x / 49.8x the LS internal energy at those two instants: "
+        "the implicit tangent of a 4-node tetrahedron stays the one-point "
+        "S4KE3 (imp_glob_k.F:176-193, solver warning 1006). In every cutting "
+        "arm the internal energy stays near its early level from ~1e-3 to "
+        "~6e-3 s and then CLIMBS (Itetra4 3 at nt 4: 24.37 / 2.525e4 / 8.82e4 "
+        "/ 1.719e5 / 2.391e5 mJ at the fifths of t_end).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3224,6 +3239,7 @@ def _make_properties(state: ConversionState) -> List[str]:
             "*INCLUDE that did not resolve or a PID typo.")
 
     _warn_shell_formulation_choice(state)
+    _warn_section_card2(state)
     for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
             continue
@@ -3326,9 +3342,16 @@ def _make_properties(state: ConversionState) -> List[str]:
             # formulation these parts were given is taken away again.
             state.ismstr10_solid_secids.add(sec.secid)
         _warn_assumed_strain_elform(state, sec, isolid)
+        # Round 8, B4 (F1): a viscous (*MAT_NULL MU) brick part on this prop
+        # whose R = 10 Nu / (c0 dmin) > 1 gets h / R (materials.guarded_prop_h).
+        prop_pids = [pid for pid, sid in part_secids.items()
+                     if sid == sec.secid and pid not in split_pids]
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain,
-                                  hcoef=_assumed_strain_h(state, sec, isolid, h),
+                                  hcoef=guarded_prop_h(
+                                      state, sec.secid, prop_pids, isolid,
+                                      _assumed_strain_h(state, sec, isolid,
+                                                        h)),
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
     _warn_default_solid_hourglass(state, default_hg_moved)
@@ -4843,6 +4866,80 @@ def _assign_hourglass_props(state: ConversionState) -> None:
             "*HOURGLASS card.")
 
 
+def _warn_section_card2(state: ConversionState) -> None:
+    """Round 8, A4 / A7: name what a USED *SECTION_SHELL's Card 2 became
+    (the thickness itself is decided in handlers.handle_section_shell, so every
+    consumer of ``sec.t1`` follows). Once per section referenced by a part
+    with shell elements.
+
+      * A4 - T1..T4 written, one nonzero and different from T1 (3-D
+        ELFORMs): the thickness is their MEAN (blank / 0.0 = T1), as
+        LS-DYNA's d3hsp reproduces, with the named energy-error cost;
+      * A7 - a plane-strain ELFORM 13 / 43 / 52 / 55 is written with
+        thickness 1.0 (LS-DYNA ignores Card 2 there and integrates a unit
+        depth, Remark 6); under ``--no-plane-strain-unit-thickness`` the fact
+        that T1 is written is still said (decision D12);
+      * an axisymmetric ELFORM 14 / 15 / 44 is named always: LS-DYNA
+        integrates per radian, which no thickness reproduces.
+    """
+    shell_pids = {e.pid for e in state.shell_elems}
+    used = {p.secid for pid, p in state.parts.items() if pid in shell_pids}
+
+    def _v(x: Optional[float]) -> str:
+        return "blank" if x is None else f"{x:g}"
+
+    for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):
+        if sec.secid not in used or sec.card2 is None:
+            continue
+        t1, t2, t3, t4 = sec.card2
+        if sec.elform in PLANE_STRAIN_ELFORMS:
+            if state.options.plane_strain_unit_thickness:
+                state.warn(
+                    f"*SECTION_SHELL {sec.secid}: ELFORM {sec.elform} is a 2-D "
+                    "PLANE-STRAIN formulation; LS-DYNA ignores Card 2's "
+                    "thickness and integrates a unit thickness (Vol I R17 "
+                    "*SECTION_SHELL Remark 6), so the /PROP/SHELL thickness is "
+                    f"1.0 (the card states {t1:g}): mass and inertia per unit "
+                    "depth are exact (ex_16_thin_shell_elform_13: the rigid "
+                    "disk weighs 0.003447366 = LS-DYNA's 0.34473655E-02, "
+                    "0.08756308 with T1 25.4) - but the element is still a 3-D "
+                    "shell, plane-STRESS through its thickness, not LS-DYNA's "
+                    "plane strain. --no-plane-strain-unit-thickness keeps T1 "
+                    "(round 8).")
+            else:
+                state.warn(
+                    f"*SECTION_SHELL {sec.secid}: ELFORM {sec.elform} is a 2-D "
+                    f"PLANE-STRAIN formulation; the card's T1 {t1:g} is written "
+                    "(--no-plane-strain-unit-thickness), while LS-DYNA ignores "
+                    "Card 2's thickness there and integrates a unit thickness "
+                    "(Vol I R17 *SECTION_SHELL Remark 6).")
+        elif sec.elform in AXISYMMETRIC_ELFORMS:
+            state.warn(
+                f"*SECTION_SHELL {sec.secid}: ELFORM {sec.elform} is a 2-D "
+                "AXISYMMETRIC formulation; LS-DYNA ignores Card 2's thickness "
+                "(Vol I R17 *SECTION_SHELL Remark 6) and integrates per radian "
+                "(2Dlag: 0.21994391E-03, where the 3-D /PROP/SHELL written here "
+                "weighs 0.0346368 = x157.5). No thickness reproduces that: this "
+                "section's mass, inertia and stress state are NOT LS-DYNA's (no "
+                "axisymmetric route is built).")
+        elif (state.options.section_nodal_thickness_mean
+              and any(v not in (None, 0.0) and v != t1 for v in (t2, t3, t4))):
+            state.warn(
+                f"*SECTION_SHELL {sec.secid}: Card 2 states T1..T4 = {t1:g} / "
+                f"{_v(t2)} / {_v(t3)} / {_v(t4)}; the /PROP/SHELL thickness is "
+                f"their MEAN {sec.t1:.7g} (blank or 0.0 = T1). LS-DYNA integrates "
+                "the thickness at the nodes and its d3hsp reproduces "
+                "mean(T1..T4): on mat_transversely_anisotropic.cup-draw the "
+                "rigid tools weigh 0.0888 / 0.0655 / 0.0555 with T1 and 0.0223 "
+                "/ 0.0164 / 0.0139 with the mean = LS-DYNA. MEASURED there (nt "
+                "4, 150 LS blocks 0 < t <= 0.015): IE / KE RMS 7.54 / 65.93 -> "
+                "2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 % - but "
+                "OpenRadioss's energy error grows: mean -4.39 -> -17.88 %, "
+                "thirds by row -7.20 / -3.62 / -2.35 -> -22.11 / -19.08 / -12.45 %, "
+                "rows below -20 %: 3857 -> 18456 (mechanism not closed). "
+                "--no-section-nodal-thickness-mean keeps T1 (round 8).")
+
+
 def _warn_shell_formulation_choice(state: ConversionState) -> None:
     """Say which Ishell the unmapped shell ELFORMs got, and that it is a choice.
 
@@ -5195,7 +5292,9 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             _warn_assumed_strain_elform(state, sec, isolid)
             lines += _emit_prop_solid(
                 prop_id, title, isolid, iale, itetra10, istrain,
-                hcoef=_assumed_strain_h(state, sec, isolid, coeff),
+                hcoef=guarded_prop_h(          # round 8, B4 (F1)
+                    state, prop_id, siblings, isolid,
+                    _assumed_strain_h(state, sec, isolid, coeff)),
                 ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)

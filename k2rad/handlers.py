@@ -26,6 +26,7 @@ from .parser import (
     to_float, to_int,
 )
 from .state import (
+    PLANE_STRAIN_ELFORMS, TWO_D_SHELL_ELFORMS,
     ConversionState,
     SET_ADD_FAMILIES,
     SET_RANGE_FAMILIES,
@@ -1919,7 +1920,28 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
                 "deck meant a user rule, move the negative value to field 6.")
             nip = abs(nip)
         t1 = to_float(f2[0]) if f2 else 0.0
+        # Card 2's T2..T4, the thickness at nodes n2..n4 (blank = T1, the
+        # card's default) - recorded raw for the writer's sentences.
+        t_raw: List[Optional[float]] = [
+            to_float(f2[k]) if len(f2) > k and f2[k].strip() else None
+            for k in (1, 2, 3)]
+        if elform in PLANE_STRAIN_ELFORMS and \
+                state.options.plane_strain_unit_thickness:
+            # round 8, A7: LS-DYNA ignores Card 2's thickness on a 2-D
+            # plane-strain shell and integrates a UNIT depth (Vol I R17
+            # *SECTION_SHELL Remark 6); the stated T1 stays in sec.card2
+            t1 = 1.0
+        elif (elform not in TWO_D_SHELL_ELFORMS
+              and state.options.section_nodal_thickness_mean
+              and any(v not in (None, 0.0) and v != t1 for v in t_raw)):
+            # round 8, A4: T1..T4 are the thickness at the four nodes and
+            # LS-DYNA's d3hsp reproduces their MEAN on every element
+            # (blank / 0.0 = T1); every consumer of sec.t1 follows
+            t1 = (t1 + sum(v if v not in (None, 0.0) else t1
+                           for v in t_raw)) / 4.0
         sec = SectionShell(secid, title, elform, nip, t1)
+        sec.card2 = (to_float(f2[0]) if f2 else 0.0, t_raw[0], t_raw[1],
+                     t_raw[2])
         # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
         # node set. Only writer/seatbelts.py reads it, to report it as dropped.
         sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
@@ -4897,9 +4919,15 @@ def handle_control_ale(block: Block, state: ConversionState) -> None:
     f = _card(block.raw, offset, fixed=True, n=8, w=10)
     if not f:
         return
+    # card 2 field 4 = VFACT (round 8, B10; read only by
+    # --shell-in-solid-coupling): blank or <= 0 keeps the 1e-6 default
+    f2 = (_card(block.raw, offset + 1, fixed=True, n=8, w=10)
+          if offset + 1 < len(block.raw) else [])
+    vfact = to_float(f2[3]) if len(f2) > 3 and f2[3].strip() else 0.0
     state.control_ale = ControlAle(
         meth=to_int(f[2]) if len(f) > 2 else 1,
-        afac=to_float(f[3]) if len(f) > 3 else 0.0)
+        afac=to_float(f[3]) if len(f) > 3 else 0.0,
+        vfact=vfact if vfact > 0.0 else 1.0e-6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4923,6 +4951,7 @@ def _clear_smooth_flag_on_redefinition(state: ConversionState, lcid: int,
     if lcid not in state.funct_smooth_ids:
         return
     state.funct_smooth_ids.discard(lcid)
+    state.smooth_curve_params.pop(lcid, None)       # round 8, B2
     state.warn(
         f"{keyword} LCID {lcid}: a *DEFINE_CURVE_SMOOTH already "
         "defined this id. LS-DYNA shares one load-curve id namespace "
@@ -4930,6 +4959,17 @@ def _clear_smooth_flag_on_redefinition(state: ConversionState, lcid: int,
         "*DEFINE_CURVE_SMOOTH LCID 'must be unique'), so one of them is a "
         f"mistake. The {keyword} points below were kept and the curve "
         "is emitted as an ordinary /FUNCT; renumber one of the two cards.")
+
+
+def _fixed_curve_field(text: str) -> Optional[float]:
+    """One 20-column field of a *DEFINE_CURVE point card (round 8, A2 (l)-3):
+    blank -> 0.0 (the field's default), a number (or a *PARAMETER reference)
+    -> its value, anything else -> None (the line is not a point)."""
+    t = text.strip()
+    if not t:
+        return 0.0
+    v = to_float(t, _math.nan)
+    return None if _math.isnan(v) else v
 
 
 def handle_define_curve(block: Block, state: ConversionState) -> None:
@@ -4945,13 +4985,43 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     offa = to_float(f1[4]) if len(f1) > 4 else 0.0
     offo = to_float(f1[5]) if len(f1) > 5 else 0.0
     pts: list = []
+    fixed_read: List[Tuple[str, float, float]] = []
     # LS-DYNA R16: "Abscissa value = SFA·(Defined value + OFFA)" — the offset is
     # applied BEFORE the scale factor (same for SFO/OFFO on the ordinate).
     for line in raw[offset + 1:]:
         f = parse_free(line)
+        pt: Optional[Tuple[float, float]] = None
         if len(f) >= 2:
-            pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
-                        (to_float(f[1]) + offo) * (sfo or 1.0)))
+            pt = (to_float(f[0]), to_float(f[1]))
+        elif state.options.fixed_curve_columns:
+            # round 8, A2 (l)-3: LS-DYNA reads a point card in fixed 2E20.0
+            # columns; a comma-free line the whitespace split cannot read as
+            # two numbers (a fused '0.0055.0', a blank abscissa) is re-read
+            # there, blank = 0.0. ONLY where the split fails (decision D4):
+            # a two-token line keeps the split, so a misaligned free-format
+            # line is never re-read. A comma line never gets here:
+            # parse_free keeps an empty comma segment as a field, so it always
+            # yields two (the comma line keeps the free read by construction).
+            data = _strip_inline_comment(line)
+            if data.strip():
+                a = _fixed_curve_field(data[0:20])
+                o = _fixed_curve_field(data[20:40])
+                if a is not None and o is not None:
+                    pt = (a, o)
+                    fixed_read.append((line, a, o))
+        if pt is not None:
+            pts.append(((pt[0] + offa) * (sfa or 1.0),
+                        (pt[1] + offo) * (sfo or 1.0)))
+    if fixed_read:
+        first, fa, fo = fixed_read[0]
+        state.warn(
+            f"*DEFINE_CURVE {lcid}: {len(fixed_read)} point line(s) that a "
+            "whitespace split reads as fewer than two numbers were read in "
+            "LS-DYNA's fixed 2E20.0 columns (blank = 0.0) - e.g. "
+            f"'{first[:40].strip()}' = ({fa:g}, {fo:g}); the curve keeps "
+            f"{len(pts)} points (the split kept {len(pts) - len(fixed_read)}). "
+            "Two-number and comma lines keep the split. "
+            "--no-fixed-curve-columns restores the split alone (round 8).")
     # A *DEFINE_CURVE_SMOOTH may have claimed this id first. LS-DYNA's curve
     # ids are unique across both keywords, so such a deck is malformed — but
     # the emitted CARD KIND must still match the points that survive.
@@ -6016,6 +6086,11 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
     keyword = block.keyword
     local = keyword.endswith("_LOCAL")
     for f, _box in _bpm_walk(block):
+        # round 8, B8 (q-i): the deck's STATEMENT, recorded before any screen
+        # (a short line, a refused VAD) - the screw joint must tell "no drive"
+        # from "a drive stated and not converted"
+        if f and to_int(f[0]):
+            state.pm_rigid_stated_pids.add(to_int(f[0]))
         if len(f) < 4:
             continue
         pid   = to_int(f[0])
@@ -7980,7 +8055,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:1052, :1495, :1607, :1796, :1953, :2077
+    sites register into at the line that writes the card (writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378
     — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, round 5 added the
@@ -8141,6 +8216,69 @@ def handle_contact_force_transducer(block: Block, state: ConversionState) -> Non
 # Control – Implicit
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: R14 triage round 8, B1: the sentence of the IMFLAG-0 + NEIG-0 explicit
+#: route (tests import it). Every figure is the tire.k run of the rule's own
+#: bytes (nt 4), scored by the campaign rule: the fifths take the OR row
+#: nearest k x t_end / 5 (the last row of a printed time), LS interpolated at
+#: that row's time; the RMS runs over the LS times 0 < t <= OR's last row.
+_IMFLAG0_EIGEN_SENTENCE = (
+    "*CONTROL_IMPLICIT_GENERAL IMFLAG 0 beside *CONTROL_IMPLICIT_EIGENVALUE "
+    "NEIG 0: converted on the EXPLICIT route (no /IMPL, no /EIG, no modal "
+    "stiffness export). LS-DYNA reads IMFLAG 0 as 'Explicit analysis' (Vol I "
+    "R17 *CONTROL_IMPLICIT_GENERAL) and NEIG 0 extracts no eigenvalue: the "
+    "reference d3hsp of implicit/basic-examples/eigenvalue/tire.k echoes "
+    "'implicit/explicit switching flag ... 0 / eq.0: explicit analysis' "
+    "(tire.d3hsp:1056-1057) and 'number of eigenvalues to extract ... 0' "
+    "(:1316), and its glstat is an explicit run (501 blocks to t 0.0999987 at "
+    "dt 4.004e-6). MEASURED on that deck at nt 4: the modal recipe stopped at "
+    "cycle 0 (SOLVER IMPLICIT STOPPED DUE TO LOADING DATA); the explicit route "
+    "ends NORMAL in 24329 cycles at t 0.1, internal / kinetic energy at the "
+    "fifths of t_end 0.1 +3.68 / -0.35 / -3.58 / -3.89 / +3.93 % and -1.18 / "
+    "-4.86 / +0.95 / -0.90 / -18.30 % against the LS glstat interpolated at "
+    "each row's time (the last row of a printed time), END +3.93 / -18.30 % "
+    "(LS at its last block t 0.0999987), RMS 2.06 / 2.23 % of the LS peak "
+    "over the 500 LS times 0 < t <= 0.1. The deck's other *CONTROL_IMPLICIT_* "
+    "cards are inert, as in LS-DYNA. --no-imflag0-eigen-explicit keeps the "
+    "modal route."
+)
+
+
+def _resolve_eigen_route(state: ConversionState) -> None:
+    """R14 triage round 8, B1: decide the route of a deck that states
+    ``*CONTROL_IMPLICIT_EIGENVALUE``.
+
+    Called at the END of both handlers, so the order of the two cards in the
+    deck does not matter (and a direct ``dispatch()`` caller gets the same
+    route). The deck goes EXPLICIT (``is_modal`` / ``is_implicit`` False: no
+    ``/IMPL``, no ``/EIG``, no modal stiffness export, no implicit element
+    formulations, no stub) only when NEIG reads 0 AND a
+    ``*CONTROL_IMPLICIT_GENERAL`` is present whose every card reads IMFLAG 0
+    AND the option is on. Every other eigen deck keeps the modal route of
+    4f5b6e8 (``is_modal`` / ``is_implicit`` True), including NEIG 0 with no
+    GENERAL card (0 carriers on five corpora: more likely a hand-trimmed
+    modal deck). The guard reads ``implicit_general_imflag_nonzero`` because
+    ``ctrl_implicit_gen`` keeps only the LAST card.
+    """
+    eig = state.ctrl_implicit_eig
+    if eig is None:
+        return
+    gen = state.ctrl_implicit_gen
+    explicit = (state.options.imflag0_eigen_explicit
+                and gen is not None
+                and not state.implicit_general_imflag_nonzero
+                and gen.imflag == 0
+                and eig.neig == 0)
+    if explicit:
+        state.is_modal = False
+        state.is_implicit = False
+        if not state.imflag0_eigen_explicit_route:
+            state.imflag0_eigen_explicit_route = True
+            state.warn(_IMFLAG0_EIGEN_SENTENCE)
+    else:
+        state.is_modal = True
+        state.is_implicit = True
+
+
 def handle_control_implicit_general(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
@@ -8153,7 +8291,9 @@ def handle_control_implicit_general(block: Block, state: ConversionState) -> Non
     nsbs   = to_int(f[3])
     if imflag != 0:
         state.is_implicit = True
+        state.implicit_general_imflag_nonzero = True
     state.ctrl_implicit_gen = ControlImplicitGeneral(imflag, dt0, imform, nsbs)
+    _resolve_eigen_route(state)
 
 
 def handle_control_implicit_solution(block: Block, state: ConversionState) -> None:
@@ -8407,7 +8547,9 @@ def handle_control_implicit_eigenvalue(block: Block, state: ConversionState) -> 
                uses ±1e29 sentinels for "no bound"; only a flagged, finite,
                positive bound is forwarded to /EIG Freqmin/Cutfreq.
     Sets state.is_modal (engine switches to /IMPL/LINEAR) and is_implicit (modal
-    IS an implicit analysis — keeps the implicit element formulations).
+    IS an implicit analysis — keeps the implicit element formulations) through
+    _resolve_eigen_route: an IMFLAG-0 + NEIG-0 deck is an LS-DYNA explicit run
+    (B1, round 8).
     """
     raw = block.raw
     if not raw:
@@ -8423,8 +8565,7 @@ def handle_control_implicit_eigenvalue(block: Block, state: ConversionState) -> 
     state.ctrl_implicit_eig = ControlImplicitEigenvalue(
         neig=abs(neig), freqmin=freqmin, cutfreq=cutfreq
     )
-    state.is_modal = True
-    state.is_implicit = True
+    _resolve_eigen_route(state)
 
 
 def handle_control_implicit_dynamics(block: Block, state: ConversionState) -> None:
@@ -10287,12 +10428,24 @@ def handle_constrained_shell_in_solid(block: Block,
     f = _card(block.raw, off, fixed=True, n=4, w=10)
     if not f or not f[0].strip():
         return
+    # card 2 (round 8, B10): START cols 1-10, END 11-20, PSSF 51-60; a
+    # blank cell keeps its default (0 / 1e20 / 0.1, Vol I R17 p.10-180/181)
+    f2 = (_card(block.raw, off + 1, fixed=True, n=8, w=10)
+          if off + 1 < len(block.raw) else [])
+
+    def _cell(i: int, default: float) -> float:
+        if len(f2) > i and f2[i].strip():
+            return to_float(f2[i])
+        return default
+    pssf = _cell(5, 0.1)
     state.shell_in_solid_cards.append(ShellInSolidCard(
         coupid=coupid, shsid=to_int(f[0]),
         ssid=to_int(f[1]) if len(f) > 1 else 0,
         shstyp=to_int(f[2]) if len(f) > 2 else 0,
         sstyp=to_int(f[3]) if len(f) > 3 else 0,
-        penalty=block.keyword.endswith("_PENALTY")))
+        penalty=block.keyword.endswith("_PENALTY"),
+        start=_cell(0, 0.0), end=_cell(1, 1.0e20),
+        pssf=pssf if pssf > 0.0 else 0.1, keyword=block.keyword))
 
 
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
@@ -17859,6 +18012,94 @@ def smooth_curve_points(dist: float, tstart: float, tend: float,
     return _strictly_increasing(pts), vmax, tend, note
 
 
+#: R14 triage round 8, B2: intervals per sampled ramp (41 points a ramp).
+_SMOOTH_SAMPLES = 40
+
+
+def sampled_smooth_points(tstart: float, trise: float, tend: float,
+                          vmax: float, endtim: Optional[float]):
+    """R14 triage round 8, B2: a well-formed ``*DEFINE_CURVE_SMOOTH`` as the
+    points of a SINE ramp, for an IMPLICIT deck.
+
+    The implicit imposed-motion path integrates a curve's raw points
+    piecewise-linearly (``fv_imp0.F:209`` FV_IMP -> ``:333`` DINTERI; the
+    file has no ISMOOTH branch, nor has ``force_imp.F``), so a
+    ``/FUNCT_SMOOTH`` there acts as the STRAIGHT trapezoid, while the
+    explicit ``fixvel.F:248-268`` blends it. LS-DYNA states no ramp formula
+    (Vol I R17 p.17-153/154); on efg/metal-cutting its tool travel grows as
+    t^2.68 .. t^2.89 over the first d3plot states, closest to the sine (t^3;
+    straight t^2, the explicit quintic t^4).
+
+    Rise ``0.5 VMAX (1 - cos(pi k / 40))`` at ``TSTART + TRISE k / 40``
+    (k = 0..40), the plateau between, the mirrored decay ``0.5 VMAX (1 +
+    cos(pi k / 40))`` from ``TEND - TRISE``; a zero-width plateau keeps the
+    shared vertex once (81 points). Each ramp integrates to VMAX TRISE / 2,
+    so the area stays DIST. Two guard points, each only when the run
+    reaches past the range, because DINTERI extrapolates the end segments
+    linearly (``fv_imp0.F:684-703``) where LS-DYNA's curve is 0: ``(0, 0)``
+    first when TSTART > 0, ``(TEND + TRISE, 0)`` last when ENDTIM > TEND.
+    """
+    n = _SMOOTH_SAMPLES
+    pts: List[Tuple[float, float]] = []
+    if tstart > 0.0:
+        pts.append((0.0, 0.0))
+    for k in range(n + 1):
+        pts.append((tstart + trise * k / n,
+                    0.5 * vmax * (1.0 - _math.cos(_math.pi * k / n))))
+    t2 = tend - trise
+    for k in range(n + 1):
+        x = t2 + trise * k / n
+        if k == 0 and abs(x - pts[-1][0]) <= 1.0e-12 * max(1.0, abs(x)):
+            continue                        # zero-width plateau: one vertex
+        pts.append((x, 0.5 * vmax * (1.0 + _math.cos(_math.pi * k / n))))
+    if endtim is not None and endtim > tend * (1.0 + 1.0e-9):
+        pts.append((tend + trise, 0.0))
+    return _strictly_increasing(pts)
+
+
+#: R14 triage round 8, B2: the constant core of the sampling sentence
+#: (tests import it). The metal-cutting tallies include the
+#: implementation's own arms (nt 4 and nt 2, the bytes of the pre-research's
+#: sine arm); the probe is a one-brick implicit deck (nt 4) whose driven
+#: node follows the integral of the emitted points on both arms.
+_SMOOTH_SAMPLING_CORE = (
+    "instead of /FUNCT_SMOOTH, because this deck is IMPLICIT and the implicit "
+    "solver reads the smoothing flag nowhere: the imposed-motion path "
+    "integrates the raw points piecewise-linearly (fv_imp0.F:209 FV_IMP -> "
+    ":333 DINTERI, which also extrapolates the end segments linearly) and "
+    "the implicit load path has no smooth branch (force_imp.F), so "
+    "/FUNCT_SMOOTH acts as a STRAIGHT ramp there, while the explicit "
+    "fixvel.F:248-268 blends it. MEASURED on a one-brick implicit probe (nt "
+    "4): the driven node's displacement follows the integral of the emitted "
+    "points to 2e-7 at every step on both arms - the 4-point /FUNCT_SMOOTH "
+    "as a straight ramp that runs the node BACKWARDS past TEND (2.782 at t "
+    "0.0466 against DIST 3), the sampled /FUNCT as the sine, held at DIST by "
+    "its end point. LS-DYNA states no ramp formula (Vol I R17 "
+    "p.17-153/154); on efg/metal-cutting/main.k its tool travel grows as "
+    "t^2.68 .. t^2.89 over the first five d3plot states, closest to the sine "
+    "(t^3; straight t^2, the explicit quintic t^4). MEASURED on that deck at "
+    "nt 4 and nt 2: the straight ramp ends ERROR TERMINATION at cycle 26 (t "
+    "6.332e-4) on 13 of 13 runs; the sampled sine ends NORMAL in 202 cycles "
+    "on 7 of 7 runs, its imposed tool travel at the last LS state t "
+    "1.07344e-3 being 0.01441 mm (the integral of the emitted points; the "
+    "exact sine 0.01432) against LS 0.014681 (straight 0.04148) - a "
+    "STATUS, not a score: the late phase does not repeat, not even on the "
+    "same bytes at one nt (END internal energy 1.48e5 .. 2.75e5 mJ over the "
+    "seven runs, 1.48e5 and 2.54e5 at nt 4), and the energy error is "
+    "unbalanced (+-99.9 % at nine of the ten fifths of t_end of an nt-4 / "
+    "nt-2 pair, 38.4 % at the tenth). --no-implicit-smooth-curve-sampling "
+    "keeps /FUNCT_SMOOTH."
+)
+
+
+def smooth_sampling_sentence(lcid: int, n_points: int, dist: float) -> str:
+    """R14 triage round 8, B2: the sentence of one sampled curve."""
+    return (f"*DEFINE_CURVE_SMOOTH LCID {lcid}: written as /FUNCT/{lcid} "
+            "sampling a SINE ramp 0.5 VMAX (1 - cos(pi (t - TSTART) / "
+            f"TRISE)) ({n_points} points: 41 per ramp, the plateau between "
+            f"them; area {dist:g} = DIST) " + _SMOOTH_SAMPLING_CORE)
+
+
 def _card_abscissa(v: float) -> float:
     """The abscissa the starter reads back from a ``_f`` field (%.10G, or
     %.6E outside 1e-4..1e15) — the value ``hm_read_funct.F:240`` compares.
@@ -18055,6 +18296,15 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
             "*DEFINE_CURVE_SMOOTH (tables share it too, p.17-445: 'Tables and "
             "Load curves may not share common IDs'). The smooth curve below "
             "replaces the earlier definition; renumber one of the cards.")
+    # R14 triage round 8, B2: the back-solved ramp cells of a WELL-FORMED
+    # trapezoid, for the implicit sampling pass (writer/assembly.
+    # _sample_implicit_smooth_curves); a degenerate shape (TRISE <= 0, or the
+    # rise and the fall overlapping) keeps its /FUNCT_SMOOTH and a
+    # redefinition must not keep a stale entry.
+    if trise > 0.0 and 2.0 * trise <= (tend - tstart) * (1.0 + 1.0e-9):
+        state.smooth_curve_params[lcid] = (tstart, trise, tend, vmax)
+    else:
+        state.smooth_curve_params.pop(lcid, None)
     state.curves[lcid] = Curve(lcid, title, 1.0, 1.0, 0.0, 0.0, pts)
     # NOT appended to state.curve_order. That list is the *DEFINE_CURVE
     # ORDERING used to resolve the legacy positional *DEFINE_TABLE form, and

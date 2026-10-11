@@ -118,6 +118,21 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          corotational_orthotropic: bool = True,
                          mat_null_pc_mu: bool = True,
                          joint_screw_gjoint: bool = True,
+                         rigid_local_constraints: bool = True,
+                         bcs_union: bool = True,
+                         bolt_rigid_contact: bool = True,
+                         fixed_curve_columns: bool = True,
+                         section_nodal_thickness_mean: bool = True,
+                         plane_strain_unit_thickness: bool = True,
+                         rigid_element_mass_admas: bool = True,
+                         spotweld_dt_mass_scaling: bool = True,
+                         adaptive_spring_token: bool = True,
+                         imflag0_eigen_explicit: bool = True,
+                         implicit_smooth_curve_sampling: bool = True,
+                         elastic_fluid_cp_cutoff: bool = True,
+                         skip_implicit_stub_with_type25: bool = False,
+                         shell_in_solid_coupling: bool = False,
+                         imflag_curve_restart: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -282,6 +297,37 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["joint_screw_gjoint"] = bool(joint_screw_gjoint)
 
+    kwargs["rigid_local_constraints"] = bool(rigid_local_constraints)
+
+    kwargs["bcs_union"] = bool(bcs_union)
+
+    kwargs["bolt_rigid_contact"] = bool(bolt_rigid_contact)
+
+    kwargs["fixed_curve_columns"] = bool(fixed_curve_columns)
+
+    kwargs["section_nodal_thickness_mean"] = bool(section_nodal_thickness_mean)
+
+    kwargs["plane_strain_unit_thickness"] = bool(plane_strain_unit_thickness)
+
+    kwargs["rigid_element_mass_admas"] = bool(rigid_element_mass_admas)
+
+    kwargs["spotweld_dt_mass_scaling"] = bool(spotweld_dt_mass_scaling)
+
+    kwargs["adaptive_spring_token"] = bool(adaptive_spring_token)
+
+    kwargs["imflag0_eigen_explicit"] = bool(imflag0_eigen_explicit)
+
+    kwargs["implicit_smooth_curve_sampling"] = bool(implicit_smooth_curve_sampling)
+
+    kwargs["elastic_fluid_cp_cutoff"] = bool(elastic_fluid_cp_cutoff)
+
+    kwargs["skip_implicit_stub_with_type25"] = bool(
+        skip_implicit_stub_with_type25)
+
+    kwargs["shell_in_solid_coupling"] = bool(shell_in_solid_coupling)
+
+    kwargs["imflag_curve_restart"] = bool(imflag_curve_restart)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -424,6 +470,21 @@ class ConverterGUI:
         self.corotational_orthotropic = tk.BooleanVar(value=True)
         self.mat_null_pc_mu = tk.BooleanVar(value=True)
         self.joint_screw_gjoint = tk.BooleanVar(value=True)
+        self.rigid_local_constraints = tk.BooleanVar(value=True)
+        self.bcs_union = tk.BooleanVar(value=True)
+        self.bolt_rigid_contact = tk.BooleanVar(value=True)
+        self.fixed_curve_columns = tk.BooleanVar(value=True)
+        self.section_nodal_thickness_mean = tk.BooleanVar(value=True)
+        self.plane_strain_unit_thickness = tk.BooleanVar(value=True)
+        self.rigid_element_mass_admas = tk.BooleanVar(value=True)
+        self.spotweld_dt_mass_scaling = tk.BooleanVar(value=True)
+        self.adaptive_spring_token = tk.BooleanVar(value=True)
+        self.imflag0_eigen_explicit = tk.BooleanVar(value=True)
+        self.implicit_smooth_curve_sampling = tk.BooleanVar(value=True)
+        self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
+        self.skip_implicit_stub_with_type25 = tk.BooleanVar(value=False)
+        self.shell_in_solid_coupling = tk.BooleanVar(value=False)
+        self.imflag_curve_restart = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -895,7 +956,8 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="*MAT_NULL PC / MU -> /MAT/HYD_VISC Pmin / Nu - ON. "
                      "PC 0 -> -1e-20 (LS cuts at zero); Nu = MU/RO on "
-                     "ELFORM-6 fluids only. sph/bird IE +69.4 -> +4.5 %, "
+                     "ELFORM-6 fluids and SPH-only materials, with the h / R "
+                     "hourglass guard (round 8). sph/bird IE +69.4 -> +4.5 %, "
                      "channel_B -98.9 -> -0.1 %",
             variable=self.mat_null_pc_mu).grid(
                 row=46, column=0, columnspan=3, sticky="w", **pad)
@@ -907,6 +969,108 @@ class ConverterGUI:
                      "183.59",
             variable=self.joint_screw_gjoint).grid(
                 row=47, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_RIGID CMO -1 -> /BCS in the /SKEW of CON1 (one skew "
+                     "per node) - ON. block-slide KE +100.10 -> +0.05 %",
+            variable=self.rigid_local_constraints).grid(
+                row=48, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_SPC union: no DOF restated in a second /BCS "
+                     "(P1-P3) - ON. Removes starter WARNING 312, 0 physics",
+            variable=self.bcs_union).grid(
+                row=49, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Bolt-end rigid bodies keep their members on penalty "
+                     "contact secondary sides - ON. mainboltaexpl IE -81.87 -> "
+                     "-8.49 % (with the curve fix)",
+            variable=self.bolt_rigid_contact).grid(
+                row=50, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*DEFINE_CURVE: read an unsplittable point line in fixed "
+                     "2E20.0 columns - ON. mainboltaexpl /FUNCT/11 2 -> 4 points",
+            variable=self.fixed_curve_columns).grid(
+                row=51, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*SECTION_SHELL T1..T4 -> their mean thickness - ON. "
+                     "cup-draw tool masses = LS-DYNA; OR energy error -4.4 -> "
+                     "-17.9 % (named cost)",
+            variable=self.section_nodal_thickness_mean).grid(
+                row=52, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Plane-strain *SECTION_SHELL (ELFORM 13/43/52/55) -> "
+                     "thickness 1.0 - ON. ex_16 disk mass = LS-DYNA",
+            variable=self.plane_strain_unit_thickness).grid(
+                row=53, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*ELEMENT_MASS on a rigid SECONDARY node -> /ADMAS on that "
+                     "node - ON. foam CoG = LS-DYNA; CNRB masses no longer "
+                     "dropped",
+            variable=self.rigid_element_mass_admas).grid(
+                row=54, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_SPOTWELD DT -> TYPE13 Mass / Inertia so the weld "
+                     "steps at 0.9 DT - ON. spotweld.k last cycle 1332 = "
+                     "LS-DYNA's 1332",
+            variable=self.spotweld_dt_mass_scaling).grid(
+                row=55, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Spring token MASS from the end-node masses (2 mu min(1, "
+                     "2/n)) - ON. the fixed 1e-4 token was killed within 3-6 "
+                     "cycles on 3 coupons",
+            variable=self.adaptive_spring_token).grid(
+                row=56, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMFLAG 0 + NEIG 0 eigenvalue deck -> EXPLICIT route "
+                     "(LS-DYNA runs it explicit) - ON. tire.k cycle-0 stop -> "
+                     "NORMAL in 24329 cycles",
+            variable=self.imflag0_eigen_explicit).grid(
+                row=57, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT deck: *DEFINE_CURVE_SMOOTH -> sampled sine /FUNCT "
+                     "(the implicit solver reads /FUNCT_SMOOTH as a straight "
+                     "ramp) - ON. metal-cutting cycle-26 ERROR -> NORMAL in 202 "
+                     "cycles",
+            variable=self.implicit_smooth_curve_sampling).grid(
+                row=58, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*MAT_ELASTIC_FLUID stated CP 0.0 -> Pmin -1e-20 (a cut-off "
+                     "at zero, as *MAT_NULL PC 0) - ON",
+            variable=self.elastic_fluid_cp_cutoff).grid(
+                row=59, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Implicit TYPE25-only deck: skip the inert all-parts "
+                     "contact stub (opt-in) - OFF. Coupon NORMAL -> ERROR at "
+                     "cycle 9 without it; doorbeam MIXED (END +582 -> +689 %, "
+                     "RMS 393 -> 313 %)",
+            variable=self.skip_implicit_stub_with_type25).grid(
+                row=60, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 + the void "
+                     "density (opt-in) - OFF. bird-el plate -100 -> -28 % at "
+                     "8.9x cycles",
+            variable=self.shell_in_solid_coupling).grid(
+                row=61, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMFLAG < 0 curve: one engine file per implicit / explicit "
+                     "segment (run them in order) - ON. ie_shell END IE -99.9 "
+                     "-> -4.5 %",
+            variable=self.imflag_curve_restart).grid(
+                row=62, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1169,6 +1333,22 @@ class ConverterGUI:
                     self.corotational_orthotropic.get()),
                 mat_null_pc_mu=self.mat_null_pc_mu.get(),
                 joint_screw_gjoint=self.joint_screw_gjoint.get(),
+                rigid_local_constraints=self.rigid_local_constraints.get(),
+                bcs_union=self.bcs_union.get(),
+                bolt_rigid_contact=self.bolt_rigid_contact.get(),
+                fixed_curve_columns=self.fixed_curve_columns.get(),
+                section_nodal_thickness_mean=self.section_nodal_thickness_mean.get(),
+                plane_strain_unit_thickness=self.plane_strain_unit_thickness.get(),
+                rigid_element_mass_admas=self.rigid_element_mass_admas.get(),
+                spotweld_dt_mass_scaling=self.spotweld_dt_mass_scaling.get(),
+                adaptive_spring_token=self.adaptive_spring_token.get(),
+                imflag0_eigen_explicit=self.imflag0_eigen_explicit.get(),
+                implicit_smooth_curve_sampling=self.implicit_smooth_curve_sampling.get(),
+                elastic_fluid_cp_cutoff=self.elastic_fluid_cp_cutoff.get(),
+                skip_implicit_stub_with_type25=(
+                    self.skip_implicit_stub_with_type25.get()),
+                shell_in_solid_coupling=self.shell_in_solid_coupling.get(),
+                imflag_curve_restart=self.imflag_curve_restart.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1246,7 +1426,13 @@ class ConverterGUI:
     def _show_result(self, result) -> None:
         self._last_out_dir = str(Path(result.starter_path).resolve().parent)
         self._append(f"\n  Starter -> {result.starter_path}\n")
-        self._append(f"  Engine  -> {result.engine_path}\n")
+        # round 8, B3 (h.2): every engine file, in run order
+        paths = getattr(result, "engine_paths", None) or [result.engine_path]
+        for p in paths:
+            self._append(f"  Engine  -> {p}\n")
+        if len(paths) > 1:
+            self._append("  Run the engine files IN ORDER from one directory "
+                         "(each restarts from the previous run's .rst).\n")
         if getattr(result, "log_path", None):
             self._append(f"  Log     -> {result.log_path}\n")
         if result.skipped_keywords:
@@ -1356,6 +1542,50 @@ class ConverterGUI:
         if not kwargs.get("joint_screw_gjoint", True):
             bits.append("*CONSTRAINED_JOINT_SCREW left skipped "
                         "(--no-joint-screw-gjoint)")
+        if not kwargs.get("rigid_local_constraints", True):
+            bits.append("*MAT_RIGID CMO -1 written as nothing "
+                        "(--no-rigid-local-constraints)")
+        if not kwargs.get("bcs_union", True):
+            bits.append("every *BOUNDARY_SPC card and the free-node guard written "
+                        "as before (--no-bcs-union)")
+        if not kwargs.get("bolt_rigid_contact", True):
+            bits.append("bolt-end rigid members removed from contact secondary "
+                        "sides (--no-bolt-rigid-contact)")
+        if not kwargs.get("fixed_curve_columns", True):
+            bits.append("*DEFINE_CURVE read by the whitespace split alone "
+                        "(--no-fixed-curve-columns)")
+        if not kwargs.get("section_nodal_thickness_mean", True):
+            bits.append("*SECTION_SHELL written with T1 only "
+                        "(--no-section-nodal-thickness-mean)")
+        if not kwargs.get("plane_strain_unit_thickness", True):
+            bits.append("plane-strain *SECTION_SHELL written with its stated T1 "
+                        "(--no-plane-strain-unit-thickness)")
+        if not kwargs.get("rigid_element_mass_admas", True):
+            bits.append("rigid secondary *ELEMENT_MASS folded / dropped as before "
+                        "(--no-rigid-element-mass-admas)")
+        if not kwargs.get("spotweld_dt_mass_scaling", True):
+            bits.append("*MAT_SPOTWELD DT dropped (--no-spotweld-dt-mass-scaling)")
+        if not kwargs.get("adaptive_spring_token", True):
+            bits.append("fixed 1e-4 spring token MASS "
+                        "(--no-adaptive-spring-token)")
+        if not kwargs.get("imflag0_eigen_explicit", True):
+            bits.append("IMFLAG-0 / NEIG-0 eigen deck kept on the modal route "
+                        "(--no-imflag0-eigen-explicit)")
+        if not kwargs.get("implicit_smooth_curve_sampling", True):
+            bits.append("implicit smooth curves kept as /FUNCT_SMOOTH "
+                        "(--no-implicit-smooth-curve-sampling)")
+        if not kwargs.get("elastic_fluid_cp_cutoff", True):
+            bits.append("*MAT_ELASTIC_FLUID CP 0.0 kept at Pmin 0 "
+                        "(--no-elastic-fluid-cp-cutoff)")
+        if kwargs.get("skip_implicit_stub_with_type25"):
+            bits.append("implicit stub skipped beside written TYPE25 contacts "
+                        "(--skip-implicit-stub-with-type25)")
+        if kwargs.get("shell_in_solid_coupling"):
+            bits.append("*CONSTRAINED_SHELL_IN_SOLID coupled as /INTER/TYPE18 "
+                        "(--shell-in-solid-coupling)")
+        if not kwargs.get("imflag_curve_restart", True):
+            bits.append("IMFLAG < 0 deck kept in ONE implicit engine file "
+                        "(--no-imflag-curve-restart)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

@@ -1125,22 +1125,53 @@ def _mat_null_user_class(state: ConversionState, part,
                                  f"Lagrangian solid (ELFORM {sec.elform})")
 
 
-#: The W-N2 fact for each class outside the Nu scope (nt 4, base-paired; the
-#: deck pair re-measured on the implementation, one window: 2432 -> 2482
-#: cycles; the bar's per-part IE and the SPH pair are the round-7
-#: pre-research's).
+#: The W-N2 fact for each class outside the Nu scope (nt 4, base-paired in
+#: one window at the shipped PC cell; R14 triage round 8, B4: the round-8
+#: critic's impact arms iB / iV / iVL / iVS / iBS against the LS glstat's
+#: 1000 times to t 9.996e-5 and the bar = part 2 by /TH/PART). The round-7
+#: pair this replaced mixed a no-PC-cell base with a PC + Nu arm.
 _NU_LAGRANGIAN_FACT = (
-    " On a Lagrangian solid it was measured WRONG: impact.k's *MAT_NULL bar "
-    "(ELFORM 1, nt 4) goes IE 10.3 -> 29.6 against LS-DYNA's 15.7, the deck "
-    "IE +58.98 -> +76.80 % (RMS 32.62 -> 42.53 % of the LS-DYNA peak).")
+    " On a Lagrangian solid it was measured WRONG on the one carrier with a "
+    "reference: impact.k's *MAT_NULL bar (ELFORM 1, part 2; nt 4) goes IE "
+    "16.60 -> 29.58 mJ against LS-DYNA's 15.67 at the matched end (+5.92 -> "
+    "+88.77 %, RMS 14.27 -> 55.05 % of its LS peak), the deck +51.91 -> "
+    "+71.13 % (RMS 29.94 -> 40.11 % over the 1000 LS times to t 1e-4), "
+    "robust to the hourglass, Isolid 14 and the step; with Nu on the bar "
+    "alone (a split copy of the material) the plate the bar strikes - part "
+    "1, under the bar by geometry although its title says 'plaque sous SPH' "
+    "- goes +32.37 -> +69.91 %. LS-DYNA does apply MU there (its elout shows "
+    "a viscous deviatoric stress in the bar), and the Couette coupon is "
+    "exact on a Lagrangian brick: what decides it is a second Lagrangian "
+    "carrier with a reference.")
+#: R14 triage round 8, B4: printed only for a MIXED material's SPH parts
+#: (an SPH-only material carries Nu since round 8, F5).
 _NU_SPH_FACT = (
-    " On SPH parts it is not measured beyond sph/bird, where Nu 1 left the "
-    "IE history where it was (IE RMS 44.37 % on both arms; END IE +69.44 -> "
-    "+69.28 %, 1942 -> 1917 cycles).")
+    " Its SPH parts are not carried either - the cell is per MATERIAL; on "
+    "impact.k's SPH bar alone (Nu 1000 on a split copy of the material) it "
+    "is inert: the deck +51.91 -> +52.61 % (RMS 29.94 -> 30.30 %), 2437 = "
+    "2437 cycles.")
 _NU_MIXED_FACT = (
     " A material whose parts mix ELFORM 6 with another class is not carried "
     "either: the cell is per MATERIAL, so it would reach the other parts "
     "too.")
+#: R14 triage round 8, B4 (F5): the sentence of an SPH-ONLY carrier's Nu
+#: (prefix + its clauses + facts). The SPH Couette pair is the round-8
+#: pre-research's; sph/bird is measured on the implementation's bytes (nt 4,
+#: base-paired with 4f5b6e8 in one window; the campaign rule).
+_NU_SPH_WRITTEN_PREFIX = "*MAT_NULL MU -> /MAT/HYD_VISC Nu on SPH parts: "
+_NU_SPH_WRITTEN_FACTS = (
+    " - Nu = MU / RO: the LAW6 cell is a KINEMATIC viscosity (m6law.F:98 VIS "
+    "= Nu x RHO), and the SPH stress takes the same material routine "
+    "(spstres.F:250) with the viscous term in its step (mdtsph.F:126). "
+    "Written where every part of the material is SPH on a deck without "
+    "*INITIAL_VOID. LS-DYNA applies MU through the material (Vol II R17 "
+    "p.2-189/190); *SECTION_SPH has no viscosity field. MEASURED at nt 4: on "
+    "an SPH Couette coupon (a sheared particle slab against its analytic "
+    "profile) Nu 0 gives no flow at all, the cell gives it - steady error "
+    "9.9 -> 6.0 % of U from a 1 mm to a 0.5 mm spacing; on sph/bird (Nu 1) it "
+    "is inert - 1616 = 1616 cycles, the same internal energy at the fifths "
+    "(+2.9 / +3.0 / +1.5 / +2.6 / +4.5 %), END +4.50 %. Pass "
+    "--no-mat-null-pc-mu to keep Nu 0.")
 
 
 def _resolve_mat_null_cells(
@@ -1160,7 +1191,11 @@ def _resolve_mat_null_cells(
     ``convertmats.cxx:300``) ONLY when MU > 0, RO > 0, the deck states no
     ``*INITIAL_VOID``, no user part is in an ``*ALE_MULTI-MATERIAL_GROUP``
     and EVERY user part is a ``*SECTION_SOLID`` ELFORM 6 - the measured
-    channel family. Every excluded class is NAMED. Keyed on the
+    channel family - or, since round 8 (B4, F5), EVERY user part is SPH (the
+    SPH Couette coupon; sph/bird inert). A Nu > 0 brick part whose R = 10 Nu
+    / (c0 dmin) exceeds 1 gets its hourglass coefficient divided by R where
+    its /PROP/SOLID is written (:func:`guarded_prop_h`, round 8 F1). Every
+    excluded class is NAMED. Keyed on the
     ``*MAT_NULL`` record, never on the emitted card: ``*MAT_ELASTIC_FLUID``
     writes the same ``/MAT/HYD_VISC`` keyword from another record and is
     untouched. ``--no-mat-null-pc-mu`` restores the 65ff389 cells (Pmin = the
@@ -1179,6 +1214,7 @@ def _resolve_mat_null_cells(
     sph_pids = {c.pid for c in state.sph_elems}
     w_p: List[str] = []
     w_n1: List[str] = []
+    w_n1_sph: List[str] = []           # round 8, B4 (F5): SPH-only carriers
     w_n2: List[str] = []
     w_n2_classes: List[str] = []
     w_n3: List[str] = []
@@ -1221,7 +1257,10 @@ def _resolve_mat_null_cells(
                 nclass = "void" if "ELFORM 12" in classes else "void_deck"
             elif any(p.pid in ammg for p in users):
                 nclass = "ammg"
-            elif users and classes == ["ELFORM 6"]:
+            elif users and classes in (["ELFORM 6"], ["SPH"]):
+                # round 8, B4 (F5): an SPH-ONLY material carries Nu too (the
+                # SPH Couette coupon converges to the analytic flow); a
+                # material MIXING SPH with another class stays Nu 0 below
                 nu = n.mu / n.rho
             elif "ELFORM 12" in classes:
                 nclass = "elform12"
@@ -1259,8 +1298,11 @@ def _resolve_mat_null_cells(
             w_p.append(f"/MAT/HYD_VISC/{mid} Pmin {pmin:g} (PC {n.pc:g}; "
                        f"{bind})")
         if nu > 0.0:
-            w_n1.append(f"/MAT/HYD_VISC/{mid} Nu {nu:g} (MU {n.mu:g} / RO "
-                        f"{n.rho:g}, parts {pids})")
+            # split by family (round 8, B4-a), so the ELFORM-6 sentence keeps
+            # its bytes on the channel decks
+            (w_n1_sph if classes == ["SPH"] else w_n1).append(
+                f"/MAT/HYD_VISC/{mid} Nu {nu:g} (MU {n.mu:g} / RO "
+                f"{n.rho:g}, parts {pids})")
         clause = (f"/MAT/HYD_VISC/{mid} (MU {n.mu:g}; "
                   + (f"parts {pids}: {', '.join(classes)})" if users
                      else "no *PART uses it)"))
@@ -1320,6 +1362,9 @@ def _resolve_mat_null_cells(
             "channel_B goes IE -98.89 -> -0.09 % (RMS 57.05 -> 0.03 % of the "
             "LS-DYNA peak, 0.987x cycles), channel_A -98.88 -> -4.03 % (RMS "
             "1.72 %, 0.831x cycles). Pass --no-mat-null-pc-mu to keep Nu 0.")
+    if w_n1_sph:
+        state.warn(_NU_SPH_WRITTEN_PREFIX + "; ".join(w_n1_sph)
+                   + _NU_SPH_WRITTEN_FACTS)
     if w_n2:
         facts = ""
         present = set(w_n2_classes)
@@ -1343,41 +1388,213 @@ def _resolve_mat_null_cells(
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n2) + ": "
             "the Nu = MU / RO cell is written only where every part of the "
-            "material is a *SECTION_SOLID ELFORM 6 on a deck without "
-            "*INITIAL_VOID, the one family where it was measured right."
-            + facts + " A Couette coupon (a sheared slab against its "
-            "analytic profile) decides these cases (ROADMAP).")
+            "material is a *SECTION_SOLID ELFORM 6, or every part is SPH, on "
+            "a deck without *INITIAL_VOID - the two families where it was "
+            "measured right." + facts + " ROADMAP names what would decide "
+            "each case.")
     if w_n3:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3) + ": "
             "on the ELFORM-12 fluid of a *INITIAL_VOID deck the cell CREATES "
             "energy - bird_B with Nu 12804 (nt 4): energy error 99.9 % from "
-            "about cycle 500, END IE +1484.66 -> +20691.23 % - by a mechanism "
-            "not found (it is not a viscous step violation: h^2 / (6 Nu) = "
-            "1.75e-6 s is above the step 2.04e-7 s). ROADMAP: the bird_B "
-            "mechanism first.")
+            "about cycle 500, END IE +1484.66 -> +20691.23 % - through the "
+            "converted deck's OPEN fixed-grid ALE faces: with the domain "
+            "faces walled the energy error reads -0.1 % (+2.4 % with the void "
+            "cells at VFACT density) against 99.9 % open, and the void "
+            "density alone does not remove it (99.9 %). LS-DYNA moves its ALE "
+            "mesh with the bird (*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4, which "
+            "k2rad skips): ROADMAP, the reference-system item first.")
     if w_n3_deck:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_deck)
             + ": the deck states *INITIAL_VOID, which the Nu cell's scope "
             "excludes - its only measured carrier on such a deck, bird_B "
             "(an ELFORM-12 fluid), CREATES energy under Nu 12804 (nt 4: "
-            "energy error 99.9 % from about cycle 500); on these parts, on "
-            "a *INITIAL_VOID deck, the cell is unmeasured.")
+            "energy error 99.9 % from about cycle 500) through its "
+            "converted deck's open fixed-grid ALE faces (walled: -0.1 %); "
+            "on these parts, on a *INITIAL_VOID deck, the cell is "
+            "unmeasured.")
     if w_n3_e12:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_e12)
             + ": an ELFORM-12 (single material with void) part is outside "
             "the Nu cell's scope - its only measured carrier, bird_B, is an "
             "ELFORM-12 fluid that CREATES energy under Nu 12804 (nt 4: "
-            "energy error 99.9 % from about cycle 500) on a deck that "
-            "states *INITIAL_VOID; without *INITIAL_VOID the cell is "
-            "unmeasured.")
+            "energy error 99.9 % from about cycle 500) through its "
+            "converted deck's open fixed-grid ALE faces (walled: -0.1 %) on "
+            "a deck that states *INITIAL_VOID; without *INITIAL_VOID the "
+            "cell is unmeasured.")
     if w_n4:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n4) + ": "
             "the material's parts are in an *ALE_MULTI-MATERIAL_GROUP; the "
             "cell is unmeasured there.")
+    return out
+
+
+#: R14 triage round 8, B4 (F1): the /PROP/SOLID formulations whose fluid
+#: hourglass force is SHVIS3's (shvis3.F:182 / :185), the term R describes:
+#: SHVIS3 is called only from SFORC3 (sforc3.F:1250), forint.F's JHBE 1 / 2
+#: / 101 / 102 branch, with GEO(13) = QH 0.1 by default
+#: (hm_read_prop14.F:357-370). Isolid 24 is NOT here (the fix round, after
+#: the fidelity review): it runs SZFORC3 -> SZHOUR3 (forint.F:1090-1096,
+#: szforc3.F:962), whose LAW6 hourglass is GG = MAX(G0, VIS)
+#: (szhour3.F:158-160) with no VIS in its damping term (:238-240), so
+#: h / R would weaken a force R does not describe. Unreachable today: the
+#: Nu cell is written on ELFORM-6 bricks, which get Isolid 1.
+_HG_GUARD_ISOLIDS = (1, 2)
+#: the starter's default h for those formulations (a blank / 0 cell)
+_HG_DEFAULT_H = 0.1
+
+_BRICK_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7),
+                (7, 4), (0, 4), (1, 5), (2, 6), (3, 7))
+
+
+def _carrier_sound_speed(state: ConversionState, mid: int
+                         ) -> Tuple[Optional[float], str]:
+    """``(c0, EOS kind)`` of a LAW6 carrier from the EMITTED EOS (the record
+    ``_eos_tension_floor`` resolves): GRUNEISEN -> C; POLYNOMIAL ->
+    sqrt(C1 / RO); any other kind -> None (named by the guard)."""
+    eos = _carrier_eos(state, mid)
+    if eos is None:
+        return None, ""
+    c = eos.params
+    if eos.kind == "GRUNEISEN":
+        v = c.get("c", 0.0)
+        return (v if v > 0.0 else None), eos.kind
+    if eos.kind == "POLYNOMIAL":
+        c1 = c.get("c1", 0.0)
+        rho = state.mat_null[mid].rho if mid in state.mat_null else 0.0
+        return ((math.sqrt(c1 / rho) if c1 > 0.0 and rho > 0.0 else None),
+                eos.kind)
+    return None, eos.kind
+
+
+def _mat_null_h_guard(state: ConversionState
+                      ) -> Dict[int, Tuple[float, float, float, float, str]]:
+    """R14 triage round 8, B4 (F1): ``{part id -> (R, dmin, Nu, c0, EOS
+    kind)}`` for every BRICK part of a ``*MAT_NULL`` carrier whose Nu cell is
+    > 0, with ``R = 10 Nu / (c0 dmin)``: with Nu > 0 the fluid hourglass
+    force of a brick is ``10 (h/4) VIS dx`` instead of ``(h/4) RHO c dx^2``
+    (``shvis3.F:166`` CAQ = GEO(13) / 4, ``:182`` / ``:185``; ``m6law.F:98``
+    VIS = Nu RHO) - R times the Nu-0 value - and no step routine carries
+    it. ``dmin`` = the part's shortest non-zero /BRICK edge (a degenerate
+    hex's repeated node skipped; /TETRA4 and /TETRA10 groups have no
+    hourglass and are not read). A carrier whose EOS gives no single sound
+    speed is NAMED (no R). Memoised on ``state.mat_null_h_guard``; empty
+    when ``--no-mat-null-pc-mu`` writes Nu 0. SPH parts have no brick edge
+    and are not guarded."""
+    if state.mat_null_h_guard is not None:
+        return state.mat_null_h_guard
+    out: Dict[int, Tuple[float, float, float, float, str]] = {}
+    state.mat_null_h_guard = out
+    nu_mids = {mid: nu for mid, (nu, _pmin)
+               in _resolve_mat_null_cells(state).items() if nu > 0.0}
+    if not nu_mids:
+        return out
+    users = {p.pid: p.mid for p in state.parts.values() if p.mid in nu_mids}
+    dmin: Dict[int, float] = {}
+    for e in state.solid_elems:
+        if e.pid not in users:
+            continue
+        for d in _brick_edge_lengths(state, e):
+            if d < dmin.get(e.pid, math.inf):
+                dmin[e.pid] = d
+    unnamed: Dict[int, str] = {}
+    for pid in sorted(users):
+        if pid not in dmin:
+            continue
+        mid = users[pid]
+        c0, kind = _carrier_sound_speed(state, mid)
+        if c0 is None:
+            unnamed.setdefault(mid, kind or "?")
+            continue
+        nu = nu_mids[mid]
+        out[pid] = (10.0 * nu / (c0 * dmin[pid]), dmin[pid], nu, c0, kind)
+    for mid, kind in sorted(unnamed.items()):
+        state.warn(
+            f"*MAT_NULL {mid}: the Nu cell's hourglass guard (round 8) needs "
+            "the carrier's sound speed, and its /EOS/" + kind + " gives no "
+            "single value here (GRUNEISEN C and POLYNOMIAL sqrt(C1 / RO) do) "
+            "- R = 10 Nu / (c0 dmin) is not computed and the /PROP/SOLID h "
+            "of its brick parts is written unchanged.")
+    return out
+
+
+def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
+                   isolid: int, hcoef: Optional[float]) -> Optional[float]:
+    """R14 triage round 8, B4 (F1): the hourglass coefficient a /PROP/SOLID
+    is written with. Unchanged unless the prop is an Isolid 1 / 2 one
+    (SHVIS3's hourglass; GEO(13) > 0) carrying a Nu > 0 brick part with
+    R = 10 Nu / (c0 dmin)
+    > 1: then ``h = h_eff / R_max`` (h_eff = the stated h, else the
+    starter's default 0.1) and the prop is named once. h is never raised
+    (R <= 1 keeps today's bytes: the channel family reads R 0.0117)."""
+    if isolid not in _HG_GUARD_ISOLIDS:
+        return hcoef
+    guard = _mat_null_h_guard(state)
+    hits = [(guard[p][0], p) for p in prop_pids if p in guard]
+    if not hits or max(r for r, _p in hits) <= 1.0:
+        return hcoef
+    r_max, p_max = max(hits)
+    h_eff = hcoef if (hcoef is not None and hcoef > 0.0) else _HG_DEFAULT_H
+    h_new = h_eff / r_max
+    if prop_id not in state.mat_null_h_guarded_props:
+        state.mat_null_h_guarded_props.add(prop_id)
+        _r, dmin, nu, c0, kind = guard[p_max]
+        pids = sorted(p for _r2, p in hits)
+        graded = any(_part_is_graded(state, p, dmin) for p in pids)
+        state.warn(
+            f"*MAT_NULL MU -> Nu on /PROP/SOLID/{prop_id} (parts {pids}): R "
+            f"= 10 Nu / (c0 dmin) = {r_max:.3g} > 1 (Nu {nu:g}; c0 "
+            f"{c0:.6g} from /EOS/{kind}; dmin {dmin:.4g}, the shortest brick "
+            f"edge), so its hourglass coefficient h is written {h_new:.6g} = "
+            f"{h_eff:g} / R: with Nu > 0 the fluid hourglass force of a brick "
+            "becomes 10 (h/4) VIS dx instead of (h/4) RHO c dx^2 "
+            "(shvis3.F:182 / :185) - R times the Nu-0 value - and no step "
+            "routine carries it. MEASURED on a Lagrangian Couette coupon "
+            "(ELFORM 6, Isolid 1, h 0.1, /DT 0.9, nt 4): stable at R 0.95 / "
+            "1.58 / 2.21, unstable at R 3.16 (internal energy +2980 .. +731 % "
+            "of the analytic dissipation, hourglass energy 368.3 mJ) and R "
+            "6.32 (+35 745 %); h / R at R 3.16 gives the analytic profile "
+            "(0.19 % of U at 0.1 t_d, hourglass energy 4e-11 mJ)."
+            + (" On a graded part h / R_max also weakens the larger elements' "
+               "hourglass below the Nu-0 level." if graded else "")
+            + " --no-mat-null-pc-mu removes the Nu cell and this guard.")
+    return h_new
+
+
+def _part_is_graded(state: ConversionState, pid: int, dmin: float) -> bool:
+    """Whether a guarded part (or prop) holds a brick whose OWN shortest
+    edge exceeds 1.5 x the prop's dmin - a graded mesh, on which one
+    h / R_max also weakens the larger elements' hourglass below the Nu-0
+    level (the warning says so)."""
+    for e in state.solid_elems:
+        if e.pid != pid:
+            continue
+        edges = _brick_edge_lengths(state, e)
+        if edges and min(edges) > 1.5 * dmin:
+            return True
+    return False
+
+
+def _brick_edge_lengths(state: ConversionState, e) -> List[float]:
+    """The non-zero edge lengths of one solid element written as a /BRICK
+    (8 node ids, not 4 or 10 distinct: those are /TETRA4 / /TETRA10, which
+    have no hourglass); [] otherwise or when a node is missing."""
+    if len(e.nodes) != 8 or len(set(e.nodes)) in (4, 10):
+        return []
+    xyz = [state.nodes.get(n) for n in e.nodes]
+    pts = [p for p in xyz if p is not None]
+    if len(pts) != 8:
+        return []
+    out: List[float] = []
+    for a, b in _BRICK_EDGES:
+        pa, pb = pts[a], pts[b]
+        d = math.sqrt((pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2
+                      + (pa.z - pb.z) ** 2)
+        if d > 0.0:
+            out.append(d)
     return out
 
 
@@ -1596,21 +1813,48 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         for mid in null_mids:
             carrier = state.mat_null[mid]
             nu, pmin = cells.get(mid, (0.0, 0.0))
+            # round 8, B10 (--shell-in-solid-coupling): the void density of
+            # an *INITIAL_VOID host of a converted *CONSTRAINED_SHELL_IN_SOLID
+            # - RHO_I = VFACT x RO, the /EOS RHO_0 = RO (empty by default)
+            dens = state.sis_density.get(mid)
             lines += _emit_mat_law6_carrier(
-                mid, carrier.title, carrier.rho, pmin=pmin, nu=nu)
+                mid, carrier.title, dens[0] if dens else carrier.rho,
+                pmin=pmin, nu=nu)
             if mid == eosid:
-                lines += _emit_eos(eos)
+                lines += _emit_eos(_sis_eos(eos, mid, dens)
+                                   if dens else eos)
             else:
                 state.warn(
                     f"{eos.label()}: bound to *MAT_NULL {mid} via "
                     f"a *PART EOSID — emitted as /EOS/{eos.kind}/{mid} on "
                     "the /MAT/LAW6 carrier of that id (Radioss binds an "
                     "/EOS to the material of the SAME id).")
-                lines += _emit_eos(EosCard(eosid=mid, kind=eos.kind,
+                lines += _emit_eos(_sis_eos(eos, mid, dens) if dens else
+                                   EosCard(eosid=mid, kind=eos.kind,
                                            params=eos.params, rho0=eos.rho0,
                                            note=eos.note,
                                            keyword=eos.keyword))
+            # ... and its COPY when a non-void part shares the *MAT_NULL
+            for copy, orig in sorted(state.sis_copy_mids.items()):
+                if orig != mid:
+                    continue
+                cdens = state.sis_density[copy]
+                lines += _emit_mat_law6_carrier(
+                    copy, f"{carrier.title or f'FLUID_{mid}'} (void copy)",
+                    cdens[0], pmin=pmin, nu=nu)
+                lines += _emit_eos(_sis_eos(eos, copy, cdens))
     return lines
+
+
+def _sis_eos(eos: EosCard, mid: int, dens: Tuple[float, float]) -> EosCard:
+    """*eos* re-emitted under material *mid* with its ``RHO_0`` cell = the
+    deck density (round 8, B10: a void host's reference density, so a
+    RHO_I of VFACT x RO does not become the EOS's reference,
+    ``hm_read_mat06.F:155-157`` / ``hm_read_eos_gruneisen.F:117-123``)."""
+    params = dict(eos.params)
+    params["rho0"] = dens[1]
+    return EosCard(eosid=mid, kind=eos.kind, params=params, rho0=eos.rho0,
+                   note=eos.note, keyword=eos.keyword)
 
 
 def _emit_mat_elastic(mat: MatElastic) -> List[str]:
@@ -7614,6 +7858,24 @@ def _emit_mat224_tab1(mat: MatTabulatedJC) -> List[str]:
 # (written as a blank 0, hm_read_mat06.F:154) rather than to -1e20.
 _LSD_CP_NO_CAVITATION = 1.0e20
 
+#: R14 triage round 8, B5: the sentence of a *MAT_ELASTIC_FLUID stated CP
+#: 0.0 written as a cut-off at zero ({tag} = the card's label). Decided on
+#: consistency: no reference in the corpora exercises the cell.
+_ELASTIC_FLUID_CP0_SENTENCE = (
+    "{tag}: CP=0.0 is stated on card 2: written as /MAT/HYD_VISC Pmin = "
+    "-1e-20, a cut-off at zero pressure. LS-DYNA keeps a stated CP 0 as its "
+    "cavitation pressure (the nvh 9.1 / 9.4 reference d3hsp echo 'cavitation "
+    "pressure = 0.00000E+00', 9.1.acoustic.compartment.hex.d3hsp:3471, not "
+    "its 1e20 default), while the Radioss reader takes a Pmin of exactly 0 "
+    "as -INFINITY (hm_read_mat06.F:154) and the EOS clamps its pressure at "
+    "Pmin (eospolyno.F:104 / 113 / 125); *MAT_NULL PC 0 gets the same -1e-20 "
+    "(round 7). The cell rests on that consistency: no reference in the "
+    "corpora exercises it - its four carriers are frequency-domain acoustic "
+    "decks (nvh 8.7 / 9.1 / 9.2 / 9.4), and on the one that runs (9.4: 18 "
+    "cycles at nt 4) both cells give 18 identical rows with zero energy. "
+    "--no-elastic-fluid-cp-cutoff keeps Pmin 0."
+)
+
 # ...but the literal 1e20 is a RAW NUMBER, so testing it alone is unit-system
 # dependent. The corpus proves it on one material: the W11 bird-strike "Head"
 # fluid writes CP = 1.0e20 in its SI (kg-m-s) copy and CP = 1e14 in the
@@ -8188,16 +8450,16 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 "pressure falls below it); the Radioss Pmin cut-off is the "
                 f"negative-going one, so this is written Pmin = {mat.pmin:g}. "
                 "Check the sign convention on card 2 field 2.")
+        elif state.options.elastic_fluid_cp_cutoff:
+            # An EXPLICIT CP = 0.0: LS-DYNA keeps the stated 0 as its cut-off
+            # (9.1...d3hsp:3471 'cavitation pressure = 0.00000E+00'); Pmin 0
+            # would be the reader's NO-cut-off sentinel (hm_read_mat06.F:154).
+            # R14 triage round 8, B5 -- the same cell *MAT_NULL PC 0 gets
+            # (round 7, B1); round 7's "deliberately not changed" is reversed.
+            mat.pmin = _VOID_CAVITATION_PMIN
+            state.warn(_ELASTIC_FLUID_CP0_SENTENCE.format(tag=tag))
         else:
-            # An EXPLICIT CP = 0.0 means "cavitate at zero pressure", which is
-            # NOT the same as a blank cell. Pmin = 0 cannot say it (it is the
-            # reader's "no cut-off" sentinel); Pmin = -1e-20 can, and is what
-            # the ELFORM-12 *INITIAL_VOID floor writes (round 6) and the
-            # *MAT_NULL PC cell writes for a PC 0 (round 7, B1) -- this
-            # *MAT_ELASTIC_FLUID mapping is deliberately not changed (B1 is
-            # keyed on the *MAT_NULL record; the 4 nvh acoustic compartments
-            # stay byte-identical; ROADMAP, the *MAT_ELASTIC_FLUID CP 0.0
-            # item).
+            # --no-elastic-fluid-cp-cutoff: the 4f5b6e8 cell (Pmin 0).
             mat.pmin = 0.0
             state.warn(
                 f"{tag}: CP=0.0 is written explicitly on card 2, i.e. "
@@ -8209,10 +8471,11 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 "silently. The zero-pressure threshold IS expressible as a "
                 "tiny negative Pmin: k2rad writes Pmin = -1e-20 on the fluid "
                 "of an ELFORM-12 *INITIAL_VOID deck (round 6; it turned the "
-                "quadrature_B and bird_B timeouts into NORMAL runs there), but "
-                "this card's mapping is not changed yet (ROADMAP) - write "
-                "Pmin = -1e-20 on the emitted /MAT/HYD_VISC if the cavitation "
-                "cut-off matters.")
+                "quadrature_B and bird_B timeouts into NORMAL runs there) and "
+                "on this card by default since round 8 - not here, because "
+                "--no-elastic-fluid-cp-cutoff was passed - write Pmin = -1e-20 "
+                "on the emitted /MAT/HYD_VISC if the cavitation cut-off "
+                "matters.")
         if mat.da != 0.0 or mat.db != 0.0:
             state.warn(
                 f"{tag}: DA={mat.da:g} / DB={mat.db:g} (axial and bending "

@@ -110,6 +110,7 @@ __all__ = [
     "_make_tied_nodes_failure_notes",
     "_make_constrained_linear_mpcs",
     "_apply_mass_weighted_rbody_inertia",
+    "_merge_mass_weighted_pairs",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -171,20 +172,71 @@ def _make_rlinks(state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """``*BOUNDARY_SPC_NODE`` / ``_SET`` -> one ``/BCS`` ``BC_<id>`` per card,
+    on the card's own node set (``/GRNOD/NODE/<nsid>``, shared by every card
+    on that set and written once).
+
+    In this order, per card:
+
+      1. a rigid-body member is RE-POINTED onto its ``/RBODY`` main node
+         (``node_to_ind``; a ``/BCS`` on a secondary is inert,
+         ``rgbodv.F:150-155``);
+      2. a resolvable CID (``*DEFINE_COORDINATE_SYSTEM`` / ``_NODES``) becomes
+         the card's skew; anything else is written in the GLOBAL system, named;
+      3. (round 8, A1) a main node that carries its body's own SKEWED card
+         (``*MAT_RIGID`` CMO -1, a skewed CNRB ``_SPC`` card) leaves a card in
+         ANOTHER skew - the starter accepts one skew per node
+         (``hm_read_bcs.F:199-205``, ERROR 148) - and is named;
+      4. (round 8, A3 P1; ``--bcs-union``, default ON) the UNION per
+         ``(node, skew)``: a DOF an EARLIER card already states on that node
+         in that skew is not restated. LS-DYNA keeps ONE constraint per node
+         (sphere1.d3hsp prints 120 SPC nodes for its 124 deck rows) and the
+         starter ORs two ``/BCS`` into the same union (``hm_read_bcs.F:198``
+         ``MY_OR``), so a second card on a common DOF only fed starter
+         WARNING 312 - which counts the DOFs both cards fix
+         (``kinchk.F:945-947``), not nodes. A node whose card adds new DOFs
+         keeps them in a ``BC_<id>_<Tra>_<Rot>`` remainder card and group;
+         the card's other nodes go to a ``BC_<id>_not_restated`` group; a
+         card left with no node writes no ``/BCS`` at all (its set's
+         ``/GRNOD`` is still written). Two skews never merge (a digit is an
+         axis of its own skew) and a node in two skews is named. When no node
+         is shared the cards are byte-identical to 4f5b6e8.
+    """
     if not state.bcs_spcs:
         return []
     lines = ["#-  BOUNDARY CONDITIONS:", HDR]
-    
+
     node_to_ind = {}
     for pid, info in rbody_info.items():
         ind_node = info["ind_node"]
         for node in info["nodes"]:
             node_to_ind[node] = ind_node
+    # round 8, B8 (q-ii): a member of a converted screw body is HELD by the
+    # joint in every DOF the card states (any other code refused the joint):
+    # the code is written nowhere - the joint section names it
+    from .joint_screw import screw_merged_members
+    screw_members = screw_merged_members(state)
 
+    # round 8, A1: the rigid-body main nodes that carry a SKEWED /BCS of their
+    # own body (empty under --no-rigid-local-constraints)
+    skewed_cards = _rigid_skewed_cards(state)
+    skew_drops: Dict[int, Tuple[str, str, int]] = {}
+    # round 8, A3 P1: (node, skew) -> the six digits an EARLIER card states
+    union = state.options.bcs_union
+    stated: Dict[Tuple[int, int], str] = {}
+    skews_of: Dict[int, Set[int]] = defaultdict(set)
+    merged_dofs: Dict[int, int] = defaultdict(int)
+    cards_gone: List[int] = []
+    rest_nodes: Set[int] = set()
     emitted_grnods: Set[int] = set()
     for bc in state.bcs_spcs:
         nsid = bc.nsid
         raw_nids = state.node_sets.get(nsid, ("", []))[1]
+        if screw_members:
+            kept_raw = [n for n in raw_nids if n not in screw_members]
+            if raw_nids and not kept_raw:
+                continue          # merged into a screw joint (its sentence)
+            raw_nids = kept_raw
 
         mapped_nids = set()
         for n in raw_nids:
@@ -211,18 +263,106 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
-        lines += [
-            f"/BCS/{bc.bc_id}",
-            f"BC_{bc.bc_id}",
-            "#  Tra rot   skew_ID  grnod_ID",
-            f"   {tra} {rot}{_i(skew_id)}{_i(nsid)}",
-            HDR,
-        ]
+        # round 8, A1 consumer (b): a member re-pointed onto a main node that
+        # carries its body's SKEWED /BCS leaves this card when the card is in
+        # another skew (ONE skew per node, ERROR 148); the same skew stays
+        card_nids = mapped_nids
+        if skewed_cards:
+            gone = {m for m in mapped_nids if m in skewed_cards
+                    and any(s != skew_id for s, _t, _a, _b in skewed_cards[m])}
+            for m in gone:
+                skew_drops[m] = (tra, rot, skew_id)
+            card_nids = mapped_nids - gone
+        # round 8, A3 P1: the union per (node, skew), in deck order
+        code = tra + rot
+        keep: List[int] = []
+        rest: Dict[str, List[int]] = defaultdict(list)
+        for n in sorted(card_nids):
+            skews_of[n].add(skew_id)
+            if not union:
+                keep.append(n)
+                continue
+            prev = stated.get((n, skew_id), "000000")
+            hit = sum(1 for c, p in zip(code, prev) if c == "1" and p == "1")
+            stated[(n, skew_id)] = "".join(
+                "1" if "1" in (c, p) else "0" for c, p in zip(code, prev))
+            if not hit:
+                keep.append(n)
+                continue
+            merged_dofs[n] += hit
+            new = "".join("1" if (c == "1" and p == "0") else "0"
+                          for c, p in zip(code, prev))
+            if "1" in new:
+                rest[new].append(n)
+                rest_nodes.add(n)
+        if keep:
+            if len(keep) == len(mapped_nids):
+                grnod = nsid               # nothing shared: the 4f5b6e8 card
+            else:
+                grnod = state.next_grnod_id()
+            lines += [
+                f"/BCS/{bc.bc_id}",
+                f"BC_{bc.bc_id}",
+                "#  Tra rot   skew_ID  grnod_ID",
+                f"   {tra} {rot}{_i(skew_id)}{_i(grnod)}",
+                HDR,
+            ]
+            if grnod != nsid:
+                restated = len(keep) < len(card_nids)
+                set_title = state.node_sets.get(nsid, ("", []))[0]
+                lines += _emit_grnod_node(
+                    grnod, (f"BC_{bc.bc_id}_not_restated" if restated else
+                            f"{set_title or f'SET_{nsid}'}_one_skew"), keep)
+        elif card_nids:
+            cards_gone.append(bc.bc_id)
+        for new in sorted(rest):
+            rid = state.next_id()
+            gid = state.next_grnod_id()
+            rtitle = f"BC_{bc.bc_id}_{new[:3]}_{new[3:]}"
+            lines += [
+                f"/BCS/{rid}",
+                rtitle,
+                "#  Tra rot   skew_ID  grnod_ID",
+                f"   {new[:3]} {new[3:]}{_i(skew_id)}{_i(gid)}",
+                HDR,
+            ]
+            lines += _emit_grnod_node(gid, rtitle, rest[new])
         if nsid in emitted_grnods:
             continue          # several SPC cards on one set share the /GRNOD
         emitted_grnods.add(nsid)
         set_title = state.node_sets.get(nsid, ("", []))[0]
         lines += _emit_grnod_node(nsid, set_title or f"SET_{nsid}", sorted(mapped_nids))
+    if skew_drops:
+        state.warn("*BOUNDARY_SPC:" + _skew_drop_sentence(
+            skew_drops, skewed_cards, "*BOUNDARY_SPC"))
+    if merged_dofs:
+        nn = sorted(merged_dofs)
+        state.warn(
+            f"*BOUNDARY_SPC: {sum(merged_dofs.values())} DOF(s) on {len(nn)} "
+            f"node(s) (node {_named(nn)}) are stated by two or more "
+            "*BOUNDARY_SPC cards in one system; LS-DYNA keeps ONE constraint "
+            "per node, the union of the DOFs, and the starter ORs two /BCS the "
+            "same way (hm_read_bcs.F:198 MY_OR), so a later card no longer "
+            "restates a DOF an earlier card fixes (the second /BCS only fed "
+            "starter WARNING 312, one condition per DOF both cards fix). "
+            f"{len(cards_gone)} card(s) write no /BCS"
+            + (" (" + ", ".join(f"BC_{c}" for c in cards_gone[:8])
+               + (" ..." if len(cards_gone) > 8 else "") + ")"
+               if cards_gone else "")
+            + f"; {len(rest_nodes)} node(s) keep the remaining DOFs in a "
+            "BC_<id>_<Tra>_<Rot> group. MEASURED on intro-by-j.-day sphere1 "
+            "(nt 4 and nt 2): 1592 = 1592 cycles, every printed row "
+            "identical, WARNING 312 24 -> none. --no-bcs-union writes every "
+            "card as before (round 8).")
+    cross = sorted(n for n, s in skews_of.items() if len(s) > 1)
+    if union and cross:
+        sk = sorted({s for n in cross for s in skews_of[n]})
+        state.warn(
+            f"*BOUNDARY_SPC: node(s) {_named(cross)} are constrained in two "
+            f"different systems (skews {', '.join(str(s) for s in sk)}); not "
+            "merged (a digit is an axis of its own skew), and the starter "
+            "accepts ONE skew per node: ERROR 148 (hm_read_bcs.F:199-205) will "
+            "stop it - state both in one system.")
     return lines
 
 
@@ -472,6 +612,100 @@ def _rigid_auto_spc_dofs(state: ConversionState
     return out
 
 
+def _rigid_skewed_cards(state: ConversionState
+                        ) -> Dict[int, List[Tuple[int, str, str, str]]]:
+    """``/RBODY main node -> [(skew_ID, title, Tra, Rot)]`` of the SKEWED
+    ``/BCS`` the rigid-body producers write there (round 8, A1): the
+    ``*MAT_RIGID`` CMO -1 cards (``state.rigid_skewed_bcs``) and the
+    ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` cards with a skew
+    (``state.cnrb_spc_bcs``).
+
+    The ONE predicate of the one-skew-per-node rule: the starter accepts ONE
+    skew per node across every /BCS (``hm_read_bcs.F:199-205``, ERROR 148 'A
+    SKEW IS ALREADY DEFINED WITH THE NODE'; the same skew twice is fine and
+    skew 0 counts), so a code on such a node in ANOTHER skew - a re-pointed
+    member *NODE TC/RC or *CONSTRAINED_GLOBAL code, or a *BOUNDARY_SPC - is
+    dropped and named (:func:`_skew_drop_sentence`) instead of making the
+    starter stop. Empty under ``--no-rigid-local-constraints``, which keeps
+    round 7's behaviour (the clash is named, not resolved).
+    """
+    out: Dict[int, List[Tuple[int, str, str, str]]] = {}
+    if not state.options.rigid_local_constraints:
+        return out
+    for nid, cards in sorted(state.rigid_skewed_bcs.items()):
+        for tra, rot, skew, title in cards:
+            out.setdefault(nid, []).append((skew, title, tra, rot))
+    for cbc in state.cnrb_spc_bcs:
+        if cbc.skew:
+            out.setdefault(cbc.ind_node, []).append(
+                (cbc.skew, cbc.title or f"/BCS/{cbc.bc_id}", cbc.tra,
+                 cbc.rot))
+    return out
+
+
+def _skew_drop_sentence(drops: Dict[int, Tuple[str, str, int]],
+                        cards: Dict[int, List[Tuple[int, str, str, str]]],
+                        source: str) -> str:
+    """W7 of round 8 A1: the codes the one-skew-per-node rule DROPPED.
+
+    *drops* maps a main node to the dropped code ``(Tra, Rot, skew)``;
+    *cards* is :func:`_rigid_skewed_cards`. The drop is EXACT where every
+    dropped digit is still held by the kept card: a global digit is held by a
+    skewed card only when that card fixes all three of its kind (``111``), so
+    exact iff (no dropped translation or kept Tra 111) and (no dropped rotation
+    or kept Rot 111)."""
+    if not drops:
+        return ""
+    nodes = sorted(drops)
+    kept_desc = sorted({f"{t} at skew {s}" for n in nodes
+                        for s, t, _a, _b in cards.get(n, [])})
+    codes = sorted({f"'{d[0]} {d[1]}' (skew {d[2]})" for d in drops.values()})
+    lost: List[str] = []
+    for n in nodes:
+        tra, rot, _s = drops[n]
+        k_tra = _or_dof_codes([c[2] for c in cards.get(n, [])] or ["000"])
+        k_rot = _or_dof_codes([c[3] for c in cards.get(n, [])] or ["000"])
+        miss = []
+        if "1" in tra and k_tra != "111":
+            miss += [ax for ax, d in zip(("x", "y", "z"), tra) if d == "1"]
+        if "1" in rot and k_rot != "111":
+            miss += [ax for ax, d in zip(("rx", "ry", "rz"), rot) if d == "1"]
+        if miss:
+            lost.append(f"node {n} no longer holds global {'/'.join(miss)}")
+    if lost:
+        tail = ("not exact: " + "; ".join(lost[:5])
+                + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")
+                + " - state them in the body's own CON2 (its local system)")
+    else:
+        tail = ("exact: the kept card's Tra / Rot is 111, so every dropped "
+                "digit is still held")
+    # The opt-out clause is keyed on the PRODUCER of the kept card (the
+    # round-8 post-review verification): the *MAT_RIGID producer titles its
+    # skewed card BC_rigid_<pid>; every other one is a skewed
+    # *CONSTRAINED_NODAL_RIGID_BODY_SPC card. Measured on starter probes:
+    # the opt-out of a *MAT_RIGID CMO -1 body is the 4f5b6e8 deck, 0 errors;
+    # that of a skewed CNRB _SPC card stops on ERROR 148.
+    titles = {t for n in nodes for _s, t, _a, _b in cards.get(n, [])}
+    opt_out = []
+    if any(t.startswith("BC_rigid_") for t in titles):
+        opt_out.append("writes no CMO -1 card for a *MAT_RIGID CMO -1 body, "
+                       "so the other code stays and nothing clashes")
+    if any(not t.startswith("BC_rigid_") for t in titles):
+        opt_out.append("keeps a skewed *CONSTRAINED_NODAL_RIGID_BODY_SPC "
+                       "card's old pair and its ERROR 148")
+    return (
+        f" {len(nodes)} /RBODY main node(s) (node {_named(nodes)}) carry the "
+        "SKEWED /BCS of their rigid body ("
+        + ", ".join(kept_desc[:5]) + (" ..." if len(kept_desc) > 5 else "")
+        + f"); the {source} code(s) " + ", ".join(codes[:5])
+        + (" ..." if len(codes) > 5 else "")
+        + " on the same node were DROPPED: the starter accepts ONE skew per "
+        "node (ERROR 148 'A SKEW IS ALREADY DEFINED WITH THE NODE', "
+        "hm_read_bcs.F:199-205; measured on a starter probe). LS-DYNA applies "
+        f"both; {tail} (round 8; --no-rigid-local-constraints "
+        + ", and ".join(opt_out) + ").")
+
+
 def _mesh_has_rotational_dof(state: ConversionState,
                              rbody_info: Dict) -> bool:
     """True unless this deck's mesh provably carries no rotational DOF.
@@ -634,9 +868,10 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
 
     The implicit free-node guard is the fifth interaction, and it is resolved
     from the OTHER side: :func:`_make_free_node_constraints` runs later, drops
-    from its own ``111 111`` group any node this pass has already pinned in all
-    six DOFs, and keeps the rest (its mask is the superset, so a partially
-    pinned free node must still reach it).
+    any node this pass has already pinned in all six DOFs, and (round 8, A3
+    P3; ``--bcs-union``) writes on a partially pinned free node only the DOFs
+    this pass leaves free, in a ``fix_free_reference_nodes_<Tra>_<Rot>`` group
+    - the node is still fixed in all six (``MY_OR``) and no DOF twice.
 
     **Rule (b)'s reach is bounded by what registers itself.**
     ``state.imp_motion_dirs`` is filled by ``_register_imp_motion_nodes``,
@@ -779,11 +1014,18 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
     rigid_members: Dict[int, List[int]] = defaultdict(list)
     rigid_orphans: List[int] = []
     rigid_repointed: Dict[int, Tuple[str, str]] = {}
+    # round 8, B8 (q-ii): a code on a converted screw body's member is HELD
+    # by the joint (any other code refused it) - written nowhere, named by
+    # the joint section
+    from .joint_screw import screw_merged_members
+    screw_members = screw_merged_members(state)
 
     for nid in sorted(cells):
         tc, rc = cells[nid]
         if nid in node_cells:
             stated[node_cells[nid]] += 1       # the *NODE card's OWN code
+        if nid in screw_members:
+            continue
         if nid in rigid_nodes:
             main = main_of.get(nid)
             if main is None:
@@ -815,6 +1057,28 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
         groups[(tra_s, rot_s)].append(main)
         state.node_tc_rc_emitted[main] = (tra_s, rot_s)
         rigid_repointed[main] = (tra_s, rot_s)
+
+    # ── round 8, A1: ONE skew per node. A main node that carries a SKEWED
+    # /BCS of its own rigid body (a *MAT_RIGID CMO -1 card or a skewed CNRB
+    # _SPC card) LEAVES its skew-0 TC/RC group: the pair is starter ERROR 148
+    # (hm_read_bcs.F:199-205), so the rigid body's card is kept and this code
+    # dropped and named (_skew_drop_sentence). Empty without
+    # --rigid-local-constraints, where the clash is only named (below).
+    skewed_cards = _rigid_skewed_cards(state)
+    skew_drops: Dict[int, Tuple[str, str, int]] = {}
+    if skewed_cards:
+        for key in sorted(groups):
+            hit = [n for n in groups[key] if n in skewed_cards]
+            if not hit:
+                continue
+            for n in hit:
+                skew_drops[n] = (key[0], key[1], 0)
+                state.node_tc_rc_emitted.pop(n, None)
+            keep = [n for n in groups[key] if n not in skewed_cards]
+            if keep:
+                groups[key] = keep
+            else:
+                del groups[key]
 
     # ── ERROR 148 (the post-review round; reach 0, pre-existing): a skewed
     # CNRB _SPC code is never merged (its digits are axes of its skew), and a
@@ -888,12 +1152,16 @@ def _make_node_tc_rc_bcs(state: ConversionState, rbody_info: Dict,
                                 for t in ts}),
             auto_stab=any(n in auto_stab_hits
                           for n, _k, _t in auto_hits if n in prov),
+            auto_cmo_neg=any(n in state.rigid_auto_cmo_neg
+                             for n, _k, _t in auto_hits if n in prov),
             auto_stab_only=bool([n for n, _k, _t in auto_hits if n in prov])
             and all(n in auto_stab_only
                     for n, _k, _t in auto_hits if n in prov),
             skew148=[n for n in skew148 if n in prov],
             skew148_cards=sorted({c for n in skew148 if n in prov
                                   for c in skewed_cnrb[n]}),
+            skew_drop={n: c for n, c in skew_drops.items() if n in prov},
+            skew_cards=skewed_cards,
             rot_inert=[n for n in rot_inert if n in prov],
             skewed_motion=[n for n in skewed_motion if n in prov],
             emptied=[n for n in emptied if n in prov])
@@ -919,9 +1187,13 @@ def _warn_constrained_global_converted(
         spc_nodes: List[int], spc_dof_count: int,
         auto_nodes: List[int], auto_dof_count: int, auto_titles: List[str],
         auto_stab: bool, auto_stab_only: bool,
+        auto_cmo_neg: bool,
         skew148: List[int], skew148_cards: List[str],
         rot_inert: List[int], skewed_motion: List[int],
-        emptied: List[int]) -> None:
+        emptied: List[int],
+        skew_drop: Optional[Dict[int, Tuple[str, str, int]]] = None,
+        skew_cards: Optional[Dict[int, List[Tuple[int, str, str, str]]]] = None
+        ) -> None:
     """Announce the ``*CONSTRAINED_GLOBAL`` conversion once per deck, AFTER
     every screen (the #133 ordering rule), with this source's own counts."""
     rows = state.constrained_global_rows
@@ -993,10 +1265,14 @@ def _warn_constrained_global_converted(
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
                                               stab=auto_stab,
-                                              stab_only=auto_stab_only))
+                                              stab_only=auto_stab_only,
+                                              cmo_neg=auto_cmo_neg))
     if skew148:
         msg.append(_skew148_sentence(skew148, skew148_cards,
                                      "--no-constrained-global"))
+    if skew_drop:
+        msg.append(_skew_drop_sentence(skew_drop, skew_cards or {},
+                                       "*CONSTRAINED_GLOBAL"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1113,7 +1389,8 @@ def _named(nids: List[int], cap: int = 5) -> str:
 def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
                                stab: bool = False,
-                               stab_only: bool = False) -> str:
+                               stab_only: bool = False,
+                               cmo_neg: bool = False) -> str:
     """Screen (c')'s sentence (round 7, A1), shared by the ``*NODE`` and the
     ``*CONSTRAINED_GLOBAL`` announcements so the two cannot drift.
 
@@ -1138,7 +1415,9 @@ def _rigid_auto_merge_sentence(auto_nodes: List[int], auto_dof_count: int,
             "unloaded free translation of a loaded body - the body states no "
             "*MAT_RIGID CON1/CON2 digit there" if stab_only else
             f"*MAT_RIGID CMO 1 CON1/CON2{named}, or the "
-            "*CONSTRAINED_NODAL_RIGID_BODY _SPC option")
+            "*CONSTRAINED_NODAL_RIGID_BODY _SPC option"
+            + (", or *MAT_RIGID CMO -1 CON2 in the global frame (CON1 0)"
+               if cmo_neg else ""))
     return (
         f" {auto_dof_count} DOF(s) on {len(auto_nodes)} rigid-body main "
         f"node(s) (node {_named(auto_nodes)}) are already fixed by the /BCS "
@@ -1183,10 +1462,16 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
                                auto_nodes: List[int], auto_dof_count: int,
                                auto_titles: List[str],
                                auto_stab: bool, auto_stab_only: bool,
+                               auto_cmo_neg: bool,
                                skew148: List[int], skew148_cards: List[str],
                                rot_inert: List[int],
                                skewed_motion: List[int],
-                               emptied: List[int]) -> None:
+                               emptied: List[int],
+                               skew_drop: Optional[
+                                   Dict[int, Tuple[str, str, int]]] = None,
+                               skew_cards: Optional[Dict[
+                                   int, List[Tuple[int, str, str, str]]]]
+                               = None) -> None:
     """Announce the ``*NODE`` TC/RC conversion once per deck, AFTER every
     screen has run and with each screen's own count.
 
@@ -1276,10 +1561,14 @@ def _warn_node_tc_rc_converted(state: ConversionState, *,
         msg.append(_rigid_auto_merge_sentence(auto_nodes, auto_dof_count,
                                               auto_titles,
                                               stab=auto_stab,
-                                              stab_only=auto_stab_only))
+                                              stab_only=auto_stab_only,
+                                              cmo_neg=auto_cmo_neg))
     if skew148:
         msg.append(_skew148_sentence(skew148, skew148_cards,
                                      "--no-node-tc-rc-bcs"))
+    if skew_drop:
+        msg.append(_skew_drop_sentence(skew_drop, skew_cards or {},
+                                       "*NODE TC/RC"))
     if rot_inert:
         msg.append(
             f" {len(rot_inert)} node(s) (node {_named(rot_inert)}) got a "
@@ -1853,7 +2142,7 @@ def _spring_kc(dofs, l13: float = 0.0
     the larger shear stiffness / damping times the length squared
     (``r4def3.F:173-174``, added at ``:545-548``: ``XKR = MAX(K4..K6) +
     MAX(K2, K3) * ALDP**2``) - the bending stiffness the two shear springs
-    give the element. ``r2len3.F:182-186`` then takes
+    give the element. ``r2len3.F:221-247`` then takes
     ``min(M / (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) +
     C_r))``. An Ileng 1 property divides all four by the length afterwards
     (``r4def3.F:870-875``); the caller does that. The PRINTED K is used:
@@ -1873,7 +2162,9 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
                                 prop_mass: float = _SPRING_TOKEN_MASS,
                                 spring: Optional[Tuple[int, float, float,
                                                        float, float,
-                                                       float]] = None
+                                                       float]] = None,
+                                prop: Optional[Tuple[int, str, int,
+                                                     float]] = None
                                 ) -> None:
     """Record the invented property mass one emitted /SPRING row puts on its
     end nodes, for the /ADMAS compensation in :func:`_make_added_masses`.
@@ -1884,6 +2175,12 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
     :func:`_warn_spring_token_mass` can state each light node's two-mass
     critical step against the spring's own step. Every registration site
     passes it; ``None`` records nothing (no clause numbers for that row).
+
+    *prop* = ``(/PROP id, "TYPE4" | "TYPE8" | "TYPE13", Ileng, element
+    length)`` of the row's token property (round 8, A5): recorded with the
+    spring in ``state.spring_token_props``, so the adaptive-token pass
+    (:func:`_adaptive_spring_token`) knows which emitted MASS cell carries
+    this spring's token. The four token producers pass it.
 
     ``rinit3.F:1926`` is ``EMS(I) = HALF*UMASS(I)`` and ``:1937-1939`` writes
     ``MSR(1..3,I)`` onto ``IXR(2,I)`` and ``IXR(3,I)`` only — HALF the property
@@ -1916,6 +2213,8 @@ def _register_spring_token_mass(state: ConversionState, n1: int, n2: int,
         eid, inertia, k_t, k_r, c_t, c_r = spring
         state.spring_token_springs.append(
             (eid, n1, n2, prop_mass, inertia, k_t, k_r, c_t, c_r))
+        if prop is not None:
+            state.spring_token_props[len(state.spring_token_springs) - 1] = prop
 
 
 def _spring_token_mass_sentence(state: ConversionState, g_elems) -> str:
@@ -2055,7 +2354,8 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # there and nothing is warned about it (see _spring_token_warn_nodes).
         _register_spring_token_mass(
             state, n1, n2,
-            spring=((e.eid,) + spring_kc) if spring_kc is not None else None)
+            spring=((e.eid,) + spring_kc) if spring_kc is not None else None,
+            prop=(prop_id, spring_kind_label, 0, 1.0))
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_grnod_id()
@@ -3810,11 +4110,62 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                    if mat.sigy > 0.0 and not state.options.spotweld_shear_yield
                    else "")
                 + " --no-spotweld-efail-displacement keeps EFAIL dropped.")
+        # round 8, A6 (default ON, --no-spotweld-dt-mass-scaling): *MAT_100
+        # DT -> the TYPE13 Mass / Inertia closed form. Vol II R17
+        # *MAT_SPOTWELD Remark 4 scales the weld inertias in the first step so
+        # that their stable step is DT - UP only. The TYPE13 step is
+        # DTFAC1(6) min(XM / (sqrt(XCM^2 + XM XKM) + XCM), the rotational one)
+        # (r2len3.F:221-247; STI = XM/DT^2 at :233) with XKM = max(K1..K3)
+        # (r4def3.F:165) and XKR = max(K2, K3) ALDP^2 + max(K4..K6) (:173,
+        # :545-547): undamped, dt = 0.9 min(sqrt(M / max K1..3),
+        # sqrt(I / (max K4..6 + max K2,3 L^2))). L_max = the LONGEST weld of
+        # the property (the smallest rotational step).
+        dt_scaled = False
+        dt_inert = False
+        f_m = f_i = 1.0
+        if (state.options.spotweld_dt_mass_scaling
+                and 0.0 < mat.dt < _SPOTWELD_NEVER):
+            l_max = max(lens) if lens else L
+            m_dt = max(k1, k23) * mat.dt ** 2
+            i_dt = (max(k4, k5, k6) + k23 * l_max ** 2) * mat.dt ** 2
+            new_mass, new_inertia = max(mass, m_dt), max(inertia, i_dt)
+            if new_mass > mass or new_inertia > inertia:
+                f_m, f_i = new_mass / mass, new_inertia / inertia
+                dt_added = (new_mass - mass) * len(beams)
+                mass, inertia = new_mass, new_inertia
+                dt_scaled = True
+            else:
+                dt_inert = True
         prop_id = state.next_prop_id()
         lines += funct_lines
         lines += _emit_prop_type13(
             prop_id, (part.title or f"SPOTWELD_{pid}") + " (MAT_100 spotweld)",
             mass, inertia, ifail, ifail2, dofs)
+        if dt_scaled:
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: DT={mat.dt:g} -> "
+                f"/PROP/TYPE13/{prop_id} Mass x {f_m:.4g}, Inertia x "
+                f"{f_i:.4g} (Vol II R17 *MAT_SPOTWELD Remark 4: the weld "
+                "inertias are scaled so that their stable step is DT), added "
+                f"mass {dt_added:.6G} on {len(beams)} weld(s): the TYPE13 "
+                "step is 0.9 min(sqrt(Mass / max K1..3), sqrt(Inertia / (max "
+                "K4..6 + max K2,3 L^2))) (r2len3.F:221-247, STI = XM/DT^2 at "
+                ":233), so it starts at 0.9 DT; a lengthening weld pulls it "
+                "below. MEASURED on spotweld.k under the opt-in rules 1 + 2 "
+                "(nt 4): last cycle 1332 = LS-DYNA's 1332 (4791 unscaled), cycle-0 "
+                "step 9.000e-7, "
+                "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %) - "
+                "MIXED: the histories are WORSE, RMS IE 6.65 -> 6.82 % and "
+                "RMS KE 23.09 -> 23.66 % of the LS peak over the 1331 LS "
+                "times to t 0.00119792. "
+                "--no-spotweld-dt-mass-scaling drops DT as before (round 8).")
+        elif dt_inert:
+            state.warn(
+                f"*MAT_SPOTWELD part {pid}: DT={mat.dt:g} is inert: the "
+                "weld's own TYPE13 step already exceeds it (Remark 4 scales a "
+                "weld UP to DT, never down - LS-DYNA runs plates.mat100 at its "
+                "beam step 2.99951e-7 s with DT 1e-9). "
+                "--no-spotweld-dt-mass-scaling names DT as dropped (round 8).")
         lines += [
             f"/PART/{pid}",
             part.title or f"SPOTWELD_{pid}",
@@ -3838,7 +4189,8 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 _register_spring_token_mass(
                     state, e.n1, e.n2,
                     spring=(e.eid, inertia) + _spring_kc(
-                        dofs, l13=_element_length(state, e)))
+                        dofs, l13=_element_length(state, e)),
+                    prop=(prop_id, "TYPE13", 0, 1.0))
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -3852,6 +4204,9 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
 
         cells = [("DT", mat.dt), ("TFAIL", mat.tfail), ("EFAIL", mat.efail),
                  ("NF", mat.nf)]
+        if dt_scaled or dt_inert:
+            # A6 (round 8): DT is converted (or named inert) above
+            cells = [c for c in cells if c[0] != "DT"]
         if efail_disp or efail_mixed:
             # EFAIL is converted (piece ii) or named by its own sentence below
             # (the mixed card): the dropped clause leaves it out
@@ -4122,7 +4477,8 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
         _register_spring_token_mass(
             state, n1, n2,
             spring=(elem_id, _SPRING_TOKEN_INERTIA) + _spring_kc(dofs,
-                                                                 l13=L))
+                                                                 l13=L),
+            prop=(prop_id, "TYPE13", 0, 1.0))
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -4518,7 +4874,8 @@ _IMP_COMMENT2 = ("#           Ascale_x            Fscale_Y"
 
 
 def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
-                               skew_id: int = 0) -> None:
+                               skew_id: int = 0, tstart: float = 0.0,
+                               tstop: float = 0.0, sensor_id: int = 0) -> None:
     """Record the nodes an /IMPDISP | /IMPVEL | /IMPACC was just written for.
 
     This is the *DATABASE_BNDOUT scope. dyna2rad builds it by re-walking the
@@ -4539,6 +4896,11 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
     TC/RC bit can be compared against; a motion written in a LOCAL system
     lands in ``state.imp_motion_skew_nodes`` instead, where the TC/RC pass
     NAMES it rather than guessing which global bits the skew axis touches.
+
+    ``tstart`` / ``tstop`` / ``sensor_id`` are the card's own window (round 8,
+    A5): a GLOBAL motion is also recorded with it in
+    ``state.imp_motion_windows``, because the adaptive spring token counts an
+    end DRIVEN only when a motion holds it for the WHOLE run.
     """
     real = [n for n in nids if n in state.nodes]
     state.imp_motion_nodes.update(real)
@@ -4549,6 +4911,8 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str,
         return
     for n in real:
         state.imp_motion_dirs.setdefault(n, set()).add(dir_str)
+        state.imp_motion_windows.setdefault(n, []).append(
+            (dir_str, tstart, tstop, sensor_id))
 
 
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
@@ -4776,7 +5140,8 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                 pm.lcid, base_dir, grnod_id, pm.sf,
                                 tstart, tstop, skew_id, state=state)
         motion_counter += 1
-        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id)
+        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id,
+                                   tstart, tstop)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -4785,7 +5150,8 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
             motion_counter += 1
-            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir, skew_id)
+            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir,
+                                       skew_id, tstart, tstop)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
     # the pid — an element-free rigid part, or a *CONSTRAINED_RIGID_BODIES slave
     # whose nodes were merged into its master) still has its three nodes in /NODE
@@ -5203,7 +5569,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
                                 skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
-        _register_imp_motion_nodes(state, nids, base_dir, skew_id)
+        _register_imp_motion_nodes(state, nids, base_dir, skew_id, tstart,
+                                   tstop)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -5211,7 +5578,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id, state=state)
-            _register_imp_motion_nodes(state, nids, lock_dir, skew_id)
+            _register_imp_motion_nodes(state, nids, lock_dir, skew_id, tstart,
+                                       tstop)
 
     return lines
 
@@ -5983,9 +6351,30 @@ def _emit_mass_weighted_bodies(state: ConversionState,
     The ROT block is written even when ``omega`` is all zeros: it is the cell
     that says the body has no spin, and emitting it on one body and not on
     another would make the deck depend on round-off.
+
+    ONE pair per main node (the round-8 post-review verification). A body
+    partly covered by SEVERAL velocity groups (an ``*INITIAL_VELOCITY_NODE``
+    whose rows carry different velocities: ``_make_inivel`` groups them by
+    value) or by several cards reaches here once per group, each time with
+    that group's momentum share over the WHOLE body mass. The starter
+    OVERWRITES a node's velocity card by card (``hm_read_inivel.F:524-526``
+    ``V = V1..V3`` for ``/INIVEL/TRA``, ``:538-540`` ``VR`` for ``/ROT``), so
+    a pair per group kept only the LAST share - the shares are linear in
+    the nodal velocities, and Vol I R17 p.28-129 Remark 3 forms the body's
+    momentum from ALL of them. A later share is therefore recorded in
+    ``state.mass_weighted_pairs`` and written nowhere; the post-registry
+    pass :func:`_merge_mass_weighted_pairs` rewrites the FIRST pair's two
+    rows with the sums. A body with one share keeps its bytes.
     """
     lines: List[str] = []
     for main, v_cm, omega in bodies:
+        rec = state.mass_weighted_pairs.get(main)
+        if rec is not None:
+            # a later share: summed into the first pair by the post-registry
+            # pass, written nowhere here (no id is drawn)
+            rec[3].append(v_cm)
+            rec[4].append(omega)
+            continue
         # the ONE record of "this body got an /INIVEL/ROT": the post-registry
         # rotary-inertia pass (_apply_mass_weighted_rbody_inertia) reads it
         state.mass_weighted_rot_mains[main] = omega
@@ -5997,7 +6386,77 @@ def _emit_mass_weighted_bodies(state: ConversionState,
         rot_id = state.next_id()
         lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
                               grnod_id, omega)
+        state.mass_weighted_pairs[main] = (inivel_id, rot_id, grnod_id,
+                                           [v_cm], [omega])
     return lines
+
+
+#: the measured coupon of _merge_mass_weighted_pairs' sentence (the round-8
+#: post-review verification's two-group cube, starter + engine at nt 4 on
+#: both arms; the closed form: M 1.57e-5, L = (0, 5.8875e-3, -1.9625e-3)
+#: about the CoG (7.5, 7.5, 7.5), the starter's NEW INERTIA tensor)
+_MW_MERGE_MEASURED = (
+    "MEASURED on a two-group coupon (a 10 mm *MAT_RIGID cube, its z = 0 "
+    "nodes at vx 100 and its z = 10 nodes at vx 300, an *ELEMENT_MASS "
+    "7.85e-6 on corner node 7; nt 4): cycle-0 K-ENERGY T 0.4906 = 0.5 M "
+    "250^2 and K-ENERGY R 0.03084 = 0.5 omega.I.omega of the summed shares "
+    "(the closed form), where one pair per group gave 0.3974 (v 225, the "
+    "last group's share) and 0.06939.")
+
+
+def _merge_mass_weighted_pairs(state: ConversionState,
+                               lines: List[str]) -> None:
+    """``--mass-weighted-inivel``: write the SUM of every momentum share of
+    a body into the ONE ``/INIVEL/TRA`` + ``/INIVEL/ROT`` pair on its main
+    node (the round-8 post-review verification; see
+    :func:`_emit_mass_weighted_bodies` for why a pair per group was wrong).
+
+    A POST-REGISTRY pass: the shares of one body can come from different
+    writer sections (``*INITIAL_VELOCITY_NODE`` groups, ``*INITIAL_VELOCITY``
+    cards, ``*INITIAL_VELOCITY_GENERATION`` cards), and the first pair is
+    already in the assembled starter when a later one arrives. The two data
+    rows are located by EXACT line equality on the header, the title and the
+    first share's row the emitter wrote (asserted; a mismatch raises - a
+    k2rad bug, never a silent skip), and only those two rows are replaced.
+    Draws no id; a no-op without the flag or without a multi-share body."""
+    merged = {m: r for m, r in state.mass_weighted_pairs.items()
+              if len(r[3]) > 1}
+    for main in sorted(merged):
+        tra_id, rot_id, grnod_id, v_shares, w_shares = merged[main]
+        v_sum = (math.fsum(v[0] for v in v_shares),
+                 math.fsum(v[1] for v in v_shares),
+                 math.fsum(v[2] for v in v_shares))
+        w_sum = (math.fsum(w[0] for w in w_shares),
+                 math.fsum(w[1] for w in w_shares),
+                 math.fsum(w[2] for w in w_shares))
+        for kind, card_id, title, first, total in (
+                ("TRA", tra_id, f"InitVelMW_{tra_id}", v_shares[0], v_sum),
+                ("ROT", rot_id, f"InitVelMWRot_{rot_id}", w_shares[0],
+                 w_sum)):
+            old = _emit_inivel(kind, card_id, title, grnod_id, first)
+            new = _emit_inivel(kind, card_id, title, grnod_id, total)
+            hits = [i for i, ln in enumerate(lines) if ln == old[0]]
+            if len(hits) != 1 or lines[hits[0]:hits[0] + 4] != old[:4]:
+                raise RuntimeError(
+                    f"--mass-weighted-inivel: /INIVEL/{kind}/{card_id} is "
+                    "not the block its emitter recorded (found "
+                    f"{len(hits)} header line(s)); refusing to rewrite a "
+                    "velocity row blind. This is a k2rad bug.")
+            lines[hits[0] + 3] = new[3]
+        state.mass_weighted_rot_mains[main] = w_sum
+        state.warn(
+            f"--mass-weighted-inivel: the rigid body on main node {main} is "
+            f"partly covered by {len(v_shares)} velocity groups / cards; "
+            "their momentum shares (each over the whole body mass) are "
+            f"SUMMED into ONE pair, /INIVEL/TRA/{tra_id} v_cm = ("
+            + ", ".join(f"{c:.6g}" for c in v_sum)
+            + f") and /INIVEL/ROT/{rot_id} omega = ("
+            + ", ".join(f"{c:.6g}" for c in w_sum)
+            + ") - the starter OVERWRITES a node's velocity card by card "
+            "(hm_read_inivel.F:524-526 / :538-540), so the pair per group "
+            "written before kept only the LAST group's share, where Vol I "
+            "R17 p.28-129 Remark 3 forms the body's momentum from ALL its "
+            "nodal velocities. " + _MW_MERGE_MEASURED)
 
 
 def _apply_mass_weighted_rbody_inertia(state: ConversionState,
@@ -6596,13 +7055,6 @@ _MassWeightedBody = Tuple[int, Tuple[float, float, float],
                           Tuple[float, float, float]]
 
 
-#: Cache for the model's lumped nodal masses, keyed by the state object's id.
-#: The lumper walks every element, so a card-by-card re-walk would be O(cards x
-#: elements); one pass per conversion is enough because nothing between the
-#: /INIVEL writers changes the mesh.
-_NODAL_MASS_CACHE: Dict[int, Tuple[Dict[int, float], float]] = {}
-
-
 def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
                                                           float]:
     """``(mass by node, the model's total lumped mass)``, computed once.
@@ -6613,14 +7065,23 @@ def _lumped_nodal_masses(state: ConversionState) -> Tuple[Dict[int, float],
     ``k2rad.lumping`` imports ``writer.beams`` and ``writer.materials``, and a
     module-level import here would put the writer package in a cycle with
     itself.
+
+    The lumper walks every element, so the result is memoised ON the state
+    (``state.lumped_nodal_masses_memo``): one pass per conversion, since
+    nothing between the /INIVEL writers changes the mesh. It used to live
+    in a module dict keyed by ``id(state)`` that was never cleared - CPython
+    reuses the id of a freed state, so a later conversion in the same
+    process (the GUI, the test suite, a script calling ``convert()`` in a
+    loop) could read an EARLIER model's masses: measured, 53 of 150
+    alternating conversions of two element-mass variants wrote the other
+    deck's /INIVEL/TRA.
     """
-    key = id(state)
-    got = _NODAL_MASS_CACHE.get(key)
+    got = state.lumped_nodal_masses_memo
     if got is None:
         from ..lumping import nodal_masses_from_state
         mass, _inertia = nodal_masses_from_state(state)
         got = (mass, math.fsum(mass.values()))
-        _NODAL_MASS_CACHE[key] = got
+        state.lumped_nodal_masses_memo = got
     return got
 
 
@@ -7885,7 +8346,7 @@ def _light_pair_clause(state: ConversionState,
     (m_n + m_f)`` (LS-DYNA Theory R16 eq. 26.25 / 26.27, the real nodal
     masses), against ``Tsca x`` the spring's OWN step ``dt_s = min(M /
     (sqrt(C_t^2 + M K_t) + C_t), I / (sqrt(C_r^2 + I K_r) + C_r))``
-    (r1len3.F:175 for a TYPE4, r2len3.F:182-186 for a TYPE8 / TYPE13; both
+    (r1len3.F:175 for a TYPE4, r2len3.F:221-247 for a TYPE8 / TYPE13; both
     read the PROPERTY mass and inertia, never the node's), with K / C as
     :func:`_spring_kc` builds them - on a TYPE13 the rotational K includes
     the shear springs' K x L^2 (r4def3.F:173), which on the R14 spotweld
@@ -7929,6 +8390,10 @@ def _light_pair_clause(state: ConversionState,
     # has no critical step to compare (the post-review round: gnonspring's
     # node 1, *BOUNDARY_SPC_NODE 111111, printed UNPROTECTED); named HELD
     held: List[Tuple[int, int]] = []
+    # round 8, A5: a spring whose two ends are both held or driven along it
+    # for the whole run kept the token (the adaptive-token pass recorded it);
+    # its light end is labelled DRIVEN, not compared (gnonspring's node 2)
+    driven: List[Tuple[int, int]] = []
     for n, m_n, _sh in light:
         for eid, n1, n2, mass, inertia, k_t, k_r, c_t, c_r in \
                 state.spring_token_springs:
@@ -7936,6 +8401,9 @@ def _light_pair_clause(state: ConversionState,
                 continue
             if n in fixed:
                 held.append((n, eid))
+                continue
+            if eid in state.spring_token_both_driven:
+                driven.append((n, eid))
                 continue
             m_f = _far_mass(n2 if n == n1 else n1)
             mu = m_n if m_f == inf else m_n * m_f / (m_n + m_f)
@@ -7950,8 +8418,18 @@ def _light_pair_clause(state: ConversionState,
         "by the deck's own *BOUNDARY_SPC or zero-scale prescribed motion, so "
         "it has no critical step to compare)" for n, eid in held[:5]) + (
         " ..." if len(held) > 5 else "")
+    driven_txt = "; ".join(
+        f"node {n} on spring {eid}: DRIVEN (both ends of spring {eid} are "
+        "held along its axis for the whole run: bcs1.F:56-89 / "
+        "fixvel.F:370-372 overwrite the acceleration there, so no "
+        "instability can grow along it; the token is kept)"
+        for n, eid in driven[:5]) + (" ..." if len(driven) > 5 else "")
+    if held and driven:
+        held_txt = held_txt + "; " + driven_txt
+    elif driven:
+        held_txt = driven_txt
     if not pairs:
-        return " Per pair: " + held_txt + "." if held else ""
+        return " Per pair: " + held_txt + "." if held_txt else ""
     pairs.sort()
 
     def _prescribed(n: int) -> str:
@@ -7970,12 +8448,12 @@ def _light_pair_clause(state: ConversionState,
         for ratio, n, eid, crit, dt_s, _m in pairs[:5])
     if len(pairs) > 5:
         shown += " ..."
-    if held:
+    if held_txt:
         shown += "; " + held_txt
     token = pairs[0][5]
     text = (
         " Per pair, the two-mass critical step 2 sqrt(mu / K) against Tsca x "
-        "the spring's own step (r1len3.F:175 / r2len3.F:182-186, which read "
+        "the spring's own step (r1len3.F:175 / r2len3.F:221-247, which read "
         "the PROPERTY mass and inertia; a TYPE13's rotational K includes its "
         "shear K x L^2, r4def3.F:173): " + shown + ". An UNPROTECTED node "
         "is stable only while the model's governing element step stays below "
@@ -8035,6 +8513,21 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
     neg_groups = neg_groups or {}
     guarded = guarded or []
     light = light or []
+    # round 8, A5: where the adaptive token rewrote a /PROP the share a node
+    # carries is no longer the fixed token's half, so the sentences below
+    # name the share itself (and keep their fixed-token wording otherwise)
+    adapted = bool(state.adaptive_token_changed)
+    per_prop = (f"{_SPRING_TOKEN_MASS:g} per /PROP"
+                + (", or the smaller MASS the adaptive token wrote on "
+                   f"{len(state.adaptive_token_changed)} /PROP(s)"
+                   if adapted else ""))
+
+    def _left(nodes: List[int]) -> str:
+        shown = ", ".join(
+            f"node {n}: {state.spring_token_mass_by_node.get(n, 0.0):g}"
+            for n in nodes[:5]) + (" ..." if len(nodes) > 5 else "")
+        return f"the token share left on them ({shown})"
+
     done = {nid for nid, _b, _s in compensated}
     removed = {nid for nids in neg_groups.values() for nid in nids}
     bad = {nid for nid, _m, _s in degenerate}
@@ -8052,7 +8545,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         total = sum(sh for _n, _b, sh in compensated)
         state.warn(
             f"*ELEMENT_DISCRETE: k2rad's token spring mass "
-            f"({_SPRING_TOKEN_MASS:g} per /PROP, half on each end node per "
+            f"({per_prop}, half on each end node per "
             f"element - rinit3.F:1926/1937-1939) was SUBTRACTED from the "
             f"/ADMAS of {len(compensated)} node(s) {_fmt_node_list(done)}, "
             f"{total:g} in total, so the model's mass and its natural "
@@ -8111,7 +8604,7 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
                 + _light_pair_clause(state, light, rigid_nodes, guarded))
         state.warn(
             "*ELEMENT_DISCRETE/*CONSTRAINED_SPOTWELD: k2rad's own token "
-            f"spring mass ({_SPRING_TOKEN_MASS:g} per /PROP, half on each end "
+            f"spring mass ({per_prop}, half on each end "
             "node per element - rinit3.F:1926/1937-1939) was REMOVED again "
             f"from {len(nodes)} node(s) {_fmt_node_list(nodes)} with a "
             f"NEGATIVE /ADMAS/0 of "
@@ -8155,7 +8648,9 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "branch on IGTYP==23 with MTN==108, i.e. a /PROP/TYPE23 SPR_MAT "
             "spring on /MAT/LAW108, which k2rad never emits here. Their mass "
             "is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element; give "
+            + (_left(sorted(n for n, _s in guarded)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element")
+            + "; give "
             "them an *ELEMENT_MASS if their dynamics matter - any positive "
             "*ELEMENT_MASS makes the node eligible, and the token then comes "
             "off. The screen is the node's OWN mass (its element mass at the "
@@ -8177,7 +8672,9 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "spring mass but are NOT in the converted model's node set, so "
             "no /ADMAS - positive or negative - could be written for them "
             "and their mass is HIGH by "
-            f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element. The "
+            + (_left(sorted(orphan)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached spring element")
+            + ". The "
             "deck names these nodes but does not define them: it is a "
             "fragment whose *NODE cards live in another file - MEASURED: the "
             "*INCLUDE fragments set-yaris-detailed-v2j.key (16 nodes) and "
@@ -8189,8 +8686,10 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
         state.warn(
             f"*ELEMENT_DISCRETE: {len(rigid)} spring node(s) "
             f"{_fmt_node_list(rigid)} are SECONDARY nodes of a rigid body. "
-            "Whether k2rad's token spring mass "
-            f"({_SPRING_TOKEN_MASS / 2:g} per attached element) reaches that "
+            "Whether k2rad's token spring mass ("
+            + (_left(sorted(rigid)) if adapted else
+               f"{_SPRING_TOKEN_MASS / 2:g} per attached element")
+            + ") reaches that "
             "body depends on its ICoG: with ICoG=4 inirby.F:265-266 (\"CG OF "
             "THE MAIN NODE (MASS OF SECONDS IGNORED)\", MASRB = MS(M)) the "
             "secondary nodes' mass is discarded, so the token - and any "
@@ -8205,28 +8704,308 @@ def _warn_spring_token_mass(state: ConversionState, rigid_nodes: Set[int],
             "roster carrier.")
 
 
-def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+#: The smallest MASS the adaptive token writes: hm_read_prop04.F:136-142
+#: refuses a /PROP/TYPE4 MASS <= 1e-15 (ERROR 229), the floor the PLOTEL
+#: mass already uses.
+_ADAPTIVE_TOKEN_FLOOR = 1.1e-15
+
+
+def _adaptive_spring_token(state: ConversionState, rigid_nodes: Set[int],
+                           acc_lines: Optional[List[str]]) -> None:
+    """The ADAPTIVE spring token MASS (R14 triage round 8, A5;
+    ``--adaptive-spring-token``, default ON).
+
+    WHY. A token ``/PROP`` (k2rad's 1e-4 on a massless LS-DYNA discrete
+    element) steps on its PROPERTY mass: ``r1len3.F:175`` ``sqrt(M / K)`` for
+    a TYPE4, ``r2len3.F:221-247`` for a TYPE8 / TYPE13 - never on the nodes'.
+    The S2 screen then takes the token back off the end nodes, so a light
+    compensated end can sit far below what that step assumes, and nothing
+    stops it: no nodal step without ``/DT/NODA``, and the run diverges
+    behind a NORMAL TERMINATION banner (measured on three coupons: the
+    energy-error limit, MESSAGE 205, killed them within 3-6 cycles).
+    LS-DYNA steps a discrete element on the REAL nodal masses (Theory R16
+    eq. 26.27, the two-mass ``2 sqrt(mu / K)``).
+
+    THE RULE. Per token ``/PROP`` (TYPE4 / TYPE8 / TYPE13, recorded by its
+    producer in ``state.spring_token_props``; never a property whose mass is
+    LS-DYNA's own ``RO A L``)::
+
+        MASS := max(1.1e-15, min(current, min over its springs s of cap_s))
+        cap_s = 2 mu_s min(1, 2 / n_s) / (L_s if Ileng 1 else 1)
+        mu_s  = m_a m_b / (m_a + m_b)   (one end infinite -> the other end)
+        n_s   = the larger token-spring count of its two end nodes
+
+    ``m_e`` = the end's own mass as the S2 screen counts it (element mass +
+    ``*ELEMENT_MASS``), or INFINITE for a rigid-body node, a connector ground
+    node, or an end DRIVEN along the spring for the WHOLE run: its GLOBAL
+    fixed or imposed translations (``_global_spc_dofs`` = the deck's
+    ``*BOUNDARY_SPC`` + the ``SF = 0`` motions, the emitted ``*NODE`` TC /
+    ``*CONSTRAINED_GLOBAL`` codes, and every skew-0 ``/IMP*`` direction whose
+    window is the whole run - ``state.imp_motion_windows``: sensor 0,
+    ``tstart <= 0``, ``tstop`` 0 or at / after ENDTIM) cover the spring's stiff
+    directions - on a TYPE4 every axis component on a FREE direction is at
+    most 1e-6 (a zero-length spring: all three), on a TYPE8 / TYPE13 all
+    three. NOT driven: a skewed SPC, a local-system motion, a windowed or
+    sensor-gated motion, a tied secondary node. A spring with both ends
+    infinite sets no cap (the token is kept; with a driven end it is
+    recorded in ``state.spring_token_both_driven`` for the LIGHT clause's
+    DRIVEN label); a GUARDED end (own mass 0, not driven) sets no cap
+    either - the S2 screen leaves its token in place. ONE MASS per ``/PROP``
+    (decision D7): a guarded spring sharing a rewritten ``/PROP`` carries
+    its smaller MASS, and W-A5 says so.
+
+    A ``/PROP`` whose printed MASS is not the token its springs registered -
+    a token weld whose ``*MAT_SPOTWELD`` DT raised it (A6, decision D11) - is
+    left alone: its step is already 0.9 DT, and the raised part stays on its
+    end nodes as LS-DYNA's own added mass.
+
+    HOW. The MASS cell of each moving ``/PROP`` is rewritten in the already
+    emitted lines (located by its exact ``/PROP/TYPEn/<id>`` header, the
+    comment row and the old value ASSERTED - a k2rad bug raises, never a
+    silent skip), printed with ``_f``; the shares in
+    ``state.spring_token_mass_by_node`` and the spring records are then
+    moved by the PRINTED value, so the S2 compensation that runs next
+    removes exactly what ``rinit3.F:1926/1937-1939`` adds. Inert under
+    ``--no-spring-token-mass-compensation``; ``--no-adaptive-spring-token``
+    keeps the fixed token (4f5b6e8 bytes).
+    """
+    state.spring_token_both_driven = set()
+    state.adaptive_token_changed = {}
+    if not (state.options.adaptive_spring_token
+            and state.options.spring_token_mass_compensation):
+        return
+    if not state.spring_token_springs or not state.spring_token_props:
+        return
+    if acc_lines is None:
+        return
+    inf = float("inf")
+    recs = state.spring_token_springs
+    props = state.spring_token_props
+    ends = {n for rec in recs for n in rec[1:3] if n > 0}
+    m_el = element_mass_by_node(state, ends,
+                                lambda mid: _mat_density(state, mid))
+    count: Dict[int, int] = {}
+    for rec in recs:
+        for n in rec[1:3]:
+            if n > 0:
+                count[n] = count.get(n, 0) + 1
+    held: Dict[int, Set[int]] = {}
+
+    def _hold(nid: int, tra: str) -> None:
+        got = held.setdefault(nid, set())
+        for k, ch in enumerate(tra[:3]):
+            if ch == "1":
+                got.add(k)
+
+    for nid, (tra, _rot) in _global_spc_dofs(state).items():
+        _hold(nid, tra)
+    for nid, (tra, _rot) in state.node_tc_rc_emitted.items():
+        _hold(nid, tra)
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 0.0
+    for nid, wins in state.imp_motion_windows.items():
+        for d, t0, t1, sensor in wins:
+            if d not in ("X", "Y", "Z") or sensor or t0 > 0.0:
+                continue
+            if t1 != 0.0 and not (endtim > 0.0 and t1 >= endtim):
+                continue
+            held.setdefault(nid, set()).add("XYZ".index(d))
+
+    def _axis(a: int, b: int) -> Optional[Tuple[float, float, float]]:
+        na, nb = state.nodes.get(a), state.nodes.get(b)
+        if na is None or nb is None:
+            return None
+        d = (nb.x - na.x, nb.y - na.y, nb.z - na.z)
+        ln = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+        if ln <= 0.0:
+            return None
+        return (d[0] / ln, d[1] / ln, d[2] / ln)
+
+    def _end(n: int, ptype: str,
+             axis: Optional[Tuple[float, float, float]]) -> Tuple[float, str]:
+        """``(mass counted, why)``: why is '', 'ground', 'rigid', 'driven'
+        or 'guarded'."""
+        if n <= 0 or n in state.connector_ground_nodes:
+            return inf, "ground"
+        if n in rigid_nodes:
+            return inf, "rigid"
+        c = held.get(n)
+        if c:
+            if ptype == "TYPE4" and axis is not None:
+                if all(abs(axis[k]) <= 1.0e-6 for k in range(3)
+                       if k not in c):
+                    return inf, "driven"
+            elif c >= {0, 1, 2}:
+                return inf, "driven"
+        own = m_el.get(n, 0.0) + state.added_node_masses.get(n, 0.0)
+        if own <= 0.0:
+            return 0.0, "guarded"
+        return own, ""
+
+    cap_of: Dict[int, float] = {}
+    springs_of: Dict[int, List[int]] = {}
+    guarded_idx: Set[int] = set()
+    for idx, rec in enumerate(recs):
+        prop = props.get(idx)
+        if prop is None:
+            continue
+        pid, ptype, ileng, length = prop
+        springs_of.setdefault(pid, []).append(idx)
+        n1, n2 = rec[1], rec[2]
+        axis = _axis(n1, n2)
+        m1, why1 = _end(n1, ptype, axis)
+        m2, why2 = _end(n2, ptype, axis)
+        if "guarded" in (why1, why2):
+            guarded_idx.add(idx)
+            continue
+        if m1 == inf and m2 == inf:
+            if "driven" in (why1, why2):
+                state.spring_token_both_driven.add(rec[0])
+            continue
+        mu = m2 if m1 == inf else (m1 if m2 == inf else m1 * m2 / (m1 + m2))
+        cap = 2.0 * mu * min(1.0, 2.0 / max(count.get(n1, 1),
+                                            count.get(n2, 1)))
+        if ileng == 1 and length > 0.0:
+            cap /= length
+        cap_of[pid] = min(cap_of.get(pid, inf), cap)
+    if not cap_of:
+        return
+    # the emitted /PROP blocks: header, title, comment, the MASS row
+    where: Dict[int, int] = {}
+    want = {f"/PROP/{props[springs_of[pid][0]][1]}/{pid}": pid for pid in cap_of}
+    for i, ln in enumerate(acc_lines):
+        pid_hit = want.get(ln)
+        if pid_hit is not None:
+            assert pid_hit not in where, f"two {ln} blocks"
+            where[pid_hit] = i + 3
+    changed: Dict[int, Tuple[float, float]] = {}
+    for pid in sorted(cap_of):
+        j = where.get(pid)
+        assert j is not None and j < len(acc_lines), (
+            f"adaptive token: /PROP {pid} was registered but not emitted")
+        assert acc_lines[j - 1].startswith("#"), acc_lines[j - 1]
+        old = float(acc_lines[j][:20])
+        # the printed cell must BE the token its springs registered (x L on
+        # Ileng 1): a DT-raised token weld (A6) is left alone
+        if any(abs(old * (props[k][3] if props[k][2] == 1 else 1.0)
+                   - recs[k][3]) > 1.0e-9 * recs[k][3]
+               for k in springs_of[pid]):
+            continue
+        new = max(min(old, cap_of[pid]), _ADAPTIVE_TOKEN_FLOOR)
+        if not new < old * (1.0 - 1.0e-9):
+            continue
+        txt = _f(new)
+        acc_lines[j] = txt + acc_lines[j][20:]
+        changed[pid] = (old, float(txt))
+    if not changed:
+        return
+    state.adaptive_token_changed = dict(changed)
+    n_guarded = 0
+    for pid, (_old, newp) in changed.items():
+        for k in springs_of[pid]:
+            rec = recs[k]
+            _p, _t, ileng, length = props[k]
+            new_pm = newp * (length if ileng == 1 else 1.0)
+            dsh = 0.5 * (new_pm - rec[3])
+            for n in rec[1:3]:
+                if n > 0:
+                    state.spring_token_mass_by_node[n] = (
+                        state.spring_token_mass_by_node.get(n, 0.0) + dsh)
+            recs[k] = (rec[0], rec[1], rec[2], new_pm, rec[4], rec[5], rec[6],
+                       rec[7], rec[8])
+            if k in guarded_idx:
+                n_guarded += 1
+    _warn_adaptive_spring_token(state, changed, springs_of, n_guarded)
+
+
+def _warn_adaptive_spring_token(state: ConversionState,
+                                changed: Dict[int, Tuple[float, float]],
+                                springs_of: Dict[int, List[int]],
+                                n_guarded: int) -> None:
+    """W-A5: one sentence per deck where a token MASS cell moved."""
+    inf = float("inf")
+    low_pid = min(changed, key=lambda p: (changed[p][1], p))
+    low_dt = inf
+    for k in springs_of[low_pid]:
+        _e, _a, _b, mass, inertia, k_t, k_r, c_t, c_r = \
+            state.spring_token_springs[k]
+        dt_t = (mass / (math.sqrt(c_t * c_t + mass * k_t) + c_t)
+                if k_t > 0.0 or c_t > 0.0 else inf)
+        dt_r = (inertia / (math.sqrt(c_r * c_r + inertia * k_r) + c_r)
+                if inertia > 0.0 and (k_r > 0.0 or c_r > 0.0) else inf)
+        low_dt = min(low_dt, dt_t, dt_r)
+    shown = ", ".join(f"{p}: {o:g} -> {n:.7g}"
+                      for p, (o, n) in sorted(changed.items())[:8])
+    if len(changed) > 8:
+        shown += ", ..."
+    n_both = len(state.spring_token_both_driven)
+    state.warn(
+        "*ELEMENT_DISCRETE / *CONSTRAINED_SPOTWELD spring token: MASS set from "
+        f"the end-node masses on {len(changed)} /PROP(s) ({shown}): min(1e-4, "
+        "2 m_a m_b / (m_a + m_b) x min(1, 2/n)), n the busier end's "
+        "token-spring count, per unit length on an Ileng 1 property, floor "
+        "1.1e-15; a rigid, ground or DRIVEN end (held or imposed along the "
+        "spring for the whole run) counts infinitely heavy, so the spring's "
+        "own step sqrt(M/K) (r1len3.F:175; r2len3.F:221-247 on a TYPE8 / "
+        "TYPE13, both on the PROPERTY mass) stays inside LS-DYNA's two-mass "
+        "step on the real nodal masses (Theory R16 eq. 26.27). "
+        f"{n_both} spring(s) with both ends driven kept the token. A skewed "
+        "SPC, a local, windowed or sensor-gated motion and a tied end are NOT "
+        f"driven. {n_guarded} guarded spring(s) (an end with no own mass) "
+        "share a rewritten /PROP and carry its smaller MASS. The token still "
+        "comes off both ends exactly (the shares follow the PRINTED value). "
+        f"Smallest MASS {changed[low_pid][1]:.7g} on /PROP {low_pid} -> spring "
+        f"step {low_dt:.3g} s. MEASURED (nt 4): the fixed token was killed "
+        "by the engine's energy-error limit (MESSAGE 205) within 3-6 cycles "
+        "on three coupons, each behind a NORMAL TERMINATION banner (D4 at "
+        "cycle 3, D2 at 5, i14 at 6 with IE 1.578e22); the rule runs D2 / "
+        "D4 4970 cycles and i14 50163 cycles, IE + KE 499.96 of the "
+        "launched 500. "
+        "--no-adaptive-spring-token keeps the fixed token (round 8).")
+
+
+def _make_added_masses(state: ConversionState, rigid_nodes: Set[int],
+                       acc_lines: Optional[List[str]] = None) -> List[str]:
     """*ELEMENT_MASS lumped masses on ORDINARY nodes → /ADMAS/0.
 
-    state.added_node_masses holds every *ELEMENT_MASS nodal mass. Masses on
-    rigid-body nodes are already accounted for via the /RBODY Mass field
-    (_make_rbodies folds the master-node mass), so /ADMAS is emitted only for
-    nodes that are NOT part of any rigid body. /ADMAS/0 adds its Mass value to
+    *acc_lines* = the starter lines emitted so far (round 8, A5): the
+    adaptive spring token (:func:`_adaptive_spring_token`) runs FIRST and
+    rewrites the token /PROP MASS cells there, before the S2 compensation
+    below reads the shares.
+
+    state.added_node_masses holds every *ELEMENT_MASS nodal mass. A mass on an
+    /RBODY MAIN node (or on any member of an ICoG-4 body) is accounted for in
+    the /RBODY Mass field (_make_rbodies / _make_cnrb_rbodies), so /ADMAS is
+    not emitted there. Since round 8 (A8, --rigid-element-mass-admas) a mass
+    on a rigid SECONDARY node IS emitted here, on its node: the starter counts
+    it at its position (centre of mass and inertia), where the fold put it at
+    the body's main node and a CNRB secondary's mass was dropped; the opt-out
+    restores the old rule (every rigid node skipped). /ADMAS/0 adds its Mass value to
     EACH node of the referenced /GRNOD, so nodes are grouped by identical mass
     value (one /GRNOD + /ADMAS/0 per distinct value). Before this, ordinary-node
     *ELEMENT_MASS was silently dropped (writer consumed added_node_masses only
     for rigid masters) — a real mass/dynamics error on any deck with point masses.
     """
+    _adaptive_spring_token(state, rigid_nodes, acc_lines)
     compensated: List[Tuple[int, float, float]] = []     # (nid, before, share)
     degenerate: List[Tuple[int, float, float]] = []      # (nid, m_node, share)
     masses_by_value: Dict[float, List[int]] = {}
     skipped_rigid = 0
+    # round 8, A8 (--rigid-element-mass-admas): only the masses an /RBODY
+    # Mass field keeps (main nodes, ICoG-4 members) are skipped; a mass on a
+    # rigid SECONDARY node is written here, on its node
+    a8 = state.options.rigid_element_mass_admas
+    skip = state.rbody_folded_mass_nodes if a8 else rigid_nodes
+    moved: Dict[int, Tuple[int, str]] = {}
     for nid, mass in state.added_node_masses.items():
         if mass <= 0 or nid not in state.nodes:
             continue
-        if nid in rigid_nodes:
+        if nid in skip:
             skipped_rigid += 1          # folded into its /RBODY already
             continue
+        if a8 and nid in rigid_nodes:
+            moved[nid] = state.rbody_secondary_masses.get(nid, (0, "dropped"))
+            masses_by_value.setdefault(mass, []).append(nid)
+            continue                    # a rigid end is never compensated (S2)
         share = state.spring_token_mass_by_node.get(nid, 0.0)
         if share > 0.0 and state.options.spring_token_mass_compensation:
             if mass - share > 0.0:
@@ -8253,7 +9032,9 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
     total = 0.0
     if masses_by_value:
         lines += [HDR,
-                  "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
+                  "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes"
+                  + (" and rigid-body secondary nodes" if moved else "")
+                  + "):"]
         for mass, nids in sorted(masses_by_value.items()):
             nids = sorted(nids)
             n_nodes += len(nids)
@@ -8291,14 +9072,51 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
                 HDR,
             ]
     if n_nodes:
-        note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_nodes} ordinary "
-                f"node(s) (total added mass {total:g}).")
+        n_ord = n_nodes - len(moved)
+        note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_ord} ordinary "
+                f"node(s)" + (f" and {len(moved)} rigid-body SECONDARY "
+                              "node(s)" if moved else "")
+                + f" (total added mass {total:g}).")
         if skipped_rigid:
             note += (f" {skipped_rigid} mass(es) on rigid-body nodes were left "
-                     "to the /RBODY (master-node mass is folded into its Mass "
-                     "field).")
+                     "to the /RBODY (" + ("main-node mass folded into its Mass "
+                                          "field" if a8 else
+                                          "master-node mass is folded into its "
+                                          "Mass field") + ").")
         state.warn(note)
+    if moved:
+        _warn_rigid_secondary_element_mass(state, moved)
     return lines
+
+
+def _warn_rigid_secondary_element_mass(state: ConversionState,
+                                       moved: Dict[int, Tuple[int, str]]
+                                       ) -> None:
+    """W-A8 (round 8): the *ELEMENT_MASS on rigid SECONDARY nodes that is
+    now /ADMAS on its node - named with what the previous converter did."""
+    nodes = sorted(moved)
+    bodies = sorted({b for b, _h in moved.values()})
+    folded = [n for n in nodes if moved[n][1] == "folded"]
+    dropped = [n for n in nodes if moved[n][1] != "folded"]
+    was = []
+    if folded:
+        was.append(f"folded into the /RBODY Mass field at the centre of mass "
+                   f"({len(folded)}, *MAT_RIGID part bodies)")
+    if dropped:
+        was.append(f"being DROPPED ({len(dropped)}: *CONSTRAINED_NODAL_RIGID_"
+                   "BODY secondaries, or part bodies under "
+                   "--no-rigid-cog-master)")
+    state.warn(
+        f"*ELEMENT_MASS: {len(nodes)} nodal mass(es) on {len(bodies)} rigid "
+        f"body/bodies sit on SECONDARY nodes (node {_named(nodes)}); they are "
+        "written as /ADMAS on their nodes, where the starter counts them at "
+        "their position, instead of " + " or ".join(was) + " as before round "
+        "8. LS-DYNA keeps a discrete mass at its node: on sph/foam/foam.k the "
+        "body's CoG moves z 121.4891 -> 150.9633 and xx / yy 1.922978 -> "
+        "2.238421 (LS-DYNA 150.96326 / 2.238), mass unchanged; a mass on a "
+        "*CONSTRAINED_NODAL_RIGID_BODY secondary was LOST before (Yaris roof "
+        "crush CNRB 2300387: LS-DYNA 2.3367e-4 vs 3.3799e-5). "
+        "--no-rigid-element-mass-admas restores the previous fold (and drop).")
 
 
 def _make_tied_nodes_failure_notes(state: ConversionState) -> List[str]:
@@ -8408,9 +9226,13 @@ _MPC_REFUSAL_NOTES = {
             "itagsl2.F:92 / :99-104) - still ends NORMAL with a 99.9 % "
             "energy error, with a CONFLICTING /MPC (IE 6237 against external "
             "work 44.35) and with a REDUNDANT one (0.1 % at cycle 1000, "
-            "19.6 % at 3000); Spotflag 27 held on that probe (-0.2 / "
-            "-0.4 %), but the Spotflag-28 mechanism is not characterised, so "
-            "no Spotflag is exempt",
+            "19.6 % at 3000): the redundant term is not redundant on "
+            "Spotflag 28, because the tie point follows its main facet's "
+            "rigid fit (i2vit3.F:386-389), so the term reaches the main "
+            "nodes - and a plain /INTER/TYPE2 is outside the Lagrange "
+            "system (lag_ntag.F:131): INTTI2 overwrites the secondaries "
+            "(resol.F:7675) before LAG_MULT corrects the main nodes "
+            "(:7901); no Spotflag is exempt",
     "tied_main": "a node of a tied interface's MAIN side may not carry one "
                  "either - the same WARNING box names tied-interface "
                  "MEMBERS, not one side; MEASURED (nt 4 = nt 2) on the same "
@@ -8425,7 +9247,23 @@ _MPC_REFUSAL_NOTES = {
                  "the tie (20.35 against 20.36) balance; the main side is "
                  "the MSID side's nodes, which for a part side includes a "
                  "solid's interior nodes (an over-approximation that can only "
-                 "refuse more)",
+                 "refuse more); the mechanism, READ from the code order (not "
+                 "instrumented): a plain /INTER/TYPE2 is outside the Lagrange "
+                 "system (lag_ntag.F:131 admits a TYPE2 only when IPARI(33) "
+                 "= 1, which only /INTER/LAGMUL/TYPE2 sets), and every cycle "
+                 "INTTI2 (resol.F:7675) overwrites each kinematic secondary's "
+                 "velocity and acceleration with its main facet's motion "
+                 "(i2vit3.F:504-509 / :810-815) before LAG_MULT (resol.F:7901) "
+                 "corrects the main node - a non-zero multiplier on a main "
+                 "node never reaches the secondaries on its facets, and the "
+                 "next reset creates energy. MEASURED on second geometries "
+                 "(nt 4 = nt 2, window 0..3 ms): two solid blocks, an /MPC on "
+                 "two main nodes, IE 4.005e4 against external work 306.1 "
+                 "(x130.9) on Spotflag 28 and 1.899e4 against 375.7 (x50.54) "
+                 "on Spotflag 27; a shell edge tied to a solid face x1983 on "
+                 "Spotflag 27; a term between a secondary and nodes outside "
+                 "every tie balances (-0.01 % with the tie's contact energy "
+                 "counted)",
 }
 
 
@@ -10921,13 +11759,16 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # A node the *NODE TC/RC pass has ALREADY pinned in all six DOFs needs
     # nothing from this guard, and a second /BCS on it is starter WARNING 312
     # (INCOMPATIBLE KINEMATIC CONDITIONS — measured, 1 warning / 8 conditions
-    # on a two-/BCS coupon). Only the exact `111 111` case is subtracted: this
-    # guard's mask is the SUPERSET, so a free node the TC/RC pass pinned only
-    # partially must still arrive here or its remaining DOFs stay zero rows in
-    # the implicit tangent. The subtraction is done HERE rather than in the
-    # TC/RC pass because only this side knows the finished free set — the
-    # element walk above depends on registries (state.rbe3_nodes,
-    # state.connector_ground_nodes) that later sections fill.
+    # on a two-/BCS coupon). That exact `111 111` case leaves the free set
+    # here. A node pinned only PARTIALLY - by its TC/RC (or *CONSTRAINED_GLOBAL)
+    # /BCS or by a global *BOUNDARY_SPC / zero-scale prescribed motion - still
+    # arrives, and since round 8 (A3 P2 / P3, --bcs-union) the guard writes
+    # only the DOFs those cards leave free, so no DOF is fixed twice and every
+    # free node is still fixed in all six (MY_OR). The subtraction is done
+    # HERE rather than in the TC/RC pass because only this side knows the
+    # finished free set — the element walk above depends on registries
+    # (state.rbe3_nodes, state.connector_ground_nodes) that later sections
+    # fill.
     fully_pinned = {n for n, (tra, rot) in state.node_tc_rc_emitted.items()
                     if tra == "111" and rot == "111"}
     free = sorted(n for n in state.nodes
@@ -10944,15 +11785,99 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         "constraint holds them where they were placed and changes nothing "
         "that moves."
     )
-    bc_id = state.next_id()
-    grnod_id = state.next_grnod_id()
-    lines = [
-        "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
-        f"/BCS/{bc_id}",
-        "fix_free_reference_nodes",
-        "#  Tra rot   skew_ID  grnod_ID",
-        f"   111 111         0{_i(grnod_id)}",
-        HDR,
-    ]
-    lines += _emit_grnod_node(grnod_id, "free_reference_nodes", free)
+    if not state.options.bcs_union:
+        bc_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        lines = [
+            "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
+            f"/BCS/{bc_id}",
+            "fix_free_reference_nodes",
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   111 111         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(grnod_id, "free_reference_nodes", free)
+        return lines
+    # round 8, A3 P2 / P3: per free node the guard writes NOT(global SPC OR
+    # TC/RC) - the two sources are disjoint by screen (c) of the TC/RC pass.
+    # A *BOUNDARY_SPC with a CID is NOT subtracted (its digits are axes of its
+    # skew): the guard keeps 111 111 at skew 0 there, which the starter stops
+    # with ERROR 148 - named below (reach 0).
+    spc6 = {n: t + r for n, (t, r) in _global_spc_dofs(state).items()}
+    tcrc6 = {n: t + r for n, (t, r) in state.node_tc_rc_emitted.items()}
+    skewed_spc: Dict[int, int] = {}
+    for bc in state.bcs_spcs:
+        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+            for n in state.node_sets.get(bc.nsid, ("", []))[1]:
+                skewed_spc[n] = bc.cid
+    rem_groups: Dict[str, List[int]] = defaultdict(list)
+    spc_hit: Dict[int, int] = {}
+    tcrc_hit: Dict[int, int] = {}
+    spc_gone: List[int] = []
+    tcrc_gone: List[int] = []
+    for n in free:
+        s = spc6.get(n, "000000")
+        t = tcrc6.get(n, "000000")
+        both = "".join("1" if "1" in (a, b) else "0" for a, b in zip(s, t))
+        if "1" in s:
+            spc_hit[n] = sum(1 for a in s if a == "1")
+        if "1" in t:
+            tcrc_hit[n] = sum(1 for a, b in zip(t, s) if a == "1" and b == "0")
+        rem = "".join("0" if c == "1" else "1" for c in both)
+        if rem == "000000":
+            (spc_gone if "1" in s else tcrc_gone).append(n)
+            continue
+        rem_groups[rem].append(n)
+    lines = ["#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR]
+    # the 111 111 group FIRST and under today's titles (byte identity without a
+    # hit), then each remainder code; ids drawn only for a written card
+    for rem in sorted(rem_groups, key=lambda c: (c != "111111", c)):
+        bc_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        title = ("fix_free_reference_nodes" if rem == "111111" else
+                 f"fix_free_reference_nodes_{rem[:3]}_{rem[3:]}")
+        lines += [
+            f"/BCS/{bc_id}",
+            title,
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   {rem[:3]} {rem[3:]}         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(
+            grnod_id, "free_reference_nodes" if rem == "111111" else title,
+            rem_groups[rem])
+    if spc_hit:
+        nn = sorted(spc_hit)
+        state.warn(
+            f"Free-node guard x *BOUNDARY_SPC: {sum(spc_hit.values())} DOF(s) "
+            f"on {len(nn)} free node(s) (node {_named(nn)}) are already fixed "
+            "by the deck's global *BOUNDARY_SPC (or a zero-scale prescribed "
+            f"motion); the guard does not fix them again: {len(spc_gone)} "
+            "node(s) need no guard /BCS, the rest keep the remaining DOFs in a "
+            "fix_free_reference_nodes_<Tra>_<Rot> group. Every free node stays "
+            "fixed in all six DOFs (hm_read_bcs.F:198 MY_OR); MEASURED on "
+            "ex_08_beam_elform_1 (nt 4): 2 = 2 cycles, identical rows, MUMPS "
+            "83 / 315 on both, WARNING 312 30 -> none. --no-bcs-union writes "
+            "the guard's 111 111 card as before (round 8).")
+    if tcrc_hit:
+        nn = sorted(tcrc_hit)
+        state.warn(
+            f"Free-node guard x *NODE TC/RC: {sum(tcrc_hit.values())} DOF(s) "
+            f"on {len(nn)} free node(s) (node {_named(nn)}) are already fixed "
+            "by their TC/RC (or *CONSTRAINED_GLOBAL) /BCS; the guard writes "
+            "only the DOFs left free, in a fix_free_reference_nodes_<Tra>_<Rot> "
+            f"group ({len(tcrc_gone)} need none). Every free node stays fixed "
+            "in all six DOFs (hm_read_bcs.F:198 MY_OR); on 11.2.sqt_iga starter "
+            "WARNING 312 goes 449 -> none. --no-bcs-union writes the guard's "
+            "111 111 card as before (round 8).")
+    skw = sorted(n for n in free if n in skewed_spc)
+    if skw:
+        state.warn(
+            f"Free-node guard: free node(s) {_named(skw)} carry a *BOUNDARY_SPC "
+            f"in /SKEW {', '.join(str(s) for s in sorted({skewed_spc[n] for n in skw}))}; "
+            "the guard's global card on them makes the starter stop with ERROR "
+            "148 (one skew per node, hm_read_bcs.F:199-205) - give the node an "
+            "element or state its SPC globally.")
+    if len(lines) == 2:
+        return []
     return lines

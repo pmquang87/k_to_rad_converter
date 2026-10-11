@@ -6,11 +6,11 @@ import itertools
 import math
 from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
-from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
-                     ContactThermal, ContactTied, ContactTiebreak, SolidElem,
-                     TshellElem)
+from ..state import (ConversionState, ContactAutoSingle, ContactAutoSurf2Surf,
+                     ContactSpotweld, ContactThermal, ContactTied,
+                     ContactTiebreak, SolidElem, TshellElem)
 from ..topology import TET10_EDGEMID
-from .joint_screw import screw_splits
+from .joint_screw import lagrange_held_pairs
 from .common import (
     AUTO_IMPLICIT_STUB_TITLE,
     HDR,
@@ -83,6 +83,9 @@ __all__ = [
     "_warn_eroding_card4",
     "_warn_eroding_smp_friction",
     "_make_type25_interfaces",
+    "add_implicit_contact_stub",
+    "_make_deferred_implicit_stub",
+    "_STUB_TYPE25_KEPT_SENTENCE",
     "_segment_set_edges",
     "_general_line_group",
     "_make_general_interfaces",
@@ -270,14 +273,23 @@ def _beam_secondary_hint(state: ConversionState, sid: int, styp: int,
     when the side's parts own beam/truss nodes that are NOT rigid-body nodes -
     ``mainboltaexpl``'s side owns 2 beam nodes that are both rigid, so the flag
     would not rescue it and the hint must not fire there. Reach on the R14
-    roster: spotweld.k and the two Yaris giants."""
+    roster: spotweld.k and the two Yaris giants.
+
+    The test reads the FULL rigid set: the penalty builders pass the set
+    WITHOUT round 8's bolt-kept members (A2 (l)-2), and those are rigid-body
+    members all the same - on mainboltaexpl's contact 10013 they are the
+    bolt's two ends, so A2 made the hint fire there although, with the flag,
+    the side gains the two ends and the contact is still dropped (its main
+    side resolves to no surface either; measured by the campaign
+    validator). Fixed in the round-8 fix round."""
     if state.options.beam_contact_secondary:
         return ""
     pids = _beam_side_pids(state, sid, styp)
     if not pids:
         return ""
+    rigid = set(rigid_nodes) | set(state.bolt_rigid_keep)
     owners = sorted({e.pid for e in state.beam_elems if e.pid in pids
-                     and any(n > 0 and n not in rigid_nodes
+                     and any(n > 0 and n not in rigid
                              for n in (e.n1, e.n2))})
     if not owners:
         return ""
@@ -462,6 +474,15 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         diag["raw"] = len(raw_nids)
         diag["rigid_removed"] = len(raw_nids) - len(clean_nids)
         diag["clean"] = len(clean_nids)
+    # round 8, A2 (l)-2: the bolt-end rigid members this side kept (the
+    # penalty builders pass a rigid set without them), for the interface's
+    # own sentence (_warn_bolt_rigid_kept)
+    if state.bolt_rigid_keep and not keep_rigid:
+        kept = [n for n in clean_nids if n in state.bolt_rigid_keep]
+        if kept:
+            state.bolt_kept_by_side[(sid, styp)] = kept
+            if diag is not None:
+                diag["bolt_kept"] = len(kept)
     if not clean_nids:
         return 0
     _warn_beam_side_gain(state, sid, styp, clean_nids)
@@ -1854,22 +1875,93 @@ def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
         "belong to a rigid body and were removed from the secondary node "
         f"group; the interface is emitted with the remaining "
         f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
-        "the converted model. THE OBVIOUS REMEDY IS MEASURED AND MOSTLY "
-        "USELESS, so it is not offered as one: keeping the rigid nodes in the "
-        "secondary group changes NOTHING on 3 of the 6 carriers of this class "
-        "(pipe, doorbeam and mat_spring.belted-dummy are identical arm for "
-        "arm; separately, 4 of the 6 are SINGLE_SURFACE contacts whose "
-        "segments are on the main side already - pipe, transducer, "
-        "mainboltaexpl and EXP_SC_PRELOAD, while doorbeam is NODES_TO_SURFACE "
-        "and belted-dummy SURFACE_TO_SURFACE), and on the other 3 it "
-        "disagrees with itself - transducer's internal energy goes -24.10 % "
-        "-> +18.31 % against its own LS-DYNA reference, EXP_SC_PRELOAD's "
-        "energy error -9.0 % -> -11.2 %, and mainboltaexpl COLLAPSES to "
-        "-62.05 % under a NORMAL TERMINATION banner. What DOES fix a "
+        "the converted model. Keeping them is not offered as a general "
+        "remedy: on the six carriers of this class it changes nothing on "
+        "pipe, doorbeam and mat_spring.belted-dummy (identical arm for arm), "
+        "transducer's internal energy goes -24.10 % -> +18.31 % against its "
+        "LS-DYNA reference and EXP_SC_PRELOAD's energy error -9.0 % -> "
+        "-11.2 %. The members of a rigid body holding an end node of an "
+        "*INITIAL_AXIAL_FORCE_BEAM bolt ARE kept by default (round 8, "
+        "--no-bolt-rigid-contact): they carry the clamp. What DOES fix a "
         "load-bearing rigid surface is to make it the MAIN (MSID) side of its "
         "own contact, where /INTER/TYPE7's asymmetry puts the segments it can "
         "actually carry."
     )
+
+
+def _bolt_end_rigid_members(state: ConversionState, rbody_info: Dict
+                            ) -> Dict[int, Tuple[int, int]]:
+    """``member node -> (body key, BSID)`` for every rigid body holding an END
+    node of an ``*INITIAL_AXIAL_FORCE_BEAM`` bolt (round 8, A2 (l)-2).
+
+    The bolt's ends are ``n1`` / ``n2`` of the ``*SET_BEAM`` elements the card
+    names, read from the DECK's records (whether or not the ``/PRELOAD/AXIAL``
+    card is emitted: it is written after the interfaces). A body - a
+    ``*MAT_RIGID`` part, a CNRB, extra nodes, a merged union (``rbody_info``,
+    where a merged slave shares its lead's record) - holds an end when the
+    end is one of its members or its main node; then all its members are
+    kept. LS-DYNA keeps every rigid member in a contact (mainboltaexpl's
+    d3hsp counts 1601 nodes for interface 1 = 984 hex faces + 556 shells
+    including the 68 CNRB 110 / 120 members), and these carry the bolt's
+    clamp.
+    """
+    out: Dict[int, Tuple[int, int]] = {}
+    if not state.ini_axial_force_beams or not rbody_info:
+        return out
+    beams = {e.eid: e for e in state.beam_elems}
+    ends: Dict[int, int] = {}
+    for rec in state.ini_axial_force_beams:
+        entry = state.beam_sets.get(rec.bsid)
+        if entry is None:
+            continue
+        for eid in entry[1]:
+            e = beams.get(eid)
+            if e is None:
+                continue
+            for n in (e.n1, e.n2):
+                if n > 0:
+                    ends.setdefault(n, rec.bsid)
+    if not ends:
+        return out
+    seen: Set[int] = set()
+    for key, info in rbody_info.items():
+        if id(info) in seen:
+            continue                  # a merged slave's shared record
+        members = set(info["nodes"]) | {info["ind_node"]}
+        hit = sorted({ends[n] for n in members if n in ends})
+        if not hit:
+            continue
+        seen.add(id(info))
+        for n in info["nodes"]:
+            out.setdefault(n, (key, hit[0]))
+    return out
+
+
+def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
+                          sid: int, styp: int) -> None:
+    """W-l2 (round 8, A2 (l)-2): the bolt-end rigid members a penalty
+    contact's secondary side KEPT."""
+    kept = state.bolt_kept_by_side.get((sid, styp))
+    if not kept:
+        return
+    bodies = sorted({state.bolt_rigid_keep[n][0] for n in kept})
+    bsids = sorted({state.bolt_rigid_keep[n][1] for n in kept})
+    state.warn(
+        f"*{keyword or 'CONTACT'} {inter_id}: {len(kept)} member node(s) of "
+        f"the rigid body(ies) {', '.join(str(b) for b in bodies)} holding an "
+        "end node of the *INITIAL_AXIAL_FORCE_BEAM bolt (BSID "
+        f"{', '.join(str(b) for b in bsids)}) were KEPT on the secondary "
+        "side; every other rigid member is still removed. LS-DYNA keeps them "
+        "(mainboltaexpl: 1601 surface nodes incl. the 68 CNRB 110 / 120 "
+        "members) and they carry the clamp - without them the bolt collapsed "
+        "to 0.00043 mm. MEASURED there with the fixed-column pull curve (nt "
+        "4): IE END -81.87 -> -8.49 %, RMS IE / KE 31.32 / 28.24 -> 9.19 / "
+        "10.22 % (1000 LS blocks, t <= 5e-3), plates IE vs matsum RMS 36.39 "
+        "-> 0.65 %, bolt force vs swforc RMS 29.11 -> 0.91 %, 1.131x the "
+        "cycles. Without the curve fix the run never pulls (IE END -62.05 "
+        "N.mm). Before the pull the bolt stays 2.196 mm against LS-DYNA's "
+        "1.817 (Inacti 5 keeps the 0.2 mm gap; not closed). "
+        "--no-bolt-rigid-contact removes them as before (round 8).")
 
 
 def _drop_interface(state: ConversionState, dropped: Dict[str, List[int]],
@@ -1920,12 +2012,17 @@ def _note_dropped_interfaces(state: ConversionState,
         )
 
 
-def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
+                     report_gapmin: bool = True) -> List[str]:
+    # report_gapmin=False only from _make_deferred_implicit_stub (round 8,
+    # B6): the INTERFACES section's own call already named every unconsumed
+    # --inter-gapmin id, and a second report would repeat each one.
     if not state.contacts_single and not state.contacts_surf2surf:
         # No /INTER/TYPE7 section at all — but a --inter-gapmin the user typed
         # still has to be accounted for, or the flag is ignored in silence on a
         # deck whose only contact is a tie.
-        _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
+        if report_gapmin:
+            _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
         return []
     lines = ["#-  INTERFACES:", HDR]
 
@@ -2040,7 +2137,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 # main node a Lagrange condition holds is cancelled on the
                 # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
                 # :7901), so the A-B pair slips the mesh off its main node.
-                splits = screw_splits(state, c.inter_id)
+                splits = lagrange_held_pairs(state, c.inter_id)
                 a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
                 lines += _emit_surf_part(
@@ -2054,19 +2151,19 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id)
                 for plan in splits:
-                    jid = plan.screw.jid
+                    tag = plan.tag
                     rest = [p for p in all_pids
                             if p not in (plan.a_pid, plan.b_pid)]
                     s_rest = state.next_id()
                     s_a = state.next_id()
                     split_iid = state.next_id()
                     lines += _emit_surf_part(
-                        s_rest, f"contact_{c.inter_id}_screw_{jid}_rest", rest)
+                        s_rest, f"contact_{c.inter_id}_{tag}_rest", rest)
                     lines += _emit_surf_part(
-                        s_a, f"contact_{c.inter_id}_screw_{jid}_body_A",
+                        s_a, f"contact_{c.inter_id}_{tag}_body_A",
                         [plan.a_pid])
                     lines += _emit_inter_type25_self(
-                        split_iid, f"CONTACT_{c.inter_id}_screw_{jid}_body_A",
+                        split_iid, f"CONTACT_{c.inter_id}_{tag}_body_A",
                         s_rest, fric, inacti, stfac, fric_id=fric_id,
                         surf_id2=s_a)
                     # minted beside the converted contact: /TH/INTER and the
@@ -2075,7 +2172,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     state.warn(
                         f"*{c.keyword or 'CONTACT_AUTOMATIC_SINGLE_SURFACE'} "
                         f"(/INTER/TYPE25/{c.inter_id}): the rigid pair of "
-                        f"*CONSTRAINED_JOINT_SCREW {jid} is split out - part "
+                        f"{plan.label} is split out - part "
                         f"{plan.a_pid} leaves the all-parts self-surface and "
                         f"gets its own two-surface /INTER/TYPE25/{split_iid} "
                         f"against every other part except {plan.b_pid} "
@@ -2089,7 +2186,18 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                         "the pair kept: 178.67 mm at t_end, IE -100 %. LS-DYNA "
                         "keeps the pair (on EXP_SC_JOINT_SCREW 99.1 % of its "
                         "external work is sliding-interface energy between the "
-                        "two screws), which no Lagrange joint can reproduce.")
+                        "two screws), which no Lagrange joint can reproduce. "
+                        # round 8, B8 (q-iii): the pairs that stay
+                        "The rigid-to-deformable pairs of part "
+                        f"{plan.a_pid} and part {plan.b_pid} stay: a Lagrange "
+                        "condition cancels their contact force on the body's "
+                        "main node only (RBYVIT, resol.F:7572, runs before "
+                        "LAG_MULT, :7901), so the mesh drifts off its main "
+                        "node by the cancelled impulse - on EXP_SC_JOINT_SCREW "
+                        "at most 0.0560 mm (a node of the screw) and 0.0250 "
+                        "mm (the nut) after its shell contact, against the "
+                        "one-cycle output lag of 0.0145 mm before it and "
+                        "178.67 mm of slip with the screw-nut pair kept.")
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_grnod_id()
@@ -2148,6 +2256,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     _main_side_remedy(state, c.ssid, c.sstyp))
                 continue
             _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
+            _warn_bolt_rigid_kept(state, c.keyword, c.inter_id, c.ssid, c.sstyp)
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
@@ -2219,6 +2328,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         _warn_partial_rigid_secondary(
             state, c.keyword, c.inter_id, diag, sec_sid,
             "msid (swapped)" if plan in _RS_SWAPPED else "ssid")
+        _warn_bolt_rigid_kept(state, c.keyword, c.inter_id, sec_sid, sec_styp)
         gapmin = _gapmin_override(state, c.inter_id,
                                   _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                   gapmin_overrides)
@@ -2269,7 +2379,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"))
 
-    _report_unconsumed_gapmin(state, gapmin_overrides)
+    if report_gapmin:
+        _report_unconsumed_gapmin(state, gapmin_overrides)
 
     _note_dropped_interfaces(state, dropped)
     return lines
@@ -3793,6 +3904,8 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -7 route), or use SOFT=-11 for an edge "
                     "contact built from a segment set.")
                 continue
+            _warn_bolt_rigid_kept(state, "CONTACT_AUTOMATIC_GENERAL",
+                                  c.inter_id, sec7_sid, sec7_styp)
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
                                        istf=2, igap=2, fric_id=fric_id, state=state)
@@ -4488,6 +4601,8 @@ def _make_type25_interfaces(state: ConversionState,
             _warn_partial_rigid_secondary(
                 state, kw, c.inter_id, diag, sec25_sid,
                 "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
+            _warn_bolt_rigid_kept(state, kw, c.inter_id, sec25_sid,
+                                  sec25_styp)
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
@@ -4541,6 +4656,7 @@ def _make_type25_interfaces(state: ConversionState,
             igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,
             tstart=c.bt, tstop=tstop, inacti=inacti, viss=viss,
             fric_id=fric_id)
+        state.type25_emitted_ids.add(c.inter_id)        # round 8, B6
 
     if any(c.eroding for c in state.contacts_type25):
         state.warn(
@@ -4558,6 +4674,150 @@ def _make_type25_interfaces(state: ConversionState,
             "contact behaves like an ordinary TYPE25.")
     _note_dropped_interfaces(state, dropped)
     return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The implicit contact stub beside a TYPE25-route contact (round 8, B6 - its
+# default inverted by the round's validation: the stub STAYS; the opt-in
+# --skip-implicit-stub-with-type25 leaves it out where a TYPE25 is WRITTEN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The measured tail every B6 sentence shares. Both carriers base-paired at
+#: nt 4 and nt 2 (every printed cycle row identical but the controlling-node
+#: label); doorbeam by the campaign rule (the last row of a printed time).
+#: The coupon is the solver-physics validator's b6t, re-run by the fix round:
+#: lower block 20 x 20 x 5 mm (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper
+#: block 10 x 10 x 5 mm 0.1 mm above it, its top face pushed down 0.3 mm over
+#: the run (IMFLAG 1, DT0 0.1, ENDTIM 1.0), the upper block's bottom nodes
+#: on the lower part through *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25.
+_STUB_TYPE25_MEASURED = (
+    "OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11 "
+    "(imp_int_k.F:847) and a TYPE25 acts through the residual alone "
+    "(intfop2.F:595; the engine prints MESSAGE 232, 'INTERFACE TYPE 25 IS NOT "
+    "AVAILABLE WITH IMPLICIT SOLUTION'), so the stub is the deck's only "
+    "implicit contact stiffness - an all-parts self-contact LS-DYNA does not "
+    "have. MEASURED both arms, nt 4 = nt 2: on a two-block coupon whose only "
+    "contact is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a "
+    "third of the run, then carries the load) the run WITH the stub ends "
+    "NORMAL in 11 cycles; WITHOUT it the run converges until the TYPE25 "
+    "contact must carry load, then 23 ITERATION DIVERGE and MESSAGE 79 "
+    "'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' - ERROR TERMINATION at "
+    "cycle 9. On implicit/basic-examples/springback-i/doorbeam.k the result "
+    "is MIXED: with the stub 39 cycles, internal energy at the fifths of "
+    "t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % against "
+    "LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
+    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
+    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
+    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - the END is worse and the "
+    "RMS better, and both arms sit 5-13x LS from the first fifth (that "
+    "deviation is the deck's own).")
+#: The default arm (the stub KEPT; printed by __init__ right after the stub's
+#: own sentence).
+_STUB_TYPE25_KEPT_SENTENCE = (
+    "Implicit deck with TYPE25-route contact(s) {ids} and no other converted "
+    "contact: the all-parts implicit stub (/INTER/TYPE7 {stub} "
+    "'auto_implicit_stabilization_self_contact', the sentence above) is KEPT "
+    "beside them. " + _STUB_TYPE25_MEASURED + " "
+    "--skip-implicit-stub-with-type25 leaves the stub out wherever a "
+    "TYPE25-route contact is actually written.")
+#: The opt-in arm, a TYPE25 written.
+_STUB_TYPE25_SKIPPED_SENTENCE = (
+    "Implicit deck with TYPE25-route contact(s) {ids} written and no other "
+    "converted contact: --skip-implicit-stub-with-type25 left out the "
+    "all-parts implicit stub k2rad injects beside them by default "
+    "(/INTER/TYPE7 'auto_implicit_stabilization_self_contact'). "
+    + _STUB_TYPE25_MEASURED + " Without the flag the stub is kept.")
+#: The opt-in arm, every TYPE25 dropped by the writer: the stub after all.
+_STUB_TYPE25_ALL_DROPPED_SENTENCE = (
+    "--skip-implicit-stub-with-type25: none of the TYPE25-route contacts "
+    "{ids} reached the deck (see the drop sentences above), so nothing "
+    "stands beside the implicit stub and it is written after all "
+    "(/INTER/TYPE7 {stub}, its id drawn after the TYPE25 section): the "
+    "engine's implicit setup needs an interface.")
+
+
+def add_implicit_contact_stub(state: ConversionState) -> int:
+    """Append the inert all-parts implicit stub (``/INTER/TYPE7``
+    ``AUTO_IMPLICIT_STUB_TITLE``) to ``state.contacts_single``, name it, and
+    return its interface id - the id is drawn HERE, after every screen that
+    can refuse the stub (``k2rad._inject_implicit_contact_stub``'s early
+    returns; the deferred section's TYPE25 test)."""
+    inter_id = state.next_id()
+    state.contacts_single.append(
+        ContactAutoSingle(
+            inter_id=inter_id,
+            title=AUTO_IMPLICIT_STUB_TITLE,
+            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
+            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
+            # stated Inacti = 1 here to dodge starter ERROR 611 on
+            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
+            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
+            # initially penetrating secondary node for the whole run, not just
+            # the ones that cannot be depenetrated. On
+            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
+            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
+            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
+            # putting Inacti back to 5 restored the 218-cycle run exactly.
+            # ERROR 611 is cleared by the Fpenmax cell that
+            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
+            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
+            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
+            # zero-normal ones).
+        )
+    )
+    state.warn(
+        "Implicit model has no contact interface — the OpenRadioss engine "
+        "segfaults in implicit setup without one. Injected an inert all-parts "
+        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
+        "(variable gap: an initially touching node gets a gap reduced to its "
+        "own penetration, so the stub carries no load at t=0) plus "
+        "Fpenmax=0.999999, which "
+        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
+        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
+        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
+        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
+        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
+        "TERMINATION. What the stub does AFTER t=0 depends on the mesh, "
+        "measured on a two-block implicit coupon: with a 0.5 mm physical gap "
+        "(0 nodes deactivated) it resists further interpenetration (I-ENERGY "
+        "1.636E+05 with the block, 4.469 without); on COINCIDENT non-merged "
+        "faces (24 nodes deactivated by Fpenmax) it is fully inert — the run "
+        "is identical to one with the whole /INTER/TYPE7 block deleted, "
+        "I-ENERGY = EXT-WORK matching at every cycle. Fpenmax buys the "
+        "refusal-free start by removing the resistance on exactly the meshes "
+        "that need Fpenmax. Remove the interface if you define real contact."
+    )
+    return inter_id
+
+
+def _make_deferred_implicit_stub(state: ConversionState,
+                                 rigid_nodes: Set[int]) -> List[str]:
+    """The opt-in ``--skip-implicit-stub-with-type25`` keyed on the WRITTEN
+    TYPE25 set (round 8, B6, after the validation round).
+
+    ``k2rad._inject_implicit_contact_stub`` defers the stub of an implicit
+    deck whose only contacts take the TYPE25 route when the flag is set
+    (``state.implicit_stub_deferred_for``); this section runs right after
+    :func:`_make_type25_interfaces`, so ``state.type25_emitted_ids`` is
+    complete. A TYPE25 written -> no stub, named. None written (every one
+    dropped) -> the stub after all: appended to ``state.contacts_single``
+    (so the /TH/INTER section, which runs later, lists it) and written by
+    :func:`_make_interfaces`, whose own early return in the INTERFACES
+    section saw no contact and already accounted for any --inter-gapmin
+    (``report_gapmin=False`` here). A no-op that draws no id on every deck
+    the flag does not reach."""
+    if not state.implicit_stub_deferred_for:
+        return []
+    ids = state.implicit_stub_deferred_for
+    if state.type25_emitted_ids:
+        state.implicit_stub_skipped_for = sorted(state.type25_emitted_ids)
+        state.warn(_STUB_TYPE25_SKIPPED_SENTENCE.format(
+            ids=state.implicit_stub_skipped_for))
+        return []
+    stub = add_implicit_contact_stub(state)
+    state.warn(_STUB_TYPE25_ALL_DROPPED_SENTENCE.format(ids=ids, stub=stub))
+    return _make_interfaces(state, rigid_nodes, report_gapmin=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
