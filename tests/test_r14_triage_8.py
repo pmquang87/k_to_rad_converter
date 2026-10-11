@@ -2700,61 +2700,193 @@ class ElasticFluidCpCutoff(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# B6 - the implicit contact stub skipped beside a TYPE25-route contact
-#      (default skip; opt-in --implicit-stub-with-type25)
+# B6 - the implicit contact stub beside a TYPE25-route contact. Round 8
+#      shipped the skip as the default; the round's validation INVERTED it:
+#      the stub STAYS by default (the 4f5b6e8 deck), the skip is the opt-in
+#      --skip-implicit-stub-with-type25, keyed on the WRITTEN TYPE25 set.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _shell_plate = _t7._shell_plate
 _IMPL1 = _t7._IMPL1
 _STUB_TITLE = "auto_implicit_stabilization_self_contact"
 _B6_HEAD = "Implicit deck with TYPE25-route contact(s)"
+_B6_FLAG = "--skip-implicit-stub-with-type25"
+_B6_STUB_SENTENCE = "Injected an inert all-parts"
 _N2S_78 = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
            "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
            + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
 #: sha256 of the 4f5b6e8 starter of _shell_plate(_IMPL1, _N2S_78) - the stub
 #: beside the TYPE25 (converted from the pristine checkout through
-#: test_r14_triage_7._convert; the opt-in must reproduce it byte for byte)
-_B6_OPT_IN_4F5B6E8_SHA = (
+#: test_r14_triage_7._convert); the DEFAULT must reproduce it byte for byte
+_B6_DEFAULT_4F5B6E8_SHA = (
     "ec7e3d3fa5ca310d70c6045f96fd15ff97fc1457d03862f87b85f079ec305892")
+#: The solver-physics validator's coupon b6t, verbatim: an implicit
+#: quasi-static deck (IMFLAG 1, DT0 0.1, NSOLVR 12, IAUTO 1, ENDTIM 1.0); a
+#: lower block 20 x 20 x 5 mm (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), an
+#: upper block 10 x 10 x 5 mm 0.1 mm above it whose top face is pushed down
+#: 0.3 mm over the run; the upper block's bottom nodes on the lower part
+#: through *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25 (the gap closes at
+#: t 1/3, then the contact carries the load).
+_B6T_DECK = """*KEYWORD
+*TITLE
+vphys B6 b6t
+*CONTROL_IMPLICIT_GENERAL
+         1       0.1
+*CONTROL_IMPLICIT_SOLUTION
+        12
+*CONTROL_IMPLICIT_AUTO
+         1        11         5         0       0.1
+*CONTROL_TERMINATION
+         1
+*DATABASE_GLSTAT
+       0.1
+*DEFINE_CURVE
+         1         0         1         1         0         0
+                   0                   0
+                   1                 0.3
+*PART
+lower
+         1         1         1
+*PART
+upper
+         2         1         1
+*SECTION_SOLID
+         1         2
+*MAT_ELASTIC
+         1  7.85e-09    210000       0.3
+*NODE
+       1      0.00000000      0.00000000      0.00000000       0       0
+       2     10.00000000      0.00000000      0.00000000       0       0
+       3     20.00000000      0.00000000      0.00000000       0       0
+       4      0.00000000     10.00000000      0.00000000       0       0
+       5     10.00000000     10.00000000      0.00000000       0       0
+       6     20.00000000     10.00000000      0.00000000       0       0
+       7      0.00000000     20.00000000      0.00000000       0       0
+       8     10.00000000     20.00000000      0.00000000       0       0
+       9     20.00000000     20.00000000      0.00000000       0       0
+      10      0.00000000      0.00000000      5.00000000       0       0
+      11     10.00000000      0.00000000      5.00000000       0       0
+      12     20.00000000      0.00000000      5.00000000       0       0
+      13      0.00000000     10.00000000      5.00000000       0       0
+      14     10.00000000     10.00000000      5.00000000       0       0
+      15     20.00000000     10.00000000      5.00000000       0       0
+      16      0.00000000     20.00000000      5.00000000       0       0
+      17     10.00000000     20.00000000      5.00000000       0       0
+      18     20.00000000     20.00000000      5.00000000       0       0
+     101      5.00000000      5.00000000      5.10000000       0       0
+     102     15.00000000      5.00000000      5.10000000       0       0
+     103      5.00000000     15.00000000      5.10000000       0       0
+     104     15.00000000     15.00000000      5.10000000       0       0
+     105      5.00000000      5.00000000     10.10000000       0       0
+     106     15.00000000      5.00000000     10.10000000       0       0
+     107      5.00000000     15.00000000     10.10000000       0       0
+     108     15.00000000     15.00000000     10.10000000       0       0
+*ELEMENT_SOLID
+       1       1       1       2       5       4      10      11      14      13
+       2       1       2       3       6       5      11      12      15      14
+       3       1       4       5       8       7      13      14      17      16
+       4       1       5       6       9       8      14      15      18      17
+     101       2     101     102     104     103     105     106     108     107
+*SET_NODE_LIST
+         1
+         1         4         7         2         5         8         3         6
+         9
+*SET_NODE_LIST
+         2
+       101       103       102       104
+*SET_NODE_LIST
+         3
+       105       107       106       108
+*SET_PART_LIST
+         1
+         1
+*BOUNDARY_SPC_SET
+         1         0         1         1         1         0         0         0
+*BOUNDARY_SPC_SET
+         3         0         1         1         0         0         0         0
+*BOUNDARY_PRESCRIBED_MOTION_SET
+         3         3         2         1        -1
+*CONTACT_NODES_TO_SURFACE
+         2         1         4         2
+         0         0
+
+*END
+"""
+#: sha256 of the 4f5b6e8 starter of _B6T_DECK (the pristine checkout through
+#: test_r14_triage_7._convert) = the default; and of the opt-in's starter
+_B6T_DEFAULT_4F5B6E8_SHA = "9271da9ad4651577a08d6815f1e64e6af71b26a767b0c74b11d8d0f88242323a"
+_B6T_SKIP_SHA = "0c6c760fc1910378103e89dd43ec6379d4f4d108e3479aa603b6b240a7079dc3"
+
+
+def _stub_ids(starter: str):
+    lines = starter.splitlines()
+    return [int(lines[i - 1].rsplit("/", 1)[1])
+            for i, ln in enumerate(lines) if ln == _STUB_TITLE]
 
 
 class ImplicitStubWithType25(unittest.TestCase):
-    """B6: OpenRadioss builds implicit contact stiffness only for TYPE 7 /
-    10 / 11 (imp_int_k.F:847; a TYPE25 acts through the residual,
-    intfop2.F:595), so on an implicit deck whose contacts take the TYPE25
-    route the all-parts stub would be the deck's only implicit contact
-    stiffness: it is skipped (after every other early return, before its
-    id is drawn) and the skip is named once.
+    """B6, as the validation round left it: OpenRadioss builds implicit
+    contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847; a TYPE25
+    acts through the residual, intfop2.F:595), so beside a TYPE25-route
+    contact the all-parts stub is the deck's only implicit contact
+    stiffness. Round 8 first skipped it by default; the solver-physics
+    validator's coupon b6t then turned NORMAL into ERROR TERMINATION without
+    it, so the stub STAYS by default and the skip is the opt-in
+    --skip-implicit-stub-with-type25, decided after the TYPE25 writer (the
+    WRITTEN set).
 
-    Starter + engine of test 1's deck (nt 4, rcv_r8i_implB_b6_t25,
-    harvested and deleted): see the implement report B6."""
+    Starter + engine of the b6t coupon, both arms, nt 4 AND nt 2 (the fix
+    round, run dirs rcv_r8i_fixpr_b6t_*, harvested and deleted): the
+    default (the stub; starter 0 errors, 1 WARNING = 343, the stub's
+    initial penetrations) NORMAL TERMINATION in 11 cycles to t 1.0, IE 311.5
+    at t 0.1 -> 1.189e5 at t 1.0; the opt-in (0 errors, 0 warnings) IE 0 to
+    t 0.4, 391.5 / 2469 / 4225 / 7953 / 1.145e4 at t 0.5 .. 0.9, then 23 x
+    ITERATION DIVERGE, MESSAGE 79 'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP
+    LIMIT', ERROR TERMINATION at cycle 9, t 0.9. MESSAGE 232 (TYPE25 ignored
+    in implicit) on both engines; every printed cycle row identical at nt 4
+    and nt 2 but the controlling-node label."""
 
-    def test_type25_only_deck_gets_no_stub(self):
+    def test_default_keeps_the_stub_and_names_both_arms(self):
         res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78))
+        self.assertEqual(_sha(starter), _B6_DEFAULT_4F5B6E8_SHA)
+        self.assertIn("/INTER/TYPE25/78", starter)
+        self.assertEqual(len(_stub_ids(starter)), 1, starter)
+        heads = [i for i, w in enumerate(res.warnings)
+                 if w.startswith(_B6_HEAD)]
+        self.assertEqual(len(heads), 1, res.warnings)
+        kept = res.warnings[heads[0]]
+        # printed right after the stub's own sentence it refers to
+        self.assertIn(_B6_STUB_SENTENCE, res.warnings[heads[0] - 1])
+        for needle in ("[78]", "is KEPT", "imp_int_k.F:847",
+                       "intfop2.F:595", "MESSAGE 232", "NORMAL in 11 cycles",
+                       "23 ITERATION DIVERGE", "MESSAGE 79",
+                       "ERROR TERMINATION at cycle 9", "+582.00", "393.31",
+                       "+689.08", "313.05", "MIXED", _B6_FLAG,
+                       "/INTER/TYPE7 %d" % _stub_ids(starter)[0]):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, kept)
+
+    def test_opt_in_skips_the_stub_where_a_type25_is_written(self):
+        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
+                                    skip_implicit_stub_with_type25=True)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertNotIn(_STUB_TITLE, starter)
-        self.assertFalse(_has(res.warnings, "Injected an inert all-parts"))
+        self.assertFalse(_has(res.warnings, _B6_STUB_SENTENCE))
         hits = [w for w in res.warnings if w.startswith(_B6_HEAD)]
         self.assertEqual(len(hits), 1, res.warnings)
-        for needle in ("[78]", "imp_int_k.F:847", "intfop2.F:595",
-                       "+689.08", "313.05", "+582.00", "393.31", "MIXED",
-                       "--implicit-stub-with-type25"):
+        for needle in ("[78] written", _B6_FLAG + " left out",
+                       "ERROR TERMINATION at cycle 9", "MIXED",
+                       "Without the flag the stub is kept."):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
-        self.assertFalse(_has(res.warnings, "carries NO /INTER"))
-
-    def test_opt_in_keeps_the_stub(self):
-        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
-                                    implicit_stub_with_type25=True)
-        self.assertIn(_STUB_TITLE, starter)
-        self.assertTrue(_has(res.warnings, "Injected an inert all-parts"))
-        self.assertFalse(_has(res.warnings, _B6_HEAD))
-        self.assertEqual(_sha(starter), _B6_OPT_IN_4F5B6E8_SHA)
+        self.assertNotIn("is KEPT", hits[0])
 
     def test_contact_free_implicit_deck_keeps_the_stub(self):
-        res, starter, _e = _convert(_shell_plate(_IMPL1))
-        self.assertIn(_STUB_TITLE, starter)
-        self.assertFalse(_has(res.warnings, _B6_HEAD))
+        for kw in ({}, {"skip_implicit_stub_with_type25": True}):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_shell_plate(_IMPL1), **kw)
+                self.assertIn(_STUB_TITLE, starter)
+                self.assertFalse(_has(res.warnings, _B6_HEAD))
 
     def test_modal_and_explicit_decks_unchanged(self):
         modal = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
@@ -2762,57 +2894,100 @@ class ImplicitStubWithType25(unittest.TestCase):
                  "*CONTROL_TERMINATION\n" + _row(0.01) + "\n")
         explicit = "*CONTROL_TERMINATION\n" + _row(0.01) + "\n"
         for name, ctrl in (("modal", modal), ("explicit", explicit)):
-            with self.subTest(deck=name):
-                res, starter, _e = _convert(_shell_plate(ctrl, _N2S_78))
-                self.assertNotIn(_STUB_TITLE, starter)
-                self.assertFalse(_has(res.warnings, _B6_HEAD))
-                self.assertIn("/INTER/TYPE25/78", starter)
+            for kw in ({}, {"skip_implicit_stub_with_type25": True}):
+                with self.subTest(deck=name, **kw):
+                    res, starter, _e = _convert(_shell_plate(ctrl, _N2S_78),
+                                                **kw)
+                    self.assertNotIn(_STUB_TITLE, starter)
+                    self.assertFalse(_has(res.warnings, _B6_HEAD))
+                    self.assertIn("/INTER/TYPE25/78", starter)
 
     def test_soft_minus7_eroding_single_surface_unchanged(self):
         """dyna2rad's SOFT -7 sentinel routes an ERODING_SINGLE_SURFACE to
         contacts_general, whose own guard returns first: no stub, no B6
-        sentence, the /INTER/TYPE7 of the contact itself."""
+        sentence, the /INTER/TYPE7 of the contact itself - on both arms."""
         extra = ("*CONTACT_ERODING_SINGLE_SURFACE_ID\n" + _row(77) + "\n"
                  + _row(0, 0, 0, 0) + "\n" + _row(0.1) + "\n" + _row() + "\n"
                  + _row(0, 1, 0) + "\n" + _row(-7) + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
-        self.assertNotIn(_STUB_TITLE, starter)
-        self.assertFalse(_has(res.warnings, _B6_HEAD))
-        self.assertTrue(_has(res.warnings, "SOFT=-7"), res.warnings)
+        for kw in ({}, {"skip_implicit_stub_with_type25": True}):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_shell_plate(_IMPL1, extra), **kw)
+                self.assertNotIn(_STUB_TITLE, starter)
+                self.assertFalse(_has(res.warnings, _B6_HEAD))
+                self.assertTrue(_has(res.warnings, "SOFT=-7"), res.warnings)
 
     def test_tied_plus_type25_keeps_todays_silence(self):
         """DECISION B6-a: a tied + TYPE25 deck returns at the tied guard,
-        silently, as at 4f5b6e8."""
+        silently, as at 4f5b6e8 - on both arms."""
         extra = _N2S_78 + ("*CONTACT_TIED_NODES_TO_SURFACE_ID\n" + _row(79)
                            + "\n" + _row(5, 1, 4, 3) + "\n" + _row() + "\n"
                            + _row() + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
-        self.assertNotIn(_STUB_TITLE, starter)
-        self.assertFalse(_has(res.warnings, _B6_HEAD))
+        for kw in ({}, {"skip_implicit_stub_with_type25": True}):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_shell_plate(_IMPL1, extra), **kw)
+                self.assertNotIn(_STUB_TITLE, starter)
+                self.assertFalse(_has(res.warnings, _B6_HEAD))
 
-    def test_dropped_type25_is_named(self):
+    def test_opt_in_with_every_type25_dropped_writes_the_stub_after_all(self):
         """The TYPE25's secondary node set does not exist: the writer drops
-        it, the skip's premise is false and the deck carries NO /INTER."""
+        it, so under the opt-in nothing stands beside the stub - keyed on the
+        WRITTEN set, the deferred section writes it after all (its id drawn
+        after the TYPE25 section) and names why; the default arm writes the
+        stub as at 4f5b6e8."""
         extra = ("*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
                  + _row(99, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row()
                  + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
-        self.assertEqual([ln for ln in starter.splitlines()
-                          if ln.startswith("/INTER/")], [])
-        self.assertTrue(_has(res.warnings, _B6_HEAD), res.warnings)
-        self.assertTrue(_has(res.warnings, "carries NO /INTER",
-                             "--implicit-stub-with-type25"), res.warnings)
+        deck = _shell_plate(_IMPL1, extra)
+        res, starter, _e = _convert(deck, skip_implicit_stub_with_type25=True)
+        inters = [ln for ln in starter.splitlines()
+                  if ln.startswith("/INTER/")]
+        self.assertEqual(len(inters), 1, inters)
+        self.assertTrue(inters[0].startswith("/INTER/TYPE7/"), inters)
+        stub = _stub_ids(starter)
+        self.assertEqual(len(stub), 1, starter)
+        self.assertTrue(_has(res.warnings, _B6_STUB_SENTENCE,
+                             "/INTER/TYPE7 id %d" % stub[0]), res.warnings)
+        self.assertTrue(_has(res.warnings, _B6_FLAG, "[78] reached the deck",
+                             "written after all",
+                             "/INTER/TYPE7 %d" % stub[0]), res.warnings)
+        self.assertFalse(_has(res.warnings, _B6_FLAG + " left out"), res.warnings)
+        r0, s0, _e0 = _convert(deck)
+        self.assertEqual(len(_stub_ids(s0)), 1, s0)
+        self.assertTrue(_has(r0.warnings, _B6_HEAD, "is KEPT"))
 
-    def test_the_skip_draws_no_id(self):
-        """B6-a: the return sits before the stub's id is drawn, so the
-        default's auto ids equal the opt-in's minus the stub's one."""
-        st_off = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+    def test_the_opt_in_draws_no_id_before_the_writer(self):
+        """The opt-in defers the decision to the writer and returns before
+        any id is drawn; the default draws the stub's id there."""
         from k2rad import _inject_implicit_contact_stub
-        st_off.options.implicit_stub_with_type25 = False
-        before = st_off._auto_id
-        _inject_implicit_contact_stub(st_off)
-        self.assertEqual(st_off._auto_id, before)
-        self.assertEqual(st_off.implicit_stub_skipped_for, [78])
+        st = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+        st.options.skip_implicit_stub_with_type25 = True
+        before = st._auto_id
+        _inject_implicit_contact_stub(st)
+        self.assertEqual(st._auto_id, before)
+        self.assertEqual(st.implicit_stub_deferred_for, [78])
+        self.assertEqual(st.contacts_single, [])
+        st0 = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+        _inject_implicit_contact_stub(st0)
+        self.assertEqual(st0.implicit_stub_deferred_for, [])
+        self.assertEqual([c.title for c in st0.contacts_single],
+                         [_STUB_TITLE])
+
+    def test_the_b6t_coupon_both_arms(self):
+        """The coupon of the class docstring: the default is the 4f5b6e8
+        deck byte for byte (the stub /INTER/TYPE7 beside /INTER/TYPE25);
+        the opt-in writes the TYPE25 alone."""
+        res, starter, _e = _convert(_B6T_DECK)
+        self.assertEqual(_sha(starter), _B6T_DEFAULT_4F5B6E8_SHA)
+        self.assertEqual(len(_stub_ids(starter)), 1, starter)
+        self.assertEqual(sum(ln.startswith("/INTER/TYPE25/")
+                             for ln in starter.splitlines()), 1)
+        r1, s1, _e1 = _convert(_B6T_DECK, skip_implicit_stub_with_type25=True)
+        self.assertEqual(_sha(s1), _B6T_SKIP_SHA)
+        self.assertEqual(_stub_ids(s1), [])
+        self.assertEqual([ln for ln in s1.splitlines()
+                          if ln.startswith("/INTER/")],
+                         [ln for ln in starter.splitlines()
+                          if ln.startswith("/INTER/TYPE25/")])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3869,13 +4044,14 @@ class Round8OptInWiringB(unittest.TestCase):
     convert() / ConvertOptions (default False) and cli.main()'s call."""
 
     _OPT_IN = {
-        "--implicit-stub-with-type25": "implicit_stub_with_type25",
+        "--skip-implicit-stub-with-type25": "skip_implicit_stub_with_type25",
         "--shell-in-solid-coupling": "shell_in_solid_coupling",
     }
     _HELP_FIGURES = {
-        "--implicit-stub-with-type25": ("+582.00 -> +689.08 %",
-                                        "393.31 -> 313.05 %",
-                                        "imp_int_k.F:847"),
+        "--skip-implicit-stub-with-type25": ("+582.00 -> +689.08 %",
+                                             "393.31 -> 313.05 %",
+                                             "imp_int_k.F:847",
+                                             "ERROR TERMINATION at cycle 9"),
         "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -28.26 %",
                                       "+1134.62 -> +42.28 %", "8.936x"),
     }
@@ -4125,24 +4301,30 @@ class Round8ChangelogReSums(unittest.TestCase):
         return _collapse(_read7("CHANGELOG.md"))
 
     def test_the_part_B_total_re_sums(self):
+        # B6 left the list when the validation round inverted its default
+        # (the stub stays; 8 / 8 -> 7 / 7)
         m = re.search(
             r"Part B's default bytes move (\d+) deck keys / (\d+) emitted "
             r"models \(B1 (\d+) / (\d+), B2 (\d+) / (\d+), B4 (\d+) / (\d+), "
-            r"B5 (\d+) / (\d+), B6 (\d+) / (\d+); B3 h\.2, B7, B8, B9 and B10 "
-            r"0;", self._text())
+            r"B5 (\d+) / (\d+); B3 h\.2, B6, B7, B8, B9 and B10 0 ",
+            self._text())
         self.assertIsNotNone(m)
         tot_k, tot_m, *items = map(int, m.groups())
         self.assertEqual((sum(items[0::2]), sum(items[1::2])),
                          (tot_k, tot_m))
-        self.assertEqual((tot_k, tot_m), (8, 8))
+        self.assertEqual((tot_k, tot_m), (7, 7))
 
     def test_the_item_bullets_state_the_same_counts(self):
         text = self._text()
         for needle in (
-                # B1 tire.k, B2 metal-cutting, B6 doorbeam
+                # B1 tire.k, B2 metal-cutting; B6 0 by default, its opt-in
+                # doorbeam
                 "Reach 1 deck key on 1 emitted model; the",
                 "Reach 1 deck key on 1 emitted model (0 explicit carriers)",
-                "Reach 1 deck key on 1 emitted model (the only stub carrier",
+                "Default bytes: 0 movers (doorbeam's `_0000.rad` = the "
+                "4f5b6e8 deck",
+                "Reach of the opt-in 1 deck key on 1 emitted model (the only "
+                "stub carrier",
                 # B4 sph/bird, B5 the four nvh keys
                 "bytes 1 deck key on 1 emitted model (`sph/bird`, one cell)",
                 "`nvh` 8.7 / 9.1 / 9.2 / 9.4, 4 deck keys on",
@@ -4193,10 +4375,16 @@ _RETRACTED_ROUND_8_B = (
     # B10 - round 7's SIS arms
     "refuted as a general rule in round 6", "+195.21 %", "1.016x", "1.016×",
     "4.506x", "4.506×",
+    # B6 - the first default (the stub skipped) and its opt-in flag, both
+    # gone when the validation round inverted the default
+    "--implicit-stub-with-type25", "carries NO /INTER",
+    "the stub is NOT injected when the deck's only",
 )
 
 #: ... and their replacements, which ARE shipped: (file, text).
 _REPLACEMENTS_ROUND_8_B = (
+    ("k2rad/writer/contacts.py", "is KEPT"),
+    ("README.md", "`--skip-implicit-stub-with-type25` — skip the implicit"),
     ("k2rad/writer/mesh.py", "13 of 13"),
     ("k2rad/writer/materials.py", "29.58"),
     ("k2rad/writer/materials.py", "-1e-20"),

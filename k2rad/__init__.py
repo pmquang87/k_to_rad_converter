@@ -20,39 +20,12 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
-from .state import ConversionState, ContactAutoSingle, ConvertOptions
-from .writer.common import AUTO_IMPLICIT_STUB_TITLE, SHELL_FORMULATIONS
+from .state import ConversionState, ConvertOptions
+from .writer.common import SHELL_FORMULATIONS
 from .writer import (build_starter, build_engines, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
-                     deformable_deformable_inter_ids, _recipe_active)
-
-
-#: R14 triage round 8, B6: the sentence of the implicit stub SKIPPED beside a
-#: TYPE25-route contact ({ids}). The doorbeam figures are the
-#: implementation's own pair (nt 4 and nt 2, base-paired with 4f5b6e8), by
-#: the campaign rule (the last row of a printed time).
-_STUB_TYPE25_SENTENCE = (
-    "Implicit deck with TYPE25-route contact(s) {ids} and no other converted "
-    "contact: the inert all-parts self-contact (/INTER/TYPE7 "
-    "'auto_implicit_stabilization_self_contact') k2rad injects into a "
-    "contact-free implicit deck is NOT injected - the deck already has an "
-    "/INTER, which is what the stub exists to provide. It would not be inert "
-    "here: OpenRadioss builds implicit contact stiffness only for TYPE 7 / "
-    "10 / 11 (imp_int_k.F:847), a TYPE25 acts through the residual alone "
-    "(intfop2.F:595), so the stub would be the deck's only implicit contact "
-    "stiffness - an all-parts self-contact LS-DYNA does not have, alive past "
-    "the deck's own contact death time. MEASURED on "
-    "implicit/basic-examples/springback-i/doorbeam.k (nt 4 = nt 2 to the "
-    "printed digit): with the stub 39 cycles, internal energy at the fifths "
-    "of t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % "
-    "against LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
-    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
-    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
-    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - MIXED: the END is worse "
-    "and the RMS better, and both arms sit 5-13x LS from the first fifth "
-    "(that deviation is the deck's own, not the stub's). "
-    "--implicit-stub-with-type25 keeps the stub."
-)
+                     deformable_deformable_inter_ids, _recipe_active,
+                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -122,65 +95,26 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # outside what OpenRadioss SPH supports, and every SPH deck in the
         # corpus is explicit.
         return
-    if state.contacts_type25 and not state.options.implicit_stub_with_type25:
-        # R14 triage round 8, B6: a deck with a TYPE25-route contact already
-        # has the /INTER the stub exists to provide; the stub would be the
-        # deck's only implicit contact STIFFNESS (imp_int_k.F:847: TYPE 7 /
-        # 10 / 11 only) and an all-parts self-contact LS-DYNA does not have.
-        # Placed after every other early return, so the sentence fires
-        # exactly where a stub WOULD have been injected (B6-a), and before
-        # the stub's id is drawn.
-        state.implicit_stub_skipped_for = sorted(
+    if state.contacts_type25 and state.options.skip_implicit_stub_with_type25:
+        # R14 triage round 8, B6 (inverted by the round's validation): under
+        # the opt-in the stub is left out only where a TYPE25-route contact
+        # is actually WRITTEN, which the writer knows and this pass does not
+        # - so the decision is deferred to
+        # writer/contacts._make_deferred_implicit_stub (right after the
+        # TYPE25 section), before any id is drawn here. Placed after every
+        # other early return, so it fires exactly where a stub WOULD have
+        # been injected.
+        state.implicit_stub_deferred_for = sorted(
             c.inter_id for c in state.contacts_type25)
-        state.warn(_STUB_TYPE25_SENTENCE.format(
-            ids=state.implicit_stub_skipped_for))
         return
-    inter_id = state.next_id()
-    state.contacts_single.append(
-        ContactAutoSingle(
-            inter_id=inter_id,
-            title=AUTO_IMPLICIT_STUB_TITLE,
-            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
-            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
-            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
-            # stated Inacti = 1 here to dodge starter ERROR 611 on
-            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
-            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
-            # initially penetrating secondary node for the whole run, not just
-            # the ones that cannot be depenetrated. On
-            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
-            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
-            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
-            # putting Inacti back to 5 restored the 218-cycle run exactly.
-            # ERROR 611 is cleared by the Fpenmax cell that
-            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
-            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
-            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
-            # zero-normal ones).
-        )
-    )
-    state.warn(
-        "Implicit model has no contact interface — the OpenRadioss engine "
-        "segfaults in implicit setup without one. Injected an inert all-parts "
-        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
-        "(variable gap: an initially touching node gets a gap reduced to its "
-        "own penetration, so the stub carries no load at t=0) plus "
-        "Fpenmax=0.999999, which "
-        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
-        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
-        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
-        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
-        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
-        "TERMINATION. What the stub does AFTER t=0 depends on the mesh, "
-        "measured on a two-block implicit coupon: with a 0.5 mm physical gap "
-        "(0 nodes deactivated) it resists further interpenetration (I-ENERGY "
-        "1.636E+05 with the block, 4.469 without); on COINCIDENT non-merged "
-        "faces (24 nodes deactivated by Fpenmax) it is fully inert — the run "
-        "is identical to one with the whole /INTER/TYPE7 block deleted, "
-        "I-ENERGY = EXT-WORK matching at every cycle. Fpenmax buys the "
-        "refusal-free start by removing the resistance on exactly the meshes "
-        "that need Fpenmax. Remove the interface if you define real contact."
-    )
+    inter_id = add_implicit_contact_stub(state)
+    if state.contacts_type25:
+        # The default since the round-8 validation round: the stub STAYS
+        # beside a TYPE25-route contact (the 4f5b6e8 deck byte for byte);
+        # the sentence names both measured arms and the opt-in.
+        state.warn(_STUB_TYPE25_KEPT_SENTENCE.format(
+            ids=sorted(c.inter_id for c in state.contacts_type25),
+            stub=inter_id))
 
 
 @dataclass
@@ -311,7 +245,7 @@ def convert(
     imflag0_eigen_explicit: bool = True,
     implicit_smooth_curve_sampling: bool = True,
     elastic_fluid_cp_cutoff: bool = True,
-    implicit_stub_with_type25: bool = False,
+    skip_implicit_stub_with_type25: bool = False,
     shell_in_solid_coupling: bool = False,
     imflag_curve_restart: bool = True,
     tgmult_imptemp: bool = True,
@@ -1010,18 +944,23 @@ def convert(
         decks; on 9.4 (nt 4) both cells give the same 18 rows with zero
         energy. Reach 4 deck keys on 4 emitted models. False keeps Pmin
         0 (= -INFINITY), the 4f5b6e8 cell.
-    implicit_stub_with_type25 : bool
-        Keep injecting the inert all-parts implicit contact stub on an
-        implicit deck whose only contacts take the TYPE25 route (round
-        8, B6; the 4f5b6e8 behaviour). By default the stub is skipped
-        there: the deck already has an /INTER, and OpenRadioss builds
-        implicit contact stiffness only for TYPE 7 / 10 / 11
-        (imp_int_k.F:847), so the stub would be the deck's only
-        implicit contact stiffness. MEASURED on
-        implicit/basic-examples/springback-i/doorbeam.k (nt 4 = nt 2):
-        skipping it moves the END +582.00 -> +689.08 % (worse) and the
-        RMS 393.31 -> 313.05 % of the LS peak (better) - MIXED. Reach 1
-        deck key on 1 emitted model. Default False.
+    skip_implicit_stub_with_type25 : bool
+        Leave out the inert all-parts implicit contact stub on an
+        implicit deck whose only contacts take the TYPE25 route, wherever
+        a TYPE25 contact is actually WRITTEN (round 8, B6; opt-in since
+        the round's validation inverted the default). By default the
+        stub stays there, the 4f5b6e8 deck: OpenRadioss builds implicit
+        contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847)
+        and a TYPE25 acts through the residual alone (intfop2.F:595), so
+        the stub is the deck's only implicit contact stiffness. MEASURED
+        (nt 4 = nt 2): on a two-block coupon whose TYPE25 contact must
+        carry load the skip turns NORMAL in 11 cycles into ERROR
+        TERMINATION at cycle 9 (23 ITERATION DIVERGE, then MESSAGE 79);
+        on implicit/basic-examples/springback-i/doorbeam.k it moves the
+        END +582.00 -> +689.08 % (worse) and the RMS 393.31 -> 313.05 %
+        of the LS peak (better) - MIXED. Reach 1 deck key on 1 emitted
+        model. When the writer drops every TYPE25 the stub is written
+        after all. Default False.
     shell_in_solid_coupling : bool
         Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty
         coupling (R14 triage round 8, B10): /SURF/PART/EXT over the
@@ -1480,7 +1419,7 @@ def convert(
         imflag0_eigen_explicit=imflag0_eigen_explicit,
         implicit_smooth_curve_sampling=implicit_smooth_curve_sampling,
         elastic_fluid_cp_cutoff=elastic_fluid_cp_cutoff,
-        implicit_stub_with_type25=implicit_stub_with_type25,
+        skip_implicit_stub_with_type25=skip_implicit_stub_with_type25,
         shell_in_solid_coupling=shell_in_solid_coupling,
         imflag_curve_restart=imflag_curve_restart,
         tgmult_imptemp=tgmult_imptemp,

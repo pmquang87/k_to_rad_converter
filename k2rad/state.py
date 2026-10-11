@@ -8148,17 +8148,23 @@ class ConvertOptions:
     # unchanged. Round 7's 'deliberately not changed' is reversed on
     # consistency (no time-domain reference).
     elastic_fluid_cp_cutoff: bool = True
-    # --implicit-stub-with-type25: keep injecting the implicit contact stub
-    # on a deck whose only contacts take the TYPE25 route (the 4f5b6e8
-    # behaviour; R14 triage round 8, B6).
+    # --skip-implicit-stub-with-type25: leave out the implicit contact stub
+    # on a deck whose only contacts take the TYPE25 route, where a TYPE25 is
+    # actually WRITTEN (R14 triage round 8, B6, inverted by the round's
+    # validation).
     #
-    # OFF by default: __init__._inject_implicit_contact_stub returns before
-    # drawing the stub's id when state.contacts_type25 is not empty
-    # (imp_int_k.F:847 builds implicit contact stiffness for TYPE 7 / 10 / 11
-    # only; a TYPE25 acts through the residual, intfop2.F:595). MEASURED on
-    # doorbeam (nt 4 = nt 2): END +582.00 -> +689.08 % with RMS 393.31 ->
-    # 313.05 % - MIXED.
-    implicit_stub_with_type25: bool = False
+    # OFF by default: the stub stays beside a TYPE25-route contact, byte for
+    # byte the 4f5b6e8 deck. imp_int_k.F:847 builds implicit contact
+    # stiffness for TYPE 7 / 10 / 11 only and a TYPE25 acts through the
+    # residual (intfop2.F:595), so the stub is the deck's only implicit
+    # contact stiffness: MEASURED (nt 4 = nt 2) on a two-block coupon whose
+    # TYPE25 contact must carry load, the skip turns NORMAL in 11 cycles
+    # into ERROR TERMINATION at cycle 9; on doorbeam it is MIXED (END
+    # +582.00 -> +689.08 %, RMS 393.31 -> 313.05 %). Under the flag
+    # __init__._inject_implicit_contact_stub defers the decision to
+    # writer/contacts._make_deferred_implicit_stub, which runs after the
+    # TYPE25 writer.
+    skip_implicit_stub_with_type25: bool = False
     # --shell-in-solid-coupling: write *CONSTRAINED_SHELL_IN_SOLID as
     # /INTER/TYPE18 (Stfval = 0.1 K A^2 / V) + the void density on an
     # *INITIAL_VOID host (B10, round 8; opt-in: one carrier).
@@ -10314,11 +10320,14 @@ class ConversionState:
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)
-    # R14 triage round 8, B6: the TYPE25-route ids beside which
-    # __init__._inject_implicit_contact_stub SKIPPED the implicit stub, and
-    # the TYPE25 ids writer/contacts._make_type25_interfaces really wrote
-    # (recorded at the write line) - a skip whose TYPE25s were all dropped
-    # leaves an implicit deck with NO /INTER, and is named.
+    # R14 triage round 8, B6 (the opt-in --skip-implicit-stub-with-type25):
+    # the TYPE25-route ids for which __init__._inject_implicit_contact_stub
+    # DEFERRED the implicit stub, the TYPE25 ids
+    # writer/contacts._make_type25_interfaces really wrote (recorded at the
+    # write line), and the ids the deferred section skipped the stub for -
+    # the opt-in keys on the WRITTEN set: a deck whose TYPE25s were all
+    # dropped gets the stub after all.
+    implicit_stub_deferred_for: List[int] = field(default_factory=list)
     implicit_stub_skipped_for: List[int] = field(default_factory=list)
     type25_emitted_ids: Set[int] = field(default_factory=set)
     # *DEFINE_FRICTION tables → /FRICTION, keyed by their (preserved) id and

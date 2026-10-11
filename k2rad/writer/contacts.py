@@ -6,9 +6,9 @@ import itertools
 import math
 from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
-from ..state import (ConversionState, ContactAutoSurf2Surf, ContactSpotweld,
-                     ContactThermal, ContactTied, ContactTiebreak, SolidElem,
-                     TshellElem)
+from ..state import (ConversionState, ContactAutoSingle, ContactAutoSurf2Surf,
+                     ContactSpotweld, ContactThermal, ContactTied,
+                     ContactTiebreak, SolidElem, TshellElem)
 from ..topology import TET10_EDGEMID
 from .joint_screw import lagrange_held_pairs
 from .common import (
@@ -83,6 +83,9 @@ __all__ = [
     "_warn_eroding_card4",
     "_warn_eroding_smp_friction",
     "_make_type25_interfaces",
+    "add_implicit_contact_stub",
+    "_make_deferred_implicit_stub",
+    "_STUB_TYPE25_KEPT_SENTENCE",
     "_segment_set_edges",
     "_general_line_group",
     "_make_general_interfaces",
@@ -2000,12 +2003,17 @@ def _note_dropped_interfaces(state: ConversionState,
         )
 
 
-def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
+                     report_gapmin: bool = True) -> List[str]:
+    # report_gapmin=False only from _make_deferred_implicit_stub (round 8,
+    # B6): the INTERFACES section's own call already named every unconsumed
+    # --inter-gapmin id, and a second report would repeat each one.
     if not state.contacts_single and not state.contacts_surf2surf:
         # No /INTER/TYPE7 section at all — but a --inter-gapmin the user typed
         # still has to be accounted for, or the flag is ignored in silence on a
         # deck whose only contact is a tie.
-        _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
+        if report_gapmin:
+            _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
         return []
     lines = ["#-  INTERFACES:", HDR]
 
@@ -2362,7 +2370,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"))
 
-    _report_unconsumed_gapmin(state, gapmin_overrides)
+    if report_gapmin:
+        _report_unconsumed_gapmin(state, gapmin_overrides)
 
     _note_dropped_interfaces(state, dropped)
     return lines
@@ -4640,19 +4649,6 @@ def _make_type25_interfaces(state: ConversionState,
             fric_id=fric_id)
         state.type25_emitted_ids.add(c.inter_id)        # round 8, B6
 
-    if state.implicit_stub_skipped_for and not state.type25_emitted_ids:
-        # Round 8, B6: the implicit stub was skipped FOR these TYPE25s, but
-        # the writer dropped every one of them - a second registry must not
-        # make the skip's premise silently false.
-        state.warn(
-            f"*CONTACT ids {state.implicit_stub_skipped_for}: the implicit "
-            "contact stub was skipped for these TYPE25-route contacts (round "
-            "8), but none of them reached the deck (see the drop sentences "
-            "above), so this implicit deck carries NO /INTER; the stub's own "
-            "W14 note says the probe /RBODY alone has run such a deck - if "
-            "the engine stops in implicit setup, re-convert with "
-            "--implicit-stub-with-type25.")
-
     if any(c.eroding for c in state.contacts_type25):
         state.warn(
             "Eroding contact converted: the interface can only retreat as fast "
@@ -4669,6 +4665,150 @@ def _make_type25_interfaces(state: ConversionState,
             "contact behaves like an ordinary TYPE25.")
     _note_dropped_interfaces(state, dropped)
     return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The implicit contact stub beside a TYPE25-route contact (round 8, B6 - its
+# default inverted by the round's validation: the stub STAYS; the opt-in
+# --skip-implicit-stub-with-type25 leaves it out where a TYPE25 is WRITTEN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The measured tail every B6 sentence shares. Both carriers base-paired at
+#: nt 4 and nt 2 (every printed cycle row identical but the controlling-node
+#: label); doorbeam by the campaign rule (the last row of a printed time).
+#: The coupon is the solver-physics validator's b6t, re-run by the fix round:
+#: lower block 20 x 20 x 5 mm (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper
+#: block 10 x 10 x 5 mm 0.1 mm above it, its top face pushed down 0.3 mm over
+#: the run (IMFLAG 1, DT0 0.1, ENDTIM 1.0), the upper block's bottom nodes
+#: on the lower part through *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25.
+_STUB_TYPE25_MEASURED = (
+    "OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11 "
+    "(imp_int_k.F:847) and a TYPE25 acts through the residual alone "
+    "(intfop2.F:595; the engine prints MESSAGE 232, 'INTERFACE TYPE 25 IS NOT "
+    "AVAILABLE WITH IMPLICIT SOLUTION'), so the stub is the deck's only "
+    "implicit contact stiffness - an all-parts self-contact LS-DYNA does not "
+    "have. MEASURED both arms, nt 4 = nt 2: on a two-block coupon whose only "
+    "contact is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a "
+    "third of the run, then carries the load) the run WITH the stub ends "
+    "NORMAL in 11 cycles; WITHOUT it the run converges until the TYPE25 "
+    "contact must carry load, then 23 ITERATION DIVERGE and MESSAGE 79 "
+    "'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' - ERROR TERMINATION at "
+    "cycle 9. On implicit/basic-examples/springback-i/doorbeam.k the result "
+    "is MIXED: with the stub 39 cycles, internal energy at the fifths of "
+    "t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % against "
+    "LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
+    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
+    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
+    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - the END is worse and the "
+    "RMS better, and both arms sit 5-13x LS from the first fifth (that "
+    "deviation is the deck's own).")
+#: The default arm (the stub KEPT; printed by __init__ right after the stub's
+#: own sentence).
+_STUB_TYPE25_KEPT_SENTENCE = (
+    "Implicit deck with TYPE25-route contact(s) {ids} and no other converted "
+    "contact: the all-parts implicit stub (/INTER/TYPE7 {stub} "
+    "'auto_implicit_stabilization_self_contact', the sentence above) is KEPT "
+    "beside them. " + _STUB_TYPE25_MEASURED + " "
+    "--skip-implicit-stub-with-type25 leaves the stub out wherever a "
+    "TYPE25-route contact is actually written.")
+#: The opt-in arm, a TYPE25 written.
+_STUB_TYPE25_SKIPPED_SENTENCE = (
+    "Implicit deck with TYPE25-route contact(s) {ids} written and no other "
+    "converted contact: --skip-implicit-stub-with-type25 left out the "
+    "all-parts implicit stub k2rad injects beside them by default "
+    "(/INTER/TYPE7 'auto_implicit_stabilization_self_contact'). "
+    + _STUB_TYPE25_MEASURED + " Without the flag the stub is kept.")
+#: The opt-in arm, every TYPE25 dropped by the writer: the stub after all.
+_STUB_TYPE25_ALL_DROPPED_SENTENCE = (
+    "--skip-implicit-stub-with-type25: none of the TYPE25-route contacts "
+    "{ids} reached the deck (see the drop sentences above), so nothing "
+    "stands beside the implicit stub and it is written after all "
+    "(/INTER/TYPE7 {stub}, its id drawn after the TYPE25 section): the "
+    "engine's implicit setup needs an interface.")
+
+
+def add_implicit_contact_stub(state: ConversionState) -> int:
+    """Append the inert all-parts implicit stub (``/INTER/TYPE7``
+    ``AUTO_IMPLICIT_STUB_TITLE``) to ``state.contacts_single``, name it, and
+    return its interface id - the id is drawn HERE, after every screen that
+    can refuse the stub (``k2rad._inject_implicit_contact_stub``'s early
+    returns; the deferred section's TYPE25 test)."""
+    inter_id = state.next_id()
+    state.contacts_single.append(
+        ContactAutoSingle(
+            inter_id=inter_id,
+            title=AUTO_IMPLICIT_STUB_TITLE,
+            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+            # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
+            # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
+            # stated Inacti = 1 here to dodge starter ERROR 611 on
+            # 05_1_welding_solid's conformal weld mesh; that was MEASURED to be
+            # the wrong lever, because Inacti = 1 zeroes the stiffness of EVERY
+            # initially penetrating secondary node for the whole run, not just
+            # the ones that cannot be depenetrated. On
+            # `efg/metal-cutting/main.k` — an implicit deck whose only contact
+            # is this stub — Inacti = 1 turned a NORMAL TERMINATION (218 cycles,
+            # t = 0.03 of 0.03) into a TIMESTEP-LIMIT death at t = 0.0084, and
+            # putting Inacti back to 5 restored the 218-cycle run exactly.
+            # ERROR 611 is cleared by the Fpenmax cell that
+            # writer/contacts._emit_inter_type7 derives from Inacti (measured on
+            # 05_1_welding_solid: stub Inacti = 5 + Fpenmax = 0.999999 gives
+            # 0 ERRORS / 1 WARNING and deactivates 355 nodes against its 310
+            # zero-normal ones).
+        )
+    )
+    state.warn(
+        "Implicit model has no contact interface — the OpenRadioss engine "
+        "segfaults in implicit setup without one. Injected an inert all-parts "
+        f"self-contact (/INTER/TYPE7 id {inter_id}) with the ordinary Inacti=5 "
+        "(variable gap: an initially touching node gets a gap reduced to its "
+        "own penetration, so the stub carries no load at t=0) plus "
+        "Fpenmax=0.999999, which "
+        "deactivates only a node lying EXACTLY on a main segment — i7pwr3.F:118 "
+        "refuses such a node with ERROR 611 for every Inacti except 1 and 2 "
+        "unless Fpenmax is set (measured, 310 of them on 05_1_welding_solid's "
+        "conformal weld mesh). Inacti=1 was tried and rejected: it zeroes every "
+        "penetrating node's stiffness and cost efg/metal-cutting its NORMAL "
+        "TERMINATION. What the stub does AFTER t=0 depends on the mesh, "
+        "measured on a two-block implicit coupon: with a 0.5 mm physical gap "
+        "(0 nodes deactivated) it resists further interpenetration (I-ENERGY "
+        "1.636E+05 with the block, 4.469 without); on COINCIDENT non-merged "
+        "faces (24 nodes deactivated by Fpenmax) it is fully inert — the run "
+        "is identical to one with the whole /INTER/TYPE7 block deleted, "
+        "I-ENERGY = EXT-WORK matching at every cycle. Fpenmax buys the "
+        "refusal-free start by removing the resistance on exactly the meshes "
+        "that need Fpenmax. Remove the interface if you define real contact."
+    )
+    return inter_id
+
+
+def _make_deferred_implicit_stub(state: ConversionState,
+                                 rigid_nodes: Set[int]) -> List[str]:
+    """The opt-in ``--skip-implicit-stub-with-type25`` keyed on the WRITTEN
+    TYPE25 set (round 8, B6, after the validation round).
+
+    ``k2rad._inject_implicit_contact_stub`` defers the stub of an implicit
+    deck whose only contacts take the TYPE25 route when the flag is set
+    (``state.implicit_stub_deferred_for``); this section runs right after
+    :func:`_make_type25_interfaces`, so ``state.type25_emitted_ids`` is
+    complete. A TYPE25 written -> no stub, named. None written (every one
+    dropped) -> the stub after all: appended to ``state.contacts_single``
+    (so the /TH/INTER section, which runs later, lists it) and written by
+    :func:`_make_interfaces`, whose own early return in the INTERFACES
+    section saw no contact and already accounted for any --inter-gapmin
+    (``report_gapmin=False`` here). A no-op that draws no id on every deck
+    the flag does not reach."""
+    if not state.implicit_stub_deferred_for:
+        return []
+    ids = state.implicit_stub_deferred_for
+    if state.type25_emitted_ids:
+        state.implicit_stub_skipped_for = sorted(state.type25_emitted_ids)
+        state.warn(_STUB_TYPE25_SKIPPED_SENTENCE.format(
+            ids=state.implicit_stub_skipped_for))
+        return []
+    stub = add_implicit_contact_stub(state)
+    state.warn(_STUB_TYPE25_ALL_DROPPED_SENTENCE.format(ids=ids, stub=stub))
+    return _make_interfaces(state, rigid_nodes, report_gapmin=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -2318,8 +2318,17 @@ that decided it and the deck that would decide it next.
    the SH_3N-controlled ones included) — better on the RMS, worse at the
    end; no GO either way; the shipped arm re-measured identical on the A2
    arm); the reach beyond `doorbeam` is not censused.
-   **Round 8:** B6 skips the stub (MIXED: END +582.00 → +689.08 %, RMS 393.31 →
-   313.05 %); doorbeam's own 5-13× is NOT list 13.
+   **Round 8:** STAYS OPEN. B6 first skipped the stub by default; the round's
+   validation inverted that (the stub stays; `--skip-implicit-stub-with-type25`
+   is the opt-in, keyed on the written TYPE25 set): the stub is not inert on
+   `doorbeam` (MIXED without it: END +582.00 → +689.08 %, RMS 393.31 →
+   313.05 %) and not removable on an engaging TYPE25 contact (the validator's
+   two-block coupon: NORMAL in 11 cycles with it, ERROR TERMINATION at cycle 9
+   without it — 23 ITERATION DIVERGE, then MESSAGE 79; nt 4 = nt 2). A TYPE7
+   route for implicit node-to-surface contacts whose gap and Fpenmax hold the
+   load is the real fix (two constant-gap TYPE7 controls did not: Gapmin 0.01
+   let the block through, Gapmin 0.05 released the nodes) — round-9 input;
+   doorbeam's own 5-13× is NOT list 13.
 8. **The tetrahedron orthotropy frame as a per-element `/INIBRI/ORTHO`**
    (round-6 item 25; B3 ships the named warning): right on the 6-tetrahedron
    cube (−0.06 % against the shipped −40.88 .. +23.48 %), measured by one
@@ -2564,14 +2573,16 @@ B1 `tire.k` IMFLAG 0 + NEIG 0 routed explicit (1 / 1); B2 the sampled
 `--imflag-curve-restart` and h.3 its default (`ie_shell` 1 / 1; the last
 commit, kept only if the campaign runner chain passes C3 (b)); B4 Nu on SPH-only `*MAT_NULL` (1 / 1 + Ryan_Lee W11
 3 models), the hourglass R guard (0 / 0) and the texts (3 / 3); B5 the
-`*MAT_ELASTIC_FLUID` CP 0.0 cutoff (4 / 4); B6 the stub skipped beside a TYPE25
-contact (1 / 1, MIXED: doorbeam's END +582.00 → +689.08 % beside its RMS 393.31
-→ 313.05 %); B7 (f') the thick-shell text (3 / 3) and (g) the plastic route (0
+`*MAT_ELASTIC_FLUID` CP 0.0 cutoff (4 / 4); B6 the opt-in
+`--skip-implicit-stub-with-type25` (its first default, the skip, inverted by
+the validation round: 0 default bytes, doorbeam's warning text only; the
+opt-in is MIXED on doorbeam, END +582.00 → +689.08 % beside its RMS 393.31 →
+313.05 %, and diverges on an engaging TYPE25 coupon); B7 (f') the thick-shell text (3 / 3) and (g) the plastic route (0
 / 0); B8 the screw rules (0 bytes; the split sentence); B9 the `/MPC` notes
 (0); B10 the opt-in `--shell-in-solid-coupling` (default: the warning text);
 B11 (`--weld-trajectory-impflux`) was specified and not built. Half B's default
-bytes move 8 deck keys on 8 emitted models (B1 1, B2 1, B4 1, B5 4, B6 1; h.3
-adds `ie_shell` if it is kept). The retracted spellings are guarded by
+bytes move 8 deck keys on 8 emitted models (B1 1, B2 1, B4 1, B5 4, and h.3's
+`ie_shell` 1 if it is kept; B6 0). The retracted spellings are guarded by
 `Round8RetractedStatementsA` / `B` (only CHANGELOG quotes them). The ledger
 EXPECTATION (before the re-run; the campaign validator re-sums it from
 db.json): normal 291 → 293 (`tire.k`, `metal-cutting`), error_engine 26 → 24,

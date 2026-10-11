@@ -130,7 +130,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          imflag0_eigen_explicit: bool = True,
                          implicit_smooth_curve_sampling: bool = True,
                          elastic_fluid_cp_cutoff: bool = True,
-                         implicit_stub_with_type25: bool = False,
+                         skip_implicit_stub_with_type25: bool = False,
                          shell_in_solid_coupling: bool = False,
                          imflag_curve_restart: bool = True,
                          tgmult_imptemp: bool = True,
@@ -321,7 +321,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["elastic_fluid_cp_cutoff"] = bool(elastic_fluid_cp_cutoff)
 
-    kwargs["implicit_stub_with_type25"] = bool(implicit_stub_with_type25)
+    kwargs["skip_implicit_stub_with_type25"] = bool(
+        skip_implicit_stub_with_type25)
 
     kwargs["shell_in_solid_coupling"] = bool(shell_in_solid_coupling)
 
@@ -481,7 +482,7 @@ class ConverterGUI:
         self.imflag0_eigen_explicit = tk.BooleanVar(value=True)
         self.implicit_smooth_curve_sampling = tk.BooleanVar(value=True)
         self.elastic_fluid_cp_cutoff = tk.BooleanVar(value=True)
-        self.implicit_stub_with_type25 = tk.BooleanVar(value=False)
+        self.skip_implicit_stub_with_type25 = tk.BooleanVar(value=False)
         self.shell_in_solid_coupling = tk.BooleanVar(value=False)
         self.imflag_curve_restart = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
@@ -1049,10 +1050,11 @@ class ConverterGUI:
                 row=59, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="Implicit TYPE25-only deck: keep the inert all-parts "
-                     "contact stub (as before round 8) - OFF. doorbeam END +582 "
-                     "-> +689 %, RMS 393 -> 313 % without it",
-            variable=self.implicit_stub_with_type25).grid(
+            io, text="Implicit TYPE25-only deck: skip the inert all-parts "
+                     "contact stub (opt-in) - OFF. Coupon NORMAL -> ERROR at "
+                     "cycle 9 without it; doorbeam MIXED (END +582 -> +689 %, "
+                     "RMS 393 -> 313 %)",
+            variable=self.skip_implicit_stub_with_type25).grid(
                 row=60, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
@@ -1342,7 +1344,8 @@ class ConverterGUI:
                 imflag0_eigen_explicit=self.imflag0_eigen_explicit.get(),
                 implicit_smooth_curve_sampling=self.implicit_smooth_curve_sampling.get(),
                 elastic_fluid_cp_cutoff=self.elastic_fluid_cp_cutoff.get(),
-                implicit_stub_with_type25=self.implicit_stub_with_type25.get(),
+                skip_implicit_stub_with_type25=(
+                    self.skip_implicit_stub_with_type25.get()),
                 shell_in_solid_coupling=self.shell_in_solid_coupling.get(),
                 imflag_curve_restart=self.imflag_curve_restart.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
@@ -1573,9 +1576,9 @@ class ConverterGUI:
         if not kwargs.get("elastic_fluid_cp_cutoff", True):
             bits.append("*MAT_ELASTIC_FLUID CP 0.0 kept at Pmin 0 "
                         "(--no-elastic-fluid-cp-cutoff)")
-        if kwargs.get("implicit_stub_with_type25"):
-            bits.append("implicit stub kept beside TYPE25 contacts "
-                        "(--implicit-stub-with-type25)")
+        if kwargs.get("skip_implicit_stub_with_type25"):
+            bits.append("implicit stub skipped beside written TYPE25 contacts "
+                        "(--skip-implicit-stub-with-type25)")
         if kwargs.get("shell_in_solid_coupling"):
             bits.append("*CONSTRAINED_SHELL_IN_SOLID coupled as /INTER/TYPE18 "
                         "(--shell-in-solid-coupling)")

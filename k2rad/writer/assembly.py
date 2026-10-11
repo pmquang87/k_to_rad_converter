@@ -89,6 +89,7 @@ from .contacts import (
     _make_tiebreak_interfaces,
     _make_spotweld_interfaces,
     _make_type25_interfaces,
+    _make_deferred_implicit_stub,
     _recipe_active,
     _warn_beam_contact_secondary_unused,
 )
@@ -3000,6 +3001,11 @@ def _starter_section_registry():
         ("general_interfaces", lambda c: _make_general_interfaces(
             c.state, c.contact_rigid_nodes)),
         ("type25_interfaces", lambda c: _make_type25_interfaces(
+            c.state, c.contact_rigid_nodes)),
+        # Round 8, B6: --skip-implicit-stub-with-type25 keyed on the WRITTEN
+        # TYPE25 set - right after the TYPE25 writer, which records it. A
+        # no-op that draws no id unless the flag deferred the stub.
+        ("deferred_implicit_stub", lambda c: _make_deferred_implicit_stub(
             c.state, c.contact_rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
         ("tiebreak_interfaces",

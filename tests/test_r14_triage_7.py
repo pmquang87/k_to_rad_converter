@@ -1622,17 +1622,16 @@ class VdcRemedyNotAboutTheStub(unittest.TestCase):
         self.assertEqual(len(hits), 1, res.warnings)
         self.assertTrue(hits[0].startswith("CONTACT 77: vdc=0 -> VisS=0"))
 
-    def test_3_with_the_opt_in_a_TYPE25_only_deck_gets_the_stub_and_no_stub_sentence(self):
-        """doorbeam's shape: its one contact takes the TYPE25 route. The
-        stub guard reads contacts_type25 since round 8 (B6: the stub is
-        skipped by default); the opt-in --implicit-stub-with-type25 keeps
-        the round-7 shape - the stub injected beside it, and no vdc sentence
-        names the stub."""
+    def test_3_a_TYPE25_only_deck_gets_the_stub_and_no_stub_sentence(self):
+        """doorbeam's shape: its one contact takes the TYPE25 route. Round 8
+        reads contacts_type25 in the stub guard; after its validation the
+        DEFAULT keeps the round-7 shape again (the opt-in
+        --skip-implicit-stub-with-type25 skips the stub) - the stub injected
+        beside it, and no vdc sentence names the stub."""
         extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
                  "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
                  + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra),
-                                    implicit_stub_with_type25=True)
+        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
         stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
                     for i, ln in enumerate(starter.splitlines())
                     if ln == "auto_implicit_stabilization_self_contact"]
