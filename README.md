@@ -705,7 +705,11 @@ Inertia′ = max(Inertia, (max K4..6 + max K2,3·L_max²)·DT²) start the weld 
 `spotweld.k` under the opt-in rules 1 + 2 (nt 4, base-paired): Mass ×2.5
 (LS-DYNA's own factor), Inertia ×13.41, first step 9.000E-07 on the spring,
 last cycle 4791 → 1332 = LS-DYNA's problem cycle 1332, model mass +7.0 %,
-IE END −33.00 → −31.18 %. No default byte mover: `plates.mat100`'s DT 1e-9
+IE END −33.00 → −31.18 % — **MIXED**: the histories are worse, RMS IE
+6.65 → 6.82 % and RMS KE 23.09 → 23.66 % of the LS peak over the 1331 LS
+times to t 0.00119792 (IE fifths +0.20 / −0.04 / +0.40 / +0.64 / −33.00 →
+−0.45 / +0.20 / +0.16 / +0.58 / −31.18 %; the campaign's history rule, the
+last row of a printed time). No default byte mover: `plates.mat100`'s DT 1e-9
 is below its weld's own step, and its warning now says the DT is inert.
 Round 7's spotweld calibration factor was the inertia factor applied to the mass as well
 (+58 % model mass) and is retracted. (Deliberately not `/MAT/LAW59`,

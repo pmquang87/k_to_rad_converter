@@ -808,6 +808,20 @@ def _single_surface_group(starter: str):
     return None
 
 
+def _secondary_group(starter: str, title: str) -> Set[int]:
+    """Node ids of the ONE /GRNOD/NODE titled *title* (asserted unique)."""
+    lines = starter.splitlines()
+    hits = [i for i, ln in enumerate(lines)
+            if ln.startswith("/GRNOD/NODE/") and lines[i + 1] == title]
+    assert len(hits) == 1, (title, len(hits))
+    ids: Set[int] = set()
+    j = hits[0] + 2
+    while j < len(lines) and not lines[j].startswith(("/", "#")):
+        ids.update(int(t) for t in lines[j].split())
+        j += 1
+    return ids
+
+
 class BoltClampAndFixedCurveColumns(unittest.TestCase):
     """A2 (round 8): mainboltaexpl lost its bolt clamp and its pull. (l)-2: the
     TYPE7 secondary side dropped every rigid member, incl. the 68 CNRB 110 /
@@ -907,6 +921,58 @@ class BoltClampAndFixedCurveColumns(unittest.TestCase):
         self.assertEqual(len(_single_surface_group(s0)), 20)
         self.assertTrue(_has(r0.warnings, "12 of the 32 node(s)"))
         self.assertFalse(_has(r0.warnings, "were KEPT on the secondary"))
+
+    def test_i2_every_penalty_builder_keeps_the_bolt_members(self):
+        """(l)-2 reaches all THREE penalty builders through ONE set
+        (ctx.contact_rigid_nodes); test_i probes only the single-surface
+        one (_make_interfaces), so a builder handed the FULL rigid set
+        survived the whole suite (the post-review verification's A2-M2: the
+        TYPE25 builder). One arm per builder, each reaching ONLY its own
+        (measured by wrapping one builder at a time): the TYPE25 route
+        (*CONTACT_NODES_TO_SURFACE part 10 on part 20 -> /INTER/TYPE25) and
+        the SOFT -7 sentinel route of *CONTACT_AUTOMATIC_GENERAL
+        (_make_general_interfaces -> /INTER/TYPE7; a plain AUTOMATIC_GENERAL
+        takes the single-surface path). Each keeps the bolt-end CNRB
+        members, drops CNRB 130's, and prints the KEPT sentence; the
+        opt-out drops them all."""
+        old = ("*SET_PART_LIST\n" + _row(1) + "\n" + _row(10, 20) + "\n"
+               "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(1, 0, 2, 0)
+               + "\n" + _row(0.1, 0.1) + "\n" + _row(0.0) + "\n")
+        arms = (
+            ("TYPE25 (*CONTACT_NODES_TO_SURFACE)",
+             "*CONTACT_NODES_TO_SURFACE\n" + _row(10, 20, 3, 3) + "\n"
+             + _row(0.1, 0.1) + "\n" + _row(0.0) + "\n",
+             "/INTER/TYPE25/", "contact_slave_10",
+             {1006, 1007, 1010, 1011}, {1001, 1002, 1005, 1013}, 12, 8,
+             "4 member node(s) of the rigid body(ies) 110 holding"),
+            ("SOFT -7 (*CONTACT_AUTOMATIC_GENERAL)",
+             "*SET_PART_LIST\n" + _row(1) + "\n" + _row(10, 20) + "\n"
+             "*CONTACT_AUTOMATIC_GENERAL\n" + _row(1, 0, 2, 0) + "\n"
+             + _row(0.1, 0.1) + "\n" + _row(1.0, 1.0, 0.0, 0.0) + "\n"
+             + _row(-7) + "\n",
+             "/INTER/TYPE7/", "contact_slave_1",
+             {1006, 1007, 1010, 1011, 2006, 2007, 2010, 2011},
+             {1001, 1002, 1005, 1013}, 28, 20,
+             "8 member node(s) of the rigid body(ies) 110, 120 holding"))
+        base = _bolt_deck()
+        self.assertEqual(base.count(old), 1)
+        for name, card, inter, title, kept, gone, n_on, n_off, needle in arms:
+            with self.subTest(arm=name):
+                deck = base.replace(old, card)
+                res, starter, _e = _convert(deck)
+                self.assertIn(inter, starter)
+                ids = _secondary_group(starter, title)
+                self.assertTrue(kept <= ids, sorted(ids))
+                self.assertFalse(gone & ids)
+                self.assertEqual(len(ids), n_on)
+                self.assertTrue(_has(res.warnings, needle, "were KEPT on "
+                                     "the secondary side"), res.warnings)
+                r0, s0, _e0 = _convert(deck, bolt_rigid_contact=False)
+                ids0 = _secondary_group(s0, title)
+                self.assertFalse((kept | gone) & ids0)
+                self.assertEqual(len(ids0), n_off)
+                self.assertFalse(_has(r0.warnings, "were KEPT on the "
+                                      "secondary"))
 
     def test_l_the_beam_hint_stays_silent_on_a_bolt_end(self):
         """The fix round (code-sweep F7 = the campaign validator's
@@ -2110,6 +2176,21 @@ class Imflag0EigenExplicit(unittest.TestCase):
         self.assertIn("/IMPL/PRINT/STIF", engine)
         self.assertNotIn(_B1_S, res.warnings)
 
+    def test_imflag0_neig1_stays_modal(self):
+        """The branch point of NEIG > 0: one eigenvalue asked is a modal deck
+        (the post-review verification: with NEIG 5 and -3 probed only, the
+        predicate 'neig <= 1' - B1-M1 - survived the whole suite)."""
+        for order in ("eig_first", "general_first"):
+            with self.subTest(order=order):
+                res, starter, engine = _convert(_eig_deck(neig="1",
+                                                          order=order))
+                self.assertIn("/IMPL/PRINT/STIF", engine)
+                self.assertEqual(_ishell(starter), 24)
+                self.assertNotIn(_B1_S, res.warnings)
+                st = _dispatch(_eig_deck(neig="1", order=order))
+                self.assertTrue(st.is_modal and st.is_implicit)
+                self.assertFalse(st.imflag0_eigen_explicit_route)
+
     def test_blank_imflag_and_blank_neig_read_zero(self):
         for imflag, neig in ((" ", "0"), ("0", " "), (" ", " ")):
             with self.subTest(imflag=imflag, neig=neig):
@@ -2377,13 +2458,45 @@ class ImplicitSmoothCurveSampling(unittest.TestCase):
         self.assertNotIn(1, state.funct_smooth_ids)
 
     def test_the_sentence_carries_the_measured_tallies(self):
+        """The imposed tool travel at the last LS state is the integral of
+        the EMITTED points, 0.01441 mm (the post-review verification: the
+        sentence quoted the exact sine truncated, 0.01431; the 41-point
+        sampling sits +0.65 % above the sine there; LS-DYNA's d3plot tool
+        travel 0.0146809, the mean of its 3978 float32 nodes)."""
         for needle in ("on 13 of 13 runs", "on 7 of 7 runs",
                        "1.48e5 .. 2.75e5 mJ over the seven runs",
-                       "0.01431 mm against LS 0.014681",
+                       "0.01441 mm (the integral of the emitted points; the "
+                       "exact sine 0.01432) against LS 0.014681",
                        "2.782 at t 0.0466 against DIST 3",
                        "t^2.68 .. t^2.89"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, _handlers._SMOOTH_SAMPLING_CORE)
+        self.assertNotIn("0.01431 mm", _handlers._SMOOTH_SAMPLING_CORE)
+
+    def test_the_imposed_travel_is_the_integral_of_the_emitted_points(self):
+        """The sentence's 0.01441 is arithmetic on what k2rad writes: the
+        trapezoid integral, to t 1.07344e-3, of the sampled sine ramp of
+        metal-cutting's curve (VMAX 360, TRISE 0.005 = &tend / 6, 41 points
+        per ramp) - re-derived here from the sampler's own points."""
+        from k2rad.writer import assembly
+        deck = _smooth_deck(tstart="0.0", tend="0.03", trise="0.005",
+                            dist="9.0", endtim="0.03")
+        state = _dispatch(deck)
+        assembly._sample_implicit_smooth_curves(state)
+        pts = state.curves[1].pts
+        self.assertAlmostEqual(max(y for _x, y in pts), 360.0, places=6)
+        t_ls = 1.07344e-3
+        travel = 0.0
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if t_ls <= x0:
+                break
+            xe = min(t_ls, x1)
+            ye = y0 + (y1 - y0) * (xe - x0) / (x1 - x0)
+            travel += (xe - x0) * (y0 + ye) / 2.0
+        self.assertEqual(f"{travel:.5f}", "0.01441")
+        sine = 0.5 * 360.0 * (t_ls - 0.005 / math.pi
+                              * math.sin(math.pi * t_ls / 0.005))
+        self.assertEqual(f"{sine:.5f}", "0.01432")
 
     def test_the_A5_placeholder_sentence_is_corrected(self):
         """B2.4 (b): the EFG placeholder sentence quotes the status split,
@@ -3204,6 +3317,28 @@ class TshellTextAndPlasticRoute(unittest.TestCase):
                 self.assertFalse(_has(res.warnings,
                                       "applied to *MAT_ELASTIC only"))
 
+    def test_a_live_part_with_no_known_law_keeps_type20(self):
+        """The round-7 clause 'every live part's law is KNOWN' (len(laws) ==
+        len(mids): `laws` drops a part whose material writes no /MAT) is
+        part of the widened predicate: a second thick-shell part on an
+        UNDEFINED material beside a LAW1 part keeps /PROP/TYPE20 (the
+        post-review verification's near-equivalent survivor B7-M1, 'len(laws)
+        >= 0', routed it). This pins the predicate, not a run: the starter
+        rejects this deck (measured on the shipped TYPE20 arm, starter only,
+        nt 4: ERROR 179 on part 2's missing material, + 3046 and 61)."""
+        two = (_TS_TWO.replace("       2       1       2       9",
+                               "       2       2       2       9"))
+        parts = ("*PART\ntshell part\n" + _row(1, 1, 1) + "\n"
+                 "*PART\nundefined-mid part\n" + _row(2, 1, 77) + "\n")
+        res, starter, _e = _convert(_ts_deck(elem=two, part=parts,
+                                             mat=_TS_ELASTIC))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertNotIn("/PROP/SOLID/1", starter)
+        self.assertFalse(_has(res.warnings, _t7._TS_ROUTED), res.warnings)
+        self.assertFalse(_has(res.warnings, _B7_ROUTED))
+        self.assertTrue(_has(res.warnings, "/PART/2 -> mat 77"),
+                        res.warnings)
+
     def test_explicit_plastic_keeps_type20(self):
         res, starter, _e = _convert(_ts_deck(control=_TS_EXPLICIT, mat=_PLP))
         self.assertIn("/PROP/TYPE20/1", starter)
@@ -3308,6 +3443,30 @@ def _flat_a(deck: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def _axis_screw(axis: int) -> str:
+    """The UNDRIVEN mini screw turned onto global axis *axis* (1 = y, 2 = z):
+    every *NODE row's x swapped with its y (axis 1) or its z (axis 2), and
+    both *MAT_RIGID cards re-coded for that axis - A holds the two normal
+    translations and rotations (CON1 = CON2 = 6 for y, 4 for z), B the two
+    normal translations and all three rotations (CON2 7). A's hex becomes
+    the same 10 mm cube about its own CoG, so I_axis = 50 m again."""
+    out, in_node = [], False
+    for ln in _screw_deck(drive=False).split("\n"):
+        if ln.startswith("*"):
+            in_node = ln.strip() == "*NODE"
+        elif in_node and ln.strip():
+            x, y, z = ln[8:24], ln[24:40], ln[40:56]
+            ln = (ln[:8] + (y + x + z if axis == 1 else z + y + x)
+                  + ln[56:])
+        out.append(ln)
+    deck = "\n".join(out)
+    con = {1: 6, 2: 4}[axis]
+    a_old, b_old = _row(1.0, 5, 5), _row(1.0, 5, 7)
+    assert deck.count(a_old) == 1 and deck.count(b_old) == 1
+    return (deck.replace(a_old, _row(1.0, con, con))
+            .replace(b_old, _row(1.0, con, 7)))
+
+
 class JointScrewRound8(unittest.TestCase):
     """B8 (round 8; under the existing --no-joint-screw-gjoint, no new flag):
     (q-i) a screw whose deck states NO drive converts without
@@ -3364,6 +3523,44 @@ class JointScrewRound8(unittest.TestCase):
         self.assertEqual(len(hits), 1, res.warnings)
         self.assertNotIn("below it", hits[0])
 
+    def test_the_pad_on_a_y_and_a_z_axis_screw(self):
+        """The pad is I_axis on the two J cells NORMAL to the screw axis and
+        0 on the axial cell, whatever the axis (the post-review
+        verification: every screw test deck had an x axis, where the pad's
+        first cell is 0 by construction, so a mutant halving that cell -
+        B8-M2 - survived the whole suite). A's hex is the 10 mm cube again:
+        I_axis = 50 m about its CoG (8 corner masses m / 8, two 5 mm arms),
+        and the padded tensor's smallest principal value is I_axis."""
+        from k2rad.lumping import _sym3_eigen
+        m = 7.85e-9 * 1000.0
+        d_j = 50.0 * m
+        for axis, want in ((1, (d_j, 0.0, d_j)), (2, (d_j, d_j, 0.0))):
+            with self.subTest(axis="yz"[axis - 1]):
+                res, starter, _e = _convert(_axis_screw(axis))
+                self.assertIn("/GJOINT/RACK/", starter)
+                self.assertNotIn("/IMPVEL/LAGMUL/", starter)
+                j = _rbody_j(starter, _rbody_main(starter, 2))
+                for k in range(3):
+                    if want[k] == 0.0:
+                        self.assertEqual(j[k], 0.0)
+                    else:
+                        self.assertAlmostEqual(j[k] / want[k], 1.0,
+                                               delta=1e-9)
+                t = [[d_j if a == b else 0.0 for b in range(3)]
+                     for a in range(3)]
+                for k in range(3):
+                    t[k][k] += j[k]
+                smallest = min(_sym3_eigen(t)[0])
+                self.assertAlmostEqual(smallest / d_j, 1.0, delta=1e-9)
+                hits = [w for w in res.warnings if _B8_UNDRIVEN in w]
+                self.assertEqual(len(hits), 1, res.warnings)
+                self.assertIn(f"added inertia {d_j:g}", hits[0])
+                self.assertIn(f"screw-axis inertia {d_j:g} (now {d_j:g})",
+                              hits[0])
+                axis_txt = "(0, 1, 0)" if axis == 1 else "(0, 0, 1)"
+                self.assertTrue(_has(res.warnings, "along the screw axis "
+                                     + axis_txt), res.warnings)
+
     def test_a_refused_vad3_drive_is_not_no_drive(self):
         """Mutation target: testing the converted registry (on_a) instead of
         state.pm_rigid_stated_pids converts this deck as undriven."""
@@ -3388,14 +3585,38 @@ class JointScrewRound8(unittest.TestCase):
     def test_refusal_11_by_class(self):
         """Mutation targets: a merge that writes the card (the 'no standard
         /BCS' assertion fails); a drive-DOF code that merges (the RC 1
-        subtest fails)."""
-        held = (("a *NODE TC 3 on A (A's z: held)", {"a_node_tc": 3}, 2,
-                 "the *NODE TC 3 / RC 0 of its node 3 on body A (part 2)"),
-                ("a *BOUNDARY_SPC DOFY on B (B's y: held)", {"b_spc": True},
-                 1, "on body B (part 1)"))
-        for name, kw, part, needle in held:
+        subtest fails). The held class carries a ROTATION member on each
+        body (the post-review verification: with translations only, a held
+        set without B's spin - B8-M1 - or without A's transverse rotations -
+        B8-M3 - survived the whole suite): B's spin about the screw axis
+        (x, DOFRX), B's transverse DOFRY / DOFRZ, A's transverse RC 2 / 3."""
+        spc_y = _row(11, 0, 0, 1, 0, 0, 0, 0)
+
+        def b_spc(dofs):
+            deck = _screw_deck(b_spc=True)
+            self.assertEqual(deck.count(spc_y), 1)
+            return deck.replace(spc_y, _row(11, 0, *dofs))
+
+        on_b = "the *BOUNDARY_SPC (/BCS/1) of its node 11 on body B (part 1)"
+        held = (("a *NODE TC 3 on A (A's z: held)", _screw_deck(a_node_tc=3),
+                 2, "the *NODE TC 3 / RC 0 of its node 3 on body A (part 2)"),
+                ("a *BOUNDARY_SPC DOFY on B (B's y: held)",
+                 _screw_deck(b_spc=True), 1, on_b),
+                ("a *BOUNDARY_SPC DOFRX on B (B's spin: held)",
+                 b_spc((0, 0, 0, 1, 0, 0)), 1, on_b),
+                ("a *BOUNDARY_SPC DOFRY on B (transverse: held)",
+                 b_spc((0, 0, 0, 0, 1, 0)), 1, on_b),
+                ("a *BOUNDARY_SPC DOFRZ on B (transverse: held)",
+                 b_spc((0, 0, 0, 0, 0, 1)), 1, on_b),
+                ("a *NODE RC 2 on A (A's y rotation: held)",
+                 _screw_deck(a_node_rc=2), 2,
+                 "the *NODE TC 0 / RC 2 of its node 3 on body A (part 2)"),
+                ("a *NODE RC 3 on A (A's z rotation: held)",
+                 _screw_deck(a_node_rc=3), 2,
+                 "the *NODE TC 0 / RC 3 of its node 3 on body A (part 2)"))
+        for name, deck, part, needle in held:
             with self.subTest(case=name):
-                res, starter, _e = _convert(_screw_deck(**kw))
+                res, starter, _e = _convert(deck)
                 self.assertIn("/GJOINT/RACK/", starter)
                 hits = [w for w in res.warnings if _B8_MERGED in w]
                 self.assertEqual(len(hits), 1, res.warnings)
@@ -4066,8 +4287,11 @@ class ImflagCurveRestart(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write(_ie_strip_deck())
             stem = os.path.join(tmp.name, "out")
-            for name in ("out_0002.rad", "out_0003.rad", "out_0010.rad",
-                         "out_00x3.rad", "outer_0004.rad", "out_0004.k"):
+            # out_0001.rad: an earlier file of the conversion's OWN name (it is
+            # overwritten, never named - on the one-file arm too)
+            for name in ("out_0001.rad", "out_0002.rad", "out_0003.rad",
+                         "out_0010.rad", "out_00x3.rad", "outer_0004.rad",
+                         "out_0004.k"):
                 with open(os.path.join(tmp.name, name), "w") as fh:
                     fh.write("#stale\n")
             for flag, n, named in ((False, 1, "out_0002.rad, out_0003.rad, "
@@ -4080,7 +4304,15 @@ class ImflagCurveRestart(unittest.TestCase):
                     hits = [w for w in res.warnings
                             if w.startswith("Stale engine file(s)")]
                     self.assertEqual(len(hits), 1, res.warnings)
-                    self.assertIn(named + " from an earlier", hits[0])
+                    # the WHOLE list, anchored at both ends: a suffix match
+                    # let 'k >= N' (naming this conversion's own last file,
+                    # out_0002 on the two-file arm) survive the whole suite
+                    # (the post-review verification's B3-M1)
+                    head = "Stale engine file(s) "
+                    self.assertTrue(hits[0].startswith(head), hits[0])
+                    listed = hits[0][len(head):hits[0].index(
+                        " from an earlier")]
+                    self.assertEqual(listed, named)
                     self.assertIn(f"this {n}-engine-file output", hits[0])
                     for other in ("out_00x3", "outer_0004", "out_0004.k"):
                         self.assertNotIn(other, hits[0])
@@ -4491,9 +4723,11 @@ class Round8ChangelogReSums(unittest.TestCase):
     def test_the_item_bullets_state_the_same_counts(self):
         text = self._text()
         for needle in (
-                # B1 tire.k, B2 metal-cutting; B6 0 by default, its opt-in
-                # doorbeam
-                "Reach 1 deck key on 1 emitted model; the",
+                # B1 tire.k (the 62 IMFLAG-1 eigen keys scoped to B1 by the
+                # post-review verification: 6 of them move by A3), B2
+                # metal-cutting; B6 0 by default, its opt-in doorbeam
+                "Reach 1 deck key on 1 emitted model; B1 moves none of the "
+                "62 IMFLAG-1 eigen keys (56 are byte-identical",
                 "Reach 1 deck key on 1 emitted model (0 explicit carriers)",
                 "Default bytes: 0 movers (doorbeam's `_0000.rad` = the "
                 "4f5b6e8 deck",
@@ -4599,6 +4833,123 @@ class NodalMassMemoIsPerState(unittest.TestCase):
                                    msg=f"iteration {i}")
 
 
+def _mw_cube(velocity: str) -> str:
+    """The post-review verification's two-group coupon: a 10 mm *MAT_RIGID
+    cube (nodes 1-8, RO 7.85e-9: M_cube 7.85e-6) with 7.85e-6 on corner node
+    7 (10, 10, 10), beside an elastic decoy plate (nodes 101-104, fully
+    held). *velocity* is the deck's velocity card(s)."""
+    nodes = [(1, 0, 0, 0), (2, 10, 0, 0), (3, 10, 10, 0), (4, 0, 10, 0),
+             (5, 0, 0, 10), (6, 10, 0, 10), (7, 10, 10, 10), (8, 0, 10, 10),
+             (101, 100, 0, 0), (102, 110, 0, 0), (103, 110, 10, 0),
+             (104, 100, 10, 0)]
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n" + _row(1.0e-4) + "\n*NODE\n"
+            + "".join(f"{n:>8}{x:>16.6f}{y:>16.6f}{z:>16.6f}\n"
+                      for n, x, y, z in nodes)
+            + "*PART\ncube\n" + _row(1, 1, 1) + "\n*SECTION_SOLID\n"
+            + _row(1, 1) + "\n*MAT_RIGID\n"
+            + _row(1, 7.85e-9, 210000.0, 0.3, 0.0, 0.0, 0.0) + "\n"
+            + _row(0.0, 0, 0) + "\n*ELEMENT_SOLID\n"
+            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8))
+            + "\n*PART\ndecoy\n" + _row(2, 2, 2) + "\n*SECTION_SHELL\n"
+            + _row(2, 2) + "\n" + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(2, 1.0e-9, 1000.0, 0.3) + "\n"
+            "*ELEMENT_SHELL\n"
+            + "".join(f"{v:>8}" for v in (2, 2, 101, 102, 103, 104)) + "\n"
+            "*BOUNDARY_SPC_NODE\n"
+            + "".join(_row(n, 0, 1, 1, 1, 1, 1, 1) + "\n"
+                      for n in (101, 102, 103, 104))
+            + "*ELEMENT_MASS\n" + f"{9:>8}{7:>8}{7.85e-6:>16}{0:>8}\n"
+            + velocity + "*END\n")
+
+
+def _iv_node_rows(rows) -> str:
+    return "*INITIAL_VELOCITY_NODE\n" + "".join(
+        _row(n, vx, 0, 0, 0, 0, 0) + "\n" for n, vx in rows)
+
+
+#: the two-group coupon's closed form (Vol I R17 p.28-129 Remark 3: the
+#: body's momentum from ALL its nodal velocities): M 1.57e-5, the CoG (7.5,
+#: 7.5, 7.5); v_cm = (4 x 9.8125e-7 x 100 + (3 x 9.8125e-7 + 8.83125e-6) x
+#: 300) / M = 250; L about the CoG = (0, 5.8875e-3, -1.9625e-3) and the
+#: starter's NEW INERTIA (xx = yy = zz 5.8875e-4, products -9.8125e-5) give
+#: omega = (10 / 7, 10, -10 / 7); measured (nt 4): cycle-0 K-ENERGY T 0.4906
+#: and R 0.03084 = 0.5 M v^2 and 0.5 omega.L, where one pair per group gave
+#: 0.3974 / 0.06939 (the last group's v 225)
+_MW_TWO_GROUPS = ((1, 100), (2, 100), (3, 100), (4, 100),
+                  (5, 300), (6, 300), (7, 300), (8, 300))
+_MW_SUM = ((250.0, 0.0, 0.0), (10.0 / 7.0, 10.0, -10.0 / 7.0))
+
+
+class MassWeightedInivelOnePairPerBody(unittest.TestCase):
+    """--mass-weighted-inivel writes ONE /INIVEL/TRA + /INIVEL/ROT pair per
+    /RBODY main node, the SUM of every momentum share (the round-8
+    post-review verification: _make_inivel groups *INITIAL_VELOCITY_NODE
+    rows by velocity value and wrote a pair per group on the same main node;
+    the starter overwrites card by card, hm_read_inivel.F:524-526 /
+    :538-540, so only the LAST group's share survived - pre-existing since
+    02e5335, round 5, opt-in). A body with one share keeps its bytes."""
+
+    def _pairs(self, starter: str):
+        lines = starter.splitlines()
+        out = []
+        for i, ln in enumerate(lines):
+            for kind in ("TRA", "ROT"):
+                if (ln.startswith(f"/INIVEL/{kind}/")
+                        and lines[i + 1].startswith("InitVelMW")):
+                    out.append((kind, tuple(float(v) for v
+                                            in lines[i + 3].split()[:3])))
+        return out
+
+    def _assert_sum(self, res, starter, n_shares: int):
+        pairs = self._pairs(starter)
+        self.assertEqual([k for k, _v in pairs], ["TRA", "ROT"], pairs)
+        for (kind, got), want in zip(pairs, _MW_SUM):
+            for g, w in zip(got, want):
+                with self.subTest(kind=kind, want=w):
+                    self.assertAlmostEqual(g, w, delta=1e-9 * max(1.0,
+                                                                  abs(w)))
+        hits = [w for w in res.warnings if "SUMMED into ONE pair" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in (f"partly covered by {n_shares} velocity groups",
+                       "v_cm = (250, 0, 0)", "omega = (1.42857, 10, "
+                       "-1.42857)", "hm_read_inivel.F:524-526 / :538-540",
+                       "K-ENERGY T 0.4906", "0.3974 (v 225"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_two_velocity_groups_of_one_card(self):
+        res, starter, _e = _convert(_mw_cube(_iv_node_rows(_MW_TWO_GROUPS)),
+                                    mass_weighted_inivel=True)
+        self._assert_sum(res, starter, 2)
+
+    def test_two_cards_in_two_writer_sections(self):
+        """The shares of one body can come from different writer sections:
+        an *INITIAL_VELOCITY_NODE group and an *INITIAL_VELOCITY set card -
+        still ONE pair, the sum (the post-registry pass)."""
+        sets = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(5, 6, 7, 8) + "\n"
+                "*INITIAL_VELOCITY\n" + _row(5) + "\n"
+                + _row(300.0, 0.0, 0.0) + "\n")
+        vel = _iv_node_rows(_MW_TWO_GROUPS[:4]) + sets
+        res, starter, _e = _convert(_mw_cube(vel), mass_weighted_inivel=True)
+        self._assert_sum(res, starter, 2)
+
+    def test_one_share_keeps_one_pair_and_no_sentence(self):
+        """One group (the z = 10 nodes only): its own share, unchanged -
+        v 225 (3.5325e-3 / 1.57e-5), no merge sentence."""
+        res, starter, _e = _convert(
+            _mw_cube(_iv_node_rows(_MW_TWO_GROUPS[4:])),
+            mass_weighted_inivel=True)
+        pairs = self._pairs(starter)
+        self.assertEqual([k for k, _v in pairs], ["TRA", "ROT"], pairs)
+        self.assertAlmostEqual(pairs[0][1][0], 225.0, delta=1e-9)
+        self.assertFalse(_has(res.warnings, "SUMMED into ONE pair"))
+
+    def test_without_the_flag_nothing_changes(self):
+        res, starter, _e = _convert(_mw_cube(_iv_node_rows(_MW_TWO_GROUPS)))
+        self.assertEqual(self._pairs(starter), [])
+        self.assertFalse(_has(res.warnings, "SUMMED into ONE pair"))
+
+
 class Round8RetractedStatementsB(unittest.TestCase):
     """B12.6, the round-7 four-test shape: no retracted spelling in any
     shipped text; the guard fires on a spelling split across adjacent
@@ -4633,6 +4984,176 @@ class Round8RetractedStatementsB(unittest.TestCase):
                        "not characterised"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The round-8 post-review verification: shipped texts it measured wrong
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: the W7 opt-out clauses, one per producer of the kept skewed card
+_W7_RIGID = ("writes no CMO -1 card for a *MAT_RIGID CMO -1 body, so the "
+             "other code stays and nothing clashes")
+_W7_CNRB = ("keeps a skewed *CONSTRAINED_NODAL_RIGID_BODY_SPC card's old "
+            "pair and its ERROR 148")
+
+#: statements the post-review verification measured false or stale; CHANGELOG
+#: may quote them (it is the history), no other shipped text may
+_RETRACTED_ROUND_8_POST = (
+    # the W7 sentence's opt-out clause, false for a *MAT_RIGID body (its
+    # opt-out is the 4f5b6e8 deck: 0 starter errors)
+    "(round 8; --no-rigid-local-constraints keeps the old pair and its "
+    "ERROR 148)",
+    # the round-6 ECTOL sentence on ie_shell, stale once h.3 converts the
+    # IMFLAG -9 curve by default
+    "switching curve is not converted). --no-zero-tolerance-ectol",
+    # B2: the exact sine truncated, quoted as the imposed travel
+    "0.01431 mm",
+    # --mat-null-pc-mu's help and GUI row before B4's SPH-only Nu
+    "Nu = MU/RO on ELFORM-6 fluids only",
+    "is a *SECTION_SOLID ELFORM 6 on a deck without *INITIAL_VOID",
+    # A6: an END sold without its (worse) history
+    "IE END -31.18 % (unscaled -33.00 %). --no-spotweld",
+    "cycle-0 step 9.000e-7, IE END -31.18 %. Default byte movers",
+    # doorbeam's B6 skip as round 8's effect (the default keeps the stub)
+    "B6: the stub is skipped beside its TYPE25 contact",
+    # row-state words db.json contradicts (the roof crush, the door sag and
+    # three more giants carry STALE runs of 2026-09-05 / -06)
+    "the Yaris giants are never launched",
+    "errors; never launched). Next: an implicit CMO",
+    "on its engine file); never launched",
+    "giants, still not launched; A1 re-converts the roof crush",
+)
+
+#: ... and their replacements, which ARE shipped: (file, text)
+_REPLACEMENTS_ROUND_8_POST = (
+    ("k2rad/writer/loads.py", _W7_RIGID),
+    ("k2rad/writer/loads.py", _W7_CNRB),
+    ("k2rad/writer/loads.py", "MIXED: the histories are WORSE, RMS IE 6.65 "
+                              "-> 6.82 % and RMS KE 23.09 -> 23.66 %"),
+    ("k2rad/__init__.py", "MIXED: RMS IE 6.65 -> 6.82 % and RMS KE 23.09 "
+                          "-> 23.66 %"),
+    ("README.md", "**MIXED**: the histories are worse, RMS IE 6.65 → 6.82 %"),
+    ("k2rad/writer/assembly.py", "converts as a two-engine-file chain (18 "
+                                 "implicit + 11 127 explicit cycles, END IE "
+                                 "-4.54 %, RMS IE 12.07 %"),
+    ("k2rad/handlers.py", "0.01441 mm (the integral of the emitted points; "
+                          "the exact sine 0.01432) against LS 0.014681"),
+    ("k2rad/cli.py", "or (round 8) every part is SPH"),
+    ("k2rad_gui.py", "Nu = MU/RO on ELFORM-6 fluids and SPH-only materials, "
+                     "with the h / R hourglass guard (round 8)"),
+    ("ROADMAP.md", "B6 (inverted by the validation round): the default keeps "
+                   "the stub"),
+    ("ROADMAP.md", "A1 + A8 re-convert the roof crush"),
+    ("ROADMAP.md", "7 pending (never launched) and 5 stale"),
+)
+
+
+class Round8PostReviewTexts(unittest.TestCase):
+    """The round-8 post-review verification's text findings: each runtime
+    sentence it measured wrong is pinned by behaviour where it has one, and
+    the old spellings are guarded the round-7 way (no shipped text but
+    CHANGELOG carries them; the guard fires across adjacent literals; the
+    replacements ARE shipped)."""
+
+    def test_the_W7_opt_out_clause_is_keyed_on_the_producer(self):
+        """Measured on starter probes (nt 4): with --no-rigid-local-
+        constraints a *MAT_RIGID CMO -1 body writes the 4f5b6e8 deck (no CMO
+        -1 card, the member code stays) and the starter reads 0 errors; a
+        skewed CNRB _SPC card keeps the pair and stops on ERROR 148 'A SKEW
+        IS ALREADY DEFINED WITH THE NODE'. The clause names each producer's
+        own outcome - unit level (both producers on two main nodes) and on
+        a deck of each producer."""
+        from k2rad.writer.loads import _skew_drop_sentence
+        drops = {19: ("001", "000", 0), 25: ("001", "000", 0)}
+        rigid = [(3, "BC_rigid_1", "100", "000")]
+        cnrb = [(5, "BC_cnrb_50", "100", "000")]
+        s_r = _skew_drop_sentence({19: drops[19]}, {19: rigid}, "*NODE TC/RC")
+        s_c = _skew_drop_sentence({25: drops[25]}, {25: cnrb}, "*NODE TC/RC")
+        s_b = _skew_drop_sentence(drops, {19: rigid, 25: cnrb}, "*NODE TC/RC")
+        self.assertIn(_W7_RIGID, s_r)
+        self.assertNotIn(_W7_CNRB, s_r)
+        self.assertIn(_W7_CNRB, s_c)
+        self.assertNotIn(_W7_RIGID, s_c)
+        self.assertIn(_W7_RIGID + ", and " + _W7_CNRB, s_b)
+        # end to end: the *MAT_RIGID producer (RigidLocalConstraints.test_j's
+        # deck) and the CNRB _SPC producer (round 7's test_4 deck)
+        res, _s, _e = _convert(_cmo(3, 100000, _VEC3, tc=3))
+        w = _node_warning(res)
+        self.assertIn(_W7_RIGID, w)
+        self.assertNotIn(_W7_CNRB, w)
+        extra = ("*DEFINE_COORDINATE_SYSTEM\n"
+                 + _row(5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                 + _row(0.0, 1.0, 0.0) + "\n"
+                 "*SET_NODE_LIST\n" + _row(7) + "\n"
+                 + _row(10, 11, 12, 13, 14, 15, 16, 17) + "\n" + _row(18)
+                 + "\n*CONSTRAINED_NODAL_RIGID_BODY_SPC\n" + _row(50, 0, 7)
+                 + "\n" + _row(-1.0, 5, 111000) + "\n")
+        res_c, _sc, _ec = _convert(_a1_deck(tc=0, elastic_tc=(3, 0),
+                                            extra=extra))
+        wc = _node_warning(res_c)
+        self.assertIn(_W7_CNRB, wc)
+        self.assertNotIn(_W7_RIGID, wc)
+
+    def test_the_A6_sentence_names_its_MIXED_history(self):
+        """spotweld.k under the opt-in rules 1 + 2 (nt 4, base-paired, the
+        campaign's history rule): IE END -33.00 -> -31.18 % but RMS IE 6.65
+        -> 6.82 % and RMS KE 23.09 -> 23.66 % over the 1331 LS times to t
+        0.00119792 - a MIXED pair, said in the sentence."""
+        res, _s, _e = _convert(_dt_weld_deck())
+        hits = [w for w in res.warnings if "DT=1e-06 -> /PROP/TYPE13/" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("IE END -31.18 % (unscaled -33.00 %) - MIXED",
+                       "RMS IE 6.65 -> 6.82 %", "RMS KE 23.09 -> 23.66 %",
+                       "1331 LS times to t 0.00119792"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_the_ECTOL_sentence_names_the_h3_chain(self):
+        res, _s, _e = _convert(_t6._impl_deck(_row(12, 0, 0, "0.0", "0.0",
+                                                   "0.0")))
+        hits = [w for w in res.warnings if w.startswith(_t6._B1_HEAD)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("measured on the ONE implicit engine file that "
+                       "--no-imflag-curve-restart still writes",
+                       "two-engine-file chain (18 implicit + 11 127 explicit "
+                       "cycles, END IE -4.54 %, RMS IE 12.07 %",
+                       "-99.87 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("curve is not converted", hits[0])
+
+    def test_the_mat_null_pc_mu_help_names_the_round_8_cells(self):
+        from k2rad import cli
+        flat = _collapse(cli.build_parser().format_help())
+        i = flat.index("--mat-null-pc-mu, --no-mat-null-pc-mu")
+        block = flat[i:i + 1600]
+        for needle in ("ELFORM 6 or (round 8) every part is SPH",
+                       "R = 10 Nu / (c0 dmin) > 1",
+                       "hourglass coefficient h / R",
+                       "Isolid 1 / 2"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, block)
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_8_POST:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_8_POST:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_collapse(needle).lower(), _collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = {k.replace("\\", "/"): v for k, v in _SHIPPED_TEXTS()}
+        for rel, needle in _REPLACEMENTS_ROUND_8_POST:
+            with self.subTest(file=rel, needle=needle):
+                self.assertIn(_collapse(needle), texts[rel])
 
 
 if __name__ == "__main__":

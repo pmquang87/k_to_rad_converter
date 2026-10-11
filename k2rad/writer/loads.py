@@ -110,6 +110,7 @@ __all__ = [
     "_make_tied_nodes_failure_notes",
     "_make_constrained_linear_mpcs",
     "_apply_mass_weighted_rbody_inertia",
+    "_merge_mass_weighted_pairs",
     "_make_starter_cloads",
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
@@ -678,6 +679,20 @@ def _skew_drop_sentence(drops: Dict[int, Tuple[str, str, int]],
     else:
         tail = ("exact: the kept card's Tra / Rot is 111, so every dropped "
                 "digit is still held")
+    # The opt-out clause is keyed on the PRODUCER of the kept card (the
+    # round-8 post-review verification): the *MAT_RIGID producer titles its
+    # skewed card BC_rigid_<pid>; every other one is a skewed
+    # *CONSTRAINED_NODAL_RIGID_BODY_SPC card. Measured on starter probes:
+    # the opt-out of a *MAT_RIGID CMO -1 body is the 4f5b6e8 deck, 0 errors;
+    # that of a skewed CNRB _SPC card stops on ERROR 148.
+    titles = {t for n in nodes for _s, t, _a, _b in cards.get(n, [])}
+    opt_out = []
+    if any(t.startswith("BC_rigid_") for t in titles):
+        opt_out.append("writes no CMO -1 card for a *MAT_RIGID CMO -1 body, "
+                       "so the other code stays and nothing clashes")
+    if any(not t.startswith("BC_rigid_") for t in titles):
+        opt_out.append("keeps a skewed *CONSTRAINED_NODAL_RIGID_BODY_SPC "
+                       "card's old pair and its ERROR 148")
     return (
         f" {len(nodes)} /RBODY main node(s) (node {_named(nodes)}) carry the "
         "SKEWED /BCS of their rigid body ("
@@ -687,8 +702,8 @@ def _skew_drop_sentence(drops: Dict[int, Tuple[str, str, int]],
         + " on the same node were DROPPED: the starter accepts ONE skew per "
         "node (ERROR 148 'A SKEW IS ALREADY DEFINED WITH THE NODE', "
         "hm_read_bcs.F:199-205; measured on a starter probe). LS-DYNA applies "
-        f"both; {tail} (round 8; --no-rigid-local-constraints keeps the old "
-        "pair and its ERROR 148).")
+        f"both; {tail} (round 8; --no-rigid-local-constraints "
+        + ", and ".join(opt_out) + ").")
 
 
 def _mesh_has_rotational_dof(state: ConversionState,
@@ -4139,7 +4154,10 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 "below. MEASURED on spotweld.k under the opt-in rules 1 + 2 "
                 "(nt 4): last cycle 1332 = LS-DYNA's 1332 (4791 unscaled), cycle-0 "
                 "step 9.000e-7, "
-                "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %). "
+                "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %) - "
+                "MIXED: the histories are WORSE, RMS IE 6.65 -> 6.82 % and "
+                "RMS KE 23.09 -> 23.66 % of the LS peak over the 1331 LS "
+                "times to t 0.00119792. "
                 "--no-spotweld-dt-mass-scaling drops DT as before (round 8).")
         elif dt_inert:
             state.warn(
@@ -6333,9 +6351,30 @@ def _emit_mass_weighted_bodies(state: ConversionState,
     The ROT block is written even when ``omega`` is all zeros: it is the cell
     that says the body has no spin, and emitting it on one body and not on
     another would make the deck depend on round-off.
+
+    ONE pair per main node (the round-8 post-review verification). A body
+    partly covered by SEVERAL velocity groups (an ``*INITIAL_VELOCITY_NODE``
+    whose rows carry different velocities: ``_make_inivel`` groups them by
+    value) or by several cards reaches here once per group, each time with
+    that group's momentum share over the WHOLE body mass. The starter
+    OVERWRITES a node's velocity card by card (``hm_read_inivel.F:524-526``
+    ``V = V1..V3`` for ``/INIVEL/TRA``, ``:538-540`` ``VR`` for ``/ROT``), so
+    a pair per group kept only the LAST share - the shares are linear in
+    the nodal velocities, and Vol I R17 p.28-129 Remark 3 forms the body's
+    momentum from ALL of them. A later share is therefore recorded in
+    ``state.mass_weighted_pairs`` and written nowhere; the post-registry
+    pass :func:`_merge_mass_weighted_pairs` rewrites the FIRST pair's two
+    rows with the sums. A body with one share keeps its bytes.
     """
     lines: List[str] = []
     for main, v_cm, omega in bodies:
+        rec = state.mass_weighted_pairs.get(main)
+        if rec is not None:
+            # a later share: summed into the first pair by the post-registry
+            # pass, written nowhere here (no id is drawn)
+            rec[3].append(v_cm)
+            rec[4].append(omega)
+            continue
         # the ONE record of "this body got an /INIVEL/ROT": the post-registry
         # rotary-inertia pass (_apply_mass_weighted_rbody_inertia) reads it
         state.mass_weighted_rot_mains[main] = omega
@@ -6347,7 +6386,77 @@ def _emit_mass_weighted_bodies(state: ConversionState,
         rot_id = state.next_id()
         lines += _emit_inivel("ROT", rot_id, f"InitVelMWRot_{rot_id}",
                               grnod_id, omega)
+        state.mass_weighted_pairs[main] = (inivel_id, rot_id, grnod_id,
+                                           [v_cm], [omega])
     return lines
+
+
+#: the measured coupon of _merge_mass_weighted_pairs' sentence (the round-8
+#: post-review verification's two-group cube, starter + engine at nt 4 on
+#: both arms; the closed form: M 1.57e-5, L = (0, 5.8875e-3, -1.9625e-3)
+#: about the CoG (7.5, 7.5, 7.5), the starter's NEW INERTIA tensor)
+_MW_MERGE_MEASURED = (
+    "MEASURED on a two-group coupon (a 10 mm *MAT_RIGID cube, its z = 0 "
+    "nodes at vx 100 and its z = 10 nodes at vx 300, an *ELEMENT_MASS "
+    "7.85e-6 on corner node 7; nt 4): cycle-0 K-ENERGY T 0.4906 = 0.5 M "
+    "250^2 and K-ENERGY R 0.03084 = 0.5 omega.I.omega of the summed shares "
+    "(the closed form), where one pair per group gave 0.3974 (v 225, the "
+    "last group's share) and 0.06939.")
+
+
+def _merge_mass_weighted_pairs(state: ConversionState,
+                               lines: List[str]) -> None:
+    """``--mass-weighted-inivel``: write the SUM of every momentum share of
+    a body into the ONE ``/INIVEL/TRA`` + ``/INIVEL/ROT`` pair on its main
+    node (the round-8 post-review verification; see
+    :func:`_emit_mass_weighted_bodies` for why a pair per group was wrong).
+
+    A POST-REGISTRY pass: the shares of one body can come from different
+    writer sections (``*INITIAL_VELOCITY_NODE`` groups, ``*INITIAL_VELOCITY``
+    cards, ``*INITIAL_VELOCITY_GENERATION`` cards), and the first pair is
+    already in the assembled starter when a later one arrives. The two data
+    rows are located by EXACT line equality on the header, the title and the
+    first share's row the emitter wrote (asserted; a mismatch raises - a
+    k2rad bug, never a silent skip), and only those two rows are replaced.
+    Draws no id; a no-op without the flag or without a multi-share body."""
+    merged = {m: r for m, r in state.mass_weighted_pairs.items()
+              if len(r[3]) > 1}
+    for main in sorted(merged):
+        tra_id, rot_id, grnod_id, v_shares, w_shares = merged[main]
+        v_sum = (math.fsum(v[0] for v in v_shares),
+                 math.fsum(v[1] for v in v_shares),
+                 math.fsum(v[2] for v in v_shares))
+        w_sum = (math.fsum(w[0] for w in w_shares),
+                 math.fsum(w[1] for w in w_shares),
+                 math.fsum(w[2] for w in w_shares))
+        for kind, card_id, title, first, total in (
+                ("TRA", tra_id, f"InitVelMW_{tra_id}", v_shares[0], v_sum),
+                ("ROT", rot_id, f"InitVelMWRot_{rot_id}", w_shares[0],
+                 w_sum)):
+            old = _emit_inivel(kind, card_id, title, grnod_id, first)
+            new = _emit_inivel(kind, card_id, title, grnod_id, total)
+            hits = [i for i, ln in enumerate(lines) if ln == old[0]]
+            if len(hits) != 1 or lines[hits[0]:hits[0] + 4] != old[:4]:
+                raise RuntimeError(
+                    f"--mass-weighted-inivel: /INIVEL/{kind}/{card_id} is "
+                    "not the block its emitter recorded (found "
+                    f"{len(hits)} header line(s)); refusing to rewrite a "
+                    "velocity row blind. This is a k2rad bug.")
+            lines[hits[0] + 3] = new[3]
+        state.mass_weighted_rot_mains[main] = w_sum
+        state.warn(
+            f"--mass-weighted-inivel: the rigid body on main node {main} is "
+            f"partly covered by {len(v_shares)} velocity groups / cards; "
+            "their momentum shares (each over the whole body mass) are "
+            f"SUMMED into ONE pair, /INIVEL/TRA/{tra_id} v_cm = ("
+            + ", ".join(f"{c:.6g}" for c in v_sum)
+            + f") and /INIVEL/ROT/{rot_id} omega = ("
+            + ", ".join(f"{c:.6g}" for c in w_sum)
+            + ") - the starter OVERWRITES a node's velocity card by card "
+            "(hm_read_inivel.F:524-526 / :538-540), so the pair per group "
+            "written before kept only the LAST group's share, where Vol I "
+            "R17 p.28-129 Remark 3 forms the body's momentum from ALL its "
+            "nodal velocities. " + _MW_MERGE_MEASURED)
 
 
 def _apply_mass_weighted_rbody_inertia(state: ConversionState,

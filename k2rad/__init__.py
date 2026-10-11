@@ -906,7 +906,9 @@ def convert(
         weld at 0.9 DT. **On by default.** MEASURED on spotweld.k under
         the opt-in rules 1 + 2 (nt 4): Mass x2.5 (LS-DYNA's own
         factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
-        cycle-0 step 9.000e-7, IE END -31.18 %. Default byte movers 0
+        cycle-0 step 9.000e-7, IE END -33.00 -> -31.18 % - MIXED: RMS
+        IE 6.65 -> 6.82 % and RMS KE 23.09 -> 23.66 % of the LS peak
+        (1331 LS times to t 0.00119792) are worse. Default byte movers 0
         (plates.mat100's DT is inert: its warning says so).
     adaptive_spring_token : bool
         Set each spring token ``/PROP`` MASS (TYPE4 / TYPE8 / TYPE13,

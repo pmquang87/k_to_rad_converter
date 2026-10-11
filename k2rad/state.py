@@ -9766,6 +9766,21 @@ class ConversionState:
     # J = J_old - SUM(IN) into exactly those bodies' /RBODY (round 6, A7).
     mass_weighted_rot_mains: Dict[int, Tuple[float, float, float]] = field(
         default_factory=dict)
+    # --mass-weighted-inivel: ONE /INIVEL/TRA + /INIVEL/ROT pair per /RBODY
+    # main node (the round-8 post-review verification). A body partly
+    # covered by SEVERAL velocity groups or cards - the rows of an
+    # *INITIAL_VELOCITY_NODE grouped by velocity value, several
+    # *INITIAL_VELOCITY / _GENERATION cards - gets every group's momentum
+    # share (each over the WHOLE body mass) summed into the FIRST pair
+    # written on it: the starter overwrites a node's velocity card by card
+    # (hm_read_inivel.F:524-526 /INIVEL/TRA, :538-540 /INIVEL/ROT), so a
+    # pair per group kept only the LAST share. main node -> (TRA id, ROT id,
+    # /GRNOD id, [v_cm shares], [omega shares]); written by
+    # writer/loads._emit_mass_weighted_bodies, read by the post-registry
+    # pass writer/loads._merge_mass_weighted_pairs.
+    mass_weighted_pairs: Dict[int, Tuple[
+        int, int, int, List[Tuple[float, float, float]],
+        List[Tuple[float, float, float]]]] = field(default_factory=dict)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
     # three above plus *ELEMENT_PLOTEL, --ground-springs, the

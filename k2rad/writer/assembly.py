@@ -135,6 +135,7 @@ from .loads import (
     _resolve_constrained_globals,
     _synthesize_spotweld_second_nodes,
     _apply_mass_weighted_rbody_inertia,
+    _merge_mass_weighted_pairs,
     _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
@@ -345,8 +346,9 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                # 118 *DATABASE_BNDOUT decks in the corpus carry no
                # *BOUNDARY_PRESCRIBED_MOTION at all.
                #
-               # build_starter runs before build_engine (k2rad/__init__.py:486),
-               # so all three registries are filled by the time this is read.
+               # convert() (k2rad/__init__.py, step 3) calls build_starter before
+               # build_engines, so all three registries are filled by the time
+               # this is read.
                #   BNDOUT  -> /TH/NODE 'TH_NODE_BNDOUT' on the driven nodes
                #   RBDOUT  -> /TH/RBODY over every converted rigid body
                #   NODFOR  -> the interval of the *DATABASE_NODAL_FORCE_GROUP
@@ -1183,8 +1185,12 @@ def _warn_zero_tolerance_ectol(state: ConversionState, sol) -> None:
         "off its reference - a named regression, larger mid-run); ie_shell "
         "ERROR (TIMESTEP LIMIT at cycle 4) -> NORMAL in 92 cycles, but at IE "
         "-99.87 % and KE 0 against the reference's 149.9 - a STATUS change "
-        "only (its IMFLAG -9 implicit/explicit switching curve is not "
-        "converted). --no-zero-tolerance-ectol restores the force default.")
+        "only, measured on the ONE implicit engine file that "
+        "--no-imflag-curve-restart still writes; by default (round 8, h.3) "
+        "its IMFLAG -9 implicit/explicit switching curve converts as a "
+        "two-engine-file chain (18 implicit + 11 127 explicit cycles, END IE "
+        "-4.54 %, RMS IE 12.07 % of the LS peak over 320 LS times). "
+        "--no-zero-tolerance-ectol restores the force default.")
 
 
 def _make_engine_implicit(state: ConversionState) -> List[str]:
@@ -2087,6 +2093,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     ctx.lines = lines
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
+    # --mass-weighted-inivel: ONE /INIVEL/TRA + /ROT pair per /RBODY main
+    # node - a body partly covered by several velocity groups / cards gets
+    # the SUM of its momentum shares in the first pair written on it (the
+    # starter overwrites a node's velocity card by card; round-8 post-review
+    # verification). A post-pass because the shares can come from three
+    # sections; content-asserted, it rewrites two rows per such body and
+    # draws no id. A no-op without the flag.
+    _merge_mass_weighted_pairs(state, lines)
     # --mass-weighted-inivel: J = -SUM(IN) on the /RBODY blocks the inivel
     # sections re-pointed (round 6, A7) - since round 7 only where the
     # *MAT_RIGID producer did not already write it by default (A2; the
@@ -2311,8 +2325,9 @@ def _warn_duplicate_th_group_ids(state: ConversionState,
     # Same scan, second consumer: build_engine's /TFILE fallback needs to know
     # whether ANY /TH group reached the deck, and this is the one place that
     # counts what was actually emitted rather than what each builder intended.
-    # build_starter runs before build_engine (k2rad/__init__.py:470-473), so
-    # the count is set by the time _make_engine_output reads it.
+    # convert() (k2rad/__init__.py, step 3) calls build_starter before
+    # build_engines, so the count is set by the time _make_engine_output
+    # reads it.
     state.th_groups_emitted = sum(len(t) for t in seen.values())
     for tid, types in sorted(seen.items()):
         if len(types) > 1:

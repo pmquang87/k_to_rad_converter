@@ -95,8 +95,10 @@ Prior history (before this changelog was introduced) is summarized in the
     KE at the fifths of t_end 0.1 +3.68 / -0.35 / -3.58 / -3.89 / +3.93 %
     and -1.18 / -4.86 / +0.95 / -0.90 / -18.30 %, END +3.93 / -18.30 % (LS
     at its last block t 0.0999987), RMS 2.06 / 2.23 % of the LS peak over
-    the 500 LS times 0 < t <= 0.1. Reach 1 deck key on 1 emitted model; the
-    62 IMFLAG-1 eigen keys are byte-identical. A deck with NEIG 0 and no
+    the 500 LS times 0 < t <= 0.1. Reach 1 deck key on 1 emitted model; B1
+    moves none of the 62 IMFLAG-1 eigen keys (56 are byte-identical; 6 of
+    them - ex_08 x3, 6.1.test13r, 11.2, 11.5 - move by A3's /BCS union, part
+    A; corrected by the post-review verification). A deck with NEIG 0 and no
     `*CONTROL_IMPLICIT_GENERAL` keeps the modal route (0 carriers); two
     GENERAL cards of which one states IMFLAG != 0 keep it too. No existing
     test changed its expected value (every test eigen card states NEIG 3 /
@@ -629,9 +631,14 @@ Prior history (before this changelog was introduced) is summarized in the
     `*DEFINE_CURVE_SMOOTH` (efg/metal-cutting) and `*DEFINE_FUNCTION`
     untouched. The empty-secondary sentence of mainboltaexpl's beam contact
     10013 gains the `--beam-contact-secondary` hint (its bolt's end nodes are
-    no longer counted rigid on penalty sides). (l)-4 TEXTS: the partial-rigid
-    secondary sentence (`contacts._warn_partial_rigid_secondary`, printed on
-    10 roster keys / 10 models incl. pipe and doorbeam, + 5 Ryan_Lee files)
+    no longer counted rigid on penalty sides) [REVERTED by the fix round's
+    523c6a9: the hint reads the full rigid set again and is silent on 10013].
+    (l)-4 TEXTS: the partial-rigid secondary sentence
+    (`contacts._warn_partial_rigid_secondary`, re-texted on 10 roster keys /
+    10 models incl. pipe and doorbeam, + 5 Ryan_Lee files) [the post-review
+    verification: on the shipped default it PRINTS on 9 keys - mainboltaexpl
+    prints the KEPT sentence instead, as every rigid member it removed was a
+    bolt-end one; 10 under --no-bolt-rigid-contact]
     no longer calls keeping the rigid nodes "mostly useless" nor reads
     mainboltaexpl's −62.05 as a percent (it is an IE in N.mm on a run without
     the pull); round 7's "moves by run sensitivity" (cli / state / __init__ /
@@ -746,7 +753,9 @@ Prior history (before this changelog was introduced) is summarized in the
     2.094395E-06 → 2.809309E-05 (x13.41), first step 0.2457E-06 →
     0.9000E-06 on SPRING 1, last cycle 4791 → 1332 = LS-DYNA's, model mass
     0.1343E-03 → 0.1437E-03 (+7.0 %), IE END -33.00 → -31.18 %, RMS IE 6.66
-    → 6.82 % (1331 LS blocks). Coupon (test 1): the starter's SPRING step
+    → 6.82 % (1331 LS blocks) [the post-review verification, the campaign's
+    history rule: RMS IE 6.65 → 6.82 % and RMS KE 23.09 → 23.66 % - a MIXED
+    pair, the histories worse]. Coupon (test 1): the starter's SPRING step
     9.9999990E-07 (= DT), the engine's 0.9000E-06 on all 12 cycles. Default
     byte movers 0 deck keys (MAT_100 with DT > 0 on the roster:
     plates.mat100 — factors 1, SHA-identical, its DT sentence now says

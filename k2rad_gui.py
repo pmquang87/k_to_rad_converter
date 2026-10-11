@@ -956,7 +956,8 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="*MAT_NULL PC / MU -> /MAT/HYD_VISC Pmin / Nu - ON. "
                      "PC 0 -> -1e-20 (LS cuts at zero); Nu = MU/RO on "
-                     "ELFORM-6 fluids only. sph/bird IE +69.4 -> +4.5 %, "
+                     "ELFORM-6 fluids and SPH-only materials, with the h / R "
+                     "hourglass guard (round 8). sph/bird IE +69.4 -> +4.5 %, "
                      "channel_B -98.9 -> -0.1 %",
             variable=self.mat_null_pc_mu).grid(
                 row=46, column=0, columnspan=3, sticky="w", **pad)
