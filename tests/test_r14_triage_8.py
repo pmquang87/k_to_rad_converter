@@ -576,6 +576,18 @@ class NonRigidBcsUnion(unittest.TestCase):
         self.assertEqual(_bcs_card(s2, "BC_1")[:3], ("110", "000", 5))
         self.assertEqual(_bcs_card(s2, "BC_2")[:3], ("100", "000", 0))
         self.assertFalse(_has(r2.warnings, _WT1), r2.warnings)
+        # the REVERSED card order (the global card first): a union read
+        # across skews (the code-sweep validator's whole-suite survivor
+        # A3-01) drops the skew-5 card's x as 'restated' here and prints the
+        # union sentence; the rule keeps both cards and names the two systems
+        r3, s3, _e3 = _convert(_plates(_SYS5 + _spc_node(14, 0, "100000")
+                                       + _spc_node(14, 5, "110000")))
+        self.assertEqual(_bcs_card(s3, "BC_1")[:3], ("100", "000", 0))
+        self.assertEqual(_bcs_card(s3, "BC_2")[:3], ("110", "000", 5))
+        self.assertTrue(_has(r3.warnings, "node(s) 14 are constrained in "
+                             "two different systems (skews 0, 5)",
+                             "ERROR 148"), r3.warnings)
+        self.assertFalse(_has(r3.warnings, _WT1), r3.warnings)
 
     def test_4_no_shared_node_is_byte_identical(self):
         deck = _plates(_spc_node(14, 0, "111000") + _spc_node(15, 0, "000111"))
@@ -2525,6 +2537,20 @@ class MatNullSphNuAndRGuard(unittest.TestCase):
             self.assertNotIn(gone, hits[0])
         self.assertEqual(_w(r, _WN1_SPH), [])
 
+    def test_sph_plus_elform6_keeps_nu_0(self):
+        """The SPH-only Nu cell's scope is classes == [SPH] exactly: a
+        *MAT_NULL shared by an SPH part and an ELFORM-6 part (each class
+        alone would get Nu) is a MIXED material and keeps Nu 0 with the W-N
+        sentence. The code-sweep validator's whole-suite survivor B4-01
+        widened the scope to `classes in ([ELFORM 6], [SPH])` and wrote Nu
+        1000 here with NO sentence; the ELFORM-1 partner above cannot see
+        that widening (both arms leave it unchanged)."""
+        r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
+                                             sph=True, second_part_elform=6))
+        self.assertEqual(_nu_pmin(s)[:20], " " * 19 + "0")
+        self.assertEqual(len(_w(r, _WN)), 1, r.warnings)
+        self.assertEqual(_w(r, _WN1_SPH), [])
+
     def test_sph_on_a_void_deck_keeps_nu_0(self):
         r, s, _e = _convert(_null_fluid_deck(pc="-1.0", mu="1.0E-6",
                                              sph=True, void="other"))
@@ -3152,16 +3178,31 @@ class TshellTextAndPlasticRoute(unittest.TestCase):
                         res12.warnings)
 
     def test_unmeasured_law_keeps_type20(self):
+        """Every law outside {LAW1} + {LAW2, LAW36, LAW44} keeps /PROP/TYPE20
+        - probed with TWO members of the class (*MAT_LOW_DENSITY_FOAM ->
+        LAW38, *MAT_037 -> LAW43), and the routed set pinned: the code-sweep validator's
+        whole-suite survivors S-B7-04 / -05 widened it by LAW4 or LAW43 and
+        only the foam was probed."""
+        from k2rad.writer import tshell
+        self.assertEqual(tshell._ROUTED_PLASTIC_LAWS, frozenset({2, 36, 44}))
         foam = ("*MAT_LOW_DENSITY_FOAM\n"
                 + _row(1, 1.0e-10, 1.0, 9) + "\n" + _row() + "\n"
                 "*DEFINE_CURVE\n" + _row(9) + "\n"
                 + f"{0.0:>20}{0.0:>20}\n{0.5:>20}{1.0:>20}\n")
-        res, starter, _e = _convert(_ts_deck(mat=foam))
-        self.assertIn("/PROP/TYPE20/1", starter)
-        self.assertTrue(_has(res.warnings, "kept on /PROP/TYPE20",
-                             "LAW2 / LAW36 / LAW44 a coupon measured"),
-                        res.warnings)
-        self.assertFalse(_has(res.warnings, "applied to *MAT_ELASTIC only"))
+        mat037 = ("*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC\n"
+                  + _row(1, 7.85e-9, 210000.0, 0.3, 250.0, 1000.0, 1.0, 0)
+                  + "\n")
+        for name, mat, law in (("foam", foam, "/MAT/LAW38/"),
+                               ("MAT_037", mat037, "/MAT/LAW43/")):
+            with self.subTest(mat=name):
+                res, starter, _e = _convert(_ts_deck(mat=mat))
+                self.assertIn(law, starter)
+                self.assertIn("/PROP/TYPE20/1", starter)
+                self.assertTrue(_has(res.warnings, "kept on /PROP/TYPE20",
+                                     "LAW2 / LAW36 / LAW44 a coupon measured"),
+                                res.warnings)
+                self.assertFalse(_has(res.warnings,
+                                      "applied to *MAT_ELASTIC only"))
 
     def test_explicit_plastic_keeps_type20(self):
         res, starter, _e = _convert(_ts_deck(control=_TS_EXPLICIT, mat=_PLP))
@@ -3375,6 +3416,11 @@ class JointScrewRound8(unittest.TestCase):
              {"a_node_rc": 1, "drive": False},
              "on a free DOF of the joint (A's spin about the screw axis)"),
             ("a *NODE TC 1 on A (axial: free)", {"a_node_tc": 1},
+             "on a free DOF of the joint (the axial translation)"),
+            # a MIXED code - x (axial, free) + y (held): refused for its free
+            # DOF (the code-sweep validator's whole-suite survivor S-B8-05,
+            # `dofs & held` for `dofs <= held`, merged it and wrote the joint)
+            ("a *NODE TC 4 on A (x axial free + y held)", {"a_node_tc": 4},
              "on a free DOF of the joint (the axial translation)"))
         for name, kw, needle in refused:
             with self.subTest(case=name):
@@ -3987,6 +4033,25 @@ class ImflagCurveRestart(unittest.TestCase):
                          [True, False, True])
         self.assertEqual(len(r2.warnings), len(set(r2.warnings)),
                          r2.warnings)
+
+    def test_dynain_only_in_the_last_engine_file(self):
+        """*INTERFACE_SPRINGBACK_LSDYNA's /DYNAIN block belongs to the end
+        of the run: on a chain it is written in the LAST engine file only
+        (the rule in build_engines). The code-sweep validator's whole-suite
+        survivor S-B3-05 wrote it in every file; no test had a springback
+        card on a chain."""
+        sb = ("*SET_PART_LIST\n" + f"{950:>10}" + "\n" + f"{1:>10}" + "\n"
+              "*INTERFACE_SPRINGBACK_LSDYNA\n" + f"{950:>10}{0:>10}{0:>10}"
+              + " " * 10 + f"{0:>10}{0:>10}{0:>10}{0:>10}" + "\n")
+        deck = _ie_strip_deck().replace("*END\n", sb + "*END\n")
+        _r, _s, eng, _n = _convert_files(deck)            # the h.3 default
+        self.assertEqual(len(eng), 2)
+        self.assertEqual(["/DYNAIN/DT" in e for e in eng], [False, True])
+        self.assertEqual(["/DYNAIN/SHELL/STRES/FULL" in e for e in eng],
+                         [False, True])
+        _r1, _s1, eng1, _n1 = _convert_files(deck, imflag_curve_restart=False)
+        self.assertEqual(len(eng1), 1)
+        self.assertIn("/DYNAIN/DT", eng1[0])
 
     def test_every_stale_engine_file_is_named(self):
         """The fix round (code-sweep F9): an earlier, LONGER chain leaves
