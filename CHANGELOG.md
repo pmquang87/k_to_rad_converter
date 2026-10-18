@@ -95,7 +95,9 @@ Prior history (before this changelog was introduced) is summarized in the
     -> `/QUAD` with the same ids, a clockwise element re-ordered
     (`qvoli2.F:82-88` ERROR 1228 on a negative area); `/PROP/SHELL` ->
     `/PROP/SOLID` Isolid 2 (Isolid 17 NO-GO: IE +7.46 .. +31.91 %), `h` = the
-    part's QH; the `/BCS` codes `abc -> cab` and the prescribed-motion
+    part's QH; a global `/BCS` code `abc -> cab` (translation AND rotation
+    digits since the fix round; a `/BCS` in a skew keeps its digits, the
+    skew's vectors carrying the permutation) and the prescribed-motion
     directions X -> Y, Y -> Z; `/SKEW/FIX` vectors and `/DFS/DETPOINT`
     points permuted; `/RBODY` J = 0 (`inirby.F:366-398`; the rigid-body
     writer skips its J = -SUM(IN) correction on a routed deck); `/TH/SHEL`

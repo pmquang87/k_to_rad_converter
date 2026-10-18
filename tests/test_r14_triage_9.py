@@ -3010,6 +3010,9 @@ def b2_ax15(dt2ms=1e-4, var="base"):
     if var == "mixed1415":
         L += ["*PART", "ring14", _f10(2, 2, 1), "*SECTION_SHELL",
               _f10(2, 14, 1.0, 2), _f10(1.0, 1.0, 1.0, 1.0)]
+    if var == "elform16":
+        L += ["*PART", "ring16", _f10(2, 2, 1), "*SECTION_SHELL",
+              _f10(2, 16, 1.0, 2), _f10(1.0, 1.0, 1.0, 1.0)]
     L += ["*NODE"]
     for j in range(ny + 1):
         for i in range(nx + 1):
@@ -3021,7 +3024,7 @@ def b2_ax15(dt2ms=1e-4, var="base"):
     for j in range(ny):
         for i in range(nx):
             n = [nid(i, j), nid(i + 1, j), nid(i + 1, j + 1), nid(i, j + 1)]
-            pid = 2 if (var == "mixed1415" and e == 6) else 1
+            pid = 2 if (var in ("mixed1415", "elform16") and e == 6) else 1
             if var in ("tri", "tricontact") and e == 6:
                 n = [n[0], n[1], n[2], n[2]]
             if var == "cw" and e == 1:
@@ -3185,6 +3188,11 @@ class Axisymmetric2D(unittest.TestCase):
     def test_every_refusal_class(self):
         probes = {
             "mixed1415": "ELFORM 14 and 15 together",
+            # the fix round (F-T-1): another ELFORM beside 15 - without this
+            # screen the transform turns EVERY /SHELL into /QUAD (it has no
+            # per-part ELFORM test); the round-9 suite let that mutant live
+            "elform16": "a *SECTION_SHELL of ELFORM [16] beside the "
+                        "axisymmetric ones",
             "tri": "1 3-node shell(s): a degenerate 2-D /QUAD creates energy",
             "contact": "*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE: OpenRadioss 2-D "
                        "decks accept only /INTER/TYPE1 / 2 / 3 / 5",
@@ -3232,6 +3240,60 @@ class Axisymmetric2D(unittest.TestCase):
         self.assertEqual([float(v) for v in rb[3].split()], [0.0, 0.0, 0.0])
         self.assertFalse(_has(res.warnings, "J = -SUM(IN)"))
         self.assertFalse(_has(res.warnings, _W_B2_DENSITY))   # rigid: no cell
+
+    def test_bcs_skewed_keeps_digits_global_rot_permuted(self):
+        """The fix round (F-B2-1 / F2). The node map P(v) = (vz, vx, vy) is a
+        proper rotation. (a) A *BOUNDARY_SPC_SET on CID 5 (local x along LS
+        y, local y along -x) holding local x: LS-DYNA holds LS y = Radioss
+        Z. The /SKEW/FIX/5 vectors are permuted (Y' = (0, -1, 0), Z' =
+        (1, 0, 0), so X' = Y' x Z' = (0, 0, 1) = Radioss Z) and the code must
+        stay '100' in skew 5 - the round-9 rewrite wrote '010' (Y' = LS -x,
+        the wrong axis, no warning). (b) A rigid part with CMO 1 CON2 3
+        (LS z rotation, the out-of-plane axis): P maps it to rot X = '100',
+        which an N2D-1 rigid body does not carry (rgbodv.F:158-180 keeps
+        VR(3) only); the round-9 rewrite wrote '001' = the spin about the
+        axis of revolution, which LS-DYNA leaves free. CON2 2 (LS y = the
+        axis) -> '001'. The base deck's global translations stay '010' /
+        '001'. Corpus reach 0 (metal-forming and 2Dlag hold Rot 111).
+        STARTER (nt 4, C:/Users/pmqua/rcv_r9i_fixpr_<name>, harvested and
+        deleted): (a) b2skew, (b) b2rig3 and b2rig2 each 0 ERROR(S) / 0
+        WARNING(S), N2D3D 1."""
+        skew_spc = ("*DEFINE_COORDINATE_SYSTEM\n"
+                    + _f10(5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) + "\n"
+                    + _f10(-1.0, 0.0, 0.0) + "\n"
+                    + "*SET_NODE_LIST\n" + _f10(7) + "\n" + _f10(8) + "\n"
+                    + "*BOUNDARY_SPC_SET\n" + _f10(7, 5, 1, 0, 0, 0, 0, 0)
+                    + "\n")
+        res, st, _e = _convert(b2_ax15().replace("*END", skew_spc + "*END"))
+        self.assertTrue(re.search(r"^/QUAD/1", st, re.M))
+        rows = sorted((t, r, s) for t, r, s, _g in _bcs_rows(st))
+        self.assertEqual(rows, [("001", "000", 0), ("010", "000", 0),
+                                ("100", "000", 5)])
+        sk = [b for h, b in _blocks(st, "/SKEW/FIX/5")][0]
+        self.assertEqual([[float(v) for v in ln.split()] for ln in sk[1:4]],
+                         [[0.0, 0.0, 0.0], [0.0, -1.0, 0.0],
+                          [1.0, 0.0, 0.0]])
+
+        def rigid(con2):
+            return ("*PART\nrigid tool\n" + _f10(2, 2, 2) + "\n"
+                    "*SECTION_SHELL\n" + _f10(2, 15, 1.0, 2) + "\n"
+                    + _f10(1.0, 1.0, 1.0, 1.0) + "\n"
+                    "*MAT_RIGID\n" + _f10(2, 7.85e-9, 210000.0, 0.3) + "\n"
+                    + _f10(1.0, 0, con2) + "\n" + _f10(0.0) + "\n"
+                    "*NODE\n" + "".join(
+                        "%8d%16.8g%16.8g%16.8g\n" % (
+                            200 + k, 5.0 + (k in (1, 2)), float(k in (2, 3)),
+                            0.0) for k in range(4))
+                    + "*ELEMENT_SHELL\n" + "%8d%8d" % (50, 2)
+                    + "".join("%8d" % (200 + k) for k in range(4)) + "\n")
+        for con2, rot in ((3, "100"), (2, "001")):
+            with self.subTest(con2=con2):
+                r2, st2, _e = _convert(b2_ax15().replace(
+                    "*END", rigid(con2) + "*END"))
+                self.assertTrue(re.search(r"^/QUAD/1", st2, re.M))
+                body = [(t, r) for t, r, s, _g in _bcs_rows(st2)
+                        if r != "000"]
+                self.assertEqual(body, [("000", rot)])
 
     def test_clockwise_quad_reordered(self):
         res, st, _e = _convert(b2_ax15(var="cw"))

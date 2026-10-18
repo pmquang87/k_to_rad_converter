@@ -417,16 +417,33 @@ def _transform_starter_lines(state: ConversionState, lines: List[str],
                 b = _prop_solid(prop, title, h) + trailing
                 counts["prop"] += 1
             elif re.match(r"^/BCS/\d+\s*$", head):
+                # The node map is the cyclic permutation P(v) = (vz, vx, vy),
+                # a proper rotation. A GLOBAL code holds LS (x, y, z) DOFs,
+                # so its translation AND rotation digits move with P: (dx,
+                # dy, dz) -> (dz, dx, dy). A SKEWED code holds the axes of
+                # its /SKEW/FIX, whose vectors the /SKEW/FIX branch below
+                # rotates by P - its local axes ARE the images of LS's
+                # local axes (P(y') x P(z') = P(x')), so its digits stay.
+                # (The fix round: the round-9 rewrite permuted the Tra
+                # digits of every /BCS, skewed too, and no rot digit.)
                 nb = list(b)
                 for i in _data_rows(b)[1:]:
                     m = re.match(r"^(\s*)([01]{3})(\s+)([01]{3})(.*)$", nb[i])
                     if not m:
                         raise _Abort(f"{head.strip()} (an unreadable Tra / rot "
                                      "row)")
-                    code = m.group(2)
-                    a_, b_, c_ = code[0], code[1], code[2]
-                    nb[i] = (m.group(1) + c_ + a_ + b_ + m.group(3)
-                             + m.group(4) + m.group(5))
+                    tail = m.group(5).split()
+                    try:
+                        skew = int(tail[0]) if tail else 0
+                    except ValueError:
+                        raise _Abort(f"{head.strip()} (an unreadable skew "
+                                     "cell)")
+                    if skew != 0:
+                        counts["bcs_skewed"] = counts.get("bcs_skewed", 0) + 1
+                        continue
+                    t_, r_ = m.group(2), m.group(4)
+                    nb[i] = (m.group(1) + t_[2] + t_[0] + t_[1] + m.group(3)
+                             + r_[2] + r_[0] + r_[1] + m.group(5))
                     counts["bcs"] += 1
                 b = nb
             elif re.match(r"^/IMP(DISP|VEL|ACC)/\d+\s*$", head):

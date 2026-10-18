@@ -263,8 +263,10 @@ the 3-D shells): `/ANALY` N2D3D 1; every node `(x, y, 0)` is written
 revolution (the tokens permuted, the values exact); `/SHELL` → `/QUAD` with
 the same element ids (a clockwise element re-ordered counter-clockwise,
 `qvoli2.F:82-88`) on `/PROP/SOLID` Isolid 2 with `h` = the part's QH (else
-0.1); the `/BCS` codes and the prescribed-motion directions permuted the same
-way; skews and detonation points permuted; `/RBODY` J = 0 (in 2-D
+0.1); a GLOBAL `/BCS` code's translation AND rotation digits and the
+prescribed-motion directions permuted the same way (`abc` → `cab`); skews and
+detonation points permuted, so a `/BCS` in a skew keeps its digits (its local
+axes are the images of LS-DYNA's: the node map is a proper rotation); `/RBODY` J = 0 (in 2-D
 `I_xx = I_yy + I_zz`, `inirby.F:366-398`); `/TH/SHEL` → `/TH/QUAD`; thermal
 cards kept with a warning (OpenRadioss has no 2-D conduction). ONE post-pass on
 the emitted lines (`writer/axisym2d.py`), so every other deck is
