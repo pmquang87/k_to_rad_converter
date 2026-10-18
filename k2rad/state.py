@@ -8245,6 +8245,19 @@ class ConvertOptions:
     # spring), so the rule keys on rigid-only sections. ex_16 error_starter ->
     # NORMAL with A4 (A5 alone = the frozen disk). Movers 1 key / 1 model.
     elform7_beam_thickness_section: bool = True
+    # --no-spc-vector-frames: a *BOUNDARY_SPC whose CID is a
+    # *DEFINE_COORDINATE_VECTOR is written in the GLOBAL system (the 386444e
+    # bytes), with a corrected sentence instead of the false 'not found'.
+    #
+    # ON by default (R14 triage round 9, A6; round-8 entry 27):
+    # writer/loads.spc_cid_skew - read by _make_bcs, _global_spc_dofs, the
+    # *CONSTRAINED_LINEAR screen, the free-node guard and the screw
+    # BodyCondition (and the *LOAD_NODE CID sibling) - resolves a VECTOR CID
+    # to its existing /SKEW/FIX/<cid>. MEASURED on control_adaptive.cylinder
+    # (explicit nt 4, 271 = 271 cycles): constrained radial displacement
+    # 0.3352 -> 1.8e-8 mm on every state, free-DOF reaction 4611 -> 0.024 N
+    # (LS-DYNA 0). Movers 1 key / 1 model.
+    spc_vector_frames: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

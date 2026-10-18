@@ -171,6 +171,32 @@ def _make_rlinks(state: ConversionState) -> List[str]:
 # Starter: boundary conditions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def spc_cid_skew(state: ConversionState, cid: int) -> int:
+    """The /SKEW id a ``*BOUNDARY_SPC`` (or ``*LOAD_NODE``) CID resolves to, 0
+    when it resolves to none (round 9, A6).
+
+    ``_make_skews`` writes every ``*DEFINE_COORDINATE_SYSTEM`` / ``_NODES`` /
+    ``_VECTOR`` under its own CID (a VECTOR frame as ``/SKEW/FIX/<cid>``,
+    ``writer/mesh._emit_coord_vector_skew``), and LS-DYNA applies the SPC in
+    any of the three (control_adaptive.cylinder.d3hsp:1170-1172 'number of
+    spc nodes ... 48', 'number of spc coordinates ... 9'). Before round 9
+    the five consumers accepted only SYSTEM / NODES frames and wrote a
+    VECTOR-CID constraint in the GLOBAL system behind a false 'not found'.
+    ``--no-spc-vector-frames`` keeps a VECTOR CID out (the 386444e bytes).
+    Every consumer reads this one test - ``_make_bcs``, ``_global_spc_dofs``,
+    the ``*CONSTRAINED_LINEAR`` screen, the free-node guard / ERROR 148
+    refusal and the screw ``BodyCondition`` - so they cannot disagree; the
+    ``*LOAD_NODE`` CID sibling takes it too (decision D9, reach 0).
+    """
+    if not cid:
+        return 0
+    if cid in state.coord_sys or cid in state.coord_nodes:
+        return cid
+    if cid in state.coord_vectors and state.options.spc_vector_frames:
+        return cid
+    return 0
+
+
 def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     """``*BOUNDARY_SPC_NODE`` / ``_SET`` -> one ``/BCS`` ``BC_<id>`` per card,
     on the card's own node set (``/GRNOD/NODE/<nsid>``, shared by every card
@@ -229,6 +255,8 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     cards_gone: List[int] = []
     rest_nodes: Set[int] = set()
     emitted_grnods: Set[int] = set()
+    # round 9, A6: (card id, CID) of every card written in a VECTOR frame
+    vector_cards: List[Tuple[int, int]] = []
     for bc in state.bcs_spcs:
         nsid = bc.nsid
         raw_nids = state.node_sets.get(nsid, ("", []))[1]
@@ -252,10 +280,18 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         # *BOUNDARY_SPC CID: constraint acts in that local system → /BCS skew.
         # Only reference it when a matching /SKEW is actually emitted
         # (_make_skews writes /SKEW/<cid> for every *DEFINE_COORDINATE_*).
-        skew_id = 0
-        if bc.cid:
-            if bc.cid in state.coord_sys or bc.cid in state.coord_nodes:
-                skew_id = bc.cid
+        # round 9, A6: ONE helper for every *BOUNDARY_SPC consumer
+        skew_id = spc_cid_skew(state, bc.cid)
+        if bc.cid and skew_id and bc.cid in state.coord_vectors:
+            vector_cards.append((bc.bc_id, bc.cid))
+        elif bc.cid and not skew_id:
+            if bc.cid in state.coord_vectors:
+                state.warn(
+                    f"BCS {bc.bc_id} (nsid={nsid}): CID {bc.cid} is a "
+                    "*DEFINE_COORDINATE_VECTOR frame (written as "
+                    f"/SKEW/FIX/{bc.cid}); --no-spc-vector-frames writes the "
+                    "constraint in the GLOBAL system instead, where LS-DYNA "
+                    "applies it in that local frame.")
             else:
                 state.warn(
                     f"BCS {bc.bc_id} (nsid={nsid}): local system cid={bc.cid} "
@@ -363,6 +399,19 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
             "merged (a digit is an axis of its own skew), and the starter "
             "accepts ONE skew per node: ERROR 148 (hm_read_bcs.F:199-205) will "
             "stop it - state both in one system.")
+    if vector_cards:
+        cids = sorted({c for _b, c in vector_cards})
+        state.warn(
+            f"*BOUNDARY_SPC: {len(vector_cards)} card(s) name a "
+            "*DEFINE_COORDINATE_VECTOR CID ("
+            + ", ".join(str(c) for c in cids)
+            + "); each constraint is written in that frame's /SKEW/FIX/<cid> "
+            "(LS-DYNA applies the DOFs in the local system). Before round 9 "
+            "they went to the GLOBAL system with a false 'not found': on "
+            "control_adaptive.cylinder the constrained radial displacement "
+            "reached 0.3352 mm (now 1.8e-8 mm on every state) and a free "
+            "tangential DOF carried up to 4611 N (now 0.024 N; LS-DYNA 0). "
+            "--no-spc-vector-frames restores the global writing.")
     return lines
 
 
@@ -557,7 +606,7 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
         out[nid] = (_or_dof_codes([old[0], tra]), _or_dof_codes([old[1], rot]))
 
     for bc in state.bcs_spcs:
-        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+        if spc_cid_skew(state, bc.cid):
             continue                      # a skewed /BCS: not a global bit
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
@@ -9477,8 +9526,7 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
         return []
     skew_spc: Dict[int, Tuple[str, str]] = {}
     for bc in state.bcs_spcs:
-        if not (bc.cid and (bc.cid in state.coord_sys
-                            or bc.cid in state.coord_nodes)):
+        if not spc_cid_skew(state, bc.cid):
             continue
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
@@ -9635,7 +9683,8 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
             continue
         skew_id = 0
         if ln.cid:
-            if ln.cid in state.coord_sys or ln.cid in state.coord_nodes:
+            # round 9, A6 (D9): the same three-kind test as *BOUNDARY_SPC
+            if spc_cid_skew(state, ln.cid):
                 skew_id = ln.cid
             else:
                 state.warn(
@@ -11874,7 +11923,7 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     tcrc6 = {n: t + r for n, (t, r) in state.node_tc_rc_emitted.items()}
     skewed_spc: Dict[int, int] = {}
     for bc in state.bcs_spcs:
-        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+        if spc_cid_skew(state, bc.cid):
             for n in state.node_sets.get(bc.nsid, ("", []))[1]:
                 skewed_spc[n] = bc.cid
     rem_groups: Dict[str, List[int]] = defaultdict(list)

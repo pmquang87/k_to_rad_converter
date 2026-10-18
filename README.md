@@ -3481,6 +3481,25 @@ MUMPS FINAL ND / NZ 4396 / 54549 on both; 6.1.test13r 2 = 2 cycles, 19039 /
 242287 (the two rows differ only in which tied shell is printed as
 controlling); ex_08_beam_elform_1 2 = 2 cycles, 83 / 315. Reach 9 deck keys on
 9 emitted models (514 nodes / 1841 DOFs).
+**A `*BOUNDARY_SPC` whose `CID` is a `*DEFINE_COORDINATE_VECTOR` is written in
+that frame** (round 9, A6; default ON, `--no-spc-vector-frames` writes it in
+the GLOBAL system as before, with a corrected sentence). k2rad already writes
+every VECTOR frame as `/SKEW/FIX/<cid>`, and LS-DYNA applies the SPC in it
+(`control_adaptive.cylinder.d3hsp:1170-1172`: 48 spc nodes, 9 spc
+coordinates; its spcforc prints local forces), but the five `*BOUNDARY_SPC`
+consumers — `/BCS` itself, the global-SPC map the `*NODE` TC/RC and free-node
+passes cancel against, the `*CONSTRAINED_LINEAR` screen, the free-node guard's
+ERROR 148 refusal and the `*CONSTRAINED_JOINT_SCREW` body conditions — accepted
+only `SYSTEM` / `NODES` frames and wrote the constraint globally behind a false
+"not found"; they now read one helper (`writer/loads.spc_cid_skew`; the
+`*LOAD_NODE` CID sibling too). A CID in no registry keeps the global fallback
+and its true sentence. MEASURED on `control_adaptive.cylinder` (explicit, nt
+4, 271 = 271 cycles, base-paired with `386444e`): the reaction on a FREE local
+DOF max 4611 → 0.024 N (RMS 1106 → 0.0019 N; LS-DYNA 0) and the constrained
+local displacement 0.3352 mm → 1.8e-8 mm, on all 271 states; IE END +5.40 →
++5.38 %, KE END +20.61 → +20.29 % (RMS 2.53 / 3.47 → 2.74 / 3.28 % over the
+19 LS times to 3.798e-4). Movers 1 key / 1 model; the `SYSTEM`-CID decks
+(`3.1_Elastic_Beams_etc`, `3.5_Linear_Elastic_QS_Plate_Hex`) byte-identical.
 `*NODE` card 1's own `TC`/`RC` cells → one `/GRNOD/NODE` + `/BCS` per distinct
 `(TC, RC)` pair, **on by default** (`--no-node-tc-rc-bcs` /
 `convert(node_tc_rc_bcs=False)` restores the old drop). Vol I R17 p.35-2 makes

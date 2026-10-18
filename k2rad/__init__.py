@@ -309,6 +309,7 @@ def convert(
     implicit_n2s_type7: bool = True,
     implicit_rigid_gravity_nodes: bool = True,
     elform7_beam_thickness_section: bool = True,
+    spc_vector_frames: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1106,6 +1107,15 @@ def convert(
         together with implicit_rigid_gravity_nodes (alone it runs with the
         rigid body frozen). A deformable ELFORM 7 member and ELFORM 8 keep
         the refusal. Default True.
+    spc_vector_frames : bool
+        Write a *BOUNDARY_SPC whose CID is a *DEFINE_COORDINATE_VECTOR in that
+        frame's /SKEW/FIX (R14 triage round 9, A6): LS-DYNA applies the DOFs
+        in the local system; before, the constraint went to the GLOBAL system
+        behind a false 'not found'. One helper (writer/loads.spc_cid_skew) for
+        all five consumers. MEASURED on control_adaptive.cylinder (explicit,
+        nt 4, 271 = 271 cycles): the constrained radial displacement 0.3352 ->
+        1.8e-8 mm, the free-DOF reaction 4611 -> 0.024 N (LS-DYNA 0).
+        Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1550,6 +1560,7 @@ def convert(
         implicit_n2s_type7=implicit_n2s_type7,
         implicit_rigid_gravity_nodes=implicit_rigid_gravity_nodes,
         elform7_beam_thickness_section=elform7_beam_thickness_section,
+        spc_vector_frames=spc_vector_frames,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

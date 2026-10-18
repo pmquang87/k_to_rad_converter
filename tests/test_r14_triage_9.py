@@ -944,6 +944,158 @@ class TwoDBeamThicknessSection(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A6 — *BOUNDARY_SPC on a *DEFINE_COORDINATE_VECTOR CID is written in that
+#      frame, through one helper for its five consumers
+# ═════════════════════════════════════════════════════════════════════════════
+
+_VEC3 = ("*DEFINE_COORDINATE_VECTOR\n"
+         + _row(3, 1.0, 2.0, 2.0, 2.0, 1.0, -2.0) + "\n")
+_W_A6 = "card(s) name a *DEFINE_COORDINATE_VECTOR CID"
+_W_A6_OFF = "--no-spc-vector-frames writes the constraint in the GLOBAL"
+_NOT_FOUND = "not found — constraint applied in the GLOBAL system"
+
+
+def _a6_block(spc: str, extra: str = "", implicit: bool = False,
+              free_node: bool = False) -> str:
+    """One elastic hex (part 1, nodes 1-8, a 10 mm cube) + *spc*."""
+    pts = [(1, 0, 0, 0), (2, 10, 0, 0), (3, 10, 10, 0), (4, 0, 10, 0),
+           (5, 0, 0, 10), (6, 10, 0, 10), (7, 10, 10, 10), (8, 0, 10, 10)]
+    if free_node:
+        pts.append((50, 30, 0, 0))
+    ctrl = ["*CONTROL_TERMINATION", _row(0.001)]
+    if implicit:
+        ctrl += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 0.0001)]
+    return "\n".join(
+        ["*KEYWORD"] + ctrl + ["*NODE"]
+        + [f"{n:>8}{float(x):>16}{float(y):>16}{float(z):>16}"
+           for n, x, y, z in pts]
+        + ["*ELEMENT_SOLID",
+           "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8)),
+           "*PART", "block", _row(1, 1, 1),
+           "*SECTION_SOLID", _row(1, 1),
+           "*MAT_ELASTIC", _row(1, 7.85e-9, 210000.0, 0.3),
+           (_VEC3 + extra + spc).rstrip("\n"), "*END", ""])
+
+
+def a6_vector_spc() -> str:
+    """(a): nodes 1-4 (set 10) held in x' / y' of the VECTOR frame 3."""
+    return _a6_block("*SET_NODE_LIST\n" + _row(10) + "\n" + _row(1, 2, 3, 4)
+                     + "\n*BOUNDARY_SPC_SET\n" + _row(10, 3, 1, 1, 0, 0, 0, 0)
+                     + "\n")
+
+
+_A6_VECTOR_386444E_SHA = "6803105a17895fa762cdcf26bd3422b6b8419c5f82e0409c24bd004502554dcc"
+
+
+def _bcs_rows(starter: str):
+    """[(Tra, Rot, skew_ID, grnod_ID)] of every /BCS."""
+    out = []
+    for head, body in _blocks(starter, "/BCS/"):
+        d = body[1].split()
+        out.append((d[0], d[1], int(d[2]), int(d[3])))
+    return out
+
+
+def a6_free_node_vector_spc() -> str:
+    """(b) / (d): an IMPLICIT block whose free node 50 carries a VECTOR-CID
+    SPC (x', y', z' held)."""
+    return _a6_block("*BOUNDARY_SPC_NODE\n" + _row(50, 3, 1, 1, 1, 0, 0, 0)
+                     + "\n", implicit=True, free_node=True)
+
+
+class SpcVectorFrames(unittest.TestCase):
+    """A6 (part-A spec A6): ONE helper (writer/loads.spc_cid_skew) for the
+    five *BOUNDARY_SPC consumers; a VECTOR CID is written in its existing
+    /SKEW/FIX/<cid>.
+
+    STARTER RUNS (nt 4, rcv_r9i_implA_<name>): a6_vector_spc() default
+    (p_a6vec_n4) and --no-spc-vector-frames (p_a6vecOff_n4, = 386444e): 0
+    ERROR / 0 WARNING each. a6_free_node_vector_spc() default
+    (p_a6free_n4): ERROR 148 + WARNING 312 - the named outcome: the
+    free-node guard's global card on a node whose SPC sits in /SKEW 3 is
+    the one-skew-per-node pair its sentence names (reach 0: every roster
+    VECTOR-CID SPC row is on the explicit cylinder).
+
+    ENGINE (control_adaptive.cylinder, explicit nt 4, the branch bytes vs
+    the 386444e base in one window, 271 = 271 cycles; an output-only
+    displacement /TH block on the 14 rotated-frame SPC nodes): the
+    constrained local displacement max 0.33518 mm (node 86, frame 6) ->
+    1.81e-8 mm, the free-DOF reaction max 4610.9 -> 0.0239 N (RMS 1105.7 ->
+    0.0019 N), all 271 states; IE END +5.3989 -> +5.3776 %, KE END +20.6080
+    -> +20.2914 % (19 LS times in (1.8828e-05, 3.79839e-04]); a second run
+    of the branch bytes identical to every digit.
+    """
+
+    def test_a_a_VECTOR_CID_is_the_BCS_skew(self):
+        res, st, _e = _convert(a6_vector_spc())
+        self.assertIn(("110", "000", 3, 10), _bcs_rows(st))
+        self.assertTrue(re.search(r"^/SKEW/FIX/3$", st, re.M))
+        self.assertTrue(_has(res.warnings, _W_A6, "(3)", "0.3352 mm",
+                             "4611 N", "--no-spc-vector-frames"))
+        self.assertFalse(_has(res.warnings, _NOT_FOUND))
+
+    def test_a2_the_opt_out_restores_the_bytes_with_a_true_sentence(self):
+        res, st, _e = _convert(a6_vector_spc(), spc_vector_frames=False)
+        self.assertEqual(_sha(st), _A6_VECTOR_386444E_SHA)
+        self.assertIn(("110", "000", 0, 10), _bcs_rows(st))
+        self.assertTrue(_has(res.warnings, _W_A6_OFF, "CID 3"))
+        self.assertFalse(_has(res.warnings, _NOT_FOUND))
+        self.assertFalse(_has(res.warnings, _W_A6))
+
+    def test_a3_a_CID_in_no_registry_keeps_the_true_not_found(self):
+        deck = _a6_block("*SET_NODE_LIST\n" + _row(10) + "\n"
+                         + _row(1, 2, 3, 4) + "\n*BOUNDARY_SPC_SET\n"
+                         + _row(10, 9, 1, 1, 0, 0, 0, 0) + "\n")
+        for kw in ({}, {"spc_vector_frames": False}):
+            with self.subTest(**kw):
+                res, st, _e = _convert(deck, **kw)
+                self.assertIn(("110", "000", 0, 10), _bcs_rows(st))
+                self.assertTrue(_has(res.warnings, "cid=9", _NOT_FOUND))
+
+    def test_b_a_VECTOR_SPC_is_not_a_global_bit_for_the_free_node_guard(self):
+        """_global_spc_dofs: the VECTOR-CID free node is NOT a global SPC
+        bit, so the implicit free-node guard keeps its 111 111 card on it
+        and names the ERROR 148 pair (d); under the opt-out the SPC is
+        global and the guard writes only the remaining DOFs."""
+        deck = a6_free_node_vector_spc()
+        res, st, _e = _convert(deck)
+        groups = _grnod_by_id(st)
+        guard = {(t, r, s): groups[g][1] for t, r, s, g in _bcs_rows(st)
+                 if g in groups and groups[g][0].startswith("free_reference")}
+        self.assertEqual(guard, {("111", "111", 0): [50]})
+        self.assertTrue(_has(res.warnings, "Free-node guard: free node(s)",
+                             "50", "/SKEW 3", "ERROR 148"))
+        r_off, st_off, _e = _convert(deck, spc_vector_frames=False)
+        self.assertFalse(_has(r_off.warnings, "/SKEW 3", "ERROR 148"))
+        self.assertTrue(_has(r_off.warnings, "Free-node guard x "
+                             "*BOUNDARY_SPC"))
+
+    def test_c_the_CONSTRAINED_LINEAR_screen_sees_the_skew(self):
+        import test_r14_triage_6 as _t6
+        spc = (_VEC3 + "*BOUNDARY_SPC_NODE\n"
+               + _row(40, 3, 0, 0, 1, 0, 0, 0) + "\n")
+        r_on, _s, _e = _convert(_t6._linear_deck(extra=spc))
+        r_off, _s, _e = _convert(_t6._linear_deck(extra=spc),
+                                 spc_vector_frames=False)
+        self.assertTrue(_has(r_on.warnings, "node 40 DOF 3 already carries",
+                             "a skewed *BOUNDARY_SPC /BCS"))
+        self.assertTrue(_has(r_off.warnings, "node 40 DOF 3 already carries",
+                             "*BOUNDARY_SPC /BCS"))
+        self.assertFalse(_has(r_off.warnings, "a skewed *BOUNDARY_SPC /BCS"))
+
+    def test_e_the_screw_body_condition_carries_the_skew(self):
+        mod = _t7._screw_synthetic()
+        start = mod.TOP_NODE - (27 + 27 + 9 * len(mod.PLATES)) + 1
+        extra = (_VEC3 + "*BOUNDARY_SPC_NODE\n"
+                 + _row(start, 3, 1, 0, 0, 0, 0, 0) + "\n")
+        deck = mod.build_deck(extra=extra)
+        r_on, _s, _e = _convert(deck)
+        r_off, _s, _e = _convert(deck, spc_vector_frames=False)
+        self.assertTrue(_has(r_on.warnings, "in a local system (/SKEW 3"))
+        self.assertFalse(_has(r_off.warnings, "in a local system (/SKEW 3"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

@@ -139,6 +139,27 @@ Prior history (before this changelog was introduced) is summarized in the
     every fifth. Movers A4 4 keys / 4 models (ex_16 + the Yaris roof crush
     and the two suspension giants, convert + starter only; the door sag's
     rigid parts own no element and already sat in its part group), A5 1 / 1.
+  - **`*BOUNDARY_SPC` on a `*DEFINE_COORDINATE_VECTOR` CID is written in that
+    frame** (A6; round-8 entry 27; default ON, `--no-spc-vector-frames`
+    writes it in the GLOBAL system as before, with a corrected sentence in
+    place of the false 'not found'). ONE helper,
+    `writer/loads.spc_cid_skew`, for the five consumers - `_make_bcs`,
+    `_global_spc_dofs`, the `*CONSTRAINED_LINEAR` screen, the free-node
+    guard / ERROR 148 refusal, the screw `BodyCondition` - and the
+    `*LOAD_NODE` CID sibling (D9, reach 0); a CID in no registry keeps the
+    global fallback and its true sentence; one W-A6 sentence per deck.
+    control_adaptive.cylinder (the only mover, 1 key / 1 model): the 48
+    `/BCS` skew cells 0 -> their CID (the existing `/SKEW/FIX/<cid>`),
+    warnings 50 -> 3. MEASURED (explicit nt 4, base-paired, 271 = 271
+    cycles; an output-only displacement `/TH` block on the 14 rotated-frame
+    SPC nodes): the constrained local displacement max 0.3352 -> 1.8e-8 mm
+    (node 86, frame 6) and the reaction on a FREE local DOF max 4611 ->
+    0.024 N (RMS 1106 -> 0.0019 N; LS-DYNA 0), on all 271 states; IE END
+    +5.3989 -> +5.3776 %, fifths +1.89 / +0.53 / +2.18 / +3.94 / +5.40 ->
+    +2.00 / +1.02 / +2.72 / +4.14 / +5.38 %, KE END +20.6080 -> +20.2914 %,
+    RMS IE / KE 2.53 / 3.47 -> 2.74 / 3.28 % (19 LS times in (1.8828e-05,
+    3.79839e-04], t_end 0.0004); the row stays deviation on KE (LS runs
+    *CONTROL_ADAPTIVE). The SYSTEM-CID decks byte-identical.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

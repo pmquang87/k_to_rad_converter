@@ -264,9 +264,8 @@ def _body_conditions(state: ConversionState, nodes: Set[int]
     for bc in state.bcs_spcs:
         hit = sorted(set(state.node_sets.get(bc.nsid, ("", []))[1]) & nodes)
         if hit:
-            skew = (bc.cid if bc.cid and (bc.cid in state.coord_sys
-                                          or bc.cid in state.coord_nodes)
-                    else 0)
+            from .loads import spc_cid_skew       # round 9, A6
+            skew = spc_cid_skew(state, bc.cid)
             out.append(BodyCondition(
                 "bcs_spc", hit[0], _dof_string(bc.dofx, bc.dofy, bc.dofz),
                 _dof_string(bc.dofrx, bc.dofry, bc.dofrz),

@@ -934,6 +934,20 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-2d-beam-thickness-section) restores the refusal.",
     )
     parser.add_argument(
+        "--spc-vector-frames",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a *BOUNDARY_SPC whose CID is a *DEFINE_COORDINATE_VECTOR "
+             "in that frame's /SKEW/FIX (LS-DYNA applies the DOFs in the "
+             "local system), through one helper all five consumers read; "
+             "before round 9 the constraint went to the GLOBAL system behind "
+             "a false 'not found'. MEASURED on control_adaptive.cylinder (48 "
+             "rows, explicit nt 4, 271 = 271 cycles): the constrained radial "
+             "displacement 0.3352 -> 1.8e-8 mm, the free-DOF reaction 4611 -> "
+             "0.024 N (LS-DYNA 0). ON by default; --no-spc-vector-frames "
+             "restores the global writing.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1629,6 +1643,7 @@ def main(argv=None) -> int:
         implicit_n2s_type7=args.implicit_n2s_type7,
         implicit_rigid_gravity_nodes=args.implicit_rigid_gravity_nodes,
         elform7_beam_thickness_section=args.elform7_beam_thickness_section,
+        spc_vector_frames=args.spc_vector_frames,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
