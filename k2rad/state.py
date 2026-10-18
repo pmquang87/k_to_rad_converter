@@ -8485,9 +8485,11 @@ class ConvertOptions:
     #
     # ON by default (R14 triage round 9, A9; round-8 entry 18):
     # writer/loads._shared_local_skew writes the drive in the /BCS skew when
-    # (a) the /BCS holds every rotation, (b) the frames are equal at t 0, (c)
-    # no DOF is held and driven, and the main node carries exactly one
-    # skewed card (D12); otherwise both skews stay, named. MEASURED on g2g's
+    # (a) the /BCS holds every rotation, (b) the frames are equal at t 0
+    # (every axis pair aligned, SIGNED - the fix round's anti-parallel
+    # case), (c) no DOF is held and driven, and the main node carries
+    # exactly one skewed card (D12); otherwise both skews stay, named. On an
+    # IMPLICIT deck only (decision A9: explicit unchanged). MEASURED on g2g's
     # two-card implicit coupon: two skews impose x0.750 / x-0.5625 of the
     # prescribed value (frames (2,1,1)/sqrt6, (2,2,1)/3), one skew x1.000,
     # nt 2 = nt 4; the Yaris roof crush's starter WARNING 312 goes (convert +

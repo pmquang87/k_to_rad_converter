@@ -546,7 +546,9 @@ Prior history (before this changelog was introduced) is summarized in the
     `kinset.F:103-105`). `writer/loads._shared_local_skew` writes the drive
     in the card's skew when the main node has exactly one skewed card
     (D12) and (a) Rot is 111, (b) the frames are equal at t 0 (LCO = CON1
-    or every axis pair within 1e-9), (c) no DOF is held and driven;
+    or every axis pair aligned within 1e-9, signed since the fix round),
+    (c) no DOF is held and driven, on an implicit deck (explicit unchanged
+    since the fix round);
     otherwise both stay and the failed condition is named; the `/SKEW/MOV`
     stays (inert). MEASURED on g2g's two-card coupon rebuilt in the tests
     (implicit, nt 4 = nt 2, 9 cycles both arms): 0.0075 -> 0.0100 mm along

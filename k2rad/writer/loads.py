@@ -5205,12 +5205,18 @@ def _shared_local_skew(state: ConversionState, pm, main: int, base_dir: str,
     When the main node carries exactly ONE skewed card of its own body
     (decision D12) and (a) that card holds every rotation (Rot 111), (b) the
     drive's frame at t 0 is the card's (LCO == CON1, or every axis pair
-    |e_i . e_i'| >= 1 - 1e-9), (c) the drive's DOF is not one the card holds,
-    the drive is written in the CARD's skew - equal at t 0 and both rotate
-    with the body as long as no rotation is free. Otherwise both skews stay
-    and the failed condition is named. The /SKEW/MOV and its three nodes stay
-    (inert). Explicit decks follow the same bytes rule (both paths impose the
-    same motion there)."""
+    e_i . e_i' >= 1 - 1e-9 - SIGNED: a frame turned 180 degrees about one
+    axis has two anti-parallel pairs and would impose the drive backwards in
+    the card's skew, measured -0.0100 mm for a prescribed +0.01 mm on the
+    W1i coupon, implicit, nt 4), (c) the drive's DOF is not one the card
+    holds, the drive is written in the CARD's skew - equal at t 0 and both
+    rotate with the body as long as no rotation is free. Otherwise both
+    skews stay and the failed condition is named. The /SKEW/MOV and its
+    three nodes stay (inert). IMPLICIT decks only (the caller's gate,
+    decision A9 'explicit unchanged'): an explicit deck keeps the 386444e
+    bytes, where the two skews impose the motion exactly (an explicit
+    two-card coupon with a step-setting shell: u . x' = the ramp value,
+    x1.0000, with two skews and with one, 665 cycles each, nt 4)."""
     cards = _rigid_skewed_cards(state).get(main, [])
     if len(cards) != 1:
         return mov_skew
@@ -5233,7 +5239,7 @@ def _shared_local_skew(state: ConversionState, pm, main: int, base_dir: str,
         bcs_basis = (_icid_basis(state, bcs_cid) if bcs_cid else
                      ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
         if not same_cid and (bcs_basis is None or any(
-                abs(_vdot(a, b)) < 1.0 - 1e-9
+                _vdot(a, b) < 1.0 - 1e-9
                 for a, b in zip(drive_basis, bcs_basis))):
             why = (f"(b) the drive's frame at t 0 is not the /BCS {btitle}'s "
                    f"(/SKEW {bskew})")
@@ -5324,8 +5330,10 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
         ref = f"pid={pm.pid}"
         skew_id = _pm_skew_for(state, pm, keyword, ref)
         # round 9, A9: a _LOCAL drive shares the skew of its body's own CMO -1
-        # /BCS when the two frames are one (no second skew id on the node)
+        # /BCS when the two frames are one (no second skew id on the node) -
+        # on an IMPLICIT deck only (decision A9: explicit unchanged)
         if (pm.local and skew_id and skew_id == getattr(pm, "skew_id", 0)
+                and state.is_implicit
                 and state.options.rigid_local_shared_skew):
             skew_id = _shared_local_skew(state, pm, info["ind_node"],
                                          base_dir, skew_id)

@@ -1164,11 +1164,13 @@ def convert(
         starter already reads 0 as 1.0, read_impdisp.F:239). Default True;
         False keeps the stated 0.
     rigid_local_shared_skew : bool
-        Write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the skew of
-        the body's own CMO -1 /BCS (R14 triage round 9, A9) when the frames
-        coincide at t 0, the /BCS holds every rotation and no DOF is held and
-        driven: two skew ids on one node make the implicit solver impose a
-        frame-dependent wrong displacement with a 0.0 % energy error (a
+        On an implicit deck write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL
+        drive in the skew of the body's own CMO -1 /BCS (R14 triage round 9,
+        A9; explicit decks unchanged) when the frames coincide at t 0 (every
+        axis pair aligned, signed), the /BCS holds every rotation and no DOF
+        is held and driven: two skew ids on one node make the implicit
+        solver impose a frame-dependent wrong displacement with a 0.0 %
+        energy error (a
         two-card coupon: x0.750 / x-0.5625 of the motion in two oblique
         frames, x1.000 in one skew) and the starter print WARNING 312.
         Default True.

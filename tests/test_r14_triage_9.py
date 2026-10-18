@@ -1433,10 +1433,41 @@ class RigidLocalSharedSkew(unittest.TestCase):
         res, st, _e = _convert(_w1i(vad=0))
         self.assertEqual(_imp_skews(st), [7])
 
-    def test_6_an_explicit_twin_follows_the_same_bytes_rule(self):
-        res, st, _e = _convert(_w1i(implicit=False))
-        self.assertEqual(_imp_skews(st), [7])
-        self.assertTrue(_has(res.warnings, _W_A9 + "7"))
+    def test_3d_an_anti_parallel_frame_keeps_both_skews(self):
+        """The fix round's F1: LCO 9 = CON1 7 turned 180 degrees about z'
+        (x'' = -x', y'' = -y', z'' = z') passed the round-9 |e . e'| test and
+        the drive went into /SKEW/7 with 'the frames are equal at t 0' -
+        measured -0.0100 mm for the prescribed +0.01 mm (implicit, nt 4,
+        9 cycles NORMAL; the 386444e bytes +0.0075). The SIGNED test keeps
+        the two skews and names condition (b); the LCO = CON1 control and
+        test_3b's equal-axes frame still share."""
+        rot180 = ("*DEFINE_COORDINATE_SYSTEM\n"
+                  + _row(9, 0.0, 0.0, 5.0, -2.0, -1.0, 4.0, 0) + "\n"
+                  + _row(5.0, -7.5, 2.5) + "\n")
+        res, st, _e = _convert(_w1i(lco=9, extra_cs=rot180))
+        self.assertNotEqual(_imp_skews(st), [7])
+        self.assertFalse(_has(res.warnings, _W_A9))
+        self.assertTrue(_has(res.warnings, _W_A9_KEPT, "(b) the drive's "
+                             "frame at t 0 is not the /BCS"))
+        r_c, st_c, _e = _convert(_w1i(lco=7))
+        self.assertEqual(_imp_skews(st_c), [7])
+        self.assertTrue(_has(r_c.warnings, _W_A9 + "7"))
+
+    def test_6_an_explicit_twin_keeps_the_386444e_bytes(self):
+        """Decision A9 'explicit unchanged' (the fix round re-derived this
+        test from the round-9 'follows the same bytes rule'): on an explicit
+        deck the two skews impose the motion exactly (an explicit two-card
+        coupon with a step-setting shell: x1.0000 in both arms, 665
+        cycles, nt 4), so the rule is gated on /IMPL and the explicit twin
+        converts as with --no-rigid-local-shared-skew."""
+        res, st, eng = _convert(_w1i(implicit=False))
+        self.assertNotEqual(_imp_skews(st), [7])
+        self.assertFalse(_has(res.warnings, _W_A9))
+        self.assertFalse(_has(res.warnings, _W_A9_KEPT))
+        r_off, st_off, eng_off = _convert(_w1i(implicit=False),
+                                          rigid_local_shared_skew=False)
+        self.assertEqual((st, eng), (st_off, eng_off))
+        self.assertEqual(res.warnings, r_off.warnings)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

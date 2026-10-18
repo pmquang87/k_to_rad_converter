@@ -1005,13 +1005,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--rigid-local-shared-skew",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the "
+        help="On an implicit deck write a "
+             "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the "
              "skew of the body's own CMO -1 /BCS when the frames coincide at "
-             "t 0, every rotation is held and no DOF is held and driven: two "
+             "t 0 (every axis aligned, signed), every rotation is held and no "
+             "DOF is held and driven: two "
              "skews on one node make the implicit solver impose a wrong "
              "displacement (a two-block coupon: x0.750 / x-0.5625 of the "
              "motion in two oblique frames, x1.000 in one skew; nt 2 = nt 4) "
-             "and the starter print WARNING 312. ON by default; "
+             "and the starter print WARNING 312. Explicit decks are "
+             "unchanged. ON by default; "
              "--no-rigid-local-shared-skew keeps the two skews.",
     )
     parser.add_argument(

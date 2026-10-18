@@ -1198,9 +1198,9 @@ class ConverterGUI:
                 row=68, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="RIGID_LOCAL drive shares the skew of its body's CMO -1 "
-                     "/BCS (no second skew on the node) - ON. Coupon x0.75 -> "
-                     "x1.00 of the motion",
+            io, text="Implicit RIGID_LOCAL drive shares the skew of its "
+                     "body's CMO -1 /BCS (no second skew on the node) - ON. "
+                     "Coupon x0.75 -> x1.00 of the motion",
             variable=self.rigid_local_shared_skew).grid(
                 row=69, column=0, columnspan=3, sticky="w", **pad)
 

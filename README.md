@@ -1028,12 +1028,16 @@ both cards ERROR 148); the implicit stabilisation of an unloaded free
 translation is never added to a skewed card, and a merged
 `*CONSTRAINED_RIGID_BODIES` slave's different code is named.
 **A `*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL` drive shares the skew of its
-body's own CMO −1 `/BCS`** (round 9, A9; default ON,
+body's own CMO −1 `/BCS`** (round 9, A9; default ON on IMPLICIT decks,
 `--no-rigid-local-shared-skew` keeps the two skews) when the main node carries
 exactly one skewed card of its body and (a) the card holds every rotation (Rot
 `111`), (b) the drive's frame at t = 0 is the card's (`LCO` = `CON1`, or every
-axis pair within 1e-9), (c) no DOF is held AND driven; otherwise both skews
-stay and the failed condition is named. Two skew ids on one main node make the
+axis pair aligned within 1e-9 — SIGNED: a frame turned 180° about one axis
+keeps the two skews, because in the card's skew the drive would run backwards,
+measured −0.0100 mm for a prescribed +0.01 mm), (c) no DOF is held AND driven;
+otherwise both skews stay and the failed condition is named. Explicit decks
+are unchanged (the two skews impose the motion exactly there: ×1.0000 on an
+explicit two-card coupon with a step-setting shell, both arms). Two skew ids on one main node make the
 IMPLICIT solver condense the `/BCS` skew (`bc_imp0.F:159-337`) and the skewed
 drive (`fv_imp0.F:1182-1205`) separately: it imposes a frame-dependent WRONG
 displacement behind an energy error of 0.0 %, and the starter prints WARNING
