@@ -269,6 +269,7 @@ def convert(
     deformable_to_rigid: bool = True,
     fixpoint_count: int = 0,
     qstat_dtscal: Union[str, float] = 10.0,
+    qstat_dtscal_stated: bool = False,
     arclength_riks: bool = False,
     zero_tolerance_ectol: bool = True,
     implicit_constant_step: bool = False,
@@ -503,6 +504,11 @@ def convert(
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
         validated 0.05 and ignores this.
+    qstat_dtscal_stated : bool
+        Whether ``qstat_dtscal`` was GIVEN rather than left at its default
+        (R14 triage round 9, A11; the CLI sets it when ``--qstat-dtscal``
+        appears, the GUI when its QSTAT box is filled). ``arclength_riks``
+        writes no ``/IMPL/QSTAT`` card unless this is True. Default False.
     arclength_riks : bool
         Emit ``/IMPL/DT/3`` (RIKS arc-length continuation) in place of
         ``/IMPL/DT/2`` when ``*CONTROL_IMPLICIT_SOLUTION`` asks for LS-DYNA's
@@ -515,13 +521,14 @@ def convert(
         shipped first and is retracted: it made ``ex_06_beam_elform_1`` a
         carrier, and that deck's own LS-DYNA ``d3hsp`` shows plain BFGS.)
         Roster reach: **2 keys**. **Off by default**; the request is warned
-        about either way. It buys the load path, not the answer: measured at
-        nt 3 AND nt 4 on both carriers (``error_engine`` either way) against
-        this branch's own flag-off baseline, ``ex_07_beam_elform_1`` walks
-        from ``t = 0.3004`` to ``t = 1.000`` at −1.72 % of its reference but
-        still exits ERROR on the last increment, and
-        ``ex_05_beam_elform_3_&_6`` fails in ~2 s without the flag and with
-        it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
+        about either way. Since round 9 (A11) the flag also writes NO
+        ``/IMPL/QSTAT`` card unless ``qstat_dtscal_stated`` (the quasi-static
+        term stiffens the arc-length tangent). It buys a load path, NOT the
+        answer: on ``ex_07_beam_elform_1`` the path loops through negative
+        load factors LS-DYNA never visits and the run ends NORMAL in 4 of 5
+        runs of identical bytes, ERROR once; ``ex_05_beam_elform_3_&_6``
+        still stops; the LS reference of both is UNMATCHED (its time axis
+        runs backwards), so no run is evidence of the answer.
         ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
         (``lectur.F:3523-3532``).
     zero_tolerance_ectol : bool
@@ -1558,6 +1565,7 @@ def convert(
         deformable_to_rigid=deformable_to_rigid,
         fixpoint_count=fixpoint_count,
         qstat_dtscal=qstat_dtscal,
+        qstat_dtscal_stated=qstat_dtscal_stated,
         arclength_riks=arclength_riks,
         zero_tolerance_ectol=zero_tolerance_ectol,
         implicit_constant_step=implicit_constant_step,

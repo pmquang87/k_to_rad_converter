@@ -5988,11 +5988,19 @@ arc length method"* — not a switch; card 3 is ignored outright unless the
 method is already active. Roster reach: **2 keys**. `/IMPL/DT/3` carries SEVEN
 cells where `/IMPL/DT/2` carries five (`freimpl.F:384-387`), and the engine
 DEACTIVATES `/IMPL/DT/FIXPOINT` under RIKS (`lectur.F:3523-3532`), so
-`--fixpoint-count` is dropped with it and says so. It buys the load path, not
-the answer: `ex_07_beam_elform_1` walks from `t = 0.3004` to `t = 1.000` at
-**−1.72 %** of its reference and still exits ERROR on the last increment,
-while `ex_05_beam_elform_3_&_6` turns a ~2 s ERROR into a 600 s timeout —
-which is why it ships off.
+`--fixpoint-count` is dropped with it and says so. **Since round 9 (A11) the
+flag writes NO `/IMPL/QSTAT` card unless `--qstat-dtscal` is given** (the
+quasi-static term adds `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the diagonal,
+`imp_dyna.F:351-355`, and the engine has no QSTAT-versus-RIKS guard,
+`lectur.F:3517-3532` disarms only FIXPOINT). It buys a load path, not the
+answer: on `ex_07_beam_elform_1` the converged load factor loops down to
+−0.4412 (94-97 turning points) where LS-DYNA's own path turns once, at 0.3745,
+and never goes below 0; five runs of identical bytes end NORMAL four times
+(1206 / 1192 cycles at nt 4, 1202 twice at nt 2) and ERROR once (MESSAGE 79 at
+cycle 1421, the load factor back at 0), and `ex_05_beam_elform_3_&_6` still
+stops (MESSAGE 79 at load factor 0.8548 / 0.8698, nt 4 / 2). The LS reference
+of both is UNMATCHED (its time axis runs backwards), so no run is evidence of
+the answer — which is why it ships off.
 `*CONTROL_IMPLICIT_SOLUTION` whose `DCTOL`/`ECTOL`/`RCTOL` are **all 0 or
 blank** → `/IMPL/NONLIN/1` **Itol 1, Toli 0.01** — LS-DYNA's own ECTOL
 default — instead of k2rad's force default Itol 2 (round 6, **on by

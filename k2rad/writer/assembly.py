@@ -681,19 +681,19 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
             "cells take lectur.F:3518-3522's defaults NL_DTP 12 / NL_DTN 25 / "
             "Tsca_dn 2-3 / Tsca_up 1.2 / IAL_M 2). ")
     measured = (
-        "It BUYS THE LOAD PATH, NOT THE ANSWER - measured at nt 3 AND nt 4 on "
-        "this corpus's TWO carriers, both of which are error_engine either "
-        "way, and both arms stated against this branch's OWN flag-off "
-        "baseline (which /IMPL/QSTAT/DTSCAL 10 already moved): "
-        "ex_07_beam_elform_1 walks from t = 0.3004 to t = 1.000 and lands at "
-        "-1.72 % of its LS-DYNA reference (identical at both nt) but still "
-        "exits ERROR on the last increment (ISTOP -2, MESSAGE ID 79); "
-        "ex_05_beam_elform_3_&_6 stays at t = 1e-5 and fails in ~2 s without "
-        "the flag, and with it runs tens of thousands of cycles to t ~ 1e-7 "
-        "and TIMES OUT - which is why the flag ships OFF. "
-        "/IMPL/DT/FIXPOINT is DEACTIVATED by the engine under RIKS "
-        "(lectur.F:3523-3532), so --fixpoint-count is silently disarmed with "
-        "it.")
+        "It BUYS THE LOAD PATH, NOT THE ANSWER: on ex_07_beam_elform_1 the "
+        "path loops through negative load factors LS-DYNA never visits (the "
+        "converged load factor down to -0.4412 with 94-97 turning points in "
+        "the round-9 runs; LS-DYNA's path turns once, at 0.3745, and never "
+        "goes below 0) and the run ends NORMAL in 4 of 5 runs of identical "
+        "bytes (1206 / 1192 cycles at nt 4, 1202 twice at nt 2) and ERROR "
+        "once (MESSAGE 79 at cycle 1421, the load factor back at 0); "
+        "ex_05_beam_elform_3_&_6 still stops (MESSAGE 79 at load factor "
+        "0.8548 / 0.8698, nt 4 / 2). The LS reference of both is UNMATCHED "
+        "(its time axis runs backwards), so no run is evidence of the "
+        "answer - which is why the flag ships OFF. /IMPL/DT/FIXPOINT is "
+        "DEACTIVATED by the engine under RIKS (lectur.F:3523-3532), so "
+        "--fixpoint-count is silently disarmed with it.")
     if modal:
         state.warn(head + "This deck is a NORMAL-MODES (/EIG) analysis, whose "
                           "engine is /IMPL/LINEAR plus the stiffness export "
@@ -702,8 +702,13 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
                           "--arclength-riks says - there is no step controller "
                           "for /IMPL/DT/3 to replace. " + measured)
     elif state.options.arclength_riks:
-        state.warn(head + "--arclength-riks was passed, so /IMPL/DT/3 is "
-                          "emitted in place of /IMPL/DT/2. " + measured)
+        qstat = ("the /IMPL/QSTAT card --qstat-dtscal asked for is kept"
+                 if state.options.qstat_dtscal_stated else
+                 "NO /IMPL/QSTAT card is written (the quasi-static term would "
+                 "stiffen the arc-length tangent, imp_dyna.F:351-355; pass "
+                 "--qstat-dtscal to keep one)")
+        state.warn(head + "--arclength-riks was passed: /IMPL/DT/3 replaces "
+                          f"/IMPL/DT/2 and {qstat}. " + measured)
     else:
         state.warn(head + "It is NOT emitted: k2rad writes /IMPL/DT/2 and the "
                           "arc-length request is DROPPED. Pass "
@@ -1366,6 +1371,16 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # _warn_deformable_deformable_contact.
         if _recipe_active(state):
             lines += ["/IMPL/QSTAT/DTSCAL", " 0.05"]
+        elif (state.options.arclength_riks and _arclength_requested(state)
+              and not state.options.qstat_dtscal_stated):
+            # R14 triage round 9, A11: --arclength-riks writes NO quasi-
+            # static term unless --qstat-dtscal was GIVEN - it adds
+            # M/((1+alpha)*beta*(DTSCAL*dt)^2) to the diagonal
+            # (imp_dyna.F:351-355), i.e. stiffens the arc-length tangent,
+            # and the engine has no QSTAT-versus-RIKS guard
+            # (lectur.F:3517-3532 disarms only FIXPOINT). The recipe above
+            # is evaluated first and keeps its 0.05.
+            pass
         else:
             dtscal = _qstat_dtscal_cell(state)
             if dtscal is not None:

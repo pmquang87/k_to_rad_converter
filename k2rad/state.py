@@ -7483,14 +7483,22 @@ class ConvertOptions:
     # --deformable-contact-recipe keeps its separately validated 0.05 and
     # IGNORES this field (the recipe branch is evaluated first).
     qstat_dtscal: Union[str, float] = 10.0
+    # Whether qstat_dtscal was GIVEN (R14 triage round 9, A11): the CLI's
+    # --qstat-dtscal action and the GUI's filled QSTAT box set it, because
+    # the default 10.0 cannot tell "not given" from "given as 10".
+    # writer/assembly.py writes no /IMPL/QSTAT on an --arclength-riks deck
+    # unless it is True.
+    qstat_dtscal_stated: bool = False
     # --arclength-riks: emit /IMPL/DT/3 (RIKS arc-length continuation) instead
     # of /IMPL/DT/2 when *CONTROL_IMPLICIT_SOLUTION asks for LS-DYNA's
-    # arc-length method (card-1 NSOLVR in {6,7,8,9}, or card-3 ARCCTL != 0).
+    # arc-length method (card-1 NSOLVR in {6,7,8,9}, or NSOLVR 12 with card-3
+    # ARCMTH 3 - the manual's rule; writer/assembly._arclength_requested).
     #
     # OPT-IN, default OFF. The predicate itself is always evaluated and always
-    # WARNS -- the three R14 carriers are told what LS-DYNA asked for and which
-    # flag supplies it -- but the card only ships behind the flag, because the
-    # repeat at a second nt REFUTED it as a default:
+    # WARNS -- the R14 carriers are told what LS-DYNA asked for and which flag
+    # supplies it -- but the card only ships behind the flag, because the
+    # repeat at a second nt REFUTED it as a default (the round-7 record, from
+    # when ex_06 still counted as a carrier):
     #   * ex_05_beam_elform_3_&_6 (NSOLVR 6) is a measured REGRESSION:
     #     error_engine in 1.5 s becomes a 600 s TIMEOUT at t = 5.08e-11 after
     #     111734 cycles (nt 4). No card field separates it from ex_07 -- both
@@ -7499,11 +7507,17 @@ class ConvertOptions:
     #     (a NORMAL that is not a result), and COMBINED with the shipped
     #     /IMPL/QSTAT/DTSCAL 10 it reads -0.08 % at nt 4 and ERROR at t = 0 at
     #     nt 3 -- an nt-flip, never quotable as a figure (MISTAKES k2rad #137).
-    #   * ex_07_beam_elform_1 (NSOLVR 6) is the one nt-stable arm: with
-    #     DTSCAL 10 it walks from t = 3e-8 to t = 1.000 and lands at -1.72 % of
-    #     its LS reference, identical at nt 3 and nt 4 -- but still exits ERROR
-    #     on the last increment (its own RCTOL = 1e-5).
-    # It buys the load path, not the answer. Net movers: zero.
+    #   * ex_07_beam_elform_1 (NSOLVR 6) walked from t = 3e-8 to t = 1.000
+    #     with DTSCAL 10 and landed at -1.72 % of its LS reference at nt 3
+    #     and nt 4.
+    # Round 9 (A11): the flag also writes no /IMPL/QSTAT unless
+    # qstat_dtscal_stated, and re-measured ex_07 under it: the path loops
+    # through negative load factors LS-DYNA never visits (down to -0.4412,
+    # 94-97 turning points; LS-DYNA's turns once, at 0.3745), NORMAL in 4 of
+    # 5 runs of identical bytes (1206 / 1192 cycles at nt 4, 1202 twice at
+    # nt 2), ERROR once (MESSAGE 79); ex_05 still stops (load factor 0.8548
+    # / 0.8698); both LS references UNMATCHED. It buys a load path, not the
+    # answer. Net movers: zero.
     arclength_riks: bool = False
     # --no-zero-tolerance-ectol: keep k2rad's force default /IMPL/NONLIN
     # Itol 2 / Toli 0.01 on a *CONTROL_IMPLICIT_SOLUTION whose DCTOL, ECTOL

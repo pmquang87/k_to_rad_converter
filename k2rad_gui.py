@@ -249,6 +249,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     qd = (qstat_dtscal_text or "").strip()
     if qd:                                        # blank -> convert() default (10)
+        # round 9, A11: a filled box is a STATED value - --arclength-riks
+        # then keeps the /IMPL/QSTAT card it would otherwise leave out
+        kwargs["qstat_dtscal_stated"] = True
         if qd.lower() == "none":
             kwargs["qstat_dtscal"] = "none"
         else:
@@ -620,10 +623,10 @@ class ConverterGUI:
                      "for it (Vol I R17 p.12-354: 6 <= NSOLVR <= 9, or NSOLVR 12 with "
                      "card-3 ARCMTH = 3 — ARCCTL is the controlling NODE ID, not a "
                      "switch) — OFF by default; the request "
-                     "is warned about either way. It buys the load path, not the "
-                     "answer: ex_07 walks from t=0.3004 to t=1.000 at -1.72 % but still "
-                     "ERRORs on the last increment, and ex_05 turns a ~2 s error into a "
-                     "600 s timeout",
+                     "is warned about either way; no /IMPL/QSTAT unless the QSTAT box "
+                     "is filled. It buys a load path, not the answer: ex_07 loops "
+                     "through negative load factors LS-DYNA never visits (NORMAL in 4 "
+                     "of 5 runs), ex_05 still stops",
             variable=self.arclength_riks).grid(
                 row=21, column=0, columnspan=3, sticky="w", **pad)
 

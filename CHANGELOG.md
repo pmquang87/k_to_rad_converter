@@ -248,7 +248,30 @@ Prior history (before this changelog was introduced) is summarized in the
     rule. mainboltaexpl's bytes under the flag = the gate's variant
     (sha256 `e72ecb94f505`); g3i's gap coupon: 48 initial penetrations ->
     0 (starter runs). Reach 4 keys / 4 models, 0 default bytes; ROADMAP
-    entry 15 stays open.
+    entry 15 stays open. Re-measured on the branch bytes (nt 4, one engine
+    at a time): all four gate arms reproduce to the printed digit
+    (mainboltaexpl 58550 / 57377 cycles, IE END -8.4881 / -7.5630 %, the
+    bolt 2.19560 / 1.99461 mm, 812 initial penetrations -> 0;
+    EXP_SC_PRELOAD 51954 / 51803 cycles, contact energy END 2916 / 7557).
+  - **`--arclength-riks` writes no `/IMPL/QSTAT` unless `--qstat-dtscal` is
+    given** (A11; inside the opt-in, 0 default bytes). A custom argparse
+    action records whether `--qstat-dtscal` was GIVEN
+    (`qstat_dtscal_stated`; the parser default 10.0 cannot tell), the GUI
+    sets it when its QSTAT box is filled, and `writer/assembly.py` leaves
+    the card out on an arc-length deck under the flag (the
+    `--deformable-contact-recipe` 0.05 is evaluated first and kept). The
+    flag's bytes = the `386444e` flag bytes with the QSTAT card removed
+    (ex_07 engine file sha256 `9219da82fbb6`). MEASURED (five runs of
+    identical bytes): ex_07_beam_elform_1 NORMAL 4 of 5 (1206 / 1192
+    cycles at nt 4, 1202 twice at nt 2), ERROR once (MESSAGE 79 at cycle
+    1421); the converged load factor loops down to -0.4412 where LS-DYNA's
+    path turns once, at 0.3745, and never goes below 0;
+    ex_05_beam_elform_3_&_6 still stops (load factor 0.8548 / 0.8698, nt 4
+    / 2); both references UNMATCHED - never evidence of the answer. The
+    stale "still exits ERROR on the last increment" clause leaves every
+    shipped text (guarded). Re-derived: `test_r14_triage_4`'s warning test
+    keeps "BUYS THE LOAD PATH, NOT THE ANSWER" and the named regression,
+    its nt pair is now the new measurement's (nt 4 and nt 2, "UNMATCHED").
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

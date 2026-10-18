@@ -1784,6 +1784,125 @@ class MixedMainThicknessGap(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A11 - --arclength-riks implies no /IMPL/QSTAT unless --qstat-dtscal is given
+# ═════════════════════════════════════════════════════════════════════════════
+
+import test_r14_triage_4 as _t4  # noqa: E402
+
+
+def a11_riks_deck() -> str:
+    """T4's quasi-static implicit brick with NSOLVR 6 (ex_07's arc-length
+    request)."""
+    return _t4._implicit_deck(nsolvr=6)
+
+
+def _qstat(engine: str):
+    m = re.search(r"^/IMPL/QSTAT/DTSCAL\n(.*)$", engine, re.M)
+    return m.group(1).strip() if m else None
+
+
+class ArclengthRiksNoQstat(unittest.TestCase):
+    """A11 (part-A spec A11; inside the existing opt-in, 0 default bytes):
+    --arclength-riks writes /IMPL/DT/3 and NO /IMPL/QSTAT unless
+    --qstat-dtscal was GIVEN (qstat_dtscal_stated); without the flag QSTAT
+    10 as before. MEASURED on the branch bytes (ex_07 under the flag = the
+    386444e flag bytes with the QSTAT card removed, engine file sha256
+    9219da82fbb6), five runs of identical bytes: NORMAL 1206 / 1192 cycles
+    at nt 4 and 1202 / 1202 at nt 2, ERROR once at nt 4 (MESSAGE 79 at
+    cycle 1421, the load factor back at 0); the converged load factor down
+    to -0.4412 on every run (LS-DYNA's glstat path turns once, at 0.3745,
+    and never goes below 0). ex_05: MESSAGE 79 at load factor 0.8548 (nt 4)
+    / 0.8698 (nt 2).
+    """
+
+    def test_a_the_flag_drops_the_QSTAT_card(self):
+        res, _s, engine = _convert(a11_riks_deck(), arclength_riks=True)
+        self.assertIn("/IMPL/DT/3", engine)
+        self.assertIsNone(_qstat(engine))
+        self.assertTrue(_has(res.warnings, "--arclength-riks was passed: "
+                             "/IMPL/DT/3 replaces /IMPL/DT/2 and NO "
+                             "/IMPL/QSTAT card is written",
+                             "negative load factors", "4 of 5", "UNMATCHED",
+                             "pass --qstat-dtscal to keep one"))
+
+    def test_b_a_stated_value_keeps_the_card(self):
+        res, _s, engine = _convert(a11_riks_deck(), arclength_riks=True,
+                                   qstat_dtscal=10.0,
+                                   qstat_dtscal_stated=True)
+        self.assertEqual(_qstat(engine), "10")
+        self.assertTrue(_has(res.warnings, "the /IMPL/QSTAT card "
+                             "--qstat-dtscal asked for is kept"))
+
+    def test_c_without_the_flag_QSTAT_10_as_before(self):
+        res, _s, engine = _convert(a11_riks_deck())
+        self.assertNotIn("/IMPL/DT/3", engine)
+        self.assertEqual(_qstat(engine), "10")
+        self.assertTrue(_has(res.warnings, "It is NOT emitted",
+                             "Pass --arclength-riks to emit it"))
+
+    def test_d_the_flag_on_a_deck_that_asks_for_nothing_keeps_QSTAT(self):
+        _r, _s, engine = _convert(_t4._implicit_deck(nsolvr=2),
+                                  arclength_riks=True)
+        self.assertEqual(_qstat(engine), "10")
+
+    def test_e_the_recipe_keeps_its_0_05(self):
+        """T4's deformable/deformable two-brick deck + NSOLVR 6: the recipe
+        branch is evaluated first and keeps 0.05 under the flag too."""
+        gen = "*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+        base = _t4.QstatDtscalRecipeStillWinsTests._DEFDEF
+        self.assertIn(gen, base)
+        deck = base.replace(gen, gen + "*CONTROL_IMPLICIT_SOLUTION\n"
+                            + _row(6, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                            + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                            + _row(0, 1, 0.0, 1, 2, 0, 0, 0) + "\n")
+        _r, _s, engine = _convert(deck, arclength_riks=True,
+                                  deformable_contact_recipe=True)
+        self.assertIn("/IMPL/DT/3", engine)
+        self.assertEqual(_qstat(engine), "0.05")
+
+    def test_f_the_cli_records_whether_the_value_was_given(self):
+        from k2rad import cli
+        p = cli.build_parser()
+        cases = {
+            ("m.k",): False,
+            ("m.k", "--arclength-riks"): False,
+            ("m.k", "--arclength-riks", "--qstat-dtscal", "10"): True,
+            ("m.k", "--qstat-dtscal", "none"): True,
+        }
+        for argv, stated in cases.items():
+            with self.subTest(argv=argv):
+                args = p.parse_args(list(argv))
+                self.assertIs(args.qstat_dtscal_stated, stated)
+        self.assertEqual(p.parse_args(["m.k"]).qstat_dtscal, 10.0)
+
+    def test_g_the_three_defaults_agree_and_the_gui_states_a_filled_box(self):
+        import inspect
+        import os
+        import tempfile
+        import k2rad_gui
+        from k2rad import cli, convert
+        from k2rad.state import ConvertOptions
+        self.assertIs(ConvertOptions().qstat_dtscal_stated, False)
+        self.assertIs(inspect.signature(convert).parameters[
+            "qstat_dtscal_stated"].default, False)
+        self.assertIs(cli.build_parser().parse_args(["m.k"])
+                      .qstat_dtscal_stated, False)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "a.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        base = dict(ground_springs=False, ground_spring_k_text="",
+                    soften_stfac_text="")
+        kw = k2rad_gui.build_convert_kwargs(path, "", ("Mg", "mm", "s"),
+                                            **base, qstat_dtscal_text="10")
+        self.assertIs(kw["qstat_dtscal_stated"], True)
+        kw0 = k2rad_gui.build_convert_kwargs(path, "", ("Mg", "mm", "s"),
+                                             **base)
+        self.assertNotIn("qstat_dtscal_stated", kw0)
+        tmp.cleanup()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1802,6 +1921,11 @@ _RETRACTED_ROUND_9_A = (
     # pass-through, refuted at source (TTOFF identical; SINT7/2 earlier)
     "residual stiffens",
     "tangent uses a constant",
+    # A11: ex_07 under --arclength-riks loops through negative load factors
+    # and ends NORMAL in 4 of 5 runs - "ERROR on the last increment" is
+    # stale ("the engine never prints its last increment", the ECTOL
+    # sentence, is another subject and is not needled)
+    "on the last increment",
 )
 
 #: (relative path, a replacement that IS shipped there)
@@ -1812,6 +1936,10 @@ _REPLACEMENTS_ROUND_9_A = (
     ("README.md", "`imp_int_k.F:111-200` has no TYPE25 branch"),
     ("ROADMAP.md", "**Round 9:** CLOSED by A2 (implicit N2S -> one-way TYPE7 "
      "+ the stub, friction-faithful"),
+    ("k2rad/writer/assembly.py", "the run ends NORMAL in 4 of 5 runs of "
+     "identical bytes"),
+    ("README.md", "**Since round 9 (A11) the flag writes NO `/IMPL/QSTAT` "
+     "card unless `--qstat-dtscal` is given**"),
 )
 
 

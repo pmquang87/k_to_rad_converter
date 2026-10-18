@@ -58,6 +58,18 @@ def _qstat_dtscal_arg(text: str) -> Union[str, float]:
     return v
 
 
+class _StatedQstatDtscal(argparse.Action):
+    """``--qstat-dtscal``: store the value AND record that it was stated
+    (R14 triage round 9, A11). ``--arclength-riks`` writes no
+    ``/IMPL/QSTAT`` unless the user asked for one, and the parser default
+    10.0 cannot tell "not given" from "given as 10" - so this action sets
+    ``qstat_dtscal_stated`` (``parser.set_defaults`` makes it False)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.qstat_dtscal_stated = True
+
+
 def _make_progress_printer():
     """A convert() progress callback that prints an updating percentage line."""
     def cb(frac: float, label: str) -> None:
@@ -175,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--qstat-dtscal",
+        action=_StatedQstatDtscal,
         type=_qstat_dtscal_arg,
         default=10.0,
         metavar="VALUE|none",
@@ -221,6 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
              "tensile2 at t = 0.746). --deformable-contact-recipe keeps its "
              "separately validated 0.05 and ignores this flag.",
     )
+    # round 9, A11: whether --qstat-dtscal was GIVEN (_StatedQstatDtscal)
+    parser.set_defaults(qstat_dtscal_stated=False)
     parser.add_argument(
         "--arclength-riks",
         action=argparse.BooleanOptionalAction,
@@ -239,15 +254,15 @@ def build_parser() -> argparse.ArgumentParser:
              "OFF by default; the request is WARNED about "
              "either way. freimpl.F:384-387 reads seven fields "
              "(NL_DTP/ALEN0/NL_DTN/Tsca_dn/Tsca_up/IAL_M/SCAL_RIKS) and the "
-             "zero cells take lectur.F:3518-3522's defaults. It buys the load "
-             "path, not the answer: measured at nt 3 AND nt 4 on both "
-             "carriers, error_engine either way, against this branch's own "
-             "flag-off baseline: ex_07_beam_elform_1 walks from t = 0.3004 "
-             "to t = 1.000 and lands "
-             "at -1.72 %% of its LS-DYNA reference but still exits ERROR on "
-             "the last increment; ex_05_beam_elform_3_&_6 fails in ~2 s "
-             "without the flag and with it runs tens of thousands of cycles "
-             "to t ~ 1e-7 and TIMES OUT. "
+             "zero cells take lectur.F:3518-3522's defaults. Since round 9 "
+             "the flag also writes NO /IMPL/QSTAT card unless --qstat-dtscal "
+             "is given (the quasi-static term stiffens the arc-length "
+             "tangent). It buys a load path, NOT the answer: on "
+             "ex_07_beam_elform_1 the path loops through negative load "
+             "factors LS-DYNA never visits and the run ends NORMAL in 4 of 5 "
+             "runs of identical bytes, ERROR once; ex_05_beam_elform_3_&_6 "
+             "still stops; the LS reference of both is UNMATCHED (its time "
+             "axis runs backwards). "
              "/IMPL/DT/FIXPOINT is deactivated by the engine under RIKS "
              "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
     )
@@ -1651,6 +1666,7 @@ def main(argv=None) -> int:
         deformable_to_rigid=args.deformable_to_rigid,
         fixpoint_count=args.fixpoint_count,
         qstat_dtscal=args.qstat_dtscal,
+        qstat_dtscal_stated=args.qstat_dtscal_stated,
         arclength_riks=args.arclength_riks,
         zero_tolerance_ectol=args.zero_tolerance_ectol,
         implicit_constant_step=args.implicit_constant_step,
