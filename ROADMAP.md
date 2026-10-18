@@ -3043,14 +3043,21 @@ models on the 356-key / 312-model roster.
     (IE END −0.45 %); `2Dlag` and the SPR main are starter-only giants. Next:
     `2Dlag`'s run (giant, never launched; its S-ALE fluid is still skipped); the
     SPR main needs `*CONTACT_2D` and adaptivity. 3 keys / 3 models.
-15. **ELFORM 7 beams beyond a fixed rigid wall** (record): the LS d3hsp rigid
-    mass of `ex_16`'s wall is 5.68× RO × TS1 × L × 1; no deformable ELFORM 7
-    carrier; ELFORM 8 has none. Next: a carrier where the section carries load.
-    1 key / 1 model.
-16. **Implicit gravity on a rigid main node** (record): the implicit routine
-    that drops the main-node load is unlocated (`gravit_imp.F` read); one
-    runnable carrier (`ex_16`) + 4 giants. Next: the source location and a
-    second runnable carrier. 5 keys / 5 models.
+15. **ELFORM 7 beams beyond `ex_16`'s spring-hung wall** (record): the LS
+    d3hsp rigid mass of `ex_16`'s wall is 5.68× RO × TS1 × L × 1; the wall
+    is `CON1 6` (free in y) on a k 345.686 spring and gravity loads it, but
+    its sag m g / k is 4.4e-10 mm, so the section's mass is inert there (the
+    scope is every rigid-only section, not the findings' "fully constrained"
+    one, which reaches 0 keys - named for the user's merge decision); no
+    deformable ELFORM 7 carrier; ELFORM 8 has none. Next: a carrier where the
+    section carries load. 1 key / 1 model.
+16. **Implicit gravity on a rigid main node** (record): the mechanism is
+    LOCATED (the fix round): `gravit_imp.F:84-91` weighs every active rigid
+    body's main node with `RBY(15)`, the main's own mass before the body was
+    formed (`inirby.F:836-837`), so a body whose members are swapped out
+    for an element-free main gets no implicit gravity - A4 keeps the
+    members; one runnable carrier (`ex_16`) + 4 giants. Next: a second
+    runnable carrier. 5 keys / 5 models.
 17. **The nvh K-export hang** (the USER's decision): 6 timeout rows at 0
     cycles; the stock engine's O(NNZ²) merge after a complete K export; the
     k2rad-patched build ends NORMAL in 2-10 s. Next: the user's choice (the

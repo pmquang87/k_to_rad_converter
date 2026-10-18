@@ -8434,8 +8434,10 @@ class ConvertOptions:
     # ON by default (R14 triage round 9, A4; gated on state.is_implicit):
     # writer/loads._make_gravity_loads / _make_body_loads keep the rigid parts
     # in the /GRNOD/PART beside their main node(s) on an implicit deck - the
-    # main's gravity alone leaves the body frozen in an implicit run (the
-    # routine that drops it is not located; gravit_imp.F read). Explicit decks
+    # main's gravity alone leaves the body frozen in an implicit run
+    # (gravit_imp.F:84-91 weighs an active rigid body's main with RBY(15) =
+    # its own pre-body mass, inirby.F:836-837 - 0 on k2rad's element-free
+    # main; located in the fix round). Explicit decks
     # keep the swap (rgbodv.F discards a secondary node's gravity there).
     # MEASURED on ex_16 with A5 (1100 LS times in (1e-4, 0.11], nt 4 = nt 2):
     # NORMAL 1101 cycles, KE fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 %

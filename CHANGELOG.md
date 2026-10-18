@@ -475,8 +475,10 @@ Prior history (before this changelog was introduced) is summarized in the
     `--no-2d-beam-thickness-section`). A4: `writer/loads._make_gravity_loads`
     / `_make_body_loads` keep the rigid parts in the `/GRNOD/PART` beside
     their `/RBODY` main on an implicit deck - the main's gravity alone leaves
-    the body frozen in an implicit run (the routine that drops it is not
-    located; `gravit_imp.F` read); explicit decks keep the swap (the
+    the body frozen in an implicit run (`gravit_imp.F:84-91` weighs an active
+    rigid body's main with `RBY(15)`, the main's own mass before the body
+    was formed, `inirby.F:836-837` - 0 on k2rad's element-free main; the
+    fix round located it); explicit decks keep the swap (the
     pendulum match pair byte-identical) and a CNRB-only scope is unchanged.
     A5: `writer/mesh._elform7_rigid_section` - NOT LS-DYNA's section (its
     rigid mass of ex_16's wall, `ex_16.d3hsp:5947-5948`, is 5.68x rho x TS1 x

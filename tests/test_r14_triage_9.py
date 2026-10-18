@@ -824,6 +824,14 @@ class ImplicitRigidGravityNodes(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "*LOAD_GRAVITY_PART", _W_A4,
                              "gravit_imp.F", "+0.42 / +0.20 / +0.14 %",
                              "--no-implicit-rigid-gravity-nodes"))
+        # the fix round (F-A4-1 + the solver-physics wording): the mechanism
+        # is cited, not 'unlocated', and the step dependence is named
+        self.assertTrue(_has(res.warnings, _W_A4,
+                             "gravit_imp.F:84-91 weighs an active rigid "
+                             "body's main node with RBY(15)",
+                             "inirby.F:836-837", "within 0.7 % at ex_16's "
+                             "dtmax 1e-4 s", "13-14 % short at the fifths"))
+        self.assertFalse(_has(res.warnings, "not located"))
         self.assertFalse(_has(res.warnings, "instead of their mesh nodes"))
 
     def test_the_group_is_still_the_part_node_union(self):
@@ -961,6 +969,11 @@ class TwoDBeamThicknessSection(unittest.TestCase):
                 self.assertTrue(_has(res.warnings, _W_A5, "5.68 x rho",
                                      "0.15414498E-10",
                                      "--no-elform7-beam-thickness-section"))
+                # the fix round (F-A5-1): gravity DOES load ex_16's wall
+                # (*LOAD_BODY_Y on every part); its sag is what is inert
+                self.assertTrue(_has(res.warnings, _W_A5, "gravity sags it "
+                                     "by m g / k = 4.4e-10 mm"))
+                self.assertFalse(_has(res.warnings, "nothing else loads"))
                 self.assertFalse(_has(res.warnings, _REFUSAL))
 
     def test_the_cell_text_is_k2rads_float_format(self):
@@ -2261,8 +2274,8 @@ class Round9FlagWiringA(_t7.Round7FlagWiringA):
             "imp_int_k.F:111-200", "ind_glob_k.F:4601-4605 MESSAGE 232",
             "-15.85 .. -28.08 %", "twelve runs, nt 4 and nt 2", "(silent)"),
         "--implicit-rigid-gravity-nodes": (
-            "gravit_imp.F", "1101 cycles", "+0.42 / +0.20 / +0.14 %",
-            "Explicit decks unchanged"),
+            "gravit_imp.F:84-91", "inirby.F:836-837", "1101 cycles",
+            "+0.42 / +0.20 / +0.14 %", "Explicit decks unchanged"),
         "--elform7-beam-thickness-section": (
             "TS1 x 1", "TS1^3 / 12", "ERROR 314-317", "5.68x"),
         "--spc-vector-frames": (

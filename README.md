@@ -2903,7 +2903,8 @@ restores the refusal): `Area = TS1 × 1`, `Iyy = Izz = TS1³ / 12`,
 section the starter refuses (ERROR 314-317). It is NOT LS-DYNA's section: the
 LS rigid mass of `ex_16`'s ELFORM 7 wall (`ex_16.d3hsp:5947-5948`,
 0.15414498E-10) is 5.68 × ρ × TS1 × L; a rigid member's section sets only the
-body's mass and inertia (inert on `ex_16`, whose wall hangs on a spring), so it
+body's mass and inertia (inert on `ex_16`, whose wall hangs on a k 345.686
+spring: `*LOAD_BODY_Y` loads it too, but its sag m g / k is 4.4e-10 mm), so it
 is written only for sections whose every part is rigid — a deformable ELFORM 7
 member and any ELFORM 8 keep the refusal. (The findings' "fully constrained
 rigid parts" scope reaches 0 keys: `ex_16`'s wall is `CON1 6` with `TC 6` /
@@ -3865,8 +3866,14 @@ and one mass, so it cannot be loaded fractionally and the whole cluster gets
 **On an IMPLICIT deck the rigid parts' own nodes stay in the `/GRAV` group**
 (round 9, A4; default ON, `--no-implicit-rigid-gravity-nodes` restores the
 main-node group). In an implicit run the main node's gravity alone does not
-move the body (the routine that drops it is not located; `gravit_imp.F` read):
-the rigid parts in scope therefore stay in the `/GRNOD/PART` beside their
+move the body: `gravit_imp.F:84-91` weighs an active rigid body's main node
+with `RBY(15)`, the main's OWN mass before the body was formed
+(`inirby.F:836-837`) — 0 on k2rad's element-free main — while the members'
+gravity is summed into the body. The implicit fall depends on the step: a free
+rigid disk follows −g t² / 2 within 0.7 % at ex_16's `dtmax` 1e-4 s (its
+velocity lags g t by one step) and falls 13-14 % short at the fifths with large
+automatic steps (25 cycles; nt 4 = nt 2).
+The rigid parts in scope therefore stay in the `/GRNOD/PART` beside their
 `/RBODY` main node (the `/GRNOD/GRNOD` union as before); explicit decks keep
 the swap. MEASURED on
 `introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k` (with A5's

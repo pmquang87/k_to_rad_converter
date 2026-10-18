@@ -5422,8 +5422,9 @@ def _elform7_rigid_section(state: ConversionState, sec: SectionBeam,
         f"= {sec.iyy:g}, Ixx = {sec.ixx:g} - a starter-clearing section, NOT "
         "LS-DYNA's (its rigid mass of ex_16's ELFORM 7 wall, d3hsp "
         "0.15414498E-10, is 5.68 x rho x TS1 x L). It sets only this rigid "
-        "body's mass and inertia (inert on ex_16: the wall hangs on a spring "
-        "and nothing else loads it); check it where the body's mass matters."
+        "body's mass and inertia (inert on ex_16: the wall hangs on a k "
+        "345.686 spring and gravity sags it by m g / k = 4.4e-10 mm with "
+        "LS-DYNA's mass); check it where the body's mass matters."
         f"{taper} A deformable ELFORM 7 member keeps the refusal. "
         "--no-elform7-beam-thickness-section restores the refusal.")
     return True

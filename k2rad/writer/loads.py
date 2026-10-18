@@ -6105,16 +6105,22 @@ def _warn_rbody_mains_added(state: ConversionState, keyword: str,
             f"{keyword} -> /GRAV on an IMPLICIT deck: the rigid part(s) "
             f"{kept} stay in the /GRNOD/PART beside their /RBODY main "
             f"node(s) ({shown}). In an implicit run the main node's gravity "
-            "alone does not move the body (the routine that drops it is not "
-            "located; gravit_imp.F read): measured on "
+            "alone does not move the body: gravit_imp.F:84-91 weighs an "
+            "active rigid body's main node with RBY(15), the main's OWN mass "
+            "before the body was formed (inirby.F:836-837) - 0 on k2rad's "
+            "element-free main - while the members' gravity is summed into "
+            "the body. Measured on "
             "introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k, "
             "the main-only group leaves the rigid disk frozen (kinetic energy "
             "-100.00 % against LS-DYNA at every fifth of t_end), this group "
             "lets it fall with LS-DYNA (KE +0.42 / +0.20 / +0.14 % at the "
             "first three fifths, nt 4 = nt 2; the 4th / 5th are the disk "
-            "passing the wall: *CONTACT_2D is not converted). Explicit decks "
-            "keep the main-node group. --no-implicit-rigid-gravity-nodes "
-            "restores it.")
+            "passing the wall: *CONTACT_2D is not converted). The implicit "
+            "fall depends on the step: a free rigid disk follows -g t^2 / 2 "
+            "within 0.7 % at ex_16's dtmax 1e-4 s (its velocity lags g t by "
+            "one step) and falls 13-14 % short at the fifths with large "
+            "automatic steps (25 cycles). Explicit decks keep the main-node "
+            "group. --no-implicit-rigid-gravity-nodes restores it.")
         return
     state.warn(
         f"{keyword} -> /GRAV: the load's scope contains rigid bodies, so the "

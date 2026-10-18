@@ -222,8 +222,9 @@ such a model EXPLICIT until the engine is fixed.
   NORMAL banner: the outcome depends on the geometry.
 - **Implicit gravity on a rigid part** (A4, default ON,
   `--no-implicit-rigid-gravity-nodes` restores the main-node group). Gravity
-  on a `/RBODY` main node alone leaves an implicit body frozen (`gravit_imp.F`
-  read; the dropping routine is not located), so on an implicit deck the
+  on a `/RBODY` main node alone leaves an implicit body frozen
+  (`gravit_imp.F:84-91` weighs the main with its own pre-body mass,
+  `inirby.F:836-837`: 0 on k2rad's element-free main), so on an implicit deck the
   rigid parts' own nodes stay in the `/GRAV` group beside their main: ex_16's
   disk KE -100 % at every fifth -> +0.42 / +0.20 / +0.14 % at the first three
   fifths (NORMAL in 1101 cycles, nt 4 = nt 2; the last two fifths are the

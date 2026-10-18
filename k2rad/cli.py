@@ -954,8 +954,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="On an implicit deck keep *MAT_RIGID parts' own nodes in the "
              "/GRAV group beside their /RBODY main: in an implicit run the "
-             "main node's gravity alone leaves the body frozen (gravit_imp.F "
-             "read; the dropping routine is not located). MEASURED on ex_16 "
+             "main node's gravity alone leaves the body frozen "
+             "(gravit_imp.F:84-91 weighs the main with its own pre-body mass, "
+             "inirby.F:836-837 - 0 on k2rad's element-free main). MEASURED "
+             "on ex_16 "
              "(with the ELFORM 7 section of "
              "--elform7-beam-thickness-section): the disk's KE -100 %% at "
              "every fifth -> +0.42 / +0.20 / +0.14 %% at the first three "
