@@ -152,16 +152,21 @@ Prior history (before this changelog was introduced) is summarized in the
     three curve pins and `preload.py`'s window stay green), the deck's own
     `/FUNCT` stays for every other consumer, and material, preload and
     thermal curves never change; excluded: DATTYP != 0, sensor-gated cards
-    (B5-b), `/FUNCT_SMOOTH` (B5-c). The census measurements (cG4, nt 4, the
-    copy's points written in place - the same function on [0, t_end]): the
-    aniso cup-draw's punch DZ at 2.1 ms +0.2187 -> -0.00055 mm (it started
-    BACKWARD at +219.29 mm/s), punch work at the fifths within 1.3-8 % of
-    LS-DYNA's bndout, but the deck IE END +6.09 -> +13.10 % and RMS 2.89 ->
-    5.57 % of the LS peak (150 LS times to t 0.015) - MIXED, the backward
-    start hid an IE excess (KE RMS 29.15 -> 29.17 %); `thick.k`'s punch
-    stops at -10.0003 mm as LS-DYNA's (-11.9888 mm before), KE END +91.96 ->
-    +23.42 %, KE RMS 21.01 -> 8.79 % (1000 LS times to t 0.0012), IE END
-    -27.21 % and RMS 14.03 % unchanged, 3332 = 3332 cycles. Movers 2 deck
+    (B5-b), `/FUNCT_SMOOTH` (B5-c). RE-MEASURED on the branch bytes against
+    the `386444e` bytes (nt 4, one engine at a time, `_infra/history.py`;
+    every figure equal to the census cG4 arm, which wrote the copy's points
+    in place, to the printed digit): the aniso cup-draw's punch DZ at 2.1 ms
+    +0.21874 -> -0.000548 mm (it started BACKWARD at +219.29 mm/s, census),
+    punch work at the fifths within 1.3-8 % of LS-DYNA's bndout (census),
+    but the deck IE END +6.09 -> +13.10 % and RMS 2.89 -> 5.57 % of the LS
+    peak (150 LS times to t 0.015) - MIXED, the backward start hid an IE
+    excess (KE RMS 29.15 -> 29.17 %; 70 734 -> 70 729 cycles); `thick.k`'s
+    punch stops at -10.0003 mm as LS-DYNA's (-11.9888 mm before), KE END
+    +91.96 -> +23.42 %, KE RMS 21.01 -> 8.79 % (1000 LS times to t 0.0012),
+    IE END -27.21 % and RMS 14.03 % unchanged, 3332 = 3332 cycles. The
+    PUNCH-OFFA test fixture (starter + engine, 28 037 cycles each): node 101
+    DZ +0.0959 / +0.1645 / +0.2187 mm at 0.5 / 1 / 2.1 ms -> 0 / 0 /
+    -0.00055 mm, VZ +164.47 mm/s at 0.5 ms -> 0. Movers 2 deck
     keys / 2 emitted models (the cup-draw, thick.k); the nvh plate decks'
     curves end at (1.0, 0) and stay byte-identical.
   - **The A4 thickness warning names the mechanism of its named cost** (B6,
