@@ -668,8 +668,8 @@ class ConverterGUI:
                      "switch) — OFF by default; the request "
                      "is warned about either way; no /IMPL/QSTAT unless the QSTAT box "
                      "is filled. It buys a load path, not the answer: ex_07 loops "
-                     "through negative load factors LS-DYNA never visits (NORMAL in 4 "
-                     "of 5 runs), ex_05 still stops",
+                     "through negative load factors LS-DYNA never visits (NORMAL in 9 "
+                     "of 10 runs), ex_05 still stops",
             variable=self.arclength_riks).grid(
                 row=21, column=0, columnspan=3, sticky="w", **pad)
 

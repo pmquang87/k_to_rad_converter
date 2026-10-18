@@ -11,6 +11,71 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 9 — the validation-fix round.** Four
+  validators (fidelity, code sweep with whole-suite mutation runs, solver
+  physics, campaign re-run) reviewed the branch at `c051c47`; every finding
+  was re-checked against the code, the solver source or a measurement of
+  this round before it was acted on, each fix is its own commit with a test
+  that fails on its parent. On the 356 roster keys the round moves NO
+  default bytes - runtime texts only (campaign report §0.33.1 names the
+  keys and re-converts them).
+  - **A CI blocker** (F4): `WeldTrajectoryImpflux.test_window_option`
+    parsed `["d.k", "--weld-trajectory-impflux", "out/stem"]`, which
+    argparse before Python 3.12 cannot do (3.9.13 / 3.10.11 exit 2; tests.yml
+    runs 3.9 / 3.10 / 3.11); the positional now comes first.
+  - **A9's frame test is SIGNED** (F1): an anti-parallel LCO frame (turned
+    180 degrees about one axis) passed `|e . e'| >= 1 - 1e-9` and the drive
+    ran BACKWARDS in the shared skew (u . x' -0.0100 mm for +0.01 mm,
+    implicit, nt 4); it now keeps the two skews, named. **A9 is gated on
+    /IMPL** (F-A9-1, the decision "explicit unchanged"; the code had said
+    "Explicit decks follow the same bytes rule"): explicit decks convert as
+    under the opt-out, where the two skews impose x1.0000 (an explicit
+    two-card coupon with a step-setting shell, 665 cycles both arms).
+  - **The 2-D route's /BCS** (F-B2-1, F2): a skewed `/BCS` keeps its digits
+    (its `/SKEW/FIX` vectors already carry the node permutation, a proper
+    rotation) and a global code permutes its ROTATION digits like its
+    translations - the round-9 rewrite held LS y for a local-x SPC in a CID
+    and the spin about the axis of revolution for a CON2 3 rigid body; the
+    route screen's "another ELFORM" refusal gets its probe (F-T-1). Reach 0.
+  - **A stated PTYP 0** on `*BOUNDARY_THERMAL_WELD_TRAJECTORY` is the
+    default 1 (F-B1-1; Vol I R17 Appendix V), no longer a refusal. Reach 0.
+  - **The routed N2S warning says whether the implicit stub is there**
+    (F-A2-1): beside the deck's own single-surface / surface-to-surface /
+    general / tied / spot-weld / tiebreak contact no stub is injected, and
+    the sentence "The all-parts implicit stub stays beside it." was printed
+    anyway; the coarse-rigid-base clause names both measured outcomes (the
+    route through on b6r, the route holding where the TYPE25 lets the block
+    through on the solver-physics validator's a2r4).
+  - **Shipped sentences the source or the measurement contradicted**: A4's
+    "the routine that drops it is not located" / "the dropping routine is
+    not located" / ROADMAP's "drops the main-node load is unlocated" ->
+    `gravit_imp.F:84-91` + `inirby.F:836-837` (the main's pre-body mass;
+    plus the implicit fall's step dependence, 0.7 % at dtmax 1e-4 vs 13-14 %
+    short with large automatic steps); A5's "nothing else loads it" ->
+    gravity loads ex_16's wall and sags it 4.4e-10 mm on its spring; A7's
+    "absorbs the wave" -> the void removes the fluid's radiation sink (8.3:
+    the structure's energy does not decay); B5's "within 1.3-8 %" -> 0.1-7.8
+    %, every fifth below LS-DYNA; A11's "NORMAL in 4 of 5" / "94-97 turning
+    points" -> 9 of 10 runs (the solver-physics validator's five more), the
+    count dropped as counting-rule dependent; A12's single-run "IE END
+    -8.64 / -6.06 %" -> a 14-run band in which four nt-2 runs end NORMAL
+    with nonsense energy (the silent failure is reachable on the default
+    bytes); ROADMAP's A8 "IE RMS gains" -> no measured gain (MIXED windows on
+    runs that stop at 9 %).
+  - **Five whole-suite mutation survivors pinned** (A5m1, A10m2, A12m2, B1m4,
+    B5m2) and B8's STYPE refusal (F-T-1), each with a probe the mutant fails.
+  - **Records**: ROADMAP's closes paragraph, entry 18 and the residue line
+    carry the MEASURED ledger (campaign report §0.33, equal to the
+    expectation); NOT entry 16's mechanism is located, entry 15 names the A5
+    scope decision for the user, entry 19 the lever probe (`ex_14` reaches
+    1.000 of `/RUN` but its IE RMS 4.61 -> 11.94 %, MIXED windows). The
+    retracted fix-round spellings are guarded by
+    `Round9FixRoundRetractedStatements` (only this file quotes them).
+  - **Rejected, with the reason**: an exact-zero z test in the 2-D screen
+    (a refusal by name is safe; a tolerance is an unmeasured rule; 0
+    carriers); a `None` default for `convert(qstat_dtscal=...)` (documented,
+    an API change); `_body_con1` under `--no-rigid-part-pid-precedence` (it
+    needs the A1 opt-out + a `_LOCAL` drive + a CMO -1 CNRB: 0 carriers).
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART B** (the CWM thermal
   package, the 2-D elements, ALE / fluids, load curves; implement agent B on
   `feat/r14-triage-9` after part A, on `9975bc1`). Part B's default bytes
@@ -341,14 +406,15 @@ Prior history (before this changelog was introduced) is summarized in the
     paragraph-rule test (`Round8RoadmapRecord`; it fails on `386444e`'s item
     17). ROADMAP gains the queue table's round-9 column, ONE "**Round 9:**"
     line on every round-8 NOT entry (part A wrote 8, B9 the other 19), "What
-    round 9 closes, and what it does NOT" (the synthesis's EXPECTED ledger:
-    normal 293 -> 299, error_starter 12 -> 7, timeout 12 -> 11, deviation 139
-    -> 143, not_comparable 193 -> 189, match 34 unchanged; the campaign
-    validator replaces it by the MEASURED one) and "What round 9 deliberately
-    does NOT close" (28 entries; 3 and 4 written from the B4 / A10 gate
-    outcomes, 17 / 24 / 26 the user's decisions); the implicit residue 27 / 27
-    -> 24 / 24 EXPECTED (`ex_16`, `9.3`, `main_fsi`; the rule: not `normal`
-    among the 134 / 107 `/IMPL` emitters). The round-9 PART-B retracted
+    round 9 closes, and what it does NOT" (the ledger, since the fix round
+    the MEASURED one of campaign report §0.33 - equal to the synthesis's
+    expectation on every line: normal 293 -> 299, error_starter 12 -> 7,
+    timeout 12 -> 11, deviation 139 -> 143, not_comparable 193 -> 189, match
+    34 unchanged) and "What round 9 deliberately does NOT close" (28
+    entries; 3 and 4 written from the B4 / A10 gate outcomes, 17 / 24 / 26
+    the user's decisions); the implicit residue 27 / 27 -> 24 / 24 MEASURED
+    (`ex_16`, `9.3`, `main_fsi`; the rule: not `normal` among the 134 / 107
+    `/IMPL` emitters). The round-9 PART-B retracted
     spellings are guarded by `Round9RetractedStatementsB` (only CHANGELOG
     quotes them) - among them B2's retired "named only" texts ("no
     axisymmetric route is built", "14 / 15 / 44 are named whatever the

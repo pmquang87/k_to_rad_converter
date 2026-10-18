@@ -4718,6 +4718,85 @@ class Round9RetractedStatementsB(unittest.TestCase):
                 self.assertIn(_t7._collapse(needle).lower(), text)
 
 
+#: Statements the round-9 VALIDATION-FIX ROUND found contradicted by the
+#: source or by a measurement. CHANGELOG quotes them (the history, in the
+#: fix-round entry); no other shipped text may.
+_RETRACTED_ROUND_9_FIX = (
+    # F-A4-1: gravit_imp.F:84-91 + inirby.F:836-837 are the mechanism
+    "the routine that drops it is not located",
+    "the dropping routine is not located",
+    "drops the main-node load is unlocated",
+    # F-A5-1: *LOAD_BODY_Y loads ex_16's wall (sag 4.4e-10 mm)
+    "nothing else loads it",
+    # F-A7-1: the 8.3 void arm's energy does not decay
+    "absorbs the wave",
+    # F-B5-1: -0.12 / -2.21 / -7.78 / -6.03 / -1.81 %
+    "within 1.3-8 %",
+    # the A11 observation: 9 of 10 runs; the count is rule-dependent
+    "94-97 turning points",
+    "NORMAL in 4 of 5",
+    # F-A12-1: one run per nt; the 14-run band holds nonsense nt-2 runs
+    "IE END -8.64 / -6.06",
+    # F-A9-1: the rule is gated on /IMPL (decision A9: explicit unchanged)
+    "Explicit decks follow the same bytes rule",
+    # F-A8-1: no measured gain (MIXED windows on runs that stop at 9 %)
+    "IE RMS gains",
+)
+_REPLACEMENTS_ROUND_9_FIX = (
+    ("k2rad/writer/loads.py", "gravit_imp.F:84-91 weighs an active rigid "
+     "body's main node with RBY(15)"),
+    ("k2rad/writer/mesh.py", "gravity sags it by m g / k = 4.4e-10 mm"),
+    ("k2rad/writer/materials.py", "carries no wave and removes the fluid's "
+     "radiation sink"),
+    ("k2rad/writer/loadcurves.py", "within 0.1-7.8 % of LS-DYNA's bndout, "
+     "every fifth below it"),
+    ("k2rad/writer/assembly.py", "The failure can be SILENT, on the default "
+     "bytes too"),
+    ("k2rad/writer/contacts.py", "NO all-parts implicit stub is written "
+     "beside it"),
+    ("ROADMAP.md", "the mechanism is LOCATED (the fix round)"),
+    ("README.md", "a `/BCS` in a skew keeps its digits"),
+)
+
+
+class Round9FixRoundRetractedStatements(unittest.TestCase):
+    """The round-9 validation-fix round: no shipped text (README, ROADMAP,
+    the GUI, every package module, docs/*.md, tools/*.py; CHANGELOG exempt)
+    carries a spelling the round retracted; the guard fires on each needle
+    split across two adjacent literals; the replacements ARE shipped;
+    CHANGELOG quotes every old spelling (the history)."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_9_FIX:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_9_FIX:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_9_FIX:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
+
+    def test_changelog_still_quotes_each_old_spelling(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md")).lower()
+        for needle in _RETRACTED_ROUND_9_FIX:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle).lower(), text)
+
+
 class Round9RoadmapRecordB(unittest.TestCase):
     """B9: the ROADMAP record of round 9 - the queue table's round-9 column
     (every row as wide as its header), ONE ``**Round 9:**`` line on every
@@ -4792,16 +4871,21 @@ class Round9RoadmapRecordB(unittest.TestCase):
             with self.subTest(entry=n):
                 self.assertIn("USER's decision", block[n])
 
-    def test_the_closes_paragraph_states_the_EXPECTED_ledger(self):
+    def test_the_closes_paragraph_states_the_MEASURED_ledger(self):
+        """Re-derived in the fix round from 'the EXPECTED ledger': the
+        campaign re-run landed (report §0.33) and an EXPECTED ledger must
+        be replaced by the MEASURED one in every document."""
         s = self._at("**What round 9 closes, and what it does NOT.**")
         e = self._at("**What round 9 deliberately does NOT close**")
         para = _t7._collapse("\n".join(self.lines[s:e]))
-        for needle in ("EXPECTED", "normal 293 → 299", "error_starter 12 → 7",
+        for needle in ("MEASURED by the campaign re-run (report §0.33",
+                       "normal 293 → 299", "error_starter 12 → 7",
                        "17 deck keys on 17 emitted models",
                        "part A 10 / 10; part B 7 / 7",
                        "the implicit residue 27 / 27 → 24 / 24"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, para)
+        self.assertNotIn("EXPECTED", para)
 
     def test_the_residue_is_restated_for_round_9(self):
         text = _t7._collapse("\n".join(self.lines))
