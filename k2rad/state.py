@@ -7237,7 +7237,8 @@ class WeldTrajectory:
     Card 1 ``PID PTYP NSID1 SPD1 NSID2 SPD2 NCYC RELVEL``, card 2 ``IFORM
     LCID Q LCROT LCMOV LCLAT DISC ENFOR``, card 3 ``P1..P8`` (IFORM 2: a b
     cf cr Ff Fr), 10-wide fixed fields (Vol I R17 pp.5-171..5-177). A blank
-    PTYP is the manual's default 1 (= PID is a *PART id, p.5-172). A
+    or stated-0 PTYP is the manual's default 1 (= PID is a *PART id,
+    p.5-172; Appendix V: LS-DYNA replaces a 0 by the default). A
     truncated card reads its missing cells as 0, so an incomplete record is
     REFUSED by the writer's screen (IFORM 0), never by an exception.
     """

@@ -13432,8 +13432,11 @@ def handle_boundary_thermal_weld_trajectory(block: Block,
 
     Three 10-wide fixed cards (Vol I R17 pp.5-171..5-177): ``PID PTYP NSID1
     SPD1 NSID2 SPD2 NCYC RELVEL`` / ``IFORM LCID Q LCROT LCMOV LCLAT DISC
-    ENFOR`` / ``P1..P8``. A blank PTYP is the manual's default 1 (p.5-172:
-    "EQ.1: Part ID / EQ.2: Part set ID"). A missing card reads as blanks = 0,
+    ENFOR`` / ``P1..P8``. A blank PTYP AND a stated 0 are the manual's
+    default 1 (p.5-172: "EQ.1: Part ID / EQ.2: Part set ID", default 1;
+    Appendix V p.73-9: the keyword reader fills a blank with 0 and LS-DYNA
+    replaces the 0 by the default - the rule round 9's A8 applies to a
+    stated SF 0.0; the fix round, F-B1-1). A missing card reads as blanks = 0,
     so a truncated record is REFUSED by the writer's screen (IFORM 0) rather
     than raising here. The writer (writer/thermal._resolve_weld_trajectories)
     converts an accepted card and removes this note; a refused one keeps it.
@@ -13448,9 +13451,8 @@ def handle_boundary_thermal_weld_trajectory(block: Block,
 
     def _iv(f: List[str], i: int) -> int:
         return to_int(f[i]) if len(f) > i and f[i].strip() else 0
-    ptyp_txt = f1[1].strip() if len(f1) > 1 else ""
     state.weld_trajectories.append(WeldTrajectory(
-        pid=_iv(f1, 0), ptyp=to_int(ptyp_txt) if ptyp_txt else 1,
+        pid=_iv(f1, 0), ptyp=_iv(f1, 1) or 1,
         nsid1=_iv(f1, 2), spd1=_fv(f1, 3), nsid2=_iv(f1, 4), spd2=_fv(f1, 5),
         ncyc=_iv(f1, 6), relvel=_iv(f1, 7), iform=_iv(f2, 0),
         lcid=_iv(f2, 1), q=_fv(f2, 2), lcrot=_iv(f2, 3), lcmov=_iv(f2, 4),

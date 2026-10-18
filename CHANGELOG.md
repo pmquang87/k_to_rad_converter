@@ -50,7 +50,9 @@ Prior history (before this changelog was introduced) is summarized in the
     rule) - or a converted non-CWM thermal material - and a power curve
     LCID with a positive ordinate. Round 8's spec refused "PTYP != 0" -
     wrong: Vol I R17 p.5-172 makes PTYP 1 a part id, the default on all four
-    carriers; the PTYP-1 and PTYP-2 probes now give the same deposit. An
+    carriers; the PTYP-1 and PTYP-2 probes now give the same deposit (and,
+    since the fix round, a stated PTYP 0 too: Appendix V's blank-or-0 =
+    default rule). An
     accepted card becomes, per window, ONE `/GRBRIC/BRIC` + ONE `/IMPFLUX`
     VOLUMIC per group of seam bricks sharing a `%.3g` flux density on one
     shared unit `/FUNCT`: each brick's in-window mean of the double

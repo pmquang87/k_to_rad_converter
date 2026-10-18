@@ -2419,15 +2419,17 @@ def _f10(*v):
     return out
 
 
-def b1_synw(var="base"):
+def b1_synw(var="base", d3plot=0.001):
     """SYN-W (round 9, B1; the part-B spec's fixture, gen_synw.py): a block
     x 0..10, y -2..2, z -2..0 of 1 mm bricks (80 bricks, 165 nodes); part 3
     = the seam strip y -1..1, z -1..0 (20 bricks, TMID 2 = *MAT_THERMAL_CWM
     born at -1 s, MID 0); NSID1 = the 7 nodes x 2..8 on y 0 z 0; NSID2 -1 =
     the 12 top faces under the path; SPD1 -301, LCID 302 = (0,0) (0.1,1)
     (1.9,1) (2,0) (10,0); Q 1000; a b cf cr Ff Fr = 1.5 1 1 2 0.6 1.4; SOLN
-    1, ENDTIM 3.0, d3plot 0.001; T0 293.15; a convection boundary on the
-    side faces. *var* names one variant (a refusal class or a control)."""
+    1, ENDTIM 3.0, d3plot *d3plot* (0.001); T0 293.15; a convection boundary
+    on the side faces. *var* names one variant (a refusal class or a
+    control; "ptyp0" states PTYP 0, "convcurve" puts the convection T_inf on
+    a curve that ends at t 1.0)."""
     nx, ny, nz = 10, 4, 2
 
     def nid(i, j, k):
@@ -2437,7 +2439,7 @@ def b1_synw(var="base"):
           "*CONTROL_TERMINATION", _f10(3.0),
           "*CONTROL_THERMAL_SOLVER", _f10(1, 1, 11),
           "*CONTROL_THERMAL_TIMESTEP", _f10(1, 1.0, 0.01, 0.0, 0.1, 0.0, 0.0),
-          "*DATABASE_BINARY_D3PLOT", _f10(0.001)]
+          "*DATABASE_BINARY_D3PLOT", _f10(d3plot)]
     if var == "soln2":
         L += ["*CONTROL_TIMESTEP", _f10(0.0, 0.9)]
     tmid3 = {"isotropic": 1, "notmid": 9}.get(var, 2)
@@ -2513,7 +2515,13 @@ def b1_synw(var="base"):
             side.append([nid(i, ny, k), nid(i, ny, k + 1),
                          nid(i + 1, ny, k + 1), nid(i + 1, ny, k)])
     L += ["*SET_SEGMENT", _f10(2)] + [_f10(*s) for s in side]
-    L += ["*BOUNDARY_CONVECTION_SET", _f10(2), _f10(0, 0.01, 0, 293.15, 0.0)]
+    if var == "convcurve":
+        L += ["*BOUNDARY_CONVECTION_SET", _f10(2),
+              _f10(0, 0.01, 303, 293.15, 0.0), "*DEFINE_CURVE", _f10(303),
+              "%20.6g%20.6g" % (0.0, 1.0), "%20.6g%20.6g" % (1.0, 1.0)]
+    else:
+        L += ["*BOUNDARY_CONVECTION_SET", _f10(2),
+              _f10(0, 0.01, 0, 293.15, 0.0)]
     L += ["*INITIAL_TEMPERATURE_SET", _f10(0, 293.15)]
     pid, ptyp = 3, 1
     if var == "ptyp2":
@@ -2521,6 +2529,8 @@ def b1_synw(var="base"):
         pid, ptyp = 7, 2
     if var == "ptyp3":
         ptyp = 3
+    if var == "ptyp0":
+        ptyp = 0
     if var == "shellpid":
         pid = 4
     nsid2 = {"nsid2_0": 0, "nsid2_pos": 1}.get(var, -1)
@@ -2836,6 +2846,30 @@ class WeldTrajectoryImpflux(unittest.TestCase):
         _r, st2, _e = _convert(b1_synw("ptyp2"))
         self.assertEqual(_impflux_set(st2)[0], _impflux_set(self.st)[0])
         self.assertEqual(len(_impflux_set(st2)[0]), 32)
+        # the fix round (F-B1-1): a STATED PTYP 0 is the default 1 (Vol I
+        # R17 Appendix V: LS-DYNA replaces a 0 by the default), not a
+        # refusal - the same deposit and the PTYP-1 sentence
+        r0, st0, _e = _convert(b1_synw("ptyp0"))
+        self.assertEqual(_impflux_set(st0)[0], _impflux_set(self.st)[0])
+        self.assertTrue(_has(r0.warnings, "on part 3 (PTYP 1) -> 32 "
+                             "/IMPFLUX VOLUMIC cards"))
+        self.assertFalse(_has(r0.warnings, "PTYP 0: only 1"))
+
+    def test_s2_cap_boundary_1000_frames(self):
+        """S2 caps a SOLN-1 weld deck that requests MORE than 1000 frames:
+        d3plot 0.003 over ENDTIM 3.0 is exactly 1000 and stays uncapped,
+        3.0 / 1001 (0.002997 in the 10-wide cell) is 1001 and is capped at
+        ENDTIM / 100 = 0.03 with the S2 sentence (the fix round, F3: '<='
+        -> '<' survived the round-9 suite)."""
+        r1, _s1, e1 = _convert(b1_synw(d3plot=0.003))
+        self.assertIn("/ANIM/DT\n0. 0.003\n", e1)
+        self.assertFalse(_has(r1.warnings, "animation frames over "
+                              "OpenRadioss's explicit conduction"))
+        r2, _s2, e2 = _convert(b1_synw(d3plot=3.0 / 1001))
+        self.assertIn("/ANIM/DT\n0. 0.03\n", e2)
+        self.assertTrue(_has(r2.warnings, "/ANIM/DT 0.03 = max(the d3plot dt "
+                             "0.002997, ENDTIM / 100)", "1001 animation "
+                             "frames"))
 
     def test_trajectory_on_isotropic_part(self):
         res, st, _e = _convert(b1_synw("isotropic"))
@@ -3550,6 +3584,20 @@ class LoadCurveOffscaleZero(unittest.TestCase):
     C:/Users/pmqua/rcv_r9i_implB_b5P / _b5B, base-paired): the probe's punch
     node 101 holds at DZ 0 until 2 ms and moves forward after; the opt-out
     drives it backward first (+0.0959 mm at 0.5 ms)."""
+
+    def test_a_thermal_consumer_keeps_its_curve(self):
+        """The fix round (F8): a THERMAL consumer is never padded - the
+        synthetic weld deck with its convection T_inf on curve 303, which
+        ends at t 1.0 before ENDTIM 3.0, writes no offscale copy and no B5
+        sentence (routing that /CONVEC through load_funct_id survived the
+        round-9 suite)."""
+        res, st, _e = _convert(b1_synw("convcurve"))
+        self.assertIn("/CONVEC/", st)
+        self.assertNotIn("offscale_zero", st)
+        self.assertFalse(_has(res.warnings, _W_B5))
+        _r0, st0, _e0 = _convert(b1_synw("convcurve"),
+                                 load_curve_offscale_zero=False)
+        self.assertEqual(st, st0)
 
     def test_punch_probe_both_ends(self):
         res, st, _e = _convert(b5_punch())
