@@ -2884,9 +2884,10 @@ short of ENDTIM; the validator task is the lever probe on ex_14_solid_elform_1
 base-paired, nt 4 and nt 2. (b) **the mixed-main gap** (entry 15 above) keeps
 4.3_General_Nonlinearity as its second bolt-preload carrier.
 
-**What round 9 closes, and what it does NOT.** Round 9 is two disjoint halves
-(no key is touched by both, in bytes, in warning records or as a guard) plus
-the campaign side. Every default change was measured with its history on fresh
+**What round 9 closes, and what it does NOT.** Round 9 is two halves whose
+bytes are disjoint (one key shares a warning record: the Yaris roof crush, a
+part-A byte mover whose default EFAIL sentence B9 re-measured) plus the
+campaign side. Every default change was measured with its history on fresh
 conversions at nt 4 (nt 2 where implicit), base-paired with the `386444e`
 conversion of a pristine checkout, fifths by the campaign rule (the LAST row of
 a printed time; an equidistant fifth takes the earlier time) and the RMS over

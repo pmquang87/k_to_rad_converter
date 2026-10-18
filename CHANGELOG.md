@@ -13,7 +13,30 @@ Prior history (before this changelog was introduced) is summarized in the
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART B** (the CWM thermal
   package, the 2-D elements, ALE / fluids, load curves; implement agent B on
-  `feat/r14-triage-9` after part A, on `9975bc1`).
+  `feat/r14-triage-9` after part A, on `9975bc1`). Part B's default bytes
+  move 7 deck keys / 7 emitted models (B1 2 / 2, B2 2 / 2, B3 1 / 1, B5 2 /
+  2; no key is shared); B4 and B8 are opt-in, B6 and B9 text only and B7 0
+  (0 corpus movers). The warning text alone moves 6 keys: `05_2` / `05_1`
+  (B1's refusal sentence), the SPR main giant (B2's refusal), bird-el (B4's
+  default sentence), bird_B (B8's skip sentence and the w_n3 clause) and
+  `section_shell.hourglassing` (B6's clause); B9's EFAIL re-wording also
+  re-texts ONE sentence on the Yaris roof crush, a part-A byte mover (its
+  EFAIL 0.8 welds fire the default displacement rule, whose evidence clause
+  B9 re-measured - the part-B spec's "default text movers 0" missed it), the
+  one key both halves touch (bytes A, one warning sentence B; the two-tree
+  sweep against part A's head: bytes identical). The two-tree sweep (the
+  356 roster keys from F:, the campaign's `verify_warnings.py sweep` at
+  `5a38ee0`, 477 s): against `386444e` 17 byte movers (part A's 10 + part
+  B's 7) and 8 warning-only (part A's `ex_05` / `ex_07` + part B's 6),
+  against part A's head 7 byte movers and 7 warning-only (part B's 6 + the
+  roof crush); the 34 match rows byte- and warning-identical against both;
+  0 errors, 0 missing. **Gate outcomes and optional
+  items, for the fix agent:** A10's gate (part A) shipped no default - the
+  Igap-3 variant is the opt-in `--mixed-main-thickness-gap`, the TYPE25
+  route NO-GO; B4's gate FAILED - the re-tune ships inside the opt-in
+  `--shell-in-solid-coupling` and ROADMAP round-9 NOT entry 3 stays open;
+  the optional A12 shipped as the opt-in `--implicit-bfgs` and B8 as the
+  coordinator's opt-in `--ale-flow-tracking` (neither is a campaign row).
   - **`*BOUNDARY_THERMAL_WELD_TRAJECTORY` is converted by default on the
     screened class** (B1; `--no-weld-trajectory-impflux` restores the
     `386444e` output, records included; `--weld-trajectory-window S`, default
@@ -287,6 +310,46 @@ Prior history (before this changelog was introduced) is summarized in the
     "-28.26 %" / "8.936x" / "30.51 / 4.88" -> "-29.06 %" / "1.140x" /
     "28.42 / 4.66", round 8's Gap-0.5 "+284.04 %" no longer quoted, and the
     flag table's help figures). ROADMAP round-8 entry 4 stays open.
+  - **The half-B texts, the retractions and the ROADMAP round-9 record**
+    (B9; 0 bytes). The spotweld texts quote today's arm (cG3's re-measure of
+    spotweld.k under the opt-in rules 1 + 2, nt 4): the A6 DT sentence adds
+    KE END +38.90 -> +30.76 %, the rupture at 1.12229e-3 s = 65.3 us before
+    LS-DYNA's swforc failure time 1.1876e-3 s (4.2 us earlier than without
+    the scaling) and the energy error within -0.3 .. +0.2 % to its MIXED
+    wording; the EFAIL family's "rupture 1.12650e-3 s vs LS 1.17969e-3 ..
+    1.19792e-3 s (4.5-6.0 % early)" (the unscaled run against LS's output
+    bracket) and the rule-1 family's "4983 cycles (7.80x) ... +82.0 % ... the
+    weld never fails (EFAIL has no /PROP/TYPE13 slot) ... MAT_100's DT is
+    dropped" (round 6's arm, before EFAIL and DT were converted) are retracted
+    at every site - `loads.py`, `cli.py`, `__init__.py`, `state.py`, the GUI,
+    README (the "Both flags, measured" section rewritten: IE END -31.18 % at
+    LS-DYNA's own 1332 cycles), ROADMAP (round-4 item 10, round-5 item 8,
+    round-6 item 6) - and this entry keeps the old spellings as history. The A5 docstring
+    names AMS and an emitted Spotflag 25-28 TYPE2 as the other nodal-step
+    switches (`intti1.F:258` sets I7KGLO, `dtnoda.F:661`). V6: round-7 item
+    17's stray "**Round 8:** Unchanged." moved into its paragraph, with a NEW
+    paragraph-rule test (`Round8RoadmapRecord`; it fails on `386444e`'s item
+    17). ROADMAP gains the queue table's round-9 column, ONE "**Round 9:**"
+    line on every round-8 NOT entry (part A wrote 8, B9 the other 19), "What
+    round 9 closes, and what it does NOT" (the synthesis's EXPECTED ledger:
+    normal 293 -> 299, error_starter 12 -> 7, timeout 12 -> 11, deviation 139
+    -> 143, not_comparable 193 -> 189, match 34 unchanged; the campaign
+    validator replaces it by the MEASURED one) and "What round 9 deliberately
+    does NOT close" (28 entries; 3 and 4 written from the B4 / A10 gate
+    outcomes, 17 / 24 / 26 the user's decisions); the implicit residue 27 / 27
+    -> 24 / 24 EXPECTED (`ex_16`, `9.3`, `main_fsi`; the rule: not `normal`
+    among the 134 / 107 `/IMPL` emitters). The round-9 PART-B retracted
+    spellings are guarded by `Round9RetractedStatementsB` (only CHANGELOG
+    quotes them) - among them B2's retired "named only" texts ("no
+    axisymmetric route is built", "14 / 15 / 44 are named whatever the
+    flag", the README's "(2Dlag ×157.5): named, never changed" and
+    ROADMAP's "Next: a real 2-D route"), B1's "specified and not built" and
+    B6's "mechanism not closed". Tests re-pointed with the texts: `test_r14_triage_6`'s
+    `--spotweld-node-synthesis` help figure and its `loads.py` presence pin,
+    `test_r14_triage_7`'s `--spotweld-efail-displacement` help figures and its
+    three presence pins, `Round8RoadmapRecord`'s column and list anchors and
+    part A's `Round9RoadmapRecordA` anchor (round 9's sections now sit between
+    the round-8 list and the starter-failure paragraph).
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

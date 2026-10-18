@@ -4353,5 +4353,273 @@ class Round9OptInWiringB(_t8.Round8OptInWiringB):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# B9 - the half-B texts, the round-9 PART-B retraction guard, the ROADMAP and
+#      CHANGELOG records of part B, and every round-9 flag in README prose
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Round-9 PART-B retractions (B9.6). CHANGELOG may quote them; no other
+#: shipped text may (adjacent literals joined, whitespace collapsed). Each
+#: needle is cut at a line end, never inside a ``#`` comment run.
+_RETRACTED_ROUND_9_B = (
+    # B6: the A4 warning's cost now names its mechanism
+    "mechanism not closed",
+    # B9.2: the unscaled EFAIL rupture against LS's output bracket
+    "1.12650e-3",
+    # B9.3: round 6's rule-1 combined arm (before EFAIL and DT converted)
+    "4983 cycles", "+82.0 %", "7.80x", "7.80×",
+    "EFAIL has no /PROP/TYPE13 slot", "MAT_100's DT is dropped",
+    # B1: the weld-trajectory package is built
+    "specified and not built",
+    # B2: the axisymmetric route is built (NOT the bare "named, never
+    # changed" / "are named, not changed", which ship for other features)
+    "no axisymmetric route is built",
+    "axisymmetric ELFORM 14 / 15 / 44 are named",
+    "14 / 15 / 44 are named whatever the flag",
+    "157.5): named, never changed",
+    "Next: a real 2-D route",
+)
+
+#: ... and the re-measured replacements, each in the file that ships it
+_REPLACEMENTS_ROUND_9_B = (
+    ("k2rad/writer/mesh.py", "counts no interface energy, ecrit.F:500-511"),
+    ("k2rad/writer/loads.py", "fails at 1.12229e-3 s, 65.3 us before "
+     "LS-DYNA's swforc failure time 1.1876e-3 s"),
+    ("k2rad/writer/loads.py", "the last cycle 1332 = LS-DYNA's 1332; IE END "
+     "-31.18 %, KE END +30.76 %"),
+    ("k2rad/writer/loads.py", "KE END +30.76 % (unscaled +38.90 %)"),
+    ("k2rad/writer/loads.py", "an emitted ``/INTER/TYPE2`` with Spotflag "
+     "25-28"),
+    ("k2rad/cli.py", "rupture 1.12229e-3 s, 65.3 us before LS-DYNA's swforc "
+     "failure time 1.1876e-3 s"),
+    ("k2rad/__init__.py", "the weld ruptures 65.3 us before LS-DYNA's "
+     "(1.12229e-3 vs 1.1876e-3 s)"),
+    ("k2rad/state.py", "1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure "
+     "time 1.1876e-3 s"),
+    ("k2rad_gui.py", "spotweld.k rupture 1.12229e-3 s, 65.3 us before LS's "
+     "1.1876e-3 s"),
+    ("README.md", "**both** end at LS-DYNA's own cycle count 1332 with IE END "
+     "−31.18 %"),
+    ("README.md", "rupture 1.12229e-3 s, 65.3 µs before LS-DYNA's swforc "
+     "failure time 1.1876e-3 s"),
+    ("ROADMAP.md", "the next step was a 2-D route of its own"),
+    ("ROADMAP.md", "was specified in round 8 and built in round 9 (B1"),
+)
+
+
+class Round9RetractedStatementsB(unittest.TestCase):
+    """B9.6 (R14 triage round 9): no shipped text (README, ROADMAP, the GUI,
+    every package module, docs/*.md, tools/*.py; CHANGELOG exempt) carries a
+    retracted part-B spelling; the guard fires on each needle split across
+    two adjacent literals; the replacements ARE shipped; CHANGELOG still
+    quotes every old spelling (the history)."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_9_B:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_9_B:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_9_B:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
+
+    def test_changelog_still_quotes_each_old_spelling(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md")).lower()
+        for needle in _RETRACTED_ROUND_9_B:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle).lower(), text)
+
+
+class Round9RoadmapRecordB(unittest.TestCase):
+    """B9: the ROADMAP record of round 9 - the queue table's round-9 column
+    (every row as wide as its header), ONE ``**Round 9:**`` line on every
+    round-8 NOT entry 1-27 (part A wrote 8, B9 the other 19), the round-9
+    NOT list numbered 1-28 with no placeholder and entries 3 / 4 written
+    from the gate outcomes, the closes paragraph's EXPECTED ledger and the
+    residue restated."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lines = _t7._read7("ROADMAP.md").splitlines()
+
+    def _at(self, prefix: str) -> int:
+        hits = [k for k, ln in enumerate(self.lines) if ln.startswith(prefix)]
+        self.assertEqual(len(hits), 1, prefix)
+        return hits[0]
+
+    def _items(self, s: int, e: int):
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        return list(zip(starts, starts[1:] + [e]))
+
+    def test_the_queue_table_has_a_round_9_column(self):
+        rows = []
+        for ln in self.lines[self._at("| # | class | decks | closed by "
+                                      "round 1 |"):]:
+            if not ln.startswith("|"):
+                break
+            rows.append(ln)
+        self.assertTrue(rows[0].endswith("| round 8 | round 9 |"), rows[0])
+        self.assertEqual(len(rows), 10)
+        width = _t7._md_cells(rows[0])
+        for r in rows[1:]:
+            with self.subTest(row=r[:48]):
+                self.assertEqual(_t7._md_cells(r), width)
+        last = rows[2].rstrip(" |").rsplit("|", 1)[1]
+        self.assertIn("B1", last)
+        self.assertIn("66 323 cycles", last)
+
+    def test_every_round_8_entry_carries_one_round_9_line(self):
+        s = self._at("**What round 8 deliberately does NOT close**")
+        e = self._at("**What round 9 closes, and what it does NOT.**")
+        items = self._items(s, e)
+        self.assertEqual(len(items), 27)
+        for n, (a, b) in enumerate(items, 1):
+            with self.subTest(entry=n):
+                self.assertTrue(self.lines[a].startswith(f"{n}. **"))
+                self.assertEqual(
+                    sum("**Round 9:**" in ln for ln in self.lines[a:b]), 1)
+
+    def test_the_round_9_not_list_is_numbered_1_to_28(self):
+        s = self._at("**What round 9 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        nums = [int(m.group(1)) for m in
+                (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
+                if m]
+        self.assertEqual(nums, list(range(1, 29)))
+        self.assertNotRegex("\n".join(self.lines[s:e]), r"<[a-z_ ]+>")
+
+    def test_entries_3_4_17_24_26_as_decided(self):
+        s = self._at("**What round 9 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        block = {n: _t7._collapse("\n".join(self.lines[a:b]))
+                 for n, (a, b) in enumerate(self._items(s, e), 1)}
+        for needle in ("B4's gate FAILED", "1.140×", "MESSAGE 205 + 207",
+                       "1.815e-7 t on 50 void ALE nodes"):
+            self.assertIn(needle, block[3])
+        for needle in ("--mixed-main-thickness-gap", "NO-GO",
+                       "4.3_General_Nonlinearity"):
+            self.assertIn(needle, block[4])
+        for n in (17, 24, 26):
+            with self.subTest(entry=n):
+                self.assertIn("USER's decision", block[n])
+
+    def test_the_closes_paragraph_states_the_EXPECTED_ledger(self):
+        s = self._at("**What round 9 closes, and what it does NOT.**")
+        e = self._at("**What round 9 deliberately does NOT close**")
+        para = _t7._collapse("\n".join(self.lines[s:e]))
+        for needle in ("EXPECTED", "normal 293 → 299", "error_starter 12 → 7",
+                       "17 deck keys on 17 emitted models",
+                       "part A 10 / 10; part B 7 / 7",
+                       "the implicit residue 27 / 27 → 24 / 24"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, para)
+
+    def test_the_residue_is_restated_for_round_9(self):
+        text = _t7._collapse("\n".join(self.lines))
+        self.assertIn("so the residue is **24 keys / 24 models** by the same "
+                      "rule", text)
+
+
+class Round9ChangelogReSumsB(unittest.TestCase):
+    """B9: the "re-add every headline total" rule for part B - the header's
+    byte-mover count re-sums from its per-item counts (no key is shared),
+    each item bullet states its own count, and the round total in ROADMAP is
+    part A's plus part B's (the halves are disjoint)."""
+
+    def test_the_part_B_total_re_sums(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md"))
+        m = re.search(
+            r"Part B's default bytes move (\d+) deck keys / (\d+) emitted "
+            r"models \(B1 (\d+) / (\d+), B2 (\d+) / (\d+), B3 (\d+) / (\d+), "
+            r"B5 (\d+) / (\d+); no key is shared\)", text)
+        self.assertIsNotNone(m)
+        tot_k, tot_m, *items = map(int, m.groups())
+        self.assertEqual((sum(items[0::2]), sum(items[1::2])),
+                         (tot_k, tot_m))
+        self.assertEqual((tot_k, tot_m), (7, 7))
+
+    def test_the_item_bullets_state_the_same_counts(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md"))
+        for needle in (
+                "Movers: bytes 2 deck keys / 2 emitted models (05_4_1, "
+                "05_5_1)",
+                "Movers: bytes 2 deck keys / 2 emitted models (metal-forming, "
+                "2Dlag)",
+                "Movers 1 deck key / 1 emitted model (main_fsi",
+                "Movers 2 deck keys / 2 emitted models (the cup-draw, "
+                "thick.k)",
+                "Movers: default bytes 0 / 0; warning text 1 deck key / 1 "
+                "emitted model (bird_B",
+                "default bytes 0 / 0 (bird-el and the round-8 fixture "
+                "byte-identical"):
+            with self.subTest(needle=needle[:40]):
+                self.assertIn(needle, text)
+
+    def test_the_round_total_is_the_two_halves(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md"))
+        a = re.search(r"Part A's default bytes move (\d+) deck keys / (\d+) "
+                      r"emitted models", text)
+        b = re.search(r"Part B's default bytes move (\d+) deck keys / (\d+) "
+                      r"emitted models \(B1", text)
+        self.assertIsNotNone(a)
+        self.assertIsNotNone(b)
+        tot = (int(a.group(1)) + int(b.group(1)),
+               int(a.group(2)) + int(b.group(2)))
+        road = _t7._collapse(_t7._read7("ROADMAP.md"))
+        self.assertIn(f"Round 9's default bytes move {tot[0]} deck keys on "
+                      f"{tot[1]} emitted models", road)
+
+
+class Round9FlagsInReadme(unittest.TestCase):
+    """Every round-9 flag of BOTH halves is named in README prose - the
+    default-ON levers by their ``--no-`` spelling, the opt-ins by their
+    positive one, B1's window option as itself - and each opt-in has its own
+    README ### heading (the round-5 rule)."""
+
+    def _readme(self) -> str:
+        return _t7._read7("README.md")
+
+    def test_every_round_9_flag_is_in_README_prose(self):
+        readme = self._readme()
+        body = [ln for ln in readme.splitlines()
+                if not re.match(r"^\s*[-*]?\s*\[.*\]\(#.*\)\s*$", ln)]
+        on = list(Round9FlagWiringA._FLAGS) + list(Round9FlagWiringB._FLAGS)
+        opt = list(Round9OptInWiring._OPT_IN) + list(
+            Round9OptInWiringB._OPT_IN)
+        spellings = (["--no-" + f[2:] for f in on] + opt
+                     + ["--weld-trajectory-window"])
+        # part A: 8 default levers + 2 opt-ins; part B: 5 default levers +
+        # 1 opt-in + B1's window option
+        self.assertEqual(len(spellings), 17)
+        for flag in spellings:
+            with self.subTest(flag=flag):
+                self.assertTrue(any(flag in ln for ln in body),
+                                f"{flag} is not in README.md prose")
+
+    def test_every_round_9_opt_in_has_its_own_heading(self):
+        headings = re.findall(r"^#{2,4}\s+(.*)$", self._readme(), re.M)
+        for flag in (list(Round9OptInWiring._OPT_IN)
+                     + list(Round9OptInWiringB._OPT_IN)):
+            with self.subTest(flag=flag):
+                self.assertTrue(any(h.startswith(f"`{flag}`")
+                                    for h in headings), flag)
+
+
 if __name__ == "__main__":
     unittest.main()
