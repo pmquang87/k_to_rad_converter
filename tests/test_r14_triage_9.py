@@ -2858,9 +2858,17 @@ class WeldTrajectoryImpflux(unittest.TestCase):
         ).weld_trajectory_window, 0.5)
         self.assertIs(p.parse_args(["d.k", "--no-weld-trajectory-impflux"]
                                    ).weld_trajectory_impflux, False)
-        # the optional positional output_stem is NOT swallowed
-        ns = p.parse_args(["d.k", "--weld-trajectory-impflux", "out/stem"])
+        # the optional positional output_stem is NOT swallowed. The
+        # positional comes BEFORE the flag: argparse before Python 3.12
+        # cannot place an nargs='?' positional after an optional (3.9.13 /
+        # 3.10.11 exit 2 on ["d.k", "--flag", "out/stem"] with any flag),
+        # and tests.yml runs 3.9 / 3.10 / 3.11.
+        ns = p.parse_args(["d.k", "out/stem", "--weld-trajectory-impflux"])
         self.assertEqual(ns.output_stem, "out/stem")
+        self.assertIs(ns.weld_trajectory_impflux, True)
+        ns = p.parse_args(["d.k", "out/stem", "--no-weld-trajectory-impflux"])
+        self.assertEqual(ns.output_stem, "out/stem")
+        self.assertIs(ns.weld_trajectory_impflux, False)
         for bad in ("0", "-1", "nan", "inf", "x"):
             with self.subTest(cli=bad):
                 with self.assertRaises(SystemExit):
