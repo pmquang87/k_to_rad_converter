@@ -6107,11 +6107,12 @@ quasi-static term adds `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the diagonal,
 `imp_dyna.F:351-355`, and the engine has no QSTAT-versus-RIKS guard,
 `lectur.F:3517-3532` disarms only FIXPOINT). It buys a load path, not the
 answer: on `ex_07_beam_elform_1` the converged load factor loops down to
-−0.4412 (94-97 turning points) where LS-DYNA's own path turns once, at 0.3745,
-and never goes below 0; five runs of identical bytes end NORMAL four times
-(1206 / 1192 cycles at nt 4, 1202 twice at nt 2) and ERROR once (MESSAGE 79 at
-cycle 1421, the load factor back at 0), and `ex_05_beam_elform_3_&_6` still
-stops (MESSAGE 79 at load factor 0.8548 / 0.8698, nt 4 / 2). The LS reference
+−0.4412, turning back and forth many times (the count depends on the counting
+rule), where LS-DYNA's own path turns once, at 0.3745, and never goes below 0;
+ten runs of identical bytes end NORMAL nine times (1192 .. 1219 cycles, five at
+nt 4 and four at nt 2) and ERROR once at nt 4 (MESSAGE 79 at cycle 1421, the
+load factor back at 0), and `ex_05_beam_elform_3_&_6` still stops (MESSAGE 79
+at load factor 0.84 .. 0.87 in four runs at nt 4 and nt 2). The LS reference
 of both is UNMATCHED (its time axis runs backwards), so no run is evidence of
 the answer — which is why it ships off.
 `*CONTROL_IMPLICIT_SOLUTION` whose `DCTOL`/`ECTOL`/`RCTOL` are **all 0 or

@@ -7702,11 +7702,12 @@ class ConvertOptions:
     # Round 9 (A11): the flag also writes no /IMPL/QSTAT unless
     # qstat_dtscal_stated, and re-measured ex_07 under it: the path loops
     # through negative load factors LS-DYNA never visits (down to -0.4412,
-    # 94-97 turning points; LS-DYNA's turns once, at 0.3745), NORMAL in 4 of
-    # 5 runs of identical bytes (1206 / 1192 cycles at nt 4, 1202 twice at
-    # nt 2), ERROR once (MESSAGE 79); ex_05 still stops (load factor 0.8548
-    # / 0.8698); both LS references UNMATCHED. It buys a load path, not the
-    # answer. Net movers: zero.
+    # turning back and forth many times; LS-DYNA's turns once, at 0.3745),
+    # NORMAL in 9 of 10 runs of identical bytes (1192 .. 1219 cycles, five
+    # at nt 4 and four at nt 2), ERROR once at nt 4 (MESSAGE 79); ex_05
+    # still stops (load factor 0.84 .. 0.87, four runs at nt 4 and nt 2);
+    # both LS references UNMATCHED. It buys a load path, not the answer.
+    # Net movers: zero.
     arclength_riks: bool = False
     # --no-zero-tolerance-ectol: keep k2rad's force default /IMPL/NONLIN
     # Itol 2 / Toli 0.01 on a *CONTROL_IMPLICIT_SOLUTION whose DCTOL, ECTOL

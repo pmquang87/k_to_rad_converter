@@ -3067,7 +3067,7 @@ models on the 356-key / 312-model roster.
     TIMESTEP LIMIT 11 (4.2, the roof crush, `ex_05` / `06` / `07`, the `ex_27`
     pair, the 4 welding steps by construction), timeout 8 (4.1, the door sag,
     the 6 nvh rows), refused IGA 3, pending giants 2; the opt-ins reach NORMAL
-    on `ex_07` (A11, 4 of 5 runs) and `ex_06` (A12, IE RMS 0.09 %) without
+    on `ex_07` (A11, 9 of 10 runs) and `ex_06` (A12, IE RMS 0.09 %) without
     campaign rows. Next, per row: 4.1 (the LAW88 implicit tangent,
     `mmats.F:187-196`, a SOLVER limitation), 4.2 (a REFERENCE question: LS
     Error 60004 at t 0.33145), `ex_05` (no lever reaches NORMAL), the `ex_27`

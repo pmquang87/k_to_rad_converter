@@ -623,13 +623,17 @@ Prior history (before this changelog was introduced) is summarized in the
     the card out on an arc-length deck under the flag (the
     `--deformable-contact-recipe` 0.05 is evaluated first and kept). The
     flag's bytes = the `386444e` flag bytes with the QSTAT card removed
-    (ex_07 engine file sha256 `9219da82fbb6`). MEASURED (five runs of
-    identical bytes): ex_07_beam_elform_1 NORMAL 4 of 5 (1206 / 1192
-    cycles at nt 4, 1202 twice at nt 2), ERROR once (MESSAGE 79 at cycle
-    1421); the converged load factor loops down to -0.4412 where LS-DYNA's
-    path turns once, at 0.3745, and never goes below 0;
-    ex_05_beam_elform_3_&_6 still stops (load factor 0.8548 / 0.8698, nt 4
-    / 2); both references UNMATCHED - never evidence of the answer. The
+    (ex_07 engine file sha256 `9219da82fbb6`). MEASURED (ten runs of
+    identical bytes, implement A's five and the solver-physics validator's
+    five): ex_07_beam_elform_1 NORMAL 9 of 10 (1206 / 1192 / 1219 / 1192 /
+    1193 cycles at nt 4, 1202 four times at nt 2), ERROR once at nt 4
+    (MESSAGE 79 at cycle 1421); the converged load factor loops down to
+    -0.4412 where LS-DYNA's path turns once, at 0.3745, and never goes
+    below 0 (the round-9 text's "94-97 turning points" was one counting
+    rule's figure - every sign change of the increment gives 126-130 - and
+    left the texts in the fix round); ex_05_beam_elform_3_&_6 still stops
+    (load factor 0.8548 / 0.8698 and 0.8507 / 0.8416, nt 4 / 2); both
+    references UNMATCHED - never evidence of the answer. The
     stale "still exits ERROR on the last increment" clause leaves every
     shipped text (guarded). Re-derived: `test_r14_triage_4`'s warning test
     keeps "BUYS THE LOAD PATH, NOT THE ANSWER" and the named regression,

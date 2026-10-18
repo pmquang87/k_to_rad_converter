@@ -235,11 +235,12 @@ such a model EXPLICIT until the engine is fixed.
   `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the stiffness diagonal
   (`imp_dyna.F:351-355`) and the engine has no QSTAT-versus-RIKS guard
   (`lectur.F:3517-3532` disarms only FIXPOINT). MEASURED on
-  `ex_07_beam_elform_1` (five runs of identical bytes): the converged load
+  `ex_07_beam_elform_1` (ten runs of identical bytes): the converged load
   factor loops down to -0.4412 where LS-DYNA's path turns once, at 0.3745,
-  and never goes below 0; NORMAL 4 of 5 (1206 / 1192 cycles at nt 4, 1202
-  twice at nt 2), ERROR once (MESSAGE 79); `ex_05_beam_elform_3_&_6` still
-  stops; both references are UNMATCHED - a load path, not the answer.
+  and never goes below 0; NORMAL 9 of 10 (1192 .. 1219 cycles, five at nt 4
+  and four at nt 2), ERROR once at nt 4 (MESSAGE 79);
+  `ex_05_beam_elform_3_&_6` still stops; both references are UNMATCHED - a
+  load path, not the answer.
 - **Quasi-Newton BFGS** (A12, opt-in `--implicit-bfgs`): `/IMPL/NONLIN/2`
   and no `/IMPL/QSTAT` (unless `--qstat-dtscal`) on an NSOLVR 12 / blank
   deck. One carrier, `ex_06_beam_elform_1`: NORMAL in 277 cycles at IE END

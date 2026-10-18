@@ -1952,7 +1952,10 @@ class ArclengthRiksNoQstat(unittest.TestCase):
     cycle 1421, the load factor back at 0); the converged load factor down
     to -0.4412 on every run (LS-DYNA's glstat path turns once, at 0.3745,
     and never goes below 0). ex_05: MESSAGE 79 at load factor 0.8548 (nt 4)
-    / 0.8698 (nt 2).
+    / 0.8698 (nt 2). The solver-physics validator's five more runs of the
+    same bytes (1219 / 1192 / 1193 at nt 4, 1202 / 1202 at nt 2) all ended
+    NORMAL, and ex_05 stopped at 0.8507 / 0.8416: the shipped tally is 9
+    of 10 (the fix round re-derived the '4 of 5' needle from that).
     """
 
     def test_a_the_flag_drops_the_QSTAT_card(self):
@@ -1962,8 +1965,10 @@ class ArclengthRiksNoQstat(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "--arclength-riks was passed: "
                              "/IMPL/DT/3 replaces /IMPL/DT/2 and NO "
                              "/IMPL/QSTAT card is written",
-                             "negative load factors", "4 of 5", "UNMATCHED",
+                             "negative load factors", "9 of 10", "UNMATCHED",
                              "pass --qstat-dtscal to keep one"))
+        self.assertFalse(_has(res.warnings, "4 of 5"))
+        self.assertFalse(_has(res.warnings, "94-97"))
 
     def test_b_a_stated_value_keeps_the_card(self):
         res, _s, engine = _convert(a11_riks_deck(), arclength_riks=True,
@@ -2409,7 +2414,7 @@ _RETRACTED_ROUND_9_A = (
     "residual stiffens",
     "tangent uses a constant",
     # A11: ex_07 under --arclength-riks loops through negative load factors
-    # and ends NORMAL in 4 of 5 runs - "ERROR on the last increment" is
+    # and ends NORMAL in 9 of 10 runs - "ERROR on the last increment" is
     # stale ("the engine never prints its last increment", the ECTOL
     # sentence, is another subject and is not needled)
     "on the last increment",
@@ -2430,7 +2435,7 @@ _REPLACEMENTS_ROUND_9_A = (
     ("README.md", "`imp_int_k.F:111-200` has no TYPE25 branch"),
     ("ROADMAP.md", "**Round 9:** CLOSED by A2 (implicit N2S -> one-way TYPE7 "
      "+ the stub, friction-faithful"),
-    ("k2rad/writer/assembly.py", "the run ends NORMAL in 4 of 5 runs of "
+    ("k2rad/writer/assembly.py", "the run ends NORMAL in 9 of 10 runs of "
      "identical bytes"),
     ("README.md", "**Since round 9 (A11) the flag writes NO `/IMPL/QSTAT` "
      "card unless `--qstat-dtscal` is given**"),
