@@ -3608,9 +3608,12 @@ only `SYSTEM` / `NODES` frames and wrote the constraint globally behind a false
 "not found"; they now read one helper (`writer/loads.spc_cid_skew`; the
 `*LOAD_NODE` CID sibling too). A CID in no registry keeps the global fallback
 and its true sentence. MEASURED on `control_adaptive.cylinder` (explicit, nt
-4, 271 = 271 cycles, base-paired with `386444e`): the reaction on a FREE local
-DOF max 4611 → 0.024 N (RMS 1106 → 0.0019 N; LS-DYNA 0) and the constrained
-local displacement 0.3352 mm → 1.8e-8 mm, on all 271 states; IE END +5.40 →
+4, 271 = 271 cycles, base-paired with `386444e`): the constrained local
+displacement 0.3352 mm → 1.8e-8 mm on all 271 states - the robust measure -
+and the T01 reaction on a FREE local DOF max 4611 → 0.024 N (RMS 1106 →
+0.0019 N; LS-DYNA 0; on a 30° coupon that channel of a node in a skewed `/BCS`
+points along the free local direction for a VECTOR and a SYSTEM frame alike,
+so the reaction figure rests on the channel's convention); IE END +5.40 →
 +5.38 %, KE END +20.61 → +20.29 % (RMS 2.53 / 3.47 → 2.74 / 3.28 % over the
 19 LS times to 3.798e-4). Movers 1 key / 1 model; the `SYSTEM`-CID decks
 (`3.1_Elastic_Beams_etc`, `3.5_Linear_Elastic_QS_Plate_Hex`) byte-identical.
