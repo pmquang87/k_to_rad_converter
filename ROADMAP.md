@@ -2690,7 +2690,11 @@ models on the 356-key / 312-model roster.
     gives LS's onset but still ×1.78 / ×7.3 after contact; in implicit Gapmin
     0.001 / 0.003 tunnels or dies. Next: Inacti 5 with the gap reduced to zero
     on the initially penetrating pairs only, on metal-cutting at nt 4 and 2. 1
-    key / 1 model.
+    key / 1 model. **Round 9:** closed by measurement (the round-9 census; the
+    record moves to the round-9 "closed by measurement" entry): a zero working
+    gap means STIF 0 (`i7keg3.F:336-340`), any gap below d0 tunnels or dies
+    (`nl_solv.F:182` / `:330-339`), and the imposed increment lies outside DD
+    (`fv_imp0.F:1182-1205`); class 9 keys / 9 models.
 12. **Itetra4 3 on EFG tetrahedron parts** (round-7 item 10, NO-GO): ×802 /
     ×49.8 the LS IE at the last two LS d3plot instants; the implicit tangent
     stays S4KE3 (`imp_glob_k.F:176-193`). Closed unless the implicit tangent
@@ -2698,37 +2702,75 @@ models on the 356-key / 312-model roster.
 13. **doorbeam's own ×5-13 deviation**: every arm sits at +531..+1206 % at
     every fifth against an LS reference whose KE is 0 in every block. Next: its
     own pre-research (the imposed punch stroke, the `/IMPL/QSTAT` card, the
-    ELFORM 16 shells, the CNRB inertias). 1 key / 1 model.
+    ELFORM 16 shells, the CNRB inertias). 1 key / 1 model. **Round 9:** the
+    pre-research found the deck driven on the WRONG body - the prescribed
+    motion drove the CNRB sharing PID 4 with the punch, which never moved (DY
+    0 at every fifth); A1 drives the part (the punch DY = LS-DYNA at every
+    fifth) and A2 writes its node-to-surface contact as a one-way
+    `/INTER/TYPE7` beside the friction-faithful stub: IE END +582.00 % ->
+    -15.85 .. -28.08 %, RMS 393.31 -> 10.34 .. 15.25 % of the LS peak (twelve
+    runs, nt 4 and nt 2). The residual is a round-9 NOT entry (doorbeam's
+    implicit residual; friction is the lever).
 14. **The cup-draw energy balance under the LS tool mass** (A4 ships): OR's
     mean energy error −4.39 → −17.88 % while IE / KE RMS improve. Next: OR
     `/TH/INTER` contact energy against LS's sliding interface energy. 1 key / 1
     model.
 15. **The mainboltaexpl pre-pull clamp** (A2 ships): the bolt stays 2.196 mm
     against LS 1.817 and the plates carry 1.3 vs 245.9 N·mm before the pull.
-    Next: an Inacti / gap arm on mainboltaexpl. 1 key / 1 model.
+    Next: an Inacti / gap arm on mainboltaexpl. 1 key / 1 model. **Round 9:**
+    NOT closed - A10's gate (nt 4) measured Igap 3 + Gapmin = t_min / 2 and
+    the TYPE25 Igap-2 route: both close the clearance (bolt 2.19560 -> 1.99461
+    / 1.99138 mm at 1e-3 s, LS 1.81686; the plates 1.31 -> 134.66 / 142.44
+    N·mm, LS 245.92) and both inflate EXP_SC_PRELOAD's contact energy (END
+    2916 -> 7557 / 5282, LS sliding interface energy 1758.5), so the first
+    ships as the opt-in `--mixed-main-thickness-gap` and the second is NO-GO;
+    4.3_General_Nonlinearity is the second bolt-preload carrier of the class
+    (two scanners + 1 openradioss_run file). Next: a gap rule that opens the
+    clearance without the friction growth.
 16. **The adaptive token's open design points** (A5 ships): n at the lighter
     end saves √2 on the i14 hub; a guarded spring sharing a `/PROP` loses its
     token; a tied end and a windowed motion have 0 corpus carriers. Next: the
     i14 coupon; a light node tied to a thin plate; a windowed `/IMPVEL` coupon.
+    **Round 9:** a record, no code (the round-9 census): "n at the lighter
+    end" is REFUTED on the star coupon, a tied end stays latent, the windowed
+    drive is confirmed and a sensor-gated motion is not expressible.
 17. **Axisymmetric shells ELFORM 14 / 15 / 44** (named warning only): LS uses
     the per-radian mass (2Dlag ×157.5); no thickness reproduces it. Next: a
     real 2-D route, its own item. 3 keys / 3 models.
-18. **CMO −1 beyond the measured pattern** (A1 ships): implicit CMO −1 exists
-    by source only; 'CON1 = 0 is global' rests on billet-forge alone; the Yaris
-    roof crush is unmeasurable (giant) - A1 writes `011 111` in skew 1 on its
-    main node 4478473 beside the deck's own `/IMPDISP` in `/SKEW/MOV/91965`
-    with Fscale 0 (entry 19), and its starter prints one NEW WARNING 312
-    (incompatible kinematic conditions; part A's starter run, both arms 0
-    errors; not re-run: its engine run of 2026-09-06 is STALE). Next: an
-    implicit CMO −1 coupon; a second CON1 = 0 carrier. 3 keys / 3 models.
-19. **SF = 0 on `*BOUNDARY_PRESCRIBED_MOTION_RIGID` written as Fscale 0**
-    (new): a stated 0.0 is kept where Vol I gives the default 1.0. Next: a
-    two-scanner census of the SF blank / 0 class and a named fix; the only
-    known carrier is a giant.
+18. **CMO −1 beyond the measured pattern** (A1 ships): implicit CMO −1 was
+    unmeasured (round 9 measured it, below); 'CON1 = 0 is global' rests on
+    billet-forge alone; the Yaris roof crush is unmeasurable (giant) - A1
+    writes `011 111` in skew 1 on its main node 4478473 beside the deck's own
+    `/IMPDISP` in `/SKEW/MOV/91965` with the deck's stated SF 0 (entry 19),
+    and its starter prints one NEW WARNING 312 (incompatible kinematic
+    conditions; part A's starter run, both arms 0 errors; not re-run: its
+    engine run of 2026-09-06 is STALE). Next: an implicit CMO −1 coupon; a
+    second CON1 = 0 carrier. 3 keys / 3 models. **Round 9:** implicit CMO −1
+    MEASURED on a coupon (the round-9 census): u . x' = 1.00000e-2 mm,
+    off-axis <= 1.4e-8, no rotation, IE = EXT-WORK, nt 4 = nt 2; six codes x
+    two rotated frames off-axis <= 2.1e-9, energy error 0.0 %. A9 writes the
+    roof crush's
+    `RIGID_LOCAL` drive in the `/BCS` skew (WARNING 312 gone on its starter,
+    0 ERROR) and A8 its stated SF 0 as Fscale 1. 'CON1 = 0 is the global
+    frame' still rests on billet-forge (1 / 1): the
+    `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO −1 class sits on 35
+    openradioss_run files, all CON1 40000000 (a FLAG-0 node frame), CON1 0
+    on none (two scanners).
+19. **SF = 0 on `*BOUNDARY_PRESCRIBED_MOTION_*`** (new): a stated 0.0 is
+    kept where Vol I gives the default 1.0. Next: a two-scanner census of the
+    SF blank / 0 class and a named fix; the only known carrier is a giant.
+    **Round 9:** CLOSED by A8 (Vol I p.759; the starter itself reads a zero
+    Fscale as 1.0, `read_impdisp.F:239`, so the RIGID cell was BYTES ONLY and
+    its round-8 physics reading is retracted); the physics defect was the
+    NODE / SET hold on a NON-zero curve: stagnation_A IE RMS 33.43 -> 15.34 %,
+    stagnation_B 3366.19 -> 32.16 % of the LS peak, both still stopping at 9 %
+    of the run (the ALE inflow work is a round-9 NOT entry).
 20. **The CNRB inertia family** (closed NO-GO in round 7): the echo scans now
     show far larger gaps (mainboltaexpl −78.75 .. −91.78 %, solidof −66.84 %,
     doorbeam −25.10 %). Next, if the family reopens: measure mainboltaexpl,
-    solidof and doorbeam first.
+    solidof and doorbeam first. **Round 9:** closed NO-GO with numbers (the
+    round-9 census): solidof's END KE −52.52 -> −57.32 % with the J cell;
+    the beam free-end rotary inertia becomes its own round-9 NOT entry.
 21. **Spotweld rules 1 + 2 as defaults** (unchanged NO-GO): no runnable,
     referenced rule-2 carrier beyond spotweld.k. Next: such a carrier. Piece 3
     ships (A6).
@@ -2768,7 +2810,21 @@ models on the 356-key / 312-model roster.
     sector frames (nine `*DEFINE_COORDINATE_VECTOR` cards), 48 such warnings.
     Next: give both tests the VECTOR frames (A1's CMO −1 helper already
     resolves them for `*MAT_RIGID`), measure at nt 4, behind its own opt-out.
-    1 key / 1 model; 0 non-roster.
+    1 key / 1 model; 0 non-roster. **Round 9:** CLOSED by A6 (one helper for
+    the five consumers, `--no-spc-vector-frames` restores the global
+    writing): on `control_adaptive.cylinder` (explicit nt 4, 271 = 271
+    cycles) the constrained radial displacement 0.3352 -> 1.8e-8 mm, the
+    free-DOF reaction 4611 -> 0.024 N (LS-DYNA 0), warnings 50 -> 3.
+
+**Round 9, part A - two records for the round-9 NOT list:** (a) **an
+implicit run that ends NORMAL below ENDTIM** - 9 keys / 5 models
+(4.3_General_Nonlinearity at 0.9689 of `/RUN`, ex_11_beam_elform_1 0.9223,
+the ex_14 x4 and ex_15 x3 families 0.9195), all `/IMPL/DYNA`: the next dynamic
+step exceeds the remaining time (`imp_dt.F:55-56`) and the run ends NORMAL
+short of ENDTIM; the validator task is the lever probe on ex_14_solid_elform_1
+(`/RUN` raised by one step and a DT_MAX that divides the remaining time),
+base-paired, nt 4 and nt 2. (b) **the mixed-main gap** (entry 15 above) keeps
+4.3_General_Nonlinearity as its second bolt-preload carrier.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 

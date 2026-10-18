@@ -3,10 +3,33 @@
   A1  a *CONSTRAINED_NODAL_RIGID_BODY sharing a *MAT_RIGID part's PID: the
       part-keyed cards drive the PART (LS Warning 10177)
       (default ON, --no-rigid-part-pid-precedence)
+  A2  implicit node-to-surface contacts as a one-way /INTER/TYPE7, the stub
+      kept and friction-faithful (default ON, --no-implicit-n2s-type7)
+  A3  the texts that ride A1 + A2 (no flag)
+  A4  implicit rigid-body gravity keeps the rigid parts' own nodes
+      (default ON, --no-implicit-rigid-gravity-nodes)
+  A5  a rigid-only *SECTION_BEAM ELFORM 7 section from TS1
+      (default ON, --no-elform7-beam-thickness-section)
+  A6  *BOUNDARY_SPC on a *DEFINE_COORDINATE_VECTOR CID in that frame
+      (default ON, --no-spc-vector-frames)
+  A7  a refused *MAT_ACOUSTIC part becomes /MAT/VOID on a modal deck
+      (default ON, --no-modal-acoustic-void)
+  A8  a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* is the default 1.0
+      (default ON, --no-prescribed-motion-sf-default)
+  A9  a RIGID_LOCAL drive shares its body's CMO -1 /BCS skew
+      (default ON, --no-rigid-local-shared-skew)
+  A10 Igap 3 + half the thinnest shell on a mixed shell + solid main
+      (OPT-IN, --mixed-main-thickness-gap)
+  A11 --arclength-riks writes no /IMPL/QSTAT unless --qstat-dtscal is given
+  A13 the records: the CNRB _SPC opt-out frame, the wiring, the ROADMAP /
+      CHANGELOG records and the retraction guards
 
 Kept in its own module, the repo's one-module-per-batch convention. The
-harness helpers are imported from tests/test_r14_triage_7.py / _8.py
-(functions and deck constants only, so no earlier TestCase runs twice).
+harness helpers are imported from tests/test_r14_triage_1.py / _4.py / _7.py
+/ _8.py, test_gravity.py and test_motion_load_variants.py as MODULES
+(functions, deck constants and the two wiring base classes, which T9
+subclasses; no earlier TestCase is bound in this namespace, so none runs
+twice).
 
 Every byte-pinning probe deck below was run through the OpenRadioss starter
 once (nt 4, C:/Users/pmqua/rcv_r9i_implA_<name>, harvested and deleted); the
@@ -1903,6 +1926,257 @@ class ArclengthRiksNoQstat(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A13 - the CNRB _SPC CMO -1 frame under --no-rigid-local-constraints: a
+#       VECTOR CON1 is a written /SKEW/FIX (no "will dangle"); only a CON1
+#       in no registry is named, with what it costs
+# ═════════════════════════════════════════════════════════════════════════════
+
+_A13_FRAMES = {
+    "vector": ("*DEFINE_COORDINATE_VECTOR\n"
+               + _row(5, 1.0, 2.0, 2.0, 2.0, 1.0, -2.0, 0) + "\n"),
+    "system": ("*DEFINE_COORDINATE_SYSTEM\n"
+               + _row(5, 0.0, 0.0, 0.0, 3.0, 6.0, 6.0, 0) + "\n"
+               + _row(6.0, 3.0, -6.0) + "\n"),
+    "missing": "",
+}
+
+
+def _a13_cnrb_frame(kind: str = "vector", con1: int = 5) -> str:
+    """g3j's closed-form coupon (R9P/g3j/coupon/cnrb_vec.k / cnrb_sys.k,
+    comments dropped): an elastic cube on a *CONSTRAINED_NODAL_RIGID_BODY_SPC
+    CMO -1 CON1 5 / CON2 011111 (only the local x free) under gravity
+    (1000, 2000, 3000), a free second hex for the explicit step; frame 5 is
+    the VECTOR x = (1,2,2)/3, v = (2,1,-2) or its SYSTEM twin."""
+    nodes = [(1, 0, 0, 0), (2, 10, 0, 0), (3, 10, 10, 0), (4, 0, 10, 0),
+             (5, 0, 0, 10), (6, 10, 0, 10), (7, 10, 10, 10), (8, 0, 10, 10),
+             (21, 100, 0, 0), (22, 110, 0, 0), (23, 110, 10, 0),
+             (24, 100, 10, 0), (25, 100, 0, 10), (26, 110, 0, 10),
+             (27, 110, 10, 10), (28, 100, 10, 10)]
+    return "".join([
+        "*KEYWORD\n*TITLE\ng3j CNRB_SPC CMO -1 frame coupon\n",
+        "*CONTROL_TERMINATION\n", _row(0.01, 0, 0.0, 0.0, 0.0), "\n",
+        "*DATABASE_GLSTAT\n", _row("1.0E-4", 0, 0, 1), "\n",
+        "*DATABASE_HISTORY_NODE\n", _row(1, 7), "\n",
+        "*DATABASE_NODOUT\n", _row("1.0E-4", 0, 0, 1), "\n",
+        _A13_FRAMES[kind],
+        "*PART\ncube\n", _row(1, 1, 1, 0, 0, 0, 0, 0), "\n",
+        "*SECTION_SOLID\n", _row(1, 1, 0), "\n",
+        "*MAT_ELASTIC\n", _row(1, "7.85E-9", 210000.0, 0.3), "\n",
+        "*SET_NODE_LIST\n", _row(1, 0.0, 0.0, 0.0, 0.0), "\n",
+        _row(1, 2, 3, 4, 5, 6, 7, 8), "\n",
+        "*CONSTRAINED_NODAL_RIGID_BODY_SPC\n", _row(100, 0, 1, 0, 0, 0, 0),
+        "\n", _row(-1.0, con1, 11111), "\n",
+        "*DEFINE_CURVE\n", _row(1, 0, 1.0, 1.0), "\n",
+        f"{0.0:>20}{1.0:>20}\n{1.0:>20}{1.0:>20}\n",
+        "*LOAD_BODY_X\n", _row(1, 1000.0), "\n",
+        "*LOAD_BODY_Y\n", _row(1, 2000.0), "\n",
+        "*LOAD_BODY_Z\n", _row(1, 3000.0), "\n",
+        "*ELEMENT_SOLID\n",
+        "       1       1       1       2       3       4       5       6       7"
+        "       8\n",
+        "       2       1      21      22      23      24      25      26      27"
+        "      28\n",
+        "*NODE\n",
+        "".join(f"{n:>8}{float(x):>16}{float(y):>16}{float(z):>16}\n"
+                for n, x, y, z in nodes),
+        "*END\n"])
+
+
+def a13_cnrb_vector_optout() -> str:
+    return _a13_cnrb_frame("vector")
+
+
+def a13_cnrb_missing_optout() -> str:
+    return _a13_cnrb_frame("missing", con1=9)
+
+
+def _no_titles(starter: str) -> str:
+    """The starter with every /SKEW block's title line blanked (the twins
+    differ only there)."""
+    out, lines = [], starter.splitlines()
+    for i, ln in enumerate(lines):
+        if i and lines[i - 1].startswith("/SKEW/"):
+            ln = "<title>"
+        out.append(ln)
+    return "\n".join(out)
+
+
+class CnrbSpcFrameOptOut(unittest.TestCase):
+    """A13 (part-A spec A13, the CNRB _SPC "will dangle" sentence; D-4: a
+    BEHAVIOURAL guard, the needle would kill 14 true sentences of other
+    features): under --no-rigid-local-constraints a VECTOR CON1 is written
+    in /SKEW/FIX/5 like its SYSTEM twin and names nothing; a CON1 in no
+    registry names what it costs.
+
+    STARTER RUNS (nt 4): a13_cnrb_vector_optout() under the opt-out
+    (p_a13vec_n4): 0 ERROR / 0 WARNING; a13_cnrb_missing_optout() under
+    the opt-out (p_a13miss_n4): ERROR 137 "UNDEFINED SKEW OR FRAME ID=9"
+    on BC_cnrb_100 - the sentence's claim. ENGINE (g3j, the round-9
+    census, 10002 cycles each with /DTIX 1.0E-6): VECTOR = SYSTEM to every
+    printed digit,
+    u . e1 = -0.179721 mm at t 0.009901 = the closed form within 1.37e-7,
+    transverse <= 1.33e-10 mm.
+    """
+
+    def test_the_twins_write_the_same_cards_on_both_paths(self):
+        for kw in ({}, {"rigid_local_constraints": False}):
+            with self.subTest(**kw):
+                r_v, s_v, _e = _convert(_a13_cnrb_frame("vector"), **kw)
+                r_s, s_s, _e = _convert(_a13_cnrb_frame("system"), **kw)
+                self.assertEqual(_no_titles(s_v), _no_titles(s_s))
+                for r in (r_v, r_s):
+                    self.assertFalse(_has(r.warnings, "will dangle"))
+                    self.assertFalse(_has(r.warnings,
+                                          "names no *DEFINE_COORDINATE_"))
+
+    def test_a_CON1_in_no_registry_names_ERROR_137(self):
+        res, _s, _e = _convert(a13_cnrb_missing_optout(),
+                               rigid_local_constraints=False)
+        self.assertTrue(_has(res.warnings, "pid=100: CON1 9 names no "
+                             "*DEFINE_COORDINATE_* system",
+                             "the starter stops (ERROR 137)"))
+        self.assertFalse(_has(res.warnings, "will dangle"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A13 - the round-9 part-A flags reach every wiring site
+# ═════════════════════════════════════════════════════════════════════════════
+
+import test_r14_triage_8 as _t8  # noqa: E402
+
+
+class Round9FlagWiringA(_t7.Round7FlagWiringA):
+    """Every round-9 part-A DEFAULT-ON lever reaches the parser (with its
+    --no- twin), the README prose, the --help render with its measured
+    figures (matched on the collapsed render), the GUI end to end,
+    convert() / ConvertOptions (default True) and cli.main()'s call - the
+    round-7 checks, for this round's eight flags (A5's findings spelling
+    --2d-beam-thickness-section is an alias: TwoDBeamThicknessSection)."""
+
+    _FLAGS = {
+        "--rigid-part-pid-precedence": "rigid_part_pid_precedence",
+        "--implicit-n2s-type7": "implicit_n2s_type7",
+        "--implicit-rigid-gravity-nodes": "implicit_rigid_gravity_nodes",
+        "--elform7-beam-thickness-section": "elform7_beam_thickness_section",
+        "--spc-vector-frames": "spc_vector_frames",
+        "--modal-acoustic-void": "modal_acoustic_void",
+        "--prescribed-motion-sf-default": "prescribed_motion_sf_default",
+        "--rigid-local-shared-skew": "rigid_local_shared_skew",
+    }
+    _HELP_FIGURES = {
+        "--rigid-part-pid-precedence": (
+            "Warning 10177", "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm",
+            "+582.00 %", "+53.91 %", "RMS 393.31 -> 81.05 %",
+            "-15.85 .. -28.08 %", "RMS 10.34 .. 15.25 %"),
+        "--implicit-n2s-type7": (
+            "imp_int_k.F:111-200", "ind_glob_k.F:4601-4605 MESSAGE 232",
+            "-15.85 .. -28.08 %", "twelve runs, nt 4 and nt 2", "(silent)"),
+        "--implicit-rigid-gravity-nodes": (
+            "gravit_imp.F", "1101 cycles", "+0.42 / +0.20 / +0.14 %",
+            "Explicit decks unchanged"),
+        "--elform7-beam-thickness-section": (
+            "TS1 x 1", "TS1^3 / 12", "ERROR 314-317", "5.68x"),
+        "--spc-vector-frames": (
+            "0.3352 -> 1.8e-8 mm", "4611 -> 0.024 N", "271 = 271 cycles",
+            "48 rows"),
+        "--modal-acoustic-void": (
+            "9.3.ssd_acoustic_box", "179 (+ 760) -> 0", "modal recipe only",
+            "IE RMS 168.69 %"),
+        "--prescribed-motion-sf-default": (
+            "read_impdisp.F:239", "Vol I p.759", "Fscale 1"),
+        "--rigid-local-shared-skew": (
+            "WARNING 312", "x0.750 / x-0.5625", "x1.000"),
+    }
+
+
+class Round9OptInWiring(_t8.Round8OptInWiringB):
+    """Every round-9 part-A OPT-IN lever (default OFF) reaches the parser
+    (with its --no- twin), the README prose (its POSITIVE spelling) and its
+    own README ### heading, the --help render with its measured figures,
+    the GUI end to end, convert() / ConvertOptions (default False) and
+    cli.main()'s call - round 8's opt-in checks for A10."""
+
+    _OPT_IN = {"--mixed-main-thickness-gap": "mixed_main_thickness_gap"}
+    _HELP_FIGURES = {
+        "--mixed-main-thickness-gap": ("2.196 -> 1.995 mm", "LS 1.817",
+                                       "2916 -> 7557", "LS 1758.5",
+                                       "OFF by default"),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A13 - the ROADMAP and CHANGELOG records of part A
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Round9RoadmapRecordA(unittest.TestCase):
+    """A13: ONE ``**Round 9:**`` line on each round-8 NOT entry part A
+    closes or re-states (11, 13, 15, 16, 18, 19, 20, 27), the round-8 list
+    still numbered 1-27 (Round8RoadmapRecord), and part A's two records for
+    the round-9 list in place."""
+
+    _ENTRIES = (11, 13, 15, 16, 18, 19, 20, 27)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lines = _t7._read7("ROADMAP.md").splitlines()
+
+    def _at(self, prefix: str) -> int:
+        hits = [k for k, ln in enumerate(self.lines) if ln.startswith(prefix)]
+        self.assertEqual(len(hits), 1, prefix)
+        return hits[0]
+
+    def test_each_part_A_entry_carries_one_round_9_line(self):
+        s = self._at("**What round 8 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        starts = {int(m.group(1)): k for k, m in
+                  ((k, re.match(r"^(\d+)\. \*\*", self.lines[k]))
+                   for k in range(s, e)) if m}
+        ends = sorted(starts.values()) + [e]
+        for n in self._ENTRIES:
+            with self.subTest(entry=n):
+                a = starts[n]
+                b = ends[ends.index(a) + 1]
+                block = "\n".join(self.lines[a:b])
+                self.assertEqual(block.count("**Round 9:**"), 1)
+
+    def test_part_A_records_for_the_round_9_list(self):
+        text = _t7._collapse("\n".join(self.lines))
+        self.assertIn("**Round 9, part A - two records for the round-9 NOT "
+                      "list:**", text)
+        for needle in ("9 keys / 5 models", "imp_dt.F:55-56",
+                       "ex_14_solid_elform_1",
+                       "4.3_General_Nonlinearity as its second bolt-preload"
+                       " carrier"):
+            self.assertIn(needle, text)
+
+
+class Round9ChangelogReSumsA(unittest.TestCase):
+    """A13: the "re-add every headline total" rule - part A's header
+    sentence re-sums from its per-item counts minus the keys several items
+    share, and each item bullet states its own count."""
+
+    #: the keys several part-A items move (the union is the sum minus these)
+    _SHARED = {"doorbeam": ("A1", "A2"), "ex_16": ("A4", "A5"),
+               "the Yaris roof crush": ("A4", "A8", "A9"),
+               "the door sag": ("A4", "A8")}
+
+    def test_the_part_A_total_re_sums(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md"))
+        m = re.search(
+            r"Part A's default bytes move (\d+) deck keys / (\d+) emitted "
+            r"models \(A1 (\d+) / (\d+), A2 (\d+) / (\d+), A4 (\d+) / (\d+), "
+            r"A5 (\d+) / (\d+), A6 (\d+) / (\d+), A7 (\d+) / (\d+), "
+            r"A8 (\d+) / (\d+), A9 (\d+) / (\d+);", text)
+        self.assertIsNotNone(m)
+        tot_k, tot_m, *items = map(int, m.groups())
+        shared = sum(len(v) - 1 for v in self._SHARED.values())
+        self.assertEqual(sum(items[0::2]) - shared, tot_k)
+        self.assertEqual(sum(items[1::2]) - shared, tot_m)
+        for name in self._SHARED:
+            self.assertIn(name, m.string[m.end():m.end() + 400])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1926,6 +2200,13 @@ _RETRACTED_ROUND_9_A = (
     # stale ("the engine never prints its last increment", the ECTOL
     # sentence, is another subject and is not needled)
     "on the last increment",
+    # A13 B-i: implicit CMO -1 was MEASURED on a coupon (round 9)
+    "by source only",
+    # A13 / A8: the starter reads a zero Fscale as 1.0 (read_impdisp.F:239);
+    # "Fscale 0" as LS-DYNA's reading of SF 0 is retracted (the true
+    # Fscale_Y = 0 sentences of loads.py are not needled)
+    "written as Fscale 0",
+    "with Fscale 0 (entry 19)",
 )
 
 #: (relative path, a replacement that IS shipped there)
@@ -1940,6 +2221,10 @@ _REPLACEMENTS_ROUND_9_A = (
      "identical bytes"),
     ("README.md", "**Since round 9 (A11) the flag writes NO `/IMPL/QSTAT` "
      "card unless `--qstat-dtscal` is given**"),
+    ("ROADMAP.md", "**Round 9:** implicit CMO −1 MEASURED on a coupon"),
+    ("ROADMAP.md", "19. **SF = 0 on `*BOUNDARY_PRESCRIBED_MOTION_*`** (new)"),
+    ("k2rad/writer/rbody.py", "names no *DEFINE_COORDINATE_* system: the "
+     "/BCS skew_ID is undefined and the starter stops (ERROR 137)"),
 )
 
 

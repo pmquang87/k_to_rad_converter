@@ -201,3 +201,46 @@ velocity — so none is shipped. The upstream reproducer is the free bar at
 `/IMPL/DTINI` 1e-8 with no wall and no contact: the penalty twin, or the
 constrained twin converted with `--no-constrained-global` (72 cycles). Run
 such a model EXPLICIT until the engine is fixed.
+
+## Round 9, part A: implicit routes measured
+
+- **Implicit node-to-surface contacts** (A2, default ON,
+  `--no-implicit-n2s-type7` keeps the TYPE25). OpenRadioss builds no implicit
+  stiffness for an `/INTER/TYPE25` (`imp_int_k.F:111-200` has no TYPE25
+  branch; `ind_glob_k.F:4601-4605` prints MESSAGE 232), so on an implicit,
+  non-modal deck a `*CONTACT_NODES_TO_SURFACE` /
+  `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` is written as a ONE-WAY `/INTER/TYPE7`
+  on the same groups (BT / DT in Tstart / Tstop), beside the all-parts
+  implicit stub, which carries the contact's friction when every routed
+  contact agrees on it. MEASURED on doorbeam (part-driven since A1): IE END
+  -15.85 .. -28.08 %, RMS 10.34 .. 15.25 % of the LS peak over twelve runs at
+  nt 4 and nt 2, where the TYPE25 ended +53.91 % / 81.05 %. A 4-node one-way
+  TYPE7 on a coarse RIGID base can end NORMAL with the block through - a
+  silent failure where the TYPE25 stops loudly.
+- **Implicit gravity on a rigid part** (A4, default ON,
+  `--no-implicit-rigid-gravity-nodes` restores the main-node group). Gravity
+  on a `/RBODY` main node alone leaves an implicit body frozen (`gravit_imp.F`
+  read; the dropping routine is not located), so on an implicit deck the
+  rigid parts' own nodes stay in the `/GRAV` group beside their main: ex_16's
+  disk KE -100 % at every fifth -> +0.42 / +0.20 / +0.14 % at the first three
+  fifths (NORMAL in 1101 cycles, nt 4 = nt 2; the last two fifths are the
+  skipped `*CONTACT_2D`). Explicit decks are unchanged.
+- **Arc-length without the quasi-static term** (A11, inside the opt-in
+  `--arclength-riks`): the flag writes no `/IMPL/QSTAT` card unless
+  `--qstat-dtscal` is given, because the term adds
+  `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the stiffness diagonal
+  (`imp_dyna.F:351-355`) and the engine has no QSTAT-versus-RIKS guard
+  (`lectur.F:3517-3532` disarms only FIXPOINT). MEASURED on
+  `ex_07_beam_elform_1` (five runs of identical bytes): the converged load
+  factor loops down to -0.4412 where LS-DYNA's path turns once, at 0.3745,
+  and never goes below 0; NORMAL 4 of 5 (1206 / 1192 cycles at nt 4, 1202
+  twice at nt 2), ERROR once (MESSAGE 79); `ex_05_beam_elform_3_&_6` still
+  stops; both references are UNMATCHED - a load path, not the answer.
+- **Implicit CMO -1** (A13): measured on a coupon in the round-9 census -
+  u . x' = 1.00000e-2 mm, off-axis <= 1.4e-8, no rotation, IE = EXT-WORK,
+  nt 4 = nt 2; six codes x two rotated frames off-axis <= 2.1e-9, energy error
+  0.0 %. A `*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL` drive on the same main
+  node shares the `/BCS` skew (A9): two skew ids on one node make the implicit
+  solver impose a frame-dependent wrong displacement (a two-block coupon:
+  x0.750 of the drive in two oblique frames, x1.000 in one skew, nt 4 = nt 2)
+  and the starter print WARNING 312.

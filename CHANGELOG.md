@@ -13,7 +13,12 @@ Prior history (before this changelog was introduced) is summarized in the
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on
-  `feat/r14-triage-9` off `386444e`).
+  `feat/r14-triage-9` off `386444e`). Part A's default bytes move 10 deck
+  keys / 10 emitted models (A1 1 / 1, A2 1 / 1, A4 5 / 5, A5 1 / 1, A6 1 /
+  1, A7 1 / 1, A8 4 / 4, A9 1 / 1; the union is the sum minus the keys
+  several items share: doorbeam carries A1 + A2, ex_16 A4 + A5, the Yaris
+  roof crush A4 + A8 + A9 and the door sag A4 + A8); A3, A10 (opt-in), A11
+  (2 keys, warning text only) and A13 0.
   - **A CNRB sharing a `*MAT_RIGID` part's PID no longer steals the part's
     cards** (A1; default ON, `--no-rigid-part-pid-precedence` restores the
     `386444e` merge). LS-DYNA accepts the shared id with Warning 10177 and
@@ -272,6 +277,27 @@ Prior history (before this changelog was introduced) is summarized in the
     shipped text (guarded). Re-derived: `test_r14_triage_4`'s warning test
     keeps "BUYS THE LOAD PATH, NOT THE ANSWER" and the named regression,
     its nt pair is now the new measurement's (nt 4 and nt 2, "UNMATCHED").
+  - **The half-A records and texts** (A13; no default bytes). (a) The CNRB
+    `_SPC` CMO -1 opt-out branch (`--no-rigid-local-constraints`) printed
+    "/BCS skew_ID will dangle" for a `*DEFINE_COORDINATE_VECTOR` CON1 - a
+    false sentence: that frame IS a written `/SKEW/FIX/<cid>` and the
+    starter accepts it (g3j's closed-form coupon rebuilt in the tests: the
+    VECTOR and SYSTEM twins write the same cards but the titles on both
+    paths); only a CON1 in no registry is named now, with what it costs
+    (ERROR 137, measured on a starter probe). (b) ROADMAP: one
+    `**Round 9:**` line on round-8 NOT entries 11, 13, 15, 16, 18, 19, 20
+    and 27 with the round-9 measurement (implicit CMO -1 measured on a
+    coupon; entry 19's title loses "written as Fscale 0"); part A's two
+    records for the round-9 list (an implicit run that ends NORMAL below
+    ENDTIM, 9 keys / 5 models, `imp_dt.F:55-56`; 4.3_General_Nonlinearity
+    as the mixed-main gap's second bolt-preload carrier). (c) The
+    retracted spellings `by source only`, `written as Fscale 0` and `with
+    Fscale 0 (entry 19)` are guarded with the round's others. (d)
+    `Round9FlagWiringA` (A1, A2, A4, A5, A6, A7, A8, A9) and
+    `Round9OptInWiring` (A10) wire every lever at every site;
+    `docs/IMPLICIT.md` gains the round-9 part-A section. Moved test:
+    `test_r14_triage_8` A1 (o)'s opt-out assertion (it pinned the false
+    sentence) now asserts no sentence and the same `/BCS` in skew 3.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

@@ -386,14 +386,17 @@ class RigidLocalConstraints(unittest.TestCase):
         """(l) --no-rigid-local-constraints on (a), (d), (e), (j), (o): the
         starter file and the warning list equal 4f5b6e8's (SHA measured from
         the pristine checkout, PYTHONDONTWRITEBYTECODE=1, porcelain --ignored
-        empty before and after)."""
+        empty before and after). Round 9 (A13): probe (o)'s list is
+        4f5b6e8's minus the one false "will dangle" sentence (its VECTOR CON1
+        IS a written /SKEW/FIX/3) - measured against the pristine 386444e
+        checkout, where the two lists differ in that sentence only."""
         for key, deck in _OPT_OUT_DECKS().items():
             with self.subTest(probe=key):
                 res, starter, _e = _convert(deck,
                                             rigid_local_constraints=False)
                 self.assertEqual(_sha(starter), _PR8_SHA[key])
                 self.assertEqual(_sha("\n".join(res.warnings)),
-                                 _PR8_WARN_SHA[key])
+                                 _R9_WARN_SHA.get(key, _PR8_WARN_SHA[key]))
 
     def test_n_the_coupon(self):
         """(n) the g3p coupon: the cube's 100 000 and the plate's 100 111,
@@ -420,7 +423,13 @@ class RigidLocalConstraints(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "will dangle"), res.warnings)
         r_off, s_off, _e2 = _convert(cnrb(3, 110000, _VEC3),
                                      rigid_local_constraints=False)
-        self.assertTrue(_has(r_off.warnings, "will dangle"))
+        # round 9 (A13): the opt-out's "will dangle" on a VECTOR CON1 was
+        # false - /SKEW/FIX/3 IS written and the starter accepts it (g3j) -
+        # so the opt-out names nothing and writes the same card
+        self.assertFalse(_has(r_off.warnings, "will dangle"), r_off.warnings)
+        self.assertFalse(_has(r_off.warnings, "names no *DEFINE_COORDINATE_"))
+        self.assertEqual(_bcs_card(s_off, "BC_cnrb_50")[:3],
+                         ("110", "000", 3))
         # FLAG 1: a t = 0 /SKEW/FIX instead of the moving skew
         node_frame = "*DEFINE_COORDINATE_NODES\n" + _row(7, 10, 12, 16, 1) + "\n"
         r1, s1, _e1 = _convert(cnrb(7, 100000, node_frame))
@@ -2051,6 +2060,12 @@ _PR8_WARN_SHA = {
     "j": "2e5113acdacb3e65d25737a27722e6b42670d61fa0bad24c1483c8ef51059258",
     "o": "cbee9879c41b3e6d9c1c3664ee4c4f17406477c9b2e2a27f4a02a31ba1dcc09a",
     "a5_d2": "cfa0c72ad12c7fdc53e990d1d8dc26bfb17bca097a01386008263cfbbd8ada20",
+}
+#: round 9 (A13): the opt-out lists that moved - (o) = 4f5b6e8's minus the
+#: false "/BCS skew_ID will dangle" sentence on its VECTOR CON1 (the same
+#: list as (a) / (e) then)
+_R9_WARN_SHA = {
+    "o": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",
 }
 
 

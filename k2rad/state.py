@@ -10004,7 +10004,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1099, :1803, :1917, :2106, :2263, :2387, in that order:
+    # (writer/rbody.py:1099, :1810, :1924, :2113, :2270, :2394, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

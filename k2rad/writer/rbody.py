@@ -1545,11 +1545,18 @@ def _resolve_cnrb_spc_lines(state: ConversionState, cnrb,
         skew = cnrb.con1
         code = f"{abs(cnrb.con2):06d}"[-6:]
         tra, rot = code[0:3], code[3:6]
-        if skew and skew not in state.coord_nodes and skew not in state.coord_sys:
+        # R14 triage round 9, A13: a *DEFINE_COORDINATE_VECTOR CON1 IS a
+        # written /SKEW/FIX/<cid> (writer/mesh._synthesize_vector_skews), and
+        # the starter accepts it (g3j's coupon: identical bytes to the SYSTEM
+        # twin but the titles, VECTOR = SYSTEM to every printed digit) - so
+        # only a CON1 in NO registry is named, and with what it costs.
+        if (skew and skew not in state.coord_nodes
+                and skew not in state.coord_sys
+                and skew not in state.coord_vectors):
             state.warn(
-                f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: local SPC "
-                f"coordinate system {skew} (CON1) not found among "
-                "*DEFINE_COORDINATE_* — /BCS skew_ID will dangle."
+                f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: CON1 "
+                f"{skew} names no *DEFINE_COORDINATE_* system: the /BCS "
+                "skew_ID is undefined and the starter stops (ERROR 137)."
             )
     if abs(cmo) == 2.0:
         state.warn(
