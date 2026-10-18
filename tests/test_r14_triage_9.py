@@ -938,7 +938,20 @@ class TwoDBeamThicknessSection(unittest.TestCase):
                               "        8.333333E-05     0.0001666666667")
 
     def test_a_deformable_member_and_ELFORM_8_keep_the_refusal(self):
-        for deck in (_a5_deck(mat="elastic"), _a5_deck(elform=8)):
+        # the fix round (F5): ONE section shared by the rigid wall and a
+        # deformable *MAT_ELASTIC member keeps the refusal too - an
+        # all() -> any() mutant gave the deformable member the TS1 section
+        # and survived the round-9 suite. STARTER (nt 4,
+        # rcv_r9i_fixpr_a5mixed): ERRORs 274 / 275 / 314-317, the named
+        # refusal.
+        mixed = _a5_deck().replace(
+            "*SECTION_BEAM", "*PART\nbeam deformable\n" + _row(8, 5, 10)
+            + "\n*SECTION_BEAM", 1).replace(
+            "*END", "*MAT_ELASTIC\n" + _row(10, 7.85e-9, 210000.0, 0.3)
+            + "\n*NODE\n" + f"{4:>8}{50.8:>16}{0.0:>16}{0.0:>16}"
+            + "\n*ELEMENT_BEAM\n" + "".join(f"{v:>8}" for v in (2, 8, 2, 4, 3))
+            + "\n*END", 1)
+        for deck in (_a5_deck(mat="elastic"), _a5_deck(elform=8), mixed):
             with self.subTest():
                 res, st, _e = _convert(deck)
                 self.assertEqual(_beam_cells(st), (0.0, 0.0, 0.0, 0.0))
@@ -1820,6 +1833,28 @@ class MixedMainThicknessGap(unittest.TestCase):
                 self.assertNotEqual(_type7_igap_gapmin(st, 1)[0], 3)
                 self.assertFalse(_has(res.warnings, _W_A10))
 
+    def test_d2_a_shell_only_main_stands_down(self):
+        """The fix round (F6): the single surface over a part set holding
+        ONLY the shell plate - a shell-only main has no solid face, so the
+        rule stands down (Igap 0, the starter default, no sentence);
+        dropping 'faces' from the mixed test gave (3, 0.5) with the false
+        'the main mixes shells and solids' and survived the round-9
+        suite. STARTER (nt 4, rcv_r9i_fixpr_a10shell, flag on): 0
+        ERROR(S) / 2 WARNING(S) (1084)."""
+        contact = "\n".join([
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID",
+            _row(1) + "shell-only main",
+            _row(3, 0, 2, 0, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+            _row(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)])
+        deck = _a10_gapc(contact=contact,
+                         extra="*SET_PART_LIST\n" + _row(3) + "\n" + _row(2))
+        res, st, _e = _convert(deck, **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (0, 0.0))
+        self.assertFalse(_has(res.warnings, _W_A10))
+        _r0, st0, _e0 = _convert(deck)
+        self.assertEqual(st, st0)
+
     def test_e2_the_implicit_stub_is_never_reached(self):
         """An implicit coupon with no contact card gets k2rad's all-parts
         stub - a mixed main - which the rule must leave alone."""
@@ -2014,7 +2049,11 @@ class ImplicitBfgs(unittest.TestCase):
                 self.assertTrue(_has(res.warnings, _W_A12, "NSOLVR blank"))
 
     def test_c_another_NSOLVR_keeps_NONLIN_1_and_is_named(self):
-        for n in (1, 6):
+        # 2 is LS-DYNA's older BFGS spelling: the decision scoped the opt-in
+        # to NSOLVR 12 / blank (the measured family), so 2 is refused like
+        # any other value (the fix round, F7: adding 2 to the family
+        # survived the round-9 suite)
+        for n in (1, 2, 6):
             with self.subTest(nsolvr=n):
                 res, _s, engine = _convert(_t4._implicit_deck(nsolvr=n),
                                            implicit_bfgs=True)
@@ -3991,6 +4030,13 @@ class AleFlowTracking(unittest.TestCase):
             ({"bcexp": 3}, "BCEXP 3: FLOW-TRACKING's deformation term"),
             ({"bcrot": 4}, "BCROT 4: only BCROT 0 / 7 map to I_rot +1 / -1"),
             ({"set_parts": (5,)}, "set 1 misses ALE part(s) [4]"),
+            # the fix round (F-T-1): the STYPE screen had no probe - its
+            # removal survived the round-9 suite; STYPE 1 reads SID as a
+            # PART id (part 1 does not exist), not as set 1 (which covers
+            # both ALE parts and would be accepted)
+            ({"stype": 2}, "STYPE 2: only a part set (0) or a part (1) names "
+                           "the ALE parts"),
+            ({"stype": 1}, "part 1 is not defined in the deck"),
             ({"n_cards": 2}, "2 *ALE_REFERENCE_SYSTEM_GROUP cards: "
                              "FLOW-TRACKING is one grid formulation for the "
                              "deck"),
