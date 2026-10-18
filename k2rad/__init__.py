@@ -311,6 +311,7 @@ def convert(
     elform7_beam_thickness_section: bool = True,
     spc_vector_frames: bool = True,
     prescribed_motion_sf_default: bool = True,
+    rigid_local_shared_skew: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1125,6 +1126,15 @@ def convert(
         Fscale 1; a RIGID row writes Fscale 1 (bytes only: the OpenRadioss
         starter already reads 0 as 1.0, read_impdisp.F:239). Default True;
         False keeps the stated 0.
+    rigid_local_shared_skew : bool
+        Write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the skew of
+        the body's own CMO -1 /BCS (R14 triage round 9, A9) when the frames
+        coincide at t 0, the /BCS holds every rotation and no DOF is held and
+        driven: two skew ids on one node make the implicit solver impose a
+        frame-dependent wrong displacement with a 0.0 % energy error (a
+        two-card coupon: x0.750 / x-0.5625 of the motion in two oblique
+        frames, x1.000 in one skew) and the starter print WARNING 312.
+        Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1571,6 +1581,7 @@ def convert(
         elform7_beam_thickness_section=elform7_beam_thickness_section,
         spc_vector_frames=spc_vector_frames,
         prescribed_motion_sf_default=prescribed_motion_sf_default,
+        rigid_local_shared_skew=rigid_local_shared_skew,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

@@ -1261,6 +1261,162 @@ class PrescribedMotionSfDefault(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A9 — a RIGID_LOCAL drive and the CMO -1 /BCS of its body in ONE shared skew
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _w1i_nodes() -> str:
+    """The 27 nodes of g2g's W1i coupon (a 10 mm cube, 3 x 3 x 3 nodes)."""
+    out = ["*NODE"]
+    nid = 0
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                nid += 1
+                out.append(f"{nid:>8}{5.0 * i:>16.6f}{5.0 * j:>16.6f}"
+                           f"{5.0 * k:>16.6f}{0:>8}{0:>8}")
+    return "\n".join(out) + "\n"
+
+
+def _w1i(con2: str = "011111", lco: int = 7, dof: int = 1, vad: int = 2,
+         implicit: bool = True, extra_cs: str = "", cnrb: bool = False) -> str:
+    """g2g's W1i coupon (SCR/r9pre/g2g/coupon_b3/W1i.k), rebuilt: an elastic
+    base (part 1, bottom fixed) and a block (part 2) on top, the block a
+    *MAT_RIGID CMO -1 body in the *DEFINE_COORDINATE_NODES 7 frame (nodes 10
+    / 24 / 25, an oblique frame), its CON2 *con2*, LCO *lco*; a
+    *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drives DOF *dof* (VAD *vad*,
+    0 -> 0.01 mm). *cnrb* makes the block deformable and its body a
+    *CONSTRAINED_NODAL_RIGID_BODY_SPC 50 (CID 7, CMO -1 CON1 7)."""
+    ctrl = ["*CONTROL_TERMINATION", _row(1.0)]
+    if implicit:
+        ctrl += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 0.1)]
+    if cnrb:
+        mat2 = ["*MAT_ELASTIC", _row(2, 7.85e-9, 210000.0, 0.3)]
+        body = ["*SET_NODE_LIST", _row(60), _row(10, 11, 12, 13, 14, 15, 16,
+                                                 17), _row(18, 19, 20, 21, 22,
+                                                           23, 24, 25),
+                _row(26, 27),
+                "*CONSTRAINED_NODAL_RIGID_BODY_SPC", _row(50, 7, 60),
+                _row(-1.0, 7, int(con2))]
+        pid = 50
+    else:
+        mat2 = ["*MAT_RIGID", _row(2, 7.85e-9, 210000.0, 0.3),
+                f"{-1.0:>10}{7:>10}{con2:>10}", _row(lco)]
+        body = []
+        pid = 2
+    return "\n".join(
+        ["*KEYWORD"] + ctrl + [
+            "*DEFINE_COORDINATE_NODES", _row(7, 10, 24, 25, 0, "X"),
+            extra_cs.rstrip("\n"),
+            "*PART", "base", _row(1, 1, 1), "*PART", "block", _row(2, 1, 2),
+            "*SECTION_SOLID", _row(1, 1),
+            "*MAT_ELASTIC", _row(1, 7.85e-9, 1000.0, 0.3)] + mat2
+        + [_w1i_nodes().rstrip("\n"), "*ELEMENT_SOLID"]
+        + ["".join(f"{v:>8}" for v in row) for row in (
+            (1, 1, 1, 2, 5, 4, 10, 11, 14, 13), (2, 1, 2, 3, 6, 5, 11, 12, 15,
+                                                 14),
+            (3, 1, 4, 5, 8, 7, 13, 14, 17, 16), (4, 1, 5, 6, 9, 8, 14, 15, 18,
+                                                 17),
+            (5, 2, 10, 11, 14, 13, 19, 20, 23, 22), (6, 2, 11, 12, 15, 14, 20,
+                                                     21, 24, 23),
+            (7, 2, 13, 14, 17, 16, 22, 23, 26, 25), (8, 2, 14, 15, 18, 17, 23,
+                                                     24, 27, 26))]
+        + ["*SET_NODE_LIST", _row(1), _row(1, 2, 3, 4, 5, 6, 7, 8), _row(9),
+           "*BOUNDARY_SPC_SET", _row(1, 0, 1, 1, 1, 1, 1, 1),
+           "*DEFINE_CURVE", _row(2), f"{0.0:>20}{0.0:>20}",
+           f"{1.0:>20}{0.01:>20}"] + body
+        + ["*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL",
+           _row(pid, dof, vad, 2, 1.0), "*END", ""])
+
+
+def a9_w1i() -> str:
+    return _w1i()
+
+
+_A9_W1I_386444E_SHA = "286cbf6756803b12a4321e547fa2101b9d37fd8d9e4668d7750aa2b199f2cffa"
+_W_A9 = "the drive is written in /SKEW/"
+_W_A9_KEPT = "the drive keeps its co-rotating /SKEW/MOV/"
+
+
+def _imp_skews(starter: str):
+    return [c[4] for c in _imp_cards(starter)]
+
+
+def _bcs_skews(starter: str):
+    return sorted({r[2] for r in _bcs_rows(starter) if r[2]})
+
+
+class RigidLocalSharedSkew(unittest.TestCase):
+    """A9 (part-A spec A9): the drive shares the CMO -1 /BCS skew when (a)
+    Rot 111, (b) the frames are equal at t 0, (c) no DOF is held and
+    driven; one refusal probe per condition.
+
+    STARTER RUNS (nt 4): a9_w1i() default (p_a9w1i_n4): 0 ERROR / 0
+    WARNING - no WARNING 312; its 386444e bytes (p_a9w1iOff_n4, the
+    pristine checkout): 0 ERROR, WARNING 312 (kinset.F:103-105).
+
+    ENGINE (the W1i coupon, implicit IMFLAG 1, an output-only /TH on block
+    node 23; nt 4 AND nt 2, identical to every digit; 9 cycles NORMAL on
+    both arms): the block moves u . e1 = 0.0100 mm along the local x' =
+    (2, 1, 1) / sqrt 6 at t 1.0 = x1.0000 of the prescribed 0.01 mm, no
+    transverse motion, IE 0.54459 = the work of the drive; the 386444e
+    bytes (two skews on the main node) move 0.0075 mm = x0.7500, IE
+    0.30637 - the frame-dependent wrong displacement behind an energy
+    error of 0.0 %.
+    """
+
+    def test_1_the_drive_takes_the_BCS_skew(self):
+        res, st, _e = _convert(a9_w1i())
+        self.assertEqual(_bcs_skews(st), [7])
+        self.assertEqual(_imp_skews(st), [7])
+        self.assertTrue(re.search(r"^/SKEW/MOV/\d+$", st, re.M))  # inert
+        self.assertTrue(_has(res.warnings, _W_A9 + "7", "x0.750 / x-0.5625",
+                             "WARNING 312", "--no-rigid-local-shared-skew"))
+
+    def test_2_the_opt_out_restores_the_round_8_bytes(self):
+        res, st, _e = _convert(a9_w1i(), rigid_local_shared_skew=False)
+        self.assertEqual(_sha(st), _A9_W1I_386444E_SHA)
+        self.assertNotEqual(_imp_skews(st), [7])
+        self.assertFalse(_has(res.warnings, _W_A9))
+
+    def test_3a_a_free_rotation_keeps_both_skews(self):
+        res, st, _e = _convert(_w1i(con2="011110"))
+        self.assertNotEqual(_imp_skews(st), [7])
+        self.assertTrue(_has(res.warnings, _W_A9_KEPT, "(a)", "Rot 110"))
+
+    def test_3b_LCO_unlike_CON1_shares_only_with_equal_axes(self):
+        same = ("*DEFINE_COORDINATE_NODES\n" + _row(9, 10, 24, 25, 0, "X")
+                + "\n")
+        other = ("*DEFINE_COORDINATE_NODES\n" + _row(8, 10, 11, 13, 0, "X")
+                 + "\n")
+        r_s, st_s, _e = _convert(_w1i(lco=9, extra_cs=same))
+        self.assertEqual(_imp_skews(st_s), [7])
+        self.assertTrue(_has(r_s.warnings, _W_A9 + "7"))
+        r_o, st_o, _e = _convert(_w1i(lco=8, extra_cs=other))
+        self.assertNotEqual(_imp_skews(st_o), [7])
+        self.assertTrue(_has(r_o.warnings, _W_A9_KEPT, "(b)"))
+
+    def test_3c_a_held_and_driven_DOF_keeps_both_skews(self):
+        res, st, _e = _convert(_w1i(con2="111111"))
+        self.assertNotEqual(_imp_skews(st), [7])
+        self.assertTrue(_has(res.warnings, _W_A9_KEPT, "(c)", "HOLDS the "
+                             "driven DOF X"))
+
+    def test_4_a_CNRB_SPC_body_shares(self):
+        res, st, _e = _convert(_w1i(cnrb=True))
+        self.assertEqual(_imp_skews(st), [7])
+        self.assertTrue(_has(res.warnings, _W_A9 + "7"))
+
+    def test_5_a_VAD_0_drive_shares(self):
+        res, st, _e = _convert(_w1i(vad=0))
+        self.assertEqual(_imp_skews(st), [7])
+
+    def test_6_an_explicit_twin_follows_the_same_bytes_rule(self):
+        res, st, _e = _convert(_w1i(implicit=False))
+        self.assertEqual(_imp_skews(st), [7])
+        self.assertTrue(_has(res.warnings, _W_A9 + "7"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

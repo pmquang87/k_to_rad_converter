@@ -5165,6 +5165,99 @@ def _pm_lock_cards(state: ConversionState, pm, keyword: str,
     return locked, fct, lines
 
 
+def _body_con1(state: ConversionState, pid: int) -> int:
+    """The CMO -1 CON1 (the local system of the body's own constraint card)
+    of the rigid body a motion on *pid* drives: the rigid PART's *MAT_RIGID
+    (round 9 A1: a clashing CNRB gives way to the part), else a
+    *CONSTRAINED_NODAL_RIGID_BODY_SPC of that PID; 0 when none."""
+    part = state.parts.get(pid)
+    mat = state.mat_rigid.get(part.mid) if part is not None else None
+    if mat is not None and mat.cmo < 0:
+        return int(mat.con1)
+    for c in state.cnrbs:
+        if c.pid == pid and getattr(c, "has_spc", False) and c.cmo < 0:
+            return int(c.con1)
+    return 0
+
+
+#: (axis index into Tra + Rot) of each /IMP* Dir letter
+_DIR_DIGIT = {"X": 0, "Y": 1, "Z": 2, "XX": 3, "YY": 4, "ZZ": 5}
+
+
+def _shared_local_skew(state: ConversionState, pm, main: int, base_dir: str,
+                       mov_skew: int) -> int:
+    """round 9, A9 (``--rigid-local-shared-skew``, default ON): the skew a
+    ``*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL`` drive is written in.
+
+    The drive's co-rotating ``/SKEW/MOV`` and the body's own CMO -1 ``/BCS``
+    (round 8, A1) put TWO skew ids on one main node: the implicit solver then
+    condenses the /BCS skew (``bc_imp0.F:159-337``) and the skewed drive
+    (``fv_imp0.F:1182-1205``) separately and imposes a frame-dependent wrong
+    displacement behind an ERROR 0.0 % (g2g's two-card coupon: x0.750 /
+    x-0.5625 of the prescribed value in two oblique frames, x1.000 with one
+    skew; nt 2 = nt 4), and the starter prints WARNING 312 (kinset.F:103-105).
+    When the main node carries exactly ONE skewed card of its own body
+    (decision D12) and (a) that card holds every rotation (Rot 111), (b) the
+    drive's frame at t 0 is the card's (LCO == CON1, or every axis pair
+    |e_i . e_i'| >= 1 - 1e-9), (c) the drive's DOF is not one the card holds,
+    the drive is written in the CARD's skew - equal at t 0 and both rotate
+    with the body as long as no rotation is free. Otherwise both skews stay
+    and the failed condition is named. The /SKEW/MOV and its three nodes stay
+    (inert). Explicit decks follow the same bytes rule (both paths impose the
+    same motion there)."""
+    cards = _rigid_skewed_cards(state).get(main, [])
+    if len(cards) != 1:
+        return mov_skew
+    bskew, btitle, btra, brot = cards[0]
+    label = f"*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL pid={pm.pid}"
+    why = ""
+    if brot != "111":
+        why = (f"(a) the /BCS {btitle} leaves a rotation free (Rot {brot}), so "
+               "the co-rotating frame and the card's fixed one part company")
+    else:
+        drive_basis = _local_body_basis(state, pm.pid)[0] or (
+            (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        con1 = _body_con1(state, pm.pid)
+        part = state.parts.get(pm.pid)
+        mat = state.mat_rigid.get(part.mid) if part is not None else None
+        same_cid = bool(mat is not None and mat.lco and mat.lco == con1)
+        coord = (set(state.coord_sys) | set(state.coord_vectors)
+                 | set(state.coord_nodes))
+        bcs_cid = bskew if bskew in coord else con1
+        bcs_basis = (_icid_basis(state, bcs_cid) if bcs_cid else
+                     ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        if not same_cid and (bcs_basis is None or any(
+                abs(_vdot(a, b)) < 1.0 - 1e-9
+                for a, b in zip(drive_basis, bcs_basis))):
+            why = (f"(b) the drive's frame at t 0 is not the /BCS {btitle}'s "
+                   f"(/SKEW {bskew})")
+        elif (btra + brot)[_DIR_DIGIT[base_dir]] == "1":
+            why = (f"(c) the /BCS {btitle} also HOLDS the driven DOF "
+                   f"{base_dir}: the solver paths disagree on which wins "
+                   "(implicit in the moving skew: the /BCS; in one skew and "
+                   "explicit: the drive)")
+    if why:
+        state.warn(
+            f"{label}: the drive keeps its co-rotating /SKEW/MOV/{mov_skew} "
+            f"beside the body's own CMO -1 /BCS in /SKEW {bskew} - two skew "
+            f"ids on one node - because {why}. Two skews on one node make the "
+            "IMPLICIT solver impose a frame-dependent wrong displacement with "
+            "a 0.0 % energy error and the starter print WARNING 312; check "
+            "the motion.")
+        return mov_skew
+    state.warn(
+        f"{label}: the drive is written in /SKEW/{bskew}, the skew of the "
+        f"body's own CMO -1 /BCS {btitle}, instead of the co-rotating "
+        f"/SKEW/MOV/{mov_skew}: the frames are equal at t 0 and the /BCS holds "
+        "every rotation, so they stay equal. Two skew ids on one node make "
+        "the IMPLICIT solver impose a frame-dependent wrong displacement with "
+        "a 0.0 % energy error (a two-block coupon: x0.750 / x-0.5625 of the "
+        "prescribed value in two oblique frames, x1.000 in one skew; nt 2 = "
+        "nt 4) and the starter print WARNING 312. "
+        "--no-rigid-local-shared-skew keeps the two skews.")
+    return bskew
+
+
 def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]:
     """*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] -> /IMPVEL | /IMPACC | /IMPDISP
     on the rigid body's /RBODY main node."""
@@ -5224,6 +5317,12 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             continue
         ref = f"pid={pm.pid}"
         skew_id = _pm_skew_for(state, pm, keyword, ref)
+        # round 9, A9: a _LOCAL drive shares the skew of its body's own CMO -1
+        # /BCS when the two frames are one (no second skew id on the node)
+        if (pm.local and skew_id and skew_id == getattr(pm, "skew_id", 0)
+                and state.options.rigid_local_shared_skew):
+            skew_id = _shared_local_skew(state, pm, info["ind_node"],
+                                         base_dir, skew_id)
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop = pm.death if pm.death < 1e27 else 0.0
         # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,

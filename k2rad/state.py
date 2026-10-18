@@ -8272,6 +8272,20 @@ class ConvertOptions:
     # runnable movers (stagnation_A / _B) die at 9 % of t_end in both arms.
     # Movers 4 keys / 4 models (2 giants convert + starter only).
     prescribed_motion_sf_default: bool = True
+    # --no-rigid-local-shared-skew: a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL
+    # drive keeps its co-rotating /SKEW/MOV beside the body's CMO -1 /BCS in
+    # its own skew (the 386444e bytes, two skew ids on the main node).
+    #
+    # ON by default (R14 triage round 9, A9; round-8 entry 18):
+    # writer/loads._shared_local_skew writes the drive in the /BCS skew when
+    # (a) the /BCS holds every rotation, (b) the frames are equal at t 0, (c)
+    # no DOF is held and driven, and the main node carries exactly one
+    # skewed card (D12); otherwise both skews stay, named. MEASURED on g2g's
+    # two-card implicit coupon: two skews impose x0.750 / x-0.5625 of the
+    # prescribed value (frames (2,1,1)/sqrt6, (2,2,1)/3), one skew x1.000,
+    # nt 2 = nt 4; the Yaris roof crush's starter WARNING 312 goes (convert +
+    # starter only). Movers 1 key / 1 model.
+    rigid_local_shared_skew: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

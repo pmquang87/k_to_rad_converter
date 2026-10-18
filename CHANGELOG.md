@@ -187,6 +187,25 @@ Prior history (before this changelog was introduced) is summarized in the
     hand-computed expectation; the old shape kept on a zero curve and
     under the opt-out): `test_motion_load_variants.TestSetBox` x2 and
     `test_output_parity.Bndout.test_a_zero_scale_row_is_not_in_scope`.
+  - **A RIGID_LOCAL drive shares the skew of its body's CMO -1 /BCS** (A9;
+    round-8 entry 18; default ON, `--no-rigid-local-shared-skew` keeps the
+    two skews). Round 8's A1 writes a `*MAT_RIGID` (or CNRB `_SPC`) CMO -1
+    code as a `/BCS` in the CON1 skew on the body's main node, and a
+    `_LOCAL` drive goes in its co-rotating `/SKEW/MOV`: two skew ids on one
+    node, which the implicit solver condenses separately (`bc_imp0.F`,
+    `fv_imp0.F:1182-1205`), imposing a frame-dependent WRONG displacement
+    behind an energy error of 0.0 % (and starter WARNING 312,
+    `kinset.F:103-105`). `writer/loads._shared_local_skew` writes the drive
+    in the card's skew when the main node has exactly one skewed card
+    (D12) and (a) Rot is 111, (b) the frames are equal at t 0 (LCO = CON1
+    or every axis pair within 1e-9), (c) no DOF is held and driven;
+    otherwise both stay and the failed condition is named; the `/SKEW/MOV`
+    stays (inert). MEASURED on g2g's two-card coupon rebuilt in the tests
+    (implicit, nt 4 = nt 2, 9 cycles both arms): 0.0075 -> 0.0100 mm along
+    the oblique x' (x0.750 -> x1.000 of the drive), IE 0.30637 -> 0.54459
+    (= the drive's work), WARNING 312 -> none. The Yaris roof crush: the
+    imposed card's skew 91965 -> 1 (convert + starter only). Movers 1 key /
+    1 model.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

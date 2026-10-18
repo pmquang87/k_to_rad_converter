@@ -960,6 +960,19 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-prescribed-motion-sf-default keeps the stated 0.",
     )
     parser.add_argument(
+        "--rigid-local-shared-skew",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the "
+             "skew of the body's own CMO -1 /BCS when the frames coincide at "
+             "t 0, every rotation is held and no DOF is held and driven: two "
+             "skews on one node make the implicit solver impose a wrong "
+             "displacement (a two-block coupon: x0.750 / x-0.5625 of the "
+             "motion in two oblique frames, x1.000 in one skew; nt 2 = nt 4) "
+             "and the starter print WARNING 312. ON by default; "
+             "--no-rigid-local-shared-skew keeps the two skews.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1657,6 +1670,7 @@ def main(argv=None) -> int:
         elform7_beam_thickness_section=args.elform7_beam_thickness_section,
         spc_vector_frames=args.spc_vector_frames,
         prescribed_motion_sf_default=args.prescribed_motion_sf_default,
+        rigid_local_shared_skew=args.rigid_local_shared_skew,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
