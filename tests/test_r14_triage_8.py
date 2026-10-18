@@ -3976,7 +3976,9 @@ def _eos_rho0(starter: str, kind: str, mid: int) -> str:
 
 
 _SIS_ON = "(--shell-in-solid-coupling): shell part(s)"
-_SIS_LINE2 = _f(2812.5) + _f(0.0) + _f(6.25) + _f(0.0) + _f(0.0)
+# round 9, B4: the fixture is an SIS-alone deck, so the re-tuned opt-in
+# writes Gap 0.55 x the 12.5 mm host edge = 6.875 (round 8: 0.5 x = 6.25)
+_SIS_LINE2 = _f(2812.5) + _f(0.0) + _f(6.875) + _f(0.0) + _f(0.0)
 
 
 class ShellInSolidCoupling(unittest.TestCase):
@@ -3992,7 +3994,8 @@ class ShellInSolidCoupling(unittest.TestCase):
         hits = [w for w in res.warnings
                 if w.startswith("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)")]
         self.assertEqual(len(hits), 1, res.warnings)
-        for needle in ("2812.5", "-28.26 %", "8.936x", "30.51 / 4.88",
+        # round 9, B4: the opt-in's numbers re-measured on its re-tune
+        for needle in ("2812.5", "-29.06 %", "1.140x", "28.42 / 4.66",
                        "2.227e-4", "3.6 %", "--shell-in-solid-coupling"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
@@ -4000,7 +4003,8 @@ class ShellInSolidCoupling(unittest.TestCase):
         self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(0.0))
 
     def test_flag_on_writes_the_coupling(self):
-        """Stfval 0.1 x 2250 x 156.25^2 / 1953.125 = 2812.5; Gap 6.25. A
+        """Stfval 0.1 x 2250 x 156.25^2 / 1953.125 = 2812.5; Gap 6.875 (round
+        9, B4: 0.55 x 12.5 on this SIS-alone deck; round 8 wrote 6.25). A
         starter run of this deck (nt 4) reads 0 errors (B10 evidence).
         Mutation target: Stfval without the 0.1."""
         res, starter, _e = _convert(_sis_ale_deck(),
@@ -4013,9 +4017,11 @@ class ShellInSolidCoupling(unittest.TestCase):
         self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID", res.skipped_keywords)
         hits = [w for w in res.warnings if _SIS_ON in w]
         self.assertEqual(len(hits), 1, res.warnings)
+        # round 9, B4: the re-tuned sentence (Gap 6.875, the re-measured
+        # -29.06 % / 1.140x); round 8's Gap-0.5 +284.04 % is no longer quoted
         for needle in ("Stfval = 0.1 x K 2250 x A^2 156.25^2 / V 1953.12",
-                       "= 2812.5", "Gap 6.25", "RHO_I 1e-15 (VFACT x RO)",
-                       "-28.26 %", "8.936x", "+284.04 %"):
+                       "= 2812.5", "Gap 6.875", "RHO_I 1e-15 (VFACT x RO)",
+                       "-29.06 %", "1.140x"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
         self.assertFalse(_has(res.warnings,
@@ -4023,12 +4029,13 @@ class ShellInSolidCoupling(unittest.TestCase):
 
     def test_stfval_on_a_non_cubic_host(self):
         """Host bricks 10 x 10 x 20, plate squares 10 x 10: Stfval = 0.1 x
-        2250 x 100^2 / 2000 = 1125; Gap = 0.5 x the mean FIRST edge = 5."""
+        2250 x 100^2 / 2000 = 1125; Gap = 0.55 x the mean FIRST edge = 5.5
+        (round 9, B4's re-tune on this SIS-alone deck; round 8: 0.5 x = 5)."""
         _r, starter, _e = _convert(_sis_ale_deck(host=(10.0, 10.0, 20.0),
                                                  plate=10.0),
                                    shell_in_solid_coupling=True)
         self.assertEqual(_type18(starter)[2],
-                         _f(1125.0) + _f(0.0) + _f(5.0) + _f(0.0) + _f(0.0))
+                         _f(1125.0) + _f(0.0) + _f(5.5) + _f(0.0) + _f(0.0))
 
     def test_penalty_pssf(self):
         res, starter, _e = _convert(
@@ -4512,8 +4519,9 @@ class Round8OptInWiringB(unittest.TestCase):
                                              "ind_glob_k.F:4601-4605",
                                              "ERROR TERMINATION at cycle 9",
                                              "49.4 %"),
-        "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -28.26 %",
-                                      "+1134.62 -> +42.28 %", "8.936x"),
+        # round 9, B4: the re-tuned opt-in's numbers
+        "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -29.06 %",
+                                      "+1134.62 -> +39.41 %", "1.140x"),
     }
 
     def _readme(self):

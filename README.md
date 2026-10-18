@@ -1167,9 +1167,13 @@ the deck IE +1134.62 % / KE −92.06 % (RMS 1102.65 / 162.68 % of the LS peak).
 Since round 8 the opt-in
 [`--shell-in-solid-coupling`](#--shell-in-solid-coupling--the-embedded-shells-as-an-intertype18-penalty-coupling)
 writes the card as an `/INTER/TYPE18` (Stfval = 0.1 K A² / V) plus the void
-density on an `*INITIAL_VOID` host of the card: the plate −28.26 %, the deck IE
-+42.28 % at 8.936× the cycles. `*CONSTRAINED_BEAM_IN_SOLID` stays a plain
-skipped keyword (reach 0).
+density on an `*INITIAL_VOID` host of the card (round 8: the plate −28.26 %, the
+deck IE +42.28 % at 8.936× the cycles); since round 9, on a deck whose only
+Lagrangian parts are the embedded shells, with Gap 0.55 × the host edge and the
+engine card `/DT/INTER/CST`: the plate −29.06 %, the deck IE +39.41 % at 1.140×
+the cycles. The round-9 gate kept it opt-in: `/DT/INTER/CST` is global and
+added mass to a TYPE7 pair beside the coupling in every arm.
+`*CONSTRAINED_BEAM_IN_SOLID` stays a plain skipped keyword (reach 0).
 
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL). `K` →
 `Bunreacted` 1:1 — Vol II R17 p.2-188 gives the pre-detonation pressure as
@@ -7170,16 +7174,43 @@ a host part is an `*INITIAL_VOID` part of the card, its `/MAT/HYD_VISC` gets
 `RHO_0 = RO` cell (`hm_read_mat06.F:155-157`, `hm_read_eos_gruneisen.F:117-123`);
 a host `*MAT_NULL` another part shares gets a copy. A card it cannot resolve
 (a Lagrangian host, another EOS, RO / C ≤ 0, no shell, START < 0, END < 0)
-keeps the skip with a named reason. MEASURED on
+keeps the skip with a named reason. Round 8 measured that form on
 `intro-by-j.-day/misc/bird-ale/bird-el.k` (nt 4; Stfval 2812.5, Gap 6.25): the
 plate's IE −100 % → −28.26 % against LS-DYNA (RMS 83.14 → 24.53 %), the deck END
 IE +1134.62 → +42.28 % / KE −92.06 → −38.13 % (RMS 1102.65 / 162.68 → 30.51 /
 4.88 % of the LS peak), at 8.936× the cycles (the step falls to a void node);
-Stfval × 0.5 / × 2 moves the plate by under 1 point. Not the default: the
-density half fails on both `*CONSTRAINED_LAGRANGE_IN_SOLID` void hosts (bird_B
-stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its
-run in 600 s), so the density is written only on a shell-in-solid host — the
-CLIS decks are byte-identical under the flag.
+Stfval × 0.5 / × 2 moves the plate by under 1 point.
+
+**Round 9 re-tunes the opt-in** (B4) on a deck that is the shell-in-solid
+problem alone — every element on an ALE part or on an embedded shell part, no
+emitted interface but the coupling's TYPE18s, an explicit run: Gap = 0.55 × the
+mean host edge (the mid-cell plate is coupled there) and ONE engine card
+`/DT/INTER/CST Tsca Tmin`, Tsca = TSSFAC (else 0.9) and
+`Tmin = 0.5 × Tsca × min(mean host edge / c_host, shortest embedded-shell edge /
+c_shell)` (c_host = √(K / RO) with the K the Stfval uses, c_shell =
+√(E / (RO (1 − ν²)))); bird-el: `/DT/INTER/CST 0.5 5.80521E-7`. The engine
+reads it into its nodal-step slot (`freform.F:1057-1059` / `:1131-1143`) and adds
+`0.5 × STIFN × (Tmin / Tsca)²` to every node whose step falls below Tmin
+(`dtnoda.F:661-722`) — so the void node no longer sets the step. MEASURED on
+bird-el (nt 4, the 500 LS times to t 2.5e-3): the plate −100 % → −29.06 % (RMS
+83.22 → 24.97 %), the deck END IE +1134.62 → +39.41 % / KE −92.06 → −42.96 %
+(RMS 1102.65 / 162.68 → 28.42 / 4.66 %), at 1.140× the cycles (round 8's form:
+8.939×), mass added 1.815e-7 t on 50 void ALE nodes and none on the plate — but
+OpenRadioss's energy error grows −32.6 → −35.0 % at t_end (not explained). Any
+other deck keeps the round-8 form (Gap 0.5 ×, no card) and is told why, and a
+deck with DT2MS < 0 keeps the card skipped (with `/DT/NODA/CST/0` the coupled
+bird-el blew up in ONE cycle: KE 1.406e6 → 5.635e6, MESSAGE 167 NEGATIVE RHO).
+It stays opt-in because the round-9 gate FAILED: `/DT/INTER/CST` is GLOBAL to
+the engine deck — every node is a candidate (`dtnoda.F:111-122`) — and on a
+water-hammer coupon with a TYPE7 block pair beside the coupling (nt 4) the
+blocks' nodes gained mass in every arm with the card (0.5 mm bricks: all 1458
+nodes × 21.4; 2 mm bricks: the 16 contact nodes +15 %), and with the step held
+below Tmin the contact nodes' mass ran away and killed the run at contact
+(MESSAGE 205 + 207). The density half also fails on both
+`*CONSTRAINED_LAGRANGE_IN_SOLID` void hosts (bird_B stalls on the TYPE18 sort
+step at t 2.227e-4; quadrature_B reaches 3.6 % of its run in 600 s), so the
+density is written only on a shell-in-solid host — the CLIS decks are
+byte-identical under the flag.
 
 Two limits the coupling's sentence names, measured on the solver-physics
 validator's hand-built coupons (nt 4):
@@ -7189,13 +7220,16 @@ validator's hand-built coupons (nt 4):
   and is never coupled: the fluid column passes through with 0 plate impulse;
   the same plate at x 20.25 in 1 mm cells couples (first-event impulse
   1.57 P0, inside [P0, 2 P0]; momentum balance within 3 %). Place the plate
-  off the host mid-plane, or raise the gap factor (0.51-0.6 × the edge is the
-  round-9 measurement on bird-el);
+  off the host mid-plane; round 9's re-tune writes 0.55 × the edge where the
+  card `/DT/INTER/CST` comes with it (the coupon's mid-cell plate is coupled
+  then: first-event impulse 1.856 P0) - never the larger gap alone, which
+  couples a void plane;
 - **the void-node step** — a coupled host node that is still void sets the
   interface step to about 1/600 of the fluid step (4.743e-10 against
   3.0e-7 s with the plate 10 mm ahead of the fluid front: 124 184 cycles
   reached 2 % of the run in 10 minutes) until fluid reaches the plate;
-  bird-el's 8.936× is the measured carrier, not the bound.
+  bird-el's 8.936× (round 8) is the measured carrier, not the bound - the
+  round-9 re-tune's `/DT/INTER/CST` removes it on an SIS-alone deck (1.140×).
 
 ### `--imflag-curve-restart` — one engine file per IMFLAG segment
 

@@ -1143,8 +1143,8 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="*CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 + the void "
-                     "density (opt-in) - OFF. bird-el plate -100 -> -28 % at "
-                     "8.9x cycles",
+                     "density (+ /DT/INTER/CST on an SIS-only deck; opt-in) - "
+                     "OFF. bird-el plate -100 -> -29 % at 1.14x cycles",
             variable=self.shell_in_solid_coupling).grid(
                 row=61, column=0, columnspan=3, sticky="w", **pad)
 

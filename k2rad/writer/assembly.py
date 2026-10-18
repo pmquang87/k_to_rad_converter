@@ -157,6 +157,9 @@ from .blast_ale import (
     _make_shell_in_solid_notes,
     _resolve_shell_in_solid,
     _make_ale_reference_notes,
+    finalize_shell_in_solid,
+    sis_dt_inter_guard,
+    sis_dt_inter_lines,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -2306,6 +2309,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_impdisp_ids(state, lines)
     _warn_duplicate_inter_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
+    # Round 9, B4 (--shell-in-solid-coupling): the re-tune is decided once
+    # every interface is written - Gap 0.55 + /DT/INTER/CST only on a deck
+    # that is the SIS problem alone, else the round-8 form; it rewrites the
+    # Gap cell of its own TYPE18 rows and draws no id. A no-op without a
+    # converted card.
+    lines = finalize_shell_in_solid(state, lines)
     # Round 9, B2: the 2-D axisymmetric route is ONE post-pass on the emitted
     # lines (decision B2-a) - every 3-D writer above ran as before, so a deck
     # that is not routed (or the opt-out) is byte-identical by construction.
@@ -3618,9 +3627,16 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     _make_engine_timestep_scale below — it used to be dropped on the floor."""
     ts = state.ctrl_timestep
     if ts is None or _engine_implicit(state) or state.is_modal:
-        return []
+        # round 9, B4: the --shell-in-solid-coupling re-tune's /DT/INTER/CST
+        # stands alone on a deck without *CONTROL_TIMESTEP ([] otherwise)
+        return (sis_dt_inter_lines(state)
+                if ts is None and not _engine_implicit(state)
+                and not state.is_modal else [])
     if ts.dt2ms >= 0.0:
-        return _make_engine_timestep_scale(state, ts)
+        # round 9, B4: right after the /DT block ([] without the re-tune;
+        # a DT2MS < 0 deck never gets it - the card is refused there)
+        return (_make_engine_timestep_scale(state, ts)
+                + sis_dt_inter_lines(state))
     tmin = abs(ts.dt2ms)
     if _ams_is_emitted(state):
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
@@ -4335,4 +4351,7 @@ def _build_engine_text(state: ConversionState) -> str:
     # Round 9, B2: a routed 2-D deck never carries /DT/NODA/CST or /DT/AMS
     # (resol.F:2711-2729 rebuilds the 2-D nodal masses every cycle).
     lines = transform_engine_lines(state, lines)
+    # Round 9, B4: the re-tune's /DT/INTER/CST leaves if another /DT/INTER
+    # card is already there (no k2rad writer emits one today)
+    lines = sis_dt_inter_guard(state, lines)
     return "\n".join(lines) + "\n"

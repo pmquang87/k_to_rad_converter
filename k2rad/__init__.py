@@ -1062,13 +1062,20 @@ def convert(
         coupling (R14 triage round 8, B10): /SURF/PART/EXT over the
         embedded shell parts, /GRBRIC/PART over the ALE host, Stfval =
         0.1 x K_host x A_seg^2 / V_host (PSSF on the _PENALTY form),
-        Gap = half the mean host edge, and - on an *INITIAL_VOID host
-        of the card only - the void density (RHO_I = VFACT x RO, the
-        EOS RHO_0 = RO). MEASURED on
-        intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate -100
-        -> -28.26 %, the deck IE +1134.62 -> +42.28 % / KE -92.06 ->
-        -38.13 % at 8.936x the cycles. Default False: the density half
-        fails on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
+        and - on an *INITIAL_VOID host of the card only - the void
+        density (RHO_I = VFACT x RO, the EOS RHO_0 = RO). Round 9 (B4):
+        on a deck whose only Lagrangian parts are the embedded shells and
+        that emits no other interface, Gap = 0.55 x the mean host edge and
+        the engine card /DT/INTER/CST Tsca Tmin (Tmin = 0.5 x Tsca x
+        min(host edge / c_host, shortest shell edge / c_shell)); any
+        other deck keeps the round-8 Gap 0.5 x without the card (the card
+        is global - the round-9 gate measured it adding mass to a TYPE7
+        pair's nodes beside the SIS); a DT2MS < 0 deck refuses the card.
+        MEASURED on intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the
+        plate -100 -> -29.06 %, the deck IE +1134.62 -> +39.41 % / KE
+        -92.06 -> -42.96 % at 1.140x the cycles (energy error -32.6 ->
+        -35.0 %). Default False: the density half fails on both
+        *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
     imflag_curve_restart : bool
         Write one engine file per method segment of an IMFLAG < 0 curve
         (R14 triage round 8, B3 h.2): <stem>_000k.rad carries

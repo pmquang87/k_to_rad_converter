@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import AleFlowTrackingPlan, ConversionState, ShellInSolidPlan
-from .common import (HDR, _emit_surf_part, _emit_surf_seg, _f, _i,
-                     _part_scoped_segment_set)
+from .common import (HDR, _ams_is_emitted, _emit_surf_part, _emit_surf_seg,
+                     _f, _i, _part_scoped_segment_set)
 
 __all__ = [
     "_AXIS_VEC",
@@ -24,6 +24,9 @@ __all__ = [
     "_make_fsi_coupling",
     "_resolve_shell_in_solid",
     "_make_shell_in_solid_coupling",
+    "finalize_shell_in_solid",
+    "sis_dt_inter_lines",
+    "sis_dt_inter_guard",
     "_make_ebcs",
     "_make_inivol_notes",
     "_make_control_ale_notes",
@@ -1122,7 +1125,9 @@ def _sis_refusal(state: ConversionState, card) -> Tuple[str, Optional[Dict]]:
         "shell_pids": shell_pids, "host_pids": hosts, "fraction": fraction,
         "k_host": k_host, "a_seg": a_seg, "v_host": v_host,
         "stfval": fraction * k_host * a_seg * a_seg / v_host,
-        "gap": 0.5 * edge, "ro": ro_by,
+        # round 9, B4: the round-8 factor; the end-of-starter re-tune
+        # (finalize_shell_in_solid) writes 0.55 x edge on an SIS-alone deck
+        "gap": 0.5 * edge, "edge": edge, "ro": ro_by,
         "tstart": card.start,
         "tstop": card.end if 0.0 < card.end < 1.0e20 else 0.0}
 
@@ -1159,8 +1164,13 @@ def _resolve_shell_in_solid(state: ConversionState) -> List[ShellInSolidPlan]:
             void_pids.add(sid)
     vfact = (state.control_ale.vfact if state.control_ale is not None
              else 1.0e-6)
+    # round 9, B4 (step 1): a DT2MS < 0 deck's mass-scaling engine card
+    # refuses every card the round-8 screen accepts - before any id is drawn
+    dt2ms_card = _sis_dt2ms_card(state)
     for card in state.shell_in_solid_cards:
         why, cells = _sis_refusal(state, card)
+        if cells is not None and dt2ms_card:
+            why, cells = _sis_dt2ms_refusal(state, dt2ms_card), None
         if cells is None:
             state.warn(
                 f"*CONSTRAINED_SHELL_IN_SOLID {card.coupid or '(no id)'}: not "
@@ -1173,7 +1183,8 @@ def _resolve_shell_in_solid(state: ConversionState) -> List[ShellInSolidPlan]:
             k_host=cells["k_host"], a_seg=cells["a_seg"],
             v_host=cells["v_host"], stfval=cells["stfval"],
             gap=cells["gap"], tstart=cells["tstart"], tstop=cells["tstop"],
-            void_parts=[p for p in cells["host_pids"] if p in void_pids]))
+            void_parts=[p for p in cells["host_pids"] if p in void_pids],
+            edge=cells["edge"]))
     # the void density: one cell pair per *MAT_NULL id, a copy MID when a
     # part outside the void hosts shares it
     dense = {p for plan in plans for p in plan.void_parts}
@@ -1206,7 +1217,9 @@ def _make_shell_in_solid_coupling(state: ConversionState) -> List[str]:
     CLIS rule), Tstart = START, Tstop = END when 0 < END < 1e20, else 0 (the
     starter's 1e30, ``:250``). Every id is drawn here, after the last
     refusal screen; the keyword leaves ``skipped_keywords`` at the line that
-    writes the card."""
+    writes the card. Round 9 (B4): the card's sentence and the Gap factor
+    are decided at the end of the starter (``finalize_shell_in_solid``),
+    once every interface is written."""
     plans = _resolve_shell_in_solid(state)
     if not plans:
         return []
@@ -1232,7 +1245,239 @@ def _make_shell_in_solid_coupling(state: ConversionState) -> List[str]:
             + _f(plan.tstop),
             HDR,
         ]
+        plan.inter_id = inter_id
         state.skipped_keywords.remove(card.keyword)
+    return lines
+
+
+#: round 9, B4: the re-tuned opt-in's Gap factor (cG1 G1-7: the mid-cell
+#: plate is coupled at 0.55 x the host edge, J1 1.856 P0) - written only with
+#: /DT/INTER/CST, never alone (any factor > 0.5 couples a void plane)
+_SIS_RETUNE_GAP = 0.55
+
+#: the measured re-tuned opt-in on the one carrier (round 9, B4; cG1 eRule,
+#: nt 4, the campaign rule; the plate by /TH/PART against LS-DYNA's matsum)
+_SIS_MEASURED = (
+    "MEASURED on intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4, the 500 LS "
+    "times to t 2.5e-3): the plate's internal energy -100 % -> -29.06 % "
+    "against LS-DYNA (RMS 83.22 -> 24.97 %), the deck END IE +1134.62 -> "
+    "+39.41 % and KE -92.06 -> -42.96 % (RMS 1102.65 / 162.68 -> 28.42 / "
+    "4.66 % of the LS peak), at 1.140x the cycles, mass added 1.815e-7 t on "
+    "50 void ALE nodes and none on the plate - but OpenRadioss's energy "
+    "error grows from -32.6 to -35.0 % at t_end (not explained). The void "
+    "density FAILS on a *CONSTRAINED_LAGRANGE_IN_SOLID void host (bird_B "
+    "stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B reaches "
+    "3.6 % of its run in 600 s), so it is written only on an *INITIAL_VOID "
+    "host of this card. Evidence base: one carrier on five corpora.")
+
+#: the round-8 form's own limits (a deck that is not SIS-alone keeps it)
+_SIS_ROUND8_LIMITS = (
+    "The void density FAILS on a *CONSTRAINED_LAGRANGE_IN_SOLID void host "
+    "(bird_B stalls on the TYPE18 sort step at t 2.227e-4; quadrature_B "
+    "reaches 3.6 % of its run in 600 s), so it is written only on an "
+    "*INITIAL_VOID host of this card. At Gap 0.5 x the host edge a shell "
+    "plate exactly at mid-cell has both neighbouring host node planes at "
+    "distance = Gap and is never coupled (the solver-physics validator's "
+    "coupon: 0 plate impulse), and a coupled host node that is still void "
+    "sets the interface step.")
+
+
+def _sis_dt2ms_card(state: ConversionState) -> str:
+    """The mass-scaling engine card a DT2MS < 0 explicit deck gets
+    (``/DT/NODA/CST/0``, or ``/DT/AMS`` under ``--ams``) - round 9, B4's
+    refusal key; '' when the engine deck carries neither."""
+    ts = state.ctrl_timestep
+    if ts is None or ts.dt2ms >= 0.0 or state.is_implicit or state.is_modal:
+        return ""
+    return "/DT/AMS" if _ams_is_emitted(state) else "/DT/NODA/CST/0"
+
+
+def _sis_dt2ms_refusal(state: ConversionState, card_name: str) -> str:
+    """Round 9, B4 (d): why a DT2MS < 0 deck keeps the card skipped."""
+    ts = state.ctrl_timestep
+    dt2ms = ts.dt2ms if ts is not None else 0.0
+    ams = (" (--ams; the same refusal as /DT/NODA/CST/0)"
+           if card_name == "/DT/AMS" else "")
+    return (f"DT2MS {dt2ms:g} < 0 makes k2rad write {card_name}{ams}, and "
+            "with the TYPE18 coupling that blows up at once (bird-el with the "
+            "coupling + /DT/NODA/CST/0 0.5 1e-7, nt 4: KE 1.406e6 -> 5.635e6 "
+            "in ONE cycle, MESSAGE 167 NEGATIVE RHO on brick 410, no "
+            "termination line; /DT/NODA excludes ALE nodes, "
+            "dtnoda.F:124-131)")
+
+
+def _sis_shell_speed(state: ConversionState, mid: int) -> float:
+    """``sqrt(E / (RO (1 - nu^2)))`` of an embedded shell's material (the
+    plane-stress wave speed), 0.0 when its family states no E / nu / RO
+    k2rad reads (*MAT_ELASTIC, the piecewise / kinematic / power-law
+    plasticity cards, *MAT_JOHNSON_COOK)."""
+    for fam in (state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
+                state.mat_power_law, state.mat_johnson_cook):
+        rec = fam.get(mid)
+        if rec is None:
+            continue
+        rho = float(getattr(rec, "rho", 0.0) or 0.0)
+        e = getattr(rec, "E", None)
+        if e is None:
+            e = getattr(rec, "e", 0.0)
+        nu = getattr(rec, "nu", None)
+        if rho > 0.0 and e and float(e) > 0.0 and nu is not None \
+                and -1.0 < float(nu) < 1.0:
+            return math.sqrt(float(e) / (rho * (1.0 - float(nu) ** 2)))
+        return 0.0
+    return 0.0
+
+
+def _sis_shell_shortest_edge(state: ConversionState, e) -> float:
+    """The shortest edge of one shell element (its distinct corners in
+    order, the closing edge included)."""
+    ids = [n for n in e.nodes if n > 0]
+    ring = list(dict.fromkeys(ids))
+    if len(ring) < 3:
+        return 0.0
+    best = 0.0
+    for a, b in zip(ring, ring[1:] + ring[:1]):
+        na, nb = state.nodes.get(a), state.nodes.get(b)
+        if na is None or nb is None:
+            continue
+        d = math.sqrt((na.x - nb.x) ** 2 + (na.y - nb.y) ** 2
+                      + (na.z - nb.z) ** 2)
+        if d > 0.0 and (best == 0.0 or d < best):
+            best = d
+    return best
+
+
+def _sis_dt_inter_cells(state: ConversionState,
+                        plans: List[ShellInSolidPlan]
+                        ) -> Tuple[float, float, str]:
+    """``(Tsca, Tmin, '')`` of the re-tune's ``/DT/INTER/CST``, or ``(Tsca,
+    0, why)``: Tsca = TSSFAC if > 0 else 0.9 (the ``/DT`` writer's rule);
+    ``Tmin = 0.5 x Tsca x min(mean host edge / c_host, shortest SIS shell
+    edge / c_shell)`` over every converted card - c_host = sqrt(K / RO) with
+    the K the Stfval uses (``_sis_host_modulus``), c_shell the shell's
+    plane-stress wave speed."""
+    ts = state.ctrl_timestep
+    tsca = ts.tssfac if ts is not None and ts.tssfac and ts.tssfac > 0.0 \
+        else 0.9
+    cands: List[float] = []
+    for p in plans:
+        for pid in p.host_pids:
+            k, ro, why = _sis_host_modulus(state, pid)
+            if not why and k > 0.0 and ro > 0.0 and p.edge > 0.0:
+                cands.append(p.edge / math.sqrt(k / ro))
+    shells = {pid for p in plans for pid in p.shell_pids}
+    speed: Dict[int, float] = {}
+    missing: Set[int] = set()
+    for e in state.shell_elems:
+        if e.pid not in shells:
+            continue
+        mid = state.parts[e.pid].mid
+        if mid not in speed:
+            speed[mid] = _sis_shell_speed(state, mid)
+        if speed[mid] <= 0.0:
+            missing.add(mid)
+            continue
+        le = _sis_shell_shortest_edge(state, e)
+        if le > 0.0:
+            cands.append(le / speed[mid])
+    if missing:
+        return tsca, 0.0, (f"embedded-shell material(s) {sorted(missing)} "
+                           "without an E / nu / RO k2rad reads")
+    if not cands:
+        return tsca, 0.0, "no host or shell size to set Tmin"
+    return tsca, 0.5 * tsca * min(cands), ""
+
+
+def _sis_other_interfaces(lines: List[str], sis_ids: Set[int]) -> List[str]:
+    """The kind of every emitted ``/INTER/<kind>/<id>`` card but the SIS
+    TYPE18s - the screen reads what the starter WRITES (a refused contact
+    emits nothing and does not count)."""
+    kinds: List[str] = []
+    for ln in lines:
+        if not ln.startswith("/INTER/"):
+            continue
+        head, _sep, tail = ln.strip().rpartition("/")
+        if not tail.isdigit():
+            continue
+        kind = head[len("/INTER/"):]
+        if kind == "TYPE18" and int(tail) in sis_ids:
+            continue
+        kinds.append(kind)
+    return kinds
+
+
+def _sis_lagrangian_parts(state: ConversionState,
+                          plans: List[ShellInSolidPlan]) -> List[int]:
+    """Every part with an element that is neither on an ALE part (Iale >= 1)
+    nor on a shell part of a converted card's SHSID side."""
+    ale = set(_ale_part_ids(state))
+    shells = {pid for p in plans for pid in p.shell_pids}
+    lag: Set[int] = set()
+    for cont in (state.solid_elems, state.shell_elems, state.tshell_elems,
+                 state.beam_elems, state.sph_elems, state.discrete_elems,
+                 state.seatbelt_elems):
+        for e in cont:
+            pid = getattr(e, "pid", None)
+            if pid is None or pid in ale or pid in shells:
+                continue
+            lag.add(int(pid))
+    return sorted(lag)
+
+
+def _sis_patch_gap(lines: List[str], plan: ShellInSolidPlan) -> None:
+    """Rewrite the Gap cell of the plan's emitted ``/INTER/TYPE18`` line 2
+    (content-asserted: the header and the line-1 / line-2 layout are the
+    ones ``_make_shell_in_solid_coupling`` wrote)."""
+    i = lines.index(f"/INTER/TYPE18/{plan.inter_id}")
+    data = [j for j in range(i + 2, min(i + 7, len(lines)))
+            if not lines[j].startswith("#")]
+    j = data[1]
+    old = (_f(plan.stfval) + _f(0.0) + _f(0.5 * plan.edge) + _f(plan.tstart)
+           + _f(plan.tstop))
+    assert lines[j] == old, (lines[j], old)
+    lines[j] = (_f(plan.stfval) + _f(0.0) + _f(plan.gap) + _f(plan.tstart)
+                + _f(plan.tstop))
+
+
+def finalize_shell_in_solid(state: ConversionState,
+                            lines: List[str]) -> List[str]:
+    """Round 9, B4: the ``--shell-in-solid-coupling`` re-tune, decided once
+    the WHOLE starter is written (``build_starter``'s post-pass; a no-op
+    without a converted card). On a deck that is the SIS problem alone -
+    every element on an ALE part or on an SHSID shell part, no emitted
+    ``/INTER`` but the SIS TYPE18s, an explicit engine deck and a shell
+    wave speed for Tmin - each card's Gap becomes 0.55 x the mean host edge
+    and the engine deck gets ONE ``/DT/INTER/CST Tsca Tmin``
+    (``state.sis_dt_inter_cst``). Any other deck keeps the round-8 form
+    (Gap 0.5 x, no card) and is told why: ``/DT/INTER/CST`` is global
+    (``dtnoda.F:661-722``, every node tagged at ``:111-122``), and the
+    round-9 gate measured it adding mass to a TYPE7 pair's nodes beside the
+    SIS in every arm. Writes every card's sentence."""
+    plans = state.shell_in_solid_plan or []
+    if not plans:
+        return lines
+    whats: List[str] = []
+    lag = _sis_lagrangian_parts(state, plans)
+    if lag:
+        whats.append(f"Lagrangian part(s) {lag}")
+    others = _sis_other_interfaces(lines, {p.inter_id for p in plans})
+    if others:
+        whats.append(f"{len(others)} other interface(s) "
+                     f"({', '.join(sorted(set(others)))})")
+    if state.is_implicit or state.is_modal:
+        whats.append("an implicit / modal solution (its engine deck has no "
+                     "/DT card)")
+    tsca, tmin, why = _sis_dt_inter_cells(state, plans)
+    if why:
+        whats.append(why)
+    retune = not whats
+    if retune:
+        for p in plans:
+            p.gap = _SIS_RETUNE_GAP * p.edge
+            _sis_patch_gap(lines, p)
+        state.sis_dt_inter_cst = (tsca, tmin)
+    for k, plan in enumerate(plans):
+        card = plan.card
         pssf = (f"; _PENALTY PSSF {plan.fraction:g}" if card.penalty else "")
         dens = []
         for pid in plan.void_parts:
@@ -1245,46 +1490,83 @@ def _make_shell_in_solid_coupling(state: ConversionState) -> List[str]:
                 f" The *INITIAL_VOID host part {pid} gets the void density: "
                 f"/MAT/HYD_VISC/{mid} RHO_I {rho_i:g} (VFACT x RO) with its "
                 f"/EOS RHO_0 cell {rho0:g} (the deck density){copy}.")
+        if retune:
+            tail = (
+                f" The engine deck also gets /DT/INTER/CST {tsca:g} "
+                f"{tmin:.6g} (Tmin = 0.5 x Tsca x min(mean host edge / "
+                "c_host, shortest SIS shell edge / c_shell)): a coupled host "
+                "node that is still void has a nodal step of about "
+                "sqrt(VFACT) of a full node's (9.317e-9 s on bird-el), and "
+                "the card adds 0.5 x STIFN x (Tmin / Tsca)^2 to every node of "
+                "the deck below Tmin - on this deck only ALE nodes and the "
+                "SIS shells can be there (the deck has no other Lagrangian "
+                "part and no other interface; that is the condition for this "
+                "card). " + _SIS_MEASURED)
+            gap_clause = f"Gap {plan.gap:g} = 0.55 x the mean host edge."
+        else:
+            tail = " " + _SIS_ROUND8_LIMITS
+            gap_clause = (f"Gap {plan.gap:g} = 0.5 x the mean host edge (the "
+                          "round-8 form - see the next sentence).")
         state.warn(
             f"*CONSTRAINED_SHELL_IN_SOLID {card.coupid or '(no id)'} -> "
-            f"/INTER/TYPE18/{inter_id} (--shell-in-solid-coupling): shell "
-            f"part(s) {plan.shell_pids} coupled to ALE host part(s) "
+            f"/INTER/TYPE18/{plan.inter_id} (--shell-in-solid-coupling): "
+            f"shell part(s) {plan.shell_pids} coupled to ALE host part(s) "
             f"{plan.host_pids} by a penalty interface - OpenRadioss has no "
             "embedded-shell constraint and TYPE18 is penalty-only, so the "
             f"stiffness is a stated choice: Stfval = {plan.fraction:g} x K "
             f"{plan.k_host:g} x A^2 {plan.a_seg:g}^2 / V {plan.v_host:g} = "
             f"{plan.stfval:g} (LS-DYNA's own default coupling fraction 0.1 of "
-            f"the solid-segment stiffness K A^2 / V{pssf}), Gap "
-            f"{plan.gap:g} = 0.5 x the mean host edge."
-            + "".join(dens) + " " + _SIS_MEASURED)
+            f"the solid-segment stiffness K A^2 / V{pssf}), " + gap_clause
+            + "".join(dens) + tail)
+    if not retune:
+        state.warn(
+            "*CONSTRAINED_SHELL_IN_SOLID (--shell-in-solid-coupling): this "
+            f"deck carries {' and '.join(whats)} beside the embedded shells, "
+            "so the coupling is written in its round-8 form (Gap 0.5 x the "
+            "mean host edge, no /DT/INTER/CST): the CST card is global and, "
+            "on a water-hammer SIS coupon with a TYPE7 block pair beside it, "
+            "added mass to the blocks' nodes in every arm (0.5 mm bricks x "
+            "21.4; 2 mm bricks +15 % on the contact nodes) and killed the run "
+            "at contact when the step sat below Tmin. Expect the void node to "
+            "set the step (bird-el's round-8 form: 8.939x the cycles).")
     return lines
 
 
-#: the measured flag arm on the one carrier (round 8, B10; the campaign
-#: rule, README 9.1; the plate by /TH/PART against LS-DYNA's matsum)
-_SIS_MEASURED = (
-    "MEASURED on intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate's "
-    "internal energy -100 % -> -28.26 % against LS-DYNA (RMS 83.14 -> "
-    "24.53 %), the deck END IE +1134.62 -> +42.28 % and KE -92.06 -> "
-    "-38.13 % (RMS 1102.65 / 162.68 -> 30.51 / 4.88 % of the LS peak over "
-    "the 500 LS times to t 2.5e-3), at 8.936x the cycles - the step falls "
-    "to a void node; Stfval x0.5 / x2 moves the plate by under 1 point. The "
-    "coupling needs the void density on this deck (without it the plate "
-    "reads +284.04 %); the same density cell FAILS on a "
-    "*CONSTRAINED_LAGRANGE_IN_SOLID void host (bird_B stalls on the TYPE18 "
-    "sort step at t 2.227e-4; quadrature_B reaches 3.6 % of its run in "
-    "600 s), so it is written only on an *INITIAL_VOID host of this card. "
-    "Two limits, measured on the solver-physics validator's coupons (nt 4): "
-    "a shell plate exactly at mid-cell has both neighbouring host node "
-    "planes at distance = Gap and is never coupled (the fluid column "
-    "passes through with 0 plate impulse; the same plate at x 20.25 in "
-    "1 mm cells couples, first-event impulse 1.57 P0 in [P0, 2 P0], "
-    "momentum balance within 3 %) - place the plate off the host "
-    "mid-plane or raise the gap factor; and a coupled host node that is "
-    "still void sets the interface step to about 1/600 of the fluid step "
-    "(4.743e-10 against 3.0e-7 with the plate 10 mm ahead of the fluid "
-    "front: 124 184 cycles for 2 % of the run) until fluid reaches the "
-    "plate - bird-el's 8.936x is the measured carrier, not the bound.")
+def sis_dt_inter_lines(state: ConversionState) -> List[str]:
+    """The re-tune's ``/DT/INTER/CST`` engine block (round 9, B4), written
+    by ``assembly._make_engine_timestep`` right after the ``/DT`` block (or
+    alone when the deck states no TSSFAC); ``[]`` by default. The engine
+    reads it free-format (``freform.F``: ``KEY2 'INTER'`` + ``KEY3 'CST'``
+    -> the NODA slot, ``:1057-1059`` / ``:1131-1143``)."""
+    cst = state.sis_dt_inter_cst
+    if cst is None:
+        return []
+    return ["/DT/INTER/CST", "#              Tscale                Tmin",
+            _f(cst[0]) + _f(cst[1]), "#"]
+
+
+def sis_dt_inter_guard(state: ConversionState,
+                       lines: List[str]) -> List[str]:
+    """Round 9, B4 (step 3): if the engine deck already holds another
+    ``/DT/INTER`` card (no k2rad writer emits one today), the re-tune's CST
+    block is left out and named - a second ``/DT/INTER`` card would compete
+    for the same NODA slot. A no-op without the re-tune."""
+    if state.sis_dt_inter_cst is None:
+        return lines
+    ours = sis_dt_inter_lines(state)
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("/DT/INTER")]
+    mine = [i for i in starts if lines[i:i + len(ours)] == ours]
+    if not mine or len(starts) == len(mine):
+        return lines
+    i = mine[0]
+    state.warn(
+        "*CONSTRAINED_SHELL_IN_SOLID (--shell-in-solid-coupling): the engine "
+        "deck already holds another /DT/INTER card, so /DT/INTER/CST "
+        f"{state.sis_dt_inter_cst[0]:g} {state.sis_dt_inter_cst[1]:.6g} is "
+        "NOT added - the starter's TYPE18 Gap 0.55 x the host edge then "
+        "stands without it; remove the other card or convert without "
+        "--shell-in-solid-coupling.")
+    return lines[:i] + lines[i + len(ours):]
 
 
 def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
@@ -1299,7 +1581,9 @@ def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
     shells receive nothing from the solids they sit in. The measured arms are
     round 8's on ``bird-el`` (nt 4, the campaign rule): the shipped deck 2492
     cycles; the opt-in's ``/INTER/TYPE18`` (Stfval = 0.1 K A^2 / V) with the
-    void density 22269 (8.936x)."""
+    void density 22269 (8.936x). Round 9 (B4) re-tuned the opt-in (Gap 0.55
+    x the host edge + ``/DT/INTER/CST``: 2839 cycles, 1.140x) and
+    measured why it stays opt-in (the gate: the CST card is global)."""
     converted = {id(p.card) for p in (state.shell_in_solid_plan or [])}
     cards = [c for c in state.shell_in_solid_cards if id(c) not in converted]
     if not cards:
@@ -1323,13 +1607,24 @@ def _make_shell_in_solid_notes(state: ConversionState) -> List[str]:
         "peak) - mostly from the void, which is converted as full-density "
         "fluid (its part carries KE 1.125e7 at cycle 0, LS-DYNA's 10.2). "
         "--shell-in-solid-coupling (opt-in) writes the card as an "
-        "/INTER/TYPE18 with Stfval = 0.1 K A^2 / V (2812.5 on this deck) "
-        "plus the void density on the *INITIAL_VOID host: the plate -28.26 % "
-        "(RMS 24.53 %), the deck IE +42.28 / KE -38.13 % (RMS 30.51 / 4.88 %) "
-        "at 8.936x the cycles. It is not the default because the density "
-        "half has one member on five corpora and fails on both "
-        "*CONSTRAINED_LAGRANGE_IN_SOLID void hosts (bird_B stalls at t "
-        "2.227e-4; quadrature_B reaches 3.6 % of its run in 600 s).")
+        "/INTER/TYPE18 with Stfval = 0.1 K A^2 / V (2812.5 on this deck), "
+        "Gap 0.55 x the mean host edge, the void density on the "
+        "*INITIAL_VOID host and the engine card /DT/INTER/CST: the plate "
+        "-29.06 % (RMS 24.97 %), the deck IE +39.41 / KE -42.96 % (RMS "
+        "28.42 / 4.66 %) at 1.140x the cycles, with OpenRadioss's energy "
+        "error -32.6 -> -35.0 %. It is not the default because "
+        "/DT/INTER/CST is GLOBAL to the engine deck: it adds mass to every "
+        "node whose nodal step falls below Tmin (dtnoda.F:661-722, every "
+        "node tagged, :111-122). MEASURED on a water-hammer SIS coupon with "
+        "a TYPE7 block pair beside it (nt 4): the blocks' nodes gained mass "
+        "in every arm with the card (0.5 mm bricks: all 1458 nodes x 21.4, "
+        "the model 1.0562e-6 -> 6.1894e-6 t; 2 mm bricks: the 16 contact "
+        "nodes +15 %), and with the step held below Tmin the contact nodes' "
+        "mass ran away and killed the run at contact (MESSAGE 205 + 207); "
+        "the opt-in therefore writes the card only on a deck with no other "
+        "Lagrangian part and no other interface, and the density half fails "
+        "on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts (bird_B stalls at "
+        "t 2.227e-4; quadrature_B reaches 3.6 % of its run in 600 s).")
     return []
 
 

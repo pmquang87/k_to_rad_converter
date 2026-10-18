@@ -2684,11 +2684,13 @@ class ShellInSolidNamed(unittest.TestCase):
         # round 8 (B10) rewrote the default sentence with the deck rule's
         # measurement: round 7's +195.21 % / 1.016x / 4.506x / "refuted as
         # a general rule in round 6" became the opt-in's 2812.5 / -28.26 % /
-        # 8.936x and the CLIS stall at t 2.227e-4
+        # 8.936x and the CLIS stall at t 2.227e-4; round 9 (B4) re-tuned the
+        # opt-in, so its numbers are the re-measured -29.06 % / 1.140x (the
+        # branch's bird-el run, nt 4)
         for needle in ("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)",
                        "1 - shell part(s) [3] in solid part(s) [1]",
                        "NOT converted", "p.10-179", "4.9377e5 (-100 %)",
-                       "+1134.62 %", "2812.5", "-28.26 %", "8.936x",
+                       "+1134.62 %", "2812.5", "-29.06 %", "1.140x",
                        "2.227e-4"):
             self.assertIn(needle, hits[0])
         self.assertIn("CONSTRAINED_SHELL_IN_SOLID", r.skipped_keywords)

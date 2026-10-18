@@ -2851,7 +2851,10 @@ class ShellInSolidPlan:
     constraint form, PSSF for ``_PENALTY``; ``k_host`` the host's bulk
     modulus (RO C^2 or C1); ``a_seg`` / ``v_host`` the mean shell-segment area
     and the mean host-brick volume; ``void_parts`` the ``*INITIAL_VOID`` host
-    parts that get the void density."""
+    parts that get the void density. Round 9 (B4): ``edge`` is the mean host
+    edge both Gap factors multiply (0.5 in the round-8 form, 0.55 when the
+    re-tune applies) and ``inter_id`` the emitted ``/INTER/TYPE18`` id the
+    end-of-starter re-tune reads back."""
     card: ShellInSolidCard
     shell_pids: List[int]
     host_pids: List[int]
@@ -2864,6 +2867,8 @@ class ShellInSolidPlan:
     tstart: float
     tstop: float
     void_parts: List[int] = field(default_factory=list)
+    edge: float = 0.0
+    inter_id: int = 0
 
 
 @dataclass
@@ -10256,6 +10261,11 @@ class ConversionState:
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.
     shell_in_solid_plan: Optional[List[ShellInSolidPlan]] = None
+    # R14 triage round 9, B4: the engine card /DT/INTER/CST (Tsca, Tmin) the
+    # --shell-in-solid-coupling re-tune decided at the end of build_starter
+    # (writer/blast_ale.finalize_shell_in_solid); None = no card (the
+    # default, a round-8-form deck, or no converted card).
+    sis_dt_inter_cst: Optional[Tuple[float, float]] = None
     # ... and what it decides for the materials and the parts: the void
     # density cells per written /MAT/HYD_VISC id (mid -> (RHO_I, the /EOS
     # RHO_0)), the copy MIDs (copy -> the original *MAT_NULL mid) and the

@@ -238,6 +238,55 @@ Prior history (before this changelog was introduced) is summarized in the
     (`test_the_bird_B_and_void_texts_name_the_open_faces`: "the
     reference-system item first" -> "the void / TYPE18 coupling item" plus
     the three new needles).
+  - **The `*CONSTRAINED_SHELL_IN_SOLID` gate FAILED, so the default is
+    unchanged and the re-tune ships inside the opt-in
+    `--shell-in-solid-coupling`** (B4; no new flag). The gate (part-B spec
+    agent, nt 4): `/DT/INTER/CST` is GLOBAL to the engine deck - every node
+    is a candidate (`dtnoda.F:111-122`), any TYPE7 / TYPE10 / TYPE18 turns
+    the nodal step on (`inttri.F:462-464`) and a node below Tmin gets `MS =
+    0.5 x STIFN x (Tmin / Tsca)^2` for good (`dtnoda.F:661-722`); on a
+    water-hammer SIS coupon with a TYPE7 block pair beside it the blocks'
+    nodes gained mass in every arm with the card (0.5 mm bricks: all 1458
+    nodes x 21.4, the model 1.0562e-6 -> 6.1894e-6 t; 2 mm bricks: the 16
+    contact nodes +15 %), and with the step pinned below Tmin the contact
+    nodes' mass ran away and killed the run at contact (MESSAGE 205 + 207).
+    Under the flag, `writer/blast_ale.finalize_shell_in_solid` (a
+    `build_starter` post-pass, once every interface is written) re-tunes a
+    deck that is the SIS problem alone - every element on an ALE part or an
+    SHSID shell part, no emitted `/INTER` but the SIS TYPE18s (the screen
+    reads the EMITTED cards: a refused contact does not count), explicit -
+    to Gap 0.55 x the mean host edge and ONE engine card `/DT/INTER/CST Tsca
+    Tmin` after the `/DT` block (alone without TSSFAC): Tsca = TSSFAC else
+    0.9, `Tmin = 0.5 x Tsca x min(host edge / c_host, shortest SHSID shell
+    edge / c_shell)`, c_host from the Stfval's K, c_shell = `sqrt(E / (RO
+    (1 - nu^2)))` of each shell's own material; any other deck keeps the
+    round-8 form (Gap 0.5 x, no card) with ONE sentence naming why
+    (Lagrangian parts / other interfaces); a DT2MS < 0 deck keeps the card
+    skipped (the engine's `/DT/NODA/CST/0` with the coupling blew bird-el up
+    in ONE cycle, MESSAGE 167); a second `/DT/INTER` card in the engine deck
+    would drop the CST block (`sis_dt_inter_guard`; no writer emits one).
+    The spec's bird-el Tmin 5.8052e-7 used RO 7.85e-9; bird-el's plate
+    (`*MAT_PLASTIC_KINEMATIC` RO 7.83e-9, E 207000, nu 0.3) gives
+    5.797843e-7 by the same rule, so bird-el was RE-MEASURED on the branch
+    bytes (nt 4; the starter = the census arm `rcv_r9c_G1_eRule`'s): NORMAL
+    in 2839 cycles = 1.140x the default's 2491 (round 8's form 8.939x),
+    the plate IE -100 -> -29.06 % (RMS 83.22 -> 24.97 %), the deck END IE
+    +1134.62 -> +39.41 % / KE -92.06 -> -42.96 % (RMS 1102.65 / 162.68 ->
+    28.42 / 4.66 % of the LS peak, 500 LS times to t 2.5e-3), mass added
+    1.815e-7 t on 50 void ALE nodes and 0 of the 50 plate nodes (the
+    engine's own `/ANIM/NODA/DMAS`), OpenRadioss's energy error -32.6 ->
+    -35.0 % (not explained). Probes: cG1's water hammer under the flag
+    (Gap 0.55, `/DT/INTER/CST 0.9 1.659925E-07`) starter 0 ERROR(S). The
+    default sentence names the gate; the CLI help, the `convert()`
+    docstring, the GUI row and the README are rewritten. Movers: default
+    bytes 0 / 0 (bird-el and the round-8 fixture byte-identical to
+    `386444e`); warning text 1 deck key / 1 emitted model (bird-el); bytes
+    under the flag 1 / 1. The round-7 / round-8 pins move with the
+    re-measured numbers (`ShellInSolidNamed`, `ShellInSolidCoupling`: Gap
+    6.25 -> 6.875 on the SIS-alone fixture, the non-cubic host 5 -> 5.5,
+    "-28.26 %" / "8.936x" / "30.51 / 4.88" -> "-29.06 %" / "1.140x" /
+    "28.42 / 4.66", round 8's Gap-0.5 "+284.04 %" no longer quoted, and the
+    flag table's help figures). ROADMAP round-8 entry 4 stays open.
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

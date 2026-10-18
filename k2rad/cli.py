@@ -881,11 +881,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty "
              "coupling of the embedded shells to their ALE host (Stfval = 0.1 K "
-             "A^2 / V, Gap = half the mean host edge) and, when the host is an "
-             "*INITIAL_VOID part, the void density (RHO_I = VFACT x RO, the EOS "
-             "RHO_0 = RO). OFF by default (one carrier on five corpora). "
-             "MEASURED on bird-el (nt 4): the plate -100 -> -28.26 %%, the deck "
-             "IE +1134.62 -> +42.28 %%, at 8.936x the cycles.",
+             "A^2 / V) with the void density on an *INITIAL_VOID host (RHO_I = "
+             "VFACT x RO, the EOS RHO_0 = RO); on a deck whose only Lagrangian "
+             "parts are the embedded shells and that has no other interface, "
+             "Gap = 0.55 x the mean host edge and the engine card "
+             "/DT/INTER/CST (the card is global: on a coupon with a TYPE7 pair "
+             "it added mass to the pair's nodes), else the round-8 Gap 0.5 x. "
+             "Refused when DT2MS < 0. OFF by default (one carrier on five "
+             "corpora). MEASURED on bird-el (nt 4): the plate -100 -> -29.06 "
+             "%%, the deck IE +1134.62 -> +39.41 %%, at 1.140x the cycles, "
+             "energy error -32.6 -> -35.0 %%.",
     )
     parser.add_argument(
         "--imflag-curve-restart",

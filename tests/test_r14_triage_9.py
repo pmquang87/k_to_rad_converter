@@ -3905,6 +3905,343 @@ class AleFlowTracking(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B4 - *CONSTRAINED_SHELL_IN_SOLID: the gate FAILED, so the re-tune (Gap 0.55
+#      + /DT/INTER/CST on an SIS-alone deck) ships INSIDE the opt-in
+#      --shell-in-solid-coupling; the default bytes are unchanged
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: the 386444e (pristine10) test-path digests of _t8._sis_ale_deck() - the
+#: default must reproduce them
+_B4_SIS_386444E_STARTER = (
+    "2d37f113f5e23c6c305944b6a950dfd4ba442e124a29f433f1cf30dd46355348")
+_B4_SIS_386444E_ENGINE = (
+    "2b92d74a3bda805d8ebefb7c5facc176f75329530be03139cc5e4c37b7b65176")
+_W_B4_ROUND8 = ("*CONSTRAINED_SHELL_IN_SOLID (--shell-in-solid-coupling): "
+                "this deck carries ")
+
+
+def _b4_f10(*vals) -> str:
+    out = ""
+    for v in vals:
+        if v is None:
+            out += " " * 10
+        elif isinstance(v, int):
+            out += "%10d" % v
+        else:
+            s = "%10.4g" % v
+            if len(s) > 10:
+                s = "%10.3e" % v
+            out += s
+    return out
+
+
+def b4_wh(xp: float = 20.5) -> str:
+    """cG1's water-hammer SIS coupon (critic_G1/gen_wh_c.py, the generator
+    rebuilt as a function): a 1-D ALE column 30 x 1 x 1 mm (ELFORM 12, 1 mm
+    cells, y / z held), fluid part 2 = x 0..20 (*MAT_NULL RO 1e-9 +
+    *EOS_GRUNEISEN C 1.5e6) at u0 1e4 mm/s, *INITIAL_VOID host part 1 = x
+    20..30, a fixed 2 x 2 mm steel shell plate part 3 at x = *xp* (20.5 =
+    mid-cell), *CONSTRAINED_SHELL_IN_SOLID_ID shells part 3 / solids part 1,
+    TSSFAC 0.9, t_end 1e-4."""
+    def nid(i, j, k):
+        return 1 + i * 4 + j * 2 + k
+    f10 = _b4_f10
+    L = ["*KEYWORD", "*TITLE", "b4 water hammer XP=%g" % xp]
+    L += ["*CONTROL_ALE", f10(3, 1, 1, 0.0, 0.0, 0.0, 0.0, 0.0),
+          f10(0.0, 0.0, 0.0, 1.0e-6, 0, 0, 0.0, 0),
+          f10(1, 50, 0, 0.0, 0.0, 0, 0.0, 0.0), f10(0, 0, 0, 1.0e-5)]
+    L += ["*CONTROL_TERMINATION", f10(1.0e-4), "*CONTROL_TIMESTEP",
+          f10(0.0, 0.9)]
+    for pid, title in ((1, "void host"), (2, "fluid")):
+        L += ["*PART", title, f10(pid, pid, pid, pid), "*SECTION_SOLID",
+              f10(pid, 12), "*MAT_NULL",
+              f10(pid, 1.0e-9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+              "*EOS_GRUNEISEN",
+              f10(pid, 1.5e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), f10(0.0)]
+    L += ["*PART", "plate", f10(3, 3, 3), "*SECTION_SHELL",
+          f10(3, 2, 0.0, 3, 1), f10(1.0, 1.0, 1.0, 1.0), "*MAT_ELASTIC",
+          f10(3, 7.85e-9, 210000.0, 0.3)]
+    L += ["*INITIAL_VOID_PART", f10(1), "*NODE"]
+    for i in range(31):
+        for j in (0, 1):
+            for k in (0, 1):
+                L.append("%8d%16.8g%16.8g%16.8g" % (nid(i, j, k), float(i),
+                                                     float(j), float(k)))
+    for p in ((1001, xp, -0.5, -0.5), (1002, xp, 1.5, -0.5),
+              (1003, xp, 1.5, 1.5), (1004, xp, -0.5, 1.5)):
+        L.append("%8d%16.8g%16.8g%16.8g" % p)
+    L.append("*ELEMENT_SOLID")
+    for i in range(30):
+        pid = 2 if i < 20 else 1
+        n = [nid(i, 0, 0), nid(i + 1, 0, 0), nid(i + 1, 1, 0), nid(i, 1, 0),
+             nid(i, 0, 1), nid(i + 1, 0, 1), nid(i + 1, 1, 1), nid(i, 1, 1)]
+        L.append("%8d%8d" % (i + 1, pid) + "".join("%8d" % x for x in n))
+    L += ["*ELEMENT_SHELL", "%8d%8d%8d%8d%8d%8d" % (1001, 3, 1001, 1002,
+                                                    1003, 1004)]
+    L.append("*INITIAL_VELOCITY_NODE")
+    for i in range(21):
+        for j in (0, 1):
+            for k in (0, 1):
+                L.append(f10(nid(i, j, k), 1.0e4, 0.0, 0.0, 0.0, 0.0, 0.0, 0))
+    ale = [nid(i, j, k) for i in range(31) for j in (0, 1) for k in (0, 1)]
+    L += ["*SET_NODE_LIST", f10(1)]
+    for c in range(0, len(ale), 8):
+        L.append(f10(*ale[c:c + 8]))
+    L += ["*SET_NODE_LIST", f10(2), f10(1001, 1002, 1003, 1004)]
+    L += ["*BOUNDARY_SPC_SET", f10(1, 0, 0, 1, 1, 0, 0, 0),
+          "*BOUNDARY_SPC_SET", f10(2, 0, 1, 1, 1, 1, 1, 1)]
+    L += ["*SET_PART_LIST", f10(1), f10(3), "*SET_PART_LIST", f10(2),
+          f10(1)]
+    L += ["*CONSTRAINED_SHELL_IN_SOLID_ID", f10(1), f10(1, 2, 0, 0)]
+    L += ["*END", ""]
+    return "\n".join(L)
+
+
+def _b4_blocks(contact: bool) -> str:
+    """Two 10 mm steel bricks (parts 5 / 6, ELFORM 1, *MAT_ELASTIC 5) away
+    from the SIS block, with a *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE between
+    them when *contact* (the gate coupon's TYPE7 pair, in miniature)."""
+    out = ["*NODE"]
+    nid = 5000
+    ids = {}
+    for b, x0 in ((5, 100.0), (6, 112.5)):
+        for k in range(2):
+            for j in range(2):
+                for i in range(2):
+                    nid += 1
+                    ids[(b, i, j, k)] = nid
+                    out.append(f"{nid:>8}{x0 + 10.0 * i:>16.4f}"
+                               f"{10.0 * j:>16.4f}{10.0 * k:>16.4f}")
+    out.append("*ELEMENT_SOLID")
+    for e, b in ((5001, 5), (5002, 6)):
+        hx = [ids[(b, 0, 0, 0)], ids[(b, 1, 0, 0)], ids[(b, 1, 1, 0)],
+              ids[(b, 0, 1, 0)], ids[(b, 0, 0, 1)], ids[(b, 1, 0, 1)],
+              ids[(b, 1, 1, 1)], ids[(b, 0, 1, 1)]]
+        out.append("".join(f"{v:>8}" for v in [e, b] + hx))
+    out += ["*PART", "block A", _row(5, 5, 5), "*PART", "block B",
+            _row(6, 5, 5), "*SECTION_SOLID", _row(5, 1), "*MAT_ELASTIC",
+            _row(5, 7.85e-9, 210000.0, 0.3)]
+    if contact:
+        out += ["*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", _row(5, 6, 3, 3),
+                _row(0.1, 0.0)]
+    return "\n".join(out) + "\n"
+
+
+def _b4_f(*vals) -> str:
+    """k2rad's own 20-wide cells (writer.common._f) of *vals*."""
+    return "".join(_t8._f(v) for v in vals)
+
+
+def _b4_cst(engine: str):
+    """``[(Tsca, Tmin)]`` of every /DT/INTER/CST block of an engine deck."""
+    lines = engine.splitlines()
+    out = []
+    for i, ln in enumerate(lines):
+        if ln.startswith("/DT/INTER/CST"):
+            cells = lines[i + 2]
+            out.append((float(cells[:20]), float(cells[20:40])))
+    return out
+
+
+class ShellInSolidRetune(unittest.TestCase):
+    """B4 (R14 triage round 9): the gate FAILED (/DT/INTER/CST is global -
+    dtnoda.F:661-722, every node tagged at :111-122 - and on a water-hammer
+    coupon with a TYPE7 pair beside the SIS it added mass to the pair's nodes
+    in every arm), so the default keeps the 386444e bytes and the re-tune
+    ships inside the opt-in: on a deck that is the SIS problem alone, Gap
+    0.55 x the mean host edge + ONE /DT/INTER/CST Tsca Tmin, Tmin = 0.5 x
+    Tsca x min(host edge / c_host, shortest SIS shell edge / c_shell); any
+    other deck keeps the round-8 form; DT2MS < 0 refuses the card. STARTER
+    run (nt 4, C:/Users/pmqua/rcv_r9i_implB_<name>): b4_wh() under the flag
+    (Gap 0.55, /DT/INTER/CST 0.9 1.659925E-07) 0 ERROR(S); bird-el under the
+    flag (its bytes: the census arm rcv_r9c_G1_eRule's starter, the engine's
+    Tmin 5.797843E-07 by this rule with the plate's own RO 7.83e-9 - the
+    census's 5.8052E-7 used RO 7.85e-9) runs NORMAL in 2839 cycles, plate
+    IE -29.06 %, deck IE END +39.41 % / KE -42.96 %, mass added 1.815e-7 t
+    on 50 void ALE nodes and 0 of the 50 plate nodes (nt 4)."""
+
+    def test_default_bytes_unchanged(self):
+        res, st, eng = _convert(_t8._sis_ale_deck())
+        self.assertEqual(_sha(st), _B4_SIS_386444E_STARTER)
+        self.assertEqual(_sha(eng), _B4_SIS_386444E_ENGINE)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", st)
+        self.assertNotIn("/INTER/TYPE18", st)
+        self.assertNotIn("/DT/INTER", eng)
+        hits = [w for w in res.warnings
+                if w.startswith("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)")]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("2812.5", "-29.06 %", "1.140x", "-32.6 -> -35.0 %",
+                       "GLOBAL", "x 21.4", "MESSAGE 205 + 207", "2.227e-4",
+                       "3.6 %", "dtnoda.F:661-722"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+
+    def test_optin_retune_on_an_sis_alone_deck(self):
+        """Tmin = 0.5 x 0.5 x min(12.5 / 1.5e6, 12.5 / 5.421933e6) =
+        5.763627e-7 (c_shell = sqrt(210000 / (7.85e-9 x 0.91)))."""
+        deck = _t8._sis_ale_deck(extra="*CONTROL_TIMESTEP\n" + _row(0.0, 0.5))
+        res, st, eng = _convert(deck, shell_in_solid_coupling=True)
+        self.assertEqual(_t8._type18(st)[2],
+                         _b4_f(2812.5, 0.0, 6.875, 0.0, 0.0))
+        lines = eng.splitlines()
+        i = lines.index("/DT")
+        self.assertEqual(lines[i + 1][:20].strip(), "0.5")
+        self.assertEqual(lines[i + 3], "/DT/INTER/CST")
+        cst = _b4_cst(eng)
+        self.assertEqual(len(cst), 1)
+        self.assertEqual(cst[0][0], 0.5)
+        self.assertAlmostEqual(cst[0][1] / 5.763627e-7, 1.0, places=6)
+        hits = [w for w in res.warnings
+                if "(--shell-in-solid-coupling): shell part(s)" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("Gap 6.875 = 0.55 x the mean host edge",
+                       "/DT/INTER/CST 0.5 5.76363e-07", "-29.06 %",
+                       "1.140x", "1.815e-7 t on 50 void ALE nodes",
+                       "-32.6 to -35.0 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertFalse(_has(res.warnings, _W_B4_ROUND8))
+
+    def test_tsca_fallback_09(self):
+        """No *CONTROL_TIMESTEP: no /DT block, the CST block alone with Tsca
+        0.9 and Tmin = 0.45 x 2.305450e-6 = 1.037453e-6."""
+        _r, _s, eng = _convert(_t8._sis_ale_deck(),
+                               shell_in_solid_coupling=True)
+        self.assertNotIn("/DT", eng.splitlines())
+        cst = _b4_cst(eng)
+        self.assertEqual(len(cst), 1)
+        self.assertEqual(cst[0][0], 0.9)
+        self.assertAlmostEqual(cst[0][1] / 1.037453e-6, 1.0, places=6)
+
+    def test_non_cubic_host_second_shell_material(self):
+        """Host bricks 10 x 10 x 20, plate squares 10 x 10 in TWO shell
+        parts of the SHSID set (steel, and E 300000 / RO 1.85e-9 / nu 0.3):
+        Gap 0.55 x 10 = 5.5; Tmin = 0.45 x min(10 / 1.5e6, 10 / 5.421933e6,
+        10 / 1.334916e7) = 3.370998e-7 - the second material decides."""
+        deck = _t8._sis_ale_deck(host=(10.0, 10.0, 20.0), plate=10.0)
+        for eid in (11, 12):
+            old = f"{eid:>8}{3:>8}"
+            self.assertEqual(deck.count(old), 1)
+            deck = deck.replace(old, f"{eid:>8}{4:>8}")
+        old_set = "*SET_PART_LIST\n" + _row(1) + "\n" + _row(3) + "\n"
+        self.assertEqual(deck.count(old_set), 1)
+        deck = deck.replace(old_set, "*SET_PART_LIST\n" + _row(1) + "\n"
+                            + _row(3, 4) + "\n")
+        deck = deck.replace("*END\n", "*PART\nplate 2\n" + _row(4, 3, 4)
+                            + "\n*MAT_ELASTIC\n"
+                            + _row(4, 1.85e-9, 300000.0, 0.3) + "\n*END\n")
+        res, st, eng = _convert(deck, shell_in_solid_coupling=True)
+        surf, _grb, line2 = _t8._type18(st)
+        self.assertEqual(surf, [3, 4])
+        self.assertEqual(line2[40:60], _b4_f(5.5))
+        cst = _b4_cst(eng)
+        self.assertEqual(len(cst), 1)
+        self.assertAlmostEqual(cst[0][1] / 3.370998e-7, 1.0, places=6)
+
+    def test_dt2ms_negative_refuses(self):
+        deck = _t8._sis_ale_deck(extra="*CONTROL_TIMESTEP\n"
+                                 + _row(0.0, 0.0, 0, 0.0, -1.0e-7))
+        r_on, s_on, e_on = _convert(deck, shell_in_solid_coupling=True)
+        _r0, s_off, e_off = _convert(deck)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+        self.assertIn("/DT/NODA/CST/0", e_on)
+        self.assertNotIn("/DT/INTER", e_on)
+        self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", s_on)
+        self.assertTrue(_has(r_on.warnings, "not converted under "
+                             "--shell-in-solid-coupling - DT2MS -1e-07 < 0 "
+                             "makes k2rad write /DT/NODA/CST/0",
+                             "1.406e6 -> 5.635e6", "MESSAGE 167",
+                             "it stays listed as skipped."), r_on.warnings)
+
+    def test_type7_beside_sis_keeps_the_round8_form(self):
+        """The screen reads the EMITTED interfaces: a TYPE7 pair (and its
+        Lagrangian blocks) or an all-parts contact keeps the round-8 form; a
+        contact k2rad refuses (undefined sets) emits nothing, so the same
+        SIS deck DOES get the re-tune."""
+        allc = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(0, 0, 5, 0)
+                + "\n" + _row(0.1, 0.0) + "\n")
+        refc = ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n" + _row(99, 98, 2, 2)
+                + "\n" + _row(0.1, 0.0) + "\n")
+        for name, extra, gap, what in (
+                ("TYPE7 pair", _b4_blocks(True), 6.25,
+                 "Lagrangian part(s) [5, 6] and 1 other interface(s) "
+                 "(TYPE7)"),
+                ("all-parts contact", allc, 6.25,
+                 "1 other interface(s) (TYPE25)"),
+                ("refused contact", refc, 6.875, "")):
+            with self.subTest(case=name):
+                res, st, eng = _convert(_t8._sis_ale_deck(extra=extra),
+                                        shell_in_solid_coupling=True)
+                self.assertEqual(_t8._type18(st)[2][40:60],
+                                 _b4_f(gap))
+                hits = [w for w in res.warnings
+                        if w.startswith(_W_B4_ROUND8)]
+                if what:
+                    self.assertEqual(_b4_cst(eng), [])
+                    self.assertEqual(len(hits), 1, res.warnings)
+                    self.assertIn(what + " beside the embedded shells",
+                                  hits[0])
+                    self.assertIn("8.939x", hits[0])
+                    self.assertTrue(_has(res.warnings, "Gap 6.25 = 0.5 x "
+                                         "the mean host edge (the round-8 "
+                                         "form"))
+                else:
+                    self.assertEqual(len(_b4_cst(eng)), 1)
+                    self.assertEqual(hits, [])
+
+    def test_lagrangian_part_beside_sis_keeps_the_round8_form(self):
+        res, st, eng = _convert(_t8._sis_ale_deck(extra=_b4_blocks(False)),
+                                shell_in_solid_coupling=True)
+        self.assertEqual(_t8._type18(st)[2][40:60], _b4_f(6.25))
+        self.assertEqual(_b4_cst(eng), [])
+        self.assertTrue(_has(res.warnings, _W_B4_ROUND8 + "Lagrangian "
+                             "part(s) [5, 6] beside the embedded shells"),
+                        res.warnings)
+
+    def test_dt_inter_guard(self):
+        from k2rad.state import ConversionState
+        from k2rad.writer.blast_ale import (sis_dt_inter_guard,
+                                            sis_dt_inter_lines)
+        state = ConversionState()
+        state.sis_dt_inter_cst = (0.9, 1.0e-6)
+        ours = sis_dt_inter_lines(state)
+        self.assertEqual(ours[0], "/DT/INTER/CST")
+        alone = ["/DT", "                 0.9                   0", "#"] + ours
+        self.assertEqual(sis_dt_inter_guard(state, list(alone)), alone)
+        self.assertEqual(state.warnings, [])
+        other = ["/DT/INTER/DEL", "                 0.9               1e-08",
+                 "#"]
+        out = sis_dt_inter_guard(state, other + ours + ["/MON/ON", "#"])
+        self.assertEqual(out, other + ["/MON/ON", "#"])
+        self.assertTrue(_has(state.warnings, "another /DT/INTER card",
+                             "is NOT added"), state.warnings)
+        state.sis_dt_inter_cst = None
+        self.assertEqual(sis_dt_inter_lines(state), [])
+
+    def test_mid_cell_plate_couples_at_055(self):
+        """cG1's water hammer (plate at x 20.5, mid-cell) under the flag:
+        Gap 0.55, Tmin = 0.45 x min(1 / 1.5e6, 2 / 5.421933e6) = 1.659925e-7
+        (the census's 1.6599E-7); the starter run of these bytes reads 0
+        ERROR(S) (cG1's engine on the same cards, wz50rule: the plate
+        coupled, first-event impulse J1 1.856 P0)."""
+        res, st, eng = _convert(b4_wh(), shell_in_solid_coupling=True)
+        self.assertEqual(_t8._type18(st)[2],
+                         _b4_f(3600.0, 0.0, 0.55, 0.0, 0.0))
+        cst = _b4_cst(eng)
+        self.assertEqual(len(cst), 1)
+        self.assertEqual(cst[0][0], 0.9)
+        self.assertAlmostEqual(cst[0][1] / 1.659925e-7, 1.0, places=6)
+
+    def test_clis_decks_untouched(self):
+        deck = _t8._sis_ale_deck(clis=True)
+        r_on, s_on, e_on = _convert(deck, shell_in_solid_coupling=True)
+        _r0, s_off, e_off = _convert(deck)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+        self.assertNotIn("/DT/INTER", e_on)
+        self.assertFalse(_has(r_on.warnings, _W_B4_ROUND8))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PART B - the round-9 part-B flags reach every wiring site
 # ═════════════════════════════════════════════════════════════════════════════
 
