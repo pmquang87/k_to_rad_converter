@@ -2803,6 +2803,21 @@ value). The prismatic section is derived from `TS1`/`TT1` instead — a solid
 `TS1 × TT1` rectangle, or the annulus `TS1`/`TT1` describe as outer/inner
 diameter when `CST = 1` — and the substitution is reported.
 
+**A rigid-only `*SECTION_BEAM` ELFORM 7 (the 2-D plane-strain beam) takes its
+section from `TS1`** (round 9, A5; default ON, on an implicit deck only together
+with `--implicit-rigid-gravity-nodes`; `--no-elform7-beam-thickness-section`,
+alias `--no-2d-beam-thickness-section` / `--2d-beam-thickness-section`,
+restores the refusal): `Area = TS1 × 1`, `Iyy = Izz = TS1³ / 12`,
+`Ixx = Iyy + Izz` (node 1's `TS1`; a `TS2` taper dropped) instead of the zero
+section the starter refuses (ERROR 314-317). It is NOT LS-DYNA's section: the
+LS rigid mass of `ex_16`'s ELFORM 7 wall (`ex_16.d3hsp:5947-5948`,
+0.15414498E-10) is 5.68 × ρ × TS1 × L; a rigid member's section sets only the
+body's mass and inertia (inert on `ex_16`, whose wall hangs on a spring), so it
+is written only for sections whose every part is rigid — a deformable ELFORM 7
+member and any ELFORM 8 keep the refusal. (The findings' "fully constrained
+rigid parts" scope reaches 0 keys: `ex_16`'s wall is `CON1 6` with `TC 6` /
+`RC 7` nodes on a spring.) `ex_16`: error_starter → NORMAL with A4.
+
 Note when migrating an `ELFORM = 2` deck onto a rule: Radioss integrates
 transverse shear over the **full** section area on `/PROP/TYPE18`
 (`main_beam18.F:266-271`) where `/PROP/BEAM` applies the usual `5/6`
@@ -3700,6 +3715,23 @@ column layout and the `*LOAD_BODY` sign change. A **scoped** load that covers
 only part of a rigid cluster is warned about: a rigid body has one main node
 and one mass, so it cannot be loaded fractionally and the whole cluster gets
 `g` (an upper bound)
+
+**On an IMPLICIT deck the rigid parts' own nodes stay in the `/GRAV` group**
+(round 9, A4; default ON, `--no-implicit-rigid-gravity-nodes` restores the
+main-node group). In an implicit run the main node's gravity alone does not
+move the body (the routine that drops it is not located; `gravit_imp.F` read):
+the rigid parts in scope therefore stay in the `/GRNOD/PART` beside their
+`/RBODY` main node (the `/GRNOD/GRNOD` union as before); explicit decks keep
+the swap. MEASURED on
+`introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k` (with A5's
+ELFORM 7 section): the main-only group leaves the rigid disk frozen (kinetic
+energy −100.00 % against LS-DYNA at every fifth of t_end); with its own nodes
+in the group the disk falls with LS-DYNA, NORMAL in 1101 cycles, KE at the
+fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 % (the last two are the disk
+passing the wall: `*CONTACT_2D` is not converted), RMS 59.56 % of the LS peak
+over the 1100 LS times in (1e-4, 0.11] (nt 4 = nt 2). A
+`*CONSTRAINED_NODAL_RIGID_BODY`-only scope (no rigid PART swapped) is
+unchanged.
 
 ### Blast & coupled ALE / high explosive
 Empirical (ConWep / TM5-1300) air blast:

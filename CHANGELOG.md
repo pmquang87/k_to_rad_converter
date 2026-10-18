@@ -112,6 +112,33 @@ Prior history (before this changelog was introduced) is summarized in the
     over every shipped text (CHANGELOG exempt). Moved pins:
     `Round8OptInWiringB._HELP_FIGURES` and `ImplicitStubWithType25`'s needles
     (`test_r14_triage_8.py`), each with the new figure.
+  - **Implicit gravity on a rigid part also loads its own nodes** (A4;
+    default ON, gated on an implicit deck, `--no-implicit-rigid-gravity-nodes`
+    restores the main-node group) **and a rigid-only `*SECTION_BEAM` ELFORM 7
+    gets `Area = TS1`, `I = TS1^3 / 12`** (A5; default ON, on an implicit
+    deck only together with A4; `--no-elform7-beam-thickness-section`, alias
+    `--no-2d-beam-thickness-section`). A4: `writer/loads._make_gravity_loads`
+    / `_make_body_loads` keep the rigid parts in the `/GRNOD/PART` beside
+    their `/RBODY` main on an implicit deck - the main's gravity alone leaves
+    the body frozen in an implicit run (the routine that drops it is not
+    located; `gravit_imp.F` read); explicit decks keep the swap (the
+    pendulum match pair byte-identical) and a CNRB-only scope is unchanged.
+    A5: `writer/mesh._elform7_rigid_section` - NOT LS-DYNA's section (its
+    rigid mass of ex_16's wall, `ex_16.d3hsp:5947-5948`, is 5.68x rho x TS1 x
+    L); scoped to sections whose every part is rigid (a deformable ELFORM 7
+    member and ELFORM 8 keep the refusal) - DEVIATION from the findings'
+    "fully constrained rigid parts", which reaches 0 keys (ex_16's wall is
+    CON1 6 with TC 6 / RC 7 nodes hung on a spring; the part-A spec's D3).
+    ex_16 (`introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k`)
+    error_starter (ERRORs 274 + 314-317) -> NORMAL TERMINATION in 1101 cycles,
+    KE fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 % (t_end 0.11), RMS
+    59.56 % of the LS peak over the 1100 LS times in (1e-4, 0.11], IE END
+    +31.81 % / RMS 18.7 % - six runs at nt 4 and nt 2 identical to every
+    printed digit; the late fifths are the unconverted `*CONTACT_2D`; A5
+    alone (the part-A spec's arm) runs with the disk frozen, KE -100 % at
+    every fifth. Movers A4 4 keys / 4 models (ex_16 + the Yaris roof crush
+    and the two suspension giants, convert + starter only; the door sag's
+    rigid parts own no element and already sat in its part group), A5 1 / 1.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

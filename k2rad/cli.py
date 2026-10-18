@@ -904,6 +904,36 @@ def build_parser() -> argparse.ArgumentParser:
              "TYPE25.",
     )
     parser.add_argument(
+        "--implicit-rigid-gravity-nodes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an implicit deck keep *MAT_RIGID parts' own nodes in the "
+             "/GRAV group beside their /RBODY main: in an implicit run the "
+             "main node's gravity alone leaves the body frozen (gravit_imp.F "
+             "read; the dropping routine is not located). MEASURED on ex_16 "
+             "(with the ELFORM 7 section of "
+             "--elform7-beam-thickness-section): the disk's KE -100 %% at "
+             "every fifth -> +0.42 / +0.20 / +0.14 %% at the first three "
+             "fifths, NORMAL in 1101 cycles (nt 4 = nt 2). Explicit decks "
+             "unchanged. ON by default; --no-implicit-rigid-gravity-nodes "
+             "restores the main-node group.",
+    )
+    parser.add_argument(
+        "--elform7-beam-thickness-section", "--2d-beam-thickness-section",
+        action=argparse.BooleanOptionalAction,
+        dest="elform7_beam_thickness_section",
+        default=True,
+        help="Give a rigid-only *SECTION_BEAM ELFORM 7 (2-D plane-strain "
+             "beam) the section Area = TS1 x 1, Iyy = Izz = TS1^3 / 12 "
+             "instead of the zero section the starter refuses (ERROR "
+             "314-317); NOT LS-DYNA's (its rigid mass is 5.68x on ex_16). A "
+             "deformable ELFORM 7 member and ELFORM 8 keep the refusal; on an "
+             "implicit deck only together with "
+             "--implicit-rigid-gravity-nodes. ON by default; "
+             "--no-elform7-beam-thickness-section (alias "
+             "--no-2d-beam-thickness-section) restores the refusal.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1597,6 +1627,8 @@ def main(argv=None) -> int:
         imflag_curve_restart=args.imflag_curve_restart,
         rigid_part_pid_precedence=args.rigid_part_pid_precedence,
         implicit_n2s_type7=args.implicit_n2s_type7,
+        implicit_rigid_gravity_nodes=args.implicit_rigid_gravity_nodes,
+        elform7_beam_thickness_section=args.elform7_beam_thickness_section,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

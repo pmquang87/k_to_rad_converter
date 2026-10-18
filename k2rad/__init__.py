@@ -307,6 +307,8 @@ def convert(
     imflag_curve_restart: bool = True,
     rigid_part_pid_precedence: bool = True,
     implicit_n2s_type7: bool = True,
+    implicit_rigid_gravity_nodes: bool = True,
+    elform7_beam_thickness_section: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1084,6 +1086,26 @@ def convert(
         On a coarse 4-node rigid-base coupon the route ends NORMAL with the
         block through where the TYPE25 stops with MESSAGE 79. Default True;
         False keeps the TYPE25 (the 386444e bytes).
+    implicit_rigid_gravity_nodes : bool
+        On an implicit deck keep *MAT_RIGID parts' own nodes in the /GRAV
+        group beside their /RBODY main node (R14 triage round 9, A4): the
+        main's gravity alone leaves the body frozen in an implicit run.
+        MEASURED on introduction/Introduction/example-16/
+        ex_16_thin_shell_elform_13.k with elform7_beam_thickness_section:
+        NORMAL 1101 cycles, kinetic energy at the fifths of t_end +0.42 /
+        +0.20 / +0.14 / +60.22 / +439.67 % against LS-DYNA (the last two =
+        the unconverted *CONTACT_2D; 1100 LS times in (1e-4, 0.11], nt 4 = nt
+        2), where the main-only group leaves the disk frozen (-100 % at
+        every fifth). Explicit decks keep the main-node group. Default True.
+    elform7_beam_thickness_section : bool
+        Give a *SECTION_BEAM ELFORM 7 (2-D plane-strain beam) whose parts are
+        all rigid the section Area = TS1 x 1, Iyy = Izz = TS1^3 / 12, Ixx =
+        Iyy + Izz instead of the zero section the starter refuses (R14 triage
+        round 9, A5) - NOT LS-DYNA's: ex_16's ELFORM 7 wall has the LS rigid
+        mass 0.15414498E-10, 5.68x rho x TS1 x L. On an implicit deck only
+        together with implicit_rigid_gravity_nodes (alone it runs with the
+        rigid body frozen). A deformable ELFORM 7 member and ELFORM 8 keep
+        the refusal. Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1526,6 +1548,8 @@ def convert(
         imflag_curve_restart=imflag_curve_restart,
         rigid_part_pid_precedence=rigid_part_pid_precedence,
         implicit_n2s_type7=implicit_n2s_type7,
+        implicit_rigid_gravity_nodes=implicit_rigid_gravity_nodes,
+        elform7_beam_thickness_section=elform7_beam_thickness_section,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

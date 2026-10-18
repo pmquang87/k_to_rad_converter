@@ -135,6 +135,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          imflag_curve_restart: bool = True,
                          rigid_part_pid_precedence: bool = True,
                          implicit_n2s_type7: bool = True,
+                         implicit_rigid_gravity_nodes: bool = True,
+                         elform7_beam_thickness_section: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -334,6 +336,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["implicit_n2s_type7"] = bool(implicit_n2s_type7)
 
+    kwargs["implicit_rigid_gravity_nodes"] = bool(implicit_rigid_gravity_nodes)
+
+    kwargs["elform7_beam_thickness_section"] = bool(elform7_beam_thickness_section)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -493,6 +499,8 @@ class ConverterGUI:
         self.imflag_curve_restart = tk.BooleanVar(value=True)
         self.rigid_part_pid_precedence = tk.BooleanVar(value=True)
         self.implicit_n2s_type7 = tk.BooleanVar(value=True)
+        self.implicit_rigid_gravity_nodes = tk.BooleanVar(value=True)
+        self.elform7_beam_thickness_section = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1094,6 +1102,20 @@ class ConverterGUI:
             variable=self.implicit_n2s_type7).grid(
                 row=64, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="IMPLICIT gravity on a rigid part: keep its own nodes in "
+                     "/GRAV beside the main - ON. ex_16's disk falls (frozen "
+                     "without)",
+            variable=self.implicit_rigid_gravity_nodes).grid(
+                row=65, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Rigid-only *SECTION_BEAM ELFORM 7: section from TS1 "
+                     "(Area TS1, I TS1^3/12) instead of the refused zero "
+                     "section - ON. NOT LS-DYNA's mass (5.68x)",
+            variable=self.elform7_beam_thickness_section).grid(
+                row=66, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1373,6 +1395,8 @@ class ConverterGUI:
                 imflag_curve_restart=self.imflag_curve_restart.get(),
                 rigid_part_pid_precedence=self.rigid_part_pid_precedence.get(),
                 implicit_n2s_type7=self.implicit_n2s_type7.get(),
+                implicit_rigid_gravity_nodes=self.implicit_rigid_gravity_nodes.get(),
+                elform7_beam_thickness_section=self.elform7_beam_thickness_section.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1616,6 +1640,12 @@ class ConverterGUI:
         if not kwargs.get("implicit_n2s_type7", True):
             bits.append("implicit N2S contacts stay /INTER/TYPE25 "
                         "(--no-implicit-n2s-type7)")
+        if not kwargs.get("implicit_rigid_gravity_nodes", True):
+            bits.append("implicit /GRAV swaps rigid parts for their main node "
+                        "(--no-implicit-rigid-gravity-nodes)")
+        if not kwargs.get("elform7_beam_thickness_section", True):
+            bits.append("rigid ELFORM 7 beam sections keep the zero section "
+                        "(--no-elform7-beam-thickness-section)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

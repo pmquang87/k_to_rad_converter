@@ -51,6 +51,7 @@ from .common import (
     _vcross,
     _vnorm,
     _vsub,
+    rigid_part_ids,
 )
 # One-way: materials imports .common and .blast_ale only, never .mesh.
 from .materials import _null_part_eos_bindings, guarded_prop_h
@@ -3407,8 +3408,14 @@ def _make_properties(state: ConversionState) -> List[str]:
             # (ERROR 314/315/316/317). The thicknesses fully determine a
             # prismatic section, so derive it and say so, rather than emitting
             # a property that cannot start.
-            derived = _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1)
-            if derived is not None:
+            # round 9, A5: a rigid-only ELFORM 7 section gets its section
+            # from TS1 (it sets only the rigid body's mass and inertia)
+            a5 = _elform7_rigid_section(state, sec, part_secids)
+            derived = (None if a5 else
+                       _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1))
+            if a5:
+                pass
+            elif derived is not None:
                 sec.area, sec.iyy, sec.izz, sec.ixx = derived
                 state.warn(
                     f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} states "
@@ -5307,6 +5314,61 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
                                       thick, hcoef=coeff)
     return lines
+
+
+def _elform7_rigid_section(state: ConversionState, sec: SectionBeam,
+                           part_secids: Dict[int, int]) -> bool:
+    """round 9, A5 (``--elform7-beam-thickness-section``, default ON - on an
+    implicit deck only together with ``--implicit-rigid-gravity-nodes``):
+    a ``*SECTION_BEAM`` ELFORM 7 (the 2-D plane-strain beam) with no
+    resultants, ``TS1 > 0`` and EVERY part on it rigid gets ``Area = TS1 x
+    1``, ``Iyy = Izz = TS1^3 / 12``, ``Ixx = Iyy + Izz`` (node 1's TS1; a TS2
+    taper dropped) instead of the zero section the starter refuses (ERROR
+    314-317). A rigid member's section sets only the body's mass and
+    inertia, never a stiffness - and it is NOT LS-DYNA's: ex_16's ELFORM 7
+    wall has the d3hsp rigid mass 0.15414498E-10 (ex_16.d3hsp:5947-5948),
+    5.68x rho x TS1 x L. Scope DECISION (part-A spec D3, against the
+    findings' 'fully constrained' wording): ex_16's wall is CON1 6 with TC 6
+    / RC 7 nodes hung on a spring, so 'fully constrained' reaches 0 keys;
+    the rule is scoped to sections used only by rigid parts. A deformable
+    ELFORM 7 member and any ELFORM 8 keep the refusal. Returns True when it
+    wrote the section (and warned)."""
+    if sec.elform != 7 or sec.ts1 <= 0.0:
+        return False
+    opts = state.options
+    if not opts.elform7_beam_thickness_section:
+        return False
+    pids = sorted(p for p, s in part_secids.items() if s == sec.secid)
+    rigid = rigid_part_ids(state)
+    if not pids or not all(p in rigid for p in pids):
+        return False
+    if state.is_implicit and not opts.implicit_rigid_gravity_nodes:
+        state.warn(
+            f"*SECTION_BEAM {sec.secid}: ELFORM 7 on the rigid part(s) {pids} "
+            "keeps the zero section the starter refuses (ERROR 314-317): on an "
+            "implicit deck the section from TS1 is written only together "
+            "with --implicit-rigid-gravity-nodes, because alone it gives a "
+            "NORMAL run with the rigid body frozen (ex_16's disk: kinetic "
+            "energy -100.00 % against LS-DYNA at every fifth of t_end).")
+        return False
+    ts1 = sec.ts1
+    sec.area = ts1 * 1.0
+    sec.iyy = sec.izz = ts1 ** 3 / 12.0
+    sec.ixx = sec.iyy + sec.izz
+    taper = (f" The node-2 thickness TS2 = {sec.ts2:g} is dropped (a "
+             "prismatic section)." if sec.ts2 and sec.ts2 != ts1 else "")
+    state.warn(
+        f"*SECTION_BEAM {sec.secid}: ELFORM 7 (2-D plane-strain beam) states "
+        f"its section as TS1 = {ts1:g} and its parts {pids} are all rigid, so "
+        f"/PROP/BEAM gets Area = TS1 x 1 = {sec.area:g}, Iyy = Izz = TS1^3/12 "
+        f"= {sec.iyy:g}, Ixx = {sec.ixx:g} - a starter-clearing section, NOT "
+        "LS-DYNA's (its rigid mass of ex_16's ELFORM 7 wall, d3hsp "
+        "0.15414498E-10, is 5.68 x rho x TS1 x L). It sets only this rigid "
+        "body's mass and inertia (inert on ex_16: the wall hangs on a spring "
+        "and nothing else loads it); check it where the body's mass matters."
+        f"{taper} A deformable ELFORM 7 member keeps the refusal. "
+        "--no-elform7-beam-thickness-section restores the refusal.")
+    return True
 
 
 def _emit_prop_beam(sec: SectionBeam) -> List[str]:

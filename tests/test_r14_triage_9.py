@@ -694,6 +694,256 @@ class ImplicitN2sType7(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A4 + A5 — implicit rigid-body gravity keeps the rigid parts' own nodes in
+#           /GRAV; a rigid-only *SECTION_BEAM ELFORM 7 takes its section from
+#           TS1 (only with A4 on an implicit deck)
+# ═════════════════════════════════════════════════════════════════════════════
+
+import test_gravity as _tg  # noqa: E402
+
+_IMPL_LINE = "*CONTROL_IMPLICIT_GENERAL\n         1     0.001\n"
+_TG_HEAD_IMPL = _tg.HEAD.replace("*CONTROL_TERMINATION\n      0.01\n",
+                                 "*CONTROL_TERMINATION\n      0.01\n"
+                                 + _IMPL_LINE)
+_W_A4 = "on an IMPLICIT deck: the rigid part(s)"
+
+
+def a4_implicit_disk() -> str:
+    """An implicit rigid shell disk: eight ELFORM-2 shells of one *MAT_RIGID
+    part 1 (a 4 x 2 grid, nodes 1-15) under *LOAD_BODY_Y on a constant
+    curve; nothing else. Converted, the main node is the synthesized 16."""
+    nodes = ["*NODE"]
+    nid = 0
+    for j in range(3):
+        for i in range(5):
+            nid += 1
+            nodes.append(f"{nid:>8}{10.0 * i:>16}{10.0 * j:>16}{0.0:>16}")
+    elems = ["*ELEMENT_SHELL"]
+    eid = 0
+    for j in range(2):
+        for i in range(4):
+            eid += 1
+            n1 = j * 5 + i + 1
+            elems.append("".join(f"{v:>8}" for v in
+                                 (eid, 1, n1, n1 + 1, n1 + 6, n1 + 5)))
+    return "\n".join(
+        ["*KEYWORD", "*CONTROL_TERMINATION", _row(0.05),
+         "*CONTROL_IMPLICIT_GENERAL", _row(1, 0.005),
+         "*PART", "rigid disk", _row(1, 1, 1),
+         "*SECTION_SHELL", _row(1, 2), _row(1.0, 1.0, 1.0, 1.0),
+         "*MAT_RIGID", _row(1, 7.85e-9, 2.1e5, 0.3), _row(0.0, 0, 0),
+         _row(0.0)] + nodes + elems
+        + ["*DEFINE_CURVE", _row(1), f"{0.0:>20}{1.0:>20}",
+           f"{1.0:>20}{1.0:>20}", "*LOAD_BODY_Y", _row(1, 9810.0),
+           "*END", ""])
+
+
+_A4_DISK_386444E_SHA = "205d70284e9d239501a6b83091bb359ca73f413ae75c4a90686b012ecfc30715"
+
+
+class ImplicitRigidGravityNodes(unittest.TestCase):
+    """A4 (part-A spec A4.2): on an IMPLICIT deck the rigid parts stay in
+    the /GRAV's /GRNOD/PART beside their /RBODY main node; explicit decks
+    keep the swap (tests/test_gravity.py GravityRigidBodyTests, unchanged).
+
+    STARTER RUN (nt 4, rcv_r9i_implA_p_a4disk_n4, a4_implicit_disk()):
+    a4_implicit_disk() bytes (sha256 ea92abf9ca80...): 0 ERROR / 1 WARNING
+    (1084).
+
+    ENGINE (ex_16, the A4 + A5 bytes sha256 5f85c259cfe4..., implicit):
+    NORMAL TERMINATION in 1101 cycles in all six runs (nt 4 x3, nt 2 x3;
+    the 386444e base stops at the starter, ERRORs 274 + 314-317), KE END
+    +439.6714 %, fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 %, RMS
+    59.56 % of the LS peak over the 1100 LS times in (1e-4, 0.11], IE END
+    +31.8085 % / RMS 18.7 % - identical to every printed digit across the
+    six runs (the 4th / 5th fifths are the disk passing the wall: the
+    *CONTACT_2D is not converted)."""
+
+    def test_the_rigid_part_stays_beside_its_main(self):
+        deck = _TG_HEAD_IMPL + _tg._gravity_part(1) + _tg._gravity_part(2) \
+            + _tg.END
+        res, starter = _tg._convert(deck)
+        parts, nodes = _tg._grav_scope(starter)
+        self.assertEqual(parts, {1, 2})
+        self.assertTrue(_tg._rbody_mains(starter) <= nodes)
+        self.assertTrue(_has(res.warnings, "*LOAD_GRAVITY_PART", _W_A4,
+                             "gravit_imp.F", "+0.42 / +0.20 / +0.14 %",
+                             "--no-implicit-rigid-gravity-nodes"))
+        self.assertFalse(_has(res.warnings, "instead of their mesh nodes"))
+
+    def test_the_group_is_still_the_part_node_union(self):
+        deck = _TG_HEAD_IMPL + _tg._gravity_part(1) + _tg._gravity_part(2) \
+            + _tg.END
+        _r, starter = _tg._convert(deck)
+        gid = int(_tg._grav_cards(starter)[0][1][40:50])
+        groups = _tg._grnods(starter)
+        self.assertEqual(groups[gid][0], "GRNOD")
+        self.assertEqual({groups[m][0] for m in groups[gid][1]},
+                         {"PART", "NODE"})
+
+    def test_a_rigid_only_scope_now_has_a_part_group_too(self):
+        deck = _TG_HEAD_IMPL + _tg._gravity_part(2) + _tg.END
+        _r, starter = _tg._convert(deck)
+        parts, nodes = _tg._grav_scope(starter)
+        self.assertEqual(parts, {2})
+        self.assertEqual(nodes, _tg._rbody_mains(starter))
+
+    def test_body_loads_keep_every_rigid_part(self):
+        _r, st = _tg._convert(_TG_HEAD_IMPL + _tg.CURVE + _tg._load_body()
+                              + _tg.END)
+        parts, nodes = _tg._grav_scope(st)
+        self.assertEqual(parts, {1, 2, 3})
+        self.assertEqual(nodes, _tg._rbody_mains(st))
+        r2, st2 = _tg._convert(_TG_HEAD_IMPL + _tg.SECOND_RIGID + _tg.CNRB
+                               + _tg.CURVE + _tg._load_body() + _tg.END)
+        parts2, nodes2 = _tg._grav_scope(st2)
+        self.assertEqual(parts2, {1, 2, 3, 4})
+        self.assertEqual(nodes2, _tg._rbody_mains(st2))
+        self.assertEqual(len(nodes2), 3)
+        self.assertTrue(_has(r2.warnings, "*LOAD_BODY_*", _W_A4))
+
+    def test_the_opt_out_and_an_explicit_deck_keep_the_swap(self):
+        imp = _TG_HEAD_IMPL + _tg._gravity_part(1) + _tg._gravity_part(2) \
+            + _tg.END
+        r_off, st_off = _tg._convert(imp, implicit_rigid_gravity_nodes=False)
+        self.assertEqual(_tg._grav_scope(st_off)[0], {1})
+        self.assertFalse(_has(r_off.warnings, _W_A4))
+        self.assertTrue(_has(r_off.warnings, "instead of their mesh nodes"))
+        exp = _tg.HEAD + _tg._gravity_part(1) + _tg._gravity_part(2) \
+            + _tg.END
+        r_x, st_x = _tg._convert(exp)
+        self.assertEqual(_tg._grav_scope(st_x)[0], {1})
+        self.assertFalse(_has(r_x.warnings, _W_A4))
+
+    def test_an_implicit_CNRB_only_scope_is_unchanged(self):
+        """A CNRB swaps no part: no rigid part record is kept, so the bytes
+        and the sentence are the opt-out's (the door sag's class)."""
+        deck = _TG_HEAD_IMPL + _tg.CNRB + _tg._gravity_part(3) + _tg.END
+        r_on, st_on = _tg._convert(deck)
+        r_off, st_off = _tg._convert(deck, implicit_rigid_gravity_nodes=False)
+        self.assertEqual(_sha(st_on), _sha(st_off))
+        self.assertFalse(_has(r_on.warnings, _W_A4))
+
+    def test_the_implicit_rigid_disk(self):
+        res, st, _e = _convert(a4_implicit_disk())
+        parts, nodes = _tg._grav_scope(st)
+        self.assertEqual(parts, {1})
+        self.assertEqual(nodes, _tg._rbody_mains(st))
+        self.assertTrue(_has(res.warnings, "*LOAD_BODY_*", _W_A4, "1 stay"))
+        _r, st_off, _e = _convert(a4_implicit_disk(),
+                                  implicit_rigid_gravity_nodes=False)
+        self.assertEqual(_sha(st_off), _A4_DISK_386444E_SHA)
+        self.assertEqual(_tg._grav_scope(st_off)[0], set())
+
+
+_W_A5 = "ELFORM 7 (2-D plane-strain beam) states its section as TS1"
+_W_A5_PAIR = "the section from TS1 is written only together"
+_REFUSAL = "the starter REFUSES"
+
+
+def _a5_deck(mat: str = "rigid", elform: int = 7, implicit: bool = False,
+             ts=(0.1, 0.1)) -> str:
+    """One ELFORM *elform* beam (part 7, section 5, nodes 1 -> 2, orientation
+    node 3) on *MAT_RIGID (CMO 1, CON1 7, CON2 7) or *MAT_ELASTIC."""
+    m = ("*MAT_RIGID\n" + _row(9, 7.85e-9, 210000.0, 0.3) + "\n"
+         + _row(1.0, 7, 7) + "\n" + _row(0.0)
+         if mat == "rigid" else
+         "*MAT_ELASTIC\n" + _row(9, 7.85e-9, 210000.0, 0.3))
+    ctrl = ["*CONTROL_TERMINATION", _row(0.01)]
+    if implicit:
+        ctrl += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 0.001)]
+    return "\n".join(
+        ["*KEYWORD"] + ctrl + [
+            "*NODE",
+            f"{1:>8}{0.0:>16}{0.0:>16}{0.0:>16}",
+            f"{2:>8}{25.4:>16}{0.0:>16}{0.0:>16}",
+            f"{3:>8}{0.0:>16}{1.0:>16}{0.0:>16}",
+            "*ELEMENT_BEAM", "".join(f"{v:>8}" for v in (1, 7, 1, 2, 3)),
+            "*PART", "beam wall", _row(7, 5, 9),
+            "*SECTION_BEAM", _row(5, elform, 1.0, 0.0, 0), _row(*ts),
+            m, "*END", ""])
+
+
+def a5_rigid_wall() -> str:
+    return _a5_deck()
+
+
+def a5_rigid_wall_implicit() -> str:
+    return _a5_deck(implicit=True)
+
+
+_A5_WALL_386444E_SHA = "b13e9b25a86899ab0039226a80cad38ac9809fa1df24a5b42872acd491fb5124"
+
+
+def _beam_cells(starter: str):
+    for head, body in _blocks(starter, "/PROP/BEAM/"):
+        row = body[3]        # title, Ismstr, dm df, Area Iyy Izz Ixx
+        return tuple(float(row[20 * k:20 * (k + 1)]) for k in range(4))
+    return None
+
+
+class TwoDBeamThicknessSection(unittest.TestCase):
+    """A5 (part-A spec A5.2, scope D3): a rigid-only ELFORM 7 section gets
+    Area = TS1, I = TS1^3 / 12.
+
+    STARTER RUNS (nt 4): a5_rigid_wall() and a5_rigid_wall_implicit()
+    (both _0000.rad sha256 fbc2533d5a1c...): 0 ERROR / 0 WARNING; ex_16's
+    386444e bytes (the zero section) stop on ERRORs 274 + 314-317
+    (e16Base_n4)."""
+
+    _CELLS = (0.1, 0.1 ** 3 / 12.0, 0.1 ** 3 / 12.0, 2 * 0.1 ** 3 / 12.0)
+
+    def _assert_cells(self, got):
+        self.assertIsNotNone(got)
+        for g, w in zip(got, self._CELLS):
+            self.assertAlmostEqual(g, w, delta=1e-9 * max(1.0, abs(w)))
+
+    def test_a_rigid_wall_gets_the_TS1_section(self):
+        for deck in (a5_rigid_wall(), a5_rigid_wall_implicit()):
+            with self.subTest(implicit="IMPLICIT" in deck):
+                res, st, _e = _convert(deck)
+                self._assert_cells(_beam_cells(st))
+                self.assertTrue(_has(res.warnings, _W_A5, "5.68 x rho",
+                                     "0.15414498E-10",
+                                     "--no-elform7-beam-thickness-section"))
+                self.assertFalse(_has(res.warnings, _REFUSAL))
+
+    def test_the_cell_text_is_k2rads_float_format(self):
+        _r, st, _e = _convert(a5_rigid_wall())
+        row = [b for h, b in _blocks(st, "/PROP/BEAM/")][0][3]
+        self.assertEqual(row, "                 0.1        8.333333E-05"
+                              "        8.333333E-05     0.0001666666667")
+
+    def test_a_deformable_member_and_ELFORM_8_keep_the_refusal(self):
+        for deck in (_a5_deck(mat="elastic"), _a5_deck(elform=8)):
+            with self.subTest():
+                res, st, _e = _convert(deck)
+                self.assertEqual(_beam_cells(st), (0.0, 0.0, 0.0, 0.0))
+                self.assertTrue(_has(res.warnings, _REFUSAL, "ERROR 314"))
+                self.assertFalse(_has(res.warnings, _W_A5))
+
+    def test_implicit_without_A4_keeps_the_refusal_and_says_why(self):
+        res, st, _e = _convert(a5_rigid_wall_implicit(),
+                               implicit_rigid_gravity_nodes=False)
+        self.assertEqual(_beam_cells(st), (0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(_has(res.warnings, _W_A5_PAIR,
+                             "--implicit-rigid-gravity-nodes", "frozen"))
+        self.assertFalse(_has(res.warnings, _W_A5))
+
+    def test_the_opt_out_restores_the_386444e_bytes(self):
+        res, st, _e = _convert(a5_rigid_wall(),
+                               elform7_beam_thickness_section=False)
+        self.assertEqual(_sha(st), _A5_WALL_386444E_SHA)
+        self.assertTrue(_has(res.warnings, _REFUSAL))
+
+    def test_the_findings_spelling_is_an_alias(self):
+        from k2rad import cli
+        ns = cli.build_parser().parse_args(["d.k",
+                                            "--no-2d-beam-thickness-section"])
+        self.assertIs(ns.elform7_beam_thickness_section, False)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

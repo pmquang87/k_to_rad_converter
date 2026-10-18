@@ -8217,6 +8217,34 @@ class ConvertOptions:
     # TYPE25; a coarse 4-node rigid-base coupon ends NORMAL with the block
     # through (named in the warning). Movers 1 key / 1 model (doorbeam).
     implicit_n2s_type7: bool = True
+    # --no-implicit-rigid-gravity-nodes: an implicit /GRAV swaps every rigid
+    # part for its /RBODY main node again (the 386444e group).
+    #
+    # ON by default (R14 triage round 9, A4; gated on state.is_implicit):
+    # writer/loads._make_gravity_loads / _make_body_loads keep the rigid parts
+    # in the /GRNOD/PART beside their main node(s) on an implicit deck - the
+    # main's gravity alone leaves the body frozen in an implicit run (the
+    # routine that drops it is not located; gravit_imp.F read). Explicit decks
+    # keep the swap (rgbodv.F discards a secondary node's gravity there).
+    # MEASURED on ex_16 with A5 (1100 LS times in (1e-4, 0.11], nt 4 = nt 2):
+    # NORMAL 1101 cycles, KE fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 %
+    # (the 4th / 5th = the unconverted *CONTACT_2D); the main-only group:
+    # the disk frozen, KE -100 % at every fifth. Movers 4 keys / 4 models
+    # (ex_16 + three Yaris giants).
+    implicit_rigid_gravity_nodes: bool = True
+    # --no-elform7-beam-thickness-section (alias --no-2d-beam-thickness-
+    # section): a rigid-only *SECTION_BEAM ELFORM 7 keeps the zero section
+    # (starter ERROR 314-317), the 386444e bytes.
+    #
+    # ON by default (R14 triage round 9, A5; on an implicit deck only with
+    # implicit_rigid_gravity_nodes): writer/mesh._elform7_rigid_section gives
+    # an ELFORM 7 section used only by rigid parts Area = TS1, Iyy = Izz =
+    # TS1^3 / 12, Ixx = Iyy + Izz - NOT LS-DYNA's (ex_16.d3hsp:5947-5948
+    # rigid mass = 5.68x rho x TS1 x L). Scope decision (part-A spec D3): the
+    # findings' 'fully constrained' reaches 0 keys (ex_16's wall hangs on a
+    # spring), so the rule keys on rigid-only sections. ex_16 error_starter ->
+    # NORMAL with A4 (A5 alone = the frozen disk). Movers 1 key / 1 model.
+    elform7_beam_thickness_section: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

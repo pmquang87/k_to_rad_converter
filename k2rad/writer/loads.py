@@ -5841,13 +5841,42 @@ def _grav_groups(state: ConversionState, part_pids: List[int],
     return lines, grnod_id, grav_id
 
 
+def _implicit_rigid_gravity_keep(state: ConversionState) -> bool:
+    """round 9, A4 (``--implicit-rigid-gravity-nodes``, default ON): on an
+    IMPLICIT deck the rigid parts in a /GRAV scope STAY in its /GRNOD/PART
+    beside their /RBODY main node (the main's gravity alone leaves the body
+    frozen in an implicit run - measured on ex_16); explicit decks keep the
+    386444e swap (rgbodv.F discards a secondary node's gravity there)."""
+    return state.is_implicit and state.options.implicit_rigid_gravity_nodes
+
+
 def _warn_rbody_mains_added(state: ConversionState, keyword: str,
-                            mains: Set[int]) -> None:
+                            mains: Set[int],
+                            kept_rigid: Optional[Set[int]] = None) -> None:
     if not mains:
         return
     shown = ", ".join(str(n) for n in sorted(mains)[:8])
     if len(mains) > 8:
         shown += ", ..."
+    if kept_rigid:
+        kept = ", ".join(str(p) for p in sorted(kept_rigid)[:8])
+        if len(kept_rigid) > 8:
+            kept += ", ..."
+        state.warn(
+            f"{keyword} -> /GRAV on an IMPLICIT deck: the rigid part(s) "
+            f"{kept} stay in the /GRNOD/PART beside their /RBODY main "
+            f"node(s) ({shown}). In an implicit run the main node's gravity "
+            "alone does not move the body (the routine that drops it is not "
+            "located; gravit_imp.F read): measured on "
+            "introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k, "
+            "the main-only group leaves the rigid disk frozen (kinetic energy "
+            "-100.00 % against LS-DYNA at every fifth of t_end), this group "
+            "lets it fall with LS-DYNA (KE +0.42 / +0.20 / +0.14 % at the "
+            "first three fifths, nt 4 = nt 2; the 4th / 5th are the disk "
+            "passing the wall: *CONTACT_2D is not converted). Explicit decks "
+            "keep the main-node group. --no-implicit-rigid-gravity-nodes "
+            "restores it.")
+        return
     state.warn(
         f"{keyword} -> /GRAV: the load's scope contains rigid bodies, so the "
         f"/GRNOD also lists their /RBODY main node(s) ({shown}) and rigid "
@@ -5928,6 +5957,9 @@ def _make_gravity_loads(state: ConversionState,
                        "- gravity is applied for the whole run.")
     lines: List[str] = ["#-  GRAVITY LOADS (*LOAD_GRAVITY_PART):", HDR]
     added_mains: Set[int] = set()
+    # round 9, A4: implicit decks keep the rigid parts in the part group
+    keep = _implicit_rigid_gravity_keep(state)
+    kept_rigid: Set[int] = set()
     # Built once: _rbody_mains_in_scope needs the {pid: nodes} inventory for
     # every scoped group, and rebuilding it walks every solid/shell/beam.
     pnodes = _part_node_sets(state) if rbody_info else {}
@@ -5951,7 +5983,11 @@ def _make_gravity_loads(state: ConversionState,
             state, rbody_info, pids, whole_model=False, pnodes=pnodes,
             keyword="*LOAD_GRAVITY_PART")
         added_mains.update(mains)
-        part_pids = [p for p in pids if p not in rigid_pids]
+        if keep:
+            part_pids = list(pids)
+            kept_rigid |= set(rigid_pids)
+        else:
+            part_pids = [p for p in pids if p not in rigid_pids]
         if not part_pids and not mains:
             continue
         glines, grnod_id, grav_id = _grav_groups(state, part_pids, mains,
@@ -5973,7 +6009,8 @@ def _make_gravity_loads(state: ConversionState,
             grav_id,
             f"Gravity_{_DIR[dof]}_parts_" + "_".join(str(p) for p in pids),
             fct, _DIR[dof], grnod_id, -accel)
-    _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains)
+    _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains,
+                            kept_rigid)
     return lines if len(lines) > 2 else []
 
 
@@ -6047,7 +6084,13 @@ def _make_body_loads(state: ConversionState,
     rigid_pids, mains = _rbody_mains_in_scope(state, rbody_info, all_pids,
                                               whole_model=whole_model,
                                               keyword="*LOAD_BODY_*")
-    part_pids = [p for p in all_pids if p not in rigid_pids]
+    # round 9, A4: an implicit deck keeps the rigid parts in the part group
+    kept_rigid: Set[int] = set()
+    if _implicit_rigid_gravity_keep(state):
+        part_pids = list(all_pids)
+        kept_rigid = set(rigid_pids)
+    else:
+        part_pids = [p for p in all_pids if p not in rigid_pids]
     if not part_pids and not mains:
         return []
     lines: List[str] = ["#-  BODY LOADS (*LOAD_BODY_* -> /GRAV):", HDR]
@@ -6212,7 +6255,7 @@ def _make_body_loads(state: ConversionState,
             "RY, and right for RZ only by accident.")
     if not emitted:
         return []
-    _warn_rbody_mains_added(state, "*LOAD_BODY_*", set(mains))
+    _warn_rbody_mains_added(state, "*LOAD_BODY_*", set(mains), kept_rigid)
     return lines
 
 
