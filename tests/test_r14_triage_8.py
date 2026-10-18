@@ -2732,9 +2732,13 @@ class MatNullSphNuAndRGuard(unittest.TestCase):
         hits = [w for w in r.warnings
                 if w.startswith(_WN) and "+20691.23 %" in w]
         self.assertEqual(len(hits), 1, r.warnings)
+        # round 9, B8: the reference-system item is closed by the opt-in
+        # --ale-flow-tracking, so the clause names the flag, its measured Nu
+        # cost and the remaining item (re-derived from the shipped text)
         for needle in ("OPEN fixed-grid ALE faces", "-0.1 %", "+2.4 %",
                        "*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4",
-                       "the reference-system item first"):
+                       "the void / TYPE18 coupling item",
+                       "--ale-flow-tracking", "+59.2 %", "+1504.57 %"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
         self.assertNotIn("mechanism not found", hits[0])

@@ -1112,7 +1112,11 @@ Elsewhere MU is named and not carried: `impact.k`'s Lagrangian bar goes IE
 deck +51.91 → +71.13 %) and `bird_B` CREATES energy (energy error 99.9 %, END
 IE +1484.66 → +20691.23 %) through its converted open fixed-grid ALE faces
 (walled −0.1 %; LS-DYNA moves that mesh with the bird,
-`*ALE_REFERENCE_SYSTEM_GROUP`, which k2rad skips); ELFORM 5 / 7 / 11 / 12 and
+`*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 — skipped by default, written as
+`/ALE/GRID/FLOW-TRACKING` under
+[`--ale-flow-tracking`](#--ale-flow-tracking--the-ale-grid-that-follows-the-material),
+and with the grid moving the Nu cell still creates energy: energy error
++59.2 %, END IE +1504.57 %); ELFORM 5 / 7 / 11 / 12 and
 mixed materials are named too. Since round 8 a `/PROP/SOLID` (Isolid 1 / 2)
 that carries a
 Nu > 0 brick part with `R = 10·Nu / (c0·dmin) > 1` is written with `h / R`
@@ -3954,6 +3958,10 @@ ELFORM 7's `AET` is named as dropped
 `*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`
 `*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
 `/INIVOL` (recognised; container geometry needs a manual `/SURF`)
+`*ALE_REFERENCE_SYSTEM_GROUP` → skipped with a named sentence (round 9);
+PRTYPE 4 → `/ALE/GRID/FLOW-TRACKING` under the opt-in
+[`--ale-flow-tracking`](#--ale-flow-tracking--the-ale-grid-that-follows-the-material);
+`*ALE_REFERENCE_SYSTEM_NODE` / `_CURVE` / `_SWITCH` → skipped, named
 
 See `docs/BLAST_ALE_JWL_MAPPING.md` for the full mapping table, card formats and
 unit/sign gotchas.
@@ -7269,6 +7277,46 @@ be SILENT: on the TYPE25 route (`--no-implicit-n2s-type7`) the same pair ends
 a NORMAL banner with nonsense internal energy (END -1.1e10 % at nt 4, -7.7e8 %
 at nt 2), and tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 -> +26.88 %).
 One carrier is not a default: check the energies before using a run.
+
+### `--ale-flow-tracking` — the ALE grid that follows the material
+
+LS-DYNA's `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 moves the ALE mesh with the
+mass-weighted mean velocity of the ALE material (Vol I R17 p.4-87/88, the bird
+in air of its Example 1). k2rad skips the card by default and names it.
+`--ale-flow-tracking` (opt-in, round 9) writes it as
+`/ALE/GRID/FLOW-TRACKING` in `<stem>_0000.rad`, right after `/DEF_SOLID`
+(never in an engine file: `lectur.F:889-902` refuses a formulation switch
+there): `I_def -1` for BCEXP 7 (no expansion in any direction - the
+deformation term of FLOW-TRACKING is all-or-nothing), `I_rot 1` / `-1` for
+BCROT 0 / 7, the scale cells 0 (read as 1). The engine moves every ALE node
+with one mean velocity about the material's centre of mass
+(`alew7.F:186-227`). It accepts exactly one GROUP card with PRID 0 and ICR 0
+whose part set (STYPE 0) or part (STYPE 1) covers every part k2rad writes with
+Iale 1, and whose BCTRAN directions every ALE node already holds through its
+own `/BCS` (FLOW-TRACKING has no translation constraint; bird_B's BCTRAN 3 is
+carried by the `*NODE` TC 3 cells). Anything else - another PRTYPE, a PRID,
+ICR 1, BCEXP 0-6, BCROT 1-6, a set that misses an ALE part, two GROUP cards, an
+`*ALE_REFERENCE_SYSTEM_NODE` / `_CURVE` / `_SWITCH` card - writes nothing and
+is named in one sentence. `/BEGIN` stays 2022: the starter prints WARNING
+100211 ("format < 2024") and reads the card (the engine echoes
+`FORMULATION : FLOW-TRACKING`); the 2024 spelling `/ALE/GRID/MASS-WEIGHTED-VEL`
+is ERROR 100210 under 2022, and `/BEGIN 2024` would re-read k2rad's
+`/PROP/SOLID` Istrain cell as a minimum volumetric strain.
+
+MEASURED on `ale/bird/bird-b/bird_B` (nt 4, 600 LS times to t 5.9992e-4):
+END IE +1484.66 → +17.00 %, IE RMS 1189.95 → 27.74 % of the LS peak, the
+energy error's worst −20.4 → −8.7 %, and the plate takes load for the first
+time — but too much (IE / KE +513.69 / +130.43 % at t 5.9916e-4). The deck KE
+gets WORSE (END +25.88 → +1542.16 %, RMS 253.09 → 749.89 %; the plate's KE RMS
+71.60 → 93.93 %): the void is still converted at full density (cycle-0 KE
+101.5 against LS-DYNA's 11.737), so the moving grid carries 9× the bird's mass.
+That KE regression makes the row MIXED, so the card is not the default; the
+light-void coupling that would remove it is open (FLOW-TRACKING with a 1e-6
+void dies at t 1.043e-4 with NEGATIVE RHO), and the `*MAT_NULL` MU cell stays
+off on this deck (with the grid moving it reads energy error +59.2 %, END IE
++1504.57 %). The rule is keyed on the deck's own card only: a void +
+`*CONSTRAINED_LAGRANGE_IN_SOLID` deck without one (quadrature_B) converts
+byte-identically under the flag. Reach 1 deck key / 1 emitted model.
 
 ---
 

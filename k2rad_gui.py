@@ -148,6 +148,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          positive_dt2ms_mass_scaling: bool = True,
                          plane_stress_unit_thickness: bool = True,
                          load_curve_offscale_zero: bool = True,
+                         ale_flow_tracking: bool = False,
                          weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -376,6 +377,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["plane_stress_unit_thickness"] = bool(plane_stress_unit_thickness)
 
     kwargs["load_curve_offscale_zero"] = bool(load_curve_offscale_zero)
+
+    kwargs["ale_flow_tracking"] = bool(ale_flow_tracking)
     # round 9, B1: the window entry - blank = the measured 0.25 s; anything
     # else must be a positive, finite number of seconds.
     wtext = (weld_trajectory_window_text or "").strip()
@@ -562,6 +565,7 @@ class ConverterGUI:
         self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
         self.plane_stress_unit_thickness = tk.BooleanVar(value=True)
         self.load_curve_offscale_zero = tk.BooleanVar(value=True)
+        self.ale_flow_tracking = tk.BooleanVar(value=False)
         self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -1256,6 +1260,13 @@ class ConverterGUI:
             variable=self.load_curve_offscale_zero).grid(
                 row=77, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="ALE reference system PRTYPE 4 -> /ALE/GRID/FLOW-TRACKING "
+                     "(opt-in) - OFF. bird_B: IE END +1485 -> +17 %, KE RMS "
+                     "worse",
+            variable=self.ale_flow_tracking).grid(
+                row=78, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1549,6 +1560,7 @@ class ConverterGUI:
                 positive_dt2ms_mass_scaling=self.positive_dt2ms_mass_scaling.get(),
                 plane_stress_unit_thickness=self.plane_stress_unit_thickness.get(),
                 load_curve_offscale_zero=self.load_curve_offscale_zero.get(),
+                ale_flow_tracking=self.ale_flow_tracking.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1831,6 +1843,9 @@ class ConverterGUI:
             bits.append("an ELFORM 12 section stating no thickness kept at Thick 0 (--no-plane-stress-unit-thickness)")
         if not kwargs.get("load_curve_offscale_zero", True):
             bits.append("applied-load curves extrapolated off scale (--no-load-curve-offscale-zero)")
+        if kwargs.get("ale_flow_tracking"):
+            bits.append("ALE reference system PRTYPE 4 -> "
+                        "/ALE/GRID/FLOW-TRACKING (--ale-flow-tracking)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

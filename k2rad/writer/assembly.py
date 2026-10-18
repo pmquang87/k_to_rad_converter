@@ -156,6 +156,7 @@ from .blast_ale import (
     _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
     _resolve_shell_in_solid,
+    _make_ale_reference_notes,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -3292,6 +3293,11 @@ def _starter_section_registry():
         ("monvols",           lambda c: _make_monvols(c.state)),
         ("inivol_notes",      lambda c: _make_inivol_notes(c.state)),
         ("control_ale_notes", lambda c: _make_control_ale_notes(c.state)),
+        # *ALE_REFERENCE_SYSTEM_* (round 9, B8): the skip / refusal sentences;
+        # no card, no id (the --ale-flow-tracking card itself is written by
+        # _make_analysis_defaults, right after /DEF_SOLID)
+        ("ale_reference_notes",
+                              lambda c: _make_ale_reference_notes(c.state)),
         ("starter_cloads",    lambda c: _make_starter_cloads(c.state)),
         ("node_cloads",       lambda c: _make_node_cloads(c.state)),
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),

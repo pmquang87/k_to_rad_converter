@@ -89,6 +89,7 @@ from .state import (
     LoadBody, LoadBodyVector, LoadBodyRot, ShellPressureLoad,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
     AleMultiMaterialGroup, ConstrainedLagrangeInSolid, ShellInSolidCard,
+    AleReferenceGroup,
     InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
@@ -10462,6 +10463,45 @@ def handle_constrained_shell_in_solid(block: Block,
         pssf=pssf if pssf > 0.0 else 0.1, keyword=block.keyword))
 
 
+def handle_ale_reference_system_group(block: Block,
+                                      state: ConversionState) -> None:
+    """``*ALE_REFERENCE_SYSTEM_GROUP`` - RECORDED (R14 triage round 9, B8).
+
+    Card 1 ``SID STYPE PRTYPE PRID BCTRAN BCEXP BCROT ICR/NID``, card 2 ``XC
+    YC ZC EXPLIM EFAC (blank) FRCPAD IEXPND``, the optional card 3 ``IPIDXCL
+    IPIDTYP`` (Vol I R17 p.4-83..88, 10-wide). The keyword stays in
+    ``skipped_keywords`` - the ``handle_constrained_shell_in_solid`` pattern,
+    so a deck converted without ``--ale-flow-tracking`` keeps its ``#--
+    SKIPPED:`` line byte for byte - and leaves it only at the line that
+    writes ``/ALE/GRID/FLOW-TRACKING`` (``writer/blast_ale``)."""
+    state.skipped_keywords.append(block.keyword)
+    f = _card(block.raw, 0, fixed=True, n=8, w=10)
+    if not f or not f[0].strip():
+        return
+    f2 = _card(block.raw, 1, fixed=True, n=8, w=10) if len(block.raw) > 1 \
+        else []
+
+    def _i(fs: List[str], k: int) -> int:
+        return to_int(fs[k]) if len(fs) > k and fs[k].strip() else 0
+
+    state.ale_reference_groups.append(AleReferenceGroup(
+        sid=_i(f, 0), stype=_i(f, 1), prtype=_i(f, 2), prid=_i(f, 3),
+        bctran=_i(f, 4), bcexp=_i(f, 5), bcrot=_i(f, 6), icr=_i(f, 7),
+        xc=_ffield(f2, 0, 0.0), yc=_ffield(f2, 1, 0.0),
+        zc=_ffield(f2, 2, 0.0), explim=_ffield(f2, 3, 0.0),
+        efac=_ffield(f2, 4, 0.0), frcpad=_ffield(f2, 6, 0.0),
+        iexpnd=_i(f2, 7), keyword=block.keyword))
+
+
+def handle_ale_reference_system_other(block: Block,
+                                      state: ConversionState) -> None:
+    """``*ALE_REFERENCE_SYSTEM_NODE`` / ``_CURVE`` / ``_SWITCH`` - recorded by
+    spelling only (round 9, B8), so ``--ale-flow-tracking``'s refusal can
+    name them; the keyword stays skipped (0 corpus carriers)."""
+    state.skipped_keywords.append(block.keyword)
+    state.ale_reference_others.append(block.keyword)
+
+
 def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
                                 rwid: int, raw, idx: int, family: str) -> None:
     """One guard for both rigid-wall families.
@@ -19370,6 +19410,13 @@ HANDLERS = {
     # named warning per deck. *CONSTRAINED_BEAM_IN_SOLID stays a plain skip.
     "CONSTRAINED_SHELL_IN_SOLID":             handle_constrained_shell_in_solid,
     "CONSTRAINED_SHELL_IN_SOLID_PENALTY":     handle_constrained_shell_in_solid,
+    # RECORDED (round 9, B8) - see handle_ale_reference_system_group: the
+    # keyword stays in skipped_keywords unless --ale-flow-tracking writes the
+    # GROUP card as /ALE/GRID/FLOW-TRACKING; the other three are named only.
+    "ALE_REFERENCE_SYSTEM_GROUP":             handle_ale_reference_system_group,
+    "ALE_REFERENCE_SYSTEM_NODE":              handle_ale_reference_system_other,
+    "ALE_REFERENCE_SYSTEM_CURVE":             handle_ale_reference_system_other,
+    "ALE_REFERENCE_SYSTEM_SWITCH":            handle_ale_reference_system_other,
     # Coupled ALE / fluid-structure coupling / boundaries
     "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
     "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,

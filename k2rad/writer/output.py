@@ -90,7 +90,13 @@ def _make_analysis_defaults(state: ConversionState) -> List[str]:
         lines.append(f"         0         0{_i(ithick)}")
     else:
         lines.append("         0")
-    lines += [HDR, "/DEF_SOLID", "         0", HDR]
+    lines += [HDR, "/DEF_SOLID", "         0"]
+    # round 9, B8 (--ale-flow-tracking): the accepted
+    # *ALE_REFERENCE_SYSTEM_GROUP's /ALE/GRID/FLOW-TRACKING, right after
+    # /DEF_SOLID (the census arm's position); [] by default
+    from .blast_ale import ale_flow_tracking_lines
+    lines += ale_flow_tracking_lines(state)
+    lines += [HDR]
     lines += ["/IOFLAG", "         0", HDR]
     return lines
 

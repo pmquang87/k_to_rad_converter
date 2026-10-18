@@ -1118,6 +1118,19 @@ def build_parser() -> argparse.ArgumentParser:
              "the curves as stated.",
     )
     parser.add_argument(
+        "--ale-flow-tracking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the grid moving with "
+             "the ALE material's mass-weighted velocity) as "
+             "/ALE/GRID/FLOW-TRACKING (I_def -1 for BCEXP 7, I_rot +1 / -1 for "
+             "BCROT 0 / 7) in the starter deck; refused by name for any other "
+             "reference-system card. OFF by default: MEASURED on bird_B (nt "
+             "4) the IE END +1484.66 -> +17.00 %% and the IE RMS 1189.95 -> "
+             "27.74 %%, but the deck KE RMS 253.09 -> 749.89 %% (the void is "
+             "converted at full density).",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1826,6 +1839,7 @@ def main(argv=None) -> int:
         positive_dt2ms_mass_scaling=args.positive_dt2ms_mass_scaling,
         plane_stress_unit_thickness=args.plane_stress_unit_thickness,
         load_curve_offscale_zero=args.load_curve_offscale_zero,
+        ale_flow_tracking=args.ale_flow_tracking,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

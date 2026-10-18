@@ -3669,6 +3669,242 @@ class HourglassGuardCap(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B8 - OPT-IN --ale-flow-tracking: *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 ->
+#      /ALE/GRID/FLOW-TRACKING
+# ═════════════════════════════════════════════════════════════════════════════
+
+def b8_bird(card: bool = True, prtype: int = 4, prid: int = 0,
+            bctran: int = 3, bcexp: int = 7, bcrot: int = 0, icr: int = 0,
+            stype: int = 0, set_parts=(4, 5), n_cards: int = 1,
+            extra: str = "", tc: int = 3, void: bool = True,
+            clis: bool = False, mu: str = "1E-05") -> str:
+    """bird_B in miniature (round 9, B8): two ELFORM-12 hexes on ONE
+    *MAT_NULL 2 (RO 7.81e-10, PC -1, MU *mu*) + *EOS_LINEAR_POLYNOMIAL 2 -
+    part 4 (x 0..1, the host, *INITIAL_VOID_PART when *void*) and part 5 (x
+    1..2, the bird) - every ALE node at *NODE TC *tc*; a one-quad shell plate
+    part 3 at x 3 (ELFORM 2, *MAT_ELASTIC 1); *CONTROL_ALE as bird_B's;
+    *SET_PART_LIST 1 = *set_parts*; *n_cards* *ALE_REFERENCE_SYSTEM_GROUP
+    cards (SID 1, STYPE *stype*, PRTYPE *prtype*, PRID *prid*, BCTRAN
+    *bctran*, BCEXP *bcexp*, BCROT *bcrot*, ICR *icr*) when *card*; *extra*
+    ("NODE", "CURVE", "SWITCH") adds an *ALE_REFERENCE_SYSTEM_<extra> card;
+    *clis* couples the plate to set 1 with bird_B's
+    *CONSTRAINED_LAGRANGE_IN_SOLID."""
+    out = ["*KEYWORD", "*TITLE", "b8 bird",
+           "*CONTROL_ALE",
+           _row(0, 1, 1, -1.0, 0.0, 0.0, 0.0, 0.0),
+           _row(0.0, "1E+17", 1.0, "1.00000E-6", 0, 0, 0.0, 0),
+           "*CONTROL_TERMINATION", _row("1.0E-4"),
+           "*PART", "plate", _row(3, 1, 1),
+           "*SECTION_SHELL", _row(1, 2, 1.0, 2), _row(1.0, 1.0, 1.0, 1.0),
+           "*MAT_ELASTIC", _row(1, "1E-09", 1000, 0.0),
+           "*PART", "void host", _row(4, 2, 2, 2),
+           "*PART", "bird", _row(5, 2, 2, 2),
+           "*SECTION_SOLID", _row(2, 12),
+           "*MAT_NULL", _row(2, "7.81E-10", -1, mu),
+           "*EOS_LINEAR_POLYNOMIAL", _row(2, 0.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0),
+           _row(0.0, 0.0)]
+    if void:
+        out += ["*INITIAL_VOID_PART", _row(4)]
+    out += ["*SET_PART_LIST", _row(1), _row(*set_parts)]
+    if card:
+        for _k in range(n_cards):
+            out += ["*ALE_REFERENCE_SYSTEM_GROUP",
+                    _row(1, stype, prtype, prid, bctran, bcexp, bcrot, icr),
+                    _row(0.0, 0.0, 0.0, 0.0, 0.0, "", 0.0, 0)]
+    if extra:
+        out += [f"*ALE_REFERENCE_SYSTEM_{extra}", _row(1, 0, 0)]
+    if clis:
+        out += ["*CONSTRAINED_LAGRANGE_IN_SOLID",
+                _row(3, 1, 1, 0, 2, 4, 2, 1),
+                _row(0.0, 10000000, 0.1, 0.0, 0.5, 0, 0, 0.0),
+                _row(0.0, 0.0, 0.0, 0, 0.1, 0, 0, 0)]
+    out.append("*ELEMENT_SOLID")
+    for i, pid in ((0, 4), (1, 5)):
+        n = [1 + (i + di) * 4 + dj * 2 + dk
+             for (di, dj, dk) in ((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+                                  (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))]
+        out.append(f"{i + 1:>8}{pid:>8}" + "".join(f"{v:>8}" for v in n))
+    out += ["*ELEMENT_SHELL", f"{11:>8}{3:>8}{101:>8}{102:>8}{103:>8}{104:>8}"]
+    out.append("*NODE")
+    for i in range(3):
+        for j in range(2):
+            for k in range(2):
+                out.append(f"{1 + i * 4 + j * 2 + k:>8}{float(i):>16}"
+                           f"{float(j):>16}{float(k):>16}{tc:>8}{0:>8}")
+    for nid, (y, z) in zip((101, 102, 103, 104),
+                           ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))):
+        out.append(f"{nid:>8}{3.0:>16}{y:>16}{z:>16}{0:>8}{0:>8}")
+    out.append("*END")
+    return "\n".join(out) + "\n"
+
+
+#: the 386444e (pristine10) test-path digests of the B8 probes - the default
+#: must reproduce them (porcelain --ignored empty before and after)
+_B8_BASE_386444E_STARTER = (
+    "3febbf8332019d8c14eeef1d14fb7a0ad5eb5b09ff3c2f7e4122c5b245e742a7")
+_B8_NOCARD_386444E_STARTER = (
+    "4dd744d05b356c143d392549a6cd8324ea4112337e785de1311568364a316dcc")
+#: ... and of the warning list of b8_bird(card=False, mu="0.0") (no
+#: *ALE_REFERENCE_SYSTEM_* card, no Nu sentence: today's list exactly)
+_B8_NOCARD_MU0_386444E_WARNINGS = (
+    "af288acf84ce9bd87899eeaee1e229831ef73d83f8dd06255c5f64852e4451ed")
+#: the branch's flag-on digest of b8_bird() (starter-run below)
+_B8_BASE_FT_STARTER = (
+    "13459cdc3b531c90dcd77f8ca6328615ad9b3205573717b88ff1a1ee4c26b53c")
+_B8_CARD = ["/ALE/GRID/FLOW-TRACKING",
+            "#    I_def           scale_def",
+            "        -1                   0",
+            "#    I_rot           scale_rot",
+            "         1                   0"]
+_W_B8_SKIP = ("*ALE_REFERENCE_SYSTEM_GROUP 1 (PRTYPE 4) is skipped: its "
+              "OpenRadioss analogue /ALE/GRID/FLOW-TRACKING is written only "
+              "under --ale-flow-tracking")
+_W_B8_REFUSED = ("*ALE_REFERENCE_SYSTEM_GROUP: not converted under "
+                 "--ale-flow-tracking - ")
+
+
+class AleFlowTracking(unittest.TestCase):
+    """B8 (R14 triage round 9): OPT-IN --ale-flow-tracking writes ONE
+    *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 card (PRID 0, ICR 0, BCEXP 7, BCROT
+    0 / 7, a set covering every Iale part, BCTRAN held by the ALE nodes' own
+    /BCS) as /ALE/GRID/FLOW-TRACKING right after /DEF_SOLID in _0000.rad;
+    anything else is refused by name. STARTER runs (nt 4,
+    C:/Users/pmqua/rcv_r9i_implB_<name>, harvested and deleted): b8_bird()
+    default (sha256 3febbf833201..., = 386444e) 0 ERROR(S) / 1 WARNING
+    (1084); flag-on (13459cdc3b53...) 0 / 2 - 1084 + WARNING ID 100211
+    "Unsupported option /ALE/GRID/FLOW-TRACKING in format < 2024", the card
+    read; b8_bird(bcrot=7) flag-on (eddd1dbc8cf0...) 0 / 2 (the same pair);
+    b8_bird(card=False) (4dd744d05b35...) 0 / 1 (1084);
+    b8_bird(card=False, clis=True) (b04093e4bde1...) 0 / 2 (1084 x2). On
+    bird_B itself the flag-on bytes equal the census arm
+    rcv_r9p_g1a_gFT22's but for its kept '#-- SKIPPED:' line and its own
+    /TH/PART."""
+
+    def test_default_is_386444e(self):
+        res, st, _e = _convert(b8_bird())
+        self.assertEqual(_sha(st), _B8_BASE_386444E_STARTER)
+        self.assertNotIn("/ALE/GRID", st)
+        self.assertIn("#-- SKIPPED: *ALE_REFERENCE_SYSTEM_GROUP", st)
+        hits = [w for w in res.warnings if w.startswith(_W_B8_SKIP)]
+        self.assertEqual(len(hits), 1, res.warnings)
+        self.assertIn("RMS 253.09 -> 749.89 %", hits[0])
+        # a *CONTROL_ALE deck WITHOUT a reference-system card: today's
+        # bytes and today's warning list exactly (the generic note unchanged)
+        res0, st0, _e0 = _convert(b8_bird(card=False, mu="0.0"))
+        self.assertEqual(_sha(st0), _B8_NOCARD_386444E_STARTER)
+        self.assertEqual(_sha("\n".join(res0.warnings)),
+                         _B8_NOCARD_MU0_386444E_WARNINGS)
+        self.assertTrue(_has(res0.warnings, "Mesh smoothing (*ALE_SMOOTHING "
+                             "/ *ALE_REFERENCE_SYSTEM_*) has no /ALE 1:1 and "
+                             "is not converted."))
+
+    def test_card_bytes_bcrot0_and_bcrot7(self):
+        res, st, eng = _convert(b8_bird(), ale_flow_tracking=True)
+        self.assertEqual(_sha(st), _B8_BASE_FT_STARTER)
+        lines = st.splitlines()
+        i = lines.index("/ALE/GRID/FLOW-TRACKING")
+        self.assertEqual(lines[i:i + 5], _B8_CARD)
+        self.assertEqual(lines[i - 2:i], ["/DEF_SOLID", "         0"])
+        self.assertEqual(st.count("/ALE/GRID"), 1)
+        self.assertNotIn("/ALE/GRID", eng)
+        self.assertIn("      2022         0", lines[:8])
+        self.assertNotIn("#-- SKIPPED: *ALE_REFERENCE_SYSTEM_GROUP", st)
+        self.assertNotIn("ALE_REFERENCE_SYSTEM_GROUP", res.skipped_keywords)
+        self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_GROUP 1 "
+                             "(PRTYPE 4, BCEXP 7, BCROT 0, BCTRAN 3) -> "
+                             "/ALE/GRID/FLOW-TRACKING I_def -1 I_rot 1",
+                             "alew7.F:186-227", "WARNING 100211",
+                             "BCTRAN 3 is carried by the ALE nodes' own /BCS",
+                             "+1484.66 -> +17.00 %", "253.09 -> 749.89 %",
+                             "NEGATIVE RHO"), res.warnings)
+        self.assertFalse(_has(res.warnings, _W_B8_SKIP))
+        _r7, st7, _e7 = _convert(b8_bird(bcrot=7), ale_flow_tracking=True)
+        lines7 = st7.splitlines()
+        j = lines7.index("/ALE/GRID/FLOW-TRACKING")
+        self.assertEqual(lines7[j + 4], "        -1                   0")
+        self.assertEqual(lines7[j + 2], "        -1                   0")
+
+    def test_every_refusal_class(self):
+        cases = (
+            ({"prtype": 0}, "PRTYPE 0: only PRTYPE 4 has an OpenRadioss "
+                            "analogue (FLOW-TRACKING)"),
+            ({"prtype": 5}, "PRTYPE 5: only PRTYPE 4"),
+            ({"prtype": 3}, "PRTYPE 3: only PRTYPE 4"),
+            ({"prid": 1}, "PRID 1: FLOW-TRACKING averages over every ALE "
+                          "node"),
+            ({"icr": 1}, "ICR 1: FLOW-TRACKING turns about the centre of "
+                         "mass"),
+            ({"bcexp": 0}, "BCEXP 0: FLOW-TRACKING's deformation term is "
+                           "all-or-nothing (only BCEXP 7 = no expansion "
+                           "maps)"),
+            ({"bcexp": 3}, "BCEXP 3: FLOW-TRACKING's deformation term"),
+            ({"bcrot": 4}, "BCROT 4: only BCROT 0 / 7 map to I_rot +1 / -1"),
+            ({"set_parts": (5,)}, "set 1 misses ALE part(s) [4]"),
+            ({"n_cards": 2}, "2 *ALE_REFERENCE_SYSTEM_GROUP cards: "
+                             "FLOW-TRACKING is one grid formulation for the "
+                             "deck"),
+            ({"extra": "NODE"}, "*ALE_REFERENCE_SYSTEM_NODE has no "
+                                "OpenRadioss analogue"),
+            ({"tc": 0}, "BCTRAN 3: OpenRadioss's FLOW-TRACKING has no "
+                        "translation constraint and the ALE nodes do not all "
+                        "hold direction(s) z"),
+        )
+        for kw, reason in cases:
+            with self.subTest(case=kw):
+                res, st, eng = _convert(b8_bird(**kw), ale_flow_tracking=True)
+                self.assertNotIn("/ALE/GRID", st + eng)
+                self.assertIn("#-- SKIPPED: *ALE_REFERENCE_SYSTEM_GROUP", st)
+                hits = [w for w in res.warnings
+                        if w.startswith(_W_B8_REFUSED)]
+                self.assertEqual(len(hits), 1, res.warnings)
+                self.assertIn(reason, hits[0])
+                self.assertTrue(hits[0].endswith("; it stays listed as "
+                                                 "skipped."))
+                self.assertFalse(_has(res.warnings, _W_B8_SKIP))
+
+    def test_keyed_on_the_card_only(self):
+        """A void + *CONSTRAINED_LAGRANGE_IN_SOLID probe WITHOUT a
+        reference-system card under the flag: byte-identical to the flag-off
+        conversion (cG1: FLOW-TRACKING on quadrature_B, which states no card,
+        drives the energy error -46.5 -> +99.9 %)."""
+        deck = b8_bird(card=False, clis=True)
+        r_on, s_on, e_on = _convert(deck, ale_flow_tracking=True)
+        r_off, s_off, e_off = _convert(deck)
+        self.assertEqual((s_on, e_on), (s_off, e_off))
+        self.assertEqual(r_on.warnings, r_off.warnings)
+        self.assertNotIn("/ALE/GRID", s_on)
+
+    def test_w_n3_text(self):
+        res, _s, _e = _convert(b8_bird())
+        hits = [w for w in res.warnings
+                if w.startswith("*MAT_NULL MU is NOT carried")
+                and "+20691.23 %" in w]
+        self.assertEqual(len(hits), 1, res.warnings)
+        for needle in ("*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4",
+                       "--ale-flow-tracking", "+59.2 %", "+1504.57 %",
+                       "the void / TYPE18 coupling item",
+                       "OPEN fixed-grid ALE faces", "-0.1 %", "+2.4 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("the reference-system item first", hits[0])
+        self.assertNotIn("which k2rad skips", hits[0])
+
+    def test_the_other_spellings_are_recorded_and_skipped(self):
+        for extra in ("NODE", "CURVE", "SWITCH"):
+            with self.subTest(extra=extra):
+                res, st, _e = _convert(b8_bird(card=False, extra=extra))
+                self.assertIn(f"#-- SKIPPED: *ALE_REFERENCE_SYSTEM_{extra}",
+                              st)
+                self.assertTrue(_has(res.warnings,
+                                     f"*ALE_REFERENCE_SYSTEM_{extra} has no "
+                                     "OpenRadioss analogue and is skipped."))
+        res, _s, _e = _convert(b8_bird(prtype=3))
+        self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_GROUP 1 "
+                             "(PRTYPE 3) has no OpenRadioss analogue and is "
+                             "skipped."))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PART B - the round-9 part-B flags reach every wiring site
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -3759,6 +3995,23 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
             k2rad.convert = saved
         self.assertEqual(seen.get("weld_trajectory_window"), 0.75)
         tmp.cleanup()
+
+
+class Round9OptInWiringB(_t8.Round8OptInWiringB):
+    """Every round-9 part-B OPT-IN lever (default OFF) reaches the parser
+    (with its --no- twin), the README prose (its POSITIVE spelling) and its
+    own README ### heading, the --help render with its measured figures,
+    the GUI end to end, convert() / ConvertOptions (default False) and
+    cli.main()'s call - round 8's opt-in checks for B8."""
+
+    _OPT_IN = {"--ale-flow-tracking": "ale_flow_tracking"}
+    _HELP_FIGURES = {
+        "--ale-flow-tracking": ("/ALE/GRID/FLOW-TRACKING",
+                                "I_def -1 for BCEXP 7",
+                                "+1484.66 -> +17.00 %",
+                                "1189.95 -> 27.74 %",
+                                "253.09 -> 749.89 %", "OFF by default"),
+    }
 
 
 if __name__ == "__main__":

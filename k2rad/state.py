@@ -2801,6 +2801,46 @@ class ShellInSolidCard:
 
 
 @dataclass
+class AleReferenceGroup:
+    """``*ALE_REFERENCE_SYSTEM_GROUP`` (R14 triage round 9, B8): card 1 ``SID
+    STYPE PRTYPE PRID BCTRAN BCEXP BCROT ICR/NID``, card 2 ``XC YC ZC EXPLIM
+    EFAC (blank) FRCPAD IEXPND`` and the optional card 3 ``IPIDXCL IPIDTYP``
+    (Vol I R17 p.4-83..88; STYPE 0 = a *SET_PART id, 1 = a *PART id). The
+    keyword stays in ``skipped_keywords`` unless ``--ale-flow-tracking``
+    writes it as ``/ALE/GRID/FLOW-TRACKING`` (writer/blast_ale)."""
+    sid: int
+    stype: int = 0
+    prtype: int = 0
+    prid: int = 0
+    bctran: int = 0
+    bcexp: int = 0
+    bcrot: int = 0
+    icr: int = 0
+    xc: float = 0.0
+    yc: float = 0.0
+    zc: float = 0.0
+    explim: float = 0.0
+    efac: float = 0.0
+    frcpad: float = 0.0
+    iexpnd: int = 0
+    keyword: str = "ALE_REFERENCE_SYSTEM_GROUP"
+
+
+@dataclass
+class AleFlowTrackingPlan:
+    """The ONE decision of ``--ale-flow-tracking`` (round 9, B8), made by
+    ``writer/blast_ale._resolve_ale_flow_tracking``: ``card`` the accepted
+    ``*ALE_REFERENCE_SYSTEM_GROUP`` (None = nothing written), ``idef`` /
+    ``irot`` the ``/ALE/GRID/FLOW-TRACKING`` IS_DEF / IS_ROT cells, and
+    ``reasons`` every failing class of a refused deck (empty when accepted
+    or when the deck states no reference-system card)."""
+    card: Optional[AleReferenceGroup] = None
+    idef: int = -1
+    irot: int = 1
+    reasons: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ShellInSolidPlan:
     """One ``*CONSTRAINED_SHELL_IN_SOLID`` card CONVERTED under
     ``--shell-in-solid-coupling`` (R14 triage round 8, B10): decided ONCE by
@@ -8561,6 +8601,21 @@ class ConvertOptions:
     # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
     # deck keys on 2 emitted models.
     load_curve_offscale_zero: bool = True
+    # --ale-flow-tracking (OPT-IN, R14 triage round 9, B8): write
+    # *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the ALE grid moving with the
+    # material's mass-weighted mean velocity about its centre of mass) as
+    # /ALE/GRID/FLOW-TRACKING in _0000.rad, after /DEF_SOLID (I_def -1 for
+    # BCEXP 7, I_rot +1 / -1 for BCROT 0 / 7; alew7.F:186-227); any other
+    # reference-system card is refused by name and stays skipped. /BEGIN
+    # stays 2022: the starter prints WARNING 100211 and reads the card.
+    #
+    # OFF by default: the row becomes MIXED. MEASURED on ale/bird/bird-b/
+    # bird_B (nt 4, 600 LS times): END IE +1484.66 -> +17.00 %, IE RMS
+    # 1189.95 -> 27.74 % of the LS peak, the energy error's worst -20.4 ->
+    # -8.7 % - but the deck KE RMS 253.09 -> 749.89 % (END +25.88 ->
+    # +1542.16 %): the void is converted at full density (cycle-0 KE 101.5
+    # against LS-DYNA's 11.737). Reach 1 deck key on 1 emitted model.
+    ale_flow_tracking: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -10187,6 +10242,16 @@ class ConversionState:
     # unless --shell-in-solid-coupling converts the card (round 8, B10).
     shell_in_solid_cards: List[ShellInSolidCard] = field(
         default_factory=list)
+    # *ALE_REFERENCE_SYSTEM_GROUP cards in deck order (round 9, B8), and the
+    # spellings of every *ALE_REFERENCE_SYSTEM_NODE / _CURVE / _SWITCH card
+    # (record-only, so the refusal can name them). Both keep the keyword in
+    # skipped_keywords; only --ale-flow-tracking converts a GROUP card.
+    ale_reference_groups: List[AleReferenceGroup] = field(
+        default_factory=list)
+    ale_reference_others: List[str] = field(default_factory=list)
+    # writer/blast_ale._resolve_ale_flow_tracking's memo (None = not yet
+    # resolved).
+    ale_flow_tracking_plan: Optional[AleFlowTrackingPlan] = None
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.

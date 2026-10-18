@@ -202,6 +202,42 @@ Prior history (before this changelog was introduced) is summarized in the
     -4.3 .. -1.1 % at the fifths as the no-QH arm). 0 corpus movers: the
     three channel decks (R 0.0117, h 1e-4) and `sph/bird` convert
     byte-identically with and without the cap on the branch.
+  - **`--ale-flow-tracking` (OPT-IN) writes `*ALE_REFERENCE_SYSTEM_GROUP`
+    PRTYPE 4 as `/ALE/GRID/FLOW-TRACKING`** (B8; default OFF = the `386444e`
+    bytes). `handlers.handle_ale_reference_system_group` records the card
+    (cards 1-2, 10-wide) and keeps the keyword skipped;
+    `*ALE_REFERENCE_SYSTEM_NODE` / `_CURVE` / `_SWITCH` are recorded by
+    spelling only. Under the flag `writer/blast_ale._resolve_ale_flow_tracking`
+    accepts exactly one GROUP card with PRTYPE 4, PRID 0, ICR 0, BCEXP 7 (->
+    I_def -1), BCROT 0 / 7 (-> I_rot +1 / -1), STYPE 0 / 1 naming every part
+    k2rad writes with Iale 1, and BCTRAN directions that every ALE node
+    already holds by its own `/BCS`; the card goes into `_0000.rad` right
+    after `/DEF_SOLID` (never an engine file, `lectur.F:889-902`) in the 2024
+    grammar `%10d%20lg` under `/BEGIN` 2022 (WARNING 100211, the card read),
+    and the keyword leaves `skipped_keywords` at that line. Anything else is
+    refused in ONE sentence naming every failing class. Without the flag a
+    NEW sentence names the skip (the generic `*CONTROL_ALE` note is not
+    edited - it fires on 6 match rows), and the `*MAT_NULL` MU w_n3 clause
+    now names the flag and its Nu cost (energy error +59.2 %, END IE
+    +1504.57 % with the grid moving). Measured on the branch bytes (nt 4):
+    bird_B under the flag - starter 0 ERROR(S) / 3 WARNING(S) (1084 x2 +
+    100211), the engine echo `FORMULATION : FLOW-TRACKING`, NORMAL in 2936
+    cycles - reproduces the census arm `rcv_r9c_G1_bFT` to the printed
+    digit: END IE +1484.66 -> +17.00 %, IE fifths n/a / -56.03 / -44.74 /
+    -16.55 / +17.00 %, IE RMS 1189.95 -> 27.74 %, the energy error's worst
+    -20.4 -> -8.7 % (cycle 1801) - but the deck KE END +25.88 -> +1542.16 %
+    and KE RMS 253.09 -> 749.89 % (the void converted at full density:
+    cycle-0 KE 101.5 against LS-DYNA's 11.737), so the row is MIXED and the
+    card is not the default. The flag-on bytes equal the census arm
+    `rcv_r9p_g1a_gFT22` but for its kept `#-- SKIPPED:` line and its own
+    `/TH/PART`. Keyed on the deck's own card only: `quadrature_B` (void +
+    `*CONSTRAINED_LAGRANGE_IN_SOLID`, no card) is byte-identical under the
+    flag. Movers: default bytes 0 / 0; warning text 1 deck key / 1 emitted
+    model (bird_B: the skip sentence and the w_n3 clause); bytes under the
+    flag 1 / 1. One round-8 test moves with the w_n3 text
+    (`test_the_bird_B_and_void_texts_name_the_open_faces`: "the
+    reference-system item first" -> "the void / TYPE18 coupling item" plus
+    the three new needles).
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

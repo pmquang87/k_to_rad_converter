@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from typing import Dict, List, Optional, Set, Tuple
-from ..state import ConversionState, ShellInSolidPlan
+from ..state import AleFlowTrackingPlan, ConversionState, ShellInSolidPlan
 from .common import (HDR, _emit_surf_part, _emit_surf_seg, _f, _i,
                      _part_scoped_segment_set)
 
@@ -27,6 +27,9 @@ __all__ = [
     "_make_ebcs",
     "_make_inivol_notes",
     "_make_control_ale_notes",
+    "_resolve_ale_flow_tracking",
+    "ale_flow_tracking_lines",
+    "_make_ale_reference_notes",
 ]
 
 
@@ -1342,4 +1345,222 @@ def _make_control_ale_notes(state: ConversionState) -> List[str]:
         f"(stable in the reference FSI example); {hint} if you need to reproduce "
         "the exact scheme. Mesh smoothing (*ALE_SMOOTHING / "
         "*ALE_REFERENCE_SYSTEM_*) has no /ALE 1:1 and is not converted.")
+    return []
+
+
+# --- round 9, B8: *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 -> ---------------------
+#     /ALE/GRID/FLOW-TRACKING, OPT-IN (--ale-flow-tracking)
+
+#: a *NODE TC / BCTRAN / BCROT code -> the directions it constrains
+_AFT_DIRS = {0: "", 1: "x", 2: "y", 3: "z", 4: "xy", 5: "yz", 6: "zx",
+             7: "xyz"}
+
+#: the bird_B measurement every B8 sentence carries (cG1 bB / bFT, nt 4)
+_AFT_MEASURED = (
+    "MEASURED on ale/bird/bird-b/bird_B (nt 4, 600 LS times to t "
+    "5.9992e-4): END IE +1484.66 -> +17.00 %, IE RMS 1189.95 -> 27.74 %, the "
+    "energy error's worst -20.4 -> -8.7 %, and the plate takes load for the "
+    "first time - but too much (IE / KE +513.69 / +130.43 % at t 5.9916e-4) "
+    "- while the deck KE gets WORSE (END +25.88 -> +1542.16 %, RMS 253.09 -> "
+    "749.89 %; plate KE RMS 71.60 -> 93.93 %): the void is still converted "
+    "at full density (cycle-0 KE 101.5 against LS-DYNA's 11.737), so the "
+    "grid motion carries 9x the bird's mass.")
+
+
+def _ale_part_ids(state: ConversionState) -> List[int]:
+    """Every part k2rad converts with Iale >= 1: a part with solid elements
+    on an ELFORM 11 / 12 ``*SECTION_SOLID`` (``handlers`` sets ``iale``)."""
+    pids: Set[int] = set()
+    for e in state.solid_elems:
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        sec = state.sec_solids.get(part.secid)
+        if sec is not None and sec.iale:
+            pids.add(e.pid)
+    return sorted(pids)
+
+
+def _ale_nodes_unheld(state: ConversionState, pids: List[int],
+                      dirs: str) -> str:
+    """The directions of *dirs* that NOT every node of the ALE parts *pids*
+    holds by a global ``/BCS`` k2rad writes from the deck's own cards: the
+    ``*NODE`` TC cells (unless ``--no-node-tc-rc-bcs``), the
+    ``*CONSTRAINED_GLOBAL`` cells and the ``*BOUNDARY_SPC`` / zero-hold
+    prescribed-motion rows (``loads._global_spc_dofs``, skewed cards
+    excluded)."""
+    from .loads import _TC_RC_DIGITS, _global_spc_dofs
+    pset = set(pids)
+    nodes: Set[int] = set()
+    for e in state.solid_elems:
+        if e.pid in pset:
+            nodes.update(n for n in e.nodes if n > 0)
+    node_cells = (state.node_tc_rc if state.options.node_tc_rc_bcs else {})
+    glob_cells = state.constrained_global_tc_rc
+    spc = _global_spc_dofs(state)
+    missing = ""
+    for k, d in enumerate("xyz"):
+        if d not in dirs:
+            continue
+        for nid in nodes:
+            if _TC_RC_DIGITS.get(node_cells.get(nid, (0, 0))[0],
+                                 "000")[k] == "1":
+                continue
+            if _TC_RC_DIGITS.get(glob_cells.get(nid, (0, 0))[0],
+                                 "000")[k] == "1":
+                continue
+            if spc.get(nid, ("000", "000"))[0][k] == "1":
+                continue
+            missing += d
+            break
+    return missing
+
+
+def _resolve_ale_flow_tracking(state: ConversionState) -> AleFlowTrackingPlan:
+    """The ONE decision of ``--ale-flow-tracking`` (round 9, B8), memoised on
+    the state. A card is accepted only when ALL hold: exactly one
+    ``*ALE_REFERENCE_SYSTEM_GROUP`` and no ``_NODE`` / ``_CURVE`` /
+    ``_SWITCH`` card (one grid formulation per deck, ``hm_read_ale_grid.F``
+    ERROR 1118 on a second card); PRTYPE 4, PRID 0 (FLOW-TRACKING averages
+    over every ALE node), ICR 0 (it turns about the centre of mass); BCEXP 7
+    -> IS_DEF -1 (its deformation term is all-or-nothing); BCROT 0 / 7 ->
+    IS_ROT +1 / -1; STYPE 0 / 1 naming every part k2rad converts with Iale >=
+    1 (one VMEAN moves every ALE node, ``alew7.F:186-227``); and every
+    direction BCTRAN constrains already held on every ALE node by a global
+    ``/BCS`` (FLOW-TRACKING has no translation constraint). Otherwise
+    ``reasons`` lists every failing class and nothing is written. Without the
+    flag (or without a reference-system card) the plan is empty."""
+    if state.ale_flow_tracking_plan is not None:
+        return state.ale_flow_tracking_plan
+    plan = AleFlowTrackingPlan()
+    state.ale_flow_tracking_plan = plan
+    groups = state.ale_reference_groups
+    if not state.options.ale_flow_tracking or not (
+            groups or state.ale_reference_others):
+        return plan
+    reasons: List[str] = []
+    for kw in sorted(set(state.ale_reference_others)):
+        reasons.append(f"*{kw} has no OpenRadioss analogue")
+    if len(groups) > 1:
+        reasons.append(f"{len(groups)} *ALE_REFERENCE_SYSTEM_GROUP cards: "
+                       "FLOW-TRACKING is one grid formulation for the deck")
+    if len(groups) == 1:
+        g = groups[0]
+        if g.prtype != 4:
+            reasons.append(f"PRTYPE {g.prtype}: only PRTYPE 4 has an "
+                           "OpenRadioss analogue (FLOW-TRACKING)")
+        if g.prid != 0:
+            reasons.append(f"PRID {g.prid}: FLOW-TRACKING averages over every "
+                           "ALE node")
+        if g.icr != 0:
+            reasons.append(f"ICR {g.icr}: FLOW-TRACKING turns about the centre "
+                           "of mass")
+        if g.bcexp != 7:
+            reasons.append(f"BCEXP {g.bcexp}: FLOW-TRACKING's deformation term "
+                           "is all-or-nothing (only BCEXP 7 = no expansion "
+                           "maps)")
+        if g.bcrot not in (0, 7):
+            reasons.append(f"BCROT {g.bcrot}: only BCROT 0 / 7 map to I_rot "
+                           "+1 / -1")
+        ale = _ale_part_ids(state)
+        if not ale:
+            reasons.append("the deck converts no ALE part (Iale >= 1)")
+        if g.stype not in (0, 1):
+            reasons.append(f"STYPE {g.stype}: only a part set (0) or a part "
+                           "(1) names the ALE parts")
+        else:
+            named = _sis_side_pids(state, g.sid, 1 if g.stype == 1 else 0)
+            what = "part" if g.stype == 1 else "set"
+            if named is None:
+                reasons.append(f"{what} {g.sid} is not defined in the deck")
+            else:
+                miss = sorted(set(ale) - set(named))
+                if miss:
+                    reasons.append(f"{what} {g.sid} misses ALE part(s) {miss}")
+        dirs = _AFT_DIRS.get(g.bctran)
+        if dirs is None:
+            reasons.append(f"BCTRAN {g.bctran}: not a constraint code (0-7)")
+        elif dirs and ale:
+            unheld = _ale_nodes_unheld(state, ale, dirs)
+            if unheld:
+                reasons.append(
+                    f"BCTRAN {g.bctran}: OpenRadioss's FLOW-TRACKING has no "
+                    "translation constraint and the ALE nodes do not all "
+                    f"hold direction(s) {unheld}")
+        if not reasons:
+            plan.card = g
+            plan.idef = -1
+            plan.irot = 1 if g.bcrot == 0 else -1
+    plan.reasons = reasons
+    return plan
+
+
+def ale_flow_tracking_lines(state: ConversionState) -> List[str]:
+    """The ``/ALE/GRID/FLOW-TRACKING`` card of an accepted plan (round 9,
+    B8), written by ``output._make_analysis_defaults`` right after
+    ``/DEF_SOLID`` in ``_0000.rad`` only (an engine deck refuses a
+    formulation switch, ``lectur.F:889-902`` MESSAGE 229) - the 2024 CFG
+    grammar ``%10d%20lg`` (``ale_grid_flow-tracking.cfg``) under ``/BEGIN``
+    2022, which prints WARNING 100211 and reads it. The keyword leaves
+    ``skipped_keywords`` here, at the line that writes the card."""
+    plan = _resolve_ale_flow_tracking(state)
+    g = plan.card
+    if g is None:
+        return []
+    state.skipped_keywords.remove(g.keyword)
+    carried = (f"BCTRAN {g.bctran} is carried by the ALE nodes' own /BCS"
+               if g.bctran else "BCTRAN 0 constrains no direction")
+    state.warn(
+        f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE 4, BCEXP {g.bcexp}, "
+        f"BCROT {g.bcrot}, BCTRAN {g.bctran}) -> /ALE/GRID/FLOW-TRACKING "
+        f"I_def {plan.idef} I_rot {plan.irot} (--ale-flow-tracking): the ALE "
+        "grid moves with the mass-weighted mean velocity of the ALE material "
+        "about its centre of mass (alew7.F:186-227), as LS-DYNA's PRTYPE 4 "
+        f"does; {carried}. The /BEGIN 2022 starter prints WARNING 100211 "
+        "('format < 2024') and reads the card (engine echo 'FORMULATION : "
+        "FLOW-TRACKING'). " + _AFT_MEASURED + " It is opt-in because that KE "
+        "regression makes the row MIXED; the light-void coupling that would "
+        "remove it is open (FT + a 1e-6 void dies at t 1.043e-4 with "
+        "NEGATIVE RHO).")
+    return ["/ALE/GRID/FLOW-TRACKING",
+            "#    I_def           scale_def",
+            _i(plan.idef) + _f(0.0),
+            "#    I_rot           scale_rot",
+            _i(plan.irot) + _f(0.0)]
+
+
+def _make_ale_reference_notes(state: ConversionState) -> List[str]:
+    """The ``*ALE_REFERENCE_SYSTEM_*`` sentences (round 9, B8); writes no
+    card and draws no id. Under ``--ale-flow-tracking`` a refused deck gets
+    ONE sentence naming every failing class; without the flag each card gets
+    its own skip sentence (a PRTYPE-4 GROUP card names the opt-in). The
+    generic ``*CONTROL_ALE`` note is NOT edited (it fires on 6 match rows)."""
+    groups = state.ale_reference_groups
+    others = sorted(set(state.ale_reference_others))
+    if not groups and not others:
+        return []
+    if state.options.ale_flow_tracking:
+        plan = _resolve_ale_flow_tracking(state)
+        if plan.card is None and plan.reasons:
+            head = ("*ALE_REFERENCE_SYSTEM_GROUP" if groups
+                    else f"*{others[0]}")
+            state.warn(f"{head}: not converted under --ale-flow-tracking - "
+                       + "; ".join(plan.reasons)
+                       + "; it stays listed as skipped.")
+        return []
+    for g in groups:
+        if g.prtype == 4:
+            state.warn(
+                f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE 4) is skipped: "
+                "its OpenRadioss analogue /ALE/GRID/FLOW-TRACKING is written "
+                "only under --ale-flow-tracking (opt-in - on bird_B it fixes "
+                "the IE history, END +1484.66 -> +17.00 %, but worsens the "
+                "deck KE through the full-density void, RMS 253.09 -> "
+                "749.89 %).")
+        else:
+            state.warn(
+                f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE {g.prtype}) has "
+                "no OpenRadioss analogue and is skipped.")
+    for kw in others:
+        state.warn(f"*{kw} has no OpenRadioss analogue and is skipped.")
     return []

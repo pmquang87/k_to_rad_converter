@@ -1410,8 +1410,11 @@ def _resolve_mat_null_cells(
             "faces walled the energy error reads -0.1 % (+2.4 % with the void "
             "cells at VFACT density) against 99.9 % open, and the void "
             "density alone does not remove it (99.9 %). LS-DYNA moves its ALE "
-            "mesh with the bird (*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4, which "
-            "k2rad skips): ROADMAP, the reference-system item first.")
+            "mesh with the bird (*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4; "
+            "--ale-flow-tracking writes /ALE/GRID/FLOW-TRACKING, and with the "
+            "grid moving the Nu cell still creates energy: energy error "
+            "+59.2 %, END IE +1504.57 % on bird_B), so the cell stays off: "
+            "ROADMAP, the void / TYPE18 coupling item.")
     if w_n3_deck:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_deck)
