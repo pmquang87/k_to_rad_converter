@@ -74,7 +74,11 @@ Prior history (before this changelog was introduced) is summarized in the
     61 in two of four starter runs, a plain "STOP DUE TO INPUT ERROR" in the
     other two); round 8's column of the queue table says MEASURED (report
     §0.31) where it still said "(EXPECTED; the campaign re-run measures)"
-    and "27 / 27 (EXPECTED)". Three round-8 notes stop quoting the
+    and "27 / 27 (EXPECTED)"; NOT entry 10 quoted a pre-research arm (the
+    route without the stub) as "the route band END −21 .. −26 %" and now
+    gives the shipped A1 + A2 band (27 runs at nt 4 and nt 2: END −15.85 ..
+    −28.08 %, RMS 10.34 .. 15.25 %) with the pre-research arms labelled.
+    Three round-8 notes stop quoting the
     retracted CNRB `_SPC` "will dangle" warning (README, the `convert()`
     docstring, `rbody._cnrb_spc_lines`). The retracted fix-round spellings
     are guarded by `Round9FixRoundRetractedStatements` (only this file quotes

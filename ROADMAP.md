@@ -3024,12 +3024,17 @@ models on the 356-key / 312-model roster.
    mechanism is refuted. Next: the per-iteration contact list of the routed
    arm and the contact forces of the 12 / 12 implicit TYPE7 control rows, row
    by row. 12 keys / 12 models.
-10. **doorbeam's implicit residual after A1 + A2** (record): the route band END
-    −21 .. −26 %, RMS 11.9 .. 13.5 % (5 runs); friction is the lever (Fric 0.1:
-    RMS 7.5 %); by part the brackets carry 2.0-2.4× their LS IE and the beam
-    −31 .. −36 % late; the explicit twin RMS 4.42 %. Next: the implicit TYPE7
-    friction / stick model against LS's, and the implicit path on the A1 + A2
-    bytes. 1 key / 1 model.
+10. **doorbeam's implicit residual after A1 + A2** (record): on the shipped
+    A1 + A2 bytes the band is END −15.85 .. −28.08 %, RMS 10.34 .. 15.25 % of
+    the LS peak over 27 runs at nt 4 and nt 2 (24 at −27.76 .. −28.08 %, three
+    at −15.85 .. −16.13 %; the campaign's three −27.76 .. −28.08 %, report
+    §0.33); the early fifths stay high (+110.19 / +42.15 %, the punch's first
+    contact). Pre-research arms (not the shipped bytes): the route without the
+    stub −21.14 .. −26.38 %, RMS 11.94 .. 13.45 % (5 runs); friction is the
+    lever (Fric 0.1 on that arm: RMS 7.5 %); by part the brackets carry
+    2.0-2.4× their LS IE and the beam −31 .. −36 % late; the explicit twin RMS
+    4.42 %. Next: the implicit TYPE7 friction / stick model against LS's, on
+    the A1 + A2 bytes. 1 key / 1 model.
 11. **The cup-draw contact-stiffness parity** (round-8 entry 14 → a RECORD +
     this): Stfac 0.1 is byte-identical in its run (Istf 4: STIF = MIN(STF,
     STFN), Stfac scales only the main side, `i7cor3.F:277-288` /

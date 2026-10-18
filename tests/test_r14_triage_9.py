@@ -4748,6 +4748,9 @@ _RETRACTED_ROUND_9_FIX = (
     # round 8's column of the queue table (report section 0.31 measured it)
     "(EXPECTED; the campaign re-run measures)",
     "27 / 27 (EXPECTED)",
+    # NOT entry 10 quoted a pre-research arm (the route without the stub)
+    # as THE route band: the shipped A1 + A2 band is -15.85 .. -28.08 %
+    "the route band END −21 .. −26 %",
 )
 _REPLACEMENTS_ROUND_9_FIX = (
     ("k2rad/writer/loads.py", "gravit_imp.F:84-91 weighs an active rigid "
@@ -4767,6 +4770,8 @@ _REPLACEMENTS_ROUND_9_FIX = (
     ("ROADMAP.md", "the residue 29 / 29 → 27 / 27 (MEASURED, campaign report "
      "§0.31)"),
     ("ROADMAP.md", "the static deck two starter runs then stopped"),
+    ("ROADMAP.md", "A1 + A2 bytes the band is END −15.85 .. −28.08 %, RMS "
+     "10.34 .. 15.25 % of the LS peak over 27 runs at nt 4 and nt 2"),
 )
 
 
