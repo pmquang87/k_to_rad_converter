@@ -7768,10 +7768,11 @@ class ConvertOptions:
     # spotweld.k: node 1213 -> z 0, new node at z 2, length 2.0 = LS-DYNA's own
     # d3plot and swforc). Rule 2 puts beam/truss nodes on a contact side
     # (writer/contacts._contact_part_nodes). MEASURED on spotweld.k (nt 4):
-    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both
-    # take IE -99.9 % -> +82.0 % at 7.80x the cycles - the error changes SIGN,
-    # not size - and the weld never fails (*MAT_SPOTWELD EFAIL has no
-    # /PROP/TYPE13 slot). Rule 2 reaches 4 R14 deck keys on 4 emitted models
+    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both,
+    # with today's EFAIL displacement criterion and DT scaling, end at
+    # LS-DYNA's own cycle count 1332 with IE END -31.18 % and the weld
+    # rupturing 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s; round 9,
+    # B9 - round 6's figures are history). Rule 2 reaches 4 R14 deck keys on 4 emitted models
     # and two unreferenced vehicles, none run WITH it but spotweld.k (the
     # three R14 giants have campaign rows from runs without it). Hence opt-in.
     spotweld_node_synthesis: bool = False
@@ -8103,7 +8104,8 @@ class ConvertOptions:
     # DeltaMax1 = delta_y + EFAIL·L, DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L
     # (the effective plastic strain sqrt(eps^2 + gamma^2/3) on a proportional
     # path). Measured on spotweld.k under the round-6 opt-in pair: rupture
-    # 1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. Its only DEFAULT mover is
+    # 1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time 1.1876e-3 s
+    # (the round-8 DT scaling makes it 4.2 us earlier). Its only DEFAULT mover is
     # the Yaris roof crush (EFAIL 0.8), a run_pass = 2 giant the campaign
     # re-converts but does not run (its row is a stale 2026-09-06
     # error_engine run): the measurable default effect is nil.

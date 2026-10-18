@@ -325,9 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
              "side (spotweld.k: 1213 -> z 0, new node at z 2, length 2.0 = "
              "LS-DYNA's own d3plot and swforc). OFF by default: alone it only "
              "costs cycles (7.64x on spotweld.k, IE -99.92 %%); with "
-             "--beam-contact-secondary the error changes sign, not size (IE "
-             "-99.9 %% -> +82.0 %% at 7.80x the cycles) and the weld never "
-             "fails (EFAIL has no /PROP/TYPE13 slot).",
+             "--beam-contact-secondary (and today's EFAIL displacement "
+             "criterion and DT scaling) the IE END reads -31.18 %% at "
+             "LS-DYNA's own cycle count 1332 and the weld ruptures 65.3 us "
+             "before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s).",
     )
     parser.add_argument(
         "--beam-contact-secondary",
@@ -600,8 +601,9 @@ def build_parser() -> argparse.ArgumentParser:
              "strain sqrt(eps^2 + gamma^2/3) on a proportional path). ON by "
              "default; beside resultant cells EFAIL is named, not converted. "
              "MEASURED on spotweld.k with --spotweld-node-synthesis "
-             "--beam-contact-secondary (nt 4): rupture 1.12650e-3 s vs "
-             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.5-6.0 %% early). Its only "
+             "--beam-contact-secondary (nt 4): rupture 1.12229e-3 s, 65.3 us "
+             "before LS-DYNA's swforc failure time 1.1876e-3 s (the round-8 "
+             "DT scaling makes it 4.2 us earlier). Its only "
              "default mover is a giant the campaign does not run (measurable "
              "default effect nil). Use --no-spotweld-efail-displacement to "
              "keep EFAIL dropped.",

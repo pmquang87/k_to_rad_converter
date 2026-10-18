@@ -4711,7 +4711,9 @@ class Round8RoadmapRecord(unittest.TestCase):
 
     def test_the_queue_table_has_a_round_8_column(self):
         rows = self._table("| # | class | decks | closed by round 1 |")
-        self.assertTrue(rows[0].endswith("| round 7 | round 8 |"), rows[0])
+        # round 9 (B9) appended its own column after round 8's
+        self.assertTrue(rows[0].endswith("| round 7 | round 8 | round 9 |"),
+                        rows[0])
         self.assertEqual(len(rows), 10)
         self._same_width(rows)
 
@@ -4743,9 +4745,29 @@ class Round8RoadmapRecord(unittest.TestCase):
                 self.assertEqual(
                     sum("**Round 8:**" in ln for ln in self.lines[a:b]), 1)
 
+    def test_every_round_7_item_has_its_round_8_line_inside_its_paragraph(self):
+        """Round 9, B9 (V6, cG4's paragraph rule): every round-7 NOT item's
+        ONE ``**Round 8:**`` line lies before the first blank line after the
+        item's start - at 386444e item 17's line sat after the sub-header
+        "New items found while doing round 7" (ROADMAP.md:2505)."""
+        s = self._at("**What round 7 deliberately does NOT close**")
+        e = self._at("**What round 8 closes, and what it does NOT.**")
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        self.assertEqual(len(starts), 22)
+        for n, (a, z) in enumerate(zip(starts, starts[1:] + [e]), 1):
+            with self.subTest(item=n):
+                b = next((k for k in range(a, z) if not self.lines[k].strip()),
+                         z)
+                hits = [k for k in range(a, b)
+                        if "**Round 8:**" in self.lines[k]]
+                self.assertEqual(len(hits), 1, self.lines[a][:40])
+
     def test_the_round_8_not_list_is_numbered_1_to_27(self):
         s = self._at("**What round 8 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # round 9's sections sit between this list and the starter-failure
+        # paragraph
+        e = self._at("**What round 9 closes, and what it does NOT.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]

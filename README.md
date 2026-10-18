@@ -739,8 +739,9 @@ gets the `Ifail 1` / `Ifail2 0` DISPLACEMENT criterion (round 7, default ON,
 (tension only), `DeltaMax2,3 = ±(δy,s + √3·EFAIL·L)` — the effective plastic
 strain `√(ε² + γ²/3)` of a proportional path reaching `EFAIL` on the quadratic
 surface `Ifail 1` applies; measured on `spotweld.k` with
-`--spotweld-node-synthesis --beam-contact-secondary`: rupture 1.12650e-3 s
-against LS-DYNA's 1.17969e-3..1.19792e-3 s (4.5-6.0 % early). Beside resultant
+`--spotweld-node-synthesis --beam-contact-secondary`: rupture 1.12229e-3 s,
+65.3 µs before LS-DYNA's swforc failure time 1.1876e-3 s (the round-8 DT
+scaling makes it 4.2 µs earlier). Beside resultant
 cells `EFAIL` is named, not converted (TYPE13 carries ONE criterion type per
 property); a 1e20-class `EFAIL` writes nothing. **`DT` scales the weld UP to
 a step of DT** (round 8, default ON, `--no-spotweld-dt-mass-scaling` drops it
@@ -758,7 +759,10 @@ IE END −33.00 → −31.18 % — **MIXED**: the histories are worse, RMS IE
 6.65 → 6.82 % and RMS KE 23.09 → 23.66 % of the LS peak over the 1331 LS
 times to t 0.00119792 (IE fifths +0.20 / −0.04 / +0.40 / +0.64 / −33.00 →
 −0.45 / +0.20 / +0.16 / +0.58 / −31.18 %; the campaign's history rule, the
-last row of a printed time). No default byte mover: `plates.mat100`'s DT 1e-9
+last row of a printed time); KE END +38.90 → +30.76 %, the weld ruptures at
+1.12229e-3 s, 65.3 µs before LS-DYNA's swforc failure time 1.1876e-3 s (4.2 µs
+earlier than without the scaling), and the energy error stays within
+−0.3 .. +0.2 %. No default byte mover: `plates.mat100`'s DT 1e-9
 is below its weld's own step, and its warning now says the DT is inert.
 Round 7's spotweld calibration factor was the inertia factor applied to the mass as well
 (+58 % model mass) and is retracted. (Deliberately not `/MAT/LAW59`,
@@ -4960,21 +4964,16 @@ rigid-body nodes.
 
 #### Both flags, measured
 
-MEASURED on spotweld.k at `nt` 4 (LS-DYNA internal energy 76 812 at
-1.18e-3; the weld fails there at 1.1876e-3): rule 1 alone costs 7.64× the
-cycles (639 → 4884) at IE −99.92 % — it builds a weld that connects nothing;
-rule 2 alone is identical to the base; **both** take IE −99.9 % → **+82.0 %**
-at 1.18e-3, at 7.80× the cycles (4983) — the error changes SIGN, not size
-(|IE error| 76 733 → 67 888) there, and GROWS after LS-DYNA's weld fails: at
-the matched end (t 1.2e-3, LS IE 60 028) it is **+141.1 %** against the base's
-−99.87 % (history +65 / +82 / +85 / +83 / +141 % at the fifths of the run,
-`nt` 4 = `nt` 2). The `/PROP/TYPE13` shear stays elastic (116 300 against
-LS-DYNA's 46 247 at 1.18e-3) and the weld NEVER fails, because
-`*MAT_SPOTWELD` `EFAIL` had no `/PROP/TYPE13` slot. **Round 7:** the default
-shear curve and the `EFAIL` displacement criterion (see `*MAT_SPOTWELD`) now
-reach that arm — the weld fails at 1.12650e-3 s (LS-DYNA between 1.17969e-3
-and 1.19792e-3 s), IE −33.00 % / KE +38.90 % at the end, RMS 6.65 / 23.09 % of
-the LS peak. And rule 2 changes the
+MEASURED on spotweld.k at `nt` 4 with today's defaults (the round-7 shear
+curve and `EFAIL` displacement criterion, see `*MAT_SPOTWELD`, and the round-8
+DT scaling): rule 1 alone costs 7.64× the cycles (639 → 4884) at IE −99.92 %
+— it builds a weld that connects nothing; rule 2 alone is identical to the
+base; **both** end at LS-DYNA's own cycle count 1332 with IE END −31.18 %,
+KE END +30.76 % and RMS IE / KE 6.82 / 23.66 % of the LS peak over the 1331
+LS times to t 0.00119792, and the weld ruptures at 1.12229e-3 s, 65.3 µs
+before LS-DYNA's swforc failure time 1.1876e-3 s (round 9's re-measure). Round
+6 measured the combined arm before `EFAIL` and DT were converted — the
+CHANGELOG round-6 entry holds those figures. And rule 2 changes the
 secondary side of 4 R14 deck keys on 4 emitted models (spotweld.k,
 `show-cases/contact-overview/main.k` and the two R14 Yaris giants — the three
 giants have campaign rows from 2026-09-06 runs WITHOUT the flag) and of the

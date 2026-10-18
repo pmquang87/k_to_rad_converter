@@ -714,9 +714,10 @@ def convert(
         new node on the nearest segment on the other side (spotweld.k: 1213
         -> z 0, new node at z 2, length 2.0 = LS-DYNA's own d3plot and
         swforc). **Off by default**: alone it only costs cycles (7.64x on
-        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` the error
-        changes sign, not size (IE -99.9 % -> +82.0 % at 7.80x the cycles)
-        and the weld never fails (EFAIL has no ``/PROP/TYPE13`` slot).
+        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` (and
+        today's EFAIL displacement criterion and DT scaling) the IE END
+        reads -31.18 % at LS-DYNA's own cycle count 1332 and the weld
+        ruptures 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s).
     beam_contact_secondary : bool
         Put the nodes of ``*ELEMENT_BEAM`` elements (beams, trusses, spotweld
         and discrete beams) of a part named on a contact side into that
@@ -786,9 +787,10 @@ def convert(
         ``DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L`` (round 7, A3 piece
         (ii)). **On by default**; beside resultant cells EFAIL is named.
         Measured on spotweld.k with the round-6 opt-in pair: rupture
-        1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. The measurable default
-        effect is nil (its one default mover is a giant the campaign does
-        not run).
+        1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time 1.1876e-3
+        s (the round-8 DT scaling makes it 4.2 us earlier). The measurable
+        default effect is nil (its one default mover is a giant the
+        campaign does not run).
     implicit_tshell_solid : bool
         On an IMPLICIT deck (the modal path included), write an isotropic
         ``*SECTION_TSHELL`` whose live parts are all ``*MAT_ELASTIC`` as
@@ -973,7 +975,11 @@ def convert(
         factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
         cycle-0 step 9.000e-7, IE END -33.00 -> -31.18 % - MIXED: RMS
         IE 6.65 -> 6.82 % and RMS KE 23.09 -> 23.66 % of the LS peak
-        (1331 LS times to t 0.00119792) are worse. Default byte movers 0
+        (1331 LS times to t 0.00119792) are worse; KE END +38.90 ->
+        +30.76 %, the weld ruptures at 1.12229e-3 s, 65.3 us before
+        LS-DYNA's swforc failure time 1.1876e-3 s (4.2 us earlier than
+        without the scaling), the energy error within -0.3 .. +0.2 %.
+        Default byte movers 0
         (plates.mat100's DT is inert: its warning says so).
     adaptive_spring_token : bool
         Set each spring token ``/PROP`` MASS (TYPE4 / TYPE8 / TYPE13,

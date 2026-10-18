@@ -986,9 +986,9 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="Put beam/truss nodes on a contact side that names their "
-                     "part - OFF. With the box above, spotweld.k goes IE "
-                     "-99.9 % -> +82.0 % at 7.80x cycles (the sign changes, "
-                     "not the size) and the weld never fails",
+                     "part - OFF. With the box above, spotweld.k ends at LS's "
+                     "1332 cycles, IE END -31.18 %, the weld rupturing 65.3 us "
+                     "before LS's",
             variable=self.beam_contact_secondary).grid(
                 row=40, column=0, columnspan=3, sticky="w", **pad)
 
@@ -1013,8 +1013,8 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="*MAT_SPOTWELD EFAIL with no resultant cell: Ifail 1 / "
                      "Ifail2 0 displacement failure (delta_y + EFAIL·L, "
-                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12650e-3 s "
-                     "vs LS 1.17969e-3..1.19792e-3 s",
+                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12229e-3 s, "
+                     "65.3 us before LS's 1.1876e-3 s",
             variable=self.spotweld_efail_displacement).grid(
                 row=43, column=0, columnspan=3, sticky="w", **pad)
 

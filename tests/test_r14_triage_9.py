@@ -2217,7 +2217,9 @@ class Round9RoadmapRecordA(unittest.TestCase):
 
     def test_each_part_A_entry_carries_one_round_9_line(self):
         s = self._at("**What round 8 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # part B's round-9 sections sit between this list and the
+        # starter-failure paragraph
+        e = self._at("**What round 9 closes, and what it does NOT.**")
         starts = {int(m.group(1)): k for k, m in
                   ((k, re.match(r"^(\d+)\. \*\*", self.lines[k]))
                    for k in range(s, e)) if m}

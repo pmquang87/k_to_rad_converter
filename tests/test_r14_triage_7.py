@@ -2141,7 +2141,9 @@ class Round7FlagWiringA(unittest.TestCase):
         "--spotweld-shear-yield": ("20374..20408", "= 20405",
                                    "8.58 / 26.74 %", "1.107x",
                                    "mainboltaexpl"),
-        "--spotweld-efail-displacement": ("1.12650e-3", "4.5-6.0 %",
+        # round 9, B9: the unscaled rupture 1.12650e-3 s against LS's output
+        # bracket is retracted - the scaled run against LS's swforc
+        "--spotweld-efail-displacement": ("1.12229e-3", "65.3 us",
                                           "sqrt(eps^2 + gamma^2/3)",
                                           "1e19"),
         "--implicit-tshell-solid": ("28 cycles", "100 624",
@@ -4421,9 +4423,14 @@ class Round7PostReviewRound(unittest.TestCase):
              "its t_end"),
             ("ROADMAP.md", "`BCS WITH LAGRANGE MULTIPLIER NOT ENABLED FOR "
              "NSPMD > 1`, `lag_mult.F:667-671`"),
-            ("k2rad/writer/loads.py", "1.19792e-3 s (4.5-6.0 % early)"),
-            ("k2rad/cli.py", "1.19792e-3 s (4.5-6.0 %% early)"),
-            ("README.md", "1.19792e-3 s (4.5-6.0 % early)"),
+            # (round 9, B9: the EFAIL rupture re-measured with the round-8 DT
+            # scaling against LS-DYNA's swforc failure time)
+            ("k2rad/writer/loads.py", "fails at 1.12229e-3 s, 65.3 us before "
+             "LS-DYNA's swforc failure time 1.1876e-3 s"),
+            ("k2rad/cli.py", "rupture 1.12229e-3 s, 65.3 us before LS-DYNA's "
+             "swforc failure time 1.1876e-3 s"),
+            ("README.md", "rupture 1.12229e-3 s, 65.3 µs before LS-DYNA's "
+             "swforc failure time 1.1876e-3 s"),
             # (round 8, B4: "IE RMS 44.37 % on both arms" left materials.py
             # and ROADMAP with the pre-PC-cell sph/bird arm it described)
             ("README.md", "`channel_C` RMS 0.03 / 0.10 (the campaign re-run"),

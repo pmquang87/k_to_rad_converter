@@ -3813,19 +3813,18 @@ def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
         def xyz(v) -> str:
             return f"({v[0]:g}, {v[1]:g}, {v[2]:g})"
         if state.options.beam_contact_secondary:
+            # round 9, B9: today's defaults (the EFAIL displacement criterion
+            # of round 7, the DT scaling of round 8) on the two opt-in rules
+            # - cG3's swA6 arm; round 6's combined-arm figures are history
+            # (CHANGELOG round 6)
             clause = (
-                " MEASURED with both flags on spotweld.k (nt 4): 4983 cycles "
-                "(7.80x) and internal energy -99.9 % -> +82.0 % of LS-DYNA's "
-                "at t 1.18e-3 - the error changes SIGN, not size (|IE error| "
-                "76733 -> 67888 on LS 76812): the /PROP/TYPE13 shear stays "
-                "elastic (116300 vs LS-DYNA's 46247 at 1.18e-3) and the weld "
-                "never fails (*MAT_SPOTWELD EFAIL has no /PROP/TYPE13 slot) "
-                "where LS-DYNA fails it at 1.1876e-3; so at the matched END (t "
-                "1.2e-3, after LS-DYNA's failure has dropped its IE to 60028) "
-                "the error GROWS to +141.1 % (the base -99.87 %), and the "
-                "history reads +65 / +82 / +85 / +83 / +141 % at the fifths of "
-                "the run (nt 4 and nt 2 identical); the TYPE13 spring also "
-                "owns the time step because MAT_100's DT is dropped.")
+                " MEASURED with both flags on spotweld.k (nt 4, today's "
+                "defaults incl. the EFAIL displacement criterion and the DT "
+                "scaling): the last cycle 1332 = LS-DYNA's 1332; IE END "
+                "-31.18 %, KE END +30.76 %, RMS IE / KE 6.82 / 23.66 % of the "
+                "LS peak over the 1331 LS times to t 0.00119792; the weld "
+                "ruptures at 1.12229e-3 s, 65.3 us before LS-DYNA's swforc "
+                "failure time 1.1876e-3 s.")
         else:
             clause = (
                 " WITHOUT --beam-contact-secondary the tie's secondary side "
@@ -3869,9 +3868,9 @@ _SPOTWELD_SHEAR_EVIDENCE = (
 _SPOTWELD_EFAIL_EVIDENCE = (
     "MEASURED on intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k with "
     "--spotweld-node-synthesis --beam-contact-secondary (nt 4): the weld "
-    "fails at 1.12650e-3 s where LS-DYNA's last intact output is 1.17969e-3 s "
-    "and its first failed one 1.19792e-3 s (4.5-6.0 % early); IE -33.00 % / "
-    "KE +38.90 % at the end, RMS 6.65 / 23.09 % of the LS peak.")
+    "fails at 1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time "
+    "1.1876e-3 s; IE -31.18 % / KE +30.76 % at the end, RMS 6.82 / 23.66 % "
+    "of the LS peak (1331 LS times).")
 
 
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
@@ -4254,7 +4253,10 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %) - "
                 "MIXED: the histories are WORSE, RMS IE 6.65 -> 6.82 % and "
                 "RMS KE 23.09 -> 23.66 % of the LS peak over the 1331 LS "
-                "times to t 0.00119792. "
+                "times to t 0.00119792. KE END +30.76 % (unscaled +38.90 %); "
+                "the weld ruptures at 1.12229e-3 s, 65.3 us before LS-DYNA's "
+                "swforc failure time 1.1876e-3 s (4.2 us earlier than without "
+                "the scaling); the energy error stays within -0.3 .. +0.2 %. "
                 "--no-spotweld-dt-mass-scaling drops DT as before (round 8).")
         elif dt_inert:
             state.warn(
@@ -9024,7 +9026,9 @@ def _adaptive_spring_token(state: ConversionState, rigid_nodes: Set[int],
     a TYPE4, ``r2len3.F:221-247`` for a TYPE8 / TYPE13 - never on the nodes'.
     The S2 screen then takes the token back off the end nodes, so a light
     compensated end can sit far below what that step assumes, and nothing
-    stops it: no nodal step without ``/DT/NODA``, and the run diverges
+    stops it: no nodal step without ``/DT/NODA``, AMS or an emitted
+    ``/INTER/TYPE2`` with Spotflag 25-28 (``intti1.F:258`` sets I7KGLO,
+    which turns on ``dtnoda.F:661``'s nodal step), and the run diverges
     behind a NORMAL TERMINATION banner (measured on three coupons: the
     energy-error limit, MESSAGE 205, killed them within 3-6 cycles).
     LS-DYNA steps a discrete element on the REAL nodal masses (Theory R16
