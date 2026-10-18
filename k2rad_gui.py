@@ -1061,8 +1061,8 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="Implicit TYPE25-only deck: skip the inert all-parts "
                      "contact stub (opt-in) - OFF. Coupon NORMAL -> ERROR at "
-                     "cycle 9 without it; doorbeam MIXED (END +582 -> +689 %, "
-                     "RMS 393 -> 313 %)",
+                     "cycle 9 without it; doorbeam (punch driven) stops at "
+                     "49 % of t_end behind a NORMAL banner",
             variable=self.skip_implicit_stub_with_type25).grid(
                 row=60, column=0, columnspan=3, sticky="w", **pad)
 

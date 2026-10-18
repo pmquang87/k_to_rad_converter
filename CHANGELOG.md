@@ -85,6 +85,33 @@ Prior history (before this changelog was introduced) is summarized in the
     warning. Movers 1 key / 1 model (doorbeam); guards: the 12 implicit decks
     that already emit a non-stub TYPE7 and the 53 / 37 stub decks keep
     their interface cards.
+  - **The texts that ride A1 + A2** (A3; no bytes). (a) The B6 opt-in
+    `--skip-implicit-stub-with-type25` is re-texted at its sites (the help,
+    the `convert()` docstring, the `ConvertOptions` comment, the runtime
+    tail `_STUB_TYPE25_MEASURED` behind its three sentences, the GUI label,
+    README's stub paragraph and flag section, ROADMAP round-7 item 7): every
+    site drops round 8's doorbeam pair "+582.00 -> +689.08 %, 393.31 ->
+    313.05 %" as the opt-in's measurement - both arms drove the WRONG body -
+    and states the round-9 one (with the punch driven the run without the
+    stub ends a NORMAL banner at t 5.434e-4, 24 cycles, 49.4 % of t_end, the
+    punch stopped at 81.51 of 135 mm; nt 4 = nt 2) plus "can stop early OR
+    end NORMAL with the load path lost", and that the flag now reaches the
+    ERODING spellings (an N2S spelling only under `--no-implicit-n2s-type7`);
+    ROADMAP round-7 item 7 keeps its history lines and closes. (b) The
+    TYPE25 no-tangent citation `imp_int_k.F:847` (only the crossing-search
+    filter) is RETRACTED -> `imp_int_k.F:111-200` (no TYPE25 branch) +
+    `ind_glob_k.F:4601-4605` (MESSAGE 232) + `intfop2.F:595` (the force enters
+    the residual) at every shipped site. (c) g2e's residual-vs-tangent
+    mechanism for the one-way pass-through (refuted at source: `/IMPL/INTER/
+    TTOFF` identical to every printed digit, SINT7/2 passes through earlier)
+    ships in no text. (d) Round 8's dT7 figures `RMS 304.95 %` / `END
+    +601.76 %` and its UNRESOLVED dT7 verdict are RETRACTED as route
+    evidence: the deck contact carried 0.0 at every TH row because the punch
+    never moved. `Round9RetractedStatementsA` guards `304.95`, `601.76`,
+    `imp_int_k.F:847`, `residual stiffens` and `tangent uses a constant`
+    over every shipped text (CHANGELOG exempt). Moved pins:
+    `Round8OptInWiringB._HELP_FIGURES` and `ImplicitStubWithType25`'s needles
+    (`test_r14_triage_8.py`), each with the new figure.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

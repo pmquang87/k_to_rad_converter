@@ -4720,13 +4720,16 @@ ordinary `Inacti = 5` plus that `Fpenmax`. It stated `Inacti = 1` for one
 round; measured, that zeroes the stiffness of every initially penetrating node
 and cost `efg/metal-cutting/main.k` its NORMAL termination (218 cycles to
 t = 0.03 became a TIMESTEP-LIMIT death at t = 0.0084), so the lever is Fpenmax
-and not Inacti. The stub is also injected when the deck's only contacts take
-the TYPE25 route, because there it is the deck's only implicit contact
-stiffness (`imp_int_k.F:847`): round 8 first left it out, and its validation
-round put it back — without it a two-block coupon whose TYPE25 contact must
-carry load ends in ERROR TERMINATION at cycle 9 (NORMAL in 11 cycles with it),
-and `doorbeam` is MIXED (END +582.00 → +689.08 %, RMS 393.31 → 313.05 % of the
-LS peak);
+and not Inacti. The stub is also injected when the deck's only contacts are
+written as TYPE25 (the ERODING spellings; since round 9 an implicit
+`*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE` is a routed `/INTER/TYPE7` and the stub
+stays beside it with the routed friction), because there it is the deck's only
+implicit contact stiffness (no implicit TYPE25 stiffness: `imp_int_k.F:111-200`
+has no TYPE25 branch, `ind_glob_k.F:4601-4605` prints MESSAGE 232): round 8
+first left it out, and its validation round put it back — without it a
+two-block coupon whose TYPE25 contact must carry load ends in ERROR TERMINATION
+at cycle 9 (NORMAL in 11 cycles with it), and `doorbeam` with its punch driven
+(round 9) ends a NORMAL banner at 49.4 % of t_end with the punch stopped;
 [`--skip-implicit-stub-with-type25`](#--skip-implicit-stub-with-type25--skip-the-implicit-stub-beside-a-type25-route-contact)
 leaves it out. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
 (`hm_read_inter_type10.F:94`) and clears the same refusal with `Itied = 1`
@@ -6927,18 +6930,21 @@ prints its last converged increment, so the end-of-run scorer compared `t`
 k2rad injects an inert all-parts `/INTER/TYPE7`
 (`auto_implicit_stabilization_self_contact`) into a CONTACT-FREE implicit deck,
 because the engine's implicit setup needs an interface. A deck whose only
-contacts take the TYPE25 route (`*CONTACT_NODES_TO_SURFACE`,
-`*CONTACT_AUTOMATIC_NODES_TO_SURFACE`, `*CONTACT_ERODING_*`) gets it too, and
-there it is not inert: OpenRadioss builds implicit contact stiffness only for
-TYPE 7 / 10 / 11 (`imp_int_k.F:847`; a TYPE25 acts through the residual alone,
-`intfop2.F:595`, and the engine prints MESSAGE 232 "INTERFACE TYPE 25 IS NOT
-AVAILABLE WITH IMPLICIT SOLUTION"), so the stub is the deck's only implicit
-contact stiffness — an all-parts self-contact LS-DYNA does not have. **The
-stub stays by default** (the 4f5b6e8 deck, byte for byte), and a sentence names
-both measured arms. `--skip-implicit-stub-with-type25` (opt-in) leaves it out
-wherever a TYPE25 contact is actually WRITTEN: the decision is taken right
-after the TYPE25 writer, so a deck whose TYPE25 contacts are all dropped gets
-the stub after all (its id drawn after the TYPE25 section, named).
+contacts are written as `/INTER/TYPE25` (the `*CONTACT_ERODING_*` spellings;
+`*CONTACT_NODES_TO_SURFACE` / `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` only under
+`--no-implicit-n2s-type7`, since round 9 routes them to a one-way TYPE7) gets it
+too, and there it is not inert: OpenRadioss builds no implicit contact
+stiffness for a TYPE25 (`imp_int_k.F:111-200` has no TYPE25 branch;
+`ind_glob_k.F:4601-4605` prints MESSAGE 232 "INTERFACE TYPE 25 IS NOT
+AVAILABLE WITH IMPLICIT SOLUTION"; its force still enters the residual,
+`intfop2.F:595`), so the stub is the deck's only implicit contact stiffness —
+an all-parts self-contact LS-DYNA does not have — and without it the run can
+stop early OR end NORMAL with the load path lost. **The stub stays by default**
+(the 4f5b6e8 deck, byte for byte), and a sentence names both measured arms.
+`--skip-implicit-stub-with-type25` (opt-in) leaves it out wherever a TYPE25
+contact is actually WRITTEN: the decision is taken right after the TYPE25
+writer, so a deck whose TYPE25 contacts are all dropped gets the stub after
+all (its id drawn after the TYPE25 section, named).
 
 Round 8 first shipped the skip as the default; its validation round inverted
 that on a measurement. MEASURED, both arms at nt 4 AND nt 2 (every printed
@@ -6951,18 +6957,20 @@ cycle row identical but the controlling-node label):
   the internal energy runs 391.5 / 2469 / 4225 / 7953 / 1.145e4 at t 0.5 .. 0.9,
   then 23 ITERATION DIVERGE and MESSAGE 79 "SOLVER IMPLICIT STOPPED DUE TO
   TIMESTEP LIMIT" — ERROR TERMINATION at cycle 9;
-- `implicit/basic-examples/springback-i/doorbeam.k` (the only roster carrier,
-  1 deck key on 1 emitted model; base-paired by the campaign rule, the last
-  row of a printed time): with the stub 39 cycles, END +582.00 %, RMS 393.31 %
-  of the LS peak over the 25 LS blocks in (0, 0.0011]; without it 33 cycles,
-  END +689.08 % (worse), RMS 313.05 % (better) — MIXED, both arms 5-13× LS from
-  the first fifth (that deviation is the deck's own).
+- `implicit/basic-examples/springback-i/doorbeam.k` with its punch driven
+  (round 9, A1; the TYPE25 bytes of `--no-implicit-n2s-type7`): with the stub
+  35 cycles, END +53.91 %, RMS 81.05 % of the LS peak over the 25 LS times in
+  (1e-5, 1.1e-3]; without it a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 %
+  of t_end) behind 'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the
+  punch stopped at 81.51 of 135 mm (RMS 224.17 % over the 13 LS times in
+  (1e-5, 5.40779e-4] - a shorter window). Round 8's doorbeam pair (END
+  +582.00 → +689.08 %) was measured while the prescribed motion drove the
+  CNRB that shares PID 4 with the punch, so the punch never moved.
 
-A real fix routes an implicit deck's node-to-surface contacts to a TYPE7 whose
-gap and Fpenmax hold the load; the solver-physics validator's two hand-built
-constant-gap TYPE7 controls on the coupon (nt 4) did not (the block passed
-through at Gapmin 0.01, and the nodes were released at Gapmin 0.05) — ROADMAP
-round-7 item 7 stays open.
+Round 9 is the real fix (A2): an implicit `*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE`
+is written as a one-way `/INTER/TYPE7` with the starter's default gap and the
+stub kept beside it (`--implicit-n2s-type7`, see the keyword row); ROADMAP
+round-7 item 7 is closed.
 
 ### `--shell-in-solid-coupling` — the embedded shells as an /INTER/TYPE18 penalty coupling
 

@@ -1010,18 +1010,24 @@ def convert(
         implicit deck whose only contacts take the TYPE25 route, wherever
         a TYPE25 contact is actually WRITTEN (round 8, B6; opt-in since
         the round's validation inverted the default). By default the
-        stub stays there, the 4f5b6e8 deck: OpenRadioss builds implicit
-        contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847)
-        and a TYPE25 acts through the residual alone (intfop2.F:595), so
-        the stub is the deck's only implicit contact stiffness. MEASURED
-        (nt 4 = nt 2): on a two-block coupon whose TYPE25 contact must
-        carry load the skip turns NORMAL in 11 cycles into ERROR
-        TERMINATION at cycle 9 (23 ITERATION DIVERGE, then MESSAGE 79);
-        on implicit/basic-examples/springback-i/doorbeam.k it moves the
-        END +582.00 -> +689.08 % (worse) and the RMS 393.31 -> 313.05 %
-        of the LS peak (better) - MIXED. Reach 1 deck key on 1 emitted
-        model. When the writer drops every TYPE25 the stub is written
-        after all. Default False.
+        stub stays there, the 4f5b6e8 deck: OpenRadioss builds no
+        implicit contact stiffness for a TYPE25 (imp_int_k.F:111-200 has
+        no TYPE25 branch; ind_glob_k.F:4601-4605 prints MESSAGE 232; its
+        force still enters the residual, intfop2.F:595), so beside a
+        TYPE25 the stub is the deck's only implicit contact stiffness and
+        without it the run can stop early OR end NORMAL with the load
+        path lost. MEASURED (nt 4 = nt 2): on a two-block coupon whose
+        TYPE25 contact must carry load the skip turns NORMAL in 11 cycles
+        into ERROR TERMINATION at cycle 9 (23 ITERATION DIVERGE, then
+        MESSAGE 79); on implicit/basic-examples/springback-i/doorbeam.k
+        with its punch driven (round 9, A1) the run without the stub ends
+        a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end), the
+        punch stopped at 81.51 of 135 mm. Since round 9 an implicit
+        *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE is a routed /INTER/TYPE7
+        (implicit_n2s_type7), so the flag reaches the ERODING spellings
+        and an N2S spelling only under implicit_n2s_type7=False. When the
+        writer drops every TYPE25 the stub is written after all. Default
+        False.
     shell_in_solid_coupling : bool
         Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty
         coupling (R14 triage round 8, B10): /SURF/PART/EXT over the

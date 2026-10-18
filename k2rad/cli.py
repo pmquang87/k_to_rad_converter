@@ -828,18 +828,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-implicit-stub-with-type25",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Leave out the inert all-parts implicit contact stub on an "
-             "implicit deck whose only contacts take the TYPE25 route "
-             "(*CONTACT_NODES_TO_SURFACE, *CONTACT_ERODING_*), wherever a "
-             "TYPE25 contact is actually written. OFF by default: the stub "
-             "stays, because it is the deck's only implicit contact stiffness "
-             "(imp_int_k.F:847: TYPE 7 / 10 / 11 only; a TYPE25 acts through "
-             "the residual). MEASURED (nt 4 = nt 2): on a two-block coupon "
-             "whose TYPE25 contact must carry load, skipping it turns NORMAL in "
-             "11 cycles into ERROR TERMINATION at cycle 9 (23 ITERATION "
-             "DIVERGE, then MESSAGE 79); on doorbeam it moves the END +582.00 "
-             "-> +689.08 %% (worse) and the RMS 393.31 -> 313.05 %% of the LS "
-             "peak (better) - MIXED, both 5-13x LS.",
+        help="Opt-in: leave out the inert all-parts implicit contact stub on "
+             "an implicit deck whose only contacts are written as "
+             "/INTER/TYPE25 (the ERODING spellings; an N2S spelling only under "
+             "--no-implicit-n2s-type7). OFF by default: the stub is then the "
+             "deck's only implicit contact stiffness (MESSAGE 232: no "
+             "implicit TYPE25 stiffness, imp_int_k.F:111-200, "
+             "ind_glob_k.F:4601-4605); without it the run can stop early OR "
+             "end NORMAL with the load path lost. MEASURED (nt 4 = nt 2): a "
+             "two-block coupon NORMAL in 11 cycles with it, ERROR TERMINATION "
+             "at cycle 9 without; doorbeam (punch driven) ends a NORMAL banner "
+             "at 49.4 %% of t_end with the punch stopped.",
     )
     parser.add_argument(
         "--shell-in-solid-coupling",

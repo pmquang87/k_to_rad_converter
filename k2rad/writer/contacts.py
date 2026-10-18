@@ -4814,35 +4814,37 @@ def _make_type25_interfaces(state: ConversionState,
 # --skip-implicit-stub-with-type25 leaves it out where a TYPE25 is WRITTEN)
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: The measured tail every B6 sentence shares. Both carriers base-paired at
-#: nt 4 and nt 2 (every printed cycle row identical but the controlling-node
-#: label); doorbeam by the campaign rule (the last row of a printed time).
-#: The coupon is the solver-physics validator's b6t, re-run by the fix round:
-#: lower block 20 x 20 x 5 mm (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper
-#: block 10 x 10 x 5 mm 0.1 mm above it, its top face pushed down 0.3 mm over
-#: the run (IMFLAG 1, DT0 0.1, ENDTIM 1.0), the upper block's bottom nodes
-#: on the lower part through *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25.
+#: The measured tail every B6 sentence shares (round 9, A3: re-texted after
+#: A1 - round 8's doorbeam pair was measured while the prescribed motion
+#: drove the CNRB that shares PID 4 with the punch, so the punch never moved).
+#: Both carriers at nt 4 and nt 2 (identical to the printed digit). The
+#: coupon is the solver-physics validator's b6t: lower block 20 x 20 x 5 mm
+#: (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper block 10 x 10 x 5 mm 0.1
+#: mm above it, its top face pushed down 0.3 mm over the run (IMFLAG 1, DT0
+#: 0.1, ENDTIM 1.0), the upper block's bottom nodes on the lower part through
+#: *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25 (the TYPE25 arm needs
+#: --no-implicit-n2s-type7 since round 9). doorbeam: the A1 + TYPE25 bytes
+#: with the stub deleted (implement A's dB6 arm).
 _STUB_TYPE25_MEASURED = (
-    "OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11 "
-    "(imp_int_k.F:847) and a TYPE25 acts through the residual alone "
-    "(intfop2.F:595; the engine prints MESSAGE 232, 'INTERFACE TYPE 25 IS NOT "
-    "AVAILABLE WITH IMPLICIT SOLUTION'), so the stub is the deck's only "
-    "implicit contact stiffness - an all-parts self-contact LS-DYNA does not "
-    "have. MEASURED both arms, nt 4 = nt 2: on a two-block coupon whose only "
-    "contact is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a "
-    "third of the run, then carries the load) the run WITH the stub ends "
-    "NORMAL in 11 cycles; WITHOUT it the run converges until the TYPE25 "
-    "contact must carry load, then 23 ITERATION DIVERGE and MESSAGE 79 "
-    "'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' - ERROR TERMINATION at "
-    "cycle 9. On implicit/basic-examples/springback-i/doorbeam.k the result "
-    "is MIXED: with the stub 39 cycles, internal energy at the fifths of "
-    "t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % against "
-    "LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
-    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
-    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
-    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - the END is worse and the "
-    "RMS better, and both arms sit 5-13x LS from the first fifth (that "
-    "deviation is the deck's own).")
+    "OpenRadioss builds no implicit contact stiffness for a TYPE25 "
+    "(imp_int_k.F:111-200 has no TYPE25 branch; ind_glob_k.F:4601-4605 "
+    "prints MESSAGE 232 'INTERFACE TYPE 25 IS NOT AVAILABLE WITH IMPLICIT "
+    "SOLUTION'; its force still enters the residual, intfop2.F:595), so "
+    "beside a TYPE25-route contact the stub is the deck's only implicit "
+    "contact stiffness - an all-parts self-contact LS-DYNA does not have. "
+    "Without it the run can stop early OR end NORMAL with the load path "
+    "lost. MEASURED, nt 4 = nt 2: on a two-block coupon whose only contact "
+    "is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a third of "
+    "the run, then carries the load) the run with the stub ends NORMAL in 11 "
+    "cycles, without it 23 ITERATION DIVERGE and MESSAGE 79 - ERROR "
+    "TERMINATION at cycle 9; on implicit/basic-examples/springback-i/"
+    "doorbeam.k with its punch driven (round 9) the run without the stub "
+    "ends a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end) behind "
+    "'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the punch "
+    "stopped at 81.51 of 135 mm. Since round 9 an implicit "
+    "*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE takes the /INTER/TYPE7 route "
+    "instead (--implicit-n2s-type7), so this applies to the ERODING "
+    "spellings and to --no-implicit-n2s-type7.")
 #: The default arm (the stub KEPT; printed by __init__ right after the stub's
 #: own sentence).
 _STUB_TYPE25_KEPT_SENTENCE = (

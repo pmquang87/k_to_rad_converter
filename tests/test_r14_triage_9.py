@@ -14,6 +14,7 @@ named outcome is recorded in the test's docstring.
 """
 
 import hashlib
+import re
 import unittest
 
 import test_r14_triage_7 as _t7
@@ -690,6 +691,77 @@ class ImplicitN2sType7(unittest.TestCase):
         _inject_implicit_contact_stub(stt)
         self.assertEqual(stt.implicit_stub_deferred_for, [79])
         self.assertEqual(stt.contacts_single, [])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The round-9 part-A retractions: no shipped text carries a retracted
+# spelling (CHANGELOG, the history, is exempt)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Part-A statements round 9 measured wrong or superseded. CHANGELOG may quote
+#: them (the history); no other shipped text may.
+_RETRACTED_ROUND_9_A = (
+    # A3 (d): round 8's dT7 figures - measured while the prescribed motion
+    # drove the CNRB, so the deck contact carried 0.0 at every TH row
+    "304.95",
+    "601.76",
+    # A3 (b): only the crossing-search filter; the no-tangent facts are
+    # imp_int_k.F:111-200 + ind_glob_k.F:4601-4605 + intfop2.F:595
+    "imp_int_k.F:847",
+    # A3 (c): g2e's residual / tangent mechanism for the one-way
+    # pass-through, refuted at source (TTOFF identical; SINT7/2 earlier)
+    "residual stiffens",
+    "tangent uses a constant",
+)
+
+#: (relative path, a replacement that IS shipped there)
+_REPLACEMENTS_ROUND_9_A = (
+    ("k2rad/writer/contacts.py", "imp_int_k.F:111-200 has no TYPE25 branch; "
+     "ind_glob_k.F:4601-4605 prints MESSAGE 232"),
+    ("k2rad/cli.py", "can stop early OR end NORMAL with the load path lost"),
+    ("README.md", "`imp_int_k.F:111-200` has no TYPE25 branch"),
+    ("ROADMAP.md", "**Round 9:** CLOSED by A2 (implicit N2S -> one-way TYPE7 "
+     "+ the stub, friction-faithful"),
+)
+
+
+class Round9RetractedStatementsA(unittest.TestCase):
+    """No shipped text (README, ROADMAP, the GUI, every package module,
+    docs/*.md, tools/*.py; CHANGELOG exempt) carries a retracted part-A
+    spelling; the guard fires on each needle split across two adjacent
+    literals; a PREFIX still fires; the replacements ARE shipped."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_9_A:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        """The companion: each retracted spelling fed through the same
+        normalisation (split across two adjacent literals) is caught."""
+        for needle in _RETRACTED_ROUND_9_A:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_9_A:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle[:max(4, len(needle) // 2)]),
+                              _t7._collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_9_A:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
 
 
 if __name__ == "__main__":

@@ -2343,6 +2343,13 @@ that decided it and the deck that would decide it next.
    load is the real fix (two constant-gap TYPE7 controls did not: Gapmin 0.01
    let the block through, Gapmin 0.05 released the nodes) — round-9 input;
    doorbeam's own 5-13× is NOT list 13.
+   **Round 9:** CLOSED by A2 (implicit N2S -> one-way TYPE7 + the stub,
+   friction-faithful; `--implicit-n2s-type7`). The doorbeam figures above
+   were measured while the prescribed motion drove the CNRB that shares PID 4
+   with the punch (A1): the punch never moved. With the punch driven the
+   shipped A1 + A2 default ends IE END −15.85 .. −28.08 %, RMS 10.34 .. 15.25 %
+   (twelve runs at nt 4 and nt 2); the TYPE25 arm without the stub ends a
+   NORMAL banner at 49.4 % of t_end with the punch stopped.
 8. **The tetrahedron orthotropy frame as a per-element `/INIBRI/ORTHO`**
    (round-6 item 25; B3 ships the named warning): right on the 6-tetrahedron
    cube (−0.06 % against the shipped −40.88 .. +23.48 %), measured by one

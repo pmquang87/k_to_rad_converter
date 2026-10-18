@@ -3030,9 +3030,10 @@ def _stub_ids(starter: str):
 
 
 class ImplicitStubWithType25(unittest.TestCase):
-    """B6, as the validation round left it: OpenRadioss builds implicit
-    contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847; a TYPE25
-    acts through the residual, intfop2.F:595), so beside a TYPE25-route
+    """B6, as the validation round left it: OpenRadioss builds no implicit
+    contact stiffness for a TYPE25 (imp_int_k.F:111-200 has no TYPE25
+    branch; ind_glob_k.F:4601-4605 MESSAGE 232; its force still enters the
+    residual, intfop2.F:595), so beside a TYPE25-route
     contact the all-parts stub is the deck's only implicit contact
     stiffness. Round 8 first skipped it by default; the solver-physics
     validator's coupon b6t then turned NORMAL into ERROR TERMINATION without
@@ -3066,11 +3067,15 @@ class ImplicitStubWithType25(unittest.TestCase):
         kept = res.warnings[heads[0]]
         # printed right after the stub's own sentence it refers to
         self.assertIn(_B6_STUB_SENTENCE, res.warnings[heads[0] - 1])
-        for needle in ("[78]", "is KEPT", "imp_int_k.F:847",
+        # round 9, A3: the measured tail re-texted (A1: round 8's doorbeam
+        # pair drove the wrong body; imp_int_k.F:847 -> the three citations)
+        for needle in ("[78]", "is KEPT", "imp_int_k.F:111-200",
+                       "ind_glob_k.F:4601-4605",
                        "intfop2.F:595", "MESSAGE 232", "NORMAL in 11 cycles",
                        "23 ITERATION DIVERGE", "MESSAGE 79",
-                       "ERROR TERMINATION at cycle 9", "+582.00", "393.31",
-                       "+689.08", "313.05", "MIXED", _B6_FLAG,
+                       "ERROR TERMINATION at cycle 9",
+                       "can stop early OR end NORMAL", "49.4 % of t_end",
+                       "81.51 of 135 mm", "--no-implicit-n2s-type7", _B6_FLAG,
                        "/INTER/TYPE7 %d" % _stub_ids(starter)[0]):
             with self.subTest(needle=needle):
                 self.assertIn(needle, kept)
@@ -3085,7 +3090,7 @@ class ImplicitStubWithType25(unittest.TestCase):
         hits = [w for w in res.warnings if w.startswith(_B6_HEAD)]
         self.assertEqual(len(hits), 1, res.warnings)
         for needle in ("[78] written", _B6_FLAG + " left out",
-                       "ERROR TERMINATION at cycle 9", "MIXED",
+                       "ERROR TERMINATION at cycle 9", "49.4 % of t_end",
                        "Without the flag the stub is kept."):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
@@ -4459,10 +4464,12 @@ class Round8OptInWiringB(unittest.TestCase):
         "--shell-in-solid-coupling": "shell_in_solid_coupling",
     }
     _HELP_FIGURES = {
-        "--skip-implicit-stub-with-type25": ("+582.00 -> +689.08 %",
-                                             "393.31 -> 313.05 %",
-                                             "imp_int_k.F:847",
-                                             "ERROR TERMINATION at cycle 9"),
+        # round 9, A3: the help no longer carries round 8's wrong-body
+        # doorbeam pair (the punch never moved) nor imp_int_k.F:847
+        "--skip-implicit-stub-with-type25": ("MESSAGE 232",
+                                             "ind_glob_k.F:4601-4605",
+                                             "ERROR TERMINATION at cycle 9",
+                                             "49.4 %"),
         "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -28.26 %",
                                       "+1134.62 -> +42.28 %", "8.936x"),
     }

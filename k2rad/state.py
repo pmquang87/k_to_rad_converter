@@ -8154,13 +8154,16 @@ class ConvertOptions:
     # validation).
     #
     # OFF by default: the stub stays beside a TYPE25-route contact, byte for
-    # byte the 4f5b6e8 deck. imp_int_k.F:847 builds implicit contact
-    # stiffness for TYPE 7 / 10 / 11 only and a TYPE25 acts through the
-    # residual (intfop2.F:595), so the stub is the deck's only implicit
-    # contact stiffness: MEASURED (nt 4 = nt 2) on a two-block coupon whose
-    # TYPE25 contact must carry load, the skip turns NORMAL in 11 cycles
-    # into ERROR TERMINATION at cycle 9; on doorbeam it is MIXED (END
-    # +582.00 -> +689.08 %, RMS 393.31 -> 313.05 %). Under the flag
+    # byte the 4f5b6e8 deck. OpenRadioss builds no implicit contact
+    # stiffness for a TYPE25 (imp_int_k.F:111-200; ind_glob_k.F:4601-4605
+    # MESSAGE 232; the force still enters the residual, intfop2.F:595), so
+    # the stub is the deck's only implicit contact stiffness: MEASURED (nt
+    # 4 = nt 2) on a two-block coupon whose TYPE25 contact must carry load,
+    # the skip turns NORMAL in 11 cycles into ERROR TERMINATION at cycle 9;
+    # on doorbeam with its punch driven (round 9, A1) the skip ends a NORMAL
+    # banner at 49.4 % of t_end with the punch stopped. Since round 9 an
+    # implicit N2S spelling is a routed TYPE7 (--implicit-n2s-type7), so the
+    # flag reaches the ERODING spellings (and N2S under the opt-out). Under the flag
     # __init__._inject_implicit_contact_stub defers the decision to
     # writer/contacts._make_deferred_implicit_stub, which runs after the
     # TYPE25 writer.
