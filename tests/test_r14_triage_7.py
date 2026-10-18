@@ -1631,14 +1631,21 @@ class VdcRemedyNotAboutTheStub(unittest.TestCase):
         extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
                  "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
                  + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
-        stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
-                    for i, ln in enumerate(starter.splitlines())
-                    if ln == "auto_implicit_stabilization_self_contact"]
-        self.assertEqual(len(stub_ids), 1, starter)     # the stub IS there
-        self.assertIn("/INTER/TYPE25/78", starter)
-        self.assertFalse(_has(res.warnings, f"CONTACT {stub_ids[0]}: vdc=0"),
-                         res.warnings)
+        # round 9, A2: by default the implicit N2S contact is a one-way
+        # /INTER/TYPE7/78 (the stub kept beside it); the TYPE25 shape of
+        # this test lives on under --no-implicit-n2s-type7
+        for kw, inter in (({}, "/INTER/TYPE7/78"),
+                          ({"implicit_n2s_type7": False}, "/INTER/TYPE25/78")):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_shell_plate(_IMPL1, extra), **kw)
+                stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
+                            for i, ln in enumerate(starter.splitlines())
+                            if ln == "auto_implicit_stabilization_self_contact"]
+                self.assertEqual(len(stub_ids), 1, starter)  # the stub IS there
+                self.assertIn(inter, starter)
+                self.assertFalse(_has(res.warnings,
+                                      f"CONTACT {stub_ids[0]}: vdc=0"),
+                                 res.warnings)
 
 
 def _efg_deck(title: bool = False) -> str:

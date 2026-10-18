@@ -3204,8 +3204,10 @@ model): before, the driven punch never moved (node 1 DY 0 mm at every fifth of
 t_end; 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, = the LS
 nodout) and internal energy ended +582.00 % against LS-DYNA; with the part
 drive alone it ends +53.91 % (RMS 393.31 → 81.05 % of the LS peak over the 25
-LS times in (1e-5, 1.1e-3], nt 4 = nt 2). `solidof.k`, whose CNRB shares the
-id of a DEFORMABLE part, is byte-identical.
+LS times in (1e-5, 1.1e-3], nt 4 = nt 2), and the shipped default — with the
+implicit node-to-surface route below (`--implicit-n2s-type7`) — ends −15.85 ..
+−28.08 %, RMS 10.34 .. 15.25 % (twelve runs at nt 4 and nt 2). `solidof.k`,
+whose CNRB shares the id of a DEFORMABLE part, is byte-identical.
 
 `*CONSTRAINED_INTERPOLATION` / `_LOCAL` → `/RBE3` (id = `ICID`, `I_modif = 2` so
 Radioss may not modify the weights) plus one `/GRNOD/NODE` per set. `DNID` →
@@ -4501,6 +4503,31 @@ set or node set, so a real segment-set id resolves only by coincidence. The
 main (`MSID`) side always needs a part or a part set. A side that resolves to
 nothing drops the interface with a remedy naming what to point it at, rather
 than converting a contact with no load path.
+
+**On an IMPLICIT, non-modal deck these two spellings become a ONE-WAY
+`/INTER/TYPE7`** (round 9, A2; default ON, `--no-implicit-n2s-type7` keeps the
+`/INTER/TYPE25`). OpenRadioss builds no implicit contact stiffness for a TYPE25
+(`imp_int_k.F:111-200` has no TYPE25 branch; `ind_glob_k.F:4601-4605` prints
+MESSAGE 232 'INTERFACE TYPE 25 IS NOT AVAILABLE WITH IMPLICIT SOLUTION'; its
+force still enters the residual, `intfop2.F:595`), so the contact is written on
+the groups the TYPE25 route resolves (Slav = the `SSID` node group, Mast = the
+`MSID` surface) with k2rad's TYPE7 cells: `Istf 4`, `Igap 0` with the starter's
+default gap (no shell-offset / derived / auto gap; `SST` / `MST` dropped; an
+explicit `--inter-gapmin` is honoured and named), `Inacti` from `IGNORE`,
+`Fpenmax 0.999999`, `Stfac` from `SFS`, `Fric = FS × FSF`, `VisS` from `VDC`,
+`Tstart` / `Tstop` = `BT` / `DT`. The ERODING spellings, explicit and modal
+decks keep the TYPE25. The all-parts implicit stub stays beside the routed
+contact and carries its `FS` (it duplicates the routed pairs; two routed
+contacts with different `FS` leave it frictionless, named). MEASURED on
+`implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive (twelve
+runs of the same bytes at nt 4 and nt 2, 25 LS times in (1e-5, 1.1e-3]): IE END
+−15.85 .. −28.08 %, RMS 10.34 .. 15.25 % of the LS peak (−27.80 .. −28.08 % /
+15.21 .. 15.25 % in ten runs, a −15.85 % / 10.34 % branch in two), where the
+TYPE25 ended +53.91 % / 81.05 % and 35 against 39 cycles. **Check that the
+contact carries load**: on a two-block coupon whose four contact nodes sit on a
+coarse RIGID base the route ends NORMAL TERMINATION with the block through the
+base (gap −0.2218 mm at t 1.0) where the TYPE25 stops with MESSAGE 79; on a
+shell-secondary coupon it holds where the TYPE25 default stops (nt 4 = nt 2).
 `*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
 `fric_ID` binding work). LS-DYNA's
 `μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`

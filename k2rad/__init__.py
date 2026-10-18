@@ -25,7 +25,8 @@ from .writer.common import SHELL_FORMULATIONS
 from .writer import (build_starter, build_engines, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active,
-                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE)
+                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE,
+                     n2s_routed)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -95,7 +96,14 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # outside what OpenRadioss SPH supports, and every SPH deck in the
         # corpus is explicit.
         return
-    if state.contacts_type25 and state.options.skip_implicit_stub_with_type25:
+    # R14 triage round 9, A2 (--implicit-n2s-type7): an implicit
+    # *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE is written as a one-way
+    # /INTER/TYPE7 ("routed"); only the rest of the TYPE25-route records are
+    # written as /INTER/TYPE25 ("t25") - the B6 opt-in and its sentence key
+    # on those alone.
+    routed = [c for c in state.contacts_type25 if n2s_routed(state, c)]
+    t25 = [c for c in state.contacts_type25 if not n2s_routed(state, c)]
+    if t25 and state.options.skip_implicit_stub_with_type25:
         # R14 triage round 8, B6 (inverted by the round's validation): under
         # the opt-in the stub is left out only where a TYPE25-route contact
         # is actually WRITTEN, which the writer knows and this pass does not
@@ -104,17 +112,43 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # TYPE25 section), before any id is drawn here. Placed after every
         # other early return, so it fires exactly where a stub WOULD have
         # been injected.
-        state.implicit_stub_deferred_for = sorted(
-            c.inter_id for c in state.contacts_type25)
+        state.implicit_stub_deferred_for = sorted(c.inter_id for c in t25)
         return
-    inter_id = add_implicit_contact_stub(state)
-    if state.contacts_type25:
+    # round 9, A2 (coordinator decision: friction-faithful): beside a routed
+    # contact the stub duplicates its pairs, so it carries the routed FS x
+    # FSF when every routed record states the same scalar value
+    stub_fs = 0.0
+    scalars = [c.fs * c.fsf if c.fs >= 0.0 and c.fs != 2.0 else None
+               for c in routed]
+    if routed and len(set(scalars)) == 1 and scalars[0] is not None:
+        stub_fs = scalars[0]
+    inter_id = add_implicit_contact_stub(state, fs=stub_fs)
+    if t25:
         # The default since the round-8 validation round: the stub STAYS
         # beside a TYPE25-route contact (the 4f5b6e8 deck byte for byte);
         # the sentence names both measured arms and the opt-in.
         state.warn(_STUB_TYPE25_KEPT_SENTENCE.format(
-            ids=sorted(c.inter_id for c in state.contacts_type25),
-            stub=inter_id))
+            ids=sorted(c.inter_id for c in t25), stub=inter_id))
+    if routed and (len(set(scalars)) > 1 or scalars[0] is None):
+        shown = ", ".join("a table / sentinel" if v is None else f"{v:g}"
+                          for v in scalars)
+        state.warn(
+            "Implicit deck: the routed node-to-surface contacts "
+            f"{sorted(c.inter_id for c in routed)} state different (or no "
+            f"scalar) friction coefficients ({shown}); the all-parts implicit "
+            f"stub (/INTER/TYPE7 {inter_id}) beside them stays frictionless, "
+            "so on the pairs it duplicates it carries none of their friction.")
+    elif routed:
+        state.warn(
+            "Implicit deck: the all-parts implicit stub (/INTER/TYPE7 "
+            f"{inter_id}) is KEPT beside the routed contact(s) "
+            f"{sorted(c.inter_id for c in routed)} and carries their friction "
+            f"FS {stub_fs:g}: it duplicates their pairs (doorbeam: identical "
+            "normal impulses on both), so a frictionless stub would halve the "
+            "friction there; the same friction also acts on the stub's other "
+            "pairs. Without the stub the one-way route loses the load "
+            "silently on few-node contacts (4-node coupon: the block passes "
+            "through behind a NORMAL TERMINATION).")
 
 
 @dataclass
@@ -272,6 +306,7 @@ def convert(
     shell_in_solid_coupling: bool = False,
     imflag_curve_restart: bool = True,
     rigid_part_pid_precedence: bool = True,
+    implicit_n2s_type7: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1021,8 +1056,28 @@ def convert(
         moved before (DY 0 at every fifth of t_end; 32.30 / 65.32 / 95.32 /
         132.8 / 135.0 mm with the part drive) and IE ended +582.00 %; with
         the part drive alone +53.91 % (RMS 393.31 -> 81.05 % of the LS peak,
-        25 LS times in (1e-5, 1.1e-3], nt 4 = nt 2). Default True; False
+        25 LS times in (1e-5, 1.1e-3], nt 4 = nt 2), with the shipped
+        default (+ implicit_n2s_type7) -15.85 .. -28.08 %, RMS 10.34 ..
+        15.25 % (twelve runs at nt 4 and nt 2). Default True; False
         restores the 386444e bytes (the CNRB record wins).
+    implicit_n2s_type7 : bool
+        Write an implicit, non-modal *CONTACT_NODES_TO_SURFACE /
+        *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING spellings) as a
+        ONE-WAY /INTER/TYPE7 on the groups the TYPE25 route resolves (R14
+        triage round 9, A2): OpenRadioss builds no implicit contact stiffness
+        for a TYPE25 (imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE
+        232). k2rad's TYPE7 cells (Istf 4, Igap 0 with the starter's default
+        gap, Inacti from IGNORE, Fric = FS x FSF, Tstart / Tstop = BT / DT);
+        the all-parts implicit stub stays beside it with the contact's
+        friction. MEASURED on implicit/basic-examples/springback-i/doorbeam.k
+        (with the A1 part drive): IE END -15.85 .. -28.08 %, RMS 10.34 ..
+        15.25 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3],
+        twelve runs of the same bytes at nt 4 and nt 2 on two branches
+        (-27.80 .. -28.08 % / RMS 15.21 .. 15.25 % in ten), where the
+        TYPE25 ended +53.91 % / RMS 81.05 %.
+        On a coarse 4-node rigid-base coupon the route ends NORMAL with the
+        block through where the TYPE25 stops with MESSAGE 79. Default True;
+        False keeps the TYPE25 (the 386444e bytes).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1464,6 +1519,7 @@ def convert(
         shell_in_solid_coupling=shell_in_solid_coupling,
         imflag_curve_restart=imflag_curve_restart,
         rigid_part_pid_precedence=rigid_part_pid_precedence,
+        implicit_n2s_type7=implicit_n2s_type7,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

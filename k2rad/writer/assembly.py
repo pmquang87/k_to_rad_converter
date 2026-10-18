@@ -1651,11 +1651,14 @@ def _merge_cnrb_records(state: ConversionState, rbody_info: Dict,
             "record replaced the part's: on "
             "implicit/basic-examples/springback-i/doorbeam.k the driven punch "
             "never moved (DY 0 at every fifth of t_end against LS-DYNA's 135 "
-            "mm) and internal energy ended +582.00 % against LS-DYNA; with "
-            "the part drive alone it ends +53.91 % (RMS 393.31 -> 81.05 % of "
-            "the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 = nt "
-            "2). --no-rigid-part-pid-precedence restores the CNRB "
-            "precedence.")
+            "mm) and internal energy ended +582.00 % against LS-DYNA (RMS "
+            "393.31 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3]); "
+            "the part drive alone brings it to +53.91 % (RMS 81.05 %, nt 4 = "
+            "nt 2) and the shipped default - with the implicit "
+            "node-to-surface route of --implicit-n2s-type7 - to -15.85 .. "
+            "-28.08 % (RMS 10.34 .. 15.25 %, twelve runs at nt 4 and nt 2), "
+            "the punch then following LS-DYNA's nodout at every fifth. "
+            "--no-rigid-part-pid-precedence restores the CNRB precedence.")
     return merged
 
 

@@ -3052,7 +3052,11 @@ class ImplicitStubWithType25(unittest.TestCase):
     and nt 2 but the controlling-node label."""
 
     def test_default_keeps_the_stub_and_names_both_arms(self):
-        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78))
+        # round 9, A2: the TYPE25 semantics of this test are pinned under
+        # --no-implicit-n2s-type7 (an implicit N2S is a routed TYPE7 by
+        # default - T9::ImplicitN2sType7 pins that arm)
+        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
+                                    implicit_n2s_type7=False)
         self.assertEqual(_sha(starter), _B6_DEFAULT_4F5B6E8_SHA)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertEqual(len(_stub_ids(starter)), 1, starter)
@@ -3073,7 +3077,8 @@ class ImplicitStubWithType25(unittest.TestCase):
 
     def test_opt_in_skips_the_stub_where_a_type25_is_written(self):
         res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
-                                    skip_implicit_stub_with_type25=True)
+                                    skip_implicit_stub_with_type25=True,
+                                    implicit_n2s_type7=False)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertNotIn(_STUB_TITLE, starter)
         self.assertFalse(_has(res.warnings, _B6_STUB_SENTENCE))
@@ -3143,7 +3148,8 @@ class ImplicitStubWithType25(unittest.TestCase):
                  + _row(99, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row()
                  + "\n")
         deck = _shell_plate(_IMPL1, extra)
-        res, starter, _e = _convert(deck, skip_implicit_stub_with_type25=True)
+        res, starter, _e = _convert(deck, skip_implicit_stub_with_type25=True,
+                                    implicit_n2s_type7=False)
         inters = [ln for ln in starter.splitlines()
                   if ln.startswith("/INTER/")]
         self.assertEqual(len(inters), 1, inters)
@@ -3156,7 +3162,7 @@ class ImplicitStubWithType25(unittest.TestCase):
                              "written after all",
                              "/INTER/TYPE7 %d" % stub[0]), res.warnings)
         self.assertFalse(_has(res.warnings, _B6_FLAG + " left out"), res.warnings)
-        r0, s0, _e0 = _convert(deck)
+        r0, s0, _e0 = _convert(deck, implicit_n2s_type7=False)
         self.assertEqual(len(_stub_ids(s0)), 1, s0)
         self.assertTrue(_has(r0.warnings, _B6_HEAD, "is KEPT"))
 
@@ -3166,12 +3172,14 @@ class ImplicitStubWithType25(unittest.TestCase):
         from k2rad import _inject_implicit_contact_stub
         st = _dispatch(_shell_plate(_IMPL1, _N2S_78))
         st.options.skip_implicit_stub_with_type25 = True
+        st.options.implicit_n2s_type7 = False        # round 9, A2
         before = st._auto_id
         _inject_implicit_contact_stub(st)
         self.assertEqual(st._auto_id, before)
         self.assertEqual(st.implicit_stub_deferred_for, [78])
         self.assertEqual(st.contacts_single, [])
         st0 = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+        st0.options.implicit_n2s_type7 = False
         _inject_implicit_contact_stub(st0)
         self.assertEqual(st0.implicit_stub_deferred_for, [])
         self.assertEqual([c.title for c in st0.contacts_single],
@@ -3181,12 +3189,13 @@ class ImplicitStubWithType25(unittest.TestCase):
         """The coupon of the class docstring: the default is the 4f5b6e8
         deck byte for byte (the stub /INTER/TYPE7 beside /INTER/TYPE25);
         the opt-in writes the TYPE25 alone."""
-        res, starter, _e = _convert(_B6T_DECK)
+        res, starter, _e = _convert(_B6T_DECK, implicit_n2s_type7=False)
         self.assertEqual(_sha(starter), _B6T_DEFAULT_4F5B6E8_SHA)
         self.assertEqual(len(_stub_ids(starter)), 1, starter)
         self.assertEqual(sum(ln.startswith("/INTER/TYPE25/")
                              for ln in starter.splitlines()), 1)
-        r1, s1, _e1 = _convert(_B6T_DECK, skip_implicit_stub_with_type25=True)
+        r1, s1, _e1 = _convert(_B6T_DECK, skip_implicit_stub_with_type25=True,
+                               implicit_n2s_type7=False)
         self.assertEqual(_sha(s1), _B6T_SKIP_SHA)
         self.assertEqual(_stub_ids(s1), [])
         self.assertEqual([ln for ln in s1.splitlines()

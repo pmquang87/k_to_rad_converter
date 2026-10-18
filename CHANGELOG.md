@@ -43,7 +43,48 @@ Prior history (before this changelog was introduced) is summarized in the
     moves instead; a `_LOCAL` drive on the same clash does not start at all
     under the opt-out (starter ERROR 3121: the triad nodes in two `/RBODY`).
     Movers 1 key / 1 model (doorbeam); `solidof.k` (a CNRB on a DEFORMABLE
-    part's id) byte-identical.
+    part's id) byte-identical. The shipped doorbeam default is A1 + A2 (the
+    band in the next entry).
+  - **Implicit `*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE` -> a one-way
+    `/INTER/TYPE7`, the implicit stub kept and friction-faithful** (A2;
+    round-7 item 7's real fix; default ON, `--no-implicit-n2s-type7` keeps the
+    `/INTER/TYPE25`). OpenRadioss builds no implicit contact stiffness for a
+    TYPE25 (`imp_int_k.F:111-200` has no TYPE25 branch;
+    `ind_glob_k.F:4601-4605` prints MESSAGE 232; its force still enters the
+    residual, `intfop2.F:595`), so on an implicit, non-modal deck these two
+    spellings (any `_ID` / `_TITLE` / `_MPP`; never an ERODING one) are
+    written by `writer/contacts._emit_routed_n2s_type7` on the groups the
+    TYPE25 route resolved, with k2rad's TYPE7 cells (Istf 4, Igap 0 and the
+    starter's default gap, Inacti from IGNORE, Fpenmax 0.999999, Stfac from
+    SFS, Fric = FS x FSF, VisS from VDC, Tstart / Tstop = BT / DT - the
+    single TYPE7 emitter gained the two cells, 0 = today's bytes). The
+    record stays in `state.contacts_type25`, so the all-parts implicit stub
+    is KEPT by construction and carries the routed FS (coordinator decision:
+    friction-faithful; two routed contacts with different FS leave it
+    frictionless, named); the B6 opt-in and its sentence key on the
+    remaining TYPE25 records; `SST` / `MST` are dropped and `--derived-gapmin`
+    / `--auto-gapmin` never reach the route (an explicit `--inter-gapmin` is
+    honoured and named). doorbeam's bytes: `/INTER/TYPE25/90001` ->
+    `/INTER/TYPE7/90001` on the same groups and the stub's Fric 0 -> 0.2.
+    MEASURED on the branch bytes (sha256 `2926b1300fb6...`, twelve runs of
+    the same bytes at nt 4 and nt 2 - this agent's six and the part-A
+    spec's six; 25 LS times in (1e-5, 1.1e-3], README 9.1): IE END -15.85 ..
+    -28.08 %, RMS 10.34 .. 15.25 % (-27.80 .. -28.08 % / 15.21 .. 15.25 % in
+    ten runs, a -15.85 % / 10.34 % branch in two at nt 2), fifths +110.19 /
+    +42.15 / -5.28 .. -5.29 / -28.13 .. -28.24 % on the upper branch, 35
+    cycles (0.897x the 39 of the `386444e` base in the same window), the
+    punch node 1 DY = the LS nodout at every fifth; the `386444e` base
+    +582.00 % / RMS 393.31 %, its punch never moving. Coupons (nt 4 = nt 2
+    to the printed digit): b6t (elastic base) NORMAL in 11 cycles on both
+    arms, the TYPE25 carrying 0 N at every row; b6s (a shell-skin secondary,
+    NEW) NORMAL under the route where the TYPE25 ends ERROR TERMINATION (23
+    ITERATION DIVERGE, MESSAGE 79) and where the route with the shell-offset
+    gap 0.05 = t/2 dies too (why the default gap stays); b6r (a coarse RIGID
+    base) ends NORMAL with the block THROUGH the base (gap -0.2218 mm at t
+    1.0, both contacts 0 N) where the TYPE25 stops loudly - named in the
+    warning. Movers 1 key / 1 model (doorbeam); guards: the 12 implicit decks
+    that already emit a non-stub TYPE7 and the 53 / 37 stub decks keep
+    their interface cards.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

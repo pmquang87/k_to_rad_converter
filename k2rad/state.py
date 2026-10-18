@@ -8191,9 +8191,29 @@ class ConvertOptions:
     # 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, LS-DYNA's
     # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
     # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
-    # nt 2, 39 -> 35 cycles). solidof (a deformable-part clash) is byte
-    # identical.
+    # nt 2, 39 -> 35 cycles); the shipped default with --implicit-n2s-type7
+    # -15.85 .. -28.08 %, RMS 10.34 .. 15.25 % (twelve runs at nt 4 and nt
+    # 2). solidof (a deformable-part clash) is byte identical.
     rigid_part_pid_precedence: bool = True
+    # --no-implicit-n2s-type7: an implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE
+    # stays an /INTER/TYPE25 (the 386444e bytes).
+    #
+    # ON by default (R14 triage round 9, A2; round-7 item 7's real fix):
+    # OpenRadioss builds no implicit contact stiffness for a TYPE25
+    # (imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232; the force
+    # still enters the residual, intfop2.F:595), so
+    # writer/contacts._make_type25_interfaces writes these two spellings on
+    # an implicit, non-modal deck as a ONE-WAY /INTER/TYPE7 on the groups the
+    # TYPE25 route resolves, with k2rad's TYPE7 cells and the starter's
+    # default gap; the record stays in state.contacts_type25 so the
+    # all-parts implicit stub is KEPT, carrying the routed FS (coordinator
+    # decision: friction-faithful). MEASURED on doorbeam with A1 (25 LS
+    # times in (1e-5, 1.1e-3]): IE END -15.85 .. -28.08 %, RMS 10.34 .. 15.25
+    # % (twelve runs at nt 4 and nt 2 on two branches, -27.80 .. -28.08 %
+    # in ten), against +53.91 % / 81.05 % on the
+    # TYPE25; a coarse 4-node rigid-base coupon ends NORMAL with the block
+    # through (named in the warning). Movers 1 key / 1 model (doorbeam).
+    implicit_n2s_type7: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -10373,6 +10393,12 @@ class ConversionState:
     implicit_stub_deferred_for: List[int] = field(default_factory=list)
     implicit_stub_skipped_for: List[int] = field(default_factory=list)
     type25_emitted_ids: Set[int] = field(default_factory=set)
+    # R14 triage round 9, A2 (--implicit-n2s-type7): the TYPE25-route ids
+    # writer/contacts._make_type25_interfaces wrote as a ONE-WAY
+    # /INTER/TYPE7 instead (an implicit, non-modal, non-ERODING
+    # *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE), recorded at the write line;
+    # never in type25_emitted_ids.
+    n2s_type7_ids: Set[int] = field(default_factory=set)
     # *DEFINE_FRICTION tables → /FRICTION, keyed by their (preserved) id and
     # kept in deck order so "exactly one table in the model" is decidable.
     define_frictions: Dict[int, DefineFriction] = field(default_factory=dict)

@@ -881,9 +881,28 @@ def build_parser() -> argparse.ArgumentParser:
              "punch never moved (DY 0 at every fifth; with the part drive "
              "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm, as LS-DYNA) and IE "
              "ended +582.00 %% (+53.91 %% with the part drive alone, RMS "
-             "393.31 -> 81.05 %%; the shipped band with --implicit-n2s-type7 "
-             "is in that flag). ON by default; --no-rigid-part-pid-precedence "
+             "393.31 -> 81.05 %%; the shipped default with "
+             "--implicit-n2s-type7 -15.85 .. -28.08 %%, RMS 10.34 .. 15.25 "
+             "%%). ON by default; --no-rigid-part-pid-precedence "
              "restores the 386444e bytes.",
+    )
+    parser.add_argument(
+        "--implicit-n2s-type7",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an implicit, non-modal deck write *CONTACT_NODES_TO_SURFACE "
+             "and *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING "
+             "spellings) as a ONE-WAY /INTER/TYPE7 on the same groups: "
+             "OpenRadioss builds no implicit TYPE25 stiffness "
+             "(imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232). The "
+             "all-parts implicit stub stays beside it and carries the "
+             "contact's friction. MEASURED on doorbeam (part-driven, A1): IE "
+             "END -15.85 .. -28.08 %%, RMS 10.34 .. 15.25 %% of the LS peak "
+             "(twelve runs, nt 4 and nt 2), where the TYPE25 ended +53.91 %% / "
+             "81.05 %%. On a coarse 4-node RIGID base the route can end "
+             "NORMAL with the block through (silent) where the TYPE25 stops "
+             "loudly. ON by default; --no-implicit-n2s-type7 keeps the "
+             "TYPE25.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1578,6 +1597,7 @@ def main(argv=None) -> int:
         shell_in_solid_coupling=args.shell_in_solid_coupling,
         imflag_curve_restart=args.imflag_curve_restart,
         rigid_part_pid_precedence=args.rigid_part_pid_precedence,
+        implicit_n2s_type7=args.implicit_n2s_type7,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

@@ -231,7 +231,9 @@ class RigidPartPidPrecedence(unittest.TestCase):
     def test_f_a_deformable_part_clash_never_moves(self):
         """A CNRB PID equal to a DEFORMABLE part's id (solidof's class) has
         no /RBODY record to collide with: both arms write the 386444e
-        bytes and neither prints a clash sentence."""
+        bytes and neither prints a clash sentence. STARTER RUN (nt 4,
+        rcv_r9i_implA_p_a1defo_n4, sha256 f2a3b65b3b82...): 0 ERROR / 1
+        WARNING (1084)."""
         r_on, st_on, _e = _convert(a1_probe_deformable_clash())
         r_off, st_off, _e = _convert(a1_probe_deformable_clash(),
                                      rigid_part_pid_precedence=False)
@@ -390,6 +392,304 @@ class RigidPartPidPrecedence(unittest.TestCase):
         self.assertFalse(_has(r_on.warnings, "would replace the part's"))
         self.assertTrue(_has(r_off.warnings, f"uses PID {mod.PART_A}, so its "
                              "record would replace the part's"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A2 — implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE -> a one-way
+#      /INTER/TYPE7, the implicit stub KEPT and friction-faithful
+# ═════════════════════════════════════════════════════════════════════════════
+
+_shell_plate = _t7._shell_plate
+_IMPL1 = _t7._IMPL1
+_STUB_TITLE = "auto_implicit_stabilization_self_contact"
+_W_A2 = "implicit deck -> ONE-WAY /INTER/TYPE7/"
+_W_A2_STUB = "is KEPT beside the routed contact(s)"
+_W_A2_MIX = "state different (or no scalar) friction coefficients"
+_W_A2_GAP = "--inter-gapmin 0.05 written on the routed /INTER/TYPE7/78"
+_MODAL = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+          "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n"
+          "*CONTROL_TERMINATION\n" + _row(0.01) + "\n")
+_EXPLICIT = "*CONTROL_TERMINATION\n" + _row(0.01) + "\n"
+
+
+def _n2s(kw: str = "*CONTACT_NODES_TO_SURFACE_ID", iid: int = 78,
+         card2=(0.1,), card3=(), mpp: bool = False, card4=None) -> str:
+    """One node-to-surface contact on the shell plate: the node set 5 (nodes
+    1-3) against part 1 (T8's _N2S_78 shape)."""
+    out = f"{kw}\n" + _row(iid) + "\n"
+    if mpp:
+        out += _row(0, 200, 0, 3, 2, 1.0005) + "\n"
+    out += _row(5, 1, 4, 3) + "\n" + _row(*card2) + "\n" + _row(*card3) + "\n"
+    if card4 is not None:
+        out += _row(*card4) + "\n"
+    return out
+
+
+_SET5 = "*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
+
+
+def a2_plain_implicit() -> str:
+    """(a): T8's _N2S_78 deck - an implicit plate, FS 0.1."""
+    return _shell_plate(_IMPL1, _SET5 + _n2s())
+
+
+def a2_explicit() -> str:
+    """(c): the same contact on an explicit deck."""
+    return _shell_plate(_EXPLICIT, _SET5 + _n2s())
+
+
+def a2_bt_dt() -> str:
+    """(j): FS 0.2, BT 0.001, DT 0.009 (card 2 cells 7 / 8)."""
+    return _shell_plate(_IMPL1, _SET5 + _n2s(
+        card2=(0.2, 0.0, 0.0, 0.0, 0.0, 0, 0.001, 0.009)))
+
+
+def _inter_block(starter: str, head: str):
+    """The data lines of the /INTER block whose header is *head*."""
+    for h, body in _blocks(starter, head):
+        if h == head:
+            return body
+    return None
+
+
+def _type7_cells(starter: str, iid: int):
+    """``{Slav, Mast, Istf, Igap, Fpenmax, Stfac, Fric, Gapmin, Tstart,
+    Tstop, Inacti, VisS}`` of /INTER/TYPE7/<iid> (2022 layout)."""
+    b = _inter_block(starter, f"/INTER/TYPE7/{iid}")
+    if b is None:
+        return None
+    c1 = b[1].split()
+    row5 = b[4]
+    row6 = b[5]
+    return {"Slav": int(c1[0]), "Mast": int(c1[1]), "Istf": int(c1[2]),
+            "Igap": int(c1[4]), "Fpenmax": float(b[2][40:60]),
+            "Stfac": float(row5[0:20]), "Fric": float(row5[20:40]),
+            "Gapmin": float(row5[40:60]), "Tstart": float(row5[60:80]),
+            "Tstop": float(row5[80:100]), "Inacti": int(row6[10:40]),
+            "VisS": float(row6[40:60])}
+
+
+def _type25_groups(starter: str, iid: int):
+    """``(grnd_IDs, surf_ID2)`` of /INTER/TYPE25/<iid>."""
+    b = _inter_block(starter, f"/INTER/TYPE25/{iid}")
+    if b is None:
+        return None
+    return int(b[2].split()[0]), int(b[1].split()[1])
+
+
+def _stub_id(starter: str):
+    lines = starter.splitlines()
+    ids = [int(lines[i - 1].rsplit("/", 1)[1])
+           for i, ln in enumerate(lines) if ln == _STUB_TITLE]
+    return ids[0] if len(ids) == 1 else ids
+
+
+# the 386444e conversions (PR10) and the branch's default of the A2 probes
+_A2_PLAIN_386444E_SHA = "ec7e3d3fa5ca310d70c6045f96fd15ff97fc1457d03862f87b85f079ec305892"
+_A2_PLAIN_DEFAULT_SHA = "d4713df234697e6b54ddb8c447ec075c98a93965525af302ff19c16bd6561787"
+_A2_EXPLICIT_386444E_SHA = "a59634d1c0e64cd5c43be08ef26ce6c036d498110f5d89f7790860443befd647"
+
+
+class ImplicitN2sType7(unittest.TestCase):
+    """A2 (part-A spec A2.7): on an implicit, non-modal deck a
+    *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE becomes a one-way /INTER/TYPE7 on
+    the groups the TYPE25 route resolves; the all-parts stub is kept and
+    carries the routed FS.
+
+    STARTER RUNS (nt 4, C:/Users/pmqua/rcv_r9i_implA_<name>, harvested and
+    deleted): a2_plain_implicit() default (p_a2plain_n4, sha256
+    d4713df23469...), a2_explicit() (p_a2expl_n4, a59634d1c0e6... =
+    386444e) and a2_bt_dt() (p_a2btdt_n4, a6928afafbc8...): 0 ERROR / 1
+    WARNING (1084) each.
+
+    SOLVER PINS (branch bytes, the part-A spec's coupons; nt 4 AND nt 2):
+    The two-block coupons (the upper block 0.1 mm above a 2 x 2 x 1-hex
+    base, its top pushed 0.3 mm; IMFLAG 1, DT0 0.1, ENDTIM 1.0; gap101 =
+    (5.1 + DZ101) - (5.0 + mean DZ of nodes 10 / 11 / 13 / 14) at t 0.2 /
+    0.4 / 0.6 / 0.8 / 1.0; every arm nt 4 = nt 2 to the printed digit):
+    b6t (elastic base; T8's _B6T_DECK) default NORMAL 11 cycles, gap101
+    +0.0751 / +0.0580 / +0.0459 / +0.0371 / +0.0303 mm, at t 1.0 the base
+    reaction 6.985e5 N = the routed TYPE7 3.683e5 + the stub 3.323e5; the
+    opt-out NORMAL 11, gap101 +0.0675 .. +0.0190 mm, the TYPE25 0 N at
+    every row, MESSAGE 232. b6r (a RIGID base): default NORMAL 11 cycles
+    WITH THE BLOCK THROUGH (gap101 -0.1481 / -0.2218 mm at t 0.8 / 1.0,
+    both contacts 0 N at t 1.0 - the silent failure W-A2 names); the
+    opt-out stops loudly (23 ITERATION DIVERGE, MESSAGE 79, gap101 -0.1216
+    at t 0.8). b6s (the secondary a 0.1 mm SHELL skin on the upper block,
+    solid main): default NORMAL 11, gap101 +0.0753 .. +0.0298 mm; the
+    opt-out ERROR TERMINATION (23 DIVERGE, MESSAGE 79 / 232) and the
+    route with --inter-gapmin 90001=0.05 (= t/2) ERROR TERMINATION (24
+    DIVERGE, MESSAGE 79) - why the route keeps the starter's default gap
+    (D2). doorbeam (sha256 2926b1300fb6..., the A1 + A2 bytes): NORMAL 35
+    cycles in all six runs of this batch (nt 4 x3, nt 2 x3; the 386444e
+    base 39 cycles = 0.897x in the same window), IE END -28.0774 /
+    -27.9855 / -27.9855 % (nt 4) and -28.0774 / -28.0774 / -28.0314 % (nt
+    2), RMS 15.21 .. 15.25 % over the 25 LS times in (1e-5, 1.1e-3]; with
+    the part-A spec's six runs of the same bytes (two at nt 2 on a -15.85 %
+    / RMS 10.34 % branch) the shipped band is END -15.85 .. -28.08 %, RMS
+    10.34 .. 15.25 %; the punch node 1 DY = the LS nodout at every fifth
+    (32.3 / 65.32 / 95.32 / 132.8 / 135 mm).
+    """
+
+    def test_a_the_plain_spelling_is_a_one_way_TYPE7_beside_the_stub(self):
+        res, st, _e = _convert(a2_plain_implicit())
+        self.assertEqual(_sha(st), _A2_PLAIN_DEFAULT_SHA)
+        self.assertNotIn("/INTER/TYPE25/", st)
+        cells = _type7_cells(st, 78)
+        self.assertIsNotNone(cells, st)
+        self.assertEqual((cells["Istf"], cells["Igap"]), (4, 0))
+        self.assertEqual(cells["Fric"], 0.1)
+        self.assertEqual(cells["Gapmin"], 0.0)
+        self.assertEqual(cells["Fpenmax"], 0.999999)
+        self.assertEqual(cells["Inacti"], 5)
+        self.assertEqual(cells["Tstop"], 0.0)       # DT blank = never
+        stub = _stub_id(st)
+        self.assertEqual(_type7_cells(st, stub)["Fric"], 0.1)
+        self.assertTrue(_has(res.warnings, _W_A2 + "78", "MESSAGE 232",
+                             "imp_int_k.F:111-200", "ind_glob_k.F:4601-4605",
+                             "intfop2.F:595", "-15.85 .. -28.08 %",
+                             "10.34 .. 15.25 %", "gap -0.2218 mm",
+                             "--no-implicit-n2s-type7"))
+        self.assertTrue(_has(res.warnings, _W_A2_STUB, "[78]", "FS 0.1",
+                             f"/INTER/TYPE7 {stub}"))
+        self.assertFalse(_has(res.warnings,
+                              "Implicit deck with TYPE25-route contact(s)"))
+
+    def test_a2_the_routed_groups_are_the_TYPE25_routes(self):
+        """The TYPE7's Slav / Mast are the groups the TYPE25 route resolved
+        (grnd_IDs / surf_ID2 of the opt-out), with the same group blocks."""
+        _r, st, _e = _convert(a2_plain_implicit())
+        _r, st_off, _e = _convert(a2_plain_implicit(),
+                                  implicit_n2s_type7=False)
+        cells = _type7_cells(st, 78)
+        grnd, surf = _type25_groups(st_off, 78)
+        self.assertEqual((cells["Slav"], cells["Mast"]), (grnd, surf))
+        g_on, g_off = _grnod_by_id(st), _grnod_by_id(st_off)
+        self.assertEqual(g_on[grnd], g_off[grnd])
+
+    def test_b_the_AUTOMATIC_MPP_spelling_routes_the_same_way(self):
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s(
+            "*CONTACT_AUTOMATIC_NODES_TO_SURFACE_MPP_ID", mpp=True))
+        res, st, _e = _convert(deck)
+        self.assertNotIn("/INTER/TYPE25/", st)
+        cells = _type7_cells(st, 78)
+        self.assertEqual((cells["Istf"], cells["Igap"], cells["Fric"]),
+                         (4, 0, 0.1))
+        self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.1)
+
+    def test_c_an_explicit_deck_keeps_the_TYPE25_bytes(self):
+        res, st, _e = _convert(a2_explicit())
+        self.assertEqual(_sha(st), _A2_EXPLICIT_386444E_SHA)
+        self.assertIn("/INTER/TYPE25/78", st)
+        self.assertNotIn(_STUB_TITLE, st)
+        self.assertFalse(_has(res.warnings, _W_A2))
+
+    def test_d_an_implicit_ERODING_spelling_keeps_the_TYPE25(self):
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s(
+            "*CONTACT_ERODING_NODES_TO_SURFACE_ID", card4=(0, 1, 0)))
+        res, st, _e = _convert(deck)
+        self.assertIn("/INTER/TYPE25/78", st)
+        self.assertIsNone(_type7_cells(st, 78))
+        self.assertFalse(_has(res.warnings, _W_A2))
+        self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.0)
+
+    def test_e_a_modal_deck_keeps_the_TYPE25_and_no_stub(self):
+        res, st, _e = _convert(_shell_plate(_MODAL, _SET5 + _n2s()))
+        self.assertIn("/INTER/TYPE25/78", st)
+        self.assertNotIn(_STUB_TITLE, st)
+        self.assertFalse(_has(res.warnings, _W_A2))
+
+    def test_f_the_opt_out_restores_the_386444e_bytes_and_sentences(self):
+        res, st, _e = _convert(a2_plain_implicit(), implicit_n2s_type7=False)
+        self.assertEqual(_sha(st), _A2_PLAIN_386444E_SHA)
+        self.assertTrue(_has(res.warnings,
+                             "Implicit deck with TYPE25-route contact(s) [78]"))
+        self.assertFalse(_has(res.warnings, _W_A2))
+        self.assertFalse(_has(res.warnings, _W_A2_STUB))
+        self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.0)
+
+    def test_g_an_all_rigid_SSID_follows_the_TYPE25_routes_plan(self):
+        """The TYPE25 route's all-rigid-SSID plan (swap / keep) is run before
+        the route: the TYPE7 takes whatever groups the plan resolved."""
+        rigid = ("*PART\nrigid plate\n" + _row(2, 1, 2) + "\n"
+                 "*MAT_RIGID\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
+                 + _row(1.0, 7, 7) + "\n" + _row(0.0) + "\n"
+                 "*NODE\n"
+                 + "".join(f"{n:>8}{x:>16.1f}{y:>16.1f}{5.0:>16.1f}\n"
+                           for n, x, y in ((11, 0, 0), (12, 10, 0),
+                                           (13, 10, 10), (14, 0, 10)))
+                 + "*ELEMENT_SHELL\n"
+                 + "".join(f"{v:>8}" for v in (11, 2, 11, 12, 13, 14)) + "\n"
+                 "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
+                 + _row(2, 1, 3, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
+        res, st, _e = _convert(_shell_plate(_IMPL1, rigid))
+        r_off, st_off, _e = _convert(_shell_plate(_IMPL1, rigid),
+                                     implicit_n2s_type7=False)
+        cells = _type7_cells(st, 78)
+        groups = _type25_groups(st_off, 78)
+        if groups is None:
+            # the plan dropped the contact on both arms
+            self.assertIsNone(cells)
+        else:
+            self.assertEqual((cells["Slav"], cells["Mast"]), groups)
+        plan_on = [w for w in res.warnings if "all-rigid" in w.lower()
+                   or "ALL " in w and "rigid body" in w]
+        plan_off = [w for w in r_off.warnings if "all-rigid" in w.lower()
+                    or "ALL " in w and "rigid body" in w]
+        self.assertEqual(plan_on, plan_off)
+
+    def test_h_the_gap_rules_that_reach_the_route(self):
+        """D2: SST / MST dropped (the route keeps the starter's default gap);
+        an explicit --inter-gapmin is honoured and named; --derived-gapmin
+        never reaches the route."""
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s(card3=(0.0, 0.0, 0.5)))
+        res, st, _e = _convert(deck)
+        self.assertEqual(_type7_cells(st, 78)["Gapmin"], 0.0)
+        self.assertTrue(_has(res.warnings, "SST=0.5", "keeps the starter's "
+                             "default gap"))
+        self.assertFalse(_has(res.warnings, "SST=0.5", "Gap_scale"))
+        r2, st2, _e = _convert(a2_plain_implicit(), inter_gapmin={78: 0.05})
+        self.assertEqual(_type7_cells(st2, 78)["Gapmin"], 0.05)
+        self.assertTrue(_has(r2.warnings, _W_A2_GAP, "IE END -96.57 %"))
+        self.assertFalse(_has(r2.warnings, "--inter-gapmin 78=0.05: "))
+        r3, st3, _e = _convert(a2_plain_implicit(), derived_gapmin=True)
+        self.assertEqual(_type7_cells(st3, 78)["Gapmin"], 0.0)
+
+    def test_i_two_routed_contacts_disagreeing_on_FS_leave_the_stub_bare(self):
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s(card2=(0.2,))
+                            + _n2s(iid=79, card2=(0.3,)))
+        res, st, _e = _convert(deck)
+        self.assertEqual(_type7_cells(st, 78)["Fric"], 0.2)
+        self.assertEqual(_type7_cells(st, 79)["Fric"], 0.3)
+        self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.0)
+        self.assertTrue(_has(res.warnings, _W_A2_MIX, "[78, 79]", "0.2, 0.3"))
+        self.assertFalse(_has(res.warnings, _W_A2_STUB))
+
+    def test_j_BT_and_DT_reach_the_TYPE7_line(self):
+        res, st, _e = _convert(a2_bt_dt())
+        cells = _type7_cells(st, 78)
+        self.assertEqual((cells["Tstart"], cells["Tstop"]), (0.001, 0.009))
+        self.assertEqual(cells["Fric"], 0.2)
+        self.assertTrue(_has(res.warnings, _W_A2 + "78",
+                             "Tstart 0.001 / Tstop 0.009"))
+
+    def test_k_the_B6_opt_in_keys_on_the_TYPE25_records_only(self):
+        """A routed-only deck keeps its stub under the B6 opt-in (no B6
+        sentence); a routed N2S beside an ERODING TYPE25 defers on the
+        TYPE25 alone."""
+        res, st, _e = _convert(a2_plain_implicit(),
+                               skip_implicit_stub_with_type25=True)
+        self.assertIsInstance(_stub_id(st), int)
+        self.assertIsNotNone(_type7_cells(st, 78))
+        self.assertFalse(_has(res.warnings, "--skip-implicit-stub-with-type25"))
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s() + _n2s(
+            "*CONTACT_ERODING_NODES_TO_SURFACE_ID", iid=79, card4=(0, 1, 0)))
+        from k2rad import _inject_implicit_contact_stub
+        stt = _t7._dispatch(deck)
+        stt.options.skip_implicit_stub_with_type25 = True
+        _inject_implicit_contact_stub(stt)
+        self.assertEqual(stt.implicit_stub_deferred_for, [79])
+        self.assertEqual(stt.contacts_single, [])
 
 
 if __name__ == "__main__":

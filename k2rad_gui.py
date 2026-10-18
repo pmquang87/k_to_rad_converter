@@ -134,6 +134,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          shell_in_solid_coupling: bool = False,
                          imflag_curve_restart: bool = True,
                          rigid_part_pid_precedence: bool = True,
+                         implicit_n2s_type7: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -331,6 +332,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_part_pid_precedence"] = bool(rigid_part_pid_precedence)
 
+    kwargs["implicit_n2s_type7"] = bool(implicit_n2s_type7)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -489,6 +492,7 @@ class ConverterGUI:
         self.shell_in_solid_coupling = tk.BooleanVar(value=False)
         self.imflag_curve_restart = tk.BooleanVar(value=True)
         self.rigid_part_pid_precedence = tk.BooleanVar(value=True)
+        self.implicit_n2s_type7 = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1083,6 +1087,13 @@ class ConverterGUI:
             variable=self.rigid_part_pid_precedence).grid(
                 row=63, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Implicit node-to-surface contacts as one-way "
+                     "/INTER/TYPE7 (stub kept, with their friction) - ON. "
+                     "doorbeam IE END -16 .. -28 %",
+            variable=self.implicit_n2s_type7).grid(
+                row=64, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1361,6 +1372,7 @@ class ConverterGUI:
                 shell_in_solid_coupling=self.shell_in_solid_coupling.get(),
                 imflag_curve_restart=self.imflag_curve_restart.get(),
                 rigid_part_pid_precedence=self.rigid_part_pid_precedence.get(),
+                implicit_n2s_type7=self.implicit_n2s_type7.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1601,6 +1613,9 @@ class ConverterGUI:
         if not kwargs.get("rigid_part_pid_precedence", True):
             bits.append("CNRB PID clash drives the CNRB "
                         "(--no-rigid-part-pid-precedence)")
+        if not kwargs.get("implicit_n2s_type7", True):
+            bits.append("implicit N2S contacts stay /INTER/TYPE25 "
+                        "(--no-implicit-n2s-type7)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")
