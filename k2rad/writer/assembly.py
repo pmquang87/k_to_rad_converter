@@ -37,6 +37,7 @@ from .materials import (
 from .muscle import _make_muscle_springs
 from .axisym2d import (resolve_axisym_plan, transform_engine_lines,
                        transform_starter_lines)
+from .loadcurves import make_offscale_functs
 from .thermal import (_make_thermal, _resolve_thermal,
                       _resolve_weld_trajectories, _thermal_solve_active,
                       _weld_anim_dt)
@@ -3442,6 +3443,9 @@ def _starter_section_registry():
         ("constrained_linear_mpcs",
                               lambda c: _make_constrained_linear_mpcs(
                                   c.state, c.rbody_info, c.rigid_nodes)),
+        # round 9, B5: the zero-off-scale copies of applied-load curves,
+        # AFTER every consumer has drawn its copy id (writer/loadcurves.py)
+        ("offscale_functs",   lambda c: make_offscale_functs(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),

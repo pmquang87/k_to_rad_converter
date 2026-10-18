@@ -146,6 +146,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          weld_trajectory_impflux: bool = True,
                          axisymmetric_2d: bool = True,
                          positive_dt2ms_mass_scaling: bool = True,
+                         plane_stress_unit_thickness: bool = True,
+                         load_curve_offscale_zero: bool = True,
                          weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -370,6 +372,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["axisymmetric_2d"] = bool(axisymmetric_2d)
 
     kwargs["positive_dt2ms_mass_scaling"] = bool(positive_dt2ms_mass_scaling)
+
+    kwargs["plane_stress_unit_thickness"] = bool(plane_stress_unit_thickness)
+
+    kwargs["load_curve_offscale_zero"] = bool(load_curve_offscale_zero)
     # round 9, B1: the window entry - blank = the measured 0.25 s; anything
     # else must be a positive, finite number of seconds.
     wtext = (weld_trajectory_window_text or "").strip()
@@ -554,6 +560,8 @@ class ConverterGUI:
         self.weld_trajectory_impflux = tk.BooleanVar(value=True)
         self.axisymmetric_2d = tk.BooleanVar(value=True)
         self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
+        self.plane_stress_unit_thickness = tk.BooleanVar(value=True)
+        self.load_curve_offscale_zero = tk.BooleanVar(value=True)
         self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -1235,6 +1243,18 @@ class ConverterGUI:
             variable=self.positive_dt2ms_mass_scaling).grid(
                 row=75, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="ELFORM 12 (plane stress) stating no thickness -> Thick 1.0 - "
+                     "ON. main_fsi: starter 117 ERROR(S) -> 0",
+            variable=self.plane_stress_unit_thickness).grid(
+                row=76, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Applied-load curves zero off scale (LS *DEFINE_CURVE Remarks "
+                     "4a / 5) - ON. cup-draw: punch starts forward (IE MIXED)",
+            variable=self.load_curve_offscale_zero).grid(
+                row=77, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1526,6 +1546,8 @@ class ConverterGUI:
                 weld_trajectory_window_text=self.weld_trajectory_window.get(),
                 axisymmetric_2d=self.axisymmetric_2d.get(),
                 positive_dt2ms_mass_scaling=self.positive_dt2ms_mass_scaling.get(),
+                plane_stress_unit_thickness=self.plane_stress_unit_thickness.get(),
+                load_curve_offscale_zero=self.load_curve_offscale_zero.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1804,6 +1826,10 @@ class ConverterGUI:
             bits.append("axisymmetric ELFORM 14 / 15 kept as 3-D shells (--no-axisymmetric-2d)")
         if not kwargs.get("positive_dt2ms_mass_scaling", True):
             bits.append("positive DT2MS ignored on a routed 2-D deck (--no-positive-dt2ms-mass-scaling)")
+        if not kwargs.get("plane_stress_unit_thickness", True):
+            bits.append("an ELFORM 12 section stating no thickness kept at Thick 0 (--no-plane-stress-unit-thickness)")
+        if not kwargs.get("load_curve_offscale_zero", True):
+            bits.append("applied-load curves extrapolated off scale (--no-load-curve-offscale-zero)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

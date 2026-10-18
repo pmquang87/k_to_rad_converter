@@ -26,7 +26,7 @@ from .parser import (
     to_float, to_int,
 )
 from .state import (
-    PLANE_STRAIN_ELFORMS, TWO_D_SHELL_ELFORMS,
+    PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS, TWO_D_SHELL_ELFORMS,
     ConversionState,
     SET_ADD_FAMILIES,
     SET_RANGE_FAMILIES,
@@ -1931,6 +1931,16 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
             # round 8, A7: LS-DYNA ignores Card 2's thickness on a 2-D
             # plane-strain shell and integrates a UNIT depth (Vol I R17
             # *SECTION_SHELL Remark 6); the stated T1 stays in sec.card2
+            t1 = 1.0
+        elif (elform in PLANE_STRESS_ELFORMS
+              and state.options.plane_stress_unit_thickness
+              and t1 == 0.0 and all(v in (None, 0.0) for v in t_raw)):
+            # round 9, B3: a 2-D PLANE-STRESS shell that states NO thickness
+            # (T1..T4 all 0 / blank, decision B3-a) - LS-DYNA integrates a
+            # unit thickness there (main_fsi's rigid mass 0.23410459 = rho x
+            # area x 1.0 in its d3hsp), although Remark 6 does not list
+            # ELFORM 12; a stated T1 > 0 is a real thickness and is kept. The
+            # stated (0.0, ...) stays in sec.card2 for the writer's sentence.
             t1 = 1.0
         elif (elform not in TWO_D_SHELL_ELFORMS
               and state.options.section_nodal_thickness_mean
@@ -5027,8 +5037,11 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     # ids are unique across both keywords, so such a deck is malformed — but
     # the emitted CARD KIND must still match the points that survive.
     _clear_smooth_flag_on_redefinition(state, lcid, "*DEFINE_CURVE")
+    # DATTYP (card 1 field 7): round 9, B5 zeroes only a DATTYP-0 applied-load
+    # curve off its range (writer/loadcurves.py); the points are not touched
+    dattyp = to_int(f1[6]) if len(f1) > 6 and f1[6].strip() else 0
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts,
-                               sidr=sidr)
+                               sidr=sidr, dattyp=dattyp)
     state.curve_order.append(lcid)
 
 

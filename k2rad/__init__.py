@@ -320,6 +320,8 @@ def convert(
     weld_trajectory_window: float = 0.25,
     axisymmetric_2d: bool = True,
     positive_dt2ms_mass_scaling: bool = True,
+    plane_stress_unit_thickness: bool = True,
+    load_curve_offscale_zero: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1213,6 +1215,28 @@ def convert(
         on a 2-D deck. MEASURED on metal-forming (nt 4): a timeout -> NORMAL
         in 24 807 cycles, IE END -0.45 %, RMS 0.24 % of the LS peak (the KE
         is the scaled-mass KE). Default True.
+    plane_stress_unit_thickness : bool
+        Write a 2-D plane-stress *SECTION_SHELL (ELFORM 12) whose Card 2
+        states no thickness (T1..T4 all 0 / blank) with thickness 1.0 (R14
+        triage round 9, B3): LS-DYNA integrates a unit thickness there
+        (main_fsi's d3hsp: rigid mass 0.23410459 = rho 1.2 x area 0.19508716
+        x 1.0000008), although Remark 6 does not list ELFORM 12; a stated T1
+        > 0 is kept. MEASURED on main_fsi: starter 117 ERROR(S) -> 0, TOTAL
+        MASS 0.2341045880 = LS-DYNA (a status move: the body is fixed under a
+        skipped ICFD fluid). Default True.
+    load_curve_offscale_zero : bool
+        Point a MECHANICAL applied-load consumer (/IMPVEL, /IMPDISP, /IMPACC,
+        /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is zero off the
+        curve's abscissa range where OpenRadioss would extrapolate it nonzero
+        inside the consumer's window (R14 triage round 9, B5): LS-DYNA
+        *DEFINE_CURVE Remark 4a adds (0, 0) and (0.999 OFFA, 0) for DATTYP 0
+        with OFFA > 0, Remark 5 sets load curves to zero off scale, while
+        OpenRadioss extends the first / last segment (finter.F:235-273). The
+        deck's own curves are never changed (material, preload and thermal
+        consumers keep them). MEASURED: the aniso cup-draw's punch no longer
+        starts backward but the deck IE END goes +6.09 -> +13.10 % (MIXED);
+        thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 ->
+        +23.42 %. Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1668,6 +1692,8 @@ def convert(
         weld_trajectory_window=weld_trajectory_window,
         axisymmetric_2d=axisymmetric_2d,
         positive_dt2ms_mass_scaling=positive_dt2ms_mass_scaling,
+        plane_stress_unit_thickness=plane_stress_unit_thickness,
+        load_curve_offscale_zero=load_curve_offscale_zero,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

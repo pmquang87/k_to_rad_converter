@@ -1086,6 +1086,33 @@ def build_parser() -> argparse.ArgumentParser:
              "default; --no-positive-dt2ms-mass-scaling keeps the density.",
     )
     parser.add_argument(
+        "--plane-stress-unit-thickness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a 2-D plane-stress *SECTION_SHELL (ELFORM 12) that states "
+             "no thickness (T1..T4 = 0 / blank) with thickness 1.0: LS-DYNA "
+             "integrates a unit thickness there (main_fsi's rigid mass "
+             "0.23410459 = rho x area x 1.0); a stated T1 > 0 is kept. "
+             "MEASURED on main_fsi: starter 117 ERROR(S) -> 0, TOTAL MASS = "
+             "LS-DYNA. ON by default; --no-plane-stress-unit-thickness keeps "
+             "T1.",
+    )
+    parser.add_argument(
+        "--load-curve-offscale-zero",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Point a mechanical applied-load consumer (/IMPVEL, /IMPDISP, "
+             "/IMPACC, /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is "
+             "zero off the curve's abscissa range, as LS-DYNA's load curves are "
+             "(*DEFINE_CURVE Remarks 4a and 5); OpenRadioss would extend the "
+             "first / last segment. Material, preload and thermal curves are "
+             "never changed. MEASURED: the cup-draw punch no longer starts "
+             "backward but its IE END goes +6.09 -> +13.10 %% (MIXED); "
+             "thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> "
+             "+23.42 %%. ON by default; --no-load-curve-offscale-zero writes "
+             "the curves as stated.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1792,6 +1819,8 @@ def main(argv=None) -> int:
         weld_trajectory_window=args.weld_trajectory_window,
         axisymmetric_2d=args.axisymmetric_2d,
         positive_dt2ms_mass_scaling=args.positive_dt2ms_mass_scaling,
+        plane_stress_unit_thickness=args.plane_stress_unit_thickness,
+        load_curve_offscale_zero=args.load_curve_offscale_zero,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

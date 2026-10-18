@@ -3251,6 +3251,318 @@ _WA7B_R9 = "is a 2-D AXISYMMETRIC formulation"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B3 - *SECTION_SHELL ELFORM 12 stating no thickness -> Thick 1.0
+#      (default ON, --no-plane-stress-unit-thickness)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_W_B3 = ("ELFORM 12 (2-D plane stress) states no thickness (T1..T4 = 0 / "
+         "blank), so the /PROP/SHELL thickness is 1.0")
+#: the 386444e (pristine10) test-path digest of _t8._quad_deck(elform=12,
+#: t=(0.0, "", "", "")) - the opt-out must reproduce it
+_B3_T0_386444E_STARTER = (
+    "9e5e750ea88f4264f5956beca7cf91bbb5687839aee26998d47412295d18e83f")
+
+
+class PlaneStressUnitThickness(unittest.TestCase):
+    """B3 (R14 triage round 9): a 2-D plane-stress *SECTION_SHELL (ELFORM 12)
+    whose Card 2 states NO thickness is written with thickness 1.0 (LS-DYNA
+    integrates a unit thickness: main_fsi's rigid mass 0.23410459 = rho x
+    area x 1.0); a stated T1 > 0 is kept. STARTER (nt 4): the production
+    main_fsi _0000.rad reads 0 ERROR(S) / 1 WARNING (1084), TOTAL MASS
+    0.2341045880 (386444e: 117 ERROR(S)); the rigid probe below reads its
+    /RBODY mass 7.85e-7 = rho x 100 x 1.0."""
+
+    def test_1_no_thickness_gives_one(self):
+        for t in ((0.0, "", "", ""), (0.0, 0.0, 0.0, 0.0), ("", "", "", "")):
+            with self.subTest(card2=t):
+                res, st, _e = _convert(_t8._quad_deck(elform=12, t=t))
+                self.assertEqual(_t8._prop_thick(st), 1.0)
+                self.assertTrue(_has(res.warnings, _W_B3, "0.23410459",
+                                     "a stated T1 > 0 is kept",
+                                     "117 ERROR(S) -> 0"))
+
+    def test_2_a_stated_thickness_is_kept(self):
+        res, st, _e = _convert(_t8._quad_deck(elform=12,
+                                              t=(25.4, "", "", "")))
+        self.assertEqual(_t8._prop_thick(st), 25.4)
+        self.assertFalse(_has(res.warnings, _W_B3))
+
+    def test_3_a_partial_card_keeps_the_A4_reading(self):
+        """T1 0 with a nonzero T2 (decision B3-a): today's A4 mean
+        (0 + 2 + 0 + 0) / 4 = 0.5, not 1.0."""
+        res, st, _e = _convert(_t8._quad_deck(elform=12,
+                                              t=(0.0, 2.0, 0.0, 0.0)))
+        self.assertEqual(_t8._prop_thick(st), 0.5)
+        self.assertFalse(_has(res.warnings, _W_B3))
+
+    def test_4_the_opt_out_is_386444e(self):
+        res, st, _e = _convert(_t8._quad_deck(elform=12, t=(0.0, "", "", "")),
+                               plane_stress_unit_thickness=False)
+        self.assertEqual(_t8._prop_thick(st), 0.0)
+        self.assertEqual(_sha(st), _B3_T0_386444E_STARTER)
+        self.assertFalse(_has(res.warnings, _W_B3))
+
+    def test_5_other_elforms_are_not_this_rule(self):
+        _r, st2, _e = _convert(_t8._quad_deck(elform=2, t=(0.0, "", "", "")))
+        self.assertEqual(_t8._prop_thick(st2), 0.0)
+        r13, st13, _e = _convert(_t8._quad_deck(elform=13,
+                                                t=(0.0, "", "", "")))
+        self.assertEqual(_t8._prop_thick(st13), 1.0)     # A7, not B3
+        self.assertFalse(_has(r13.warnings, _W_B3))
+
+    def test_6_a_rigid_plane_stress_part(self):
+        res, st, _e = _convert(_t8._quad_deck(elform=12, t=(0.0, "", "", ""),
+                                              rigid=True))
+        self.assertEqual(_t8._prop_thick(st), 1.0)
+        self.assertTrue(re.search(r"^/RBODY/", st, re.M))
+        self.assertTrue(_has(res.warnings, _W_B3))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B5 - an applied-load /FUNCT is zero off scale at BOTH ends, written at
+#      emission (default ON, --no-load-curve-offscale-zero)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def b5_punch(var="base"):
+    """PUNCH-OFFA (round 9, B5; the part-B spec's probe, gen_b5.py): a rigid
+    punch (one 10 x 10 mm *MAT_RIGID shell, part 2, node 101 first) driven in
+    z by *BOUNDARY_PRESCRIBED_MOTION_RIGID (DOF 3, VAD 0, LCID 1, SF -20)
+    above a 2 x 2 x 1 elastic block (part 1, base held), no contact; curve 1
+    = the cup-draw's first points with OFFA 0.002 -> (0.002, 0) (0.0023,
+    1.644664) (0.0026, 3.287704) (0.0036, 3.287704); ENDTIM 0.004 (the curve
+    ends before it: an end side too). *var* names a forbidden class or a
+    control."""
+    sfa, offa, dattyp = 1.0, 0.002, 0
+    pts = [(0.0, 0.0), (0.0003, 1.644664), (0.0006, 3.287704),
+           (0.0016, 3.287704)]
+    if var in ("dattyp1", "offa_neg", "offa0", "sfa2", "matcurve",
+               "matonly"):
+        pts = [(0.0, 0.0), (0.0003, 1.644664), (0.0006, 3.287704),
+               (0.01, 3.287704)]
+    if var == "dattyp1":
+        dattyp = 1
+    if var == "offa_neg":
+        offa = -0.0001
+    if var == "offa0":
+        offa = 0.0
+    if var == "sfa2":
+        sfa = 2.0
+    if var == "covering":
+        offa = 0.0
+        pts = [(0.0, 0.0), (0.0003, 1.644664), (0.0006, 3.287704),
+               (0.01, 3.287704)]
+    if var == "endonly":
+        offa = 0.0
+        pts = [(0.0, 3.287704), (0.003, 3.287704)]
+    L = ["*KEYWORD", "*TITLE", "B5 PUNCH-OFFA probe (%s)" % var,
+         "*CONTROL_TERMINATION", _f10(0.004),
+         "*DATABASE_GLSTAT", _f10(1.0e-5), "*DATABASE_MATSUM", _f10(1.0e-5),
+         "*DATABASE_NODOUT", _f10(1.0e-5),
+         "*DATABASE_HISTORY_NODE", _f10(101),
+         "*PART", "block", _f10(1, 1, 1), "*SECTION_SOLID", _f10(1, 1),
+         "*MAT_ELASTIC", _f10(1, 7.85e-9, 210000.0, 0.3),
+         "*PART", "punch", _f10(2, 2, 2), "*SECTION_SHELL", _f10(2, 2, 1.0, 2),
+         _f10(1.0, 1.0, 1.0, 1.0),
+         "*MAT_RIGID", _f10(2, 7.85e-9, 210000.0, 0.3), _f10(0.0, 0, 0),
+         _f10(0.0)]
+    if var in ("matcurve", "matonly"):
+        L += ["*PART", "plastic", _f10(3, 1, 3),
+              "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+              _f10(3, 7.85e-9, 210000.0, 0.3, 200.0, 0.0, 0.0, 0.0),
+              _f10(0.0, 0.0, 1, 0), _f10(0.0), _f10(0.0)]
+    L += ["*NODE"]
+    k = 1
+    for z in (0.0, 1.0):
+        for y in (0.0, 1.0, 2.0):
+            for x in (0.0, 1.0, 2.0):
+                L.append("%8d%16.8g%16.8g%16.8g" % (k, x, y, z))
+                k += 1
+    for p in [(101, -4.0, -4.0, 1.5), (102, 6.0, -4.0, 1.5),
+              (103, 6.0, 6.0, 1.5), (104, -4.0, 6.0, 1.5)]:
+        L.append("%8d%16.8g%16.8g%16.8g" % p)
+    if var in ("matcurve", "matonly"):
+        for p in [(201, 10.0, 0.0, 0.0), (202, 11.0, 0.0, 0.0),
+                  (203, 11.0, 1.0, 0.0), (204, 10.0, 1.0, 0.0),
+                  (205, 10.0, 0.0, 1.0), (206, 11.0, 0.0, 1.0),
+                  (207, 11.0, 1.0, 1.0), (208, 10.0, 1.0, 1.0)]:
+            L.append("%8d%16.8g%16.8g%16.8g" % p)
+    L += ["*ELEMENT_SOLID"]
+
+    def n(i, j, kk):
+        return 1 + kk * 9 + j * 3 + i
+    e = 1
+    for j in range(2):
+        for i in range(2):
+            c = [n(i, j, 0), n(i + 1, j, 0), n(i + 1, j + 1, 0),
+                 n(i, j + 1, 0), n(i, j, 1), n(i + 1, j, 1),
+                 n(i + 1, j + 1, 1), n(i, j + 1, 1)]
+            L.append("%8d%8d" % (e, 1) + "".join("%8d" % x for x in c))
+            e += 1
+    if var in ("matcurve", "matonly"):
+        L.append("%8d%8d" % (9, 3) + "".join("%8d" % x
+                                              for x in range(201, 209)))
+    L += ["*ELEMENT_SHELL", "%8d%8d%8d%8d%8d%8d" % (101, 2, 101, 102, 103,
+                                                     104)]
+    base = [n(i, j, 0) for j in range(3) for i in range(3)]
+    L += ["*SET_NODE_LIST", _f10(1)] + [_f10(*base[c:c + 8])
+                                        for c in range(0, len(base), 8)]
+    L += ["*BOUNDARY_SPC_SET", _f10(1, 0, 1, 1, 1, 1, 1, 1)]
+    birth = {"birth": 0.0005, "birth3": 0.003}.get(var, 0.0)
+    if var != "matonly":
+        L += ["*BOUNDARY_PRESCRIBED_MOTION_RIGID",
+              _f10(2, 3, 0, 1, -20.0, 0, 1.0e28, birth)]
+    L += ["*DEFINE_CURVE", _f10(1, 0, sfa, 1.0, offa, 0.0, dattyp)] + [
+        "%20.8g%20.8g" % p for p in pts]
+    L += ["*END", ""]
+    return "\n".join(L)
+
+
+_W_B5 = ("an applied-load curve is zero off its abscissa range in LS-DYNA "
+         "(Vol I R17 *DEFINE_CURVE Remark 5")
+#: the 386444e (pristine10) test-path digest of b5_punch() - the opt-out
+#: must reproduce it
+_B5_PUNCH_386444E_STARTER = (
+    "79b8e9c574c47bcf343f11aabe1c1580b13d7b22ee08b1f8686021a79b89baaa")
+
+
+def _funct_rows(starter: str, fid: int):
+    head = f"/FUNCT/{fid}"
+    lines = starter.splitlines()
+    i = lines.index(head)
+    out = []
+    for ln in lines[i + 2:]:
+        if ln.startswith("/"):
+            break
+        if not ln.startswith("#"):
+            out.append(ln)
+    return out
+
+
+class LoadCurveOffscaleZero(unittest.TestCase):
+    """B5 (R14 triage round 9): a mechanical applied-load consumer reads a
+    COPY of its curve with LS-DYNA's zero points (Remark 4a before the first
+    abscissa, Remark 5 after the last) where OpenRadioss would extrapolate it
+    nonzero inside the consumer's window; state.curves and every other
+    consumer keep the deck's curve. STARTER + ENGINE (nt 4,
+    C:/Users/pmqua/rcv_r9i_implB_b5P / _b5B, base-paired): the probe's punch
+    node 101 holds at DZ 0 until 2 ms and moves forward after; the opt-out
+    drives it backward first (+0.0959 mm at 0.5 ms)."""
+
+    def test_punch_probe_both_ends(self):
+        res, st, _e = _convert(b5_punch())
+        fid, pts = _funct_points(st, "FUNCT_1_offscale_zero")
+        self.assertEqual(pts, [(0.0, 0.0), (0.001998, 0.0), (0.002, 0.0),
+                               (0.0023, 1.644664), (0.0026, 3.287704),
+                               (0.0036, 3.287704), (0.00360036, 0.0),
+                               (0.008, 0.0)])
+        self.assertEqual(len([ln for ln in st.splitlines()
+                              if ln == "FUNCT_1_offscale_zero"]), 1)
+        imp = [b for h, b in _blocks(st, "/IMPVEL/")][0]
+        self.assertEqual(int(imp[1][:10]), fid)
+        _r0, st0, _e0 = _convert(b5_punch(), load_curve_offscale_zero=False)
+        self.assertEqual(_funct_rows(st, 1), _funct_rows(st0, 1))
+        self.assertTrue(_has(res.warnings, _W_B5, "/IMPVEL consumer(s)",
+                             "at both ends",
+                             f"/FUNCT/1 -> /FUNCT/{fid} ((0, 0) and "
+                             "(0.001998, 0) before 0.002; (0.00360036, 0) and "
+                             "(0.008, 0) after 0.0036)",
+                             "+6.09 -> +13.10 %", "MIXED",
+                             "KE END +91.96 -> +23.42 %"))
+        state = _t7._dispatch(b5_punch())
+        self.assertEqual(state.curves[1].pts,
+                         [(0.002, 0.0), (0.0023, 1.644664),
+                          (0.0026, 3.287704), (0.0036, 3.287704)])
+
+    def test_forbidden_classes_are_byte_identical(self):
+        for var in ("dattyp1", "offa_neg", "offa0", "sfa2", "covering"):
+            with self.subTest(probe=var):
+                deck = b5_punch(var)
+                res, st, _e = _convert(deck)
+                _r0, st0, _e0 = _convert(deck, load_curve_offscale_zero=False)
+                self.assertEqual(_sha(st), _sha(st0))
+                self.assertFalse(_has(res.warnings, _W_B5))
+        from k2rad.writer.loadcurves import load_funct_id
+        state = _t7._dispatch(b5_punch())
+        self.assertEqual(load_funct_id(state, 1, "IMPVEL", sensor_id=7), 1)
+        self.assertEqual(state.offscale_functs, {})
+        self.assertNotEqual(load_funct_id(state, 1, "IMPVEL"), 1)
+
+    def test_material_and_preload_consumers_keep_the_original(self):
+        # (a) a curve feeding ONLY a material: no consumer asks for a copy
+        _r, st, _e = _convert(b5_punch("matonly"))
+        _r0, st0, _e0 = _convert(b5_punch("matonly"),
+                                 load_curve_offscale_zero=False)
+        self.assertEqual(_sha(st), _sha(st0))
+        self.assertNotIn("FUNCT_1_offscale_zero", st)
+        # (c) the same curve feeding a load AND a material: the load reads
+        # the copy, the material keeps /FUNCT/1 as stated
+        res, stc, _e = _convert(b5_punch("matcurve"))
+        _r0, stc0, _e0 = _convert(b5_punch("matcurve"),
+                                  load_curve_offscale_zero=False)
+        fid, pts = _funct_points(stc, "FUNCT_1_offscale_zero")
+        self.assertEqual(pts[:2], [(0.0, 0.0), (0.001998, 0.0)])
+        self.assertEqual(_funct_rows(stc, 1), _funct_rows(stc0, 1))
+        imp = [b for h, b in _blocks(stc, "/IMPVEL/")][0]
+        self.assertEqual(int(imp[1][:10]), fid)
+        mat = [b for h, b in _blocks(stc, "/MAT/LAW36/3")]
+        self.assertTrue(mat)
+        self.assertNotIn(str(fid), "".join(mat[0]))
+
+    def test_end_side_only(self):
+        _r, st, _e = _convert(b5_punch("endonly"))
+        _fid, pts = _funct_points(st, "FUNCT_1_offscale_zero")
+        self.assertEqual(pts, [(0.0, 3.287704), (0.003, 3.287704),
+                               (0.0030003, 0.0), (0.008, 0.0)])
+
+    def test_birth_inside_the_lead_in(self):
+        _r, st, _e = _convert(b5_punch("birth"))
+        _fid, pts = _funct_points(st, "FUNCT_1_offscale_zero")
+        self.assertEqual(pts[:2], [(0.0, 0.0), (0.001998, 0.0)])
+        _r, st3, _e = _convert(b5_punch("birth3"))
+        _fid, pts3 = _funct_points(st3, "FUNCT_1_offscale_zero")
+        self.assertEqual(pts3[0], (0.002, 0.0))     # no start points
+        self.assertEqual(pts3[-2:], [(0.00360036, 0.0), (0.008, 0.0)])
+
+    def test_ascale_x_maps_the_window(self):
+        from k2rad.writer.loadcurves import load_funct_id
+        state = _t7._dispatch(b5_punch("endonly"))
+        state.curves[1].pts = [(0.0, 3.287704), (0.0025, 3.287704)]
+        # ENDTIM 0.004 with Ascale_x 2: x_b = 0.002 < 0.0025 -> no end side
+        self.assertEqual(load_funct_id(state, 1, "IMPVEL", ascale_x=2.0), 1)
+        # Ascale_x 1: x_b = 0.004 > 0.0025 -> the end side
+        self.assertNotEqual(load_funct_id(state, 1, "IMPVEL"), 1)
+
+    def test_the_curve_pins_are_untouched(self):
+        """The emission-side rule never edits state.curves (a parse-time
+        prepend would fail tests/test_converter.py's CurveOffsetScaleOrder,
+        tests/test_r14_triage_8.py:887-891 and
+        tests/test_preload_inistate.py:781-788): the probe's curve keeps
+        the handler's ((a + OFFA) SFA, (o + OFFO) SFO) points after a full
+        conversion."""
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(b5_punch())
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.state import ConversionState
+        from k2rad.writer.assembly import build_starter
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        before = list(state.curves[1].pts)
+        build_starter(state)
+        self.assertEqual(state.curves[1].pts, before)
+        self.assertEqual(len(state.offscale_functs), 1)
+        tmp.cleanup()
+
+    def test_opt_out_is_386444e(self):
+        res, st, _e = _convert(b5_punch(), load_curve_offscale_zero=False)
+        self.assertEqual(_sha(st), _B5_PUNCH_386444E_STARTER)
+        self.assertFalse(_has(res.warnings, _W_B5))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PART B - the round-9 part-B flags reach every wiring site
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -3266,6 +3578,8 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
         "--weld-trajectory-impflux": "weld_trajectory_impflux",
         "--axisymmetric-2d": "axisymmetric_2d",
         "--positive-dt2ms-mass-scaling": "positive_dt2ms_mass_scaling",
+        "--plane-stress-unit-thickness": "plane_stress_unit_thickness",
+        "--load-curve-offscale-zero": "load_curve_offscale_zero",
     }
     _HELP_FIGURES = {
         "--weld-trajectory-impflux": (
@@ -3277,6 +3591,13 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
         "--positive-dt2ms-mass-scaling": (
             "(DT2MS / dt0)^2", "never /DT/NODA/CST on a 2-D deck",
             "24 807 cycles", "IE END -0.45 %", "RMS 0.24 %"),
+        "--plane-stress-unit-thickness": (
+            "ELFORM 12", "0.23410459", "117 ERROR(S) -> 0",
+            "a stated T1 > 0 is kept"),
+        "--load-curve-offscale-zero": (
+            "Remarks 4a and 5", "+6.09 -> +13.10 % (MIXED)",
+            "+91.96 -> +23.42 %", "Material, preload and thermal curves are "
+            "never changed"),
     }
 
     def test_the_window_option_reaches_convert_and_the_gui(self):

@@ -118,6 +118,52 @@ Prior history (before this changelog was introduced) is summarized in the
     3-D case under `--no-axisymmetric-2d`, and
     `TwoDimensionalShellThickness.test_2` is split (ELFORM 44 named; 14 / 15
     named under the opt-out with its clause; 14 / 15 routed by default).
+  - **A 2-D plane-stress `*SECTION_SHELL` (ELFORM 12) that states no
+    thickness is written with thickness 1.0** (B3;
+    `--no-plane-stress-unit-thickness` restores the `386444e` bytes and
+    sentences). In `handlers.handle_section_shell` beside round 8's A7: only
+    when T1..T4 are ALL 0 / blank (decision B3-a; a T1 0 beside a nonzero
+    T2..T4 keeps the A4 mean, a stated T1 > 0 is kept). LS-DYNA integrates a
+    unit thickness there: `main_fsi.d3hsp:4420-4421` "mass of rigid body =
+    0.23410459E+00" = rho 1.2 x the part's shell area 0.1950871566 x
+    1.0000008, although Vol I R17 *SECTION_SHELL Remark 6 does not list
+    ELFORM 12. Measured on the branch bytes (nt 4,
+    `icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi`): starter 117
+    ERROR(S) (ERROR 495 x 116 + the rigid inertia) -> 0 ERROR(S) / 1 WARNING
+    (1084), TOTAL MASS 0.2341045879512 = LS-DYNA; engine NORMAL TERMINATION
+    at cycle 100 000 (100 001 cycles) to t 100.0 in 123.3 s (190.1-560.5 s in
+    the census windows: unpaired, the base cannot run) - a fixed rigid body
+    under a skipped ICFD fluid, so a status move and not a physics check;
+    the rigid ELFORM-12 probe's starter reads the /RBODY mass 0.7850000E-06 =
+    rho x 100 x 1.0. Movers 1 deck key / 1 emitted model (main_fsi; the other
+    emitted-Thick-0 decks are not ELFORM 12 and stay byte-identical).
+  - **A mechanical applied-load consumer reads its curve with LS-DYNA's zero
+    points off the abscissa range** (B5; `--no-load-curve-offscale-zero`
+    writes the curves as stated). `writer/loadcurves.load_funct_id`, called
+    at EMISSION by `/IMPVEL` / `/IMPDISP` / `/IMPACC` (rigid, node / set and
+    rigid-wall forms), `/CLOAD`, `/PLOAD` and `/GRAV` with each card's own
+    window: where OpenRadioss would extrapolate the curve NONZERO inside
+    `[max(0, Tstart), min(ENDTIM, Tstop)]` (`finter.F:235-273` extends the
+    first / last segment), the card names a COPY
+    `FUNCT_<lcid>_offscale_zero` with Remark 4a's (0, 0) and (0.999 OFFA, 0)
+    in front (DATTYP 0, OFFA > 0, SFA 1) and / or Remark 5's zero after the
+    last abscissa ((1.0001 X_N, 0) and (max(2 ENDTIM, 2 X_N), 0)), written in
+    a block after every consumer. `state.curves` is never modified (the
+    three curve pins and `preload.py`'s window stay green), the deck's own
+    `/FUNCT` stays for every other consumer, and material, preload and
+    thermal curves never change; excluded: DATTYP != 0, sensor-gated cards
+    (B5-b), `/FUNCT_SMOOTH` (B5-c). The census measurements (cG4, nt 4, the
+    copy's points written in place - the same function on [0, t_end]): the
+    aniso cup-draw's punch DZ at 2.1 ms +0.2187 -> -0.00055 mm (it started
+    BACKWARD at +219.29 mm/s), punch work at the fifths within 1.3-8 % of
+    LS-DYNA's bndout, but the deck IE END +6.09 -> +13.10 % and RMS 2.89 ->
+    5.57 % of the LS peak (150 LS times to t 0.015) - MIXED, the backward
+    start hid an IE excess (KE RMS 29.15 -> 29.17 %); `thick.k`'s punch
+    stops at -10.0003 mm as LS-DYNA's (-11.9888 mm before), KE END +91.96 ->
+    +23.42 %, KE RMS 21.01 -> 8.79 % (1000 LS times to t 0.0012), IE END
+    -27.21 % and RMS 14.03 % unchanged, 3332 = 3332 cycles. Movers 2 deck
+    keys / 2 emitted models (the cup-draw, thick.k); the nvh plate decks'
+    curves end at (1.0, 0) and stay byte-identical.
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

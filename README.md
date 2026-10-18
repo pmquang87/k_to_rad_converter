@@ -283,6 +283,18 @@ metal-forming (nt 4, the 500 LS times in (0.0032, 1.6]): the 3-D row's
 timeout (t 0.2075 of 1.6) → NORMAL in 24 807 cycles, IE END -0.45 %, RMS
 0.24 % of the LS peak; the KE is the scaled-mass KE. Reach 2 deck keys / 2
 emitted models (metal-forming, 2Dlag) + 1 / 1 refused by name (the SPR giant).
+**A 2-D plane-stress `*SECTION_SHELL` (ELFORM 12) that states no thickness →
+thickness 1.0** (round 9, B3, default ON, `--no-plane-stress-unit-thickness`
+keeps `T1`): with Card 2's T1..T4 all 0 / blank LS-DYNA integrates a unit
+thickness (`main_fsi`'s d3hsp: its rigid body weighs 0.23410459 = rho 1.2 x
+area 0.19508716 x 1.0000008), although Remark 6 does not list ELFORM 12; a
+stated T1 > 0 is a real thickness and is kept, and a T1 0 beside a nonzero
+T2..T4 keeps the A4 mean (decision B3-a). MEASURED on
+`icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi` (nt 4): starter 117
+ERROR(S) (ERROR 495 x 116 + the rigid inertia) → 0, TOTAL MASS 0.2341045880 =
+LS-DYNA; NORMAL in 100 001 cycles - a fixed rigid body under a skipped ICFD
+fluid, so a status move, not a physics check. Reach 1 deck key / 1 emitted
+model.
 `*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
 `_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
 element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with
@@ -2944,6 +2956,28 @@ collapse runs on `*LOAD_BLAST_SEGMENT`'s inline rows, the other producer of a
 segment set. It makes the two SPELLINGS one segment and nothing more: a face a
 single block genuinely lists twice still emits two `/SURF/SEG` rows, which is
 what LS-DYNA does with it.
+**An applied-load curve is zero off its abscissa range** (round 9, B5,
+default ON, `--no-load-curve-offscale-zero` writes the curves as stated):
+LS-DYNA zeroes a load curve off scale (`*DEFINE_CURVE` Remark 5) and Remark 4a
+adds (0, 0) and (0.999 OFFA, 0) to a DATTYP-0 curve with OFFA > 0, while
+OpenRadioss extends a `/FUNCT`'s first / last segment (`finter.F:235-273`). So
+a mechanical applied-load consumer (`/IMPVEL`, `/IMPDISP`, `/IMPACC` - rigid,
+node / set and rigid-wall forms - `/CLOAD`, `/PLOAD`, `/GRAV`) whose curve
+OpenRadioss would extrapolate NONZERO inside the consumer's active window
+`[max(0, Tstart), min(ENDTIM, Tstop)]` reads a COPY (`FUNCT_<lcid>_offscale_zero`,
+written after every consumer) with the zero points before the first abscissa
+and / or after the last; the deck's own `/FUNCT` stays as stated for every
+other consumer, and material, preload and thermal curves never change.
+Excluded: DATTYP != 0, a start side with OFFA <= 0 or SFA != 1, a
+sensor-gated card, a `/FUNCT_SMOOTH`. MEASURED (nt 4): the aniso cup-draw's
+punch no longer starts BACKWARD (DZ at 2.1 ms +0.2187 → -0.00055 mm) - but
+its IE END goes +6.09 → +13.10 % and its RMS 2.89 → 5.57 % of the LS peak
+(150 LS times to t 0.015): MIXED, the backward start hid an IE excess;
+`thick.k`'s punch stops at -10 mm as LS-DYNA's (it ran on to -11.99 mm), KE
+END +91.96 → +23.42 %, KE RMS 21.01 → 8.79 % (1000 LS times), IE unchanged.
+A prescribed DISPLACEMENT whose curve ends before t_end returns to 0 by the
+manual's wording; no LS-DYNA carrier measures that side. Reach 2 deck keys /
+2 emitted models.
 `*DEFINE_CURVE` → `/FUNCT` (or `/TABLE/1` when a law consumes it through a
 `Tab_ID` slot, `/FUNCT_SMOOTH` for the `_SMOOTH` spelling), with a **strictly
 increasing abscissa AS PRINTED**: `hm_read_funct.F:143` refuses a

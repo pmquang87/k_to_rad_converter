@@ -3069,6 +3069,10 @@ class Curve:
     #: ``_has_dynamic_relaxation``)? A deck can start one from the curve alone,
     #: without a *CONTROL_DYNAMIC_RELAXATION card.
     sidr: int = 0
+    #: *DEFINE_CURVE card-1 field 7 (cols 61-70), DATTYP. Read for ONE rule
+    #: (R14 triage round 9, B5, writer/loadcurves.py): only a DATTYP-0 curve
+    #: is an applied-load curve that LS-DYNA zeroes off its abscissa range.
+    dattyp: int = 0
 
 
 @dataclass
@@ -8524,6 +8528,36 @@ class ConvertOptions:
     # times in (0.0032, 1.6]): a timeout -> NORMAL in 24 807 cycles, IE END
     # -0.45 %, RMS 0.24 % of the LS peak. Reach 1 key on 1 model.
     positive_dt2ms_mass_scaling: bool = True
+    # --no-plane-stress-unit-thickness: a 2-D plane-stress *SECTION_SHELL
+    # (ELFORM 12) that states no thickness keeps Thick 0 (the 386444e bytes:
+    # starter ERROR 495 per shell).
+    #
+    # ON by default (R14 triage round 9, B3): handlers.handle_section_shell
+    # writes thickness 1.0 when Card 2's T1..T4 are all 0 / blank - LS-DYNA
+    # integrates a unit thickness there (main_fsi's d3hsp: its rigid body
+    # weighs 0.23410459 = rho 1.2 x area 0.19508716 x 1.0000008), although
+    # Remark 6 does not list ELFORM 12; a stated T1 > 0 is kept. MEASURED on
+    # icfd/.../main_fsi (nt 4): starter 117 ERROR(S) -> 0, TOTAL MASS
+    # 0.2341045880 = LS-DYNA, NORMAL in 100 001 cycles - a fixed rigid body
+    # under a skipped ICFD fluid, a status move only. Reach 1 deck key on 1
+    # emitted model.
+    plane_stress_unit_thickness: bool = True
+    # --no-load-curve-offscale-zero: every consumer reads the deck's /FUNCT
+    # as stated (the 386444e bytes; OpenRadioss extends its first / last
+    # segment, finter.F:235-273).
+    #
+    # ON by default (R14 triage round 9, B5): writer/loadcurves.py points a
+    # MECHANICAL applied-load consumer (/IMPVEL, /IMPDISP, /IMPACC, /CLOAD,
+    # /PLOAD, /GRAV) at a COPY of its curve that is zero off the abscissa
+    # range where OpenRadioss would extrapolate it nonzero inside the
+    # consumer's window - LS-DYNA *DEFINE_CURVE Remark 4a's (0, 0) and
+    # (0.999 OFFA, 0) for DATTYP 0 / OFFA > 0 and Remark 5's "set to zero if
+    # the time goes off scale". state.curves, material, preload and thermal
+    # curves never change. MEASURED: the aniso cup-draw's punch no longer
+    # starts backward but its IE END goes +6.09 -> +13.10 % (MIXED); thick.k's
+    # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
+    # deck keys on 2 emitted models.
+    load_curve_offscale_zero: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9830,6 +9864,18 @@ class ConversionState:
     # route's screen reads what the deck STATES, converted or not).
     axisym_plan: Optional[AxisymPlan] = None
     deck_keywords: Set[str] = field(default_factory=set)
+    # R14 triage round 9, B5: the zero-off-scale COPIES of applied-load
+    # curves written at emission (writer/loadcurves.load_funct_id): (lcid,
+    # head points, tail points) -> (the copy's /FUNCT id, its points), and
+    # every (lcid, consumer, copy id, head, tail) use for the sentence.
+    # state.curves itself is never modified.
+    offscale_functs: Dict[Tuple[int, Tuple[Tuple[float, float], ...],
+                                Tuple[Tuple[float, float], ...]],
+                          Tuple[int, List[Tuple[float, float]]]] = field(
+        default_factory=dict)
+    offscale_uses: List[Tuple[int, str, int, List[Tuple[float, float]],
+                              List[Tuple[float, float]]]] = field(
+        default_factory=list)
     # *CONTROL_THERMAL_SOLVER — FWORK reaches /HEAT/MAT's EFRAC and TSF the
     # engine /THERM; every other cell is a named per-field drop.
     ctrl_thermal_solver: Optional[ControlThermalSolver] = None

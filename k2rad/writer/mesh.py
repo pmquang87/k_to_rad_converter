@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
-    AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS,
+    AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS,
     ConversionState,
     SET_ADD_ADVANCED_TYPES,
     SET_ADD_FAMILIES,
@@ -4923,6 +4923,25 @@ def _warn_section_card2(state: ConversionState) -> None:
                     "(--no-plane-strain-unit-thickness), while LS-DYNA ignores "
                     "Card 2's thickness there and integrates a unit thickness "
                     "(Vol I R17 *SECTION_SHELL Remark 6).")
+        elif (sec.elform in PLANE_STRESS_ELFORMS
+              and state.options.plane_stress_unit_thickness
+              and t1 == 0.0 and all(v in (None, 0.0) for v in (t2, t3, t4))
+              and sec.t1 == 1.0):
+            state.warn(
+                f"*SECTION_SHELL {sec.secid}: ELFORM 12 (2-D plane stress) "
+                "states no thickness (T1..T4 = 0 / blank), so the /PROP/SHELL "
+                "thickness is 1.0: LS-DYNA integrates a unit thickness there "
+                "(main_fsi: its rigid body weighs 0.23410459 = rho 1.2 x area "
+                "0.19508716 x 1.0000008 in the d3hsp), although Vol I R17 "
+                "*SECTION_SHELL Remark 6 does not list ELFORM 12 among the "
+                "forms whose Card-2 thickness is ignored - a stated T1 > 0 is "
+                "kept. The element stays a 3-D shell. MEASURED on "
+                "icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi (nt 4): "
+                "starter 117 ERROR(S) -> 0, TOTAL MASS 0.2341045880 = LS-DYNA; "
+                "NORMAL in 100 001 cycles (123-560 s by machine load) - a fixed "
+                "rigid body under a skipped ICFD fluid, so a status move, not a "
+                "physics check. --no-plane-stress-unit-thickness keeps T1 "
+                "(starter ERROR 495).")
         elif sec.elform in AXISYMMETRIC_ELFORMS:
             # round 9, B2: a ROUTED deck gets the route's own sentence (once
             # per deck, writer/axisym2d); otherwise the section is a 3-D

@@ -5040,6 +5040,10 @@ def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
     """
     if state is not None:
         state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
+        # round 9, B5: a curve OpenRadioss would extrapolate nonzero inside
+        # [Tstart, Tstop] is read through its zero-off-scale copy
+        from .loadcurves import load_funct_id
+        lcid = load_funct_id(state, lcid, keyword, tstart, tstop)
     return [
         f"/{keyword}/{motion_id}",
         title,
@@ -5871,7 +5875,8 @@ _GRAV_COMMENT = ("#funct_IDT       DIR   skew_ID sensor_ID  grnod_ID"
 
 def _emit_grav_card(grav_id: int, title: str, fct: int, direction: str,
                     grnod_id: int, fscale: float,
-                    skew_id: int = 0) -> List[str]:
+                    skew_id: int = 0,
+                    state: Optional[ConversionState] = None) -> List[str]:
     """One /GRAV card in the column layout grav.cfg specifies (see above).
 
     ``Ascale_x`` is always 1.0: the starter stores ``GRAV(2,K) = ONE/FCX``
@@ -5884,7 +5889,13 @@ def _emit_grav_card(grav_id: int, title: str, fct: int, direction: str,
     emitted) and the engine then adds the acceleration along that skew's row
     for DIR instead of the global axis (gravit.F:150-162,
     ``A(1..3,N) += SKEW(3*N2-2..3*N2, ISK) * AA``). 0 = global.
+
+    Pass *state* to read a curve OpenRadioss would extrapolate nonzero
+    through its zero-off-scale copy (round 9, B5, writer/loadcurves.py).
     """
+    if state is not None:
+        from .loadcurves import load_funct_id
+        fct = load_funct_id(state, fct, "GRAV")
     return [
         f"/GRAV/{grav_id}",
         title,
@@ -6226,7 +6237,7 @@ def _make_gravity_loads(state: ConversionState,
         lines += _emit_grav_card(
             grav_id,
             f"Gravity_{_DIR[dof]}_parts_" + "_".join(str(p) for p in pids),
-            fct, _DIR[dof], grnod_id, -accel)
+            fct, _DIR[dof], grnod_id, -accel, state=state)
     _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains,
                             kept_rigid)
     return lines if len(lines) > 2 else []
@@ -6351,7 +6362,7 @@ def _make_body_loads(state: ConversionState,
                     "— the base acceleration is applied along the GLOBAL "
                     f"{bl.dir} axis.")
         lines += _emit_grav_card(grav_id, f"Body_accel_{bl.dir}", bl.lcid,
-                                 bl.dir, gnid, -bl.sf, skew_id)
+                                 bl.dir, gnid, -bl.sf, skew_id, state=state)
     if emitted:
         state.warn(
             "*LOAD_BODY_{X,Y,Z} -> /GRAV with Fscale_Y = -SF: a POSITIVE LS-DYNA "
@@ -6408,7 +6419,7 @@ def _make_body_loads(state: ConversionState,
         lines += _emit_skew_fix(skew_id, f"SKEW_FIX_GRAV_{grav_id}",
                                 (bv.xc, bv.yc, bv.zc), axes[0], axes[1])
         lines += _emit_grav_card(grav_id, "Body_accel_VECTOR", bv.lcid,
-                                 "X", gnid, -bv.sf, skew_id)
+                                 "X", gnid, -bv.sf, skew_id, state=state)
     if vec_emitted:
         state.warn(
             "*LOAD_BODY_VECTOR -> ONE /GRAV with DIR=X in a companion /SKEW/FIX "
@@ -8221,7 +8232,8 @@ _PLOAD_COMMENT = ("#  surf_ID  functIDT sensor_ID                             "
 
 
 def _emit_pload_card(pload_id: int, title: str, surf_id: int, lcid: int,
-                     fscale: float, sensor_id: int = 0) -> List[str]:
+                     fscale: float, sensor_id: int = 0,
+                     state: Optional[ConversionState] = None) -> List[str]:
     """One /PLOAD block.
 
     Card grid (``radioss2021/LOADS/pload.cfg``, the newest FORMAT block a
@@ -8237,7 +8249,14 @@ def _emit_pload_card(pload_id: int, title: str, surf_id: int, lcid: int,
     ``Ascale_x`` is always 1.0 — it is an abscissa DIVISOR (the starter stores
     ``PRES(2,K) = ONE/FCX``, ``hm_read_pload.F:166``), and no LS-DYNA pressure
     keyword scales the time axis.
+
+    Pass *state* to read a curve OpenRadioss would extrapolate nonzero
+    through its zero-off-scale copy (round 9, B5; a sensor-gated card is
+    excluded: its argument is shifted by the sensor's start).
     """
+    if state is not None:
+        from .loadcurves import load_funct_id
+        lcid = load_funct_id(state, lcid, "PLOAD", sensor_id=sensor_id)
     return [
         f"/PLOAD/{pload_id}",
         title,
@@ -8447,7 +8466,7 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
             sensors_emitted = True
             lines += _emit_sensor_time(sensor_id, f"PLOAD_{pload_id}_arrival", at)
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
-                                  sf, sensor_id)
+                                  sf, sensor_id, state=state)
         pload_id += 1
     if seg_flipped:
         state.warn(
@@ -9817,12 +9836,14 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
                 continue
             dirs_to_emit = [(d, lb.sf)]
 
+        from .loadcurves import load_funct_id
         for dir_str, sf in dirs_to_emit:
+            fct = load_funct_id(state, lb.lcid, "CLOAD")   # round 9, B5
             lines += [
                 f"/CLOAD/{load_id}",
                 f"LoadRB_{load_id}",
                 "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-                f"{_i(lb.lcid)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}"
+                f"{_i(fct)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}"
                 f"          {_f(1.0)}{_f(sf)}",
                 HDR,
             ]
@@ -9865,11 +9886,13 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
             grnod_id = state.next_grnod_id()
             grnod_by_nsid[ln.nsid] = grnod_id
         load_id = state.next_id()
+        from .loadcurves import load_funct_id
+        fct = load_funct_id(state, ln.lcid, "CLOAD")       # round 9, B5
         lines += [
             f"/CLOAD/{load_id}",
             set_title or f"LoadNode_{load_id}",
             "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-            f"{_i(ln.lcid)}{_DOF_DIR_FORCE[ln.dof].rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+            f"{_i(fct)}{_DOF_DIR_FORCE[ln.dof].rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
             f"          {_f(1.0)}{_f(ln.sf)}",
             HDR,
         ]
@@ -10265,11 +10288,13 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
     state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     lines = _emit_skew_fix(skew_id, f"RWALL_{rw.rwid}_MOTION_DIR",
                            (0.0, 0.0, 0.0), yax, zax)
+    from .loadcurves import load_funct_id
+    fct = load_funct_id(state, rw.lcid, keyword)       # round 9, B5
     lines += [
         f"/{keyword}/{motion_id}",
         f"RWALL_{rw.rwid}_MOTION",
         "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID  frame_ID     Icoor",
-        f"{_i(rw.lcid)}{'X'.rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+        f"{_i(fct)}{'X'.rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
         "         0         0",
         "#           Ascale_x            Fscale_Y              Tstart               Tstop",
         f"                   1{_f(1.0)}{_f(0.0)}{_f(0.0)}",
