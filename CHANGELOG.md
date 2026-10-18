@@ -187,7 +187,10 @@ Prior history (before this changelog was introduced) is summarized in the
     every figure equal to the census cG4 arm, which wrote the copy's points
     in place, to the printed digit): the aniso cup-draw's punch DZ at 2.1 ms
     +0.21874 -> -0.000548 mm (it started BACKWARD at +219.29 mm/s, census),
-    punch work at the fifths within 1.3-8 % of LS-DYNA's bndout (census),
+    punch work at the fifths within 0.1-7.8 % of LS-DYNA's bndout, every
+    fifth below it (OR 83.4 / 1306.9 / 3760.9 / 7819.2 / 13957.3 vs LS 83.5 /
+    1336.5 / 4078.4 / 8320.7 / 14214.4 N.mm; the round-9 text said
+    "within 1.3-8 %", corrected in the fix round),
     but the deck IE END +6.09 -> +13.10 % and RMS 2.89 -> 5.57 % of the LS
     peak (150 LS times to t 0.015) - MIXED, the backward start hid an IE
     excess (KE RMS 29.15 -> 29.17 %; 70 734 -> 70 729 cycles); `thick.k`'s

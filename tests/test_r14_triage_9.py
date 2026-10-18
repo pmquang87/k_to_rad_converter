@@ -3709,6 +3709,12 @@ class LoadCurveOffscaleZero(unittest.TestCase):
                              "(0.008, 0) after 0.0036)",
                              "+6.09 -> +13.10 %", "MIXED",
                              "KE END +91.96 -> +23.42 %"))
+        # the fix round (F-B5-1): the census pairs give -0.12 / -2.21 /
+        # -7.78 / -6.03 / -1.81 %, so 0.1-7.8 % with every fifth below LS
+        self.assertTrue(_has(res.warnings, _W_B5, "punch work at the fifths "
+                             "within 0.1-7.8 % of LS-DYNA's bndout, every "
+                             "fifth below it"))
+        self.assertFalse(_has(res.warnings, "1.3-8 %"))
         state = _t7._dispatch(b5_punch())
         self.assertEqual(state.curves[1].pts,
                          [(0.002, 0.0), (0.0023, 1.644664),
