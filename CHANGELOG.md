@@ -68,9 +68,17 @@ Prior history (before this changelog was introduced) is summarized in the
     carry the MEASURED ledger (campaign report §0.33, equal to the
     expectation); NOT entry 16's mechanism is located, entry 15 names the A5
     scope decision for the user, entry 19 the lever probe (`ex_14` reaches
-    1.000 of `/RUN` but its IE RMS 4.61 -> 11.94 %, MIXED windows). The
-    retracted fix-round spellings are guarded by
-    `Round9FixRoundRetractedStatements` (only this file quotes them).
+    1.000 of `/RUN` but its IE RMS 4.61 -> 11.94 %, MIXED windows), entry 23
+    the two Yaris suspension decks' starter blocks (ERROR 179 on both,
+    identical at `386444e`; the static deck's ERROR 745 ×311 / 3047 / 3046 /
+    61 in two of four starter runs, a plain "STOP DUE TO INPUT ERROR" in the
+    other two); round 8's column of the queue table says MEASURED (report
+    §0.31) where it still said "(EXPECTED; the campaign re-run measures)"
+    and "27 / 27 (EXPECTED)". Three round-8 notes stop quoting the
+    retracted CNRB `_SPC` "will dangle" warning (README, the `convert()`
+    docstring, `rbody._cnrb_spc_lines`). The retracted fix-round spellings
+    are guarded by `Round9FixRoundRetractedStatements` (only this file quotes
+    them).
   - **Rejected, with the reason**: an exact-zero z test in the 2-D screen
     (a refusal by name is safe; a tolerance is an unmeasured rule; 0
     carriers); a `None` default for `convert(qstat_dtscal=...)` (documented,

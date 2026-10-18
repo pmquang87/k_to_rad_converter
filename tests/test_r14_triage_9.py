@@ -4741,6 +4741,13 @@ _RETRACTED_ROUND_9_FIX = (
     "Explicit decks follow the same bytes rule",
     # F-A8-1: no measured gain (MIXED windows on runs that stop at 9 %)
     "IE RMS gains",
+    # the retraction rule (A13): the CNRB _SPC 'will dangle' sentence is
+    # retracted, so no round-8 note may quote it either (f864a02)
+    "skew_ID will dangle",
+    # an EXPECTED ledger is replaced by the MEASURED one once the run lands:
+    # round 8's column of the queue table (report section 0.31 measured it)
+    "(EXPECTED; the campaign re-run measures)",
+    "27 / 27 (EXPECTED)",
 )
 _REPLACEMENTS_ROUND_9_FIX = (
     ("k2rad/writer/loads.py", "gravit_imp.F:84-91 weighs an active rigid "
@@ -4756,6 +4763,10 @@ _REPLACEMENTS_ROUND_9_FIX = (
      "beside it"),
     ("ROADMAP.md", "the mechanism is LOCATED (the fix round)"),
     ("README.md", "a `/BCS` in a skew keeps its digits"),
+    ("ROADMAP.md", "0 verdict movers (MEASURED, campaign report §0.31)"),
+    ("ROADMAP.md", "the residue 29 / 29 → 27 / 27 (MEASURED, campaign report "
+     "§0.31)"),
+    ("ROADMAP.md", "the static deck two starter runs then stopped"),
 )
 
 
