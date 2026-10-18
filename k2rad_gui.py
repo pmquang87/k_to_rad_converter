@@ -141,6 +141,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          prescribed_motion_sf_default: bool = True,
                          rigid_local_shared_skew: bool = True,
                          modal_acoustic_void: bool = True,
+                         mixed_main_thickness_gap: bool = False,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -352,6 +353,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["modal_acoustic_void"] = bool(modal_acoustic_void)
 
+    kwargs["mixed_main_thickness_gap"] = bool(mixed_main_thickness_gap)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -517,6 +520,7 @@ class ConverterGUI:
         self.prescribed_motion_sf_default = tk.BooleanVar(value=True)
         self.rigid_local_shared_skew = tk.BooleanVar(value=True)
         self.modal_acoustic_void = tk.BooleanVar(value=True)
+        self.mixed_main_thickness_gap = tk.BooleanVar(value=False)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1160,6 +1164,13 @@ class ConverterGUI:
             variable=self.modal_acoustic_void).grid(
                 row=70, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Opt-in: AUTOMATIC contact on a mixed shell + solid main "
+                     "gets Igap 3 + Gapmin = t_min / 2 (bolt clearance "
+                     "closes; costs frictional contact energy)",
+            variable=self.mixed_main_thickness_gap).grid(
+                row=71, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1445,6 +1456,7 @@ class ConverterGUI:
                 prescribed_motion_sf_default=self.prescribed_motion_sf_default.get(),
                 rigid_local_shared_skew=self.rigid_local_shared_skew.get(),
                 modal_acoustic_void=self.modal_acoustic_void.get(),
+                mixed_main_thickness_gap=self.mixed_main_thickness_gap.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1706,6 +1718,9 @@ class ConverterGUI:
         if not kwargs.get("modal_acoustic_void", True):
             bits.append("a refused *MAT_ACOUSTIC part keeps no material on a "
                         "modal deck (--no-modal-acoustic-void)")
+        if kwargs.get("mixed_main_thickness_gap"):
+            bits.append("mixed shell + solid main TYPE7: Igap 3 + Gapmin "
+                        "t_min / 2 (--mixed-main-thickness-gap)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

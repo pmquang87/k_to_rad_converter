@@ -229,6 +229,26 @@ Prior history (before this changelog was introduced) is summarized in the
     52.65 Hz where LS-DYNA's `eigout` starts at 66.40 Hz - unvalidated.
     Time-domain decks keep the refusal (`8.3.plate_kirchhoff`'s void route:
     IE RMS 168.69 %), byte-identical. Movers 1 key / 1 model.
+  - **Opt-in `--mixed-main-thickness-gap`** (A10; round-8 entry 15; default
+    OFF = the `386444e` bytes). The round's gate measured it against the
+    TYPE25 Igap-2 route on both carriers: both close mainboltaexpl's
+    clearance (bolt 2.196 -> 1.995 / 1.991 mm at 1e-3 s, LS 1.817), both
+    inflate EXP_SC_PRELOAD's frictional contact energy (2834 -> 7460 /
+    5027 at END, LS sliding 1758.5), so neither is a default (part-A spec
+    D1); the TYPE25 route also moved EXP_SC_PRELOAD's KE END -44.10 ->
+    -80.08 % and mainboltaexpl's END bolt force 27 201 -> 22 931 N (LS
+    26 541). Under the flag `writer/contacts._mixed_main_thickness_gap`
+    gives an AUTOMATIC (SINGLE_SURFACE / SURFACE_TO_SURFACE / GENERAL,
+    `_MORTAR` included) contact's `/INTER/TYPE7` whose emitted main mixes
+    shells and solids, with no gap stated or derived, Igap 3 + Gapmin =
+    min(t_min / 2, half the smallest main side) at all three TYPE7 sites
+    (the single-surface SSID 0 / SSID > 0 and the surface-to-surface
+    ones), t_min in the starter's own order (OPTT, element thickness,
+    section; `i7sti3.F:226-238`); Inacti keeps the gap from before the
+    rule. mainboltaexpl's bytes under the flag = the gate's variant
+    (sha256 `e72ecb94f505`); g3i's gap coupon: 48 initial penetrations ->
+    0 (starter runs). Reach 4 keys / 4 models, 0 default bytes; ROADMAP
+    entry 15 stays open.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

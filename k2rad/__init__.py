@@ -313,6 +313,7 @@ def convert(
     prescribed_motion_sf_default: bool = True,
     rigid_local_shared_skew: bool = True,
     modal_acoustic_void: bool = True,
+    mixed_main_thickness_gap: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1145,6 +1146,14 @@ def convert(
         on an 8-point brick, no nodal mass), so the modes are the
         structure's alone. A time-domain deck keeps the refusal (a void
         there absorbs the wave). Default True.
+    mixed_main_thickness_gap : bool
+        Opt-in (R14 triage round 9, A10): on an AUTOMATIC contact's
+        /INTER/TYPE7 whose main mixes shells and solids and states no gap,
+        write Igap 3 with Gapmin = half the thinnest main shell (capped at
+        half the smallest main edge) - LS-DYNA offsets the shells by t/2 and
+        the solids by nothing. Measured: mainboltaexpl's bolt 2.19560 ->
+        1.99461 mm (LS 1.81686); COST: EXP_SC_PRELOAD's contact energy
+        2916 -> 7557 at END (LS sliding 1758.5). Default False.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1593,6 +1602,7 @@ def convert(
         prescribed_motion_sf_default=prescribed_motion_sf_default,
         rigid_local_shared_skew=rigid_local_shared_skew,
         modal_acoustic_void=modal_acoustic_void,
+        mixed_main_thickness_gap=mixed_main_thickness_gap,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

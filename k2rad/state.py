@@ -8299,6 +8299,18 @@ class ConvertOptions:
     # step (status-only: the reference is frequency-domain). Movers 1 key / 1
     # model.
     modal_acoustic_void: bool = True
+    # --mixed-main-thickness-gap (OPT-IN, R14 triage round 9, A10): an
+    # AUTOMATIC (SINGLE_SURFACE / SURFACE_TO_SURFACE / GENERAL) contact's
+    # /INTER/TYPE7 whose emitted main mixes shells and solids, with no gap
+    # stated or derived, gets Igap 3 + Gapmin = min(t_min / 2, half the
+    # smallest main side) (writer/contacts._mixed_main_thickness_gap). The
+    # round's gate (part-A spec A10.0, nt 4): mainboltaexpl's bolt 2.19560 ->
+    # 1.99461 mm at 1e-3 s (LS 1.81686), the plates' IE 1.31 -> 134.66 N.mm
+    # (LS 245.92); COST on EXP_SC_PRELOAD: contact energy 2916 -> 7557 at END
+    # vs LS sliding 1758.5, farther at every fifth - so not a default (D1);
+    # the TYPE25 route was measured too and is NO-GO. Reach 4 keys / 4
+    # models. Default False = the 386444e bytes.
+    mixed_main_thickness_gap: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

@@ -1297,6 +1297,176 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
     return value, True
 
 
+#: The *CONTACT_AUTOMATIC_* types the round-9 A10 opt-in reaches (a _MORTAR
+#: suffix is stripped for this test only; _ID / _TITLE / _MPP by
+#: _contact_base_spelling).
+_A10_AUTOMATIC_TYPES = frozenset({
+    "AUTOMATIC_SINGLE_SURFACE", "AUTOMATIC_SURFACE_TO_SURFACE",
+    "AUTOMATIC_GENERAL",
+})
+
+
+def _main_shells_and_faces(state: ConversionState, sid: int, styp: int
+                           ) -> Tuple[list, List[List[int]], bool]:
+    """``(shells, solid faces, complete)`` of a contact MAIN side as
+    ``writer.common._make_master_surface`` emits it (round 9, A10).
+
+    The :func:`_main_surface_segments` rules: per part, SHELLS WIN (a part
+    with shell elements contributes its shells only), a shell-free solid /
+    thick-shell part contributes its external faces, a ``*SET_SEGMENT``
+    side is classified by node membership - and here a shell-classified
+    segment must ALSO match an ``*ELEMENT_SHELL`` by its node set, because the
+    rule needs each main shell's thickness (no match -> ``complete`` False:
+    the rule stands down). ``*SET_SHELL`` (styp 1) carries no solid faces.
+    PURE: no id drawn, no line emitted.
+    """
+    shells: list = []
+    faces: List[List[int]] = []
+    complete = True
+
+    def _from_pids(pids: Iterable[int]) -> None:
+        nonlocal complete
+        pset = set(pids)
+        shell_pids = {e.pid for e in state.shell_elems if e.pid in pset}
+        solid_pids = ({e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems})
+        shells.extend(e for e in state.shell_elems if e.pid in shell_pids)
+        solid_only = sorted(p for p in pset
+                            if p in solid_pids and p not in shell_pids)
+        got, ok = _solid_boundary_faces(state, solid_only)
+        faces.extend(got)
+        complete = complete and ok
+
+    if styp == 5 or sid == 0:
+        _from_pids(state.parts.keys())
+    elif styp == 2:
+        ps = state.part_sets.get(sid)
+        _from_pids(ps[1] if ps else ())
+    elif styp == 3:
+        _from_pids([sid] if sid in state.parts else ())
+    elif styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return [], [], False
+        by_nodes = {frozenset(n for n in e.nodes if n > 0): e
+                    for e in state.shell_elems}
+        shell_nodes = {n for e in state.shell_elems for n in e.nodes if n > 0}
+        solid_nodes = {n for e in state.solid_elems for n in e.nodes if n > 0}
+        solid_nodes |= {n for e in state.tshell_elems for n in e.nodes if n > 0}
+        for seg in ss.segments:
+            nds = [n for n in seg if n > 0]
+            if not nds:
+                continue
+            if all(n in solid_nodes for n in nds) and not all(
+                    n in shell_nodes for n in nds):
+                faces.append(nds)
+            else:
+                e = by_nodes.get(frozenset(nds))
+                if e is None:
+                    complete = False
+                else:
+                    shells.append(e)
+        _from_pids(ss.part_scope)
+    else:
+        return [], [], False
+    return shells, faces, complete
+
+
+def _main_shell_thickness(state: ConversionState, e) -> float:
+    """The thickness the starter takes for a main shell's gap at Igap >= 1
+    (``i7sti3.F:226-238``): the ``/PART`` Thick (``*PART_CONTACT`` OPTT)
+    first, then the element's own (``*ELEMENT_SHELL_THICKNESS``), then the
+    section ``T1`` (a ``*PART_COMPOSITE`` part: its valid-ply sum)."""
+    pc = state.part_contacts.get(e.pid)
+    if pc is not None and pc.optt:
+        return float(pc.optt)
+    from .mesh import _shell_element_thickness, _unique_node_slots
+    part = state.parts.get(e.pid)
+    comp = state.part_composites.get(e.pid)
+    if part is not None and part.secid == 0 and comp is not None:
+        return sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+    sec = state.sec_shells.get(part.secid) if part is not None else None
+    t1 = sec.t1 if sec is not None else 0.0
+    return _shell_element_thickness(e, _unique_node_slots(e.nodes), t1) or t1
+
+
+def _mixed_main_thickness_gap(state: ConversionState,
+                              c: Union[ContactAutoSingle,
+                                       ContactAutoSurf2Surf],
+                              gapmin: float, offset_gap: bool, main_sid: int,
+                              main_styp: int) -> Tuple[float, int]:
+    """Round 9, A10 (OPT-IN ``--mixed-main-thickness-gap``): ``(Gapmin,
+    Igap)`` of an AUTOMATIC contact's ``/INTER/TYPE7`` whose EMITTED main
+    holds shell AND solid segments.
+
+    LS-DYNA offsets an AUTOMATIC contact's shells by half their thickness and
+    its solids by nothing (Vol I R17 p.11-128/129 General Remark 12). With
+    no gap stated the starter takes ONE constant gap, the mean main shell
+    thickness capped at half the smallest main side (``i7sti3.F:1055-1066``):
+    0.7499998 on mainboltaexpl, above its 0.7 mm plate distance, so 812
+    initial penetrations that Inacti 5 accepts and the LS 0.2 mm clearance
+    never exists. Under the flag the card gets Igap 3 with Gapmin =
+    ``min(t_min / 2, 0.5 x the smallest main side)``, ``t_min`` the thinnest
+    main shell (:func:`_main_shell_thickness`).
+
+    Stands down (returns its input and Igap 0) unless the option is on, the
+    keyword is a :data:`_A10_AUTOMATIC_TYPES` type, the card is neither
+    k2rad's implicit stub nor an ``_INTERFERENCE`` fit, NO gap is stated or
+    derived (Card-3 SST / MST, ``--inter-gapmin``, ``--auto-gapmin``,
+    ``--derived-gapmin``, the shell offset), and the main is mixed and fully
+    classified. A main shell without a positive thickness refuses by name.
+    The round's gate measured the rule against the TYPE25 Igap-2 route on
+    both carriers and shipped neither as a default (part-A spec D1): the
+    clearance closes on mainboltaexpl, EXP_SC_PRELOAD's frictional contact
+    energy grows - hence opt-in. PURE apart from its warning.
+    """
+    if (not state.options.mixed_main_thickness_gap or gapmin != 0.0
+            or offset_gap or getattr(c, "interference", False)
+            or c.title == AUTO_IMPLICIT_STUB_TITLE):
+        return gapmin, 0
+    base = _contact_base_spelling(c.keyword)
+    if base.endswith("_MORTAR"):
+        base = base[:-len("_MORTAR")]
+    if base not in _A10_AUTOMATIC_TYPES:
+        return gapmin, 0
+    shells, faces, complete = _main_shells_and_faces(state, main_sid,
+                                                     main_styp)
+    if not (shells and faces and complete):
+        return gapmin, 0
+    kw = c.keyword.lstrip("*")
+    thick = [_main_shell_thickness(state, e) for e in shells]
+    bad = [e.eid for e, t in zip(shells, thick) if not t > 0.0]
+    if bad:
+        state.warn(
+            f"*{kw} {c.inter_id}: --mixed-main-thickness-gap: main shell(s) "
+            f"{bad[:10]} carry no positive thickness, so no half-thickness "
+            "gap exists; the starter's constant default gap stands (Igap 0).")
+        return gapmin, 0
+    t_min = min(thick)
+    edge = _min_segment_side(state, [e.nodes for e in shells] + faces)
+    half_t = 0.5 * t_min
+    capped = edge > 0.0 and 0.5 * edge < half_t
+    value = _round_sig(0.5 * edge if capped else half_t)
+    state.warn(
+        f"*{kw} {c.inter_id}: --mixed-main-thickness-gap: the main mixes "
+        f"shells and solids, so /INTER/TYPE7/{c.inter_id} gets Igap 3 with "
+        f"Gapmin {value:g} = half the thinnest main shell "
+        f"({_round_sig(t_min):g})"
+        + (f", capped at half the smallest main edge {_round_sig(edge):g}"
+           if capped else "")
+        + " instead of the starter's constant default gap (the mean main "
+        "shell thickness capped at half the smallest main side, "
+        "i7sti3.F:1055-1066). LS-DYNA offsets an AUTOMATIC contact's shells "
+        "by half their thickness and its solids by nothing (Vol I R17 "
+        "p.11-128/129 General Remark 12). MEASURED (nt 4): mainboltaexpl's "
+        "bolt 2.19560 -> 1.99461 mm at 1e-3 s (LS 1.81686), the plates' IE "
+        "1.31 -> 134.66 N.mm (LS 245.92); COST on EXP_SC_PRELOAD: contact "
+        "energy 2916 -> 7557 at END against LS-DYNA's sliding interface "
+        "energy 1758.5, farther at every fifth (mostly frictional) - hence "
+        "not a default.")
+    return value, 3
+
+
 #: The measured cost of a smaller Gapmin (R14 triage round 6, the 16-arm gap
 #: sweep, cycle ratios base-paired). ONE constant so the warning and its
 #: documentation cannot drift; the contact-step line was read in the engine.
@@ -2231,12 +2401,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                            0, 5)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
+            gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
+                                                     0, 5)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state,
-                                                         c.inter_id, gapmin),
+                                       inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id, state=state)
+                                       igap=igap, fric_id=fric_id, state=state)
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -2273,12 +2446,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                            c.ssid, c.sstyp)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
+            gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
+                                                     c.ssid, c.sstyp)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state,
-                                                         c.inter_id, gapmin),
+                                       inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id, state=state)
+                                       igap=igap, fric_id=fric_id, state=state)
 
     for c in state.contacts_surf2surf:
         diag = {}
@@ -2364,6 +2540,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                        interference=c.interference,
                                        force=plan == _RS_IMPLICIT_SWAP)
         inacti_gap = gap_pre_offset if offset_gap else gapmin
+        # round 9, A10 (opt-in): Igap 3 + a half-thickness Gapmin on a mixed
+        # shell + solid main. Like the shell offset above it is not a STATED
+        # gap, so _ignore_to_inacti keeps the gap from before it.
+        gapmin, igap = _mixed_main_thickness_gap(
+            state, c, gapmin, offset_gap, main_sid, main_styp)
         if c.interference:
             # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
             # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
@@ -2383,7 +2564,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                   fric_id=fric_id, state=state,
+                                   igap=igap, fric_id=fric_id, state=state,
                                    thermal=_contact_thermal_cells(
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"))

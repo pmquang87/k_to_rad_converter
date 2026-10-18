@@ -1600,6 +1600,190 @@ class ModalAcousticVoid(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A10 - OPT-IN --mixed-main-thickness-gap: Igap 3 + Gapmin = t_min / 2 on an
+#       AUTOMATIC contact's mixed shell + solid main
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _a10_single(sst: float = 0.0) -> str:
+    """gapc07.k's contact: AUTOMATIC_SINGLE_SURFACE over part set 1."""
+    return "\n".join([
+        "*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID", _row(1) + "gap coupon contact",
+        _row(1, 0, 2, 0, 0, 0, 0, 0),
+        _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+        _row(1.0, 1.0, sst, 0.0, 1.0, 1.0, 1.0, 1.0)])
+
+
+def _a10_gapc(zmid: float = 0.7, block_h: float = 2.0, t: float = 1.0,
+              t_b: float = 0.0, contact: str = "", sst: float = 0.0,
+              extra: str = "", implicit: bool = False,
+              optt: float = 0.0) -> str:
+    """g3i's gap coupon (R9P/g3i/coupon/gapc07.k / gapc10.k rebuilt): a
+    10 x 10 solid block (part 1, z from -block_h to 0, 2 x 2 hexes) and a
+    shell plate (part 2, thickness t, 2 x 2 shells at z = zmid; *t_b*
+    gives the second row of shells its own *ELEMENT_SHELL_THICKNESS; *optt*
+    makes the plate a *PART_CONTACT with that OPTT), the block fixed, the
+    plate driven down at 100 mm/s, one AUTOMATIC_SINGLE_SURFACE over the
+    part set {1, 2} (or *contact*)."""
+    nodes = []
+    nid = 1
+    for z in (-block_h, 0.0, zmid):
+        for y in (0.0, 5.0, 10.0):
+            for x in (0.0, 5.0, 10.0):
+                nodes.append(f"{nid:>8}{x:>16.6f}{y:>16.6f}{z:>16.6f}"
+                             f"{0:>8}{0:>8}")
+                nid += 1
+    hexes = [(1, 2, 5, 4, 10, 11, 14, 13), (2, 3, 6, 5, 11, 12, 15, 14),
+             (4, 5, 8, 7, 13, 14, 17, 16), (5, 6, 9, 8, 14, 15, 18, 17)]
+    quads = [(19, 20, 23, 22), (20, 21, 24, 23), (22, 23, 26, 25),
+             (23, 24, 27, 26)]
+    shells = [f"{5 + k:>8}{2:>8}" + "".join(f"{n:>8}" for n in q)
+              for k, q in enumerate(quads)]
+    out = ["*KEYWORD", "*TITLE", f"gap coupon zmid {zmid:g}",
+           "*CONTROL_TERMINATION", _row(0.01, 0, 0.0, 0.0, 0.0, 0)]
+    if implicit:
+        out += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 1.0e-3)]
+    out += ["*CONTROL_CONTACT", _row(0.1, 1.0, 2, 0, 1, 0, 1, 0),
+            _row(0, 0, 0, 0, 4.0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            _row(2, 0, 0, 1, 2, 1, 0.0, 0),
+            "*DATABASE_GLSTAT", _row(0.00005, 0, 0, 1), "*NODE"] + nodes
+    out += ["*PART", "block", _row(1, 1, 1, 0, 0, 0, 0, 0),
+            "*SECTION_SOLID", _row(1, 1, 0),
+            "*MAT_ELASTIC", _row(1, "7.85E-09", 210000.0, 0.3),
+            "*PART_CONTACT" if optt else "*PART", "plate",
+            _row(2, 2, 2, 0, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, optt, 0.0, 0.0, 0) if optt else "",
+            "*SECTION_SHELL", _row(2, 16, 1.0, 5, 1, 0, 0, 1),
+            _row(t, t, t, t, 0.0, 0.0, 0.0, 0),
+            "*MAT_ELASTIC", _row(2, "7.85E-09", 210000.0, 0.3),
+            "*ELEMENT_SOLID"]
+    out += [f"{k + 1:>8}{1:>8}" + "".join(f"{n:>8}" for n in h)
+            for k, h in enumerate(hexes)]
+    if t_b:
+        out.append("*ELEMENT_SHELL_THICKNESS")
+        for k, s in enumerate(shells):
+            tk = t_b if k >= 2 else t
+            out += [s, _row(tk, tk, tk, tk)]
+    else:
+        out += ["*ELEMENT_SHELL"] + shells
+    out += ["*SET_NODE_LIST", _row(1), _row(*range(1, 9)), _row(9),
+            "*SET_NODE_LIST", _row(2), _row(*range(19, 27)), _row(27),
+            "*BOUNDARY_SPC_SET", _row(1, 0, 1, 1, 1, 1, 1, 1),
+            "*BOUNDARY_SPC_SET", _row(2, 0, 1, 1, 0, 1, 1, 1),
+            "*BOUNDARY_PRESCRIBED_MOTION_SET",
+            _row(2, 3, 0, 1, -100.0, 0, 0.0, 0.0),
+            "*DEFINE_CURVE", _row(1), f"{0.0:>20}{1.0:>20}",
+            f"{1.0:>20}{1.0:>20}",
+            "*SET_PART_LIST", _row(1), _row(1, 2),
+            contact.rstrip("\n") or _a10_single(sst), extra.rstrip("\n"),
+            "*END"]
+    return "\n".join(ln for ln in out if ln) + "\n"
+
+
+def a10_gapc07() -> str:
+    return _a10_gapc()
+
+
+def _type7_igap_gapmin(starter: str, iid: int):
+    """``(Igap, Gapmin)`` of /INTER/TYPE7/<iid> (None when absent)."""
+    for head, body in _blocks(starter, f"/INTER/TYPE7/{iid}"):
+        if head == f"/INTER/TYPE7/{iid}":
+            return int(body[1][40:50]), float(body[4][40:60] or 0)
+    return None
+
+
+_A10_GAPC07_386444E_SHA = ("16463ded4b0419b724285dc45e82abc8"
+                           "18cffeb08388ec0d76a9b2e903ea9802")
+_W_A10 = "--mixed-main-thickness-gap: the main mixes shells and solids"
+_ON = {"mixed_main_thickness_gap": True}
+
+
+class MixedMainThicknessGap(unittest.TestCase):
+    """A10 (part-A spec A10.1; OPT-IN, D1): with the flag an AUTOMATIC
+    contact's /INTER/TYPE7 whose main mixes shells and solids, with no gap
+    stated or derived, gets Igap 3 + Gapmin = min(t_min / 2, half the
+    smallest main side); without it the 386444e bytes.
+
+    STARTER RUNS (nt 4): a10_gapc07() with the flag (p_a10on_n4): 0 ERROR,
+    no WARNING 343 - 0 initial penetrations; without it = the 386444e
+    bytes (p_a10off_n4): 0 ERROR, WARNING 343 "THERE ARE 48 INITIAL
+    PENETRATIONS (CONCERNING 18 NODES)" - the plate 0.7 inside the
+    starter's constant default gap (the coupon is gapc07.k rebuilt: its
+    comment lines and *DATABASE_RCFORC dropped).
+
+    The carriers under the flag (convert only): mainboltaexpl's
+    /INTER/TYPE7/10001 Igap 0 -> 3, Gapmin 0 -> 0.5 (_0000.rad sha256
+    e72ecb94f505 = the part-A gate's variant H, whose engine run is the
+    W-A10 record), EXP_SC_PRELOAD's /INTER/TYPE7/1 Gapmin 0.2.
+    """
+
+    def test_a_the_coupon_gets_Igap_3_and_half_the_shell(self):
+        res, st, _e = _convert(a10_gapc07(), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.5))
+        self.assertTrue(_has(res.warnings, "*CONTACT_AUTOMATIC_SINGLE_SURFACE"
+                             " 1: " + _W_A10, "Gapmin 0.5 = half the "
+                             "thinnest main shell (1)", "i7sti3.F:1055-1066",
+                             "2916 -> 7557", "1758.5", "not a default"))
+
+    def test_a2_the_default_is_the_386444e_bytes(self):
+        res, st, _e = _convert(a10_gapc07())
+        self.assertEqual(_sha(st), _A10_GAPC07_386444E_SHA)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (0, 0.0))
+        self.assertFalse(_has(res.warnings, _W_A10))
+
+    def test_b_two_thicknesses_take_the_thinner_and_OPTT_wins(self):
+        _r, st, _e = _convert(_a10_gapc(t_b=0.6), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.3))
+        _r2, st2, _e = _convert(_a10_gapc(optt=0.8), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st2, 1), (3, 0.4))
+
+    def test_c_the_edge_cap(self):
+        res, st, _e = _convert(_a10_gapc(block_h=0.4), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.2))
+        self.assertTrue(_has(res.warnings, _W_A10, "capped at half the "
+                             "smallest main edge 0.4"))
+
+    def test_d_a_solid_only_main_keeps_the_shell_offset(self):
+        s2s = "\n".join([
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID", _row(1) + "s2s",
+            _row(2, 1, 3, 3, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+            _row(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)])
+        res, st, _e = _convert(_a10_gapc(contact=s2s), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (0, 0.5))
+        self.assertFalse(_has(res.warnings, _W_A10))
+
+    def test_e_the_refusals(self):
+        cases = {
+            "SST stated": (_a10_gapc(sst=0.3), {}),
+            "--inter-gapmin": (a10_gapc07(), {"inter_gapmin": {1: 0.25}}),
+            "non-AUTOMATIC": (_a10_gapc(contact=_a10_single().replace(
+                "AUTOMATIC_SINGLE_SURFACE", "SINGLE_SURFACE")), {}),
+        }
+        for name, (deck, kw) in cases.items():
+            with self.subTest(name):
+                res, st, _e = _convert(deck, **_ON, **kw)
+                self.assertNotEqual(_type7_igap_gapmin(st, 1)[0], 3)
+                self.assertFalse(_has(res.warnings, _W_A10))
+
+    def test_e2_the_implicit_stub_is_never_reached(self):
+        """An implicit coupon with no contact card gets k2rad's all-parts
+        stub - a mixed main - which the rule must leave alone."""
+        res, st, _e = _convert(_a10_gapc(implicit=True,
+                                         contact="*DATABASE_BNDOUT\n"
+                                         + _row(1.0e-4)), **_ON)
+        self.assertIn("auto_implicit_stabilization_self_contact", st)
+        self.assertNotIn("  3                   0         2", st)
+        self.assertFalse(_has(res.warnings, _W_A10))
+
+    def test_f_a_MORTAR_spelling_is_reached(self):
+        mortar = _a10_single().replace("SINGLE_SURFACE_ID",
+                                       "SINGLE_SURFACE_MORTAR_ID")
+        res, st, _e = _convert(_a10_gapc(contact=mortar), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.5))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

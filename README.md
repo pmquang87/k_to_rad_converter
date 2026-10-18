@@ -7130,6 +7130,41 @@ an implicit DYNAMIC segment after an explicit one; an implicit STATIC segment
 after an explicit one drops the explicit kinetic energy (a coupon: KE 316.1 →
 0); a chain of more than two engine files (every measured chain has two).
 
+### `--mixed-main-thickness-gap` — Igap 3 + half the thinnest shell on a mixed shell + solid main
+
+LS-DYNA offsets an AUTOMATIC contact's shells by half their thickness and its
+solids by nothing (Vol I R17 p.11-128/129 General Remark 12). When the main
+side of such a contact mixes shells and solids and states no gap, the starter
+takes ONE constant gap - the mean main shell thickness capped at half the
+smallest main side (`i7sti3.F:1055-1066`) - which on
+`show-cases/bolts/typea/explicit/mainboltaexpl.k` is 0.7499998 mm, above the
+plates' 0.7 mm distance: 812 initial penetrations that Inacti 5 accepts, and
+LS-DYNA's 0.2 mm clearance never exists. `--mixed-main-thickness-gap` (opt-in,
+round 9) writes such an `/INTER/TYPE7` (from an
+`*CONTACT_AUTOMATIC_SINGLE_SURFACE`, `_SURFACE_TO_SURFACE` or `_GENERAL`, with
+`_MORTAR` / `_ID` / `_TITLE` / `_MPP`; not the implicit stub, not an
+`_INTERFERENCE`, no Card-3 SST / MST, `--inter-gapmin`, `--auto-gapmin`,
+`--derived-gapmin` or shell-offset value) with Igap 3 and Gapmin =
+min(t_min / 2, half the smallest main side), t_min the thinnest main shell
+(the `*PART_CONTACT` OPTT first, then the element thickness, then the section:
+the starter's own order at Igap >= 1, `i7sti3.F:226-238`); the Inacti choice
+keeps the gap from before the rule. On g3i's gap coupon (a shell plate 0.7
+above a solid block) the starter's 48 initial penetrations go to 0. The
+round's gate measured it against the TYPE25 Igap-2 route on both carriers (nt
+4): both close mainboltaexpl's clearance - the bolt LENGTH at 1e-3 s 2.19560
+-> 1.99461 / 1.99138 mm (LS 1.81686), the plates' IE 1.31 -> 134.66 /
+142.44 N.mm (LS 245.92) - and both inflate
+`show-cases/preload/EXP_SC_PRELOAD.k`'s contact energy (END 2916 -> 7557 /
+5282, its frictional part 2834 -> 7460 / 5027, against LS-DYNA's sliding
+interface energy 1758.5, farther at every fifth), so neither ships as a
+default; the TYPE25 route also moved EXP_SC_PRELOAD's KE END -44.10 ->
+-80.08 % and mainboltaexpl's END bolt force 27 201 -> 22 931 N (LS 26 541) and
+is recorded NO-GO. Under the flag mainboltaexpl's bytes are the gate's variant
+(`_0000.rad` sha256 `e72ecb94f505`). Reach: 4 keys / 4 models by the part-A
+spec's two scanners (mainboltaexpl, EXP_SC_PRELOAD, contact-overview `main.k`,
+the Yaris door sag); 0 default bytes. What would close it is a gap rule that
+opens the clearance without the friction growth (ROADMAP entry 15).
+
 ---
 
 ## Modal analysis

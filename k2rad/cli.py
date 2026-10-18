@@ -986,6 +986,16 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-modal-acoustic-void keeps the refusal.",
     )
     parser.add_argument(
+        "--mixed-main-thickness-gap",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in: Igap 3 + Gapmin = half the thinnest main shell on an "
+             "AUTOMATIC contact whose main mixes shells and solids (LS's "
+             "shell offset leaves a clearance at t = 0). mainboltaexpl's bolt "
+             "2.196 -> 1.995 mm (LS 1.817); EXP_SC_PRELOAD's contact energy "
+             "2916 -> 7557 (LS 1758.5) - OFF by default.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1685,6 +1695,7 @@ def main(argv=None) -> int:
         prescribed_motion_sf_default=args.prescribed_motion_sf_default,
         rigid_local_shared_skew=args.rigid_local_shared_skew,
         modal_acoustic_void=args.modal_acoustic_void,
+        mixed_main_thickness_gap=args.mixed_main_thickness_gap,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
