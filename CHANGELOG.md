@@ -126,7 +126,10 @@ Prior history (before this changelog was introduced) is summarized in the
     END -0.4532 %, fifths +0.01 / -0.20 / -0.38 / -0.53 / -0.45 % (t_end 1.6,
     the last row of a printed time), RMS 0.24 % of the LS peak over the 500
     LS times in (0.0032, 1.6] (`_infra/history.py`); the KE END +1.7e7 % is
-    the SCALED-mass KE. The branch's metal-forming bytes equal the census
+    the SCALED-mass KE. The control, the route alone
+    (`--no-positive-dt2ms-mass-scaling`: the physical density, the 2-D step
+    2.26e-7 s), stays a timeout: killed at the 600 s cap at cycle 530 120, t
+    0.12123 of 1.6 (starter 0 / 0, energy error -0.3 %). The branch's metal-forming bytes equal the census
     arm `rcv_r9p_g3l_mf2d_i2_rhoR` but for RHO_I 1.468718E-03 (closed form)
     against 1.468657E-03. `2Dlag` (giant, starter only): ERROR 3046 -> 0 /
     0, the rigid body's NEW MASS 0.2199439E-03 = LS-DYNA, the bytes equal

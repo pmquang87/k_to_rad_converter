@@ -285,7 +285,8 @@ the run starts at DT2MS; `/DT/NODA/CST` is never written on a 2-D deck
 (`resol.F:2711-2729` rebuilds the 2-D nodal masses every cycle). MEASURED on
 metal-forming (nt 4, the 500 LS times in (0.0032, 1.6]): the 3-D row's
 timeout (t 0.2075 of 1.6) → NORMAL in 24 807 cycles, IE END -0.45 %, RMS
-0.24 % of the LS peak; the KE is the scaled-mass KE. Reach 2 deck keys / 2
+0.24 % of the LS peak; the KE is the scaled-mass KE; the route alone (the
+cell off) stays a timeout (t 0.12123 of 1.6 at the 600 s cap). Reach 2 deck keys / 2
 emitted models (metal-forming, 2Dlag) + 1 / 1 refused by name (the SPR giant).
 **A 2-D plane-stress `*SECTION_SHELL` (ELFORM 12) that states no thickness →
 thickness 1.0** (round 9, B3, default ON, `--no-plane-stress-unit-thickness`
