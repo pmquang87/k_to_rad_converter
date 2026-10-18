@@ -109,6 +109,7 @@ from .state import (
     MatElasticPlasticThermal, MatCWM, MatElasticPlasticHydro, MatVacuum,
     MatAddThermalExpansion, MatThermalIsotropic,
     MatThermalIsotropicTD, MatThermalOrthotropic,
+    ThermalCwm, WeldTrajectory,
     ControlThermalSolver, ThermalBoundary, LoadThermalElement,
     InitialTemperature, ImposedTemperature,
     ElementDeath, PerturbationNode, FinalGeometryNode,
@@ -13257,6 +13258,164 @@ def _thermal_deferred(keyword: str, what: str, target: str):
     return _h
 
 
+# R14 triage round 9, B1: *MAT_THERMAL_CWM and *BOUNDARY_THERMAL_WELD_
+# TRAJECTORY are RECORDED by the two handlers below. Their notes keep the
+# 386444e text VERBATIM under --no-weld-trajectory-impflux (that run writes
+# what 386444e wrote, records included); with the conversion on, the notes
+# say what the writer does, and writer/thermal._resolve_weld_trajectories
+# REMOVES them for an accepted card (it states the conversion instead).
+_CWM_WHAT = (
+    "a computational-welding-mechanics thermal material: quiet/dead/live "
+    "property pairs interpolated by a phase fraction gamma(T_max) with an "
+    "element BIRTH time (Vol II R17 pp.3-25..3-27)")
+_CWM_TARGET_386444E = (
+    "no Radioss counterpart for a BIRTH or a phase fraction — /HEAT/MAT "
+    "holds ONE (T0, RHO0_CP, AS, BS, T1, AL, BL) set "
+    "(hm_read_therm.F:157-166) with no birth, no ghost properties and no "
+    "peak-temperature history. The one shape that IS expressible is a "
+    "card born before t = 0 (TISTART, TIEND <= 0 and TLEND below T0, so "
+    "gamma = 1 from the first step, Vol II R17 pp.3-25..3-27 - every R14 "
+    "carrier's card is this shape): it is then the TD_LC material. It is "
+    "NOT converted because it cannot stand alone: MEASURED on 05_5_1, "
+    "converting it clears the starter's ERROR 179 (2 -> 0 errors) and "
+    "yields a ZERO-HEATING run - 293.15 K on every weld-path node over "
+    "4631 samples, 31 018 explicit conduction cycles to t 46.3 of 99 s at "
+    "the 600 s cap (66 332 for the whole 99 s against LS-DYNA's 64 "
+    "implicit steps) - because the deck's only heat source is the "
+    "*BOUNDARY_THERMAL_WELD_TRAJECTORY, which does not convert. It would "
+    "ship only together with that source (ROADMAP)")
+_CWM_TARGET = (
+    "no Radioss counterpart for a BIRTH or a phase fraction — /HEAT/MAT "
+    "holds ONE (T0, RHO0_CP, AS, BS, T1, AL, BL) set "
+    "(hm_read_therm.F:157-166) with no birth, no ghost properties and no "
+    "peak-temperature history. The one shape that IS expressible is a "
+    "card born before t = 0 (TISTART, TIEND <= 0 and TLEND below T0, so "
+    "gamma = 1 from the first step, Vol II R17 pp.3-25..3-27 - every R14 "
+    "carrier's card is this shape): it is then the TD_LC material. It "
+    "never converts ALONE: MEASURED on 05_5_1, converting it clears the "
+    "starter's ERROR 179 (2 -> 0 errors) and yields a ZERO-HEATING run - "
+    "293.15 K on every weld-path node over 4631 samples, 31 018 explicit "
+    "conduction cycles to t 46.3 of 99 s at the 600 s cap (66 332 for the "
+    "whole 99 s against LS-DYNA's 64 implicit steps) - when the deck's only "
+    "heat source, the *BOUNDARY_THERMAL_WELD_TRAJECTORY, is not converted "
+    "with it. It converts ONLY as the live /HEAT/MAT of an ACCEPTED "
+    "trajectory (round 9; the writer's sentence then names it and this note "
+    "is removed)")
+_TRAJ_WHAT = (
+    "the nodal-path spelling of the moving welding heat source, with a "
+    "prescribed velocity along the path (Vol I R17 p.5-171)")
+_TRAJ_TARGET_386444E = (
+    "no Radioss counterpart THAT MOVES, for the same reason as "
+    "*BOUNDARY_THERMAL_WELD: /IMPFLUX has no position argument and "
+    "nothing in the engine moves its group. Its volumetric form and its "
+    "own time window DO exist - see that entry for the two withdrawn "
+    "claims and for the measured window synthesis (53 /IMPFLUX + 53 "
+    "/GRBRIC per seam at 0.25 s). Censused on "
+    "F:: 4 cards on 4 keys; 05_1 is IFORM 2, Q 5e6, a 3.0 / b 2.5 / "
+    "cf 2.0 / cr 8.0, travelling 6 mm/s for 6.8 s along a 425-element "
+    "seam")
+_TRAJ_NOTE = (
+    "the nodal-path spelling of the moving welding heat source, with a "
+    "prescribed velocity along the path (Vol I R17 p.5-171): converted by "
+    "the writer when its screen accepts it (IFORM 2, ENFOR 0, Q > 0, SOLN 1, "
+    "RELVEL 0, NSID2 < 0 with every NSID1 edge aimed, PTYP 1 / 2 on solid "
+    "parts, its *MAT_THERMAL_CWM born before t 0) into windowed /IMPFLUX "
+    "VOLUMIC cards - see the writer's sentence, which replaces this note; "
+    "otherwise no card is written and the writer's refusal sentence names "
+    "why. Censused on F:: 4 cards on 4 keys (the welding-new thermal steps)")
+
+
+def _cwm_alias(seen: str) -> str:
+    return ("" if seen == "MAT_THERMAL_CWM" else
+            f" (*{seen} is Vol II R17 p.2-9's numeric alias for "
+            "*MAT_THERMAL_CWM)")
+
+
+def handle_mat_thermal_cwm(block: Block, state: ConversionState) -> None:
+    """*MAT_THERMAL_CWM (and its alias *MAT_T07) - RECORDED (round 9, B1).
+
+    The card is kept in ``state.thermal_cwm`` (Vol II R17 pp.3-25..3-27, two
+    10-wide fixed cards; a fused ``27.85000E-9`` is TMID 2 + TRO 7.85e-9) and
+    still logged as recognized-not-emitted: it converts only together with an
+    ACCEPTED *BOUNDARY_THERMAL_WELD_TRAJECTORY (writer/thermal.
+    _resolve_weld_trajectories), never alone. A truncated card reads its
+    missing cells as 0 and is recorded, never skipped.
+    """
+    seen = block.keyword or "MAT_THERMAL_CWM"
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+
+    def _fv(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i and f[i].strip() else 0.0
+
+    def _iv(f: List[str], i: int) -> int:
+        return to_int(f[i]) if len(f) > i and f[i].strip() else 0
+    tmid = _iv(f1, 0)
+    if tmid > 0:
+        state.thermal_cwm[tmid] = ThermalCwm(
+            tmid=tmid, title=title, tro=_fv(f1, 1), tgrlc=_iv(f1, 2),
+            tgmult=_fv(f1, 3), hdead=_fv(f1, 4), tdead=_fv(f1, 5),
+            tlat=_fv(f1, 6), hlat=_fv(f1, 7), lchc=_iv(f2, 0),
+            lctc=_iv(f2, 1), tlstart=_fv(f2, 2), tlend=_fv(f2, 3),
+            tistart=_fv(f2, 4), tiend=_fv(f2, 5), hghost=_fv(f2, 6),
+            tghost=_fv(f2, 7), keyword_seen=seen)
+    if state.options.weld_trajectory_impflux:
+        note = (f"{_CWM_WHAT}{_cwm_alias(seen)} — no card written. "
+                f"{_CWM_TARGET}.")
+    else:
+        note = (f"{_CWM_WHAT}{_cwm_alias(seen)} — no card written. "
+                f"{_CWM_TARGET_386444E}. Registering the keyword is what lets "
+                "this log say WHICH thermal input the deck loses instead of "
+                "leaving it in the unrecognized-keyword list.")
+    state.note_recognized_not_emitted(seen, note)
+
+
+def handle_boundary_thermal_weld_trajectory(block: Block,
+                                            state: ConversionState) -> None:
+    """*BOUNDARY_THERMAL_WELD_TRAJECTORY - RECORDED (round 9, B1).
+
+    Three 10-wide fixed cards (Vol I R17 pp.5-171..5-177): ``PID PTYP NSID1
+    SPD1 NSID2 SPD2 NCYC RELVEL`` / ``IFORM LCID Q LCROT LCMOV LCLAT DISC
+    ENFOR`` / ``P1..P8``. A blank PTYP is the manual's default 1 (p.5-172:
+    "EQ.1: Part ID / EQ.2: Part set ID"). A missing card reads as blanks = 0,
+    so a truncated record is REFUSED by the writer's screen (IFORM 0) rather
+    than raising here. The writer (writer/thermal._resolve_weld_trajectories)
+    converts an accepted card and removes this note; a refused one keeps it.
+    """
+    raw = block.raw
+    f1 = _card(raw, 0, fixed=True, n=8, w=10)
+    f2 = _card(raw, 1, fixed=True, n=8, w=10)
+    f3 = _card(raw, 2, fixed=True, n=8, w=10)
+
+    def _fv(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i and f[i].strip() else 0.0
+
+    def _iv(f: List[str], i: int) -> int:
+        return to_int(f[i]) if len(f) > i and f[i].strip() else 0
+    ptyp_txt = f1[1].strip() if len(f1) > 1 else ""
+    state.weld_trajectories.append(WeldTrajectory(
+        pid=_iv(f1, 0), ptyp=to_int(ptyp_txt) if ptyp_txt else 1,
+        nsid1=_iv(f1, 2), spd1=_fv(f1, 3), nsid2=_iv(f1, 4), spd2=_fv(f1, 5),
+        ncyc=_iv(f1, 6), relvel=_iv(f1, 7), iform=_iv(f2, 0),
+        lcid=_iv(f2, 1), q=_fv(f2, 2), lcrot=_iv(f2, 3), lcmov=_iv(f2, 4),
+        lclat=_iv(f2, 5), disc=_fv(f2, 6), enfor=_iv(f2, 7),
+        p=[_fv(f3, k) for k in range(8)],
+        index=len(state.weld_trajectories)))
+    kw = "BOUNDARY_THERMAL_WELD_TRAJECTORY"
+    if state.options.weld_trajectory_impflux:
+        state.note_recognized_not_emitted(kw, _TRAJ_NOTE + ".")
+    else:
+        state.note_recognized_not_emitted(
+            block.keyword or kw,
+            f"{_TRAJ_WHAT} — no card written. {_TRAJ_TARGET_386444E}. "
+            "Registering the keyword is what lets this log say WHICH thermal "
+            "input the deck loses instead of leaving it in the "
+            "unrecognized-keyword list.")
+
+
 def handle_mat_tabulated_johnson_cook(block: Block,
                                       state: ConversionState) -> None:
     """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1].
@@ -20114,26 +20273,7 @@ RARE_MATERIAL_KEYWORDS = {
         "extract eigenvalues from — tempur.F:48-55 integrates the temperature "
         "explicitly on a lumped capacity, and the engine's own structural "
         "eigensolver is a compiled-out stub on this build"),
-    "MAT_THERMAL_CWM": _thermal_deferred(
-        "MAT_THERMAL_CWM",
-        "a computational-welding-mechanics thermal material: quiet/dead/live "
-        "property pairs interpolated by a phase fraction gamma(T_max) with an "
-        "element BIRTH time (Vol II R17 pp.3-25..3-27)",
-        "no Radioss counterpart for a BIRTH or a phase fraction — /HEAT/MAT "
-        "holds ONE (T0, RHO0_CP, AS, BS, T1, AL, BL) set "
-        "(hm_read_therm.F:157-166) with no birth, no ghost properties and no "
-        "peak-temperature history. The one shape that IS expressible is a "
-        "card born before t = 0 (TISTART, TIEND <= 0 and TLEND below T0, so "
-        "gamma = 1 from the first step, Vol II R17 pp.3-25..3-27 - every R14 "
-        "carrier's card is this shape): it is then the TD_LC material. It is "
-        "NOT converted because it cannot stand alone: MEASURED on 05_5_1, "
-        "converting it clears the starter's ERROR 179 (2 -> 0 errors) and "
-        "yields a ZERO-HEATING run - 293.15 K on every weld-path node over "
-        "4631 samples, 31 018 explicit conduction cycles to t 46.3 of 99 s at "
-        "the 600 s cap (66 332 for the whole 99 s against LS-DYNA's 64 "
-        "implicit steps) - because the deck's only heat source is the "
-        "*BOUNDARY_THERMAL_WELD_TRAJECTORY, which does not convert. It would "
-        "ship only together with that source (ROADMAP)"),
+    "MAT_THERMAL_CWM": handle_mat_thermal_cwm,
     "LOAD_THERMAL_D3PLOT": _thermal_deferred(
         "LOAD_THERMAL_D3PLOT",
         "nodal temperatures read from an external d3plot file, named by "
@@ -20372,23 +20512,15 @@ RARE_MATERIAL_KEYWORDS = {
         "arrives late); the whole seam needs 53 /IMPFLUX + 53 /GRBRIC at "
         "0.25 s windows (134 + 134 at 0.1 s), and the deck's Ff + Fr = 1.5 "
         "delivers 0.75 Q (the manual expects 2). That is a synthesis, not a "
-        "mapping, and is not implemented (ROADMAP). On the two thermal-only "
+        "mapping: the trajectory spelling *BOUNDARY_THERMAL_WELD_TRAJECTORY "
+        "is converted on its screened class (round 9, B1: each seam brick's "
+        "in-window mean of the double ellipsoid); this fixed-path spelling "
+        "has 0 carriers on five corpora and is not. On the two thermal-only "
         "carriers (05_5_1, 05_4_1) the seam is also a *MAT_THERMAL_CWM-only "
         "part (ERROR 179 today); the two coupled ones (05_2, 05_1) give the "
         "seam a mechanical *MAT_CWM and do not hit it"),
-    "BOUNDARY_THERMAL_WELD_TRAJECTORY": _thermal_deferred(
-        "BOUNDARY_THERMAL_WELD_TRAJECTORY",
-        "the nodal-path spelling of the moving welding heat source, with a "
-        "prescribed velocity along the path (Vol I R17 p.5-171)",
-        "no Radioss counterpart THAT MOVES, for the same reason as "
-        "*BOUNDARY_THERMAL_WELD: /IMPFLUX has no position argument and "
-        "nothing in the engine moves its group. Its volumetric form and its "
-        "own time window DO exist - see that entry for the two withdrawn "
-        "claims and for the measured window synthesis (53 /IMPFLUX + 53 "
-        "/GRBRIC per seam at 0.25 s). Censused on "
-        "F:: 4 cards on 4 keys; 05_1 is IFORM 2, Q 5e6, a 3.0 / b 2.5 / "
-        "cf 2.0 / cr 8.0, travelling 6 mm/s for 6.8 s along a 425-element "
-        "seam"),
+    "BOUNDARY_THERMAL_WELD_TRAJECTORY":
+        handle_boundary_thermal_weld_trajectory,
 }
 
 #: Vol II R17 p.2-9, verbatim: the ``*MAT_T##`` numeric aliases of the thermal

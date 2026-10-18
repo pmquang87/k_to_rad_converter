@@ -58,6 +58,21 @@ def _qstat_dtscal_arg(text: str) -> Union[str, float]:
     return v
 
 
+def _weld_window_arg(text: str) -> float:
+    """``--weld-trajectory-window`` takes a positive, finite number of seconds
+    (round 9, B1): the /IMPFLUX window of the weld-trajectory conversion."""
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--weld-trajectory-window takes a number of seconds, not {text!r}")
+    if not (v > 0.0 and v != float("inf")):
+        raise argparse.ArgumentTypeError(
+            "--weld-trajectory-window must be > 0 s and finite (use "
+            "--no-weld-trajectory-impflux to switch the conversion off)")
+    return v
+
+
 class _StatedQstatDtscal(argparse.Action):
     """``--qstat-dtscal``: store the value AND record that it was stated
     (R14 triage round 9, A11). ``--arclength-riks`` writes no
@@ -1021,6 +1036,32 @@ def build_parser() -> argparse.ArgumentParser:
              "OFF by default.",
     )
     parser.add_argument(
+        "--weld-trajectory-impflux",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (IFORM 2, SOLN 1, "
+             "NSID2 < 0, PTYP 1 / 2 on solid parts, its *MAT_THERMAL_CWM born "
+             "before t 0) into windowed /IMPFLUX VOLUMIC cards: each seam "
+             "brick gets its in-window mean of the double ellipsoid, the "
+             "source switched off past the end of NSID1; the CWM becomes the "
+             "part's /HEAT/MAT, a > 1000-frame d3plot cadence is capped at "
+             "ENDTIM / 100 and the TEMP history is the path + history nodes. "
+             "ON by default; a refused card keeps today's output with a named "
+             "sentence. MEASURED on 05_5_1 (one LS model, nt 4): NORMAL in "
+             "66 323 cycles, deposit -0.30 %% of LS-DYNA's source energy, "
+             "path peaks +5.03..+6.18 %% and END -11.81..-13.46 %% of the "
+             "rise; 721-2075 s of engine time. --no-weld-trajectory-impflux "
+             "restores the 386444e output.",
+    )
+    parser.add_argument(
+        "--weld-trajectory-window",
+        type=_weld_window_arg,
+        default=0.25,
+        metavar="S",
+        help="The /IMPFLUX window (seconds, > 0) of --weld-trajectory-impflux "
+             "(default 0.25, the measured window).",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1723,6 +1764,8 @@ def main(argv=None) -> int:
         modal_acoustic_void=args.modal_acoustic_void,
         mixed_main_thickness_gap=args.mixed_main_thickness_gap,
         implicit_bfgs=args.implicit_bfgs,
+        weld_trajectory_impflux=args.weld_trajectory_impflux,
+        weld_trajectory_window=args.weld_trajectory_window,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

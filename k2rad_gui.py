@@ -143,6 +143,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          modal_acoustic_void: bool = True,
                          mixed_main_thickness_gap: bool = False,
                          implicit_bfgs: bool = False,
+                         weld_trajectory_impflux: bool = True,
+                         weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -361,6 +363,21 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["implicit_bfgs"] = bool(implicit_bfgs)
 
+    kwargs["weld_trajectory_impflux"] = bool(weld_trajectory_impflux)
+    # round 9, B1: the window entry - blank = the measured 0.25 s; anything
+    # else must be a positive, finite number of seconds.
+    wtext = (weld_trajectory_window_text or "").strip()
+    if wtext:
+        try:
+            wval = float(wtext)
+        except ValueError:
+            raise ValueError(
+                f"Weld trajectory window must be a number of seconds, not "
+                f"{wtext!r}")
+        if not (wval > 0.0 and wval != float("inf")):
+            raise ValueError("Weld trajectory window must be > 0 s")
+        kwargs["weld_trajectory_window"] = wval
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -528,6 +545,8 @@ class ConverterGUI:
         self.modal_acoustic_void = tk.BooleanVar(value=True)
         self.mixed_main_thickness_gap = tk.BooleanVar(value=False)
         self.implicit_bfgs = tk.BooleanVar(value=False)
+        self.weld_trajectory_impflux = tk.BooleanVar(value=True)
+        self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1185,6 +1204,16 @@ class ConverterGUI:
             variable=self.implicit_bfgs).grid(
                 row=72, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_THERMAL_WELD_TRAJECTORY -> windowed /IMPFLUX "
+                     "VOLUMIC (its *MAT_THERMAL_CWM as /HEAT/MAT) - ON. "
+                     "05_5_1: NORMAL, deposit -0.30 % of LS. Window (s, blank "
+                     "= 0.25):",
+            variable=self.weld_trajectory_impflux).grid(
+                row=73, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Entry(io, textvariable=self.weld_trajectory_window,
+                  width=8).grid(row=73, column=2, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1472,6 +1501,8 @@ class ConverterGUI:
                 modal_acoustic_void=self.modal_acoustic_void.get(),
                 mixed_main_thickness_gap=self.mixed_main_thickness_gap.get(),
                 implicit_bfgs=self.implicit_bfgs.get(),
+                weld_trajectory_impflux=self.weld_trajectory_impflux.get(),
+                weld_trajectory_window_text=self.weld_trajectory_window.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1739,6 +1770,13 @@ class ConverterGUI:
         if kwargs.get("implicit_bfgs"):
             bits.append("implicit BFGS /IMPL/NONLIN/2 without /IMPL/QSTAT "
                         "(--implicit-bfgs)")
+        if not kwargs.get("weld_trajectory_impflux", True):
+            bits.append("weld trajectory NOT converted "
+                        "(--no-weld-trajectory-impflux)")
+        if kwargs.get("weld_trajectory_window", 0.25) != 0.25:
+            bits.append("weld trajectory window "
+                        f"{kwargs['weld_trajectory_window']:g} s "
+                        "(--weld-trajectory-window)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

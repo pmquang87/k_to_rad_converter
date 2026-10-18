@@ -56,14 +56,16 @@ factor 8.3e4, silently. Here ``LCID``/``MULT`` are the pair that is carried.
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..state import (ConversionState, Curve, ImposedTemperature,
                      InitialTemperature, MatElastic, MatPlasTAB,
                      MatThermalIsotropicTD, MatThermalOrthotropic,
-                     TgmultGeneration)
-from .common import HDR, _emit_grnod_node, _emit_surf_seg, _f, _i
+                     TgmultGeneration, WeldGroup, WeldPlan, WeldTrajectory)
+from .common import (HDR, _emit_grnod_node, _emit_id_group, _emit_surf_seg,
+                     _f, _i)
 
 __all__ = [
     "_resolve_thermal",
@@ -75,6 +77,8 @@ __all__ = [
     "_resolve_thermal_standins",
     "_THERMAL_STANDIN_E",
     "_THERMAL_STANDIN_NU",
+    "_resolve_weld_trajectories",
+    "_weld_anim_dt",
 ]
 
 
@@ -1976,6 +1980,10 @@ def _td_name(tm) -> str:
     """
     canon = "*MAT_THERMAL_ISOTROPIC_TD" + ("_LC" if tm.is_lc else "")
     spelling = getattr(tm, "spelling", "") or canon
+    if getattr(tm, "cwm", False):
+        # round 9, B1: the live material of an accepted weld trajectory's
+        # *MAT_THERMAL_CWM - the deck states no TD_LC card at all.
+        return f"{spelling} (born before t 0: its live TD_LC material)"
     return spelling if spelling == canon else f"{spelling} ({canon})"
 
 
@@ -4149,6 +4157,9 @@ def _make_thermal(state: ConversionState) -> List[str]:
     # `thermal_source_emitted` is set before _warn_inert_expansion and
     # _make_thermal_output read it.
     lines += _make_thermal_boundaries(state)
+    # round 9, B1: the accepted weld trajectories' windowed /IMPFLUX cards -
+    # a heat source like the three above, ids drawn here after every screen.
+    lines += _make_weld_impflux(state)
     _warn_inert_expansion(state)
     _warn_constant_driver_expansion(state)
     lines += _make_thermal_output(state, seen)
@@ -4330,6 +4341,22 @@ def _make_thermal_output(state: ConversionState,
                 if n in state.nodes and n not in have:
                     have.add(n)
                     nodes.append(n)
+    if state.weld_plans:
+        # round 9, B1 (the same gate as S2's: an ACCEPTED trajectory): the
+        # group is the NSID1 path nodes of every accepted trajectory in set
+        # order, then the deck's own *DATABASE_HISTORY_NODE nodes - 10 002
+        # driven / boundary nodes on 05_5_1 wrote a ~396 MB T01, its 26 path
+        # nodes ~5 MB. The count of the replaced group goes to S2's sentence.
+        k_old = len(nodes)
+        nodes, have = [], set()
+        hist = [n for h in state.db_histories
+                if h.db_type in ("NODE", "NODE_LOCAL") for n in h.ids]
+        for n in ([n for p in state.weld_plans for n in p.path_nodes]
+                  + hist):
+            if n in state.nodes and n not in have:
+                have.add(n)
+                nodes.append(n)
+        state.weld_temp_counts = (len(nodes), k_old)
     if not nodes:
         return []
     th_id = state.next_id()
@@ -4525,3 +4552,661 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
             "0.0000000, at 0 ERROR / 0 WARNING / NORMAL TERMINATION. Only the "
             "imposed nodes move (resol.F:1802 FIXTEMP is reached); nothing "
             "conducts. Run the thermal-expansion phase explicitly.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R14 triage round 9, B1: *BOUNDARY_THERMAL_WELD_TRAJECTORY -> windowed
+# /IMPFLUX VOLUMIC cards (default ON, --no-weld-trajectory-impflux)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: the 4-point sub-grid of a brick's (u, v, w) in [-1, 1]^3 -> 64 sub-points
+_WELD_SUB = (-0.75, -0.25, 0.25, 0.75)
+#: LS-DYNA / Radioss 8-node hexa corner signs (bottom face 1-4, top 5-8)
+_HEX_SIGNS = ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+              (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1))
+#: the mid-point instants per window and the midpoint-rule sub-steps of the
+#: travel integral (the measured rule: g1c's vfs prototype, spec B1.1.c)
+_WELD_INSTANTS = 10
+_WELD_TRAVEL_STEPS = 400
+#: S2: a SOLN-1 weld deck that requests MORE frames than this gets the
+#: engine /ANIM/DT = max(d3plot dt, ENDTIM / 100)
+_WELD_ANIM_FRAME_LIMIT = 1000
+#: the TD_LC capacity-spread rule the stand-in shares (_fit_td_conductivity)
+_WELD_CWM_CP_SPREAD_LIMIT = _TD_CP_SPREAD_LIMIT
+#: the exact far-brick pre-check of _weld_plan: a brick whose bounding sphere
+#: (centroid, farthest node) lies farther than the largest semi-axis from the
+#: source cannot hold a sub-point inside a lobe, so it is skipped. A switch
+#: only so a test can run the unskipped loop and compare (spec B1.6 test 14).
+_WELD_FAR_SKIP = True
+
+#: the 64 sub-points' trilinear weights, ONE table for every brick
+_WELD_WEIGHTS: List[Tuple[float, ...]] = [
+    tuple((1 + u * a) * (1 + v * b) * (1 + w * c) / 8.0
+          for a, b, c in _HEX_SIGNS)
+    for u in _WELD_SUB for v in _WELD_SUB for w in _WELD_SUB]
+#: 2 x 2 x 2 Gauss points: exact for the trilinear Jacobian determinant
+_GAUSS2 = (-1.0 / math.sqrt(3.0), 1.0 / math.sqrt(3.0))
+
+
+def _weld_lin(pts: List[Tuple[float, float]], x: float) -> float:
+    """A piecewise-linear curve at *x*, HELD at its end values outside its
+    abscissa range (the thermal source curves are never zeroed off scale -
+    B5's rule covers mechanical loads only)."""
+    if not pts:
+        return 0.0
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0) if x1 > x0 else y1
+    return pts[-1][1]
+
+
+def _weld_curve(state: ConversionState, lcid: int
+                ) -> Optional[List[Tuple[float, float]]]:
+    """The *DEFINE_CURVE points in abscissa order (``state.curves`` holds them
+    already scaled: ``((a + OFFA) SFA, (o + OFFO) SFO)``, handle_define_curve),
+    or None when the curve is missing or has fewer than two points."""
+    c = state.curves.get(lcid) if lcid > 0 else None
+    if c is None or len(c.pts) < 2:
+        return None
+    return sorted(c.pts)
+
+
+def _weld_travel(speed, t: float) -> float:
+    """``integral_0^t speed`` by the midpoint rule (400 sub-steps); *speed* is
+    a point list or a constant."""
+    if t <= 0.0:
+        return 0.0
+    if not isinstance(speed, list):
+        return float(speed) * t
+    h = t / _WELD_TRAVEL_STEPS
+    return sum(_weld_lin(speed, (k + 0.5) * h)
+               for k in range(_WELD_TRAVEL_STEPS)) * h
+
+
+def _weld_curve_integral(pts: List[Tuple[float, float]], t_end: float) -> float:
+    """``integral_0^t_end`` of the held piecewise-linear curve, exactly."""
+    if t_end <= 0.0:
+        return 0.0
+    xs = sorted({0.0, t_end} | {x for x, _ in pts if 0.0 < x < t_end})
+    return sum(0.5 * (_weld_lin(pts, a) + _weld_lin(pts, b)) * (b - a)
+               for a, b in zip(xs, xs[1:]))
+
+
+def _weld_t_last(pts: List[Tuple[float, float]]) -> float:
+    """The abscissa end of the LAST LCID segment with a positive ordinate at
+    either end (05_x_1: (6.9, 1) -> (7.0, 0) gives 7.0)."""
+    t_last = 0.0
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if y0 > 0.0 or y1 > 0.0:
+            t_last = x1
+    return t_last
+
+
+def _sub3(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _dot3(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross3(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _unit3(a):
+    m = math.sqrt(_dot3(a, a))
+    return (a[0] / m, a[1] / m, a[2] / m)
+
+
+def _hexa_subpoints(xs) -> List[Tuple[float, float, float]]:
+    """The 64 sub-points of a brick: the trilinear map of (u, v, w) in
+    {-0.75, -0.25, 0.25, 0.75}^3."""
+    return [(sum(wt[n] * xs[n][0] for n in range(8)),
+             sum(wt[n] * xs[n][1] for n in range(8)),
+             sum(wt[n] * xs[n][2] for n in range(8)))
+            for wt in _WELD_WEIGHTS]
+
+
+def _hexa_volume(xs) -> float:
+    """The volume of a trilinear brick: 2 x 2 x 2 Gauss on det J, exact for
+    every non-inverted 8-node hexahedron (det J is at most quadratic in each
+    of u, v, w)."""
+    vol = 0.0
+    for u in _GAUSS2:
+        for v in _GAUSS2:
+            for w in _GAUSS2:
+                du = [0.0, 0.0, 0.0]
+                dv = [0.0, 0.0, 0.0]
+                dw = [0.0, 0.0, 0.0]
+                for n, (a, b, c) in enumerate(_HEX_SIGNS):
+                    fu = a * (1 + v * b) * (1 + w * c) / 8.0
+                    fv = b * (1 + u * a) * (1 + w * c) / 8.0
+                    fw = c * (1 + u * a) * (1 + v * b) / 8.0
+                    for d in range(3):
+                        du[d] += fu * xs[n][d]
+                        dv[d] += fv * xs[n][d]
+                        dw[d] += fw * xs[n][d]
+                vol += _dot3(du, _cross3(dv, dw))
+    return abs(vol)
+
+
+def _weld_lobe_fractions(pts, pos, r, s, t, a: float, b: float, cf: float,
+                         cr: float) -> Tuple[float, float]:
+    """The fraction of *pts* inside the FRONT (x_r >= 0, semi-axes cf / a / b)
+    and the REAR (x_r < 0, cr / a / b) quarter-ellipsoids of the IFORM-2
+    double ellipsoid centred at *pos* in the frame (r, s, t)."""
+    nf = nr = 0
+    for p in pts:
+        d = (p[0] - pos[0], p[1] - pos[1], p[2] - pos[2])
+        xr = d[0] * r[0] + d[1] * r[1] + d[2] * r[2]
+        xs_ = d[0] * s[0] + d[1] * s[1] + d[2] * s[2]
+        xt = d[0] * t[0] + d[1] * t[1] + d[2] * t[2]
+        lat = (xs_ / a) ** 2 + (xt / b) ** 2
+        if xr >= 0.0:
+            if (xr / cf) ** 2 + lat <= 1.0:
+                nf += 1
+        elif (xr / cr) ** 2 + lat <= 1.0:
+            nr += 1
+    n = float(len(pts))
+    return nf / n, nr / n
+
+
+def _weld_heated_pids(state: ConversionState, tr: WeldTrajectory
+                      ) -> Optional[List[int]]:
+    """PID as a *PART id (PTYP 1) or a *SET_PART id (PTYP 2); None for any
+    other PTYP or an unknown id."""
+    if tr.ptyp == 1:
+        return [tr.pid] if tr.pid in state.parts else None
+    if tr.ptyp == 2:
+        ps = state.part_sets.get(tr.pid)
+        if ps is None or not ps[1]:
+            return None
+        return list(dict.fromkeys(ps[1]))
+    return None
+
+
+def _weld_driven_nodes(state: ConversionState) -> Tuple[Set[int], Set[int],
+                                                        bool]:
+    """``(driven / loaded node ids, driven / loaded part ids, whole model)``
+    of every *BOUNDARY_PRESCRIBED_MOTION_* and *LOAD_NODE / _SEGMENT /
+    _SHELL / _BODY / _RIGID_BODY / _GRAVITY_PART record (screen 6)."""
+    nodes: Set[int] = set()
+    pids: Set[int] = set()
+    whole = False
+    for pm in state.prescribed_motions:
+        pids.add(pm.pid)
+    for ps in state.prescribed_motion_sets:
+        if ps.nsid in state.node_sets:
+            nodes.update(state.node_sets[ps.nsid][1])
+        else:
+            whole = True              # a _BOX motion over "every node inside"
+    for ln in state.load_nodes:
+        if ln.nsid in state.node_sets:
+            nodes.update(state.node_sets[ln.nsid][1])
+    for pl in state.pressure_loads:
+        nodes.update(pl.nodes)
+    for sp in state.segment_set_pressure_loads:
+        ss = state.segment_sets.get(sp.ssid)
+        if ss is not None:
+            for seg in ss.segments:
+                nodes.update(seg)
+    if state.shell_pressure_loads:
+        eids = {e for sl in state.shell_pressure_loads for e in sl.eids}
+        for el in state.shell_elems:
+            if el.eid in eids:
+                nodes.update(el.nodes)
+    for lr in state.load_rigid_bodies:
+        pids.add(lr.pid)
+    for gl in state.gravity_loads:
+        pids.add(gl.pid)
+    if state.body_loads or state.body_load_vectors or state.body_load_rots:
+        if state.body_load_psid and state.body_load_psid in state.part_sets:
+            pids.update(state.part_sets[state.body_load_psid][1])
+        else:
+            whole = True
+    nodes.discard(0)
+    return nodes, pids, whole
+
+
+def _weld_born_t0(state: ConversionState) -> float:
+    """The T0 the stand-in /HEAT/MAT is written with (the deck's model-wide
+    initial temperature; 0.0 when it states none)."""
+    return _heat_mat_t0(state, _global_initial_temperature(state))
+
+
+def _weld_refusal(state: ConversionState, tr: WeldTrajectory) -> Optional[str]:
+    """The FIRST failing test of the B1 screen (spec B1.1.b, in its order), or
+    None when the trajectory is accepted. Reads only the parsed records - it
+    draws no id and writes nothing."""
+    if tr.iform != 2:
+        return (f"IFORM {tr.iform}: only the IFORM-2 double ellipsoid is "
+                "measured")
+    if tr.enfor != 0:
+        return (f"ENFOR {tr.enfor}: an enforced-temperature source is not "
+                "converted")
+    if not tr.q > 0.0:
+        return f"Q {tr.q:g} <= 0"
+    a, b, cf, cr = tr.p[0], tr.p[1], tr.p[2], tr.p[3]
+    if not (a > 0.0 and b > 0.0 and cf > 0.0 and cr > 0.0):
+        return (f"P1..P4 (a {a:g}, b {b:g}, cf {cf:g}, cr {cr:g}): every "
+                "IFORM-2 semi-axis must be > 0")
+    if state.ctrl_solution_soln != 1:
+        return (f"SOLN {state.ctrl_solution_soln}: only the thermal-only "
+                "solution is measured; a coupled run is a different card set")
+    if tr.relvel != 0:
+        return (f"RELVEL {tr.relvel}: a source moving relative to a moving "
+                "body is not converted")
+    if tr.lcrot or tr.lcmov or tr.lclat:
+        return (f"LCROT {tr.lcrot} / LCMOV {tr.lcmov} / LCLAT {tr.lclat}: the "
+                "source's rotation, motion and lateral-offset curves are not "
+                "converted")
+    ns = state.node_sets.get(tr.nsid1)
+    path = list(ns[1]) if ns is not None else []
+    if len(path) < 2 or any(n not in state.nodes for n in path):
+        return (f"NSID1 {tr.nsid1}: the path set is missing, names a node the "
+                "deck does not define, or holds fewer than two nodes")
+    heated = _weld_heated_pids(state, tr)
+    d_nodes, d_pids, whole = _weld_driven_nodes(state)
+    if whole or d_nodes or d_pids:
+        node_pids: Dict[int, Set[int]] = defaultdict(set)
+        path_set = set(path)
+        for fam in (state.solid_elems, state.shell_elems, state.tshell_elems):
+            for el in fam:
+                for n in el.nodes:
+                    if n in path_set:
+                        node_pids[n].add(el.pid)
+        for n in path:
+            hit = sorted(node_pids[n] & d_pids)
+            if whole or n in d_nodes or hit:
+                pid = hit[0] if hit else sorted(node_pids[n] or {0})[0]
+                return f"NSID1 node {n} is on driven / loaded part {pid}"
+    if tr.nsid2 >= 0:
+        return (f"NSID2 {tr.nsid2}: only an aim by a segment set (NSID2 < 0) "
+                "is measured")
+    ss = state.segment_sets.get(abs(tr.nsid2))
+    segs = [list(s) for s in ss.segments] if ss is not None else []
+    for k in range(len(path) - 1):
+        if not any(path[k] in sg and path[k + 1] in sg for sg in segs):
+            return (f"NSID1 edge {path[k]}-{path[k + 1]} lies on no segment "
+                    f"of set {abs(tr.nsid2)}: the source has no aim there")
+    if heated is None:
+        return (f"PTYP {tr.ptyp}: only 1 (part) and 2 (part set) exist"
+                if tr.ptyp not in (1, 2) else
+                f"PTYP {tr.ptyp} PID {tr.pid} names no "
+                + ("*PART" if tr.ptyp == 1 else "*SET_PART"))
+    hset = set(heated)
+    for pid in heated:
+        if pid not in state.parts:
+            return f"PTYP 2 set {tr.pid} names part {pid}, which does not exist"
+    fam_of = (("shell", state.shell_elems), ("thick-shell",
+              state.tshell_elems), ("beam", state.beam_elems))
+    for family, elems in fam_of:
+        for el in elems:
+            if el.pid in hset:
+                return (f"part {el.pid} carries {family} elements: the source "
+                        "is volumetric")
+    n_solid = 0
+    for el in state.solid_elems:
+        if el.pid in hset:
+            if len(el.nodes) != 8:
+                return (f"part {el.pid} carries {len(el.nodes)}-node solid "
+                        "elements: the source is mapped on 8-node bricks")
+            n_solid += 1
+    if not n_solid:
+        return "the heated part(s) own no solid element"
+    t0 = _weld_born_t0(state)
+    for pid in heated:
+        part = state.parts[pid]
+        cwm = state.thermal_cwm.get(part.tmid) if part.tmid else None
+        if cwm is not None:
+            if not (cwm.tistart <= 0.0 and cwm.tiend <= 0.0
+                    and cwm.tlend < t0):
+                return (f"the *MAT_THERMAL_CWM {cwm.tmid} of part {pid} is "
+                        f"not born before t 0 (TISTART {cwm.tistart:g}, TIEND "
+                        f"{cwm.tiend:g}, TLEND {cwm.tlend:g} vs T0 {t0:g}): "
+                        "the ghost / birth phase has no Radioss counterpart")
+            hc = _weld_curve(state, cwm.lchc)
+            tc = _weld_curve(state, cwm.lctc)
+            if hc is None or tc is None:
+                return (f"the *MAT_THERMAL_CWM {cwm.tmid} of part {pid} names "
+                        f"LCHC {cwm.lchc} / LCTC {cwm.lctc}, and a curve "
+                        "with at least two points is missing: its live "
+                        "material has nothing to fit")
+            cps = [y for _x, y in hc if y]
+            if not cps or min(cps) <= 0.0 or (
+                    max(cps) / min(cps) > _WELD_CWM_CP_SPREAD_LIMIT):
+                return (f"the *MAT_THERMAL_CWM {cwm.tmid} of part {pid}: its "
+                        f"specific heat (LCHC {cwm.lchc}) is not positive or "
+                        f"varies by more than {_WELD_CWM_CP_SPREAD_LIMIT:g}x, "
+                        "and /HEAT/MAT carries ONE RHO0_CP (the TD_LC rule)")
+            if not cwm.tro > 0.0:
+                return (f"the *MAT_THERMAL_CWM {cwm.tmid} of part {pid} states "
+                        f"TRO {cwm.tro:g}: its stand-in needs a positive "
+                        "density")
+        elif _thermal_material_for_part(state, pid) is None:
+            return (f"part {pid}'s TMID {part.tmid} names neither a "
+                    "*MAT_THERMAL_CWM nor a converted thermal material")
+    if tr.spd1 < 0.0 and _weld_curve(state, int(abs(tr.spd1))) is None:
+        return (f"SPD1 {tr.spd1:g}: speed curve {int(abs(tr.spd1))} is "
+                "missing or has fewer than two points")
+    lc = _weld_curve(state, tr.lcid)
+    if lc is None:
+        return (f"LCID {tr.lcid}: the power curve is missing or has fewer than "
+                "two points (only a curve-driven source is measured)")
+    if _weld_t_last(lc) <= 0.0:
+        return f"LCID {tr.lcid} has no positive ordinate after t 0"
+    return None
+
+
+def _weld_plan(state: ConversionState, tr: WeldTrajectory,
+               window: float) -> WeldPlan:
+    """The deposit of an ACCEPTED trajectory (spec B1.1.c): per window of
+    *window* s, each seam brick's mean flux density over 10 mid-point
+    instants, from the fraction of its 64 sub-points inside the front / rear
+    quarter-ellipsoid at the source position the SPD1 travel gives - OFF once
+    the travel passes the end of NSID1 - grouped by the %.3g value."""
+    heated = _weld_heated_pids(state, tr) or []
+    hset = set(heated)
+    path = list(state.node_sets[tr.nsid1][1])
+
+    def _xyz(n: int) -> Tuple[float, float, float]:
+        p = state.nodes[n]
+        return (p.x, p.y, p.z)
+    pp = [_xyz(n) for n in path]
+    cum = [0.0]
+    for k in range(len(pp) - 1):
+        cum.append(cum[-1] + math.sqrt(_dot3(_sub3(pp[k + 1], pp[k]),
+                                            _sub3(pp[k + 1], pp[k]))))
+    l_path = cum[-1]
+    segs = [list(s) for s in state.segment_sets[abs(tr.nsid2)].segments]
+    frames = []
+    for k in range(len(pp) - 1):
+        r = _unit3(_sub3(pp[k + 1], pp[k]))
+        acc = (0.0, 0.0, 0.0)
+        first = None
+        for sg in segs:
+            if path[k] in sg and path[k + 1] in sg:
+                if len(sg) < 4 or any(n not in state.nodes for n in sg[:4]):
+                    continue
+                x = [_xyz(n) for n in sg[:4]]
+                nn = _unit3(_cross3(_sub3(x[2], x[0]), _sub3(x[3], x[1])))
+                if first is None:
+                    first = nn
+                elif _dot3(nn, first) < 0.0:
+                    nn = (-nn[0], -nn[1], -nn[2])
+                acc = (acc[0] + nn[0], acc[1] + nn[1], acc[2] + nn[2])
+        tn = _sub3(acc, tuple(_dot3(acc, r) * c for c in r))
+        tn = _unit3(tn)
+        frames.append((r, _cross3(tn, r), tn))
+
+    def _frame(sv: float):
+        k = 0
+        while k < len(pp) - 2 and cum[k + 1] < sv:
+            k += 1
+        seg = cum[k + 1] - cum[k]
+        w = min(max((sv - cum[k]) / seg, 0.0), 1.0) if seg > 0.0 else 0.0
+        pos = tuple(pp[k][d] + w * (pp[k + 1][d] - pp[k][d]) for d in range(3))
+        return (pos,) + frames[k]
+    a, b, cf, cr, ff, fr = tr.p[0], tr.p[1], tr.p[2], tr.p[3], tr.p[4], tr.p[5]
+    qf = 3.0 * ff * tr.q / (2.0 * math.pi * a * b * cf)
+    qr = 3.0 * fr * tr.q / (2.0 * math.pi * a * b * cr)
+    reach = max(cf, cr, a, b)
+    seam = [el for el in state.solid_elems if el.pid in hset]
+    sub: Dict[int, List[Tuple[float, float, float]]] = {}
+    vol: Dict[int, float] = {}
+    ball: Dict[int, Tuple[Tuple[float, float, float], float]] = {}
+    for el in seam:
+        xs = [_xyz(n) for n in el.nodes]
+        sub[el.eid] = _hexa_subpoints(xs)
+        vol[el.eid] = _hexa_volume(xs)
+        cen = (sum(x[0] for x in xs) / 8.0, sum(x[1] for x in xs) / 8.0,
+               sum(x[2] for x in xs) / 8.0)
+        rad = max(math.sqrt(_dot3(_sub3(x, cen), _sub3(x, cen))) for x in xs)
+        ball[el.eid] = (cen, rad)
+    speed: Any = (_weld_curve(state, int(abs(tr.spd1))) if tr.spd1 < 0.0
+                  else tr.spd1)
+    lc = _weld_curve(state, tr.lcid) or []
+    t_last = _weld_t_last(lc)
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 0.0
+    if endtim > 0.0:
+        t_last = min(t_last, endtim)
+    nwin = int(math.ceil(t_last / window - 1e-9))
+    plan = WeldPlan(traj=tr, heated_pids=heated, window=window, nwin=nwin,
+                    t_last=t_last, l_path=l_path, path_nodes=path)
+    for k in range(nwin):
+        t0, t1 = k * window, min((k + 1) * window, t_last)
+        qe: Dict[int, float] = {}
+        for m in range(_WELD_INSTANTS):
+            tm = t0 + (m + 0.5) * (t1 - t0) / _WELD_INSTANTS
+            sv = _weld_travel(speed, tm)
+            if sv > l_path:
+                continue                    # past the end of NSID1: OFF
+            lcv = _weld_lin(lc, tm)
+            pos, r, s, t = _frame(sv)
+            for eid, pts in sub.items():
+                cen, rad = ball[eid]
+                dc = _sub3(cen, pos)
+                if (_WELD_FAR_SKIP
+                        and math.sqrt(_dot3(dc, dc)) - rad > reach):
+                    continue                # no sub-point can be in a lobe
+                fff, ffr = _weld_lobe_fractions(pts, pos, r, s, t, a, b, cf,
+                                                cr)
+                if fff or ffr:
+                    qe[eid] = qe.get(eid, 0.0) + lcv * (qf * fff + qr * ffr)
+        grp: Dict[float, List[int]] = {}
+        for eid, v in qe.items():
+            v /= _WELD_INSTANTS
+            if v > 0.0:
+                grp.setdefault(float("%.3g" % v), []).append(eid)
+        for key in sorted(grp):
+            bricks = sorted(grp[key])
+            plan.groups.append(WeldGroup(k, t0, t1, key, bricks))
+            plan.energy += key * sum(vol[e] for e in bricks) * (t1 - t0)
+    plan.target = tr.q * _weld_curve_integral(lc, t_last)
+    return plan
+
+
+def _weld_cwm_standin(state: ConversionState, plan: WeldPlan) -> None:
+    """The accepted trajectory's *MAT_THERMAL_CWM (born before t 0) becomes
+    its part's LIVE material: a TD_LC record whose capacity is the LCHC
+    ordinates and whose conductivity points are LCTC's, so the shared
+    stand-in pass writes /MAT/ELAST (RHO_I = TRO, E 1, nu 0.3) and
+    _fit_td_conductivity the /HEAT/MAT (RHO0_CP = TRO x mean(LCHC), AS = AL,
+    BS = BL = one least-squares line through LCTC)."""
+    for pid in plan.heated_pids:
+        part = state.parts[pid]
+        cwm = state.thermal_cwm.get(part.tmid) if part.tmid else None
+        if cwm is None or cwm.tmid in state.mat_thermal_iso_td:
+            continue
+        hc = _weld_curve(state, cwm.lchc) or []
+        tc = _weld_curve(state, cwm.lctc) or []
+        state.mat_thermal_iso_td[cwm.tmid] = MatThermalIsotropicTD(
+            tmid=cwm.tmid, title=cwm.title, tro=cwm.tro, tgrlc=cwm.tgrlc,
+            tgmult=cwm.tgmult, tlat=cwm.tlat, hlat=cwm.hlat,
+            temps=[x for x, _y in tc], cps=[y for _x, y in hc],
+            ks=[y for _x, y in tc], hclc=cwm.lchc, tclc=cwm.lctc,
+            is_lc=True, spelling="*" + cwm.keyword_seen, cwm=True)
+        plan.cwm_tmid = cwm.tmid
+
+
+def _weld_warn_accepted(state: ConversionState, plan: WeldPlan) -> None:
+    tr = plan.traj
+    n = len(plan.groups)
+    frac = plan.energy / plan.target if plan.target > 0.0 else 0.0
+    cwm_clause = ""
+    if plan.cwm_tmid:
+        tm = state.mat_thermal_iso_td[plan.cwm_tmid]
+        cwm = state.thermal_cwm[plan.cwm_tmid]
+        cps = [c for c in tm.cps if c]
+        rho_cp = tm.tro * sum(cps) / len(cps)
+        a_s, bs = _least_squares_line(list(zip(tm.temps, tm.ks)))
+        pids = [p for p in plan.heated_pids
+                if state.parts[p].tmid == plan.cwm_tmid]
+        cwm_clause = (
+            f"The *MAT_THERMAL_CWM {cwm.tmid} of part(s) {pids} (born before "
+            f"t 0: TISTART {cwm.tistart:g}, TIEND {cwm.tiend:g}, TLEND "
+            f"{cwm.tlend:g} < T0 {_weld_born_t0(state):g}) becomes its live "
+            f"material as a /HEAT/MAT: RHO0_CP {rho_cp:g} (TRO x the mean cp "
+            f"of LCHC {cwm.lchc}), AS = AL {a_s:.10g}, BS = BL {bs:.10g} (one "
+            f"line through the LCTC {cwm.lctc} points) on a structural "
+            "stand-in /MAT/ELAST (RHO_I = TRO, E 1, nu 0.3): the peak runs "
+            "hot by the constant cp. ")
+    state.warn(
+        f"*BOUNDARY_THERMAL_WELD_TRAJECTORY on part {tr.pid} (PTYP {tr.ptyp}) "
+        f"-> {n} /IMPFLUX VOLUMIC cards on {n} /GRBRIC groups (window "
+        f"{plan.window:g} s, {plan.nwin} windows to t {plan.t_last:g}): "
+        "OpenRadioss has no moving heat source - /IMPFLUX has no position "
+        "argument and a fixed /GRBRIC group receives VOLG x FLUX_DENS x DT1N, "
+        "1/8 per node, inside its exact [TSTART, TSTOP] overlap "
+        "(fixflux.F:115-128, :205-238) - so LS-DYNA's IFORM-2 double "
+        "ellipsoid (q = 3 F Q / (2 pi a b c) in the front / rear "
+        f"quarter-ellipsoids aimed along the normals of segment set "
+        f"{abs(tr.nsid2)}, Vol I R17 pp.5-172..5-176) is deposited per window "
+        "as each brick's in-window mean: the fraction of its 64 sub-points "
+        "inside each lobe at 10 mid-point instants along NSID1 "
+        f"{tr.nsid1} ({plan.l_path:g} mm) at the SPD1 travel, clipped to the "
+        f"heated part(s) {plan.heated_pids}, and OFF once the travel passes "
+        "the end of NSID1 (LS-DYNA's own Qgen is flat from 6.7 s on 05_5_1 "
+        f"while LCID is 1.0 to 6.9 s). NCYC {tr.ncyc} is not used (the 10 "
+        f"instants replace it). The deposit delivers {frac:.4f} of Q x the "
+        f"LCID integral. {cwm_clause}MEASURED on "
+        "thermal/welding-new/uncoupled-binout/05_5_1 (= 05_4_1: ONE LS run, so "
+        "the evidence base is one model; nt 4): NORMAL in 66 323 conduction "
+        "cycles (the source adds none), 721-2075 s of engine time by machine "
+        "load (1.2-3.5x the campaign's 600 s); the deposit within -0.30 % of "
+        "LS-DYNA's own source energy; the first / middle / last path nodes "
+        "peak +5.03 / +6.05 / +6.18 % of T, end the 99 s run 11.81 / 13.46 / "
+        "12.22 % of their rise cool, RMS 2.28 / 2.07 / 2.61 % of the peak "
+        "rise (63 LS times 0 < t <= 98.991 s); the stored heat is 11.8 % "
+        "below LS-DYNA's tprint at t 99 - boundary radiation, not deposit "
+        "(LS-DYNA's printed boundary energy is 0.52-1.04 of the textbook "
+        "formula on its own temperatures). --no-weld-trajectory-impflux "
+        "restores the 386444e output.")
+
+
+def _resolve_weld_trajectories(state: ConversionState) -> List[WeldPlan]:
+    """Screen every recorded *BOUNDARY_THERMAL_WELD_TRAJECTORY and plan the
+    accepted ones (memoised on ``state.weld_plans``). Runs in build_starter
+    BEFORE _resolve_thermal: an accepted card's *MAT_THERMAL_CWM is
+    registered as a TD_LC record there, so the stand-in and /HEAT/MAT passes
+    treat its part like any other thermal part. Draws no card id - the
+    /GRBRIC and /IMPFLUX ids are drawn by _make_weld_impflux at emission,
+    after every screen (a refused deck stays byte-identical to the opt-out);
+    the one shared unit /FUNCT is registered here so _make_functions writes
+    it. A refused card keeps today's output and its notes, with ONE named
+    sentence."""
+    if state.weld_plans is not None:
+        return state.weld_plans
+    plans: List[WeldPlan] = []
+    state.weld_plans = plans
+    if not state.options.weld_trajectory_impflux or not state.weld_trajectories:
+        return plans
+    window = float(state.options.weld_trajectory_window)
+    refused = 0
+    for tr in state.weld_trajectories:
+        why = _weld_refusal(state, tr)
+        if why:
+            refused += 1
+            state.warn(
+                f"*BOUNDARY_THERMAL_WELD_TRAJECTORY on part {tr.pid}: not "
+                f"converted - {why}; the part keeps today's output (starter "
+                "ERROR 179 when its only thermal material is a "
+                "*MAT_THERMAL_CWM).")
+            continue
+        plans.append(_weld_plan(state, tr, window))
+    if not plans:
+        return plans
+    for plan in plans:
+        _weld_cwm_standin(state, plan)
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
+    fid = state.next_curve_id()
+    state.curves[fid] = Curve(fid, "weld_trajectory_unit", 1.0, 1.0, 0.0, 0.0,
+                              [(0.0, 1.0), (max(2.0 * endtim, 1000.0), 1.0)])
+    state.weld_unit_funct = fid
+    for plan in plans:
+        _weld_warn_accepted(state, plan)
+    # The notes give way to the conversion sentence: the trajectory's when
+    # EVERY trajectory converts, a CWM's when EVERY recorded CWM is the live
+    # material of an accepted trajectory (deduplicated on the keyword).
+    live = {p.cwm_tmid for p in plans if p.cwm_tmid}
+    drop: Set[str] = set()
+    if not refused:
+        drop.add("BOUNDARY_THERMAL_WELD_TRAJECTORY")
+    if live and all(t in live for t in state.thermal_cwm):
+        drop |= {c.keyword_seen for c in state.thermal_cwm.values()}
+    if drop:
+        state.recognized_not_emitted = [
+            (kw, why) for kw, why in state.recognized_not_emitted
+            if kw not in drop]
+    return plans
+
+
+def _make_weld_impflux(state: ConversionState) -> List[str]:
+    """ONE /GRBRIC/BRIC + ONE /IMPFLUX VOLUMIC per group of every accepted
+    plan (radioss2018/LOADS/impflux.cfg: SURF_ID 0, the shared unit FUNCT,
+    SENSOR 0, GRBRIC_ID; ASCALE 1, FSCALE = the group's flux density, TSTART
+    / TSTOP = its window). The ids are drawn HERE, after every screen."""
+    plans = state.weld_plans or []
+    if not plans:
+        return []
+    lines: List[str] = [
+        "#-  WELD HEAT SOURCE (*BOUNDARY_THERMAL_WELD_TRAJECTORY -> windowed "
+        "/IMPFLUX VOLUMIC):",
+        HDR,
+    ]
+    fid = state.weld_unit_funct
+    for plan in plans:
+        per_win: Dict[int, int] = defaultdict(int)
+        for g in plan.groups:
+            per_win[g.window] += 1
+            title = (f"weld_t{plan.traj.pid}_w{g.window:03d}_"
+                     f"g{per_win[g.window]:04d}")
+            gid = state.next_elem_group_id()
+            lines += _emit_id_group("GRBRIC/BRIC", gid, title, g.bricks)
+            cid = state.next_id()
+            lines += [
+                f"/IMPFLUX/{cid}",
+                title,
+                "#  SURF_ID  FUNCT_ID SENSOR_ID GRBRIC_ID",
+                f"{_i(0)}{_i(fid)}{_i(0)}{_i(gid)}",
+                "#             ASCALE              FSCALE              TSTART"
+                "               TSTOP",
+                f"{_f(1.0)}{_f(g.fscale)}{_f(g.t0)}{_f(g.t1)}",
+                HDR,
+            ]
+    state.thermal_source_emitted = True
+    return lines
+
+
+def _weld_anim_dt(state: ConversionState, dt_anim: float,
+                  endtim: float) -> float:
+    """S2: the engine /ANIM/DT of a SOLN-1 deck with an ACCEPTED trajectory
+    that requests more than 1000 frames is max(d3plot dt, ENDTIM / 100) -
+    LS-DYNA's implicit thermal step bounded its own state count (05_5_1: 65
+    states for 9 900 requested) while OpenRadioss's explicit conduction step
+    writes every requested frame (freanim.F). Any other deck: *dt_anim*."""
+    if (not state.weld_plans or state.ctrl_solution_soln != 1
+            or dt_anim <= 0.0 or endtim <= 0.0):
+        return dt_anim
+    n_req = endtim / dt_anim
+    if n_req <= _WELD_ANIM_FRAME_LIMIT:
+        return dt_anim
+    capped = max(dt_anim, endtim / 100.0)
+    k, k_old = state.weld_temp_counts or (0, 0)
+    state.warn(
+        f"/ANIM/DT {capped:g} = max(the d3plot dt {dt_anim:g}, ENDTIM / 100) "
+        "on this SOLN-1 weld deck: the d3plot cadence would write "
+        f"{n_req:.0f} animation frames over OpenRadioss's explicit conduction "
+        "step (every requested frame is written), where LS-DYNA's implicit "
+        "thermal step bounded its own state count (05_5_1: 65 states for "
+        "9 900 requested); measured on 05_5_1: 100 frames = 351.5 MB instead "
+        "of 34.80 GB. The temperature history is the /TH/NODE TEMP group on "
+        f"the {k} NSID1 + *DATABASE_HISTORY_NODE nodes (it replaces the "
+        f"{k_old}-node group of every driven / loaded node).")
+    return capped

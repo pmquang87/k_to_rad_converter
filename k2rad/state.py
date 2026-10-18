@@ -4,6 +4,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
 
@@ -7107,6 +7108,109 @@ class MatThermalIsotropicTD:
     #: The keyword the DECK actually wrote, so messages name that and not a
     #: synonym the reader would have to look up.
     spelling: str = ""
+    #: R14 triage round 9, B1: the record is the LIVE material of an accepted
+    #: *BOUNDARY_THERMAL_WELD_TRAJECTORY's *MAT_THERMAL_CWM (born before
+    #: t 0), registered by writer/thermal._resolve_weld_trajectories - the
+    #: deck states no TD_LC card, so messages name the CWM instead.
+    cwm: bool = False
+
+
+@dataclass
+class ThermalCwm:
+    """*MAT_THERMAL_CWM (T07) - RECORDED (R14 triage round 9, B1).
+
+    Card 1 ``TMID TRO TGRLC TGMULT HDEAD TDEAD TLAT HLAT``, card 2 ``LCHC
+    LCTC TLSTART TLEND TISTART TIEND HGHOST TGHOST`` (Vol II R17
+    pp.3-25..3-27), 10-wide fixed fields. It converts ONLY together with an
+    accepted *BOUNDARY_THERMAL_WELD_TRAJECTORY and only when it is born
+    before t 0 (``TISTART <= 0``, ``TIEND <= 0``, ``TLEND`` below the part's
+    T0): then gamma = 1 from the first step and the card IS its live
+    TD_LC material (writer/thermal._resolve_weld_trajectories).
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    hdead: float = 0.0
+    tdead: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    lchc: int = 0
+    lctc: int = 0
+    tlstart: float = 0.0
+    tlend: float = 0.0
+    tistart: float = 0.0
+    tiend: float = 0.0
+    hghost: float = 0.0
+    tghost: float = 0.0
+    #: the keyword the deck wrote (*MAT_THERMAL_CWM or its alias *MAT_T07)
+    keyword_seen: str = "MAT_THERMAL_CWM"
+
+
+@dataclass
+class WeldTrajectory:
+    """*BOUNDARY_THERMAL_WELD_TRAJECTORY - RECORDED (R14 triage round 9, B1).
+
+    Card 1 ``PID PTYP NSID1 SPD1 NSID2 SPD2 NCYC RELVEL``, card 2 ``IFORM
+    LCID Q LCROT LCMOV LCLAT DISC ENFOR``, card 3 ``P1..P8`` (IFORM 2: a b
+    cf cr Ff Fr), 10-wide fixed fields (Vol I R17 pp.5-171..5-177). A blank
+    PTYP is the manual's default 1 (= PID is a *PART id, p.5-172). A
+    truncated card reads its missing cells as 0, so an incomplete record is
+    REFUSED by the writer's screen (IFORM 0), never by an exception.
+    """
+    pid: int
+    ptyp: int = 1
+    nsid1: int = 0
+    spd1: float = 0.0
+    nsid2: int = 0
+    spd2: float = 0.0
+    ncyc: int = 0
+    relvel: int = 0
+    iform: int = 0
+    lcid: int = 0
+    q: float = 0.0
+    lcrot: int = 0
+    lcmov: int = 0
+    lclat: int = 0
+    disc: float = 0.0
+    enfor: int = 0
+    p: List[float] = field(default_factory=lambda: [0.0] * 8)
+    #: 0-based position among the deck's trajectory cards (for the messages)
+    index: int = 0
+
+
+@dataclass
+class WeldGroup:
+    """One window's group of seam bricks sharing one rounded flux density:
+    ONE ``/GRBRIC/BRIC`` + ONE ``/IMPFLUX`` VOLUMIC card (round 9, B1)."""
+    window: int
+    t0: float
+    t1: float
+    fscale: float
+    bricks: List[int] = field(default_factory=list)
+
+
+@dataclass
+class WeldPlan:
+    """An ACCEPTED *BOUNDARY_THERMAL_WELD_TRAJECTORY's deposit (round 9, B1;
+    writer/thermal._weld_plan): the windows, the groups and the numbers the
+    acceptance warning states. Ids are drawn at emission, after every
+    screen (writer/thermal._make_weld_impflux)."""
+    traj: WeldTrajectory
+    heated_pids: List[int]
+    window: float
+    nwin: int
+    t_last: float
+    l_path: float
+    path_nodes: List[int]
+    groups: List[WeldGroup] = field(default_factory=list)
+    #: delivered energy sum_g FSCALE_g x V_g x (t1 - t0) and its target
+    #: Q x the LCID integral over [0, t_last]
+    energy: float = 0.0
+    target: float = 0.0
+    #: the *MAT_THERMAL_CWM tmid that became the live material (0 = none)
+    cwm_tmid: int = 0
 
 
 @dataclass
@@ -8336,6 +8440,31 @@ class ConvertOptions:
     # internal energy) - so never a default. Default False = the 386444e
     # bytes.
     implicit_bfgs: bool = False
+    # --no-weld-trajectory-impflux: a *BOUNDARY_THERMAL_WELD_TRAJECTORY and
+    # its *MAT_THERMAL_CWM stay unconverted (the 386444e output: the seam
+    # part keeps mat_ID 0, starter ERROR 179 + 3046).
+    #
+    # ON by default (R14 triage round 9, B1): writer/thermal.
+    # _resolve_weld_trajectories screens each trajectory (IFORM 2, ENFOR 0,
+    # Q > 0, SOLN 1, RELVEL 0, no NSID1 node on a driven / loaded part,
+    # NSID2 < 0 with every NSID1 edge aimed, PTYP 1 / 2 naming all-solid
+    # parts, the *MAT_THERMAL_CWM born before t 0) and writes an accepted one
+    # as windowed /IMPFLUX VOLUMIC cards on /GRBRIC groups (each seam brick's
+    # in-window mean of the IFORM-2 double ellipsoid: 64 sub-points, 10
+    # mid-point instants, no heat past the end of NSID1), its CWM as the
+    # part's live /HEAT/MAT (TD_LC line), the S2 /ANIM/DT cap and the TEMP
+    # /TH/NODE group on the NSID1 + history nodes. MEASURED on 05_5_1 (= 05_4_1,
+    # ONE LS model; nt 4): NORMAL in 66 323 cycles, deposit -0.30 % of
+    # LS-DYNA's source energy, the path nodes END -11.81 / -13.46 / -12.22 %
+    # of their rise (63 LS times to 98.991 s). Reach 2 deck keys on 2 emitted
+    # models (bytes) + 2 / 2 refusal-sentence movers (SOLN 2).
+    weld_trajectory_impflux: bool = True
+    # --weld-trajectory-window S: the /IMPFLUX window of the conversion above
+    # (default 0.25 s, the measured one; > 0 and finite, checked in
+    # __post_init__). A separate value option because an optional-value
+    # spelling (--weld-trajectory-impflux[=S], nargs "?") would swallow the
+    # optional positional output_stem (round 8 D1, round 9 conventions D-2).
+    weld_trajectory_window: float = 0.25
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8969,6 +9098,19 @@ class ConvertOptions:
                 "as a substitute for LS-DYNA's assumed-strain ELFORM -1/-2; "
                 "18 and 14 read worse on the same decks and an arbitrary cell "
                 "would be written into /PROP/SOLID verbatim.")
+        try:
+            win = float(self.weld_trajectory_window)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "weld_trajectory_window must be a number of seconds, not "
+                f"{self.weld_trajectory_window!r}")
+        if not (math.isfinite(win) and win > 0.0):
+            raise ValueError(
+                f"weld_trajectory_window must be > 0 s and finite (got "
+                f"{win:g}); it is the /IMPFLUX window of the "
+                "*BOUNDARY_THERMAL_WELD_TRAJECTORY conversion - switch the "
+                "conversion off with weld_trajectory_impflux=False "
+                "(--no-weld-trajectory-impflux) instead.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9611,6 +9753,18 @@ class ConversionState:
         field(default_factory=dict)
     mat_thermal_ortho: Dict[int, MatThermalOrthotropic] = \
         field(default_factory=dict)
+    # R14 triage round 9, B1: *MAT_THERMAL_CWM and
+    # *BOUNDARY_THERMAL_WELD_TRAJECTORY are RECORDED (always, flag on or off;
+    # the records alone write nothing). writer/thermal.
+    # _resolve_weld_trajectories screens each trajectory and memoises the
+    # accepted ones' plans on weld_plans (None = not resolved yet);
+    # weld_temp_counts = (the TEMP /TH/NODE group's node count, the count of
+    # the driven / loaded-node group it replaced) for the S2 sentence.
+    thermal_cwm: Dict[int, ThermalCwm] = field(default_factory=dict)
+    weld_trajectories: List[WeldTrajectory] = field(default_factory=list)
+    weld_plans: Optional[List[WeldPlan]] = None
+    weld_temp_counts: Optional[Tuple[int, int]] = None
+    weld_unit_funct: int = 0
     # *CONTROL_THERMAL_SOLVER — FWORK reaches /HEAT/MAT's EFRAC and TSF the
     # engine /THERM; every other cell is a named per-field drop.
     ctrl_thermal_solver: Optional[ControlThermalSolver] = None

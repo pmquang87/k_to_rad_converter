@@ -36,7 +36,8 @@ from .materials import (
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
-                      _thermal_solve_active)
+                      _resolve_weld_trajectories, _thermal_solve_active,
+                      _weld_anim_dt)
 from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
@@ -452,6 +453,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         # one line up — noted, deliberately not changed here, because moving it
         # would rewrite the engine file of every include-only fragment.)
         dt_anim = endtim / 40.0 if state.ctrl_termination else 0.01
+    # Round 9, B1 (S2): a SOLN-1 deck with an accepted weld trajectory that
+    # requests > 1000 frames gets max(d3plot dt, ENDTIM / 100); every other
+    # deck keeps dt_anim (writer/thermal._weld_anim_dt).
+    dt_anim = _weld_anim_dt(state, dt_anim, endtim)
     if dt_anim > 0.0:
         lines += ["/ANIM/DT", f"0. {dt_anim:.6G}"]
     else:
@@ -1976,6 +1981,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # does not name, which changes what that writer emits and what
     # _target_mat_law answers). It allocates /FUNCT ids, so it is placed after
     # every other curve-synthesizing pass to keep their numbering unchanged.
+    #
+    # Round 9, B1: the *BOUNDARY_THERMAL_WELD_TRAJECTORY screen + deposit
+    # plan runs FIRST - an accepted card's *MAT_THERMAL_CWM becomes a TD_LC
+    # record that _resolve_thermal's stand-in and /HEAT/MAT passes read, and
+    # its one shared unit /FUNCT must exist before _make_functions. It draws
+    # that /FUNCT's id only when a card is ACCEPTED (the /GRBRIC + /IMPFLUX
+    # ids come at emission), so a refused deck keeps the opt-out's bytes; it
+    # does nothing on a deck without a trajectory or under the opt-out.
+    _resolve_weld_trajectories(state)
     _resolve_thermal(state)
 
     # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +

@@ -2357,5 +2357,659 @@ class Round9RetractedStatementsA(unittest.TestCase):
                 self.assertIn(_t7._collapse(needle), texts[key])
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# B1  *BOUNDARY_THERMAL_WELD_TRAJECTORY -> windowed /IMPFLUX VOLUMIC on the
+#     screened class + the S2 /ANIM/DT cap + the TEMP group
+#     (default ON, --no-weld-trajectory-impflux; --weld-trajectory-window S)
+# (B2 .. B9 below, each under its own banner.)
+
+import math  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+from k2rad import convert  # noqa: E402
+
+
+def _f10(*v):
+    out = ""
+    for x in v:
+        if x is None:
+            out += " " * 10
+        elif isinstance(x, int):
+            out += "%10d" % x
+        else:
+            s = "%10.6g" % x
+            out += s if len(s) <= 10 else "%10.3e" % x
+    return out
+
+
+def b1_synw(var="base"):
+    """SYN-W (round 9, B1; the part-B spec's fixture, gen_synw.py): a block
+    x 0..10, y -2..2, z -2..0 of 1 mm bricks (80 bricks, 165 nodes); part 3
+    = the seam strip y -1..1, z -1..0 (20 bricks, TMID 2 = *MAT_THERMAL_CWM
+    born at -1 s, MID 0); NSID1 = the 7 nodes x 2..8 on y 0 z 0; NSID2 -1 =
+    the 12 top faces under the path; SPD1 -301, LCID 302 = (0,0) (0.1,1)
+    (1.9,1) (2,0) (10,0); Q 1000; a b cf cr Ff Fr = 1.5 1 1 2 0.6 1.4; SOLN
+    1, ENDTIM 3.0, d3plot 0.001; T0 293.15; a convection boundary on the
+    side faces. *var* names one variant (a refusal class or a control)."""
+    nx, ny, nz = 10, 4, 2
+
+    def nid(i, j, k):
+        return 1 + i * (ny + 1) * (nz + 1) + j * (nz + 1) + k
+    L = ["*KEYWORD", "*TITLE", "SYN-W weld trajectory fixture (%s)" % var]
+    L += ["*CONTROL_SOLUTION", _f10(2 if var == "soln2" else 1),
+          "*CONTROL_TERMINATION", _f10(3.0),
+          "*CONTROL_THERMAL_SOLVER", _f10(1, 1, 11),
+          "*CONTROL_THERMAL_TIMESTEP", _f10(1, 1.0, 0.01, 0.0, 0.1, 0.0, 0.0),
+          "*DATABASE_BINARY_D3PLOT", _f10(0.001)]
+    if var == "soln2":
+        L += ["*CONTROL_TIMESTEP", _f10(0.0, 0.9)]
+    tmid3 = {"isotropic": 1, "notmid": 9}.get(var, 2)
+    L += ["*PART", "seam", _f10(3, 3, 9 if var == "soln2" else 0, 0, 0, 0,
+                                0, tmid3)]
+    if var == "shellpid":
+        L += ["*PART", "seam shell", _f10(4, 4, 9, 0, 0, 0, 0, 2),
+              "*SECTION_SHELL", _f10(4, 2), _f10(1.0, 1.0, 1.0, 1.0),
+              "*MAT_ELASTIC", _f10(9, 7.85e-9, 210000.0, 0.3)]
+    if var == "soln2":
+        L += ["*MAT_ELASTIC", _f10(9, 7.85e-9, 210000.0, 0.3)]
+    L += ["*PART", "base metal", _f10(1, 3, 0, 0, 0, 0, 0, 1),
+          "*MAT_THERMAL_ISOTROPIC", _f10(1, 7.85e-9), _f10(4.6e8, 40.0)]
+    L += ["*SECTION_SOLID", _f10(3, 1)]
+    if var not in ("isotropic", "notmid"):
+        tist, tiend, tlend = -2.0, -1.0, -1000.0
+        if var == "born_late":
+            tist, tiend = 0.5, 1.0
+        if var == "tlend_hot":
+            tlend = 400.0
+        lchc = 999 if var == "nocwmcurve" else 106
+        L += ["*MAT_THERMAL_CWM",
+              _f10(2, 7.85e-9, 0, 0.0, 5.11e8, 0.001, 0.0, 0.0),
+              _f10(lchc, 107, -1001.0, tlend, tist, tiend, 5.11e8, 0.001)]
+    hc3 = 1500.0 if var == "cpspread" else 750.0
+    L += ["*DEFINE_CURVE", _f10(106, 0, 1.0, 1.0e6),
+          "%20.6g%20.6g" % (273.0, 500.0), "%20.6g%20.6g" % (473.0, 550.0),
+          "%20.6g%20.6g" % (10000.0, hc3)]
+    L += ["*DEFINE_CURVE", _f10(107), "%20.6g%20.6g" % (273.0, 15.0),
+          "%20.6g%20.6g" % (473.0, 20.0), "%20.6g%20.6g" % (10000.0, 30.0)]
+    shape = [(0.0, 0.0), (0.1, 1.0), (1.9, 1.0), (2.0, 0.0), (10.0, 0.0)]
+    for lc in (301, 302):
+        L += ["*DEFINE_CURVE", _f10(lc)] + ["%20.6g%20.6g" % p for p in shape]
+    L += ["*NODE"]
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            for k in range(nz + 1):
+                L.append("%8d%16.8g%16.8g%16.8g" % (
+                    nid(i, j, k), float(i), float(j - 2), float(k - 2)))
+    L += ["*ELEMENT_SOLID"]
+    e = 1
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                c = [nid(i, j, k), nid(i + 1, j, k), nid(i + 1, j + 1, k),
+                     nid(i, j + 1, k), nid(i, j, k + 1), nid(i + 1, j, k + 1),
+                     nid(i + 1, j + 1, k + 1), nid(i, j + 1, k + 1)]
+                pid = 3 if (j in (1, 2) and k == 1) else 1
+                L.append("%8d%8d" % (e, pid) + "".join("%8d" % x for x in c))
+                e += 1
+    if var == "shellpid":
+        L += ["*ELEMENT_SHELL", "%8d%8d%8d%8d%8d%8d" % (
+            1001, 4, nid(0, 0, 2), nid(1, 0, 2), nid(1, 1, 2), nid(0, 1, 2))]
+    path = [nid(i, 2, 2) for i in range(2, 9)]
+    if var == "short":
+        path = path[:2]
+    L += ["*SET_NODE_LIST", _f10(1)]
+    for c in range(0, len(path), 8):
+        L.append(_f10(*path[c:c + 8]))
+    segs = []
+    for i in range(2, 8):
+        for j in (1, 2):
+            segs.append([nid(i, j, 2), nid(i + 1, j, 2), nid(i + 1, j + 1, 2),
+                         nid(i, j + 1, 2)])
+    if var == "noaim":
+        segs = segs[2:]
+    L += ["*SET_SEGMENT", _f10(1)] + [_f10(*s) for s in segs]
+    side = []
+    for i in range(nx):
+        for k in range(nz):
+            side.append([nid(i, 0, k), nid(i + 1, 0, k), nid(i + 1, 0, k + 1),
+                         nid(i, 0, k + 1)])
+            side.append([nid(i, ny, k), nid(i, ny, k + 1),
+                         nid(i + 1, ny, k + 1), nid(i + 1, ny, k)])
+    L += ["*SET_SEGMENT", _f10(2)] + [_f10(*s) for s in side]
+    L += ["*BOUNDARY_CONVECTION_SET", _f10(2), _f10(0, 0.01, 0, 293.15, 0.0)]
+    L += ["*INITIAL_TEMPERATURE_SET", _f10(0, 293.15)]
+    pid, ptyp = 3, 1
+    if var == "ptyp2":
+        L += ["*SET_PART_LIST", _f10(7), _f10(3)]
+        pid, ptyp = 7, 2
+    if var == "ptyp3":
+        ptyp = 3
+    if var == "shellpid":
+        pid = 4
+    nsid2 = {"nsid2_0": 0, "nsid2_pos": 1}.get(var, -1)
+    iform = {"iform1": 1, "iform3": 3, "iform4": 4, "iform5": 5}.get(var, 2)
+    a_ax = 0.0 if var == "axis0" else 1.5
+    L += ["*BOUNDARY_THERMAL_WELD_TRAJECTORY",
+          _f10(pid, ptyp, 1, -301, nsid2, -301, 5,
+               1 if var == "relvel1" else 0),
+          _f10(iform, 0 if var == "lcid0" else 302,
+               -1000.0 if var == "qneg" else 1000.0,
+               5 if var == "lcrot" else 0, 0, 0, 0.0,
+               1 if var == "enfor1" else 0),
+          _f10(a_ax, 1.0, 1.0, 2.0, 0.6, 1.4, 0.0, 0.0)]
+    if var == "driven":
+        L += ["*BOUNDARY_PRESCRIBED_MOTION_NODE",
+              _f10(path[0], 3, 2, 302, 1.0)]
+    if var == "nowtraj":
+        L = L[:L.index("*BOUNDARY_THERMAL_WELD_TRAJECTORY")]
+    L += ["*DATABASE_HISTORY_NODE", _f10(nid(0, 0, 0), nid(10, 4, 0))]
+    L += ["*END", ""]
+    return "\n".join(L)
+
+
+def _impflux_set(starter: str):
+    """``{(TSTART, TSTOP, FSCALE, frozenset(bricks))}`` over every /IMPFLUX
+    + its /GRBRIC/BRIC (ids, titles and comments excluded) and the raw
+    /IMPFLUX data lines, in file order."""
+    lines = starter.splitlines()
+    grb = {}
+    for head, body in _blocks(starter, "/GRBRIC/BRIC/"):
+        grb[int(head.split("/")[3])] = frozenset(
+            int(t) for ln in body[1:] for t in ln.split())
+    out, rows = set(), []
+    for i, ln in enumerate(lines):
+        if ln.startswith("/IMPFLUX/"):
+            a, b = lines[i + 3], lines[i + 5]
+            cells = [int(a[k:k + 10]) for k in range(0, 40, 10)]
+            vals = [float(b[k:k + 20]) for k in range(0, 80, 20)]
+            rows.append((cells, vals))
+            out.add((round(vals[2], 9), round(vals[3], 9), vals[1],
+                     grb[cells[3]]))
+    return out, rows
+
+
+def _funct_points(starter: str, title: str):
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/FUNCT/") and lines[i + 1].strip() == title:
+            pts = []
+            j = i + 2
+            while j < len(lines) and not lines[j].startswith("/"):
+                if not lines[j].startswith("#"):
+                    pts.append(tuple(float(t) for t in lines[j].split()))
+                j += 1
+            return int(ln.split("/")[2]), pts
+    return None, None
+
+
+#: the 386444e (pristine10) test-path digests of b1_synw("base") - the
+#: opt-out must reproduce them (computed once by the implement agent through
+#: this module's _convert path on C:/Users/pmqua/PycharmProjects/
+#: k2rad-wt-pristine10, porcelain --ignored empty before and after)
+_B1_SYNW_386444E_STARTER = (
+    "c93e1066c9a93afc22c91d813dc30403a447da613b0512ded727a6c3777b716a")
+_B1_SYNW_386444E_ENGINE = (
+    "50fbc4f7004d128d8602d07f3a3dd339b8b0b021984b0b979f9effcf6c438dad")
+#: ... and of the SYN-W deck WITHOUT the trajectory (a CWM never converts
+#: alone: the default reproduces them)
+_B1_NOWTRAJ_386444E_STARTER = (
+    "c68a99475f78bdbd42f4d0100b72df1864a3f32e96294eb042e2dede155c969b")
+_B1_NOWTRAJ_386444E_ENGINE = (
+    "fbc638ff02793693cb64984f28c66f2737e7cca04dccaaf1e0c467625572b9a1")
+
+_W_B1_OK = "*BOUNDARY_THERMAL_WELD_TRAJECTORY on part 3 (PTYP 1) -> "
+_W_B1_REFUSED = "*BOUNDARY_THERMAL_WELD_TRAJECTORY on part"
+
+
+def _b1_independent_energy(window: float = 0.25, short: bool = False):
+    """An INDEPENDENT ~25-line reference of the vfs rule on SYN-W (no k2rad
+    function): returns (energy, groups) with groups = {(t0, t1, key,
+    frozenset(bricks))}."""
+    g4 = (-0.75, -0.25, 0.25, 0.75)
+    path = [(float(i), 0.0, 0.0) for i in range(2, 4 if short else 9)]
+    lpath = len(path) - 1.0
+
+    def lin(t):
+        pts = [(0.0, 0.0), (0.1, 1.0), (1.9, 1.0), (2.0, 0.0), (10.0, 0.0)]
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if x0 <= t <= x1:
+                return y0 + (y1 - y0) * (t - x0) / (x1 - x0)
+        return 0.0
+    qf = 3 * 0.6 * 1000.0 / (2 * math.pi * 1.5 * 1.0 * 1.0)
+    qr = 3 * 1.4 * 1000.0 / (2 * math.pi * 1.5 * 1.0 * 2.0)
+    seam = {}
+    e = 1
+    for i in range(10):
+        for j in range(4):
+            for k in range(2):
+                if j in (1, 2) and k == 1:     # unit cubes, corner (i, j-2, k-2)
+                    seam[e] = [(i + 0.5 * (1 + u), j - 2 + 0.5 * (1 + v),
+                                -1 + 0.5 * (1 + w)) for u in g4 for v in g4
+                               for w in g4]
+                e += 1
+    energy, groups, nwin = 0.0, set(), int(math.ceil(2.0 / window - 1e-9))
+    for kw in range(nwin):
+        t0, t1 = kw * window, min((kw + 1) * window, 2.0)
+        q = {}
+        for m in range(10):
+            tm = t0 + (m + 0.5) * (t1 - t0) / 10
+            s = sum(lin((n + 0.5) * tm / 400) for n in range(400)) * tm / 400
+            if s > lpath:
+                continue
+            x0 = 2.0 + s                        # r = +x, s-axis = +y, t = +z
+            for eid, pts in seam.items():
+                nf = sum(1 for p in pts if p[0] >= x0 and ((p[0] - x0) / 1.0)
+                         ** 2 + (p[1] / 1.5) ** 2 + (p[2] / 1.0) ** 2 <= 1.0)
+                nr = sum(1 for p in pts if p[0] < x0 and ((p[0] - x0) / 2.0)
+                         ** 2 + (p[1] / 1.5) ** 2 + (p[2] / 1.0) ** 2 <= 1.0)
+                q[eid] = q.get(eid, 0.0) + lin(tm) * (qf * nf + qr * nr) / 64
+        keys = {}
+        for eid, v in q.items():
+            if v / 10 > 0:
+                keys.setdefault(float("%.3g" % (v / 10)), []).append(eid)
+        for key, els in keys.items():
+            groups.add((round(t0, 9), round(t1, 9), key, frozenset(els)))
+            energy += key * len(els) * (t1 - t0)
+    return energy, groups
+
+
+class WeldTrajectoryImpflux(unittest.TestCase):
+    """B1 (R14 triage round 9): an accepted *BOUNDARY_THERMAL_WELD_TRAJECTORY
+    becomes windowed /IMPFLUX VOLUMIC cards on /GRBRIC groups, its
+    *MAT_THERMAL_CWM the part's live /HEAT/MAT, the d3plot cadence is capped
+    (S2) and the TEMP history is the path + history nodes; every refusal
+    class keeps today's bytes with one named sentence. Every deck is
+    written by the test (no F: dependency). STARTER (nt 4,
+    C:/Users/pmqua/rcv_r9i_implB_synw, harvested and deleted): the
+    production SYN-W _0000.rad reads 0 ERROR(S) / 0 WARNING(S) with 64
+    VOLUMIC HEAT FLUX DENSITY brick lines; the refusal probes' bytes are the
+    opt-out's = 386444e's (ERROR 179 + 3046 where the CWM part is the heated
+    part)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res, cls.st, cls.eng = _convert(b1_synw())
+
+    def test_default_converts_the_trajectory(self):
+        st = self.st
+        self.assertEqual(len([ln for ln in st.splitlines()
+                              if re.match(r"^/IMPFLUX/\d+$", ln)]), 32)
+        self.assertEqual(len([ln for ln in st.splitlines()
+                              if re.match(r"^/GRBRIC/BRIC/\d+$", ln)]), 32)
+        fid, pts = _funct_points(st, "weld_trajectory_unit")
+        self.assertEqual(pts, [(0.0, 1.0), (1000.0, 1.0)])
+        sets, rows = _impflux_set(st)
+        grb_ids = {int(h.split("/")[3]) for h, _b in
+                   _blocks(st, "/GRBRIC/BRIC/")}
+        for cells, vals in rows:
+            self.assertEqual(cells[0], 0)            # SURF_ID 0: VOLUMIC
+            self.assertEqual(cells[1], fid)          # the shared unit FUNCT
+            self.assertEqual(cells[2], 0)            # no sensor
+            self.assertIn(cells[3], grb_ids)
+            self.assertEqual(vals[0], 1.0)           # ASCALE
+        self.assertEqual(sorted({(r[1][2], r[1][3]) for r in rows}),
+                         [(0.25 * k, 0.25 * (k + 1)) for k in range(8)])
+        self.assertTrue(_has(self.res.warnings, _W_B1_OK,
+                             "32 /IMPFLUX VOLUMIC cards on 32 /GRBRIC groups",
+                             "8 windows to t 2", "delivers 0.8625 of Q",
+                             "fixflux.F:115-128", "721-2075 s",
+                             "ONE LS run, so the evidence base is one model",
+                             "NCYC 5 is not used"))
+
+    def test_window_groups_window0_and_1(self):
+        sets, _rows = _impflux_set(self.st)
+        w0 = {(fs, tuple(sorted(b))) for t0, t1, fs, b in sets if t0 == 0.0}
+        w1 = {(fs, tuple(sorted(b))) for t0, t1, fs, b in sets if t0 == 0.25}
+        self.assertEqual(w0, {(1.19, (28, 30)), (70.4, (4, 6)),
+                              (118.0, (20, 22)), (155.0, (12, 14))})
+        self.assertEqual(w1, {(21.5, (28, 30)), (52.9, (4, 6)),
+                              (176.0, (20, 22)), (181.0, (12, 14))})
+
+    def test_delivered_sum_against_an_independent_loop(self):
+        sets, _rows = _impflux_set(self.st)
+        energy = sum(fs * len(b) * (t1 - t0) for t0, t1, fs, b in sets)
+        ref, ref_groups = _b1_independent_energy()
+        self.assertAlmostEqual(energy, 1638.72, delta=1e-9 * 1638.72)
+        self.assertAlmostEqual(ref, energy, delta=1e-9 * energy)
+        self.assertEqual(sets, ref_groups)
+        self.assertEqual(round(energy / 1900.0, 6), 0.862484)
+
+    def test_lobe_fractions_vs_analytic(self):
+        """The production sub-point / lobe / volume functions on an all-seam
+        0.25 mm block (32 x 16 x 8 bricks), torch at (4, 0, 0), r +x, t +z,
+        a = b = cf = 1, cr = 2: sum(phi V) against pi a b c / 3."""
+        from k2rad.writer import thermal as th
+        h = 0.25
+        sf = sr = 0.0
+        for i in range(32):
+            for j in range(16):
+                for k in range(8):
+                    x0, y0, z0 = i * h, -2.0 + j * h, -2.0 + k * h
+                    xs = [(x0 + h * (sx > 0), y0 + h * (sy > 0),
+                           z0 + h * (sz > 0)) for sx, sy, sz in th._HEX_SIGNS]
+                    ff, fr = th._weld_lobe_fractions(
+                        th._hexa_subpoints(xs), (4.0, 0.0, 0.0),
+                        (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+                        1.0, 1.0, 1.0, 2.0)
+                    v = th._hexa_volume(xs)
+                    sf += ff * v
+                    sr += fr * v
+        self.assertAlmostEqual(sf, 1.053223, places=6)
+        self.assertAlmostEqual(sr, 2.095703, places=6)
+        self.assertLess(abs(sf / (math.pi / 3.0) - 1.0), 0.01)
+        self.assertLess(abs(sr / (2.0 * math.pi / 3.0) - 1.0), 0.01)
+        qf = 3 * 0.6 * 1000.0 / (2 * math.pi)
+        qr = 3 * 1.4 * 1000.0 / (2 * math.pi * 2.0)
+        self.assertAlmostEqual(qf * sf + qr * sr, 1002.163240, places=5)
+
+    def test_source_off_past_the_path_end(self):
+        res, st, _e = _convert(b1_synw("short"))
+        sets, _rows = _impflux_set(st)
+        self.assertEqual(len(sets), 19)
+        self.assertEqual({t0 for t0, _t1, _f, _b in sets},
+                         {0.0, 0.25, 0.5, 0.75, 1.0})   # windows 5-7: none
+        self.assertEqual(len([s for s in sets if s[0] == 1.0]), 3)
+        energy = sum(fs * len(b) * (t1 - t0) for t0, t1, fs, b in sets)
+        self.assertAlmostEqual(energy, 862.66, delta=1e-9 * 862.66)
+        ref, ref_groups = _b1_independent_energy(short=True)
+        self.assertEqual(sets, ref_groups)
+
+    def test_material_standin_numbers(self):
+        st = self.st
+        part3 = [b for h, b in _blocks(st, "/PART/3")][0]
+        mid = int(part3[1][10:20])
+        heat = [b for h, b in _blocks(st, f"/HEAT/MAT/{mid}")][0]
+        self.assertEqual([float(heat[0][k:k + 20]) for k in range(0, 80, 20)],
+                         [293.15, 4.71, 16.98821235, 0.00130610115])
+        self.assertEqual([float(heat[1][k:k + 20]) for k in range(0, 80, 20)],
+                         [0.0, 16.98821235, 0.00130610115, 1.0])
+        mat = [b for h, b in _blocks(st, f"/MAT/ELAST/{mid}")][0]
+        self.assertEqual(float(mat[1]), 7.85e-9)
+        self.assertEqual([float(t) for t in mat[2].split()], [1.0, 0.3])
+        self.assertTrue(_has(self.res.warnings, "The *MAT_THERMAL_CWM 2 of "
+                             "part(s) [3] (born before t 0: TISTART -2, "
+                             "TIEND -1, TLEND -1000 < T0 293.15)",
+                             "RHO0_CP 4.71", "AS = AL 16.98821235",
+                             "BS = BL 0.00130610115"))
+        rne = dict(self.res.recognized_not_emitted)
+        self.assertNotIn("MAT_THERMAL_CWM", rne)
+        self.assertNotIn("BOUNDARY_THERMAL_WELD_TRAJECTORY", rne)
+
+    def test_cwm_never_converts_alone(self):
+        res, st, eng = _convert(b1_synw("nowtraj"))
+        self.assertEqual(_sha(st), _B1_NOWTRAJ_386444E_STARTER)
+        self.assertEqual(_sha(eng), _B1_NOWTRAJ_386444E_ENGINE)
+        part3 = [b for h, b in _blocks(st, "/PART/3")][0]
+        self.assertEqual(int(part3[1][10:20]), 0)
+        rne = dict(res.recognized_not_emitted)
+        self.assertIn("ZERO-HEATING", rne["MAT_THERMAL_CWM"])
+        self.assertIn("never converts ALONE", rne["MAT_THERMAL_CWM"])
+        self.assertTrue(_has(res.warnings, "a weld that never heats"))
+
+    def test_every_refusal_class(self):
+        """One probe per CLASS: the .rad pair equals the opt-out's (= today's
+        bytes) and the named reason is printed."""
+        probes = {
+            "iform1": "IFORM 1: only the IFORM-2 double ellipsoid",
+            "iform3": "IFORM 3: only the IFORM-2",
+            "iform4": "IFORM 4: only the IFORM-2",
+            "iform5": "IFORM 5: only the IFORM-2",
+            "enfor1": "ENFOR 1: an enforced-temperature source",
+            "qneg": "Q -1000 <= 0",
+            "axis0": "every IFORM-2 semi-axis must be > 0",
+            "soln2": "SOLN 2: only the thermal-only solution is measured; a "
+                     "coupled run is a different card set",
+            "relvel1": "RELVEL 1: a source moving relative to a moving body",
+            "lcrot": "LCROT 5 / LCMOV 0 / LCLAT 0",
+            "driven": "NSID1 node 39 is on driven / loaded part",
+            "nsid2_0": "NSID2 0: only an aim by a segment set",
+            "nsid2_pos": "NSID2 1: only an aim by a segment set",
+            "noaim": "NSID1 edge 39-54 lies on no segment of set 1",
+            "ptyp3": "PTYP 3: only 1 (part) and 2 (part set) exist",
+            "shellpid": "part 4 carries shell elements: the source is "
+                        "volumetric",
+            "born_late": "is not born before t 0 (TISTART 0.5, TIEND 1",
+            "tlend_hot": "TLEND 400 vs T0 293.15",
+            "nocwmcurve": "LCHC 999 / LCTC 107, and a curve",
+            "cpspread": "varies by more than 2x",
+            "notmid": "TMID 9 names neither a *MAT_THERMAL_CWM nor a "
+                      "converted thermal material",
+            "lcid0": "LCID 0: the power curve is missing",
+        }
+        for var, reason in probes.items():
+            with self.subTest(probe=var):
+                deck = b1_synw(var)
+                res, st, eng = _convert(deck)
+                _r, st_off, eng_off = _convert(
+                    deck, weld_trajectory_impflux=False)
+                self.assertEqual(_sha(st), _sha(st_off))
+                self.assertEqual(_sha(eng), _sha(eng_off))
+                self.assertFalse(re.search(r"^/IMPFLUX/", st, re.M))
+                self.assertTrue(_has(res.warnings, _W_B1_REFUSED,
+                                     ": not converted - ", reason,
+                                     "the part keeps today's output"),
+                                [w for w in res.warnings if "WELD" in w])
+                rne = dict(res.recognized_not_emitted)
+                self.assertIn("BOUNDARY_THERMAL_WELD_TRAJECTORY", rne)
+
+    def test_ptyp_positive_controls(self):
+        """PTYP 1 (base) AND PTYP 2 (a *SET_PART_LIST of part 3) convert to
+        the SAME deposit - the round-8 spec's 'PTYP != 0' refusal would have
+        refused both."""
+        _r, st2, _e = _convert(b1_synw("ptyp2"))
+        self.assertEqual(_impflux_set(st2)[0], _impflux_set(self.st)[0])
+        self.assertEqual(len(_impflux_set(st2)[0]), 32)
+
+    def test_trajectory_on_isotropic_part(self):
+        res, st, _e = _convert(b1_synw("isotropic"))
+        self.assertEqual(len(_impflux_set(st)[0]), 32)
+        self.assertFalse(_has(res.warnings, "The *MAT_THERMAL_CWM"))
+        self.assertTrue(_has(res.warnings, "on part 3 (PTYP 1) -> 32 "
+                             "/IMPFLUX VOLUMIC cards"))
+
+    def test_s2_anim_cap_and_temp_group(self):
+        self.assertIn("/ANIM/DT\n0. 0.03\n", self.eng)
+        self.assertEqual(_th_node(self.st, "TH_temperature"),
+                         [39, 54, 69, 84, 99, 114, 129, 1, 163])
+        self.assertTrue(_has(self.res.warnings, "/ANIM/DT 0.03 = max(the "
+                             "d3plot dt 0.001, ENDTIM / 100)",
+                             "3000 animation frames", "351.5 MB instead of "
+                             "34.80 GB", "the 9 NSID1 + "
+                             "*DATABASE_HISTORY_NODE nodes"))
+        _r, st_off, eng_off = _convert(b1_synw(),
+                                       weld_trajectory_impflux=False)
+        self.assertIn("/ANIM/DT\n0. 0.001\n", eng_off)
+        self.assertNotEqual(_th_node(st_off, "TH_temperature"),
+                            [39, 54, 69, 84, 99, 114, 129, 1, 163])
+
+    def test_window_option(self):
+        res, st, _e = _convert(b1_synw(), weld_trajectory_window=0.5)
+        sets, _rows = _impflux_set(st)
+        self.assertEqual(len({s[0] for s in sets}), 4)
+        self.assertEqual(len(sets), 16)
+        self.assertEqual(sum(len(s[3]) for s in sets), 32)
+        energy = sum(fs * len(b) * (t1 - t0) for t0, t1, fs, b in sets)
+        self.assertAlmostEqual(energy, 1645.4, delta=1e-9 * 1645.4)
+        self.assertEqual(round(energy / 1900.0, 6), 0.866)
+        ref, ref_groups = _b1_independent_energy(window=0.5)
+        self.assertEqual(sets, ref_groups)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(b1_synw())
+        for bad in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(window=bad):
+                with self.assertRaises(ValueError):
+                    convert(path, write_log=False,
+                            weld_trajectory_window=bad)
+        tmp.cleanup()
+        from k2rad import cli
+        p = cli.build_parser()
+        self.assertEqual(p.parse_args(["d.k"]).weld_trajectory_window, 0.25)
+        self.assertIs(p.parse_args(["d.k"]).weld_trajectory_impflux, True)
+        self.assertEqual(p.parse_args(
+            ["d.k", "--weld-trajectory-window", "0.5"]
+        ).weld_trajectory_window, 0.5)
+        self.assertIs(p.parse_args(["d.k", "--no-weld-trajectory-impflux"]
+                                   ).weld_trajectory_impflux, False)
+        # the optional positional output_stem is NOT swallowed
+        ns = p.parse_args(["d.k", "--weld-trajectory-impflux", "out/stem"])
+        self.assertEqual(ns.output_stem, "out/stem")
+        for bad in ("0", "-1", "nan", "inf", "x"):
+            with self.subTest(cli=bad):
+                with self.assertRaises(SystemExit):
+                    p.parse_args(["d.k", "--weld-trajectory-window", bad])
+        self.assertIn("--weld-trajectory-window", p.format_help())
+
+    def test_opt_out_is_386444e(self):
+        res, st, eng = _convert(b1_synw(), weld_trajectory_impflux=False)
+        self.assertEqual(_sha(st), _B1_SYNW_386444E_STARTER)
+        self.assertEqual(_sha(eng), _B1_SYNW_386444E_ENGINE)
+        self.assertFalse(_has(res.warnings, "WELD_TRAJECTORY"))
+        rne = dict(res.recognized_not_emitted)
+        self.assertIn("which does not convert", rne["MAT_THERMAL_CWM"])
+        self.assertIn("53 /IMPFLUX + 53 /GRBRIC per seam at 0.25 s",
+                      rne["BOUNDARY_THERMAL_WELD_TRAJECTORY"])
+
+    def test_far_skip_is_exact(self):
+        """The bounding-sphere pre-check skips only bricks no sub-point of
+        which can be in a lobe: the plan with the reach set to infinity (no
+        skip) is identical on SYN-W and on the short variant."""
+        from k2rad.writer import thermal as th
+        for var in ("base", "short"):
+            with self.subTest(variant=var):
+                tmp = tempfile.TemporaryDirectory()
+                path = os.path.join(tmp.name, "d.k")
+                with open(path, "w") as fh:
+                    fh.write(b1_synw(var))
+                from k2rad.parser import parse_k_file
+                from k2rad.handlers import dispatch
+                from k2rad.state import ConversionState
+                state = ConversionState()
+                for block in parse_k_file(path):
+                    dispatch(block, state)
+                tr = state.weld_trajectories[0]
+                orig = th._weld_lobe_fractions
+                calls = []
+
+                def spy(*a, **k):
+                    calls.append(1)
+                    return orig(*a, **k)
+                try:
+                    th._weld_lobe_fractions = spy
+                    plan = th._weld_plan(state, tr, 0.25)
+                    n_skip = len(calls)
+                    th._WELD_FAR_SKIP = False
+                    plan_noskip = th._weld_plan(state, tr, 0.25)
+                finally:
+                    th._weld_lobe_fractions = orig
+                    th._WELD_FAR_SKIP = True
+                self.assertEqual(
+                    [(g.window, g.fscale, g.bricks) for g in plan.groups],
+                    [(g.window, g.fscale, g.bricks)
+                     for g in plan_noskip.groups])
+                self.assertEqual(plan.energy, plan_noskip.energy)
+                # the pre-check really skipped bricks (else it tests nothing)
+                self.assertLess(n_skip, len(calls) - n_skip)
+                tmp.cleanup()
+
+    def test_truncated_cards_are_recorded_not_skipped(self):
+        """One card line per spelling (the thermal-solver alias test's shape):
+        both records are kept, nothing lands in skipped_keywords, and the
+        writer's screen refuses the incomplete trajectory (IFORM 0) instead
+        of raising."""
+        deck = ("*KEYWORD\n*MAT_THERMAL_CWM\n" + _row(7, 1.0) + "\n"
+                "*BOUNDARY_THERMAL_WELD_TRAJECTORY\n" + _row(500, 1.0)
+                + "\n*END\n")
+        state = _t7._dispatch(deck)
+        self.assertEqual(state.skipped_keywords, [])
+        self.assertEqual(sorted(state.thermal_cwm), [7])
+        self.assertEqual(state.weld_trajectories[0].pid, 500)
+        self.assertEqual(state.weld_trajectories[0].iform, 0)
+        from k2rad.writer.thermal import _weld_refusal
+        self.assertIn("IFORM 0: only the IFORM-2",
+                      _weld_refusal(state, state.weld_trajectories[0]))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART B - the round-9 part-B flags reach every wiring site
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Round9FlagWiringB(_t7.Round7FlagWiringA):
+    """Every round-9 part-B DEFAULT-ON lever reaches the parser (with its
+    --no- twin), the README prose, the --help render with its measured
+    figures (matched on the collapsed render), the GUI end to end,
+    convert() / ConvertOptions (default True) and cli.main()'s call - the
+    round-7 checks, for this round's part-B flags. B1's window is a VALUE
+    option and has its own test (WeldTrajectoryImpflux.test_window_option)."""
+
+    _FLAGS = {
+        "--weld-trajectory-impflux": "weld_trajectory_impflux",
+    }
+    _HELP_FIGURES = {
+        "--weld-trajectory-impflux": (
+            "66 323 cycles", "-0.30 % of LS-DYNA's source energy",
+            "721-2075 s", "PTYP 1 / 2", "-11.81..-13.46 %"),
+    }
+
+    def test_the_window_option_reaches_convert_and_the_gui(self):
+        import inspect
+        import k2rad_gui
+        from k2rad.state import ConvertOptions
+        self.assertEqual(
+            inspect.signature(convert).parameters[
+                "weld_trajectory_window"].default, 0.25)
+        self.assertEqual(ConvertOptions().weld_trajectory_window, 0.25)
+        for bad in (0.0, -2.0, float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ConvertOptions(weld_trajectory_window=bad)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        kw = k2rad_gui.build_convert_kwargs(
+            path, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", soften_stfac_text="",
+            weld_trajectory_window_text="0.5")
+        self.assertEqual(kw["weld_trajectory_window"], 0.5)
+        captured = []
+        app = k2rad_gui.ConverterGUI.__new__(k2rad_gui.ConverterGUI)
+        app._append = captured.append
+        k2rad_gui.ConverterGUI._describe_options(app, kw)
+        self.assertIn("--weld-trajectory-window", "".join(captured))
+        kw0 = k2rad_gui.build_convert_kwargs(
+            path, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", soften_stfac_text="")
+        self.assertNotIn("weld_trajectory_window", kw0)
+        for bad in ("0", "-1", "x"):
+            with self.subTest(gui=bad):
+                with self.assertRaises(ValueError):
+                    k2rad_gui.build_convert_kwargs(
+                        path, "", ("Mg", "mm", "s"), ground_springs=False,
+                        ground_spring_k_text="", soften_stfac_text="",
+                        weld_trajectory_window_text=bad)
+        from k2rad import cli
+        import k2rad
+        seen = {}
+
+        def fake_convert(*a, **k):
+            seen.update(k)
+            raise SystemExit(0)
+        saved = k2rad.convert
+        k2rad.convert = fake_convert
+        try:
+            with self.assertRaises(SystemExit):
+                cli.main([path, "--weld-trajectory-window", "0.75"])
+        finally:
+            k2rad.convert = saved
+        self.assertEqual(seen.get("weld_trajectory_window"), 0.75)
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

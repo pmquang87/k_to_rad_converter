@@ -316,6 +316,8 @@ def convert(
     modal_acoustic_void: bool = True,
     mixed_main_thickness_gap: bool = False,
     implicit_bfgs: bool = False,
+    weld_trajectory_impflux: bool = True,
+    weld_trajectory_window: float = 0.25,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1169,6 +1171,26 @@ def convert(
         failure can be SILENT (doorbeam: a NORMAL banner with nonsense
         internal energy), so check the energies before using a run. Default
         False.
+    weld_trajectory_impflux : bool
+        Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (R14 triage round 9, B1)
+        whose screen accepts it - IFORM 2, ENFOR 0, Q > 0, SOLN 1, RELVEL 0,
+        no NSID1 node on a driven / loaded part, NSID2 < 0 with every NSID1
+        edge aimed, PTYP 1 / 2 naming all-solid parts, its *MAT_THERMAL_CWM
+        born before t 0 - into windowed /IMPFLUX VOLUMIC cards: each seam
+        brick gets its in-window mean of the IFORM-2 double ellipsoid (64
+        sub-points, 10 mid-point instants), the source OFF past the end of
+        NSID1; the CWM becomes the part's live /HEAT/MAT (TD_LC line), the
+        engine /ANIM/DT is capped at max(d3plot dt, ENDTIM / 100) when more
+        than 1000 frames are requested, and the TEMP /TH/NODE group is the
+        NSID1 + *DATABASE_HISTORY_NODE nodes. A refused card keeps the
+        386444e output with one named sentence; a CWM never converts alone.
+        MEASURED on 05_5_1 (= 05_4_1, one LS model; nt 4): NORMAL in 66 323
+        cycles, deposit -0.30 % of LS-DYNA's source energy, the path nodes
+        END -11.81 / -13.46 / -12.22 % of their rise; 721-2075 s of engine
+        time. Default True; False restores the 386444e output.
+    weld_trajectory_window : float
+        The /IMPFLUX window of the conversion above, in seconds (default
+        0.25, the measured one); must be > 0 and finite (ValueError).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1620,6 +1642,8 @@ def convert(
         modal_acoustic_void=modal_acoustic_void,
         mixed_main_thickness_gap=mixed_main_thickness_gap,
         implicit_bfgs=implicit_bfgs,
+        weld_trajectory_impflux=weld_trajectory_impflux,
+        weld_trajectory_window=weld_trajectory_window,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

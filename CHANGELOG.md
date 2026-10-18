@@ -11,6 +11,57 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 9 — PART B** (the CWM thermal
+  package, the 2-D elements, ALE / fluids, load curves; implement agent B on
+  `feat/r14-triage-9` after part A, on `9975bc1`).
+  - **`*BOUNDARY_THERMAL_WELD_TRAJECTORY` is converted by default on the
+    screened class** (B1; `--no-weld-trajectory-impflux` restores the
+    `386444e` output, records included; `--weld-trajectory-window S`, default
+    0.25 s). The screen (`writer/thermal._weld_refusal`, first failing test
+    named): IFORM 2, ENFOR 0, Q > 0, the IFORM-2 semi-axes > 0, SOLN 1,
+    RELVEL 0, no LCROT / LCMOV / LCLAT curve, no NSID1 node on a driven /
+    loaded part, NSID2 < 0 with every NSID1 edge held by a segment of the set
+    (an unaimed edge has no frame normal), PTYP 1 (part) or 2 (part set)
+    naming all-solid 8-node parts, the `*MAT_THERMAL_CWM` born before t 0
+    with its LCHC / LCTC curves present and a capacity spread <= 2 (the TD_LC
+    rule) - or a converted non-CWM thermal material - and a power curve
+    LCID with a positive ordinate. Round 8's spec refused "PTYP != 0" -
+    wrong: Vol I R17 p.5-172 makes PTYP 1 a part id, the default on all four
+    carriers; the PTYP-1 and PTYP-2 probes now give the same deposit. An
+    accepted card becomes, per window, ONE `/GRBRIC/BRIC` + ONE `/IMPFLUX`
+    VOLUMIC per group of seam bricks sharing a `%.3g` flux density on one
+    shared unit `/FUNCT`: each brick's in-window mean of the double
+    ellipsoid (`q = 3 F Q / (2 pi a b c)`, the fraction of its 64 sub-points
+    inside each lobe at 10 mid-point instants along NSID1 at the SPD1
+    travel, OFF once the travel passes the end of NSID1;
+    `fixflux.F:115-128` / `:205-238` deliver `VOLG x FLUX_DENS x DT1N`
+    inside the exact window); its `*MAT_THERMAL_CWM` becomes the part's live
+    `/HEAT/MAT` through the TD_LC pipeline (`RHO0_CP = TRO x mean(LCHC)`,
+    `AS = AL`, `BS = BL` = one line through LCTC; 05_x_1: 4.71, 16.98821235,
+    0.00130610115) on a stand-in `/MAT/ELAST`; a CWM never converts alone
+    (its zero-heating measurement stays the reason). S2: on such a SOLN-1
+    deck requesting more than 1000 frames the engine `/ANIM/DT` is
+    `max(d3plot dt, ENDTIM / 100)` (05_5_1: `0. 0.99`, 100 frames = 351.5 MB
+    instead of 34.80 GB) and the TEMP `/TH/NODE` group is the NSID1 +
+    `*DATABASE_HISTORY_NODE` nodes (26 on 05_5_1 instead of 10 002). The
+    `=WINDOW_S` spelling of the findings is NOT built: an optional-value
+    option (`nargs="?"`) swallows the optional positional `output_stem`
+    (round 8 D1, round 9 conventions D-2) - the window is its own option.
+    Measured on the branch bytes: SYN-W (the test fixture) 32 + 32 cards
+    over 8 windows, energy 1638.72 = 0.862484 of Q x the LCID integral,
+    starter 0 ERROR(S) / 0 WARNING(S) with 64 VOLUMIC brick lines
+    (`rcv_r9i_implB_synw`, nt 4); 05_5_1 from F: 1135 `/GRBRIC` + 1135
+    `/IMPFLUX`, the normalised (TSTART, TSTOP, FSCALE, bricks) set and the
+    `/HEAT/MAT` cells EQUAL to the census arm `rcv_r9c_G1_vfs` - whose run
+    (cG1, nt 4, ONE LS model: 05_5_1 = 05_4_1) reads NORMAL in 66 323
+    cycles, the deposit -0.30 % of LS-DYNA's own source energy, the path
+    nodes 11 / 613 / 649 END -11.81 / -13.46 / -12.22 % of their rise, RMS
+    2.28 / 2.07 / 2.61 % of the peak rise (63 LS times 0 < t <= 98.991 s),
+    721-2075 s of engine time by machine load. Movers: bytes 2 deck keys / 2
+    emitted models (05_4_1, 05_5_1), refusal-sentence text 2 / 2 (05_2,
+    05_1: SOLN 2). Round 8's "specified and not built" entry stays below as
+    history.
+
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on
   `feat/r14-triage-9` off `386444e`). Part A's default bytes move 10 deck
