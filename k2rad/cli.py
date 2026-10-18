@@ -973,6 +973,19 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-rigid-local-shared-skew keeps the two skews.",
     )
     parser.add_argument(
+        "--modal-acoustic-void",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a modal (/IMPL/PRINT/STIF) deck write a part on a refused "
+             "*MAT_ACOUSTIC as /MAT/VOID (RHO_I = RO; no stiffness, no "
+             "pressure DOF) instead of leaving it without a material: "
+             "9.3.ssd_acoustic_box starter ERROR 179 (+ 760) -> 0, the "
+             "exported modes the structure's alone (modal recipe only). "
+             "Time-domain decks keep the refusal (8.3: a void there absorbs "
+             "the wave, IE RMS 168.69 %%). ON by default; "
+             "--no-modal-acoustic-void keeps the refusal.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1671,6 +1684,7 @@ def main(argv=None) -> int:
         spc_vector_frames=args.spc_vector_frames,
         prescribed_motion_sf_default=args.prescribed_motion_sf_default,
         rigid_local_shared_skew=args.rigid_local_shared_skew,
+        modal_acoustic_void=args.modal_acoustic_void,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

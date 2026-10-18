@@ -206,6 +206,29 @@ Prior history (before this changelog was introduced) is summarized in the
     (= the drive's work), WARNING 312 -> none. The Yaris roof crush: the
     imposed card's skew 91965 -> 1 (convert + starter only). Movers 1 key /
     1 model.
+  - **A refused `*MAT_ACOUSTIC` part becomes `/MAT/VOID` on a modal deck**
+    (A7; default ON, `--no-modal-acoustic-void` keeps the refusal). The
+    `*MAT_ACOUSTIC` / `*MAT_090` handler keeps the by-name refusal and also
+    records RO and the title; on a MODAL deck
+    `writer/materials._resolve_modal_acoustic_void` lifts the refusal for
+    every acoustic mid a `*PART` uses and writes `/MAT/VOID/<mid>` with
+    `RHO_I = RO`, E 0, nu 0 (title `ACOUSTIC_VOID_<mid>` when the card states
+    none), drops an `/EBCS` on that part's faces (`iniebcs.F:428-441`, ERROR
+    1602 - measured on a starter probe; reach 0) and names what the void
+    does not carry. `nvh/example-09-03/9.3.ssd_acoustic_box`: starter ERROR
+    179 + 760 -> 0 ERROR / 1 WARNING (1084), NORMAL in the modal step's 2
+    cycles at nt 4 and nt 2 (bytes = the part-A spec's void arm, sha256
+    `436267e4dfa6`). The spec's "the acoustic domain carries MASS ONLY" was
+    measured and is NOT shipped: the void carries neither stiffness nor mass
+    in the modal chain (the exported matrix holds the 402 shell nodes of
+    726; the Isolid-17 void bricks get no nodal mass, `inivoid.F:254` -
+    starter TOTAL MASS 0.2818 = the shells' 0.2808 + the 0.001 probe body;
+    `tools/modal_solve.py` weighs no acoustic material), so the modes are
+    the structure's alone. Status only: the offline solve of that export
+    with the stock `E10.2` engine gives 7 zero-frequency modes and then
+    52.65 Hz where LS-DYNA's `eigout` starts at 66.40 Hz - unvalidated.
+    Time-domain decks keep the refusal (`8.3.plate_kirchhoff`'s void route:
+    IE RMS 168.69 %), byte-identical. Movers 1 key / 1 model.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

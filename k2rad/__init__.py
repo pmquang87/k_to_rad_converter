@@ -312,6 +312,7 @@ def convert(
     spc_vector_frames: bool = True,
     prescribed_motion_sf_default: bool = True,
     rigid_local_shared_skew: bool = True,
+    modal_acoustic_void: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1135,6 +1136,15 @@ def convert(
         two-card coupon: x0.750 / x-0.5625 of the motion in two oblique
         frames, x1.000 in one skew) and the starter print WARNING 312.
         Default True.
+    modal_acoustic_void : bool
+        On a modal (/IMPL/PRINT/STIF) deck write a part on a refused
+        *MAT_ACOUSTIC as /MAT/VOID with RHO_I = RO, E 0, nu 0 (R14 triage round
+        9, A7): the part resolves and the structure's stiffness is exported,
+        where the refusal stopped the starter (ERROR 179). The void carries
+        no pressure DOF, no fluid stiffness and no acoustic coupling (and,
+        on an 8-point brick, no nodal mass), so the modes are the
+        structure's alone. A time-domain deck keeps the refusal (a void
+        there absorbs the wave). Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1582,6 +1592,7 @@ def convert(
         spc_vector_frames=spc_vector_frames,
         prescribed_motion_sf_default=prescribed_motion_sf_default,
         rigid_local_shared_skew=rigid_local_shared_skew,
+        modal_acoustic_void=modal_acoustic_void,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

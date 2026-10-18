@@ -8286,6 +8286,19 @@ class ConvertOptions:
     # nt 2 = nt 4; the Yaris roof crush's starter WARNING 312 goes (convert +
     # starter only). Movers 1 key / 1 model.
     rigid_local_shared_skew: bool = True
+    # --no-modal-acoustic-void: a *PART on a refused *MAT_ACOUSTIC keeps no
+    # material on a MODAL deck too (the 386444e bytes: starter ERROR 179).
+    #
+    # ON by default (R14 triage round 9, A7): writer/materials.py::
+    # _resolve_modal_acoustic_void writes /MAT/VOID/<mid> with RHO_I = RO
+    # (E 0, nu 0) for every acoustic mid a *PART uses when state.is_modal, and
+    # drops an /EBCS on that part's faces (iniebcs.F:428-441 ERROR 1602; reach
+    # 0). A time-domain deck keeps the refusal: there the void runs but absorbs
+    # the wave (8.3.plate_kirchhoff: IE RMS 168.69 %). MEASURED on
+    # 9.3.ssd_acoustic_box: error_starter -> 0 ERROR, NORMAL in the modal
+    # step (status-only: the reference is frequency-domain). Movers 1 key / 1
+    # model.
+    modal_acoustic_void: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9516,6 +9529,17 @@ class ConversionState:
     # A refusal is deliberate and is NOT the same thing as an unread keyword.
     refused_materials: Dict[int, Tuple[str, str, str]] = \
         field(default_factory=dict)
+    # *MAT_ACOUSTIC / *MAT_090 mid -> (RO, the card's title or ""), recorded
+    # by handlers._handle_mat_acoustic BESIDE the by-name refusal above (the
+    # refusal still stands on every deck until a writer pass says otherwise).
+    acoustic_mats: Dict[int, Tuple[float, str]] = field(default_factory=dict)
+    # The subset of acoustic_mats written as /MAT/VOID (R14 triage round 9,
+    # A7): a MODAL deck, --modal-acoustic-void on, a *PART on the mid. Filled
+    # by writer/materials.py::_resolve_modal_acoustic_void, which also takes
+    # the mid OUT of refused_materials; read by _make_materials (the card),
+    # writer/mesh.py::_target_mat_law (law 0), all_mat_ids and
+    # writer/blast_ale.py::_make_ebcs (no /EBCS on such a part's faces).
+    acoustic_void: Dict[int, Tuple[float, str]] = field(default_factory=dict)
     # The /MAT/LAW51 phase list per *ALE_MULTI-MATERIAL_GROUP (index into
     # state.ale_mmgs -> the ordered submaterial ids), decided by
     # writer/materials.py::_resolve_ale_submaterials: vacuum and every other
@@ -10922,7 +10946,11 @@ class ConversionState:
                   # Same source/resolved rule as LAW106 above.
                   self.mat_law3,
                   # *MAT_140 → /MAT/VOID, MID verbatim.
-                  self.mat_vacuum):
+                  self.mat_vacuum,
+                  # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal
+                  # deck (round 9, A7), MID verbatim. The RESOLVED registry:
+                  # a time-domain deck's refusal writes no /MAT at all.
+                  self.acoustic_void):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

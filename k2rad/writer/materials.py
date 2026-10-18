@@ -155,6 +155,9 @@ __all__ = [
     "_emit_fail_spalling",
     "_emit_mat_vacuum",
     "_warn_refused_materials",
+    # R14 triage round 9
+    "_resolve_modal_acoustic_void",
+    "_emit_acoustic_void",
     "_resolve_he_bunreacted",
     "_ammg_member_mids",
     "_jwl_unreacted_bulk",
@@ -175,6 +178,11 @@ __all__ = [
 
 def _make_materials(state: ConversionState) -> List[str]:
     lines = ["#-  MATERIALS:", HDR]
+    # R14 triage round 9, A7: a refused *MAT_ACOUSTIC's /MAT/VOID on a MODAL
+    # deck (resolved by _resolve_modal_acoustic_void; empty on every other
+    # deck, so nothing below moves).
+    for mid in sorted(state.acoustic_void):
+        lines += _emit_acoustic_void(mid, *state.acoustic_void[mid])
     for mat in state.mat_elastic.values():
         lines += _emit_mat_elastic(mat)
     for mat in state.mat_plas_tab.values():
@@ -1904,6 +1912,21 @@ def _emit_mat_vacuum(mat: MatVacuum) -> List[str]:
         mat.title or f"VACUUM_{mat.mid}",
         "#              RHO_I                   E                  nu",
         f"{_f(mat.rho)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_acoustic_void(mid: int, ro: float, title: str) -> List[str]:
+    """The round-9 A7 card: ``/MAT/VOID`` (LAW0) under the *MAT_ACOUSTIC MID
+    with ``RHO_I = RO``, ``E 0``, ``nu 0`` — the :func:`_emit_mat_vacuum`
+    layout (``radioss140/MAT/matl_void0.cfg`` reads RHO_I, E and nu, nothing
+    else). Title: the *MAT_ACOUSTIC card's own, else ``ACOUSTIC_VOID_<mid>``.
+    """
+    return [
+        f"/MAT/VOID/{mid}",
+        title or f"ACOUSTIC_VOID_{mid}",
+        "#              RHO_I                   E                  nu",
+        f"{_f(ro)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
 
@@ -11262,6 +11285,76 @@ def _warn_refused_materials(state: ConversionState) -> None:
                "No /PART names this material, so nothing in the emitted deck "
                "references it and the refusal costs the model nothing.")
             )
+
+
+def _resolve_modal_acoustic_void(state: ConversionState) -> None:
+    """R14 triage round 9, A7: on a MODAL deck a *PART on a refused
+    *MAT_ACOUSTIC gets ``/MAT/VOID`` (``RHO_I = RO``) instead of no material
+    at all.
+
+    ``handlers._handle_mat_acoustic`` refuses the law like the other refused
+    families — OpenRadioss has no acoustic pressure element — and keeps RO and
+    the title. On a modal deck (``state.is_modal``: one ``/IMPL/LINEAR`` step
+    plus ``/IMPL/PRINT/STIF``, the modes solved offline by
+    ``tools/modal_solve.py``) that refusal costs the WHOLE run: the starter
+    stops on ERROR 179 for the part with no material, so not even the
+    structure's stiffness is exported. A void in the part's place resolves it
+    and adds nothing to the modal problem — MEASURED on 9.3.ssd_acoustic_box
+    (Isolid 17): the exported matrix holds the 402 shell nodes of 726 (the
+    air's interior nodes carry no stiffness and drop out), the starter gives
+    the void bricks no mass either (``inivoid.F:254`` weighs a void brick only
+    when it does not have 8 integration points: TOTAL MASS 0.2818 = the
+    shells' 0.2808 + the 0.001 probe body), and ``tools/modal_solve.py``'s
+    lumper weighs no acoustic material. So, for every acoustic mid a *PART
+    uses, the mid
+    moves from ``refused_materials`` to ``acoustic_void`` (the card is written
+    by :func:`_make_materials`, ``_target_mat_law`` answers law 0), the
+    recognized-not-emitted note goes once no refused mid of that spelling is
+    left, and the warning names what the void does not carry.
+
+    A time-domain deck keeps the refusal: there a void runs but absorbs the
+    wave (8.3.plate_kirchhoff, explicit with a *BOUNDARY_NON_REFLECTING: the
+    void route ran NORMAL in 238 416 cycles with IE RMS 168.69 % / KE RMS
+    7.11 %). ``--no-modal-acoustic-void`` keeps it on a modal deck too (the
+    386444e bytes). Runs before every pass that reads ``_target_mat_law`` or
+    ``refused_materials``; emits nothing and draws no id.
+    """
+    if not (state.acoustic_mats and state.is_modal
+            and state.options.modal_acoustic_void):
+        return
+    users: Dict[int, List[int]] = defaultdict(list)
+    for pid, part in state.parts.items():
+        if part.mid in state.acoustic_mats:
+            users[part.mid].append(pid)
+    lifted: Set[str] = set()
+    for mid in sorted(users):
+        ro, title = state.acoustic_mats[mid]
+        seen = state.refused_materials.pop(
+            mid, ("MAT_ACOUSTIC", "", ""))[0]
+        lifted.add(seen)
+        state.acoustic_void[mid] = (ro, title)
+        state.warn(
+            f"*{seen} {mid} (part(s) {sorted(users[mid])}) on a MODAL deck: "
+            f"written as /MAT/VOID/{mid} with RHO_I = {ro:g} (E 0, nu 0) so "
+            "the part resolves - before round 9 it had no material and the "
+            "starter stopped (ERROR 179). The void carries no pressure DOF, "
+            "no fluid stiffness and no acoustic coupling (OpenRadioss has no "
+            "acoustic pressure element; matl_void0.cfg reads RHO_I, E and nu "
+            "only), so the exported stiffness and tools/modal_solve.py's "
+            "lumped mass are the STRUCTURE's alone: on 9.3.ssd_acoustic_box "
+            "the matrix holds the 402 shell nodes of 726 and even the .rad "
+            "gives the void bricks no mass (inivoid.F:254 weighs a void "
+            "brick only without 8 integration points; starter TOTAL MASS "
+            "0.2818 = the shells' 0.2808 + the 0.001 probe body). A "
+            "time-domain deck keeps the refusal (a void there runs but "
+            "absorbs the wave: IE RMS 168.69 % on 8.3). "
+            "--no-modal-acoustic-void keeps the refusal.")
+    gone = lifted - {kw for kw, _what, _why
+                     in state.refused_materials.values()}
+    if gone:
+        state.recognized_not_emitted = [
+            (kw, why) for kw, why in state.recognized_not_emitted
+            if kw not in gone]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

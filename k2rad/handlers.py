@@ -12008,6 +12008,38 @@ _REFUSED_MATERIALS = {
         "polynomial"),
 }
 
+#: The *MAT_ACOUSTIC row of _REFUSED_MATERIALS — the one refused family with
+#: a second, narrower route (R14 triage round 9, A7).
+_ACOUSTIC_NAMES = ("MAT_ACOUSTIC", "MAT_090")
+_refuse_acoustic = _material_refused(
+    _ACOUSTIC_NAMES[0], *_REFUSED_MATERIALS[_ACOUSTIC_NAMES])
+
+
+def _handle_mat_acoustic(block: Block, state: ConversionState) -> None:
+    """*MAT_ACOUSTIC (*MAT_090): the by-name refusal, plus RO and the title.
+
+    Card 1 is MID, RO, C, BETA, CF, ATMOS, GRAV, read with the fixed-width
+    w=10 slice every ``*MAT`` handler uses. The refusal and its
+    recognized-not-emitted note are recorded exactly as for the other refused
+    families, because on a time-domain deck the refusal STANDS: a void in the
+    part's place runs but absorbs the wave (8.3.plate_kirchhoff, explicit with
+    a *BOUNDARY_NON_REFLECTING: NORMAL in 238 416 cycles with IE RMS
+    168.69 %). On a MODAL deck ``writer/materials.py::
+    _resolve_modal_acoustic_void`` lifts it for every mid a *PART uses and
+    writes ``/MAT/VOID`` with ``RHO_I = RO`` — which is what RO and the title
+    are kept for. C (the sound speed), BETA and the rest have no cell to go
+    to: ``/MAT/VOID`` carries RHO_I, E and nu only
+    (``radioss140/MAT/matl_void0.cfg``).
+    """
+    _refuse_acoustic(block, state)
+    offset = _title_offset(block)
+    f1 = _card(block.raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 and f1[0].strip() else 0
+    if mid > 0:
+        ro = to_float(f1[1]) if len(f1) > 1 and f1[1].strip() else 0.0
+        state.acoustic_mats[mid] = (ro,
+                                    _read_title(block) if offset else "")
+
 
 def _scalar_or_curve(f: List[str], i: int, default: float,
                      state: Optional[ConversionState] = None,
@@ -19958,7 +19990,12 @@ RARE_MATERIAL_KEYWORDS = {
     # Generated from ONE table so the canonical name and its numeric alias can
     # never be diagnosed differently (the _MAT_THERMAL_ALIASES rule).
     **{kw: _material_refused(names[0], what, why)
-       for names, (what, why) in _REFUSED_MATERIALS.items() for kw in names},
+       for names, (what, why) in _REFUSED_MATERIALS.items()
+       if names != _ACOUSTIC_NAMES for kw in names},
+    # *MAT_ACOUSTIC / *MAT_090: the SAME refusal (built from the same row),
+    # plus RO and the title for the modal /MAT/VOID route (round 9, A7). Both
+    # spellings share one handler, so the alias rule above still holds.
+    **{kw: _handle_mat_acoustic for kw in _ACOUSTIC_NAMES},
     # *MAT_140 -> /MAT/VOID so the vacuum *PART resolves; the /MAT/LAW51
     # phase list drops it (LAW0 is not on fill_buffer_51.F:210's list, and
     # Radioss's void is the UNDECLARED BALANCE of the volume fractions).

@@ -140,6 +140,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          spc_vector_frames: bool = True,
                          prescribed_motion_sf_default: bool = True,
                          rigid_local_shared_skew: bool = True,
+                         modal_acoustic_void: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -349,6 +350,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_local_shared_skew"] = bool(rigid_local_shared_skew)
 
+    kwargs["modal_acoustic_void"] = bool(modal_acoustic_void)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -513,6 +516,7 @@ class ConverterGUI:
         self.spc_vector_frames = tk.BooleanVar(value=True)
         self.prescribed_motion_sf_default = tk.BooleanVar(value=True)
         self.rigid_local_shared_skew = tk.BooleanVar(value=True)
+        self.modal_acoustic_void = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1149,6 +1153,13 @@ class ConverterGUI:
             variable=self.rigid_local_shared_skew).grid(
                 row=69, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Modal deck: a refused *MAT_ACOUSTIC part becomes "
+                     "/MAT/VOID (RHO_I = RO, no stiffness) - ON. Starter "
+                     "ERROR 179 -> 0; the modes stay the structure's",
+            variable=self.modal_acoustic_void).grid(
+                row=70, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1433,6 +1444,7 @@ class ConverterGUI:
                 spc_vector_frames=self.spc_vector_frames.get(),
                 prescribed_motion_sf_default=self.prescribed_motion_sf_default.get(),
                 rigid_local_shared_skew=self.rigid_local_shared_skew.get(),
+                modal_acoustic_void=self.modal_acoustic_void.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1691,6 +1703,9 @@ class ConverterGUI:
         if not kwargs.get("rigid_local_shared_skew", True):
             bits.append("RIGID_LOCAL drive keeps its own /SKEW/MOV beside the "
                         "CMO -1 /BCS (--no-rigid-local-shared-skew)")
+        if not kwargs.get("modal_acoustic_void", True):
+            bits.append("a refused *MAT_ACOUSTIC part keeps no material on a "
+                        "modal deck (--no-modal-acoustic-void)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

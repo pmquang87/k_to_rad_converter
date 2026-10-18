@@ -831,6 +831,31 @@ def _warn_initial_void_in_fsi(state: ConversionState, cls, mpids: List[int],
             "incompatible with *ALE_MULTI-MATERIAL_GROUP.")
 
 
+def _acoustic_void_faces(state: ConversionState
+                         ) -> Tuple[Set[Tuple[int, ...]], List[int]]:
+    """``(faces, pids)`` of the parts on a *MAT_ACOUSTIC written as
+    ``/MAT/VOID`` (round 9, A7): every corner face of their solids as a
+    sorted tuple of DISTINCT node ids (a degenerate face keys like the
+    triangle it is), and the part ids. Empty unless the modal route ran."""
+    if not state.acoustic_void:
+        return set(), []
+    from .contacts import _HEX_FACE_IDX, _TET4_FACE_IDX
+    pids = sorted(pid for pid, p in state.parts.items()
+                  if p.mid in state.acoustic_void)
+    pidset = set(pids)
+    faces: Set[Tuple[int, ...]] = set()
+    for e in state.solid_elems:
+        if e.pid not in pidset:
+            continue
+        nds = list(e.nodes)
+        table: Tuple[Tuple[int, ...], ...] = (
+            _HEX_FACE_IDX if len(nds) >= 8 else _TET4_FACE_IDX)
+        for f in table:
+            if max(f) < len(nds):
+                faces.add(tuple(sorted({nds[i] for i in f})))
+    return faces, pids
+
+
 def _make_ebcs(state: ConversionState) -> List[str]:
     """*BOUNDARY_NON_REFLECTING → /EBCS/NRF on the named segment set.
 
@@ -842,6 +867,8 @@ def _make_ebcs(state: ConversionState) -> List[str]:
         return []
     lines: List[str] = []
     surf_for_ssid: Dict[int, int] = {}
+    void_faces, void_pids = _acoustic_void_faces(state)
+    void_named: Set[int] = set()
     for nrf in state.non_reflecting:
         segset = state.segment_sets.get(nrf.nsid)
         if _part_scoped_segment_set(state, nrf.nsid,
@@ -852,12 +879,36 @@ def _make_ebcs(state: ConversionState) -> List[str]:
             state.warn(f"*BOUNDARY_NON_REFLECTING nsid={nrf.nsid}: segment set not "
                        "found or empty — /EBCS/NRF skipped.")
             continue
+        segments = segset.segments
+        if void_faces:
+            kept = [s for s in segments
+                    if tuple(sorted({n for n in s if n})) not in void_faces]
+            if len(kept) < len(segments):
+                if nrf.nsid not in void_named:
+                    void_named.add(nrf.nsid)
+                    state.warn(
+                        f"*BOUNDARY_NON_REFLECTING nsid={nrf.nsid}: "
+                        f"{len(segments) - len(kept)} of {len(segments)} "
+                        f"segment(s) lie on faces of part(s) {void_pids}, a "
+                        "*MAT_ACOUSTIC written as /MAT/VOID on this modal deck "
+                        "(round 9, A7). The starter refuses an /EBCS on any "
+                        "element outside the ALE / Euler framework "
+                        "(iniebcs.F:428-441, ERROR 1602), and the void is "
+                        "Lagrangian, so "
+                        + ("the /EBCS/NRF is DROPPED." if not kept else
+                           f"those segments are dropped and the /EBCS/NRF "
+                           f"keeps the other {len(kept)}.")
+                        + " --no-modal-acoustic-void keeps the refusal and "
+                        "the full /EBCS.")
+                if not kept:
+                    continue
+                segments = kept
         surf_id = surf_for_ssid.get(nrf.nsid)
         if surf_id is None:
             surf_id = state.next_id()
             surf_for_ssid[nrf.nsid] = surf_id
             lines += _emit_surf_seg(surf_id, segset.title or f"nrf_{nrf.nsid}",
-                                    segset.segments)
+                                    segments)
         ebcs_id = state.next_id()
         lines += [
             f"/EBCS/NRF/{ebcs_id}",

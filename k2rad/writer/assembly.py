@@ -32,6 +32,7 @@ from .materials import (
     _resolve_he_bunreacted,
     _resolve_ale_submaterials,
     _warn_refused_materials,
+    _resolve_modal_acoustic_void,
 )
 from .muscle import _make_muscle_springs
 from .thermal import (_make_thermal, _resolve_thermal,
@@ -1699,6 +1700,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # sampled sine /FUNCT, before any emitter reads funct_smooth_ids.
     _sample_implicit_smooth_curves(state)
     _resolve_define_tables(state)
+    # R14 triage round 9, A7: on a MODAL deck a *PART on a refused
+    # *MAT_ACOUSTIC gets /MAT/VOID with the acoustic density. FIRST of the
+    # material passes, because it moves the mid out of refused_materials and
+    # into what _target_mat_law answers (law 0) — every later reader of
+    # either must see the resolved state. Emits nothing and draws no id.
+    _resolve_modal_acoustic_void(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
     # Johnson-Cook LAW2/LAW4 routing (needs the *PART EOSID bindings) + the

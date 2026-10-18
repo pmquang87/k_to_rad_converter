@@ -1417,6 +1417,189 @@ class RigidLocalSharedSkew(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A7 — a refused *MAT_ACOUSTIC part becomes /MAT/VOID on the modal recipe only
+# ═════════════════════════════════════════════════════════════════════════════
+
+import test_r14_triage_1 as _t1  # noqa: E402
+
+_A7_EIGEN = "*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(10) + "\n"
+# A second (elastic) brick on top of T1's unit brick, sharing its face 5-6-7-8.
+_A7_BRICK2 = """*NODE
+         9             0.0             0.0             2.0
+        10             1.0             0.0             2.0
+        11             1.0             1.0             2.0
+        12             0.0             1.0             2.0
+*ELEMENT_SOLID
+       2       2       5       6       7       8       9      10      11      12
+"""
+
+
+def _a7_deck(modal: bool = True, nrf=(), second: bool = False,
+             kw: str = "*MAT_ACOUSTIC", extra: str = "") -> str:
+    """T1:919-969's *MAT_ACOUSTIC deck (RefusedMaterialTests._deck: one unit
+    brick, part 1, RO 1.0E-9) - *modal* adds *CONTROL_IMPLICIT_EIGENVALUE
+    NEIG 10; *second* an elastic brick (part 2) sharing the face 5-6-7-8;
+    *nrf* the segments of a *SET_SEGMENT 5 named by a
+    *BOUNDARY_NON_REFLECTING."""
+    out = ["*KEYWORD\n", "*CONTROL_TERMINATION\n" + _row(1.0) + "\n"]
+    if modal:
+        out.append(_A7_EIGEN)
+    out += [_t1._BRICK, "*PART\np1\n" + _row(1, 1, 1) + "\n",
+            "*SECTION_SOLID\n" + _row(1, 1) + "\n",
+            kw + "\n" + _row(1, "1.0E-9", 1500.0, 0.0, 0.0) + "\n"]
+    if second:
+        out += [_A7_BRICK2, "*PART\np2\n" + _row(2, 1, 2) + "\n",
+                "*MAT_ELASTIC\n" + _row(2, "7.85E-9", 210000.0, 0.3) + "\n"]
+    if nrf:
+        out += ["*SET_SEGMENT\n" + _row(5) + "\n"
+                + "".join(_row(*s) + "\n" for s in nrf),
+                "*BOUNDARY_NON_REFLECTING\n" + _row(5) + "\n"]
+    out += [extra, "*END\n"]
+    return "".join(out)
+
+
+def a7_modal_twin() -> str:
+    return _a7_deck()
+
+
+def a7_modal_nrf() -> str:
+    """The modal twin with a *BOUNDARY_NON_REFLECTING on the void's y = 0
+    face (nodes 1-2-6-5)."""
+    return _a7_deck(nrf=[(1, 2, 6, 5)])
+
+
+def a7_modal_nrf_mixed() -> str:
+    """Two bricks; the segment set holds the void's y = 0 face AND the
+    elastic brick's top face (9-10-11-12)."""
+    return _a7_deck(nrf=[(1, 2, 6, 5), (9, 10, 11, 12)], second=True)
+
+
+def a7_time_domain_nrf() -> str:
+    """T1's time-domain deck with the same *BOUNDARY_NON_REFLECTING."""
+    return _a7_deck(modal=False, nrf=[(1, 2, 6, 5)])
+
+
+_A7_TWIN_386444E_SHA = "13c7fbe9a85c5a769d2a85eb89a7574fdb8c55ae34a619bb0d9f27f7cf26fc48"
+_A7_TIME_DOMAIN_386444E_SHA = ("aad2ecfc4ac8607daef2244c890926b1"
+                               "84546ea65d5f79c71c7380a216548d5b")
+_W_A7 = "on a MODAL deck: written as /MAT/VOID/"
+_W_REFUSED = "is REFUSED BY NAME"
+
+
+def _void_block(starter: str, mid: int):
+    """``(title, (RHO_I, E, nu))`` of /MAT/VOID/<mid>, None when absent."""
+    for head, body in _blocks(starter, f"/MAT/VOID/{mid}"):
+        if head == f"/MAT/VOID/{mid}":
+            row = body[1]
+            return body[0], tuple(float(row[i:i + 20] or 0)
+                                  for i in (0, 20, 40))
+    return None
+
+
+def _surf_rows(starter: str, surf_id: int):
+    for head, body in _blocks(starter, f"/SURF/SEG/{surf_id}"):
+        if head == f"/SURF/SEG/{surf_id}":
+            return [[int(t) for t in ln.split()][1:] for ln in body[1:]]
+    return None
+
+
+class ModalAcousticVoid(unittest.TestCase):
+    """A7 (part-A spec A7): on a MODAL deck a *PART on a refused
+    *MAT_ACOUSTIC is written /MAT/VOID/<mid> with RHO_I = RO, E 0, nu 0; a
+    time-domain deck keeps the refusal (T1:919-969 still asserts it); an
+    /EBCS on the void's faces goes (iniebcs.F:428-441, ERROR 1602).
+
+    STARTER RUNS (nt 4): a7_modal_twin() default (p_a7twin_n4): 0 ERROR /
+    0 WARNING; its 386444e bytes (p_a7twinOff_n4): ERROR 179 + 760;
+    a7_modal_nrf() (p_a7nrf_n4, the /EBCS dropped): 0 ERROR / 0 WARNING;
+    a7_modal_nrf_mixed() (p_a7mix_n4): ERROR 1602 - the KEPT segment on the
+    elastic brick, the starter's own refusal of an EBCS outside the ALE /
+    Euler framework, i.e. the reason the void's segments are dropped;
+    a7_time_domain_nrf() = the 386444e bytes (p_a7td_n4): ERROR 179 + 760 +
+    1602.
+
+    ENGINE: 9.3.ssd_acoustic_box (nvh/example-09-03, mid 1, RO 1.22E-12;
+    branch _0000.rad sha256 436267e4dfa6 = the part-A spec's void arm):
+    386444e ERROR 179 + 760; the void 0 ERROR / 1 WARNING (1084, the shell
+    property), NORMAL TERMINATION in 2 cycles at nt 4 AND nt 2, the
+    exported stiffness byte-identical at both (2346 DOFs on the 402 shell
+    nodes of 726). Starter TOTAL MASS 0.2818 = the shells' 0.2808 + the
+    0.001 probe body: the Isolid-17 void bricks get no mass
+    (inivoid.F:254).
+    """
+
+    def test_a_the_modal_twin_writes_the_void_with_RO(self):
+        res, st, _e = _convert(a7_modal_twin())
+        self.assertEqual(_void_block(st, 1),
+                         ("ACOUSTIC_VOID_1", (1.0e-9, 0.0, 0.0)))
+        self.assertTrue(_has(res.warnings, "*MAT_ACOUSTIC 1 (part(s) [1]) "
+                             + _W_A7 + "1", "RHO_I = 1e-09 (E 0, nu 0)",
+                             "STRUCTURE's alone", "inivoid.F:254",
+                             "ERROR 179", "IE RMS 168.69 %",
+                             "--no-modal-acoustic-void"))
+        self.assertFalse(_has(res.warnings, _W_REFUSED))
+        self.assertFalse(_has(res.warnings, "reference a material id that "
+                              "NO /MAT"))
+        self.assertNotIn("MAT_ACOUSTIC",
+                         [k for k, _ in res.recognized_not_emitted])
+        self.assertNotIn("/EBCS", st)
+
+    def test_b_the_card_title_and_the_numeric_alias(self):
+        _r, st, _e = _convert(_a7_deck(kw="*MAT_ACOUSTIC_TITLE\nair"))
+        self.assertEqual(_void_block(st, 1), ("air", (1.0e-9, 0.0, 0.0)))
+        res, st9, _e = _convert(_a7_deck(kw="*MAT_090"))
+        self.assertEqual(_void_block(st9, 1),
+                         ("ACOUSTIC_VOID_1", (1.0e-9, 0.0, 0.0)))
+        self.assertTrue(_has(res.warnings, "*MAT_090 1 (part(s) [1]) "
+                             + _W_A7 + "1"))
+
+    def test_c_the_opt_out_restores_the_386444e_bytes(self):
+        res, st, _e = _convert(a7_modal_twin(), modal_acoustic_void=False)
+        self.assertEqual(_sha(st), _A7_TWIN_386444E_SHA)
+        self.assertIsNone(_void_block(st, 1))
+        self.assertTrue(_has(res.warnings, "*MAT_ACOUSTIC 1:", _W_REFUSED))
+        self.assertIn("MAT_ACOUSTIC",
+                      [k for k, _ in res.recognized_not_emitted])
+
+    def test_d_a_time_domain_deck_keeps_the_refusal_and_its_EBCS(self):
+        res, st, _e = _convert(a7_time_domain_nrf())
+        self.assertEqual(_sha(st), _A7_TIME_DOMAIN_386444E_SHA)
+        self.assertIsNone(_void_block(st, 1))
+        self.assertTrue(re.search(r"^/EBCS/NRF/\d+$", st, re.M))
+        self.assertTrue(_has(res.warnings, "*MAT_ACOUSTIC 1:", _W_REFUSED))
+        self.assertFalse(_has(res.warnings, _W_A7))
+
+    def test_e_the_modal_route_drops_the_EBCS_on_the_void_faces(self):
+        res, st, _e = _convert(a7_modal_nrf())
+        self.assertIsNotNone(_void_block(st, 1))
+        self.assertNotIn("/EBCS", st)
+        self.assertNotIn("/SURF/SEG/", st)
+        self.assertTrue(_has(res.warnings, "nsid=5: 1 of 1 segment(s)",
+                             "part(s) [1]", "iniebcs.F:428-441",
+                             "ERROR 1602", "the /EBCS/NRF is DROPPED"))
+
+    def test_f_a_mixed_segment_set_keeps_its_other_segments(self):
+        res, st, _e = _convert(a7_modal_nrf_mixed())
+        ebcs = _blocks(st, "/EBCS/NRF/")
+        self.assertEqual(len(ebcs), 1)
+        surf = int(ebcs[0][1][1].split()[0])
+        self.assertEqual(_surf_rows(st, surf), [[9, 10, 11, 12]])
+        self.assertTrue(_has(res.warnings, "nsid=5: 1 of 2 segment(s)",
+                             "keeps the other 1"))
+
+    def test_g_an_acoustic_mid_no_part_uses_stays_refused(self):
+        spare = "*MAT_ACOUSTIC\n" + _row(9, "1.0E-9", 1500.0) + "\n"
+        res, st, _e = _convert(_a7_deck(extra=spare))
+        self.assertIsNotNone(_void_block(st, 1))
+        self.assertIsNone(_void_block(st, 9))
+        self.assertTrue(_has(res.warnings, "*MAT_ACOUSTIC 9:", _W_REFUSED,
+                             "No /PART names this material"))
+        # the note stays while a refused mid of the spelling is left
+        self.assertIn("MAT_ACOUSTIC",
+                      [k for k, _ in res.recognized_not_emitted])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

@@ -6515,7 +6515,9 @@ REFUSED BY NAME — `*MAT_INV_HYPERBOLIC_SIN` (`*MAT_102`, the arcsinh
 Zener-Hollomon hot-forming flow law: no Radioss law at `/BEGIN 2022` has that
 form, `/MAT/LAW129 crp_law = 2` is `radioss2025`, and `/MAT/LAW103` would be a
 FIT, not a mapping), `*MAT_ACOUSTIC` (`*MAT_090`: no acoustic pressure element
-and no frequency-domain solver, so the whole analysis has no counterpart),
+and no frequency-domain solver, so the whole analysis has no counterpart; on a
+MODAL deck its parts become `/MAT/VOID` instead - see
+[Modal analysis](#modal-analysis)),
 `*MAT_FRAZER_NASH_RUBBER_MODEL` (`*MAT_031`: the corpus card states inclusion
 FLAGS and asks LS-DYNA for its own least-squares fit, so there is no value to
 map — and Frazer-Nash's Green–St-Venant invariants are not the reduced
@@ -7156,6 +7158,34 @@ ARPACK stopped with "error -9: Starting vector is zero"; a thick shell is now
 lumped exactly like the hexa it is emitted as (a degenerate 6-node one as the
 wedge it is), and a `*ELEMENT_MASS_PART` FINMASS on a thick-shell part reaches
 its nodes. The converter's own `.rad` output does not change.
+
+**A refused `*MAT_ACOUSTIC` part becomes `/MAT/VOID` on a modal deck** (round
+9, A7; default ON, `--no-modal-acoustic-void` keeps the refusal). OpenRadioss
+has no acoustic pressure element, so `*MAT_ACOUSTIC` (`*MAT_090`) is refused by
+name - and on a modal deck that refusal cost the whole run: the part had no
+material, the starter stopped (ERROR 179) and not even the structure's
+stiffness was exported. On a modal deck every acoustic material a `*PART` uses
+is now written `/MAT/VOID/<mid>` with `RHO_I = RO`, E 0, nu 0 (title: the
+card's own, else `ACOUSTIC_VOID_<mid>`), an `/EBCS` on that part's faces is
+dropped (the starter refuses an EBCS outside the ALE / Euler framework,
+`iniebcs.F:428-441`, ERROR 1602), and the warning says what the void does not
+carry: no pressure DOF, no fluid stiffness, no acoustic coupling. The modes
+are the STRUCTURE's alone - measured on
+`nvh/example-09-03/9.3.ssd_acoustic_box`: starter ERROR 179 + 760 -> 0 ERROR,
+NORMAL in the modal step at nt 4 and nt 2 (the exported matrix byte-identical
+at both), 2346 DOFs on the 402 shell nodes of 726 (the air's interior nodes
+carry no stiffness and drop out), and the `.rad` gives the void bricks no mass
+either (`inivoid.F:254` weighs a void brick only without 8 integration points:
+starter TOTAL MASS 0.2818 = the shells' 0.2808 + the 0.001 probe body), while
+`tools/modal_solve.py`'s lumper weighs no acoustic material. The deck's own
+frequency-domain result has no counterpart, so the row is a status promotion,
+not a validation: the offline solve of that export with this machine's STOCK
+(`E10.2`) engine gives 7 zero-frequency modes and then 52.65 Hz where
+LS-DYNA's `eigout` starts at 66.40 Hz - unvalidated, like every low-precision
+matrix (below). A time-domain deck keeps the refusal: there a void runs but
+absorbs the wave (`8.3.plate_kirchhoff`, explicit with a
+`*BOUNDARY_NON_REFLECTING`: NORMAL in 238 416 cycles with IE RMS 168.69 % / KE
+RMS 7.11 %).
 
 The mass arm weighs a `*SECTION_BEAM` that states only THICKNESSES (ELFORM
 0/1/4/5/11, whose card 2 is `TS1 TS2 TT1 TT2 …`): the area is taken from the

@@ -5750,6 +5750,10 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # Radioss's void is the undeclared balance of the volume fractions).
     if mid in state.mat_vacuum:
         return 0                                   # *MAT_140 -> /MAT/VOID
+    # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal deck (round 9,
+    # A7). The RESOLVED registry: a time-domain deck's refusal stays None.
+    if mid in state.acoustic_void:
+        return 0                                   # *MAT_090 -> /MAT/VOID
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:
