@@ -5167,6 +5167,24 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
     return lines
 
 
+def _cnrb_gives_way(state: ConversionState, pid: int) -> bool:
+    """round 9, A1 (``--rigid-part-pid-precedence``, default ON): True when a
+    *CONSTRAINED_NODAL_RIGID_BODY with this PID gives way to the rigid PART of
+    the same id - a *MAT_RIGID / *DEFORMABLE_TO_RIGID part that owns nodes and
+    so becomes an /RBODY of its own (LS-DYNA's Warning 10177 drives the
+    part). Read from the deck, not from ``state.cnrb_record_key``: the
+    _LOCAL frame reservation runs BEFORE the /RBODY builders set that."""
+    if not state.options.rigid_part_pid_precedence:
+        return False
+    if pid not in state.parts or pid not in rigid_part_ids(state):
+        return False
+    if not any(c.pid == pid for c in state.cnrbs):
+        return False
+    return (bool(_part_node_sets(state).get(pid))
+            or bool(state.extra_rigid_nodes.get(pid))
+            or any(c.pid == pid for c in state.sph_elems))
+
+
 def _local_body_basis(state: ConversionState, pid: int):
     """The rigid body's OWN local system, as ``(basis, source)`` where *basis* is
     the global-frame orthonormal triad ``(ex, ey, ez)``, or ``(None, reason)``.
@@ -5187,10 +5205,13 @@ def _local_body_basis(state: ConversionState, pid: int):
 
     Only the LCO/CID = 0 default is unrecoverable, because it needs the body's
     inertia tensor and k2rad computes none. A CNRB whose PID collides with a
-    rigid part's id resolves to the CNRB, matching _make_cnrb_rbodies' precedence.
+    rigid part's id resolves to the PART under --rigid-part-pid-precedence
+    (the default, round 9 A1: LS Warning 10177 drives the part), to the CNRB
+    without it.
     """
+    yields = _cnrb_gives_way(state, pid)
     for c in state.cnrbs:
-        if c.pid != pid:
+        if c.pid != pid or yields:
             continue
         if not c.cid:
             return None, ("*CONSTRAINED_NODAL_RIGID_BODY CID is 0, so LS-DYNA "
@@ -6747,17 +6768,20 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                  + [f"*INITIAL_VELOCITY_GENERATION with STYP={g.styp}"
                     for g in state.inivel_generations if not g.styp])
 
-    todo: List[Tuple[int, str, RigidInertia]] = [
-        (pid, f"*PART_INERTIA {pid}", inr)
+    todo: List[Tuple[int, str, RigidInertia, int]] = [
+        (pid, f"*PART_INERTIA {pid}", inr, pid)
         for pid, inr in sorted(state.part_inertias.items())]
+    # round 9, A1: a CNRB that gave way to the rigid part of its PID is filed
+    # under its shadow key - its own card-5 velocity stays on the CNRB main
     todo += [(c.pid, f"*CONSTRAINED_NODAL_RIGID_BODY_INERTIA pid={c.pid}",
-              c.inertia) for c in state.cnrbs if c.inertia is not None]
+              c.inertia, state.cnrb_record_key.get(c.pid, c.pid))
+             for c in state.cnrbs if c.inertia is not None]
 
     lines: List[str] = []
-    for pid, label, inr in todo:
+    for pid, label, inr, key in todo:
         if not inr.has_velocity():
             continue
-        info = rbody_info.get(pid)
+        info = rbody_info.get(key)
         if not info:
             state.warn(
                 f"{label}: the card-5 initial velocity "
@@ -6765,7 +6789,7 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                 f"VR={inr.vrx:g},{inr.vry:g},{inr.vrz:g}) is DROPPED — no /RBODY "
                 "was emitted for that id, so there is no main node to put it on.")
             continue
-        if pid in iv_rb_pids:
+        if pid in iv_rb_pids and key == pid:
             state.warn(
                 f"{label}: the card-5 initial velocity is DROPPED because "
                 f"*INITIAL_VELOCITY_RIGID_BODY also drives part {pid}. *PART "

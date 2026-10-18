@@ -869,6 +869,23 @@ def build_parser() -> argparse.ArgumentParser:
              "/ 12.04 %% of the LS peak.",
     )
     parser.add_argument(
+        "--rigid-part-pid-precedence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When a *CONSTRAINED_NODAL_RIGID_BODY PID equals a *MAT_RIGID "
+             "part id (LS Warning 10177), address every part-keyed card "
+             "(prescribed motion and its /TH rows, *LOAD_RIGID_BODY, "
+             "*INITIAL_VELOCITY_RIGID_BODY, gravity, /BCS, /TH) to the PART's "
+             "/RBODY, as LS-DYNA and dyna2rad do; the CNRB keeps its own "
+             "/RBODY. Before round 9 the CNRB won: on doorbeam the driven "
+             "punch never moved (DY 0 at every fifth; with the part drive "
+             "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm, as LS-DYNA) and IE "
+             "ended +582.00 %% (+53.91 %% with the part drive alone, RMS "
+             "393.31 -> 81.05 %%; the shipped band with --implicit-n2s-type7 "
+             "is in that flag). ON by default; --no-rigid-part-pid-precedence "
+             "restores the 386444e bytes.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1560,6 +1577,7 @@ def main(argv=None) -> int:
         skip_implicit_stub_with_type25=args.skip_implicit_stub_with_type25,
         shell_in_solid_coupling=args.shell_in_solid_coupling,
         imflag_curve_restart=args.imflag_curve_restart,
+        rigid_part_pid_precedence=args.rigid_part_pid_precedence,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

@@ -8176,6 +8176,24 @@ class ConvertOptions:
     # the campaign runner's chain passed gate (b) on ie_shell);
     # --no-imflag-curve-restart keeps one implicit engine file.
     imflag_curve_restart: bool = True
+    # --no-rigid-part-pid-precedence: a *CONSTRAINED_NODAL_RIGID_BODY whose
+    # PID equals a *MAT_RIGID part id replaces the part's record again (the
+    # 386444e merge), so the part-keyed cards drive the CNRB.
+    #
+    # ON by default (R14 triage round 9, A1): LS-DYNA accepts the shared id
+    # with Warning 10177 and drives the PART (doorbeam.d3hsp:1040-1041);
+    # dyna2rad drives the part by write order (convertrigids.cxx:37-50,
+    # :145, :238). writer/assembly._merge_cnrb_records keeps the part record
+    # under its id and files the CNRB under the shadow key -pid
+    # (state.cnrb_record_key). MEASURED on
+    # implicit/basic-examples/springback-i/doorbeam.k (the only mover, 1 key
+    # / 1 model): the punch moved 0 mm at every fifth of t_end before (DY
+    # 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, LS-DYNA's
+    # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
+    # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
+    # nt 2, 39 -> 35 cycles). solidof (a deformable-part clash) is byte
+    # identical.
+    rigid_part_pid_precedence: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9844,7 +9862,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378, in that order:
+    # (writer/rbody.py:1099, :1803, :1917, :2106, :2263, :2387, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -10139,6 +10157,16 @@ class ConversionState:
     # that field is *CONSTRAINED_EXTRA_NODES input and its "not a *MAT_RIGID
     # part" warning would misreport these.
     local_frame_nodes: Dict[int, List[int]] = field(default_factory=dict)
+    # round 9, A1 (--rigid-part-pid-precedence, default ON): a
+    # *CONSTRAINED_NODAL_RIGID_BODY whose PID equals the id of a rigid PART
+    # that also became an /RBODY gives way to the part (LS Warning 10177):
+    # pid -> the SHADOW key (-pid) its record is stored under in the merged
+    # rbody_info, so the CNRB-own consumers (its _INERTIA card-5 velocity)
+    # still reach it. Reset per build in writer/assembly.build_starter
+    # before _make_cnrb_rbodies runs (which then leaves the clashing part's
+    # _LOCAL triad and *ELEMENT_MASS_PART to the part). Empty when no PID
+    # clashes, and always empty under --no-rigid-part-pid-precedence.
+    cnrb_record_key: Dict[int, int] = field(default_factory=dict)
 
     #: Every node id the SOURCE deck defined, snapshotted by build_starter as its
     #: very first act — i.e. before any prepass synthesizes a node. The writer

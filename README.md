@@ -3187,6 +3187,26 @@ gets the same transfer — `Mass`, `Jxx..Jxz`, `ICoG = 4`, the main node at
 `_INERTIA` body (LS-DYNA relocates `PNODE` to the centre of mass itself, so it is
 a readout node); `DRFLAG`/`RRFLAG` DOF releases, the `_OVERRIDE` card
 (`ICNT`/`IBAG`/`IPSM`) and the `_THERMAL` card (`IDTHRM`) are warn-dropped
+
+**A CNRB `PID` shared with a `*MAT_RIGID` part: the part's cards drive the
+PART** (round 9, A1; default ON, `--no-rigid-part-pid-precedence` restores the
+386444e merge in which the CNRB record replaced the part's). LS-DYNA accepts
+the shared id with `*** Warning 10177` ('nodal rigid body and part share the
+same ID', `doorbeam.d3hsp:1040-1041`) and drives the part; dyna2rad does the
+same by write order (`convertrigids.cxx:37-50`, `:145`, `:238`). So every
+part-keyed card — `*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL]` and its `/TH`
+reaction rows, `*LOAD_RIGID_BODY`, `*INITIAL_VELOCITY_RIGID_BODY` /
+`_GENERATION`, gravity, `/BCS`, `/TH` — addresses the part's `/RBODY`; the CNRB
+keeps its own `/RBODY`, its `_INERTIA` velocity and its `_SPC` (its record is
+filed under a shadow key). MEASURED on
+`implicit/basic-examples/springback-i/doorbeam.k`, the only mover (1 key / 1
+model): before, the driven punch never moved (node 1 DY 0 mm at every fifth of
+t_end; 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, = the LS
+nodout) and internal energy ended +582.00 % against LS-DYNA; with the part
+drive alone it ends +53.91 % (RMS 393.31 → 81.05 % of the LS peak over the 25
+LS times in (1e-5, 1.1e-3], nt 4 = nt 2). `solidof.k`, whose CNRB shares the
+id of a DEFORMABLE part, is byte-identical.
+
 `*CONSTRAINED_INTERPOLATION` / `_LOCAL` → `/RBE3` (id = `ICID`, `I_modif = 2` so
 Radioss may not modify the weights) plus one `/GRNOD/NODE` per set. `DNID` →
 `Node_IDr`, `DDOF` → `Trarot_ref` (digit-set membership: `1356` means DOFs

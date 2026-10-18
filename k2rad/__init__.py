@@ -271,6 +271,7 @@ def convert(
     skip_implicit_stub_with_type25: bool = False,
     shell_in_solid_coupling: bool = False,
     imflag_curve_restart: bool = True,
+    rigid_part_pid_precedence: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1008,6 +1009,20 @@ def convert(
         lists them. Default True since round 8 (kept after the campaign
         runner's chain passed gate (b) on ie_shell); False keeps one
         implicit engine file.
+    rigid_part_pid_precedence : bool
+        When a *CONSTRAINED_NODAL_RIGID_BODY PID equals a *MAT_RIGID part
+        id, every part-keyed card (*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL]
+        and its /TH rows, *LOAD_RIGID_BODY, *INITIAL_VELOCITY_RIGID_BODY /
+        _GENERATION, gravity, /BCS, /TH) addresses the PART's /RBODY (R14
+        triage round 9, A1): LS-DYNA accepts the shared id with Warning
+        10177 and drives the part, dyna2rad too (by write order). The CNRB
+        keeps its own /RBODY, its _INERTIA velocity and its _SPC. MEASURED
+        on implicit/basic-examples/springback-i/doorbeam.k: the punch never
+        moved before (DY 0 at every fifth of t_end; 32.30 / 65.32 / 95.32 /
+        132.8 / 135.0 mm with the part drive) and IE ended +582.00 %; with
+        the part drive alone +53.91 % (RMS 393.31 -> 81.05 % of the LS peak,
+        25 LS times in (1e-5, 1.1e-3], nt 4 = nt 2). Default True; False
+        restores the 386444e bytes (the CNRB record wins).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1448,6 +1463,7 @@ def convert(
         skip_implicit_stub_with_type25=skip_implicit_stub_with_type25,
         shell_in_solid_coupling=shell_in_solid_coupling,
         imflag_curve_restart=imflag_curve_restart,
+        rigid_part_pid_precedence=rigid_part_pid_precedence,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

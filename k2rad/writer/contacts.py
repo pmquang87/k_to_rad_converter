@@ -1937,6 +1937,13 @@ def _bolt_end_rigid_members(state: ConversionState, rbody_info: Dict
     return out
 
 
+def _body_label(key: int) -> str:
+    """An rbody_info key as a reader sees it: a part / CNRB id, or - for the
+    shadow key -pid of a CNRB that gave way to the rigid part of its PID
+    (round 9, A1) - 'CNRB <pid>'."""
+    return str(key) if key > 0 else f"CNRB {-key}"
+
+
 def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
                           sid: int, styp: int) -> None:
     """W-l2 (round 8, A2 (l)-2): the bolt-end rigid members a penalty
@@ -1948,7 +1955,8 @@ def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
     bsids = sorted({state.bolt_rigid_keep[n][1] for n in kept})
     state.warn(
         f"*{keyword or 'CONTACT'} {inter_id}: {len(kept)} member node(s) of "
-        f"the rigid body(ies) {', '.join(str(b) for b in bodies)} holding an "
+        f"the rigid body(ies) {', '.join(_body_label(b) for b in bodies)} "
+        "holding an "
         "end node of the *INITIAL_AXIAL_FORCE_BEAM bolt (BSID "
         f"{', '.join(str(b) for b in bsids)}) were KEPT on the secondary "
         "side; every other rigid member is still removed. LS-DYNA keeps them "

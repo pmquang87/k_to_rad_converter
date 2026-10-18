@@ -2131,7 +2131,7 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     use (convertrigids.cxx:766-772).
 
     ``state.rbody_ids`` is the set the SIX Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378,
+    register into at the line that writes the card — writer/rbody.py:1099, :1803, :1917, :2106, :2263, :2387,
     in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
     element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
     out, so four LS-DYNA sources funnel through the first one),
@@ -2144,8 +2144,10 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
     all (so a deck whose ONLY rigid body is the probe would get no group), a
-    CNRB/part id collision drops one record from it, and a
-    *CONSTRAINED_RIGID_BODIES merge aliases several keys onto one master node.
+    CNRB/part id collision drops one record from it under
+    --no-rigid-part-pid-precedence (and files the CNRB under a shadow key
+    by default, round 9 A1), and a *CONSTRAINED_RIGID_BODIES merge aliases
+    several keys onto one master node.
 
     Two /TH/RBODY-only card rules, both measured:
 

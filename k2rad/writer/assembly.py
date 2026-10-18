@@ -1593,6 +1593,72 @@ def _sample_implicit_smooth_curves(state: ConversionState) -> None:
             lcid, len(curve.pts), vmax * (tend - tstart - trise)))
 
 
+def _merge_cnrb_records(state: ConversionState, rbody_info: Dict,
+                        cnrb_info: Dict) -> Dict:
+    """Merge the *CONSTRAINED_NODAL_RIGID_BODY records into ``rbody_info``.
+
+    The two dicts are keyed by DIFFERENT id namespaces - *MAT_RIGID records by
+    PART id, CNRB records by the CNRB's own PID - so a CNRB whose PID equals a
+    rigid part's id collides with that part's record. LS-DYNA accepts the
+    shared id with ``*** Warning 10177 (KEY+177)`` ('nodal rigid body and part
+    share the same ID', doorbeam.d3hsp:1040-1041) and drives the PART;
+    dyna2rad does the same by write order (``ConvertEntities`` calls
+    ``ConvertConstrainedNodalRbodies`` before ``ConvertMatsRigid``,
+    convertrigids.cxx:37-50, and the part overwrites the CNRB's entry of
+    ``storeRbodyPIDVsMasterNode``, :145 / :238).
+
+    round 9, A1 (``--rigid-part-pid-precedence``, default ON): on a clash the
+    part record keeps its key and position, so every part-keyed consumer
+    (prescribed motion and its /TH rows, *LOAD_RIGID_BODY, the rigid-body
+    initial velocities, gravity, /BCS, /TH) addresses the PART's /RBODY; the
+    CNRB record is filed under the SHADOW key ``-pid`` (its ``kind`` stays
+    "cnrb"), so the value-iterating consumers (the node -> main maps of /BCS
+    and /TH, gravity's CNRB scope, the bolt-end screen) keep BOTH bodies and
+    the CNRB's own _INERTIA velocity still finds it through
+    ``state.cnrb_record_key``. No clash: ``{**rbody_info, **cnrb_info}``, the
+    386444e merge exactly. ``--no-rigid-part-pid-precedence`` keeps the
+    386444e merge (the CNRB record replaces the part's) and its sentence.
+    """
+    clash = sorted(set(rbody_info) & set(cnrb_info))
+    if not clash or not state.options.rigid_part_pid_precedence:
+        state.cnrb_record_key = {}
+        for _dup in clash:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY PID {_dup} collides with the "
+                "id of a *MAT_RIGID part that k2rad also turned into an "
+                "/RBODY. The CNRB record wins, so cards keyed on that part id "
+                "(gravity groups, /BCS, /INIVEL, /TH) address the CNRB's main "
+                "node and the rigid PART's own main node is not reached - give "
+                "the CNRB an unused part id.")
+        return {**rbody_info, **cnrb_info}
+    state.cnrb_record_key = {pid: -pid for pid in clash}
+    merged = dict(rbody_info)
+    for pid, info in cnrb_info.items():
+        merged[-pid if pid in rbody_info else pid] = info
+    for pid in clash:
+        state.warn(
+            f"*CONSTRAINED_NODAL_RIGID_BODY PID {pid} collides with the id of "
+            "a *MAT_RIGID part that k2rad also turned into an /RBODY. LS-DYNA "
+            "accepts the shared id with Warning 10177 ('nodal rigid body and "
+            "part share the same ID') and drives the PART; dyna2rad does the "
+            "same by write order (convertrigids.cxx:37-50, :145, :238). So "
+            "the part-keyed cards (*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] "
+            "and its /TH reaction rows, *LOAD_RIGID_BODY, "
+            "*INITIAL_VELOCITY_RIGID_BODY / _GENERATION, gravity, /BCS, /TH) "
+            f"address the PART's /RBODY main node {rbody_info[pid]['ind_node']}; "
+            f"the CNRB keeps its own /RBODY {cnrb_info[pid]['ind_node']} (its "
+            "_INERTIA velocity and _SPC stay on it). Before round 9 the CNRB "
+            "record replaced the part's: on "
+            "implicit/basic-examples/springback-i/doorbeam.k the driven punch "
+            "never moved (DY 0 at every fifth of t_end against LS-DYNA's 135 "
+            "mm) and internal energy ended +582.00 % against LS-DYNA; with "
+            "the part drive alone it ends +53.91 % (RMS 393.31 -> 81.05 % of "
+            "the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 = nt "
+            "2). --no-rigid-part-pid-precedence restores the CNRB "
+            "precedence.")
+    return merged
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
     # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
     # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
@@ -2015,26 +2081,21 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_spring_eid_collisions(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
+    # round 9, A1 (--rigid-part-pid-precedence): the CNRB pids that collide
+    # with a rigid PART record, known BEFORE _make_cnrb_rbodies runs - it
+    # leaves such a part's _LOCAL triad nodes and *ELEMENT_MASS_PART to the
+    # part (rbody.py), and the merge below files the CNRB record under the
+    # shadow key -pid. Always empty under --no-rigid-part-pid-precedence.
+    state.cnrb_record_key = {}
+    if state.options.rigid_part_pid_precedence:
+        state.cnrb_record_key = {
+            c.pid: -c.pid for c in state.cnrbs if c.pid in rbody_info}
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
     # be visible to every rigid-body-keyed section below, so merge their info,
     # rigid-node set, and rad lines with the *MAT_RIGID ones.
     cnrb_lines, cnrb_rigid_nodes, cnrb_info = _make_cnrb_rbodies(state)
     rigid_nodes = rigid_nodes | cnrb_rigid_nodes
-    # The two dicts are keyed by DIFFERENT id namespaces — *MAT_RIGID records by
-    # PART id, CNRB records by the CNRB's own PID — so a CNRB whose PID happens
-    # to equal a rigid part's id silently replaces that part's record here, and
-    # every rbody_info consumer below (gravity groups, /BCS, /INIVEL, /TH) then
-    # addresses the wrong main node. LS-DYNA requires a CNRB's PID to be a new,
-    # unused part id, so this is invalid input — but it must not be silent.
-    for _dup in sorted(set(rbody_info) & set(cnrb_info)):
-        state.warn(
-            f"*CONSTRAINED_NODAL_RIGID_BODY PID {_dup} collides with the id of "
-            "a *MAT_RIGID part that k2rad also turned into an /RBODY. The CNRB "
-            "record wins, so cards keyed on that part id (gravity groups, "
-            "/BCS, /INIVEL, /TH) address the CNRB's main node and the rigid "
-            "PART's own main node is not reached - give the CNRB an unused "
-            "part id.")
-    rbody_info = {**rbody_info, **cnrb_info}
+    rbody_info = _merge_cnrb_records(state, rbody_info, cnrb_info)
     rbody_lines = rbody_lines + cnrb_lines
     # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT:
     # /RBODY producers 4 and 5, appended before the probe body.

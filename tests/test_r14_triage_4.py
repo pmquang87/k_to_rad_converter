@@ -1847,7 +1847,9 @@ class RigidPartPredicateTests(unittest.TestCase):
         # _side_has_deformable_part, all_deformable_nodes, and (round 6 A8)
         # _shell_offset_gapmin's SHLTHK 1 "rigid bodies excluded" test
         "contacts.py": 3,
-        "loads.py": 2,        # the _LOCAL triads, the *DAMPING_GLOBAL scope
+        # the _LOCAL triads, the *DAMPING_GLOBAL scope, and (round 9 A1)
+        # _cnrb_gives_way's "is the clashing PID a rigid PART" test
+        "loads.py": 3,
         "inistate.py": 1,     # the /XREF skip
         "composites.py": 1,   # the *INTEGRATION_SHELL layup drop
     }

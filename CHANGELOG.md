@@ -11,6 +11,40 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
+  bodies, constraints, starter clears; implement agent A on
+  `feat/r14-triage-9` off `386444e`).
+  - **A CNRB sharing a `*MAT_RIGID` part's PID no longer steals the part's
+    cards** (A1; default ON, `--no-rigid-part-pid-precedence` restores the
+    `386444e` merge). LS-DYNA accepts the shared id with Warning 10177 and
+    drives the part (`doorbeam.d3hsp:1040-1041`); dyna2rad does the same by
+    write order (`convertrigids.cxx:37-50`, `:145`, `:238`). k2rad's merge
+    `rbody_info = {**rbody_info, **cnrb_info}` let the CNRB record win, so
+    doorbeam's `*BOUNDARY_PRESCRIBED_MOTION_RIGID` drove the CNRB that
+    shares PID 4 with the `*MAT_RIGID` punch and the punch never moved -
+    five rounds scored that run. `writer/assembly._merge_cnrb_records` now
+    keeps the part record under its id and files the CNRB under the shadow
+    key `-pid` (`state.cnrb_record_key`), so every part-keyed card
+    (prescribed motion and its `/TH` rows, `*LOAD_RIGID_BODY`,
+    `*INITIAL_VELOCITY_RIGID_BODY` / `_GENERATION`, gravity, `/BCS`, `/TH`)
+    addresses the part's `/RBODY` while the CNRB keeps its own body, its
+    `_INERTIA` card-5 velocity and its `_SPC`; a clashing CNRB leaves the
+    part's `_LOCAL` triad nodes and `*ELEMENT_MASS_PART` to the part, and the
+    `_LOCAL` frame resolves to the part's LCO. doorbeam's bytes: `/IMPDISP/1`
+    grnod 90010 (node 77266, the CNRB main) -> 90005 (node 77264, the punch
+    main) and the two `/TH/NODE` rows the same - nothing else. MEASURED with
+    this rule alone (the part-A spec's arms, nt 4 = nt 2): the punch node 1
+    DY 0 mm at every fifth before, 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm
+    after (= the LS nodout); IE END +582.00 -> +53.91 %, RMS 393.31 -> 81.05
+    % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], 39 -> 35
+    cycles. The A1 probe in the solver (branch bytes, explicit, nt 4, 665
+    cycles both arms): the driven rigid plate follows the curve to 5e-9 mm
+    by default and stays at 0 mm under the opt-out, where the CNRB member
+    moves instead; a `_LOCAL` drive on the same clash does not start at all
+    under the opt-out (starter ERROR 3121: the triad nodes in two `/RBODY`).
+    Movers 1 key / 1 model (doorbeam); `solidof.k` (a CNRB on a DEFORMABLE
+    part's id) byte-identical.
+
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the
   branch at `f79d8b7`; every finding was re-checked against the code, the

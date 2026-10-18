@@ -197,6 +197,11 @@ def _rigid_own_body(state: ConversionState, pid: int,
     if pid in state.extra_rigid_nodes:
         return f"part {pid} carries *CONSTRAINED_EXTRA_NODES"
     if any(getattr(c, "pid", 0) == pid for c in state.cnrbs):
+        if state.options.rigid_part_pid_precedence:
+            # round 9, A1: the part keeps its record, but the screw still
+            # refuses a body whose id two rigid bodies share
+            return (f"a *CONSTRAINED_NODAL_RIGID_BODY shares PID {pid} with "
+                    "the part (LS Warning 10177)")
         return (f"a *CONSTRAINED_NODAL_RIGID_BODY uses PID {pid}, so its "
                 "record would replace the part's")
     if pid_nodes & cnrb_nodes:

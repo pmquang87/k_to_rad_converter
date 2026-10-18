@@ -1670,7 +1670,11 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # is now placed from mesh_nodes, i.e. the node set alone, so the written
         # coordinate is the same with and without a _LOCAL card.
         mesh_nodes = unique_nodes
-        helpers = state.local_frame_nodes.get(cnrb.pid)
+        # round 9, A1: a CNRB that gives way to the rigid PART of its PID
+        # leaves the triad to the part's /RBODY (_make_rbodies already took
+        # it) - one node in two /RBODY is refused by the starter
+        helpers = (None if cnrb.pid in state.cnrb_record_key
+                   else state.local_frame_nodes.get(cnrb.pid))
         if helpers:
             unique_nodes = sorted(set(unique_nodes) | set(helpers))
 
@@ -1756,7 +1760,12 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             for n in secondary_nodes:
                 if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
                     state.rbody_secondary_masses[n] = (cnrb.pid, "dropped")
-        part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
+        # round 9, A1: *ELEMENT_MASS_PART names a PART id; when the CNRB gives
+        # way to the rigid part of that id, the part's /RBODY carries the
+        # mass (_make_rbodies) and the CNRB none - never counted twice
+        part_add, part_fin = ((0.0, 0.0) if cnrb.pid in state.cnrb_record_key
+                              else state.element_mass_parts.get(
+                                  cnrb.pid, (0.0, 0.0)))
         added_mass = node_added + (part_fin if part_fin > 0 else part_add)
         # `props is None` — see the matching gate in _make_rbodies: with _INERTIA
         # accepted the Mass field holds TM and the SUPERSEDED warning below is the
