@@ -935,15 +935,18 @@ def build_parser() -> argparse.ArgumentParser:
              "and *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING "
              "spellings) as a ONE-WAY /INTER/TYPE7 on the same groups: "
              "OpenRadioss builds no implicit TYPE25 stiffness "
-             "(imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232). The "
-             "all-parts implicit stub stays beside it and carries the "
-             "contact's friction. MEASURED on doorbeam (part-driven, A1): IE "
+             "(imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232). "
+             "Where k2rad injects the all-parts implicit stub (a deck with "
+             "no contact of its own) it stays beside the route and carries "
+             "the contact's friction; beside another contact there is no "
+             "stub, named. MEASURED on doorbeam (part-driven, A1): IE "
              "END -15.85 .. -28.08 %%, RMS 10.34 .. 15.25 %% of the LS peak "
              "(twelve runs, nt 4 and nt 2), where the TYPE25 ended +53.91 %% / "
-             "81.05 %%. On a coarse 4-node RIGID base the route can end "
-             "NORMAL with the block through (silent) where the TYPE25 stops "
-             "loudly. ON by default; --no-implicit-n2s-type7 keeps the "
-             "TYPE25.",
+             "81.05 %%. With four contact nodes on a coarse RIGID base the "
+             "outcome depends on the geometry: the route can end NORMAL "
+             "with the block through (silent) where the TYPE25 stops "
+             "loudly, or hold where the TYPE25 lets the block through. ON "
+             "by default; --no-implicit-n2s-type7 keeps the TYPE25.",
     )
     parser.add_argument(
         "--implicit-rigid-gravity-nodes",

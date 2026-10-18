@@ -4700,18 +4700,26 @@ default gap (no shell-offset / derived / auto gap; `SST` / `MST` dropped; an
 explicit `--inter-gapmin` is honoured and named), `Inacti` from `IGNORE`,
 `Fpenmax 0.999999`, `Stfac` from `SFS`, `Fric = FS × FSF`, `VisS` from `VDC`,
 `Tstart` / `Tstop` = `BT` / `DT`. The ERODING spellings, explicit and modal
-decks keep the TYPE25. The all-parts implicit stub stays beside the routed
-contact and carries its `FS` (it duplicates the routed pairs; two routed
-contacts with different `FS` leave it frictionless, named). MEASURED on
+decks keep the TYPE25. Where k2rad injects the all-parts implicit stub (an
+implicit deck with no single-surface / surface-to-surface / general / tied /
+spot-weld / tiebreak contact of its own) it stays beside the routed contact
+and carries its `FS` (it duplicates the routed pairs; two routed contacts with
+different `FS` leave it frictionless, named); beside such a contact no stub is
+written and the routed warning says so. MEASURED on
 `implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive (twelve
 runs of the same bytes at nt 4 and nt 2, 25 LS times in (1e-5, 1.1e-3]): IE END
 −15.85 .. −28.08 %, RMS 10.34 .. 15.25 % of the LS peak (−27.80 .. −28.08 % /
 15.21 .. 15.25 % in ten runs, a −15.85 % / 10.34 % branch in two), where the
 TYPE25 ended +53.91 % / 81.05 % and 35 against 39 cycles. **Check that the
-contact carries load**: on a two-block coupon whose four contact nodes sit on a
-coarse RIGID base the route ends NORMAL TERMINATION with the block through the
-base (gap −0.2218 mm at t 1.0) where the TYPE25 stops with MESSAGE 79; on a
-shell-secondary coupon it holds where the TYPE25 default stops (nt 4 = nt 2).
+contact carries load**: with four contact nodes on a coarse RIGID base the
+outcome depends on the geometry - on one two-block coupon (a 10 × 10 × 5 mm
+block on a 2 × 2 × 1-hex rigid base) the route ends NORMAL TERMINATION with
+the block through the base (gap −0.2218 mm at t 1.0) where the TYPE25 stops
+with MESSAGE 79; on another (a one-hex 20 × 20 × 10 mm block on a one-hex
+30 × 30 × 10 mm rigid base) it holds (gap +0.0228 mm at t 1.0) where the TYPE25
+lets the block through (−0.1708 mm at t 0.9) and stops at 98 % of t_end behind
+a NORMAL TERMINATION; on a shell-secondary coupon it holds where the TYPE25
+default stops (nt 4 = nt 2 on every coupon).
 `*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
 `fric_ID` binding work). LS-DYNA's
 `μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`

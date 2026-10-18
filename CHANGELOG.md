@@ -434,7 +434,10 @@ Prior history (before this changelog was introduced) is summarized in the
     gap 0.05 = t/2 dies too (why the default gap stays); b6r (a coarse RIGID
     base) ends NORMAL with the block THROUGH the base (gap -0.2218 mm at t
     1.0, both contacts 0 N) where the TYPE25 stops loudly - named in the
-    warning. Movers 1 key / 1 model (doorbeam); guards: the 12 implicit decks
+    warning, which since the fix round also names the solver-physics
+    validator's opposite outcome on another coarse rigid base (a2r4: the
+    route holds, +0.0228 mm, where the TYPE25 lets the block through and
+    stops at 98 % of t_end behind a NORMAL banner). Movers 1 key / 1 model (doorbeam); guards: the 12 implicit decks
     that already emit a non-stub TYPE7 and the 53 / 37 stub decks keep
     their interface cards.
   - **The texts that ride A1 + A2** (A3; no bytes). (a) The B6 opt-in

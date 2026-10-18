@@ -8422,8 +8422,11 @@ class ConvertOptions:
     # times in (1e-5, 1.1e-3]): IE END -15.85 .. -28.08 %, RMS 10.34 .. 15.25
     # % (twelve runs at nt 4 and nt 2 on two branches, -27.80 .. -28.08 %
     # in ten), against +53.91 % / 81.05 % on the
-    # TYPE25; a coarse 4-node rigid-base coupon ends NORMAL with the block
-    # through (named in the warning). Movers 1 key / 1 model (doorbeam).
+    # TYPE25; on a coarse 4-node rigid base the outcome depends on the
+    # geometry (one coupon ends NORMAL with the block through, another holds
+    # where the TYPE25 lets it through - both named in the warning, as is a
+    # deck whose own contacts leave no stub). Movers 1 key / 1 model
+    # (doorbeam).
     implicit_n2s_type7: bool = True
     # --no-implicit-rigid-gravity-nodes: an implicit /GRAV swaps every rigid
     # part for its /RBODY main node again (the 386444e group).

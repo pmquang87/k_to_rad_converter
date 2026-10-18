@@ -1116,16 +1116,21 @@ def convert(
         for a TYPE25 (imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE
         232). k2rad's TYPE7 cells (Istf 4, Igap 0 with the starter's default
         gap, Inacti from IGNORE, Fric = FS x FSF, Tstart / Tstop = BT / DT);
-        the all-parts implicit stub stays beside it with the contact's
-        friction. MEASURED on implicit/basic-examples/springback-i/doorbeam.k
+        where k2rad injects the all-parts implicit stub (an implicit deck
+        with no contact of its own) it stays beside the route with the
+        contact's friction - beside another contact there is no stub, and
+        the warning says so. MEASURED on
+        implicit/basic-examples/springback-i/doorbeam.k
         (with the A1 part drive): IE END -15.85 .. -28.08 %, RMS 10.34 ..
         15.25 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3],
         twelve runs of the same bytes at nt 4 and nt 2 on two branches
         (-27.80 .. -28.08 % / RMS 15.21 .. 15.25 % in ten), where the
         TYPE25 ended +53.91 % / RMS 81.05 %.
-        On a coarse 4-node rigid-base coupon the route ends NORMAL with the
-        block through where the TYPE25 stops with MESSAGE 79. Default True;
-        False keeps the TYPE25 (the 386444e bytes).
+        With four contact nodes on a coarse rigid base the outcome depends
+        on the geometry: one coupon ends NORMAL with the block through where
+        the TYPE25 stops with MESSAGE 79, another holds where the TYPE25
+        lets the block through. Default True; False keeps the TYPE25 (the
+        386444e bytes).
     implicit_rigid_gravity_nodes : bool
         On an implicit deck keep *MAT_RIGID parts' own nodes in the /GRAV
         group beside their /RBODY main node (R14 triage round 9, A4): the

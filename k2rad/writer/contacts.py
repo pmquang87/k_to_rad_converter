@@ -4711,9 +4711,12 @@ def n2s_routed(state: ConversionState, c) -> bool:
 #: (sha256 2926b1300fb6...) at nt 4 and nt 2 - the part-A spec's six and
 #: implement A's six - scatter on the END and the 4th fifth (two branches:
 #: -27.80 .. -28.08 % in ten, -15.85 % in two, both at nt 2), so the
-#: figures ship as a band; the coupon is the part-A spec's b6r (a 10 x 10 x
-#: 5 mm block 0.1 mm above a coarse RIGID 2 x 2 x 1-hex base, its top
-#: pushed 0.3 mm; IMFLAG 1, DT0 0.1, ENDTIM 1.0; nt 4 = nt 2).
+#: figures ship as a band; the coupons on a coarse RIGID base are the
+#: part-A spec's b6r (a 10 x 10 x 5 mm block 0.1 mm above a 2 x 2 x 1-hex
+#: rigid base, its top pushed 0.3 mm; IMFLAG 1, DT0 0.1, ENDTIM 1.0; nt 4 =
+#: nt 2) and the solver-physics validator's a2r4 (a one-hex 20 x 20 x 10 mm
+#: block 0.1 mm above a one-hex 30 x 30 x 10 mm rigid base, its top pushed
+#: 0.3 mm over t 1; nt 4 = nt 2): the same class, opposite outcomes.
 _N2S_TYPE7_MEASURED = (
     "MEASURED on implicit/basic-examples/springback-i/doorbeam.k with the "
     "part drive: internal energy END -15.85 .. -28.08 % against LS-DYNA, RMS "
@@ -4721,10 +4724,42 @@ _N2S_TYPE7_MEASURED = (
     "(twelve runs of the same bytes at nt 4 and nt 2: the route scatters run "
     "to run, -27.80 .. -28.08 % / RMS 15.21 .. 15.25 % in ten), where the "
     "TYPE25 ended +53.91 % / RMS 81.05 %. CHECK THAT THE CONTACT CARRIES "
-    "LOAD: on a two-block coupon whose four contact nodes sit on a coarse "
-    "RIGID base this route ends NORMAL TERMINATION with the block through "
-    "the base (gap -0.2218 mm at t 1.0) where the TYPE25 stops with MESSAGE "
-    "79.")
+    "LOAD - with four contact nodes on a coarse RIGID base the outcome "
+    "depends on the geometry: on one two-block coupon this route ends "
+    "NORMAL TERMINATION with the block through the base (gap -0.2218 mm at t "
+    "1.0) where the TYPE25 stops with MESSAGE 79; on another it holds (gap "
+    "+0.0228 mm at t 1.0) where the TYPE25 lets the block through (-0.1708 "
+    "mm at t 0.9) and stops at 98 % of t_end behind a NORMAL TERMINATION.")
+
+
+def _routed_stub_clause(state: ConversionState) -> str:
+    """The routed warning's sentence on the all-parts implicit stub - what
+    k2rad._inject_implicit_contact_stub actually did (the fix round,
+    F-A2-1): the stub is injected only into an implicit deck WITHOUT a
+    single-surface / surface-to-surface / general / tied / spot-weld /
+    tiebreak contact of its own, and under --skip-implicit-stub-with-type25
+    its fate is decided after the TYPE25 section."""
+    if any(c.title == AUTO_IMPLICIT_STUB_TITLE
+           for c in state.contacts_single):
+        return " The all-parts implicit stub stays beside it."
+    if state.implicit_stub_deferred_for:
+        return (" Whether the all-parts implicit stub stays beside it is "
+                "decided after the TYPE25 section "
+                "(--skip-implicit-stub-with-type25; its own sentence names "
+                "the outcome).")
+    fams = [name for name, recs in (
+        ("single-surface", state.contacts_single),
+        ("surface-to-surface", state.contacts_surf2surf),
+        ("general", state.contacts_general),
+        ("tied", state.contacts_tied),
+        ("spot-weld", state.contacts_spotweld),
+        ("tiebreak", state.contacts_tiebreak)) if recs]
+    return (" NO all-parts implicit stub is written beside it: k2rad injects "
+            "the stub only into an implicit deck without a contact of its "
+            f"own, and this deck has {' / '.join(fams) or 'another'} "
+            "contact(s) - so the route has no stub duplicating its pairs "
+            "(without it a 4-node coupon's block passed through behind a "
+            "NORMAL TERMINATION).")
 
 
 def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
@@ -4765,8 +4800,8 @@ def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
         "implicit contact stiffness for a TYPE25 (imp_int_k.F:111-200; "
         "ind_glob_k.F:4601-4605 prints MESSAGE 232 'INTERFACE TYPE 25 IS NOT "
         "AVAILABLE WITH IMPLICIT SOLUTION'; its force still enters the "
-        "residual, intfop2.F:595). The all-parts implicit stub stays beside "
-        f"it.{soft} " + _N2S_TYPE7_MEASURED
+        "residual, intfop2.F:595)." + _routed_stub_clause(state)
+        + f"{soft} " + _N2S_TYPE7_MEASURED
         + " --no-implicit-n2s-type7 keeps the TYPE25.")
     return lines
 

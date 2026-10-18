@@ -211,12 +211,15 @@ such a model EXPLICIT until the engine is fixed.
   non-modal deck a `*CONTACT_NODES_TO_SURFACE` /
   `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` is written as a ONE-WAY `/INTER/TYPE7`
   on the same groups (BT / DT in Tstart / Tstop), beside the all-parts
-  implicit stub, which carries the contact's friction when every routed
-  contact agrees on it. MEASURED on doorbeam (part-driven since A1): IE END
-  -15.85 .. -28.08 %, RMS 10.34 .. 15.25 % of the LS peak over twelve runs at
-  nt 4 and nt 2, where the TYPE25 ended +53.91 % / 81.05 %. A 4-node one-way
-  TYPE7 on a coarse RIGID base can end NORMAL with the block through - a
-  silent failure where the TYPE25 stops loudly.
+  implicit stub where k2rad injects one (a deck with no contact of its own;
+  the warning names a deck whose own contacts leave no stub), which carries
+  the contact's friction when every routed contact agrees on it. MEASURED on
+  doorbeam (part-driven since A1): IE END -15.85 .. -28.08 %, RMS 10.34 ..
+  15.25 % of the LS peak over twelve runs at nt 4 and nt 2, where the TYPE25
+  ended +53.91 % / 81.05 %. A 4-node one-way TYPE7 on a coarse RIGID base
+  can end NORMAL with the block through - a silent failure where the TYPE25
+  stops loudly - or hold where the TYPE25 lets the block through behind a
+  NORMAL banner: the outcome depends on the geometry.
 - **Implicit gravity on a rigid part** (A4, default ON,
   `--no-implicit-rigid-gravity-nodes` restores the main-node group). Gravity
   on a `/RBODY` main node alone leaves an implicit body frozen (`gravit_imp.F`

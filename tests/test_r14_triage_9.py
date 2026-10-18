@@ -579,6 +579,38 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertFalse(_has(res.warnings,
                               "Implicit deck with TYPE25-route contact(s)"))
 
+    def test_a3_the_stub_sentence_follows_the_stub(self):
+        """The fix round (F-A2-1): the routed warning said 'The all-parts
+        implicit stub stays beside it' on every deck, but the stub is
+        injected only into an implicit deck WITHOUT a contact of its own -
+        beside an AUTOMATIC_SINGLE_SURFACE or a TIED contact no stub is
+        written. The sentence now says which; the injected case keeps the
+        round-9 wording (doorbeam's sentence unchanged)."""
+        ss = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID\n" + _row(77) + "\n"
+              + _row(1, 0, 3, 0) + "\n" + _row(0.1, 0.0, 0.0, 0.0, 0.0)
+              + "\n" + _row() + "\n")
+        tied = ("*SET_NODE_LIST\n" + _row(6) + "\n" + _row(4, 5) + "\n"
+                "*CONTACT_TIED_NODES_TO_SURFACE_ID\n" + _row(88) + "\n"
+                + _row(6, 1, 4, 3) + "\n" + _row() + "\n" + _row() + "\n")
+        res, st, _e = _convert(a2_plain_implicit())
+        self.assertIn(_STUB_TITLE, st)
+        self.assertTrue(_has(res.warnings, _W_A2 + "78", "The all-parts "
+                             "implicit stub stays beside it."))
+        for name, extra, fam in (("single", ss, "single-surface"),
+                                 ("tied", tied, "tied")):
+            with self.subTest(name):
+                r2, st2, _e = _convert(_shell_plate(_IMPL1,
+                                                    _SET5 + _n2s() + extra))
+                self.assertNotIn(_STUB_TITLE, st2)
+                self.assertIn("/INTER/TYPE7/78", st2)
+                hits = [w for w in r2.warnings if _W_A2 + "78" in w]
+                self.assertEqual(len(hits), 1, r2.warnings)
+                self.assertNotIn("stub stays beside it", hits[0])
+                self.assertIn("NO all-parts implicit stub is written beside "
+                              "it: k2rad injects the stub only into an "
+                              "implicit deck without a contact of its own, "
+                              f"and this deck has {fam} contact(s)", hits[0])
+
     def test_a2_the_routed_groups_are_the_TYPE25_routes(self):
         """The TYPE7's Slav / Mast are the groups the TYPE25 route resolved
         (grnd_IDs / surf_ID2 of the opt-out), with the same group blocks."""

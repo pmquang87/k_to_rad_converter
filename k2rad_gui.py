@@ -1164,8 +1164,8 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="Implicit node-to-surface contacts as one-way "
-                     "/INTER/TYPE7 (stub kept, with their friction) - ON. "
-                     "doorbeam IE END -16 .. -28 %",
+                     "/INTER/TYPE7 (an injected stub kept, with their "
+                     "friction) - ON. doorbeam IE END -16 .. -28 %",
             variable=self.implicit_n2s_type7).grid(
                 row=64, column=0, columnspan=3, sticky="w", **pad)
 
