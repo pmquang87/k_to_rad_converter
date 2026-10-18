@@ -860,7 +860,7 @@ def convert(
         2 or more than six digits, an undefined CON1 or a degenerate
         node frame writes NO card and is named. The
         ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` CMO -1 card shares the
-        helper (a VECTOR CON1 no longer prints a false 'will dangle').
+        helper (a VECTOR CON1 is a real /SKEW/FIX).
         ONE skew per node (``hm_read_bcs.F:199-205``, ERROR 148): a
         ``*NODE`` TC/RC, ``*CONSTRAINED_GLOBAL`` or ``*BOUNDARY_SPC``
         code on such a main node in another skew is DROPPED and named,

@@ -1513,8 +1513,8 @@ def _resolve_cnrb_spc_lines(state: ConversionState, cnrb,
 
     With ``--rigid-local-constraints`` (the default) a CMO < 0 card goes
     through :func:`_local_constraint`, the helper the ``*MAT_RIGID`` producer
-    shares: a ``*DEFINE_COORDINATE_VECTOR`` CON1 is a real /SKEW/FIX (no
-    false "will dangle" warning), a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
+    shares: a ``*DEFINE_COORDINATE_VECTOR`` CON1 is a real /SKEW/FIX (and
+    no warning says otherwise), a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
     gets a /SKEW/FIX at its t = 0 axes (CON1 is "fixed in time"), and a code
     with more than six digits or a digit >= 2, an undefined CON1 or a
     degenerate node frame writes NO card (and no record). Without it, the

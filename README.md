@@ -1017,7 +1017,7 @@ errors and ONE new WARNING 312 — this `/BCS` beside the deck's own `/IMPDISP`
 in `/SKEW/MOV/91965` on the same main node — round 9 writes that drive in the
 `/BCS` skew (A9) and its stated `SF = 0` as `Fscale 1` (A8)). The
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO −1 card shares the rule (a VECTOR CON1
-no longer prints a false "skew_ID will dangle"). **One skew per node**: the
+is a real `/SKEW/FIX`, under the opt-out too since round 9). **One skew per node**: the
 starter accepts ONE skew per node across every `/BCS` (`hm_read_bcs.F:199-205`,
 ERROR 148 "A SKEW IS ALREADY DEFINED WITH THE NODE"; the same skew twice is
 fine, skew 0 counts), so a `*NODE` TC/RC, `*CONSTRAINED_GLOBAL` or
