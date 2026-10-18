@@ -144,6 +144,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          mixed_main_thickness_gap: bool = False,
                          implicit_bfgs: bool = False,
                          weld_trajectory_impflux: bool = True,
+                         axisymmetric_2d: bool = True,
+                         positive_dt2ms_mass_scaling: bool = True,
                          weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -364,6 +366,10 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["implicit_bfgs"] = bool(implicit_bfgs)
 
     kwargs["weld_trajectory_impflux"] = bool(weld_trajectory_impflux)
+
+    kwargs["axisymmetric_2d"] = bool(axisymmetric_2d)
+
+    kwargs["positive_dt2ms_mass_scaling"] = bool(positive_dt2ms_mass_scaling)
     # round 9, B1: the window entry - blank = the measured 0.25 s; anything
     # else must be a positive, finite number of seconds.
     wtext = (weld_trajectory_window_text or "").strip()
@@ -546,6 +552,8 @@ class ConverterGUI:
         self.mixed_main_thickness_gap = tk.BooleanVar(value=False)
         self.implicit_bfgs = tk.BooleanVar(value=False)
         self.weld_trajectory_impflux = tk.BooleanVar(value=True)
+        self.axisymmetric_2d = tk.BooleanVar(value=True)
+        self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
         self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -1214,6 +1222,19 @@ class ConverterGUI:
         ttk.Entry(io, textvariable=self.weld_trajectory_window,
                   width=8).grid(row=73, column=2, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="Axisymmetric ELFORM 14 / 15 -> the OpenRadioss 2-D route (N2D3"
+                     "D 1, /QUAD on Isolid 2) - ON. metal-forming: mass = LS per rad"
+                     "ian",
+            variable=self.axisymmetric_2d).grid(
+                row=74, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Routed 2-D deck: positive DT2MS -> density x (DT2MS / dt0)^2 -"
+                     " ON. metal-forming: timeout -> NORMAL",
+            variable=self.positive_dt2ms_mass_scaling).grid(
+                row=75, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1503,6 +1524,8 @@ class ConverterGUI:
                 implicit_bfgs=self.implicit_bfgs.get(),
                 weld_trajectory_impflux=self.weld_trajectory_impflux.get(),
                 weld_trajectory_window_text=self.weld_trajectory_window.get(),
+                axisymmetric_2d=self.axisymmetric_2d.get(),
+                positive_dt2ms_mass_scaling=self.positive_dt2ms_mass_scaling.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1777,6 +1800,10 @@ class ConverterGUI:
             bits.append("weld trajectory window "
                         f"{kwargs['weld_trajectory_window']:g} s "
                         "(--weld-trajectory-window)")
+        if not kwargs.get("axisymmetric_2d", True):
+            bits.append("axisymmetric ELFORM 14 / 15 kept as 3-D shells (--no-axisymmetric-2d)")
+        if not kwargs.get("positive_dt2ms_mass_scaling", True):
+            bits.append("positive DT2MS ignored on a routed 2-D deck (--no-positive-dt2ms-mass-scaling)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

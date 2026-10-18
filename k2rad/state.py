@@ -1201,10 +1201,43 @@ class SectionShell:
 #: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
 #: *SECTION_SHELL Remark 6): the 2-D PLANE-STRAIN formulations integrate a
 #: unit depth (round 8, A7 writes Thick 1.0), the AXISYMMETRIC ones integrate
-#: per radian (named, no thickness reproduces it).
+#: per radian - an all-ELFORM-14 / 15 deck is routed to the OpenRadioss 2-D
+#: deck (round 9, B2: writer/axisym2d.py) unless refused by name; ELFORM 44
+#: (EFG) has no Radioss 2-D element and stays a 3-D shell, named.
 PLANE_STRAIN_ELFORMS = frozenset({13, 43, 52, 55})
 AXISYMMETRIC_ELFORMS = frozenset({14, 15, 44})
 TWO_D_SHELL_ELFORMS = PLANE_STRAIN_ELFORMS | AXISYMMETRIC_ELFORMS
+#: R14 triage round 9, B3: the 2-D PLANE-STRESS formulation. LS-DYNA
+#: integrates a UNIT thickness on it only when Card 2 states none (main_fsi's
+#: rigid mass 0.23410459 = rho x area x 1.0 in its d3hsp), although Remark 6
+#: does not list ELFORM 12 - a stated T1 > 0 is a real thickness.
+PLANE_STRESS_ELFORMS = frozenset({12})
+
+
+@dataclass
+class AxisymPlan:
+    """R14 triage round 9, B2: the axisymmetric 2-D route decision
+    (writer/axisym2d.resolve_axisym_plan, memoised on
+    ``ConversionState.axisym_plan``).
+
+    ``candidate`` - the deck uses an ELFORM 14 / 15 *SECTION_SHELL and the
+    route is enabled; ``routed`` - the screen passed (``reasons`` empty);
+    ``aborted`` - the emitted-deck transform met a card it does not map and
+    kept the 3-D lines (screen 7); ``density`` / ``dt0`` - the 2-D DT2MS
+    density cell's per-material factor and OpenRadioss's own cycle-0 2-D
+    step of that material's quads."""
+    candidate: bool = False
+    routed: bool = False
+    aborted: bool = False
+    elform: int = 0
+    pids: List[int] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+    density: Dict[int, float] = field(default_factory=dict)
+    dt0: Dict[int, float] = field(default_factory=dict)
+    f2d: float = 0.67
+    dt2ms: float = 0.0
+    no_modulus: List[int] = field(default_factory=list)
+    engine_dt_dropped: bool = False
 
 
 @dataclass
@@ -8193,8 +8226,8 @@ class ConvertOptions:
     # ignores Card 2 there and integrates a unit depth (Remark 6). MEASURED
     # (starter): ex_16's rigid disk 0.08756308 -> 0.003447366 = LS-DYNA
     # 0.34473655E-02. The element stays a 3-D plane-stress shell (named);
-    # axisymmetric ELFORM 14 / 15 / 44 are named, never changed. Reach 1 deck
-    # key on 1 emitted model.
+    # axisymmetric ELFORM 14 / 15 take the 2-D route (B2, axisymmetric_2d),
+    # ELFORM 44 stays named. Reach 1 deck key on 1 emitted model.
     plane_strain_unit_thickness: bool = True
     # --no-rigid-element-mass-admas: fold every rigid member's *ELEMENT_MASS
     # into the /RBODY Mass field (and drop a CNRB secondary's), as before
@@ -8465,6 +8498,32 @@ class ConvertOptions:
     # spelling (--weld-trajectory-impflux[=S], nargs "?") would swallow the
     # optional positional output_stem (round 8 D1, round 9 conventions D-2).
     weld_trajectory_window: float = 0.25
+    # --no-axisymmetric-2d: an all-ELFORM-14 / 15 *SECTION_SHELL deck stays a
+    # 3-D shell deck with Card 2's T1 (the 386444e bytes; named).
+    #
+    # ON by default (R14 triage round 9, B2): writer/axisym2d.py routes such
+    # a deck to the OpenRadioss 2-D AXISYMMETRIC deck (/ANALY N2D3D 1; nodes
+    # (x, y, 0) -> (0, x, y); /SHELL -> /QUAD on /PROP/SOLID Isolid 2; /BCS
+    # and prescribed-motion directions permuted; /RBODY J = 0; /TH/QUAD),
+    # refused by name for another element family, a 3-node shell, any
+    # *CONTACT_*, a node off the xy-plane or at x < 0, or an unmapped card.
+    # MEASURED on thermal/metal-forming: starter TOTAL MASS 5.7080700E-06 =
+    # LS-DYNA's per radian (the 3-D route -77.78 %); 2Dlag (giant, starter
+    # only) ERROR 3046 -> 0. Reach 2 deck keys on 2 emitted models (bytes) +
+    # 1 / 1 refused by name (SPR main).
+    axisymmetric_2d: bool = True
+    # --no-positive-dt2ms-mass-scaling: a routed 2-D deck keeps its physical
+    # density whatever *CONTROL_TIMESTEP DT2MS says.
+    #
+    # ON by default (round 9, B2): on a ROUTED deck a positive DT2MS
+    # multiplies each deformable material's density by max(1, (DT2MS /
+    # dt0)^2), dt0 = OpenRadioss's own cycle-0 2-D step of its quads in
+    # closed form (qdlen2.F:113, mqviscb.F:259-260, contrl.F:1148), so the run
+    # starts at DT2MS; /DT/NODA/CST is never written on a 2-D deck
+    # (resol.F:2711-2729). MEASURED on metal-forming (nt 4, the 500 LS
+    # times in (0.0032, 1.6]): a timeout -> NORMAL in 24 807 cycles, IE END
+    # -0.45 %, RMS 0.24 % of the LS peak. Reach 1 key on 1 model.
+    positive_dt2ms_mass_scaling: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -9765,6 +9824,12 @@ class ConversionState:
     weld_plans: Optional[List[WeldPlan]] = None
     weld_temp_counts: Optional[Tuple[int, int]] = None
     weld_unit_funct: int = 0
+    # R14 triage round 9, B2: the axisymmetric 2-D route decision (None =
+    # not resolved yet; writer/axisym2d.resolve_axisym_plan) and every
+    # keyword name the deck dispatched (handlers.dispatch records it - the
+    # route's screen reads what the deck STATES, converted or not).
+    axisym_plan: Optional[AxisymPlan] = None
+    deck_keywords: Set[str] = field(default_factory=set)
     # *CONTROL_THERMAL_SOLVER — FWORK reaches /HEAT/MAT's EFRAC and TSF the
     # engine /THERM; every other cell is a named per-field drop.
     ctrl_thermal_solver: Optional[ControlThermalSolver] = None
@@ -10169,7 +10234,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1099, :1810, :1924, :2113, :2270, :2394, in that order:
+    # (writer/rbody.py:1106, :1817, :1931, :2120, :2277, :2401, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,

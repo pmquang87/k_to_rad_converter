@@ -2936,6 +2936,321 @@ class WeldTrajectoryImpflux(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B2 - axisymmetric ELFORM 14 / 15 -> the OpenRadioss 2-D route, with the 2-D
+#      DT2MS density cell (default ON, --no-axisymmetric-2d,
+#      --no-positive-dt2ms-mass-scaling)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def b2_ax15(dt2ms=1e-4, var="base"):
+    """AX-15 (round 9, B2; the part-B spec's fixture, gen_ax.py): 3 x 2 quads
+    of 1 mm (r = x in 0..3, axis = y in 0..2, z 0) on *SECTION_SHELL ELFORM
+    15, *MAT_ELASTIC RO 7.85e-9 E 210000 PR 0.3; the axis nodes (x 0) held in
+    x, the bottom nodes held in y, the top nodes driven in y (DOF 2, VAD 2) on
+    curve 1 = (0, 0) (1e-3, -0.01); ENDTIM 1e-3; *CONTROL_TIMESTEP DT2MS
+    *dt2ms*. Per-radian mass RO x int(r dA) = 7.85e-9 x 4.5 x 2 = 7.065e-8.
+    *var*: a refusal class or a control."""
+    nx, ny = 3, 2
+
+    def nid(i, j):
+        return 1 + j * (nx + 1) + i
+    elform = 14 if var == "elform14" else 15
+    L = ["*KEYWORD", "*TITLE", "AX-15 axisymmetric fixture (%s)" % var,
+         "*CONTROL_TERMINATION", _f10(1.0e-3),
+         "*CONTROL_TIMESTEP", _f10(0.0, 0.0, 0, 0.0, dt2ms),
+         "*DATABASE_GLSTAT", _f10(1.0e-5), "*DATABASE_MATSUM", _f10(1.0e-5),
+         "*DATABASE_HISTORY_SHELL", _f10(1),
+         "*PART", "ring", _f10(1, 1, 1),
+         "*SECTION_SHELL", _f10(1, elform, 1.0, 2), _f10(1.0, 1.0, 1.0, 1.0)]
+    if var == "rigid":
+        L += ["*MAT_RIGID", _f10(1, 7.85e-9, 210000.0, 0.3), _f10(0.0, 0, 0),
+              _f10(0.0)]
+    else:
+        L += ["*MAT_ELASTIC", _f10(1, 7.85e-9, 210000.0, 0.3)]
+    if var == "mixed1415":
+        L += ["*PART", "ring14", _f10(2, 2, 1), "*SECTION_SHELL",
+              _f10(2, 14, 1.0, 2), _f10(1.0, 1.0, 1.0, 1.0)]
+    L += ["*NODE"]
+    for j in range(ny + 1):
+        for i in range(nx + 1):
+            x = float(i) - (0.5 if var == "xneg" and i == 0 else 0.0)
+            z = 0.001 if (var == "zoff" and i == 3 and j == 2) else 0.0
+            L.append("%8d%16.8g%16.8g%16.8g" % (nid(i, j), x, float(j), z))
+    L += ["*ELEMENT_SHELL"]
+    e = 1
+    for j in range(ny):
+        for i in range(nx):
+            n = [nid(i, j), nid(i + 1, j), nid(i + 1, j + 1), nid(i, j + 1)]
+            pid = 2 if (var == "mixed1415" and e == 6) else 1
+            if var in ("tri", "tricontact") and e == 6:
+                n = [n[0], n[1], n[2], n[2]]
+            if var == "cw" and e == 1:
+                n = [n[0], n[3], n[2], n[1]]
+            L.append("%8d%8d" % (e, pid) + "".join("%8d" % x for x in n))
+            e += 1
+    axis = [nid(0, j) for j in range(ny + 1)]
+    bottom = [nid(i, 0) for i in range(nx + 1)]
+    top = [nid(i, ny) for i in range(nx + 1)]
+    L += ["*SET_NODE_LIST", _f10(1), _f10(*axis), "*SET_NODE_LIST", _f10(2),
+          _f10(*bottom), "*SET_NODE_LIST", _f10(3), _f10(*top)]
+    L += ["*BOUNDARY_SPC_SET", _f10(1, 0, 1, 0, 0, 0, 0, 0),
+          "*BOUNDARY_SPC_SET", _f10(2, 0, 0, 1, 0, 0, 0, 0)]
+    dof = 3 if var == "dof3" else 2
+    L += ["*BOUNDARY_PRESCRIBED_MOTION_SET", _f10(3, dof, 2, 1, 1.0)]
+    L += ["*DEFINE_CURVE", _f10(1), "%20.6g%20.6g" % (0.0, 0.0),
+          "%20.6g%20.6g" % (1.0e-3, -0.01)]
+    if var in ("contact", "tricontact"):
+        L += ["*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE", _f10(1, 2)]
+    if var == "loadnode":
+        L += ["*LOAD_NODE_POINT", _f10(nid(3, 1), 1, 1, 1.0)]
+    if var == "elmass":
+        L += ["*ELEMENT_MASS", "%8d%8d%16.6g" % (100, nid(3, 2), 1.0e-6)]
+    if var == "inivel":
+        L += ["*INITIAL_VELOCITY_NODE", _f10(nid(3, 2), 0.0, -10.0, 0.0)]
+    if var == "rigidwall":
+        L += ["*RIGIDWALL_PLANAR", _f10(0),
+              _f10(0.0, -1.0, 0.0, 0.0, 1.0, 0.0)]
+    if var == "adaptive":
+        L += ["*CONTROL_ADAPTIVE", _f10(1.0e-4, 5.0)]
+    if var == "solid":
+        L += ["*PART", "block", _f10(9, 9, 1), "*SECTION_SOLID", _f10(9, 1),
+              "*NODE"] + ["%8d%16.8g%16.8g%16.8g" % (
+                  100 + k, 10.0 + (k & 1), 10.0 + ((k >> 1) & 1),
+                  float(k >> 2)) for k in range(8)] + \
+            ["*ELEMENT_SOLID", "%8d%8d" % (100, 9) + "".join(
+                "%8d" % (100 + k) for k in (0, 1, 3, 2, 4, 5, 7, 6))]
+    if var == "beam":
+        L += ["*PART", "rod", _f10(9, 9, 1), "*SECTION_BEAM", _f10(9, 1),
+              _f10(1.0, 1.0), "*ELEMENT_BEAM",
+              "%8d%8d%8d%8d" % (100, 9, nid(0, 0), nid(1, 0))]
+    L += ["*END", ""]
+    return "\n".join(L)
+
+
+#: the 386444e (pristine10) test-path digests of b2_ax15() - the opt-out
+#: --no-axisymmetric-2d must reproduce them (computed once by the implement
+#: agent on C:/Users/pmqua/PycharmProjects/k2rad-wt-pristine10)
+_B2_AX15_386444E_STARTER = (
+    "1d6aca67bfb87cb1bf149289d7fb451aced6cc02279467282183df60ea5ff575")
+_B2_AX15_386444E_ENGINE = (
+    "48a32f057cdc960f8a54cf02cf4e4faa6c9393fa3f6ca716ce478e24a4d1f269")
+_W_B2_ROUTED = "-> the 2-D AXISYMMETRIC route (/ANALY N2D3D 1)"
+_W_B2_REFUSED = "the 2-D axisymmetric route is NOT used - "
+_W_B2_DENSITY = "> 0 on the routed 2-D deck: the density of material(s)"
+
+
+def _data_after(starter: str, head: str, k: int = 0):
+    """The k-th non-comment data line after the header line *head*."""
+    lines = starter.splitlines()
+    i = lines.index(head)
+    data = [ln for ln in lines[i + 1:] if not ln.startswith("#")]
+    return data[k]
+
+
+class Axisymmetric2D(unittest.TestCase):
+    """B2 (R14 triage round 9): an all-ELFORM-14 / 15 deck is written as the
+    OpenRadioss 2-D axisymmetric deck, a positive DT2MS scales its density
+    by (DT2MS / dt0)^2 with dt0 in closed form; every refusal class keeps
+    the 3-D bytes with its named reason. STARTER (nt 4,
+    C:/Users/pmqua/rcv_r9i_implB_<name>): the production AX-15 _0000.rad
+    reads 0 ERROR(S) / 0 WARNING(S), N2D3D 1, TOTAL MASS 0.12527037 (density
+    cell on) and 7.065E-08 under --no-positive-dt2ms-mass-scaling."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res, cls.st, cls.eng = _convert(b2_ax15())
+
+    def test_routed_cards(self):
+        st = self.st
+        self.assertEqual(_data_after(st, "/ANALY")[:10], "         1")
+        rows = {int(ln.split()[0]): ln.split()[1:] for ln in
+                [b for h, b in _blocks(st, "/NODE")][0]}
+        self.assertEqual(rows[4], ["0", "3", "0"])
+        self.assertEqual(rows[12], ["0", "3", "2"])
+        self.assertTrue(all(v[0] == "0" for v in rows.values()))
+        quad = [b for h, b in _blocks(st, "/QUAD/1")][0]
+        self.assertEqual([[int(t) for t in ln.split()] for ln in quad],
+                         [[1, 1, 2, 6, 5], [2, 2, 3, 7, 6], [3, 3, 4, 8, 7],
+                          [4, 5, 6, 10, 9], [5, 6, 7, 11, 10],
+                          [6, 7, 8, 12, 11]])
+        self.assertFalse(re.search(r"^/SHELL/", st, re.M))
+        self.assertFalse(re.search(r"^/PROP/SHELL/", st, re.M))
+        prop = [b for h, b in _blocks(st, "/PROP/SOLID/1")][0]
+        self.assertEqual(prop[1].split()[0], "2")         # Isolid 2
+        self.assertEqual(float(prop[2].split()[2]), 0.1)  # h
+        bcs = sorted(ln.split()[0] for h, b in _blocks(st, "/BCS/")
+                     for ln in b[1:])
+        self.assertEqual(bcs, ["001", "010"])
+        self.assertEqual(_data_after(st, "/IMPDISP/90002", 1)[10:20].strip(),
+                         "Z")
+        self.assertEqual([b for h, b in _blocks(st, "/TH/QUAD/1")][0][-1]
+                         .split(), ["1"])
+        self.assertTrue(_has(self.res.warnings, _W_B2_ROUTED,
+                             "6 /SHELL become /QUAD (0 re-ordered",
+                             "Isolid 2 (h 0.1)", "J = 0",
+                             "5.7080700E-06", "0.2199439E-03"))
+        self.assertFalse(_has(self.res.warnings, _WA7B_R9))
+        self.assertFalse(_has(self.res.warnings, "Ishell=12"))
+
+    def test_density_cell_closed_form(self):
+        rho = _data_after(self.st, "/MAT/ELAST/1", 1)
+        self.assertEqual(rho.strip(), "1.391893E-02")
+        self.assertAlmostEqual(7.85e-9 * 1773111.708199, 1.391893e-2,
+                               places=8)
+        self.assertTrue(_has(self.res.warnings, _W_B2_DENSITY,
+                             "= 1.77311e+06 with dt0 = 7.509862e-08 s",
+                             "resol.F:2711-2729", "24 807 cycles",
+                             "IE END -0.45 %", "RMS 0.24 %"))
+        res0, st0, _e = _convert(b2_ax15(dt2ms=0.0))
+        self.assertEqual(_data_after(st0, "/MAT/ELAST/1", 1).strip(),
+                         "7.850000E-09")
+        self.assertFalse(_has(res0.warnings, _W_B2_DENSITY))
+        self.assertTrue(_has(res0.warnings, _W_B2_ROUTED))
+        res1, st1, _e = _convert(b2_ax15(),
+                                 positive_dt2ms_mass_scaling=False)
+        self.assertEqual(_data_after(st1, "/MAT/ELAST/1", 1).strip(),
+                         "7.850000E-09")
+        self.assertTrue(re.search(r"^/QUAD/1", st1, re.M))
+        self.assertFalse(_has(res1.warnings, _W_B2_DENSITY))
+
+    def test_dt0_metal_forming_numbers(self):
+        from k2rad.writer.axisym2d import dt0_closed_form
+        quads = [[(3.0 * i, 3.0 * j), (3.0 * i + 3, 3.0 * j),
+                  (3.0 * i + 3, 3.0 * j + 3), (3.0 * i, 3.0 * j + 3)]
+                 for i in range(3) for j in range(6)]
+        dt0 = dt0_closed_form(quads, 210000.0, 0.28, 7.83e-9, 0.67)
+        self.assertAlmostEqual(dt0 / 2.308935e-07, 1.0, places=6)
+        self.assertAlmostEqual((1e-4 / dt0) ** 2 / 187575.7263, 1.0,
+                               places=7)
+        dt9 = dt0_closed_form(quads, 210000.0, 0.28, 7.83e-9, 0.9)
+        self.assertAlmostEqual(dt9 / (0.9 / 0.67 * dt0), 1.0, places=12)
+        ax = dt0_closed_form([[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0),
+                               (0.0, 1.0)]], 210000.0, 0.3, 7.85e-9, 0.67)
+        self.assertAlmostEqual(ax / 7.509862e-08, 1.0, places=6)
+
+    def test_dt2ms_negative_writes_no_noda_cst(self):
+        for kw in ({}, {"ams": True}):
+            with self.subTest(**kw):
+                res, st, eng = _convert(b2_ax15(dt2ms=-1e-4), **kw)
+                self.assertNotIn("/DT/NODA/CST", eng)
+                self.assertNotIn("/DT/AMS", eng)
+                self.assertEqual(_data_after(st, "/MAT/ELAST/1", 1).strip(),
+                                 "7.850000E-09")
+                self.assertTrue(_has(res.warnings, "DT2MS -0.0001 < 0 on the "
+                                     "routed 2-D deck: /DT/NODA/CST is NOT "
+                                     "written"))
+        _r, _s, eng3 = _convert(b2_ax15(dt2ms=-1e-4), axisymmetric_2d=False)
+        self.assertIn("/DT/NODA/CST/0", eng3)
+
+    def test_every_refusal_class(self):
+        probes = {
+            "mixed1415": "ELFORM 14 and 15 together",
+            "tri": "1 3-node shell(s): a degenerate 2-D /QUAD creates energy",
+            "contact": "*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE: OpenRadioss 2-D "
+                       "decks accept only /INTER/TYPE1 / 2 / 3 / 5",
+            "zoff": "node 12 has z = 0.001 / x = 3: the axisymmetric section",
+            "xneg": "node 1 has z = 0 / x = -0.5",
+            "loadnode": "*LOAD_NODE_POINT has no 2-D mapping in k2rad",
+            "elmass": "a *ELEMENT_MASS element: OpenRadioss 2-D decks carry "
+                      "quads only",
+            "inivel": "*INITIAL_VELOCITY_NODE has no 2-D mapping",
+            "rigidwall": "*RIGIDWALL_PLANAR has no 2-D mapping",
+            "dof3": "*BOUNDARY_PRESCRIBED_MOTION_{NODE|SET} DOF 3 has no 2-D "
+                    "mapping",
+            "adaptive": "*CONTROL_ADAPTIVE has no 2-D mapping",
+            "solid": "a solid element: OpenRadioss 2-D decks carry quads only "
+                     "(initia.F:953-955 ERROR 603 for solids)",
+            "beam": "a beam element: OpenRadioss 2-D decks carry quads only",
+        }
+        for var, reason in probes.items():
+            with self.subTest(probe=var):
+                deck = b2_ax15(var=var)
+                res, st, eng = _convert(deck)
+                _r, st_off, eng_off = _convert(deck, axisymmetric_2d=False)
+                self.assertEqual(_sha(st), _sha(st_off))
+                self.assertEqual(_sha(eng), _sha(eng_off))
+                self.assertFalse(re.search(r"^/QUAD/", st, re.M))
+                self.assertTrue(_has(res.warnings, _W_B2_REFUSED, reason,
+                                     "the sections stay 3-D /SHELL"),
+                                [w for w in res.warnings if "2-D" in w])
+                self.assertTrue(_has(res.warnings, _WA7B_R9,
+                                     "the 2-D axisymmetric route is refused "
+                                     "for this deck"))
+        res, _s, _e = _convert(b2_ax15(var="tricontact"))
+        self.assertTrue(_has(res.warnings, _W_B2_REFUSED, "3-node shell(s)",
+                             "*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE"))
+
+    def test_elform14_and_rigid_route(self):
+        res, st, _e = _convert(b2_ax15(var="elform14"))
+        self.assertTrue(re.search(r"^/QUAD/1", st, re.M))
+        self.assertTrue(_has(res.warnings, "ELFORM 14 on part(s) [1] -> the "
+                             "2-D AXISYMMETRIC route"))
+        res, st, _e = _convert(b2_ax15(var="rigid"))
+        self.assertTrue(re.search(r"^/QUAD/1", st, re.M))
+        rb = [b for h, b in _blocks(st, "/RBODY/")][0]
+        self.assertEqual([float(v) for v in rb[2].split()], [0.0, 0.0, 0.0])
+        self.assertEqual([float(v) for v in rb[3].split()], [0.0, 0.0, 0.0])
+        self.assertFalse(_has(res.warnings, "J = -SUM(IN)"))
+        self.assertFalse(_has(res.warnings, _W_B2_DENSITY))   # rigid: no cell
+
+    def test_clockwise_quad_reordered(self):
+        res, st, _e = _convert(b2_ax15(var="cw"))
+        quad = [b for h, b in _blocks(st, "/QUAD/1")][0]
+        self.assertEqual([int(t) for t in quad[0].split()], [1, 1, 2, 6, 5])
+        self.assertTrue(_has(res.warnings, "6 /SHELL become /QUAD (1 "
+                             "re-ordered counter-clockwise)"))
+
+    def test_opt_out_is_386444e(self):
+        res, st, eng = _convert(b2_ax15(), axisymmetric_2d=False)
+        self.assertEqual(_sha(st), _B2_AX15_386444E_STARTER)
+        self.assertEqual(_sha(eng), _B2_AX15_386444E_ENGINE)
+        self.assertTrue(_has(res.warnings, _WA7B_R9, "--no-axisymmetric-2d "
+                             "keeps the 3-D shell; the default writes the 2-D "
+                             "route"))
+        self.assertFalse(_has(res.warnings, _W_B2_ROUTED))
+
+    def test_non_axisymmetric_decks_untouched(self):
+        for e in (13, 2):
+            with self.subTest(elform=e):
+                deck = _t8._quad_deck(elform=e)
+                _r, a, ea = _convert(deck)
+                _r, b, eb = _convert(deck, axisymmetric_2d=False)
+                self.assertEqual(_sha(a), _sha(b))
+                self.assertEqual(_sha(ea), _sha(eb))
+                self.assertFalse(re.search(r"^/QUAD/", a, re.M))
+
+    def test_transform_guard(self):
+        """Screen 7: an emitted card the transform does not map (a synthetic
+        /GRAV block) makes it return the 3-D lines and the reason."""
+        from k2rad.writer import axisym2d
+        from k2rad.state import AxisymPlan
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(b2_ax15())
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.state import ConversionState
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        plan = AxisymPlan(candidate=True, routed=True, elform=15, pids=[1])
+        lines = ["/NODE", "         1                   0                 "
+                 "  0                   0", "/GRAV/1", "g", "#"]
+        out, why, _c = axisym2d._transform_starter_lines(state, lines, plan)
+        self.assertEqual(out, lines)
+        self.assertEqual(why, "/GRAV/1")
+        out2, why2, c2 = axisym2d._transform_starter_lines(
+            state, lines[:2], plan)
+        self.assertEqual(why2, "")
+        self.assertEqual(out2[1].split(), ["1", "0", "0", "0"])
+        self.assertEqual(c2["node"], 1)
+
+
+_WA7B_R9 = "is a 2-D AXISYMMETRIC formulation"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PART B - the round-9 part-B flags reach every wiring site
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2949,11 +3264,19 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
 
     _FLAGS = {
         "--weld-trajectory-impflux": "weld_trajectory_impflux",
+        "--axisymmetric-2d": "axisymmetric_2d",
+        "--positive-dt2ms-mass-scaling": "positive_dt2ms_mass_scaling",
     }
     _HELP_FIGURES = {
         "--weld-trajectory-impflux": (
             "66 323 cycles", "-0.30 % of LS-DYNA's source energy",
             "721-2075 s", "PTYP 1 / 2", "-11.81..-13.46 %"),
+        "--axisymmetric-2d": (
+            "/ANALY N2D3D 1", "Isolid 2", "(x, y, 0) -> (0, x, y)",
+            "the 3-D route -77.78 %"),
+        "--positive-dt2ms-mass-scaling": (
+            "(DT2MS / dt0)^2", "never /DT/NODA/CST on a 2-D deck",
+            "24 807 cycles", "IE END -0.45 %", "RMS 0.24 %"),
     }
 
     def test_the_window_option_reaches_convert_and_the_gui(self):

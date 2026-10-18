@@ -318,6 +318,8 @@ def convert(
     implicit_bfgs: bool = False,
     weld_trajectory_impflux: bool = True,
     weld_trajectory_window: float = 0.25,
+    axisymmetric_2d: bool = True,
+    positive_dt2ms_mass_scaling: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -928,9 +930,10 @@ def convert(
         ex_16_thin_shell_elform_13's rigid disk 0.08756308 ->
         0.003447366 = LS-DYNA's 0.34473655E-02, its inertia 0.02225525
         x2 / 0.04451050 = LS-DYNA; the element stays a 3-D plane-stress
-        shell (named). Axisymmetric ELFORM 14 / 15 / 44 are named
-        whatever the flag (LS-DYNA's per-radian mass, 2Dlag x157.5).
-        Reach 1 deck key on 1 emitted model (bytes) + 4 / 4 by text.
+        shell (named). Axisymmetric ELFORM 14 / 15 take the 2-D route
+        (axisymmetric_2d, round 9); ELFORM 44 is named (LS-DYNA's
+        per-radian mass, 2Dlag x157.5). Reach 1 deck key on 1 emitted
+        model (bytes) + 4 / 4 by text.
     rigid_element_mass_admas : bool
         Write an ``*ELEMENT_MASS`` on a rigid body's SECONDARY node as
         ``/ADMAS/0`` on that node (round 8, A8): the starter counts it
@@ -1191,6 +1194,25 @@ def convert(
     weld_trajectory_window : float
         The /IMPFLUX window of the conversion above, in seconds (default
         0.25, the measured one); must be > 0 and finite (ValueError).
+    axisymmetric_2d : bool
+        Write an all-ELFORM-14 / 15 *SECTION_SHELL deck as an OpenRadioss 2-D
+        AXISYMMETRIC deck (R14 triage round 9, B2): /ANALY N2D3D 1, every
+        node (x, y, 0) written (0, x, y) (Radioss Y = the radius, Z = the
+        axis), /SHELL -> /QUAD on /PROP/SOLID Isolid 2, the /BCS and the
+        prescribed-motion directions permuted, /RBODY J = 0, /TH/QUAD. Refused
+        by name (the deck stays 3-D) for another element family, a 3-node
+        shell, any *CONTACT_*, a node off the xy-plane or at x < 0, ELFORM 14
+        and 15 together, ELFORM 44 or an unmapped card. MEASURED on
+        metal-forming: starter TOTAL MASS 5.7080700E-06 = LS-DYNA per radian
+        (the 3-D route -77.78 %). Default True.
+    positive_dt2ms_mass_scaling : bool
+        On a ROUTED 2-D deck, a positive *CONTROL_TIMESTEP DT2MS multiplies
+        each deformable material's density by max(1, (DT2MS / dt0)^2), dt0 =
+        OpenRadioss's own cycle-0 2-D step of its quads in closed form, so
+        the run starts at DT2MS (round 9, B2); /DT/NODA/CST is never written
+        on a 2-D deck. MEASURED on metal-forming (nt 4): a timeout -> NORMAL
+        in 24 807 cycles, IE END -0.45 %, RMS 0.24 % of the LS peak (the KE
+        is the scaled-mass KE). Default True.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1644,6 +1666,8 @@ def convert(
         implicit_bfgs=implicit_bfgs,
         weld_trajectory_impflux=weld_trajectory_impflux,
         weld_trajectory_window=weld_trajectory_window,
+        axisymmetric_2d=axisymmetric_2d,
+        positive_dt2ms_mass_scaling=positive_dt2ms_mass_scaling,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

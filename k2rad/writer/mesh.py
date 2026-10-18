@@ -4886,8 +4886,11 @@ def _warn_section_card2(state: ConversionState) -> None:
         thickness 1.0 (LS-DYNA ignores Card 2 there and integrates a unit
         depth, Remark 6); under ``--no-plane-strain-unit-thickness`` the fact
         that T1 is written is still said (decision D12);
-      * an axisymmetric ELFORM 14 / 15 / 44 is named always: LS-DYNA
-        integrates per radian, which no thickness reproduces.
+      * an axisymmetric ELFORM 14 / 15 / 44 that stays a 3-D shell is
+        named: LS-DYNA integrates per radian, which no thickness reproduces
+        (round 9, B2: an all-14 / 15 deck is routed to the 2-D deck and gets
+        the route's own sentence instead; ELFORM 44, a refused deck and
+        ``--no-axisymmetric-2d`` keep this one, the last clause saying why).
     """
     shell_pids = {e.pid for e in state.shell_elems}
     used = {p.secid for pid, p in state.parts.items() if pid in shell_pids}
@@ -4921,14 +4924,30 @@ def _warn_section_card2(state: ConversionState) -> None:
                     "Card 2's thickness there and integrates a unit thickness "
                     "(Vol I R17 *SECTION_SHELL Remark 6).")
         elif sec.elform in AXISYMMETRIC_ELFORMS:
+            # round 9, B2: a ROUTED deck gets the route's own sentence (once
+            # per deck, writer/axisym2d); otherwise the section is a 3-D
+            # shell and is named, the last clause saying why.
+            from .axisym2d import resolve_axisym_plan
+            plan = resolve_axisym_plan(state)
+            if plan.routed:
+                continue
+            if sec.elform == 44:
+                why = ("ELFORM 44, EFG, has no Radioss 2-D element: the 2-D "
+                       "route covers 14 and 15")
+            elif not state.options.axisymmetric_2d:
+                why = ("--no-axisymmetric-2d keeps the 3-D shell; the default "
+                       "writes the 2-D route")
+            else:
+                why = ("the 2-D axisymmetric route is refused for this deck - "
+                       "its sentence names every failing class")
             state.warn(
                 f"*SECTION_SHELL {sec.secid}: ELFORM {sec.elform} is a 2-D "
                 "AXISYMMETRIC formulation; LS-DYNA ignores Card 2's thickness "
                 "(Vol I R17 *SECTION_SHELL Remark 6) and integrates per radian "
                 "(2Dlag: 0.21994391E-03, where the 3-D /PROP/SHELL written here "
                 "weighs 0.0346368 = x157.5). No thickness reproduces that: this "
-                "section's mass, inertia and stress state are NOT LS-DYNA's (no "
-                "axisymmetric route is built).")
+                "section's mass, inertia and stress state are NOT LS-DYNA's "
+                f"({why}).")
         elif (state.options.section_nodal_thickness_mean
               and any(v not in (None, 0.0) and v != t1 for v in (t2, t3, t4))):
             state.warn(
@@ -4961,8 +4980,13 @@ def _warn_shell_formulation_choice(state: ConversionState) -> None:
     """
     if state.is_implicit or not state.sec_shells:
         return
+    # round 9, B2: a deck routed to the 2-D axisymmetric deck writes its
+    # ELFORM 14 / 15 sections as /PROP/SOLID Isolid 2 quads - no Ishell
+    plan = state.axisym_plan
+    routed_ef = (14, 15) if plan is not None and plan.routed else ()
     unmapped = sorted({s.elform for s in state.sec_shells.values()
-                       if s.elform not in _ELFORM_ALWAYS_QEPH})
+                       if s.elform not in _ELFORM_ALWAYS_QEPH
+                       and s.elform not in routed_ef})
     if not unmapped:
         return
     ishell = state.options.shell_default_ishell

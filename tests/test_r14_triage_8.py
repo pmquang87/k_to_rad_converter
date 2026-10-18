@@ -1098,8 +1098,12 @@ class SectionNodalThicknessMean(unittest.TestCase):
     def test_2_the_2D_formulations_are_A7s(self):
         _r, s13, _e = _convert(_quad_deck(elform=13, t=(25.4, 1.0, 1.0, 1.0)))
         self.assertEqual(_prop_thick(s13), 1.0)
+        # round 9, B2: an all-ELFORM-15 deck is routed to the 2-D deck by
+        # default (no /PROP/SHELL at all); the 3-D shell A4 must not touch is
+        # the --no-axisymmetric-2d arm's
         r15, s15, _e15 = _convert(_quad_deck(elform=15,
-                                              t=(25.4, 1.0, 1.0, 1.0)))
+                                              t=(25.4, 1.0, 1.0, 1.0)),
+                                  axisymmetric_2d=False)
         self.assertEqual(_prop_thick(s15), 25.4)
         self.assertFalse(_has(r15.warnings, _WA4))
 
@@ -1146,17 +1150,36 @@ class TwoDimensionalShellThickness(unittest.TestCase):
                 self.assertFalse(_has(res.warnings, "PLANE-STRAIN"))
 
     def test_2_axisymmetric_is_named_never_changed(self):
-        for e in (14, 15, 44):
+        """Round 9, B2 split this case: ELFORM 44 (EFG) stays a named 3-D
+        shell; ELFORM 14 / 15 under --no-axisymmetric-2d are named with
+        clause (d); by default they take the 2-D route (/QUAD, no
+        /PROP/SHELL) with the route's sentence."""
+        deck44 = _quad_deck(elform=44, t=(1000.0, "", "", ""))
+        res, starter, _e = _convert(deck44)
+        self.assertEqual(_prop_thick(starter), 1000.0)
+        _r0, s0, _e0 = _convert(deck44, plane_strain_unit_thickness=False)
+        self.assertEqual(starter, s0)
+        self.assertTrue(_has(res.warnings, _WA7B, "Remark 6",
+                             "NOT LS-DYNA's", "ELFORM 44, EFG, has no Radioss "
+                             "2-D element"), res.warnings)
+        for e in (14, 15):
             with self.subTest(elform=e):
                 deck = _quad_deck(elform=e, t=(1000.0, "", "", ""))
-                res, starter, _e = _convert(deck)
+                res, starter, _e = _convert(deck, axisymmetric_2d=False)
                 self.assertEqual(_prop_thick(starter), 1000.0)
-                _r0, s0, _e0 = _convert(deck,
+                _r0, s0, _e0 = _convert(deck, axisymmetric_2d=False,
                                         plane_strain_unit_thickness=False)
                 self.assertEqual(starter, s0)
                 self.assertTrue(_has(res.warnings, _WA7B, "Remark 6",
-                                     "NOT LS-DYNA's"), res.warnings)
+                                     "NOT LS-DYNA's", "--no-axisymmetric-2d "
+                                     "keeps the 3-D shell"), res.warnings)
                 self.assertTrue(_has(_r0.warnings, _WA7B))
+                rd, sd, _ed = _convert(deck)
+                self.assertIn("/QUAD/1", sd.splitlines())
+                self.assertNotIn("/PROP/SHELL/1", sd.splitlines())
+                self.assertTrue(_has(rd.warnings, f"ELFORM {e} on part(s) [1] "
+                                     "-> the 2-D AXISYMMETRIC route"))
+                self.assertFalse(_has(rd.warnings, _WA7B))
 
     def test_3_a_rigid_plane_strain_body(self):
         """Rigid ELFORM-13 quad, T 25.4 -> 1: mass 7.85e-7, IN per node

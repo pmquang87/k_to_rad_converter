@@ -35,6 +35,8 @@ from .materials import (
     _resolve_modal_acoustic_void,
 )
 from .muscle import _make_muscle_springs
+from .axisym2d import (resolve_axisym_plan, transform_engine_lines,
+                       transform_starter_lines)
 from .thermal import (_make_thermal, _resolve_thermal,
                       _resolve_weld_trajectories, _thermal_solve_active,
                       _weld_anim_dt)
@@ -1782,6 +1784,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # containers, and the tet10->tet4 prune (further down) mutates node_sets.
     _expand_set_ranges_and_generals(state)
     _flatten_set_adds(state)
+    # Round 9, B2: the axisymmetric 2-D route decision, BEFORE any writer -
+    # the rigid-body writer skips its J = -SUM(IN) correction on a routed
+    # deck and the section sentences read it. Reads the parsed deck only,
+    # draws no id; a deck with no ELFORM 14 / 15 section (or the opt-out)
+    # gets an empty plan and nothing below changes.
+    resolve_axisym_plan(state)
     # R14 triage round 8, B2: an implicit deck's *DEFINE_CURVE_SMOOTH -> a
     # sampled sine /FUNCT, before any emitter reads funct_smooth_ids.
     _sample_implicit_smooth_curves(state)
@@ -2296,6 +2304,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_impdisp_ids(state, lines)
     _warn_duplicate_inter_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
+    # Round 9, B2: the 2-D axisymmetric route is ONE post-pass on the emitted
+    # lines (decision B2-a) - every 3-D writer above ran as before, so a deck
+    # that is not routed (or the opt-out) is byte-identical by construction.
+    lines = transform_starter_lines(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
 
@@ -4310,4 +4322,7 @@ def _build_engine_text(state: ConversionState) -> str:
     lines: List[str] = []
     for sec in sections:
         lines.extend(sec)
+    # Round 9, B2: a routed 2-D deck never carries /DT/NODA/CST or /DT/AMS
+    # (resol.F:2711-2729 rebuilds the 2-D nodal masses every cycle).
+    lines = transform_engine_lines(state, lines)
     return "\n".join(lines) + "\n"

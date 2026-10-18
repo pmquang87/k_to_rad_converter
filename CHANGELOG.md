@@ -61,6 +61,63 @@ Prior history (before this changelog was introduced) is summarized in the
     emitted models (05_4_1, 05_5_1), refusal-sentence text 2 / 2 (05_2,
     05_1: SOLN 2). Round 8's "specified and not built" entry stays below as
     history.
+  - **An all-ELFORM-14 / 15 `*SECTION_SHELL` deck is written as an
+    OpenRadioss 2-D AXISYMMETRIC deck by default** (B2;
+    `--no-axisymmetric-2d` restores the `386444e` bytes, the section sentence
+    then saying so). `writer/axisym2d.py` is ONE post-pass on the emitted
+    lines (decision B2-a), so every non-routed deck is byte-identical by
+    construction: `/ANALY` N2D3D 1 (`hm_read_analy.F:78`); every node
+    `(x, y, 0)` written `(0, x, y)` - Radioss Y = LS x = the radius, Z = LS y
+    = the axis of revolution, the tokens permuted (values exact); `/SHELL`
+    -> `/QUAD` with the same ids, a clockwise element re-ordered
+    (`qvoli2.F:82-88` ERROR 1228 on a negative area); `/PROP/SHELL` ->
+    `/PROP/SOLID` Isolid 2 (Isolid 17 NO-GO: IE +7.46 .. +31.91 %), `h` = the
+    part's QH; the `/BCS` codes `abc -> cab` and the prescribed-motion
+    directions X -> Y, Y -> Z; `/SKEW/FIX` vectors and `/DFS/DETPOINT`
+    points permuted; `/RBODY` J = 0 (`inirby.F:366-398`; the rigid-body
+    writer skips its J = -SUM(IN) correction on a routed deck); `/TH/SHEL`
+    -> `/TH/QUAD`; thermal cards kept with a warning (no 2-D conduction);
+    `/DT/NODA/CST`, `/DT/AMS` and `/AMS` never on a routed deck
+    (`resol.F:2711-2729` rebuilds the 2-D nodal masses every cycle). The
+    screen names EVERY failing class (B2-b): another ELFORM (44 / EFG
+    included) or 14 with 15, another element family, a 3-node shell, any
+    `*CONTACT_*` (`hm_read_interfaces.F:175-179`), a node off the xy-plane or
+    at x < 0, a load / initial velocity / rigid wall / adaptivity /
+    `*CONSTRAINED_` card or a prescribed motion off DOF 1 / 2; an emitted
+    card the transform does not map aborts it (screen 7, the 3-D lines kept,
+    named). **The 2-D DT2MS density cell** (`--no-positive-dt2ms-mass-scaling`
+    keeps the physical density): a positive DT2MS multiplies each deformable
+    material's density by `max(1, (DT2MS / dt0)^2)` (per material, add-only:
+    B2-d) with dt0 = OpenRadioss's own cycle-0 2-D step in CLOSED FORM
+    (`f2d x min(area / sqrt(largest squared edge or diagonal)) / (c (qb +
+    sqrt(1 + qb^2)))`, `qdlen2.F:113`, `mqviscb.F:215` / `:259-260`,
+    `contrl.F:1148` f2d 0.67, `hm_read_prop14.F:354-355` qb 0.05; the part-B
+    spec checked it against the engine's cycle-0 step to the printed digit
+    on two geometries), so the run starts at DT2MS; the 3-D DT2MS > 0
+    mapping is NOT built (LS-DYNA's ratio 85901 is not computable at
+    conversion). Measured on the branch bytes, nt 4: `thermal/metal-forming`
+    starter TOTAL MASS 1.070695422 (= 5.70807E-06 x 187575.726) and
+    5.7080700E-06 = LS-DYNA's per radian under the cell's opt-out (the 3-D
+    route: 1.26846E-06, -77.78 %); the run: the 3-D row's timeout (t 0.2075
+    of 1.6 at 601.53 s) -> NORMAL TERMINATION in 24 807 cycles, 30.5 s; IE
+    END -0.4532 %, fifths +0.01 / -0.20 / -0.38 / -0.53 / -0.45 % (t_end 1.6,
+    the last row of a printed time), RMS 0.24 % of the LS peak over the 500
+    LS times in (0.0032, 1.6] (`_infra/history.py`); the KE END +1.7e7 % is
+    the SCALED-mass KE. The branch's metal-forming bytes equal the census
+    arm `rcv_r9p_g3l_mf2d_i2_rhoR` but for RHO_I 1.468718E-03 (closed form)
+    against 1.468657E-03. `2Dlag` (giant, starter only): ERROR 3046 -> 0 /
+    0, the rigid body's NEW MASS 0.2199439E-03 = LS-DYNA, the bytes equal
+    the census arm `arm2d_2dlag`. AX-15 (the test fixture): starter 0 / 0,
+    N2D3D 1, TOTAL MASS 0.12527037 / 7.065E-08 (cell on / off). The SPR
+    giant `main_selfforgingrivet` is refused by name (20 3-node shells, a
+    node at z -5.55e-18, `*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE`,
+    `*CONTROL_ADAPTIVE`, `*PART_ADAPTIVE_FAILURE`), bytes identical, starter 0
+    / 1 as today. Movers: bytes 2 deck keys / 2 emitted models
+    (metal-forming, 2Dlag), text 1 / 1 (SPR main). Two round-8 tests move
+    with the route: `SectionNodalThicknessMean.test_2` asserts its ELFORM-15
+    3-D case under `--no-axisymmetric-2d`, and
+    `TwoDimensionalShellThickness.test_2` is split (ELFORM 44 named; 14 / 15
+    named under the opt-out with its clause; 14 / 15 routed by default).
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

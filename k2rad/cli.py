@@ -763,8 +763,8 @@ def build_parser() -> argparse.ArgumentParser:
              "integrates a unit depth (Vol I R17 *SECTION_SHELL Remark 6) - "
              "ex_16_thin_shell_elform_13's rigid disk 0.08756308 -> 0.003447366 "
              "= LS-DYNA's d3hsp. The element stays a 3-D (plane-stress) shell, "
-             "which the warning names; axisymmetric ELFORM 14 / 15 / 44 are "
-             "named, not changed. ON by default; "
+             "which the warning names; axisymmetric ELFORM 14 / 15: see "
+             "--axisymmetric-2d (ELFORM 44 stays named). ON by default; "
              "--no-plane-strain-unit-thickness keeps T1.",
     )
     parser.add_argument(
@@ -1060,6 +1060,30 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="S",
         help="The /IMPFLUX window (seconds, > 0) of --weld-trajectory-impflux "
              "(default 0.25, the measured window).",
+    )
+    parser.add_argument(
+        "--axisymmetric-2d",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an all-ELFORM-14 / 15 *SECTION_SHELL deck as an "
+             "OpenRadioss 2-D axisymmetric deck (/ANALY N2D3D 1, /QUAD on "
+             "/PROP/SOLID Isolid 2, nodes (x, y, 0) -> (0, x, y)): per-radian "
+             "masses as LS-DYNA. Refused by name (3-D kept) for another element "
+             "family, a 3-node shell, any *CONTACT_*, a node off the xy-plane "
+             "or at x < 0, or an unmapped card. MEASURED on metal-forming: "
+             "TOTAL MASS = LS-DYNA per radian (the 3-D route -77.78 %%). ON by "
+             "default; --no-axisymmetric-2d keeps the 3-D shells.",
+    )
+    parser.add_argument(
+        "--positive-dt2ms-mass-scaling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a routed 2-D deck, a positive DT2MS multiplies the deformable "
+             "materials' density by (DT2MS / dt0)^2, dt0 = OpenRadioss's own "
+             "cycle-0 2-D step of the quads, so the run starts at DT2MS (never "
+             "/DT/NODA/CST on a 2-D deck). MEASURED on metal-forming: timeout "
+             "-> NORMAL in 24 807 cycles, IE END -0.45 %%, RMS 0.24 %%. ON by "
+             "default; --no-positive-dt2ms-mass-scaling keeps the density.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1766,6 +1790,8 @@ def main(argv=None) -> int:
         implicit_bfgs=args.implicit_bfgs,
         weld_trajectory_impflux=args.weld_trajectory_impflux,
         weld_trajectory_window=args.weld_trajectory_window,
+        axisymmetric_2d=args.axisymmetric_2d,
+        positive_dt2ms_mass_scaling=args.positive_dt2ms_mass_scaling,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

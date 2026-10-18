@@ -246,10 +246,43 @@ unit depth: `ex_16_thin_shell_elform_13`'s rigid disk (T 25.4) weighs
 inertia 0.02225525 ×2 / 0.04451050 = LS-DYNA's. The element stays a 3-D
 shell, plane-STRESS through its thickness — the warning names that.
 Axisymmetric ELFORM 14 / 15 / 44 integrate per radian, which no thickness
-reproduces (`2Dlag`: LS-DYNA 2.1994e-4 against 0.0346368 here, ×157.5):
-named, never changed. Reach 1 deck key on 1 emitted model (`ex_16`, still
+reproduces (`2Dlag`: LS-DYNA 2.1994e-4 against 0.0346368 for a 3-D shell,
+×157.5): an all-ELFORM-14 / 15 deck takes the OpenRadioss 2-D route (round
+9, B2 - the next paragraph); ELFORM 44 (EFG) has no Radioss 2-D element and
+stays a named 3-D shell. Reach 1 deck key on 1 emitted model (`ex_16`, still
 stopped by its own starter ERRORs 274 / 314-317 — the same 10 lines on both
 arms) + 4 text movers.
+**An all-ELFORM-14 / 15 `*SECTION_SHELL` deck → the OpenRadioss 2-D
+AXISYMMETRIC deck** (round 9, B2, default ON, `--no-axisymmetric-2d` keeps
+the 3-D shells): `/ANALY` N2D3D 1; every node `(x, y, 0)` is written
+`(0, x, y)` - Radioss Y = LS x = the radius, Radioss Z = LS y = the axis of
+revolution (the tokens permuted, the values exact); `/SHELL` → `/QUAD` with
+the same element ids (a clockwise element re-ordered counter-clockwise,
+`qvoli2.F:82-88`) on `/PROP/SOLID` Isolid 2 with `h` = the part's QH (else
+0.1); the `/BCS` codes and the prescribed-motion directions permuted the same
+way; skews and detonation points permuted; `/RBODY` J = 0 (in 2-D
+`I_xx = I_yy + I_zz`, `inirby.F:366-398`); `/TH/SHEL` → `/TH/QUAD`; thermal
+cards kept with a warning (OpenRadioss has no 2-D conduction). ONE post-pass on
+the emitted lines (`writer/axisym2d.py`), so every other deck is
+byte-identical. Refused by name, every failing class listed, for another
+element family, a 3-node shell, any `*CONTACT_*` (2-D decks take only
+`/INTER/TYPE1/2/3/5`, `hm_read_interfaces.F:175-179`), a node off the
+xy-plane or at x < 0, ELFORM 14 and 15 together, ELFORM 44, or a card the
+transform does not map. Masses and energies are then per radian as in
+LS-DYNA: `thermal/metal-forming` starter TOTAL MASS 5.7080700E-06 = LS-DYNA's
+0.57080700E-05 (the 3-D route -77.78 %); `2Dlag` (giant, starter only)
+ERROR 3046 → 0 with its rigid body 0.2199439E-03 = LS-DYNA. **The 2-D DT2MS
+density cell** (default ON, `--no-positive-dt2ms-mass-scaling`): on a routed
+deck a positive DT2MS multiplies each deformable material's density by
+`max(1, (DT2MS / dt0)^2)`, dt0 = OpenRadioss's own cycle-0 2-D step of its
+quads in closed form - `f2d x min(area / longest edge or diagonal) / (c (qb +
+sqrt(1 + qb^2)))`, `qdlen2.F:113`, `mqviscb.F:259-260`, `contrl.F:1148` - so
+the run starts at DT2MS; `/DT/NODA/CST` is never written on a 2-D deck
+(`resol.F:2711-2729` rebuilds the 2-D nodal masses every cycle). MEASURED on
+metal-forming (nt 4, the 500 LS times in (0.0032, 1.6]): the 3-D row's
+timeout (t 0.2075 of 1.6) → NORMAL in 24 807 cycles, IE END -0.45 %, RMS
+0.24 % of the LS peak; the KE is the scaled-mass KE. Reach 2 deck keys / 2
+emitted models (metal-forming, 2Dlag) + 1 / 1 refused by name (the SPR giant).
 `*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
 `_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
 element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with

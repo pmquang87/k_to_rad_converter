@@ -8056,7 +8056,7 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
     lists ``state.rbody_ids``, which all SIX Radioss-side /RBODY emission
-    sites register into at the line that writes the card (writer/rbody.py:1099, :1810, :1924, :2113, :2270, :2394
+    sites register into at the line that writes the card (writer/rbody.py:1106, :1817, :1931, :2120, :2277, :2401
     — seven LS-DYNA sources, since *MAT_RIGID parts,
     *PART_INERTIA, element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge
     masters all come out of the first one, round 5 added the
@@ -20738,6 +20738,9 @@ def dispatch(block: Block, state: ConversionState) -> None:
     either way (both land in skipped_keywords), but the diagnostic named the wrong
     keyword family.
     """
+    # round 9, B2: every dispatched keyword name, converted or not - the
+    # axisymmetric route's screen reads what the deck STATES
+    state.deck_keywords.add(block.keyword)
     handler = HANDLERS.get(block.keyword)
     if handler is None:
         for _prefix, _handler in _PREFIX_HANDLERS:

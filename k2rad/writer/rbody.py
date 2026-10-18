@@ -1061,7 +1061,14 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # would never see this body. ICoG 4 (props) keeps the deck's tensor:
         # inirby.F:266-280 adds no secondary IN there.
         j_status = ""
-        if props is None and state.options.rigid_shell_rotary_inertia:
+        # round 9, B2: a deck routed to the 2-D axisymmetric deck writes
+        # J = 0 (in 2-D I_xx = I_yy + I_zz exactly, inirby.F:366-398, and quad
+        # nodes carry no rotary inertia to cancel), so the correction - and
+        # its sentence - are skipped there.
+        routed = (state.axisym_plan is not None
+                  and state.axisym_plan.routed)
+        if (props is None and state.options.rigid_shell_rotary_inertia
+                and not routed):
             if lumped is None:
                 from ..lumping import (nodal_masses_from_state,
                                        triangle_shell_nodes)
