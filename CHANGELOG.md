@@ -160,6 +160,33 @@ Prior history (before this changelog was introduced) is summarized in the
     RMS IE / KE 2.53 / 3.47 -> 2.74 / 3.28 % (19 LS times in (1.8828e-05,
     3.79839e-04], t_end 0.0004); the row stays deviation on KE (LS runs
     *CONTROL_ADAPTIVE). The SYSTEM-CID decks byte-identical.
+  - **A stated SF 0.0 on `*BOUNDARY_PRESCRIBED_MOTION_*` is the default 1.0**
+    (A8; round-8 entry 19 + the NODE / SET class; default ON,
+    `--no-prescribed-motion-sf-default` keeps the stated 0). LS-DYNA: Vol I
+    R17 p.759 ("SF Load curve scale factor. The default is 1.0.", no EQ.0
+    clause) and Appendix V p.73-9 (a stated 0 is replaced by the default);
+    the Yaris roof crush press does work at SF 0 (bndout 5.4039E+05).
+    `writer/loads._pm_zero_hold`: a NODE / SET row with SF 0.0 stays a
+    `/BCS` hold only for a zero motion (VAD 0 / 2 on an identically zero
+    curve, or no curve; VAD 1 on a zero curve is imposed - D11); every
+    other one is imposed with Fscale 1 (`_pm_sf`) and only the kept holds
+    count as global SPC bits; RIGID rows and the screw drive write Fscale 1
+    - BYTES ONLY there, since the OpenRadioss starter already reads a zero
+    Fscale as 1.0 (`read_impdisp.F:239`, `read_impvel.F:248`,
+    `hm_read_impacc.F:194`): round 8's reading of "a stated SF 0.0 is
+    Fscale 0" as a physics defect is RETRACTED. No measured-gain sentence
+    ships: on stagnation_A / _B (the inflow set imposed instead of held)
+    both arms of both decks still end ERROR TERMINATION (MESSAGE 167) at 9 %
+    of t_end (825 -> 832 cycles; IE RMS 33.43 -> 15.34 % / 3366.19 -> 32.16 %
+    over 44 vs 45 LS times - MIXED windows; the branch's inflow does 3.12
+    N.mm of external work by 1.81e-3 s where LS-DYNA's has done 1254.6 N.mm
+    by 2.4e-4 s). The VAD-1 coupon keeps its initial velocity (DY = 100 t
+    to 6 digits). Movers 4 keys / 4 models (stagnation_A / _B; the roof crush
+    and the door sag one Fscale cell each, convert + starter only); the
+    zero-curve holds unchanged. Re-derived tests (each with its new
+    hand-computed expectation; the old shape kept on a zero curve and
+    under the opt-out): `test_motion_load_variants.TestSetBox` x2 and
+    `test_output_parity.Bndout.test_a_zero_scale_row_is_not_in_scope`.
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

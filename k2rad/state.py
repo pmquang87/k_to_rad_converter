@@ -8258,6 +8258,20 @@ class ConvertOptions:
     # 0.3352 -> 1.8e-8 mm on every state, free-DOF reaction 4611 -> 0.024 N
     # (LS-DYNA 0). Movers 1 key / 1 model.
     spc_vector_frames: bool = True
+    # --no-prescribed-motion-sf-default: keep a STATED SF 0.0 on
+    # *BOUNDARY_PRESCRIBED_MOTION_* as 0 (a /BCS hold on every NODE / SET
+    # row, Fscale 0 on RIGID rows) - the 386444e bytes.
+    #
+    # ON by default (R14 triage round 9, A8; round-8 entry 19): LS-DYNA
+    # replaces a stated 0 by the default 1.0 (Vol I R17 p.759; Appendix V
+    # p.73-9). writer/loads._pm_zero_hold keeps the /BCS hold only for a zero
+    # motion (VAD 0 / 2 on an identically zero curve, or no curve); every
+    # other SF-0 NODE / SET row is imposed with Fscale 1 (_pm_sf); RIGID and
+    # the screw drive write Fscale 1 - bytes only there, the starter already
+    # reads 0 as 1.0 (read_impdisp.F:239). No measured-gain sentence: both
+    # runnable movers (stagnation_A / _B) die at 9 % of t_end in both arms.
+    # Movers 4 keys / 4 models (2 giants convert + starter only).
+    prescribed_motion_sf_default: bool = True
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

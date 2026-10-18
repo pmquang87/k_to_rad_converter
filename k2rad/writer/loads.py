@@ -171,6 +171,53 @@ def _make_rlinks(state: ConversionState) -> List[str]:
 # Starter: boundary conditions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _curve_identically_zero(state: ConversionState, lcid: int) -> bool:
+    """True when *lcid* is a converted *DEFINE_CURVE whose every ordinate is
+    0.0 (the stored points already carry SFO / OFFO). A function, a table or a
+    missing id is NOT zero (round 9, A8)."""
+    c = state.curves.get(lcid)
+    return bool(c is not None and c.pts and all(o == 0.0 for _a, o in c.pts))
+
+
+def _pm_sf(state: ConversionState, pm) -> float:
+    """The scale factor LS-DYNA applies to a *BOUNDARY_PRESCRIBED_MOTION row
+    (round 9, A8; ``--prescribed-motion-sf-default``, default ON).
+
+    Vol I R17 p.759: "SF  Load curve scale factor. The default is 1.0." - with
+    no EQ.0 clause - and the general rule of Appendix V p.73-9: the keyword
+    reader fills a blank field with 0 and LS-DYNA then replaces the value 0 by
+    the default. So a STATED 0.0 is 1.0 (the Yaris roof crush press, SF 0.0,
+    does 5.4039E+05 of work in its bndout). The OpenRadioss starter reads a
+    zero Fscale as 1.0 too (read_impdisp.F:239, read_impvel.F:248,
+    hm_read_impacc.F:194), so on a RIGID row only the bytes change.
+    ``--no-prescribed-motion-sf-default`` keeps the stated 0."""
+    if pm.sf == 0.0 and state.options.prescribed_motion_sf_default:
+        return 1.0
+    return pm.sf
+
+
+def _pm_zero_hold(state: ConversionState, pm) -> bool:
+    """A *BOUNDARY_PRESCRIBED_MOTION_NODE / _SET row written as a /BCS hold
+    instead of an /IMP* card: before round 9 every SF = 0.0 row; with
+    ``prescribed_motion_sf_default`` only a stated SF 0.0 whose motion really
+    is zero - VAD 0 or 2 on an identically zero curve, or no motion
+    definition at all (LCID 0, or an id no curve / table registry holds) -
+    because SF 0 is LS-DYNA's 1.0 and a non-zero curve then MOVES the nodes;
+    VAD 1 on a zero curve is imposed (a zero acceleration keeps the initial
+    velocity, decision D11)."""
+    if pm.sf != 0.0:
+        return False
+    if not state.options.prescribed_motion_sf_default:
+        return True
+    if pm.vad not in (0, 2):
+        return False
+    if (pm.lcid == 0 or (pm.lcid not in state.curves
+                         and pm.lcid not in state.define_tables
+                         and pm.lcid not in state.define_tables_3d)):
+        return True
+    return _curve_identically_zero(state, pm.lcid)
+
+
 def spc_cid_skew(state: ConversionState, cid: int) -> int:
     """The /SKEW id a ``*BOUNDARY_SPC`` (or ``*LOAD_NODE``) CID resolves to, 0
     when it resolves to none (round 9, A6).
@@ -613,7 +660,8 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
         for nid in state.node_sets.get(bc.nsid, ("", []))[1]:
             _add(nid, tra, rot)
     for pm in state.prescribed_motion_sets:
-        if pm.sf != 0.0 or pm.boxid:
+        # round 9, A8: only the rows still written as a /BCS hold count
+        if not _pm_zero_hold(state, pm) or pm.boxid:
             continue
         mapped = _PM_DOF_TO_BCS.get(pm.dof)
         if mapped is None:
@@ -5185,8 +5233,17 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             skews_written.add(pm.skew_id)
             lines += _emit_skew_mov(
                 pm.skew_id, f"SKEW_MOV_LOCAL_PID{pm.pid}", *pm.mov_nodes, "X")
+        if pm.sf == 0.0 and state.options.prescribed_motion_sf_default:
+            # round 9, A8: bytes only - the starter already reads 0 as 1.0
+            state.warn(
+                f"*{keyword} pid={pm.pid} dof={pm.dof}: SF = 0.0 written as "
+                "the default Fscale 1.0; the OpenRadioss starter reads 0 as "
+                "1.0 too (read_impdisp.F:239), so the motion is unchanged - "
+                "only the card now says what runs (LS-DYNA: SF 'The default "
+                "is 1.0', Vol I R17 p.759). --no-prescribed-motion-sf-default "
+                "writes the stated 0.")
         lines += _emit_imp_card(kw, motion_counter, f"Motion_{motion_counter}",
-                                pm.lcid, base_dir, grnod_id, pm.sf,
+                                pm.lcid, base_dir, grnod_id, _pm_sf(state, pm),
                                 tstart, tstop, skew_id, state=state)
         motion_counter += 1
         _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id,
@@ -5570,7 +5627,20 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         nids = _pm_set_nodes(state, pm, box_cache)
         if nids is None:
             continue
-        if pm.sf == 0.0:
+        hold = _pm_zero_hold(state, pm)
+        if pm.sf == 0.0 and not hold:
+            # round 9, A8: a stated SF 0.0 is LS-DYNA's 1.0
+            state.warn(
+                "*BOUNDARY_PRESCRIBED_MOTION_NODE / _SET "
+                f"nsid={pm.nsid} dof={pm.dof}: SF = 0.0 is read as the card's "
+                "default 1.0 (Vol I R17 p.759; Appendix V p.73-9) and curve "
+                f"{pm.lcid} (VAD {pm.vad}) is not a zero motion, so the motion "
+                f"is IMPOSED (/{PM_VAD_KEYWORD[pm.vad]} Fscale 1); before round "
+                "9 k2rad held the DOF with a /BCS. A zero motion (VAD 0 / 2 on a "
+                "zero curve, or no curve) stays a /BCS hold; VAD 1 on a zero "
+                "curve is imposed (the node keeps its initial velocity). "
+                "--no-prescribed-motion-sf-default restores the hold.")
+        if hold:
             mapped = _PM_DOF_TO_BCS.get(pm.dof)
             if mapped is None:
                 state.warn(
@@ -5636,8 +5706,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         # so this index can never miss (a VAD outside it never reaches here).
         kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
-                                base_dir, grnod_id, pm.sf, tstart, tstop,
-                                skew_id, state=state)
+                                base_dir, grnod_id, _pm_sf(state, pm), tstart,
+                                tstop, skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
         _register_imp_motion_nodes(state, nids, base_dir, skew_id, tstart,
                                    tstop)

@@ -594,25 +594,65 @@ class TestSetBox(unittest.TestCase):
         self.assertEqual(_imp_cards(starter), [])
         self.assertTrue(_has_warn(result, "no node of set 1 lies inside"))
 
+    #: round 9, A8: an identically zero curve - the one an SF 0.0 row may
+    #: still be held on (VAD 0 / 2 on a zero curve = a zero motion)
+    ZERO_CURVE = ("*DEFINE_CURVE\n        30\n       0.0       0.0\n"
+                  "       1.0       0.0\n")
+
     def test_sf_zero_box_row_becomes_a_scoped_bcs(self):
-        """The SF=0 -> /BCS idiom must see the INTERSECTED node list too."""
-        _result, starter = _convert(_deck(BOX_HALF, _set_box(sf=0.0)))
-        target = [c for c in _bcs_cards(starter) if c[0] == "100"]
-        self.assertEqual(len(target), 1, "no Tra=100 /BCS emitted")
-        self.assertEqual(sorted(_grnod_nodes(starter, target[0][3])), [1, 4])
+        """The SF=0 -> /BCS idiom must see the INTERSECTED node list too.
+
+        Round 9, A8 re-derived this test: a stated SF 0.0 is LS-DYNA's
+        default 1.0 (Vol I R17 p.759), so on the RAMP curve 10 the row is an
+        imposed motion - /IMPDISP (VAD 2) Dir X, Fscale 1, on the
+        intersected nodes [1, 4]; the scoped /BCS idiom now needs a zero
+        motion (the zero curve 30), and the RAMP row keeps the old /BCS
+        under --no-prescribed-motion-sf-default."""
+        _r, starter = _convert(_deck(BOX_HALF, _set_box(sf=0.0)))
+        imps = _imp_cards(starter)
+        self.assertEqual([(i[0], i[3], i[10]) for i in imps],
+                         [("/IMPDISP", "X", 1.0)])
+        self.assertEqual(sorted(_grnod_nodes(starter, imps[0][6])), [1, 4])
+        self.assertEqual([c for c in _bcs_cards(starter) if c[0] == "100"], [])
+        for deck, kw in ((_deck(BOX_HALF, self.ZERO_CURVE,
+                                _set_box(sf=0.0, lcid=30)), {}),
+                         (_deck(BOX_HALF, _set_box(sf=0.0)),
+                          {"prescribed_motion_sf_default": False})):
+            with self.subTest(**kw):
+                _result, starter = _convert(deck, **kw)
+                target = [c for c in _bcs_cards(starter) if c[0] == "100"]
+                self.assertEqual(len(target), 1, "no Tra=100 /BCS emitted")
+                self.assertEqual(
+                    sorted(_grnod_nodes(starter, target[0][3])), [1, 4])
+                self.assertEqual(_imp_cards(starter), [])
 
     def test_two_boxes_on_one_set_do_not_share_a_bcs(self):
+        """Round 9, A8 re-derived: on the ramp curve 10 the two SF 0.0 box
+        rows are two imposed motions (Dir X on box 5's [1, 4], Dir Y on box
+        6's [1, 2], Fscale 1 each); on the zero curve 30 - and under
+        --no-prescribed-motion-sf-default - they stay two scoped /BCS."""
         second = ("*DEFINE_BOX\n"
                   "         6      -1.0      11.0      -1.0       5.0"
                   "      -1.0      11.0\n")
-        deck = _deck(BOX_HALF, second,
+        ramp = _deck(BOX_HALF, second,
                      _set_box(dof=1, sf=0.0, boxid=5),
                      _set_box(dof=2, sf=0.0, boxid=6))
-        _result, starter = _convert(deck)
-        groups = [(c[0], sorted(_grnod_nodes(starter, c[3])))
-                  for c in _bcs_cards(starter) if c[0] in ("100", "010")]
-        self.assertIn(("100", [1, 4]), groups)      # box 5: x <= 5
-        self.assertIn(("010", [1, 2]), groups)      # box 6: y <= 5
+        _r, starter = _convert(ramp)
+        imps = sorted((i[3], sorted(_grnod_nodes(starter, i[6])), i[10])
+                      for i in _imp_cards(starter))
+        self.assertEqual(imps, [("X", [1, 4], 1.0), ("Y", [1, 2], 1.0)])
+        zero = _deck(BOX_HALF, second, self.ZERO_CURVE,
+                     _set_box(dof=1, sf=0.0, boxid=5, lcid=30),
+                     _set_box(dof=2, sf=0.0, boxid=6, lcid=30))
+        for deck, kw in ((zero, {}),
+                         (ramp, {"prescribed_motion_sf_default": False})):
+            with self.subTest(**kw):
+                _result, starter = _convert(deck, **kw)
+                groups = [(c[0], sorted(_grnod_nodes(starter, c[3])))
+                          for c in _bcs_cards(starter)
+                          if c[0] in ("100", "010")]
+                self.assertIn(("100", [1, 4]), groups)  # box 5: x <= 5
+                self.assertIn(("010", [1, 2]), groups)  # box 6: y <= 5
 
     def test_unmapped_spellings_stay_unregistered(self):
         """The IGA / line / segment forms are absent from the reader's own cfg

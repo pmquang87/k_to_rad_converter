@@ -958,8 +958,8 @@ t 0.0015; RMS 41.95 → 0.056 % over 150 LS blocks; OpenRadioss energy error
 Reach 3 deck keys on 3 emitted models (the Yaris Dynamic Roof Crush giant
 converts to `011 111` in skew 1, never run; its starter at nt 4 reads 0
 errors and ONE new WARNING 312 — this `/BCS` beside the deck's own `/IMPDISP`
-in `/SKEW/MOV/91965` on the same main node, whose Fscale is the deck's
-`SF = 0`, a separate open item). The
+in `/SKEW/MOV/91965` on the same main node — round 9 writes that drive in the
+`/BCS` skew (A9) and its stated `SF = 0` as `Fscale 1` (A8)). The
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` CMO −1 card shares the rule (a VECTOR CON1
 no longer prints a false "skew_ID will dangle"). **One skew per node**: the
 starter accepts ONE skew per node across every `/BCS` (`hm_read_bcs.F:199-205`,
@@ -3543,8 +3543,22 @@ two run against their own LS-DYNA `glstat` move from IE −99.92 % / KE
 death at `t = 0.22` to NORMAL TERMINATION at `t = 1.0`
 (`ex_03_solid_elform_1_4x6x4_mesh`)
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
-`*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
-`sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
+`*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` for a
+zero motion). **A stated `SF = 0.0` is LS-DYNA's default 1.0** (round 9, A8;
+default ON, `--no-prescribed-motion-sf-default` keeps the stated 0): Vol I
+R17 p.759 defines `SF` with "The default is 1.0" and no `EQ.0` clause, and
+Appendix V p.73-9 states the general rule (the reader fills a blank with 0,
+LS-DYNA then replaces 0 by the default) — the Yaris roof crush press, `SF
+0.0`, does 5.4039E+05 of work in its bndout. So a NODE / SET row with `SF 0.0`
+stays a `/BCS` hold only for a zero motion (`VAD` 0 / 2 on an identically zero
+curve, or no curve); on a non-zero curve it is imposed with `Fscale 1` (and a
+`VAD 1` row on a zero curve too: the node keeps its initial velocity); a
+`RIGID` row and the screw drive write `Fscale 1` — bytes only there, the
+OpenRadioss starter reads a zero Fscale as 1.0 as well (`read_impdisp.F:239`).
+Movers 4 keys / 4 models: `stagnation_A` / `_B` (their inflow set is imposed
+instead of held — both still end ERROR TERMINATION at 9 % of t_end in both
+arms, so no gain is claimed) and the Yaris roof crush / door sag (one Fscale
+cell each, convert + starter only); the zero-curve holds are unchanged.
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL` → the same three cards driven in a
 **co-rotating** `/SKEW/MOV`, built on three synthesized element-free nodes that
 join the body's `/RBODY` secondary group so the triad turns with it

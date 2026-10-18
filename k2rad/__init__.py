@@ -310,6 +310,7 @@ def convert(
     implicit_rigid_gravity_nodes: bool = True,
     elform7_beam_thickness_section: bool = True,
     spc_vector_frames: bool = True,
+    prescribed_motion_sf_default: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1116,6 +1117,14 @@ def convert(
         nt 4, 271 = 271 cycles): the constrained radial displacement 0.3352 ->
         1.8e-8 mm, the free-DOF reaction 4611 -> 0.024 N (LS-DYNA 0).
         Default True.
+    prescribed_motion_sf_default : bool
+        Read a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* as LS-DYNA's
+        default 1.0 (R14 triage round 9, A8; Vol I R17 p.759, Appendix V
+        p.73-9): a NODE / SET row stays a /BCS hold only for a zero motion
+        (VAD 0 / 2 on a zero curve, or no curve), else it is imposed with
+        Fscale 1; a RIGID row writes Fscale 1 (bytes only: the OpenRadioss
+        starter already reads 0 as 1.0, read_impdisp.F:239). Default True;
+        False keeps the stated 0.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1561,6 +1570,7 @@ def convert(
         implicit_rigid_gravity_nodes=implicit_rigid_gravity_nodes,
         elform7_beam_thickness_section=elform7_beam_thickness_section,
         spc_vector_frames=spc_vector_frames,
+        prescribed_motion_sf_default=prescribed_motion_sf_default,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

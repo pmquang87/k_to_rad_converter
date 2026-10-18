@@ -138,6 +138,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          implicit_rigid_gravity_nodes: bool = True,
                          elform7_beam_thickness_section: bool = True,
                          spc_vector_frames: bool = True,
+                         prescribed_motion_sf_default: bool = True,
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -343,6 +344,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["spc_vector_frames"] = bool(spc_vector_frames)
 
+    kwargs["prescribed_motion_sf_default"] = bool(prescribed_motion_sf_default)
+
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
@@ -505,6 +508,7 @@ class ConverterGUI:
         self.implicit_rigid_gravity_nodes = tk.BooleanVar(value=True)
         self.elform7_beam_thickness_section = tk.BooleanVar(value=True)
         self.spc_vector_frames = tk.BooleanVar(value=True)
+        self.prescribed_motion_sf_default = tk.BooleanVar(value=True)
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -1127,6 +1131,13 @@ class ConverterGUI:
             variable=self.spc_vector_frames).grid(
                 row=67, column=0, columnspan=3, sticky="w", **pad)
 
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_PRESCRIBED_MOTION_* stated SF 0.0 = the "
+                     "default 1.0 (a NODE / SET hold only for a zero motion) "
+                     "- ON",
+            variable=self.prescribed_motion_sf_default).grid(
+                row=68, column=0, columnspan=3, sticky="w", **pad)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1409,6 +1420,7 @@ class ConverterGUI:
                 implicit_rigid_gravity_nodes=self.implicit_rigid_gravity_nodes.get(),
                 elform7_beam_thickness_section=self.elform7_beam_thickness_section.get(),
                 spc_vector_frames=self.spc_vector_frames.get(),
+                prescribed_motion_sf_default=self.prescribed_motion_sf_default.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1661,6 +1673,9 @@ class ConverterGUI:
         if not kwargs.get("spc_vector_frames", True):
             bits.append("VECTOR-CID *BOUNDARY_SPC written in the GLOBAL "
                         "system (--no-spc-vector-frames)")
+        if not kwargs.get("prescribed_motion_sf_default", True):
+            bits.append("prescribed-motion SF 0.0 kept as 0 (NODE / SET rows "
+                        "held) (--no-prescribed-motion-sf-default)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

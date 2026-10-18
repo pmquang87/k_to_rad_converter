@@ -1096,6 +1096,171 @@ class SpcVectorFrames(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A8 — a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* is LS-DYNA's default
+#      1.0; a NODE / SET row stays a /BCS hold only for a zero motion
+# ═════════════════════════════════════════════════════════════════════════════
+
+import test_motion_load_variants as _tmv  # noqa: E402
+
+_imp_cards = _tmv._imp_cards
+_W_A8_SET = "SF = 0.0 is read as the card's default 1.0"
+_W_A8_RIGID = "SF = 0.0 written as the default Fscale 1.0"
+_RAMP_7 = ("*DEFINE_CURVE\n" + _row(7) + "\n" + f"{0.0:>20}{0.0:>20}\n"
+           + f"{1.0:>20}{10.0:>20}\n")
+_ZERO_8 = ("*DEFINE_CURVE\n" + _row(8) + "\n" + f"{0.0:>20}{0.0:>20}\n"
+           + f"{1.0:>20}{0.0:>20}\n")
+
+
+def _a8_set(vad: int = 0, lcid: int = 7, sf: float = 0.0, dof: int = 2,
+            implicit: bool = False, free_node: bool = False) -> str:
+    """The shell plate (nodes 1-6) + node set 5 (nodes 1 2 3 [+ the free
+    node 50]) driven by *BOUNDARY_PRESCRIBED_MOTION_SET (DOF *dof*)."""
+    ctrl = _IMPL1 if implicit else _EXPLICIT
+    nodes = [1, 2, 3] + ([50] if free_node else [])
+    extra = ""
+    if free_node:
+        extra += "*NODE\n" + f"{50:>8}{40.0:>16}{0.0:>16}{0.0:>16}\n"
+    extra += ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(*nodes) + "\n"
+              + _RAMP_7 + _ZERO_8 + "*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+              + _row(5, dof, vad, lcid, sf) + "\n")
+    return _shell_plate(ctrl, extra)
+
+
+def a8_set_ramp() -> str:
+    """(a): SF 0.0, VAD 0 on the ramp curve 7."""
+    return _a8_set()
+
+
+def a8_vad1_inivel() -> str:
+    """(d)'s engine deck: VAD 1 on the zero curve 8 (SF 0.0) over nodes 1-3
+    which start at VY 100 mm/s (*INITIAL_VELOCITY on set 5), explicit, t
+    0.01; node 1 in a *DATABASE_HISTORY_NODE. A zero imposed acceleration
+    keeps the initial velocity: DY(t) = 100 t (1.0 mm at t 0.01)."""
+    deck = _a8_set(vad=1, lcid=8)
+    return deck.replace(
+        "*END\n", "*INITIAL_VELOCITY\n" + _row(5) + "\n"
+        + _row(0.0, 100.0, 0.0) + "\n*DATABASE_HISTORY_NODE\n" + _row(1)
+        + "\n*DATABASE_NODOUT\n" + _row(1.0e-4) + "\n*END\n")
+
+
+def a8_rigid_sf0() -> str:
+    """(f): *BOUNDARY_PRESCRIBED_MOTION_RIGID SF 0.0 on the A1 probe's
+    rigid plate (no CNRB clash: the CNRB takes PID 3)."""
+    return _a1_probe(_PM.replace(_row(1, 3, 2, 1, 1.0), _row(1, 3, 2, 1, 0.0)),
+                     cnrb_pid=3)
+
+
+_A8_SET_386444E_SHA = "9425c3c6da12cbd94952a68d64032214c37715236b394c10967ce90b0bacc469"
+_A8_RIGID_386444E_SHA = "555a6647813579642d1ed08cce3fa85e96b32a506d98f0cae613cea5fe906f02"
+
+
+class PrescribedMotionSfDefault(unittest.TestCase):
+    """A8 (part-A spec A8): a stated SF 0.0 is LS-DYNA's default 1.0 (Vol I
+    R17 p.759; Appendix V p.73-9). NO measured-gain sentence ships (both
+    runnable movers die at 9 % of t_end in both arms).
+
+    STARTER RUNS (nt 4, rcv_r9i_implA_<name>): a8_set_ramp() (p_a8set_n4)
+    and a8_rigid_sf0() (p_a8rig_n4) default bytes: 0 ERROR / 1 WARNING
+    (1084) each.
+
+    ENGINE (d), D11 (a8vad1_n4, explicit nt 4, NORMAL 6643 cycles): the
+    VAD 1 row on the zero curve as /IMPACC Fscale 1 keeps the initial
+    velocity - node 1 VY 100 at every state, DY 0.200095 / 0.500012 /
+    0.990087 mm at t 2.00095e-3 / 5.00012e-3 / 9.90087e-3 (= 100 t).
+
+    stagnation_A / _B (the physics movers, explicit nt 4, base-paired):
+    both arms of both decks ERROR TERMINATION (MESSAGE 167, NEGATIVE RHO)
+    at 9 % of t_end - 825 cycles at 386444e, 832 on the branch; IE END
+    -222.95 -> -100.21 % (A), RMS 33.43 -> 15.34 % (A) and 3366.19 -> 32.16
+    % (B) over 44 vs 45 LS times (windows differ by one time: MIXED);
+    EXT-WORK 3.120 at t 1.81e-3 on the branch (0 at 386444e) - hence no
+    gain sentence ships."""
+
+    def test_a_a_non_zero_curve_is_imposed_with_Fscale_1(self):
+        res, st, _e = _convert(a8_set_ramp())
+        imps = _imp_cards(st)
+        self.assertEqual([(c[0], c[3], c[10]) for c in imps],
+                         [("/IMPVEL", "Y", 1.0)])
+        self.assertFalse(any(r[0] == "010" for r in _bcs_rows(st)))
+        self.assertTrue(_has(res.warnings, _W_A8_SET, "curve 7 (VAD 0)",
+                             "/IMPVEL Fscale 1", "Vol I R17 p.759",
+                             "--no-prescribed-motion-sf-default"))
+
+    def test_b_c_e_a_zero_motion_stays_a_BCS_hold(self):
+        for name, deck in (("zero curve, VAD 0", _a8_set(lcid=8)),
+                           ("zero curve, VAD 2", _a8_set(vad=2, lcid=8)),
+                           ("LCID 0", _a8_set(lcid=0)),
+                           ("undefined LCID", _a8_set(lcid=99))):
+            with self.subTest(name):
+                res, st, _e = _convert(deck)
+                self.assertIn(("010", "000"),
+                              [(r[0], r[1]) for r in _bcs_rows(st)])
+                self.assertEqual(_imp_cards(st), [])
+                self.assertFalse(_has(res.warnings, _W_A8_SET))
+
+    def test_d_VAD_1_on_a_zero_curve_is_an_imposed_acceleration(self):
+        """D11: a zero imposed acceleration keeps the initial velocity, so
+        it is not a hold."""
+        res, st, _e = _convert(_a8_set(vad=1, lcid=8))
+        self.assertEqual([(c[0], c[3], c[10]) for c in _imp_cards(st)],
+                         [("/IMPACC", "Y", 1.0)])
+        self.assertTrue(_has(res.warnings, _W_A8_SET, "VAD 1"))
+
+    def test_f_RIGID_writes_Fscale_1(self):
+        res, st, _e = _convert(a8_rigid_sf0())
+        self.assertEqual([(c[0], c[10]) for c in _imp_cards(st)],
+                         [("/IMPDISP", 1.0)])
+        self.assertTrue(_has(res.warnings, _W_A8_RIGID, "read_impdisp.F:239"))
+
+    def test_g_only_the_kept_holds_are_global_SPC_bits(self):
+        """_global_spc_dofs: the imposed row's free node 50 is not a
+        global bit (the implicit free-node guard fixes all six of its
+        DOFs); the held row's is (the guard writes the remainder only)."""
+        r_a, st_a, _e = _convert(_a8_set(implicit=True, free_node=True))
+        g_a = _grnod_by_id(st_a)
+        guard_a = {(r[0], r[1]): g_a[r[3]][1] for r in _bcs_rows(st_a)
+                   if g_a.get(r[3], ("",))[0].startswith("free_reference")}
+        self.assertEqual(guard_a, {("111", "111"): [50]})
+        r_b, st_b, _e = _convert(_a8_set(lcid=8, implicit=True,
+                                         free_node=True))
+        g_b = _grnod_by_id(st_b)
+        guard_b = {(r[0], r[1]): g_b[r[3]][1] for r in _bcs_rows(st_b)
+                   if g_b.get(r[3], ("",))[0].startswith(
+                       "fix_free_reference")}
+        self.assertEqual(guard_b, {("101", "111"): [50]})
+
+    def test_h_the_screw_drive_writes_Fscale_1(self):
+        mod = _t7._screw_synthetic()
+        drive = ("*BOUNDARY_PRESCRIBED_MOTION_RIGID_ID\n"
+                 + f"{mod.DRIVE_ID:>10}screw drive\n"
+                 + _row(mod.PART_A, 5, 2, mod.LCID, 0.0, 0, 1e28, 0.0) + "\n")
+        deck = mod.build_deck(drive=False, extra=drive)
+        for kw, want in (({}, 1.0),
+                         ({"prescribed_motion_sf_default": False}, 0.0)):
+            with self.subTest(**kw):
+                _r, st, _e = _convert(deck, **kw)
+                blk = [b for h, b in _blocks(st, "/IMPVEL/LAGMUL/")]
+                self.assertEqual(len(blk), 1, st)
+                self.assertEqual(float(blk[0][2][20:40]), want)
+
+    def test_i_the_opt_out_restores_the_386444e_bytes(self):
+        r1, st1, _e = _convert(a8_set_ramp(),
+                               prescribed_motion_sf_default=False)
+        self.assertEqual(_sha(st1), _A8_SET_386444E_SHA)
+        self.assertFalse(_has(r1.warnings, _W_A8_SET))
+        r2, st2, _e = _convert(a8_rigid_sf0(),
+                               prescribed_motion_sf_default=False)
+        self.assertEqual(_sha(st2), _A8_RIGID_386444E_SHA)
+        self.assertFalse(_has(r2.warnings, _W_A8_RIGID))
+
+    def test_j_a_stated_non_zero_SF_is_untouched(self):
+        res, st, _e = _convert(_a8_set(sf=2.0))
+        self.assertEqual([(c[0], c[10]) for c in _imp_cards(st)],
+                         [("/IMPVEL", 2.0)])
+        self.assertFalse(_has(res.warnings, _W_A8_SET))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # The round-9 part-A retractions: no shipped text carries a retracted
 # spelling (CHANGELOG, the history, is exempt)
 # ═════════════════════════════════════════════════════════════════════════════

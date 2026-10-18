@@ -688,6 +688,7 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     The keyword leaves ``skipped_keywords`` here, at the line that writes the
     ``/GJOINT``."""
+    from .loads import _pm_sf                 # local: loads imports us
     plans = state.joint_screw_plan or []
     if not plans:
         return []
@@ -737,7 +738,7 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
                       f"{_i(fid)}{_DIRS[k]:>10}{_i(0)}{'':10}"
                       f"{_i(plan.a_ind_grnod)}",
                       "#           Ascale_x            Fscale_y",
-                      f"{_f(1.0)}{_f(pm.sf)}", HDR]
+                      f"{_f(1.0)}{_f(_pm_sf(state, pm))}", HDR]
         gid = state.next_id()
         fs = -1.0 / s.parm
         lines += [f"/GJOINT/RACK/{gid}", f"SCREW_{jid}",

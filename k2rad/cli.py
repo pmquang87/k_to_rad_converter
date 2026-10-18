@@ -948,6 +948,18 @@ def build_parser() -> argparse.ArgumentParser:
              "restores the global writing.",
     )
     parser.add_argument(
+        "--prescribed-motion-sf-default",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Read a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* as "
+             "LS-DYNA's default 1.0 (Vol I p.759; Appendix V): a NODE / SET "
+             "row stays a /BCS hold only for a zero motion (VAD 0 / 2 on a "
+             "zero curve, or no curve), else it is imposed with Fscale 1; "
+             "RIGID writes Fscale 1 (the starter already read 0 as 1.0, "
+             "read_impdisp.F:239). ON by default; "
+             "--no-prescribed-motion-sf-default keeps the stated 0.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1644,6 +1656,7 @@ def main(argv=None) -> int:
         implicit_rigid_gravity_nodes=args.implicit_rigid_gravity_nodes,
         elform7_beam_thickness_section=args.elform7_beam_thickness_section,
         spc_vector_frames=args.spc_vector_frames,
+        prescribed_motion_sf_default=args.prescribed_motion_sf_default,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
