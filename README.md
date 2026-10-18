@@ -7327,12 +7327,15 @@ no `/IMPL/QSTAT` card unless `--qstat-dtscal` is given (the A11 rule); any
 other NSOLVR keeps `/IMPL/NONLIN/1` and is named. MEASURED (nt 4 and nt 2):
 `ex_06_beam_elform_1` ends NORMAL in 277 cycles at IE END -0.09 %, RMS 0.09 %
 of the LS peak over 121 LS times in (0.01, 1.0] (nt 4 = nt 2), where the
-default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2 bytes) ends NORMAL
-in 40 cycles at IE END -8.64 / -6.06 % (RMS 9.26 / 11.27 %). The failure can
-be SILENT: on the TYPE25 route (`--no-implicit-n2s-type7`) the same pair ends
-a NORMAL banner with nonsense internal energy (END -1.1e10 % at nt 4, -7.7e8 %
-at nt 2), and tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 -> +26.88 %).
-One carrier is not a default: check the energies before using a run.
+default stops at t 0.1601 (IE -59.58 %). The failure can be SILENT, on the
+default bytes too: doorbeam (A1 + A2 bytes) ends a NORMAL banner in all 14 runs
+of identical bytes (39-42 cycles), with IE END -8.64 .. +29.51 % (RMS 8.19 ..
+38.42 % of the LS peak) in the seven at nt 4, but in four of the seven at nt 2
+with NONSENSE internal energy (END -199.96 / -2251.24 / -5182.84 / -12177.48 %;
+the other three -4.92 .. -6.06 %); the TYPE25 route (`--no-implicit-n2s-type7`)
+does the same (END -1.1e10 % at nt 4, -7.7e8 % at nt 2), and tensile2's IE RMS
+goes 2.48 -> 5.61 % (END -0.54 -> +26.88 %). One carrier is not a default:
+check the energies before using a run.
 
 ### `--ale-flow-tracking` — the ALE grid that follows the material
 

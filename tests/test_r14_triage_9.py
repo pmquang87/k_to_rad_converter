@@ -2076,12 +2076,16 @@ class ImplicitBfgs(unittest.TestCase):
     MEASURED on the branch bytes (nt 4 AND nt 2, identical where marked):
     ex_06_beam_elform_1 NORMAL in 277 cycles, IE END -0.0934 %, RMS 0.09 %
     of the LS peak over 121 LS times in (0.01, 1.0] (nt 4 = nt 2), where
-    the default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2) NORMAL
-    in 40 cycles, IE END -8.64 / -6.06 %, the punch = LS at every fifth;
-    the same pair on the TYPE25 route (--no-implicit-n2s-type7): a NORMAL
-    banner (387 / 110 cycles) with IE END -1.1e10 / -7.7e8 % - the SILENT
-    failure; tensile2 NORMAL 75 -> 43 cycles, IE RMS 2.48 -> 5.61 % (END
-    -0.54 -> +26.88 %, nt 4 = nt 2).
+    the default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2) a
+    14-run band (implement A's 2, the solver-physics validator's 6, the
+    fix round's 6; engine file sha256 a31d565457c5; a NORMAL banner in
+    every run, 39-42 cycles): IE END -8.64 .. +29.51 % at nt 4, and at nt
+    2 three sane runs (-4.92 .. -6.06 %) and four with nonsense energy
+    (-199.96 / -2251.24 / -5182.84 / -12177.48 %) - the SILENT failure on
+    the default bytes; the same pair on the TYPE25 route
+    (--no-implicit-n2s-type7): a NORMAL banner (387 / 110 cycles) with IE
+    END -1.1e10 / -7.7e8 %; tensile2 NORMAL 75 -> 43 cycles, IE RMS 2.48
+    -> 5.61 % (END -0.54 -> +26.88 %, nt 4 = nt 2).
     """
 
     def test_a_NSOLVR_12_gets_BFGS_and_no_QSTAT(self):
@@ -2091,6 +2095,17 @@ class ImplicitBfgs(unittest.TestCase):
         self.assertIsNone(_qstat(engine))
         self.assertTrue(_has(res.warnings, _W_A12, "for NSOLVR 12",
                              "with no /IMPL/QSTAT card", "SILENT"))
+        # the fix round (F-A12-1 + the solver-physics major): the silent
+        # failure is reachable on doorbeam's DEFAULT A1 + A2 bytes - a
+        # 14-run band, four nt-2 runs with nonsense energy - not only on
+        # the TYPE25 route; one run per nt was quoted before
+        self.assertTrue(_has(res.warnings, _W_A12, "The failure can be "
+                             "SILENT, on the default bytes too",
+                             "all 14 runs of identical bytes",
+                             "IE END -8.64 .. +29.51 %", "in four of the "
+                             "seven at nt 2 with NONSENSE internal energy",
+                             "-12177.48 %"))
+        self.assertFalse(_has(res.warnings, "-8.64 / -6.06"))
 
     def test_b_a_blank_NSOLVR_and_no_card_are_the_family(self):
         for name, deck in (("blank", _t4._implicit_deck(nsolvr=0)),
@@ -2316,7 +2331,8 @@ class Round9OptInWiring(_t8.Round8OptInWiringB):
                                        "2916 -> 7557", "LS 1758.5",
                                        "OFF by default"),
         "--implicit-bfgs": ("/IMPL/NONLIN/2", "ex_06", "IE RMS 0.09 %",
-                            "SILENTLY", "TYPE25 route"),
+                            "SILENTLY", "default A1 + A2 bytes",
+                            "4 of 7 runs at nt 2", "TYPE25 route"),
     }
 
 

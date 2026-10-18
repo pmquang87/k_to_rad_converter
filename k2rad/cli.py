@@ -1055,8 +1055,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Opt-in: Quasi-Newton BFGS (/IMPL/NONLIN/2) without /IMPL/QSTAT "
              "for an NSOLVR 12 (or blank) deck. One carrier (ex_06: IE RMS "
              "0.09 %%, NORMAL where the default stops); can fail SILENTLY "
-             "(doorbeam on the TYPE25 route: NORMAL with nonsense energy) - "
-             "OFF by default.",
+             "(doorbeam's default A1 + A2 bytes: a NORMAL banner with "
+             "nonsense internal energy in 4 of 7 runs at nt 2, END down to "
+             "-12177.48 %%; the TYPE25 route too) - OFF by default.",
     )
     parser.add_argument(
         "--weld-trajectory-impflux",

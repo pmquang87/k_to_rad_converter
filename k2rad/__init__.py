@@ -1203,9 +1203,10 @@ def convert(
         Opt-in (R14 triage round 9, A12): Quasi-Newton BFGS (/IMPL/NONLIN/2)
         with no /IMPL/QSTAT (unless qstat_dtscal_stated) on an implicit deck
         whose NSOLVR is 12 or blank. One carrier (ex_06_beam_elform_1); the
-        failure can be SILENT (doorbeam: a NORMAL banner with nonsense
-        internal energy), so check the energies before using a run. Default
-        False.
+        failure can be SILENT (doorbeam's default A1 + A2 bytes: a NORMAL
+        banner with nonsense internal energy in 4 of 7 runs at nt 2, END
+        down to -12177.48 %), so check the energies before using a run.
+        Default False.
     weld_trajectory_impflux : bool
         Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (R14 triage round 9, B1)
         whose screen accepts it - IFORM 2, ENFOR 0, Q > 0, SOLN 1, RELVEL 0,

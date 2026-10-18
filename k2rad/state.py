@@ -8534,9 +8534,9 @@ class ConvertOptions:
     # (or that has no such card) write /IMPL/NONLIN/2 (Quasi-Newton BFGS) in
     # place of /IMPL/NONLIN/1 and no /IMPL/QSTAT unless qstat_dtscal_stated
     # (writer/assembly._bfgs_requested). One measured carrier (ex_06); the
-    # failure can be SILENT (doorbeam ends a NORMAL banner with nonsense
-    # internal energy) - so never a default. Default False = the 386444e
-    # bytes.
+    # failure can be SILENT (doorbeam's A1 + A2 bytes end a NORMAL banner
+    # with nonsense internal energy in 4 of 7 runs at nt 2) - so never a
+    # default. Default False = the 386444e bytes.
     implicit_bfgs: bool = False
     # --no-weld-trajectory-impflux: a *BOUNDARY_THERMAL_WELD_TRAJECTORY and
     # its *MAT_THERMAL_CWM stay unconverted (the 386444e output: the seam

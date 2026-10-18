@@ -667,10 +667,15 @@ Prior history (before this changelog was introduced) is summarized in the
     unchanged. MEASURED on the branch bytes: ex_06_beam_elform_1 NORMAL in
     277 cycles, IE END -0.09 %, RMS 0.09 % of the LS peak over 121 LS times
     (nt 4 = nt 2) where the default stops at t 0.1601; doorbeam (A1 + A2)
-    NORMAL in 40 cycles at IE END -8.64 / -6.06 % (nt 4 / 2); the SILENT
-    failure is real on the TYPE25 route (`--no-implicit-n2s-type7`: a NORMAL
-    banner with IE END -1.1e10 / -7.7e8 %); tensile2 IE RMS 2.48 -> 5.61 %.
-    One carrier, so opt-in only (the part-A spec's own verdict).
+    is a 14-run band since the fix round: a NORMAL banner in every run, IE
+    END -8.64 .. +29.51 % at nt 4, but NONSENSE internal energy in four of
+    the seven runs at nt 2 (END -199.96 / -2251.24 / -5182.84 / -12177.48
+    %) - the SILENT failure is reachable on the default bytes, not only on
+    the TYPE25 route (`--no-implicit-n2s-type7`: a NORMAL banner with IE
+    END -1.1e10 / -7.7e8 %), which the round-9 text, quoting one run per nt
+    ("IE END -8.64 / -6.06 %"), had placed there alone; tensile2 IE RMS
+    2.48 -> 5.61 %. One carrier, so opt-in only (the part-A spec's own
+    verdict).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the
