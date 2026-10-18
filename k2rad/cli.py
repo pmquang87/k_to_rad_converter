@@ -1011,6 +1011,16 @@ def build_parser() -> argparse.ArgumentParser:
              "2916 -> 7557 (LS 1758.5) - OFF by default.",
     )
     parser.add_argument(
+        "--implicit-bfgs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in: Quasi-Newton BFGS (/IMPL/NONLIN/2) without /IMPL/QSTAT "
+             "for an NSOLVR 12 (or blank) deck. One carrier (ex_06: IE RMS "
+             "0.09 %%, NORMAL where the default stops); can fail SILENTLY "
+             "(doorbeam on the TYPE25 route: NORMAL with nonsense energy) - "
+             "OFF by default.",
+    )
+    parser.add_argument(
         "--tgmult-imptemp",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1712,6 +1722,7 @@ def main(argv=None) -> int:
         rigid_local_shared_skew=args.rigid_local_shared_skew,
         modal_acoustic_void=args.modal_acoustic_void,
         mixed_main_thickness_gap=args.mixed_main_thickness_gap,
+        implicit_bfgs=args.implicit_bfgs,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

@@ -612,6 +612,66 @@ def _arclength_requested(state: ConversionState) -> bool:
     return sol.nsolvr == 12 and sol.arcmth == _ARCLENGTH_ARCMTH
 
 
+#: The *CONTROL_IMPLICIT_SOLUTION NSOLVR values --implicit-bfgs reaches: 12
+#: (LS-DYNA's nonlinear solver with BFGS updates) and 0 = a blank cell.
+_BFGS_NSOLVR = frozenset({0, 12})
+
+
+def _bfgs_requested(state: ConversionState) -> bool:
+    """R14 triage round 9, A12: does ``--implicit-bfgs`` apply to this deck?
+
+    An implicit, non-modal deck whose ``*CONTROL_IMPLICIT_SOLUTION`` NSOLVR
+    is 12 or blank (or that states no such card) - the one family the
+    option was measured on (ex_06_beam_elform_1, NSOLVR 12). Any other
+    NSOLVR keeps ``/IMPL/NONLIN/1`` and is named by
+    :func:`_warn_implicit_bfgs`.
+    """
+    if not (state.options.implicit_bfgs and state.is_implicit
+            and not state.is_modal):
+        return False
+    sol = state.ctrl_implicit_sol
+    return sol is None or sol.nsolvr in _BFGS_NSOLVR
+
+
+def _warn_implicit_bfgs(state: ConversionState) -> None:
+    """The ``--implicit-bfgs`` sentence: what it writes, the one carrier it
+    was measured on, and the silent failure it can give (round 9, A12)."""
+    if not (state.options.implicit_bfgs and state.is_implicit
+            and not state.is_modal):
+        return
+    sol = state.ctrl_implicit_sol
+    n = sol.nsolvr if sol is not None else 0
+    if not _bfgs_requested(state):
+        state.warn(
+            f"--implicit-bfgs: *CONTROL_IMPLICIT_SOLUTION NSOLVR {n} is not "
+            "the family the option was measured on (NSOLVR 12 or blank: "
+            "ex_06_beam_elform_1), so /IMPL/NONLIN/1 and the /IMPL/QSTAT "
+            "choice stay as without the flag.")
+        return
+    qstat = ("the /IMPL/QSTAT card --qstat-dtscal asked for is kept"
+             if state.options.qstat_dtscal_stated else
+             "no /IMPL/QSTAT card")
+    state.warn(
+        f"--implicit-bfgs: /IMPL/NONLIN/2 (Quasi-Newton BFGS) in place of "
+        f"/IMPL/NONLIN/1 for NSOLVR {n or 'blank'}, with {qstat}. "
+        + _BFGS_MEASURED)
+
+
+#: The measured record of --implicit-bfgs (round 9, A12, on the branch
+#: bytes). ONE constant so the warning and the docs cannot drift.
+_BFGS_MEASURED = (
+    "Measured on ONE carrier: ex_06_beam_elform_1 NORMAL in 277 cycles, "
+    "internal energy END -0.09 %, RMS 0.09 % of the LS peak over 121 LS "
+    "times in (0.01, 1.0], nt 4 = nt 2, where the default stops at t "
+    "0.1601 (IE -59.58 %). doorbeam (A1 + A2 bytes) ends NORMAL in 40 "
+    "cycles at IE END -8.64 / -6.06 % (RMS 9.26 / 11.27 %, nt 4 / 2), but "
+    "the failure can be SILENT: on the TYPE25 route "
+    "(--no-implicit-n2s-type7) the same pair ends a NORMAL banner with "
+    "nonsense internal energy (END -1.1e10 % at nt 4, -7.7e8 % at nt 2), "
+    "and tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 -> +26.88 %, "
+    "nt 4 = nt 2). Check the energies before using a run.")
+
+
 def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
     """The ``/IMPL/QSTAT/DTSCAL`` data cell, or None to emit no card.
 
@@ -1216,6 +1276,7 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             seg is None or seg.first_implicit):
         if _arclength_requested(state):
             _warn_arclength(state, modal=state.is_modal)
+        _warn_implicit_bfgs(state)
         _warn_implicit_auto_drops(state, modal=state.is_modal)
         _warn_implicit_constant_step(state)
     if state.is_modal:
@@ -1322,7 +1383,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
                     f"Itol {itol}, Toli {toli:g}.")
         if zero_tol_ectol:
             _warn_zero_tolerance_ectol(state, sol)
-    lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
+    # round 9, A12 (opt-in): /IMPL/NONLIN/2 = Quasi-Newton BFGS
+    nonlin = 2 if _bfgs_requested(state) else 1
+    lines: List[str] = [f"/IMPL/NONLIN/{nonlin}", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
 
     # Per OpenRadioss 2022 Reference Guide (pages 2942-2943):
@@ -1371,7 +1434,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # _warn_deformable_deformable_contact.
         if _recipe_active(state):
             lines += ["/IMPL/QSTAT/DTSCAL", " 0.05"]
-        elif (state.options.arclength_riks and _arclength_requested(state)
+        elif (((state.options.arclength_riks
+                and _arclength_requested(state))
+               or _bfgs_requested(state))
               and not state.options.qstat_dtscal_stated):
             # R14 triage round 9, A11: --arclength-riks writes NO quasi-
             # static term unless --qstat-dtscal was GIVEN - it adds
@@ -1379,7 +1444,8 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             # (imp_dyna.F:351-355), i.e. stiffens the arc-length tangent,
             # and the engine has no QSTAT-versus-RIKS guard
             # (lectur.F:3517-3532 disarms only FIXPOINT). The recipe above
-            # is evaluated first and keeps its 0.05.
+            # is evaluated first and keeps its 0.05. Round 9, A12: the
+            # --implicit-bfgs pair is measured WITHOUT the term too.
             pass
         else:
             dtscal = _qstat_dtscal_cell(state)

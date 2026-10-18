@@ -315,6 +315,7 @@ def convert(
     rigid_local_shared_skew: bool = True,
     modal_acoustic_void: bool = True,
     mixed_main_thickness_gap: bool = False,
+    implicit_bfgs: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1161,6 +1162,13 @@ def convert(
         the solids by nothing. Measured: mainboltaexpl's bolt 2.19560 ->
         1.99461 mm (LS 1.81686); COST: EXP_SC_PRELOAD's contact energy
         2916 -> 7557 at END (LS sliding 1758.5). Default False.
+    implicit_bfgs : bool
+        Opt-in (R14 triage round 9, A12): Quasi-Newton BFGS (/IMPL/NONLIN/2)
+        with no /IMPL/QSTAT (unless qstat_dtscal_stated) on an implicit deck
+        whose NSOLVR is 12 or blank. One carrier (ex_06_beam_elform_1); the
+        failure can be SILENT (doorbeam: a NORMAL banner with nonsense
+        internal energy), so check the energies before using a run. Default
+        False.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1611,6 +1619,7 @@ def convert(
         rigid_local_shared_skew=rigid_local_shared_skew,
         modal_acoustic_void=modal_acoustic_void,
         mixed_main_thickness_gap=mixed_main_thickness_gap,
+        implicit_bfgs=implicit_bfgs,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

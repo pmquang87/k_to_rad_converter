@@ -6300,13 +6300,15 @@ class ControlImplicitEigenvalue:
 
 @dataclass
 class ControlImplicitSolution:
-    nsolvr: int         # PARSED AND UNUSED: LS-DYNA's *CONTROL_IMPLICIT_
-    #                   # SOLUTION solution method (1 = linear, 2 =
-    #                   # nonlinear + BFGS, ...). It is NOT the linear
+    nsolvr: int         # LS-DYNA's *CONTROL_IMPLICIT_SOLUTION solution
+    #                   # method (1 = linear, 2 / 12 = nonlinear + BFGS,
+    #                   # 6..9 = arc-length, ...). It is NOT the linear
     #                   # solver LSOLVR of *CONTROL_IMPLICIT_SOLVER, which
-    #                   # an earlier comment here named. Nothing in the
-    #                   # package reads it; _make_engine_implicit always
-    #                   # writes /IMPL/NONLIN/1. See ROADMAP.
+    #                   # an earlier comment here named. Read by
+    #                   # writer/assembly._arclength_requested (round 4)
+    #                   # and _bfgs_requested (round 9, A12: the opt-in
+    #                   # --implicit-bfgs writes /IMPL/NONLIN/2 for 12 or
+    #                   # blank); otherwise /IMPL/NONLIN/1 is written.
     ilimit: int         # max stiffness reformations
     maxref: int         # max refinements
     dctol: float        # displacement convergence
@@ -8325,6 +8327,15 @@ class ConvertOptions:
     # the TYPE25 route was measured too and is NO-GO. Reach 4 keys / 4
     # models. Default False = the 386444e bytes.
     mixed_main_thickness_gap: bool = False
+    # --implicit-bfgs (OPT-IN, R14 triage round 9, A12): on an implicit,
+    # non-modal deck whose *CONTROL_IMPLICIT_SOLUTION NSOLVR is 12 or blank
+    # (or that has no such card) write /IMPL/NONLIN/2 (Quasi-Newton BFGS) in
+    # place of /IMPL/NONLIN/1 and no /IMPL/QSTAT unless qstat_dtscal_stated
+    # (writer/assembly._bfgs_requested). One measured carrier (ex_06); the
+    # failure can be SILENT (doorbeam ends a NORMAL banner with nonsense
+    # internal energy) - so never a default. Default False = the 386444e
+    # bytes.
+    implicit_bfgs: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #

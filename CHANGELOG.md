@@ -18,7 +18,7 @@ Prior history (before this changelog was introduced) is summarized in the
   1, A7 1 / 1, A8 4 / 4, A9 1 / 1; the union is the sum minus the keys
   several items share: doorbeam carries A1 + A2, ex_16 A4 + A5, the Yaris
   roof crush A4 + A8 + A9 and the door sag A4 + A8); A3, A10 (opt-in), A11
-  (2 keys, warning text only) and A13 0.
+  (2 keys, warning text only), A12 (opt-in) and A13 0.
   - **A CNRB sharing a `*MAT_RIGID` part's PID no longer steals the part's
     cards** (A1; default ON, `--no-rigid-part-pid-precedence` restores the
     `386444e` merge). LS-DYNA accepts the shared id with Warning 10177 and
@@ -298,6 +298,18 @@ Prior history (before this changelog was introduced) is summarized in the
     `docs/IMPLICIT.md` gains the round-9 part-A section. Moved test:
     `test_r14_triage_8` A1 (o)'s opt-out assertion (it pinned the false
     sentence) now asserts no sentence and the same `/BCS` in skew 3.
+  - **Opt-in `--implicit-bfgs`** (A12; default OFF = the `386444e` bytes):
+    `/IMPL/NONLIN/2` (Quasi-Newton BFGS) in place of `/IMPL/NONLIN/1` on an
+    implicit, non-modal deck whose NSOLVR is 12 or blank, with no
+    `/IMPL/QSTAT` unless `--qstat-dtscal` is given
+    (`writer/assembly._bfgs_requested`); any other NSOLVR is named and
+    unchanged. MEASURED on the branch bytes: ex_06_beam_elform_1 NORMAL in
+    277 cycles, IE END -0.09 %, RMS 0.09 % of the LS peak over 121 LS times
+    (nt 4 = nt 2) where the default stops at t 0.1601; doorbeam (A1 + A2)
+    NORMAL in 40 cycles at IE END -8.64 / -6.06 % (nt 4 / 2); the SILENT
+    failure is real on the TYPE25 route (`--no-implicit-n2s-type7`: a NORMAL
+    banner with IE END -1.1e10 / -7.7e8 %); tensile2 IE RMS 2.48 -> 5.61 %.
+    One carrier, so opt-in only (the part-A spec's own verdict).
 
 - **R14 CAMPAIGN TRIAGE batch, round 8 — the post-review verification
   round.** Four verifiers (two solver-physics, code, evidence) checked the

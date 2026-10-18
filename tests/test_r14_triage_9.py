@@ -1926,6 +1926,93 @@ class ArclengthRiksNoQstat(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A12 - OPT-IN --implicit-bfgs: /IMPL/NONLIN/2 without /IMPL/QSTAT on an
+#       NSOLVR 12 (or blank) deck
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _nonlin(engine: str):
+    m = re.search(r"^/IMPL/NONLIN/(\d+)$", engine, re.M)
+    return int(m.group(1)) if m else None
+
+
+def _no_solution_card(deck: str) -> str:
+    """T4's implicit deck with its *CONTROL_IMPLICIT_SOLUTION removed."""
+    lines = deck.split("\n")
+    k = lines.index("*CONTROL_IMPLICIT_SOLUTION")
+    return "\n".join(lines[:k] + lines[k + 4:])
+
+
+_W_A12 = "--implicit-bfgs: /IMPL/NONLIN/2 (Quasi-Newton BFGS)"
+
+
+class ImplicitBfgs(unittest.TestCase):
+    """A12 (part-A spec A12; OPT-IN): with the flag an implicit, non-modal
+    deck whose NSOLVR is 12 or blank gets /IMPL/NONLIN/2 and no
+    /IMPL/QSTAT unless qstat_dtscal_stated; any other NSOLVR keeps
+    /IMPL/NONLIN/1 and is named; without the flag the 386444e bytes.
+
+    MEASURED on the branch bytes (nt 4 AND nt 2, identical where marked):
+    ex_06_beam_elform_1 NORMAL in 277 cycles, IE END -0.0934 %, RMS 0.09 %
+    of the LS peak over 121 LS times in (0.01, 1.0] (nt 4 = nt 2), where
+    the default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2) NORMAL
+    in 40 cycles, IE END -8.64 / -6.06 %, the punch = LS at every fifth;
+    the same pair on the TYPE25 route (--no-implicit-n2s-type7): a NORMAL
+    banner (387 / 110 cycles) with IE END -1.1e10 / -7.7e8 % - the SILENT
+    failure; tensile2 NORMAL 75 -> 43 cycles, IE RMS 2.48 -> 5.61 % (END
+    -0.54 -> +26.88 %, nt 4 = nt 2).
+    """
+
+    def test_a_NSOLVR_12_gets_BFGS_and_no_QSTAT(self):
+        res, _s, engine = _convert(_t4._implicit_deck(nsolvr=12),
+                                   implicit_bfgs=True)
+        self.assertEqual(_nonlin(engine), 2)
+        self.assertIsNone(_qstat(engine))
+        self.assertTrue(_has(res.warnings, _W_A12, "for NSOLVR 12",
+                             "with no /IMPL/QSTAT card", "SILENT"))
+
+    def test_b_a_blank_NSOLVR_and_no_card_are_the_family(self):
+        for name, deck in (("blank", _t4._implicit_deck(nsolvr=0)),
+                           ("no card",
+                            _no_solution_card(_t4._implicit_deck()))):
+            with self.subTest(name):
+                self.assertNotIn("*CONTROL_IMPLICIT_SOLUTION\n"
+                                 + _row(2), deck)
+                res, _s, engine = _convert(deck, implicit_bfgs=True)
+                self.assertEqual(_nonlin(engine), 2)
+                self.assertIsNone(_qstat(engine))
+                self.assertTrue(_has(res.warnings, _W_A12, "NSOLVR blank"))
+
+    def test_c_another_NSOLVR_keeps_NONLIN_1_and_is_named(self):
+        for n in (1, 6):
+            with self.subTest(nsolvr=n):
+                res, _s, engine = _convert(_t4._implicit_deck(nsolvr=n),
+                                           implicit_bfgs=True)
+                self.assertEqual(_nonlin(engine), 1)
+                self.assertTrue(_has(res.warnings, "--implicit-bfgs: "
+                                     f"*CONTROL_IMPLICIT_SOLUTION NSOLVR {n}"
+                                     " is not the family"))
+                self.assertFalse(_has(res.warnings, _W_A12))
+
+    def test_d_a_stated_QSTAT_is_kept(self):
+        res, _s, engine = _convert(_t4._implicit_deck(nsolvr=12),
+                                   implicit_bfgs=True, qstat_dtscal=10.0,
+                                   qstat_dtscal_stated=True)
+        self.assertEqual(_nonlin(engine), 2)
+        self.assertEqual(_qstat(engine), "10")
+        self.assertTrue(_has(res.warnings, _W_A12, "the /IMPL/QSTAT card "
+                             "--qstat-dtscal asked for is kept"))
+
+    def test_e_without_the_flag_the_default_bytes(self):
+        deck = _t4._implicit_deck(nsolvr=12)
+        res, st, engine = _convert(deck)
+        res2, st2, engine2 = _convert(deck, implicit_bfgs=False)
+        self.assertEqual((st, engine), (st2, engine2))
+        self.assertEqual(_nonlin(engine), 1)
+        self.assertEqual(_qstat(engine), "10")
+        self.assertFalse(_has(res.warnings, "--implicit-bfgs"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # A13 - the CNRB _SPC CMO -1 frame under --no-rigid-local-constraints: a
 #       VECTOR CON1 is a written /SKEW/FIX (no "will dangle"); only a CON1
 #       in no registry is named, with what it costs
@@ -2096,11 +2183,14 @@ class Round9OptInWiring(_t8.Round8OptInWiringB):
     the GUI end to end, convert() / ConvertOptions (default False) and
     cli.main()'s call - round 8's opt-in checks for A10."""
 
-    _OPT_IN = {"--mixed-main-thickness-gap": "mixed_main_thickness_gap"}
+    _OPT_IN = {"--mixed-main-thickness-gap": "mixed_main_thickness_gap",
+               "--implicit-bfgs": "implicit_bfgs"}
     _HELP_FIGURES = {
         "--mixed-main-thickness-gap": ("2.196 -> 1.995 mm", "LS 1.817",
                                        "2916 -> 7557", "LS 1758.5",
                                        "OFF by default"),
+        "--implicit-bfgs": ("/IMPL/NONLIN/2", "ex_06", "IE RMS 0.09 %",
+                            "SILENTLY", "TYPE25 route"),
     }
 
 

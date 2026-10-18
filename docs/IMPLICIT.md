@@ -236,6 +236,12 @@ such a model EXPLICIT until the engine is fixed.
   and never goes below 0; NORMAL 4 of 5 (1206 / 1192 cycles at nt 4, 1202
   twice at nt 2), ERROR once (MESSAGE 79); `ex_05_beam_elform_3_&_6` still
   stops; both references are UNMATCHED - a load path, not the answer.
+- **Quasi-Newton BFGS** (A12, opt-in `--implicit-bfgs`): `/IMPL/NONLIN/2`
+  and no `/IMPL/QSTAT` (unless `--qstat-dtscal`) on an NSOLVR 12 / blank
+  deck. One carrier, `ex_06_beam_elform_1`: NORMAL in 277 cycles at IE END
+  -0.09 % (RMS 0.09 %), nt 4 = nt 2, where the default stops at t 0.1601.
+  The failure can be SILENT - on doorbeam's TYPE25 route the pair ends a
+  NORMAL banner with IE END -1.1e10 % - so check the energies.
 - **Implicit CMO -1** (A13): measured on a coupon in the round-9 census -
   u . x' = 1.00000e-2 mm, off-axis <= 1.4e-8, no rotation, IE = EXT-WORK,
   nt 4 = nt 2; six codes x two rotated frames off-axis <= 2.1e-9, energy error
