@@ -654,7 +654,10 @@ def build_parser() -> argparse.ArgumentParser:
              "on a deck without *INITIAL_VOID; since round 8 a /PROP/SOLID "
              "Isolid 1 / 2 carrying a Nu > 0 brick with R = 10 Nu / "
              "(c0 dmin) > 1 also gets the hourglass coefficient h / R "
-             "(shvis3.F:182 / :185). "
+             "(shvis3.F:182 / :185), and since round 9 a stated h is first "
+             "capped: h' = min(h_eff, 0.14 / Tsca) / max(1, R) (Couette "
+             "coupon: QH 0.2 at R 1.2 is unstable divided only, stable "
+             "capped). "
              "The ELFORM-12 void floor keeps precedence; with "
              "--no-initial-void-floor alone a PC-0 void gets -1e-20 from "
              "this rule. ON by default. MEASURED at nt 4: sph/bird IE "
@@ -751,8 +754,10 @@ def build_parser() -> argparse.ArgumentParser:
              "0.0655 / 0.0555 -> 0.0223 / 0.0164 / 0.0139 = LS-DYNA, its IE / KE "
              "history RMS 7.54 / 65.93 -> 2.89 / 29.15 %% of the LS peak - but "
              "OpenRadioss's own energy error grows there, mean -4.39 -> -17.88 "
-             "%% (named cost, mechanism not closed). ON by default; "
-             "--no-section-nodal-thickness-mean keeps T1.",
+             "%% (named cost: OpenRadioss's energy error counts no interface "
+             "energy and no TYPE7 VisS damping work - ecrit.F:500-511, "
+             "i7for3.F:1077-1120; with VisS 1e-6 the mean is -5.04 %%). ON by "
+             "default; --no-section-nodal-thickness-mean keeps T1.",
     )
     parser.add_argument(
         "--plane-strain-unit-thickness",

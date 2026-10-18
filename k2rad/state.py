@@ -8122,8 +8122,9 @@ class ConvertOptions:
     # +88.77 %) and bird_B CREATES energy through its converted open
     # fixed-grid ALE faces (energy error 99.9 %; walled -0.1 %). Round 8: Nu
     # is written on SPH-only materials too (F5), and a /PROP/SOLID whose
-    # R = 10 Nu / (c0 dmin) exceeds 1 gets h / R (F1). TEROD / CEROD are
-    # named (no LAW6 cell).
+    # R = 10 Nu / (c0 dmin) exceeds 1 gets h / R (F1); round 9 (B7) caps a
+    # stated h first: h' = min(h_eff, 0.14 / Tsca) / max(1, R), so the cap
+    # also acts at R <= 1. TEROD / CEROD are named (no LAW6 cell).
     # MEASURED at nt 4 (base-paired; sph/bird, channel_B and underwater_A/B
     # re-measured on the implementation, channel_A the round-7 pre-research
     # arm): sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B
@@ -8220,8 +8221,10 @@ class ConvertOptions:
     # reproduces it (cup-draw's rigid tools 0.0223 / 0.0164 / 0.0139 = LS).
     # The 2-D ELFORMs 13 / 14 / 15 / 43 / 44 / 52 / 55 are A7's. MEASURED on
     # cup-draw (nt 4): IE / KE RMS 7.54 / 65.93 -> 2.89 / 29.15 %, and the
-    # named cost: OpenRadioss's energy error mean -4.39 -> -17.88 %. Reach 2
-    # deck keys on 2 emitted models.
+    # named cost: OpenRadioss's energy error mean -4.39 -> -17.88 % (round 9,
+    # B6: that error counts no interface energy, ecrit.F:500-511, and no
+    # TYPE7 VisS damping work, i7for3.F:1077-1120; with VisS 1e-6 the mean
+    # is -5.04 %). Reach 2 deck keys on 2 emitted models.
     section_nodal_thickness_mean: bool = True
     # --no-plane-strain-unit-thickness: write a plane-strain *SECTION_SHELL's
     # stated T1, as before round 8 (R14 triage round 8, A7).
@@ -10162,8 +10165,8 @@ class ConversionState:
     # --no-mat-null-pc-mu (the cells carry Nu 0 there).
     mat_null_h_guard: Optional[
         Dict[int, Tuple[float, float, float, float, str]]] = None
-    # /PROP/SOLID ids whose h the F1 guard divided (its sentence prints once
-    # per prop).
+    # /PROP/SOLID ids whose h the F1 guard divided or (round 9, B7) capped
+    # (its sentence prints once per prop).
     mat_null_h_guarded_props: Set[int] = field(default_factory=set)
     # writer/loads._lumped_nodal_masses' memo: (mass by node, the model's
     # total lumped mass), one lumping pass per conversion. Kept on the

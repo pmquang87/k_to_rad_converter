@@ -826,7 +826,11 @@ def convert(
         ``-1e-20`` from this rule. **On by default.** MEASURED at nt 4:
         sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 ->
         -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay within
-        1 %. Byte reach: 20 deck keys, 17 emitted models.
+        1 %. Byte reach: 20 deck keys, 17 emitted models. Since round 8 a
+        ``/PROP/SOLID`` carrying a Nu > 0 brick with ``R = 10 Nu / (c0
+        dmin) > 1`` gets ``h / R``; since round 9 (B7) a stated h is first
+        capped: ``h' = min(h_eff, 0.14 / Tsca) / max(1, R)`` (0 corpus
+        movers).
     joint_screw_gjoint : bool
         Convert ``*CONSTRAINED_JOINT_SCREW`` between two ``*MAT_RIGID``
         bodies on a global axis into ``/GJOINT/RACK`` (round 7, B2;
@@ -921,8 +925,10 @@ def convert(
         4, 150 LS blocks 0 < t <= 0.015): IE / KE history RMS 7.54 /
         65.93 -> 2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 %,
         1.0007x the cycles - the NAMED COST: OpenRadioss's energy error
-        grows, mean -4.39 -> -17.88 % (mechanism not closed). Reach 2
-        deck keys on 2 emitted models.
+        grows, mean -4.39 -> -17.88 % (named cost: OpenRadioss's energy
+        error counts no interface energy and no TYPE7 VisS damping work -
+        ecrit.F:500-511, i7for3.F:1077-1120; with VisS 1e-6 the mean is
+        -5.04 %). Reach 2 deck keys on 2 emitted models.
     plane_strain_unit_thickness : bool
         Write a plane-strain ``*SECTION_SHELL`` (ELFORM 13 / 43 / 52 /
         55) with thickness 1.0 (round 8, A7): LS-DYNA ignores Card 2's

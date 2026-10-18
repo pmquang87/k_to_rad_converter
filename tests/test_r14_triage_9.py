@@ -3563,6 +3563,112 @@ class LoadCurveOffscaleZero(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# B6 - the A4 warning's mechanism clause (the cup-draw energy balance)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class B6MechanismClause(unittest.TestCase):
+    """B6 (R14 triage round 9; text only): round 8's A4 mean-thickness
+    sentence names WHY OpenRadioss's energy error grows on the cup-draw - the
+    ENERGY ERROR counts no interface energy (ecrit.F:500-511) and the TYPE7
+    VisS damping work has no channel (i7for3.F:1077-1120) - with the
+    measured numbers (cG4: VisS 0.05 vs 1e-6 vs T1, with and without the T01
+    CONTACT_ENERGY). The round-8 figure pins stay (the needle "-4.39 ->
+    -17.88 %" is kept verbatim); both A4 carriers (the cup-draw and
+    section_shell.hourglassing) print the one shared sentence."""
+
+    def test_the_warning_carries_the_mechanism(self):
+        res, _st, _e = _convert(_t8._quad_deck(t=(2.0, 4.0, "", 0.0)))
+        self.assertTrue(_has(
+            res.warnings, "the /PROP/SHELL thickness is their MEAN",
+            "OpenRadioss's energy error grows: mean -4.39 -> -17.88 %",
+            "ecrit.F:500-511", "i7for3.F:1077-1120",
+            "k2rad maps VDC 5 to VisS 0.05", "-5.04 %", "1426.1 N.mm",
+            "141.0", "-38.10 %", "-14.52 / -1.41 / -1.79 %"))
+        self.assertFalse(_has(res.warnings, "mechanism not closed"))
+
+    def test_the_help_carries_the_mechanism(self):
+        from k2rad import cli
+        flat = _t7._collapse(cli.build_parser().format_help())
+        self.assertIn("ecrit.F:500-511, i7for3.F:1077-1120; with VisS 1e-6 "
+                      "the mean is -5.04 %", flat)
+        self.assertIn("-4.39 -> -17.88 %", flat)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B7 - the F1 hourglass-guard cap h' = min(h_eff, 0.14 / Tsca) / max(1, R)
+#      (inside --mat-null-pc-mu)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _b7_deck(c: str, hourglass: str = "", tssfac: str = "") -> str:
+    """Round 8's viscous brick (one 1 mm ELFORM-6 cube, *MAT_NULL RO 1e-9 MU
+    1e-5 -> Nu 1e4, *EOS_GRUNEISEN C *c*: R = 10 Nu / (c dmin) = 1e5 / c),
+    optionally on *HOURGLASS IHQ 1 QH *hourglass* and *CONTROL_TIMESTEP
+    TSSFAC *tssfac*."""
+    deck = _t8._visc_brick_deck(sizes=(1.0,), c=c, hourglass=hourglass)
+    if tssfac:
+        deck = deck.replace("*KEYWORD\n", "*KEYWORD\n*CONTROL_TIMESTEP\n"
+                            + _row(0.0, float(tssfac)) + "\n", 1)
+    return deck
+
+
+def _b7_h(starter: str) -> float:
+    props = [ln for ln in starter.splitlines()
+             if ln.startswith("/PROP/SOLID/")]
+    return float(_t8._prop_h(starter, int(props[0].rsplit("/", 1)[1])))
+
+
+class HourglassGuardCap(unittest.TestCase):
+    """B7 (R14 triage round 9): round 8's F1 guard divided a STATED h by R
+    only; cG1's Couette coupon (critic_G1/gen_cou_c.py, nt 4) left QH 0.2 at
+    R 1.2 unstable after the division (h 0.1667: energy error +16.2 %,
+    hourglass energy 732.6 mJ) and stable with the cap (h 0.1296: 8.0e-12
+    mJ). Hand values: Nu = 1e-5 / 1e-9 = 1e4; R = 1e5 / C; the cap 0.14 /
+    0.9 = 0.155556 (0.2 at TSSFAC 0.7)."""
+
+    def test_1_r12_qh02_is_capped_then_divided(self):
+        res, st, _e = _convert(_b7_deck("83333.3333", hourglass="0.2"))
+        self.assertAlmostEqual(_b7_h(st), 0.14 / 0.9 / 1.2, places=9)
+        self.assertAlmostEqual(_b7_h(st), 0.1296296296, places=9)
+        self.assertTrue(_has(res.warnings, "R = 10 Nu / (c0 dmin) = 1.2 > 1",
+                             "= min(0.2, 0.14 / Tsca) / R",
+                             "is first capped at 0.14 / Tsca = 0.155556 "
+                             "(Tsca 0.9)", "732.6 mJ", "8.0e-12 mJ"))
+
+    def test_2_r095_qh02_is_capped_with_its_own_sentence(self):
+        res, st, _e = _convert(_b7_deck("105263.158", hourglass="0.2"))
+        self.assertAlmostEqual(_b7_h(st), 0.14 / 0.9, places=9)
+        self.assertTrue(_has(res.warnings, "R = 0.95 <= 1, but the stated "
+                             "hourglass coefficient 0.2 exceeds 0.14 / Tsca "
+                             "= 0.155556, so h is written 0.155556",
+                             "--no-mat-null-pc-mu"))
+
+    def test_3_the_default_h_is_unchanged(self):
+        _r, st, _e = _convert(_b7_deck("31622.7766"))
+        self.assertEqual(_t8._prop_h(st, 1), "        0.0316227766")
+
+    def test_4_a_stated_h_below_the_cap_keeps_todays_bytes(self):
+        deck = _b7_deck("105263.158", hourglass="0.1")
+        res, st, _e = _convert(deck)
+        _r0, st0, _e0 = _convert(deck, mat_null_pc_mu=False)
+        self.assertAlmostEqual(_b7_h(st), 0.1, places=12)
+        self.assertEqual(_b7_h(st), _b7_h(st0))
+        self.assertFalse(_has(res.warnings, "0.14 / Tsca"))
+
+    def test_5_tssfac_moves_the_cap(self):
+        res, st, _e = _convert(_b7_deck("83333.3333", hourglass="0.3",
+                                        tssfac="0.7"))
+        self.assertAlmostEqual(_b7_h(st), 0.2 / 1.2, places=9)
+        self.assertTrue(_has(res.warnings, "capped at 0.14 / Tsca = 0.2 "
+                             "(Tsca 0.7)"))
+
+    def test_6_the_opt_out_keeps_the_stated_h(self):
+        res, st, _e = _convert(_b7_deck("83333.3333", hourglass="0.2"),
+                               mat_null_pc_mu=False)
+        self.assertAlmostEqual(_b7_h(st), 0.2, places=12)
+        self.assertFalse(_has(res.warnings, "0.14 / Tsca"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PART B - the round-9 part-B flags reach every wiring site
 # ═════════════════════════════════════════════════════════════════════════════
 

@@ -164,6 +164,39 @@ Prior history (before this changelog was introduced) is summarized in the
     -27.21 % and RMS 14.03 % unchanged, 3332 = 3332 cycles. Movers 2 deck
     keys / 2 emitted models (the cup-draw, thick.k); the nvh plate decks'
     curves end at (1.0, 0) and stay byte-identical.
+  - **The A4 thickness warning names the mechanism of its named cost** (B6,
+    text only, 0 bytes; ROADMAP round-8 entry 14 becomes a record). Round
+    8's "(mechanism not closed)" after the cup-draw's energy-error growth
+    (mean -4.39 -> -17.88 %) is replaced at every shipped site (the
+    `_warn_section_card2` sentence, the `--section-nodal-thickness-mean`
+    help, the `convert()` docstring, the options comment, the README A4
+    paragraph): OpenRadioss's ENERGY ERROR is `(IE + KE + KR) / W_ext - 1`
+    and counts no interface energy (`ecrit.F:500-511`), and the TYPE7 VisS
+    damping work has no channel at all (`i7for3.F:1077-1120`; ECONTDT is
+    filled only for the hidden IVIS2 5); k2rad maps VDC 5 to VisS 0.05, a
+    damper `VisS sqrt(2 K m)` with the hard-coded quadratic VISCA 0.4, not
+    LS-DYNA's `VDC / 100 x 2 m w`. Measured by the census (cG4 reproduced
+    g4n's arms to the digit, nt 4): the mean over every printed row is
+    -17.88 % with VisS 0.05 and -5.04 % with VisS 1e-6 (-4.39 % with T1); at
+    the 499 output states with the T01 CONTACT_ENERGY added to IE + KE it
+    reads -14.52 / -1.41 / -1.79 % (VisS 0.05 / VisS 1e-6 / T1); the energy
+    no channel records at t_end is 1426.1 N.mm against 141.0; LS-DYNA's own
+    glstat printed with OpenRadioss's rule reads -38.10 % (its own total /
+    external - 1: -0.008 %). Text mover: the A4 carriers (the cup-draw;
+    `section_shell.hourglassing` prints the same sentence).
+  - **The `*MAT_NULL` MU hourglass guard caps a stated h at 0.14 / Tsca
+    before dividing by R** (B7, inside `--mat-null-pc-mu`, no new flag):
+    `writer/materials.guarded_prop_h` writes `h' = min(h_eff, 0.14 / Tsca) /
+    max(1, R)` (h_eff = the stated QH, else the starter's 0.1; Tsca =
+    TSSFAC, else 0.9 - the `/DT` writer's rule), so the cap also acts at R
+    <= 1 with its own one-time sentence, and the round-8 sentence gains the
+    cap clause when it acted. The shipped guard left QH 0.2 at R 1.2
+    unstable on cG1's independent Couette coupon (ELFORM 6, MU 1e-5, Tsca
+    0.9, nt 4: h 0.1667, energy error +16.2 %, hourglass energy 732.6 mJ);
+    the cap is stable (h 0.1296, 8.0e-12 mJ, the analytic dissipation's
+    -4.3 .. -1.1 % at the fifths as the no-QH arm). 0 corpus movers: the
+    three channel decks (R 0.0117, h 1e-4) and `sph/bird` convert
+    byte-identically with and without the cap on the branch.
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — PART A** (implicit routing, rigid
   bodies, constraints, starter clears; implement agent A on

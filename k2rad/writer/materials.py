@@ -1453,6 +1453,15 @@ def _resolve_mat_null_cells(
 _HG_GUARD_ISOLIDS = (1, 2)
 #: the starter's default h for those formulations (a blank / 0 cell)
 _HG_DEFAULT_H = 0.1
+#: round 9, B7: the hourglass-guard cap h' = min(h_eff, 0.14 / Tsca) /
+#: max(1, R) - the numerator, and the coupon measurement every cap sentence
+#: carries (cG1's Couette, critic_G1/gen_cou_c.py, arms rcv_r9c_G1_uG / uC)
+_HG_CAP_NUM = 0.14
+_HG_CAP_MEASURED = (
+    "MEASURED on a Couette coupon (ELFORM 6, MU 1e-5, Tsca 0.9, nt 4) the "
+    "uncapped h_eff / R = 0.1667 at R 1.2 is UNSTABLE (energy error +16.2 %, "
+    "hourglass energy 732.6 mJ) and min(h_eff, 0.14 / Tsca) / R = 0.1296 is "
+    "stable (8.0e-12 mJ).")
 
 _BRICK_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7),
                 (7, 4), (0, 4), (1, 5), (2, 6), (3, 7))
@@ -1537,16 +1546,44 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
     R = 10 Nu / (c0 dmin)
     > 1: then ``h = h_eff / R_max`` (h_eff = the stated h, else the
     starter's default 0.1) and the prop is named once. h is never raised
-    (R <= 1 keeps today's bytes: the channel family reads R 0.0117)."""
+    (R <= 1 keeps today's bytes: the channel family reads R 0.0117).
+
+    Round 9, B7: a stated h above ``0.14 / Tsca`` is first capped there -
+    ``h' = min(h_eff, 0.14 / Tsca) / max(1, R)`` - so the cap also acts at R
+    <= 1 (with its own sentence); 0 corpus movers."""
     if isolid not in _HG_GUARD_ISOLIDS:
         return hcoef
     guard = _mat_null_h_guard(state)
     hits = [(guard[p][0], p) for p in prop_pids if p in guard]
-    if not hits or max(r for r, _p in hits) <= 1.0:
+    if not hits:
         return hcoef
     r_max, p_max = max(hits)
     h_eff = hcoef if (hcoef is not None and hcoef > 0.0) else _HG_DEFAULT_H
-    h_new = h_eff / r_max
+    # round 9, B7: a STATED h is first capped at 0.14 / Tsca (Tsca = the /DT
+    # Tsca written: TSSFAC, else the engine's 0.9) - h' = min(h_eff, 0.14 /
+    # Tsca) / max(1, R): the uncapped QH 0.2 at R 1.2 stayed UNSTABLE on a
+    # Couette coupon. Unchanged where the cap does not act and R <= 1.
+    ts = state.ctrl_timestep
+    tsca = ts.tssfac if ts is not None and ts.tssfac > 0.0 else 0.9
+    h_cap = _HG_CAP_NUM / tsca
+    capped = h_eff > h_cap
+    if r_max <= 1.0 and not capped:
+        return hcoef
+    h_new = min(h_eff, h_cap) / max(1.0, r_max)
+    cap_clause = (f" The stated h {h_eff:g} is first capped at 0.14 / Tsca = "
+                  f"{h_cap:.6g} (Tsca {tsca:g}): {_HG_CAP_MEASURED}"
+                  if capped else "")
+    if r_max <= 1.0:
+        if prop_id not in state.mat_null_h_guarded_props:
+            state.mat_null_h_guarded_props.add(prop_id)
+            pids = sorted(p for _r2, p in hits)
+            state.warn(
+                f"*MAT_NULL MU -> Nu on /PROP/SOLID/{prop_id} (parts {pids}): "
+                f"R = {r_max:.3g} <= 1, but the stated hourglass coefficient "
+                f"{h_eff:g} exceeds 0.14 / Tsca = {h_cap:.6g}, so h is written "
+                f"{h_cap:.6g}: {_HG_CAP_MEASURED} --no-mat-null-pc-mu removes "
+                "the Nu cell and this guard.")
+        return h_new
     if prop_id not in state.mat_null_h_guarded_props:
         state.mat_null_h_guarded_props.add(prop_id)
         _r, dmin, nu, c0, kind = guard[p_max]
@@ -1557,7 +1594,9 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
             f"= 10 Nu / (c0 dmin) = {r_max:.3g} > 1 (Nu {nu:g}; c0 "
             f"{c0:.6g} from /EOS/{kind}; dmin {dmin:.4g}, the shortest brick "
             f"edge), so its hourglass coefficient h is written {h_new:.6g} = "
-            f"{h_eff:g} / R: with Nu > 0 the fluid hourglass force of a brick "
+            + (f"min({h_eff:g}, 0.14 / Tsca) / R" if capped else
+               f"{h_eff:g} / R")
+            + ": with Nu > 0 the fluid hourglass force of a brick "
             "becomes 10 (h/4) VIS dx instead of (h/4) RHO c dx^2 "
             "(shvis3.F:182 / :185) - R times the Nu-0 value - and no step "
             "routine carries it. MEASURED on a Lagrangian Couette coupon "
@@ -1568,6 +1607,7 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
             "(0.19 % of U at 0.1 t_d, hourglass energy 4e-11 mJ)."
             + (" On a graded part h / R_max also weakens the larger elements' "
                "hourglass below the Nu-0 level." if graded else "")
+            + cap_clause
             + " --no-mat-null-pc-mu removes the Nu cell and this guard.")
     return h_new
 

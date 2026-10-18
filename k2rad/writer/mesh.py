@@ -4981,7 +4981,22 @@ def _warn_section_card2(state: ConversionState) -> None:
                 "2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 % - but "
                 "OpenRadioss's energy error grows: mean -4.39 -> -17.88 %, "
                 "thirds by row -7.20 / -3.62 / -2.35 -> -22.11 / -19.08 / -12.45 %, "
-                "rows below -20 %: 3857 -> 18456 (mechanism not closed). "
+                "rows below -20 %: 3857 -> 18456 (OpenRadioss's ENERGY ERROR is "
+                "(IE + KE + KR) / W_ext - 1 and counts no interface energy, "
+                "ecrit.F:500-511, and the TYPE7 VisS damping work has no channel "
+                "at all, i7for3.F:1077-1120 - ECONTDT is filled only for the "
+                "hidden IVIS2 5; k2rad maps VDC 5 to VisS 0.05, a damper VisS "
+                "sqrt(2 K m) with the hard-coded quadratic VISCA 0.4 and the "
+                "(GAPV - PENE) / GAPV amplification, not LS-DYNA's VDC / 100 x "
+                "2 m w. MEASURED on the cup-draw (nt 4): the energy error's mean "
+                "over every printed row is -17.88 % with VisS 0.05 and -5.04 % "
+                "with VisS 1e-6 (-4.39 % with T1); at the 499 output states, "
+                "with the T01 CONTACT_ENERGY added to IE + KE, it reads -14.52 / "
+                "-1.41 / -1.79 % (VisS 0.05 / VisS 1e-6 / T1); the energy no "
+                "channel records at t_end is 1426.1 N.mm (VisS 0.05) against "
+                "141.0 (VisS 1e-6); LS-DYNA's own glstat printed with "
+                "OpenRadioss's rule reads -38.10 % (86 of its 150 blocks below "
+                "-20 %), against LS-DYNA's own total / external -1 of -0.008 %). "
                 "--no-section-nodal-thickness-mean keeps T1 (round 8).")
 
 

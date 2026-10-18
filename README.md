@@ -233,8 +233,12 @@ on cup-draw (nt 4, base-paired with 4f5b6e8, 150 LS blocks 0 < t ≤ 0.015):
 IE / KE history RMS 7.54 / 65.93 → 2.89 / 29.15 % of the LS peak, IE END
 +11.90 → +6.09 %, 70686 → 70734 cycles — and the NAMED COST, printed in the
 same warning: OpenRadioss's own energy error grows, mean −4.39 → −17.88 %,
-rows below −20 %: 3857 → 18456 (mechanism not closed; the row stays
-deviation). `section_shell.hourglassing` moves 4.7625 → 4.762125: 6682 = 6682
+rows below −20 %: 3857 → 18456 (named cost: OpenRadioss's energy error counts
+no interface energy and no TYPE7 VisS damping work - `ecrit.F:500-511`,
+`i7for3.F:1077-1120`; k2rad maps VDC 5 to VisS 0.05, and with VisS 1e-6 the
+mean is -5.04 %; with the T01 CONTACT_ENERGY added at the 499 output states
+it reads -14.52 / -1.41 / -1.79 % for VisS 0.05 / VisS 1e-6 / T1 - round 9,
+B6; the row stays deviation). `section_shell.hourglassing` moves 4.7625 → 4.762125: 6682 = 6682
 cycles, IE END +60.53 % on both arms (46 of 6682 printed rows differ, in the
 4th digit). Reach 2 deck keys on 2 emitted models.
 **A plane-strain `*SECTION_SHELL` (ELFORM 13 / 43 / 52 / 55) → thickness
@@ -1115,7 +1119,14 @@ Nu > 0 brick part with `R = 10·Nu / (c0·dmin) > 1` is written with `h / R`
 (with Nu > 0 the fluid hourglass force of a brick is `10·(h/4)·VIS·dx` instead
 of `(h/4)·RHO·c·dx²`, `shvis3.F:182` / `:185` — R times the Nu-0 value; on the
 Couette coupon R 3.16 is unstable at h 0.1 and analytic at h / R); R stays
-0.0117 on the channel family, whose bytes do not move. TEROD / CEROD have no
+0.0117 on the channel family, whose bytes do not move. Since round 9 (B7) a
+stated h is capped first: `h' = min(h_eff, 0.14 / Tsca) / max(1, R)` (h_eff =
+the stated QH, else the starter's 0.1; Tsca = TSSFAC, else 0.9), so the cap
+also acts at R ≤ 1, with its own sentence — on cG1's Couette coupon (ELFORM 6,
+MU 1e-5, Tsca 0.9, nt 4) QH 0.2 at R 1.2 divided only (h 0.1667) is UNSTABLE
+(energy error +16.2 %, hourglass energy 732.6 mJ) and capped (h 0.1296) stable
+(8.0e-12 mJ); no corpus deck moves (the three channel decks and `sph/bird`
+convert byte-identically with and without the cap). TEROD / CEROD have no
 LAW6 cell and are named. Round 8's SPH-only Nu cell has NO opt-out of its own:
 `--no-mat-null-pc-mu` writes the 65ff389 cells (Nu 0 AND Pmin 0), which is not
 the `4f5b6e8` file where a stated PC was carried (`sph/bird`: `4f5b6e8` Nu 0 /
