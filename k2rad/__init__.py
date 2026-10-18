@@ -1187,7 +1187,9 @@ def convert(
         no pressure DOF, no fluid stiffness and no acoustic coupling (and,
         on an 8-point brick, no nodal mass), so the modes are the
         structure's alone. A time-domain deck keeps the refusal (a void
-        there absorbs the wave). Default True.
+        there carries no wave and removes the fluid's radiation sink: on 8.3
+        the structure's energy does not decay, IE RMS 168.69 %). Default
+        True.
     mixed_main_thickness_gap : bool
         Opt-in (R14 triage round 9, A10): on an AUTOMATIC contact's
         /INTER/TYPE7 whose main mixes shells and solids and states no gap,

@@ -8508,8 +8508,10 @@ class ConvertOptions:
     # _resolve_modal_acoustic_void writes /MAT/VOID/<mid> with RHO_I = RO
     # (E 0, nu 0) for every acoustic mid a *PART uses when state.is_modal, and
     # drops an /EBCS on that part's faces (iniebcs.F:428-441 ERROR 1602; reach
-    # 0). A time-domain deck keeps the refusal: there the void runs but absorbs
-    # the wave (8.3.plate_kirchhoff: IE RMS 168.69 %). MEASURED on
+    # 0). A time-domain deck keeps the refusal: there the void runs but
+    # carries no wave and removes the fluid's radiation sink
+    # (8.3.plate_kirchhoff: the structure's energy does not decay, IE RMS
+    # 168.69 %). MEASURED on
     # 9.3.ssd_acoustic_box: error_starter -> 0 ERROR, NORMAL in the modal
     # step (status-only: the reference is frequency-domain). Movers 1 key / 1
     # model.

@@ -12076,9 +12076,10 @@ def _handle_mat_acoustic(block: Block, state: ConversionState) -> None:
     w=10 slice every ``*MAT`` handler uses. The refusal and its
     recognized-not-emitted note are recorded exactly as for the other refused
     families, because on a time-domain deck the refusal STANDS: a void in the
-    part's place runs but absorbs the wave (8.3.plate_kirchhoff, explicit with
-    a *BOUNDARY_NON_REFLECTING: NORMAL in 238 416 cycles with IE RMS
-    168.69 %). On a MODAL deck ``writer/materials.py::
+    part's place runs but carries no wave and removes the fluid's radiation
+    sink (8.3.plate_kirchhoff, explicit with a *BOUNDARY_NON_REFLECTING:
+    NORMAL in 238 416 cycles, the structure's energy not decaying where
+    LS-DYNA's does - IE RMS 168.69 %). On a MODAL deck ``writer/materials.py::
     _resolve_modal_acoustic_void`` lifts it for every mid a *PART uses and
     writes ``/MAT/VOID`` with ``RHO_I = RO`` — which is what RO and the title
     are kept for. C (the sound speed), BETA and the rest have no cell to go

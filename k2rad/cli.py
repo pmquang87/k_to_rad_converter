@@ -1031,8 +1031,10 @@ def build_parser() -> argparse.ArgumentParser:
              "pressure DOF) instead of leaving it without a material: "
              "9.3.ssd_acoustic_box starter ERROR 179 (+ 760) -> 0, the "
              "exported modes the structure's alone (modal recipe only). "
-             "Time-domain decks keep the refusal (8.3: a void there absorbs "
-             "the wave, IE RMS 168.69 %%). ON by default; "
+             "Time-domain decks keep the refusal (8.3: a void there carries "
+             "no wave and removes the fluid's radiation sink, so the "
+             "structure's energy does not decay; IE RMS 168.69 %%). ON by "
+             "default; "
              "--no-modal-acoustic-void keeps the refusal.",
     )
     parser.add_argument(

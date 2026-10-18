@@ -11355,10 +11355,11 @@ def _resolve_modal_acoustic_void(state: ConversionState) -> None:
     recognized-not-emitted note goes once no refused mid of that spelling is
     left, and the warning names what the void does not carry.
 
-    A time-domain deck keeps the refusal: there a void runs but absorbs the
-    wave (8.3.plate_kirchhoff, explicit with a *BOUNDARY_NON_REFLECTING: the
-    void route ran NORMAL in 238 416 cycles with IE RMS 168.69 % / KE RMS
-    7.11 %). ``--no-modal-acoustic-void`` keeps it on a modal deck too (the
+    A time-domain deck keeps the refusal: there a void runs but carries no
+    wave and removes the fluid's radiation sink (8.3.plate_kirchhoff,
+    explicit with a *BOUNDARY_NON_REFLECTING: the void route ran NORMAL in
+    238 416 cycles, the structure's internal energy stayed at ~0.01 where
+    LS-DYNA's decays to 2e-11 - IE RMS 168.69 % / KE RMS 7.11 %). ``--no-modal-acoustic-void`` keeps it on a modal deck too (the
     386444e bytes). Runs before every pass that reads ``_target_mat_law`` or
     ``refused_materials``; emits nothing and draws no id.
     """
@@ -11390,8 +11391,9 @@ def _resolve_modal_acoustic_void(state: ConversionState) -> None:
             "brick only without 8 integration points; starter TOTAL MASS "
             "0.2818 = the shells' 0.2808 + the 0.001 probe body). A "
             "time-domain deck keeps the refusal (a void there runs but "
-            "absorbs the wave: IE RMS 168.69 % on 8.3). "
-            "--no-modal-acoustic-void keeps the refusal.")
+            "carries no wave and removes the fluid's radiation sink: on 8.3 "
+            "the structure's energy does not decay where LS-DYNA's does, IE "
+            "RMS 168.69 %). --no-modal-acoustic-void keeps the refusal.")
     gone = lifted - {kw for kw, _what, _why
                      in state.refused_materials.values()}
     if gone:

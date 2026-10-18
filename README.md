@@ -7426,9 +7426,10 @@ not a validation: the offline solve of that export with this machine's STOCK
 (`E10.2`) engine gives 7 zero-frequency modes and then 52.65 Hz where
 LS-DYNA's `eigout` starts at 66.40 Hz - unvalidated, like every low-precision
 matrix (below). A time-domain deck keeps the refusal: there a void runs but
-absorbs the wave (`8.3.plate_kirchhoff`, explicit with a
-`*BOUNDARY_NON_REFLECTING`: NORMAL in 238 416 cycles with IE RMS 168.69 % / KE
-RMS 7.11 %).
+carries no wave and removes the fluid's radiation sink (`8.3.plate_kirchhoff`,
+explicit with a `*BOUNDARY_NON_REFLECTING`: NORMAL in 238 416 cycles, the
+structure's internal energy staying at ~0.01 at every fifth where LS-DYNA's
+decays from 8.21e-5 to 1.99e-11 - IE RMS 168.69 % / KE RMS 7.11 %).
 
 The mass arm weighs a `*SECTION_BEAM` that states only THICKNESSES (ELFORM
 0/1/4/5/11, whose card 2 is `TS1 TS2 TT1 TT2 …`): the area is taken from the

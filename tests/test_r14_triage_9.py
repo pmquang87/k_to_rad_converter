@@ -1649,6 +1649,12 @@ class ModalAcousticVoid(unittest.TestCase):
                              "STRUCTURE's alone", "inivoid.F:254",
                              "ERROR 179", "IE RMS 168.69 %",
                              "--no-modal-acoustic-void"))
+        # the fix round (F-A7-1): the 8.3 void arm's energy does NOT decay
+        # (the census: 'the LS energy decays to zero, the OR energy does
+        # not') - the void removes the radiation sink, it absorbs nothing
+        self.assertTrue(_has(res.warnings, _W_A7 + "1", "carries no wave "
+                             "and removes the fluid's radiation sink"))
+        self.assertFalse(_has(res.warnings, "absorbs the wave"))
         self.assertFalse(_has(res.warnings, _W_REFUSED))
         self.assertFalse(_has(res.warnings, "reference a material id that "
                               "NO /MAT"))
