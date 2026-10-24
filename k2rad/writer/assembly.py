@@ -671,24 +671,28 @@ def _warn_implicit_bfgs(state: ConversionState) -> None:
 
 #: The measured record of --implicit-bfgs (round 9, A12, on the branch
 #: bytes). ONE constant so the warning and the docs cannot drift. doorbeam
-#: (the A1 + A2 bytes, engine file sha256 a31d565457c5) is a band of 14
-#: runs: implement A's two, the solver-physics validator's six, the fix
-#: round's six (END nt 4: -8.64 / -5.24 / -7.90 / +29.51 / -7.86 / +0.51 /
-#: -7.12 %; nt 2: -6.06 / -2251.24 / -12177.48 / -5.33 / -5182.84 /
-#: -199.96 / -4.92 %; every run a NORMAL banner, no USER BREAK).
+#: (the A1 + A2 bytes, engine file sha256 a31d565457c5): 96 runs of
+#: identical bytes - the round-9 record's 14 (implement A's two, the
+#: solver-physics validator's six, the fix round's six) and the post-review
+#: round's 82 (its fix agent's 50, its verifiers' 32); a NORMAL banner in
+#: every run, nonsense internal energy in 4 of 51 at nt 4 (none in the fix
+#: agent's 30 there, four in the verifiers' 14) and 9 of 45 at nt 2 - which
+#: run fails is run to run, not an nt property (the round-9 text tied it to
+#: nt 2). The TYPE25 route: 14 runs (the round-9 two, the post-review 12),
+#: 13 NORMAL, every one with nonsense energy - a band, not a figure.
 _BFGS_MEASURED = (
     "Measured on ONE carrier: ex_06_beam_elform_1 NORMAL in 277 cycles, "
     "internal energy END -0.09 %, RMS 0.09 % of the LS peak over 121 LS "
     "times in (0.01, 1.0], nt 4 = nt 2, where the default stops at t "
     "0.1601 (IE -59.58 %). The failure can be SILENT, on the default bytes "
-    "too: doorbeam (A1 + A2 bytes) ends a NORMAL banner in all 14 runs of "
-    "identical bytes, with IE END -8.64 .. +29.51 % (RMS 8.19 .. 38.42 % "
-    "of the LS peak) in the seven at nt 4, but in four of the seven at nt "
-    "2 with NONSENSE internal energy (END -199.96 / -2251.24 / -5182.84 / "
-    "-12177.48 %; the other three -4.92 .. -6.06 %), and the TYPE25 route "
-    "(--no-implicit-n2s-type7) does the same (END -1.1e10 % at nt 4, "
-    "-7.7e8 % at nt 2); tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 "
-    "-> +26.88 %, nt 4 = nt 2). Check the energies before using a run.")
+    "too, at nt 4 AND nt 2: doorbeam (A1 + A2 bytes) ends a NORMAL banner in "
+    "all 96 runs of identical bytes, and 13 of them carry NONSENSE internal "
+    "energy (4 of 51 at nt 4, 9 of 45 at nt 2; END -19769.57 .. +1082.01 %) "
+    "- run to run, not an nt property - while the other 83 end -11.85 .. "
+    "+29.51 %; the TYPE25 route (--no-implicit-n2s-type7) carries nonsense "
+    "energy behind the banner too (13 of 14 runs NORMAL, every one "
+    "nonsense); tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 -> +26.88 "
+    "%, nt 4 = nt 2). Check the energies before using a run.")
 
 
 def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
@@ -763,8 +767,9 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
         "It BUYS THE LOAD PATH, NOT THE ANSWER: on ex_07_beam_elform_1 the "
         "path loops through negative load factors LS-DYNA never visits (the "
         "converged load factor goes down to -0.4412 and turns back and forth "
-        "many times in every round-9 run; LS-DYNA's path turns once, at "
-        "0.3745, and never goes below 0) and the run ends NORMAL in 9 of 10 "
+        "many times in every round-9 run; LS-DYNA's path rises to 0.3745, "
+        "unloads to exactly 0 and reloads to 1.185, and never goes below 0) "
+        "and the run ends NORMAL in 9 of 10 "
         "runs of identical bytes (1192 .. 1219 cycles: five at nt 4, four "
         "at nt 2) and ERROR once at nt 4 (MESSAGE 79 at cycle 1421, the load "
         "factor back at 0); ex_05_beam_elform_3_&_6 still stops (MESSAGE 79 "
@@ -786,7 +791,8 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
                  if state.options.qstat_dtscal_stated else
                  "NO /IMPL/QSTAT card is written (the quasi-static term would "
                  "stiffen the arc-length tangent, imp_dyna.F:351-355; pass "
-                 "--qstat-dtscal to keep one)")
+                 "--qstat-dtscal to keep one - through the API, "
+                 "qstat_dtscal=<value> WITH qstat_dtscal_stated=True)")
         state.warn(head + "--arclength-riks was passed: /IMPL/DT/3 replaces "
                           f"/IMPL/DT/2 and {qstat}. " + measured)
     else:
@@ -1757,9 +1763,10 @@ def _merge_cnrb_records(state: ConversionState, rbody_info: Dict,
             "393.31 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3]); "
             "the part drive alone brings it to +53.91 % (RMS 81.05 %, nt 4 = "
             "nt 2) and the shipped default - with the implicit "
-            "node-to-surface route of --implicit-n2s-type7 - to -15.85 .. "
-            "-28.08 % (RMS 10.34 .. 15.25 %, twelve runs at nt 4 and nt 2), "
-            "the punch then following LS-DYNA's nodout at every fifth. "
+            "node-to-surface route of --implicit-n2s-type7 - to -0.78 .. "
+            "-28.12 % (RMS 7.21 .. 15.26 %, 125 runs at nt 4 and nt 2, run to "
+            "run on three branches), the punch then following LS-DYNA's "
+            "nodout at every fifth. "
             "--no-rigid-part-pid-precedence restores the CNRB precedence.")
     return merged
 

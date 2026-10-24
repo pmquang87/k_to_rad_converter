@@ -980,7 +980,7 @@ class ConverterGUI:
             io, text="One-node ELFORM-9 *MAT_SPOTWELD beam: create its second "
                      "node on the nearest reference segment on the other side "
                      "(Vol I R17 p.19-3) - OFF. Alone it only costs cycles "
-                     "(7.64x on spotweld.k); pair it with the next box",
+                     "(2.09x on spotweld.k); pair it with the next box",
             variable=self.spotweld_node_synthesis).grid(
                 row=39, column=0, columnspan=3, sticky="w", **pad)
 
@@ -1256,7 +1256,7 @@ class ConverterGUI:
 
         ttk.Checkbutton(
             io, text="Applied-load curves zero off scale (LS *DEFINE_CURVE Remarks "
-                     "4a / 5) - ON. cup-draw: punch starts forward (IE MIXED)",
+                     "4a / 5) - ON. cup-draw: punch starts forward (IE WORSE)",
             variable=self.load_curve_offscale_zero).grid(
                 row=77, column=0, columnspan=3, sticky="w", **pad)
 

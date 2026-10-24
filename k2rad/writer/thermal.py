@@ -1523,11 +1523,19 @@ def _note_tprint(state: ConversionState) -> None:
     if not state.db_tprint_dt:
         return
     if _thermal_solve_active(state):
+        # the post-review round (F12): an ACCEPTED weld trajectory replaced
+        # the group (thermal temperature-group writer, round 9 B1)
+        k_weld = (state.weld_temp_counts or (0, 0))[0]
+        group = ("/TH/NODE TEMP group over the driven and loaded nodes"
+                 if not (state.weld_plans and k_weld) else
+                 f"/TH/NODE TEMP group over the {k_weld} NSID1 path + "
+                 "*DATABASE_HISTORY_NODE nodes of the accepted weld trajectory "
+                 "(it replaces the group of every driven / loaded node)")
         state.warn(
             "*DATABASE_TPRINT: the deck arms a thermal solve (a /HEAT/MAT plus "
             "a temperature driver or a heat-source boundary), so the nodal "
             "temperature IS written - /ANIM/NODA/TEMP in the engine deck and a "
-            "/TH/NODE TEMP group over the driven and loaded nodes. Its dt is "
+            f"{group}. Its dt is "
             "deliberately NOT folded into the /TFILE minimum: the TEMP channel "
             "rides the groups already there rather than pacing one of its own. "
             "The whole-model heat balance is in the engine .out instead of a "
@@ -4699,8 +4707,13 @@ def _hexa_volume(xs) -> float:
 def _weld_lobe_fractions(pts, pos, r, s, t, a: float, b: float, cf: float,
                          cr: float) -> Tuple[float, float]:
     """The fraction of *pts* inside the FRONT (x_r >= 0, semi-axes cf / a / b)
-    and the REAR (x_r < 0, cr / a / b) quarter-ellipsoids of the IFORM-2
-    double ellipsoid centred at *pos* in the frame (r, s, t)."""
+    and the REAR (x_r < 0, cr / a / b) HALF-ellipsoids (both signs of x_t)
+    of the IFORM-2 double ellipsoid centred at *pos* in the frame (r, s, t).
+    On a surface path - both carriers - the material holds only the quarter
+    below the surface, which LS-DYNA's normalisation 3FQ / (2 pi a b c)
+    assumes; an embedded path (material on both sides of t) could take up to
+    twice the deposit - not screened, 0 carriers (the post-review round,
+    F5)."""
     nf = nr = 0
     for p in pts:
         d = (p[0] - pos[0], p[1] - pos[1], p[2] - pos[2])
@@ -5078,10 +5091,11 @@ def _weld_warn_accepted(state: ConversionState, plan: WeldPlan) -> None:
         f"LCID integral. {cwm_clause}MEASURED on "
         "thermal/welding-new/uncoupled-binout/05_5_1 (= 05_4_1: ONE LS run, so "
         "the evidence base is one model; nt 4): NORMAL in 66 323 conduction "
-        "cycles (the source adds none), 721-2075 s of engine time by machine "
+        "cycles (the source adds none), 720-2075 s of engine time by machine "
         "load (1.2-3.5x the campaign's 600 s); the deposit within -0.30 % of "
         "LS-DYNA's own source energy; the first / middle / last path nodes "
-        "peak +5.03 / +6.05 / +6.18 % of T, end the 99 s run 11.81 / 13.46 / "
+        "peak +5.03 / +6.05 / +6.18 % of T (at the LS state times), end the "
+        "99 s run 11.81 / 13.46 / "
         "12.22 % of their rise cool, RMS 2.28 / 2.07 / 2.61 % of the peak "
         "rise (63 LS times 0 < t <= 98.991 s); the stored heat is 11.8 % "
         "below LS-DYNA's tprint at t 99 - boundary radiation, not deposit "

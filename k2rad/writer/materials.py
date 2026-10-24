@@ -1573,6 +1573,12 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
     if r_max <= 1.0 and not capped:
         return hcoef
     h_new = min(h_eff, h_cap) / max(1.0, r_max)
+    # the post-review round (F2): a written h >= 0.15 is outside the
+    # starter's recommended ]0, 0.15[ and draws its WARNING 311
+    w311 = (f" The written h {h_new:.6g} is >= 0.15, so the starter prints "
+            "WARNING 311 (HOURGLASS VISCOSITY COEFFICIENT, recommended "
+            "]0, 0.15[, hm_read_prop14.F:271-273) - a recommendation, not a "
+            "refusal." if h_new >= 0.15 else "")
     cap_clause = (f" The stated h {h_eff:g} is first capped at 0.14 / Tsca = "
                   f"{h_cap:.6g} (Tsca {tsca:g}): {_HG_CAP_MEASURED}"
                   if capped else "")
@@ -1584,8 +1590,8 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
                 f"*MAT_NULL MU -> Nu on /PROP/SOLID/{prop_id} (parts {pids}): "
                 f"R = {r_max:.3g} <= 1, but the stated hourglass coefficient "
                 f"{h_eff:g} exceeds 0.14 / Tsca = {h_cap:.6g}, so h is written "
-                f"{h_cap:.6g}: {_HG_CAP_MEASURED} --no-mat-null-pc-mu removes "
-                "the Nu cell and this guard.")
+                f"{h_cap:.6g}: {_HG_CAP_MEASURED}{w311} --no-mat-null-pc-mu "
+                "removes the Nu cell and this guard.")
         return h_new
     if prop_id not in state.mat_null_h_guarded_props:
         state.mat_null_h_guarded_props.add(prop_id)
@@ -1610,7 +1616,7 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
             "(0.19 % of U at 0.1 t_d, hourglass energy 4e-11 mJ)."
             + (" On a graded part h / R_max also weakens the larger elements' "
                "hourglass below the Nu-0 level." if graded else "")
-            + cap_clause
+            + cap_clause + w311
             + " --no-mat-null-pc-mu removes the Nu cell and this guard.")
     return h_new
 

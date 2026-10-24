@@ -143,10 +143,13 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
             "Implicit deck: the all-parts implicit stub (/INTER/TYPE7 "
             f"{inter_id}) is KEPT beside the routed contact(s) "
             f"{sorted(c.inter_id for c in routed)} and carries their friction "
-            f"FS {stub_fs:g}: it duplicates their pairs (doorbeam: identical "
-            "normal impulses on both), so a frictionless stub would halve the "
-            "friction there; the same friction also acts on the stub's other "
-            "pairs. Without the stub the one-way route loses the load "
+            f"FS {stub_fs:g}: it duplicates their pairs (doorbeam: the same "
+            "normal impulse on both, within 0.15 %, while the punch loads, "
+            "through t 9.35e-4 s; they part over the last 0.17 ms, the stub "
+            "at 0.89-0.90 x the routed contact's at t_end on the main branch "
+            "and 1.29-1.33 x on the -16 % one), so a frictionless stub would "
+            "halve the friction there; the same friction also acts on the "
+            "stub's other pairs. Without the stub the one-way route loses the load "
             "silently on few-node contacts (4-node coupon: the block passes "
             "through behind a NORMAL TERMINATION).")
 
@@ -714,8 +717,9 @@ def convert(
         the nearest reference segment of the tie that names the weld part, a
         new node on the nearest segment on the other side (spotweld.k: 1213
         -> z 0, new node at z 2, length 2.0 = LS-DYNA's own d3plot and
-        swforc). **Off by default**: alone it only costs cycles (7.64x on
-        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` (and
+        swforc). **Off by default**: alone it only costs cycles (2.09x on
+        spotweld.k with today's DT scaling, 639 -> 1334, 7.64x without; IE
+        END -99.88 %); with ``beam_contact_secondary`` (and
         today's EFAIL displacement criterion and DT scaling) the IE END
         reads -31.18 % at LS-DYNA's own cycle count 1332 and the weld
         ruptures 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s).
@@ -1057,8 +1061,9 @@ def convert(
         into ERROR TERMINATION at cycle 9 (23 ITERATION DIVERGE, then
         MESSAGE 79); on implicit/basic-examples/springback-i/doorbeam.k
         with its punch driven (round 9, A1) the run without the stub ends
-        a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end), the
-        punch stopped at 81.51 of 135 mm. Since round 9 an implicit
+        a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end): the
+        run stops with the punch at 81.51 of 135 mm. Since round 9 an
+        implicit
         *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE is a routed /INTER/TYPE7
         (implicit_n2s_type7), so the flag reaches the ERODING spellings
         and an N2S spelling only under implicit_n2s_type7=False. When the
@@ -1106,9 +1111,10 @@ def convert(
         132.8 / 135.0 mm with the part drive) and IE ended +582.00 %; with
         the part drive alone +53.91 % (RMS 393.31 -> 81.05 % of the LS peak,
         25 LS times in (1e-5, 1.1e-3], nt 4 = nt 2), with the shipped
-        default (+ implicit_n2s_type7) -15.85 .. -28.08 %, RMS 10.34 ..
-        15.25 % (twelve runs at nt 4 and nt 2). Default True; False
-        restores the 386444e bytes (the CNRB record wins).
+        default (+ implicit_n2s_type7) -0.78 .. -28.12 %, RMS 7.21 ..
+        15.26 % (125 runs at nt 4 and nt 2, run to run on three branches).
+        Default True; False restores the 386444e bytes (the CNRB record
+        wins).
     implicit_n2s_type7 : bool
         Write an implicit, non-modal *CONTACT_NODES_TO_SURFACE /
         *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING spellings) as a
@@ -1122,15 +1128,17 @@ def convert(
         contact's friction - beside another contact there is no stub, and
         the warning says so. MEASURED on
         implicit/basic-examples/springback-i/doorbeam.k
-        (with the A1 part drive): IE END -15.85 .. -28.08 %, RMS 10.34 ..
-        15.25 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3],
-        twelve runs of the same bytes at nt 4 and nt 2 on two branches
-        (-27.80 .. -28.08 % / RMS 15.21 .. 15.25 % in ten), where the
-        TYPE25 ended +53.91 % / RMS 81.05 %.
+        (with the A1 part drive): IE END -0.78 .. -28.12 %, RMS 7.21 ..
+        15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3],
+        125 runs of the same bytes at nt 4 and nt 2, run to run on three
+        branches (102 at -27.76 .. -28.12 %, 21 at -15.85 .. -16.27 %, two
+        single nt-4 runs at -8.36 / -0.78 %), where the TYPE25 ended
+        +53.91 % / RMS 81.05 %.
         With four contact nodes on a coarse rigid base the outcome depends
         on the geometry: one coupon ends NORMAL with the block through where
         the TYPE25 stops with MESSAGE 79, another holds where the TYPE25
-        lets the block through. Default True; False keeps the TYPE25 (the
+        lets the block through, and with the nodes over the base's corners
+        both let it through. Default True; False keeps the TYPE25 (the
         386444e bytes).
     implicit_rigid_gravity_nodes : bool
         On an implicit deck keep *MAT_RIGID parts' own nodes in the /GRAV
@@ -1203,9 +1211,10 @@ def convert(
         Opt-in (R14 triage round 9, A12): Quasi-Newton BFGS (/IMPL/NONLIN/2)
         with no /IMPL/QSTAT (unless qstat_dtscal_stated) on an implicit deck
         whose NSOLVR is 12 or blank. One carrier (ex_06_beam_elform_1); the
-        failure can be SILENT (doorbeam's default A1 + A2 bytes: a NORMAL
-        banner with nonsense internal energy in 4 of 7 runs at nt 2, END
-        down to -12177.48 %), so check the energies before using a run.
+        failure can be SILENT at nt 4 and nt 2 (doorbeam's default A1 + A2
+        bytes: a NORMAL banner in all 96 runs, nonsense internal energy in
+        13 - 4 of 51 at nt 4, 9 of 45 at nt 2), so check the energies before
+        using a run.
         Default False.
     weld_trajectory_impflux : bool
         Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (R14 triage round 9, B1)
@@ -1222,7 +1231,7 @@ def convert(
         386444e output with one named sentence; a CWM never converts alone.
         MEASURED on 05_5_1 (= 05_4_1, one LS model; nt 4): NORMAL in 66 323
         cycles, deposit -0.30 % of LS-DYNA's source energy, the path nodes
-        END -11.81 / -13.46 / -12.22 % of their rise; 721-2075 s of engine
+        END -11.81 / -13.46 / -12.22 % of their rise; 720-2075 s of engine
         time. Default True; False restores the 386444e output.
     weld_trajectory_window : float
         The /IMPFLUX window of the conversion above, in seconds (default
@@ -1257,15 +1266,18 @@ def convert(
         skipped ICFD fluid). Default True.
     load_curve_offscale_zero : bool
         Point a MECHANICAL applied-load consumer (/IMPVEL, /IMPDISP, /IMPACC,
-        /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is zero off the
-        curve's abscissa range where OpenRadioss would extrapolate it nonzero
-        inside the consumer's window (R14 triage round 9, B5): LS-DYNA
+        /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is zero past its
+        last abscissa and - for a DATTYP-0 curve with OFFA > 0 and SFA 0 / 1 -
+        before OFFA, where OpenRadioss would extrapolate it nonzero inside
+        the consumer's window (a curve that starts after t 0 without OFFA
+        keeps its head) (R14 triage round 9, B5): LS-DYNA
         *DEFINE_CURVE Remark 4a adds (0, 0) and (0.999 OFFA, 0) for DATTYP 0
         with OFFA > 0, Remark 5 sets load curves to zero off scale, while
         OpenRadioss extends the first / last segment (finter.F:235-273). The
         deck's own curves are never changed (material, preload and thermal
         consumers keep them). MEASURED: the aniso cup-draw's punch no longer
-        starts backward but the deck IE END goes +6.09 -> +13.10 % (MIXED);
+        starts backward but the deck IE is WORSE (END +6.09 -> +13.10 %, RMS
+        2.89 -> 5.57 %; KE END -40.31 -> -42.14 %);
         thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 ->
         +23.42 %. Default True.
     ale_flow_tracking : bool

@@ -6,9 +6,12 @@ LS-DYNA (Vol I R17 *DEFINE_CURVE): Remark 4a adds the two points (0, 0) and
 (0.999 OFFA, 0) to a DATTYP-0 curve with OFFA > 0, and Remark 5 says load
 curves are not extrapolated - "Function values are set to zero if the time
 goes off scale". OpenRadioss extends a /FUNCT's first / last segment instead
-(``finter.F:235-273``), so a curve that starts after t 0 (the aniso cup-draw:
-the punch started BACKWARD at +219.29 mm/s) or ends before t_end (thick.k:
-the punch ran on past LS-DYNA's stop) drives the model where LS-DYNA does not.
+(``finter.F:235-273``), so a curve shifted after t 0 by OFFA (Remark 4a; the
+aniso cup-draw: the punch started BACKWARD at +219.29 mm/s) or ending before
+t_end (Remark 5; thick.k: the punch ran on past LS-DYNA's stop) drives the
+model where LS-DYNA does not. The HEAD is padded only under Remark 4a (OFFA >
+0, SFA 0 / 1): a curve whose first abscissa is merely > 0 keeps its head (the
+post-review round, C7 / F8: the texts said 'off the abscissa range').
 
 The rule acts at EMISSION (decision B5-a): a mechanical applied-load consumer
 (/IMPVEL, /IMPDISP, /IMPACC - their rigid-body, node / set and rigid-wall forms
@@ -137,9 +140,10 @@ def make_offscale_functs(state: ConversionState) -> List[str]:
         "mat_transversely_anisotropic.cup-draw (nt 4) - the punch no longer "
         "starts BACKWARD (DZ at 2.1 ms +0.2187 -> -0.00055 mm; punch work at "
         "the fifths within 0.1-7.8 % of LS-DYNA's bndout, every fifth "
-        "below it), but the deck IE END "
-        "goes +6.09 -> +13.10 % and its RMS 2.89 -> 5.57 % of the LS peak (150 "
-        "LS times to t 0.015) - MIXED: the backward start hid an IE excess; "
+        "below it), but the deck IE is WORSE on both counts - END +6.09 -> "
+        "+13.10 % and RMS 2.89 -> 5.57 % of the LS peak (150 LS times to t "
+        "0.015) - and KE END -40.31 -> -42.14 %: the backward start hid an IE "
+        "excess; "
         "thick.k (nt 4) - the punch stops at -10.0003 mm as LS-DYNA's does (it "
         "ran on to -11.99 mm), KE END +91.96 -> +23.42 %, KE RMS 21.01 -> "
         "8.79 % (1000 LS times to t 0.0012), IE unchanged. A prescribed "

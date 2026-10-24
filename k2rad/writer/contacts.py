@@ -4694,8 +4694,10 @@ def n2s_routed(state: ConversionState, c) -> bool:
     IMPLICIT, non-modal ``*CONTACT_NODES_TO_SURFACE`` or
     ``*CONTACT_AUTOMATIC_NODES_TO_SURFACE`` (any ``_ID`` / ``_TITLE`` / ``_MPP``
     spelling; never an ERODING one). OpenRadioss builds implicit contact
-    stiffness for TYPE 7 / 10 / 11 only (``imp_int_k.F:111-200`` has no TYPE25
-    branch; ``ind_glob_k.F:4601-4605`` prints MESSAGE 232), so an implicit
+    stiffness for TYPE 5 / 7 / 10 / 11 / 24 only (``imp_int_k.F:111-200``:
+    NTY 5 at :113, 7 at :135, 10 at :152, 11 at :159, 24 at :176 - the ELSE
+    at :198 is empty, no TYPE25 branch; ``ind_glob_k.F:4601-4605`` prints
+    MESSAGE 232), so an implicit
     TYPE25 acts through the residual alone (``intfop2.F:595``). The record
     STAYS in ``state.contacts_type25`` - the stub guard of
     ``k2rad._inject_implicit_contact_stub`` (single / surf2surf / general
@@ -4707,29 +4709,41 @@ def n2s_routed(state: ConversionState, c) -> bool:
 
 
 #: W-A2's measured tail (round 9, A2). doorbeam with A1's part drive, the
-#: campaign's sampling rule (README 9.1): twelve runs of the same bytes
-#: (sha256 2926b1300fb6...) at nt 4 and nt 2 - the part-A spec's six and
-#: implement A's six - scatter on the END and the 4th fifth (two branches:
-#: -27.80 .. -28.08 % in ten, -15.85 % in two, both at nt 2), so the
-#: figures ship as a band; the coupons on a coarse RIGID base are the
+#: campaign's sampling rule (README 9.1): 125 runs of the same bytes
+#: (sha256 2926b1300fb6...) at nt 4 and nt 2 - the round-9 record's 27 and
+#: the post-review round's 98 (its fix agent's 50, its verifiers' 48) -
+#: scatter run to run on the END and the 4th fifth, on three branches: 102
+#: at -27.76 .. -28.12 %, 21 at -15.85 .. -16.27 % (both branches at both
+#: nt), two single nt-4 runs at -8.36 / -0.78 % - so the figures ship as a
+#: band; the coupons on a coarse RIGID base are the
 #: part-A spec's b6r (a 10 x 10 x 5 mm block 0.1 mm above a 2 x 2 x 1-hex
 #: rigid base, its top pushed 0.3 mm; IMFLAG 1, DT0 0.1, ENDTIM 1.0; nt 4 =
 #: nt 2) and the solver-physics validator's a2r4 (a one-hex 20 x 20 x 10 mm
 #: block 0.1 mm above a one-hex 30 x 30 x 10 mm rigid base, its top pushed
-#: 0.3 mm over t 1; nt 4 = nt 2): the same class, opposite outcomes.
+#: 0.3 mm over t 1; nt 4 = nt 2): the same class, opposite outcomes; on
+#: the corner coupons cD / cE (a one-hex 10 x 10 x 5 mm block whose four
+#: bottom nodes sit over the corners of a 2 x 2 / 1 x 1-hex rigid base,
+#: its top pushed 0.3 mm; the solver-physics verifier's decks, re-run by
+#: the post-review fix agent, nt 4 = nt 2) BOTH let the block through
+#: behind a NORMAL banner: gap -0.1865 / -0.1907 mm on the route, -0.1885 /
+#: -0.1922 mm on the TYPE25, at t 1.0.
 _N2S_TYPE7_MEASURED = (
     "MEASURED on implicit/basic-examples/springback-i/doorbeam.k with the "
-    "part drive: internal energy END -15.85 .. -28.08 % against LS-DYNA, RMS "
-    "10.34 .. 15.25 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3] "
-    "(twelve runs of the same bytes at nt 4 and nt 2: the route scatters run "
-    "to run, -27.80 .. -28.08 % / RMS 15.21 .. 15.25 % in ten), where the "
-    "TYPE25 ended +53.91 % / RMS 81.05 %. CHECK THAT THE CONTACT CARRIES "
-    "LOAD - with four contact nodes on a coarse RIGID base the outcome "
-    "depends on the geometry: on one two-block coupon this route ends "
-    "NORMAL TERMINATION with the block through the base (gap -0.2218 mm at t "
-    "1.0) where the TYPE25 stops with MESSAGE 79; on another it holds (gap "
-    "+0.0228 mm at t 1.0) where the TYPE25 lets the block through (-0.1708 "
-    "mm at t 0.9) and stops at 98 % of t_end behind a NORMAL TERMINATION.")
+    "part drive: internal energy END -0.78 .. -28.12 % against LS-DYNA, RMS "
+    "7.21 .. 15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], "
+    "in 125 runs of the same bytes at nt 4 and nt 2 - the route scatters run "
+    "to run on three branches: 102 runs at -27.76 .. -28.12 %, 21 at -15.85 "
+    ".. -16.27 % (both at nt 4 and nt 2) and two single nt-4 runs nearer LS "
+    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. "
+    "CHECK THAT THE CONTACT CARRIES LOAD - with four contact nodes on a "
+    "coarse RIGID base the outcome depends on the geometry: on one two-block "
+    "coupon this route ends NORMAL TERMINATION with the block through the "
+    "base (gap -0.2218 mm at t 1.0) where the TYPE25 stops with MESSAGE 79; "
+    "on another it holds (gap +0.0228 mm at t 1.0) where the TYPE25 lets the "
+    "block through (-0.1708 mm at t 0.9) and stops at 98 % of t_end behind a "
+    "NORMAL TERMINATION; with the block's four nodes over the base's corners "
+    "BOTH let it through behind a NORMAL banner (gap -0.19 mm at t 1.0) - "
+    "the TYPE25 default fails silently too.")
 
 
 def _routed_stub_clause(state: ConversionState) -> str:
@@ -5056,8 +5070,8 @@ _STUB_TYPE25_MEASURED = (
     "TERMINATION at cycle 9; on implicit/basic-examples/springback-i/"
     "doorbeam.k with its punch driven (round 9) the run without the stub "
     "ends a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end) behind "
-    "'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the punch "
-    "stopped at 81.51 of 135 mm. Since round 9 an implicit "
+    "'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the run stopped "
+    "with the punch at 81.51 of 135 mm. Since round 9 an implicit "
     "*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE takes the /INTER/TYPE7 route "
     "instead (--implicit-n2s-type7), so this applies to the ERODING "
     "spellings and to --no-implicit-n2s-type7.")

@@ -11,6 +11,128 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN TRIAGE batch, round 9 — the post-review verification
+  round.** Four verifiers (two solver-physics, code with whole-suite
+  mutation runs, evidence) checked the branch at `d84716b`: no blocker; 10
+  majors (six whole-suite mutation survivors, three evidence majors, the
+  A12 nt attribution) and the minors below. Every finding was re-checked
+  against the code, the solver source or a measurement of this round
+  before it was acted on; every number this entry ships was re-measured
+  by this round's fix agent (nt stated; its runs are harvested under its
+  scratchpad `fix_work/`) or is a record it re-read, named as such.
+  - **Five whole-suite mutation survivors are pinned** (the rules were
+    right, the tests missing): the `*LOAD_NODE` CID sibling of A6 (a
+    `*LOAD_NODE_SET` on a `*DEFINE_COORDINATE_VECTOR` CID writes its
+    `/CLOAD` in that skew; under `--no-spc-vector-frames` its sentence now
+    says the frame exists and is kept out instead of a false "not found");
+    A10's first and third emission sites (the implicit SSID-0 single
+    surface; a surface-to-surface contact with a mixed shell + solid main)
+    and its solid-only main (no exception, no rule); B1's node-count
+    refusal class (a VALID 10-node tet on the seam part); A2's stub
+    friction FS x FSF (FSF 0.5 -> stub Fric 0.05 = the routed one).
+  - **B2's plane test has a round-off band** (E3): a node is in the
+    xy-plane when |z| <= 1e-9 x the largest absolute shell-node coordinate
+    (screen 4 and the `/NODE` transform read one `AxisymPlan.z_tol`). The
+    SPR main giant's node 1 (z = -5.55e-18 at x = 0.099371) was named
+    'the axisymmetric section must lie in the xy-plane' - the fix round's
+    rejection called that class "loud and named, 0 carriers"; it had one
+    text carrier, which now loses the clause (its other refusal classes
+    stand). z = 1e-8 on the 3-mm fixture still refuses by name.
+  - **A routed 2-D deck reads its reactions per unit radius** (F14): a
+    2-D nodal mass is per radian PER UNIT RADIUS (`fixvel.F:361` weighs
+    the imposed motion's work by `AXI = Y`), so the per-radian force of a
+    node is Y_node x d(REAC*)/dt, 0 on the axis. The route sentence says
+    so whenever a `/TH/NODE` REAC group exists, and the transform rewrites
+    that group's reminder line. MEASURED (this round, nt 4, a 3 x 2-quad
+    ELFORM-15 ring at physical density with `*DATABASE_BNDOUT`, 13 328
+    cycles): the external work = v x SUM(Y REACZ) within 0.1 % at the
+    five fifths (0.9991 .. 1.0002), while v x SUM(REACZ) reads 0.666 of it. metal-forming's
+    `_0000.rad` moves by that comment line only.
+  - **Texts named**: B7's cap at R <= 1 writes h 0.155556 >= 0.15, which
+    the starter answers with WARNING 311 (recommended `]0, 0.15[`,
+    `hm_read_prop14.F:271-273`) - the sentence now says so (F2, 0
+    carriers); under an ACCEPTED `--ale-flow-tracking` plan the generic
+    `*CONTROL_ALE` note no longer calls the reference-system card "not
+    converted" (F1, opt-in only); the `*DATABASE_TPRINT` note on an
+    accepted weld trajectory names the group written - the NSID1 path +
+    history nodes (F12); A11's sentence names the API pair
+    `qstat_dtscal=<value>` WITH `qstat_dtscal_stated=True` (PA11).
+  - **doorbeam's A1 + A2 band, one count everywhere** (PA1 / F3 / F13 /
+    C6 / E10): the texts quoted "twelve runs at nt 4 and nt 2" (also
+    "twelve runs, nt 4 and nt 2", "twelve runs of the same bytes", the
+    sub-cluster "-27.80 .. -28.08 %", a lower branch "both at nt 2") in
+    one place and 27 runs in another, with one band "-15.85 .. -28.08 %" /
+    "RMS 10.34 .. 15.25 %" ("−15.85 .. −28.08 %" in the ROADMAP). This
+    round ran the same bytes (`_0000.rad` sha256 `2926b1300fb6...`) 50
+    more times (nt 4 x30, nt 2 x20; every punch on the LS nodout at the
+    fifths): 44 at -27.76 .. -28.12 %, 6 at -15.85 .. -16.13 % (four at nt
+    4). With the verifiers' 48 runs (records re-read: two single nt-4
+    runs at -8.36 % / RMS 7.59 % and -0.78 % / RMS 7.21 %) and the round-9
+    record's 27, the shipped band covers 125 runs: END -0.78 .. -28.12 %,
+    RMS 7.21 .. 15.26 % - run to run on three branches (102 / 21 / 2).
+  - **The stub and the routed contact** (PA5): "identical normal
+    impulses" was half true - over this round's 50 runs the two carry the
+    same accumulated normal impulse within 0.15 % while the punch loads
+    (t <= 9.35e-4 s) and part over the last 0.17 ms (stub / route 0.894 ..
+    0.899 at t_end on the main branch, 1.287 .. 1.327 on the -16 % one).
+    **The corner coupons** (PA6): the solver-physics verifier's cD / cE
+    decks re-run here (nt 4 = nt 2): with the block's four nodes over the
+    base's corners BOTH the route and the TYPE25 let it through behind a
+    NORMAL banner (gap -0.1865 / -0.1907 mm vs -0.1885 / -0.1922 mm at t
+    1.0) - the warning now says the TYPE25 default fails silently too.
+  - **A12 `--implicit-bfgs`, the silent failure at both nt** (E2 / PA2 /
+    PA3): the record placed it at nt 2 ("4 of 7 runs at nt 2", "in four of
+    the seven at nt 2", "in the seven at nt 4" sane, "IE END -8.64 ..
+    +29.51 %") and quoted the TYPE25-route arm as single runs ("-1.1e10"
+    %). This round's 50 runs: none of 30 at nt 4, 4 of 20 at nt 2 with
+    nonsense energy; the verifiers' 32 (records re-read) hold four nonsense
+    nt-4 runs. Shipped: 96 runs of identical bytes, a NORMAL banner in all,
+    13 with NONSENSE internal energy - 4 of 51 at nt 4, 9 of 45 at nt 2,
+    END -19769.57 .. +1082.01 % - and the other 83 at -11.85 .. +29.51 %:
+    run to run, not an nt property; the TYPE25 route 13 of 14 runs NORMAL,
+    every one nonsense (this round: 9 of 10 NORMAL).
+  - **A11** (PA7): LS-DYNA's ex_07 path does not "turns once" - the F:
+    glstat (208 blocks) rises to 0.3745 (block 57), unloads to exactly 0
+    (held over blocks 127-188) and reloads to 1.185.
+  - **Spotweld rule 1 alone** (F15): "(639 -> 4884)" / "(639 → 4884)",
+    "costs 7.64x alone;" and "(7.64x on spotweld.k" was the round-6
+    figure, the `--no-spotweld-dt-mass-scaling` arm. Re-measured (this
+    round, nt 4, two runs each, identical; the driven set on its curve at
+    every fifth): base 639 cycles, rule 1 alone 1334 = 2.09x (IE END
+    -99.88 %), 4884 = 7.64x under `--no-spotweld-dt-mass-scaling`, rule 2
+    alone = the base, both 1333 (IE END -31.18 %, KE +30.76 %, RMS 6.82 /
+    23.66 %, as shipped).
+  - **The cup-draw is WORSE, not MIXED** (F11 / E11): "+13.10 % (MIXED)",
+    "MIXED: the backward start" and "(IE MIXED)" - its IE got worse on END
+    (+6.09 -> +13.10 %) AND RMS (2.89 -> 5.57 %), and KE END moved -40.31 ->
+    -42.14 % (`db.json`; the branch run re-scored by `history.py`: IE
+    +13.0961 % / RMS 5.57 %, KE -42.1378 % / RMS 29.17 %); the kinematics
+    and the punch work improved. **B5's head side** (C7 / F8): "zero off
+    the curve's abscissa range, as LS-DYNA" over-claimed - the head is
+    padded only under Remark 4a (OFFA > 0, SFA 0 / 1); a curve that merely
+    starts after t 0 keeps its head (the README's exclusion list already
+    said so). **B6's cup-draw figures** are named as the round-8
+    (`386444e`) bytes' (F10).
+  - **A6's IE pair is MIXED** (PA8): END +5.40 -> +5.38 % but RMS 2.53 ->
+    2.74 % and fifths 1-4 worse; the README and the round-9 entry say so.
+  - **Records**: B1's cost floor "721-2075 s" -> 720-2075 s (the
+    campaign's 05_5_1 run took 719.83 s; E8) and its path peaks are named
+    as sampled at the LS state times; "7 zero-frequency modes" -> the count
+    follows the eigsh request; "with the punch stopped" / "punch stopped at
+    81.51" -> the run stopped with the punch at 81.51 of 135 mm (PA13);
+    ROADMAP NOT entry 10 drops "the explicit twin RMS" 4.42 % (an
+    undefined pre-research arm; PA10); NOT entry 14's 2Dlag was not
+    "never launched; its S-ALE fluid" - its row has a stale run of the old
+    bytes (E4); NOT entry 23's "the static deck two starter runs then
+    stopped" - the starter's non-determinism (ERROR 179 alone vs 315
+    ERRORS) is on BOTH suspension decks and both byte sets (the
+    verifiers' runs: static 4 of 9, dynamic 2 of 5; PA9 / Osus); the
+    lobe docstring's "quarter-ellipsoids of the IFORM-2" are HALF
+    ellipsoids per lobe (F5); `n2s_routed`'s "TYPE 7 / 10 / 11 only" ->
+    TYPE 5 / 7 / 10 / 11 / 24 (`imp_int_k.F:113` / `:135` / `:152` /
+    `:159` / `:176`; PA12).
+  - The retracted spellings are guarded by `PostReviewRetractedStatements`
+    (only this file quotes them).
 - **R14 CAMPAIGN TRIAGE batch, round 9 — the validation-fix round.** Four
   validators (fidelity, code sweep with whole-suite mutation runs, solver
   physics, campaign re-run) reviewed the branch at `c051c47`; every finding
@@ -159,7 +281,7 @@ Prior history (before this changelog was introduced) is summarized in the
     cycles, the deposit -0.30 % of LS-DYNA's own source energy, the path
     nodes 11 / 613 / 649 END -11.81 / -13.46 / -12.22 % of their rise, RMS
     2.28 / 2.07 / 2.61 % of the peak rise (63 LS times 0 < t <= 98.991 s),
-    721-2075 s of engine time by machine load. Movers: bytes 2 deck keys / 2
+    720-2075 s of engine time by machine load. Movers: bytes 2 deck keys / 2
     emitted models (05_4_1, 05_5_1), refusal-sentence text 2 / 2 (05_2,
     05_1: SOLN 2). Round 8's "specified and not built" entry stays below as
     history.
@@ -594,7 +716,8 @@ Prior history (before this changelog was introduced) is summarized in the
     (node 86, frame 6) and the reaction on a FREE local DOF max 4611 ->
     0.024 N (RMS 1106 -> 0.0019 N; LS-DYNA 0), on all 271 states; IE END
     +5.3989 -> +5.3776 %, fifths +1.89 / +0.53 / +2.18 / +3.94 / +5.40 ->
-    +2.00 / +1.02 / +2.72 / +4.14 / +5.38 %, KE END +20.6080 -> +20.2914 %,
+    +2.00 / +1.02 / +2.72 / +4.14 / +5.38 % (a MIXED IE pair: END better,
+    RMS and fifths 1-4 worse), KE END +20.6080 -> +20.2914 %,
     RMS IE / KE 2.53 / 3.47 -> 2.74 / 3.28 % (19 LS times in (1.8828e-05,
     3.79839e-04], t_end 0.0004); the row stays deviation on KE (LS runs
     *CONTROL_ADAPTIVE). The SYSTEM-CID decks byte-identical.
@@ -706,8 +829,9 @@ Prior history (before this changelog was introduced) is summarized in the
     five): ex_07_beam_elform_1 NORMAL 9 of 10 (1206 / 1192 / 1219 / 1192 /
     1193 cycles at nt 4, 1202 four times at nt 2), ERROR once at nt 4
     (MESSAGE 79 at cycle 1421); the converged load factor loops down to
-    -0.4412 where LS-DYNA's path turns once, at 0.3745, and never goes
-    below 0 (the round-9 text's "94-97 turning points" was one counting
+    -0.4412 where LS-DYNA's path rises to 0.3745, unloads to exactly 0 and
+    reloads to 1.185, never below 0 (the post-review round: two reversals,
+    not "turns once"; the round-9 text's "94-97 turning points" was one counting
     rule's figure - every sign change of the increment gives 126-130 - and
     left the texts in the fix round); ex_05_beam_elform_3_&_6 still stops
     (load factor 0.8548 / 0.8698 and 0.8507 / 0.8416, nt 4 / 2); both

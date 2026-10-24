@@ -3712,7 +3712,9 @@ class SpotweldOptInPair(unittest.TestCase):
         for needle in ("moved from (5, 5, 1) to (5, 5, 0) on shell 1 (part 1)",
                        "new element-free node 101 created at (5, 5, 2) on "
                        "shell 11 (part 2)", "weld length 2.",
-                       "WITHOUT --beam-contact-secondary", "7.64x"):
+                       "WITHOUT --beam-contact-secondary", "2.09x",
+                       "(639 -> 1334)", "7.64x (4884) under "
+                       "--no-spotweld-dt-mass-scaling"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hit[0])
         # L = the sheet distance 2.0, not the thickness 1.0 or TS1 1.5:
@@ -3873,7 +3875,10 @@ class Round6FlagWiringB(unittest.TestCase):
                                      "33 R14 deck keys on 22 emitted models"),
         # round 9, B9: the combined arm's +82.0 % (round 6, before EFAIL and
         # DT were converted) is retracted; the help quotes today's -31.18 %
-        "--spotweld-node-synthesis": ("7.64x", "-31.18 %", "p.19-3"),
+        # the post-review round (F15): rule 1 alone costs 2.09x with the
+        # round-8 DT scaling; 7.64x is the --no-spotweld-dt-mass-scaling arm
+        "--spotweld-node-synthesis": ("2.09x", "7.64x without", "-31.18 %",
+                                      "p.19-3"),
         "--beam-contact-secondary": ("4 R14 deck keys on 4 emitted models",),
         "--derived-gapmin": ("-91 %", "ZERO campaign verdict promotions",
                              "i7for3.F:762-770"),

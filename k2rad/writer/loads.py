@@ -3829,8 +3829,9 @@ def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
             clause = (
                 " WITHOUT --beam-contact-secondary the tie's secondary side "
                 "still resolves to no node, so the weld connects nothing: "
-                "MEASURED on spotweld.k, this flag alone costs 7.64x the "
-                "cycles (639 -> 4884) at IE -99.92 %.")
+                "MEASURED on spotweld.k (nt 4), this flag alone costs 2.09x "
+                "the cycles (639 -> 1334) at IE END -99.88 % with today's DT "
+                "scaling - 7.64x (4884) under --no-spotweld-dt-mass-scaling.")
         state.warn(
             f"*ELEMENT_BEAM {e.eid} (part {e.pid}: *SECTION_BEAM ELFORM 9, "
             f"*MAT_SPOTWELD) names ONE node ({e.n1}; n2 = 0). "
@@ -9894,6 +9895,14 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
             # round 9, A6 (D9): the same three-kind test as *BOUNDARY_SPC
             if spc_cid_skew(state, ln.cid):
                 skew_id = ln.cid
+            elif ln.cid in state.coord_vectors:
+                # the post-review round: under --no-spc-vector-frames the
+                # VECTOR frame exists and is kept out (the 386444e bytes) -
+                # a true sentence instead of 'not found'
+                state.warn(
+                    f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} is a "
+                    "*DEFINE_COORDINATE_VECTOR, which --no-spc-vector-frames "
+                    "keeps out — load applied in the GLOBAL system.")
             else:
                 state.warn(
                     f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} not "

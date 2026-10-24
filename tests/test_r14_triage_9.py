@@ -550,8 +550,14 @@ class ImplicitN2sType7(unittest.TestCase):
     -27.9855 / -27.9855 % (nt 4) and -28.0774 / -28.0774 / -28.0314 % (nt
     2), RMS 15.21 .. 15.25 % over the 25 LS times in (1e-5, 1.1e-3]; with
     the part-A spec's six runs of the same bytes (two at nt 2 on a -15.85 %
-    / RMS 10.34 % branch) the shipped band is END -15.85 .. -28.08 %, RMS
-    10.34 .. 15.25 %; the punch node 1 DY = the LS nodout at every fifth
+    / RMS 10.34 % branch) the round-9 band was END -15.85 .. -28.08 %, RMS
+    10.34 .. 15.25 %. The post-review round's 98 more runs of the same
+    bytes (its fix agent's 50 at nt 4 x30 / nt 2 x20, harvested in its
+    scratchpad fix_work/door_pre*, its verifiers' 48) give the shipped band
+    over 125 runs: END -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % - 102 at
+    -27.76 .. -28.12 %, 21 at -15.85 .. -16.27 % (both at both nt), two
+    single nt-4 runs at -8.36 / -0.78 %; the punch node 1 DY = the LS
+    nodout at every fifth
     (32.3 / 65.32 / 95.32 / 132.8 / 135 mm).
     """
 
@@ -571,11 +577,20 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertEqual(_type7_cells(st, stub)["Fric"], 0.1)
         self.assertTrue(_has(res.warnings, _W_A2 + "78", "MESSAGE 232",
                              "imp_int_k.F:111-200", "ind_glob_k.F:4601-4605",
-                             "intfop2.F:595", "-15.85 .. -28.08 %",
-                             "10.34 .. 15.25 %", "gap -0.2218 mm",
+                             "intfop2.F:595", "-0.78 .. -28.12 %",
+                             "RMS 7.21 .. 15.26 %", "in 125 runs",
+                             "three branches", "gap -0.2218 mm",
+                             "BOTH let it through behind a NORMAL banner",
+                             "the TYPE25 default fails silently too",
                              "--no-implicit-n2s-type7"))
         self.assertTrue(_has(res.warnings, _W_A2_STUB, "[78]", "FS 0.1",
                              f"/INTER/TYPE7 {stub}"))
+        # the post-review round (PA5): the impulses are equal while the
+        # punch loads and part at the end - not 'identical'
+        self.assertTrue(_has(res.warnings, _W_A2_STUB, "the same normal "
+                             "impulse on both, within 0.15 %", "0.89-0.90 x",
+                             "1.29-1.33 x"))
+        self.assertFalse(_has(res.warnings, "identical normal impulses"))
         self.assertFalse(_has(res.warnings,
                               "Implicit deck with TYPE25-route contact(s)"))
 
@@ -720,6 +735,19 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.0)
         self.assertTrue(_has(res.warnings, _W_A2_MIX, "[78, 79]", "0.2, 0.3"))
         self.assertFalse(_has(res.warnings, _W_A2_STUB))
+
+    def test_l_the_stub_carries_FS_times_FSF(self):
+        """The post-review round (C5): the friction-faithful stub takes
+        FS x FSF (card-3 FSF 0.5 on FS 0.1 -> 0.05), the value the routed
+        TYPE7 writes; a stub scalar without FSF (stub 0.1 beside the routed
+        0.05) survived the round-9 suite (doorbeam states FSF 1)."""
+        deck = _shell_plate(_IMPL1, _SET5 + _n2s(
+            card3=(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.5)))
+        res, st, _e = _convert(deck)
+        self.assertEqual(_type7_cells(st, 78)["Fric"], 0.05)
+        self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.05)
+        self.assertTrue(_has(res.warnings, _W_A2_STUB, "[78]", "FS 0.05"))
+        self.assertFalse(_has(res.warnings, "FS 0.1:"))
 
     def test_j_BT_and_DT_reach_the_TYPE7_line(self):
         res, st, _e = _convert(a2_bt_dt())
@@ -1102,9 +1130,11 @@ class SpcVectorFrames(unittest.TestCase):
     displacement /TH block on the 14 rotated-frame SPC nodes): the
     constrained local displacement max 0.33518 mm (node 86, frame 6) ->
     1.81e-8 mm, the free-DOF reaction max 4610.9 -> 0.0239 N (RMS 1105.7 ->
-    0.0019 N), all 271 states; IE END +5.3989 -> +5.3776 %, KE END +20.6080
-    -> +20.2914 % (19 LS times in (1.8828e-05, 3.79839e-04]); a second run
-    of the branch bytes identical to every digit.
+    0.0019 N), all 271 states; IE END +5.3989 -> +5.3776 % - a MIXED IE
+    pair: RMS 2.53 -> 2.74 % and fifths 1-4 worse (the post-review round) -
+    KE END +20.6080 -> +20.2914 % (19 LS times in (1.8828e-05,
+    3.79839e-04]); a second run of the branch bytes identical to every
+    digit.
     """
 
     def test_a_a_VECTOR_CID_is_the_BCS_skew(self):
@@ -1174,6 +1204,32 @@ class SpcVectorFrames(unittest.TestCase):
         r_off, _s, _e = _convert(deck, spc_vector_frames=False)
         self.assertTrue(_has(r_on.warnings, "in a local system (/SKEW 3"))
         self.assertFalse(_has(r_off.warnings, "in a local system (/SKEW 3"))
+
+    def test_f_the_LOAD_NODE_sibling_takes_the_VECTOR_skew(self):
+        """The post-review round (C1): the *LOAD_NODE CID sibling (D9)
+        reads the same helper - a *LOAD_NODE_SET on the VECTOR frame 3
+        writes its /CLOAD with skew_ID 3 and no 'not found' sentence. The
+        pre-round-9 test (SYSTEM / NODES registries only) wrote skew_ID 0
+        behind a false 'cid=3 not found' and survived the round-9 suite.
+        Under --no-spc-vector-frames the load is global (the 386444e
+        bytes) with a TRUE sentence: the frame exists and is kept out."""
+        deck = _a6_block("*DEFINE_CURVE\n" + _row(77) + "\n"
+                         + f"{0.0:>20}{0.0:>20}\n{1.0:>20}{5.0:>20}\n"
+                         + "*SET_NODE_LIST\n" + _row(10) + "\n"
+                         + _row(1, 2, 3, 4) + "\n*LOAD_NODE_SET\n"
+                         + _row(10, 1, 77, 1.0, 3) + "\n")
+        res, st, _e = _convert(deck)
+        cload = _blocks(st, "/CLOAD/")
+        self.assertEqual(len(cload), 1)
+        self.assertEqual(cload[0][1][1][10:20].strip(), "X")
+        self.assertEqual(int(cload[0][1][1][20:30]), 3)
+        self.assertFalse(_has(res.warnings, "LOAD_NODE nsid=10"))
+        r_off, st_off, _e = _convert(deck, spc_vector_frames=False)
+        self.assertEqual(int(_blocks(st_off, "/CLOAD/")[0][1][1][20:30]), 0)
+        self.assertTrue(_has(r_off.warnings, "LOAD_NODE nsid=10: local "
+                             "system cid=3 is a *DEFINE_COORDINATE_VECTOR, "
+                             "which --no-spc-vector-frames keeps out"))
+        self.assertFalse(_has(r_off.warnings, "cid=3 not found"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1922,6 +1978,68 @@ class MixedMainThicknessGap(unittest.TestCase):
         res, st, _e = _convert(_a10_gapc(contact=mortar), **_ON)
         self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.5))
 
+    def test_g_site_1_the_implicit_all_parts_single_surface(self):
+        """The post-review round (C2): the rule's FIRST site - an
+        AUTOMATIC_SINGLE_SURFACE with SSID 0 on an IMPLICIT deck, the
+        all-parts self-contact written as /INTER/TYPE7 (an explicit SSID 0
+        goes to TYPE25 and never reaches it) - gets Igap 3 + half the
+        shell; disabling that site survived the round-9 suite, whose probes
+        all sat at site 2 (SSID > 0)."""
+        contact = "\n".join([
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID", _row(1) + "all parts",
+            _row(0, 0, 0, 0, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+            _row(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)])
+        deck = _a10_gapc(contact=contact, implicit=True)
+        res, st, _e = _convert(deck, **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.5))
+        self.assertTrue(_has(res.warnings, "*CONTACT_AUTOMATIC_SINGLE_SURFACE"
+                             " 1: " + _W_A10, "Gapmin 0.5 = half the "
+                             "thinnest main shell (1)"))
+        r0, st0, _e = _convert(deck)
+        self.assertEqual(_type7_igap_gapmin(st0, 1), (0, 0.0))
+        self.assertFalse(_has(r0.warnings, _W_A10))
+
+    def test_h_site_3_the_surface_to_surface_mixed_main(self):
+        """The post-review round (C2): the THIRD site - an
+        AUTOMATIC_SURFACE_TO_SURFACE whose main is the part set {1, 2} (the
+        solid block + the shell plate) and whose secondary is the plate -
+        gets Igap 3 + half the shell; disabling it survived the round-9
+        suite."""
+        s2s = "\n".join([
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID", _row(1) + "s2s mixed",
+            _row(2, 1, 3, 2, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+            _row(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)])
+        res, st, _e = _convert(_a10_gapc(contact=s2s), **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (3, 0.5))
+        self.assertTrue(_has(res.warnings,
+                             "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE 1: "
+                             + _W_A10, "Gapmin 0.5"))
+        r0, st0, _e = _convert(_a10_gapc(contact=s2s))
+        self.assertEqual(_type7_igap_gapmin(st0, 1), (0, 0.0))
+
+    def test_i_a_solid_only_main_stands_down_without_an_exception(self):
+        """The post-review round (C3): a single surface over a part set
+        holding ONLY the solid block - no main shell, so no half-thickness
+        exists: the rule stands down (Igap 0, no sentence) and converts.
+        Dropping 'shells' from the mixed test raised 'min() iterable
+        argument is empty' and survived the round-9 suite (test_d's solid
+        main stood down on its shell offset first)."""
+        contact = "\n".join([
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID",
+            _row(1) + "solid-only main",
+            _row(3, 0, 2, 0, 0, 0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 20.0, 0, 0.0, "1E+17"),
+            _row(1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)])
+        deck = _a10_gapc(contact=contact,
+                         extra="*SET_PART_LIST\n" + _row(3) + "\n" + _row(1))
+        res, st, _e = _convert(deck, **_ON)
+        self.assertEqual(_type7_igap_gapmin(st, 1), (0, 0.0))
+        self.assertFalse(_has(res.warnings, "--mixed-main-thickness-gap"))
+        _r0, st0, _e0 = _convert(deck)
+        self.assertEqual(st, st0)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A11 - --arclength-riks implies no /IMPL/QSTAT unless --qstat-dtscal is given
@@ -1950,8 +2068,10 @@ class ArclengthRiksNoQstat(unittest.TestCase):
     9219da82fbb6), five runs of identical bytes: NORMAL 1206 / 1192 cycles
     at nt 4 and 1202 / 1202 at nt 2, ERROR once at nt 4 (MESSAGE 79 at
     cycle 1421, the load factor back at 0); the converged load factor down
-    to -0.4412 on every run (LS-DYNA's glstat path turns once, at 0.3745,
-    and never goes below 0). ex_05: MESSAGE 79 at load factor 0.8548 (nt 4)
+    to -0.4412 on every run (LS-DYNA's glstat path rises to 0.3745, unloads
+    to exactly 0 - held there over blocks 127-188 - and reloads to 1.185;
+    it never goes below 0: two reversals, not one, the post-review round's
+    re-read of the F: glstat). ex_05: MESSAGE 79 at load factor 0.8548 (nt 4)
     / 0.8698 (nt 2). The solver-physics validator's five more runs of the
     same bytes (1219 / 1192 / 1193 at nt 4, 1202 / 1202 at nt 2) all ended
     NORMAL, and ex_05 stopped at 0.8507 / 0.8416: the shipped tally is 9
@@ -1966,7 +2086,11 @@ class ArclengthRiksNoQstat(unittest.TestCase):
                              "/IMPL/DT/3 replaces /IMPL/DT/2 and NO "
                              "/IMPL/QSTAT card is written",
                              "negative load factors", "9 of 10", "UNMATCHED",
-                             "pass --qstat-dtscal to keep one"))
+                             "pass --qstat-dtscal to keep one",
+                             "through the API, qstat_dtscal=<value> WITH "
+                             "qstat_dtscal_stated=True",
+                             "rises to 0.3745, unloads to exactly 0"))
+        self.assertFalse(_has(res.warnings, "turns once"))
         self.assertFalse(_has(res.warnings, "4 of 5"))
         self.assertFalse(_has(res.warnings, "94-97"))
 
@@ -2076,16 +2200,18 @@ class ImplicitBfgs(unittest.TestCase):
     MEASURED on the branch bytes (nt 4 AND nt 2, identical where marked):
     ex_06_beam_elform_1 NORMAL in 277 cycles, IE END -0.0934 %, RMS 0.09 %
     of the LS peak over 121 LS times in (0.01, 1.0] (nt 4 = nt 2), where
-    the default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2) a
-    14-run band (implement A's 2, the solver-physics validator's 6, the
-    fix round's 6; engine file sha256 a31d565457c5; a NORMAL banner in
-    every run, 39-42 cycles): IE END -8.64 .. +29.51 % at nt 4, and at nt
-    2 three sane runs (-4.92 .. -6.06 %) and four with nonsense energy
-    (-199.96 / -2251.24 / -5182.84 / -12177.48 %) - the SILENT failure on
-    the default bytes; the same pair on the TYPE25 route
-    (--no-implicit-n2s-type7): a NORMAL banner (387 / 110 cycles) with IE
-    END -1.1e10 / -7.7e8 %; tensile2 NORMAL 75 -> 43 cycles, IE RMS 2.48
-    -> 5.61 % (END -0.54 -> +26.88 %, nt 4 = nt 2).
+    the default stops at t 0.1601 (IE -59.58 %); doorbeam (A1 + A2; engine
+    file sha256 a31d565457c5; a NORMAL banner in every run, 39-42 cycles):
+    96 runs of identical bytes - the round-9 record's 14 (four of seven
+    nonsense at nt 2) and the post-review round's 82 (its fix agent's 50:
+    none of 30 at nt 4, 4 of 20 at nt 2; its verifiers' 32: four of 14 at
+    nt 4, one of 18 at nt 2) - 13 with NONSENSE internal energy, 4 of 51
+    at nt 4 and 9 of 45 at nt 2, END -19769.57 .. +1082.01 %, the other 83
+    -11.85 .. +29.51 %: the SILENT failure on the default bytes at both
+    nt, run to run; the TYPE25 route (--no-implicit-n2s-type7): 13 of 14
+    runs NORMAL, every one with nonsense energy (one run per nt was
+    quoted as a figure before); tensile2 NORMAL 75 -> 43 cycles, IE RMS
+    2.48 -> 5.61 % (END -0.54 -> +26.88 %, nt 4 = nt 2).
     """
 
     def test_a_NSOLVR_12_gets_BFGS_and_no_QSTAT(self):
@@ -2100,12 +2226,17 @@ class ImplicitBfgs(unittest.TestCase):
         # 14-run band, four nt-2 runs with nonsense energy - not only on
         # the TYPE25 route; one run per nt was quoted before
         self.assertTrue(_has(res.warnings, _W_A12, "The failure can be "
-                             "SILENT, on the default bytes too",
-                             "all 14 runs of identical bytes",
-                             "IE END -8.64 .. +29.51 %", "in four of the "
-                             "seven at nt 2 with NONSENSE internal energy",
-                             "-12177.48 %"))
+                             "SILENT, on the default bytes too, at nt 4 AND "
+                             "nt 2", "all 96 runs of identical bytes",
+                             "13 of them carry NONSENSE internal energy",
+                             "4 of 51 at nt 4, 9 of 45 at nt 2",
+                             "run to run, not an nt property",
+                             "13 of 14 runs NORMAL, every one nonsense"))
         self.assertFalse(_has(res.warnings, "-8.64 / -6.06"))
+        # the post-review round (E2 / PA2 / PA3): the nt split and the
+        # single TYPE25-route runs are retracted
+        self.assertFalse(_has(res.warnings, "in the seven at nt 4"))
+        self.assertFalse(_has(res.warnings, "-1.1e10"))
 
     def test_b_a_blank_NSOLVR_and_no_card_are_the_family(self):
         for name, deck in (("blank", _t4._implicit_deck(nsolvr=0)),
@@ -2295,10 +2426,12 @@ class Round9FlagWiringA(_t7.Round7FlagWiringA):
         "--rigid-part-pid-precedence": (
             "Warning 10177", "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm",
             "+582.00 %", "+53.91 %", "RMS 393.31 -> 81.05 %",
-            "-15.85 .. -28.08 %", "RMS 10.34 .. 15.25 %"),
+            "-0.78 .. -28.12 %", "RMS 7.21 .. 15.26 %",
+            "over 125 runs, run to run on three branches"),
         "--implicit-n2s-type7": (
             "imp_int_k.F:111-200", "ind_glob_k.F:4601-4605 MESSAGE 232",
-            "-15.85 .. -28.08 %", "twelve runs, nt 4 and nt 2", "(silent)"),
+            "-0.78 .. -28.12 %", "125 runs, nt 4 and nt 2", "(silent)",
+            "both let it through"),
         "--implicit-rigid-gravity-nodes": (
             "gravit_imp.F:84-91", "inirby.F:836-837", "1101 cycles",
             "+0.42 / +0.20 / +0.14 %", "Explicit decks unchanged"),
@@ -2332,7 +2465,9 @@ class Round9OptInWiring(_t8.Round8OptInWiringB):
                                        "OFF by default"),
         "--implicit-bfgs": ("/IMPL/NONLIN/2", "ex_06", "IE RMS 0.09 %",
                             "SILENTLY", "default A1 + A2 bytes",
-                            "4 of 7 runs at nt 2", "TYPE25 route"),
+                            "at nt 4 and nt 2", "in all 96 runs",
+                            "4 of 51 at nt 4, 9 of 45 at nt 2",
+                            "TYPE25 route"),
     }
 
 
@@ -2604,6 +2739,27 @@ def b1_synw(var="base", d3plot=0.001):
     if var == "shellpid":
         L += ["*ELEMENT_SHELL", "%8d%8d%8d%8d%8d%8d" % (
             1001, 4, nid(0, 0, 2), nid(1, 0, 2), nid(1, 1, 2), nid(0, 1, 2))]
+    if var == "tet10":
+        # the post-review round (C4): a VALID-geometry 10-node tet on the
+        # seam part 3 (corners 5 / 20 / 8 / 6, the right tetrahedron at the
+        # block's corner; midsides in LS-DYNA's order N5..N10 = mid 12 / 23
+        # / 31 / 24 / 34 / 14) - a degenerate card is normalised before
+        # the screen, only a valid one reaches the node-count class
+        cc = [nid(0, 1, 1), nid(1, 1, 1), nid(0, 2, 1), nid(0, 1, 2)]
+
+        def _xyz(n):
+            m = n - 1
+            return (float(m // 15), float((m % 15) // 3 - 2),
+                    float(m % 3 - 2))
+        pairs = [(0, 1), (1, 2), (2, 0), (1, 3), (2, 3), (0, 3)]
+        mids = list(range(9101, 9107))
+        L += ["*NODE"] + ["%8d%16.8g%16.8g%16.8g" % (
+            m, *[(_xyz(cc[a])[q] + _xyz(cc[b])[q]) / 2 for q in range(3)])
+            for m, (a, b) in zip(mids, pairs)]
+        L += ["*ELEMENT_SOLID", "%8d%8d" % (9001, 3),
+              "".join("%8d" % n for n in cc + mids)]
+    if var == "tprint":
+        L += ["*DATABASE_TPRINT", _f10(0.1)]
     path = [nid(i, 2, 2) for i in range(2, 9)]
     if var == "short":
         path = path[:2]
@@ -2810,7 +2966,8 @@ class WeldTrajectoryImpflux(unittest.TestCase):
         self.assertTrue(_has(self.res.warnings, _W_B1_OK,
                              "32 /IMPFLUX VOLUMIC cards on 32 /GRBRIC groups",
                              "8 windows to t 2", "delivers 0.8625 of Q",
-                             "fixflux.F:115-128", "721-2075 s",
+                             "fixflux.F:115-128", "720-2075 s",
+                             "(at the LS state times)",
                              "ONE LS run, so the evidence base is one model",
                              "NCYC 5 is not used"))
 
@@ -2933,6 +3090,11 @@ class WeldTrajectoryImpflux(unittest.TestCase):
             "notmid": "TMID 9 names neither a *MAT_THERMAL_CWM nor a "
                       "converted thermal material",
             "lcid0": "LCID 0: the power curve is missing",
+            # the post-review round (C4): the node-count class - removing
+            # it mapped a 10-node tet as the trilinear brick of its first 8
+            # nodes (32 /IMPFLUX) and survived the round-9 suite
+            "tet10": "part 3 carries 10-node solid elements: the source is "
+                     "mapped on 8-node bricks",
         }
         for var, reason in probes.items():
             with self.subTest(probe=var):
@@ -2965,6 +3127,25 @@ class WeldTrajectoryImpflux(unittest.TestCase):
         self.assertTrue(_has(r0.warnings, "on part 3 (PTYP 1) -> 32 "
                              "/IMPFLUX VOLUMIC cards"))
         self.assertFalse(_has(r0.warnings, "PTYP 0: only 1"))
+
+    def test_tprint_note_names_the_weld_temp_group(self):
+        """The post-review round (F12): on an ACCEPTED trajectory the
+        *DATABASE_TPRINT note names the group that is written - the 9 NSID1
+        path + *DATABASE_HISTORY_NODE nodes (TH_temperature, the S2
+        sentence's count) - not 'the driven and loaded nodes'; refused or
+        under the opt-out the note keeps today's wording."""
+        res, st, _e = _convert(b1_synw("tprint"))
+        self.assertEqual(len(_th_node(st, "TH_temperature")), 9)
+        self.assertTrue(_has(res.warnings, "*DATABASE_TPRINT: the deck arms "
+                             "a thermal solve", "/TH/NODE TEMP group over the "
+                             "9 NSID1 path + *DATABASE_HISTORY_NODE nodes of "
+                             "the accepted weld trajectory"))
+        self.assertFalse(_has(res.warnings, "TEMP group over the driven and "
+                              "loaded nodes"))
+        r0, _s0, _e0 = _convert(b1_synw("tprint"),
+                                weld_trajectory_impflux=False)
+        self.assertFalse(_has(r0.warnings, "NSID1 path + "
+                              "*DATABASE_HISTORY_NODE nodes of the accepted"))
 
     def test_s2_cap_boundary_1000_frames(self):
         """S2 caps a SOLN-1 weld deck that requests MORE than 1000 frames:
@@ -3163,6 +3344,8 @@ def b2_ax15(dt2ms=1e-4, var="base"):
         for i in range(nx + 1):
             x = float(i) - (0.5 if var == "xneg" and i == 0 else 0.0)
             z = 0.001 if (var == "zoff" and i == 3 and j == 2) else 0.0
+            if i == 3 and j == 2 and var in ("zround", "zsmall"):
+                z = -5.5511151e-18 if var == "zround" else 1.0e-8
             L.append("%8d%16.8g%16.8g%16.8g" % (nid(i, j), x, float(j), z))
     L += ["*ELEMENT_SHELL"]
     e = 1
@@ -3189,6 +3372,8 @@ def b2_ax15(dt2ms=1e-4, var="base"):
           "%20.6g%20.6g" % (1.0e-3, -0.01)]
     if var in ("contact", "tricontact"):
         L += ["*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE", _f10(1, 2)]
+    if var == "bndout":
+        L += ["*DATABASE_BNDOUT", _f10(1.0e-5)]
     if var == "loadnode":
         L += ["*LOAD_NODE_POINT", _f10(nid(3, 1), 1, 1, 1.0)]
     if var == "elmass":
@@ -3279,6 +3464,42 @@ class Axisymmetric2D(unittest.TestCase):
                              "5.7080700E-06", "0.2199439E-03"))
         self.assertFalse(_has(self.res.warnings, _WA7B_R9))
         self.assertFalse(_has(self.res.warnings, "Ishell=12"))
+
+    def test_round_off_z_is_in_the_plane(self):
+        """The post-review round (E3): a z of ROUND-OFF size (the SPR main
+        giant's node 1: z = -5.55e-18 at x = 0.099) is in the xy-plane -
+        |z| <= 1e-9 x the largest absolute coordinate - so screen 4 passes
+        and the /NODE transform writes (0, x, y); the exact-zero test named
+        it 'the axisymmetric section must lie in the xy-plane'. z = 1e-8 on
+        this 3-mm fixture (3.3e-9 of it) still refuses by name."""
+        res, st, _e = _convert(b2_ax15(var="zround"))
+        self.assertTrue(_has(res.warnings, _W_B2_ROUTED))
+        self.assertFalse(_has(res.warnings, _W_B2_REFUSED))
+        nodes = [b for h, b in _blocks(st, "/NODE")][0]
+        self.assertEqual(nodes, [b for h, b in _blocks(self.st, "/NODE")][0])
+        r2, st2, _e = _convert(b2_ax15(var="zsmall"))
+        self.assertTrue(_has(r2.warnings, _W_B2_REFUSED, "node 12 has z = "
+                             "1e-08 / x = 3: the axisymmetric section"))
+        self.assertFalse(re.search(r"^/QUAD/", st2, re.M))
+
+    def test_reac_channels_read_per_unit_radius(self):
+        """The post-review round (F14): a 2-D nodal mass is per radian PER
+        UNIT RADIUS (fixvel.F:361 weighs the imposed motion's work by AXI =
+        Y), so on the routed deck the TH_NODE_BNDOUT reminder and the route
+        sentence give the per-radian force as Y_node x d(REAC*)/dt; the 3-D
+        route keeps d(REAC*)/dt, and a routed deck without a REAC group
+        gets no clause."""
+        res, st, _e = _convert(b2_ax15(var="bndout"))
+        self.assertIn("#  REAC* accumulates m*a*dt over the run: bndout force "
+                      "per radian = Y_node * d(REAC*)/dt (2-D axisymmetric: "
+                      "REAC* is per unit radius)", st)
+        self.assertNotIn("bndout force = d(REAC*)/dt", st)
+        self.assertTrue(_has(res.warnings, _W_B2_ROUTED, "per radian PER UNIT "
+                             "RADIUS", "fixvel.F:361", "Y_node x d(REAC*)/dt"))
+        r3, st3, _e = _convert(b2_ax15(var="bndout"), axisymmetric_2d=False)
+        self.assertIn("bndout force = d(REAC*)/dt", st3)
+        self.assertNotIn("per unit radius", st3)
+        self.assertFalse(_has(self.res.warnings, "PER UNIT RADIUS"))
 
     def test_density_cell_closed_form(self):
         rho = _data_after(self.st, "/MAT/ELAST/1", 1)
@@ -3728,8 +3949,10 @@ class LoadCurveOffscaleZero(unittest.TestCase):
                              f"/FUNCT/1 -> /FUNCT/{fid} ((0, 0) and "
                              "(0.001998, 0) before 0.002; (0.00360036, 0) and "
                              "(0.008, 0) after 0.0036)",
-                             "+6.09 -> +13.10 %", "MIXED",
+                             "+6.09 -> +13.10 %", "IE is WORSE on both "
+                             "counts", "KE END -40.31 -> -42.14 %",
                              "KE END +91.96 -> +23.42 %"))
+        self.assertFalse(_has(res.warnings, "MIXED: the backward start"))
         # the fix round (F-B5-1): the census pairs give -0.12 / -2.21 /
         # -7.78 / -6.03 / -1.81 %, so 0.1-7.8 % with every fifth below LS
         self.assertTrue(_has(res.warnings, _W_B5, "punch work at the fifths "
@@ -3901,6 +4124,7 @@ class HourglassGuardCap(unittest.TestCase):
                              "= min(0.2, 0.14 / Tsca) / R",
                              "is first capped at 0.14 / Tsca = 0.155556 "
                              "(Tsca 0.9)", "732.6 mJ", "8.0e-12 mJ"))
+        self.assertFalse(_has(res.warnings, "WARNING 311"))   # h 0.1296
 
     def test_2_r095_qh02_is_capped_with_its_own_sentence(self):
         res, st, _e = _convert(_b7_deck("105263.158", hourglass="0.2"))
@@ -3909,6 +4133,11 @@ class HourglassGuardCap(unittest.TestCase):
                              "hourglass coefficient 0.2 exceeds 0.14 / Tsca "
                              "= 0.155556, so h is written 0.155556",
                              "--no-mat-null-pc-mu"))
+        # the post-review round (F2): 0.155556 >= 0.15 draws the starter's
+        # WARNING 311 (recommended ]0, 0.15[) - named in the sentence
+        self.assertTrue(_has(res.warnings, "The written h 0.155556 is >= "
+                             "0.15, so the starter prints WARNING 311",
+                             "hm_read_prop14.F:271-273"))
 
     def test_3_the_default_h_is_unchanged(self):
         _r, st, _e = _convert(_b7_deck("31622.7766"))
@@ -4091,6 +4320,29 @@ class AleFlowTracking(unittest.TestCase):
         j = lines7.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines7[j + 4], "        -1                   0")
         self.assertEqual(lines7[j + 2], "        -1                   0")
+
+    def test_generic_control_ale_note_follows_the_plan(self):
+        """The post-review round (F1): under an ACCEPTED plan the generic
+        *CONTROL_ALE note no longer says the reference-system card 'is not
+        converted' beside the B8 sentence that converts it; a refused plan
+        and the default keep the note word for word (it fires on 6 match
+        rows)."""
+        res, _st, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        self.assertTrue(_has(res.warnings, "*CONTROL_ALE (METH=", "the "
+                             "*ALE_REFERENCE_SYSTEM_GROUP 1 card IS converted "
+                             "under --ale-flow-tracking"))
+        self.assertFalse(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_*) has no "
+                              "/ALE 1:1 and is not converted"))
+        for kw in ({"ale_flow_tracking": True, "prid": 1}, {}):
+            flag = kw.pop("ale_flow_tracking", False)
+            with self.subTest(**kw, flag=flag):
+                r2, _s2, _e2 = _convert(b8_bird(**kw),
+                                        ale_flow_tracking=flag)
+                self.assertTrue(_has(r2.warnings, "Mesh smoothing "
+                                     "(*ALE_SMOOTHING / *ALE_REFERENCE_SYSTEM"
+                                     "_*) has no /ALE 1:1 and is not "
+                                     "converted."))
+                self.assertFalse(_has(r2.warnings, "card IS converted"))
 
     def test_every_refusal_class(self):
         cases = (
@@ -4538,7 +4790,7 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
     _HELP_FIGURES = {
         "--weld-trajectory-impflux": (
             "66 323 cycles", "-0.30 % of LS-DYNA's source energy",
-            "721-2075 s", "PTYP 1 / 2", "-11.81..-13.46 %"),
+            "720-2075 s", "PTYP 1 / 2", "-11.81..-13.46 %"),
         "--axisymmetric-2d": (
             "/ANALY N2D3D 1", "Isolid 2", "(x, y, 0) -> (0, x, y)",
             "the 3-D route -77.78 %"),
@@ -4549,7 +4801,9 @@ class Round9FlagWiringB(_t7.Round7FlagWiringA):
             "ELFORM 12", "0.23410459", "117 ERROR(S) -> 0",
             "a stated T1 > 0 is kept"),
         "--load-curve-offscale-zero": (
-            "Remarks 4a and 5", "+6.09 -> +13.10 % (MIXED)",
+            "Remarks 4a and 5", "IE is WORSE (END +6.09 -> +13.10 %, RMS "
+            "2.89 -> 5.57 %; KE END -40.31 -> -42.14 %)",
+            "keeps its head",
             "+91.96 -> +23.42 %", "Material, preload and thermal curves are "
             "never changed"),
     }
@@ -4769,9 +5023,10 @@ _REPLACEMENTS_ROUND_9_FIX = (
     ("ROADMAP.md", "0 verdict movers (MEASURED, campaign report §0.31)"),
     ("ROADMAP.md", "the residue 29 / 29 → 27 / 27 (MEASURED, campaign report "
      "§0.31)"),
-    ("ROADMAP.md", "the static deck two starter runs then stopped"),
-    ("ROADMAP.md", "A1 + A2 bytes the band is END −15.85 .. −28.08 %, RMS "
-     "10.34 .. 15.25 % of the LS peak over 27 runs at nt 4 and nt 2"),
+    # the post-review round re-texted these two (both decks; 125 runs)
+    ("ROADMAP.md", "On BOTH decks a starter run either stops"),
+    ("ROADMAP.md", "A1 + A2 bytes the band is END −0.78 .. −28.12 %, RMS "
+     "7.21 .. 15.26 % of the LS peak over 125 runs at nt 4 and nt 2"),
 )
 
 
@@ -4992,6 +5247,129 @@ class Round9FlagsInReadme(unittest.TestCase):
             with self.subTest(flag=flag):
                 self.assertTrue(any(h.startswith(f"`{flag}`")
                                     for h in headings), flag)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The post-review verification round (k2rad #143): the spellings it retracted
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Statements the post-review round's own runs or reads superseded. CHANGELOG
+#: quotes every one (the history); no other shipped text may.
+_RETRACTED_POST_REVIEW = (
+    # PA1 / F3 / F13 / C6 / E10: ONE doorbeam count everywhere - 125 runs of
+    # the A1 + A2 bytes on three branches (the twelve- and 27-run subsets and
+    # the two-branch band are retracted)
+    "twelve runs at nt 4 and nt 2",
+    "twelve runs, nt 4 and nt 2",
+    "twelve runs of the same bytes",
+    "-27.80 .. -28.08 %",
+    "-15.85 .. -28.08 %",
+    "−15.85 .. −28.08 %",
+    "RMS 10.34 .. 15.25 %",
+    "both at nt 2",
+    # PA5: the stub and the route carry the same impulse while the punch
+    # loads and part at the end
+    "identical normal impulses",
+    # PA7: LS-DYNA's ex_07 path reverses twice (0.3745, then 0)
+    "turns once",
+    # PA10: an undefined pre-research arm
+    "the explicit twin RMS",
+    # PA2 / PA3 / E2: the silent failure is run to run at both nt; the
+    # TYPE25-route arm is a band, not single figures
+    "in four of the seven at nt 2",
+    "4 of 7 runs at nt 2",
+    "in the seven at nt 4",
+    "IE END -8.64 .. +29.51 %",
+    "-1.1e10",
+    # PA13: the run stopped, the punch did not; the zero-mode count follows
+    # the eigsh request
+    "with the punch stopped",
+    "punch stopped at 81.51",
+    "7 zero-frequency modes",
+    # F15: rule 1 alone costs 2.09x with the round-8 DT scaling (7.64x is
+    # the --no-spotweld-dt-mass-scaling arm)
+    "(639 -> 4884)",
+    "(639 → 4884)",
+    "costs 7.64x alone;",
+    "(7.64x on spotweld.k",
+    # F11: the cup-draw's IE is worse on END AND RMS - not MIXED
+    "+13.10 % (MIXED)",
+    "MIXED: the backward start",
+    "(IE MIXED)",
+    # C7: the head is padded only under Remark 4a
+    "zero off the curve's abscissa range, as LS-DYNA",
+    # E8: the campaign's 05_5_1 run took 719.83 s
+    "721-2075 s",
+    # E4: 2Dlag's row has a stale run of the old bytes
+    "never launched; its S-ALE fluid",
+    # PA9: the starter non-determinism is on both suspension decks
+    "the static deck two starter runs then stopped",
+    # F5: each lobe tests a HALF ellipsoid
+    "quarter-ellipsoids of the IFORM-2",
+    # PA12: implicit contact stiffness exists for TYPE 5 / 7 / 10 / 11 / 24
+    "TYPE 7 / 10 / 11 only",
+)
+_REPLACEMENTS_POST_REVIEW = (
+    ("k2rad/writer/contacts.py", "in 125 runs of the same bytes at nt 4 and "
+     "nt 2"),
+    ("k2rad/writer/contacts.py", "the TYPE25 default fails silently too"),
+    ("k2rad/writer/assembly.py", "all 96 runs of identical bytes, and 13 of "
+     "them carry NONSENSE internal energy"),
+    ("k2rad/writer/loads.py", "this flag alone costs 2.09x the cycles (639 "
+     "-> 1334)"),
+    ("k2rad/__init__.py", "the same normal impulse on both, within 0.15 %"),
+    ("k2rad/writer/axisym2d.py", "per radian PER UNIT RADIUS"),
+    ("k2rad/writer/materials.py", "so the starter prints WARNING 311"),
+    ("k2rad/writer/blast_ale.py", "card IS converted under "
+     "--ale-flow-tracking"),
+    ("k2rad/writer/thermal.py", "NSID1 path + *DATABASE_HISTORY_NODE nodes "
+     "of the accepted weld trajectory"),
+    ("k2rad/writer/loadcurves.py", "The HEAD is padded only under Remark 4a"),
+    ("README.md", "BOTH let it through behind a NORMAL banner"),
+    ("README.md", "rule 1 alone costs 2.09× the cycles (639 → 1334)"),
+    ("ROADMAP.md", "over 125 runs at nt 4 and nt 2, run to run on three "
+     "branches"),
+    ("ROADMAP.md", "On BOTH decks a starter run either stops"),
+    ("docs/IMPLICIT.md", "13 carry nonsense internal energy"),
+)
+
+
+class PostReviewRetractedStatements(unittest.TestCase):
+    """The post-review verification round (k2rad #143): no shipped text
+    (README, ROADMAP, the GUI, every package module, docs/*.md, tools/*.py;
+    CHANGELOG exempt) carries a spelling the round retracted; the guard
+    fires on each needle split across two adjacent literals; the
+    replacements ARE shipped; CHANGELOG quotes every old spelling."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_POST_REVIEW:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_POST_REVIEW:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_POST_REVIEW:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
+
+    def test_changelog_still_quotes_each_old_spelling(self):
+        text = _t7._collapse(_t7._read7("CHANGELOG.md")).lower()
+        for needle in _RETRACTED_POST_REVIEW:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle).lower(), text)
 
 
 if __name__ == "__main__":

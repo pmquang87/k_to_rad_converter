@@ -1635,11 +1635,23 @@ def _make_control_ale_notes(state: ConversionState) -> List[str]:
     meth = state.control_ale.meth
     hint = ("Van-Leer/HIS second-order advection -> add /ALE/MUSCL"
             if meth in (2, 3) else "donor-cell advection → OpenRadioss default (upwind)")
+    # the post-review round (F1): under an ACCEPTED --ale-flow-tracking plan
+    # (resolved earlier, by _make_analysis_defaults) the GROUP card IS
+    # converted - only then is the generic clause qualified, so no default
+    # carrier of this note moves (it fires on 6 match rows)
+    ft = state.ale_flow_tracking_plan
+    smoothing = ("Mesh smoothing (*ALE_SMOOTHING / *ALE_REFERENCE_SYSTEM_*) "
+                 "has no /ALE 1:1 and is not converted.")
+    if ft is not None and ft.card is not None:
+        smoothing = (
+            "Mesh smoothing (*ALE_SMOOTHING) has no /ALE 1:1 and is not "
+            f"converted; the *ALE_REFERENCE_SYSTEM_GROUP {ft.card.sid} card IS "
+            "converted under --ale-flow-tracking (/ALE/GRID/FLOW-TRACKING, its "
+            "own sentence).")
     state.warn(
         f"*CONTROL_ALE (METH={meth}): OpenRadioss keeps its default ALE advection "
         f"(stable in the reference FSI example); {hint} if you need to reproduce "
-        "the exact scheme. Mesh smoothing (*ALE_SMOOTHING / "
-        "*ALE_REFERENCE_SYSTEM_*) has no /ALE 1:1 and is not converted.")
+        "the exact scheme. " + smoothing)
     return []
 
 
@@ -1829,7 +1841,9 @@ def _make_ale_reference_notes(state: ConversionState) -> List[str]:
     card and draws no id. Under ``--ale-flow-tracking`` a refused deck gets
     ONE sentence naming every failing class; without the flag each card gets
     its own skip sentence (a PRTYPE-4 GROUP card names the opt-in). The
-    generic ``*CONTROL_ALE`` note is NOT edited (it fires on 6 match rows)."""
+    generic ``*CONTROL_ALE`` note (it fires on 6 match rows) changes only
+    under an ACCEPTED plan, where its 'not converted' clause would contradict
+    the B8 sentence (the post-review round, F1)."""
     groups = state.ale_reference_groups
     others = sorted(set(state.ale_reference_others))
     if not groups and not others:

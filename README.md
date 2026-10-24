@@ -273,9 +273,16 @@ the emitted lines (`writer/axisym2d.py`), so every other deck is
 byte-identical. Refused by name, every failing class listed, for another
 element family, a 3-node shell, any `*CONTACT_*` (2-D decks take only
 `/INTER/TYPE1/2/3/5`, `hm_read_interfaces.F:175-179`), a node off the
-xy-plane or at x < 0, ELFORM 14 and 15 together, ELFORM 44, or a card the
-transform does not map. Masses and energies are then per radian as in
-LS-DYNA: `thermal/metal-forming` starter TOTAL MASS 5.7080700E-06 = LS-DYNA's
+xy-plane (|z| above 1e-9 of the largest absolute coordinate: a round-off z,
+like the SPR giant's -5.55e-18, is in the plane) or at x < 0, ELFORM 14 and 15
+together, ELFORM 44, or a card the transform does not map. Masses and energies
+are then per radian as in LS-DYNA, and a `/TH/NODE` reaction (REAC*) is per
+radian PER UNIT RADIUS (`fixvel.F:361` weighs the imposed motion's work by
+`AXI = Y`): the per-radian force of a node is Y × d(REAC*)/dt, 0 on the axis -
+the route sentence and the group's reminder line say so (measured on a ring
+at physical density: the external work = v × Σ Y·REACZ within 0.1 % at every
+fifth, Σ REACZ alone 0.666 of it). `thermal/metal-forming` starter TOTAL MASS
+5.7080700E-06 = LS-DYNA's
 0.57080700E-05 (the 3-D route -77.78 %); `2Dlag` (giant, starter only)
 ERROR 3046 → 0 with its rigid body 0.2199439E-03 = LS-DYNA. **The 2-D DT2MS
 density cell** (default ON, `--no-positive-dt2ms-mass-scaling`): on a routed
@@ -1141,7 +1148,10 @@ also acts at R ≤ 1, with its own sentence — on cG1's Couette coupon (ELFORM 
 MU 1e-5, Tsca 0.9, nt 4) QH 0.2 at R 1.2 divided only (h 0.1667) is UNSTABLE
 (energy error +16.2 %, hourglass energy 732.6 mJ) and capped (h 0.1296) stable
 (8.0e-12 mJ); no corpus deck moves (the three channel decks and `sph/bird`
-convert byte-identically with and without the cap). TEROD / CEROD have no
+convert byte-identically with and without the cap). At R ≤ 1 the cap writes
+0.14 / Tsca itself (0.155556 at Tsca 0.9), at or above the starter's
+recommended `]0, 0.15[`, so the starter prints WARNING 311 - a
+recommendation, named in the sentence. TEROD / CEROD have no
 LAW6 cell and are named. Round 8's SPH-only Nu cell has NO opt-out of its own:
 `--no-mat-null-pc-mu` writes the 65ff389 cells (Nu 0 AND Pmin 0), which is not
 the `4f5b6e8` file where a stated PC was carried (`sph/bird`: `4f5b6e8` Nu 0 /
@@ -3002,8 +3012,9 @@ other consumer, and material, preload and thermal curves never change.
 Excluded: DATTYP != 0, a start side with OFFA <= 0 or SFA != 1, a
 sensor-gated card, a `/FUNCT_SMOOTH`. MEASURED (nt 4): the aniso cup-draw's
 punch no longer starts BACKWARD (DZ at 2.1 ms +0.2187 → -0.00055 mm) - but
-its IE END goes +6.09 → +13.10 % and its RMS 2.89 → 5.57 % of the LS peak
-(150 LS times to t 0.015): MIXED, the backward start hid an IE excess;
+its IE is WORSE on both counts, END +6.09 → +13.10 % and RMS 2.89 → 5.57 % of
+the LS peak (150 LS times to t 0.015), and KE END −40.31 → −42.14 %: the
+backward start hid an IE excess;
 `thick.k`'s punch stops at -10 mm as LS-DYNA's (it ran on to -11.99 mm), KE
 END +91.96 → +23.42 %, KE RMS 21.01 → 8.79 % (1000 LS times), IE unchanged.
 A prescribed DISPLACEMENT whose curve ends before t_end returns to 0 by the
@@ -3334,8 +3345,9 @@ t_end; 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, = the LS
 nodout) and internal energy ended +582.00 % against LS-DYNA; with the part
 drive alone it ends +53.91 % (RMS 393.31 → 81.05 % of the LS peak over the 25
 LS times in (1e-5, 1.1e-3], nt 4 = nt 2), and the shipped default — with the
-implicit node-to-surface route below (`--implicit-n2s-type7`) — ends −15.85 ..
-−28.08 %, RMS 10.34 .. 15.25 % (twelve runs at nt 4 and nt 2). `solidof.k`,
+implicit node-to-surface route below (`--implicit-n2s-type7`) — ends −0.78 ..
+−28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2, run to run on three
+branches). `solidof.k`,
 whose CNRB shares the id of a DEFORMABLE part, is byte-identical.
 
 `*CONSTRAINED_INTERPOLATION` / `_LOCAL` → `/RBE3` (id = `ICID`, `I_modif = 2` so
@@ -3613,9 +3625,11 @@ displacement 0.3352 mm → 1.8e-8 mm on all 271 states - the robust measure -
 and the T01 reaction on a FREE local DOF max 4611 → 0.024 N (RMS 1106 →
 0.0019 N; LS-DYNA 0; on a 30° coupon that channel of a node in a skewed `/BCS`
 points along the free local direction for a VECTOR and a SYSTEM frame alike,
-so the reaction figure rests on the channel's convention); IE END +5.40 →
-+5.38 %, KE END +20.61 → +20.29 % (RMS 2.53 / 3.47 → 2.74 / 3.28 % over the
-19 LS times to 3.798e-4). Movers 1 key / 1 model; the `SYSTEM`-CID decks
+so the reaction figure rests on the channel's convention); KE END +20.61 →
++20.29 % (RMS 3.47 → 3.28 %) and a MIXED IE pair - END +5.40 → +5.38 % but
+RMS 2.53 → 2.74 % and fifths 1-4 worse (+1.89 / +0.53 / +2.18 / +3.94 →
++2.00 / +1.02 / +2.72 / +4.14 %) - over the 19 LS times to 3.798e-4. Movers
+1 key / 1 model; the `SYSTEM`-CID decks
 (`3.1_Elastic_Beams_etc`, `3.5_Linear_Elastic_QS_Plate_Hex`) byte-identical.
 `*NODE` card 1's own `TC`/`RC` cells → one `/GRNOD/NODE` + `/BCS` per distinct
 `(TC, RC)` pair, **on by default** (`--no-node-tc-rc-bcs` /
@@ -4020,7 +4034,7 @@ unit/sign gotchas.
 | `*CONTROL_SOLUTION` SOLN=1/2 + `*LOAD_THERMAL_*` | — (the drivers are DROPPED) | Vol I R17 p.33-162: the family's temperatures *"are all applied in a structural only analysis. They are ignored in a thermal only or coupled thermal/structural analysis"*. `/IMPTEMP` is a HARD Dirichlet reset every cycle (`fixtemp.F:180-199`), so emitting it on such a deck would OVERRIDE the very solve the deck asks for. `*BOUNDARY_TEMPERATURE` and `*INITIAL_TEMPERATURE` are untouched — p.33-162 scopes its sentence to `*LOAD_THERMAL_OPTION` alone. A STATED SOLN=0 beside thermal cards is named (LS-DYNA runs no thermal analysis there) but not dropped |
 | `*MAT_T01..T18` (Vol II R17 p.2-9) | as their canonical `*MAT_THERMAL_*` name | the alias rows are GENERATED from one table, so an alias is never less well diagnosed than the name it aliases; the message names the spelling the deck wrote |
 | `*MAT_THERMAL_{ORTHOTROPIC_TD[_LC],DISCRETE_BEAM,CHEMICAL_REACTION[_ORTHOTROPIC],ISOTROPIC_PHASE_CHANGE,ISPG,USER_DEFINED}`, `*BOUNDARY_TEMPERATURE_{PERIODIC_SET,RSW,TRAJECTORY}`, `*BOUNDARY_THERMAL_{BULKFLOW,BULKNODE,WELD}` | — | recognized + **named** warn-drop: `/HEAT/MAT` is nine isotropic scalars with no reaction, latent heat, birth or user hook, and Radioss has no advective transport, no bulk-node reservoir and no moving heat source (the fixed-path `*BOUNDARY_THERMAL_WELD` has 0 carriers on five corpora; its trajectory spelling converts, the next row) |
-| `*BOUNDARY_THERMAL_WELD_TRAJECTORY` (round 9, B1) | `/IMPFLUX` VOLUMIC per window on `/GRBRIC/BRIC` groups + one shared unit `/FUNCT`, on the screened class | **Converted by default on the screened class** (`--no-weld-trajectory-impflux` restores the 386444e output): IFORM 2, ENFOR 0, Q > 0, `*CONTROL_SOLUTION` SOLN 1, RELVEL 0, no NSID1 node on a driven / loaded part, NSID2 < 0 with every NSID1 edge held by a segment of the set, PTYP 1 (part; a blank or stated 0 is that default) or 2 (part set) naming all-solid 8-node parts, the `*MAT_THERMAL_CWM` born before t 0 (round 8's spec refused 'PTYP != 0' - wrong: Vol I R17 p.5-172 makes PTYP 1 a part id, the default on all four carriers). OpenRadioss has no moving heat source - `/IMPFLUX` has no position argument and a fixed `/GRBRIC` group receives `VOLG x FLUX_DENS x DT1N`, 1/8 per node, inside its exact `[TSTART, TSTOP]` overlap (`fixflux.F:115-128`, `:205-238`) - so the IFORM-2 double ellipsoid (`q = 3 F Q / (2 pi a b c)` in the front / rear quarter-ellipsoids aimed along the segment normals) is deposited per window (`--weld-trajectory-window S`, default 0.25 s) as each seam brick's in-window mean: the fraction of its 64 sub-points inside each lobe at 10 mid-point instants along NSID1 at the SPD1 travel, OFF once the travel passes the end of NSID1. On such a SOLN-1 deck requesting more than 1000 frames the engine `/ANIM/DT` is `max(d3plot dt, ENDTIM / 100)` (S2: 100 frames = 351.5 MB instead of 34.80 GB on 05_5_1) and the TEMP `/TH/NODE` group is the NSID1 + `*DATABASE_HISTORY_NODE` nodes. A refused card keeps today's output with one named sentence. MEASURED on `thermal/welding-new/uncoupled-binout/05_5_1` (= 05_4_1: ONE LS run, so one physics model; nt 4): NORMAL in 66 323 conduction cycles (the source adds none), 721-2075 s of engine time by machine load; the deposit within -0.30 % of LS-DYNA's own source energy; the first / middle / last path nodes peak +5.03 / +6.05 / +6.18 % of T and end the 99 s run -11.81 / -13.46 / -12.22 % of their rise, RMS 2.28 / 2.07 / 2.61 % of the peak rise (63 LS times 0 < t <= 98.991 s); the stored heat is 11.8 % below LS-DYNA's tprint at t 99 - boundary radiation, not deposit. Reach: 2 deck keys / 2 emitted models (bytes) + 2 / 2 refusal-sentence movers (05_2, 05_1: SOLN 2) |
+| `*BOUNDARY_THERMAL_WELD_TRAJECTORY` (round 9, B1) | `/IMPFLUX` VOLUMIC per window on `/GRBRIC/BRIC` groups + one shared unit `/FUNCT`, on the screened class | **Converted by default on the screened class** (`--no-weld-trajectory-impflux` restores the 386444e output): IFORM 2, ENFOR 0, Q > 0, `*CONTROL_SOLUTION` SOLN 1, RELVEL 0, no NSID1 node on a driven / loaded part, NSID2 < 0 with every NSID1 edge held by a segment of the set, PTYP 1 (part; a blank or stated 0 is that default) or 2 (part set) naming all-solid 8-node parts, the `*MAT_THERMAL_CWM` born before t 0 (round 8's spec refused 'PTYP != 0' - wrong: Vol I R17 p.5-172 makes PTYP 1 a part id, the default on all four carriers). OpenRadioss has no moving heat source - `/IMPFLUX` has no position argument and a fixed `/GRBRIC` group receives `VOLG x FLUX_DENS x DT1N`, 1/8 per node, inside its exact `[TSTART, TSTOP]` overlap (`fixflux.F:115-128`, `:205-238`) - so the IFORM-2 double ellipsoid (`q = 3 F Q / (2 pi a b c)` in the front / rear quarter-ellipsoids aimed along the segment normals) is deposited per window (`--weld-trajectory-window S`, default 0.25 s) as each seam brick's in-window mean: the fraction of its 64 sub-points inside each lobe at 10 mid-point instants along NSID1 at the SPD1 travel, OFF once the travel passes the end of NSID1. On such a SOLN-1 deck requesting more than 1000 frames the engine `/ANIM/DT` is `max(d3plot dt, ENDTIM / 100)` (S2: 100 frames = 351.5 MB instead of 34.80 GB on 05_5_1) and the TEMP `/TH/NODE` group is the NSID1 + `*DATABASE_HISTORY_NODE` nodes. A refused card keeps today's output with one named sentence. MEASURED on `thermal/welding-new/uncoupled-binout/05_5_1` (= 05_4_1: ONE LS run, so one physics model; nt 4): NORMAL in 66 323 conduction cycles (the source adds none), 720-2075 s of engine time by machine load; the deposit within -0.30 % of LS-DYNA's own source energy; the first / middle / last path nodes peak +5.03 / +6.05 / +6.18 % of T and end the 99 s run -11.81 / -13.46 / -12.22 % of their rise, RMS 2.28 / 2.07 / 2.61 % of the peak rise (63 LS times 0 < t <= 98.991 s); the stored heat is 11.8 % below LS-DYNA's tprint at t 99 - boundary radiation, not deposit. Reach: 2 deck keys / 2 emitted models (bytes) + 2 / 2 refusal-sentence movers (05_2, 05_1: SOLN 2) |
 | `*MAT_THERMAL_CWM` (also `*MAT_T07`) via `*PART` TMID (round 9, B1) | the `/HEAT/MAT` values (TD_LC line) + a stand-in `/MAT/ELAST`, **only** with an accepted `*BOUNDARY_THERMAL_WELD_TRAJECTORY` | A card born before t 0 (`TISTART <= 0`, `TIEND <= 0`, `TLEND` below T0) is gamma = 1 from the first step, i.e. its live TD_LC material: `RHO0_CP = TRO x mean(LCHC ordinates)`, `AS = AL`, `BS = BL` = one least-squares line through the LCTC points (05_x_1: 4.71, 16.98821235, 0.00130610115). It **never converts alone**: converting it without its source gives a ZERO-HEATING run (05_5_1: 293.15 K on every weld-path node), so a deck without an accepted trajectory keeps the named warn-drop |
 | `*CONTROL_THERMAL_{TIMESTEP,NONLINEAR,FORMING,EIGENVALUE}`, `*LOAD_THERMAL_{VARIABLE_BEAM,VARIABLE_SHELL}[_SET]`, `*LOAD_THERMAL_{RSW,TOPAZ,D3PLOT,BINOUT}`, `*BOUNDARY_FLUX_TRAJECTORY` | — | recognized + **named** warn-drop: no Radioss counterpart at all. Every field is listed in the message (`*CONTROL_THERMAL_TIMESTEP` names all eight, `_NONLINEAR` all seven) |
 
@@ -4716,11 +4730,14 @@ spot-weld / tiebreak contact of its own) it stays beside the routed contact
 and carries its `FS` (it duplicates the routed pairs; two routed contacts with
 different `FS` leave it frictionless, named); beside such a contact no stub is
 written and the routed warning says so. MEASURED on
-`implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive (twelve
-runs of the same bytes at nt 4 and nt 2, 25 LS times in (1e-5, 1.1e-3]): IE END
-−15.85 .. −28.08 %, RMS 10.34 .. 15.25 % of the LS peak (−27.80 .. −28.08 % /
-15.21 .. 15.25 % in ten runs, a −15.85 % / 10.34 % branch in two), where the
-TYPE25 ended +53.91 % / 81.05 % and 35 against 39 cycles. **Check that the
+`implicit/basic-examples/springback-i/doorbeam.k` with A1's part drive (125
+runs of the same bytes at nt 4 and nt 2 — the round-9 record's 27 and the
+post-review round's 98 — 25 LS times in (1e-5, 1.1e-3]): IE END −0.78 ..
+−28.12 %, RMS 7.21 .. 15.26 % of the LS peak, run to run on three branches
+(102 runs at −27.76 .. −28.12 %, 21 at −15.85 .. −16.27 %, both at nt 4 and
+nt 2, and two single nt-4 runs nearer LS: −8.36 % / RMS 7.59 % and −0.78 % /
+RMS 7.21 %), where the TYPE25 ended +53.91 % / 81.05 % and 35 against 39
+cycles. **Check that the
 contact carries load**: with four contact nodes on a coarse RIGID base the
 outcome depends on the geometry - on one two-block coupon (a 10 × 10 × 5 mm
 block on a 2 × 2 × 1-hex rigid base) the route ends NORMAL TERMINATION with
@@ -4728,8 +4745,11 @@ the block through the base (gap −0.2218 mm at t 1.0) where the TYPE25 stops
 with MESSAGE 79; on another (a one-hex 20 × 20 × 10 mm block on a one-hex
 30 × 30 × 10 mm rigid base) it holds (gap +0.0228 mm at t 1.0) where the TYPE25
 lets the block through (−0.1708 mm at t 0.9) and stops at 98 % of t_end behind
-a NORMAL TERMINATION; on a shell-secondary coupon it holds where the TYPE25
-default stops (nt 4 = nt 2 on every coupon).
+a NORMAL TERMINATION; with the block's four nodes over the corners of a
+2 × 2 or a 1 × 1-hex rigid base BOTH let it through behind a NORMAL banner (gap
+−0.1865 / −0.1907 mm on the route, −0.1885 / −0.1922 mm on the TYPE25 at t
+1.0) — the TYPE25 default fails silently too; on a shell-secondary coupon it
+holds where the TYPE25 default stops (nt 4 = nt 2 on every coupon).
 `*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
 `fric_ID` binding work). LS-DYNA's
 `μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`
@@ -4931,7 +4951,8 @@ has no TYPE25 branch, `ind_glob_k.F:4601-4605` prints MESSAGE 232): round 8
 first left it out, and its validation round put it back — without it a
 two-block coupon whose TYPE25 contact must carry load ends in ERROR TERMINATION
 at cycle 9 (NORMAL in 11 cycles with it), and `doorbeam` with its punch driven
-(round 9) ends a NORMAL banner at 49.4 % of t_end with the punch stopped;
+(round 9) ends a NORMAL banner at 49.4 % of t_end with the run stopped (the
+punch at 81.51 of 135 mm);
 [`--skip-implicit-stub-with-type25`](#--skip-implicit-stub-with-type25--skip-the-implicit-stub-beside-a-type25-route-contact)
 leaves it out. A **tied** `/INTER/TYPE10` has no Fpenmax field at all
 (`hm_read_inter_type10.F:94`) and clears the same refusal with `Itied = 1`
@@ -4991,8 +5012,10 @@ rigid-body nodes.
 
 MEASURED on spotweld.k at `nt` 4 with today's defaults (the round-7 shear
 curve and `EFAIL` displacement criterion, see `*MAT_SPOTWELD`, and the round-8
-DT scaling): rule 1 alone costs 7.64× the cycles (639 → 4884) at IE −99.92 %
-— it builds a weld that connects nothing; rule 2 alone is identical to the
+DT scaling): rule 1 alone costs 2.09× the cycles (639 → 1334) at IE END
+−99.88 % — it builds a weld that connects nothing (7.64×, 4884 cycles, under
+`--no-spotweld-dt-mass-scaling`: the round-6 figure, re-measured by the
+post-review round); rule 2 alone is identical to the
 base; **both** end at LS-DYNA's own cycle count 1332 with IE END −31.18 %,
 KE END +30.76 % and RMS IE / KE 6.82 / 23.66 % of the LS peak over the 1331
 LS times to t 0.00119792, and the weld ruptures at 1.12229e-3 s, 65.3 µs
@@ -6111,7 +6134,8 @@ quasi-static term adds `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the diagonal,
 `lectur.F:3517-3532` disarms only FIXPOINT). It buys a load path, not the
 answer: on `ex_07_beam_elform_1` the converged load factor loops down to
 −0.4412, turning back and forth many times (the count depends on the counting
-rule), where LS-DYNA's own path turns once, at 0.3745, and never goes below 0;
+rule), where LS-DYNA's own path rises to 0.3745, unloads to exactly 0 and
+reloads to 1.185, and never goes below 0;
 ten runs of identical bytes end NORMAL nine times (1192 .. 1219 cycles, five at
 nt 4 and four at nt 2) and ERROR once at nt 4 (MESSAGE 79 at cycle 1421, the
 load factor back at 0), and `ex_05_beam_elform_3_&_6` still stops (MESSAGE 79
@@ -7170,7 +7194,8 @@ cycle row identical but the controlling-node label):
   35 cycles, END +53.91 %, RMS 81.05 % of the LS peak over the 25 LS times in
   (1e-5, 1.1e-3]; without it a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 %
   of t_end) behind 'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the
-  punch stopped at 81.51 of 135 mm (RMS 224.17 % over the 13 LS times in
+  run stopped with the punch at 81.51 of 135 mm (RMS 224.17 % over the 13 LS
+  times in
   (1e-5, 5.40779e-4] - a shorter window). Round 8's doorbeam pair (END
   +582.00 → +689.08 %) was measured while the prescribed motion drove the
   CNRB that shares PID 4 with the punch, so the punch never moved.
@@ -7331,14 +7356,15 @@ other NSOLVR keeps `/IMPL/NONLIN/1` and is named. MEASURED (nt 4 and nt 2):
 `ex_06_beam_elform_1` ends NORMAL in 277 cycles at IE END -0.09 %, RMS 0.09 %
 of the LS peak over 121 LS times in (0.01, 1.0] (nt 4 = nt 2), where the
 default stops at t 0.1601 (IE -59.58 %). The failure can be SILENT, on the
-default bytes too: doorbeam (A1 + A2 bytes) ends a NORMAL banner in all 14 runs
-of identical bytes (39-42 cycles), with IE END -8.64 .. +29.51 % (RMS 8.19 ..
-38.42 % of the LS peak) in the seven at nt 4, but in four of the seven at nt 2
-with NONSENSE internal energy (END -199.96 / -2251.24 / -5182.84 / -12177.48 %;
-the other three -4.92 .. -6.06 %); the TYPE25 route (`--no-implicit-n2s-type7`)
-does the same (END -1.1e10 % at nt 4, -7.7e8 % at nt 2), and tensile2's IE RMS
-goes 2.48 -> 5.61 % (END -0.54 -> +26.88 %). One carrier is not a default:
-check the energies before using a run.
+default bytes too, at nt 4 AND nt 2: doorbeam (A1 + A2 bytes) ends a NORMAL
+banner in all 96 runs of identical bytes (the round-9 record's 14 and the
+post-review round's 82, 39-42 cycles), and 13 of them carry NONSENSE internal
+energy - 4 of 51 at nt 4, 9 of 45 at nt 2, END -19769.57 .. +1082.01 % - while
+the other 83 end -11.85 .. +29.51 %: which run fails is run to run, not an nt
+property. The TYPE25 route (`--no-implicit-n2s-type7`) carries nonsense energy
+behind a NORMAL banner too (13 of 14 runs), and tensile2's IE RMS goes 2.48 ->
+5.61 % (END -0.54 -> +26.88 %). One carrier is not a default: check the
+energies before using a run.
 
 ### `--ale-flow-tracking` — the ALE grid that follows the material
 
@@ -7430,7 +7456,8 @@ starter TOTAL MASS 0.2818 = the shells' 0.2808 + the 0.001 probe body), while
 `tools/modal_solve.py`'s lumper weighs no acoustic material. The deck's own
 frequency-domain result has no counterpart, so the row is a status promotion,
 not a validation: the offline solve of that export with this machine's STOCK
-(`E10.2`) engine gives 7 zero-frequency modes and then 52.65 Hz where
+(`E10.2`) engine gives zero-frequency modes (their count follows the eigsh
+request) and then 52.65 Hz where
 LS-DYNA's `eigout` starts at 66.40 Hz - unvalidated, like every low-precision
 matrix (below). A time-domain deck keeps the refusal: there a void runs but
 carries no wave and removes the fluid's radiation sink (`8.3.plate_kirchhoff`,

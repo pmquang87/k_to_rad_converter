@@ -325,7 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
              "the weld part, a new node on the nearest segment on the other "
              "side (spotweld.k: 1213 -> z 0, new node at z 2, length 2.0 = "
              "LS-DYNA's own d3plot and swforc). OFF by default: alone it only "
-             "costs cycles (7.64x on spotweld.k, IE -99.92 %%); with "
+             "costs cycles (2.09x on spotweld.k with today's DT scaling, "
+             "7.64x without; IE END -99.88 %%); with "
              "--beam-contact-secondary (and today's EFAIL displacement "
              "criterion and DT scaling) the IE END reads -31.18 %% at "
              "LS-DYNA's own cycle count 1332 and the weld ruptures 65.3 us "
@@ -876,7 +877,8 @@ def build_parser() -> argparse.ArgumentParser:
              "end NORMAL with the load path lost. MEASURED (nt 4 = nt 2): a "
              "two-block coupon NORMAL in 11 cycles with it, ERROR TERMINATION "
              "at cycle 9 without; doorbeam (punch driven) ends a NORMAL banner "
-             "at 49.4 %% of t_end with the punch stopped.",
+             "at 49.4 %% of t_end with the run stopped (the punch at 81.51 of "
+             "135 mm).",
     )
     parser.add_argument(
         "--shell-in-solid-coupling",
@@ -924,9 +926,10 @@ def build_parser() -> argparse.ArgumentParser:
              "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm, as LS-DYNA) and IE "
              "ended +582.00 %% (+53.91 %% with the part drive alone, RMS "
              "393.31 -> 81.05 %%; the shipped default with "
-             "--implicit-n2s-type7 -15.85 .. -28.08 %%, RMS 10.34 .. 15.25 "
-             "%%). ON by default; --no-rigid-part-pid-precedence "
-             "restores the 386444e bytes.",
+             "--implicit-n2s-type7 -0.78 .. -28.12 %%, RMS 7.21 .. 15.26 "
+             "%% over 125 runs, run to run on three branches). ON by "
+             "default; --no-rigid-part-pid-precedence restores the 386444e "
+             "bytes.",
     )
     parser.add_argument(
         "--implicit-n2s-type7",
@@ -941,13 +944,15 @@ def build_parser() -> argparse.ArgumentParser:
              "no contact of its own) it stays beside the route and carries "
              "the contact's friction; beside another contact there is no "
              "stub, named. MEASURED on doorbeam (part-driven, A1): IE "
-             "END -15.85 .. -28.08 %%, RMS 10.34 .. 15.25 %% of the LS peak "
-             "(twelve runs, nt 4 and nt 2), where the TYPE25 ended +53.91 %% / "
-             "81.05 %%. With four contact nodes on a coarse RIGID base the "
+             "END -0.78 .. -28.12 %%, RMS 7.21 .. 15.26 %% of the LS peak "
+             "(125 runs, nt 4 and nt 2, run to run on three branches: "
+             "mostly -27.76 .. -28.12 %%), where the TYPE25 ended +53.91 %% "
+             "/ 81.05 %%. With four contact nodes on a coarse RIGID base the "
              "outcome depends on the geometry: the route can end NORMAL "
              "with the block through (silent) where the TYPE25 stops "
-             "loudly, or hold where the TYPE25 lets the block through. ON "
-             "by default; --no-implicit-n2s-type7 keeps the TYPE25.",
+             "loudly, hold where the TYPE25 lets the block through, or - "
+             "nodes over the base's corners - both let it through. ON by "
+             "default; --no-implicit-n2s-type7 keeps the TYPE25.",
     )
     parser.add_argument(
         "--implicit-rigid-gravity-nodes",
@@ -1055,9 +1060,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Opt-in: Quasi-Newton BFGS (/IMPL/NONLIN/2) without /IMPL/QSTAT "
              "for an NSOLVR 12 (or blank) deck. One carrier (ex_06: IE RMS "
              "0.09 %%, NORMAL where the default stops); can fail SILENTLY "
-             "(doorbeam's default A1 + A2 bytes: a NORMAL banner with "
-             "nonsense internal energy in 4 of 7 runs at nt 2, END down to "
-             "-12177.48 %%; the TYPE25 route too) - OFF by default.",
+             "at nt 4 and nt 2 (doorbeam's default A1 + A2 bytes: a NORMAL "
+             "banner in all 96 runs, nonsense internal energy in 13 - 4 of "
+             "51 at nt 4, 9 of 45 at nt 2; the TYPE25 route too) - OFF by "
+             "default.",
     )
     parser.add_argument(
         "--weld-trajectory-impflux",
@@ -1074,7 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
              "sentence. MEASURED on 05_5_1 (one LS model, nt 4): NORMAL in "
              "66 323 cycles, deposit -0.30 %% of LS-DYNA's source energy, "
              "path peaks +5.03..+6.18 %% and END -11.81..-13.46 %% of the "
-             "rise; 721-2075 s of engine time. --no-weld-trajectory-impflux "
+             "rise; 720-2075 s of engine time. --no-weld-trajectory-impflux "
              "restores the 386444e output.",
     )
     parser.add_argument(
@@ -1127,11 +1133,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Point a mechanical applied-load consumer (/IMPVEL, /IMPDISP, "
              "/IMPACC, /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is "
-             "zero off the curve's abscissa range, as LS-DYNA's load curves are "
-             "(*DEFINE_CURVE Remarks 4a and 5); OpenRadioss would extend the "
-             "first / last segment. Material, preload and thermal curves are "
-             "never changed. MEASURED: the cup-draw punch no longer starts "
-             "backward but its IE END goes +6.09 -> +13.10 %% (MIXED); "
+             "zero past its last abscissa (*DEFINE_CURVE Remark 5) and, for a "
+             "DATTYP-0 curve with OFFA > 0 and SFA 0 / 1, before OFFA (Remarks "
+             "4a and 5), as LS-DYNA's load curves are; OpenRadioss would "
+             "extend the last / first segment. A curve that merely starts "
+             "after t 0 without OFFA keeps its head. Material, preload and "
+             "thermal curves are never changed. MEASURED: the cup-draw punch "
+             "no longer starts backward but its IE is WORSE (END +6.09 -> "
+             "+13.10 %%, RMS 2.89 -> 5.57 %%; KE END -40.31 -> -42.14 %%); "
              "thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> "
              "+23.42 %%. ON by default; --no-load-curve-offscale-zero writes "
              "the curves as stated.",

@@ -45,6 +45,17 @@ _F2D_DEFAULT = 0.67
 #: the starter's own default hourglass coefficient for a 0 cell
 #: (hm_read_prop14.F:363-366)
 _H_DEFAULT = 0.1
+#: the plane test's relative round-off band: a node is in the xy-plane when
+#: |z| <= _PLANE_TOL x the largest absolute coordinate of the shell nodes
+#: (screen 4 and the /NODE transform read the same AxisymPlan.z_tol)
+_PLANE_TOL = 1.0e-9
+#: the reminder line of a /TH/NODE REAC* group (writer/output.py writes it
+#: for the reaction / SPCFORC / BNDOUT groups) and its 2-D reading: a 2-D
+#: REAC* is per radian per unit radius (the post-review round, F14)
+_REAC_PREFIX = "#  REAC* accumulates m*a*dt over the run: "
+_REAC_FORCE = "force = d(REAC*)/dt"
+_REAC_FORCE_2D = ("force per radian = Y_node * d(REAC*)/dt (2-D axisymmetric: "
+                  "REAC* is per unit radius)")
 
 #: ELEMENT keyword families that a 2-D deck cannot carry (screen 2)
 _FAMILY_PREFIXES = (
@@ -188,12 +199,22 @@ def resolve_axisym_plan(state: ConversionState) -> AxisymPlan:
             "energy (cG3 mf2dRT: IE fifths +11.50 .. +66.73 %, energy error "
             "up to 99.9 %) and a 2-D /TRIA needs LAW151 "
             "(check_mat_elem_prop_compatibility.F:141-147)")
-    # 4: the section in the xy-plane, x >= 0 (element nodes)
+    # 4: the section in the xy-plane, x >= 0 (element nodes). "In the plane"
+    # is |z| <= _PLANE_TOL x the largest absolute coordinate: a z of round-off
+    # size (the SPR main giant's node 1 sits at z = -5.55e-18, x = 0.099) is
+    # in the plane, not a refusal class (the post-review round, E3)
+    scale = 0.0
+    for el in state.shell_elems:
+        for n in el.nodes:
+            p = state.nodes.get(n)
+            if p is not None:
+                scale = max(scale, abs(p.x), abs(p.y), abs(p.z))
+    plan.z_tol = _PLANE_TOL * scale
     for el in state.shell_elems:
         bad = None
         for n in el.nodes:
             p = state.nodes.get(n)
-            if p is not None and (p.z != 0.0 or p.x < 0.0):
+            if p is not None and (abs(p.z) > plan.z_tol or p.x < 0.0):
                 bad = (n, p)
                 break
         if bad is not None:
@@ -371,7 +392,7 @@ def _transform_starter_lines(state: ConversionState, lines: List[str],
                         nb.append(x)
                         continue
                     t = x.split()
-                    if len(t) != 4 or float(t[3]) != 0.0:
+                    if len(t) != 4 or abs(float(t[3])) > plan.z_tol:
                         raise _Abort(f"/NODE {t[0] if t else '?'} (off the "
                                      "xy-plane)")
                     nb.append(f"{int(t[0]):10d}{'0':>20s}{t[1]:>20s}"
@@ -494,6 +515,15 @@ def _transform_starter_lines(state: ConversionState, lines: List[str],
             elif re.match(r"^/TH/SHEL/\d+\s*$", head):
                 b = ["/TH/QUAD/" + head.split("/")[3].strip()] + b[1:]
                 counts["th"] += 1
+            elif re.match(r"^/TH/NODE/\d+\s*$", head) and any(
+                    x.startswith(_REAC_PREFIX) for x in b):
+                # the post-review round (F14): a 2-D nodal mass is per
+                # radian PER UNIT RADIUS (fixvel.F:361 weighs the imposed
+                # motion's work by AXI = Y), so the reminder's force reading
+                # takes the node's radius
+                b = [x.replace(_REAC_FORCE, _REAC_FORCE_2D)
+                     if x.startswith(_REAC_PREFIX) else x for x in b]
+                counts["reac"] = counts.get("reac", 0) + 1
             elif re.match(r"^/AMS(/\d+)?\s*$", head):
                 # --ams: the starter half of /DT/AMS, which a 2-D deck never
                 # carries (resol.F:2711-2729; the engine half is dropped by
@@ -557,7 +587,13 @@ def transform_starter_lines(state: ConversionState,
         "codes (LS d3hsp 'for 2D axisymmetric problems the following masses "
         "are reported per radian'; OpenRadioss qvoli2.F:91-96 weights the "
         "volume by Y). The /TH/NODE channels keep Radioss's names: their Y is "
-        "the radius and Z the axis. Both ELFORM 14 and 15 run as "
+        "the radius and Z the axis."
+        + (" Their reaction channels (REAC*) are per radian PER UNIT RADIUS "
+           "(fixvel.F:361 weighs the imposed motion's work by AXI = Y): the "
+           "per-radian force of a node is Y_node x d(REAC*)/dt, 0 on the axis "
+           "- not the d(REAC*)/dt a 3-D deck reads."
+           if c.get("reac") else "")
+        + " Both ELFORM 14 and 15 run as "
         "OpenRadioss's area-weighted quad (QFORC2; the volume-weighted branch "
         "is not reachable from input, hm_read_prop14.F:247-250). MEASURED on "
         "thermal/metal-forming/metal-forming.k (nt 4): starter TOTAL MASS "

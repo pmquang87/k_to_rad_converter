@@ -1225,10 +1225,13 @@ class AxisymPlan:
     ``aborted`` - the emitted-deck transform met a card it does not map and
     kept the 3-D lines (screen 7); ``density`` / ``dt0`` - the 2-D DT2MS
     density cell's per-material factor and OpenRadioss's own cycle-0 2-D
-    step of that material's quads."""
+    step of that material's quads; ``z_tol`` - the plane test's round-off
+    band (1e-9 x the largest absolute coordinate of the shell nodes; the
+    post-review round's E3)."""
     candidate: bool = False
     routed: bool = False
     aborted: bool = False
+    z_tol: float = 0.0
     elform: int = 0
     pids: List[int] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
@@ -7702,7 +7705,8 @@ class ConvertOptions:
     # Round 9 (A11): the flag also writes no /IMPL/QSTAT unless
     # qstat_dtscal_stated, and re-measured ex_07 under it: the path loops
     # through negative load factors LS-DYNA never visits (down to -0.4412,
-    # turning back and forth many times; LS-DYNA's turns once, at 0.3745),
+    # turning back and forth many times; LS-DYNA's rises to 0.3745, unloads
+    # to exactly 0, reloads to 1.185 and never goes below 0),
     # NORMAL in 9 of 10 runs of identical bytes (1192 .. 1219 cycles, five
     # at nt 4 and four at nt 2), ERROR once at nt 4 (MESSAGE 79); ex_05
     # still stops (load factor 0.84 .. 0.87, four runs at nt 4 and nt 2);
@@ -7770,7 +7774,8 @@ class ConvertOptions:
     # spotweld.k: node 1213 -> z 0, new node at z 2, length 2.0 = LS-DYNA's own
     # d3plot and swforc). Rule 2 puts beam/truss nodes on a contact side
     # (writer/contacts._contact_part_nodes). MEASURED on spotweld.k (nt 4):
-    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both,
+    # rule 1 alone costs 2.09x the cycles (639 -> 1334) at IE END -99.88 %
+    # with the round-8 DT scaling (7.64x, 4884, without it); both,
     # with today's EFAIL displacement criterion and DT scaling, end at
     # LS-DYNA's own cycle count 1332 with IE END -31.18 % and the weld
     # rupturing 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s; round 9,
@@ -8370,7 +8375,8 @@ class ConvertOptions:
     # 4 = nt 2) on a two-block coupon whose TYPE25 contact must carry load,
     # the skip turns NORMAL in 11 cycles into ERROR TERMINATION at cycle 9;
     # on doorbeam with its punch driven (round 9, A1) the skip ends a NORMAL
-    # banner at 49.4 % of t_end with the punch stopped. Since round 9 an
+    # banner at 49.4 % of t_end with the run stopped (the punch at 81.51 of
+    # 135 mm). Since round 9 an
     # implicit N2S spelling is a routed TYPE7 (--implicit-n2s-type7), so the
     # flag reaches the ERODING spellings (and N2S under the opt-out). Under the flag
     # __init__._inject_implicit_contact_stub defers the decision to
@@ -8404,8 +8410,8 @@ class ConvertOptions:
     # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
     # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
     # nt 2, 39 -> 35 cycles); the shipped default with --implicit-n2s-type7
-    # -15.85 .. -28.08 %, RMS 10.34 .. 15.25 % (twelve runs at nt 4 and nt
-    # 2). solidof (a deformable-part clash) is byte identical.
+    # -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2,
+    # three branches). solidof (a deformable-part clash) is byte identical.
     rigid_part_pid_precedence: bool = True
     # --no-implicit-n2s-type7: an implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE
     # stays an /INTER/TYPE25 (the 386444e bytes).
@@ -8420,12 +8426,13 @@ class ConvertOptions:
     # default gap; the record stays in state.contacts_type25 so the
     # all-parts implicit stub is KEPT, carrying the routed FS (coordinator
     # decision: friction-faithful). MEASURED on doorbeam with A1 (25 LS
-    # times in (1e-5, 1.1e-3]): IE END -15.85 .. -28.08 %, RMS 10.34 .. 15.25
-    # % (twelve runs at nt 4 and nt 2 on two branches, -27.80 .. -28.08 %
-    # in ten), against +53.91 % / 81.05 % on the
+    # times in (1e-5, 1.1e-3]): IE END -0.78 .. -28.12 %, RMS 7.21 .. 15.26
+    # % (125 runs at nt 4 and nt 2, run to run on three branches, 102 at
+    # -27.76 .. -28.12 %), against +53.91 % / 81.05 % on the
     # TYPE25; on a coarse 4-node rigid base the outcome depends on the
     # geometry (one coupon ends NORMAL with the block through, another holds
-    # where the TYPE25 lets it through - both named in the warning, as is a
+    # where the TYPE25 lets it through, corner-node coupons let it through
+    # on both - all named in the warning, as is a
     # deck whose own contacts leave no stub). Movers 1 key / 1 model
     # (doorbeam).
     implicit_n2s_type7: bool = True
@@ -8534,9 +8541,10 @@ class ConvertOptions:
     # (or that has no such card) write /IMPL/NONLIN/2 (Quasi-Newton BFGS) in
     # place of /IMPL/NONLIN/1 and no /IMPL/QSTAT unless qstat_dtscal_stated
     # (writer/assembly._bfgs_requested). One measured carrier (ex_06); the
-    # failure can be SILENT (doorbeam's A1 + A2 bytes end a NORMAL banner
-    # with nonsense internal energy in 4 of 7 runs at nt 2) - so never a
-    # default. Default False = the 386444e bytes.
+    # failure can be SILENT at nt 4 and nt 2 (doorbeam's A1 + A2 bytes end a
+    # NORMAL banner in all 96 runs, with nonsense internal energy in 13: 4 of
+    # 51 at nt 4, 9 of 45 at nt 2) - so never a default. Default False = the
+    # 386444e bytes.
     implicit_bfgs: bool = False
     # --no-weld-trajectory-impflux: a *BOUNDARY_THERMAL_WELD_TRAJECTORY and
     # its *MAT_THERMAL_CWM stay unconverted (the 386444e output: the seam
@@ -8615,7 +8623,8 @@ class ConvertOptions:
     # (0.999 OFFA, 0) for DATTYP 0 / OFFA > 0 and Remark 5's "set to zero if
     # the time goes off scale". state.curves, material, preload and thermal
     # curves never change. MEASURED: the aniso cup-draw's punch no longer
-    # starts backward but its IE END goes +6.09 -> +13.10 % (MIXED); thick.k's
+    # starts backward but its IE is WORSE (END +6.09 -> +13.10 %, RMS 2.89 ->
+    # 5.57 %; KE END -40.31 -> -42.14 %); thick.k's
     # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
     # deck keys on 2 emitted models.
     load_curve_offscale_zero: bool = True
