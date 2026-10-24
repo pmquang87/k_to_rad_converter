@@ -86,6 +86,7 @@ __all__ = [
     "add_implicit_contact_stub",
     "_make_deferred_implicit_stub",
     "_STUB_TYPE25_KEPT_SENTENCE",
+    "n2s_routed",
     "_segment_set_edges",
     "_general_line_group",
     "_make_general_interfaces",
@@ -1296,6 +1297,176 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
     return value, True
 
 
+#: The *CONTACT_AUTOMATIC_* types the round-9 A10 opt-in reaches (a _MORTAR
+#: suffix is stripped for this test only; _ID / _TITLE / _MPP by
+#: _contact_base_spelling).
+_A10_AUTOMATIC_TYPES = frozenset({
+    "AUTOMATIC_SINGLE_SURFACE", "AUTOMATIC_SURFACE_TO_SURFACE",
+    "AUTOMATIC_GENERAL",
+})
+
+
+def _main_shells_and_faces(state: ConversionState, sid: int, styp: int
+                           ) -> Tuple[list, List[List[int]], bool]:
+    """``(shells, solid faces, complete)`` of a contact MAIN side as
+    ``writer.common._make_master_surface`` emits it (round 9, A10).
+
+    The :func:`_main_surface_segments` rules: per part, SHELLS WIN (a part
+    with shell elements contributes its shells only), a shell-free solid /
+    thick-shell part contributes its external faces, a ``*SET_SEGMENT``
+    side is classified by node membership - and here a shell-classified
+    segment must ALSO match an ``*ELEMENT_SHELL`` by its node set, because the
+    rule needs each main shell's thickness (no match -> ``complete`` False:
+    the rule stands down). ``*SET_SHELL`` (styp 1) carries no solid faces.
+    PURE: no id drawn, no line emitted.
+    """
+    shells: list = []
+    faces: List[List[int]] = []
+    complete = True
+
+    def _from_pids(pids: Iterable[int]) -> None:
+        nonlocal complete
+        pset = set(pids)
+        shell_pids = {e.pid for e in state.shell_elems if e.pid in pset}
+        solid_pids = ({e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems})
+        shells.extend(e for e in state.shell_elems if e.pid in shell_pids)
+        solid_only = sorted(p for p in pset
+                            if p in solid_pids and p not in shell_pids)
+        got, ok = _solid_boundary_faces(state, solid_only)
+        faces.extend(got)
+        complete = complete and ok
+
+    if styp == 5 or sid == 0:
+        _from_pids(state.parts.keys())
+    elif styp == 2:
+        ps = state.part_sets.get(sid)
+        _from_pids(ps[1] if ps else ())
+    elif styp == 3:
+        _from_pids([sid] if sid in state.parts else ())
+    elif styp == 0:
+        ss = state.segment_sets.get(sid)
+        if ss is None:
+            return [], [], False
+        by_nodes = {frozenset(n for n in e.nodes if n > 0): e
+                    for e in state.shell_elems}
+        shell_nodes = {n for e in state.shell_elems for n in e.nodes if n > 0}
+        solid_nodes = {n for e in state.solid_elems for n in e.nodes if n > 0}
+        solid_nodes |= {n for e in state.tshell_elems for n in e.nodes if n > 0}
+        for seg in ss.segments:
+            nds = [n for n in seg if n > 0]
+            if not nds:
+                continue
+            if all(n in solid_nodes for n in nds) and not all(
+                    n in shell_nodes for n in nds):
+                faces.append(nds)
+            else:
+                e = by_nodes.get(frozenset(nds))
+                if e is None:
+                    complete = False
+                else:
+                    shells.append(e)
+        _from_pids(ss.part_scope)
+    else:
+        return [], [], False
+    return shells, faces, complete
+
+
+def _main_shell_thickness(state: ConversionState, e) -> float:
+    """The thickness the starter takes for a main shell's gap at Igap >= 1
+    (``i7sti3.F:226-238``): the ``/PART`` Thick (``*PART_CONTACT`` OPTT)
+    first, then the element's own (``*ELEMENT_SHELL_THICKNESS``), then the
+    section ``T1`` (a ``*PART_COMPOSITE`` part: its valid-ply sum)."""
+    pc = state.part_contacts.get(e.pid)
+    if pc is not None and pc.optt:
+        return float(pc.optt)
+    from .mesh import _shell_element_thickness, _unique_node_slots
+    part = state.parts.get(e.pid)
+    comp = state.part_composites.get(e.pid)
+    if part is not None and part.secid == 0 and comp is not None:
+        return sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+    sec = state.sec_shells.get(part.secid) if part is not None else None
+    t1 = sec.t1 if sec is not None else 0.0
+    return _shell_element_thickness(e, _unique_node_slots(e.nodes), t1) or t1
+
+
+def _mixed_main_thickness_gap(state: ConversionState,
+                              c: Union[ContactAutoSingle,
+                                       ContactAutoSurf2Surf],
+                              gapmin: float, offset_gap: bool, main_sid: int,
+                              main_styp: int) -> Tuple[float, int]:
+    """Round 9, A10 (OPT-IN ``--mixed-main-thickness-gap``): ``(Gapmin,
+    Igap)`` of an AUTOMATIC contact's ``/INTER/TYPE7`` whose EMITTED main
+    holds shell AND solid segments.
+
+    LS-DYNA offsets an AUTOMATIC contact's shells by half their thickness and
+    its solids by nothing (Vol I R17 p.11-128/129 General Remark 12). With
+    no gap stated the starter takes ONE constant gap, the mean main shell
+    thickness capped at half the smallest main side (``i7sti3.F:1055-1066``):
+    0.7499998 on mainboltaexpl, above its 0.7 mm plate distance, so 812
+    initial penetrations that Inacti 5 accepts and the LS 0.2 mm clearance
+    never exists. Under the flag the card gets Igap 3 with Gapmin =
+    ``min(t_min / 2, 0.5 x the smallest main side)``, ``t_min`` the thinnest
+    main shell (:func:`_main_shell_thickness`).
+
+    Stands down (returns its input and Igap 0) unless the option is on, the
+    keyword is a :data:`_A10_AUTOMATIC_TYPES` type, the card is neither
+    k2rad's implicit stub nor an ``_INTERFERENCE`` fit, NO gap is stated or
+    derived (Card-3 SST / MST, ``--inter-gapmin``, ``--auto-gapmin``,
+    ``--derived-gapmin``, the shell offset), and the main is mixed and fully
+    classified. A main shell without a positive thickness refuses by name.
+    The round's gate measured the rule against the TYPE25 Igap-2 route on
+    both carriers and shipped neither as a default (part-A spec D1): the
+    clearance closes on mainboltaexpl, EXP_SC_PRELOAD's frictional contact
+    energy grows - hence opt-in. PURE apart from its warning.
+    """
+    if (not state.options.mixed_main_thickness_gap or gapmin != 0.0
+            or offset_gap or getattr(c, "interference", False)
+            or c.title == AUTO_IMPLICIT_STUB_TITLE):
+        return gapmin, 0
+    base = _contact_base_spelling(c.keyword)
+    if base.endswith("_MORTAR"):
+        base = base[:-len("_MORTAR")]
+    if base not in _A10_AUTOMATIC_TYPES:
+        return gapmin, 0
+    shells, faces, complete = _main_shells_and_faces(state, main_sid,
+                                                     main_styp)
+    if not (shells and faces and complete):
+        return gapmin, 0
+    kw = c.keyword.lstrip("*")
+    thick = [_main_shell_thickness(state, e) for e in shells]
+    bad = [e.eid for e, t in zip(shells, thick) if not t > 0.0]
+    if bad:
+        state.warn(
+            f"*{kw} {c.inter_id}: --mixed-main-thickness-gap: main shell(s) "
+            f"{bad[:10]} carry no positive thickness, so no half-thickness "
+            "gap exists; the starter's constant default gap stands (Igap 0).")
+        return gapmin, 0
+    t_min = min(thick)
+    edge = _min_segment_side(state, [e.nodes for e in shells] + faces)
+    half_t = 0.5 * t_min
+    capped = edge > 0.0 and 0.5 * edge < half_t
+    value = _round_sig(0.5 * edge if capped else half_t)
+    state.warn(
+        f"*{kw} {c.inter_id}: --mixed-main-thickness-gap: the main mixes "
+        f"shells and solids, so /INTER/TYPE7/{c.inter_id} gets Igap 3 with "
+        f"Gapmin {value:g} = half the thinnest main shell "
+        f"({_round_sig(t_min):g})"
+        + (f", capped at half the smallest main edge {_round_sig(edge):g}"
+           if capped else "")
+        + " instead of the starter's constant default gap (the mean main "
+        "shell thickness capped at half the smallest main side, "
+        "i7sti3.F:1055-1066). LS-DYNA offsets an AUTOMATIC contact's shells "
+        "by half their thickness and its solids by nothing (Vol I R17 "
+        "p.11-128/129 General Remark 12). MEASURED (nt 4): mainboltaexpl's "
+        "bolt 2.19560 -> 1.99461 mm at 1e-3 s (LS 1.81686), the plates' IE "
+        "1.31 -> 134.66 N.mm (LS 245.92); COST on EXP_SC_PRELOAD: contact "
+        "energy 2916 -> 7557 at END against LS-DYNA's sliding interface "
+        "energy 1758.5, farther at every fifth (mostly frictional) - hence "
+        "not a default.")
+    return value, 3
+
+
 #: The measured cost of a smaller Gapmin (R14 triage round 6, the 16-arm gap
 #: sweep, cycle ratios base-paired). ONE constant so the warning and its
 #: documentation cannot drift; the contact-step line was read in the engine.
@@ -1937,6 +2108,13 @@ def _bolt_end_rigid_members(state: ConversionState, rbody_info: Dict
     return out
 
 
+def _body_label(key: int) -> str:
+    """An rbody_info key as a reader sees it: a part / CNRB id, or - for the
+    shadow key -pid of a CNRB that gave way to the rigid part of its PID
+    (round 9, A1) - 'CNRB <pid>'."""
+    return str(key) if key > 0 else f"CNRB {-key}"
+
+
 def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
                           sid: int, styp: int) -> None:
     """W-l2 (round 8, A2 (l)-2): the bolt-end rigid members a penalty
@@ -1948,7 +2126,8 @@ def _warn_bolt_rigid_kept(state: ConversionState, keyword: str, inter_id: int,
     bsids = sorted({state.bolt_rigid_keep[n][1] for n in kept})
     state.warn(
         f"*{keyword or 'CONTACT'} {inter_id}: {len(kept)} member node(s) of "
-        f"the rigid body(ies) {', '.join(str(b) for b in bodies)} holding an "
+        f"the rigid body(ies) {', '.join(_body_label(b) for b in bodies)} "
+        "holding an "
         "end node of the *INITIAL_AXIAL_FORCE_BEAM bolt (BSID "
         f"{', '.join(str(b) for b in bsids)}) were KEPT on the secondary "
         "side; every other rigid member is still removed. LS-DYNA keeps them "
@@ -2222,12 +2401,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                            0, 5)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
+            gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
+                                                     0, 5)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state,
-                                                         c.inter_id, gapmin),
+                                       inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id, state=state)
+                                       igap=igap, fric_id=fric_id, state=state)
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -2264,12 +2446,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                            c.ssid, c.sstyp)
             fric, fric_id = _contact_friction(
                 state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
+            gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
+                                                     c.ssid, c.sstyp)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
-                                       _ignore_to_inacti(c.ignore, state,
-                                                         c.inter_id, gapmin),
+                                       inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       fric_id=fric_id, state=state)
+                                       igap=igap, fric_id=fric_id, state=state)
 
     for c in state.contacts_surf2surf:
         diag = {}
@@ -2355,6 +2540,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                        interference=c.interference,
                                        force=plan == _RS_IMPLICIT_SWAP)
         inacti_gap = gap_pre_offset if offset_gap else gapmin
+        # round 9, A10 (opt-in): Igap 3 + a half-thickness Gapmin on a mixed
+        # shell + solid main. Like the shell offset above it is not a STATED
+        # gap, so _ignore_to_inacti keeps the gap from before it.
+        gapmin, igap = _mixed_main_thickness_gap(
+            state, c, gapmin, offset_gap, main_sid, main_styp)
         if c.interference:
             # *CONTACT_SURFACE_TO_SURFACE_INTERFERENCE exists to RESOLVE an
             # initial overlap into prestress (Vol I R17 p.11-66). Inacti 5/6
@@ -2374,7 +2564,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                   fric_id=fric_id, state=state,
+                                   igap=igap, fric_id=fric_id, state=state,
                                    thermal=_contact_thermal_cells(
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"))
@@ -2410,8 +2600,16 @@ def _report_unconsumed_gapmin(state: ConversionState,
         "all — a tie's engagement distance is `dsearch`. Set it with a "
         "NEGATIVE Card-3 SST/MST on the *CONTACT (LS-DYNA's absolute "
         "tie-criterion distance), which the converter honours as a floor")
+    # round 9, A2: a routed implicit node-to-surface contact IS written as
+    # /INTER/TYPE7 - the TYPE25 section, which runs after this one, consumes
+    # its override (_emit_routed_n2s_type7)
+    routed_ids = {c.inter_id for c in state.contacts_type25
+                  if n2s_routed(state, c)}
+    leftovers = {k: v for k, v in leftovers.items() if k not in routed_ids}
     known: Dict[int, str] = {}
     for c in state.contacts_type25:
+        if c.inter_id in routed_ids:
+            continue
         known[c.inter_id] = (
             "was emitted as /INTER/TYPE25, whose engagement distance is its "
             "own Gap_scale/%mesh_size pair rather than a Gapmin column; "
@@ -3350,8 +3548,15 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       istf: int = 4, igap: int = 0,
                       fric_id: int = 0,
                       state: Optional[ConversionState] = None,
-                      thermal: Optional["_ThermalCells"] = None) -> List[str]:
+                      thermal: Optional["_ThermalCells"] = None,
+                      tstart: float = 0.0,
+                      tstop: float = 0.0) -> List[str]:
     """One ``/INTER/TYPE7`` block.
+
+    ``tstart`` / ``tstop`` fill the Tstart / Tstop cells (round 9, A2: the
+    routed implicit node-to-surface contact carries the deck's BT / DT); 0 is
+    written as today's ``0`` (a Tstop of 0 is 'never',
+    hm_read_inter_type07.F:544), so every other caller is byte-identical.
 
     ``Fpenmax`` is derived from ``inacti`` HERE, in the single emitter, rather
     than at each of the four call sites — a guard keyed on one caller goes dead
@@ -3425,7 +3630,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
         "                1000                   0                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
-        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         ("#    Ifric    Ifiltr               Xfreq     Iform   sens_ID   fct_IDF"
@@ -4483,6 +4688,138 @@ def _warn_eroding_smp_friction(state: ConversionState, c, fric: float,
         "the reference was MPP (or if the friction is what you actually want).")
 
 
+def n2s_routed(state: ConversionState, c) -> bool:
+    """round 9, A2 (``--implicit-n2s-type7``, default ON): True when the
+    TYPE25-route record *c* is written as a ONE-WAY /INTER/TYPE7 instead - an
+    IMPLICIT, non-modal ``*CONTACT_NODES_TO_SURFACE`` or
+    ``*CONTACT_AUTOMATIC_NODES_TO_SURFACE`` (any ``_ID`` / ``_TITLE`` / ``_MPP``
+    spelling; never an ERODING one). OpenRadioss builds implicit contact
+    stiffness for TYPE 5 / 7 / 10 / 11 / 24 only (``imp_int_k.F:111-200``:
+    NTY 5 at :113, 7 at :135, 10 at :152, 11 at :159, 24 at :176 - the ELSE
+    at :198 is empty, no TYPE25 branch; ``ind_glob_k.F:4601-4605`` prints
+    MESSAGE 232), so an implicit
+    TYPE25 acts through the residual alone (``intfop2.F:595``). The record
+    STAYS in ``state.contacts_type25`` - the stub guard of
+    ``k2rad._inject_implicit_contact_stub`` (single / surf2surf / general
+    only) never sees it, so the all-parts stub is KEPT beside it by
+    construction."""
+    return (state.options.implicit_n2s_type7 and state.is_implicit
+            and not state.is_modal and c.variant == "NODES_TO_SURFACE"
+            and not c.eroding)
+
+
+#: W-A2's measured tail (round 9, A2). doorbeam with A1's part drive, the
+#: campaign's sampling rule (README 9.1): 125 runs of the same bytes
+#: (sha256 2926b1300fb6...) at nt 4 and nt 2 - the round-9 record's 27 and
+#: the post-review round's 98 (its fix agent's 50, its verifiers' 48) -
+#: scatter run to run on the END and the 4th fifth, on three branches: 102
+#: at -27.76 .. -28.12 %, 21 at -15.85 .. -16.27 % (both branches at both
+#: nt), two single nt-4 runs at -8.36 / -0.78 % - so the figures ship as a
+#: band; the coupons on a coarse RIGID base are the
+#: part-A spec's b6r (a 10 x 10 x 5 mm block 0.1 mm above a 2 x 2 x 1-hex
+#: rigid base, its top pushed 0.3 mm; IMFLAG 1, DT0 0.1, ENDTIM 1.0; nt 4 =
+#: nt 2) and the solver-physics validator's a2r4 (a one-hex 20 x 20 x 10 mm
+#: block 0.1 mm above a one-hex 30 x 30 x 10 mm rigid base, its top pushed
+#: 0.3 mm over t 1; nt 4 = nt 2): the same class, opposite outcomes; on
+#: the corner coupons cD / cE (a one-hex 10 x 10 x 5 mm block whose four
+#: bottom nodes sit over the corners of a 2 x 2 / 1 x 1-hex rigid base,
+#: its top pushed 0.3 mm; the solver-physics verifier's decks, re-run by
+#: the post-review fix agent, nt 4 = nt 2) BOTH let the block through
+#: behind a NORMAL banner: gap -0.1865 / -0.1907 mm on the route, -0.1885 /
+#: -0.1922 mm on the TYPE25, at t 1.0.
+_N2S_TYPE7_MEASURED = (
+    "MEASURED on implicit/basic-examples/springback-i/doorbeam.k with the "
+    "part drive: internal energy END -0.78 .. -28.12 % against LS-DYNA, RMS "
+    "7.21 .. 15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], "
+    "in 125 runs of the same bytes at nt 4 and nt 2 - the route scatters run "
+    "to run on three branches: 102 runs at -27.76 .. -28.12 %, 21 at -15.85 "
+    ".. -16.27 % (both at nt 4 and nt 2) and two single nt-4 runs nearer LS "
+    "(-8.36 %, -0.78 %) - where the TYPE25 ended +53.91 % / RMS 81.05 %. "
+    "CHECK THAT THE CONTACT CARRIES LOAD - with four contact nodes on a "
+    "coarse RIGID base the outcome depends on the geometry: on one two-block "
+    "coupon this route ends NORMAL TERMINATION with the block through the "
+    "base (gap -0.2218 mm at t 1.0) where the TYPE25 stops with MESSAGE 79; "
+    "on another it holds (gap +0.0228 mm at t 1.0) where the TYPE25 lets the "
+    "block through (-0.1708 mm at t 0.9) and stops at 98 % of t_end behind a "
+    "NORMAL TERMINATION; with the block's four nodes over the base's corners "
+    "BOTH let it through behind a NORMAL banner (gap -0.19 mm at t 1.0) - "
+    "the TYPE25 default fails silently too.")
+
+
+def _routed_stub_clause(state: ConversionState) -> str:
+    """The routed warning's sentence on the all-parts implicit stub - what
+    k2rad._inject_implicit_contact_stub actually did (the fix round,
+    F-A2-1): the stub is injected only into an implicit deck WITHOUT a
+    single-surface / surface-to-surface / general / tied / spot-weld /
+    tiebreak contact of its own, and under --skip-implicit-stub-with-type25
+    its fate is decided after the TYPE25 section."""
+    if any(c.title == AUTO_IMPLICIT_STUB_TITLE
+           for c in state.contacts_single):
+        return " The all-parts implicit stub stays beside it."
+    if state.implicit_stub_deferred_for:
+        return (" Whether the all-parts implicit stub stays beside it is "
+                "decided after the TYPE25 section "
+                "(--skip-implicit-stub-with-type25; its own sentence names "
+                "the outcome).")
+    fams = [name for name, recs in (
+        ("single-surface", state.contacts_single),
+        ("surface-to-surface", state.contacts_surf2surf),
+        ("general", state.contacts_general),
+        ("tied", state.contacts_tied),
+        ("spot-weld", state.contacts_spotweld),
+        ("tiebreak", state.contacts_tiebreak)) if recs]
+    return (" NO all-parts implicit stub is written beside it: k2rad injects "
+            "the stub only into an implicit deck without a contact of its "
+            f"own, and this deck has {' / '.join(fams) or 'another'} "
+            "contact(s) - so the route has no stub duplicating its pairs "
+            "(without it a 4-node coupon's block passed through behind a "
+            "NORMAL TERMINATION).")
+
+
+def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
+                           surf2: int, fric: float, fric_id: int,
+                           inacti: int, viss: float, stfac: float,
+                           tstop: float) -> List[str]:
+    """round 9, A2: the ONE-WAY /INTER/TYPE7 of an implicit node-to-surface
+    contact (see :func:`n2s_routed`), on the groups the TYPE25 route resolved
+    (Slav = the SSID node group, Mast = the MSID surface), with k2rad's TYPE7
+    cells: Istf 4, Igap 0 and Gapmin 0 (the starter's default gap - only an
+    explicit ``--inter-gapmin`` writes one, W-A2-gap), Fpenmax from Inacti,
+    Stfac from SFS, Fric = FS x FSF, VisS from VDC, Tstart = BT, Tstop = DT.
+    Recorded in ``state.n2s_type7_ids``."""
+    gapmin = _gapmin_override(state, c.inter_id, 0.0,
+                              dict(state.options.inter_gapmin))
+    if gapmin > 0.0:
+        state.warn(
+            f"*{kw} {c.inter_id}: --inter-gapmin {gapmin:g} written on the "
+            f"routed /INTER/TYPE7/{c.inter_id}: a written gap below the "
+            "starter's default lets the contact go through in implicit "
+            "(shell-secondary coupon: ERROR after cycle 8 with 0.05 where the "
+            "default holds; doorbeam with 0.0735: IE END -96.57 %).")
+    lines = _emit_inter_type7(c.inter_id, c.title, grnod, surf2, fric, inacti,
+                              viss=viss, gapmin=gapmin, stfac=stfac,
+                              fric_id=fric_id, state=state, tstart=c.bt,
+                              tstop=tstop)
+    state.n2s_type7_ids.add(c.inter_id)
+    soft = (" Its SOFT=2 (segment-based penalty) has no TYPE7 counterpart and "
+            "is dropped." if c.soft == 2 else "")
+    fpen = _FPENMAX_ZERO_NORMAL if inacti in _FPENMAX_INACTI else 0.0
+    state.warn(
+        f"*{kw} {c.inter_id}: implicit deck -> ONE-WAY "
+        f"/INTER/TYPE7/{c.inter_id} (Slav = the SSID node group "
+        f"/GRNOD/{grnod}, Mast = the MSID surface /SURF/{surf2}; Istf 4, Igap "
+        f"0 with the starter's default gap, Inacti {inacti}, Fpenmax "
+        f"{fpen:g}, Fric {fric:g}, Tstart {c.bt:g} / Tstop {tstop:g}) instead "
+        "of the /INTER/TYPE25 an explicit deck gets: OpenRadioss builds no "
+        "implicit contact stiffness for a TYPE25 (imp_int_k.F:111-200; "
+        "ind_glob_k.F:4601-4605 prints MESSAGE 232 'INTERFACE TYPE 25 IS NOT "
+        "AVAILABLE WITH IMPLICIT SOLUTION'; its force still enters the "
+        "residual, intfop2.F:595)." + _routed_stub_clause(state)
+        + f"{soft} " + _N2S_TYPE7_MEASURED
+        + " --no-implicit-n2s-type7 keeps the TYPE25.")
+    return lines
+
+
 def _make_type25_interfaces(state: ConversionState,
                             rigid_nodes: Set[int]) -> List[str]:
     """*CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
@@ -4519,9 +4856,23 @@ def _make_type25_interfaces(state: ConversionState,
 
     for c in state.contacts_type25:
         kw = c.keyword or "CONTACT"
+        # round 9, A2: an implicit node-to-surface contact takes the ONE-WAY
+        # /INTER/TYPE7 route below, with k2rad's TYPE7 cells
+        routed = n2s_routed(state, c)
         if c.eroding:
             _warn_eroding_card4(state, c)
-        if c.sst or c.mst:
+        if (c.sst or c.mst) and routed:
+            state.warn(
+                f"*{kw} {c.inter_id}: Card-3 SST={c.sst:g}/MST={c.mst:g} "
+                "(explicit per-side contact thickness) is DROPPED: the routed "
+                f"/INTER/TYPE7/{c.inter_id} keeps the starter's default gap "
+                "(Igap 0, Gapmin 0). A written gap below the starter's "
+                "default lets an implicit one-way contact go through "
+                "(MEASURED on a shell-secondary coupon: Gapmin 0.05 = half "
+                "the skin ends ERROR TERMINATION after cycle 8 where the "
+                "default holds); pass --inter-gapmin "
+                f"{c.inter_id}=VALUE to write one anyway.")
+        elif c.sst or c.mst:
             state.warn(
                 f"*{kw} {c.inter_id}: Card-3 SST={c.sst:g}/MST={c.mst:g} "
                 "(explicit per-side contact thickness) is DROPPED. "
@@ -4530,9 +4881,11 @@ def _make_type25_interfaces(state: ConversionState,
                 "/BEGIN 2022 deck cannot hold — the gap comes from the "
                 "elements' own thickness/size instead (Igap=2). Scale it with "
                 "Gap_scale by hand if the explicit thickness is load-bearing.")
-        istf, iedge = _type25_istf_iedge(state, c)
+        istf, iedge = ((4, _TYPE25_IEDGE_NONE) if routed
+                       else _type25_istf_iedge(state, c))
         fric, fric_id = _contact_friction(state, c.fs, c.fd, c.inter_id, kw,
-                                          "TYPE25", fsf=c.fsf)
+                                          "TYPE7" if routed else "TYPE25",
+                                          fsf=c.fsf)
         if c.dc and not fric_id:
             state.warn(
                 f"*{kw} {c.inter_id}: Card-2 DC={c.dc:g} (exponential "
@@ -4542,8 +4895,12 @@ def _make_type25_interfaces(state: ConversionState,
                 "FS=-2 to get the decay law (/FRICTION Ifric=2, exact).")
         _warn_eroding_smp_friction(state, c, fric, fric_id)
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
-        viss = _type25_viss(c.vdc, state, c.inter_id, kw)
-        stfac = _type25_stfac(state, c)
+        if routed:
+            viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
+            stfac = _stfac_for(state, c.sfs, c.inter_id)
+        else:
+            viss = _type25_viss(c.vdc, state, c.inter_id, kw)
+            stfac = _type25_stfac(state, c)
         # LS-DYNA's blank DT is 1e20; TYPE25 turns a Tstop of 0 back into EP30
         # (hm_read_inter_type25.F:579), so "no death time" is written as 0.
         tstop = 0.0 if c.dt >= 1e19 else c.dt
@@ -4603,6 +4960,11 @@ def _make_type25_interfaces(state: ConversionState,
                 "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
             _warn_bolt_rigid_kept(state, kw, c.inter_id, sec25_sid,
                                   sec25_styp)
+            if routed:
+                lines += _emit_routed_n2s_type7(state, c, kw, grnod, surf2,
+                                                fric, fric_id, inacti, viss,
+                                                stfac, tstop)
+                continue
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
@@ -4682,35 +5044,37 @@ def _make_type25_interfaces(state: ConversionState,
 # --skip-implicit-stub-with-type25 leaves it out where a TYPE25 is WRITTEN)
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: The measured tail every B6 sentence shares. Both carriers base-paired at
-#: nt 4 and nt 2 (every printed cycle row identical but the controlling-node
-#: label); doorbeam by the campaign rule (the last row of a printed time).
-#: The coupon is the solver-physics validator's b6t, re-run by the fix round:
-#: lower block 20 x 20 x 5 mm (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper
-#: block 10 x 10 x 5 mm 0.1 mm above it, its top face pushed down 0.3 mm over
-#: the run (IMFLAG 1, DT0 0.1, ENDTIM 1.0), the upper block's bottom nodes
-#: on the lower part through *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25.
+#: The measured tail every B6 sentence shares (round 9, A3: re-texted after
+#: A1 - round 8's doorbeam pair was measured while the prescribed motion
+#: drove the CNRB that shares PID 4 with the punch, so the punch never moved).
+#: Both carriers at nt 4 and nt 2 (identical to the printed digit). The
+#: coupon is the solver-physics validator's b6t: lower block 20 x 20 x 5 mm
+#: (2 x 2 x 1 ELFORM-2 hexes, bottom fixed), upper block 10 x 10 x 5 mm 0.1
+#: mm above it, its top face pushed down 0.3 mm over the run (IMFLAG 1, DT0
+#: 0.1, ENDTIM 1.0), the upper block's bottom nodes on the lower part through
+#: *CONTACT_NODES_TO_SURFACE -> /INTER/TYPE25 (the TYPE25 arm needs
+#: --no-implicit-n2s-type7 since round 9). doorbeam: the A1 + TYPE25 bytes
+#: with the stub deleted (implement A's dB6 arm).
 _STUB_TYPE25_MEASURED = (
-    "OpenRadioss builds implicit contact stiffness only for TYPE 7 / 10 / 11 "
-    "(imp_int_k.F:847) and a TYPE25 acts through the residual alone "
-    "(intfop2.F:595; the engine prints MESSAGE 232, 'INTERFACE TYPE 25 IS NOT "
-    "AVAILABLE WITH IMPLICIT SOLUTION'), so the stub is the deck's only "
-    "implicit contact stiffness - an all-parts self-contact LS-DYNA does not "
-    "have. MEASURED both arms, nt 4 = nt 2: on a two-block coupon whose only "
-    "contact is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a "
-    "third of the run, then carries the load) the run WITH the stub ends "
-    "NORMAL in 11 cycles; WITHOUT it the run converges until the TYPE25 "
-    "contact must carry load, then 23 ITERATION DIVERGE and MESSAGE 79 "
-    "'SOLVER IMPLICIT STOPPED DUE TO TIMESTEP LIMIT' - ERROR TERMINATION at "
-    "cycle 9. On implicit/basic-examples/springback-i/doorbeam.k the result "
-    "is MIXED: with the stub 39 cycles, internal energy at the fifths of "
-    "t_end 0.0011 +667.62 / +1086.39 / +972.69 / +841.87 / +582.00 % against "
-    "LS-DYNA, RMS 393.31 % of the LS peak over the 25 LS blocks in "
-    "(0, 0.0011], and starter WARNING 343 for the stub (30 initial "
-    "penetrations on 17 nodes); without it 33 cycles, +1206.19 / +1002.88 / "
-    "+690.05 / +531.38 / +689.08 %, RMS 313.05 % - the END is worse and the "
-    "RMS better, and both arms sit 5-13x LS from the first fifth (that "
-    "deviation is the deck's own).")
+    "OpenRadioss builds no implicit contact stiffness for a TYPE25 "
+    "(imp_int_k.F:111-200 has no TYPE25 branch; ind_glob_k.F:4601-4605 "
+    "prints MESSAGE 232 'INTERFACE TYPE 25 IS NOT AVAILABLE WITH IMPLICIT "
+    "SOLUTION'; its force still enters the residual, intfop2.F:595), so "
+    "beside a TYPE25-route contact the stub is the deck's only implicit "
+    "contact stiffness - an all-parts self-contact LS-DYNA does not have. "
+    "Without it the run can stop early OR end NORMAL with the load path "
+    "lost. MEASURED, nt 4 = nt 2: on a two-block coupon whose only contact "
+    "is a *CONTACT_NODES_TO_SURFACE (a 0.1 mm gap that closes at a third of "
+    "the run, then carries the load) the run with the stub ends NORMAL in 11 "
+    "cycles, without it 23 ITERATION DIVERGE and MESSAGE 79 - ERROR "
+    "TERMINATION at cycle 9; on implicit/basic-examples/springback-i/"
+    "doorbeam.k with its punch driven (round 9) the run without the stub "
+    "ends a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end) behind "
+    "'NODAL VELOCITY MAY BE TOO HIGH FOR INTERFACE 90001', the run stopped "
+    "with the punch at 81.51 of 135 mm. Since round 9 an implicit "
+    "*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE takes the /INTER/TYPE7 route "
+    "instead (--implicit-n2s-type7), so this applies to the ERODING "
+    "spellings and to --no-implicit-n2s-type7.")
 #: The default arm (the stub KEPT; printed by __init__ right after the stub's
 #: own sentence).
 _STUB_TYPE25_KEPT_SENTENCE = (
@@ -4736,18 +5100,22 @@ _STUB_TYPE25_ALL_DROPPED_SENTENCE = (
     "engine's implicit setup needs an interface.")
 
 
-def add_implicit_contact_stub(state: ConversionState) -> int:
+def add_implicit_contact_stub(state: ConversionState, fs: float = 0.0) -> int:
     """Append the inert all-parts implicit stub (``/INTER/TYPE7``
     ``AUTO_IMPLICIT_STUB_TITLE``) to ``state.contacts_single``, name it, and
     return its interface id - the id is drawn HERE, after every screen that
     can refuse the stub (``k2rad._inject_implicit_contact_stub``'s early
-    returns; the deferred section's TYPE25 test)."""
+    returns; the deferred section's TYPE25 test).
+
+    ``fs`` is the stub's Coulomb friction: 0 (frictionless) everywhere but
+    beside a routed implicit node-to-surface contact (round 9, A2), whose
+    pairs the stub duplicates - there it carries the routed contact's FS."""
     inter_id = state.next_id()
     state.contacts_single.append(
         ContactAutoSingle(
             inter_id=inter_id,
             title=AUTO_IMPLICIT_STUB_TITLE,
-            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+            ssid=0, sstyp=0, fs=fs, fd=0.0, bt=0.0, dt=1.0e28,
             # The stub takes the ORDINARY ignore -> Inacti mapping, i.e.
             # Inacti = 5 (variable gap, no t = 0 pre-load). A previous round
             # stated Inacti = 1 here to dodge starter ERROR 611 on

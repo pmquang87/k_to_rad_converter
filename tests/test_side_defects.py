@@ -1658,7 +1658,12 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
         21 -> 22 with R14 triage round 8 (B10): the opt-in
         ``--shell-in-solid-coupling`` writes its ALE host as a second
         /GRBRIC/PART (``blast_ale._make_shell_in_solid_coupling``), through
-        the guarded allocator like the FSI one."""
+        the guarded allocator like the FSI one.
+
+        22 -> 23 with R14 triage round 9 (B1): an accepted
+        *BOUNDARY_THERMAL_WELD_TRAJECTORY writes one /GRBRIC/BRIC per window
+        group (``thermal._make_weld_impflux``), through the guarded
+        allocator."""
         import re
         from pathlib import Path as _P
         root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
@@ -1668,7 +1673,7 @@ class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
                 # Skip prose: only count real call sites.
                 if re.search(r"state\.next_elem_group_id\(\)", ln):
                     n += 1
-        self.assertEqual(n, 22)
+        self.assertEqual(n, 23)
 
 
 class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):

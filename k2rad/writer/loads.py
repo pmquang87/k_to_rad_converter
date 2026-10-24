@@ -171,6 +171,79 @@ def _make_rlinks(state: ConversionState) -> List[str]:
 # Starter: boundary conditions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _curve_identically_zero(state: ConversionState, lcid: int) -> bool:
+    """True when *lcid* is a converted *DEFINE_CURVE whose every ordinate is
+    0.0 (the stored points already carry SFO / OFFO). A function, a table or a
+    missing id is NOT zero (round 9, A8)."""
+    c = state.curves.get(lcid)
+    return bool(c is not None and c.pts and all(o == 0.0 for _a, o in c.pts))
+
+
+def _pm_sf(state: ConversionState, pm) -> float:
+    """The scale factor LS-DYNA applies to a *BOUNDARY_PRESCRIBED_MOTION row
+    (round 9, A8; ``--prescribed-motion-sf-default``, default ON).
+
+    Vol I R17 p.759: "SF  Load curve scale factor. The default is 1.0." - with
+    no EQ.0 clause - and the general rule of Appendix V p.73-9: the keyword
+    reader fills a blank field with 0 and LS-DYNA then replaces the value 0 by
+    the default. So a STATED 0.0 is 1.0 (the Yaris roof crush press, SF 0.0,
+    does 5.4039E+05 of work in its bndout). The OpenRadioss starter reads a
+    zero Fscale as 1.0 too (read_impdisp.F:239, read_impvel.F:248,
+    hm_read_impacc.F:194), so on a RIGID row only the bytes change.
+    ``--no-prescribed-motion-sf-default`` keeps the stated 0."""
+    if pm.sf == 0.0 and state.options.prescribed_motion_sf_default:
+        return 1.0
+    return pm.sf
+
+
+def _pm_zero_hold(state: ConversionState, pm) -> bool:
+    """A *BOUNDARY_PRESCRIBED_MOTION_NODE / _SET row written as a /BCS hold
+    instead of an /IMP* card: before round 9 every SF = 0.0 row; with
+    ``prescribed_motion_sf_default`` only a stated SF 0.0 whose motion really
+    is zero - VAD 0 or 2 on an identically zero curve, or no motion
+    definition at all (LCID 0, or an id no curve / table registry holds) -
+    because SF 0 is LS-DYNA's 1.0 and a non-zero curve then MOVES the nodes;
+    VAD 1 on a zero curve is imposed (a zero acceleration keeps the initial
+    velocity, decision D11)."""
+    if pm.sf != 0.0:
+        return False
+    if not state.options.prescribed_motion_sf_default:
+        return True
+    if pm.vad not in (0, 2):
+        return False
+    if (pm.lcid == 0 or (pm.lcid not in state.curves
+                         and pm.lcid not in state.define_tables
+                         and pm.lcid not in state.define_tables_3d)):
+        return True
+    return _curve_identically_zero(state, pm.lcid)
+
+
+def spc_cid_skew(state: ConversionState, cid: int) -> int:
+    """The /SKEW id a ``*BOUNDARY_SPC`` (or ``*LOAD_NODE``) CID resolves to, 0
+    when it resolves to none (round 9, A6).
+
+    ``_make_skews`` writes every ``*DEFINE_COORDINATE_SYSTEM`` / ``_NODES`` /
+    ``_VECTOR`` under its own CID (a VECTOR frame as ``/SKEW/FIX/<cid>``,
+    ``writer/mesh._emit_coord_vector_skew``), and LS-DYNA applies the SPC in
+    any of the three (control_adaptive.cylinder.d3hsp:1170-1172 'number of
+    spc nodes ... 48', 'number of spc coordinates ... 9'). Before round 9
+    the five consumers accepted only SYSTEM / NODES frames and wrote a
+    VECTOR-CID constraint in the GLOBAL system behind a false 'not found'.
+    ``--no-spc-vector-frames`` keeps a VECTOR CID out (the 386444e bytes).
+    Every consumer reads this one test - ``_make_bcs``, ``_global_spc_dofs``,
+    the ``*CONSTRAINED_LINEAR`` screen, the free-node guard / ERROR 148
+    refusal and the screw ``BodyCondition`` - so they cannot disagree; the
+    ``*LOAD_NODE`` CID sibling takes it too (decision D9, reach 0).
+    """
+    if not cid:
+        return 0
+    if cid in state.coord_sys or cid in state.coord_nodes:
+        return cid
+    if cid in state.coord_vectors and state.options.spc_vector_frames:
+        return cid
+    return 0
+
+
 def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     """``*BOUNDARY_SPC_NODE`` / ``_SET`` -> one ``/BCS`` ``BC_<id>`` per card,
     on the card's own node set (``/GRNOD/NODE/<nsid>``, shared by every card
@@ -229,6 +302,8 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
     cards_gone: List[int] = []
     rest_nodes: Set[int] = set()
     emitted_grnods: Set[int] = set()
+    # round 9, A6: (card id, CID) of every card written in a VECTOR frame
+    vector_cards: List[Tuple[int, int]] = []
     for bc in state.bcs_spcs:
         nsid = bc.nsid
         raw_nids = state.node_sets.get(nsid, ("", []))[1]
@@ -252,10 +327,18 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         # *BOUNDARY_SPC CID: constraint acts in that local system → /BCS skew.
         # Only reference it when a matching /SKEW is actually emitted
         # (_make_skews writes /SKEW/<cid> for every *DEFINE_COORDINATE_*).
-        skew_id = 0
-        if bc.cid:
-            if bc.cid in state.coord_sys or bc.cid in state.coord_nodes:
-                skew_id = bc.cid
+        # round 9, A6: ONE helper for every *BOUNDARY_SPC consumer
+        skew_id = spc_cid_skew(state, bc.cid)
+        if bc.cid and skew_id and bc.cid in state.coord_vectors:
+            vector_cards.append((bc.bc_id, bc.cid))
+        elif bc.cid and not skew_id:
+            if bc.cid in state.coord_vectors:
+                state.warn(
+                    f"BCS {bc.bc_id} (nsid={nsid}): CID {bc.cid} is a "
+                    "*DEFINE_COORDINATE_VECTOR frame (written as "
+                    f"/SKEW/FIX/{bc.cid}); --no-spc-vector-frames writes the "
+                    "constraint in the GLOBAL system instead, where LS-DYNA "
+                    "applies it in that local frame.")
             else:
                 state.warn(
                     f"BCS {bc.bc_id} (nsid={nsid}): local system cid={bc.cid} "
@@ -363,6 +446,19 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
             "merged (a digit is an axis of its own skew), and the starter "
             "accepts ONE skew per node: ERROR 148 (hm_read_bcs.F:199-205) will "
             "stop it - state both in one system.")
+    if vector_cards:
+        cids = sorted({c for _b, c in vector_cards})
+        state.warn(
+            f"*BOUNDARY_SPC: {len(vector_cards)} card(s) name a "
+            "*DEFINE_COORDINATE_VECTOR CID ("
+            + ", ".join(str(c) for c in cids)
+            + "); each constraint is written in that frame's /SKEW/FIX/<cid> "
+            "(LS-DYNA applies the DOFs in the local system). Before round 9 "
+            "they went to the GLOBAL system with a false 'not found': on "
+            "control_adaptive.cylinder the constrained radial displacement "
+            "reached 0.3352 mm (now 1.8e-8 mm on every state) and a free "
+            "tangential DOF carried up to 4611 N (now 0.024 N; LS-DYNA 0). "
+            "--no-spc-vector-frames restores the global writing.")
     return lines
 
 
@@ -557,14 +653,15 @@ def _global_spc_dofs(state: ConversionState) -> Dict[int, Tuple[str, str]]:
         out[nid] = (_or_dof_codes([old[0], tra]), _or_dof_codes([old[1], rot]))
 
     for bc in state.bcs_spcs:
-        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+        if spc_cid_skew(state, bc.cid):
             continue                      # a skewed /BCS: not a global bit
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
         for nid in state.node_sets.get(bc.nsid, ("", []))[1]:
             _add(nid, tra, rot)
     for pm in state.prescribed_motion_sets:
-        if pm.sf != 0.0 or pm.boxid:
+        # round 9, A8: only the rows still written as a /BCS hold count
+        if not _pm_zero_hold(state, pm) or pm.boxid:
             continue
         mapped = _PM_DOF_TO_BCS.get(pm.dof)
         if mapped is None:
@@ -3716,25 +3813,25 @@ def _synthesize_spotweld_second_nodes(state: ConversionState) -> None:
         def xyz(v) -> str:
             return f"({v[0]:g}, {v[1]:g}, {v[2]:g})"
         if state.options.beam_contact_secondary:
+            # round 9, B9: today's defaults (the EFAIL displacement criterion
+            # of round 7, the DT scaling of round 8) on the two opt-in rules
+            # - cG3's swA6 arm; round 6's combined-arm figures are history
+            # (CHANGELOG round 6)
             clause = (
-                " MEASURED with both flags on spotweld.k (nt 4): 4983 cycles "
-                "(7.80x) and internal energy -99.9 % -> +82.0 % of LS-DYNA's "
-                "at t 1.18e-3 - the error changes SIGN, not size (|IE error| "
-                "76733 -> 67888 on LS 76812): the /PROP/TYPE13 shear stays "
-                "elastic (116300 vs LS-DYNA's 46247 at 1.18e-3) and the weld "
-                "never fails (*MAT_SPOTWELD EFAIL has no /PROP/TYPE13 slot) "
-                "where LS-DYNA fails it at 1.1876e-3; so at the matched END (t "
-                "1.2e-3, after LS-DYNA's failure has dropped its IE to 60028) "
-                "the error GROWS to +141.1 % (the base -99.87 %), and the "
-                "history reads +65 / +82 / +85 / +83 / +141 % at the fifths of "
-                "the run (nt 4 and nt 2 identical); the TYPE13 spring also "
-                "owns the time step because MAT_100's DT is dropped.")
+                " MEASURED with both flags on spotweld.k (nt 4, today's "
+                "defaults incl. the EFAIL displacement criterion and the DT "
+                "scaling): the last cycle 1332 = LS-DYNA's 1332; IE END "
+                "-31.18 %, KE END +30.76 %, RMS IE / KE 6.82 / 23.66 % of the "
+                "LS peak over the 1331 LS times to t 0.00119792; the weld "
+                "ruptures at 1.12229e-3 s, 65.3 us before LS-DYNA's swforc "
+                "failure time 1.1876e-3 s.")
         else:
             clause = (
                 " WITHOUT --beam-contact-secondary the tie's secondary side "
                 "still resolves to no node, so the weld connects nothing: "
-                "MEASURED on spotweld.k, this flag alone costs 7.64x the "
-                "cycles (639 -> 4884) at IE -99.92 %.")
+                "MEASURED on spotweld.k (nt 4), this flag alone costs 2.09x "
+                "the cycles (639 -> 1334) at IE END -99.88 % with today's DT "
+                "scaling - 7.64x (4884) under --no-spotweld-dt-mass-scaling.")
         state.warn(
             f"*ELEMENT_BEAM {e.eid} (part {e.pid}: *SECTION_BEAM ELFORM 9, "
             f"*MAT_SPOTWELD) names ONE node ({e.n1}; n2 = 0). "
@@ -3772,9 +3869,9 @@ _SPOTWELD_SHEAR_EVIDENCE = (
 _SPOTWELD_EFAIL_EVIDENCE = (
     "MEASURED on intro-by-a.-tabiei/contact/contact-spotweld/spotweld.k with "
     "--spotweld-node-synthesis --beam-contact-secondary (nt 4): the weld "
-    "fails at 1.12650e-3 s where LS-DYNA's last intact output is 1.17969e-3 s "
-    "and its first failed one 1.19792e-3 s (4.5-6.0 % early); IE -33.00 % / "
-    "KE +38.90 % at the end, RMS 6.65 / 23.09 % of the LS peak.")
+    "fails at 1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time "
+    "1.1876e-3 s; IE -31.18 % / KE +30.76 % at the end, RMS 6.82 / 23.66 % "
+    "of the LS peak (1331 LS times).")
 
 
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
@@ -4157,7 +4254,10 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
                 "model mass +7.0 %, IE END -31.18 % (unscaled -33.00 %) - "
                 "MIXED: the histories are WORSE, RMS IE 6.65 -> 6.82 % and "
                 "RMS KE 23.09 -> 23.66 % of the LS peak over the 1331 LS "
-                "times to t 0.00119792. "
+                "times to t 0.00119792. KE END +30.76 % (unscaled +38.90 %); "
+                "the weld ruptures at 1.12229e-3 s, 65.3 us before LS-DYNA's "
+                "swforc failure time 1.1876e-3 s (4.2 us earlier than without "
+                "the scaling); the energy error stays within -0.3 .. +0.2 %. "
                 "--no-spotweld-dt-mass-scaling drops DT as before (round 8).")
         elif dt_inert:
             state.warn(
@@ -4943,6 +5043,10 @@ def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
     """
     if state is not None:
         state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
+        # round 9, B5: a curve OpenRadioss would extrapolate nonzero inside
+        # [Tstart, Tstop] is read through its zero-off-scale copy
+        from .loadcurves import load_funct_id
+        lcid = load_funct_id(state, lcid, keyword, tstart, tstop)
     return [
         f"/{keyword}/{motion_id}",
         title,
@@ -5068,6 +5172,105 @@ def _pm_lock_cards(state: ConversionState, pm, keyword: str,
     return locked, fct, lines
 
 
+def _body_con1(state: ConversionState, pid: int) -> int:
+    """The CMO -1 CON1 (the local system of the body's own constraint card)
+    of the rigid body a motion on *pid* drives: the rigid PART's *MAT_RIGID
+    (round 9 A1: a clashing CNRB gives way to the part), else a
+    *CONSTRAINED_NODAL_RIGID_BODY_SPC of that PID; 0 when none."""
+    part = state.parts.get(pid)
+    mat = state.mat_rigid.get(part.mid) if part is not None else None
+    if mat is not None and mat.cmo < 0:
+        return int(mat.con1)
+    for c in state.cnrbs:
+        if c.pid == pid and getattr(c, "has_spc", False) and c.cmo < 0:
+            return int(c.con1)
+    return 0
+
+
+#: (axis index into Tra + Rot) of each /IMP* Dir letter
+_DIR_DIGIT = {"X": 0, "Y": 1, "Z": 2, "XX": 3, "YY": 4, "ZZ": 5}
+
+
+def _shared_local_skew(state: ConversionState, pm, main: int, base_dir: str,
+                       mov_skew: int) -> int:
+    """round 9, A9 (``--rigid-local-shared-skew``, default ON): the skew a
+    ``*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL`` drive is written in.
+
+    The drive's co-rotating ``/SKEW/MOV`` and the body's own CMO -1 ``/BCS``
+    (round 8, A1) put TWO skew ids on one main node: the implicit solver then
+    condenses the /BCS skew (``bc_imp0.F:159-337``) and the skewed drive
+    (``fv_imp0.F:1182-1205``) separately and imposes a frame-dependent wrong
+    displacement behind an ERROR 0.0 % (g2g's two-card coupon: x0.750 /
+    x-0.5625 of the prescribed value in two oblique frames, x1.000 with one
+    skew; nt 2 = nt 4), and the starter prints WARNING 312 (kinset.F:103-105).
+    When the main node carries exactly ONE skewed card of its own body
+    (decision D12) and (a) that card holds every rotation (Rot 111), (b) the
+    drive's frame at t 0 is the card's (LCO == CON1, or every axis pair
+    e_i . e_i' >= 1 - 1e-9 - SIGNED: a frame turned 180 degrees about one
+    axis has two anti-parallel pairs and would impose the drive backwards in
+    the card's skew, measured -0.0100 mm for a prescribed +0.01 mm on the
+    W1i coupon, implicit, nt 4), (c) the drive's DOF is not one the card
+    holds, the drive is written in the CARD's skew - equal at t 0 and both
+    rotate with the body as long as no rotation is free. Otherwise both
+    skews stay and the failed condition is named. The /SKEW/MOV and its
+    three nodes stay (inert). IMPLICIT decks only (the caller's gate,
+    decision A9 'explicit unchanged'): an explicit deck keeps the 386444e
+    bytes, where the two skews impose the motion exactly (an explicit
+    two-card coupon with a step-setting shell: u . x' = the ramp value,
+    x1.0000, with two skews and with one, 665 cycles each, nt 4)."""
+    cards = _rigid_skewed_cards(state).get(main, [])
+    if len(cards) != 1:
+        return mov_skew
+    bskew, btitle, btra, brot = cards[0]
+    label = f"*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL pid={pm.pid}"
+    why = ""
+    if brot != "111":
+        why = (f"(a) the /BCS {btitle} leaves a rotation free (Rot {brot}), so "
+               "the co-rotating frame and the card's fixed one part company")
+    else:
+        drive_basis = _local_body_basis(state, pm.pid)[0] or (
+            (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        con1 = _body_con1(state, pm.pid)
+        part = state.parts.get(pm.pid)
+        mat = state.mat_rigid.get(part.mid) if part is not None else None
+        same_cid = bool(mat is not None and mat.lco and mat.lco == con1)
+        coord = (set(state.coord_sys) | set(state.coord_vectors)
+                 | set(state.coord_nodes))
+        bcs_cid = bskew if bskew in coord else con1
+        bcs_basis = (_icid_basis(state, bcs_cid) if bcs_cid else
+                     ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        if not same_cid and (bcs_basis is None or any(
+                _vdot(a, b) < 1.0 - 1e-9
+                for a, b in zip(drive_basis, bcs_basis))):
+            why = (f"(b) the drive's frame at t 0 is not the /BCS {btitle}'s "
+                   f"(/SKEW {bskew})")
+        elif (btra + brot)[_DIR_DIGIT[base_dir]] == "1":
+            why = (f"(c) the /BCS {btitle} also HOLDS the driven DOF "
+                   f"{base_dir}: the solver paths disagree on which wins "
+                   "(implicit in the moving skew: the /BCS; in one skew and "
+                   "explicit: the drive)")
+    if why:
+        state.warn(
+            f"{label}: the drive keeps its co-rotating /SKEW/MOV/{mov_skew} "
+            f"beside the body's own CMO -1 /BCS in /SKEW {bskew} - two skew "
+            f"ids on one node - because {why}. Two skews on one node make the "
+            "IMPLICIT solver impose a frame-dependent wrong displacement with "
+            "a 0.0 % energy error and the starter print WARNING 312; check "
+            "the motion.")
+        return mov_skew
+    state.warn(
+        f"{label}: the drive is written in /SKEW/{bskew}, the skew of the "
+        f"body's own CMO -1 /BCS {btitle}, instead of the co-rotating "
+        f"/SKEW/MOV/{mov_skew}: the frames are equal at t 0 and the /BCS holds "
+        "every rotation, so they stay equal. Two skew ids on one node make "
+        "the IMPLICIT solver impose a frame-dependent wrong displacement with "
+        "a 0.0 % energy error (a two-block coupon: x0.750 / x-0.5625 of the "
+        "prescribed value in two oblique frames, x1.000 in one skew; nt 2 = "
+        "nt 4) and the starter print WARNING 312. "
+        "--no-rigid-local-shared-skew keeps the two skews.")
+    return bskew
+
+
 def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]:
     """*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] -> /IMPVEL | /IMPACC | /IMPDISP
     on the rigid body's /RBODY main node."""
@@ -5127,6 +5330,14 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             continue
         ref = f"pid={pm.pid}"
         skew_id = _pm_skew_for(state, pm, keyword, ref)
+        # round 9, A9: a _LOCAL drive shares the skew of its body's own CMO -1
+        # /BCS when the two frames are one (no second skew id on the node) -
+        # on an IMPLICIT deck only (decision A9: explicit unchanged)
+        if (pm.local and skew_id and skew_id == getattr(pm, "skew_id", 0)
+                and state.is_implicit
+                and state.options.rigid_local_shared_skew):
+            skew_id = _shared_local_skew(state, pm, info["ind_node"],
+                                         base_dir, skew_id)
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop = pm.death if pm.death < 1e27 else 0.0
         # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,
@@ -5136,8 +5347,17 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             skews_written.add(pm.skew_id)
             lines += _emit_skew_mov(
                 pm.skew_id, f"SKEW_MOV_LOCAL_PID{pm.pid}", *pm.mov_nodes, "X")
+        if pm.sf == 0.0 and state.options.prescribed_motion_sf_default:
+            # round 9, A8: bytes only - the starter already reads 0 as 1.0
+            state.warn(
+                f"*{keyword} pid={pm.pid} dof={pm.dof}: SF = 0.0 written as "
+                "the default Fscale 1.0; the OpenRadioss starter reads 0 as "
+                "1.0 too (read_impdisp.F:239), so the motion is unchanged - "
+                "only the card now says what runs (LS-DYNA: SF 'The default "
+                "is 1.0', Vol I R17 p.759). --no-prescribed-motion-sf-default "
+                "writes the stated 0.")
         lines += _emit_imp_card(kw, motion_counter, f"Motion_{motion_counter}",
-                                pm.lcid, base_dir, grnod_id, pm.sf,
+                                pm.lcid, base_dir, grnod_id, _pm_sf(state, pm),
                                 tstart, tstop, skew_id, state=state)
         motion_counter += 1
         _register_imp_motion_nodes(state, [info["ind_node"]], base_dir, skew_id,
@@ -5167,6 +5387,24 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
     return lines
 
 
+def _cnrb_gives_way(state: ConversionState, pid: int) -> bool:
+    """round 9, A1 (``--rigid-part-pid-precedence``, default ON): True when a
+    *CONSTRAINED_NODAL_RIGID_BODY with this PID gives way to the rigid PART of
+    the same id - a *MAT_RIGID / *DEFORMABLE_TO_RIGID part that owns nodes and
+    so becomes an /RBODY of its own (LS-DYNA's Warning 10177 drives the
+    part). Read from the deck, not from ``state.cnrb_record_key``: the
+    _LOCAL frame reservation runs BEFORE the /RBODY builders set that."""
+    if not state.options.rigid_part_pid_precedence:
+        return False
+    if pid not in state.parts or pid not in rigid_part_ids(state):
+        return False
+    if not any(c.pid == pid for c in state.cnrbs):
+        return False
+    return (bool(_part_node_sets(state).get(pid))
+            or bool(state.extra_rigid_nodes.get(pid))
+            or any(c.pid == pid for c in state.sph_elems))
+
+
 def _local_body_basis(state: ConversionState, pid: int):
     """The rigid body's OWN local system, as ``(basis, source)`` where *basis* is
     the global-frame orthonormal triad ``(ex, ey, ez)``, or ``(None, reason)``.
@@ -5187,10 +5425,13 @@ def _local_body_basis(state: ConversionState, pid: int):
 
     Only the LCO/CID = 0 default is unrecoverable, because it needs the body's
     inertia tensor and k2rad computes none. A CNRB whose PID collides with a
-    rigid part's id resolves to the CNRB, matching _make_cnrb_rbodies' precedence.
+    rigid part's id resolves to the PART under --rigid-part-pid-precedence
+    (the default, round 9 A1: LS Warning 10177 drives the part), to the CNRB
+    without it.
     """
+    yields = _cnrb_gives_way(state, pid)
     for c in state.cnrbs:
-        if c.pid != pid:
+        if c.pid != pid or yields:
             continue
         if not c.cid:
             return None, ("*CONSTRAINED_NODAL_RIGID_BODY CID is 0, so LS-DYNA "
@@ -5500,7 +5741,20 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         nids = _pm_set_nodes(state, pm, box_cache)
         if nids is None:
             continue
-        if pm.sf == 0.0:
+        hold = _pm_zero_hold(state, pm)
+        if pm.sf == 0.0 and not hold:
+            # round 9, A8: a stated SF 0.0 is LS-DYNA's 1.0
+            state.warn(
+                "*BOUNDARY_PRESCRIBED_MOTION_NODE / _SET "
+                f"nsid={pm.nsid} dof={pm.dof}: SF = 0.0 is read as the card's "
+                "default 1.0 (Vol I R17 p.759; Appendix V p.73-9) and curve "
+                f"{pm.lcid} (VAD {pm.vad}) is not a zero motion, so the motion "
+                f"is IMPOSED (/{PM_VAD_KEYWORD[pm.vad]} Fscale 1); before round "
+                "9 k2rad held the DOF with a /BCS. A zero motion (VAD 0 / 2 on a "
+                "zero curve, or no curve) stays a /BCS hold; VAD 1 on a zero "
+                "curve is imposed (the node keeps its initial velocity). "
+                "--no-prescribed-motion-sf-default restores the hold.")
+        if hold:
             mapped = _PM_DOF_TO_BCS.get(pm.dof)
             if mapped is None:
                 state.warn(
@@ -5566,8 +5820,8 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         # so this index can never miss (a VAD outside it never reaches here).
         kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
-                                base_dir, grnod_id, pm.sf, tstart, tstop,
-                                skew_id, state=state)
+                                base_dir, grnod_id, _pm_sf(state, pm), tstart,
+                                tstop, skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
         _register_imp_motion_nodes(state, nids, base_dir, skew_id, tstart,
                                    tstop)
@@ -5632,7 +5886,8 @@ _GRAV_COMMENT = ("#funct_IDT       DIR   skew_ID sensor_ID  grnod_ID"
 
 def _emit_grav_card(grav_id: int, title: str, fct: int, direction: str,
                     grnod_id: int, fscale: float,
-                    skew_id: int = 0) -> List[str]:
+                    skew_id: int = 0,
+                    state: Optional[ConversionState] = None) -> List[str]:
     """One /GRAV card in the column layout grav.cfg specifies (see above).
 
     ``Ascale_x`` is always 1.0: the starter stores ``GRAV(2,K) = ONE/FCX``
@@ -5645,7 +5900,13 @@ def _emit_grav_card(grav_id: int, title: str, fct: int, direction: str,
     emitted) and the engine then adds the acceleration along that skew's row
     for DIR instead of the global axis (gravit.F:150-162,
     ``A(1..3,N) += SKEW(3*N2-2..3*N2, ISK) * AA``). 0 = global.
+
+    Pass *state* to read a curve OpenRadioss would extrapolate nonzero
+    through its zero-off-scale copy (round 9, B5, writer/loadcurves.py).
     """
+    if state is not None:
+        from .loadcurves import load_funct_id
+        fct = load_funct_id(state, fct, "GRAV")
     return [
         f"/GRAV/{grav_id}",
         title,
@@ -5820,13 +6081,48 @@ def _grav_groups(state: ConversionState, part_pids: List[int],
     return lines, grnod_id, grav_id
 
 
+def _implicit_rigid_gravity_keep(state: ConversionState) -> bool:
+    """round 9, A4 (``--implicit-rigid-gravity-nodes``, default ON): on an
+    IMPLICIT deck the rigid parts in a /GRAV scope STAY in its /GRNOD/PART
+    beside their /RBODY main node (the main's gravity alone leaves the body
+    frozen in an implicit run - measured on ex_16); explicit decks keep the
+    386444e swap (rgbodv.F discards a secondary node's gravity there)."""
+    return state.is_implicit and state.options.implicit_rigid_gravity_nodes
+
+
 def _warn_rbody_mains_added(state: ConversionState, keyword: str,
-                            mains: Set[int]) -> None:
+                            mains: Set[int],
+                            kept_rigid: Optional[Set[int]] = None) -> None:
     if not mains:
         return
     shown = ", ".join(str(n) for n in sorted(mains)[:8])
     if len(mains) > 8:
         shown += ", ..."
+    if kept_rigid:
+        kept = ", ".join(str(p) for p in sorted(kept_rigid)[:8])
+        if len(kept_rigid) > 8:
+            kept += ", ..."
+        state.warn(
+            f"{keyword} -> /GRAV on an IMPLICIT deck: the rigid part(s) "
+            f"{kept} stay in the /GRNOD/PART beside their /RBODY main "
+            f"node(s) ({shown}). In an implicit run the main node's gravity "
+            "alone does not move the body: gravit_imp.F:84-91 weighs an "
+            "active rigid body's main node with RBY(15), the main's OWN mass "
+            "before the body was formed (inirby.F:836-837) - 0 on k2rad's "
+            "element-free main - while the members' gravity is summed into "
+            "the body. Measured on "
+            "introduction/Introduction/example-16/ex_16_thin_shell_elform_13.k, "
+            "the main-only group leaves the rigid disk frozen (kinetic energy "
+            "-100.00 % against LS-DYNA at every fifth of t_end), this group "
+            "lets it fall with LS-DYNA (KE +0.42 / +0.20 / +0.14 % at the "
+            "first three fifths, nt 4 = nt 2; the 4th / 5th are the disk "
+            "passing the wall: *CONTACT_2D is not converted). The implicit "
+            "fall depends on the step: a free rigid disk follows -g t^2 / 2 "
+            "within 0.7 % at ex_16's dtmax 1e-4 s (its velocity lags g t by "
+            "one step) and falls 13-14 % short at the fifths with large "
+            "automatic steps (25 cycles). Explicit decks keep the main-node "
+            "group. --no-implicit-rigid-gravity-nodes restores it.")
+        return
     state.warn(
         f"{keyword} -> /GRAV: the load's scope contains rigid bodies, so the "
         f"/GRNOD also lists their /RBODY main node(s) ({shown}) and rigid "
@@ -5907,6 +6203,9 @@ def _make_gravity_loads(state: ConversionState,
                        "- gravity is applied for the whole run.")
     lines: List[str] = ["#-  GRAVITY LOADS (*LOAD_GRAVITY_PART):", HDR]
     added_mains: Set[int] = set()
+    # round 9, A4: implicit decks keep the rigid parts in the part group
+    keep = _implicit_rigid_gravity_keep(state)
+    kept_rigid: Set[int] = set()
     # Built once: _rbody_mains_in_scope needs the {pid: nodes} inventory for
     # every scoped group, and rebuilding it walks every solid/shell/beam.
     pnodes = _part_node_sets(state) if rbody_info else {}
@@ -5930,7 +6229,11 @@ def _make_gravity_loads(state: ConversionState,
             state, rbody_info, pids, whole_model=False, pnodes=pnodes,
             keyword="*LOAD_GRAVITY_PART")
         added_mains.update(mains)
-        part_pids = [p for p in pids if p not in rigid_pids]
+        if keep:
+            part_pids = list(pids)
+            kept_rigid |= set(rigid_pids)
+        else:
+            part_pids = [p for p in pids if p not in rigid_pids]
         if not part_pids and not mains:
             continue
         glines, grnod_id, grav_id = _grav_groups(state, part_pids, mains,
@@ -5951,8 +6254,9 @@ def _make_gravity_loads(state: ConversionState,
         lines += _emit_grav_card(
             grav_id,
             f"Gravity_{_DIR[dof]}_parts_" + "_".join(str(p) for p in pids),
-            fct, _DIR[dof], grnod_id, -accel)
-    _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains)
+            fct, _DIR[dof], grnod_id, -accel, state=state)
+    _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains,
+                            kept_rigid)
     return lines if len(lines) > 2 else []
 
 
@@ -6026,7 +6330,13 @@ def _make_body_loads(state: ConversionState,
     rigid_pids, mains = _rbody_mains_in_scope(state, rbody_info, all_pids,
                                               whole_model=whole_model,
                                               keyword="*LOAD_BODY_*")
-    part_pids = [p for p in all_pids if p not in rigid_pids]
+    # round 9, A4: an implicit deck keeps the rigid parts in the part group
+    kept_rigid: Set[int] = set()
+    if _implicit_rigid_gravity_keep(state):
+        part_pids = list(all_pids)
+        kept_rigid = set(rigid_pids)
+    else:
+        part_pids = [p for p in all_pids if p not in rigid_pids]
     if not part_pids and not mains:
         return []
     lines: List[str] = ["#-  BODY LOADS (*LOAD_BODY_* -> /GRAV):", HDR]
@@ -6069,7 +6379,7 @@ def _make_body_loads(state: ConversionState,
                     "— the base acceleration is applied along the GLOBAL "
                     f"{bl.dir} axis.")
         lines += _emit_grav_card(grav_id, f"Body_accel_{bl.dir}", bl.lcid,
-                                 bl.dir, gnid, -bl.sf, skew_id)
+                                 bl.dir, gnid, -bl.sf, skew_id, state=state)
     if emitted:
         state.warn(
             "*LOAD_BODY_{X,Y,Z} -> /GRAV with Fscale_Y = -SF: a POSITIVE LS-DYNA "
@@ -6126,7 +6436,7 @@ def _make_body_loads(state: ConversionState,
         lines += _emit_skew_fix(skew_id, f"SKEW_FIX_GRAV_{grav_id}",
                                 (bv.xc, bv.yc, bv.zc), axes[0], axes[1])
         lines += _emit_grav_card(grav_id, "Body_accel_VECTOR", bv.lcid,
-                                 "X", gnid, -bv.sf, skew_id)
+                                 "X", gnid, -bv.sf, skew_id, state=state)
     if vec_emitted:
         state.warn(
             "*LOAD_BODY_VECTOR -> ONE /GRAV with DIR=X in a companion /SKEW/FIX "
@@ -6191,7 +6501,7 @@ def _make_body_loads(state: ConversionState,
             "RY, and right for RZ only by accident.")
     if not emitted:
         return []
-    _warn_rbody_mains_added(state, "*LOAD_BODY_*", set(mains))
+    _warn_rbody_mains_added(state, "*LOAD_BODY_*", set(mains), kept_rigid)
     return lines
 
 
@@ -6747,17 +7057,20 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                  + [f"*INITIAL_VELOCITY_GENERATION with STYP={g.styp}"
                     for g in state.inivel_generations if not g.styp])
 
-    todo: List[Tuple[int, str, RigidInertia]] = [
-        (pid, f"*PART_INERTIA {pid}", inr)
+    todo: List[Tuple[int, str, RigidInertia, int]] = [
+        (pid, f"*PART_INERTIA {pid}", inr, pid)
         for pid, inr in sorted(state.part_inertias.items())]
+    # round 9, A1: a CNRB that gave way to the rigid part of its PID is filed
+    # under its shadow key - its own card-5 velocity stays on the CNRB main
     todo += [(c.pid, f"*CONSTRAINED_NODAL_RIGID_BODY_INERTIA pid={c.pid}",
-              c.inertia) for c in state.cnrbs if c.inertia is not None]
+              c.inertia, state.cnrb_record_key.get(c.pid, c.pid))
+             for c in state.cnrbs if c.inertia is not None]
 
     lines: List[str] = []
-    for pid, label, inr in todo:
+    for pid, label, inr, key in todo:
         if not inr.has_velocity():
             continue
-        info = rbody_info.get(pid)
+        info = rbody_info.get(key)
         if not info:
             state.warn(
                 f"{label}: the card-5 initial velocity "
@@ -6765,7 +7078,7 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                 f"VR={inr.vrx:g},{inr.vry:g},{inr.vrz:g}) is DROPPED — no /RBODY "
                 "was emitted for that id, so there is no main node to put it on.")
             continue
-        if pid in iv_rb_pids:
+        if pid in iv_rb_pids and key == pid:
             state.warn(
                 f"{label}: the card-5 initial velocity is DROPPED because "
                 f"*INITIAL_VELOCITY_RIGID_BODY also drives part {pid}. *PART "
@@ -7936,7 +8249,8 @@ _PLOAD_COMMENT = ("#  surf_ID  functIDT sensor_ID                             "
 
 
 def _emit_pload_card(pload_id: int, title: str, surf_id: int, lcid: int,
-                     fscale: float, sensor_id: int = 0) -> List[str]:
+                     fscale: float, sensor_id: int = 0,
+                     state: Optional[ConversionState] = None) -> List[str]:
     """One /PLOAD block.
 
     Card grid (``radioss2021/LOADS/pload.cfg``, the newest FORMAT block a
@@ -7952,7 +8266,14 @@ def _emit_pload_card(pload_id: int, title: str, surf_id: int, lcid: int,
     ``Ascale_x`` is always 1.0 — it is an abscissa DIVISOR (the starter stores
     ``PRES(2,K) = ONE/FCX``, ``hm_read_pload.F:166``), and no LS-DYNA pressure
     keyword scales the time axis.
+
+    Pass *state* to read a curve OpenRadioss would extrapolate nonzero
+    through its zero-off-scale copy (round 9, B5; a sensor-gated card is
+    excluded: its argument is shifted by the sensor's start).
     """
+    if state is not None:
+        from .loadcurves import load_funct_id
+        lcid = load_funct_id(state, lcid, "PLOAD", sensor_id=sensor_id)
     return [
         f"/PLOAD/{pload_id}",
         title,
@@ -8162,7 +8483,7 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
             sensors_emitted = True
             lines += _emit_sensor_time(sensor_id, f"PLOAD_{pload_id}_arrival", at)
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
-                                  sf, sensor_id)
+                                  sf, sensor_id, state=state)
         pload_id += 1
     if seg_flipped:
         state.warn(
@@ -8720,7 +9041,9 @@ def _adaptive_spring_token(state: ConversionState, rigid_nodes: Set[int],
     a TYPE4, ``r2len3.F:221-247`` for a TYPE8 / TYPE13 - never on the nodes'.
     The S2 screen then takes the token back off the end nodes, so a light
     compensated end can sit far below what that step assumes, and nothing
-    stops it: no nodal step without ``/DT/NODA``, and the run diverges
+    stops it: no nodal step without ``/DT/NODA``, AMS or an emitted
+    ``/INTER/TYPE2`` with Spotflag 25-28 (``intti1.F:258`` sets I7KGLO,
+    which turns on ``dtnoda.F:661``'s nodal step), and the run diverges
     behind a NORMAL TERMINATION banner (measured on three coupons: the
     energy-error limit, MESSAGE 205, killed them within 3-6 cycles).
     LS-DYNA steps a discrete element on the REAL nodal masses (Theory R16
@@ -9410,8 +9733,7 @@ def _make_constrained_linear_mpcs(state: ConversionState, rbody_info: Dict,
         return []
     skew_spc: Dict[int, Tuple[str, str]] = {}
     for bc in state.bcs_spcs:
-        if not (bc.cid and (bc.cid in state.coord_sys
-                            or bc.cid in state.coord_nodes)):
+        if not spc_cid_skew(state, bc.cid):
             continue
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
@@ -9533,12 +9855,14 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
                 continue
             dirs_to_emit = [(d, lb.sf)]
 
+        from .loadcurves import load_funct_id
         for dir_str, sf in dirs_to_emit:
+            fct = load_funct_id(state, lb.lcid, "CLOAD")   # round 9, B5
             lines += [
                 f"/CLOAD/{load_id}",
                 f"LoadRB_{load_id}",
                 "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-                f"{_i(lb.lcid)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}"
+                f"{_i(fct)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}"
                 f"          {_f(1.0)}{_f(sf)}",
                 HDR,
             ]
@@ -9568,8 +9892,17 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
             continue
         skew_id = 0
         if ln.cid:
-            if ln.cid in state.coord_sys or ln.cid in state.coord_nodes:
+            # round 9, A6 (D9): the same three-kind test as *BOUNDARY_SPC
+            if spc_cid_skew(state, ln.cid):
                 skew_id = ln.cid
+            elif ln.cid in state.coord_vectors:
+                # the post-review round: under --no-spc-vector-frames the
+                # VECTOR frame exists and is kept out (the 386444e bytes) -
+                # a true sentence instead of 'not found'
+                state.warn(
+                    f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} is a "
+                    "*DEFINE_COORDINATE_VECTOR, which --no-spc-vector-frames "
+                    "keeps out — load applied in the GLOBAL system.")
             else:
                 state.warn(
                     f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} not "
@@ -9580,11 +9913,13 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
             grnod_id = state.next_grnod_id()
             grnod_by_nsid[ln.nsid] = grnod_id
         load_id = state.next_id()
+        from .loadcurves import load_funct_id
+        fct = load_funct_id(state, ln.lcid, "CLOAD")       # round 9, B5
         lines += [
             f"/CLOAD/{load_id}",
             set_title or f"LoadNode_{load_id}",
             "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
-            f"{_i(ln.lcid)}{_DOF_DIR_FORCE[ln.dof].rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+            f"{_i(fct)}{_DOF_DIR_FORCE[ln.dof].rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
             f"          {_f(1.0)}{_f(ln.sf)}",
             HDR,
         ]
@@ -9980,11 +10315,13 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
     state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     lines = _emit_skew_fix(skew_id, f"RWALL_{rw.rwid}_MOTION_DIR",
                            (0.0, 0.0, 0.0), yax, zax)
+    from .loadcurves import load_funct_id
+    fct = load_funct_id(state, rw.lcid, keyword)       # round 9, B5
     lines += [
         f"/{keyword}/{motion_id}",
         f"RWALL_{rw.rwid}_MOTION",
         "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID  frame_ID     Icoor",
-        f"{_i(rw.lcid)}{'X'.rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+        f"{_i(fct)}{'X'.rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
         "         0         0",
         "#           Ascale_x            Fscale_Y              Tstart               Tstop",
         f"                   1{_f(1.0)}{_f(0.0)}{_f(0.0)}",
@@ -11807,7 +12144,7 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     tcrc6 = {n: t + r for n, (t, r) in state.node_tc_rc_emitted.items()}
     skewed_spc: Dict[int, int] = {}
     for bc in state.bcs_spcs:
-        if bc.cid and (bc.cid in state.coord_sys or bc.cid in state.coord_nodes):
+        if spc_cid_skew(state, bc.cid):
             for n in state.node_sets.get(bc.nsid, ("", []))[1]:
                 skewed_spc[n] = bc.cid
     rem_groups: Dict[str, List[int]] = defaultdict(list)

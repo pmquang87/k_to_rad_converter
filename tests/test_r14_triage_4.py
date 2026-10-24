@@ -538,12 +538,15 @@ class ArcLengthCardTests(unittest.TestCase):
         self.assertNotIn("/IMPL/DT/3", engine)
 
     def test_the_warning_names_the_measurement_and_never_claims_a_result(self):
+        # round 9 (A11) re-measured the flag at nt 4 AND nt 2 (no QSTAT):
+        # the nt pair and the UNMATCHED reference are the new measurement
         result, _s, _e = _convert(_implicit_deck(nsolvr=6), arclength_riks=True)
         w = next(x for x in result.warnings if "ARC-LENGTH" in x)
         self.assertIn("BUYS THE LOAD PATH, NOT THE ANSWER", w)
         self.assertIn("ex_05_beam_elform_3_&_6", w)     # the named regression
-        self.assertIn("nt 3", w)
         self.assertIn("nt 4", w)
+        self.assertIn("nt 2", w)
+        self.assertIn("UNMATCHED", w)
 
     def test_fixpoint_is_disarmed_under_riks_and_says_so(self):
         """``lectur.F:3523-3532`` prints ``** WARNING :RIKS METHOD IS NOT
@@ -1847,7 +1850,9 @@ class RigidPartPredicateTests(unittest.TestCase):
         # _side_has_deformable_part, all_deformable_nodes, and (round 6 A8)
         # _shell_offset_gapmin's SHLTHK 1 "rigid bodies excluded" test
         "contacts.py": 3,
-        "loads.py": 2,        # the _LOCAL triads, the *DAMPING_GLOBAL scope
+        # the _LOCAL triads, the *DAMPING_GLOBAL scope, and (round 9 A1)
+        # _cnrb_gives_way's "is the clashing PID a rigid PART" test
+        "loads.py": 3,
         "inistate.py": 1,     # the /XREF skip
         "composites.py": 1,   # the *INTEGRATION_SHELL layup drop
     }

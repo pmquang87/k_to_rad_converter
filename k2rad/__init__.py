@@ -25,7 +25,8 @@ from .writer.common import SHELL_FORMULATIONS
 from .writer import (build_starter, build_engines, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active,
-                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE)
+                     add_implicit_contact_stub, _STUB_TYPE25_KEPT_SENTENCE,
+                     n2s_routed)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -95,7 +96,14 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # outside what OpenRadioss SPH supports, and every SPH deck in the
         # corpus is explicit.
         return
-    if state.contacts_type25 and state.options.skip_implicit_stub_with_type25:
+    # R14 triage round 9, A2 (--implicit-n2s-type7): an implicit
+    # *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE is written as a one-way
+    # /INTER/TYPE7 ("routed"); only the rest of the TYPE25-route records are
+    # written as /INTER/TYPE25 ("t25") - the B6 opt-in and its sentence key
+    # on those alone.
+    routed = [c for c in state.contacts_type25 if n2s_routed(state, c)]
+    t25 = [c for c in state.contacts_type25 if not n2s_routed(state, c)]
+    if t25 and state.options.skip_implicit_stub_with_type25:
         # R14 triage round 8, B6 (inverted by the round's validation): under
         # the opt-in the stub is left out only where a TYPE25-route contact
         # is actually WRITTEN, which the writer knows and this pass does not
@@ -104,17 +112,46 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # TYPE25 section), before any id is drawn here. Placed after every
         # other early return, so it fires exactly where a stub WOULD have
         # been injected.
-        state.implicit_stub_deferred_for = sorted(
-            c.inter_id for c in state.contacts_type25)
+        state.implicit_stub_deferred_for = sorted(c.inter_id for c in t25)
         return
-    inter_id = add_implicit_contact_stub(state)
-    if state.contacts_type25:
+    # round 9, A2 (coordinator decision: friction-faithful): beside a routed
+    # contact the stub duplicates its pairs, so it carries the routed FS x
+    # FSF when every routed record states the same scalar value
+    stub_fs = 0.0
+    scalars = [c.fs * c.fsf if c.fs >= 0.0 and c.fs != 2.0 else None
+               for c in routed]
+    if routed and len(set(scalars)) == 1 and scalars[0] is not None:
+        stub_fs = scalars[0]
+    inter_id = add_implicit_contact_stub(state, fs=stub_fs)
+    if t25:
         # The default since the round-8 validation round: the stub STAYS
         # beside a TYPE25-route contact (the 4f5b6e8 deck byte for byte);
         # the sentence names both measured arms and the opt-in.
         state.warn(_STUB_TYPE25_KEPT_SENTENCE.format(
-            ids=sorted(c.inter_id for c in state.contacts_type25),
-            stub=inter_id))
+            ids=sorted(c.inter_id for c in t25), stub=inter_id))
+    if routed and (len(set(scalars)) > 1 or scalars[0] is None):
+        shown = ", ".join("a table / sentinel" if v is None else f"{v:g}"
+                          for v in scalars)
+        state.warn(
+            "Implicit deck: the routed node-to-surface contacts "
+            f"{sorted(c.inter_id for c in routed)} state different (or no "
+            f"scalar) friction coefficients ({shown}); the all-parts implicit "
+            f"stub (/INTER/TYPE7 {inter_id}) beside them stays frictionless, "
+            "so on the pairs it duplicates it carries none of their friction.")
+    elif routed:
+        state.warn(
+            "Implicit deck: the all-parts implicit stub (/INTER/TYPE7 "
+            f"{inter_id}) is KEPT beside the routed contact(s) "
+            f"{sorted(c.inter_id for c in routed)} and carries their friction "
+            f"FS {stub_fs:g}: it duplicates their pairs (doorbeam: the same "
+            "normal impulse on both, within 0.15 %, while the punch loads, "
+            "through t 9.35e-4 s; they part over the last 0.17 ms, the stub "
+            "at 0.89-0.90 x the routed contact's at t_end on the main branch "
+            "and 1.29-1.33 x on the -16 % one), so a frictionless stub would "
+            "halve the friction there; the same friction also acts on the "
+            "stub's other pairs. Without the stub the one-way route loses the load "
+            "silently on few-node contacts (4-node coupon: the block passes "
+            "through behind a NORMAL TERMINATION).")
 
 
 @dataclass
@@ -235,6 +272,7 @@ def convert(
     deformable_to_rigid: bool = True,
     fixpoint_count: int = 0,
     qstat_dtscal: Union[str, float] = 10.0,
+    qstat_dtscal_stated: bool = False,
     arclength_riks: bool = False,
     zero_tolerance_ectol: bool = True,
     implicit_constant_step: bool = False,
@@ -271,6 +309,23 @@ def convert(
     skip_implicit_stub_with_type25: bool = False,
     shell_in_solid_coupling: bool = False,
     imflag_curve_restart: bool = True,
+    rigid_part_pid_precedence: bool = True,
+    implicit_n2s_type7: bool = True,
+    implicit_rigid_gravity_nodes: bool = True,
+    elform7_beam_thickness_section: bool = True,
+    spc_vector_frames: bool = True,
+    prescribed_motion_sf_default: bool = True,
+    rigid_local_shared_skew: bool = True,
+    modal_acoustic_void: bool = True,
+    mixed_main_thickness_gap: bool = False,
+    implicit_bfgs: bool = False,
+    weld_trajectory_impflux: bool = True,
+    weld_trajectory_window: float = 0.25,
+    axisymmetric_2d: bool = True,
+    positive_dt2ms_mass_scaling: bool = True,
+    plane_stress_unit_thickness: bool = True,
+    load_curve_offscale_zero: bool = True,
+    ale_flow_tracking: bool = False,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -460,6 +515,11 @@ def convert(
         is measured WORSE than either (``ex_02`` dies at cycle 0, ``tensile2``
         at ``t = 0.746``). ``deformable_contact_recipe`` keeps its separately
         validated 0.05 and ignores this.
+    qstat_dtscal_stated : bool
+        Whether ``qstat_dtscal`` was GIVEN rather than left at its default
+        (R14 triage round 9, A11; the CLI sets it when ``--qstat-dtscal``
+        appears, the GUI when its QSTAT box is filled). ``arclength_riks``
+        writes no ``/IMPL/QSTAT`` card unless this is True. Default False.
     arclength_riks : bool
         Emit ``/IMPL/DT/3`` (RIKS arc-length continuation) in place of
         ``/IMPL/DT/2`` when ``*CONTROL_IMPLICIT_SOLUTION`` asks for LS-DYNA's
@@ -472,13 +532,15 @@ def convert(
         shipped first and is retracted: it made ``ex_06_beam_elform_1`` a
         carrier, and that deck's own LS-DYNA ``d3hsp`` shows plain BFGS.)
         Roster reach: **2 keys**. **Off by default**; the request is warned
-        about either way. It buys the load path, not the answer: measured at
-        nt 3 AND nt 4 on both carriers (``error_engine`` either way) against
-        this branch's own flag-off baseline, ``ex_07_beam_elform_1`` walks
-        from ``t = 0.3004`` to ``t = 1.000`` at −1.72 % of its reference but
-        still exits ERROR on the last increment, and
-        ``ex_05_beam_elform_3_&_6`` fails in ~2 s without the flag and with
-        it runs tens of thousands of cycles to ``t ~ 1e-7`` and times out.
+        about either way. Since round 9 (A11) the flag also writes NO
+        ``/IMPL/QSTAT`` card unless ``qstat_dtscal_stated`` (the quasi-static
+        term stiffens the arc-length tangent). It buys a load path, NOT the
+        answer: on ``ex_07_beam_elform_1`` the path loops through negative
+        load factors LS-DYNA never visits and the run ends NORMAL in 9 of 10
+        runs of identical bytes (nt 4 and nt 2), ERROR once;
+        ``ex_05_beam_elform_3_&_6``
+        still stops; the LS reference of both is UNMATCHED (its time axis
+        runs backwards), so no run is evidence of the answer.
         ``/IMPL/DT/FIXPOINT`` is deactivated by the engine under RIKS
         (``lectur.F:3523-3532``).
     zero_tolerance_ectol : bool
@@ -655,10 +717,12 @@ def convert(
         the nearest reference segment of the tie that names the weld part, a
         new node on the nearest segment on the other side (spotweld.k: 1213
         -> z 0, new node at z 2, length 2.0 = LS-DYNA's own d3plot and
-        swforc). **Off by default**: alone it only costs cycles (7.64x on
-        spotweld.k, IE -99.92 %); with ``beam_contact_secondary`` the error
-        changes sign, not size (IE -99.9 % -> +82.0 % at 7.80x the cycles)
-        and the weld never fails (EFAIL has no ``/PROP/TYPE13`` slot).
+        swforc). **Off by default**: alone it only costs cycles (2.09x on
+        spotweld.k with today's DT scaling, 639 -> 1334, 7.64x without; IE
+        END -99.88 %); with ``beam_contact_secondary`` (and
+        today's EFAIL displacement criterion and DT scaling) the IE END
+        reads -31.18 % at LS-DYNA's own cycle count 1332 and the weld
+        ruptures 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s).
     beam_contact_secondary : bool
         Put the nodes of ``*ELEMENT_BEAM`` elements (beams, trusses, spotweld
         and discrete beams) of a part named on a contact side into that
@@ -728,9 +792,10 @@ def convert(
         ``DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L`` (round 7, A3 piece
         (ii)). **On by default**; beside resultant cells EFAIL is named.
         Measured on spotweld.k with the round-6 opt-in pair: rupture
-        1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. The measurable default
-        effect is nil (its one default mover is a giant the campaign does
-        not run).
+        1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time 1.1876e-3
+        s (the round-8 DT scaling makes it 4.2 us earlier). The measurable
+        default effect is nil (its one default mover is a giant the
+        campaign does not run).
     implicit_tshell_solid : bool
         On an IMPLICIT deck (the modal path included), write an isotropic
         ``*SECTION_TSHELL`` whose live parts are all ``*MAT_ELASTIC`` as
@@ -769,7 +834,11 @@ def convert(
         ``-1e-20`` from this rule. **On by default.** MEASURED at nt 4:
         sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B -98.89 ->
         -0.09 %, channel_A -98.88 -> -4.03 %; underwater_A/B stay within
-        1 %. Byte reach: 20 deck keys, 17 emitted models.
+        1 %. Byte reach: 20 deck keys, 17 emitted models. Since round 8 a
+        ``/PROP/SOLID`` carrying a Nu > 0 brick with ``R = 10 Nu / (c0
+        dmin) > 1`` gets ``h / R``; since round 9 (B7) a stated h is first
+        capped: ``h' = min(h_eff, 0.14 / Tsca) / max(1, R)`` (0 corpus
+        movers).
     joint_screw_gjoint : bool
         Convert ``*CONSTRAINED_JOINT_SCREW`` between two ``*MAT_RIGID``
         bodies on a global axis into ``/GJOINT/RACK`` (round 7, B2;
@@ -795,7 +864,7 @@ def convert(
         2 or more than six digits, an undefined CON1 or a degenerate
         node frame writes NO card and is named. The
         ``*CONSTRAINED_NODAL_RIGID_BODY_SPC`` CMO -1 card shares the
-        helper (a VECTOR CON1 no longer prints a false 'will dangle').
+        helper (a VECTOR CON1 is a real /SKEW/FIX).
         ONE skew per node (``hm_read_bcs.F:199-205``, ERROR 148): a
         ``*NODE`` TC/RC, ``*CONSTRAINED_GLOBAL`` or ``*BOUNDARY_SPC``
         code on such a main node in another skew is DROPPED and named,
@@ -864,8 +933,10 @@ def convert(
         4, 150 LS blocks 0 < t <= 0.015): IE / KE history RMS 7.54 /
         65.93 -> 2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 %,
         1.0007x the cycles - the NAMED COST: OpenRadioss's energy error
-        grows, mean -4.39 -> -17.88 % (mechanism not closed). Reach 2
-        deck keys on 2 emitted models.
+        grows, mean -4.39 -> -17.88 % (named cost: OpenRadioss's energy
+        error counts no interface energy and no TYPE7 VisS damping work -
+        ecrit.F:500-511, i7for3.F:1077-1120; with VisS 1e-6 the mean is
+        -5.04 %). Reach 2 deck keys on 2 emitted models.
     plane_strain_unit_thickness : bool
         Write a plane-strain ``*SECTION_SHELL`` (ELFORM 13 / 43 / 52 /
         55) with thickness 1.0 (round 8, A7): LS-DYNA ignores Card 2's
@@ -875,9 +946,10 @@ def convert(
         ex_16_thin_shell_elform_13's rigid disk 0.08756308 ->
         0.003447366 = LS-DYNA's 0.34473655E-02, its inertia 0.02225525
         x2 / 0.04451050 = LS-DYNA; the element stays a 3-D plane-stress
-        shell (named). Axisymmetric ELFORM 14 / 15 / 44 are named
-        whatever the flag (LS-DYNA's per-radian mass, 2Dlag x157.5).
-        Reach 1 deck key on 1 emitted model (bytes) + 4 / 4 by text.
+        shell (named). Axisymmetric ELFORM 14 / 15 take the 2-D route
+        (axisymmetric_2d, round 9); ELFORM 44 is named (LS-DYNA's
+        per-radian mass, 2Dlag x157.5). Reach 1 deck key on 1 emitted
+        model (bytes) + 4 / 4 by text.
     rigid_element_mass_admas : bool
         Write an ``*ELEMENT_MASS`` on a rigid body's SECONDARY node as
         ``/ADMAS/0`` on that node (round 8, A8): the starter counts it
@@ -908,7 +980,11 @@ def convert(
         factor), Inertia x13.41, last cycle 1332 = LS-DYNA's 1332,
         cycle-0 step 9.000e-7, IE END -33.00 -> -31.18 % - MIXED: RMS
         IE 6.65 -> 6.82 % and RMS KE 23.09 -> 23.66 % of the LS peak
-        (1331 LS times to t 0.00119792) are worse. Default byte movers 0
+        (1331 LS times to t 0.00119792) are worse; KE END +38.90 ->
+        +30.76 %, the weld ruptures at 1.12229e-3 s, 65.3 us before
+        LS-DYNA's swforc failure time 1.1876e-3 s (4.2 us earlier than
+        without the scaling), the energy error within -0.3 .. +0.2 %.
+        Default byte movers 0
         (plates.mat100's DT is inert: its warning says so).
     adaptive_spring_token : bool
         Set each spring token ``/PROP`` MASS (TYPE4 / TYPE8 / TYPE13,
@@ -974,30 +1050,44 @@ def convert(
         implicit deck whose only contacts take the TYPE25 route, wherever
         a TYPE25 contact is actually WRITTEN (round 8, B6; opt-in since
         the round's validation inverted the default). By default the
-        stub stays there, the 4f5b6e8 deck: OpenRadioss builds implicit
-        contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847)
-        and a TYPE25 acts through the residual alone (intfop2.F:595), so
-        the stub is the deck's only implicit contact stiffness. MEASURED
-        (nt 4 = nt 2): on a two-block coupon whose TYPE25 contact must
-        carry load the skip turns NORMAL in 11 cycles into ERROR
-        TERMINATION at cycle 9 (23 ITERATION DIVERGE, then MESSAGE 79);
-        on implicit/basic-examples/springback-i/doorbeam.k it moves the
-        END +582.00 -> +689.08 % (worse) and the RMS 393.31 -> 313.05 %
-        of the LS peak (better) - MIXED. Reach 1 deck key on 1 emitted
-        model. When the writer drops every TYPE25 the stub is written
-        after all. Default False.
+        stub stays there, the 4f5b6e8 deck: OpenRadioss builds no
+        implicit contact stiffness for a TYPE25 (imp_int_k.F:111-200 has
+        no TYPE25 branch; ind_glob_k.F:4601-4605 prints MESSAGE 232; its
+        force still enters the residual, intfop2.F:595), so beside a
+        TYPE25 the stub is the deck's only implicit contact stiffness and
+        without it the run can stop early OR end NORMAL with the load
+        path lost. MEASURED (nt 4 = nt 2): on a two-block coupon whose
+        TYPE25 contact must carry load the skip turns NORMAL in 11 cycles
+        into ERROR TERMINATION at cycle 9 (23 ITERATION DIVERGE, then
+        MESSAGE 79); on implicit/basic-examples/springback-i/doorbeam.k
+        with its punch driven (round 9, A1) the run without the stub ends
+        a NORMAL banner at t 5.434e-4 (24 cycles, 49.4 % of t_end): the
+        run stops with the punch at 81.51 of 135 mm. Since round 9 an
+        implicit
+        *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE is a routed /INTER/TYPE7
+        (implicit_n2s_type7), so the flag reaches the ERODING spellings
+        and an N2S spelling only under implicit_n2s_type7=False. When the
+        writer drops every TYPE25 the stub is written after all. Default
+        False.
     shell_in_solid_coupling : bool
         Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty
         coupling (R14 triage round 8, B10): /SURF/PART/EXT over the
         embedded shell parts, /GRBRIC/PART over the ALE host, Stfval =
         0.1 x K_host x A_seg^2 / V_host (PSSF on the _PENALTY form),
-        Gap = half the mean host edge, and - on an *INITIAL_VOID host
-        of the card only - the void density (RHO_I = VFACT x RO, the
-        EOS RHO_0 = RO). MEASURED on
-        intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the plate -100
-        -> -28.26 %, the deck IE +1134.62 -> +42.28 % / KE -92.06 ->
-        -38.13 % at 8.936x the cycles. Default False: the density half
-        fails on both *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
+        and - on an *INITIAL_VOID host of the card only - the void
+        density (RHO_I = VFACT x RO, the EOS RHO_0 = RO). Round 9 (B4):
+        on a deck whose only Lagrangian parts are the embedded shells and
+        that emits no other interface, Gap = 0.55 x the mean host edge and
+        the engine card /DT/INTER/CST Tsca Tmin (Tmin = 0.5 x Tsca x
+        min(host edge / c_host, shortest shell edge / c_shell)); any
+        other deck keeps the round-8 Gap 0.5 x without the card (the card
+        is global - the round-9 gate measured it adding mass to a TYPE7
+        pair's nodes beside the SIS); a DT2MS < 0 deck refuses the card.
+        MEASURED on intro-by-j.-day/misc/bird-ale/bird-el.k (nt 4): the
+        plate -100 -> -29.06 %, the deck IE +1134.62 -> +39.41 % / KE
+        -92.06 -> -42.96 % at 1.140x the cycles (energy error -32.6 ->
+        -35.0 %). Default False: the density half fails on both
+        *CONSTRAINED_LAGRANGE_IN_SOLID void hosts.
     imflag_curve_restart : bool
         Write one engine file per method segment of an IMFLAG < 0 curve
         (R14 triage round 8, B3 h.2): <stem>_000k.rad carries
@@ -1008,6 +1098,201 @@ def convert(
         lists them. Default True since round 8 (kept after the campaign
         runner's chain passed gate (b) on ie_shell); False keeps one
         implicit engine file.
+    rigid_part_pid_precedence : bool
+        When a *CONSTRAINED_NODAL_RIGID_BODY PID equals a *MAT_RIGID part
+        id, every part-keyed card (*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL]
+        and its /TH rows, *LOAD_RIGID_BODY, *INITIAL_VELOCITY_RIGID_BODY /
+        _GENERATION, gravity, /BCS, /TH) addresses the PART's /RBODY (R14
+        triage round 9, A1): LS-DYNA accepts the shared id with Warning
+        10177 and drives the part, dyna2rad too (by write order). The CNRB
+        keeps its own /RBODY, its _INERTIA velocity and its _SPC. MEASURED
+        on implicit/basic-examples/springback-i/doorbeam.k: the punch never
+        moved before (DY 0 at every fifth of t_end; 32.30 / 65.32 / 95.32 /
+        132.8 / 135.0 mm with the part drive) and IE ended +582.00 %; with
+        the part drive alone +53.91 % (RMS 393.31 -> 81.05 % of the LS peak,
+        25 LS times in (1e-5, 1.1e-3], nt 4 = nt 2), with the shipped
+        default (+ implicit_n2s_type7) -0.78 .. -28.12 %, RMS 7.21 ..
+        15.26 % (125 runs at nt 4 and nt 2, run to run on three branches).
+        Default True; False restores the 386444e bytes (the CNRB record
+        wins).
+    implicit_n2s_type7 : bool
+        Write an implicit, non-modal *CONTACT_NODES_TO_SURFACE /
+        *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING spellings) as a
+        ONE-WAY /INTER/TYPE7 on the groups the TYPE25 route resolves (R14
+        triage round 9, A2): OpenRadioss builds no implicit contact stiffness
+        for a TYPE25 (imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE
+        232). k2rad's TYPE7 cells (Istf 4, Igap 0 with the starter's default
+        gap, Inacti from IGNORE, Fric = FS x FSF, Tstart / Tstop = BT / DT);
+        where k2rad injects the all-parts implicit stub (an implicit deck
+        with no contact of its own) it stays beside the route with the
+        contact's friction - beside another contact there is no stub, and
+        the warning says so. MEASURED on
+        implicit/basic-examples/springback-i/doorbeam.k
+        (with the A1 part drive): IE END -0.78 .. -28.12 %, RMS 7.21 ..
+        15.26 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3],
+        125 runs of the same bytes at nt 4 and nt 2, run to run on three
+        branches (102 at -27.76 .. -28.12 %, 21 at -15.85 .. -16.27 %, two
+        single nt-4 runs at -8.36 / -0.78 %), where the TYPE25 ended
+        +53.91 % / RMS 81.05 %.
+        With four contact nodes on a coarse rigid base the outcome depends
+        on the geometry: one coupon ends NORMAL with the block through where
+        the TYPE25 stops with MESSAGE 79, another holds where the TYPE25
+        lets the block through, and with the nodes over the base's corners
+        both let it through. Default True; False keeps the TYPE25 (the
+        386444e bytes).
+    implicit_rigid_gravity_nodes : bool
+        On an implicit deck keep *MAT_RIGID parts' own nodes in the /GRAV
+        group beside their /RBODY main node (R14 triage round 9, A4): the
+        main's gravity alone leaves the body frozen in an implicit run.
+        MEASURED on introduction/Introduction/example-16/
+        ex_16_thin_shell_elform_13.k with elform7_beam_thickness_section:
+        NORMAL 1101 cycles, kinetic energy at the fifths of t_end +0.42 /
+        +0.20 / +0.14 / +60.22 / +439.67 % against LS-DYNA (the last two =
+        the unconverted *CONTACT_2D; 1100 LS times in (1e-4, 0.11], nt 4 = nt
+        2), where the main-only group leaves the disk frozen (-100 % at
+        every fifth). Explicit decks keep the main-node group. Default True.
+    elform7_beam_thickness_section : bool
+        Give a *SECTION_BEAM ELFORM 7 (2-D plane-strain beam) whose parts are
+        all rigid the section Area = TS1 x 1, Iyy = Izz = TS1^3 / 12, Ixx =
+        Iyy + Izz instead of the zero section the starter refuses (R14 triage
+        round 9, A5) - NOT LS-DYNA's: ex_16's ELFORM 7 wall has the LS rigid
+        mass 0.15414498E-10, 5.68x rho x TS1 x L. On an implicit deck only
+        together with implicit_rigid_gravity_nodes (alone it runs with the
+        rigid body frozen). A deformable ELFORM 7 member and ELFORM 8 keep
+        the refusal. Default True.
+    spc_vector_frames : bool
+        Write a *BOUNDARY_SPC whose CID is a *DEFINE_COORDINATE_VECTOR in that
+        frame's /SKEW/FIX (R14 triage round 9, A6): LS-DYNA applies the DOFs
+        in the local system; before, the constraint went to the GLOBAL system
+        behind a false 'not found'. One helper (writer/loads.spc_cid_skew) for
+        all five consumers. MEASURED on control_adaptive.cylinder (explicit,
+        nt 4, 271 = 271 cycles): the constrained radial displacement 0.3352 ->
+        1.8e-8 mm, the free-DOF reaction 4611 -> 0.024 N (LS-DYNA 0).
+        Default True.
+    prescribed_motion_sf_default : bool
+        Read a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* as LS-DYNA's
+        default 1.0 (R14 triage round 9, A8; Vol I R17 p.759, Appendix V
+        p.73-9): a NODE / SET row stays a /BCS hold only for a zero motion
+        (VAD 0 / 2 on a zero curve, or no curve), else it is imposed with
+        Fscale 1; a RIGID row writes Fscale 1 (bytes only: the OpenRadioss
+        starter already reads 0 as 1.0, read_impdisp.F:239). Default True;
+        False keeps the stated 0.
+    rigid_local_shared_skew : bool
+        On an implicit deck write a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL
+        drive in the skew of the body's own CMO -1 /BCS (R14 triage round 9,
+        A9; explicit decks unchanged) when the frames coincide at t 0 (every
+        axis pair aligned, signed), the /BCS holds every rotation and no DOF
+        is held and driven: two skew ids on one node make the implicit
+        solver impose a frame-dependent wrong displacement with a 0.0 %
+        energy error (a
+        two-card coupon: x0.750 / x-0.5625 of the motion in two oblique
+        frames, x1.000 in one skew) and the starter print WARNING 312.
+        Default True.
+    modal_acoustic_void : bool
+        On a modal (/IMPL/PRINT/STIF) deck write a part on a refused
+        *MAT_ACOUSTIC as /MAT/VOID with RHO_I = RO, E 0, nu 0 (R14 triage round
+        9, A7): the part resolves and the structure's stiffness is exported,
+        where the refusal stopped the starter (ERROR 179). The void carries
+        no pressure DOF, no fluid stiffness and no acoustic coupling (and,
+        on an 8-point brick, no nodal mass), so the modes are the
+        structure's alone. A time-domain deck keeps the refusal (a void
+        there carries no wave and removes the fluid's radiation sink: on 8.3
+        the structure's energy does not decay, IE RMS 168.69 %). Default
+        True.
+    mixed_main_thickness_gap : bool
+        Opt-in (R14 triage round 9, A10): on an AUTOMATIC contact's
+        /INTER/TYPE7 whose main mixes shells and solids and states no gap,
+        write Igap 3 with Gapmin = half the thinnest main shell (capped at
+        half the smallest main edge) - LS-DYNA offsets the shells by t/2 and
+        the solids by nothing. Measured: mainboltaexpl's bolt 2.19560 ->
+        1.99461 mm (LS 1.81686); COST: EXP_SC_PRELOAD's contact energy
+        2916 -> 7557 at END (LS sliding 1758.5). Default False.
+    implicit_bfgs : bool
+        Opt-in (R14 triage round 9, A12): Quasi-Newton BFGS (/IMPL/NONLIN/2)
+        with no /IMPL/QSTAT (unless qstat_dtscal_stated) on an implicit deck
+        whose NSOLVR is 12 or blank. One carrier (ex_06_beam_elform_1); the
+        failure can be SILENT at nt 4 and nt 2 (doorbeam's default A1 + A2
+        bytes: a NORMAL banner in all 96 runs, nonsense internal energy in
+        13 - 4 of 51 at nt 4, 9 of 45 at nt 2), so check the energies before
+        using a run.
+        Default False.
+    weld_trajectory_impflux : bool
+        Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (R14 triage round 9, B1)
+        whose screen accepts it - IFORM 2, ENFOR 0, Q > 0, SOLN 1, RELVEL 0,
+        no NSID1 node on a driven / loaded part, NSID2 < 0 with every NSID1
+        edge aimed, PTYP 1 / 2 naming all-solid parts, its *MAT_THERMAL_CWM
+        born before t 0 - into windowed /IMPFLUX VOLUMIC cards: each seam
+        brick gets its in-window mean of the IFORM-2 double ellipsoid (64
+        sub-points, 10 mid-point instants), the source OFF past the end of
+        NSID1; the CWM becomes the part's live /HEAT/MAT (TD_LC line), the
+        engine /ANIM/DT is capped at max(d3plot dt, ENDTIM / 100) when more
+        than 1000 frames are requested, and the TEMP /TH/NODE group is the
+        NSID1 + *DATABASE_HISTORY_NODE nodes. A refused card keeps the
+        386444e output with one named sentence; a CWM never converts alone.
+        MEASURED on 05_5_1 (= 05_4_1, one LS model; nt 4): NORMAL in 66 323
+        cycles, deposit -0.30 % of LS-DYNA's source energy, the path nodes
+        END -11.81 / -13.46 / -12.22 % of their rise; 720-2075 s of engine
+        time. Default True; False restores the 386444e output.
+    weld_trajectory_window : float
+        The /IMPFLUX window of the conversion above, in seconds (default
+        0.25, the measured one); must be > 0 and finite (ValueError).
+    axisymmetric_2d : bool
+        Write an all-ELFORM-14 / 15 *SECTION_SHELL deck as an OpenRadioss 2-D
+        AXISYMMETRIC deck (R14 triage round 9, B2): /ANALY N2D3D 1, every
+        node (x, y, 0) written (0, x, y) (Radioss Y = the radius, Z = the
+        axis), /SHELL -> /QUAD on /PROP/SOLID Isolid 2, the /BCS and the
+        prescribed-motion directions permuted, /RBODY J = 0, /TH/QUAD. Refused
+        by name (the deck stays 3-D) for another element family, a 3-node
+        shell, any *CONTACT_*, a node off the xy-plane or at x < 0, ELFORM 14
+        and 15 together, ELFORM 44 or an unmapped card. MEASURED on
+        metal-forming: starter TOTAL MASS 5.7080700E-06 = LS-DYNA per radian
+        (the 3-D route -77.78 %). Default True.
+    positive_dt2ms_mass_scaling : bool
+        On a ROUTED 2-D deck, a positive *CONTROL_TIMESTEP DT2MS multiplies
+        each deformable material's density by max(1, (DT2MS / dt0)^2), dt0 =
+        OpenRadioss's own cycle-0 2-D step of its quads in closed form, so
+        the run starts at DT2MS (round 9, B2); /DT/NODA/CST is never written
+        on a 2-D deck. MEASURED on metal-forming (nt 4): a timeout -> NORMAL
+        in 24 807 cycles, IE END -0.45 %, RMS 0.24 % of the LS peak (the KE
+        is the scaled-mass KE). Default True.
+    plane_stress_unit_thickness : bool
+        Write a 2-D plane-stress *SECTION_SHELL (ELFORM 12) whose Card 2
+        states no thickness (T1..T4 all 0 / blank) with thickness 1.0 (R14
+        triage round 9, B3): LS-DYNA integrates a unit thickness there
+        (main_fsi's d3hsp: rigid mass 0.23410459 = rho 1.2 x area 0.19508716
+        x 1.0000008), although Remark 6 does not list ELFORM 12; a stated T1
+        > 0 is kept. MEASURED on main_fsi: starter 117 ERROR(S) -> 0, TOTAL
+        MASS 0.2341045880 = LS-DYNA (a status move: the body is fixed under a
+        skipped ICFD fluid). Default True.
+    load_curve_offscale_zero : bool
+        Point a MECHANICAL applied-load consumer (/IMPVEL, /IMPDISP, /IMPACC,
+        /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is zero past its
+        last abscissa and - for a DATTYP-0 curve with OFFA > 0 and SFA 0 / 1 -
+        before OFFA, where OpenRadioss would extrapolate it nonzero inside
+        the consumer's window (a curve that starts after t 0 without OFFA
+        keeps its head) (R14 triage round 9, B5): LS-DYNA
+        *DEFINE_CURVE Remark 4a adds (0, 0) and (0.999 OFFA, 0) for DATTYP 0
+        with OFFA > 0, Remark 5 sets load curves to zero off scale, while
+        OpenRadioss extends the first / last segment (finter.F:235-273). The
+        deck's own curves are never changed (material, preload and thermal
+        consumers keep them). MEASURED: the aniso cup-draw's punch no longer
+        starts backward but the deck IE is WORSE (END +6.09 -> +13.10 %, RMS
+        2.89 -> 5.57 %; KE END -40.31 -> -42.14 %);
+        thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 ->
+        +23.42 %. Default True.
+    ale_flow_tracking : bool
+        OPT-IN (R14 triage round 9, B8): write ``*ALE_REFERENCE_SYSTEM_GROUP``
+        PRTYPE 4 (the ALE grid moving with the material's mass-weighted mean
+        velocity about its centre of mass) as ``/ALE/GRID/FLOW-TRACKING`` in
+        ``_0000.rad`` after ``/DEF_SOLID`` (I_def -1 for BCEXP 7, I_rot +1 /
+        -1 for BCROT 0 / 7; ``alew7.F:186-227``); one GROUP card naming every
+        ALE part, PRID 0, ICR 0, and BCTRAN already held by the ALE nodes'
+        own /BCS - anything else is refused by name and stays skipped.
+        ``/BEGIN`` stays 2022 (WARNING 100211, the card read). MEASURED on
+        bird_B (nt 4): END IE +1484.66 -> +17.00 %, IE RMS 1189.95 ->
+        27.74 %, but the deck KE RMS 253.09 -> 749.89 % (the void is
+        converted at full density) - a MIXED row, hence opt-in. Default
+        False.
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution
@@ -1412,6 +1697,7 @@ def convert(
         deformable_to_rigid=deformable_to_rigid,
         fixpoint_count=fixpoint_count,
         qstat_dtscal=qstat_dtscal,
+        qstat_dtscal_stated=qstat_dtscal_stated,
         arclength_riks=arclength_riks,
         zero_tolerance_ectol=zero_tolerance_ectol,
         implicit_constant_step=implicit_constant_step,
@@ -1448,6 +1734,23 @@ def convert(
         skip_implicit_stub_with_type25=skip_implicit_stub_with_type25,
         shell_in_solid_coupling=shell_in_solid_coupling,
         imflag_curve_restart=imflag_curve_restart,
+        rigid_part_pid_precedence=rigid_part_pid_precedence,
+        implicit_n2s_type7=implicit_n2s_type7,
+        implicit_rigid_gravity_nodes=implicit_rigid_gravity_nodes,
+        elform7_beam_thickness_section=elform7_beam_thickness_section,
+        spc_vector_frames=spc_vector_frames,
+        prescribed_motion_sf_default=prescribed_motion_sf_default,
+        rigid_local_shared_skew=rigid_local_shared_skew,
+        modal_acoustic_void=modal_acoustic_void,
+        mixed_main_thickness_gap=mixed_main_thickness_gap,
+        implicit_bfgs=implicit_bfgs,
+        weld_trajectory_impflux=weld_trajectory_impflux,
+        weld_trajectory_window=weld_trajectory_window,
+        axisymmetric_2d=axisymmetric_2d,
+        positive_dt2ms_mass_scaling=positive_dt2ms_mass_scaling,
+        plane_stress_unit_thickness=plane_stress_unit_thickness,
+        load_curve_offscale_zero=load_curve_offscale_zero,
+        ale_flow_tracking=ale_flow_tracking,
         tgmult_imptemp=tgmult_imptemp,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,

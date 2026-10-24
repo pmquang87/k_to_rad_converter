@@ -133,6 +133,23 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          skip_implicit_stub_with_type25: bool = False,
                          shell_in_solid_coupling: bool = False,
                          imflag_curve_restart: bool = True,
+                         rigid_part_pid_precedence: bool = True,
+                         implicit_n2s_type7: bool = True,
+                         implicit_rigid_gravity_nodes: bool = True,
+                         elform7_beam_thickness_section: bool = True,
+                         spc_vector_frames: bool = True,
+                         prescribed_motion_sf_default: bool = True,
+                         rigid_local_shared_skew: bool = True,
+                         modal_acoustic_void: bool = True,
+                         mixed_main_thickness_gap: bool = False,
+                         implicit_bfgs: bool = False,
+                         weld_trajectory_impflux: bool = True,
+                         axisymmetric_2d: bool = True,
+                         positive_dt2ms_mass_scaling: bool = True,
+                         plane_stress_unit_thickness: bool = True,
+                         load_curve_offscale_zero: bool = True,
+                         ale_flow_tracking: bool = False,
+                         weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
@@ -240,6 +257,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     qd = (qstat_dtscal_text or "").strip()
     if qd:                                        # blank -> convert() default (10)
+        # round 9, A11: a filled box is a STATED value - --arclength-riks
+        # then keeps the /IMPL/QSTAT card it would otherwise leave out
+        kwargs["qstat_dtscal_stated"] = True
         if qd.lower() == "none":
             kwargs["qstat_dtscal"] = "none"
         else:
@@ -327,6 +347,51 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["shell_in_solid_coupling"] = bool(shell_in_solid_coupling)
 
     kwargs["imflag_curve_restart"] = bool(imflag_curve_restart)
+
+    kwargs["rigid_part_pid_precedence"] = bool(rigid_part_pid_precedence)
+
+    kwargs["implicit_n2s_type7"] = bool(implicit_n2s_type7)
+
+    kwargs["implicit_rigid_gravity_nodes"] = bool(implicit_rigid_gravity_nodes)
+
+    kwargs["elform7_beam_thickness_section"] = bool(elform7_beam_thickness_section)
+
+    kwargs["spc_vector_frames"] = bool(spc_vector_frames)
+
+    kwargs["prescribed_motion_sf_default"] = bool(prescribed_motion_sf_default)
+
+    kwargs["rigid_local_shared_skew"] = bool(rigid_local_shared_skew)
+
+    kwargs["modal_acoustic_void"] = bool(modal_acoustic_void)
+
+    kwargs["mixed_main_thickness_gap"] = bool(mixed_main_thickness_gap)
+
+    kwargs["implicit_bfgs"] = bool(implicit_bfgs)
+
+    kwargs["weld_trajectory_impflux"] = bool(weld_trajectory_impflux)
+
+    kwargs["axisymmetric_2d"] = bool(axisymmetric_2d)
+
+    kwargs["positive_dt2ms_mass_scaling"] = bool(positive_dt2ms_mass_scaling)
+
+    kwargs["plane_stress_unit_thickness"] = bool(plane_stress_unit_thickness)
+
+    kwargs["load_curve_offscale_zero"] = bool(load_curve_offscale_zero)
+
+    kwargs["ale_flow_tracking"] = bool(ale_flow_tracking)
+    # round 9, B1: the window entry - blank = the measured 0.25 s; anything
+    # else must be a positive, finite number of seconds.
+    wtext = (weld_trajectory_window_text or "").strip()
+    if wtext:
+        try:
+            wval = float(wtext)
+        except ValueError:
+            raise ValueError(
+                f"Weld trajectory window must be a number of seconds, not "
+                f"{wtext!r}")
+        if not (wval > 0.0 and wval != float("inf")):
+            raise ValueError("Weld trajectory window must be > 0 s")
+        kwargs["weld_trajectory_window"] = wval
 
     kwargs["tgmult_imptemp"] = bool(tgmult_imptemp)
 
@@ -485,6 +550,23 @@ class ConverterGUI:
         self.skip_implicit_stub_with_type25 = tk.BooleanVar(value=False)
         self.shell_in_solid_coupling = tk.BooleanVar(value=False)
         self.imflag_curve_restart = tk.BooleanVar(value=True)
+        self.rigid_part_pid_precedence = tk.BooleanVar(value=True)
+        self.implicit_n2s_type7 = tk.BooleanVar(value=True)
+        self.implicit_rigid_gravity_nodes = tk.BooleanVar(value=True)
+        self.elform7_beam_thickness_section = tk.BooleanVar(value=True)
+        self.spc_vector_frames = tk.BooleanVar(value=True)
+        self.prescribed_motion_sf_default = tk.BooleanVar(value=True)
+        self.rigid_local_shared_skew = tk.BooleanVar(value=True)
+        self.modal_acoustic_void = tk.BooleanVar(value=True)
+        self.mixed_main_thickness_gap = tk.BooleanVar(value=False)
+        self.implicit_bfgs = tk.BooleanVar(value=False)
+        self.weld_trajectory_impflux = tk.BooleanVar(value=True)
+        self.axisymmetric_2d = tk.BooleanVar(value=True)
+        self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
+        self.plane_stress_unit_thickness = tk.BooleanVar(value=True)
+        self.load_curve_offscale_zero = tk.BooleanVar(value=True)
+        self.ale_flow_tracking = tk.BooleanVar(value=False)
+        self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=True)
@@ -584,10 +666,10 @@ class ConverterGUI:
                      "for it (Vol I R17 p.12-354: 6 <= NSOLVR <= 9, or NSOLVR 12 with "
                      "card-3 ARCMTH = 3 — ARCCTL is the controlling NODE ID, not a "
                      "switch) — OFF by default; the request "
-                     "is warned about either way. It buys the load path, not the "
-                     "answer: ex_07 walks from t=0.3004 to t=1.000 at -1.72 % but still "
-                     "ERRORs on the last increment, and ex_05 turns a ~2 s error into a "
-                     "600 s timeout",
+                     "is warned about either way; no /IMPL/QSTAT unless the QSTAT box "
+                     "is filled. It buys a load path, not the answer: ex_07 loops "
+                     "through negative load factors LS-DYNA never visits (NORMAL in 9 "
+                     "of 10 runs), ex_05 still stops",
             variable=self.arclength_riks).grid(
                 row=21, column=0, columnspan=3, sticky="w", **pad)
 
@@ -898,15 +980,15 @@ class ConverterGUI:
             io, text="One-node ELFORM-9 *MAT_SPOTWELD beam: create its second "
                      "node on the nearest reference segment on the other side "
                      "(Vol I R17 p.19-3) - OFF. Alone it only costs cycles "
-                     "(7.64x on spotweld.k); pair it with the next box",
+                     "(2.09x on spotweld.k); pair it with the next box",
             variable=self.spotweld_node_synthesis).grid(
                 row=39, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="Put beam/truss nodes on a contact side that names their "
-                     "part - OFF. With the box above, spotweld.k goes IE "
-                     "-99.9 % -> +82.0 % at 7.80x cycles (the sign changes, "
-                     "not the size) and the weld never fails",
+                     "part - OFF. With the box above, spotweld.k ends at LS's "
+                     "1332 cycles, IE END -31.18 %, the weld rupturing 65.3 us "
+                     "before LS's",
             variable=self.beam_contact_secondary).grid(
                 row=40, column=0, columnspan=3, sticky="w", **pad)
 
@@ -931,8 +1013,8 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="*MAT_SPOTWELD EFAIL with no resultant cell: Ifail 1 / "
                      "Ifail2 0 displacement failure (delta_y + EFAIL·L, "
-                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12650e-3 s "
-                     "vs LS 1.17969e-3..1.19792e-3 s",
+                     "sqrt3 on shear) - ON. spotweld.k rupture 1.12229e-3 s, "
+                     "65.3 us before LS's 1.1876e-3 s",
             variable=self.spotweld_efail_displacement).grid(
                 row=43, column=0, columnspan=3, sticky="w", **pad)
 
@@ -957,7 +1039,8 @@ class ConverterGUI:
             io, text="*MAT_NULL PC / MU -> /MAT/HYD_VISC Pmin / Nu - ON. "
                      "PC 0 -> -1e-20 (LS cuts at zero); Nu = MU/RO on "
                      "ELFORM-6 fluids and SPH-only materials, with the h / R "
-                     "hourglass guard (round 8). sph/bird IE +69.4 -> +4.5 %, "
+                     "hourglass guard (round 8), capped at 0.14 / Tsca "
+                     "(round 9). sph/bird IE +69.4 -> +4.5 %, "
                      "channel_B -98.9 -> -0.1 %",
             variable=self.mat_null_pc_mu).grid(
                 row=46, column=0, columnspan=3, sticky="w", **pad)
@@ -1053,15 +1136,15 @@ class ConverterGUI:
         ttk.Checkbutton(
             io, text="Implicit TYPE25-only deck: skip the inert all-parts "
                      "contact stub (opt-in) - OFF. Coupon NORMAL -> ERROR at "
-                     "cycle 9 without it; doorbeam MIXED (END +582 -> +689 %, "
-                     "RMS 393 -> 313 %)",
+                     "cycle 9 without it; doorbeam (punch driven) stops at "
+                     "49 % of t_end behind a NORMAL banner",
             variable=self.skip_implicit_stub_with_type25).grid(
                 row=60, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
             io, text="*CONSTRAINED_SHELL_IN_SOLID -> /INTER/TYPE18 + the void "
-                     "density (opt-in) - OFF. bird-el plate -100 -> -28 % at "
-                     "8.9x cycles",
+                     "density (+ /DT/INTER/CST on an SIS-only deck; opt-in) - "
+                     "OFF. bird-el plate -100 -> -29 % at 1.14x cycles",
             variable=self.shell_in_solid_coupling).grid(
                 row=61, column=0, columnspan=3, sticky="w", **pad)
 
@@ -1071,6 +1154,118 @@ class ConverterGUI:
                      "-> -4.5 %",
             variable=self.imflag_curve_restart).grid(
                 row=62, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="CNRB sharing a rigid part's PID: drive the PART (LS "
+                     "Warning 10177) - ON. doorbeam's punch moves (it never "
+                     "did)",
+            variable=self.rigid_part_pid_precedence).grid(
+                row=63, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Implicit node-to-surface contacts as one-way "
+                     "/INTER/TYPE7 (an injected stub kept, with their "
+                     "friction) - ON. doorbeam IE END -16 .. -28 %",
+            variable=self.implicit_n2s_type7).grid(
+                row=64, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="IMPLICIT gravity on a rigid part: keep its own nodes in "
+                     "/GRAV beside the main - ON. ex_16's disk falls (frozen "
+                     "without)",
+            variable=self.implicit_rigid_gravity_nodes).grid(
+                row=65, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Rigid-only *SECTION_BEAM ELFORM 7: section from TS1 "
+                     "(Area TS1, I TS1^3/12) instead of the refused zero "
+                     "section - ON. NOT LS-DYNA's mass (5.68x)",
+            variable=self.elform7_beam_thickness_section).grid(
+                row=66, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_SPC on a *DEFINE_COORDINATE_VECTOR CID: "
+                     "written in that frame - ON. cylinder constrained "
+                     "displacement 0.335 -> 1.8e-8 mm",
+            variable=self.spc_vector_frames).grid(
+                row=67, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_PRESCRIBED_MOTION_* stated SF 0.0 = the "
+                     "default 1.0 (a NODE / SET hold only for a zero motion) "
+                     "- ON",
+            variable=self.prescribed_motion_sf_default).grid(
+                row=68, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Implicit RIGID_LOCAL drive shares the skew of its "
+                     "body's CMO -1 /BCS (no second skew on the node) - ON. "
+                     "Coupon x0.75 -> x1.00 of the motion",
+            variable=self.rigid_local_shared_skew).grid(
+                row=69, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Modal deck: a refused *MAT_ACOUSTIC part becomes "
+                     "/MAT/VOID (RHO_I = RO, no stiffness) - ON. Starter "
+                     "ERROR 179 -> 0; the modes stay the structure's",
+            variable=self.modal_acoustic_void).grid(
+                row=70, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Opt-in: AUTOMATIC contact on a mixed shell + solid main "
+                     "gets Igap 3 + Gapmin = t_min / 2 (bolt clearance "
+                     "closes; costs frictional contact energy)",
+            variable=self.mixed_main_thickness_gap).grid(
+                row=71, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Opt-in: implicit Quasi-Newton BFGS (/IMPL/NONLIN/2, no "
+                     "/IMPL/QSTAT) for NSOLVR 12 - one carrier; can fail "
+                     "SILENTLY, check the energies",
+            variable=self.implicit_bfgs).grid(
+                row=72, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="*BOUNDARY_THERMAL_WELD_TRAJECTORY -> windowed /IMPFLUX "
+                     "VOLUMIC (its *MAT_THERMAL_CWM as /HEAT/MAT) - ON. "
+                     "05_5_1: NORMAL, deposit -0.30 % of LS. Window (s, blank "
+                     "= 0.25):",
+            variable=self.weld_trajectory_impflux).grid(
+                row=73, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Entry(io, textvariable=self.weld_trajectory_window,
+                  width=8).grid(row=73, column=2, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Axisymmetric ELFORM 14 / 15 -> the OpenRadioss 2-D route (N2D3"
+                     "D 1, /QUAD on Isolid 2) - ON. metal-forming: mass = LS per rad"
+                     "ian",
+            variable=self.axisymmetric_2d).grid(
+                row=74, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Routed 2-D deck: positive DT2MS -> density x (DT2MS / dt0)^2 -"
+                     " ON. metal-forming: timeout -> NORMAL",
+            variable=self.positive_dt2ms_mass_scaling).grid(
+                row=75, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="ELFORM 12 (plane stress) stating no thickness -> Thick 1.0 - "
+                     "ON. main_fsi: starter 117 ERROR(S) -> 0",
+            variable=self.plane_stress_unit_thickness).grid(
+                row=76, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Applied-load curves zero off scale (LS *DEFINE_CURVE Remarks "
+                     "4a / 5) - ON. cup-draw: punch starts forward (IE WORSE)",
+            variable=self.load_curve_offscale_zero).grid(
+                row=77, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="ALE reference system PRTYPE 4 -> /ALE/GRID/FLOW-TRACKING "
+                     "(opt-in) - OFF. bird_B: IE END +1485 -> +17 %, KE RMS "
+                     "worse",
+            variable=self.ale_flow_tracking).grid(
+                row=78, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1349,6 +1544,23 @@ class ConverterGUI:
                     self.skip_implicit_stub_with_type25.get()),
                 shell_in_solid_coupling=self.shell_in_solid_coupling.get(),
                 imflag_curve_restart=self.imflag_curve_restart.get(),
+                rigid_part_pid_precedence=self.rigid_part_pid_precedence.get(),
+                implicit_n2s_type7=self.implicit_n2s_type7.get(),
+                implicit_rigid_gravity_nodes=self.implicit_rigid_gravity_nodes.get(),
+                elform7_beam_thickness_section=self.elform7_beam_thickness_section.get(),
+                spc_vector_frames=self.spc_vector_frames.get(),
+                prescribed_motion_sf_default=self.prescribed_motion_sf_default.get(),
+                rigid_local_shared_skew=self.rigid_local_shared_skew.get(),
+                modal_acoustic_void=self.modal_acoustic_void.get(),
+                mixed_main_thickness_gap=self.mixed_main_thickness_gap.get(),
+                implicit_bfgs=self.implicit_bfgs.get(),
+                weld_trajectory_impflux=self.weld_trajectory_impflux.get(),
+                weld_trajectory_window_text=self.weld_trajectory_window.get(),
+                axisymmetric_2d=self.axisymmetric_2d.get(),
+                positive_dt2ms_mass_scaling=self.positive_dt2ms_mass_scaling.get(),
+                plane_stress_unit_thickness=self.plane_stress_unit_thickness.get(),
+                load_curve_offscale_zero=self.load_curve_offscale_zero.get(),
+                ale_flow_tracking=self.ale_flow_tracking.get(),
                 tgmult_imptemp=self.tgmult_imptemp.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
@@ -1586,6 +1798,54 @@ class ConverterGUI:
         if not kwargs.get("imflag_curve_restart", True):
             bits.append("IMFLAG < 0 deck kept in ONE implicit engine file "
                         "(--no-imflag-curve-restart)")
+        if not kwargs.get("rigid_part_pid_precedence", True):
+            bits.append("CNRB PID clash drives the CNRB "
+                        "(--no-rigid-part-pid-precedence)")
+        if not kwargs.get("implicit_n2s_type7", True):
+            bits.append("implicit N2S contacts stay /INTER/TYPE25 "
+                        "(--no-implicit-n2s-type7)")
+        if not kwargs.get("implicit_rigid_gravity_nodes", True):
+            bits.append("implicit /GRAV swaps rigid parts for their main node "
+                        "(--no-implicit-rigid-gravity-nodes)")
+        if not kwargs.get("elform7_beam_thickness_section", True):
+            bits.append("rigid ELFORM 7 beam sections keep the zero section "
+                        "(--no-elform7-beam-thickness-section)")
+        if not kwargs.get("spc_vector_frames", True):
+            bits.append("VECTOR-CID *BOUNDARY_SPC written in the GLOBAL "
+                        "system (--no-spc-vector-frames)")
+        if not kwargs.get("prescribed_motion_sf_default", True):
+            bits.append("prescribed-motion SF 0.0 kept as 0 (NODE / SET rows "
+                        "held) (--no-prescribed-motion-sf-default)")
+        if not kwargs.get("rigid_local_shared_skew", True):
+            bits.append("RIGID_LOCAL drive keeps its own /SKEW/MOV beside the "
+                        "CMO -1 /BCS (--no-rigid-local-shared-skew)")
+        if not kwargs.get("modal_acoustic_void", True):
+            bits.append("a refused *MAT_ACOUSTIC part keeps no material on a "
+                        "modal deck (--no-modal-acoustic-void)")
+        if kwargs.get("mixed_main_thickness_gap"):
+            bits.append("mixed shell + solid main TYPE7: Igap 3 + Gapmin "
+                        "t_min / 2 (--mixed-main-thickness-gap)")
+        if kwargs.get("implicit_bfgs"):
+            bits.append("implicit BFGS /IMPL/NONLIN/2 without /IMPL/QSTAT "
+                        "(--implicit-bfgs)")
+        if not kwargs.get("weld_trajectory_impflux", True):
+            bits.append("weld trajectory NOT converted "
+                        "(--no-weld-trajectory-impflux)")
+        if kwargs.get("weld_trajectory_window", 0.25) != 0.25:
+            bits.append("weld trajectory window "
+                        f"{kwargs['weld_trajectory_window']:g} s "
+                        "(--weld-trajectory-window)")
+        if not kwargs.get("axisymmetric_2d", True):
+            bits.append("axisymmetric ELFORM 14 / 15 kept as 3-D shells (--no-axisymmetric-2d)")
+        if not kwargs.get("positive_dt2ms_mass_scaling", True):
+            bits.append("positive DT2MS ignored on a routed 2-D deck (--no-positive-dt2ms-mass-scaling)")
+        if not kwargs.get("plane_stress_unit_thickness", True):
+            bits.append("an ELFORM 12 section stating no thickness kept at Thick 0 (--no-plane-stress-unit-thickness)")
+        if not kwargs.get("load_curve_offscale_zero", True):
+            bits.append("applied-load curves extrapolated off scale (--no-load-curve-offscale-zero)")
+        if kwargs.get("ale_flow_tracking"):
+            bits.append("ALE reference system PRTYPE 4 -> "
+                        "/ALE/GRID/FLOW-TRACKING (--ale-flow-tracking)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

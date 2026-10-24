@@ -201,3 +201,61 @@ velocity — so none is shipped. The upstream reproducer is the free bar at
 `/IMPL/DTINI` 1e-8 with no wall and no contact: the penalty twin, or the
 constrained twin converted with `--no-constrained-global` (72 cycles). Run
 such a model EXPLICIT until the engine is fixed.
+
+## Round 9, part A: implicit routes measured
+
+- **Implicit node-to-surface contacts** (A2, default ON,
+  `--no-implicit-n2s-type7` keeps the TYPE25). OpenRadioss builds no implicit
+  stiffness for an `/INTER/TYPE25` (`imp_int_k.F:111-200` has no TYPE25
+  branch; `ind_glob_k.F:4601-4605` prints MESSAGE 232), so on an implicit,
+  non-modal deck a `*CONTACT_NODES_TO_SURFACE` /
+  `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` is written as a ONE-WAY `/INTER/TYPE7`
+  on the same groups (BT / DT in Tstart / Tstop), beside the all-parts
+  implicit stub where k2rad injects one (a deck with no contact of its own;
+  the warning names a deck whose own contacts leave no stub), which carries
+  the contact's friction when every routed contact agrees on it. MEASURED on
+  doorbeam (part-driven since A1): IE END -0.78 .. -28.12 %, RMS 7.21 ..
+  15.26 % of the LS peak over 125 runs at nt 4 and nt 2, run to run on three
+  branches (mostly -27.76 .. -28.12 %), where the TYPE25 ended +53.91 % /
+  81.05 %. A 4-node one-way TYPE7 on a coarse RIGID base can end NORMAL with
+  the block through - a silent failure where the TYPE25 stops loudly - or
+  hold where the TYPE25 lets the block through behind a NORMAL banner, and
+  with the nodes over the base's corners both let it through: the outcome
+  depends on the geometry.
+- **Implicit gravity on a rigid part** (A4, default ON,
+  `--no-implicit-rigid-gravity-nodes` restores the main-node group). Gravity
+  on a `/RBODY` main node alone leaves an implicit body frozen
+  (`gravit_imp.F:84-91` weighs the main with its own pre-body mass,
+  `inirby.F:836-837`: 0 on k2rad's element-free main), so on an implicit deck the
+  rigid parts' own nodes stay in the `/GRAV` group beside their main: ex_16's
+  disk KE -100 % at every fifth -> +0.42 / +0.20 / +0.14 % at the first three
+  fifths (NORMAL in 1101 cycles, nt 4 = nt 2; the last two fifths are the
+  skipped `*CONTACT_2D`). Explicit decks are unchanged.
+- **Arc-length without the quasi-static term** (A11, inside the opt-in
+  `--arclength-riks`): the flag writes no `/IMPL/QSTAT` card unless
+  `--qstat-dtscal` is given, because the term adds
+  `M/((1+alpha)*beta*(DTSCAL*dt)^2)` to the stiffness diagonal
+  (`imp_dyna.F:351-355`) and the engine has no QSTAT-versus-RIKS guard
+  (`lectur.F:3517-3532` disarms only FIXPOINT). MEASURED on
+  `ex_07_beam_elform_1` (ten runs of identical bytes): the converged load
+  factor loops down to -0.4412 where LS-DYNA's path rises to 0.3745,
+  unloads to exactly 0 and reloads to 1.185, never below 0; NORMAL 9 of 10 (1192 .. 1219 cycles, five at nt 4
+  and four at nt 2), ERROR once at nt 4 (MESSAGE 79);
+  `ex_05_beam_elform_3_&_6` still stops; both references are UNMATCHED - a
+  load path, not the answer.
+- **Quasi-Newton BFGS** (A12, opt-in `--implicit-bfgs`): `/IMPL/NONLIN/2`
+  and no `/IMPL/QSTAT` (unless `--qstat-dtscal`) on an NSOLVR 12 / blank
+  deck. One carrier, `ex_06_beam_elform_1`: NORMAL in 277 cycles at IE END
+  -0.09 % (RMS 0.09 %), nt 4 = nt 2, where the default stops at t 0.1601.
+  The failure can be SILENT, on the default bytes too, at nt 4 and nt 2 -
+  doorbeam (A1 + A2) ends a NORMAL banner in all 96 runs of identical bytes
+  and 13 carry nonsense internal energy (4 of 51 at nt 4, 9 of 45 at nt 2,
+  run to run), its TYPE25 route likewise - so check the energies.
+- **Implicit CMO -1** (A13): measured on a coupon in the round-9 census -
+  u . x' = 1.00000e-2 mm, off-axis <= 1.4e-8, no rotation, IE = EXT-WORK,
+  nt 4 = nt 2; six codes x two rotated frames off-axis <= 2.1e-9, energy error
+  0.0 %. A `*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL` drive on the same main
+  node shares the `/BCS` skew (A9): two skew ids on one node make the implicit
+  solver impose a frame-dependent wrong displacement (a two-block coupon:
+  x0.750 of the drive in two oblique frames, x1.000 in one skew, nt 4 = nt 2)
+  and the starter print WARNING 312.

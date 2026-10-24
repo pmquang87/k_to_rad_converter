@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
-    AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS,
+    AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS,
     ConversionState,
     SET_ADD_ADVANCED_TYPES,
     SET_ADD_FAMILIES,
@@ -51,6 +51,7 @@ from .common import (
     _vcross,
     _vnorm,
     _vsub,
+    rigid_part_ids,
 )
 # One-way: materials imports .common and .blast_ale only, never .mesh.
 from .materials import _null_part_eos_bindings, guarded_prop_h
@@ -3407,8 +3408,14 @@ def _make_properties(state: ConversionState) -> List[str]:
             # (ERROR 314/315/316/317). The thicknesses fully determine a
             # prismatic section, so derive it and say so, rather than emitting
             # a property that cannot start.
-            derived = _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1)
-            if derived is not None:
+            # round 9, A5: a rigid-only ELFORM 7 section gets its section
+            # from TS1 (it sets only the rigid body's mass and inertia)
+            a5 = _elform7_rigid_section(state, sec, part_secids)
+            derived = (None if a5 else
+                       _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1))
+            if a5:
+                pass
+            elif derived is not None:
                 sec.area, sec.iyy, sec.izz, sec.ixx = derived
                 state.warn(
                     f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} states "
@@ -4879,8 +4886,11 @@ def _warn_section_card2(state: ConversionState) -> None:
         thickness 1.0 (LS-DYNA ignores Card 2 there and integrates a unit
         depth, Remark 6); under ``--no-plane-strain-unit-thickness`` the fact
         that T1 is written is still said (decision D12);
-      * an axisymmetric ELFORM 14 / 15 / 44 is named always: LS-DYNA
-        integrates per radian, which no thickness reproduces.
+      * an axisymmetric ELFORM 14 / 15 / 44 that stays a 3-D shell is
+        named: LS-DYNA integrates per radian, which no thickness reproduces
+        (round 9, B2: an all-14 / 15 deck is routed to the 2-D deck and gets
+        the route's own sentence instead; ELFORM 44, a refused deck and
+        ``--no-axisymmetric-2d`` keep this one, the last clause saying why).
     """
     shell_pids = {e.pid for e in state.shell_elems}
     used = {p.secid for pid, p in state.parts.items() if pid in shell_pids}
@@ -4913,15 +4923,50 @@ def _warn_section_card2(state: ConversionState) -> None:
                     "(--no-plane-strain-unit-thickness), while LS-DYNA ignores "
                     "Card 2's thickness there and integrates a unit thickness "
                     "(Vol I R17 *SECTION_SHELL Remark 6).")
+        elif (sec.elform in PLANE_STRESS_ELFORMS
+              and state.options.plane_stress_unit_thickness
+              and t1 == 0.0 and all(v in (None, 0.0) for v in (t2, t3, t4))
+              and sec.t1 == 1.0):
+            state.warn(
+                f"*SECTION_SHELL {sec.secid}: ELFORM 12 (2-D plane stress) "
+                "states no thickness (T1..T4 = 0 / blank), so the /PROP/SHELL "
+                "thickness is 1.0: LS-DYNA integrates a unit thickness there "
+                "(main_fsi: its rigid body weighs 0.23410459 = rho 1.2 x area "
+                "0.19508716 x 1.0000008 in the d3hsp), although Vol I R17 "
+                "*SECTION_SHELL Remark 6 does not list ELFORM 12 among the "
+                "forms whose Card-2 thickness is ignored - a stated T1 > 0 is "
+                "kept. The element stays a 3-D shell. MEASURED on "
+                "icfd/basics-examples/Basics_Cylinder_flow_FSI/main_fsi (nt 4): "
+                "starter 117 ERROR(S) -> 0, TOTAL MASS 0.2341045880 = LS-DYNA; "
+                "NORMAL in 100 001 cycles (123-560 s by machine load) - a fixed "
+                "rigid body under a skipped ICFD fluid, so a status move, not a "
+                "physics check. --no-plane-stress-unit-thickness keeps T1 "
+                "(starter ERROR 495).")
         elif sec.elform in AXISYMMETRIC_ELFORMS:
+            # round 9, B2: a ROUTED deck gets the route's own sentence (once
+            # per deck, writer/axisym2d); otherwise the section is a 3-D
+            # shell and is named, the last clause saying why.
+            from .axisym2d import resolve_axisym_plan
+            plan = resolve_axisym_plan(state)
+            if plan.routed:
+                continue
+            if sec.elform == 44:
+                why = ("ELFORM 44, EFG, has no Radioss 2-D element: the 2-D "
+                       "route covers 14 and 15")
+            elif not state.options.axisymmetric_2d:
+                why = ("--no-axisymmetric-2d keeps the 3-D shell; the default "
+                       "writes the 2-D route")
+            else:
+                why = ("the 2-D axisymmetric route is refused for this deck - "
+                       "its sentence names every failing class")
             state.warn(
                 f"*SECTION_SHELL {sec.secid}: ELFORM {sec.elform} is a 2-D "
                 "AXISYMMETRIC formulation; LS-DYNA ignores Card 2's thickness "
                 "(Vol I R17 *SECTION_SHELL Remark 6) and integrates per radian "
                 "(2Dlag: 0.21994391E-03, where the 3-D /PROP/SHELL written here "
                 "weighs 0.0346368 = x157.5). No thickness reproduces that: this "
-                "section's mass, inertia and stress state are NOT LS-DYNA's (no "
-                "axisymmetric route is built).")
+                "section's mass, inertia and stress state are NOT LS-DYNA's "
+                f"({why}).")
         elif (state.options.section_nodal_thickness_mean
               and any(v not in (None, 0.0) and v != t1 for v in (t2, t3, t4))):
             state.warn(
@@ -4936,7 +4981,24 @@ def _warn_section_card2(state: ConversionState) -> None:
                 "2.89 / 29.15 % of the LS peak, IE END +11.90 -> +6.09 % - but "
                 "OpenRadioss's energy error grows: mean -4.39 -> -17.88 %, "
                 "thirds by row -7.20 / -3.62 / -2.35 -> -22.11 / -19.08 / -12.45 %, "
-                "rows below -20 %: 3857 -> 18456 (mechanism not closed). "
+                "rows below -20 %: 3857 -> 18456 (OpenRadioss's ENERGY ERROR is "
+                "(IE + KE + KR) / W_ext - 1 and counts no interface energy, "
+                "ecrit.F:500-511, and the TYPE7 VisS damping work has no channel "
+                "at all, i7for3.F:1077-1120 - ECONTDT is filled only for the "
+                "hidden IVIS2 5; k2rad maps VDC 5 to VisS 0.05, a damper VisS "
+                "sqrt(2 K m) with the hard-coded quadratic VISCA 0.4 and the "
+                "(GAPV - PENE) / GAPV amplification, not LS-DYNA's VDC / 100 x "
+                "2 m w. MEASURED on the cup-draw's round-8 (386444e) bytes "
+                "(nt 4; round 9's B5 curve moves the deck since): the energy "
+                "error's mean "
+                "over every printed row is -17.88 % with VisS 0.05 and -5.04 % "
+                "with VisS 1e-6 (-4.39 % with T1); at the 499 output states, "
+                "with the T01 CONTACT_ENERGY added to IE + KE, it reads -14.52 / "
+                "-1.41 / -1.79 % (VisS 0.05 / VisS 1e-6 / T1); the energy no "
+                "channel records at t_end is 1426.1 N.mm (VisS 0.05) against "
+                "141.0 (VisS 1e-6); LS-DYNA's own glstat printed with "
+                "OpenRadioss's rule reads -38.10 % (86 of its 150 blocks below "
+                "-20 %), against LS-DYNA's own total / external -1 of -0.008 %). "
                 "--no-section-nodal-thickness-mean keeps T1 (round 8).")
 
 
@@ -4954,8 +5016,13 @@ def _warn_shell_formulation_choice(state: ConversionState) -> None:
     """
     if state.is_implicit or not state.sec_shells:
         return
+    # round 9, B2: a deck routed to the 2-D axisymmetric deck writes its
+    # ELFORM 14 / 15 sections as /PROP/SOLID Isolid 2 quads - no Ishell
+    plan = state.axisym_plan
+    routed_ef = (14, 15) if plan is not None and plan.routed else ()
     unmapped = sorted({s.elform for s in state.sec_shells.values()
-                       if s.elform not in _ELFORM_ALWAYS_QEPH})
+                       if s.elform not in _ELFORM_ALWAYS_QEPH
+                       and s.elform not in routed_ef})
     if not unmapped:
         return
     ishell = state.options.shell_default_ishell
@@ -5307,6 +5374,62 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
                                       thick, hcoef=coeff)
     return lines
+
+
+def _elform7_rigid_section(state: ConversionState, sec: SectionBeam,
+                           part_secids: Dict[int, int]) -> bool:
+    """round 9, A5 (``--elform7-beam-thickness-section``, default ON - on an
+    implicit deck only together with ``--implicit-rigid-gravity-nodes``):
+    a ``*SECTION_BEAM`` ELFORM 7 (the 2-D plane-strain beam) with no
+    resultants, ``TS1 > 0`` and EVERY part on it rigid gets ``Area = TS1 x
+    1``, ``Iyy = Izz = TS1^3 / 12``, ``Ixx = Iyy + Izz`` (node 1's TS1; a TS2
+    taper dropped) instead of the zero section the starter refuses (ERROR
+    314-317). A rigid member's section sets only the body's mass and
+    inertia, never a stiffness - and it is NOT LS-DYNA's: ex_16's ELFORM 7
+    wall has the d3hsp rigid mass 0.15414498E-10 (ex_16.d3hsp:5947-5948),
+    5.68x rho x TS1 x L. Scope DECISION (part-A spec D3, against the
+    findings' 'fully constrained' wording): ex_16's wall is CON1 6 with TC 6
+    / RC 7 nodes hung on a spring, so 'fully constrained' reaches 0 keys;
+    the rule is scoped to sections used only by rigid parts. A deformable
+    ELFORM 7 member and any ELFORM 8 keep the refusal. Returns True when it
+    wrote the section (and warned)."""
+    if sec.elform != 7 or sec.ts1 <= 0.0:
+        return False
+    opts = state.options
+    if not opts.elform7_beam_thickness_section:
+        return False
+    pids = sorted(p for p, s in part_secids.items() if s == sec.secid)
+    rigid = rigid_part_ids(state)
+    if not pids or not all(p in rigid for p in pids):
+        return False
+    if state.is_implicit and not opts.implicit_rigid_gravity_nodes:
+        state.warn(
+            f"*SECTION_BEAM {sec.secid}: ELFORM 7 on the rigid part(s) {pids} "
+            "keeps the zero section the starter refuses (ERROR 314-317): on an "
+            "implicit deck the section from TS1 is written only together "
+            "with --implicit-rigid-gravity-nodes, because alone it gives a "
+            "NORMAL run with the rigid body frozen (ex_16's disk: kinetic "
+            "energy -100.00 % against LS-DYNA at every fifth of t_end).")
+        return False
+    ts1 = sec.ts1
+    sec.area = ts1 * 1.0
+    sec.iyy = sec.izz = ts1 ** 3 / 12.0
+    sec.ixx = sec.iyy + sec.izz
+    taper = (f" The node-2 thickness TS2 = {sec.ts2:g} is dropped (a "
+             "prismatic section)." if sec.ts2 and sec.ts2 != ts1 else "")
+    state.warn(
+        f"*SECTION_BEAM {sec.secid}: ELFORM 7 (2-D plane-strain beam) states "
+        f"its section as TS1 = {ts1:g} and its parts {pids} are all rigid, so "
+        f"/PROP/BEAM gets Area = TS1 x 1 = {sec.area:g}, Iyy = Izz = TS1^3/12 "
+        f"= {sec.iyy:g}, Ixx = {sec.ixx:g} - a starter-clearing section, NOT "
+        "LS-DYNA's (its rigid mass of ex_16's ELFORM 7 wall, d3hsp "
+        "0.15414498E-10, is 5.68 x rho x TS1 x L). It sets only this rigid "
+        "body's mass and inertia (inert on ex_16: the wall hangs on a k "
+        "345.686 spring and gravity sags it by m g / k = 4.4e-10 mm with "
+        "LS-DYNA's mass); check it where the body's mass matters."
+        f"{taper} A deformable ELFORM 7 member keeps the refusal. "
+        "--no-elform7-beam-thickness-section restores the refusal.")
+    return True
 
 
 def _emit_prop_beam(sec: SectionBeam) -> List[str]:
@@ -5688,6 +5811,10 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # Radioss's void is the undeclared balance of the volume fractions).
     if mid in state.mat_vacuum:
         return 0                                   # *MAT_140 -> /MAT/VOID
+    # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal deck (round 9,
+    # A7). The RESOLVED registry: a time-domain deck's refusal stays None.
+    if mid in state.acoustic_void:
+        return 0                                   # *MAT_090 -> /MAT/VOID
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

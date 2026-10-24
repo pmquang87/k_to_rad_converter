@@ -1631,14 +1631,21 @@ class VdcRemedyNotAboutTheStub(unittest.TestCase):
         extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3) + "\n"
                  "*CONTACT_NODES_TO_SURFACE_ID\n" + _row(78) + "\n"
                  + _row(5, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row() + "\n")
-        res, starter, _e = _convert(_shell_plate(_IMPL1, extra))
-        stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
-                    for i, ln in enumerate(starter.splitlines())
-                    if ln == "auto_implicit_stabilization_self_contact"]
-        self.assertEqual(len(stub_ids), 1, starter)     # the stub IS there
-        self.assertIn("/INTER/TYPE25/78", starter)
-        self.assertFalse(_has(res.warnings, f"CONTACT {stub_ids[0]}: vdc=0"),
-                         res.warnings)
+        # round 9, A2: by default the implicit N2S contact is a one-way
+        # /INTER/TYPE7/78 (the stub kept beside it); the TYPE25 shape of
+        # this test lives on under --no-implicit-n2s-type7
+        for kw, inter in (({}, "/INTER/TYPE7/78"),
+                          ({"implicit_n2s_type7": False}, "/INTER/TYPE25/78")):
+            with self.subTest(**kw):
+                res, starter, _e = _convert(_shell_plate(_IMPL1, extra), **kw)
+                stub_ids = [int(starter.splitlines()[i - 1].rsplit("/", 1)[1])
+                            for i, ln in enumerate(starter.splitlines())
+                            if ln == "auto_implicit_stabilization_self_contact"]
+                self.assertEqual(len(stub_ids), 1, starter)  # the stub IS there
+                self.assertIn(inter, starter)
+                self.assertFalse(_has(res.warnings,
+                                      f"CONTACT {stub_ids[0]}: vdc=0"),
+                                 res.warnings)
 
 
 def _efg_deck(title: bool = False) -> str:
@@ -2134,7 +2141,9 @@ class Round7FlagWiringA(unittest.TestCase):
         "--spotweld-shear-yield": ("20374..20408", "= 20405",
                                    "8.58 / 26.74 %", "1.107x",
                                    "mainboltaexpl"),
-        "--spotweld-efail-displacement": ("1.12650e-3", "4.5-6.0 %",
+        # round 9, B9: the unscaled rupture 1.12650e-3 s against LS's output
+        # bracket is retracted - the scaled run against LS's swforc
+        "--spotweld-efail-displacement": ("1.12229e-3", "65.3 us",
                                           "sqrt(eps^2 + gamma^2/3)",
                                           "1e19"),
         "--implicit-tshell-solid": ("28 cycles", "100 624",
@@ -2677,11 +2686,13 @@ class ShellInSolidNamed(unittest.TestCase):
         # round 8 (B10) rewrote the default sentence with the deck rule's
         # measurement: round 7's +195.21 % / 1.016x / 4.506x / "refuted as
         # a general rule in round 6" became the opt-in's 2812.5 / -28.26 % /
-        # 8.936x and the CLIS stall at t 2.227e-4
+        # 8.936x and the CLIS stall at t 2.227e-4; round 9 (B4) re-tuned the
+        # opt-in, so its numbers are the re-measured -29.06 % / 1.140x (the
+        # branch's bird-el run, nt 4)
         for needle in ("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)",
                        "1 - shell part(s) [3] in solid part(s) [1]",
                        "NOT converted", "p.10-179", "4.9377e5 (-100 %)",
-                       "+1134.62 %", "2812.5", "-28.26 %", "8.936x",
+                       "+1134.62 %", "2812.5", "-29.06 %", "1.140x",
                        "2.227e-4"):
             self.assertIn(needle, hits[0])
         self.assertIn("CONSTRAINED_SHELL_IN_SOLID", r.skipped_keywords)
@@ -4412,9 +4423,14 @@ class Round7PostReviewRound(unittest.TestCase):
              "its t_end"),
             ("ROADMAP.md", "`BCS WITH LAGRANGE MULTIPLIER NOT ENABLED FOR "
              "NSPMD > 1`, `lag_mult.F:667-671`"),
-            ("k2rad/writer/loads.py", "1.19792e-3 s (4.5-6.0 % early)"),
-            ("k2rad/cli.py", "1.19792e-3 s (4.5-6.0 %% early)"),
-            ("README.md", "1.19792e-3 s (4.5-6.0 % early)"),
+            # (round 9, B9: the EFAIL rupture re-measured with the round-8 DT
+            # scaling against LS-DYNA's swforc failure time)
+            ("k2rad/writer/loads.py", "fails at 1.12229e-3 s, 65.3 us before "
+             "LS-DYNA's swforc failure time 1.1876e-3 s"),
+            ("k2rad/cli.py", "rupture 1.12229e-3 s, 65.3 us before LS-DYNA's "
+             "swforc failure time 1.1876e-3 s"),
+            ("README.md", "rupture 1.12229e-3 s, 65.3 µs before LS-DYNA's "
+             "swforc failure time 1.1876e-3 s"),
             # (round 8, B4: "IE RMS 44.37 % on both arms" left materials.py
             # and ROADMAP with the pre-PC-cell sph/bird arm it described)
             ("README.md", "`channel_C` RMS 0.03 / 0.10 (the campaign re-run"),

@@ -386,14 +386,17 @@ class RigidLocalConstraints(unittest.TestCase):
         """(l) --no-rigid-local-constraints on (a), (d), (e), (j), (o): the
         starter file and the warning list equal 4f5b6e8's (SHA measured from
         the pristine checkout, PYTHONDONTWRITEBYTECODE=1, porcelain --ignored
-        empty before and after)."""
+        empty before and after). Round 9 (A13): probe (o)'s list is
+        4f5b6e8's minus the one false "will dangle" sentence (its VECTOR CON1
+        IS a written /SKEW/FIX/3) - measured against the pristine 386444e
+        checkout, where the two lists differ in that sentence only."""
         for key, deck in _OPT_OUT_DECKS().items():
             with self.subTest(probe=key):
                 res, starter, _e = _convert(deck,
                                             rigid_local_constraints=False)
                 self.assertEqual(_sha(starter), _PR8_SHA[key])
                 self.assertEqual(_sha("\n".join(res.warnings)),
-                                 _PR8_WARN_SHA[key])
+                                 _R9_WARN_SHA.get(key, _PR8_WARN_SHA[key]))
 
     def test_n_the_coupon(self):
         """(n) the g3p coupon: the cube's 100 000 and the plate's 100 111,
@@ -420,7 +423,13 @@ class RigidLocalConstraints(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "will dangle"), res.warnings)
         r_off, s_off, _e2 = _convert(cnrb(3, 110000, _VEC3),
                                      rigid_local_constraints=False)
-        self.assertTrue(_has(r_off.warnings, "will dangle"))
+        # round 9 (A13): the opt-out's "will dangle" on a VECTOR CON1 was
+        # false - /SKEW/FIX/3 IS written and the starter accepts it (g3j) -
+        # so the opt-out names nothing and writes the same card
+        self.assertFalse(_has(r_off.warnings, "will dangle"), r_off.warnings)
+        self.assertFalse(_has(r_off.warnings, "names no *DEFINE_COORDINATE_"))
+        self.assertEqual(_bcs_card(s_off, "BC_cnrb_50")[:3],
+                         ("110", "000", 3))
         # FLAG 1: a t = 0 /SKEW/FIX instead of the moving skew
         node_frame = "*DEFINE_COORDINATE_NODES\n" + _row(7, 10, 12, 16, 1) + "\n"
         r1, s1, _e1 = _convert(cnrb(7, 100000, node_frame))
@@ -1089,8 +1098,12 @@ class SectionNodalThicknessMean(unittest.TestCase):
     def test_2_the_2D_formulations_are_A7s(self):
         _r, s13, _e = _convert(_quad_deck(elform=13, t=(25.4, 1.0, 1.0, 1.0)))
         self.assertEqual(_prop_thick(s13), 1.0)
+        # round 9, B2: an all-ELFORM-15 deck is routed to the 2-D deck by
+        # default (no /PROP/SHELL at all); the 3-D shell A4 must not touch is
+        # the --no-axisymmetric-2d arm's
         r15, s15, _e15 = _convert(_quad_deck(elform=15,
-                                              t=(25.4, 1.0, 1.0, 1.0)))
+                                              t=(25.4, 1.0, 1.0, 1.0)),
+                                  axisymmetric_2d=False)
         self.assertEqual(_prop_thick(s15), 25.4)
         self.assertFalse(_has(r15.warnings, _WA4))
 
@@ -1137,17 +1150,36 @@ class TwoDimensionalShellThickness(unittest.TestCase):
                 self.assertFalse(_has(res.warnings, "PLANE-STRAIN"))
 
     def test_2_axisymmetric_is_named_never_changed(self):
-        for e in (14, 15, 44):
+        """Round 9, B2 split this case: ELFORM 44 (EFG) stays a named 3-D
+        shell; ELFORM 14 / 15 under --no-axisymmetric-2d are named with
+        clause (d); by default they take the 2-D route (/QUAD, no
+        /PROP/SHELL) with the route's sentence."""
+        deck44 = _quad_deck(elform=44, t=(1000.0, "", "", ""))
+        res, starter, _e = _convert(deck44)
+        self.assertEqual(_prop_thick(starter), 1000.0)
+        _r0, s0, _e0 = _convert(deck44, plane_strain_unit_thickness=False)
+        self.assertEqual(starter, s0)
+        self.assertTrue(_has(res.warnings, _WA7B, "Remark 6",
+                             "NOT LS-DYNA's", "ELFORM 44, EFG, has no Radioss "
+                             "2-D element"), res.warnings)
+        for e in (14, 15):
             with self.subTest(elform=e):
                 deck = _quad_deck(elform=e, t=(1000.0, "", "", ""))
-                res, starter, _e = _convert(deck)
+                res, starter, _e = _convert(deck, axisymmetric_2d=False)
                 self.assertEqual(_prop_thick(starter), 1000.0)
-                _r0, s0, _e0 = _convert(deck,
+                _r0, s0, _e0 = _convert(deck, axisymmetric_2d=False,
                                         plane_strain_unit_thickness=False)
                 self.assertEqual(starter, s0)
                 self.assertTrue(_has(res.warnings, _WA7B, "Remark 6",
-                                     "NOT LS-DYNA's"), res.warnings)
+                                     "NOT LS-DYNA's", "--no-axisymmetric-2d "
+                                     "keeps the 3-D shell"), res.warnings)
                 self.assertTrue(_has(_r0.warnings, _WA7B))
+                rd, sd, _ed = _convert(deck)
+                self.assertIn("/QUAD/1", sd.splitlines())
+                self.assertNotIn("/PROP/SHELL/1", sd.splitlines())
+                self.assertTrue(_has(rd.warnings, f"ELFORM {e} on part(s) [1] "
+                                     "-> the 2-D AXISYMMETRIC route"))
+                self.assertFalse(_has(rd.warnings, _WA7B))
 
     def test_3_a_rigid_plane_strain_body(self):
         """Rigid ELFORM-13 quad, T 25.4 -> 1: mass 7.85e-7, IN per node
@@ -2052,6 +2084,12 @@ _PR8_WARN_SHA = {
     "o": "cbee9879c41b3e6d9c1c3664ee4c4f17406477c9b2e2a27f4a02a31ba1dcc09a",
     "a5_d2": "cfa0c72ad12c7fdc53e990d1d8dc26bfb17bca097a01386008263cfbbd8ada20",
 }
+#: round 9 (A13): the opt-out lists that moved - (o) = 4f5b6e8's minus the
+#: false "/BCS skew_ID will dangle" sentence on its VECTOR CON1 (the same
+#: list as (a) / (e) then)
+_R9_WARN_SHA = {
+    "o": "02c3df87ca83a12d9f437789ad15ab19a028efd5cb0d22e4617e5cfbb385a325",
+}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2694,9 +2732,13 @@ class MatNullSphNuAndRGuard(unittest.TestCase):
         hits = [w for w in r.warnings
                 if w.startswith(_WN) and "+20691.23 %" in w]
         self.assertEqual(len(hits), 1, r.warnings)
+        # round 9, B8: the reference-system item is closed by the opt-in
+        # --ale-flow-tracking, so the clause names the flag, its measured Nu
+        # cost and the remaining item (re-derived from the shipped text)
         for needle in ("OPEN fixed-grid ALE faces", "-0.1 %", "+2.4 %",
                        "*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4",
-                       "the reference-system item first"):
+                       "the void / TYPE18 coupling item",
+                       "--ale-flow-tracking", "+59.2 %", "+1504.57 %"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
         self.assertNotIn("mechanism not found", hits[0])
@@ -3030,9 +3072,10 @@ def _stub_ids(starter: str):
 
 
 class ImplicitStubWithType25(unittest.TestCase):
-    """B6, as the validation round left it: OpenRadioss builds implicit
-    contact stiffness only for TYPE 7 / 10 / 11 (imp_int_k.F:847; a TYPE25
-    acts through the residual, intfop2.F:595), so beside a TYPE25-route
+    """B6, as the validation round left it: OpenRadioss builds no implicit
+    contact stiffness for a TYPE25 (imp_int_k.F:111-200 has no TYPE25
+    branch; ind_glob_k.F:4601-4605 MESSAGE 232; its force still enters the
+    residual, intfop2.F:595), so beside a TYPE25-route
     contact the all-parts stub is the deck's only implicit contact
     stiffness. Round 8 first skipped it by default; the solver-physics
     validator's coupon b6t then turned NORMAL into ERROR TERMINATION without
@@ -3052,7 +3095,11 @@ class ImplicitStubWithType25(unittest.TestCase):
     and nt 2 but the controlling-node label."""
 
     def test_default_keeps_the_stub_and_names_both_arms(self):
-        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78))
+        # round 9, A2: the TYPE25 semantics of this test are pinned under
+        # --no-implicit-n2s-type7 (an implicit N2S is a routed TYPE7 by
+        # default - T9::ImplicitN2sType7 pins that arm)
+        res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
+                                    implicit_n2s_type7=False)
         self.assertEqual(_sha(starter), _B6_DEFAULT_4F5B6E8_SHA)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertEqual(len(_stub_ids(starter)), 1, starter)
@@ -3062,25 +3109,30 @@ class ImplicitStubWithType25(unittest.TestCase):
         kept = res.warnings[heads[0]]
         # printed right after the stub's own sentence it refers to
         self.assertIn(_B6_STUB_SENTENCE, res.warnings[heads[0] - 1])
-        for needle in ("[78]", "is KEPT", "imp_int_k.F:847",
+        # round 9, A3: the measured tail re-texted (A1: round 8's doorbeam
+        # pair drove the wrong body; imp_int_k.F:847 -> the three citations)
+        for needle in ("[78]", "is KEPT", "imp_int_k.F:111-200",
+                       "ind_glob_k.F:4601-4605",
                        "intfop2.F:595", "MESSAGE 232", "NORMAL in 11 cycles",
                        "23 ITERATION DIVERGE", "MESSAGE 79",
-                       "ERROR TERMINATION at cycle 9", "+582.00", "393.31",
-                       "+689.08", "313.05", "MIXED", _B6_FLAG,
+                       "ERROR TERMINATION at cycle 9",
+                       "can stop early OR end NORMAL", "49.4 % of t_end",
+                       "81.51 of 135 mm", "--no-implicit-n2s-type7", _B6_FLAG,
                        "/INTER/TYPE7 %d" % _stub_ids(starter)[0]):
             with self.subTest(needle=needle):
                 self.assertIn(needle, kept)
 
     def test_opt_in_skips_the_stub_where_a_type25_is_written(self):
         res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
-                                    skip_implicit_stub_with_type25=True)
+                                    skip_implicit_stub_with_type25=True,
+                                    implicit_n2s_type7=False)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertNotIn(_STUB_TITLE, starter)
         self.assertFalse(_has(res.warnings, _B6_STUB_SENTENCE))
         hits = [w for w in res.warnings if w.startswith(_B6_HEAD)]
         self.assertEqual(len(hits), 1, res.warnings)
         for needle in ("[78] written", _B6_FLAG + " left out",
-                       "ERROR TERMINATION at cycle 9", "MIXED",
+                       "ERROR TERMINATION at cycle 9", "49.4 % of t_end",
                        "Without the flag the stub is kept."):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
@@ -3143,7 +3195,8 @@ class ImplicitStubWithType25(unittest.TestCase):
                  + _row(99, 1, 4, 3) + "\n" + _row(0.1) + "\n" + _row()
                  + "\n")
         deck = _shell_plate(_IMPL1, extra)
-        res, starter, _e = _convert(deck, skip_implicit_stub_with_type25=True)
+        res, starter, _e = _convert(deck, skip_implicit_stub_with_type25=True,
+                                    implicit_n2s_type7=False)
         inters = [ln for ln in starter.splitlines()
                   if ln.startswith("/INTER/")]
         self.assertEqual(len(inters), 1, inters)
@@ -3156,7 +3209,7 @@ class ImplicitStubWithType25(unittest.TestCase):
                              "written after all",
                              "/INTER/TYPE7 %d" % stub[0]), res.warnings)
         self.assertFalse(_has(res.warnings, _B6_FLAG + " left out"), res.warnings)
-        r0, s0, _e0 = _convert(deck)
+        r0, s0, _e0 = _convert(deck, implicit_n2s_type7=False)
         self.assertEqual(len(_stub_ids(s0)), 1, s0)
         self.assertTrue(_has(r0.warnings, _B6_HEAD, "is KEPT"))
 
@@ -3166,12 +3219,14 @@ class ImplicitStubWithType25(unittest.TestCase):
         from k2rad import _inject_implicit_contact_stub
         st = _dispatch(_shell_plate(_IMPL1, _N2S_78))
         st.options.skip_implicit_stub_with_type25 = True
+        st.options.implicit_n2s_type7 = False        # round 9, A2
         before = st._auto_id
         _inject_implicit_contact_stub(st)
         self.assertEqual(st._auto_id, before)
         self.assertEqual(st.implicit_stub_deferred_for, [78])
         self.assertEqual(st.contacts_single, [])
         st0 = _dispatch(_shell_plate(_IMPL1, _N2S_78))
+        st0.options.implicit_n2s_type7 = False
         _inject_implicit_contact_stub(st0)
         self.assertEqual(st0.implicit_stub_deferred_for, [])
         self.assertEqual([c.title for c in st0.contacts_single],
@@ -3181,12 +3236,13 @@ class ImplicitStubWithType25(unittest.TestCase):
         """The coupon of the class docstring: the default is the 4f5b6e8
         deck byte for byte (the stub /INTER/TYPE7 beside /INTER/TYPE25);
         the opt-in writes the TYPE25 alone."""
-        res, starter, _e = _convert(_B6T_DECK)
+        res, starter, _e = _convert(_B6T_DECK, implicit_n2s_type7=False)
         self.assertEqual(_sha(starter), _B6T_DEFAULT_4F5B6E8_SHA)
         self.assertEqual(len(_stub_ids(starter)), 1, starter)
         self.assertEqual(sum(ln.startswith("/INTER/TYPE25/")
                              for ln in starter.splitlines()), 1)
-        r1, s1, _e1 = _convert(_B6T_DECK, skip_implicit_stub_with_type25=True)
+        r1, s1, _e1 = _convert(_B6T_DECK, skip_implicit_stub_with_type25=True,
+                               implicit_n2s_type7=False)
         self.assertEqual(_sha(s1), _B6T_SKIP_SHA)
         self.assertEqual(_stub_ids(s1), [])
         self.assertEqual([ln for ln in s1.splitlines()
@@ -3920,7 +3976,9 @@ def _eos_rho0(starter: str, kind: str, mid: int) -> str:
 
 
 _SIS_ON = "(--shell-in-solid-coupling): shell part(s)"
-_SIS_LINE2 = _f(2812.5) + _f(0.0) + _f(6.25) + _f(0.0) + _f(0.0)
+# round 9, B4: the fixture is an SIS-alone deck, so the re-tuned opt-in
+# writes Gap 0.55 x the 12.5 mm host edge = 6.875 (round 8: 0.5 x = 6.25)
+_SIS_LINE2 = _f(2812.5) + _f(0.0) + _f(6.875) + _f(0.0) + _f(0.0)
 
 
 class ShellInSolidCoupling(unittest.TestCase):
@@ -3936,7 +3994,8 @@ class ShellInSolidCoupling(unittest.TestCase):
         hits = [w for w in res.warnings
                 if w.startswith("*CONSTRAINED_SHELL_IN_SOLID: 1 card(s)")]
         self.assertEqual(len(hits), 1, res.warnings)
-        for needle in ("2812.5", "-28.26 %", "8.936x", "30.51 / 4.88",
+        # round 9, B4: the opt-in's numbers re-measured on its re-tune
+        for needle in ("2812.5", "-29.06 %", "1.140x", "28.42 / 4.66",
                        "2.227e-4", "3.6 %", "--shell-in-solid-coupling"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
@@ -3944,7 +4003,8 @@ class ShellInSolidCoupling(unittest.TestCase):
         self.assertEqual(_eos_rho0(starter, "GRUNEISEN", 1), _f(0.0))
 
     def test_flag_on_writes_the_coupling(self):
-        """Stfval 0.1 x 2250 x 156.25^2 / 1953.125 = 2812.5; Gap 6.25. A
+        """Stfval 0.1 x 2250 x 156.25^2 / 1953.125 = 2812.5; Gap 6.875 (round
+        9, B4: 0.55 x 12.5 on this SIS-alone deck; round 8 wrote 6.25). A
         starter run of this deck (nt 4) reads 0 errors (B10 evidence).
         Mutation target: Stfval without the 0.1."""
         res, starter, _e = _convert(_sis_ale_deck(),
@@ -3957,9 +4017,11 @@ class ShellInSolidCoupling(unittest.TestCase):
         self.assertNotIn("CONSTRAINED_SHELL_IN_SOLID", res.skipped_keywords)
         hits = [w for w in res.warnings if _SIS_ON in w]
         self.assertEqual(len(hits), 1, res.warnings)
+        # round 9, B4: the re-tuned sentence (Gap 6.875, the re-measured
+        # -29.06 % / 1.140x); round 8's Gap-0.5 +284.04 % is no longer quoted
         for needle in ("Stfval = 0.1 x K 2250 x A^2 156.25^2 / V 1953.12",
-                       "= 2812.5", "Gap 6.25", "RHO_I 1e-15 (VFACT x RO)",
-                       "-28.26 %", "8.936x", "+284.04 %"):
+                       "= 2812.5", "Gap 6.875", "RHO_I 1e-15 (VFACT x RO)",
+                       "-29.06 %", "1.140x"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hits[0])
         self.assertFalse(_has(res.warnings,
@@ -3967,12 +4029,13 @@ class ShellInSolidCoupling(unittest.TestCase):
 
     def test_stfval_on_a_non_cubic_host(self):
         """Host bricks 10 x 10 x 20, plate squares 10 x 10: Stfval = 0.1 x
-        2250 x 100^2 / 2000 = 1125; Gap = 0.5 x the mean FIRST edge = 5."""
+        2250 x 100^2 / 2000 = 1125; Gap = 0.55 x the mean FIRST edge = 5.5
+        (round 9, B4's re-tune on this SIS-alone deck; round 8: 0.5 x = 5)."""
         _r, starter, _e = _convert(_sis_ale_deck(host=(10.0, 10.0, 20.0),
                                                  plate=10.0),
                                    shell_in_solid_coupling=True)
         self.assertEqual(_type18(starter)[2],
-                         _f(1125.0) + _f(0.0) + _f(5.0) + _f(0.0) + _f(0.0))
+                         _f(1125.0) + _f(0.0) + _f(5.5) + _f(0.0) + _f(0.0))
 
     def test_penalty_pssf(self):
         res, starter, _e = _convert(
@@ -4450,12 +4513,15 @@ class Round8OptInWiringB(unittest.TestCase):
         "--shell-in-solid-coupling": "shell_in_solid_coupling",
     }
     _HELP_FIGURES = {
-        "--skip-implicit-stub-with-type25": ("+582.00 -> +689.08 %",
-                                             "393.31 -> 313.05 %",
-                                             "imp_int_k.F:847",
-                                             "ERROR TERMINATION at cycle 9"),
-        "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -28.26 %",
-                                      "+1134.62 -> +42.28 %", "8.936x"),
+        # round 9, A3: the help no longer carries round 8's wrong-body
+        # doorbeam pair (the punch never moved) nor imp_int_k.F:847
+        "--skip-implicit-stub-with-type25": ("MESSAGE 232",
+                                             "ind_glob_k.F:4601-4605",
+                                             "ERROR TERMINATION at cycle 9",
+                                             "49.4 %"),
+        # round 9, B4: the re-tuned opt-in's numbers
+        "--shell-in-solid-coupling": ("0.1 K A^2 / V", "-100 -> -29.06 %",
+                                      "+1134.62 -> +39.41 %", "1.140x"),
     }
 
     def _readme(self):
@@ -4645,7 +4711,9 @@ class Round8RoadmapRecord(unittest.TestCase):
 
     def test_the_queue_table_has_a_round_8_column(self):
         rows = self._table("| # | class | decks | closed by round 1 |")
-        self.assertTrue(rows[0].endswith("| round 7 | round 8 |"), rows[0])
+        # round 9 (B9) appended its own column after round 8's
+        self.assertTrue(rows[0].endswith("| round 7 | round 8 | round 9 |"),
+                        rows[0])
         self.assertEqual(len(rows), 10)
         self._same_width(rows)
 
@@ -4677,9 +4745,29 @@ class Round8RoadmapRecord(unittest.TestCase):
                 self.assertEqual(
                     sum("**Round 8:**" in ln for ln in self.lines[a:b]), 1)
 
+    def test_every_round_7_item_has_its_round_8_line_inside_its_paragraph(self):
+        """Round 9, B9 (V6, cG4's paragraph rule): every round-7 NOT item's
+        ONE ``**Round 8:**`` line lies before the first blank line after the
+        item's start - at 386444e item 17's line sat after the sub-header
+        "New items found while doing round 7" (ROADMAP.md:2505)."""
+        s = self._at("**What round 7 deliberately does NOT close**")
+        e = self._at("**What round 8 closes, and what it does NOT.**")
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        self.assertEqual(len(starts), 22)
+        for n, (a, z) in enumerate(zip(starts, starts[1:] + [e]), 1):
+            with self.subTest(item=n):
+                b = next((k for k in range(a, z) if not self.lines[k].strip()),
+                         z)
+                hits = [k for k in range(a, b)
+                        if "**Round 8:**" in self.lines[k]]
+                self.assertEqual(len(hits), 1, self.lines[a][:40])
+
     def test_the_round_8_not_list_is_numbered_1_to_27(self):
         s = self._at("**What round 8 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # round 9's sections sit between this list and the starter-failure
+        # paragraph
+        e = self._at("**What round 9 closes, and what it does NOT.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]

@@ -1061,7 +1061,14 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # would never see this body. ICoG 4 (props) keeps the deck's tensor:
         # inirby.F:266-280 adds no secondary IN there.
         j_status = ""
-        if props is None and state.options.rigid_shell_rotary_inertia:
+        # round 9, B2: a deck routed to the 2-D axisymmetric deck writes
+        # J = 0 (in 2-D I_xx = I_yy + I_zz exactly, inirby.F:366-398, and quad
+        # nodes carry no rotary inertia to cancel), so the correction - and
+        # its sentence - are skipped there.
+        routed = (state.axisym_plan is not None
+                  and state.axisym_plan.routed)
+        if (props is None and state.options.rigid_shell_rotary_inertia
+                and not routed):
             if lumped is None:
                 from ..lumping import (nodal_masses_from_state,
                                        triangle_shell_nodes)
@@ -1506,8 +1513,8 @@ def _resolve_cnrb_spc_lines(state: ConversionState, cnrb,
 
     With ``--rigid-local-constraints`` (the default) a CMO < 0 card goes
     through :func:`_local_constraint`, the helper the ``*MAT_RIGID`` producer
-    shares: a ``*DEFINE_COORDINATE_VECTOR`` CON1 is a real /SKEW/FIX (no
-    false "will dangle" warning), a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
+    shares: a ``*DEFINE_COORDINATE_VECTOR`` CON1 is a real /SKEW/FIX (and
+    no warning says otherwise), a FLAG-1 ``*DEFINE_COORDINATE_NODES`` frame
     gets a /SKEW/FIX at its t = 0 axes (CON1 is "fixed in time"), and a code
     with more than six digits or a digit >= 2, an undefined CON1 or a
     degenerate node frame writes NO card (and no record). Without it, the
@@ -1545,11 +1552,18 @@ def _resolve_cnrb_spc_lines(state: ConversionState, cnrb,
         skew = cnrb.con1
         code = f"{abs(cnrb.con2):06d}"[-6:]
         tra, rot = code[0:3], code[3:6]
-        if skew and skew not in state.coord_nodes and skew not in state.coord_sys:
+        # R14 triage round 9, A13: a *DEFINE_COORDINATE_VECTOR CON1 IS a
+        # written /SKEW/FIX/<cid> (writer/mesh._synthesize_vector_skews), and
+        # the starter accepts it (g3j's coupon: identical bytes to the SYSTEM
+        # twin but the titles, VECTOR = SYSTEM to every printed digit) - so
+        # only a CON1 in NO registry is named, and with what it costs.
+        if (skew and skew not in state.coord_nodes
+                and skew not in state.coord_sys
+                and skew not in state.coord_vectors):
             state.warn(
-                f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: local SPC "
-                f"coordinate system {skew} (CON1) not found among "
-                "*DEFINE_COORDINATE_* — /BCS skew_ID will dangle."
+                f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: CON1 "
+                f"{skew} names no *DEFINE_COORDINATE_* system: the /BCS "
+                "skew_ID is undefined and the starter stops (ERROR 137)."
             )
     if abs(cmo) == 2.0:
         state.warn(
@@ -1670,7 +1684,11 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # is now placed from mesh_nodes, i.e. the node set alone, so the written
         # coordinate is the same with and without a _LOCAL card.
         mesh_nodes = unique_nodes
-        helpers = state.local_frame_nodes.get(cnrb.pid)
+        # round 9, A1: a CNRB that gives way to the rigid PART of its PID
+        # leaves the triad to the part's /RBODY (_make_rbodies already took
+        # it) - one node in two /RBODY is refused by the starter
+        helpers = (None if cnrb.pid in state.cnrb_record_key
+                   else state.local_frame_nodes.get(cnrb.pid))
         if helpers:
             unique_nodes = sorted(set(unique_nodes) | set(helpers))
 
@@ -1756,7 +1774,12 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             for n in secondary_nodes:
                 if n != ind_node and state.added_node_masses.get(n, 0.0) > 0:
                     state.rbody_secondary_masses[n] = (cnrb.pid, "dropped")
-        part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
+        # round 9, A1: *ELEMENT_MASS_PART names a PART id; when the CNRB gives
+        # way to the rigid part of that id, the part's /RBODY carries the
+        # mass (_make_rbodies) and the CNRB none - never counted twice
+        part_add, part_fin = ((0.0, 0.0) if cnrb.pid in state.cnrb_record_key
+                              else state.element_mass_parts.get(
+                                  cnrb.pid, (0.0, 0.0)))
         added_mass = node_added + (part_fin if part_fin > 0 else part_add)
         # `props is None` — see the matching gate in _make_rbodies: with _INERTIA
         # accepted the Mass field holds TM and the SUPERSEDED warning below is the

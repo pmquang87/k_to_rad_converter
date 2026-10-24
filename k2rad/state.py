@@ -4,6 +4,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
 
@@ -1200,10 +1201,46 @@ class SectionShell:
 #: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
 #: *SECTION_SHELL Remark 6): the 2-D PLANE-STRAIN formulations integrate a
 #: unit depth (round 8, A7 writes Thick 1.0), the AXISYMMETRIC ones integrate
-#: per radian (named, no thickness reproduces it).
+#: per radian - an all-ELFORM-14 / 15 deck is routed to the OpenRadioss 2-D
+#: deck (round 9, B2: writer/axisym2d.py) unless refused by name; ELFORM 44
+#: (EFG) has no Radioss 2-D element and stays a 3-D shell, named.
 PLANE_STRAIN_ELFORMS = frozenset({13, 43, 52, 55})
 AXISYMMETRIC_ELFORMS = frozenset({14, 15, 44})
 TWO_D_SHELL_ELFORMS = PLANE_STRAIN_ELFORMS | AXISYMMETRIC_ELFORMS
+#: R14 triage round 9, B3: the 2-D PLANE-STRESS formulation. LS-DYNA
+#: integrates a UNIT thickness on it only when Card 2 states none (main_fsi's
+#: rigid mass 0.23410459 = rho x area x 1.0 in its d3hsp), although Remark 6
+#: does not list ELFORM 12 - a stated T1 > 0 is a real thickness.
+PLANE_STRESS_ELFORMS = frozenset({12})
+
+
+@dataclass
+class AxisymPlan:
+    """R14 triage round 9, B2: the axisymmetric 2-D route decision
+    (writer/axisym2d.resolve_axisym_plan, memoised on
+    ``ConversionState.axisym_plan``).
+
+    ``candidate`` - the deck uses an ELFORM 14 / 15 *SECTION_SHELL and the
+    route is enabled; ``routed`` - the screen passed (``reasons`` empty);
+    ``aborted`` - the emitted-deck transform met a card it does not map and
+    kept the 3-D lines (screen 7); ``density`` / ``dt0`` - the 2-D DT2MS
+    density cell's per-material factor and OpenRadioss's own cycle-0 2-D
+    step of that material's quads; ``z_tol`` - the plane test's round-off
+    band (1e-9 x the largest absolute coordinate of the shell nodes; the
+    post-review round's E3)."""
+    candidate: bool = False
+    routed: bool = False
+    aborted: bool = False
+    z_tol: float = 0.0
+    elform: int = 0
+    pids: List[int] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+    density: Dict[int, float] = field(default_factory=dict)
+    dt0: Dict[int, float] = field(default_factory=dict)
+    f2d: float = 0.67
+    dt2ms: float = 0.0
+    no_modulus: List[int] = field(default_factory=list)
+    engine_dt_dropped: bool = False
 
 
 @dataclass
@@ -2767,6 +2804,46 @@ class ShellInSolidCard:
 
 
 @dataclass
+class AleReferenceGroup:
+    """``*ALE_REFERENCE_SYSTEM_GROUP`` (R14 triage round 9, B8): card 1 ``SID
+    STYPE PRTYPE PRID BCTRAN BCEXP BCROT ICR/NID``, card 2 ``XC YC ZC EXPLIM
+    EFAC (blank) FRCPAD IEXPND`` and the optional card 3 ``IPIDXCL IPIDTYP``
+    (Vol I R17 p.4-83..88; STYPE 0 = a *SET_PART id, 1 = a *PART id). The
+    keyword stays in ``skipped_keywords`` unless ``--ale-flow-tracking``
+    writes it as ``/ALE/GRID/FLOW-TRACKING`` (writer/blast_ale)."""
+    sid: int
+    stype: int = 0
+    prtype: int = 0
+    prid: int = 0
+    bctran: int = 0
+    bcexp: int = 0
+    bcrot: int = 0
+    icr: int = 0
+    xc: float = 0.0
+    yc: float = 0.0
+    zc: float = 0.0
+    explim: float = 0.0
+    efac: float = 0.0
+    frcpad: float = 0.0
+    iexpnd: int = 0
+    keyword: str = "ALE_REFERENCE_SYSTEM_GROUP"
+
+
+@dataclass
+class AleFlowTrackingPlan:
+    """The ONE decision of ``--ale-flow-tracking`` (round 9, B8), made by
+    ``writer/blast_ale._resolve_ale_flow_tracking``: ``card`` the accepted
+    ``*ALE_REFERENCE_SYSTEM_GROUP`` (None = nothing written), ``idef`` /
+    ``irot`` the ``/ALE/GRID/FLOW-TRACKING`` IS_DEF / IS_ROT cells, and
+    ``reasons`` every failing class of a refused deck (empty when accepted
+    or when the deck states no reference-system card)."""
+    card: Optional[AleReferenceGroup] = None
+    idef: int = -1
+    irot: int = 1
+    reasons: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ShellInSolidPlan:
     """One ``*CONSTRAINED_SHELL_IN_SOLID`` card CONVERTED under
     ``--shell-in-solid-coupling`` (R14 triage round 8, B10): decided ONCE by
@@ -2777,7 +2854,10 @@ class ShellInSolidPlan:
     constraint form, PSSF for ``_PENALTY``; ``k_host`` the host's bulk
     modulus (RO C^2 or C1); ``a_seg`` / ``v_host`` the mean shell-segment area
     and the mean host-brick volume; ``void_parts`` the ``*INITIAL_VOID`` host
-    parts that get the void density."""
+    parts that get the void density. Round 9 (B4): ``edge`` is the mean host
+    edge both Gap factors multiply (0.5 in the round-8 form, 0.55 when the
+    re-tune applies) and ``inter_id`` the emitted ``/INTER/TYPE18`` id the
+    end-of-starter re-tune reads back."""
     card: ShellInSolidCard
     shell_pids: List[int]
     host_pids: List[int]
@@ -2790,6 +2870,8 @@ class ShellInSolidPlan:
     tstart: float
     tstop: float
     void_parts: List[int] = field(default_factory=list)
+    edge: float = 0.0
+    inter_id: int = 0
 
 
 @dataclass
@@ -3035,6 +3117,10 @@ class Curve:
     #: ``_has_dynamic_relaxation``)? A deck can start one from the curve alone,
     #: without a *CONTROL_DYNAMIC_RELAXATION card.
     sidr: int = 0
+    #: *DEFINE_CURVE card-1 field 7 (cols 61-70), DATTYP. Read for ONE rule
+    #: (R14 triage round 9, B5, writer/loadcurves.py): only a DATTYP-0 curve
+    #: is an applied-load curve that LS-DYNA zeroes off its abscissa range.
+    dattyp: int = 0
 
 
 @dataclass
@@ -6300,13 +6386,15 @@ class ControlImplicitEigenvalue:
 
 @dataclass
 class ControlImplicitSolution:
-    nsolvr: int         # PARSED AND UNUSED: LS-DYNA's *CONTROL_IMPLICIT_
-    #                   # SOLUTION solution method (1 = linear, 2 =
-    #                   # nonlinear + BFGS, ...). It is NOT the linear
+    nsolvr: int         # LS-DYNA's *CONTROL_IMPLICIT_SOLUTION solution
+    #                   # method (1 = linear, 2 / 12 = nonlinear + BFGS,
+    #                   # 6..9 = arc-length, ...). It is NOT the linear
     #                   # solver LSOLVR of *CONTROL_IMPLICIT_SOLVER, which
-    #                   # an earlier comment here named. Nothing in the
-    #                   # package reads it; _make_engine_implicit always
-    #                   # writes /IMPL/NONLIN/1. See ROADMAP.
+    #                   # an earlier comment here named. Read by
+    #                   # writer/assembly._arclength_requested (round 4)
+    #                   # and _bfgs_requested (round 9, A12: the opt-in
+    #                   # --implicit-bfgs writes /IMPL/NONLIN/2 for 12 or
+    #                   # blank); otherwise /IMPL/NONLIN/1 is written.
     ilimit: int         # max stiffness reformations
     maxref: int         # max refinements
     dctol: float        # displacement convergence
@@ -7105,6 +7193,110 @@ class MatThermalIsotropicTD:
     #: The keyword the DECK actually wrote, so messages name that and not a
     #: synonym the reader would have to look up.
     spelling: str = ""
+    #: R14 triage round 9, B1: the record is the LIVE material of an accepted
+    #: *BOUNDARY_THERMAL_WELD_TRAJECTORY's *MAT_THERMAL_CWM (born before
+    #: t 0), registered by writer/thermal._resolve_weld_trajectories - the
+    #: deck states no TD_LC card, so messages name the CWM instead.
+    cwm: bool = False
+
+
+@dataclass
+class ThermalCwm:
+    """*MAT_THERMAL_CWM (T07) - RECORDED (R14 triage round 9, B1).
+
+    Card 1 ``TMID TRO TGRLC TGMULT HDEAD TDEAD TLAT HLAT``, card 2 ``LCHC
+    LCTC TLSTART TLEND TISTART TIEND HGHOST TGHOST`` (Vol II R17
+    pp.3-25..3-27), 10-wide fixed fields. It converts ONLY together with an
+    accepted *BOUNDARY_THERMAL_WELD_TRAJECTORY and only when it is born
+    before t 0 (``TISTART <= 0``, ``TIEND <= 0``, ``TLEND`` below the part's
+    T0): then gamma = 1 from the first step and the card IS its live
+    TD_LC material (writer/thermal._resolve_weld_trajectories).
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    hdead: float = 0.0
+    tdead: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    lchc: int = 0
+    lctc: int = 0
+    tlstart: float = 0.0
+    tlend: float = 0.0
+    tistart: float = 0.0
+    tiend: float = 0.0
+    hghost: float = 0.0
+    tghost: float = 0.0
+    #: the keyword the deck wrote (*MAT_THERMAL_CWM or its alias *MAT_T07)
+    keyword_seen: str = "MAT_THERMAL_CWM"
+
+
+@dataclass
+class WeldTrajectory:
+    """*BOUNDARY_THERMAL_WELD_TRAJECTORY - RECORDED (R14 triage round 9, B1).
+
+    Card 1 ``PID PTYP NSID1 SPD1 NSID2 SPD2 NCYC RELVEL``, card 2 ``IFORM
+    LCID Q LCROT LCMOV LCLAT DISC ENFOR``, card 3 ``P1..P8`` (IFORM 2: a b
+    cf cr Ff Fr), 10-wide fixed fields (Vol I R17 pp.5-171..5-177). A blank
+    or stated-0 PTYP is the manual's default 1 (= PID is a *PART id,
+    p.5-172; Appendix V: LS-DYNA replaces a 0 by the default). A
+    truncated card reads its missing cells as 0, so an incomplete record is
+    REFUSED by the writer's screen (IFORM 0), never by an exception.
+    """
+    pid: int
+    ptyp: int = 1
+    nsid1: int = 0
+    spd1: float = 0.0
+    nsid2: int = 0
+    spd2: float = 0.0
+    ncyc: int = 0
+    relvel: int = 0
+    iform: int = 0
+    lcid: int = 0
+    q: float = 0.0
+    lcrot: int = 0
+    lcmov: int = 0
+    lclat: int = 0
+    disc: float = 0.0
+    enfor: int = 0
+    p: List[float] = field(default_factory=lambda: [0.0] * 8)
+    #: 0-based position among the deck's trajectory cards (for the messages)
+    index: int = 0
+
+
+@dataclass
+class WeldGroup:
+    """One window's group of seam bricks sharing one rounded flux density:
+    ONE ``/GRBRIC/BRIC`` + ONE ``/IMPFLUX`` VOLUMIC card (round 9, B1)."""
+    window: int
+    t0: float
+    t1: float
+    fscale: float
+    bricks: List[int] = field(default_factory=list)
+
+
+@dataclass
+class WeldPlan:
+    """An ACCEPTED *BOUNDARY_THERMAL_WELD_TRAJECTORY's deposit (round 9, B1;
+    writer/thermal._weld_plan): the windows, the groups and the numbers the
+    acceptance warning states. Ids are drawn at emission, after every
+    screen (writer/thermal._make_weld_impflux)."""
+    traj: WeldTrajectory
+    heated_pids: List[int]
+    window: float
+    nwin: int
+    t_last: float
+    l_path: float
+    path_nodes: List[int]
+    groups: List[WeldGroup] = field(default_factory=list)
+    #: delivered energy sum_g FSCALE_g x V_g x (t1 - t0) and its target
+    #: Q x the LCID integral over [0, t_last]
+    energy: float = 0.0
+    target: float = 0.0
+    #: the *MAT_THERMAL_CWM tmid that became the live material (0 = none)
+    cwm_tmid: int = 0
 
 
 @dataclass
@@ -7483,14 +7675,22 @@ class ConvertOptions:
     # --deformable-contact-recipe keeps its separately validated 0.05 and
     # IGNORES this field (the recipe branch is evaluated first).
     qstat_dtscal: Union[str, float] = 10.0
+    # Whether qstat_dtscal was GIVEN (R14 triage round 9, A11): the CLI's
+    # --qstat-dtscal action and the GUI's filled QSTAT box set it, because
+    # the default 10.0 cannot tell "not given" from "given as 10".
+    # writer/assembly.py writes no /IMPL/QSTAT on an --arclength-riks deck
+    # unless it is True.
+    qstat_dtscal_stated: bool = False
     # --arclength-riks: emit /IMPL/DT/3 (RIKS arc-length continuation) instead
     # of /IMPL/DT/2 when *CONTROL_IMPLICIT_SOLUTION asks for LS-DYNA's
-    # arc-length method (card-1 NSOLVR in {6,7,8,9}, or card-3 ARCCTL != 0).
+    # arc-length method (card-1 NSOLVR in {6,7,8,9}, or NSOLVR 12 with card-3
+    # ARCMTH 3 - the manual's rule; writer/assembly._arclength_requested).
     #
     # OPT-IN, default OFF. The predicate itself is always evaluated and always
-    # WARNS -- the three R14 carriers are told what LS-DYNA asked for and which
-    # flag supplies it -- but the card only ships behind the flag, because the
-    # repeat at a second nt REFUTED it as a default:
+    # WARNS -- the R14 carriers are told what LS-DYNA asked for and which flag
+    # supplies it -- but the card only ships behind the flag, because the
+    # repeat at a second nt REFUTED it as a default (the round-7 record, from
+    # when ex_06 still counted as a carrier):
     #   * ex_05_beam_elform_3_&_6 (NSOLVR 6) is a measured REGRESSION:
     #     error_engine in 1.5 s becomes a 600 s TIMEOUT at t = 5.08e-11 after
     #     111734 cycles (nt 4). No card field separates it from ex_07 -- both
@@ -7499,11 +7699,19 @@ class ConvertOptions:
     #     (a NORMAL that is not a result), and COMBINED with the shipped
     #     /IMPL/QSTAT/DTSCAL 10 it reads -0.08 % at nt 4 and ERROR at t = 0 at
     #     nt 3 -- an nt-flip, never quotable as a figure (MISTAKES k2rad #137).
-    #   * ex_07_beam_elform_1 (NSOLVR 6) is the one nt-stable arm: with
-    #     DTSCAL 10 it walks from t = 3e-8 to t = 1.000 and lands at -1.72 % of
-    #     its LS reference, identical at nt 3 and nt 4 -- but still exits ERROR
-    #     on the last increment (its own RCTOL = 1e-5).
-    # It buys the load path, not the answer. Net movers: zero.
+    #   * ex_07_beam_elform_1 (NSOLVR 6) walked from t = 3e-8 to t = 1.000
+    #     with DTSCAL 10 and landed at -1.72 % of its LS reference at nt 3
+    #     and nt 4.
+    # Round 9 (A11): the flag also writes no /IMPL/QSTAT unless
+    # qstat_dtscal_stated, and re-measured ex_07 under it: the path loops
+    # through negative load factors LS-DYNA never visits (down to -0.4412,
+    # turning back and forth many times; LS-DYNA's rises to 0.3745, unloads
+    # to exactly 0, reloads to 1.185 and never goes below 0),
+    # NORMAL in 9 of 10 runs of identical bytes (1192 .. 1219 cycles, five
+    # at nt 4 and four at nt 2), ERROR once at nt 4 (MESSAGE 79); ex_05
+    # still stops (load factor 0.84 .. 0.87, four runs at nt 4 and nt 2);
+    # both LS references UNMATCHED. It buys a load path, not the answer.
+    # Net movers: zero.
     arclength_riks: bool = False
     # --no-zero-tolerance-ectol: keep k2rad's force default /IMPL/NONLIN
     # Itol 2 / Toli 0.01 on a *CONTROL_IMPLICIT_SOLUTION whose DCTOL, ECTOL
@@ -7566,10 +7774,12 @@ class ConvertOptions:
     # spotweld.k: node 1213 -> z 0, new node at z 2, length 2.0 = LS-DYNA's own
     # d3plot and swforc). Rule 2 puts beam/truss nodes on a contact side
     # (writer/contacts._contact_part_nodes). MEASURED on spotweld.k (nt 4):
-    # rule 1 alone costs 7.64x the cycles (639 -> 4884) at IE -99.92 %; both
-    # take IE -99.9 % -> +82.0 % at 7.80x the cycles - the error changes SIGN,
-    # not size - and the weld never fails (*MAT_SPOTWELD EFAIL has no
-    # /PROP/TYPE13 slot). Rule 2 reaches 4 R14 deck keys on 4 emitted models
+    # rule 1 alone costs 2.09x the cycles (639 -> 1334) at IE END -99.88 %
+    # with the round-8 DT scaling (7.64x, 4884, without it); both,
+    # with today's EFAIL displacement criterion and DT scaling, end at
+    # LS-DYNA's own cycle count 1332 with IE END -31.18 % and the weld
+    # rupturing 65.3 us before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s; round 9,
+    # B9 - round 6's figures are history). Rule 2 reaches 4 R14 deck keys on 4 emitted models
     # and two unreferenced vehicles, none run WITH it but spotweld.k (the
     # three R14 giants have campaign rows from runs without it). Hence opt-in.
     spotweld_node_synthesis: bool = False
@@ -7901,7 +8111,8 @@ class ConvertOptions:
     # DeltaMax1 = delta_y + EFAIL·L, DeltaMax2,3 = delta_y,s + sqrt3·EFAIL·L
     # (the effective plastic strain sqrt(eps^2 + gamma^2/3) on a proportional
     # path). Measured on spotweld.k under the round-6 opt-in pair: rupture
-    # 1.12650e-3 s vs LS 1.17969e-3..1.19792e-3 s. Its only DEFAULT mover is
+    # 1.12229e-3 s, 65.3 us before LS-DYNA's swforc failure time 1.1876e-3 s
+    # (the round-8 DT scaling makes it 4.2 us earlier). Its only DEFAULT mover is
     # the Yaris roof crush (EFAIL 0.8), a run_pass = 2 giant the campaign
     # re-converts but does not run (its row is a stale 2026-09-06
     # error_engine run): the measurable default effect is nil.
@@ -7965,8 +8176,9 @@ class ConvertOptions:
     # +88.77 %) and bird_B CREATES energy through its converted open
     # fixed-grid ALE faces (energy error 99.9 %; walled -0.1 %). Round 8: Nu
     # is written on SPH-only materials too (F5), and a /PROP/SOLID whose
-    # R = 10 Nu / (c0 dmin) exceeds 1 gets h / R (F1). TEROD / CEROD are
-    # named (no LAW6 cell).
+    # R = 10 Nu / (c0 dmin) exceeds 1 gets h / R (F1); round 9 (B7) caps a
+    # stated h first: h' = min(h_eff, 0.14 / Tsca) / max(1, R), so the cap
+    # also acts at R <= 1. TEROD / CEROD are named (no LAW6 cell).
     # MEASURED at nt 4 (base-paired; sph/bird, channel_B and underwater_A/B
     # re-measured on the implementation, channel_A the round-7 pre-research
     # arm): sph/bird IE +69.44 -> +4.50 % (0.832x cycles), channel_B
@@ -8063,8 +8275,10 @@ class ConvertOptions:
     # reproduces it (cup-draw's rigid tools 0.0223 / 0.0164 / 0.0139 = LS).
     # The 2-D ELFORMs 13 / 14 / 15 / 43 / 44 / 52 / 55 are A7's. MEASURED on
     # cup-draw (nt 4): IE / KE RMS 7.54 / 65.93 -> 2.89 / 29.15 %, and the
-    # named cost: OpenRadioss's energy error mean -4.39 -> -17.88 %. Reach 2
-    # deck keys on 2 emitted models.
+    # named cost: OpenRadioss's energy error mean -4.39 -> -17.88 % (round 9,
+    # B6: that error counts no interface energy, ecrit.F:500-511, and no
+    # TYPE7 VisS damping work, i7for3.F:1077-1120; with VisS 1e-6 the mean
+    # is -5.04 %). Reach 2 deck keys on 2 emitted models.
     section_nodal_thickness_mean: bool = True
     # --no-plane-strain-unit-thickness: write a plane-strain *SECTION_SHELL's
     # stated T1, as before round 8 (R14 triage round 8, A7).
@@ -8073,8 +8287,8 @@ class ConvertOptions:
     # ignores Card 2 there and integrates a unit depth (Remark 6). MEASURED
     # (starter): ex_16's rigid disk 0.08756308 -> 0.003447366 = LS-DYNA
     # 0.34473655E-02. The element stays a 3-D plane-stress shell (named);
-    # axisymmetric ELFORM 14 / 15 / 44 are named, never changed. Reach 1 deck
-    # key on 1 emitted model.
+    # axisymmetric ELFORM 14 / 15 take the 2-D route (B2, axisymmetric_2d),
+    # ELFORM 44 stays named. Reach 1 deck key on 1 emitted model.
     plane_strain_unit_thickness: bool = True
     # --no-rigid-element-mass-admas: fold every rigid member's *ELEMENT_MASS
     # into the /RBODY Mass field (and drop a CNRB secondary's), as before
@@ -8154,13 +8368,17 @@ class ConvertOptions:
     # validation).
     #
     # OFF by default: the stub stays beside a TYPE25-route contact, byte for
-    # byte the 4f5b6e8 deck. imp_int_k.F:847 builds implicit contact
-    # stiffness for TYPE 7 / 10 / 11 only and a TYPE25 acts through the
-    # residual (intfop2.F:595), so the stub is the deck's only implicit
-    # contact stiffness: MEASURED (nt 4 = nt 2) on a two-block coupon whose
-    # TYPE25 contact must carry load, the skip turns NORMAL in 11 cycles
-    # into ERROR TERMINATION at cycle 9; on doorbeam it is MIXED (END
-    # +582.00 -> +689.08 %, RMS 393.31 -> 313.05 %). Under the flag
+    # byte the 4f5b6e8 deck. OpenRadioss builds no implicit contact
+    # stiffness for a TYPE25 (imp_int_k.F:111-200; ind_glob_k.F:4601-4605
+    # MESSAGE 232; the force still enters the residual, intfop2.F:595), so
+    # the stub is the deck's only implicit contact stiffness: MEASURED (nt
+    # 4 = nt 2) on a two-block coupon whose TYPE25 contact must carry load,
+    # the skip turns NORMAL in 11 cycles into ERROR TERMINATION at cycle 9;
+    # on doorbeam with its punch driven (round 9, A1) the skip ends a NORMAL
+    # banner at 49.4 % of t_end with the run stopped (the punch at 81.51 of
+    # 135 mm). Since round 9 an
+    # implicit N2S spelling is a routed TYPE7 (--implicit-n2s-type7), so the
+    # flag reaches the ERODING spellings (and N2S under the opt-out). Under the flag
     # __init__._inject_implicit_contact_stub defers the decision to
     # writer/contacts._make_deferred_implicit_stub, which runs after the
     # TYPE25 writer.
@@ -8176,6 +8394,255 @@ class ConvertOptions:
     # the campaign runner's chain passed gate (b) on ie_shell);
     # --no-imflag-curve-restart keeps one implicit engine file.
     imflag_curve_restart: bool = True
+    # --no-rigid-part-pid-precedence: a *CONSTRAINED_NODAL_RIGID_BODY whose
+    # PID equals a *MAT_RIGID part id replaces the part's record again (the
+    # 386444e merge), so the part-keyed cards drive the CNRB.
+    #
+    # ON by default (R14 triage round 9, A1): LS-DYNA accepts the shared id
+    # with Warning 10177 and drives the PART (doorbeam.d3hsp:1040-1041);
+    # dyna2rad drives the part by write order (convertrigids.cxx:37-50,
+    # :145, :238). writer/assembly._merge_cnrb_records keeps the part record
+    # under its id and files the CNRB under the shadow key -pid
+    # (state.cnrb_record_key). MEASURED on
+    # implicit/basic-examples/springback-i/doorbeam.k (the only mover, 1 key
+    # / 1 model): the punch moved 0 mm at every fifth of t_end before (DY
+    # 32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm with the part drive, LS-DYNA's
+    # nodout); IE END +582.00 -> +53.91 % with this rule alone (RMS 393.31 ->
+    # 81.05 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3], nt 4 =
+    # nt 2, 39 -> 35 cycles); the shipped default with --implicit-n2s-type7
+    # -0.78 .. -28.12 %, RMS 7.21 .. 15.26 % (125 runs at nt 4 and nt 2,
+    # three branches). solidof (a deformable-part clash) is byte identical.
+    rigid_part_pid_precedence: bool = True
+    # --no-implicit-n2s-type7: an implicit *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE
+    # stays an /INTER/TYPE25 (the 386444e bytes).
+    #
+    # ON by default (R14 triage round 9, A2; round-7 item 7's real fix):
+    # OpenRadioss builds no implicit contact stiffness for a TYPE25
+    # (imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232; the force
+    # still enters the residual, intfop2.F:595), so
+    # writer/contacts._make_type25_interfaces writes these two spellings on
+    # an implicit, non-modal deck as a ONE-WAY /INTER/TYPE7 on the groups the
+    # TYPE25 route resolves, with k2rad's TYPE7 cells and the starter's
+    # default gap; the record stays in state.contacts_type25 so the
+    # all-parts implicit stub is KEPT, carrying the routed FS (coordinator
+    # decision: friction-faithful). MEASURED on doorbeam with A1 (25 LS
+    # times in (1e-5, 1.1e-3]): IE END -0.78 .. -28.12 %, RMS 7.21 .. 15.26
+    # % (125 runs at nt 4 and nt 2, run to run on three branches, 102 at
+    # -27.76 .. -28.12 %), against +53.91 % / 81.05 % on the
+    # TYPE25; on a coarse 4-node rigid base the outcome depends on the
+    # geometry (one coupon ends NORMAL with the block through, another holds
+    # where the TYPE25 lets it through, corner-node coupons let it through
+    # on both - all named in the warning, as is a
+    # deck whose own contacts leave no stub). Movers 1 key / 1 model
+    # (doorbeam).
+    implicit_n2s_type7: bool = True
+    # --no-implicit-rigid-gravity-nodes: an implicit /GRAV swaps every rigid
+    # part for its /RBODY main node again (the 386444e group).
+    #
+    # ON by default (R14 triage round 9, A4; gated on state.is_implicit):
+    # writer/loads._make_gravity_loads / _make_body_loads keep the rigid parts
+    # in the /GRNOD/PART beside their main node(s) on an implicit deck - the
+    # main's gravity alone leaves the body frozen in an implicit run
+    # (gravit_imp.F:84-91 weighs an active rigid body's main with RBY(15) =
+    # its own pre-body mass, inirby.F:836-837 - 0 on k2rad's element-free
+    # main; located in the fix round). Explicit decks
+    # keep the swap (rgbodv.F discards a secondary node's gravity there).
+    # MEASURED on ex_16 with A5 (1100 LS times in (1e-4, 0.11], nt 4 = nt 2):
+    # NORMAL 1101 cycles, KE fifths +0.42 / +0.20 / +0.14 / +60.22 / +439.67 %
+    # (the 4th / 5th = the unconverted *CONTACT_2D); the main-only group:
+    # the disk frozen, KE -100 % at every fifth. Movers 4 keys / 4 models
+    # (ex_16 + three Yaris giants).
+    implicit_rigid_gravity_nodes: bool = True
+    # --no-elform7-beam-thickness-section (alias --no-2d-beam-thickness-
+    # section): a rigid-only *SECTION_BEAM ELFORM 7 keeps the zero section
+    # (starter ERROR 314-317), the 386444e bytes.
+    #
+    # ON by default (R14 triage round 9, A5; on an implicit deck only with
+    # implicit_rigid_gravity_nodes): writer/mesh._elform7_rigid_section gives
+    # an ELFORM 7 section used only by rigid parts Area = TS1, Iyy = Izz =
+    # TS1^3 / 12, Ixx = Iyy + Izz - NOT LS-DYNA's (ex_16.d3hsp:5947-5948
+    # rigid mass = 5.68x rho x TS1 x L). Scope decision (part-A spec D3): the
+    # findings' 'fully constrained' reaches 0 keys (ex_16's wall hangs on a
+    # spring), so the rule keys on rigid-only sections. ex_16 error_starter ->
+    # NORMAL with A4 (A5 alone = the frozen disk). Movers 1 key / 1 model.
+    elform7_beam_thickness_section: bool = True
+    # --no-spc-vector-frames: a *BOUNDARY_SPC whose CID is a
+    # *DEFINE_COORDINATE_VECTOR is written in the GLOBAL system (the 386444e
+    # bytes), with a corrected sentence instead of the false 'not found'.
+    #
+    # ON by default (R14 triage round 9, A6; round-8 entry 27):
+    # writer/loads.spc_cid_skew - read by _make_bcs, _global_spc_dofs, the
+    # *CONSTRAINED_LINEAR screen, the free-node guard and the screw
+    # BodyCondition (and the *LOAD_NODE CID sibling) - resolves a VECTOR CID
+    # to its existing /SKEW/FIX/<cid>. MEASURED on control_adaptive.cylinder
+    # (explicit nt 4, 271 = 271 cycles): constrained radial displacement
+    # 0.3352 -> 1.8e-8 mm on every state, free-DOF reaction 4611 -> 0.024 N
+    # (LS-DYNA 0). Movers 1 key / 1 model.
+    spc_vector_frames: bool = True
+    # --no-prescribed-motion-sf-default: keep a STATED SF 0.0 on
+    # *BOUNDARY_PRESCRIBED_MOTION_* as 0 (a /BCS hold on every NODE / SET
+    # row, Fscale 0 on RIGID rows) - the 386444e bytes.
+    #
+    # ON by default (R14 triage round 9, A8; round-8 entry 19): LS-DYNA
+    # replaces a stated 0 by the default 1.0 (Vol I R17 p.759; Appendix V
+    # p.73-9). writer/loads._pm_zero_hold keeps the /BCS hold only for a zero
+    # motion (VAD 0 / 2 on an identically zero curve, or no curve); every
+    # other SF-0 NODE / SET row is imposed with Fscale 1 (_pm_sf); RIGID and
+    # the screw drive write Fscale 1 - bytes only there, the starter already
+    # reads 0 as 1.0 (read_impdisp.F:239). No measured-gain sentence: both
+    # runnable movers (stagnation_A / _B) die at 9 % of t_end in both arms.
+    # Movers 4 keys / 4 models (2 giants convert + starter only).
+    prescribed_motion_sf_default: bool = True
+    # --no-rigid-local-shared-skew: a *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL
+    # drive keeps its co-rotating /SKEW/MOV beside the body's CMO -1 /BCS in
+    # its own skew (the 386444e bytes, two skew ids on the main node).
+    #
+    # ON by default (R14 triage round 9, A9; round-8 entry 18):
+    # writer/loads._shared_local_skew writes the drive in the /BCS skew when
+    # (a) the /BCS holds every rotation, (b) the frames are equal at t 0
+    # (every axis pair aligned, SIGNED - the fix round's anti-parallel
+    # case), (c) no DOF is held and driven, and the main node carries
+    # exactly one skewed card (D12); otherwise both skews stay, named. On an
+    # IMPLICIT deck only (decision A9: explicit unchanged). MEASURED on g2g's
+    # two-card implicit coupon: two skews impose x0.750 / x-0.5625 of the
+    # prescribed value (frames (2,1,1)/sqrt6, (2,2,1)/3), one skew x1.000,
+    # nt 2 = nt 4; the Yaris roof crush's starter WARNING 312 goes (convert +
+    # starter only). Movers 1 key / 1 model.
+    rigid_local_shared_skew: bool = True
+    # --no-modal-acoustic-void: a *PART on a refused *MAT_ACOUSTIC keeps no
+    # material on a MODAL deck too (the 386444e bytes: starter ERROR 179).
+    #
+    # ON by default (R14 triage round 9, A7): writer/materials.py::
+    # _resolve_modal_acoustic_void writes /MAT/VOID/<mid> with RHO_I = RO
+    # (E 0, nu 0) for every acoustic mid a *PART uses when state.is_modal, and
+    # drops an /EBCS on that part's faces (iniebcs.F:428-441 ERROR 1602; reach
+    # 0). A time-domain deck keeps the refusal: there the void runs but
+    # carries no wave and removes the fluid's radiation sink
+    # (8.3.plate_kirchhoff: the structure's energy does not decay, IE RMS
+    # 168.69 %). MEASURED on
+    # 9.3.ssd_acoustic_box: error_starter -> 0 ERROR, NORMAL in the modal
+    # step (status-only: the reference is frequency-domain). Movers 1 key / 1
+    # model.
+    modal_acoustic_void: bool = True
+    # --mixed-main-thickness-gap (OPT-IN, R14 triage round 9, A10): an
+    # AUTOMATIC (SINGLE_SURFACE / SURFACE_TO_SURFACE / GENERAL) contact's
+    # /INTER/TYPE7 whose emitted main mixes shells and solids, with no gap
+    # stated or derived, gets Igap 3 + Gapmin = min(t_min / 2, half the
+    # smallest main side) (writer/contacts._mixed_main_thickness_gap). The
+    # round's gate (part-A spec A10.0, nt 4): mainboltaexpl's bolt 2.19560 ->
+    # 1.99461 mm at 1e-3 s (LS 1.81686), the plates' IE 1.31 -> 134.66 N.mm
+    # (LS 245.92); COST on EXP_SC_PRELOAD: contact energy 2916 -> 7557 at END
+    # vs LS sliding 1758.5, farther at every fifth - so not a default (D1);
+    # the TYPE25 route was measured too and is NO-GO. Reach 4 keys / 4
+    # models. Default False = the 386444e bytes.
+    mixed_main_thickness_gap: bool = False
+    # --implicit-bfgs (OPT-IN, R14 triage round 9, A12): on an implicit,
+    # non-modal deck whose *CONTROL_IMPLICIT_SOLUTION NSOLVR is 12 or blank
+    # (or that has no such card) write /IMPL/NONLIN/2 (Quasi-Newton BFGS) in
+    # place of /IMPL/NONLIN/1 and no /IMPL/QSTAT unless qstat_dtscal_stated
+    # (writer/assembly._bfgs_requested). One measured carrier (ex_06); the
+    # failure can be SILENT at nt 4 and nt 2 (doorbeam's A1 + A2 bytes end a
+    # NORMAL banner in all 96 runs, with nonsense internal energy in 13: 4 of
+    # 51 at nt 4, 9 of 45 at nt 2) - so never a default. Default False = the
+    # 386444e bytes.
+    implicit_bfgs: bool = False
+    # --no-weld-trajectory-impflux: a *BOUNDARY_THERMAL_WELD_TRAJECTORY and
+    # its *MAT_THERMAL_CWM stay unconverted (the 386444e output: the seam
+    # part keeps mat_ID 0, starter ERROR 179 + 3046).
+    #
+    # ON by default (R14 triage round 9, B1): writer/thermal.
+    # _resolve_weld_trajectories screens each trajectory (IFORM 2, ENFOR 0,
+    # Q > 0, SOLN 1, RELVEL 0, no NSID1 node on a driven / loaded part,
+    # NSID2 < 0 with every NSID1 edge aimed, PTYP 1 / 2 naming all-solid
+    # parts, the *MAT_THERMAL_CWM born before t 0) and writes an accepted one
+    # as windowed /IMPFLUX VOLUMIC cards on /GRBRIC groups (each seam brick's
+    # in-window mean of the IFORM-2 double ellipsoid: 64 sub-points, 10
+    # mid-point instants, no heat past the end of NSID1), its CWM as the
+    # part's live /HEAT/MAT (TD_LC line), the S2 /ANIM/DT cap and the TEMP
+    # /TH/NODE group on the NSID1 + history nodes. MEASURED on 05_5_1 (= 05_4_1,
+    # ONE LS model; nt 4): NORMAL in 66 323 cycles, deposit -0.30 % of
+    # LS-DYNA's source energy, the path nodes END -11.81 / -13.46 / -12.22 %
+    # of their rise (63 LS times to 98.991 s). Reach 2 deck keys on 2 emitted
+    # models (bytes) + 2 / 2 refusal-sentence movers (SOLN 2).
+    weld_trajectory_impflux: bool = True
+    # --weld-trajectory-window S: the /IMPFLUX window of the conversion above
+    # (default 0.25 s, the measured one; > 0 and finite, checked in
+    # __post_init__). A separate value option because an optional-value
+    # spelling (--weld-trajectory-impflux[=S], nargs "?") would swallow the
+    # optional positional output_stem (round 8 D1, round 9 conventions D-2).
+    weld_trajectory_window: float = 0.25
+    # --no-axisymmetric-2d: an all-ELFORM-14 / 15 *SECTION_SHELL deck stays a
+    # 3-D shell deck with Card 2's T1 (the 386444e bytes; named).
+    #
+    # ON by default (R14 triage round 9, B2): writer/axisym2d.py routes such
+    # a deck to the OpenRadioss 2-D AXISYMMETRIC deck (/ANALY N2D3D 1; nodes
+    # (x, y, 0) -> (0, x, y); /SHELL -> /QUAD on /PROP/SOLID Isolid 2; /BCS
+    # and prescribed-motion directions permuted; /RBODY J = 0; /TH/QUAD),
+    # refused by name for another element family, a 3-node shell, any
+    # *CONTACT_*, a node off the xy-plane or at x < 0, or an unmapped card.
+    # MEASURED on thermal/metal-forming: starter TOTAL MASS 5.7080700E-06 =
+    # LS-DYNA's per radian (the 3-D route -77.78 %); 2Dlag (giant, starter
+    # only) ERROR 3046 -> 0. Reach 2 deck keys on 2 emitted models (bytes) +
+    # 1 / 1 refused by name (SPR main).
+    axisymmetric_2d: bool = True
+    # --no-positive-dt2ms-mass-scaling: a routed 2-D deck keeps its physical
+    # density whatever *CONTROL_TIMESTEP DT2MS says.
+    #
+    # ON by default (round 9, B2): on a ROUTED deck a positive DT2MS
+    # multiplies each deformable material's density by max(1, (DT2MS /
+    # dt0)^2), dt0 = OpenRadioss's own cycle-0 2-D step of its quads in
+    # closed form (qdlen2.F:113, mqviscb.F:259-260, contrl.F:1148), so the run
+    # starts at DT2MS; /DT/NODA/CST is never written on a 2-D deck
+    # (resol.F:2711-2729). MEASURED on metal-forming (nt 4, the 500 LS
+    # times in (0.0032, 1.6]): a timeout -> NORMAL in 24 807 cycles, IE END
+    # -0.45 %, RMS 0.24 % of the LS peak. Reach 1 key on 1 model.
+    positive_dt2ms_mass_scaling: bool = True
+    # --no-plane-stress-unit-thickness: a 2-D plane-stress *SECTION_SHELL
+    # (ELFORM 12) that states no thickness keeps Thick 0 (the 386444e bytes:
+    # starter ERROR 495 per shell).
+    #
+    # ON by default (R14 triage round 9, B3): handlers.handle_section_shell
+    # writes thickness 1.0 when Card 2's T1..T4 are all 0 / blank - LS-DYNA
+    # integrates a unit thickness there (main_fsi's d3hsp: its rigid body
+    # weighs 0.23410459 = rho 1.2 x area 0.19508716 x 1.0000008), although
+    # Remark 6 does not list ELFORM 12; a stated T1 > 0 is kept. MEASURED on
+    # icfd/.../main_fsi (nt 4): starter 117 ERROR(S) -> 0, TOTAL MASS
+    # 0.2341045880 = LS-DYNA, NORMAL in 100 001 cycles - a fixed rigid body
+    # under a skipped ICFD fluid, a status move only. Reach 1 deck key on 1
+    # emitted model.
+    plane_stress_unit_thickness: bool = True
+    # --no-load-curve-offscale-zero: every consumer reads the deck's /FUNCT
+    # as stated (the 386444e bytes; OpenRadioss extends its first / last
+    # segment, finter.F:235-273).
+    #
+    # ON by default (R14 triage round 9, B5): writer/loadcurves.py points a
+    # MECHANICAL applied-load consumer (/IMPVEL, /IMPDISP, /IMPACC, /CLOAD,
+    # /PLOAD, /GRAV) at a COPY of its curve that is zero off the abscissa
+    # range where OpenRadioss would extrapolate it nonzero inside the
+    # consumer's window - LS-DYNA *DEFINE_CURVE Remark 4a's (0, 0) and
+    # (0.999 OFFA, 0) for DATTYP 0 / OFFA > 0 and Remark 5's "set to zero if
+    # the time goes off scale". state.curves, material, preload and thermal
+    # curves never change. MEASURED: the aniso cup-draw's punch no longer
+    # starts backward but its IE is WORSE (END +6.09 -> +13.10 %, RMS 2.89 ->
+    # 5.57 %; KE END -40.31 -> -42.14 %); thick.k's
+    # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
+    # deck keys on 2 emitted models.
+    load_curve_offscale_zero: bool = True
+    # --ale-flow-tracking (OPT-IN, R14 triage round 9, B8): write
+    # *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the ALE grid moving with the
+    # material's mass-weighted mean velocity about its centre of mass) as
+    # /ALE/GRID/FLOW-TRACKING in _0000.rad, after /DEF_SOLID (I_def -1 for
+    # BCEXP 7, I_rot +1 / -1 for BCROT 0 / 7; alew7.F:186-227); any other
+    # reference-system card is refused by name and stays skipped. /BEGIN
+    # stays 2022: the starter prints WARNING 100211 and reads the card.
+    #
+    # OFF by default: the row becomes MIXED. MEASURED on ale/bird/bird-b/
+    # bird_B (nt 4, 600 LS times): END IE +1484.66 -> +17.00 %, IE RMS
+    # 1189.95 -> 27.74 % of the LS peak, the energy error's worst -20.4 ->
+    # -8.7 % - but the deck KE RMS 253.09 -> 749.89 % (END +25.88 ->
+    # +1542.16 %): the void is converted at full density (cycle-0 KE 101.5
+    # against LS-DYNA's 11.737). Reach 1 deck key on 1 emitted model.
+    ale_flow_tracking: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -8809,6 +9276,19 @@ class ConvertOptions:
                 "as a substitute for LS-DYNA's assumed-strain ELFORM -1/-2; "
                 "18 and 14 read worse on the same decks and an arbitrary cell "
                 "would be written into /PROP/SOLID verbatim.")
+        try:
+            win = float(self.weld_trajectory_window)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "weld_trajectory_window must be a number of seconds, not "
+                f"{self.weld_trajectory_window!r}")
+        if not (math.isfinite(win) and win > 0.0):
+            raise ValueError(
+                f"weld_trajectory_window must be > 0 s and finite (got "
+                f"{win:g}); it is the /IMPFLUX window of the "
+                "*BOUNDARY_THERMAL_WELD_TRAJECTORY conversion - switch the "
+                "conversion off with weld_trajectory_impflux=False "
+                "(--no-weld-trajectory-impflux) instead.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9406,6 +9886,17 @@ class ConversionState:
     # A refusal is deliberate and is NOT the same thing as an unread keyword.
     refused_materials: Dict[int, Tuple[str, str, str]] = \
         field(default_factory=dict)
+    # *MAT_ACOUSTIC / *MAT_090 mid -> (RO, the card's title or ""), recorded
+    # by handlers._handle_mat_acoustic BESIDE the by-name refusal above (the
+    # refusal still stands on every deck until a writer pass says otherwise).
+    acoustic_mats: Dict[int, Tuple[float, str]] = field(default_factory=dict)
+    # The subset of acoustic_mats written as /MAT/VOID (R14 triage round 9,
+    # A7): a MODAL deck, --modal-acoustic-void on, a *PART on the mid. Filled
+    # by writer/materials.py::_resolve_modal_acoustic_void, which also takes
+    # the mid OUT of refused_materials; read by _make_materials (the card),
+    # writer/mesh.py::_target_mat_law (law 0), all_mat_ids and
+    # writer/blast_ale.py::_make_ebcs (no /EBCS on such a part's faces).
+    acoustic_void: Dict[int, Tuple[float, str]] = field(default_factory=dict)
     # The /MAT/LAW51 phase list per *ALE_MULTI-MATERIAL_GROUP (index into
     # state.ale_mmgs -> the ordered submaterial ids), decided by
     # writer/materials.py::_resolve_ale_submaterials: vacuum and every other
@@ -9440,6 +9931,36 @@ class ConversionState:
         field(default_factory=dict)
     mat_thermal_ortho: Dict[int, MatThermalOrthotropic] = \
         field(default_factory=dict)
+    # R14 triage round 9, B1: *MAT_THERMAL_CWM and
+    # *BOUNDARY_THERMAL_WELD_TRAJECTORY are RECORDED (always, flag on or off;
+    # the records alone write nothing). writer/thermal.
+    # _resolve_weld_trajectories screens each trajectory and memoises the
+    # accepted ones' plans on weld_plans (None = not resolved yet);
+    # weld_temp_counts = (the TEMP /TH/NODE group's node count, the count of
+    # the driven / loaded-node group it replaced) for the S2 sentence.
+    thermal_cwm: Dict[int, ThermalCwm] = field(default_factory=dict)
+    weld_trajectories: List[WeldTrajectory] = field(default_factory=list)
+    weld_plans: Optional[List[WeldPlan]] = None
+    weld_temp_counts: Optional[Tuple[int, int]] = None
+    weld_unit_funct: int = 0
+    # R14 triage round 9, B2: the axisymmetric 2-D route decision (None =
+    # not resolved yet; writer/axisym2d.resolve_axisym_plan) and every
+    # keyword name the deck dispatched (handlers.dispatch records it - the
+    # route's screen reads what the deck STATES, converted or not).
+    axisym_plan: Optional[AxisymPlan] = None
+    deck_keywords: Set[str] = field(default_factory=set)
+    # R14 triage round 9, B5: the zero-off-scale COPIES of applied-load
+    # curves written at emission (writer/loadcurves.load_funct_id): (lcid,
+    # head points, tail points) -> (the copy's /FUNCT id, its points), and
+    # every (lcid, consumer, copy id, head, tail) use for the sentence.
+    # state.curves itself is never modified.
+    offscale_functs: Dict[Tuple[int, Tuple[Tuple[float, float], ...],
+                                Tuple[Tuple[float, float], ...]],
+                          Tuple[int, List[Tuple[float, float]]]] = field(
+        default_factory=dict)
+    offscale_uses: List[Tuple[int, str, int, List[Tuple[float, float]],
+                              List[Tuple[float, float]]]] = field(
+        default_factory=list)
     # *CONTROL_THERMAL_SOLVER — FWORK reaches /HEAT/MAT's EFRAC and TSF the
     # engine /THERM; every other cell is a named per-field drop.
     ctrl_thermal_solver: Optional[ControlThermalSolver] = None
@@ -9726,8 +10247,8 @@ class ConversionState:
     # --no-mat-null-pc-mu (the cells carry Nu 0 there).
     mat_null_h_guard: Optional[
         Dict[int, Tuple[float, float, float, float, str]]] = None
-    # /PROP/SOLID ids whose h the F1 guard divided (its sentence prints once
-    # per prop).
+    # /PROP/SOLID ids whose h the F1 guard divided or (round 9, B7) capped
+    # (its sentence prints once per prop).
     mat_null_h_guarded_props: Set[int] = field(default_factory=set)
     # writer/loads._lumped_nodal_masses' memo: (mass by node, the model's
     # total lumped mass), one lumping pass per conversion. Kept on the
@@ -9748,10 +10269,25 @@ class ConversionState:
     # unless --shell-in-solid-coupling converts the card (round 8, B10).
     shell_in_solid_cards: List[ShellInSolidCard] = field(
         default_factory=list)
+    # *ALE_REFERENCE_SYSTEM_GROUP cards in deck order (round 9, B8), and the
+    # spellings of every *ALE_REFERENCE_SYSTEM_NODE / _CURVE / _SWITCH card
+    # (record-only, so the refusal can name them). Both keep the keyword in
+    # skipped_keywords; only --ale-flow-tracking converts a GROUP card.
+    ale_reference_groups: List[AleReferenceGroup] = field(
+        default_factory=list)
+    ale_reference_others: List[str] = field(default_factory=list)
+    # writer/blast_ale._resolve_ale_flow_tracking's memo (None = not yet
+    # resolved).
+    ale_flow_tracking_plan: Optional[AleFlowTrackingPlan] = None
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.
     shell_in_solid_plan: Optional[List[ShellInSolidPlan]] = None
+    # R14 triage round 9, B4: the engine card /DT/INTER/CST (Tsca, Tmin) the
+    # --shell-in-solid-coupling re-tune decided at the end of build_starter
+    # (writer/blast_ale.finalize_shell_in_solid); None = no card (the
+    # default, a round-8-form deck, or no converted card).
+    sis_dt_inter_cst: Optional[Tuple[float, float]] = None
     # ... and what it decides for the materials and the parts: the void
     # density cells per written /MAT/HYD_VISC id (mid -> (RHO_I, the /EOS
     # RHO_0)), the copy MIDs (copy -> the original *MAT_NULL mid) and the
@@ -9844,7 +10380,7 @@ class ConversionState:
     # record is parsed and warned about but never written.
     shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. SIX Radioss-side emission sites
-    # (writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378, in that order:
+    # (writer/rbody.py:1106, :1817, :1931, :2120, :2277, :2401, in that order:
     # *MAT_RIGID parts — which also covers *PART_INERTIA, element-free CoG
     # masters and *CONSTRAINED_RIGID_BODIES merge masters — then
     # *CONSTRAINED_NODAL_RIGID_BODY, the implicit no-rigid-body probe,
@@ -10139,6 +10675,16 @@ class ConversionState:
     # that field is *CONSTRAINED_EXTRA_NODES input and its "not a *MAT_RIGID
     # part" warning would misreport these.
     local_frame_nodes: Dict[int, List[int]] = field(default_factory=dict)
+    # round 9, A1 (--rigid-part-pid-precedence, default ON): a
+    # *CONSTRAINED_NODAL_RIGID_BODY whose PID equals the id of a rigid PART
+    # that also became an /RBODY gives way to the part (LS Warning 10177):
+    # pid -> the SHADOW key (-pid) its record is stored under in the merged
+    # rbody_info, so the CNRB-own consumers (its _INERTIA card-5 velocity)
+    # still reach it. Reset per build in writer/assembly.build_starter
+    # before _make_cnrb_rbodies runs (which then leaves the clashing part's
+    # _LOCAL triad and *ELEMENT_MASS_PART to the part). Empty when no PID
+    # clashes, and always empty under --no-rigid-part-pid-precedence.
+    cnrb_record_key: Dict[int, int] = field(default_factory=dict)
 
     #: Every node id the SOURCE deck defined, snapshotted by build_starter as its
     #: very first act — i.e. before any prepass synthesizes a node. The writer
@@ -10345,6 +10891,12 @@ class ConversionState:
     implicit_stub_deferred_for: List[int] = field(default_factory=list)
     implicit_stub_skipped_for: List[int] = field(default_factory=list)
     type25_emitted_ids: Set[int] = field(default_factory=set)
+    # R14 triage round 9, A2 (--implicit-n2s-type7): the TYPE25-route ids
+    # writer/contacts._make_type25_interfaces wrote as a ONE-WAY
+    # /INTER/TYPE7 instead (an implicit, non-modal, non-ERODING
+    # *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE), recorded at the write line;
+    # never in type25_emitted_ids.
+    n2s_type7_ids: Set[int] = field(default_factory=set)
     # *DEFINE_FRICTION tables → /FRICTION, keyed by their (preserved) id and
     # kept in deck order so "exactly one table in the model" is decidable.
     define_frictions: Dict[int, DefineFriction] = field(default_factory=dict)
@@ -10796,7 +11348,11 @@ class ConversionState:
                   # Same source/resolved rule as LAW106 above.
                   self.mat_law3,
                   # *MAT_140 → /MAT/VOID, MID verbatim.
-                  self.mat_vacuum):
+                  self.mat_vacuum,
+                  # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal
+                  # deck (round 9, A7), MID verbatim. The RESOLVED registry:
+                  # a time-domain deck's refusal writes no /MAT at all.
+                  self.acoustic_void):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

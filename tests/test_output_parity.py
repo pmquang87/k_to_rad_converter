@@ -54,12 +54,12 @@ from k2rad.state import ConversionState                  # noqa: E402
 
 # ── Harness ──────────────────────────────────────────────────────────────────
 
-def _convert(deck_text: str):
+def _convert(deck_text: str, **kw):
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck_text)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     with open(result.engine_path) as fh:
@@ -1154,16 +1154,37 @@ class Bndout(unittest.TestCase):
         self.assertEqual([_col_i(ln, 1, 10) for ln in _rows(blk)], [1, 2, 3])
 
     def test_a_zero_scale_row_is_not_in_scope(self):
-        """sf == 0 means "fix this dof" and k2rad folds it into a /BCS instead
-        of an /IMP* — that is dyna2rad's SPCFORC scope, not its BNDOUT one."""
-        fixed = "*BOUNDARY_PRESCRIBED_MOTION_SET\n" + _row(10, 1, 2, 1, 0.0)
+        """A row k2rad folds into a /BCS hold instead of an /IMP* is
+        dyna2rad's SPCFORC scope, not its BNDOUT one.
+
+        Round 9, A8 re-derived this test: a stated SF 0.0 is LS-DYNA's
+        default 1.0 (Vol I R17 p.759), so on the RAMP curve 1 the row is an
+        imposed motion and its nodes 1, 2, 3 ARE in the BNDOUT scope; the
+        hold - and so the out-of-scope row - needs a zero motion (the zero
+        curve 2), and the ramp row keeps the old hold under
+        --no-prescribed-motion-sf-default."""
+        bnd = "*DATABASE_BNDOUT\n" + _row(1.0e-5)
+        zero = ("*DEFINE_CURVE\n" + _row(2)
+                + f"{0.0:>20}{0.0:>20}\n{1.0:>20}{0.0:>20}\n")
+        ramp_row = "*BOUNDARY_PRESCRIBED_MOTION_SET\n" + _row(10, 1, 2, 1, 0.0)
+        zero_row = "*BOUNDARY_PRESCRIBED_MOTION_SET\n" + _row(10, 1, 2, 2, 0.0)
         result, starter, _ = _convert(deck(
-            extra=SETS + fixed + CURVE + "*DATABASE_BNDOUT\n" + _row(1.0e-5),
-            body=self.BODY))
-        self.assertNotIn("TH_NODE_BNDOUT", starter)
-        self.assertTrue(_warns(result, "drives no node with a "
-                                       "*BOUNDARY_PRESCRIBED_MOTION"),
-                        result.warnings)
+            extra=SETS + ramp_row + CURVE + bnd, body=self.BODY))
+        blk = [b for b in _blocks(starter, "/TH/NODE/")
+               if b[1] == "TH_NODE_BNDOUT"]
+        self.assertEqual(len(blk), 1, starter)
+        self.assertEqual([_col_i(ln, 1, 10) for ln in _rows(blk[0])],
+                         [1, 2, 3])
+        for extra, kw in ((SETS + zero_row + CURVE + zero + bnd, {}),
+                          (SETS + ramp_row + CURVE + bnd,
+                           {"prescribed_motion_sf_default": False})):
+            with self.subTest(**kw):
+                result, starter, _ = _convert(deck(extra=extra,
+                                                   body=self.BODY), **kw)
+                self.assertNotIn("TH_NODE_BNDOUT", starter)
+                self.assertTrue(_warns(result, "drives no node with a "
+                                               "*BOUNDARY_PRESCRIBED_MOTION"),
+                                result.warnings)
 
     def test_a_deck_with_no_prescribed_motion_writes_no_group(self):
         result, starter, _ = _convert(deck(

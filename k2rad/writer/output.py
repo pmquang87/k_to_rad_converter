@@ -90,7 +90,13 @@ def _make_analysis_defaults(state: ConversionState) -> List[str]:
         lines.append(f"         0         0{_i(ithick)}")
     else:
         lines.append("         0")
-    lines += [HDR, "/DEF_SOLID", "         0", HDR]
+    lines += [HDR, "/DEF_SOLID", "         0"]
+    # round 9, B8 (--ale-flow-tracking): the accepted
+    # *ALE_REFERENCE_SYSTEM_GROUP's /ALE/GRID/FLOW-TRACKING, right after
+    # /DEF_SOLID (the census arm's position); [] by default
+    from .blast_ale import ale_flow_tracking_lines
+    lines += ale_flow_tracking_lines(state)
+    lines += [HDR]
     lines += ["/IOFLAG", "         0", HDR]
     return lines
 
@@ -2131,7 +2137,7 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     use (convertrigids.cxx:766-772).
 
     ``state.rbody_ids`` is the set the SIX Radioss-side /RBODY emission sites
-    register into at the line that writes the card — writer/rbody.py:1099, :1794, :1908, :2097, :2254, :2378,
+    register into at the line that writes the card — writer/rbody.py:1106, :1817, :1931, :2120, :2277, :2401,
     in that order: *MAT_RIGID parts (which is also where *PART_INERTIA,
     element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters come
     out, so four LS-DYNA sources funnel through the first one),
@@ -2144,8 +2150,10 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     bodies do reach /TH/RBODY — which is what "EVERY /RBODY" has to mean.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
     all (so a deck whose ONLY rigid body is the probe would get no group), a
-    CNRB/part id collision drops one record from it, and a
-    *CONSTRAINED_RIGID_BODIES merge aliases several keys onto one master node.
+    CNRB/part id collision drops one record from it under
+    --no-rigid-part-pid-precedence (and files the CNRB under a shadow key
+    by default, round 9 A1), and a *CONSTRAINED_RIGID_BODIES merge aliases
+    several keys onto one master node.
 
     Two /TH/RBODY-only card rules, both measured:
 

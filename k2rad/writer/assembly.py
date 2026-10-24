@@ -32,10 +32,15 @@ from .materials import (
     _resolve_he_bunreacted,
     _resolve_ale_submaterials,
     _warn_refused_materials,
+    _resolve_modal_acoustic_void,
 )
 from .muscle import _make_muscle_springs
+from .axisym2d import (resolve_axisym_plan, transform_engine_lines,
+                       transform_starter_lines)
+from .loadcurves import make_offscale_functs
 from .thermal import (_make_thermal, _resolve_thermal,
-                      _thermal_solve_active)
+                      _resolve_weld_trajectories, _thermal_solve_active,
+                      _weld_anim_dt)
 from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
@@ -151,6 +156,10 @@ from .blast_ale import (
     _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
     _resolve_shell_in_solid,
+    _make_ale_reference_notes,
+    finalize_shell_in_solid,
+    sis_dt_inter_guard,
+    sis_dt_inter_lines,
 )
 from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
@@ -451,6 +460,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         # one line up — noted, deliberately not changed here, because moving it
         # would rewrite the engine file of every include-only fragment.)
         dt_anim = endtim / 40.0 if state.ctrl_termination else 0.01
+    # Round 9, B1 (S2): a SOLN-1 deck with an accepted weld trajectory that
+    # requests > 1000 frames gets max(d3plot dt, ENDTIM / 100); every other
+    # deck keeps dt_anim (writer/thermal._weld_anim_dt).
+    dt_anim = _weld_anim_dt(state, dt_anim, endtim)
     if dt_anim > 0.0:
         lines += ["/ANIM/DT", f"0. {dt_anim:.6G}"]
     else:
@@ -611,6 +624,77 @@ def _arclength_requested(state: ConversionState) -> bool:
     return sol.nsolvr == 12 and sol.arcmth == _ARCLENGTH_ARCMTH
 
 
+#: The *CONTROL_IMPLICIT_SOLUTION NSOLVR values --implicit-bfgs reaches: 12
+#: (LS-DYNA's nonlinear solver with BFGS updates) and 0 = a blank cell.
+_BFGS_NSOLVR = frozenset({0, 12})
+
+
+def _bfgs_requested(state: ConversionState) -> bool:
+    """R14 triage round 9, A12: does ``--implicit-bfgs`` apply to this deck?
+
+    An implicit, non-modal deck whose ``*CONTROL_IMPLICIT_SOLUTION`` NSOLVR
+    is 12 or blank (or that states no such card) - the one family the
+    option was measured on (ex_06_beam_elform_1, NSOLVR 12). Any other
+    NSOLVR keeps ``/IMPL/NONLIN/1`` and is named by
+    :func:`_warn_implicit_bfgs`.
+    """
+    if not (state.options.implicit_bfgs and state.is_implicit
+            and not state.is_modal):
+        return False
+    sol = state.ctrl_implicit_sol
+    return sol is None or sol.nsolvr in _BFGS_NSOLVR
+
+
+def _warn_implicit_bfgs(state: ConversionState) -> None:
+    """The ``--implicit-bfgs`` sentence: what it writes, the one carrier it
+    was measured on, and the silent failure it can give (round 9, A12)."""
+    if not (state.options.implicit_bfgs and state.is_implicit
+            and not state.is_modal):
+        return
+    sol = state.ctrl_implicit_sol
+    n = sol.nsolvr if sol is not None else 0
+    if not _bfgs_requested(state):
+        state.warn(
+            f"--implicit-bfgs: *CONTROL_IMPLICIT_SOLUTION NSOLVR {n} is not "
+            "the family the option was measured on (NSOLVR 12 or blank: "
+            "ex_06_beam_elform_1), so /IMPL/NONLIN/1 and the /IMPL/QSTAT "
+            "choice stay as without the flag.")
+        return
+    qstat = ("the /IMPL/QSTAT card --qstat-dtscal asked for is kept"
+             if state.options.qstat_dtscal_stated else
+             "no /IMPL/QSTAT card")
+    state.warn(
+        f"--implicit-bfgs: /IMPL/NONLIN/2 (Quasi-Newton BFGS) in place of "
+        f"/IMPL/NONLIN/1 for NSOLVR {n or 'blank'}, with {qstat}. "
+        + _BFGS_MEASURED)
+
+
+#: The measured record of --implicit-bfgs (round 9, A12, on the branch
+#: bytes). ONE constant so the warning and the docs cannot drift. doorbeam
+#: (the A1 + A2 bytes, engine file sha256 a31d565457c5): 96 runs of
+#: identical bytes - the round-9 record's 14 (implement A's two, the
+#: solver-physics validator's six, the fix round's six) and the post-review
+#: round's 82 (its fix agent's 50, its verifiers' 32); a NORMAL banner in
+#: every run, nonsense internal energy in 4 of 51 at nt 4 (none in the fix
+#: agent's 30 there, four in the verifiers' 14) and 9 of 45 at nt 2 - which
+#: run fails is run to run, not an nt property (the round-9 text tied it to
+#: nt 2). The TYPE25 route: 14 runs (the round-9 two, the post-review 12),
+#: 13 NORMAL, every one with nonsense energy - a band, not a figure.
+_BFGS_MEASURED = (
+    "Measured on ONE carrier: ex_06_beam_elform_1 NORMAL in 277 cycles, "
+    "internal energy END -0.09 %, RMS 0.09 % of the LS peak over 121 LS "
+    "times in (0.01, 1.0], nt 4 = nt 2, where the default stops at t "
+    "0.1601 (IE -59.58 %). The failure can be SILENT, on the default bytes "
+    "too, at nt 4 AND nt 2: doorbeam (A1 + A2 bytes) ends a NORMAL banner in "
+    "all 96 runs of identical bytes, and 13 of them carry NONSENSE internal "
+    "energy (4 of 51 at nt 4, 9 of 45 at nt 2; END -19769.57 .. +1082.01 %) "
+    "- run to run, not an nt property - while the other 83 end -11.85 .. "
+    "+29.51 %; the TYPE25 route (--no-implicit-n2s-type7) carries nonsense "
+    "energy behind the banner too (13 of 14 runs NORMAL, every one "
+    "nonsense); tensile2's IE RMS goes 2.48 -> 5.61 % (END -0.54 -> +26.88 "
+    "%, nt 4 = nt 2). Check the energies before using a run.")
+
+
 def _qstat_dtscal_cell(state: ConversionState) -> Optional[str]:
     """The ``/IMPL/QSTAT/DTSCAL`` data cell, or None to emit no card.
 
@@ -680,19 +764,21 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
             "cells take lectur.F:3518-3522's defaults NL_DTP 12 / NL_DTN 25 / "
             "Tsca_dn 2-3 / Tsca_up 1.2 / IAL_M 2). ")
     measured = (
-        "It BUYS THE LOAD PATH, NOT THE ANSWER - measured at nt 3 AND nt 4 on "
-        "this corpus's TWO carriers, both of which are error_engine either "
-        "way, and both arms stated against this branch's OWN flag-off "
-        "baseline (which /IMPL/QSTAT/DTSCAL 10 already moved): "
-        "ex_07_beam_elform_1 walks from t = 0.3004 to t = 1.000 and lands at "
-        "-1.72 % of its LS-DYNA reference (identical at both nt) but still "
-        "exits ERROR on the last increment (ISTOP -2, MESSAGE ID 79); "
-        "ex_05_beam_elform_3_&_6 stays at t = 1e-5 and fails in ~2 s without "
-        "the flag, and with it runs tens of thousands of cycles to t ~ 1e-7 "
-        "and TIMES OUT - which is why the flag ships OFF. "
-        "/IMPL/DT/FIXPOINT is DEACTIVATED by the engine under RIKS "
-        "(lectur.F:3523-3532), so --fixpoint-count is silently disarmed with "
-        "it.")
+        "It BUYS THE LOAD PATH, NOT THE ANSWER: on ex_07_beam_elform_1 the "
+        "path loops through negative load factors LS-DYNA never visits (the "
+        "converged load factor goes down to -0.4412 and turns back and forth "
+        "many times in every round-9 run; LS-DYNA's path rises to 0.3745, "
+        "unloads to exactly 0 and reloads to 1.185, and never goes below 0) "
+        "and the run ends NORMAL in 9 of 10 "
+        "runs of identical bytes (1192 .. 1219 cycles: five at nt 4, four "
+        "at nt 2) and ERROR once at nt 4 (MESSAGE 79 at cycle 1421, the load "
+        "factor back at 0); ex_05_beam_elform_3_&_6 still stops (MESSAGE 79 "
+        "at load factor 0.84 .. 0.87 in four runs at nt 4 and nt 2). The LS "
+        "reference of both is UNMATCHED "
+        "(its time axis runs backwards), so no run is evidence of the "
+        "answer - which is why the flag ships OFF. /IMPL/DT/FIXPOINT is "
+        "DEACTIVATED by the engine under RIKS (lectur.F:3523-3532), so "
+        "--fixpoint-count is silently disarmed with it.")
     if modal:
         state.warn(head + "This deck is a NORMAL-MODES (/EIG) analysis, whose "
                           "engine is /IMPL/LINEAR plus the stiffness export "
@@ -701,8 +787,14 @@ def _warn_arclength(state: ConversionState, modal: bool = False) -> None:
                           "--arclength-riks says - there is no step controller "
                           "for /IMPL/DT/3 to replace. " + measured)
     elif state.options.arclength_riks:
-        state.warn(head + "--arclength-riks was passed, so /IMPL/DT/3 is "
-                          "emitted in place of /IMPL/DT/2. " + measured)
+        qstat = ("the /IMPL/QSTAT card --qstat-dtscal asked for is kept"
+                 if state.options.qstat_dtscal_stated else
+                 "NO /IMPL/QSTAT card is written (the quasi-static term would "
+                 "stiffen the arc-length tangent, imp_dyna.F:351-355; pass "
+                 "--qstat-dtscal to keep one - through the API, "
+                 "qstat_dtscal=<value> WITH qstat_dtscal_stated=True)")
+        state.warn(head + "--arclength-riks was passed: /IMPL/DT/3 replaces "
+                          f"/IMPL/DT/2 and {qstat}. " + measured)
     else:
         state.warn(head + "It is NOT emitted: k2rad writes /IMPL/DT/2 and the "
                           "arc-length request is DROPPED. Pass "
@@ -1210,6 +1302,7 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
             seg is None or seg.first_implicit):
         if _arclength_requested(state):
             _warn_arclength(state, modal=state.is_modal)
+        _warn_implicit_bfgs(state)
         _warn_implicit_auto_drops(state, modal=state.is_modal)
         _warn_implicit_constant_step(state)
     if state.is_modal:
@@ -1316,7 +1409,9 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
                     f"Itol {itol}, Toli {toli:g}.")
         if zero_tol_ectol:
             _warn_zero_tolerance_ectol(state, sol)
-    lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
+    # round 9, A12 (opt-in): /IMPL/NONLIN/2 = Quasi-Newton BFGS
+    nonlin = 2 if _bfgs_requested(state) else 1
+    lines: List[str] = [f"/IMPL/NONLIN/{nonlin}", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
 
     # Per OpenRadioss 2022 Reference Guide (pages 2942-2943):
@@ -1365,6 +1460,19 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # _warn_deformable_deformable_contact.
         if _recipe_active(state):
             lines += ["/IMPL/QSTAT/DTSCAL", " 0.05"]
+        elif (((state.options.arclength_riks
+                and _arclength_requested(state))
+               or _bfgs_requested(state))
+              and not state.options.qstat_dtscal_stated):
+            # R14 triage round 9, A11: --arclength-riks writes NO quasi-
+            # static term unless --qstat-dtscal was GIVEN - it adds
+            # M/((1+alpha)*beta*(DTSCAL*dt)^2) to the diagonal
+            # (imp_dyna.F:351-355), i.e. stiffens the arc-length tangent,
+            # and the engine has no QSTAT-versus-RIKS guard
+            # (lectur.F:3517-3532 disarms only FIXPOINT). The recipe above
+            # is evaluated first and keeps its 0.05. Round 9, A12: the
+            # --implicit-bfgs pair is measured WITHOUT the term too.
+            pass
         else:
             dtscal = _qstat_dtscal_cell(state)
             if dtscal is not None:
@@ -1593,6 +1701,76 @@ def _sample_implicit_smooth_curves(state: ConversionState) -> None:
             lcid, len(curve.pts), vmax * (tend - tstart - trise)))
 
 
+def _merge_cnrb_records(state: ConversionState, rbody_info: Dict,
+                        cnrb_info: Dict) -> Dict:
+    """Merge the *CONSTRAINED_NODAL_RIGID_BODY records into ``rbody_info``.
+
+    The two dicts are keyed by DIFFERENT id namespaces - *MAT_RIGID records by
+    PART id, CNRB records by the CNRB's own PID - so a CNRB whose PID equals a
+    rigid part's id collides with that part's record. LS-DYNA accepts the
+    shared id with ``*** Warning 10177 (KEY+177)`` ('nodal rigid body and part
+    share the same ID', doorbeam.d3hsp:1040-1041) and drives the PART;
+    dyna2rad does the same by write order (``ConvertEntities`` calls
+    ``ConvertConstrainedNodalRbodies`` before ``ConvertMatsRigid``,
+    convertrigids.cxx:37-50, and the part overwrites the CNRB's entry of
+    ``storeRbodyPIDVsMasterNode``, :145 / :238).
+
+    round 9, A1 (``--rigid-part-pid-precedence``, default ON): on a clash the
+    part record keeps its key and position, so every part-keyed consumer
+    (prescribed motion and its /TH rows, *LOAD_RIGID_BODY, the rigid-body
+    initial velocities, gravity, /BCS, /TH) addresses the PART's /RBODY; the
+    CNRB record is filed under the SHADOW key ``-pid`` (its ``kind`` stays
+    "cnrb"), so the value-iterating consumers (the node -> main maps of /BCS
+    and /TH, gravity's CNRB scope, the bolt-end screen) keep BOTH bodies and
+    the CNRB's own _INERTIA velocity still finds it through
+    ``state.cnrb_record_key``. No clash: ``{**rbody_info, **cnrb_info}``, the
+    386444e merge exactly. ``--no-rigid-part-pid-precedence`` keeps the
+    386444e merge (the CNRB record replaces the part's) and its sentence.
+    """
+    clash = sorted(set(rbody_info) & set(cnrb_info))
+    if not clash or not state.options.rigid_part_pid_precedence:
+        state.cnrb_record_key = {}
+        for _dup in clash:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY PID {_dup} collides with the "
+                "id of a *MAT_RIGID part that k2rad also turned into an "
+                "/RBODY. The CNRB record wins, so cards keyed on that part id "
+                "(gravity groups, /BCS, /INIVEL, /TH) address the CNRB's main "
+                "node and the rigid PART's own main node is not reached - give "
+                "the CNRB an unused part id.")
+        return {**rbody_info, **cnrb_info}
+    state.cnrb_record_key = {pid: -pid for pid in clash}
+    merged = dict(rbody_info)
+    for pid, info in cnrb_info.items():
+        merged[-pid if pid in rbody_info else pid] = info
+    for pid in clash:
+        state.warn(
+            f"*CONSTRAINED_NODAL_RIGID_BODY PID {pid} collides with the id of "
+            "a *MAT_RIGID part that k2rad also turned into an /RBODY. LS-DYNA "
+            "accepts the shared id with Warning 10177 ('nodal rigid body and "
+            "part share the same ID') and drives the PART; dyna2rad does the "
+            "same by write order (convertrigids.cxx:37-50, :145, :238). So "
+            "the part-keyed cards (*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] "
+            "and its /TH reaction rows, *LOAD_RIGID_BODY, "
+            "*INITIAL_VELOCITY_RIGID_BODY / _GENERATION, gravity, /BCS, /TH) "
+            f"address the PART's /RBODY main node {rbody_info[pid]['ind_node']}; "
+            f"the CNRB keeps its own /RBODY {cnrb_info[pid]['ind_node']} (its "
+            "_INERTIA velocity and _SPC stay on it). Before round 9 the CNRB "
+            "record replaced the part's: on "
+            "implicit/basic-examples/springback-i/doorbeam.k the driven punch "
+            "never moved (DY 0 at every fifth of t_end against LS-DYNA's 135 "
+            "mm) and internal energy ended +582.00 % against LS-DYNA (RMS "
+            "393.31 % of the LS peak over the 25 LS times in (1e-5, 1.1e-3]); "
+            "the part drive alone brings it to +53.91 % (RMS 81.05 %, nt 4 = "
+            "nt 2) and the shipped default - with the implicit "
+            "node-to-surface route of --implicit-n2s-type7 - to -0.78 .. "
+            "-28.12 % (RMS 7.21 .. 15.26 %, 125 runs at nt 4 and nt 2, run to "
+            "run on three branches), the punch then following LS-DYNA's "
+            "nodout at every fifth. "
+            "--no-rigid-part-pid-precedence restores the CNRB precedence.")
+    return merged
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
     # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
     # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
@@ -1626,10 +1804,22 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # containers, and the tet10->tet4 prune (further down) mutates node_sets.
     _expand_set_ranges_and_generals(state)
     _flatten_set_adds(state)
+    # Round 9, B2: the axisymmetric 2-D route decision, BEFORE any writer -
+    # the rigid-body writer skips its J = -SUM(IN) correction on a routed
+    # deck and the section sentences read it. Reads the parsed deck only,
+    # draws no id; a deck with no ELFORM 14 / 15 section (or the opt-out)
+    # gets an empty plan and nothing below changes.
+    resolve_axisym_plan(state)
     # R14 triage round 8, B2: an implicit deck's *DEFINE_CURVE_SMOOTH -> a
     # sampled sine /FUNCT, before any emitter reads funct_smooth_ids.
     _sample_implicit_smooth_curves(state)
     _resolve_define_tables(state)
+    # R14 triage round 9, A7: on a MODAL deck a *PART on a refused
+    # *MAT_ACOUSTIC gets /MAT/VOID with the acoustic density. FIRST of the
+    # material passes, because it moves the mid out of refused_materials and
+    # into what _target_mat_law answers (law 0) — every later reader of
+    # either must see the resolved state. Emits nothing and draws no id.
+    _resolve_modal_acoustic_void(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
     # Johnson-Cook LAW2/LAW4 routing (needs the *PART EOSID bindings) + the
@@ -1819,6 +2009,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # does not name, which changes what that writer emits and what
     # _target_mat_law answers). It allocates /FUNCT ids, so it is placed after
     # every other curve-synthesizing pass to keep their numbering unchanged.
+    #
+    # Round 9, B1: the *BOUNDARY_THERMAL_WELD_TRAJECTORY screen + deposit
+    # plan runs FIRST - an accepted card's *MAT_THERMAL_CWM becomes a TD_LC
+    # record that _resolve_thermal's stand-in and /HEAT/MAT passes read, and
+    # its one shared unit /FUNCT must exist before _make_functions. It draws
+    # that /FUNCT's id only when a card is ACCEPTED (the /GRBRIC + /IMPFLUX
+    # ids come at emission), so a refused deck keeps the opt-out's bytes; it
+    # does nothing on a deck without a trajectory or under the opt-out.
+    _resolve_weld_trajectories(state)
     _resolve_thermal(state)
 
     # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +
@@ -2015,26 +2214,21 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_spring_eid_collisions(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
+    # round 9, A1 (--rigid-part-pid-precedence): the CNRB pids that collide
+    # with a rigid PART record, known BEFORE _make_cnrb_rbodies runs - it
+    # leaves such a part's _LOCAL triad nodes and *ELEMENT_MASS_PART to the
+    # part (rbody.py), and the merge below files the CNRB record under the
+    # shadow key -pid. Always empty under --no-rigid-part-pid-precedence.
+    state.cnrb_record_key = {}
+    if state.options.rigid_part_pid_precedence:
+        state.cnrb_record_key = {
+            c.pid: -c.pid for c in state.cnrbs if c.pid in rbody_info}
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
     # be visible to every rigid-body-keyed section below, so merge their info,
     # rigid-node set, and rad lines with the *MAT_RIGID ones.
     cnrb_lines, cnrb_rigid_nodes, cnrb_info = _make_cnrb_rbodies(state)
     rigid_nodes = rigid_nodes | cnrb_rigid_nodes
-    # The two dicts are keyed by DIFFERENT id namespaces — *MAT_RIGID records by
-    # PART id, CNRB records by the CNRB's own PID — so a CNRB whose PID happens
-    # to equal a rigid part's id silently replaces that part's record here, and
-    # every rbody_info consumer below (gravity groups, /BCS, /INIVEL, /TH) then
-    # addresses the wrong main node. LS-DYNA requires a CNRB's PID to be a new,
-    # unused part id, so this is invalid input — but it must not be silent.
-    for _dup in sorted(set(rbody_info) & set(cnrb_info)):
-        state.warn(
-            f"*CONSTRAINED_NODAL_RIGID_BODY PID {_dup} collides with the id of "
-            "a *MAT_RIGID part that k2rad also turned into an /RBODY. The CNRB "
-            "record wins, so cards keyed on that part id (gravity groups, "
-            "/BCS, /INIVEL, /TH) address the CNRB's main node and the rigid "
-            "PART's own main node is not reached - give the CNRB an unused "
-            "part id.")
-    rbody_info = {**rbody_info, **cnrb_info}
+    rbody_info = _merge_cnrb_records(state, rbody_info, cnrb_info)
     rbody_lines = rbody_lines + cnrb_lines
     # *CONSTRAINED_SHELL_TO_SOLID and *CONSTRAINED_GENERALIZED_WELD_BUTT:
     # /RBODY producers 4 and 5, appended before the probe body.
@@ -2130,6 +2324,16 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_impdisp_ids(state, lines)
     _warn_duplicate_inter_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
+    # Round 9, B4 (--shell-in-solid-coupling): the re-tune is decided once
+    # every interface is written - Gap 0.55 + /DT/INTER/CST only on a deck
+    # that is the SIS problem alone, else the round-8 form; it rewrites the
+    # Gap cell of its own TYPE18 rows and draws no id. A no-op without a
+    # converted card.
+    lines = finalize_shell_in_solid(state, lines)
+    # Round 9, B2: the 2-D axisymmetric route is ONE post-pass on the emitted
+    # lines (decision B2-a) - every 3-D writer above ran as before, so a deck
+    # that is not routed (or the opt-out) is byte-identical by construction.
+    lines = transform_starter_lines(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
 
@@ -3113,6 +3317,11 @@ def _starter_section_registry():
         ("monvols",           lambda c: _make_monvols(c.state)),
         ("inivol_notes",      lambda c: _make_inivol_notes(c.state)),
         ("control_ale_notes", lambda c: _make_control_ale_notes(c.state)),
+        # *ALE_REFERENCE_SYSTEM_* (round 9, B8): the skip / refusal sentences;
+        # no card, no id (the --ale-flow-tracking card itself is written by
+        # _make_analysis_defaults, right after /DEF_SOLID)
+        ("ale_reference_notes",
+                              lambda c: _make_ale_reference_notes(c.state)),
         ("starter_cloads",    lambda c: _make_starter_cloads(c.state)),
         ("node_cloads",       lambda c: _make_node_cloads(c.state)),
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
@@ -3264,6 +3473,9 @@ def _starter_section_registry():
         ("constrained_linear_mpcs",
                               lambda c: _make_constrained_linear_mpcs(
                                   c.state, c.rbody_info, c.rigid_nodes)),
+        # round 9, B5: the zero-off-scale copies of applied-load curves,
+        # AFTER every consumer has drawn its copy id (writer/loadcurves.py)
+        ("offscale_functs",   lambda c: make_offscale_functs(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),
@@ -3430,9 +3642,16 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     _make_engine_timestep_scale below — it used to be dropped on the floor."""
     ts = state.ctrl_timestep
     if ts is None or _engine_implicit(state) or state.is_modal:
-        return []
+        # round 9, B4: the --shell-in-solid-coupling re-tune's /DT/INTER/CST
+        # stands alone on a deck without *CONTROL_TIMESTEP ([] otherwise)
+        return (sis_dt_inter_lines(state)
+                if ts is None and not _engine_implicit(state)
+                and not state.is_modal else [])
     if ts.dt2ms >= 0.0:
-        return _make_engine_timestep_scale(state, ts)
+        # round 9, B4: right after the /DT block ([] without the re-tune;
+        # a DT2MS < 0 deck never gets it - the card is refused there)
+        return (_make_engine_timestep_scale(state, ts)
+                + sis_dt_inter_lines(state))
     tmin = abs(ts.dt2ms)
     if _ams_is_emitted(state):
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
@@ -4144,4 +4363,10 @@ def _build_engine_text(state: ConversionState) -> str:
     lines: List[str] = []
     for sec in sections:
         lines.extend(sec)
+    # Round 9, B2: a routed 2-D deck never carries /DT/NODA/CST or /DT/AMS
+    # (resol.F:2711-2729 rebuilds the 2-D nodal masses every cycle).
+    lines = transform_engine_lines(state, lines)
+    # Round 9, B4: the re-tune's /DT/INTER/CST leaves if another /DT/INTER
+    # card is already there (no k2rad writer emits one today)
+    lines = sis_dt_inter_guard(state, lines)
     return "\n".join(lines) + "\n"

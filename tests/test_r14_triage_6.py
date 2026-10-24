@@ -3712,7 +3712,9 @@ class SpotweldOptInPair(unittest.TestCase):
         for needle in ("moved from (5, 5, 1) to (5, 5, 0) on shell 1 (part 1)",
                        "new element-free node 101 created at (5, 5, 2) on "
                        "shell 11 (part 2)", "weld length 2.",
-                       "WITHOUT --beam-contact-secondary", "7.64x"):
+                       "WITHOUT --beam-contact-secondary", "2.09x",
+                       "(639 -> 1334)", "7.64x (4884) under "
+                       "--no-spotweld-dt-mass-scaling"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, hit[0])
         # L = the sheet distance 2.0, not the thickness 1.0 or TS1 1.5:
@@ -3871,7 +3873,12 @@ class Round6FlagWiringB(unittest.TestCase):
                                      "16.07 % -> 1.16 %", "75 -> 168",
                                      "-0.54 % -> -4.36 %",
                                      "33 R14 deck keys on 22 emitted models"),
-        "--spotweld-node-synthesis": ("7.64x", "+82.0 %", "p.19-3"),
+        # round 9, B9: the combined arm's +82.0 % (round 6, before EFAIL and
+        # DT were converted) is retracted; the help quotes today's -31.18 %
+        # the post-review round (F15): rule 1 alone costs 2.09x with the
+        # round-8 DT scaling; 7.64x is the --no-spotweld-dt-mass-scaling arm
+        "--spotweld-node-synthesis": ("2.09x", "7.64x without", "-31.18 %",
+                                      "p.19-3"),
         "--beam-contact-secondary": ("4 R14 deck keys on 4 emitted models",),
         "--derived-gapmin": ("-91 %", "ZERO campaign verdict promotions",
                              "i7for3.F:762-770"),
@@ -4612,7 +4619,10 @@ class PostReviewShippedTexts(unittest.TestCase):
             ("k2rad/writer/materials.py",
              "KE +272 / +407 / +143 / -73 / -92 %"),
             ("k2rad/writer/materials.py", "energy error -17.9 -> -32.6 %"),
-            ("k2rad/writer/loads.py", "the error GROWS to +141.1 %"),
+            # round 9, B9: the rule-1 combined-arm figures (+141.1 % at the
+            # matched end) are retracted - the sentence quotes today's arm
+            ("k2rad/writer/loads.py", "the weld ruptures at 1.12229e-3 s, "
+             "65.3 us before LS-DYNA's swforc failure time 1.1876e-3 s"),
             ("k2rad/writer/loads.py", "RMS 17.5 -> 11.6 % of the LS peak"),
             ("k2rad/writer/assembly.py", "reads -2.94x (KE x 8.81) at the "
              "first time-history sample"),

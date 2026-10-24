@@ -58,6 +58,33 @@ def _qstat_dtscal_arg(text: str) -> Union[str, float]:
     return v
 
 
+def _weld_window_arg(text: str) -> float:
+    """``--weld-trajectory-window`` takes a positive, finite number of seconds
+    (round 9, B1): the /IMPFLUX window of the weld-trajectory conversion."""
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--weld-trajectory-window takes a number of seconds, not {text!r}")
+    if not (v > 0.0 and v != float("inf")):
+        raise argparse.ArgumentTypeError(
+            "--weld-trajectory-window must be > 0 s and finite (use "
+            "--no-weld-trajectory-impflux to switch the conversion off)")
+    return v
+
+
+class _StatedQstatDtscal(argparse.Action):
+    """``--qstat-dtscal``: store the value AND record that it was stated
+    (R14 triage round 9, A11). ``--arclength-riks`` writes no
+    ``/IMPL/QSTAT`` unless the user asked for one, and the parser default
+    10.0 cannot tell "not given" from "given as 10" - so this action sets
+    ``qstat_dtscal_stated`` (``parser.set_defaults`` makes it False)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.qstat_dtscal_stated = True
+
+
 def _make_progress_printer():
     """A convert() progress callback that prints an updating percentage line."""
     def cb(frac: float, label: str) -> None:
@@ -175,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--qstat-dtscal",
+        action=_StatedQstatDtscal,
         type=_qstat_dtscal_arg,
         default=10.0,
         metavar="VALUE|none",
@@ -221,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
              "tensile2 at t = 0.746). --deformable-contact-recipe keeps its "
              "separately validated 0.05 and ignores this flag.",
     )
+    # round 9, A11: whether --qstat-dtscal was GIVEN (_StatedQstatDtscal)
+    parser.set_defaults(qstat_dtscal_stated=False)
     parser.add_argument(
         "--arclength-riks",
         action=argparse.BooleanOptionalAction,
@@ -239,15 +269,16 @@ def build_parser() -> argparse.ArgumentParser:
              "OFF by default; the request is WARNED about "
              "either way. freimpl.F:384-387 reads seven fields "
              "(NL_DTP/ALEN0/NL_DTN/Tsca_dn/Tsca_up/IAL_M/SCAL_RIKS) and the "
-             "zero cells take lectur.F:3518-3522's defaults. It buys the load "
-             "path, not the answer: measured at nt 3 AND nt 4 on both "
-             "carriers, error_engine either way, against this branch's own "
-             "flag-off baseline: ex_07_beam_elform_1 walks from t = 0.3004 "
-             "to t = 1.000 and lands "
-             "at -1.72 %% of its LS-DYNA reference but still exits ERROR on "
-             "the last increment; ex_05_beam_elform_3_&_6 fails in ~2 s "
-             "without the flag and with it runs tens of thousands of cycles "
-             "to t ~ 1e-7 and TIMES OUT. "
+             "zero cells take lectur.F:3518-3522's defaults. Since round 9 "
+             "the flag also writes NO /IMPL/QSTAT card unless --qstat-dtscal "
+             "is given (the quasi-static term stiffens the arc-length "
+             "tangent). It buys a load path, NOT the answer: on "
+             "ex_07_beam_elform_1 the path loops through negative load "
+             "factors LS-DYNA never visits and the run ends NORMAL in 9 of "
+             "10 runs of identical bytes (nt 4 and nt 2), ERROR once; "
+             "ex_05_beam_elform_3_&_6 "
+             "still stops; the LS reference of both is UNMATCHED (its time "
+             "axis runs backwards). "
              "/IMPL/DT/FIXPOINT is deactivated by the engine under RIKS "
              "(lectur.F:3523-3532), so --fixpoint-count goes with it.",
     )
@@ -294,10 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
              "the weld part, a new node on the nearest segment on the other "
              "side (spotweld.k: 1213 -> z 0, new node at z 2, length 2.0 = "
              "LS-DYNA's own d3plot and swforc). OFF by default: alone it only "
-             "costs cycles (7.64x on spotweld.k, IE -99.92 %%); with "
-             "--beam-contact-secondary the error changes sign, not size (IE "
-             "-99.9 %% -> +82.0 %% at 7.80x the cycles) and the weld never "
-             "fails (EFAIL has no /PROP/TYPE13 slot).",
+             "costs cycles (2.09x on spotweld.k with today's DT scaling, "
+             "7.64x without; IE END -99.88 %%); with "
+             "--beam-contact-secondary (and today's EFAIL displacement "
+             "criterion and DT scaling) the IE END reads -31.18 %% at "
+             "LS-DYNA's own cycle count 1332 and the weld ruptures 65.3 us "
+             "before LS-DYNA's (1.12229e-3 vs 1.1876e-3 s).",
     )
     parser.add_argument(
         "--beam-contact-secondary",
@@ -570,8 +603,9 @@ def build_parser() -> argparse.ArgumentParser:
              "strain sqrt(eps^2 + gamma^2/3) on a proportional path). ON by "
              "default; beside resultant cells EFAIL is named, not converted. "
              "MEASURED on spotweld.k with --spotweld-node-synthesis "
-             "--beam-contact-secondary (nt 4): rupture 1.12650e-3 s vs "
-             "LS-DYNA 1.17969e-3..1.19792e-3 s (4.5-6.0 %% early). Its only "
+             "--beam-contact-secondary (nt 4): rupture 1.12229e-3 s, 65.3 us "
+             "before LS-DYNA's swforc failure time 1.1876e-3 s (the round-8 "
+             "DT scaling makes it 4.2 us earlier). Its only "
              "default mover is a giant the campaign does not run (measurable "
              "default effect nil). Use --no-spotweld-efail-displacement to "
              "keep EFAIL dropped.",
@@ -624,7 +658,10 @@ def build_parser() -> argparse.ArgumentParser:
              "on a deck without *INITIAL_VOID; since round 8 a /PROP/SOLID "
              "Isolid 1 / 2 carrying a Nu > 0 brick with R = 10 Nu / "
              "(c0 dmin) > 1 also gets the hourglass coefficient h / R "
-             "(shvis3.F:182 / :185). "
+             "(shvis3.F:182 / :185), and since round 9 a stated h is first "
+             "capped: h' = min(h_eff, 0.14 / Tsca) / max(1, R) (Couette "
+             "coupon: QH 0.2 at R 1.2 is unstable divided only, stable "
+             "capped). "
              "The ELFORM-12 void floor keeps precedence; with "
              "--no-initial-void-floor alone a PC-0 void gets -1e-20 from "
              "this rule. ON by default. MEASURED at nt 4: sph/bird IE "
@@ -721,8 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
              "0.0655 / 0.0555 -> 0.0223 / 0.0164 / 0.0139 = LS-DYNA, its IE / KE "
              "history RMS 7.54 / 65.93 -> 2.89 / 29.15 %% of the LS peak - but "
              "OpenRadioss's own energy error grows there, mean -4.39 -> -17.88 "
-             "%% (named cost, mechanism not closed). ON by default; "
-             "--no-section-nodal-thickness-mean keeps T1.",
+             "%% (named cost: OpenRadioss's energy error counts no interface "
+             "energy and no TYPE7 VisS damping work - ecrit.F:500-511, "
+             "i7for3.F:1077-1120; with VisS 1e-6 the mean is -5.04 %%). ON by "
+             "default; --no-section-nodal-thickness-mean keeps T1.",
     )
     parser.add_argument(
         "--plane-strain-unit-thickness",
@@ -733,8 +772,8 @@ def build_parser() -> argparse.ArgumentParser:
              "integrates a unit depth (Vol I R17 *SECTION_SHELL Remark 6) - "
              "ex_16_thin_shell_elform_13's rigid disk 0.08756308 -> 0.003447366 "
              "= LS-DYNA's d3hsp. The element stays a 3-D (plane-stress) shell, "
-             "which the warning names; axisymmetric ELFORM 14 / 15 / 44 are "
-             "named, not changed. ON by default; "
+             "which the warning names; axisymmetric ELFORM 14 / 15: see "
+             "--axisymmetric-2d (ELFORM 44 stays named). ON by default; "
              "--no-plane-strain-unit-thickness keeps T1.",
     )
     parser.add_argument(
@@ -828,18 +867,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-implicit-stub-with-type25",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Leave out the inert all-parts implicit contact stub on an "
-             "implicit deck whose only contacts take the TYPE25 route "
-             "(*CONTACT_NODES_TO_SURFACE, *CONTACT_ERODING_*), wherever a "
-             "TYPE25 contact is actually written. OFF by default: the stub "
-             "stays, because it is the deck's only implicit contact stiffness "
-             "(imp_int_k.F:847: TYPE 7 / 10 / 11 only; a TYPE25 acts through "
-             "the residual). MEASURED (nt 4 = nt 2): on a two-block coupon "
-             "whose TYPE25 contact must carry load, skipping it turns NORMAL in "
-             "11 cycles into ERROR TERMINATION at cycle 9 (23 ITERATION "
-             "DIVERGE, then MESSAGE 79); on doorbeam it moves the END +582.00 "
-             "-> +689.08 %% (worse) and the RMS 393.31 -> 313.05 %% of the LS "
-             "peak (better) - MIXED, both 5-13x LS.",
+        help="Opt-in: leave out the inert all-parts implicit contact stub on "
+             "an implicit deck whose only contacts are written as "
+             "/INTER/TYPE25 (the ERODING spellings; an N2S spelling only under "
+             "--no-implicit-n2s-type7). OFF by default: the stub is then the "
+             "deck's only implicit contact stiffness (MESSAGE 232: no "
+             "implicit TYPE25 stiffness, imp_int_k.F:111-200, "
+             "ind_glob_k.F:4601-4605); without it the run can stop early OR "
+             "end NORMAL with the load path lost. MEASURED (nt 4 = nt 2): a "
+             "two-block coupon NORMAL in 11 cycles with it, ERROR TERMINATION "
+             "at cycle 9 without; doorbeam (punch driven) ends a NORMAL banner "
+             "at 49.4 %% of t_end with the run stopped (the punch at 81.51 of "
+             "135 mm).",
     )
     parser.add_argument(
         "--shell-in-solid-coupling",
@@ -847,11 +886,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Write *CONSTRAINED_SHELL_IN_SOLID as an /INTER/TYPE18 penalty "
              "coupling of the embedded shells to their ALE host (Stfval = 0.1 K "
-             "A^2 / V, Gap = half the mean host edge) and, when the host is an "
-             "*INITIAL_VOID part, the void density (RHO_I = VFACT x RO, the EOS "
-             "RHO_0 = RO). OFF by default (one carrier on five corpora). "
-             "MEASURED on bird-el (nt 4): the plate -100 -> -28.26 %%, the deck "
-             "IE +1134.62 -> +42.28 %%, at 8.936x the cycles.",
+             "A^2 / V) with the void density on an *INITIAL_VOID host (RHO_I = "
+             "VFACT x RO, the EOS RHO_0 = RO); on a deck whose only Lagrangian "
+             "parts are the embedded shells and that has no other interface, "
+             "Gap = 0.55 x the mean host edge and the engine card "
+             "/DT/INTER/CST (the card is global: on a coupon with a TYPE7 pair "
+             "it added mass to the pair's nodes), else the round-8 Gap 0.5 x. "
+             "Refused when DT2MS < 0. OFF by default (one carrier on five "
+             "corpora). MEASURED on bird-el (nt 4): the plate -100 -> -29.06 "
+             "%%, the deck IE +1134.62 -> +39.41 %%, at 1.140x the cycles, "
+             "energy error -32.6 -> -35.0 %%.",
     )
     parser.add_argument(
         "--imflag-curve-restart",
@@ -867,6 +911,252 @@ def build_parser() -> argparse.ArgumentParser:
              "MEASURED on ie_shell (nt 4 = nt 2): 92 -> 18 + 11 "
              "127 cycles, END IE -99.87 -> -4.54 %%, RMS 58.96 / 58.79 -> 12.07 "
              "/ 12.04 %% of the LS peak.",
+    )
+    parser.add_argument(
+        "--rigid-part-pid-precedence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When a *CONSTRAINED_NODAL_RIGID_BODY PID equals a *MAT_RIGID "
+             "part id (LS Warning 10177), address every part-keyed card "
+             "(prescribed motion and its /TH rows, *LOAD_RIGID_BODY, "
+             "*INITIAL_VELOCITY_RIGID_BODY, gravity, /BCS, /TH) to the PART's "
+             "/RBODY, as LS-DYNA and dyna2rad do; the CNRB keeps its own "
+             "/RBODY. Before round 9 the CNRB won: on doorbeam the driven "
+             "punch never moved (DY 0 at every fifth; with the part drive "
+             "32.30 / 65.32 / 95.32 / 132.8 / 135.0 mm, as LS-DYNA) and IE "
+             "ended +582.00 %% (+53.91 %% with the part drive alone, RMS "
+             "393.31 -> 81.05 %%; the shipped default with "
+             "--implicit-n2s-type7 -0.78 .. -28.12 %%, RMS 7.21 .. 15.26 "
+             "%% over 125 runs, run to run on three branches). ON by "
+             "default; --no-rigid-part-pid-precedence restores the 386444e "
+             "bytes.",
+    )
+    parser.add_argument(
+        "--implicit-n2s-type7",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an implicit, non-modal deck write *CONTACT_NODES_TO_SURFACE "
+             "and *CONTACT_AUTOMATIC_NODES_TO_SURFACE (not the ERODING "
+             "spellings) as a ONE-WAY /INTER/TYPE7 on the same groups: "
+             "OpenRadioss builds no implicit TYPE25 stiffness "
+             "(imp_int_k.F:111-200; ind_glob_k.F:4601-4605 MESSAGE 232). "
+             "Where k2rad injects the all-parts implicit stub (a deck with "
+             "no contact of its own) it stays beside the route and carries "
+             "the contact's friction; beside another contact there is no "
+             "stub, named. MEASURED on doorbeam (part-driven, A1): IE "
+             "END -0.78 .. -28.12 %%, RMS 7.21 .. 15.26 %% of the LS peak "
+             "(125 runs, nt 4 and nt 2, run to run on three branches: "
+             "mostly -27.76 .. -28.12 %%), where the TYPE25 ended +53.91 %% "
+             "/ 81.05 %%. With four contact nodes on a coarse RIGID base the "
+             "outcome depends on the geometry: the route can end NORMAL "
+             "with the block through (silent) where the TYPE25 stops "
+             "loudly, hold where the TYPE25 lets the block through, or - "
+             "nodes over the base's corners - both let it through. ON by "
+             "default; --no-implicit-n2s-type7 keeps the TYPE25.",
+    )
+    parser.add_argument(
+        "--implicit-rigid-gravity-nodes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an implicit deck keep *MAT_RIGID parts' own nodes in the "
+             "/GRAV group beside their /RBODY main: in an implicit run the "
+             "main node's gravity alone leaves the body frozen "
+             "(gravit_imp.F:84-91 weighs the main with its own pre-body mass, "
+             "inirby.F:836-837 - 0 on k2rad's element-free main). MEASURED "
+             "on ex_16 "
+             "(with the ELFORM 7 section of "
+             "--elform7-beam-thickness-section): the disk's KE -100 %% at "
+             "every fifth -> +0.42 / +0.20 / +0.14 %% at the first three "
+             "fifths, NORMAL in 1101 cycles (nt 4 = nt 2). Explicit decks "
+             "unchanged. ON by default; --no-implicit-rigid-gravity-nodes "
+             "restores the main-node group.",
+    )
+    parser.add_argument(
+        "--elform7-beam-thickness-section", "--2d-beam-thickness-section",
+        action=argparse.BooleanOptionalAction,
+        dest="elform7_beam_thickness_section",
+        default=True,
+        help="Give a rigid-only *SECTION_BEAM ELFORM 7 (2-D plane-strain "
+             "beam) the section Area = TS1 x 1, Iyy = Izz = TS1^3 / 12 "
+             "instead of the zero section the starter refuses (ERROR "
+             "314-317); NOT LS-DYNA's (its rigid mass is 5.68x on ex_16). A "
+             "deformable ELFORM 7 member and ELFORM 8 keep the refusal; on an "
+             "implicit deck only together with "
+             "--implicit-rigid-gravity-nodes. ON by default; "
+             "--no-elform7-beam-thickness-section (alias "
+             "--no-2d-beam-thickness-section) restores the refusal.",
+    )
+    parser.add_argument(
+        "--spc-vector-frames",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a *BOUNDARY_SPC whose CID is a *DEFINE_COORDINATE_VECTOR "
+             "in that frame's /SKEW/FIX (LS-DYNA applies the DOFs in the "
+             "local system), through one helper all five consumers read; "
+             "before round 9 the constraint went to the GLOBAL system behind "
+             "a false 'not found'. MEASURED on control_adaptive.cylinder (48 "
+             "rows, explicit nt 4, 271 = 271 cycles): the constrained radial "
+             "displacement 0.3352 -> 1.8e-8 mm, the free-DOF reaction 4611 -> "
+             "0.024 N (LS-DYNA 0). ON by default; --no-spc-vector-frames "
+             "restores the global writing.",
+    )
+    parser.add_argument(
+        "--prescribed-motion-sf-default",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Read a stated SF 0.0 on *BOUNDARY_PRESCRIBED_MOTION_* as "
+             "LS-DYNA's default 1.0 (Vol I p.759; Appendix V): a NODE / SET "
+             "row stays a /BCS hold only for a zero motion (VAD 0 / 2 on a "
+             "zero curve, or no curve), else it is imposed with Fscale 1; "
+             "RIGID writes Fscale 1 (the starter already read 0 as 1.0, "
+             "read_impdisp.F:239). ON by default; "
+             "--no-prescribed-motion-sf-default keeps the stated 0.",
+    )
+    parser.add_argument(
+        "--rigid-local-shared-skew",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On an implicit deck write a "
+             "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drive in the "
+             "skew of the body's own CMO -1 /BCS when the frames coincide at "
+             "t 0 (every axis aligned, signed), every rotation is held and no "
+             "DOF is held and driven: two "
+             "skews on one node make the implicit solver impose a wrong "
+             "displacement (a two-block coupon: x0.750 / x-0.5625 of the "
+             "motion in two oblique frames, x1.000 in one skew; nt 2 = nt 4) "
+             "and the starter print WARNING 312. Explicit decks are "
+             "unchanged. ON by default; "
+             "--no-rigid-local-shared-skew keeps the two skews.",
+    )
+    parser.add_argument(
+        "--modal-acoustic-void",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a modal (/IMPL/PRINT/STIF) deck write a part on a refused "
+             "*MAT_ACOUSTIC as /MAT/VOID (RHO_I = RO; no stiffness, no "
+             "pressure DOF) instead of leaving it without a material: "
+             "9.3.ssd_acoustic_box starter ERROR 179 (+ 760) -> 0, the "
+             "exported modes the structure's alone (modal recipe only). "
+             "Time-domain decks keep the refusal (8.3: a void there carries "
+             "no wave and removes the fluid's radiation sink, so the "
+             "structure's energy does not decay; IE RMS 168.69 %%). ON by "
+             "default; "
+             "--no-modal-acoustic-void keeps the refusal.",
+    )
+    parser.add_argument(
+        "--mixed-main-thickness-gap",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in: Igap 3 + Gapmin = half the thinnest main shell on an "
+             "AUTOMATIC contact whose main mixes shells and solids (LS's "
+             "shell offset leaves a clearance at t = 0). mainboltaexpl's bolt "
+             "2.196 -> 1.995 mm (LS 1.817); EXP_SC_PRELOAD's contact energy "
+             "2916 -> 7557 (LS 1758.5) - OFF by default.",
+    )
+    parser.add_argument(
+        "--implicit-bfgs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in: Quasi-Newton BFGS (/IMPL/NONLIN/2) without /IMPL/QSTAT "
+             "for an NSOLVR 12 (or blank) deck. One carrier (ex_06: IE RMS "
+             "0.09 %%, NORMAL where the default stops); can fail SILENTLY "
+             "at nt 4 and nt 2 (doorbeam's default A1 + A2 bytes: a NORMAL "
+             "banner in all 96 runs, nonsense internal energy in 13 - 4 of "
+             "51 at nt 4, 9 of 45 at nt 2; the TYPE25 route too) - OFF by "
+             "default.",
+    )
+    parser.add_argument(
+        "--weld-trajectory-impflux",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert a *BOUNDARY_THERMAL_WELD_TRAJECTORY (IFORM 2, SOLN 1, "
+             "NSID2 < 0, PTYP 1 / 2 on solid parts, its *MAT_THERMAL_CWM born "
+             "before t 0) into windowed /IMPFLUX VOLUMIC cards: each seam "
+             "brick gets its in-window mean of the double ellipsoid, the "
+             "source switched off past the end of NSID1; the CWM becomes the "
+             "part's /HEAT/MAT, a > 1000-frame d3plot cadence is capped at "
+             "ENDTIM / 100 and the TEMP history is the path + history nodes. "
+             "ON by default; a refused card keeps today's output with a named "
+             "sentence. MEASURED on 05_5_1 (one LS model, nt 4): NORMAL in "
+             "66 323 cycles, deposit -0.30 %% of LS-DYNA's source energy, "
+             "path peaks +5.03..+6.18 %% and END -11.81..-13.46 %% of the "
+             "rise; 720-2075 s of engine time. --no-weld-trajectory-impflux "
+             "restores the 386444e output.",
+    )
+    parser.add_argument(
+        "--weld-trajectory-window",
+        type=_weld_window_arg,
+        default=0.25,
+        metavar="S",
+        help="The /IMPFLUX window (seconds, > 0) of --weld-trajectory-impflux "
+             "(default 0.25, the measured window).",
+    )
+    parser.add_argument(
+        "--axisymmetric-2d",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an all-ELFORM-14 / 15 *SECTION_SHELL deck as an "
+             "OpenRadioss 2-D axisymmetric deck (/ANALY N2D3D 1, /QUAD on "
+             "/PROP/SOLID Isolid 2, nodes (x, y, 0) -> (0, x, y)): per-radian "
+             "masses as LS-DYNA. Refused by name (3-D kept) for another element "
+             "family, a 3-node shell, any *CONTACT_*, a node off the xy-plane "
+             "or at x < 0, or an unmapped card. MEASURED on metal-forming: "
+             "TOTAL MASS = LS-DYNA per radian (the 3-D route -77.78 %%). ON by "
+             "default; --no-axisymmetric-2d keeps the 3-D shells.",
+    )
+    parser.add_argument(
+        "--positive-dt2ms-mass-scaling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a routed 2-D deck, a positive DT2MS multiplies the deformable "
+             "materials' density by (DT2MS / dt0)^2, dt0 = OpenRadioss's own "
+             "cycle-0 2-D step of the quads, so the run starts at DT2MS (never "
+             "/DT/NODA/CST on a 2-D deck). MEASURED on metal-forming: timeout "
+             "-> NORMAL in 24 807 cycles, IE END -0.45 %%, RMS 0.24 %%. ON by "
+             "default; --no-positive-dt2ms-mass-scaling keeps the density.",
+    )
+    parser.add_argument(
+        "--plane-stress-unit-thickness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a 2-D plane-stress *SECTION_SHELL (ELFORM 12) that states "
+             "no thickness (T1..T4 = 0 / blank) with thickness 1.0: LS-DYNA "
+             "integrates a unit thickness there (main_fsi's rigid mass "
+             "0.23410459 = rho x area x 1.0); a stated T1 > 0 is kept. "
+             "MEASURED on main_fsi: starter 117 ERROR(S) -> 0, TOTAL MASS = "
+             "LS-DYNA. ON by default; --no-plane-stress-unit-thickness keeps "
+             "T1.",
+    )
+    parser.add_argument(
+        "--load-curve-offscale-zero",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Point a mechanical applied-load consumer (/IMPVEL, /IMPDISP, "
+             "/IMPACC, /CLOAD, /PLOAD, /GRAV) at a copy of its /FUNCT that is "
+             "zero past its last abscissa (*DEFINE_CURVE Remark 5) and, for a "
+             "DATTYP-0 curve with OFFA > 0 and SFA 0 / 1, before OFFA (Remarks "
+             "4a and 5), as LS-DYNA's load curves are; OpenRadioss would "
+             "extend the last / first segment. A curve that merely starts "
+             "after t 0 without OFFA keeps its head. Material, preload and "
+             "thermal curves are never changed. MEASURED: the cup-draw punch "
+             "no longer starts backward but its IE is WORSE (END +6.09 -> "
+             "+13.10 %%, RMS 2.89 -> 5.57 %%; KE END -40.31 -> -42.14 %%); "
+             "thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> "
+             "+23.42 %%. ON by default; --no-load-curve-offscale-zero writes "
+             "the curves as stated.",
+    )
+    parser.add_argument(
+        "--ale-flow-tracking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the grid moving with "
+             "the ALE material's mass-weighted velocity) as "
+             "/ALE/GRID/FLOW-TRACKING (I_def -1 for BCEXP 7, I_rot +1 / -1 for "
+             "BCROT 0 / 7) in the starter deck; refused by name for any other "
+             "reference-system card. OFF by default: MEASURED on bird_B (nt "
+             "4) the IE END +1484.66 -> +17.00 %% and the IE RMS 1189.95 -> "
+             "27.74 %%, but the deck KE RMS 253.09 -> 749.89 %% (the void is "
+             "converted at full density).",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -1524,6 +1814,7 @@ def main(argv=None) -> int:
         deformable_to_rigid=args.deformable_to_rigid,
         fixpoint_count=args.fixpoint_count,
         qstat_dtscal=args.qstat_dtscal,
+        qstat_dtscal_stated=args.qstat_dtscal_stated,
         arclength_riks=args.arclength_riks,
         zero_tolerance_ectol=args.zero_tolerance_ectol,
         implicit_constant_step=args.implicit_constant_step,
@@ -1560,6 +1851,23 @@ def main(argv=None) -> int:
         skip_implicit_stub_with_type25=args.skip_implicit_stub_with_type25,
         shell_in_solid_coupling=args.shell_in_solid_coupling,
         imflag_curve_restart=args.imflag_curve_restart,
+        rigid_part_pid_precedence=args.rigid_part_pid_precedence,
+        implicit_n2s_type7=args.implicit_n2s_type7,
+        implicit_rigid_gravity_nodes=args.implicit_rigid_gravity_nodes,
+        elform7_beam_thickness_section=args.elform7_beam_thickness_section,
+        spc_vector_frames=args.spc_vector_frames,
+        prescribed_motion_sf_default=args.prescribed_motion_sf_default,
+        rigid_local_shared_skew=args.rigid_local_shared_skew,
+        modal_acoustic_void=args.modal_acoustic_void,
+        mixed_main_thickness_gap=args.mixed_main_thickness_gap,
+        implicit_bfgs=args.implicit_bfgs,
+        weld_trajectory_impflux=args.weld_trajectory_impflux,
+        weld_trajectory_window=args.weld_trajectory_window,
+        axisymmetric_2d=args.axisymmetric_2d,
+        positive_dt2ms_mass_scaling=args.positive_dt2ms_mass_scaling,
+        plane_stress_unit_thickness=args.plane_stress_unit_thickness,
+        load_curve_offscale_zero=args.load_curve_offscale_zero,
+        ale_flow_tracking=args.ale_flow_tracking,
         tgmult_imptemp=args.tgmult_imptemp,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,

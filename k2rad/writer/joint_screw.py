@@ -197,6 +197,11 @@ def _rigid_own_body(state: ConversionState, pid: int,
     if pid in state.extra_rigid_nodes:
         return f"part {pid} carries *CONSTRAINED_EXTRA_NODES"
     if any(getattr(c, "pid", 0) == pid for c in state.cnrbs):
+        if state.options.rigid_part_pid_precedence:
+            # round 9, A1: the part keeps its record, but the screw still
+            # refuses a body whose id two rigid bodies share
+            return (f"a *CONSTRAINED_NODAL_RIGID_BODY shares PID {pid} with "
+                    "the part (LS Warning 10177)")
         return (f"a *CONSTRAINED_NODAL_RIGID_BODY uses PID {pid}, so its "
                 "record would replace the part's")
     if pid_nodes & cnrb_nodes:
@@ -259,9 +264,8 @@ def _body_conditions(state: ConversionState, nodes: Set[int]
     for bc in state.bcs_spcs:
         hit = sorted(set(state.node_sets.get(bc.nsid, ("", []))[1]) & nodes)
         if hit:
-            skew = (bc.cid if bc.cid and (bc.cid in state.coord_sys
-                                          or bc.cid in state.coord_nodes)
-                    else 0)
+            from .loads import spc_cid_skew       # round 9, A6
+            skew = spc_cid_skew(state, bc.cid)
             out.append(BodyCondition(
                 "bcs_spc", hit[0], _dof_string(bc.dofx, bc.dofy, bc.dofz),
                 _dof_string(bc.dofrx, bc.dofry, bc.dofrz),
@@ -684,6 +688,7 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     The keyword leaves ``skipped_keywords`` here, at the line that writes the
     ``/GJOINT``."""
+    from .loads import _pm_sf                 # local: loads imports us
     plans = state.joint_screw_plan or []
     if not plans:
         return []
@@ -733,7 +738,7 @@ def _make_joint_screws(state: ConversionState, rbody_info: Dict) -> List[str]:
                       f"{_i(fid)}{_DIRS[k]:>10}{_i(0)}{'':10}"
                       f"{_i(plan.a_ind_grnod)}",
                       "#           Ascale_x            Fscale_y",
-                      f"{_f(1.0)}{_f(pm.sf)}", HDR]
+                      f"{_f(1.0)}{_f(_pm_sf(state, pm))}", HDR]
         gid = state.next_id()
         fs = -1.0 / s.parm
         lines += [f"/GJOINT/RACK/{gid}", f"SCREW_{jid}",

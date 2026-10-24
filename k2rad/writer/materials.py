@@ -155,6 +155,9 @@ __all__ = [
     "_emit_fail_spalling",
     "_emit_mat_vacuum",
     "_warn_refused_materials",
+    # R14 triage round 9
+    "_resolve_modal_acoustic_void",
+    "_emit_acoustic_void",
     "_resolve_he_bunreacted",
     "_ammg_member_mids",
     "_jwl_unreacted_bulk",
@@ -175,6 +178,11 @@ __all__ = [
 
 def _make_materials(state: ConversionState) -> List[str]:
     lines = ["#-  MATERIALS:", HDR]
+    # R14 triage round 9, A7: a refused *MAT_ACOUSTIC's /MAT/VOID on a MODAL
+    # deck (resolved by _resolve_modal_acoustic_void; empty on every other
+    # deck, so nothing below moves).
+    for mid in sorted(state.acoustic_void):
+        lines += _emit_acoustic_void(mid, *state.acoustic_void[mid])
     for mat in state.mat_elastic.values():
         lines += _emit_mat_elastic(mat)
     for mat in state.mat_plas_tab.values():
@@ -1402,8 +1410,11 @@ def _resolve_mat_null_cells(
             "faces walled the energy error reads -0.1 % (+2.4 % with the void "
             "cells at VFACT density) against 99.9 % open, and the void "
             "density alone does not remove it (99.9 %). LS-DYNA moves its ALE "
-            "mesh with the bird (*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4, which "
-            "k2rad skips): ROADMAP, the reference-system item first.")
+            "mesh with the bird (*ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4; "
+            "--ale-flow-tracking writes /ALE/GRID/FLOW-TRACKING, and with the "
+            "grid moving the Nu cell still creates energy: energy error "
+            "+59.2 %, END IE +1504.57 % on bird_B), so the cell stays off: "
+            "ROADMAP, the void / TYPE18 coupling item.")
     if w_n3_deck:
         state.warn(
             "*MAT_NULL MU is NOT carried (Nu 0) on " + "; ".join(w_n3_deck)
@@ -1445,6 +1456,15 @@ def _resolve_mat_null_cells(
 _HG_GUARD_ISOLIDS = (1, 2)
 #: the starter's default h for those formulations (a blank / 0 cell)
 _HG_DEFAULT_H = 0.1
+#: round 9, B7: the hourglass-guard cap h' = min(h_eff, 0.14 / Tsca) /
+#: max(1, R) - the numerator, and the coupon measurement every cap sentence
+#: carries (cG1's Couette, critic_G1/gen_cou_c.py, arms rcv_r9c_G1_uG / uC)
+_HG_CAP_NUM = 0.14
+_HG_CAP_MEASURED = (
+    "MEASURED on a Couette coupon (ELFORM 6, MU 1e-5, Tsca 0.9, nt 4) the "
+    "uncapped h_eff / R = 0.1667 at R 1.2 is UNSTABLE (energy error +16.2 %, "
+    "hourglass energy 732.6 mJ) and min(h_eff, 0.14 / Tsca) / R = 0.1296 is "
+    "stable (8.0e-12 mJ).")
 
 _BRICK_EDGES = ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7),
                 (7, 4), (0, 4), (1, 5), (2, 6), (3, 7))
@@ -1529,16 +1549,50 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
     R = 10 Nu / (c0 dmin)
     > 1: then ``h = h_eff / R_max`` (h_eff = the stated h, else the
     starter's default 0.1) and the prop is named once. h is never raised
-    (R <= 1 keeps today's bytes: the channel family reads R 0.0117)."""
+    (R <= 1 keeps today's bytes: the channel family reads R 0.0117).
+
+    Round 9, B7: a stated h above ``0.14 / Tsca`` is first capped there -
+    ``h' = min(h_eff, 0.14 / Tsca) / max(1, R)`` - so the cap also acts at R
+    <= 1 (with its own sentence); 0 corpus movers."""
     if isolid not in _HG_GUARD_ISOLIDS:
         return hcoef
     guard = _mat_null_h_guard(state)
     hits = [(guard[p][0], p) for p in prop_pids if p in guard]
-    if not hits or max(r for r, _p in hits) <= 1.0:
+    if not hits:
         return hcoef
     r_max, p_max = max(hits)
     h_eff = hcoef if (hcoef is not None and hcoef > 0.0) else _HG_DEFAULT_H
-    h_new = h_eff / r_max
+    # round 9, B7: a STATED h is first capped at 0.14 / Tsca (Tsca = the /DT
+    # Tsca written: TSSFAC, else the engine's 0.9) - h' = min(h_eff, 0.14 /
+    # Tsca) / max(1, R): the uncapped QH 0.2 at R 1.2 stayed UNSTABLE on a
+    # Couette coupon. Unchanged where the cap does not act and R <= 1.
+    ts = state.ctrl_timestep
+    tsca = ts.tssfac if ts is not None and ts.tssfac > 0.0 else 0.9
+    h_cap = _HG_CAP_NUM / tsca
+    capped = h_eff > h_cap
+    if r_max <= 1.0 and not capped:
+        return hcoef
+    h_new = min(h_eff, h_cap) / max(1.0, r_max)
+    # the post-review round (F2): a written h >= 0.15 is outside the
+    # starter's recommended ]0, 0.15[ and draws its WARNING 311
+    w311 = (f" The written h {h_new:.6g} is >= 0.15, so the starter prints "
+            "WARNING 311 (HOURGLASS VISCOSITY COEFFICIENT, recommended "
+            "]0, 0.15[, hm_read_prop14.F:271-273) - a recommendation, not a "
+            "refusal." if h_new >= 0.15 else "")
+    cap_clause = (f" The stated h {h_eff:g} is first capped at 0.14 / Tsca = "
+                  f"{h_cap:.6g} (Tsca {tsca:g}): {_HG_CAP_MEASURED}"
+                  if capped else "")
+    if r_max <= 1.0:
+        if prop_id not in state.mat_null_h_guarded_props:
+            state.mat_null_h_guarded_props.add(prop_id)
+            pids = sorted(p for _r2, p in hits)
+            state.warn(
+                f"*MAT_NULL MU -> Nu on /PROP/SOLID/{prop_id} (parts {pids}): "
+                f"R = {r_max:.3g} <= 1, but the stated hourglass coefficient "
+                f"{h_eff:g} exceeds 0.14 / Tsca = {h_cap:.6g}, so h is written "
+                f"{h_cap:.6g}: {_HG_CAP_MEASURED}{w311} --no-mat-null-pc-mu "
+                "removes the Nu cell and this guard.")
+        return h_new
     if prop_id not in state.mat_null_h_guarded_props:
         state.mat_null_h_guarded_props.add(prop_id)
         _r, dmin, nu, c0, kind = guard[p_max]
@@ -1549,7 +1603,9 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
             f"= 10 Nu / (c0 dmin) = {r_max:.3g} > 1 (Nu {nu:g}; c0 "
             f"{c0:.6g} from /EOS/{kind}; dmin {dmin:.4g}, the shortest brick "
             f"edge), so its hourglass coefficient h is written {h_new:.6g} = "
-            f"{h_eff:g} / R: with Nu > 0 the fluid hourglass force of a brick "
+            + (f"min({h_eff:g}, 0.14 / Tsca) / R" if capped else
+               f"{h_eff:g} / R")
+            + ": with Nu > 0 the fluid hourglass force of a brick "
             "becomes 10 (h/4) VIS dx instead of (h/4) RHO c dx^2 "
             "(shvis3.F:182 / :185) - R times the Nu-0 value - and no step "
             "routine carries it. MEASURED on a Lagrangian Couette coupon "
@@ -1560,6 +1616,7 @@ def guarded_prop_h(state: ConversionState, prop_id: int, prop_pids,
             "(0.19 % of U at 0.1 t_d, hourglass energy 4e-11 mJ)."
             + (" On a graded part h / R_max also weakens the larger elements' "
                "hourglass below the Nu-0 level." if graded else "")
+            + cap_clause + w311
             + " --no-mat-null-pc-mu removes the Nu cell and this guard.")
     return h_new
 
@@ -1904,6 +1961,21 @@ def _emit_mat_vacuum(mat: MatVacuum) -> List[str]:
         mat.title or f"VACUUM_{mat.mid}",
         "#              RHO_I                   E                  nu",
         f"{_f(mat.rho)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_acoustic_void(mid: int, ro: float, title: str) -> List[str]:
+    """The round-9 A7 card: ``/MAT/VOID`` (LAW0) under the *MAT_ACOUSTIC MID
+    with ``RHO_I = RO``, ``E 0``, ``nu 0`` — the :func:`_emit_mat_vacuum`
+    layout (``radioss140/MAT/matl_void0.cfg`` reads RHO_I, E and nu, nothing
+    else). Title: the *MAT_ACOUSTIC card's own, else ``ACOUSTIC_VOID_<mid>``.
+    """
+    return [
+        f"/MAT/VOID/{mid}",
+        title or f"ACOUSTIC_VOID_{mid}",
+        "#              RHO_I                   E                  nu",
+        f"{_f(ro)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
 
@@ -11262,6 +11334,78 @@ def _warn_refused_materials(state: ConversionState) -> None:
                "No /PART names this material, so nothing in the emitted deck "
                "references it and the refusal costs the model nothing.")
             )
+
+
+def _resolve_modal_acoustic_void(state: ConversionState) -> None:
+    """R14 triage round 9, A7: on a MODAL deck a *PART on a refused
+    *MAT_ACOUSTIC gets ``/MAT/VOID`` (``RHO_I = RO``) instead of no material
+    at all.
+
+    ``handlers._handle_mat_acoustic`` refuses the law like the other refused
+    families — OpenRadioss has no acoustic pressure element — and keeps RO and
+    the title. On a modal deck (``state.is_modal``: one ``/IMPL/LINEAR`` step
+    plus ``/IMPL/PRINT/STIF``, the modes solved offline by
+    ``tools/modal_solve.py``) that refusal costs the WHOLE run: the starter
+    stops on ERROR 179 for the part with no material, so not even the
+    structure's stiffness is exported. A void in the part's place resolves it
+    and adds nothing to the modal problem — MEASURED on 9.3.ssd_acoustic_box
+    (Isolid 17): the exported matrix holds the 402 shell nodes of 726 (the
+    air's interior nodes carry no stiffness and drop out), the starter gives
+    the void bricks no mass either (``inivoid.F:254`` weighs a void brick only
+    when it does not have 8 integration points: TOTAL MASS 0.2818 = the
+    shells' 0.2808 + the 0.001 probe body), and ``tools/modal_solve.py``'s
+    lumper weighs no acoustic material. So, for every acoustic mid a *PART
+    uses, the mid
+    moves from ``refused_materials`` to ``acoustic_void`` (the card is written
+    by :func:`_make_materials`, ``_target_mat_law`` answers law 0), the
+    recognized-not-emitted note goes once no refused mid of that spelling is
+    left, and the warning names what the void does not carry.
+
+    A time-domain deck keeps the refusal: there a void runs but carries no
+    wave and removes the fluid's radiation sink (8.3.plate_kirchhoff,
+    explicit with a *BOUNDARY_NON_REFLECTING: the void route ran NORMAL in
+    238 416 cycles, the structure's internal energy stayed at ~0.01 where
+    LS-DYNA's decays to 2e-11 - IE RMS 168.69 % / KE RMS 7.11 %). ``--no-modal-acoustic-void`` keeps it on a modal deck too (the
+    386444e bytes). Runs before every pass that reads ``_target_mat_law`` or
+    ``refused_materials``; emits nothing and draws no id.
+    """
+    if not (state.acoustic_mats and state.is_modal
+            and state.options.modal_acoustic_void):
+        return
+    users: Dict[int, List[int]] = defaultdict(list)
+    for pid, part in state.parts.items():
+        if part.mid in state.acoustic_mats:
+            users[part.mid].append(pid)
+    lifted: Set[str] = set()
+    for mid in sorted(users):
+        ro, title = state.acoustic_mats[mid]
+        seen = state.refused_materials.pop(
+            mid, ("MAT_ACOUSTIC", "", ""))[0]
+        lifted.add(seen)
+        state.acoustic_void[mid] = (ro, title)
+        state.warn(
+            f"*{seen} {mid} (part(s) {sorted(users[mid])}) on a MODAL deck: "
+            f"written as /MAT/VOID/{mid} with RHO_I = {ro:g} (E 0, nu 0) so "
+            "the part resolves - before round 9 it had no material and the "
+            "starter stopped (ERROR 179). The void carries no pressure DOF, "
+            "no fluid stiffness and no acoustic coupling (OpenRadioss has no "
+            "acoustic pressure element; matl_void0.cfg reads RHO_I, E and nu "
+            "only), so the exported stiffness and tools/modal_solve.py's "
+            "lumped mass are the STRUCTURE's alone: on 9.3.ssd_acoustic_box "
+            "the matrix holds the 402 shell nodes of 726 and even the .rad "
+            "gives the void bricks no mass (inivoid.F:254 weighs a void "
+            "brick only without 8 integration points; starter TOTAL MASS "
+            "0.2818 = the shells' 0.2808 + the 0.001 probe body). A "
+            "time-domain deck keeps the refusal (a void there runs but "
+            "carries no wave and removes the fluid's radiation sink: on 8.3 "
+            "the structure's energy does not decay where LS-DYNA's does, IE "
+            "RMS 168.69 %). --no-modal-acoustic-void keeps the refusal.")
+    gone = lifted - {kw for kw, _what, _why
+                     in state.refused_materials.values()}
+    if gone:
+        state.recognized_not_emitted = [
+            (kw, why) for kw, why in state.recognized_not_emitted
+            if kw not in gone]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
