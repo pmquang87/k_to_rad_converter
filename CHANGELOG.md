@@ -13,9 +13,11 @@ Prior history (before this changelog was introduced) is summarized in the
 
 - **R14 CAMPAIGN TRIAGE batch, round 9 — the post-review verification
   round.** Four verifiers (two solver-physics, code with whole-suite
-  mutation runs, evidence) checked the branch at `d84716b`: no blocker; 10
-  majors (six whole-suite mutation survivors, three evidence majors, the
-  A12 nt attribution) and the minors below. Every finding was re-checked
+  mutation runs, evidence) checked the branch at `d84716b`: no blocker; 8
+  majors (the code verifier's six whole-suite mutation survivors, reported
+  as five; the evidence verifier's three: the campaign report's doorbeam
+  band, the A12 nt attribution, the fix round's "0 carriers" rejection) and
+  the minors below. Every finding was re-checked
   against the code, the solver source or a measurement of this round
   before it was acted on; every number this entry ships was re-measured
   by this round's fix agent (nt stated; its runs are harvested under its
@@ -131,6 +133,38 @@ Prior history (before this changelog was introduced) is summarized in the
     ellipsoids per lobe (F5); `n2s_routed`'s "TYPE 7 / 10 / 11 only" ->
     TYPE 5 / 7 / 10 / 11 / 24 (`imp_int_k.F:113` / `:135` / `:152` /
     `:159` / `:176`; PA12).
+  - **Movers** (all 356 roster keys converted from F: by
+    `_infra/verify_warnings.py sweep` from pristine detached checkouts of
+    `d84716b` and `1f76c54`, 0 errors each, porcelain `--ignored` empty
+    before and after): **bytes 1 key / 1 model** - metal-forming's
+    `_0000.rad`, its line 227 the 2-D REAC reminder (F14) - and **warning
+    text 9 keys / 9 models**: doorbeam (the band, the stub impulse, the
+    corner coupons), ex_05 and ex_07 (A11's two reversals), the cup-draw and
+    section_shell.hourglassing (the B6 clause's bytes; the cup-draw also
+    B5's WORSE label), thick.k (B5), the SPR main giant (the round-off z
+    clause gone), 05_5_1 and 05_4_1 (the TPRINT group, 720 s, the peaks'
+    sampling); 346 identical, warning COUNTS unchanged, the 34 match rows
+    untouched; 10 keys on 10 models by two scanners. The campaign
+    re-converted the 10 and re-ran the 9 runnable ones (report §0.33.2).
+  - **Rejected or deferred, with the reason**: the routed TYPE7's own
+    comment header (a comment change on doorbeam's chaotic implicit row);
+    A10's IE / KE figures in its opt-in sentence (two long re-runs for an
+    opt-in text); B1's embedded-path deposit and weld-curve head, B4's
+    unreachable guard path (0 carriers); padding every late-starting curve
+    head per Remark 5 (unmeasured roster bytes - the text was narrowed).
+  - **Mutation checks** (whole suite per mutant, two throwaway detached
+    worktrees at `1f76c54`, each anchor matched once, every file restored by
+    blob, porcelain `--ignored` empty after each; both unmutated BASE runs
+    green): **15 / 15 KILLED** - the six survivors A6-loadnode, A10-site1,
+    A10-site3, A10-solidonly, B1-solid8, A2-fsf, and this round's own rules
+    (the `*LOAD_NODE` opt-out sentence, the plane band in the screen, in the
+    transform and as an absolute 1e-6, the REAC comment and sentence, B7's
+    WARNING 311, the generic `*CONTROL_ALE` qualifier, the TPRINT group),
+    each by the probe written for it.
+  - **The campaign tooling**: the validator's live `verify_runs.py` fix
+    (the shadowed `th`) gains a hermetic test in
+    `_infra/tests/test_campaign_tooling_r9.py`; with the shadowing put back
+    on a copy the test fails (the summary line ends `ds/s]`, not `T01]`).
   - The retracted spellings are guarded by `PostReviewRetractedStatements`
     (only this file quotes them).
 - **R14 CAMPAIGN TRIAGE batch, round 9 — the validation-fix round.** Four

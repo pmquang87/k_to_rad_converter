@@ -2948,7 +2948,11 @@ not_comparable 193 → 189 (roster 176 → 172); the implicit residue 27 / 27 �
 107 `/IMPL` emitters); NORMAL zero models 5; STALE giant runs 5 (A10 shipped
 no default). The validation-fix round after it (CHANGELOG) moved no default
 bytes on the roster - only runtime texts on 10 keys (the report's follow-up
-section names them).
+section names them). The post-review verification round (CHANGELOG) moved
+the bytes of 1 key / 1 model - metal-forming's `_0000.rad`, one comment line
+(the 2-D REAC reading) - and runtime texts on 9 keys / 9 models; the
+campaign re-converted the 10 and re-ran the 9 runnable ones (report
+§0.33.2).
 
 **What round 9 deliberately does NOT close** — each entry with the measurement
 that decided it and the deck that would decide it next; reaches as N keys / M
