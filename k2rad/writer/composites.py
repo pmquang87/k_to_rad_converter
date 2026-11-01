@@ -37,7 +37,7 @@ the starter.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from ..state import (
     ConversionState,
@@ -58,6 +58,7 @@ from .mesh import (
     _auto_section_shell,
     _emit_prop_type9,
     _emit_skew_fix,
+    _law1_global_n_secids,
     _ortho_skew_axes,
     _shell_istrain_flag,
 )
@@ -1316,6 +1317,8 @@ def _resolve_integration_shells(state: ConversionState) -> None:
             "for them")
 
     # ── Part-level: claim a /PROP, or report why the rule cannot reach one ───
+    # the K-31 N = 0 sections, computed once and only if a LAW1 part needs it
+    global_n: Optional[FrozenSet[int]] = None
     for pid, part in sorted(state.parts.items()):
         sec = state.sec_shells.get(_part_secid(state, pid))
         rule = _layered_rule(state, sec)
@@ -1371,9 +1374,29 @@ def _resolve_integration_shells(state: ConversionState) -> None:
             # orthotropic shell property (IGTYP 9/10/11/16/17/51/52) with
             # ERROR 658, checked on the /PART's own material, so no property
             # k2rad could emit would carry the layup. LAW1 is the purely
-            # elastic law Radioss integrates GLOBALLY (it answers N > 1 with
-            # WARNING 1084 "FORMULATION IS SWITCHED TO GLOBAL INTEGRATION
-            # N=0"), i.e. it has no through-thickness state to layer.
+            # elastic law Radioss integrates GLOBALLY (the starter switches a
+            # LAW1 shell group written with N > 1 to N = 0,
+            # cgrtails.F:780-791), i.e. it has no through-thickness state to
+            # layer. K-31 writes that N = 0 on the plain /PROP/SHELL itself
+            # (writer/mesh._law1_global_n_secids), so the sentence names
+            # the N the property really carries.
+            if global_n is None:
+                global_n = _law1_global_n_secids(state)
+            n_plain = max(2, sec.nip)
+            if sec.secid in global_n:
+                kept = (
+                    "The part keeps its plain /PROP/SHELL with a UNIFORM "
+                    "thickness, written N = 0 (global integration: the N "
+                    "the starter switches a LAW1 shell group with N > 1 to, "
+                    "cgrtails.F:780-791; --no-law1-shell-global-n writes "
+                    f"max(2, NIP) = {n_plain} instead, which the starter "
+                    "switches the same way with WARNING 1084)")
+            else:
+                kept = (
+                    "The part keeps its plain /PROP/SHELL with a UNIFORM "
+                    f"thickness and N = {n_plain}, which the starter "
+                    "switches to N = 0 (global integration) for a LAW1 "
+                    "group, with WARNING 1084 (cgrtails.F:780-791)")
             state.warn(
                 f"{label}: the rule is DROPPED — the part's material "
                 f"{part.mid} converts to /MAT/ELAST (LAW1), which Radioss "
@@ -1381,9 +1404,8 @@ def _resolve_integration_shells(state: ConversionState) -> None:
                 "(IGTYP 9/10/11/16/17/51/52, starter ERROR 658 in "
                 "hm_read_part.F). LAW1 is integrated globally and carries no "
                 "through-thickness state, so there is nothing for the rule's "
-                "layers to vary. The part keeps its plain /PROP/SHELL with the "
-                f"rule's {len(rule.points)} integration point(s) but a UNIFORM "
-                "thickness; give the part an elasto-plastic law (e.g. "
+                f"{len(rule.points)} layers to vary. {kept}; give the part an "
+                "elasto-plastic law (e.g. "
                 "*MAT_PLASTIC_KINEMATIC or *MAT_PIECEWISE_LINEAR_PLASTICITY) "
                 "if the laminate matters.")
             continue

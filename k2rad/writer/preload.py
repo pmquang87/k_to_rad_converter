@@ -161,6 +161,20 @@ def _vector_direction(state: ConversionState, vid: int):
 #: Isolid 5 is what *CONTROL_HOURGLASS IHQ 4/5 maps to, so leaving it out made
 #: the warning fire on decks whose bolt preload is in fact fine — re-measured
 #: (0 ERRORS, NORMAL TERMINATION, 2813 cycles) and added.
+#:
+#: The set says nothing about a TET bolt (K-30, 2026-10-31): the starter runs
+#: a 4- / 10-node tet group written Isolid 14, 1 or 24 at Isolid 1 alike
+#: (sgrtails.F:984-999), and MEASURED on the tet twin of the bar (24 Kuhn tets,
+#: ELFORM 10, the same *INITIAL_STRESS_SECTION) the written Isolid 14
+#: (master), 1 (K-30) and 24 (ELFORM 1 + *CONTROL_HOURGLASS IHQ 6) give
+#: decoded-equal T01 (GLOBAL and the bolt /SECT, 50 states over 20 us) and
+#: byte-equal anim files - one run, three cells. Whether that run holds the
+#: pre-tension is a separate question this set does not answer: in that
+#: measurement (nt 4) the tet bolt's step fell from 1.0e-7 to 2.9e-9 s by
+#: t = 1.87e-5 s, and so did the Isolid 17 arm of the hex bar itself
+#: (test_preload_inistate._bar_deck(), byte-identical at master and K-30:
+#: 1.4e-7 to 2.3e-9 s by t = 1.79e-5 s, I-ENERGY 174.5 at cycle 100) - the
+#: hex rows above were not reproduced in that run (ROADMAP).
 _PRELOAD_STABLE_ISOLID = frozenset({5, 14, 17})
 
 
@@ -613,6 +627,17 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
         if (e.pid in state.ismstr10_solid_pids
                 or sec.secid in state.ismstr10_solid_secids):
             ismstr10.add(e.pid)
+        if not emitted_nodes:
+            # A /TETRA4 or /TETRA10 (the family test above). The stable set was
+            # measured on a HEX bar, and a tet group written Isolid 14, 1 or 24
+            # runs Isolid 1 alike - sgrtails.F:984-988 resets a 4-node group,
+            # :989-999 a 10-node one - so its property cell (14, the 1 K-30
+            # writes on an all-tet section, a 24 from IHQ 6) says nothing about
+            # the pre-tension: MEASURED, the three cells give one run (the
+            # tet-bolt notes of _PRELOAD_STABLE_ISOLID). Judging the cell
+            # would warn a K-30 tet bolt that master did not warn, for the
+            # same run.
+            continue
         isolid = _effective_solid_isolid(state, e.pid, sec)
         if isolid not in _PRELOAD_STABLE_ISOLID:
             bad.setdefault(isolid, set()).add(e.pid)

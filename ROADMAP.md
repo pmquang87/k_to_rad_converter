@@ -3012,6 +3012,11 @@ models on the 356-key / 312-model roster.
    only (B2's closed-form cell). Next: a non-uniform carrier (the 3 Ryan_Lee
    W16 door decks, DT2MS 3e-6) and `thermal-stress` (LS ratio 1.67e6). Roster
    3 keys / 3 models + 3 Ryan_Lee files.
+   **CardStack K-41 (2026-10):** the drop on a 3-D deck is now named, also
+   when TSSFAC is blank and no `/DT` is written: 2 of the 371 roster decks
+   (icfd tool-cooling `main.k` and `thermal-stress.k`) used to drop it
+   silently; `metal-forming.k` on the 2-D route carries it in its density
+   cell. The entry stays open.
 6. **Beam nodal rotary inertia** (new, from round-8 entry 20): solidof's free
    beam end padded to LS's 11.277 turns the row deviation → match (END IE
    +11.67 → +0.04 %, KE −52.52 → +3.68 %, RMS 14.57 / 45.5 → 0.13 / 0.27 %);
@@ -3056,6 +3061,18 @@ models on the 356-key / 312-model roster.
     one-way S2S / `*CONTACT_FORMING_*` with a `*MAT_RIGID` main side; an Istf /
     Stmax arm softening the secondary side; a coupon only with an analytic
     target. 1 key / 1 model.
+    **CardStack K1a (2026-10):** the Stmin half is now named and settable: a
+    default-ON warning names every `/INTER/TYPE7` whose estimated K (Stfac x E
+    x t / E x t on shells, Stfac x B x A^2/V / B x (2 V_node)^(1/3) on solids,
+    combined by Istf) is below k2rad's Stmin 1000, and `--inter-stmin ID=VAL`
+    writes another floor; on the CardStack paperboard probe SFS 0.85 / 0.15
+    give byte-identical T01 at Stmin 1000 and different ones at Stmin 0. It
+    prints nothing on the two R14 cup-draw decks, so this entry's next steps
+    stand. It fires on the R14 ring trio (`ring_01` / `ring_1` / `ring_100`,
+    `*CONTACT_ONE_WAY_SURFACE_TO_SURFACE` with SFS 0.01 / 1 / 100: estimated
+    K 1 / 100 / 100 against 1000). Next: the trio with `--inter-stmin
+    90001=0` against its LS-DYNA references (`ring_01`'s +207 % overshoot is
+    the round-3 record); not run.
 12. **The CWM stored-heat gap beyond the converter** (record): 71 % of the
     1.97e6 gap is LS's printed boundary energy at 0.54-0.94 (convection) /
     0.52-1.04 (radiation) of the textbook segment formula on its own
@@ -3870,6 +3887,16 @@ found and deliberately did NOT close.
     k2rad emits, AUTOMATIC spellings included (a policy constant needs the
     population it selects, not one deck - and that population is the element
     type, not the spelling: `Igap 0` / `Gapmin 0` goes on all of them).
+    **CardStack K-08B (2026-10):** the two-surface TYPE25 now exists as an
+    OPT-IN route, `--s2s-type25`, for the explicit
+    `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` only (Istf 4, Igap 2, Gap_max 0,
+    Inacti 5). On a lip coupon it stops a pusher the TYPE7 lets through
+    (0.1782 mm above the plate mid-plane, t/2 0.175). On `twobar` respelled
+    AUTOMATIC, the flag's own TYPE25 reproduces this record: peak IE 0.7835
+    against the TYPE7's 4.459e4 and LS-DYNA's 3036.17, with the kinetic
+    energy kept at 1.249e5 of 1.25e5 (K1a fix round). That is why it is off
+    by default. `twobar` as shipped (non-AUTOMATIC) is refused by the flag,
+    so its campaign row is unchanged.
   - **`05_4_2` and `05_5_2` regress NORMAL -> ERROR TERMINATION.** Registering
     `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR` adds a second penalty interface to
     an implicit quasi-static weld whose two plates already interpenetrate
@@ -4084,9 +4111,203 @@ census, which is round-4 input):
   (identical to the legally parented form and to the parent interface, and
   93.2 % of `2·m·v₀`).
 
+## CardStack FEM-pipeline batch (2026-10): owed, opened and closed
+
+The batch's own record (CHANGELOG, *CardStack FEM-pipeline smoothing*). Every
+number here was measured by the batch's groups, their fix rounds or their
+reviews (2026-10-25 .. 31); the pipeline recipe that uses these routes is
+`C:\nebenjob\upwork2\CardStack\FEM_PIPELINE_RECIPE.md` on this machine.
+
+### Owed at the merge
+
+- **The R14 re-baseline of the default changes.** Measured movers against the
+  tree before each group (dry conversions; 0 conversion errors):
+  - K-30 (all-tet Isolid 1): 6 keys, one `/PROP/SOLID` Isolid cell each
+    (`introduction/Introduction/example-27` `ex_27_solid_elform_10_penalty`,
+    `_10_rigidwall`, `_13_penalty`, `_13_rigidwall`;
+    `nvh/example-09-02` `9.2.acoustic.compartment.fem.tetra`;
+    `nvh/example-09-04` `9.4.acoustic.compartment.seat.impd`).
+  - K-31 (LAW1 shells N = 0): 142 keys (268 `/PROP/SHELL` N cells, every one
+    on `/MAT/ELAST` parts only); 146 keys with K-30 (the two `ex_27`
+    `_penalty` decks carry both). No `_0001.rad` engine file moves. The
+    starter sorts element groups by the written cells, so 3 of the 146 keys
+    can change their element order (anim layout, T01 round-off) although no
+    engine file moves: `4.2_Buckling_of_Beer_Can.k` (N 3 / 2 at the opt-out,
+    0 / 0 at the default) and the two Yaris suspension decks (45 x N 5 +
+    1 x N 2 at the opt-out, 44 x 0 + 2 x 5 at the default; on the static
+    deck the second review traced the 2 x 5 to LAW1 parts on a section a
+    LAW36 part shares). Found by a scan, not run.
+  - K-20 (damping curves in time): 1 of the 14 decks with these cards,
+    `integration_shell.lobotto.beam` (starter only).
+  - K-11 (Card-2 BT / DT on every sliding route): 6 starter decks -
+    `275key2.k` (two TYPE7 Tstart 0.0005, its own BT) and five TYPE25 decks
+    whose DT 1e14 / 1e17 past ENDTIM is now written Tstop 0, which the
+    starter reads as 1e30 (`contact.projectile.k`, `contact.n2s-sphere.k`,
+    `damping.tire.k`, `section_solid.hourglassing.k`, `proj-errod.k`).
+  - The MAXINT read: 9 engine decks gain one `/ANIM/SHELL/TENS/STRESS/ALL`
+    line (`3.3_Composite_Analysis.k`, `shells1.k`, `shells2.k`,
+    `ex_20_thin_shell_elform_16.k`, `control_shell.beam-twist.k`,
+    `integration_shell.lobotto.beam.k`, `pan.drawbead.31.k`, `275key2.k`,
+    `bird.k`).
+  - K-12, the K-10 SOFT 2 Iedge gate, K-16 and `*CONTROL_UNITS`: 0 R14 decks.
+
+  Whether to re-baseline these at the merge or to ship the defaults opt-in
+  first is the user's open question.
+- **Four default changes have no opt-out flag** (the user's decision): K-11,
+  the K-10 SOFT 2 Iedge gate, K-16 (SRNDE 1 -> Ishape 2) and the
+  `*DATABASE_EXTENT_BINARY` MAXINT read. The plan defined none, and a flag
+  reaches `state.options` only through `convert()` in `k2rad/__init__.py`
+  (K-0P's file). Either accept them as defaults and re-baseline the movers
+  above, or add the flags through the K-0P plumbing.
+
+### Opened by the batch
+
+- **SHRF -> `/PROP/SHELL` Ashear** (round-10 item). `SectionShell.shrf` is
+  stored (0.0 = blank), and the log names every stated SHRF other than 5/6.
+  Next: carry 0 < SHRF <= 1 to Ashear, the rule `composites.py` uses for
+  `*PART_COMPOSITE`. Ship it opt-in first: every repo fixture states SHRF 1.0,
+  so as a default it would flip each fixture's Ashear from the starter's 5/6
+  (`hm_read_prop01.F:244`) to 1.0. A blank SHRF (LS-DYNA's 1.0) deviates the
+  same way and is not named. Measure on the R14 roster before any default.
+- **Damping curves off scale (K-20).** After its last abscissa a
+  `*DAMPING_PART_MASS` / `*DAMPING_GLOBAL` curve is 0, except a FLAT curve (one
+  level) that reaches t 0, which keeps its level to ENDTIM (warned - k2rad's
+  historical whole-run reading). `*DEFINE_CURVE` Remark 5 states the off-scale
+  zero for applied loads only, and no LS-DYNA run here measures what a damping
+  curve does (no LS-DYNA solver on this machine). One LS-DYNA run of a short
+  flat curve settles it, e.g. 250 1/s on (0, 0.5 ms) with ENDTIM 2 ms:
+  KE(2 ms)/KE0 = exp(-0.25) = 0.7788 if zeroed, exp(-1) = 0.3679 if held.
+  Three review minors stay open: the steepness bound takes |SF| but not the
+  per-direction ST_i factors (a FLAG 1, ST 10 probe gave KE/KE0 0.8196
+  against the curve's 0.7617; no R14 reach); the flat-curve hold at a last
+  abscissa of exactly t 0 has no pin (a mutant survives); on a deck without
+  ENDTIM the window text says "before ENDTIM=inf".
+- **`--dt2ms-tssfac-product` as the default (K-41).** One LS-DYNA twin so far,
+  the R14 billet forge: the step equals LS-DYNA's 1.08e-7 (default 1.2e-7), end
+  KE -5.13 % against +16.99 % by default, end IE +0.135 % in both. 13 of the
+  371 roster decks carry DT2MS < 0; only 8 explicit ones get `/DT/NODA/CST`.
+  Next: two more of the 8 with an LS-DYNA glstat (cup-draw, self-forging
+  rivet), compared on the step and the added mass.
+- **ERODE 1 + TSLIMT > 0 -> `/DT/<elem>/DEL` Tmin = TSLIMT** (to check). Vol I
+  R17 p.12-586 erodes solids and thick shells at tsmin under ERODE 1, and
+  shells only under ERODE 10 / 11; `_make_engine_dt_deletion` deletes shells,
+  SH_3N and bricks at Tmin = TSLIMT. 0 of the 371 roster decks carry ERODE 1
+  with TSLIMT > 0. Next: a carrier deck with an LS-DYNA d3hsp erosion count.
+- **The routed 2-D deck's deletion floor does not reach its `/QUAD` elements.**
+  k2rad writes `/DT/SHELL/DEL`, `/DT/SH_3N/DEL` and `/DT/BRICK/DEL`; the quad
+  floor is `/DT/QUAD/DEL` (`freform.F:1103-1106`). MEASURED on a 6-quad AX-15
+  probe with ERODE 1 and TSLIMT 1e-6: as written 0 quads deleted in 13 328
+  cycles; with `/DT/QUAD/DEL 0.9 1e-6` added by hand all 6 at the start. Next:
+  write it, behind an opt-out flag (an engine-deck change); no R14 deck moves.
+- **(small) A TSSFAC < 0 curve on a DT2MS >= 0 deck** writes no `/DT` and no
+  text (master behaviour); 0 of the 371 roster decks carry one.
+- **MAXINT < -3 does not reach K-42's rule.** For a negative MAXINT LS-DYNA
+  writes |MAXINT| points at every in-plane point with no averaging (Vol I R17
+  p.16-67); the writer's MAXINT > 3 test keeps MEMB / UPPER / LOWER only. The
+  handler names it. R14: 0 decks.
+- **The `/PRELOAD` formulation stable set `{5, 14, 17}` was not reproduced on
+  this build** (2026-10-31, nt 4, on master and K-30 alike): the hex bar of
+  `tests/test_preload_inistate._bar_deck()` at Isolid 17 lost its step from
+  1.4e-7 to 2.3e-9 s by t = 1.79e-5 s, and its 24-tet twin bolt fell below
+  3.0e-9 s from t = 1.87e-5 s. Since K-30 the check skips preloaded tets on
+  both arms. Re-measure the set before its warning text is relied on.
+- **CHECK `_ELFORM_ALWAYS_QEPH`** {-16, 9, 20, 21, 26} writes Ishell 24, while
+  dyna2rad writes 12 for exactly that list (`convertprops.cxx:781-783`) and 24
+  for ELFORM 16 and every other ELFORM. Observation, not acted on.
+- **CHECK NIP 1 shells.** k2rad writes NIP 1 as N 2; on LAW1 the starter then
+  runs N = 0 (WARNING 1084), on another law 2 points. The shell bends either
+  way; LS-DYNA's NIP 1 (one point, no bending, Vol I R17 p.41-66) does not.
+  N = 1 would give one point (`hm_read_prop01.F:246-259`). Not measured.
+- **CHECK an ELFORM 2 / 16 tet section** is written Isolid 17, which the
+  starter resets to Isolid 1 silently (`sgrtails.F:984-999`); K-30 left it
+  alone (its scope is ELFORM 10 / 13).
+- **K-12: SOFT -7 with |SST| above the shell thickness is not warned.** The
+  Igap 2 TYPE7 engages two shells at max(|SST|/2, t), below LS-DYNA's |SST|.
+  The plan's rule warns for 0 < SST < t only (pinned by
+  `test_soft_7_names_optt_below_the_shell_thickness`, which asserts no warning
+  for SST 0.5 on t 0.35), so extending it is a plan change. The same
+  `*PART_CONTACT` OPTT lever applies. Text only; not measured on a deck.
+- **A LAW169 part on a TYPE25 is not named.** `i25sti3.F:885-889` takes a
+  TYPE25 solid main segment's stiffness from PM(32) (PM(107) when ICONTR = 1),
+  so a `*MAT_ARUP_ADHESIVE` part in the SSID = 0 TYPE25 gets STF 0 too; the
+  naming covers `/INTER/TYPE7` only. Reach: 0 of 411 R14 keyword files and 0
+  of 40 CardStack keyword files carry the law. A contact against LAW169
+  carries no load on any route (measured on TYPE7); no conversion fixes it.
+- **K-16: SRNDE on an `*CONTACT_ERODING_*` card under SOFT 0 / 1** (a
+  limitation, not decided). Vol I R17 p.11-117 lists AUTOMATIC_SINGLE,
+  AUTOMATIC_GENERAL, NODES_TO_SURFACE and SURFACE_TO_SURFACE and is silent on
+  ERODING_SURFACE_TO_SURFACE; k2rad writes Ishape 2 for an eroding SRNDE 1
+  card on shells. 0 R14 decks state SRNDE.
+- **SRNDE against `*CONTROL_CONTACT` SHLEDG.** LS-DYNA ignores SRNDE unless
+  SHLEDG is 0 on both `*CONTACT` and `*CONTROL_CONTACT` (p.11-117); k2rad
+  reads only the `*CONTACT` Card D SHLEDG.
+- **The K-02 estimate's bulk modulus for LAW28 / LAW38 / LAW50 / LAW90 is not
+  the starter's** (`hm_read_mat28.F:185`, `hm_read_mat38.F:347`,
+  `hm_read_mat50.F90:405/416`, `hm_read_mat90.F:200-201`; e.g. a
+  `*MAT_LOW_DENSITY_FOAM` keeps no nu, so the estimate is E / 3 where the
+  starter uses E). Text only; not measured on a deck. The TET10 face split
+  into 4 sub-triangles in the solid estimate has no pin (the K1a review's
+  M16).
+- **Named, not converted:** Card E ICOR (VDC as a coefficient of restitution,
+  p.11-115; the TYPE7 routes, the eroding / node-to-surface TYPE25 family and
+  `--s2s-type25` write VDC / 100 as damping and say so); SOFT 1 / SOFT 2 and
+  their Card A / C cells (the TYPE25 counterpart, Istf 7 / IPSTIF / STFAC_MDT
+  / DTSTIF, needs a `/BEGIN` >= 2023 writer); Card-2 BT / DT curve pairs (DT
+  = -9999) and a Card-2 VDC on the SSID = 0 TYPE25; Mortar IGNORE 3 / 4
+  (closure over MPAR1) and IGNORE 2 + MPAR1 (an initial pressure).
+- **Single-surface SURFATYP 5 / 6 / 7 with a stated SSID.** SURFATYP 5 is
+  dropped by name, as the plan decided; LS-DYNA ignores SURFA there and runs
+  the all-parts self-contact (Vol I R17 p.11-25), so routing it like SSID = 0
+  would be the faithful conversion. SURFATYP 6 (all parts except a set) and 7
+  still take the generic "the SECONDARY side resolved to no nodes" drop.
+  Reach: 0 of the 101 R14 contact decks converted carry SURFATYP 5.
+- **The `--auto-gapmin` offset cap on a sliver main** (K-04): where a main side
+  is shorter than t, the 0.5 x side cap sits below T, inside LS-DYNA's offset
+  surface; the line says so and names `--inter-gapmin <id>=<T>`. No engine run
+  measures that case (`deck_a`'s 0.1794 is uncapped).
+- **`--soften-stfac` does not reach the `*_TIEBREAK` post-rupture companion
+  `/INTER/TYPE25`** (measured Stfac 0 under 0.3; the help says so). Passing
+  the override there would change it; then the help, the GUI label and the
+  test class `SoftenStfacReach` change with it.
+- **Text follow-ups (code, no byte):** the `--ams` warning appends the
+  `/DT/NODA/CST` clause that cites `dtnoda.F`, which does not run under
+  `/DT/AMS` (`resol.F:5847-5857` calls DTNODAMS there; the K4 second
+  review); the loads writer's `_rwall_shell_thickness` duplicates
+  `contacts._main_shell_thickness` minus OPTT (one helper with an
+  `include_optt` switch); the pre-existing starter WARNING 100217 'card is
+  missing' on an `/INTER/TYPE11` (unchanged, measured on the before-snapshot
+  deck too); `docs/IMPLICIT.md`'s `--auto-gapmin` paragraph still gives only
+  F x d (the offset-aware formula is in the README and the help);
+  `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` was re-measured statement by statement
+  on 2026-11-01 against the final tree (its sections 5, 6.7 and 6.8, two
+  passes); its engine records 6.1 and 6.3 to 6.6 are still those of
+  2026-10-31; the `--law1-shell-global-n` help names only the
+  `*INITIAL_STRESS_SHELL` exclusion, not `*MAT_RIGID`, NIP 1,
+  `*INITIAL_STRAIN_SHELL`, a `/THERM_STRESS` deck or a section another law
+  shares (the K3 fix round's proposed text), and the `--tet-isolid1` help cites
+  `sgrtails.F:984-1000` (the reset is `:984-999`) and leaves out that a
+  section with a `/BRICK` keeps 14.
+
+### Closed by the batch
+
+- D1-14 (Card-2 BT / DT dropped): K-11. D1-15 / D5-15 (single-surface SST
+  halved): K-12. D5-19 (the false "no /INTER/TYPE7" text): K-05. D1-6
+  (AUTOMATIC_GENERAL shell edges): K-10, opt-in. D1-19 (SRNDE): K-16. D1-8 (the
+  IGNORE texts): K-14. D1-4 / D6-64 (dropped Card A / C fields): named, K-09.
+- The K-42 record "MAXINT > 3 is not reachable from a `.k` deck": the handler
+  reads card 1 field 3 since wave C.
+- Round 9's NOT list, entry 11: the Stmin half is named and settable (K-02);
+  the entry's next steps stand.
+
 ## Lossy conversions to tighten
 
 Cases that convert today but drop or approximate detail worth recovering:
+
+- **The CardStack batch's lossy items** (SURFATYP 5 / 6 / 7 on the
+  single-surface route, the `--auto-gapmin` cap on a sliver main, damping
+  curves off scale, ICOR, the SOFT 1 / 2 cells, BT / DT curve pairs, Mortar
+  IGNORE 3 / 4, SRNDE against `*CONTROL_CONTACT` SHLEDG) are listed in
+  *CardStack FEM-pipeline batch (2026-10): owed, opened and closed* above.
 
 - **A substituted density on an `RO ≤ 0` material** — the floor is `1e-24`,
   measured from LS-DYNA's own substitution rather than picked (CHANGELOG), and

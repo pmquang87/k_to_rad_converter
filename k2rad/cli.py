@@ -73,6 +73,52 @@ def _weld_window_arg(text: str) -> float:
     return v
 
 
+def _print_every_arg(text: str) -> int:
+    """``--print-every`` takes a whole number of cycles in 1..9999: the
+    engine reads the /PRINT/-N cell as I5 (freform.F:1563), so "-9999" is
+    the widest value that fits."""
+    try:
+        v = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--print-every takes a whole number of cycles, not {text!r}")
+    if not 1 <= v <= 9999:
+        raise argparse.ArgumentTypeError(
+            f"--print-every must be 1..9999 cycles (got {v}): the engine "
+            "reads the /PRINT/-N cell as I5 (freform.F:1563)")
+    return v
+
+
+def _id_value_pairs(flag: str, items, value_type, check, form: str = "ID=VAL"):
+    """Parse a repeatable ``ID=VAL`` flag (the --inter-gapmin shape) into
+    ``{id: value}``. Returns ``(pairs, None)`` or ``(None, message)`` - the
+    caller prints the message and exits 1 BEFORE converting, as
+    --inter-gapmin always has. ``check(value)`` returns an error text or
+    None; ``form`` is the spelling the message asks for. One interface
+    given two different values is refused by name (the last one used to
+    win in silence); the same pair repeated is accepted."""
+    out: dict = {}
+    for item in items:
+        if "=" not in item:
+            return None, f"ERROR: {flag} expects {form}, got {item!r}"
+        sid, _, sval = item.partition("=")
+        try:
+            iid = int(sid.strip())
+            val = value_type(sval.strip())
+        except ValueError:
+            return None, (f"ERROR: {flag} ID and VAL must be numeric: "
+                          f"{item!r}")
+        why = check(val)
+        if why:
+            return None, f"ERROR: {flag} {item!r}: {why}"
+        if iid in out and out[iid] != val:
+            return None, (f"ERROR: {flag} interface {iid} given twice, "
+                          f"with {out[iid]!r} and {val!r} - give each "
+                          "interface one value")
+        out[iid] = val
+    return out, None
+
+
 class _StatedQstatDtscal(argparse.Action):
     """``--qstat-dtscal``: store the value AND record that it was stated
     (R14 triage round 9, A11). ``--arclength-riks`` writes no
@@ -110,11 +156,19 @@ def _print_gapmin_suggestions(input_path: str, factor: float, analyze_file) -> i
         print("  No contact interfaces found.")
         return 0
     if suggestions:
-        print(f"\n  Suggested Gapmin (= {factor:g} x node-to-segment clearance):")
+        print(f"\n  Suggested Gapmin (= {factor:g} x node-to-segment clearance d,"
+              f" or T + {factor:g} x (d - T) where LS-DYNA offsets shells by T):")
         for iid in sorted(suggestions):
             s = suggestions[iid]
             print(f"    INTER {iid} ({s.title}): {s.side_a} -> {s.side_b}")
-            print(f"        node-to-segment clearance = {s.min_distance:g}  ->  Gapmin = {s.suggested_gapmin:g}")
+            form = ("" if not s.offset else
+                    f"  (T = {s.offset:g}: {s.offset_note}"
+                    + ("; d <= T, the offset surfaces overlap" if s.overlap
+                       else "") + ")")
+            cap = (f"  [capped at 0.5 x the smallest main side = {s.cap:g}]"
+                   if s.cap else "")
+            print(f"        node-to-segment clearance = {s.min_distance:g}  ->  "
+                  f"Gapmin = {s.suggested_gapmin:g}{form}{cap}")
         print(f"\n  Apply with:  --auto-gapmin --gapmin-factor {factor:g}")
         print("  Or pin explicitly:  " + " ".join(
             f"--inter-gapmin {i}={suggestions[i].suggested_gapmin:g}" for i in sorted(suggestions)))
@@ -146,9 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--units",
         nargs=3,
         metavar=("MASS", "LENGTH", "TIME"),
-        default=("Mg", "mm", "s"),
-        help="Unit labels for the /BEGIN header (default: Mg mm s). "
-             "Labels only — values are never rescaled.",
+        default=None,
+        help="Unit labels for the /BEGIN header. Default: the deck's "
+             "*CONTROL_UNITS LENGTH / TIME / MASS mapped to the Radioss "
+             "labels of the same units (mm / sec / mtrc_ton -> Mg mm s; "
+             "Vol I R17 p.12-592) when the card states a mappable system, "
+             "else Mg mm s; a *LOAD_BLAST_ENHANCED UNIT flag wins over both. "
+             "Given, --units is written as it is and a *CONTROL_UNITS that "
+             "disagrees is named in a warning - except the spelled-out "
+             "default Mg mm s on a *LOAD_BLAST_ENHANCED deck, which still "
+             "adopts the UNIT flag, as it always has. Labels only — no "
+             "input value is rescaled, but the starter converts its "
+             "built-in constants (radiation, gas, blast) with them.",
     )
     parser.add_argument(
         "--quiet",
@@ -546,8 +609,13 @@ def build_parser() -> argparse.ArgumentParser:
              "Several thicknesses: written only when every t/2 is above the "
              "cap; a shell main is never touched. MEASURED on bend (t 0.381, "
              "SHLTHK 2, written the capped 0.127): IE -2.00 -> -1.42 %%, KE "
-             "-68.65 -> -45.60 %% at matched time, 0.98x the cycles. Use "
-             "--no-shell-offset-gapmin to keep the starter's derived gap.",
+             "-68.65 -> -45.60 %% at matched time, 0.98x the cycles. Where "
+             "the cap bites (a main-segment side shorter than t; the warning "
+             "counts them) two routes write t/2 unclamped, because a stated "
+             "gap is written as it is: Card-3 SST = t on the contact, or "
+             "--inter-gapmin <id>=<t/2>. Use --no-shell-offset-gapmin to keep "
+             "the starter's derived gap, 0.1 x that side - smaller still "
+             "than the cap.",
     )
     parser.add_argument(
         "--rigid-shell-rotary-inertia",
@@ -1230,20 +1298,72 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="ID=VAL",
-        help="Override /INTER/TYPE7 Gapmin (field 3) on interface ID to VAL (mm). "
-             "Repeatable. Drop a pulled clearance-fit interface below its nodal "
-             "clearance so it starts with 0 initial penetrations. (.k-native: set "
-             "the contact's Card-3 SST/MST so (SST+MST)/2 = the gap you want.)",
+        help="Override the Gapmin cell (field 3) of /INTER/TYPE7 interface ID "
+             "with VAL, in the deck's length unit. Repeatable. It reaches "
+             "the /INTER/TYPE7 of a surface-to-surface card, of the implicit "
+             "node-to-surface route and of *CONTACT_AUTOMATIC_SINGLE_SURFACE "
+             "(its SSID != 0 route on an explicit deck included); not the "
+             "SOFT-routed *CONTACT_AUTOMATIC_GENERAL TYPE7 (its gap is "
+             "element-derived) nor a TYPE25 (no Gapmin cell). Drop a pulled "
+             "clearance-fit interface below its nodal clearance so it starts "
+             "with 0 initial penetrations. (.k-native: the contact's Card-3 "
+             "SST/MST.)",
+    )
+    fc.add_argument(
+        "--inter-stmin",
+        action="append",
+        default=[],
+        metavar="ID=VAL",
+        help="Write VAL in the Stmin cell (the interface stiffness floor) of "
+             "/INTER/TYPE7 interface ID instead of k2rad's 1000, a force / "
+             "length in the deck's units (1000 N/mm on t-mm-s, 1e6 N/mm on "
+             "kg-mm-ms). Repeatable; VAL >= 0. With Stmin 0 a secondary node "
+             "no element stiffens contacts with K = 0: Istf 4 takes "
+             "min(K_main, K_secondary) and then MAX(Stmin, K) "
+             "(i7cor3.F:277-288), and Stfac scales the main side only "
+             "(ROADMAP round-9 NOT entry 11). A default-ON warning names "
+             "every /INTER/TYPE7 whose estimated stiffness is below the "
+             "floor - shell main Stfac x E x t (i7sti3.F:615), shell "
+             "secondary E x t (asstifi.F:52), solid main Stfac x B x A^2/V "
+             "(i7sti3.F:444), solid secondary B x (2 V_node)^(1/3) "
+             "(asstifi.F:50), each the median of the side - with the Stfac "
+             "under which SFS / --soften-stfac change nothing. MEASURED on "
+             "a paperboard card-on-block coupon (E 3200, t 0.35, t-mm-s): "
+             "Stfac 0.85 and 0.15 give byte-identical T01 channels at Stmin "
+             "1000 and different ones at Stmin 0.",
+    )
+    fc.add_argument(
+        "--inter-inacti",
+        action="append",
+        default=[],
+        metavar="ID=6",
+        help="Write Inacti 6 - Inacti 5's gap reduction plus 5 %% of the "
+             "remaining gap (i7pwr3.F:244-257) - on /INTER/TYPE7 / TYPE11 / "
+             "TYPE19 interface ID where k2rad writes 5 for the deck's IGNORE; "
+             "never over an *_INTERFERENCE's 0, the implicit bootstrap's 0 "
+             "or --deformable-contact-recipe's 5. Repeatable; 6 is the only "
+             "value accepted. A TYPE25 id is refused by name: "
+             "hm_read_inter_type25.F:603-610 turns any Inacti but 0, -1 and "
+             "5 into 5 with WARNING 1559.",
     )
     fc.add_argument(
         "--soften-stfac",
         type=float,
         default=None,
         metavar="STFAC",
-        help="Set Stfac (penalty stiffness scale) on ALL /INTER/TYPE7 interfaces "
-             "(e.g. 0.3) as contact-chatter insurance; overrides the per-contact "
-             "Card-3 SFS mapping. Default: engine auto (0). (.k-native per contact: "
-             "set Card-3 SFS, e.g. SFS=0.3.)",
+        help="Set Stfac (penalty stiffness scale) on the penalty contacts "
+             "written from a *CONTACT_ card (e.g. 0.3) as contact-chatter "
+             "insurance: each /INTER/TYPE7 (the "
+             "*CONTACT_AUTOMATIC_SINGLE_SURFACE SSID != 0 route on an explicit "
+             "deck included), the /INTER/TYPE25 a contact card is written as "
+             "and the SOFT-routed TYPE11 / TYPE19. It overrides the "
+             "per-contact Card-3 SFS mapping. Not reached: the post-rupture "
+             "companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK, which "
+             "keeps Stfac 0 (the engine default), and the tied /INTER/TYPE2 "
+             "/ TYPE10 (--tie-stfac sets the TYPE10's). Default: that "
+             "mapping (Stfac 0 = engine auto on a TYPE7 whose SFS is 1 or "
+             "blank). (.k-native per contact: set Card-3 SFS, e.g. "
+             "SFS=0.3.)",
     )
     fc.add_argument(
         "--tie-stfac",
@@ -1266,9 +1386,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-gapmin",
         action="store_true",
         help="Set each surface-to-surface interface's Gapmin from the minimum "
-             "node-to-node clearance between its two parts (Gapmin = "
-             "--gapmin-factor × clearance), instead of hand-tuning Card-3 SST/SBST "
-             "per mesh. An explicit --inter-gapmin still wins. Off by default.",
+             "node-to-segment clearance d between its two parts - each "
+             "secondary node to the nearest main segment (gapmin.py) - "
+             "(Gapmin = --gapmin-factor F × d), instead of hand-tuning "
+             "Card-3 SST/MST per mesh. Where LS-DYNA offsets the shells by "
+             "half their thickness (the --shell-offset-gapmin predicate) d "
+             "runs between mid-planes and Gapmin = T + F x (d - T), T = t/2 "
+             "of the shell secondary (+ t/2 of a shell main), t = Card-3 "
+             "SST / MST, else SFST / SFMT x the /SHELL thickness; d <= T "
+             "(the offset surfaces overlap) keeps F x d and is named; the "
+             "offset value is capped at 0.5 x the smallest main-segment "
+             "side (WARNING 94 above it). An explicit --inter-gapmin still "
+             "wins; every interface it skips is named with its route "
+             "(self-contact, TYPE25, tie, SOFT-routed). Off by default.",
     )
     fc.add_argument(
         "--gapmin-factor",
@@ -1651,7 +1781,14 @@ def build_parser() -> argparse.ArgumentParser:
              "integration class, drops the starter's injected dn=1e-3 "
              "numerical damping, and erodes faithfully under /FAIL/JOHNSON "
              "Ifail_sh=2 (2 failure events to delete an element, not 8 — "
-             "Ishell=12 under-erodes by up to ~1.7x). CHOOSING 'qeph' CHANGES "
+             "Ishell=12 under-erodes by up to ~1.7x). Per ELFORM: ELFORM 2 "
+             "(under-integrated) is the class 'qeph' matches; ELFORM 16 (fully "
+             "integrated, 2x2 in-plane points) -> Ishell 12 by default, the "
+             "same integration class, and 'qeph' turns it into Ishell 24 - "
+             "the dyna2rad parity choice (dyna2rad writes 24, "
+             "convertprops.cxx:779-785) - MEASURED +0.46 %% peak tip "
+             "deflection on an ELFORM 16 cantilever (1.5357 vs 1.5287 mm, nt "
+             "4). CHOOSING 'qeph' CHANGES "
              "RESULTS on every shell deck, which is why it is not the "
              "default. Under-integrated Ishell 1-4 is not offered: it would "
              "break /INISHE initial-stress transfer (npg 4 -> 1).",
@@ -1751,6 +1888,135 @@ def build_parser() -> argparse.ArgumentParser:
              "species, the injector, the vents and the porous surfaces are "
              "identical either way; only the pressure field is uniform.",
     )
+
+    # ── The CardStack-pipeline batch (contacts, damping, mass scaling,
+    #    output; --inter-stmin / --inter-inacti sit beside --inter-gapmin) ──
+    parser.add_argument(
+        "--damping-curve-window",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Convert the LCID curve of *DAMPING_PART_MASS / *DAMPING_GLOBAL "
+             "in TIME: a piecewise-constant curve (a settle window) becomes "
+             "one alpha-only /DAMP per level with its Tstart / Tstop, any "
+             "other shape /DAMP/FUNCT, and on *DAMPING_GLOBAL the curve "
+             "replaces VALDMP, which LS-DYNA bypasses when LCID > 0 (Vol I "
+             "R17 p.15-8). ON by default; --no-damping-curve-window writes "
+             "the old single /DAMP at the curve's first ordinate (VALDMP on "
+             "*DAMPING_GLOBAL) for the whole run.",
+    )
+    parser.add_argument(
+        "--stop-added-mass",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="On an explicit *CONTROL_TIMESTEP DT2MS < 0 deck that gets "
+             "/DT/NODA/CST, write *CONTROL_TERMINATION ENDMAS (a percent) as "
+             "an engine /STOP with Mmax = ENDMAS / 100: the engine stops on "
+             "the added-mass RATIO (M - M0) / M0, the MAS.ERR column "
+             "(ecrit.F:516/593), with MESSAGE 208. A stopped run's listing "
+             "ends USER BREAK, the engine exits 0, and it writes its engine "
+             "restart file although the deck says /RFILE/OFF (measured). An "
+             "ENDMAS < 0 curve, --ams (MAS.ERR stays 0 under /DT/AMS, "
+             "measured) and the routed 2-D deck get a warning and no /STOP. "
+             "OFF by default; without it a stated ENDMAS is named in a "
+             "warning.",
+    )
+    parser.add_argument(
+        "--dt2ms-tssfac-product",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Hold a DT2MS < 0 deck's mass-scaled step at TSSFAC x |DT2MS| "
+             "(the /DT/NODA/CST and /DT/AMS Tmin), the minimum step LS-DYNA "
+             "permits (Vol I R17 p.12-585), instead of |DT2MS|. OFF by "
+             "default. TSSFAC blank or a curve = 0.9; the /DT/AMS Tsca stays "
+             "0.67. Measured on the R14 billet-forge deck: the step then "
+             "equals LS-DYNA's 1.08e-7 (1.2e-7 without it).",
+    )
+    parser.add_argument(
+        "--print-every",
+        type=_print_every_arg,
+        default=None,
+        metavar="N",
+        help="Write the engine /PRINT/-N: a status line every N cycles in "
+             "<stem>_0001.out and on the console, N = 1..9999 (the engine "
+             "reads the cell as I5, freform.F:1563). Default: /PRINT/-IKEDIT "
+             "for a *CONTROL_OUTPUT IKEDIT on a deck without "
+             "*DATABASE_GLSTAT (LS-DYNA ignores IKEDIT when glstat is "
+             "written, Vol I R17 p.12-441), else /PRINT/-1. IKEDIT above 9999 "
+             "is written as 9999; any *DATABASE_GLSTAT_<option> card counts "
+             "as glstat. --print-every 1 keeps /PRINT/-1 on a deck the IKEDIT "
+             "rule moves.",
+    )
+    parser.add_argument(
+        "--tet-isolid1",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /PROP/SOLID Isolid 1 on a section whose elements are all "
+             "4- / 10-node tets (not ALE, not cohesive) instead of Isolid 14. "
+             "The starter resets every tet group to Isolid 1 anyway, for "
+             "every material (sgrtails.F:984-1000); on the way, Isolid 14 on "
+             "a LAW1 section draws WARNING 791, the integration-point "
+             "message (sgrtails.F:695-704). ON by default; --no-tet-isolid1 "
+             "writes Isolid 14.",
+    )
+    parser.add_argument(
+        "--law1-shell-global-n",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /PROP/SHELL N = 0 (global integration) on a section whose "
+             "parts are all LAW1 (*MAT_ELASTIC) with no *INITIAL_STRESS_SHELL, "
+             "instead of max(2, NIP), which the starter switches to N = 0 "
+             "itself with WARNING 1084 (cgrtails.F:780-791). ON by default; "
+             "--no-law1-shell-global-n writes max(2, NIP).",
+    )
+    parser.add_argument(
+        "--s2s-type25",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write an explicit *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE (not "
+             "_ONE_WAY) as a two-surface /INTER/TYPE25 - the SSID surface "
+             "against the MSID surface (/SURF/PART/EXT on a solid side), Istf "
+             "4, Igap 2, Gap_max 0, Inacti 5 - instead of the one-way "
+             "/INTER/TYPE7 (secondary nodes against main segments), so each "
+             "side's nodes are checked against the other side's segments. OFF "
+             "by default; its SST/MST, VISs and friction cells are "
+             "approximations. Refused by name, the /INTER/TYPE7 route kept: "
+             "an implicit deck, a _ONE_WAY or other spelling (the _THERMAL "
+             "ones among them), a *SET_NODE side. MEASURED on a lip coupon (a "
+             "2 mm pusher dropped at 1 m/s "
+             "onto the middle of one 10 mm shell element): the TYPE7 lets it "
+             "through, the TYPE25 stops it 0.178 above the plate mid-plane "
+             "(t/2 0.175) and rebounds it. On twobar (two solid bars with "
+             "*SET_SEGMENT sides, respelled AUTOMATIC) the flag's own TYPE25 "
+             "carries no load - peak internal energy 0.78 against the TYPE7's "
+             "4.46e4 (LS-DYNA ends at 3036) - so it is opt-in.",
+    )
+    parser.add_argument(
+        "--general-shell-edges",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="On an SSID = 0 *CONTACT_AUTOMATIC_GENERAL (an all-parts "
+             "/INTER/TYPE25 self-contact) write Iedge 1, edge-to-edge contact "
+             "of the shell border edges, instead of Iedge 1000 (none). OFF "
+             "by default. Named, not written: a deck with no shell keeps 1000; "
+             "an SSID != 0 or implicit card keeps its /INTER/TYPE7; beams take "
+             "no part in a TYPE25. Starter probe: EDGE FLAG 1, 0 ERROR(S).",
+    )
+    parser.add_argument(
+        "--single-surface-sst-gap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write Gapmin = |SST| on a single-surface *CONTACT_ whose sides "
+             "are all shells (the Igap 0 routes): two shells that each carry "
+             "the contact thickness SST meet at SST/2 + SST/2. ON by default; "
+             "--no-single-surface-sst-gap writes the old (|SST| + |MST|)/2 "
+             "(0.175 for SST 0.35); a mixed shell / solid set is refused by "
+             "name. Routes: the SSID != 0 and the implicit SSID = 0 "
+             "/INTER/TYPE7 and a self-mirrored SOFT -11 / -19 card; MST is "
+             "named as unused; on the SOFT -7 TYPE7 (Igap 2) an SST below the "
+             "shell thickness is warned with its lever, *PART_CONTACT OPTT; "
+             "the airbag and two-surface routes are unchanged. Starter probe: "
+             "MINIMUM GAP 0.35 for SST 0.35 on TYPE7, TYPE11 and TYPE19.",
+    )
     return parser
 
 
@@ -1793,13 +2059,35 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 1
 
+    # --inter-stmin ID=VAL / --inter-inacti ID=6, the same shape and the
+    # same exit-1-before-converting rule (ConvertOptions refuses the same
+    # values for a direct convert() caller).
+    inter_stmin, err = _id_value_pairs(
+        "--inter-stmin", args.inter_stmin, float,
+        lambda v: (None if v >= 0.0 and v != float("inf")
+                   else "the Stmin cell is a stiffness floor, VAL must be "
+                        ">= 0 and finite"))
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    inter_inacti, err = _id_value_pairs(
+        "--inter-inacti", args.inter_inacti, int,
+        lambda v: (None if v == 6 else
+                   "only Inacti 6 is accepted (it replaces the 5 k2rad "
+                   "writes for the deck's IGNORE)"),
+        form="ID=6")
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+
     from . import convert
 
     print(f"Converting: {input_path}")
     result = convert(
         input_path=str(input_path),
         output_stem=args.output_stem,
-        units=tuple(args.units),
+        # None = from the deck (*CONTROL_UNITS, else Mg mm s)
+        units=tuple(args.units) if args.units is not None else None,
         ground_springs=args.ground_springs,
         ground_spring_k=args.ground_spring_k,
         inter_gapmin=inter_gapmin,
@@ -1889,6 +2177,17 @@ def main(argv=None) -> int:
         ale_multimat_law51=args.ale_multimat_law51,
         eroding_surf_ext=args.eroding_surf_ext,
         airbag_particle_uniform=args.airbag_particle_uniform,
+        damping_curve_window=args.damping_curve_window,
+        stop_added_mass=args.stop_added_mass,
+        dt2ms_tssfac_product=args.dt2ms_tssfac_product,
+        print_every=args.print_every,
+        tet_isolid1=args.tet_isolid1,
+        law1_shell_global_n=args.law1_shell_global_n,
+        inter_stmin=inter_stmin,
+        inter_inacti=inter_inacti,
+        s2s_type25=args.s2s_type25,
+        general_shell_edges=args.general_shell_edges,
+        single_surface_sst_gap=args.single_surface_sst_gap,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

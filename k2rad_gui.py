@@ -18,7 +18,8 @@ which is the GUI equivalent of
     python k2rad.py model.k --ground-springs --auto-gapmin --gapmin-factor 0.8 --soften-stfac 0.3
 
 Tick "Auto Gapmin from mesh clearance" to set each contact's Gapmin from the
-measured minimum node distance between its two parts (= factor × clearance)
+measured minimum node-to-segment clearance between its two parts (= factor ×
+clearance)
 instead of hand-tuning it per mesh — the fix for a deck whose contacts were
 tuned for one mesh (e.g. TET4) but re-run on a finer one (e.g. TET10). It is the
 GUI equivalent of ``--auto-gapmin --gapmin-factor 0.8``.
@@ -80,6 +81,38 @@ def parse_inter_gapmin(text: str) -> dict:
         except ValueError:
             raise ValueError(
                 f"Gapmin override ID and VAL must be numeric, got {tok!r}.")
+    return out
+
+
+def _parse_id_pairs(text: str, what: str, value_type, check) -> dict:
+    """Parse a free-text "ID=VAL [ID=VAL ...]" box the way
+    :func:`parse_inter_gapmin` does, with *check(value)* returning an error
+    text or None. Raises ValueError naming *what*; one interface given two
+    different values is refused, as the CLI refuses it."""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    out: dict = {}
+    for tok in re.split(r"[,;\s]+", text):
+        if not tok:
+            continue
+        if "=" not in tok:
+            raise ValueError(f"{what} must be ID=VAL, got {tok!r}.")
+        sid, _, sval = tok.partition("=")
+        try:
+            iid = int(sid.strip())
+            val = value_type(sval.strip())
+        except ValueError:
+            raise ValueError(
+                f"{what} ID and VAL must be numeric, got {tok!r}.")
+        why = check(val)
+        if why:
+            raise ValueError(f"{what} {tok!r}: {why}")
+        if iid in out and out[iid] != val:
+            raise ValueError(
+                f"{what}: interface {iid} given twice, with {out[iid]!r} "
+                f"and {val!r} - give each interface one value.")
+        out[iid] = val
     return out
 
 
@@ -169,12 +202,25 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          he_bunreacted: str = "",
                          ale_multimat_law51: bool = False,
                          eroding_surf_ext: bool = False,
-                         airbag_particle_uniform: bool = False) -> dict:
+                         airbag_particle_uniform: bool = False,
+                         damping_curve_window: bool = True,
+                         stop_added_mass: bool = False,
+                         dt2ms_tssfac_product: bool = False,
+                         print_every_text: str = "",
+                         tet_isolid1: bool = True,
+                         law1_shell_global_n: bool = True,
+                         inter_stmin_text: str = "",
+                         inter_inacti_text: str = "",
+                         s2s_type25: bool = False,
+                         general_shell_edges: bool = False,
+                         single_surface_sst_gap: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
     units, and all stabilization/mesh options at their defaults → a byte-identical
-    standard conversion.
+    standard conversion. Three blank unit boxes pass no units at all, so
+    convert() takes them from the deck (*CONTROL_UNITS, else Mg mm s) as
+    the CLI does without --units.
     """
     input_path = (input_path or "").strip()
     if not input_path:
@@ -189,7 +235,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
         kwargs["output_stem"] = out
 
     defaults = ("Mg", "mm", "s")
-    kwargs["units"] = tuple((str(units[i]).strip() or defaults[i]) for i in range(3))
+    if any(str(units[i]).strip() for i in range(3)):
+        # a partly filled row falls back per slot, as it always has
+        kwargs["units"] = tuple((str(units[i]).strip() or defaults[i])
+                                for i in range(3))
+    # else: no "units" key - convert() resolves them from the deck
 
     kwargs["tet10_to_tet4"] = bool(tet10_to_tet4)
 
@@ -484,6 +534,36 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                 "for LS-DYNA's p = F*p_eos.")
         kwargs["he_bunreacted"] = hb
 
+    # The CardStack-pipeline levers (the CLI flags of the same names).
+    kwargs["damping_curve_window"] = bool(damping_curve_window)
+    kwargs["stop_added_mass"] = bool(stop_added_mass)
+    kwargs["dt2ms_tssfac_product"] = bool(dt2ms_tssfac_product)
+    kwargs["tet_isolid1"] = bool(tet_isolid1)
+    kwargs["law1_shell_global_n"] = bool(law1_shell_global_n)
+    kwargs["s2s_type25"] = bool(s2s_type25)
+    kwargs["general_shell_edges"] = bool(general_shell_edges)
+    kwargs["single_surface_sst_gap"] = bool(single_surface_sst_gap)
+    pe = (print_every_text or "").strip()
+    if pe:                                    # blank -> the writer's rule
+        try:
+            pv = int(pe)
+        except ValueError:
+            raise ValueError(
+                f"Print every N cycles must be a whole number, got {pe!r}.")
+        if not 1 <= pv <= 9999:
+            raise ValueError(
+                f"Print every N cycles must be 1..9999 (got {pv}): the "
+                "engine reads the /PRINT/-N cell as I5.")
+        kwargs["print_every"] = pv
+    kwargs["inter_stmin"] = _parse_id_pairs(
+        inter_stmin_text, "Stmin override", float,
+        lambda v: (None if v >= 0.0 and v != float("inf")
+                   else "the Stmin cell is a stiffness floor, VAL must be "
+                        ">= 0 and finite"))
+    kwargs["inter_inacti"] = _parse_id_pairs(
+        inter_inacti_text, "Inacti override", int,
+        lambda v: None if v == 6 else "only Inacti 6 is accepted")
+
     return kwargs
 
 
@@ -508,9 +588,11 @@ class ConverterGUI:
         # Tk variables
         self.in_path = tk.StringVar()
         self.out_stem = tk.StringVar()
-        self.u_mass = tk.StringVar(value="Mg")
-        self.u_len = tk.StringVar(value="mm")
-        self.u_time = tk.StringVar(value="s")
+        # blank = from the deck (*CONTROL_UNITS, else Mg mm s), as the CLI
+        # without --units
+        self.u_mass = tk.StringVar(value="")
+        self.u_len = tk.StringVar(value="")
+        self.u_time = tk.StringVar(value="")
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="0")
         self.qstat_dtscal = tk.StringVar(value="")
@@ -583,6 +665,16 @@ class ConverterGUI:
         self.ale_multimat_law51 = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
         self.airbag_particle_uniform = tk.BooleanVar(value=False)
+        # The CardStack-pipeline levers
+        self.damping_curve_window = tk.BooleanVar(value=True)
+        self.stop_added_mass = tk.BooleanVar(value=False)
+        self.dt2ms_tssfac_product = tk.BooleanVar(value=False)
+        self.print_every = tk.StringVar(value="")
+        self.tet_isolid1 = tk.BooleanVar(value=True)
+        self.law1_shell_global_n = tk.BooleanVar(value=True)
+        self.s2s_type25 = tk.BooleanVar(value=False)
+        self.general_shell_edges = tk.BooleanVar(value=False)
+        self.single_surface_sst_gap = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -626,6 +718,9 @@ class ConverterGUI:
         ttk.Label(units, text="Units (header labels only — values are never rescaled):").pack(side="left")
         for var, w in ((self.u_mass, 6), (self.u_len, 6), (self.u_time, 6)):
             ttk.Entry(units, textvariable=var, width=w).pack(side="left", padx=3)
+        ttk.Label(units, text="(mass length time; all blank = the deck's "
+                              "*CONTROL_UNITS, else Mg mm s)",
+                  foreground="gray").pack(side="left", padx=3)
 
         ttk.Checkbutton(
             io, text="Downgrade TET10 → TET4 (linear tets — stiffer / less accurate; "
@@ -1267,6 +1362,55 @@ class ConverterGUI:
             variable=self.ale_flow_tracking).grid(
                 row=78, column=0, columnspan=3, sticky="w", **pad)
 
+        # ── The CardStack-pipeline levers (rows 79-87) ──────────────────────
+        ttk.Checkbutton(
+            io, text="Damping LCID curves converted in time (a box curve -> "
+                     "/DAMP Tstart / Tstop, else /DAMP/FUNCT; GLOBAL: the "
+                     "curve replaces VALDMP) - ON",
+            variable=self.damping_curve_window).grid(
+                row=79, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: DT2MS < 0 + ENDMAS -> engine /STOP Mmax = "
+                     "ENDMAS / 100 (stop on the added-mass ratio) - OFF",
+            variable=self.stop_added_mass).grid(
+                row=80, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: mass-scaled Tmin = TSSFAC x |DT2MS| (LS-DYNA's "
+                     "minimum step) instead of |DT2MS| - OFF",
+            variable=self.dt2ms_tssfac_product).grid(
+                row=81, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="All-tet sections -> /PROP/SOLID Isolid 1 (the "
+                     "starter's own tet reset, no WARNING 791 on LAW1) - ON",
+            variable=self.tet_isolid1).grid(
+                row=82, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="All-LAW1 shell sections -> /PROP/SHELL N = 0 (no "
+                     "WARNING 1084 reset) - ON",
+            variable=self.law1_shell_global_n).grid(
+                row=83, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: explicit AUTOMATIC_SURFACE_TO_SURFACE -> "
+                     "two-surface /INTER/TYPE25 instead of one-way TYPE7 - OFF",
+            variable=self.s2s_type25).grid(
+                row=84, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: SSID = 0 AUTOMATIC_GENERAL TYPE25 with Iedge 1 "
+                     "(shell border edges) - OFF",
+            variable=self.general_shell_edges).grid(
+                row=85, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Single-surface shell contact: Gapmin = |SST| (not "
+                     "SST/2) - ON",
+            variable=self.single_surface_sst_gap).grid(
+                row=86, column=0, columnspan=3, sticky="w", **pad)
+        pf = ttk.Frame(io)
+        pf.grid(row=87, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(pf, text="Engine /PRINT/-N every N cycles (1-9999, blank = "
+                           "IKEDIT without GLSTAT, else 1):").pack(side="left")
+        ttk.Entry(pf, textvariable=self.print_every, width=8).pack(
+            side="left", padx=3)
+
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
         # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
@@ -1290,6 +1434,14 @@ class ConverterGUI:
                      "CHANGES RESULTS on every shell deck.",
             value="qeph", variable=self.shell_formulation,
         ).grid(row=1, column=0, sticky="w")
+        ttk.Label(
+            sf, wraplength=760, foreground="gray",
+            text="Per ELFORM: ELFORM 16 (fully integrated, 2x2 in-plane "
+                 "points) -> Ishell 12 by default, the same integration "
+                 "class; QEPH turns it into Ishell 24, the dyna2rad parity "
+                 "choice (dyna2rad writes 24), measured +0.46 % peak tip "
+                 "deflection on an ELFORM 16 cantilever.",
+        ).grid(row=2, column=0, sticky="w")
 
         # ── Time-step deletion floor (issue #78) ────────────────────────────
         # An entry box, not a checkbox: there is no safe default value to tick
@@ -1358,7 +1510,7 @@ class ConverterGUI:
         ag = ttk.Frame(fc)
         ag.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
         self._auto_gapmin_chk = ttk.Checkbutton(
-            ag, text="Auto Gapmin from mesh clearance (min node distance between each contact's two parts)",
+            ag, text="Auto Gapmin from mesh clearance (min node-to-segment clearance between each contact's two parts)",
             variable=self.auto_gapmin, command=self._sync_gapmin_factor)
         self._auto_gapmin_chk.pack(side="left")
         ttk.Label(ag, text="   factor:").pack(side="left")
@@ -1388,8 +1540,9 @@ class ConverterGUI:
 
         ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default; "
-                           ".k-native per contact: Card-3 SFS (overridden by this field)",
+        ttk.Label(fc, text="penalty stiffness scale on every /INTER/TYPE7 (the SSID != 0 single-surface route "
+                           "included), TYPE25 (not a tiebreak's post-rupture companion) and SOFT TYPE11 / 19, "
+                           "e.g. 0.3 — blank = the per-contact Card-3 SFS mapping (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
         ttk.Label(fc, text="Tie STFAC:").grid(row=5, column=0, sticky="w", **pad)
@@ -1582,6 +1735,15 @@ class ConverterGUI:
                 ale_multimat_law51=self.ale_multimat_law51.get(),
                 eroding_surf_ext=self.eroding_surf_ext.get(),
                 airbag_particle_uniform=self.airbag_particle_uniform.get(),
+                damping_curve_window=self.damping_curve_window.get(),
+                stop_added_mass=self.stop_added_mass.get(),
+                dt2ms_tssfac_product=self.dt2ms_tssfac_product.get(),
+                print_every_text=self.print_every.get(),
+                tet_isolid1=self.tet_isolid1.get(),
+                law1_shell_global_n=self.law1_shell_global_n.get(),
+                s2s_type25=self.s2s_type25.get(),
+                general_shell_edges=self.general_shell_edges.get(),
+                single_surface_sst_gap=self.single_surface_sst_gap.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -1892,6 +2054,38 @@ class ConverterGUI:
             bits.append("*AIRBAG_PARTICLE as uniform-pressure /MONVOL/AIRBAG1")
         if kwargs.get("he_bunreacted") is not None:
             bits.append(f"Bunreacted={kwargs['he_bunreacted']:g}")
+        # The CardStack-pipeline levers: a default-ON one is named by its
+        # --no- spelling when switched off, an opt-in by its own when on.
+        if not kwargs.get("damping_curve_window", True):
+            bits.append("damping curves kept at their first ordinate "
+                        "(--no-damping-curve-window)")
+        if kwargs.get("stop_added_mass"):
+            bits.append("ENDMAS -> /STOP Mmax (--stop-added-mass)")
+        if kwargs.get("dt2ms_tssfac_product"):
+            bits.append("mass-scaled Tmin = TSSFAC x |DT2MS| "
+                        "(--dt2ms-tssfac-product)")
+        if kwargs.get("print_every") is not None:
+            bits.append(f"/PRINT/-{kwargs['print_every']} "
+                        f"(--print-every {kwargs['print_every']})")
+        if not kwargs.get("tet_isolid1", True):
+            bits.append("all-tet sections keep Isolid 14 (--no-tet-isolid1)")
+        if not kwargs.get("law1_shell_global_n", True):
+            bits.append("LAW1 shells keep N = max(2, NIP) "
+                        "(--no-law1-shell-global-n)")
+        if kwargs.get("inter_stmin"):
+            bits.append("--inter-stmin " + " ".join(
+                f"{i}={v:g}" for i, v in kwargs["inter_stmin"].items()))
+        if kwargs.get("inter_inacti"):
+            bits.append("--inter-inacti " + " ".join(
+                f"{i}={v}" for i, v in kwargs["inter_inacti"].items()))
+        if kwargs.get("s2s_type25"):
+            bits.append("AUTOMATIC_S2S as two-surface /INTER/TYPE25 "
+                        "(--s2s-type25)")
+        if kwargs.get("general_shell_edges"):
+            bits.append("GENERAL SSID 0 TYPE25 Iedge 1 (--general-shell-edges)")
+        if not kwargs.get("single_surface_sst_gap", True):
+            bits.append("single-surface SST gap (|SST|+|MST|)/2 "
+                        "(--no-single-surface-sst-gap)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ from .state import (
     ControlHourglass, HourglassDef, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlParallel, ControlShell, ControlSolid,
     ControlImplicitGeneral, ControlImplicitSolution, ControlImplicitEigenvalue,
-    ControlTermination, ControlTimestep,
+    ControlTermination, ControlTimestep, ControlUnits,
     DampingGlobal, DampingPartStiffness, DampingPartMass,
     DampingFrequencyRange, DampingRelative,
     DbD3Plot, DbHistory, DbExtentBinary, DbNodalForceGroup,
@@ -1954,6 +1954,13 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
         sec = SectionShell(secid, title, elform, nip, t1)
         sec.card2 = (to_float(f2[0]) if f2 else 0.0, t_raw[0], t_raw[1],
                      t_raw[2])
+        # Card 1 field 3 (cols 21-30): SHRF, the transverse shear correction
+        # factor, as STATED - a blank cell is 0.0 = "not given" (LS-DYNA's
+        # own default is 1.0), the SectionTshell / *PART_COMPOSITE rule.
+        # Stored for the writer's notes; /PROP/SHELL Ashear is not written
+        # from it (ROADMAP round 10).
+        sec.shrf = (to_float(f1[2]) if len(f1) > 2 and f1[2].strip()
+                    else 0.0)
         # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
         # node set. Only writer/seatbelts.py reads it, to report it as dropped.
         sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
@@ -6511,8 +6518,41 @@ def _read_contact_soft(raw: List[str], offset: int, extra: int = 0) -> int:
     return to_int(f[0]) if f and f[0].strip() else 0
 
 
+def _read_contact_optional(raw: List[str], offset: int,
+                           extra: int = 0) -> Dict[str, Any]:
+    """The optional-card fields the CardStack batch reads (K-09 / K-10 /
+    K-11 / K-16), by position like :func:`_read_contact_ignore` - Cards A,
+    B, C, D, E at ``offset + 3 .. 7 + extra`` ("If using Optional Card E,
+    then you must define Optional Cards A, B, C, and D", Vol I R17
+    p.11-114; a blank line holds a card's place, ``parser.parse_k_file``
+    keeps it as "")::
+
+        A  SOFT SOFSCL LCIDAB MAXPAR SBOPT DEPTH BSORT FRCFRQ   (p.11-89)
+        C  IGAP IGNORE DPRFAC/MPAR1 DTSTIF/MPAR2 ...            (p.11-105)
+        D  Q2TRI DTPCHK SFNBR FNLSCL DNLSCL TCSO TIEDID SHLEDG  (p.11-110)
+        E  SHAREC CPARM8 IPBACK SRNDE FRICSF ICOR FTORQ REGION  (p.11-114)
+
+    A blank or absent cell reads 0 (LS-DYNA's SOFSCL 0.1, SBOPT 2 and
+    DEPTH 2 / 3 are the writer's to apply). Card C field 4 is MPAR2 on a
+    MORTAR spelling; the caller decides what it means."""
+    def _cells(k: int) -> List[str]:
+        return _card(raw, offset + k + extra, fixed=True, n=8, w=10)
+
+    def _i(f: List[str], k: int) -> int:
+        return to_int(f[k]) if len(f) > k and f[k].strip() else 0
+
+    def _x(f: List[str], k: int) -> float:
+        return to_float(f[k]) if len(f) > k and f[k].strip() else 0.0
+
+    a, c, d, e = _cells(3), _cells(5), _cells(6), _cells(7)
+    return {"soft": _i(a, 0), "sofscl": _x(a, 1), "sbopt": _i(a, 4),
+            "depth": _i(a, 5), "dtstif": _x(c, 3), "shledg": _i(d, 7),
+            "srnde": _i(e, 3), "icor": _i(e, 5)}
+
+
 def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
-                      f1: List[str]) -> None:
+                      f1: List[str], *,
+                      card2_present: Optional[bool] = None) -> None:
     """Warn (loudly) when a contact Card 1 carries SBOXID/MBOXID (fields 5/6).
 
     dyna2rad only maps box-restricted contact scoping for
@@ -6522,6 +6562,10 @@ def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
     walls), which does not map cleanly onto a contact's slave/master *surface*,
     so the box is dropped and the contact uses the full surface — flagged here
     so the user can restrict the *SET manually if the scoping is load-bearing.
+
+    ``card2_present`` (keyword-only, given by the PENALTY-contact readers
+    only - not the tie / spot-weld ones, whose card 2 friction carries no
+    load) also runs :func:`_warn_card1_flag_cells` (CardStack K-07).
     """
     sboxid = to_int(f1[4]) if len(f1) > 4 else 0
     mboxid = to_int(f1[5]) if len(f1) > 5 else 0
@@ -6533,6 +6577,67 @@ def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
             "scoping for *CONTACT_FORCE_TRANSDUCER_PENALTY, and a box does not "
             "map cleanly onto a contact surface here; restrict the referenced "
             "*SET manually if the box scoping matters.")
+    if card2_present is not None:
+        _warn_card1_flag_cells(state, keyword, inter_id, f1, card2_present)
+
+
+#: The *CONTACT spellings whose card-1 field 8 is not SBPR: the airbag card's
+#: IFLAG (``contact_airbag_single_surface.cfg:556-563``, see
+#: :func:`handle_contact_airbag_single_surface`) - an integer flag all the
+#: same, so only the integer test applies to it.
+_CARD1_FIELD8_IFLAG = frozenset({"CONTACT_AIRBAG_SINGLE_SURFACE",
+                                 "CONTACT_AIRBAG_SINGLE_SURFACE_MPP"})
+
+
+def _warn_card1_flag_cells(state: ConversionState, keyword: str,
+                           inter_id: int, f1: List[str],
+                           card2_present: bool) -> None:
+    """CardStack K-07: name friction typed into card 1's SAPR / SBPR.
+
+    Card 1 is ``SURFA SURFB SURFATYP SURFBTYP SABOXID SBBOXID SAPR SBPR``
+    and SAPR / SBPR are INTEGER output flags - 0, or 1 / 2 to write that
+    side's forces to *DATABASE_NCFORC / *DATABASE_BINARY_INTFOR (Vol I R17
+    p.11-24 card, p.11-26 fields). The CardStack agents' runs 03-14 typed FS
+    FD = 0.22 0.20 there and wrote no card 2, so the contact converted with
+    Fric 0 and nothing said so (wf1 D5-10, F_agent_card1). A non-integer
+    or out-of-range value is named; without a card 2 the warning says the
+    interface is frictionless and names the two cells that set friction and
+    stiffness. The airbag card's field 8 is IFLAG (an integer flag, see
+    :data:`_CARD1_FIELD8_IFLAG`): there only the integer test applies.
+    """
+    slot8 = "IFLAG" if keyword in _CARD1_FIELD8_IFLAG else "SBPR"
+    bad: List[str] = []
+    for name, i in (("SAPR", 6), (slot8, 7)):
+        cell = f1[i].strip() if len(f1) > i else ""
+        if not cell:
+            continue
+        try:
+            v = float(cell)
+        except ValueError:
+            v = to_float(cell, float("nan"))
+        ok = _math.isfinite(v) and float(v).is_integer() and (
+            name == "IFLAG" or int(v) in (0, 1, 2))
+        if not ok:
+            bad.append(f"{name} = {v:g}" if _math.isfinite(v)
+                       else f"{name} = {cell!r}")
+    if not bad:
+        return
+    text = (f"*{keyword} {inter_id}: card 1 holds {', '.join(bad)} in field "
+            "7 / 8, but those cells are integer flags: SAPR / SBPR are output "
+            "flags (0, or 1 / 2 to write the side's forces to "
+            "*DATABASE_NCFORC / *DATABASE_BINARY_INTFOR; Vol I R17 p.11-24 "
+            "card, p.11-26 fields)"
+            + (" and the airbag card's field 8 is its IFLAG" if slot8 == "IFLAG"
+               else "")
+            + ". No friction is read there - by LS-DYNA or by k2rad.")
+    if card2_present:
+        text += (" The friction written is Card 2's (FS -> Fric).")
+    else:
+        text += (" This card has no Card 2, so Fric = 0 (frictionless) on this "
+                 "interface. Friction is Card 2 FS -> Fric (FD the dynamic "
+                 "coefficient, FS FD DC VC VDC PENCHK BT DT); the penalty "
+                 "stiffness scale is Card 3 SFS -> Stfac.")
+    state.warn(text)
 
 
 def _read_contact_thermal(raw: List[str], offset: int) -> ContactThermal:
@@ -6626,6 +6731,36 @@ _CONTACT_SPELLING_NOTES = {
         "default-ON warning names the derived value on every "
         "carrier either way. Set one interface with --inter-gapmin "
         "<id>=VAL."),
+    # CardStack K-08: the AUTOMATIC two-way pair loses the same thing as its
+    # non-AUTOMATIC twin, stated in its own words and with the levers that
+    # DO check both sides (log only). Kept apart from "twoway" - whose round-3
+    # / round-4 records stay as they are - and free of the opt-in flags'
+    # names that a plain deck must not see (tests/test_converter.py
+    # ForceControlStabilizationTests, tests/test_eroding_contacts.py
+    # ByteIdentityTests).
+    "twoway_auto": (
+        "LS-DYNA's two-way contact checks BOTH surfaces for penetration (Vol "
+        "I R17 p.11-8 item 1b), but the /INTER/TYPE7 k2rad writes for it by "
+        "default is one-way: "
+        "the secondary (SSID) nodes against the main (MSID) segments only. So "
+        "a main-side corner or edge - a lip, a pusher face - passes through a "
+        "secondary face between that face's nodes, and where the MSID side is "
+        "the finer or the softer mesh its nodes pass through the SSID "
+        "surface. Three levers check both sides: --s2s-type25 (this explicit, "
+        "non-_ONE_WAY spelling as a two-surface /INTER/TYPE25, opt-in; "
+        "MEASURED on a lip coupon - a 2 mm pusher dropped at 1 m/s onto the "
+        "middle of one 10 mm shell element - the TYPE7 lets it through, the "
+        "TYPE25 stops it 0.178 above the plate's mid-plane, t/2 = 0.175, and "
+        "rebounds it), a second contact "
+        "with SSID and MSID swapped beside this one, or "
+        "*CONTACT_ERODING_SURFACE_TO_SURFACE, which k2rad writes as a "
+        "two-surface /INTER/TYPE25 too, with Istf 2 and its solid sides as "
+        "/SURF/PART/ALL (where --s2s-type25 writes Istf 4 and "
+        "/SURF/PART/EXT; see that keyword's own note for the external-skin "
+        "choice). Swapping the "
+        "two sides INSTEAD is not one of them for a deformable pair (twobar: "
+        "+188 % swapped against +1151 % as shipped, the non-AUTOMATIC "
+        "spelling's record)."),
     "forming": (
         "the FORMING family IGNORES the SURFB (tooling) contact thickness, "
         "and a NEGATIVE SBST additionally offsets SURFB by |SBST|/2 opposite "
@@ -6636,15 +6771,33 @@ _CONTACT_SPELLING_NOTES = {
         "offset is NOT applied: the blank engages the tool half a tool "
         "thickness too early. Set the engagement gap explicitly with "
         "--inter-gapmin <id>=VAL if the drawn thickness matters."),
+    # CardStack K-14 (text only): IGNORE 2's MPAR1 is a pressure, not a
+    # closure over time - that is IGNORE 3 / 4 - and the route is named for
+    # the SSID = 0 explicit single-surface card too (bound to the
+    # AUTOMATIC_SINGLE_SURFACE_MORTAR row below the table).
     "mortar": (
         "MORTAR is a segment-to-segment contact with a consistent nodal force "
         "assembly and an automatic eroding treatment (Vol I R17 p.11-131 "
         "General Remark 14). OpenRadioss has no mortar interface; the contact "
-        "converts to the node-to-segment /INTER/TYPE7. Expect a coarser "
-        "contact-pressure distribution and, on an implicit deck, worse Newton "
-        "behaviour than LS-DYNA's. The MORTAR family's IGNORE default of 2 and "
-        "its implicit MPAR1 prestress/ramp variants (p.11-133) have no "
-        "counterpart either."),
+        "converts to the node-to-segment penalty /INTER/TYPE7 (the all-parts "
+        "/INTER/TYPE25 for an SSID = 0 single-surface card on an explicit "
+        "deck). Expect a coarser contact-pressure distribution and, on an "
+        "implicit deck, worse Newton behaviour than LS-DYNA's. The MORTAR "
+        "family's IGNORE default of 2 fixes the contact surface at its "
+        "initial place, so an initial penetration carries zero contact "
+        "stress, and its MPAR1 is an initial contact PRESSURE imposed on "
+        "such an interface (a prestress, not a removal over time); IGNORE 3 / "
+        "4 close the initial penetrations linearly between t = 0 and MPAR1 "
+        "(4 with the penetration depth MPAR2) (Vol I R17 p.11-133/134 General "
+        "Remark 14). None of them has an OpenRadioss counterpart here: k2rad "
+        "writes Inacti 5, which takes each initial overlap as the zero-force "
+        "state - an overlap that only shrinks, each cycle by 5 % of its "
+        "excess over a smaller current penetration (i7for3.F:725-726), and "
+        "to 0 once the pair leaves the gap (i7dst3.F:428-433) - so no "
+        "prestress and no closure over time (Inacti 0 for the implicit "
+        "pre-engagement bootstrap). On a Mortar "
+        "card LS-DYNA reads only BSORT of Card A and nothing of Cards D-G "
+        "(Table 11-1, p.11-135)."),
     "interference": (
         "an INTERFERENCE contact must RESOLVE its initial overlap into "
         "prestress (Vol I R17 p.11-66: 'the contact forces to develop to "
@@ -6713,7 +6866,8 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card2: fs fd dc vc vdc penchk bt dt  (immediately after Card1)
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -6723,16 +6877,21 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
     # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sfs (slave penalty stiffness
     # scale) → /INTER/TYPE7 Stfac; sst/mst (optional contact thickness per side,
-    # SAST/SBST in newer manuals) → /INTER/TYPE7 Gapmin.
+    # SAST/SBST in newer manuals) → /INTER/TYPE7 Gapmin; sfst read for the
+    # SSID = 0 TYPE25 route's gap-input warning only (CardStack K-13).
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
+    sfst = to_float(f4[4]) if len(f4) > 4 else 0.0
     ignore = _read_contact_ignore(raw, offset, extra)
+    # optional Cards A / C / D / E (CardStack K-09 / K-11 / K-16): named or
+    # mapped by the writer route, never by position here
+    opt = _read_contact_optional(raw, offset, extra)
     state.contacts_single.append(
         ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore,
                           vdc=vdc, sst=sst, mst=mst, sfs=sfs,
-                          keyword=block.keyword)
+                          keyword=block.keyword, sfst=sfst, **opt)
     )
 
 
@@ -6748,8 +6907,10 @@ def handle_contact_automatic_general(block: Block, state: ConversionState,
       * SOFT == -11 → /INTER/TYPE11 (edge-to-edge / line self-contact)
       * SOFT == -19 → /INTER/TYPE19 (combined surface + edge self-contact)
       * any other value (0/1/2/blank, or Card A absent) → the ordinary
-        single-surface path (unchanged: /INTER/TYPE25 explicit, /INTER/TYPE7
-        implicit). These -7/-11/-19 values are a dyna2rad-only sentinel
+        single-surface path, unchanged: SSID = 0 → the all-parts
+        /INTER/TYPE25 on an explicit deck (/INTER/TYPE7 node→surface on an
+        implicit one); SSID != 0 → the /INTER/TYPE7 self-contact of that set
+        on both. These -7/-11/-19 values are a dyna2rad-only sentinel
         convention (nothing in LS-DYNA writes them) — the user hand-enters SOFT
         to request the edge/line interface, exactly as dyna2rad expects.
 
@@ -6780,7 +6941,8 @@ def handle_contact_automatic_general(block: Block, state: ConversionState,
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card2: fs fd dc vc vdc penchk bt dt
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -6835,7 +6997,8 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card2: fs fd dc vc vdc penchk bt dt
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -6844,13 +7007,18 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
     vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
     # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sfs (slave penalty stiffness
-    # scale) → /INTER/TYPE7 Stfac; sst/mst → /INTER/TYPE7 Gapmin.
+    # scale) → /INTER/TYPE7 Stfac; sst/mst → /INTER/TYPE7 Gapmin; sfst /
+    # sfmt read for --auto-gapmin's offset term only (CardStack K-04).
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
+    sfst = to_float(f4[4]) if len(f4) > 4 else 0.0
+    sfmt = to_float(f4[5]) if len(f4) > 5 else 0.0
     ignore = _read_contact_ignore(raw, offset, extra)
     thkopt, shlthk_c = _read_contact_thkopt(raw, offset, extra)
+    # optional Cards A / C / D / E (CardStack K-09 / K-11 / K-16)
+    opt = _read_contact_optional(raw, offset, extra)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs,
@@ -6858,7 +7026,8 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
                              thermal=(_read_contact_thermal(raw, offset)
                                       if thermal else None),
                              interference=interference,
-                             thkopt=thkopt, shlthk_c=shlthk_c)
+                             thkopt=thkopt, shlthk_c=shlthk_c,
+                             sfst=sfst, sfmt=sfmt, **opt)
     )
 
 
@@ -6895,7 +7064,8 @@ def handle_contact_single_edge(block: Block, state: ConversionState,
     msid = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card2: fs fd dc vc vdc penchk bt dt
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f2[0]) if f2 else 0.0
@@ -7100,7 +7270,8 @@ def handle_contact_airbag_single_surface(block: Block,
         inter_id = state.next_id()
     ssid = to_int(f1[0]) if f1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card2: fs fd dc vc vdc penchk bt dt
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -7650,7 +7821,8 @@ def handle_contact_type25(block: Block, state: ConversionState) -> None:
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
-    _warn_contact_box(state, block.keyword, inter_id, f1)
+    _warn_contact_box(state, block.keyword, inter_id, f1,
+                      card2_present=len(raw) > offset + 1)
     # Card 2: fs fd dc vc vdc penchk bt dt
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs  = to_float(f2[0]) if f2 else 0.0
@@ -7700,12 +7872,18 @@ def handle_contact_type25(block: Block, state: ConversionState) -> None:
                                mst=mst, sfs=sfs))
         return
 
+    # optional Cards A / D / E (CardStack K-10 DEPTH / SBOPT gate of Iedge
+    # 22, K-16 SHLEDG / SRNDE, K-11 ICOR) - the same positions, past Card 4
+    opt = _read_contact_optional(raw, offset, extra)
     state.contacts_type25.append(
         ContactType25(inter_id, title, ssid, sstyp, msid, mstyp, variant,
                       eroding=eroding, fs=fs, fd=fd, dc=dc, bt=bt, dt=dt,
                       vdc=vdc, sfs=sfs, sfm=sfm, sst=sst, mst=mst, fsf=fsf,
                       isym=isym, erosop=erosop, iadj=iadj, soft=soft,
-                      ignore=ignore, keyword=block.keyword))
+                      ignore=ignore, keyword=block.keyword,
+                      sbopt=opt["sbopt"], depth=opt["depth"],
+                      shledg=opt["shledg"], srnde=opt["srnde"],
+                      icor=opt["icor"]))
 
 
 def handle_define_friction(block: Block, state: ConversionState) -> None:
@@ -8351,11 +8529,20 @@ def handle_control_implicit_solution(block: Block, state: ConversionState) -> No
 
 
 def handle_control_termination(block: Block, state: ConversionState) -> None:
+    """*CONTROL_TERMINATION card 1: ENDTIM ENDCYC DTMIN ENDENG ENDMAS NOSOL
+    (Vol I R17 p.12-558). ENDCYC..ENDMAS used to be sliced into ``f`` and
+    dropped; they are stored as STATED (blank = 0) for their writers."""
     raw = block.raw
     if not raw:
         return
     f = _card(raw, 0, fixed=True, n=6, w=10)
-    state.ctrl_termination = ControlTermination(to_float(f[0]))
+    state.ctrl_termination = ControlTermination(
+        to_float(f[0]),
+        endcyc=to_int(f[1]) if len(f) > 1 else 0,
+        dtmin=to_float(f[2]) if len(f) > 2 else 0.0,
+        endeng=to_float(f[3]) if len(f) > 3 else 0.0,
+        endmas=to_float(f[4]) if len(f) > 4 else 0.0,
+    )
 
 
 def handle_control_timestep(block: Block, state: ConversionState) -> None:
@@ -8602,7 +8789,132 @@ def handle_control_output(block: Block, state: ConversionState) -> None:
     f = _card(raw, 0, fixed=True, n=8, w=10)
     npopt  = to_int(f[0]) if f else 0
     neecho = to_int(f[1]) if len(f) > 1 else 0
-    state.ctrl_output = ControlOutput(npopt, neecho)
+    # Card 1 field 7: NPOPT NEECHO NREFUP IACCOP OPIFS IPNINT IKEDIT IFLUSH
+    # (Vol I R17 p.12-439); stored as STATED (blank = 0, LS-DYNA's own
+    # default being 100).
+    ikedit = to_int(f[6]) if len(f) > 6 else 0
+    state.ctrl_output = ControlOutput(npopt, neecho, ikedit)
+
+
+# ── *CONTROL_UNITS → the /BEGIN unit labels ────────────────────────────────
+#
+# Card-1 names of Vol I R17 p.12-593 → the OpenRadioss /BEGIN label of the
+# SAME unit. A label is an SI prefix + 'g' / 'm' / 's' of 1..3 characters
+# (unit_code.F:70-158, the grammar handlers._blast_unit_system's docstring
+# spells out), so the imperial names have none. Matched case-insensitively
+# EXCEPT 'mg' (the milligram): 'Mg' is OpenRadioss's megagram, 1e9 times
+# heavier, and is not a *CONTROL_UNITS name - LS-DYNA spells the metric ton
+# 'mtrc_ton' - so it must not fold onto 'mg'. 's' / 'ton' / 'tonne' are
+# unambiguous aliases of 'sec' / 'mtrc_ton'.
+_CONTROL_UNITS_NAMES: Dict[str, Dict[str, str]] = {
+    "LENGTH": {"m": "m", "mm": "mm", "cm": "cm"},
+    "TIME": {"sec": "s", "s": "s", "ms": "ms", "micro_s": "mus"},
+    "MASS": {"kg": "kg", "g": "g", "mtrc_ton": "Mg", "ton": "Mg",
+             "tonne": "Mg"},
+}
+_CONTROL_UNITS_EXACT = {"MASS": {"mg": "mg"}}
+#: Names the manual lists that no /BEGIN label can carry.
+_CONTROL_UNITS_NO_LABEL = {"LENGTH": ("in", "ft"),
+                           "MASS": ("lb", "slug", "slinch")}
+#: The manual's defaults for a blank card-1 cell ("Default m sec kg").
+_CONTROL_UNITS_DEFAULTS = {"LENGTH": "m", "TIME": "sec", "MASS": "kg"}
+#: Card 2 (meters / seconds / kilograms per deck unit) → label; a scale
+#: matching none of these has no /BEGIN label k2rad writes.
+_CONTROL_UNITS_SCALES: Dict[str, Tuple[Tuple[float, str], ...]] = {
+    "LENGTH": ((1.0, "m"), (1.0e-2, "cm"), (1.0e-3, "mm")),
+    "TIME": ((1.0, "s"), (1.0e-3, "ms"), (1.0e-6, "mus")),
+    "MASS": ((1.0, "kg"), (1.0e-3, "g"), (1.0e-6, "mg"), (1.0e3, "Mg")),
+}
+_CONTROL_UNITS_SCALE_UNIT = {"LENGTH": "m", "TIME": "s", "MASS": "kg"}
+
+
+def _control_units_label(slot: str, name: str) -> Optional[str]:
+    """The /BEGIN label of a *CONTROL_UNITS card-1 *name* in *slot*
+    (LENGTH / TIME / MASS), or None."""
+    exact = _CONTROL_UNITS_EXACT.get(slot, {})
+    if name in exact:
+        return exact[name]
+    if name.lower() in exact:          # 'Mg' / 'MG': not the milligram
+        return None
+    return _CONTROL_UNITS_NAMES[slot].get(name.lower())
+
+
+def _control_units_resolve(cu: ControlUnits) -> None:
+    """Fill ``cu.labels`` / ``problems`` / ``defaulted`` from the stated
+    cells: per slot a non-zero card-2 scale first ("Any non-zero scales ...
+    override what is specified on the first card", p.12-592), else the
+    card-1 name, a blank name taking the manual's default. ``labels`` is
+    None when any slot has no label or the card states nothing at all."""
+    names = (("LENGTH", cu.length, cu.length_scale),
+             ("TIME", cu.time, cu.time_scale),
+             ("MASS", cu.mass, cu.mass_scale))
+    if not any(n or s for _slot, n, s in names):
+        cu.problems = ["states no unit (an empty card: every LENGTH / "
+                       "TIME / MASS cell blank, no card-2 scale)"]
+        return
+    got: Dict[str, Optional[str]] = {}
+    for slot, name, scale in names:
+        if scale != 0.0:
+            label = next((lab for val, lab in _CONTROL_UNITS_SCALES[slot]
+                          if _math.isclose(scale, val, rel_tol=1.0e-6)), None)
+            if label is None:
+                cu.problems.append(
+                    f"{slot}_SCALE {scale:g} ({_CONTROL_UNITS_SCALE_UNIT[slot]}"
+                    " per deck unit) has no Radioss /BEGIN label")
+            got[slot] = label
+            continue
+        if not name:
+            name = _CONTROL_UNITS_DEFAULTS[slot]
+            cu.defaulted.append(slot)
+        label = _control_units_label(slot, name)
+        if label is None:
+            if name.lower() in _CONTROL_UNITS_NO_LABEL.get(slot, ()):
+                cu.problems.append(
+                    f"{slot} '{name}' has no Radioss /BEGIN label (a label "
+                    "is an SI prefix + g / m / s, unit_code.F)")
+            else:
+                cu.problems.append(
+                    f"{slot} '{name}' is not a *CONTROL_UNITS {slot} name "
+                    "(Vol I R17 p.12-593: "
+                    + {"LENGTH": "m, mm, cm, in, ft",
+                       "TIME": "sec, ms, micro_s",
+                       "MASS": "kg, g, mg, lb, slug, slinch, mtrc_ton"}[slot]
+                    + ")")
+        got[slot] = label
+    mass, length, time = got["MASS"], got["LENGTH"], got["TIME"]
+    if mass is not None and length is not None and time is not None:
+        cu.labels = (mass, length, time)
+
+
+def handle_control_units(block: Block, state: ConversionState) -> None:
+    """*CONTROL_UNITS → ``state.control_units``; convert() turns its labels
+    into the /BEGIN units when the caller gave none (it was a skipped
+    keyword before the CardStack batch).
+
+    Card 1 ``LENGTH TIME MASS TEMP`` (A10 each), optional card 2
+    ``LENGTH_SCALE TIME_SCALE MASS_SCALE`` (F20 each) - Vol I R17
+    p.12-592/593. The card itself converts nothing in LS-DYNA ("This does
+    not provide any mechanism for automatic conversion of units"), and the
+    /BEGIN labels convert nothing either: k2rad writes the same triple on
+    both unit lines, so they only NAME the deck's units for the cards that
+    read them. TEMP is stored and not used (/BEGIN has no temperature
+    unit). The last *CONTROL_UNITS of the deck wins."""
+    raw = block.raw
+    f1 = _card(raw, 0, fixed=True, n=4, w=10) if raw else []
+    f2 = _card(raw, 1, fixed=True, n=3, w=20) if len(raw) > 1 else []
+
+    def _cell(f: List[str], i: int) -> str:
+        return f[i].strip() if len(f) > i else ""
+
+    def _scale(f: List[str], i: int) -> float:
+        return to_float(f[i]) if len(f) > i and f[i].strip() else 0.0
+
+    cu = ControlUnits(length=_cell(f1, 0), time=_cell(f1, 1),
+                      mass=_cell(f1, 2), temp=_cell(f1, 3),
+                      length_scale=_scale(f2, 0), time_scale=_scale(f2, 1),
+                      mass_scale=_scale(f2, 2))
+    _control_units_resolve(cu)
+    state.control_units = cu
 
 
 def handle_control_shell(block: Block, state: ConversionState) -> None:
@@ -8852,7 +9164,11 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
         return
+    # Card 1: neiph neips maxint strflg sigflg epsflg rltflg engflg (Vol I
+    # R17 p.16-67). MAXINT (field 3, "def = 3", so blank = 3) feeds K-42's
+    # MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL rule (CardStack, wave C).
     f1 = _card(raw, 0, fixed=True, n=8, w=10)
+    maxint = to_int(f1[2]) if len(f1) > 2 and f1[2].strip() else 3
     strflg = to_int(f1[3]) if len(f1) > 3 else 0
     sigflg = to_int(f1[4]) if len(f1) > 4 else 1
     epsflg = to_int(f1[5]) if len(f1) > 5 else 1
@@ -8861,7 +9177,27 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     # Card 2: cmpflg ieverp beamip dcomp shge stssz n3thdt
     f2   = _card(raw, 1, fixed=True, n=8, w=10)
     shge = to_int(f2[4]) if len(f2) > 4 else 0
-    state.db_extent_binary = DbExtentBinary(strflg, sigflg, epsflg, rltflg, engflg, shge)
+    state.db_extent_binary = DbExtentBinary(strflg, sigflg, epsflg, rltflg,
+                                            engflg, shge, maxint=maxint)
+    # the fix round of the K1b review: the read moves the engine deck of a
+    # MAXINT > 3 deck (nine R14 decks), so it is named; a MAXINT below -3
+    # asks for more than 3 layers too, but K-42's writer rule
+    # (writer/assembly.py) reads MAXINT > 3 only
+    if maxint > 3:
+        state.warn(
+            f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (> 3: d3plot output "
+            "for the first MAXINT shell / thick-shell integration points, "
+            "Vol I R17 p.16-67) -> /ANIM/SHELL/TENS/STRESS/ALL in the engine "
+            "deck, beside STRESS/MEMB / UPPER / LOWER: the stress of every "
+            "through-thickness layer (ISTRESALL, anim_dcod_key_0.F:302-304; "
+            "CardStack K-42).")
+    elif maxint < -3:
+        state.warn(
+            f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (< 0: |MAXINT| = "
+            f"{-maxint} integration points at every in-plane point, no "
+            "averaging, Vol I R17 p.16-67) - /ANIM/SHELL/TENS/STRESS/ALL is "
+            "not written: k2rad writes it for MAXINT > 3 only, so the engine "
+            "deck keeps STRESS/MEMB / UPPER / LOWER.")
 
 
 def handle_database_jntforc(block: Block, state: ConversionState) -> None:
@@ -17273,7 +17609,28 @@ def handle_damping_global(block: Block, state: ConversionState) -> None:
     srx = to_float(f[5]) if len(f) > 5 else 0.0
     sry = to_float(f[6]) if len(f) > 6 else 0.0
     srz = to_float(f[7]) if len(f) > 7 else 0.0
-    if lcid > 0:
+    if lcid > 0 and state.options.damping_curve_window:
+        # Vol I R17 p.15-8: LCID "GT.0: system damping is given by load
+        # curve LCID", VALDMP "(this option is bypassed if the load curve
+        # number defined above is non zero)" - the writer converts the
+        # curve (writer/loads, --damping-curve-window). Its one exception
+        # (K-20, writer/loads._make_damping): beside a non-zero
+        # *DAMPING_PART_STIFFNESS beta - a card the deck may state after
+        # this one, so the sentence names the rule - a curve that varies in
+        # time is ONE ungated /DAMP at its t-0 value, and the writer warns.
+        state.warn(
+            f"*DAMPING_GLOBAL: LCID={lcid} > 0 - the system damping constant "
+            f"is curve {lcid}'s D(t) and VALDMP={valdmp:g} is bypassed, as "
+            "LS-DYNA reads the card (Vol I R17 p.15-8); the /DAMP writer "
+            "converts the curve in time, not VALDMP - except beside a "
+            "non-zero *DAMPING_PART_STIFFNESS beta, where a curve that "
+            "varies in time becomes ONE ungated /DAMP at its value at t 0 "
+            "(the writer warns that the time variation is lost: /DAMP/FUNCT "
+            "has no Beta column). "
+            "--no-damping-curve-window writes the old constant VALDMP for "
+            "the whole run instead.")
+    elif lcid > 0:
+        # --no-damping-curve-window: the old bytes and their old sentence
         state.warn(
             f"*DAMPING_GLOBAL: lcid={lcid} (time-varying damping) not supported; "
             f"using constant valdmp={valdmp}"
@@ -19520,8 +19877,10 @@ HANDLERS = {
 
     # Contacts
     "CONTACT_AUTOMATIC_SINGLE_SURFACE":       handle_contact_automatic_single_surface,
-    "CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR": handle_contact_automatic_single_surface,
-    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE":   handle_contact_automatic_surface_to_surface,
+    # CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR is registered after
+    # _CONTACT_SPELLINGS, bound with its 'mortar' note (CardStack K-14).
+    # CONTACT_AUTOMATIC_SURFACE_TO_SURFACE is registered after
+    # _CONTACT_SPELLINGS, bound with its 'twoway_auto' note (CardStack K-08).
     # The *CONTACT_..._TIEBREAK family is generated below from
     # TIEBREAK_CONTACT_KEYWORDS — all 13 LS-DYNA spellings plus their _MPP
     # forms — so the dispatch table and assembly._OFFSET_SPECS read ONE source.
@@ -19575,7 +19934,8 @@ HANDLERS = {
     "CONTROL_BULK_VISCOSITY":                 handle_skip,
     "CONTROL_DYNAMIC_RELAXATION":             handle_skip,
     "CONTROL_MPP_DECOMPOSITION":              handle_skip,
-    "CONTROL_UNITS":                          handle_skip,
+    # CardStack batch: the /BEGIN labels (was handle_skip)
+    "CONTROL_UNITS":                          handle_control_units,
 
     # Damping
     "DAMPING_GLOBAL":                         handle_damping_global,
@@ -19919,10 +20279,16 @@ class _ContactRoute:
 
 _CONTACT_SPELLINGS: Dict[str, _ContactRoute] = {
     # ── The two-way / one-way surface pairs → the surf2surf route ──────────
-    # Vol I R17 p.11-13. The AUTOMATIC twins of these already route here, so
-    # the converted deck is byte-identical to the twin's apart from the
-    # /INTER title — which is the point: the LS-DYNA difference is segment
-    # orientation (p.11-10 item 4), and Radioss has no one-sided segment.
+    # Vol I R17 p.11-13. The AUTOMATIC twins of these route through the same
+    # handler and writer; the LS-DYNA difference is segment orientation
+    # (p.11-10 item 4), and Radioss has no one-sided segment. The converted
+    # decks are NOT byte-identical apart from the /INTER title, though:
+    # only the AUTOMATIC spellings (General Remark 12, p.11-128/129) get
+    # the shell-offset Gapmin without *CONTROL_CONTACT SHLTHK (round 6, A8,
+    # writer/contacts._shell_offset_gapmin), and only the explicit
+    # *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE takes --s2s-type25 (CardStack
+    # K-08B). The AUTOMATIC two-way pair states its own one-way note
+    # ('twoway_auto', CardStack K-08), bound after this table.
     "CONTACT_SURFACE_TO_SURFACE": _ContactRoute(
         handle_contact_automatic_surface_to_surface,
         {"notes": ("nonauto", "twoway")}),
@@ -20022,6 +20388,22 @@ for _base, _route_spec in _CONTACT_SPELLINGS.items():
         if _route_spec.offsets and not _mpp_sfx:
             CONTACT_OFFSET_KEYWORDS.append(_spelling)
 del _base, _route_spec, _mpp_sfx, _spelling, _route_kwargs
+
+# CardStack K-08: the AUTOMATIC two-way pair is as one-way here as its
+# non-AUTOMATIC twin, so it states the loss in its own note ('twoway_auto',
+# with the levers that check both sides, --s2s-type25 among them). Bound
+# here, after _contact_route exists, and NOT made a _CONTACT_SPELLINGS row:
+# that table's spelling set is counted (tests/test_r14_triage_3.py) and a
+# row would also register a _MPP sibling the deck grammar never reached
+# before. Log only: the handler's record and the bytes are unchanged.
+HANDLERS["CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"] = _contact_route(
+    handle_contact_automatic_surface_to_surface, notes=("twoway_auto",))
+# CardStack K-14: the single-surface MORTAR spelling states the 'mortar' note
+# its surface-to-surface siblings always printed - bound the K-08 way, not as
+# a _CONTACT_SPELLINGS row (that table's spelling set is counted and a row
+# would register an _MPP sibling). Log only: record and bytes unchanged.
+HANDLERS["CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR"] = _contact_route(
+    handle_contact_automatic_single_surface, notes=("mortar",))
 
 HANDLERS["DEFINE_FRICTION"] = handle_define_friction
 

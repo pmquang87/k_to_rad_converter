@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, Curve,
@@ -18,7 +19,8 @@ from .common import (
     _spotweld_beam_pids, _truss_pids, _vcross, _vnorm, _vsub, rigid_part_ids,
 )
 from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
-                   _target_mat_law)
+                   _shell_element_thickness, _target_mat_law,
+                   _unique_node_slots)
 from ..lumping import element_mass_by_node, rigid_body_momentum_velocity
 # ONE skip predicate for the default J = -SUM(IN) (round 7, A2) and this
 # module's --mass-weighted-inivel pass (round 6, A7); it moved to rbody.py
@@ -5858,7 +5860,9 @@ def _emit_grnod_part(grnod_id: int, title: str, pids: List[int]) -> List[str]:
 
 
 # ── /GRAV card layout ────────────────────────────────────────────────────────
-# grav.cfg (radioss51 FORMAT, LOADS/grav.cfg:110-114) is
+# grav.cfg's FORMAT(radioss51) block, which a /BEGIN 2022 deck reads (the
+# newest copy, radioss120/LOADS/grav.cfg:114-118; radioss51/LOADS/
+# grav.cfg:110-114 holds the same five lines), is
 #   CARD("%10d%10s%10d%10d%10d          %20lg%20lg", curveid, rad_dir,
 #        inputsystem, rad_sensor_id, entityid, xscale, magnitude);
 # — note the TEN literal blank columns (51-60) between grnod_ID and Ascale_x.
@@ -10472,9 +10476,19 @@ def _rwall_search_distance(face: RigidWallGeomFace, corners,
     return 1e10
 
 
+@dataclass
+class _RwallScope:
+    """What one wall tracks at t = 0, recorded by ``_rwall_node_groups`` for
+    the planar-wall notes (K-21): the explicit tracked group (None = the
+    starter's distance search) and the nodes ``grnd_ID2`` removes."""
+    tracked: Optional[List[int]] = None
+    excluded: Set[int] = field(default_factory=set)
+
+
 def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
                        nsid: int, nsidex: int, boxid: int,
-                       carrier_nodes=(), carrier_grnod=None):
+                       carrier_nodes=(), carrier_grnod=None,
+                       scope: Optional[_RwallScope] = None):
     """A rigid wall's tracked (grnd_ID1) and excluded (grnd_ID2) node groups.
 
     Returns (grnd_ID1, grnd_ID2, /GRNOD blocks), or None when the wall must be
@@ -10495,6 +10509,9 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
     search and simply zeroes LPRW (hm_read_rwall_spher.F:266-274). Feeding a
     face its OWN carrier node there is harmless, so all walls share one group
     — ``carrier_grnod`` is a one-element cache the caller uses to emit it once.
+
+    *scope*, when given, receives the tracked group's nodes (left None for a
+    distance search) and the excluded nodes; it changes no card.
     """
     grnd1 = grnd2 = 0
     grnod_blocks: List[str] = []
@@ -10504,6 +10521,8 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
             grnd1 = state.next_grnod_id()
             grnod_blocks += _emit_grnod_node(
                 grnd1, set_title or f"rwall_{rwid}_nodes", nids)
+            if scope is not None:
+                scope.tracked = list(nids)
         else:
             state.warn(
                 f"{label}: node set {nsid} not "
@@ -10525,6 +10544,8 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
                 grnd1 = state.next_grnod_id()
                 grnod_blocks += _emit_grnod_node(
                     grnd1, f"rwall_{rwid}_box{boxid}", box_nids)
+                if scope is not None:
+                    scope.tracked = list(box_nids)
                 state.warn(
                     f"{label}: tracked nodes scoped "
                     f"to the {len(box_nids)} node(s) inside *DEFINE_BOX "
@@ -10539,6 +10560,10 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
     # Only a distance search (grnd_ID1 = 0) can sweep in a foreign carrier
     # node; an explicit tracked group never contains one, and d is 0 there.
     extra = sorted(carrier_nodes) if not grnd1 else []
+    if scope is not None:
+        scope.excluded = set(extra)
+        if nsidex > 0:
+            scope.excluded |= set(state.node_sets.get(nsidex, ("", []))[1])
     if nsidex > 0:
         set_title, nids = state.node_sets.get(nsidex, ("", []))
         if nids or extra:
@@ -10574,10 +10599,17 @@ def _rwall_slide(fric: float, state: ConversionState, label: str,
 
     *RIGIDWALL_PLANAR (Manual p. 40-20)   *RIGIDWALL_GEOMETRIC (p. 40-8)
       0.0  frictionless sliding             0.0  frictionless sliding
-      1.0  no sliding                       1.0  no sliding
+      1.0  no sliding, may bounce back      1.0  no sliding
       2.0  weld above WVEL, sliding ok      -    (no weld values)
       3.0  weld above WVEL, no sliding      -
       else Coulomb mu = FRIC                else Coulomb mu = FRIC
+
+    Radioss ``Slide 1`` ("tied") is FRIC 1.0, not a weld: the tied branch
+    sets a pressed node's velocity to the wall's (``rgwall.F:319-350``,
+    ``rgwalp.F:316-321`` - no sliding), and a node moving away from the wall
+    is skipped before it (``rgwall.F:136-139`` / ``163-166``,
+    ``rgwalp.F:197-198``), so it may bounce back - the R17 table's "Bouncing
+    back from wall: allowed" for FRIC 1.0, "not allowed" for 2.0 and 3.0.
 
     The geometric card documents only 0.0 and 1.0, so FRIC = 2.0 there is a
     plain Coulomb coefficient of 2.0 and must NOT be read as a weld. A
@@ -10597,8 +10629,8 @@ def _rwall_slide(fric: float, state: ConversionState, label: str,
         return 0
     if planar and fric in (2.0, 3.0):
         # WVEL-gated welding: the node sticks to the wall once its normal
-        # impact velocity exceeds WVEL. /RWALL has no velocity-gated mode, so
-        # take the closest unconditional one and say so.
+        # impact velocity exceeds WVEL. /RWALL has no weld at all, so take
+        # the closest sliding mode and say what is lost: the weld itself.
         tied = fric == 3.0
         state.warn(
             f"{label}: FRIC = {fric:g} welds a node to the wall once its "
@@ -10606,8 +10638,15 @@ def _rwall_slide(fric: float, state: ConversionState, label: str,
             + ("; no sliding after welding)" if tied else
                "; frictionless sliding after welding)")
             + ". /RWALL has no velocity-gated weld, so the wall is emitted "
-            + ("tied (Slide 1) UNCONDITIONALLY — nodes below WVEL are tied "
-               "too, and they would rebound in LS-DYNA."
+            + ("tied (Slide 1) UNCONDITIONALLY, whatever the impact "
+               "velocity: no sliding while a node is pressed on the "
+               "wall, and a node moving away is released (rgwall.F / "
+               "rgwalp.F skip it before the tied branch sets its velocity to "
+               "the wall's) — LS-DYNA's FRIC = 1.0, whose p. 40-20 table "
+               "reads 'bouncing back from wall: allowed'. What is lost is "
+               "the weld: a node above WVEL that LS-DYNA holds on the wall "
+               "(bouncing back not allowed for FRIC = 3.0) can bounce back "
+               "off it here."
                if tied else
                "frictionless (Slide 0) — nodes above WVEL are NOT held "
                "against the wall and will rebound, which LS-DYNA prevents."))
@@ -10648,6 +10687,169 @@ def _rwall_planar_face(rw, state: ConversionState) -> RigidWallGeomFace:
     return face
 
 
+def _rwall_shell_thickness(state: ConversionState, e) -> float:
+    """A shell's own thickness - what puts its face t/2 off the node a wall
+    tracks: the *ELEMENT_SHELL_THICKNESS mean or the section T1 (a
+    *PART_COMPOSITE part: its valid-ply sum). The rule of
+    ``contacts._main_shell_thickness`` without its *PART_CONTACT OPTT: that
+    is a contact thickness, and /RWALL is no contact."""
+    part = state.parts.get(e.pid)
+    comp = state.part_composites.get(e.pid)
+    if part is not None and part.secid == 0 and comp is not None:
+        return sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+    sec = state.sec_shells.get(part.secid) if part is not None else None
+    t1 = sec.t1 if sec is not None else 0.0
+    return _shell_element_thickness(e, _unique_node_slots(e.nodes), t1) or t1
+
+
+def _vtxt(v) -> str:
+    """A 3-vector for a warning, with no '-0'."""
+    return "(" + ", ".join(f"{c + 0.0:g}" for c in v) + ")"
+
+
+def _rwall_planar_notes(state: ConversionState, label: str,
+                        face: RigidWallGeomFace, d: float,
+                        scope: _RwallScope,
+                        thick_cache: Dict[str, Dict[int, float]]) -> None:
+    """K-21 (CardStack batch): what one *RIGIDWALL_PLANAR wall can touch at
+    t = 0 - warnings only, no card changes.
+
+    The tracked nodes are the explicit group of ``_rwall_node_groups``, or
+    for NSID = 0 the starter's distance search, ``0 <= DISN <= D_search``
+    with ``DISN = (X - M) . n`` (``hm_read_rwall_paral.F``; the wall's own
+    carrier node and ``grnd_ID2`` are out). A node can act on a FINITE face
+    only from its normal side and over the face: ``rgwalp.F`` skips a node
+    with ``DP0 <= -TOL`` (``:168``) and one whose projection falls outside
+    the parallelogram (the cross-product tests at ``:170-194``, i.e. s and u
+    of ``X - M = s (M1 - M) + u (M2 - M)`` in [0, 1]).
+
+    1. The footprint lint: a /RWALL/PARAL with none of its tracked nodes over
+       its face on the normal side is named once, with m = n x l (Vol I R17
+       p.40-22) and the fix the counts point to.
+    2. The clearance line, once per wall over the nodes it can touch: /RWALL
+       acts on the NODE, a shell's mid-surface, and ignores the thickness, so
+       the closest shell face clears it by the node clearance - t/2.
+    """
+    if face.m1 is None:
+        return
+    m = face.m
+    e1 = _vsub(face.m1, m)
+    e2 = _vsub(face.m2, m) if face.form == "PARAL" and face.m2 else None
+    nrm = _vnorm(_vcross(e1, e2) if e2 is not None else e1)
+    if nrm is None:
+        return
+    nodes = state.nodes
+
+    def dot(a, b) -> float:
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    if scope.tracked is not None:
+        ids = [n for n in scope.tracked
+               if n in nodes and n not in scope.excluded]
+    else:
+        ids = []
+        for nid, nd in nodes.items():
+            if nid == face.node_id or nid in scope.excluded:
+                continue
+            dist = dot((nd.x - m[0], nd.y - m[1], nd.z - m[2]), nrm)
+            if 0.0 <= dist <= d:
+                ids.append(nid)
+    if not ids:
+        return
+    len1 = math.sqrt(dot(e1, e1))
+    len2 = math.sqrt(dot(e2, e2)) if e2 is not None else 0.0
+    tol_h = 1.0e-9 * max(1.0, len1, len2)
+    g11 = dot(e1, e1)
+    g22 = dot(e2, e2) if e2 is not None else 0.0
+    g12 = dot(e1, e2) if e2 is not None else 0.0
+    det = g11 * g22 - g12 * g12
+    rows = []                         # (nid, h, s, u): s, u in [0, 1] = over
+    for nid in ids:
+        nd = nodes[nid]
+        r = (nd.x - m[0], nd.y - m[1], nd.z - m[2])
+        s = u = 0.5                   # an infinite plane is over every node
+        if e2 is not None and det > 0.0:
+            r1, r2 = dot(r, e1), dot(r, e2)
+            s = (r1 * g22 - r2 * g12) / det
+            u = (r2 * g11 - r1 * g12) / det
+        rows.append((nid, dot(r, nrm), s, u))
+
+    def is_over(row) -> bool:
+        return (-1.0e-9 <= row[2] <= 1.0 + 1.0e-9
+                and -1.0e-9 <= row[3] <= 1.0 + 1.0e-9)
+
+    front = [r for r in rows if r[1] >= -tol_h]
+    acting = [r for r in front if is_over(r)]
+    if e2 is not None and not acting:
+        n_over = sum(1 for r in rows if is_over(r))
+        shown = front or rows
+        a = [r[2] * len1 for r in shown]
+        b = [r[3] * len2 for r in shown]
+        fixes = []
+        if front:
+            fixes.append(
+                "extend or move the face (LENL / LENM, the tail corner, or "
+                "XHEV..ZHEV, which sets l and through it m) so it covers "
+                "them")
+        if n_over:
+            fixes.append(
+                "flip the normal (swap the tail and head of Card 2) so they "
+                "are on its normal side, and re-place the face with it: "
+                "m = n x l turns around too, so the flipped face would lie "
+                "on the other side of the l edge")
+        if not fixes:
+            # behind the plane AND beside the face: one fix needs both
+            fixes = ["flip the normal (swap the tail and head of Card 2) so "
+                     "they are on its normal side, and place the face over "
+                     "them (m = n x l turns around with the normal)"]
+        state.warn(
+            f"{label}: the FINITE face covers NONE of its {len(rows)} tracked "
+            f"node(s) at t = 0 - no node is both over the {len1:g} x "
+            f"{len2:g} face and on its normal side ({len(front)} on the "
+            f"normal side, {n_over} over the face), so the /RWALL/PARAL "
+            "cannot act until a node moves over it. LS-DYNA builds the same "
+            "face (Vol I R17 p.40-22: 'm = n x l', the tail is the corner "
+            "point), so the conversion is faithful and this is the deck's "
+            f"geometry: from the tail {_vtxt(m)} the face runs {len1:g} "
+            f"along l = {_vtxt(tuple(c / len1 for c in e1))} and {len2:g} "
+            f"along m = n x l = {_vtxt(tuple(c / len2 for c in e2))}, while "
+            f"the tracked nodes{' on the normal side' if front else ''} lie "
+            f"at l {min(a):g}..{max(a):g}, m {min(b):g}..{max(b):g}. The fix "
+            "is in the .k: " + ", or ".join(fixes) + ".")
+        return
+    node_t = thick_cache.get("t")
+    if node_t is None:
+        node_t = {}
+        for e in state.shell_elems:
+            t = _rwall_shell_thickness(state, e)
+            if t > 0.0:
+                for n in e.nodes:
+                    if n > 0 and t > node_t.get(n, 0.0):
+                        node_t[n] = t
+        thick_cache["t"] = node_t
+    best: Optional[Tuple[float, int, float, float]] = None
+    for nid, h, _s, _u in acting:
+        t = node_t.get(nid, 0.0)
+        if t > 0.0 and (best is None or h - 0.5 * t < best[0]):
+            best = (h - 0.5 * t, nid, h, t)
+    if best is None:
+        return
+    fc, nid, h, t = best
+    state.warn(
+        f"{label}: the wall acts on the tracked NODES - a shell's "
+        "mid-surface node - and does not see the shell thickness (Altair "
+        "/RWALL: 'Nodal thickness of rigid wall secondary nodes is not taken "
+        "into account'; rgwall.F / rgwalp.F measure each node's own distance "
+        "to the plane), as LS-DYNA's wall tracks nodes too (NSID 'Nodal set "
+        "ID containing tracked nodes', Vol I R17 p.40-18). So a shell FACE "
+        "clears the wall by the node clearance - t/2: at t = 0 the closest "
+        f"shell face is at node {nid}, node clearance {h:g} - t/2 = "
+        f"{0.5 * t:g} -> face clearance {fc:g}"
+        + (" (the face is already through the plane)" if fc < 0.0 else "")
+        + ". Place the plane at mid-surface + clearance, not at face + "
+        "clearance.")
+
+
 def _make_rigid_walls(state: ConversionState) -> List[str]:
     """*RIGIDWALL_PLANAR and *RIGIDWALL_GEOMETRIC_* → /RWALL/*.
 
@@ -10677,6 +10879,9 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
     carrier_grnod: List[int] = []
 
     th_wall_ids: List[Tuple[int, str]] = []
+    # K-21: the node -> shell thickness map of the clearance line, built once
+    # and only when a planar wall can touch a node
+    thick_cache: Dict[str, Dict[int, float]] = {}
 
     def emit(label: str, rwid: int, nsid: int, nsidex: int, boxid: int,
              fric: float, faces: List[RigidWallGeomFace], planar: bool,
@@ -10685,8 +10890,9 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
         # `I /= MSR`, so the exclusion group is only worth emitting when some
         # face would otherwise sweep in a FOREIGN one.
         foreign = carriers if any(carriers - {f.node_id} for f in faces) else ()
+        scope = _RwallScope()
         groups = _rwall_node_groups(state, label, rwid, nsid, nsidex, boxid,
-                                    foreign, carrier_grnod)
+                                    foreign, carrier_grnod, scope)
         if groups is None:
             return
         grnd1, grnd2, grnod_blocks = groups
@@ -10699,6 +10905,9 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
             lines.extend(_emit_rwall_geom_face(face, slide, fric,
                                                grnd1, grnd2, d))
             th_wall_ids.append((face.rwid, face.title))
+            if planar:
+                _rwall_planar_notes(state, label, face, d, scope,
+                                    thick_cache)
         if motion is not None:
             lines.extend(motion())
         lines.extend(grnod_blocks)
@@ -11049,6 +11258,16 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     - α from *DAMPING_GLOBAL valdmp (mass-proportional, damps low-freq modes)
     - β from *DAMPING_PART_STIFFNESS coef (stiffness-prop, damps high-freq waves)
 
+    With LCID > 0 and ``damping_curve_window`` (default ON), α is curve
+    LCID's D(t) in TIME and VALDMP is bypassed, as LS-DYNA reads the card
+    (Vol I R17 p.15-8: "this option is bypassed if the load curve number
+    defined above is non zero"): see :func:`_damping_schedule` - alpha-only
+    /DAMP windows or one /DAMP/FUNCT (Alpha 1) on the same /GRNOD, the old
+    single card when the curve is constant over the run. A card that also
+    carries β stays ONE ungated /DAMP at D(t = 0): /DAMP/FUNCT has no Beta
+    column and a second card on the same nodes corrupts β (the shared
+    per-node history buffer). ``--no-damping-curve-window`` keeps VALDMP.
+
     OpenRadioss /DAMP (Reference Guide p.130):
     - Format 1: single α, all DOFs
     - Format 2: per-DOF α and β, 6 lines
@@ -11072,10 +11291,53 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     if state.damping_global is None and not state.damping_part_stiffness:
         return []
 
-    alpha = state.damping_global.valdmp if state.damping_global else 0.0
+    g = state.damping_global
     # Aggregate β from *DAMPING_PART_STIFFNESS — use max coef across all parts
     beta = max((d.coef for d in state.damping_part_stiffness), default=0.0)
-    if alpha == 0.0 and beta == 0.0:
+    # K-20 (default ON): with LCID > 0 the damping constant is curve LCID's
+    # D(t) and VALDMP is bypassed (Vol I R17 p.15-8), so the curve is read in
+    # TIME. ``sch`` stays set only for windows / /DAMP/FUNCT; a curve that is
+    # constant over the run becomes the old single card with its level.
+    curve_mode = (g is not None and g.lcid > 0
+                  and state.options.damping_curve_window)
+    sch: Optional[_DampSchedule] = None
+    # a constant (flat curve) schedule, for the held-level sentence once
+    # the card is written
+    held: Optional[_DampSchedule] = None
+    if g is not None and curve_mode:
+        sch = _damping_schedule(state, g.lcid)
+        if sch is None:
+            state.warn(
+                f"*DAMPING_GLOBAL: load curve {g.lcid} is not defined in this "
+                "deck (or has no points) — with LCID > 0 the curve is the ONLY "
+                "source of the system damping constant (VALDMP is bypassed, "
+                "Vol I R17 p.15-8), so no mass damping is written.")
+            alpha = 0.0
+        elif sch.kind in ("constant", "zero"):
+            alpha = sch.value if sch.kind == "constant" else 0.0
+            held = sch if sch.kind == "constant" else None
+            sch = None if sch.kind == "constant" else sch
+        else:
+            alpha = sch.value
+            if beta != 0.0:
+                state.warn(
+                    f"*DAMPING_GLOBAL: LCID={g.lcid} varies in time over the "
+                    f"run, but this deck's /DAMP also carries beta={beta:.6G} "
+                    "from *DAMPING_PART_STIFFNESS, and a time-gated card "
+                    "cannot carry it: /DAMP/FUNCT has no Beta column, and a "
+                    "second /DAMP on the same nodes would corrupt the beta "
+                    "term (damping.F keeps ONE per-node acceleration history, "
+                    "DAMP(1:6,I), that every card overwrites). So ONE ungated "
+                    "/DAMP is written with the curve's value at t 0 "
+                    f"(alpha={alpha:.6G}) for the whole run, and the time "
+                    f"variation of curve {g.lcid} is LOST. Scope the "
+                    "stiffness damping to other parts, or drop it, to get "
+                    "the curve in time.")
+                sch = None
+    else:
+        alpha = g.valdmp if g else 0.0
+    timed = sch is not None and sch.kind in ("windows", "funct")
+    if not timed and alpha == 0.0 and beta == 0.0:
         # Two ways in, and the message has to name the one that applies:
         #   - *DAMPING_PART_STIFFNESS with every COEF = 0.0 — documented
         #     "Inactive" (Manual Vol I R16 p.15-12). With no *DAMPING_GLOBAL
@@ -11089,8 +11351,15 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
         # that damps exactly zero. Same rule _make_damping_part_mass applies to
         # SF x curve == 0.
         why = []
-        if state.damping_global is not None:
-            g = state.damping_global
+        if g is not None and curve_mode:
+            why.append(
+                f"*DAMPING_GLOBAL LCID={g.lcid}: " + (
+                    f"curve {g.lcid} is 0 over the whole run [0, "
+                    f"ENDTIM={sch.endtim:g}] (a curve is 0 after its last "
+                    "abscissa, and a level that opens at or after ENDTIM "
+                    "never acts)" if sch is not None else
+                    f"curve {g.lcid} is not defined (reported above)"))
+        elif g is not None:
             why.append("*DAMPING_GLOBAL VALDMP=0" + (
                 f" (its damping constant lives on LCID={g.lcid}, a curve this "
                 "card does not read — reported separately above)"
@@ -11190,6 +11459,8 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     grnod_id = state.next_grnod_id()
     damp_id = state.next_id()
     lines = _emit_grnod_node(grnod_id, grnod_title, target_nodes)
+    if held is not None:
+        _warn_damp_held_tail(state, held, "*DAMPING_GLOBAL")
 
     # *DAMPING_GLOBAL's STX..SRZ (Vol I R17 p.15-8, card 1 fields 3-8) are
     # "Scale factor on global x/y/z translational damping FORCES" and the three
@@ -11219,6 +11490,37 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     if not per_dof:
         scales = (1.0,) * 6
 
+    if d is not None and sch is not None and timed:
+        # K-20: the curve in TIME on the same group - alpha-only windows or
+        # one /DAMP/FUNCT (Alpha 1: *DAMPING_GLOBAL has no SF, the curve's
+        # own SFO is already in its points). Beta is 0 here by construction:
+        # a beta-bearing card stayed ungated above.
+        dof = scales if per_dof else None
+        if per_dof:
+            zeroed = [n for n, s in zip(("STX", "STY", "STZ", "SRX", "SRY",
+                                         "SRZ"), scales) if s == 0.0]
+            if zeroed:
+                state.warn(
+                    f"*DAMPING_GLOBAL: {', '.join(zeroed)} = 0.0 while the "
+                    "others are not, so Vol I R17 p.15-9 Remark 2's "
+                    "all-six-zero unity default does NOT apply — LS-DYNA "
+                    "leaves the degrees of freedom those cells name undamped, "
+                    "and so does the emitted card (alpha_i = D(t) x ST_i in "
+                    "the order x, y, z, xx, yy, zz). Check this is intended: "
+                    "mass damping on a subset of the DOFs is unusual outside "
+                    "a 2-D or planar idealisation.")
+        cards, fct = _damp_schedule_cards(
+            state, sch, grnod_id, damp_id, 1.0, dof,
+            f"Rayleigh mass damping *DAMPING_GLOBAL lcid={d.lcid}")
+        lines += cards
+        _warn_damp_schedule(
+            state, sch, "*DAMPING_GLOBAL", 1.0,
+            "the level" if sch.kind == "windows"
+            else "1 (*DAMPING_GLOBAL has no SF)", dof, fct,
+            "--no-damping-curve-window writes VALDMP for the whole run "
+            "instead, which LS-DYNA bypasses when LCID > 0.")
+        return lines
+
     # If only α, no β and no per-DOF factors, use Format 1 (smaller deck).
     if beta == 0.0 and not per_dof:
         # The /DAMP card always reads Beta from cols 21-40 — there is no
@@ -11246,13 +11548,18 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
             # The cell names carry the DOF: ST* is a translation, SR* a
             # rotation. Deriving a bare axis letter from the last character
             # ("z" for both STZ and SRZ) would make the two indistinguishable,
-            # so the cells are named and nothing is derived from them.
+            # so the cells are named and nothing is derived from them. In
+            # curve mode alpha is curve LCID's level (or its value at t 0 on a
+            # beta card), VALDMP being bypassed, and the text says so.
+            src = ("VALDMP x ST_i" if not curve_mode else
+                   f"{alpha:.6G} x ST_i, alpha from curve "
+                   f"{d.lcid if d else 0} with VALDMP bypassed,")
             state.warn(
                 f"*DAMPING_GLOBAL: {', '.join(zeroed)} = 0.0 while the others "
                 "are not, so Vol I R17 p.15-9 Remark 2's all-six-zero unity "
                 "default does NOT apply — LS-DYNA leaves the degrees of "
                 "freedom those cells name undamped, and so does the emitted "
-                "/DAMP (Format 2, alpha_i = VALDMP x ST_i in the order x, y, "
+                "/DAMP (Format 2, alpha_i = " + src + " in the order x, y, "
                 "z, xx, yy, zz). Check this is intended: mass damping on a "
                 "subset of the DOFs is unusual outside a 2-D or planar "
                 "idealisation.")
@@ -11273,28 +11580,35 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     return lines
 
 
+def _warn_damping_curve_missing(state: ConversionState, lcid: int,
+                                what: str) -> None:
+    state.warn(
+        f"{what}: load curve {lcid} is not defined in this deck (or has no "
+        "points) — the damping constant comes ENTIRELY from that curve, so "
+        "the card is DROPPED and those parts run UNDAMPED.")
+
+
 def _damping_curve_constant(state: ConversionState, lcid: int,
                             what: str) -> Optional[float]:
-    """The single ordinate a /BEGIN 2022 /DAMP can carry for curve *lcid*.
+    """The single ordinate the OLD reduction gives curve *lcid* — the
+    ``--no-damping-curve-window`` path, kept byte for byte.
 
     LS-DYNA's *DAMPING_PART_MASS states its damping constant as ``D_s(t) =
-    SF * f_LCID(t)``; plain /DAMP has only a scalar ``Alpha``, and the Radioss
-    card that DOES take a function — /DAMP/FUNCT, whose engine kernel computes
-    ``alpha = f(t)*Alpha*Alpha_dir`` (``damping_funct_ini.F90:80-99``) — first
-    exists in ``radioss2026/DAMP/Damp_funct.cfg``, far above the /BEGIN 2022
-    this converter writes.
-
-    So the curve is reduced to its ordinate at the first abscissa. That is
-    EXACT for the flat curves these decks almost always use (the corpus case
-    ``11.3.sqt_iga_s.k`` is ``(0, 200) (0.01, 200)``), and is warned about
-    otherwise. Returns None when the curve cannot be used at all.
+    SF * f_LCID(t)``; plain /DAMP has only a scalar ``Alpha``. This reduction
+    takes the curve's ordinate at the first abscissa, which is EXACT for the
+    flat curves these decks almost always use (the corpus case
+    ``11.3.sqt_iga_s.k`` is ``(0, 200) (0.01, 200)``) and is warned about
+    otherwise. Its warning says the Radioss card that takes a function,
+    /DAMP/FUNCT (``alpha = f(t)*Alpha*Alpha_dir``,
+    ``damping_funct_ini.F90:80-99``), is a radioss2026 keyword: true of
+    ``radioss2026/DAMP/Damp_funct.cfg``, but no reason not to write it — a
+    /BEGIN 2022 starter reads it correctly behind an advisory WARNING
+    100211, which is what the default ON path (:func:`_damping_schedule`)
+    now does. Returns None when the curve cannot be used at all.
     """
     curve = state.curves.get(lcid)
     if curve is None or not curve.pts:
-        state.warn(
-            f"{what}: load curve {lcid} is not defined in this deck (or has no "
-            "points) — the damping constant comes ENTIRELY from that curve, so "
-            "the card is DROPPED and those parts run UNDAMPED.")
+        _warn_damping_curve_missing(state, lcid, what)
         return None
     ordinates = [o for _, o in curve.pts]
     value = ordinates[0]
@@ -11307,6 +11621,470 @@ def _damping_curve_constant(state: ConversionState, lcid: int,
             "time variation is LOST. The Radioss card that takes a function, "
             "/DAMP/FUNCT, is a radioss2026 keyword.")
     return value
+
+
+# ── The LCID curve of *DAMPING_PART_MASS / *DAMPING_GLOBAL in TIME ──────────
+# CardStack batch, K-20 (default ON; --no-damping-curve-window keeps the old
+# single /DAMP of _damping_curve_constant / VALDMP above).
+
+#: An EDGE of a damping curve - the stretch between two of its plateaus - is
+#: STEEP when (largest - smallest ALPHA across it) x its duration is at or
+#: below a bound: alpha = SF x the curve on *DAMPING_PART_MASS, so SF scales
+#: the product (fix round of the K-20 review). The damping reaches the
+#: motion through the exponent of KE(t) = KE0 exp(-2 int alpha dt). A
+#: STRAIGHT edge (one segment) replaced by a step at its midpoint keeps that
+#: integral exact after the edge and moves it by at most an eighth of the
+#: product inside it, so this bound keeps KE within 1 % (exp(2 x 0.005)).
+#: An edge through intermediate points can move it by the WHOLE product -
+#: after the edge too: 0 -> 380 -> 370 -> 10 within 0.1 ms integrates to
+#: 0.0371 where its step gives 0.0005 - so it is held to
+#: ``_DAMP_STEEP_DOSE_MULTI``, the same 1 %. alpha (1/time) x time is
+#: dimensionless, so the bounds hold in every unit system.
+_DAMP_STEEP_DOSE = 0.04
+#: the bound of an edge through intermediate points (see above)
+_DAMP_STEEP_DOSE_MULTI = 0.005
+#: /DAMP Tstop for "to the end of the run" (hm_read_damp.F's own default:
+#: a Tstop of 0 is read as EP30, so a real window never ends at t 0)
+_DAMP_NO_STOP = 1.0e30
+#: the /DAMP/FUNCT column headers of radioss2026/DAMP/Damp_funct.cfg
+_DAMP_FUNCT_HDR = "#   Fct_ID  grnod_id               Alpha"
+_DAMP_FUNCT_HDR_T = ("#            Alpha_x             Alpha_y"
+                     "             Alpha_z")
+_DAMP_FUNCT_HDR_R = ("#           Alpha_xx            Alpha_yy"
+                     "            Alpha_zz")
+
+
+@dataclass
+class _DampSchedule:
+    """What one damping LCID curve does over the run [0, ENDTIM].
+
+    ``kind``: ``constant`` (one level covers the run: the old card is exact),
+    ``windows`` (alpha-only /DAMP per level), ``funct`` (/DAMP/FUNCT) or
+    ``zero`` (nothing to damp in the run). ``value`` is the level of a
+    ``constant`` and D(t = 0) otherwise; ``windows`` holds (level, Tstart,
+    Tstop) clipped to the run; ``copy_pts`` the points of the /FUNCT copy a
+    ``funct`` must name (None: the deck's own curve), and ``copy_notes`` what
+    the copy changed, ``copy_tag`` the copy's title tail; ``why`` the reason
+    a curve is not piecewise constant; ``held_from`` the curve's last
+    abscissa when a FLAT curve's ``constant`` schedule holds its non-zero
+    level from there to ENDTIM (:func:`_warn_damp_held_tail`); ``ends_at``
+    (last abscissa, level) when a ``windows`` schedule's last, non-zero level
+    stops at the curve's last abscissa inside the run (said by
+    :func:`_warn_damp_schedule`).
+    """
+    kind: str
+    lcid: int
+    endtim: float
+    value: float = 0.0
+    windows: List[Tuple[float, float, float]] = field(default_factory=list)
+    copy_pts: Optional[List[Tuple[float, float]]] = None
+    copy_notes: List[str] = field(default_factory=list)
+    copy_tag: str = "damping_zero_tail"
+    why: str = ""
+    held_from: Optional[float] = None
+    ends_at: Optional[Tuple[float, float]] = None
+
+
+def _damp_endtim(state: ConversionState) -> float:
+    """ENDTIM, or +inf when the deck states none (then nothing is clipped)."""
+    ct = state.ctrl_termination
+    return ct.endtim if ct is not None and ct.endtim > 0.0 else math.inf
+
+
+def _damping_curve_points(curve: Curve) -> Tuple[List[Tuple[float, float]],
+                                                 bool]:
+    """The curve as LS-DYNA evaluates it in time, and whether it differs
+    from the stored points.
+
+    ``Curve.pts`` is already scaled (``handle_define_curve`` stores
+    ``((x + OFFA) SFA, (y + OFFO) SFO)``, see ``_law106_curve_points``). For
+    a DATTYP-0 curve with OFFA > 0 (SFA 0 / 1), Vol I R17 *DEFINE_CURVE
+    Remark 4a adds two points at t 0 and 0.999 OFFA with the value 0 - the
+    head writer/loadcurves gives an applied-load curve."""
+    pts = [(float(a), float(o)) for a, o in curve.pts]
+    if (curve.offa > 0.0 and curve.sfa in (0.0, 1.0)
+            and getattr(curve, "dattyp", 0) in (0, None)
+            and pts and pts[0][0] > 0.0
+            and not all(o == 0.0 for _a, o in pts[:2])):
+        head = [(0.0, 0.0)]
+        if 0.999 * curve.offa < pts[0][0]:
+            head.append((0.999 * curve.offa, 0.0))
+        return head + pts, True
+    return pts, False
+
+
+def _damping_steps(pts: List[Tuple[float, float]], scale: float = 1.0
+                   ) -> Tuple[Optional[List[Tuple[float, float, float]]], str]:
+    """The piecewise-constant reading of a damping curve:
+    ``[(level, t_on, t_off)]``, the first from -inf, or ``(None, why)`` when
+    the curve has none.
+
+    A PLATEAU is a run of points sharing one ordinate - two or more of them,
+    or the first / last run of the curve. The first run's level holds before
+    the first abscissa, as the /DAMP/FUNCT copy holds the first value back
+    to t 0. After the LAST abscissa the curve is 0 - the zero tail the
+    /DAMP/FUNCT copy gets, Vol I R17 *DEFINE_CURVE Remark 5's off-scale zero
+    (stated for applied loads) - so the last level ends there, on both
+    branches alike (fix round of the K-20 review: windows used to hold it to
+    ENDTIM while a copy dropped it to 0). One exception keeps the old bytes:
+    a FLAT curve (one level) that reaches t 0 holds its level to the end of
+    the run (+inf), the reading k2rad has always given a flat curve - the
+    old first-ordinate card damped the whole run with it.
+
+    Between two plateaus lies an EDGE, one segment or several through single
+    points. Every edge must be steep - (largest - smallest ordinate) x
+    duration x |*scale*| (SF: the bound is about alpha) at or below
+    ``_DAMP_STEEP_DOSE`` for one segment, ``_DAMP_STEEP_DOSE_MULTI`` through
+    intermediate points - and change the level - a bump that returns to its
+    own level has no step to stand for it - and its step sits at the edge's
+    midpoint, where a straight ramp's damping integral is kept exactly. A
+    reversed abscissa has no piecewise reading either: LS-DYNA evaluates
+    such a curve with a forward-walking search (``_monotonic_abscissae``)."""
+    for (a, _va), (b, _vb) in zip(pts, pts[1:]):
+        if b < a:
+            return None, f"its abscissa reverses at t {b:g}, after t {a:g}"
+    runs: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(pts):
+        j = i
+        while j + 1 < len(pts) and pts[j + 1][1] == pts[i][1]:
+            j += 1
+        runs.append((i, j))
+        i = j + 1
+    plats = [r for k, r in enumerate(runs)
+             if k in (0, len(runs) - 1) or r[1] > r[0]]
+    steps: List[Tuple[float, float, float]] = []
+    t_on = -math.inf
+    sf_txt = "SF x " if scale != 1.0 else ""
+    for (_p0, p1), (q0, _q1) in zip(plats, plats[1:]):
+        t1, t2 = pts[p1][0], pts[q0][0]
+        ords = [o for _a, o in pts[p1:q0 + 1]]
+        dose = abs(scale) * (max(ords) - min(ords)) * (t2 - t1)
+        straight = q0 == p1 + 1
+        bound = _DAMP_STEEP_DOSE if straight else _DAMP_STEEP_DOSE_MULTI
+        if dose > bound:
+            return None, (
+                f"its edge at t {t1:g} .. {t2:g} has {sf_txt}(largest - "
+                f"smallest ordinate) x duration = {dose:.6G} > {bound:g}"
+                + ("" if straight else
+                   ", the bound of an edge through intermediate points, "
+                   "whose step can move the damping integral by that whole "
+                   "product"))
+        if pts[p1][1] == pts[q0][1]:
+            return None, (f"its bump at t {t1:g} .. {t2:g} returns to its "
+                          f"own level {pts[p1][1]:g}")
+        t_mid = 0.5 * (t1 + t2)
+        steps.append((pts[p1][1], t_on, t_mid))
+        t_on = t_mid
+    held = len(plats) == 1 and pts[-1][0] >= 0.0
+    steps.append((pts[plats[-1][0]][1], t_on,
+                  math.inf if held else pts[-1][0]))
+    return steps, ""
+
+
+def _damping_value_at(pts: List[Tuple[float, float]], t: float) -> float:
+    """D(t) as the /DAMP/FUNCT copy carries it: the first ordinate before the
+    first abscissa, linear between points, 0 after the last."""
+    if t < pts[0][0]:
+        return pts[0][1]
+    if t > pts[-1][0]:
+        return 0.0
+    for (a, va), (b, vb) in zip(pts, pts[1:]):
+        if a <= t <= b:
+            return va if b == a else va + (vb - va) * (t - a) / (b - a)
+    return pts[-1][1]
+
+
+def _damping_smooth_points(state: ConversionState, lcid: int, curve: Curve,
+                           endtim: float
+                           ) -> Tuple[List[Tuple[float, float]], str, bool]:
+    """The points a *DEFINE_CURVE_SMOOTH damping curve is read by, the note
+    its /FUNCT copy carries, and whether they are a sampled shape.
+
+    /DAMP/FUNCT evaluates its function with ``ufunc.F`` GET_U_FUNC
+    (:174-210, called by ``damping_funct_ini.F90``): straight between the
+    stored points, the first and the last segment extended. ``hm_read_funct.F``
+    (:191-260) stores a /FUNCT_SMOOTH's points in the same PLD table as a
+    /FUNCT's, so the smoothing flag plays no part there, and on the
+    trapezoid k2rad writes for the card the falling last segment runs on
+    below 0 after TEND - negative damping that feeds energy in (the K-20
+    review measured KE/KE0 2073 at 10 ms on the raw /FUNCT_SMOOTH). A
+    well-formed shape (``state.smooth_curve_params``) is therefore sampled as
+    the SINE ramp an implicit deck's smooth curve gets
+    (``handlers.sampled_smooth_points``: 41 points a ramp, the area DIST, and
+    a (TEND + TRISE, 0) end point that makes the last segment flat at 0); a
+    degenerate one keeps the stored points, which the zero tail then ends at
+    0. The /DAMP/FUNCT always names a /FUNCT copy of them."""
+    params = state.smooth_curve_params.get(lcid)
+    why = ("/DAMP/FUNCT reads its /FUNCT_SMOOTH's points piecewise-linearly "
+           "(ufunc.F GET_U_FUNC - the smoothing flag is for the load "
+           "routines) and extends the falling last segment below 0 after "
+           "TEND")
+    if params is None:
+        return ([(float(a), float(o)) for a, o in curve.pts],
+                "the stored points of the *DEFINE_CURVE_SMOOTH (a degenerate "
+                "shape, no ramp to sample), because " + why, False)
+    from ..handlers import sampled_smooth_points
+    tstart, trise, tend, vmax = params
+    pts = [(float(a), float(o)) for a, o in
+           sampled_smooth_points(tstart, trise, tend, vmax, endtim)]
+    return (pts, "the *DEFINE_CURVE_SMOOTH shape sampled as a SINE ramp 0.5 "
+            "VMAX (1 - cos(pi (t - TSTART) / TRISE)) (" + str(len(pts))
+            + " points, 41 a ramp, area DIST: the shape an implicit deck's "
+            "smooth curve gets), because " + why, True)
+
+
+def _damping_schedule(state: ConversionState, lcid: int,
+                      scale: float = 1.0) -> Optional[_DampSchedule]:
+    """How curve *lcid* damps the run [0, ENDTIM] - None when it is not
+    defined (the caller words that warning). *scale* is the SF that turns
+    the curve into alpha (*DAMPING_PART_MASS; 1 on *DAMPING_GLOBAL): the
+    steepness of an edge is judged on alpha.
+
+    A piecewise-constant curve (:func:`_damping_steps`) gives its non-zero
+    levels as windows clipped to the run: a window that starts at or after
+    ENDTIM is dropped, one that starts before t 0 starts at 0, one that
+    ends at or before t 0 (or has no length left) is dropped, and one that
+    lasts to ENDTIM or beyond gets Tstop 1E30. A single window covering the
+    whole run is ``constant``. Any other curve is ``funct``; its /FUNCT copy
+    is 0 after the last abscissa (the same rule the windows follow: Vol I
+    R17 *DEFINE_CURVE Remark 5, where OpenRadioss would extend the last
+    segment - ``ufunc.F`` GET_U_FUNC :174-210, the routine the /DAMP/FUNCT
+    kernel reads its function with), holds the first ordinate back to t 0
+    instead of extending a first slope, and carries the Remark 4a head. A
+    *DEFINE_CURVE_SMOOTH is read on its sampled shape
+    (:func:`_damping_smooth_points`), and its /DAMP/FUNCT always names a
+    copy: the /FUNCT_SMOOTH's own points would be read straight and run on
+    below 0."""
+    curve = state.curves.get(lcid)
+    if curve is None or not curve.pts:
+        return None
+    endtim = _damp_endtim(state)
+    smooth = lcid in state.funct_smooth_ids
+    smooth_note = ""
+    sampled = False
+    if smooth:
+        pts, smooth_note, sampled = _damping_smooth_points(state, lcid, curve,
+                                                           endtim)
+        head4a = False
+    else:
+        pts, head4a = _damping_curve_points(curve)
+    steps, why = _damping_steps(pts, scale)
+    if steps is not None:
+        wins = [(lv, max(0.0, t_on),
+                 _DAMP_NO_STOP if t_off >= endtim else t_off)
+                for lv, t_on, t_off in steps
+                if lv != 0.0 and t_off > max(0.0, t_on) and t_on < endtim]
+        if not wins:
+            return _DampSchedule("zero", lcid, endtim)
+        xn = pts[-1][0]
+        lv_n, _on_n, off_n = steps[-1]
+        # a flat curve's level is held past its last abscissa (+inf): said
+        # when that is before a stated ENDTIM; any other curve's last level
+        # stops there: said when that is inside the run
+        held = (xn if off_n == math.inf and lv_n != 0.0
+                and xn < endtim < math.inf else None)
+        ends_at = ((xn, lv_n) if off_n != math.inf and lv_n != 0.0
+                   and 0.0 < xn < endtim else None)
+        if len(wins) == 1 and wins[0][1] == 0.0 \
+                and wins[0][2] == _DAMP_NO_STOP:
+            return _DampSchedule("constant", lcid, endtim, value=wins[0][0],
+                                 held_from=held)
+        v0 = next((lv for lv, t_on, t_off in steps if t_on <= 0.0 < t_off),
+                  steps[-1][0])
+        return _DampSchedule("windows", lcid, endtim, value=v0, windows=wins,
+                             ends_at=ends_at)
+    inside = [o for a, o in pts if 0.0 <= a <= endtim]
+    inside.append(_damping_value_at(pts, 0.0))
+    if endtim < math.inf:
+        inside.append(_damping_value_at(pts, endtim))
+    if all(o == 0.0 for o in inside):
+        return _DampSchedule("zero", lcid, endtim)
+    sch = _DampSchedule("funct", lcid, endtim,
+                        value=_damping_value_at(pts, 0.0), why=why)
+    if smooth:
+        sch.copy_notes.append(smooth_note)
+        if sampled:
+            sch.copy_tag = "damping_smooth_sampled"
+    head: List[Tuple[float, float]] = []
+    if head4a:
+        sch.copy_notes.append(
+            f"(0, 0) and (0.999 OFFA, 0) in front, the two points Remark 4a "
+            f"adds to a DATTYP-0 curve with OFFA = {curve.offa:g}")
+    elif pts[0][0] > 0.0 and len(pts) > 1 and pts[1][1] != pts[0][1]:
+        head = [(0.0, pts[0][1])]
+        sch.copy_notes.append(
+            f"(0, {pts[0][1]:g}) in front, so f holds its first value back "
+            f"to t 0 instead of extending its first slope")
+    tail: List[Tuple[float, float]] = []
+    xn = pts[-1][0]
+    if (xn < endtim
+            and not (len(pts) > 1 and pts[-2][1] == 0.0
+                     and pts[-1][1] == 0.0)):
+        # with no ENDTIM stated the windows stop at the last abscissa too,
+        # so the tail is written all the same, on the scale of the /RUN 1.0
+        # k2rad then writes (any far point keeps the extension flat at 0)
+        span = endtim if endtim < math.inf else max(1.0, abs(xn))
+        x1 = 1.0001 * xn if xn > 0.0 else xn + 1.0e-4 * span
+        far = max(2.0 * span, 2.0 * xn)
+        if far <= x1:
+            far = x1 + span
+        tail = [(x1, 0.0), (far, 0.0)]
+        sch.copy_notes.append(
+            f"0 after its last abscissa {xn:g}, where OpenRadioss's "
+            f"GET_U_FUNC would extend the last segment (Vol I R17 "
+            f"*DEFINE_CURVE Remark 5; a stepped curve's last window stops "
+            f"there too)")
+    if smooth or head4a or head or tail or lcid in state.table_1d_ids:
+        if lcid in state.table_1d_ids:
+            sch.copy_notes.append(
+                "the points of the curve a material reads as a /TABLE")
+        sch.copy_pts = head + pts + tail
+    return sch
+
+
+def _damp_schedule_cards(state: ConversionState, sch: _DampSchedule,
+                         grnod_id: int, damp_id: int, scale: float,
+                         dof: Optional[Tuple[float, ...]],
+                         title: str) -> Tuple[List[str], int]:
+    """The cards of a ``windows`` / ``funct`` schedule on *grnod_id*, and the
+    /FUNCT id a /DAMP/FUNCT names (0 for windows).
+
+    ``windows``: one plain alpha-only /DAMP per level, ``Alpha = scale x
+    level``, Tstart / Tstop in card 1 (radioss110/DAMP/Damp.cfg); *dof*
+    (STX..SRZ, x y z xx yy zz) turns each into the Format-2 card whose five
+    extra rows carry ``Alpha x ST_i`` with Beta 0. The first card takes
+    *damp_id*, the others draw theirs.
+
+    ``funct``: the /FUNCT copy when the schedule has one (zero tail, head,
+    a /TABLE curve's points or a sampled smooth shape; written here,
+    inline: the /FUNCT section ran long before), then ONE /DAMP/FUNCT
+    (radioss2026/DAMP/Damp_funct.cfg) with ``Alpha = scale`` and all six
+    direction coefficients written out - ``hm_read_damp.F`` gives Alpha_x ..
+    Alpha_zz no default, so a blank one leaves that direction undamped."""
+    lines: List[str] = []
+    if sch.kind == "windows":
+        n = len(sch.windows)
+        for k, (level, t0, t1) in enumerate(sch.windows, 1):
+            did = damp_id if k == 1 else state.next_id()
+            alpha = scale * level
+            head = [f"/DAMP/{did}",
+                    f"{title} window {k}/{n} (alpha={alpha:.6G})",
+                    _DAMP_CARD1_HDR]
+            if dof is None:
+                lines += head + [
+                    f"{_f(alpha)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(t0)}"
+                    f"{_f(t1)}", HDR]
+            else:
+                ax, ay, az, axx, ayy, azz = (alpha * s for s in dof)
+                lines += head + [
+                    f"{_f(ax)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(t0)}"
+                    f"{_f(t1)}",
+                    f"{_f(ay)}{_f(0.0)}", f"{_f(az)}{_f(0.0)}",
+                    f"{_f(axx)}{_f(0.0)}", f"{_f(ayy)}{_f(0.0)}",
+                    f"{_f(azz)}{_f(0.0)}", HDR]
+        return lines, 0
+    fct = sch.lcid
+    if sch.copy_pts is not None:
+        fct = state.next_curve_id()
+        lines += [f"/FUNCT/{fct}", f"FUNCT_{sch.lcid}_{sch.copy_tag}",
+                  "#                  X                   Y"]
+        for a, o in _monotonic_abscissae(sch.copy_pts):
+            lines.append(f"{_f(a)}{_f(o)}")
+        lines.append(HDR)
+    co = dof if dof is not None else (1.0,) * 6
+    lines += [
+        f"/DAMP/FUNCT/{damp_id}",
+        f"{title} (alpha = {scale:.6G} x f(t))",
+        _DAMP_FUNCT_HDR,
+        f"{_i(fct)}{_i(grnod_id)}{_f(scale)}",
+        _DAMP_FUNCT_HDR_T,
+        f"{_f(co[0])}{_f(co[1])}{_f(co[2])}",
+        _DAMP_FUNCT_HDR_R,
+        f"{_f(co[3])}{_f(co[4])}{_f(co[5])}",
+        HDR,
+    ]
+    return lines, fct
+
+
+def _warn_damp_schedule(state: ConversionState, sch: _DampSchedule,
+                        what: str, scale: float, scale_txt: str,
+                        dof: Optional[Tuple[float, ...]], fct: int,
+                        opt_out: str) -> None:
+    """The one sentence that says how a ``windows`` / ``funct`` schedule was
+    written (*scale_txt* says what alpha / Alpha is, e.g. 'SF x level' or
+    'SF = 1.5')."""
+    if sch.kind == "windows":
+        n = len(sch.windows)
+        spans = "; ".join(
+            f"alpha={scale * lv:.6G} for t {t0:.6G}.."
+            + ("end" if t1 >= _DAMP_NO_STOP else f"{t1:.6G}")
+            for lv, t0, t1 in sch.windows)
+        stop = ""
+        if sch.ends_at is not None:
+            xn, lv = sch.ends_at
+            stop = (f" Curve {sch.lcid} ends at t {xn:g}, before "
+                    f"ENDTIM={sch.endtim:g}, so its last level "
+                    f"(alpha={scale * lv:.6G}) stops there; extend the curve "
+                    "to ENDTIM if that level is meant to hold.")
+        state.warn(
+            f"{what}: load curve {sch.lcid} is piecewise constant, so it is "
+            f"written in TIME as {n} alpha-only /DAMP{'s' if n > 1 else ''} "
+            f"on one /GRNOD (alpha = {scale_txt}): {spans}. Each step sits "
+            "at its edge's midpoint, every edge being steep ((largest - "
+            "smallest alpha across it) x duration <= "
+            f"{_DAMP_STEEP_DOSE:g} for a straight edge, "
+            f"{_DAMP_STEEP_DOSE_MULTI:g} for one through intermediate "
+            "points, which keeps KE within 1 % of what the curve itself "
+            "gives); a curve is 0 after its last abscissa (Vol I R17 "
+            "*DEFINE_CURVE Remark 5's off-scale zero, stated for applied "
+            "loads - the zero tail a /DAMP/FUNCT copy gets too), and the "
+            f"windows are clipped to [0, ENDTIM={sch.endtim:g}] (Tstop 1E30 "
+            "= to the end of the run)." + stop + " " + opt_out)
+        return
+    coeff = ("all 1" if dof is None
+             else "STX..SRZ = " + " ".join(f"{s:g}" for s in dof))
+    src = (f"curve {sch.lcid} itself" if fct == sch.lcid else
+           f"/FUNCT/{fct}, a copy of curve {sch.lcid} with "
+           + "; ".join(sch.copy_notes))
+    state.warn(
+        f"{what}: load curve {sch.lcid} is not piecewise constant "
+        f"({sch.why}), so it is written as /DAMP/FUNCT: alpha(t) = Alpha x "
+        f"f(t) x Alpha_dir with Alpha = {scale_txt} and the six direction "
+        f"coefficients Alpha_dir written out ({coeff}), because "
+        "hm_read_damp.F gives Alpha_x..Alpha_zz no default and a blank one "
+        f"leaves that direction undamped. f is {src}. /DAMP/FUNCT is a "
+        "radioss2026 keyword: at /BEGIN 2022 the starter prints the advisory "
+        "WARNING 100211 (Unsupported option /DAMP/FUNCT in format < 2026) and "
+        "reads the card as written (MEASURED: the echo MASS DAMPING WITH "
+        "INPUT FUNCTION). " + opt_out)
+
+
+def _warn_damp_held_tail(state: ConversionState, sch: _DampSchedule,
+                         what: str) -> None:
+    """Say that a FLAT curve's level is held past the curve's last abscissa
+    to ENDTIM - the reading k2rad has always given a flat curve (the old
+    first-ordinate card damped the whole run with it), and what
+    OpenRadioss's own /FUNCT extension of a flat segment gives - while any
+    other curve is 0 there. LS-DYNA's off-scale rule (Vol I R17
+    *DEFINE_CURVE Remark 5) is stated for applied loads only, so the deck,
+    not the converter, has to settle what happens there."""
+    if sch.held_from is None:
+        return
+    state.warn(
+        f"{what}: load curve {sch.lcid} ends at t {sch.held_from:g}, before "
+        f"ENDTIM={sch.endtim:g}, on the level {sch.value:g}, which is HELD "
+        "to the end of the run (Tstop 1E30): a FLAT curve keeps the reading "
+        "k2rad has always given it - the old first-ordinate card damped the "
+        "whole run with its level, as OpenRadioss's /FUNCT extrapolation of "
+        "a flat segment does - while a curve with more than one level is 0 "
+        "after its last abscissa (its last window stops there, its "
+        "/DAMP/FUNCT copy gets a zero tail). Vol I R17 *DEFINE_CURVE Remark "
+        "5 sets an APPLIED-LOAD curve to zero once the time goes off scale "
+        "and names no damping curve, so whether LS-DYNA still damps after "
+        "the last abscissa is not established (no LS-DYNA run here). Extend "
+        "the curve to ENDTIM, or end it with an edge to 0, to make the deck "
+        "say which.")
 
 
 def _make_damping_part_mass(state: ConversionState,
@@ -11369,19 +12147,51 @@ def _make_damping_part_mass(state: ConversionState,
                 "constant-value column — the damping constant is read entirely "
                 "off the curve — so there is nothing to apply; card DROPPED.")
             continue
-        value = _damping_curve_constant(state, dm.lcid, what)
-        if value is None:
-            continue
-        alpha = dm.sf * value
-        if alpha == 0.0:
-            state.warn(
-                f"{what}: SF={dm.sf:.6G} x curve {dm.lcid} = 0, so the card "
-                "damps nothing — /DAMP not emitted for it. (If the curve is "
-                "flat at zero it really does ask for no damping; if it only "
-                "STARTS at zero and ramps up, the time variation that is being "
-                "lost has been reported separately — a /BEGIN 2022 /DAMP "
-                "carries a constant Alpha and cannot ramp.)")
-            continue
+        # K-20 (default ON): the curve in TIME, its edges judged on alpha =
+        # SF x curve. A schedule that is constant over the run falls through
+        # to the old single card, which is exact for it; ``sch`` stays set
+        # only for windows / /DAMP/FUNCT, and ``held`` keeps a constant (flat
+        # curve) schedule for the held-level sentence once the card is
+        # written.
+        sch: Optional[_DampSchedule] = None
+        held: Optional[_DampSchedule] = None
+        if state.options.damping_curve_window:
+            sch = _damping_schedule(state, dm.lcid, dm.sf)
+            if sch is None:
+                _warn_damping_curve_missing(state, dm.lcid, what)
+                continue
+            if dm.sf == 0.0:
+                state.warn(
+                    f"{what}: SF={dm.sf:.6G} x curve {dm.lcid} = 0, so the "
+                    "card damps nothing — /DAMP not emitted for it.")
+                continue
+            if sch.kind == "zero":
+                state.warn(
+                    f"{what}: load curve {dm.lcid} is 0 over the whole run "
+                    f"[0, ENDTIM={sch.endtim:g}] (a curve is 0 after its "
+                    "last abscissa, and a level that opens at or after "
+                    "ENDTIM never acts), so the card damps nothing — /DAMP "
+                    "not emitted for it.")
+                continue
+            alpha = dm.sf * sch.value
+            if sch.kind == "constant":
+                held = sch
+                sch = None
+        else:
+            value = _damping_curve_constant(state, dm.lcid, what)
+            if value is None:
+                continue
+            alpha = dm.sf * value
+            if alpha == 0.0:
+                state.warn(
+                    f"{what}: SF={dm.sf:.6G} x curve {dm.lcid} = 0, so the "
+                    "card damps nothing — /DAMP not emitted for it. (If the "
+                    "curve is flat at zero it really does ask for no damping; "
+                    "if it only STARTS at zero and ramps up, the time "
+                    "variation that is being lost has been reported "
+                    "separately — a /BEGIN 2022 /DAMP carries a constant "
+                    "Alpha and cannot ramp.)")
+                continue
         pids = _damping_resolve_pids(state, dm.pid, dm.is_set, what)
         if pids is None:
             continue
@@ -11414,8 +12224,9 @@ def _make_damping_part_mass(state: ConversionState,
                 f"{what}: FLAG=1 requests per-DOF damping scale factors but "
                 "STX..SRZ are all 0.0, which would scale the damping to zero "
                 "on every DOF. Read as 'uniform' (the all-six-zero convention "
-                f"dyna2rad applies on /DAMP/FUNCT) and alpha={alpha:.6G} is "
-                "used on all six DOFs.")
+                "dyna2rad applies on /DAMP/FUNCT) and "
+                + (f"alpha={alpha:.6G}" if sch is None
+                   else "alpha = SF x curve") + " is used on all six DOFs.")
             per_dof = False
         if shared := sorted(stiff_nodes.intersection(nodes)):
             # Two /DAMP cards sharing a node share the single per-node history
@@ -11438,7 +12249,21 @@ def _make_damping_part_mass(state: ConversionState,
         lines += _emit_grnod_node(
             grnod_id, f"damping_part_mass_{'pset' if dm.is_set else 'pid'}"
                       f"_{dm.pid}", nodes)
-        if not per_dof:
+        if held is not None:
+            _warn_damp_held_tail(state, held, what)
+        if sch is not None:
+            dof = scales if per_dof else None
+            cards, fct = _damp_schedule_cards(
+                state, sch, grnod_id, damp_id, dm.sf, dof,
+                f"Mass damping {kw} lcid={dm.lcid}")
+            lines += cards
+            _warn_damp_schedule(
+                state, sch, what, dm.sf,
+                "SF x level" if sch.kind == "windows"
+                else f"SF = {dm.sf:.6G}", dof, fct,
+                "--no-damping-curve-window writes the old single /DAMP at "
+                "the curve's first ordinate for the whole run.")
+        elif not per_dof:
             lines += [
                 f"/DAMP/{damp_id}",
                 f"Mass damping *DAMPING_PART_MASS lcid={dm.lcid} "

@@ -49,13 +49,13 @@ from k2rad.writer.common import _f, _i
 from k2rad.writer.loads import _DAMP_CARD1_HDR, _resolve_damping_relative
 
 
-def _convert(deck: str):
+def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -595,15 +595,29 @@ class DampingPartMassEmissionTests(unittest.TestCase):
         result, _ = _convert(deck)
         self.assertEqual([], _warns(result, "time-VARYING"))
 
-    def test_ramped_curve_warns_and_uses_the_first_ordinate(self):
+    def test_ramped_curve_is_carried_in_time_by_damp_funct(self):
+        """CardStack batch, K-20 (default ON): a ramp is not piecewise
+        constant, so it is no longer reduced to its first ordinate — it
+        becomes a /DAMP/FUNCT on the curve with Alpha = SF."""
         deck = (_MESH + _CURVE_RAMP
                 + "*DAMPING_PART_MASS\n         1       202       1.0\n" + _END)
         result, starter = _convert(deck)
+        self.assertEqual([], _warns(result, "time-VARYING"))
+        self.assertNotIn("(alpha=50)", starter)
+        self.assertIn("/DAMP/FUNCT/", starter)
+
+    def test_ramped_curve_warns_and_uses_the_first_ordinate(self):
+        """--no-damping-curve-window keeps the old reduction, its warning
+        and its card."""
+        deck = (_MESH + _CURVE_RAMP
+                + "*DAMPING_PART_MASS\n         1       202       1.0\n" + _END)
+        result, starter = _convert(deck, damping_curve_window=False)
         w = _warns(result, "time-VARYING")
         self.assertEqual(1, len(w))
         self.assertIn("ordinates 50..150", w[0])
         self.assertIn("(50)", w[0])
         self.assertIn("(alpha=50)", starter)
+        self.assertNotIn("/DAMP/FUNCT/", starter)
 
     def test_curve_scale_factors_are_already_baked_into_the_ordinate(self):
         """*DEFINE_CURVE SFO/OFFO are applied at parse time, so the writer must
@@ -617,20 +631,39 @@ class DampingPartMassEmissionTests(unittest.TestCase):
         _, starter = _convert(deck)
         self.assertIn("(alpha=600)", starter)
 
+    _CURVE_STARTS_0 = (
+        "*DEFINE_CURVE\n"
+        "       205         0     1.000     1.000     0.000     0.000\n"
+        "               0.000               0.000\n"
+        "        1.000000e-02             100.000\n")
+
     def test_zero_alpha_emits_nothing(self):
-        for sf, lcid, curve, label in (
-                ("       0.0", "       201", _CURVE_FLAT, "SF=0"),
-                ("       1.0", "       205",
-                 "*DEFINE_CURVE\n"
-                 "       205         0     1.000     1.000     0.000     0.000\n"
-                 "               0.000               0.000\n"
-                 "        1.000000e-02             100.000\n", "curve starts 0")):
+        """SF = 0 drops the card either way; the curve that only STARTS at 0
+        is dropped by the old first-ordinate reduction, which
+        --no-damping-curve-window keeps."""
+        for sf, lcid, curve, label, kw in (
+                ("       0.0", "       201", _CURVE_FLAT, "SF=0", {}),
+                ("       0.0", "       201", _CURVE_FLAT, "SF=0, opt-out",
+                 {"damping_curve_window": False}),
+                ("       1.0", "       205", self._CURVE_STARTS_0,
+                 "curve starts 0, opt-out", {"damping_curve_window": False})):
             with self.subTest(case=label):
                 deck = (_MESH + curve + "*DAMPING_PART_MASS\n"
                         f"         1{lcid}{sf}\n" + _END)
-                result, starter = _convert(deck)
+                result, starter = _convert(deck, **kw)
                 self.assertNotIn("PART MASS DAMPING", starter)
                 self.assertTrue(_warns(result, "damps nothing"))
+
+    def test_a_curve_that_only_starts_at_0_is_carried_in_time(self):
+        """CardStack batch, K-20 (default ON): the ramp from 0 is a
+        /DAMP/FUNCT, not a card dropped for its first ordinate."""
+        deck = (_MESH + self._CURVE_STARTS_0
+                + "*DAMPING_PART_MASS\n         1       205       1.0\n"
+                + _END)
+        result, starter = _convert(deck)
+        self.assertIn("PART MASS DAMPING", starter)
+        self.assertIn("/DAMP/FUNCT/", starter)
+        self.assertEqual([], _warns(result, "damps nothing"))
 
     def test_part_without_any_element_nodes_warns(self):
         """A part with NO mesh at all. The message used to say "no deformable
@@ -1428,12 +1461,24 @@ class DampingBatchNonRegressionTests(unittest.TestCase):
         self.assertNotIn("PART_STIFFNESS", w)
 
         # ...and with an LCID the curve is named as the real damping source
+        # (--no-damping-curve-window: the old VALDMP reading)...
         deck = (_MESH + _CURVE_FLAT
                 + "*DAMPING_GLOBAL\n       201       0.0\n" + _END)
-        result, starter = _convert(deck)
+        result, starter = _convert(deck, damping_curve_window=False)
         self.assertNotIn("/DAMP/", starter)
         w = _warns(result, "resolves to alpha=0 AND beta=0")[0]
         self.assertIn("lives on LCID=201", w)
+
+        # ...while the default reads it: CardStack batch, K-20 - LCID > 0
+        # bypasses VALDMP (Vol I R17 p.15-8), so the flat curve's 200 damps
+        # the whole run instead of nothing
+        result, starter = _convert(deck)
+        self.assertEqual([], _warns(result, "resolves to alpha=0 AND beta=0"))
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/DAMP/"))
+        self.assertEqual("Rayleigh mass damping (alpha=200)", lines[i + 1])
+        self.assertEqual(f"{_f(200.0)}{_f(0.0)}", lines[i + 3][:40])
+        self.assertEqual(f"{_f(0.0)}{_f(1.0E30)}", lines[i + 3][60:])
 
     def test_zero_coef_part_still_rides_in_the_beta_bearing_group(self):
         """_make_damping puts EVERY *DAMPING_PART_STIFFNESS pid in its /GRNOD

@@ -93,13 +93,13 @@ from k2rad.writer.common import _ref_flag_materials   # noqa: E402
 
 # ── Harness (same shape as tests/test_adhesives.py) ──────────────────────────
 
-def _convert(deck: str):
+def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -918,22 +918,36 @@ class Mat154Tests(unittest.TestCase):
         self.assertIn("Isolid=24", hits[0])
         self.assertIn("NORMAL TERMINATION after 1 cycle", hits[0])
 
-    def test_tet_formulation_left_with_warning(self):
-        """A MAT_154 TET part (ELFORM 10 -> Isolid 14) is NOT remapped —
-        only the measured-fatal hex 17 is — but the WARNING-1905 window
-        pre-announcement survives, telling the user to verify the engine
-        time step."""
+    def _tet154_deck(self):
         tet = ("*ELEMENT_SOLID\n" + _row(1, 7)
                + "\n" + _row(1, 2, 3, 5, 5, 5, 5, 5) + "\n")
-        deck = (NODES + tet + PART
+        return (NODES + tet + PART
                 + "*SECTION_SOLID\n" + _row(7, 10) + "\n"
                 + _mat154() + END)
-        res, starter = _convert(deck)
+
+    def test_tet_formulation_left_with_warning(self):
+        """A MAT_154 TET part under --no-tet-isolid1 (ELFORM 10 -> Isolid 14)
+        is NOT remapped — only the measured-fatal hex 17 is — but the
+        WARNING-1905 window pre-announcement survives, telling the user to
+        verify the engine time step."""
+        res, starter = _convert(self._tet154_deck(), tet_isolid1=False)
         prop = _cards(_block(starter, "/PROP/SOLID/7"))
         self.assertEqual(_col_i(prop[0], 1, 10), 14)       # tet Isolid kept
         hits = _warns(res, "WARNING 1905")
         self.assertTrue(hits)
         self.assertIn("VERIFY", hits[0])
+        self.assertFalse(_warns(res, "UNRUNNABLE"))
+
+    def test_an_all_tet_section_is_written_isolid_1_without_the_1905_note(self):
+        """K-30 (default ON): the all-tet section is written Isolid 1, the
+        value the starter resets an Isolid 14 tet group to (sgrtails.F:984-988).
+        That is outside the WARNING-1905 window (JHBE 3..20 or Itetra4 1..2,
+        sgrtails.F:631), so the gate - which reads the emitted value - names
+        no window, and the hex 17 -> 24 route is not claimed either."""
+        res, starter = _convert(self._tet154_deck())
+        prop = _cards(_block(starter, "/PROP/SOLID/7"))
+        self.assertEqual(_col_i(prop[0], 1, 10), 1)
+        self.assertFalse(_warns(res, "WARNING 1905"))
         self.assertFalse(_warns(res, "UNRUNNABLE"))
 
     def test_shared_section_drag_warned(self):
@@ -1283,7 +1297,12 @@ class RegistryTests(unittest.TestCase):
         emitter. The named risks here are _make_materials (five new loops),
         _composite_material_mids/_assign_composite_props (the MAT_126
         claim), handle_set_part_list (the DA-attribute recording) and the
-        build_starter prepass ordering around _resolve_mat_foams."""
+        build_starter prepass ordering around _resolve_mat_foams. (The
+        CardStack batch re-baselined five of these goldens on purpose - K-30
+        writes solid_plastic's all-tet section Isolid 1, K-31 the four
+        *MAT_ELASTIC shell goldens N = 0, six cells in all; measured and
+        pinned in tests/test_cardstack_pipeline_props.py::GoldenFixtureMoves.)
+        """
         import shutil
         fixtures = Path(__file__).resolve().parent / "fixtures"
         expected = fixtures / "expected"

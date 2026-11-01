@@ -35,8 +35,8 @@ from .materials import (
     _resolve_modal_acoustic_void,
 )
 from .muscle import _make_muscle_springs
-from .axisym2d import (resolve_axisym_plan, transform_engine_lines,
-                       transform_starter_lines)
+from .axisym2d import (axisym_routed, resolve_axisym_plan,
+                       transform_engine_lines, transform_starter_lines)
 from .loadcurves import make_offscale_functs
 from .thermal import (_make_thermal, _resolve_thermal,
                       _resolve_weld_trajectories, _thermal_solve_active,
@@ -301,6 +301,71 @@ def _engine_implicit(state: ConversionState) -> bool:
 #: orders of magnitude above any real run length in any unit system used there.
 _ENDTIM_SENTINEL = 1e6
 
+#: The engine reads the N of ``/PRINT/-N`` from the keyword line itself,
+#: ``FMT='(7X,I5,X,I5)'`` (freform.F:1563), so "-9999" is the widest N that
+#: fits the I5 cell; a sixth character would be cut off silently.
+_PRINT_N_MAX = 9999
+
+
+def _glstat_requested(state: ConversionState) -> bool:
+    """Does the deck carry a ``*DATABASE_GLSTAT`` (any spelling)?
+
+    The card's PRESENCE, not its DT: LS-DYNA ignores ``*CONTROL_OUTPUT``
+    IKEDIT "if the glstat file is written" (Vol I R17 p.12-441), and a glstat
+    card whose DT cell is blank can still be paced by its LCUR curve, which
+    k2rad does not read. Presence keeps such a deck at the old ``/PRINT/-1``.
+    """
+    return bool(state.db_glstat_dt) or any(
+        k == "DATABASE_GLSTAT" or k.startswith("DATABASE_GLSTAT_")
+        for k in state.deck_keywords)
+
+
+def _print_cadence(state: ConversionState) -> int:
+    """The N of the engine ``/PRINT/-N`` (CardStack batch, K-42).
+
+    ``/PRINT/-N`` prints one cycle row every N cycles to ``<stem>_0001.out``
+    (ecrit.F:156 / 650) and, N being negative, the same row to the console
+    (ecrit.F:652). In order:
+
+    * ``--print-every N`` (``options.print_every``, 1..9999), as given;
+    * else a STATED ``*CONTROL_OUTPUT`` IKEDIT ("problem status report
+      interval steps to the d3hsp file. This flag is ignored if the glstat
+      file is written", Vol I R17 p.12-441) on a deck WITHOUT
+      ``*DATABASE_GLSTAT`` - LS-DYNA's own rule - capped at 9999 (the I5
+      cell, freform.F:1563);
+    * else 1, the ``/PRINT/-1`` k2rad has always written (a blank IKEDIT is
+      0 as stated, whatever LS-DYNA's own default 100).
+
+    ``--print-every 1`` therefore restores ``/PRINT/-1`` on a deck the IKEDIT
+    rule moves. The ``/STOP`` written by ``--stop-added-mass`` does not depend
+    on N: its Nth / Nanim 1 keep ecrit.F:171-174 from returning early, so the
+    mass criterion is tested every cycle, not only on print cycles.
+    """
+    pe = state.options.print_every
+    if pe is not None:
+        return int(pe)
+    co = state.ctrl_output
+    ikedit = co.ikedit if co is not None else 0
+    if ikedit <= 0 or _glstat_requested(state):
+        return 1
+    n = min(ikedit, _PRINT_N_MAX)
+    # MEASURED (the K4 probe, 401 cycles): /PRINT/-7 printed cycles 0, 7,
+    # ..., 399 and not the last cycle 400 - the row of a final cycle that is
+    # not a multiple of N is never printed.
+    state.warn(
+        f"*CONTROL_OUTPUT IKEDIT {ikedit} on a deck without *DATABASE_GLSTAT "
+        "(LS-DYNA honours IKEDIT only when no glstat file is written, Vol I "
+        f"R17 p.12-441) -> engine /PRINT/-{n}: one cycle row every {n} cycles "
+        "in the engine listing (<stem>_0001.out) and on the console, instead "
+        "of every cycle."
+        + (f" IKEDIT {ikedit} is above {_PRINT_N_MAX}, the widest N the "
+           "engine reads (the /PRINT cell is I5, freform.F:1563), so "
+           f"/PRINT/-{n} is written." if ikedit > _PRINT_N_MAX else "")
+        + " The last row then sits up to N - 1 cycles before the end "
+        "(measured: /PRINT/-7 on a 401-cycle run prints cycle 399 last); "
+        "--print-every 1 keeps /PRINT/-1.")
+    return n
+
 
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
@@ -441,7 +506,8 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                "(Manual p. 16-7). Radioss's /TFILE is a TIME interval and has "
                "no cycle-based form, so those requests cannot be honoured and "
                "took no part in the derivation above." if cycle_based else ""))
-    lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
+    lines += ["/TFILE", f"{dt_th:.6G}", "#",
+              f"/PRINT/-{_print_cadence(state)}", "#"]
 
     dt_anim = 0.0
     if state.db_d3plot:
@@ -517,6 +583,20 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/SHELL/TENS/STRESS/MEMB")
     lines.append("/ANIM/SHELL/TENS/STRESS/UPPER")
     lines.append("/ANIM/SHELL/TENS/STRESS/LOWER")
+    # *DATABASE_EXTENT_BINARY MAXINT > 3 asks d3plot for "the first MAXINT
+    # integration points" of every shell (Vol I R17 p.16-67; the default 3
+    # is top / bottom / mid-surface, which MEMB / UPPER / LOWER above
+    # cover). STRESS/ALL sets ISTRESALL (anim_dcod_key_0.F:302-304), i.e.
+    # UPPER, LOWER and every one of the NIPMAX layers
+    # (anim_build_index_all.F:152-167); MEMB stays on its own line. The
+    # field is DbExtentBinary.maxint (card 1 field 3, default 3), stored by
+    # handle_database_extent_binary since the CardStack wave C, so a deck
+    # that states MAXINT > 3 reaches this line. A MAXINT < -3 (|MAXINT|
+    # points at every in-plane point, no averaging) is named in the handler
+    # log and not written here (ROADMAP).
+    maxint = int(ext.maxint or 0) if ext is not None else 0
+    if maxint > 3:
+        lines.append("/ANIM/SHELL/TENS/STRESS/ALL")
     lines.append("/ANIM/SHELL/TENS/STRAIN/MEMB")
     lines.append("/ANIM/SHELL/TENS/STRAIN/UPPER")
     lines.append("/ANIM/SHELL/TENS/STRAIN/LOWER")
@@ -3513,21 +3593,113 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
     Only emitted when TSSFAC > 0. TSSFAC = 0 is LS-DYNA's "use my default"
     (0.9), which is also OpenRadioss's /DT default, so there is nothing to
     carry and the deck is left exactly as it converted before.
+
+    DT2MS > 0 is NOT "no mass scaling": it is LS-DYNA's step of a
+    mass-scaled solution for quasi-static or time-history runs (Vol I R17
+    p.12-585). k2rad does not convert it on a 3-D deck - ROADMAP, the R14
+    queue, round 9's NOT list, entry 5 "Positive DT2MS on 3-D decks" records
+    why - so the text says that (CardStack batch, K-41), and says it also
+    when TSSFAC is blank and no /DT is written, where the drop used to be
+    silent. The routed 2-D deck's density cell is the one route that does
+    carry it (writer/axisym2d.py), and is not called a drop.
     """
     tsca = ts.tssfac
+    converted, positive = (_positive_dt2ms_clause(state, ts)
+                           if ts.dt2ms > 0.0 else (False, ""))
     if not tsca or tsca <= 0.0:
+        if positive and not converted:
+            # the drop that used to be silent (no /DT to hang a text on)
+            state.warn(f"*CONTROL_TIMESTEP{positive}")
         return []
-    state.warn(
-        f"*CONTROL_TIMESTEP TSSFAC={tsca:g} (DT2MS={ts.dt2ms:g}, no mass "
-        f"scaling) -> /DT Tsca={tsca:g}. The time-step safety factor is "
-        "carried over; Tmin=0 (no lower bound) because LS-DYNA TSLIMT is not "
-        "converted, so the engine will not stop or delete on a small step."
-    )
+    if ts.dt2ms > 0.0:
+        state.warn(
+            f"*CONTROL_TIMESTEP TSSFAC={tsca:g} -> /DT Tsca={tsca:g}. The "
+            "time-step safety factor is carried over; Tmin=0 (no lower "
+            "bound) because LS-DYNA TSLIMT is not converted, so the engine "
+            "will not stop or delete on a small step." + positive)
+    else:
+        state.warn(
+            f"*CONTROL_TIMESTEP TSSFAC={tsca:g} (DT2MS={ts.dt2ms:g}, no mass "
+            f"scaling) -> /DT Tsca={tsca:g}. The time-step safety factor is "
+            "carried over; Tmin=0 (no lower bound) because LS-DYNA TSLIMT is "
+            "not converted, so the engine will not stop or delete on a small "
+            "step."
+        )
     return [
         "/DT",
         f"{_f(tsca)}{_f(0.0)}",
         "#",
     ]
+
+
+def _positive_dt2ms_clause(state: ConversionState, ts) -> Tuple[bool, str]:
+    """``(converted, the sentence)`` of a DT2MS > 0 deck (K-41): converted by
+    the routed 2-D deck's density cell, else NOT converted (ROADMAP entry
+    5)."""
+    routed = axisym_routed(state)
+    plan = state.axisym_plan
+    if routed and plan is not None and plan.density:
+        return True, (f" DT2MS={ts.dt2ms:g} > 0 is converted on this routed "
+                      "2-D deck by its density cell (the 2-D DT2MS warning), "
+                      "not by an engine card.")
+    where = ("on this routed 2-D deck (--no-positive-dt2ms-mass-scaling, or "
+             "no elastic modulus to size the 2-D density cell)" if routed
+             else "on a 3-D deck")
+    return False, (
+        f" DT2MS={ts.dt2ms:g} > 0 - LS-DYNA's step of a mass-scaled "
+        "solution for quasi-static or time-history runs (Vol I R17 "
+        f"p.12-585) - is NOT converted {where}: the run steps at its own "
+        "critical step with the physical mass (ROADMAP, R14 queue, round "
+        "9's NOT list, entry 5 'Positive DT2MS on 3-D decks').")
+
+
+def _tssfac_for_dt2ms(ts) -> Tuple[float, str]:
+    """``(TSSFAC as written, the words for a blank one)``: the deck's TSSFAC
+    when > 0, else 0.9 - Vol I R17 p.12-589 Remark 1 c's default; the 0.333 /
+    0.667 of Remark 1 a / b (SLSFAC >= 1 contacts, *INITIAL_DETONATION,
+    *BOUNDARY_NON_REFLECTING) are not reproduced, and a TSSFAC < 0 curve is
+    not converted."""
+    if ts.tssfac and ts.tssfac > 0.0:
+        return ts.tssfac, ""
+    if ts.tssfac < 0.0:
+        return 0.9, (f"TSSFAC {ts.tssfac:g} < 0 (load curve "
+                     f"{int(round(-ts.tssfac))}, not converted) -> 0.9; ")
+    return 0.9, "TSSFAC blank -> 0.9; "
+
+
+def _dt2ms_tmin(state: ConversionState, ts) -> Tuple[float, float, str]:
+    """``(Tmin, TSSFAC, the words for a blank TSSFAC)`` of a DT2MS < 0 deck:
+    the Tmin ``/DT/NODA/CST`` and ``/DT/AMS`` carry (K-41) - |DT2MS| by
+    default, TSSFAC x |DT2MS| under ``--dt2ms-tssfac-product``. The one
+    source of that number, so a text that restates it (the ``/DT/<elem>/DEL``
+    warning) cannot drift from the card."""
+    tssfac, blank = _tssfac_for_dt2ms(ts)
+    if state.options.dt2ms_tssfac_product:
+        return tssfac * abs(ts.dt2ms), tssfac, blank
+    return abs(ts.dt2ms), tssfac, blank
+
+
+def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
+                       blank: str, tmin: float) -> str:
+    """The step sentence of the DT2MS < 0 warnings (K-41): which Tmin was
+    written, and LS-DYNA's minimum step TSSFAC x |DT2MS| (Vol I R17
+    p.12-585) beside it."""
+    d = abs(ts.dt2ms)
+    if state.options.dt2ms_tssfac_product:
+        return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
+                f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
+                "p.12-585) [--dt2ms-tssfac-product].")
+    # Not 'the run steps at Tmin' (fix round): /DT/NODA/CST (IDTMIN(11) = 8,
+    # freform.F:1057-1059) adds mass only to a node whose own step is below
+    # Tmin (dtnoda.F:270-303) and clamps the global step only when it fell
+    # below Tmin (dtnoda.F:654-655), so a deck whose nodal steps all exceed
+    # Tmin keeps its own, larger step.
+    return (f" {blank}Tmin = |DT2MS| = {tmin:g}: every nodal step below "
+            f"{tmin:g} is lifted to it with added mass (dtnoda.F:270-303, "
+            "654-655), where LS-DYNA's minimum step is TSSFAC x |DT2MS| = "
+            f"{tssfac * d:g} (Vol I R17 p.12-585) - a floor 1/TSSFAC higher, "
+            "which takes more added mass; --dt2ms-tssfac-product writes the "
+            "product.")
 
 
 # /DT/<elem>/DEL blocks k2rad can emit, in the order they are written. SH_3N is
@@ -3609,7 +3781,16 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
             "stdout. This removes mass and stiffness the LS-DYNA original may "
             "have kept — check the deletion count before trusting the result.")
     if ts is not None and ts.dt2ms < 0.0:
-        if state.options.ams:
+        if axisym_routed(state):
+            # the routed 2-D deck: transform_engine_lines drops /DT/NODA/CST
+            # and /DT/AMS and says so itself (writer/axisym2d.py), so there
+            # is no mass-scaling card for this floor to coexist with (fix
+            # round; the text below used to say there was)
+            warn += (
+                " On this routed 2-D deck no /DT/NODA/CST or /DT/AMS is "
+                "written (the 2-D DT2MS warning says why), so no mass "
+                "scaling runs beside this floor.")
+        elif state.options.ams:
             warn += (
                 " NOTE --ams: under AMS the element step is computed from "
                 "SQRT(mass/stiffness) (cdt3.F:105-109), not length/sound "
@@ -3618,11 +3799,29 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
                 "all. Verify against the deletion messages.")
         else:
             warn += (
-                f" It coexists with /DT/NODA/CST (Tmin={abs(ts.dt2ms):g}): the "
+                f" It coexists with /DT/NODA/CST (Tmin="
+                f"{_dt2ms_tmin(state, ts)[0]:g}): the "
                 "deletion test runs on the element's own GEOMETRIC step "
                 "(length/sound speed, no mass term) and executes BEFORE the "
                 "NODADT early return (cdt3.F:146 vs :200), so nodal mass "
                 "scaling does NOT make this floor unreachable.")
+    if axisym_routed(state):
+        # fix round: the routed 2-D deck's elements are /QUAD; /DT/QUAD sets
+        # IDTMIN(2) (freform.F:1103-1106) while /DT/BRICK, /DT/SHELL and
+        # /DT/SH_3N set IDTMIN(1), (3) and (7) (:1074, :1107, :1111), and the
+        # element test reads IDTMIN(ITY) of the element group
+        # (mqviscb.F:425-498, 2 = DEL at :449; qforc2.F passes the array).
+        # MEASURED (mk_quad_probe.py, AX-15 + ERODE 1 + TSLIMT 1e-6, above
+        # every element's step): as written, engine echo 'QUAD MINIMUM TIME
+        # STEP 0.000000', 0 of 6 quads deleted, 13328 cycles; with
+        # /DT/QUAD/DEL added by hand, 6 of 6 deleted at the start, 73 cycles.
+        # Writing /DT/QUAD/DEL would change the engine deck: not done here.
+        warn += (
+            " This is the routed 2-D deck, whose elements are /QUAD: the quad "
+            "floor is /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106), which "
+            "k2rad does not write, so none of these three cards reaches them "
+            "(measured on a 6-quad probe with TSLIMT above every element's "
+            "step: 0 quads deleted; with /DT/QUAD/DEL added by hand, all 6).")
     state.warn(warn)
 
     out: List[str] = []
@@ -3652,38 +3851,217 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
         # a DT2MS < 0 deck never gets it - the card is refused there)
         return (_make_engine_timestep_scale(state, ts)
                 + sis_dt_inter_lines(state))
-    tmin = abs(ts.dt2ms)
+    # Tmin (CardStack batch, K-41): |DT2MS| by default; TSSFAC x |DT2MS|
+    # under --dt2ms-tssfac-product, the minimum step LS-DYNA permits for
+    # DT2MS < 0 (Vol I R17 p.12-585) - on /DT/NODA/CST and on /DT/AMS alike,
+    # TSSFAC being the deck's (blank -> 0.9), not AMS's 0.67 Tsca.
+    tmin, tssfac, blank = _dt2ms_tmin(state, ts)
+    step = _dt2ms_step_clause(state, ts, tssfac, blank, tmin)
+    # On the routed 2-D deck transform_engine_lines drops the card these
+    # lines build and says so itself (writer/axisym2d.py); a text about the
+    # mass the card adds would be false there, so none is given.
+    say = not axisym_routed(state)
     if _ams_is_emitted(state):
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
         # scale factor — the PCG needs more margin than /DT/NODA/CST's 0.9. The
         # paired starter /AMS card is emitted by _make_ams, and the /DT/THERM
         # refusal screens on the SAME predicate — see _ams_is_emitted.
         tsca = 0.67
-        state.warn(
-            f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/AMS (Advanced Mass "
-            f"Scaling, Tmin={tmin:g}, Tsca={tsca:g}) [--ams]. AMS holds the time "
-            "step with a coupled mass matrix that preserves low-frequency dynamics "
-            "instead of adding real nodal mass. It solves a PCG each cycle and can "
-            "DIVERGE ('AMS IS LIKELY DIVERGING') on stiff / high-stiffness-contrast "
-            "/ contact-heavy models or at a large Tmin/element-dt ratio; if it "
-            "does, drop --ams (default /DT/NODA/CST) or lower |DT2MS|."
-        )
+        if say:
+            state.warn(
+                f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/AMS (Advanced Mass "
+                f"Scaling, Tmin={tmin:g}, Tsca={tsca:g}) [--ams]. AMS holds the "
+                "time step with a coupled mass matrix that preserves "
+                "low-frequency dynamics instead of adding real nodal mass. It "
+                "solves a PCG each cycle and can DIVERGE ('AMS IS LIKELY "
+                "DIVERGING') on stiff / high-stiffness-contrast / contact-heavy "
+                "models or at a large Tmin/element-dt ratio; if it does, drop "
+                "--ams (default /DT/NODA/CST) or lower |DT2MS|." + step
+            )
         return [
             "/DT/AMS",
             f"{_f(tsca)}{_f(tmin)}",
             "#",
         ]
-    tsca = ts.tssfac if ts.tssfac and ts.tssfac > 0.0 else 0.9
-    state.warn(
-        f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/NODA/CST/0 (nodal mass "
-        f"scaling, Tmin={tmin:g}, Tsca={tsca:g}); OpenRadioss adds mass to hold "
-        "the time step at Tmin. Check the starter ADDED MASS is acceptable."
-    )
+    tsca = tssfac
+    # K-40: the added mass is printed in two places, and neither is the
+    # starter's 'ADDED MASS' line (that is the /RBODY echo): the starter's
+    # 'INITIAL ADDED MASS ESTIMATION for /DT/NODA/CST' table
+    # (add_mass_stat.F:154, the target step for DM/M 1 .. 5 % at the first
+    # cycle, at scale factor 0.9 and 0.67) and the engine's MAS.ERR column
+    # (ecrit.F:516, (M - M0) / M0 with M0 the mass before the cycle-0 added
+    # mass, ecrit.F:505; DM/M on the console).
+    if say:
+        state.warn(
+            f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/NODA/CST/0 (nodal "
+            f"mass scaling, Tmin={tmin:g}, Tsca={tsca:g}); OpenRadioss adds "
+            "nodal mass to hold the time step at Tmin." + step + " Read the "
+            "added mass before trusting the run: the starter's 'INITIAL ADDED "
+            "MASS ESTIMATION for /DT/NODA/CST' table gives the target step "
+            "for DM/M 1 .. 5 % at the first cycle (add_mass_stat.F), and the "
+            "engine's MAS.ERR column in <stem>_0001.out (DM/M on the console) "
+            "is the added mass over the initial mass, (M - M0) / M0 "
+            "(ecrit.F:516), from cycle 0 on. The starter's 'ADDED MASS' lines "
+            "are the /RBODY echo, not this. *CONTROL_TERMINATION ENDMAS with "
+            "--stop-added-mass stops the run on it."
+        )
     return [
         "/DT/NODA/CST/0",
         f"{_f(tsca)}{_f(tmin)}",
         "#",
     ]
+
+
+#: *CONTROL_TERMINATION ENDMAS at or above this is LS-DYNA's own default,
+#: 1.0E8 percent (Vol I R17 p.12-558): no mass criterion at all.
+_ENDMAS_OFF = 1.0e8
+
+
+def _make_engine_stop(state: ConversionState) -> List[str]:
+    """``*CONTROL_TERMINATION`` ENDMAS -> engine ``/STOP`` (CardStack batch,
+    K-40; ENDENG is warned only).
+
+    ENDMAS is the "percent change in the total mass for termination of
+    calculation", relevant "if and only if mass scaling is used to limit the
+    minimum time step size" (Vol I R17 p.12-558; default 1.0E8 = off; < 0 =
+    the id of a curve of the percent against the total mass). k2rad
+    mass-scales exactly one kind of deck - explicit, ``*CONTROL_TIMESTEP``
+    DT2MS < 0, ``/DT/NODA/CST`` or ``/DT/AMS`` - so only that deck can carry
+    the criterion.
+
+    The engine card (freform.F:767, list-directed)::
+
+        /STOP
+        Emax Mmax Nmax Nth Nanim Nerr_posit   ->   0. ENDMAS/100 0. 1 1 0
+
+    Mmax is a RATIO: ecrit.F:516 computes EMASS = (M - M0) / M0, the MAS.ERR
+    column (M0 is the mass before the cycle-0 added mass, ecrit.F:505), and
+    ecrit.F:593-594 stops the run with MESSAGE 208 'TOTAL MASS ERROR LIMIT
+    REACHED' once EMASS > Mmax. Emax / Nmax 0 are off (freform.F:780-782 turn
+    a 0 into 1e30). Nth / Nanim 1 write a time-history record and an
+    animation file at the stop, and keep ecrit.F:171-174 from returning
+    early, so the criterion is tested every cycle whatever ``/PRINT/-N``
+    says - which also makes every cycle an energy-summation cycle
+    (forint.F:279-284 tests NTH /= 0 .OR. NANIM /= 0), a small CPU cost.
+    MESSAGE 208 also sets MREST (ecrit.F:597): MEASURED, the stopped probe
+    wrote its engine restart file ``<stem>_0001_0001.rst`` (860043 B) under
+    the ``/RFILE/OFF`` k2rad writes, and the unstopped one wrote none.
+
+    Written only under ``--stop-added-mass`` (opt-in): a stated ENDMAS without
+    the flag is named in a warning; an ENDMAS < 0 curve, the routed 2-D deck
+    (no ``/DT/NODA/CST``, resol.F:2711-2729; and its DT2MS > 0 density cell,
+    whose mass is in the starter density, so inside M0 and never in
+    MAS.ERR) and an ``--ams`` deck are warned and skipped - MEASURED,
+    ``/DT/AMS`` prints MAS.ERR 0.000 on every cycle (its mass is not in that
+    column), so Mmax could never fire there.
+    ENDENG ("percent change in energy ratio", p.12-558) has no counterpart:
+    ``/STOP`` Emax stops on the engine's relative energy ERROR (ecrit.F:510,
+    563-565), not the same quantity.
+    """
+    ct = state.ctrl_termination
+    if ct is None:
+        return []
+    if ct.endeng != 0.0:
+        state.warn(
+            f"*CONTROL_TERMINATION ENDENG {ct.endeng:g} (the percent change "
+            "in the energy ratio that stops LS-DYNA, Vol I R17 p.12-558) is "
+            "NOT converted: the nearest engine card, /STOP Emax, stops on the "
+            "relative energy ERROR column (ecrit.F:510, ERR = ENTOTB / ENTOT1B "
+            "- 1; ecrit.F:563-565), not the same quantity, so no /STOP Emax "
+            "is written; read the ERROR column of <stem>_0001.out instead.")
+    endmas = ct.endmas
+    if endmas == 0.0 or endmas >= _ENDMAS_OFF:
+        return []
+    flag = state.options.stop_added_mass
+    ts = state.ctrl_timestep
+    explicit = not _engine_implicit(state) and not state.is_modal
+    scaled = ts is not None and ts.dt2ms < 0.0 and explicit
+    # the 2-D density route: a routed deck's DT2MS > 0 is carried by the
+    # density cell (writer/axisym2d.py) - mass scaling, but in the starter
+    plan = state.axisym_plan
+    density_2d = bool(explicit and axisym_routed(state) and plan is not None
+                      and plan.density)
+    if not scaled and not density_2d:
+        if flag:
+            positive = ts is not None and ts.dt2ms > 0.0 and explicit
+            state.warn(
+                f"--stop-added-mass: *CONTROL_TERMINATION ENDMAS {endmas:g} "
+                "gets no /STOP - this engine file is not mass-scaled (k2rad "
+                "mass-scales an explicit deck with *CONTROL_TIMESTEP DT2MS < "
+                "0, and a routed 2-D deck's DT2MS > 0 by its density cell), "
+                "so the engine adds no mass for Mmax to gate; "
+                + (f"DT2MS={ts.dt2ms:g} > 0 is LS-DYNA mass scaling as well "
+                   "(Vol I R17 p.12-585), but it is not converted on this "
+                   "deck (the *CONTROL_TIMESTEP warning says why)."
+                   if positive and ts is not None else
+                   "LS-DYNA too reads ENDMAS only under mass scaling (Vol I "
+                   "R17 p.12-558)."))
+        return []
+    if endmas < 0.0:
+        state.warn(
+            f"*CONTROL_TERMINATION ENDMAS {endmas:g} < 0 names load curve "
+            f"{int(round(-endmas))} (the percent change in the total mass as "
+            "a function of the total mass, Vol I R17 p.12-558); the engine "
+            "/STOP Mmax is one constant ratio, so no /STOP is written"
+            + (" even with --stop-added-mass" if flag else "")
+            + " and the run is not stopped on its added mass.")
+        return []
+    mmax = endmas / 100.0
+    if density_2d and plan is not None:
+        state.warn(
+            f"*CONTROL_TERMINATION ENDMAS {endmas:g} on the routed 2-D deck: "
+            f"no /STOP is written - its DT2MS={plan.dt2ms:g} > 0 is carried "
+            "by the density cell, i.e. in the starter's material density, so "
+            "the engine's initial mass M0 already holds that added mass "
+            "(ecrit.F:505) and the MAS.ERR column (M - M0) / M0 never sees "
+            f"it: Mmax {mmax:g} could not stop the run on it.")
+        return []
+    if axisym_routed(state):
+        state.warn(
+            f"*CONTROL_TERMINATION ENDMAS {endmas:g} on the routed 2-D deck: "
+            "no /STOP is written - the 2-D deck carries no /DT/NODA/CST "
+            "(resol.F:2711-2729 rebuilds the 2-D nodal masses every cycle), "
+            f"so the engine adds no mass for Mmax {mmax:g} to gate.")
+        return []
+    if _ams_is_emitted(state):
+        # MEASURED (the K4 probe, a free 336-shell card, DT2MS -5e-6, nt 2):
+        # /DT/NODA/CST Tmin 5e-6 -> MAS.ERR 3.455 from cycle 0, while /DT/AMS
+        # at the same Tmin prints MAS.ERR 0.000 and MASS ADDED 0 on all 401
+        # rows, and a /STOP Mmax 0.05 beside it never fired - AMS's added
+        # mass is not in the (M - M0) / M0 column.
+        state.warn(
+            f"*CONTROL_TERMINATION ENDMAS {endmas:g} under --ams: no /STOP is "
+            "written - the mass /DT/AMS adds is not in the engine's MAS.ERR "
+            "column ((M - M0) / M0 stays 0: measured on a 336-shell probe, "
+            "MAS.ERR 0.000 on all 401 cycles where /DT/NODA/CST at the same "
+            f"Tmin prints 3.455), so Mmax {mmax:g} would never stop the run.")
+        return []
+    if not flag:
+        state.warn(
+            f"*CONTROL_TERMINATION ENDMAS {endmas:g} (stop when the total "
+            f"mass has grown by {endmas:g} %) is NOT converted by default: "
+            f"--stop-added-mass writes it as the engine /STOP Mmax {mmax:g} = "
+            "ENDMAS / 100; without it the run goes on whatever mass "
+            "/DT/NODA/CST adds.")
+        return []
+    state.warn(
+        f"*CONTROL_TERMINATION ENDMAS {endmas:g} -> engine /STOP Mmax "
+        f"{mmax:g} [--stop-added-mass]: Mmax is a RATIO, ENDMAS a percent. "
+        "The engine stops with MESSAGE 208 'TOTAL MASS ERROR LIMIT REACHED' "
+        "once (M - M0) / M0, the MAS.ERR column, exceeds Mmax (ecrit.F:516, "
+        "593-594; M0 is the mass before the cycle-0 added mass, ecrit.F:505, "
+        "so mass added at the first cycle counts) and writes a time-history "
+        "record and an animation file at the stop (Nth 1, Nanim 1). Emax and "
+        "Nmax are 0 = off. A stopped run's listing ends 'NORMAL TERMINATION' "
+        "then 'USER BREAK' and the engine exits 0 (measured on a 336-shell "
+        "probe), so read the listing, not the exit code. MESSAGE 208 also "
+        "sets the restart flag (ecrit.F:597): the stopped run writes the "
+        "engine restart file <stem>_0001_0001.rst (one per SPMD domain)"
+        + (" although the engine deck says /RFILE/OFF"
+           if _make_engine_restart(state) else "")
+        + " (measured on that probe; the run that was not stopped wrote "
+        "none).")
+    return ["/STOP", f"0. {mmax:.6G} 0. 1 1 0", "#"]
 
 
 def _warn_dt_therm_window(state: ConversionState) -> None:
@@ -4356,6 +4734,9 @@ def _build_engine_text(state: ConversionState) -> str:
         # /DT/AMS was written (freform.F:1327 refuses the pair outright).
         _make_engine_thermal(state),
         _make_engine_dt_deletion(state),
+        # K-40: ENDMAS -> /STOP Mmax under --stop-added-mass, after every
+        # /DT card (it gates the mass /DT/NODA/CST or /DT/AMS adds)
+        _make_engine_stop(state),
         _make_engine_implicit(state),
         _make_engine_cpu(state),
         ["/MON/ON", "#"],

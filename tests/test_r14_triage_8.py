@@ -53,6 +53,61 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: The CardStack batch (2026-10, group K3) switched two writer defaults ON
+#: that move bytes of decks below without touching what those tests test: an
+#: all-tet *SECTION_SOLID is written /PROP/SOLID Isolid 1 (K-30,
+#: --no-tet-isolid1) and an all-LAW1 *SECTION_SHELL /PROP/SHELL N = 0 (K-31,
+#: --no-law1-shell-global-n). The historical-bytes pins hold both levers at
+#: their opt-out, so each keeps testing its own change against the pristine
+#: checkout it was measured on (MEASURED 2026-10-31: with both levers off
+#: every pin below holds again); K-30 / K-31 are pinned in
+#: tests/test_cardstack_pipeline_props.py. A pin of a DEFAULT arm also
+#: converts the deck with the defaults and checks, with _k3_default_moves,
+#: that this arm is the pinned bytes plus exactly the K-30 / K-31 cells it
+#: names - so the default output stays pinned as a whole.
+_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False)
+
+
+def _k3_default_moves(off: str, on: str):
+    """``[(card header, cell before, cell after)]``: the starter cells the two
+    K3 defaults move, *off* being a deck converted with both levers off
+    (``_K3_OFF``) and *on* the same deck converted with the defaults. Fails
+    (AssertionError) on any other difference - a different line count, a
+    moved line that is not the /PROP/SHELL card 3 (K-31's N cell) or the
+    /PROP/SOLID card 1 (K-30's Isolid cell), a byte beyond that line's first
+    10-column cell, or a cell that does not move max(2, NIP) -> 0 (N) or
+    14 -> 1 (Isolid)."""
+    lo, ln = off.splitlines(), on.splitlines()
+    assert len(lo) == len(ln), (len(lo), len(ln))
+    moves = []
+    head, row = "", 0
+    for a, b in zip(lo, ln):
+        if a.startswith("/"):
+            head, row = a, -2           # the title line comes next
+        elif not a.startswith("#"):
+            row += 1
+        if a == b:
+            continue
+        shell = head.startswith("/PROP/SHELL/") and row == 2
+        solid = head.startswith("/PROP/SOLID/") and row == 0
+        assert (shell or solid) and a[10:] == b[10:], (head, row, a, b)
+        before, after = int(a[:10]), int(b[:10])
+        assert ((shell and before >= 2 and after == 0)
+                or (solid and (before, after) == (14, 1))), (head, a, b)
+        moves.append((head, before, after))
+    return moves
+
+
+def _k32_shrf_free(warnings):
+    """*warnings* without the K-32 note a stated *SECTION_SHELL SHRF draws
+    since the CardStack batch (these decks state SHRF 1.0) - the warning-list
+    pins were measured on pristine checkouts that had no such note; the note
+    itself is pinned in tests/test_cardstack_pipeline_props.py."""
+    return [w for w in warnings
+            if not (w.startswith("*SECTION_SHELL ")
+                    and "the stated SHRF" in w)]
+
+
 def _bcs_card(starter: str, title: str):
     """``(Tra, Rot, skew_ID, grnod_ID)`` of the ``/BCS`` titled *title*, or
     None."""
@@ -374,13 +429,19 @@ class RigidLocalConstraints(unittest.TestCase):
 
     def test_m_cmo_plus_1_cards_do_not_move(self):
         """(m) round 7's P1 / P2 probes (CMO +1) are byte-identical to
-        4f5b6e8 (SHA measured from the pristine checkout)."""
+        4f5b6e8 (SHA measured from the pristine checkout) with both K3
+        levers off; the default arm is those bytes plus K-31's one N cell
+        (the probes' shell section, whose *MAT_ELASTIC and *MAT_RIGID parts
+        are both /MAT/ELAST: /PROP/SHELL/1 N 2 -> 0)."""
         for deck, sha in ((_a1_deck(), _PR8_SHA["p1"]),
                           (_a1_deck(con1=1, con2=7, tc=6, rc=7),
                            _PR8_SHA["p2"])):
             with self.subTest(sha=sha[:12]):
-                _r, starter, _e = _convert(deck)
+                _r, starter, _e = _convert(deck, **_K3_OFF)
                 self.assertEqual(_sha(starter), sha)
+                _r, s_def, _e = _convert(deck)
+                self.assertEqual(_k3_default_moves(starter, s_def),
+                                 [("/PROP/SHELL/1", 2, 0)])
 
     def test_l_the_opt_out_restores_the_4f5b6e8_bytes_and_warnings(self):
         """(l) --no-rigid-local-constraints on (a), (d), (e), (j), (o): the
@@ -393,10 +454,12 @@ class RigidLocalConstraints(unittest.TestCase):
         for key, deck in _OPT_OUT_DECKS().items():
             with self.subTest(probe=key):
                 res, starter, _e = _convert(deck,
-                                            rigid_local_constraints=False)
+                                            rigid_local_constraints=False,
+                                            **_K3_OFF)
                 self.assertEqual(_sha(starter), _PR8_SHA[key])
-                self.assertEqual(_sha("\n".join(res.warnings)),
-                                 _R9_WARN_SHA.get(key, _PR8_WARN_SHA[key]))
+                self.assertEqual(
+                    _sha("\n".join(_k32_shrf_free(res.warnings))),
+                    _R9_WARN_SHA.get(key, _PR8_WARN_SHA[key]))
 
     def test_n_the_coupon(self):
         """(n) the g3p coupon: the cube's 100 000 and the plate's 100 111,
@@ -698,7 +761,7 @@ class NonRigidBcsUnion(unittest.TestCase):
         starter file (SHA measured from the pristine checkout)."""
         for key, deck in _A3_DECKS().items():
             with self.subTest(probe=key):
-                _r, starter, _e = _convert(deck, bcs_union=False)
+                _r, starter, _e = _convert(deck, bcs_union=False, **_K3_OFF)
                 self.assertEqual(_sha(starter), _PR8_SHA[key])
 
 
@@ -1092,8 +1155,14 @@ class SectionNodalThicknessMean(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "Card 2 states T1..T4 = 2 / 4 / "
                              "blank / 0; the /PROP/SHELL thickness is their "
                              "MEAN 2.5", "-4.39 -> -17.88 %"), res.warnings)
-        _r, s_u, _e2 = _convert(_quad_deck(t=(1.5, 1.5, 1.5, 1.5)))
+        # the uniform-T deck keeps 4f5b6e8's bytes with both K3 levers off;
+        # the default arm is those bytes plus K-31's one N cell
+        _r, s_u, _e2 = _convert(_quad_deck(t=(1.5, 1.5, 1.5, 1.5)),
+                                **_K3_OFF)
         self.assertEqual(_sha(s_u), _PR8_SHA["a4_uniform"])
+        _r, s_def, _e2 = _convert(_quad_deck(t=(1.5, 1.5, 1.5, 1.5)))
+        self.assertEqual(_k3_default_moves(s_u, s_def),
+                         [("/PROP/SHELL/1", 2, 0)])
 
     def test_2_the_2D_formulations_are_A7s(self):
         _r, s13, _e = _convert(_quad_deck(elform=13, t=(25.4, 1.0, 1.0, 1.0)))
@@ -1122,7 +1191,8 @@ class SectionNodalThicknessMean(unittest.TestCase):
     def test_4_the_opt_out_keeps_T1(self):
         _r, starter, _e = _convert(_quad_deck(t=(4.0, 1.0, 1.0, 1.0),
                                               rigid=True),
-                                   section_nodal_thickness_mean=False)
+                                   section_nodal_thickness_mean=False,
+                                   **_K3_OFF)
         self.assertEqual(_prop_thick(starter), 4.0)
         self.assertEqual(_sha(starter), _PR8_SHA["a4_rigid"])
 
@@ -1194,7 +1264,8 @@ class TwoDimensionalShellThickness(unittest.TestCase):
         res, starter, _e = _convert(_quad_deck(elform=13,
                                                t=(25.4, "", "", ""),
                                                rigid=True),
-                                    plane_strain_unit_thickness=False)
+                                    plane_strain_unit_thickness=False,
+                                    **_K3_OFF)
         self.assertEqual(_prop_thick(starter), 25.4)
         self.assertEqual(_sha(starter), _PR8_SHA["a7_rigid"])
         self.assertTrue(_has(res.warnings, "the card's T1 25.4 is written",
@@ -1270,7 +1341,7 @@ class RigidSecondaryElementMass(unittest.TestCase):
                              "folded into the /RBODY Mass field"),
                         res.warnings)
         r0, s0, _e0 = _convert(_plates(_emass(9, 0.01)),
-                               rigid_element_mass_admas=False)
+                               rigid_element_mass_admas=False, **_K3_OFF)
         self.assertEqual(_rbody_mass(s0, 19), 0.01)
         self.assertEqual(_admas(s0), {})
         self.assertEqual(_sha(s0), _PR8_SHA["a8_1"])
@@ -1299,7 +1370,8 @@ class RigidSecondaryElementMass(unittest.TestCase):
         self.assertEqual(_admas(starter), {0.01: [12]})
         self.assertTrue(_has(res.warnings, _WA8, "LOST before",
                              "being DROPPED"), res.warnings)
-        r0, s0, _e0 = _convert(_plates(cnrb), rigid_element_mass_admas=False)
+        r0, s0, _e0 = _convert(_plates(cnrb), rigid_element_mass_admas=False,
+                               **_K3_OFF)
         self.assertEqual(_admas(s0), {})
         self.assertEqual(_sha(s0), _PR8_SHA["a8_3"])
 
@@ -1555,7 +1627,8 @@ class SpotweldDtClosedForm(unittest.TestCase):
 
     def test_5_the_opt_out_drops_DT_as_4f5b6e8(self):
         res, starter, _e = _convert(_dt_weld_deck(),
-                                    spotweld_dt_mass_scaling=False)
+                                    spotweld_dt_mass_scaling=False,
+                                    **_K3_OFF)
         self.assertEqual(_sha(starter), _PR8_SHA["a6_off"])
         self.assertTrue(_has(res.warnings, "DT have no /PROP/TYPE13 slot"))
 
@@ -3099,7 +3172,7 @@ class ImplicitStubWithType25(unittest.TestCase):
         # --no-implicit-n2s-type7 (an implicit N2S is a routed TYPE7 by
         # default - T9::ImplicitN2sType7 pins that arm)
         res, starter, _e = _convert(_shell_plate(_IMPL1, _N2S_78),
-                                    implicit_n2s_type7=False)
+                                    implicit_n2s_type7=False, **_K3_OFF)
         self.assertEqual(_sha(starter), _B6_DEFAULT_4F5B6E8_SHA)
         self.assertIn("/INTER/TYPE25/78", starter)
         self.assertEqual(len(_stub_ids(starter)), 1, starter)
@@ -3631,12 +3704,19 @@ class JointScrewRound8(unittest.TestCase):
         self.assertEqual(st.prescribed_motions, [])
 
     def test_driven_screw_bytes_unchanged(self):
-        res, starter, _e = _convert(_screw_deck())
+        """The driven screw keeps 4f5b6e8's bytes with both K3 levers off;
+        the default arm is those bytes plus K-31's one N cell (part 3's
+        /MAT/ELAST shell section, /PROP/SHELL/3 N 2 -> 0)."""
+        res, starter, _e = _convert(_screw_deck(), **_K3_OFF)
         self.assertEqual(_rbody_j(starter, _rbody_main(starter, 2)),
                          (0.0, 0.0, 0.0))
         self.assertIn("/IMPVEL/LAGMUL/", starter)
         self.assertFalse(_has(res.warnings, _B8_UNDRIVEN), res.warnings)
         self.assertEqual(_sha(starter), _B8_DRIVEN_4F5B6E8_SHA)
+        res, s_def, _e = _convert(_screw_deck())
+        self.assertFalse(_has(res.warnings, _B8_UNDRIVEN), res.warnings)
+        self.assertEqual(_k3_default_moves(starter, s_def),
+                         [("/PROP/SHELL/3", 2, 0)])
 
     def test_refusal_11_by_class(self):
         """Mutation targets: a merge that writes the card (the 'no standard

@@ -1185,12 +1185,19 @@ class AutomaticGeneralSoftRoutingTests(unittest.TestCase):
         self.assertEqual(card[1], 0.1)                  # Fric == FS
 
     def test_soft_minus11_sst_mst_map_to_gapmin(self):
-        # Card3 SST/MST → TYPE11 GAPmin = (|SST|+|MST|)/2.
-        res, s = _convert(_GEN_MESH + _general_contact(-11, sst=0.02, mst=0.04) + _GEN_TAIL)
-        body = _block(s, _hdr(s, "/INTER/TYPE11/"))
-        card = next(r for ln in body if len(r := _num_row(ln)) == 5)
-        self.assertEqual(card[2], 0.03)                 # GAPmin third field
-        self.assertTrue(any("Gapmin=0.03" in w and "TYPE11" in w for w in res.warnings))
+        # Card3 SST/MST → TYPE11 GAPmin. CardStack K-12 (default ON): the
+        # self-mirrored -11 card over shells is a single-surface contact, so
+        # two SAST-thick shells meet at |SST| = 0.02 (MST unused);
+        # --no-single-surface-sst-gap keeps (|SST|+|MST|)/2 = 0.03.
+        deck = _GEN_MESH + _general_contact(-11, sst=0.02, mst=0.04) + _GEN_TAIL
+        for kw, gap in (({}, 0.02), ({"single_surface_sst_gap": False}, 0.03)):
+            with self.subTest(**kw):
+                res, s = _convert(deck, **kw)
+                body = _block(s, _hdr(s, "/INTER/TYPE11/"))
+                card = next(r for ln in body if len(r := _num_row(ln)) == 5)
+                self.assertEqual(card[2], gap)          # GAPmin third field
+                self.assertTrue(any(f"Gapmin={gap:g}" in w and "TYPE11" in w
+                                    for w in res.warnings))
 
     def test_default_soft_delegates_to_single_surface(self):
         # SOFT absent / 0 / 2 → the ordinary single-surface path (a specific-part

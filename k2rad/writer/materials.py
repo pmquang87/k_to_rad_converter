@@ -4028,6 +4028,7 @@ def _resolve_mat_deshpande_fleck(state: ConversionState) -> None:
     kw = "*MAT_DESHPANDE_FLECK_FOAM"
     if not state.mat_deshpande_fleck:
         return
+    from .mesh import _tet_section_isolid  # local: mesh imports us
     shell_parts = _shell_parts_by_mid(state)
     sqrt45 = math.sqrt(4.5)
     # Loop-invariants hoisted (the _shell_parts_by_mid rule: an O(n_elems)
@@ -4080,6 +4081,11 @@ def _resolve_mat_deshpande_fleck(state: ConversionState) -> None:
             isolid = (_elform_to_isolid(
                 sec.elform, state.options.assumed_strain_isolid_value)
                 if sec else 17)
+            # K-30: an all-tet section is WRITTEN Isolid 1 (the starter's own
+            # tet formulation, sgrtails.F:984-999), which is outside the
+            # 1905 window (JHBE 3..20, sgrtails.F:631) - only
+            # --no-tet-isolid1 leaves the 14 that draws it.
+            isolid = _tet_section_isolid(state, sec, isolid)
             if isolid == 17:
                 routed.append(pid)
             elif 2 < isolid < 21:

@@ -98,7 +98,10 @@ class TssfacScaleTests(_EngineDeckMixin, unittest.TestCase):
         self.assertNotIn("/DT", engine.splitlines())
 
     def test_positive_dt2ms_still_gets_tssfac(self):
-        # DT2MS > 0 is init-only, still no mass scaling, TSSFAC still applies.
+        # DT2MS > 0 IS mass scaling in LS-DYNA (quasi-static / time-history
+        # runs, Vol I R17 p.12-585), but k2rad does not convert it on a 3-D
+        # deck (ROADMAP, round 9's NOT list, entry 5 "Positive DT2MS on 3-D
+        # decks"), so the run gets no mass scaling - TSSFAC still applies.
         deck = TSSFAC_K.replace("       0.0\n*MAT", "    1.0E-6\n*MAT")
         _r, engine = self._convert(deck)
         row = self._dt_card(engine)
@@ -145,6 +148,68 @@ class MassScalingPathUnchangedTests(_EngineDeckMixin, unittest.TestCase):
         _r, engine = self._convert(self._deck(), ams=True)
         self.assertIn("/DT/AMS", engine)
         self.assertNotIn("/DT", engine.splitlines())
+
+
+class Dt2msTssfacProductTests(_EngineDeckMixin, unittest.TestCase):
+    """--dt2ms-tssfac-product (the CardStack batch, K-41). For DT2MS < 0
+    LS-DYNA makes TSSFAC x |DT2MS| the minimum step (Vol I R17 p.12-585),
+    while the default /DT/NODA/CST Tmin above is |DT2MS|, a step 1/TSSFAC
+    larger. The opt-in writes the product as Tmin, on /DT/NODA/CST and on
+    /DT/AMS; the default stays |DT2MS| (pinned above)."""
+
+    def _deck(self, tssfac="       0.9"):
+        return (TSSFAC_K.replace("       0.8", tssfac)
+                .replace("       0.0\n*MAT", "   -1.0E-6\n*MAT"))
+
+    def _cells(self, engine, card):
+        row = engine.split(card, 1)[1].splitlines()[1]
+        return [float(v) for v in row.split()]
+
+    def test_flag_holds_tmin_at_the_product(self):
+        _r, engine = self._convert(self._deck(), dt2ms_tssfac_product=True)
+        tsca, tmin = self._cells(engine, "/DT/NODA/CST/0")
+        self.assertEqual(tsca, 0.9)
+        self.assertAlmostEqual(tmin, 9.0e-7, places=15)
+
+    def test_default_keeps_tmin_at_dt2ms(self):
+        _r, engine = self._convert(self._deck())
+        tsca, tmin = self._cells(engine, "/DT/NODA/CST/0")
+        self.assertEqual(tsca, 0.9)
+        self.assertAlmostEqual(tmin, 1.0e-6, places=15)
+
+    def test_flag_on_the_ams_branch(self):
+        # Tsca stays AMS's 0.67; Tmin is TSSFAC x |DT2MS|, not 0.67 x |DT2MS|
+        _r, engine = self._convert(self._deck(), ams=True,
+                                   dt2ms_tssfac_product=True)
+        tsca, tmin = self._cells(engine, "/DT/AMS")
+        self.assertEqual(tsca, 0.67)
+        self.assertAlmostEqual(tmin, 9.0e-7, places=15)
+
+    def test_blank_tssfac_takes_0_9(self):
+        _r, engine = self._convert(self._deck(tssfac="       0.0"),
+                                   dt2ms_tssfac_product=True)
+        tsca, tmin = self._cells(engine, "/DT/NODA/CST/0")
+        self.assertEqual(tsca, 0.9)
+        self.assertAlmostEqual(tmin, 9.0e-7, places=15)
+
+    def test_negative_tssfac_curve_takes_0_9(self):
+        # TSSFAC < 0 names a load curve of the scale factor, which is not
+        # converted: Tsca 0.9 and Tmin |DT2MS| by default, 0.9 x |DT2MS|
+        # under the flag (on /DT/AMS too, Tsca 0.67 there) - never the
+        # negative curve id as a factor. Fix round: no test had a TSSFAC < 0,
+        # so the branch could change the DEFAULT Tsca unseen.
+        for flag, ams, card, want_tsca, want_tmin in (
+                (False, False, "/DT/NODA/CST/0", 0.9, 1.0e-6),
+                (True, False, "/DT/NODA/CST/0", 0.9, 9.0e-7),
+                (False, True, "/DT/AMS", 0.67, 1.0e-6),
+                (True, True, "/DT/AMS", 0.67, 9.0e-7)):
+            with self.subTest(flag=flag, ams=ams):
+                _r, engine = self._convert(self._deck(tssfac="      -3.0"),
+                                           dt2ms_tssfac_product=flag,
+                                           ams=ams)
+                tsca, tmin = self._cells(engine, card)
+                self.assertEqual(tsca, want_tsca)
+                self.assertAlmostEqual(tmin, want_tmin, places=15)
 
 
 if __name__ == "__main__":
