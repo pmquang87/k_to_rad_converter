@@ -441,18 +441,25 @@ class Type25IstfTests(unittest.TestCase):
     undocumented but it IS the reference behaviour."""
 
     class _C:
-        def __init__(self, keyword, soft):
+        def __init__(self, keyword, soft, depth=0, sbopt=0):
             self.keyword, self.soft, self.inter_id = keyword, soft, 1
+            self.depth, self.sbopt = depth, sbopt
 
-    def _istf(self, keyword, soft):
-        return _type25_istf_iedge(ConversionState(), self._C(keyword, soft))
+    def _istf(self, keyword, soft, depth=0, sbopt=0):
+        return _type25_istf_iedge(ConversionState(),
+                                  self._C(keyword, soft, depth, sbopt))
 
     def test_full_soft_rule_families(self):
+        """SOFT 2's Iedge 22 is gated on an edge DEPTH or SBOPT 1 since the
+        CardStack batch (K-10): LS-DYNA's SOFT 2 checks no edge-to-edge
+        penetration otherwise (Vol I R17 p.11-94/97); Istf 2 stays."""
         for kw in ("CONTACT_ERODING_SURFACE_TO_SURFACE",
                    "CONTACT_AUTOMATIC_NODES_TO_SURFACE"):
             self.assertEqual(self._istf(kw, 0), (2, 1000), kw)
             self.assertEqual(self._istf(kw, 1), (4, 1000), kw)
-            self.assertEqual(self._istf(kw, 2), (2, 22), kw)
+            self.assertEqual(self._istf(kw, 2), (2, 1000), kw)
+            self.assertEqual(self._istf(kw, 2, depth=5), (2, 22), kw)
+            self.assertEqual(self._istf(kw, 2, sbopt=1), (2, 22), kw)
 
     def test_coarse_soft_rule_families(self):
         for kw in ("CONTACT_ERODING_SINGLE_SURFACE",
@@ -464,7 +471,11 @@ class Type25IstfTests(unittest.TestCase):
 
     def test_mpp_spelling_takes_the_same_branch(self):
         self.assertEqual(
-            self._istf("CONTACT_ERODING_SURFACE_TO_SURFACE_MPP", 2), (2, 22))
+            self._istf("CONTACT_ERODING_SURFACE_TO_SURFACE_MPP", 2, depth=5),
+            (2, 22))
+        self.assertEqual(
+            self._istf("CONTACT_ERODING_SURFACE_TO_SURFACE_MPP", 2),
+            (2, 1000))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

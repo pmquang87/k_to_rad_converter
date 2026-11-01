@@ -916,13 +916,13 @@ class ContactGapminTests(unittest.TestCase):
     uniform-Gapmin press-fit artifact.  Without SST/MST the card is
     byte-identical to the pre-mapping writer output (Gapmin 0)."""
 
-    def _convert(self, deck: str):
+    def _convert(self, deck: str, **kw):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = os.path.join(tmp.name, "g.k")
         with open(path, "w") as fh:
             fh.write(deck)
-        result = convert(path)
+        result = convert(path, **kw)
         return result, Path(result.starter_path).read_text()
 
     def test_sst_mst_map_to_gapmin(self):
@@ -948,6 +948,12 @@ class ContactGapminTests(unittest.TestCase):
         )
         result, starter = self._convert(deck)
         self.assertIn("/INTER/TYPE7/11", starter)
+        # CardStack K-12 (default ON): a single-surface contact of shells
+        # engages at |SST| (two SAST-thick shells meet at SAST/2 + SAST/2),
+        # MST unused; --no-single-surface-sst-gap keeps (0.02 + 0.04)/2
+        self.assertIn("                0.02", starter)
+        self.assertTrue(any("Gapmin=0.02" in w for w in result.warnings))
+        result, starter = self._convert(deck, single_surface_sst_gap=False)
         self.assertIn("                0.03", starter)   # (0.02+0.04)/2
         self.assertTrue(any("Gapmin=0.03" in w for w in result.warnings))
 
@@ -4005,9 +4011,12 @@ class DeformableContactRecipeTests(unittest.TestCase):
         from k2rad.gapmin import fast_proximity_available
         if not fast_proximity_available():
             self.skipTest("auto-gapmin needs numpy+scipy")
-        # auto-gapmin ALONE shrinks it to 0.8 (= 0.8 x the 1.0 part-to-part clearance)
+        # auto-gapmin ALONE rewrites it: since CardStack K-04 the shell pair's
+        # offset counts - T = 1.0/2 (shell t) + 0.22/2 (Card-3 MST) = 0.61 of
+        # the 1.0 mid-plane clearance, T + 0.8 x (1.0 - T) = 0.922, capped at
+        # 0.5 x the 1.0 main-segment side = 0.5 (was 0.8 x 1.0 = 0.8)
         _, starter_auto, _ = self._convert(DEFDEF_K, auto_gapmin=True)
-        self.assertEqual(self._inter_gapmin(starter_auto, 9), "0.8")
+        self.assertEqual(self._inter_gapmin(starter_auto, 9), "0.5")
         # recipe + auto-gapmin: keep the mesh-scale SST/MST Gapmin 0.11, not 0.8
         res, starter_rec, _ = self._convert(
             DEFDEF_K, auto_gapmin=True, deformable_contact_recipe=True)

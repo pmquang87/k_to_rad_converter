@@ -355,7 +355,11 @@ class InitialStrainShellTests(unittest.TestCase):
             body = _block(starter, "/PROP/SHELL/1")
             data = [ln for ln in body if not ln.startswith("#")]
             return data[-1][:20]                # card 3: N then Istrain
-        self.assertEqual(_nip_istrain(base), f"{_i(5)}{_i(0)}")
+        # K-31 (the CardStack batch): the strain-free deck's all-LAW1 section
+        # is written N = 0, the global integration cgrtails.F:780-791
+        # switches a LAW1 group to anyway; the *INITIAL_STRAIN_SHELL record
+        # keeps its section at max(2, NIP) = 5, the N its /INISHE needs.
+        self.assertEqual(_nip_istrain(base), f"{_i(0)}{_i(0)}")
         self.assertEqual(_nip_istrain(with_strain), f"{_i(5)}{_i(1)}")
 
     def test_npg_is_one_even_on_a_batoz_or_qeph_property(self):

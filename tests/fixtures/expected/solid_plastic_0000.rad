@@ -63,7 +63,7 @@ solid
 /PROP/SOLID/1
 PROP_1
 #   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn
-        14         0         0         0         0         0         0         0
+         1         0         0         0         0         0         0         0
 #                q_a                 q_b                   h            LAMBDA_V                MU_V
                    0                   0                   0                   0                   0
 #             dt_min   istrain      IHKT

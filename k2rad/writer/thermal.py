@@ -1734,9 +1734,11 @@ def _restate_law1_shells(state: ConversionState, mid: int) -> None:
     as /MAT/LAW36 with a far-yield flat curve.
 
     **Why.** LAW1 is the one law Radioss integrates GLOBALLY through the
-    thickness: it answers ``N > 1`` with ``WARNING 1084 FORMULATION IS SWITCHED
-    TO GLOBAL INTEGRATION N=0``, and the shell thermal-expansion routine
-    reaches the per-integration-point stresses (``thermexpc.F``'s
+    thickness: the starter switches a LAW1 shell group written with ``N > 1``
+    to ``N = 0`` (``cgrtails.F:780-791``, WARNING 1084; K-31 writes N = 0
+    directly on an all-LAW1 section, but not on a /THERM_STRESS deck:
+    ``writer/mesh._law1_global_n_secids``), and the shell thermal-expansion
+    routine reaches the per-integration-point stresses (``thermexpc.F``'s
     ``IF (NPT /= 0)`` block). With ``NPT = 0`` there is nothing for it to
     correct. Measured on this branch's own converted decks, a 10 x 1 mm strip
     at ``alpha = 1.2e-5`` over ``dT = 100 K`` (closed form 0.012 mm):
@@ -1822,8 +1824,9 @@ def _restate_law1_shells(state: ConversionState, mid: int) -> None:
         f"is a SHELL ({pids}), so it is RESTATED as /MAT/LAW36 with a flat "
         f"yield curve at {sigy:g} (= 1000 x E, a strain of 1000 — the law "
         "never leaves its elastic branch). /MAT/LAW1 is the one law Radioss "
-        "integrates GLOBALLY through the thickness (it answers N > 1 with "
-        "WARNING 1084 'FORMULATION IS SWITCHED TO GLOBAL INTEGRATION N=0'), "
+        "integrates GLOBALLY through the thickness (N = 0: the starter "
+        "switches a LAW1 shell group written with N > 1 to it, "
+        "cgrtails.F:780-791), "
         "and the shell expansion routine only reaches the per-integration-"
         "point stresses — measured, a LAW1 shell strip expands by 2.7e-07 mm "
         "where the closed form is 0.012 mm, at NIP 1 and NIP 5 alike, while "
@@ -4466,8 +4469,9 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
     converted decks:
 
     * A ``/MAT/ELAST`` (LAW1) SHELL gets **no expansion at all** — LAW1 always
-      runs global integration (``WARNING 1084 ... FORMULATION IS SWITCHED TO
-      GLOBAL INTEGRATION N=0``) and ``thermexpc.F`` only reaches the
+      runs global integration (N = 0, ``cgrtails.F:780-791``: the starter
+      switches the ``max(2, NIP)`` a /THERM_STRESS deck keeps, with WARNING
+      1084) and ``thermexpc.F`` only reaches the
       per-integration-point stresses. Measured: 2.66e-07 mm against a
       closed-form 0.012 mm, at NIP 1 and NIP 5 alike. ``_restate_law1_shells``
       converts the ordinary case (every part on the material is a shell) to
@@ -4533,8 +4537,9 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
             "/MAT/ELAST (LAW1) material, which gets NO thermal expansion, and "
             "the material could NOT be restated as LAW36 because it also "
             "carries non-shell parts. LAW1 always runs GLOBAL integration "
-            "(starter WARNING 1084 'NUMBER OF INTEGRATION POINTS IS HIGHER "
-            "THAN 1 ... SWITCHED TO GLOBAL INTEGRATION N=0') and thermexpc.F "
+            "(N = 0: on a /THERM_STRESS deck k2rad keeps writing N = max(2, "
+            "NIP), and the starter switches it to N = 0 with WARNING 1084, "
+            "cgrtails.F:780-791) and thermexpc.F "
             "only reaches the per-integration-point stresses, so there is "
             "nothing for it to correct - measured, a LAW1 shell strip expands "
             "by 2.66e-07 mm where the closed form is 0.012 mm, at NIP 1 and "

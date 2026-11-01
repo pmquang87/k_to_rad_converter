@@ -14,6 +14,7 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -253,10 +254,173 @@ def _write_conversion_log(output_stem: str, input_path: str,
     return log_path
 
 
+#: The /BEGIN default: LS-DYNA's ton-mm-s system.
+_DEFAULT_BEGIN_UNITS: Tuple[str, str, str] = ("Mg", "mm", "s")
+
+
+def _unit_label_factor(label: str, base: str) -> Optional[float]:
+    """The SI factor of a /BEGIN unit *label*, read the way the starter
+    reads it (``unit_code.F:70-158``: 1..3 characters, an SI prefix + the
+    *base* letter 'g' / 'm' / 's'), or None for a label it would refuse."""
+    from .writer.materials import _SI_PREFIX_FACTORS
+    key = str(label).strip()
+    if not 1 <= len(key) <= 3 or key[-1] != base:
+        return None
+    return _SI_PREFIX_FACTORS.get(key[:-1])
+
+
+def _same_begin_units(a: tuple, b: tuple) -> bool:
+    """Do two (mass, length, time) label triples name the same units? By
+    SI factor where both labels parse ('kg' == 'Kg', 'us' == 'mus'), else
+    as text."""
+    for x, y, base in zip(a, b, "gms"):
+        fx, fy = _unit_label_factor(x, base), _unit_label_factor(y, base)
+        if fx is not None and fy is not None:
+            if not math.isclose(fx, fy, rel_tol=1e-9):
+                return False
+        elif str(x).strip() != str(y).strip():
+            return False
+    return True
+
+
+def _control_units_cells(cu) -> str:
+    """'LENGTH mm, TIME sec, MASS mtrc_ton' (+ any card-2 scale)."""
+    cells = [f"{slot} {val or '(blank)'}" for slot, val in
+             (("LENGTH", cu.length), ("TIME", cu.time), ("MASS", cu.mass))]
+    cells += [f"{slot}_SCALE {val:g}" for slot, val in
+              (("LENGTH", cu.length_scale), ("TIME", cu.time_scale),
+               ("MASS", cu.mass_scale)) if val]
+    return ", ".join(cells)
+
+
+def _resolve_begin_units(state: ConversionState,
+                         units: Optional[tuple]) -> Tuple[str, str, str]:
+    """The /BEGIN (mass, length, time) labels, resolved after dispatch.
+
+    1. A ``*LOAD_BLAST_ENHANCED`` UNIT flag when the caller gave no units or
+       spelled the default Mg mm s - the pre-CardStack rule, unchanged (an
+       explicit "Mg mm s" has always counted as "left at the default"). It
+       also wins over a disagreeing ``*CONTROL_UNITS``, named for both
+       spellings of the default: LS-DYNA computes the blast in the flag's
+       units, and /LOAD/PBLAST reads the labels.
+    2. The caller's units, as given; a disagreeing blast flag (the old
+       UNIT MISMATCH text) or ``*CONTROL_UNITS`` is named.
+    3. The deck's ``*CONTROL_UNITS`` labels (handlers.handle_control_units).
+    4. Mg mm s.
+
+    The labels only NAME the deck's units: k2rad writes the same triple on
+    both /BEGIN unit lines, so no input value is rescaled - but the starter
+    converts its built-in constants with them (hm_read_radiation.F:140-142,
+    hm_read_matgas.F:288-293, hm_read_pblast.F:293-295)."""
+    cu = state.control_units
+    blast = state.blast_unit_system
+    if blast and (units is None or tuple(units) == _DEFAULT_BEGIN_UNITS):
+        # the spelled default IS the default here, so the card is named for
+        # it exactly as without units (the K-0P review)
+        if (cu is not None and cu.labels is not None
+                and not _same_begin_units(cu.labels, blast)):
+            state.warn(
+                f"*CONTROL_UNITS ({_control_units_cells(cu)} = "
+                f"{'/'.join(cu.labels)}) disagrees with the "
+                f"*LOAD_BLAST_ENHANCED UNIT flag ({'/'.join(blast)}): the "
+                "blast flag wins for /BEGIN - LS-DYNA computes the blast in "
+                "the flag's units and /LOAD/PBLAST reads the /BEGIN labels. "
+                "Check which of the two cards states the deck's real units.")
+        elif cu is not None and cu.labels is None:
+            # an unmappable or empty card is named on a blast deck too, as
+            # it is without one (the K-0P review, CardStack K1a follow-up)
+            state.warn(
+                "*CONTROL_UNITS: " + "; ".join(cu.problems)
+                + f" - the *LOAD_BLAST_ENHANCED UNIT flag sets /BEGIN to "
+                f"{'/'.join(blast)} (LS-DYNA computes the blast in the "
+                "flag's units, and the card converts nothing, Vol I R17 "
+                "p.12-592).")
+        m, l, t = blast
+        state.warn(
+            f"/BEGIN units set to {m}/{l}/{t} from the *LOAD_BLAST_ENHANCED UNIT "
+            "flag (the TM5-1300 blast formula is unit-dependent). Pass an explicit "
+            "convert(units=...) to override.")
+        return blast
+    if units is not None:
+        chosen = tuple(units)
+        if blast and (tuple(str(u).strip().lower() for u in chosen)
+                      != tuple(u.lower() for u in blast)):
+            # Explicit units win (deliberate), but a mismatch against the
+            # deck's own UNIT flag is almost always a mistake: /LOAD/PBLAST
+            # rescales its internal {cm,g,µs} data by the /BEGIN labels, so
+            # e.g. labelling an SI-metre deck "mm" makes every distance read
+            # 1000x too small — the starter then flags EVERY loaded segment
+            # "Rg/W**(1/3) < 0.5 : Horizontal Distance on Ground (Rg) is too
+            # close to the charge" and the blast pressures are wrong by unit
+            # factors.
+            eu = "/".join(str(u).strip() for u in chosen)
+            bu = "/".join(blast)
+            state.warn(
+                f"UNIT MISMATCH for the blast load: explicit units {eu} were "
+                f"passed, but the deck's *LOAD_BLAST_ENHANCED UNIT flag says the "
+                f"model is in {bu}. /LOAD/PBLAST converts its empirical TM5-1300 "
+                f"data via the /BEGIN labels, so mislabelled units make the blast "
+                f"pressures wrong by unit factors (typical symptom: the starter "
+                f"warns 'Rg too close to the charge' on every loaded segment). "
+                f"Unless the deck really is in {eu}, reconvert with units={bu} "
+                f"(or leave units at the default to adopt the UNIT flag).")
+        if cu is not None:
+            eu = "/".join(str(u).strip() for u in chosen)
+            if cu.labels is not None and not _same_begin_units(chosen,
+                                                               cu.labels):
+                cl = "/".join(cu.labels)
+                state.warn(
+                    f"--units {eu} disagree with the deck's *CONTROL_UNITS "
+                    f"({_control_units_cells(cu)} = {cl}): the explicit units "
+                    "are written to /BEGIN. The labels only name the deck's "
+                    "units for the cards that read them (nothing is "
+                    f"rescaled), so unless the deck really is in {eu}, drop "
+                    f"--units (convert(units=None)) to write {cl}.")
+            elif cu.labels is None:
+                state.warn(
+                    "*CONTROL_UNITS: " + "; ".join(cu.problems)
+                    + f" - the explicit --units {eu} are written to /BEGIN.")
+        return chosen
+    if cu is None:
+        return _DEFAULT_BEGIN_UNITS
+    if cu.labels is None:
+        if cu.problems and cu.problems[0].startswith("states no unit"):
+            state.warn(
+                f"*CONTROL_UNITS {cu.problems[0]}: LS-DYNA would read its own "
+                "m / sec / kg defaults, but the card converts nothing (Vol I "
+                "R17 p.12-592), so /BEGIN keeps the default Mg/mm/s - pass "
+                "--units / convert(units=...) if the deck is in other units.")
+        else:
+            state.warn(
+                "*CONTROL_UNITS: " + "; ".join(cu.problems) + " - /BEGIN "
+                "keeps the default Mg/mm/s. The labels only name the deck's "
+                "units for the cards that read them (nothing is rescaled); "
+                "pass --units / convert(units=...) with the deck's real "
+                "units if it is not in Mg mm s.")
+        return _DEFAULT_BEGIN_UNITS
+    # (a blast deck without explicit units returned at step 1)
+    defaulted = (f"; blank {' / '.join(cu.defaulted)} = the manual's "
+                 "default " + " / ".join(
+                     {"LENGTH": "m", "TIME": "sec", "MASS": "kg"}[s]
+                     for s in cu.defaulted)
+                 if cu.defaulted else "")
+    state.warn(
+        f"/BEGIN units {'/'.join(cu.labels)} from *CONTROL_UNITS "
+        f"({_control_units_cells(cu)}{defaulted}): no input value is "
+        "rescaled, but the starter converts its built-in constants with "
+        "these labels - the /RADIATION Stefan-Boltzmann sigma "
+        "(hm_read_radiation.F:140-142), the /MAT/GAS gas constant "
+        "(hm_read_matgas.F:288-293) and the /LOAD/PBLAST data - while "
+        "LS-DYNA currently uses the card only to convert an external "
+        "database (Vol I R17 p.12-592), so a stale card moves exactly "
+        "those. --units / convert(units=...) overrides.")
+    return cu.labels
+
+
 def convert(
     input_path: str,
     output_stem: Optional[str] = None,
-    units: tuple = ("Mg", "mm", "s"),
+    units: Optional[tuple] = None,
     *,
     ground_springs: bool = False,
     ground_spring_k: float = 100.0,
@@ -347,6 +511,21 @@ def convert(
     ale_multimat_law51: bool = False,
     eroding_surf_ext: bool = False,
     airbag_particle_uniform: bool = False,
+    damping_curve_window: bool = True,
+    stop_added_mass: bool = False,
+    dt2ms_tssfac_product: bool = False,
+    print_every: Optional[int] = None,
+    tet_isolid1: bool = True,
+    law1_shell_global_n: bool = True,
+    inter_stmin: Optional[Dict[int, float]] = None,
+    inter_inacti: Optional[Dict[int, int]] = None,
+    s2s_type25: bool = False,
+    general_shell_edges: bool = False,
+    single_surface_sst_gap: bool = True,
+    contact_birth_death: bool = True,
+    soft2_iedge_gate: bool = True,
+    srnde_ishape: bool = True,
+    maxint_stress_all: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -359,11 +538,19 @@ def convert(
     output_stem : str, optional
         Base path for output files (without ``_0000.rad`` / ``_0001.rad``).
         Defaults to *input_path* with the extension removed.
-    units : tuple of (mass, length, time)
-        Unit strings written to the /BEGIN header.  Defaults to the LS-DYNA
-        ton-mm-s system ("Mg", "mm", "s").  This only labels the header — the
-        converter never rescales numeric values, so the labels should match
-        the units already used in the .k file.
+    units : tuple of (mass, length, time), optional
+        Unit strings written to the /BEGIN header. None (the default) takes
+        them from the deck: its ``*CONTROL_UNITS`` LENGTH / TIME / MASS
+        mapped to the Radioss labels of the same units (``mm`` / ``sec`` /
+        ``mtrc_ton`` -> "Mg", "mm", "s"; Vol I R17 p.12-592) when the card
+        states a mappable system, else the LS-DYNA ton-mm-s default
+        ("Mg", "mm", "s"); a ``*LOAD_BLAST_ENHANCED`` UNIT flag wins over
+        both, as before. Given units are written as they are, and a
+        ``*CONTROL_UNITS`` that disagrees is named in a warning - except
+        the spelled-out default Mg mm s on a ``*LOAD_BLAST_ENHANCED`` deck,
+        which still adopts the UNIT flag, as it always has. This only
+        labels the header — the converter never rescales numeric values, so
+        the labels should match the units already used in the .k file.
 
     Other Parameters
     ----------------
@@ -1638,6 +1825,80 @@ def convert(
         ``underwater_C`` T01 channels identical at all 172 samples). Turning it
         on also re-arms the ``Bunreacted`` derivation, because
         ``fill_buffer_51.F:496`` then applies again.
+    damping_curve_window : bool
+        Convert the LCID curve of ``*DAMPING_PART_MASS`` / ``*DAMPING_GLOBAL``
+        in time (``--no-damping-curve-window`` opts out). Default True: a
+        piecewise-constant curve becomes one alpha-only ``/DAMP`` per level
+        with its Tstart / Tstop, any other shape ``/DAMP/FUNCT``, and on
+        ``*DAMPING_GLOBAL`` the curve replaces VALDMP, which LS-DYNA bypasses
+        when LCID > 0 (Vol I R17 p.15-8). False keeps the old single ``/DAMP``
+        at the curve's first ordinate (VALDMP on ``*DAMPING_GLOBAL``).
+    stop_added_mass : bool
+        On a ``*CONTROL_TIMESTEP`` DT2MS < 0 deck, write
+        ``*CONTROL_TERMINATION`` ENDMAS (a PERCENT) as an engine ``/STOP``
+        whose Mmax is the RATIO ENDMAS / 100 (``ecrit.F:516/593`` compare
+        (M - M0) / M0 with it). Off by default.
+    dt2ms_tssfac_product : bool
+        Hold the mass-scaled step at TSSFAC x |DT2MS| (``/DT/NODA/CST`` and
+        ``/DT/AMS`` Tmin), LS-DYNA's minimum step for DT2MS < 0 (Vol I R17
+        p.12-585), instead of |DT2MS|. Off by default.
+    print_every : int, optional
+        Write the engine ``/PRINT/-N`` with this N (1..9999 cycles; the
+        engine reads the cell as I5, ``freform.F:1563``). None = the
+        writer's own rule.
+    tet_isolid1 : bool
+        Write ``/PROP/SOLID`` Isolid 1 on a section whose elements are all 4-
+        / 10-node tets (not ALE, not cohesive) instead of Isolid 14. The
+        starter resets every tet group to Isolid 1 anyway, for every
+        material (``sgrtails.F:984-1000``); before that, Isolid 14 on a LAW1
+        section draws WARNING 791, the integration-point message
+        (``sgrtails.F:695-704``). Default True (``--no-tet-isolid1``).
+    law1_shell_global_n : bool
+        Write ``/PROP/SHELL`` N = 0 on a section whose parts are all LAW1
+        with no ``*INITIAL_STRESS_SHELL`` instead of max(2, NIP), which the
+        starter switches to N = 0 itself with WARNING 1084
+        (``cgrtails.F:780-791``). Default True (``--no-law1-shell-global-n``).
+    inter_stmin : dict[int, float], optional
+        Per-interface ``/INTER/TYPE7`` Stmin overrides ``{inter_id: Stmin}``
+        (k2rad's own cell is 1000, a force / length in the deck's units;
+        each value finite and >= 0).
+    inter_inacti : dict[int, int], optional
+        ``{inter_id: 6}``: Inacti 6 on that TYPE7 / 11 / 19 interface where
+        k2rad would write 5; 6 is the only value accepted.
+    s2s_type25 : bool
+        Write an explicit ``*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE`` (not
+        ``_ONE_WAY``) as a two-surface ``/INTER/TYPE25`` instead of the
+        one-way ``/INTER/TYPE7``. Off by default.
+    general_shell_edges : bool
+        Write an SSID = 0 ``*CONTACT_AUTOMATIC_GENERAL``'s ``/INTER/TYPE25``
+        self-contact with Iedge 1 (shell border edges) instead of 1000. Off
+        by default.
+    single_surface_sst_gap : bool
+        Gapmin = |SST| on a single-surface contact of shells (Igap-0 routes)
+        instead of (|SST| + |MST|)/2. Default True
+        (``--no-single-surface-sst-gap``).
+    contact_birth_death : bool
+        ``*CONTACT`` Card-2 BT / DT -> ``/INTER`` Tstart / Tstop on every
+        sliding-contact route, by the sign rules of Vol I R17 p.11-29/30
+        (CardStack K-11). Default True (``--no-contact-birth-death``: the
+        cells each route wrote before K-11 - 0 / 0 where BT / DT were
+        dropped, BT / DT as stated on the eroding / node-to-surface
+        ``/INTER/TYPE25`` family, the routed implicit node-to-surface
+        ``/INTER/TYPE7`` and ``--s2s-type25``).
+    soft2_iedge_gate : bool
+        An optional Card A SOFT 2 on the ERODING_SURFACE_TO_SURFACE /
+        AUTOMATIC_NODES_TO_SURFACE ``/INTER/TYPE25`` writes Iedge 22 only
+        with DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (CardStack K-10).
+        Default True (``--no-soft2-iedge-gate``: Iedge 22 for every SOFT 2
+        card there, dyna2rad's rule).
+    srnde_ishape : bool
+        Optional Card E SRNDE 1 -> ``/INTER/TYPE25`` Ishape 2 where the
+        interface holds a shell (CardStack K-16). Default True
+        (``--no-srnde-ishape``: Ishape 0, the SRNDE named).
+    maxint_stress_all : bool
+        ``*DATABASE_EXTENT_BINARY`` MAXINT > 3 ->
+        ``/ANIM/SHELL/TENS/STRESS/ALL`` in the engine deck (CardStack K-42).
+        Default True (``--no-maxint-stress-all``: no such line).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -1646,8 +1907,9 @@ def convert(
         Save the conversion's warnings + skipped keywords to ``<stem>_conversion.log``
         for later investigation (default True). The .rad files are unaffected.
 
-    All conversion switches are opt-in: with their defaults the .rad output is
-    byte-identical to a plain conversion (see :class:`~k2rad.state.ConvertOptions`).
+    The opt-in switches default to off; the default-ON measured fixes, each
+    with a ``--no-`` opt-out, are listed in
+    :class:`~k2rad.state.ConvertOptions`.
 
     Returns
     -------
@@ -1679,9 +1941,12 @@ def convert(
     if ams_forced_cog:
         rigid_cog_master = True
 
-    # 2. Dispatch each block to fill state
+    # 2. Dispatch each block to fill state. The /BEGIN units are provisional
+    #    here (no handler reads them) and resolved after dispatch, when the
+    #    deck's *CONTROL_UNITS and blast UNIT flag are known (step 2a).
     state = ConversionState()
-    state.units = tuple(units)
+    state.units = (tuple(units) if units is not None
+                   else _DEFAULT_BEGIN_UNITS)
     state.options = ConvertOptions(
         ground_springs=ground_springs,
         ground_spring_k=ground_spring_k,
@@ -1772,6 +2037,21 @@ def convert(
         ale_multimat_law51=ale_multimat_law51,
         eroding_surf_ext=eroding_surf_ext,
         airbag_particle_uniform=airbag_particle_uniform,
+        damping_curve_window=damping_curve_window,
+        stop_added_mass=stop_added_mass,
+        dt2ms_tssfac_product=dt2ms_tssfac_product,
+        print_every=print_every,
+        tet_isolid1=tet_isolid1,
+        law1_shell_global_n=law1_shell_global_n,
+        inter_stmin=dict(inter_stmin or {}),
+        inter_inacti=dict(inter_inacti or {}),
+        s2s_type25=s2s_type25,
+        general_shell_edges=general_shell_edges,
+        single_surface_sst_gap=single_surface_sst_gap,
+        contact_birth_death=contact_birth_death,
+        soft2_iedge_gate=soft2_iedge_gate,
+        srnde_ishape=srnde_ishape,
+        maxint_stress_all=maxint_stress_all,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(
@@ -1780,8 +2060,13 @@ def convert(
             "'qbat' -> /PROP/SHELL Ishell=12 (fully integrated, the default "
             "and what every previous conversion produced); 'qeph' -> Ishell=24 "
             "(reduced integration, physically stabilised, closer to LS-DYNA "
-            "ELFORM=2 Belytschko-Tsay). Choosing 'qeph' CHANGES RESULTS on "
-            "every shell deck.")
+            "ELFORM=2 Belytschko-Tsay). Per ELFORM: ELFORM 16 (fully "
+            "integrated, 2x2 in-plane points) -> Ishell 12 by default, the "
+            "same integration class; 'qeph' turns it into Ishell 24, the "
+            "dyna2rad parity choice (dyna2rad writes 24), measured +0.46 % "
+            "peak tip deflection on an ELFORM 16 cantilever (1.5357 vs "
+            "1.5287 mm). Choosing 'qeph' CHANGES RESULTS on every shell "
+            "deck.")
     if ams_forced_cog:
         state.warn(
             "--ams requires element-free /RBODY masters, overriding "
@@ -1825,41 +2110,12 @@ def convert(
     # build_starter calls it too for direct callers.
     _flatten_set_adds(state)
 
-    # 2a. Blast decks: /LOAD/PBLAST reads the /BEGIN unit labels to convert its
-    #     internal {cm,g,µs} TM5-1300 data to model units, so those labels MUST
-    #     match the deck's real units. A *LOAD_BLAST_ENHANCED UNIT flag pins the
-    #     system down (handlers._blast_unit_system); adopt it when the caller
-    #     left units at the default so the pressures come out right.
-    if state.blast_unit_system:
-        # Already a Tuple[str, str, str] — the tuple() call was a copy of one.
-        blast_units = state.blast_unit_system
-        if tuple(units) == ("Mg", "mm", "s"):
-            state.units = blast_units
-            m, l, t = state.units
-            state.warn(
-                f"/BEGIN units set to {m}/{l}/{t} from the *LOAD_BLAST_ENHANCED UNIT "
-                "flag (the TM5-1300 blast formula is unit-dependent). Pass an explicit "
-                "convert(units=...) to override.")
-        elif (tuple(str(u).strip().lower() for u in units)
-              != tuple(u.lower() for u in blast_units)):
-            # Explicit units win (deliberate), but a mismatch against the deck's
-            # own UNIT flag is almost always a mistake: /LOAD/PBLAST rescales its
-            # internal {cm,g,µs} data by the /BEGIN labels, so e.g. labelling an
-            # SI-metre deck "mm" makes every distance read 1000x too small — the
-            # starter then flags EVERY loaded segment "Rg/W**(1/3) < 0.5 :
-            # Horizontal Distance on Ground (Rg) is too close to the charge" and
-            # the blast pressures are wrong by unit factors.
-            eu = "/".join(str(u).strip() for u in units)
-            bu = "/".join(blast_units)
-            state.warn(
-                f"UNIT MISMATCH for the blast load: explicit units {eu} were "
-                f"passed, but the deck's *LOAD_BLAST_ENHANCED UNIT flag says the "
-                f"model is in {bu}. /LOAD/PBLAST converts its empirical TM5-1300 "
-                f"data via the /BEGIN labels, so mislabelled units make the blast "
-                f"pressures wrong by unit factors (typical symptom: the starter "
-                f"warns 'Rg too close to the charge' on every loaded segment). "
-                f"Unless the deck really is in {eu}, reconvert with units={bu} "
-                f"(or leave units at the default to adopt the UNIT flag).")
+    # 2a. The /BEGIN unit labels, now that every card is read: the caller's
+    #     units, a *LOAD_BLAST_ENHANCED UNIT flag (/LOAD/PBLAST reads the
+    #     labels to convert its internal {cm,g,µs} TM5-1300 data, so they
+    #     MUST match the deck's real units), the deck's *CONTROL_UNITS, or
+    #     the ton-mm-s default - see _resolve_begin_units for the order.
+    state.units = _resolve_begin_units(state, units)
 
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.

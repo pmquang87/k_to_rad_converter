@@ -109,7 +109,10 @@ class CliTests(unittest.TestCase):
 
     def test_build_parser_defaults(self):
         args = cli.build_parser().parse_args([self.kpath])
-        self.assertEqual(tuple(args.units), ("Mg", "mm", "s"))
+        # The CardStack batch: --units defaults to None = from the deck
+        # (*CONTROL_UNITS, else Mg mm s - convert() resolves it; the
+        # resolved Mg mm s is pinned in tests/test_cardstack_pipeline.py).
+        self.assertIsNone(args.units)
         self.assertEqual(args.gapmin_factor, 0.8)
         self.assertTrue(args.rigid_cog_master)      # BooleanOptionalAction default
         self.assertFalse(args.ams)

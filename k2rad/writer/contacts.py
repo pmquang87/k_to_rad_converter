@@ -8,7 +8,7 @@ from typing import (Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
                     Union)
 from ..state import (ConversionState, ContactAutoSingle, ContactAutoSurf2Surf,
                      ContactSpotweld, ContactThermal, ContactTied,
-                     ContactTiebreak, SolidElem, TshellElem)
+                     ContactTiebreak, ShellElem, SolidElem, TshellElem)
 from ..topology import TET10_EDGEMID
 from .joint_screw import lagrange_held_pairs
 from .common import (
@@ -819,9 +819,21 @@ def _gapmin_override(state: ConversionState, inter_id: int, base: float,
     so it starts with 0 initial penetrations is the key fix for the contact
     limit cycle: pre-engaged nodes on the releasing side otherwise flip-flop in
     and out of the penalty gap and the force residual never converges (open item
-    0 / durable lesson #3)."""
+    0 / durable lesson #3).
+
+    An entry :func:`k2rad.gapmin.apply_auto_gapmin` wrote (its id in
+    ``state.auto_gapmin_ids``, CardStack K-04) is named as ``--auto-gapmin``,
+    the flag the user actually passed: its value is the measured clearance
+    the ``--auto-gapmin INTER`` line above states."""
     if inter_id in requested:
         val = requested.pop(inter_id)
+        if inter_id in state.auto_gapmin_ids:
+            state.warn(
+                f"INTER {inter_id}: Gapmin overridden {base:g} -> {val:g} via "
+                "--auto-gapmin (the value its '--auto-gapmin INTER "
+                f"{inter_id}' line derives from the measured node-to-segment "
+                "clearance; --inter-gapmin pins another one).")
+            return val
         state.warn(
             f"INTER {inter_id}: Gapmin overridden {base:g} -> {val:g} via "
             "--inter-gapmin (drop a pulled clearance-fit interface below its "
@@ -1140,6 +1152,65 @@ def _contact_base_spelling(keyword: str) -> str:
     return kw
 
 
+def _ls_shell_offset_reason(state: ConversionState, c: ContactAutoSurf2Surf,
+                            shells: list) -> Tuple[Optional[str], str]:
+    """``(reason, mixed)``: why LS-DYNA offsets the contact's *shells* by
+    half their thickness (Vol I R17), or ``(None, ...)`` when it does not.
+
+    Always for a General Remark 12 type (p.11-128/129,
+    :data:`_LS_ALWAYS_OFFSETS_SHELLS`); for any other type when the contact's
+    own optional Card B says ``THKOPT 1`` with its ``SHLTHK`` 1/2
+    (``THKOPT 2`` = never; p.11-101/102), else when ``*CONTROL_CONTACT
+    SHLTHK`` is 2, or 1 with no rigid shell among *shells* (SHLTHK 1
+    "excludes rigid bodies", p.12-70). A set MIXING rigid and deformable
+    shells under SHLTHK 1 gives ``(None, mixed)`` with *mixed* the clause
+    naming the counts - one rule for the shell-offset Gapmin
+    (:func:`_shell_offset_gapmin`) and --auto-gapmin's offset term
+    (``k2rad.gapmin``, CardStack K-04)."""
+    base = _contact_base_spelling(c.keyword)
+    if base in _LS_ALWAYS_OFFSETS_SHELLS:
+        return (f"*CONTACT_{base} always does (Vol I R17 p.11-128/129 "
+                "Remark 12)"), ""
+    if c.thkopt == 2:
+        return None, ""                         # its own Card B: no offsets
+    if c.thkopt == 1:
+        shlthk = c.shlthk_c
+        reason = (f"its own Card B THKOPT 1 / SHLTHK {shlthk} "
+                  "(p.11-101/102)")
+    else:
+        cc = state.ctrl_contact
+        shlthk = cc.shlthk if cc is not None else 0
+        reason = f"*CONTROL_CONTACT SHLTHK {shlthk} (p.12-70)"
+    if shlthk not in (1, 2):
+        return None, ""                         # LS-DYNA ignores thickness
+    if shlthk == 1:
+        rigid_pids = rigid_part_ids(state)
+        n_rigid = sum(1 for e in shells if e.pid in rigid_pids)
+        if n_rigid == len(shells):
+            return None, ""                     # SHLTHK 1 excludes rigid bodies
+        if n_rigid:
+            return None, (f"{n_rigid} rigid and {len(shells) - n_rigid} "
+                          f"deformable shells under {reason}, which offsets "
+                          "the deformable ones only")
+    return reason, ""
+
+
+def _shell_offset_thickness(state: ConversionState, e) -> float:
+    """The thickness LS-DYNA offsets shell *e* by, as the /SHELL row carries
+    it (``writer/mesh._shell_element_thickness``, else the section ``T1``; a
+    ``*PART_COMPOSITE`` part its valid-ply sum); 0 when it has none."""
+    # Imported here, not at module level: writer.mesh imports much of the
+    # writer (lumping.nodal_masses_from_state does the same).
+    from .mesh import _shell_element_thickness, _unique_node_slots
+    part = state.parts.get(e.pid)
+    comp = state.part_composites.get(e.pid)
+    if part is not None and part.secid == 0 and comp is not None:
+        return sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
+    sec = state.sec_shells.get(part.secid) if part is not None else None
+    t1 = sec.t1 if sec is not None else 0.0
+    return _shell_element_thickness(e, _unique_node_slots(e.nodes), t1) or t1
+
+
 def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
                          gapmin: float, main_sid: int, main_styp: int,
                          sec_sid: int, sec_styp: int, rigid_nodes: Set[int],
@@ -1206,50 +1277,17 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
             covered |= ids
     if not surface or covered != group:
         return gapmin, False                    # not a shell-only surface
-    base = _contact_base_spelling(c.keyword)
-    if base in _LS_ALWAYS_OFFSETS_SHELLS:
-        reason = (f"*CONTACT_{base} always does (Vol I R17 p.11-128/129 "
-                  "Remark 12)")
-    else:
-        if c.thkopt == 2:
-            return gapmin, False                # its own Card B: no offsets
-        if c.thkopt == 1:
-            shlthk = c.shlthk_c
-            reason = (f"its own Card B THKOPT 1 / SHLTHK {shlthk} "
-                      "(p.11-101/102)")
-        else:
-            cc = state.ctrl_contact
-            shlthk = cc.shlthk if cc is not None else 0
-            reason = f"*CONTROL_CONTACT SHLTHK {shlthk} (p.12-70)"
-        if shlthk not in (1, 2):
-            return gapmin, False                # LS-DYNA ignores thickness
-        if shlthk == 1:
-            rigid_pids = rigid_part_ids(state)
-            n_rigid = sum(1 for e in surface if e.pid in rigid_pids)
-            if n_rigid == len(surface):
-                return gapmin, False            # SHLTHK 1 excludes rigid bodies
-            if n_rigid:
-                state.warn(
-                    f"/INTER/TYPE7 {c.inter_id}: the secondary surface mixes "
-                    f"{n_rigid} rigid and {len(surface) - n_rigid} deformable "
-                    f"shells under {reason}, which offsets the deformable ones "
-                    "only - no single constant Gapmin (Igap 0) represents "
-                    "that; the starter's derived gap stands.")
-                return gapmin, False
-    # Imported here, not at module level: writer.mesh imports much of the
-    # writer (lumping.nodal_masses_from_state does the same).
-    from .mesh import _shell_element_thickness, _unique_node_slots
+    reason, mixed = _ls_shell_offset_reason(state, c, surface)
+    if mixed:
+        state.warn(
+            f"/INTER/TYPE7 {c.inter_id}: the secondary surface mixes {mixed} "
+            "- no single constant Gapmin (Igap 0) represents that; the "
+            "starter's derived gap stands.")
+    if reason is None:
+        return gapmin, False
     thick: List[float] = []
     for e in surface:
-        part = state.parts.get(e.pid)
-        comp = state.part_composites.get(e.pid)
-        if part is not None and part.secid == 0 and comp is not None:
-            t = sum(p.thick for p in comp.plies if p.mid > 0 and p.thick > 0.0)
-        else:
-            sec = state.sec_shells.get(part.secid) if part is not None else None
-            t1 = sec.t1 if sec is not None else 0.0
-            t = _shell_element_thickness(e, _unique_node_slots(e.nodes),
-                                         t1) or t1
+        t = _shell_offset_thickness(state, e)
         if not t > 0.0:
             state.warn(
                 f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary "
@@ -1272,6 +1310,23 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
     half = ts[0] / 2.0
     clamped = half > ceiling
     value = _round_sig(ceiling if clamped else half)
+    routes = ""
+    if clamped:
+        # CardStack K-03 (text only): how many sides set the cap, and the two
+        # exact routes to t/2 - a STATED gap is written as it is (no cap:
+        # i7sti3.F:1057 derives only when the gap is <= 0) and the starter
+        # warns above 0.5 x the side (WARNING 94) but uses it, which the
+        # parenthetical after the routes says once (the K1a review: the
+        # route text had repeated it, and the tail the 0.1 x side value).
+        n_short, n_sides = _short_main_sides(state, main_sid, main_styp, ts[0])
+        t_txt, h_txt = f"{_round_sig(ts[0]):g}", f"{_round_sig(half):g}"
+        routes = (
+            f". {n_short} of the main surface's {n_sides} unique segment "
+            f"sides are shorter than t = {t_txt} (the shortest {edge:g}), so "
+            "the cap comes from the mesh of the main side. Two routes write "
+            f"t/2 unclamped: Card-3 SST = {t_txt} on this contact (Gapmin = "
+            f"(SST + MST)/2 = {h_txt}, written as stated) or --inter-gapmin "
+            f"{c.inter_id}={h_txt}")
     state.warn(
         f"/INTER/TYPE7 {c.inter_id}: LS-DYNA offsets the secondary SHELLS by "
         f"half their thickness here ({reason}), so it engages them at t/2 = "
@@ -1283,6 +1338,7 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
            "WARNING 94 - informational, the gap is used as written; bend "
            "prints it, once per domain-decomposition pass)"
            if clamped else "")
+        + routes
         + (f" (the secondary surface carries shells of thickness {ts}; every "
            "t/2 is above the ceiling, so each gives the same Gapmin)"
            if len(ts) > 1 else "")
@@ -1293,8 +1349,33 @@ def _shell_offset_gapmin(state: ConversionState, c: ContactAutoSurf2Surf,
           "SHLTHK 2, written 0.127): IE -2.00 -> -1.42 %, KE -68.65 -> "
           "-45.60 % at matched time, closer to LS-DYNA at every sampled time, "
           "0.98x the cycles; the row stays deviation. Pass "
-          "--no-shell-offset-gapmin to keep the starter's derived gap.")
+          "--no-shell-offset-gapmin to keep the starter's derived gap"
+        + (", smaller still than the cap" if clamped else "") + ".")
     return value, True
+
+
+def _short_main_sides(state: ConversionState, main_sid: int, main_styp: int,
+                      t: float) -> Tuple[int, int]:
+    """``(sides shorter than t, unique sides)`` of a contact main side's
+    segments - the sides that put the shell-offset cap 0.5 x side below
+    t/2 (CardStack K-03: one CAD sliver, or the mesh itself)."""
+    segments, _solid = _main_surface_segments(state, main_sid, main_styp)
+    sides: Set[Tuple[int, int]] = set()
+    for seg in segments:
+        nds = [n for n in seg if n > 0]
+        for a in range(len(nds)):
+            n1, n2 = nds[a], nds[(a + 1) % len(nds)]
+            if n1 != n2:
+                sides.add((min(n1, n2), max(n1, n2)))
+    short = 0
+    for n1, n2 in sides:
+        p, q = state.nodes.get(n1), state.nodes.get(n2)
+        if p is None or q is None:
+            continue
+        d = math.sqrt((p.x - q.x) ** 2 + (p.y - q.y) ** 2 + (p.z - q.z) ** 2)
+        if 0.0 < d < t:
+            short += 1
+    return short, len(sides)
 
 
 #: The *CONTACT_AUTOMATIC_* types the round-9 A10 opt-in reaches (a _MORTAR
@@ -1593,9 +1674,11 @@ def _maybe_derived_gapmin(state: ConversionState, inter_id: int, title: str,
     return value
 
 
-def _sfs_to_stfac(sfs: float, state: ConversionState, inter_id: int) -> float:
+def _sfs_to_stfac(sfs: float, state: ConversionState, inter_id: int,
+                  target: str = "TYPE7") -> float:
     """Map LS-DYNA *CONTACT Card 3 SFS (slave penalty stiffness scale factor) →
-    OpenRadioss /INTER/TYPE7 Stfac.
+    OpenRadioss /INTER/<target> Stfac (*target* names the interface type in
+    the log line only; the mapping is the same on every route).
 
     LS-DYNA SFS default is 1.0 (0/blank also reset to 1.0) = "no scaling"; that
     maps to Stfac=0 (OpenRadioss auto — byte-identical to the converter's prior
@@ -1608,18 +1691,33 @@ def _sfs_to_stfac(sfs: float, state: ConversionState, inter_id: int) -> float:
         return 0.0
     state.warn(
         f"CONTACT {inter_id}: SFS={sfs:g} (Card-3 slave penalty stiffness scale) "
-        f"-> /INTER/TYPE7 Stfac={sfs:g} (SFS=1.0/0/blank would leave the engine "
-        "default Stfac=0)."
+        f"-> /INTER/{target} Stfac={sfs:g} (SFS=1.0/0/blank would leave the "
+        "engine default Stfac=0)."
     )
     return sfs
 
 
-def _stfac_for(state: ConversionState, sfs: float, inter_id: int) -> float:
+def _record_soften_reach(state: ConversionState, target: str,
+                         inter_id: int) -> None:
+    """Note that --soften-stfac set the Stfac cell of /INTER/<target>
+    *inter_id*, for the one summary :func:`_report_contact_lever_reach`
+    prints after the last contact section (the K-0P review: the old
+    up-front 'forced on all /INTER/TYPE7 interfaces' line was false on a
+    TYPE25 deck and missing on a TYPE25-family one)."""
+    ids = state.soften_stfac_reached.setdefault(target, [])
+    if inter_id not in ids:
+        ids.append(inter_id)
+
+
+def _stfac_for(state: ConversionState, sfs: float, inter_id: int,
+               target: str = "TYPE7") -> float:
     """Per-interface Stfac: the global --soften-stfac override if given, else the
-    per-contact *CONTACT Card-3 SFS mapping."""
+    per-contact *CONTACT Card-3 SFS mapping. *target* is the interface type
+    the cell lands in (TYPE7 / TYPE11 / TYPE19 / TYPE25)."""
     if state.options.soften_stfac is not None:
+        _record_soften_reach(state, target, inter_id)
         return state.options.soften_stfac
-    return _sfs_to_stfac(sfs, state, inter_id)
+    return _sfs_to_stfac(sfs, state, inter_id, target)
 
 
 # -----------------------------------------------------------------------------
@@ -2191,15 +2289,153 @@ def _note_dropped_interfaces(state: ConversionState,
         )
 
 
+#: K-08B: why a two-surface /INTER/TYPE25 is not one-for-one the LS-DYNA
+#: two-way contact (the approximations the --s2s-type25 warning names).
+_S2S_TYPE25_APPROX = (
+    "The mapping is an approximation: TYPE25 has no Gapmin - each side's gap "
+    "is min(Gap_scale x t/2, Gap_max) from its own elements (i25sti3.F:"
+    "211-229, 312-317; Gap_scale 1, Gap_max 0 = 1e30, 0 on a solid), so "
+    "Card-3 SST / MST are not written; VISs is TYPE25's own critical-damping "
+    "fraction (the Radioss 0.05 unless Card-2 VDC states one), not the TYPE7 "
+    "VisS; friction is Coulomb Fric = FS (Ifric 0) as on the TYPE7, and "
+    "TYPE25 zeroes the friction critical damping (frictionparts_model.F:"
+    "108-112). MEASURED (OpenRadioss against itself) on a lip coupon - a 2 "
+    "mm pusher dropped at 1 m/s onto the middle of one 10 mm shell element: "
+    "the TYPE7 lets it through, this TYPE25 stops it 0.178 above the plate's "
+    "mid-plane and rebounds it. On twobar (two solid bars with *SET_SEGMENT "
+    "sides, the deck respelled AUTOMATIC) this route's own TYPE25 carries no "
+    "load: peak IE 0.78 against the TYPE7's 4.46e4 and LS-DYNA's end value "
+    "3036, the kinetic energy kept at 1.249e5 of 1.25e5 (a hand-built "
+    "two-surface /INTER/TYPE25 read the same, ROADMAP), which is why it is "
+    "opt-in.")
+
+
+def _s2s_type25_refusal(state: ConversionState, c: ContactAutoSurf2Surf) -> str:
+    """Why ``--s2s-type25`` does not take surface-to-surface record *c*
+    ("" = it does). PURE - no warning, no id - so ``k2rad.gapmin`` asks the
+    same question before the writer runs.
+
+    Three refusals, in this order: (1) a spelling whose base is not
+    ``AUTOMATIC_SURFACE_TO_SURFACE`` - :func:`_contact_base_spelling`
+    strips ``CONTACT_`` and the options ``_ID``, ``_TITLE`` and ``_MPP``,
+    and a ``_ONE_WAY`` spelling gets its own reason; (2) an implicit deck;
+    (3) a ``*SET_NODE`` side (STYP 4) - and for a ``*SET_NODE`` MAIN side
+    the reason says the TYPE7 route then drops it by name. A record with no
+    keyword (k2rad's own) counts as the AUTOMATIC spelling.
+
+    Because the base strips ``_MPP`` too, the function itself would take a
+    ``*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MPP`` record if one were ever
+    registered (the CardStack K1a second review); the user-facing text
+    names ``_ID`` and ``_TITLE`` only, because today no such record exists.
+    There is no ``_THERMAL`` test here either (the CardStack K1a review):
+    the ``_THERMAL`` spellings the surface-to-surface handler reads
+    (``SURFACE_TO_SURFACE_THERMAL``, ``AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_
+    THERMAL``) are other spellings and refused as such by test (1), and no
+    handler takes ``*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_THERMAL`` or
+    ``..._MPP`` (each is skipped by name, as at master)."""
+    base = _contact_base_spelling(c.keyword
+                                  or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE")
+    if base != "AUTOMATIC_SURFACE_TO_SURFACE":
+        return ("a _ONE_WAY contact checks its SURFA nodes only in LS-DYNA "
+                "too, so the one-way /INTER/TYPE7 is its faithful route"
+                if "ONE_WAY" in base else
+                "the flag reaches *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE only "
+                "(with _ID / _TITLE); this spelling keeps its /INTER/TYPE7")
+    if state.is_implicit:
+        return ("this is an implicit deck, and OpenRadioss builds no "
+                "implicit contact stiffness for a TYPE25 (imp_int_k.F:"
+                "111-200; ind_glob_k.F:4601-4605 prints MESSAGE 232), so "
+                "the /INTER/TYPE7 stays")
+    if 4 in (c.sstyp, c.mstyp):
+        return ("a *SET_NODE side has no faces to build a /SURF from, and a "
+                "two-surface /INTER/TYPE25 needs a surface on both sides; "
+                + ("the /INTER/TYPE7 stays" if c.mstyp != 4 else
+                   "it takes the /INTER/TYPE7 route, which drops a *SET_NODE "
+                   "MAIN side by name"))
+    return ""
+
+
+def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
+                      lines: List[str], dropped: Dict[str, List[int]]) -> bool:
+    """``--s2s-type25`` (CardStack K-08B, opt-in): an explicit
+    ``*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE`` (``_ID`` / ``_TITLE``; not
+    ``_ONE_WAY``) as a two-surface /INTER/TYPE25 - surf_ID1 =
+    the SSID /SURF, surf_ID2 = the MSID /SURF (a solid part's
+    /SURF/PART/EXT, the record is not an eroding one), Istf 4, Igap 2,
+    Gap_max 0 (= 1e30, ``hm_read_inter_type25.F:565-566``), Inacti from
+    IGNORE (5), Idel 2, Iedge 1000: each side's nodes are checked against
+    the other side's segments (starter ILEV 2), where the /INTER/TYPE7 checks
+    the SSID nodes only. An ``--inter-inacti`` 6 request on it is refused by
+    :func:`_inacti_six` (a TYPE25 keeps Inacti 5), not by
+    :func:`_s2s_type25_refusal`. True when the interface was written (or
+    dropped) here; False sends it down the TYPE7 route, after a refusal by
+    name."""
+    kw = c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"
+    refuse = _s2s_type25_refusal(state, c)
+    if refuse:
+        state.warn(f"--s2s-type25 refused on *{kw} {c.inter_id}: {refuse}.")
+        return False
+    surf1 = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
+    surf2 = _resolve_contact_master(state, c.msid, c.mstyp, lines) if surf1 else 0
+    if not surf1 or not surf2:
+        side, sid, styp = (("SECONDARY (SSID)", c.ssid, c.sstyp) if not surf1
+                           else ("MAIN (MSID)", c.msid, c.mstyp))
+        _drop_interface(
+            state, dropped, kw, c.inter_id,
+            f"--s2s-type25: the {side} side sid={sid} styp={styp} resolved to "
+            "no contact surface: " + _describe_empty_main(state, sid, styp),
+            _main_side_remedy(state, sid, styp))
+        return True
+    fric, fric_id = _contact_friction(state, c.fs, c.fd, c.inter_id, kw,
+                                      "TYPE25")
+    inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0,
+                               target="TYPE25")
+    stfac = _stfac_for(state, c.sfs, c.inter_id, "TYPE25") or 1.0
+    viss = _type25_viss(c.vdc, state, c.inter_id, kw)
+    # CardStack K-11: the Card-2 BT / DT sign rules (a negative DT used to be
+    # written as a negative Tstop); "no death time" is still written 0
+    # (TYPE25 turns a Tstop of 0 back into EP30, hm_read_inter_type25.F:579)
+    tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, kw, "TYPE25",
+                                 dt_was_written=True)
+    # CardStack K-16: Card E SRNDE 1 -> Ishape 2
+    ishape = _type25_ishape(
+        state, c, kw, c.inter_id,
+        _contact_master_pids(state, c.ssid, c.sstyp)
+        | _contact_master_pids(state, c.msid, c.mstyp))
+    lines += _emit_inter_type25(
+        c.inter_id, c.title, surf1, surf2, istf=4, igap=2, idel=_TYPE25_IDEL,
+        iedge=_TYPE25_IEDGE_NONE, stfac=stfac, fric=fric, tstart=tstart,
+        tstop=tstop, inacti=inacti, viss=viss, fric_id=fric_id,
+        ishape=ishape)
+    _warn_icor_damping(state, c, kw, "TYPE25", "VISs", viss)
+    state.s2s_type25_ids.add(c.inter_id)
+    state.warn(
+        f"*{kw} {c.inter_id}: --s2s-type25 -> two-surface "
+        f"/INTER/TYPE25/{c.inter_id} instead of the one-way /INTER/TYPE7: "
+        f"surf_ID1 = the SSID surface /SURF/{surf1}, surf_ID2 = the MSID "
+        f"surface /SURF/{surf2} (starter ILEV 2): each side's nodes are "
+        "checked against the other side's segments, so a main-side corner "
+        "or edge between two secondary nodes is caught too. Istf 4, Igap 2, "
+        f"Gap_max 0 (= 1e30), Inacti {inacti}, Idel {_TYPE25_IDEL}, Iedge "
+        f"{_TYPE25_IEDGE_NONE}, Stfac {stfac:g}, Fric {fric:g}, VISs "
+        f"{viss:g}. " + _S2S_TYPE25_APPROX)
+    _warn_soft_card_fields(state, c, kw, "TYPE25")              # K-09
+    return True
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                      report_gapmin: bool = True) -> List[str]:
     # report_gapmin=False only from _make_deferred_implicit_stub (round 8,
     # B6): the INTERFACES section's own call already named every unconsumed
     # --inter-gapmin id, and a second report would repeat each one.
     if not state.contacts_single and not state.contacts_surf2surf:
-        # No /INTER/TYPE7 section at all — but a --inter-gapmin the user typed
-        # still has to be accounted for, or the flag is ignored in silence on a
-        # deck whose only contact is a tie.
+        # No single-surface / surface-to-surface contact, so this section
+        # writes nothing (a SOFT-routed general contact - its -7 route an
+        # /INTER/TYPE7 too - is written by _make_general_interfaces, a TYPE25
+        # or tie by its own section, all later) — but a --inter-gapmin the
+        # user typed still has to be accounted for, or the flag is ignored in
+        # silence on a deck whose only contact is a tie or a SOFT-routed one
+        # (CardStack K-05: the report names that route's own gap rule).
         if report_gapmin:
             _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
         return []
@@ -2207,15 +2443,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
 
     # Stfac (penalty stiffness scale) is per-contact from *CONTACT Card-3 SFS
     # (_stfac_for / _sfs_to_stfac); --soften-stfac, when given, overrides it on
-    # EVERY interface. Both leave Stfac=0 (engine auto) by default → the output
-    # is byte-identical to before when neither is in play.
-    if state.options.soften_stfac is not None:
-        state.warn(
-            f"--soften-stfac: Stfac={state.options.soften_stfac:g} forced on all "
-            "/INTER/TYPE7 interfaces (overrides any *CONTACT Card-3 SFS). Softer "
-            "penalty so threshold contact nodes transition smoothly instead of "
-            "chattering; flag absent leaves Stfac from SFS (default 0 = engine auto)."
-        )
+    # every penalty interface written from a *CONTACT card. Both leave Stfac=0
+    # (engine auto) by default → the output is byte-identical to before when
+    # neither is in play. Which interfaces the flag reached is said ONCE, after
+    # the last contact section (_report_contact_lever_reach, CardStack K-0P
+    # review): this section cannot know the TYPE25 ones written later.
     # --inter-gapmin ID=VAL: per-interface Gapmin overrides, consumed as applied.
     gapmin_overrides = dict(state.options.inter_gapmin)
 
@@ -2303,12 +2535,22 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 # an asymmetric ~half-model contact that the native reader does NOT
                 # produce; in explicit dynamics the driven part blows through it and the
                 # model flies apart. TYPE25 self-contact reproduces the native scope and
-                # holds the load path. Kept TYPE7 only for implicit (validated recipe).
+                # holds the load path. The all-parts TYPE7 node→surface stays for
+                # implicit (validated recipe); a part or part set in SSID is the
+                # TYPE7 self-contact of that set on BOTH decks (the else branch).
+                kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
                 state.warn(
-                    f"*CONTACT_AUTOMATIC_SINGLE_SURFACE {c.inter_id}: explicit analysis "
-                    "→ /INTER/TYPE25 all-parts self-contact (matches the native "
-                    "OpenRadioss reader; TYPE7 node→surface is kept for implicit only)."
-                )
+                    f"*{kw} {c.inter_id}: SSID = 0 on an explicit analysis → "
+                    f"/INTER/TYPE25/{c.inter_id} all-parts self-contact (one "
+                    "/SURF/PART/EXT over every part, surf_ID2 = 0: each node "
+                    "against every segment of the same surface, as the native "
+                    "OpenRadioss reader writes it). A part or part set in SSID "
+                    "(SSID != 0) gives the /INTER/TYPE7 self-contact of that "
+                    "set instead, on explicit and implicit decks alike; an "
+                    "SSID = 0 card on an implicit deck takes the all-parts "
+                    "node→surface /INTER/TYPE7 recipe.")
+                _warn_type25_self_gap_inputs(state, c, kw)
+                _warn_soft_card_fields(state, c, kw, "TYPE25")   # K-09
                 # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) takes its
                 # spinning body A out of this self-surface and gives it ONE
                 # two-surface /INTER/TYPE25 against every other part except B
@@ -2324,11 +2566,24 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                     [p for p in all_pids if p not in a_parts])
                 fric, fric_id = _contact_friction(
                     state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
-                inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
-                stfac = _stfac_for(state, c.sfs, c.inter_id) or 1.0
+                # never Inacti 6 here (CardStack K-06): a TYPE25 refuses it
+                inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0,
+                                           target="TYPE25")
+                stfac = _stfac_for(state, c.sfs, c.inter_id, "TYPE25") or 1.0
+                # CardStack K-10 (opt-in --general-shell-edges): Iedge 1 on
+                # an ordinary AUTOMATIC_GENERAL; the split copies it below
+                iedge = _general_shell_edges_iedge(state, c, kw, all_pids)
+                # CardStack K-11: Card-2 BT / DT -> Tstart / Tstop (the split
+                # copies them); VDC is named, not written (VISs 0.05)
+                tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt,
+                                             kw, "TYPE25")
+                _warn_type25_self_vdc(state, c, kw)
+                # CardStack K-16: Card E SRNDE 1 -> Ishape 2 (the split too)
+                ishape = _type25_ishape(state, c, kw, c.inter_id, all_pids)
                 lines += _emit_inter_type25_self(
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
-                    fric_id=fric_id)
+                    fric_id=fric_id, iedge=iedge, tstart=tstart, tstop=tstop,
+                    ishape=ishape)
                 for plan in splits:
                     tag = plan.tag
                     rest = [p for p in all_pids
@@ -2336,6 +2591,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                     s_rest = state.next_id()
                     s_a = state.next_id()
                     split_iid = state.next_id()
+                    if state.options.soften_stfac is not None:
+                        _record_soften_reach(state, "TYPE25", split_iid)
                     lines += _emit_surf_part(
                         s_rest, f"contact_{c.inter_id}_{tag}_rest", rest)
                     lines += _emit_surf_part(
@@ -2344,7 +2601,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                     lines += _emit_inter_type25_self(
                         split_iid, f"CONTACT_{c.inter_id}_{tag}_body_A",
                         s_rest, fric, inacti, stfac, fric_id=fric_id,
-                        surf_id2=s_a)
+                        surf_id2=s_a, iedge=iedge, tstart=tstart,
+                        tstop=tstop, ishape=ishape)
                     # minted beside the converted contact: /TH/INTER and the
                     # other registry walks must be told (companion_inter_ids)
                     state.companion_inter_ids.append(split_iid)
@@ -2394,8 +2652,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                     "cover actually have *ELEMENT_SHELL / *ELEMENT_SOLID "
                     "elements in the deck.")
                 continue
+            # CardStack K-12: a single-surface SST is |SST| on shells only
             gapmin = _gapmin_override(state, c.inter_id,
-                                      _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                      _single_surface_sst_gapmin(
+                                          state, c.inter_id, c.sst, c.mst,
+                                          all_pids),
                                       gapmin_overrides)
             gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
                                            0, 5)
@@ -2405,11 +2666,48 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
             # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
             gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
                                                      0, 5)
+            # VisS before Stfac: the order the two log lines always had
+            viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
+            stfac = _stfac_for(state, c.sfs, c.inter_id)
+            tstart, tstop = _birth_death(                       # K-11
+                state, c.inter_id, c.bt, c.dt,
+                c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE", "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        inacti,
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       igap=igap, fric_id=fric_id, state=state)
+                                       viss=viss,
+                                       gapmin=gapmin, stfac=stfac,
+                                       igap=igap, fric_id=fric_id, state=state,
+                                       tstart=tstart, tstop=tstop)
+            _warn_stmin_floor(
+                state, c.inter_id, all_pids,
+                {e.pid for e in _shell_and_solid_elems(state)
+                 if e.pid not in _rigid_parts},
+                stfac, 4, c.title)
+            kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
+            _warn_soft_card_fields(state, c, kw, "TYPE7")       # K-09
+            _warn_general_shell_edges_unreached(                 # K-10
+                state, c, kw, "the implicit all-parts /INTER/TYPE7 "
+                "node-to-surface recipe")
+            _warn_card_e_type7(state, c, kw, viss)               # K-16
+        elif c.sstyp == 5:
+            # SURFATYP 5 = "include all non-spot-weld parts (the SURFA field
+            # is ignored)", Vol I R17 p.11-25. k2rad routes the all-parts
+            # self-contact from SSID = 0 only, so a stated SSID with type 5
+            # is dropped - before the resolvers run (they would find no
+            # nodes for type 5 anyway and draw no id) - and named
+            # (CardStack K-01).
+            _drop_interface(
+                state, dropped, c.keyword, c.inter_id,
+                f"SURFATYP 5 means 'include all non-spot-weld parts (the "
+                f"SURFA field is ignored)' (Vol I R17 p.11-25), but SSID = "
+                f"{c.ssid} is stated and k2rad builds the all-parts "
+                "self-contact from SSID = 0 only",
+                "REMEDY: set SSID to 0 for the all-parts self-contact "
+                "(/INTER/TYPE25 on an explicit deck, the node→surface "
+                "/INTER/TYPE7 on an implicit one), or name a part set "
+                "(SURFATYP 2) or a part (3) for the /INTER/TYPE7 "
+                "self-contact of that set.")
+            continue
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -2439,8 +2737,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 continue
             _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
             _warn_bolt_rigid_kept(state, c.keyword, c.inter_id, c.ssid, c.sstyp)
+            # CardStack K-12: a single-surface SST is |SST| on shells only
             gapmin = _gapmin_override(state, c.inter_id,
-                                      _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                      _single_surface_sst_gapmin(
+                                          state, c.inter_id, c.sst, c.mst,
+                                          _contact_master_pids(
+                                              state, c.ssid, c.sstyp)),
                                       gapmin_overrides)
             gapmin = _maybe_derived_gapmin(state, c.inter_id, c.title, gapmin,
                                            c.ssid, c.sstyp)
@@ -2450,14 +2752,49 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
             # round 9, A10 (opt-in): not a STATED gap - Inacti from before it
             gapmin, igap = _mixed_main_thickness_gap(state, c, gapmin, False,
                                                      c.ssid, c.sstyp)
+            # VisS before Stfac: the order the two log lines always had
+            viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
+            stfac = _stfac_for(state, c.sfs, c.inter_id)
+            tstart, tstop = _birth_death(                       # K-11
+                state, c.inter_id, c.bt, c.dt,
+                c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE", "TYPE7")
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        inacti,
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
-                                       igap=igap, fric_id=fric_id, state=state)
+                                       viss=viss,
+                                       gapmin=gapmin, stfac=stfac,
+                                       igap=igap, fric_id=fric_id, state=state,
+                                       tstart=tstart, tstop=tstop)
+            # CardStack K-01: say which route a part-set SSID took - the
+            # TYPE7 self-contact of the set, on an EXPLICIT deck as well
+            kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
+            kind = {0: "a *SET_SEGMENT", 1: "a *SET_SHELL", 2: "a part set",
+                    3: "a part"}.get(c.sstyp, f"SURFATYP {c.sstyp}")
+            state.warn(
+                f"*{kw} {c.inter_id}: SSID = {c.ssid} ({kind}, SURFATYP "
+                f"{c.sstyp}) → /INTER/TYPE7/{c.inter_id} self-contact of that "
+                f"set on this {'implicit' if state.is_implicit else 'explicit'}"
+                f" deck: secondary = /GRNOD/{slav_grnod} (the "
+                f"{diag.get('clean', 0)} non-rigid nodes of the set), main = "
+                f"/SURF/{mast_surf} (the set's surface), Istf 4, Igap {igap}, "
+                f"Gapmin {gapmin:g} (0 = the starter's own gap, "
+                "i7sti3.F:1055-1066: the mean shell thickness on a shell "
+                "surface, capped at half its smallest segment side; 0.1 x that "
+                "side on a solid one). SSID = 0 gives the all-parts "
+                "/INTER/TYPE25 self-contact instead on an explicit deck.")
+            set_pids = _contact_master_pids(state, c.ssid, c.sstyp)
+            _warn_stmin_floor(state, c.inter_id, set_pids,
+                              set_pids - _rigid_parts, stfac, 4, c.title)
+            _warn_soft_card_fields(state, c, kw, "TYPE7")       # K-09
+            _warn_general_shell_edges_unreached(                 # K-10
+                state, c, kw, "the /INTER/TYPE7 self-contact of its SSID set")
+            _warn_card_e_type7(state, c, kw, viss)               # K-16
 
     for c in state.contacts_surf2surf:
         diag = {}
+        # CardStack K-08B (opt-in): the two-surface /INTER/TYPE25 route
+        if state.options.s2s_type25 and _s2s_type25_route(state, c, lines,
+                                                          dropped):
+            continue
         # The all-rigid-SSID rule. Decided BEFORE anything is emitted, because
         # the resolvers allocate ids; the two sides then travel with their TYPE
         # cells, so a *SET_SEGMENT main can become the secondary node source and
@@ -2553,21 +2890,49 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
             # own IGNORE cell is overridden here. The reason is stated on the
             # keyword's own "interference" note, emitted by the handler.
             inacti = 0
+            _inacti_six_not_applied(
+                state, c.inter_id, "TYPE7", 0,
+                "a *CONTACT_..._INTERFERENCE resolves its initial overlap into "
+                "prestress, so its Inacti is forced to 0 (the keyword's "
+                "'interference' note); 5 or 6 would accept the overlap as the "
+                "zero-force state (i7pwr3.F:244-257).")
         elif c.inter_id in recipe_inacti_ids:
             inacti = 5
+            _inacti_six_not_applied(
+                state, c.inter_id, "TYPE7", 5,
+                "--deformable-contact-recipe writes Inacti 5 on this "
+                "deformable-deformable interface (the recipe's per-interface "
+                "half); drop the recipe to write 6.")
         else:
             inacti = _ignore_to_inacti(c.ignore, state, c.inter_id,
                                        inacti_gap)
         fric, fric_id = _contact_friction(
             state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+        # VisS before Stfac: the order the two log lines always had
+        viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
+        stfac = _stfac_for(state, c.sfs, c.inter_id)
+        tstart, tstop = _birth_death(                           # K-11
+            state, c.inter_id, c.bt, c.dt,
+            c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", "TYPE7")
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
-                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id, c.title),
-                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                   viss=viss,
+                                   gapmin=gapmin, stfac=stfac,
                                    igap=igap, fric_id=fric_id, state=state,
                                    thermal=_contact_thermal_cells(
                                        state, c.keyword, c.inter_id, c.thermal,
-                                       "TYPE7"))
+                                       "TYPE7"),
+                                   tstart=tstart, tstop=tstop)
+        _warn_stmin_floor(
+            state, c.inter_id, _contact_master_pids(state, main_sid, main_styp),
+            _secondary_pids(state, sec_sid, sec_styp, rigid_nodes, keep_rigid),
+            stfac, 4, c.title)
+        _warn_soft_card_fields(                                  # K-09
+            state, c, c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
+            "TYPE7")
+        _warn_card_e_type7(                                      # K-16
+            state, c, c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
+            viss)
 
     if report_gapmin:
         _report_unconsumed_gapmin(state, gapmin_overrides)
@@ -2585,11 +2950,17 @@ def _report_unconsumed_gapmin(state: ConversionState,
     section at all, and without this the flag would be ignored in total
     silence.
     """
-    # Ids that ARE in the deck but not as a /INTER/TYPE7. Reporting one of
-    # these as an "unknown interface id" sends the user hunting for a typo in
-    # a number the .rad plainly contains — the same false-fact class the
-    # tiebreak arm was added for, one container wider. Every contact container
-    # that emits something other than TYPE7 is here, each with its own reason.
+    # Ids that ARE in the deck, on a route --inter-gapmin does not reach.
+    # Reporting one of these as an "unknown interface id" sends the user
+    # hunting for a typo in a number the .rad plainly contains — the same
+    # false-fact class the tiebreak arm was added for, one container wider.
+    # Every contact container whose interfaces this flag does not reach is
+    # here, each with its own reason - the SOFT-routed general contacts too
+    # (CardStack K-05): their SOFT -7 route IS an /INTER/TYPE7, but it is
+    # written by _make_general_interfaces, which never applies the override.
+    # This report runs BEFORE that section (and the TYPE25 / tie ones) has
+    # written anything, so each reason names the route the record takes and
+    # never claims it "was emitted".
     #
     # A contact registered in ``dropped_inter_ids`` produced NO /INTER at all
     # (its side resolved to nothing), so "was emitted as ..." would be false
@@ -2614,6 +2985,11 @@ def _report_unconsumed_gapmin(state: ConversionState,
             "was emitted as /INTER/TYPE25, whose engagement distance is its "
             "own Gap_scale/%mesh_size pair rather than a Gapmin column; "
             "--inter-gapmin only reaches /INTER/TYPE7")
+    for iid in state.s2s_type25_ids:            # CardStack K-08B
+        known[iid] = (
+            "was emitted as a two-surface /INTER/TYPE25 (--s2s-type25), whose "
+            "engagement distance is its own Gap_scale/%mesh_size pair rather "
+            "than a Gapmin column; --inter-gapmin only reaches /INTER/TYPE7")
     for c in state.contacts_tied:
         known[c.inter_id] = (
             f"is a *CONTACT_TIED_{c.variant} and "
@@ -2625,6 +3001,11 @@ def _report_unconsumed_gapmin(state: ConversionState,
         known[c.inter_id] = "is a *CONTACT_SPOTWELD and " + _TIE_REASON
     for c in state.contacts_tiebreak:
         known[c.inter_id] = "is a *CONTACT_..._TIEBREAK and " + _TIE_REASON
+    for g in state.contacts_general:            # CardStack K-05
+        label, tname, rule = _general_route_gap(g)
+        known[g.inter_id] = (
+            f"is a {label} routed to /INTER/{tname} {rule}; --inter-gapmin "
+            "does not reach the SOFT-routed interfaces")
     for iid in state.dropped_inter_ids:
         known.pop(iid, None)
     for iid, val in sorted(leftovers.items()):
@@ -3081,8 +3462,47 @@ _FPENMAX_ZERO_NORMAL = 0.999999
 _FPENMAX_INACTI = (3, 4, 5, 6)
 
 
+def _inacti_six(state: ConversionState, inter_id: int, target: str,
+                inacti: int) -> int:
+    """--inter-inacti ID=6 (CardStack K-06) on the Inacti 5 k2rad writes for
+    the deck's IGNORE: 6 on a TYPE7 / TYPE11 / TYPE19, a refusal by name on a
+    TYPE25 (*target*); *inacti* back unchanged for any other id."""
+    if inter_id not in state.options.inter_inacti:
+        return inacti
+    state.inter_inacti_reached.add(inter_id)
+    if target == "TYPE25":
+        state.warn(
+            f"--inter-inacti {inter_id}=6 refused: /INTER/TYPE25/{inter_id} "
+            f"keeps Inacti {inacti}. hm_read_inter_type25.F:603-610 turns any "
+            "Inacti but 0, -1 and 5 into 5 with WARNING 1559, so a 6 would "
+            "be written for nothing; Inacti 6 exists on /INTER/TYPE7, TYPE11 "
+            "and TYPE19 only.")
+        return inacti
+    state.warn(
+        f"--inter-inacti {inter_id}=6: /INTER/{target}/{inter_id} Inacti 6 "
+        f"instead of {inacti}. Like Inacti 5 it absorbs each initial "
+        "penetration into that node's gap, and it adds 5 % of the remaining "
+        "gap on top (PENE + 0.05 x (GAP - PENE), i7pwr3.F:250-257), so the "
+        "node starts slightly clear of the reduced gap; no node is moved - "
+        "Inacti 3 / 4 are the ones that change coordinates "
+        "(i7pwr3.F:208-243).")
+    return 6
+
+
+def _inacti_six_not_applied(state: ConversionState, inter_id: int,
+                            target: str, inacti: int, why: str) -> None:
+    """Name an --inter-inacti ID=6 the converter does not apply because the
+    interface's Inacti is a deliberate one (*why*), never the IGNORE map."""
+    if inter_id not in state.options.inter_inacti:
+        return
+    state.inter_inacti_reached.add(inter_id)
+    state.warn(
+        f"--inter-inacti {inter_id}=6 not applied: /INTER/{target}/{inter_id} "
+        f"keeps Inacti {inacti} - {why}")
+
+
 def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
-                      gapmin: float = 0.0) -> int:
+                      gapmin: float = 0.0, *, target: str = "TYPE7") -> int:
     """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
 
     LS-DYNA never applies a contact force to *initial* penetrations, whatever
@@ -3114,6 +3534,13 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
     that documented bootstrap (see _sst_mst_to_gapmin) NEEDS the t=0 spring
     force as Newton's stiffness path at zero load.
 
+    ``--inter-inacti ID=6`` (CardStack K-06, :func:`_inacti_six`) replaces the
+    two ``return 5`` branches only, on the interface type *target* names: 6 on
+    a TYPE7 / TYPE11 / TYPE19, refused by name on a TYPE25 (the starter
+    would turn it back into 5 with WARNING 1559). The bootstrap's 0 is never
+    overridden, and neither are the 0 / 5 the callers decide themselves (an
+    ``*_INTERFERENCE``, ``--deformable-contact-recipe``).
+
     This corrects an earlier mapping to Inacti=1 (deactivate / zero the stiffness
     of penetrating secondary nodes). On `implicit_hr-anlenkung` that mapping was
     the load-path killer: a geometry pen-check (folder 6kN_claude-pencheck) showed
@@ -3128,8 +3555,11 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
 
     Inacti=5 is both correct AND safe here:
       * It does NOT modify node coordinates, so it is safe for rigid-body
-        secondary nodes (unlike Inacti=3/6, where moving 21 rigid-body nodes
-        seg-faulted the engine during init).
+        secondary nodes. Inacti 3 / 4 are the values that do - 3 moves the
+        secondary nodes, 4 the main ones (i7pwr3.F:208-243) - and it was
+        Inacti 3 that moved 21 rigid-body nodes and seg-faulted the engine
+        during init (git ae17cbf). Inacti 6 moves none: it is Inacti 5's gap
+        reduction plus 5 % of the remaining gap (i7pwr3.F:250-257).
       * Because the penetrations are sub-5-µm against a ~0.109 mm gap, the
         adjusted gap stays ~0.105 mm — i.e. the nodes keep essentially their full
         gap and remain active. (The old worry that "Inacti=5 silently suppresses
@@ -3143,7 +3573,7 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
             "t=0 force spike). Matches LS-DYNA 'ignore initial penetration' intent "
             "and keeps load-path nodes active (was Inacti=1, which deletes them)."
         )
-        return 5
+        return _inacti_six(state, inter_id, target, 5)
     if state.is_implicit and gapmin > 0.0:
         # ``ignore={ignore}`` for the same reason as the branch below: any
         # value outside {0,1,2} reaches this one too.
@@ -3154,10 +3584,43 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
             "Set ignore=1 on *CONTACT if you want initial penetrations "
             "neutralized instead."
         )
+        _inacti_six_not_applied(
+            state, inter_id, target, 0,
+            "the implicit pre-engagement bootstrap: a stated engagement Gapmin "
+            f"({gapmin:g}) on an implicit deck keeps Inacti 0, whose t=0 "
+            "spring force is Newton's stiffness path at zero load.")
         return 0
     # ``ignore={ignore}``, not a hard-coded 0: any value outside {0,1,2} lands
     # here too, and printing "ignore=0" for it would state a fact the deck does
-    # not contain. Renders identically for the 0 that reaches it in practice.
+    # not contain. CardStack K-14 (text only): IGNORE 3 / 4 and a negative
+    # IGNORE are Mortar values with their own meaning (Vol I R17 p.11-105/106,
+    # p.11-133/134 General Remark 14), so they say what LS-DYNA does with
+    # them instead of the IGNORE 0 sentence; the Inacti is the same 5.
+    if ignore in (3, 4):
+        what = ("closes the initial penetrations linearly between t = 0 and "
+                "MPAR1" + (" (with the penetration depth MPAR2)"
+                           if ignore == 4 else ""))
+        state.warn(
+            f"CONTACT {inter_id}: ignore={ignore} (Mortar only: LS-DYNA "
+            f"{what}, Vol I R17 p.11-106 / p.11-133/134 General Remark 14) "
+            "mapped to Inacti=5, which takes each initial overlap as the "
+            "zero-force state: the stored overlap only shrinks - each cycle "
+            "by 5 % of its excess over a smaller current penetration "
+            "(i7for3.F:725-726), and to 0 once the pair leaves the gap "
+            "(i7dst3.F:428-433) - so no closure over time; Inacti=0 would "
+            "apply the full penalty force to every initially penetrated node "
+            "at cycle 0 instead.")
+        return _inacti_six(state, inter_id, target, 5)
+    if ignore < 0:
+        state.warn(
+            f"CONTACT {inter_id}: ignore={ignore} (Mortar only: as IGNORE "
+            f"{-ignore}, with no contact between segments of the same part, "
+            "Vol I R17 p.11-105) mapped to Inacti=5, which takes each initial "
+            "overlap as the zero-force state - an overlap that only shrinks "
+            "(i7for3.F:725-726; 0 once the pair leaves the gap, "
+            "i7dst3.F:428-433); the same-part exclusion has no /INTER "
+            "counterpart and is not converted.")
+        return _inacti_six(state, inter_id, target, 5)
     state.warn(
         f"CONTACT {inter_id}: ignore={ignore} mapped to Inacti=5. LS-DYNA "
         "removes initial penetrations at initialization (moves nodes; no t=0 "
@@ -3165,7 +3628,7 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
         "initially penetrated node at cycle 0 and can inject huge kinetic "
         "energy into a model that merely rests in contact."
     )
-    return 5
+    return _inacti_six(state, inter_id, target, 5)
 
 
 class _ThermalCells(NamedTuple):
@@ -3417,6 +3880,105 @@ _REFUSED_CONTACT_NOTES = {
 }
 
 
+def _written_interface_types(state: ConversionState) -> Dict[int, str]:
+    """``{inter_id: "/INTER/TYPEn"}`` of every contact record the writers
+    turned into an interface (dropped ones left out), for the lever reports
+    of :func:`_report_contact_lever_reach`."""
+    kinds: Dict[int, str] = {}
+    for c in state.contacts_single:
+        kinds[c.inter_id] = ("/INTER/TYPE25" if c.ssid == 0
+                             and not state.is_implicit else "/INTER/TYPE7")
+    for c in state.contacts_surf2surf:
+        kinds[c.inter_id] = ("/INTER/TYPE25" if c.inter_id
+                             in state.s2s_type25_ids else "/INTER/TYPE7")
+    for c in state.contacts_general:
+        kinds[c.inter_id] = {-11: "/INTER/TYPE11",
+                             -19: "/INTER/TYPE19"}.get(c.soft, "/INTER/TYPE7")
+    for c in state.contacts_type25:
+        kinds[c.inter_id] = ("/INTER/TYPE7" if c.inter_id
+                             in state.n2s_type7_ids else "/INTER/TYPE25")
+    for c in state.contacts_tied:
+        kinds[c.inter_id] = f"/INTER/{_tied_interface_type(c, state)} (a tie)"
+    for iid in ([c.inter_id for c in state.contacts_spotweld]
+                + [c.inter_id for c in state.contacts_tiebreak]):
+        kinds[iid] = "/INTER/TYPE2 (a tie)"
+    for iid in state.companion_inter_ids:
+        kinds[iid] = "/INTER/TYPE25"
+    for iid in state.dropped_inter_ids:
+        kinds.pop(iid, None)
+    return kinds
+
+
+def _report_contact_lever_reach(state: ConversionState) -> None:
+    """Say, once per deck and after the LAST contact section, what the
+    per-interface contact levers reached (CardStack K-02 / K-06 and the
+    K-0P review of --soften-stfac): the --soften-stfac interfaces by type
+    (and the tiebreak companions it leaves at Stfac 0), and every
+    --inter-stmin / --inter-inacti id no interface took."""
+    kinds: Optional[Dict[int, str]] = None
+    stmin_left = sorted(i for i in state.options.inter_stmin
+                        if i not in state.inter_stmin_reached)
+    inacti_left = sorted(i for i in state.options.inter_inacti
+                         if i not in state.inter_inacti_reached)
+    if stmin_left or inacti_left:
+        kinds = _written_interface_types(state)
+    for iid in stmin_left:
+        val = state.options.inter_stmin[iid]
+        kind = kinds.get(iid) if kinds is not None else None
+        if kind is not None:
+            state.warn(
+                f"--inter-stmin {iid}={val:g}: interface {iid} was emitted as "
+                f"{kind}, not as an /INTER/TYPE7 - the flag writes a TYPE7's "
+                "Stmin cell only (k2rad writes no floor, Stmin 0, on its "
+                "TYPE11 / TYPE19 / TYPE25) - override ignored.")
+        else:
+            state.warn(
+                f"--inter-stmin {iid}={val:g}: no /INTER/TYPE7/{iid} was "
+                "emitted (unknown interface id) - override ignored. Use the "
+                "id printed in the .rad (auto-assigned contacts are numbered "
+                "from 90001 in definition order).")
+    for iid in inacti_left:
+        kind = kinds.get(iid) if kinds is not None else None
+        if kind is not None:
+            state.warn(
+                f"--inter-inacti {iid}=6: interface {iid} was emitted as "
+                f"{kind}, whose Inacti k2rad does not take from the deck's "
+                "IGNORE - override ignored.")
+        else:
+            state.warn(
+                f"--inter-inacti {iid}=6: no interface {iid} was written with "
+                "an Inacti from the deck's IGNORE (unknown interface id) - "
+                "override ignored. Use the id printed in the .rad.")
+    soft = state.options.soften_stfac
+    if soft is None:
+        return
+    reached = {t: sorted(set(ids))
+               for t, ids in state.soften_stfac_reached.items() if ids}
+    parts: List[str] = []
+    if reached.get("TYPE7"):
+        parts.append("forced on all /INTER/TYPE7 interfaces ("
+                     + ", ".join(map(str, reached["TYPE7"])) + ")")
+    for t in ("TYPE11", "TYPE19", "TYPE25"):
+        if reached.get(t):
+            parts.append(("on " if parts else "forced on ") + f"/INTER/{t} "
+                         + ", ".join(map(str, reached[t])))
+    comp = sorted(set(state.soften_stfac_unreached))
+    tail = (" It does not reach the post-rupture companion /INTER/TYPE25 "
+            + ", ".join(map(str, comp)) + " of a *CONTACT_..._TIEBREAK, which "
+            "keeps Stfac 0 (the engine default)." if comp else "")
+    if not parts:
+        state.warn(
+            f"--soften-stfac: Stfac={soft:g} reached no interface: this deck "
+            "writes no /INTER/TYPE7, TYPE11, TYPE19 or contact-card "
+            "/INTER/TYPE25 (a tie takes --tie-stfac)." + tail)
+        return
+    state.warn(
+        f"--soften-stfac: Stfac={soft:g} " + " and ".join(parts)
+        + " (overrides any *CONTACT Card-3 SFS). Softer penalty so threshold "
+        "contact nodes transition smoothly instead of chattering; flag absent "
+        "leaves Stfac from SFS (default 0 = engine auto)." + tail)
+
+
 def _make_refused_contact_notes(state: ConversionState) -> List[str]:
     """Emit the by-name refusal for every ``state.contacts_refused`` record.
 
@@ -3424,8 +3986,16 @@ def _make_refused_contact_notes(state: ConversionState) -> List[str]:
     starter deck is unchanged. It runs from ``build_starter``'s section table
     rather than from the handler because one refusal quotes a
     ``*DEFINE_CURVE`` the handler has not read yet (see
-    :class:`~k2rad.state.ContactRefused`).
+    :class:`~k2rad.state.ContactRefused`). It is also the LAST contact
+    section, so it closes with :func:`_report_contact_lever_reach`.
     """
+    out = _refused_contact_notes(state)
+    _report_contact_lever_reach(state)
+    return out
+
+
+def _refused_contact_notes(state: ConversionState) -> List[str]:
+    """The body of :func:`_make_refused_contact_notes`."""
     for rec in state.contacts_refused:
         # The notes are keyed on the BASE spelling: an _MPP sibling is the same
         # keyword with a decomposition card in front of Card 1, and looking it
@@ -3457,6 +4027,195 @@ def _make_refused_contact_notes(state: ConversionState) -> List[str]:
             "interface can carry it; the per-interface warning names the "
             "LS-DYNA field, the source line and the physical consequence.")
     return []
+
+
+def _birth_death(state: ConversionState, inter_id: int, bt: float, dt: float,
+                 kw: str, target: str, *,
+                 dt_was_written: bool = False) -> Tuple[float, float]:
+    """CardStack K-11: LS-DYNA Card-2 BT / DT -> the ``(Tstart, Tstop)``
+    cells of /INTER/*target* *inter_id*, by the rules of Vol I R17
+    p.11-29/30 (a converted run is the transient phase only - no dynamic
+    relaxation):
+
+    * DT = -9999: BT is the id of a curve or table of birth-time /
+      death-time pairs (Remark 2) - one Tstart / Tstop pair cannot hold
+      them: both 0 (active the whole run), named;
+    * BT < 0 (DT >= 0): a birth time for the dynamic-relaxation phase
+      only; after it LS-DYNA activates the contact whatever BT (p.11-29):
+      Tstart 0;
+    * DT < 0: inactive during dynamic relaxation, after it the birth and
+      death times are |BT| and |DT| (p.11-30): Tstart |BT|, Tstop |DT|
+      (a negative Tstop is never written);
+    * Tstop 0 (= never, ``hm_read_inter_type07.F:544``,
+      ``hm_read_inter_type25.F:579``) for a DT of 0 (LS-DYNA's 1e20), >=
+      1e19, or at / past ENDTIM - a death the run never reaches.
+
+    A line names every BT / DT that writes a non-zero cell or whose sign was
+    rewritten, and a death time at / past ENDTIM is said on such a line. BT
+    0 with a blank, >= 1e19 or at / past-ENDTIM DT writes 0 / 0; on the
+    routes that dropped BT / DT before K-11 that is the cell they always
+    wrote, and nothing is said. *dt_was_written* marks the three routes
+    that wrote a stated DT below 1e19 as it stood (``tstop = 0 if DT >=
+    1e19 else DT``): the eroding / node-to-surface /INTER/TYPE25 family,
+    the routed implicit node-to-surface /INTER/TYPE7 and ``--s2s-type25``.
+    There a DT at / past ENDTIM moves the Tstop cell to 0, and a line names
+    it (the fix round of the K-11 review: five R14 decks moved with no
+    line). The run is the same: the starter reads a Tstop of 0 as 1e30
+    (``hm_read_inter_type25.F:579``, ``hm_read_inter_type07.F:544``).
+
+    ``--no-contact-birth-death`` (``ConvertOptions.contact_birth_death``
+    False, the user's decision 8 of 2026-11-01) returns the cells of the
+    code before K-11 instead (:func:`_birth_death_opted_out`), and none of
+    the lines above is printed."""
+    if not state.options.contact_birth_death:
+        return _birth_death_opted_out(state, inter_id, bt, dt, kw, target,
+                                      dt_was_written)
+    if dt == -9999.0:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 DT = -9999 makes BT = {bt:g} the id of "
+            "a curve or table of birth-time / death-time pairs (Vol I R17 "
+            f"p.11-30, Remark 2); /INTER/{target}/{inter_id} has ONE Tstart / "
+            "Tstop pair, so both are written 0 (active for the whole run) "
+            "and the pairs are LOST.")
+        return 0.0, 0.0
+    ct = state.ctrl_termination
+    endtim = ct.endtim if ct is not None else 0.0
+    tstart, tstop = _k11_cells(state, bt, dt)
+    notes = []
+    if bt < 0.0 and dt >= 0.0:
+        notes.append(f"BT {bt:g} < 0 is a birth time for the dynamic-"
+                     "relaxation phase only - after it LS-DYNA activates the "
+                     "contact whatever BT, and the converted run has no such "
+                     "phase: Tstart 0")
+    if dt < 0.0:
+        notes.append(f"DT {dt:g} < 0 keeps the contact inactive during "
+                     "dynamic relaxation only; after it LS-DYNA follows the "
+                     "birth and death times as |BT| and |DT| (p.11-30): "
+                     f"Tstart {tstart:g} / Tstop {tstop:g}")
+    # a plain death time at / past ENDTIM writes today's 0 / 0: said only on
+    # a line that is printed for something else
+    late = 0.0 < abs(dt) < 1e19 and tstop == 0.0
+    if tstart or tstop or notes:
+        if late:
+            notes.append(f"the death time {abs(dt):g} is at or past ENDTIM "
+                         f"{endtim:g}, so Tstop 0 (never)")
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 BT {bt:g} / DT {dt:g} -> "
+            f"/INTER/{target}/{inter_id} Tstart {tstart:g} / Tstop "
+            f"{tstop:g} (Vol I R17 p.11-29/30: the interface acts between "
+            "them)" + ("" if not notes else " - " + "; ".join(notes)) + ".")
+    elif late and dt_was_written:
+        cite = {"TYPE25": "hm_read_inter_type25.F:579",
+                "TYPE11": "hm_read_inter_type11.F:389"}.get(
+                    target, "hm_read_inter_type07.F:544")
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 DT {dt:g} is at or past ENDTIM "
+            f"{endtim:g} -> /INTER/{target}/{inter_id} Tstop 0 (never: the "
+            f"starter reads a Tstop of 0 as 1e30, {cite}), so the contact "
+            "acts to the end of the run, as with the stated death time "
+            "(Vol I R17 p.11-30; CardStack K-11).")
+    return tstart, tstop
+
+
+def _k11_cells(state: ConversionState, bt: float,
+               dt: float) -> Tuple[float, float]:
+    """The ``(Tstart, Tstop)`` CardStack K-11 writes for Card-2 *bt* / *dt*,
+    by :func:`_birth_death`'s rules and without its lines: 0 / 0 for DT =
+    -9999; |BT| / |DT| for DT < 0; else BT (0 for BT < 0) / DT; Tstop 0
+    for a DT of 0, >= 1e19 or at / past ENDTIM."""
+    if dt == -9999.0:
+        return 0.0, 0.0
+    ct = state.ctrl_termination
+    endtim = ct.endtim if ct is not None else 0.0
+    tstart = abs(bt) if dt < 0.0 else (bt if bt > 0.0 else 0.0)
+    tstop = abs(dt)
+    if tstop >= 1e19 or (endtim > 0.0 and tstop >= endtim):
+        tstop = 0.0
+    return tstart, tstop
+
+
+#: where the engine skips an interface outside its Tstart / Tstop window
+#: (``IF(TT>STOPT) RETURN``): a negative Tstop switches it off from t 0
+_TSTOP_SKIP_CITE = {"TYPE7": "i7mainf.F:264-265",
+                    "TYPE25": "i25mainf.F:310-311"}
+
+
+def _birth_death_opted_out(state: ConversionState, inter_id: int, bt: float,
+                           dt: float, kw: str, target: str,
+                           dt_was_written: bool) -> Tuple[float, float]:
+    """``--no-contact-birth-death`` (the user's decision 8, 2026-11-01): the
+    ``(Tstart, Tstop)`` each route wrote before CardStack K-11. The three
+    *dt_was_written* routes (the eroding / node-to-surface /INTER/TYPE25
+    family, the routed implicit node-to-surface /INTER/TYPE7 and
+    ``--s2s-type25``) wrote BT and DT as stated, Tstop 0 for a DT >= 1e19
+    (``tstop = 0 if DT >= 1e19 else DT``); every other route dropped them,
+    Tstart 0 / Tstop 0. One line names the opt-out where these cells, as
+    written (:func:`_f`), are not K-11's (:func:`_k11_cells`); a negative
+    Tstop is said to switch the interface off from t 0, because the engine
+    skips it while TT > Tstop (``i7mainf.F:264-265``,
+    ``i25mainf.F:310-311``)."""
+    cells: Tuple[float, float] = ((bt, 0.0 if dt >= 1e19 else dt)
+                                  if dt_was_written else (0.0, 0.0))
+    ka, kb = _k11_cells(state, bt, dt)
+    if (_f(cells[0]), _f(cells[1])) == (_f(ka), _f(kb)):
+        return cells
+    k11 = (f"K-11 writes Tstart {ka:g} / Tstop {kb:g} (Vol I R17 "
+           "p.11-29/30)")
+    if not dt_was_written:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 BT {bt:g} / DT {dt:g} not converted "
+            f"(--no-contact-birth-death): /INTER/{target}/{inter_id} keeps "
+            "Tstart 0 / Tstop 0, active for the whole run, as this route "
+            f"wrote it before CardStack K-11; {k11}.")
+        return cells
+    curve = ("; DT = -9999 makes BT the id of a curve of birth / death "
+             "pairs (Remark 2), written here as a time" if dt == -9999.0
+             else "")
+    off = ""
+    if cells[1] < 0.0:
+        off = (f" - Tstop {cells[1]:g} < 0 switches the interface off from "
+               "t 0: the engine skips it while TT > Tstop ("
+               f"{_TSTOP_SKIP_CITE.get(target, 'i7mainf.F:264-265')}), so "
+               "this contact never acts")
+    state.warn(
+        f"*{kw} {inter_id}: Card-2 BT {bt:g} / DT {dt:g} -> "
+        f"/INTER/{target}/{inter_id} Tstart {cells[0]:g} / Tstop "
+        f"{cells[1]:g} as stated (--no-contact-birth-death: the cells this "
+        "route wrote before CardStack K-11, Tstop 0 for a DT >= 1e19 only"
+        f"{curve}); {k11}{off}.")
+    return cells
+
+
+def _warn_type25_self_vdc(state: ConversionState, c: ContactAutoSingle,
+                          kw: str) -> None:
+    """CardStack K-11: a Card-2 VDC on the SSID = 0 /INTER/TYPE25 route is
+    NAMED, not written - the card keeps VISs 0.05 (the plan's not_changing
+    list: VDC, LS-DYNA's viscous damping in percent of critical, is not the
+    TYPE25 VISs; the other TYPE25 routes keep their own VDC -> VISs map).
+    With a Card E ICOR != 0, VDC is a coefficient of restitution instead
+    (Vol I R17 p.11-115), and that is what the line says - where ICOR acts
+    (:func:`_icor_applies`: under SOFT 0 / 1 not on AUTOMATIC_GENERAL, the
+    fix round of the K-11 review)."""
+    if not c.vdc:
+        return
+    if _icor_applies(c, kw):
+        state.warn(
+            f"*{kw} {c.inter_id}: Card E ICOR {c.icor} makes Card-2 VDC "
+            f"{c.vdc:g} a coefficient of restitution in percent (Vol I R17 "
+            f"p.11-115); /INTER/TYPE25/{c.inter_id} has no restitution cell, "
+            "so it is not converted (VISs stays 0.05).")
+        return
+    state.warn(
+        f"*{kw} {c.inter_id}: Card-2 VDC {c.vdc:g} (viscous damping, percent "
+        "of critical, Vol I R17 p.11-29) is not written: the all-parts "
+        f"/INTER/TYPE25/{c.inter_id} keeps VISs 0.05, the Radioss default "
+        "critical damping of the interface stiffness - not the same damping, "
+        "so k2rad does not map one onto the other on this route."
+        + (f" Card E ICOR {c.icor} does not act on this spelling: under "
+           f"SOFT {c.soft} it acts on AUTOMATIC_NODES_TO_SURFACE / "
+           "SURFACE_TO_SURFACE / SINGLE_SURFACE only (Vol I R17 p.11-115), "
+           "so VDC stays a damping here." if c.icor and "MORTAR" not in
+           _contact_base_spelling(kw) else ""))
 
 
 def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int,
@@ -3541,6 +4300,725 @@ def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
     return gapmin
 
 
+def _pids_shell_solid(state: ConversionState,
+                      pids: Iterable[int]) -> Tuple[bool, bool]:
+    """``(has a shell, has a solid or thick shell)`` over the parts *pids*."""
+    pidset = set(pids)
+    return (any(e.pid in pidset for e in state.shell_elems),
+            any(e.pid in pidset for e in state.solid_elems)
+            or any(t.pid in pidset for t in state.tshell_elems))
+
+
+def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
+                               sst: float, mst: float, pids: Iterable[int],
+                               target: str = "TYPE7") -> float:
+    """CardStack K-12 (default ON, ``--no-single-surface-sst-gap``): the
+    Gapmin of a SINGLE-surface contact on an Igap-0 route from Card-3 SST.
+
+    Every segment of a single-surface contact is SURFA, so two shells that
+    each carry the contact thickness SST meet at SST/2 + SST/2 = |SST| (SAST
+    "applies to contact with shell and beam elements", Vol I R17 p.11-33);
+    the two-surface :func:`_sst_mst_to_gapmin` (|SST| + |MST|)/2 engaged
+    them at half that. MST (SBST, the SURFB thickness) has no surface to
+    act on and is named as unused. The rule needs a set of shells only
+    (*pids*, the set's parts): with solids too, a shell meets a solid at
+    |SST|/2 and a shell at |SST|, one constant Gapmin cannot hold both, and
+    the rule is refused by name (the old value kept). No SST, no shell, or
+    the flag off: :func:`_sst_mst_to_gapmin`, today's value and text - and
+    with the flag on, SST 0 and an MST on a set with a shell, MST is named as
+    unused while the old value stands (the fix round of the K-12 review)."""
+    if not state.options.single_surface_sst_gap:
+        return _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
+    if sst == 0.0:
+        gap = _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
+        if mst and _pids_shell_solid(state, pids)[0]:
+            state.warn(
+                f"CONTACT {inter_id}: MST {mst:g} is not used by a "
+                "single-surface contact - it has no SURFB (SBST is the SURFB "
+                "thickness, Vol I R17 p.11-33) - but with SST 0 the |SST| "
+                "rule (CardStack K-12) has no thickness to take, so "
+                f"/INTER/{target} keeps the old (|SST| + |MST|)/2 = {gap:g}, "
+                "from MST alone"
+                + (f"; --inter-gapmin {inter_id}=VAL sets another value."
+                   if target == "TYPE7" else "."))
+        return gap
+    has_shell, has_solid = _pids_shell_solid(state, pids)
+    if not has_shell:
+        return _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
+    old = (abs(sst) + abs(mst)) / 2.0
+    if has_solid:
+        gap = _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
+        state.warn(
+            f"CONTACT {inter_id}: SST {sst:g} on a single-surface set that "
+            "mixes shells and solids: SAST applies to contact with shell and "
+            "beam elements (Vol I R17 p.11-33), so a shell meets a shell at "
+            "|SST| and a solid at |SST|/2, and one constant Gapmin cannot "
+            "hold both - the |SST| rule (CardStack K-12) is refused here and "
+            f"/INTER/{target} keeps Gapmin (|SST| + |MST|)/2 = {old:g}"
+            + (f"; --inter-gapmin {inter_id}=VAL sets another value."
+               if target == "TYPE7" else "."))
+        return gap
+    if sst < 0.0:
+        state.warn(
+            f"CONTACT {inter_id}: negative SST ({sst:g}) — using the "
+            "magnitude for the Gapmin mapping; the negative-thickness "
+            f"projection semantics have no /INTER/{target} equivalent.")
+    gap = abs(sst)
+    state.warn(
+        f"CONTACT {inter_id}: single-surface SST contact thickness -> "
+        f"/INTER/{target} Gapmin={gap:g} = |SST|: every segment of a "
+        "single-surface contact is SURFA, so two shells that each carry the "
+        "contact thickness |SST| meet at |SST|/2 + |SST|/2 (Vol I R17 "
+        "p.11-33 SAST; CardStack K-12). --no-single-surface-sst-gap writes "
+        f"the old two-surface (|SST| + |MST|)/2 = {old:g}."
+        + (f" MST {mst:g} is not used: a single-surface contact has no SURFB "
+           "(SBST is the SURFB thickness, p.11-33)." if mst else "")
+        + " On an implicit deck, keep ignore=0 to retain Inacti=0 if Gapmin "
+        "exceeds the physical clearance (pre-engagement bootstrap) — "
+        "ignore=1/2 (and any explicit deck) maps to Inacti=5, which shrinks "
+        "the gap back to the clearance and cancels the pre-engagement.")
+    return gap
+
+
+def _warn_soft7_sst_below_t(state: ConversionState, c, gapmin: float,
+                            pids: Iterable[int]) -> None:
+    """CardStack K-12: on the SOFT -7 self-contact (/INTER/TYPE7, Igap 2) the
+    gap is max(Gapmin, t_s/2 + t_m/2) from the elements, so a Card-3 SST
+    below the shell thickness only sets a floor that never acts. Named with
+    the .k lever that does reach that gap, *PART_CONTACT OPTT (the /PART
+    Thick column the TYPE7 gap reads before the element thickness,
+    ``i7sti3.F:230-231 / 494-495``). No byte moves."""
+    if not c.sst:
+        return
+    pidset = set(pids)
+    ts = [t for e in state.shell_elems if e.pid in pidset
+          if (t := _main_shell_thickness(state, e)) > 0.0]
+    if not ts:
+        return
+    t = _round_sig(min(ts))
+    if not (abs(c.sst) < t and gapmin < t):
+        return
+    state.warn(
+        f"CONTACT {c.inter_id}: SOFT -7 -> /INTER/TYPE7 with Igap 2, whose "
+        "gap is max(Gapmin, t_s/2 + t_m/2) from the elements: Card-3 SST "
+        f"{c.sst:g} is below the shell thickness t = {t:g}, so the Gapmin "
+        f"{gapmin:g} it gives is a floor that never acts and SST has no effect "
+        "- LS-DYNA engages the shells at |SST|. The .k lever is "
+        f"*PART_CONTACT OPTT {abs(c.sst):g} on these parts: k2rad writes it as "
+        "the /PART Thick column the TYPE7 gap reads before the element "
+        "thickness (i7sti3.F:230-231, 494-495), so they meet at OPTT. No "
+        "byte moves (CardStack K-12).")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The /INTER/TYPE7 Stmin floor (CardStack K-02)
+#
+# k2rad writes Stmin 1000 on every /INTER/TYPE7 (the cell dates from the first
+# commit, d713ded, with no record). The starter reads it for Istf > 1 only
+# (hm_read_inter_type07.F:479-486) and the engine then applies
+# STIF = MAX(Stmin, MIN(K, Stmax)) to the Istf-combined K (i7cor3.F:251-301),
+# so on a soft or thin contact the floor, not the stiffness formula, sets the
+# penalty - and an SFS / --soften-stfac below it changes nothing (measured on
+# the CardStack card-on-block coupon: Stfac 0.85 and 0.15 give byte-identical
+# T01 channels at Stmin 1000 and different ones at Stmin 0, wf1 D1-5).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: k2rad's own Stmin cell (a force / length in the deck's units).
+_TYPE7_STMIN = 1000.0
+
+#: Istf -> (the combination the engine applies, its lines in i7cor3.F).
+_ISTF_RULES = {
+    2: ("K = (Km + Ks) / 2", "i7cor3.F:251-262"),
+    3: ("K = max(Km, Ks)", "i7cor3.F:264-275"),
+    4: ("K = min(Km, Ks)", "i7cor3.F:277-288"),
+    5: ("K = Km x Ks / (Km + Ks)", "i7cor3.F:290-301"),
+}
+
+
+class _PartStiffness(NamedTuple):
+    """One part's contact-stiffness estimate, the starter's own formulas on
+    the part's median element (``state.stmin_part_estimates``)."""
+    kind: str          # "shell" | "solid"
+    k_main: float      # main segment per unit Stfac: E x t | B x A^2/V
+    k_sec: float       # secondary node: E x t | B x (2 V_node)^(1/3)
+    n_main: int        # segments the median is taken over
+    n_sec: int         # nodes the median is taken over
+    e: float           # Young's modulus (the starter's PM(20))
+    t: float           # shell: median element thickness
+    b: float           # solid: bulk modulus E / (3 (1 - 2 nu))
+    a2v: float         # solid: median A^2 / V of the part's boundary faces
+    l13: float         # solid: median (2 V_node)^(1/3) of its surface nodes
+
+
+def _combine_istf(km: float, ks: float, istf: int) -> float:
+    """The engine's Istf combination of a main and a secondary stiffness."""
+    if istf == 2:
+        return 0.5 * (km + ks)
+    if istf == 3:
+        return max(km, ks)
+    if istf == 5:
+        return km * ks / max(1e-30, km + ks)
+    return min(km, ks)
+
+
+def _median(vals: List[float]) -> float:
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+
+
+def _weighted_median(pairs: List[Tuple[float, int]]) -> float:
+    """The median of values carried with a count each (per-part medians
+    weighted by how many segments / nodes they stand for)."""
+    pairs = sorted(p for p in pairs if p[1] > 0)
+    total = sum(n for _v, n in pairs)
+    if not total:
+        return 0.0
+    acc = 0
+    for v, n in pairs:
+        acc += n
+        if 2 * acc >= total:
+            return v
+    return pairs[-1][0]                           # pragma: no cover
+
+
+#: Material records whose OpenRadioss law the STARTER gives no contact
+#: stiffness (the CardStack K1a residual, wave C): ``{record class name: (the
+#: law k2rad writes, the LS-DYNA keyword, the reader line that leaves the
+#: bulk modulus unset)}``. A law above 27 takes PM(20) / PM(32) from
+#: PARMAT(2) / PARMAT(1) (``hm_read_mat.F90:1451-1464``), falling back to
+#: ``matparam%bulk`` (:1546); /MAT/LAW169's reader sets PARMAT(2) and
+#: comments PARMAT(1) out (``hm_read_mat169.F90:202``) and never sets
+#: ``matparam%bulk``, so PM(32) = 0, and with it every solid contact
+#: stiffness of the part: the main segment's ``B x A^2 / V``
+#: (``i7sti3.F:442-444``) and the node's ``B x (2 V_node)^(1/3)``
+#: (``sbulk3.F:99``, ``asstifi.F:50``, ``i7stslav.F:58``). Every other
+#: registered record with a Young's modulus was checked against its law's
+#: reader in wave C: each sets a non-zero PARMAT(1) (or PM(32) directly).
+_NO_CONTACT_STIFFNESS_LAWS: Dict[str, Tuple[str, str, str]] = {
+    "MatArupAdhesive": ("/MAT/LAW169", "*MAT_ARUP_ADHESIVE",
+                        "hm_read_mat169.F90:202"),
+}
+
+
+def _part_material(state: ConversionState, pid: int):
+    """The part's material record (the first registry that holds its MID),
+    or None."""
+    from .thermal import _material_registries
+    part = state.parts.get(pid)
+    if part is None:
+        return None
+    for reg in _material_registries(state):
+        mat = reg.get(part.mid)
+        if mat is not None:
+            return mat
+    return None
+
+
+def _part_no_contact_stiffness(state: ConversionState,
+                               pid: int) -> Optional[Tuple[str, str, str]]:
+    """``(law, keyword, source)`` of :data:`_NO_CONTACT_STIFFNESS_LAWS` when
+    the part's material is a law the starter gives no contact stiffness,
+    else None."""
+    mat = _part_material(state, pid)
+    if mat is None:
+        return None
+    return _NO_CONTACT_STIFFNESS_LAWS.get(type(mat).__name__)
+
+
+def _part_e_nu(state: ConversionState, pid: int) -> Optional[Tuple[float, float]]:
+    """``(E, nu)`` of the part's material record, or None (a law k2rad keeps
+    no Young's modulus for, a law the starter gives no contact stiffness -
+    :data:`_NO_CONTACT_STIFFNESS_LAWS`, so no estimate can carry a number -
+    or no material).
+
+    Poisson's ratio is the record's ``nu``, else its ``pr`` - the name the
+    *MAT_224 / *MAT_252 records keep it under (CardStack K1a review: it was
+    read as 0 there, so B came out E / 3, 4.2 x low at nu 0.38); their laws
+    LAW109 / LAW120 store PARMAT(1) = E / (3 (1 - 2 nu))
+    (``hm_read_mat109.F:113/163``, ``hm_read_mat120.F:146/238``). An
+    *MAT_ELASTIC_FLUID gives ``(3 K, 0)``, the isotropic pair whose
+    bulk modulus E / (3 (1 - 2 nu)) is its K: LS-DYNA ignores E and PR under
+    FLUID (Vol II R16 p.2-148, Remark 5), and k2rad writes K as the
+    /EOS/POLYNOMIAL C1 the starter takes as the bulk modulus (PM(32) = C1 +
+    C4 E0, ``hm_read_eos_polynomial.F:110``); a blank K falls back to E / (3
+    (1 - 2 PR)), the rule of the record's own writer
+    (``materials._resolve_mat_elastic_fluid``)."""
+    from ..state import MatElasticFluid
+    from .thermal import _material_registries
+    part = state.parts.get(pid)
+    if part is None:
+        return None
+    for reg in _material_registries(state):
+        mat = reg.get(part.mid)
+        if mat is None:
+            continue
+        if type(mat).__name__ in _NO_CONTACT_STIFFNESS_LAWS:
+            return None
+        if isinstance(mat, MatElasticFluid):
+            bulk = mat.k if mat.k > 0.0 else (
+                mat.e / (3.0 * (1.0 - 2.0 * mat.pr))
+                if mat.e > 0.0 and mat.pr < 0.5 else 0.0)
+            return (3.0 * bulk, 0.0) if bulk > 0.0 else None
+        e = getattr(mat, "E", getattr(mat, "e", None))
+        nu = getattr(mat, "nu", getattr(mat, "pr", 0.0))
+        if not isinstance(e, float) or not e > 0.0:
+            return None
+        return e, (nu if isinstance(nu, float) else 0.0)
+    return None
+
+
+def _node_xyz(nodes, ids: Iterable[int]
+              ) -> Optional[List[Tuple[float, float, float]]]:
+    """The coordinates of *ids*, or None when a node is missing."""
+    out: List[Tuple[float, float, float]] = []
+    for n in ids:
+        nd = nodes.get(n)
+        if nd is None:
+            return None
+        out.append((nd.x, nd.y, nd.z))
+    return out
+
+
+def _solid_volume(pts: List[Tuple[float, float, float]]) -> float:
+    """Volume of a 4 / 10 (corners) / 6 / 8-node solid from its corners."""
+    from ..lumping import _HEXA_TETS, _tet_volume
+    n = len(pts)
+    if n in (4, 10):
+        return _tet_volume(pts[0], pts[1], pts[2], pts[3])
+    if n == 6:
+        return (_tet_volume(pts[0], pts[1], pts[2], pts[3])
+                + _tet_volume(pts[1], pts[2], pts[3], pts[4])
+                + _tet_volume(pts[2], pts[3], pts[4], pts[5]))
+    if n == 8:
+        return sum(_tet_volume(pts[a], pts[b], pts[c], pts[d])
+                   for a, b, c, d in _HEXA_TETS)
+    return 0.0
+
+
+def _face_area(pts: List[Tuple[float, float, float]]) -> float:
+    """Area of a 3- or 4-corner face (a quad from its diagonals)."""
+    if len(pts) == 3:
+        u = [pts[1][k] - pts[0][k] for k in range(3)]
+        v = [pts[2][k] - pts[0][k] for k in range(3)]
+    else:
+        u = [pts[2][k] - pts[0][k] for k in range(3)]
+        v = [pts[3][k] - pts[1][k] for k in range(3)]
+    cx = u[1] * v[2] - u[2] * v[1]
+    cy = u[2] * v[0] - u[0] * v[2]
+    cz = u[0] * v[1] - u[1] * v[0]
+    return 0.5 * math.sqrt(cx * cx + cy * cy + cz * cz)
+
+
+#: The quick gate of the floor warning: an interface whose sampled stiffness
+#: is this many times above its Stmin is not measured exactly. The factor
+#: covers the gap between a cube's B x h and the median A^2/V of a slab's
+#: faces up to an aspect ratio of about 30 ((c/a)^(2/3), c/a = 1/30 ->
+#: 0.10); the exact walk is the cost of a large solid part (51 840 tets: 1.1
+#: s against a 2.8 s conversion, measured on ex_27_solid_elform_13_penalty).
+_STMIN_QUICK_MARGIN = 10.0
+#: Elements of a part the quick estimate samples (a stride over the part).
+_STMIN_QUICK_SAMPLE = 400
+
+
+def _part_stiffness_quick(state: ConversionState,
+                          pids: Iterable[int]) -> Dict[int, Optional[float]]:
+    """``{pid: k}`` per unit Stfac, memoised: E x t of a shell part, B x
+    V^(1/3) of a solid one (the starter's formulas on a cube-like element),
+    each the median of at most :data:`_STMIN_QUICK_SAMPLE` elements spread
+    over the part; None where :func:`_part_e_nu` gives no modulus. Used only
+    to skip :func:`_part_stiffness` where the floor is far below."""
+    pids = list(pids)
+    cache = state.stmin_part_quick
+    want = {p for p in pids if p not in cache}
+    if want:
+        shells: Dict[int, list] = {p: [] for p in want}
+        solids: Dict[int, list] = {p: [] for p in want}
+        for e in state.shell_elems:
+            if e.pid in want:
+                shells[e.pid].append(e)
+        both: Iterable[Union[SolidElem, TshellElem]] = itertools.chain(
+            state.solid_elems, state.tshell_elems)
+        for se in both:
+            if se.pid in want:
+                solids[se.pid].append(se)
+        nodes = state.nodes
+        for pid in want:
+            cache[pid] = None
+            en = _part_e_nu(state, pid)
+            if en is None:
+                continue
+            e_mod, nu = en
+            if shells[pid]:
+                from .mesh import _shell_element_thickness, _unique_node_slots
+                part = state.parts.get(pid)
+                sec = (state.sec_shells.get(part.secid) if part is not None
+                       else None)
+                t1 = sec.t1 if sec is not None else 0.0
+                lst = shells[pid]
+                ts = [t for e in lst[::max(1, len(lst) // _STMIN_QUICK_SAMPLE)]
+                      if (t := _shell_element_thickness(
+                          e, _unique_node_slots(e.nodes), t1) or t1) > 0.0]
+                cache[pid] = e_mod * _median(ts) if ts else None
+                continue
+            if not solids[pid] or not 0.0 <= nu < 0.5:
+                continue
+            lst = solids[pid]
+            hs: List[float] = []
+            for se in lst[::max(1, len(lst) // _STMIN_QUICK_SAMPLE)]:
+                nds = list(se.nodes)
+                corners = (nds[:4] if len(nds) == 10 else
+                           _ordered_unique_nodes(nds) if len(set(nds)) == 4
+                           else nds)
+                xyz = _node_xyz(nodes, corners)
+                if len(corners) not in (4, 8) or xyz is None:
+                    continue
+                vol = _solid_volume(xyz)
+                if vol > 0.0:
+                    hs.append(vol ** (1.0 / 3.0))
+            if hs:
+                cache[pid] = e_mod / (3.0 * (1.0 - 2.0 * nu)) * _median(hs)
+    return {p: cache.get(p) for p in pids}
+
+
+def _part_stiffness(state: ConversionState,
+                    pids: Iterable[int]) -> Dict[int, Optional[_PartStiffness]]:
+    """The memoised :class:`_PartStiffness` of each part in *pids* (None =
+    no estimate: no material E, no element, or a shape not measured).
+
+    Shell part (the starter's own lines): main segment ``Stfac x E x t``
+    (``i7sti3.F:615``, quad; ``:528`` triangle), secondary node ``E x t``
+    (``asstifi.F:52``, the mean over the node's shells), t the element
+    thickness the /SHELL row carries. Solid part: main face
+    ``Stfac x B x A^2 / V`` (``i7sti3.F:444``; a /TETRA10 face is its 4
+    sub-triangles), secondary node ``B x (2 V_node)^(1/3)``
+    (``asstifi.F:50``, V_node = the element volumes over their node counts,
+    ``sbulk3.F``). Each a median over the part's elements / surface nodes."""
+    pids = list(pids)
+    cache = state.stmin_part_estimates
+    want = [p for p in set(pids) if p not in cache]
+    if not want:
+        return {p: cache.get(p) for p in pids}
+    wanted = set(want)
+    shells: Dict[int, list] = {p: [] for p in want}
+    solids: Dict[int, list] = {p: [] for p in want}
+    for e in state.shell_elems:
+        if e.pid in wanted:
+            shells[e.pid].append(e)
+    both: Iterable[Union[SolidElem, TshellElem]] = itertools.chain(
+        state.solid_elems, state.tshell_elems)
+    for se in both:
+        if se.pid in wanted:
+            solids[se.pid].append(se)
+    nodes = state.nodes
+    for pid in want:
+        cache[pid] = None
+        en = _part_e_nu(state, pid)
+        if en is None:
+            continue
+        e_mod, nu = en
+        if shells[pid]:
+            from .mesh import _shell_element_thickness, _unique_node_slots
+            part = state.parts.get(pid)
+            sec = state.sec_shells.get(part.secid) if part is not None else None
+            t1 = sec.t1 if sec is not None else 0.0
+            ts = [(_shell_element_thickness(e, _unique_node_slots(e.nodes), t1)
+                   or t1) for e in shells[pid]]
+            ts = [t for t in ts if t > 0.0]
+            if not ts:
+                continue
+            t = _median(ts)
+            cache[pid] = _PartStiffness("shell", e_mod * t, e_mod * t,
+                                        len(ts), len(ts), e_mod, t, 0.0, 0.0,
+                                        0.0)
+            continue
+        if not solids[pid] or not 0.0 <= nu < 0.5:
+            continue
+        bulk = e_mod / (3.0 * (1.0 - 2.0 * nu))
+        # each element by its DISTINCT corners: a 4-node card, a TET10 (its
+        # first 4) or a collapsed 8-node card with 4 distinct nodes is a tet
+        # (the writer's /TETRA4), 8 distinct nodes a hex; pentahedra and
+        # pyramids are left out of the estimate
+        elems: List[Tuple[List[int], Tuple[Tuple[int, ...], ...], int]] = []
+        tet10 = True
+        for se in solids[pid]:
+            nds = list(se.nodes)
+            n_uniq = len(set(nds))
+            if len(nds) == 10:
+                elems.append((nds[:4], _TET4_FACE_IDX, n_uniq))
+            elif n_uniq == 4:
+                elems.append((nds if len(nds) == 4 else
+                              _ordered_unique_nodes(nds), _TET4_FACE_IDX, 4))
+                tet10 = False
+            elif len(nds) == 8 and n_uniq == 8:
+                elems.append((nds, _HEX_FACE_IDX, 8))
+                tet10 = False
+        # pass 1: the boundary faces (used by ONE element of the part) - only
+        # keys here, so a large part pays for areas and volumes on its skin
+        owner: Dict[Tuple[int, ...], Tuple[int, int]] = {}
+        shared: Set[Tuple[int, ...]] = set()
+        for k, (corners, idx, _nu) in enumerate(elems):
+            for fi, f in enumerate(idx):
+                key = tuple(sorted([corners[i] for i in f]))
+                if key in owner:
+                    shared.add(key)
+                else:
+                    owner[key] = (k, fi)
+        vol_of: Dict[int, float] = {}
+
+        def _vol(k: int) -> float:
+            if k not in vol_of:
+                xyz = _node_xyz(nodes, elems[k][0])
+                vol_of[k] = _solid_volume(xyz) if xyz is not None else 0.0
+            return vol_of[k]
+
+        a2v: List[float] = []
+        surface: Set[int] = set()
+        sub = 4.0 if tet10 else 1.0            # a /TETRA10 face: 4 triangles
+        for key, (k, fi) in owner.items():
+            if key in shared:
+                continue
+            corners, idx, _nu = elems[k]
+            xyz = _node_xyz(nodes, [corners[i] for i in idx[fi]])
+            vol = _vol(k)
+            if not vol > 0.0 or xyz is None:
+                continue
+            area = _face_area(xyz)
+            if area > 0.0:
+                a2v.append((area / sub) ** 2 / vol)
+                surface.update(key)
+        # pass 2: the nodal volume (sbulk3.F: V / nodes per element) of the
+        # surface nodes, from every element that touches one
+        vnode: Dict[int, float] = {}
+        for k, (corners, _idx, n_uniq) in enumerate(elems):
+            hit = [n for n in corners if n in surface]
+            if hit:
+                share = _vol(k) / n_uniq
+                for n in hit:
+                    vnode[n] = vnode.get(n, 0.0) + share
+        l13 = [(2.0 * vnode[nid]) ** (1.0 / 3.0) for nid in surface
+               if vnode.get(nid, 0.0) > 0.0]
+        if not a2v or not l13:
+            continue
+        ma, ml = _median(a2v), _median(l13)
+        cache[pid] = _PartStiffness("solid", bulk * ma, bulk * ml, len(a2v),
+                                    len(l13), e_mod, 0.0, bulk, ma, ml)
+    return {p: cache.get(p) for p in pids}
+
+
+def _side_formula(est: List[_PartStiffness], main: bool,
+                  stfac: float) -> Tuple[float, str, str]:
+    """``(K, formula, source lines)`` of one contact side from its parts'
+    estimates: the formula with the part's numbers when the side is ONE
+    material and size, else the count-weighted median over its parts."""
+    g = _round_sig
+    if main:
+        k = stfac * _weighted_median([(x.k_main, x.n_main) for x in est])
+    else:
+        k = _weighted_median([(x.k_sec, x.n_sec) for x in est])
+    kinds = {x.kind for x in est}
+    cite = {("shell", True): "i7sti3.F:615", ("solid", True): "i7sti3.F:444",
+            ("shell", False): "asstifi.F:52",
+            ("solid", False): "asstifi.F:50"}
+    src = " / ".join(cite[(kd, main)] for kd in sorted(kinds))
+    lab = "Km" if main else "Ks"
+    one = {(x.kind, g(x.e), g(x.t), g(x.b), g(x.a2v), g(x.l13)) for x in est}
+    if len(one) == 1:
+        x = est[0]
+        pre = "Stfac x " if main else ""
+        num = f"{g(stfac):g} x " if main else ""
+        if x.kind == "shell":
+            return k, (f"{lab} = {pre}E x t = {num}{g(x.e):g} x {g(x.t):g} = "
+                       f"{g(k):g}"), src
+        if main:
+            return k, (f"{lab} = Stfac x B x A^2/V = {num}{g(x.b):g} x "
+                       f"{g(x.a2v):g} = {g(k):g} (the median of "
+                       f"{x.n_main} main faces)"), src
+        return k, (f"{lab} = B x (2 V_node)^(1/3) = {g(x.b):g} x "
+                   f"{g(x.l13):g} = {g(k):g} (the median of {x.n_sec} "
+                   "surface nodes)"), src
+    n = sum(x.n_main if main else x.n_sec for x in est)
+    what = "main segments" if main else "secondary nodes"
+    return k, (f"{lab} = {'Stfac x ' if main else ''}the median {what} "
+               f"stiffness = {g(k):g} (over {n} {what} of {len(est)} parts)"), src
+
+
+def _stiffness_in_n_per_mm(state: ConversionState, k: float) -> Optional[float]:
+    """*k*, a force / length in the deck's /BEGIN units, in N/mm (force /
+    length = mass / time^2, so only the mass and time labels count)."""
+    from .thermal import _unit_factor
+    mass, _length, time = state.units
+    fm = _unit_factor(str(mass), "g")
+    ft = _unit_factor(str(time), "s")
+    if fm is None or ft is None or not ft > 0.0:
+        return None
+    return k * fm / (ft * ft) / 1000.0
+
+
+def _side_pids_of_nodes(state: ConversionState, nids: Set[int]) -> Set[int]:
+    """The parts whose shells / solids hold any of *nids*."""
+    out: Set[int] = set()
+    for e in _shell_and_solid_elems(state):
+        if e.pid not in out and any(n in nids for n in e.nodes):
+            out.add(e.pid)
+    return out
+
+
+def _shell_and_solid_elems(state: ConversionState
+                           ) -> Iterable[Union[ShellElem, SolidElem,
+                                               TshellElem]]:
+    """Every shell, solid and thick-shell element, in that order."""
+    return itertools.chain(state.shell_elems, state.solid_elems,
+                           state.tshell_elems)
+
+
+def _secondary_pids(state: ConversionState, sid: int, styp: int,
+                    rigid_nodes: Set[int], keep_rigid: bool) -> Set[int]:
+    """The parts whose elements hold a TYPE7 secondary group's nodes - the
+    nodes :func:`_resolve_contact_slave` writes, filtered exactly as it
+    filters (rigid-body nodes out unless *keep_rigid*)."""
+    return _side_pids_of_nodes(state, {
+        n for n in _side_node_ids(state, sid, styp)
+        if n > 0 and (keep_rigid or n not in rigid_nodes)})
+
+
+def _warn_no_contact_stiffness(state: ConversionState, inter_id: int,
+                               inert_main: Dict[int, Tuple[str, str, str]],
+                               inert_sec: Dict[int, Tuple[str, str, str]],
+                               rest: bool) -> None:
+    """The K1a residual (wave C): name the parts of /INTER/TYPE7 *inter_id*
+    whose law the starter gives no contact stiffness
+    (:data:`_NO_CONTACT_STIFFNESS_LAWS`), side by side, instead of an
+    estimate that would print a stiffness the starter does not have.
+    *rest*: each side also holds other parts, whose estimate still runs."""
+    sides = []
+    laws: Dict[Tuple[str, str, str], None] = {}
+    for side, inert in (("main", inert_main), ("secondary", inert_sec)):
+        if not inert:
+            continue
+        by_law: Dict[Tuple[str, str, str], List[int]] = {}
+        for pid, law in sorted(inert.items()):
+            by_law.setdefault(law, []).append(pid)
+            laws[law] = None
+        sides.append(f"the {side} side's " + "; ".join(
+            f"part{'s' if len(pids) > 1 else ''} "
+            f"{', '.join(str(p) for p in pids)} ({law[0]}, {law[1]})"
+            for law, pids in by_law.items()))
+    readers = "; ".join(f"{law[0]}'s reader leaves PARMAT(1) unset "
+                        f"({law[2]})" for law in laws)
+    measured = (" MEASURED on the CardStack K1a probe (two shell cards "
+                "thrown at a block at 1000 mm/s, 1e-3 s): with the block a "
+                "/MAT/LAW169 main side the starter finds POSSIBLE IMPACT "
+                "NUMBER 0 and the cards keep all their kinetic energy (0.00 "
+                "% drop), against 48 and an 85.76 % drop with *MAT_ELASTIC E "
+                "10; a /MAT/LAW169 secondary side keeps it too (0.00 %, "
+                "against 91.60 %)."
+                if any(law[0] == "/MAT/LAW169" for law in laws) else "")
+    state.warn(
+        f"/INTER/TYPE7 {inter_id}: {' and '.join(sides)} - a law that gives "
+        f"the starter no contact stiffness: {readers}, so its bulk modulus "
+        "PM(32) = 0 (hm_read_mat.F90:1451/1464/1546). A main segment of such "
+        "a part gets STF = 0 (i7sti3.F:442-444) and its nodes a secondary "
+        "stiffness of 0 (sbulk3.F:99, asstifi.F:50, i7stslav.F:58), and the "
+        "engine search skips both (i7trivox.F:221/342), so whatever the "
+        "Stmin or Stfac this interface carries no load on those parts"
+        + (" - on the other parts of a side the stiffness estimate holds as "
+           "usual." if rest else ".") + measured)
+
+
+def _warn_stmin_floor(state: ConversionState, inter_id: int,
+                      main_pids: Optional[Iterable[int]],
+                      sec_pids: Optional[Iterable[int]],
+                      stfac: float, istf: int, title: str = "") -> None:
+    """CardStack K-02: the default-ON warning that the Stmin floor of
+    /INTER/TYPE7 *inter_id* is above the stiffness the starter computes for
+    it (no byte moves). *stfac* is the written cell (0 = 1.0,
+    ``hm_read_inter_type07.F:541``); either side None = not part-resolvable,
+    no estimate. k2rad's own implicit stub is skipped.
+
+    A part whose law the starter gives no contact stiffness
+    (:data:`_NO_CONTACT_STIFFNESS_LAWS`, the K1a residual) is named by
+    :func:`_warn_no_contact_stiffness` whatever the Stmin, and left out of
+    the estimate; a side with nothing else gets no estimate at all."""
+    if (title == AUTO_IMPLICIT_STUB_TITLE or main_pids is None
+            or sec_pids is None):
+        return
+    main_l, sec_l = sorted(set(main_pids)), sorted(set(sec_pids))
+    inert_m = {p: law for p in main_l
+               if (law := _part_no_contact_stiffness(state, p)) is not None}
+    inert_s = {p: law for p in sec_l
+               if (law := _part_no_contact_stiffness(state, p)) is not None}
+    if inert_m or inert_s:
+        main_l = [p for p in main_l if p not in inert_m]
+        sec_l = [p for p in sec_l if p not in inert_s]
+        _warn_no_contact_stiffness(state, inter_id, inert_m, inert_s,
+                                   bool(main_l and sec_l))
+    if istf not in _ISTF_RULES or not main_l or not sec_l:
+        return
+    stmin = float(state.options.inter_stmin.get(inter_id, _TYPE7_STMIN))
+    if not stmin > 0.0:
+        return
+    s = stfac if stfac > 0.0 else 1.0
+    # the cost bound: a sampled lower-side estimate far above the floor
+    # settles it without the exact walk of every element of the parts
+    quick = _part_stiffness_quick(state, main_l + sec_l)
+    qm = [q for p in main_l if (q := quick.get(p)) is not None]
+    qs = [q for p in sec_l if (q := quick.get(p)) is not None]
+    if (qm and qs and _combine_istf(s * min(qm), min(qs), istf)
+            > _STMIN_QUICK_MARGIN * stmin):
+        return
+    ests = _part_stiffness(state, main_l + sec_l)
+    main_e = [x for p in main_l if (x := ests.get(p)) is not None]
+    sec_e = [x for p in sec_l if (x := ests.get(p)) is not None]
+    if not main_e or not sec_e:
+        return
+    km, km_txt, km_src = _side_formula(main_e, True, s)
+    ks, ks_txt, ks_src = _side_formula(sec_e, False, s)
+    k = _combine_istf(km, ks, istf)
+    if not stmin > k:
+        return
+    g = _round_sig
+    rule, lines = _ISTF_RULES[istf]
+    km1 = km / s
+    if istf == 4:
+        thr = stmin / km1 if ks > stmin else None
+    elif istf == 2:
+        thr = (2.0 * stmin - ks) / km1
+    elif istf == 5:
+        thr = stmin * ks / (km1 * (ks - stmin)) if ks > stmin else None
+    else:
+        thr = None if ks > stmin else stmin / km1
+    if thr is None:
+        lever = (f"no Stfac lifts K above the floor: with Istf {istf} the "
+                 f"secondary side's Ks = {g(ks):g} holds K below it")
+    else:
+        # the opt-in flag is named only when it is in play (a plain deck must
+        # not see it, tests/test_converter.py ForceControlStabilizationTests)
+        via = (" / --soften-stfac" if state.options.soften_stfac is not None
+               else "")
+        lever = (f"below Stfac {_round_sig(thr, 3):g} the floor sets K "
+                 f"whatever the Stfac, and a smaller Card-3 SFS{via} "
+                 "changes nothing on this interface")
+    written = (f"Stmin {stmin:g}" if inter_id not in state.options.inter_stmin
+               else f"Stmin {stmin:g} (--inter-stmin {inter_id}={stmin:g})")
+    nmm = _stiffness_in_n_per_mm(state, stmin)
+    units = "/".join(str(u) for u in state.units)
+    unit_txt = (f"{stmin:g} = {g(nmm):g} N/mm in this deck's {units} units"
+                if nmm is not None else
+                f"{stmin:g} is a force / length in this deck's {units} units")
+    state.warn(
+        f"/INTER/TYPE7 {inter_id}: {written} is above the estimated contact "
+        f"stiffness, so the floor sets it. With {km_txt} for the main "
+        f"segments ({km_src}) and {ks_txt} for the secondary nodes "
+        f"({ks_src}), Istf {istf} combines {rule} = {g(k):g} ({lines}) and "
+        f"the engine applies MAX(Stmin, K) = {stmin:g}: {lever} (Stfac "
+        f"scales the main side only). Stmin {unit_txt}. --inter-stmin "
+        f"{inter_id}=0 writes no floor - then a secondary node no element "
+        "stiffens contacts with K = 0 (ROADMAP round-9 NOT entry 11).")
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
@@ -3599,6 +5077,19 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
     fric_card = "         0         0                   0         2         0"
     if fric_id:
         fric_card += f"         0{_f(0.0)}{_i(fric_id)}"
+    # CardStack K-02: the Stmin cell, k2rad's 1000 unless --inter-stmin names
+    # this interface (decided HERE, in the one emitter, like Fpenmax below)
+    stmin = _TYPE7_STMIN
+    if state is not None and inter_id in state.options.inter_stmin:
+        stmin = float(state.options.inter_stmin[inter_id])
+        state.inter_stmin_reached.add(inter_id)
+        state.warn(
+            f"--inter-stmin {inter_id}={stmin:g}: /INTER/TYPE7/{inter_id} "
+            f"Stmin {stmin:g} instead of k2rad's {_TYPE7_STMIN:g} - the "
+            "floor the engine applies to the Istf-combined stiffness, "
+            "MAX(Stmin, K) (i7cor3.F:251-301)"
+            + (": with 0 a secondary node no element stiffens contacts with "
+               "K = 0." if stmin == 0.0 else "."))
     fpenmax = _FPENMAX_ZERO_NORMAL if inacti in _FPENMAX_INACTI else 0.0
     if fpenmax and state is not None:
         state.warn(
@@ -3628,7 +5119,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#          Fscalegap             GAP_MAX             Fpenmax",
         f"                   0                   0{_f(fpenmax)}",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
-        "                1000                   0                   0                   0         0",
+        f"{_f(stmin)}                   0                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
@@ -3642,16 +5133,27 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
 
 def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
                             inacti: int = 5, stfac: float = 1.0,
-                            fric_id: int = 0, surf_id2: int = 0) -> List[str]:
-    """*CONTACT_AUTOMATIC_SINGLE_SURFACE → /INTER/TYPE25 self-contact (explicit).
+                            fric_id: int = 0, surf_id2: int = 0,
+                            iedge: int = 1000, tstart: float = 0.0,
+                            tstop: float = 0.0,
+                            ishape: int = 0) -> List[str]:
+    """*CONTACT_AUTOMATIC_SINGLE_SURFACE with SSID = 0 → /INTER/TYPE25
+    all-parts self-contact (explicit decks).
 
     surf_id is ONE surface (surf_ID1); surf_ID2=0 → self-impact, so every segment
     of the surface contacts every node of the same surface (symmetric). This is
-    how the native OpenRadioss reader converts ASS; the TYPE7 node-group→surface
-    k2rad emits otherwise is an asymmetric ~half-model contact whose driven part
-    blows through, flying the model apart in explicit dynamics. Params match the
-    native TYPE25 echo: Istf=4, Igap=2, Iedge=1000 (no edge), Inacti from ignore,
-    Stfac, Coulomb Fric.
+    how the native OpenRadioss reader converts an SSID = 0 ASS; the all-parts
+    TYPE7 node-group→surface k2rad writes for SSID = 0 on an IMPLICIT deck is
+    an asymmetric ~half-model contact whose driven part blows through, flying
+    the model apart in explicit dynamics. SSID != 0 (a part or part set) is
+    not written here at all: it is the /INTER/TYPE7 self-contact of that set
+    on explicit and implicit decks alike (secondary = the set's non-rigid
+    nodes, main = the set's surface, :func:`_make_interfaces`). Params match
+    the native TYPE25 echo: Istf=4, Igap=2, Iedge=1000 (no edge), Inacti from
+    ignore, Stfac, Coulomb Fric. The gap is TYPE25's own, per side
+    min(Gap_scale x t/2, Gap_max) from the elements (Gap_scale 1.0, Gap_max
+    1e30 here; no Gapmin), so Card-3 SST / MST / SFST are not gap inputs on
+    this route (:func:`_warn_type25_self_gap_inputs`, CardStack K-13).
 
     NB there are TWO hand-written /INTER/TYPE25 layouts in this module — this
     one and :func:`_emit_inter_type25`, which the eroding / node-to-surface
@@ -3671,24 +5173,400 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
     existing caller) makes it a two-surface interface with every other cell
     unchanged: the *CONSTRAINED_JOINT_SCREW split (round 7, B2) writes the
     spinning body's parts there against the rest of the self-surface.
+
+    *iedge* (default 1000 = no edge contact, today's cell) is 1 under
+    ``--general-shell-edges`` on an SSID = 0 *CONTACT_AUTOMATIC_GENERAL
+    (CardStack K-10): the external border edges of the shell segments.
+    *tstart* / *tstop* (default 0 / 0, today's cells) carry the Card-2 BT /
+    DT (CardStack K-11, :func:`_birth_death`); *ishape* (default 0 = the
+    /DEFAULT 1, square, today's cell) is 2, round, for a Card E SRNDE 1
+    (CardStack K-16, :func:`_type25_ishape`).
     """
     return [
         f"/INTER/TYPE25/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2                Idel     Iedge    IPSTIF",
-        f"{_i(surf_id)}{_i(surf_id2)}         4         0         2         0                   2      1000         0",
+        f"{_i(surf_id)}{_i(surf_id2)}         4         0         2         0                   2{_i(iedge)}         0",
         "# grnd_IDs                     Gap_scale          %mesh_size           Gap_max_s           Gap_max_m",
         "         0                           1.0                   0                1e30                1e30",
         "#              Stmin               Stmax     Igap0    Ishape          Edge_angle          STFAC_MDT",
-        "                   0                1e30      1000         0                   0                   0",
+        f"                   0                1e30      1000{_i(ishape)}                   0                   0",
         "#              Stfac                Fric           Tpressfit              Tstart               Tstop",
-        f"{_f(stfac)}{_f(fric)}                   0                   0                   0",
+        f"{_f(stfac)}{_f(fric)}                   0{_f(tstart)}{_f(tstop)}",
         "#      IBC               IVIS2    Inacti                VISs    Ithick                          Pmax",
         f"       000                   0{_i(inacti)}                0.05         0                             0",
         "#    Ifric    Ifiltr               Xfreq             sens_ID              DTSTIF             fric_ID",
         f"         0         0                   0                   0                   0{_i(fric_id, 20)}",
         HDR,
     ]
+
+
+#: Optional Card A DEPTH values that turn on segment-to-segment edge-to-edge
+#: checking for SOFT 2 (Vol I R17 p.11-97 items 3, 5, 7, 8, 9).
+_SOFT2_EDGE_DEPTHS = (5, 15, 25, 35, 45, 55)
+
+
+def _warn_soft_card_fields(state: ConversionState,
+                           c: Union[ContactAutoSingle, ContactAutoSurf2Surf],
+                           kw: str, target: str) -> None:
+    """CardStack K-09: name the optional Card A SOFT / SOFSCL / SBOPT / DEPTH
+    and Card C DTSTIF a *CONTACT states and its route drops (text only; the
+    readers keep them on the record, ``handlers._read_contact_optional``).
+
+    A cell is named where it would act in LS-DYNA: SOFT when non-zero;
+    SOFSCL with SOFT 1 (its only reader, p.11-89); SBOPT with SOFT 2 when
+    not its default 2 (p.11-90/91); DEPTH when not its default (2, 3 on
+    AUTOMATIC_GENERAL; p.11-91) - a segment-to-segment option under SOFT 2,
+    the search depth otherwise, a curve of it over time when negative; DTSTIF
+    when non-zero (read by SOFT 1 / 2, p.11-106, and said so under any other
+    SOFT). A search DEPTH with no stiffness cell beside it gets its own
+    reason - no search-depth cell - and not the SFS lever. A MORTAR spelling
+    names nothing: LS-DYNA reads only BSORT of its Card A, and its Card C
+    field 4 is MPAR2 (Table 11-1, p.11-135).
+    *target* is the interface the route wrote: /INTER/TYPE7 has no mass /
+    time-step stiffness at all, and the /INTER/TYPE25 k2rad writes keeps
+    Istf 4 - its IPSTIF / STFAC_MDT / DTSTIF columns are the radioss2026
+    layout, which /BEGIN 2022 does not read."""
+    soft = c.soft
+    base = _contact_base_spelling(kw)
+    if "MORTAR" in base:
+        # Table 11-1 (Vol I R17 p.11-135): on a Mortar contact LS-DYNA reads
+        # only BSORT of Card A - nothing here is a loss (CardStack K-14)
+        return
+    items: List[str] = []
+    # a cell of the stiffness formulation (SOFT, its options, DTSTIF): only
+    # then do the stiffness reason and the SFS lever apply - a search DEPTH
+    # alone gets its own reason (the fix round of the K-09 review)
+    stiff = bool(soft or c.dtstif)
+    if soft == 1:
+        items.append(
+            "SOFT 1 (the soft-constraint penalty, k = max(0.5 x SOFSCL x m* "
+            "/ dt_c^2, the SOFT 0 stiffness), LS-DYNA Theory R16 eq. "
+            "30.9-30.10) with SOFSCL "
+            + (f"{c.sofscl:g}" if c.sofscl else "blank = 0.1"))
+    elif soft == 2:
+        items.append("SOFT 2 (the segment-to-segment penalty, Vol I R17 "
+                     "p.11-93"
+                     + ("; LS-DYNA supports it for AUTOMATIC_SINGLE_SURFACE "
+                        "but not for AUTOMATIC_GENERAL, p.11-123 General "
+                        "Remark 2" if base.startswith("AUTOMATIC_GENERAL")
+                        else "")
+                     + "): the interface stays node-to-segment")
+    elif soft:
+        items.append(f"SOFT {soft}")
+    if soft == 2 and c.sbopt not in (0, 2):
+        items.append(f"SBOPT {c.sbopt} (a segment-to-segment option)")
+    if c.depth not in (0, 3 if base.startswith("AUTOMATIC_GENERAL") else 2):
+        if soft == 2:
+            what = "a segment-to-segment option"
+        elif c.depth < 0:
+            what = (f"|DEPTH| = {-c.depth} is the curve of the search depth "
+                    "over time, Vol I R17 p.11-91 LT.0")
+        else:
+            what = "the search depth, in segments, Vol I R17 p.11-91"
+        items.append(f"DEPTH {c.depth} ({what})")
+    if c.dtstif:
+        items.append(f"Card C DTSTIF {c.dtstif:g} (the time step of the "
+                     "SOFT 1 / 2 stiffness"
+                     + (")" if soft in (1, 2) else
+                        "; LS-DYNA reads it under SOFT 1 / 2 only)"))
+    if not items:
+        return
+    if not stiff:
+        state.warn(
+            f"*{kw} {c.inter_id}: optional Card A / C {'; '.join(items)} - "
+            f"not converted: /INTER/{target} has no search-depth cell (2022 "
+            f"Reference Guide /INTER/{target} card format). No byte moves.")
+        return
+    if target == "TYPE25":
+        why = ("the /INTER/TYPE25 k2rad writes keeps Istf 4, the minimum of "
+               "the two material stiffnesses: its mass / time-step stiffness "
+               "(Istf 7, IPSTIF, STFAC_MDT, DTSTIF) is not written - the "
+               "IPSTIF, STFAC_MDT and DTSTIF columns of that card are the "
+               "radioss2026 layout, which /BEGIN 2022 does not read "
+               "(radioss2022/INTER/inter_type25.cfg:509/516/525 end card 1 "
+               "at Iedge, card 3 at Edge_angle, card 6 in a 30-column "
+               "blank)")
+    else:
+        why = (f"/INTER/{target} has no mass / time-step stiffness: its "
+               "penalty is the material stiffness, Istf 2-5 combining the "
+               "main and secondary sides (2 the average, 3 the maximum, 4 the "
+               "minimum, Istf 5 the two in series, i7cor3.F:251-301)")
+    state.warn(
+        f"*{kw} {c.inter_id}: optional Card A / C {'; '.join(items)} - not "
+        f"converted: {why}. Card-3 SFS > 1 (the Stfac k2rad writes) is the "
+        ".k lever that stiffens this contact. No byte moves.")
+
+
+#: /INTER/TYPE25 Iedge 1: "The secondary and the main edges are the external
+#: border edges of shell segments. There is no edge contact for solid
+#: elements." (2022 Reference Guide /INTER/TYPE25, p.364).
+_TYPE25_IEDGE_SHELL_BORDER = 1
+
+#: What AUTOMATIC_GENERAL checks beyond AUTOMATIC_SINGLE_SURFACE (Vol I R17
+#: p.11-123 General Remark 2).
+_GENERAL_EDGES_REMARK = (
+    "*CONTACT_AUTOMATIC_GENERAL checks for penetration along the entire "
+    "length of the exterior (unshared) shell edges and treats beam-to-beam "
+    "contact over the whole beam length (Vol I R17 p.11-123 General Remark "
+    "2)")
+
+
+def _is_general_card(kw: str) -> bool:
+    return _contact_base_spelling(kw) == "AUTOMATIC_GENERAL"
+
+
+def _general_shell_edges_iedge(state: ConversionState, c: ContactAutoSingle,
+                               kw: str, pids: Iterable[int]) -> int:
+    """CardStack K-10 (``--general-shell-edges``, opt-in): the Iedge of the
+    SSID = 0 explicit /INTER/TYPE25 self-contact of *c* - 1, the shells'
+    external border edges, for an ordinary *CONTACT_AUTOMATIC_GENERAL when
+    the flag is on and the all-parts surface (*pids*) holds a shell; else
+    1000 (none, today's cell). The beams AUTOMATIC_GENERAL also treats take
+    no part in a TYPE25 (a /SURF holds no 1-D element) and are named; its
+    spot-weld (*SECTION_BEAM ELFORM 9) beams are counted apart, because
+    AUTOMATIC_GENERAL leaves them out unless Card E CPARM8 is 2 (Vol I R17
+    p.11-114; the fix round of the K-10 review)."""
+    if not state.options.general_shell_edges or not _is_general_card(kw):
+        return _TYPE25_IEDGE_NONE
+    pidset = set(pids)
+    if not any(e.pid in pidset for e in state.shell_elems):
+        state.warn(
+            f"*{kw} {c.inter_id}: --general-shell-edges: the all-parts "
+            f"/INTER/TYPE25/{c.inter_id} holds no shell element, so there is "
+            "no shell border edge for Iedge 1 to add - Iedge 1000 (no edge "
+            "contact) is kept.")
+        return _TYPE25_IEDGE_NONE
+    nweld = sum(1 for b in state.beam_elems
+                if (p := state.parts.get(b.pid)) is not None
+                and (sec := state.sec_beams.get(p.secid)) is not None
+                and sec.elform == 9)
+    nbeam = len(state.beam_elems) - nweld
+    state.warn(
+        f"*{kw} {c.inter_id}: --general-shell-edges -> /INTER/TYPE25/"
+        f"{c.inter_id} Iedge 1: the secondary and main edges are the external "
+        "border edges of the shell segments (2022 Reference Guide "
+        "/INTER/TYPE25 Iedge 1; no edge contact for solids), the counterpart "
+        f"of what Iedge 1000 leaves out: {_GENERAL_EDGES_REMARK}. The starter "
+        "counts the initial edge-to-edge penetrations it finds in a WARNING "
+        "1633 (Inacti 5, inint3.F:2368)."
+        + (f" The deck's {nbeam} beam element{'s' if nbeam > 1 else ''} "
+           f"(*ELEMENT_BEAM) take{'' if nbeam > 1 else 's'} no part in this "
+           "TYPE25 - a /SURF holds no 1-D element - so their beam-to-beam "
+           "contact is not converted." if nbeam else "")
+        + ((f" The deck's {nweld} spot-weld beams (*SECTION_BEAM ELFORM 9) "
+            "are" if nweld > 1 else
+            " The deck's spot-weld beam (*SECTION_BEAM ELFORM 9) is")
+           + " no loss at the default: AUTOMATIC_GENERAL leaves spot-weld "
+           "beams out unless Card E CPARM8 is 2 (Vol I R17 p.11-114)."
+           if nweld else ""))
+    return _TYPE25_IEDGE_SHELL_BORDER
+
+
+def _warn_general_shell_edges_unreached(state: ConversionState,
+                                        c: ContactAutoSingle, kw: str,
+                                        route: str) -> None:
+    """``--general-shell-edges`` on an AUTOMATIC_GENERAL card it does not
+    write (SSID != 0, or an implicit deck): say so (CardStack K-10; the plan
+    keeps such a card on its /INTER/TYPE7, no TYPE19)."""
+    if state.options.general_shell_edges and _is_general_card(kw):
+        state.warn(
+            f"*{kw} {c.inter_id}: --general-shell-edges does not reach this "
+            f"card - it acts on the SSID = 0 explicit /INTER/TYPE25 "
+            f"self-contact only, and this one is {route}, a node-to-segment "
+            "contact with no edge treatment.")
+
+
+#: DEPTH values for which a SOFT 2 contact ignores SHLEDG and SRNDE and
+#: behaves like SHLEDG 1, square edges flush with the nodes (Vol I R17
+#: p.11-112, p.11-117 Remark 3).
+_SOFT2_FLUSH_DEPTHS = (23, 33, 35, 55)
+
+#: /INTER/TYPE25 Ishape 2, "round gap" (2022 Reference Guide p.366).
+_TYPE25_ISHAPE_ROUND = 2
+
+#: what an edge cap of radius t/2 that extends the shell reaches, against
+#: the TYPE25 gap - shared by the SRNDE 0 note and the SHLEDG 2 note
+_EDGE_CAP_REACH = (
+    "lets a node meet a free edge up to (t_s + t_m)/2 beyond it, while the "
+    "TYPE25 gap never reaches more than the secondary node's own gap, "
+    "t_s/2, beyond the main surface's external border (2022 Reference Guide "
+    "/INTER/TYPE25 comment 4); the card keeps Ishape 0 (= 1, a square gap "
+    "there)")
+
+_SRNDE_REACH_HEAD = (
+    "LS-DYNA's default free-edge treatment (Card E SRNDE 0: a cylindrical "
+    "cap of radius t/2 along each exterior shell edge, Vol I R17 p.11-116 "
+    "Remark 3) " + _EDGE_CAP_REACH)
+
+_SRNDE_REACH_NOTE = (
+    _SRNDE_REACH_HEAD + ", and SRNDE 1 - rounded, not extended - writes "
+    "Ishape 2 (round). No byte moves")
+
+#: the same note under --no-srnde-ishape, where SRNDE 1 keeps Ishape 0 too
+#: (the fix round of the wave-D review: it said Ishape 2 either way)
+_SRNDE_REACH_NOTE_NO_ISHAPE = (
+    _SRNDE_REACH_HEAD + ", and under --no-srnde-ishape SRNDE 1 - rounded, "
+    "not extended - keeps Ishape 0 too (the default writes it as Ishape 2, "
+    "round). No byte moves")
+
+
+def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
+                   pids: Iterable[int]) -> int:
+    """CardStack K-16: the /INTER/TYPE25 Ishape cell from Card E SRNDE (Vol
+    I R17 p.11-115, Remark 3 p.11-116/117): SRNDE 1 -> 2 (round); 0 / blank
+    keeps 0 (today's cell, the /DEFAULT square gap) and, where the
+    interface's parts (*pids*) hold a shell, notes LS-DYNA's longer
+    free-edge reach; SRNDE 2 (square edges) keeps 0 silently. For SOFT 2
+    a non-zero SHLEDG (Card D) or DEPTH 23/33/35/55 takes precedence and
+    SRNDE is not used (p.11-117); a Mortar card reads none of Cards D-G
+    ("Shell edges are always flat", Table 11-1 p.11-135). SRNDE acts on
+    exterior SHELL edges ("non-extended exterior shell segment edges",
+    p.11-114), so with no shell in *pids* SRNDE 1 keeps 0 too, said (a solid
+    segment has no contact gap, 2022 Reference Guide /INTER/TYPE25; the
+    fix round of the K-16 review). ``--no-srnde-ishape``
+    (``ConvertOptions.srnde_ishape`` False, the user's decision 8 of
+    2026-11-01) keeps 0 where SRNDE 1 would write 2 - the cell of the code
+    before K-16 - and names the dropped SRNDE; the SRNDE 0 note then says
+    that SRNDE 1 keeps Ishape 0 too (:data:`_SRNDE_REACH_NOTE_NO_ISHAPE`)."""
+    if "MORTAR" in _contact_base_spelling(kw):
+        return 0
+    has_shell = _pids_shell_solid(state, pids)[0]
+    if c.soft == 2 and (c.shledg or c.depth in _SOFT2_FLUSH_DEPTHS):
+        rule = (f"SHLEDG {c.shledg} (Card D)" if c.shledg
+                else f"DEPTH {c.depth}")
+        if c.srnde:
+            state.warn(
+                f"*{kw} {inter_id}: Card E SRNDE {c.srnde} is not used: with "
+                f"SOFT 2, {rule} takes precedence (Vol I R17 p.11-117 Remark "
+                f"3) - /INTER/TYPE25/{inter_id} keeps Ishape 0 (square).")
+        if c.shledg == 2 and has_shell:
+            state.warn(f"*{kw} {inter_id}: SHLEDG 2 rounds the shell edges "
+                       "with a radius of t/2 and extends them outward by it "
+                       "(Vol I R17 p.11-112), which " + _EDGE_CAP_REACH
+                       + " - SHLEDG takes precedence over Card E SRNDE "
+                       "(p.11-117). No byte moves.")
+        return 0
+    if c.srnde == 1 and not has_shell:
+        state.warn(
+            f"*{kw} {inter_id}: Card E SRNDE 1 (exterior shell edges rounded, "
+            "not extended, Vol I R17 p.11-114/116) has nothing to act on: "
+            f"/INTER/TYPE25/{inter_id} holds no shell, and a solid segment "
+            "has no contact gap (2022 Reference Guide /INTER/TYPE25), so the "
+            "card keeps Ishape 0. No byte moves.")
+        return 0
+    if c.srnde == 1:
+        if not state.options.srnde_ishape:
+            state.warn(
+                f"*{kw} {inter_id}: Card E SRNDE 1 is not converted "
+                f"(--no-srnde-ishape): /INTER/TYPE25/{inter_id} keeps Ishape "
+                "0 (square), where the default writes SRNDE 1 - exterior "
+                "shell edges rounded, not extended (Vol I R17 p.11-115/116 "
+                "Remark 3) - as Ishape 2 (round) (CardStack K-16).")
+            return 0
+        state.warn(
+            f"*{kw} {inter_id}: Card E SRNDE 1 (exterior shell edges rounded, "
+            "not extended, Vol I R17 p.11-115/116 Remark 3) -> "
+            f"/INTER/TYPE25/{inter_id} Ishape 2: a round gap along the "
+            "surface's external border (2022 Reference Guide /INTER/TYPE25 "
+            "Ishape), reaching the secondary node's t_s/2 past it.")
+        return _TYPE25_ISHAPE_ROUND
+    if not c.srnde and has_shell:
+        state.warn(f"*{kw} {inter_id}: " + (
+            _SRNDE_REACH_NOTE if state.options.srnde_ishape
+            else _SRNDE_REACH_NOTE_NO_ISHAPE) + ".")
+    return 0
+
+
+def _warn_card_e_type7(state: ConversionState, c, kw: str,
+                       viss: float) -> None:
+    """CardStack K-16: a Card E SRNDE on an /INTER/TYPE7 route is named -
+    TYPE7 has no free-edge shape cell (the TYPE25 routes map SRNDE 1 to
+    Ishape 2, or keep Ishape 0 under ``--no-srnde-ishape``, and the line
+    says which) - and so is an ICOR that makes the Card-2 VDC behind the
+    written VisS *viss* a coefficient of restitution
+    (:func:`_warn_icor_damping`). Not on a Mortar card, which reads no Card
+    E."""
+    if c.srnde and "MORTAR" not in _contact_base_spelling(kw):
+        state.warn(
+            f"*{kw} {c.inter_id}: Card E SRNDE {c.srnde} is not converted: "
+            "/INTER/TYPE7 has no free-edge shape cell (the /INTER/TYPE25 "
+            "routes write SRNDE 1 as Ishape 2"
+            + ("" if state.options.srnde_ishape else
+               " by default, and keep Ishape 0 under --no-srnde-ishape")
+            + ").")
+    _warn_icor_damping(state, c, kw, "TYPE7", "VisS", viss)
+
+
+#: the spellings Card E ICOR acts on under SOFT 0 / 1 - "When SOFT = 0 or 1,
+#: ICOR applies to AUTOMATIC_NODES_TO_SURFACE, AUTOMATIC_SURFACE_TO_SURFACE
+#: and AUTOMATIC_SINGLE_SURFACE. ICOR applies to all SOFT = 2 contacts"
+#: (Vol I R17 p.11-115)
+_ICOR_SOFT01_BASES = frozenset({"AUTOMATIC_NODES_TO_SURFACE",
+                                "AUTOMATIC_SURFACE_TO_SURFACE",
+                                "AUTOMATIC_SINGLE_SURFACE"})
+
+
+def _icor_applies(c, kw: str) -> bool:
+    """Does Card E ICOR turn this card's Card-2 VDC into a coefficient of
+    restitution (Vol I R17 p.11-115)? Not on a Mortar card (no Card E,
+    Table 11-1)."""
+    base = _contact_base_spelling(kw)
+    if not c.icor or "MORTAR" in base:
+        return False
+    return c.soft == 2 or base in _ICOR_SOFT01_BASES
+
+
+def _warn_icor_damping(state: ConversionState, c, kw: str, target: str,
+                       cell: str, value: float) -> None:
+    """Card E ICOR != 0 makes Card-2 VDC a coefficient of restitution in
+    percent (Vol I R17 p.11-115), where the routes that map VDC write it as
+    the damping cell *cell* = *value* of /INTER/*target* (VDC / 100, a
+    fraction of critical damping): named, not converted - no Radioss
+    interface has a restitution cell. A VDC of 0 says nothing, as on the
+    SSID = 0 TYPE25 route (:func:`_warn_type25_self_vdc`)."""
+    if not c.vdc or not _icor_applies(c, kw):
+        return
+    state.warn(
+        f"*{kw} {c.inter_id}: Card E ICOR {c.icor} makes Card-2 VDC "
+        f"{c.vdc:g} a coefficient of restitution in percent (Vol I R17 "
+        "p.11-115, meant for unconstrained rigid bodies); "
+        f"/INTER/{target}/{c.inter_id} has no restitution cell, and the "
+        f"{cell} {value:g} k2rad writes from VDC is the normal contact "
+        "damping, a fraction of critical damping - not the same quantity. "
+        "No byte moves.")
+
+
+def _warn_type25_self_gap_inputs(state: ConversionState,
+                                 c: ContactAutoSingle, kw: str) -> None:
+    """CardStack K-13: on the SSID = 0 /INTER/TYPE25 route a stated Card-3
+    SST / MST / SFST (``SAST`` / ``SBST`` / ``SFSAT``, Vol I R17
+    p.11-33/34) is not a gap input - TYPE25 has no Gapmin and reads its gap
+    per side from the elements - so the deck's value is named with the two
+    levers that DO reach that gap. Text only: no byte moves."""
+    stated = []
+    if c.sst:
+        stated.append(f"SST = {c.sst:g}")
+    if c.mst:
+        stated.append(f"MST = {c.mst:g}")
+    if c.sfst not in (0.0, 1.0):
+        stated.append(f"SFST = {c.sfst:g}")
+    if not stated:
+        return
+    state.warn(
+        f"*{kw} {c.inter_id}: Card-3 {', '.join(stated)} - SST / MST / SFST "
+        f"are not TYPE25 gap inputs. The all-parts /INTER/TYPE25/{c.inter_id} "
+        "takes each side's gap from its own elements, min(Gap_scale x t/2, "
+        "Gap_max) (i25sti3.F:211-229, 312-317; written Gap_scale 1.0 and "
+        "Gap_max 1e30, a solid gives 0), so a shell of thickness t engages "
+        "t/2 from its mid-plane whatever these cells say. The .k lever is "
+        "*PART_CONTACT OPTT, the part's contact thickness, which k2rad writes "
+        "as the /PART Thick column the TYPE25 gap reads before the element "
+        "thickness (i25sti3.F:217-218): OPTT 0.10 on 0.35 cards gives the "
+        "0.05 per side of CardStack run 27's Gap_max 0.05 - MEASURED on a "
+        "two-card drop probe, byte-identical decoded T01 channels. SFST's "
+        "TYPE25 counterpart is Gap_scale, written 1.0 here - edit it by hand "
+        "for a scaled gap. No byte of this card moves.")
 
 
 #: /INTER/TYPE25 Idel. 2 = "when A 4-node shell, 3-node shell or solid element
@@ -3727,7 +5605,8 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
                        tstop: float = 0.0, inacti: int = 5,
                        viss: float = 0.05, fric_id: int = 0,
                        irem_i2: int = 0,
-                       thermal: Optional["_ThermalCells"] = None) -> List[str]:
+                       thermal: Optional["_ThermalCells"] = None,
+                       ishape: int = 0) -> List[str]:
     # ``thermal`` is FORWARD-LOOKING: no caller passes it today. Only
     # ``contacts_surf2surf`` records can carry a ContactThermal and they are
     # emitted through _emit_inter_type7 exclusively, so the TYPE25 branch of
@@ -3774,6 +5653,10 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
     contact energy; with ``Irem_i2 = 3`` the descent was arrested and reversed
     (+0.0936 -> +0.715 mm) and the contact energy was 0.0334 mJ. The card is
     legal, echoes correctly and does NOTHING at the default.
+
+    ``ishape`` (card 3 col 51-60; default 0 = /DEFAULT = 1, square, today's
+    cell) is 2, round, for a Card E SRNDE 1 (CardStack K-16,
+    :func:`_type25_ishape`).
     """
     return [
         f"/INTER/TYPE25/{inter_id}",
@@ -3788,7 +5671,7 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
         "                   0                   0",
         "#              Stmin               Stmax     Igap0    Ishape"
         "          Edge_angle",
-        "                   0                   0         0         0"
+        f"                   0                   0         0{_i(ishape)}"
         "                   0",
         "#              Stfac                Fric           Tpressfit"
         "              Tstart               Tstop",
@@ -3812,7 +5695,8 @@ def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
 def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
                        fric: float, inacti: int = 6, viss: float = 0.0,
                        visf: float = 0.0, gapmin: float = 0.0,
-                       stfac: float = 0.0, fric_id: int = 0) -> List[str]:
+                       stfac: float = 0.0, fric_id: int = 0,
+                       tstart: float = 0.0, tstop: float = 0.0) -> List[str]:
     """/INTER/TYPE11 edge-to-edge (line) contact (FORMAT radioss2020).
 
     ``line_ids``/``line_idm`` are /LINE group ids (NOT /SURF or /GRNOD). A
@@ -3823,6 +5707,9 @@ def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
     ``radioss2020/INTER/inter_type11.cfg:409-410`` is 90 blank columns then
     ``%10d`` — which is written only when ``fric_id`` is set, so every
     table-free deck stays byte-identical.
+
+    ``tstart`` / ``tstop`` (default 0 / 0, today's cells) carry the Card-2
+    BT / DT (CardStack K-11, :func:`_birth_death`).
     """
     lines = [
         f"/INTER/TYPE11/{inter_id}",
@@ -3832,7 +5719,7 @@ def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
         "#              Stmin               Stmax          %mesh_size               dtmin     Iform   sens_ID",
         "                   0                   0                   0                   0         0         0",
         "#              Stfac                Fric              GAPmin              Tstart               Tstop",
-        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VIS_S               VIS_F              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
     ]
@@ -3849,7 +5736,8 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
                        fric: float, inacti: int = 6, viss: float = 0.0,
                        visf: float = 0.0, gapmin: float = 0.0,
                        stfac: float = 0.0, fric_id: int = 0,
-                       istf: int = 2, ibag: int = 0, idel: int = 1) -> List[str]:
+                       istf: int = 2, ibag: int = 0, idel: int = 1,
+                       tstart: float = 0.0, tstop: float = 0.0) -> List[str]:
     """/INTER/TYPE19 combined surface + edge contact (FORMAT radioss2021).
 
     Both entities are /SURF ids; the starter auto-generates the child TYPE7
@@ -3881,6 +5769,9 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
     columns are written only when ``fric_id`` is set, so a table-free deck
     stays byte-identical. The hm_reader carries the binding onto every child
     interface the TYPE19 expands into (``GlobalModelSdi.cpp:1247/1341/1432``).
+
+    ``tstart`` / ``tstop`` (default 0 / 0, today's cells) carry the Card-2
+    BT / DT (CardStack K-11, :func:`_birth_death`).
     """
     fric_card = "         0         0                   0         2         0"
     if fric_id:
@@ -3896,7 +5787,7 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap  Irem_i2",
         "                   0                   0                   0                   0         0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
-        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VISs                VISf              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         ("#    Ifric    Ifiltr               Xfreq     Iform   sens_ID"
@@ -3977,6 +5868,40 @@ def _general_line_group(state: ConversionState, sid: int, styp: int,
     return line_id
 
 
+def _general_route_gap(c) -> Tuple[str, str, str]:
+    """``(label, target, gap rule)`` of a ``state.contacts_general`` record -
+    what ``--inter-gapmin`` and ``--auto-gapmin``, which do not reach these
+    routes, say of them (CardStack K-05). Neutral about emission: the
+    ``--inter-gapmin`` report runs before :func:`_make_general_interfaces`
+    has written anything.
+
+    The SOFT -7 TYPE7 is Igap 2, a variable gap max(Gapmin, g_s + g_m) from
+    the elements (2022 Reference Guide /INTER/TYPE7 Igap 2; g = t/2 of a
+    shell, a ``*PART_CONTACT`` OPTT - the /PART Thick column - first,
+    ``i7sti3.F:230-250`` / ``494-501``), so Card-3 SST / MST only set its
+    Gapmin floor; the -11 / -19 cards are Igap 0, a constant gap = Gapmin;
+    the airbag flavour's Gapmin is dyna2rad's single-sided |SST|/2 x SFST."""
+    kw = c.keyword or "CONTACT_AUTOMATIC_GENERAL"
+    tname = {-11: "TYPE11", -19: "TYPE19"}.get(c.soft, "TYPE7")
+    label = (f"*{kw}" if kw == "CONTACT_SINGLE_EDGE" else
+             f"SOFT {c.soft} *{kw}")
+    if c.airbag:
+        rule = ("with a constant gap, Gapmin = |SST|/2 x SFST (the airbag "
+                "card is single-sided: dyna2rad's formula, "
+                "convertcontacts.cxx:659-660)")
+    elif c.soft == -7:
+        rule = ("with Istf 2, Igap 2: a variable gap, max(Gapmin, t_s/2 + "
+                "t_m/2) from the elements' thicknesses (a *PART_CONTACT OPTT "
+                "first, i7sti3.F:230-250 / 494-501), so the Card-3 SST/MST "
+                "set only its Gapmin floor")
+    else:
+        rule = ("with a constant gap, Gapmin from the Card-3 SST/MST: |SST| "
+                "on a self-contact of shells only (CardStack K-12; "
+                "--no-single-surface-sst-gap keeps the old value), else "
+                "(|SST| + |MST|)/2")
+    return label, tname, rule
+
+
 def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     """*CONTACT_AUTOMATIC_GENERAL with a SOFT sentinel → /INTER/TYPE7|11|19.
 
@@ -3985,8 +5910,12 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
     surface path. Gapmin comes from the Card-3 SST/MST (``_sst_mst_to_gapmin``),
     Inacti from IGNORE (``_ignore_to_inacti``), VisS from VDC, Stfac from SFS,
     and scalar Fric from FS — the same plumbing as the TYPE7/TYPE25 path.
-    (``--inter-gapmin`` / ``--auto-gapmin`` do NOT reach these sentinel-routed
-    interfaces; their engagement gap is the Card-3 SST/MST only.)
+    ``--inter-gapmin`` / ``--auto-gapmin`` do NOT reach these sentinel-routed
+    interfaces (the report names each one's route, :func:`_general_route_gap`,
+    CardStack K-05): the SOFT -7 TYPE7's gap is element-derived - Igap 2, a
+    variable gap max(Gapmin, t_s/2 + t_m/2) from the elements' thicknesses,
+    so the Card-3 SST/MST set only its Gapmin floor - and the -11 / -19 ones
+    are a constant gap, the Gapmin from Card-3 SST/MST.
 
     Deliberate deviations from dyna2rad, all consistent with k2rad's existing
     (solver-validated) TYPE7 path and harmless for the common self-contact deck:
@@ -3994,9 +5923,15 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         scale-weighted fabs(SST*SFST + MST*SFMT)/2. These coincide whenever the
         Card-3 scale factors are blank/unit and SST/MST share a sign (the usual
         case); they differ only for non-unit SFST/SFMT or mixed-sign thicknesses.
+        A self-mirrored -11 / -19 card over shells only takes |SST| instead
+        (``_single_surface_sst_gapmin``, CardStack K-12, default ON).
       * Inacti via ``_ignore_to_inacti`` (=5 explicit) rather than dyna2rad's
-        fixed 6 — Inacti=5 is the validated k2rad convention (node-moving
-        Inacti=3/6 seg-faulted the engine on rigid-body secondary nodes).
+        fixed 6 — Inacti=5 is the validated k2rad convention. The node-moving
+        values are Inacti 3 / 4 (i7pwr3.F:208-243), and the engine seg-fault
+        on rigid-body secondary nodes was Inacti 3's (git ae17cbf); 6 moves
+        no node, it adds 5 % of the remaining gap to Inacti 5's reduction
+        (i7pwr3.F:250-257) and is written per interface with
+        ``--inter-inacti ID=6`` (CardStack K-06).
       * Scalar Coulomb Fric = FS with Ifric=0 (as the whole k2rad TYPE7 family),
         not dyna2rad's FD*FSF + C5/C6 decay + Ifric=2 for the -7/-19 routes;
         identical when FS==FD.
@@ -4066,17 +6001,30 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "Gapmin exceeds the physical clearance; ignore=1/2 (and "
                     "any explicit deck) maps to Inacti=5, which shrinks the "
                     "gap back to the clearance.")
+        elif self_contact and c.soft in (-11, -19):
+            # CardStack K-12: the self-mirrored -11 / -19 cards are Igap-0
+            # single-surface routes - |SST| on a set of shells only
+            gapmin = _single_surface_sst_gapmin(
+                state, c.inter_id, c.sst, c.mst,
+                _contact_master_pids(state, c.ssid, c.sstyp), tname)
         else:
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)
-        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+            if self_contact and c.soft == -7:
+                # CardStack K-12: Igap 2 - SST below t never acts
+                _warn_soft7_sst_below_t(
+                    state, c, gapmin,
+                    _contact_master_pids(state, c.ssid, c.sstyp))
+        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin,
+                                   target=tname)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
-        stfac = _stfac_for(state, c.sfs, c.inter_id)
+        stfac = _stfac_for(state, c.sfs, c.inter_id, tname)
         # All three sentinel routes can hold a /FRICTION binding: TYPE7,
         # TYPE11 and TYPE19 each carry fric_ID in cols 91-100 of their last
         # card at /BEGIN 2022 — see _FRIC_ID_TYPES for the CFG lines.
         fric, fric_id = _contact_friction(
             state, c.fs, c.fd, c.inter_id, "CONTACT_AUTOMATIC_GENERAL", tname)
+        gkw = c.keyword or "CONTACT_AUTOMATIC_GENERAL"
 
         if c.soft == -7:
             # The all-rigid-SSID rule reaches this sentinel route too (measured
@@ -4111,9 +6059,18 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                 continue
             _warn_bolt_rigid_kept(state, "CONTACT_AUTOMATIC_GENERAL",
                                   c.inter_id, sec7_sid, sec7_styp)
+            # CardStack K-11: Card-2 BT / DT -> Tstart / Tstop
+            tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, gkw,
+                                         tname)
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                       istf=2, igap=2, fric_id=fric_id, state=state)
+                                       istf=2, igap=2, fric_id=fric_id, state=state,
+                                       tstart=tstart, tstop=tstop)
+            _warn_stmin_floor(
+                state, c.inter_id,
+                _contact_master_pids(state, main7_sid, main7_styp),
+                _secondary_pids(state, sec7_sid, sec7_styp, rigid_nodes, keep7),
+                stfac, 2, c.title)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
                 f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
@@ -4138,9 +6095,12 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             # bag that can tear) and Ibag=1 (close the vent holes where the
             # fabric self-contacts). dyna2rad sets all three,
             # convertcontacts.cxx:659-664.
+            tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, gkw,
+                                         tname)                 # K-11
             lines += _emit_inter_type19(
                 c.inter_id, c.title, surf_s, surf_m, fric, inacti, viss=viss,
                 gapmin=gapmin, stfac=stfac, fric_id=fric_id,
+                tstart=tstart, tstop=tstop,
                 **({"istf": 4, "idel": 2, "ibag": 1 if has_monvol else 0}
                    if c.airbag else {}))
             kw = c.keyword or "CONTACT_AUTOMATIC_GENERAL"
@@ -4174,9 +6134,12 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "or at a part / part set carrying shell or solid "
                     "elements.")
                 continue
+            tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, gkw,
+                                         tname)                 # K-11
             lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, fric,
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                        fric_id=fric_id)
+                                        fric_id=fric_id, tstart=tstart,
+                                        tstop=tstop)
             state.warn(
                 # *CONTACT_SINGLE_EDGE reaches this branch too (it files a
                 # soft = -11 record, so the ONE validated /LINE + TYPE11
@@ -4423,6 +6386,7 @@ def _type25_stfac(state: ConversionState, c) -> float:
     ``stfac = min(lsdSFS, lsdSFM)`` after ``:410-414`` resets 0 to 1).
     ``--soften-stfac``, when given, overrides it as everywhere else."""
     if state.options.soften_stfac is not None:
+        _record_soften_reach(state, "TYPE25", c.inter_id)
         return state.options.soften_stfac
     sfs = c.sfs if c.sfs != 0.0 else 1.0
     sfm = c.sfm if c.sfm != 0.0 else 1.0
@@ -4453,6 +6417,17 @@ def _type25_istf_iedge(state: ConversionState, c):
     90), so a SOFT=2 contact loses the segment-based penalty stiffness and is
     warned about. Istf: 2 = average of the two sides' stiffness, 4 = minimum
     (``radioss2026/INTER/inter_type25.cfg:208-216``).
+
+    The SOFT 2 Iedge 22 is GATED (CardStack K-10), the one deliberate break
+    with dyna2rad here: LS-DYNA's SOFT 2 checks edge-to-edge penetration
+    only with Card A DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 ("By
+    default, we do not enable edge treatment for SOFT = 2", Vol I R17
+    p.11-94; DEPTH p.11-97, SBOPT p.11-91), so any other DEPTH writes Iedge
+    1000; Istf 2 stays. ``--no-soft2-iedge-gate``
+    (``ConvertOptions.soft2_iedge_gate`` False, the user's decision 8 of
+    2026-11-01) writes Iedge 22 for every SOFT 2 card of this family again,
+    dyna2rad's rule and k2rad's before K-10, with a line where the gate
+    would have held it back.
     """
     base = (c.keyword or "").replace("_MPP", "")
     full_soft_rule = ("ERODING_SURFACE_TO_SURFACE" in base
@@ -4461,13 +6436,39 @@ def _type25_istf_iedge(state: ConversionState, c):
     if full_soft_rule:
         if c.soft == 2:
             istf = 2
-            iedge = _TYPE25_IEDGE_ALL_SOLID_AND_SHELL
+            gate_open = c.depth in _SOFT2_EDGE_DEPTHS or c.sbopt == 1
+            edges = gate_open or not state.options.soft2_iedge_gate
+            if edges:
+                iedge = _TYPE25_IEDGE_ALL_SOLID_AND_SHELL
+            gate = (f"DEPTH {c.depth}" if c.depth in _SOFT2_EDGE_DEPTHS
+                    else "SBOPT 1" if gate_open else
+                    f"neither (DEPTH {c.depth or 'blank = 2'}, SBOPT "
+                    f"{c.sbopt or 'blank = 2'})")
             state.warn(
                 f"*{c.keyword} {c.inter_id}: optional-Card-A SOFT=2 "
                 "(segment-based penalty) -> /INTER/TYPE25 Istf=2 with "
-                f"Iedge={iedge} (secondary and main edges = all external solid "
-                "segments + all shell segments), matching dyna2rad "
-                "convertcontacts.cxx:593-611. Its companion IPSTIF=1 has NO "
+                + (f"Iedge={iedge} (secondary and main edges = all external "
+                   "solid segments + all shell segments): LS-DYNA's SOFT 2 "
+                   f"checks edge-to-edge penetration here ({gate}, Vol I R17 "
+                   "p.11-91/97), as dyna2rad convertcontacts.cxx:593-611 "
+                   "writes it for every SOFT 2 card."
+                   if gate_open else
+                   f"Iedge={iedge} (secondary and main edges = all external "
+                   "solid segments + all shell segments) under "
+                   "--no-soft2-iedge-gate, as dyna2rad "
+                   "convertcontacts.cxx:593-611 writes it for every SOFT 2 "
+                   "card - although LS-DYNA's SOFT 2 checks edge-to-edge "
+                   "penetration only with DEPTH 5/15/25/35/45/55 or SBOPT 1 "
+                   f"(Vol I R17 p.11-91/94/97) and this card has {gate}, so "
+                   "the default writes Iedge 1000 (CardStack K-10)."
+                   if edges else
+                   f"Iedge={iedge} (no edge-to-edge contact): LS-DYNA's SOFT "
+                   "2 checks edge-to-edge penetration only with DEPTH "
+                   "5/15/25/35/45/55 or SBOPT 1 (Vol I R17 p.11-91/94/97), "
+                   f"and this card has {gate} - where dyna2rad "
+                   "(convertcontacts.cxx:593-611) writes Iedge 22 for every "
+                   "SOFT 2 card.")
+                + " Its companion IPSTIF=1 has NO "
                 "column in the /BEGIN 2022 TYPE25 format (card 1 ends at Iedge, "
                 "col 90) and is dropped — the contact uses the ordinary nodal "
                 "penalty stiffness.")
@@ -4779,14 +6780,15 @@ def _routed_stub_clause(state: ConversionState) -> str:
 def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
                            surf2: int, fric: float, fric_id: int,
                            inacti: int, viss: float, stfac: float,
-                           tstop: float) -> List[str]:
+                           tstart: float, tstop: float) -> List[str]:
     """round 9, A2: the ONE-WAY /INTER/TYPE7 of an implicit node-to-surface
     contact (see :func:`n2s_routed`), on the groups the TYPE25 route resolved
     (Slav = the SSID node group, Mast = the MSID surface), with k2rad's TYPE7
     cells: Istf 4, Igap 0 and Gapmin 0 (the starter's default gap - only an
     explicit ``--inter-gapmin`` writes one, W-A2-gap), Fpenmax from Inacti,
-    Stfac from SFS, Fric = FS x FSF, VisS from VDC, Tstart = BT, Tstop = DT.
-    Recorded in ``state.n2s_type7_ids``."""
+    Stfac from SFS, Fric = FS x FSF, VisS from VDC, Tstart / Tstop from BT /
+    DT by :func:`_birth_death`'s rules (CardStack K-11: BT < 0 -> 0, DT < 0
+    -> |DT|, DT = -9999 -> 0 / 0). Recorded in ``state.n2s_type7_ids``."""
     gapmin = _gapmin_override(state, c.inter_id, 0.0,
                               dict(state.options.inter_gapmin))
     if gapmin > 0.0:
@@ -4798,7 +6800,7 @@ def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
             "default holds; doorbeam with 0.0735: IE END -96.57 %).")
     lines = _emit_inter_type7(c.inter_id, c.title, grnod, surf2, fric, inacti,
                               viss=viss, gapmin=gapmin, stfac=stfac,
-                              fric_id=fric_id, state=state, tstart=c.bt,
+                              fric_id=fric_id, state=state, tstart=tstart,
                               tstop=tstop)
     state.n2s_type7_ids.add(c.inter_id)
     soft = (" Its SOFT=2 (segment-based penalty) has no TYPE7 counterpart and "
@@ -4809,7 +6811,7 @@ def _emit_routed_n2s_type7(state: ConversionState, c, kw: str, grnod: int,
         f"/INTER/TYPE7/{c.inter_id} (Slav = the SSID node group "
         f"/GRNOD/{grnod}, Mast = the MSID surface /SURF/{surf2}; Istf 4, Igap "
         f"0 with the starter's default gap, Inacti {inacti}, Fpenmax "
-        f"{fpen:g}, Fric {fric:g}, Tstart {c.bt:g} / Tstop {tstop:g}) instead "
+        f"{fpen:g}, Fric {fric:g}, Tstart {tstart:g} / Tstop {tstop:g}) instead "
         "of the /INTER/TYPE25 an explicit deck gets: OpenRadioss builds no "
         "implicit contact stiffness for a TYPE25 (imp_int_k.F:111-200; "
         "ind_glob_k.F:4601-4605 prints MESSAGE 232 'INTERFACE TYPE 25 IS NOT "
@@ -4894,16 +6896,17 @@ def _make_type25_interfaces(state: ConversionState,
                 "FS/FD/DC into a *DEFINE_FRICTION table and reference it with "
                 "FS=-2 to get the decay law (/FRICTION Ifric=2, exact).")
         _warn_eroding_smp_friction(state, c, fric, fric_id)
-        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
+        # CardStack K-06: --inter-inacti 6 is gated HERE, on the route - the
+        # routed implicit node-to-surface contact is a TYPE7 and takes it,
+        # every other record of this section is a TYPE25 and refuses it
+        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0,
+                                   target="TYPE7" if routed else "TYPE25")
         if routed:
             viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)
             stfac = _stfac_for(state, c.sfs, c.inter_id)
         else:
             viss = _type25_viss(c.vdc, state, c.inter_id, kw)
             stfac = _type25_stfac(state, c)
-        # LS-DYNA's blank DT is 1e20; TYPE25 turns a Tstop of 0 back into EP30
-        # (hm_read_inter_type25.F:579), so "no death time" is written as 0.
-        tstop = 0.0 if c.dt >= 1e19 else c.dt
 
         surf1 = surf2 = grnod = 0
         if c.variant == "NODES_TO_SURFACE":
@@ -4960,10 +6963,24 @@ def _make_type25_interfaces(state: ConversionState,
                 "msid (swapped)" if plan25 == _RS_SWAP else "ssid")
             _warn_bolt_rigid_kept(state, kw, c.inter_id, sec25_sid,
                                   sec25_styp)
+            ish_pids = _contact_master_pids(state, main25_sid,      # K-16
+                                            main25_styp)
             if routed:
+                tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt,
+                                             kw, "TYPE7",       # K-11
+                                             dt_was_written=True)
                 lines += _emit_routed_n2s_type7(state, c, kw, grnod, surf2,
                                                 fric, fric_id, inacti, viss,
-                                                stfac, tstop)
+                                                stfac, tstart, tstop)
+                _warn_stmin_floor(
+                    state, c.inter_id,
+                    _contact_master_pids(state, main25_sid, main25_styp),
+                    _secondary_pids(state, sec25_sid, sec25_styp, rigid_nodes,
+                                    keep25),
+                    stfac, 4, c.title)
+                # CardStack K-16 (fix round): this route leaves before
+                # _type25_ishape, so a stated Card E is named here
+                _warn_card_e_type7(state, c, kw, viss)
                 continue
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
@@ -4975,6 +6992,9 @@ def _make_type25_interfaces(state: ConversionState,
         else:
             single = c.variant == "SINGLE_SURFACE"
             tag = ("self" if single else "secnd")
+            ish_pids = (set(state.parts) if single and c.ssid == 0 else   # K-16
+                        _contact_master_pids(state, c.ssid, c.sstyp)
+                        | _contact_master_pids(state, c.msid, c.mstyp))
             # Only a SINGLE_SURFACE reads SSID=0 as "all parts" (Vol I p.11-24).
             surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
                                     f"contact_{c.inter_id}_{tag}", lines,
@@ -5013,11 +7033,21 @@ def _make_type25_interfaces(state: ConversionState,
                     f"starter ILEV=1, self-impact), Istf={istf}, Igap=2, "
                     f"Idel={_TYPE25_IDEL}, Iedge={iedge}.")
 
+        # CardStack K-11: the Card-2 BT / DT sign rules (a negative DT used
+        # to be written as a negative Tstop); "no death time" is written 0,
+        # which TYPE25 turns back into EP30 (hm_read_inter_type25.F:579)
+        tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, kw,
+                                     "TYPE25", dt_was_written=True)
+        # CardStack K-16: Card E SRNDE 1 -> Ishape 2; the shells that count
+        # are the surfaces' (a node-to-surface one: its main side's, after
+        # any rigid swap; an SSID = 0 single surface: every part)
+        ishape = _type25_ishape(state, c, kw, c.inter_id, ish_pids)
         lines += _emit_inter_type25(
             c.inter_id, c.title, surf1, surf2, grnod_id=grnod, istf=istf,
             igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,
-            tstart=c.bt, tstop=tstop, inacti=inacti, viss=viss,
-            fric_id=fric_id)
+            tstart=tstart, tstop=tstop, inacti=inacti, viss=viss,
+            fric_id=fric_id, ishape=ishape)
+        _warn_icor_damping(state, c, kw, "TYPE25", "VISs", viss)
         state.type25_emitted_ids.add(c.inter_id)        # round 8, B6
 
     if any(c.eroding for c in state.contacts_type25):
@@ -6738,6 +8768,10 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         shape = (f"one-way node-to-surface (/GRNOD/NODE/{grnod_id} vs "
                  f"/SURF/{surf_id})")
     state.companion_inter_ids.append(comp_id)
+    if state.options.soften_stfac is not None:
+        # Stfac stays 0 (the engine default) here: named in the one
+        # --soften-stfac summary (_report_contact_lever_reach)
+        state.soften_stfac_unreached.append(comp_id)
     fric_note = (f"Fric={fric:g}" if fric_id == 0
                  else f"Fric={fric:g} with fric_ID={fric_id}")
     state.warn(

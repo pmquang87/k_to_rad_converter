@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import weakref
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 from ..state import (
     AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS,
     ConversionState,
@@ -1475,8 +1476,13 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
             "k2rad's plain TYPE7 (from *CONTACT_SURFACE_TO_SURFACE and friends) "
             "carries Igap=0, so OPTT is INERT there; the TYPE25 route and the "
             "SOFT=-7 TYPE7 both use Igap=2 and do honour it. Check the Igap column "
-            "of the interfaces that scope these parts, and set /INTER Gapmin "
-            "directly (or *CONTACT Card 3 SST/MST) if the gap has to change.")
+            "of the interfaces that scope these parts. To change a gap: on an "
+            "Igap=0 TYPE7 it is the single Gapmin - state *CONTACT Card 3 "
+            "SST/MST (Gapmin = (SST + MST) / 2) or pass --inter-gapmin ID=VAL; "
+            "/INTER/TYPE25 has no Gapmin column (hm_read_inter_type25.F:578 "
+            "GAP = ZERO) and reads neither, and there OPTT IS the per-part gap "
+            "lever: each side's gap is min(Gap_scale x OPTT / 2, Gap_max) "
+            "(i25sti3.F:217-218, :315-317).")
 
 
 def _brick_row(eid: int, nodes: List[int]) -> Tuple[str, int]:
@@ -2419,13 +2425,47 @@ def _warn_default_solid_hourglass(
            "did NOT appear on the carriers measured here (ex_03_elform_1 "
            "reaches its reference in 16 cycles / 2.0 s), but it is the "
            "engine's own caveat and not k2rad's to withdraw. NOTE also that "
-           "the coefficient an Isolid 24 uses is Dn, not h: "
-           "hm_read_prop14.F:358-361 is 'IF (IHBE == 24) THEN IF (CVIS == "
-           "ZERO) CVIS = EM01; GEO(13) = CVIS; QH = ZERO', and k2rad leaves "
-           "Dn blank, so the run uses the CVIS default 0.1 - the same number "
-           "h states, but a deck stating some other QH/QM would not carry it "
-           "here." if state.is_implicit else "")
+           "an Isolid 24 discards h: hm_read_prop14.F:358-361 is 'IF (IHBE "
+           "== 24) THEN IF (CVIS == ZERO) CVIS = EM01; GEO(13) = CVIS; QH = "
+           "ZERO', and k2rad leaves Dn blank, so the run uses the CVIS "
+           "default 0.1. That Dn is a numerical DAMPING of the hourglass-mode "
+           "velocities (szhour3.F:215 and :233-240, added to the hourglass "
+           "force at :538-549), not a stiffness scale - the HEPH hourglass "
+           "stiffness comes from the material's own moduli (szhour3.F:156-172, "
+           ":224) - so a stated QH/QM, which scales LS-DYNA's type 6 "
+           "hourglass STIFFNESS (Vol I R17 p.12-272 Remark 3), has no cell to "
+           "go to on this property." if state.is_implicit
+           else _DEFAULT_HG_EXPLICIT_BENDING)
         + " Pass --no-default-hourglass to keep the pre-2026-09 output.")
+
+
+#: K-33: the sentence the EXPLICIT default-hourglass warning ends with. The
+#: IHQ 2 -> Isolid 1 mapping is LS-DYNA's own default and faithful, so what
+#: the user needs is the known cost of that element in coarse bending and the
+#: two .k routes that avoid it - with the cantilever measurement behind it.
+_DEFAULT_HG_EXPLICIT_BENDING = (
+    " The mapping is faithful: LS-DYNA's IHQ 2 (Flanagan-Belytschko "
+    "viscous) and Radioss Isolid 1 (one integration point, Belytschko "
+    "viscous hourglass control) are the same class of element, with the "
+    "same known cost in coarse bending. A part only n one-point elements "
+    "thick keeps (1 - 1/n^2) of its bending stiffness (each element samples "
+    "its strain at its centre: n = 2 keeps 3/4, a deflection x 4/3), and h "
+    "is a VISCOSITY - shvis3.F:166 and :368 scale it into a force on the "
+    "hourglass-mode VELOCITY - so it damps the hourglass motion and adds no "
+    "static stiffness. MEASURED on a 20 x 4 x 2 mm elastic hex cantilever (1 "
+    "mm cubes, 2 through the height) under a 100 g step load: peak tip "
+    "deflection 0.0812 mm at this Isolid 1 (0.0811 mm at h 0.14), 0.0604 mm "
+    "at Isolid 24 and 0.0602 mm at Isolid 17, against 0.0613 mm by beam "
+    "theory (twice q L^4 / 8 E I). For a coarse, bending-dominated hex part "
+    "(a tooling tooth, a plate one or two elements thick) state "
+    "*CONTROL_HOURGLASS or the part's *HOURGLASS IHQ 6 with QH 1.0 in the .k "
+    "- LS-DYNA's own coarse-mesh elastic-bending setting (Vol I R17 p.12-272 "
+    "Remark 4) - which k2rad writes as Isolid 24 (HEPH, an hourglass "
+    "STIFFNESS taken from the material, szhour3.F; the 1.0 lands in that "
+    "property's h cell, which Isolid 24 discards, and draws the starter's "
+    "advisory WARNING 311, h outside ]0, 0.15[); or ELFORM 2 (-> Isolid 17, "
+    "fully integrated), but only on cube-like elements: poor aspect ratios "
+    "shear-lock it (p.41-100 Remark 5).")
 
 
 def _shell_hg_values(state: ConversionState, sec: Optional[SectionShell],
@@ -2447,12 +2487,128 @@ def _shell_hg_values(state: ConversionState, sec: Optional[SectionShell],
     return (min(max(coeff, 0.0), _SHELL_HG_MAX), None)
 
 
+#: One-entry memo for _tet_only_solid_secids: ``(weak reference to the state
+#: it was built for, the fingerprint of the lists it walked, the answer)``.
+#: The property emitters ask once per section, but the /PRELOAD and /INIBRI
+#: writers reach the set once per ELEMENT through _effective_solid_isolid, so
+#: the walk over every solid element has to run once per conversion. A weak
+#: reference never keeps a finished conversion alive, and a dead one never
+#: answers for a new state that happens to reuse its address; the fingerprint
+#: makes a changed element / part / section list recompute.
+_TET_ONLY_MEMO: List[Any] = [None]
+
+
+def _tet_only_solid_secids(state: ConversionState) -> FrozenSet[int]:
+    """K-30 (``tet_isolid1``, default ON, ``--no-tet-isolid1``): the
+    ``*SECTION_SOLID`` ids whose EVERY solid element is a tetrahedron the way
+    the element writer emits it - 10 nodes (``/TETRA10``) or 4 distinct nodes
+    (``/TETRA4``), the test ``_make_parts_and_elements`` applies - with at
+    least one element. ALE (``sec.iale``) and cohesive
+    (``_cohesive_solid_secids``) sections are left out as DEFENSIVE guards,
+    not as rules: neither can carry the 14 the rule replaces (an ALE section
+    is written Isolid 0, a cohesive one as ``/PROP/TYPE43`` before the rule
+    runs), so today they change no output.
+
+    Why the set exists: the starter runs EVERY 4- and 10-node tet group at
+    Isolid 1 - ``sgrtails.F:694`` first turns a written 2 into 0, then
+    ``:984-988`` set ``JHBE = 1`` / ``NPT = 1`` (``NPT = 4`` with Itetra4
+    1) on a 4-node group whose JHBE is not 1 or 2, ``:989-999`` set ``JHBE
+    = 1`` / ``NPT = 4`` on such a 10-node one, and ``:972-982`` zero JCVT on
+    both. The
+    Isolid 14 that ``_elform_to_isolid`` gives ELFORM 10 / 13 is therefore
+    never what the engine runs; on the way, a LAW1 group at Isolid 14 draws
+    WARNING 791 per element group and grouping pass (``sgrtails.F:695-704``,
+    'MATERIAL LAW 1 IS USED WITH ISOLID = 14 ... SET IT TO 2'), and a LAW115
+    one WARNING 1905 (``:631``). A section that also carries a ``/BRICK``
+    (a hex, or a wedge / pyramid written as a degenerate hex) keeps 14: its
+    property serves a hex group too.
+
+    MEASURED (OpenRadioss starter + engine, Isolid 14 against 1 on decks
+    otherwise byte-equal, 2026-10-31): a 20 x 4 x 2 mm LAW1 cantilever of
+    960 ELFORM 10 ``/TETRA4`` (100 g step, 0.02 s) 8 x WARNING 791 -> 0,
+    T01 decoded equal and every anim file byte-equal; the same beam as
+    1920 ``/TETRA10`` (Itetra10 1000, 4 ms) 8 x 791 -> 0, T01 decoded equal
+    and every anim file byte-equal; its
+    IMPLICIT ``/TETRA4`` twin (5 steps) 16 x 791 -> 0, T01 decoded equal at
+    nt 1 (at nt 4 the implicit solver differs by ~5e-12 between two runs of
+    one byte-identical deck, so that arm is noise either way); the CardStack
+    A_base deck (86 090 LAW1 tets; its card shells also carry K-31's N
+    cell) 1346 x 791 -> 0 (1350 -> 2 warnings, the two WARNING 94 left),
+    its engine run (5001 cycles to 0.4 ms) T01 decoded equal and both anim
+    files byte-equal.
+
+    One side effect, MEASURED: the starter orders the solid element groups
+    by a key that holds the WRITTEN Isolid (``get_sort_key_solid.F90:158``
+    ``jhbe = igeo(10,pid)``, sort key 3 at ``:239``, below the element type
+    of key 1), built in SGRHEAD (``sgrhead.F:185``, called at
+    ``lectur.F:6144``) before SGRTAILS (``lectur.F:6172``) resets the tet
+    groups. So where a K-30 section sits
+    beside another tet group of the same element type and law that is
+    written with another Isolid on one arm (an ELFORM 1 tet section, Isolid
+    1 on an explicit deck), the two arms can order the elements
+    differently; the physics does not move. Two 48-tet *MAT_ELASTIC bars,
+    ELFORM 10 beside ELFORM 1, written 14 / 1 against 1 / 1 (starter +
+    engine, nt 1, 2 ms under 1 g, 2026-10-31): every T01 value equal, but
+    all 5 anim files differ (948 to 1914 of their 19539 bytes); two ELFORM
+    10 bars (14 / 14 against 1 / 1): byte-equal anim files."""
+    key = (id(state.solid_elems), len(state.solid_elems), id(state.parts),
+           len(state.parts), id(state.sec_solids), len(state.sec_solids))
+    entry = _TET_ONLY_MEMO[0]
+    if entry is not None:
+        ref, memo_key, memo_value = entry
+        if ref() is state and memo_key == key:
+            return memo_value
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    seen: Set[int] = set()
+    not_tet: Set[int] = set()
+    for e in state.solid_elems:
+        sid = part_secids.get(e.pid)
+        if sid is None:
+            continue
+        seen.add(sid)
+        if sid in not_tet:
+            continue
+        if not (len(e.nodes) == 10
+                or len(_ordered_unique_nodes(e.nodes)) == 4):
+            not_tet.add(sid)
+    cohesive = _cohesive_solid_secids(state)
+    value = frozenset(
+        sid for sid in seen - not_tet
+        if sid in state.sec_solids and not state.sec_solids[sid].iale
+        and sid not in cohesive)
+    _TET_ONLY_MEMO[0] = (weakref.ref(state), key, value)
+    return value
+
+
+def _tet_section_isolid(state: ConversionState, sec: Optional[SectionSolid],
+                        isolid: int) -> int:
+    """K-30: the Isolid an all-tet section is WRITTEN with - 1, the value the
+    starter resets an Isolid 14 tet group to (``_tet_only_solid_secids``),
+    in place of the 14 of ``_elform_to_isolid``; every other value passes
+    through. Only a 14 is replaced: the hourglass remap (1 / 5 / 24) and the
+    LAW115 remap (24) never produce it, so an ELFORM 1 tet section keeps
+    what the deck's hourglass control says, and ``_elform_to_isolid`` keeps
+    returning 14 for the hourglass gate and the tet tests that key on it.
+    A 17 (ELFORM 2 or 16 on tets) is left as written too:
+    the starter runs that tet group at Isolid 1 as well, but a 17 draws no
+    WARNING 791 (that one is for a LAW1 group at 14 / 15,
+    ``sgrtails.F:695-704``) and lies outside K-30's ELFORM 10 / 13 scope.
+    ``--no-tet-isolid1`` writes the 14."""
+    if (isolid == 14 and sec is not None and state.options.tet_isolid1
+            and sec.secid in _tet_only_solid_secids(state)):
+        return 1
+    return isolid
+
+
 def _effective_solid_isolid(state: ConversionState, pid: int,
                             sec: Optional[SectionSolid]) -> int:
     """The Isolid the /PROP/SOLID that *part pid* references actually emits, once
     per-part hourglass control has had its say: the per-part split's Isolid, else
     the global *CONTROL_HOURGLASS remap on the shared prop, else (no hourglass)
-    the section's ELFORM Isolid. The /INIBRI writer needs this — not the raw
+    the section's ELFORM Isolid - and, on an all-tet section, the Isolid 1 K-30
+    writes instead of the ELFORM's 14 (``_tet_section_isolid``). The /INIBRI
+    writer needs this — not the raw
     ELFORM Isolid — so its Nb_integr matches the property's integration order
     once IHQ remaps a full-integration hex to an under-integrated 1/5/24 (a
     stale Nb_integr is rejected by the starter, MSGID 695)."""
@@ -2462,9 +2618,124 @@ def _effective_solid_isolid(state: ConversionState, pid: int,
          if sec else 17)
     if pid in state.hourglass_prop_ids:
         iso_over = state.hourglass_prop_vals.get(pid, (None, None))[1]
-        return iso_over if iso_over is not None else base
-    _, iso = _solid_hg_values(state, sec, None)
-    return iso if iso is not None else base
+        iso = iso_over if iso_over is not None else base
+    else:
+        _, hg_iso = _solid_hg_values(state, sec, None)
+        iso = hg_iso if hg_iso is not None else base
+    return _tet_section_isolid(state, sec, iso)
+
+
+def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
+    """K-31 (``law1_shell_global_n``, default ON, ``--no-law1-shell-global-n``):
+    the ``*SECTION_SHELL`` ids whose /PROP/SHELL is written N = 0 (global
+    integration) instead of ``max(2, NIP)``.
+
+    A section qualifies when it carries at least one shell element and every
+    shell element on it belongs to a part whose material k2rad writes as LAW1
+    (``_target_mat_law`` 1: ``*MAT_ELASTIC``, and ``*MAT_RIGID``, written as
+    /MAT/ELAST for its /RBODY), and three exclusions hold:
+
+    * its NIP is not 1 (the plan keeps NIP 1 as it was). A NIP-1 section
+      keeps the N 2 k2rad has always written (max(2, NIP)), and the starter
+      still switches that LAW1 group to N = 0 with WARNING 1084, like every
+      LAW1 group written N > 1 (``cgrtails.F:780-791``; a /SH3N group
+      silently, ``c3grtails.F:710``). So it runs the same global integration
+      a K-31 section is written with, and keeps the warning. LS-DYNA's own
+      NIP 1 - one point, no bending (Vol I R17 p.41-66) - is reproduced on
+      neither arm: that would take N = 1, which both switches leave alone
+      and on which the starter zeroes Ashear and turns Ishell 0 / 2 into 1
+      with WARNING 322 (``hm_read_prop01.F:246-259``) - not measured, a
+      ROADMAP item. MEASURED (starter + engine, nt 1, 2026-10-31): a NIP-1
+      *MAT_ELASTIC strip is written N 2 on both arms and prints 1 x WARNING
+      1084 on both (anim files byte-equal, T01 equal);
+    * no ``*INITIAL_STRESS_SHELL`` / ``*INITIAL_STRAIN_SHELL`` record names
+      one of its elements, directly or through a ``*SET_SHELL``: an /INISHE
+      record carries one station per through-thickness point and
+      ``writer/inistate`` writes it for N = max(2, NIP);
+    * the deck writes no /THERM_STRESS (``state.therm_stress_cards``): the
+      LAW1 texts and measurements of ``writer/thermal`` are about that deck
+      as it was written.
+
+    Why: the starter switches every LAW1 shell group with N > 1 to N = 0
+    itself and prints WARNING 1084, a cumulated message that names the
+    property / material couples it switched (``cgrtails.F:780-791``), so
+    N = 0 written directly is the group the starter runs, minus the
+    warning. A section that also carries any other
+    law keeps max(2, NIP): N = 0 on a non-LAW1 group is WARNING 1912 and
+    N = 3 (``cgrtails.F:796-805``), a physics change.
+
+    MEASURED (starter + engine, 2026-10-31, N 0 against max(2, NIP) on
+    decks otherwise byte-equal): a 20 x 10 mm ELFORM 16 NIP 5 LAW1 card
+    strip (t 0.35, 100 g step) 1 x WARNING 1084 -> 0, T01 decoded equal,
+    every anim file byte-equal; the shell_explicit, tied_weld and
+    implicit_qstat goldens 2 x 1084 -> 0, T01 decoded equal.
+
+    One side effect, MEASURED: the starter orders the shell element groups
+    by a key that holds the WRITTEN N (``get_sort_key_shell.F90:146``, sort
+    key 4 at ``:251``; ``get_sort_key_shell3n.F90:160``, ``:291`` for
+    /SH3N; keys 5 / 6 are the material and property ids), built in CGRHEAD
+    / C3GRHEAD (``cgrhead.F:281``, ``c3grhead.F:306``; called at
+    ``lectur.F:6276``, ``:6514``) before CGRTAILS / C3GRTAILS
+    (``lectur.F:6304``, ``:6553``) switch a LAW1 group to N = 0. So
+    wherever the written N differs between LAW1 shell groups of one element
+    type on either arm - different NIP on the opt-out arm (5 and 3), or a
+    section this set leaves at max(2, NIP) (NIP 1, an initial-state record)
+    beside one it writes 0 - the two arms can order the elements
+    differently; the physics does not move. Two 20-quad *MAT_ELASTIC
+    strips (starter + engine, nt 1, 2 ms under 1 g, 2026-10-31), NIP 5 +
+    NIP 3 (written 5 / 3 against 0 / 0) and NIP 1 + NIP 5 (2 / 5 against
+    2 / 0): all 5 anim files differ (314 to 586 of their 14828 bytes) and
+    the T01 only in Y_MOMENTUM, the round-off of zero (|value| <= 1.4e-28,
+    |delta| <= 7.4e-32), every energy, the mass and the time step equal;
+    NIP 5 + NIP 5 (5 / 5 against 0 / 0): byte-equal anim files, equal T01.
+    Two LAW1 sections of which an *INITIAL_STRESS_SHELL record keeps one at
+    N 2 (nt 4): all 40 anim files differ (62 to 198 of their 3488 bytes),
+    the X / Y momentum (|value| <= 6.9e-19) by up to 1.3e-20, the rest of
+    the T01 equal."""
+    if not state.options.law1_shell_global_n or state.therm_stress_cards:
+        return frozenset()
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    eid2pid = {e.eid: e.pid for e in state.shell_elems}
+    touched: Set[int] = set()
+    for rec in state.ini_stress_shells:
+        sid = part_secids.get(eid2pid.get(rec.eid, 0))
+        if sid is not None:
+            touched.add(sid)
+    for rec in state.ini_strain_shells:
+        if getattr(rec, "is_set", False):
+            entry = state.shell_sets.get(rec.eid)
+            eids = list(entry[1]) if entry else []
+        else:
+            eids = [rec.eid]
+        for eid in eids:
+            sid = part_secids.get(eid2pid.get(eid, 0))
+            if sid is not None:
+                touched.add(sid)
+    law_of: Dict[int, Optional[int]] = {}
+    seen: Set[int] = set()
+    other: Set[int] = set()
+    for e in state.shell_elems:
+        part = state.parts.get(e.pid)
+        sid = part_secids.get(e.pid)
+        if part is None or sid is None:
+            continue
+        seen.add(sid)
+        if sid in other:
+            continue
+        if part.mid not in law_of:
+            law_of[part.mid] = _target_mat_law(state, part.mid)
+        if law_of[part.mid] != 1:
+            other.add(sid)
+    return frozenset(
+        sid for sid in seen - other - touched
+        if sid in state.sec_shells and state.sec_shells[sid].nip != 1)
+
+
+def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int]) -> int:
+    """The /PROP/SHELL N cell: 0 on a K-31 section (``_law1_global_n_secids``),
+    else ``max(2, NIP)``, the value k2rad has always written."""
+    return 0 if sec.secid in global_n else max(2, sec.nip)
 
 
 # LS-DYNA cohesive solid formulations (*SECTION_SOLID Vol I R16 p.41-88):
@@ -3241,17 +3512,31 @@ def _make_properties(state: ConversionState) -> List[str]:
 
     _warn_shell_formulation_choice(state)
     _warn_section_card2(state)
+    # K-31 (--no-law1-shell-global-n opts out): an all-LAW1 section is written
+    # N = 0, the global integration cgrtails.F:780-791 switches it to anyway.
+    global_n = _law1_global_n_secids(state)
+    shrf_stated: List[Tuple[int, float]] = []
+    # a deck routed to the 2-D axisymmetric deck rewrites its ELFORM 14 / 15
+    # /PROP/SHELL as /PROP/SOLID (writer/axisym2d): no Ashear, no SHRF note
+    plan = state.axisym_plan
+    shrf_routed_ef = (14, 15) if plan is not None and plan.routed else ()
     for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
             continue
         ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                   state.options.shell_default_ishell)
-        nip = max(2, sec.nip)
+        nip = _shell_prop_n(sec, global_n)
         # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
         # (its base); parts with a different *HOURGLASS are split out below.
         hm, _ = _shell_hg_values(state, sec, None)
         lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   ishell, nip, istrain, sec.t1, hcoef=hm)
+        # K-32: a stated SHRF that is not the 5/6 the starter supplies for
+        # the Ashear 0 written above is named (_warn_shell_shrf_not_converted)
+        if (sec.shrf and abs(sec.shrf - 5.0 / 6.0) > _SHRF_FIVE_SIXTHS_TOL
+                and sec.elform not in shrf_routed_ef):
+            shrf_stated.append((sec.secid, sec.shrf))
+    _warn_shell_shrf_not_converted(state, shrf_stated)
     cohesive_secids = _cohesive_solid_secids(state)
     # (secid, elform, emitted Isolid, emitted h) for every solid section whose
     # Isolid the LS-DYNA-default hourglass synthesis actually MOVED — reported
@@ -3336,6 +3621,12 @@ def _make_properties(state: ConversionState) -> List[str]:
         # 17 is touched.
         if sec.secid in law115_secids and isolid == 17:
             isolid = 24
+        # K-30 (--no-tet-isolid1 opts out): an all-tet ELFORM 10 / 13 section
+        # writes the Isolid 1 the starter runs its tet group at
+        # (sgrtails.F:984-999), not the 14 that draws WARNING 791 on a LAW1
+        # group on the way (sgrtails.F:695-704). Applied after the remaps so
+        # it only ever replaces the ELFORM's 14.
+        isolid = _tet_section_isolid(state, sec, isolid)
         if sec.secid in ismstr10_secids:
             # Recorded at the write line for the /PRELOAD writer: a preloaded
             # element group at Ismstr 10/11/12 is downgraded to 4/1/2 by
@@ -5026,9 +5317,13 @@ def _warn_shell_formulation_choice(state: ConversionState) -> None:
     if not unmapped:
         return
     ishell = state.options.shell_default_ishell
-    if ishell == ISHELL_QEPH:
+    # K-32: ELFORM 16 is LS-DYNA's FULLY integrated shell, so the ELFORM 2
+    # sentence (under-integration, qeph the closer match) is wrong for it: it
+    # gets its own sentence, written after the one of the other ELFORMs.
+    rest = [ef for ef in unmapped if ef != 16]
+    if rest and ishell == ISHELL_QEPH:
         state.warn(
-            f"*SECTION_SHELL ELFORM {unmapped} -> /PROP/SHELL Ishell=24 "
+            f"*SECTION_SHELL ELFORM {rest} -> /PROP/SHELL Ishell=24 "
             "(QEPH, reduced integration with physical stabilisation), because "
             "shell_formulation='qeph' was requested. This is NOT the default: "
             "the default 'qbat' emits Ishell=12 and is what every earlier "
@@ -5036,9 +5331,9 @@ def _warn_shell_formulation_choice(state: ConversionState) -> None:
             "them. QEPH is the closer match to ELFORM=2 Belytschko-Tsay and "
             "erodes more faithfully under /FAIL/JOHNSON Ifail_sh=2 (2 failure "
             "events to delete an element, not 8).")
-    else:
+    elif rest:
         state.warn(
-            f"*SECTION_SHELL ELFORM {unmapped} -> /PROP/SHELL Ishell=12 "
+            f"*SECTION_SHELL ELFORM {rest} -> /PROP/SHELL Ishell=12 "
             "(QBAT, FULLY integrated, 4 in-plane points) — the default. Note "
             "LS-DYNA ELFORM=2 (Belytschko-Tsay) is UNDER-integrated, so this "
             "changes the element's integration class: with /FAIL/JOHNSON "
@@ -5047,6 +5342,98 @@ def _warn_shell_formulation_choice(state: ConversionState) -> None:
             "~1.7x under-erosion. Pass shell_formulation='qeph' (CLI "
             "--shell-formulation qeph) for Ishell=24, which is the closer "
             "match — it changes results, which is why it is not the default.")
+    if 16 in unmapped:
+        _warn_elform16_formulation(state, ishell)
+
+
+#: K-32: the ELFORM 16 cantilever measurement both ELFORM 16 sentences cite
+#: (Ishell 24 against the default Ishell 12, peak tip deflection).
+_ELFORM16_QEPH_MEASURED = (
+    "MEASURED +0.46 % peak tip deflection against the default on an ELFORM "
+    "16 cantilever (1.5357 vs 1.5287 mm)")
+
+
+def _warn_elform16_formulation(state: ConversionState, ishell: int) -> None:
+    """K-32: the per-ELFORM sentence for ``*SECTION_SHELL`` ELFORM 16.
+
+    LS-DYNA ELFORM 16 is the FULLY integrated shell (Vol I R17 p.41-64; the
+    Theory Manual R16 ch. 12, 'Fully Integrated Shell (Type 16)'), so the
+    default Ishell 12 (QBAT, 4 in-plane points) is the SAME integration class
+    and ``--shell-formulation qeph`` (Ishell 24, reduced integration with
+    physical stabilisation) LOWERS it. qeph is the dyna2rad parity choice:
+    dyna2rad writes Ishell 24 for ELFORM 16 (``convertprops.cxx:779-785``).
+    The mapping itself does not change - ``_elform_to_ishell(16, False)`` is
+    12, 24 with qeph; only the log stops recommending qeph as the closer
+    match, which holds for the under-integrated ELFORM 2 alone."""
+    if ishell == ISHELL_QEPH:
+        state.warn(
+            "*SECTION_SHELL ELFORM [16] -> /PROP/SHELL Ishell=24 (QEPH, "
+            "reduced integration with physical stabilisation), because "
+            "shell_formulation='qeph' was requested. LS-DYNA ELFORM 16 is "
+            "FULLY integrated ('Fully integrated shell element', Vol I R17 "
+            "p.41-64), so "
+            "this LOWERS its integration class: the default 'qbat' "
+            "(Ishell=12, the same class) is what every earlier conversion of "
+            "this deck produced, and results WILL differ from it - "
+            f"{_ELFORM16_QEPH_MEASURED}. Ishell=24 is the dyna2rad parity "
+            "choice (dyna2rad writes 24 for ELFORM 16, "
+            "convertprops.cxx:779-785).")
+        return
+    state.warn(
+        "*SECTION_SHELL ELFORM [16] -> /PROP/SHELL Ishell=12 (QBAT, FULLY "
+        "integrated, 4 in-plane points) — the default, and the SAME "
+        "integration class: LS-DYNA ELFORM 16 is its 'Fully integrated shell "
+        "element' (Vol I R17 p.41-64). "
+        "shell_formulation='qeph' (CLI --shell-formulation qeph, Ishell=24, "
+        "reduced integration with physical stabilisation) would LOWER the "
+        "class; it is the dyna2rad parity choice (dyna2rad writes 24 for "
+        f"ELFORM 16, convertprops.cxx:779-785), {_ELFORM16_QEPH_MEASURED}.")
+
+
+#: K-32: a stated SHRF this close to 5/6 is the value the starter supplies
+#: for the Ashear 0 k2rad writes (0.833, 0.8333 and 0.8333333 all are).
+_SHRF_FIVE_SIXTHS_TOL = 1.0e-3
+
+
+def _warn_shell_shrf_not_converted(
+        state: ConversionState, stated: List[Tuple[int, float]]) -> None:
+    """K-32: name the ``*SECTION_SHELL`` SHRF values the /PROP/SHELL does not
+    carry, once per deck.
+
+    SHRF (card 1 field 3, the transverse shear correction factor; K-0P
+    stores it as ``SectionShell.shrf``, 0.0 when blank) is NOT converted:
+    /PROP/SHELL Ashear is written 0, which the starter turns into 5/6
+    (``hm_read_prop01.F:244``). Carrying SHRF to Ashear is a ROADMAP round-10
+    item, so the bytes do not move; this only says it. *stated* holds the
+    ``(secid, SHRF)`` of the sections written as a /PROP/SHELL whose SHRF is
+    stated and not 5/6 (``_SHRF_FIVE_SIXTHS_TOL``). A blank SHRF is not
+    listed although it deviates the same way: LS-DYNA reads it as 1.0 (Vol
+    I R17 p.41-63) and the shell runs at 5/6 all the same. The plan names a
+    STATED SHRF only (a blank one sits on nearly every shell deck); the
+    note's last sentence says so to the reader who gets it."""
+    if not stated:
+        return
+    by_value: Dict[float, List[int]] = defaultdict(list)
+    for secid, shrf in stated:
+        by_value[shrf].append(secid)
+    groups = []
+    for value in sorted(by_value):
+        ids = sorted(by_value[value])
+        shown = ", ".join(str(s) for s in ids[:10])
+        if len(ids) > 10:
+            shown += f", ... ({len(ids)} sections)"
+        groups.append(f"{shown} (SHRF {value:g})")
+    state.warn(
+        f"*SECTION_SHELL {'; '.join(groups)}: the stated SHRF, the transverse "
+        "shear correction factor, is NOT converted - the /PROP/SHELL Ashear "
+        "cell is written 0, which the starter turns into 5/6 "
+        "(hm_read_prop01.F:244 'IF(GEO(38)==ZERO) GEO(38)=FIVE_OVER_6'), so "
+        "these shells run with a shear factor of 5/6 whatever SHRF says "
+        "(LS-DYNA's own suggestion for isotropic shells, Vol I R17 p.41-66). "
+        "Carrying SHRF to Ashear is a ROADMAP round-10 item; until then set "
+        "Ashear on the /PROP/SHELL by hand if the factor matters. A section "
+        "that leaves SHRF blank (LS-DYNA's default 1.0, Vol I R17 p.41-63) "
+        "runs at 5/6 the same way and is not listed here.")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -5303,6 +5690,8 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
         pids_by_prop[prop_id].append(pid)
     lines: List[str] = []
     emitted: Set[int] = set()
+    # K-31: a split copy of an all-LAW1 section keeps the section's N = 0
+    global_n = _law1_global_n_secids(state)
     for pid, prop_id in sorted(state.hourglass_prop_ids.items()):
         if prop_id in emitted:
             continue
@@ -5322,6 +5711,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                           if sec else 17))
             if iso_over is not None:
                 isolid = iso_over
+            # K-30: the same tet rule as the shared section prop, so a split
+            # copy of an all-tet section cannot come out at 14 while its
+            # section prop is written 1.
+            isolid = _tet_section_isolid(state, sec, isolid)
             iale = sec.iale if sec else 0
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
             # A /XREF or /MAT/LAW95 part split out by the hourglass overlay
@@ -5369,7 +5762,7 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                                         state.options.shell_default_ishell) if sec
                       else _elform_to_ishell(2, state.is_implicit,
                                              state.options.shell_default_ishell))
-            nip = max(2, sec.nip) if sec else 2
+            nip = _shell_prop_n(sec, global_n) if sec else 2
             thick = sec.t1 if sec else 0.0
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
                                       thick, hcoef=coeff)

@@ -36,6 +36,13 @@ factor.  Node-to-node has been removed; only the node-to-segment measure remains
 factor < 1 is a safety margin that keeps the gap strictly below the measured
 clearance (0 initial penetration) while still engaging promptly under load.
 
+Where LS-DYNA offsets the contact shells by half their thickness (the
+writer's --shell-offset-gapmin predicate) the measured distance d runs
+between MID-planes, so the value is ``T + factor x (d - T)``, T the offset
+(t/2 of the shell secondary, + t/2 of a shell main), capped at 0.5 x the
+smallest main-segment side; ``d <= T`` (the offset surfaces overlap) keeps
+``factor x d`` and is flagged. See :func:`suggest_gapmins` (CardStack K-04).
+
 Dependencies
 ------------
 The node-to-segment search is a point-to-mesh query accelerated by a spatial
@@ -720,7 +727,16 @@ class GapminSuggestion:
     side_a: str               # human description of the secondary side
     side_b: str               # human description of the main side
     min_distance: float       # min node-to-segment clearance (secondary node → main facet)
-    suggested_gapmin: float   # = factor × min_distance (rounded)
+    suggested_gapmin: float   # = factor × min_distance (rounded), or the offset form
+    #: CardStack K-04: the LS-DYNA shell offset T = t_s/2 (+ t_m/2 for a
+    #: shell main) the suggestion starts from - 0 when LS-DYNA offsets no
+    #: shell here - and the clause saying why and from which thickness.
+    offset: float = 0.0
+    offset_note: str = ""
+    #: d <= T: the offset surfaces already overlap; f x d is written
+    overlap: bool = False
+    #: the 0.5 x smallest-main-side cap when it bit (0.0 = it did not)
+    cap: float = 0.0
 
 
 def _describe_side(state: ConversionState, sid: int, styp: int) -> str:
@@ -754,6 +770,107 @@ def _describe_side(state: ConversionState, sid: int, styp: int) -> str:
     return f"id {sid}"
 
 
+#: The tail of a skip line on a route --inter-gapmin reaches (a TYPE7).
+_SET_BY_HAND = (" Set Gapmin manually via --inter-gapmin if it pre-penetrates "
+                "or fails to engage")
+
+#: The TYPE25 gap rule every TYPE25-route skip line states.
+_TYPE25_GAP = ("TYPE25 has no Gapmin cell: its gap is min(Gap_scale x t/2, "
+               "Gap_max) per side from the elements (i25sti3.F:211-229, "
+               "312-317; *PART_CONTACT OPTT sets t)")
+
+
+def _single_surface_skip(state: ConversionState, c) -> str:
+    """CardStack K-04: the route-specific skip reason of a single-surface
+    contact, which has no two-part clearance to measure."""
+    from .writer.common import AUTO_IMPLICIT_STUB_TITLE
+    if c.title == AUTO_IMPLICIT_STUB_TITLE:
+        return ("the all-parts implicit stub k2rad injects (no *CONTACT card "
+                "of the deck; it keeps the starter's own gap)")
+    starter_gap = ("leave SST/MST blank and the starter derives the gap "
+                   "(i7sti3.F:1055-1066: the mean shell thickness - LS-DYNA's "
+                   "t/2 + t/2 - on a shell surface, 0.1 x the smallest segment "
+                   "side on a solid one)")
+    if c.ssid == 0 and not state.is_implicit:
+        return ("an SSID = 0 all-parts self-contact, written as /INTER/TYPE25 "
+                "on this explicit deck - " + _TYPE25_GAP)
+    if c.ssid == 0:
+        return ("an SSID = 0 all-parts self-contact, written as the implicit "
+                "node->surface /INTER/TYPE7 recipe: one surface, no two-part "
+                "clearance to measure; " + starter_gap + "." + _SET_BY_HAND)
+    return (f"the /INTER/TYPE7 self-contact of SSID {c.ssid} (one surface, no "
+            "two-part clearance to measure); " + starter_gap + "."
+            + _SET_BY_HAND)
+
+
+def _offset_term(state: ConversionState, c, a_nodes: Set[int],
+                 b_pids: Set[int]) -> Tuple[float, str]:
+    """CardStack K-04: ``(T, note)`` - the contact thickness LS-DYNA keeps
+    between the two mid-planes (Vol I R17 p.11-128/129 General Remark 12, the
+    SAME predicate as the writer's shell-offset Gapmin), T = t_s/2 for a
+    secondary side of shells only, + t_m/2 for a main side of shells only;
+    t = Card-3 SST / MST when stated, else SFST / SFMT (blank = 1) x the
+    thinnest /SHELL thickness of the side (Vol I R17 p.11-33/34: SFST is
+    ignored where SST is non-zero). ``(0.0, "")`` when no shell is offset."""
+    from .writer.contacts import (_ls_shell_offset_reason,
+                                  _shell_offset_thickness)
+    notes: List[str] = []
+    total = 0.0
+    sec_shells = []
+    covered: Set[int] = set()
+    for e in state.shell_elems:
+        ids = {n for n in e.nodes if n > 0}
+        if ids and ids <= a_nodes:
+            sec_shells.append(e)
+            covered |= ids
+    on_solid = any(n in a_nodes for el in (state.solid_elems, state.tshell_elems)
+                   for s in el for n in s.nodes)
+    main_shells = [e for e in state.shell_elems if e.pid in b_pids]
+    main_solid = any(s.pid in b_pids for el in (state.solid_elems,
+                                                state.tshell_elems)
+                     for s in el)
+    for side, shells, ok, st, sf in (
+            ("secondary", sec_shells, bool(sec_shells) and covered == a_nodes
+             and not on_solid, c.sst, getattr(c, "sfst", 0.0)),
+            ("main", main_shells, bool(main_shells) and not main_solid,
+             c.mst, getattr(c, "sfmt", 0.0))):
+        if not ok:
+            continue
+        reason, _mixed = _ls_shell_offset_reason(state, c, shells)
+        if reason is None:
+            continue
+        if st:
+            t = abs(st)
+            src = f"Card-3 {'SST' if side == 'secondary' else 'MST'} {t:g}"
+        else:
+            ts = [x for x in (_shell_offset_thickness(state, e) for e in shells)
+                  if x > 0.0]
+            if not ts:
+                continue
+            scale = sf if sf else 1.0
+            t = scale * min(ts)
+            src = (f"/SHELL t {min(ts):g}" if scale == 1.0 else
+                   f"SF{'S' if side == 'secondary' else 'M'}T {scale:g} x "
+                   f"/SHELL t {min(ts):g}")
+        total += 0.5 * t
+        notes.append(f"{side} t/2 = {_round_sig(0.5 * t):g} ({src}; "
+                     f"{reason})")
+    return total, "; ".join(notes)
+
+
+def _main_min_side(state: ConversionState, b_pids: Set[int]) -> float:
+    """The smallest segment side of the main side's facets (its shells, else
+    its solids' boundary faces) - the starter's GAPMX, the 0.5 x cap of the
+    shell-offset Gapmin (WARNING 94 above it, i7sti3.F:1075-1083)."""
+    from .writer.contacts import _min_segment_side, _solid_boundary_faces
+    segs: List[List[int]] = [list(e.nodes) for e in state.shell_elems
+                             if e.pid in b_pids]
+    shell_pids = {e.pid for e in state.shell_elems if e.pid in b_pids}
+    faces, _complete = _solid_boundary_faces(
+        state, [p for p in b_pids if p not in shell_pids])
+    return _min_segment_side(state, segs + faces)
+
+
 def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTOR
                     ) -> Tuple[Dict[int, GapminSuggestion], Dict[int, str]]:
     """Suggest a Gapmin for every surface-to-surface contact between two
@@ -761,19 +878,30 @@ def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTO
     closest approach from the secondary side's nodes to the main side's surface
     facets.
 
+    Where LS-DYNA offsets the shells of the contact by half their thickness
+    (CardStack K-04, :func:`_offset_term`) the clearance d runs between
+    MID-PLANES, T of it is contact thickness, and the suggestion is
+    ``T + factor x (d - T)`` - the shells engage just before their offset
+    surfaces meet - capped at 0.5 x the smallest main-segment side like the
+    writer's shell-offset Gapmin; ``d <= T`` (the offset surfaces already
+    overlap) keeps ``factor x d`` and is flagged (``overlap``). No floor.
+
     Returns ``(suggestions, skipped)`` where *suggestions* maps inter_id →
     :class:`GapminSuggestion` and *skipped* maps inter_id → a reason string
-    (self-contacts, single-surface contacts, node-set / facet-less main sides,
-    and — when numpy+scipy are absent — every interface, since there is no
+    naming the route the interface took (self-contacts, TYPE25 routes, ties,
+    the SOFT-routed general contacts, node-set / facet-less main sides, and —
+    when numpy+scipy are absent — every interface, since there is no
     node-to-node fallback).
     """
+    from .writer.contacts import (_general_route_gap, _s2s_type25_refusal,
+                                  n2s_routed)
     part_nodes = _part_nodes_map(state)
     suggestions: Dict[int, GapminSuggestion] = {}
     skipped: Dict[int, str] = {}
 
     # Single-surface (self / all-parts) contacts have no two-part clearance.
     for c in state.contacts_single:
-        skipped[c.inter_id] = "single-surface self-contact (no two-part clearance)"
+        skipped[c.inter_id] = _single_surface_skip(state, c)
 
     # A *CONTACT_..._TIEBREAK is emitted as /INTER/TYPE2, a TIE, which has no
     # Gapmin column at all — its engagement distance is `dsearch`, measured
@@ -786,14 +914,49 @@ def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTO
         skipped[c.inter_id] = (
             "*CONTACT_..._TIEBREAK -> /INTER/TYPE2 (a tie); TYPE2 has no "
             "Gapmin, its engagement distance is dsearch")
+    # CardStack K-04: every other route by name, so a deck without a
+    # measurable interface says what it has.
+    for c in state.contacts_tied:
+        skipped[c.inter_id] = (
+            f"*CONTACT_TIED_{c.variant} -> a tie (/INTER/TYPE2 or TYPE10), "
+            "whose engagement distance is dsearch / its GAP from Card-3 "
+            "SST/MST, not a Gapmin")
+    for c in state.contacts_spotweld:
+        skipped[c.inter_id] = (
+            "*CONTACT_SPOTWELD -> /INTER/TYPE2 (a tie); TYPE2 has no Gapmin, "
+            "its engagement distance is dsearch")
+    for c in state.contacts_general:
+        # the route's own gap rule, shared with the --inter-gapmin report
+        # (writer.contacts._general_route_gap, CardStack K-05): the -7 TYPE7
+        # is Igap 2, an element-derived gap SST/MST only floor
+        _label, tname, rule = _general_route_gap(c)
+        kw = c.keyword or "CONTACT_AUTOMATIC_GENERAL"
+        soft = "" if kw == "CONTACT_SINGLE_EDGE" else f" SOFT = {c.soft}"
+        skipped[c.inter_id] = (
+            f"*{kw}{soft} -> /INTER/{tname} {rule}: --inter-gapmin / "
+            "--auto-gapmin do not reach the SOFT-routed interfaces")
+    for c in state.contacts_type25:
+        kw = c.keyword or "CONTACT"
+        skipped[c.inter_id] = (
+            f"*{kw} is written as the one-way /INTER/TYPE7 of the implicit "
+            "node-to-surface route (--implicit-n2s-type7), which "
+            "--auto-gapmin does not measure; --inter-gapmin sets its Gapmin"
+            if n2s_routed(state, c) else
+            f"*{kw} is written as /INTER/TYPE25 - " + _TYPE25_GAP)
 
     have_backend = _HAVE_FAST_PROXIMITY
 
     for c in state.contacts_surf2surf:
+        if state.options.s2s_type25 and not _s2s_type25_refusal(state, c):
+            skipped[c.inter_id] = (
+                "written as a two-surface /INTER/TYPE25 (--s2s-type25) - "
+                + _TYPE25_GAP)
+            continue
         a_pids = _side_pids(state, c.ssid, c.sstyp)        # secondary
         b_pids = _side_pids(state, c.msid, c.mstyp)        # main
         if a_pids is not None and b_pids is not None and a_pids and a_pids == b_pids:
-            skipped[c.inter_id] = "self-contact (same part on both sides)"
+            skipped[c.inter_id] = ("self-contact (same part on both sides)."
+                                   + _SET_BY_HAND)
             continue
 
         a_nodes = _side_node_ids(state, c.ssid, c.sstyp, part_nodes)   # secondary
@@ -801,35 +964,55 @@ def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTO
         shared = a_nodes & b_nodes
         a_nodes -= shared
         if not a_nodes or not b_nodes:
-            skipped[c.inter_id] = "a side has no nodes of its own (empty or fully shared)"
+            skipped[c.inter_id] = ("a side has no nodes of its own (empty or "
+                                   "fully shared)." + _SET_BY_HAND)
             continue
 
         if not have_backend:
             skipped[c.inter_id] = (
                 "node-to-segment clearance needs numpy+scipy (not installed) — "
-                "no node-to-node fallback")
+                "no node-to-node fallback." + _SET_BY_HAND)
             continue
 
         if b_pids is None or not b_pids:
             skipped[c.inter_id] = (
-                "main side is a node set (no surface facets to measure against)")
+                "main side is a node set (no surface facets to measure "
+                "against)." + _SET_BY_HAND)
             continue
 
         d = _min_node_to_segment(state, a_nodes, b_pids)
         if d is None:
-            skipped[c.inter_id] = "main side has no surface facets (no solid/shell elements)"
+            skipped[c.inter_id] = ("main side has no surface facets (no "
+                                   "solid/shell elements)." + _SET_BY_HAND)
             continue
         if d <= 0.0:
-            skipped[c.inter_id] = "degenerate clearance (secondary node lies on the main surface)"
+            skipped[c.inter_id] = ("degenerate clearance (secondary node lies "
+                                   "on the main surface)." + _SET_BY_HAND)
             continue
 
+        offset, note = _offset_term(state, c, a_nodes, b_pids)
+        overlap = False
+        cap = 0.0
+        if offset > 0.0 and d > offset:
+            value = offset + factor * (d - offset)
+            # the shell-offset Gapmin's own cap (WARNING 94 above it,
+            # i7sti3.F:1075-1083), on the offset form only: the plain
+            # factor x d below keeps the value it always had
+            side = _main_min_side(state, b_pids)
+            if side > 0.0 and value > 0.5 * side:
+                value = cap = 0.5 * side
+        else:
+            value = factor * d
+            overlap = offset > 0.0
         suggestions[c.inter_id] = GapminSuggestion(
             inter_id=c.inter_id,
             title=c.title.strip() or f"CONTACT_{c.inter_id}",
             side_a=_describe_side(state, c.ssid, c.sstyp),
             side_b=_describe_side(state, c.msid, c.mstyp),
             min_distance=d,
-            suggested_gapmin=_round_sig(factor * d),
+            suggested_gapmin=_round_sig(value),
+            offset=_round_sig(offset), offset_note=note, overlap=overlap,
+            cap=_round_sig(cap),
         )
 
     return suggestions, skipped
@@ -847,6 +1030,9 @@ def apply_auto_gapmin(state: ConversionState, protect_inter_ids=()) -> None:
     would re-trigger the active-set chatter the recipe specifically fixes, so
     auto-gapmin must not shrink them.  Called by :func:`k2rad.convert` when
     ``auto_gapmin`` is on.
+
+    Every value written is recorded in ``state.auto_gapmin_ids`` (CardStack
+    K-04), so the writer's override line names ``--auto-gapmin`` for it.
     """
     protect = set(protect_inter_ids)
     if not _HAVE_FAST_PROXIMITY:
@@ -880,21 +1066,59 @@ def apply_auto_gapmin(state: ConversionState, protect_inter_ids=()) -> None:
             )
             continue
         state.options.inter_gapmin[iid] = s.suggested_gapmin
-        state.warn(
-            f"--auto-gapmin INTER {iid} ({s.title}): min node-to-segment clearance "
-            f"{s.side_a} → {s.side_b} = {s.min_distance:g} → Gapmin="
-            f"{s.suggested_gapmin:g} (= {factor:g}×clearance) for 0 initial "
-            "penetrations and clean engagement under load."
-        )
+        state.auto_gapmin_ids.add(iid)
+        capped = (f", CAPPED at 0.5 x the smallest main-segment side = "
+                  f"{s.cap:g} like the shell-offset Gapmin (above it the "
+                  "starter prints WARNING 94, i7sti3.F:1075-1083; "
+                  f"--inter-gapmin {iid}=VAL writes past the cap)"
+                  if s.cap else "")
+        if s.offset and not s.overlap:
+            # the K1a review: a cap below T lies INSIDE LS-DYNA's offset
+            # contact surfaces, so the contact engages later than LS-DYNA's
+            below = (f" The cap {s.cap:g} is below T = {s.offset:g}: the "
+                     "written gap lies inside LS-DYNA's offset contact "
+                     "surfaces, so this contact engages "
+                     f"{_round_sig(s.offset - s.cap):g} closer than LS-DYNA's "
+                     f"does; --inter-gapmin {iid}={s.offset:g} writes T."
+                     if s.cap and s.cap < s.offset else "")
+            state.warn(
+                f"--auto-gapmin INTER {iid} ({s.title}): min node-to-segment "
+                f"clearance {s.side_a} → {s.side_b} = {s.min_distance:g}, "
+                "measured between MID-PLANES - LS-DYNA offsets the shells by "
+                f"half their thickness here ({s.offset_note}), so T = "
+                f"{s.offset:g} of it is contact thickness → Gapmin="
+                f"{s.suggested_gapmin:g} (= T + {factor:g} x (d - T), "
+                f"{factor:g} of the {_round_sig(s.min_distance - s.offset):g} "
+                f"between the offset surfaces){capped} for 0 initial "
+                "penetrations"
+                + ("." + below if below else
+                   " and clean engagement under load."))
+        elif s.overlap:
+            state.warn(
+                f"--auto-gapmin INTER {iid} ({s.title}): min node-to-segment "
+                f"clearance {s.side_a} → {s.side_b} = {s.min_distance:g}, but "
+                f"LS-DYNA offsets the shells here ({s.offset_note}) by T = "
+                f"{s.offset:g}: d = {s.min_distance:g} <= T, so the offset "
+                "contact surfaces already overlap by "
+                f"{_round_sig(s.offset - s.min_distance):g} and LS-DYNA "
+                "engages them at t = 0. Gapmin="
+                f"{s.suggested_gapmin:g} (= {factor:g} x d){capped} keeps 0 "
+                "initial penetrations here - check the mesh for the overlap.")
+        else:
+            state.warn(
+                f"--auto-gapmin INTER {iid} ({s.title}): min node-to-segment clearance "
+                f"{s.side_a} → {s.side_b} = {s.min_distance:g} → Gapmin="
+                f"{s.suggested_gapmin:g} (= {factor:g}×clearance) for 0 initial "
+                "penetrations and clean engagement under load."
+            )
 
     for iid, reason in sorted(skipped.items()):
         state.warn(
-            f"--auto-gapmin INTER {iid}: no clearance suggestion — {reason}. "
-            "Set Gapmin manually via --inter-gapmin if it pre-penetrates or fails to engage."
-        )
+            f"--auto-gapmin INTER {iid}: no clearance suggestion — {reason}.")
 
     if not suggestions and not skipped:
-        state.warn("--auto-gapmin: no contact interfaces found to analyze.")
+        state.warn("--auto-gapmin: the deck writes no contact interface, so "
+                   "there is no clearance to measure.")
 
 
 def analyze_file(input_path: str, factor: float = DEFAULT_GAPMIN_FACTOR

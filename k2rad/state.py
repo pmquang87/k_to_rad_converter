@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import (Any, Dict, FrozenSet, List, NamedTuple, Optional, Set,
+                    Tuple, Union)
 
 
 #: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
@@ -1196,6 +1197,13 @@ class SectionShell:
     # the deck's own values for the writer's sentences. None = never read.
     card2: Optional[Tuple[float, Optional[float], Optional[float],
                           Optional[float]]] = None
+    # *SECTION_SHELL card 1 field 3 (cols 21-30) SHRF, the transverse shear
+    # correction factor, as STATED: a BLANK field is 0.0 = "not given"
+    # (LS-DYNA's own default is 1.0) - the convention SectionTshell and
+    # *PART_COMPOSITE use. NOT converted: /PROP/SHELL Ashear stays 0, which
+    # the starter turns into 5/6 (hm_read_prop01.F:244); carrying SHRF to
+    # Ashear is a ROADMAP round-10 item.
+    shrf: float = 0.0
 
 
 #: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
@@ -3848,6 +3856,29 @@ class ContactAutoSingle:
     # k2rad itself (the implicit-stabilization self-contact), which has no
     # originating keyword to report.
     keyword: str = ""
+    #: LS-DYNA Card 3 field 5 SFST / SFSAT, the SURFA contact-thickness scale
+    #: (Vol I R17 p.11-33/34; 0 = blank = 1.0). Read for the SSID = 0
+    #: /INTER/TYPE25 route's gap-input warning (CardStack K-13); written
+    #: nowhere.
+    sfst: float = 0.0
+    #: Optional Card A fields 1 / 2 / 5 / 6 SOFT SOFSCL SBOPT DEPTH and Card
+    #: C field 4 DTSTIF (Vol I R17 p.11-89/90/91, p.11-105/106; blank = 0,
+    #: which is LS-DYNA's SOFSCL 0.1, SBOPT 2 and DEPTH 2 - 3 on
+    #: AUTOMATIC_GENERAL). Named by the route that drops them
+    #: (writer/contacts._warn_soft_card_fields, CardStack K-09); written
+    #: nowhere.
+    soft: int = 0
+    sofscl: float = 0.0
+    sbopt: int = 0
+    depth: int = 0
+    dtstif: float = 0.0
+    #: Optional Card D field 8 SHLEDG and Card E fields 4 / 6 SRNDE ICOR
+    #: (Vol I R17 p.11-110/114/115): SRNDE 1 -> TYPE25 Ishape 2 (CardStack
+    #: K-16, SHLEDG first for SOFT 2), ICOR != 0 makes Card-2 VDC a
+    #: coefficient of restitution (K-11). 0 = blank.
+    shledg: int = 0
+    srnde: int = 0
+    icor: int = 0
     # NOTE (round 2, 2026-09-06): an `inacti: Optional[int]` field lived here
     # for one round so k2rad's synthesized implicit-stabilization stub could
     # state Inacti = 1 and dodge starter ERROR 611. It was REMOVED after
@@ -3890,6 +3921,22 @@ class ContactAutoSurf2Surf:
     #: R14 triage round 6, A8).
     thkopt: int = 0
     shlthk_c: int = 0
+    #: Card 3 fields 5 / 6 SFST / SFMT (SFSAT / SFSBT): the SURFA / SURFB
+    #: contact-thickness scales, ignored where SST / MST is non-zero (Vol I
+    #: R17 p.11-33/34); 0 = blank = 1.0. Read for --auto-gapmin's offset term
+    #: (gapmin.suggest_gapmins, CardStack K-04); written nowhere.
+    sfst: float = 0.0
+    sfmt: float = 0.0
+    #: Optional Cards A / C / D / E, as on ContactAutoSingle (CardStack K-09,
+    #: K-11, K-16): SOFT SOFSCL SBOPT DEPTH, DTSTIF, SHLEDG, SRNDE ICOR.
+    soft: int = 0
+    sofscl: float = 0.0
+    sbopt: int = 0
+    depth: int = 0
+    dtstif: float = 0.0
+    shledg: int = 0
+    srnde: int = 0
+    icor: int = 0
 
 
 @dataclass
@@ -3902,8 +3949,12 @@ class ContactAutoGeneral:
       * SOFT == -7  → /INTER/TYPE7  (node-group → surface penalty self-contact)
       * SOFT == -11 → /INTER/TYPE11 (edge-to-edge / line contact)
       * SOFT == -19 → /INTER/TYPE19 (combined surface + edge contact)
-      * anything else (0/1/2/…) → the default (handled by ``ContactAutoSingle``
-        → /INTER/TYPE25 explicit or /INTER/TYPE7 implicit, unchanged).
+      * anything else (0/1/2/…) → the default, handled by
+        ``ContactAutoSingle`` and unchanged: SSID = 0 → the all-parts
+        /INTER/TYPE25 self-contact on an explicit deck (/INTER/TYPE7
+        node→surface on an implicit one); SSID != 0 → the /INTER/TYPE7
+        self-contact of that set on BOTH decks (secondary = the set's
+        non-rigid nodes, main = the set's surface).
 
     Only the three sentinel-routed cases land here; the default case is appended
     to ``contacts_single`` so the validated single-surface path is byte-for-byte
@@ -4163,6 +4214,15 @@ class ContactType25:
     soft: int = 0           # optional Card A SOFT (dyna2rad -7/-11/-19 sentinels)
     ignore: int = 0         # optional Card C IGNORE → Inacti
     keyword: str = ""       # source *CONTACT spelling — see ContactAutoSingle.keyword
+    #: Optional Card A SBOPT / DEPTH: a SOFT 2 contact checks edge-to-edge
+    #: penetration only with DEPTH 5/15/25/35/45/55 or SBOPT 1 (Vol I R17
+    #: p.11-91/97), the gate for Iedge 22 (CardStack K-10). Card D SHLEDG
+    #: and Card E SRNDE / ICOR as on ContactAutoSingle (K-16, K-11).
+    sbopt: int = 0
+    depth: int = 0
+    shledg: int = 0
+    srnde: int = 0
+    icor: int = 0
 
 
 @dataclass
@@ -6320,6 +6380,13 @@ class ControlImplicitDynamics:
 class ControlOutput:
     npopt: int          # 0=print node/elem, 1=suppress
     neecho: int         # nodal echo flag
+    # *CONTROL_OUTPUT card 1 field 7 (cols 61-70) IKEDIT: "Problem status
+    # report interval steps to the d3hsp file. This flag is ignored if the
+    # glstat file is written" (Vol I R17 p.12-441). Stored as STATED: 0 =
+    # blank (LS-DYNA's own default is 100). The candidate for the engine
+    # /PRINT/-N cadence (writer/assembly), which LS-DYNA honours only when
+    # no *DATABASE_GLSTAT is written.
+    ikedit: int = 0
 
 
 @dataclass
@@ -6422,7 +6489,48 @@ class ControlImplicitSolution:
 
 @dataclass
 class ControlTermination:
+    """*CONTROL_TERMINATION card 1: ENDTIM ENDCYC DTMIN ENDENG ENDMAS NOSOL
+    (Vol I R17 p.12-558). ``endtim`` -> /RUN; the other four are stored as
+    STATED (0 / 0.0 = blank) for their consumers - ENDMAS ("percent change
+    in the total mass for termination ... relevant if and only if mass
+    scaling is used", LS-DYNA's own default 1.0E8 = off; < 0 is a load
+    curve id) is the candidate for an engine /STOP Mmax on a DT2MS < 0
+    deck, whose Mmax is a RATIO (ecrit.F:516/593). NOSOL is not read."""
     endtim: float
+    endcyc: int = 0         # termination cycle (0 = none)
+    dtmin: float = 0.0      # tsmin = dtstart x DTMIN (0 = none)
+    endeng: float = 0.0     # percent change in energy ratio (0 = inactive)
+    endmas: float = 0.0     # percent change in total mass (0 = blank)
+
+
+@dataclass
+class ControlUnits:
+    """*CONTROL_UNITS (Vol I R17 p.12-592/593): the deck's DECLARED units -
+    "This does not provide any mechanism for automatic conversion of units
+    of any entry in the keyword input deck."
+
+    Card 1 ``LENGTH TIME MASS TEMP`` (A10 each; defaults m, sec, kg, K),
+    stored as STATED ("" = blank). Optional card 2 ``LENGTH_SCALE
+    TIME_SCALE MASS_SCALE`` (F20 each: meters / seconds / kilograms per
+    deck unit; 0.0 = not given), whose "non-zero scales ... override what
+    is specified on the first card".
+
+    ``labels`` is the OpenRadioss /BEGIN (mass, length, time) triple the
+    card maps to (handlers._control_units_labels), None when it has none -
+    an imperial or unknown name, a scale with no Radioss label, or a card
+    that states nothing; ``problems`` says why, ``defaulted`` names the
+    blank card-1 cells that took the manual's default. convert() writes
+    ``labels`` to /BEGIN when the caller gave no units."""
+    length: str = ""
+    time: str = ""
+    mass: str = ""
+    temp: str = ""
+    length_scale: float = 0.0
+    time_scale: float = 0.0
+    mass_scale: float = 0.0
+    labels: Optional[Tuple[str, str, str]] = None
+    problems: List[str] = field(default_factory=list)
+    defaulted: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -6512,6 +6620,12 @@ class DbExtentBinary:
     rltflg: int = 1     # resultant stresses flag
     engflg: int = 1     # energy output flag
     shge: int = 0       # shell hourglass energy flag
+    #: Card 1 field 3 MAXINT, the shell / thick-shell through-thickness
+    #: integration points written to d3plot (Vol I R17 p.16-67, "def = 3";
+    #: blank = 3). MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL
+    #: (writer/assembly._make_engine_output, CardStack K-42; read since wave
+    #: C - before it the rule could not fire from a .k deck).
+    maxint: int = 3
 
 
 # ── Seatbelts / restraints (*ELEMENT_SEATBELT* family) ───────────────────────
@@ -7570,10 +7684,43 @@ class ImposedTemperature:
 
 @dataclass
 class ConvertOptions:
-    """Opt-in conversion switches set from the CLI / convert() — NOT parsed from
-    the .k file. All default to off so a default conversion is byte-identical.
+    """Conversion switches set from the CLI / convert() — NOT parsed from the
+    .k file. The opt-in levers default to off (or None / empty), and with
+    them alone a conversion keeps the bytes the option did not exist for.
+    The EXCEPTIONS default to ON: measured fixes, each with a ``--no-``
+    opt-out that restores the earlier output on the decks it moves -
 
-    These productize the three proven manual deck-patches that make a
+    ``adaptive_spring_token``, ``axisymmetric_2d``, ``bcs_union``,
+    ``bolt_rigid_contact``, ``constrained_global``, ``constrained_linear``,
+    ``contact_birth_death``, ``corotational_orthotropic``,
+    ``damping_curve_window``,
+    ``default_hourglass``, ``deformable_to_rigid``, ``discrete_offset``,
+    ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
+    ``fixed_curve_columns``, ``generalized_weld_butt``,
+    ``imflag0_eigen_explicit``, ``imflag_curve_restart``,
+    ``implicit_n2s_type7``, ``implicit_rigid_gravity_nodes``,
+    ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
+    ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
+    ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
+    ``maxint_stress_all``, ``modal_acoustic_void``, ``node_tc_rc_bcs``,
+    ``plane_strain_unit_thickness``, ``plane_stress_unit_thickness``,
+    ``positive_dt2ms_mass_scaling``, ``prescribed_motion_sf_default``,
+    ``rigid_cog_master``, ``rigid_element_mass_admas``,
+    ``rigid_local_constraints``, ``rigid_local_shared_skew``,
+    ``rigid_part_pid_precedence``, ``rigid_secondary_swap``,
+    ``rigid_shell_rotary_inertia``, ``section_nodal_thickness_mean``,
+    ``shell_offset_gapmin``, ``shell_to_solid_rbody``,
+    ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
+    ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
+    ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
+    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``, ``weld_exponents``,
+    ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
+    ``zero_tolerance_ectol``
+
+    (tests/test_cardstack_pipeline.py holds this list to the fields: every
+    default-ON field is named here, and nothing else is).
+
+    The first fields productize the three proven manual deck-patches that make a
     force-control implicit deck (a *LOAD_RIGID_BODY pulling a clearance-fit pin
     held only by penalty contact) converge — see the writer for the physics:
       * ground_springs/ground_spring_k → soft /PROP/TYPE8 grounding springs on
@@ -9238,6 +9385,89 @@ class ConvertOptions:
     # it, because then the check applies again.
     ale_multimat_law51: bool = False
 
+    # ── The CardStack-pipeline batch levers (the front-end plumbing; each
+    #    consumer lives in the writer module named) ─────────────────────────
+    # --no-damping-curve-window (default ON; writer/loads): the LCID curve of
+    # *DAMPING_PART_MASS / *DAMPING_GLOBAL is converted in TIME - a
+    # piecewise-constant curve as one alpha-only /DAMP per level with its
+    # Tstart / Tstop, any other shape as /DAMP/FUNCT - and on *DAMPING_GLOBAL
+    # the curve replaces VALDMP, which LS-DYNA bypasses when LCID > 0 (Vol I
+    # R17 p.15-8). False = the old single /DAMP at the curve's first
+    # ordinate (VALDMP on *DAMPING_GLOBAL).
+    damping_curve_window: bool = True
+    # --stop-added-mass (opt-in; writer/assembly): on a DT2MS < 0 deck write
+    # *CONTROL_TERMINATION ENDMAS as an engine /STOP whose Mmax is the RATIO
+    # ENDMAS / 100 (ecrit.F:516/593 compare (M - M0) / M0 against it).
+    stop_added_mass: bool = False
+    # --dt2ms-tssfac-product (opt-in; writer/assembly): /DT/NODA/CST (and
+    # /DT/AMS) Tmin = TSSFAC x |DT2MS|, LS-DYNA's minimum step for DT2MS < 0
+    # (Vol I R17 p.12-585), instead of |DT2MS|.
+    dt2ms_tssfac_product: bool = False
+    # --print-every N (writer/assembly): the engine /PRINT/-N cadence, N in
+    # 1..9999 (the engine reads the cell as I5, freform.F:1563). None = the
+    # writer's own rule.
+    print_every: Optional[int] = None
+    # --no-tet-isolid1 (default ON; writer/mesh): /PROP/SOLID Isolid 1 on a
+    # section whose elements are ALL 4- / 10-node tets (not ALE, not
+    # cohesive) instead of Isolid 14. The starter resets every tet group to
+    # Isolid 1 anyway, for every material (sgrtails.F:984-1000); on the way,
+    # Isolid 14 on a LAW1 section draws WARNING 791, the integration-point
+    # message (sgrtails.F:695-704).
+    tet_isolid1: bool = True
+    # --no-law1-shell-global-n (default ON; writer/mesh): /PROP/SHELL N = 0
+    # on a section whose parts are all LAW1 and carry no
+    # *INITIAL_STRESS_SHELL, instead of max(2, NIP) - which the starter sets
+    # to N = 0 itself with WARNING 1084 (cgrtails.F:780-791).
+    law1_shell_global_n: bool = True
+    # --inter-stmin ID=VAL (writer/contacts): the /INTER/TYPE7 Stmin cell of
+    # interface ID (k2rad's own value is 1000, a force / length in the
+    # deck's units). VAL >= 0.
+    inter_stmin: Dict[int, float] = field(default_factory=dict)
+    # --inter-inacti ID=6 (writer/contacts): Inacti 6 on the TYPE7 / 11 / 19
+    # interface ID where k2rad would write 5; 6 is the only value accepted.
+    inter_inacti: Dict[int, int] = field(default_factory=dict)
+    # --s2s-type25 (opt-in; writer/contacts): an explicit
+    # *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE as a two-surface /INTER/TYPE25
+    # instead of the one-way /INTER/TYPE7.
+    s2s_type25: bool = False
+    # --general-shell-edges (opt-in; writer/contacts): an SSID = 0
+    # *CONTACT_AUTOMATIC_GENERAL's TYPE25 self-contact with Iedge 1 (shell
+    # border edges) instead of 1000.
+    general_shell_edges: bool = False
+    # --no-single-surface-sst-gap (default ON; writer/contacts): Gapmin =
+    # |SST| on a single-surface contact of shells on an Igap-0 route - two
+    # shells each carrying the contact thickness SST meet at SST/2 + SST/2 -
+    # instead of (|SST| + |MST|)/2.
+    single_surface_sst_gap: bool = True
+
+    # ── The opt-out flags of the user's decision 8 (2026-11-01) for the
+    #    wave-C defaults that had none ───────────────────────────────────
+    # --no-contact-birth-death (default ON; writer/contacts): *CONTACT
+    # Card-2 BT / DT -> /INTER Tstart / Tstop on every sliding-contact route
+    # by the sign rules of Vol I R17 p.11-29/30 (CardStack K-11). False =
+    # the cells each route wrote before K-11: Tstart 0 / Tstop 0 where BT /
+    # DT were dropped; BT / DT as stated (Tstop 0 for a DT >= 1e19) on the
+    # eroding / node-to-surface TYPE25 family, the routed implicit
+    # node-to-surface TYPE7 and --s2s-type25.
+    contact_birth_death: bool = True
+    # --no-soft2-iedge-gate (default ON; writer/contacts): an optional
+    # Card A SOFT 2 on the ERODING_SURFACE_TO_SURFACE /
+    # AUTOMATIC_NODES_TO_SURFACE /INTER/TYPE25 writes Iedge 22 only with
+    # DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1, LS-DYNA's edge-treatment
+    # rule (Vol I R17 p.11-94; CardStack K-10). False = Iedge 22 for every
+    # SOFT 2 card there, as dyna2rad writes it (convertcontacts.cxx:593-611).
+    soft2_iedge_gate: bool = True
+    # --no-srnde-ishape (default ON; writer/contacts): optional Card E SRNDE
+    # 1 -> /INTER/TYPE25 Ishape 2 (round gap) where the interface holds a
+    # shell (CardStack K-16). False = Ishape 0 (square), the dropped SRNDE
+    # named.
+    srnde_ishape: bool = True
+    # --no-maxint-stress-all (default ON; writer/assembly):
+    # *DATABASE_EXTENT_BINARY MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL in
+    # the engine deck (CardStack K-42, reached from a .k deck since wave C).
+    # False = no such line whatever MAXINT says; the read stays.
+    maxint_stress_all: bool = True
+
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
 
@@ -9289,6 +9519,44 @@ class ConvertOptions:
                 "*BOUNDARY_THERMAL_WELD_TRAJECTORY conversion - switch the "
                 "conversion off with weld_trajectory_impflux=False "
                 "(--no-weld-trajectory-impflux) instead.")
+        # The CardStack-pipeline levers: the same refusals the CLI and the
+        # GUI make, for a convert() caller handing them in directly.
+        pe = self.print_every
+        if pe is not None and (isinstance(pe, bool) or not isinstance(pe, int)
+                               or not 1 <= pe <= 9999):
+            raise ValueError(
+                f"print_every must be a whole number of cycles in 1..9999 "
+                f"(got {pe!r}): the engine reads the /PRINT/-N cell as I5 "
+                "(freform.F:1563). None keeps the writer's own /PRINT.")
+        for iid, val in self.inter_stmin.items():
+            if isinstance(iid, bool) or not isinstance(iid, int):
+                raise ValueError(
+                    f"inter_stmin keys are interface ids (int), not {iid!r}")
+            # a str / bool passes float() ("1.5" -> 1.5, True -> 1.0) and
+            # would reach the writer as written: refused like print_every
+            if isinstance(val, (bool, str, bytes)):
+                raise ValueError(
+                    f"inter_stmin[{iid}] must be a number, not {val!r}")
+            try:
+                fv = float(val)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"inter_stmin[{iid}] must be a number, not {val!r}")
+            if not (math.isfinite(fv) and fv >= 0.0):
+                raise ValueError(
+                    f"inter_stmin[{iid}] = {val!r}: the /INTER/TYPE7 Stmin "
+                    "cell is a stiffness FLOOR and must be finite and >= 0 "
+                    "(i7cor3.F:277-289 applies it as MAX(Stmin, K)).")
+        for iid, val in self.inter_inacti.items():
+            if isinstance(iid, bool) or not isinstance(iid, int):
+                raise ValueError(
+                    f"inter_inacti keys are interface ids (int), not {iid!r}")
+            if isinstance(val, bool) or not isinstance(val, int) or val != 6:
+                raise ValueError(
+                    f"inter_inacti[{iid}] = {val!r}: only Inacti 6 is "
+                    "accepted - it replaces the 5 k2rad writes for the "
+                    "deck's IGNORE on a TYPE7 / 11 / 19 interface; every "
+                    "other value already has its own .k route.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9454,7 +9722,9 @@ class ConversionState:
     engine_segment: Optional["EngineSegment"] = None
     _auto_id: int = 90001               # counter for auto-generated IDs
     # Unit system written to the /BEGIN header (mass, length, time).
-    # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
+    # convert() resolves it AFTER dispatch: the caller's units if given,
+    # else the *CONTROL_UNITS labels, else this ton-mm-s default (a
+    # *LOAD_BLAST_ENHANCED UNIT flag then wins over the last two).
     units: Tuple[str, str, str] = ("Mg", "mm", "s")
     # Opt-in conversion switches (CLI flags); see ConvertOptions.
     options: ConvertOptions = field(default_factory=ConvertOptions)
@@ -10904,6 +11174,41 @@ class ConversionState:
     # /TH/INTER is assembled from the parsed contact records, so it has to
     # subtract these or the starter answers WARNING 257 NONEXISTENT INTER.
     dropped_inter_ids: Set[int] = field(default_factory=set)
+    # CardStack batch, K1a-contacts: the per-interface contact levers'
+    # bookkeeping. Each is filled at the write line that consumes the lever
+    # and read by writer/contacts._report_contact_lever_reach in the LAST
+    # contact section of the starter registry (refused_contacts), so a lever
+    # that reached another interface type than its help names, or none, is
+    # said once per deck.
+    #: --soften-stfac: ``{"TYPE7" | "TYPE11" | "TYPE19" | "TYPE25": [ids]}``,
+    #: the interfaces whose Stfac cell took the override (_stfac_for /
+    #: _type25_stfac).
+    soften_stfac_reached: Dict[str, List[int]] = field(default_factory=dict)
+    #: --soften-stfac: the *_TIEBREAK post-rupture companion /INTER/TYPE25
+    #: ids, which keep Stfac 0 (writer/contacts._tiebreak_companion_contact).
+    soften_stfac_unreached: List[int] = field(default_factory=list)
+    #: K-02: the --inter-stmin ids whose /INTER/TYPE7 Stmin cell took them.
+    inter_stmin_reached: Set[int] = field(default_factory=set)
+    #: K-06: the --inter-inacti ids an Inacti decision reached - Inacti 6
+    #: written, or the request refused / not applied by name (a TYPE25, the
+    #: *_INTERFERENCE 0, the implicit bootstrap 0, the recipe's 5).
+    inter_inacti_reached: Set[int] = field(default_factory=set)
+    #: K-04: the inter_gapmin entries gapmin.apply_auto_gapmin wrote, so the
+    #: override line names --auto-gapmin rather than --inter-gapmin.
+    auto_gapmin_ids: Set[int] = field(default_factory=set)
+    #: K-02: the per-part contact-stiffness estimate of the Stmin floor
+    #: warning, memoised per conversion: ``{pid: estimate | None}``, the
+    #: estimate a ``writer.contacts._PartStiffness`` (None = the part's
+    #: material or elements give none).
+    stmin_part_estimates: Dict[int, Any] = field(default_factory=dict)
+    #: K-02: the cheap sampled stiffness scale per part (``{pid: float |
+    #: None}``) that lets the floor warning skip the exact walk where the
+    #: floor is far below (writer.contacts._part_stiffness_quick).
+    stmin_part_quick: Dict[int, Any] = field(default_factory=dict)
+    #: K-08B: the *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE ids --s2s-type25
+    #: wrote as a two-surface /INTER/TYPE25 (writer/contacts._make_interfaces),
+    #: so the --inter-gapmin report names that route instead of 'unknown id'.
+    s2s_type25_ids: Set[int] = field(default_factory=set)
     force_transducers: List[ContactForceTransducer] = field(default_factory=list)
     # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
     th_sub_ids: List[Tuple[int, str]] = field(default_factory=list)
@@ -10935,9 +11240,12 @@ class ConversionState:
     ctrl_parallels: List[ControlParallel] = field(default_factory=list)
     ctrl_implicit_auto: Optional[ControlImplicitAuto] = None
     ctrl_implicit_dyn: Optional[ControlImplicitDynamics] = None
-    #: Parsed and stored; NO writer consumer reads it — the card's effect
-    #: is currently DROPPED (the handler keeps it out of skipped_keywords).
+    #: Parsed and stored. NPOPT / NEECHO have no Radioss counterpart; IKEDIT
+    #: is the candidate /PRINT/-N cadence of the engine writer.
     ctrl_output: Optional[ControlOutput] = None
+    #: *CONTROL_UNITS (handlers.handle_control_units). convert() reads its
+    #: ``labels`` for the /BEGIN units when the caller gave none.
+    control_units: Optional[ControlUnits] = None
     ctrl_shell: Optional[ControlShell] = None
     #: Parsed and stored; NO writer consumer reads it — the card's effect
     #: is currently DROPPED (the handler keeps it out of skipped_keywords).

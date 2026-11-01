@@ -338,10 +338,16 @@ def _elform_to_isolid(elform: int, assumed_strain_isolid: int = 0) -> int:
         Variable Number of Gauss Points", ``radioss2022/PROP/
         prop_p14_solid.cfg:198``; ``hm_read_prop14.F:277`` and
         ``hm_read_prop06.F:297`` force it co-rotational, JCVT 2). k2rad also
-        writes it as the property Isolid of its
-        tetrahedron ELFORMs 10/13 (a tetrahedron's formulation is picked by
-        the property's ``Itetra4`` / ``Itetra10`` cells), and since round 6 on
-        an element-frame orthotropic brick
+        returns it for its tetrahedron ELFORMs 10/13 (a tetrahedron's
+        formulation is picked by the property's ``Itetra4`` / ``Itetra10``
+        cells) - the hourglass gate and the tet tests key on that 14 - but
+        WRITES it there only on a section whose elements are not all tets (a
+        ``/BRICK`` among them - a hex, or a wedge / pyramid written as a
+        degenerate hex - or no element at all) or under
+        ``--no-tet-isolid1``: an all-tet section is written Isolid 1 (K-30,
+        ``writer/mesh._tet_section_isolid``), the value the starter resets
+        an Isolid 14 tet group to (``sgrtails.F:984-999``). Since round 6 it
+        is also the Isolid of an element-frame orthotropic brick
         (``writer/composites._connectivity_frame_isolid``). ``24`` HEPH (1
         Gauss point with physical stabilisation). ``1`` the
         Belytschko-orthogonalised viscous 1-point hex; ``2`` the Hallquist

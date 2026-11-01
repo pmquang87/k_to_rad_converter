@@ -51,6 +51,38 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: The CardStack batch (2026-10, group K3) switched two writer defaults ON
+#: that move bytes of decks below without touching what those tests test: an
+#: all-tet *SECTION_SOLID is written /PROP/SOLID Isolid 1 (K-30,
+#: --no-tet-isolid1) and an all-LAW1 *SECTION_SHELL /PROP/SHELL N = 0 (K-31,
+#: --no-law1-shell-global-n). The 386444e-bytes pins hold both levers at
+#: their opt-out, so each keeps testing its own change against the pristine
+#: checkout it was measured on (MEASURED 2026-10-31: with both levers off
+#: every pin below holds again); K-30 / K-31 are pinned in
+#: tests/test_cardstack_pipeline_props.py. A pin of a DEFAULT arm (or of an
+#: opt-in arm) also converts the deck with the K3 defaults and checks, with
+#: _k3_default_moves, that this arm is the pinned bytes plus exactly the
+#: K-30 / K-31 cells it names - so that output stays pinned as a whole.
+_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False)
+
+
+def _k3_default_moves(off: str, on: str):
+    """tests/test_r14_triage_8._k3_default_moves, the one definition (that
+    module is imported further down as _t8)."""
+    return _t8._k3_default_moves(off, on)
+
+
+def _k32_shrf_free(warnings):
+    """*warnings* without the K-32 note a stated *SECTION_SHELL SHRF draws
+    since the CardStack batch (these decks state SHRF 1.0) - the warning-list
+    pins were measured on the pristine 386444e checkout, which had no such
+    note; the note itself is pinned in tests/test_cardstack_pipeline_props.py.
+    """
+    return [w for w in warnings
+            if not (w.startswith("*SECTION_SHELL ")
+                    and "the stated SHRF" in w)]
+
+
 def _blocks(starter: str, prefix: str):
     """``[(header, [body lines])]`` of every block whose header starts with
     *prefix* (comment lines dropped from the body)."""
@@ -243,7 +275,7 @@ class RigidPartPidPrecedence(unittest.TestCase):
 
     def test_g_the_opt_out_restores_the_386444e_bytes_and_sentence(self):
         res, st, _e = _convert(a1_probe_motion(),
-                               rigid_part_pid_precedence=False)
+                               rigid_part_pid_precedence=False, **_K3_OFF)
         self.assertEqual(_sha(st), _A1_MOTION_386444E_SHA)
         self.assertTrue(_has(res.warnings, _W_A1_OLD, _W_CLASH))
         self.assertFalse(_has(res.warnings, _W_A1))
@@ -255,16 +287,23 @@ class RigidPartPidPrecedence(unittest.TestCase):
     def test_f_a_deformable_part_clash_never_moves(self):
         """A CNRB PID equal to a DEFORMABLE part's id (solidof's class) has
         no /RBODY record to collide with: both arms write the 386444e
-        bytes and neither prints a clash sentence. STARTER RUN (nt 4,
-        rcv_r9i_implA_p_a1defo_n4, sha256 f2a3b65b3b82...): 0 ERROR / 1
-        WARNING (1084)."""
-        r_on, st_on, _e = _convert(a1_probe_deformable_clash())
+        bytes (with both K3 levers off) and neither prints a clash sentence.
+        STARTER RUN of those bytes (nt 4, rcv_r9i_implA_p_a1defo_n4, sha256
+        f2a3b65b3b82...): 0 ERROR / 1 WARNING (1084). The K3 default arm is
+        those bytes plus K-31's one N cell (/PROP/SHELL/1 N 2 -> 0, the
+        group the starter's 1084 switched to anyway)."""
+        r_on, st_on, _e = _convert(a1_probe_deformable_clash(), **_K3_OFF)
         r_off, st_off, _e = _convert(a1_probe_deformable_clash(),
-                                     rigid_part_pid_precedence=False)
+                                     rigid_part_pid_precedence=False,
+                                     **_K3_OFF)
         self.assertEqual(_sha(st_on), _sha(st_off))
         self.assertEqual(_sha(st_on), _A1_DEFORMABLE_386444E_SHA)
         for r in (r_on, r_off):
             self.assertFalse(_has(r.warnings, _W_CLASH))
+        r_def, st_def, _e = _convert(a1_probe_deformable_clash())
+        self.assertFalse(_has(r_def.warnings, _W_CLASH))
+        self.assertEqual(_k3_default_moves(st_on, st_def),
+                         [("/PROP/SHELL/1", 2, 0)])
 
     def test_b_LOAD_RIGID_BODY_loads_the_part(self):
         res, st, _e = _convert(_a1_probe(
@@ -562,8 +601,13 @@ class ImplicitN2sType7(unittest.TestCase):
     """
 
     def test_a_the_plain_spelling_is_a_one_way_TYPE7_beside_the_stub(self):
-        res, st, _e = _convert(a2_plain_implicit())
+        # _A2_PLAIN_DEFAULT_SHA = this round's default with both K3 levers
+        # off; the K3 default arm adds K-31's one N cell
+        res, st, _e = _convert(a2_plain_implicit(), **_K3_OFF)
         self.assertEqual(_sha(st), _A2_PLAIN_DEFAULT_SHA)
+        _r, st_def, _e = _convert(a2_plain_implicit())
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/1", 2, 0)])
         self.assertNotIn("/INTER/TYPE25/", st)
         cells = _type7_cells(st, 78)
         self.assertIsNotNone(cells, st)
@@ -649,11 +693,17 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertEqual(_type7_cells(st, _stub_id(st))["Fric"], 0.1)
 
     def test_c_an_explicit_deck_keeps_the_TYPE25_bytes(self):
-        res, st, _e = _convert(a2_explicit())
+        """386444e's bytes with both K3 levers off; the K3 default arm is
+        those bytes plus K-31's one N cell."""
+        res, st, _e = _convert(a2_explicit(), **_K3_OFF)
         self.assertEqual(_sha(st), _A2_EXPLICIT_386444E_SHA)
         self.assertIn("/INTER/TYPE25/78", st)
         self.assertNotIn(_STUB_TITLE, st)
         self.assertFalse(_has(res.warnings, _W_A2))
+        r_def, st_def, _e = _convert(a2_explicit())
+        self.assertFalse(_has(r_def.warnings, _W_A2))
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/1", 2, 0)])
 
     def test_d_an_implicit_ERODING_spelling_keeps_the_TYPE25(self):
         deck = _shell_plate(_IMPL1, _SET5 + _n2s(
@@ -671,7 +721,8 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertFalse(_has(res.warnings, _W_A2))
 
     def test_f_the_opt_out_restores_the_386444e_bytes_and_sentences(self):
-        res, st, _e = _convert(a2_plain_implicit(), implicit_n2s_type7=False)
+        res, st, _e = _convert(a2_plain_implicit(), implicit_n2s_type7=False,
+                               **_K3_OFF)
         self.assertEqual(_sha(st), _A2_PLAIN_386444E_SHA)
         self.assertTrue(_has(res.warnings,
                              "Implicit deck with TYPE25-route contact(s) [78]"))
@@ -922,7 +973,8 @@ class ImplicitRigidGravityNodes(unittest.TestCase):
         self.assertEqual(nodes, _tg._rbody_mains(st))
         self.assertTrue(_has(res.warnings, "*LOAD_BODY_*", _W_A4, "1 stay"))
         _r, st_off, _e = _convert(a4_implicit_disk(),
-                                  implicit_rigid_gravity_nodes=False)
+                                  implicit_rigid_gravity_nodes=False,
+                                  **_K3_OFF)
         self.assertEqual(_sha(st_off), _A4_DISK_386444E_SHA)
         self.assertEqual(_tg._grav_scope(st_off)[0], set())
 
@@ -1382,11 +1434,11 @@ class PrescribedMotionSfDefault(unittest.TestCase):
 
     def test_i_the_opt_out_restores_the_386444e_bytes(self):
         r1, st1, _e = _convert(a8_set_ramp(),
-                               prescribed_motion_sf_default=False)
+                               prescribed_motion_sf_default=False, **_K3_OFF)
         self.assertEqual(_sha(st1), _A8_SET_386444E_SHA)
         self.assertFalse(_has(r1.warnings, _W_A8_SET))
         r2, st2, _e = _convert(a8_rigid_sf0(),
-                               prescribed_motion_sf_default=False)
+                               prescribed_motion_sf_default=False, **_K3_OFF)
         self.assertEqual(_sha(st2), _A8_RIGID_386444E_SHA)
         self.assertFalse(_has(r2.warnings, _W_A8_RIGID))
 
@@ -1900,10 +1952,18 @@ class MixedMainThicknessGap(unittest.TestCase):
                              "2916 -> 7557", "1758.5", "not a default"))
 
     def test_a2_the_default_is_the_386444e_bytes(self):
-        res, st, _e = _convert(a10_gapc07())
+        """386444e's bytes with both K3 levers off; the K3 default arm is
+        those bytes plus K-31's one N cell (the NIP 5 section of the coupon,
+        /PROP/SHELL/2 N 5 -> 0) - this round's lever still writes nothing."""
+        res, st, _e = _convert(a10_gapc07(), **_K3_OFF)
         self.assertEqual(_sha(st), _A10_GAPC07_386444E_SHA)
         self.assertEqual(_type7_igap_gapmin(st, 1), (0, 0.0))
         self.assertFalse(_has(res.warnings, _W_A10))
+        r_def, st_def, _e = _convert(a10_gapc07())
+        self.assertEqual(_type7_igap_gapmin(st_def, 1), (0, 0.0))
+        self.assertFalse(_has(r_def.warnings, _W_A10))
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/2", 5, 0)])
 
     def test_b_two_thicknesses_take_the_thinner_and_OPTT_wins(self):
         _r, st, _e = _convert(_a10_gapc(t_b=0.6), **_ON)
@@ -3233,7 +3293,8 @@ class WeldTrajectoryImpflux(unittest.TestCase):
         self.assertIn("--weld-trajectory-window", p.format_help())
 
     def test_opt_out_is_386444e(self):
-        res, st, eng = _convert(b1_synw(), weld_trajectory_impflux=False)
+        res, st, eng = _convert(b1_synw(), weld_trajectory_impflux=False,
+                                **_K3_OFF)
         self.assertEqual(_sha(st), _B1_SYNW_386444E_STARTER)
         self.assertEqual(_sha(eng), _B1_SYNW_386444E_ENGINE)
         self.assertFalse(_has(res.warnings, "WELD_TRAJECTORY"))
@@ -3669,7 +3730,7 @@ class Axisymmetric2D(unittest.TestCase):
                              "re-ordered counter-clockwise)"))
 
     def test_opt_out_is_386444e(self):
-        res, st, eng = _convert(b2_ax15(), axisymmetric_2d=False)
+        res, st, eng = _convert(b2_ax15(), axisymmetric_2d=False, **_K3_OFF)
         self.assertEqual(_sha(st), _B2_AX15_386444E_STARTER)
         self.assertEqual(_sha(eng), _B2_AX15_386444E_ENGINE)
         self.assertTrue(_has(res.warnings, _WA7B_R9, "--no-axisymmetric-2d "
@@ -3766,7 +3827,7 @@ class PlaneStressUnitThickness(unittest.TestCase):
 
     def test_4_the_opt_out_is_386444e(self):
         res, st, _e = _convert(_t8._quad_deck(elform=12, t=(0.0, "", "", "")),
-                               plane_stress_unit_thickness=False)
+                               plane_stress_unit_thickness=False, **_K3_OFF)
         self.assertEqual(_t8._prop_thick(st), 0.0)
         self.assertEqual(_sha(st), _B3_T0_386444E_STARTER)
         self.assertFalse(_has(res.warnings, _W_B3))
@@ -4048,7 +4109,8 @@ class LoadCurveOffscaleZero(unittest.TestCase):
         tmp.cleanup()
 
     def test_opt_out_is_386444e(self):
-        res, st, _e = _convert(b5_punch(), load_curve_offscale_zero=False)
+        res, st, _e = _convert(b5_punch(), load_curve_offscale_zero=False,
+                               **_K3_OFF)
         self.assertEqual(_sha(st), _B5_PUNCH_386444E_STARTER)
         self.assertFalse(_has(res.warnings, _W_B5))
 
@@ -4278,26 +4340,39 @@ class AleFlowTracking(unittest.TestCase):
     /TH/PART."""
 
     def test_default_is_386444e(self):
-        res, st, _e = _convert(b8_bird())
+        """386444e's bytes with both K3 levers off; the K3 default arm of
+        each deck is those bytes plus K-31's one N cell (the bird's
+        *MAT_ELASTIC plate, /PROP/SHELL/1 N 2 -> 0)."""
+        res, st, _e = _convert(b8_bird(), **_K3_OFF)
         self.assertEqual(_sha(st), _B8_BASE_386444E_STARTER)
         self.assertNotIn("/ALE/GRID", st)
         self.assertIn("#-- SKIPPED: *ALE_REFERENCE_SYSTEM_GROUP", st)
         hits = [w for w in res.warnings if w.startswith(_W_B8_SKIP)]
         self.assertEqual(len(hits), 1, res.warnings)
         self.assertIn("RMS 253.09 -> 749.89 %", hits[0])
+        _r, st_def, _e = _convert(b8_bird())
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/1", 2, 0)])
         # a *CONTROL_ALE deck WITHOUT a reference-system card: today's
         # bytes and today's warning list exactly (the generic note unchanged)
-        res0, st0, _e0 = _convert(b8_bird(card=False, mu="0.0"))
+        res0, st0, _e0 = _convert(b8_bird(card=False, mu="0.0"), **_K3_OFF)
         self.assertEqual(_sha(st0), _B8_NOCARD_386444E_STARTER)
-        self.assertEqual(_sha("\n".join(res0.warnings)),
+        self.assertEqual(_sha("\n".join(_k32_shrf_free(res0.warnings))),
                          _B8_NOCARD_MU0_386444E_WARNINGS)
         self.assertTrue(_has(res0.warnings, "Mesh smoothing (*ALE_SMOOTHING "
                              "/ *ALE_REFERENCE_SYSTEM_*) has no /ALE 1:1 and "
                              "is not converted."))
+        _r, st0_def, _e = _convert(b8_bird(card=False, mu="0.0"))
+        self.assertEqual(_k3_default_moves(st0, st0_def),
+                         [("/PROP/SHELL/1", 2, 0)])
 
     def test_card_bytes_bcrot0_and_bcrot7(self):
-        res, st, eng = _convert(b8_bird(), ale_flow_tracking=True)
+        res, st, eng = _convert(b8_bird(), ale_flow_tracking=True, **_K3_OFF)
         self.assertEqual(_sha(st), _B8_BASE_FT_STARTER)
+        # the opt-in arm with the K3 defaults: those bytes plus K-31's cell
+        _r, st_def, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/1", 2, 0)])
         lines = st.splitlines()
         i = lines.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines[i:i + 5], _B8_CARD)
@@ -4588,9 +4663,17 @@ class ShellInSolidRetune(unittest.TestCase):
     on 50 void ALE nodes and 0 of the 50 plate nodes (nt 4)."""
 
     def test_default_bytes_unchanged(self):
-        res, st, eng = _convert(_t8._sis_ale_deck())
+        """386444e's starter and engine bytes with both K3 levers off; the
+        K3 default arm is that starter plus K-31's one N cell (the plate's
+        *MAT_ELASTIC section, /PROP/SHELL/3 N 2 -> 0) and the same engine
+        file."""
+        res, st, eng = _convert(_t8._sis_ale_deck(), **_K3_OFF)
         self.assertEqual(_sha(st), _B4_SIS_386444E_STARTER)
         self.assertEqual(_sha(eng), _B4_SIS_386444E_ENGINE)
+        _r, st_def, eng_def = _convert(_t8._sis_ale_deck())
+        self.assertEqual(_k3_default_moves(st, st_def),
+                         [("/PROP/SHELL/3", 2, 0)])
+        self.assertEqual(eng_def, eng)
         self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", st)
         self.assertNotIn("/INTER/TYPE18", st)
         self.assertNotIn("/DT/INTER", eng)
