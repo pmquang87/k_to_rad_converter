@@ -4118,6 +4118,31 @@ number here was measured by the batch's groups, their fix rounds or their
 reviews (2026-10-25 .. 31); the pipeline recipe that uses these routes is
 `C:\nebenjob\upwork2\CardStack\FEM_PIPELINE_RECIPE.md` on this machine.
 
+### The user's decisions of 2026-11-01
+
+The user answered the batch's open questions on 2026-11-01 (the pipeline
+recipe's section 17 lists all nine). The four that concern k2rad:
+
+- **(3) K-30 keeps its scope.** Isolid 1 on every all-tet section, for every
+  material (the starter resets every tet group to Isolid 1 anyway,
+  `sgrtails.F:984-999`); `--no-tet-isolid1` stays the opt-out. No code
+  change.
+- **(4) The R14 movers are re-baselined at the merge.** The batch defaults
+  ship as defaults, with no opt-in phase first; the movers are listed under
+  *Owed at the merge*.
+- **(7) K-12 stays default ON** (Gapmin = |SST| on a single-surface contact
+  of shells; the user left the choice to the coordinator), with
+  `--no-single-surface-sst-gap`. No code change.
+- **(8) The four wave-C defaults without an opt-out flag get one** (the user
+  left the choice to the coordinator, who added all four):
+  `--no-contact-birth-death` (K-11), `--no-soft2-iedge-gate` (the K-10 SOFT 2
+  Iedge gate), `--no-srnde-ishape` (K-16) and `--no-maxint-stress-all` (the
+  MAXINT read). MEASURED on the 350 R14 roster decks under 30 MB: the four
+  together give the bytes of the wave-C tree from before these items on every
+  deck; alone, `--no-contact-birth-death` moves the 6 K-11 starter decks
+  back, `--no-maxint-stress-all` the 9 MAXINT engine decks, and the other two
+  move none (CHANGELOG, *Opt-out flags*).
+
 ### Owed at the merge
 
 - **The R14 re-baseline of the default changes.** Measured movers against the
@@ -4151,14 +4176,8 @@ reviews (2026-10-25 .. 31); the pipeline recipe that uses these routes is
     `bird.k`).
   - K-12, the K-10 SOFT 2 Iedge gate, K-16 and `*CONTROL_UNITS`: 0 R14 decks.
 
-  Whether to re-baseline these at the merge or to ship the defaults opt-in
-  first is the user's open question.
-- **Four default changes have no opt-out flag** (the user's decision): K-11,
-  the K-10 SOFT 2 Iedge gate, K-16 (SRNDE 1 -> Ishape 2) and the
-  `*DATABASE_EXTENT_BINARY` MAXINT read. The plan defined none, and a flag
-  reaches `state.options` only through `convert()` in `k2rad/__init__.py`
-  (K-0P's file). Either accept them as defaults and re-baseline the movers
-  above, or add the flags through the K-0P plumbing.
+  Decided on 2026-11-01 (the user's decision 4, above): re-baseline them at
+  the merge; the defaults ship as defaults.
 
 ### Opened by the batch
 
@@ -4296,6 +4315,9 @@ reviews (2026-10-25 .. 31); the pipeline recipe that uses these routes is
   IGNORE texts): K-14. D1-4 / D6-64 (dropped Card A / C fields): named, K-09.
 - The K-42 record "MAXINT > 3 is not reachable from a `.k` deck": the handler
   reads card 1 field 3 since wave C.
+- The exception to the opt-out convention (K-11, the K-10 SOFT 2 Iedge gate,
+  K-16 and the MAXINT read changed bytes by default with no opt-out flag):
+  closed on 2026-11-01 by the four flags of decision 8.
 - Round 9's NOT list, entry 11: the Stmin half is named and settable (K-02);
   the entry's next steps stand.
 

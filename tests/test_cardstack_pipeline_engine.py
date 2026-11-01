@@ -706,5 +706,131 @@ class AnimShellStressAll(unittest.TestCase):
                          lines.index("/ANIM/SHELL/TENS/STRESS/LOWER") + 1)
 
 
+class MaxintStressAllOptOut(unittest.TestCase):
+    """--no-maxint-stress-all (wave D, the user's decision 8 of 2026-11-01):
+    since wave C the handler stores MAXINT and K-42's rule writes
+    /ANIM/SHELL/TENS/STRESS/ALL for MAXINT > 3 (nine R14 engine decks gain
+    the line). The flag writes no such line whatever MAXINT says - the
+    engine deck of the code before the read - and the handler's MAXINT line
+    says so; the read itself stays."""
+
+    _ALL = "/ANIM/SHELL/TENS/STRESS/ALL"
+    _FLAG = "--no-maxint-stress-all"
+
+    def test_maxint_5_by_default_writes_the_line(self):
+        res, _s, eng = _convert(_plate(maxint=5))
+        lines = eng.splitlines()
+        self.assertEqual(lines.index(self._ALL),
+                         lines.index("/ANIM/SHELL/TENS/STRESS/LOWER") + 1)
+        self.assertTrue(_has(res.warnings, "MAXINT 5",
+                             "-> /ANIM/SHELL/TENS/STRESS/ALL in the engine "
+                             "deck"), res.warnings)
+        self.assertFalse(_has(res.warnings, self._FLAG), res.warnings)
+
+    def test_maxint_5_under_the_flag_writes_no_line_and_says_so(self):
+        for maxint in (4, 5, 8):
+            with self.subTest(maxint=maxint):
+                res, s, eng = _convert(_plate(maxint=maxint),
+                                       maxint_stress_all=False)
+                _r3, s3, eng3 = _convert(_plate(maxint=3))
+                self.assertNotIn(self._ALL, eng)
+                self.assertEqual((s, eng), (s3, eng3))
+                ws = [w for w in res.warnings if f"MAXINT {maxint}" in w]
+                self.assertEqual(len(ws), 1, res.warnings)
+                for needle in (self._FLAG, "is not written",
+                               "STRESS/MEMB / UPPER / LOWER", "p.16-67"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, ws[0])
+                self.assertNotIn("-> /ANIM/SHELL/TENS/STRESS/ALL in the "
+                                 "engine deck", ws[0])
+
+    def test_the_read_stays_under_the_flag(self):
+        import os
+        import tempfile
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        from k2rad.state import ConversionState, ConvertOptions
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(_plate(maxint=5))
+        state = ConversionState()
+        state.options = ConvertOptions(maxint_stress_all=False)
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        self.assertEqual(state.db_extent_binary.maxint, 5)
+
+    def test_maxint_3_or_blank_is_unchanged_both_ways(self):
+        _r, _s, eng0 = _convert(_plate())
+        for maxint in (None, 3, 0):
+            for flag in (True, False):
+                with self.subTest(maxint=maxint, flag=flag):
+                    res, _s, eng = _convert(_plate(maxint=maxint),
+                                            maxint_stress_all=flag)
+                    self.assertEqual(eng, eng0)
+                    self.assertFalse(_has(res.warnings, "MAXINT"),
+                                     res.warnings)
+
+    def test_a_negative_maxint_moves_nothing_and_names_the_flag(self):
+        """A MAXINT below -3 never reaches the rule, so the engine deck is
+        the same both ways; under the flag its line says that no MAXINT
+        reaches it (the wave-D review: it said MAXINT > 3 does, either
+        way). Every other line is the same."""
+        r1, _s, e1 = _convert(_plate(maxint=-5))
+        r0, _s, e0 = _convert(_plate(maxint=-5), maxint_stress_all=False)
+        self.assertEqual(e1, e0)
+        self.assertNotIn(self._ALL, e0)
+        w1 = [w for w in r1.warnings if "MAXINT -5" in w]
+        w0 = [w for w in r0.warnings if "MAXINT -5" in w]
+        self.assertEqual((len(w1), len(w0)), (1, 1),
+                         (r1.warnings, r0.warnings))
+        self.assertIn("k2rad writes it for MAXINT > 3 only, so the engine "
+                      "deck keeps STRESS/MEMB / UPPER / LOWER.", w1[0])
+        self.assertNotIn(self._FLAG, w1[0])
+        self.assertIn("k2rad writes it for MAXINT > 3 only, and for no "
+                      "MAXINT under --no-maxint-stress-all, so the engine "
+                      "deck keeps STRESS/MEMB / UPPER / LOWER.", w0[0])
+        self.assertEqual([w for w in r1.warnings if w not in w1],
+                         [w for w in r0.warnings if w not in w0])
+
+    def test_the_writer_rule_reads_the_option(self):
+        from k2rad.writer.assembly import _make_engine_output
+        state = _dispatch(_plate())
+        state.db_extent_binary = DbExtentBinary(maxint=5)
+        self.assertIn(self._ALL, _make_engine_output(state))
+        state.options.maxint_stress_all = False
+        self.assertNotIn(self._ALL, _make_engine_output(state))
+
+    def test_the_help_and_the_gui_carry_the_opt_out(self):
+        import os
+        import tempfile
+        import k2rad_gui
+        from k2rad import cli
+        acts = {s: a for a in cli.build_parser()._actions
+                for s in a.option_strings}
+        self.assertIs(acts["--maxint-stress-all"],
+                      acts["--no-maxint-stress-all"])
+        self.assertIs(acts["--maxint-stress-all"].default, True)
+        h = " ".join(acts["--maxint-stress-all"].help.split())
+        for needle in ("MAXINT", self._ALL, "ON by default", self._FLAG,
+                       "K-42"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, h)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+        kw = dict(ground_springs=False, ground_spring_k_text="",
+                  soften_stfac_text="")
+        on = k2rad_gui.build_convert_kwargs(path, "", ("Mg", "mm", "s"),
+                                            **kw)
+        off = k2rad_gui.build_convert_kwargs(path, "", ("Mg", "mm", "s"),
+                                             maxint_stress_all=False, **kw)
+        tmp.cleanup()
+        self.assertIs(on["maxint_stress_all"], True)
+        self.assertIs(off["maxint_stress_all"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

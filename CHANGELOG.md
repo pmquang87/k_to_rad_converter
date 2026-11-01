@@ -16,9 +16,10 @@ Prior history (before this changelog was introduced) is summarized in the
   only the mesh with k2rad and appended hand-written `/GRAV`, `/DAMP`,
   `/RWALL`, `/BCS` and `/FUNCT` text, and run 27 wrote the whole deck as
   Python strings. This batch lets such a pipeline write every card family as
-  LS-DYNA keywords and convert it. It adds eleven options, converts
-  `*CONTROL_UNITS`, damping curves, ENDMAS, IKEDIT, MAXINT and the contact
-  Card-2 birth / death times, and names what it does not convert. The new page
+  LS-DYNA keywords and convert it. It adds eleven options and, on 2026-11-01,
+  four opt-out flags, converts `*CONTROL_UNITS`, damping curves, ENDMAS,
+  IKEDIT, MAXINT and the contact Card-2 birth / death times, and names what it
+  does not convert. The new page
   `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` maps each hand-written Radioss card to
   the `.k` keyword that makes k2rad write it; the pipeline recipe on this
   machine is `C:\nebenjob\upwork2\CardStack\FEM_PIPELINE_RECIPE.md`.
@@ -182,7 +183,8 @@ Prior history (before this changelog was introduced) is summarized in the
     TYPE25 writes SOFT 2's Iedge 22 only with Card A DEPTH 5 / 15 / 25 / 35 /
     45 / 55 or SBOPT 1, because LS-DYNA's SOFT 2 checks no edges otherwise
     (Vol I R17 p.11-94); probes EDGE FLAG 1000 without DEPTH and 22 with
-    DEPTH 5. R14: 0 decks move. No opt-out flag (see the last bullet).
+    DEPTH 5. R14: 0 decks move. Opt-out since 2026-11-01:
+    `--no-soft2-iedge-gate` (*Opt-out flags*, below).
   - **Card-2 BT / DT reach every sliding-contact route (K-11, default).** The
     `/INTER/TYPE7` of the single-surface, surface-to-surface and SOFT -7 cards,
     the SSID = 0 `/INTER/TYPE25` (and its `*CONSTRAINED_JOINT_SCREW` split),
@@ -197,7 +199,8 @@ Prior history (before this changelog was introduced) is summarized in the
     decks with a DT of 1e14 / 1e17 past ENDTIM now write Tstop 0, which the
     starter reads as 1e30 (`hm_read_inter_type25.F:579`; probes echo STOP TIME
     1.0E+30), so their runs do not change, and a line names the moved cell. A
-    Card-2 VDC on the SSID = 0 TYPE25 is named, not written. No opt-out flag.
+    Card-2 VDC on the SSID = 0 TYPE25 is named, not written. Opt-out since
+    2026-11-01: `--no-contact-birth-death` (*Opt-out flags*, below).
   - **A single-surface contact of shells takes Gapmin = |SST| (K-12, default
     ON, `--no-single-surface-sst-gap`).** On the Igap-0 single-surface routes
     every segment is SURFA, so two SAST-thick shells meet at SST/2 + SST/2
@@ -228,7 +231,8 @@ Prior history (before this changelog was introduced) is summarized in the
     gap, with a note on LS-DYNA's longer free-edge reach. Probes: GAP SHAPE ...
     2, 0 ERROR(S), 0 WARNING(S). R14: no deck states SRNDE 1; the SRNDE-0 note
     is on 28 of the 350 decks. Card E ICOR (VDC as a coefficient of
-    restitution) is named where VDC is written as damping. No opt-out flag.
+    restitution) is named where VDC is written as damping. Opt-out since
+    2026-11-01: `--no-srnde-ishape` (*Opt-out flags*, below).
   - **Damping curves become time windows (K-20, default ON,
     `--no-damping-curve-window`).** The LCID curve of `*DAMPING_PART_MASS` /
     `_SET` and `*DAMPING_GLOBAL` is converted in TIME. A piecewise-constant
@@ -351,17 +355,90 @@ Prior history (before this changelog was introduced) is summarized in the
     `/ANIM/SHELL/TENS/STRESS/ALL`, which no `.k` deck could reach before; the
     log names it. A MAXINT below -3 (|MAXINT| points, no averaging, Vol I R17
     p.16-67) is named as not reaching the rule (0 R14 decks). R14 movers
-    (engine deck, one added line): 9 decks (MAXINT 4, 5, 7 or 8). No opt-out
-    flag.
+    (engine deck, one added line): 9 decks (MAXINT 4, 5, 7 or 8). Opt-out
+    since 2026-11-01: `--no-maxint-stress-all` (*Opt-out flags*, below).
   - **Defaults that move bytes, and their movers.** K-30 (6 R14 keys), K-31
     (142 keys; 146 with K-30), K-20 (1 deck), K-11 (6 starter decks), the
     MAXINT read (9 engine decks), K-12 (0 R14 decks; CardStack `deck_sst`),
     the K-10 SOFT 2 Iedge gate and K-16 (0 R14 decks) and `*CONTROL_UNITS` (0).
-    K-20, K-30, K-31 and K-12 have an opt-out flag. K-11, the K-10 gate,
-    K-16 and the MAXINT read have none: the plan defined none, and the group
-    could not add one (the flag plumbing is K-0P's file). That is an exception
-    to the opt-out convention and is the user's decision (ROADMAP). The
-    re-baseline of the R14 movers is owed at the merge.
+    K-20, K-30, K-31 and K-12 have an opt-out flag from their groups. K-11,
+    the K-10 gate, K-16 and the MAXINT read had none - the plan defined none,
+    and the group could not add one (the flag plumbing is K-0P's file) - and
+    have one since 2026-11-01 (the next bullet), which ends that exception to
+    the opt-out convention. The defaults ship as defaults, and the R14 movers
+    are re-baselined at the merge (the user's decisions of 2026-11-01,
+    ROADMAP).
+  - **Opt-out flags (2026-11-01, decision 8: the user left the choice to the
+    coordinator, who added all four; ROADMAP).** The four wave-C
+    defaults that had no opt-out flag get one each, wired as K-0P's levers
+    are (the parser, `convert()`, `ConvertOptions`, `cli.main()` and a GUI
+    checkbox): `--no-contact-birth-death` (K-11), `--no-soft2-iedge-gate`
+    (the K-10 SOFT 2 Iedge gate), `--no-srnde-ishape` (K-16) and
+    `--no-maxint-stress-all` (the MAXINT read). Each writes what its route
+    wrote before the item, and one log line names the flag wherever it moves
+    a byte. The defaults do not change.
+    - `--no-contact-birth-death`: Tstart 0 / Tstop 0 on the seven routes that
+      dropped Card-2 BT / DT; BT and DT as stated, Tstop 0 for a DT >= 1e19,
+      on the eroding / node-to-surface `/INTER/TYPE25` family, the routed
+      implicit node-to-surface `/INTER/TYPE7` and `--s2s-type25`. There a
+      negative DT is written as a negative Tstop, and the engine skips an
+      interface while TT > Tstop (`i7mainf.F:264-265`, `i25mainf.F:310-311`),
+      so the contact never acts; the line says so. MEASURED (`run_or.ps1
+      -Both`, nt 4): the K1a probe's 18 card nodes thrown at the block at
+      1000 mm/s for 1e-3 s through an eroding surface-to-surface contact with
+      BT 0 / DT -0.004 - by default STOP TIME 1.0E+30 and a 58.05 % drop of
+      the kinetic energy; with the flag STOP TIME -4.0E-03, a 0.00 % drop and
+      no internal energy; both 0 ERROR(S), 0 WARNING(S), NORMAL TERMINATION.
+    - `--no-soft2-iedge-gate`: Iedge 22 for every SOFT 2 card of
+      `*CONTACT_ERODING_SURFACE_TO_SURFACE` /
+      `*CONTACT_AUTOMATIC_NODES_TO_SURFACE`, dyna2rad's rule. Starter probe
+      (SOFT 2, no DEPTH / SBOPT): EDGE FLAG 1000 by default, 22 with the
+      flag, 0 ERROR(S) / 0 WARNING(S) each.
+    - `--no-srnde-ishape`: a stated SRNDE 1 keeps Ishape 0 (square) and is
+      named. Starter probe (the SSID = 0 TYPE25, SRNDE 1): GAP SHAPE ALONG
+      MAIN FREE EDGES 2 by default, 1 with the flag, 0 ERROR(S) / 0
+      WARNING(S) each. Under the flag the SRNDE 0 free-edge note and the
+      `/INTER/TYPE7` routes' SRNDE line say that SRNDE 1 keeps Ishape 0 too;
+      by default they say Ishape 2, as before (log only).
+    - `--no-maxint-stress-all`: no `/ANIM/SHELL/TENS/STRESS/ALL` whatever
+      MAXINT says; the read stays, and its line says that the card is not
+      written. The line of a MAXINT below -3 adds that no MAXINT reaches the
+      rule under the flag (log only).
+    - R14, MEASURED on the 350 roster decks under 30 MB (dry conversions, one
+      arm per flag, 0 conversion errors in each): the default arm is byte- and
+      log-identical to the wave-C fix round's final census; the four flags
+      together give the bytes of the wave-C tree from before K1b on all 350
+      decks; `--no-contact-birth-death` moves exactly the 6 K-11 starter
+      decks back (and drops the K-11 line of `doorbeam.k`, whose cells it
+      leaves alone), `--no-maxint-stress-all` exactly the 9 MAXINT engine
+      decks, `--no-soft2-iedge-gate` and `--no-srnde-ishape` 0 decks; under
+      `--no-srnde-ishape` the SRNDE 0 free-edge note of 28 decks (30 lines)
+      says that SRNDE 1 keeps Ishape 0 (log only). The review's fix round
+      re-ran the default, `--no-srnde-ishape`, `--no-maxint-stress-all` and
+      all-four arms: 0 byte movers against the same arms before it, the
+      default arm still byte- and log-identical to the wave-C census, and the
+      four flags together still the bytes of the tree from before K1b. Against
+      the R14 collection's baseline decks the K-11 cells are gone on all six
+      movers under `--no-contact-birth-death`, and `--no-maxint-stress-all`
+      gives back the engine decks of `shells1`, `ex_20_thin_shell_elform_16`
+      and `bird`. What remains is K-31's `/PROP/SHELL` N cells (`275key2`,
+      `section_solid.hourglassing`, `shells1`) and `275key2`'s STRESS/ALL
+      line; with every batch opt-out (`--no-tet-isolid1
+      --no-law1-shell-global-n --no-damping-curve-window
+      --no-single-surface-sst-gap` and the four) all 18 files of the nine
+      decks are sha256-identical to the collection's.
+    - Tests: `tests/test_cardstack_pipeline.py` (`ContactBirthDeathOptOut`,
+      `Soft2IedgeGateOptOut`, `SrndeIshapeOptOut`, `OptOutFlagHelpTexts`,
+      `GuiCheckboxBinding`, and the four flags in the lever-wiring tables)
+      309 passed, 1074 subtests; `tests/test_cardstack_pipeline_engine.py`
+      (`MaxintStressAllOptOut`) 50 passed, 80 subtests; the four CardStack
+      modules 532 passed, 1209 subtests; the whole suite 6795 passed, 2
+      skipped. 27 mutants of the new rules and help texts, each killed by a
+      new test. The review's own 30 mutants left 6 alive (the 1e19 cut-off,
+      the DT = -9999 and the Tstop 0 texts of the raw-route line, the SOFT 2
+      gate text twice, a GUI checkbox bound to another lever's variable);
+      the fix round's tests kill all six, 3 variants of them and the 7
+      mutants of its own log-text changes.
   - **Erratum: the SOFT-route entry's "`Inacti=5` (validated — node-moving
     `Inacti=6` seg-faults rigid-body secondary nodes)".** The recorded crash
     was Inacti **3**: on `implicit_hr-anlenkung` Inacti 3 moved 21 cylinder

@@ -9182,8 +9182,19 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     # the fix round of the K1b review: the read moves the engine deck of a
     # MAXINT > 3 deck (nine R14 decks), so it is named; a MAXINT below -3
     # asks for more than 3 layers too, but K-42's writer rule
-    # (writer/assembly.py) reads MAXINT > 3 only
-    if maxint > 3:
+    # (writer/assembly.py) reads MAXINT > 3 only. --no-maxint-stress-all
+    # (the user's decision 8 of 2026-11-01) keeps the read and writes no
+    # STRESS/ALL line, and the line says so - the MAXINT < -3 line too (the
+    # fix round of the wave-D review).
+    if maxint > 3 and not state.options.maxint_stress_all:
+        state.warn(
+            f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (> 3: d3plot output "
+            "for the first MAXINT shell / thick-shell integration points, "
+            "Vol I R17 p.16-67) - /ANIM/SHELL/TENS/STRESS/ALL is not written "
+            "(--no-maxint-stress-all), so the engine deck keeps STRESS/MEMB "
+            "/ UPPER / LOWER, the deck of the code before the MAXINT read "
+            "(CardStack K-42).")
+    elif maxint > 3:
         state.warn(
             f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (> 3: d3plot output "
             "for the first MAXINT shell / thick-shell integration points, "
@@ -9196,8 +9207,10 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
             f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (< 0: |MAXINT| = "
             f"{-maxint} integration points at every in-plane point, no "
             "averaging, Vol I R17 p.16-67) - /ANIM/SHELL/TENS/STRESS/ALL is "
-            "not written: k2rad writes it for MAXINT > 3 only, so the engine "
-            "deck keeps STRESS/MEMB / UPPER / LOWER.")
+            "not written: k2rad writes it for MAXINT > 3 only"
+            + ("" if state.options.maxint_stress_all else
+               ", and for no MAXINT under --no-maxint-stress-all")
+            + ", so the engine deck keeps STRESS/MEMB / UPPER / LOWER.")
 
 
 def handle_database_jntforc(block: Block, state: ConversionState) -> None:

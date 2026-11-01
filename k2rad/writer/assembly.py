@@ -593,9 +593,12 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # handle_database_extent_binary since the CardStack wave C, so a deck
     # that states MAXINT > 3 reaches this line. A MAXINT < -3 (|MAXINT|
     # points at every in-plane point, no averaging) is named in the handler
-    # log and not written here (ROADMAP).
+    # log and not written here (ROADMAP). --no-maxint-stress-all (the
+    # user's decision 8 of 2026-11-01) writes no such line whatever MAXINT
+    # says - the engine deck of the code before the read - and the
+    # handler's MAXINT line says so.
     maxint = int(ext.maxint or 0) if ext is not None else 0
-    if maxint > 3:
+    if maxint > 3 and state.options.maxint_stress_all:
         lines.append("/ANIM/SHELL/TENS/STRESS/ALL")
     lines.append("/ANIM/SHELL/TENS/STRAIN/MEMB")
     lines.append("/ANIM/SHELL/TENS/STRAIN/UPPER")

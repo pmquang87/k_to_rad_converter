@@ -2017,6 +2017,85 @@ def build_parser() -> argparse.ArgumentParser:
              "the airbag and two-surface routes are unchanged. Starter probe: "
              "MINIMUM GAP 0.35 for SST 0.35 on TYPE7, TYPE11 and TYPE19.",
     )
+    # The opt-out flags of the user's decision 8 (2026-11-01) for the four
+    # wave-C defaults that had none: K-11, K-10's SOFT 2 Iedge gate, K-16
+    # and the MAXINT read.
+    parser.add_argument(
+        "--contact-birth-death",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write the *CONTACT Card-2 BT / DT as the /INTER Tstart / Tstop "
+             "on every sliding-contact route, by the rules of Vol I R17 "
+             "p.11-29/30 (CardStack K-11): DT = -9999 (a curve of pairs) "
+             "writes 0 / 0, named; DT < 0 writes |BT| / |DT|; BT < 0 with "
+             "DT >= 0 writes Tstart 0; a blank, >= 1e19 or at / past-ENDTIM "
+             "DT writes Tstop 0 (never). ON by default; "
+             "--no-contact-birth-death writes what each route wrote before "
+             "K-11: Tstart 0 / Tstop 0 on the single-surface, "
+             "surface-to-surface and SOFT -7 /INTER/TYPE7, the SSID = 0 "
+             "/INTER/TYPE25 (and its joint-screw split) and the SOFT -11 / "
+             "-19 TYPE11 / TYPE19; BT / DT as stated (Tstop 0 for a DT >= "
+             "1e19) on the eroding / node-to-surface TYPE25 family, the "
+             "routed implicit node-to-surface TYPE7 and --s2s-type25, where "
+             "a negative DT is a negative Tstop that switches the contact "
+             "off from t 0 (i7mainf.F:264-265, i25mainf.F:310-311). A line "
+             "names each contact card whose cells the flag moves (a "
+             "*CONSTRAINED_JOINT_SCREW split copies the cells of its card, "
+             "as its own line says). MEASURED: on the R14 "
+             "roster (350 decks under 30 MB) the flag moves the 6 starter "
+             "decks K-11 moved back (275key2's two TYPE7 Tstart 0.0005 -> 0, "
+             "five TYPE25 Tstop 0 -> the stated 1e14 / 1e17); an eroding S2S "
+             "with DT -0.004 echoes STOP TIME -4.0E-03 and stops none of the "
+             "cards thrown at it (kinetic-energy drop 0.00 %%, 58.05 %% by "
+             "default).",
+    )
+    parser.add_argument(
+        "--soft2-iedge-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On the /INTER/TYPE25 of *CONTACT_ERODING_SURFACE_TO_SURFACE "
+             "and *CONTACT_AUTOMATIC_NODES_TO_SURFACE write an optional-Card-A "
+             "SOFT 2's Iedge 22 (edge-to-edge contact) only with DEPTH 5 / 15 "
+             "/ 25 / 35 / 45 / 55 or SBOPT 1: LS-DYNA's SOFT 2 checks no "
+             "edges otherwise (Vol I R17 p.11-94; CardStack K-10), so any "
+             "other card writes Iedge 1000. ON by default; "
+             "--no-soft2-iedge-gate writes Iedge 22 for every SOFT 2 card "
+             "there, as dyna2rad (convertcontacts.cxx:593-611) and k2rad "
+             "before K-10 did, with a line where it moves the cell. MEASURED: "
+             "starter EDGE FLAG 22 with the flag, 1000 by default (SOFT 2, no "
+             "DEPTH / SBOPT; 0 ERROR(S)). R14: 0 decks move.",
+    )
+    parser.add_argument(
+        "--srnde-ishape",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write an optional Card E SRNDE 1 (exterior shell edges "
+             "rounded, not extended, Vol I R17 p.11-116) as /INTER/TYPE25 "
+             "Ishape 2, the round gap along the surface's free edges, where "
+             "the interface holds a shell (CardStack K-16; with SOFT 2 a "
+             "SHLEDG != 0 or DEPTH 23 / 33 / 35 / 55 takes precedence). ON "
+             "by default; --no-srnde-ishape keeps Ishape 0 (square), the "
+             "cell before K-16, and names the dropped SRNDE. The /INTER/TYPE7 "
+             "routes name a stated SRNDE and never apply it, either way. "
+             "MEASURED: starter GAP SHAPE ALONG MAIN FREE EDGES 1 with the "
+             "flag, 2 by default (0 ERROR(S)). R14: 0 decks move (none states "
+             "SRNDE 1).",
+    )
+    parser.add_argument(
+        "--maxint-stress-all",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /ANIM/SHELL/TENS/STRESS/ALL (the stress of every "
+             "through-thickness layer, anim_dcod_key_0.F:302-304) in the "
+             "engine deck for a *DATABASE_EXTENT_BINARY MAXINT > 3 (card 1 "
+             "field 3, blank = 3; Vol I R17 p.16-67; CardStack K-42, read "
+             "from the .k deck since wave C). ON by default; "
+             "--no-maxint-stress-all writes no such line whatever MAXINT "
+             "says - MEMB / UPPER / LOWER only, the engine deck before the "
+             "MAXINT read - and the MAXINT log line says so. R14: the flag "
+             "takes the line out of the 9 engine decks that state MAXINT 4, "
+             "5, 7 or 8.",
+    )
     return parser
 
 
@@ -2188,6 +2267,10 @@ def main(argv=None) -> int:
         s2s_type25=args.s2s_type25,
         general_shell_edges=args.general_shell_edges,
         single_surface_sst_gap=args.single_surface_sst_gap,
+        contact_birth_death=args.contact_birth_death,
+        soft2_iedge_gate=args.soft2_iedge_gate,
+        srnde_ishape=args.srnde_ishape,
+        maxint_stress_all=args.maxint_stress_all,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

@@ -92,7 +92,8 @@ directory).
 #### CardStack FEM-pipeline options (2026-10)
 
 The CardStack FEM-pipeline batch (contacts, damping, mass scaling, output,
-properties) adds eleven options and changes the `--units` default. Each bullet
+properties) adds eleven options and changes the `--units` default; the four
+opt-out flags of 2026-11-01 (ROADMAP, decision 8) close the list. Each bullet
 gives the spelling(s), the default and what the option writes, as its `--help`
 text says, with the measurement behind it. Each option is also the `convert()`
 keyword of the same name, dashes as underscores (`--print-every N` is
@@ -250,6 +251,63 @@ decks should start from
   `hm_read_inter_type25.F:603-610` turns any Inacti but 0, -1 and 5 into 5
   with `WARNING 1559`. MEASURED: the starter echoes `DE-ACTIVATION OF INITIAL
   PENETRATIONS . . . 6` at 0 ERROR(S) on a TYPE7, a TYPE11 and a TYPE19 probe.
+- `--contact-birth-death` / `--no-contact-birth-death` — **ON by default**
+  (the opt-out since 2026-11-01). Write the `*CONTACT` Card-2 BT / DT as the
+  `/INTER` Tstart / Tstop on every sliding-contact route, by the rules of Vol
+  I R17 p.11-29/30 (CardStack K-11, see *Contact*): DT = -9999 (a curve of
+  pairs) writes 0 / 0, named; DT < 0 writes |BT| / |DT|; BT < 0 with DT >= 0
+  writes Tstart 0; a blank, >= 1e19 or at / past-ENDTIM DT writes Tstop 0
+  (never). `--no-contact-birth-death` writes what each route wrote before
+  K-11: Tstart 0 / Tstop 0 on the single-surface, surface-to-surface and
+  SOFT -7 `/INTER/TYPE7`, the SSID = 0 `/INTER/TYPE25` (and its joint-screw
+  split) and the SOFT -11 / -19 TYPE11 / TYPE19; BT / DT as stated (Tstop 0
+  for a DT >= 1e19) on the eroding / node-to-surface TYPE25 family, the
+  routed implicit node-to-surface TYPE7 and `--s2s-type25`, where a negative
+  DT is a negative Tstop that switches the contact off from t 0
+  (`i7mainf.F:264-265`, `i25mainf.F:310-311`). A line names each contact
+  card whose cells the flag moves (a `*CONSTRAINED_JOINT_SCREW` split copies
+  the cells of its card, as its own line says). MEASURED: on the R14 roster
+  (350 decks under 30 MB) the flag moves the 6 starter decks K-11 moved back
+  (`275key2`'s two TYPE7 Tstart 0.0005 -> 0, five TYPE25 Tstop 0 -> the
+  stated 1e14 / 1e17); an eroding surface-to-surface contact with DT -0.004
+  echoes STOP TIME -4.0E-03 and stops none of the 18 card nodes thrown at it
+  at 1000 mm/s (kinetic-energy drop 0.00 %, 58.05 % by default;
+  `run_or.ps1 -Both`, NORMAL TERMINATION both).
+- `--soft2-iedge-gate` / `--no-soft2-iedge-gate` — **ON by default** (the
+  opt-out since 2026-11-01). On the `/INTER/TYPE25` of
+  `*CONTACT_ERODING_SURFACE_TO_SURFACE` and
+  `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` write an optional-Card-A SOFT 2's
+  Iedge 22 (edge-to-edge contact) only with DEPTH 5 / 15 / 25 / 35 / 45 / 55
+  or SBOPT 1: LS-DYNA's SOFT 2 checks no edges otherwise (Vol I R17 p.11-94;
+  CardStack K-10), so any other card writes Iedge 1000.
+  `--no-soft2-iedge-gate` writes Iedge 22 for every SOFT 2 card there, as
+  dyna2rad (`convertcontacts.cxx:593-611`) and k2rad before K-10 did, with a
+  line where it moves the cell. MEASURED: the starter echoes EDGE FLAG 22
+  with the flag and 1000 by default (SOFT 2, no DEPTH / SBOPT; 0 ERROR(S)).
+  R14: 0 decks move.
+- `--srnde-ishape` / `--no-srnde-ishape` — **ON by default** (the opt-out
+  since 2026-11-01). Write an optional Card E SRNDE 1 (exterior shell edges
+  rounded, not extended, Vol I R17 p.11-116) as `/INTER/TYPE25` Ishape 2, the
+  round gap along the surface's free edges, where the interface holds a shell
+  (CardStack K-16; with SOFT 2 a SHLEDG != 0 or DEPTH 23 / 33 / 35 / 55 takes
+  precedence). `--no-srnde-ishape` keeps Ishape 0 (square), the cell before
+  K-16, and names the dropped SRNDE. The `/INTER/TYPE7` routes name a stated
+  SRNDE and never apply it, either way. MEASURED: the starter echoes GAP
+  SHAPE ALONG MAIN FREE EDGES 1 with the flag and 2 by default (0
+  ERROR(S)). R14: 0 decks move (none states SRNDE 1).
+- `--maxint-stress-all` / `--no-maxint-stress-all` — **ON by default** (the
+  opt-out since 2026-11-01). Write `/ANIM/SHELL/TENS/STRESS/ALL` (the stress
+  of every through-thickness layer, `anim_dcod_key_0.F:302-304`) in the
+  engine deck for a `*DATABASE_EXTENT_BINARY` MAXINT > 3 (card 1 field 3,
+  blank = 3; Vol I R17 p.16-67; CardStack K-42, read from the `.k` deck since
+  wave C). `--no-maxint-stress-all` writes no such line whatever MAXINT says
+  (MEMB / UPPER / LOWER only, the engine deck before the MAXINT read), and the
+  MAXINT log line says so. R14: the flag takes the line out of the 9 engine
+  decks that state MAXINT 4, 5, 7 or 8.
+
+The four opt-out flags together: every one of the 350 R14 roster decks under
+30 MB converts to the bytes of the wave-C tree from before these four items
+(MEASURED against that tree's census, 2026-11-01).
 
 Changed help texts of existing options (the same flags):
 
@@ -4913,6 +4971,8 @@ the routed implicit node-to-surface TYPE7 and `--s2s-type25`). A Card-2 VDC
 on the SSID = 0 `/INTER/TYPE25` is named, not written (VISs 0.05). MEASURED:
 START TIME 1.0000000000000E-03 / STOP TIME 4.0000000000000E-03 echoed on all
 four types; STOP TIME 1.0000000000000E+30 on one probe deck per raw-DT route.
+`--no-contact-birth-death` writes the cells of before K-11 (see *CardStack
+FEM-pipeline options*).
 **A single-surface contact of shells (CardStack K-12)** writes Gapmin = |SST|
 on its Igap-0 routes (see `--single-surface-sst-gap`).
 **Optional Cards A, C, D and E** are read on the single-surface,
@@ -4923,7 +4983,8 @@ STFAC_MDT / DTSTIF columns are not read at `/BEGIN 2022`; Card-3 SFS > 1
 stiffens. Card E SRNDE 1 writes `/INTER/TYPE25` Ishape 2 where the interface
 holds a shell (with no shell: Ishape 0, and a line says why). SRNDE 0 keeps
 the square gap, with a note on LS-DYNA's longer free-edge reach. SOFT 2's
-SHLEDG / DEPTH 23 / 33 / 35 / 55 take precedence (CardStack K-16). Card E ICOR
+SHLEDG / DEPTH 23 / 33 / 35 / 55 take precedence (CardStack K-16;
+`--no-srnde-ishape` keeps Ishape 0). Card E ICOR
 (VDC as a coefficient of restitution, p.11-115) is named on the routes that
 write VDC as damping. A Mortar card reads none of these cards (Table 11-1).
 **The `mortar` note** (CardStack K-14) says that IGNORE 2's MPAR1 is an
@@ -4933,7 +4994,8 @@ zero-force state and lets it only shrink (`i7for3.F:725-726`).
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR` prints it too.
 **The SOFT 2 Iedge 22** of the eroding / automatic node-to-surface TYPE25 is
 gated on Card A DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (CardStack K-10),
-because LS-DYNA checks edges only then.
+because LS-DYNA checks edges only then; `--no-soft2-iedge-gate` writes 22 for
+every SOFT 2 card, dyna2rad's rule.
 
 `*CONTACT_SURFACE_TO_SURFACE`, `_ONE_WAY_SURFACE_TO_SURFACE`,
 `_FORMING_ONE_WAY_SURFACE_TO_SURFACE`, `_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR`,
@@ -6798,7 +6860,8 @@ writes N instead)
 LOWER (CardStack K-42; the handler reads the cell since the batch's wave C).
 R14: 9 of the 350 roster decks gain the line. The conversion log names it. A
 MAXINT below -3 (|MAXINT| points, no averaging, Vol I R17 p.16-67) is named as
-not reaching the rule (0 R14 decks).
+not reaching the rule (0 R14 decks). `--no-maxint-stress-all` writes no such
+line.
 `*DATABASE_CROSS_SECTION_SET[_ID]` → `/SECT` (node set + `*SET_SHELL`/`_SOLID`/
 `_BEAM` element groups); `*DATABASE_CROSS_SECTION_PLANE[_ID]` → `/SECT` via a
 geometric resolver (elements whose nodes straddle the cutting plane,

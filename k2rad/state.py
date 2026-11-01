@@ -7692,7 +7692,8 @@ class ConvertOptions:
 
     ``adaptive_spring_token``, ``axisymmetric_2d``, ``bcs_union``,
     ``bolt_rigid_contact``, ``constrained_global``, ``constrained_linear``,
-    ``corotational_orthotropic``, ``damping_curve_window``,
+    ``contact_birth_death``, ``corotational_orthotropic``,
+    ``damping_curve_window``,
     ``default_hourglass``, ``deformable_to_rigid``, ``discrete_offset``,
     ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
     ``fixed_curve_columns``, ``generalized_weld_butt``,
@@ -7701,7 +7702,7 @@ class ConvertOptions:
     ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
     ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
     ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
-    ``modal_acoustic_void``, ``node_tc_rc_bcs``,
+    ``maxint_stress_all``, ``modal_acoustic_void``, ``node_tc_rc_bcs``,
     ``plane_strain_unit_thickness``, ``plane_stress_unit_thickness``,
     ``positive_dt2ms_mass_scaling``, ``prescribed_motion_sf_default``,
     ``rigid_cog_master``, ``rigid_element_mass_admas``,
@@ -7709,10 +7710,10 @@ class ConvertOptions:
     ``rigid_part_pid_precedence``, ``rigid_secondary_swap``,
     ``rigid_shell_rotary_inertia``, ``section_nodal_thickness_mean``,
     ``shell_offset_gapmin``, ``shell_to_solid_rbody``,
-    ``single_surface_sst_gap``, ``spc_vector_frames``,
+    ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
-    ``tet_isolid1``, ``tgmult_imptemp``, ``weld_exponents``,
+    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``, ``weld_exponents``,
     ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
     ``zero_tolerance_ectol``
 
@@ -9438,6 +9439,34 @@ class ConvertOptions:
     # shells each carrying the contact thickness SST meet at SST/2 + SST/2 -
     # instead of (|SST| + |MST|)/2.
     single_surface_sst_gap: bool = True
+
+    # ── The opt-out flags of the user's decision 8 (2026-11-01) for the
+    #    wave-C defaults that had none ───────────────────────────────────
+    # --no-contact-birth-death (default ON; writer/contacts): *CONTACT
+    # Card-2 BT / DT -> /INTER Tstart / Tstop on every sliding-contact route
+    # by the sign rules of Vol I R17 p.11-29/30 (CardStack K-11). False =
+    # the cells each route wrote before K-11: Tstart 0 / Tstop 0 where BT /
+    # DT were dropped; BT / DT as stated (Tstop 0 for a DT >= 1e19) on the
+    # eroding / node-to-surface TYPE25 family, the routed implicit
+    # node-to-surface TYPE7 and --s2s-type25.
+    contact_birth_death: bool = True
+    # --no-soft2-iedge-gate (default ON; writer/contacts): an optional
+    # Card A SOFT 2 on the ERODING_SURFACE_TO_SURFACE /
+    # AUTOMATIC_NODES_TO_SURFACE /INTER/TYPE25 writes Iedge 22 only with
+    # DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1, LS-DYNA's edge-treatment
+    # rule (Vol I R17 p.11-94; CardStack K-10). False = Iedge 22 for every
+    # SOFT 2 card there, as dyna2rad writes it (convertcontacts.cxx:593-611).
+    soft2_iedge_gate: bool = True
+    # --no-srnde-ishape (default ON; writer/contacts): optional Card E SRNDE
+    # 1 -> /INTER/TYPE25 Ishape 2 (round gap) where the interface holds a
+    # shell (CardStack K-16). False = Ishape 0 (square), the dropped SRNDE
+    # named.
+    srnde_ishape: bool = True
+    # --no-maxint-stress-all (default ON; writer/assembly):
+    # *DATABASE_EXTENT_BINARY MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL in
+    # the engine deck (CardStack K-42, reached from a .k deck since wave C).
+    # False = no such line whatever MAXINT says; the read stays.
+    maxint_stress_all: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

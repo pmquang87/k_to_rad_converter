@@ -426,7 +426,10 @@ class DampingGlobalLcidText(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 
 #: (CLI flag, ConvertOptions / convert() name, default) - every boolean
-#: lever K-0P lands; each is a BooleanOptionalAction with its --no- twin.
+#: lever K-0P lands, and the four opt-out flags of the user's decision 8
+#: (2026-11-01) for the wave-C defaults K-11, K-10's SOFT 2 Iedge gate,
+#: K-16 and the MAXINT read; each is a BooleanOptionalAction with its
+#: --no- twin.
 _BOOL_LEVERS = (
     ("--damping-curve-window", "damping_curve_window", True),
     ("--stop-added-mass", "stop_added_mass", False),
@@ -436,6 +439,10 @@ _BOOL_LEVERS = (
     ("--s2s-type25", "s2s_type25", False),
     ("--general-shell-edges", "general_shell_edges", False),
     ("--single-surface-sst-gap", "single_surface_sst_gap", True),
+    ("--contact-birth-death", "contact_birth_death", True),
+    ("--soft2-iedge-gate", "soft2_iedge_gate", True),
+    ("--srnde-ishape", "srnde_ishape", True),
+    ("--maxint-stress-all", "maxint_stress_all", True),
 )
 #: the non-boolean levers and their defaults
 _VALUE_LEVERS = {"print_every": None, "inter_stmin": {}, "inter_inacti": {}}
@@ -1136,7 +1143,8 @@ class NewLeverRefusals(unittest.TestCase):
 
 #: build_convert_kwargs parameter -> its ConverterGUI Tk variable, for each
 #: lever K-0P adds to the window (the --inter-stmin / --inter-inacti boxes
-#: have no widget, like --inter-gapmin's).
+#: have no widget, like --inter-gapmin's), and the four opt-out flags of
+#: the user's decision 8 (2026-11-01).
 _GUI_LEVER_VARS = {
     "damping_curve_window": "damping_curve_window",
     "stop_added_mass": "stop_added_mass",
@@ -1147,6 +1155,10 @@ _GUI_LEVER_VARS = {
     "s2s_type25": "s2s_type25",
     "general_shell_edges": "general_shell_edges",
     "single_surface_sst_gap": "single_surface_sst_gap",
+    "contact_birth_death": "contact_birth_death",
+    "soft2_iedge_gate": "soft2_iedge_gate",
+    "srnde_ishape": "srnde_ishape",
+    "maxint_stress_all": "maxint_stress_all",
 }
 
 
@@ -1279,6 +1291,70 @@ class GuiWindowWiring(unittest.TestCase):
         finally:
             k2rad_gui.build_convert_kwargs = real
             root.destroy()
+
+
+#: build_convert_kwargs parameter -> a phrase of its checkbox label, for
+#: every boolean lever of _GUI_LEVER_VARS (the wave-D review: no test read
+#: which Tk variable a checkbox binds, mutant R63)
+_GUI_CHECKBOX_LABELS = {
+    "damping_curve_window": "Damping LCID curves converted in time",
+    "stop_added_mass": "DT2MS < 0 + ENDMAS -> engine /STOP Mmax",
+    "dt2ms_tssfac_product": "mass-scaled Tmin = TSSFAC x |DT2MS|",
+    "tet_isolid1": "All-tet sections -> /PROP/SOLID Isolid 1",
+    "law1_shell_global_n": "All-LAW1 shell sections -> /PROP/SHELL N = 0",
+    "s2s_type25": "AUTOMATIC_SURFACE_TO_SURFACE -> two-surface /INTER/TYPE25",
+    "general_shell_edges": "AUTOMATIC_GENERAL TYPE25 with Iedge 1",
+    "single_surface_sst_gap": "Single-surface shell contact: Gapmin = |SST|",
+    "contact_birth_death": "Card-2 BT / DT -> /INTER Tstart / Tstop",
+    "soft2_iedge_gate": "SOFT 2 Iedge 22 only with DEPTH",
+    "srnde_ishape": "Card E SRNDE 1 -> TYPE25 Ishape 2",
+    "maxint_stress_all": "MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL",
+}
+
+
+def _gui_checkboxes():
+    """[(label text, self attribute)] of every Checkbutton the window
+    builds in __init__, read from the source (no display needed)."""
+    import ast
+    out = []
+    for node in ast.walk(_gui_method_ast("__init__")):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "Checkbutton"):
+            kws = {k.arg: k.value for k in node.keywords}
+            text, var = kws.get("text"), kws.get("variable")
+            out.append((
+                text.value if isinstance(text, ast.Constant) else None,
+                var.attr if (isinstance(var, ast.Attribute)
+                             and isinstance(var.value, ast.Name)
+                             and var.value.id == "self") else None))
+    return out
+
+
+class GuiCheckboxBinding(unittest.TestCase):
+    """Each boolean lever has ONE checkbox; its label names the lever and
+    the default (ON / OFF), and it binds the lever's own Tk variable - the
+    one _on_convert reads (GuiOnConvertWiring). In the wave-D review the
+    SRNDE checkbox bound to the MAXINT variable, and every test still
+    passed (mutant R63)."""
+
+    def test_every_bool_lever_checkbox_binds_its_own_variable(self):
+        import k2rad_gui
+        boxes = _gui_checkboxes()
+        sig = inspect.signature(k2rad_gui.build_convert_kwargs).parameters
+        self.assertEqual(set(_GUI_CHECKBOX_LABELS),
+                         {p for p in _GUI_LEVER_VARS
+                          if isinstance(sig[p].default, bool)})
+        for param, phrase in _GUI_CHECKBOX_LABELS.items():
+            attr = _GUI_LEVER_VARS[param]
+            with self.subTest(param=param):
+                bound = [t for t, v in boxes if v == attr]
+                self.assertEqual(len(bound), 1, bound)
+                self.assertIn(phrase, bound[0])
+                self.assertEqual([v for t, v in boxes if t and phrase in t],
+                                 [attr])
+                self.assertTrue(bound[0].endswith(
+                    " - ON" if sig[param].default else " - OFF"), bound[0])
 
 
 def _stfac_cell(starter: str, header_prefix: str, title_prefix: str = ""):
@@ -4742,6 +4818,491 @@ class GeneralShellEdgesBeamCount(unittest.TestCase):
         self.assertIn("1 beam element (*ELEMENT_BEAM) takes no part", w)
         self.assertIn("beam-to-beam contact is not converted", w)
         self.assertIn("spot-weld beam (*SECTION_BEAM ELFORM 9)", w)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The opt-out flags of the user's decision 8 (2026-11-01, wave D): K-11
+# (--no-contact-birth-death), K-10's SOFT 2 Iedge gate
+# (--no-soft2-iedge-gate) and K-16 (--no-srnde-ishape); the MAXINT one
+# (--no-maxint-stress-all) is pinned in tests/test_cardstack_pipeline_engine.py
+# beside the K-42 rule it gates. Each flag restores the cells its route
+# wrote before the item, and one line names it where it moves a byte. The
+# parser / convert() / ConvertOptions / cli.main() / GUI wiring of the four is
+# the _BOOL_LEVERS and _GUI_LEVER_VARS tables above.
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: the _k11_routes / _raw_dt_routes names whose route wrote the raw Card-2
+#: BT / DT before K-11 (dt_was_written); the other seven dropped them
+_RAW_DT_NAMES = frozenset({"S2S --s2s-type25", "--s2s-type25", "ERODING S2S",
+                           "explicit N2S", "routed implicit N2S"})
+
+#: K-11's own line (the opt-out does not print it)
+_K11_LINE = "(Vol I R17 p.11-29/30: the interface acts between them)"
+
+#: the raw-route opt-out line's sentence for a DT of -9999 (Remark 2)
+_CURVE_AS_TIME = ("DT = -9999 makes BT the id of a curve of birth / death "
+                  "pairs (Remark 2), written here as a time")
+
+
+def _data_line(starter: str, header: str, row: int) -> int:
+    """The line index of data row *row* of the block *header* (the title
+    line and the '#' rows skipped, as _inter_rows counts them)."""
+    lines = starter.splitlines()
+    i = lines.index(header)
+    data = []
+    for k in range(i + 2, len(lines)):
+        if lines[k].startswith("/"):
+            break
+        if not lines[k].startswith("#"):
+            data.append(k)
+    return data[row]
+
+
+def _differing_lines(a: str, b: str):
+    la, lb = a.splitlines(), b.splitlines()
+    assert len(la) == len(lb), (len(la), len(lb))
+    return [k for k, (x, y) in enumerate(zip(la, lb)) if x != y]
+
+
+def _opt_out_lines(res, flag: str):
+    return [w for w in res.warnings if flag in w]
+
+
+class ContactBirthDeathOptOut(unittest.TestCase):
+    """--no-contact-birth-death (D-02): every K-11 route writes the cells it
+    wrote before K-11. The single-surface, surface-to-surface and SOFT -7
+    TYPE7, the SSID = 0 TYPE25 (and its joint-screw split) and the SOFT -11
+    / -19 TYPE11 / TYPE19 dropped Card-2 BT / DT (Tstart 0 / Tstop 0); the
+    eroding / node-to-surface TYPE25 family, the routed implicit
+    node-to-surface TYPE7 and --s2s-type25 wrote BT and DT as stated, Tstop
+    0 for a DT >= 1e19 (``tstop = 0 if DT >= 1e19 else DT``, the code at
+    0562f3c's parent and the K1b before-snapshot). One line names the
+    opt-out on each interface whose cells it moves."""
+
+    _FLAG = "--no-contact-birth-death"
+
+    def test_the_dropping_routes_write_the_bytes_of_no_bt_dt(self):
+        plain = {n: (d, k) for n, d, k, _t, _i in _k11_routes((0.2, 0.2))}
+        seen = 0
+        for name, deck, kw, kind, iid in _k11_routes(_card2(0.001, 0.004)):
+            if name in _RAW_DT_NAMES:
+                continue
+            seen += 1
+            with self.subTest(name):
+                res, s, e = _convert(_endtim(deck), contact_birth_death=False,
+                                     **kw)
+                self.assertEqual(_t_cells(s, kind, iid), ("0", "0"))
+                d0, k0 = plain[name]
+                _r, s0, e0 = _convert(_endtim(d0), **k0)
+                self.assertEqual((s, e), (s0, e0))
+                ws = _opt_out_lines(res, self._FLAG)
+                self.assertEqual(len(ws), 1, res.warnings)
+                for needle in (f" {iid}: Card-2 BT 0.001 / DT 0.004",
+                               f"/INTER/{kind}/{iid} keeps Tstart 0 / Tstop 0",
+                               "active for the whole run",
+                               "K-11 writes Tstart 0.001 / Tstop 0.004",
+                               "p.11-29/30"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, ws[0])
+                self.assertFalse(_has(res.warnings, _K11_LINE), res.warnings)
+        self.assertEqual(seen, 7)
+
+    def test_the_raw_routes_write_bt_and_dt_as_stated(self):
+        plain = {n: (d, k) for n, d, k, _t, _i in _raw_dt_routes((0.2, 0.2))}
+        for card2, raw, k11 in (
+                (_card2(-0.001, 0.004), ("-0.001", "0.004"),
+                 "K-11 writes Tstart 0 / Tstop 0.004"),
+                (_card2(0.002, -0.004), ("0.002", "-0.004"),
+                 "K-11 writes Tstart 0.002 / Tstop 0.004"),
+                (_card2(0.0, "1.0E+14"), ("0", "1E+14"),
+                 "K-11 writes Tstart 0 / Tstop 0"),
+                (_card2(3, -9999), ("3", "-9999"),
+                 "K-11 writes Tstart 0 / Tstop 0")):
+            for name, deck, kw, kind, iid in _raw_dt_routes(card2):
+                with self.subTest(name, bt=card2[6], dt=card2[7]):
+                    res, s, e = _convert(_endtim(deck),
+                                         contact_birth_death=False, **kw)
+                    self.assertEqual(_t_cells(s, kind, iid), raw)
+                    # nothing else moves: the deck without BT / DT, but the
+                    # one Tstart / Tstop row
+                    d0, k0 = plain[name]
+                    _r, s0, e0 = _convert(_endtim(d0), **k0)
+                    self.assertEqual(
+                        _differing_lines(s, s0),
+                        [_data_line(s, f"/INTER/{kind}/{iid}", _T_ROW[kind])])
+                    self.assertEqual(e, e0)
+                    ws = _opt_out_lines(res, self._FLAG)
+                    self.assertEqual(len(ws), 1, res.warnings)
+                    for needle in (f" {iid}: Card-2 BT", "as stated",
+                                   "before CardStack K-11", k11):
+                        with self.subTest(needle=needle):
+                            self.assertIn(needle, ws[0])
+                    # DT = -9999 is named as a curve id written as a time,
+                    # on that row only (the wave-D review, mutant R03)
+                    if card2[7] == -9999:
+                        self.assertIn(_CURVE_AS_TIME, ws[0])
+                    else:
+                        self.assertNotIn(_CURVE_AS_TIME, ws[0])
+                    self.assertFalse(_has(res.warnings, _K11_LINE))
+                    self.assertFalse(_has(res.warnings, "pairs are LOST"))
+                    self.assertFalse(_has(res.warnings,
+                                          "is at or past ENDTIM"))
+
+    def test_a_negative_raw_tstop_is_named_as_switching_the_contact_off(self):
+        for name, deck, kw, kind, iid in _raw_dt_routes(_card2(0.002,
+                                                               -0.004)):
+            with self.subTest(name):
+                res, _s, _e = _convert(_endtim(deck),
+                                       contact_birth_death=False, **kw)
+                ws = _opt_out_lines(res, self._FLAG)
+                self.assertEqual(len(ws), 1, res.warnings)
+                for needle in ("Tstop -0.004 < 0", "from t 0",
+                               "i7mainf.F:264-265" if kind == "TYPE7"
+                               else "i25mainf.F:310-311"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, ws[0])
+        res, _s, _e = _convert(_endtim(_raw_dt_routes(_card2(-0.001, 0.004))
+                                       [0][1]), contact_birth_death=False)
+        self.assertFalse(_has(res.warnings, "from t 0"), res.warnings)
+        # a Tstop of 0 means never (the starter reads it as 1e30), not a
+        # switch-off: BT < 0 with a blank DT prints the line with Tstop 0 on
+        # every raw route, and it must not say the contact never acts (the
+        # wave-D review, mutant R04: <= for <)
+        for name, deck, kw, kind, iid in _raw_dt_routes(_card2(-0.001, "")):
+            with self.subTest(name, tstop=0):
+                res, s, _e = _convert(_endtim(deck),
+                                      contact_birth_death=False, **kw)
+                self.assertEqual(_t_cells(s, kind, iid), ("-0.001", "0"))
+                ws = _opt_out_lines(res, self._FLAG)
+                self.assertEqual(len(ws), 1, res.warnings)
+                self.assertIn(f"/INTER/{kind}/{iid} Tstart -0.001 / Tstop 0 "
+                              "as stated", ws[0])
+                self.assertFalse(_has(res.warnings, "from t 0"), res.warnings)
+                self.assertNotIn("never acts", ws[0])
+
+    def test_where_the_cells_agree_nothing_moves_and_nothing_is_said(self):
+        for card2 in ((0.2, 0.2), _card2(0.0, 1.0e20), _card2(0.001, 0.004)):
+            for name, deck, kw, kind, iid in _raw_dt_routes(card2):
+                with self.subTest(name, card2=card2):
+                    res, s, e = _convert(_endtim(deck),
+                                         contact_birth_death=False, **kw)
+                    _r, s1, e1 = _convert(_endtim(deck), **kw)
+                    self.assertEqual((s, e), (s1, e1))
+                    self.assertFalse(_opt_out_lines(res, self._FLAG),
+                                     res.warnings)
+                    self.assertFalse(_has(res.warnings, _K11_LINE))
+        for card2 in ((0.2, 0.2), _card2(0.0, 1.0e20), _card2(0.0, 0.02)):
+            for name, deck, kw, kind, iid in _k11_routes(card2):
+                if name in _RAW_DT_NAMES:
+                    continue
+                with self.subTest(name, card2=card2):
+                    res, s, e = _convert(_endtim(deck),
+                                         contact_birth_death=False, **kw)
+                    _r, s1, e1 = _convert(_endtim(deck), **kw)
+                    self.assertEqual((s, e), (s1, e1))
+                    self.assertFalse(_opt_out_lines(res, self._FLAG),
+                                     res.warnings)
+
+    def test_a_dt_of_1e19_is_the_raw_routes_cut_off(self):
+        """The raw routes wrote ``tstop = 0 if DT >= 1e19 else DT`` (d7652da
+        contacts.py:4906): a DT of exactly 1e19 writes Tstop 0 under the
+        flag, the cell K-11 writes too, so nothing moves and nothing is
+        said (the wave-D review, mutant R01: > for >=)."""
+        for name, deck, kw, kind, iid in _raw_dt_routes(_card2(0.0, 1.0e19)):
+            with self.subTest(name):
+                res, s, e = _convert(_endtim(deck),
+                                     contact_birth_death=False, **kw)
+                self.assertEqual(_t_cells(s, kind, iid), ("0", "0"))
+                _r, s1, e1 = _convert(_endtim(deck), **kw)
+                self.assertEqual((s, e), (s1, e1))
+                self.assertFalse(_opt_out_lines(res, self._FLAG),
+                                 res.warnings)
+
+    def test_the_k11_texts_are_not_printed_under_the_flag(self):
+        """DT = -9999 on a dropping route writes 0 / 0 both ways (no byte
+        moves, so no opt-out line), and K-11's 'pairs are LOST' line - a
+        K-11 conversion text - is not printed either."""
+        res, s, _e = _convert(_endtim(_k1a_deck(_k1a_ass(
+            7, 1, 2, card2=_card2(3, -9999)))), contact_birth_death=False)
+        self.assertEqual(_t_cells(s, "TYPE7", 7), ("0", "0"))
+        self.assertFalse(_has(res.warnings, "pairs are LOST"), res.warnings)
+        self.assertFalse(_opt_out_lines(res, self._FLAG), res.warnings)
+
+    def test_the_joint_screw_split_takes_the_parent_cells(self):
+        """The *CONSTRAINED_JOINT_SCREW split copies the SSID = 0 TYPE25's
+        Tstart / Tstop (R11e): under the flag both write 0 / 0."""
+        deck = _t7._screw_deck()
+        old = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(0, 0, 5, 0) + "\n"
+               + _row(0.1, 0.0, 0.0, 0.0) + "\n\n")
+        self.assertEqual(deck.count(old), 1)
+        new = ("*CONTACT_AUTOMATIC_GENERAL\n" + _row(0, 0, 5, 0) + "\n"
+               + _row(0.1, 0.0, 0.0, 0.0, 0.0, 0, 1.0e-4, 0.05) + "\n"
+               + _row() + "\n")
+        res, s, _e = _convert(deck.replace(old, new),
+                              contact_birth_death=False)
+        ids = _type25_ids_by_title(s)
+        self.assertEqual(len(ids), 2, ids)
+        for title, iid in ids.items():
+            with self.subTest(title=title):
+                self.assertEqual(_t_cells(s, "TYPE25", iid), ("0", "0"))
+        _r, s1, _e = _convert(deck.replace(old, new))
+        for title, iid in _type25_ids_by_title(s1).items():
+            with self.subTest(default=title):
+                self.assertEqual(tuple(float(v) for v in
+                                       _t_cells(s1, "TYPE25", iid)),
+                                 (1.0e-4, 0.05))
+        self.assertEqual(len(_opt_out_lines(res, self._FLAG)), 1,
+                         res.warnings)
+
+
+def _n2s_soft(card_a=(2,)) -> str:
+    """The explicit *CONTACT_AUTOMATIC_NODES_TO_SURFACE 16 (node set 5 on
+    the block) with Card A *card_a* - the other family of the K-10 gate."""
+    return _k1a_s2s(16, ssid=5, msid=1, sstyp=4, mstyp=3,
+                    kw="CONTACT_AUTOMATIC_NODES_TO_SURFACE_ID",
+                    tail=_row(*card_a) + "\n")
+
+
+class Soft2IedgeGateOptOut(unittest.TestCase):
+    """--no-soft2-iedge-gate (D-03): K-10 writes SOFT 2's Iedge 22 on the
+    ERODING_SURFACE_TO_SURFACE / AUTOMATIC_NODES_TO_SURFACE TYPE25 only with
+    Card A DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (Vol I R17
+    p.11-91/94/97); the flag writes 22 for every SOFT 2 card of that family,
+    as the native reader does (dyna2rad convertcontacts.cxx:593-611) and as
+    k2rad did before K-10."""
+
+    _FLAG = "--no-soft2-iedge-gate"
+
+    def test_the_flag_writes_iedge_22_where_the_gate_holds_it_back(self):
+        blank = "neither (DEPTH blank = 2, SBOPT blank = 2)"
+        for name, contact, extra, iid, gate in (
+                ("ERODING S2S", _eroding_s2s(), "", 51, blank),
+                ("AUTOMATIC N2S", _n2s_soft(), _card_nset(), 16, blank),
+                ("ERODING S2S, DEPTH 3 / SBOPT 3",
+                 _eroding_s2s(card_a=(2, 0, 0, 0, 3, 3)), "", 51,
+                 "neither (DEPTH 3, SBOPT 3)")):
+            with self.subTest(name):
+                deck = _k1a_deck(contact, extra=extra)
+                _r, s0, e0 = _convert(deck)
+                self.assertEqual(_type25_card1(s0, iid)[7], "1000")
+                res, s, e = _convert(deck, soft2_iedge_gate=False)
+                c1 = _type25_card1(s, iid)
+                self.assertEqual((c1[2], c1[7]), ("2", "22"))
+                self.assertEqual(_differing_lines(s, s0),
+                                 [_data_line(s, f"/INTER/TYPE25/{iid}", 0)])
+                self.assertEqual(e, e0)
+                ws = _opt_out_lines(res, self._FLAG)
+                self.assertEqual(len(ws), 1, res.warnings)
+                for needle in ("SOFT=2", "Iedge=22",
+                               "DEPTH 5/15/25/35/45/55 or SBOPT 1",
+                               "convertcontacts.cxx:593-611",
+                               "the default writes Iedge 1000", "IPSTIF=1"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, ws[0])
+                # the card's own gate text: the flag opens no gate, so the
+                # line never says SBOPT 1 (the wave-D review, mutants R20 /
+                # R22)
+                self.assertIn(f"and this card has {gate}, so the default "
+                              "writes Iedge 1000", ws[0])
+                self.assertNotIn("this card has SBOPT 1", ws[0])
+                self.assertFalse(_has(res.warnings, "Iedge=1000 (no "
+                                      "edge-to-edge contact)"), res.warnings)
+
+    def test_where_the_gate_is_open_the_flag_moves_nothing(self):
+        for card_a in ((2, 0, 0, 0, 0, 5), (2, 0, 0, 0, 0, 45),
+                       (2, 0, 0, 0, 1, 0)):
+            with self.subTest(card_a=card_a):
+                deck = _k1a_deck(_eroding_s2s(card_a=card_a))
+                r0, s0, e0 = _convert(deck)
+                res, s, e = _convert(deck, soft2_iedge_gate=False)
+                self.assertEqual(_type25_card1(s, 51)[7], "22")
+                self.assertEqual((s, e, res.warnings), (s0, e0, r0.warnings))
+
+    def test_the_other_soft_values_and_spellings_are_untouched(self):
+        eroding_self = _k1a_ass(61, 1, 2,
+                                kw="CONTACT_ERODING_SINGLE_SURFACE_ID",
+                                tail=_row(0, 1, 1) + "\n" + _row(2) + "\n")
+        for name, contact in (("SOFT 0", _eroding_s2s(card_a=(0,))),
+                              ("SOFT 1", _eroding_s2s(card_a=(1,))),
+                              ("ERODING_SINGLE_SURFACE SOFT 2", eroding_self)):
+            with self.subTest(name):
+                deck = _k1a_deck(contact)
+                r0, s0, e0 = _convert(deck)
+                res, s, e = _convert(deck, soft2_iedge_gate=False)
+                self.assertEqual((s, e, res.warnings), (s0, e0, r0.warnings))
+                self.assertFalse(_opt_out_lines(res, self._FLAG))
+
+
+class SrndeIshapeOptOut(unittest.TestCase):
+    """--no-srnde-ishape (D-04): K-16 writes a stated Card E SRNDE 1 as
+    /INTER/TYPE25 Ishape 2 where the interface holds a shell; the flag keeps
+    Ishape 0 (the square gap of the code before K-16) and names the dropped
+    SRNDE in K-16's wording. The TYPE7 routes name SRNDE and never apply it,
+    either way; their line and the SRNDE 0 reach note say what SRNDE 1
+    writes on the TYPE25 routes, so under the flag they say Ishape 0."""
+
+    _FLAG = "--no-srnde-ishape"
+
+    @staticmethod
+    def _emitters(srnde):
+        eroding = "CONTACT_ERODING_SURFACE_TO_SURFACE_ID"
+        return (
+            ("SSID = 0 self", _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=srnde)),
+             {}, 21),
+            ("ERODING S2S", _k1a_s2s(51, kw=eroding, tail=_row(0, 1, 1) + "\n"
+                                     + _cards_ae(srnde=srnde)), {}, 51),
+            ("--s2s-type25", _k1a_s2s(51, tail=_cards_ae(srnde=srnde)),
+             {"s2s_type25": True}, 51))
+
+    def test_the_flag_keeps_ishape_0_on_both_type25_emitters(self):
+        plain = {n: c for n, c, _k, _i in self._emitters(0)}
+        for name, contact, kw, iid in self._emitters(1):
+            with self.subTest(name):
+                _r, s1, _e = _convert(_k1a_deck(contact), **kw)
+                self.assertEqual(_ishape(s1, iid), "2")
+                res, s, e = _convert(_k1a_deck(contact), srnde_ishape=False,
+                                     **kw)
+                self.assertEqual(_ishape(s, iid), "0")
+                _r0, s0, e0 = _convert(_k1a_deck(plain[name]), **kw)
+                self.assertEqual((s, e), (s0, e0))
+                ws = _opt_out_lines(res, self._FLAG)
+                self.assertEqual(len(ws), 1, res.warnings)
+                for needle in (f"{iid}: Card E SRNDE 1 is not converted",
+                               f"/INTER/TYPE25/{iid} keeps Ishape 0 (square)",
+                               "Ishape 2 (round)", "p.11-115/116 Remark 3"):
+                    with self.subTest(needle=needle):
+                        self.assertIn(needle, ws[0])
+                self.assertFalse(_has(res.warnings, f"/INTER/TYPE25/{iid} "
+                                      "Ishape 2: a round gap"), res.warnings)
+                self.assertFalse(_has(res.warnings, f"{iid}:", _REACH),
+                                 res.warnings)
+
+    def test_where_srnde_1_writes_ishape_0_anyway_the_flag_moves_nothing(self):
+        for name, deck in (
+                ("SOFT 2 SHLEDG 1", _k1a_deck(_k1a_ass(21, 0, 0, tail=_cards_ae(
+                    srnde=1, shledg=1, card_a=(2,))))),
+                ("SOFT 2 DEPTH 23", _k1a_deck(_k1a_ass(21, 0, 0, tail=_cards_ae(
+                    srnde=1, card_a=(2, 0, 0, 0, 0, 23))))),
+                ("no shell", _without_shells(_k1a_deck(_k1a_ass(
+                    21, 0, 0, tail=_cards_ae(srnde=1))))),
+                ("Mortar", _k1a_deck(_k1a_ass(
+                    21, 0, 0, kw="CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR_ID",
+                    tail=_cards_ae(srnde=1))))):
+            with self.subTest(name):
+                r0, s0, e0 = _convert(deck)
+                res, s, e = _convert(deck, srnde_ishape=False)
+                self.assertEqual((s, e, res.warnings), (s0, e0, r0.warnings))
+                self.assertFalse(_opt_out_lines(res, self._FLAG))
+        # the TYPE7 route moves no byte either; its SRNDE line follows the
+        # flag (test_the_srnde_notes_follow_the_flag)
+
+    def _one_line_moves(self, deck, needle):
+        """Convert *deck* both ways: the same bytes, and the same lines but
+        the ONE line holding *needle* - returned as (default, flag)."""
+        r0, s0, e0 = _convert(deck)
+        res, s, e = _convert(deck, srnde_ishape=False)
+        self.assertEqual((s, e), (s0, e0))
+        w0 = [w for w in r0.warnings if needle in w]
+        w1 = [w for w in res.warnings if needle in w]
+        self.assertEqual((len(w0), len(w1)), (1, 1),
+                         (r0.warnings, res.warnings))
+        self.assertEqual([w for w in res.warnings if w not in w1],
+                         [w for w in r0.warnings if w not in w0])
+        # no SRNDE 1 lost an Ishape 2 here: no D-04 opt-out line
+        self.assertFalse(_has(res.warnings,
+                              "is not converted (--no-srnde-ishape)"))
+        return w0[0], w1[0]
+
+    def test_the_srnde_notes_follow_the_flag(self):
+        """The SRNDE 0 reach note (a shell TYPE25) and the TYPE7 route's
+        SRNDE line say what SRNDE 1 writes on the TYPE25 routes: Ishape 2 by
+        default, Ishape 0 under the flag (the wave-D review: both said
+        Ishape 2 either way). No byte moves."""
+        d0, d1 = self._one_line_moves(
+            _k1a_deck(_k1a_ass(21, 0, 0, tail=_cards_ae(srnde=0))), _REACH)
+        self.assertIn("21: LS-DYNA's default free-edge treatment", d1)
+        self.assertIn("SRNDE 1 - rounded, not extended - writes Ishape 2 "
+                      "(round). No byte moves.", d0)
+        self.assertNotIn(self._FLAG, d0)
+        for needle in ("the card keeps Ishape 0 (= 1, a square gap there), "
+                       "and under --no-srnde-ishape SRNDE 1 - rounded, not "
+                       "extended - keeps Ishape 0 too (the default writes "
+                       "it as Ishape 2, round). No byte moves.", _REACH):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, d1)
+        self.assertNotIn("writes Ishape 2 (round)", d1)
+        t0, t1 = self._one_line_moves(
+            _k1a_deck(_k1a_ass(7, 1, 2, tail=_cards_ae(srnde=1))),
+            "7: Card E SRNDE 1 is not converted")
+        self.assertTrue(t0.endswith("(the /INTER/TYPE25 routes write SRNDE 1 "
+                                    "as Ishape 2)."), t0)
+        self.assertTrue(t1.endswith("(the /INTER/TYPE25 routes write SRNDE 1 "
+                                    "as Ishape 2 by default, and keep Ishape "
+                                    "0 under --no-srnde-ishape)."), t1)
+
+    def test_the_joint_screw_split_keeps_ishape_0(self):
+        deck = _t7._screw_deck()
+        old = ("*CONTACT_AUTOMATIC_SINGLE_SURFACE\n" + _row(0, 0, 5, 0) + "\n"
+               + _row(0.1, 0.0, 0.0, 0.0) + "\n\n")
+        new = ("*CONTACT_AUTOMATIC_GENERAL\n" + _row(0, 0, 5, 0) + "\n"
+               + _row(0.1, 0.0, 0.0, 0.0) + "\n" + _row() + "\n"
+               + _cards_ae(srnde=1))
+        res, s, _e = _convert(deck.replace(old, new), srnde_ishape=False)
+        ids = _type25_ids_by_title(s)
+        self.assertEqual(len(ids), 2, ids)
+        for title, iid in ids.items():
+            with self.subTest(title=title):
+                self.assertEqual(_ishape(s, iid), "0")
+        self.assertEqual(len(_opt_out_lines(res, self._FLAG)), 1,
+                         res.warnings)
+
+
+class OptOutFlagHelpTexts(unittest.TestCase):
+    """The four help texts say what the default writes, what the --no-
+    spelling restores and what it was measured to move (the R14 numbers
+    are the wave-D census of 2026-11-01)."""
+
+    def test_each_help_names_its_item_and_what_the_opt_out_restores(self):
+        for flag, needles in (
+                ("--contact-birth-death", (
+                    "Card-2 BT / DT", "Tstart / Tstop", "CardStack K-11",
+                    "p.11-29/30", "ON by default", "--no-contact-birth-death",
+                    "before K-11", "Tstart 0 / Tstop 0", "as stated",
+                    "i7mainf.F:264-265", "i25mainf.F:310-311",
+                    "6 starter decks", "STOP TIME -4.0E-03", "0.00 %",
+                    "58.05 %",
+                    # the split moves with its card and has no line of its
+                    # own (the wave-D review)
+                    "A line names each contact card whose cells the flag "
+                    "moves", "a *CONSTRAINED_JOINT_SCREW split copies the "
+                    "cells of its card, as its own line says")),
+                ("--soft2-iedge-gate", (
+                    "SOFT 2", "Iedge 22", "DEPTH 5 / 15 / 25 / 35 / 45 / 55",
+                    "SBOPT 1", "p.11-94", "CardStack K-10", "ON by default",
+                    "--no-soft2-iedge-gate", "convertcontacts.cxx:593-611",
+                    "EDGE FLAG 22", "R14: 0 decks move")),
+                ("--srnde-ishape", (
+                    "SRNDE 1", "Ishape 2", "CardStack K-16", "ON by default",
+                    "--no-srnde-ishape", "Ishape 0",
+                    "GAP SHAPE ALONG MAIN FREE EDGES 1", "R14: 0 decks move")),
+                ("--maxint-stress-all", (
+                    "MAXINT", "/ANIM/SHELL/TENS/STRESS/ALL", "p.16-67",
+                    "ON by default", "--no-maxint-stress-all", "K-42",
+                    "9 engine decks", "MAXINT 4, 5, 7 or 8"))):
+            h = _action_help(flag)
+            for needle in needles:
+                with self.subTest(flag=flag, needle=needle):
+                    self.assertIn(needle, h)
+            self.assertNotIn("names each interface the flag moves", h)
+
+    def test_the_gui_names_each_opt_out_on_its_checkbox(self):
+        src = _gui_source_joined()
+        for needle in ("Card-2 BT / DT -> /INTER Tstart / Tstop",
+                       "SOFT 2 Iedge 22 only with DEPTH",
+                       "Card E SRNDE 1 -> TYPE25 Ishape 2",
+                       "MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, src)
 
 
 if __name__ == "__main__":

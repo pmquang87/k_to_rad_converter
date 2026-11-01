@@ -522,6 +522,10 @@ def convert(
     s2s_type25: bool = False,
     general_shell_edges: bool = False,
     single_surface_sst_gap: bool = True,
+    contact_birth_death: bool = True,
+    soft2_iedge_gate: bool = True,
+    srnde_ishape: bool = True,
+    maxint_stress_all: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1873,6 +1877,28 @@ def convert(
         Gapmin = |SST| on a single-surface contact of shells (Igap-0 routes)
         instead of (|SST| + |MST|)/2. Default True
         (``--no-single-surface-sst-gap``).
+    contact_birth_death : bool
+        ``*CONTACT`` Card-2 BT / DT -> ``/INTER`` Tstart / Tstop on every
+        sliding-contact route, by the sign rules of Vol I R17 p.11-29/30
+        (CardStack K-11). Default True (``--no-contact-birth-death``: the
+        cells each route wrote before K-11 - 0 / 0 where BT / DT were
+        dropped, BT / DT as stated on the eroding / node-to-surface
+        ``/INTER/TYPE25`` family, the routed implicit node-to-surface
+        ``/INTER/TYPE7`` and ``--s2s-type25``).
+    soft2_iedge_gate : bool
+        An optional Card A SOFT 2 on the ERODING_SURFACE_TO_SURFACE /
+        AUTOMATIC_NODES_TO_SURFACE ``/INTER/TYPE25`` writes Iedge 22 only
+        with DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (CardStack K-10).
+        Default True (``--no-soft2-iedge-gate``: Iedge 22 for every SOFT 2
+        card there, dyna2rad's rule).
+    srnde_ishape : bool
+        Optional Card E SRNDE 1 -> ``/INTER/TYPE25`` Ishape 2 where the
+        interface holds a shell (CardStack K-16). Default True
+        (``--no-srnde-ishape``: Ishape 0, the SRNDE named).
+    maxint_stress_all : bool
+        ``*DATABASE_EXTENT_BINARY`` MAXINT > 3 ->
+        ``/ANIM/SHELL/TENS/STRESS/ALL`` in the engine deck (CardStack K-42).
+        Default True (``--no-maxint-stress-all``: no such line).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2022,6 +2048,10 @@ def convert(
         s2s_type25=s2s_type25,
         general_shell_edges=general_shell_edges,
         single_surface_sst_gap=single_surface_sst_gap,
+        contact_birth_death=contact_birth_death,
+        soft2_iedge_gate=soft2_iedge_gate,
+        srnde_ishape=srnde_ishape,
+        maxint_stress_all=maxint_stress_all,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

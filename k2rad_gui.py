@@ -213,7 +213,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          inter_inacti_text: str = "",
                          s2s_type25: bool = False,
                          general_shell_edges: bool = False,
-                         single_surface_sst_gap: bool = True) -> dict:
+                         single_surface_sst_gap: bool = True,
+                         contact_birth_death: bool = True,
+                         soft2_iedge_gate: bool = True,
+                         srnde_ishape: bool = True,
+                         maxint_stress_all: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -543,6 +547,11 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["s2s_type25"] = bool(s2s_type25)
     kwargs["general_shell_edges"] = bool(general_shell_edges)
     kwargs["single_surface_sst_gap"] = bool(single_surface_sst_gap)
+    # the opt-out flags of the user's decision 8 (2026-11-01)
+    kwargs["contact_birth_death"] = bool(contact_birth_death)
+    kwargs["soft2_iedge_gate"] = bool(soft2_iedge_gate)
+    kwargs["srnde_ishape"] = bool(srnde_ishape)
+    kwargs["maxint_stress_all"] = bool(maxint_stress_all)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -675,6 +684,11 @@ class ConverterGUI:
         self.s2s_type25 = tk.BooleanVar(value=False)
         self.general_shell_edges = tk.BooleanVar(value=False)
         self.single_surface_sst_gap = tk.BooleanVar(value=True)
+        # the opt-out flags of the user's decision 8 (2026-11-01)
+        self.contact_birth_death = tk.BooleanVar(value=True)
+        self.soft2_iedge_gate = tk.BooleanVar(value=True)
+        self.srnde_ishape = tk.BooleanVar(value=True)
+        self.maxint_stress_all = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1362,7 +1376,7 @@ class ConverterGUI:
             variable=self.ale_flow_tracking).grid(
                 row=78, column=0, columnspan=3, sticky="w", **pad)
 
-        # ── The CardStack-pipeline levers (rows 79-87) ──────────────────────
+        # ── The CardStack-pipeline levers (rows 79-91) ──────────────────────
         ttk.Checkbutton(
             io, text="Damping LCID curves converted in time (a box curve -> "
                      "/DAMP Tstart / Tstop, else /DAMP/FUNCT; GLOBAL: the "
@@ -1410,6 +1424,27 @@ class ConverterGUI:
                            "IKEDIT without GLSTAT, else 1):").pack(side="left")
         ttk.Entry(pf, textvariable=self.print_every, width=8).pack(
             side="left", padx=3)
+        # the opt-out flags of the user's decision 8 (2026-11-01)
+        ttk.Checkbutton(
+            io, text="Contact Card-2 BT / DT -> /INTER Tstart / Tstop (the "
+                     "sign rules, every sliding-contact route) - ON",
+            variable=self.contact_birth_death).grid(
+                row=88, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Eroding / N2S TYPE25: SOFT 2 Iedge 22 only with DEPTH "
+                     "5/15/25/35/45/55 or SBOPT 1 - ON",
+            variable=self.soft2_iedge_gate).grid(
+                row=89, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Card E SRNDE 1 -> TYPE25 Ishape 2 (round free-edge "
+                     "gap) - ON",
+            variable=self.srnde_ishape).grid(
+                row=90, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL in the engine "
+                     "deck - ON",
+            variable=self.maxint_stress_all).grid(
+                row=91, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1744,6 +1779,10 @@ class ConverterGUI:
                 s2s_type25=self.s2s_type25.get(),
                 general_shell_edges=self.general_shell_edges.get(),
                 single_surface_sst_gap=self.single_surface_sst_gap.get(),
+                contact_birth_death=self.contact_birth_death.get(),
+                soft2_iedge_gate=self.soft2_iedge_gate.get(),
+                srnde_ishape=self.srnde_ishape.get(),
+                maxint_stress_all=self.maxint_stress_all.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2086,6 +2125,16 @@ class ConverterGUI:
         if not kwargs.get("single_surface_sst_gap", True):
             bits.append("single-surface SST gap (|SST|+|MST|)/2 "
                         "(--no-single-surface-sst-gap)")
+        if not kwargs.get("contact_birth_death", True):
+            bits.append("contact BT / DT as before K-11 "
+                        "(--no-contact-birth-death)")
+        if not kwargs.get("soft2_iedge_gate", True):
+            bits.append("SOFT 2 Iedge 22 on every card (--no-soft2-iedge-gate)")
+        if not kwargs.get("srnde_ishape", True):
+            bits.append("SRNDE 1 keeps Ishape 0 (--no-srnde-ishape)")
+        if not kwargs.get("maxint_stress_all", True):
+            bits.append("no STRESS/ALL for MAXINT > 3 "
+                        "(--no-maxint-stress-all)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

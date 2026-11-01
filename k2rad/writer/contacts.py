@@ -4061,7 +4061,15 @@ def _birth_death(state: ConversionState, inter_id: int, bt: float, dt: float,
     There a DT at / past ENDTIM moves the Tstop cell to 0, and a line names
     it (the fix round of the K-11 review: five R14 decks moved with no
     line). The run is the same: the starter reads a Tstop of 0 as 1e30
-    (``hm_read_inter_type25.F:579``, ``hm_read_inter_type07.F:544``)."""
+    (``hm_read_inter_type25.F:579``, ``hm_read_inter_type07.F:544``).
+
+    ``--no-contact-birth-death`` (``ConvertOptions.contact_birth_death``
+    False, the user's decision 8 of 2026-11-01) returns the cells of the
+    code before K-11 instead (:func:`_birth_death_opted_out`), and none of
+    the lines above is printed."""
+    if not state.options.contact_birth_death:
+        return _birth_death_opted_out(state, inter_id, bt, dt, kw, target,
+                                      dt_was_written)
     if dt == -9999.0:
         state.warn(
             f"*{kw} {inter_id}: Card-2 DT = -9999 makes BT = {bt:g} the id of "
@@ -4072,10 +4080,7 @@ def _birth_death(state: ConversionState, inter_id: int, bt: float, dt: float,
         return 0.0, 0.0
     ct = state.ctrl_termination
     endtim = ct.endtim if ct is not None else 0.0
-    tstart = abs(bt) if dt < 0.0 else (bt if bt > 0.0 else 0.0)
-    tstop = abs(dt)
-    if tstop >= 1e19 or (endtim > 0.0 and tstop >= endtim):
-        tstop = 0.0
+    tstart, tstop = _k11_cells(state, bt, dt)
     notes = []
     if bt < 0.0 and dt >= 0.0:
         notes.append(f"BT {bt:g} < 0 is a birth time for the dynamic-"
@@ -4110,6 +4115,75 @@ def _birth_death(state: ConversionState, inter_id: int, bt: float, dt: float,
             "acts to the end of the run, as with the stated death time "
             "(Vol I R17 p.11-30; CardStack K-11).")
     return tstart, tstop
+
+
+def _k11_cells(state: ConversionState, bt: float,
+               dt: float) -> Tuple[float, float]:
+    """The ``(Tstart, Tstop)`` CardStack K-11 writes for Card-2 *bt* / *dt*,
+    by :func:`_birth_death`'s rules and without its lines: 0 / 0 for DT =
+    -9999; |BT| / |DT| for DT < 0; else BT (0 for BT < 0) / DT; Tstop 0
+    for a DT of 0, >= 1e19 or at / past ENDTIM."""
+    if dt == -9999.0:
+        return 0.0, 0.0
+    ct = state.ctrl_termination
+    endtim = ct.endtim if ct is not None else 0.0
+    tstart = abs(bt) if dt < 0.0 else (bt if bt > 0.0 else 0.0)
+    tstop = abs(dt)
+    if tstop >= 1e19 or (endtim > 0.0 and tstop >= endtim):
+        tstop = 0.0
+    return tstart, tstop
+
+
+#: where the engine skips an interface outside its Tstart / Tstop window
+#: (``IF(TT>STOPT) RETURN``): a negative Tstop switches it off from t 0
+_TSTOP_SKIP_CITE = {"TYPE7": "i7mainf.F:264-265",
+                    "TYPE25": "i25mainf.F:310-311"}
+
+
+def _birth_death_opted_out(state: ConversionState, inter_id: int, bt: float,
+                           dt: float, kw: str, target: str,
+                           dt_was_written: bool) -> Tuple[float, float]:
+    """``--no-contact-birth-death`` (the user's decision 8, 2026-11-01): the
+    ``(Tstart, Tstop)`` each route wrote before CardStack K-11. The three
+    *dt_was_written* routes (the eroding / node-to-surface /INTER/TYPE25
+    family, the routed implicit node-to-surface /INTER/TYPE7 and
+    ``--s2s-type25``) wrote BT and DT as stated, Tstop 0 for a DT >= 1e19
+    (``tstop = 0 if DT >= 1e19 else DT``); every other route dropped them,
+    Tstart 0 / Tstop 0. One line names the opt-out where these cells, as
+    written (:func:`_f`), are not K-11's (:func:`_k11_cells`); a negative
+    Tstop is said to switch the interface off from t 0, because the engine
+    skips it while TT > Tstop (``i7mainf.F:264-265``,
+    ``i25mainf.F:310-311``)."""
+    cells: Tuple[float, float] = ((bt, 0.0 if dt >= 1e19 else dt)
+                                  if dt_was_written else (0.0, 0.0))
+    ka, kb = _k11_cells(state, bt, dt)
+    if (_f(cells[0]), _f(cells[1])) == (_f(ka), _f(kb)):
+        return cells
+    k11 = (f"K-11 writes Tstart {ka:g} / Tstop {kb:g} (Vol I R17 "
+           "p.11-29/30)")
+    if not dt_was_written:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 BT {bt:g} / DT {dt:g} not converted "
+            f"(--no-contact-birth-death): /INTER/{target}/{inter_id} keeps "
+            "Tstart 0 / Tstop 0, active for the whole run, as this route "
+            f"wrote it before CardStack K-11; {k11}.")
+        return cells
+    curve = ("; DT = -9999 makes BT the id of a curve of birth / death "
+             "pairs (Remark 2), written here as a time" if dt == -9999.0
+             else "")
+    off = ""
+    if cells[1] < 0.0:
+        off = (f" - Tstop {cells[1]:g} < 0 switches the interface off from "
+               "t 0: the engine skips it while TT > Tstop ("
+               f"{_TSTOP_SKIP_CITE.get(target, 'i7mainf.F:264-265')}), so "
+               "this contact never acts")
+    state.warn(
+        f"*{kw} {inter_id}: Card-2 BT {bt:g} / DT {dt:g} -> "
+        f"/INTER/{target}/{inter_id} Tstart {cells[0]:g} / Tstop "
+        f"{cells[1]:g} as stated (--no-contact-birth-death: the cells this "
+        "route wrote before CardStack K-11, Tstop 0 for a DT >= 1e19 only"
+        f"{curve}); {k11}{off}.")
+    return cells
 
 
 def _warn_type25_self_vdc(state: ConversionState, c: ContactAutoSingle,
@@ -5320,11 +5394,21 @@ _EDGE_CAP_REACH = (
     "/INTER/TYPE25 comment 4); the card keeps Ishape 0 (= 1, a square gap "
     "there)")
 
-_SRNDE_REACH_NOTE = (
+_SRNDE_REACH_HEAD = (
     "LS-DYNA's default free-edge treatment (Card E SRNDE 0: a cylindrical "
     "cap of radius t/2 along each exterior shell edge, Vol I R17 p.11-116 "
-    "Remark 3) " + _EDGE_CAP_REACH + ", and SRNDE 1 - rounded, not extended "
-    "- writes Ishape 2 (round). No byte moves")
+    "Remark 3) " + _EDGE_CAP_REACH)
+
+_SRNDE_REACH_NOTE = (
+    _SRNDE_REACH_HEAD + ", and SRNDE 1 - rounded, not extended - writes "
+    "Ishape 2 (round). No byte moves")
+
+#: the same note under --no-srnde-ishape, where SRNDE 1 keeps Ishape 0 too
+#: (the fix round of the wave-D review: it said Ishape 2 either way)
+_SRNDE_REACH_NOTE_NO_ISHAPE = (
+    _SRNDE_REACH_HEAD + ", and under --no-srnde-ishape SRNDE 1 - rounded, "
+    "not extended - keeps Ishape 0 too (the default writes it as Ishape 2, "
+    "round). No byte moves")
 
 
 def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
@@ -5340,7 +5424,11 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
     exterior SHELL edges ("non-extended exterior shell segment edges",
     p.11-114), so with no shell in *pids* SRNDE 1 keeps 0 too, said (a solid
     segment has no contact gap, 2022 Reference Guide /INTER/TYPE25; the
-    fix round of the K-16 review)."""
+    fix round of the K-16 review). ``--no-srnde-ishape``
+    (``ConvertOptions.srnde_ishape`` False, the user's decision 8 of
+    2026-11-01) keeps 0 where SRNDE 1 would write 2 - the cell of the code
+    before K-16 - and names the dropped SRNDE; the SRNDE 0 note then says
+    that SRNDE 1 keeps Ishape 0 too (:data:`_SRNDE_REACH_NOTE_NO_ISHAPE`)."""
     if "MORTAR" in _contact_base_spelling(kw):
         return 0
     has_shell = _pids_shell_solid(state, pids)[0]
@@ -5368,6 +5456,14 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
             "card keeps Ishape 0. No byte moves.")
         return 0
     if c.srnde == 1:
+        if not state.options.srnde_ishape:
+            state.warn(
+                f"*{kw} {inter_id}: Card E SRNDE 1 is not converted "
+                f"(--no-srnde-ishape): /INTER/TYPE25/{inter_id} keeps Ishape "
+                "0 (square), where the default writes SRNDE 1 - exterior "
+                "shell edges rounded, not extended (Vol I R17 p.11-115/116 "
+                "Remark 3) - as Ishape 2 (round) (CardStack K-16).")
+            return 0
         state.warn(
             f"*{kw} {inter_id}: Card E SRNDE 1 (exterior shell edges rounded, "
             "not extended, Vol I R17 p.11-115/116 Remark 3) -> "
@@ -5376,7 +5472,9 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
             "Ishape), reaching the secondary node's t_s/2 past it.")
         return _TYPE25_ISHAPE_ROUND
     if not c.srnde and has_shell:
-        state.warn(f"*{kw} {inter_id}: " + _SRNDE_REACH_NOTE + ".")
+        state.warn(f"*{kw} {inter_id}: " + (
+            _SRNDE_REACH_NOTE if state.options.srnde_ishape
+            else _SRNDE_REACH_NOTE_NO_ISHAPE) + ".")
     return 0
 
 
@@ -5384,7 +5482,8 @@ def _warn_card_e_type7(state: ConversionState, c, kw: str,
                        viss: float) -> None:
     """CardStack K-16: a Card E SRNDE on an /INTER/TYPE7 route is named -
     TYPE7 has no free-edge shape cell (the TYPE25 routes map SRNDE 1 to
-    Ishape 2) - and so is an ICOR that makes the Card-2 VDC behind the
+    Ishape 2, or keep Ishape 0 under ``--no-srnde-ishape``, and the line
+    says which) - and so is an ICOR that makes the Card-2 VDC behind the
     written VisS *viss* a coefficient of restitution
     (:func:`_warn_icor_damping`). Not on a Mortar card, which reads no Card
     E."""
@@ -5392,7 +5491,10 @@ def _warn_card_e_type7(state: ConversionState, c, kw: str,
         state.warn(
             f"*{kw} {c.inter_id}: Card E SRNDE {c.srnde} is not converted: "
             "/INTER/TYPE7 has no free-edge shape cell (the /INTER/TYPE25 "
-            "routes write SRNDE 1 as Ishape 2).")
+            "routes write SRNDE 1 as Ishape 2"
+            + ("" if state.options.srnde_ishape else
+               " by default, and keep Ishape 0 under --no-srnde-ishape")
+            + ").")
     _warn_icor_damping(state, c, kw, "TYPE7", "VisS", viss)
 
 
@@ -6321,7 +6423,11 @@ def _type25_istf_iedge(state: ConversionState, c):
     only with Card A DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 ("By
     default, we do not enable edge treatment for SOFT = 2", Vol I R17
     p.11-94; DEPTH p.11-97, SBOPT p.11-91), so any other DEPTH writes Iedge
-    1000; Istf 2 stays.
+    1000; Istf 2 stays. ``--no-soft2-iedge-gate``
+    (``ConvertOptions.soft2_iedge_gate`` False, the user's decision 8 of
+    2026-11-01) writes Iedge 22 for every SOFT 2 card of this family again,
+    dyna2rad's rule and k2rad's before K-10, with a line where the gate
+    would have held it back.
     """
     base = (c.keyword or "").replace("_MPP", "")
     full_soft_rule = ("ERODING_SURFACE_TO_SURFACE" in base
@@ -6330,11 +6436,12 @@ def _type25_istf_iedge(state: ConversionState, c):
     if full_soft_rule:
         if c.soft == 2:
             istf = 2
-            edges = c.depth in _SOFT2_EDGE_DEPTHS or c.sbopt == 1
+            gate_open = c.depth in _SOFT2_EDGE_DEPTHS or c.sbopt == 1
+            edges = gate_open or not state.options.soft2_iedge_gate
             if edges:
                 iedge = _TYPE25_IEDGE_ALL_SOLID_AND_SHELL
             gate = (f"DEPTH {c.depth}" if c.depth in _SOFT2_EDGE_DEPTHS
-                    else "SBOPT 1" if edges else
+                    else "SBOPT 1" if gate_open else
                     f"neither (DEPTH {c.depth or 'blank = 2'}, SBOPT "
                     f"{c.sbopt or 'blank = 2'})")
             state.warn(
@@ -6345,6 +6452,15 @@ def _type25_istf_iedge(state: ConversionState, c):
                    f"checks edge-to-edge penetration here ({gate}, Vol I R17 "
                    "p.11-91/97), as dyna2rad convertcontacts.cxx:593-611 "
                    "writes it for every SOFT 2 card."
+                   if gate_open else
+                   f"Iedge={iedge} (secondary and main edges = all external "
+                   "solid segments + all shell segments) under "
+                   "--no-soft2-iedge-gate, as dyna2rad "
+                   "convertcontacts.cxx:593-611 writes it for every SOFT 2 "
+                   "card - although LS-DYNA's SOFT 2 checks edge-to-edge "
+                   "penetration only with DEPTH 5/15/25/35/45/55 or SBOPT 1 "
+                   f"(Vol I R17 p.11-91/94/97) and this card has {gate}, so "
+                   "the default writes Iedge 1000 (CardStack K-10)."
                    if edges else
                    f"Iedge={iedge} (no edge-to-edge contact): LS-DYNA's SOFT "
                    "2 checks edge-to-edge penetration only with DEPTH "
