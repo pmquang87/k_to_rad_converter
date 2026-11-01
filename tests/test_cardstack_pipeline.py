@@ -714,10 +714,18 @@ class NewLeversGui(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _action_help(flag: str) -> str:
+    """The help text of *flag* as written in cli.py.
+
+    argparse.BooleanOptionalAction appends " (default: %(default)s)" to the
+    help of every boolean option on Python 3.9 and 3.10 (3.11+ no longer
+    does), so the suffix is removed before the text is formatted - the tests
+    look at the sentences cli.py wrote, on every interpreter of the CI matrix.
+    """
     from k2rad import cli
     for a in cli.build_parser()._actions:
         if flag in a.option_strings:
-            return _collapse(a.help % {})
+            text = a.help.replace(" (default: %(default)s)", "")
+            return _collapse(text % {"default": a.default})
     raise AssertionError(flag)
 
 
@@ -3407,6 +3415,8 @@ class InterGapminOnSoftRoutes(unittest.TestCase):
                                       inter_gapmin={101: 0.2})
                 self.assertEqual((s0, e0), (s1, e1))
 
+    @unittest.skipUnless(_k1a_has_fast_proximity(),
+                         "--auto-gapmin needs numpy + scipy")
     def test_auto_gapmin_names_the_route_rule(self):
         res, _s, _e = _convert(_soft_deck(-7), auto_gapmin=True)
         self.assertTrue(_has(res.warnings, "--auto-gapmin INTER 101: no "
@@ -4413,6 +4423,8 @@ class DroppedSoftCardFieldsReviewPins(unittest.TestCase):
 class AutoGapminSingleEdgeReviewPin(unittest.TestCase):
     """K-05: --auto-gapmin's skip line for a *CONTACT_SINGLE_EDGE."""
 
+    @unittest.skipUnless(_k1a_has_fast_proximity(),
+                         "--auto-gapmin needs numpy + scipy")
     def test_a_single_edge_card_has_no_soft_value_in_the_skip_line(self):
         """R05a: the card files a soft = -11 record, but its own spelling
         has no SOFT, so the skip line names none."""
