@@ -383,6 +383,29 @@ class A2Nip1OnePoint(unittest.TestCase):
                                nip1_one_point=False)
         self.assertEqual(_shell_n(st), 2)
 
+    def test_the_hourglass_split_prop_carries_n_1(self):
+        """Two triangle parts on section 1 (NIP 1), part 2 with its own
+        *HOURGLASS: the split /PROP/SHELL of part 2 (mesh.py
+        _emit_hourglass_props) is written N 1 as well, the plain one too;
+        under the opt-out both are N 2."""
+        second = ("*ELEMENT_SHELL\n" + _elem(3, 2, 2, 5, 6, 6)
+                  + "*PART\nsecond\n" + _row(2, 1, 1, 0, 4) + "\n"
+                  + "*HOURGLASS\n" + _row(4, 4, 0.02) + "\n")
+        deck = _tri_deck(extra=second)
+        for kw, n in (({}, 1), ({"nip1_one_point": False}, 2)):
+            with self.subTest(**kw):
+                _r, st, _e = _convert(deck, **kw)
+                lines = st.splitlines()
+                refs = {}
+                for pid in (1, 2):
+                    i = lines.index(f"/PART/{pid}")
+                    data = [ln for ln in lines[i + 2:i + 6]
+                            if not ln.startswith("#")]
+                    refs[pid] = int(data[0][0:10])
+                self.assertNotEqual(refs[1], refs[2], refs)
+                for pid, prop in refs.items():
+                    self.assertEqual(_shell_n(st, prop), n, (pid, prop))
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A3  the texts that ride A1 / A2 (help, comment, docstring)
