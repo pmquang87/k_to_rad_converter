@@ -192,24 +192,36 @@ at the limit (6.3). Make tooling `*MAT_RIGID` instead of mass-scaling its
 CAD micro-edges (D5-2: rigid tooling gave the same 1.89e-6 s step with zero
 added mass). `--dt2ms-tssfac-product` makes the step LS-DYNA's (6.4).
 
-Two limits of these readings, measured by the end-to-end proof (6.8):
+Two limits of these readings, measured by the end-to-end proof (6.8; the first
+mechanism corrected on 2026-11-01 from the starter source):
 
-* On rigid tooling the starter's estimate is too high. It loops over every
-  node, rigid-body secondary nodes included (`add_mass_stat.F:81-83`), while
-  the engine sets those nodes' stiffness to EM20 (`rgbodfp.F:753-754`), so they
-  take no mass. On the 2-card benchmark the audit finds Tmin at 1.06x the
-  starter's 5 % target step, and the run's MAS.ERR is 0.000; on the rigid
-  CardStack variant 4.78x, and MAS.ERR 0.0276. The launcher audit's
-  mass-forecast FLAG can then be a false positive for the model as a whole.
-  Whether it is one depends on the added mass of the deformable parts (next
-  bullet): read the cards' per-node added mass before you call it false.
+* On a deck with rigid bodies the starter's estimate can be too high, and not
+  because of the secondary nodes: `inirby.F:876-883` lumps each rigid body's
+  mass and the summed stiffness of its secondary nodes on the body's main node
+  and sets the secondary nodes to EM20 before the estimate, so the estimate
+  (`add_mass_stat.F:82`) and the engine (`rgbodfp.F:753-754`) both leave the
+  secondary nodes out, and the main node gets the smallest step of the table.
+  With the body's elements switched off (`Ioptoff` 0, which k2rad writes) the
+  engine's main node never carries that stiffness. On the 2-card benchmark
+  only the two rigid main nodes lie below Tmin/Tsca (8.4e-9 and 1.2e-8 s; the
+  first deformable node at 9.3e-7 s), the audit's forecast ratio is 1.06x and
+  the run's MAS.ERR 0.000; on the rigid CardStack variant 582 card nodes lie
+  just below the bound (2.004e-6 against 2.222e-6 s), the ratio is 4.78x and
+  the cards took +22.7 % mass behind MAS.ERR 0.0276. The launcher audit's
+  `mass-forecast` rule (revised 2026-11-01) therefore reads the listing's
+  NODAL TIME STEP (estimation) table: a NOTE only when every node below
+  Tmin/Tsca is a rigid main node, the table reaches the bound and Tmin is
+  below 2x the limit; a FLAG otherwise, naming the smallest other node and
+  the Tmin to set. (The earlier text here, 'rigid-body secondary nodes
+  included', was wrong; corrected from the starter source on 2026-11-01.)
 * MAS.ERR and ENDMAS are ratios over the whole model. On the rigid CardStack
   variant the base is 86 % of the 1.450e-4 Mg, so MAS.ERR 0.0276 passes the
   0.05 gate while every card node took mass (2244 of 2244; mean +23.2 %, max
-  +163.8 %; 4.007e-6 Mg on the cards' 1.765e-5 Mg, +22.7 %; 6.8). Nothing
-  checks the added mass per part: read the per-node mass change of the
-  animation files (`/ANIM/NODA/DMAS`, which k2rad writes; `anim_to_vtk` names
-  it Mass_Change).
+  +163.8 %; 4.007e-6 Mg on the cards' 1.765e-5 Mg, +22.7 %; 6.8). The
+  fem-pipeline results check (row 7) reads the added mass per part from the
+  per-node mass change of the animation files (`/ANIM/NODA/DMAS`, which k2rad
+  writes; `anim_to_vtk` names it Mass_Change, the relative change per node);
+  k2rad and the launcher audit do not.
 
 ### 3.8 One `/GRAV` data line, and gravity at 1 g
 

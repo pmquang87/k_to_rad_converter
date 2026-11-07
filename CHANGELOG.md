@@ -9,6 +9,24 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docs: the mass-forecast mechanism on rigid bodies (2026-11-01).**
+  `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` section 3.7 said the starter's `INITIAL
+  ADDED MASS ESTIMATION` counts rigid-body secondary nodes that the engine
+  excludes. The starter source says otherwise: `inirby.F:876-883` lumps each
+  rigid body's mass and the summed stiffness of its secondary nodes on the
+  body's main node and sets the secondary nodes to EM20 before the estimate,
+  so `add_mass_stat.F:82` and the engine (`rgbodfp.F:753-754`) both leave the
+  secondary nodes out, and the main node gets the smallest step of the table;
+  with the body's elements switched off (`Ioptoff` 0, which k2rad writes) the
+  engine's main node never carries that stiffness. The page now states this,
+  the measured cases (2-card benchmark 1.06x at MAS.ERR 0.000; the rigid
+  CardStack variant 4.78x with its cards at +22.7 % behind MAS.ERR 0.0276),
+  and that the launcher audit's rule reads the listing's `NODAL TIME STEP
+  (estimation)` table; its 'nothing checks the added mass per part' now names
+  the fem-pipeline results check (row 7). Text only; no converter output moves.
+
 ### Added
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
