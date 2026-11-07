@@ -2368,12 +2368,13 @@ class S2sType25OptIn(unittest.TestCase):
 
 
 class OneWayNoteOnlyOnTheType7(unittest.TestCase):
-    """K-08 x K-08B: the 'twoway_auto' one-way note prints only while the
-    interface stays /INTER/TYPE7. The CardStack template's conversion with
-    --s2s-type25 printed it as warning 1 for the interface its warning 13
-    and the starter listing show as the two-surface /INTER/TYPE25/2. Where
-    the flag is refused the /INTER/TYPE7 stays, and so does the note; where
-    the flag's route drops the interface, no /INTER/TYPE7 is written."""
+    """K-08 x K-08B: the 'twoway_auto' one-way note prints only where the
+    interface is written as /INTER/TYPE7. The CardStack template's
+    conversion with --s2s-type25 printed it as warning 1 for the interface
+    its warning 13 and the starter listing show as the two-surface
+    /INTER/TYPE25/2. A refused card takes the /INTER/TYPE7 route: it keeps
+    the note where that route writes the TYPE7. A drop, on either route,
+    writes no /INTER at all, and the note goes with it."""
 
     #: the note's own clause (the TYPE25 warning says 'lip coupon' too)
     _CLAUSE = "the /INTER/TYPE7 k2rad writes for it by default is one-way"
@@ -2412,24 +2413,38 @@ class OneWayNoteOnlyOnTheType7(unittest.TestCase):
                                      why))
                 self.assertEqual(res.warnings.count(self._note(12)), 1)
 
-    def test_the_note_goes_where_the_flags_route_drops_the_interface(self):
-        """MSID names no part set: the flag's route drops the interface
-        (no /INTER at all) and the note goes with it. Without the flag the
-        /INTER/TYPE7 route drops it by its own warning and keeps the note,
-        as at master."""
-        deck = _k1a_deck(_k1a_s2s(12, msid=77))
-        res, s, _e = _convert(deck, s2s_type25=True)
-        for card in ("/INTER/TYPE7/12", "/INTER/TYPE25/12"):
-            self.assertNotIn(card, s)
-        self.assertTrue(_has(res.warnings, "--s2s-type25: the MAIN (MSID) "
-                             "side sid=77", "resolved to no contact surface"))
-        self.assertNotIn(self._note(12), res.warnings)
-        res, s, _e = _convert(deck)
-        for card in ("/INTER/TYPE7/12", "/INTER/TYPE25/12"):
-            self.assertNotIn(card, s)
-        self.assertTrue(_has(res.warnings, "the MAIN (MSID) side msid=77",
-                             "resolved to no contact surface"))
-        self.assertEqual(res.warnings.count(self._note(12)), 1)
+    def test_the_note_goes_where_either_route_drops_the_interface(self):
+        """A side that resolves to no surface: the route that drops the
+        interface writes no /INTER at all, and the note goes with it. Set
+        77 does not exist. Node set 9 as the MSID is refused by the flag by
+        name, and then the /INTER/TYPE7 route drops it (master kept the
+        note on every drop of that route)."""
+        refused = ("--s2s-type25 refused", "which drops a *SET_NODE MAIN "
+                   "side by name")
+        for name, contact, flag, drop in (
+                ("MSID 77, flag's route", _k1a_s2s(12, msid=77), True,
+                 "--s2s-type25: the MAIN (MSID) side sid=77"),
+                ("MSID 77, TYPE7 route", _k1a_s2s(12, msid=77), False,
+                 "the MAIN (MSID) side msid=77"),
+                ("SSID 77, TYPE7 route", _k1a_s2s(12, ssid=77), False,
+                 "the SECONDARY (SSID) side ssid=77"),
+                ("node set MSID, refused, TYPE7 route",
+                 _k1a_s2s(12, msid=9, mstyp=4), True,
+                 "the MAIN (MSID) side msid=9"),
+                ("node set MSID, TYPE7 route",
+                 _k1a_s2s(12, msid=9, mstyp=4), False,
+                 "the MAIN (MSID) side msid=9")):
+            with self.subTest(name):
+                kw = {"s2s_type25": True} if flag else {}
+                res, s, _e = _convert(_k1a_deck(contact), **kw)
+                for card in ("/INTER/TYPE7/12", "/INTER/TYPE25/12"):
+                    self.assertNotIn(card, s)
+                self.assertTrue(_has(res.warnings, drop,
+                                     "NO /INTER was emitted"))
+                self.assertEqual(_has(res.warnings, *refused),
+                                 flag and "msid=9" in drop)
+                self.assertNotIn(self._note(12), res.warnings)
+                self.assertFalse(_has(res.warnings, self._CLAUSE))
 
 
 # ── K-13 ─────────────────────────────────────────────────────────────────────
