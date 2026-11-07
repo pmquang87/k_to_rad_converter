@@ -11,6 +11,25 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **The K-08 one-way note is no longer printed for an interface
+  `--s2s-type25` takes (2026-11-07).** `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE`
+  states its `twoway_auto` note ("the /INTER/TYPE7 k2rad writes for it by
+  default is one-way", with `--s2s-type25` among the levers) in its handler,
+  before the writer chooses the route. So the note also printed where
+  `--s2s-type25` had written the two-surface `/INTER/TYPE25`: the CardStack
+  template's conversion log carried it as warning 1 for the interface that
+  its warning 13 and the starter listing show as `/INTER/TYPE25/2`.
+  `writer/contacts._s2s_type25_route` now withdraws the note once the
+  refusals have passed (the TYPE25 is written, or that route drops the
+  interface). A refused card (an implicit deck, a `*SET_NODE` side) keeps its
+  `/INTER/TYPE7` and the note, in its place. Log only: no deck byte moves,
+  and without `--s2s-type25` no warning moves. MEASURED against master
+  fba6afd: the 9 R14 decks with this card keep their bytes and warning lists;
+  with `--s2s-type25` they keep their bytes and each loses only this note; the
+  CardStack template deck goes from 19 to 18 warnings at the same starter and
+  engine sha256. Tests: `tests/test_cardstack_pipeline.py`
+  `OneWayNoteOnlyOnTheType7`.
+
 - **Docs: the mass-forecast mechanism on rigid bodies (2026-11-01).**
   `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` section 3.7 said the starter's `INITIAL
   ADDED MASS ESTIMATION` counts rigid-body secondary nodes that the engine

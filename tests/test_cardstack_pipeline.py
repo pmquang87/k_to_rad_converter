@@ -2367,6 +2367,71 @@ class S2sType25OptIn(unittest.TestCase):
                              "*SET_NODE side"))
 
 
+class OneWayNoteOnlyOnTheType7(unittest.TestCase):
+    """K-08 x K-08B: the 'twoway_auto' one-way note prints only while the
+    interface stays /INTER/TYPE7. The CardStack template's conversion with
+    --s2s-type25 printed it as warning 1 for the interface its warning 13
+    and the starter listing show as the two-surface /INTER/TYPE25/2. Where
+    the flag is refused the /INTER/TYPE7 stays, and so does the note; where
+    the flag's route drops the interface, no /INTER/TYPE7 is written."""
+
+    #: the note's own clause (the TYPE25 warning says 'lip coupon' too)
+    _CLAUSE = "the /INTER/TYPE7 k2rad writes for it by default is one-way"
+
+    @staticmethod
+    def _note(iid: int) -> str:
+        from k2rad.handlers import _CONTACT_SPELLING_NOTES
+        return (f"*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE {iid}: "
+                + _CONTACT_SPELLING_NOTES["twoway_auto"])
+
+    def test_the_note_is_on_the_type7_and_not_on_the_type25(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(12)))
+        self.assertIn("/INTER/TYPE7/12", s)
+        self.assertEqual(res.warnings.count(self._note(12)), 1)
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(12)), s2s_type25=True)
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertNotIn("/INTER/TYPE7/12", s)
+        self.assertNotIn(self._note(12), res.warnings)
+        self.assertFalse(_has(res.warnings, self._CLAUSE))
+        self.assertTrue(_has(res.warnings,
+                             "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE 12: "
+                             "--s2s-type25 -> two-surface /INTER/TYPE25/12"))
+
+    def test_the_note_stays_where_the_flag_is_refused(self):
+        nset = ("*SET_NODE_LIST\n" + _row(5) + "\n"
+                + _row(*_CARD_NODES[:8]) + "\n")
+        for name, deck, why in (
+                ("implicit", _k1a_deck(_k1a_s2s(12), implicit=True),
+                 "this is an implicit deck"),
+                ("node set", _k1a_deck(_k1a_s2s(12, ssid=5, sstyp=4),
+                                       extra=nset), "a *SET_NODE side")):
+            with self.subTest(name):
+                res, s, _e = _convert(deck, s2s_type25=True)
+                self.assertIn("/INTER/TYPE7/12", s)
+                self.assertTrue(_has(res.warnings, "--s2s-type25 refused",
+                                     why))
+                self.assertEqual(res.warnings.count(self._note(12)), 1)
+
+    def test_the_note_goes_where_the_flags_route_drops_the_interface(self):
+        """MSID names no part set: the flag's route drops the interface
+        (no /INTER at all) and the note goes with it. Without the flag the
+        /INTER/TYPE7 route drops it by its own warning and keeps the note,
+        as at master."""
+        deck = _k1a_deck(_k1a_s2s(12, msid=77))
+        res, s, _e = _convert(deck, s2s_type25=True)
+        for card in ("/INTER/TYPE7/12", "/INTER/TYPE25/12"):
+            self.assertNotIn(card, s)
+        self.assertTrue(_has(res.warnings, "--s2s-type25: the MAIN (MSID) "
+                             "side sid=77", "resolved to no contact surface"))
+        self.assertNotIn(self._note(12), res.warnings)
+        res, s, _e = _convert(deck)
+        for card in ("/INTER/TYPE7/12", "/INTER/TYPE25/12"):
+            self.assertNotIn(card, s)
+        self.assertTrue(_has(res.warnings, "the MAIN (MSID) side msid=77",
+                             "resolved to no contact surface"))
+        self.assertEqual(res.warnings.count(self._note(12)), 1)
+
+
 # ── K-13 ─────────────────────────────────────────────────────────────────────
 
 class Type25SelfGapInputs(unittest.TestCase):

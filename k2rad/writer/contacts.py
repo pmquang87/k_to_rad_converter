@@ -2369,12 +2369,18 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     :func:`_inacti_six` (a TYPE25 keeps Inacti 5), not by
     :func:`_s2s_type25_refusal`. True when the interface was written (or
     dropped) here; False sends it down the TYPE7 route, after a refusal by
-    name."""
+    name. On True the handler's one-way 'twoway_auto' note is withdrawn:
+    no /INTER/TYPE7 is written (CardStack K-08)."""
     kw = c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"
     refuse = _s2s_type25_refusal(state, c)
     if refuse:
         state.warn(f"--s2s-type25 refused on *{kw} {c.inter_id}: {refuse}.")
         return False
+    # CardStack K-08: past the refusals this route owns the record (the
+    # TYPE25 below, or a drop), so no /INTER/TYPE7 is written and the
+    # handler's one-way note, which names this flag as a lever, goes
+    from ..handlers import _withdraw_contact_spelling
+    _withdraw_contact_spelling(state, c.keyword, c.inter_id, "twoway_auto")
     surf1 = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
     surf2 = _resolve_contact_master(state, c.msid, c.mstyp, lines) if surf1 else 0
     if not surf1 or not surf2:

@@ -6831,11 +6831,28 @@ _CONTACT_SPELLING_NOTES = {
 }
 
 
+def _contact_spelling_note(keyword: str, inter_id: int, tag: str) -> str:
+    """The warning text of the named-loss *tag* on *keyword* *inter_id*."""
+    return f"*{keyword} {inter_id}: {_CONTACT_SPELLING_NOTES[tag]}"
+
+
 def _warn_contact_spelling(state: ConversionState, keyword: str, inter_id: int,
                            notes: Tuple[str, ...]) -> None:
     """Emit one named-loss warning per tag on this spelling's table row."""
     for tag in notes:
-        state.warn(f"*{keyword} {inter_id}: {_CONTACT_SPELLING_NOTES[tag]}")
+        state.warn(_contact_spelling_note(keyword, inter_id, tag))
+
+
+def _withdraw_contact_spelling(state: ConversionState, keyword: str,
+                               inter_id: int, tag: str) -> None:
+    """Take back the *tag* warning :func:`_warn_contact_spelling` gave
+    *keyword* *inter_id* where the route the writer took makes it untrue.
+    One caller: ``writer/contacts._s2s_type25_route`` withdraws the
+    'twoway_auto' note of an interface --s2s-type25 takes, which gets no
+    /INTER/TYPE7 (CardStack K-08). Every other warning keeps its place."""
+    text = _contact_spelling_note(keyword, inter_id, tag)
+    if text in state.warnings:
+        state.warnings.remove(text)
 
 
 def handle_contact_automatic_single_surface(block: Block, state: ConversionState,
@@ -20408,7 +20425,9 @@ del _base, _route_spec, _mpp_sfx, _spelling, _route_kwargs
 # here, after _contact_route exists, and NOT made a _CONTACT_SPELLINGS row:
 # that table's spelling set is counted (tests/test_r14_triage_3.py) and a
 # row would also register a _MPP sibling the deck grammar never reached
-# before. Log only: the handler's record and the bytes are unchanged.
+# before. Log only: the handler's record and the bytes are unchanged. The
+# note holds only while the interface stays /INTER/TYPE7: where --s2s-type25
+# takes the record, writer/contacts._s2s_type25_route withdraws it.
 HANDLERS["CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"] = _contact_route(
     handle_contact_automatic_surface_to_surface, notes=("twoway_auto",))
 # CardStack K-14: the single-surface MORTAR spelling states the 'mortar' note
