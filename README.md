@@ -6946,7 +6946,15 @@ recognized-not-emitted record. MEASURED on a 10-brick column (ERODE 1, TSLIMT
 (closed form 2.990e-4) where LS-DYNA's closed form deletes none; 0 R14 decks
 state TSLIMT != 0. `--no-erode-tsmin-rule` restores the earlier trigger (a
 half-request - `ERODE` without `TSLIMT`, or the reverse - is then reported as
-before).
+before). On a deck routed to the 2-D axisymmetric deck `--dt-del` writes
+**`/DT/QUAD/DEL`** since round 10 (A12): its elements are `/QUAD`, which the
+three 3-D cards never reach (`mqviscb.F:449` reads IDTMIN(ITY), ITY 2 for a
+quad; only `/DT/QUAD/DEL` sets IDTMIN(2), `freform.F:1103-1106`). Tsca is the
+deck's TSSFAC, else the 2-D default 0.67 (`contrl.F:1148`), never the 3-D
+0.9, which would change the quad step x1.343 and, measured, delete nothing.
+MEASURED on `metal-forming` with Tmin 3.0e-5: quad 7 deleted at t 1.562, IE
+END -0.45 -> -5.41 % against LS-DYNA (500 LS times). LS-DYNA's ERODE does
+not erode its 2-D elements, so ERODE never writes this card.
 It coexists with `/DT/NODA/CST`: the deletion test runs on the element's own
 geometric step (length/sound speed, no mass term) and executes before the
 `NODADT` early return (`cdt3.F:146` vs `:200`), so nodal mass scaling does not

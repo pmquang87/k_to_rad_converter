@@ -567,6 +567,32 @@ class Dt2msTexts(unittest.TestCase):
                                      "none of these three cards reaches "
                                      "them", "0 quads deleted"))
 
+    def test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor(self):
+        # R14 round 10, A12: --dt-del on the routed 2-D deck writes
+        # /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106) and none of the 3-D
+        # cards; Tsca = the deck's TSSFAC (here blank) else the 2-D default
+        # 0.67 (contrl.F:1148), never 0.9
+        for dt2ms in (-1.0e-4, 1.0e-4):
+            with self.subTest(dt2ms=dt2ms):
+                res, _st, eng = _convert(_ax15(dt2ms), dt_del=3.0e-5)
+                self.assertEqual(_block(eng, "/DT/QUAD/DEL"),
+                                 ["                0.67        3.000000E-05"])
+                for kind in ("SHELL", "SH_3N", "BRICK"):
+                    self.assertIsNone(_block(eng, f"/DT/{kind}/DEL"))
+                self.assertTrue(_has(res.warnings, "--dt-del 3e-05 -> "
+                                     "/DT/QUAD/DEL (Tsca=0.67, Tmin=3e-05)",
+                                     "mqviscb.F:466-467", "contrl.F:1148",
+                                     "IE END -0.45 -> -5.41 %"))
+        # a stated TSSFAC is the quad card's Tsca
+        old = "*CONTROL_TIMESTEP\n" + _t9._f10(0.0, 0.0, 0, 0.0, -1.0e-4)
+        deck = _ax15(-1.0e-4)
+        self.assertIn(old, deck)
+        deck = deck.replace(old, "*CONTROL_TIMESTEP\n"
+                            + _t9._f10(0.0, 0.5, 0, 0.0, -1.0e-4))
+        _r, _st, eng = _convert(deck, dt_del=3.0e-5)
+        self.assertEqual(_block(eng, "/DT/QUAD/DEL"),
+                         ["                 0.5        3.000000E-05"])
+
     def test_the_default_erode_and_tslimt_write_no_floor(self):
         # R14 round 10, A11: ERODE 1 + TSLIMT > 0 is no deletion floor on
         # the routed 2-D deck either - no /DT/*/DEL at all, both fields named

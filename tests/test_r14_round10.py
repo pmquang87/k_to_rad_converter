@@ -664,6 +664,25 @@ class A11Texts(unittest.TestCase):
             self.assertNotIn("because LS-DYNA TSLIMT is not converted", w)
 
 
+class A12QuadFloorHelp(unittest.TestCase):
+    """A12: --dt-del on the routed 2-D deck writes /DT/QUAD/DEL (the bytes:
+    tests/test_cardstack_pipeline_engine.Dt2msTexts
+    .test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor); the help and
+    README name the card and its measurement."""
+
+    def test_the_dt_del_help_names_the_quad_card(self):
+        text = _flag_help("--dt-del")
+        for needle in ("/DT/QUAD/DEL (Tsca = TSSFAC, else the 2-D default "
+                       "0.67)", "quad 7 deleted at t 1.562",
+                       "Without it no deletion floor is written since round "
+                       "10 (A11)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        readme = _t7._collapse(_readme())
+        self.assertIn("`--dt-del` writes **`/DT/QUAD/DEL`** since round 10",
+                      readme)
+
+
 class A6ImplicitDamping(unittest.TestCase):
     """The starter /DAMP is inert on an implicit run (named by default);
     --implicit-rayleigh-damping (opt-in) writes /IMPL/DYNA/DAMP."""

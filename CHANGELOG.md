@@ -278,6 +278,24 @@ Prior history (before this changelog was introduced) is summarized in the
     swaps the new clause back before hashing (the 4f5b6e8 SHA stands). New:
     `tests/test_r14_round10.py` `A11Texts`, the A11 needles of
     `Round10RetractedStatementsA`, `Round10FlagWiringA` += `--erode-tsmin-rule`.
+  - **A12 - `--dt-del` on a deck routed to the 2-D axisymmetric deck writes
+    `/DT/QUAD/DEL`.** The routed deck's elements are `/QUAD`; the three 3-D
+    cards `--dt-del` wrote there set IDTMIN(3) / (7) / (1) and never reach a
+    quad (`mqviscb.F:449` reads IDTMIN(ITY), ITY 2 for quads; only
+    `/DT/QUAD/DEL` sets IDTMIN(2), `freform.F:1103-1106`). Now the routed
+    deck gets `/DT/QUAD/DEL` alone, Tsca = the deck's TSSFAC else the 2-D
+    default 0.67 (`contrl.F:1148`) - never the 3-D 0.9, which changes the
+    quad step x1.343 (18468 vs 24807 cycles) and then deletes nothing.
+    MEASURED (census g2f, nt 4) on `metal-forming` with Tmin 3.0e-5: quad 7
+    deleted at cycle 23478, t 1.562 (`-- DELETE SOLID ELEMENTS 7`), IE END
+    -0.45 -> -5.41 % against LS-DYNA (500 LS times), the punch moving as
+    LS-DYNA's; the shipped bytes differ from that hand card only in the
+    printed form of the same number (`3.000000E-05` vs `3.0E-5`). ERODE never
+    writes the card (LS-DYNA's ERODE does not erode its 2-D elements,
+    2Dlag.d3hsp). Movers: 0 R14 (no roster conversion passes `--dt-del`).
+    Tests: `test_cardstack_pipeline_engine.Dt2msTexts.test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor`
+    (the card bytes `0.67 3.000000E-05`, a stated TSSFAC 0.5, none of the 3-D
+    cards, the sentence), `tests/test_r14_round10.py` `A12QuadFloorHelp`.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

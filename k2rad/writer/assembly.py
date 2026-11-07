@@ -3980,7 +3980,10 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     * the USER asks: ``--dt-del <seconds>`` (``convert(dt_del=...)``) — the
       escape hatch for a long run where one degrading element drags the global
       step toward zero and the job never finishes. It has no LS-DYNA
-      counterpart, so it is opt-in and never derived automatically;
+      counterpart, so it is opt-in and never derived automatically. On a deck
+      routed to the 2-D axisymmetric deck it writes ``/DT/QUAD/DEL`` (R14
+      round 10, A12), the one card that reaches a /QUAD (IDTMIN(2),
+      ``freform.F:1103-1106``), Tsca = TSSFAC else the 2-D default 0.67;
     * ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0`` used to be the
       second route (Tmin = TSLIMT). It reads the wrong LS-DYNA field: TSLIMT
       is the shell MODULUS floor of ``*MAT`` 3 / 18 / 19 / 24 shells (Vol I
@@ -4050,6 +4053,31 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
                 "explicitly.")
         return []
 
+    if axisym_routed(state) and explicit is not None and explicit > 0.0:
+        # R14 round 10, A12: the routed 2-D deck's elements are /QUAD, whose
+        # floor is /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106); /DT/SHELL,
+        # /SH_3N and /BRICK never reach a quad group (mqviscb.F:449 reads
+        # IDTMIN(ITY), ITY 2 for quads). Tsca: the deck's TSSFAC, else the
+        # 2-D default 0.67 (contrl.F:1148) - never the 3-D 0.9, which would
+        # change the quad step x1.343 (measured on metal-forming: 0.7445x
+        # cycles and the floor then deletes 0 quads instead of 1).
+        tsca_q = (ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0)
+                  else 0.67)
+        state.warn(
+            f"{source} -> /DT/QUAD/DEL (Tsca={tsca_q:g}, Tmin={tmin:g}) on "
+            "this routed 2-D deck, whose elements are /QUAD (IDTMIN(2), "
+            "freform.F:1103-1106; the /DT/SHELL, /SH_3N and /BRICK cards a 3-D "
+            "deck gets never reach a quad): OpenRadioss will DELETE any quad "
+            "whose time step reaches Tmin and prints '-- DELETE SOLID "
+            "ELEMENTS <id>' for it (mqviscb.F:466-467). Tsca is the deck's "
+            "TSSFAC, else the 2-D default 0.67 (contrl.F:1148). MEASURED on "
+            "metal-forming with Tmin 3.0e-5: quad 7 deleted at t 1.562, IE END "
+            "-0.45 -> -5.41 % against LS-DYNA (500 LS times). LS-DYNA's ERODE "
+            "does not erode its 2-D elements under ERODE 1 (2Dlag.d3hsp: "
+            "'shell elements ... not active'), so k2rad writes this card only "
+            "for --dt-del.")
+        return ["/DT/QUAD/DEL", f"{_f(tsca_q)}{_f(tmin)}", "#"]
+
     tsca = ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0) else 0.9
     warn = (f"{source} -> /DT/{{SHELL,SH_3N,BRICK}}/DEL (Tsca={tsca:g}, "
             f"Tmin={tmin:g}): OpenRadioss will DELETE any element whose time "
@@ -4095,9 +4123,10 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
         warn += (
             " This is the routed 2-D deck, whose elements are /QUAD: the quad "
             "floor is /DT/QUAD/DEL (IDTMIN(2), freform.F:1103-1106), which "
-            "k2rad does not write, so none of these three cards reaches them "
-            "(measured on a 6-quad probe with TSLIMT above every element's "
-            "step: 0 quads deleted; with /DT/QUAD/DEL added by hand, all 6).")
+            "k2rad writes for --dt-del only, so none of these three cards "
+            "reaches them (measured on a 6-quad probe with TSLIMT above every "
+            "element's step: 0 quads deleted; with /DT/QUAD/DEL added by hand, "
+            "all 6).")
     state.warn(warn)
 
     out: List[str] = []

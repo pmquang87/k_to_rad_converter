@@ -1845,8 +1845,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="TMIN",
-        help="Emit /DT/{SHELL,SH_3N,BRICK}/DEL with this Tmin (seconds): "
-             "OpenRadioss DELETES any element whose time step reaches it. "
+        help="Emit /DT/{SHELL,SH_3N,BRICK}/DEL with this Tmin (seconds) - "
+             "/DT/QUAD/DEL (Tsca = TSSFAC, else the 2-D default 0.67) on a "
+             "deck routed to the 2-D axisymmetric deck, whose /QUAD elements "
+             "the three 3-D cards never reach (measured on metal-forming with "
+             "Tmin 3.0e-5: quad 7 deleted at t 1.562): OpenRadioss DELETES "
+             "any element whose time step reaches it. "
              "Opt-in, and off unless given — the card removes mass and "
              "stiffness the LS-DYNA original may have kept. Without it no "
              "deletion floor is written since round 10 (A11): "
