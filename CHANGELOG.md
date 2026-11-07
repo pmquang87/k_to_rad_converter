@@ -91,6 +91,31 @@ Prior history (before this changelog was introduced) is summarized in the
     0.05 mm at every fifth (nt 4). Text-only: ex_20 (NIP-1 ELFORM 16 quads,
     named). Tests: `tests/test_r14_round10.py` `A2Nip1OnePoint`;
     `Round10FlagWiringA` += `--nip1-one-point`.
+  - **A3 - the texts that ride A1 / A2 (0 bytes, 0 warning records).** The
+    `--law1-shell-global-n` help names all five K-31 conditions of
+    `writer/mesh._law1_global_n_secids` (it named the `*INITIAL_STRESS_SHELL`
+    exclusion only): LAW1 parts incl. `*MAT_RIGID` written as `/MAT/ELAST`,
+    not NIP 1, no `*INITIAL_STRESS_SHELL` / `*INITIAL_STRAIN_SHELL` record
+    (also through a `*SET_SHELL`), no other law on the section, no
+    `/THERM_STRESS` deck; the README K-31 bullet says so. The
+    `_ELFORM_ALWAYS_QEPH` comment (`writer/common.py`) gives the measured
+    reason instead of the wrong one: LS-DYNA calls ELFORM -16 / 9 / 20 / 21 /
+    26 FULLY integrated (Vol I R17 p.41-64) and dyna2rad writes them Ishell 12
+    (`convertprops.cxx:781-783`), but Ishell 12 worsens the internal-energy
+    RMS on all three explicit R14 ELFORM 9 carriers (tire-compression 8.59 ->
+    9.50 %, the two airbag.deploy decks 12.63 -> 21.94 % and 43.78 -> 50.35 %
+    of the LS peak, nt 4) and on the two fabric airbags runs QBAT at N 1, the
+    one-point path measured unstable (ENERGY ERROR at cycles 81-88); the
+    `--shell-formulation` help names the fixed list. The `--tet-isolid1`
+    help, the `convert()` docstring and the ConvertOptions comment cite the
+    starter's tet reset as `sgrtails.F:984-999` (line 1000 is a comment
+    line), and the help, the `_tet_section_isolid` docstring and README say
+    that an all-tet ELFORM 2 / 16 section keeps its Isolid 17, which the
+    starter resets the same way (measured on `3.1_Elastic_Beams_etc`: every
+    printed cycle row equal to an Isolid-1 twin's, nt 1, six pairs). Moved
+    pin: `test_cardstack_pipeline.FixRoundHelpTexts.test_tet_isolid1_names_the_starters_own_tet_reset`
+    re-pinned to `:984-999`. Tests: `tests/test_r14_round10.py` `A3Texts`
+    and the A3 needles of `Round10RetractedStatementsA`.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

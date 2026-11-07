@@ -163,7 +163,11 @@ decks should start from
   written 14 drew `WARNING 791` per element group (`sgrtails.F:695-704`; 1346
   of them on the CardStack `A_base` deck). A section that also holds a
   `/BRICK` (hex, wedge, pyramid) keeps 14; a tet section written 17 (ELFORM 2
-  / 16) keeps 17. `--no-tet-isolid1` writes Isolid 14. The starter sorts tet
+  / 16) keeps 17, which the starter resets to 1 the same way (silently for
+  `/TETRA10`) - measured in R14 round 10 on `3.1_Elastic_Beams_etc`'s all-tet
+  ELFORM 16 section: every printed cycle row equal to an Isolid-1 twin's
+  (nt 1, six pairs), only the starter's property echo differs.
+  `--no-tet-isolid1` writes Isolid 14. The starter sorts tet
   groups by the written Isolid, so beside another tet section of the same law
   written with another Isolid the anim element layout can change (energies
   equal, measured).
@@ -183,9 +187,9 @@ decks should start from
   arm - different NIP, a NIP-1 or initial-state section, or a LAW1 part on a
   section another law shares, beside an N = 0 one - the anim bytes move;
   energies, mass and time step stay equal (measured by the K3 fix round and
-  its second review; the numbers are in the CHANGELOG's K-31 entry). The
-  `--help` text names only the `*INITIAL_STRESS_SHELL` exclusion; the rule
-  above is the writer's (`writer/mesh._law1_global_n_secids`).
+  its second review; the numbers are in the CHANGELOG's K-31 entry). Since
+  R14 round 10 the `--help` text names every condition above (the rule is
+  the writer's, `writer/mesh._law1_global_n_secids`).
 - `--s2s-type25` / `--no-s2s-type25` — **OFF by default**. Write an explicit
   `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (not `_ONE_WAY`) as a two-surface
   `/INTER/TYPE25` — the SSID surface against the MSID surface

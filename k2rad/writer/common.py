@@ -261,11 +261,19 @@ ISHELL_QEPH = 24    # reduced integration, PHYSICALLY stabilised (Q4 + EPH)
 #: name -> Ishell, for the user-facing ``shell_formulation`` option.
 SHELL_FORMULATIONS = {"qbat": ISHELL_QBAT, "qeph": ISHELL_QEPH}
 
-# LS-DYNA shell ELFORMs k2rad maps to QEPH regardless of the option: already
-# reduced-integration / co-rotational forms whose Radioss counterpart is
-# unambiguous. Everything else — ELFORM=2 (Belytschko-Tsay) above all, the
-# most common shell formulation in LS-DYNA decks — has no exact counterpart
-# and falls through to the user's choice.
+# LS-DYNA shell ELFORMs k2rad maps to QEPH (Ishell 24) regardless of the
+# option. They are FULLY integrated forms in LS-DYNA (Vol I R17 p.41-64), and
+# dyna2rad writes them Ishell 12 (convertprops.cxx:781-783); k2rad keeps 24
+# because it is MEASURED better on the only explicit carriers (R14 round 10,
+# three ELFORM 9 decks, nt 4): Ishell 12 worsens the internal-energy RMS on
+# all three - tire-compression 8.59 -> 9.50 %, the two airbag.deploy decks
+# 12.63 -> 21.94 % and 43.78 -> 50.35 % of the LS peak - and on the two fabric
+# airbags it runs QBAT at N 1, the one-point QBAT path measured unstable at
+# the engine's own step on a cantilever (ENERGY ERROR at cycles 81-88).
+# ELFORM -16 / 20 / 21 / 26 have no explicit carrier on any corpus (implicit
+# decks get 24 for every ELFORM). Everything else — ELFORM=2
+# (Belytschko-Tsay) above all, the most common shell formulation in LS-DYNA
+# decks — has no exact counterpart and falls through to the user's choice.
 _ELFORM_ALWAYS_QEPH = {-16, 9, 20, 21, 26}
 
 

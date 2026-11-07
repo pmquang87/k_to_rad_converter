@@ -1440,7 +1440,7 @@ class FixRoundHelpTexts(unittest.TestCase):
     """Two sentences the review found untrue (its minors)."""
 
     def test_tet_isolid1_names_the_starters_own_tet_reset(self):
-        """sgrtails.F:984-1000 resets every 4- / 10-node tet group to
+        """sgrtails.F:984-999 resets every 4- / 10-node tet group to
         Isolid 1 for every material; WARNING 791 (:695-704) is the LAW1
         integration-point message Isolid 14 draws on the way."""
         texts = {"help": _action_help("--tet-isolid1"),
@@ -1448,7 +1448,7 @@ class FixRoundHelpTexts(unittest.TestCase):
                      __import__("k2rad").convert.__doc__)}
         for where, text in texts.items():
             with self.subTest(where=where):
-                self.assertIn("sgrtails.F:984-1000", text)
+                self.assertIn("sgrtails.F:984-999", text)
                 self.assertIn("WARNING 791", text)
                 self.assertNotIn("resets Isolid 14 on a LAW1 tet", text)
         self.assertNotIn("no WARNING 791 reset", _gui_source_joined())

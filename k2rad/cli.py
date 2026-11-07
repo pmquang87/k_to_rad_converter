@@ -1791,7 +1791,12 @@ def build_parser() -> argparse.ArgumentParser:
              "4). CHOOSING 'qeph' CHANGES "
              "RESULTS on every shell deck, which is why it is not the "
              "default. Under-integrated Ishell 1-4 is not offered: it would "
-             "break /INISHE initial-stress transfer (npg 4 -> 1).",
+             "break /INISHE initial-stress transfer (npg 4 -> 1). Not governed "
+             "by this option: ELFORM -16 / 9 / 20 / 21 / 26 are always written "
+             "Ishell 24 (dyna2rad writes 12, convertprops.cxx:781-783); on the "
+             "three explicit R14 ELFORM 9 carriers 12 worsens the "
+             "internal-energy RMS (8.59 -> 9.50 / 12.63 -> 21.94 / 43.78 -> "
+             "50.35 %% of the LS peak).",
     )
     parser.add_argument(
         "--he-bunreacted",
@@ -1953,20 +1958,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write /PROP/SOLID Isolid 1 on a section whose elements are all "
              "4- / 10-node tets (not ALE, not cohesive) instead of Isolid 14. "
              "The starter resets every tet group to Isolid 1 anyway, for "
-             "every material (sgrtails.F:984-1000); on the way, Isolid 14 on "
-             "a LAW1 section draws WARNING 791, the integration-point "
-             "message (sgrtails.F:695-704). ON by default; --no-tet-isolid1 "
-             "writes Isolid 14.",
+             "every material (sgrtails.F:984-999, silently for /TETRA10); on "
+             "the way, Isolid 14 on a LAW1 section draws WARNING 791, the "
+             "integration-point message (sgrtails.F:695-704). An all-tet "
+             "ELFORM 2 or 16 section keeps the Isolid 17 of its ELFORM, which "
+             "the starter resets the same way (measured: engine output "
+             "byte-equal to an Isolid-1 twin, only the starter's property "
+             "echo differs); a section with a /BRICK keeps its Isolid. ON by "
+             "default; --no-tet-isolid1 writes Isolid 14.",
     )
     parser.add_argument(
         "--law1-shell-global-n",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Write /PROP/SHELL N = 0 (global integration) on a section whose "
-             "parts are all LAW1 (*MAT_ELASTIC) with no *INITIAL_STRESS_SHELL, "
-             "instead of max(2, NIP), which the starter switches to N = 0 "
-             "itself with WARNING 1084 (cgrtails.F:780-791). ON by default; "
-             "--no-law1-shell-global-n writes max(2, NIP).",
+        help="Write /PROP/SHELL N = 0 (global integration) on a "
+             "*SECTION_SHELL whose shell elements all sit on parts k2rad "
+             "writes as LAW1 (*MAT_ELASTIC, and *MAT_RIGID written as "
+             "/MAT/ELAST for its /RBODY), instead of max(2, NIP), which the "
+             "starter switches to N = 0 itself (WARNING 1084, "
+             "cgrtails.F:780-791; a /SH3N group silently, c3grtails.F:710). "
+             "Not on a section with NIP 1 (one point: N 1 on a triangle-only "
+             "section under --nip1-one-point, else max(2, NIP)), not on a "
+             "section an *INITIAL_STRESS_SHELL or *INITIAL_STRAIN_SHELL names "
+             "(directly or through a *SET_SHELL), not on a section another "
+             "material law shares, and nowhere in a deck that writes "
+             "/THERM_STRESS. ON by default; --no-law1-shell-global-n writes "
+             "max(2, NIP).",
     )
     parser.add_argument(
         "--s2s-type25",

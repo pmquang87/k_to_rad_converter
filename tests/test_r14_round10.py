@@ -384,6 +384,88 @@ class A2Nip1OnePoint(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A3  the texts that ride A1 / A2 (help, comment, docstring)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _flag_help(flag: str) -> str:
+    """The rendered --help text of one option, whitespace collapsed."""
+    from k2rad import cli
+    parser = cli.build_parser()
+    for action in parser._actions:
+        if flag in action.option_strings:
+            return _t7._collapse((action.help or "").replace("%%", "%"))
+    raise AssertionError(flag)
+
+
+def _source(*parts: str) -> str:
+    with open(os.path.join(_ROOT, *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+class A3Texts(unittest.TestCase):
+
+    def test_law1_help_names_the_five_conditions(self):
+        """The --law1-shell-global-n help names every condition of
+        writer/mesh._law1_global_n_secids (it named one before round 10)."""
+        text = _flag_help("--law1-shell-global-n")
+        for needle in ("*MAT_RIGID written as /MAT/ELAST",
+                       "Not on a section with NIP 1", "*INITIAL_STRAIN_SHELL",
+                       "another material law shares", "/THERM_STRESS",
+                       "c3grtails.F:710", "cgrtails.F:780-791",
+                       "--no-law1-shell-global-n writes max(2, NIP)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_elform_always_qeph_comment(self):
+        """common.py's _ELFORM_ALWAYS_QEPH comment gives the measured reason
+        (Vol I calls the five ELFORMs FULLY integrated; 'already
+        reduced-integration' was wrong)."""
+        text = _t7._collapse(_source("k2rad", "writer", "common.py"))
+        for needle in ("FULLY integrated forms in LS-DYNA",
+                       "convertprops.cxx:781-783", "8.59 -> 9.50 %",
+                       "43.78 -> 50.35 %", "cycles 81-88"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        # the '#' rule: needle each retracted comment line on its own
+        for needle in ("QEPH regardless of the option: already",
+                       "reduced-integration / co-rotational forms whose "
+                       "Radioss counterpart is"):
+            with self.subTest(retracted=needle):
+                self.assertNotIn(needle, text)
+
+    def test_shell_formulation_help_names_the_fixed_list(self):
+        text = _flag_help("--shell-formulation")
+        for needle in ("-16 / 9 / 20 / 21 / 26", "convertprops.cxx:781-783",
+                       "43.78 -> 50.35 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_tet_reset_citation(self):
+        """sgrtails.F:984-999 is the reset block; line 1000 is a comment.
+        The wrong ':984-1000' ships nowhere a claim is made (the help, the
+        convert() docstring, ConvertOptions, writer/mesh, README); ROADMAP's
+        CardStack 'Opened by the batch' record quotes it as the defect."""
+        from k2rad import cli
+        import k2rad
+        shipped = {
+            "help": _t7._collapse(cli.build_parser().format_help()),
+            "convert()": _t7._collapse(k2rad.convert.__doc__),
+            "state.py": _source("k2rad", "state.py"),
+            "mesh.py": _source("k2rad", "writer", "mesh.py"),
+            "cli.py": _source("k2rad", "cli.py"),
+            "__init__.py": _source("k2rad", "__init__.py"),
+            "README.md": _source("README.md"),
+        }
+        for where, text in shipped.items():
+            with self.subTest(where=where):
+                self.assertNotIn("sgrtails.F:984-1000", text)
+        for where in ("help", "convert()"):
+            self.assertIn("sgrtails.F:984-999", shipped[where])
+        self.assertIn("An all-tet ELFORM 2 or 16 section keeps the Isolid 17",
+                      _flag_help("--tet-isolid1"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Retracted statements and forbidden sentences (the rounds 4-9 shape:
 # _t7._SHIPPED_TEXTS = README, ROADMAP, the GUI, k2rad.py, k2rad/, docs/*.md,
 # tools/*.py with adjacent literals joined; CHANGELOG is the history)
@@ -402,6 +484,12 @@ _RETRACTED_ROUND_10_A = (
     # A1: the README K-32 paragraph
     "carrying SHRF over is a round-10 item",
     "it runs at 5/6 the same way and is not named",
+    # A3: the _ELFORM_ALWAYS_QEPH comment's wrong reason (writer/common; the
+    # '#' rule: one needle per comment line)
+    "QEPH regardless of the option: already",
+    "reduced-integration / co-rotational forms whose Radioss counterpart is",
+    # A3: the README K-31 bullet's help sentence
+    "text names only the `*INITIAL_STRESS_SHELL` exclusion",
 )
 
 #: (shipped file, the replacement text it now carries)
@@ -419,6 +507,10 @@ _REPLACEMENTS_ROUND_10_A = (
      "since R14 round 10**"),
     ("docs/K_ROUTE_FOR_RADIOSS_CARDS.md",
      "Ashear carries `*SECTION_SHELL` SHRF since R14 round 10"),
+    ("k2rad/writer/common.py",
+     "They are FULLY integrated forms in LS-DYNA (Vol I R17 p.41-64), and"),
+    ("README.md",
+     "R14 round 10 the `--help` text names every condition above"),
 )
 
 #: sentences that must never ship, CHANGELOG included (measured false before

@@ -9419,7 +9419,7 @@ class ConvertOptions:
     # --no-tet-isolid1 (default ON; writer/mesh): /PROP/SOLID Isolid 1 on a
     # section whose elements are ALL 4- / 10-node tets (not ALE, not
     # cohesive) instead of Isolid 14. The starter resets every tet group to
-    # Isolid 1 anyway, for every material (sgrtails.F:984-1000); on the way,
+    # Isolid 1 anyway, for every material (sgrtails.F:984-999); on the way,
     # Isolid 14 on a LAW1 section draws WARNING 791, the integration-point
     # message (sgrtails.F:695-704).
     tet_isolid1: bool = True

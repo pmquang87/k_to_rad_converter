@@ -2591,10 +2591,15 @@ def _tet_section_isolid(state: ConversionState, sec: Optional[SectionSolid],
     what the deck's hourglass control says, and ``_elform_to_isolid`` keeps
     returning 14 for the hourglass gate and the tet tests that key on it.
     A 17 (ELFORM 2 or 16 on tets) is left as written too:
-    the starter runs that tet group at Isolid 1 as well, but a 17 draws no
-    WARNING 791 (that one is for a LAW1 group at 14 / 15,
-    ``sgrtails.F:695-704``) and lies outside K-30's ELFORM 10 / 13 scope.
-    ``--no-tet-isolid1`` writes the 14."""
+    the starter runs that tet group at Isolid 1 as well (``sgrtails.F:984-999``,
+    silently for /TETRA10: its WARNING 341 is commented out at :990-995), a 17
+    draws no WARNING 791 (that one is for a LAW1 group at 14 / 15,
+    ``sgrtails.F:695-704``) and it lies outside K-30's ELFORM 10 / 13 scope.
+    MEASURED (R14 round 10): 3.1_Elastic_Beams_etc's all-tet ELFORM 16
+    section at Isolid 17 and an Isolid-1 twin print equal cycle rows (nt 1,
+    six pairs) and differ only in the starter's property echo. A section
+    holding a /BRICK keeps its ELFORM's Isolid. ``--no-tet-isolid1`` writes
+    the 14."""
     if (isolid == 14 and sec is not None and state.options.tet_isolid1
             and sec.secid in _tet_only_solid_secids(state)):
         return 1

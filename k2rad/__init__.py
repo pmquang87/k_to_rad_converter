@@ -1852,7 +1852,7 @@ def convert(
         Write ``/PROP/SOLID`` Isolid 1 on a section whose elements are all 4-
         / 10-node tets (not ALE, not cohesive) instead of Isolid 14. The
         starter resets every tet group to Isolid 1 anyway, for every
-        material (``sgrtails.F:984-1000``); before that, Isolid 14 on a LAW1
+        material (``sgrtails.F:984-999``); before that, Isolid 14 on a LAW1
         section draws WARNING 791, the integration-point message
         (``sgrtails.F:695-704``). Default True (``--no-tet-isolid1``).
     law1_shell_global_n : bool
