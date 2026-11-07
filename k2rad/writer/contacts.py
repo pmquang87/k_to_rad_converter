@@ -6744,7 +6744,14 @@ _N2S_TYPE7_MEASURED = (
     "block through (-0.1708 mm at t 0.9) and stops at 98 % of t_end behind a "
     "NORMAL TERMINATION; with the block's four nodes over the base's corners "
     "BOTH let it through behind a NORMAL banner (gap -0.19 mm at t 1.0) - "
-    "the TYPE25 default fails silently too.")
+    "the TYPE25 default fails silently too. On an ELASTIC base the outcome "
+    "VARIES RUN TO RUN on identical bytes: a one-hex block (its 4 bottom "
+    "nodes the secondary side) driven onto a 2 x 2-hex elastic base ended in "
+    "5 of 7 runs NORMAL TERMINATION with the block through the base, in 1 "
+    "NORMAL with the block held and in 1 ERROR TERMINATION on the implicit "
+    "TIMESTEP LIMIT (nt 4 and nt 2); a frictionless 9-node block pressed "
+    "onto an elastic base sat 0.02 mm inside it with zero contact work "
+    "behind a NORMAL TERMINATION (nt 4 = nt 2).")
 
 
 def _routed_stub_clause(state: ConversionState) -> str:

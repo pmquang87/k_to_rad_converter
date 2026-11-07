@@ -296,6 +296,26 @@ Prior history (before this changelog was introduced) is summarized in the
     Tests: `test_cardstack_pipeline_engine.Dt2msTexts.test_dt_del_on_the_routed_2d_deck_writes_the_quad_floor`
     (the card bytes `0.67 3.000000E-05`, a stated TSSFAC 0.5, none of the 3-D
     cards, the sentence), `tests/test_r14_round10.py` `A12QuadFloorHelp`.
+  - **A13 - the routed implicit N2S caution widened to the ELASTIC base (text
+    only).** The round-9 caution of the default `--implicit-n2s-type7` route
+    (`writer/contacts._N2S_TYPE7_MEASURED`, the `--implicit-n2s-type7` help,
+    README) named the silent pass-through behind a NORMAL TERMINATION for a
+    four-node block on a coarse RIGID base only. MEASURED (census g3l and
+    critic G3 on identical bytes, nt 4 and nt 2): a one-hex block, its four
+    bottom nodes the secondary side, driven onto a 2 x 2-hex ELASTIC base
+    ended in 5 of 7 runs NORMAL TERMINATION with the block through the base,
+    in 1 NORMAL with the block held and in 1 ERROR TERMINATION on the
+    implicit TIMESTEP LIMIT - an outcome that varies run to run; a
+    frictionless nine-node block pressed onto an elastic base sat 0.02 mm
+    inside it with zero contact work behind a NORMAL TERMINATION (nt 4 =
+    nt 2). Both decks are repo fixtures now
+    (`tests/fixtures/round10/b6t_g3l.k`, `slide_mu0.k`, the census decks
+    byte for byte) pinned by their converted BYTES (four SHA-256, the ed52c93
+    ones: 0 bytes move) and the caution's TEXT - no solver outcome is pinned
+    anywhere. Movers: text on 1 R14 key / 1 model (doorbeam, the route's
+    only roster carrier). Tests: `tests/test_r14_round10.py` `A13N2sCaution`;
+    the round-9 pins `test_r14_triage_9.ImplicitN2sType7` and the README
+    needles stay green.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

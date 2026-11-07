@@ -1021,7 +1021,10 @@ def build_parser() -> argparse.ArgumentParser:
              "outcome depends on the geometry: the route can end NORMAL "
              "with the block through (silent) where the TYPE25 stops "
              "loudly, hold where the TYPE25 lets the block through, or - "
-             "nodes over the base's corners - both let it through. ON by "
+             "nodes over the base's corners - both let it through. On an "
+             "ELASTIC base the outcome varies run to run on identical bytes "
+             "(a 4-node block: 5 of 7 runs NORMAL with the block through, 1 "
+             "held, 1 TIMESTEP-LIMIT stop). ON by "
              "default; --no-implicit-n2s-type7 keeps the TYPE25.",
     )
     parser.add_argument(

@@ -5286,7 +5286,15 @@ a NORMAL TERMINATION; with the block's four nodes over the corners of a
 2 × 2 or a 1 × 1-hex rigid base BOTH let it through behind a NORMAL banner (gap
 −0.1865 / −0.1907 mm on the route, −0.1885 / −0.1922 mm on the TYPE25 at t
 1.0) — the TYPE25 default fails silently too; on a shell-secondary coupon it
-holds where the TYPE25 default stops (nt 4 = nt 2 on every coupon).
+holds where the TYPE25 default stops (nt 4 = nt 2 on every coupon). On an
+ELASTIC base the outcome varies run to run on identical bytes (R14 round 10):
+a one-hex block, its 4 bottom nodes the secondary side, driven onto a 2 × 2-hex
+elastic base ended in 5 of 7 runs NORMAL TERMINATION with the block through the
+base, in 1 NORMAL with the block held and in 1 ERROR TERMINATION on the implicit
+TIMESTEP LIMIT (nt 4 and nt 2); a frictionless 9-node block pressed onto an
+elastic base sat 0.02 mm inside it with zero contact work behind a NORMAL
+TERMINATION (nt 4 = nt 2). The two decks are repo fixtures
+(`tests/fixtures/round10/b6t_g3l.k`, `tests/fixtures/round10/slide_mu0.k`).
 `*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
 `fric_ID` binding work). LS-DYNA's
 `μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`

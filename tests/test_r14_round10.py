@@ -758,6 +758,57 @@ class A6ImplicitDamping(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A13  the routed N2S caution (text only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class A13N2sCaution(unittest.TestCase):
+
+    #: the two census decks (the round-10 g3l 4-node elastic-base coupon and
+    #: the 9-node frictionless sliding block), repo fixtures since round 10;
+    #: their bytes at ed52c93 and on this branch (A13 is text only). Their
+    #: SOLVER outcome is not pinned: it varies run to run (the sentence).
+    _FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "round10")
+    _SHA = {
+        "b6t_g3l": (
+            "3f8e5fc645a8edc7807ae532d9d27238fed4b9968a47740fc0114d1c2d5b7d63",
+            "185c209d0a3ed9395a76689916e194c44b48c81ec251659a80bcde1f20653e49"),
+        "slide_mu0": (
+            "5260b17e41cbab3631597e2e763a0aa9f680961f41232661bff3d5b7b88ba1bc",
+            "a79c4e779ab95248fcb149d3a5020ec332cecf3e1246d56caa876e20b16c3bc7"),
+    }
+
+    def test_the_two_fixtures_convert_to_the_route_and_name_it(self):
+        for stem, (s_sha, e_sha) in self._SHA.items():
+            with self.subTest(fixture=stem):
+                with open(os.path.join(self._FIX, stem + ".k")) as fh:
+                    deck = fh.read()
+                res, st, eng = _convert(deck)
+                self.assertEqual(_tp._sha(st), s_sha)
+                self.assertEqual(_tp._sha(eng), e_sha)
+                self.assertEqual([ln for ln in st.splitlines()
+                                  if ln.startswith("/INTER/")],
+                                 ["/INTER/TYPE7/90002", "/INTER/TYPE7/90001"])
+                self.assertTrue(_has(res.warnings, "5 of 7 runs NORMAL",
+                                     "0.02 mm inside it"))
+                # --no-implicit-n2s-type7 keeps the TYPE25 (round 9)
+                _r, st25, _e = _convert(deck, implicit_n2s_type7=False)
+                self.assertIn("/INTER/TYPE25/90001", st25.splitlines())
+
+    def test_the_measured_variance_is_named_in_code_help_and_readme(self):
+        from k2rad import cli
+        from k2rad.writer import contacts
+        texts = {"code": _t7._collapse(contacts._N2S_TYPE7_MEASURED),
+                 "help": _t7._collapse(cli.build_parser().format_help()),
+                 "readme": _t7._collapse(_readme())}
+        for where, text in texts.items():
+            with self.subTest(where=where):
+                self.assertIn("5 of 7 runs NORMAL", text)
+        # the round-9 instruction stays
+        self.assertIn("CHECK THAT THE CONTACT CARRIES LOAD", texts["code"])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Retracted statements and forbidden sentences (the rounds 4-9 shape:
 # _t7._SHIPPED_TEXTS = README, ROADMAP, the GUI, k2rad.py, k2rad/, docs/*.md,
 # tools/*.py with adjacent literals joined; CHANGELOG is the history)
