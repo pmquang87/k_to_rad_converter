@@ -316,6 +316,22 @@ Prior history (before this changelog was introduced) is summarized in the
     only roster carrier). Tests: `tests/test_r14_round10.py` `A13N2sCaution`;
     the round-9 pins `test_r14_triage_9.ImplicitN2sType7` and the README
     needles stay green.
+  - **A14 - `*DATABASE_EXTENT_BINARY` MAXINT -3 .. -1 named (text only).**
+    `handle_database_extent_binary` named MAXINT > 3 (K-42) and MAXINT < -3;
+    -3 .. -1 passed in silence although they ask for the same thing - |MAXINT|
+    through-thickness points at every in-plane point, no averaging (Vol I R17
+    p.16-67). They are named now: the engine deck keeps STRESS/MEMB / UPPER /
+    LOWER (the bytes MAXINT 3 gets), and OpenRadioss writes UPPER / LOWER as
+    the mean over the element's NPTR x NPTS in-plane points
+    (`tensorc.F:179`, `:835-840`), so LS-DYNA's per-point output is not
+    reproduced. Movers: text on 4 R14 keys / 4 models (3.1_Elastic_Beams_etc,
+    3.4_Connectors_CNRB_Interpolation, 3.5_Linear_Elastic_QS_Plate_Shell,
+    4.2_Buckling_of_Beer_Can - all MAXINT -3 on fully integrated sections);
+    0 bytes. Moved pin, split (the claim it asserted ends here):
+    `test_cardstack_pipeline.DbExtentBinaryMaxintNamed.test_maxint_3_or_blank_or_minus_3_say_nothing`
+    -> `test_maxint_3_or_blank_say_nothing` ("", 3, 2, 0) + the new
+    `test_maxint_minus_3_to_minus_1_is_named` (-3 / -2 / -1: the MAXINT-3
+    bytes, one sentence with its citations).
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

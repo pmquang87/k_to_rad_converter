@@ -9187,7 +9187,9 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     # (writer/assembly.py) reads MAXINT > 3 only. --no-maxint-stress-all
     # (the user's decision 8 of 2026-11-01) keeps the read and writes no
     # STRESS/ALL line, and the line says so - the MAXINT < -3 line too (the
-    # fix round of the wave-D review).
+    # fix round of the wave-D review). R14 round 10, A14: MAXINT -3 .. -1 ask
+    # for the same per-point output with |MAXINT| <= 3 and are named too
+    # (they used to pass in silence); no byte moves.
     if maxint > 3 and not state.options.maxint_stress_all:
         state.warn(
             f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (> 3: d3plot output "
@@ -9213,6 +9215,17 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
             + ("" if state.options.maxint_stress_all else
                ", and for no MAXINT under --no-maxint-stress-all")
             + ", so the engine deck keeps STRESS/MEMB / UPPER / LOWER.")
+    elif maxint < 0:
+        # R14 round 10, A14: -3 .. -1 asked for the 'no averaging' output
+        # too, which used to pass in silence
+        state.warn(
+            f"*DATABASE_EXTENT_BINARY: MAXINT {maxint} (< 0: |MAXINT| = "
+            f"{-maxint} integration points at every in-plane point, no "
+            "averaging, Vol I R17 p.16-67) - with |MAXINT| <= 3 the engine "
+            "deck keeps STRESS/MEMB / UPPER / LOWER, and OpenRadioss writes "
+            "UPPER / LOWER as the mean over the element's NPTR x NPTS "
+            "in-plane points (tensorc.F:179, 835-840): the per-point output "
+            "LS-DYNA writes is not reproduced.")
 
 
 def handle_database_jntforc(block: Block, state: ConversionState) -> None:

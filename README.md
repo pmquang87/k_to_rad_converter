@@ -7027,7 +7027,11 @@ writes N instead)
 LOWER (CardStack K-42; the handler reads the cell since the batch's wave C).
 R14: 9 of the 350 roster decks gain the line. The conversion log names it. A
 MAXINT below -3 (|MAXINT| points, no averaging, Vol I R17 p.16-67) is named as
-not reaching the rule (0 R14 decks). `--no-maxint-stress-all` writes no such
+not reaching the rule (0 R14 decks). MAXINT -3 .. -1 (the same request with
+|MAXINT| <= 3) is named too since R14 round 10: the engine deck keeps STRESS/MEMB
+/ UPPER / LOWER, and OpenRadioss writes UPPER / LOWER as the mean over the
+element's in-plane points (`tensorc.F:179, 835-840`), so LS-DYNA's per-point
+output is not reproduced (4 R14 decks). `--no-maxint-stress-all` writes no such
 line.
 `*DATABASE_CROSS_SECTION_SET[_ID]` → `/SECT` (node set + `*SET_SHELL`/`_SOLID`/
 `_BEAM` element groups); `*DATABASE_CROSS_SECTION_PLANE[_ID]` → `/SECT` via a

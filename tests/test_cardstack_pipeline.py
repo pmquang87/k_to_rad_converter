@@ -4593,11 +4593,30 @@ class DbExtentBinaryMaxintNamed(unittest.TestCase):
                              "MAXINT -5", "no averaging", "not written"),
                         res.warnings)
 
-    def test_maxint_3_or_blank_or_minus_3_say_nothing(self):
-        for cell in ("", 3, 2, 0, -3):
+    def test_maxint_3_or_blank_say_nothing(self):
+        for cell in ("", 3, 2, 0):
             with self.subTest(maxint=cell):
                 res, _s, _e = _convert(_deck(extra=self._ext(0, 0, cell)))
                 self.assertFalse(_has(res.warnings, "MAXINT"), res.warnings)
+
+    def test_maxint_minus_3_to_minus_1_is_named(self):
+        """R14 round 10, A14: -3 .. -1 ask for LS-DYNA's per-point output
+        too (no averaging, p.16-67); the engine deck keeps MEMB / UPPER /
+        LOWER, UPPER / LOWER being the mean over the NPTR x NPTS in-plane
+        points (tensorc.F:179, 835-840) - no byte moves."""
+        _r, s0, e0 = _convert(_deck(extra=self._ext(0, 0, 3)))
+        for cell in (-3, -2, -1):
+            with self.subTest(maxint=cell):
+                res, s, eng = _convert(_deck(extra=self._ext(0, 0, cell)))
+                self.assertNotIn(self._ALL, eng)
+                self.assertEqual((s, eng), (s0, e0))
+                hits = [w for w in res.warnings if "MAXINT" in w]
+                self.assertEqual(len(hits), 1, hits)
+                for needle in (f"MAXINT {cell} (< 0: |MAXINT| = {-cell} ",
+                               "no averaging", "p.16-67",
+                               "STRESS/MEMB / UPPER / LOWER",
+                               "tensorc.F:179, 835-840", "not reproduced"):
+                    self.assertIn(needle, hits[0])
 
 
 class Inacti5Wording(unittest.TestCase):

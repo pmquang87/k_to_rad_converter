@@ -591,9 +591,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # (anim_build_index_all.F:152-167); MEMB stays on its own line. The
     # field is DbExtentBinary.maxint (card 1 field 3, default 3), stored by
     # handle_database_extent_binary since the CardStack wave C, so a deck
-    # that states MAXINT > 3 reaches this line. A MAXINT < -3 (|MAXINT|
+    # that states MAXINT > 3 reaches this line. A MAXINT < 0 (|MAXINT|
     # points at every in-plane point, no averaging) is named in the handler
-    # log and not written here (ROADMAP). --no-maxint-stress-all (the
+    # log and not written here (ROADMAP; -3 .. -1 named since R14 round 10,
+    # A14). --no-maxint-stress-all (the
     # user's decision 8 of 2026-11-01) writes no such line whatever MAXINT
     # says - the engine deck of the code before the read - and the
     # handler's MAXINT line says so.
