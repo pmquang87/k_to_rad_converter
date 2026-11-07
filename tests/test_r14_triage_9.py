@@ -63,7 +63,11 @@ def _sha(text: str) -> str:
 #: opt-in arm) also converts the deck with the K3 defaults and checks, with
 #: _k3_default_moves, that this arm is the pinned bytes plus exactly the
 #: K-30 / K-31 cells it names - so that output stays pinned as a whole.
-_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False)
+#: R14 round 10 (A1) adds SHRF -> the /PROP/SHELL Ashear cell as a third
+#: lever the same way (--no-shrf-ashear; the cell is named by
+#: _k3_default_moves as (header + " Ashear", 0.0, value)).
+_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False,
+               shrf_ashear=False)
 
 
 def _k3_default_moves(off: str, on: str):
@@ -74,13 +78,16 @@ def _k3_default_moves(off: str, on: str):
 
 def _k32_shrf_free(warnings):
     """*warnings* without the K-32 note a stated *SECTION_SHELL SHRF draws
-    since the CardStack batch (these decks state SHRF 1.0) - the warning-list
-    pins were measured on the pristine 386444e checkout, which had no such
-    note; the note itself is pinned in tests/test_cardstack_pipeline_props.py.
+    since the CardStack batch (these decks state SHRF 1.0) and without the
+    sentence round 10's --no-shrf-ashear arm writes in its place - the
+    warning-list pins were measured on the pristine 386444e checkout, which
+    had no such note; the notes are pinned in
+    tests/test_cardstack_pipeline_props.py.
     """
     return [w for w in warnings
             if not (w.startswith("*SECTION_SHELL ")
-                    and "the stated SHRF" in w)]
+                    and ("the stated SHRF" in w
+                         or "(--no-shrf-ashear)" in w))]
 
 
 def _blocks(starter: str, prefix: str):
@@ -303,7 +310,8 @@ class RigidPartPidPrecedence(unittest.TestCase):
         r_def, st_def, _e = _convert(a1_probe_deformable_clash())
         self.assertFalse(_has(r_def.warnings, _W_CLASH))
         self.assertEqual(_k3_default_moves(st_on, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_b_LOAD_RIGID_BODY_loads_the_part(self):
         res, st, _e = _convert(_a1_probe(
@@ -607,7 +615,8 @@ class ImplicitN2sType7(unittest.TestCase):
         self.assertEqual(_sha(st), _A2_PLAIN_DEFAULT_SHA)
         _r, st_def, _e = _convert(a2_plain_implicit())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         self.assertNotIn("/INTER/TYPE25/", st)
         cells = _type7_cells(st, 78)
         self.assertIsNotNone(cells, st)
@@ -703,7 +712,8 @@ class ImplicitN2sType7(unittest.TestCase):
         r_def, st_def, _e = _convert(a2_explicit())
         self.assertFalse(_has(r_def.warnings, _W_A2))
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_d_an_implicit_ERODING_spelling_keeps_the_TYPE25(self):
         deck = _shell_plate(_IMPL1, _SET5 + _n2s(
@@ -1963,7 +1973,8 @@ class MixedMainThicknessGap(unittest.TestCase):
         self.assertEqual(_type7_igap_gapmin(st_def, 1), (0, 0.0))
         self.assertFalse(_has(r_def.warnings, _W_A10))
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/2", 5, 0)])
+                         [("/PROP/SHELL/2", 5, 0),
+                          ("/PROP/SHELL/2 Ashear", 0.0, 1.0)])
 
     def test_b_two_thicknesses_take_the_thinner_and_OPTT_wins(self):
         _r, st, _e = _convert(_a10_gapc(t_b=0.6), **_ON)
@@ -4352,7 +4363,8 @@ class AleFlowTracking(unittest.TestCase):
         self.assertIn("RMS 253.09 -> 749.89 %", hits[0])
         _r, st_def, _e = _convert(b8_bird())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         # a *CONTROL_ALE deck WITHOUT a reference-system card: today's
         # bytes and today's warning list exactly (the generic note unchanged)
         res0, st0, _e0 = _convert(b8_bird(card=False, mu="0.0"), **_K3_OFF)
@@ -4364,7 +4376,8 @@ class AleFlowTracking(unittest.TestCase):
                              "is not converted."))
         _r, st0_def, _e = _convert(b8_bird(card=False, mu="0.0"))
         self.assertEqual(_k3_default_moves(st0, st0_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_card_bytes_bcrot0_and_bcrot7(self):
         res, st, eng = _convert(b8_bird(), ale_flow_tracking=True, **_K3_OFF)
@@ -4372,7 +4385,8 @@ class AleFlowTracking(unittest.TestCase):
         # the opt-in arm with the K3 defaults: those bytes plus K-31's cell
         _r, st_def, _e = _convert(b8_bird(), ale_flow_tracking=True)
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
         lines = st.splitlines()
         i = lines.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines[i:i + 5], _B8_CARD)
@@ -4672,7 +4686,8 @@ class ShellInSolidRetune(unittest.TestCase):
         self.assertEqual(_sha(eng), _B4_SIS_386444E_ENGINE)
         _r, st_def, eng_def = _convert(_t8._sis_ale_deck())
         self.assertEqual(_k3_default_moves(st, st_def),
-                         [("/PROP/SHELL/3", 2, 0)])
+                         [("/PROP/SHELL/3", 2, 0),
+                          ("/PROP/SHELL/3 Ashear", 0.0, 1.0)])
         self.assertEqual(eng_def, eng)
         self.assertIn("#-- SKIPPED: *CONSTRAINED_SHELL_IN_SOLID", st)
         self.assertNotIn("/INTER/TYPE18", st)

@@ -331,6 +331,32 @@ Changed help texts of existing options (the same flags):
   MEASURED +0.46 % peak tip deflection on an ELFORM 16 cantilever (1.5357 vs
   1.5287 mm).
 
+#### R14 parity round 10 options (2026-11)
+
+The options of R14 parity round 10. Each measured fix is ON by default with a
+`--no-` opt-out that restores the earlier bytes on the decks it moves; an
+opt-in says so. Each is also the `convert()` keyword of the same name, dashes
+as underscores.
+
+- `--shrf-ashear` / `--no-shrf-ashear` — **ON by default**. Write the
+  `*SECTION_SHELL` SHRF (card 1 field 3, the transverse shear correction
+  factor) to the `/PROP/SHELL` Ashear cell: a blank or 0 SHRF as LS-DYNA's
+  default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as stated, a value within
+  0.005 of 5/6 as the starter's own 5/6 (the cell 0,
+  `hm_read_prop01.F:244`), a value outside (0, 1] as 1.0 with a warning. The
+  cell stays 0 on the sections LS-DYNA does not shear: NIP 1 (one point, no
+  bending; the starter zeroes Ashear under N 1 itself,
+  `hm_read_prop01.F:246-259`), the membranes ELFORM 5 / 9, the 2-D ELFORMs
+  12-15, 43, 44, 52, 55, +-29 and k2rad's own placeholder sections; each kept
+  or substituted value is named. The `/PROP/TYPE9` / `TYPE11` / `TYPE51`
+  routes keep their own rules. MEASURED: each Ashear reproduces its own
+  Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads and
+  -0.024 / -0.025 % on triangles; LS-DYNA's d3hsp echoes `shear area factor =
+  1.0` on all 2642 R14 shell parts with a blank, 0 or 1.0 SHRF; 148 R14 keys
+  / 132 models move by bytes, and the 14 match rows among them stay match
+  (largest END move 1.54 points). `--no-shrf-ashear` writes Ashear 0 (the
+  starter's 5/6) everywhere.
+
 ### Python API
 
 ```python
@@ -2499,7 +2525,9 @@ the same `_elform_to_ishell` mapping (and the same `--shell-formulation` option)
 every other shell property uses; `NLOC` 0/−1/+1 → `Ipos` 0/4/3; an explicitly
 given `SHRF` → `Ashear` (a blank field keeps Radioss's 5/6 rather than
 LS-DYNA's 1.0 default, which would silently stiffen transverse shear by 20%
-against both dyna2rad and every other k2rad shell); each ply's
+against dyna2rad; the `/PROP/SHELL` of a plain `*SECTION_SHELL` carries the
+blank as LS-DYNA's 1.0 since R14 round 10, the `/PROP/TYPE51` stack keeps
+5/6); each ply's
 `B_i` rides on its own `delta_phi`. **Each ply takes two lines** on the TYPE51
 card — the ply card plus a mandatory blank — because the importer counts free
 cards and divides by two. Layers with `MID ≤ 0` or zero thickness are LS-DYNA's
@@ -6780,11 +6808,28 @@ conversion log** — the original defect was that it happened silently.
 default `Ishell=12` is the same integration class and `qeph` lowers it. `qeph`
 is the dyna2rad parity choice for 16 (`convertprops.cxx:779-785`), measured at
 +0.46 % peak tip deflection on an ELFORM 16 cantilever (1.5357 vs 1.5287 mm),
-and the log says so (CardStack K-32). A stated `SHRF` other than 5/6 is not
-converted: `Ashear` is written 0, which the starter turns into 5/6
-(`hm_read_prop01.F:244`). The log names those sections; carrying SHRF over is
-a round-10 item. A blank `SHRF` is LS-DYNA's 1.0 (Vol I R17 p.41-63); it runs
-at 5/6 the same way and is not named.
+and the log says so (CardStack K-32). **`*SECTION_SHELL` SHRF is written to
+the `/PROP/SHELL` Ashear cell since R14 round 10** (`--no-shrf-ashear` opts
+out): a blank or 0 SHRF as LS-DYNA's default 1.0 (Vol I R17 p.41-63; the R14
+d3hsp echoes `shear area factor = 1.0` on all 2642 shell parts whose SHRF is
+blank, 0 or 1.0), 0 < SHRF <= 1 as stated, a value within 0.005 of 5/6 as the
+starter's own 5/6 (the cell 0, `hm_read_prop01.F:244`: the ~5/6 sections keep
+their bytes; a 0.83 is named as a 0.40 % substitution), a value outside
+(0, 1] as 1.0 with a warning. The cell stays 0 on the sections LS-DYNA does
+not shear transversely - NIP 1 (one point, no bending, p.41-66; on an N-1
+property the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`), the
+membranes ELFORM 5 / 9 and the 2-D ELFORMs 12-15, 43, 44, 52, 55, +-29
+(p.41-67) - with a sentence that says why, and on k2rad's own placeholder
+sections; the BCIZ / DK ELFORMs 3 / 17 / 18, which LS-DYNA does not apply
+SHRF to, take the rule and are named. Both emission sites carry the cell (the
+per-section property and the per-part `*HOURGLASS` split). MEASURED: each
+Ashear reproduces its own Timoshenko closed form to -0.041 % (L/t 3) /
+-0.018 % (L/t 5) on quads and -0.024 / -0.025 % on `/SH3N` triangles (a
+clamped cantilever, explicit and implicit, nt 4 = nt 2); 148 R14 keys / 132
+models move by the Ashear cells only, and the 14 match rows among them stay
+match (largest END move 1.54 points). `--no-shrf-ashear` writes Ashear 0
+everywhere (the starter's 5/6) and names every section that then runs at 5/6
+where LS-DYNA does not, stated or blank.
 Under-integrated `Ishell=1..4` is deliberately not offered: it would activate
 the `Hm/Hf/Hr` hourglass path this repo documents as inert and set
 `inistate.py`'s `npg` 4→1, corrupting `*INITIAL_STRESS_SHELL` transfer. Implicit

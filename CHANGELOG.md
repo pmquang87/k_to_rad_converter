@@ -11,6 +11,59 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
+  time step, implicit, the erosion and few-node texts).** One commit per item;
+  every later item of the round is measured on the bytes of the earlier ones
+  (A1 first). The movers below are the part-A-i research sweep of all 356 R14
+  roster keys (= 312 emitted models) through the prototype of this code,
+  every changed line classified by cell, 0 unattributed; the campaign pass on
+  the branch (report section 0.36) replaces them by its own measurement.
+  - **A1 - `*SECTION_SHELL` SHRF -> `/PROP/SHELL` Ashear, by default
+    (`--no-shrf-ashear` writes Ashear 0 everywhere).** A blank or 0 SHRF is
+    written as LS-DYNA's default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as
+    stated, a value within 0.005 of 5/6 keeps the cell 0 (the starter's own
+    5/6, `hm_read_prop01.F:244`: the ~5/6 sections keep their bytes; a 0.83 is
+    named as a 0.40 % substitution), a value outside (0, 1] is written 1.0 and
+    named. The cell stays 0 on the sections LS-DYNA does not shear
+    transversely - NIP 1 (one point, no bending, p.41-66; on an N-1 property
+    the starter zeroes Ashear itself, `hm_read_prop01.F:246-259`), the
+    membranes ELFORM 5 / 9 and the 2-D ELFORMs 12-15 / 43 / 44 / 52 / 55 /
+    +-29 (p.41-67) - with its own sentence, and on k2rad's own placeholder
+    sections (`SectionShell.card_given`); BCIZ / DK (ELFORM 3 / 17 / 18) take
+    the rule and are named. One rule (`writer/mesh._shrf_rule`) writes the
+    cell at both emission sites (the per-section `/PROP/SHELL` and the
+    per-part `*HOURGLASS` split) and selects every sentence. The K-32 "SHRF is
+    NOT converted" note is gone from the default path; `--no-shrf-ashear`
+    names every section that then runs at 5/6 where LS-DYNA does not, stated
+    AND blank. The `/PROP/TYPE9` / `TYPE11` / `TYPE51` routes are untouched
+    (a ROADMAP item). MEASURED: each Ashear reproduces its own Timoshenko
+    closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on clamped quad
+    cantilevers (64 runs: LAW1 N 0 / N 5 / LAW2 / LAW36 / LAW44, Ishell 24 /
+    12 / 1 / 4, implicit, nt 4 = nt 2) and to -0.024 / -0.025 % on a `/SH3N`
+    strip (16 runs, 16633 = 16633 cycles); LS-DYNA's d3hsp echoes `shear
+    area factor = 1.00000E+00` on all 2642 R14 shell parts whose section
+    states SHRF blank, 0 or 1.0. Movers: 148 R14 keys / 132 models by bytes
+    (the `_0000.rad` Ashear cells only, the `_0001.rad` never), 6 keys / 6
+    models by text only. The 14 match rows among them stay match (26 runs,
+    largest END move 1.54 points: sphere1 IE END -1.66 -> -0.12 %; cycle
+    ratios 0.9990 - 1.0006); 0 status or verdict flips on 40 measured
+    deviation / not_comparable keys. Three rows move AWAY from LS-DYNA, named:
+    contact.edge IE END -14.17 -> -24.16 %, thick IE END -27.21 -> -33.54 %,
+    transducer KE RMS 15.19 -> 17.28 %; the ring trio and airbag.deploy are
+    perturbation-sensitive (a 1e-6 edit of the cell moves them as much) and
+    no move there is attributed. Outside the roster all 28 of the 28
+    shell-carrying CardStack run decks move: `run_03` .. `run_21` state SHRF
+    1.0 on ELFORM 16 NIP 5 T 0.35 mm, `run_22` .. `run_26` leave it blank on
+    ELFORM 2 (the user's pipeline: the round does not edit its recipe). The 4
+    starter goldens `implicit_qstat`, `rigid_contact`, `shell_explicit`,
+    `tied_weld` move in 5 Ashear cells `0` -> `1`; the historical-bytes pins
+    hold the lever off (`_K3_OFF` += `shrf_ashear=False`, the K3 pattern) and
+    `_k3_default_moves` names the cell. Tests: `tests/test_r14_round10.py`
+    `A1ShrfAshear`, `Round10RetractedStatementsA`, `Round10FlagWiringA`;
+    `test_cardstack_pipeline.SectionShellShrf.test_shrf_moves_only_the_ashear_cell`,
+    `test_cardstack_pipeline_props.GoldenFixtureMoves.test_round10_a1_moves_only_the_ashear_cells`,
+    the rewritten `ShrfNote`.
+
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted
   only the mesh with k2rad and appended hand-written `/GRAV`, `/DAMP`,

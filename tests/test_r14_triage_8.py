@@ -64,18 +64,23 @@ def _sha(text: str) -> str:
 #: tests/test_cardstack_pipeline_props.py. A pin of a DEFAULT arm also
 #: converts the deck with the defaults and checks, with _k3_default_moves,
 #: that this arm is the pinned bytes plus exactly the K-30 / K-31 cells it
-#: names - so the default output stays pinned as a whole.
-_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False)
+#: names - so the default output stays pinned as a whole. R14 round 10 (A1)
+#: adds a third byte lever the same way: SHRF -> the /PROP/SHELL Ashear cell
+#: (--no-shrf-ashear); the historical pins hold it off too, and
+#: _k3_default_moves names its cell as (header + " Ashear", 0.0, value).
+_K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False,
+               shrf_ashear=False)
 
 
 def _k3_default_moves(off: str, on: str):
-    """``[(card header, cell before, cell after)]``: the starter cells the two
-    K3 defaults move, *off* being a deck converted with both levers off
-    (``_K3_OFF``) and *on* the same deck converted with the defaults. Fails
-    (AssertionError) on any other difference - a different line count, a
-    moved line that is not the /PROP/SHELL card 3 (K-31's N cell) or the
-    /PROP/SOLID card 1 (K-30's Isolid cell), a byte beyond that line's first
-    10-column cell, or a cell that does not move max(2, NIP) -> 0 (N) or
+    """``[(card header, cell before, cell after)]``: the starter cells the
+    K3 defaults and round 10's A1 move, *off* being a deck converted with the
+    levers off (``_K3_OFF``) and *on* the same deck converted with the
+    defaults. Fails (AssertionError) on any other difference - a different
+    line count, a moved line that is not the /PROP/SHELL card 3 (K-31's N
+    cell in columns 1-10, A1's Ashear cell in columns 41-60) or the
+    /PROP/SOLID card 1 (K-30's Isolid cell), a byte outside those cells, or
+    a cell that does not move max(2, NIP) -> 0 (N), 0 -> (0, 1] (Ashear) or
     14 -> 1 (Isolid)."""
     lo, ln = off.splitlines(), on.splitlines()
     assert len(lo) == len(ln), (len(lo), len(ln))
@@ -90,22 +95,34 @@ def _k3_default_moves(off: str, on: str):
             continue
         shell = head.startswith("/PROP/SHELL/") and row == 2
         solid = head.startswith("/PROP/SOLID/") and row == 0
-        assert (shell or solid) and a[10:] == b[10:], (head, row, a, b)
+        assert shell or solid, (head, row, a, b)
+        if solid:
+            assert a[10:] == b[10:], (head, row, a, b)
+            assert (int(a[:10]), int(b[:10])) == (14, 1), (head, a, b)
+            moves.append((head, 14, 1))
+            continue
+        assert a[10:40] == b[10:40] and a[60:] == b[60:], (head, row, a, b)
         before, after = int(a[:10]), int(b[:10])
-        assert ((shell and before >= 2 and after == 0)
-                or (solid and (before, after) == (14, 1))), (head, a, b)
-        moves.append((head, before, after))
+        if before != after:
+            assert before >= 2 and after == 0, (head, a, b)
+            moves.append((head, before, after))
+        s0, s1 = float(a[40:60]), float(b[40:60])
+        if s0 != s1:
+            assert s0 == 0.0 and 0.0 < s1 <= 1.0, (head, a, b)
+            moves.append((head + " Ashear", s0, s1))
     return moves
 
 
 def _k32_shrf_free(warnings):
     """*warnings* without the K-32 note a stated *SECTION_SHELL SHRF draws
-    since the CardStack batch (these decks state SHRF 1.0) - the warning-list
-    pins were measured on pristine checkouts that had no such note; the note
-    itself is pinned in tests/test_cardstack_pipeline_props.py."""
+    since the CardStack batch (these decks state SHRF 1.0) and without the
+    sentence round 10's --no-shrf-ashear arm writes in its place - the
+    warning-list pins were measured on pristine checkouts that had no such
+    note; the notes are pinned in tests/test_cardstack_pipeline_props.py."""
     return [w for w in warnings
             if not (w.startswith("*SECTION_SHELL ")
-                    and "the stated SHRF" in w)]
+                    and ("the stated SHRF" in w
+                         or "(--no-shrf-ashear)" in w))]
 
 
 def _bcs_card(starter: str, title: str):
@@ -441,7 +458,8 @@ class RigidLocalConstraints(unittest.TestCase):
                 self.assertEqual(_sha(starter), sha)
                 _r, s_def, _e = _convert(deck)
                 self.assertEqual(_k3_default_moves(starter, s_def),
-                                 [("/PROP/SHELL/1", 2, 0)])
+                                 [("/PROP/SHELL/1", 2, 0),
+                                  ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_l_the_opt_out_restores_the_4f5b6e8_bytes_and_warnings(self):
         """(l) --no-rigid-local-constraints on (a), (d), (e), (j), (o): the
@@ -1162,7 +1180,8 @@ class SectionNodalThicknessMean(unittest.TestCase):
         self.assertEqual(_sha(s_u), _PR8_SHA["a4_uniform"])
         _r, s_def, _e2 = _convert(_quad_deck(t=(1.5, 1.5, 1.5, 1.5)))
         self.assertEqual(_k3_default_moves(s_u, s_def),
-                         [("/PROP/SHELL/1", 2, 0)])
+                         [("/PROP/SHELL/1", 2, 0),
+                          ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_2_the_2D_formulations_are_A7s(self):
         _r, s13, _e = _convert(_quad_deck(elform=13, t=(25.4, 1.0, 1.0, 1.0)))
@@ -3716,7 +3735,8 @@ class JointScrewRound8(unittest.TestCase):
         res, s_def, _e = _convert(_screw_deck())
         self.assertFalse(_has(res.warnings, _B8_UNDRIVEN), res.warnings)
         self.assertEqual(_k3_default_moves(starter, s_def),
-                         [("/PROP/SHELL/3", 2, 0)])
+                         [("/PROP/SHELL/3", 2, 0),
+                          ("/PROP/SHELL/3 Ashear", 0.0, 1.0)])
 
     def test_refusal_11_by_class(self):
         """Mutation targets: a merge that writes the card (the 'no standard

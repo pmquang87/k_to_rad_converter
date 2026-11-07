@@ -1957,10 +1957,12 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
         # Card 1 field 3 (cols 21-30): SHRF, the transverse shear correction
         # factor, as STATED - a blank cell is 0.0 = "not given" (LS-DYNA's
         # own default is 1.0), the SectionTshell / *PART_COMPOSITE rule.
-        # Stored for the writer's notes; /PROP/SHELL Ashear is not written
-        # from it (ROADMAP round 10).
+        # R14 round 10, A1: writer/mesh._shrf_ashear writes it to the
+        # /PROP/SHELL Ashear cell; card_given marks a section the deck
+        # states (k2rad's placeholder sections keep Ashear 0).
         sec.shrf = (to_float(f1[2]) if len(f1) > 2 and f1[2].strip()
                     else 0.0)
+        sec.card_given = True
         # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
         # node set. Only writer/seatbelts.py reads it, to report it as dropped.
         sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0

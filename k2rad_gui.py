@@ -217,7 +217,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          contact_birth_death: bool = True,
                          soft2_iedge_gate: bool = True,
                          srnde_ishape: bool = True,
-                         maxint_stress_all: bool = True) -> dict:
+                         maxint_stress_all: bool = True,
+                         shrf_ashear: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -552,6 +553,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["soft2_iedge_gate"] = bool(soft2_iedge_gate)
     kwargs["srnde_ishape"] = bool(srnde_ishape)
     kwargs["maxint_stress_all"] = bool(maxint_stress_all)
+    # R14 parity round 10 (the CLI flags of the same names)
+    kwargs["shrf_ashear"] = bool(shrf_ashear)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -689,6 +692,8 @@ class ConverterGUI:
         self.soft2_iedge_gate = tk.BooleanVar(value=True)
         self.srnde_ishape = tk.BooleanVar(value=True)
         self.maxint_stress_all = tk.BooleanVar(value=True)
+        # R14 parity round 10
+        self.shrf_ashear = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1445,6 +1450,13 @@ class ConverterGUI:
                      "deck - ON",
             variable=self.maxint_stress_all).grid(
                 row=91, column=0, columnspan=3, sticky="w", **pad)
+        # The R14 parity round-10 levers (rows 92-...)
+        ttk.Checkbutton(
+            io, text="*SECTION_SHELL SHRF -> /PROP/SHELL Ashear (blank = "
+                     "LS-DYNA's 1.0; NIP 1 / membrane / 2-D sections keep "
+                     "5/6) - ON",
+            variable=self.shrf_ashear).grid(
+                row=92, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1783,6 +1795,7 @@ class ConverterGUI:
                 soft2_iedge_gate=self.soft2_iedge_gate.get(),
                 srnde_ishape=self.srnde_ishape.get(),
                 maxint_stress_all=self.maxint_stress_all.get(),
+                shrf_ashear=self.shrf_ashear.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2135,6 +2148,9 @@ class ConverterGUI:
         if not kwargs.get("maxint_stress_all", True):
             bits.append("no STRESS/ALL for MAXINT > 3 "
                         "(--no-maxint-stress-all)")
+        # R14 parity round 10
+        if not kwargs.get("shrf_ashear", True):
+            bits.append("SHRF not carried, Ashear 5/6 (--no-shrf-ashear)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

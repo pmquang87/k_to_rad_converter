@@ -3840,8 +3840,12 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
     # SHRF is carried only when the deck actually gave it (the handler records a
     # blank field as 0.0). Defaulting a blank to LS-DYNA's own 1.0 would make
     # the part 20% stiffer in transverse shear than Radioss's 5/6 default, which
-    # is what dyna2rad leaves in place and what every other k2rad shell property
-    # writes — a silent divergence driven by a default rather than deck data.
+    # is what dyna2rad leaves in place. Since R14 round 10 (A1) the /PROP/SHELL
+    # of a plain *SECTION_SHELL does carry a blank as LS-DYNA's 1.0
+    # (writer/mesh._shrf_rule, measured on a Timoshenko coupon); this
+    # /PROP/TYPE51 blank branch keeps 5/6 by design - round 10 builds the
+    # /PROP/SHELL rule only (the TYPE9 / TYPE11 / TYPE51 extensions stay a
+    # ROADMAP item).
     ashear = pc.shrf if 0.0 < pc.shrf <= 1.0 else _ASHEAR_DEFAULT
     total_t = sum(p.thick for p in plies)
 

@@ -137,6 +137,12 @@ _PIN_STARTER = ("44626ef238d8b7f0b40dc66861bba8eab6c3698091f0f5d6212751693e"
                 "2d4891")
 _PIN_ENGINE = ("6d9f5932bc54f3ea642930434d1d4c0646476b327bfe37822a34841d9dd"
                "471b6")
+# R14 round 10, A1: the plain deck's starter by default - _PIN_STARTER with
+# the shell plate's /PROP/SHELL Ashear cell 0 -> 1 (its SHRF is blank, LS-DYNA's
+# 1.0); --no-shrf-ashear keeps _PIN_STARTER. MEASURED on the round-10
+# prototype (resA1 pin_probe.py); the engine file does not move.
+_PIN_STARTER_R10 = ("0fc77e23500453dd83d6ccc69c2347d74804f8b1507172acffa4f0"
+                    "59ddbba0fd")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -362,8 +368,10 @@ class ControlUnitsBeginLabels(unittest.TestCase):
 class SectionShellShrf(unittest.TestCase):
     """Card 1 is SECID ELFORM SHRF NIP ...: SHRF is field 3, recorded as
     STATED (0.0 = blank), the convention of SectionTshell / *PART_COMPOSITE.
-    Not converted yet (Ashear stays the starter's 5/6, ROADMAP round 10),
-    so the bytes do not move."""
+    Since R14 round 10 (A1) it is the /PROP/SHELL Ashear cell (columns
+    41-60): a blank as LS-DYNA's 1.0, a value within 0.005 of 5/6 as the
+    starter's own 5/6 (the cell 0); --no-shrf-ashear writes 0 everywhere.
+    Only that cell moves."""
 
     def test_stated_shrf_is_read(self):
         st = _dispatch(_deck(shrf="0.8333"))
@@ -372,11 +380,25 @@ class SectionShellShrf(unittest.TestCase):
     def test_blank_shrf_is_zero(self):
         self.assertEqual(_dispatch(_deck()).sec_shells[2].shrf, 0.0)
 
-    def test_shrf_changes_no_byte(self):
-        _r, s1, e1 = _convert(_deck(shrf="0.8333"))
-        _r, s0, e0 = _convert(_deck())
-        self.assertEqual(_sha(s1), _sha(s0))
-        self.assertEqual(_sha(e1), _sha(e0))
+    def test_shrf_moves_only_the_ashear_cell(self):
+        _r, s_off, e_off = _convert(_deck(), shrf_ashear=False)
+        self.assertEqual(_sha(s_off), _PIN_STARTER)
+        for shrf, cell in (("", "1"), ("0.7", "0.7"), ("1.0", "1"),
+                           ("0.8333", "0")):
+            with self.subTest(shrf=shrf):
+                _r, s1, e1 = _convert(_deck(shrf=shrf))
+                self.assertEqual(_sha(e1), _sha(e_off))
+                lo, ln = s_off.splitlines(), s1.splitlines()
+                self.assertEqual(len(lo), len(ln))
+                moved = [(a, b) for a, b in zip(lo, ln) if a != b]
+                if cell == "0":
+                    self.assertEqual(moved, [])
+                    continue
+                self.assertEqual(len(moved), 1, moved)
+                a, b = moved[0]
+                self.assertEqual((a[:40], a[60:]), (b[:40], b[60:]))
+                self.assertEqual((a[40:60].strip(), b[40:60].strip()),
+                                 ("0", cell))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -800,23 +822,26 @@ class HelpTexts(unittest.TestCase):
 class ByteIdentityAtMaster(unittest.TestCase):
 
     def test_plain_deck_keeps_the_master_bytes(self):
-        _r, starter, engine = _convert(_deck())
+        _r, starter, engine = _convert(_deck(), shrf_ashear=False)
         self.assertEqual(_sha(starter), _PIN_STARTER)
+        self.assertEqual(_sha(engine), _PIN_ENGINE)
+        # the default: those bytes plus A1's one Ashear cell (round 10)
+        _r, starter, engine = _convert(_deck())
+        self.assertEqual(_sha(starter), _PIN_STARTER_R10)
         self.assertEqual(_sha(engine), _PIN_ENGINE)
 
     def test_the_read_only_cards_change_no_byte(self):
         """ENDCYC / DTMIN / ENDENG / ENDMAS, IKEDIT beside a
-        *DATABASE_GLSTAT, SHRF and a *CONTROL_UNITS that maps to the
-        default triple are read and stored - the files stay those of the
-        plain deck."""
+        *DATABASE_GLSTAT and a *CONTROL_UNITS that maps to the default
+        triple are read and stored - the files stay those of the plain
+        deck. (SHRF left this list in round 10: A1 writes it.)"""
         cards = _deck(
             control="*CONTROL_TERMINATION\n"
                     + _row(0.001, 900000, 0.001, 50.0, 4.0) + "\n",
-            shrf="0.8333",
             extra="*CONTROL_OUTPUT\n" + _row(0, 0, 0, 0, 0.0, 0, 2000) + "\n"
                   + _units_card("mm", "sec", "mtrc_ton", "K"))
         _r, s1, e1 = _convert(cards)
-        self.assertEqual(_sha(s1), _PIN_STARTER)
+        self.assertEqual(_sha(s1), _PIN_STARTER_R10)
         self.assertEqual(_sha(e1), _PIN_ENGINE)
 
 

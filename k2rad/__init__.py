@@ -526,6 +526,7 @@ def convert(
     soft2_iedge_gate: bool = True,
     srnde_ishape: bool = True,
     maxint_stress_all: bool = True,
+    shrf_ashear: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1899,6 +1900,21 @@ def convert(
         ``*DATABASE_EXTENT_BINARY`` MAXINT > 3 ->
         ``/ANIM/SHELL/TENS/STRESS/ALL`` in the engine deck (CardStack K-42).
         Default True (``--no-maxint-stress-all``: no such line).
+    shrf_ashear : bool
+        ``*SECTION_SHELL`` SHRF -> the ``/PROP/SHELL`` Ashear cell (R14 round
+        10, A1): a blank / 0 as LS-DYNA's default 1.0 (Vol I R17 p.41-63),
+        0 < SHRF <= 1 as stated, within 0.005 of 5/6 the cell 0 (the
+        starter's own 5/6, ``hm_read_prop01.F:244``), outside (0, 1] 1.0
+        with a warning; kept 0 on NIP-1, membrane ELFORM 5 / 9 and 2-D
+        sections (LS-DYNA shears none of them; the starter zeroes Ashear
+        under N 1 itself, ``hm_read_prop01.F:246-259``) and on k2rad's own
+        placeholder sections. MEASURED: each Ashear reproduces its own
+        Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on
+        quads and -0.024 / -0.025 % on ``/SH3N`` triangles (nt 4 = nt 2);
+        148 R14 deck keys / 132 models move by the Ashear cells only, the
+        14 match rows among them stay match (largest END move 1.54 points).
+        Default True (``--no-shrf-ashear``: Ashear 0, the starter's 5/6,
+        everywhere).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2052,6 +2068,7 @@ def convert(
         soft2_iedge_gate=soft2_iedge_gate,
         srnde_ishape=srnde_ishape,
         maxint_stress_all=maxint_stress_all,
+        shrf_ashear=shrf_ashear,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

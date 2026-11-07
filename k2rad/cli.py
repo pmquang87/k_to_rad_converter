@@ -2096,6 +2096,32 @@ def build_parser() -> argparse.ArgumentParser:
              "takes the line out of the 9 engine decks that state MAXINT 4, "
              "5, 7 or 8.",
     )
+    # ── R14 parity round 10 ───────────────────────────────────────────────
+    parser.add_argument(
+        "--shrf-ashear",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write the *SECTION_SHELL SHRF (card 1 field 3, the transverse "
+             "shear correction factor) to the /PROP/SHELL Ashear cell: a "
+             "blank or 0 SHRF as LS-DYNA's default 1.0 (Vol I R17 p.41-63), "
+             "0 < SHRF <= 1 as stated, a value within 0.005 of 5/6 as the "
+             "starter's own 5/6 (the cell 0, hm_read_prop01.F:244), a value "
+             "outside (0, 1] as 1.0 with a warning. Kept 0 on the sections "
+             "LS-DYNA does not shear - NIP 1 (one point, no bending; the "
+             "starter zeroes Ashear under N 1 itself, "
+             "hm_read_prop01.F:246-259), the membranes ELFORM 5 / 9 and the "
+             "2-D ELFORMs 12-15, 43, 44, 52, 55, +-29 - and on k2rad's own "
+             "placeholder sections; each kept or substituted value is named. "
+             "MEASURED: each Ashear reproduces its own Timoshenko closed "
+             "form to -0.041 %% (L/t 3) / -0.018 %% (L/t 5) on quads and "
+             "-0.024 / -0.025 %% on triangles; LS-DYNA's d3hsp echoes 'shear "
+             "area factor = 1.0' on all 2642 R14 shell parts with a blank, 0 "
+             "or 1.0 SHRF; the 14 R14 match rows it moves stay match (0 "
+             "verdict flips, largest END move 1.54 points). ON by default; "
+             "--no-shrf-ashear writes Ashear 0 (5/6) everywhere and names "
+             "every section, stated or blank, that then runs at 5/6 where "
+             "LS-DYNA does not.",
+    )
     return parser
 
 
@@ -2271,6 +2297,7 @@ def main(argv=None) -> int:
         soft2_iedge_gate=args.soft2_iedge_gate,
         srnde_ishape=args.srnde_ishape,
         maxint_stress_all=args.maxint_stress_all,
+        shrf_ashear=args.shrf_ashear,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

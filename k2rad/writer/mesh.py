@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import weakref
 from collections import defaultdict
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 from ..state import (
     AXISYMMETRIC_ELFORMS, PLANE_STRAIN_ELFORMS, PLANE_STRESS_ELFORMS,
     ConversionState,
@@ -2738,6 +2738,74 @@ def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int]) -> int:
     return 0 if sec.secid in global_n else max(2, sec.nip)
 
 
+#: R14 round 10, A1: the LS-DYNA *SECTION_SHELL ELFORMs on which SHRF acts on
+#: nothing - the membranes 5 / 9 (no bending, no transverse shear) and the
+#: two-dimensional ELFORMs 12-15 / 43 / 44 / 52 / 55 / +-29, whose
+#: through-thickness integration "is not meaningful" (Vol I R17 p.41-67). A
+#: NIP-1 section is the third class: one point, no bending (p.41-66), and on
+#: an N-1 property the starter zeroes Ashear itself (hm_read_prop01.F:246-259).
+_SHRF_NO_SHEAR_ELFORMS = frozenset({5, 9, 12, 13, 14, 15, 43, 44, 52, 55,
+                                    29, -29})
+#: A1: the BCIZ (3) and DK (17, 18) Kirchhoff-type shells LS-DYNA does not
+#: apply SHRF to (Vol I R17 p.41-66). k2rad writes them as the Mindlin
+#: /PROP/SHELL Ishell 12 / 24 with Ashear = the rule's value (the nearer
+#: stand-in for a shear-rigid element) and names them.
+_SHRF_KIRCHHOFF_ELFORMS = frozenset({3, 17, 18})
+#: A1: a stated SHRF within this of 5/6 keeps the Ashear cell 0, which the
+#: starter turns into its own 5/6 (hm_read_prop01.F:244): 0.83 / 0.833 /
+#: 0.8333 / 0.83333 all are (the ~5/6 sections stay byte-identical). The K-32
+#: _SHRF_FIVE_SIXTHS_TOL (1e-3, below) is the window sentence's lower edge
+#: and the --no-shrf-ashear sentence's threshold.
+_SHRF_ASHEAR_FIVE_SIXTHS_WINDOW = 0.005
+
+
+def _shrf_excluded(sec: SectionShell) -> bool:
+    """A1's exclusion: NIP 1 (the EFFECTIVE count - writer/composites pushes a
+    one-point *INTEGRATION_SHELL's count onto ``sec.nip`` before the
+    properties are written), a membrane ELFORM 5 / 9 or a 2-D ELFORM."""
+    return sec.nip == 1 or sec.elform in _SHRF_NO_SHEAR_ELFORMS
+
+
+def _shrf_rule(sec: SectionShell, exclude: bool = True) -> Optional[float]:
+    """R14 round 10, A1: THE rule for the /PROP/SHELL Ashear cell of a deck
+    section, the option aside - the one predicate the cell
+    (:func:`_shrf_ashear`) and every SHRF sentence (:func:`_shrf_note_class`)
+    read. None = the literal ``0`` k2rad has always written (the starter's
+    5/6, hm_read_prop01.F:244).
+
+    * no deck card (``card_given`` False: k2rad's own placeholder sections)
+      -> None;
+    * *exclude* and :func:`_shrf_excluded` -> None (LS-DYNA shears none of
+      them; ``exclude=False`` is the rule without the exclusion, for the
+      exclusion's own sentence);
+    * SHRF blank / 0 -> 1.0, LS-DYNA's default (Vol I R17 p.41-63; its d3hsp
+      echoes ``shear area factor = 1.0`` on every such R14 part);
+    * |SHRF - 5/6| < 0.005 -> None;
+    * 0 < SHRF <= 1 -> SHRF as stated;
+    * SHRF < 0 or > 1 -> 1.0 (named)."""
+    if not sec.card_given:
+        return None
+    if exclude and _shrf_excluded(sec):
+        return None
+    v = sec.shrf
+    if v == 0.0:
+        return 1.0
+    if abs(v - 5.0 / 6.0) < _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW:
+        return None
+    return v if 0.0 < v <= 1.0 else 1.0
+
+
+def _shrf_ashear(state: ConversionState,
+                 sec: Optional[SectionShell]) -> Optional[float]:
+    """R14 round 10, A1 (``shrf_ashear``, default ON, ``--no-shrf-ashear``):
+    the /PROP/SHELL Ashear cell of section *sec* at both emission sites (the
+    per-section loop and the per-part hourglass split), or None for the
+    literal ``0``: :func:`_shrf_rule` when the option is on, else None."""
+    if sec is None or not state.options.shrf_ashear:
+        return None
+    return _shrf_rule(sec)
+
+
 # LS-DYNA cohesive solid formulations (*SECTION_SOLID Vol I R16 p.41-88):
 # ±19 = 8-node 4-point cohesive (+19 zero-thickness, -19 with plane offset),
 # 20 = 19 with offsets for use WITH SHELLS (transmits moments), ±21/22 = the
@@ -3166,15 +3234,20 @@ def _shell_istrain_flag(state: ConversionState) -> int:
 
 def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
                      istrain: int, thick: float,
-                     hcoef: Optional[float] = None) -> List[str]:
+                     hcoef: Optional[float] = None,
+                     ashear: Optional[float] = None) -> List[str]:
     """/PROP/SHELL (TYPE1), byte-identical to the historical inline block.
     *hcoef* None → Hm/Hf/Hr stay 0 (Radioss default 0.01); otherwise the
     (clamped) hourglass coefficient is written into all three membrane/bending/
-    rotation slots. Shared by the per-section and per-part paths."""
+    rotation slots. *ashear* None → the Ashear cell is the literal ``0`` (the
+    starter's 5/6, hm_read_prop01.F:244); otherwise ``_f(ashear)`` in cols
+    41-60 (R14 round 10, A1: :func:`_shrf_ashear`). Shared by the
+    per-section and per-part paths."""
     if hcoef is not None:
         hg_card = f"{_f(hcoef)}{_f(hcoef)}{_f(hcoef)}{_f(0.0)}{_f(0.0)}"
     else:
         hg_card = f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}"
+    ash = _f(ashear) if ashear is not None else "                   0"
     return [
         f"/PROP/SHELL/{prop_id}",
         title,
@@ -3183,7 +3256,7 @@ def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
         "#                 hm                  hf                  hr                  dm                  dn",
         hg_card,
         "#        N   Istrain               Thick              Ashear              Ithick     Iplas",
-        f"{_i(nip)}{_i(istrain)}{_f(thick)}                   0                   0         0",
+        f"{_i(nip)}{_i(istrain)}{_f(thick)}{ash}                   0         0",
         HDR,
     ]
 
@@ -3515,7 +3588,7 @@ def _make_properties(state: ConversionState) -> List[str]:
     # K-31 (--no-law1-shell-global-n opts out): an all-LAW1 section is written
     # N = 0, the global integration cgrtails.F:780-791 switches it to anyway.
     global_n = _law1_global_n_secids(state)
-    shrf_stated: List[Tuple[int, float]] = []
+    shrf_notes: Dict[str, List[SectionShell]] = defaultdict(list)
     # a deck routed to the 2-D axisymmetric deck rewrites its ELFORM 14 / 15
     # /PROP/SHELL as /PROP/SOLID (writer/axisym2d): no Ashear, no SHRF note
     plan = state.axisym_plan
@@ -3529,14 +3602,19 @@ def _make_properties(state: ConversionState) -> List[str]:
         # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
         # (its base); parts with a different *HOURGLASS are split out below.
         hm, _ = _shell_hg_values(state, sec, None)
+        # R14 round 10, A1 (--no-shrf-ashear opts out): the Ashear cell
+        # carries the section's SHRF (_shrf_ashear, the one rule)
         lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
-                                  ishell, nip, istrain, sec.t1, hcoef=hm)
-        # K-32: a stated SHRF that is not the 5/6 the starter supplies for
-        # the Ashear 0 written above is named (_warn_shell_shrf_not_converted)
-        if (sec.shrf and abs(sec.shrf - 5.0 / 6.0) > _SHRF_FIVE_SIXTHS_TOL
-                and sec.elform not in shrf_routed_ef):
-            shrf_stated.append((sec.secid, sec.shrf))
-    _warn_shell_shrf_not_converted(state, shrf_stated)
+                                  ishell, nip, istrain, sec.t1, hcoef=hm,
+                                  ashear=_shrf_ashear(state, sec))
+        # A1: what that cell did with the deck's SHRF, named once per deck
+        # and class by _warn_shell_shrf (the K-32 'NOT converted' note of
+        # ed52c93 survives as the --no-shrf-ashear sentence only)
+        if sec.elform not in shrf_routed_ef:
+            cls = _shrf_note_class(state, sec)
+            if cls:
+                shrf_notes[cls].append(sec)
+    _warn_shell_shrf(state, shrf_notes)
     cohesive_secids = _cohesive_solid_secids(state)
     # (secid, elform, emitted Isolid, emitted h) for every solid section whose
     # Isolid the LS-DYNA-default hourglass synthesis actually MOVED — reported
@@ -5390,50 +5468,179 @@ def _warn_elform16_formulation(state: ConversionState, ishell: int) -> None:
         f"ELFORM 16, convertprops.cxx:779-785), {_ELFORM16_QEPH_MEASURED}.")
 
 
-#: K-32: a stated SHRF this close to 5/6 is the value the starter supplies
-#: for the Ashear 0 k2rad writes (0.833, 0.8333 and 0.8333333 all are).
+#: K-32: a stated SHRF this close to 5/6 IS the value the starter supplies
+#: for an Ashear 0 (0.833, 0.8333 and 0.8333333 all are): nothing to name.
+#: R14 round 10, A1: between it and _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW (0.005)
+#: the cell stays 0 and the window sentence names the substitution (0.83 ->
+#: 5/6); the --no-shrf-ashear sentence names every stated value beyond it,
+#: as the K-32 note of ed52c93 did.
 _SHRF_FIVE_SIXTHS_TOL = 1.0e-3
 
+#: A1: the measurement every SHRF sentence cites, ONE constant so that the
+#: code, the --help text, README and CHANGELOG cannot drift (R14 round-10
+#: census g1a and critic G1: a clamped Timoshenko cantilever, Ashear 1.0
+#: against 5/6, explicit and implicit, nt 4 = nt 2; the d3hsp part echoes of
+#: the R14 LS-DYNA reference runs).
+_SHRF_MEASURED = (
+    "MEASURED on a clamped cantilever coupon: each Ashear reproduces its own "
+    "Timoshenko closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads "
+    "and -0.024 / -0.025 % on /SH3N triangles; LS-DYNA's d3hsp echoes "
+    "'shear area factor = 1.0' on all 2642 R14 shell parts whose SHRF is "
+    "blank, 0 or 1.0")
 
-def _warn_shell_shrf_not_converted(
-        state: ConversionState, stated: List[Tuple[int, float]]) -> None:
-    """K-32: name the ``*SECTION_SHELL`` SHRF values the /PROP/SHELL does not
-    carry, once per deck.
 
-    SHRF (card 1 field 3, the transverse shear correction factor; K-0P
-    stores it as ``SectionShell.shrf``, 0.0 when blank) is NOT converted:
-    /PROP/SHELL Ashear is written 0, which the starter turns into 5/6
-    (``hm_read_prop01.F:244``). Carrying SHRF to Ashear is a ROADMAP round-10
-    item, so the bytes do not move; this only says it. *stated* holds the
-    ``(secid, SHRF)`` of the sections written as a /PROP/SHELL whose SHRF is
-    stated and not 5/6 (``_SHRF_FIVE_SIXTHS_TOL``). A blank SHRF is not
-    listed although it deviates the same way: LS-DYNA reads it as 1.0 (Vol
-    I R17 p.41-63) and the shell runs at 5/6 all the same. The plan names a
-    STATED SHRF only (a blank one sits on nearly every shell deck); the
-    note's last sentence says so to the reader who gets it."""
-    if not stated:
-        return
-    by_value: Dict[float, List[int]] = defaultdict(list)
-    for secid, shrf in stated:
-        by_value[shrf].append(secid)
-    groups = []
-    for value in sorted(by_value):
-        ids = sorted(by_value[value])
-        shown = ", ".join(str(s) for s in ids[:10])
+def _shrf_window(sec: SectionShell) -> bool:
+    """A1: a stated SHRF 1e-3 < |SHRF - 5/6| < 0.005 from 5/6 - kept at the
+    starter's own 5/6 by the rule, and named (the window sentence; under
+    --no-shrf-ashear the opt-out sentence)."""
+    if not sec.card_given or sec.shrf == 0.0:
+        return False
+    d = abs(sec.shrf - 5.0 / 6.0)
+    return _SHRF_FIVE_SIXTHS_TOL < d < _SHRF_ASHEAR_FIVE_SIXTHS_WINDOW
+
+
+def _shrf_note_class(state: ConversionState,
+                     sec: SectionShell) -> Optional[str]:
+    """R14 round 10, A1: which SHRF sentence names section *sec* (None: none
+    does - the cell carries the deck's own value, LS-DYNA's default 1.0 for
+    a blank, or a value within 1e-3 of the starter's 5/6). Read from the
+    same :func:`_shrf_rule` that writes the cell.
+
+    * ``off`` (``--no-shrf-ashear``): the K-32 selection of ed52c93 - every
+      STATED SHRF more than 1e-3 from 5/6, the exclusion included - and every
+      blank / 0 whose cell the default writes (stated AND blank);
+    * ``excluded``: the cell stays 0 under NIP 1 / ELFORM 5 / 9 / a 2-D
+      ELFORM where the rule without the exclusion would write it (a blank,
+      LS-DYNA's echoed 1.0, or a stated value outside the 0.005 window);
+    * ``window``: 1e-3 < |SHRF - 5/6| < 0.005, kept at 5/6;
+    * ``range``: SHRF < 0 or > 1, written as 1.0;
+    * ``kirchhoff``: ELFORM 3 / 17 / 18, written although LS-DYNA does not
+      use the factor there."""
+    if not sec.card_given:
+        return None
+    if not state.options.shrf_ashear:
+        stated = (sec.shrf != 0.0
+                  and abs(sec.shrf - 5.0 / 6.0) > _SHRF_FIVE_SIXTHS_TOL)
+        blank = sec.shrf == 0.0 and _shrf_rule(sec) is not None
+        return "off" if stated or blank else None
+    if _shrf_rule(sec) is None:
+        if _shrf_rule(sec, exclude=False) is not None:
+            return "excluded"
+        return "window" if _shrf_window(sec) else None
+    if not 0.0 <= sec.shrf <= 1.0:
+        return "range"
+    if sec.elform in _SHRF_KIRCHHOFF_ELFORMS:
+        return "kirchhoff"
+    return None
+
+
+def _shrf_groups(secs: List[SectionShell], label: Callable[[SectionShell],
+                 str]) -> List[Tuple[str, List[int]]]:
+    """``[(label, sorted section ids)]`` sorted by label - one entry per
+    distinct label of *secs*."""
+    by: Dict[str, List[int]] = defaultdict(list)
+    for s in secs:
+        by[label(s)].append(s.secid)
+    return [(lab, sorted(by[lab])) for lab in sorted(by)]
+
+
+def _shrf_ids(groups: List[Tuple[str, List[int]]]) -> str:
+    """'1, 2 (label); 7 (label)' with the K-32 10-id cap per group."""
+    out = []
+    for lab, ids in groups:
+        shown = ", ".join(str(i) for i in ids[:10])
         if len(ids) > 10:
             shown += f", ... ({len(ids)} sections)"
-        groups.append(f"{shown} (SHRF {value:g})")
-    state.warn(
-        f"*SECTION_SHELL {'; '.join(groups)}: the stated SHRF, the transverse "
-        "shear correction factor, is NOT converted - the /PROP/SHELL Ashear "
-        "cell is written 0, which the starter turns into 5/6 "
-        "(hm_read_prop01.F:244 'IF(GEO(38)==ZERO) GEO(38)=FIVE_OVER_6'), so "
-        "these shells run with a shear factor of 5/6 whatever SHRF says "
-        "(LS-DYNA's own suggestion for isotropic shells, Vol I R17 p.41-66). "
-        "Carrying SHRF to Ashear is a ROADMAP round-10 item; until then set "
-        "Ashear on the /PROP/SHELL by hand if the factor matters. A section "
-        "that leaves SHRF blank (LS-DYNA's default 1.0, Vol I R17 p.41-63) "
-        "runs at 5/6 the same way and is not listed here.")
+        out.append(f"{shown} ({lab})")
+    return "; ".join(out)
+
+
+def _shrf_label(s: SectionShell) -> str:
+    return "SHRF blank / 0" if s.shrf == 0.0 else f"SHRF {s.shrf:g}"
+
+
+def _shrf_excl_label(s: SectionShell) -> str:
+    return "NIP 1" if s.nip == 1 else f"ELFORM {s.elform}"
+
+
+def _shrf_elform_label(s: SectionShell) -> str:
+    return f"ELFORM {s.elform}"
+
+
+def _warn_shell_shrf(state: ConversionState,
+                     notes: Dict[str, List[SectionShell]]) -> None:
+    """R14 round 10, A1: ONE sentence per class (:func:`_shrf_note_class`) of
+    what the /PROP/SHELL Ashear cell did with the deck's SHRF, once per deck
+    (both emission sites write the cell; only the per-section loop collects
+    the notes, so a section is named once). Nothing is said where the cell
+    carries the deck's own value or LS-DYNA's default 1.0 for a blank. The
+    K-32 'NOT converted' note of ed52c93 is gone from the default path (the
+    factor IS written); under ``--no-shrf-ashear`` one sentence names every
+    section the starter's 5/6 overrides - stated AND blank."""
+    off = notes.get("off")
+    if off:
+        unsheared = sorted(s.secid for s in off if _shrf_excluded(s))
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(off, _shrf_label))}: "
+            "SHRF, the transverse shear correction factor, is NOT carried to "
+            "the /PROP/SHELL Ashear cell (--no-shrf-ashear): the cell is "
+            "written 0, which the starter turns into 5/6 "
+            "(hm_read_prop01.F:244), so these shells run at 5/6 where LS-DYNA "
+            "runs the stated factor or, for a blank / 0, its default 1.0 (Vol "
+            "I R17 p.41-63). " + _SHRF_MEASURED + ". The default writes the "
+            "factor (a value within 0.005 of 5/6 keeps the starter's own 5/6)"
+            + ("" if not unsheared else
+               f"; section(s) {', '.join(str(i) for i in unsheared[:10])}"
+               + (f", ... ({len(unsheared)} sections)"
+                  if len(unsheared) > 10 else "")
+               + " are NIP-1 / membrane / 2-D sections LS-DYNA does not "
+               "shear transversely at all, whose cell the default keeps 0 "
+               "too") + ".")
+        return
+    excl = notes.get("excluded")
+    if excl:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(excl, _shrf_excl_label))}"
+            ": SHRF is NOT written to the /PROP/SHELL Ashear cell (it stays 0, "
+            "the starter's 5/6) because LS-DYNA does not shear these sections "
+            "transversely: NIP 1 is one point with no bending (Vol I R17 "
+            "p.41-66), and on an N-1 property the starter zeroes Ashear "
+            "itself (hm_read_prop01.F:246-259); a membrane ELFORM 5 / 9 has "
+            "no bending; on a two-dimensional ELFORM (12-15, 43, 44, 52, 55, "
+            "+-29) the through-thickness integration is not meaningful (Vol I "
+            "R17 p.41-67). LS-DYNA's d3hsp still echoes the factor on such "
+            "parts.")
+    kir = notes.get("kirchhoff")
+    if kir:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(kir, _shrf_elform_label))}"
+            ": SHRF is written to the /PROP/SHELL Ashear cell (blank / 0 -> "
+            "1.0) although LS-DYNA's BCIZ (ELFORM 3) and DK (17, 18) elements "
+            "do not use it (Vol I R17 p.41-66: they are not first-order "
+            "shear-deformation shells). k2rad writes these Kirchhoff-type "
+            "shells as the Mindlin /PROP/SHELL Ishell 12 / 24, on which the "
+            "larger factor is the nearer stand-in for a shear-rigid element.")
+    win = notes.get("window")
+    if win:
+        groups = _shrf_groups(win, _shrf_label)
+        values = {_shrf_label(s): s.shrf for s in win}
+        dev = ", ".join(
+            f"{abs(5.0 / 6.0 - values[lab]) / values[lab] * 100.0:.2f} %"
+            for lab, _ids in groups)
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(groups)}: SHRF within 0.005 of 5/6 "
+            "is written as the starter's own 5/6 (Ashear 0, "
+            f"hm_read_prop01.F:244), {dev} from the stated value"
+            + ("s." if len(groups) > 1 else "."))
+    rng = notes.get("range")
+    if rng:
+        state.warn(
+            f"*SECTION_SHELL {_shrf_ids(_shrf_groups(rng, _shrf_label))}: "
+            "SHRF outside (0, 1] cannot be a shear correction factor - the "
+            "starter takes any non-zero Ashear unchecked "
+            "(hm_read_prop01.F:161 / :244), so a negative one would be a "
+            "negative transverse shear modulus - and is written as LS-DYNA's "
+            "default 1.0.")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -5764,8 +5971,11 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                                              state.options.shell_default_ishell))
             nip = _shell_prop_n(sec, global_n) if sec else 2
             thick = sec.t1 if sec else 0.0
+            # R14 round 10, A1: the split copy carries its section's Ashear
+            # (the section itself is named by the per-section loop)
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
-                                      thick, hcoef=coeff)
+                                      thick, hcoef=coeff,
+                                      ashear=_shrf_ashear(state, sec))
     return lines
 
 

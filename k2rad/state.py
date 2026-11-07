@@ -1199,11 +1199,19 @@ class SectionShell:
                           Optional[float]]] = None
     # *SECTION_SHELL card 1 field 3 (cols 21-30) SHRF, the transverse shear
     # correction factor, as STATED: a BLANK field is 0.0 = "not given"
-    # (LS-DYNA's own default is 1.0) - the convention SectionTshell and
-    # *PART_COMPOSITE use. NOT converted: /PROP/SHELL Ashear stays 0, which
-    # the starter turns into 5/6 (hm_read_prop01.F:244); carrying SHRF to
-    # Ashear is a ROADMAP round-10 item.
+    # (LS-DYNA's own default is 1.0, Vol I R17 p.41-63) - the convention
+    # SectionTshell and *PART_COMPOSITE use. R14 round 10, A1 (default ON,
+    # --no-shrf-ashear): written to the /PROP/SHELL Ashear cell by the rule
+    # writer/mesh._shrf_rule (blank / 0 -> 1.0; within 0.005 of 5/6 the cell
+    # 0, the starter's own 5/6, hm_read_prop01.F:244; 0 on NIP-1, membrane
+    # and 2-D sections).
     shrf: float = 0.0
+    # R14 round 10, A1: True only for a section read from a *SECTION_SHELL
+    # card (handlers.handle_section_shell). k2rad's own placeholders -
+    # AutoPropShell_<id> (writer/mesh._auto_section_shell),
+    # PART_COMPOSITE_FALLBACK_<id> (writer/composites), the /PROP/TYPE9
+    # fallback (writer/mesh, LAW128) - have no deck SHRF and keep Ashear 0.
+    card_given: bool = False
 
 
 #: *SECTION_SHELL ELFORMs whose Card-2 thickness LS-DYNA ignores (Vol I R17
@@ -7709,7 +7717,7 @@ class ConvertOptions:
     ``rigid_local_constraints``, ``rigid_local_shared_skew``,
     ``rigid_part_pid_precedence``, ``rigid_secondary_swap``,
     ``rigid_shell_rotary_inertia``, ``section_nodal_thickness_mean``,
-    ``shell_offset_gapmin``, ``shell_to_solid_rbody``,
+    ``shell_offset_gapmin``, ``shell_to_solid_rbody``, ``shrf_ashear``,
     ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
@@ -9467,6 +9475,23 @@ class ConvertOptions:
     # the engine deck (CardStack K-42, reached from a .k deck since wave C).
     # False = no such line whatever MAXINT says; the read stays.
     maxint_stress_all: bool = True
+
+    # ── R14 parity round 10 (the defaults and their opt-outs) ──────────────
+    # --no-shrf-ashear (A1, default ON; writer/mesh._shrf_rule, read at both
+    # /PROP/SHELL emission sites and by every SHRF sentence): the
+    # *SECTION_SHELL SHRF on the /PROP/SHELL Ashear cell - a blank / 0 as
+    # LS-DYNA's default 1.0 (Vol I R17 p.41-63), 0 < SHRF <= 1 as stated,
+    # within 0.005 of 5/6 the cell 0 (the starter's own 5/6,
+    # hm_read_prop01.F:244), outside (0, 1] 1.0 with a warning; the cell
+    # stays 0 on NIP-1, membrane ELFORM 5 / 9 and 2-D sections (LS-DYNA
+    # shears none of them; the starter zeroes Ashear under N 1 itself,
+    # hm_read_prop01.F:246-259) and on k2rad's own placeholder sections.
+    # MEASURED (R14 round 10): each Ashear reproduces its own Timoshenko
+    # closed form to -0.041 % (L/t 3) / -0.018 % (L/t 5) on quads and
+    # -0.024 / -0.025 % on /SH3N triangles; 148 R14 keys / 132 models move
+    # by the Ashear cells only, the 14 match rows among them stay match.
+    # False = Ashear 0 everywhere (the ed52c93 bytes).
+    shrf_ashear: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
