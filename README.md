@@ -140,13 +140,18 @@ decks should start from
   probe). An ENDMAS < 0 curve, `--ams` (MAS.ERR stays 0 under `/DT/AMS`,
   measured) and the routed 2-D deck get a warning and no `/STOP`. Without the
   flag a stated ENDMAS is named in a warning.
-- `--dt2ms-tssfac-product` / `--no-dt2ms-tssfac-product` — **OFF by default**.
-  Hold a DT2MS < 0 deck's mass-scaled step at TSSFAC x `|DT2MS|` (the
-  `/DT/NODA/CST` and `/DT/AMS` Tmin), the minimum step LS-DYNA permits (Vol I
-  R17 p.12-585), instead of `|DT2MS|`. TSSFAC blank or a curve = 0.9; the
-  `/DT/AMS` Tsca stays 0.67. MEASURED on the R14 billet-forge deck (nt 4): the
-  step then equals LS-DYNA's 1.08e-7 (1.2e-7 without it), end KE -5.13 %
-  against +16.99 % by default.
+- `--dt2ms-tssfac-product` / `--no-dt2ms-tssfac-product` — **ON by default
+  since R14 round 10** (it was OFF in the CardStack batch). Hold an explicit
+  DT2MS < 0 deck's mass-scaled step at TSSFAC x `|DT2MS|` (the `/DT/NODA/CST`
+  Tmin), the minimum step LS-DYNA permits (Vol I R17 p.12-585) and the cell
+  dyna2rad writes (`convertcards.cxx:173-174`), instead of `|DT2MS|`. TSSFAC
+  blank or a curve = 0.9. `/DT/AMS` (`--ams`) keeps Tmin = `|DT2MS|` on both
+  arms, as dyna2rad writes it (`convertcards.cxx:233-234`); its Tsca stays
+  0.67. MEASURED on the R14 billet-forge deck (nt 4): the step then equals
+  LS-DYNA's 1.08e-7 (1.2e-7 without it), 13889 cycles = LS-DYNA's 13889, KE
+  END -5.13 % against +16.99 %, KE RMS 8.54 -> 1.74 % of the LS peak over its
+  150 LS times; 8 R14 keys / 8 models move one engine cell.
+  `--no-dt2ms-tssfac-product` writes `|DT2MS|`.
 - `--print-every N` — write the engine `/PRINT/-N`: a status line every N
   cycles in `<stem>_0001.out` and on the console, N = 1..9999 (the engine
   reads the cell as I5, `freform.F:1563`). Default: `/PRINT/-IKEDIT` for a
@@ -6754,12 +6759,16 @@ writing. (The starter's `_0000_*.rst` model-handoff file is always written.)
 every node whose own step falls below `Tmin` gets the mass that lifts it to
 `Tmin`, `dtnoda.F:270-303`; the global step is clamped up to `Tmin` only when
 it fell below it, `:654-655`; `Tsca` = `TSSFAC`, or 0.9 when TSSFAC is blank or
-a curve). `Tmin` = `|DT2MS|` by default; `--dt2ms-tssfac-product` (opt-in)
-writes `TSSFAC x |DT2MS|`, the minimum step LS-DYNA permits (Vol I R17
-p.12-585), on `/DT/AMS` too. MEASURED on R14 `control_timestep.billet-forge.k`
-(DT2MS -1.2e-7, nt 4; LS-DYNA steps at 1.08e-7): the default runs at 1.2e-7,
-12 501 cycles, end KE +16.99 % against LS-DYNA; the flag at 1.08e-7, 13 890
-cycles, end KE -5.13 %; end IE +0.135 % in both. Without the card OpenRadioss
+a curve). `Tmin` = `TSSFAC x |DT2MS|` by default since R14 round 10, the
+minimum step LS-DYNA permits (Vol I R17 p.12-585) and the cell dyna2rad writes
+(`convertcards.cxx:173-174`); `--no-dt2ms-tssfac-product` writes `|DT2MS|`.
+`/DT/AMS` keeps `|DT2MS|` on both arms (dyna2rad's cell,
+`convertcards.cxx:233-234`; the AMS step is computed in DTNODAMS,
+`resol.F:5847-5857`). MEASURED on R14 `control_timestep.billet-forge.k`
+(DT2MS -1.2e-7, nt 4; LS-DYNA steps at 1.08e-7, 13 889 cycles): `|DT2MS|` runs
+at 1.2e-7, 12 501 cycles, end KE +16.99 % against LS-DYNA; the product at
+1.08e-7, 13 890 cycles, end KE -5.13 %, KE RMS 8.54 -> 1.74 % of the LS peak
+over its 150 LS times; end IE +0.135 % in both. Without the card OpenRadioss
 runs at the raw smallest-element step — on a fine/TET mesh that can be ~100×
 below `DT2MS`, i.e. a ~100× slower run. Explicit decks only. Read the added
 mass in the starter's 'INITIAL ADDED MASS ESTIMATION for /DT/NODA/CST' table

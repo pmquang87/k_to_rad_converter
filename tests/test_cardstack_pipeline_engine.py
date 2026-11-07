@@ -403,10 +403,14 @@ _OLD_DT2MS0_TEXT = (
 class Dt2msTexts(unittest.TestCase):
 
     def test_default_text_states_the_step_and_names_the_flag(self):
+        # R14 round 10, A4: the product is the default
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9))
-        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06",
-                             "TSSFAC x |DT2MS| = 9e-07",
-                             "--dt2ms-tssfac-product"))
+        self.assertTrue(_has(res.warnings,
+                             "Tmin = TSSFAC x |DT2MS| = 0.9 x 1e-06 = 9e-07",
+                             "Vol I R17 p.12-585", "convertcards.cxx:173-174",
+                             "--no-dt2ms-tssfac-product writes Tmin = "
+                             "|DT2MS| = 1e-06"))
+        self.assertFalse(_has(res.warnings, "[--dt2ms-tssfac-product]"))
 
     def test_default_text_says_a_nodal_step_below_tmin_is_lifted(self):
         # /DT/NODA/CST (IDTMIN(11) = 8, freform.F:1057-1059) adds mass only to
@@ -415,7 +419,15 @@ class Dt2msTexts(unittest.TestCase):
         # whose nodal steps all exceed Tmin keeps its own larger step - 'the
         # run steps at Tmin' overstated it (fix round)
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9))
-        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06",
+        self.assertTrue(_has(res.warnings, "Tmin = TSSFAC x |DT2MS|",
+                             "every nodal step below 9e-07 is lifted to it",
+                             "a floor 1/TSSFAC higher"))
+        self.assertFalse(_has(res.warnings, "the run steps at 9e-07"))
+        # the opt-out keeps the ed52c93 Tmin and its sentence
+        res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9),
+                               dt2ms_tssfac_product=False)
+        self.assertTrue(_has(res.warnings, "Tmin = |DT2MS| = 1e-06 "
+                             "[--no-dt2ms-tssfac-product]",
                              "every nodal step below 1e-06 is lifted to it",
                              "a floor 1/TSSFAC higher"))
         self.assertFalse(_has(res.warnings, "the run steps at 1e-06"))
@@ -438,14 +450,19 @@ class Dt2msTexts(unittest.TestCase):
                                      "curve 3, not converted) -> 0.9; "))
                 self.assertFalse(_has(res.warnings, "TSSFAC blank"))
 
-    def test_flag_text_states_the_product(self):
-        for kw in ({}, {"ams": True}):
+    def test_the_ams_text_keeps_dt2ms_on_both_arms(self):
+        # R14 round 10, A4 (D12): /DT/AMS keeps Tmin = |DT2MS| whatever
+        # the lever, as dyna2rad writes it; the sentence says why
+        for kw in ({}, {"dt2ms_tssfac_product": False}):
             with self.subTest(**kw):
                 res, _s, _e = _convert(_plate(dt2ms=-1.0e-6, tssfac=0.9),
-                                       dt2ms_tssfac_product=True, **kw)
+                                       ams=True, **kw)
                 self.assertTrue(_has(
-                    res.warnings, "Tmin = TSSFAC x |DT2MS| = 0.9 x 1e-06 = "
-                    "9e-07", "[--dt2ms-tssfac-product]"))
+                    res.warnings, "Tmin = |DT2MS| = 1e-06 on /DT/AMS",
+                    "convertcards.cxx:233-234", "TSSFAC x |DT2MS| = 9e-07",
+                    "resol.F:5847-5857"))
+                self.assertFalse(_has(res.warnings, "Tmin = TSSFAC x "
+                                      "|DT2MS| = 0.9 x 1e-06"))
 
     def test_blank_tssfac_is_named_as_0_9(self):
         res, _s, _e = _convert(_plate(dt2ms=-1.0e-6),
@@ -492,10 +509,17 @@ class Dt2msTexts(unittest.TestCase):
                                       "/DT/NODA/CST"))
                 self.assertFalse(_has(res.warnings, "ERODE=1",
                                       "NOTE --ams"))
-        # off the 2-D route the same fixture keeps the coexistence text
+        # off the 2-D route the same fixture keeps the coexistence text, with
+        # the written Tmin: TSSFAC blank -> 0.9, so 0.9 x 1e-4 = 9e-05 since
+        # round 10 (A4; 0.0001 under --no-dt2ms-tssfac-product)
         res, _s, eng = _convert(_ax15(-1.0e-4, tslimt=1.0e-9, erode=1),
                                 axisymmetric_2d=False)
         self.assertIsNotNone(_block(eng, "/DT/NODA/CST/0"))
+        self.assertTrue(_has(res.warnings, "It coexists with /DT/NODA/CST "
+                             "(Tmin=9e-05)"))
+        res, _s, eng = _convert(_ax15(-1.0e-4, tslimt=1.0e-9, erode=1),
+                                axisymmetric_2d=False,
+                                dt2ms_tssfac_product=False)
         self.assertTrue(_has(res.warnings, "It coexists with /DT/NODA/CST "
                              "(Tmin=0.0001)"))
         self.assertFalse(_has(res.warnings, "On this routed 2-D deck no "

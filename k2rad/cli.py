@@ -1928,13 +1928,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dt2ms-tssfac-product",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Hold a DT2MS < 0 deck's mass-scaled step at TSSFAC x |DT2MS| "
-             "(the /DT/NODA/CST and /DT/AMS Tmin), the minimum step LS-DYNA "
-             "permits (Vol I R17 p.12-585), instead of |DT2MS|. OFF by "
-             "default. TSSFAC blank or a curve = 0.9; the /DT/AMS Tsca stays "
-             "0.67. Measured on the R14 billet-forge deck: the step then "
-             "equals LS-DYNA's 1.08e-7 (1.2e-7 without it).",
+        default=True,
+        help="Hold an explicit DT2MS < 0 deck's mass-scaled step at TSSFAC x "
+             "|DT2MS| (the /DT/NODA/CST Tmin), the minimum step LS-DYNA "
+             "permits (Vol I R17 p.12-585) and the cell dyna2rad writes "
+             "(convertcards.cxx:173-174), instead of |DT2MS|. TSSFAC blank or "
+             "a curve = 0.9. /DT/AMS (--ams) keeps Tmin = |DT2MS| on both "
+             "arms, as dyna2rad writes it (convertcards.cxx:233-234); the "
+             "/DT/AMS Tsca stays 0.67. Measured on the R14 billet-forge deck: "
+             "the step then equals LS-DYNA's 1.08e-7 (1.2e-7 without it), "
+             "13889 cycles = LS-DYNA's 13889, KE END -5.13 %% against +16.99 "
+             "%%, KE RMS 8.54 -> 1.74 %% of the LS peak over its 150 LS times "
+             "(nt 4). ON by default since round 10; "
+             "--no-dt2ms-tssfac-product writes |DT2MS|.",
     )
     parser.add_argument(
         "--print-every",

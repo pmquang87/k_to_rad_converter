@@ -490,6 +490,14 @@ _RETRACTED_ROUND_10_A = (
     "reduced-integration / co-rotational forms whose Radioss counterpart is",
     # A3: the README K-31 bullet's help sentence
     "text names only the `*INITIAL_STRESS_SHELL` exclusion",
+    # A4: the opt-in wording of --dt2ms-tssfac-product (the GUI label; the
+    # ed52c93 step sentences; the product on /DT/AMS too)
+    "Opt-in: mass-scaled Tmin",
+    "--dt2ms-tssfac-product writes the product",
+    "(Vol I R17 p.12-585) [--dt2ms-tssfac-product]",
+    "the /DT/NODA/CST and /DT/AMS Tmin",
+    "`/DT/NODA/CST` and `/DT/AMS` Tmin",
+    "on `/DT/AMS` too",
 )
 
 #: (shipped file, the replacement text it now carries)
@@ -583,6 +591,7 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
     _FLAGS = {
         "--shrf-ashear": "shrf_ashear",
         "--nip1-one-point": "nip1_one_point",
+        "--dt2ms-tssfac-product": "dt2ms_tssfac_product",
     }
     _HELP_FIGURES = {
         "--shrf-ashear": ("-0.041 % (L/t 3) / -0.018 % (L/t 5)",
@@ -593,7 +602,21 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
                              "-0.4761 mm", "110032 cycles",
                              "IE END +65.73 -> +46.57 %",
                              "22.79 -> 14.23 %"),
+        "--dt2ms-tssfac-product": ("Vol I R17 p.12-585",
+                                   "convertcards.cxx:173-174",
+                                   "convertcards.cxx:233-234",
+                                   "13889 cycles = LS-DYNA's 13889",
+                                   "KE RMS 8.54 -> 1.74 %"),
     }
+
+    def test_the_k41_flag_is_on_by_default_now(self):
+        """A4 flips the CardStack opt-in: its help says ON (it said 'OFF by
+        default'), the README bullet says ON, the GUI label ends '- ON'."""
+        text = _flag_help("--dt2ms-tssfac-product")
+        self.assertIn("ON by default since round 10", text)
+        self.assertNotIn("OFF by default", text)
+        self.assertIn("`--dt2ms-tssfac-product` / `--no-dt2ms-tssfac-product` "
+                      "— **ON by default", _t7._collapse(_readme()))
 
 
 if __name__ == "__main__":

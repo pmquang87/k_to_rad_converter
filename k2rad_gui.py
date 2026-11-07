@@ -205,7 +205,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          airbag_particle_uniform: bool = False,
                          damping_curve_window: bool = True,
                          stop_added_mass: bool = False,
-                         dt2ms_tssfac_product: bool = False,
+                         dt2ms_tssfac_product: bool = True,
                          print_every_text: str = "",
                          tet_isolid1: bool = True,
                          law1_shell_global_n: bool = True,
@@ -682,7 +682,7 @@ class ConverterGUI:
         # The CardStack-pipeline levers
         self.damping_curve_window = tk.BooleanVar(value=True)
         self.stop_added_mass = tk.BooleanVar(value=False)
-        self.dt2ms_tssfac_product = tk.BooleanVar(value=False)
+        self.dt2ms_tssfac_product = tk.BooleanVar(value=True)
         self.print_every = tk.StringVar(value="")
         self.tet_isolid1 = tk.BooleanVar(value=True)
         self.law1_shell_global_n = tk.BooleanVar(value=True)
@@ -1397,8 +1397,9 @@ class ConverterGUI:
             variable=self.stop_added_mass).grid(
                 row=80, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
-            io, text="Opt-in: mass-scaled Tmin = TSSFAC x |DT2MS| (LS-DYNA's "
-                     "minimum step) instead of |DT2MS| - OFF",
+            io, text="DT2MS < 0: /DT/NODA/CST Tmin = TSSFAC x |DT2MS| "
+                     "(LS-DYNA's minimum step; mass-scaled Tmin = TSSFAC x "
+                     "|DT2MS|), /DT/AMS keeps |DT2MS| - ON",
             variable=self.dt2ms_tssfac_product).grid(
                 row=81, column=0, columnspan=3, sticky="w", **pad)
         ttk.Checkbutton(
@@ -2122,9 +2123,9 @@ class ConverterGUI:
                         "(--no-damping-curve-window)")
         if kwargs.get("stop_added_mass"):
             bits.append("ENDMAS -> /STOP Mmax (--stop-added-mass)")
-        if kwargs.get("dt2ms_tssfac_product"):
-            bits.append("mass-scaled Tmin = TSSFAC x |DT2MS| "
-                        "(--dt2ms-tssfac-product)")
+        if not kwargs.get("dt2ms_tssfac_product", True):
+            bits.append("mass-scaled Tmin = |DT2MS| "
+                        "(--no-dt2ms-tssfac-product)")
         if kwargs.get("print_every") is not None:
             bits.append(f"/PRINT/-{kwargs['print_every']} "
                         f"(--print-every {kwargs['print_every']})")

@@ -455,7 +455,7 @@ class DampingGlobalLcidText(unittest.TestCase):
 _BOOL_LEVERS = (
     ("--damping-curve-window", "damping_curve_window", True),
     ("--stop-added-mass", "stop_added_mass", False),
-    ("--dt2ms-tssfac-product", "dt2ms_tssfac_product", False),
+    ("--dt2ms-tssfac-product", "dt2ms_tssfac_product", True),
     ("--tet-isolid1", "tet_isolid1", True),
     ("--law1-shell-global-n", "law1_shell_global_n", True),
     ("--s2s-type25", "s2s_type25", False),

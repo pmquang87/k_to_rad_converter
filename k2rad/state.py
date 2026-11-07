@@ -7703,6 +7703,7 @@ class ConvertOptions:
     ``contact_birth_death``, ``corotational_orthotropic``,
     ``damping_curve_window``,
     ``default_hourglass``, ``deformable_to_rigid``, ``discrete_offset``,
+    ``dt2ms_tssfac_product``,
     ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
     ``fixed_curve_columns``, ``generalized_weld_butt``,
     ``imflag0_eigen_explicit``, ``imflag_curve_restart``,
@@ -9408,10 +9409,12 @@ class ConvertOptions:
     # *CONTROL_TERMINATION ENDMAS as an engine /STOP whose Mmax is the RATIO
     # ENDMAS / 100 (ecrit.F:516/593 compare (M - M0) / M0 against it).
     stop_added_mass: bool = False
-    # --dt2ms-tssfac-product (opt-in; writer/assembly): /DT/NODA/CST (and
-    # /DT/AMS) Tmin = TSSFAC x |DT2MS|, LS-DYNA's minimum step for DT2MS < 0
-    # (Vol I R17 p.12-585), instead of |DT2MS|.
-    dt2ms_tssfac_product: bool = False
+    # --no-dt2ms-tssfac-product (R14 round 10, A4: default ON;
+    # writer/assembly): /DT/NODA/CST Tmin = TSSFAC x |DT2MS|, LS-DYNA's
+    # minimum step for DT2MS < 0 (Vol I R17 p.12-585), instead of |DT2MS|.
+    # /DT/AMS (--ams) keeps |DT2MS| on both arms, as dyna2rad writes it
+    # (convertcards.cxx:233-234): no AMS run measured the product.
+    dt2ms_tssfac_product: bool = True
     # --print-every N (writer/assembly): the engine /PRINT/-N cadence, N in
     # 1..9999 (the engine reads the cell as I5, freform.F:1563). None = the
     # writer's own rule.

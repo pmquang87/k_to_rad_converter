@@ -116,6 +116,58 @@ Prior history (before this changelog was introduced) is summarized in the
     pin: `test_cardstack_pipeline.FixRoundHelpTexts.test_tet_isolid1_names_the_starters_own_tet_reset`
     re-pinned to `:984-999`. Tests: `tests/test_r14_round10.py` `A3Texts`
     and the A3 needles of `Round10RetractedStatementsA`.
+  - **A4 - K-41: `/DT/NODA/CST` Tmin = TSSFAC x |DT2MS| is the default
+    (`--no-dt2ms-tssfac-product` writes |DT2MS|); `/DT/AMS` keeps |DT2MS|.**
+    An explicit DT2MS < 0 deck now holds its mass-scaled step at the minimum
+    step LS-DYNA permits, TSSFAC x |DT2MS| (Vol I R17 p.12-585; TSSFAC blank
+    or a curve = 0.9), the cell dyna2rad writes (`convertcards.cxx:173-174`),
+    instead of |DT2MS|, a floor 1/TSSFAC higher. The flag governs
+    `/DT/NODA/CST` only: `/DT/AMS` (`--ams`) writes |DT2MS| on both arms, as
+    dyna2rad does (`convertcards.cxx:233-234`) - it used to take the product
+    under the opt-in, and no AMS run measured it - and the `--ams` warning no
+    longer cites `/DT/NODA/CST`'s nodal rule (dtnoda.F) for an AMS run, whose
+    step the engine computes in DTNODAMS (`resol.F:5847-5857`). MEASURED on
+    `control_timestep.billet-forge` (DT2MS -1.2e-7, TSSFAC blank; A1's rigid
+    die cell on the same bytes, inert; nt 4): 12500 -> 13889 cycles (=
+    LS-DYNA's 13889, d3hsp; ratio 1.1111), the OR step 1.08e-7 = LS-DYNA's in
+    151 / 151 glstat blocks, KE END +16.99 -> -5.13 % (fifths -3.84 / -2.35 /
+    -1.37 / -1.93 / -5.13), KE RMS 8.54 -> 1.74 % of the LS peak over its 150
+    LS times (9.936e-6, 1.49991e-3], IE END +0.1348 % on both arms, the
+    driven die `/TH/NODE/90024` DZ = the integral of LCID 1 at every fifth -
+    the round's one expected verdict flip, deviation -> match. The named
+    cost: `07_metalstrip` (DT2MS -1e-4, TSSFAC 0.5; not_comparable, LS IE a
+    structural zero) runs x2.000 cycles (20000, LS 20001), its added mass
+    +167.08 -> -33.22 % of LS-DYNA's 0.5485 t at every fifth, KE END -93.73
+    -> -98.43 %. Movers: 8 R14 keys / 8 models, the `_0001.rad` Tmin cell
+    only (billet, metal strip, control_adaptive.cup-draw, EXP_SC_JOINT_SCREW,
+    8.1 / 8.2 / 8.3 plate decks, the self-forging rivet giant); the screw and
+    the cup-draw never reach the floor (rows identical), nor do 8.1 / 8.2 (0
+    of 238417 rows with added mass); the 5 implicit DT2MS < 0 keys write no
+    `/DT/NODA/CST` on either arm. Outside the roster 58 getriebekette files
+    and the CardStack archive's 39 explicit DT2MS < 0 files move their Tmin
+    cell; three of the user's own files map a quoted Tmin to DT2MS one to one
+    and are now off by 1/TSSFAC (DT2MS = -Tmin / TSSFAC): the CardStack recipe
+    section 8, `fem-pipeline/scripts/results_check.py:201` and
+    `run-openradioss/scripts/audit_or_run.py:992` - not edited by this
+    round. Moved pins (re-derived, the product hand-computed):
+    `test_cardstack_pipeline` `_BOOL_LEVERS` row -> True (NewLeversWiring x4,
+    NewLeversGui); `test_cardstack_pipeline_engine.Dt2msTexts`
+    `test_default_text_states_the_step_and_names_the_flag` (0.9 x 1e-6 =
+    9e-7), `test_default_text_says_a_nodal_step_below_tmin_is_lifted` (+ the
+    opt-out arm), `test_flag_text_states_the_product` -> 
+    `test_the_ams_text_keeps_dt2ms_on_both_arms`, the routed-deck off-route
+    needle `(Tmin=9e-05)` (+ the opt-out's `(Tmin=0.0001)`);
+    `test_control_timestep.Dt2msTssfacProductTests`
+    `test_default_keeps_tmin_at_dt2ms` -> `test_default_holds_tmin_at_the_product`
+    + `test_the_opt_out_keeps_tmin_at_dt2ms`, `test_flag_on_the_ams_branch` ->
+    `test_ams_keeps_tmin_at_dt2ms_on_both_arms` (9e-7 -> 1e-6),
+    `test_negative_tssfac_curve_takes_0_9` (the AMS + flag row 1e-6),
+    `MassScalingPathUnchangedTests.test_still_emits_noda_cst_with_tssfac_as_tsca`
+    (0.8 x 1.112e-6 = 8.896e-7); `test_converter.MassScalingTests`
+    `test_tmin_is_abs_dt2ms` -> `test_tmin_is_tssfac_times_abs_dt2ms` (0.9 x
+    1.112e-6 = 1.0008e-6). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md`'s K-41 rows
+    are re-texted after the merge of master (its 6.3 / 6.4 / 6.7 / 6.8
+    records were measured at Tmin = |DT2MS|).
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

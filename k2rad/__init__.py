@@ -513,7 +513,7 @@ def convert(
     airbag_particle_uniform: bool = False,
     damping_curve_window: bool = True,
     stop_added_mass: bool = False,
-    dt2ms_tssfac_product: bool = False,
+    dt2ms_tssfac_product: bool = True,
     print_every: Optional[int] = None,
     tet_isolid1: bool = True,
     law1_shell_global_n: bool = True,
@@ -1841,9 +1841,14 @@ def convert(
         whose Mmax is the RATIO ENDMAS / 100 (``ecrit.F:516/593`` compare
         (M - M0) / M0 with it). Off by default.
     dt2ms_tssfac_product : bool
-        Hold the mass-scaled step at TSSFAC x |DT2MS| (``/DT/NODA/CST`` and
-        ``/DT/AMS`` Tmin), LS-DYNA's minimum step for DT2MS < 0 (Vol I R17
-        p.12-585), instead of |DT2MS|. Off by default.
+        Hold the mass-scaled step at TSSFAC x |DT2MS| (the ``/DT/NODA/CST``
+        Tmin), LS-DYNA's minimum step for DT2MS < 0 (Vol I R17 p.12-585) and
+        the cell dyna2rad writes (``convertcards.cxx:173-174``), instead of
+        |DT2MS|. ``/DT/AMS`` keeps |DT2MS| on both arms
+        (``convertcards.cxx:233-234``). MEASURED on the R14 billet forge (nt
+        4): 13889 cycles = LS-DYNA's 13889, KE END +16.99 -> -5.13 %, KE RMS
+        8.54 -> 1.74 % of the LS peak over its 150 LS times. Default True
+        since R14 round 10, A4 (``--no-dt2ms-tssfac-product``: |DT2MS|).
     print_every : int, optional
         Write the engine ``/PRINT/-N`` with this N (1..9999 cycles; the
         engine reads the cell as I5, ``freform.F:1563``). None = the

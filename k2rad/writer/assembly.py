@@ -3670,39 +3670,62 @@ def _tssfac_for_dt2ms(ts) -> Tuple[float, str]:
     return 0.9, "TSSFAC blank -> 0.9; "
 
 
-def _dt2ms_tmin(state: ConversionState, ts) -> Tuple[float, float, str]:
+def _dt2ms_tmin(state: ConversionState, ts,
+                ams: bool = False) -> Tuple[float, float, str]:
     """``(Tmin, TSSFAC, the words for a blank TSSFAC)`` of a DT2MS < 0 deck:
-    the Tmin ``/DT/NODA/CST`` and ``/DT/AMS`` carry (K-41) - |DT2MS| by
-    default, TSSFAC x |DT2MS| under ``--dt2ms-tssfac-product``. The one
-    source of that number, so a text that restates it (the ``/DT/<elem>/DEL``
-    warning) cannot drift from the card."""
+    the Tmin ``/DT/NODA/CST`` carries (K-41; R14 round 10, A4) - TSSFAC x
+    |DT2MS| by default, the minimum step LS-DYNA permits (Vol I R17
+    p.12-585) and the cell dyna2rad writes (convertcards.cxx:173-174);
+    |DT2MS| under ``--no-dt2ms-tssfac-product``. *ams*: the ``/DT/AMS``
+    Tmin, |DT2MS| on both arms, as dyna2rad writes it
+    (convertcards.cxx:233-234; the engine runs DTNODAMS there, not
+    /DT/NODA/CST's nodal rule, resol.F:5847-5857, and no AMS run measured
+    the product). The one source of that number, so a text that restates it
+    (the ``/DT/<elem>/DEL`` warning) cannot drift from the card."""
     tssfac, blank = _tssfac_for_dt2ms(ts)
-    if state.options.dt2ms_tssfac_product:
+    if state.options.dt2ms_tssfac_product and not ams:
         return tssfac * abs(ts.dt2ms), tssfac, blank
     return abs(ts.dt2ms), tssfac, blank
 
 
 def _dt2ms_step_clause(state: ConversionState, ts, tssfac: float,
-                       blank: str, tmin: float) -> str:
-    """The step sentence of the DT2MS < 0 warnings (K-41): which Tmin was
-    written, and LS-DYNA's minimum step TSSFAC x |DT2MS| (Vol I R17
-    p.12-585) beside it."""
+                       blank: str, tmin: float, ams: bool = False) -> str:
+    """The step sentence of the DT2MS < 0 warnings (K-41; R14 round 10, A4):
+    which Tmin was written, and LS-DYNA's minimum step TSSFAC x |DT2MS| (Vol
+    I R17 p.12-585) beside it. *ams*: the ``/DT/AMS`` sentence - the AMS step
+    is computed in DTNODAMS, not with /DT/NODA/CST's nodal rule
+    (resol.F:5847-5857), so the dtnoda.F clause does not apply there."""
     d = abs(ts.dt2ms)
-    if state.options.dt2ms_tssfac_product:
-        return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
-                f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
-                "p.12-585) [--dt2ms-tssfac-product].")
+    if ams:
+        return (f" {blank}Tmin = |DT2MS| = {tmin:g} on /DT/AMS, as dyna2rad "
+                "writes it (convertcards.cxx:233-234); LS-DYNA's minimum step "
+                f"TSSFAC x |DT2MS| = {tssfac * d:g} (Vol I R17 p.12-585) is "
+                "not applied on this route - the engine computes the AMS step "
+                "in DTNODAMS, not with /DT/NODA/CST's nodal rule "
+                "(resol.F:5847-5857), and no AMS run measured the product.")
     # Not 'the run steps at Tmin' (fix round): /DT/NODA/CST (IDTMIN(11) = 8,
     # freform.F:1057-1059) adds mass only to a node whose own step is below
     # Tmin (dtnoda.F:270-303) and clamps the global step only when it fell
     # below Tmin (dtnoda.F:654-655), so a deck whose nodal steps all exceed
     # Tmin keeps its own, larger step.
-    return (f" {blank}Tmin = |DT2MS| = {tmin:g}: every nodal step below "
-            f"{tmin:g} is lifted to it with added mass (dtnoda.F:270-303, "
-            "654-655), where LS-DYNA's minimum step is TSSFAC x |DT2MS| = "
-            f"{tssfac * d:g} (Vol I R17 p.12-585) - a floor 1/TSSFAC higher, "
-            "which takes more added mass; --dt2ms-tssfac-product writes the "
-            "product.")
+    if state.options.dt2ms_tssfac_product:
+        # R14 round 10, A4: the default since round 10
+        return (f" {blank}Tmin = TSSFAC x |DT2MS| = {tssfac:g} x {d:g} = "
+                f"{tmin:g}, the minimum step LS-DYNA permits (Vol I R17 "
+                "p.12-585; dyna2rad writes the same product, "
+                "convertcards.cxx:173-174): every nodal step below "
+                f"{tmin:g} is lifted to it with added mass (dtnoda.F:257, "
+                "270-303, 654-655). MEASURED on the R14 billet forge (nt 4): "
+                "13889 cycles = LS-DYNA's 13889, KE END +16.99 -> -5.13 %, "
+                "KE RMS 8.54 -> 1.74 % of the LS peak over its 150 LS times. "
+                "--no-dt2ms-tssfac-product writes Tmin = |DT2MS| "
+                f"= {d:g}, a floor 1/TSSFAC higher.")
+    return (f" {blank}Tmin = |DT2MS| = {tmin:g} [--no-dt2ms-tssfac-product]: "
+            f"every nodal step below {tmin:g} is lifted to it with added mass "
+            "(dtnoda.F:270-303, 654-655), where LS-DYNA's minimum step is "
+            f"TSSFAC x |DT2MS| = {tssfac * d:g} (Vol I R17 p.12-585) - a "
+            "floor 1/TSSFAC higher, which takes more added mass; the default "
+            "writes the product.")
 
 
 # /DT/<elem>/DEL blocks k2rad can emit, in the order they are written. SH_3N is
@@ -3854,17 +3877,19 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
         # a DT2MS < 0 deck never gets it - the card is refused there)
         return (_make_engine_timestep_scale(state, ts)
                 + sis_dt_inter_lines(state))
-    # Tmin (CardStack batch, K-41): |DT2MS| by default; TSSFAC x |DT2MS|
-    # under --dt2ms-tssfac-product, the minimum step LS-DYNA permits for
-    # DT2MS < 0 (Vol I R17 p.12-585) - on /DT/NODA/CST and on /DT/AMS alike,
-    # TSSFAC being the deck's (blank -> 0.9), not AMS's 0.67 Tsca.
-    tmin, tssfac, blank = _dt2ms_tmin(state, ts)
-    step = _dt2ms_step_clause(state, ts, tssfac, blank, tmin)
+    # Tmin (CardStack batch K-41; R14 round 10, A4): TSSFAC x |DT2MS| by
+    # default on /DT/NODA/CST, the minimum step LS-DYNA permits for DT2MS < 0
+    # (Vol I R17 p.12-585), TSSFAC being the deck's (blank -> 0.9); |DT2MS|
+    # under --no-dt2ms-tssfac-product and on /DT/AMS on both arms (dyna2rad's
+    # cell, convertcards.cxx:233-234).
+    ams = _ams_is_emitted(state)
+    tmin, tssfac, blank = _dt2ms_tmin(state, ts, ams=ams)
+    step = _dt2ms_step_clause(state, ts, tssfac, blank, tmin, ams=ams)
     # On the routed 2-D deck transform_engine_lines drops the card these
     # lines build and says so itself (writer/axisym2d.py); a text about the
     # mass the card adds would be false there, so none is given.
     say = not axisym_routed(state)
-    if _ams_is_emitted(state):
+    if ams:
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
         # scale factor — the PCG needs more margin than /DT/NODA/CST's 0.9. The
         # paired starter /AMS card is emitted by _make_ams, and the /DT/THERM
