@@ -2369,12 +2369,18 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     :func:`_inacti_six` (a TYPE25 keeps Inacti 5), not by
     :func:`_s2s_type25_refusal`. True when the interface was written (or
     dropped) here; False sends it down the TYPE7 route, after a refusal by
-    name."""
+    name. On True the handler's one-way 'twoway_auto' note is withdrawn:
+    no /INTER/TYPE7 is written (CardStack K-08)."""
     kw = c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE"
     refuse = _s2s_type25_refusal(state, c)
     if refuse:
         state.warn(f"--s2s-type25 refused on *{kw} {c.inter_id}: {refuse}.")
         return False
+    # CardStack K-08: past the refusals this route owns the record (the
+    # TYPE25 below, or a drop), so no /INTER/TYPE7 is written and the
+    # handler's one-way note, which names this flag as a lever, goes
+    from ..handlers import _withdraw_contact_spelling
+    _withdraw_contact_spelling(state, c.keyword, c.inter_id, "twoway_auto")
     surf1 = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
     surf2 = _resolve_contact_master(state, c.msid, c.mstyp, lines) if surf1 else 0
     if not surf1 or not surf2:
@@ -2789,6 +2795,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 state, c, kw, "the /INTER/TYPE7 self-contact of its SSID set")
             _warn_card_e_type7(state, c, kw, viss)               # K-16
 
+    # CardStack K-08: the handler's one-way 'twoway_auto' note holds only
+    # where this loop writes the /INTER/TYPE7 (_emit_inter_type7 below), so
+    # each drop takes it back, as _s2s_type25_route does where the flag
+    # takes the record. A no-op for every other spelling, which has no
+    # such note.
+    from ..handlers import _withdraw_contact_spelling
     for c in state.contacts_surf2surf:
         diag = {}
         # CardStack K-08B (opt-in): the two-surface /INTER/TYPE25 route
@@ -2830,6 +2842,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                                    rigid_nodes),
                             note=(_implicit_rigid_secondary_note(state)
                                   if plan == _RS_IMPLICIT else ""))
+            _withdraw_contact_spelling(state, c.keyword, c.inter_id,
+                                       "twoway_auto")
             continue
         if not mast_surf:
             # After a SWAP the main side is the deck's SSID, so naming the id
@@ -2846,6 +2860,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 f"{main_label} resolved to no contact surface: "
                 + _describe_empty_main(state, main_sid, main_styp),
                 _main_side_remedy(state, main_sid, main_styp))
+            _withdraw_contact_spelling(state, c.keyword, c.inter_id,
+                                       "twoway_auto")
             continue
         _warn_partial_rigid_secondary(
             state, c.keyword, c.inter_id, diag, sec_sid,

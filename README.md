@@ -4812,8 +4812,9 @@ The SSID side becomes the secondary `/GRNOD` and the MSID side the main
 `/SURF`, so **the deformable part belongs on the SSID side**: `/INTER/TYPE7`
 is an asymmetric node-to-**segment** contact and only the secondary nodes are
 checked against the main segments. The conversion log says so on every two-way
-`AUTOMATIC_SURFACE_TO_SURFACE` card (CardStack K-08; 9 of the 101 R14 contact
-decks converted) and names the three levers that check both sides:
+`AUTOMATIC_SURFACE_TO_SURFACE` card that stays `/INTER/TYPE7` (CardStack K-08;
+9 of the 101 R14 contact decks converted; not on one `--s2s-type25` takes) and
+names the three levers that check both sides:
 `--s2s-type25` (opt-in, the two-surface `/INTER/TYPE25`), a second contact
 with SSID and MSID swapped beside this one, or
 `*CONTACT_ERODING_SURFACE_TO_SURFACE` (a two-surface TYPE25 too, but with
