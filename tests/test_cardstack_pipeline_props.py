@@ -503,8 +503,9 @@ class Law1ShellGlobalN(unittest.TestCase):
         switches the LAW1 group to N = 0 (global integration,
         cgrtails.F:780-791) and prints WARNING 1084 - MEASURED (starter +
         engine, nt 1, 2026-10-31) on a NIP-1 *MAT_ELASTIC strip: N 2 and 1 x
-        WARNING 1084 on both arms, anim files byte-equal. A one-point
-        section would take N 1 (a ROADMAP item)."""
+        WARNING 1084 on both arms, anim files byte-equal. A triangle-only
+        NIP-1 section takes N 1 since R14 round 10 (A2,
+        tests/test_r14_round10.py); this strip is a QUAD, which keeps N 2."""
         _r, starter, _e = _convert(_shell_deck(nip="1"))
         self.assertEqual(_shell_n(starter), 2)
         _r, s_off, _e = _convert(_shell_deck(nip="1"),

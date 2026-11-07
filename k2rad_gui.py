@@ -218,7 +218,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          soft2_iedge_gate: bool = True,
                          srnde_ishape: bool = True,
                          maxint_stress_all: bool = True,
-                         shrf_ashear: bool = True) -> dict:
+                         shrf_ashear: bool = True,
+                         nip1_one_point: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -555,6 +556,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["maxint_stress_all"] = bool(maxint_stress_all)
     # R14 parity round 10 (the CLI flags of the same names)
     kwargs["shrf_ashear"] = bool(shrf_ashear)
+    kwargs["nip1_one_point"] = bool(nip1_one_point)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -694,6 +696,7 @@ class ConverterGUI:
         self.maxint_stress_all = tk.BooleanVar(value=True)
         # R14 parity round 10
         self.shrf_ashear = tk.BooleanVar(value=True)
+        self.nip1_one_point = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1457,6 +1460,11 @@ class ConverterGUI:
                      "5/6) - ON",
             variable=self.shrf_ashear).grid(
                 row=92, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="NIP 1 on a triangle-only section -> /PROP/SHELL N 1 "
+                     "(one point, no bending) - ON",
+            variable=self.nip1_one_point).grid(
+                row=93, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1796,6 +1804,7 @@ class ConverterGUI:
                 srnde_ishape=self.srnde_ishape.get(),
                 maxint_stress_all=self.maxint_stress_all.get(),
                 shrf_ashear=self.shrf_ashear.get(),
+                nip1_one_point=self.nip1_one_point.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2151,6 +2160,8 @@ class ConverterGUI:
         # R14 parity round 10
         if not kwargs.get("shrf_ashear", True):
             bits.append("SHRF not carried, Ashear 5/6 (--no-shrf-ashear)")
+        if not kwargs.get("nip1_one_point", True):
+            bits.append("NIP 1 written N 2 (--no-nip1-one-point)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

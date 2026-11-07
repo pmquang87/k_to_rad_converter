@@ -7710,7 +7710,8 @@ class ConvertOptions:
     ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
     ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
     ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
-    ``maxint_stress_all``, ``modal_acoustic_void``, ``node_tc_rc_bcs``,
+    ``maxint_stress_all``, ``modal_acoustic_void``, ``nip1_one_point``,
+    ``node_tc_rc_bcs``,
     ``plane_strain_unit_thickness``, ``plane_stress_unit_thickness``,
     ``positive_dt2ms_mass_scaling``, ``prescribed_motion_sf_default``,
     ``rigid_cog_master``, ``rigid_element_mass_admas``,
@@ -9492,6 +9493,18 @@ class ConvertOptions:
     # by the Ashear cells only, the 14 match rows among them stay match.
     # False = Ashear 0 everywhere (the ed52c93 bytes).
     shrf_ashear: bool = True
+    # --no-nip1-one-point (A2, default ON; writer/mesh._nip1_one_point_secids,
+    # read at both /PROP/SHELL emission sites): /PROP/SHELL N 1 on a NIP-1
+    # *SECTION_SHELL (stated, or a one-point *INTEGRATION_SHELL) whose shell
+    # elements are all triangles - LS-DYNA's one point, no bending (Vol I R17
+    # p.41-66), which no starter switch touches (c3grtails.F:710); a NIP-1
+    # section with quadrilaterals or an initial-state record keeps
+    # max(2, NIP) = 2 and is named. MEASURED (R14 round 10): a /SH3N
+    # cantilever's N-1 strip hangs (tip -81.76 mm) where N 2 bends (-0.4761
+    # mm); mat_spring.belted-dummy (the one R14 carrier, 1 key / 1 model)
+    # with A1: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS
+    # peak over its 500 LS times (nt 4). False = max(2, NIP) (ed52c93).
+    nip1_one_point: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

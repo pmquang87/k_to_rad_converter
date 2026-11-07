@@ -174,9 +174,10 @@ decks should start from
   with `WARNING 1084` (`cgrtails.F:780-791`). Kept at max(2, NIP): a section
   another law shares; a section an `*INITIAL_STRESS_SHELL` /
   `*INITIAL_STRAIN_SHELL` record names; every section of a deck that writes
-  `/THERM_STRESS`; and NIP 1 (written N 2 as before; the starter still
-  switches it to N = 0 with `WARNING 1084`, so LS-DYNA's one-point,
-  no-bending NIP 1 is reproduced on neither arm). `--no-law1-shell-global-n`
+  `/THERM_STRESS`; and NIP 1 (N 1, LS-DYNA's one point, on a triangle-only
+  section since R14 round 10 - `--nip1-one-point` below; N 2 with
+  quadrilaterals, which the starter switches to N = 0 with `WARNING 1084`).
+  `--no-law1-shell-global-n`
   writes max(2, NIP). The starter sorts shell groups by the written N before
   its switch, so where LAW1 shell parts are written with different N on either
   arm - different NIP, a NIP-1 or initial-state section, or a LAW1 part on a
@@ -356,6 +357,20 @@ as underscores.
   / 132 models move by bytes, and the 14 match rows among them stay match
   (largest END move 1.54 points). `--no-shrf-ashear` writes Ashear 0 (the
   starter's 5/6) everywhere.
+- `--nip1-one-point` / `--no-nip1-one-point` — **ON by default**. Write
+  `/PROP/SHELL` N 1 on a `*SECTION_SHELL` with NIP 1 (stated, or a one-point
+  `*INTEGRATION_SHELL`) whose shell elements are all triangles: LS-DYNA's one
+  point with no bending (Vol I R17 p.41-66), which no starter switch changes
+  (`c3grtails.F:710`; the starter zeroes Ashear on N 1 itself,
+  `hm_read_prop01.F:246-259`). A NIP-1 section with quadrilaterals keeps N 2
+  and is named (the one-point QBAT path diverged at the default step in the
+  round-10 probes: ENERGY ERROR at cycles 81-88 on a cantilever), as is one
+  an initial-state record names. MEASURED: a `/SH3N` cantilever's N-1 strip
+  hangs (tip -81.76 mm) where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619
+  mm); on `mat_spring.belted-dummy` (the one R14 carrier) with
+  `--shrf-ashear`: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the
+  LS peak over its 500 LS times (110032 cycles, nt 4). `--no-nip1-one-point`
+  writes max(2, NIP).
 
 ### Python API
 

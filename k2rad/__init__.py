@@ -527,6 +527,7 @@ def convert(
     srnde_ishape: bool = True,
     maxint_stress_all: bool = True,
     shrf_ashear: bool = True,
+    nip1_one_point: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1915,6 +1916,18 @@ def convert(
         14 match rows among them stay match (largest END move 1.54 points).
         Default True (``--no-shrf-ashear``: Ashear 0, the starter's 5/6,
         everywhere).
+    nip1_one_point : bool
+        NIP 1 -> ``/PROP/SHELL`` N 1 (R14 round 10, A2) on a
+        ``*SECTION_SHELL`` with NIP 1 (stated, or a one-point
+        ``*INTEGRATION_SHELL``) whose shell elements are all triangles:
+        LS-DYNA's one point, no bending (Vol I R17 p.41-66), which no starter
+        switch touches (``c3grtails.F:710``). A NIP-1 section with
+        quadrilaterals or an initial-state record keeps max(2, NIP) = 2 and
+        is named. MEASURED: a ``/SH3N`` cantilever's N-1 strip hangs (tip
+        -81.76 mm) where N 2 bends (-0.4761 mm); mat_spring.belted-dummy
+        with ``shrf_ashear``: IE END +65.73 -> +46.57 %, IE RMS 22.79 ->
+        14.23 % of the LS peak over its 500 LS times (110032 cycles, nt 4).
+        Default True (``--no-nip1-one-point``: max(2, NIP)).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2069,6 +2082,7 @@ def convert(
         srnde_ishape=srnde_ishape,
         maxint_stress_all=maxint_stress_all,
         shrf_ashear=shrf_ashear,
+        nip1_one_point=nip1_one_point,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

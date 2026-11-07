@@ -293,6 +293,97 @@ class A1ShrfAshear(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A2  NIP 1 -> /PROP/SHELL N 1 on triangle-only sections (default;
+#     --no-nip1-one-point)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _tri_deck(nip=1, quads=False, mat=_tp._ELASTIC, extra="") -> str:
+    """Two triangles (degenerate quads n4 = n3) on part 1 / *SECTION_SHELL 1,
+    or two quads when *quads*."""
+    rows = ((_elem(1, 1, 1, 2, 3, 4) + _elem(2, 1, 2, 5, 6, 3)) if quads
+            else (_elem(1, 1, 1, 2, 3, 3) + _elem(2, 1, 1, 3, 4, 4)))
+    return ("*KEYWORD\n" + _EXPLICIT + "*NODE\n" + _node_rows(_tp._QUAD_PTS)
+            + "*ELEMENT_SHELL\n" + rows
+            + "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _row(1, 2, "", nip) + "\n" + _row(1.0)
+            + "\n" + mat + extra + "*END\n")
+
+
+class A2Nip1OnePoint(unittest.TestCase):
+
+    def test_triangles_are_written_n_1_and_named(self):
+        for mat in (_tp._ELASTIC, _LAW44):        # LAW1 too: K-31 skips NIP 1
+            with self.subTest(mat=mat[:14]):
+                res, st, _e = _convert(_tri_deck(mat=mat))
+                self.assertEqual(_shell_n(st), 1)
+                self.assertEqual(_ashear(st), "0")    # A1's exclusion
+                self.assertTrue(_has(res.warnings, "*SECTION_SHELL 1: NIP 1 "
+                                     "on a section of triangles only -> "
+                                     "/PROP/SHELL N 1", "c3grtails.F:710",
+                                     "-81.76 mm", "IE END +65.73 -> +46.57 %",
+                                     "22.79 -> 14.23 %"))
+
+    def test_quads_keep_n_2_and_are_named(self):
+        res, st, _e = _convert(_tri_deck(quads=True))
+        self.assertEqual(_shell_n(st), 2)
+        self.assertTrue(_has(res.warnings, "*SECTION_SHELL 1: NIP 1",
+                             "keeps /PROP/SHELL N max(2, NIP) = 2",
+                             "cycles 81-88"))
+        self.assertFalse(_has(res.warnings, "on a section of triangles only"))
+
+    def test_an_initial_state_section_keeps_n_2(self):
+        ini = ("*INITIAL_STRESS_SHELL\n" + _row(1, 1, 2, 0, 0, 0) + "\n"
+               + _row(-0.5, 10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row(0.5, 10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        res, st, _e = _convert(_tri_deck(extra=ini))
+        self.assertEqual(_shell_n(st), 2)
+        self.assertTrue(_has(res.warnings, "*SECTION_SHELL 1: NIP 1 keeps "
+                             "/PROP/SHELL N max(2, NIP) = 2 because an "
+                             "*INITIAL_STRESS_SHELL"))
+
+    def test_nip_2_triangles_do_not_move(self):
+        _r, on, _e = _convert(_tri_deck(nip=2, mat=_LAW44))
+        _r, off, _e = _convert(_tri_deck(nip=2, mat=_LAW44),
+                               nip1_one_point=False)
+        self.assertEqual(on, off)
+        self.assertEqual(_shell_n(on), 2)
+
+    def test_the_opt_out_writes_n_2_and_says_it_bends(self):
+        res, st, _e = _convert(_tri_deck(), nip1_one_point=False)
+        self.assertEqual(_shell_n(st), 2)
+        self.assertTrue(_has(res.warnings, "*SECTION_SHELL 1: NIP 1",
+                             "(--no-nip1-one-point)", "BENDS"))
+        _r, on, _e = _convert(_tri_deck())
+        moved = _tp._diff_lines(st, on)
+        self.assertEqual(len(moved), 1, moved)
+        self.assertEqual((int(moved[0][0][:10]), int(moved[0][1][:10])),
+                         (2, 1))
+        self.assertEqual(moved[0][0][10:], moved[0][1][10:])   # N cell only
+
+    def test_a_one_point_rule_on_triangles_names_the_n_1_written(self):
+        """A one-point *INTEGRATION_SHELL on a LAW1 triangle-only section
+        (stated NIP 5): writer/composites drops the rule (LAW1) and its
+        sentence names the N the plain /PROP/SHELL really carries - 1 under
+        A2, not the max(2, NIP) the starter would switch to N = 0."""
+        rule = ("*INTEGRATION_SHELL\n" + _row(3, 1, 0) + "\n"
+                + _row(0.0, 1.0) + "\n")
+        deck = _tri_deck(nip=5).replace(
+            "*SECTION_SHELL\n" + _row(1, 2, "", 5),
+            "*SECTION_SHELL\n" + _row(1, 2, "", 5, 1.0, -3))
+        self.assertIn(_row(1, 2, "", 5, 1.0, -3), deck)
+        res, st, _e = _convert(deck.replace("*END\n", rule + "*END\n"))
+        self.assertEqual(_shell_n(st), 1)
+        msg = [w for w in res.warnings if "the rule is DROPPED" in w
+               and "LAW1" in w]
+        self.assertEqual(len(msg), 1, res.warnings)
+        self.assertIn("written N = 1 (LS-DYNA's one point, no bending; no "
+                      "starter switch acts on N 1, c3grtails.F:710", msg[0])
+        res, st, _e = _convert(deck.replace("*END\n", rule + "*END\n"),
+                               nip1_one_point=False)
+        self.assertEqual(_shell_n(st), 2)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Retracted statements and forbidden sentences (the rounds 4-9 shape:
 # _t7._SHIPPED_TEXTS = README, ROADMAP, the GUI, k2rad.py, k2rad/, docs/*.md,
 # tools/*.py with adjacent literals joined; CHANGELOG is the history)
@@ -399,12 +490,17 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
 
     _FLAGS = {
         "--shrf-ashear": "shrf_ashear",
+        "--nip1-one-point": "nip1_one_point",
     }
     _HELP_FIGURES = {
         "--shrf-ashear": ("-0.041 % (L/t 3) / -0.018 % (L/t 5)",
                           "-0.024 / -0.025 %", "all 2642 R14 shell parts",
                           "hm_read_prop01.F:246-259",
                           "0 verdict flips, largest END move 1.54 points"),
+        "--nip1-one-point": ("p.41-66", "c3grtails.F:710", "-81.76 mm",
+                             "-0.4761 mm", "110032 cycles",
+                             "IE END +65.73 -> +46.57 %",
+                             "22.79 -> 14.23 %"),
     }
 
 

@@ -2635,19 +2635,21 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
     (``_target_mat_law`` 1: ``*MAT_ELASTIC``, and ``*MAT_RIGID``, written as
     /MAT/ELAST for its /RBODY), and three exclusions hold:
 
-    * its NIP is not 1 (the plan keeps NIP 1 as it was). A NIP-1 section
-      keeps the N 2 k2rad has always written (max(2, NIP)), and the starter
-      still switches that LAW1 group to N = 0 with WARNING 1084, like every
-      LAW1 group written N > 1 (``cgrtails.F:780-791``; a /SH3N group
-      silently, ``c3grtails.F:710``). So it runs the same global integration
-      a K-31 section is written with, and keeps the warning. LS-DYNA's own
-      NIP 1 - one point, no bending (Vol I R17 p.41-66) - is reproduced on
-      neither arm: that would take N = 1, which both switches leave alone
-      and on which the starter zeroes Ashear and turns Ishell 0 / 2 into 1
-      with WARNING 322 (``hm_read_prop01.F:246-259``) - not measured, a
-      ROADMAP item. MEASURED (starter + engine, nt 1, 2026-10-31): a NIP-1
-      *MAT_ELASTIC strip is written N 2 on both arms and prints 1 x WARNING
-      1084 on both (anim files byte-equal, T01 equal);
+    * its NIP is not 1. A NIP-1 section is not a K-31 section. Since R14
+      round 10 (A2, :func:`_nip1_one_point_secids`, ``--no-nip1-one-point``
+      opts out) it is written N 1 - LS-DYNA's own one point, no bending (Vol
+      I R17 p.41-66), which both starter switches leave alone and on which
+      the starter zeroes Ashear and turns Ishell 0 / 2 into 1 with WARNING
+      322 (``hm_read_prop01.F:246-259``; Ishell 12 / 24 are left alone) -
+      when all its shell elements are triangles; with quadrilaterals (or an
+      initial-state record) it keeps max(2, NIP) = 2, and the starter
+      switches that LAW1 group to N = 0 with WARNING 1084 like every LAW1
+      group written N > 1 (``cgrtails.F:780-791``; a /SH3N group silently,
+      ``c3grtails.F:710``). MEASURED (starter + engine, nt 1, 2026-10-31): a
+      NIP-1 *MAT_ELASTIC quad strip is written N 2 on both K-31 arms and
+      prints 1 x WARNING 1084 on both (anim files byte-equal, T01 equal);
+      (R14 round 10) a /SH3N cantilever's N-1 strip hangs (tip -81.76 mm)
+      where N 2 bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm);
     * no ``*INITIAL_STRESS_SHELL`` / ``*INITIAL_STRAIN_SHELL`` record names
       one of its elements, directly or through a ``*SET_SHELL``: an /INISHE
       record carries one station per through-thickness point and
@@ -2697,21 +2699,7 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
     eid2pid = {e.eid: e.pid for e in state.shell_elems}
-    touched: Set[int] = set()
-    for rec in state.ini_stress_shells:
-        sid = part_secids.get(eid2pid.get(rec.eid, 0))
-        if sid is not None:
-            touched.add(sid)
-    for rec in state.ini_strain_shells:
-        if getattr(rec, "is_set", False):
-            entry = state.shell_sets.get(rec.eid)
-            eids = list(entry[1]) if entry else []
-        else:
-            eids = [rec.eid]
-        for eid in eids:
-            sid = part_secids.get(eid2pid.get(eid, 0))
-            if sid is not None:
-                touched.add(sid)
+    touched = _ini_state_shell_secids(state, part_secids, eid2pid)
     law_of: Dict[int, Optional[int]] = {}
     seen: Set[int] = set()
     other: Set[int] = set()
@@ -2732,10 +2720,101 @@ def _law1_global_n_secids(state: ConversionState) -> FrozenSet[int]:
         if sid in state.sec_shells and state.sec_shells[sid].nip != 1)
 
 
-def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int]) -> int:
-    """The /PROP/SHELL N cell: 0 on a K-31 section (``_law1_global_n_secids``),
-    else ``max(2, NIP)``, the value k2rad has always written."""
-    return 0 if sec.secid in global_n else max(2, sec.nip)
+def _ini_state_shell_secids(state: ConversionState,
+                            part_secids: Dict[int, int],
+                            eid2pid: Dict[int, int]) -> Set[int]:
+    """The ``*SECTION_SHELL`` ids an ``*INITIAL_STRESS_SHELL`` /
+    ``*INITIAL_STRAIN_SHELL`` record names (directly or through a
+    ``*SET_SHELL``): writer/inistate writes their /INISHE stations for
+    N = max(2, NIP), so neither K-31 nor A2 (R14 round 10) changes their N.
+    (Moved out of :func:`_law1_global_n_secids` unchanged.)"""
+    touched: Set[int] = set()
+    for rec in state.ini_stress_shells:
+        sid = part_secids.get(eid2pid.get(rec.eid, 0))
+        if sid is not None:
+            touched.add(sid)
+    for rec in state.ini_strain_shells:
+        if getattr(rec, "is_set", False):
+            entry = state.shell_sets.get(rec.eid)
+            eids = list(entry[1]) if entry else []
+        else:
+            eids = [rec.eid]
+        for eid in eids:
+            sid = part_secids.get(eid2pid.get(eid, 0))
+            if sid is not None:
+                touched.add(sid)
+    return touched
+
+
+#: R14 round 10, A2: the 2-D ELFORMs on which the through-thickness
+#: integration "is not meaningful" (Vol I R17 p.41-67), so NIP 1 means
+#: nothing there and A2 leaves them alone.
+_TWO_D_SHELL_ELFORMS_A2 = frozenset({12, 13, 14, 15, 43, 44, 52, 55, 29, -29})
+
+
+def _nip1_one_point_secids(state: ConversionState, force: bool = False
+                           ) -> Tuple[FrozenSet[int], Dict[int, str]]:
+    """R14 round 10, A2 (``nip1_one_point``, default ON,
+    ``--no-nip1-one-point``): ``(the sections written /PROP/SHELL N 1,
+    {secid: why kept at max(2, NIP)})``.
+
+    A ``*SECTION_SHELL`` with NIP 1 (stated, or a one-point
+    ``*INTEGRATION_SHELL`` - writer/composites pushes the rule's count onto
+    ``sec.nip`` before this runs) and a 3-D ELFORM, all of whose shell
+    elements are triangles (3 nodes, or n3 == n4), is written N 1: LS-DYNA's
+    one point, no bending (Vol I R17 p.41-66), which no starter switch
+    touches (``c3grtails.F:710``) and on which the starter zeroes Ashear
+    itself (``hm_read_prop01.F:246-259``). Kept at max(2, NIP) = 2 and named:
+    a section with quadrilaterals (``"quads"``: the one-point QBAT / QEPH
+    quads diverged in the round-10 probes) and one an initial-state record
+    names (``"initial state"``: writer/inistate writes its stations for
+    max(2, NIP)). A section without shell elements is not touched. *force*:
+    the set the default would write, whatever the option says (for the
+    opt-out's sentence)."""
+    if not (force or state.options.nip1_one_point):
+        return frozenset(), {}
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    eid2pid = {e.eid: e.pid for e in state.shell_elems}
+    tri: Dict[int, int] = defaultdict(int)
+    quad: Dict[int, int] = defaultdict(int)
+    for e in state.shell_elems:
+        sid = part_secids.get(e.pid)
+        if sid is None:
+            continue
+        nd = list(e.nodes)
+        if len(nd) == 3 or (len(nd) == 4 and nd[2] == nd[3]):
+            tri[sid] += 1
+        else:
+            quad[sid] += 1
+    touched = _ini_state_shell_secids(state, part_secids, eid2pid)
+    one: Set[int] = set()
+    kept: Dict[int, str] = {}
+    for sid, sec in state.sec_shells.items():
+        if sec.nip != 1 or sec.elform in _TWO_D_SHELL_ELFORMS_A2:
+            continue
+        if tri.get(sid, 0) + quad.get(sid, 0) == 0:
+            continue
+        if quad.get(sid, 0):
+            kept[sid] = "quads"
+        elif sid in touched:
+            kept[sid] = "initial state"
+        else:
+            one.add(sid)
+    return frozenset(one), kept
+
+
+def _shell_prop_n(sec: SectionShell, global_n: FrozenSet[int],
+                  one_point: FrozenSet[int] = frozenset()) -> int:
+    """The /PROP/SHELL N cell: 0 on a K-31 section (``_law1_global_n_secids``,
+    never a NIP-1 one), 1 on a round-10 A2 section
+    (``_nip1_one_point_secids``), else ``max(2, NIP)``, the value k2rad has
+    always written."""
+    if sec.secid in global_n:
+        return 0
+    if sec.secid in one_point:
+        return 1
+    return max(2, sec.nip)
 
 
 #: R14 round 10, A1: the LS-DYNA *SECTION_SHELL ELFORMs on which SHRF acts on
@@ -3588,6 +3667,9 @@ def _make_properties(state: ConversionState) -> List[str]:
     # K-31 (--no-law1-shell-global-n opts out): an all-LAW1 section is written
     # N = 0, the global integration cgrtails.F:780-791 switches it to anyway.
     global_n = _law1_global_n_secids(state)
+    # R14 round 10, A2 (--no-nip1-one-point opts out): a NIP-1 section of
+    # triangles only is written N 1, LS-DYNA's one point
+    one_point, nip1_kept = _nip1_one_point_secids(state)
     shrf_notes: Dict[str, List[SectionShell]] = defaultdict(list)
     # a deck routed to the 2-D axisymmetric deck rewrites its ELFORM 14 / 15
     # /PROP/SHELL as /PROP/SOLID (writer/axisym2d): no Ashear, no SHRF note
@@ -3598,7 +3680,7 @@ def _make_properties(state: ConversionState) -> List[str]:
             continue
         ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                   state.options.shell_default_ishell)
-        nip = _shell_prop_n(sec, global_n)
+        nip = _shell_prop_n(sec, global_n, one_point)
         # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
         # (its base); parts with a different *HOURGLASS are split out below.
         hm, _ = _shell_hg_values(state, sec, None)
@@ -3615,6 +3697,7 @@ def _make_properties(state: ConversionState) -> List[str]:
             if cls:
                 shrf_notes[cls].append(sec)
     _warn_shell_shrf(state, shrf_notes)
+    _warn_nip1_one_point(state, one_point, nip1_kept)
     cohesive_secids = _cohesive_solid_secids(state)
     # (secid, elform, emitted Isolid, emitted h) for every solid section whose
     # Isolid the LS-DYNA-default hourglass synthesis actually MOVED — reported
@@ -5643,6 +5726,70 @@ def _warn_shell_shrf(state: ConversionState,
             "default 1.0.")
 
 
+def _capped_ids(ids: List[int]) -> str:
+    """'1, 2, 3' with the K-32 10-id cap: '..., ... (N sections)'."""
+    ids = sorted(ids)
+    shown = ", ".join(str(i) for i in ids[:10])
+    if len(ids) > 10:
+        shown += f", ... ({len(ids)} sections)"
+    return shown
+
+
+def _warn_nip1_one_point(state: ConversionState, one_point: FrozenSet[int],
+                         kept: Dict[int, str]) -> None:
+    """R14 round 10, A2: name the NIP-1 sections written N 1 and those kept
+    at max(2, NIP) with the reason, once per deck (the per-section loop; the
+    hourglass split copies carry the same N). ``--no-nip1-one-point`` names
+    the sections the default would write N 1 as bending shells."""
+    if not state.options.nip1_one_point:
+        ids = sorted(_nip1_one_point_secids(state, force=True)[0])
+        if ids:
+            state.warn(
+                f"*SECTION_SHELL {_capped_ids(ids)}: NIP 1 (one "
+                "through-thickness point, no bending, Vol I R17 p.41-66) is "
+                "written /PROP/SHELL N 2 (--no-nip1-one-point), which the "
+                "starter runs as N 0 global integration on a LAW1 group "
+                "(cgrtails.F:780-791, c3grtails.F:710): a shell that BENDS "
+                "where LS-DYNA's does not.")
+        return
+    if one_point:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(list(one_point))}: NIP 1 on a "
+            "section of triangles only -> /PROP/SHELL N 1, LS-DYNA's one "
+            "point with no bending (Vol I R17 p.41-66; its d3hsp echoes 1 "
+            "integration point): the engine integrates no moment and no "
+            "transverse shear at one point (mulawc.F90:760-765, "
+            "c3coef3.F:134-137), no starter switch acts on N 1 "
+            "(c3grtails.F:710) and the starter zeroes Ashear there "
+            "(hm_read_prop01.F:246-259). MEASURED on a /SH3N cantilever: the "
+            "N-1 strip hangs (tip -81.76 mm in the hold window) where N 2 "
+            "bends (-0.4761 mm, Euler-Bernoulli 0.47619 mm); on "
+            "mat_spring.belted-dummy (the one R14 carrier) with the SHRF rule: "
+            "IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS "
+            "peak over its 500 LS times (110032 cycles, nt 4). "
+            "--no-nip1-one-point writes N 2, which the starter "
+            "runs as N 0 on LAW1: a shell that bends.")
+    quads = [s for s, why in kept.items() if why == "quads"]
+    if quads:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(quads)}: NIP 1 (one point, no "
+            "bending, Vol I R17 p.41-66) on a section with quadrilaterals "
+            "keeps /PROP/SHELL N max(2, NIP) = 2 - a shell that BENDS where "
+            "LS-DYNA's does not (the starter runs N 2 as N 0 on LAW1, "
+            "cgrtails.F:780-791). N 1 on quads is not written: the one-point "
+            "quads of this OpenRadioss build diverged in the round-10 probes "
+            "(QBAT, Ishell 12, on a cantilever: ENERGY ERROR at cycles 81-88 "
+            "at the default step, stable at half of it; QEPH, Ishell 24, on "
+            "an elastic airbag at the full and the half step).")
+    ini = [s for s, why in kept.items() if why == "initial state"]
+    if ini:
+        state.warn(
+            f"*SECTION_SHELL {_capped_ids(ini)}: NIP 1 keeps /PROP/SHELL N "
+            "max(2, NIP) = 2 because an *INITIAL_STRESS_SHELL / "
+            "*INITIAL_STRAIN_SHELL record names the section and its /INISHE "
+            "stations are written for that N (writer/inistate).")
+
+
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
                      is_implicit: bool, istrain: int, state: ConversionState,
                      refvec=(1.0, 0.0, 0.0), phi: float = 0.0) -> List[str]:
@@ -5899,6 +6046,9 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
     emitted: Set[int] = set()
     # K-31: a split copy of an all-LAW1 section keeps the section's N = 0
     global_n = _law1_global_n_secids(state)
+    # R14 round 10, A2: ... and an A2 section's N 1 (named by the
+    # per-section loop)
+    one_point, _kept = _nip1_one_point_secids(state)
     for pid, prop_id in sorted(state.hourglass_prop_ids.items()):
         if prop_id in emitted:
             continue
@@ -5969,7 +6119,7 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                                         state.options.shell_default_ishell) if sec
                       else _elform_to_ishell(2, state.is_implicit,
                                              state.options.shell_default_ishell))
-            nip = _shell_prop_n(sec, global_n) if sec else 2
+            nip = _shell_prop_n(sec, global_n, one_point) if sec else 2
             thick = sec.t1 if sec else 0.0
             # R14 round 10, A1: the split copy carries its section's Ashear
             # (the section itself is named by the per-section loop)

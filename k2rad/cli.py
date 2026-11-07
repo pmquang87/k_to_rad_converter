@@ -2122,6 +2122,24 @@ def build_parser() -> argparse.ArgumentParser:
              "every section, stated or blank, that then runs at 5/6 where "
              "LS-DYNA does not.",
     )
+    parser.add_argument(
+        "--nip1-one-point",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write /PROP/SHELL N 1 on a *SECTION_SHELL with NIP 1 (stated, "
+             "or a one-point *INTEGRATION_SHELL) whose shell elements are all "
+             "triangles: LS-DYNA's one point with no bending (Vol I R17 "
+             "p.41-66), which no starter switch changes (c3grtails.F:710). A "
+             "NIP-1 section with quadrilaterals keeps N 2 and is named (the "
+             "one-point quads diverged in the round-10 probes: QBAT at cycles "
+             "81-88 at the default step), as is one an initial-state record "
+             "names. MEASURED: a /SH3N cantilever's N-1 strip hangs (tip "
+             "-81.76 mm) where N 2 bends (-0.4761 mm); "
+             "mat_spring.belted-dummy with --shrf-ashear (110032 cycles, nt "
+             "4): IE END +65.73 -> +46.57 %%, IE RMS 22.79 -> 14.23 %% of the "
+             "LS peak over its 500 LS times. ON by default; "
+             "--no-nip1-one-point writes max(2, NIP).",
+    )
     return parser
 
 
@@ -2298,6 +2316,7 @@ def main(argv=None) -> int:
         srnde_ishape=args.srnde_ishape,
         maxint_stress_all=args.maxint_stress_all,
         shrf_ashear=args.shrf_ashear,
+        nip1_one_point=args.nip1_one_point,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

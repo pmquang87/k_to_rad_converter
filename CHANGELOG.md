@@ -63,6 +63,34 @@ Prior history (before this changelog was introduced) is summarized in the
     `test_cardstack_pipeline.SectionShellShrf.test_shrf_moves_only_the_ashear_cell`,
     `test_cardstack_pipeline_props.GoldenFixtureMoves.test_round10_a1_moves_only_the_ashear_cells`,
     the rewritten `ShrfNote`.
+  - **A2 - NIP 1 -> `/PROP/SHELL` N 1 on a triangle-only section, by default
+    (`--no-nip1-one-point` writes max(2, NIP)).** A `*SECTION_SHELL` with
+    NIP 1 (stated, or a one-point `*INTEGRATION_SHELL`), a 3-D ELFORM and
+    shell elements that are all triangles is written N 1: LS-DYNA's one
+    point, no bending (Vol I R17 p.41-66; the belted dummy's d3hsp echoes 1
+    integration point), which no starter switch touches (`c3grtails.F:710`)
+    and on which the starter zeroes Ashear itself (`hm_read_prop01.F:246-259`).
+    Until now such a section was written N 2, which the starter runs as N 0
+    global integration on LAW1 (`cgrtails.F:780-791`): a shell that bends.
+    Kept at N 2 and named: a NIP-1 section with quadrilaterals (the one-point
+    quads of this OpenRadioss build diverged in the round-10 probes: QBAT at
+    cycles 81-88 on a cantilever at the default step, QEPH on an elastic
+    airbag) and a section an initial-state record names (writer/inistate's
+    `/INISHE` stations are written for max(2, NIP)). Both emission sites carry
+    the N (`writer/mesh._nip1_one_point_secids`); writer/composites' dropped
+    LAW1 `*INTEGRATION_SHELL` sentence names the N = 1 written. MEASURED: a
+    `/SH3N` cantilever (L 100, t 2 mm, P 2 N) - the N-1 strip hangs (tip
+    -81.76 mm in the hold window) where N 2 bends (-0.476139 mm,
+    Euler-Bernoulli 0.47619 mm); on `mat_spring.belted-dummy`, the one R14 carrier
+    (1 key / 1 model; `/PROP/SHELL/20` and `/21` N 2 -> 1), with A1 on the
+    same bytes: 110032 cycles = base, IE END +65.73 -> +46.57 % (fifths
+    +29.27 / -2.01 / +3.85 / +58.71 / +46.57 at t 0.024 .. 0.12), IE RMS
+    22.79 -> 14.23 % of the LS peak over its 500 LS times (0.00023912,
+    0.119997], KE RMS 2.24 = 2.24 %, KE at the 4th fifth +165.47 -> +177.22 %
+    (farther, named); the driven belt nodes 1763 / 1997 DX = LS nodout within
+    0.05 mm at every fifth (nt 4). Text-only: ex_20 (NIP-1 ELFORM 16 quads,
+    named). Tests: `tests/test_r14_round10.py` `A2Nip1OnePoint`;
+    `Round10FlagWiringA` += `--nip1-one-point`.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

@@ -59,6 +59,7 @@ from .mesh import (
     _emit_prop_type9,
     _emit_skew_fix,
     _law1_global_n_secids,
+    _nip1_one_point_secids,
     _ortho_skew_axes,
     _shell_istrain_flag,
 )
@@ -1383,7 +1384,17 @@ def _resolve_integration_shells(state: ConversionState) -> None:
             if global_n is None:
                 global_n = _law1_global_n_secids(state)
             n_plain = max(2, sec.nip)
-            if sec.secid in global_n:
+            # R14 round 10, A2: a NIP-1 section of triangles only is written
+            # N 1, which no starter switch touches (c3grtails.F:710)
+            if sec.secid in _nip1_one_point_secids(state)[0]:
+                kept = (
+                    "The part keeps its plain /PROP/SHELL with a UNIFORM "
+                    "thickness, written N = 1 (LS-DYNA's one point, no "
+                    "bending; no starter switch acts on N 1, "
+                    "c3grtails.F:710; --no-nip1-one-point writes "
+                    f"max(2, NIP) = {n_plain}, which the starter switches to "
+                    "N = 0 for a LAW1 group)")
+            elif sec.secid in global_n:
                 kept = (
                     "The part keeps its plain /PROP/SHELL with a UNIFORM "
                     "thickness, written N = 0 (global integration: the N "
