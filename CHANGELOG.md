@@ -16,7 +16,11 @@ Prior history (before this changelog was introduced) is summarized in the
   every later item of the round is measured on the bytes of the earlier ones
   (A1 first). The movers below are the part-A-i research sweep of all 356 R14
   roster keys (= 312 emitted models) through the prototype of this code,
-  every changed line classified by cell, 0 unattributed; the campaign pass on
+  every changed line classified by cell, 0 unattributed; the shipped commits
+  write the same bytes as that prototype on every emitted file of the 356
+  keys (sha256, 713 files). In all part A-i moves the bytes of 167 keys / 146
+  models (A1 148 / 132, A2 1 / 1, A4 8 / 8, A5 21 / 16; 11 keys by two
+  items) and the warning text of 189 keys / 169 models; the campaign pass on
   the branch (report section 0.36) replaces them by its own measurement.
   - **A1 - `*SECTION_SHELL` SHRF -> `/PROP/SHELL` Ashear, by default
     (`--no-shrf-ashear` writes Ashear 0 everywhere).** A blank or 0 SHRF is
@@ -134,7 +138,7 @@ Prior history (before this changelog was introduced) is summarized in the
     -1.37 / -1.93 / -5.13), KE RMS 8.54 -> 1.74 % of the LS peak over its 150
     LS times (9.936e-6, 1.49991e-3], IE END +0.1348 % on both arms, the
     driven die `/TH/NODE/90024` DZ = the integral of LCID 1 at every fifth -
-    the round's one expected verdict flip, deviation -> match. The named
+    the round's one EXPECTED verdict flip, deviation -> match. The named
     cost: `07_metalstrip` (DT2MS -1e-4, TSSFAC 0.5; not_comparable, LS IE a
     structural zero) runs x2.000 cycles (20000, LS 20001), its added mass
     +167.08 -> -33.22 % of LS-DYNA's 0.5485 t at every fifth, KE END -93.73
@@ -196,7 +200,7 @@ Prior history (before this changelog was introduced) is summarized in the
     1.05e-4) KE 0.160 -> 170.1, ERROR -99.9 %; the R14 stop rows' remainders
     are 62 - 85 % of the step (clean last rows). Movers: 21 R14 keys / 16
     models by the two engine lines (18 runnable + 3 giants); 0 status /
-    verdict moves expected. Tests: `tests/test_r14_round10.py`
+    verdict moves EXPECTED. Tests: `tests/test_r14_round10.py`
     `A5EndFixpoint` (the bytes of `fixpoint_count=1`, the opt-out = 2 lines
     fewer, the sentence, static / RIKS / a 4-point grid untouched);
     `Round10FlagWiringA` += `--implicit-end-fixpoint`. No existing pin moves.
