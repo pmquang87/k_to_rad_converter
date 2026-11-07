@@ -626,6 +626,24 @@ class A5EndFixpoint(unittest.TestCase):
         _r, _s, eng = _convert(riks)                 # the control: /IMPL/DT/2
         self.assertIn("/IMPL/DT/FIXPOINT", eng.splitlines())
 
+    def test_a_stated_imass_0_is_static_and_untouched(self):
+        """*CONTROL_IMPLICIT_DYNAMICS stated with IMASS 0 is a static
+        analysis: the deck gets no /IMPL/DYNA card and no end fix point,
+        the same engine file as a deck without the card
+        (writer/assembly._implicit_end_fixpoint keys on IMASS > 0)."""
+        dyn1 = _row(1, 0.5, 0.25, 0.0, "1.0E28", "1.0E28", 0, 0.0)
+        dyn0 = _row(0, 0.5, 0.25, 0.0, "1.0E28", "1.0E28", 0, 0.0)
+        deck = _hex_block().replace(dyn1, dyn0)
+        self.assertIn(dyn0, deck)
+        res, _s, eng = _convert(deck)
+        self.assertNotIn("/IMPL/DT/FIXPOINT", eng)
+        self.assertFalse([ln for ln in eng.splitlines()
+                          if ln.startswith("/IMPL/DYNA")], eng)
+        self.assertFalse([w for w in res.warnings
+                          if w.startswith("/IMPL/DT/FIXPOINT")])
+        _r, _s, eng_none = _convert(_hex_block(dynamic=False))
+        self.assertEqual(eng, eng_none)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A11  the *CONTROL_TIMESTEP texts (the deletion-floor bytes:
