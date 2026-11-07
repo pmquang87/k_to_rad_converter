@@ -1848,9 +1848,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit /DT/{SHELL,SH_3N,BRICK}/DEL with this Tmin (seconds): "
              "OpenRadioss DELETES any element whose time step reaches it. "
              "Opt-in, and off unless given — the card removes mass and "
-             "stiffness the LS-DYNA original may have kept. Without it a "
-             "deletion floor is emitted only when the deck asks, i.e. "
-             "*CONTROL_TIMESTEP ERODE=1 with TSLIMT>0. Use it as an escape "
+             "stiffness the LS-DYNA original may have kept. Without it no "
+             "deletion floor is written since round 10 (A11): "
+             "*CONTROL_TIMESTEP TSLIMT is LS-DYNA's shell MODULUS floor, and "
+             "its erosion floor DTMIN x dtstart is not converted (both named; "
+             "--no-erode-tsmin-rule restores ERODE=1 with TSLIMT>0 as a "
+             "floor). Use it as an escape "
              "hatch for a long run where one degrading element drags the "
              "global step toward zero. Pick the value as a DELETION "
              "threshold, not a mass-scaling target: ~0.9x the initial step "
@@ -2205,6 +2208,21 @@ def build_parser() -> argparse.ArgumentParser:
              "alone turns the run dynamic, freimpl.F:171), for an LCID > 0 or "
              "a per-DOF card, or beside *DAMPING_PART_* cards - each named.",
     )
+    parser.add_argument(
+        "--erode-tsmin-rule",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="*CONTROL_TIMESTEP ERODE 1 with TSLIMT > 0 writes no "
+             "/DT/{SHELL,SH_3N,BRICK}/DEL: TSLIMT is LS-DYNA's shell MODULUS "
+             "floor for *MAT 3 / 18 / 19 / 24 shells (Vol I R17 p.12-584 / "
+             "12-585), never an erosion floor, and LS-DYNA's own floor tsmin "
+             "= DTMIN x dtstart (*CONTROL_TERMINATION DTMIN, p.12-558; Remark "
+             "6 p.12-590) is not converted; both are named. MEASURED on a "
+             "10-brick column (ERODE 1, TSLIMT 1e-7): the ed52c93 cards "
+             "delete 10 of 10 bricks at t 2.988e-4 where LS-DYNA's closed "
+             "form deletes none. --dt-del stays the explicit floor. ON by "
+             "default; --no-erode-tsmin-rule restores the TSLIMT trigger.",
+    )
     return parser
 
 
@@ -2384,6 +2402,7 @@ def main(argv=None) -> int:
         nip1_one_point=args.nip1_one_point,
         implicit_end_fixpoint=args.implicit_end_fixpoint,
         implicit_rayleigh_damping=args.implicit_rayleigh_damping,
+        erode_tsmin_rule=args.erode_tsmin_rule,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

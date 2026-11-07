@@ -71,6 +71,18 @@ def _sha(text: str) -> str:
 _K3_OFF = dict(tet_isolid1=False, law1_shell_global_n=False,
                shrf_ashear=False)
 
+#: R14 round 10, A11: the Tmin clause of the *CONTROL_TIMESTEP TSSFAC
+#: sentence, as round 10 writes it and as ed52c93 wrote it (a warning-list
+#: pin measured before round 10 swaps the new clause back).
+_A11_TMIN_CLAUSE = (
+    "Tmin=0 (no lower bound): this /DT card neither stops nor deletes on a "
+    "small step (element deletion is the separate /DT/<elem>/DEL card), and "
+    "LS-DYNA has no floor either: *CONTROL_TERMINATION DTMIN is 0, so its "
+    "tsmin = DTMIN x dtstart is 0 (Vol I R17 p.12-558).")
+_A11_TMIN_CLAUSE_ED52C93 = (
+    "Tmin=0 (no lower bound) because LS-DYNA TSLIMT is not converted, so "
+    "the engine will not stop or delete on a small step.")
+
 
 def _k3_default_moves(off: str, on: str):
     """``[(card header, cell before, cell after)]``: the starter cells the
@@ -1881,11 +1893,15 @@ class AdaptiveSpringToken(unittest.TestCase):
         self.assertEqual(_sha(s0), _PR8_SHA["a5_d2"])
         # the 4f5b6e8 warnings but for the r2len3.F citation the fix round
         # corrected (:182-186 is the nodal-step / AMS branch; the default
-        # element step is :221-247)
+        # element step is :221-247) and the *CONTROL_TIMESTEP Tmin clause
+        # round 10 corrected (A11: TSLIMT is a shell-modulus floor, not a
+        # stop / delete field)
         joined = "\n".join(res.warnings)
         self.assertIn("r2len3.F:221-247", joined)
+        self.assertIn(_A11_TMIN_CLAUSE, joined)
         self.assertEqual(
-            _sha(joined.replace("r2len3.F:221-247", "r2len3.F:182-186")),
+            _sha(joined.replace("r2len3.F:221-247", "r2len3.F:182-186")
+                 .replace(_A11_TMIN_CLAUSE, _A11_TMIN_CLAUSE_ED52C93)),
             _PR8_WARN_SHA["a5_d2"])
         self.assertFalse(_has(res.warnings, _WA5))
 

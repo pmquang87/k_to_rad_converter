@@ -230,6 +230,54 @@ Prior history (before this changelog was introduced) is summarized in the
     static and dynamic; the opt-in card and its two engine lines; the three
     refusals; the uniform 0.5 x 11.535 = 5.7675) and `Round10OptInWiring`; the
     README section `--implicit-rayleigh-damping`, docs/IMPLICIT.md.
+  - **A11 - the erosion floor reads the right LS-DYNA field: ERODE 1 + TSLIMT
+    > 0 is no deletion floor (default; `--no-erode-tsmin-rule` restores it),
+    TSLIMT / ERODE / DTMIN named, the TSSFAC Tmin text corrected, a TSSFAC
+    curve named.** `writer/assembly._make_engine_dt_deletion` wrote
+    `/DT/{SHELL,SH_3N,BRICK}/DEL` Tmin = TSLIMT whenever ERODE was 1 and
+    TSLIMT > 0. TSLIMT is LS-DYNA's shell minimum time step ASSIGNMENT - the
+    moduli (not the masses) of `*MAT` 3 / 18 / 19 / 24 shells are modified so
+    the step stays above it (Vol I R17 p.12-584 / 12-585), never an erosion
+    floor - and ERODE erodes below tsmin = DTMIN x dtstart of
+    `*CONTROL_TERMINATION` (p.12-558; p.12-586 / Remark 6 p.12-590), LS-DYNA's
+    own initial step, which k2rad does not compute. MEASURED on the census's
+    per-family coupons (ERODE 1, TSLIMT 1e-7): those cards deleted 10 of 10
+    bricks at t 2.988e-4 (closed form 2.990e-4), 2 shells at 3.736e-4 and 2
+    triangles at 2.404e-4, where LS-DYNA's closed form deletes none (its
+    tsmin is 0); the default now writes the v0 bytes, whose runs delete
+    nothing. One recognized-not-emitted record names both fields
+    (`_note_erode_tslimt`; one record because the log deduplicates on the
+    keyword): the TSLIMT semantics with the DT2MS interplay, and the ERODE
+    classes by digit with the deck's DTMIN. The `*CONTROL_TIMESTEP` TSSFAC
+    sentence's Tmin clause (100 R14 keys / 88 models, 22 match rows among them
+    by text only) said "Tmin=0 (no lower bound) because LS-DYNA TSLIMT is not
+    converted" - wrong twice; it now says the `/DT` card neither stops nor
+    deletes and reads DTMIN (`_tsmin_clause`: 0 on 98 of the 100, birdball's
+    0.3 and 2Dlag's 0.001 named as not converted). A TSSFAC < 0 curve on a
+    DT2MS >= 0 deck used to vanish without a word: it is named with its range
+    over 0 .. ENDTIM (`_tssfac_curve_sentence`; `/DT` has no curve input,
+    `freform.F:1033-1043`; a constant-0.5 probe stepped 1.8x the asked step).
+    Deviation from the part-A-i prototype, a documented defect: the range is
+    read from the stored curve points, which `handle_define_curve` already
+    scaled and offset - the prototype applied SFA / SFO / OFFA / OFFO a
+    second time (pinned by `A11Texts.test_the_curve_range_is_the_stored_points_once_scaled`).
+    The LS-faithful erosion card (ERODE digits -> the element classes, Tmin =
+    DTMIN x dtstart) is NOT built: it needs LS-DYNA's dtstart, and the two R14
+    carriers (birdball, 2Dlag) erode nothing in LS-DYNA's own runs. Movers: 0
+    bytes on the R14 roster (0 decks state TSLIMT != 0); text 100 keys / 88
+    models; birdball and 2Dlag swap the half-request record for the ERODE
+    record. Moved pins: `tests/test_dt_deletion_floor.py` (`TestTheDeckAsking`
+    on the `--no-erode-tsmin-rule` arm, `TestOrderingAgainstMassScaling` on
+    `dt_del=3.5e-8` and the legacy arm, new `TestTheDeckAskingRound10`);
+    `test_cardstack_pipeline_engine.Dt2msTexts` (`_OLD_DT2MS0_TEXT` ->
+    `_DT2MS0_TEXT`, `test_dt2ms_zero_keeps_the_old_text_byte_for_byte` ->
+    `test_dt2ms_zero_text_byte_for_byte`, the coexistence test on `dt_del`
+    and the legacy arm, the routed-deck tests on `erode_tsmin_rule=False`,
+    new `test_the_default_erode_and_tslimt_write_no_floor`);
+    `test_r14_triage_8.AdaptiveSpringToken.test_7_inert_without_compensation_and_the_opt_out`
+    swaps the new clause back before hashing (the 4f5b6e8 SHA stands). New:
+    `tests/test_r14_round10.py` `A11Texts`, the A11 needles of
+    `Round10RetractedStatementsA`, `Round10FlagWiringA` += `--erode-tsmin-rule`.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

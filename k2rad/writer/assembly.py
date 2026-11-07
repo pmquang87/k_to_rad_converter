@@ -3758,9 +3758,13 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
         Tsca  Tmin
 
     Tmin is emitted as 0.0 = no lower bound. Tmin on /DT is a run-STOP
-    threshold, and LS-DYNA's equivalent (TSLIMT) is a different field that this
-    handler does not parse; inventing one would stop runs the user never asked
-    to stop. Tsca is the only thing being carried across.
+    threshold; LS-DYNA's own floor is tsmin = DTMIN x dtstart of
+    *CONTROL_TERMINATION (Vol I R17 p.12-558), which k2rad does not compute,
+    and TSLIMT is a shell MODULUS floor, not a stop field (p.12-584 / 12-585;
+    R14 round 10, A11 - the sentence names both through _tsmin_clause).
+    Inventing a Tmin would stop runs the user never asked to stop. Tsca is
+    the only thing being carried across; a TSSFAC < 0 curve is named
+    (_tssfac_curve_sentence), not converted.
 
     Only emitted when TSSFAC > 0. TSSFAC = 0 is LS-DYNA's "use my default"
     (0.9), which is also OpenRadioss's /DT default, so there is nothing to
@@ -3778,30 +3782,57 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
     tsca = ts.tssfac
     converted, positive = (_positive_dt2ms_clause(state, ts)
                            if ts.dt2ms > 0.0 else (False, ""))
+    if tsca and tsca < 0.0:
+        # R14 round 10, A11 (f3): a TSSFAC < 0 curve used to be dropped in
+        # silence on this path (the DT2MS < 0 path names it,
+        # _tssfac_for_dt2ms)
+        state.warn(_tssfac_curve_sentence(state, ts) + positive)
+        return []
     if not tsca or tsca <= 0.0:
         if positive and not converted:
             # the drop that used to be silent (no /DT to hang a text on)
             state.warn(f"*CONTROL_TIMESTEP{positive}")
         return []
+    # R14 round 10, A11: Tmin 0 is 'no lower bound'; TSLIMT is LS-DYNA's
+    # shell MODULUS floor, not a stop / delete field (the sentence said so
+    # before round 10), and LS-DYNA's own floor is *CONTROL_TERMINATION
+    # DTMIN x dtstart (named by _make_engine_dt_deletion)
+    floor = _tsmin_clause(state)
     if ts.dt2ms > 0.0:
         state.warn(
             f"*CONTROL_TIMESTEP TSSFAC={tsca:g} -> /DT Tsca={tsca:g}. The "
-            "time-step safety factor is carried over; Tmin=0 (no lower "
-            "bound) because LS-DYNA TSLIMT is not converted, so the engine "
-            "will not stop or delete on a small step." + positive)
+            "time-step safety factor is carried over; " + floor + positive)
     else:
         state.warn(
             f"*CONTROL_TIMESTEP TSSFAC={tsca:g} (DT2MS={ts.dt2ms:g}, no mass "
             f"scaling) -> /DT Tsca={tsca:g}. The time-step safety factor is "
-            "carried over; Tmin=0 (no lower bound) because LS-DYNA TSLIMT is "
-            "not converted, so the engine will not stop or delete on a small "
-            "step."
+            "carried over; " + floor
         )
     return [
         "/DT",
         f"{_f(tsca)}{_f(0.0)}",
         "#",
     ]
+
+
+def _tsmin_clause(state: ConversionState) -> str:
+    """R14 round 10, A11: the Tmin clause of the *CONTROL_TIMESTEP TSSFAC
+    sentence. The /DT card's Tmin 0 is 'no lower bound'; LS-DYNA's own floor
+    is tsmin = DTMIN x dtstart of *CONTROL_TERMINATION (Vol I R17 p.12-558),
+    0 when DTMIN is 0 - TSLIMT is a shell-modulus floor, not a stop / delete
+    field (p.12-584), which the ed52c93 clause implied."""
+    ct = state.ctrl_termination
+    dtmin = ct.dtmin if ct is not None else 0.0
+    head = ("Tmin=0 (no lower bound): this /DT card neither stops nor "
+            "deletes on a small step (element deletion is the separate "
+            "/DT/<elem>/DEL card)")
+    if dtmin and dtmin > 0.0:
+        return (f"{head}; LS-DYNA's own floor tsmin = DTMIN x dtstart "
+                f"(*CONTROL_TERMINATION DTMIN={dtmin:g}, Vol I R17 "
+                "p.12-558) is not converted.")
+    return (f"{head}, and LS-DYNA has no floor either: *CONTROL_TERMINATION "
+            "DTMIN is 0, so its tsmin = DTMIN x dtstart is 0 (Vol I R17 "
+            "p.12-558).")
 
 
 def _positive_dt2ms_clause(state: ConversionState, ts) -> Tuple[bool, str]:
@@ -3837,6 +3868,42 @@ def _tssfac_for_dt2ms(ts) -> Tuple[float, str]:
         return 0.9, (f"TSSFAC {ts.tssfac:g} < 0 (load curve "
                      f"{int(round(-ts.tssfac))}, not converted) -> 0.9; ")
     return 0.9, "TSSFAC blank -> 0.9; "
+
+
+def _tssfac_curve_sentence(state: ConversionState, ts) -> str:
+    """R14 round 10, A11 (f3): the DT2MS >= 0 deck's TSSFAC < 0 load curve
+    (Vol I R17 p.12-584 'LT.0.0: |TSSFAC| is the load curve or function
+    ID'), named with its ordinate range over 0 .. ENDTIM - the engine /DT has
+    no curve input (``freform.F:1033-1043``), so OpenRadioss steps at its
+    default scale, 0.9 in 3-D and 0.67 on a 2-D deck
+    (``contrl.F:1148-1149``). Until round 10 this path dropped the curve in
+    silence (no /DT, no text; the curve an orphan /FUNCT)."""
+    lcid = int(round(-ts.tssfac))
+    dflt = "0.67 on this routed 2-D deck" if axisym_routed(state) else "0.9"
+    cur = state.curves.get(lcid)
+    t_end = (state.ctrl_termination.endtim
+             if state.ctrl_termination is not None else 0.0)
+    rng = ""
+    if cur is not None and cur.pts:
+        # Curve.pts is ALREADY scaled and offset by handle_define_curve
+        # (((x + OFFA) SFA, (y + OFFO) SFO), writer/materials
+        # _law106_curve_points): applying SFA / SFO / OFFA / OFFO again would
+        # square the factors (the part-A-i prototype did; fixed here)
+        pts = list(cur.pts)
+        inside = [y for x, y in pts if 0.0 <= x <= t_end] if t_end > 0 else []
+        ys = inside or [y for _x, y in pts]
+        rng = (f"; the curve ranges {min(ys):g} .. {max(ys):g}"
+               + (f" over 0 .. ENDTIM {t_end:g}" if inside else
+                  " over its points"))
+    else:
+        rng = f"; load curve {lcid} is not defined in the deck"
+    return (f"*CONTROL_TIMESTEP TSSFAC={ts.tssfac:g} < 0 (load curve {lcid}, "
+            "the scale factor as a function of time, Vol I R17 p.12-584) is "
+            "NOT converted: the engine /DT has no curve input "
+            "(freform.F:1033-1043), so OpenRadioss steps at its default "
+            f"scale {dflt} (contrl.F:1148-1149){rng}. MEASURED on a "
+            "constant-0.5 curve probe: OpenRadioss stepped 1.8x the asked "
+            "step (cycle ratio 1.800, 0.9 / 0.5).")
 
 
 def _dt2ms_tmin(state: ConversionState, ts,
@@ -3906,17 +3973,24 @@ _DT_DEL_KINDS = ("SHELL", "SH_3N", "BRICK")
 def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     """``/DT/<elem>/DEL`` — delete an element whose time step reaches Tmin.
 
-    **This card deletes elements, so k2rad never emits it uninvited.** Two
-    routes in, both explicit:
+    **This card deletes elements, so k2rad never emits it uninvited.** Since
+    R14 round 10 (A11, ``erode_tsmin_rule``) there is ONE route in, the
+    user's:
 
-    * the DECK asks: ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0``.
-      ERODE is precisely LS-DYNA's "delete elements that fall below the floor",
-      so carrying it across is faithful rather than inventive. Both fields used
-      to be sliced off the card and dropped silently;
     * the USER asks: ``--dt-del <seconds>`` (``convert(dt_del=...)``) — the
       escape hatch for a long run where one degrading element drags the global
       step toward zero and the job never finishes. It has no LS-DYNA
-      counterpart, so it is opt-in and never derived automatically.
+      counterpart, so it is opt-in and never derived automatically;
+    * ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0`` used to be the
+      second route (Tmin = TSLIMT). It reads the wrong LS-DYNA field: TSLIMT
+      is the shell MODULUS floor of ``*MAT`` 3 / 18 / 19 / 24 shells (Vol I
+      R17 p.12-584 / 12-585), and ERODE erodes below tsmin = DTMIN x dtstart
+      (``*CONTROL_TERMINATION`` DTMIN, p.12-558; Remark 6 p.12-590), which
+      k2rad does not compute. MEASURED on a 10-brick column (ERODE 1, TSLIMT
+      1e-7): those cards deleted 10 of 10 bricks at t 2.988e-4 where LS-DYNA's
+      closed form deletes none. The default names both fields
+      (:func:`_note_erode_tslimt`); ``--no-erode-tsmin-rule`` restores that
+      trigger byte for byte.
 
     ORDERING AGAINST MASS SCALING, which issue #78 flagged as the crux and
     feared would leave one of the two cards as dead configuration. Verified in
@@ -3947,19 +4021,26 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     if _engine_implicit(state) or state.is_modal:
         return []
     explicit = state.options.dt_del
+    # R14 round 10, A11 (default ON, --no-erode-tsmin-rule restores the
+    # ed52c93 trigger): ERODE 1 + TSLIMT > 0 is no deletion floor
+    legacy = not state.options.erode_tsmin_rule
     tmin = None
     source = ""
     if explicit is not None and explicit > 0.0:
         tmin = float(explicit)
         source = f"--dt-del {tmin:g}"
-    elif ts is not None and int(ts.erode) == 1 and ts.tslimt > 0.0:
+    elif (legacy and ts is not None and int(ts.erode) == 1
+          and ts.tslimt > 0.0):
         tmin = float(ts.tslimt)
         source = f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}"
+    if not legacy and ts is not None:
+        _note_erode_tslimt(state, ts)
 
     if tmin is None:
         # Nothing to emit — but SAY so when the deck asked for something and
         # only half of it is usable, instead of dropping it on the floor.
-        if ts is not None and (int(ts.erode) == 1 or ts.tslimt > 0.0):
+        if legacy and ts is not None and (int(ts.erode) == 1
+                                          or ts.tslimt > 0.0):
             state.note_recognized_not_emitted(
                 "CONTROL_TIMESTEP",
                 f"ERODE={int(ts.erode)} / TSLIMT={ts.tslimt:g} asks for element "
@@ -4023,6 +4104,80 @@ def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
     for kind in _DT_DEL_KINDS:
         out += [f"/DT/{kind}/DEL", f"{_f(tsca)}{_f(tmin)}", "#"]
     return out
+
+
+def _erode_digits(erode: int) -> List[str]:
+    """The element classes a *CONTROL_TIMESTEP ERODE value erodes, by digit
+    (Vol I R17 p.12-586 / Remark 6 p.12-590: ones = solids, thick shells and
+    SPH; tens = shells; hundreds = beams)."""
+    e = abs(int(erode))
+    out = []
+    if e % 10:
+        out.append("solid and thick-shell elements (SPH particles are "
+                   "deactivated)")
+    if (e // 10) % 10:
+        out.append("shell elements")
+    if (e // 100) % 10:
+        out.append("beam elements")
+    return out
+
+
+def _note_erode_tslimt(state: ConversionState, ts) -> None:
+    """R14 round 10, A11: name what *CONTROL_TIMESTEP TSLIMT and ERODE ask
+    for, with LS-DYNA's semantics, instead of deleting on TSLIMT.
+
+    * TSLIMT is the shell minimum time step ASSIGNMENT: the MODULI (not the
+      masses) of *MAT_PLASTIC_KINEMATIC / _POWER_LAW_PLASTICITY /
+      _STRAIN_RATE_DEPENDENT_PLASTICITY / _PIECEWISE_LINEAR_PLASTICITY shells
+      are modified so the shell step does not fall below it; with DT2MS
+      active a positive TSLIMT is disabled (10^-18), a negative one below
+      |DT2MS| is applied before the mass is scaled (Vol I R17 p.12-584 /
+      12-585). OpenRadioss has no modulus floor: not converted.
+    * ERODE: elements whose step falls below tsmin = DTMIN x dtstart
+      (*CONTROL_TERMINATION DTMIN, p.12-558; Remark 6 p.12-590) erode, by
+      digit; dtstart is LS-DYNA's own initial step, which k2rad does not
+      compute: not converted. DTMIN 0 = no tsmin, nothing erodes.
+    ONE recognized_not_emitted record (the bucket the ed52c93 half-request
+    record used; the log deduplicates on the keyword, so the two sentences
+    share it)."""
+    parts: List[str] = []
+    if ts.tslimt:
+        if ts.dt2ms and ts.tslimt > 0.0:
+            dyn = ("; with DT2MS active a positive TSLIMT is disabled, "
+                   "TSLIMT defaulting to 1e-18")
+        elif ts.dt2ms and ts.tslimt < 0.0:
+            dyn = ("; with DT2MS active a negative TSLIMT is applied before "
+                   "the mass is scaled, and set to 1e-18 if |DT2MS| exceeds "
+                   "|TSLIMT|")
+        else:
+            dyn = ""
+        parts.append(
+            f"TSLIMT={ts.tslimt:g} is LS-DYNA's shell minimum time step "
+            "assignment: the MODULI (not the masses) of *MAT_PLASTIC_KINEMATIC "
+            "/ *MAT_POWER_LAW_PLASTICITY / *MAT_STRAIN_RATE_DEPENDENT_PLASTICITY "
+            "/ *MAT_PIECEWISE_LINEAR_PLASTICITY shells are modified so that the "
+            f"shell step does not fall below it (Vol I R17 p.12-584 / 12-585{dyn})"
+            ". OpenRadioss has no modulus floor, so it is not converted; it is "
+            "NOT an erosion floor and writes no /DT/<elem>/DEL "
+            "(--no-erode-tsmin-rule restores the ed52c93 trigger ERODE 1 + "
+            "TSLIMT > 0 -> Tmin = TSLIMT).")
+    if ts.erode:
+        ct = state.ctrl_termination
+        dtmin = ct.dtmin if ct is not None else 0.0
+        cls = _erode_digits(ts.erode)
+        what = ((", the ".join(cls[:-1]) + " and the " + cls[-1])
+                if len(cls) > 1 else (cls[0] if cls else "no element class"))
+        parts.append(
+            f"ERODE={int(ts.erode)}: LS-DYNA erodes the {what} whose time step "
+            "falls below tsmin = DTMIN x dtstart, dtstart being its own "
+            "initial step (*CONTROL_TERMINATION DTMIN, Vol I R17 p.12-558; "
+            "p.12-586 / Remark 6 p.12-590) - "
+            + (f"DTMIN={dtmin:g} here, " if dtmin else
+               "DTMIN is 0 here, so LS-DYNA has no tsmin and erodes nothing; ")
+            + "not converted (k2rad does not compute dtstart). --dt-del "
+            "<seconds> writes an explicit /DT/<elem>/DEL floor.")
+    if parts:
+        state.note_recognized_not_emitted("CONTROL_TIMESTEP", " ".join(parts))
 
 
 def _make_engine_timestep(state: ConversionState) -> List[str]:

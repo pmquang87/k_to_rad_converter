@@ -6548,14 +6548,20 @@ class ControlTimestep:
     # DT2MS: <0 = mass scaling to hold the explicit time step at |DT2MS|
     # (→ /DT/NODA/CST). 0 or >0 (init-only) = no mass scaling.
     dt2ms: float = 0.0
-    # TSLIMT (card field 3): the shell time-step floor. In LS-DYNA this is the
-    # step at which a shell is stiffness-reduced or, with ERODE=1, DELETED.
-    # Carried to /DT/<elem>/DEL Tmin.
+    # TSLIMT (card field 3): LS-DYNA's shell minimum time step ASSIGNMENT -
+    # the moduli (not the masses) of *MAT 3 / 18 / 19 / 24 shells are
+    # modified so the shell step does not fall below it (Vol I R17 p.12-584 /
+    # 12-585). No erosion floor; OpenRadioss has no modulus floor, so it is
+    # named, not converted (R14 round 10, A11; under --no-erode-tsmin-rule
+    # ERODE 1 + TSLIMT > 0 still writes /DT/<elem>/DEL Tmin = TSLIMT, the
+    # ed52c93 trigger).
     tslimt: float = 0.0
-    # ERODE (card field 6): 1 = delete elements whose step falls below the
-    # floor, rather than merely limiting it. This is the user's explicit
-    # consent to LOSE ELEMENTS, which is why k2rad emits no deletion floor
-    # without it (or without the explicit --dt-del opt-in).
+    # ERODE (card field 6): by digit, the classes LS-DYNA erodes when their
+    # step falls below tsmin = DTMIN x dtstart of *CONTROL_TERMINATION
+    # (p.12-586 / Remark 6 p.12-590; ones solids + thick shells + SPH, tens
+    # shells, hundreds beams). k2rad does not compute dtstart, so ERODE is
+    # named, not converted (A11); --dt-del, the user's own request, is the
+    # only route to a deletion floor.
     erode: int = 0
 
 
@@ -7705,7 +7711,7 @@ class ConvertOptions:
     ``default_hourglass``, ``deformable_to_rigid``, ``discrete_offset``,
     ``dt2ms_tssfac_product``,
     ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
-    ``fixed_curve_columns``, ``generalized_weld_butt``,
+    ``erode_tsmin_rule``, ``fixed_curve_columns``, ``generalized_weld_butt``,
     ``imflag0_eigen_explicit``, ``imflag_curve_restart``,
     ``implicit_end_fixpoint``, ``implicit_n2s_type7``,
     ``implicit_rigid_gravity_nodes``,
@@ -9535,6 +9541,16 @@ class ConvertOptions:
     # step with the end fix point it worsens ex_14_solid_elform_1, IE RMS 4.51
     # -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS peak over its 200 LS times.
     implicit_rayleigh_damping: bool = False
+    # --no-erode-tsmin-rule (A11, default ON; writer/assembly
+    # _make_engine_dt_deletion / _note_erode_tslimt): *CONTROL_TIMESTEP
+    # ERODE 1 + TSLIMT > 0 writes no /DT/{SHELL,SH_3N,BRICK}/DEL - TSLIMT is
+    # LS-DYNA's shell MODULUS floor (Vol I R17 p.12-584 / 12-585), its erosion
+    # floor is tsmin = DTMIN x dtstart (p.12-558), not converted; both named in
+    # one recognized-not-emitted record. MEASURED (R14 round 10): on a 10-brick
+    # column (ERODE 1, TSLIMT 1e-7) the ed52c93 cards deleted 10 of 10 bricks
+    # at t 2.988e-4 where LS-DYNA's closed form deletes none; 0 R14 decks state
+    # TSLIMT != 0. False = the ed52c93 trigger (Tmin = TSLIMT).
+    erode_tsmin_rule: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

@@ -410,6 +410,17 @@ as underscores.
   (the card alone turns the run dynamic, `freimpl.F:171`), for an LCID > 0 or
   a per-DOF card, or beside `*DAMPING_PART_*` cards - each refusal named
   (the section under Implicit dynamic notes below has the measurements).
+- `--erode-tsmin-rule` / `--no-erode-tsmin-rule` — **ON by default**.
+  `*CONTROL_TIMESTEP` ERODE 1 with TSLIMT > 0 no longer writes
+  `/DT/{SHELL,SH_3N,BRICK}/DEL`: TSLIMT is LS-DYNA's shell MODULUS floor for
+  `*MAT` 3 / 18 / 19 / 24 shells (Vol I R17 p.12-584 / 12-585), never an
+  erosion floor, and LS-DYNA's own floor tsmin = DTMIN x dtstart
+  (`*CONTROL_TERMINATION` DTMIN, p.12-558; Remark 6 p.12-590) is not
+  converted; both fields are named in one recognized-not-emitted record.
+  MEASURED on a 10-brick column (ERODE 1, TSLIMT 1e-7): the earlier cards
+  delete 10 of 10 bricks at t 2.988e-4 s where LS-DYNA's closed form deletes
+  none; 0 R14 decks carry TSLIMT != 0. `--dt-del` stays the explicit floor.
+  `--no-erode-tsmin-rule` restores the TSLIMT trigger.
 
 ### Python API
 
@@ -6844,8 +6855,13 @@ warned only. Without the flag a stated ENDMAS is named in a warning.
 `TSSFAC`, `Tmin` = 0). `TSSFAC` is LS-DYNA's scale factor on the computed
 critical step and `Tsca` is the identical quantity in OpenRadioss, so the
 safety factor is carried across rather than dropped. `Tmin` is 0 (no lower
-bound) deliberately — `/DT`'s `Tmin` is a run-*stop* threshold and LS-DYNA's
-`TSLIMT` is not converted, so nothing stops or deletes on a small step.
+bound) deliberately — `/DT`'s `Tmin` is a run-*stop* threshold, and LS-DYNA's
+own floor is tsmin = DTMIN x dtstart of `*CONTROL_TERMINATION` (Vol I R17
+p.12-558), 0 when DTMIN is 0 (98 of the 100 R14 carriers) and not converted
+otherwise; the warning says which (R14 round 10, A11: it used to name
+`TSLIMT`, which is LS-DYNA's shell modulus floor, not a stop field). A
+`TSSFAC` < 0 load curve is named with its range over 0 .. ENDTIM, not
+converted (`/DT` has no curve input, `freform.F:1033-1043`).
 `TSSFAC`=0 emits nothing (LS-DYNA's default 0.9 is also the `/DT` default).
 `DT2MS` > 0 is LS-DYNA mass scaling too (the step of a mass-scaled
 quasi-static or time-history solution, Vol I R17 p.12-585); k2rad does not
@@ -6913,13 +6929,24 @@ Under-integrated `Ishell=1..4` is deliberately not offered: it would activate
 the `Hm/Hf/Hr` hourglass path this repo documents as inert and set
 `inistate.py`'s `npg` 4→1, corrupting `*INITIAL_STRESS_SHELL` transfer. Implicit
 decks are always `Ishell=24` regardless of the option.
-`*CONTROL_TIMESTEP` `TSLIMT`/`ERODE` → **`/DT/{SHELL,SH_3N,BRICK}/DEL`**, a
-time-step *deletion* floor: OpenRadioss deletes any element whose step reaches
-`Tmin`. Emitted **only on explicit consent**, because the card removes mass and
-stiffness the LS-DYNA original may have kept — either the deck asks (`ERODE=1`
-**and** `TSLIMT>0`) or the user does (`--dt-del <seconds>` / GUI entry /
-`convert(dt_del=...)`). A half-request (`ERODE` without `TSLIMT`, or the
-reverse) emits nothing and is *reported*; it used to be dropped silently.
+`--dt-del <seconds>` → **`/DT/{SHELL,SH_3N,BRICK}/DEL`**, a time-step
+*deletion* floor: OpenRadioss deletes any element whose step reaches `Tmin`.
+Emitted **only on the user's request** (`--dt-del` / GUI entry /
+`convert(dt_del=...)`), because the card removes mass and stiffness the LS-DYNA
+original may have kept. **Since R14 round 10 (A11, `--no-erode-tsmin-rule`
+opts out) `*CONTROL_TIMESTEP` `ERODE=1` with `TSLIMT>0` no longer writes it**:
+`TSLIMT` is LS-DYNA's shell minimum time step *assignment* - the moduli (not
+the masses) of `*MAT` 3 / 18 / 19 / 24 shells are modified so the step stays
+above it (Vol I R17 p.12-584 / 12-585), never an erosion floor - and `ERODE`
+erodes the elements whose step falls below tsmin = DTMIN x dtstart of
+`*CONTROL_TERMINATION` (p.12-558, Remark 6 p.12-590), LS-DYNA's own initial
+step, which k2rad does not compute. Both fields are named in one
+recognized-not-emitted record. MEASURED on a 10-brick column (ERODE 1, TSLIMT
+1e-7): the earlier trigger's cards deleted 10 of 10 bricks at t 2.988e-4 s
+(closed form 2.990e-4) where LS-DYNA's closed form deletes none; 0 R14 decks
+state TSLIMT != 0. `--no-erode-tsmin-rule` restores the earlier trigger (a
+half-request - `ERODE` without `TSLIMT`, or the reverse - is then reported as
+before).
 It coexists with `/DT/NODA/CST`: the deletion test runs on the element's own
 geometric step (length/sound speed, no mass term) and executes before the
 `NODADT` early return (`cdt3.F:146` vs `:200`), so nodal mass scaling does not

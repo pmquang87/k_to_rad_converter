@@ -15,6 +15,14 @@ LS-DYNA original kept. Hence exactly two ways in, both explicit:
 
 Nothing else emits it. These tests pin both routes, the refusal in every other
 case, and the interaction with mass scaling that #78 called the crux.
+
+R14 round 10 (A11): the deck route is GONE by default. TSLIMT is LS-DYNA's
+shell minimum-step ASSIGNMENT (the moduli of four plasticity laws are
+modified, Vol I R17 p.12-584 / 12-585), not an erosion floor, and ERODE erodes
+below tsmin = DTMIN x dtstart of *CONTROL_TERMINATION (p.12-558, p.12-590
+Remark 6), which k2rad cannot compute; both are named in ONE
+recognized-not-emitted record instead. ``--no-erode-tsmin-rule`` restores the
+deck route; the user route is unchanged.
 """
 import os
 import shutil
@@ -30,11 +38,16 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _state(dt2ms=0.0, tslimt=0.0, erode=0, dt_del=None, ams=False,
-           tssfac=0.9):
+           tssfac=0.9, erode_tsmin_rule=True):
     st = ConversionState()
-    st.options = ConvertOptions(ams=ams, dt_del=dt_del)
+    st.options = ConvertOptions(ams=ams, dt_del=dt_del,
+                                erode_tsmin_rule=erode_tsmin_rule)
     st.ctrl_timestep = ControlTimestep(0.0, tssfac, dt2ms, tslimt, erode)
     return st
+
+
+#: the ed52c93 deck route, restored by --no-erode-tsmin-rule (round 10, A11)
+_LEGACY = dict(erode_tsmin_rule=False)
 
 
 def _cards(lines):
@@ -72,9 +85,10 @@ class TestNothingIsEmittedUninvited(unittest.TestCase):
 
 
 class TestTheDeckAsking(unittest.TestCase):
+    """The ed52c93 deck route, now the --no-erode-tsmin-rule arm."""
 
     def test_erode_plus_tslimt_emits_all_three_families(self):
-        st = _state(erode=1, tslimt=3.5e-8)
+        st = _state(erode=1, tslimt=3.5e-8, **_LEGACY)
         cards = _cards(_make_engine_dt_deletion(st))
         self.assertEqual(cards, ["/DT/SHELL/DEL", "/DT/SH_3N/DEL",
                                  "/DT/BRICK/DEL"])
@@ -82,22 +96,74 @@ class TestTheDeckAsking(unittest.TestCase):
     def test_sh3n_is_not_forgotten(self):
         """3-node shells are a SEPARATE family in Radioss: a deck whose ESORT
         generates triangles would otherwise leave them with no floor."""
-        st = _state(erode=1, tslimt=3.5e-8)
+        st = _state(erode=1, tslimt=3.5e-8, **_LEGACY)
         self.assertIn("/DT/SH_3N/DEL", _make_engine_dt_deletion(st))
 
     def test_tmin_is_tslimt_and_tsca_is_tssfac(self):
-        st = _state(erode=1, tslimt=3.5e-8, tssfac=0.8)
+        st = _state(erode=1, tslimt=3.5e-8, tssfac=0.8, **_LEGACY)
         lines = _make_engine_dt_deletion(st)
         data = lines[lines.index("/DT/SHELL/DEL") + 1]
         self.assertAlmostEqual(float(data.split()[0]), 0.8)
         self.assertAlmostEqual(float(data.split()[1]), 3.5e-8)
 
     def test_the_deletion_is_warned_about(self):
-        st = _state(erode=1, tslimt=3.5e-8)
+        st = _state(erode=1, tslimt=3.5e-8, **_LEGACY)
         _make_engine_dt_deletion(st)
         w = " ".join(st.warnings)
         self.assertIn("DELETE", w)
         self.assertIn("removes mass and stiffness", w)
+
+
+class TestTheDeckAskingRound10(unittest.TestCase):
+    """R14 round 10, A11 (the default): ERODE 1 + TSLIMT > 0 is no deletion
+    floor; the one record names what each field is in LS-DYNA."""
+
+    def _rne(self, st):
+        return dict(st.recognized_not_emitted).get("CONTROL_TIMESTEP", "")
+
+    def test_erode_plus_tslimt_emits_no_floor(self):
+        for kw in ({}, {"dt2ms": -1e-7}):
+            with self.subTest(**kw):
+                st = _state(erode=1, tslimt=3.5e-8, **kw)
+                self.assertEqual(_make_engine_dt_deletion(st), [])
+                self.assertEqual(st.warnings, [])
+
+    def test_one_record_names_tslimt_and_erode(self):
+        st = _state(erode=1, tslimt=3.5e-8)
+        _make_engine_dt_deletion(st)
+        why = self._rne(st)
+        for needle in ("TSLIMT=3.5e-08", "MODULI (not the masses)",
+                       "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+                       "p.12-584 / 12-585", "NOT an erosion floor",
+                       "--no-erode-tsmin-rule", "ERODE=1",
+                       "solid and thick-shell elements",
+                       "tsmin = DTMIN x dtstart", "p.12-558",
+                       "DTMIN is 0 here, so LS-DYNA has no tsmin",
+                       "--dt-del"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, why)
+
+    def test_the_digits_and_dtmin_are_read(self):
+        from k2rad.state import ControlTermination
+        st = _state(erode=111, tslimt=0.0)
+        st.ctrl_termination = ControlTermination(1.0e-3, dtmin=0.3)
+        _make_engine_dt_deletion(st)
+        why = self._rne(st)
+        self.assertIn("ERODE=111: LS-DYNA erodes the solid and thick-shell "
+                      "elements (SPH particles are deactivated), the shell "
+                      "elements and the beam elements whose time step", why)
+        self.assertIn("DTMIN=0.3 here", why)
+        self.assertNotIn("TSLIMT", why)
+
+    def test_the_dt2ms_interplay_of_tslimt_is_named(self):
+        for tslimt, needle in ((3.5e-8, "a positive TSLIMT is disabled, "
+                                "TSLIMT defaulting to 1e-18"),
+                               (-3.5e-8, "a negative TSLIMT is applied "
+                                "before the mass is scaled")):
+            with self.subTest(tslimt=tslimt):
+                st = _state(tslimt=tslimt, dt2ms=-1e-7)
+                _make_engine_dt_deletion(st)
+                self.assertIn(needle, self._rne(st))
 
 
 class TestTheUserAsking(unittest.TestCase):
@@ -136,14 +202,17 @@ class TestOrderingAgainstMassScaling(unittest.TestCase):
     """
 
     def test_nodal_scaling_and_deletion_coexist_and_the_log_says_why(self):
-        st = _state(dt2ms=-1e-7, erode=1, tslimt=3.5e-8)
-        self.assertEqual(len(_cards(_make_engine_dt_deletion(st))), 3)
-        w = " ".join(st.warnings)
-        self.assertIn("cdt3.F:146", w)
-        self.assertIn("does NOT make this floor unreachable", w)
+        for kw in ({"dt_del": 3.5e-8},
+                   dict(erode=1, tslimt=3.5e-8, **_LEGACY)):
+            with self.subTest(**kw):
+                st = _state(dt2ms=-1e-7, **kw)
+                self.assertEqual(len(_cards(_make_engine_dt_deletion(st))), 3)
+                w = " ".join(st.warnings)
+                self.assertIn("cdt3.F:146", w)
+                self.assertIn("does NOT make this floor unreachable", w)
 
     def test_ams_is_flagged_as_a_different_interaction(self):
-        st = _state(dt2ms=-1e-7, erode=1, tslimt=3.5e-8, ams=True)
+        st = _state(dt2ms=-1e-7, dt_del=3.5e-8, ams=True)
         _make_engine_dt_deletion(st)
         w = " ".join(st.warnings)
         self.assertIn("--ams", w)

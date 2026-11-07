@@ -604,6 +604,66 @@ class A5EndFixpoint(unittest.TestCase):
         self.assertIn("/IMPL/DT/FIXPOINT", eng.splitlines())
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# A11  the *CONTROL_TIMESTEP texts (the deletion-floor bytes:
+#      tests/test_dt_deletion_floor.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class A11Texts(unittest.TestCase):
+
+    _CURVE = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+              + f"{0.0:>20}{0.5:>20}\n{1.0:>20}{0.5:>20}\n")
+
+    def _plate(self, **kw):
+        import test_cardstack_pipeline_engine as _te
+        return _te._plate(**kw)
+
+    def test_a_tssfac_curve_on_dt2ms_0_is_named_with_its_range(self):
+        """f3: the DT2MS >= 0 path used to drop a TSSFAC < 0 curve in
+        silence (no /DT, no text, the curve an orphan /FUNCT)."""
+        res, _s, eng = _convert(self._plate(dt2ms=0.0, tssfac=-5.0,
+                                            extra=self._CURVE))
+        self.assertNotIn("/DT", eng.splitlines())
+        self.assertTrue(_has(res.warnings, "*CONTROL_TIMESTEP TSSFAC=-5 < 0 "
+                             "(load curve 5, the scale factor as a function "
+                             "of time, Vol I R17 p.12-584) is NOT converted",
+                             "freform.F:1033-1043", "default scale 0.9",
+                             "contrl.F:1148-1149",
+                             "the curve ranges 0.5 .. 0.5 over 0 .. ENDTIM "
+                             "0.001", "1.8x the asked step"))
+
+    def test_the_curve_range_is_the_stored_points_once_scaled(self):
+        """handle_define_curve stores ((x + OFFA) SFA, (y + OFFO) SFO): the
+        range is read from those points as they are (SFO 2 on 0.25 -> 0.5),
+        never scaled a second time (0.25 x 2 x 2 = 1 would be wrong)."""
+        curve = ("*DEFINE_CURVE\n" + _row(5, 0, 1.0, 2.0) + "\n"
+                 + f"{0.0:>20}{0.25:>20}\n{1.0:>20}{0.25:>20}\n")
+        res, _s, _e = _convert(self._plate(dt2ms=0.0, tssfac=-5.0,
+                                           extra=curve))
+        self.assertTrue(_has(res.warnings, "the curve ranges 0.5 .. 0.5"))
+        self.assertFalse(_has(res.warnings, "the curve ranges 1 .. 1"))
+        # an undefined curve is said so
+        res, _s, _e = _convert(self._plate(dt2ms=0.0, tssfac=-7.0))
+        self.assertTrue(_has(res.warnings, "TSSFAC=-7 < 0",
+                             "load curve 7 is not defined in the deck"))
+
+    def test_the_tmin_clause_reads_dtmin(self):
+        res, _s, _e = _convert(self._plate(dt2ms=0.0, tssfac=0.8))
+        self.assertTrue(_has(res.warnings, "TSSFAC=0.8", "LS-DYNA has no "
+                             "floor either: *CONTROL_TERMINATION DTMIN is 0"))
+        deck = self._plate(dt2ms=0.0, tssfac=0.8).replace(
+            "*CONTROL_TERMINATION\n" + _row(0.001, "", "", "", ""),
+            "*CONTROL_TERMINATION\n" + _row(0.001, "", 0.3, "", ""))
+        self.assertIn(_row(0.001, "", 0.3, "", ""), deck)
+        res, _s, _e = _convert(deck)
+        self.assertTrue(_has(res.warnings, "TSSFAC=0.8", "LS-DYNA's own "
+                             "floor tsmin = DTMIN x dtstart "
+                             "(*CONTROL_TERMINATION DTMIN=0.3, Vol I R17 "
+                             "p.12-558) is not converted."))
+        for w in res.warnings:
+            self.assertNotIn("because LS-DYNA TSLIMT is not converted", w)
+
+
 class A6ImplicitDamping(unittest.TestCase):
     """The starter /DAMP is inert on an implicit run (named by default);
     --implicit-rayleigh-damping (opt-in) writes /IMPL/DYNA/DAMP."""
@@ -711,6 +771,15 @@ _RETRACTED_ROUND_10_A = (
     "the /DT/NODA/CST and /DT/AMS Tmin",
     "`/DT/NODA/CST` and `/DT/AMS` Tmin",
     "on `/DT/AMS` too",
+    # A11: TSLIMT read as the stop / deletion field (the /DT sentences, the
+    # ControlTimestep comments, the --dt-del help / GUI / README texts)
+    "because LS-DYNA TSLIMT is not converted",
+    "LS-DYNA's equivalent (TSLIMT) is a different field",
+    "Carried to /DT/<elem>/DEL Tmin",
+    "the user's explicit consent to LOSE ELEMENTS",
+    "a deletion floor is emitted only when the deck asks",
+    "a deck that asks for deletion itself",
+    "either the deck asks (`ERODE=1`",
 )
 
 #: (shipped file, the replacement text it now carries)
@@ -806,6 +875,7 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
         "--nip1-one-point": "nip1_one_point",
         "--dt2ms-tssfac-product": "dt2ms_tssfac_product",
         "--implicit-end-fixpoint": "implicit_end_fixpoint",
+        "--erode-tsmin-rule": "erode_tsmin_rule",
     }
     _HELP_FIGURES = {
         "--shrf-ashear": ("-0.041 % (L/t 3) / -0.018 % (L/t 5)",
@@ -827,6 +897,8 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
                                     "-14.44 % at t 0.01839 -> -33.66 % at t "
                                     "0.02", "+1343.37 -> -78.46 %",
                                     "6.06e8"),
+        "--erode-tsmin-rule": ("p.12-584 / 12-585", "p.12-558",
+                               "10 of 10 bricks at t 2.988e-4"),
     }
 
     def test_the_k41_flag_is_on_by_default_now(self):

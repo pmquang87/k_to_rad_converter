@@ -530,6 +530,7 @@ def convert(
     nip1_one_point: bool = True,
     implicit_end_fixpoint: bool = True,
     implicit_rayleigh_damping: bool = False,
+    erode_tsmin_rule: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1960,6 +1961,16 @@ def convert(
         ex_14_solid_elform_1 on the shipped adaptive step with the end fix
         point, IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS peak
         over its 200 LS times.
+    erode_tsmin_rule : bool
+        ``*CONTROL_TIMESTEP`` ERODE 1 + TSLIMT > 0 is no deletion floor (R14
+        round 10, A11): TSLIMT is LS-DYNA's shell MODULUS floor (Vol I R17
+        p.12-584 / 12-585) and its erosion floor tsmin = DTMIN x dtstart
+        (p.12-558) is not converted; both are named in one
+        recognized-not-emitted record. MEASURED on a 10-brick column (ERODE 1,
+        TSLIMT 1e-7): the earlier cards deleted 10 of 10 bricks at t 2.988e-4
+        where LS-DYNA's closed form deletes none. ``dt_del`` stays the
+        explicit floor. Default True (``--no-erode-tsmin-rule``: the earlier
+        trigger, Tmin = TSLIMT).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2117,6 +2128,7 @@ def convert(
         nip1_one_point=nip1_one_point,
         implicit_end_fixpoint=implicit_end_fixpoint,
         implicit_rayleigh_damping=implicit_rayleigh_damping,
+        erode_tsmin_rule=erode_tsmin_rule,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

@@ -221,7 +221,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          shrf_ashear: bool = True,
                          nip1_one_point: bool = True,
                          implicit_end_fixpoint: bool = True,
-                         implicit_rayleigh_damping: bool = False) -> dict:
+                         implicit_rayleigh_damping: bool = False,
+                         erode_tsmin_rule: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -561,6 +562,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["nip1_one_point"] = bool(nip1_one_point)
     kwargs["implicit_end_fixpoint"] = bool(implicit_end_fixpoint)
     kwargs["implicit_rayleigh_damping"] = bool(implicit_rayleigh_damping)
+    kwargs["erode_tsmin_rule"] = bool(erode_tsmin_rule)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -703,6 +705,7 @@ class ConverterGUI:
         self.nip1_one_point = tk.BooleanVar(value=True)
         self.implicit_end_fixpoint = tk.BooleanVar(value=True)
         self.implicit_rayleigh_damping = tk.BooleanVar(value=False)
+        self.erode_tsmin_rule = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1483,6 +1486,11 @@ class ConverterGUI:
                      "implicit) - OFF",
             variable=self.implicit_rayleigh_damping).grid(
                 row=95, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="ERODE 1 + TSLIMT > 0 is no deletion floor (TSLIMT is "
+                     "LS-DYNA's shell modulus floor) - ON",
+            variable=self.erode_tsmin_rule).grid(
+                row=96, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1530,9 +1538,11 @@ class ConverterGUI:
             text="Emits /DT/{SHELL,SH_3N,BRICK}/DEL — OpenRadioss DELETES any "
                  "element whose time step reaches Tmin, removing mass and "
                  "stiffness the LS-DYNA original may have kept. Leave blank "
-                 "unless a run is stalling on one degrading element; a deck "
-                 "that asks for deletion itself (*CONTROL_TIMESTEP ERODE=1 "
-                 "with TSLIMT>0) is converted without this. Choose it as a "
+                 "unless a run is stalling on one degrading element; since "
+                 "R14 round 10 nothing else writes a deletion floor "
+                 "(*CONTROL_TIMESTEP TSLIMT is LS-DYNA's shell modulus "
+                 "floor, and its ERODE floor DTMIN x dtstart is not "
+                 "converted - both named in the log). Choose it as a "
                  "DELETION threshold, not a mass-scaling target: ~0.9x the "
                  "initial step deletes elements that merely stretched ~10%, "
                  "~0.4-0.5x reserves it for near-total element collapse."
@@ -1825,6 +1835,7 @@ class ConverterGUI:
                 nip1_one_point=self.nip1_one_point.get(),
                 implicit_end_fixpoint=self.implicit_end_fixpoint.get(),
                 implicit_rayleigh_damping=self.implicit_rayleigh_damping.get(),
+                erode_tsmin_rule=self.erode_tsmin_rule.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2187,6 +2198,9 @@ class ConverterGUI:
         if kwargs.get("implicit_rayleigh_damping"):
             bits.append("/IMPL/DYNA/DAMP from *DAMPING_GLOBAL "
                         "(--implicit-rayleigh-damping)")
+        if not kwargs.get("erode_tsmin_rule", True):
+            bits.append("ERODE 1 + TSLIMT > 0 as a deletion floor "
+                        "(--no-erode-tsmin-rule)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
