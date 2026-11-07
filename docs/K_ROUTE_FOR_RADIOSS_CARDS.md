@@ -320,7 +320,7 @@ described in D2-8 / D5-12. This tree has every one of them (re-measured on
 | ENDMAS -> `/STOP` Mmax | K-40 | done, opt-in `--stop-added-mass`: `/STOP 0. 0.05 0. 1 1 0` for ENDMAS 5 |
 | `/PRINT/-N` from `--print-every` / IKEDIT | K-42 | done: IKEDIT 50 without glstat gives `/PRINT/-50`, with glstat `/PRINT/-1`; `--print-every 2000` gives `/PRINT/-2000` |
 | MAXINT > 3 -> `/ANIM/SHELL/TENS/STRESS/ALL` | K-42 (the handler read came later in the batch) | done, default ON (`--no-maxint-stress-all`): MAXINT 5 writes it; blank (= 3) and -5 do not, -5 is named |
-| two-surface TYPE25 for AUTOMATIC_S2S | K-08B | done, opt-in `--s2s-type25`: surf_ID1 = the SSID surface; the one-way TYPE7 warning still prints (cosmetic) |
+| two-surface TYPE25 for AUTOMATIC_S2S | K-08B | done, opt-in `--s2s-type25`: surf_ID1 = the SSID surface; the one-way TYPE7 warning still printed beside it (cosmetic; withdrawn on 2026-11-07, CHANGELOG) |
 | friction typed into SPR / MPR warned | K-07 | done: both cells named, Fric 0 |
 | single-surface SST gap | K-12 | done, default ON (`--no-single-surface-sst-gap`): Gapmin 0.35 for SST 0.35, 0.175 with the flag |
 | all-tet Isolid 1, LAW1 shell N 0 | K-30, K-31 | active (default ON): Isolid 1 and N 0; the opt-outs give Isolid 14 and N 5 |
