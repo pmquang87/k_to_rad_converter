@@ -466,6 +466,144 @@ class A3Texts(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A5 / A6  the dynamic implicit fixture (2 x 2 x 2 hexes, ex_14's controls)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _hex_block(dynamic=True, damping="*DAMPING_GLOBAL\n"
+               + _row(0, 11.535, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n",
+               extra="") -> str:
+    """A 20 mm cube of 2 x 2 x 2 *MAT_ELASTIC hexes, the base nodes fixed,
+    a -100 N load on each top node, ex_14's implicit controls (IAUTO 0,
+    DT0 ... ; *CONTROL_IMPLICIT_DYNAMICS IMASS 1 when *dynamic*), ENDTIM
+    0.02 and a *DAMPING_GLOBAL VALDMP 11.535 (LCID 0, ST all 0)."""
+    nodes, nid = {}, 0
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                nid += 1
+                nodes[(i, j, k)] = nid
+    elems = []
+    for k in range(2):
+        for j in range(2):
+            for i in range(2):
+                c = [nodes[(i, j, k)], nodes[(i + 1, j, k)],
+                     nodes[(i + 1, j + 1, k)], nodes[(i, j + 1, k)],
+                     nodes[(i, j, k + 1)], nodes[(i + 1, j, k + 1)],
+                     nodes[(i + 1, j + 1, k + 1)], nodes[(i, j + 1, k + 1)]]
+                elems.append(c)
+    base = [n for (i, j, k), n in sorted(nodes.items()) if k == 0]
+    top = [n for (i, j, k), n in sorted(nodes.items()) if k == 2]
+    s = ["*KEYWORD", "*TITLE", "round-10 A5/A6 fixture",
+         "*CONTROL_IMPLICIT_AUTO", _row(0, 11, 5, 0.0, 0.0, 0.0, 0, 0)]
+    if dynamic:
+        s += ["*CONTROL_IMPLICIT_DYNAMICS",
+              _row(1, 0.5, 0.25, 0.0, "1.0E28", "1.0E28", 0, 0.0)]
+    s += ["*CONTROL_IMPLICIT_GENERAL", _row(1, 1.0e-4, 2, 1, 2, 0, 0, 0),
+          "*CONTROL_IMPLICIT_SOLUTION",
+          _row(12, 11, 15, 0.001, 0.01, "1.0E10", 0.9, 1.0),
+          "*CONTROL_TERMINATION", _row(0.02, 0, 0.0, 0.0, 0.0, 0),
+          "*DATABASE_GLSTAT", _row(1.0e-4),
+          "*PART", "block", _row(1, 1, 1, 0, 0, 0, 0, 0),
+          "*SECTION_SOLID", _row(1, 1, 0),
+          "*MAT_ELASTIC", _row(1, 8.0e-9, 200000.0, 0.3, 0.0, 0.0, 0, 0),
+          "*DEFINE_CURVE", _row(1, 0, 0.0, 0.0, 0.0, 0.0, 0, 0),
+          f"{0.0:>20}{1.0:>20}", f"{1.0:>20}{1.0:>20}",
+          "*SET_NODE_LIST", _row(1, 0.0, 0.0, 0.0, 0.0), _row(*base[:8]),
+          _row(*base[8:]),
+          "*SET_NODE_LIST", _row(2, 0.0, 0.0, 0.0, 0.0), _row(*top[:8]),
+          _row(*top[8:]),
+          "*BOUNDARY_SPC_SET", _row(1, 0, 1, 1, 1, 1, 1, 1),
+          "*LOAD_NODE_SET", _row(2, 3, 1, -100.0, 0, 0, 0, 0)]
+    if damping:
+        s.append(damping.rstrip("\n"))
+    s += ["*ELEMENT_SOLID"]
+    for e, c in enumerate(elems, 1):
+        s.append(f"{e:>8}{1:>8}" + "".join(f"{n:>8}" for n in c))
+    s += ["*NODE"]
+    for (i, j, k), n in sorted(nodes.items(), key=lambda t: t[1]):
+        s.append(f"{n:>8}{10.0 * i:>16}{10.0 * j:>16}{10.0 * k:>16}")
+    return "\n".join(s) + "\n" + extra + "*END\n"
+
+
+def _engine_block(engine: str, head: str):
+    """The data rows under the engine card *head* (None when absent)."""
+    lines = engine.splitlines()
+    if head not in lines:
+        return None
+    out = []
+    for ln in lines[lines.index(head) + 1:]:
+        if ln.startswith(("/", "#")):
+            break
+        out.append(ln)
+    return out
+
+
+class A5EndFixpoint(unittest.TestCase):
+
+    def test_the_two_lines_of_fixpoint_count_1(self):
+        _r, s_def, e_def = _convert(_hex_block())
+        _r, s_fp1, e_fp1 = _convert(_hex_block(), implicit_end_fixpoint=False,
+                                    fixpoint_count=1)
+        self.assertEqual((s_def, e_def), (s_fp1, e_fp1))
+        self.assertEqual(_engine_block(e_def, "/IMPL/DT/FIXPOINT"),
+                         ["                0.02"])
+        lines = e_def.splitlines()
+        i = lines.index("/IMPL/DT/2")
+        self.assertEqual(lines[i + 2:i + 4], ["/IMPL/DT/FIXPOINT",
+                                              "                0.02"])
+
+    def test_the_opt_out_restores_the_ed52c93_engine_file(self):
+        _r, s_off, e_off = _convert(_hex_block(),
+                                    implicit_end_fixpoint=False)
+        _r, s_def, e_def = _convert(_hex_block())
+        self.assertEqual(s_off, s_def)
+        self.assertNotIn("/IMPL/DT/FIXPOINT", e_off)
+        moved = [ln for ln in e_def.splitlines()
+                 if ln not in e_off.splitlines()]
+        self.assertEqual(moved, ["/IMPL/DT/FIXPOINT",
+                                 "                0.02"])
+        self.assertEqual(len(e_def.splitlines()),
+                         len(e_off.splitlines()) + 2)
+
+    def test_the_sentence_names_the_mechanism_and_the_sliver(self):
+        res, _s, _e = _convert(_hex_block())
+        hits = [w for w in res.warnings if w.startswith("/IMPL/DT/FIXPOINT")]
+        self.assertEqual(len(hits), 1, hits)
+        for needle in ("imp_dt.F:53-56", "resol.F:8317-8318",
+                       "9 keys / 5 models", "-14.44 % at t 0.01839 -> "
+                       "-33.66 % at t 0.02", "+1343.37 -> -78.46 %",
+                       "imp_dt.F:311-320", "6.06e8", "0.160 -> 170.1",
+                       "read the row before it"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("gain", hits[0].lower())
+        res, _s, _e = _convert(_hex_block(), implicit_end_fixpoint=False)
+        self.assertFalse([w for w in res.warnings
+                          if w.startswith("/IMPL/DT/FIXPOINT")])
+
+    def test_static_riks_and_a_grid_are_untouched(self):
+        _r, _s, eng = _convert(_hex_block(dynamic=False))
+        self.assertNotIn("/IMPL/DT/FIXPOINT", eng)
+        _r, _s, eng = _convert(_hex_block(), fixpoint_count=4)
+        # k/4 x 0.02: 0.005 0.01 0.015 0.02 on one line
+        self.assertEqual(_engine_block(eng, "/IMPL/DT/FIXPOINT"),
+                         ["               0.005                0.01"
+                          "               0.015                0.02"])
+        # NSOLVR 6 asks for arc-length (Vol I R17 p.12-354); with
+        # --arclength-riks the step card is /IMPL/DT/3, under which the
+        # engine disarms every fix point (lectur.F:3523-3532): none written
+        riks = _hex_block().replace(
+            _row(12, 11, 15, 0.001, 0.01, "1.0E10", 0.9, 1.0),
+            _row(6, 11, 15, 0.001, 0.01, "1.0E10", 0.9, 1.0))
+        self.assertIn(_row(6, 11, 15, 0.001, 0.01, "1.0E10", 0.9, 1.0), riks)
+        _r, _s, eng = _convert(riks, arclength_riks=True)
+        self.assertIn("/IMPL/DT/3", eng.splitlines())
+        self.assertNotIn("/IMPL/DT/FIXPOINT", eng)
+        _r, _s, eng = _convert(riks)                 # the control: /IMPL/DT/2
+        self.assertIn("/IMPL/DT/FIXPOINT", eng.splitlines())
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Retracted statements and forbidden sentences (the rounds 4-9 shape:
 # _t7._SHIPPED_TEXTS = README, ROADMAP, the GUI, k2rad.py, k2rad/, docs/*.md,
 # tools/*.py with adjacent literals joined; CHANGELOG is the history)
@@ -592,6 +730,7 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
         "--shrf-ashear": "shrf_ashear",
         "--nip1-one-point": "nip1_one_point",
         "--dt2ms-tssfac-product": "dt2ms_tssfac_product",
+        "--implicit-end-fixpoint": "implicit_end_fixpoint",
     }
     _HELP_FIGURES = {
         "--shrf-ashear": ("-0.041 % (L/t 3) / -0.018 % (L/t 5)",
@@ -607,6 +746,12 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
                                    "convertcards.cxx:233-234",
                                    "13889 cycles = LS-DYNA's 13889",
                                    "KE RMS 8.54 -> 1.74 %"),
+        "--implicit-end-fixpoint": ("imp_dt.F:53-56", "resol.F:8317-8318",
+                                    "lectur.F:3523-3532", "9 keys / 5 models",
+                                    "34 -> 35 cycles",
+                                    "-14.44 % at t 0.01839 -> -33.66 % at t "
+                                    "0.02", "+1343.37 -> -78.46 %",
+                                    "6.06e8"),
     }
 
     def test_the_k41_flag_is_on_by_default_now(self):

@@ -7707,7 +7707,8 @@ class ConvertOptions:
     ``elastic_fluid_cp_cutoff``, ``elform7_beam_thickness_section``,
     ``fixed_curve_columns``, ``generalized_weld_butt``,
     ``imflag0_eigen_explicit``, ``imflag_curve_restart``,
-    ``implicit_n2s_type7``, ``implicit_rigid_gravity_nodes``,
+    ``implicit_end_fixpoint``, ``implicit_n2s_type7``,
+    ``implicit_rigid_gravity_nodes``,
     ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
     ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
     ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
@@ -9016,7 +9017,10 @@ class ConvertOptions:
     # Implicit decks only (no effect on explicit output). NOTE: convert() is
     # the package's only ConvertOptions construction and always passes this
     # field, so the value here is a documentation default, not the live one -
-    # cli.py's --fixpoint-count default is what a CLI run reads.
+    # cli.py's --fixpoint-count default is what a CLI run reads. DEFAULT 0 =
+    # no grid; a dynamic implicit deck still gets ONE fix point at its end
+    # time unless --no-implicit-end-fixpoint (R14 round 10, A5:
+    # implicit_end_fixpoint below).
     fixpoint_count: int = 0
     # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
     # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
@@ -9508,6 +9512,19 @@ class ConvertOptions:
     # with A1: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the LS
     # peak over its 500 LS times (nt 4). False = max(2, NIP) (ed52c93).
     nip1_one_point: bool = True
+    # --no-implicit-end-fixpoint (A5, default ON; writer/assembly
+    # _implicit_end_fixpoint): one /IMPL/DT/FIXPOINT at the run's end time on
+    # a dynamic implicit deck (/IMPL/DYNA/2 with /IMPL/DT/2, not RIKS) when no
+    # --fixpoint-count grid is written - the bytes of --fixpoint-count 1. The
+    # engine does not clip a dynamic increment to the remaining time
+    # (imp_dt.F:53-56) and stops at the first cycle past the end
+    # (resol.F:8317-8318). MEASURED (R14 round 10, nt 4 = nt 2): the 9 keys /
+    # 5 models that ended NORMAL below ENDTIM reach it at +1 cycle with
+    # fifths 1-4 unchanged; END moves both ways (ex_14_solid_elform_1 IE END
+    # -14.44 % at t 0.01839 -> -33.66 % at t 0.02); a sliver remainder makes
+    # the last row an artifact (metal-cutting KE 91.3 -> 6.06e8). 21 keys /
+    # 16 models move by the two lines. False = no card (ed52c93).
+    implicit_end_fixpoint: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

@@ -260,7 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
              "The COST of 0 is fewer output states - 15 "
              "cycles become 8 on the controls - which is the whole reason the "
              "card exists, so pass a count back if you need the milestones. "
-             "Implicit decks only; ignored for explicit.",
+             "Implicit decks only; ignored for explicit. DEFAULT 0 = no grid; "
+             "a dynamic implicit deck still gets ONE fix point at its end "
+             "time unless --no-implicit-end-fixpoint (R14 round 10, A5).",
     )
 
     parser.add_argument(
@@ -2163,6 +2165,28 @@ def build_parser() -> argparse.ArgumentParser:
              "LS peak over its 500 LS times. ON by default; "
              "--no-nip1-one-point writes max(2, NIP).",
     )
+    parser.add_argument(
+        "--implicit-end-fixpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="On a dynamic implicit deck (/IMPL/DYNA/2 with /IMPL/DT/2, not "
+             "--arclength-riks) without a --fixpoint-count grid, write one "
+             "/IMPL/DT/FIXPOINT at the run's end time - the bytes of "
+             "--fixpoint-count 1: the engine does not clip a dynamic "
+             "increment to the remaining time (imp_dt.F:53-56) and stops at "
+             "the first cycle past the end (resol.F:8317-8318), so without it "
+             "a run can end NORMAL below ENDTIM. Static decks clip their last "
+             "step themselves (imp_dt.F:55) and are untouched; RIKS disarms "
+             "every fix point (lectur.F:3523-3532). MEASURED on the R14 roster "
+             "(nt 4 = nt 2): the 9 keys / 5 models that ended below their end "
+             "time reach it at +1 cycle with fifths 1-4 unchanged; the END "
+             "value moves both ways (ex_14_solid_elform_1, 34 -> 35 cycles: IE "
+             "END -14.44 %% at t 0.01839 -> -33.66 %% at t 0.02; ex_11 KE END "
+             "+1343.37 -> -78.46 %%). When the remainder is a sliver of the "
+             "step the last row is an integration artifact "
+             "(efg/metal-cutting: KE 91.3 -> 6.06e8, ERROR 99.9 %%). ON by "
+             "default; --no-implicit-end-fixpoint writes no card.",
+    )
     return parser
 
 
@@ -2340,6 +2364,7 @@ def main(argv=None) -> int:
         maxint_stress_all=args.maxint_stress_all,
         shrf_ashear=args.shrf_ashear,
         nip1_one_point=args.nip1_one_point,
+        implicit_end_fixpoint=args.implicit_end_fixpoint,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

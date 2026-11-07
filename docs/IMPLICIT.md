@@ -259,3 +259,48 @@ such a model EXPLICIT until the engine is fixed.
   solver impose a frame-dependent wrong displacement (a two-block coupon:
   x0.750 of the drive in two oblique frames, x1.000 in one skew, nt 4 = nt 2)
   and the starter print WARNING 312.
+
+## Round 10, part A-i: the end fix point and damping on an implicit run
+
+### The end fix point (round 10, A5)
+
+Default ON, `--no-implicit-end-fixpoint` opts out. A dynamic implicit deck
+(`/IMPL/DYNA/2` from `*CONTROL_IMPLICIT_DYNAMICS` IMASS > 0, with the
+`/IMPL/DT/2` step card) gets ONE `/IMPL/DT/FIXPOINT` at its end time when no
+`--fixpoint-count` grid is written: the two lines `--fixpoint-count 1`
+writes, byte for byte.
+
+- **Why.** `imp_dt.F:53-56`: `TREST = TSTOP - TT; IF (IMCONV == 1 .AND.
+  TREST > EM10) THEN DT_E = MIN(DT_IMP, TREST); IF (IDYNA > 0) DT_E =
+  DT_IMP` - a static run clips its last step to the remaining time, a
+  dynamic one does not. `resol.F:8317-8318` advances `TT = TT + DT2` and
+  `:8470` solves only while `TT <= TSTOP` (within 1e-10), so the dynamic run
+  ends at the last converged time below the end: an adaptive `/IMPL/DT/2`
+  run can end NORMAL one increment short. The fix point makes `IMP_DTF`
+  (`imp_dt.F:302-321`) cut the step that would pass it to the remainder,
+  then restore the old step.
+- **Scope.** Static decks are untouched (they clip their own last step);
+  `--arclength-riks` writes `/IMPL/DT/3`, under which `lectur.F:3523-3532`
+  disarms every fix point, so none is written; a `--fixpoint-count N > 0`
+  grid already ends at the end time. On an IMFLAG-curve segment
+  (`--imflag-curve-restart`) the point is the segment's own `/RUN` end.
+- **Measured** (nt 4 = nt 2, the R14 roster): the 9 keys / 5 models that
+  ended NORMAL below their end time reach it at +1 cycle with the fifths 1-4
+  of the history unchanged; the END value is then read AT the end time and
+  moves both ways: `ex_14_solid_elform_1` 34 -> 35 cycles, IE END -14.44 % at
+  t 0.01839 -> -33.66 % at t 0.02 (IE RMS 4.51 % over its 200 LS times);
+  `ex_11_beam_elform_1` 35 -> 36 cycles, KE END +1343.37 -> -78.46 %;
+  `ex_14_solid_elform_2` IE END +213.83 -> -0.28 %. Decks that already land on
+  the end time (`ex_14_solid_elform_3`, `ex_16`, `Intermediate_fsi_flap`)
+  print the same rows. 21 R14 keys / 16 models move by the two engine lines.
+- **The sliver.** `IMP_DTF` cuts the step to the remainder whatever its size
+  (`imp_dt.F:311-320`). When the remainder is a sliver of the step, the LAST
+  printed row is an integration artifact: on `efg/metal-cutting/main.k` the
+  step 2.0e-4 is cut to 1.0e-5 and the row at t 0.03 prints K-ENERGY 6.06e8
+  (91.3 one cycle before) and ERROR 99.9 %; on a 2 x 2 x 2-hex probe the step
+  2.0e-3 is cut to 1.05e-4 and the last row prints KE 170.1 (0.160 before) and
+  ERROR -99.9 %, rows 1-33 equal to the run without the card. Read the row
+  before it. On the R14 stop rows the remainder is 62 - 85 % of the step and
+  the last row is clean (ex_14 elform_1 ERROR 0.4 %, ex_11 -0.2 %). The
+  mechanism of the artifact (the variable-step Newmark update) is not read
+  yet: a ROADMAP item.

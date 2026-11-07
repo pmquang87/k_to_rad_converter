@@ -528,6 +528,7 @@ def convert(
     maxint_stress_all: bool = True,
     shrf_ashear: bool = True,
     nip1_one_point: bool = True,
+    implicit_end_fixpoint: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1933,6 +1934,19 @@ def convert(
         with ``shrf_ashear``: IE END +65.73 -> +46.57 %, IE RMS 22.79 ->
         14.23 % of the LS peak over its 500 LS times (110032 cycles, nt 4).
         Default True (``--no-nip1-one-point``: max(2, NIP)).
+    implicit_end_fixpoint : bool
+        ONE ``/IMPL/DT/FIXPOINT`` at the end time on a dynamic implicit deck
+        (``/IMPL/DYNA/2`` with ``/IMPL/DT/2``, not RIKS) when no
+        ``fixpoint_count`` grid is written - the bytes of ``fixpoint_count=1``
+        (R14 round 10, A5): the engine does not clip a dynamic increment to
+        the remaining time (``imp_dt.F:53-56``) and stops at the first cycle
+        past the end (``resol.F:8317-8318``). MEASURED (nt 4 = nt 2): the 9
+        R14 keys / 5 models that ended NORMAL below ENDTIM reach it at +1
+        cycle, fifths 1-4 unchanged, END moving both ways
+        (ex_14_solid_elform_1 IE END -14.44 % at t 0.01839 -> -33.66 % at t
+        0.02); a sliver remainder makes the last row an integration artifact
+        (metal-cutting KE 91.3 -> 6.06e8). Default True
+        (``--no-implicit-end-fixpoint``: no card).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2088,6 +2102,7 @@ def convert(
         maxint_stress_all=maxint_stress_all,
         shrf_ashear=shrf_ashear,
         nip1_one_point=nip1_one_point,
+        implicit_end_fixpoint=implicit_end_fixpoint,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

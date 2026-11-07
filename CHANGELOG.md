@@ -168,6 +168,38 @@ Prior history (before this changelog was introduced) is summarized in the
     1.112e-6 = 1.0008e-6). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md`'s K-41 rows
     are re-texted after the merge of master (its 6.3 / 6.4 / 6.7 / 6.8
     records were measured at Tmin = |DT2MS|).
+  - **A5 - the end fix point on dynamic implicit decks, by default
+    (`--no-implicit-end-fixpoint` writes none).** A dynamic implicit deck
+    (`/IMPL/DYNA/2`, the `/IMPL/DT/2` step card, not `--arclength-riks`)
+    without a `--fixpoint-count` grid gets ONE `/IMPL/DT/FIXPOINT` at its end
+    time - byte for byte the two lines `--fixpoint-count 1` writes (a stated
+    `--fixpoint-count 0` is the default; on an IMFLAG-curve segment the point
+    is the segment's own `/RUN` end). Why: under `/IMPL/DYNA` the engine does
+    not clip an increment to the remaining time (`imp_dt.F:53-56`; a static
+    run clips its last step, `:55`, and static decks are untouched) and stops
+    at the first cycle past the end (`resol.F:8317-8318`, `:8470`), so an
+    adaptive run could end NORMAL one increment below ENDTIM; `IMP_DTF`
+    (`imp_dt.F:302-321`) lands it on the fix point. MEASURED (census g2g /
+    critic G2 from k2rad's own `fixpoint_count=1` conversion, nt 4 = nt 2):
+    the 9 keys / 5 models that ended below their end time reach it at +1
+    cycle with fifths 1-4 unchanged, and the END value - read AT the end time
+    now - moves both ways: `ex_14_solid_elform_1` 34 -> 35 cycles, IE END
+    -14.44 % (t 0.01839) -> -33.66 % (t 0.02), IE RMS 4.61 % (n 183) / 4.51 %
+    (n 200); `ex_11_beam_elform_1` KE END +1343.37 -> -78.46 %;
+    `ex_14_solid_elform_2` IE END +213.83 -> -0.28 %, KE END +129.12 ->
+    +784.18 %; the decks that already landed on the end time print the same
+    rows. No "gain" is claimed. The sliver: `IMP_DTF` cuts the step to the
+    remainder whatever its size (`imp_dt.F:311-320`), so where the remainder
+    is a sliver of the step the LAST row is an integration artifact - on
+    `efg/metal-cutting/main.k` (step 2.0e-4 cut to 1.0e-5) KE 91.3 -> 6.06e8
+    and ERROR 99.9 % at t 0.03, on a 2 x 2 x 2-hex probe (2.0e-3 cut to
+    1.05e-4) KE 0.160 -> 170.1, ERROR -99.9 %; the R14 stop rows' remainders
+    are 62 - 85 % of the step (clean last rows). Movers: 21 R14 keys / 16
+    models by the two engine lines (18 runnable + 3 giants); 0 status /
+    verdict moves expected. Tests: `tests/test_r14_round10.py`
+    `A5EndFixpoint` (the bytes of `fixpoint_count=1`, the opt-out = 2 lines
+    fewer, the sentence, static / RIKS / a 4-point grid untouched);
+    `Round10FlagWiringA` += `--implicit-end-fixpoint`. No existing pin moves.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

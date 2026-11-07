@@ -380,6 +380,23 @@ as underscores.
   `--shrf-ashear`: IE END +65.73 -> +46.57 %, IE RMS 22.79 -> 14.23 % of the
   LS peak over its 500 LS times (110032 cycles, nt 4). `--no-nip1-one-point`
   writes max(2, NIP).
+- `--implicit-end-fixpoint` / `--no-implicit-end-fixpoint` — **ON by
+  default**. On a dynamic implicit deck (`/IMPL/DYNA/2` with `/IMPL/DT/2`,
+  not `--arclength-riks`) without a `--fixpoint-count` grid, write ONE
+  `/IMPL/DT/FIXPOINT` at the end time - the two lines `--fixpoint-count 1`
+  writes. The engine does not clip a dynamic increment to the remaining time
+  (`imp_dt.F:53-56`) and stops at the first cycle past the end
+  (`resol.F:8317-8318`), so an adaptive run can end NORMAL one increment
+  below ENDTIM; static decks clip their own last step (`imp_dt.F:55`) and are
+  untouched. MEASURED (nt 4 = nt 2): the 9 R14 keys / 5 models that ended
+  below their end time reach it at +1 cycle with fifths 1-4 unchanged; the
+  END value moves both ways (`ex_14_solid_elform_1` IE END -14.44 % at t
+  0.01839 -> -33.66 % at t 0.02; `ex_11_beam_elform_1` KE END +1343.37 ->
+  -78.46 %). When the remainder is a sliver of the step the last increment is
+  cut to it (`imp_dt.F:311-320`) and the LAST row is an integration artifact
+  (`efg/metal-cutting/main.k`: step 2.0e-4 cut to 1.0e-5, KE 91.3 -> 6.06e8,
+  ERROR 99.9 % at t 0.03): read the row before it.
+  `--no-implicit-end-fixpoint` writes no card.
 
 ### Python API
 
@@ -6585,9 +6602,10 @@ only `SORTIE_MAIN` call site and is not gated on `IMPL_S`. **So no implicit
 guard is applied and none should be**; what to expect instead is FEWER files
 than the schedule asks for, because `sortie_main.F:952` advances `TDYNAIN` by
 one interval per write and a long implicit step strides over several triggers.
-`/IMPL/DT/FIXPOINT`, which `--fixpoint-count N` re-enables (it is OFF by
-default since 2026-09, see below), removes the intermediate overshoot — at
-the cost the same section names.
+`/IMPL/DT/FIXPOINT`, which `--fixpoint-count N` re-enables (the grid is OFF by
+default since 2026-09; a dynamic deck gets one end fix point since round 10,
+see below), removes the intermediate overshoot — at the cost the same section
+names.
 
 **The STRAIN card's spelling is load-bearing.** `fredynain.F:140` accepts the
 card on `KEY3(1:5) == 'STRAI'`, so `/DYNAIN/SHELL/STRAI/FULL` parses too — but
@@ -6627,6 +6645,26 @@ and two improve. A coarser grid is NOT the fix — at 10 points `ex_15`
 terminates at a 99.9 % energy error and `ex_14` at 86.1 %, both NORMAL
 banners over junk (measured 2026-09-12, `nt = 4`). The cost of 0 is fewer output
 states (15 cycles become 8 on the controls)
+**The END fix point (R14 round 10, `--no-implicit-end-fixpoint` opts out).**
+The GRID stays off; since round 10 a DYNAMIC implicit deck (`/IMPL/DYNA/2`
+with `/IMPL/DT/2`, not `--arclength-riks`) gets ONE `/IMPL/DT/FIXPOINT` at its
+end time when no `--fixpoint-count` grid is written - the two lines
+`--fixpoint-count 1` writes. Under `/IMPL/DYNA` the engine does not clip an
+increment to the remaining time (`imp_dt.F:53-56`; a static run clips its last
+step, `:55`, and is untouched) and the run stops at the first cycle past the
+end (`resol.F:8317-8318`), so an adaptive run could end NORMAL one increment
+below ENDTIM; the fix point makes the step controller land on it
+(`imp_dt.F:302-321`). MEASURED (nt 4 = nt 2): the 9 R14 keys / 5 models that
+ended below their end time reach it at +1 cycle with the fifths 1-4 of the
+history unchanged; the END value is then read AT the end time and moves both
+ways (`ex_14_solid_elform_1` IE END -14.44 % at t 0.01839 -> -33.66 % at t
+0.02; `ex_11_beam_elform_1` KE END +1343.37 -> -78.46 %). When the remainder
+is a sliver of the step, the last increment is cut to it (`imp_dt.F:311-320`)
+and the LAST printed row is an integration artifact: `efg/metal-cutting/main.k`
+(step 2.0e-4 cut to 1.0e-5) prints KE 91.3 -> 6.06e8 and ERROR 99.9 % at t
+0.03, a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4) KE 0.160 -> 170.1 and
+ERROR -99.9 % - read the row before it. 21 R14 keys / 16 models move by the
+two engine lines.
 `/IMPL/QSTAT/DTSCAL` is **10 since 2026-09**, changed from 0.1
 (`--qstat-dtscal VALUE|none` to override, `--qstat-dtscal 0.1` to restore).
 That cell scales the inertia stabilization k2rad adds to the implicit tangent:

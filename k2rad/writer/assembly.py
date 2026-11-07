@@ -1661,9 +1661,71 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         lines.append("/IMPL/DT/FIXPOINT")
         for i in range(0, len(fixpts), 5):                   # ≤5 fields → ≤100 cols
             lines.append("".join(_f(t) for t in fixpts[i:i + 5]))
+    elif n_fix == 0:
+        # R14 round 10, A5 (--no-implicit-end-fixpoint opts out): no grid
+        # asked for (or one disarmed under RIKS) - a dynamic deck still gets
+        # ONE fix point at its end time
+        lines += _implicit_end_fixpoint(state, dyn, seg)
 
     lines.append("#")
     return lines
+
+
+def _implicit_end_fixpoint(state: ConversionState, dyn, seg) -> List[str]:
+    """R14 round 10, A5 (``implicit_end_fixpoint``, default ON,
+    ``--no-implicit-end-fixpoint``): ONE ``/IMPL/DT/FIXPOINT`` at the run's
+    end on a dynamic implicit engine deck - byte for byte the two lines
+    ``--fixpoint-count 1`` writes.
+
+    Why: under /IMPL/DYNA the engine does not clip an increment to the
+    remaining time (``imp_dt.F:53-56`` 'IF (IDYNA>0) DT_E = DT_IMP'; a static
+    run clips its last step, ``imp_dt.F:55``) and the run stops at the first
+    cycle whose time passes the end (``resol.F:8317-8318``, ``:8470``), so an
+    adaptive /IMPL/DT/2 run can end NORMAL one increment short of ENDTIM; the
+    fix point makes the step controller land on it (``imp_dt.F:302-321``
+    IMP_DTF cuts the step to the remainder, whatever its size - a sliver
+    remainder makes the last row an integration artifact, named in the
+    warning). Scope: /IMPL/DYNA/2 written (``*CONTROL_IMPLICIT_DYNAMICS``
+    IMASS > 0), the /IMPL/DT/2 step card (RIKS /IMPL/DT/3 disarms every fix
+    point, ``lectur.F:3523-3532``), no ``--fixpoint-count`` grid (the clamped
+    count is 0: a stated ``--fixpoint-count 0`` is the default), an end time
+    > 0. On an IMFLAG-curve segment (``--imflag-curve-restart``) the end is
+    the segment's own /RUN end; the warning is written once per deck."""
+    if not state.options.implicit_end_fixpoint:
+        return []
+    if dyn is None or dyn.imass <= 0:
+        return []
+    if _arclength_requested(state) and state.options.arclength_riks:
+        return []
+    if seg is not None:
+        t_end = seg.t_stop
+    elif state.ctrl_termination and state.ctrl_termination.endtim > 0:
+        t_end = state.ctrl_termination.endtim
+    else:
+        return []
+    if not t_end > 0.0:
+        return []
+    if seg is None or seg.first_implicit:
+        state.warn(
+            f"/IMPL/DT/FIXPOINT {t_end:g} (the end fix point; "
+            "--no-implicit-end-fixpoint writes none): on this dynamic implicit "
+            "deck (/IMPL/DYNA/2, /IMPL/DT/2) the engine does not clip the "
+            "last increment to the remaining time (imp_dt.F:53-56) and stops "
+            "at the first cycle past the end (resol.F:8317-8318), so the "
+            "adaptive step can end the run NORMAL below its end time; the fix "
+            "point lands it there. MEASURED on the R14 roster (nt 4 = nt 2): "
+            "the 9 keys / 5 models that ended below their end time reach it "
+            "at +1 cycle with the fifths 1-4 of the history unchanged; the END "
+            "value is then read AT the end time and moves both ways "
+            "(ex_14_solid_elform_1 IE END -14.44 % at t 0.01839 -> -33.66 % "
+            "at t 0.02; ex_11_beam_elform_1 KE END +1343.37 -> -78.46 %). "
+            "When the remainder is a sliver of the step the last increment "
+            "is cut to it (imp_dt.F:311-320) and the LAST row is an "
+            "integration artifact - measured on efg/metal-cutting/main.k "
+            "(step 2.0e-4 cut to 1.0e-5: KE 91.3 -> 6.06e8, ERROR 99.9 % at "
+            "t 0.03) and on a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4: KE "
+            "0.160 -> 170.1, ERROR -99.9 %): read the row before it.")
+    return ["/IMPL/DT/FIXPOINT", _f(t_end)]
 
 
 def _make_engine_cpu(state: ConversionState) -> List[str]:
