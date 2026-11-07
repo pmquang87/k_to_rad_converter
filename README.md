@@ -397,6 +397,19 @@ as underscores.
   (`efg/metal-cutting/main.k`: step 2.0e-4 cut to 1.0e-5, KE 91.3 -> 6.06e8,
   ERROR 99.9 % at t 0.03): read the row before it.
   `--no-implicit-end-fixpoint` writes no card.
+- `--implicit-rayleigh-damping` — **OFF by default** (opt-in). On a dynamic
+  implicit deck write `*DAMPING_GLOBAL` (LCID 0, uniform STX .. SRZ) as
+  `/IMPL/DYNA/DAMP` alpha = VALDMP, beta 0 after `/IMPL/DYNA/2`
+  (`imp_dyna.F:1810-1828`), beside the starter `/DAMP`, which has no effect
+  on an implicit run (Reference Guide 2022 `/IMPL/DYNA/DAMP` comment 2;
+  `resol.F:6406` / `:6547` skip `CALL DAMPING`). Without the flag the
+  inertness is named in a warning. Off by default because it worsens the
+  measured history on the shipped adaptive step: `ex_14_solid_elform_1` with
+  the end fix point, IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS
+  peak over its 200 LS times (nt 4 = nt 2). Not written on a static deck
+  (the card alone turns the run dynamic, `freimpl.F:171`), for an LCID > 0 or
+  a per-DOF card, or beside `*DAMPING_PART_*` cards - each refusal named
+  (the section under Implicit dynamic notes below has the measurements).
 
 ### Python API
 
@@ -8106,6 +8119,38 @@ off on this deck (with the grid moving it reads energy error +59.2 %, END IE
 +1504.57 %). The rule is keyed on the deck's own card only: a void +
 `*CONSTRAINED_LAGRANGE_IN_SOLID` deck without one (quadrature_B) converts
 byte-identically under the flag. Reach 1 deck key / 1 emitted model.
+
+### `--implicit-rayleigh-damping` — `/IMPL/DYNA/DAMP` from `*DAMPING_GLOBAL` on a dynamic implicit deck
+
+k2rad writes `*DAMPING_GLOBAL` (LCID 0) as the starter `/DAMP` (mass-weighted
+alpha = VALDMP). On an implicit run that card has no effect: the Reference
+Guide 2022 says so in its `/IMPL/DYNA/DAMP` comment 2 ("/DAMP defined in
+Starter has no effect on implicit run"), and the engine's only `CALL DAMPING`
+(`resol.F:7216-7219`, and the `DAMPING44` / `DAMPING51` branches) sits in the
+explicit block that an implicit run skips (`resol.F:6406` / `:6547`,
+`GOTO 111`). Since round 10 k2rad names this on every implicit deck that
+carries a `/DAMP` (8 R14 keys / 3 models, all dynamic).
+
+`--implicit-rayleigh-damping` (opt-in, round 10) also writes, on a dynamic
+implicit deck (`/IMPL/DYNA/2`), `/IMPL/DYNA/DAMP` alpha = VALDMP x ST, beta 0
+right after `/IMPL/DYNA/2`: `imp_dyna.F:1810-1828` adds alpha x M x V, LS-DYNA's
+F = Ds m v (Vol I R17 p.15-9 Remark 4); ST is the common value of the six
+scale factors STX .. SRZ (all 0 = unity, p.15-9 Remark 2). The starter `/DAMP`
+stays. The card is not written - and each refusal is named - on a static deck
+(the card alone turns the run dynamic: `freimpl.F:171` sets IDYNA), for an
+LCID > 0 (a time curve; the card holds one constant), for unequal STX .. SRZ
+(the card damps every DOF alike), beside `*DAMPING_PART_MASS` /
+`*DAMPING_PART_STIFFNESS` cards (part-scoped; the card is global) or for
+VALDMP <= 0.
+
+MEASURED (nt 4 = nt 2, the R14 round-10 census): on LS-DYNA's own step the
+card brings the history nearer LS-DYNA (`ex_14_solid_elform_1` IE RMS 11.94 ->
+10.38 %, `ex_15_thick_shell_elform_5` 5.07 -> 3.43 % of the LS peak), but on
+the step k2rad ships (the adaptive `/IMPL/DT/2` with the end fix point) it
+worsens both carriers' internal energy: `ex_14_solid_elform_1` IE RMS 4.51 ->
+5.27 %, KE RMS 2.66 -> 7.56 % over its 200 LS times; `ex_15_thick_shell_elform_5`
+IE RMS 5.31 -> 6.58 %. So it is not the default. The engine echoes
+`IMPLICIT RAYLEIGH DAMPING COEFFICIENTS : 11.53500 0.000000` for VALDMP 11.535.
 
 ---
 

@@ -200,6 +200,36 @@ Prior history (before this changelog was introduced) is summarized in the
     `A5EndFixpoint` (the bytes of `fixpoint_count=1`, the opt-out = 2 lines
     fewer, the sentence, static / RIKS / a 4-point grid untouched);
     `Round10FlagWiringA` += `--implicit-end-fixpoint`. No existing pin moves.
+  - **A6 - the starter `/DAMP` is inert on an implicit run: named by default;
+    `--implicit-rayleigh-damping` (opt-in) writes `/IMPL/DYNA/DAMP`.** k2rad
+    writes `*DAMPING_GLOBAL` (LCID 0) as the starter `/DAMP`, on implicit
+    decks too, and an implicit run never applies it (Reference Guide 2022
+    `/IMPL/DYNA/DAMP` comment 2: "/DAMP defined in Starter has no effect on
+    implicit run"; the engine's only `CALL DAMPING`, `resol.F:7216-7219`,
+    sits in the explicit block `resol.F:6406` / `:6547` skip): every implicit
+    deck that carries a `/DAMP` now says so, once (a new starter registry,
+    `writer/assembly._register_damp_cards`, reads the `/DAMP` headers the
+    damping sections wrote; `ConversionState.damp_cards`). The opt-in writes
+    `/IMPL/DYNA/DAMP` alpha = VALDMP x ST, beta 0 right after `/IMPL/DYNA/2`
+    (`imp_dyna.F:1810-1828`: alpha x M x V = LS-DYNA's Ds m v; ST the common
+    STX .. SRZ, all 0 = unity, Vol I R17 p.15-9) and keeps the starter
+    `/DAMP`; it refuses by name a static deck (the card alone turns the run
+    dynamic, `freimpl.F:171`), an LCID > 0, an uneven STX .. SRZ,
+    `*DAMPING_PART_*` cards and VALDMP <= 0. MEASURED (census g2g / critic G2,
+    nt 4 = nt 2): deleting the `/DAMP` changes no printed figure of
+    `ex_14_solid_elform_1`; the card is consumed (engine echo `IMPLICIT
+    RAYLEIGH DAMPING COEFFICIENTS`) and brings LS-DYNA's own step nearer the
+    reference (ex_14 IE RMS 11.94 -> 10.38 %, ex_15 elform_5 5.07 -> 3.43 % of
+    the LS peak), but on the step k2rad ships (adaptive + the A5 end fix
+    point) it worsens the internal energy of both carriers - ex_14 IE RMS 4.51
+    -> 5.27 %, KE RMS 2.66 -> 7.56 % over its 200 LS times; ex_15 elform_5 IE
+    RMS 5.31 -> 6.58 % - so the card is an opt-in and no sentence calls it a
+    gain. Movers: 0 bytes by default; the sentence on 8 R14 keys / 3 models
+    (ex_14 elform -1 / -2 / 1 / 2 / 3, ex_15 elform 2 / 3 / 5). Tests:
+    `tests/test_r14_round10.py` `A6ImplicitDamping` (the default sentence,
+    static and dynamic; the opt-in card and its two engine lines; the three
+    refusals; the uniform 0.5 x 11.535 = 5.7675) and `Round10OptInWiring`; the
+    README section `--implicit-rayleigh-damping`, docs/IMPLICIT.md.
 
 - **CardStack FEM-pipeline smoothing (2026-10).** The CardStack card-stack
   pipeline wrote its OpenRadioss decks partly by hand: runs 03-26 converted

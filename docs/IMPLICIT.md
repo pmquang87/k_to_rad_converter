@@ -304,3 +304,35 @@ writes, byte for byte.
   the last row is clean (ex_14 elform_1 ERROR 0.4 %, ex_11 -0.2 %). The
   mechanism of the artifact (the variable-step Newmark update) is not read
   yet: a ROADMAP item.
+
+### Damping on an implicit run (round 10, A6)
+
+k2rad writes `*DAMPING_GLOBAL` (LCID 0) as the starter `/DAMP` (mass-weighted
+alpha = VALDMP), on implicit decks too. An implicit run never applies it: the
+Reference Guide 2022 says so in its `/IMPL/DYNA/DAMP` comment 2 ("/DAMP
+defined in Starter has no effect on implicit run"), and the engine's only
+`CALL DAMPING` (`resol.F:7216-7219`, with the `DAMPING44` / `DAMPING51`
+branches) sits in the explicit block an implicit run jumps over
+(`resol.F:6406` `IF (IMPL_S == 1)` ... `:6547` `GOTO 111`). Measured on
+`ex_14_solid_elform_1`: deleting the `/DAMP` changes no printed figure of
+the run. Since round 10 every implicit deck that carries a `/DAMP` names it
+(8 R14 keys / 3 models, all dynamic); a dynamic one is UNDAMPED where
+LS-DYNA damps it (its glstat "system damping energy": 1.29493E+07 at t 0.02
+on ex_14, 16.8 % of the external work).
+
+The opt-in `--implicit-rayleigh-damping` writes `/IMPL/DYNA/DAMP` alpha =
+VALDMP x ST, beta 0 right after `/IMPL/DYNA/2` (`freimpl.F:169-176` reads the
+two values; `imp_dyna.F:1810-1828` adds alpha x M x V, LS-DYNA's F = Ds m v,
+Vol I R17 p.15-9 Remark 4; ST = the common STX .. SRZ, all 0 = unity, Remark
+2) and keeps the starter `/DAMP`. It refuses, by name, a static deck (any
+`/IMPL/DYNA*` card turns the run dynamic, `freimpl.F:171`), an LCID > 0, an
+uneven STX .. SRZ, `*DAMPING_PART_*` cards and VALDMP <= 0. Both directions
+are measured (nt 4 = nt 2): on LS-DYNA's own step the card brings the history
+nearer LS-DYNA (`ex_14_solid_elform_1` IE RMS 11.94 -> 10.38 %,
+`ex_15_thick_shell_elform_5` 5.07 -> 3.43 % of the LS peak), on the step
+k2rad ships (the adaptive `/IMPL/DT/2` with the end fix point) it worsens the
+internal energy of both carriers: `ex_14_solid_elform_1` IE RMS 4.51 ->
+5.27 %, KE RMS 2.66 -> 7.56 % over its 200 LS times; `ex_15_thick_shell_elform_5`
+IE RMS 5.31 -> 6.58 %. So it stays an opt-in. (The run-openradioss launcher's
+audit NOTE `damp-window` reads an implicit `/DAMP` as active; the inertness
+above is the engine's.)

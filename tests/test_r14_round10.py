@@ -12,6 +12,7 @@ import re
 import unittest
 
 import test_r14_triage_7 as _t7
+import test_r14_triage_8 as _t8
 import test_cardstack_pipeline_props as _tp
 
 _row = _t7._row
@@ -603,6 +604,80 @@ class A5EndFixpoint(unittest.TestCase):
         self.assertIn("/IMPL/DT/FIXPOINT", eng.splitlines())
 
 
+class A6ImplicitDamping(unittest.TestCase):
+    """The starter /DAMP is inert on an implicit run (named by default);
+    --implicit-rayleigh-damping (opt-in) writes /IMPL/DYNA/DAMP."""
+
+    def test_the_default_names_the_inert_damp(self):
+        res, st, eng = _convert(_hex_block())
+        self.assertIn("/DAMP/", st)
+        self.assertNotIn("/IMPL/DYNA/DAMP", eng)
+        hits = [w for w in res.warnings
+                if "the starter /DAMP has NO effect on an implicit run" in w]
+        self.assertEqual(len(hits), 1, hits)
+        for needle in ("resol.F:7216-7219", "resol.F:6406 / :6547",
+                       "UNDAMPED", "IE RMS 4.51 -> 5.27 %",
+                       "KE RMS 2.66 -> 7.56 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, hits[0])
+        self.assertNotIn("gain", hits[0].lower())
+        # a static deck: named, no 'undamped' claim about a dynamic run
+        res, _s, eng = _convert(_hex_block(dynamic=False))
+        self.assertTrue(_has(res.warnings, "the starter /DAMP has NO effect",
+                             "(this deck is static: no "
+                             "*CONTROL_IMPLICIT_DYNAMICS)"))
+        self.assertNotIn("/IMPL/DYNA/DAMP", eng)
+        # no /DAMP, no sentence
+        res, _s, _e = _convert(_hex_block(damping=""))
+        self.assertFalse(_has(res.warnings, "the starter /DAMP has NO effect"))
+
+    def test_the_opt_in_writes_the_card_after_dyna_2(self):
+        res, st, eng = _convert(_hex_block(), implicit_rayleigh_damping=True)
+        lines = eng.splitlines()
+        i = lines.index("/IMPL/DYNA/2")
+        self.assertEqual(lines[i + 2:i + 4],
+                         ["/IMPL/DYNA/DAMP",
+                          "              11.535                   0"])
+        self.assertIn("/DAMP/", st)                  # the starter card stays
+        self.assertTrue(_has(res.warnings, "--implicit-rayleigh-damping: "
+                             "/IMPL/DYNA/DAMP alpha = 11.535, beta 0"))
+        _r, st0, eng0 = _convert(_hex_block())
+        self.assertEqual(st, st0)
+        self.assertEqual([ln for ln in lines if ln not in eng0.splitlines()],
+                         ["/IMPL/DYNA/DAMP",
+                          "              11.535                   0"])
+        self.assertEqual(len(lines), len(eng0.splitlines()) + 2)
+
+    def test_the_refusals_are_named(self):
+        cases = (
+            ({"dynamic": False}, "the deck is static"),
+            ({"damping": "*DAMPING_GLOBAL\n" + _row(7, 11.535) + "\n"
+              + "*DEFINE_CURVE\n" + _row(7) + "\n"
+              + f"{0.0:>20}{11.535:>20}\n{1.0:>20}{11.535:>20}\n"},
+             "LCID 7 > 0"),
+            ({"damping": "*DAMPING_GLOBAL\n"
+              + _row(0, 11.535, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0) + "\n"},
+             "STX..SRZ are not uniform"),
+        )
+        for kw, needle in cases:
+            with self.subTest(needle=needle):
+                res, _s, eng = _convert(_hex_block(**kw),
+                                        implicit_rayleigh_damping=True)
+                self.assertNotIn("/IMPL/DYNA/DAMP", eng)
+                self.assertTrue(_has(res.warnings, "--implicit-rayleigh-"
+                                     "damping: /IMPL/DYNA/DAMP not written",
+                                     needle), res.warnings)
+
+    def test_a_uniform_scale_multiplies_valdmp(self):
+        # Vol I R17 p.15-9 Remark 2: all six 0 -> unity; 0.5 x 11.535 = 5.7675
+        deck = _hex_block(damping="*DAMPING_GLOBAL\n"
+                          + _row(0, 11.535, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
+                          + "\n")
+        _r, _s, eng = _convert(deck, implicit_rayleigh_damping=True)
+        self.assertEqual(_engine_block(eng, "/IMPL/DYNA/DAMP"),
+                         ["              5.7675                   0"])
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Retracted statements and forbidden sentences (the rounds 4-9 shape:
 # _t7._SHIPPED_TEXTS = README, ROADMAP, the GUI, k2rad.py, k2rad/, docs/*.md,
@@ -762,6 +837,22 @@ class Round10FlagWiringA(_t7.Round7FlagWiringA):
         self.assertNotIn("OFF by default", text)
         self.assertIn("`--dt2ms-tssfac-product` / `--no-dt2ms-tssfac-product` "
                       "— **ON by default", _t7._collapse(_readme()))
+
+
+class Round10OptInWiring(_t8.Round8OptInWiringB):
+    """The round-10 part-A-i OPT-IN lever (default OFF): parser + --no-
+    twin, README prose (the POSITIVE spelling) and its own ### heading, the
+    --help figures, the GUI end to end, convert() / ConvertOptions default
+    False and cli.main()'s call."""
+
+    _OPT_IN = {"--implicit-rayleigh-damping": "implicit_rayleigh_damping"}
+    _HELP_FIGURES = {
+        "--implicit-rayleigh-damping": ("imp_dyna.F:1810-1828",
+                                        "resol.F:6406 / :6547",
+                                        "IE RMS 4.51 -> 5.27 %",
+                                        "KE RMS 2.66 -> 7.56 %",
+                                        "freimpl.F:171", "OFF by default"),
+    }
 
 
 if __name__ == "__main__":

@@ -2187,6 +2187,24 @@ def build_parser() -> argparse.ArgumentParser:
              "(efg/metal-cutting: KE 91.3 -> 6.06e8, ERROR 99.9 %%). ON by "
              "default; --no-implicit-end-fixpoint writes no card.",
     )
+    parser.add_argument(
+        "--implicit-rayleigh-damping",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="On a dynamic implicit deck write *DAMPING_GLOBAL (LCID 0, "
+             "uniform STX..SRZ) as /IMPL/DYNA/DAMP alpha = VALDMP, beta 0 "
+             "after /IMPL/DYNA/2 (imp_dyna.F:1810-1828: alpha x M x V), "
+             "beside the starter /DAMP, which has no effect on an implicit "
+             "run (Reference Guide 2022 /IMPL/DYNA/DAMP comment 2; the "
+             "engine's only CALL DAMPING sits in the explicit block that "
+             "resol.F:6406 / :6547 skip) - the default names that. OFF by "
+             "default: on the shipped adaptive step it worsens the history - "
+             "ex_14_solid_elform_1 with the end fix point: IE RMS 4.51 -> "
+             "5.27 %%, KE RMS 2.66 -> 7.56 %% of the LS peak over its 200 LS "
+             "times (nt 4 = nt 2). Not written on a static deck (the card "
+             "alone turns the run dynamic, freimpl.F:171), for an LCID > 0 or "
+             "a per-DOF card, or beside *DAMPING_PART_* cards - each named.",
+    )
     return parser
 
 
@@ -2365,6 +2383,7 @@ def main(argv=None) -> int:
         shrf_ashear=args.shrf_ashear,
         nip1_one_point=args.nip1_one_point,
         implicit_end_fixpoint=args.implicit_end_fixpoint,
+        implicit_rayleigh_damping=args.implicit_rayleigh_damping,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

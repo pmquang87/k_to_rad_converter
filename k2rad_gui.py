@@ -220,7 +220,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          maxint_stress_all: bool = True,
                          shrf_ashear: bool = True,
                          nip1_one_point: bool = True,
-                         implicit_end_fixpoint: bool = True) -> dict:
+                         implicit_end_fixpoint: bool = True,
+                         implicit_rayleigh_damping: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -559,6 +560,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["shrf_ashear"] = bool(shrf_ashear)
     kwargs["nip1_one_point"] = bool(nip1_one_point)
     kwargs["implicit_end_fixpoint"] = bool(implicit_end_fixpoint)
+    kwargs["implicit_rayleigh_damping"] = bool(implicit_rayleigh_damping)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -700,6 +702,7 @@ class ConverterGUI:
         self.shrf_ashear = tk.BooleanVar(value=True)
         self.nip1_one_point = tk.BooleanVar(value=True)
         self.implicit_end_fixpoint = tk.BooleanVar(value=True)
+        self.implicit_rayleigh_damping = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1474,6 +1477,12 @@ class ConverterGUI:
                      "(the run reaches ENDTIM) - ON",
             variable=self.implicit_end_fixpoint).grid(
                 row=94, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Opt-in: dynamic implicit *DAMPING_GLOBAL -> "
+                     "/IMPL/DYNA/DAMP (the starter /DAMP is inert in "
+                     "implicit) - OFF",
+            variable=self.implicit_rayleigh_damping).grid(
+                row=95, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1815,6 +1824,7 @@ class ConverterGUI:
                 shrf_ashear=self.shrf_ashear.get(),
                 nip1_one_point=self.nip1_one_point.get(),
                 implicit_end_fixpoint=self.implicit_end_fixpoint.get(),
+                implicit_rayleigh_damping=self.implicit_rayleigh_damping.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2174,6 +2184,9 @@ class ConverterGUI:
             bits.append("NIP 1 written N 2 (--no-nip1-one-point)")
         if not kwargs.get("implicit_end_fixpoint", True):
             bits.append("no end fix point (--no-implicit-end-fixpoint)")
+        if kwargs.get("implicit_rayleigh_damping"):
+            bits.append("/IMPL/DYNA/DAMP from *DAMPING_GLOBAL "
+                        "(--implicit-rayleigh-damping)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

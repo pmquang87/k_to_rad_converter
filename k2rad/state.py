@@ -9525,6 +9525,16 @@ class ConvertOptions:
     # the last row an artifact (metal-cutting KE 91.3 -> 6.06e8). 21 keys /
     # 16 models move by the two lines. False = no card (ed52c93).
     implicit_end_fixpoint: bool = True
+    # --implicit-rayleigh-damping (A6, OPT-IN; writer/assembly
+    # _implicit_damping): /IMPL/DYNA/DAMP alpha = VALDMP x ST, beta 0 after
+    # /IMPL/DYNA/2 for a *DAMPING_GLOBAL LCID 0 with uniform STX..SRZ on a
+    # dynamic implicit deck (imp_dyna.F:1810-1828: alpha x M x V), beside the
+    # starter /DAMP, which an implicit run never applies (resol.F:6406 /
+    # :6547 skip CALL DAMPING; the inertness is named by default). OFF by
+    # default: MEASURED (R14 round 10, nt 4 = nt 2) on the shipped adaptive
+    # step with the end fix point it worsens ex_14_solid_elform_1, IE RMS 4.51
+    # -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS peak over its 200 LS times.
+    implicit_rayleigh_damping: bool = False
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
@@ -11316,6 +11326,11 @@ class ConversionState:
     damping_global: Optional[DampingGlobal] = None
     damping_part_stiffness: List[DampingPartStiffness] = field(default_factory=list)
     damping_part_mass: List[DampingPartMass] = field(default_factory=list)
+    #: R14 round 10, A6: the /DAMP (and /DAMP/FUNCT) header lines the
+    #: starter carries, registered after the damping sections
+    #: (writer/assembly build_starter) and read by the implicit engine
+    #: writer, which names them inert on an implicit run.
+    damp_cards: List[str] = field(default_factory=list)
     damping_frequency_range: List[DampingFrequencyRange] = field(default_factory=list)
     damping_relative: List[DampingRelative] = field(default_factory=list)
 

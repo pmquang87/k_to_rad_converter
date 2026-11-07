@@ -529,6 +529,7 @@ def convert(
     shrf_ashear: bool = True,
     nip1_one_point: bool = True,
     implicit_end_fixpoint: bool = True,
+    implicit_rayleigh_damping: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1947,6 +1948,18 @@ def convert(
         0.02); a sliver remainder makes the last row an integration artifact
         (metal-cutting KE 91.3 -> 6.06e8). Default True
         (``--no-implicit-end-fixpoint``: no card).
+    implicit_rayleigh_damping : bool
+        OPT-IN (R14 round 10, A6): on a dynamic implicit deck write
+        ``*DAMPING_GLOBAL`` (LCID 0, uniform STX..SRZ) as ``/IMPL/DYNA/DAMP``
+        alpha = VALDMP x ST, beta 0 after ``/IMPL/DYNA/2``
+        (``imp_dyna.F:1810-1828``), beside the starter ``/DAMP``, which an
+        implicit run never applies (``resol.F:6406`` / ``:6547`` skip CALL
+        DAMPING) - the default names that. Refused by name on a static deck,
+        for an LCID > 0, unequal STX..SRZ, ``*DAMPING_PART_*`` cards or VALDMP
+        <= 0. Default False: MEASURED (nt 4 = nt 2) it worsens
+        ex_14_solid_elform_1 on the shipped adaptive step with the end fix
+        point, IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS peak
+        over its 200 LS times.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2103,6 +2116,7 @@ def convert(
         shrf_ashear=shrf_ashear,
         nip1_one_point=nip1_one_point,
         implicit_end_fixpoint=implicit_end_fixpoint,
+        implicit_rayleigh_damping=implicit_rayleigh_damping,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

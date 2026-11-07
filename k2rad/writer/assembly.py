@@ -1510,7 +1510,13 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # The engine defect on this path with an initial velocity (round 6,
         # B4) - warned here, in the branch that writes the card it is about.
         _warn_implicit_dynamic_initial_velocity(state, dyn.imass, gamma, beta)
+        # R14 round 10, A6: the starter /DAMP is inert in an implicit run;
+        # --implicit-rayleigh-damping writes the implicit card (opt-in)
+        lines += _implicit_damping(state, dynamic=True,
+                                   first=seg is None or seg.first_implicit)
     else:
+        _implicit_damping(state, dynamic=False,
+                          first=seg is None or seg.first_implicit)
         # /IMPL/QSTAT/DTSCAL: the inertia-stabilization scale. imp_dyna.F:351
         # builds S = (1+D_AL)*DY_B*DT2*DT2, :353 multiplies it by SCAL_DTQ^2
         # and :355 takes BDT = 1/S, so the stabilization added to the stiffness
@@ -1726,6 +1732,102 @@ def _implicit_end_fixpoint(state: ConversionState, dyn, seg) -> List[str]:
             "t 0.03) and on a 2 x 2 x 2-hex probe (2.0e-3 cut to 1.05e-4: KE "
             "0.160 -> 170.1, ERROR -99.9 %): read the row before it.")
     return ["/IMPL/DT/FIXPOINT", _f(t_end)]
+
+
+def _register_damp_cards(state: ConversionState,
+                         lines: List[str]) -> List[str]:
+    """R14 round 10, A6: record the /DAMP and /DAMP/FUNCT headers the starter
+    carries so far (the three damping sections run before this one); emits
+    nothing and draws no id. /DAMP/FREQUENCY_RANGE is not recorded: it acts
+    inside the material law, not in the nodal CALL DAMPING an implicit run
+    skips."""
+    state.damp_cards = [ln.strip() for ln in lines
+                        if ln.startswith("/DAMP/")
+                        and not ln.startswith("/DAMP/FREQUENCY_RANGE")]
+    return []
+
+
+def _implicit_damping(state: ConversionState, dynamic: bool,
+                      first: bool) -> List[str]:
+    """R14 round 10, A6: on an implicit run the starter /DAMP has no effect
+    ('/DAMP defined in Starter has no effect on implicit run', Reference
+    Guide 2022 /IMPL/DYNA/DAMP comment 2): the engine's only CALL DAMPING
+    (``resol.F:7216-7219``, with its DAMPING44 / DAMPING51 branches) sits in
+    the explicit block that ``resol.F:6406`` / ``:6547`` 'GOTO 111' skips.
+    Named by default on every implicit deck that carries one, once per deck
+    (*first*: the first implicit segment). Under
+    ``--implicit-rayleigh-damping`` (opt-in) a DYNAMIC deck's
+    ``*DAMPING_GLOBAL`` with LCID 0 and uniform STX..SRZ gets
+    ``/IMPL/DYNA/DAMP`` alpha = VALDMP x ST (all six 0 = unity, Vol I R17
+    p.15-9 Remark 2), beta 0 (``imp_dyna.F:1810-1828``: alpha x M x V, the
+    F = Ds m v of Remark 4); the starter /DAMP is kept. Every other case is
+    refused by name. Returns the engine lines (none unless the opt-in writes
+    the card)."""
+    if not state.damp_cards:
+        return []
+    ids = ", ".join(c for c in state.damp_cards[:10]) + (
+        f", ... ({len(state.damp_cards)} cards)"
+        if len(state.damp_cards) > 10 else "")
+    g = state.damping_global
+    card: List[str] = []
+    why_not = ""
+    if state.options.implicit_rayleigh_damping:
+        sts: List[float] = ([g.stx, g.sty, g.stz, g.srx, g.sry, g.srz]
+                            if g else [])
+        uniform = bool(sts) and all(s == sts[0] for s in sts)
+        if not dynamic:
+            why_not = ("not written: the deck is static (no "
+                       "*CONTROL_IMPLICIT_DYNAMICS IMASS > 0), and "
+                       "/IMPL/DYNA/DAMP alone turns an implicit run dynamic "
+                       "(freimpl.F:171 sets IDYNA)")
+        elif g is None:
+            why_not = "not written: no *DAMPING_GLOBAL card to carry"
+        elif g.lcid > 0:
+            why_not = (f"not written: *DAMPING_GLOBAL LCID {g.lcid} > 0, and "
+                       "/IMPL/DYNA/DAMP takes one constant alpha")
+        elif not uniform:
+            why_not = ("not written: *DAMPING_GLOBAL STX..SRZ are not "
+                       "uniform, and /IMPL/DYNA/DAMP damps every DOF alike")
+        elif state.damping_part_mass or state.damping_part_stiffness:
+            why_not = ("not written: *DAMPING_PART_MASS / _PART_STIFFNESS "
+                       "cards are part-scoped, and /IMPL/DYNA/DAMP is global")
+        elif not g.valdmp > 0.0:
+            why_not = "not written: *DAMPING_GLOBAL VALDMP is not positive"
+        else:
+            scale = sts[0] if sts[0] != 0.0 else 1.0
+            alpha = g.valdmp * scale
+            card = ["/IMPL/DYNA/DAMP", f"{_f(alpha)}{_f(0.0)}"]
+    if first:
+        what = (
+            f"{ids}: the starter /DAMP has NO effect on an implicit run "
+            "('/DAMP defined in Starter has no effect on implicit run', "
+            "Reference Guide 2022 /IMPL/DYNA/DAMP comment 2): the engine's "
+            "only CALL DAMPING (resol.F:7216-7219) sits in the explicit block "
+            "an implicit run skips (resol.F:6406 / :6547 'GOTO 111')")
+        if dynamic:
+            what += (", so the converted dynamic run is UNDAMPED where LS-DYNA "
+                     "damps it (its glstat 'system damping energy'). MEASURED "
+                     "on ex_14_solid_elform_1: deleting the /DAMP changes no "
+                     "printed figure of the run")
+        else:
+            what += " (this deck is static: no *CONTROL_IMPLICIT_DYNAMICS)"
+        if card:
+            what += (". --implicit-rayleigh-damping: /IMPL/DYNA/DAMP alpha = "
+                     f"{float(card[1][:20]):g}, beta 0 is written after "
+                     "/IMPL/DYNA/2 (imp_dyna.F:1810-1828, alpha x M x V = "
+                     "LS-DYNA's Ds m v); the starter /DAMP stays.")
+        elif why_not:
+            what += f". --implicit-rayleigh-damping: /IMPL/DYNA/DAMP {why_not}."
+        elif dynamic and g is not None and g.lcid == 0:
+            what += (". --implicit-rayleigh-damping writes /IMPL/DYNA/DAMP "
+                     "alpha = VALDMP after /IMPL/DYNA/2 (opt-in: on the shipped "
+                     "adaptive step it worsens ex_14_solid_elform_1's history, "
+                     "IE RMS 4.51 -> 5.27 %, KE RMS 2.66 -> 7.56 % of the LS "
+                     "peak over its 200 LS times, nt 4 = nt 2).")
+        else:
+            what += "."
+        state.warn(what)
+    return card
 
 
 def _make_engine_cpu(state: ConversionState) -> List[str]:
@@ -3563,6 +3665,11 @@ def _starter_section_registry():
         ("damping_freq_range", lambda c: _make_damping_frequency_range(c.state)),
         ("damping_relative",  lambda c: _resolve_damping_relative(c.state,
                                                                   c.rbody_info)),
+        # R14 round 10, A6: AFTER the three damping sections above - the
+        # registry of the /DAMP cards the implicit engine writer names inert
+        # (resol.F:6406 / :6547 skip CALL DAMPING in an implicit run). Draws
+        # no id and emits nothing.
+        ("damp_registry",     lambda c: _register_damp_cards(c.state, c.lines)),
         ("starter_th",        lambda c: _make_starter_th(c.state)),
         ("starter_th_inter",  lambda c: _make_starter_th_inter(c.state)),
         ("starter_th_node_reac", lambda c: _make_starter_th_node_reac(c.state, c.rbody_info)),
