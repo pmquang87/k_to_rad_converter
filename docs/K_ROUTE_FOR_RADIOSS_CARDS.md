@@ -60,7 +60,7 @@ them after the batch merges.
 | `/SURF/PART` (all cards) | the part set of a contact (`*SET_PART_LIST`) | `writer/common.py`, `writer/contacts.py` | k2rad writes `/SURF/GRSHEL` for a part-set TYPE7, `/SURF/PART/EXT` for the all-parts TYPE25 |
 | `/INTER/TYPE25` card to card, single surface over the cards only | none | `writer/contacts.py` | NOT expressible: see 4.3 |
 | `/INTER/TYPE25` single surface over ALL parts | `*CONTACT_AUTOMATIC_SINGLE_SURFACE` SSID 0 (explicit) | `writer/contacts.py` | the scope includes the tooling (6.8: 15 tooling-to-tooling initial penetrations on the reduced CardStack deck). Gap = min(Gap_scale x t/2, Gap_max) per side, 0 on solids. Gap_max is not a `.k` cell: k2rad writes Gap_scale 1.0 and Gap_max 1e30, which the starter echoes. The `.k` lever is `*PART_CONTACT` OPTT, written as the `/PART` Thick column: OPTT 0.10 gives `/PART` Thick 0.1, the 0.05 per card side of run 27's Gap_max 0.05 (6.7; a byte-identical T01, recorded by this batch's verification). Card-3 SST / MST / SFST are no gap inputs here and are named in a warning (K-13); SFST is not converted to Gap_scale (6.7: SFST 2 changes no byte of the deck but its title). Inacti 6 does not exist on TYPE25 (the starter turns it into 5, WARNING 1559), so 5 is the faithful value for run 27's 6, and `--inter-inacti` refuses a TYPE25 id by name (6.7). Card-2 BT / DT -> Tstart / Tstop (K-11; `--no-contact-birth-death`: 0 / 0) and Card E SRNDE 1 -> Ishape 2 on shells (K-16; `--no-srnde-ishape`: Ishape 0, starter GAP SHAPE 1, 2026-11-01) |
-| `/INTER/TYPE25` tooling to cards, two surfaces | `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` + `--s2s-type25` (K-08B, opt-in), or `*CONTACT_ERODING_SURFACE_TO_SURFACE` + `--eroding-surf-ext` | `writer/contacts.py` | measured (6.2, 6.7): both write a two-surface TYPE25 with surf_ID1 = the SSID surface and surf_ID2 = the MSID surface (a solid side as `/SURF/PART/EXT`). `--s2s-type25` writes Istf 4, Igap 2, Gap_max 0 (= 1e30), Inacti 5, Idel 2, Iedge 1000; the eroding route writes Istf 2. Against run 27's `/INTER/TYPE25/2` (surf_ID1 = tooling, surf_ID2 = cards, Idel at its default 1000, no deletion): with the cards on the SSID side the surface order is swapped, and Idel 2 does nothing while no element fails (6.8). The log still prints the one-way TYPE7 warning of `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` after `--s2s-type25` has routed the card to TYPE25 (cosmetic: no TYPE7 is written for that card; 6.7, 6.8). The eroding route writes SOFT 2's Iedge 22 only with DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (K-10; `--no-soft2-iedge-gate`: 22 for every SOFT 2 card, starter EDGE FLAG 22, 2026-11-01); both routes write Card-2 BT / DT as Tstart / Tstop (K-11; `--no-contact-birth-death`: as stated, so a negative DT switches the contact off from t 0, STOP TIME -4.0E-03, 2026-11-01) |
+| `/INTER/TYPE25` tooling to cards, two surfaces | `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` + `--s2s-type25` (K-08B, opt-in), or `*CONTACT_ERODING_SURFACE_TO_SURFACE` + `--eroding-surf-ext` | `writer/contacts.py` | measured (6.2, 6.7): both write a two-surface TYPE25 with surf_ID1 = the SSID surface and surf_ID2 = the MSID surface (a solid side as `/SURF/PART/EXT`). `--s2s-type25` writes Istf 4, Igap 2, Gap_max 0 (= 1e30), Inacti 5, Idel 2, Iedge 1000; the eroding route writes Istf 2. Against run 27's `/INTER/TYPE25/2` (surf_ID1 = tooling, surf_ID2 = cards, Idel at its default 1000, no deletion): with the cards on the SSID side the surface order is swapped, and Idel 2 does nothing while no element fails (6.8). The 2026-11-01 logs still printed the one-way TYPE7 warning of `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` after `--s2s-type25` had routed the card to TYPE25 (cosmetic: no TYPE7 is written for that card; 6.7, 6.8); since 2026-11-07 the warning prints only where the TYPE7 is written (CHANGELOG). The eroding route writes SOFT 2's Iedge 22 only with DEPTH 5 / 15 / 25 / 35 / 45 / 55 or SBOPT 1 (K-10; `--no-soft2-iedge-gate`: 22 for every SOFT 2 card, starter EDGE FLAG 22, 2026-11-01); both routes write Card-2 BT / DT as Tstart / Tstop (K-11; `--no-contact-birth-death`: as stated, so a negative DT switches the contact off from t 0, STOP TIME -4.0E-03, 2026-11-01) |
 | `/INTER/TYPE7` (runs 03-26) | `*CONTACT_AUTOMATIC_SINGLE_SURFACE` SSID = part set; `*CONTACT_AUTOMATIC_GENERAL` SSID = part set; `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` | `writer/contacts.py` | measured (6.2, 6.7). AUTOMATIC_S2S becomes a ONE-WAY TYPE7 (SSID nodes against MSID segments), Gapmin (SST + MST)/2, and is warned; `--s2s-type25` gives the two-surface TYPE25 of the row above. The single-surface routes write Gapmin = \|SST\| (K-12, default ON; `--no-single-surface-sst-gap` writes the old (\|SST\| + \|MST\|)/2): SST 0.35 gives Gapmin 0.35 (starter MINIMUM GAP 0.35), with the flag Gapmin 0.175 (6.7). Friction goes on card 2 (FS, FD), never in the card-1 SPR / MPR columns: see 3.5. Card-2 BT / DT -> Tstart / Tstop (K-11; `--no-contact-birth-death`: 0 / 0) |
 | `/RWALL/PLANE` (runs 03-26) | `*RIGIDWALL_PLANAR[_FINITE]` (NSID, tail XT..ZT, head XH..ZH, FRIC) | `writer/loads.py` `_rwall_slide` | exact matches, not thresholds: FRIC 0 -> Slide 0 (frictionless sliding); FRIC 1.0 -> Slide 1 (TIED); on `*RIGIDWALL_PLANAR` FRIC 2.0 -> Slide 0 and FRIC 3.0 -> Slide 1, the WVEL-gated weld itself not converted (warned); FRIC < 0 -> Slide 0 (warned); any other FRIC -> Slide 2 (Coulomb, mu = FRIC); re-measured case by case (6.7). `_FINITE` writes `/RWALL/PARAL`, and a face that covers none of its tracked nodes is named (K-21; 6.7). The hand-written walls used Slide 1, which is tied |
 | joints | `*CONSTRAINED_JOINT_REVOLUTE` (N1..N4) | `writer/joints.py` | `/PROP/TYPE45` Type 2 + `/SPRING`; a joint to a fixed body works as a pivot: see 3.4 |
@@ -192,24 +192,36 @@ at the limit (6.3). Make tooling `*MAT_RIGID` instead of mass-scaling its
 CAD micro-edges (D5-2: rigid tooling gave the same 1.89e-6 s step with zero
 added mass). `--dt2ms-tssfac-product` makes the step LS-DYNA's (6.4).
 
-Two limits of these readings, measured by the end-to-end proof (6.8):
+Two limits of these readings, measured by the end-to-end proof (6.8; the first
+mechanism corrected on 2026-11-01 from the starter source):
 
-* On rigid tooling the starter's estimate is too high. It loops over every
-  node, rigid-body secondary nodes included (`add_mass_stat.F:81-83`), while
-  the engine sets those nodes' stiffness to EM20 (`rgbodfp.F:753-754`), so they
-  take no mass. On the 2-card benchmark the audit finds Tmin at 1.06x the
-  starter's 5 % target step, and the run's MAS.ERR is 0.000; on the rigid
-  CardStack variant 4.78x, and MAS.ERR 0.0276. The launcher audit's
-  mass-forecast FLAG can then be a false positive for the model as a whole.
-  Whether it is one depends on the added mass of the deformable parts (next
-  bullet): read the cards' per-node added mass before you call it false.
+* On a deck with rigid bodies the starter's estimate can be too high, and not
+  because of the secondary nodes: `inirby.F:876-883` lumps each rigid body's
+  mass and the summed stiffness of its secondary nodes on the body's main node
+  and sets the secondary nodes to EM20 before the estimate, so the estimate
+  (`add_mass_stat.F:82`) and the engine (`rgbodfp.F:753-754`) both leave the
+  secondary nodes out, and the main node gets the smallest step of the table.
+  With the body's elements switched off (`Ioptoff` 0, which k2rad writes) the
+  engine's main node never carries that stiffness. On the 2-card benchmark
+  only the two rigid main nodes lie below Tmin/Tsca (8.4e-9 and 1.2e-8 s; the
+  first deformable node at 9.3e-7 s), the audit's forecast ratio is 1.06x and
+  the run's MAS.ERR 0.000; on the rigid CardStack variant 582 card nodes lie
+  just below the bound (2.004e-6 against 2.222e-6 s), the ratio is 4.78x and
+  the cards took +22.7 % mass behind MAS.ERR 0.0276. The launcher audit's
+  `mass-forecast` rule (revised 2026-11-01) therefore reads the listing's
+  NODAL TIME STEP (estimation) table: a NOTE only when every node below
+  Tmin/Tsca is a rigid main node, the table reaches the bound and Tmin is
+  below 2x the limit; a FLAG otherwise, naming the smallest other node and
+  the Tmin to set. (The earlier text here, 'rigid-body secondary nodes
+  included', was wrong; corrected from the starter source on 2026-11-01.)
 * MAS.ERR and ENDMAS are ratios over the whole model. On the rigid CardStack
   variant the base is 86 % of the 1.450e-4 Mg, so MAS.ERR 0.0276 passes the
   0.05 gate while every card node took mass (2244 of 2244; mean +23.2 %, max
-  +163.8 %; 4.007e-6 Mg on the cards' 1.765e-5 Mg, +22.7 %; 6.8). Nothing
-  checks the added mass per part: read the per-node mass change of the
-  animation files (`/ANIM/NODA/DMAS`, which k2rad writes; `anim_to_vtk` names
-  it Mass_Change).
+  +163.8 %; 4.007e-6 Mg on the cards' 1.765e-5 Mg, +22.7 %; 6.8). The
+  fem-pipeline results check (row 7) reads the added mass per part from the
+  per-node mass change of the animation files (`/ANIM/NODA/DMAS`, which k2rad
+  writes; `anim_to_vtk` names it Mass_Change, the relative change per node);
+  k2rad and the launcher audit do not.
 
 ### 3.8 One `/GRAV` data line, and gravity at 1 g
 
@@ -308,7 +320,7 @@ described in D2-8 / D5-12. This tree has every one of them (re-measured on
 | ENDMAS -> `/STOP` Mmax | K-40 | done, opt-in `--stop-added-mass`: `/STOP 0. 0.05 0. 1 1 0` for ENDMAS 5 |
 | `/PRINT/-N` from `--print-every` / IKEDIT | K-42 | done: IKEDIT 50 without glstat gives `/PRINT/-50`, with glstat `/PRINT/-1`; `--print-every 2000` gives `/PRINT/-2000` |
 | MAXINT > 3 -> `/ANIM/SHELL/TENS/STRESS/ALL` | K-42 (the handler read came later in the batch) | done, default ON (`--no-maxint-stress-all`): MAXINT 5 writes it; blank (= 3) and -5 do not, -5 is named |
-| two-surface TYPE25 for AUTOMATIC_S2S | K-08B | done, opt-in `--s2s-type25`: surf_ID1 = the SSID surface; the one-way TYPE7 warning still prints (cosmetic) |
+| two-surface TYPE25 for AUTOMATIC_S2S | K-08B | done, opt-in `--s2s-type25`: surf_ID1 = the SSID surface; the one-way TYPE7 warning still printed beside it (cosmetic; withdrawn on 2026-11-07, CHANGELOG) |
 | friction typed into SPR / MPR warned | K-07 | done: both cells named, Fric 0 |
 | single-surface SST gap | K-12 | done, default ON (`--no-single-surface-sst-gap`): Gapmin 0.35 for SST 0.35, 0.175 with the flag |
 | all-tet Isolid 1, LAW1 shell N 0 | K-30, K-31 | active (default ON): Isolid 1 and N 0; the opt-outs give Isolid 14 and N 5 |
