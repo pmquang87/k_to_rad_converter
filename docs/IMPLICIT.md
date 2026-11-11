@@ -80,9 +80,14 @@ with `Gapmin` `0.03 / 0.03 / 0.14` per interface, then stalls in a limit cycle
 when the same uniform value is re-used on a finer TET10 mesh whose measured pin
 clearances are `0.12` and `0.16`.)
 
-`--auto-gapmin` removes the guesswork: it sets each surface-to-surface
-interface's `Gapmin` to `--gapmin-factor` × the minimum node-to-node distance
-between its two parts (default factor `0.8`). Inspect first with
+`--auto-gapmin` removes the guesswork: it measures each surface-to-surface
+interface's minimum node-to-SEGMENT clearance d between its two parts and
+writes `Gapmin` = F × d (F = `--gapmin-factor`, default `0.8`) or, where
+LS-DYNA offsets the shells (the `--shell-offset-gapmin` predicate),
+T + F × (d − T) with T = t/2 of the shell secondary (+ t/2 of a shell main),
+capped at 0.5 × the smallest main-segment side (MEASURED on the CardStack
+`deck_a` probe: d 0.1805, T 0.175 → `Gapmin` 0.1794, starter
+`MINIMUM GAP 0.1794`). Inspect first with
 `--suggest-gapmin` (read-only — prints the clearances and exits); an explicit
 `--inter-gapmin ID=VAL` always wins over the suggestion. Self-contacts and
 single-surface contacts have no two-part clearance and are reported as skipped.
@@ -93,9 +98,10 @@ python k2rad.py model.k --auto-gapmin                     # apply (factor 0.8)
 python k2rad.py model.k --auto-gapmin --gapmin-factor 0.6 # more conservative
 ```
 
-Lower the factor if an interface still reports initial penetration (node-to-node
-distance over-estimates the true node-to-segment clearance); raise it toward
-`1.0` if a contact fails to engage.
+Lower the factor if an interface still reports initial penetration; raise it
+toward `1.0` if a contact fails to engage. Where the cap acts below T the line
+says so and names `--inter-gapmin <id>=<T>` (measured in round 10: the capped
+gap engages a card 0.075 mm inside LS-DYNA's offset, ROADMAP K-04).
 
 ## Deformable–deformable contact (`--deformable-contact-recipe`)
 

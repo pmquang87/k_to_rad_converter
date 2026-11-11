@@ -5215,13 +5215,15 @@ class Round9RoadmapRecordB(unittest.TestCase):
             if not ln.startswith("|"):
                 break
             rows.append(ln)
-        self.assertTrue(rows[0].endswith("| round 8 | round 9 |"), rows[0])
+        # round 10 (B's docs) appended its own column after round 9's: the
+        # round-9 cell is the second-to-last
+        self.assertIn("| round 8 | round 9 |", rows[0])
         self.assertEqual(len(rows), 10)
         width = _t7._md_cells(rows[0])
         for r in rows[1:]:
             with self.subTest(row=r[:48]):
                 self.assertEqual(_t7._md_cells(r), width)
-        last = rows[2].rstrip(" |").rsplit("|", 1)[1]
+        last = rows[2].rstrip(" |").rsplit("|", 2)[1]
         self.assertIn("B1", last)
         self.assertIn("66 323 cycles", last)
 
@@ -5238,7 +5240,9 @@ class Round9RoadmapRecordB(unittest.TestCase):
 
     def test_the_round_9_not_list_is_numbered_1_to_28(self):
         s = self._at("**What round 9 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        # round 10's sections sit between this list and the starter-failure
+        # paragraph (the move round 9 made for round 8's anchors)
+        e = self._at("**What round 10 closes, and what it does NOT.**")
         nums = [int(m.group(1)) for m in
                 (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
                 if m]
@@ -5247,7 +5251,7 @@ class Round9RoadmapRecordB(unittest.TestCase):
 
     def test_entries_3_4_17_24_26_as_decided(self):
         s = self._at("**What round 9 deliberately does NOT close**")
-        e = self._at("**52 of the 59 starter failures.**")
+        e = self._at("**What round 10 closes, and what it does NOT.**")
         block = {n: _t7._collapse("\n".join(self.lines[a:b]))
                  for n, (a, b) in enumerate(self._items(s, e), 1)}
         for needle in ("B4's gate FAILED", "1.140×", "MESSAGE 205 + 207",
@@ -5321,8 +5325,11 @@ class Round9ChangelogReSumsB(unittest.TestCase):
         text = _t7._collapse(_t7._read7("CHANGELOG.md"))
         a = re.search(r"Part A's default bytes move (\d+) deck keys / (\d+) "
                       r"emitted models", text)
+        # round 10's part-B entry sits above round 9's and uses the same
+        # phrase: read round 9's own part-B entry
+        r9 = text.index("R14 CAMPAIGN TRIAGE batch, round 9 — PART B")
         b = re.search(r"Part B's default bytes move (\d+) deck keys / (\d+) "
-                      r"emitted models \(B1", text)
+                      r"emitted models \(B1", text[r9:])
         self.assertIsNotNone(a)
         self.assertIsNotNone(b)
         tot = (int(a.group(1)) + int(b.group(1)),

@@ -4827,9 +4827,9 @@ class Round8RoadmapRecord(unittest.TestCase):
 
     def test_the_queue_table_has_a_round_8_column(self):
         rows = self._table("| # | class | decks | closed by round 1 |")
-        # round 9 (B9) appended its own column after round 8's
-        self.assertTrue(rows[0].endswith("| round 7 | round 8 | round 9 |"),
-                        rows[0])
+        # round 9 (B9) appended its own column after round 8's, and round 10
+        # (B's docs) its own after round 9's
+        self.assertIn("| round 7 | round 8 | round 9 |", rows[0])
         self.assertEqual(len(rows), 10)
         self._same_width(rows)
 

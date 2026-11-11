@@ -78,7 +78,7 @@ them after the batch merges.
 | `/ANIM/DT` | `*DATABASE_BINARY_D3PLOT` DT | `writer/assembly.py` | cell for cell |
 | `/ANIM/VECT/DISP`, `/ANIM/VECT/VEL`, `/ANIM/VECT/CONT`, `/ANIM/ELEM/VONM`, `/ANIM/BRICK/TENS/STRESS` | always written | `writer/assembly.py` `_make_engine_output` | k2rad's fixed list is a superset of run 27's |
 | `/ANIM/SHELL/TENS/STRESS/ALL` | `*DATABASE_EXTENT_BINARY` MAXINT > 3 (K-42; `--no-maxint-stress-all` writes no such line) | `handlers.py` `handle_database_extent_binary` (card 1 field 3, blank = 3), `writer/assembly.py` | measured (6.7): MAXINT 5 writes `/ANIM/SHELL/TENS/STRESS/ALL` right after MEMB / UPPER / LOWER, and the log names it. A blank MAXINT (= 3) writes MEMB, UPPER and LOWER only; a MAXINT below -3 is named in the log and not converted. The engine runs the line to NORMAL TERMINATION (6.5; 6.8, the rigid-tooling CardStack run) |
-| `/DT/NODA/CST` Tsca, Tmin | `*CONTROL_TIMESTEP` TSSFAC, DT2MS < 0 | `writer/assembly.py` `_make_engine_timestep` | Tmin = \|DT2MS\| by default; `--dt2ms-tssfac-product` writes TSSFAC x \|DT2MS\|, LS-DYNA's minimum step (6.4). Read the added mass: see 3.7 |
+| `/DT/NODA/CST` Tsca, Tmin | `*CONTROL_TIMESTEP` TSSFAC, DT2MS < 0 | `writer/assembly.py` `_make_engine_timestep` | Tmin = TSSFAC x \|DT2MS\| by default since round 10 (LS-DYNA's minimum step, 6.4; `/DT/AMS` keeps \|DT2MS\|); `--no-dt2ms-tssfac-product` writes \|DT2MS\|. Read the added mass: see 3.7 |
 | `/STOP` (added-mass limit) | `*CONTROL_TERMINATION` ENDMAS + `--stop-added-mass` (K-40) | `writer/assembly.py` `_make_engine_stop` | `0. ENDMAS/100 0. 1 1 0`: Mmax is a RATIO, ENDMAS a percent (6.3). Only on a DT2MS < 0 deck with `/DT/NODA/CST`: an ENDMAS < 0 curve, `--ams` and the routed 2-D deck get a warning and no `/STOP` (6.7). A stopped run ends NORMAL TERMINATION then USER BREAK with engine exit 0 and writes its engine restart file although the deck says `/RFILE/OFF` (6.3): read the listing, not the exit code |
 | `/PRINT/-2000` | `--print-every 2000`, or `*CONTROL_OUTPUT` IKEDIT 2000 on a deck WITHOUT `*DATABASE_GLSTAT` (K-42) | `writer/assembly.py` `_print_cadence` | LS-DYNA ignores IKEDIT when glstat is written, and so does k2rad; else `/PRINT/-1` (6.5) |
 | `/PARITH/ON` | `*CONTROL_PARALLEL` CONST 1 | `writer/output.py` | parith is on by default anyway: `/ANALY` Iparith 0 sets IPARI0 1 (`hm_read_analy.F`), and an engine deck without `/PARITH` takes it (`rdresa.F:282`) |
@@ -175,7 +175,8 @@ every non-elastic section.
 ### 3.7 Mass scaling: read the added mass, not the starter's 'ADDED MASS'
 
 `*CONTROL_TIMESTEP` DT2MS < 0 becomes `/DT/NODA/CST/0` Tsca = TSSFAC (blank ->
-0.9; 6.7), Tmin = |DT2MS|. OpenRadioss then adds mass to every node whose own
+0.9; 6.7), Tmin = TSSFAC x |DT2MS| (round 10; `--no-dt2ms-tssfac-product`:
+|DT2MS|). OpenRadioss then adds mass to every node whose own
 step is below Tmin and lifts that step to Tmin (`dtnoda.F:270-303`; the global step
 is clamped up to Tmin only when it fell below it, `:654-655`). A deck whose
 nodal steps all stay above Tmin keeps its own, larger step and gets no added
@@ -194,10 +195,14 @@ at cycle 0); the 0.07 % quoted in troubles.md did not describe that run. State
 `*CONTROL_TERMINATION` ENDMAS and pass `--stop-added-mass`: the run then stops
 at the limit (6.3). Make tooling `*MAT_RIGID` instead of mass-scaling its
 CAD micro-edges (D5-2: rigid tooling gave the same 1.89e-6 s step with zero
-added mass). `--dt2ms-tssfac-product` makes the step LS-DYNA's (6.4).
+added mass). Since round 10 the step is LS-DYNA's by default (6.4).
 
 Two limits of these readings, measured by the end-to-end proof (6.8; the first
-mechanism corrected on 2026-11-01 from the starter source):
+mechanism corrected on 2026-11-01 from the starter source). Every figure in
+them was measured before round 10, at Tmin = |DT2MS| (the 2-card benchmark
+1.5e-7, the CardStack variants 2.0e-6); since round 10 the default writes
+Tmin = TSSFAC x |DT2MS| (1.35e-7 and 1.8e-6 on those decks), and the figures
+were not re-measured at it:
 
 * On a deck with rigid bodies the starter's estimate can be too high, and not
   because of the secondary nodes: `inirby.F:876-883` lumps each rigid body's
@@ -320,7 +325,7 @@ described in D2-8 / D5-12. This tree has every one of them (re-measured on
 | `*CONTROL_UNITS` -> `/BEGIN` labels | K-0P | done: `Mg mm s` from `mm sec mtrc_ton`; a `--units` that disagrees is written and warned |
 | damping curve -> `/DAMP` time windows | K-20 | done, default ON (`--no-damping-curve-window`): alpha 200, Tstart 0, Tstop 0.00050005 |
 | finite rigid-wall footprint lint | K-21 | done: a `_FINITE` face over none of its 9 nodes is named |
-| DT2MS < 0: Tmin = TSSFAC x \|DT2MS\| | K-41 | done, opt-in `--dt2ms-tssfac-product`: 4.5e-6 for 0.9 x 5e-6 |
+| DT2MS < 0: Tmin = TSSFAC x \|DT2MS\| | K-41 | done, default since round 10 (`--no-dt2ms-tssfac-product`): 4.5e-6 for 0.9 x 5e-6 |
 | ENDMAS -> `/STOP` Mmax | K-40 | done, opt-in `--stop-added-mass`: `/STOP 0. 0.05 0. 1 1 0` for ENDMAS 5 |
 | `/PRINT/-N` from `--print-every` / IKEDIT | K-42 | done: IKEDIT 50 without glstat gives `/PRINT/-50`, with glstat `/PRINT/-1`; `--print-every 2000` gives `/PRINT/-2000` |
 | MAXINT > 3 -> `/ANIM/SHELL/TENS/STRESS/ALL` | K-42 (the handler read came later in the batch) | done, default ON (`--no-maxint-stress-all`): MAXINT 5 writes it; blank (= 3) and -5 do not, -5 is named |
@@ -391,7 +396,7 @@ density cell neither (MAS.ERR 0.000, 11 cycles): k2rad warns there and writes no
 12501 cycles, end KE +16.99 % against LS-DYNA; with the flag 1.08e-7 -> echo
 1.08e-7, 13890 cycles, end KE -5.13 %; end IE +0.135 % in both. On the shell
 card of 6.3 the flag cuts the added mass at cycle 0 from 1.371e-5 to 1.035e-5
-Mg.
+Mg. (Since round 10 this is the default.)
 
 **6.5 `/PRINT/-N`** (the card of 6.3, 401 cycles): `--print-every 100` prints
 cycles 0, 100, .., 400; IKEDIT 50 without `*DATABASE_GLSTAT` prints every 50th
@@ -529,7 +534,8 @@ tree, the starter and the engine:
   starter 0 ERROR(S) and engine NORMAL TERMINATION. The echoes show TYPE7
   MINIMUM GAP 0.40 (= |SST|, K-12) beside 0.21 (= (SST + MST)/2), the
   two-surface TYPE25 of `--s2s-type25` (k25s) and Inacti 6 from `--inter-inacti`
-  (k7i6). The k25s log prints the one-way TYPE7 warning beside the TYPE25 line.
+  (k7i6). The k25s log prints the one-way TYPE7 warning beside the TYPE25 line
+  (withdrawn since 2026-11-07, master PR #147).
   At DT2MS -1.5e-7 the audit's only FLAG was the mass forecast (1.06x) at
   MAS.ERR 0.000 (3.7); at DT2MS 0 `run_or.ps1 -Both -Strict` exits 0 (r4).
 * The reduced CardStack decks (folder `cs2`): a (all-parts TYPE25) and b (card

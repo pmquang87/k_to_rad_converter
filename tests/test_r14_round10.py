@@ -2507,5 +2507,363 @@ class Round10FlagWiringB(_t7.Round7FlagWiringA):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# The docs of the round (part B writes them last): retracted / forbidden
+# statements, the README rows, the CHANGELOG stages, the ROADMAP record
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Part B statements round 10 made false. CHANGELOG may quote them (its
+#: part-B entry's 'Retracted spellings' bullet does).
+_RETRACTED_ROUND_10_B = (
+    # B3: the --soften-stfac reach (README, the GUI label, the help and the
+    # summary line said the tiebreak companion is not reached)
+    "the tiebreak companion stays 0",
+    "not a tiebreak's post-rupture companion",
+    "keeps Stfac 0 (the engine default)",
+    # B9: the /PRELOAD stable set (a FREE bar collapses at every Isolid)
+    "ZERO OR NEGATIVE VOLUME at cycle 0",
+    "completely SILENT no-op",
+    "1266 -> 1370 MPa",
+    "was not reproduced on this build",
+    "were not reproduced in that run",
+    # B10: the K-04 bullet (three engine arms measure that case)
+    "No engine run measures that case",
+    # B4: the LAW90 clause was never true (Nu 0: the starter's C1 = E0 / 3)
+    "LAW28 / LAW38 / LAW50 / LAW90 is not the starter's",
+    # the docs: docs/IMPLICIT.md's --auto-gapmin rule (pre-K-04)
+    "the minimum node-to-node distance between its two parts",
+)
+
+#: (shipped file, the replacement text it now carries)
+_REPLACEMENTS_ROUND_10_B = (
+    ("README.md", "the tiebreak companion 0 -> 0.3"),
+    ("k2rad_gui.py", "a tiebreak's post-rupture companion too"),
+    ("k2rad/cli.py", "--no-tiebreak-companion-stfac keeps it at Stfac 0"),
+    ("k2rad/writer/preload.py", "lose the cut element"),
+    ("k2rad/writer/preload.py", "never calls the bolt routine BOLTST"),
+    ("k2rad/writer/preload.py", "1432 MPa at 0.8 (Tstop - Tstart)"),
+    # (a comment needle is cut at its comment line's end: the guard keeps #)
+    ("k2rad/writer/preload.py", "did not reproduce the set: the probe,"),
+    ("ROADMAP.md", "holds on clamped bars"),
+    ("ROADMAP.md", "The cap stays."),
+    ("ROADMAP.md", "LAW90's E / 3 is the starter's C1 with Nu 0"),
+    ("docs/IMPLICIT.md", "minimum node-to-SEGMENT clearance d"),
+    ("docs/K_ROUTE_FOR_RADIOSS_CARDS.md",
+     "since 2026-11-07 the warning prints only where the TYPE7 is written"),
+)
+
+#: Never shipped, CHANGELOG included: the round's forbidden census / critic
+#: wording (findings section 0 and 6.8; conventions F-A1 / F-A7 / F-A8 /
+#: F-A10a / F-C1 / F-C2)
+_FORBIDDEN_ROUND_10 = (
+    "does not touch the CardStack pipeline",
+    "4 commits behind",
+    "3 / 3 movers",
+    "VFACT is the void density",
+    "LS's effective penalty",
+    "LS-DYNA's effective penalty",
+    "3-run band",
+)
+
+
+class Round10RetractedStatementsB(unittest.TestCase):
+    """No shipped text carries a retracted part-B spelling; the guard fires
+    on each needle split across two adjacent literals; a PREFIX still fires;
+    the replacements ARE shipped; CHANGELOG quotes every retracted
+    spelling (its part-B 'Retracted spellings' bullet)."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_10_B:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_10_B + _FORBIDDEN_ROUND_10:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_10_B + _FORBIDDEN_ROUND_10:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle[:max(4, len(needle) // 2)]),
+                              _t7._collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_10_B:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
+
+    def test_the_changelog_quotes_every_retracted_spelling(self):
+        with open(os.path.join(_ROOT, "CHANGELOG.md"),
+                  encoding="utf-8") as fh:
+            log = _t7._collapse(fh.read())
+        for needle in _RETRACTED_ROUND_10_B:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle), log)
+
+
+class Round10ForbiddenStatements(unittest.TestCase):
+    """The round's forbidden sentences appear nowhere - the shipped texts,
+    CHANGELOG and the merge-duties chip prompt when it exists."""
+
+    def test_no_document_carries_a_forbidden_sentence(self):
+        texts = _with_changelog()
+        duties = os.path.join(_ROOT, "docs", "R14_ROUND10_MERGE_DUTIES.md")
+        if os.path.isfile(duties):
+            with open(duties, encoding="utf-8") as fh:
+                texts.append(("docs/R14_ROUND10_MERGE_DUTIES.md",
+                              _t7._collapse(fh.read())))
+        for rel, joined in texts:
+            for needle in _FORBIDDEN_ROUND_10:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+
+class Round10FlagsInReadme(unittest.TestCase):
+    """Every round-10 default-ON lever of the three stages is in README
+    prose by its --no- spelling, and every round-10 opt-in has its own
+    README heading."""
+
+    _OPT_INS = ("--implicit-rayleigh-damping", "--clis-pfac-stiffness")
+
+    def test_every_default_on_lever_has_its_no_spelling(self):
+        flags = (list(Round10FlagWiringA._FLAGS)
+                 + list(Round10FlagWiringA2._FLAGS)
+                 + list(Round10FlagWiringB._FLAGS))
+        self.assertEqual(len(flags), 12)
+        text = _readme()
+        for flag in flags:
+            with self.subTest(flag=flag):
+                self.assertIn("`--no-" + flag[2:] + "`", text)
+
+    def test_every_opt_in_has_its_own_heading(self):
+        lines = _readme().splitlines()
+        for flag in self._OPT_INS:
+            with self.subTest(flag=flag):
+                self.assertEqual(sum(ln.startswith(f"### `{flag}`")
+                                     for ln in lines), 1)
+
+
+def _changelog() -> str:
+    with open(os.path.join(_ROOT, "CHANGELOG.md"), encoding="utf-8") as fh:
+        return _t7._collapse(fh.read())
+
+
+class Round10ChangelogStages(unittest.TestCase):
+    """The three stage entries of round 10 sit at the top of '### Added',
+    newest first, all above the CardStack entry."""
+
+    def test_the_three_stages_newest_first(self):
+        text = _changelog()
+        # each head with its opening parenthesis: 'part A-i' is a prefix of
+        # 'part A-ii'
+        heads = ("R14 CAMPAIGN PARITY batch, round 10 - part B (",
+                 "R14 CAMPAIGN PARITY batch, round 10 - part A-ii (",
+                 "R14 CAMPAIGN PARITY batch, round 10 - part A-i (")
+        pos = []
+        for h in heads:
+            with self.subTest(head=h):
+                self.assertEqual(text.count(h), 1)
+            pos.append(text.index(h))
+        self.assertEqual(pos, sorted(pos))
+        self.assertLess(pos[-1], text.index(
+            "**CardStack FEM-pipeline smoothing (2026-10).**"))
+
+
+class Round10ChangelogReSumsB(unittest.TestCase):
+    """The part-B header's byte-mover totals re-sum from the per-item counts
+    (no key is shared) and are 0 / 0; each byte-capable item's bullet states
+    its own 'R14: 0 movers'."""
+
+    def test_the_part_B_total_re_sums(self):
+        m = re.search(
+            r"Part B's default bytes move (\d+) deck keys / (\d+) emitted "
+            r"models \(B1 (\d+) / (\d+), B2 (\d+) / (\d+), B3 (\d+) / (\d+), "
+            r"B7 (\d+) / (\d+), B8 (\d+) / (\d+); no key is shared\)",
+            _changelog())
+        self.assertIsNotNone(m)
+        tot_k, tot_m, *items = map(int, m.groups())
+        self.assertEqual((sum(items[0::2]), sum(items[1::2])), (tot_k, tot_m))
+        self.assertEqual((tot_k, tot_m), (0, 0))
+
+    def test_each_item_bullet_states_its_movers(self):
+        text = _changelog()
+        for title in ("**A self-mirrored SOFT -7 `*CONTACT_AUTOMATIC_GENERAL` "
+                      "over shells takes Gapmin = |SST|**",
+                      "**A single-surface `*CONTACT` with a stated SSID and "
+                      "SURFATYP 5 / 6 is converted**",
+                      "**The `*CONTACT_..._TIEBREAK` post-rupture companion",
+                      "**The K-02 stiffness estimate reads the starter's own "
+                      "B, tet volume and TET10 node volume**",
+                      "**A `*CONTROL_CONTACT` SHLEDG turns SRNDE off on a "
+                      "SOFT 2 card**",
+                      "**The K-20 review minors**"):
+            with self.subTest(title=title[:40]):
+                i = text.index(title)
+                nxt = text.find(" - **", i + len(title))
+                self.assertIn("R14: 0 movers", text[i:nxt])
+
+
+class Round10RoadmapRecord(unittest.TestCase):
+    """The ROADMAP record of round 10 - the queue table's round-10 column,
+    ONE '**Round 10:**' line on every round-9 NOT entry 1-28 and on every
+    CardStack 'Opened by the batch' bullet, the round-10 NOT list numbered
+    1-34 with no placeholder and no census tag, entry 2 written from A10's
+    gate, the closes paragraph's ledger, the residue restated, the K-04
+    bullet's measurement."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.lines = _t7._read7("ROADMAP.md").splitlines()
+
+    def _at(self, prefix: str, start: int = 0) -> int:
+        hits = [k for k, ln in enumerate(self.lines)
+                if k >= start and ln.startswith(prefix)]
+        self.assertEqual(len(hits), 1, prefix)
+        return hits[0]
+
+    def _items(self, s: int, e: int):
+        starts = [k for k in range(s, e)
+                  if re.match(r"^\d+\. \*\*", self.lines[k])]
+        return list(zip(starts, starts[1:] + [e]))
+
+    def _not_list(self):
+        s = self._at("**What round 10 deliberately does NOT close**")
+        e = self._at("**52 of the 59 starter failures.**")
+        return s, e
+
+    def test_the_queue_table_has_a_round_10_column(self):
+        rows = []
+        for ln in self.lines[self._at("| # | class | decks | closed by "
+                                      "round 1 |"):]:
+            if not ln.startswith("|"):
+                break
+            rows.append(ln)
+        self.assertTrue(rows[0].endswith("| round 9 | round 10 |"), rows[0])
+        self.assertEqual(len(rows), 10)
+        width = _t7._md_cells(rows[0])
+        for r in rows[1:]:
+            with self.subTest(row=r[:48]):
+                self.assertEqual(_t7._md_cells(r), width)
+        last = rows[4].rstrip(" |").rsplit("|", 1)[1]
+        self.assertIn("A5", last)
+        self.assertIn("9 keys / 5 models", last)
+
+    def test_every_round_9_entry_carries_one_round_10_line(self):
+        s = self._at("**What round 9 deliberately does NOT close**")
+        e = self._at("**What round 10 closes, and what it does NOT.**")
+        items = self._items(s, e)
+        self.assertEqual(len(items), 28)
+        for n, (a, b) in enumerate(items, 1):
+            with self.subTest(entry=n):
+                self.assertTrue(self.lines[a].startswith(f"{n}. **"))
+                self.assertEqual(
+                    sum("**Round 10:**" in ln for ln in self.lines[a:b]), 1)
+        block = {n: _t7._collapse("\n".join(self.lines[a:b]))
+                 for n, (a, b) in enumerate(items, 1)}
+        self.assertIn("CLOSED for `/PROP/SHELL` by A1", block[1])
+        self.assertIn("CLOSED by A5", block[19])
+
+    def test_the_round_10_not_list_is_numbered_1_to_34(self):
+        s, e = self._not_list()
+        nums = [int(m.group(1)) for m in
+                (re.match(r"^(\d+)\. \*\*", ln) for ln in self.lines[s:e])
+                if m]
+        self.assertEqual(nums, list(range(1, 35)))
+        text = "\n".join(self.lines[s:e])
+        self.assertNotRegex(text, r"<[a-z_ /|.']+>")
+        bare = re.sub(r"`[^`]*`", "", text)
+        self.assertNotRegex(bare, r"\b(?:g[1-4][a-p]|cG[1-4])\b")
+        self.assertNotIn("FOUR_DECISIONS", text)
+
+    def test_entry_2_states_the_gate_outcome(self):
+        s, e = self._not_list()
+        block = {n: _t7._collapse("\n".join(self.lines[a:b]))
+                 for n, (a, b) in enumerate(self._items(s, e), 1)}
+        self.assertEqual(("A10's gate PASSED" in block[2])
+                         + ("A10's gate FAILED" in block[2]), 1)
+        self.assertIn("2.044e-7 / 2.176e-6 / 6.543e-5", block[2])
+
+    def test_entries_as_decided(self):
+        s, e = self._not_list()
+        block = {n: _t7._collapse("\n".join(self.lines[a:b]))
+                 for n, (a, b) in enumerate(self._items(s, e), 1)}
+        self.assertIn("WARNING 343", block[10])
+        self.assertIn("General Remark 12", block[10])
+        self.assertIn("an implicit SURFATYP-6 probe", block[12])
+        self.assertIn("24 / 24", block[21])
+        self.assertTrue("EXPECTED" in block[21] or "MEASURED" in block[21])
+        self.assertIn("Round-9 NOT 4", block[25])
+        for needle in ("0.7788", "0.3679", "0.3692"):
+            self.assertIn(needle, block[28])
+        self.assertNotIn("docs/IMPLICIT.md's `--auto-gapmin` paragraph,",
+                         block[32])
+        self.assertIn("`--ams`", block[32])
+        for needle in ("`imp_dt.F:311-320`", "6.06e8", "0.62 - 0.85"):
+            self.assertIn(needle, block[34])
+        self.assertIn("A11", block[7])
+
+    def test_the_closes_paragraph_states_the_ledger(self):
+        s = self._at("**What round 10 closes, and what it does NOT.**")
+        e = self._at("**What round 10 deliberately does NOT close**")
+        para = _t7._collapse("\n".join(self.lines[s:e]))
+        for needle in ("normal 300 → 302", "match 34 → 35",
+                       "the implicit residue 24 / 24",
+                       "169 deck keys on 147 emitted models",
+                       "part A-i 167 / 146, part A-ii 9 / 8, part B 0 / 0",
+                       "A10's gate PASSED"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, para)
+        if "MEASURED by the campaign re-run (report §0.36" in para:
+            self.assertNotIn("EXPECTED", para)
+        self.assertNotRegex(para, r"<[a-z_ /|.']+>")
+
+    def test_the_residue_is_restated_for_round_10(self):
+        self.assertRegex(
+            _t7._collapse("\n".join(self.lines)),
+            r"\*\*Round 10\*\* \((?:EXPECTED|MEASURED)[^)]*\).*?so the "
+            r"residue (?:stays|is) \*\*\d+ keys / \d+ models\*\* by the same "
+            r"rule")
+
+    def test_every_cardstack_bullet_carries_one_round_10_line(self):
+        s = self._at("### Opened by the batch")
+        e = self._at("### Closed by the batch")
+        heads = [k for k in range(s, e) if self.lines[k].startswith("- **")]
+        self.assertEqual(len(heads), 21)
+        for a, b in zip(heads, heads[1:] + [e]):
+            with self.subTest(bullet=self.lines[a][:50]):
+                self.assertEqual(
+                    sum("**Round 10:**" in ln for ln in self.lines[a:b]), 1)
+        o = self._at("### Owed at the merge")
+        self.assertEqual(sum("**Round 10:**" in ln
+                             for ln in self.lines[o:s]), 1)
+        nxt = self._at("## Lossy conversions to tighten")
+        self.assertIn("Round 10 (2026-11):",
+                      _t7._collapse("\n".join(self.lines[e:nxt])))
+
+    def test_the_k04_bullet_states_its_measurement(self):
+        a = self._at("- **The `--auto-gapmin` offset cap on a sliver main**")
+        b = a + 1
+        while self.lines[b].startswith("  "):
+            b += 1
+        bullet = _t7._collapse("\n".join(self.lines[a:b]))
+        for needle in ("0.1009 mm", "0.1760 mm", "1.36 -> 0.85 %",
+                       "-45.60 -> -83.08 %", "2.61 -> 3.37 %",
+                       "The cap stays."):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, bullet)
+        self.assertNotIn("No engine run measures that case", bullet)
+
+
 if __name__ == "__main__":
     unittest.main()

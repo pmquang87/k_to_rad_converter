@@ -53,6 +53,207 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN PARITY batch, round 10 - part B (the CardStack batch's
+  contact and damping leftovers with 0 roster movers, and the docs of the
+  round).** One commit per item in the order B1, B2, B3, B6, B7, B4, B8, B9,
+  then B10 and the docs, on the part-A-ii head `1205c13` (part A-i + master
+  `b17c298` + part A-ii). Part B's default bytes move 0 deck keys / 0 emitted
+  models (B1 0 / 0, B2 0 / 0, B3 0 / 0, B7 0 / 0, B8 0 / 0; no key is
+  shared) and 0 warning records on the 356 roster keys: the sweep of all 356
+  R14 keys (units Mg mm s) through the last part-B code commit `140250d`
+  against the part-A-ii head's own sweep (`6f1a0c4` = the bytes of `1205c13`)
+  reads 0 byte movers, 0 warning-record movers, 0 recognized-not-emitted
+  movers and 0 conversion errors, the 34 match rows unmoved. B4, B6 and B9 are
+  text only, B10 is docs, and B5 was closed on master by PR #147 before this
+  part began. Outside the roster B2 gives the two getriebekette
+  `..._exclude_actor0` / `_exclude_actor1` backups the contact they lacked (no
+  `/INTER` before; one `/INTER/TYPE25` over every part but 10000000) and B4
+  moves the numbers of one Model-318 line (152.6 -> 101.7, still below its
+  floor). Two new default-ON levers with their opt-outs (decision 8 of
+  2026-11-01): `--no-surfatyp-all-parts` (B2) and
+  `--no-tiebreak-companion-stfac` (B3). Every byte-moving rule's coupon bytes
+  equal a census arm whose engine run measured it (B1 p1gap05, B2 p2ssid0 /
+  p2b6h, B3 p3bhand, B7 P2S, B8 st10fix; only a deck or card title line
+  differs on B2 / B7 / B8), and part B's own runs of them on its bytes (nt 4)
+  reproduce the census runs' last cycle rows (508 / 510 / 508 / 514 printed
+  cycles; B8's T01 GLOBAL channels byte for byte).
+  - **A self-mirrored SOFT -7 `*CONTACT_AUTOMATIC_GENERAL` over shells takes
+    Gapmin = |SST|** (B1; CardStack K-12, inside
+    `--no-single-surface-sst-gap`). Its `/INTER/TYPE7` is Igap 2, a gap of
+    max(Gapmin, t_s/2 + t_m/2) (`i7cor3.F:98-121`), so the old (|SST| +
+    |MST|)/2 lost the part of |SST| above t: MEASURED on two t 0.35 cards
+    with SST 0.5 (nt 4) the card engaged at 0.3501 mm with Gapmin 0.25 and
+    engages at 0.5005 mm with Gapmin 0.5 (LS-DYNA's |SST| = 0.5; the B1 bytes
+    equal the measured one-cell arm, starter MINIMUM GAP 0.5). A mixed shell
+    / solid set keeps the old value by name, a two-surface SOFT -7 card is
+    unchanged, an SST below t keeps the OPTT sentence; an MST beside SST no
+    longer lifts the Gapmin (a single-surface card has no SURFB, Vol I R17
+    p.11-33: SST 0.1 with MST 1.0 writes 0.1, was 0.55, and the OPTT lever is
+    named); on this route no sentence offers `--inter-gapmin` (it does not
+    reach the sentinel routes). Tests: `tests/test_cardstack_pipeline.py`
+    `SingleSurfaceSstGap` (two re-pinned, four new),
+    `SingleSurfaceSstGapReviewPins::test_soft_7_names_the_unused_mst_and_the_optt_lever`,
+    `HandOverHelpTexts::test_the_k1b_flags_say_what_they_reach`. R14: 0
+    movers (0 carriers on six rosters).
+  - **A single-surface `*CONTACT` with a stated SSID and SURFATYP 5 / 6 is
+    converted** (B2; default ON, `--no-surfatyp-all-parts`). SURFATYP 5
+    ('include all non-spot-weld parts (the SURFA field is ignored)', Vol I
+    R17 p.11-25) takes the SSID = 0 all-parts route on both routes (its
+    bytes equal the SSID = 0 card's); SURFATYP 6 takes, on an explicit deck,
+    the all-parts `/INTER/TYPE25` over every part except the exempted
+    `*SET_PART` (an implicit 6, a missing set, a set exempting every part and
+    SURFATYP 7 - a `*SET_PART_TREE` branch, no reader - are dropped by
+    name). One predicate, `writer/common.single_surface_scope`, decides the
+    route at all six sites (the writer, the solid-main registry, the
+    `/TH/INTER` pick, the lever report, the joint-screw split, the K-04 skip
+    text). MEASURED (shell cards thrown at 1000 mm/s, nt 4): dropped as
+    before the cards passed through each other; routed they engage at
+    0.3489 mm (t_s/2 + t_m/2 = 0.35), and the exempted card passes through.
+    The drop text no longer says the set 'names no part, part set or node
+    set' on every route that meets a SURFATYP 5 / 6 / 7 side
+    (`_styp567_clause`, convertcontacts.cxx:268-291). Tests:
+    `AssRouteIsNamed` (two re-derived), `SurfatypAllParts` (10 new),
+    `Round10FlagWiringB`. R14: 0 movers; non-roster: the two getriebekette
+    `..._exclude_actor` backups get their contact (no `/INTER` before).
+  - **The `*CONTACT_..._TIEBREAK` post-rupture companion `/INTER/TYPE25`
+    takes `--soften-stfac`, else the card's Card-3 min(SFS, SFM)** (B3;
+    default ON, `--no-tiebreak-companion-stfac`: the opt-out of decision 8).
+    LS-DYNA's tiebreak behaves as a surface-to-surface contact after failure
+    (Vol I R17 p.11-39 Remark 1) whose penalty Card 3 SFSA / SFSB scale; the
+    companion was always written Stfac 0 = the starter's 1.0
+    (`hm_read_inter_type25.F:620-622`). A value of exactly 1.0 is still
+    written 0 (a default card keeps its bytes); `--soften-stfac` wins over the
+    card. MEASURED on a two-block tiebreak coupon under `--soften-stfac 0.3`
+    (nt 4; the B3 bytes equal the measured one-cell arm): STIFFNESS FACTOR
+    1.000 -> 0.300, the re-contact penetration 0.000914 -> 0.002344 mm, 685
+    -> 515 cycles. A TYPE25 Stfac scales its segments (`i25sti3.F:140`) and,
+    with Istf 4, its secondary nodes (`inintr1.F:94-99`, `i25stslav.F:56-64`).
+    `ContactTiebreak` now keeps SFS / SFM. The `--soften-stfac` help, the GUI
+    label and the summary line say the companion is reached. Tests:
+    `SoftenStfacReach` (two re-derived),
+    `SoftenStfacWarningFollowsTheRoutes::test_the_tiebreak_companion_is_reached_and_the_opt_out_named`,
+    `TiebreakCompanionStfac` (8 new), `Round10FlagWiringB`. R14: 0 movers
+    (the one roster tiebreak is `_NODES_ONLY`).
+  - **The K-02 stiffness estimate reads the starter's own B, tet volume and
+    TET10 node volume** (B4; warning text only, no byte). B = the emitted
+    law's PM(32): E for `/MAT/LAW38`, the largest written modulus for
+    `/MAT/LAW50`, the largest written uncompressed modulus for `/MAT/LAW28`
+    (LAW90 and every isotropic law unchanged); a tet main face is over the
+    starter's 1.5 V (it stores a tet as a degenerate brick,
+    `hm_read_solid.F:278-284` / `:386-392`, whose one-point volume is 1.5 V,
+    `i7sti3.F:426-444`); a `/TETRA10` secondary node takes VOLU/32 (corner)
+    or 7 VOLU/48 (midside) of VOLU = V/4 (`s10init3.F:233` / `:347`,
+    `sbulk3.F:152-181`). MEASURED by one-cell Stmin brackets (nt 4): the
+    engine's K lies in [180, 220) on a LAW38 foam (the estimate said 66.67,
+    now 200), [10.3, 10.5) on a TET10 main (15.62 -> 10.42), [160, 173) on a
+    TET4 main (250 -> 166.7), [28.5, 29.5) at the softest TET10 secondary
+    node (28.89; the median 85.15 -> 48.28). Tests:
+    `StminEstimateLawsAndTets` (9 new; one pins the softest TET10 node,
+    28.89, through the per-node list - the median 48.28 is a midside
+    node's and does not see the corner share). R14: 0 movers; 1
+    openradioss_run line's numbers move (Model-318: 152.6 -> 101.7, still
+    below its floor).
+  - **B5, the K-08 one-way note after `--s2s-type25`, was closed on master
+    by PR #147** (`ac190c9` / `63ab3c9`, merged into this branch as
+    `e512676` before part A-ii): the note prints only where the
+    `/INTER/TYPE7` is written. Verified on the merged tree: P1E7 with
+    `--s2s-type25` carries no note on both part-A-ii and part-B heads, and
+    without the flag the TYPE7 keeps it; master's
+    `OneWayNoteOnlyOnTheType7` pins both routes (the TYPE25 route and every
+    drop), so part B adds no test and no code.
+  - **A no-contact-stiffness law (LAW169) on an `/INTER/TYPE25` is named**
+    (B6; text). The K-02 naming covered the TYPE7 routes only; the three
+    TYPE25 emitters (the SSID = 0 / SURFATYP self-contact, the eroding /
+    node-to-surface family, `--s2s-type25`) now say that a
+    `*MAT_ARUP_ADHESIVE` part's segments and nodes get no stiffness
+    (`i25sti3.F:884-889`, `i25stslav.F:63-64`) and that the engine search
+    skips them. MEASURED (nt 4): two cards thrown onto a LAW169 block in an
+    SSID = 0 TYPE25 keep 0.04725 of kinetic energy at every 0.2 ms (0.00 %
+    drop) against 50.33 % with `*MAT_ELASTIC` E 10. Tests:
+    `Type25NoContactStiffnessLaw` (6 new, one proving the bytes of all three
+    routes unchanged). 0 corpus carriers.
+  - **A `*CONTROL_CONTACT` SHLEDG turns SRNDE off on a SOFT 2 card** (B7;
+    inside `--no-srnde-ishape`). Card 6 field 1 is read; a SOFT 2 card with
+    Card D SHLEDG 0 and the control SHLEDG != 0 writes Ishape 0 and says
+    SRNDE is not used - 'SRNDE is ignored unless SHLEDG is 0 on both
+    *CONTACT and *CONTROL_CONTACT' (Vol I R17 p.11-117; Card D 'EQ.0: Default
+    to SHLEDG on *CONTROL_CONTACT', p.11-111; Card 6, p.12-79). It wrote
+    Ishape 2 (round) there; the B7 bytes equal the measured square-gap arm
+    (starter GAP SHAPE ALONG MAIN FREE EDGES 1). Tests:
+    `SrndeControlContactShledg` (6 new). R14: 0 movers (0 corpus carriers).
+  - **The K-20 review minors** (B8; inside `--no-damping-curve-window`). (1)
+    The steepness bound judges the direction factors the card writes:
+    alpha_i = SF x curve x ST_i, so a FLAG 1 `*DAMPING_PART_MASS` takes |SF|
+    x max|ST_i| and a `*DAMPING_GLOBAL` with a non-zero ST row max|ST_i| (an
+    all-zero row stays uniform). MEASURED (nt 4 = nt 2): the review's FLAG 1
+    ST 10 probe written as one window kept KE/KE0 0.8201 at 10 ms against
+    the curve's 0.7617 (+7.67 %); the `/DAMP/FUNCT` it now gets (the bytes of
+    the measured st10fix arm) 0.7641 (+0.32 %). The window sentence of a
+    per-direction card prints alpha_i (it printed the uniform alpha: 'alpha=2'
+    on a card whose rows are 1 / 2 / 4). (2) The flat-curve hold at a last
+    abscissa of exactly t 0 is pinned (mutant X09, `pts[-1][0] > 0.0`,
+    survived the 1586 damping tests; on the census probe it decides between
+    13.6 % and 100 % of the KE at 10 ms), and so is the 'stops there'
+    sentence on a deck without ENDTIM (mutant X12). (3) A deck without
+    ENDTIM says 'the end of the run (no ENDTIM > 0 stated)' where five texts
+    said 'ENDTIM=inf'. Tests: `tests/test_cardstack_pipeline_loads.py`
+    `PinFlatCurveEndingAtTimeZero`, `PinStopSentenceWithoutEndtim`,
+    `NoInfInTheWindowText`, `STiInTheEdgeBound`, `AlphaIInTheWindowText`.
+    R14: 0 movers.
+  - **The `/PRELOAD` formulation stable set {5, 14, 17} holds; the probe that
+    'did not reproduce' it was a free bar** (B9; text only). Re-measured (nt
+    4 = nt 2) on a 1 x 1 x 4 hex bar clamped at both end faces, built along
+    z and along (1, 2, 2)/3, `/PRELOAD` Itype 2 at 200 MPa over 2e-4 s:
+    Isolid 5 / 14 / 17 keep the cut brick at 200.0 MPa through the hold and
+    within 196.8 .. 203.2 / 198.6 .. 201.4 / 195.6 .. 204.6 MPa after Tstop;
+    Isolid 1 and 2 lose the cut element right after the hold (ZERO OR
+    NEGATIVE VOLUME and a time-step stop at 2.27e-5 / 2.30e-5 s) or once the
+    stiffness is back (1.43e-4 s, rotated); Isolid 12 carries 0 MPa with only
+    the starter's WARNING 1160 (the 8-point S8FORC3 never calls BOLTST);
+    Isolid 24 diverges once the stiffness is back (1432.1 MPa at 0.8 dT).
+    The tests' `_bar_deck()` is free and collapses at every Isolid (Isolid
+    17: dt < 1e-8 s at 1.483e-5 s). The warning, the comment table, README,
+    the `convert()` docstring, the `deck_enabled` comment, the
+    `_solid_hg_screens` docstring and three test texts now say so (nine
+    sites; the convert() docstring was found by the round's own retraction
+    guard). Tests: `tests/test_preload_inistate.py`
+    `PreloadWarningGateTests::test_the_formulation_warning_states_the_clamped_measurement`.
+    0 movers.
+  - **The K-04 ROADMAP bullet states its measurement** (B10; docs). 'No
+    engine run measures that case' is replaced by the census's three arms:
+    the capped Gapmin 0.1 engages a card 0.075 mm inside LS-DYNA's offset T
+    = 0.175 (0.1009 vs 0.1760 mm with `--inter-gapmin`), and on the two
+    roster carriers the unclamped T is not better (bend.k IE RMS 1.36 ->
+    0.85 %, KE END -45.60 -> -83.08 %; adpips.k IE RMS 2.61 -> 3.37 %, still a
+    match). The cap stays; no byte moves.
+  - **The round-10 docs** (0 bytes). README: a row for every new flag of the
+    three stages in *R14 parity round 10 options* (the parser-vs-README test
+    holds them), B1 / B3 / B4 / B7 / B8 / B9's sites. ROADMAP: the queue
+    table's round-10 column; "What round 10 closes, and what it does NOT"
+    with the ledger EXPECTED (report §0.36 replaces it by the MEASURED one);
+    "What round 10 deliberately does NOT close" (34 entries: entry 2 written
+    from A10's gate, PASSED; entry 32 without the `--ams` clause A4 took;
+    entry 34 the end fix point's last-row sliver); ONE "**Round 10:**" line
+    on each round-9 NOT entry 1-28 (1 and 19 CLOSED by A1 / A5), on each of
+    the 21 CardStack 'Opened by the batch' bullets and on its 'Owed at the
+    merge' bullet; the implicit residue restated (24 / 24 EXPECTED).
+    `docs/IMPLICIT.md`: the `--auto-gapmin` paragraph gives the README's
+    offset-aware rule. `docs/K_ROUTE_FOR_RADIOSS_CARDS.md`: A4's Tmin texts
+    (the measured figures keep their values and name the pre-round-10 Tmin =
+    |DT2MS| they were measured at). Tests: `tests/test_r14_round10.py`
+    `Round10RoadmapRecord`, `Round10ChangelogStages`,
+    `Round10ChangelogReSumsB`, `Round10FlagsInReadme`,
+    `Round10RetractedStatementsB`, `Round10ForbiddenStatements`; the anchors
+    of `Round8RoadmapRecord` / `Round9RoadmapRecordB` follow the new column
+    and sections.
+  - **Retracted spellings** (only CHANGELOG quotes them; guarded by
+    `Round10RetractedStatementsB`): 'the tiebreak companion stays 0', 'not a
+    tiebreak's post-rupture companion', 'keeps Stfac 0 (the engine
+    default)', 'ZERO OR NEGATIVE VOLUME at cycle 0', 'completely SILENT
+    no-op', '1266 -> 1370 MPa', 'was not reproduced on this build', 'were
+    not reproduced in that run', 'No engine run measures that case',
+    'LAW28 / LAW38 / LAW50 / LAW90 is not the starter's', 'the minimum
+    node-to-node distance between its two parts'.
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-ii (ALE and the rigid-tool
   contacts).** One commit per item in the order A7, A9, A8, A10, each
   measured on the bytes of part A-i and of the items before it; the base of
