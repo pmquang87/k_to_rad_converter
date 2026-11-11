@@ -1667,8 +1667,10 @@ def convert(
         behavior is not affected by hourglass parameters"*), ELFORM 2/3/16 and
         the tetrahedra (no hourglass modes), ALE sections, ``/MAT/LAW115``
         sections (their own measured 17 → 24) and any deck carrying an
-        ``*INITIAL_STRESS_SECTION`` (``Isolid`` 1 and 2 hit ZERO OR NEGATIVE
-        VOLUME at cycle 0 under ``/PRELOAD`` ``Itype=2``). A ``*MAT_NULL`` /
+        ``*INITIAL_STRESS_SECTION`` (under ``/PRELOAD`` ``Itype=2``,
+        ``Isolid`` 1 and 2 hold the preload through its hold and then lose
+        the cut element - ZERO OR NEGATIVE VOLUME and a time-step stop -
+        measured on a bar clamped at both ends). A ``*MAT_NULL`` /
         ``*MAT_ELASTIC_FLUID`` section keeps the VISCOUS ``Isolid`` 1 even on
         an implicit deck (p.25-3 ``*HOURGLASS`` Remark 4: *"For fluids modeled
         with null material, type 6 hourglass control is viscous"*; the
