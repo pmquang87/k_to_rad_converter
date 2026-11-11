@@ -2335,6 +2335,27 @@ def build_parser() -> argparse.ArgumentParser:
              "and +22.6 %% above stagnation_A's on its round-10 bytes "
              "(1.776e-6). OFF by default.",
     )
+    # Round 10, part B: the CardStack batch's contact leftovers (decision 8
+    # of 2026-11-01: every default gets an opt-out).
+    parser.add_argument(
+        "--surfatyp-all-parts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Route a single-surface *CONTACT with a stated SSID and SURFATYP "
+             "5 ('include all non-spot-weld parts (the SURFA field is "
+             "ignored)', Vol I R17 p.11-25) like SSID = 0 - the all-parts "
+             "/INTER/TYPE25 self-contact on an explicit deck, the all-parts "
+             "/INTER/TYPE7 recipe on an implicit one - and one with SURFATYP "
+             "6 (every part except the exempted *SET_PART) as that TYPE25 "
+             "over the other parts, on an explicit deck only (an implicit "
+             "SURFATYP 6 card is dropped by name: no probe). ON by default; "
+             "--no-surfatyp-all-parts drops both by name, as before. SURFATYP "
+             "7 (a *SET_PART_TREE branch) is dropped by name either way. "
+             "MEASURED (shell cards thrown at 1000 mm/s, nt 4): dropped, they "
+             "pass through each other; routed, they engage at 0.3489 mm (t_s/2 "
+             "+ t_m/2 = 0.35) and an exempted card passes through. R14: 0 "
+             "decks move.",
+    )
     return parser
 
 
@@ -2520,6 +2541,7 @@ def main(argv=None) -> int:
         rigid_tool_penalty_cap=args.rigid_tool_penalty_cap,
         initial_void_copy=args.initial_void_copy,
         clis_pfac_stiffness=args.clis_pfac_stiffness,
+        surfatyp_all_parts=args.surfatyp_all_parts,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

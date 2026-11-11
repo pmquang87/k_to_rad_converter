@@ -465,6 +465,8 @@ _BOOL_LEVERS = (
     ("--soft2-iedge-gate", "soft2_iedge_gate", True),
     ("--srnde-ishape", "srnde_ishape", True),
     ("--maxint-stress-all", "maxint_stress_all", True),
+    # round 10, part B (decision 8: every default gets an opt-out)
+    ("--surfatyp-all-parts", "surfatyp_all_parts", True),
 )
 #: the non-boolean levers and their defaults
 _VALUE_LEVERS = {"print_every": None, "inter_stmin": {}, "inter_inacti": {}}
@@ -1192,6 +1194,7 @@ _GUI_LEVER_VARS = {
     "soft2_iedge_gate": "soft2_iedge_gate",
     "srnde_ishape": "srnde_ishape",
     "maxint_stress_all": "maxint_stress_all",
+    "surfatyp_all_parts": "surfatyp_all_parts",
 }
 
 
@@ -1342,6 +1345,7 @@ _GUI_CHECKBOX_LABELS = {
     "soft2_iedge_gate": "SOFT 2 Iedge 22 only with DEPTH",
     "srnde_ishape": "Card E SRNDE 1 -> TYPE25 Ishape 2",
     "maxint_stress_all": "MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL",
+    "surfatyp_all_parts": "Single-surface SURFATYP 5 / 6 with an SSID",
 }
 
 
@@ -1657,8 +1661,9 @@ _K01_TYPE25_21 = (
 class AssRouteIsNamed(unittest.TestCase):
     """K-01: which *CONTACT_AUTOMATIC_SINGLE_SURFACE route was taken. SSID =
     0 -> the all-parts /INTER/TYPE25 (explicit); SSID != 0 -> the
-    /INTER/TYPE7 self-contact on explicit decks too; SURFATYP 5 with SSID !=
-    0 is dropped and named. No byte moves."""
+    /INTER/TYPE7 self-contact on explicit decks too. The K-01 texts move no
+    byte. SURFATYP 5 with SSID != 0 takes the SSID = 0 route since round 10
+    (B2; dropped and named under --no-surfatyp-all-parts)."""
 
     def test_a_part_set_ssid_is_a_type7_self_contact_on_an_explicit_deck(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(7, 1, 2)))
@@ -1692,13 +1697,24 @@ class AssRouteIsNamed(unittest.TestCase):
                     res.warnings, f"*{kw[:-3]} 21: SSID = 0",
                     "all-parts self-contact"))
 
-    def test_surfatyp_5_with_a_nonzero_ssid_is_dropped_and_named(self):
+    def test_surfatyp_5_with_a_nonzero_ssid_takes_the_ssid_0_route(self):
+        """Round 10, B2: the default routes the card (SURFATYP 5 = 'include
+        all non-spot-weld parts (the SURFA field is ignored)', Vol I R17
+        p.11-25); --no-surfatyp-all-parts drops it by name as before."""
         res, s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)))
+        self.assertIn("/INTER/TYPE25/22", s)
+        self.assertTrue(_has(
+            res.warnings,
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE 22: SURFATYP 5 with SSID = 7",
+            "Vol I R17 p.11-25", "SSID = 7 is ignored", "0.3489 mm",
+            "--no-surfatyp-all-parts"), res.warnings)
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)),
+                              surfatyp_all_parts=False)
         self.assertNotIn("/INTER/", s)
         self.assertTrue(_has(
             res.warnings, "*CONTACT_AUTOMATIC_SINGLE_SURFACE 22",
             "SURFATYP 5", "Vol I R17 p.11-25", "SSID = 7",
-            "REMEDY: set SSID to 0"))
+            "REMEDY: set SSID to 0", "--no-surfatyp-all-parts"))
         self.assertFalse(_has(res.warnings, "22", "it names no part, part set"))
 
     def test_the_route_texts_change_no_byte(self):
@@ -1735,17 +1751,146 @@ class AssRouteIsNamed(unittest.TestCase):
             "(a part set, SURFATYP 2)", "/INTER/TYPE7/7 self-contact",
             "on this implicit deck", "18 non-rigid nodes"))
 
-    def test_the_surfatyp_5_drop_draws_no_id(self):
+    def test_the_surfatyp_5_drop_under_the_opt_out_draws_no_id(self):
         """The drop comes before the side resolvers, so the next contact's
-        groups keep the ids they get without the dropped card."""
-        _r, alone, _e = _convert(_k1a_deck(_k1a_s2s(12)))
-        _r, both, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5) + _k1a_s2s(12)))
+        groups keep the ids they get without the dropped card (round 10, B2:
+        the card drops under --no-surfatyp-all-parts; the default routes
+        it)."""
+        _r, alone, _e = _convert(_k1a_deck(_k1a_s2s(12)),
+                                 surfatyp_all_parts=False)
+        _r, both, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5) + _k1a_s2s(12)),
+                                surfatyp_all_parts=False)
         self.assertEqual(_type7(both, 12), _type7(alone, 12))
 
     def test_ssid_0_on_an_implicit_deck_has_no_type25_text(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(21, 0, 0), implicit=True))
         self.assertIn("/INTER/TYPE7/21", s)
         self.assertFalse(_has(res.warnings, "all-parts self-contact (one "))
+
+
+class SurfatypAllParts(unittest.TestCase):
+    """Round 10, B2 (default ON, --no-surfatyp-all-parts): a single-surface
+    *CONTACT with a stated SSID and SURFATYP 5 ('include all non-spot-weld
+    parts (the SURFA field is ignored)', Vol I R17 p.11-25) takes the SSID =
+    0 route on both routes; SURFATYP 6 (every part except the exempted
+    *SET_PART) the explicit all-parts /INTER/TYPE25 over the other parts; an
+    implicit 6, a missing or all-exempting set and SURFATYP 7 are dropped by
+    name. ONE predicate, writer/common.single_surface_scope, decides the
+    route at every site. The deck: part 1 = the block (solid), 101 / 102 =
+    the cards; part set 1 = {101, 102}, part set 2 = {1}."""
+
+    def test_surfatyp_5_writes_the_ssid_0_bytes(self):
+        for implicit in (False, True):
+            with self.subTest(implicit=implicit):
+                _r0, s0, e0 = _convert(_k1a_deck(_k1a_ass(22, 0, 0),
+                                                 implicit=implicit))
+                _r5, s5, e5 = _convert(_k1a_deck(_k1a_ass(22, 7, 5),
+                                                 implicit=implicit))
+                self.assertEqual(s5, s0)
+                self.assertEqual(e5, e0)
+
+    def test_surfatyp_6_exempts_its_set_on_an_explicit_deck(self):
+        """Hand: all parts {1, 101, 102} minus set 2 = {1} -> [101, 102]."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 2, 6)))
+        self.assertIn("/INTER/TYPE25/23", s)
+        surf = int(_inter_rows(s, "/INTER/TYPE25/23")[0][0])
+        self.assertEqual(_ids_under(s, f"/SURF/PART/EXT/{surf}"), [101, 102])
+        self.assertTrue(_has(res.warnings, "SURFATYP 6 with SSID = 2",
+                             "part(s) 1 left out",
+                             "over the 2 other part(s)"), res.warnings)
+
+    def test_surfatyp_6_on_an_implicit_deck_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 2, 6), implicit=True))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "routes SURFATYP 6 on an EXPLICIT "
+                             "deck only", "no probe",
+                             "REMEDY: invert *SET_PART 2"), res.warnings)
+
+    def test_surfatyp_6_with_a_missing_set_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 99, 6)))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "no *SET_PART 99 exists in this "
+                             "deck", "REMEDY: add the *SET_PART 99"),
+                        res.warnings)
+
+    def test_surfatyp_6_exempting_every_part_is_dropped(self):
+        every = "*SET_PART_LIST\n" + _row(3) + "\n" + _row(1, 101, 102) + "\n"
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(23, 3, 6), extra=every))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "exempts every part of the deck"),
+                        res.warnings)
+
+    def test_surfatyp_7_is_dropped_by_name(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(24, 7, 7)))
+        self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "*SET_PART_TREE branch id",
+                             "no *SET_PART_TREE reader"), res.warnings)
+
+    def test_the_opt_out_drops_5_and_6_as_before(self):
+        for sstyp, ssid in ((5, 7), (6, 2)):
+            with self.subTest(sstyp=sstyp):
+                res, s, _e = _convert(_k1a_deck(_k1a_ass(23, ssid, sstyp)),
+                                      surfatyp_all_parts=False)
+                self.assertNotIn("/INTER/", s)
+        self.assertTrue(_has(res.warnings, "SURFATYP 6", "under "
+                             "--no-surfatyp-all-parts",
+                             ", or drop --no-surfatyp-all-parts."),
+                        res.warnings)
+
+    def test_a_two_surface_surfatyp_6_side_names_its_type(self):
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(12, ssid=1, msid=2,
+                                                 sstyp=6)))
+        self.assertNotIn("/INTER/TYPE7/12", s)
+        self.assertTrue(_has(res.warnings, "SURFATYP 6 means 'Part set ID for "
+                             "exempted parts", "convertcontacts.cxx:268-291"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, "it names no part, part set or "
+                              "node set"), res.warnings)
+
+    def test_the_predicate_is_the_one_every_site_reads(self):
+        from k2rad.writer import common
+        self.assertIn("single_surface_scope", common.__all__)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for rel in ("k2rad/writer/contacts.py", "k2rad/writer/joint_screw.py",
+                    "k2rad/gapmin.py"):
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                src = fh.read()
+            for spelling in ("c.ssid == 0 and live(c)",
+                             'kinds[c.inter_id] = ("/INTER/TYPE25" if '
+                             "c.ssid == 0",
+                             "if c.ssid == 0 and not state.is_implicit:"):
+                with self.subTest(file=rel, spelling=spelling):
+                    self.assertNotIn(spelling, src)
+        # the lever-reach consumer (_written_interface_types) follows it
+        res, _s, _e = _convert(_k1a_deck(_k1a_ass(22, 7, 5)),
+                               inter_stmin={22: 0.0})
+        self.assertTrue(_has(res.warnings, "--inter-stmin 22=0: interface 22 "
+                             "was emitted as /INTER/TYPE25, not as an "
+                             "/INTER/TYPE7"), res.warnings)
+
+    def test_the_joint_screw_split_follows_the_route(self):
+        """tests/fixtures/screw_synthetic.py's contact is SSID 0 SURFATYP 5:
+        the same card with SSID 77 writes the fixture's bytes, the split
+        included; SSID 78 SURFATYP 6 exempting the nut (part 10000045)
+        holds no screw pair, so it writes ONE /INTER/TYPE25 and no split."""
+        sc = _t7._screw_synthetic()
+        base = sc.build_deck()
+        row0 = sc._row(0, 0, 5, 0)
+        self.assertEqual(base.count(row0), 1)
+        res0, s0, e0 = _convert(base)
+        self.assertTrue(_has(res0.warnings, "is split out"), res0.warnings)
+        self.assertEqual(s0.count("/INTER/TYPE25/"), 2)
+        res, s, e = _convert(base.replace(row0, sc._row(77, 0, 5, 0)))
+        self.assertEqual(s, s0)
+        self.assertEqual(e, e0)
+        self.assertTrue(_has(res.warnings, "is split out"), res.warnings)
+        nut = "*SET_PART_LIST\n" + sc._row(78) + "\n" + sc._row(sc.PART_B)
+        res, s, _e = _convert(sc.build_deck(extra=nut).replace(
+            row0, sc._row(78, 0, 6, 0)))
+        self.assertEqual(s.count("/INTER/TYPE25/"), 1)
+        self.assertFalse(_has(res.warnings, "is split out"), res.warnings)
+        self.assertFalse(_has(res.warnings, "*CONSTRAINED_JOINT_SCREW",
+                              "refused"), res.warnings)
 
 
 # ── K-02 ─────────────────────────────────────────────────────────────────────

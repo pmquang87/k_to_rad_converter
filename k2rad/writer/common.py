@@ -56,6 +56,7 @@ __all__ = [
     "_seatbelt_2d_part_ids",
     "_ams_is_emitted",
     "rigid_part_ids",
+    "single_surface_scope",
     "AUTO_IMPLICIT_STUB_TITLE",
 ]
 
@@ -163,6 +164,43 @@ def rigid_part_ids(state: ConversionState) -> Set[int]:
     if state.options.deformable_to_rigid:
         out |= set(state.deformable_to_rigid)
     return out
+
+
+def single_surface_scope(state: ConversionState, c) -> Optional[List[int]]:
+    """The parts of a ``state.contacts_single`` record *c* that takes the
+    ALL-PARTS route (the explicit ``/INTER/TYPE25`` self-contact over one
+    ``/SURF/PART/EXT``, the implicit all-parts ``/INTER/TYPE7`` recipe), or
+    None when its SSID names the set of an ``/INTER/TYPE7`` self-contact (or
+    the card is dropped). The ONE predicate every consumer of "is this
+    single-surface card the all-parts self-contact?" tests (round 10, B2).
+
+    * SSID = 0: every part (Vol I R17 p.11-24, SURFA "EQ.0: Includes all
+      parts in the case of single surface contact types").
+    * SURFATYP 5 with a stated SSID: every part, on both routes - "EQ.5:
+      Include all non-spot-weld parts (the SURFA field is ignored)",
+      p.11-25.
+    * SURFATYP 6 with a stated SSID, on an EXPLICIT deck: every part except
+      those of ``*SET_PART`` SSID - "EQ.6: Part set ID for exempted parts.
+      All non-exempted parts (except spot-weld parts) are included in the
+      contact", p.11-25 - when that set exists and leaves a part; the
+      implicit all-parts ``/INTER/TYPE7`` recipe minus a set has no probe,
+      so an implicit card is dropped by name (ROADMAP round-10 NOT entry 12).
+    * ``--no-surfatyp-all-parts`` (``ConvertOptions.surfatyp_all_parts``
+      False): SSID = 0 only, the cards before round 10.
+    """
+    all_pids = sorted(state.parts.keys())
+    if c.ssid == 0:
+        return all_pids
+    if not state.options.surfatyp_all_parts:
+        return None
+    if c.sstyp == 5:
+        return all_pids
+    if (c.sstyp == 6 and not state.is_implicit
+            and c.ssid in state.part_sets):
+        exempt = set(state.part_sets[c.ssid][1])
+        rest = [p for p in all_pids if p not in exempt]
+        return rest or None
+    return None
 
 
 def _ams_is_emitted(state: ConversionState) -> bool:

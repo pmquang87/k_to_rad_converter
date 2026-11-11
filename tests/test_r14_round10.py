@@ -2482,5 +2482,25 @@ class Round10OptInWiringA2(_t8.Round8OptInWiringB):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Part B - the CardStack batch's contact and damping leftovers (the behaviour
+# tests sit beside the CardStack classes they re-pin, in
+# tests/test_cardstack_pipeline*.py and tests/test_preload_inistate.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Round10FlagWiringB(_t7.Round7FlagWiringA):
+    """The round-10 default-ON levers of part B (the positive spelling;
+    README and the GUI summary carry the --no- one)."""
+
+    _FLAGS = {
+        "--surfatyp-all-parts": "surfatyp_all_parts",
+    }
+    _HELP_FIGURES = {
+        "--surfatyp-all-parts": ("Vol I R17 p.11-25", "0.3489 mm",
+                                 "t_s/2 + t_m/2 = 0.35",
+                                 "R14: 0 decks move"),
+    }
+
+
 if __name__ == "__main__":
     unittest.main()

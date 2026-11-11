@@ -783,7 +783,7 @@ _TYPE25_GAP = ("TYPE25 has no Gapmin cell: its gap is min(Gap_scale x t/2, "
 def _single_surface_skip(state: ConversionState, c) -> str:
     """CardStack K-04: the route-specific skip reason of a single-surface
     contact, which has no two-part clearance to measure."""
-    from .writer.common import AUTO_IMPLICIT_STUB_TITLE
+    from .writer.common import AUTO_IMPLICIT_STUB_TITLE, single_surface_scope
     if c.title == AUTO_IMPLICIT_STUB_TITLE:
         return ("the all-parts implicit stub k2rad injects (no *CONTACT card "
                 "of the deck; it keeps the starter's own gap)")
@@ -791,11 +791,15 @@ def _single_surface_skip(state: ConversionState, c) -> str:
                    "(i7sti3.F:1055-1066: the mean shell thickness - LS-DYNA's "
                    "t/2 + t/2 - on a shell surface, 0.1 x the smallest segment "
                    "side on a solid one)")
-    if c.ssid == 0 and not state.is_implicit:
-        return ("an SSID = 0 all-parts self-contact, written as /INTER/TYPE25 "
+    # round 10, B2: SURFATYP 5 / 6 with a stated SSID take this route too
+    allp = single_surface_scope(state, c) is not None
+    what = ("an SSID = 0" if c.ssid == 0 else
+            f"a SURFATYP {c.sstyp} (SSID {c.ssid})")
+    if allp and not state.is_implicit:
+        return (f"{what} all-parts self-contact, written as /INTER/TYPE25 "
                 "on this explicit deck - " + _TYPE25_GAP)
-    if c.ssid == 0:
-        return ("an SSID = 0 all-parts self-contact, written as the implicit "
+    if allp:
+        return (f"{what} all-parts self-contact, written as the implicit "
                 "node->surface /INTER/TYPE7 recipe: one surface, no two-part "
                 "clearance to measure; " + starter_gap + "." + _SET_BY_HAND)
     return (f"the /INTER/TYPE7 self-contact of SSID {c.ssid} (one surface, no "

@@ -534,6 +534,22 @@ as underscores.
   +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS IE 1189.95 -> 6.71 %,
   KE 253.09 -> 3.37 %. The card alone is no longer written.
   `--no-ale-flow-tracking` writes none of the three (the part-A-i bytes).
+- `--surfatyp-all-parts` / `--no-surfatyp-all-parts` — **ON by default**
+  (round 10, B2). A single-surface `*CONTACT` with a stated SSID and
+  SURFATYP 5 ("include all non-spot-weld parts (the SURFA field is
+  ignored)", Vol I R17 p.11-25) takes the SSID = 0 route - the all-parts
+  `/INTER/TYPE25` self-contact on an explicit deck, the all-parts
+  `/INTER/TYPE7` recipe on an implicit one - and one with SURFATYP 6 (every
+  part except the exempted `*SET_PART`) the `/INTER/TYPE25` over the other
+  parts, on an explicit deck only. An implicit SURFATYP 6 card, a missing or
+  all-exempting set and SURFATYP 7 (a `*SET_PART_TREE` branch: no reader)
+  are dropped by name. `--no-surfatyp-all-parts` drops SURFATYP 5 and 6 by
+  name, as before (the drop text no longer says the set "names no part,
+  part set or node set"). MEASURED (two shell cards thrown at 1000 mm/s, nt
+  4): dropped, they pass through each other; routed, they engage at 0.3489
+  mm (t_s/2 + t_m/2 = 0.35), and an exempted card passes through. R14: 0
+  decks move; outside the roster the two getriebekette `..._exclude_actor`
+  backups get their contact.
 
 ### Python API
 

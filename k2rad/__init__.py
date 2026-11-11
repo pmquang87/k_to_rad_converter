@@ -536,6 +536,7 @@ def convert(
     rigid_tool_penalty_cap: bool = True,
     initial_void_copy: bool = True,
     clis_pfac_stiffness: bool = False,
+    surfatyp_all_parts: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -2033,6 +2034,14 @@ def convert(
         the coupled fluid, dt0 this converter's estimate of the first time
         step, ``writer.blast_ale.clis_dt0_estimate``); a load-curve PFAC and
         a deck with a LAW0 ``*MAT_VACUUM`` are refused. Default False.
+    surfatyp_all_parts : bool
+        A single-surface ``*CONTACT`` with a stated SSID and SURFATYP 5
+        takes the SSID = 0 all-parts route (both routes), one with SURFATYP 6
+        the explicit all-parts ``/INTER/TYPE25`` minus the exempted
+        ``*SET_PART`` (R14 round 10, B2; Vol I R17 p.11-25). MEASURED (shell
+        cards thrown at 1000 mm/s, nt 4): routed, they engage at 0.3489 mm
+        (t_s/2 + t_m/2 = 0.35); dropped, they pass through each other.
+        Default True (``--no-surfatyp-all-parts``: both dropped by name).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2196,6 +2205,7 @@ def convert(
         rigid_tool_penalty_cap=rigid_tool_penalty_cap,
         initial_void_copy=initial_void_copy,
         clis_pfac_stiffness=clis_pfac_stiffness,
+        surfatyp_all_parts=surfatyp_all_parts,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

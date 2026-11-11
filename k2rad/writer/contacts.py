@@ -32,6 +32,7 @@ from .common import (
     _part_node_sets,
     _split_shell_eids_by_topology,
     rigid_part_ids,
+    single_surface_scope,
 )
 
 __all__ = [
@@ -656,8 +657,9 @@ def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
         return set()
     out: Set[int] = set()
     for c in state.contacts_single:
-        if c.ssid == 0:
-            out |= all_solid_pids                      # all-parts self-contact
+        scope = single_surface_scope(state, c)         # round 10, B2
+        if scope is not None:
+            out |= all_solid_pids & set(scope)         # all-parts self-contact
         else:
             out |= _contact_master_pids(state, c.ssid, c.sstyp) & all_solid_pids
     for c in state.contacts_surf2surf:
@@ -2046,14 +2048,58 @@ def _implicit_rigid_secondary_note(state: ConversionState,
         + flag)
 
 
+#: Vol I R17 p.11-25: the SURFATYP / SURFBTYP 5 / 6 / 7 meanings (round 10,
+#: B2 - the drop text named the resolver's failure, "it names no part, part
+#: set or node set ...", which is false for these types)
+_STYP567_MEANING = {
+    5: "Include all non-spot-weld parts (the SURFA field is ignored)",
+    6: ("Part set ID for exempted parts. All non-exempted parts (except "
+        "spot-weld parts) are included in the contact"),
+    7: "Branch ID; see *SET_PART_TREE",
+}
+
+
+def _styp567_clause(sid: int, styp: int) -> str:
+    """Round 10, B2: why a SURFATYP / SURFBTYP 5 / 6 / 7 side resolved to
+    nothing on a route with no resolver for it - the type's meaning instead
+    of the false "names no part, part set or node set". A CLAUSE (no closing
+    punctuation: :func:`_drop_interface` closes it)."""
+    what = {5: "every non-spot-weld part of the model",
+            6: f"every part except those of *SET_PART {sid}",
+            7: f"the parts of *SET_PART_TREE branch {sid}"}[styp]
+    dyna = {5: "dyna2rad writes a /SET/GENERAL ALL clause for it",
+            6: "dyna2rad writes an ALL clause minus the set for it",
+            7: "dyna2rad does not convert it either"}[styp]
+    return (f"SURFATYP {styp} means '{_STYP567_MEANING[styp]}' (Vol I R17 "
+            f"p.11-25), i.e. {what}, and this route has no resolver for that "
+            f"type ({dyna}, convertcontacts.cxx:268-291)")
+
+
+def _styp567_remedy(sid: int, styp: int) -> str:
+    """Round 10, B2: the REMEDY of a SURFATYP / SURFBTYP 5 / 6 / 7 side
+    (:func:`_styp567_clause`)."""
+    if styp == 5:
+        return ("REMEDY: name the parts in a *SET_PART and state SURFATYP 2 "
+                "(a single-surface card with SURFATYP 5 takes the SSID = 0 "
+                "route, unless --no-surfatyp-all-parts is set).")
+    if styp == 6:
+        return (f"REMEDY: invert *SET_PART {sid} by hand into a *SET_PART of "
+                "the parts the contact should hold and state SURFATYP 2.")
+    return ("REMEDY: list the branch's parts in a *SET_PART and state "
+            "SURFATYP 2 (k2rad has no *SET_PART_TREE reader).")
+
+
 def _secondary_side_remedy(sid: int, styp: int) -> str:
     """REMEDY text for a contact SECONDARY side that resolved to no nodes.
 
     Named per TYPE, because "check that SSID names a part, part set or node
     set" is the wrong advice for the two set types: SURFATYP 0 and 1 name a
     *SET_SEGMENT and a *SET_SHELL, and telling the reader to point them at a
-    part is telling them to state a type the cell does not mean.
+    part is telling them to state a type the cell does not mean - nor for
+    SURFATYP 5 / 6 / 7 (round 10, B2: :func:`_styp567_remedy`).
     """
+    if styp in (5, 6, 7):
+        return _styp567_remedy(sid, styp)
     if styp in (0, 1) and sid:
         kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
         return (f"REMEDY: add the {kind} {sid} this side names (SURFATYP "
@@ -2076,6 +2122,8 @@ def _describe_empty_main(state: ConversionState, sid: int, styp: int) -> str:
     """
     if styp in (0, 1) and sid:
         return _styp01_missing_note(state, sid, styp)
+    if styp in (5, 6, 7):                                   # round 10, B2
+        return _styp567_clause(sid, styp)
     if styp == 4:
         return (f"SURFATYP=4 makes {sid} a *SET_NODE id, and a node group has "
                 "no FACES — OpenRadioss builds a main /SURF from segments, "
@@ -2087,6 +2135,8 @@ def _describe_empty_main(state: ConversionState, sid: int, styp: int) -> str:
 
 
 def _main_side_remedy(state: ConversionState, sid: int, styp: int) -> str:
+    if styp in (5, 6, 7):                                   # round 10, B2
+        return _styp567_remedy(sid, styp)
     if styp in (0, 1) and sid:
         kind = "*SET_SEGMENT" if styp == 0 else "*SET_SHELL"
         return (f"REMEDY: add the {kind} {sid} this side names, or restate the "
@@ -2106,6 +2156,10 @@ def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int,
             return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} "
                     "resolved to no nodes at all — "
                     + _styp01_missing_note(state, sid, styp))
+        if styp in (5, 6, 7):                               # round 10, B2
+            return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} "
+                    "resolved to no nodes at all — "
+                    + _styp567_clause(sid, styp))
         return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
                 "no nodes at all — it names no part, part set or node set that "
                 "carries shell/solid elements in this deck")
@@ -2429,6 +2483,101 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     return True
 
 
+def _warn_surfatyp_route(state: ConversionState, c: ContactAutoSingle,
+                         kw: str, scope: List[int],
+                         all_pids: List[int]) -> None:
+    """Round 10, B2 (default ON, ``--no-surfatyp-all-parts``): name the
+    all-parts route a single-surface card with a stated SSID and SURFATYP 5
+    or 6 took (:func:`~k2rad.writer.common.single_surface_scope`)."""
+    route = (f"/INTER/TYPE25/{c.inter_id} self-contact (one /SURF/PART/EXT, "
+             "surf_ID2 = 0) on this explicit deck" if not state.is_implicit
+             else "the all-parts node→surface /INTER/TYPE7 recipe of an "
+             "SSID = 0 card on this implicit deck")
+    if c.sstyp == 5:
+        head = (f"SURFATYP 5 with SSID = {c.ssid}: "
+                f"'{_STYP567_MEANING[5]}' (Vol I R17 p.11-25), so SSID = "
+                f"{c.ssid} is ignored and the card takes the SSID = 0 "
+                f"all-parts route → {route}")
+        measured = (" MEASURED (two t 0.35 shell cards, one thrown at 1000 "
+                    "mm/s, nt 4): dropped as before, they passed through each "
+                    "other; routed, they engage at 0.3489 mm (t_s/2 + t_m/2 = "
+                    "0.35)" + (" - on the explicit route; this implicit route "
+                               "is the SSID = 0 recipe's." if state.is_implicit
+                               else "."))
+    else:
+        exempt = sorted(set(all_pids) - set(scope))
+        head = (f"SURFATYP 6 with SSID = {c.ssid}: *SET_PART {c.ssid} names "
+                f"the EXEMPTED parts - '{_STYP567_MEANING[6]}' (Vol I R17 "
+                f"p.11-25) - → {route} over the {len(scope)} other part(s); "
+                f"part(s) {', '.join(str(p) for p in exempt[:10])}"
+                + (" ..." if len(exempt) > 10 else "") + " left out")
+        measured = (" MEASURED (three t 0.35 shell cards, two thrown at 1000 "
+                    "mm/s, nt 4, one of them exempted): dropped as before, "
+                    "both passed through; routed, the included card engages "
+                    "at 0.3489 mm (t_s/2 + t_m/2 = 0.35) and the exempted "
+                    "one passes through, as EQ.6 reads. An implicit SURFATYP "
+                    "6 card is dropped by name (no probe).")
+    state.warn(
+        f"*{kw} {c.inter_id}: {head}. LS-DYNA leaves spot-weld parts out of "
+        f"a SURFATYP {c.sstyp} side; k2rad's surface lists every part as the "
+        "SSID = 0 route does (a /SURF holds no 1-D element, so a spot-weld "
+        "beam adds no segment)." + measured + " --no-surfatyp-all-parts "
+        "drops the card as before (round 10).")
+
+
+def _surfatyp_drop(state: ConversionState,
+                   c: ContactAutoSingle) -> Tuple[str, str]:
+    """Round 10, B2: ``(cause, remedy)`` of a single-surface card with a
+    stated SSID and SURFATYP 5 / 6 / 7 that takes no route: 5 or 6 under
+    ``--no-surfatyp-all-parts``; 6 on an implicit deck, with no such
+    ``*SET_PART`` or with one that exempts every part; 7 always."""
+    off = not state.options.surfatyp_all_parts
+    if c.sstyp == 5:
+        return (
+            f"SURFATYP 5 means 'include all non-spot-weld parts (the SURFA "
+            f"field is ignored)' (Vol I R17 p.11-25), but SSID = {c.ssid} is "
+            "stated and under --no-surfatyp-all-parts k2rad builds the "
+            "all-parts self-contact from SSID = 0 only",
+            "REMEDY: set SSID to 0 for the all-parts self-contact "
+            "(/INTER/TYPE25 on an explicit deck, the node→surface "
+            "/INTER/TYPE7 on an implicit one), name a part set (SURFATYP 2) "
+            "or a part (3) for the /INTER/TYPE7 self-contact of that set, or "
+            "drop --no-surfatyp-all-parts: without it the card takes the "
+            "SSID = 0 route.")
+    if c.sstyp == 6:
+        why = (f"SURFATYP 6 makes SSID = {c.ssid} the *SET_PART of EXEMPTED "
+               f"parts - '{_STYP567_MEANING[6]}' (Vol I R17 p.11-25) - ")
+        if off:
+            why += ("and under --no-surfatyp-all-parts k2rad builds no "
+                    "all-parts-minus-a-set contact")
+        elif c.ssid not in state.part_sets:
+            why += f"but no *SET_PART {c.ssid} exists in this deck"
+        elif state.is_implicit:
+            why += ("and k2rad routes SURFATYP 6 on an EXPLICIT deck only (an "
+                    "/INTER/TYPE25 over every part minus the set); the "
+                    "implicit all-parts /INTER/TYPE7 recipe minus a set has "
+                    "no probe")
+        else:
+            why += f"and *SET_PART {c.ssid} exempts every part of the deck"
+        if c.ssid not in state.part_sets and not off:
+            return (why,
+                    f"REMEDY: add the *SET_PART {c.ssid} of the exempted "
+                    "parts, or name the parts the contact should hold in a "
+                    "*SET_PART and state SURFATYP 2.")
+        return (why,
+                f"REMEDY: invert *SET_PART {c.ssid} by hand into a *SET_PART "
+                "of the parts the contact should hold and state SURFATYP 2 - "
+                "the /INTER/TYPE7 self-contact of that set (MEASURED on the "
+                "three-card explicit coupon: the included card engages at "
+                "0.3501 mm, the left-out one passes through)"
+                + (", or drop --no-surfatyp-all-parts." if off
+                   and not state.is_implicit else "."))
+    return (f"SURFATYP 7 makes SSID = {c.ssid} a *SET_PART_TREE branch id "
+            "(Vol I R17 p.11-25), and k2rad has no *SET_PART_TREE reader",
+            "REMEDY: list the branch's parts in a *SET_PART and state "
+            "SURFATYP 2 (the /INTER/TYPE7 self-contact of that set).")
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                      report_gapmin: bool = True) -> List[str]:
     # report_gapmin=False only from _make_deferred_implicit_stub (round 8,
@@ -2499,7 +2648,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
     all_pids: List[int] = sorted(state.parts.keys())
 
     for c in state.contacts_single:
-        if c.ssid == 0:
+        # round 10, B2: SSID = 0, or SURFATYP 5 / 6 with a stated SSID - the
+        # ONE predicate (writer/common.single_surface_scope)
+        scope = single_surface_scope(state, c)
+        if scope is not None:
             # The two halves of this guard belong to DIFFERENT branches, and
             # fusing them dropped a load path. `not all_pids` means there is no
             # surface to build at all and is fatal either way. `not
@@ -2546,16 +2698,20 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 # implicit (validated recipe); a part or part set in SSID is the
                 # TYPE7 self-contact of that set on BOTH decks (the else branch).
                 kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
-                state.warn(
-                    f"*{kw} {c.inter_id}: SSID = 0 on an explicit analysis → "
-                    f"/INTER/TYPE25/{c.inter_id} all-parts self-contact (one "
-                    "/SURF/PART/EXT over every part, surf_ID2 = 0: each node "
-                    "against every segment of the same surface, as the native "
-                    "OpenRadioss reader writes it). A part or part set in SSID "
-                    "(SSID != 0) gives the /INTER/TYPE7 self-contact of that "
-                    "set instead, on explicit and implicit decks alike; an "
-                    "SSID = 0 card on an implicit deck takes the all-parts "
-                    "node→surface /INTER/TYPE7 recipe.")
+                if c.ssid == 0:
+                    state.warn(
+                        f"*{kw} {c.inter_id}: SSID = 0 on an explicit analysis "
+                        f"→ /INTER/TYPE25/{c.inter_id} all-parts self-contact "
+                        "(one /SURF/PART/EXT over every part, surf_ID2 = 0: "
+                        "each node against every segment of the same "
+                        "surface, as the native OpenRadioss reader writes "
+                        "it). A part or part set in SSID (SSID != 0) gives "
+                        "the /INTER/TYPE7 self-contact of that set instead, "
+                        "on explicit and implicit decks alike; an SSID = 0 "
+                        "card on an implicit deck takes the all-parts "
+                        "node→surface /INTER/TYPE7 recipe.")
+                else:
+                    _warn_surfatyp_route(state, c, kw, scope, all_pids)
                 _warn_type25_self_gap_inputs(state, c, kw)
                 _warn_soft_card_fields(state, c, kw, "TYPE25")   # K-09
                 # A converted *CONSTRAINED_JOINT_SCREW (round 7, B2) takes its
@@ -2565,12 +2721,14 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 # main node a Lagrange condition holds is cancelled on the
                 # main node alone (RBYVIT, resol.F:7572, runs before LAG_MULT,
                 # :7901), so the A-B pair slips the mesh off its main node.
+                # (A SURFATYP 6 card that leaves A or B out holds no such
+                # pair: joint_screw._contact_conflict registers no split.)
                 splits = lagrange_held_pairs(state, c.inter_id)
                 a_parts = {p.a_pid for p in splits}
                 self_surf = state.next_id()
                 lines += _emit_surf_part(
                     self_surf, f"contact_{c.inter_id}_self",
-                    [p for p in all_pids if p not in a_parts])
+                    [p for p in scope if p not in a_parts])
                 fric, fric_id = _contact_friction(
                     state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
                 # never Inacti 6 here (CardStack K-06): a TYPE25 refuses it
@@ -2579,21 +2737,21 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 stfac = _stfac_for(state, c.sfs, c.inter_id, "TYPE25") or 1.0
                 # CardStack K-10 (opt-in --general-shell-edges): Iedge 1 on
                 # an ordinary AUTOMATIC_GENERAL; the split copies it below
-                iedge = _general_shell_edges_iedge(state, c, kw, all_pids)
+                iedge = _general_shell_edges_iedge(state, c, kw, scope)
                 # CardStack K-11: Card-2 BT / DT -> Tstart / Tstop (the split
                 # copies them); VDC is named, not written (VISs 0.05)
                 tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt,
                                              kw, "TYPE25")
                 _warn_type25_self_vdc(state, c, kw)
                 # CardStack K-16: Card E SRNDE 1 -> Ishape 2 (the split too)
-                ishape = _type25_ishape(state, c, kw, c.inter_id, all_pids)
+                ishape = _type25_ishape(state, c, kw, c.inter_id, scope)
                 lines += _emit_inter_type25_self(
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id, iedge=iedge, tstart=tstart, tstop=tstop,
                     ishape=ishape)
                 for plan in splits:
                     tag = plan.tag
-                    rest = [p for p in all_pids
+                    rest = [p for p in scope
                             if p not in (plan.a_pid, plan.b_pid)]
                     s_rest = state.next_id()
                     s_a = state.next_id()
@@ -2691,29 +2849,25 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                  if e.pid not in _rigid_parts},
                 stfac, 4, c.title)
             kw = c.keyword or "CONTACT_AUTOMATIC_SINGLE_SURFACE"
+            if c.ssid != 0:
+                _warn_surfatyp_route(state, c, kw, scope, all_pids)  # B2
             _warn_soft_card_fields(state, c, kw, "TYPE7")       # K-09
             _warn_general_shell_edges_unreached(                 # K-10
                 state, c, kw, "the implicit all-parts /INTER/TYPE7 "
                 "node-to-surface recipe")
             _warn_card_e_type7(state, c, kw, viss)               # K-16
-        elif c.sstyp == 5:
+        elif c.sstyp in (5, 6, 7):
             # SURFATYP 5 = "include all non-spot-weld parts (the SURFA field
-            # is ignored)", Vol I R17 p.11-25. k2rad routes the all-parts
-            # self-contact from SSID = 0 only, so a stated SSID with type 5
-            # is dropped - before the resolvers run (they would find no
-            # nodes for type 5 anyway and draw no id) - and named
-            # (CardStack K-01).
-            _drop_interface(
-                state, dropped, c.keyword, c.inter_id,
-                f"SURFATYP 5 means 'include all non-spot-weld parts (the "
-                f"SURFA field is ignored)' (Vol I R17 p.11-25), but SSID = "
-                f"{c.ssid} is stated and k2rad builds the all-parts "
-                "self-contact from SSID = 0 only",
-                "REMEDY: set SSID to 0 for the all-parts self-contact "
-                "(/INTER/TYPE25 on an explicit deck, the node→surface "
-                "/INTER/TYPE7 on an implicit one), or name a part set "
-                "(SURFATYP 2) or a part (3) for the /INTER/TYPE7 "
-                "self-contact of that set.")
+            # is ignored)", 6 = "part set ID for exempted parts", 7 = a
+            # *SET_PART_TREE branch id, Vol I R17 p.11-25. 5 / 6 reach here
+            # only under --no-surfatyp-all-parts, a 6 also on an implicit
+            # deck (or with no such set, or one that exempts every part), 7
+            # always (no *SET_PART_TREE reader): dropped before the
+            # resolvers run (they would find no nodes and draw no id) and
+            # named by the type (CardStack K-01; round 10, B2).
+            cause, remedy = _surfatyp_drop(state, c)
+            _drop_interface(state, dropped, c.keyword, c.inter_id, cause,
+                            remedy)
             continue
         else:
             diag: Dict[str, int] = {}
@@ -3134,8 +3288,10 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
     def live(c) -> bool:
         return c.inter_id not in state.dropped_inter_ids
 
+    every_part = sorted(state.parts)
     for c in state.contacts_single:
-        if c.ssid == 0 and live(c):
+        # SSID = 0, or SURFATYP 5 (round 10, B2): every part
+        if live(c) and single_surface_scope(state, c) == every_part:
             return c.inter_id
     for c in state.contacts_single:
         if live(c):
@@ -3971,7 +4127,8 @@ def _written_interface_types(state: ConversionState) -> Dict[int, str]:
     of :func:`_report_contact_lever_reach`."""
     kinds: Dict[int, str] = {}
     for c in state.contacts_single:
-        kinds[c.inter_id] = ("/INTER/TYPE25" if c.ssid == 0
+        kinds[c.inter_id] = ("/INTER/TYPE25"
+                             if single_surface_scope(state, c) is not None
                              and not state.is_implicit else "/INTER/TYPE7")
     for c in state.contacts_surf2surf:
         kinds[c.inter_id] = ("/INTER/TYPE25" if c.inter_id

@@ -7785,8 +7785,8 @@ class ConvertOptions:
     ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
-    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``,
-    ``vacuum_light_fluid``, ``weld_exponents``,
+    ``srnde_ishape``, ``surfatyp_all_parts``, ``tet_isolid1``,
+    ``tgmult_imptemp``, ``vacuum_light_fluid``, ``weld_exponents``,
     ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
     ``zero_tolerance_ectol``
 
@@ -9669,6 +9669,15 @@ class ConvertOptions:
     # Stmax). Every other class is named. 4 keys / 4 models, 12 cells.
     # MEASURED figures: _A8_MEASURED in writer/contacts. False = Stmax 0.
     rigid_tool_penalty_cap: bool = True
+
+    # ── Round 10, part B (the CardStack batch's contact leftovers) ─────────
+    # --no-surfatyp-all-parts (default ON; writer/common.single_surface_scope
+    # and writer/contacts): a single-surface *CONTACT with a stated SSID and
+    # SURFATYP 5 takes the SSID = 0 all-parts route on both routes, one with
+    # SURFATYP 6 the explicit all-parts /INTER/TYPE25 minus the exempted
+    # *SET_PART (Vol I R17 p.11-25). False = both dropped by name, as the
+    # cards were before round 10.
+    surfatyp_all_parts: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

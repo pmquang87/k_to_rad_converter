@@ -227,7 +227,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ale_inflow_ebcs: bool = True,
                          rigid_tool_penalty_cap: bool = True,
                          initial_void_copy: bool = True,
-                         clis_pfac_stiffness: bool = False) -> dict:
+                         clis_pfac_stiffness: bool = False,
+                         surfatyp_all_parts: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -573,6 +574,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["rigid_tool_penalty_cap"] = bool(rigid_tool_penalty_cap)
     kwargs["initial_void_copy"] = bool(initial_void_copy)
     kwargs["clis_pfac_stiffness"] = bool(clis_pfac_stiffness)
+    # round 10, part B
+    kwargs["surfatyp_all_parts"] = bool(surfatyp_all_parts)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -721,6 +724,8 @@ class ConverterGUI:
         self.rigid_tool_penalty_cap = tk.BooleanVar(value=True)
         self.initial_void_copy = tk.BooleanVar(value=True)
         self.clis_pfac_stiffness = tk.BooleanVar(value=False)
+        # round 10, part B
+        self.surfatyp_all_parts = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1531,6 +1536,12 @@ class ConverterGUI:
                      "quadrature IE RMS 161.11 -> 492.61 %",
             variable=self.clis_pfac_stiffness).grid(
                 row=101, column=0, columnspan=3, sticky="w", **pad)
+        # round 10, part B
+        ttk.Checkbutton(
+            io, text="Single-surface SURFATYP 5 / 6 with an SSID -> the "
+                     "all-parts self-contact (6: explicit, minus the set) - ON",
+            variable=self.surfatyp_all_parts).grid(
+                row=102, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1881,6 +1892,7 @@ class ConverterGUI:
                 rigid_tool_penalty_cap=self.rigid_tool_penalty_cap.get(),
                 initial_void_copy=self.initial_void_copy.get(),
                 clis_pfac_stiffness=self.clis_pfac_stiffness.get(),
+                surfatyp_all_parts=self.surfatyp_all_parts.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2258,6 +2270,9 @@ class ConverterGUI:
             bits.append("no *INITIAL_VOID void copy (--no-initial-void-copy)")
         if kwargs.get("clis_pfac_stiffness", False):
             bits.append("CLIS PFAC stiffness (--clis-pfac-stiffness)")
+        if not kwargs.get("surfatyp_all_parts", True):
+            bits.append("SURFATYP 5 / 6 with an SSID dropped "
+                        "(--no-surfatyp-all-parts)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

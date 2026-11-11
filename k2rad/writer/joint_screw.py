@@ -46,7 +46,8 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..state import (BodyCondition, ConversionState, ConstrainedJointScrew,
                      JointScrewPlan, PrescribedMotionRigid)
-from .common import HDR, _dof_string, _f, _i, _emit_grnod_node
+from .common import (HDR, _dof_string, _f, _i, _emit_grnod_node,
+                     single_surface_scope)
 
 #: the spelling the pattern converts; _LOCAL / _FAILURE / _COOR_ are named
 _PLAIN_SCREW = "CONSTRAINED_JOINT_SCREW"
@@ -159,8 +160,15 @@ def _contact_conflict(state: ConversionState, a: int, b: int,
     WILL handle)``."""
     split: List[int] = []
     for c in state.contacts_single:
-        if c.ssid == 0 and not state.is_implicit:
-            split.append(c.inter_id)
+        scope = (None if state.is_implicit
+                 else single_surface_scope(state, c))
+        if scope is not None:
+            # the explicit all-parts self-contact - SSID = 0, or SURFATYP 5 /
+            # 6 with a stated SSID since round 10 (B2): split where it holds
+            # the A-B pair; a SURFATYP 6 card whose exempted set holds A or
+            # B holds no such pair
+            if a in scope and b in scope:
+                split.append(c.inter_id)
             continue
         if (_side_touches(state, c.ssid, c.sstyp, a, a_nodes)
                 and _side_touches(state, c.ssid, c.sstyp, b, b_nodes)):
