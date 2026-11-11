@@ -2119,6 +2119,9 @@ class StminOverrideAndFloor(unittest.TestCase):
                        "K = min(Km, Ks) = 256.9", "below Stfac 3.89"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, ws[0])
+        # round 10, B4: a hex part of an isotropic law keeps its text
+        self.assertNotIn("1.5 V", ws[0])
+        self.assertNotIn("B = ", ws[0])
         self.assertEqual(_type7(s, 12)["stmin"], "1000")
         res, _s, _e = _convert(_k1a_deck(_k1a_s2s(12)))      # E 2400: silent
         self.assertEqual(_stmin_warnings(res), [])
@@ -2138,6 +2141,9 @@ class StminOverrideAndFloor(unittest.TestCase):
                        "no Stfac lifts K above the floor"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, ws[0])
+        # round 10, B4: a hex part of an isotropic law keeps its text
+        self.assertNotIn("VOLU/32", ws[0])
+        self.assertNotIn("B = ", ws[0])
 
     def test_the_general_type7_takes_the_override(self):
         deck = _k1a_deck(_k1a_ass(
@@ -2181,6 +2187,257 @@ class StminOverrideAndFloor(unittest.TestCase):
         res, _s, _e = _convert(_k1a_deck(_k1a_ass(21, 0, 0), implicit=True,
                                          card_e=10.0, block_e=10.0))
         self.assertEqual(len(_stmin_warnings(res)), 1)
+
+
+def _b4_row(*v, w=10) -> str:
+    return "".join((f"{x}" if not isinstance(x, float) else f"{x:.6g}")
+                   .rjust(w) for x in v)
+
+
+def _b4_node(i, p) -> str:
+    return f"{i:>8}{p[0]:>16.6f}{p[1]:>16.6f}{p[2]:>16.6f}"
+
+
+def _b4_tail(ssid: int, msid: int) -> str:
+    """The card's material, the base SPC, the thrown card and the S2S card
+    (SSID / MSID parts) of the round-10 B4 coupons (census g3j P5 / P6)."""
+    return ("*MAT_ELASTIC\n" + _b4_row(2, 1.35e-9, 3200.0, 0.35) + "\n"
+            + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n" + _b4_row(16)
+            + "b4_probe\n" + _b4_row(ssid, msid, 3, 3) + "\n"
+            + _b4_row(0.0, 0.0) + "\n" + _b4_row(0.0, 0.0) + "\n*END\n")
+
+
+def _b4_hex_deck(block_mat: str) -> str:
+    """g3j P5's geometry: a 10 x 10 x 4 block of 2 mm hex cubes (part 1,
+    MID 1 = *block_mat*) as the MAIN side under a 0.35 card of 4 x 4
+    shells of 2.5 mm (part 101, E 3200: Ks = E x t = 1120). A boundary face:
+    A = 4, V = 8, A^2/V = 2."""
+    pts, nid, ids = [], 2000, {}
+    for k in range(3):
+        for j in range(6):
+            for i in range(6):
+                nid += 1
+                ids[(i, j, k)] = nid
+                pts.append(_b4_node(nid, (2.0 * i, 2.0 * j, 2.0 * k)))
+    hexes, e = [], 2000
+    for k in range(2):
+        for j in range(5):
+            for i in range(5):
+                e += 1
+                c = [ids[(a, b, kk)] for kk in (k, k + 1) for a, b in (
+                    (i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1))]
+                hexes.append("".join(f"{v:>8}" for v in [e, 1] + c))
+    card, cid = [], {}
+    n = 0
+    for j in range(5):
+        for i in range(5):
+            n += 1
+            cid[(i, j)] = n
+            card.append(_b4_node(n, (2.5 * i, 2.5 * j, 4.2)))
+    shells, e = [], 0
+    for j in range(4):
+        for i in range(4):
+            e += 1
+            shells.append("".join(f"{v:>8}" for v in [e, 101, cid[(i, j)],
+                          cid[(i + 1, j)], cid[(i + 1, j + 1)],
+                          cid[(i, j + 1)]]))
+    return ("*KEYWORD\n*TITLE\nround 10 B4 hex probe\n*CONTROL_TERMINATION\n"
+            + _b4_row(3.0e-4) + "\n*NODE\n" + "\n".join(card + pts) + "\n"
+            + "*ELEMENT_SOLID\n" + "\n".join(hexes) + "\n"
+            + "*ELEMENT_SHELL\n" + "\n".join(shells) + "\n"
+            + "*PART\nblock\n" + _b4_row(1, 1, 1) + "\n*PART\ncard\n"
+            + _b4_row(101, 2, 2) + "\n*SECTION_SOLID\n" + _b4_row(1, 1) + "\n"
+            + "*SECTION_SHELL\n" + _b4_row(2, 2, 0.8333, 2) + "\n"
+            + _b4_row(0.35, 0.35, 0.35, 0.35) + "\n" + block_mat
+            + "*DEFINE_CURVE\n" + _b4_row(9) + "\n"
+            + "".join(f"{x:>20}{y:>20}\n" for x, y in (
+                (0.0, 0.0), (0.05, 5.0), (0.5, 50.0), (0.9, 500.0)))
+            + _b4_tail(101, 1))
+
+
+def _b4_tet_deck(tet10: bool, block_secondary: bool) -> str:
+    """g3j P6 / P6b / P6c's geometry: a 4 x 4 x 2 *MAT_ELASTIC block (E 100,
+    nu 0.3: B 83.33) of 2 mm cubes, each cut into 6 Kuhn tets (a boundary
+    face: a right triangle of legs 2, A = 2; V = 8/6), with the six midside
+    nodes in Radioss order (a,b) (b,c) (c,a) (a,d) (b,d) (c,d) for a
+    /TETRA10 (ELFORM 16) or the collapsed 8-node card for a /TETRA4
+    (ELFORM 10). As the MAIN side under a 4 x 4 card of 1 mm shells (P6 /
+    P6b), or as the SECONDARY side under a 6 x 6 card spanning -1 .. 5
+    (P6c)."""
+    h, pts, ids = 2.0, {}, [1000]
+
+    def pid_of(p):
+        key = tuple(round(c, 9) for c in p)
+        if key not in pts:
+            ids[0] += 1
+            pts[key] = ids[0]
+        return pts[key]
+
+    def vol(a, b, c, d):
+        u = [b[k] - a[k] for k in range(3)]
+        v = [c[k] - a[k] for k in range(3)]
+        w = [d[k] - a[k] for k in range(3)]
+        return (u[0] * (v[1] * w[2] - v[2] * w[1])
+                - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0])) / 6.0
+
+    tets = []
+    for j in range(2):
+        for i in range(2):
+            o = (i * h, j * h, 0.0)
+            for pa in ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1),
+                       (2, 1, 0)):
+                cur = [0, 0, 0]
+                corners = [tuple(o)]
+                for ax in pa:
+                    cur[ax] = 1
+                    corners.append((o[0] + cur[0] * h, o[1] + cur[1] * h,
+                                    o[2] + cur[2] * h))
+                a, b, c, d = corners
+                if vol(a, b, c, d) < 0:
+                    b, c = c, b
+                mids = [tuple((p[m] + q[m]) / 2.0 for m in range(3))
+                        for p, q in ((a, b), (b, c), (c, a), (a, d), (b, d),
+                                     (c, d))]
+                tets.append([pid_of(p) for p in (a, b, c, d)]
+                            + [pid_of(p) for p in mids])
+    n_side, x0 = (7, -1.0) if block_secondary else (5, 0.0)
+    card, cid, n = [], {}, 0
+    for j in range(n_side):
+        for i in range(n_side):
+            n += 1
+            cid[(i, j)] = n
+            card.append(_b4_node(n, (x0 + i, x0 + j, 2.2)))
+    shells, e = [], 0
+    for j in range(n_side - 1):
+        for i in range(n_side - 1):
+            e += 1
+            shells.append("".join(f"{v:>8}" for v in [e, 101, cid[(i, j)],
+                          cid[(i + 1, j)], cid[(i + 1, j + 1)],
+                          cid[(i, j + 1)]]))
+    used = set()
+    for t in tets:
+        used.update(t if tet10 else t[:4])
+    blk = [_b4_node(nn, p) for p, nn in sorted(pts.items(), key=lambda x: x[1])
+           if nn in used]
+    sol = []
+    for t_i, t in enumerate(tets, 2001):
+        if tet10:
+            sol.append(f"{t_i:>8}{1:>8}\n" + "".join(f"{v:>8}" for v in t))
+        else:
+            c4 = t[:4]
+            sol.append("".join(f"{v:>8}" for v in [t_i, 1] + c4 + [c4[3]] * 4))
+    return ("*KEYWORD\n*TITLE\nround 10 B4 tet probe\n*CONTROL_TERMINATION\n"
+            + _b4_row(3.0e-4) + "\n*NODE\n" + "\n".join(card + blk) + "\n"
+            + "*ELEMENT_SOLID\n" + "\n".join(sol) + "\n"
+            + "*ELEMENT_SHELL\n" + "\n".join(shells) + "\n"
+            + "*PART\nblock\n" + _b4_row(1, 1, 1) + "\n*PART\ncard\n"
+            + _b4_row(101, 2, 2) + "\n*SECTION_SOLID\n"
+            + _b4_row(1, 16 if tet10 else 10) + "\n*SECTION_SHELL\n"
+            + _b4_row(2, 2, 0.8333, 2) + "\n"
+            + _b4_row(0.35, 0.35, 0.35, 0.35) + "\n*MAT_ELASTIC\n"
+            + _b4_row(1, 1.2e-9, 100.0, 0.3) + "\n"
+            + (_b4_tail(1, 101) if block_secondary else _b4_tail(101, 1)))
+
+
+_B4_LAW38 = ("*MAT_LOW_DENSITY_FOAM\n" + _b4_row(1, "5e-11", 100, 9, "1e+20", 1,
+                                                  0, 0) + "\n"
+             + _b4_row(0, 0, 0) + "\n")
+
+
+class StminEstimateLawsAndTets(unittest.TestCase):
+    """Round 10, B4 (warning text only, no byte): the K-02 estimate reads
+    the starter's own B, tet volume and TET10 node volume. B = the emitted
+    law's PM(32) (hm_read_mat.F90:1451-1464): E for /MAT/LAW38
+    (hm_read_mat38.F:347-348), the largest written modulus for /MAT/LAW50
+    (hm_read_mat50.F90:405/416), the largest written uncompressed modulus
+    for /MAT/LAW28 (hm_read_mat28.F:185); LAW90 keeps E / 3 (its C1 with the
+    Nu 0 k2rad writes). A tet main face is over the starter's 1.5 V (a tet
+    is stored as a degenerate brick, hm_read_solid.F:278-284 / :386-392,
+    whose one-point volume is 1.5 V, i7sti3.F:426-444); a /TETRA10
+    secondary node takes VOLU/32 (corner) or 7 VOLU/48 (midside) of VOLU =
+    V/4 (s10init3.F:233 / :347, sbulk3.F:152-181). Each expectation is hand
+    computed from the geometry; the measured one-cell Stmin brackets (g3j,
+    nt 4) hold them: LAW38 [180, 220), TET10 main [10.3, 10.5), TET4 main
+    [160, 173), the softest TET10 secondary node [28.5, 29.5)."""
+
+    def _line(self, deck: str) -> str:
+        res, _s, _e = _convert(deck)
+        ws = _stmin_warnings(res)
+        self.assertEqual(len(ws), 1, res.warnings)
+        return ws[0]
+
+    def test_law38_takes_b_equal_to_e(self):
+        """Hand: B = E = 100 (no nu on the record), A^2/V = 2 -> 200 (the
+        old E / 3 x 2 = 66.67)."""
+        w = self._line(_b4_hex_deck(_B4_LAW38))
+        self.assertIn("Km = Stfac x B x A^2/V = 1 x 100 x 2 = 200", w)
+        self.assertIn("B = E for /MAT/LAW38 (hm_read_mat38.F:347-348)", w)
+        self.assertIn("below Stfac 5", w)
+
+    def test_law50_crushable_foam_takes_the_largest_modulus(self):
+        """Hand: max(100, 100 / 2.6 = 38.46) = 100 -> 200 (the old
+        100 / (3 x 0.4) = 83.33 would print 166.7)."""
+        mat = ("*MAT_CRUSHABLE_FOAM\n"
+               + _b4_row(1, "5e-11", 100, 0.3, 9, 0, 0) + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 100 x 2 = 200", w)
+        self.assertIn("B = the largest /MAT/LAW50 modulus", w)
+
+    def test_law28_honeycomb_takes_the_largest_uncompressed_modulus(self):
+        """Hand: max(EAAU .. GCAU) = 400 -> 800 (the old 70000 / 1.2 x 2 =
+        1.167e5 would not fire at all)."""
+        mat = ("*MAT_HONEYCOMB\n"
+               + _b4_row(1, "5e-11", 70000, 0.3, 50, 0.2, 0.05, 0) + "\n"
+               + _b4_row(9, 9, 9, 9, 9, 9, 9, 0) + "\n"
+               + _b4_row(50, 60, 400, 20, 30, 25, 0, 1) + "\n"
+               + _b4_row(0, 0, 0, 0, 0, 0) + "\n" + _b4_row(0, 0, 0, 0, 0)
+               + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 400 x 2 = 800", w)
+        self.assertIn("B = the largest uncompressed /MAT/LAW28 modulus", w)
+
+    def test_law90_keeps_e_over_three(self):
+        """Hand: E / 3 = 100 (the starter's C1 with the Nu 0 k2rad writes)
+        -> 200, with no law note."""
+        mat = ("*MAT_LOW_DENSITY_VISCOUS_FOAM\n"
+               + _b4_row(1, "5e-11", 300, 9, 0, 1, 0, 0) + "\n"
+               + _b4_row(0, 0, 0, 0, 0, 0, 0, 0) + "\n")
+        w = self._line(_b4_hex_deck(mat))
+        self.assertIn("1 x 100 x 2 = 200", w)
+        self.assertNotIn("B = ", w)
+
+    def test_a_tet10_main_face_is_four_triangles_over_1_5_v(self):
+        """Hand: ((2/4)^2) / (1.5 x 8/6) = 0.125; x 83.33 = 10.42."""
+        w = self._line(_b4_tet_deck(tet10=True, block_secondary=False))
+        self.assertIn("Km = Stfac x B x A^2/(1.5 V) = 1 x 83.33 x 0.125 = "
+                      "10.42", w)
+        self.assertIn("hm_read_solid.F:278-284 / :386-392", w)
+        self.assertIn("i7sti3.F:426-444", w)
+
+    def test_a_tet4_main_face_is_over_1_5_v(self):
+        """Hand: 2^2 / (1.5 x 8/6) = 2; x 83.33 = 166.7."""
+        w = self._line(_b4_tet_deck(tet10=False, block_secondary=False))
+        self.assertIn("Km = Stfac x B x A^2/(1.5 V) = 1 x 83.33 x 2 = 166.7",
+                      w)
+
+    def test_a_tet10_secondary_splits_v_over_4(self):
+        """Hand (the census tet10_hand.py, no k2rad import): 66 surface
+        nodes (18 corners + 48 face-edge midsides), median (2 V_node)^(1/3)
+        0.5793 -> 48.28; the softest node 28.89 sits in the measured
+        bracket [28.5, 29.5)."""
+        w = self._line(_b4_tet_deck(tet10=True, block_secondary=True))
+        self.assertIn("Ks = B x (2 V_node)^(1/3) = 83.33 x 0.5793 = 48.28 "
+                      "(the median of 66 surface nodes", w)
+        self.assertIn("VOLU/32", w)
+        self.assertIn("7 VOLU/48", w)
+
+    def test_a_tet4_secondary_is_unchanged(self):
+        """Hand: V/4 per corner, median over 18 surface nodes 115.6."""
+        w = self._line(_b4_tet_deck(tet10=False, block_secondary=True))
+        self.assertIn("83.33 x 1.387 = 115.6 (the median of 18 surface "
+                      "nodes", w)
+        self.assertNotIn("VOLU/32", w)
 
 
 # ── K-03 ─────────────────────────────────────────────────────────────────────

@@ -5193,7 +5193,18 @@ secondary B × (2 V_node)^(1/3) (`asstifi.F:50`), each the median of its side,
 combined by Istf (2 average, 3 max, 4 min, 5 series); B = E / (3 (1 - 2 nu))
 with nu the material record's nu or pr (`*MAT_224` / `*MAT_252` keep it as
 pr), and an `*MAT_ELASTIC_FLUID` part's B its K (the `/EOS/POLYNOMIAL` C1
-k2rad writes, `hm_read_eos_polynomial.F:110`) — states the value in the
+k2rad writes, `hm_read_eos_polynomial.F:110`); since round 10 (B4) B is the
+emitted law's PM(32) - E for `/MAT/LAW38` (`hm_read_mat38.F:347-348`), the
+largest written modulus for `/MAT/LAW50` (`hm_read_mat50.F90:405/416`) and
+the largest written uncompressed modulus for `/MAT/LAW28`
+(`hm_read_mat28.F:185`) - a tet's V is the starter's 1.5 V (a tet is stored
+as a degenerate brick, `hm_read_solid.F:278-284` / `:386-392`, whose
+one-point volume is 1.5 V, `i7sti3.F:426-444`) and a `/TETRA10` secondary
+node takes VOLU/32 (corner) or 7 VOLU/48 (midside) of VOLU = V/4
+(`s10init3.F:233` / `:347`, `sbulk3.F:152-181`). MEASURED by one-cell Stmin
+brackets (nt 4): the engine's K lies in [180, 220) on a LAW38 foam (the
+estimate 200), [10.3, 10.5) on a TET10 main (10.42), [160, 173) on a TET4
+main (166.7), [28.5, 29.5) at the softest TET10 secondary node (28.89) — states the value in the
 deck's force / length unit, and the Stfac below which SFS / `--soften-stfac`
 change nothing. A `*MAT_ARUP_ADHESIVE` (`/MAT/LAW169`) part is named instead
 of estimated: the starter gives that law no bulk modulus

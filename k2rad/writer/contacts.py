@@ -4706,9 +4706,14 @@ class _PartStiffness(NamedTuple):
     n_sec: int         # nodes the median is taken over
     e: float           # Young's modulus (the starter's PM(20))
     t: float           # shell: median element thickness
-    b: float           # solid: bulk modulus E / (3 (1 - 2 nu))
+    b: float           # solid: the bulk modulus the starter reads, PM(32)
     a2v: float         # solid: median A^2 / V of the part's boundary faces
     l13: float         # solid: median (2 V_node)^(1/3) of its surface nodes
+    # round 10, B4: how B, the tet volume and a TET10 nodal volume were
+    # taken ("" = E / (3 (1 - 2 nu)), the true volume, V / nodes)
+    bnote: str = ""
+    tet: bool = False      # A^2 / V over the starter's 1.5 x tet volume
+    tet10_nodes: bool = False  # the TET10 corner / midside split of V/4
 
 
 def _combine_istf(km: float, ks: float, istf: int) -> float:
@@ -4924,7 +4929,11 @@ def _part_stiffness_quick(state: ConversionState,
                           e, _unique_node_slots(e.nodes), t1) or t1) > 0.0]
                 cache[pid] = e_mod * _median(ts) if ts else None
                 continue
-            if not solids[pid] or not 0.0 <= nu < 0.5:
+            if not solids[pid]:
+                continue
+            # round 10, B4: the law's PM(32), as the exact walk reads it
+            bq = _part_bulk(state, pid, e_mod, nu)
+            if bq is None:
                 continue
             lst = solids[pid]
             hs: List[float] = []
@@ -4940,8 +4949,54 @@ def _part_stiffness_quick(state: ConversionState,
                 if vol > 0.0:
                     hs.append(vol ** (1.0 / 3.0))
             if hs:
-                cache[pid] = e_mod / (3.0 * (1.0 - 2.0 * nu)) * _median(hs)
+                cache[pid] = bq[0] * _median(hs)
     return {p: cache.get(p) for p in pids}
+
+
+def _part_bulk(state: ConversionState, pid: int, e_mod: float,
+               nu: float) -> Optional[Tuple[float, str]]:
+    """Round 10, B4: ``(B, note)`` - the bulk modulus a solid part's contact
+    stiffness reads in the starter, PM(32) = PARMAT(1) of the EMITTED law
+    (``hm_read_mat.F90:1451-1464``; ``i7sti3.F:444`` and the secondary
+    node's ``sbulk3.F:99``), or None (no estimate). *note* names a law whose
+    B is not the isotropic E / (3 (1 - 2 nu)) ("" otherwise):
+
+    * /MAT/LAW38 (``*MAT_LOW_DENSITY_FOAM``): B = E (``hm_read_mat38.F:
+      347-348``); the record keeps no nu, so the isotropic formula gave E / 3
+      (MEASURED: the Stmin bracket [180, 220) holds the starter's 200 on a
+      100-modulus foam, against the old estimate's 66.67);
+    * /MAT/LAW50 (``*MAT_CRUSHABLE_FOAM``, ``*MAT_MODIFIED_HONEYCOMB``): B
+      = the largest of the six written moduli E11 E22 E33 G12 G23 G31
+      (``hm_read_mat50.F90:405`` / ``:416``) - E and E / (2 (1 + nu)) for
+      the crushable foam, the resolved uncompressed moduli for the
+      honeycomb;
+    * /MAT/LAW28 (``*MAT_HONEYCOMB``): B = the largest of the written
+      uncompressed moduli EAAU .. GCAU (``hm_read_mat28.F:185``);
+    * every other law, /MAT/LAW90 included (``hm_read_mat90.F:200-201`` C1
+      = E / 3 / (1 - 2 Nu) with the Nu 0 k2rad writes = the formula): E /
+      (3 (1 - 2 nu)) for 0 <= nu < 0.5, else None."""
+    from ..state import (MatCrushableFoam, MatHoneycomb, MatLowDensityFoam,
+                         MatModifiedHoneycomb)
+    mat = _part_material(state, pid)
+    if isinstance(mat, MatLowDensityFoam):
+        return e_mod, "B = E for /MAT/LAW38 (hm_read_mat38.F:347-348)"
+    if isinstance(mat, MatCrushableFoam):
+        g = (e_mod / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0
+             else e_mod / 2.0)
+        return (max(e_mod, g), "B = the largest /MAT/LAW50 modulus "
+                "(hm_read_mat50.F90:405/416)")
+    if isinstance(mat, MatModifiedHoneycomb):
+        mods = [float(m) for m in (getattr(mat, "moduli", None) or ())]
+        b = max(mods) if mods else 0.0
+        return ((b, "B = the largest /MAT/LAW50 modulus "
+                 "(hm_read_mat50.F90:405/416)") if b > 0.0 else None)
+    if isinstance(mat, MatHoneycomb):
+        b = max(mat.eaau, mat.ebbu, mat.eccu, mat.gabu, mat.gbcu, mat.gcau)
+        return ((b, "B = the largest uncompressed /MAT/LAW28 modulus "
+                 "(hm_read_mat28.F:185)") if b > 0.0 else None)
+    if not 0.0 <= nu < 0.5:
+        return None
+    return e_mod / (3.0 * (1.0 - 2.0 * nu)), ""
 
 
 def _part_stiffness(state: ConversionState,
@@ -4954,9 +5009,12 @@ def _part_stiffness(state: ConversionState,
     (``asstifi.F:52``, the mean over the node's shells), t the element
     thickness the /SHELL row carries. Solid part: main face
     ``Stfac x B x A^2 / V`` (``i7sti3.F:444``; a /TETRA10 face is its 4
-    sub-triangles), secondary node ``B x (2 V_node)^(1/3)``
-    (``asstifi.F:50``, V_node = the element volumes over their node counts,
-    ``sbulk3.F``). Each a median over the part's elements / surface nodes."""
+    sub-triangles; a tet's V the starter's 1.5 x its volume), secondary node
+    ``B x (2 V_node)^(1/3)`` (``asstifi.F:50``, V_node = the element
+    volumes over their node counts, ``sbulk3.F``; a /TETRA10's corner and
+    midside shares of V/4), B the emitted law's PM(32)
+    (:func:`_part_bulk`) - the three since round 10, B4. Each a median over
+    the part's elements / surface nodes."""
     pids = list(pids)
     cache = state.stmin_part_estimates
     want = [p for p in set(pids) if p not in cache]
@@ -4995,32 +5053,43 @@ def _part_stiffness(state: ConversionState,
                                         len(ts), len(ts), e_mod, t, 0.0, 0.0,
                                         0.0)
             continue
-        if not solids[pid] or not 0.0 <= nu < 0.5:
+        if not solids[pid]:
             continue
-        bulk = e_mod / (3.0 * (1.0 - 2.0 * nu))
+        # round 10, B4: B is the bulk modulus the starter reads, PM(32) =
+        # PARMAT(1) of the EMITTED law (hm_read_mat.F90:1451-1464)
+        bb = _part_bulk(state, pid, e_mod, nu)
+        if bb is None:
+            continue
+        bulk, bnote = bb
         # each element by its DISTINCT corners: a 4-node card, a TET10 (its
         # first 4) or a collapsed 8-node card with 4 distinct nodes is a tet
         # (the writer's /TETRA4), 8 distinct nodes a hex; pentahedra and
-        # pyramids are left out of the estimate
-        elems: List[Tuple[List[int], Tuple[Tuple[int, ...], ...], int]] = []
+        # pyramids are left out of the estimate. The 4th item is a TET10's
+        # six midside nodes (round 10, B4: they are secondary nodes too)
+        elems: List[Tuple[List[int], Tuple[Tuple[int, ...], ...], int,
+                          List[int]]] = []
         tet10 = True
+        any_tet = False
         for se in solids[pid]:
             nds = list(se.nodes)
             n_uniq = len(set(nds))
             if len(nds) == 10:
-                elems.append((nds[:4], _TET4_FACE_IDX, n_uniq))
+                elems.append((nds[:4], _TET4_FACE_IDX, n_uniq, nds[4:]))
+                any_tet = True
             elif n_uniq == 4:
                 elems.append((nds if len(nds) == 4 else
-                              _ordered_unique_nodes(nds), _TET4_FACE_IDX, 4))
+                              _ordered_unique_nodes(nds), _TET4_FACE_IDX, 4,
+                              []))
                 tet10 = False
+                any_tet = True
             elif len(nds) == 8 and n_uniq == 8:
-                elems.append((nds, _HEX_FACE_IDX, 8))
+                elems.append((nds, _HEX_FACE_IDX, 8, []))
                 tet10 = False
         # pass 1: the boundary faces (used by ONE element of the part) - only
         # keys here, so a large part pays for areas and volumes on its skin
         owner: Dict[Tuple[int, ...], Tuple[int, int]] = {}
         shared: Set[Tuple[int, ...]] = set()
-        for k, (corners, idx, _nu) in enumerate(elems):
+        for k, (corners, idx, _nu, _mids) in enumerate(elems):
             for fi, f in enumerate(idx):
                 key = tuple(sorted([corners[i] for i in f]))
                 if key in owner:
@@ -5041,23 +5110,44 @@ def _part_stiffness(state: ConversionState,
         for key, (k, fi) in owner.items():
             if key in shared:
                 continue
-            corners, idx, _nu = elems[k]
-            xyz = _node_xyz(nodes, [corners[i] for i in idx[fi]])
+            corners, idx, _nu, mids = elems[k]
+            face = [corners[i] for i in idx[fi]]
+            xyz = _node_xyz(nodes, face)
             vol = _vol(k)
             if not vol > 0.0 or xyz is None:
                 continue
+            # round 10, B4: the starter stores a tet as the degenerate brick
+            # (n1, n1, n2, n2, n4, n3, n3, n4) (hm_read_solid.F:278-284
+            # /TETRA4, :386-392 /TETRA10) and i7sti3.F:426-444 takes its
+            # one-point VOLINT volume, 1.5 x the tet's (MEASURED: Stmin
+            # brackets [10.3, 10.5) on /TETRA10, [160, 173) on /TETRA4)
+            vs = 1.5 * vol if idx is _TET4_FACE_IDX else vol
             area = _face_area(xyz)
             if area > 0.0:
-                a2v.append((area / sub) ** 2 / vol)
+                a2v.append((area / sub) ** 2 / vs)
                 surface.update(key)
-        # pass 2: the nodal volume (sbulk3.F: V / nodes per element) of the
-        # surface nodes, from every element that touches one
+                if mids:                       # the face's edge midsides
+                    i, j, m = idx[fi]
+                    for a, b in ((i, j), (j, m), (i, m)):
+                        surface.add(mids[TET10_EDGEMID[frozenset((a, b))]
+                                         - 4])
+        # pass 2: the nodal volume of the surface nodes, from every element
+        # that touches one: V / its nodes (sbulk3.F:93-104), but a /TETRA10
+        # splits VOLU = V/4 - the LAST of its 4 integration points' volumes
+        # (s10init3.F:233 inside the loop :225-240, read at :347) - as
+        # VOLU / 32 per corner and 7 VOLU / 48 per midside node
+        # (sbulk3.F:152-181, FAC = 3/14) (round 10, B4; MEASURED: the Stmin
+        # bracket [28.5, 29.5) holds the 28.89 of the softest corner node)
         vnode: Dict[int, float] = {}
-        for k, (corners, _idx, n_uniq) in enumerate(elems):
-            hit = [n for n in corners if n in surface]
-            if hit:
-                share = _vol(k) / n_uniq
-                for n in hit:
+        for k, (corners, _idx, n_uniq, mids) in enumerate(elems):
+            if mids:
+                volu = _vol(k) / 4.0
+                pairs = ([(n, volu / 32.0) for n in corners]
+                         + [(n, 7.0 * volu / 48.0) for n in mids])
+            else:
+                pairs = [(n, _vol(k) / n_uniq) for n in corners]
+            for n, share in pairs:
+                if n in surface:
                     vnode[n] = vnode.get(n, 0.0) + share
         l13 = [(2.0 * vnode[nid]) ** (1.0 / 3.0) for nid in surface
                if vnode.get(nid, 0.0) > 0.0]
@@ -5065,7 +5155,9 @@ def _part_stiffness(state: ConversionState,
             continue
         ma, ml = _median(a2v), _median(l13)
         cache[pid] = _PartStiffness("solid", bulk * ma, bulk * ml, len(a2v),
-                                    len(l13), e_mod, 0.0, bulk, ma, ml)
+                                    len(l13), e_mod, 0.0, bulk, ma, ml,
+                                    bnote, any_tet,
+                                    any(m for _c, _i, _n, m in elems))
     return {p: cache.get(p) for p in pids}
 
 
@@ -5093,13 +5185,24 @@ def _side_formula(est: List[_PartStiffness], main: bool,
         if x.kind == "shell":
             return k, (f"{lab} = {pre}E x t = {num}{g(x.e):g} x {g(x.t):g} = "
                        f"{g(k):g}"), src
+        # round 10, B4: the law's B, the tet's 1.5 V, the TET10 node split
+        bn = f"; {x.bnote}" if x.bnote else ""
         if main:
-            return k, (f"{lab} = Stfac x B x A^2/V = {num}{g(x.b):g} x "
+            vtxt = "A^2/(1.5 V)" if x.tet else "A^2/V"
+            tn = ("; V = the tet volume - the starter stores a tet as a "
+                  "degenerate brick (hm_read_solid.F:278-284 / :386-392) "
+                  "whose one-point volume is 1.5 V (i7sti3.F:426-444)"
+                  if x.tet else "")
+            return k, (f"{lab} = Stfac x B x {vtxt} = {num}{g(x.b):g} x "
                        f"{g(x.a2v):g} = {g(k):g} (the median of "
-                       f"{x.n_main} main faces)"), src
+                       f"{x.n_main} main faces{bn}{tn})"), src
+        tn = ("; a /TETRA10 gives V_node = VOLU/32 at a corner and 7 VOLU/48 "
+              "at a midside node, VOLU = V/4, its last integration point's "
+              "volume (s10init3.F:233, :347; sbulk3.F:152-181)"
+              if x.tet10_nodes else "")
         return k, (f"{lab} = B x (2 V_node)^(1/3) = {g(x.b):g} x "
                    f"{g(x.l13):g} = {g(k):g} (the median of {x.n_sec} "
-                   "surface nodes)"), src
+                   f"surface nodes{bn}{tn})"), src
     n = sum(x.n_main if main else x.n_sec for x in est)
     what = "main segments" if main else "secondary nodes"
     return k, (f"{lab} = {'Stfac x ' if main else ''}the median {what} "
