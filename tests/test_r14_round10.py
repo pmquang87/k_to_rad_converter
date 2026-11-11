@@ -2122,7 +2122,12 @@ class InitialVoidCopy(unittest.TestCase):
     (nt 4, README 9.1, ``C:/Users/pmqua/rcv_r10i_implA2_q_{base,2b}``): 1094
     -> 1109 cycles, KE RMS 28.17 -> 10.42 %, IE RMS 142.04 -> 161.11 %;
     its converted bytes ran the starter with 0 ERROR(S) and both
-    ``/INTER/TYPE18`` echoed."""
+    ``/INTER/TYPE18`` echoed. STARTER probes of this class's decks on the
+    branch bytes (nt 4, ``C:/Users/pmqua/rcv_r10i_implA2_pr_b8_{2b,pkg}``):
+    b8_bird(card=False, clis=True) 0 ERROR(S) / 0 WARNING(S), both
+    interfaces (90006, 90008) echoed; b8_bird(card=True, clis=True) - the
+    package - 0 ERROR(S) / 1 WARNING (100211: /ALE/GRID/FLOW-TRACKING read
+    under /BEGIN 2022)."""
 
     def test_the_copy_cells(self):
         res, st, _e = _convert(_t9.b8_bird(card=False, clis=True))
@@ -2240,6 +2245,22 @@ class InitialVoidCopy(unittest.TestCase):
                                ale_flow_tracking=True,
                                clis_pfac_stiffness=True)
         self.assertEqual(st2, st)
+
+    def test_the_void_copy_opt_out_turns_the_package_off(self):
+        """--no-initial-void-copy on the package deck: no copy, so no
+        package - the FLOW-TRACKING card is not written and the skip
+        sentence names the opt-out and its measured reason (FLOW-TRACKING
+        with the PFAC stiffness but without the copy: KE +1248.28 % on
+        bird_B), never that the deck has no void (the D-6 mutation pass)."""
+        res, st, _e = _convert(_t9.b8_bird(card=True, clis=True),
+                               initial_void_copy=False)
+        self.assertNotIn("/ALE/GRID/FLOW-TRACKING", st)
+        self.assertEqual(_tp._sha(st), _A10_PKG_AI_SHA)
+        self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_GROUP 1 "
+                             "(PRTYPE 4) is skipped", "and here "
+                             "--no-initial-void-copy turns the package off",
+                             "+1248.28 %"))
+        self.assertFalse(_has(res.warnings, "and the deck has none"))
 
     def test_a_void_without_clis_is_untouched(self):
         """bird-el's class (a void, no CLIS): bytes AND warnings = the

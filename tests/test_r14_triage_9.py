@@ -4505,7 +4505,9 @@ class AleFlowTracking(unittest.TestCase):
         drives the energy error -46.5 -> +99.9 %)."""
         deck = b8_bird(card=False, clis=True)
         r_on, s_on, e_on = _convert(deck, ale_flow_tracking=True)
-        r_off, s_off, e_off = _convert(deck)
+        # R14 round 10 (A10 / D-6): the flag is ON by default, so the
+        # flag-off arm is the explicit --no-ale-flow-tracking
+        r_off, s_off, e_off = _convert(deck, ale_flow_tracking=False)
         self.assertEqual((s_on, e_on), (s_off, e_off))
         self.assertEqual(r_on.warnings, r_off.warnings)
         self.assertNotIn("/ALE/GRID", s_on)

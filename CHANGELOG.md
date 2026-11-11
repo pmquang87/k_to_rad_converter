@@ -57,7 +57,18 @@ Prior history (before this changelog was introduced) is summarized in the
   contacts).** One commit per item in the order A7, A9, A8, A10, each
   measured on the bytes of part A-i and of the items before it; the base of
   every byte comparison is the part-A-i head merged with master `b17c298`
-  (`e512676`).
+  (`e512676`). The sweep of all 356 R14 roster keys (units Mg mm s; the base
+  `e512676` against the A10 / D-6 head `6f1a0c4`, every key converted on
+  both, 0 errors): part A-ii's default bytes move 9 deck keys / 8 emitted
+  models, every one `_0000.rad` only - A7 2 / 2 (stagnation_A / _B), A8 4 / 4
+  (the 12 Stmax cells), A10 3 / 2 (quadrature_B / _C, one model, and bird_B,
+  the package) - and its sentences 24 keys / 21 models in all: A7 10 / 8
+  (text only on 8 / 6: the refused vacuums of cylinder_impact_A / _B and
+  ale_wavehitcol, and the corrected `*MAT_VACUUM` and AMMG statements on
+  2Dlag and underwater_C / D / E / F), A8 4 / 4, A9 8 / 8, A10 8 / 7 (the
+  CLIS sentence's PFAC clause, the void sentences, the FLOW-TRACKING note);
+  every changed sentence and every byte mover attributed to its item, 0
+  unattributed.
   - **A7 - `*MAT_VACUUM` in an AMMG deck -> a LAW6 light fluid, and the ALE
     velocity inlet -> `/EBCS/INLET/VP`, as a pair (both default ON;
     `--no-vacuum-light-fluid` / `--no-ale-inflow-ebcs`).** A LAW0
