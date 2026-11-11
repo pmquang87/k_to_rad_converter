@@ -11403,7 +11403,13 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     # the card is written
     held: Optional[_DampSchedule] = None
     if g is not None and curve_mode:
-        sch = _damping_schedule(state, g.lcid)
+        # K-20 minor 1 (round 10, B8): the steepness bound judges alpha_i =
+        # D(t) x ST_i, so a non-zero ST row scales it by its largest |ST_i|
+        gst = (g.stx, g.sty, g.stz, g.srx, g.sry, g.srz)
+        gstb = (max(abs(s) for s in gst) if any(s != 0.0 for s in gst)
+                else 1.0)
+        sch = _damping_schedule(state, g.lcid, gstb,
+                                "max|ST_i| x " if gstb != 1.0 else "")
         if sch is None:
             state.warn(
                 f"*DAMPING_GLOBAL: load curve {g.lcid} is not defined in this "
@@ -11453,7 +11459,7 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
             why.append(
                 f"*DAMPING_GLOBAL LCID={g.lcid}: " + (
                     f"curve {g.lcid} is 0 over the whole run [0, "
-                    f"ENDTIM={sch.endtim:g}] (a curve is 0 after its last "
+                    f"{_endtim_txt(sch.endtim)}] (a curve is 0 after its last "
                     "abscissa, and a level that opens at or after ENDTIM "
                     "never acts)" if sch is not None else
                     f"curve {g.lcid} is not defined (reported above)"))
@@ -11789,6 +11795,15 @@ def _damp_endtim(state: ConversionState) -> float:
     return ct.endtim if ct is not None and ct.endtim > 0.0 else math.inf
 
 
+def _endtim_txt(endtim: float) -> str:
+    """K-20 minor 3 (round 10, B8): how the damping texts name the run's
+    end - ``ENDTIM=<value>``, or, on a deck that states no ENDTIM > 0
+    (:func:`_damp_endtim` +inf, the engine deck's ``/RUN`` 1.0), "the end of
+    the run (no ENDTIM > 0 stated)" instead of "ENDTIM=inf"."""
+    return (f"ENDTIM={endtim:g}" if endtim < math.inf
+            else "the end of the run (no ENDTIM > 0 stated)")
+
+
 def _damping_curve_points(curve: Curve) -> Tuple[List[Tuple[float, float]],
                                                  bool]:
     """The curve as LS-DYNA evaluates it in time, and whether it differs
@@ -11811,7 +11826,8 @@ def _damping_curve_points(curve: Curve) -> Tuple[List[Tuple[float, float]],
     return pts, False
 
 
-def _damping_steps(pts: List[Tuple[float, float]], scale: float = 1.0
+def _damping_steps(pts: List[Tuple[float, float]], scale: float = 1.0,
+                   scale_txt: str = ""
                    ) -> Tuple[Optional[List[Tuple[float, float, float]]], str]:
     """The piecewise-constant reading of a damping curve:
     ``[(level, t_on, t_off)]``, the first from -inf, or ``(None, why)`` when
@@ -11831,13 +11847,16 @@ def _damping_steps(pts: List[Tuple[float, float]], scale: float = 1.0
 
     Between two plateaus lies an EDGE, one segment or several through single
     points. Every edge must be steep - (largest - smallest ordinate) x
-    duration x |*scale*| (SF: the bound is about alpha) at or below
+    duration x |*scale*| (SF x the largest |ST_i| of a per-direction card
+    since round 10, B8: the bound is about alpha_i) at or below
     ``_DAMP_STEEP_DOSE`` for one segment, ``_DAMP_STEEP_DOSE_MULTI`` through
     intermediate points - and change the level - a bump that returns to its
     own level has no step to stand for it - and its step sits at the edge's
     midpoint, where a straight ramp's damping integral is kept exactly. A
     reversed abscissa has no piecewise reading either: LS-DYNA evaluates
-    such a curve with a forward-walking search (``_monotonic_abscissae``)."""
+    such a curve with a forward-walking search (``_monotonic_abscissae``).
+    *scale_txt* names *scale* in the reason ("" = "SF x " when it is not
+    1)."""
     for (a, _va), (b, _vb) in zip(pts, pts[1:]):
         if b < a:
             return None, f"its abscissa reverses at t {b:g}, after t {a:g}"
@@ -11853,7 +11872,7 @@ def _damping_steps(pts: List[Tuple[float, float]], scale: float = 1.0
              if k in (0, len(runs) - 1) or r[1] > r[0]]
     steps: List[Tuple[float, float, float]] = []
     t_on = -math.inf
-    sf_txt = "SF x " if scale != 1.0 else ""
+    sf_txt = scale_txt or ("SF x " if scale != 1.0 else "")
     for (_p0, p1), (q0, _q1) in zip(plats, plats[1:]):
         t1, t2 = pts[p1][0], pts[q0][0]
         ords = [o for _a, o in pts[p1:q0 + 1]]
@@ -11933,11 +11952,15 @@ def _damping_smooth_points(state: ConversionState, lcid: int, curve: Curve,
 
 
 def _damping_schedule(state: ConversionState, lcid: int,
-                      scale: float = 1.0) -> Optional[_DampSchedule]:
+                      scale: float = 1.0,
+                      scale_txt: str = "") -> Optional[_DampSchedule]:
     """How curve *lcid* damps the run [0, ENDTIM] - None when it is not
-    defined (the caller words that warning). *scale* is the SF that turns
-    the curve into alpha (*DAMPING_PART_MASS; 1 on *DAMPING_GLOBAL): the
-    steepness of an edge is judged on alpha.
+    defined (the caller words that warning). *scale* is the factor that
+    turns the curve into the largest alpha_i (*DAMPING_PART_MASS: |SF|, x
+    the largest |ST_i| on a FLAG-1 card with a non-zero ST row;
+    *DAMPING_GLOBAL: 1, or the largest |ST_i| of a non-zero ST row - round
+    10, B8): the steepness of an edge is judged on alpha_i. *scale_txt*
+    names it in the reason text.
 
     A piecewise-constant curve (:func:`_damping_steps`) gives its non-zero
     levels as windows clipped to the run: a window that starts at or after
@@ -11967,7 +11990,7 @@ def _damping_schedule(state: ConversionState, lcid: int,
         head4a = False
     else:
         pts, head4a = _damping_curve_points(curve)
-    steps, why = _damping_steps(pts, scale)
+    steps, why = _damping_steps(pts, scale, scale_txt)
     if steps is not None:
         wins = [(lv, max(0.0, t_on),
                  _DAMP_NO_STOP if t_off >= endtim else t_off)
@@ -12114,21 +12137,31 @@ def _warn_damp_schedule(state: ConversionState, sch: _DampSchedule,
     'SF = 1.5')."""
     if sch.kind == "windows":
         n = len(sch.windows)
+
+        def _alpha(a: float) -> str:
+            # K-20 minor 1 (round 10, B8): a per-direction card writes
+            # alpha_i = alpha x ST_i (x y z xx yy zz)
+            if dof is None:
+                return f"alpha={a:.6G}"
+            return "alpha_i=" + " / ".join(f"{a * s:.6G}" for s in dof)
+
         spans = "; ".join(
-            f"alpha={scale * lv:.6G} for t {t0:.6G}.."
+            f"{_alpha(scale * lv)} for t {t0:.6G}.."
             + ("end" if t1 >= _DAMP_NO_STOP else f"{t1:.6G}")
             for lv, t0, t1 in sch.windows)
         stop = ""
         if sch.ends_at is not None:
             xn, lv = sch.ends_at
             stop = (f" Curve {sch.lcid} ends at t {xn:g}, before "
-                    f"ENDTIM={sch.endtim:g}, so its last level "
-                    f"(alpha={scale * lv:.6G}) stops there; extend the curve "
+                    f"{_endtim_txt(sch.endtim)}, so its last level "
+                    f"({_alpha(scale * lv)}) stops there; extend the curve "
                     "to ENDTIM if that level is meant to hold.")
+        head = (f"alpha = {scale_txt}" if dof is None else
+                f"alpha_i = {scale_txt} x ST_i in the order x y z xx yy zz")
         state.warn(
             f"{what}: load curve {sch.lcid} is piecewise constant, so it is "
             f"written in TIME as {n} alpha-only /DAMP{'s' if n > 1 else ''} "
-            f"on one /GRNOD (alpha = {scale_txt}): {spans}. Each step sits "
+            f"on one /GRNOD ({head}): {spans}. Each step sits "
             "at its edge's midpoint, every edge being steep ((largest - "
             "smallest alpha across it) x duration <= "
             f"{_DAMP_STEEP_DOSE:g} for a straight edge, "
@@ -12137,7 +12170,7 @@ def _warn_damp_schedule(state: ConversionState, sch: _DampSchedule,
             "gives); a curve is 0 after its last abscissa (Vol I R17 "
             "*DEFINE_CURVE Remark 5's off-scale zero, stated for applied "
             "loads - the zero tail a /DAMP/FUNCT copy gets too), and the "
-            f"windows are clipped to [0, ENDTIM={sch.endtim:g}] (Tstop 1E30 "
+            f"windows are clipped to [0, {_endtim_txt(sch.endtim)}] (Tstop 1E30 "
             "= to the end of the run)." + stop + " " + opt_out)
         return
     coeff = ("all 1" if dof is None
@@ -12171,7 +12204,7 @@ def _warn_damp_held_tail(state: ConversionState, sch: _DampSchedule,
         return
     state.warn(
         f"{what}: load curve {sch.lcid} ends at t {sch.held_from:g}, before "
-        f"ENDTIM={sch.endtim:g}, on the level {sch.value:g}, which is HELD "
+        f"{_endtim_txt(sch.endtim)}, on the level {sch.value:g}, which is HELD "
         "to the end of the run (Tstop 1E30): a FLAT curve keeps the reading "
         "k2rad has always given it - the old first-ordinate card damped the "
         "whole run with its level, as OpenRadioss's /FUNCT extrapolation of "
@@ -12253,8 +12286,19 @@ def _make_damping_part_mass(state: ConversionState,
         # written.
         sch: Optional[_DampSchedule] = None
         held: Optional[_DampSchedule] = None
+        # K-20 minor 1 (round 10, B8): the per-direction factors are decided
+        # BEFORE the schedule - FLAG 1 with a non-zero ST row writes alpha_i
+        # = SF x curve x ST_i - so the steepness bound judges the largest
+        # alpha_i, |SF| x max|ST_i| (an all-zero ST row stays uniform, as
+        # the per_dof rule below reads it)
+        st_row = (dm.stx, dm.sty, dm.stz, dm.srx, dm.sry, dm.srz)
+        st_dof = dm.flag == 1 and any(s != 0.0 for s in st_row)
+        st_max = max(abs(s) for s in st_row) if st_dof else 1.0
+        bound_scale = abs(dm.sf) * st_max if st_max != 1.0 else dm.sf
+        bound_txt = ("|SF| x max|ST_i| x " if st_max != 1.0
+                     and bound_scale != 1.0 else "")
         if state.options.damping_curve_window:
-            sch = _damping_schedule(state, dm.lcid, dm.sf)
+            sch = _damping_schedule(state, dm.lcid, bound_scale, bound_txt)
             if sch is None:
                 _warn_damping_curve_missing(state, dm.lcid, what)
                 continue
@@ -12266,7 +12310,7 @@ def _make_damping_part_mass(state: ConversionState,
             if sch.kind == "zero":
                 state.warn(
                     f"{what}: load curve {dm.lcid} is 0 over the whole run "
-                    f"[0, ENDTIM={sch.endtim:g}] (a curve is 0 after its "
+                    f"[0, {_endtim_txt(sch.endtim)}] (a curve is 0 after its "
                     "last abscissa, and a level that opens at or after "
                     "ENDTIM never acts), so the card damps nothing — /DAMP "
                     "not emitted for it.")

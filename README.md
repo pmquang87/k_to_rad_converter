@@ -6670,7 +6670,8 @@ batch, K-20, default ON; `--no-damping-curve-window` writes the old single
 `/DAMP` at the curve's first ordinate). A piecewise-constant curve - its
 points as scaled, Remark 4a's OFFA head included, every edge between two
 levels steep, i.e. (largest - smallest alpha across it) x duration, alpha =
-SF x curve, at most 0.04 for a straight edge (stepped at its midpoint it
+SF x curve (on alpha_i: |SF| x max|ST_i| on a FLAG 1 card, max|ST_i| of a
+`*DAMPING_GLOBAL` ST row - round 10), at most 0.04 for a straight edge (stepped at its midpoint it
 keeps the damping integral after the edge and stays within 1 % of KE inside
 it) and at most 0.005 for an edge through intermediate points - becomes one
 alpha-only `/DAMP` per non-zero level with its Tstart / Tstop on the card's
