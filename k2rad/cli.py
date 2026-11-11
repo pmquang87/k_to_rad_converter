@@ -1221,15 +1221,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ale-flow-tracking",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Write *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the grid moving with "
-             "the ALE material's mass-weighted velocity) as "
-             "/ALE/GRID/FLOW-TRACKING (I_def -1 for BCEXP 7, I_rot +1 / -1 for "
-             "BCROT 0 / 7) in the starter deck; refused by name for any other "
-             "reference-system card. OFF by default: MEASURED on bird_B (nt "
-             "4) the IE END +1484.66 -> +17.00 %% and the IE RMS 1189.95 -> "
-             "27.74 %%, but the deck KE RMS 253.09 -> 749.89 %% (the void is "
-             "converted at full density).",
+        default=True,
+        help="The round-10 ALE package (ON by default, R14 round 10, A10): "
+             "on a deck with ONE accepted *ALE_REFERENCE_SYSTEM_GROUP PRTYPE "
+             "4 card (PRID 0, ICR 0, BCEXP 7, BCROT 0 / 7, its set naming "
+             "every Iale part, BCTRAN held by the ALE nodes' own /BCS) and an "
+             "*INITIAL_VOID part in the fluid set of a "
+             "*CONSTRAINED_LAGRANGE_IN_SOLID coupling: "
+             "/ALE/GRID/FLOW-TRACKING (I_def -1, I_rot +1 / -1; the grid "
+             "moving with the ALE material's mass-weighted velocity) + the "
+             "void copy at 1e-3 x RO + Stfval = PFAC x m_node / dt0^2 on the "
+             "fluid's /INTER/TYPE18 (x 1e-3 on the void's). MEASURED on "
+             "bird_B (nt 4, n 600): 2935 -> 2976 cycles, END IE +1484.66 -> "
+             "+8.15 %%, END KE +25.88 -> -14.44 %%, RMS IE 1189.95 -> 6.71 "
+             "%%, KE 253.09 -> 3.37 %% at Stfval 133.1 (a 0.2 %% change of it "
+             "moved END IE by 0.37 point). The card alone (round 9: KE RMS "
+             "253.09 -> 749.89 %%) is no longer written; any other "
+             "reference-system card is refused by name. "
+             "--no-ale-flow-tracking writes none of the three.",
     )
     parser.add_argument(
         "--tgmult-imptemp",
@@ -2290,8 +2299,9 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="An *INITIAL_VOID part in the fluid set of a "
-             "*CONSTRAINED_LAGRANGE_IN_SOLID coupling (no "
-             "*ALE_REFERENCE_SYSTEM card) is written as a LAW6 copy of its "
+             "*CONSTRAINED_LAGRANGE_IN_SOLID coupling (on an "
+             "*ALE_REFERENCE_SYSTEM deck only inside the --ale-flow-tracking "
+             "package) is written as a LAW6 copy of its "
              "fluid at 1e-3 x RO (its /EOS RHO_0 = RO) on its own "
              "/GRBRIC/PART + /INTER/TYPE18 at 1e-3 x the fluid's Stfval. f = "
              "1e-3 is a numerical floor of this converter, not LS-DYNA's "
@@ -2307,7 +2317,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Opt-in: write Stfval = PFAC x m_node / dt0^2 on every "
              "*CONSTRAINED_LAGRANGE_IN_SOLID /INTER/TYPE18 instead of the "
-             "unit stiffness (m_node = the median lumped nodal mass of the "
+             "unit stiffness (the --ale-flow-tracking package writes it on "
+             "its deck by default; m_node = the median lumped nodal mass of "
+             "the "
              "coupled fluid; dt0 = Tsca x the starter's smallest element "
              "step, estimated from the deck); a void copy's or an A7 "
              "light-fluid vacuum's own interface takes it x its density "

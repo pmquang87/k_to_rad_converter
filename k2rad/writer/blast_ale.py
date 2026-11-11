@@ -702,8 +702,8 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
         stiff = stiff or stf.stfval is not None
     if lines:
         what = ("a unit interface stiffness (Stfval=1)" if not stiff else
-                "the --clis-pfac-stiffness interface stiffness (Stfval = "
-                "PFAC x m_node / dt0^2, its own note)")
+                f"the PFAC interface stiffness of {_clis_2a_source(state)} "
+                "(Stfval = PFAC x m_node / dt0^2, its own note)")
         if split:
             what += (" - x 1e-3 on a void copy's own interface (round 10, "
                      "A10 2b)")
@@ -782,8 +782,9 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int,
     else:
         dflt = " (0 = the default 0.1)" if p == 0.0 else ""
         if stf.written:
-            tail = (f"is read by --clis-pfac-stiffness, which writes Stfval "
-                    f"{stf.stfval:g} here (see that interface's note).")
+            tail = (f"is read by {_clis_2a_source(state)}, which writes "
+                    f"Stfval {stf.stfval:g} here (see that interface's "
+                    "note).")
         elif stf.stfval is not None or stf.would is not None:
             tail = ("is read only by the opt-in --clis-pfac-stiffness, which "
                     f"would write Stfval {stf.would:g} here (PFAC x m_node / "
@@ -799,7 +800,8 @@ def _warn_clis_dropped_cells(state: ConversionState, cls, inter_id: int,
         "ISTIFF = 1, 'constant user value' - hm_read_inter_type18.F:131 and "
         ":158-159)" if not stf.written else
         "The emitted interface uses a CONSTANT stiffness (Stfval = "
-        f"{stf.stfval:g} from --clis-pfac-stiffness, Vref = 0.0, Iauto left "
+        f"{stf.stfval:g} from {_clis_2a_source(state)}, Vref = 0.0, Iauto "
+        "left "
         "blank so the starter takes ISTIFF = 1, 'constant user value' - "
         "hm_read_inter_type18.F:131 and :158-159)")
     state.warn(
@@ -1074,27 +1076,68 @@ def _resolve_initial_void_copy(state: ConversionState
     return plans
 
 
+#: what the void copy does WITHOUT the FLOW-TRACKING grid on an
+#: *ALE_REFERENCE_SYSTEM_* deck (the round-10 census, g4n bDV1S100D3)
+_A10_STALL = ("without the FLOW-TRACKING grid the void copy stalls the "
+              "coupling (bird_B: the void interface's sort step 3.787e-18 s "
+              "at t 2.648e-4, a time-out at 44 % of t_end)")
+
+
 def _void_copy_ars_refusal(state: ConversionState) -> str:
     """The void copy's ``*ALE_REFERENCE_SYSTEM_*`` refusal ("" = none). On
-    bird_B the void copy WITHOUT the FLOW-TRACKING grid stalls the coupling
-    (the round-10 census, g4n bDV1S100D3: the void interface's sort step
-    3.787e-18 s at t 2.648e-4, a time-out at 44 % of t_end); the measured
-    package is the void copy + FLOW-TRACKING + the PFAC stiffness, written
-    when ``--ale-flow-tracking`` and ``--clis-pfac-stiffness`` are both
-    given and the FLOW-TRACKING card is accepted (D-A10-4)."""
+    such a deck the void copy is written only inside the measured package
+    (FLOW-TRACKING + the void copy + the PFAC stiffness, the default since
+    R14 round 10, A10 / D-6): the B8 screen accepts the card and the PFAC
+    stiffness can apply to every CLIS card holding a void
+    (``_package_stiffness_refusal``)."""
     if not (state.ale_reference_groups or state.ale_reference_others):
         return ""
-    if (state.options.ale_flow_tracking
-            and state.options.clis_pfac_stiffness
-            and _resolve_ale_flow_tracking(state).card is not None):
-        return ""
-    return ("the deck states an *ALE_REFERENCE_SYSTEM_* card, and there the "
-            "void copy is written only inside the measured package of "
-            "FLOW-TRACKING + the void copy + the PFAC stiffness "
-            "(--ale-flow-tracking --clis-pfac-stiffness, both opt-in): "
-            "without the FLOW-TRACKING grid it stalls the coupling (bird_B: "
-            "the void interface's sort step 3.787e-18 s at t 2.648e-4, a "
-            "time-out at 44 % of t_end)")
+    if not state.options.ale_flow_tracking:
+        return ("the deck states an *ALE_REFERENCE_SYSTEM_* card and "
+                "--no-ale-flow-tracking turns the round-10 package off; "
+                + _A10_STALL)
+    screen = _aft_screen(state)
+    if screen.card is None:
+        return ("the deck's *ALE_REFERENCE_SYSTEM_* card is not converted ("
+                + "; ".join(screen.reasons) + "); " + _A10_STALL)
+    why = _package_stiffness_refusal(state)
+    if why:
+        return ("the deck states an *ALE_REFERENCE_SYSTEM_* card and the "
+                "round-10 package needs the PFAC stiffness, which cannot "
+                f"apply here ({why}); " + _A10_STALL)
+    return ""
+
+
+def _package_stiffness_refusal(state: ConversionState) -> str:
+    """Why the PFAC stiffness of the package cannot apply on this deck ("" =
+    it can): a negative PFAC on a CLIS card whose fluid set holds an
+    *INITIAL_VOID part, a LAW0 ``*MAT_VACUUM``, no first-step estimate, or
+    a coupling that would keep no fluid brick mass. Called while the void
+    copy is being decided, so it reads the CLIS cards and the void records
+    directly, never the plan."""
+    law0 = _clis_law0_vacuum(state)
+    if law0:
+        return f"the deck's *MAT_VACUUM part {law0} is a LAW0 /MAT/VOID"
+    dt0, why, _dte, _tsca = clis_dt0_estimate(state)
+    if dt0 is None:
+        return f"no first-step estimate: {why}"
+    voids: Set[int] = set()
+    for sid, is_set in state.initial_void_parts:
+        voids.update(_part_pids(state, sid, not is_set))
+    for cls in state.lagrange_in_solid:
+        mpids = _part_pids(state, cls.master, cls.mstyp == 1)
+        held = voids & set(mpids)
+        if not held:
+            continue
+        if cls.pfac_stated < 0.0:
+            return (f"PFAC {cls.pfac_stated:g} of the coupling of master "
+                    f"{cls.master} is a load-curve id")
+        light = _clis_light_fluid_pids(state, mpids)
+        fluid = {q for q in mpids if q not in held and q not in light}
+        if _clis_fluid_node_mass(state, fluid)[0] is None:
+            return (f"the coupling of master {cls.master} keeps no fluid "
+                    "brick mass")
+    return ""
 
 
 def _void_copy_refusal_clause(plan: VoidCopyPlan) -> str:
@@ -1154,8 +1197,19 @@ class _ClisStiffness(NamedTuple):
 
 
 def _clis_2a_active(state: ConversionState) -> bool:
-    """2a writes its Stfval: the opt-in ``--clis-pfac-stiffness``."""
-    return bool(state.options.clis_pfac_stiffness)
+    """2a writes its Stfval: the opt-in ``--clis-pfac-stiffness``, or the
+    round-10 package (an accepted FLOW-TRACKING card, which since D-6 is
+    written only together with the void copy and the PFAC stiffness)."""
+    return bool(state.options.clis_pfac_stiffness
+                or _resolve_ale_flow_tracking(state).card is not None)
+
+
+def _clis_2a_source(state: ConversionState) -> str:
+    """Who writes the PFAC stiffness: the opt-in, or the round-10 ALE
+    package (its third part, the default on its deck)."""
+    if state.options.clis_pfac_stiffness:
+        return "--clis-pfac-stiffness"
+    return "the round-10 ALE package (--ale-flow-tracking)"
 
 
 def _clis_light_fluid_pids(state: ConversionState,
@@ -1260,7 +1314,8 @@ def _warn_clis_pfac_stiffness(state: ConversionState, cls, inter_id: int,
     if not _clis_2a_active(state):
         return
     if not stf.written:
-        state.warn(f"--clis-pfac-stiffness: /INTER/TYPE18/{inter_id} keeps "
+        state.warn(f"{_clis_2a_source(state)}: /INTER/TYPE18/{inter_id} "
+                   "keeps "
                    f"Stfval 1 - {stf.refusal}.")
         return
     if side:
@@ -1273,8 +1328,8 @@ def _warn_clis_pfac_stiffness(state: ConversionState, cls, inter_id: int,
         voids = "; no void or light-fluid part on this card"
     state.warn(
         f"*CONSTRAINED_LAGRANGE_IN_SOLID (slave {cls.slave} / master "
-        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: --clis-pfac-stiffness "
-        "writes Stfval = PFAC x m_node / dt0^2 = "
+        f"{cls.master}) -> /INTER/TYPE18/{inter_id}: "
+        f"{_clis_2a_source(state)} writes Stfval = PFAC x m_node / dt0^2 = "
         f"{stf.pfac:g} x {stf.m_node:g} / ({stf.dt0:g})^2 = {stf.stfval:g} "
         "(m_node = the median lumped nodal mass of the coupled fluid over "
         f"its {stf.n_node} nodes, dt0 = this converter's estimate of the "
@@ -1282,7 +1337,9 @@ def _warn_clis_pfac_stiffness(state: ConversionState, cls, inter_id: int,
         f"step {stf.dt_el:g}) instead of the unit stiffness{voids}. "
         "LS-DYNA's coupling stiffness is PFAC x an estimated critical "
         "stiffness on the coupled mass (Vol I R17 p.10-117 / 10-122). "
-        + _A10_2A_MEASURED)
+        + (_A10_2A_MEASURED if state.options.clis_pfac_stiffness else
+           "It is the package's third part; the package's measurement is "
+           "the FLOW-TRACKING note's."))
 
 
 #: the six hexahedron faces sdlen3.F hands to slen.F
@@ -2401,16 +2458,11 @@ def _make_control_ale_notes(state: ConversionState) -> List[str]:
 _AFT_DIRS = {0: "", 1: "x", 2: "y", 3: "z", 4: "xy", 5: "yz", 6: "zx",
              7: "xyz"}
 
-#: the bird_B measurement every B8 sentence carries (cG1 bB / bFT, nt 4)
-_AFT_MEASURED = (
-    "MEASURED on ale/bird/bird-b/bird_B (nt 4, 600 LS times to t "
-    "5.9992e-4): END IE +1484.66 -> +17.00 %, IE RMS 1189.95 -> 27.74 %, the "
-    "energy error's worst -20.4 -> -8.7 %, and the plate takes load for the "
-    "first time - but too much (IE / KE +513.69 / +130.43 % at t 5.9916e-4) "
-    "- while the deck KE gets WORSE (END +25.88 -> +1542.16 %, RMS 253.09 -> "
-    "749.89 %; plate KE RMS 71.60 -> 93.93 %): the void is still converted "
-    "at full density (cycle-0 KE 101.5 against LS-DYNA's 11.737), so the "
-    "grid motion carries 9x the bird's mass.")
+#: FLOW-TRACKING ALONE on bird_B (round 9's opt-in, retired into the
+#: round-10 package): the figures the package sentences name
+_AFT_ALONE = ("on bird_B it fixed the IE history (END +1484.66 -> +17.00 %) "
+              "but worsened the deck KE through the full-density void (RMS "
+              "253.09 -> 749.89 %).")
 
 
 def _ale_part_ids(state: ConversionState) -> List[int]:
@@ -2661,11 +2713,53 @@ def _resolve_ale_flow_tracking(state: ConversionState) -> AleFlowTrackingPlan:
     direction BCTRAN constrains already held on every ALE node by a global
     ``/BCS`` (FLOW-TRACKING has no translation constraint). Otherwise
     ``reasons`` lists every failing class and nothing is written. Without the
-    flag (or without a reference-system card) the plan is empty."""
+    flag (or without a reference-system card) the plan is empty.
+
+    R14 round 10, A10 (D-6; the findings' 6.3a): the flag is ON by default
+    and keyed on the PACKAGE - an accepted card is written only together
+    with the void copy of an *INITIAL_VOID part in a CLIS fluid set and the
+    PFAC stiffness (``_aft_package_refusal``); otherwise ``package`` names
+    the failing condition and nothing is written (FLOW-TRACKING alone, round
+    9's opt-in, measured the deck KE worse on bird_B and is retired)."""
     if state.ale_flow_tracking_plan is not None:
         return state.ale_flow_tracking_plan
-    plan = AleFlowTrackingPlan()
+    plan = _aft_screen(state)
     state.ale_flow_tracking_plan = plan
+    if plan.card is not None:
+        why = _aft_package_refusal(state)
+        if why:
+            plan.card = None
+            plan.package = why
+    return plan
+
+
+def _aft_package_refusal(state: ConversionState) -> str:
+    """Why the round-10 package does not apply to a deck whose card the B8
+    screen accepted ("" = it applies): it needs ``--initial-void-copy`` and
+    an *INITIAL_VOID part in a CLIS fluid set that the void copy writes
+    (``_resolve_initial_void_copy``, whose *ALE_REFERENCE_SYSTEM_* refusal
+    ``_void_copy_ars_refusal`` lifts for the package and keeps with the
+    reason when the PFAC stiffness cannot apply)."""
+    if not state.options.initial_void_copy:
+        return ("--no-initial-void-copy turns the package off (FLOW-TRACKING "
+                "with the PFAC stiffness but without the void copy measured "
+                "the deck KE +1248.28 % on bird_B)")
+    plans = _resolve_initial_void_copy(state)
+    if any(not pl.refusal for pl in plans.values()):
+        return ""
+    if not plans:
+        return ("it needs an *INITIAL_VOID part in the fluid set of a "
+                "*CONSTRAINED_LAGRANGE_IN_SOLID coupling, and the deck has "
+                "none")
+    return ("the void copy is refused here (" + "; ".join(
+        f"part {p}: {pl.refusal}" for p, pl in sorted(plans.items())) + ")")
+
+
+def _aft_screen(state: ConversionState) -> AleFlowTrackingPlan:
+    """The B8 screen of ``_resolve_ale_flow_tracking`` (round 9) alone: no
+    memo and no package check, so the void copy can ask it before the
+    FLOW-TRACKING decision is made (R14 round 10, A10)."""
+    plan = AleFlowTrackingPlan()
     groups = state.ale_reference_groups
     if not state.options.ale_flow_tracking or not (
             groups or state.ale_reference_others):
@@ -2744,21 +2838,15 @@ _A10_PKG_MEASURED = (
 
 
 def _aft_tail(state: ConversionState) -> str:
-    """The measured clause of the FLOW-TRACKING sentence: the round-10
-    package's when the void copy is written on this deck (R14 round 10,
-    A10), else round 9's FT-alone figures."""
-    plans = state.initial_void_copy_plan or {}
-    if any(not pl.refusal for pl in plans.values()):
-        return ("With the void copy (round 10, A10 2b: the *INITIAL_VOID part "
-                "a LAW6 copy at 1e-3 x RO on its own /INTER/TYPE18) and the "
-                "PFAC stiffness (A10 2a) it is the measured package. "
-                + _A10_PKG_MEASURED)
-    return (_AFT_MEASURED + " It is opt-in because that KE regression makes "
-            "the row MIXED; the light-void coupling that removes it is the "
-            "round-10 package, --ale-flow-tracking together with "
-            "--clis-pfac-stiffness (the void copy at 1e-3 x RO + the PFAC "
-            "stiffness, R14 round 10, A10; a 1e-6 void instead dies at t "
-            "1.043e-4 with NEGATIVE RHO).")
+    """The measured clause of the FLOW-TRACKING sentence (R14 round 10,
+    A10): the card is written only inside the package, which is the
+    default."""
+    return ("With the void copy (round 10, A10 2b: the *INITIAL_VOID part a "
+            "LAW6 copy at 1e-3 x RO on its own /INTER/TYPE18) and the PFAC "
+            "stiffness (A10 2a) it is the measured package, ON by default "
+            "since R14 round 10 (--no-ale-flow-tracking writes none of the "
+            "three). " + _A10_PKG_MEASURED + " FLOW-TRACKING alone (round 9) "
+            "is no longer written: " + _AFT_ALONE)
 
 
 def ale_flow_tracking_lines(state: ConversionState) -> List[str]:
@@ -2794,23 +2882,35 @@ def ale_flow_tracking_lines(state: ConversionState) -> List[str]:
 
 def _make_ale_reference_notes(state: ConversionState) -> List[str]:
     """The ``*ALE_REFERENCE_SYSTEM_*`` sentences (round 9, B8); writes no
-    card and draws no id. Under ``--ale-flow-tracking`` a refused deck gets
-    ONE sentence naming every failing class; without the flag each card gets
-    its own skip sentence (a PRTYPE-4 GROUP card names the opt-in). The
-    generic ``*CONTROL_ALE`` note (it fires on 6 match rows) changes only
-    under an ACCEPTED plan, where its 'not converted' clause would contradict
-    the B8 sentence (the post-review round, F1)."""
+    card and draws no id. R14 round 10 (A10, D-6: ``--ale-flow-tracking`` ON
+    by default, keyed on the package): a deck with a PRTYPE-4 GROUP card
+    gets ONE sentence - the B8 screen's failing classes, the package
+    condition that keeps an accepted card out, or the ``--no-`` opt-out; a
+    deck without one keeps round 9's per-card skip sentences. The generic
+    ``*CONTROL_ALE`` note (it fires on 6 match rows) changes only under an
+    ACCEPTED plan, where its 'not converted' clause would contradict the B8
+    sentence (the post-review round, F1)."""
     groups = state.ale_reference_groups
     others = sorted(set(state.ale_reference_others))
     if not groups and not others:
         return []
-    if state.options.ale_flow_tracking:
+    four = [g for g in groups if g.prtype == 4]
+    if state.options.ale_flow_tracking and four:
         plan = _resolve_ale_flow_tracking(state)
-        if plan.card is None and plan.reasons:
-            head = ("*ALE_REFERENCE_SYSTEM_GROUP" if groups
-                    else f"*{others[0]}")
-            state.warn(f"{head}: not converted under --ale-flow-tracking - "
-                       + "; ".join(plan.reasons)
+        if plan.card is None and plan.package:
+            g = four[0]
+            state.warn(
+                f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE 4) is skipped: "
+                "its OpenRadioss analogue /ALE/GRID/FLOW-TRACKING is written "
+                "only under --ale-flow-tracking (ON by default since R14 "
+                "round 10) and only inside the measured package - the card + "
+                "the void copy of an *INITIAL_VOID part in the fluid set of a "
+                "*CONSTRAINED_LAGRANGE_IN_SOLID coupling + the PFAC stiffness "
+                f"- and here {plan.package}. FLOW-TRACKING alone (round 9) is "
+                "not written: " + _AFT_ALONE)
+        elif plan.card is None and plan.reasons:
+            state.warn("*ALE_REFERENCE_SYSTEM_GROUP: not converted under "
+                       "--ale-flow-tracking - " + "; ".join(plan.reasons)
                        + "; it stays listed as skipped.")
         return []
     for g in groups:
@@ -2818,10 +2918,10 @@ def _make_ale_reference_notes(state: ConversionState) -> List[str]:
             state.warn(
                 f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE 4) is skipped: "
                 "its OpenRadioss analogue /ALE/GRID/FLOW-TRACKING is written "
-                "only under --ale-flow-tracking (opt-in - on bird_B it fixes "
-                "the IE history, END +1484.66 -> +17.00 %, but worsens the "
-                "deck KE through the full-density void, RMS 253.09 -> "
-                "749.89 %).")
+                "only under --ale-flow-tracking, which --no-ale-flow-tracking "
+                "turns off (the round-10 package: the card + the void copy "
+                "+ the PFAC stiffness). FLOW-TRACKING alone (round 9): "
+                + _AFT_ALONE)
         else:
             state.warn(
                 f"*ALE_REFERENCE_SYSTEM_GROUP {g.sid} (PRTYPE {g.prtype}) has "

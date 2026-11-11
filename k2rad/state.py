@@ -2884,6 +2884,10 @@ class AleFlowTrackingPlan:
     idef: int = -1
     irot: int = 1
     reasons: List[str] = field(default_factory=list)
+    #: R14 round 10, A10 (D-6): the package condition that kept a card the
+    #: B8 screen accepted out ("" = none) - since the default flip the card
+    #: is written only inside the package
+    package: str = ""
 
 
 @dataclass
@@ -7751,7 +7755,8 @@ class ConvertOptions:
     The EXCEPTIONS default to ON: measured fixes, each with a ``--no-``
     opt-out that restores the earlier output on the decks it moves -
 
-    ``adaptive_spring_token``, ``ale_inflow_ebcs``, ``axisymmetric_2d``,
+    ``adaptive_spring_token``, ``ale_flow_tracking``, ``ale_inflow_ebcs``,
+    ``axisymmetric_2d``,
     ``bcs_union``,
     ``bolt_rigid_contact``, ``constrained_global``, ``constrained_linear``,
     ``contact_birth_death``, ``corotational_orthotropic``,
@@ -8843,21 +8848,22 @@ class ConvertOptions:
     # punch stops at -10 mm as LS-DYNA's, KE END +91.96 -> +23.42 %. Reach 2
     # deck keys on 2 emitted models.
     load_curve_offscale_zero: bool = True
-    # --ale-flow-tracking (OPT-IN, R14 triage round 9, B8): write
-    # *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 (the ALE grid moving with the
-    # material's mass-weighted mean velocity about its centre of mass) as
-    # /ALE/GRID/FLOW-TRACKING in _0000.rad, after /DEF_SOLID (I_def -1 for
-    # BCEXP 7, I_rot +1 / -1 for BCROT 0 / 7; alew7.F:186-227); any other
-    # reference-system card is refused by name and stays skipped. /BEGIN
-    # stays 2022: the starter prints WARNING 100211 and reads the card.
-    #
-    # OFF by default: the row becomes MIXED. MEASURED on ale/bird/bird-b/
-    # bird_B (nt 4, 600 LS times): END IE +1484.66 -> +17.00 %, IE RMS
-    # 1189.95 -> 27.74 % of the LS peak, the energy error's worst -20.4 ->
-    # -8.7 % - but the deck KE RMS 253.09 -> 749.89 % (END +25.88 ->
-    # +1542.16 %): the void is converted at full density (cycle-0 KE 101.5
-    # against LS-DYNA's 11.737). Reach 1 deck key on 1 emitted model.
-    ale_flow_tracking: bool = False
+    # --no-ale-flow-tracking (R14 round 10, A10 / D-6; round 9's B8 opt-in
+    # retired into it): the ALE PACKAGE, ON by default - on a deck with ONE
+    # accepted *ALE_REFERENCE_SYSTEM_GROUP PRTYPE 4 card (the B8 screen:
+    # PRID 0, ICR 0, BCEXP 7, BCROT 0 / 7, a set naming every Iale part,
+    # BCTRAN held by the ALE nodes' own /BCS) AND an *INITIAL_VOID part in
+    # the fluid set of a CLIS coupling that the void copy writes AND the PFAC
+    # stiffness able to apply (PFAC >= 0, an estimate): /ALE/GRID/FLOW-
+    # TRACKING in _0000.rad after /DEF_SOLID (I_def -1, I_rot +1 / -1;
+    # alew7.F:186-227) + the void copy + Stfval = PFAC x m_node / dt0^2 on
+    # the fluid's TYPE18 (x 1e-3 on the void's). The card ALONE is no longer
+    # written (round 9 measured it MIXED: KE RMS 253.09 -> 749.89 %).
+    # MEASURED on bird_B (nt 4, 600 LS times, the findings' 6.3a gate arm
+    # reproduced to the digit): 2935 -> 2976 cycles, END IE +1484.66 ->
+    # +8.15 %, END KE +25.88 -> -14.44 %, RMS IE 1189.95 -> 6.71 %, KE
+    # 253.09 -> 3.37 %. Reach 1 deck key on 1 emitted model.
+    ale_flow_tracking: bool = True
     # --no-initial-void-copy (R14 round 10, A10 2b, default ON;
     # writer/blast_ale._resolve_initial_void_copy): an *INITIAL_VOID part in
     # the fluid (master) set of a *CONSTRAINED_LAGRANGE_IN_SOLID coupling, on

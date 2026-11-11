@@ -181,7 +181,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          positive_dt2ms_mass_scaling: bool = True,
                          plane_stress_unit_thickness: bool = True,
                          load_curve_offscale_zero: bool = True,
-                         ale_flow_tracking: bool = False,
+                         ale_flow_tracking: bool = True,
                          weld_trajectory_window_text: str = "",
                          tgmult_imptemp: bool = True,
                          deformable_contact_recipe: bool = False,
@@ -677,7 +677,7 @@ class ConverterGUI:
         self.positive_dt2ms_mass_scaling = tk.BooleanVar(value=True)
         self.plane_stress_unit_thickness = tk.BooleanVar(value=True)
         self.load_curve_offscale_zero = tk.BooleanVar(value=True)
-        self.ale_flow_tracking = tk.BooleanVar(value=False)
+        self.ale_flow_tracking = tk.BooleanVar(value=True)
         self.weld_trajectory_window = tk.StringVar(value="")
         self.tgmult_imptemp = tk.BooleanVar(value=True)
         self.blast_ground = tk.StringVar(value="auto")
@@ -1402,9 +1402,8 @@ class ConverterGUI:
                 row=77, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
-            io, text="ALE reference system PRTYPE 4 -> /ALE/GRID/FLOW-TRACKING "
-                     "(opt-in) - OFF. bird_B: IE END +1485 -> +17 %, KE RMS "
-                     "worse",
+            io, text="ALE package: FLOW-TRACKING + void copy + PFAC stiffness "
+                     "- ON. bird_B IE END +1484.66 -> +8.15 %",
             variable=self.ale_flow_tracking).grid(
                 row=78, column=0, columnspan=3, sticky="w", **pad)
 
@@ -2143,9 +2142,9 @@ class ConverterGUI:
             bits.append("an ELFORM 12 section stating no thickness kept at Thick 0 (--no-plane-stress-unit-thickness)")
         if not kwargs.get("load_curve_offscale_zero", True):
             bits.append("applied-load curves extrapolated off scale (--no-load-curve-offscale-zero)")
-        if kwargs.get("ale_flow_tracking"):
-            bits.append("ALE reference system PRTYPE 4 -> "
-                        "/ALE/GRID/FLOW-TRACKING (--ale-flow-tracking)")
+        if not kwargs.get("ale_flow_tracking", True):
+            bits.append("no ALE package: FLOW-TRACKING + void copy + PFAC "
+                        "stiffness off (--no-ale-flow-tracking)")
         if not kwargs.get("tgmult_imptemp", True):
             bits.append("*MAT_THERMAL_* TGMULT dropped "
                         "(--no-tgmult-imptemp)")

@@ -1979,6 +1979,12 @@ _A10_VOID_AI_SHA = (
     "403e15cc8afbc8b838075f37d66a5d970fd285dcf8335676329ebb94ffc6c78e")
 _A10_BIRDEL_AI_SHA = (
     "ae44daef55fdfbc1451be619d3c7e93cc2a594f7f7bbc9257785ec62c7ce128b")
+#: b8_bird(card=True, clis=True)'s _0000: at the part-A-i head (= the
+#: branch under --no-ale-flow-tracking) and the branch's default package
+_A10_PKG_AI_SHA = (
+    "1cb4a0982ffe431111d739095209327eeda683bae0984cb3b38334f4be0583d8")
+_A10_PKG_SHA = (
+    "cc65b90d78f94ba4b5f1220d7b695dd1184c3f27449b16dbfa9ea93244df0ea9")
 _A10_BIRDEL_AI_WARNINGS = (
     "f085e585d1fd5cac9f1a0aae1dc3dd4c3d7dd8173ca0ac1547a92a6177c78a71")
 
@@ -2162,14 +2168,34 @@ class InitialVoidCopy(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "The void copy (round 10"))
 
     def test_the_refusals_are_named_and_change_no_byte(self):
-        # an *ALE_REFERENCE_SYSTEM_* deck (bird_B's class)
+        # an *ALE_REFERENCE_SYSTEM_* deck (bird_B's class) with the package
+        # off: the void copy without the FLOW-TRACKING grid stalls
         ars = _t9.b8_bird(card=True, clis=True)
-        res, st, _e = _convert(ars)
-        _r0, st0, _e0 = _convert(ars, initial_void_copy=False)
+        res, st, _e = _convert(ars, ale_flow_tracking=False)
+        _r0, st0, _e0 = _convert(ars, ale_flow_tracking=False,
+                                 initial_void_copy=False)
         self.assertEqual(st, st0)
+        self.assertEqual(_tp._sha(st), _A10_PKG_AI_SHA)
         self.assertTrue(_has(res.warnings, "The void copy (round 10, A10 2b) "
                              "is NOT written for part 4: the deck states an "
-                             "*ALE_REFERENCE_SYSTEM_* card", "3.787e-18 s"))
+                             "*ALE_REFERENCE_SYSTEM_* card and "
+                             "--no-ale-flow-tracking turns the round-10 "
+                             "package off", "3.787e-18 s"))
+        # ... and with the package on but its PFAC stiffness impossible
+        res, st, _e = _convert(_a10_pfac(ars, "-2.0"))
+        self.assertNotIn("/ALE/GRID/FLOW-TRACKING", st)
+        self.assertEqual(_block(st, "/PART/4")[1].split()[:2], ["2", "2"])
+        self.assertTrue(_has(res.warnings, "is NOT written for part 4: the "
+                             "deck states an *ALE_REFERENCE_SYSTEM_* card and "
+                             "the round-10 package needs the PFAC stiffness, "
+                             "which cannot apply here (PFAC -2 of the "
+                             "coupling of master 1 is a load-curve id)"))
+        self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_GROUP 1 "
+                             "(PRTYPE 4) is skipped: its OpenRadioss analogue "
+                             "/ALE/GRID/FLOW-TRACKING is written only under "
+                             "--ale-flow-tracking (ON by default since R14 "
+                             "round 10) and only inside the measured package",
+                             "and here the void copy is refused here"))
         # a void that is not a *MAT_NULL + *EOS_* fluid
         lines = _t9.b8_bird(card=False, clis=True).split("\n")
         i = lines.index("*MAT_NULL")
@@ -2183,22 +2209,37 @@ class InitialVoidCopy(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "is NOT written for part 4: part "
                              "4's material 2 is not a *MAT_NULL + *EOS_* fluid"))
 
-    def test_the_two_opt_ins_lift_the_ars_refusal(self):
-        """D-A10-4: --ale-flow-tracking with --clis-pfac-stiffness on an
-        accepted card is the measured package: the copy, the FLOW-TRACKING
-        card and the PFAC stiffness (x 1e-3 on the void's interface)."""
-        res, st, _e = _convert(_t9.b8_bird(card=True, clis=True),
-                               ale_flow_tracking=True,
-                               clis_pfac_stiffness=True)
+    def test_the_package_is_the_default_on_the_ars_deck(self):
+        """D-6 (the findings' 6.3a: the gate PASSED): on an accepted
+        PRTYPE-4 card with an *INITIAL_VOID part in the CLIS fluid set the
+        DEFAULT is the measured package - the copy, the FLOW-TRACKING card
+        and the PFAC stiffness (x 1e-3 on the void's interface);
+        --no-ale-flow-tracking is the part-A-i deck (above). bird_B's own
+        default bytes ran as the package arm (nt 4,
+        ``C:/Users/pmqua/rcv_r10i_implA2_b_pkg``): 2976 cycles, END IE
+        +8.15 %, END KE -14.44 %, RMS 6.71 / 3.37 % (n 600)."""
+        res, st, _e = _convert(_t9.b8_bird(card=True, clis=True))
+        self.assertEqual(_tp._sha(st), _A10_PKG_SHA)
         self.assertIn("/ALE/GRID/FLOW-TRACKING", st)
         self.assertEqual(_block(st, "/PART/4")[1].split()[:2], ["2", "90001"])
         s = _a10_bird_stfval()
         stf = sorted(v[1] for v in _a10_type18(st).values())
         self.assertAlmostEqual(stf[1] / s, 1.0, delta=1e-9)
         self.assertAlmostEqual(stf[0] / (s * 1e-3), 1.0, delta=1e-9)
-        self.assertTrue(_has(res.warnings, "it is the measured package",
+        self.assertTrue(_has(res.warnings, "it is the measured package, ON "
+                             "by default since R14 round 10",
                              "END IE +1484.66 -> +8.15 %", "133.1",
-                             "0.2 % change of Stfval"))
+                             "0.2 % change of Stfval",
+                             "FLOW-TRACKING alone (round 9) is no longer "
+                             "written"))
+        self.assertTrue(_has(res.warnings, "the round-10 ALE package "
+                             "(--ale-flow-tracking) writes Stfval = PFAC x "
+                             "m_node / dt0^2"))
+        # the opt-in pair of part A10's first commit gives the same bytes
+        _r, st2, _e = _convert(_t9.b8_bird(card=True, clis=True),
+                               ale_flow_tracking=True,
+                               clis_pfac_stiffness=True)
+        self.assertEqual(st2, st)
 
     def test_a_void_without_clis_is_untouched(self):
         """bird-el's class (a void, no CLIS): bytes AND warnings = the
@@ -2308,8 +2349,10 @@ _FORBIDDEN_ROUND_10_A2 = (
     "VFACT is the void density",
 )
 
-#: (shipped file, the replacement text it now carries)
+#: (shipped file, the replacement text it now carries) - with A10's
+#: gate PASSED the --no- spelling of the ALE package is shipped (F-A10b)
 _REPLACEMENTS_ROUND_10_A2 = (
+    ("README.md", "--no-ale-flow-tracking"),
     ("k2rad/handlers.py",
      "a LAW0 cell takes no material, so whatever advects into it is DELETED "
      "(measured on stagnation_A)"),
@@ -2374,6 +2417,9 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
         "--ale-inflow-ebcs": "ale_inflow_ebcs",
         "--rigid-tool-penalty-cap": "rigid_tool_penalty_cap",
         "--initial-void-copy": "initial_void_copy",
+        # D-6 (the findings' 6.3a gate PASSED): round 9's opt-in, moved here
+        # from test_r14_triage_9.Round9OptInWiringB
+        "--ale-flow-tracking": "ale_flow_tracking",
     }
     _HELP_FIGURES = {
         "--vacuum-light-fluid": ("NEGATIVE RHO", "832 -> 9364 cycles",
@@ -2392,6 +2438,11 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
             "at 1e-3 x RO", "a numerical floor of this converter",
             "(a stress cut-off)", "KE RMS 28.17 -> 10.42 %",
             "IE RMS 142.04 -> 161.11 %", "ON by default"),
+        "--ale-flow-tracking": (
+            "/ALE/GRID/FLOW-TRACKING", "I_def -1", "2935 -> 2976 cycles",
+            "+1484.66 -> +8.15 %", "+25.88 -> -14.44 %",
+            "1189.95 -> 6.71 %", "253.09 -> 3.37 %", "Stfval 133.1",
+            "0.37 point", "ON by default", "none of the three"),
     }
 
 

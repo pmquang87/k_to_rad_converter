@@ -520,6 +520,17 @@ as underscores.
   [below](#--clis-pfac-stiffness--the-clis-coupling-stiffness-from-pfac)).
   Stfval = PFAC x m_node / dt0^2 on every `*CONSTRAINED_LAGRANGE_IN_SOLID`
   `/INTER/TYPE18`, with a converter-side estimate of the first time step.
+- `--ale-flow-tracking` / `--no-ale-flow-tracking` — **ON by default since
+  round 10** (A10, D-6; round 9's opt-in retired into it): the ALE PACKAGE,
+  on a deck with one accepted `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 card and
+  an `*INITIAL_VOID` part in the fluid set of a CLIS coupling - the
+  `/ALE/GRID/FLOW-TRACKING` card + the void copy + the PFAC stiffness
+  ([below](#the-ale-grid-that-follows-the-material-the-round-10-ale-package)). MEASURED on bird_B (nt 4, n 600, its
+  part-A-i bytes and the package in one window - the findings' 6.3a gate
+  arm reproduced to the printed digit): 2935 -> 2976 cycles, END IE
+  +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS IE 1189.95 -> 6.71 %,
+  KE 253.09 -> 3.37 %. The card alone is no longer written.
+  `--no-ale-flow-tracking` writes none of the three (the part-A-i bytes).
 
 ### Python API
 
@@ -1588,7 +1599,7 @@ IE +1484.66 → +20691.23 %) through its converted open fixed-grid ALE faces
 (walled −0.1 %; LS-DYNA moves that mesh with the bird,
 `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 — skipped by default, written as
 `/ALE/GRID/FLOW-TRACKING` under
-[`--ale-flow-tracking`](#--ale-flow-tracking--the-ale-grid-that-follows-the-material),
+[`--ale-flow-tracking`](#the-ale-grid-that-follows-the-material-the-round-10-ale-package),
 and with the grid moving the Nu cell still creates energy: energy error
 +59.2 %, END IE +1504.57 %); ELFORM 5 / 7 / 11 / 12 and
 mixed materials are named too. Since round 8 a `/PROP/SOLID` (Isolid 1 / 2)
@@ -4495,8 +4506,10 @@ PFAC read by the opt-in
 `*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
 `/INIVOL` (recognised; container geometry needs a manual `/SURF`)
 `*ALE_REFERENCE_SYSTEM_GROUP` → skipped with a named sentence (round 9);
-PRTYPE 4 → `/ALE/GRID/FLOW-TRACKING` under the opt-in
-[`--ale-flow-tracking`](#--ale-flow-tracking--the-ale-grid-that-follows-the-material);
+PRTYPE 4 → `/ALE/GRID/FLOW-TRACKING` inside the round-10 ALE package
+(`--ale-flow-tracking`, ON by default: with the void copy and the PFAC
+stiffness, [below](#the-ale-grid-that-follows-the-material-the-round-10-ale-package); `--no-ale-flow-tracking`
+writes none of it);
 `*ALE_REFERENCE_SYSTEM_NODE` / `_CURVE` / `_SWITCH` → skipped, named
 
 See `docs/BLAST_ALE_JWL_MAPPING.md` for the full mapping table, card formats and
@@ -8254,12 +8267,14 @@ behind a NORMAL banner too (13 of 14 runs), and tensile2's IE RMS goes 2.48 ->
 5.61 % (END -0.54 -> +26.88 %). One carrier is not a default: check the
 energies before using a run.
 
-### `--ale-flow-tracking` — the ALE grid that follows the material
+### The ALE grid that follows the material: the round-10 ALE package
 
 LS-DYNA's `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 moves the ALE mesh with the
 mass-weighted mean velocity of the ALE material (Vol I R17 p.4-87/88, the bird
-in air of its Example 1). k2rad skips the card by default and names it.
-`--ale-flow-tracking` (opt-in, round 9) writes it as
+in air of its Example 1). Since R14 round 10 (A10, D-6) `--ale-flow-tracking`
+is ON by default and writes the card only inside the package below
+(`--no-ale-flow-tracking` writes none of it; round 9's opt-in wrote the card
+alone). It is written as
 `/ALE/GRID/FLOW-TRACKING` in `<stem>_0000.rad`, right after `/DEF_SOLID`
 (never in an engine file: `lectur.F:889-902` refuses a formulation switch
 there): `I_def -1` for BCEXP 7 (no expansion in any direction - the
@@ -8286,21 +8301,26 @@ time — but too much (IE / KE +513.69 / +130.43 % at t 5.9916e-4). The deck KE
 gets WORSE (END +25.88 → +1542.16 %, RMS 253.09 → 749.89 %; the plate's KE RMS
 71.60 → 93.93 %): the void is still converted at full density (cycle-0 KE
 101.5 against LS-DYNA's 11.737), so the moving grid carries 9× the bird's mass.
-That KE regression makes the row MIXED, so the card alone is not the default;
-the light-void coupling that removes it is the round-10 package below
-(FLOW-TRACKING with a 1e-6 void instead dies at t 1.043e-4 with NEGATIVE RHO),
-and the `*MAT_NULL` MU cell stays off on this deck (with the grid moving it
-reads energy error +59.2 %, END IE +1504.57 %). The rule is keyed on the
-deck's own card only: a void + `*CONSTRAINED_LAGRANGE_IN_SOLID` deck without
-one (quadrature_B) converts byte-identically under the flag. Reach 1 deck key
-/ 1 emitted model.
+That KE regression (the card ALONE, round 9) made the row MIXED, so the
+card alone is no longer written; the light-void coupling that removes it is
+the round-10 package below (FLOW-TRACKING with a 1e-6 void instead dies at t
+1.043e-4 with NEGATIVE RHO), and the `*MAT_NULL` MU cell stays off on this
+deck (with the grid moving it reads energy error +59.2 %, END IE
++1504.57 %). The rule is keyed on the deck's own card: a void +
+`*CONSTRAINED_LAGRANGE_IN_SOLID` deck without one (quadrature_B) gets no
+FLOW-TRACKING. Reach 1 deck key / 1 emitted model.
 
-**The package (R14 round 10, A10).** With `--clis-pfac-stiffness` as well, a
-deck whose card is accepted gets the measured package: the FLOW-TRACKING card,
-the `*INITIAL_VOID` part of its CLIS fluid set written as the A10 void copy
-(1e-3 x RO on its own `/INTER/TYPE18`, the `--initial-void-copy` rule, whose
-`*ALE_REFERENCE_SYSTEM_*` refusal the pair lifts) and the CLIS stiffness
-PFAC x m_node / dt0^2 on the fluid's interface (x 1e-3 on the void's).
+**The package (R14 round 10, A10; the default since D-6).** A deck whose
+card the screen above accepts AND that holds an `*INITIAL_VOID` part in the
+fluid set of a CLIS coupling gets the measured package: the FLOW-TRACKING
+card, that part written as the A10 void copy (1e-3 x RO on its own
+`/INTER/TYPE18`, the `--initial-void-copy` rule, whose
+`*ALE_REFERENCE_SYSTEM_*` refusal the package lifts) and the CLIS stiffness
+PFAC x m_node / dt0^2 on the fluid's interface (x 1e-3 on the void's) -
+written by the package whether or not `--clis-pfac-stiffness` is given.
+Where the screen accepts the card but the package cannot apply (no such
+void, `--no-initial-void-copy`, a negative PFAC, no first-step estimate) the
+card is skipped and that condition named.
 MEASURED on bird_B (nt 4, README 9.1, 600 LS times to t 5.9992e-4; its
 part-A-i bytes and the package in one window): 2935 → 2976 cycles, END IE
 +1484.66 → +8.15 %, KE +25.88 → −14.44 %, RMS IE 1189.95 → 6.71 %, KE
@@ -8308,8 +8328,8 @@ part-A-i bytes and the package in one window): 2935 → 2976 cycles, END IE
 0.1 x 5.573e-11 / dt0^2 (the bird's median nodal mass; this converter's dt0
 2.046e-7, +0.11 % above the engine's first step 2.044e-7); a 0.2 % change of
 it (133.10 → 133.39, the round-10 research arms on the ed52c93 bytes) moved
-END IE by 0.37 point. In this commit the package is reachable as the two
-opt-ins.
+END IE by 0.37 point. `--no-ale-flow-tracking` restores the part-A-i bytes
+(2935 cycles, END IE +1484.66 %).
 
 ### `--clis-pfac-stiffness` — the CLIS coupling stiffness from PFAC
 
@@ -8317,7 +8337,8 @@ opt-ins.
 factor: PFAC > 0 a fraction of an estimated critical stiffness on the coupled
 mass, 0 the default 0.1, < 0 a load-curve id (Vol I R17 p.10-117 / 10-122).
 k2rad writes every CLIS `/INTER/TYPE18` with the unit stiffness Stfval 1 by
-default (the CLIS sentence names what this option would write there).
+default (the CLIS sentence names what this option would write there) - except
+on the deck of the ALE package above, which writes this stiffness itself.
 `--clis-pfac-stiffness` (opt-in, round 10, A10 2a) writes Stfval = PFAC x
 m_node / dt0^2 instead: m_node the median lumped nodal mass of the coupled
 fluid (sum over each node's bricks of RHO_I x V / 8, over the fluid parts that

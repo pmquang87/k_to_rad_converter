@@ -489,7 +489,7 @@ def convert(
     positive_dt2ms_mass_scaling: bool = True,
     plane_stress_unit_thickness: bool = True,
     load_curve_offscale_zero: bool = True,
-    ale_flow_tracking: bool = False,
+    ale_flow_tracking: bool = True,
     tgmult_imptemp: bool = True,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
@@ -1478,18 +1478,19 @@ def convert(
         thick.k's punch stops at -10 mm as LS-DYNA's, KE END +91.96 ->
         +23.42 %. Default True.
     ale_flow_tracking : bool
-        OPT-IN (R14 triage round 9, B8): write ``*ALE_REFERENCE_SYSTEM_GROUP``
-        PRTYPE 4 (the ALE grid moving with the material's mass-weighted mean
-        velocity about its centre of mass) as ``/ALE/GRID/FLOW-TRACKING`` in
-        ``_0000.rad`` after ``/DEF_SOLID`` (I_def -1 for BCEXP 7, I_rot +1 /
-        -1 for BCROT 0 / 7; ``alew7.F:186-227``); one GROUP card naming every
-        ALE part, PRID 0, ICR 0, and BCTRAN already held by the ALE nodes'
-        own /BCS - anything else is refused by name and stays skipped.
-        ``/BEGIN`` stays 2022 (WARNING 100211, the card read). MEASURED on
-        bird_B (nt 4): END IE +1484.66 -> +17.00 %, IE RMS 1189.95 ->
-        27.74 %, but the deck KE RMS 253.09 -> 749.89 % (the void is
-        converted at full density) - a MIXED row, hence opt-in. Default
-        False.
+        The round-10 ALE package (R14 round 10, A10; round 9's B8 card is
+        its first third): on a deck with ONE accepted
+        ``*ALE_REFERENCE_SYSTEM_GROUP`` PRTYPE 4 card (PRID 0, ICR 0, BCEXP
+        7, BCROT 0 / 7, a set naming every ALE part, BCTRAN held by the ALE
+        nodes' own /BCS) AND an ``*INITIAL_VOID`` part in the fluid set of a
+        CLIS coupling that the void copy writes: ``/ALE/GRID/FLOW-TRACKING``
+        in ``_0000.rad`` after ``/DEF_SOLID`` (I_def -1, I_rot +1 / -1;
+        ``alew7.F:186-227``) + the void copy (``initial_void_copy``) + the
+        CLIS PFAC stiffness on the fluid's and the void's ``/INTER/TYPE18``.
+        The card alone (round 9) is no longer written. MEASURED on bird_B
+        (nt 4): END IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS
+        1189.95 / 253.09 -> 6.71 / 3.37 %. Default True
+        (``--no-ale-flow-tracking``: none of the three).
     tgmult_imptemp : bool
         Turn a ``*MAT_THERMAL_*`` ``TGMULT`` (volumetric heat generation) into
         an ``/IMPTEMP`` holding the closed-form adiabatic solution

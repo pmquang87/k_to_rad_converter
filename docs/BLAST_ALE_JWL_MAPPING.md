@@ -46,7 +46,7 @@ OpenRadioss FSI example `Drop_Container/fsi_drop_container_0000.rad`
 | `*CONSTRAINED_LAGRANGE_IN_SOLID` | `/INTER/TYPE18` | **added** | FSI penalty coupling |
 | `*BOUNDARY_NON_REFLECTING` | `/EBCS/NRF` | **added** | non-reflecting frontier |
 | `*BOUNDARY_AMBIENT` / ambient AMMG | `/EBCS/INLET` (or `/EBCS/NRF`) | warn/skip | reservoir state, see §B7 |
-| `*ALE_REFERENCE_SYSTEM_*` | `/ALE/GRID/FLOW-TRACKING` (GROUP PRTYPE 4, opt-in `--ale-flow-tracking`) | skip-with-warning by default | mesh-motion control; round 9: PRTYPE 4 + BCEXP 7 + BCROT 0 / 7 maps, everything else refused by name |
+| `*ALE_REFERENCE_SYSTEM_*` | `/ALE/GRID/FLOW-TRACKING` (GROUP PRTYPE 4, inside the round-10 ALE package, `--ale-flow-tracking` ON by default) | skip-with-warning unless the package applies | mesh-motion control; round 9: PRTYPE 4 + BCEXP 7 + BCROT 0 / 7 maps, everything else refused by name |
 | `*DATABASE_BINARY_BLSTFOR` | `/TH/SURF` (P, A) + `/ANIM/NODA/PEXT` + `/ANIM/VECT/FEXT` | **added** | blast pressure history + nodal fringe |
 
 `/INTER/TYPE22` (ALE/Lagrange with a cut-cell, "conservative" FSI) is the other
@@ -319,11 +319,14 @@ smoothing. OpenRadioss splits these across `/ALE/MUSCL`, `/UPWIND`,
 Donor-cell (`METH=1`) → default upwind; Van-Leer/HIS (`METH=2/3`) → `/ALE/MUSCL`.
 Mesh-smoothing (`*ALE_SMOOTHING`, `*ALE_REFERENCE_SYSTEM_*`) has no clean 1:1 and
 is documented as skip-with-warning - except `*ALE_REFERENCE_SYSTEM_GROUP`
-PRTYPE 4, which `--ale-flow-tracking` (opt-in, round 9) writes as
+PRTYPE 4, which `--ale-flow-tracking` writes as
 `/ALE/GRID/FLOW-TRACKING` (I_def -1 for BCEXP 7, I_rot +1 / -1 for BCROT 0 /
-7; bird_B: IE END +1484.66 -> +17.00 %, but the deck KE RMS 253.09 ->
-749.89 % through the full-density void, so not the default; see the README
-section of the flag). k2rad emits the ALE materials/props/coupling
+7) - since R14 round 10 ON by default and only inside the ALE package (the
+card + the `*INITIAL_VOID` void copy + the CLIS PFAC stiffness; bird_B: END
+IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS 1189.95 / 253.09 ->
+6.71 / 3.37 %); round 9's card alone (KE RMS 253.09 -> 749.89 % through the
+full-density void) is no longer written; see the README section of the
+package. k2rad emits the ALE materials/props/coupling
 but leaves the advection tuning to OpenRadioss defaults (validated as stable in
 the `Drop_Container` reference), with a note pointing at `/ALE/MUSCL` + `/UPWIND`
 for users who need to reproduce a specific `METH`.
@@ -358,8 +361,8 @@ for users who need to reproduce a specific `METH`.
 * `*ALE_REFERENCE_SYSTEM_NODE/_GROUP/_SWITCH` — ALE mesh-motion prescription;
   OpenRadioss `/ALE/GRID/*` is structured differently. Warn. Round 9: the
   GROUP card with PRTYPE 4 (mass-weighted mean velocity) has the analogue
-  `/ALE/GRID/FLOW-TRACKING`, written only under `--ale-flow-tracking`
-  (opt-in; `alew7.F:186-227`).
+  `/ALE/GRID/FLOW-TRACKING`, written only inside the round-10 ALE package
+  (`--ale-flow-tracking`, ON by default; `alew7.F:186-227`).
 * `*ALE_SMOOTHING` — mesh relaxation; no 1:1. Warn.
 * `*INITIAL_VOLUME_FRACTION` (set form, explicit per-element fractions) —
   `/INIVOL` is surface-based. Warn.

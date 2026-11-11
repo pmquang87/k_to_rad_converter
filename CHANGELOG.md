@@ -270,6 +270,49 @@ Prior history (before this changelog was introduced) is summarized in the
     `TestEveryElementGroupSiteIsGuarded.test_the_guarded_allocator_is_used_at_every_site_it_should_be`
     (23 -> 24 guarded `next_elem_group_id` sites: the split part's
     `/GRBRIC/PART`).
+  - **A10 / D-6 - the ALE package is the default (`--ale-flow-tracking` ON;
+    `--no-ale-flow-tracking`).** The findings' 6.3a gate PASSED: the package
+    arm on the branch bytes at the estimator's Stfval reproduced the gate arm
+    g2_Sest_ash to the printed digit (nt 4, n 600: 2976 cycles, END IE +8.15
+    %, END KE -14.44 %, RMS 6.71 / 3.37 %). `--ale-flow-tracking` now
+    defaults to True and is keyed on the PACKAGE: a deck with one accepted
+    `*ALE_REFERENCE_SYSTEM_GROUP` PRTYPE 4 card (round 9's B8 screen,
+    unchanged) AND an `*INITIAL_VOID` part in the fluid set of a CLIS
+    coupling that the void copy writes AND the PFAC stiffness able to apply
+    gets the FLOW-TRACKING card + the void copy (its ARS refusal lifted) +
+    Stfval = PFAC x m_node / dt0^2 on the fluid's `/INTER/TYPE18` (x 1e-3 on
+    the void's), whether or not `--clis-pfac-stiffness` is given
+    (`writer/blast_ale._resolve_ale_flow_tracking` = `_aft_screen` +
+    `_aft_package_refusal`; `_void_copy_ars_refusal`,
+    `_package_stiffness_refusal`). The card ALONE (round 9's opt-in, MIXED on
+    bird_B: KE RMS 253.09 -> 749.89 %) is retired: an accepted card without
+    the package is skipped with the failing condition named, and a deck
+    without a PRTYPE-4 card keeps round 9's per-card sentences. MEASURED on
+    bird_B (README 9.1, its part-A-i bytes and the default in one window):
+    2935 -> 2976 cycles, END IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44
+    %, RMS IE 1189.95 -> 6.71 %, KE 253.09 -> 3.37 %, cycle-0 KE 101.5 ->
+    11.83 (LS-DYNA 11.737), at Stfval 133.1 = 0.1 x 5.573e-11 / dt0^2 (the
+    bird's median nodal mass; dt0 2.046e-7, +0.11 % above the engine's first
+    step 2.044e-7). The S-sensitivity is the package's stated uncertainty: a
+    0.2 % change of Stfval (133.10 -> 133.39, the round-10 research arms on
+    the ed52c93 bytes) moved END IE by 0.37 point (+8.50 -> +8.13 %).
+    `--no-ale-flow-tracking` = the part-A-i bytes. Movers: bird_B by bytes
+    (1 key / 1 model, `_0000.rad` only: the void copy, the split TYPE18 pair
+    at 133.1 / 0.1331, the FLOW-TRACKING card). Tests:
+    `tests/test_r14_round10.py`
+    `InitialVoidCopy.test_the_package_is_the_default_on_the_ars_deck` and
+    `.test_the_refusals_are_named_and_change_no_byte`, `Round10FlagWiringA2`
+    (the flag moved there from `tests/test_r14_triage_9.py`
+    `Round9OptInWiringB`, now empty), `Round10RetractedStatementsA2` (F-A10b
+    flips to a replacement: `--no-ale-flow-tracking` is shipped); moved
+    because A10's package makes FLOW-TRACKING a default on its key class
+    (round 10): `tests/test_r14_triage_9.py`
+    `AleFlowTracking.test_card_bytes_bcrot0_and_bcrot7` (the package deck;
+    the card alone writes nothing),
+    `.test_generic_control_ale_note_follows_the_plan`,
+    `.test_every_refusal_class` (PRTYPE 0 / 3 / 5 keep the per-card
+    sentence), `Round9FlagsInReadme.test_every_round_9_flag_is_in_README_prose`
+    (17 -> 16 spellings).
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
   time step, implicit, the erosion and few-node texts).** One commit per item;
   every later item of the round is measured on the bytes of the earlier ones

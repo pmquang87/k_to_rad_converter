@@ -4380,10 +4380,20 @@ class AleFlowTracking(unittest.TestCase):
                           ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
 
     def test_card_bytes_bcrot0_and_bcrot7(self):
-        res, st, eng = _convert(b8_bird(), ale_flow_tracking=True, **_K3_OFF)
-        self.assertEqual(_sha(st), _B8_BASE_FT_STARTER)
-        # the opt-in arm with the K3 defaults: those bytes plus K-31's cell
-        _r, st_def, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        # R14 round 10 (A10 / D-6): the card is written only inside the
+        # round-10 package (the void copy + the PFAC stiffness), the
+        # DEFAULT, so the deck is the package deck b8_bird(clis=True); the
+        # card ALONE (round 9's flag-on digest _B8_BASE_FT_STARTER of
+        # b8_bird()) is no longer written - b8_bird() gets the package
+        # sentence instead
+        res, st, eng = _convert(b8_bird(clis=True), **_K3_OFF)
+        r_alone, st_alone, _e = _convert(b8_bird(), ale_flow_tracking=True,
+                                         **_K3_OFF)
+        self.assertEqual(_sha(st_alone), _B8_BASE_386444E_STARTER)
+        self.assertTrue(_has(r_alone.warnings, _W_B8_SKIP, "the measured "
+                             "package", "it needs an *INITIAL_VOID part"))
+        # the package arm with the K3 defaults: those bytes plus K-31's cell
+        _r, st_def, _e = _convert(b8_bird(clis=True))
         self.assertEqual(_k3_default_moves(st, st_def),
                          [("/PROP/SHELL/1", 2, 0),
                           ("/PROP/SHELL/1 Ashear", 0.0, 1.0)])
@@ -4402,9 +4412,9 @@ class AleFlowTracking(unittest.TestCase):
                              "alew7.F:186-227", "WARNING 100211",
                              "BCTRAN 3 is carried by the ALE nodes' own /BCS",
                              "+1484.66 -> +17.00 %", "253.09 -> 749.89 %",
-                             "NEGATIVE RHO"), res.warnings)
+                             "+1484.66 -> +8.15 %"), res.warnings)
         self.assertFalse(_has(res.warnings, _W_B8_SKIP))
-        _r7, st7, _e7 = _convert(b8_bird(bcrot=7), ale_flow_tracking=True)
+        _r7, st7, _e7 = _convert(b8_bird(bcrot=7, clis=True))
         lines7 = st7.splitlines()
         j = lines7.index("/ALE/GRID/FLOW-TRACKING")
         self.assertEqual(lines7[j + 4], "        -1                   0")
@@ -4416,7 +4426,8 @@ class AleFlowTracking(unittest.TestCase):
         converted' beside the B8 sentence that converts it; a refused plan
         and the default keep the note word for word (it fires on 6 match
         rows)."""
-        res, _st, _e = _convert(b8_bird(), ale_flow_tracking=True)
+        # R14 round 10 (A10 / D-6): an accepted plan is the package deck's
+        res, _st, _e = _convert(b8_bird(clis=True))
         self.assertTrue(_has(res.warnings, "*CONTROL_ALE (METH=", "the "
                              "*ALE_REFERENCE_SYSTEM_GROUP 1 card IS converted "
                              "under --ale-flow-tracking"))
@@ -4434,11 +4445,20 @@ class AleFlowTracking(unittest.TestCase):
                 self.assertFalse(_has(r2.warnings, "card IS converted"))
 
     def test_every_refusal_class(self):
+        # R14 round 10 (A10 / D-6, the flag ON by default): a deck with
+        # no PRTYPE-4 card keeps round 9's per-card skip sentence (so its
+        # default text does not move); the reasons sentence is a PRTYPE-4
+        # deck's
+        for prtype in (0, 5, 3):
+            with self.subTest(prtype=prtype):
+                res, st, eng = _convert(b8_bird(prtype=prtype),
+                                        ale_flow_tracking=True)
+                self.assertNotIn("/ALE/GRID", st + eng)
+                self.assertTrue(_has(res.warnings, "*ALE_REFERENCE_SYSTEM_"
+                                     f"GROUP 1 (PRTYPE {prtype}) has no "
+                                     "OpenRadioss analogue and is skipped."))
+                self.assertFalse(_has(res.warnings, _W_B8_REFUSED))
         cases = (
-            ({"prtype": 0}, "PRTYPE 0: only PRTYPE 4 has an OpenRadioss "
-                            "analogue (FLOW-TRACKING)"),
-            ({"prtype": 5}, "PRTYPE 5: only PRTYPE 4"),
-            ({"prtype": 3}, "PRTYPE 3: only PRTYPE 4"),
             ({"prid": 1}, "PRID 1: FLOW-TRACKING averages over every ALE "
                           "node"),
             ({"icr": 1}, "ICR 1: FLOW-TRACKING turns about the centre of "
@@ -4968,14 +4988,12 @@ class Round9OptInWiringB(_t8.Round8OptInWiringB):
     the GUI end to end, convert() / ConvertOptions (default False) and
     cli.main()'s call - round 8's opt-in checks for B8."""
 
-    _OPT_IN = {"--ale-flow-tracking": "ale_flow_tracking"}
-    _HELP_FIGURES = {
-        "--ale-flow-tracking": ("/ALE/GRID/FLOW-TRACKING",
-                                "I_def -1 for BCEXP 7",
-                                "+1484.66 -> +17.00 %",
-                                "1189.95 -> 27.74 %",
-                                "253.09 -> 749.89 %", "OFF by default"),
-    }
+    # R14 round 10 (A10 / D-6): A10's package makes FLOW-TRACKING a default
+    # on its key class (the findings' 6.3a gate PASSED), so the flag left
+    # this class for test_r14_round10.Round10FlagWiringA2 with its
+    # re-measured figures; round 9's part B has no opt-in left
+    _OPT_IN: dict = {}
+    _HELP_FIGURES: dict = {}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -5331,8 +5349,9 @@ class Round9FlagsInReadme(unittest.TestCase):
         spellings = (["--no-" + f[2:] for f in on] + opt
                      + ["--weld-trajectory-window"])
         # part A: 8 default levers + 2 opt-ins; part B: 5 default levers +
-        # 1 opt-in + B1's window option
-        self.assertEqual(len(spellings), 17)
+        # B1's window option - its 1 opt-in, --ale-flow-tracking, is a round-10
+        # default since A10 / D-6 (test_r14_round10.Round10FlagWiringA2)
+        self.assertEqual(len(spellings), 16)
         for flag in spellings:
             with self.subTest(flag=flag):
                 self.assertTrue(any(flag in ln for ln in body),
