@@ -439,10 +439,11 @@ class PreloadOnATetBolt(unittest.TestCase):
     nt 4, 20 us) this deck written Isolid 14 (master), 1 (K-30) and 24
     (ELFORM 1 + IHQ 6) gives decoded-equal T01 (GLOBAL + the bolt /SECT, 50
     states from t = 0 to 1.96e-5 s) and byte-equal anim files, so a verdict
-    keyed on the cell would split one run in two. (That run is not a good
-    one - its T01 time step falls from 1.0e-7 s to 2.8e-9 s by t = 1.88e-5
-    s, 1.9e-9 s at least, on all three arms, ROADMAP - and no warning names
-    a preloaded tet any more.)"""
+    keyed on the cell would split one run in two. (That deck is a FREE bar,
+    which collapses at every Isolid: its T01 time step falls from 1.0e-7 s
+    to 2.8e-9 s by t = 1.88e-5 s on all three arms. CLAMPED, the tet twin
+    holds 192.2 .. 208.2 MPa after Tstop and runs NORMAL to 4e-4 s - round
+    10, B9. No warning names a preloaded tet any more.)"""
 
     def _formulation_warnings(self, res):
         return [w for w in res.warnings if "emit /PROP/SOLID Isolid=" in w]

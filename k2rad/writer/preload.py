@@ -145,18 +145,35 @@ def _vector_direction(state: ConversionState, vid: int):
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: /PROP/SOLID Isolid values that actually carry a bolt preload on this build.
-#: Measured on a 1x1x4 hex bar, /PRELOAD Itype=2 Preload=200 MPa, engine to
-#: 4e-4 s, reading /TH/BRIC SZ of the preloaded brick:
-#:   Isolid 14 -> 200.0 at t=0, 199.7 during, ~200 after Tstop   (cleanest)
-#:   Isolid 17 -> 200.0 at t=0, mild ringing, ~200 after Tstop
-#:   Isolid  5 -> 200.0 at t=0, 203.1 during, 199.1 after Tstop  (as good as 17)
-#:   Isolid  1 -> ZERO OR NEGATIVE VOLUME at cycle 0, T01 dies at 2.2e-5
-#:   Isolid  2 -> garbage (-1347 / 20511 / 3899 MPa)
-#:   Isolid 12 -> 0 MPa for the whole run: a SILENT no-op
-#:   Isolid 24 -> diverges late in the preload window and never recovers:
-#:                re-measured 1266 -> 1370 MPa against the 200 MPa target
-#:                (an earlier probe of the same bar reached 1400-1500 MPa —
-#:                the sample varies, the divergence does not)
+#: Measured (round 10, B9) on a 1x1x4 hex bar CLAMPED at both end faces,
+#: built along z and along (1, 2, 2)/3, /PRELOAD Itype=2 Preload=200 MPa,
+#: Tstart 0, Tstop 2e-4 s, engine to 4e-4 s at nt 4 and nt 2 (identical),
+#: reading the cut brick's axial stress at 0 / 1.9e-5 / 8e-5 / 1.6e-4 /
+#: 2.4e-4 / 3.2e-4 / 4e-4 s:
+#:   Isolid 14 -> 200.0 / 200.0 / 200.0 / 198.5 / 199.3 / 200.7 / 199.6
+#:                (cleanest: 198.6 .. 201.4 MPa after Tstop)
+#:   Isolid 17 -> 200.0 / 200.0 / 200.0 / 202.5 / 196.7 / 201.5 / 198.6
+#:                (195.6 .. 204.6 after Tstop)
+#:   Isolid  5 -> 200.0 / 200.0 / 200.0 / 199.3 / 200.2 / 199.8 / 200.5
+#:                (196.8 .. 203.2 after Tstop)
+#:   Isolid  1, 2 -> hold the preload during the hold (the engine resets the
+#:                cut stress to it while t <= Tstart + 0.1 dT, boltst.F:104)
+#:                and then lose the cut element: ZERO OR NEGATIVE VOLUME and
+#:                a time-step stop right after it (z bar, 2.27e-5 / 2.30e-5
+#:                s) or once the stiffness is back at Tstart + 0.7 dT
+#:                (rotated bar, 1.43e-4 s)
+#:   Isolid 12 -> 0 MPa for the whole run, 0 errors: the starter prints only
+#:                WARNING 1160 (ISOLID=12 obsolete), and the 8-point
+#:                S8FORC3 never calls the bolt routine BOLTST (s8forc3.F)
+#:   Isolid 24 -> diverges once the stiffness is back: 1432.1 MPa at 0.8 dT,
+#:                1410.9 at 2 dT, against the 200 MPa target
+#: dT = Tstop - Tstart. A preload that nothing reacts collapses its cut
+#: elements at every Isolid: the FREE bar of test_preload_inistate._bar_deck()
+#: at Isolid 17 lost its step (dt < 1e-8 s at 1.483e-5 s) while its two halves
+#: closed on the held 200 MPa - which is why a 2026-10-31 run of that free bar
+#: (1.4e-7 to 2.3e-9 s by t = 1.79e-5 s) did not reproduce the set: the probe,
+#: not the set (LS-DYNA's *INITIAL_STRESS_SECTION Remark 6 also presumes a
+#: structure that reacts the cross-section stress).
 #:
 #: Isolid 5 is what *CONTROL_HOURGLASS IHQ 4/5 maps to, so leaving it out made
 #: the warning fire on decks whose bolt preload is in fact fine — re-measured
@@ -168,13 +185,10 @@ def _vector_direction(state: ConversionState, vid: int):
 #: ELFORM 10, the same *INITIAL_STRESS_SECTION) the written Isolid 14
 #: (master), 1 (K-30) and 24 (ELFORM 1 + *CONTROL_HOURGLASS IHQ 6) give
 #: decoded-equal T01 (GLOBAL and the bolt /SECT, 50 states over 20 us) and
-#: byte-equal anim files - one run, three cells. Whether that run holds the
-#: pre-tension is a separate question this set does not answer: in that
-#: measurement (nt 4) the tet bolt's step fell from 1.0e-7 to 2.9e-9 s by
-#: t = 1.87e-5 s, and so did the Isolid 17 arm of the hex bar itself
-#: (test_preload_inistate._bar_deck(), byte-identical at master and K-30:
-#: 1.4e-7 to 2.3e-9 s by t = 1.79e-5 s, I-ENERGY 174.5 at cycle 100) - the
-#: hex rows above were not reproduced in that run (ROADMAP).
+#: byte-equal anim files - one run, three cells. That twin is free as well,
+#: and its step fell from 1.0e-7 to 2.9e-9 s by t = 1.87e-5 s; CLAMPED, the
+#: tet twin holds the preload (192.2 .. 208.2 MPa after Tstop, NORMAL to 4e-4
+#: s; round 10, B9).
 _PRELOAD_STABLE_ISOLID = frozenset({5, 14, 17})
 
 
@@ -645,14 +659,19 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
         state.warn(
             f"{label}: preloaded part(s) {sorted(pids)} emit /PROP/SOLID "
             f"Isolid={isolid}. Measured on this build with /PRELOAD Itype=2 at "
-            "200 MPa, only Isolid 5, 14 and 17 hold the pre-tension (14 "
-            "cleanest: 200.0 MPa at t=0, still ~200 after Tstop). Isolid 1 and "
-            "2 hit ZERO OR NEGATIVE VOLUME at cycle 0, Isolid 12 is a "
-            "completely SILENT no-op (0 MPa for the whole run, 0 errors, 0 "
-            "warnings) and Isolid 24 diverges late in the preload window and "
-            "never recovers (re-measured 1266 -> 1370 MPa against a 200 MPa "
-            "target; an earlier probe of the same bar reached 1400-1500 MPa). "
-            "Set the part's "
+            "200 MPa on a bar clamped at both ends (two geometries, nt 4 = nt "
+            "2), only Isolid 5, 14 and 17 hold the pre-tension (14 cleanest: "
+            "198.6 .. 201.4 MPa after Tstop). Isolid 1 and 2 hold it during "
+            "the hold and then lose the cut element - ZERO OR NEGATIVE VOLUME "
+            "and a time-step stop right after Tstart + 0.1 (Tstop - Tstart), "
+            "or once the stiffness is restored at Tstart + 0.7 (Tstop - "
+            "Tstart); Isolid 12 carries 0 MPa for the whole run with 0 errors "
+            "- the starter prints only WARNING 1160 (ISOLID=12 obsolete), and "
+            "the 8-point S8FORC3 never calls the bolt routine BOLTST; Isolid "
+            "24 diverges once the stiffness is back (1432 MPa at 0.8 (Tstop - "
+            "Tstart), 1411 at 2 (Tstop - Tstart), against 200). A preload "
+            "that nothing reacts (a free bar) collapses its cut elements at "
+            "every Isolid. Set the part's "
             "*SECTION_SOLID ELFORM — or its *CONTROL_HOURGLASS IHQ, which also "
             "picks Isolid — to one of the three, or the bolt pre-tension will "
             "not do what this card says.")

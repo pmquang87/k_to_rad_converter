@@ -7190,7 +7190,9 @@ from +2.884 % / +4.041 % to −1.719 % / +1.405 %, and the IMPLICIT
 (p.41-104 Remark 13 — no hourglass energy at all), ELFORM 2/3/16 and the
 tetrahedra (no hourglass modes), ALE sections, `/MAT/LAW115` sections (their
 own measured 17 → 24) and any deck carrying an `*INITIAL_STRESS_SECTION`
-(`Isolid` 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0 under `/PRELOAD`).
+(under `/PRELOAD` Itype 2, `Isolid` 1 and 2 hold the preload through its
+hold and then lose the cut element - ZERO OR NEGATIVE VOLUME and a time-step
+stop - MEASURED on a bar clamped at both ends).
 A `*MAT_NULL` / `*MAT_ELASTIC_FLUID` section keeps the VISCOUS `Isolid` 1 even
 implicitly (p.25-3 `*HOURGLASS` Remark 4), and on an implicit deck a stated
 IHQ 1-5 also becomes type 6 (p.12-272), which is what LS-DYNA does itself._

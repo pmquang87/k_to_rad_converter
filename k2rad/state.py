@@ -6377,9 +6377,10 @@ class SolidHourglassScreens:
     is consulted once per part in the ``_assign_hourglass_props`` prepass and
     once per preloaded element in the /PRELOAD writer.
     """
-    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: /PRELOAD
-    #: Itype=2 measured ZERO OR NEGATIVE VOLUME at cycle 0 on Isolid 1 and 2
-    #: (``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
+    #: False when the deck carries a ``*INITIAL_STRESS_SECTION``: under
+    #: /PRELOAD Itype=2 Isolid 1 and 2 lose the cut element right after the
+    #: hold (ZERO OR NEGATIVE VOLUME, measured on a clamped bar;
+    #: ``writer/preload._PRELOAD_STABLE_ISOLID``), so a bolted deck keeps its
     #: ELFORM Isolid everywhere.
     deck_enabled: bool
     #: Section ids the synthesis skips outright — today the /MAT/LAW115

@@ -2203,8 +2203,10 @@ def _solid_hg_screens(state: ConversionState) -> SolidHourglassScreens:
 
     * **deck_enabled** — a deck carrying ``*INITIAL_STRESS_SECTION`` keeps its
       ELFORM Isolid everywhere. ``writer/preload._PRELOAD_STABLE_ISOLID`` is
-      ``{5, 14, 17}``: measured on a 1x1x4 hex bar at /PRELOAD Itype=2 /
-      200 MPa, **Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0**. The
+      ``{5, 14, 17}``: measured on a 1x1x4 hex bar clamped at both ends at
+      /PRELOAD Itype=2 / 200 MPa, **Isolid 1 and 2 lose the cut element
+      right after the hold** (ZERO OR NEGATIVE VOLUME and a time-step stop
+      at t 2.27e-5 / 2.30e-5 s of a 2e-4 s window). The
       screen is deck-wide rather than per-section because the preloaded parts
       are only known once the cross-section cut has been resolved, in a writer
       pass that runs much later than this one; a deck-wide screen can only fail
