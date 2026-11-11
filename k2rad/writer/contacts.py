@@ -2444,6 +2444,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         # (CardStack K-05: the report names that route's own gap rule).
         if report_gapmin:
             _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
+        _warn_slsfac_dropped(state)                      # round 10, A9
         return []
     lines = ["#-  INTERFACES:", HDR]
 
@@ -2954,7 +2955,43 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         _report_unconsumed_gapmin(state, gapmin_overrides)
 
     _note_dropped_interfaces(state, dropped)
+    _warn_slsfac_dropped(state)                          # round 10, A9
     return lines
+
+
+def _deck_has_contact_record(state: ConversionState) -> bool:
+    """True when the deck carries a contact k2rad converts in any
+    container (round 10, A9: the SLSFAC sentence is about those)."""
+    return bool(state.contacts_single or state.contacts_surf2surf
+                or state.contacts_general or state.contacts_type25
+                or state.contacts_tied or state.contacts_spotweld
+                or state.contacts_tiebreak or state.force_transducers)
+
+
+def _warn_slsfac_dropped(state: ConversionState) -> None:
+    """R14 round 10, A9: ONE sentence per deck when ``*CONTROL_CONTACT``
+    SLSFAC is not LS-DYNA's default (0 = 0.1, Vol I R17 p.12-69) on a deck
+    with a contact: the reader stores it (``handlers.handle_control_contact``)
+    and no ``/INTER`` cell carries it. Called from both exits of
+    :func:`_make_interfaces` (five of the eight R14 carriers reach only the
+    early one); the state flag keeps it once when a deferred implicit stub
+    calls that section a second time. Text only: no byte moves."""
+    cc = state.ctrl_contact
+    if cc is None or state.slsfac_named or not _deck_has_contact_record(state):
+        return
+    v = cc.slsfac
+    if v == 0.0 or abs(v - 0.1) <= 1e-12 * 0.1:
+        return
+    state.slsfac_named = True
+    neg = " - a negative value LS-DYNA does not define" if v < 0.0 else ""
+    state.warn(
+        f"*CONTROL_CONTACT SLSFAC = {v:g}{neg} (Vol I R17 p.12-69: the scale "
+        "factor of every sliding-interface penalty; 0 = LS-DYNA's default "
+        "0.1): no /INTER cell k2rad writes carries it - the reader stores it "
+        "and reads back only SHLTHK - so on this deck's contacts the "
+        "OpenRadioss stiffness is the starter's own formula times Stfac (from "
+        "each card's SFS), not LS-DYNA's SLSFAC x SF x K A / max shell "
+        "diagonal (Theory R16 eq. 30.7 / 30.8).")
 
 
 def _report_unconsumed_gapmin(state: ConversionState,

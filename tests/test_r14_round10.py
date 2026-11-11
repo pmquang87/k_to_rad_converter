@@ -1559,6 +1559,99 @@ _A7_GUARD_AI_SHA = {
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A9  *CONTROL_CONTACT SLSFAC named (text only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _a9_deck(slsfac="0.02", contact="*CONTACT_SURFACE_TO_SURFACE",
+             ctrl=True) -> str:
+    """Two 10 x 10 mm *MAT_ELASTIC shell plates 1 mm apart (parts 1 / 2),
+    one *CONTACT card between them (part sides), and a *CONTROL_CONTACT
+    card whose first field is *slsfac* (blank: an empty field)."""
+    nodes = "".join(f"{n:8d}{x:16.1f}{y:16.1f}{z:16.1f}\n" for n, x, y, z in (
+        (1, 0, 0, 0), (2, 10, 0, 0), (3, 10, 10, 0), (4, 0, 10, 0),
+        (5, 0, 0, 1), (6, 10, 0, 1), (7, 10, 10, 1), (8, 0, 10, 1)))
+    cc = (f"*CONTROL_CONTACT\n{slsfac:>10}       0.0         0         0"
+          "         1\n" if ctrl else "")
+    con = (f"{contact}\n" + _row(1, 2, 3, 3) + "\n" + _row(0.0, 0.0) + "\n"
+           + _row(1.0, 1.0) + "\n") if contact else ""
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n    1.0E-4\n" + cc
+            + "*PART\np1\n" + _row(1, 1, 1) + "\n*PART\np2\n" + _row(2, 1, 1)
+            + "\n*SECTION_SHELL\n" + _row(1, 2) + "\n" + _row(1.0, 1.0, 1.0,
+                                                             1.0)
+            + "\n*MAT_ELASTIC\n" + _row(1, "7.8E-9", "2.0E5", 0.3) + "\n"
+            + con + "*ELEMENT_SHELL\n" + "".join(
+                f"{e:8d}{p:8d}" + "".join(f"{n:8d}" for n in ns) + "\n"
+                for e, p, ns in ((1, 1, (1, 2, 3, 4)), (2, 2, (5, 6, 7, 8))))
+            + "*NODE\n" + nodes + "*END\n")
+
+
+def _a9_notes(res):
+    return [w for w in res.warnings
+            if w.startswith("*CONTROL_CONTACT SLSFAC")]
+
+
+class SlsfacNamed(unittest.TestCase):
+    """A9 (text only): *CONTROL_CONTACT SLSFAC (Vol I R17 p.12-69, 0 = the
+    default 0.1) reaches no /INTER cell; one sentence per deck with a
+    contact when it is not 0 / 0.1, from both exits of _make_interfaces."""
+
+    def test_a_stated_slsfac_is_named_once(self):
+        res, st, eng = _convert(_a9_deck("0.02"))
+        self.assertEqual(len(_cards(st, "/INTER/TYPE7/")), 1)
+        notes = _a9_notes(res)
+        self.assertEqual(len(notes), 1)
+        for needle in ("*CONTROL_CONTACT SLSFAC = 0.02 (Vol I R17 p.12-69",
+                       "no /INTER cell k2rad writes carries it",
+                       "reads back only SHLTHK",
+                       "Theory R16 eq. 30.7 / 30.8"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, notes[0])
+        self.assertNotIn("negative", notes[0])
+        # text only: the value moves no byte
+        _r, st1, eng1 = _convert(_a9_deck("0.1"))
+        self.assertEqual((st, eng), (st1, eng1))
+
+    def test_the_default_says_nothing(self):
+        for value in ("0.1", "0.0", ""):
+            with self.subTest(slsfac=value):
+                res, _st, _e = _convert(_a9_deck(value))
+                self.assertEqual(_a9_notes(res), [])
+
+    def test_the_early_exit_names_it_too(self):
+        """A deck whose only contact takes the TYPE25 route never reaches
+        the surface-to-surface loop (proj-errod / projectile shape)."""
+        res, st, _e = _convert(_a9_deck(
+            "1.0", contact="*CONTACT_ERODING_SURFACE_TO_SURFACE"))
+        self.assertTrue(_cards(st, "/INTER/TYPE25/"))
+        self.assertEqual(len(_a9_notes(res)), 1)
+        self.assertIn("SLSFAC = 1 (", _a9_notes(res)[0])
+
+    def test_no_contact_no_sentence(self):
+        res, _st, _e = _convert(_a9_deck("0.02", contact=""))
+        self.assertEqual(_a9_notes(res), [])
+
+    def test_a_negative_value_is_named_as_undefined(self):
+        res, _st, _e = _convert(_a9_deck("-0.5"))
+        notes = _a9_notes(res)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("SLSFAC = -0.5 - a negative value LS-DYNA does not "
+                      "define (", notes[0])
+
+    def test_a_second_call_says_nothing(self):
+        """A deferred implicit stub calls _make_interfaces again: the
+        sentence stays once (the state flag)."""
+        from k2rad.state import ConversionState, ControlContact
+        from k2rad.writer import contacts
+        st = ConversionState()
+        st.ctrl_contact = ControlContact(0.02, 0.0, 1, 0, 1, 0)
+        st.contacts_type25.append(object())       # any record will do
+        contacts._warn_slsfac_dropped(st)
+        contacts._warn_slsfac_dropped(st)
+        self.assertEqual(len([w for w in st.warnings
+                              if w.startswith("*CONTROL_CONTACT")]), 1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Part A-ii: retracted statements and the flags
 # ═════════════════════════════════════════════════════════════════════════════
 

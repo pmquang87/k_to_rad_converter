@@ -7069,7 +7069,10 @@ or ELFORM 2 on cube-like elements (-> `Isolid` 17).
 `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_OUTPUT`, `*CONTROL_SHELL`,
 `*CONTROL_SOLID`, `*CONTROL_ENERGY`, `*CONTROL_CPU` (`*CONTROL_OUTPUT` IKEDIT is
 read for the engine `/PRINT/-N`, see *Output frequencies*; `--print-every N`
-writes N instead)
+writes N instead; `*CONTROL_CONTACT` SLSFAC - the scale factor of every
+LS-DYNA sliding-interface penalty, 0 = the default 0.1, Vol I R17 p.12-69 -
+reaches no `/INTER` cell and is named once per deck with a contact when it
+is not 0 / 0.1, since R14 round 10: 8 R14 decks)
 `*DATABASE_*` (binary output, time-history channels)
 `*DATABASE_EXTENT_BINARY` MAXINT (card 1 field 3, blank = 3) > 3 →
 `/ANIM/SHELL/TENS/STRESS/ALL` in the engine deck, right after MEMB / UPPER /

@@ -117,6 +117,22 @@ Prior history (before this changelog was introduced) is summarized in the
     `test_r14_triage_1.AleSubmaterialTests` re-derived (the route-neutral
     sentence; the light-fluid drop text with `--no-vacuum-light-fluid` as
     the `/MAT/VOID` subcase).
+  - **A9 - `*CONTROL_CONTACT` SLSFAC is named (text only, no flag).** Read
+    since round 1 (`handlers.handle_control_contact`) and carried by no
+    `/INTER` cell - the writer reads back only SHLTHK. LS-DYNA scales every
+    sliding-interface penalty by it (Vol I R17 p.12-69, 0 = the default 0.1;
+    Theory R16 eq. 30.7 / 30.8). Now ONE sentence per deck with a contact
+    when it is not 0 / 0.1, from both exits of
+    `writer/contacts._make_interfaces` (`_warn_slsfac_dropped`; five of the
+    eight R14 carriers reach only the early exit, their contacts take the
+    TYPE25 route), once even when a deferred implicit stub calls that
+    section again; a negative value is named as one LS-DYNA does not
+    define. MEASURED on the A-ii branch: the 8 R14 carriers print it once
+    each with their stated value (efg/metal-cutting 2.5, ex_26 1,
+    contact.projectile 1, control_adaptive.cup-draw 0.01, plate-shatter
+    0.01, proj-errod 10, projectile 1, pan.drawbead.31 0.02); the
+    anisotropic cup-draw and hemi.draw (0.1) stay silent. 0 bytes. Tests:
+    `tests/test_r14_round10.py` `SlsfacNamed`.
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
   time step, implicit, the erosion and few-node texts).** One commit per item;
   every later item of the round is measured on the bytes of the earlier ones

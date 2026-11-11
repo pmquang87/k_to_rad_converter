@@ -10684,6 +10684,10 @@ class ConversionState:
     # The materials section, the LAW51 phase screen and the A7 1b inlet
     # refusal all read this ONE record.
     vacuum_light_fluid_plan: Optional[Dict[int, VacuumLightFluidPlan]] = None
+    # R14 round 10, A9: the *CONTROL_CONTACT SLSFAC sentence was written
+    # (writer/contacts._warn_slsfac_dropped runs at both exits of
+    # _make_interfaces, which a deferred implicit stub calls a second time).
+    slsfac_named: bool = False
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.
