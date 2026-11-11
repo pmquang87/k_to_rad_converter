@@ -9539,7 +9539,8 @@ class ConvertOptions:
     # --no-single-surface-sst-gap (default ON; writer/contacts): Gapmin =
     # |SST| on a single-surface contact of shells on an Igap-0 route - two
     # shells each carrying the contact thickness SST meet at SST/2 + SST/2 -
-    # instead of (|SST| + |MST|)/2.
+    # instead of (|SST| + |MST|)/2 (a self-mirrored SOFT -7 card too since
+    # round 10: its Igap-2 TYPE7 gap is max(Gapmin, t)).
     single_surface_sst_gap: bool = True
 
     # ── The opt-out flags of the user's decision 8 (2026-11-01) for the

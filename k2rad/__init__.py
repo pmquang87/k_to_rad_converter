@@ -1890,9 +1890,9 @@ def convert(
         self-contact with Iedge 1 (shell border edges) instead of 1000. Off
         by default.
     single_surface_sst_gap : bool
-        Gapmin = |SST| on a single-surface contact of shells (Igap-0 routes)
-        instead of (|SST| + |MST|)/2. Default True
-        (``--no-single-surface-sst-gap``).
+        Gapmin = |SST| on a single-surface contact of shells (Igap-0 routes,
+        and the Igap-2 SOFT -7 self-contact since round 10) instead of
+        (|SST| + |MST|)/2. Default True (``--no-single-surface-sst-gap``).
     contact_birth_death : bool
         ``*CONTACT`` Card-2 BT / DT -> ``/INTER`` Tstart / Tstop on every
         sliding-contact route, by the sign rules of Vol I R17 p.11-29/30

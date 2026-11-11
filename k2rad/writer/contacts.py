@@ -4396,7 +4396,8 @@ def _pids_shell_solid(state: ConversionState,
 
 def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
                                sst: float, mst: float, pids: Iterable[int],
-                               target: str = "TYPE7") -> float:
+                               target: str = "TYPE7",
+                               igap2: bool = False) -> float:
     """CardStack K-12 (default ON, ``--no-single-surface-sst-gap``): the
     Gapmin of a SINGLE-surface contact on an Igap-0 route from Card-3 SST.
 
@@ -4411,7 +4412,14 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
     the rule is refused by name (the old value kept). No SST, no shell, or
     the flag off: :func:`_sst_mst_to_gapmin`, today's value and text - and
     with the flag on, SST 0 and an MST on a set with a shell, MST is named as
-    unused while the old value stands (the fix round of the K-12 review)."""
+    unused while the old value stands (the fix round of the K-12 review).
+
+    *igap2* (round 10, B1): the self-mirrored SOFT -7 card, an /INTER/TYPE7
+    with Igap 2 whose gap is max(Gapmin, t_s/2 + t_m/2) from the elements
+    (``i7cor3.F:98-121``), takes the same |SST|, and its sentence says that
+    |SST| acts only where it exceeds t; ``--inter-gapmin`` does not reach
+    that route (CardStack K-05), so no sentence offers it there."""
+    lever = target == "TYPE7" and not igap2
     if not state.options.single_surface_sst_gap:
         return _sst_mst_to_gapmin(sst, mst, state, inter_id, target)
     if sst == 0.0:
@@ -4425,7 +4433,7 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
                 f"/INTER/{target} keeps the old (|SST| + |MST|)/2 = {gap:g}, "
                 "from MST alone"
                 + (f"; --inter-gapmin {inter_id}=VAL sets another value."
-                   if target == "TYPE7" else "."))
+                   if lever else "."))
         return gap
     has_shell, has_solid = _pids_shell_solid(state, pids)
     if not has_shell:
@@ -4441,7 +4449,7 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
             "hold both - the |SST| rule (CardStack K-12) is refused here and "
             f"/INTER/{target} keeps Gapmin (|SST| + |MST|)/2 = {old:g}"
             + (f"; --inter-gapmin {inter_id}=VAL sets another value."
-               if target == "TYPE7" else "."))
+               if lever else "."))
         return gap
     if sst < 0.0:
         state.warn(
@@ -4458,6 +4466,13 @@ def _single_surface_sst_gapmin(state: ConversionState, inter_id: int,
         f"the old two-surface (|SST| + |MST|)/2 = {old:g}."
         + (f" MST {mst:g} is not used: a single-surface contact has no SURFB "
            "(SBST is the SURFB thickness, p.11-33)." if mst else "")
+        + (" SOFT -7 writes Igap 2, whose gap is max(Gapmin, t_s/2 + t_m/2) "
+           "from the elements (i7cor3.F:98-121), so |SST| sets the "
+           "engagement where it exceeds the shell thickness (MEASURED on two "
+           "t 0.35 cards with SST 0.5, nt 4: engaged at 0.3501 mm with the "
+           "old Gapmin 0.25, at 0.5005 mm with Gapmin 0.5; LS-DYNA's 0.5) "
+           "and the element thickness sets it below (round 10)."
+           if igap2 else "")
         + " On an implicit deck, keep ignore=0 to retain Inacti=0 if Gapmin "
         "exceeds the physical clearance (pre-engagement bootstrap) — "
         "ignore=1/2 (and any explicit deck) maps to Inacti=5, which shrinks "
@@ -6174,7 +6189,10 @@ def _general_route_gap(c) -> Tuple[str, str, str]:
         rule = ("with Istf 2, Igap 2: a variable gap, max(Gapmin, t_s/2 + "
                 "t_m/2) from the elements' thicknesses (a *PART_CONTACT OPTT "
                 "first, i7sti3.F:230-250 / 494-501), so the Card-3 SST/MST "
-                "set only its Gapmin floor")
+                "set only its Gapmin floor: |SST| on a self-contact of "
+                "shells only (CardStack K-12, round 10; "
+                "--no-single-surface-sst-gap keeps the old value), else "
+                "(|SST| + |MST|)/2")
     else:
         rule = ("with a constant gap, Gapmin from the Card-3 SST/MST: |SST| "
                 "on a self-contact of shells only (CardStack K-12; "
@@ -6204,8 +6222,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         scale-weighted fabs(SST*SFST + MST*SFMT)/2. These coincide whenever the
         Card-3 scale factors are blank/unit and SST/MST share a sign (the usual
         case); they differ only for non-unit SFST/SFMT or mixed-sign thicknesses.
-        A self-mirrored -11 / -19 card over shells only takes |SST| instead
-        (``_single_surface_sst_gapmin``, CardStack K-12, default ON).
+        A self-mirrored -7 / -11 / -19 card over shells only takes |SST|
+        instead (``_single_surface_sst_gapmin``, CardStack K-12, default ON;
+        the -7 one since round 10, B1).
       * Inacti via ``_ignore_to_inacti`` (=5 explicit) rather than dyna2rad's
         fixed 6 — Inacti=5 is the validated k2rad convention. The node-moving
         values are Inacti 3 / 4 (i7pwr3.F:208-243), and the engine seg-fault
@@ -6282,20 +6301,21 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "Gapmin exceeds the physical clearance; ignore=1/2 (and "
                     "any explicit deck) maps to Inacti=5, which shrinks the "
                     "gap back to the clearance.")
-        elif self_contact and c.soft in (-11, -19):
+        elif self_contact and c.soft in (-7, -11, -19):
             # CardStack K-12: the self-mirrored -11 / -19 cards are Igap-0
-            # single-surface routes - |SST| on a set of shells only
+            # single-surface routes - |SST| on a set of shells only; the
+            # SOFT -7 TYPE7 (Igap 2) takes |SST| too (round 10, B1): its
+            # gap is max(Gapmin, t_s/2 + t_m/2), so |SST| acts above t
+            self_pids = _contact_master_pids(state, c.ssid, c.sstyp)
             gapmin = _single_surface_sst_gapmin(
-                state, c.inter_id, c.sst, c.mst,
-                _contact_master_pids(state, c.ssid, c.sstyp), tname)
+                state, c.inter_id, c.sst, c.mst, self_pids, tname,
+                igap2=c.soft == -7)
+            if c.soft == -7:
+                # CardStack K-12: Igap 2 - SST below t never acts
+                _warn_soft7_sst_below_t(state, c, gapmin, self_pids)
         else:
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)
-            if self_contact and c.soft == -7:
-                # CardStack K-12: Igap 2 - SST below t never acts
-                _warn_soft7_sst_below_t(
-                    state, c, gapmin,
-                    _contact_master_pids(state, c.ssid, c.sstyp))
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin,
                                    target=tname)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id, c.title)

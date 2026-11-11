@@ -3384,9 +3384,10 @@ class HandOverHelpTexts(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
         h = _action_help("--single-surface-sst-gap")
-        for needle in ("self-mirrored SOFT -11 / -19", "MST is named as "
+        # round 10, B1: the SOFT -7 route takes |SST| too
+        for needle in ("self-mirrored SOFT -7 / -11 / -19", "MST is named as "
                        "unused", "*PART_CONTACT OPTT", "MINIMUM GAP 0.35",
-                       "TYPE7, TYPE11 and TYPE19"):
+                       "TYPE7, TYPE11 and TYPE19", "0.5005 mm"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
 
@@ -3951,9 +3952,10 @@ class SingleSurfaceSstGap(unittest.TestCase):
     segment of a single-surface contact is SURFA, so two shells that each
     carry the contact thickness SST meet at SST/2 + SST/2 = |SST| (Vol I R17
     p.11-33 SAST); the two-surface (|SST| + |MST|)/2 engaged them at half
-    that. Shell-only Igap-0 routes only: a mixed shell / solid set is refused
-    by name, the SOFT -7 TYPE7 (Igap 2) gets a warning, the airbag route and
-    every two-surface route are untouched."""
+    that. Shell-only: a mixed shell / solid set is refused by name, the SOFT
+    -7 TYPE7 (Igap 2) takes |SST| too (round 10, B1: its gap is max(Gapmin,
+    t)) and names an SST below t with OPTT, the airbag route and every
+    two-surface route are untouched."""
 
     def test_the_shell_ass_route_takes_sst(self):
         deck = _k1a_deck(_k1a_ass(7, 1, 2, card3=(0, 0, 0.35)))
@@ -3995,9 +3997,12 @@ class SingleSurfaceSstGap(unittest.TestCase):
         self.assertTrue(_has(res.warnings, "CONTACT 21:", "mixes shells and "
                              "solids"), res.warnings)
 
-    def test_the_soft_11_and_19_self_mirrors_take_sst(self):
+    def test_the_soft_7_11_and_19_self_mirrors_take_sst(self):
+        """Round 10, B1 extends the -11 / -19 rule to -7 (hand: |0.35| by
+        default, (0.35 + 0)/2 = 0.175 under the opt-out)."""
         gen = "CONTACT_AUTOMATIC_GENERAL_ID"
-        for soft, gap in ((-11, _gap11), (-19, _gap19)):
+        for soft, gap in ((-7, lambda s, i: _type7(s, i)["gapmin"]),
+                          (-11, _gap11), (-19, _gap19)):
             with self.subTest(soft=soft):
                 deck = _k1a_deck(_k1a_ass(31, 1, 2, card3=(0, 0, 0.35), kw=gen,
                                           tail=_row(soft) + "\n"))
@@ -4006,18 +4011,76 @@ class SingleSurfaceSstGap(unittest.TestCase):
                 _r, s, _e = _convert(deck, single_surface_sst_gap=False)
                 self.assertEqual(gap(s, 31), 0.175)
 
-    def test_soft_7_names_optt_below_the_shell_thickness(self):
+    def test_soft_7_takes_sst_and_names_optt_below_the_shell_thickness(self):
+        """Round 10, B1: SST 0.2 on t 0.35 writes Gapmin |0.2| = 0.2 (was
+        (0.2 + 0)/2 = 0.1) and still names the OPTT lever; SST 0.5 writes
+        |0.5| = 0.5 with the Igap-2 sentence and no OPTT line."""
         gen = "CONTACT_AUTOMATIC_GENERAL_ID"
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.2), kw=gen, tail=_row(-7) + "\n")))
-        self.assertEqual(_type7(s, 31)["gapmin"], 0.1)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.2)
         self.assertTrue(_has(res.warnings, "CONTACT 31:", "Igap 2",
                              "below the shell thickness t = 0.35",
                              "no effect", "*PART_CONTACT OPTT 0.2"),
                         res.warnings)
-        res, _s, _e = _convert(_k1a_deck(_k1a_ass(
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.5), kw=gen, tail=_row(-7) + "\n")))
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.5)
         self.assertFalse(_has(res.warnings, "*PART_CONTACT OPTT"))
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "Gapmin=0.5 = |SST|",
+                             "SOFT -7 writes Igap 2",
+                             "max(Gapmin, t_s/2 + t_m/2)", "i7cor3.F:98-121",
+                             "0.3501 mm", "0.5005 mm"), res.warnings)
+
+    def test_soft_7_on_a_mixed_set_keeps_the_old_value(self):
+        """Round 10, B1: the mixed-set refusal on the SOFT -7 route keeps
+        (0.35 + 0)/2 = 0.175 and offers no --inter-gapmin (it does not reach
+        the sentinel routes, CardStack K-05; D-B1)."""
+        deck = _k1a_deck(_k1a_ass(31, 1, 2, card3=(0, 0, 0.35),
+                                  kw="CONTACT_AUTOMATIC_GENERAL_ID",
+                                  tail=_row(-7) + "\n"))
+        old_set = "*SET_PART_LIST\n" + _row(1) + "\n" + _row(101, 102) + "\n"
+        self.assertEqual(deck.count(old_set), 1)
+        deck = deck.replace(old_set, "*SET_PART_LIST\n" + _row(1) + "\n"
+                            + _row(101, 102, 1) + "\n")
+        res, s, _e = _convert(deck)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.175)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "mixes shells and "
+                             "solids", "refused", "(|SST| + |MST|)/2 = 0.175"),
+                        res.warnings)
+        self.assertFalse(_has(res.warnings, "--inter-gapmin 31=VAL"),
+                         res.warnings)
+
+    def test_a_two_surface_soft_7_card_is_unchanged(self):
+        """Round 10, B1: a two-surface SOFT -7 card keeps (0.35 + 0.1)/2 =
+        0.225 and gets no K-12 sentence."""
+        res, s, _e = _convert(_k1a_deck(_k1a_s2s(
+            31, kw="CONTACT_AUTOMATIC_GENERAL_ID", card3=(0, 0, 0.35, 0.1),
+            tail=_row(-7) + "\n")))
+        self.assertAlmostEqual(_type7(s, 31)["gapmin"], 0.225)
+        self.assertFalse(_has(res.warnings, "CONTACT 31:", "= |SST|"),
+                         res.warnings)
+
+    def test_soft_7_opt_out_keeps_the_old_gap(self):
+        """Round 10, B1: --no-single-surface-sst-gap writes 0.5/2 = 0.25 on
+        the SOFT -7 route and prints no Igap-2 sentence."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
+            31, 1, 2, card3=(0, 0, 0.5), kw="CONTACT_AUTOMATIC_GENERAL_ID",
+            tail=_row(-7) + "\n")), single_surface_sst_gap=False)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.25)
+        self.assertEqual(_type7(s, 31)["igap"], "2")
+        self.assertFalse(_has(res.warnings, "SOFT -7 writes Igap 2"),
+                         res.warnings)
+
+    def test_soft_7_names_mst_as_unused(self):
+        """Round 10, B1: SST 0.5 and MST 0.1 on the self-mirrored SOFT -7
+        card write |0.5| = 0.5 and name MST as unused."""
+        res, s, _e = _convert(_k1a_deck(_k1a_ass(
+            31, 1, 2, card3=(0, 0, 0.5, 0.1), kw="CONTACT_AUTOMATIC_GENERAL_ID",
+            tail=_row(-7) + "\n")))
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.5)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "MST 0.1 is not "
+                             "used"), res.warnings)
 
     def test_the_airbag_and_two_surface_routes_are_untouched(self):
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
@@ -4359,15 +4422,20 @@ class SingleSurfaceSstGapReviewPins(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "|SST|/2 + |SST|/2"),
                          res.warnings)
 
-    def test_soft_7_with_a_gapmin_at_the_thickness_says_nothing(self):
-        """R12c: SST below t but an MST that lifts the written Gapmin to t
-        or more - the floor acts, no OPTT warning."""
+    def test_soft_7_names_the_unused_mst_and_the_optt_lever(self):
+        """R12c (round 10, B1): an MST no longer lifts the SOFT -7 Gapmin
+        (LS-DYNA's single-surface card has no SURFB): SST 0.1 writes 0.1 and
+        the OPTT lever is named. (The old (0.1 + 1.0)/2 = 0.55 engaged the
+        cards at 0.55 against LS-DYNA's 0.1; the new card engages at
+        max(0.1, t) = 0.35, and OPTT 0.1 reaches 0.1.)"""
         res, s, _e = _convert(_k1a_deck(_k1a_ass(
             31, 1, 2, card3=(0, 0, 0.1, 1.0),
             kw="CONTACT_AUTOMATIC_GENERAL_ID", tail=_row(-7) + "\n")))
-        self.assertEqual(_type7(s, 31)["gapmin"], 0.55)
-        self.assertFalse(_has(res.warnings, "*PART_CONTACT OPTT"),
-                         res.warnings)
+        self.assertEqual(_type7(s, 31)["gapmin"], 0.1)
+        self.assertTrue(_has(res.warnings, "CONTACT 31:", "MST 1 is not used"),
+                        res.warnings)
+        self.assertTrue(_has(res.warnings, "*PART_CONTACT OPTT 0.1"),
+                        res.warnings)
 
     def test_soft_7_without_sst_says_nothing(self):
         """R12d: no Card-3 SST - no 'OPTT 0' advice."""

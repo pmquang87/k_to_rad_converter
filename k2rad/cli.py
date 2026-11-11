@@ -2055,11 +2055,14 @@ def build_parser() -> argparse.ArgumentParser:
              "--no-single-surface-sst-gap writes the old (|SST| + |MST|)/2 "
              "(0.175 for SST 0.35); a mixed shell / solid set is refused by "
              "name. Routes: the SSID != 0 and the implicit SSID = 0 "
-             "/INTER/TYPE7 and a self-mirrored SOFT -11 / -19 card; MST is "
-             "named as unused; on the SOFT -7 TYPE7 (Igap 2) an SST below the "
-             "shell thickness is warned with its lever, *PART_CONTACT OPTT; "
-             "the airbag and two-surface routes are unchanged. Starter probe: "
-             "MINIMUM GAP 0.35 for SST 0.35 on TYPE7, TYPE11 and TYPE19.",
+             "/INTER/TYPE7 and a self-mirrored SOFT -7 / -11 / -19 card; MST "
+             "is named as unused; the SOFT -7 TYPE7 is Igap 2, a gap of "
+             "max(Gapmin, t), so |SST| acts above the shell thickness "
+             "(MEASURED, two t 0.35 cards with SST 0.5: engaged at 0.5005 mm, "
+             "0.3501 mm with the old value) and an SST below it is warned "
+             "with its lever, *PART_CONTACT OPTT; the airbag and two-surface "
+             "routes are unchanged. Starter probe: MINIMUM GAP 0.35 for SST "
+             "0.35 on TYPE7, TYPE11 and TYPE19.",
     )
     # The opt-out flags of the user's decision 8 (2026-11-01) for the four
     # wave-C defaults that had none: K-11, K-10's SOFT 2 Iedge gate, K-16

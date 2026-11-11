@@ -231,10 +231,13 @@ decks should start from
   `--no-single-surface-sst-gap` writes the old `(|SST| + |MST|)/2` (0.175
   for SST 0.35); a mixed shell / solid set is refused by name. The routes are
   the SSID != 0 and the implicit SSID = 0 `/INTER/TYPE7`, and a self-mirrored
-  SOFT -11 / -19 card. MST is named as unused (with SST 0 and an MST the old
-  value stands). On the SOFT -7 TYPE7 (Igap 2) an SST below the shell
-  thickness is warned with its lever, `*PART_CONTACT` OPTT. The airbag and
-  two-surface routes are unchanged. MEASURED: the starter echoes MINIMUM GAP
+  SOFT -7 / -11 / -19 card (the SOFT -7 TYPE7 is Igap 2, a gap of
+  max(Gapmin, t): `|SST|` acts above the shell thickness - MEASURED on two t
+  0.35 cards with SST 0.5: engaged at 0.5005 mm, 0.3501 mm with the old
+  `(|SST| + |MST|)/2` = 0.25 - and an SST below it is warned with its lever,
+  `*PART_CONTACT` OPTT; round 10). MST is named as unused (with SST 0 and an
+  MST the old value stands). The airbag and two-surface routes are
+  unchanged. MEASURED: the starter echoes MINIMUM GAP
   0.35 for SST 0.35 on a TYPE7, a TYPE11 and a TYPE19 probe, 0 ERROR(S). R14:
   0 of the 350 roster decks under 30 MB move.
 - `--inter-stmin ID=VAL` (repeatable) — default: no override, the cell keeps
