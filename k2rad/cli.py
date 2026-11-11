@@ -2285,6 +2285,41 @@ def build_parser() -> argparse.ArgumentParser:
              "they are. ON by default; --no-rigid-tool-penalty-cap writes "
              "Stmax 0.",
     )
+    parser.add_argument(
+        "--initial-void-copy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="An *INITIAL_VOID part in the fluid set of a "
+             "*CONSTRAINED_LAGRANGE_IN_SOLID coupling (no "
+             "*ALE_REFERENCE_SYSTEM card) is written as a LAW6 copy of its "
+             "fluid at 1e-3 x RO (its /EOS RHO_0 = RO) on its own "
+             "/GRBRIC/PART + /INTER/TYPE18 at 1e-3 x the fluid's Stfval. f = "
+             "1e-3 is a numerical floor of this converter, not LS-DYNA's "
+             "VFACT (a stress cut-off); LS-DYNA empties the part. "
+             "MEASURED on quadrature_B (nt 4, n 500): KE RMS 28.17 -> "
+             "10.42 %%, the cost IE RMS 142.04 -> 161.11 %%. ON by default; "
+             "--no-initial-void-copy keeps the void part on its fluid's "
+             "material at RO.",
+    )
+    parser.add_argument(
+        "--clis-pfac-stiffness",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt-in: write Stfval = PFAC x m_node / dt0^2 on every "
+             "*CONSTRAINED_LAGRANGE_IN_SOLID /INTER/TYPE18 instead of the "
+             "unit stiffness (m_node = the median lumped nodal mass of the "
+             "coupled fluid; dt0 = Tsca x the starter's smallest element "
+             "step, estimated from the deck); a void copy's or an A7 "
+             "light-fluid vacuum's own interface takes it x its density "
+             "ratio. A load-curve PFAC (< 0) and a deck with a LAW0 "
+             "*MAT_VACUUM are refused. MEASURED (nt 4): stagnation_A with "
+             "the vacuum light fluid and the inlet 86 %% of LS-DYNA's inflow "
+             "work by t 2.40e-4, IE RMS 206.79 -> 223.42 %%; quadrature_B IE "
+             "RMS 161.11 -> 492.61 %%. The first-step estimate is +0.11 / "
+             "+1.77 %% above the engine's first step on bird_B / quadrature_B "
+             "and +22.6 %% above stagnation_A's on its round-10 bytes "
+             "(1.776e-6). OFF by default.",
+    )
     return parser
 
 
@@ -2468,6 +2503,8 @@ def main(argv=None) -> int:
         vacuum_light_fluid=args.vacuum_light_fluid,
         ale_inflow_ebcs=args.ale_inflow_ebcs,
         rigid_tool_penalty_cap=args.rigid_tool_penalty_cap,
+        initial_void_copy=args.initial_void_copy,
+        clis_pfac_stiffness=args.clis_pfac_stiffness,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

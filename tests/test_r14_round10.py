@@ -13,6 +13,7 @@ import unittest
 
 import test_r14_triage_7 as _t7
 import test_r14_triage_8 as _t8
+import test_r14_triage_9 as _t9
 import test_cardstack_pipeline_props as _tp
 
 _row = _t7._row
@@ -1904,6 +1905,379 @@ _A8_COUPON_AI_SHA = (
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# PART A-ii.  A10  the *INITIAL_VOID void copy (2b, default;
+# --no-initial-void-copy), the CLIS PFAC stiffness (2a, opt-in
+# --clis-pfac-stiffness) and the converter-side first-step estimate
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _a10_state(deck: str, **kw):
+    """The dispatched ConversionState of *deck* with ConvertOptions(**kw)."""
+    from k2rad.state import ConvertOptions
+    return _a7_state(deck, ConvertOptions(**kw))
+
+
+def _a10_fixture(name: str, *edits) -> str:
+    with open(os.path.join(_FIX10, name)) as fh:
+        deck = fh.read()
+    for old, new in edits:
+        assert deck.count(old) == 1, old
+        deck = deck.replace(old, new)
+    return deck
+
+
+def _rect_almin(a: float, b: float) -> float:
+    """``cndleni.F``'s ALMIN of an a x b rectangle in closed form (QBAT):
+    AL1 = (a^2 + b^2) / 4, AL2 = 0, FAC1 = 1 + min(0.5, (a / b - 1) / 4),
+    FAC2 = 0.78 + 0.22 (3.413 (1 - 0.7071))^3, FAC11 = 4/3."""
+    import math
+    a, b = max(a, b), min(a, b)
+    fac1 = 1.0 + min(0.5, 0.25 * (a / b - 1.0))
+    fac2 = 0.78 + 0.22 * (3.413 * (1.0 - 0.7071)) ** 3
+    return a * b / math.sqrt(2.0 * fac1 * fac2 * 4.0 / 3.0
+                             * (a * a + b * b) / 4.0)
+
+
+def _hex_step(h: float, c: float) -> float:
+    """``dtel.F`` for a cube of edge *h* at sound speed *c* (q_b 0.05)."""
+    import math
+    return h / (c * (0.05 + math.sqrt(1.0025)))
+
+
+def _a10_pfac(deck: str, value: str) -> str:
+    """*deck* with its one CLIS card-2 PFAC cell (columns 21-30) = *value*."""
+    lines = deck.split("\n")
+    i = lines.index("*CONSTRAINED_LAGRANGE_IN_SOLID") + 2
+    lines[i] = lines[i][:20] + f"{value:>10}" + lines[i][30:]
+    return "\n".join(lines)
+
+
+def _a10_bird_stfval(void_copied: bool = True) -> float:
+    """The 2a Stfval of ``_t9.b8_bird(clis=True)`` by hand: the plate's 1 x
+    1 mm QBAT (E 1000, rho 1e-9) sets the step, Tsca 0.9 (no
+    *CONTROL_TIMESTEP); m_node = the median lumped mass of the bird's (and,
+    without the copy, the void host's) nodes = 7.81e-10 x 1 / 8."""
+    import math
+    dt0 = 0.9 * _rect_almin(1.0, 1.0) / math.sqrt(1000.0 / 1e-9)
+    return 0.1 * (7.81e-10 / 8.0) / dt0 ** 2
+
+
+def _a10_type18(starter: str):
+    """{interface id: (grbric id, Stfval)} of every /INTER/TYPE18."""
+    out = {}
+    for ln in _cards(starter, "/INTER/TYPE18/"):
+        rows = [r for r in _block(starter, ln) if not r.startswith("#")]
+        out[int(ln.split("/")[-1])] = (int(rows[1].split()[1]),
+                                       float(rows[2][:20]))
+    return out
+
+
+#: the part-A-i head (e512676, a detached checkout) digests of the A10 pin
+#: decks: b8_bird(card=False, clis=True)'s _0000 (= --no-initial-void-copy)
+#: and b8_bird(card=False, clis=False)'s _0000 + its warning list (bird-el's
+#: class: a void without CLIS)
+_A10_VOID_AI_SHA = (
+    "403e15cc8afbc8b838075f37d66a5d970fd285dcf8335676329ebb94ffc6c78e")
+_A10_BIRDEL_AI_SHA = (
+    "ae44daef55fdfbc1451be619d3c7e93cc2a594f7f7bbc9257785ec62c7ce128b")
+_A10_BIRDEL_AI_WARNINGS = (
+    "f085e585d1fd5cac9f1a0aae1dc3dd4c3d7dd8173ca0ac1547a92a6177c78a71")
+
+
+class ClisDt0Estimator(unittest.TestCase):
+    """A10: ``writer/blast_ale.clis_dt0_estimate`` - Tsca x the smallest
+    STARTER element step over the elements the engine integrates (8-node
+    bricks by ``dtel.F`` with DELTAX = V / A_max; 4-node QBAT / QEPH shells
+    by ``cndleni.F``), the ``/RBODY`` and LAW0 parts left out.
+
+    The four fixtures ``tests/fixtures/round10/r10_clis_dt0*.k`` (the dt0
+    fixture of the round-10 part-A-ii research spec, md5
+    e0578a90727cb8c0a3232445984e512d, and the bird_B / quadrature /
+    stagnation shapes) were converted on the branch and run through the
+    STARTER (nt 4, ``C:/Users/pmqua/rcv_r10i_implA2_fx_*``): 0 ERROR(S) / 0
+    WARNING(S) each, and the printed element steps are ``_STARTER``'s - the
+    estimate reproduces the bricks to every printed digit and the shells to
+    2.5e-8. The engine's cycle 0 of the dt0 fixture printed 0.5739E-06 (the
+    research spec's run) = dt0 here; on the corpus the estimate is +0.11 %
+    (bird_B), +1.77 % (quadrature_B) above the engine's first step."""
+
+    _STARTER = {
+        "r10_clis_dt0.k": {("solid", 3): 8.1987371899954E-07,
+                           ("solid", 4): 9.5124921972504E-05,
+                           ("shell", 1): 8.6612033409390E-07,
+                           ("shell", 2): 9.7990329849817E-07},
+        "r10_clis_dt0_shell.k": {("solid", 2): 1.3291984764694E-05,
+                                 ("shell", 1): 3.5873266435589E-07},
+        "r10_clis_dt0_solid.k": {("solid", 1): 9.5124921972504E-05,
+                                 ("solid", 2): 9.5124921972504E-05},
+        "r10_clis_dt0_stag.k": {("solid", 2): 6.3416614648336E-06,
+                                ("shell", 1): 2.7185257370198E-06},
+    }
+
+    def test_every_element_step_is_the_starter_s(self):
+        from k2rad.writer import blast_ale
+        for fix, table in self._STARTER.items():
+            st = _a10_state(_a10_fixture(fix))
+            els = {("solid", e.eid): e for e in st.solid_elems}
+            els.update({("shell", e.eid): e for e in st.shell_elems})
+            for key, printed in table.items():
+                with self.subTest(fixture=fix, element=key):
+                    rule = (blast_ale._brick_step if key[0] == "solid"
+                            else blast_ale._qbat_step)
+                    dt, fam = rule(st, els[key])
+                    self.assertEqual(fam, key[0])
+                    self.assertAlmostEqual(dt / printed, 1.0, delta=1e-7)
+
+    def test_dt0_leaves_the_rigid_brick_out(self):
+        from k2rad.writer import blast_ale
+        st = _a10_state(_a10_fixture("r10_clis_dt0.k"))
+        dt0, fam, dte, tsca = blast_ale.clis_dt0_estimate(st)
+        # the rigid brick's own starter step 5.7973826642121E-08 is not it
+        self.assertEqual((fam, tsca), ("solid", 0.7))
+        self.assertAlmostEqual(dte / 8.1987371899954E-07, 1.0, delta=1e-12)
+        self.assertAlmostEqual(dt0 / (0.7 * 8.1987371899954E-07), 1.0,
+                               delta=1e-12)
+        self.assertEqual(f"{dt0:.4e}", "5.7391e-07")    # engine 0.5739E-06
+        self.assertIs(blast_ale.clis_dt0_estimate(st), st.clis_dt0_memo)
+
+    def test_the_hand_values(self):
+        import math
+        from k2rad.writer import blast_ale
+        st = _a10_state(_a10_fixture("r10_clis_dt0.k"))
+        els = {e.eid: e for e in st.solid_elems + st.shell_elems}
+        g, c1 = 1000.0 / (2.0 * 1.3), 1000.0 / (3.0 * (1.0 - 0.6))
+        law1 = math.sqrt((4.0 / 3.0 * g + c1) / 1e-9)       # 1160238.702
+        self.assertAlmostEqual(law1, 1160238.702, places=2)
+        for eid, rule, hand in (
+                (3, blast_ale._brick_step, _hex_step(1.0, law1)),
+                (4, blast_ale._brick_step, _hex_step(10.0, 1e5)),
+                (1, blast_ale._qbat_step,
+                 _rect_almin(1.0, 1.0) / math.sqrt(1000.0 / 1e-9)),
+                (2, blast_ale._qbat_step,
+                 _rect_almin(2.0, 1.0) / math.sqrt(1000.0 / 1e-9))):
+            with self.subTest(element=eid):
+                self.assertAlmostEqual(rule(st, els[eid])[0] / hand, 1.0,
+                                       delta=1e-12)
+        self.assertAlmostEqual(_rect_almin(1.0, 1.0), 0.8661203553,
+                               places=9)
+
+    def test_the_three_carrier_shapes(self):
+        import math
+        from k2rad.writer import blast_ale
+        for fix, tsca, fam, hand in (
+                ("r10_clis_dt0_shell.k", 0.7, "shell",
+                 _rect_almin(0.661, 0.367) / math.sqrt(1000.0 / 1e-9)),
+                ("r10_clis_dt0_solid.k", 0.7, "solid",
+                 _hex_step(10.0, 1e5)),
+                ("r10_clis_dt0_stag.k", 0.8, "shell",
+                 _rect_almin(15.03, 10.0) / math.sqrt(1e5 / 8e-9))):
+            with self.subTest(fixture=fix):
+                st = _a10_state(_a10_fixture(fix))
+                dt0, f, _dte, ts = blast_ale.clis_dt0_estimate(st)
+                self.assertEqual((f, ts), (fam, tsca))
+                self.assertAlmostEqual(dt0 / (tsca * hand), 1.0, delta=1e-9)
+        st = _a10_state(_a10_fixture("r10_clis_dt0_solid.k"))
+        self.assertAlmostEqual(blast_ale.clis_dt0_estimate(st)[0],
+                               6.6587445e-05, delta=1e-12)
+
+    def test_the_refusals_are_named(self):
+        from k2rad.writer import blast_ale
+        shell = "r10_clis_dt0_shell.k"
+        for why, deck, needle in (
+                ("mass-scaled", _a10_fixture(shell, (
+                    "       0.0       0.7         0       0.0       0.0",
+                    "       0.0       0.7         0       0.0  -1.0E-7")),
+                 "mass-scaled (DT2MS < 0"),
+                ("triangle", _a10_fixture(shell, (
+                    "       1       1       1       2       3       4",
+                    "       1       1       1       2       3       3")),
+                 "part 1: a triangle"),
+                ("tet", _a10_fixture(shell, (
+                    "      15      16      17      18",
+                    "      15      15      15      15")),
+                 "part 2: a degenerate or non-8-node solid")):
+            with self.subTest(case=why):
+                st = _a10_state(deck)
+                dt0, reason, _d, _t = blast_ale.clis_dt0_estimate(st)
+                self.assertIsNone(dt0)
+                self.assertIn(needle, reason)
+        st = _a10_state(_a10_fixture(shell))
+        st.beam_elems.append(object())                     # a beam family
+        dt0, reason, _d, _t = blast_ale.clis_dt0_estimate(st)
+        self.assertIsNone(dt0)
+        self.assertIn("beam elements", reason)
+
+
+class InitialVoidCopy(unittest.TestCase):
+    """A10 2b (default ON, ``--no-initial-void-copy``): an *INITIAL_VOID
+    part in the fluid set of a CLIS coupling is a LAW6 copy of its fluid at
+    1e-3 x RO (the ``/EOS`` RHO_0 = RO) on its own ``/GRBRIC/PART`` +
+    ``/INTER/TYPE18`` at the fluid's Stfval x 1e-3. The deck is round 9's
+    bird_B miniature ``_t9.b8_bird(clis=True)``. MEASURED on quadrature_B
+    (nt 4, README 9.1, ``C:/Users/pmqua/rcv_r10i_implA2_q_{base,2b}``): 1094
+    -> 1109 cycles, KE RMS 28.17 -> 10.42 %, IE RMS 142.04 -> 161.11 %;
+    its converted bytes ran the starter with 0 ERROR(S) and both
+    ``/INTER/TYPE18`` echoed."""
+
+    def test_the_copy_cells(self):
+        res, st, _e = _convert(_t9.b8_bird(card=False, clis=True))
+        self.assertEqual(_block(st, "/MAT/HYD_VISC/90001")[:4],
+                         ["FLUID_2 (void copy)", "#              RHO_I",
+                          "        7.810000E-13",
+                          "#                 Nu                Pmin"])
+        eos = [r for r in _block(st, "/EOS/POLYNOMIAL/90001")
+               if not r.startswith("#")]
+        self.assertEqual(float(eos[2][80:100]), 7.81e-10)   # RHO_0 = RO
+        self.assertEqual(_block(st, "/PART/4")[1].split()[:2], ["2", "90001"])
+        self.assertEqual(_block(st, "/PART/5")[1].split()[:2], ["2", "2"])
+        self.assertEqual(_block(st, "/GRBRIC/PART/90005")[:2],
+                         ["fsi_fluid_1", "         5"])
+        self.assertEqual(_block(st, "/GRBRIC/PART/90007")[:2],
+                         ["fsi_void_4", "         4"])
+        self.assertEqual(_a10_type18(st), {90006: (90005, 1.0),
+                                           90008: (90007, 0.001)})
+        self.assertTrue(_has(
+            res.warnings, "*INITIAL_VOID_PART 4 is the ALE fluid group",
+            "a LAW6 COPY of its fluid (part 4: RHO_I = 0.001 x RO = 7.81e-13 "
+            "on /MAT/HYD_VISC/90001",
+            "its own /GRBRIC/PART/90007 and /INTER/TYPE18/90008 at Stfval "
+            "0.001", "a numerical floor of this converter, not a value "
+            "LS-DYNA states", "KE RMS 28.17 -> 10.42 %",
+            "RMS 142.04 -> 161.11 %", "--no-initial-void-copy"))
+        self.assertFalse(_has(res.warnings, "THE FSI RESULT ON THIS DECK IS "
+                              "NOT VALID"))
+        # F-A10a on the A10 texts: f is no VFACT density
+        for text in [w for w in res.warnings if "LAW6 COPY" in w] + [
+                _flag_help("--initial-void-copy")]:
+            self.assertNotIn("vfact x ro", _t7._collapse(text).lower())
+        # the floor sentence points at the copy
+        self.assertTrue(_has(res.warnings, "The void itself is written as a "
+                             "LAW6 copy at 0.001 x RO (round 10, A10 2b"))
+
+    def test_the_opt_out_is_the_part_A_i_deck(self):
+        deck = _t9.b8_bird(card=False, clis=True)
+        res, st, _e = _convert(deck, initial_void_copy=False)
+        self.assertEqual(_tp._sha(st), _A10_VOID_AI_SHA)
+        self.assertTrue(_has(res.warnings, "THE FSI RESULT ON THIS DECK IS "
+                             "NOT VALID"))
+        self.assertFalse(_has(res.warnings, "The void copy (round 10"))
+
+    def test_the_refusals_are_named_and_change_no_byte(self):
+        # an *ALE_REFERENCE_SYSTEM_* deck (bird_B's class)
+        ars = _t9.b8_bird(card=True, clis=True)
+        res, st, _e = _convert(ars)
+        _r0, st0, _e0 = _convert(ars, initial_void_copy=False)
+        self.assertEqual(st, st0)
+        self.assertTrue(_has(res.warnings, "The void copy (round 10, A10 2b) "
+                             "is NOT written for part 4: the deck states an "
+                             "*ALE_REFERENCE_SYSTEM_* card", "3.787e-18 s"))
+        # a void that is not a *MAT_NULL + *EOS_* fluid
+        lines = _t9.b8_bird(card=False, clis=True).split("\n")
+        i = lines.index("*MAT_NULL")
+        lines[i:i + 2] = ["*MAT_ELASTIC", _row(2, "7.81E-10", 1000.0, 0.3)]
+        j = lines.index("*EOS_LINEAR_POLYNOMIAL")
+        del lines[j:j + 3]
+        ela = "\n".join(lines)
+        res, st, _e = _convert(ela)
+        _r0, st0, _e0 = _convert(ela, initial_void_copy=False)
+        self.assertEqual(st, st0)
+        self.assertTrue(_has(res.warnings, "is NOT written for part 4: part "
+                             "4's material 2 is not a *MAT_NULL + *EOS_* fluid"))
+
+    def test_the_two_opt_ins_lift_the_ars_refusal(self):
+        """D-A10-4: --ale-flow-tracking with --clis-pfac-stiffness on an
+        accepted card is the measured package: the copy, the FLOW-TRACKING
+        card and the PFAC stiffness (x 1e-3 on the void's interface)."""
+        res, st, _e = _convert(_t9.b8_bird(card=True, clis=True),
+                               ale_flow_tracking=True,
+                               clis_pfac_stiffness=True)
+        self.assertIn("/ALE/GRID/FLOW-TRACKING", st)
+        self.assertEqual(_block(st, "/PART/4")[1].split()[:2], ["2", "90001"])
+        s = _a10_bird_stfval()
+        stf = sorted(v[1] for v in _a10_type18(st).values())
+        self.assertAlmostEqual(stf[1] / s, 1.0, delta=1e-9)
+        self.assertAlmostEqual(stf[0] / (s * 1e-3), 1.0, delta=1e-9)
+        self.assertTrue(_has(res.warnings, "it is the measured package",
+                             "END IE +1484.66 -> +8.15 %", "133.1",
+                             "0.2 % change of Stfval"))
+
+    def test_a_void_without_clis_is_untouched(self):
+        """bird-el's class (a void, no CLIS): bytes AND warnings = the
+        part-A-i head (A10.6 (f))."""
+        res, st, _e = _convert(_t9.b8_bird(card=False, clis=False))
+        self.assertEqual(_tp._sha(st), _A10_BIRDEL_AI_SHA)
+        self.assertEqual(_tp._sha("\n".join(res.warnings)),
+                         _A10_BIRDEL_AI_WARNINGS)
+
+
+class ClisPfacStiffness(unittest.TestCase):
+    """A10 2a (OPT-IN ``--clis-pfac-stiffness``): Stfval = PFAC x m_node /
+    dt0^2 on every CLIS ``/INTER/TYPE18`` (PFAC 0 = 0.1, < 0 refused), a
+    void copy's interface x 1e-3. MEASURED (nt 4,
+    ``C:/Users/pmqua/rcv_r10i_implA2_{sA_2a,q_2b2a}``): stagnation_A with
+    the light fluid and the inlet at 13176.1086 - 9288 cycles, 86 % of
+    LS-DYNA's inflow work by t 2.40e-4, IE RMS 223.42 %; quadrature_B at
+    11.27678492 - IE RMS 492.61 %."""
+
+    def test_the_stfval_by_hand(self):
+        res, st, _e = _convert(_t9.b8_bird(card=False, clis=True),
+                               clis_pfac_stiffness=True)
+        s = _a10_bird_stfval()
+        self.assertEqual(set(_a10_type18(st)), {90006, 90008})
+        self.assertAlmostEqual(_a10_type18(st)[90006][1] / s, 1.0,
+                               delta=1e-9)
+        self.assertAlmostEqual(_a10_type18(st)[90008][1] / (s * 1e-3), 1.0,
+                               delta=1e-9)
+        self.assertTrue(_has(res.warnings, "--clis-pfac-stiffness writes "
+                             "Stfval = PFAC x m_node / dt0^2 = 0.1 x "
+                             "9.7625e-11", "Tsca 0.9 x the shell element step",
+                             "/INTER/TYPE18/90008 (void copy part 4)",
+                             "86 %", "IE RMS 206.79 -> 223.42 %"))
+        # PFAC 0 is LS-DYNA's default 0.1: the same Stfval
+        _r, st0, _e = _convert(_a10_pfac(_t9.b8_bird(card=False, clis=True),
+                                         "0.0"), clis_pfac_stiffness=True)
+        self.assertEqual(_a10_type18(st0), _a10_type18(st))
+
+    def test_a_curve_pfac_is_refused(self):
+        deck = _a10_pfac(_t9.b8_bird(card=False, clis=True), "-2.0")
+        res, st, _e = _convert(deck, clis_pfac_stiffness=True)
+        self.assertEqual(_a10_type18(st), {90006: (90005, 1.0),
+                                           90008: (90007, 0.001)})
+        self.assertTrue(_has(res.warnings, "--clis-pfac-stiffness: "
+                             "/INTER/TYPE18/90006 keeps Stfval 1 - PFAC -2 is "
+                             "a LOAD CURVE id"))
+        state = _a10_state(deck)
+        cls = state.lagrange_in_solid[0]
+        self.assertEqual((cls.pfac_stated, cls.pfac), (-2.0, 0.1))
+
+    def test_a_law0_vacuum_deck_is_refused(self):
+        from k2rad.state import ConstrainedLagrangeInSolid
+        from k2rad.writer import blast_ale
+        st = _a10_state(_a7_coupon(), vacuum_light_fluid=False)
+        cls = ConstrainedLagrangeInSolid(slave=9, master=1, mstyp=1,
+                                         pfac_stated=0.1)
+        stf = blast_ale._clis_pfac_stiffness(st, cls)
+        self.assertIsNone(stf.would)
+        self.assertIn("*MAT_VACUUM part 2 is a LAW0 /MAT/VOID", stf.refusal)
+        st = _a10_state(_a7_coupon())                  # the light fluid: on
+        self.assertIsNotNone(blast_ale._clis_pfac_stiffness(st, cls).would)
+
+    def test_the_default_clis_sentence_names_the_stated_pfac(self):
+        base = _t9.b8_bird(card=False, clis=True)
+        for value, needle in (
+                ("0.1", "PFAC 0.1 is read only by the opt-in "
+                        "--clis-pfac-stiffness, which would write Stfval "),
+                ("0.0", "PFAC 0 (0 = the default 0.1) is read only by the "
+                        "opt-in --clis-pfac-stiffness"),
+                ("-2.0", "PFAC -2 is a LOAD CURVE id (a penalty-stiffness "
+                         "curve) - /INTER/TYPE18 has no field for one, so "
+                         "--clis-pfac-stiffness refuses this card.")):
+            with self.subTest(pfac=value):
+                res, st, _e = _convert(_a10_pfac(base, value))
+                self.assertTrue(_has(res.warnings, needle))
+                self.assertEqual(_a10_type18(st)[90006][1], 1.0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Part A-ii: retracted statements and the flags
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1927,6 +2301,11 @@ _FORBIDDEN_ROUND_10_A2 = (
     # formula; LS-DYNA's own measured holder penalty on the anisotropic
     # cup-draw is ~100x below it (findings 6.8; conventions F-A8)
     "effective penalty",
+    # A10 2b: f = 1e-3 is a numerical floor of this converter; *CONTROL_ALE
+    # VFACT is a stress cut-off on the volume fraction (conventions F-A10a;
+    # its second needle 'VFACT x RO' is round 8's TRUE --shell-in-solid-
+    # coupling cell, so InitialVoidCopy checks it on the A10 texts only)
+    "VFACT is the void density",
 )
 
 #: (shipped file, the replacement text it now carries)
@@ -1994,6 +2373,7 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
         "--vacuum-light-fluid": "vacuum_light_fluid",
         "--ale-inflow-ebcs": "ale_inflow_ebcs",
         "--rigid-tool-penalty-cap": "rigid_tool_penalty_cap",
+        "--initial-void-copy": "initial_void_copy",
     }
     _HELP_FIGURES = {
         "--vacuum-light-fluid": ("NEGATIVE RHO", "832 -> 9364 cycles",
@@ -2008,6 +2388,25 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
             "IE RMS 10.85 -> 4.01 %", "-13.33 / -82.43 -> -96.70 / -99.15 %",
             "END -42.14 -> -49.31 %", "KE RMS 29.17 -> 28.83 %",
             "It is the manual's formula, not a penalty"),
+        "--initial-void-copy": (
+            "at 1e-3 x RO", "a numerical floor of this converter",
+            "(a stress cut-off)", "KE RMS 28.17 -> 10.42 %",
+            "IE RMS 142.04 -> 161.11 %", "ON by default"),
+    }
+
+
+class Round10OptInWiringA2(_t8.Round8OptInWiringB):
+    """The round-10 part-A-ii OPT-IN lever (default OFF): parser + --no-
+    twin, README prose (the POSITIVE spelling) and its own ### heading, the
+    --help figures, the GUI end to end, convert() / ConvertOptions default
+    False and cli.main()'s call."""
+
+    _OPT_IN = {"--clis-pfac-stiffness": "clis_pfac_stiffness"}
+    _HELP_FIGURES = {
+        "--clis-pfac-stiffness": (
+            "PFAC x m_node / dt0^2", "86 % of", "IE RMS 206.79 -> 223.42 %",
+            "161.11 -> 492.61 %", "+0.11 / +1.77 % above",
+            "OFF by default"),
     }
 
 

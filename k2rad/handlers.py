@@ -4843,11 +4843,16 @@ def handle_constrained_lagrange_in_solid(block: Block, state: ConversionState) -
     start = to_float(f2[0]) if f2 else 0.0
     end   = to_float(f2[1]) if len(f2) > 1 else 0.0
     pfac  = to_float(f2[2]) if len(f2) > 2 else 0.1
+    # R14 round 10, A10 (D-11): ``pfac`` keeps its fold (<= 0 -> 0.1) for
+    # every older reader; ``pfac_stated`` is the cell as written (0 = LS's
+    # default 0.1, < 0 = a load-curve id) for --clis-pfac-stiffness and the
+    # CLIS inventory sentence
     state.lagrange_in_solid.append(ConstrainedLagrangeInSolid(
         slave=to_int(f1[0]), master=to_int(f1[1]),
         sstyp=to_int(f1[2]) if len(f1) > 2 else 0,
         mstyp=to_int(f1[3]) if len(f1) > 3 else 0,
-        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end))
+        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end,
+        pfac_stated=pfac))
 
 
 def handle_initial_void(block: Block, state: ConversionState) -> None:

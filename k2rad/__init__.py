@@ -534,6 +534,8 @@ def convert(
     vacuum_light_fluid: bool = True,
     ale_inflow_ebcs: bool = True,
     rigid_tool_penalty_cap: bool = True,
+    initial_void_copy: bool = True,
+    clis_pfac_stiffness: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -2013,6 +2015,23 @@ def convert(
         two-way S2S, MORTAR and a deformable tool are outside it. The
         measured effect is the README's. Default True
         (``--no-rigid-tool-penalty-cap``: Stmax 0).
+    initial_void_copy : bool
+        An ``*INITIAL_VOID_PART / _SET`` part in the fluid (master) set of a
+        ``*CONSTRAINED_LAGRANGE_IN_SOLID`` coupling, on a deck with no
+        ``*ALE_REFERENCE_SYSTEM_*`` card, is written as a LAW6 copy of its
+        fluid at RHO_I = 1e-3 x RO (its ``/EOS`` RHO_0 = RO) on its own
+        ``/GRBRIC/PART`` + ``/INTER/TYPE18`` at the fluid's Stfval x 1e-3
+        (R14 round 10, A10 2b). f = 1e-3 is a numerical floor of this
+        converter, not a value LS-DYNA states. Refused by name: a void not on
+        a ``*MAT_NULL`` + ``*EOS_*`` fluid, RO <= 0. The measured effect is
+        the README's. Default True (``--no-initial-void-copy``: the void at
+        full density).
+    clis_pfac_stiffness : bool
+        Opt-in (R14 round 10, A10 2a): Stfval = PFAC x m_node / dt0^2 on
+        every CLIS ``/INTER/TYPE18`` (m_node the median lumped nodal mass of
+        the coupled fluid, dt0 this converter's estimate of the first time
+        step, ``writer.blast_ale.clis_dt0_estimate``); a load-curve PFAC and
+        a deck with a LAW0 ``*MAT_VACUUM`` are refused. Default False.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2174,6 +2193,8 @@ def convert(
         vacuum_light_fluid=vacuum_light_fluid,
         ale_inflow_ebcs=ale_inflow_ebcs,
         rigid_tool_penalty_cap=rigid_tool_penalty_cap,
+        initial_void_copy=initial_void_copy,
+        clis_pfac_stiffness=clis_pfac_stiffness,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

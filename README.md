@@ -490,6 +490,36 @@ as underscores.
   contact-1 force RMS 12.92 -> 13.66 %. The coupon `tests/fixtures/round10/r10_type7_coupon_quad.k` puts eq.
   30.8's node spring into the engine exactly (peak penetration 0.18031 mm =
   the closed form). `--no-rigid-tool-penalty-cap` writes Stmax 0.
+- `--initial-void-copy` / `--no-initial-void-copy` — **ON by default**. An
+  `*INITIAL_VOID_PART` / `_SET` part in the fluid (master) set of a
+  `*CONSTRAINED_LAGRANGE_IN_SOLID` coupling, on a deck with no
+  `*ALE_REFERENCE_SYSTEM_*` card, is written as a LAW6 COPY of its fluid at
+  RHO_I = 1e-3 x RO (its `/EOS` RHO_0 = RO, Pmin as the fluid's; a copy MID
+  when another part shares the `*MAT_NULL`) and gets its own `/GRBRIC/PART`
+  and its own `/INTER/TYPE18` at the fluid interface's Stfval x 1e-3. f =
+  1e-3 is a numerical floor of this converter, not a value LS-DYNA states
+  (LS-DYNA empties the part, Vol I R17 p.28-134; `*CONTROL_ALE` VFACT is a
+  stress cut-off on the volume fraction, p.12-52); 1e-6 is unworkable on both
+  coupled carriers. Refused by name: a void whose material is not a
+  `*MAT_NULL` + `*EOS_*` fluid (forging_B), RO <= 0, a material the
+  `--shell-in-solid-coupling` void density owns, a coupling whose fluid group
+  would hold only voids, and a deck with an `*ALE_REFERENCE_SYSTEM_*` card
+  (bird_B: the void copy without the FLOW-TRACKING grid stalls the coupling;
+  there it is written only inside the package below). MEASURED (nt 4,
+  README 9.1, the part-A-ii bytes before and after in one window):
+  quadrature_B 1094 -> 1109 cycles, KE RMS 28.17 -> 10.42 % (n 499 / 500,
+  t_end 0.07; KE END -40.68 -> -16.24 %), the named cost IE RMS 142.04 ->
+  161.11 % (END +394.00 -> +664.72 %); quadrature_C (the same bytes, NQUAD 3
+  in LS-DYNA) KE RMS 29.95 -> 12.37 %, IE RMS 59.26 -> 61.33 %. Reach:
+  quadrature_B / _C by bytes (2 keys / 1 model); bird_B, forging_B (refused
+  by name) and the four CLIS decks without a void (stagnation_A / _B,
+  cylinder_impact_B, ale_wavehitcol: the CLIS sentence's PFAC clause) by
+  text; bird-el (a void without CLIS) unchanged. `--no-initial-void-copy`
+  writes the void at full density.
+- `--clis-pfac-stiffness` — **OFF by default** (opt-in; its own section
+  [below](#--clis-pfac-stiffness--the-clis-coupling-stiffness-from-pfac)).
+  Stfval = PFAC x m_node / dt0^2 on every `*CONSTRAINED_LAGRANGE_IN_SOLID`
+  `/INTER/TYPE18`, with a converter-side estimate of the first time step.
 
 ### Python API
 
@@ -1520,16 +1550,21 @@ p.28-134 does not permit with this option — are floored too and NAMED (reach
 named; a deck that also states `*ALE_MULTI-MATERIAL_GROUP` (forbidden together,
 p.28-134), a void that is not ELFORM 12 and a void whose material is not a LAW6
 carrier are refused by name: their carriers get the `*MAT_NULL` PC cell
-(`Pmin −1e-20` for PC 0; `--no-mat-null-pc-mu` keeps `Pmin 0`). The void's low
-DENSITY is NOT
+(`Pmin −1e-20` for PC 0; `--no-mat-null-pc-mu` keeps `Pmin 0`). A void
+density of 1e-6 x RO is NOT
 written (on the two `/INTER/TYPE18`-coupled carriers it is a dead coupling or
-4.51× the cycles, and it stalls bird_B on the TYPE18 sort step). MEASURED at
+4.51× the cycles, and it stalls bird_B on the TYPE18 sort step); since R14
+round 10 a void in the fluid set of a `*CONSTRAINED_LAGRANGE_IN_SOLID`
+coupling IS written at 1e-3 x RO, as a LAW6 copy on its own `/INTER/TYPE18`
+(`--initial-void-copy`, default ON; the round-10 options list). MEASURED at
 nt 4 against the LS-DYNA references: quadrature_B and quadrature_C (one emitted
 model) timeout → NORMAL in 1095 cycles (IE +394.0 %), bird_B timeout → NORMAL in
 2936 cycles (IE +1484.7 %), bird-el NORMAL either way (IE +454.1 → +1134.6 %
 and energy error −17.9 → −32.6 % WORSE, KE +10 856 → −92.1 % at the end; its
 plate carries nothing, `*CONSTRAINED_SHELL_IN_SOLID` is not converted).
-**NORMAL here is not an LS-DYNA match**: the void is still full of fluid.
+**NORMAL here is not an LS-DYNA match**: outside the round-10 void copy
+(`--initial-void-copy`: a CLIS-coupled void at 1e-3 x RO) the void is still
+full of fluid.
 
 **Since round 7 the `*MAT_NULL` PC and MU cells are carried on the
 `/MAT/HYD_VISC` carrier** (default ON, `--no-mat-null-pc-mu`, one flag for both
@@ -4451,7 +4486,11 @@ ELFORM cell does not state. They DO take the 1-point hourglass control (see
 (`solid formulation = 11`, hourglass type 2 / coefficient 0.1) — worth
 `taylor_B` +5.06 % → +2.44 % and `sloshing_C` a timeout → NORMAL at +2.82 %.
 ELFORM 7's `AET` is named as dropped
-`*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`
+`*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`;
+an `*INITIAL_VOID` part of its fluid set → its own `/GRBRIC/PART` +
+`/INTER/TYPE18` on a LAW6 void copy (round 10, `--initial-void-copy`); card 2
+PFAC read by the opt-in
+[`--clis-pfac-stiffness`](#--clis-pfac-stiffness--the-clis-coupling-stiffness-from-pfac)
 `*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`
 `*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
 `/INIVOL` (recognised; container geometry needs a manual `/SURF`)
@@ -8247,13 +8286,66 @@ time — but too much (IE / KE +513.69 / +130.43 % at t 5.9916e-4). The deck KE
 gets WORSE (END +25.88 → +1542.16 %, RMS 253.09 → 749.89 %; the plate's KE RMS
 71.60 → 93.93 %): the void is still converted at full density (cycle-0 KE
 101.5 against LS-DYNA's 11.737), so the moving grid carries 9× the bird's mass.
-That KE regression makes the row MIXED, so the card is not the default; the
-light-void coupling that would remove it is open (FLOW-TRACKING with a 1e-6
-void dies at t 1.043e-4 with NEGATIVE RHO), and the `*MAT_NULL` MU cell stays
-off on this deck (with the grid moving it reads energy error +59.2 %, END IE
-+1504.57 %). The rule is keyed on the deck's own card only: a void +
-`*CONSTRAINED_LAGRANGE_IN_SOLID` deck without one (quadrature_B) converts
-byte-identically under the flag. Reach 1 deck key / 1 emitted model.
+That KE regression makes the row MIXED, so the card alone is not the default;
+the light-void coupling that removes it is the round-10 package below
+(FLOW-TRACKING with a 1e-6 void instead dies at t 1.043e-4 with NEGATIVE RHO),
+and the `*MAT_NULL` MU cell stays off on this deck (with the grid moving it
+reads energy error +59.2 %, END IE +1504.57 %). The rule is keyed on the
+deck's own card only: a void + `*CONSTRAINED_LAGRANGE_IN_SOLID` deck without
+one (quadrature_B) converts byte-identically under the flag. Reach 1 deck key
+/ 1 emitted model.
+
+**The package (R14 round 10, A10).** With `--clis-pfac-stiffness` as well, a
+deck whose card is accepted gets the measured package: the FLOW-TRACKING card,
+the `*INITIAL_VOID` part of its CLIS fluid set written as the A10 void copy
+(1e-3 x RO on its own `/INTER/TYPE18`, the `--initial-void-copy` rule, whose
+`*ALE_REFERENCE_SYSTEM_*` refusal the pair lifts) and the CLIS stiffness
+PFAC x m_node / dt0^2 on the fluid's interface (x 1e-3 on the void's).
+MEASURED on bird_B (nt 4, README 9.1, 600 LS times to t 5.9992e-4; its
+part-A-i bytes and the package in one window): 2935 → 2976 cycles, END IE
++1484.66 → +8.15 %, KE +25.88 → −14.44 %, RMS IE 1189.95 → 6.71 %, KE
+253.09 → 3.37 %; cycle-0 KE 101.5 → 11.83 (LS-DYNA 11.737). Stfval 133.1 =
+0.1 x 5.573e-11 / dt0^2 (the bird's median nodal mass; this converter's dt0
+2.046e-7, +0.11 % above the engine's first step 2.044e-7); a 0.2 % change of
+it (133.10 → 133.39, the round-10 research arms on the ed52c93 bytes) moved
+END IE by 0.37 point. In this commit the package is reachable as the two
+opt-ins.
+
+### `--clis-pfac-stiffness` — the CLIS coupling stiffness from PFAC
+
+`*CONSTRAINED_LAGRANGE_IN_SOLID` card 2 PFAC is LS-DYNA's coupling penalty
+factor: PFAC > 0 a fraction of an estimated critical stiffness on the coupled
+mass, 0 the default 0.1, < 0 a load-curve id (Vol I R17 p.10-117 / 10-122).
+k2rad writes every CLIS `/INTER/TYPE18` with the unit stiffness Stfval 1 by
+default (the CLIS sentence names what this option would write there).
+`--clis-pfac-stiffness` (opt-in, round 10, A10 2a) writes Stfval = PFAC x
+m_node / dt0^2 instead: m_node the median lumped nodal mass of the coupled
+fluid (sum over each node's bricks of RHO_I x V / 8, over the fluid parts that
+are not a void copy and not an A7 light-fluid vacuum), dt0 this converter's
+estimate of the engine's first step - Tsca x the smallest starter element step
+over the elements the engine integrates (8-node bricks: `dtel.F` with DELTAX =
+V / A_max, q_b 0.05, LAW6 SSP sqrt(PM32 / PM1) from the `/EOS`, LAW1
+sqrt((4/3 G + C1) / rho); 4-node QBAT / QEPH shells: `cndleni.F`'s ALMIN /
+sqrt(E / rho); `/RBODY` and LAW0 parts left out). A void copy's or a
+light-fluid vacuum's own interface takes the fluid's Stfval x its density
+ratio. Refused by name (Stfval 1 kept): a negative PFAC (a curve
+`/INTER/TYPE18` has no field for: stagnation_B, cylinder_impact_B), a deck
+with a LAW0 `*MAT_VACUUM` (a stiff coupling against it stops stagnation_A at
+cycle 22), no estimate (a mass-scaled or implicit deck, a thick shell / beam /
+discrete / SPH / seatbelt / plotel element, a tetrahedron, a triangle, another
+law), a fluid group with no 8-node LAW6 brick. The estimate reproduces the
+starter's printed element steps (to every printed digit on the bricks, 2.5e-8
+on the shells; `tests/fixtures/round10/r10_clis_dt0*.k`). MEASURED (nt 4,
+README 9.1): stagnation_A with the vacuum light fluid and the inlet at
+Stfval 13176 (its light-fluid vacuum's interface 0.1318): 9364 → 9288
+cycles, the inflow work (EXT-WORK) 1076 against LS-DYNA's bndout 1254.6 by
+t 2.40e-4 (86 %; 2.519 at the unit stiffness), +28 % at t 0.02, KE RMS
+14.40 → 12.83 %, the cost IE RMS 206.79 → 223.42 % (n 500); quadrature_B
+with the void copy at 11.28: 1109 → 1364 cycles, KE RMS 10.42 → 8.71 %, IE
+RMS 161.11 → 492.61 % (n 500 / 499). The estimate against the engine's
+first step: +0.11 % (bird_B), +1.77 % (quadrature_B), +22.6 % on
+stagnation_A's round-10 bytes (1.776e-6; +0.09 % against the 2.176e-6 of
+its part-A-i bytes, before A7's light fluid). Not a default.
 
 ### `--implicit-rayleigh-damping` — `/IMPL/DYNA/DAMP` from `*DAMPING_GLOBAL` on a dynamic implicit deck
 

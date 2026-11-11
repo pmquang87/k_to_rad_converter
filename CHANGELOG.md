@@ -198,6 +198,78 @@ Prior history (before this changelog was introduced) is summarized in the
     clause), `Round10FlagWiringA2`; `tests/test_r14_triage_4.py`
     `RigidPartPredicateTests` counts the cap's call of `rigid_part_ids` (the
     one rigid-part predicate; contacts.py 3 -> 4 calls).
+  - **A10 - `*INITIAL_VOID` on a CLIS-coupled ALE deck: a LAW6 void copy at
+    1e-3 x RO on its own `/INTER/TYPE18` (2b, default ON;
+    `--no-initial-void-copy`), the CLIS PFAC stiffness (2a, opt-in
+    `--clis-pfac-stiffness`) and a converter-side first-step estimate.** 2b
+    (`writer/blast_ale._resolve_initial_void_copy`, a build_starter prepass
+    right after B10's): every `*INITIAL_VOID_PART / _SET` part in the master
+    (fluid) set of a `*CONSTRAINED_LAGRANGE_IN_SOLID` card is written as a
+    LAW6 copy of its fluid at RHO_I = 1e-3 x RO with its `/EOS` RHO_0 = RO
+    (the round-8 B10 maps: a copy MID from `next_mat_id` when another part
+    shares the `*MAT_NULL`), and `_make_fsi_coupling` moves it out of the
+    fluid's `/GRBRIC/PART` into its own group with a second `/INTER/TYPE18`
+    (the same surface, Gap and times) at the fluid's Stfval x 1e-3. f = 1e-3
+    is a numerical floor of this converter, not a value LS-DYNA states
+    (LS-DYNA empties the part; `*CONTROL_ALE` VFACT is a stress cut-off, Vol I
+    R17 p.12-52); 1e-6 is unworkable on both coupled carriers. Refused by
+    name, no byte: an `*ALE_REFERENCE_SYSTEM_*` deck (bird_B; lifted by the
+    two opt-ins `--ale-flow-tracking --clis-pfac-stiffness`, the measured
+    package), a void not on a `*MAT_NULL` + `*EOS_*` fluid (forging_B), RO <=
+    0, a material B10's void density owns, a coupling whose fluid group would
+    hold only voids. MEASURED (nt 4, README 9.1, n 499 / 500 LS times to t
+    0.07, each arm's bytes in one window): quadrature_B 1094 -> 1109 cycles,
+    KE RMS 28.17 -> 10.42 % (KE fifths -27.91 / -31.06 / -40.22 / -41.38 /
+    -40.68 -> 0.00 / -6.03 / -16.01 / -18.04 / -16.24 %), the named cost IE
+    END +394.00 -> +664.72 %, IE RMS 142.04 -> 161.11 %; quadrature_C (the
+    same bytes, NQUAD 3 in LS-DYNA) KE RMS 29.95 -> 12.37 %, IE RMS 59.26 ->
+    61.33 %. 2a (opt-in): Stfval = PFAC x m_node / dt0^2 - PFAC the STATED
+    cell (`ConstrainedLagrangeInSolid.pfac_stated`, D-11: 0 = LS-DYNA's 0.1,
+    < 0 a load-curve id, refused by name; the folded `pfac` stays for every
+    other reader), m_node the median lumped nodal mass of the coupled fluid,
+    a void copy's or an A7 light-fluid vacuum's own interface x its density
+    ratio; refused on a deck with a LAW0 `*MAT_VACUUM`. dt0 =
+    `writer/blast_ale.clis_dt0_estimate`: Tsca x the smallest starter element
+    step over the elements the engine integrates (8-node bricks by `dtel.F`,
+    4-node QBAT / QEPH shells by `cndleni.F`; `/RBODY` and LAW0 parts left
+    out; refused on a mass-scaled or implicit deck and on every other element
+    family) - the starter's printed steps to every digit on the bricks and to
+    2.5e-8 on the shells (the four fixtures
+    `tests/fixtures/round10/r10_clis_dt0*.k`, starter-run: 0 ERROR(S) / 0
+    WARNING(S)), +0.11 % (bird_B) / +1.77 % (quadrature_B) above the engine's
+    first step, +22.6 % above stagnation_A's on its round-10 bytes (1.776e-6,
+    a nodal step since A7's light fluid; +0.09 % on its part-A-i bytes).
+    MEASURED (nt 4, README 9.1): stagnation_A (the A7 bytes) at Stfval
+    13176.1086 (its light-fluid interface 0.131761086): 9364 -> 9288 cycles,
+    the inflow work (EXT-WORK) 1076 against LS-DYNA's bndout 1254.6 by t
+    2.40e-4 (86 %; 2.519 at the unit stiffness), 1669 against 1303.5 at t
+    0.02 (+28 %), KE RMS 14.40 -> 12.83 %, IE RMS 206.79 -> 223.42 % (n
+    500); quadrature_B (with 2b) at 11.27678492: 1109 -> 1364 cycles, KE RMS
+    10.42 -> 8.71 %, IE RMS 161.11 -> 492.61 % - hence opt-in. The bird_B
+    package (FLOW-TRACKING + 2b + 2a, here the two opt-ins) on the branch
+    bytes at the estimator's Stfval 133.1 = 0.1 x 5.573e-11 / dt0^2: 2935 ->
+    2976 cycles, END IE +1484.66 -> +8.15 %, END KE +25.88 -> -14.44 %, RMS
+    IE 1189.95 -> 6.71 %, KE 253.09 -> 3.37 % (n 600) - the gate arm of the
+    findings' 6.3a (g2_Sest_ash) reproduced to the printed digit, so the next
+    commit makes it the default. Texts: the CLIS sentence's PFAC clause now
+    reads the stated cell and names what the opt-in would write (or why it
+    refuses); the void sentence gets W-A10-2b for a copied void (the
+    full-density "NOT VALID" sentence leaves those decks) or one refusal
+    clause; the ELFORM-12 floor sentence points at the copy; the
+    FLOW-TRACKING sentence names the package. Movers: quadrature_B / _C by
+    bytes (2 keys / 1 model); bird_B, forging_B, stagnation_A / _B,
+    cylinder_impact_B, ale_wavehitcol by text; bird-el (a void without CLIS)
+    byte- and text-identical. Tests: `tests/test_r14_round10.py`
+    `ClisDt0Estimator`, `InitialVoidCopy`, `ClisPfacStiffness`,
+    `Round10FlagWiringA2`, `Round10OptInWiringA2`; moved, each because A10 2b writes the void copy on a CLIS-coupled *INITIAL_VOID deck (round 10):
+    `tests/test_r14_triage_6.py` `InitialVoidFloorTests.test_ONE_decision_the_warning_reads_the_record_not_the_option`,
+    `.test_the_TYPE18_coupled_void_gets_the_rewritten_warning`,
+    `.test_the_coupled_void_warning_names_a_refused_floor` (the copy's
+    sentence carries the floor clause; the full-density one is
+    `--no-initial-void-copy`'s), and `tests/test_side_defects.py`
+    `TestEveryElementGroupSiteIsGuarded.test_the_guarded_allocator_is_used_at_every_site_it_should_be`
+    (23 -> 24 guarded `next_elem_group_id` sites: the split part's
+    `/GRBRIC/PART`).
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
   time step, implicit, the erosion and few-node texts).** One commit per item;
   every later item of the round is measured on the bytes of the earlier ones

@@ -1088,10 +1088,8 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "EOS floors its pressure at PMIN, gruneisen.F:129/132/152, "
         "eospolyno.F:104/113/125). -1e-20 is the zero-pressure cavitation "
         "limit *MAT_NULL Remark 4 (Vol II R17 p.2-190) describes for PC."
-        + overrides +
-        " The void itself is still converted as ORDINARY FLUID at full "
-        "density: its low density is NOT written (see ROADMAP), so NORMAL "
-        "TERMINATION here is not an LS-DYNA match. MEASURED at nt 4 against "
+        + overrides + _void_itself_clause(state, kw) +
+        " MEASURED at nt 4 against "
         "the LS-DYNA references (round-6 arms): quadrature_B timeout (t "
         "4.587e-3 of 0.07) -> NORMAL in 1095 cycles, IE +394.0 % / KE "
         "-40.7 % / energy error -46.5 % (KE 28-41 % low at each fifth of the "
@@ -1110,6 +1108,22 @@ def _resolve_initial_void_floor(state: ConversionState) -> Dict[int, float]:
         "-> Pmin -1e-20, a stated PC as stated), and --no-mat-null-pc-mu as "
         "well to keep Pmin 0.")
     return out
+
+
+def _void_itself_clause(state: ConversionState, kw: str) -> str:
+    """The floor sentence's clause on the void's own density: the round-6
+    words, unless the R14 round 10 A10 2b void copy writes a void of this
+    deck (``blast_ale._resolve_initial_void_copy``, decided in the
+    prepass; the clause then points at the coupling note)."""
+    plans = state.initial_void_copy_plan or {}
+    if any(not pl.refusal for pl in plans.values()):
+        from .blast_ale import _VOID_COPY_DENSITY_RATIO
+        return (" The void itself is written as a LAW6 copy at "
+                f"{_VOID_COPY_DENSITY_RATIO:g} x RO (round 10, A10 2b; see "
+                f"the {kw} coupling note).")
+    return (" The void itself is still converted as ORDINARY FLUID at full "
+            "density: its low density is NOT written (see ROADMAP), so "
+            "NORMAL TERMINATION here is not an LS-DYNA match.")
 
 
 def _carrier_fluid_signature(state: ConversionState, mid: int):

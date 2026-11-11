@@ -225,7 +225,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          erode_tsmin_rule: bool = True,
                          vacuum_light_fluid: bool = True,
                          ale_inflow_ebcs: bool = True,
-                         rigid_tool_penalty_cap: bool = True) -> dict:
+                         rigid_tool_penalty_cap: bool = True,
+                         initial_void_copy: bool = True,
+                         clis_pfac_stiffness: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -569,6 +571,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["vacuum_light_fluid"] = bool(vacuum_light_fluid)
     kwargs["ale_inflow_ebcs"] = bool(ale_inflow_ebcs)
     kwargs["rigid_tool_penalty_cap"] = bool(rigid_tool_penalty_cap)
+    kwargs["initial_void_copy"] = bool(initial_void_copy)
+    kwargs["clis_pfac_stiffness"] = bool(clis_pfac_stiffness)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -715,6 +719,8 @@ class ConverterGUI:
         self.vacuum_light_fluid = tk.BooleanVar(value=True)
         self.ale_inflow_ebcs = tk.BooleanVar(value=True)
         self.rigid_tool_penalty_cap = tk.BooleanVar(value=True)
+        self.initial_void_copy = tk.BooleanVar(value=True)
+        self.clis_pfac_stiffness = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1516,6 +1522,16 @@ class ConverterGUI:
                      "eq. 30.8 penalty - ON",
             variable=self.rigid_tool_penalty_cap).grid(
                 row=99, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="*INITIAL_VOID on a CLIS deck: a LAW6 void copy at "
+                     "1e-3 x RO - ON. quadrature KE RMS 28.17 -> 10.42 %",
+            variable=self.initial_void_copy).grid(
+                row=100, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="CLIS stiffness PFAC x m / dt0^2 - OFF (opt-in). "
+                     "quadrature IE RMS 161.11 -> 492.61 %",
+            variable=self.clis_pfac_stiffness).grid(
+                row=101, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1864,6 +1880,8 @@ class ConverterGUI:
                 vacuum_light_fluid=self.vacuum_light_fluid.get(),
                 ale_inflow_ebcs=self.ale_inflow_ebcs.get(),
                 rigid_tool_penalty_cap=self.rigid_tool_penalty_cap.get(),
+                initial_void_copy=self.initial_void_copy.get(),
+                clis_pfac_stiffness=self.clis_pfac_stiffness.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2237,6 +2255,10 @@ class ConverterGUI:
         if not kwargs.get("rigid_tool_penalty_cap", True):
             bits.append("rigid-tool contacts keep Stmax 0 "
                         "(--no-rigid-tool-penalty-cap)")
+        if not kwargs.get("initial_void_copy", True):
+            bits.append("no *INITIAL_VOID void copy (--no-initial-void-copy)")
+        if kwargs.get("clis_pfac_stiffness", False):
+            bits.append("CLIS PFAC stiffness (--clis-pfac-stiffness)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

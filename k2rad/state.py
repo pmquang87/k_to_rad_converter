@@ -2794,6 +2794,33 @@ class ConstrainedLagrangeInSolid:
     pfac: float = 0.1
     start: float = 0.0
     end: float = 0.0
+    #: R14 round 10, A10 (D-11): the card-2 PFAC cell AS STATED - ``pfac``
+    #: folds every value <= 0 to 0.1 for its older readers, while LS-DYNA
+    #: reads 0 as the default 0.1 and a negative value as a LOAD CURVE id
+    #: (Vol I R17 p.10-117); read by the opt-in ``--clis-pfac-stiffness``
+    #: and the CLIS inventory sentence only
+    pfac_stated: float = 0.0
+
+
+@dataclass
+class VoidCopyPlan:
+    """The ONE decision of the ``*INITIAL_VOID`` void copy (R14 round 10, A10
+    2b) for one void part *pid* in the master (fluid) set of an emitted
+    ``*CONSTRAINED_LAGRANGE_IN_SOLID`` coupling, made by
+    ``writer/blast_ale._resolve_initial_void_copy``: ``record`` the
+    ``(sid, is_set)`` of the ``*INITIAL_VOID`` card that names it,
+    ``cls_idx`` the CLIS cards whose master set holds it, ``refusal`` the
+    clause that keeps the void at full density ("" = the copy is written),
+    ``copy_mid`` the MID its ``/PART`` is written with (its own MID when no
+    other part shares the ``*MAT_NULL``) and ``rho`` / ``ro`` the copy's
+    RHO_I and the fluid RO (its ``/EOS`` RHO_0)."""
+    pid: int
+    record: Tuple[int, bool] = (0, False)
+    cls_idx: List[int] = field(default_factory=list)
+    refusal: str = ""
+    copy_mid: int = 0
+    rho: float = 0.0
+    ro: float = 0.0
 
 
 @dataclass
@@ -7737,6 +7764,7 @@ class ConvertOptions:
     ``implicit_end_fixpoint``, ``implicit_n2s_type7``,
     ``implicit_rigid_gravity_nodes``,
     ``implicit_smooth_curve_sampling``, ``implicit_tshell_solid``,
+    ``initial_void_copy``,
     ``initial_void_floor``, ``joint_screw_gjoint``, ``law106_shell_restate``,
     ``law1_shell_global_n``, ``load_curve_offscale_zero``, ``mat_null_pc_mu``,
     ``maxint_stress_all``, ``modal_acoustic_void``, ``nip1_one_point``,
@@ -8830,6 +8858,29 @@ class ConvertOptions:
     # +1542.16 %): the void is converted at full density (cycle-0 KE 101.5
     # against LS-DYNA's 11.737). Reach 1 deck key on 1 emitted model.
     ale_flow_tracking: bool = False
+    # --no-initial-void-copy (R14 round 10, A10 2b, default ON;
+    # writer/blast_ale._resolve_initial_void_copy): an *INITIAL_VOID part in
+    # the fluid (master) set of a *CONSTRAINED_LAGRANGE_IN_SOLID coupling, on
+    # a deck with no *ALE_REFERENCE_SYSTEM card, is written as a LAW6 copy of
+    # its fluid at RHO_I = 1e-3 x RO (f = 1e-3 a numerical floor of this
+    # converter - LS-DYNA empties the part; *CONTROL_ALE VFACT is a stress
+    # cut-off, Vol I R17 p.12-52), its /EOS RHO_0 = RO, on its own
+    # /GRBRIC/PART + /INTER/TYPE18 at the fluid interface's Stfval x 1e-3.
+    # MEASURED on quadrature_B (nt 4, n 500): KE RMS 28.17 -> 10.42 %, the
+    # cost IE RMS 142.04 -> 161.11 %. Reach 2 deck keys on 1 emitted model
+    # (quadrature_B / _C); forging_B is refused (its fluid is not emitted).
+    initial_void_copy: bool = True
+    # --clis-pfac-stiffness (OPT-IN, R14 round 10, A10 2a): Stfval = PFAC x
+    # m_node / dt0^2 on every *CONSTRAINED_LAGRANGE_IN_SOLID /INTER/TYPE18
+    # (m_node = the median lumped nodal mass of the coupled fluid, dt0 = Tsca
+    # x the starter's smallest element step estimated from the deck,
+    # writer/blast_ale.clis_dt0_estimate: +0.11 / +0.09 / +1.77 % against the
+    # engine's cycle-0 step on bird_B / stagnation_A / quadrature_B). A load-
+    # curve PFAC (< 0) is refused. MEASURED (nt 4): stagnation_A with the
+    # vacuum light fluid and the inlet 86 % of LS-DYNA's inflow work by t
+    # 2.40e-4, IE RMS 206.79 -> 223.42 %; quadrature_B IE RMS 161.11 -> 492.61
+    # %: not a default.
+    clis_pfac_stiffness: bool = False
     # --no-tgmult-imptemp: stop synthesizing an /IMPTEMP from a
     # *MAT_THERMAL_* TGMULT.
     #
@@ -10708,6 +10759,15 @@ class ConversionState:
     # the card's own value and never claims 1000 where the rigid-tool cap
     # wrote less.
     type7_written_stmin: Dict[int, float] = field(default_factory=dict)
+    # R14 round 10, A10 2b: writer/blast_ale._resolve_initial_void_copy's
+    # memo (None = not yet resolved; else void pid -> its plan, refused ones
+    # included; {} when nothing qualifies). The copy writes its cells through
+    # the round-8 B10 maps below (sis_density / sis_copy_mids /
+    # sis_part_mids); _make_fsi_coupling reads this record for the split.
+    initial_void_copy_plan: Optional[Dict[int, VoidCopyPlan]] = None
+    # R14 round 10, A10: writer/blast_ale.clis_dt0_estimate's memo - (dt0,
+    # family, element step, Tsca) or (None, the refusal, 0, 0)
+    clis_dt0_memo: Optional[Tuple[Optional[float], str, float, float]] = None
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.

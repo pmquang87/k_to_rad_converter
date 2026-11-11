@@ -156,6 +156,7 @@ from .blast_ale import (
     _make_shell_in_solid_coupling,
     _make_shell_in_solid_notes,
     _resolve_shell_in_solid,
+    _resolve_initial_void_copy,
     _make_ale_reference_notes,
     finalize_shell_in_solid,
     sis_dt_inter_guard,
@@ -2454,6 +2455,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # materials (the void density cells) and the parts (a copy MID). Draws
     # no id unless a void host shares its *MAT_NULL; empty by default.
     _resolve_shell_in_solid(state)
+    # *INITIAL_VOID in a CLIS fluid set -> a LAW6 void copy (R14 round 10,
+    # A10 2b, default ON): the ONE decision, after B10's (it refuses a
+    # material B10's void density owns) and before the materials and the
+    # parts (its density cells, a copy MID - the only id it draws).
+    _resolve_initial_void_copy(state)
 
     # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
     # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
