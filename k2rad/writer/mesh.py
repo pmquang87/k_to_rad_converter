@@ -6567,7 +6567,13 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # matters to _resolve_ale_submaterials, which drops law 0 from the
     # /MAT/LAW51 phase list (fill_buffer_51.F:210 does not accept it, and
     # Radioss's void is the undeclared balance of the volume fractions).
+    # R14 round 10, A7 1a: on an AMMG deck whose one fluid partner is a LAW6
+    # carrier the vacuum MID is written as a LAW6 light-fluid copy
+    # (materials._resolve_vacuum_light_fluid: a decision only, memoised).
     if mid in state.mat_vacuum:
+        from .materials import _vacuum_is_light_fluid
+        if _vacuum_is_light_fluid(state, mid):
+            return 6                               # light-fluid /MAT/HYD_VISC
         return 0                                   # *MAT_140 -> /MAT/VOID
     # A refused *MAT_ACOUSTIC written as /MAT/VOID on a modal deck (round 9,
     # A7). The RESOLVED registry: a time-domain deck's refusal stays None.

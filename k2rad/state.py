@@ -7015,6 +7015,22 @@ class MatVacuum:
 
 
 @dataclass
+class VacuumLightFluidPlan:
+    """The ONE decision of the vacuum light fluid (R14 round 10, A7 1a) for
+    one ``*MAT_VACUUM`` MID whose part k2rad emits with Iale >= 1, made by
+    ``writer/materials._resolve_vacuum_light_fluid``: ``vparts`` the vacuum's
+    emitted ALE parts, ``partners`` the other materials of its
+    ``*ALE_MULTI-MATERIAL_GROUP``, ``fmid`` the one fluid partner (0 when
+    there is not exactly one) and ``refusal`` the clause that keeps the
+    ``/MAT/VOID`` ("" = the LAW6 light-fluid copy is written)."""
+    vmid: int
+    vparts: List[int] = field(default_factory=list)
+    partners: List[int] = field(default_factory=list)
+    fmid: int = 0
+    refusal: str = ""
+
+
+@dataclass
 class MatElasticPlasticHydro:
     """``*MAT_ELASTIC_PLASTIC_HYDRO`` (``*MAT_010``) → ``/MAT/LAW3`` + its
     same-id ``/EOS``.
@@ -7704,7 +7720,8 @@ class ConvertOptions:
     The EXCEPTIONS default to ON: measured fixes, each with a ``--no-``
     opt-out that restores the earlier output on the decks it moves -
 
-    ``adaptive_spring_token``, ``axisymmetric_2d``, ``bcs_union``,
+    ``adaptive_spring_token``, ``ale_inflow_ebcs``, ``axisymmetric_2d``,
+    ``bcs_union``,
     ``bolt_rigid_contact``, ``constrained_global``, ``constrained_linear``,
     ``contact_birth_death``, ``corotational_orthotropic``,
     ``damping_curve_window``,
@@ -7730,7 +7747,8 @@ class ConvertOptions:
     ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
-    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``, ``weld_exponents``,
+    ``srnde_ishape``, ``tet_isolid1``, ``tgmult_imptemp``,
+    ``vacuum_light_fluid``, ``weld_exponents``,
     ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
     ``zero_tolerance_ectol``
 
@@ -9551,6 +9569,33 @@ class ConvertOptions:
     # at t 2.988e-4 where LS-DYNA's closed form deletes none; 0 R14 decks state
     # TSLIMT != 0. False = the ed52c93 trigger (Tmin = TSLIMT).
     erode_tsmin_rule: bool = True
+    # --no-vacuum-light-fluid (R14 round 10, A7 1a, default ON;
+    # writer/materials._resolve_vacuum_light_fluid): a *MAT_VACUUM part k2rad
+    # emits with Iale >= 1 whose *ALE_MULTI-MATERIAL_GROUP holds exactly one
+    # other material, a *MAT_NULL + *EOS_* fluid written as /MAT/HYD_VISC, is
+    # written as a LAW6 light-fluid copy of that fluid under the vacuum's own
+    # MID (RHO_I = the vacuum RO, the /EOS RHO_0 = the fluid RO, Pmin -1e-20
+    # where the fluid's is 0) instead of /MAT/VOID, which DELETES the fluid
+    # that advects into it. MEASURED (nt 4): stagnation_A / _B died at cycle
+    # 832 (NEGATIVE RHO, t 0.00181 of 0.02) and run NORMAL to t 0.02 in 9364
+    # cycles with the ALE inlet (A7 1b). A LAW44 or LAW0 partner, two
+    # partners, RO <= 0 or an /EOS id clash keep /MAT/VOID, named. 2 keys / 2
+    # models. False = /MAT/VOID (the round-10 A-i bytes).
+    vacuum_light_fluid: bool = True
+    # --no-ale-inflow-ebcs (R14 round 10, A7 1b, default ON;
+    # writer/loads._make_imposed_motions_set + writer/blast_ale
+    # _ale_inlet_faces): a VAD-0 *BOUNDARY_PRESCRIBED_MOTION_SET / _NODE row
+    # on a global X / Y / Z translation whose nodes cover boundary faces of an
+    # EMITTED Iale (ELFORM 11 / 12) brick -> /SURF/SEG of those faces +
+    # /EBCS/INLET/VP with the row's velocity, in place of the /IMPVEL of the
+    # covered nodes: an /IMPVEL on an Eulerian ALE boundary admits no material
+    # (aflux3.F:488-524). MEASURED on stagnation_A with the light fluid (nt
+    # 4, n 500 LS times): KE RMS 53.09 -> 14.40 %, the named cost IE RMS
+    # 172.71 -> 206.79 %. Refused by name beside a LAW0 vacuum, for a skew,
+    # a time window, a non-/FUNCT curve or an unheld face node; ELFORM 5 / 6
+    # (Iale 0 in k2rad) never reached. 2 keys / 2 models. False = the
+    # /IMPVEL.
+    ale_inflow_ebcs: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
@@ -10633,6 +10678,12 @@ class ConversionState:
     # writer/blast_ale._resolve_ale_flow_tracking's memo (None = not yet
     # resolved).
     ale_flow_tracking_plan: Optional[AleFlowTrackingPlan] = None
+    # R14 round 10, A7 1a: writer/materials._resolve_vacuum_light_fluid's
+    # memo (None = not yet resolved; else vacuum MID -> its plan, one entry
+    # per *MAT_VACUUM on an emitted Iale part, {} when the option is off).
+    # The materials section, the LAW51 phase screen and the A7 1b inlet
+    # refusal all read this ONE record.
+    vacuum_light_fluid_plan: Optional[Dict[int, VacuumLightFluidPlan]] = None
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.

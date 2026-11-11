@@ -2230,6 +2230,38 @@ def build_parser() -> argparse.ArgumentParser:
              "form deletes none. --dt-del stays the explicit floor. ON by "
              "default; --no-erode-tsmin-rule restores the TSLIMT trigger.",
     )
+    # ── R14 parity round 10, part A-ii ──────────────────────────────────────
+    parser.add_argument(
+        "--vacuum-light-fluid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="A *MAT_VACUUM part of an Iale (ELFORM 11 / 12) deck whose "
+             "*ALE_MULTI-MATERIAL_GROUP holds exactly one other material, a "
+             "*MAT_NULL + *EOS_* fluid k2rad writes as /MAT/HYD_VISC, is "
+             "written as a LAW6 light-fluid copy of that fluid (RHO_I = the "
+             "vacuum RO, the /EOS RHO_0 = the fluid RO, Pmin -1e-20) instead "
+             "of /MAT/VOID, which DELETES the fluid that advects into it: "
+             "stagnation_A / _B stopped at cycle 832 on NEGATIVE RHO and run "
+             "NORMAL to t 0.02 with the ALE inlet (832 -> 9364 cycles, nt 4). "
+             "A LAW44 / LAW0 partner is refused by name (cylinder_impact_A / "
+             "_B, ale_wavehitcol). ON by default; --no-vacuum-light-fluid "
+             "writes /MAT/VOID.",
+    )
+    parser.add_argument(
+        "--ale-inflow-ebcs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="A VAD-0 *BOUNDARY_PRESCRIBED_MOTION_SET / _NODE on a global X "
+             "/ Y / Z translation whose nodes cover boundary faces of an "
+             "Iale (ELFORM 11 / 12) mesh becomes the /SURF/SEG of those faces "
+             "+ /EBCS/INLET/VP with the row's velocity: an /IMPVEL there "
+             "moves the nodes and admits no material (aflux3.F:488-524, a "
+             "slip wall). stagnation_A with the vacuum light fluid (nt 4, n "
+             "500 LS times in (3.85e-5, 0.02]): KE RMS 53.09 -> 14.40 %%, the "
+             "cost IE RMS 172.71 -> 206.79 %%. Never on ELFORM 5 / 6 "
+             "(Lagrangian in k2rad) or beside a LAW0 vacuum. ON by default; "
+             "--no-ale-inflow-ebcs keeps the /IMPVEL.",
+    )
     return parser
 
 
@@ -2410,6 +2442,8 @@ def main(argv=None) -> int:
         implicit_end_fixpoint=args.implicit_end_fixpoint,
         implicit_rayleigh_damping=args.implicit_rayleigh_damping,
         erode_tsmin_rule=args.erode_tsmin_rule,
+        vacuum_light_fluid=args.vacuum_light_fluid,
+        ale_inflow_ebcs=args.ale_inflow_ebcs,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

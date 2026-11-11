@@ -12261,6 +12261,16 @@ def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
 
     RHO is written verbatim, 0.0 included — ``hm_read_mat.F90:1575-1583``
     exempts law 0 from ERROR 683.
+
+    **The route is the writer's (R14 round 10, A7 1a).** On an
+    ``*ALE_MULTI-MATERIAL_GROUP`` deck whose one fluid partner k2rad writes
+    as ``/MAT/HYD_VISC`` + ``/EOS``, ``writer/materials``
+    ``_resolve_vacuum_light_fluid`` writes the vacuum MID as a LAW6
+    light-fluid copy of that fluid instead (``--no-vacuum-light-fluid``
+    keeps ``/MAT/VOID``), so this parse-time sentence names both routes and
+    the write-time sentence says which one the deck got. The earlier claim
+    that no material reaches the vacuum region was MEASURED false on
+    stagnation_A: the water advects into the LAW0 cells and is DELETED there.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -12276,20 +12286,23 @@ def handle_mat_vacuum(block: Block, state: ConversionState) -> None:
     rho = to_float(f[1]) if len(f) > 1 else 0.0
     state.mat_vacuum[mid] = MatVacuum(mid=mid, title=title, rho=rho)
     state.warn(
-        f"*MAT_VACUUM {mid} -> /MAT/VOID/{mid} (LAW0, RHO_I = {rho:g}). "
-        "Radioss has no vacuum MATERIAL — the word appears nowhere in the 2022 "
-        "Reference or User Guide — but /MAT/VOID is a region that carries no "
-        "stress at all, which is what the LS-DYNA card means, and it is the "
-        "same target a bare *MAT_NULL takes here. It exists so the vacuum "
-        "*PART resolves (a /PART naming no /MAT is ERROR 179). It is NOT "
+        f"*MAT_VACUUM {mid} (RO {rho:g}): Radioss has no vacuum MATERIAL - "
+        "the word appears nowhere in the 2022 Reference or User Guide. k2rad "
+        f"writes either /MAT/VOID/{mid} (LAW0: a region that carries no "
+        "stress at all, the same target a bare *MAT_NULL takes here; it "
+        "exists so the vacuum *PART resolves - a /PART naming no /MAT is "
+        "ERROR 179) or, on an *ALE_MULTI-MATERIAL_GROUP deck whose one fluid "
+        "partner is a LAW6 carrier, a light-fluid copy of that fluid (round "
+        "10, A7; see the vacuum note of the materials section). It is NOT "
         "written into the /MAT/LAW51 phase list: LAW0 is not on "
-        "fill_buffer_51.F:210's allowed list, and it does not need to be — "
+        "fill_buffer_51.F:210's allowed list, and it does not need to be - "
         "hm_read_mat51.F:639-646 checks only that the volume fractions SUM "
-        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST: "
-        "in LS-DYNA the vacuum is an AMMG PHASE that the other materials "
-        "advect into as they expand; here it is a separate single-material ALE "
-        "region on its own mesh, so nothing flows into it. See the "
-        "*ALE_MULTI-MATERIAL_GROUP warning for the whole-deck statement.")
+        "ABOVE 1, so the undeclared balance IS Radioss's void. WHAT IS LOST "
+        "on the LAW0 route: in LS-DYNA the vacuum is an AMMG PHASE that the "
+        "other materials advect into as they expand; a LAW0 cell takes no "
+        "material, so whatever advects into it is DELETED (measured on "
+        "stagnation_A). See the *ALE_MULTI-MATERIAL_GROUP warning for the "
+        "whole-deck statement.")
 
 
 def handle_mat_elastic_plastic_hydro(block: Block,

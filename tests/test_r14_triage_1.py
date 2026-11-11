@@ -1311,10 +1311,18 @@ class AleSubmaterialTests(unittest.TestCase):
                          [1e-12, 0.0, 0.0])
         self.assertNotIn("reference a material id that NO /MAT",
                          " ".join(res.warnings))
-        w = [x for x in res.warnings if "-> /MAT/VOID/1" in x]
+        # R14 round 10, A7: the parse-time sentence is route-neutral (the
+        # writer decides /MAT/VOID or the LAW6 light fluid) and its clause
+        # 'so nothing flows into it' was MEASURED false (stagnation_A: the
+        # water that advects into the LAW0 cells is deleted there).
+        w = [x for x in res.warnings if x.startswith("*MAT_VACUUM 1 (RO")]
         self.assertEqual(len(w), 1)
         self.assertIn("undeclared balance IS Radioss's void", w[0])
-        self.assertIn("nothing flows into it", w[0])
+        self.assertIn("so whatever advects into it is DELETED", w[0])
+        self.assertNotIn("nothing flows into it", w[0])
+        # this deck's partner is LAW44 (cylinder_impact-shaped): refused
+        self.assertIn("*MAT_VACUUM 1 stays /MAT/VOID/1 (LAW0)",
+                      " ".join(res.warnings))
 
     def test_a_zero_density_vacuum_needs_no_substitution(self):
         deck = _ammg_deck().replace(_row(1, "1E-12"), _row(1, 0.0))
@@ -1326,17 +1334,23 @@ class AleSubmaterialTests(unittest.TestCase):
         """hm_read_mat51.F:608-627 reads exactly MIP rows and a tMID <= 0
         inside them is fatal, so a vacuum cannot be declared as MID 0; the
         undeclared balance of the volume fractions IS the void."""
-        res, starter = _convert(_ammg_deck(fluid=True),
-                                ale_multimat_law51=True)
-        law51 = _headers(starter, "/MAT/LAW51/")
-        self.assertEqual(len(law51), 1)
-        rows = [r for r in _data_rows(starter, law51[0])
-                if r.strip() and r.strip() != "12"]
-        self.assertEqual(len(rows), 2)          # the title + ONE phase row
-        w = [x for x in res.warnings if "phase(s) DROPPED" in x]
-        self.assertEqual(len(w), 1)
-        self.assertIn("MID 1 (*MAT_VACUUM -> /MAT/VOID)", w[0])
-        self.assertIn("MIP falls to 1", w[0])
+        # R14 round 10, A7: this deck's one partner is a LAW6 fluid, so by
+        # default the vacuum is the light-fluid copy - still not a phase;
+        # --no-vacuum-light-fluid keeps the /MAT/VOID route of this test.
+        for kw, route in (({}, "a LAW6 light-fluid copy, round 10, A7"),
+                          ({"vacuum_light_fluid": False}, "/MAT/VOID")):
+            with self.subTest(**kw):
+                res, starter = _convert(_ammg_deck(fluid=True),
+                                        ale_multimat_law51=True, **kw)
+                law51 = _headers(starter, "/MAT/LAW51/")
+                self.assertEqual(len(law51), 1)
+                rows = [r for r in _data_rows(starter, law51[0])
+                        if r.strip() and r.strip() != "12"]
+                self.assertEqual(len(rows), 2)  # the title + ONE phase row
+                w = [x for x in res.warnings if "phase(s) DROPPED" in x]
+                self.assertEqual(len(w), 1)
+                self.assertIn(f"MID 1 (*MAT_VACUUM -> {route})", w[0])
+                self.assertIn("MIP falls to 1", w[0])
 
     def test_a_phase_without_an_eos_is_dropped_by_name(self):
         """MEASURED on cylinder_impact_A, and it CORRECTS the source's own

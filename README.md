@@ -421,6 +421,45 @@ as underscores.
   delete 10 of 10 bricks at t 2.988e-4 s where LS-DYNA's closed form deletes
   none; 0 R14 decks carry TSLIMT != 0. `--dt-del` stays the explicit floor.
   `--no-erode-tsmin-rule` restores the TSLIMT trigger.
+- `--vacuum-light-fluid` / `--no-vacuum-light-fluid` — **ON by default**. A
+  `*MAT_VACUUM` part of an Iale (ELFORM 11 / 12) deck whose
+  `*ALE_MULTI-MATERIAL_GROUP` holds exactly one other material, a
+  `*MAT_NULL` + `*EOS_*` fluid k2rad writes as `/MAT/HYD_VISC`, is written as
+  a LAW6 light-fluid copy of that fluid under the vacuum's own MID: RHO_I =
+  the vacuum RO, the fluid's `/EOS` copied with its RHO_0 cell = the fluid
+  RO (so the starter's reference density stays the fluid's,
+  `hm_read_eos_gruneisen.F:117-123`), Pmin -1e-20, the fluid's Nu. A LAW0
+  `/MAT/VOID` cell takes no material: the fluid that advects into it is
+  DELETED (stagnation_A's water loses rho v A = 0.02 t/s) and the water cell
+  beside it goes to a negative density (`srho3.F:199-213`) - stagnation_A /
+  _B stopped at cycle 832 (NEGATIVE RHO, t 0.00181 of 0.02). With the ALE
+  inlet below both run NORMAL to t 0.02 in 9364 cycles (nt 4). A LAW44 or
+  LAW0 partner (cylinder_impact_A / _B; ale_wavehitcol, whose
+  `*EOS_MURNAGHAN` is not converted), two partners, an RO <= 0 or an `/EOS`
+  id clash keep `/MAT/VOID`, each named. `--no-vacuum-light-fluid` writes
+  `/MAT/VOID`.
+- `--ale-inflow-ebcs` / `--no-ale-inflow-ebcs` — **ON by default**. A VAD-0
+  `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` row on a global X / Y / Z
+  translation whose nodes cover boundary faces of an EMITTED Iale brick
+  becomes the `/SURF/SEG` of those faces (outward node order) + an
+  `/EBCS/INLET/VP` with the row's own `/FUNCT` x its Fscale on that
+  component, the other two 0, the face bricks' fluid density and pressure 0,
+  in place of the `/IMPVEL` of the covered nodes: an `/IMPVEL` on an Eulerian
+  ALE boundary moves the nodes and admits no material (`aflux3.F:488-524`,
+  every neighbourless ALE face is a slip wall), while the EBCS imposes the
+  velocity every cycle and brings the fluid in (`ebcs8_inlet.F90:693-716`).
+  MEASURED on stagnation_A with the vacuum light fluid (nt 4, 500 LS times in
+  (3.85e-5, 0.02]): KE END +25.91 %, KE RMS 53.09 -> 14.40 % against the
+  light fluid alone; the named COST is the IE: END +839.05 %, RMS 172.71 ->
+  206.79 % (a single-material light fluid smears the water into the light
+  cells; LS-DYNA keeps the vacuum as a phase); stagnation_B KE RMS 60.18 ->
+  10.03 %. Refused by name beside a LAW0 vacuum (an inlet there dies where the
+  `/IMPVEL` deck dies), for a VAD other than 0, a DOF other than 1 / 2 / 3, a
+  BIRTH / DEATH window, a curve that is not a `*DEFINE_CURVE`, a face node
+  that does not hold the two other translations (the inlet imposes all
+  three) or a face brick that is not on a LAW6 fluid. ELFORM 5 / 6 decks
+  (Lagrangian in k2rad: the three channel MATCH rows) are never reached.
+  `--no-ale-inflow-ebcs` keeps the `/IMPVEL`.
 
 ### Python API
 
@@ -4033,7 +4072,10 @@ death at `t = 0.22` to NORMAL TERMINATION at `t = 1.0`
 (`ex_03_solid_elform_1_4x6x4_mesh`)
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` for a
-zero motion). **A stated `SF = 0.0` is LS-DYNA's default 1.0** (round 9, A8;
+zero motion); on the boundary faces of an Iale (ELFORM 11 / 12) mesh, VAD 0:
+`/SURF/SEG` + `/EBCS/INLET/VP` (R14 round 10, A7, default ON,
+`--no-ale-inflow-ebcs` keeps the `/IMPVEL`; the round-10 options list has
+the rule and the stagnation_A figures). **A stated `SF = 0.0` is LS-DYNA's default 1.0** (round 9, A8;
 default ON, `--no-prescribed-motion-sf-default` keeps the stated 0): Vol I
 R17 p.759 defines `SF` with "The default is 1.0" and no `EQ.0` clause, and
 Appendix V p.73-9 states the general rule (the reader fills a blank with 0,
@@ -4328,8 +4370,14 @@ at all and the same target a bare `*MAT_NULL` takes here, with `RHO` verbatim
 (law 0 is exempt from `ERROR 683`, so a stated `RHO = 0` needs no
 substitution) — because a `/PART` naming no `/MAT` is `ERROR 179`, which four
 corpus ALE decks used to get on top of their LAW51 error. What is lost is
-named: in LS-DYNA the vacuum is an AMMG PHASE the other materials advect into,
-here it is a separate single-material ALE region nothing flows into. A phase with **no
+named: in LS-DYNA the vacuum is an AMMG PHASE the other materials advect into;
+a LAW0 cell takes no material, so whatever advects into it is DELETED
+(measured on stagnation_A: the water loses rho v A = 0.02 t/s and the run
+stopped at cycle 832 on NEGATIVE RHO). Since R14 round 10 (A7, default ON,
+`--no-vacuum-light-fluid`) a vacuum whose one AMMG partner is a `*MAT_NULL` +
+`*EOS_*` fluid is written as a LAW6 light-fluid copy of that fluid instead
+(`*MAT_VACUUM` → `/MAT/VOID`, or a LAW6 light-fluid copy of its one AMMG
+fluid partner; the round-10 options list has the rule). A phase with **no
 `/EOS` is dropped too**, and that is a MEASURED correction to the source's own
 comment: `fill_buffer_51.F:213-219`'s THEN branch is empty and its ELSE raises
 *"SUBMATERIAL EOS IS NOT COMPATIBLE WITH MATERIAL LAW 51"* on exactly the types

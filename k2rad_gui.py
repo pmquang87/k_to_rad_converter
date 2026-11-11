@@ -222,7 +222,9 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          nip1_one_point: bool = True,
                          implicit_end_fixpoint: bool = True,
                          implicit_rayleigh_damping: bool = False,
-                         erode_tsmin_rule: bool = True) -> dict:
+                         erode_tsmin_rule: bool = True,
+                         vacuum_light_fluid: bool = True,
+                         ale_inflow_ebcs: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -563,6 +565,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["implicit_end_fixpoint"] = bool(implicit_end_fixpoint)
     kwargs["implicit_rayleigh_damping"] = bool(implicit_rayleigh_damping)
     kwargs["erode_tsmin_rule"] = bool(erode_tsmin_rule)
+    kwargs["vacuum_light_fluid"] = bool(vacuum_light_fluid)
+    kwargs["ale_inflow_ebcs"] = bool(ale_inflow_ebcs)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -706,6 +710,8 @@ class ConverterGUI:
         self.implicit_end_fixpoint = tk.BooleanVar(value=True)
         self.implicit_rayleigh_damping = tk.BooleanVar(value=False)
         self.erode_tsmin_rule = tk.BooleanVar(value=True)
+        self.vacuum_light_fluid = tk.BooleanVar(value=True)
+        self.ale_inflow_ebcs = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1491,6 +1497,17 @@ class ConverterGUI:
                      "LS-DYNA's shell modulus floor) - ON",
             variable=self.erode_tsmin_rule).grid(
                 row=96, column=0, columnspan=3, sticky="w", **pad)
+        # part A-ii (rows 97-...)
+        ttk.Checkbutton(
+            io, text="*MAT_VACUUM in an AMMG: a LAW6 light fluid, not "
+                     "/MAT/VOID - ON. stagnation 832 cycles -> NORMAL",
+            variable=self.vacuum_light_fluid).grid(
+                row=97, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="ALE inflow: /EBCS/INLET/VP, not /IMPVEL - ON. "
+                     "stagnation KE RMS 53.09 -> 14.40 %",
+            variable=self.ale_inflow_ebcs).grid(
+                row=98, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1836,6 +1853,8 @@ class ConverterGUI:
                 implicit_end_fixpoint=self.implicit_end_fixpoint.get(),
                 implicit_rayleigh_damping=self.implicit_rayleigh_damping.get(),
                 erode_tsmin_rule=self.erode_tsmin_rule.get(),
+                vacuum_light_fluid=self.vacuum_light_fluid.get(),
+                ale_inflow_ebcs=self.ale_inflow_ebcs.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2201,6 +2220,11 @@ class ConverterGUI:
         if not kwargs.get("erode_tsmin_rule", True):
             bits.append("ERODE 1 + TSLIMT > 0 as a deletion floor "
                         "(--no-erode-tsmin-rule)")
+        if not kwargs.get("vacuum_light_fluid", True):
+            bits.append("*MAT_VACUUM stays /MAT/VOID "
+                        "(--no-vacuum-light-fluid)")
+        if not kwargs.get("ale_inflow_ebcs", True):
+            bits.append("ALE inflow kept as /IMPVEL (--no-ale-inflow-ebcs)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

@@ -1038,5 +1038,623 @@ class Round10OptInWiring(_t8.Round8OptInWiringB):
     }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PART A-ii.  A7  *MAT_VACUUM -> a LAW6 light fluid (default;
+# --no-vacuum-light-fluid) + the ALE velocity inlet -> /SURF/SEG +
+# /EBCS/INLET/VP (default; --no-ale-inflow-ebcs)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_FIX10 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "fixtures", "round10")
+
+#: the coupon's prescribed-motion row (nsid 1, DOF 2, VAD 0, curve 1, SF 1)
+_A7_BPM = ("         1         2         0         1       1.0         0"
+           "       0.0       0.0")
+#: its water material pair and its vacuum card
+_A7_WATER = ("*MAT_NULL\n         1    1.0E-9       0.0       0.0       0.0"
+             "       0.0       0.0       0.0\n*EOS_GRUNEISEN\n         1"
+             " 1500000.0       0.0       0.0       0.0       0.0       0.0"
+             "       0.0\n       0.0\n")
+_A7_VACUUM = "*MAT_VACUUM\n         2   1.0E-14\n"
+_A7_AMMG = ("*ALE_MULTI-MATERIAL_GROUP\n         1         1\n"
+            "         2         1\n")
+
+
+def _a7_coupon(*edits) -> str:
+    """The A7 coupon ``tests/fixtures/round10/r10_ale_inlet_coupon.k`` (the
+    part-A-ii research spec's ``inletc.k``, byte for byte): a 3 x 1 x 1
+    column of 10 mm ELFORM-11 bricks - the vacuum cell (part 2, brick 1) at
+    the bottom, two water cells (part 1) above - one AMMG of parts 1 and 2,
+    a VAD-0 ``*BOUNDARY_PRESCRIBED_MOTION_SET`` DOF 2 at -20000 mm/s on the
+    four top nodes 13-16, which hold x / z by ``*NODE`` TC 6. Each (old,
+    new) edit is applied once (asserted)."""
+    with open(os.path.join(_FIX10, "r10_ale_inlet_coupon.k")) as fh:
+        deck = fh.read()
+    for old, new in edits:
+        assert deck.count(old) == 1, old
+        deck = deck.replace(old, new)
+    return deck
+
+
+def _block(starter: str, header: str):
+    """The lines of one card block after its header (up to the next '/')."""
+    lines = starter.splitlines()
+    i = lines.index(header)
+    out = []
+    for ln in lines[i + 1:]:
+        if ln.startswith("/"):
+            break
+        out.append(ln)
+    return out
+
+
+def _cards(starter: str, prefix: str):
+    return [ln for ln in starter.splitlines() if ln.startswith(prefix)]
+
+
+def _a7_state(deck: str, options):
+    """The parsed ConversionState of a deck string, with *options*."""
+    import tempfile
+    from k2rad.handlers import dispatch
+    from k2rad.parser import parse_k_file
+    from k2rad.state import ConversionState
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "d.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    state = ConversionState()
+    state.options = options
+    for block in parse_k_file(path):
+        dispatch(block, state)
+    tmp.cleanup()
+    return state
+
+
+class VacuumLightFluid(unittest.TestCase):
+    """A7 1a (default ON): a *MAT_VACUUM part of an Iale deck whose AMMG
+    holds exactly one other material, a *MAT_NULL + *EOS_* LAW6 carrier, is
+    written as a LAW6 light-fluid copy of that fluid under the vacuum's own
+    MID - RHO_I = the vacuum RO, the fluid's /EOS copied with RHO_0 = the
+    fluid RO (hm_read_eos_gruneisen.F:117-123: an /EOS RHO_0 > 0 is the
+    starter's reference density), Pmin -1e-20, the fluid's Nu - instead of
+    /MAT/VOID, which DELETES the fluid that advects into it (stagnation_A /
+    _B: NEGATIVE RHO at cycle 832). Every other case keeps /MAT/VOID and is
+    named; --no-vacuum-light-fluid writes /MAT/VOID."""
+
+    def test_the_coupon_writes_the_light_fluid(self):
+        res, st, _eng = _convert(_a7_coupon())
+        self.assertNotIn("/MAT/VOID/2", st)
+        mat = _block(st, "/MAT/HYD_VISC/2")
+        self.assertEqual(mat[0], "VACUUM_2")
+        self.assertEqual(float(mat[2]), 1e-14)                 # RHO_I
+        self.assertEqual((float(mat[4][:20]), float(mat[4][20:40])),
+                         (0.0, -1e-20))                        # Nu, Pmin
+        eos = _block(st, "/EOS/GRUNEISEN/2")
+        self.assertEqual(float(eos[2][:20]), 1.5e6)            # C
+        self.assertEqual(float(eos[4][60:80]), 1e-9)           # RHO_0
+        # the water's own carrier is untouched
+        self.assertEqual(float(_block(st, "/MAT/HYD_VISC/1")[2]), 1e-9)
+        self.assertTrue(_has(
+            res.warnings, "*MAT_VACUUM 2 -> /MAT/HYD_VISC/2: a LAW6 "
+            "LIGHT-FLUID copy of its *ALE_MULTI-MATERIAL_GROUP partner, fluid "
+            "MID 1", "RHO_0 = the fluid RO 1e-09 and Pmin -1e-20",
+            "NEGATIVE RHO element 260 at cycle 832",
+            "with the ALE inlet as well KE RMS 14.40 %, IE RMS 206.79 %",
+            "--no-vacuum-light-fluid writes /MAT/VOID."))
+
+    def test_the_emitted_law_map_says_six(self):
+        """mesh._target_mat_law is the ONE mid -> law map (the /XREF gate,
+        the zero-density floor, the LAW51 screen read it): the vacuum MID
+        is law 6 where the copy is written, 0 where it is not."""
+        from k2rad.state import ConvertOptions
+        from k2rad.writer.mesh import _target_mat_law
+        for on, law in ((True, 6), (False, 0)):
+            with self.subTest(vacuum_light_fluid=on):
+                st = _a7_state(_a7_coupon(),
+                               ConvertOptions(vacuum_light_fluid=on))
+                self.assertEqual(_target_mat_law(st, 2), law)
+
+    def test_every_refusal_keeps_the_void_and_says_why(self):
+        mid3 = ("*PART\nsecond fluid\n         3         1         3\n"
+                "*MAT_NULL\n         3    1.0E-9\n*EOS_GRUNEISEN\n         3"
+                " 1500000.0\n")
+        cases = {
+            "a LAW44 partner (cylinder_impact-shaped)": (
+                ((_A7_WATER, "*MAT_PLASTIC_KINEMATIC\n         1    7.8E-9"
+                  "  200000.0       0.3     200.0\n"),),
+                "its AMMG partner MID 1 is *MAT_PLASTIC_KINEMATIC -> "
+                "/MAT/LAW44, not a *MAT_NULL + *EOS_* fluid k2rad writes as "
+                "/MAT/HYD_VISC"),
+            "a LAW0 partner (wavehitcol-shaped: *EOS_MURNAGHAN)": (
+                ((_A7_WATER, "*MAT_NULL\n         1    1.0E-9\n"
+                  "*EOS_MURNAGHAN\n         1       7.0  2.2E+03       1.0"
+                  "\n"),),
+                "its AMMG partner MID 1 is a *MAT_NULL with no converted "
+                "*EOS_* (its *PART EOSID 1 names no converted *EOS_*), so it "
+                "is itself /MAT/VOID (LAW0)"),
+            "two partners": (
+                ((_A7_AMMG, _A7_AMMG + "         3         1\n"),
+                 ("*SET_NODE_LIST\n", mid3 + "*SET_NODE_LIST\n")),
+                "its *ALE_MULTI-MATERIAL_GROUP holds 2 other materials "
+                "[1, 3], not one fluid"),
+            "RO 0": (
+                ((_A7_VACUUM, "*MAT_VACUUM\n         2       0.0\n"),),
+                "its RO 0 is not > 0 (a /MAT/HYD_VISC needs RHO_I > 0, "
+                "ERROR 683)"),
+            "no AMMG": (
+                ((_A7_AMMG, ""),),
+                "it is in no *ALE_MULTI-MATERIAL_GROUP"),
+            "an /EOS id clash": (
+                ((_A7_VACUUM, _A7_VACUUM + "*EOS_GRUNEISEN\n         2"
+                  " 1500000.0\n"),),
+                "an *EOS_* with id 2 is already in the deck"),
+        }
+        for name, (edits, why) in cases.items():
+            with self.subTest(case=name):
+                res, st, _e = _convert(_a7_coupon(*edits))
+                self.assertIn("/MAT/VOID/2", st)
+                self.assertNotIn("/MAT/HYD_VISC/2", st)
+                self.assertTrue(_has(
+                    res.warnings, "*MAT_VACUUM 2 stays /MAT/VOID/2 (LAW0): "
+                    "the light-fluid copy (round 10, A7) is not written "
+                    "because " + why,
+                    "whatever advects into it is DELETED"), res.warnings)
+                # a LAW0 vacuum is left in the ALE domain: no inlet either
+                self.assertNotIn("/EBCS/INLET/VP/", st)
+                self.assertTrue(_cards(st, "/IMPVEL/"))
+                self.assertTrue(_has(
+                    res.warnings, "the ALE inlet (/EBCS/INLET/VP, round 10, "
+                    "A7) is NOT written - the ALE domain still holds the LAW0 "
+                    "/MAT/VOID part(s)"))
+
+    def test_the_opt_out_writes_the_void(self):
+        """--no-vacuum-light-fluid = the A-i HEAD bytes (the LAW0 vacuum is
+        left, so the inlet refuses by name and the /IMPVEL stays)."""
+        res, st, eng = _convert(_a7_coupon(), vacuum_light_fluid=False)
+        self.assertEqual(_tp._sha(st), _A7_COUPON_AI_SHA[0])
+        self.assertEqual(_tp._sha(eng), _A7_COUPON_AI_SHA[1])
+        self.assertIn("/MAT/VOID/2", st)
+        self.assertFalse(_has(res.warnings, "LIGHT-FLUID copy"))
+        self.assertTrue(_has(res.warnings, "/MAT/VOID part(s) [2]",
+                             "stays an /IMPVEL"))
+        # both opt-outs: the same bytes
+        _r, st2, _e2 = _convert(_a7_coupon(), vacuum_light_fluid=False,
+                                ale_inflow_ebcs=False)
+        self.assertEqual(st2, st)
+
+
+def _block_grid(nx: int, nz: int, h: float = 10.0, inlet_j: int = 1,
+                extra=()) -> str:
+    """An nx x 1 x nz ELFORM-11 water block (*MAT_NULL + *EOS_GRUNEISEN,
+    10 mm cells, y from 0 to h), the nodes of its top (inlet_j 1, y = h) or
+    bottom (inlet_j 0, y = 0) layer - and the *extra* node ids - in
+    *SET_NODE_LIST 1, the layer holding x / z by TC 6, under a VAD-0 DOF-2
+    row at -20000 mm/s. The bottom layer is each brick's face (1 2 3 4),
+    whose node order points INTO the brick. Node ids run y-layer, then x,
+    then z (nx 2, nz 1: bottom 1-6, top 7-12; x = 10 bottom: 3, 4)."""
+    nodes, ids, top = [], {}, []
+    nid = 0
+    for j, y in enumerate((0.0, h)):
+        for i in range(nx + 1):
+            for k in range(nz + 1):
+                nid += 1
+                ids[(i, j, k)] = nid
+                tc = 6 if j == inlet_j else 0
+                nodes.append(f"{nid:8d}{i * 10.0:16.1f}{y:16.1f}"
+                             f"{k * 10.0:16.1f}{tc:8d}{0:8d}")
+                if j == inlet_j:
+                    top.append(nid)
+    elems, eid = [], 0
+    for i in range(nx):
+        for k in range(nz):
+            eid += 1
+            n = [ids[(i, 0, k)], ids[(i, 0, k + 1)], ids[(i + 1, 0, k + 1)],
+                 ids[(i + 1, 0, k)], ids[(i, 1, k)], ids[(i, 1, k + 1)],
+                 ids[(i + 1, 1, k + 1)], ids[(i + 1, 1, k)]]
+            elems.append(f"{eid:8d}{1:8d}" + "".join(f"{x:8d}" for x in n))
+    top = top + list(extra)
+    rows = ["".join(f"{x:10d}" for x in top[r:r + 8])
+            for r in range(0, len(top), 8)]
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n    1.0E-4\n"
+            "*PART\nwater\n         1         1         1         1\n"
+            "*SECTION_SOLID\n         1        11         0\n" + _A7_WATER
+            + "*DEFINE_CURVE\n         1\n                 0.0"
+            "            -20000.0\n                 1.0            -20000.0\n"
+            "*SET_NODE_LIST\n         1\n" + "\n".join(rows) + "\n"
+            "*BOUNDARY_PRESCRIBED_MOTION_SET\n" + _A7_BPM + "\n"
+            "*ELEMENT_SOLID\n" + "\n".join(elems) + "\n*NODE\n"
+            + "\n".join(nodes) + "\n*END\n")
+
+
+def _a7_guard_decks():
+    """The two A7 guards: the coupon with the vacuum removed (part 2 on the
+    water) and both sections ELFORM 6 - k2rad's Lagrangian channel, Iale 0 -
+    and the ELFORM-11 coupon with neither a vacuum nor a prescribed motion."""
+    no_vac = ((_A7_VACUUM, ""), (_A7_AMMG, ""),
+              ("vacuum\n         2         2         2",
+               "vacuum\n         2         2         1"))
+    return {
+        "channel": _a7_coupon(*no_vac,
+                              ("         1        11         0",
+                               "         1         6         0"),
+                              ("         2        11         0",
+                               "         2         6         0")),
+        "plain": _a7_coupon(*no_vac, ("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                                      + _A7_BPM + "\n", "")),
+    }
+
+
+def _node_xyz(starter: str):
+    out = {}
+    for ln in _block(starter, "/NODE"):
+        if ln.startswith("#") or not ln.strip():
+            continue
+        out[int(ln[:10])] = (float(ln[10:30]), float(ln[30:50]),
+                             float(ln[50:70]))
+    return out
+
+
+def _surf_rows(starter: str, header: str):
+    return [[int(ln[i:i + 10]) for i in range(0, 50, 10)]
+            for ln in _block(starter, header)
+            if ln.strip() and not ln.startswith("#") and ln[:10].strip()
+            .isdigit() and len(ln) >= 50]
+
+
+class AleInflowEbcs(unittest.TestCase):
+    """A7 1b (default ON): a VAD-0 prescribed-motion row whose nodes cover
+    boundary faces of an EMITTED Iale brick becomes the /SURF/SEG of those
+    faces (outward order) + /EBCS/INLET/VP (vel_flag 1, the row's /FUNCT x
+    Fscale on its DOF, the other two 0; one material row: alpha 1, the face
+    bricks' density, p 0), in place of the covered nodes' /IMPVEL - an
+    /IMPVEL on an Eulerian ALE face admits no material (aflux3.F:488-524).
+
+    The coupon's branch bytes through the starter + engine (round 10,
+    part A-ii, `C:/Users/pmqua/rcv_r10i_implA2_ic_a7`, nt 4): `FLUID INLET
+    EBCS NUMBER . . . : 90002 inlet_1`, `NUMBER OF SEGMENTS FOUND . . . 1`,
+    0 ERROR(S) / 0 WARNING(S); engine NORMAL TERMINATION in 20 cycles to t
+    9.936e-5 (the /IMPVEL bytes: NORMAL in 19) - as the part-A-ii research
+    spec's own run of these bytes (`rcv_r10i_resA2_g5_ic_a7`)."""
+
+    def test_the_coupon_writes_the_inlet(self):
+        res, st, _e = _convert(_a7_coupon())
+        self.assertEqual(_surf_rows(st, "/SURF/SEG/90001"),
+                         [[1, 13, 14, 15, 16]])
+        self.assertEqual(_block(st, "/EBCS/INLET/VP/90002")[:7], [
+            "inlet_1",
+            "#  surf_ID  vel_flag",
+            "     90001         1",
+            "# fct_IDvx            Fscalevx  fct_IDvy            Fscalevy  "
+            "fct_IDvz            Fscalevz",
+            "         0                   0         1                   1"
+            "         0                   0",
+            "# fct_IDvf            Fscalevf fct_IDrho           Fscalerho "
+            "fct_IDp_e           Fscalep_e",
+            "         0                   1         0        1.000000E-09"
+            "         0                   0"])
+        self.assertEqual(_cards(st, "/IMPVEL/"), [])
+        self.assertNotIn("SET_1", st)            # no /GRNOD for the set
+        self.assertTrue(_has(
+            res.warnings, "*BOUNDARY_PRESCRIBED_MOTION_SET nsid=1 dof=2 "
+            "(VAD 0) drives 1 boundary face(s) of the ALE (Iale >= 1) mesh -> "
+            "/SURF/SEG/90001 + /EBCS/INLET/VP/90002", "inflow density 1e-09",
+            "aflux3.F:488-524", "KE RMS 53.09 -> 14.40 %",
+            "--no-ale-inflow-ebcs keeps the /IMPVEL."))
+
+    def test_four_faces_of_a_two_by_two_inlet_point_outward(self):
+        """Top layer (each brick's face 5 6 7 8, already outward) and bottom
+        layer (face 1 2 3 4, whose order points INTO the brick and must be
+        reversed): every written segment's (n2 - n1) x (n4 - n1) points out
+        of the block."""
+        for inlet_j, sign in ((1, 1.0), (0, -1.0)):
+            res, st, _e = _convert(_block_grid(2, 2, inlet_j=inlet_j))
+            rows = _surf_rows(st, "/SURF/SEG/90001")
+            self.assertEqual(len(rows), 4)
+            xyz = _node_xyz(st)
+            for _sid, n1, n2, n3, n4 in rows:
+                a = [xyz[n2][k] - xyz[n1][k] for k in range(3)]
+                b = [xyz[n4][k] - xyz[n1][k] for k in range(3)]
+                nrm = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                       a[0] * b[1] - a[1] * b[0])
+                with self.subTest(layer=inlet_j, face=(n1, n2, n3, n4)):
+                    self.assertGreater(sign * nrm[1], 0.0)   # out of the block
+                    self.assertEqual((nrm[0], nrm[2]), (0.0, 0.0))
+            self.assertEqual(_cards(st, "/IMPVEL/"), [])
+            self.assertTrue(_has(res.warnings, "drives 4 boundary face(s)"))
+
+    def test_an_interior_face_is_never_an_inlet_face(self):
+        """Two bricks side by side (x 0-10 / 10-20): their shared face (x =
+        10: bottom nodes 3 4, top nodes 9 10) has all four nodes in the set
+        and is still no segment - it belongs to two bricks. The two top faces
+        are; the bottom nodes 3 4 keep an /IMPVEL (they hold nothing, so an
+        inlet face through them would be refused)."""
+        res, st, _e = _convert(_block_grid(2, 1, extra=(3, 4)))
+        rows = _surf_rows(st, "/SURF/SEG/90001")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(set(r[1:]) <= set(range(7, 13)) for r in rows))
+        imp = _cards(st, "/IMPVEL/")
+        self.assertEqual(len(imp), 1)
+        grnod = int(_block(st, imp[0])[2][40:50])
+        self.assertEqual([int(x) for x in _block(st, f"/GRNOD/NODE/{grnod}")[1]
+                          .split()], [3, 4])
+        self.assertTrue(_has(res.warnings, "drives 2 boundary face(s)",
+                             "The row's 2 node(s) on no inlet face"))
+
+    def test_a_partial_cover_keeps_an_impvel_on_exactly_the_rest(self):
+        """Node 9 (between the two water cells) is on no boundary face: it
+        keeps an /IMPVEL on a /GRNOD/NODE of exactly itself."""
+        res, st, _e = _convert(_a7_coupon(
+            ("        13        14        15        16\n",
+             "        13        14        15        16         9\n")))
+        self.assertEqual(_surf_rows(st, "/SURF/SEG/90001"),
+                         [[1, 13, 14, 15, 16]])
+        imp = _cards(st, "/IMPVEL/")
+        self.assertEqual(len(imp), 1)
+        grnod = int(_block(st, imp[0])[2][40:50])
+        self.assertEqual([int(x) for x in _block(st, f"/GRNOD/NODE/{grnod}")[1]
+                          .split()], [9])
+        self.assertTrue(_has(res.warnings, "The row's 1 node(s) on no inlet "
+                             f"face keep an /IMPVEL ({imp[0]} on "
+                             f"/GRNOD/NODE/{grnod})."))
+
+    def test_every_refusal_is_named_and_keeps_the_card_byte_for_byte(self):
+        """A refused row is decided before any id is drawn: its bytes are the
+        --no-ale-inflow-ebcs bytes (the A-i route), and the sentence names
+        the class."""
+        bpm = _A7_BPM
+        cases = {
+            "VAD 2": (((bpm, bpm.replace("2         0         1",
+                                         "2         2         1")),),
+                      {}, "VAD 2 is not a velocity", "IMPDISP"),
+            "DOF 5": (((bpm, bpm.replace("1         2         0",
+                                         "1         5         0")),),
+                      {}, "DOF 5 is not a global X / Y / Z translation",
+                      "IMPVEL"),
+            "a BIRTH": (((bpm, bpm[:-10] + "    1.0E-5"),), {},
+                        "it states a time window (BIRTH 1e-05, DEATH 0)",
+                        "IMPVEL"),
+            "a DEATH": (((bpm, bpm[:-20] + "    5.0E-5       0.0"),), {},
+                        "it states a time window (BIRTH 0, DEATH 5e-05)",
+                        "IMPVEL"),
+            "LCID 0": (((bpm, bpm.replace("0         1       1.0",
+                                          "0         0       1.0")),),
+                       {}, "its LCID 0 is not a *DEFINE_CURVE", "IMPVEL"),
+            "an x-free face node": (
+                (("      13             0.0            30.0             0.0"
+                  "       6", "      13             0.0            30.0"
+                  "             0.0       3"),),
+                {}, "not every face node holds direction(s) x", "IMPVEL"),
+            "a face on the vacuum brick": (
+                (("        13        14        15        16\n",
+                  "         1         2         3         4\n"),),
+                {}, "a face brick of part 2 is not on a *MAT_NULL + *EOS_* "
+                "fluid", "IMPVEL"),
+            "--no-vacuum-light-fluid": (
+                (), {"vacuum_light_fluid": False},
+                "the ALE domain still holds the LAW0 /MAT/VOID part(s) [2]",
+                "IMPVEL"),
+        }
+        for name, (edits, kw, why, card) in cases.items():
+            with self.subTest(case=name):
+                deck = _a7_coupon(*edits)
+                res, st, eng = _convert(deck, **kw)
+                self.assertNotIn("/EBCS/INLET/VP/", st)
+                self.assertTrue(_cards(st, f"/{card}/"))
+                self.assertTrue(_has(
+                    res.warnings, "*BOUNDARY_PRESCRIBED_MOTION_SET nsid=1: "
+                    "the ALE inlet (/EBCS/INLET/VP, round 10, A7) is NOT "
+                    "written - " + why, f"so the row stays an /{card}"),
+                    res.warnings)
+                _r, st_off, eng_off = _convert(deck, ale_inflow_ebcs=False,
+                                               **kw)
+                self.assertEqual(st, st_off)
+                self.assertEqual(eng, eng_off)
+
+    def test_the_opt_out_keeps_the_impvel_with_the_light_fluid(self):
+        res, st, _e = _convert(_a7_coupon(), ale_inflow_ebcs=False)
+        self.assertIn("/MAT/HYD_VISC/2", st)
+        self.assertEqual(len(_cards(st, "/IMPVEL/")), 1)
+        self.assertNotIn("/EBCS/INLET/VP/", st)
+        self.assertFalse(_has(res.warnings, "/EBCS/INLET/VP/"))
+        self.assertFalse(_has(res.warnings, "the ALE inlet (/EBCS/INLET/VP"))
+
+    def test_a_lagrangian_channel_and_a_plain_ale_deck_are_untouched(self):
+        """ELFORM 6 is Lagrangian in k2rad (Iale 0): an inflow row on it is
+        never reached (channel_A / _B / _C are MATCH rows); an ELFORM-11
+        deck without a vacuum and without a prescribed motion moves nothing.
+        Both = the A-i HEAD bytes (pinned)."""
+        for name, deck in _a7_guard_decks().items():
+            with self.subTest(deck=name):
+                res, st, eng = _convert(deck)
+                self.assertEqual((_tp._sha(st), _tp._sha(eng)),
+                                 _A7_GUARD_AI_SHA[name])
+                self.assertFalse(_has(res.warnings, "ALE inlet"))
+                self.assertFalse(_has(res.warnings, "/EBCS/INLET/VP"))
+
+
+class A7Texts(unittest.TestCase):
+    """The texts that change with A7."""
+
+    def test_the_vacuum_sentence_is_route_neutral(self):
+        """A *MAT_VACUUM with no emitted Iale part (2Dlag-shaped: the
+        vacuum part on a Lagrangian ELFORM 1 brick) gets the parse-time
+        sentence only - route-neutral, the measured-false clause gone."""
+        deck = _a7_coupon(("         2        11         0",
+                           "         2         1         0"))
+        res, st, _e = _convert(deck)
+        w = [x for x in res.warnings if x.startswith("*MAT_VACUUM 2 (RO")]
+        self.assertEqual(len(w), 1)
+        for needle in ("Radioss has no vacuum MATERIAL",
+                       "k2rad writes either /MAT/VOID/2 (LAW0",
+                       "a light-fluid copy of that fluid (round 10, A7",
+                       "so whatever advects into it is DELETED (measured on "
+                       "stagnation_A)", "undeclared balance IS Radioss's "
+                       "void"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, w[0])
+        self.assertFalse(_has(res.warnings, "light-fluid copy (round 10, A7) "
+                              "is not written"))
+        self.assertIn("/MAT/VOID/2", st)
+
+    def test_the_retracted_clause_prints_nowhere(self):
+        decks = (_a7_coupon(),
+                 _a7_coupon((_A7_WATER, "*MAT_PLASTIC_KINEMATIC\n         1"
+                             "    7.8E-9  200000.0       0.3     200.0\n")),
+                 _a7_coupon(("         2        11         0",
+                             "         2         1         0")))
+        for k, deck in enumerate(decks):
+            with self.subTest(deck=k):
+                res, _st, _e = _convert(deck)
+                self.assertFalse(_has(res.warnings, "nothing flows into"))
+
+    def test_the_ammg_cycle_18_clause_is_history(self):
+        res, _st, _e = _convert(_a7_coupon())
+        w = [x for x in res.warnings if "NO /MAT/LAW51 is emitted" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("stagnation_A's engine stopped at cycle 18 (t = 3.9e-5 "
+                      "of ENDTIM 2e-2) when that batch measured it; at round "
+                      "10 its default bytes (the vacuum light fluid and the "
+                      "ALE inlet, A7) run to NORMAL TERMINATION at t 0.02 in "
+                      "9364 cycles (nt 4).", w[0])
+        self.assertNotIn("stops at cycle 18", w[0])
+        res2, _s2, _e2 = _convert(_a7_coupon(), ale_multimat_law51=True)
+        w2 = [x for x in res2.warnings if "listing submaterials" in x]
+        self.assertIn("stopped at cycle 18", w2[0])
+        self.assertNotIn("stops at cycle 18", w2[0])
+        # the LAW51 phase screen names the light-fluid route
+        self.assertTrue(_has(res2.warnings, "MID 2 (*MAT_VACUUM -> a LAW6 "
+                             "light-fluid copy, round 10, A7)",
+                             "keeps its light-fluid /MAT/HYD_VISC"))
+
+    def test_the_sf_sentence_names_the_inlet_route(self):
+        """Round 9's SF-default sentence (a stated SF 0.0 is LS-DYNA's 1.0)
+        says where the motion goes on an inlet row."""
+        deck = _a7_coupon((_A7_BPM, _A7_BPM.replace("1       1.0",
+                                                    "1       0.0")))
+        res, _st, _e = _convert(deck)
+        self.assertTrue(_has(res.warnings, "SF = 0.0 is read as the card's "
+                             "default 1.0", "so the motion is IMPOSED - here "
+                             "through the ALE inlet /EBCS/INLET/VP of this "
+                             "set with Fscale 1 (see the inlet note)"))
+        res2, _s, _e2 = _convert(deck, ale_inflow_ebcs=False)
+        self.assertTrue(_has(res2.warnings, "so the motion is IMPOSED "
+                             "(/IMPVEL Fscale 1)"))
+
+
+#: the coupon's _0000 / _0001 sha256 at the part-A-i head (e512676 = the
+#: A-i head 1792a66 + master b17c298; measured on a detached checkout of it):
+#: the opt-out arm of A7 must reproduce them
+_A7_COUPON_AI_SHA = (
+    "a089f2b03cf96d74be7c1b29e773e4cd615a0d024bb99189e7cf8cc79d666738",
+    "a6a8b01b5a3e8829f02a0367ba52a48746ba1b911e340fb35faf9ef4c0f55b0a")
+#: the two A7 guard decks' _0000 / _0001 sha256 at the part-A-i head
+_A7_GUARD_AI_SHA = {
+    "channel": (
+        "9cca15e7da2838282482fad3d9d17c15dbf98f4c19c41604c5fa6a198ca3fa2f",
+        "a6a8b01b5a3e8829f02a0367ba52a48746ba1b911e340fb35faf9ef4c0f55b0a"),
+    "plain": (
+        "14ff025e22759df77711ad11d02d5a411b8b7e5a3c80e8689b064c229dcccb7e",
+        "a6a8b01b5a3e8829f02a0367ba52a48746ba1b911e340fb35faf9ef4c0f55b0a"),
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Part A-ii: retracted statements and the flags
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Part A-ii statements round 10 made false. CHANGELOG may quote them.
+_RETRACTED_ROUND_10_A2 = (
+    # A7: the *MAT_VACUUM handler's clause, MEASURED false (the water that
+    # advects into a LAW0 cell is deleted there; stagnation_A)
+    "so nothing flows into it",
+    # A7: the README's copy of the same claim
+    "here it is a separate single-material ALE region nothing flows into",
+    # A7: the AMMG warning's row-state clause (stagnation_A now runs NORMAL)
+    "stagnation_A's engine stops at cycle",
+)
+
+#: Never shipped, CHANGELOG included: a census mover count that was wrong
+#: before it could ship (1a moves 2 / 2: ale_wavehitcol's water is
+#: /MAT/VOID).
+_FORBIDDEN_ROUND_10_A2 = (
+    "3 / 3 movers",
+)
+
+#: (shipped file, the replacement text it now carries)
+_REPLACEMENTS_ROUND_10_A2 = (
+    ("k2rad/handlers.py",
+     "a LAW0 cell takes no material, so whatever advects into it is DELETED "
+     "(measured on stagnation_A)"),
+    ("README.md",
+     "a LAW0 cell takes no material, so whatever advects into it is DELETED"),
+    ("k2rad/writer/blast_ale.py",
+     "stagnation_A's engine stopped at cycle 18 (t = 3.9e-5 of ENDTIM 2e-2) "
+     "when that batch measured it"),
+)
+
+
+class Round10RetractedStatementsA2(unittest.TestCase):
+    """No shipped text carries a retracted part-A-ii spelling; the guard
+    fires on each needle split across two adjacent literals; a PREFIX still
+    fires; the replacements ARE shipped; the forbidden sentences appear
+    nowhere, CHANGELOG included."""
+
+    def test_no_shipped_text_carries_a_retracted_statement(self):
+        for rel, joined in _t7._SHIPPED_TEXTS():
+            for needle in _RETRACTED_ROUND_10_A2:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+    def test_the_guard_fires_on_each_retracted_spelling(self):
+        for needle in _RETRACTED_ROUND_10_A2 + _FORBIDDEN_ROUND_10_A2:
+            with self.subTest(needle=needle):
+                fake = ('x ' + needle.replace(" ", ' "\n            "')
+                        + ' y')
+                self.assertIn(_t7._collapse(needle).lower(), _t7._collapse(
+                    re.sub(r'"\s*\n\s*"', "", fake)).lower())
+
+    def test_a_PREFIX_of_a_retracted_string_still_fires(self):
+        for needle in _RETRACTED_ROUND_10_A2 + _FORBIDDEN_ROUND_10_A2:
+            with self.subTest(needle=needle):
+                self.assertIn(_t7._collapse(needle[:max(4, len(needle) // 2)]),
+                              _t7._collapse(needle))
+
+    def test_the_replacements_really_are_shipped(self):
+        texts = dict(_t7._SHIPPED_TEXTS())
+        for rel, needle in _REPLACEMENTS_ROUND_10_A2:
+            with self.subTest(file=rel, needle=needle):
+                key = next((k for k in texts
+                            if k.replace("\\", "/") == rel), None)
+                self.assertIsNotNone(key, f"{rel} was not scanned")
+                self.assertIn(_t7._collapse(needle), texts[key])
+
+    def test_no_document_carries_a_forbidden_sentence(self):
+        for rel, joined in _with_changelog():
+            for needle in _FORBIDDEN_ROUND_10_A2:
+                with self.subTest(file=rel, needle=needle):
+                    self.assertNotIn(_t7._collapse(needle).lower(),
+                                     joined.lower())
+
+
+class Round10FlagWiringA2(_t7.Round7FlagWiringA):
+    """The round-10 default-ON levers of part A-ii (the positive spelling;
+    README and the GUI summary carry the --no- one)."""
+
+    _FLAGS = {
+        "--vacuum-light-fluid": "vacuum_light_fluid",
+        "--ale-inflow-ebcs": "ale_inflow_ebcs",
+    }
+    _HELP_FIGURES = {
+        "--vacuum-light-fluid": ("NEGATIVE RHO", "832 -> 9364 cycles",
+                                 "LAW44 / LAW0 partner is refused by name",
+                                 "RHO_I = the vacuum RO, the /EOS RHO_0 = "
+                                 "the fluid RO"),
+        "--ale-inflow-ebcs": ("aflux3.F:488-524", "KE RMS 53.09 -> 14.40 %",
+                              "IE RMS 172.71 -> 206.79 %",
+                              "(3.85e-5, 0.02]", "Never on ELFORM 5 / 6"),
+    }
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,70 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **R14 CAMPAIGN PARITY batch, round 10 - part A-ii (ALE and the rigid-tool
+  contacts).** One commit per item in the order A7, A9, A8, A10, each
+  measured on the bytes of part A-i and of the items before it; the base of
+  every byte comparison is the part-A-i head merged with master `b17c298`
+  (`e512676`).
+  - **A7 - `*MAT_VACUUM` in an AMMG deck -> a LAW6 light fluid, and the ALE
+    velocity inlet -> `/EBCS/INLET/VP`, as a pair (both default ON;
+    `--no-vacuum-light-fluid` / `--no-ale-inflow-ebcs`).** A LAW0
+    `/MAT/VOID` cell DELETES the fluid that advects into it (stagnation_A's
+    water loses rho v A = 0.02 t/s) and the water cell beside it goes to a
+    negative density (`srho3.F:199-213`): stagnation_A / _B stopped at cycle
+    832 (NEGATIVE RHO element 260, t 0.00181 of 0.02). An `/IMPVEL` on the
+    boundary nodes of an Eulerian ALE mesh admits no material
+    (`aflux3.F:488-524`: a neighbourless ALE face is a slip wall). 1a writes
+    a vacuum whose `*ALE_MULTI-MATERIAL_GROUP` holds exactly one other
+    material, a `*MAT_NULL` + `*EOS_*` LAW6 carrier, as a LAW6 copy of that
+    fluid under the vacuum's own MID (RHO_I = the vacuum RO, the fluid's
+    `/EOS` with RHO_0 = the fluid RO, Pmin -1e-20; `writer/materials`
+    `_resolve_vacuum_light_fluid`, a decision `mesh._target_mat_law` reads:
+    law 6 there). 1b writes a VAD-0 row on a global X / Y / Z translation
+    whose nodes cover boundary faces of an emitted Iale brick as the
+    `/SURF/SEG` of those faces (outward order) + `/EBCS/INLET/VP` (vel_flag 1,
+    the row's own `/FUNCT` x its Fscale on that component, the other two 0;
+    one material row: alpha 1, the face bricks' density, p 0;
+    `radioss2019/LOADS/inlet.cfg:165-205`, `ebcs8_inlet.F90:693-716`) in
+    place of the covered nodes' `/IMPVEL`; the row is decided before any id
+    is drawn, so a refused row keeps its `/IMP*` card byte for byte. MEASURED
+    (nt 4, README 9.1, 500 LS times in (3.85435e-05, 0.0199996], the A-ii
+    branch bytes): stagnation_A and _B run NORMAL to t 0.02 in 9364 cycles,
+    while their part-A-i bytes, run in the same window, end ERROR TERMINATION
+    at cycle 832 (NEGATIVE RHO element 260) - the two status moves
+    error_engine -> normal are A7's (EXPECTED in the campaign pass).
+    stagnation_A KE END +25.91 % (fifths +0.62 / +7.33 / +13.31 / +25.90 /
+    +25.91), KE RMS 53.09 % with the light fluid alone -> 14.40 % with the
+    pair; the named COST is the IE: END +839.05 %, IE RMS 172.71 -> 206.79 %
+    (a single-material light fluid smears the water into the light cells;
+    LS-DYNA keeps the vacuum as a phase). stagnation_B KE END +18.60 %, KE RMS
+    60.18 -> 10.03 %. The inflow work is the global EXT-WORK
+    (`ebcs8_inlet.F90:646/656`): stagnation_A 3.42e-5 / 0.122 / 2.467 / 2.519
+    / 22.69 / 818.1 at the LS bndout instants t 1.20165e-4 / 1.60976e-4 /
+    2.01787e-4 / 2.40330e-4 / 1.80021e-3 / 2.00018e-2 against LS-DYNA's
+    0.008369 / 52.86 / 1224 / 1255 / 1255 / 1304 - at the unit coupling
+    stiffness the water hammer that does LS-DYNA's inflow work by t 2.40e-4
+    is not reproduced. Refused by name: a LAW44 partner (cylinder_impact_A /
+    _B), a LAW0 partner (ale_wavehitcol: its `*EOS_MURNAGHAN` is not
+    converted), two partners, RO <= 0, an `/EOS` id clash (1a); a VAD other
+    than 0, a DOF other than 1 / 2 / 3, a BIRTH / DEATH window, a curve that
+    is not a `*DEFINE_CURVE`, a face node that does not hold the two other
+    translations, a face brick not on a LAW6 fluid and a LAW0 part left in
+    the ALE domain (1b: beside a LAW0 vacuum the inlet dies where the
+    `/IMPVEL` deck dies). The `*MAT_VACUUM` sentence's "so nothing flows into
+    it" was measured false and is replaced; the AMMG warning's stagnation_A
+    clause is history now. Movers: 2 keys / 2 models by bytes (stagnation_A
+    d7a41d9fa3d0, stagnation_B 2f774562d950: `_0000.rad`), text on the
+    `*MAT_VACUUM` decks cylinder_impact_A / _B, ale_wavehitcol and 2Dlag;
+    the Lagrangian ELFORM 5 / 6 channels (channel_A / _B / _C, MATCH rows;
+    advection_B / _C) are byte-identical. Tests: `tests/test_r14_round10.py`
+    `VacuumLightFluid`, `AleInflowEbcs`, `A7Texts`,
+    `Round10RetractedStatementsA2`, `Round10FlagWiringA2` (fixture
+    `tests/fixtures/round10/r10_ale_inlet_coupon.k`: starter 0 ERROR(S),
+    `NUMBER OF SEGMENTS FOUND 1`, engine NORMAL in 20 cycles);
+    `test_r14_triage_1.AleSubmaterialTests` re-derived (the route-neutral
+    sentence; the light-fluid drop text with `--no-vacuum-light-fluid` as
+    the `/MAT/VOID` subcase).
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
   time step, implicit, the erosion and few-node texts).** One commit per item;
   every later item of the round is measured on the bytes of the earlier ones

@@ -5701,6 +5701,86 @@ def _pm_set_nodes(state: ConversionState, pm,
     return list(state.node_sets[pm.nsid][1])
 
 
+#: A non-hold prescribed-motion row's round-10 A7 1b inlet decision:
+#: ``(faces, inflow density, refusal)`` - faces non-empty = the inlet is
+#: written; a refusal is named where the row covers Iale boundary faces.
+_InletDecision = Tuple[List[Tuple[int, int, List[int]]], float, str]
+_NO_INLET: _InletDecision = ([], 0.0, "")
+
+
+def _pm_inlet_decision(state: ConversionState, pm, nids: List[int],
+                       cache: Dict[str, object]) -> _InletDecision:
+    """R14 round 10, A7 1b (``--ale-inflow-ebcs``, default ON): a
+    ``*BOUNDARY_PRESCRIBED_MOTION_SET / _NODE`` row whose nodes cover
+    boundary faces of an EMITTED Iale (ELFORM 11 / 12) brick becomes the
+    ``/SURF/SEG`` of those faces + an ``/EBCS/INLET/VP``: an ``/IMPVEL`` on
+    an Eulerian ALE boundary moves the nodes and admits no material
+    (``aflux3.F:488-524``, a neighbourless ALE face is a slip wall). Decided
+    BEFORE any id is drawn (a refused row keeps its ``/IMP*`` card byte for
+    byte); ``_NO_INLET`` when the option is off, the DOF has no Dir letter
+    or the row covers no Iale boundary face (every ELFORM 5 / 6 channel,
+    which k2rad writes Lagrangian)."""
+    if (not state.options.ale_inflow_ebcs
+            or _DOF_DIR.get(abs(pm.dof)) is None):
+        return _NO_INLET
+    from .blast_ale import _ale_inlet_faces, _ale_inlet_refusal
+    faces = _ale_inlet_faces(state, set(nids), cache)
+    if not faces:
+        return _NO_INLET
+    refusal, rho = _ale_inlet_refusal(state, pm, faces)
+    if refusal:
+        return [], 0.0, refusal
+    return faces, rho, ""
+
+
+def _emit_ale_inlet_row(state: ConversionState, pm, nids: List[int],
+                        faces: List[Tuple[int, int, List[int]]], rho: float,
+                        keyword: str, set_title: str,
+                        base_dir: str) -> List[str]:
+    """The accepted A7 1b row: the ``/SURF/SEG`` + ``/EBCS/INLET/VP`` of its
+    faces (the row's own ``/FUNCT`` x the ``/IMPVEL`` Fscale), an
+    ``/IMPVEL`` on a ``/GRNOD/NODE`` of exactly the row's nodes on no inlet
+    face (none when every node is covered), the driven-node registry with
+    the WHOLE row (the BNDOUT ``/TH/NODE`` and the free-node guard see the
+    driven set they saw before), and the W-A7-1b sentence."""
+    from .blast_ale import _A7_INLET_MEASURED, ale_inlet_lines
+    from .loadcurves import load_funct_id
+    fct = load_funct_id(state, pm.lcid, "EBCS/INLET/VP")
+    sf = _pm_sf(state, pm)
+    lines, inlet_id = ale_inlet_lines(state, pm, faces, rho, fct, sf)
+    surf_id = int(lines[0].rsplit("/", 1)[1])
+    covered = {n for _e, _p, fn in faces for n in fn}
+    rest = [n for n in nids if n not in covered]
+    tail = ""
+    if rest:
+        grnod_id = state.next_grnod_id()
+        motion_id = state.next_id()
+        lines += _emit_imp_card("IMPVEL", motion_id, f"Motion_{motion_id}",
+                                pm.lcid, base_dir, grnod_id, sf, 0.0, 0.0,
+                                0, state=state)
+        lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}",
+                                  rest)
+        tail = (f" The row's {len(rest)} node(s) on no inlet face keep an "
+                f"/IMPVEL (/IMPVEL/{motion_id} on /GRNOD/NODE/{grnod_id}).")
+    _register_imp_motion_nodes(state, nids, base_dir, 0, 0.0, 0.0)
+    state.warn(
+        f"*{keyword} nsid={pm.nsid} dof={pm.dof} (VAD 0) drives "
+        f"{len(faces)} boundary face(s) of the ALE (Iale >= 1) mesh -> "
+        f"/SURF/SEG/{surf_id} + /EBCS/INLET/VP/{inlet_id}: an ALE INLET with "
+        f"the row's velocity (curve {pm.lcid} x {sf:g} on "
+        f"{'XYZ'[pm.dof - 1]}, the other two components 0 - the face nodes "
+        f"hold them), inflow density {rho:g} (the face bricks' fluid) and "
+        "pressure 0, instead of an /IMPVEL. An /IMPVEL on the boundary nodes "
+        "of an Eulerian ALE mesh moves the nodes and admits NO material: "
+        "OpenRadioss makes every neighbourless ALE face a slip wall "
+        "(aflux3.F:488-524, FLRD = PM(92) = 0 for LAW6), so the inlet cells "
+        "drain (stagnation_A's inlet cell 1e-9 -> 2.67e-11 by t 1.81e-3); "
+        "the EBCS imposes the velocity on its nodes every cycle and brings "
+        "the fluid in (ebcs8_inlet.F90:693-716). " + _A7_INLET_MEASURED
+        + tail + " --no-ale-inflow-ebcs keeps the /IMPVEL.")
+    return lines
+
+
 def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     lines: List[str] = []
     if not state.prescribed_motion_sets:
@@ -5735,23 +5815,30 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     fix_rot: Dict[Tuple[int, int], List[str]] = defaultdict(list)
     fix_nodes: Dict[Tuple[int, int], List[int]] = {}
     fix_order: List[Tuple[int, int]] = []
-    # (row, its resolved node ids) — carried together rather than looked up by
-    # id(pm) later, which only stays unique while the objects are alive.
-    motions: List[Tuple[PrescribedMotionSet, List[int]]] = []
+    # (row, its resolved node ids, its round-10 A7 1b inlet decision) —
+    # carried together rather than looked up by id(pm) later, which only
+    # stays unique while the objects are alive.
+    motions: List[Tuple[PrescribedMotionSet, List[int], _InletDecision]] = []
     box_cache: Dict[int, Optional[Set[int]]] = {}
+    inlet_cache: Dict[str, object] = {}
     for pm in state.prescribed_motion_sets:
         nids = _pm_set_nodes(state, pm, box_cache)
         if nids is None:
             continue
         hold = _pm_zero_hold(state, pm)
+        inlet = (_pm_inlet_decision(state, pm, nids, inlet_cache)
+                 if not hold else _NO_INLET)
         if pm.sf == 0.0 and not hold:
             # round 9, A8: a stated SF 0.0 is LS-DYNA's 1.0
+            how = (f"(/{PM_VAD_KEYWORD[pm.vad]} Fscale 1)" if not inlet[0]
+                   else "- here through the ALE inlet /EBCS/INLET/VP of this "
+                        "set with Fscale 1 (see the inlet note)")
             state.warn(
                 "*BOUNDARY_PRESCRIBED_MOTION_NODE / _SET "
                 f"nsid={pm.nsid} dof={pm.dof}: SF = 0.0 is read as the card's "
                 "default 1.0 (Vol I R17 p.759; Appendix V p.73-9) and curve "
                 f"{pm.lcid} (VAD {pm.vad}) is not a zero motion, so the motion "
-                f"is IMPOSED (/{PM_VAD_KEYWORD[pm.vad]} Fscale 1); before round "
+                f"is IMPOSED {how}; before round "
                 "9 k2rad held the DOF with a /BCS. A zero motion (VAD 0 / 2 on a "
                 "zero curve, or no curve) stays a /BCS hold; VAD 1 on a zero "
                 "curve is imposed (the node keeps its initial velocity). "
@@ -5772,7 +5859,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             fix_tra[key].append(mapped[0])
             fix_rot[key].append(mapped[1])
         else:
-            motions.append((pm, nids))
+            motions.append((pm, nids, inlet))
 
     for key in fix_order:
         nsid, boxid = key
@@ -5797,7 +5884,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{nsid}", nids)
 
     # Non-zero scale: real prescribed motion → /IMPDISP, /IMPVEL, /IMPACC
-    for pm, nids in motions:
+    for pm, nids, inlet in motions:
         keyword = ("BOUNDARY_PRESCRIBED_MOTION_SET_BOX" if pm.boxid
                    else "BOUNDARY_PRESCRIBED_MOTION_SET")
         set_title = state.node_sets.get(pm.nsid, ("", []))[0]
@@ -5814,13 +5901,24 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             continue
         ref = f"nsid={pm.nsid}"
         skew_id = _pm_skew_for(state, pm, keyword, ref)
+        # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,
+        # so this index can never miss (a VAD outside it never reaches here).
+        kw = PM_VAD_KEYWORD[pm.vad]
+        faces, rho, refusal = inlet
+        if refusal:
+            state.warn(
+                f"*{keyword} nsid={pm.nsid}: the ALE inlet (/EBCS/INLET/VP, "
+                f"round 10, A7) is NOT written - {refusal} - so the row stays "
+                f"an /{kw}, which on an Eulerian ALE face admits no material "
+                "(aflux3.F:488-524).")
+        if faces:
+            lines += _emit_ale_inlet_row(state, pm, nids, faces, rho,
+                                         keyword, set_title, base_dir)
+            continue
         grnod_id = state.next_grnod_id()
         motion_id = state.next_id()
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop  = pm.death if pm.death < 1e27 else 0.0
-        # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,
-        # so this index can never miss (a VAD outside it never reaches here).
-        kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
                                 base_dir, grnod_id, _pm_sf(state, pm), tstart,
                                 tstop, skew_id, state=state)

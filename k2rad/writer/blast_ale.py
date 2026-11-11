@@ -438,10 +438,12 @@ def _warn_ale_multimaterial_omitted(state: ConversionState) -> List[str]:
             "relation to the deck's *INITIAL_VOLUME_FRACTION*. Also measured "
             "on these decks: underwater_C runs to its full target time with a "
             "kinetic energy 54x the LS-DYNA glstat's and an engine energy "
-            "error reaching 99.9 %, and stagnation_A's engine stops at cycle "
-            "18 (t = 3.9e-5 of ENDTIM 2e-2) with no termination line at all. "
-            "The starter fix is real; the engine result is not the LS-DYNA "
-            "answer.")
+            "error reaching 99.9 %, and stagnation_A's engine stopped at "
+            "cycle 18 (t = 3.9e-5 of ENDTIM 2e-2) when that batch measured "
+            "it; at round 10 its default bytes (the vacuum light fluid and "
+            "the ALE inlet, A7) run to NORMAL TERMINATION at t 0.02 in 9364 "
+            "cycles (nt 4). The starter fix is real; the engine result is "
+            "not the LS-DYNA answer.")
     return []
 
 
@@ -585,10 +587,12 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
             "(see the *MAT_HIGH_EXPLOSIVE_BURN warning). Also measured on "
             "these decks: underwater_C runs to its full target time with a "
             "kinetic energy 54.5x the LS-DYNA glstat's and an engine energy "
-            "error reaching 99.9 %, and stagnation_A's engine stops at cycle "
-            "18 (t = 3.9e-5 of ENDTIM 2e-2) with no termination line at all. "
-            "The starter fix is real; the engine result is not the LS-DYNA "
-            "answer.")
+            "error reaching 99.9 %, and stagnation_A's engine stopped at "
+            "cycle 18 (t = 3.9e-5 of ENDTIM 2e-2) when that batch measured "
+            "it; at round 10 its default bytes (the vacuum light fluid and "
+            "the ALE inlet, A7) run to NORMAL TERMINATION at t 0.02 in 9364 "
+            "cycles (nt 4). The starter fix is real; the engine result is "
+            "not the LS-DYNA answer.")
     return lines
 
 
@@ -1696,12 +1700,21 @@ def _ale_nodes_unheld(state: ConversionState, pids: List[int],
     ``*CONSTRAINED_GLOBAL`` cells and the ``*BOUNDARY_SPC`` / zero-hold
     prescribed-motion rows (``loads._global_spc_dofs``, skewed cards
     excluded)."""
-    from .loads import _TC_RC_DIGITS, _global_spc_dofs
     pset = set(pids)
     nodes: Set[int] = set()
     for e in state.solid_elems:
         if e.pid in pset:
             nodes.update(n for n in e.nodes if n > 0)
+    return _nodes_unheld(state, nodes, dirs)
+
+
+def _nodes_unheld(state: ConversionState, nodes: Set[int], dirs: str) -> str:
+    """The directions of *dirs* that NOT every node of *nodes* holds by a
+    global ``/BCS`` k2rad writes from the deck's own cards - the three
+    sources ``_ale_nodes_unheld`` names (shared by the round-10 A7 1b inlet
+    screen, which asks it about the face nodes of one prescribed-motion
+    row)."""
+    from .loads import _TC_RC_DIGITS, _global_spc_dofs
     node_cells = (state.node_tc_rc if state.options.node_tc_rc_bcs else {})
     glob_cells = state.constrained_global_tc_rc
     spc = _global_spc_dofs(state)
@@ -1721,6 +1734,183 @@ def _ale_nodes_unheld(state: ConversionState, pids: List[int],
             missing += d
             break
     return missing
+
+
+# --- round 10, A7 1b: the ALE velocity inlet -> /SURF/SEG + /EBCS/INLET/VP ---
+
+#: The LS-DYNA / Radioss hexahedron faces (the same table contacts.py faces a
+#: solid side with): (1 2 3 4) (5 6 7 8) (1 2 6 5) (2 3 7 6) (3 4 8 7) (4 1 5 8)
+_INLET_HEX_FACES = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4),
+                    (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7))
+
+#: stagnation_A, the deck every W-A7-1b figure was measured on (nt 4, README
+#: 9.1, the light fluid on; the round-10 part-A-ii research arms, reproduced
+#: by the census and its critic to the printed digit)
+_A7_INLET_MEASURED = (
+    "MEASURED on stagnation_A with the vacuum light fluid (nt 4, README 9.1, "
+    "n 500 LS times in (3.85e-5, 0.02]): NORMAL 9364 cycles; KE END +25.91 % "
+    "(fifths +0.62 / +7.33 / +13.31 / +25.90 / +25.91), KE RMS 53.09 -> "
+    "14.40 % against the light fluid alone; the COST is the IE: END +839.05 "
+    "%, RMS 172.71 -> 206.79 %. The inflow work is the global EXT-WORK "
+    "(ebcs8_inlet.F90:646/656), not the /TH/NODE REAC channels, which read 0 "
+    "on the driven DOF: 22.69 at t 1.80e-3 against LS-DYNA's bndout 1254.6 "
+    "(stagnation_A) / 22.658 (stagnation_B) - at the converter's unit "
+    "coupling stiffness the water hammer that does LS-DYNA's inflow work by "
+    "t 2.40e-4 is not reproduced.")
+
+
+def _ale_inlet_faces(state: ConversionState, nodes: Set[int],
+                     cache: Dict[str, object]
+                     ) -> List[Tuple[int, int, List[int]]]:
+    """``(brick id, part id, face nodes)`` of every BOUNDARY face of an
+    emitted Iale >= 1 brick whose four nodes all belong to *nodes* (round 10,
+    A7 1b). A face is a boundary face when its node set belongs to exactly
+    ONE 8-node solid / thick shell of the whole emitted mesh (every part);
+    each is written with the node order that makes ``(n2 - n1) x (n4 - n1)``
+    point AWAY from its brick's centroid (``findele.F:178-195`` orients
+    either way; the outward order keeps the bytes deterministic), sorted by
+    brick id, then face index. *cache* holds the deck's Iale parts and face
+    counts across the rows of one deck. ``[]`` on a deck with no Iale part
+    (an ELFORM 5 / 6 channel k2rad writes Lagrangian never gets here)."""
+    if "iale" not in cache:
+        cache["iale"] = (set(_ale_part_ids(state))
+                         if any(s.iale for s in state.sec_solids.values())
+                         else set())
+    iale = cache["iale"]
+    assert isinstance(iale, set)
+    if not iale or not nodes:
+        return []
+    if "count" not in cache:
+        count: Dict[Tuple[int, ...], int] = {}
+        for e in list(state.solid_elems) + list(state.tshell_elems):
+            nds = list(e.nodes)
+            if len(nds) != 8:
+                continue
+            for f in _INLET_HEX_FACES:
+                key = tuple(sorted(nds[i] for i in f))
+                count[key] = count.get(key, 0) + 1
+        cache["count"] = count
+    counts = cache["count"]
+    assert isinstance(counts, dict)
+    out: List[Tuple[int, int, List[int]]] = []
+    for e in sorted(state.solid_elems, key=lambda q: q.eid):
+        if e.pid not in iale or len(e.nodes) != 8:
+            continue
+        nds = list(e.nodes)
+        if not any(n in nodes for n in nds):
+            continue
+        pts = [state.nodes.get(n) for n in nds]
+        if any(p is None for p in pts):
+            continue
+        cx = sum(p.x for p in pts if p is not None) / 8.0
+        cy = sum(p.y for p in pts if p is not None) / 8.0
+        cz = sum(p.z for p in pts if p is not None) / 8.0
+        for f in _INLET_HEX_FACES:
+            fn = [nds[i] for i in f]
+            if len(set(fn)) != 4 or not set(fn) <= nodes:
+                continue
+            if counts.get(tuple(sorted(fn)), 0) != 1:
+                continue
+            q = [state.nodes[n] for n in fn]
+            ax, ay, az = q[1].x - q[0].x, q[1].y - q[0].y, q[1].z - q[0].z
+            bx, by, bz = q[3].x - q[0].x, q[3].y - q[0].y, q[3].z - q[0].z
+            nx, ny, nz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+            fx = sum(p.x for p in q) / 4.0 - cx
+            fy = sum(p.y for p in q) / 4.0 - cy
+            fz = sum(p.z for p in q) / 4.0 - cz
+            if nx * fx + ny * fy + nz * fz < 0.0:
+                fn = [fn[0], fn[3], fn[2], fn[1]]
+            out.append((e.eid, e.pid, fn))
+    return out
+
+
+def _ale_inlet_refusal(state: ConversionState, pm,
+                       faces: List[Tuple[int, int, List[int]]]
+                       ) -> Tuple[str, float]:
+    """``(refusal, inflow density)`` of a row whose nodes cover Iale
+    boundary faces: refusal "" = the inlet is written. Screened in this
+    order: VAD, DOF (a global translation 1 / 2 / 3 - the /EBCS/INLET/VP
+    velocity is global, and a node-set row is written in the global system
+    for those DOFs), the time window (LS-DYNA's DEATH 0 is its 1e28), the
+    curve, a LAW0 part left in the ALE domain, the face nodes' two other
+    translations, the face bricks' fluid and its density."""
+    from .materials import _law6_carrier_mids
+    from .mesh import _target_mat_law
+    if pm.vad != 0:
+        return (f"VAD {pm.vad} is not a velocity (the inlet imposes the "
+                "velocity of the inflow, ebcs8_inlet.F90:183-210)", 0.0)
+    if pm.dof not in (1, 2, 3):
+        return (f"DOF {pm.dof} is not a global X / Y / Z translation (1 / 2 "
+                "/ 3)", 0.0)
+    if pm.birth > 0.0 or 0.0 < pm.death < 1e27:
+        return (f"it states a time window (BIRTH {pm.birth:g}, DEATH "
+                f"{pm.death:g}) and /EBCS/INLET/VP has none", 0.0)
+    if pm.lcid not in state.curves:
+        return (f"its LCID {pm.lcid} is not a *DEFINE_CURVE k2rad writes as "
+                "a /FUNCT", 0.0)
+    iale = sorted(set(_ale_part_ids(state)))
+    law0 = [p for p in iale
+            if _target_mat_law(state, state.parts[p].mid) == 0]
+    if law0:
+        return (f"the ALE domain still holds the LAW0 /MAT/VOID part(s) "
+                f"{law0} (a *MAT_VACUUM the light-fluid copy does not cover, "
+                "--no-vacuum-light-fluid, or a bare *MAT_NULL), and beside a "
+                "LAW0 cell the inflow dies where the /IMPVEL deck dies "
+                "(stagnation_A: NEGATIVE RHO at cycle 832)", 0.0)
+    covered = {n for _e, _p, fn in faces for n in fn}
+    other = "".join(d for k, d in enumerate("xyz") if k != pm.dof - 1)
+    unheld = _nodes_unheld(state, covered, other)
+    if unheld:
+        return (f"not every face node holds direction(s) {unheld} (the inlet "
+                "imposes all three velocity components on its nodes, "
+                "ebcs8_inlet.F90:706-713)", 0.0)
+    carriers = _law6_carrier_mids(state)
+    rhos: Set[float] = set()
+    for _e, pid, _fn in faces:
+        part = state.parts.get(pid)
+        if part is None or part.mid not in carriers:
+            return (f"a face brick of part {pid} is not on a *MAT_NULL + "
+                    "*EOS_* fluid written as /MAT/HYD_VISC, whose density is "
+                    "the inflow's", 0.0)
+        mid = state.sis_part_mids.get(pid, part.mid)
+        dens = state.sis_density.get(mid)
+        rhos.add(dens[0] if dens else state.mat_null[part.mid].rho)
+    if len(rhos) != 1:
+        return (f"the face bricks' fluids have different densities "
+                f"{sorted(rhos)} and the inlet takes one", 0.0)
+    return "", rhos.pop()
+
+
+def ale_inlet_lines(state: ConversionState, pm,
+                    faces: List[Tuple[int, int, List[int]]], rho: float,
+                    fct: int, fscale: float) -> Tuple[List[str], int]:
+    """``(lines, inlet id)``: the ``/SURF/SEG`` of *faces* and the
+    ``/EBCS/INLET/VP`` on it (round 10, A7 1b). Card grammar
+    ``radioss2019/LOADS/inlet.cfg:165-205`` (``/BEGIN 2022`` reads it):
+    ``vel_flag`` 1, the row's DOF component = the ``/FUNCT`` *fct* x
+    *fscale* (``ebcs8_inlet.F90:183-210``), the other two 0, one material
+    row (volume fraction 1, density *rho*, pressure 0). Ids drawn here,
+    after every screen."""
+    surf_id = state.next_id()
+    lines = _emit_surf_seg(surf_id, f"inlet_{pm.nsid}",
+                           [fn for _e, _p, fn in faces])
+    inlet_id = state.next_id()
+    vel = [_i(0) + _f(0.0), _i(0) + _f(0.0), _i(0) + _f(0.0)]
+    vel[pm.dof - 1] = _i(fct) + _f(fscale)
+    lines += [
+        f"/EBCS/INLET/VP/{inlet_id}",
+        f"inlet_{pm.nsid}",
+        "#  surf_ID  vel_flag",
+        _i(surf_id) + _i(1),
+        "# fct_IDvx            Fscalevx  fct_IDvy            Fscalevy  "
+        "fct_IDvz            Fscalevz",
+        "".join(vel),
+        "# fct_IDvf            Fscalevf fct_IDrho           Fscalerho "
+        "fct_IDp_e           Fscalep_e",
+        _i(0) + _f(1.0) + _i(0) + _f(rho) + _i(0) + _f(0.0),
+        HDR,
+    ]
+    return lines, inlet_id
 
 
 def _resolve_ale_flow_tracking(state: ConversionState) -> AleFlowTrackingPlan:

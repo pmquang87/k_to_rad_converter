@@ -531,6 +531,8 @@ def convert(
     implicit_end_fixpoint: bool = True,
     implicit_rayleigh_damping: bool = False,
     erode_tsmin_rule: bool = True,
+    vacuum_light_fluid: bool = True,
+    ale_inflow_ebcs: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1971,6 +1973,32 @@ def convert(
         where LS-DYNA's closed form deletes none. ``dt_del`` stays the
         explicit floor. Default True (``--no-erode-tsmin-rule``: the earlier
         trigger, Tmin = TSLIMT).
+    vacuum_light_fluid : bool
+        A ``*MAT_VACUUM`` part of an Iale (ELFORM 11 / 12) deck whose
+        ``*ALE_MULTI-MATERIAL_GROUP`` holds exactly one other material, a
+        ``*MAT_NULL`` + ``*EOS_*`` fluid written as ``/MAT/HYD_VISC``, is
+        written as a LAW6 light-fluid copy of that fluid under the vacuum's
+        own MID (RHO_I = the vacuum RO, the ``/EOS`` RHO_0 = the fluid RO,
+        Pmin -1e-20) instead of ``/MAT/VOID``, which DELETES the fluid that
+        advects into it (R14 round 10, A7 1a). MEASURED (nt 4):
+        stagnation_A / _B stopped at cycle 832 on NEGATIVE RHO (t 0.00181 of
+        0.02) and run NORMAL to t 0.02 in 9364 cycles with the ALE inlet. A
+        LAW44 / LAW0 partner, two partners, RO <= 0 or an ``/EOS`` id clash
+        keep ``/MAT/VOID``, named. Default True
+        (``--no-vacuum-light-fluid``: ``/MAT/VOID``).
+    ale_inflow_ebcs : bool
+        A VAD-0 ``*BOUNDARY_PRESCRIBED_MOTION_SET / _NODE`` row on a global
+        X / Y / Z translation whose nodes cover boundary faces of an EMITTED
+        Iale brick becomes the ``/SURF/SEG`` of those faces + an
+        ``/EBCS/INLET/VP`` with the row's velocity, in place of the
+        ``/IMPVEL`` of the covered nodes (R14 round 10, A7 1b): an
+        ``/IMPVEL`` on an Eulerian ALE boundary admits no material
+        (``aflux3.F:488-524``). MEASURED on stagnation_A with the light fluid
+        (nt 4, n 500 LS times in (3.85e-5, 0.02]): KE RMS 53.09 -> 14.40 %,
+        the named cost IE RMS 172.71 -> 206.79 %. Refused by name beside a
+        LAW0 vacuum, for a time window, a non-/FUNCT curve or an unheld face
+        node; ELFORM 5 / 6 (Lagrangian in k2rad) never reached. Default True
+        (``--no-ale-inflow-ebcs``: the ``/IMPVEL``).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2129,6 +2157,8 @@ def convert(
         implicit_end_fixpoint=implicit_end_fixpoint,
         implicit_rayleigh_damping=implicit_rayleigh_damping,
         erode_tsmin_rule=erode_tsmin_rule,
+        vacuum_light_fluid=vacuum_light_fluid,
+        ale_inflow_ebcs=ale_inflow_ebcs,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(
