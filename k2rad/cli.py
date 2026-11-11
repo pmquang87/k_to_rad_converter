@@ -1371,10 +1371,11 @@ def build_parser() -> argparse.ArgumentParser:
              "*CONTACT_AUTOMATIC_SINGLE_SURFACE SSID != 0 route on an explicit "
              "deck included), the /INTER/TYPE25 a contact card is written as "
              "and the SOFT-routed TYPE11 / TYPE19. It overrides the "
-             "per-contact Card-3 SFS mapping. Not reached: the post-rupture "
-             "companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK, which "
-             "keeps Stfac 0 (the engine default), and the tied /INTER/TYPE2 "
-             "/ TYPE10 (--tie-stfac sets the TYPE10's). Default: that "
+             "per-contact Card-3 SFS mapping. It reaches the post-rupture "
+             "companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK too (round "
+             "10; --no-tiebreak-companion-stfac keeps it at Stfac 0, the "
+             "starter's 1.0). Not reached: the tied /INTER/TYPE2 / TYPE10 "
+             "(--tie-stfac sets the TYPE10's). Default: that "
              "mapping (Stfac 0 = engine auto on a TYPE7 whose SFS is 1 or "
              "blank). (.k-native per contact: set Card-3 SFS, e.g. "
              "SFS=0.3.)",
@@ -2356,6 +2357,23 @@ def build_parser() -> argparse.ArgumentParser:
              "+ t_m/2 = 0.35) and an exempted card passes through. R14: 0 "
              "decks move.",
     )
+    parser.add_argument(
+        "--tiebreak-companion-stfac",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a Stfac on the post-rupture companion /INTER/TYPE25 of a "
+             "*CONTACT_..._TIEBREAK: --soften-stfac when given, else the "
+             "card's Card-3 min(SFS, SFM) (blank or 0 = 1.0), written 0 at 1.0 "
+             "- the starter's own 1.0 (hm_read_inter_type25.F:620-622), so a "
+             "card with SFS = SFM = 1 keeps its bytes. LS-DYNA's tiebreak "
+             "behaves as a surface-to-surface contact after failure (Vol I "
+             "R17 p.11-39) whose penalty SFS / SFM scale (p.11-33). ON by "
+             "default; --no-tiebreak-companion-stfac writes 0 whatever the card "
+             "or --soften-stfac says, as before. MEASURED on a two-block "
+             "tiebreak coupon under --soften-stfac 0.3 (nt 4): STIFFNESS "
+             "FACTOR 1.000 -> 0.300, the re-contact penetration 0.000914 -> "
+             "0.002344 mm, 685 -> 515 cycles. R14: 0 decks move.",
+    )
     return parser
 
 
@@ -2542,6 +2560,7 @@ def main(argv=None) -> int:
         initial_void_copy=args.initial_void_copy,
         clis_pfac_stiffness=args.clis_pfac_stiffness,
         surfatyp_all_parts=args.surfatyp_all_parts,
+        tiebreak_companion_stfac=args.tiebreak_companion_stfac,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

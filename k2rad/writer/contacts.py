@@ -4155,8 +4155,9 @@ def _report_contact_lever_reach(state: ConversionState) -> None:
     """Say, once per deck and after the LAST contact section, what the
     per-interface contact levers reached (CardStack K-02 / K-06 and the
     K-0P review of --soften-stfac): the --soften-stfac interfaces by type
-    (and the tiebreak companions it leaves at Stfac 0), and every
-    --inter-stmin / --inter-inacti id no interface took."""
+    (the tiebreak companions among the TYPE25 since round 10, B3; under
+    --no-tiebreak-companion-stfac the companions it leaves at Stfac 0), and
+    every --inter-stmin / --inter-inacti id no interface took."""
     kinds: Optional[Dict[int, str]] = None
     stmin_left = sorted(i for i in state.options.inter_stmin
                         if i not in state.inter_stmin_reached)
@@ -4207,7 +4208,8 @@ def _report_contact_lever_reach(state: ConversionState) -> None:
     comp = sorted(set(state.soften_stfac_unreached))
     tail = (" It does not reach the post-rupture companion /INTER/TYPE25 "
             + ", ".join(map(str, comp)) + " of a *CONTACT_..._TIEBREAK, which "
-            "keeps Stfac 0 (the engine default)." if comp else "")
+            "keeps Stfac 0 (the starter's 1.0) under "
+            "--no-tiebreak-companion-stfac." if comp else "")
     if not parts:
         state.warn(
             f"--soften-stfac: Stfac={soft:g} reached no interface: this deck "
@@ -9214,11 +9216,13 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         if _make_master_surface(state, cand, f"tiebreak_{c.inter_id}_post_surfa",
                                 sec_pids, out):
             sec_surf = cand
+    comp_stfac, stfac_note = _tiebreak_companion_stfac(state, c, comp_id)
     if sec_surf:
         out += _emit_inter_type25(comp_id,
                                   f"post_rupture_contact_{c.inter_id}",
                                   sec_surf, surf_id, istf=4, inacti=5,
-                                  fric=fric, fric_id=fric_id, irem_i2=3)
+                                  stfac=comp_stfac, fric=fric,
+                                  fric_id=fric_id, irem_i2=3)
         shape = (f"symmetric surface-to-surface (/SURF/{sec_surf} vs "
                  f"/SURF/{surf_id})")
     else:
@@ -9228,15 +9232,11 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         out += _emit_inter_type25(comp_id,
                                   f"post_rupture_contact_{c.inter_id}",
                                   0, surf_id, grnod_id=grnod_id, istf=4,
-                                  inacti=5, fric=fric, fric_id=fric_id,
-                                  irem_i2=3)
+                                  inacti=5, stfac=comp_stfac, fric=fric,
+                                  fric_id=fric_id, irem_i2=3)
         shape = (f"one-way node-to-surface (/GRNOD/NODE/{grnod_id} vs "
                  f"/SURF/{surf_id})")
     state.companion_inter_ids.append(comp_id)
-    if state.options.soften_stfac is not None:
-        # Stfac stays 0 (the engine default) here: named in the one
-        # --soften-stfac summary (_report_contact_lever_reach)
-        state.soften_stfac_unreached.append(comp_id)
     fric_note = (f"Fric={fric:g}" if fric_id == 0
                  else f"Fric={fric:g} with fric_ID={fric_id}")
     state.warn(
@@ -9258,8 +9258,58 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         "a zero gap, so Inacti=0 and Inacti=5 measure identically there. "
         "Inacti=5 is the DEFENSIVE choice for the untested case, a SHELL "
         "tiebreak, where Igap=2 gives a half-thickness gap that two coincident "
-        "mid-surfaces sit inside.")
+        "mid-surfaces sit inside." + stfac_note)
     return out
+
+
+def _tiebreak_companion_stfac(state: ConversionState, c: ContactTiebreak,
+                              comp_id: int) -> Tuple[float, str]:
+    """Round 10, B3 (default ON, ``--no-tiebreak-companion-stfac``): the
+    Stfac cell of the post-rupture companion ``/INTER/TYPE25`` *comp_id* and
+    the sentence the companion line appends ("" when the cell is 0).
+
+    LS-DYNA's tiebreak "behaves as a surface-to-surface contact" after
+    failure (Vol I R17 p.11-39 Remark 1), and Card 3's SFSA / SFSB scale the
+    penalty of the SURFA / SURFB side (p.11-33); a TYPE25 has ONE Stfac, on
+    the segments (``i25sti3.F:140``, SLSFAC = STFAC) and, with Istf > 1, on
+    the secondary nodes (``inintr1.F:94-99`` -> ``i25stslav.F:56-64``). So:
+    ``--soften-stfac`` when given (recorded as reached), else min(SFS, SFM)
+    with a blank / 0 / negative value read 1.0 - dyna2rad's rule for the
+    family (``convertcontacts.cxx:410-414``, ``:444-449``) - written 0 at 1.0
+    (``hm_read_inter_type25.F:620-622`` turns 0 into 1.0), so a card with
+    SFS = SFM = 1 keeps its bytes. With the opt-out the cell stays 0 and an
+    ``--soften-stfac`` names the companion as not reached, the code before
+    round 10."""
+    if not state.options.tiebreak_companion_stfac:
+        if state.options.soften_stfac is not None:
+            # named in the one --soften-stfac summary
+            # (_report_contact_lever_reach)
+            state.soften_stfac_unreached.append(comp_id)
+        return 0.0, ""
+    if state.options.soften_stfac is not None:
+        _record_soften_reach(state, "TYPE25", comp_id)
+        v = state.options.soften_stfac
+        src = (f"--soften-stfac {v:g}, which overrides the card's Card-3 "
+               "SFS / SFM here as on every penalty interface")
+    else:
+        sfs = c.sfs if c.sfs > 0.0 else 1.0
+        sfm = c.sfm if c.sfm > 0.0 else 1.0
+        v = min(sfs, sfm)
+        src = (f"the card's Card-3 min(SFS, SFM) = min({sfs:g}, {sfm:g}): "
+               "the post-failure contact carries the card's penalty scale "
+               "(Vol I R17 p.11-33 SFSA / SFSB; dyna2rad's min, "
+               "convertcontacts.cxx:444-449)")
+    if v == 1.0:
+        return 0.0, ""
+    return v, (
+        f" Stfac={v:g} on the companion, from {src} (round 10). A TYPE25 "
+        "Stfac scales its segments (i25sti3.F:140) and, with Istf 4, its "
+        "secondary nodes (inintr1.F:94-99, i25stslav.F:56-64). MEASURED on a "
+        "two-block "
+        "tiebreak coupon (nt 4): Stfac 0.3 against the starter's 1.0 deepens "
+        "the re-contact penetration 0.000914 -> 0.002344 mm, in 515 instead "
+        "of 685 cycles. --no-tiebreak-companion-stfac writes 0 (the "
+        "starter's 1.0).")
 
 
 #: Card-4 cell -> the OPTIONs that actually READ it, from the field list on

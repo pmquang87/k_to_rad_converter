@@ -537,6 +537,7 @@ def convert(
     initial_void_copy: bool = True,
     clis_pfac_stiffness: bool = False,
     surfatyp_all_parts: bool = True,
+    tiebreak_companion_stfac: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -2042,6 +2043,14 @@ def convert(
         cards thrown at 1000 mm/s, nt 4): routed, they engage at 0.3489 mm
         (t_s/2 + t_m/2 = 0.35); dropped, they pass through each other.
         Default True (``--no-surfatyp-all-parts``: both dropped by name).
+    tiebreak_companion_stfac : bool
+        The post-rupture companion ``/INTER/TYPE25`` of a
+        ``*CONTACT_..._TIEBREAK`` takes ``soften_stfac`` when given, else
+        the card's Card-3 min(SFS, SFM), written 0 at 1.0 (R14 round 10, B3).
+        MEASURED on a two-block tiebreak coupon under ``soften_stfac=0.3``
+        (nt 4): STIFFNESS FACTOR 1.000 -> 0.300, the re-contact penetration
+        0.000914 -> 0.002344 mm, 685 -> 515 cycles. Default True
+        (``--no-tiebreak-companion-stfac``: Stfac 0).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2206,6 +2215,7 @@ def convert(
         initial_void_copy=initial_void_copy,
         clis_pfac_stiffness=clis_pfac_stiffness,
         surfatyp_all_parts=surfatyp_all_parts,
+        tiebreak_companion_stfac=tiebreak_companion_stfac,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

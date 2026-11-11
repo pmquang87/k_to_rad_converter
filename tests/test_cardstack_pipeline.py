@@ -467,6 +467,7 @@ _BOOL_LEVERS = (
     ("--maxint-stress-all", "maxint_stress_all", True),
     # round 10, part B (decision 8: every default gets an opt-out)
     ("--surfatyp-all-parts", "surfatyp_all_parts", True),
+    ("--tiebreak-companion-stfac", "tiebreak_companion_stfac", True),
 )
 #: the non-boolean levers and their defaults
 _VALUE_LEVERS = {"print_every": None, "inter_stmin": {}, "inter_inacti": {}}
@@ -1195,6 +1196,7 @@ _GUI_LEVER_VARS = {
     "srnde_ishape": "srnde_ishape",
     "maxint_stress_all": "maxint_stress_all",
     "surfatyp_all_parts": "surfatyp_all_parts",
+    "tiebreak_companion_stfac": "tiebreak_companion_stfac",
 }
 
 
@@ -1346,6 +1348,7 @@ _GUI_CHECKBOX_LABELS = {
     "srnde_ishape": "Card E SRNDE 1 -> TYPE25 Ishape 2",
     "maxint_stress_all": "MAXINT > 3 -> /ANIM/SHELL/TENS/STRESS/ALL",
     "surfatyp_all_parts": "Single-surface SURFATYP 5 / 6 with an SSID",
+    "tiebreak_companion_stfac": "Tiebreak post-rupture companion TYPE25",
 }
 
 
@@ -1410,21 +1413,22 @@ def _stfac_cell(starter: str, header_prefix: str, title_prefix: str = ""):
 
 
 class SoftenStfacReach(unittest.TestCase):
-    """--soften-stfac reaches the routes its help names, and the help names
-    the TYPE25 it does not reach (the review's major 5, measured: the
-    *_TIEBREAK post-rupture companion keeps Stfac 0)."""
+    """--soften-stfac reaches the routes its help names, the *_TIEBREAK
+    post-rupture companion included since round 10 (B3; measured: STIFFNESS
+    FACTOR 1.000 -> 0.300 on a two-block coupon);
+    --no-tiebreak-companion-stfac keeps the companion at Stfac 0."""
 
     def test_the_help_and_the_gui_name_the_tiebreak_companion(self):
         h = _action_help("--soften-stfac")
         for needle in ("post-rupture companion /INTER/TYPE25",
-                       "*CONTACT_..._TIEBREAK", "keeps Stfac 0",
-                       "--tie-stfac"):
+                       "*CONTACT_..._TIEBREAK", "--no-tiebreak-companion-stfac",
+                       "keeps it at Stfac 0", "--tie-stfac"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, h)
-        self.assertIn("not a tiebreak's post-rupture companion",
+        self.assertIn("a tiebreak's post-rupture companion too",
                       _gui_source_joined())
 
-    def test_the_named_routes_and_the_named_exception_are_real(self):
+    def test_the_named_routes_and_the_companion_are_real(self):
         import test_tiebreak_rupture as _tb
         _r, s, _e = _convert(_deck(), soften_stfac=0.3)
         self.assertEqual(_stfac_cell(s, "/INTER/TYPE7/"), 0.3)
@@ -1437,7 +1441,110 @@ class SoftenStfacReach(unittest.TestCase):
                + _tb._auto_tiebreak(6, "50.0", "20.0", "0.005") + _tb._TAIL)
         _r, s, _e = _convert(tie, soften_stfac=0.3)
         self.assertEqual(
+            _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_"), 0.3)
+        _r, s, _e = _convert(tie, soften_stfac=0.3,
+                             tiebreak_companion_stfac=False)
+        self.assertEqual(
             _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_"), 0.0)
+
+
+#: the Card 3 line of test_tiebreak_rupture._auto_tiebreak (SFS 1.0, SFM 1.0)
+_TB_CARD3 = ("       1.0       1.0       0.0       0.0       0.0       0.0"
+             "       0.0       0.0\n")
+
+
+def _tb_deck(card3: str = _TB_CARD3) -> str:
+    """The two-block AUTOMATIC tiebreak deck (OPTION 6, companion
+    /INTER/TYPE25/90005) with its Card 3 line replaced by *card3*."""
+    import test_tiebreak_rupture as _tb
+    card = _tb._auto_tiebreak(6, "50.0", "20.0", "0.005")
+    assert card.count(_TB_CARD3) == 1
+    return "*KEYWORD\n" + _tb._MESH + card.replace(_TB_CARD3, card3) + _tb._TAIL
+
+
+def _tb_card3(sfs="", sfm="") -> str:
+    return f"{sfs:>10}{sfm:>10}" + "       0.0" * 6 + "\n"
+
+
+class TiebreakCompanionStfac(unittest.TestCase):
+    """Round 10, B3 (default ON, --no-tiebreak-companion-stfac): the
+    post-rupture companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK takes
+    --soften-stfac when given, else the card's Card-3 min(SFS, SFM) (blank /
+    0 = 1.0), written 0 at 1.0 - the starter's own 1.0
+    (hm_read_inter_type25.F:620-622), so a default card keeps its bytes.
+    LS-DYNA's tiebreak behaves as a surface-to-surface contact after failure
+    (Vol I R17 p.11-39) whose penalty SFSA / SFSB scale (p.11-33)."""
+
+    @staticmethod
+    def _cell(s: str) -> float:
+        return _stfac_cell(s, "/INTER/TYPE25/", "post_rupture_contact_")
+
+    @staticmethod
+    def _note(res):
+        return [w for w in res.warnings if "COMPANION /INTER/TYPE25" in w
+                and "on the companion" in w]
+
+    def test_the_card_min_sfs_sfm_reaches_the_companion(self):
+        """Hand: min(0.5, 0.8) = 0.5."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)))
+        self.assertEqual(self._cell(s), 0.5)
+        self.assertTrue(_has(res.warnings, "Stfac=0.5 on the companion",
+                             "min(0.5, 0.8)", "i25sti3.F:140",
+                             "inintr1.F:94-99", "i25stslav.F:56-64",
+                             "0.000914 -> 0.002344 mm",
+                             "--no-tiebreak-companion-stfac"), res.warnings)
+
+    def test_a_blank_sfm_reads_one(self):
+        """Hand: min(0.5, 1.0) = 0.5."""
+        _r, s, _e = _convert(_tb_deck(_tb_card3(0.5, "")))
+        self.assertEqual(self._cell(s), 0.5)
+
+    def test_the_card_can_stiffen_it(self):
+        """Hand: min(2, 3) = 2."""
+        _r, s, _e = _convert(_tb_deck(_tb_card3(2.0, 3.0)))
+        self.assertEqual(self._cell(s), 2.0)
+
+    def test_one_is_written_zero_and_says_nothing(self):
+        """Hand: min(1, 1) = 1 -> written 0 (the starter's 1.0); a blank
+        Card 3 line too."""
+        for card3 in (_TB_CARD3, _tb_card3("", "")):
+            with self.subTest(card3=card3):
+                res, s, _e = _convert(_tb_deck(card3))
+                self.assertEqual(self._cell(s), 0.0)
+                self.assertEqual(self._note(res), [])
+
+    def test_soften_stfac_wins_over_the_card(self):
+        """D-B3b: --soften-stfac 0.3 over SFS 0.5 -> 0.3."""
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)), soften_stfac=0.3)
+        self.assertEqual(self._cell(s), 0.3)
+        self.assertTrue(_has(res.warnings, "Stfac=0.3 on the companion",
+                             "from --soften-stfac 0.3"), res.warnings)
+
+    def test_the_opt_out_writes_zero(self):
+        res, s, _e = _convert(_tb_deck(_tb_card3(0.5, 0.8)),
+                              tiebreak_companion_stfac=False)
+        self.assertEqual(self._cell(s), 0.0)
+        self.assertEqual(self._note(res), [])
+
+    def test_an_only_card_still_gets_no_companion(self):
+        import test_tiebreak_rupture as _tb
+        deck = ("*KEYWORD\n" + _tb._MESH
+                + "*CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY\n"
+                  "         1         2         3         3         0         0"
+                  "         0         0\n"
+                  "       0.0       0.0       0.0       0.0       0.0         0"
+                  "       0.0       0.0\n"
+                + _tb_card3(0.5, 0.8)
+                + "     100.0     200.0         0         0\n" + _tb._TAIL)
+        _r, s, _e = _convert(deck)
+        self.assertFalse([ln for ln in s.splitlines()
+                          if ln.startswith("/INTER/TYPE25/")])
+        self.assertNotIn("post_rupture_contact_", s)
+
+    def test_the_record_reads_card_3(self):
+        state = _dispatch(_tb_deck(_tb_card3(0.5, 0.8)))
+        self.assertEqual(state.contacts_tiebreak[0].sfs, 0.5)
+        self.assertEqual(state.contacts_tiebreak[0].sfm, 0.8)
 
 
 class FixRoundHelpTexts(unittest.TestCase):
@@ -2737,15 +2844,25 @@ class SoftenStfacWarningFollowsTheRoutes(unittest.TestCase):
         self.assertIn("forced on all /INTER/TYPE7 interfaces (12)", ws[0])
         self.assertIn("/INTER/TYPE25 21", ws[0])
 
-    def test_the_tiebreak_companion_is_named_as_not_reached(self):
+    def test_the_tiebreak_companion_is_reached_and_the_opt_out_named(self):
+        """Round 10, B3: --soften-stfac reaches the companion by default;
+        under --no-tiebreak-companion-stfac the summary names it as not
+        reached."""
         import test_tiebreak_rupture as _tb
         tie = ("*KEYWORD\n" + _tb._MESH
                + _tb._auto_tiebreak(6, "50.0", "20.0", "0.005") + _tb._TAIL)
         res, _s, _e = _convert(tie, soften_stfac=0.3)
         ws = _soften_warnings(res)
         self.assertEqual(len(ws), 1, ws)
+        self.assertIn("forced on /INTER/TYPE25 90005", ws[0])
+        self.assertNotIn("reached no interface", ws[0])
+        res, _s, _e = _convert(tie, soften_stfac=0.3,
+                               tiebreak_companion_stfac=False)
+        ws = _soften_warnings(res)
+        self.assertEqual(len(ws), 1, ws)
         self.assertIn("reached no interface", ws[0])
-        self.assertIn("post-rupture companion /INTER/TYPE25", ws[0])
+        self.assertIn("post-rupture companion /INTER/TYPE25 90005", ws[0])
+        self.assertIn("under --no-tiebreak-companion-stfac", ws[0])
 
     def test_the_soft_routed_types_are_named(self):
         for soft, name in ((-11, "/INTER/TYPE11 31"), (-19, "/INTER/TYPE19 31"),

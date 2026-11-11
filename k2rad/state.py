@@ -4143,6 +4143,11 @@ class ContactTiebreak:
     fd: float = 0.0
     sst: float = 0.0        # Card3 SAST (negative = absolute tie distance)
     mst: float = 0.0        # Card3 SBST (negative = absolute tie distance)
+    # Card3 SFSA / SFSB (0.0 = blank = 1.0): the penalty scale of the
+    # post-failure contact (round 10, B3: the companion /INTER/TYPE25 Stfac
+    # = min(SFS, SFM), dyna2rad's rule, convertcontacts.cxx:444-449)
+    sfs: float = 0.0
+    sfm: float = 0.0
     # ── keyword suffixes with no OpenRadioss counterpart ──────────────────
     mortar: bool = False
     user: bool = False
@@ -7786,7 +7791,8 @@ class ConvertOptions:
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
     ``spotweld_shear_yield``, ``spring_token_mass_compensation``,
     ``srnde_ishape``, ``surfatyp_all_parts``, ``tet_isolid1``,
-    ``tgmult_imptemp``, ``vacuum_light_fluid``, ``weld_exponents``,
+    ``tgmult_imptemp``, ``tiebreak_companion_stfac``,
+    ``vacuum_light_fluid``, ``weld_exponents``,
     ``weld_trajectory_impflux``, ``zero_density_floor``, ``zero_t0_sentinel``,
     ``zero_tolerance_ectol``
 
@@ -9678,6 +9684,12 @@ class ConvertOptions:
     # *SET_PART (Vol I R17 p.11-25). False = both dropped by name, as the
     # cards were before round 10.
     surfatyp_all_parts: bool = True
+    # --no-tiebreak-companion-stfac (default ON; writer/contacts): the
+    # post-rupture companion /INTER/TYPE25 of a *CONTACT_..._TIEBREAK takes
+    # --soften-stfac when given, else the card's Card-3 min(SFS, SFM) (blank
+    # or 0 = 1.0, written 0 at 1.0). False = Stfac 0 (the starter's 1.0)
+    # whatever the card or the flag says, the cell before round 10.
+    tiebreak_companion_stfac: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.

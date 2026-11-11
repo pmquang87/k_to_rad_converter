@@ -228,7 +228,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          rigid_tool_penalty_cap: bool = True,
                          initial_void_copy: bool = True,
                          clis_pfac_stiffness: bool = False,
-                         surfatyp_all_parts: bool = True) -> dict:
+                         surfatyp_all_parts: bool = True,
+                         tiebreak_companion_stfac: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -576,6 +577,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["clis_pfac_stiffness"] = bool(clis_pfac_stiffness)
     # round 10, part B
     kwargs["surfatyp_all_parts"] = bool(surfatyp_all_parts)
+    kwargs["tiebreak_companion_stfac"] = bool(tiebreak_companion_stfac)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -726,6 +728,7 @@ class ConverterGUI:
         self.clis_pfac_stiffness = tk.BooleanVar(value=False)
         # round 10, part B
         self.surfatyp_all_parts = tk.BooleanVar(value=True)
+        self.tiebreak_companion_stfac = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1542,6 +1545,11 @@ class ConverterGUI:
                      "all-parts self-contact (6: explicit, minus the set) - ON",
             variable=self.surfatyp_all_parts).grid(
                 row=102, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Tiebreak post-rupture companion TYPE25 takes Soften "
+                     "Stfac / the card's min(SFS, SFM) - ON",
+            variable=self.tiebreak_companion_stfac).grid(
+                row=103, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1675,8 +1683,9 @@ class ConverterGUI:
         ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
         ttk.Label(fc, text="penalty stiffness scale on every /INTER/TYPE7 (the SSID != 0 single-surface route "
-                           "included), TYPE25 (not a tiebreak's post-rupture companion) and SOFT TYPE11 / 19, "
-                           "e.g. 0.3 — blank = the per-contact Card-3 SFS mapping (overridden by this field)",
+                           "included), TYPE25 (a tiebreak's post-rupture companion too, unless the 'Tiebreak "
+                           "post-rupture companion' option is off) and SOFT TYPE11 / 19, e.g. 0.3 — blank = "
+                           "the per-contact Card-3 SFS mapping (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
         ttk.Label(fc, text="Tie STFAC:").grid(row=5, column=0, sticky="w", **pad)
@@ -1893,6 +1902,7 @@ class ConverterGUI:
                 initial_void_copy=self.initial_void_copy.get(),
                 clis_pfac_stiffness=self.clis_pfac_stiffness.get(),
                 surfatyp_all_parts=self.surfatyp_all_parts.get(),
+                tiebreak_companion_stfac=self.tiebreak_companion_stfac.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2273,6 +2283,9 @@ class ConverterGUI:
         if not kwargs.get("surfatyp_all_parts", True):
             bits.append("SURFATYP 5 / 6 with an SSID dropped "
                         "(--no-surfatyp-all-parts)")
+        if not kwargs.get("tiebreak_companion_stfac", True):
+            bits.append("tiebreak companion Stfac 0 "
+                        "(--no-tiebreak-companion-stfac)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

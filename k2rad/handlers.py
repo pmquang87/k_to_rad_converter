@@ -7702,13 +7702,17 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sst = to_float(f3[2]) if len(f3) > 2 else 0.0
     mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    # Card3 SFSA / SFSB: the penalty scale of the post-failure contact
+    # (round 10, B3; the companion /INTER/TYPE25's Stfac)
+    sfs = to_float(f3[0]) if f3 else 0.0
+    sfm = to_float(f3[1]) if len(f3) > 1 else 0.0
 
     rec = ContactTiebreak(inter_id, title, ssid, sstyp, msid, mstyp, family,
                           keyword=kw, only=only, one_way=one_way, option=option,
                           nfls=nfls, sfls=sfls, param=param, eraten=eraten,
                           erates=erates, ct2cn=ct2cn, cn=cn, tblcid=tblcid,
                           thkoff=thkoff, nflf=nflf, sflf=sflf, nen=nen, mes=mes,
-                          fs=fs, fd=fd, sst=sst, mst=mst,
+                          fs=fs, fd=fd, sst=sst, mst=mst, sfs=sfs, sfm=sfm,
                           mortar=mortar, user=user, damping=damping, mpp=mpp)
 
     # ── OPTION 4: LS-DYNA itself does not tie tangentially ───────────────

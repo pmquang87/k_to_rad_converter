@@ -2494,11 +2494,16 @@ class Round10FlagWiringB(_t7.Round7FlagWiringA):
 
     _FLAGS = {
         "--surfatyp-all-parts": "surfatyp_all_parts",
+        "--tiebreak-companion-stfac": "tiebreak_companion_stfac",
     }
     _HELP_FIGURES = {
         "--surfatyp-all-parts": ("Vol I R17 p.11-25", "0.3489 mm",
                                  "t_s/2 + t_m/2 = 0.35",
                                  "R14: 0 decks move"),
+        "--tiebreak-companion-stfac": (
+            "hm_read_inter_type25.F:620-622",
+            "STIFFNESS FACTOR 1.000 -> 0.300", "0.000914 -> 0.002344 mm",
+            "685 -> 515 cycles"),
     }
 
 

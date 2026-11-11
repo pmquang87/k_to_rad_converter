@@ -334,11 +334,13 @@ Changed help texts of existing options (the same flags):
 - `--inter-gapmin` names the routes it reaches (the SSID != 0 single-surface
   `/INTER/TYPE7` included) and the ones it does not; on a SOFT-routed
   `*CONTACT_AUTOMATIC_GENERAL` the line names the route and its gap rule.
-- `--soften-stfac` names what it does not reach: the post-rupture companion
-  `/INTER/TYPE25` of a `*CONTACT_..._TIEBREAK` keeps Stfac 0, and the tied
-  `/INTER/TYPE2` / `TYPE10` are untouched (`--tie-stfac` sets the TYPE10's).
-  MEASURED with `soften_stfac=0.3`: S2S TYPE7 Stfac 0 -> 0.3, SSID = 0 TYPE25
-  1 -> 0.3, the tiebreak companion stays 0.
+- `--soften-stfac` names what it reaches: since round 10 the post-rupture
+  companion `/INTER/TYPE25` of a `*CONTACT_..._TIEBREAK` too
+  (`--no-tiebreak-companion-stfac` keeps it at Stfac 0, the starter's 1.0);
+  the tied `/INTER/TYPE2` / `TYPE10` are untouched (`--tie-stfac` sets the
+  TYPE10's). MEASURED with `soften_stfac=0.3`: S2S TYPE7 Stfac 0 -> 0.3,
+  SSID = 0 TYPE25 1 -> 0.3, the tiebreak companion 0 -> 0.3 (STIFFNESS
+  FACTOR 1.000 -> 0.300).
 - `--shell-formulation`: ELFORM 16 -> Ishell 12 by default is the same
   (fully integrated) class; `qeph` (Ishell 24) is dyna2rad's choice for 16,
   MEASURED +0.46 % peak tip deflection on an ELFORM 16 cantilever (1.5357 vs
@@ -550,6 +552,18 @@ as underscores.
   mm (t_s/2 + t_m/2 = 0.35), and an exempted card passes through. R14: 0
   decks move; outside the roster the two getriebekette `..._exclude_actor`
   backups get their contact.
+- `--tiebreak-companion-stfac` / `--no-tiebreak-companion-stfac` — **ON by
+  default** (round 10, B3). The post-rupture companion `/INTER/TYPE25` of a
+  `*CONTACT_..._TIEBREAK` takes `--soften-stfac` when given, else the card's
+  Card-3 min(SFS, SFM) (blank or 0 = 1.0); 1.0 is written 0, the starter's
+  own 1.0 (`hm_read_inter_type25.F:620-622`), so a card with SFS = SFM = 1
+  keeps its bytes. LS-DYNA's tiebreak behaves as a surface-to-surface
+  contact after failure (Vol I R17 p.11-39) whose penalty SFS / SFM scale.
+  `--no-tiebreak-companion-stfac` writes Stfac 0 whatever the card or
+  `--soften-stfac` says, as before. MEASURED on a two-block tiebreak coupon
+  under `--soften-stfac 0.3` (nt 4): STIFFNESS FACTOR 1.000 -> 0.300, the
+  re-contact penetration 0.000914 -> 0.002344 mm, 685 -> 515 cycles. R14: 0
+  decks move.
 
 ### Python API
 
