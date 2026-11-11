@@ -2432,6 +2432,31 @@ class StminEstimateLawsAndTets(unittest.TestCase):
         self.assertIn("VOLU/32", w)
         self.assertIn("7 VOLU/48", w)
 
+    def test_the_tet10_corner_share_sets_the_softest_node(self):
+        """The per-node rule, not only its median (decision D-B4b: the
+        median 48.28 is a midside node's, so it does not see the corner
+        share): the softest of the 66 surface nodes is a corner node at
+        B x (2 VOLU/32 summed over its tets)^(1/3) = 28.89 (hand, the census
+        tet10_hand.py), the value the measured Stmin bracket [28.5, 29.5)
+        holds."""
+        from unittest import mock
+        from k2rad.writer import contacts
+        st = _dispatch(_b4_tet_deck(tet10=True, block_secondary=True))
+        seen = []
+        real = contacts._median
+
+        def spy(vals):
+            seen.append(list(vals))
+            return real(vals)
+        st.stmin_part_estimates.clear()
+        with mock.patch.object(contacts, "_median", spy):
+            est = contacts._part_stiffness(st, [1])[1]
+        self.assertIsNotNone(est)
+        l13 = [v for v in seen if len(v) == 66]
+        self.assertEqual(len(l13), 1, [len(v) for v in seen])
+        self.assertAlmostEqual(est.b * min(l13[0]), 28.89, places=2)
+        self.assertAlmostEqual(est.b * real(l13[0]), 48.28, places=2)
+
     def test_a_tet4_secondary_is_unchanged(self):
         """Hand: V/4 per corner, median over 18 surface nodes 115.6."""
         w = self._line(_b4_tet_deck(tet10=False, block_secondary=True))
