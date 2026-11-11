@@ -302,8 +302,9 @@ decks should start from
   since 2026-11-01). Write an optional Card E SRNDE 1 (exterior shell edges
   rounded, not extended, Vol I R17 p.11-116) as `/INTER/TYPE25` Ishape 2, the
   round gap along the surface's free edges, where the interface holds a shell
-  (CardStack K-16; with SOFT 2 a SHLEDG != 0 or DEPTH 23 / 33 / 35 / 55 takes
-  precedence). `--no-srnde-ishape` keeps Ishape 0 (square), the cell before
+  (CardStack K-16; with SOFT 2 a SHLEDG != 0 - Card D's, or
+  `*CONTROL_CONTACT` Card 6's under a Card D 0, round 10 - or DEPTH 23 / 33
+  / 35 / 55 takes precedence). `--no-srnde-ishape` keeps Ishape 0 (square), the cell before
   K-16, and names the dropped SRNDE. The `/INTER/TYPE7` routes name a stated
   SRNDE and never apply it, either way. MEASURED: the starter echoes GAP
   SHAPE ALONG MAIN FREE EDGES 1 with the flag and 2 by default (0
@@ -5241,7 +5242,10 @@ stiffens. Card E SRNDE 1 writes `/INTER/TYPE25` Ishape 2 where the interface
 holds a shell (with no shell: Ishape 0, and a line says why). SRNDE 0 keeps
 the square gap, with a note on LS-DYNA's longer free-edge reach. SOFT 2's
 SHLEDG / DEPTH 23 / 33 / 35 / 55 take precedence (CardStack K-16;
-`--no-srnde-ishape` keeps Ishape 0). Card E ICOR
+`--no-srnde-ishape` keeps Ishape 0); since round 10 (B7) a Card D SHLEDG 0
+defaults to the `*CONTROL_CONTACT` Card 6 SHLEDG, read: "SRNDE is ignored
+unless SHLEDG is 0 on both `*CONTACT` and `*CONTROL_CONTACT`" (Vol I R17
+p.11-117; Card D p.11-111). Card E ICOR
 (VDC as a coefficient of restitution, p.11-115) is named on the routes that
 write VDC as damping. A Mortar card reads none of these cards (Table 11-1).
 **The `mortar` note** (CardStack K-14) says that IGNORE 2's MPAR1 is an

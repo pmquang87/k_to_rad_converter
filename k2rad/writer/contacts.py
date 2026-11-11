@@ -5913,8 +5913,9 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
     keeps 0 (today's cell, the /DEFAULT square gap) and, where the
     interface's parts (*pids*) hold a shell, notes LS-DYNA's longer
     free-edge reach; SRNDE 2 (square edges) keeps 0 silently. For SOFT 2
-    a non-zero SHLEDG (Card D) or DEPTH 23/33/35/55 takes precedence and
-    SRNDE is not used (p.11-117); a Mortar card reads none of Cards D-G
+    a non-zero SHLEDG (Card D, or *CONTROL_CONTACT Card 6 under a Card D 0 -
+    round 10, B7) or DEPTH 23/33/35/55 takes precedence and SRNDE is not
+    used (p.11-117); a Mortar card reads none of Cards D-G
     ("Shell edges are always flat", Table 11-1 p.11-135). SRNDE acts on
     exterior SHELL edges ("non-extended exterior shell segment edges",
     p.11-114), so with no shell in *pids* SRNDE 1 keeps 0 too, said (a solid
@@ -5927,9 +5928,17 @@ def _type25_ishape(state: ConversionState, c, kw: str, inter_id: int,
     if "MORTAR" in _contact_base_spelling(kw):
         return 0
     has_shell = _pids_shell_solid(state, pids)[0]
-    if c.soft == 2 and (c.shledg or c.depth in _SOFT2_FLUSH_DEPTHS):
+    # round 10, B7: a Card D SHLEDG 0 defaults to *CONTROL_CONTACT's Card 6
+    # SHLEDG (Vol I R17 p.11-111), and "SRNDE is ignored unless SHLEDG is 0
+    # on both *CONTACT and *CONTROL_CONTACT" (p.11-117, the SOFT 2 paragraph)
+    ctrl_shledg = (state.ctrl_contact.shledg
+                   if state.ctrl_contact is not None else 0)
+    if c.soft == 2 and (c.shledg or ctrl_shledg
+                        or c.depth in _SOFT2_FLUSH_DEPTHS):
         rule = (f"SHLEDG {c.shledg} (Card D)" if c.shledg
-                else f"DEPTH {c.depth}")
+                else f"*CONTROL_CONTACT SHLEDG {ctrl_shledg} (Card 6, "
+                     "p.12-79; the default of Card D's SHLEDG 0, p.11-111)"
+                if ctrl_shledg else f"DEPTH {c.depth}")
         if c.srnde:
             state.warn(
                 f"*{kw} {inter_id}: Card E SRNDE {c.srnde} is not used: with "

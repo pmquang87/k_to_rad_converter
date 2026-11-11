@@ -4856,6 +4856,74 @@ class SrndeIshapeReviewPins(unittest.TestCase):
         self.assertFalse(_has(res.warnings, "16:", _REACH), res.warnings)
 
 
+def _control_contact(n_cards: int, shledg=1) -> str:
+    """*CONTROL_CONTACT with Card 1's SLSFAC 0.1 and *n_cards* cards in all;
+    a 6-card one carries SHLEDG *shledg* in Card 6 field 1 (Vol I R17
+    p.12-79)."""
+    cards = [_row(0.1)] + [_row() for _ in range(n_cards - 1)]
+    if n_cards >= 6:
+        cards[5] = _row(shledg)
+    return "*CONTROL_CONTACT\n" + "\n".join(cards) + "\n"
+
+
+class SrndeControlContactShledg(unittest.TestCase):
+    """Round 10, B7 (inside --no-srnde-ishape): *CONTROL_CONTACT Card 6
+    SHLEDG is read, and a SOFT 2 card with Card D SHLEDG 0 takes it ('EQ.0:
+    Default to SHLEDG on *CONTROL_CONTACT', Vol I R17 p.11-111): 'SRNDE is
+    ignored unless SHLEDG is 0 on both *CONTACT and *CONTROL_CONTACT'
+    (p.11-117), so a SOFT 2 card under a control SHLEDG 1 writes Ishape 0
+    and says SRNDE is not used. SOFT 0 / 1 are untouched (the sentence is in
+    the SOFT 2 paragraph)."""
+
+    def test_a_control_shledg_turns_srnde_off_on_soft_2(self):
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "0")
+        self.assertTrue(_has(res.warnings, "21: Card E SRNDE 1 is not used",
+                             "*CONTROL_CONTACT SHLEDG 1", "p.12-79",
+                             "p.11-111", "p.11-117"), res.warnings)
+
+    def test_a_short_control_card_reads_shledg_0(self):
+        for n in (2, 5):
+            with self.subTest(cards=n):
+                _r, s, _e = _convert(_k1a_deck(
+                    _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+                    extra=_control_contact(n)))
+                self.assertEqual(_ishape(s, 21), "2")
+
+    def test_soft_0_ignores_the_control_shledg(self):
+        _r, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1)),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "2")
+
+    def test_card_d_keeps_precedence(self):
+        res, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, shledg=1,
+                                             card_a=(2,))),
+            extra=_control_contact(6)))
+        self.assertEqual(_ishape(s, 21), "0")
+        self.assertTrue(_has(res.warnings, "21: Card E SRNDE 1 is not used",
+                             "SHLEDG 1 (Card D)"), res.warnings)
+        self.assertFalse(_has(res.warnings, "21:",
+                              "*CONTROL_CONTACT SHLEDG"), res.warnings)
+
+    def test_the_control_card_is_read(self):
+        st = _dispatch(_k1a_deck(_k1a_ass(21, 0, 0),
+                                 extra=_control_contact(6)))
+        self.assertEqual(st.ctrl_contact.shledg, 1)
+        st = _dispatch(_k1a_deck(_k1a_ass(21, 0, 0),
+                                 extra=_control_contact(5)))
+        self.assertEqual(st.ctrl_contact.shledg, 0)
+
+    def test_the_opt_out_keeps_ishape_0(self):
+        _r, s, _e = _convert(_k1a_deck(
+            _k1a_ass(21, 0, 0, tail=_cards_ae(srnde=1, card_a=(2,))),
+            extra=_control_contact(6)), srnde_ishape=False)
+        self.assertEqual(_ishape(s, 21), "0")
+
+
 class Soft2EdgeGateReviewPins(unittest.TestCase):
     """K-10: every edge depth of the SOFT 2 Iedge 22 gate."""
 

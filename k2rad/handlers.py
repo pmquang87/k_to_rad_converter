@@ -8686,7 +8686,12 @@ def handle_control_contact(block: Block, state: ConversionState) -> None:
     shlthk = to_int(f[3])   if len(f) > 3 else 0
     penopt = to_int(f[4])   if len(f) > 4 else 1
     thkchk = to_int(f[5])   if len(f) > 5 else 0
-    state.ctrl_contact = ControlContact(slsfac, rwpnal, islchk, shlthk, penopt, thkchk)
+    # round 10, B7: Card 6 (optional) field 1 SHLEDG, Vol I R17 p.12-79 -
+    # the parser keeps a blank card in its slot, so raw[5] is Card 6
+    f6 = _card(raw, 5, fixed=True, n=8, w=10)
+    shledg = to_int(f6[0]) if f6 else 0
+    state.ctrl_contact = ControlContact(slsfac, rwpnal, islchk, shlthk, penopt,
+                                        thkchk, shledg)
 
 
 def handle_control_cpu(block: Block, state: ConversionState) -> None:

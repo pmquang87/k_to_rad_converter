@@ -6227,6 +6227,11 @@ class ControlContact:
     shlthk: int         # shell thickness consideration
     penopt: int         # penalty option
     thkchk: int         # thickness change check
+    # Card 6 field 1 (optional card; blank / absent = 0): the SOFT 2 shell
+    # edge shape, Vol I R17 p.12-79 - the default of a *CONTACT Card D
+    # SHLEDG 0 (p.11-111). Round 10, B7: SRNDE is ignored unless SHLEDG is
+    # 0 on both cards (p.11-117).
+    shledg: int = 0
 
 
 @dataclass
