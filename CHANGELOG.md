@@ -133,6 +133,71 @@ Prior history (before this changelog was introduced) is summarized in the
     0.01, proj-errod 10, projectile 1, pan.drawbead.31 0.02); the
     anisotropic cup-draw and hemi.draw (0.1) stay silent. 0 bytes. Tests:
     `tests/test_r14_round10.py` `SlsfacNamed`.
+  - **A8 - the rigid-tool penalty cap (default ON;
+    `--no-rigid-tool-penalty-cap` writes Stmax 0).** On the `/INTER/TYPE7`
+    of a non-automatic `*CONTACT_ONE_WAY_SURFACE_TO_SURFACE` /
+    `*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE` (+ `_MPP`) whose emitted
+    main side is all rigid and whose two sides are shells, SOFT 0, PENOPT 0
+    / 1: Stmax = 2 x k_LS, k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank),
+    k = the median LS-DYNA Theory R16 eq. 30.8 segment stiffness K A / max
+    shell diagonal over the side's shells (`writer/contacts._rigid_tool_cap`,
+    `_ls_shell_penalty`; Card 3 SFM read since this item) - the 2 undoes the
+    1/2 an Istf-4 TYPE7 applies per node (`i7for3.F:976`), so the engine's
+    MAX(Stmin, MIN(Km, Ks, Stmax)) (`i7cor3.F:277-288`) gives each blank node
+    k_LS - and Stmin = min(1000, Stmax); an `--inter-stmin` value wins. The
+    K-02 floor sentence reads the WRITTEN Stmin (`state.type7_written_stmin`).
+    The value is the manual's formula, not what LS-DYNA's runs show (its
+    measured holder penalty on the anisotropic cup-draw is ~100x below it).
+    Refused by name inside the class: a rigid SURFA (the all-rigid-SSID
+    route), SOFT 1 / 2, PENOPT 2-5, a negative SLSFAC / SFS / SFM, a solid
+    side; outside it, unchanged: AUTOMATIC_ONE_WAY, the two-way S2S (20 R14
+    keys with a rigid main), MORTAR and a deformable tool (the ring trio).
+    MEASURED (nt 4, README 9.1, each deck's part-A-i bytes and the capped
+    bytes in one window, run dirs `C:/Users/pmqua/rcv_r10i_implA2_<deck>_
+    {base,new}`): pan.drawbead.31 (t_end 8.5e-3, n 61 LS times (1.36541e-4,
+    8.3864e-3]) 2769 -> 2510 cycles (0.9065), IE END +45.94 -> -15.35 %, IE
+    RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 %, IE fifths -13.33 / -82.43
+    / +26.00 / -2.40 / +45.90 -> -96.70 / -99.15 / +11.60 / -3.36 / -15.35 %
+    (the first two worse), KE fifths -65.32 / -84.68 / +22.03 / +20.65 /
+    -92.83 -> -98.86 / -99.15 / +17.87 / +5.81 / -91.48 %, force RMS of LS's
+    peak (LS rcforc against the `/TH/INTER` impulse differenced) contact 1
+    448.66 -> 41.68 %, the binder (contact 2) 108.23 -> 93.23 %, contact 3
+    414.13 -> 40.27 %; the capped run's ERROR column hits the -99.9 % print
+    clamp on 569 of 2511 rows from cycle 490 (the base's worst -98.6 %; the
+    column leaves out the contact energy). mat_transversely_anisotropic.cup-
+    draw (t_end 0.015, ALONE, n 150 (9.99569e-05, 0.0149997]) 70728 -> 63169
+    cycles (0.8931), IE END +13.10 -> +8.76 %, IE fifths +93.78 / +121.04 /
+    +60.32 / +18.96 / +13.10 -> +87.60 / +9.58 / +30.66 / +10.96 / +8.76 %,
+    IE RMS 5.57 -> 3.43 %, and the named COST on the KE: END -42.14 ->
+    -49.31 % (fifths -75.33 / +204.60 / +10.76 / -54.21 / -42.14 -> -55.00 /
+    +11.60 / +10.55 / -58.45 / -49.31 %), KE RMS 29.17 -> 28.83 %; holder
+    force RMS 129.70 -> 92.39 %; the punch (node 40006) DZ = LS nodout at
+    every fifth on both arms (max 0.00000 mm). hemi.draw (t_end 6e-3, n 120
+    (4.94864e-05, 0.00599932]) 5256 -> 4328 cycles (0.8234), IE END -3.46 ->
+    -2.79 %, IE RMS 1.25 -> 0.99 %, KE RMS 39.60 -> 36.19 %.
+    control_adaptive.cup-draw = A1 + A4 + A8 (t_end 7e-4, n 699 (8.39908e-07,
+    6.98827e-04]) 2326 -> 2221 cycles (0.9549), IE END +38.39 -> +39.49 %,
+    IE RMS 12.86 -> 13.02 %, KE RMS 2.67 -> 2.61 %, contact-1 force RMS
+    12.92 -> 13.66 %; the punch's DY = its curve's integral at every fifth on
+    both arms; the minimum printed step 2.53e-7 -> 3.09e-7 stays above A4's
+    Tmin 2.25e-7 (A4 does not engage), MAS.ERR 0. The A9 sentence names the
+    capped interfaces on its two carriers among the movers
+    (control_adaptive.cup-draw and pan.drawbead.31, 90001 / 90002 / 90003).
+    The coupon
+    `tests/fixtures/round10/r10_type7_coupon_quad.k` (the round-10 critic's
+    cq.k: a rigid plate dropping on a 2 mm quad strip) with VisS 1e-6: peak
+    penetration 0.18031 mm = the closed form at K = 21.42747822 (-0.00 %,
+    802 cycles), 0.02809 against 0.02810 at Stmin 1000. Movers: 4 keys / 4
+    models, the 12 Stmax cells of `_0000.rad` (control_adaptive.cup-draw
+    2376.650209, mat_transversely_anisotropic.cup-draw 41130.97918,
+    pan.drawbead.31 7882.991856, hemi.draw 17490.62313); the 22 rigid-side
+    TYPE7 guards checked here (sphere1, forging_A, metal-cutting,
+    EXP_SC_CONTACT_INTERFERENCE, the ring trio and the siblings) are
+    byte-identical. Tests: `tests/test_r14_round10.py` `RigidToolPenaltyCap`
+    (its `test_the_slsfac_sentence_names_the_capped_interfaces` pins A9's cap
+    clause), `Round10FlagWiringA2`; `tests/test_r14_triage_4.py`
+    `RigidPartPredicateTests` counts the cap's call of `rigid_part_ids` (the
+    one rigid-part predicate; contacts.py 3 -> 4 calls).
 - **R14 CAMPAIGN PARITY batch, round 10 - part A-i (shells and sections, the
   time step, implicit, the erosion and few-node texts).** One commit per item;
   every later item of the round is measured on the bytes of the earlier ones

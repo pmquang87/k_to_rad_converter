@@ -533,6 +533,7 @@ def convert(
     erode_tsmin_rule: bool = True,
     vacuum_light_fluid: bool = True,
     ale_inflow_ebcs: bool = True,
+    rigid_tool_penalty_cap: bool = True,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -1999,6 +2000,19 @@ def convert(
         LAW0 vacuum, for a time window, a non-/FUNCT curve or an unheld face
         node; ELFORM 5 / 6 (Lagrangian in k2rad) never reached. Default True
         (``--no-ale-inflow-ebcs``: the ``/IMPVEL``).
+    rigid_tool_penalty_cap : bool
+        On the ``/INTER/TYPE7`` of a non-automatic
+        ``*CONTACT_ONE_WAY_SURFACE_TO_SURFACE`` /
+        ``*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE`` (+ ``_MPP``) with an
+        all-rigid shell tool, SOFT 0 and PENOPT 0 / 1 (R14 round 10, A8):
+        Stmax = 2 x LS-DYNA Theory eq. 30.8 (K A / max shell diagonal) x
+        SLSFAC x SF - the 2 undoes the 1/2 an Istf-4 TYPE7 applies per node
+        (``i7for3.F:976``) - and Stmin = min(1000, Stmax). The class's other
+        members (a rigid SURFA, SOFT 1 / 2, PENOPT 2-5, a negative SLSFAC /
+        SF, a solid side) are refused by name; AUTOMATIC_ONE_WAY, the
+        two-way S2S, MORTAR and a deformable tool are outside it. The
+        measured effect is the README's. Default True
+        (``--no-rigid-tool-penalty-cap``: Stmax 0).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -2159,6 +2173,7 @@ def convert(
         erode_tsmin_rule=erode_tsmin_rule,
         vacuum_light_fluid=vacuum_light_fluid,
         ale_inflow_ebcs=ale_inflow_ebcs,
+        rigid_tool_penalty_cap=rigid_tool_penalty_cap,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

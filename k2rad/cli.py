@@ -2262,6 +2262,29 @@ def build_parser() -> argparse.ArgumentParser:
              "(Lagrangian in k2rad) or beside a LAW0 vacuum. ON by default; "
              "--no-ale-inflow-ebcs keeps the /IMPVEL.",
     )
+    parser.add_argument(
+        "--rigid-tool-penalty-cap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cap the TYPE7 spring of a non-automatic "
+             "*CONTACT_[FORMING_]ONE_WAY_SURFACE_TO_SURFACE on an all-rigid "
+             "shell tool (SOFT 0, PENOPT 0 / 1) at the SOFT-0 penalty of "
+             "LS-DYNA's manual: Stmax = 2 x Theory eq. 30.8 (K A / max "
+             "diagonal) x SLSFAC x SF, the 2 undoing the 1/2 of "
+             "i7for3.F:976; Stmin = min(1000, Stmax). It is the manual's "
+             "formula, not a penalty LS-DYNA's own runs show. MEASURED (nt 4, "
+             "each deck's part-A-i bytes against the capped bytes): "
+             "pan.drawbead IE RMS 10.85 -> 4.01 %%, KE RMS 14.24 -> 10.86 %% "
+             "(n 61), contact-1 force RMS 448.66 -> 41.68 %% (its first two IE "
+             "fifths worse: -13.33 / -82.43 -> -96.70 / -99.15 %%); the "
+             "anisotropic cup-draw IE RMS 5.57 -> 3.43 %% at a KE cost, END "
+             "-42.14 -> -49.31 %%, KE RMS 29.17 -> 28.83 %%; hemi.draw KE RMS "
+             "39.60 -> 36.19 %%; control_adaptive IE RMS 12.86 -> 13.02 %%. "
+             "AUTOMATIC_ONE_WAY, the two-way S2S, MORTAR, PENOPT "
+             "2-5, SOFT 1 / 2, solid sides and deformable tools are left as "
+             "they are. ON by default; --no-rigid-tool-penalty-cap writes "
+             "Stmax 0.",
+    )
     return parser
 
 
@@ -2444,6 +2467,7 @@ def main(argv=None) -> int:
         erode_tsmin_rule=args.erode_tsmin_rule,
         vacuum_light_fluid=args.vacuum_light_fluid,
         ale_inflow_ebcs=args.ale_inflow_ebcs,
+        rigid_tool_penalty_cap=args.rigid_tool_penalty_cap,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

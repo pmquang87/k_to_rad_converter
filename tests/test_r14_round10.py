@@ -1652,6 +1652,258 @@ class SlsfacNamed(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# A8  the rigid-tool penalty cap (default; --no-rigid-tool-penalty-cap)
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: LS-DYNA Theory R16 eq. 30.8 by hand on _a8_deck (E 69000, nu 0.3: K =
+#: 69000 / (3 (1 - 0.6)) = 57500): a 1 x 1 mm blank quad K A / dmax = 57500
+#: / sqrt(2), the 3 x 3 mm tool quad 57500 x 9 / sqrt(18)
+_A8_K_BLANK = 57500.0 / 2.0 ** 0.5
+_A8_K_TOOL = 57500.0 * 9.0 / 18.0 ** 0.5
+
+
+def _a8_deck(spelling="*CONTACT_ONE_WAY_SURFACE_TO_SURFACE", slsfac="",
+             penopt="1", sfs="", sfm="", soft=None, tool="rigid",
+             swap=False) -> str:
+    """A 2 x 2 blank of 1 mm *MAT_ELASTIC quads (E 69000 nu 0.3 t 1, part 1,
+    the SURFA side) under a 3 x 3 mm tool 0.5 mm above it (part 2, SURFB):
+    tool 'rigid' (*MAT_RIGID shell), 'elastic' (a *MAT_ELASTIC shell - the
+    ring trio's deformable wall) or 'solid' (one rigid brick). *swap* puts
+    the tool on SURFA. *soft* adds Optional Card A with that SOFT."""
+    blank = [(1 + i + 3 * j, float(i), float(j), 0.0)
+             for j in range(3) for i in range(3)]
+    tool_n = [(101, -0.5, -0.5, 0.5), (102, 2.5, -0.5, 0.5),
+              (103, 2.5, 2.5, 0.5), (104, -0.5, 2.5, 0.5)]
+    if tool == "solid":
+        tool_n += [(105, -0.5, -0.5, 1.5), (106, 2.5, -0.5, 1.5),
+                   (107, 2.5, 2.5, 1.5), (108, -0.5, 2.5, 1.5)]
+    nodes = "".join(f"{n:8d}{x:16.1f}{y:16.1f}{z:16.1f}\n"
+                    for n, x, y, z in blank + tool_n)
+    quads = "".join(f"{e:8d}{1:8d}" + "".join(f"{n:8d}" for n in ns) + "\n"
+                    for e, ns in ((1, (1, 2, 5, 4)), (2, (2, 3, 6, 5)),
+                                  (3, (4, 5, 8, 7)), (4, (5, 6, 9, 8))))
+    if tool == "solid":
+        tool_el = ("*ELEMENT_SOLID\n" + f"{11:8d}{2:8d}" + "".join(
+            f"{n:8d}" for n in range(101, 109)) + "\n")
+        tool_sec = "*SECTION_SOLID\n" + _row(2, 1) + "\n"
+    else:
+        tool_el = ("*ELEMENT_SHELL\n" + f"{11:8d}{2:8d}" + "".join(
+            f"{n:8d}" for n in (101, 102, 103, 104)) + "\n")
+        tool_sec = ("*SECTION_SHELL\n" + _row(2, 2) + "\n"
+                    + _row(1.0, 1.0, 1.0, 1.0) + "\n")
+    tool_mat = ("*MAT_ELASTIC\n" + _row(2, "7.8E-9", "69000.0", 0.3) + "\n"
+                if tool == "elastic" else
+                "*MAT_RIGID\n" + _row(2, "7.8E-9", "69000.0", 0.3) + "\n"
+                + _row(0.0, 0, 0) + "\n" + _row(0.0) + "\n")
+    sides = _row(2, 1, 3, 3) if swap else _row(1, 2, 3, 3)
+    card_a = (_row(soft) + "\n") if soft is not None else ""
+    # an _MPP spelling carries its MPP card BEFORE Card 1
+    # (handlers._contact_mpp_card_offset)
+    if spelling.endswith("_MPP"):
+        sides = _row(0, 200, 0, 3, 1, 0) + "\n" + sides
+    return ("*KEYWORD\n*CONTROL_TERMINATION\n    1.0E-4\n"
+            "*CONTROL_CONTACT\n" + f"{slsfac:>10}" + "       0.0         1"
+            "         0" + f"{penopt:>10}" + "\n"
+            "*PART\nblank\n" + _row(1, 1, 1) + "\n*PART\ntool\n"
+            + _row(2, 2, 2) + "\n*SECTION_SHELL\n" + _row(1, 2) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n" + tool_sec
+            + "*MAT_ELASTIC\n" + _row(1, "7.8E-9", "69000.0", 0.3) + "\n"
+            + tool_mat + spelling + "\n" + sides + "\n" + _row(0.0, 0.0)
+            + "\n" + f"{sfs:>10}{sfm:>10}" + "\n" + card_a
+            + "*ELEMENT_SHELL\n" + quads + tool_el + "*NODE\n" + nodes
+            + "*END\n")
+
+
+def _type7_card3(starter: str, iid: int = 90001):
+    """(Stmin, Stmax) of /INTER/TYPE7/<iid> (Card 3)."""
+    blk = _block(starter, f"/INTER/TYPE7/{iid}")
+    assert blk[5].lstrip("# ").startswith("Stmin"), blk[5]
+    c3 = blk[6]
+    return float(c3[:20]), float(c3[20:40])
+
+
+class RigidToolPenaltyCap(unittest.TestCase):
+    """A8 (default ON): on the /INTER/TYPE7 of a non-automatic
+    *CONTACT_[FORMING_]ONE_WAY_SURFACE_TO_SURFACE (+ _MPP) with an all-rigid
+    shell tool, SOFT 0, PENOPT 0 / 1: Stmax = 2 x k_LS, k_LS = SLSFAC x
+    min(SFM x k_tool, SFS x k_blank), k = the median LS-DYNA Theory R16 eq.
+    30.8 segment stiffness K A / max diagonal; Stmin = min(1000, Stmax).
+
+    The coupon fixture (round10/r10_type7_coupon_quad.k = the round-10
+    critic's cq.k: a rigid 12 x 12 plate dropping on a fixed 4 x 4 strip of
+    2 mm quads, E 100 nu 0.28 t 0.8, ONE_WAY, no *CONTROL_CONTACT) through
+    the starter + engine on the branch bytes (round 10, part A-ii, nt 4,
+    `C:/Users/pmqua/rcv_r10i_implA2_cq_new`): NORMAL TERMINATION, 808
+    cycles; with VisS 1e-6 on both arms (`..._cq_new_v` / `..._cq_base_v`)
+    the peak penetration is 0.18031 mm = the closed form of the TYPE7 law at
+    K = 21.42747822 (-0.00 %; 802 cycles) and 0.02809 mm against 0.02810 at
+    the card's Stmin 1000 (-0.03 %) - the cap puts eq. 30.8's node spring
+    into the engine exactly."""
+
+    def test_the_coupon_cells_and_numbers(self):
+        with open(os.path.join(_FIX10, "r10_type7_coupon_quad.k")) as fh:
+            deck = fh.read()
+        res, st, _e = _convert(deck)
+        k_blank = (100.0 / (3.0 * (1.0 - 0.56))) * 4.0 / 8.0 ** 0.5
+        stmin, stmax = _type7_card3(st)
+        self.assertAlmostEqual(stmax, 2.0 * 0.1 * k_blank, delta=1e-7)
+        self.assertEqual(stmin, stmax)            # min(1000, Stmax) = Stmax
+        self.assertAlmostEqual(stmax, 21.42747822, places=8)
+        self.assertTrue(_has(
+            res.warnings, "*CONTACT_ONE_WAY_SURFACE_TO_SURFACE 90001 -> "
+            "/INTER/TYPE7/90001: the rigid-tool penalty cap Stmax = 2 x k_LS "
+            "= 21.4275 and Stmin = min(1000, Stmax) = 21.4275",
+            "0.1 x min(1 x 1.33065e+06, 1 x 107.137) = 10.7137",
+            "the median over the 1 tool and 16 blank shells",
+            "i7for3.F:976", "i7cor3.F:277-288"))
+        # D-A8-1: the K-02 floor sentence reads the WRITTEN Stmin
+        self.assertFalse(_has(res.warnings, "Stmin 1000 is above"))
+        _r, st0, _e0 = _convert(deck, rigid_tool_penalty_cap=False)
+        self.assertEqual(_type7_card3(st0), (1000.0, 0.0))
+        self.assertTrue(_has(_r.warnings, "/INTER/TYPE7 90001: Stmin 1000 is "
+                             "above the estimated contact stiffness"))
+        self.assertEqual(_tp._sha(st0), _A8_COUPON_AI_SHA)
+
+    def test_the_class_cells_by_hand(self):
+        cases = (
+            ({"slsfac": "0.01"}, 0.01 * _A8_K_BLANK),
+            ({"slsfac": "0.1"}, 0.1 * _A8_K_BLANK),
+            ({"slsfac": ""}, 0.1 * _A8_K_BLANK),           # blank = 0.1
+            ({"slsfac": "0.0"}, 0.1 * _A8_K_BLANK),        # 0 = 0.1
+            ({"sfs": "0.5"}, 0.1 * 0.5 * _A8_K_BLANK),
+            ({"sfm": "0.1"}, 0.1 * 0.1 * _A8_K_TOOL),      # the tool is min
+        )
+        for spelling in ("*CONTACT_ONE_WAY_SURFACE_TO_SURFACE",
+                         "*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE",
+                         "*CONTACT_ONE_WAY_SURFACE_TO_SURFACE_MPP"):
+            for kw, k_ls in cases:
+                with self.subTest(spelling=spelling, **kw):
+                    res, st, _e = _convert(_a8_deck(spelling, **kw))
+                    stmin, stmax = _type7_card3(st)
+                    self.assertAlmostEqual(stmax / (2.0 * k_ls), 1.0,
+                                           delta=1e-9)
+                    self.assertAlmostEqual(stmin, min(1000.0, stmax),
+                                           delta=1e-6)
+                    self.assertTrue(_has(res.warnings,
+                                         "the rigid-tool penalty cap Stmax"))
+                    self.assertTrue(_has(res.warnings, "The rigid-tool "
+                                         "penalty cap (round 10, A8) is "
+                                         "LS-DYNA Theory eq. 30.8 x SLSFAC x "
+                                         "SF"))
+        # SLSFAC 0.01: the min(1000, Stmax) branch writes Stmin = Stmax
+        _r, st, _e = _convert(_a8_deck(slsfac="0.01"))
+        self.assertAlmostEqual(_type7_card3(st)[0], 813.1727984, places=6)
+
+    def test_the_refusals_are_named_and_change_no_cell(self):
+        cases = {
+            "PENOPT 4": ({"penopt": "4"}, "*CONTROL_CONTACT PENOPT 4"),
+            "SOFT 1": ({"soft": 1}, "SOFT 1 (its penalty is not eq. 30.8"),
+            "a rigid SURFA": ({"swap": True}, "a rigid secondary side (the "
+                              "all-rigid-SSID route)"),
+            "SLSFAC -0.1": ({"slsfac": "-0.1"}, "*CONTROL_CONTACT SLSFAC -0.1 "
+                            "(a value LS-DYNA does not define)"),
+            "a negative SFS": ({"sfs": "-1.0"}, "Card 3 SFS -1 / SFM 0 (a "
+                               "negative penalty scale)"),
+            "a solid tool": ({"tool": "solid"}, "a solid side (eq. 30.7 has "
+                             "no measured carrier)"),
+        }
+        for name, (kw, why) in cases.items():
+            with self.subTest(case=name):
+                res, st, eng = _convert(_a8_deck(**kw))
+                self.assertEqual(_type7_card3(st)[1], 0.0)
+                self.assertTrue(_has(
+                    res.warnings, "the rigid-tool penalty cap (round 10, A8) "
+                    "is not written - " + why, "keeps Stmax 0 and Stmin "),
+                    res.warnings)
+                self.assertFalse(_has(res.warnings, "the rigid-tool penalty "
+                                      "cap Stmax"))
+                _r, st0, eng0 = _convert(_a8_deck(**kw),
+                                         rigid_tool_penalty_cap=False)
+                self.assertEqual((st, eng), (st0, eng0))
+
+    def test_the_classes_outside_are_silent(self):
+        cases = {
+            "AUTOMATIC_ONE_WAY": {"spelling": "*CONTACT_AUTOMATIC_ONE_WAY_"
+                                  "SURFACE_TO_SURFACE"},
+            "two-way S2S": {"spelling": "*CONTACT_SURFACE_TO_SURFACE"},
+            "MORTAR": {"spelling": "*CONTACT_FORMING_SURFACE_TO_SURFACE_"
+                       "MORTAR"},
+            "a deformable tool": {"tool": "elastic"},
+        }
+        for name, kw in cases.items():
+            with self.subTest(case=name):
+                res, st, eng = _convert(_a8_deck(**kw))
+                for iid in [int(h.rsplit("/", 1)[1])
+                            for h in _cards(st, "/INTER/TYPE7/")]:
+                    self.assertEqual(_type7_card3(st, iid)[1], 0.0)
+                self.assertFalse(_has(res.warnings, "rigid-tool penalty cap"))
+                _r, st0, eng0 = _convert(_a8_deck(**kw),
+                                         rigid_tool_penalty_cap=False)
+                self.assertEqual((st, eng), (st0, eng0))
+
+    def test_an_inter_stmin_wins_over_the_cap_floor(self):
+        res, st, _e = _convert(_a8_deck(slsfac="0.1"),
+                               inter_stmin={90001: 500.0})
+        self.assertAlmostEqual(_type7_card3(st)[0], 500.0)
+        self.assertAlmostEqual(_type7_card3(st)[1], 8131.727984, places=5)
+        res, st, _e = _convert(_a8_deck(slsfac="0.1"),
+                               inter_stmin={90001: 9000.0})
+        self.assertEqual(_type7_card3(st)[0], 9000.0)
+        self.assertTrue(_has(res.warnings, "Stmin = --inter-stmin 9000 "
+                             "(above Stmax: the floor then sets K, "
+                             "i7cor3.F:288)"))
+
+    def test_the_segment_stiffness_by_hand(self):
+        """eq. 30.8's K A / dmax on a parallelogram whose LONGER diagonal is
+        d24 (A = |d13 x d24| / 2 = 2, dmax = |d24| = sqrt(10)) and on a
+        triangle (A = 1, dmax = its longest edge sqrt(5)); the median over
+        the side's shells."""
+        from k2rad.state import ConvertOptions
+        from k2rad.writer import contacts
+        deck = ("*KEYWORD\n*PART\np\n" + _row(1, 1, 1)
+                + "\n*SECTION_SHELL\n" + _row(1, 2) + "\n"
+                + _row(1.0, 1.0, 1.0, 1.0) + "\n*MAT_ELASTIC\n"
+                + _row(1, "7.8E-9", "69000.0", 0.3) + "\n*ELEMENT_SHELL\n"
+                + f"{1:8d}{1:8d}{1:8d}{2:8d}{3:8d}{4:8d}\n"
+                + f"{2:8d}{1:8d}{5:8d}{6:8d}{7:8d}{7:8d}\n*NODE\n"
+                + "".join(f"{n:8d}{x:16.1f}{y:16.1f}{0.0:16.1f}\n"
+                          for n, x, y in ((1, 1, 1), (2, 0, 0), (3, 2, 0),
+                                          (4, 3, 1), (5, 10, 0), (6, 12, 0),
+                                          (7, 10, 1)))
+                + "*END\n")
+        st = _a7_state(deck, ConvertOptions())
+        k, n = contacts._ls_shell_penalty(st, {1})
+        quad = 57500.0 * 2.0 / 10.0 ** 0.5
+        tri = 57500.0 * 1.0 / 5.0 ** 0.5
+        self.assertEqual(n, 2)
+        self.assertAlmostEqual(k / (0.5 * (quad + tri)), 1.0, delta=1e-12)
+
+    def test_the_emitter_writes_the_old_card_without_a_cap(self):
+        from k2rad.writer import contacts
+        card = contacts._emit_inter_type7(7, "t", 1, 2, 0.0)
+        self.assertEqual(card[7], "                1000                   0"
+                         "                   0                   0         0")
+
+    def test_the_slsfac_sentence_names_the_capped_interfaces(self):
+        res, _st, _e = _convert(_a8_deck(slsfac="0.01"))
+        notes = _a9_notes(res)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("only the rigid-tool penalty cap (round 10, A8) carries "
+                      "it - Stmax = 2 x LS-DYNA Theory eq. 30.8 x SLSFAC x SF "
+                      "on /INTER/TYPE7 90001", notes[0])
+        res, _st, _e = _convert(_a8_deck(slsfac="0.01"),
+                                rigid_tool_penalty_cap=False)
+        self.assertIn("The rigid-tool penalty cap (round 10, A8) reaches no "
+                      "interface of this deck.", _a9_notes(res)[0])
+
+
+#: the coupon's _0000 sha256 at the part-A-i head (e512676; measured on a
+#: detached checkout of it): --no-rigid-tool-penalty-cap reproduces it
+_A8_COUPON_AI_SHA = (
+    "4a0822b57c473123416f297c8dabe6d669c2e73752eaa8e1f94b0c667db246fd")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Part A-ii: retracted statements and the flags
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1671,6 +1923,10 @@ _RETRACTED_ROUND_10_A2 = (
 #: /MAT/VOID).
 _FORBIDDEN_ROUND_10_A2 = (
     "3 / 3 movers",
+    # A8: the cap's value is LS-DYNA Theory eq. 30.8 x SLSFAC x SF - a
+    # formula; LS-DYNA's own measured holder penalty on the anisotropic
+    # cup-draw is ~100x below it (findings 6.8; conventions F-A8)
+    "effective penalty",
 )
 
 #: (shipped file, the replacement text it now carries)
@@ -1737,6 +1993,7 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
     _FLAGS = {
         "--vacuum-light-fluid": "vacuum_light_fluid",
         "--ale-inflow-ebcs": "ale_inflow_ebcs",
+        "--rigid-tool-penalty-cap": "rigid_tool_penalty_cap",
     }
     _HELP_FIGURES = {
         "--vacuum-light-fluid": ("NEGATIVE RHO", "832 -> 9364 cycles",
@@ -1746,6 +2003,11 @@ class Round10FlagWiringA2(_t7.Round7FlagWiringA):
         "--ale-inflow-ebcs": ("aflux3.F:488-524", "KE RMS 53.09 -> 14.40 %",
                               "IE RMS 172.71 -> 206.79 %",
                               "(3.85e-5, 0.02]", "Never on ELFORM 5 / 6"),
+        "--rigid-tool-penalty-cap": (
+            "eq. 30.8", "i7for3.F:976", "Stmin = min(1000, Stmax)",
+            "IE RMS 10.85 -> 4.01 %", "-13.33 / -82.43 -> -96.70 / -99.15 %",
+            "END -42.14 -> -49.31 %", "KE RMS 29.17 -> 28.83 %",
+            "It is the manual's formula, not a penalty"),
     }
 
 

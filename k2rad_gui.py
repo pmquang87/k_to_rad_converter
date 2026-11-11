@@ -224,7 +224,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          implicit_rayleigh_damping: bool = False,
                          erode_tsmin_rule: bool = True,
                          vacuum_light_fluid: bool = True,
-                         ale_inflow_ebcs: bool = True) -> dict:
+                         ale_inflow_ebcs: bool = True,
+                         rigid_tool_penalty_cap: bool = True) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -567,6 +568,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["erode_tsmin_rule"] = bool(erode_tsmin_rule)
     kwargs["vacuum_light_fluid"] = bool(vacuum_light_fluid)
     kwargs["ale_inflow_ebcs"] = bool(ale_inflow_ebcs)
+    kwargs["rigid_tool_penalty_cap"] = bool(rigid_tool_penalty_cap)
     pe = (print_every_text or "").strip()
     if pe:                                    # blank -> the writer's rule
         try:
@@ -712,6 +714,7 @@ class ConverterGUI:
         self.erode_tsmin_rule = tk.BooleanVar(value=True)
         self.vacuum_light_fluid = tk.BooleanVar(value=True)
         self.ale_inflow_ebcs = tk.BooleanVar(value=True)
+        self.rigid_tool_penalty_cap = tk.BooleanVar(value=True)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -1508,6 +1511,11 @@ class ConverterGUI:
                      "stagnation KE RMS 53.09 -> 14.40 %",
             variable=self.ale_inflow_ebcs).grid(
                 row=98, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            io, text="Rigid-tool ONE_WAY / FORMING contacts: Stmax = 2 x LS "
+                     "eq. 30.8 penalty - ON",
+            variable=self.rigid_tool_penalty_cap).grid(
+                row=99, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -1855,6 +1863,7 @@ class ConverterGUI:
                 erode_tsmin_rule=self.erode_tsmin_rule.get(),
                 vacuum_light_fluid=self.vacuum_light_fluid.get(),
                 ale_inflow_ebcs=self.ale_inflow_ebcs.get(),
+                rigid_tool_penalty_cap=self.rigid_tool_penalty_cap.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -2225,6 +2234,9 @@ class ConverterGUI:
                         "(--no-vacuum-light-fluid)")
         if not kwargs.get("ale_inflow_ebcs", True):
             bits.append("ALE inflow kept as /IMPVEL (--no-ale-inflow-ebcs)")
+        if not kwargs.get("rigid_tool_penalty_cap", True):
+            bits.append("rigid-tool contacts keep Stmax 0 "
+                        "(--no-rigid-tool-penalty-cap)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

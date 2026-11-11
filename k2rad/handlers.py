@@ -7032,6 +7032,8 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     # sfmt read for --auto-gapmin's offset term only (CardStack K-04).
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sfs = to_float(f4[0]) if f4 else 0.0
+    # R14 round 10, A8: SFM, read for the rigid-tool penalty cap only
+    sfm = to_float(f4[1]) if len(f4) > 1 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     sfst = to_float(f4[4]) if len(f4) > 4 else 0.0
@@ -7048,7 +7050,7 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
                                       if thermal else None),
                              interference=interference,
                              thkopt=thkopt, shlthk_c=shlthk_c,
-                             sfst=sfst, sfmt=sfmt, **opt)
+                             sfst=sfst, sfmt=sfmt, sfm=sfm, **opt)
     )
 
 

@@ -460,6 +460,36 @@ as underscores.
   three) or a face brick that is not on a LAW6 fluid. ELFORM 5 / 6 decks
   (Lagrangian in k2rad: the three channel MATCH rows) are never reached.
   `--no-ale-inflow-ebcs` keeps the `/IMPVEL`.
+- `--rigid-tool-penalty-cap` / `--no-rigid-tool-penalty-cap` — **ON by
+  default**. On the `/INTER/TYPE7` of a non-automatic
+  `*CONTACT_ONE_WAY_SURFACE_TO_SURFACE` /
+  `*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE` (+ `_MPP`) whose main side
+  is all rigid and whose two sides are shells, SOFT 0, PENOPT 0 / 1: Stmax =
+  2 x k_LS with k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank), k = the
+  median LS-DYNA Theory R16 eq. 30.8 segment stiffness K A / max shell
+  diagonal (K = E / (3 (1 - 2 nu))) over the side's shells - the 2 undoes
+  the 1/2 an Istf-4 TYPE7 applies per node (`i7for3.F:976`), so the
+  engine's MAX(Stmin, MIN(Km, Ks, Stmax)) (`i7cor3.F:277-288`) gives each
+  blank node k_LS - and Stmin = min(1000, Stmax). The manual's formula, not
+  a penalty LS-DYNA's own runs show (its measured holder penalty on the
+  anisotropic cup-draw is ~100x below it). Card 3 SFM is read for it since
+  round 10. Refused by name inside the class: a rigid SURFA (the
+  all-rigid-SSID route), SOFT 1 / 2, PENOPT 2-5, a negative SLSFAC / SFS /
+  SFM, a solid side; outside it, unchanged: AUTOMATIC_ONE_WAY, the two-way
+  `*CONTACT_SURFACE_TO_SURFACE` (20 R14 keys with a rigid main), MORTAR and a
+  deformable tool (the ring trio). MEASURED (nt 4, each deck's part-A-i bytes
+  and the capped bytes in one window, 4 R14 keys / 12 cells): pan.drawbead.31
+  IE RMS 10.85 -> 4.01 %, KE RMS 14.24 -> 10.86 % (n 61), contact-1 force
+  RMS 448.66 -> 41.68 % of LS's peak - its first two IE fifths are worse
+  (-13.33 / -82.43 -> -96.70 / -99.15 %) and its ERROR column hits the
+  -99.9 % print clamp on 569 of 2511 rows (the column leaves out the contact
+  energy); the anisotropic cup-draw IE RMS 5.57 -> 3.43 % (n 150) at a KE
+  cost, END -42.14 -> -49.31 %, KE RMS 29.17 -> 28.83 %, holder force RMS
+  129.70 -> 92.39 %; hemi.draw IE RMS 1.25 -> 0.99 %, KE RMS 39.60 ->
+  36.19 % (n 120); control_adaptive.cup-draw IE RMS 12.86 -> 13.02 % (n 699),
+  contact-1 force RMS 12.92 -> 13.66 %. The coupon `tests/fixtures/round10/r10_type7_coupon_quad.k` puts eq.
+  30.8's node spring into the engine exactly (peak penetration 0.18031 mm =
+  the closed form). `--no-rigid-tool-penalty-cap` writes Stmax 0.
 
 ### Python API
 
@@ -5164,7 +5194,12 @@ Remark 9 p.11-128),
 neither of which the `(|SAST|+|SBST|)/2` Gapmin reproduces — use
 `--inter-gapmin ID=VAL`; `MORTAR` is a segment-to-segment contact with a
 consistent nodal assembly and automatic erosion (General Remark 14 p.11-131)
-that OpenRadioss has no interface for at all.
+that OpenRadioss has no interface for at all. Since R14 round 10 (A8) a
+`_ONE_WAY_SURFACE_TO_SURFACE` / `_FORMING_ONE_WAY_SURFACE_TO_SURFACE` card
+on an all-rigid shell tool also gets the rigid-tool penalty cap in its
+`/INTER/TYPE7` Card 3 (Stmax = 2 x LS-DYNA Theory eq. 30.8 x SLSFAC x SF;
+Card 3 SFM is read for it; the round-10 options list has the rule,
+`--no-rigid-tool-penalty-cap` writes Stmax 0).
 `*CONTACT_SURFACE_TO_SURFACE_INTERFERENCE` takes the same route with
 **`Inacti` forced to 0** and the deck's own `IGNORE` cell ignored: the keyword
 exists to RESOLVE an initial overlap into prestress (p.11-66), and
@@ -7071,8 +7106,9 @@ or ELFORM 2 on cube-like elements (-> `Isolid` 17).
 read for the engine `/PRINT/-N`, see *Output frequencies*; `--print-every N`
 writes N instead; `*CONTROL_CONTACT` SLSFAC - the scale factor of every
 LS-DYNA sliding-interface penalty, 0 = the default 0.1, Vol I R17 p.12-69 -
-reaches no `/INTER` cell and is named once per deck with a contact when it
-is not 0 / 0.1, since R14 round 10: 8 R14 decks)
+is carried only by the rigid-tool penalty cap (`--rigid-tool-penalty-cap`)
+and is named once per deck with a contact when it is not 0 / 0.1, since R14
+round 10: 8 R14 decks)
 `*DATABASE_*` (binary output, time-history channels)
 `*DATABASE_EXTENT_BINARY` MAXINT (card 1 field 3, blank = 3) > 3 →
 `/ANIM/SHELL/TENS/STRESS/ALL` in the engine deck, right after MEMB / UPPER /

@@ -3945,6 +3945,10 @@ class ContactAutoSurf2Surf:
     shledg: int = 0
     srnde: int = 0
     icor: int = 0
+    #: Card 3 field 2 SFM (the SURFB / main side's penalty scale, 0 / blank =
+    #: 1.0; Vol I R17 p.11-33): read since R14 round 10 for the rigid-tool
+    #: penalty cap (writer/contacts._rigid_tool_cap, A8) - no other reader.
+    sfm: float = 0.0
 
 
 @dataclass
@@ -7742,7 +7746,8 @@ class ConvertOptions:
     ``rigid_cog_master``, ``rigid_element_mass_admas``,
     ``rigid_local_constraints``, ``rigid_local_shared_skew``,
     ``rigid_part_pid_precedence``, ``rigid_secondary_swap``,
-    ``rigid_shell_rotary_inertia``, ``section_nodal_thickness_mean``,
+    ``rigid_shell_rotary_inertia``, ``rigid_tool_penalty_cap``,
+    ``section_nodal_thickness_mean``,
     ``shell_offset_gapmin``, ``shell_to_solid_rbody``, ``shrf_ashear``,
     ``single_surface_sst_gap``, ``soft2_iedge_gate``, ``spc_vector_frames``,
     ``spotweld_dt_mass_scaling``, ``spotweld_efail_displacement``,
@@ -9596,6 +9601,16 @@ class ConvertOptions:
     # (Iale 0 in k2rad) never reached. 2 keys / 2 models. False = the
     # /IMPVEL.
     ale_inflow_ebcs: bool = True
+    # --no-rigid-tool-penalty-cap (R14 round 10, A8, default ON;
+    # writer/contacts._rigid_tool_cap): on the /INTER/TYPE7 of a
+    # non-automatic *CONTACT_ONE_WAY_SURFACE_TO_SURFACE /
+    # *CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE (+ _MPP) whose main side is
+    # all rigid and whose two sides are shells, SOFT 0, PENOPT 0 / 1: Stmax =
+    # 2 x LS-DYNA Theory eq. 30.8 x SLSFAC x SF (the 2 undoes the 1/2 an
+    # Istf-4 TYPE7 applies per node, i7for3.F:976) and Stmin = min(1000,
+    # Stmax). Every other class is named. 4 keys / 4 models, 12 cells.
+    # MEASURED figures: _A8_MEASURED in writer/contacts. False = Stmax 0.
+    rigid_tool_penalty_cap: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a numeric lever the writer would otherwise print verbatim.
@@ -10688,6 +10703,11 @@ class ConversionState:
     # (writer/contacts._warn_slsfac_dropped runs at both exits of
     # _make_interfaces, which a deferred implicit stub calls a second time).
     slsfac_named: bool = False
+    # R14 round 10, A8: the Stmin cell each /INTER/TYPE7 was WRITTEN with
+    # (writer/contacts._emit_inter_type7), so the K-02 floor sentence reads
+    # the card's own value and never claims 1000 where the rigid-tool cap
+    # wrote less.
+    type7_written_stmin: Dict[int, float] = field(default_factory=dict)
     # The ONE decision of --shell-in-solid-coupling (round 8, B10): None =
     # not yet resolved; else the converted cards
     # (writer/blast_ale._resolve_shell_in_solid). Empty under the default.

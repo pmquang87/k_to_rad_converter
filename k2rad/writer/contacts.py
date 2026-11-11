@@ -2802,6 +2802,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
     # takes the record. A no-op for every other spelling, which has no
     # such note.
     from ..handlers import _withdraw_contact_spelling
+    capped: List[int] = []           # round 10, A8: the capped TYPE7 ids
     for c in state.contacts_surf2surf:
         diag = {}
         # CardStack K-08B (opt-in): the two-surface /INTER/TYPE25 route
@@ -2931,6 +2932,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         tstart, tstop = _birth_death(                           # K-11
             state, c.inter_id, c.bt, c.dt,
             c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE", "TYPE7")
+        main_pids = _contact_master_pids(state, main_sid, main_styp)
+        sec_pids = _secondary_pids(state, sec_sid, sec_styp, rigid_nodes,
+                                   keep_rigid)
+        # R14 round 10, A8: the rigid-tool penalty cap (decided on the
+        # EMITTED sides, before the card is written)
+        cap, cap_why = _rigid_tool_cap(state, c, plan, main_pids, sec_pids)
         lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
                                    viss=viss,
@@ -2939,11 +2946,20 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                                    thermal=_contact_thermal_cells(
                                        state, c.keyword, c.inter_id, c.thermal,
                                        "TYPE7"),
-                                   tstart=tstart, tstop=tstop)
-        _warn_stmin_floor(
-            state, c.inter_id, _contact_master_pids(state, main_sid, main_styp),
-            _secondary_pids(state, sec_sid, sec_styp, rigid_nodes, keep_rigid),
-            stfac, 4, c.title)
+                                   tstart=tstart, tstop=tstop,
+                                   stmax=cap.stmax if cap else 0.0,
+                                   stmin_cap=cap.stmin if cap else None)
+        if cap is not None:
+            capped.append(c.inter_id)
+            _warn_tool_cap(state, c, cap, sec_pids)
+        elif cap_why:
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: the rigid-tool penalty cap "
+                f"(round 10, A8) is not written - {cap_why}; "
+                f"/INTER/TYPE7/{c.inter_id} keeps Stmax 0 and Stmin "
+                f"{state.type7_written_stmin.get(c.inter_id, _TYPE7_STMIN):g}.")
+        _warn_stmin_floor(state, c.inter_id, main_pids, sec_pids, stfac, 4,
+                          c.title)
         _warn_soft_card_fields(                                  # K-09
             state, c, c.keyword or "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
             "TYPE7")
@@ -2955,7 +2971,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
         _report_unconsumed_gapmin(state, gapmin_overrides)
 
     _note_dropped_interfaces(state, dropped)
-    _warn_slsfac_dropped(state)                          # round 10, A9
+    if capped:                                           # round 10, A8
+        _warn_tool_cap_deck(state)
+    _warn_slsfac_dropped(state, capped)                  # round 10, A9
     return lines
 
 
@@ -2968,14 +2986,16 @@ def _deck_has_contact_record(state: ConversionState) -> bool:
                 or state.contacts_tiebreak or state.force_transducers)
 
 
-def _warn_slsfac_dropped(state: ConversionState) -> None:
+def _warn_slsfac_dropped(state: ConversionState,
+                         capped_ids: Iterable[int] = ()) -> None:
     """R14 round 10, A9: ONE sentence per deck when ``*CONTROL_CONTACT``
     SLSFAC is not LS-DYNA's default (0 = 0.1, Vol I R17 p.12-69) on a deck
     with a contact: the reader stores it (``handlers.handle_control_contact``)
-    and no ``/INTER`` cell carries it. Called from both exits of
-    :func:`_make_interfaces` (five of the eight R14 carriers reach only the
-    early one); the state flag keeps it once when a deferred implicit stub
-    calls that section a second time. Text only: no byte moves."""
+    and no ``/INTER`` cell carries it - except the rigid-tool penalty cap
+    (A8), whose capped interfaces *capped_ids* the sentence names. Called
+    from both exits of :func:`_make_interfaces` (five of the eight R14
+    carriers reach only the early one); the state flag keeps it once when a
+    deferred implicit stub calls that section a second time. Text only."""
     cc = state.ctrl_contact
     if cc is None or state.slsfac_named or not _deck_has_contact_record(state):
         return
@@ -2984,14 +3004,26 @@ def _warn_slsfac_dropped(state: ConversionState) -> None:
         return
     state.slsfac_named = True
     neg = " - a negative value LS-DYNA does not define" if v < 0.0 else ""
+    ids = sorted(capped_ids)
+    head = (f"*CONTROL_CONTACT SLSFAC = {v:g}{neg} (Vol I R17 p.12-69: the "
+            "scale factor of every sliding-interface penalty; 0 = LS-DYNA's "
+            "default 0.1): ")
+    rest = ("the OpenRadioss stiffness is the starter's own formula times "
+            "Stfac (from each card's SFS), not LS-DYNA's SLSFAC x SF x K A / "
+            "max shell diagonal (Theory R16 eq. 30.7 / 30.8).")
+    if ids:
+        state.warn(
+            head + "the reader stores it and only the rigid-tool penalty cap "
+            "(round 10, A8) carries it - Stmax = 2 x LS-DYNA Theory eq. 30.8 "
+            "x SLSFAC x SF on /INTER/TYPE7 "
+            f"{' / '.join(str(i) for i in ids)} (see each interface's "
+            "note); on every other contact of this deck " + rest)
+        return
     state.warn(
-        f"*CONTROL_CONTACT SLSFAC = {v:g}{neg} (Vol I R17 p.12-69: the scale "
-        "factor of every sliding-interface penalty; 0 = LS-DYNA's default "
-        "0.1): no /INTER cell k2rad writes carries it - the reader stores it "
-        "and reads back only SHLTHK - so on this deck's contacts the "
-        "OpenRadioss stiffness is the starter's own formula times Stfac (from "
-        "each card's SFS), not LS-DYNA's SLSFAC x SF x K A / max shell "
-        "diagonal (Theory R16 eq. 30.7 / 30.8).")
+        head + "no /INTER cell k2rad writes carries it - the reader stores it "
+        "and reads back only SHLTHK - so on this deck's contacts " + rest
+        + " The rigid-tool penalty cap (round 10, A8) reaches no interface "
+        "of this deck.")
 
 
 def _report_unconsumed_gapmin(state: ConversionState,
@@ -5010,7 +5042,10 @@ def _warn_stmin_floor(state: ConversionState, inter_id: int,
                                    bool(main_l and sec_l))
     if istf not in _ISTF_RULES or not main_l or not sec_l:
         return
-    stmin = float(state.options.inter_stmin.get(inter_id, _TYPE7_STMIN))
+    # R14 round 10, A8: the Stmin the card was WRITTEN with (the rigid-tool
+    # cap can write less than 1000); the option / k2rad's floor otherwise
+    stmin = float(state.type7_written_stmin.get(
+        inter_id, state.options.inter_stmin.get(inter_id, _TYPE7_STMIN)))
     if not stmin > 0.0:
         return
     s = stfac if stfac > 0.0 else 1.0
@@ -5072,6 +5107,186 @@ def _warn_stmin_floor(state: ConversionState, inter_id: int,
         "stiffens contacts with K = 0 (ROADMAP round-9 NOT entry 11).")
 
 
+# --- R14 round 10, A8: the rigid-tool penalty cap ---------------------------
+
+#: the two non-automatic one-way spellings of the measured class (an _MPP
+#: sibling is the same card)
+_CAP_SPELLINGS = ("CONTACT_ONE_WAY_SURFACE_TO_SURFACE",
+                  "CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE")
+
+#: the measured effect, carried by the deck sentence (nt 4, README 9.1;
+#: the part-A-ii arms `C:/Users/pmqua/rcv_r10i_implA2_{pd,cup,hd,ca}_{base,
+#: new}`, each deck's part-A-i bytes and the capped bytes in one window)
+_A8_MEASURED = (
+    "MEASURED (nt 4, LS-DYNA glstat, README 9.1; each deck's part-A-i bytes "
+    "and the capped bytes in one window): pan.drawbead IE RMS 10.85 -> "
+    "4.01 %, KE RMS 14.24 -> 10.86 % (n 61, t in (1.365e-4, 8.386e-3]), "
+    "contact-1 force RMS 448.66 -> 41.68 % of LS's peak, with its first two "
+    "IE fifths worse (-13.33 / -82.43 -> -96.70 / -99.15 %); "
+    "mat_transversely_anisotropic.cup-draw IE RMS 5.57 -> 3.43 % (n 150) "
+    "with a named COST on the KE: END -42.14 -> -49.31 % (fifths -75.33 / "
+    "+204.60 / +10.76 / -54.21 / -42.14 -> -55.00 / +11.60 / +10.55 / "
+    "-58.45 / -49.31), KE RMS 29.17 -> 28.83 %; hemi.draw IE RMS 1.25 -> "
+    "0.99 %, KE RMS 39.60 -> 36.19 % (n 120); control_adaptive.cup-draw IE "
+    "RMS 12.86 -> 13.02 % (n 699), contact-1 force RMS 12.92 -> 13.66 %.")
+
+
+class _ToolCap(NamedTuple):
+    """One interface's rigid-tool penalty cap (round 10, A8)."""
+    stmax: float       # 2 x k_LS
+    stmin: float       # min(_TYPE7_STMIN, stmax)
+    k_ls: float        # SLSFAC x min(SFM x k_main, SFS x k_sec)
+    k_main: float      # the tool side's median K A / dmax
+    k_sec: float       # the blank side's median K A / dmax
+    n_main: int
+    n_sec: int
+    slsfac: float
+    sfs: float
+    sfm: float
+
+
+def _ls_shell_penalty(state: ConversionState, pids: Set[int]
+                      ) -> Tuple[Optional[float], int]:
+    """``(median, n)`` over every shell of *pids* of LS-DYNA's segment
+    stiffness K A / max(shell diagonal) (Theory R16 eq. 30.8), K = E / (3 (1
+    - 2 nu)) from :func:`_part_e_nu` (the K-02 lookup): a quad's A = |d13 x
+    d24| / 2 and dmax = max(|d13|, |d24|), a triangle's (3 distinct nodes)
+    A = |e1 x e2| / 2 and dmax its longest edge (:func:`_face_area`). A shell
+    whose part has no E (or nu >= 0.5) is left out; ``(None, 0)`` when no
+    shell remains."""
+    def _len(a, b) -> float:
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+                         + (a[2] - b[2]) ** 2)
+    vals: List[float] = []
+    for e in state.shell_elems:
+        if e.pid not in pids:
+            continue
+        en = _part_e_nu(state, e.pid)
+        if en is None or not en[1] < 0.5:
+            continue
+        pts = _node_xyz(state.nodes,
+                        list(dict.fromkeys(n for n in e.nodes if n > 0)))
+        if pts is None or len(pts) not in (3, 4):
+            continue
+        if len(pts) == 4:
+            dmax = max(_len(pts[2], pts[0]), _len(pts[3], pts[1]))
+        else:
+            dmax = max(_len(pts[1], pts[0]), _len(pts[2], pts[1]),
+                       _len(pts[0], pts[2]))
+        if dmax > 0.0:
+            vals.append(en[0] / (3.0 * (1.0 - 2.0 * en[1]))
+                        * _face_area(pts) / dmax)
+    return (_median(vals), len(vals)) if vals else (None, 0)
+
+
+def _rigid_tool_cap(state: ConversionState, c: ContactAutoSurf2Surf,
+                    plan: str, main_pids: Set[int], sec_pids: Set[int]
+                    ) -> Tuple[Optional[_ToolCap], str]:
+    """R14 round 10, A8 (``--rigid-tool-penalty-cap``, default ON): the cap
+    of one surface-to-surface ``/INTER/TYPE7`` - ``(cap, "")``, or ``(None,
+    refusal)``; refusal "" = outside the class or the opt-out (silent).
+
+    THE CLASS (the four R14 decks measured): a non-automatic
+    ``*CONTACT_ONE_WAY_SURFACE_TO_SURFACE`` / ``_FORMING_ONE_WAY_`` (+ _MPP)
+    whose emitted main side is all rigid (``rigid_part_ids``: a deformable
+    tool - the ring trio's *MAT_ELASTIC wall - is out). Refused by name
+    inside it: the all-rigid-SSID route (a rigid secondary side), SOFT 1 /
+    2, PENOPT 2-5, a negative SLSFAC / SFS / SFM, a solid side, a side with
+    no Young's modulus. THE RULE: k_LS = SLSFAC x min(SFM x k_main, SFS x
+    k_sec), k = the median LS-DYNA Theory R16 eq. 30.8 segment stiffness (K A
+    / max diagonal) over the side's shells, SLSFAC / SFS / SFM 0 = 0.1 / 1 /
+    1; Stmax = 2 k_LS - an Istf-4 TYPE7 applies 1/2 K per node
+    (``i7for3.F:976``) and combines MAX(Stmin, MIN(Km, Ks, Stmax))
+    (``i7cor3.F:277-288``), so each blank node gets k_LS - and Stmin =
+    min(1000, Stmax), so the floor never lifts the cap."""
+    kw = c.keyword[:-4] if c.keyword.endswith("_MPP") else c.keyword
+    if kw not in _CAP_SPELLINGS or not state.options.rigid_tool_penalty_cap:
+        return None, ""
+    if not main_pids or not set(main_pids) <= rigid_part_ids(state):
+        return None, ""                 # a deformable tool: silent
+    if plan != _RS_NONE:
+        return None, "a rigid secondary side (the all-rigid-SSID route)"
+    if c.soft != 0:
+        return None, (f"SOFT {c.soft} (its penalty is not eq. 30.8: Theory "
+                      "R16 eq. 30.9-30.11)")
+    ctrl = state.ctrl_contact
+    penopt = ctrl.penopt if ctrl is not None else 1
+    if penopt not in (0, 1):
+        return None, (f"*CONTROL_CONTACT PENOPT {penopt} (only 0 / 1 take the "
+                      "minimum of the two sides)")
+    slsfac = ctrl.slsfac if ctrl is not None else 0.1
+    if slsfac < 0.0:
+        return None, (f"*CONTROL_CONTACT SLSFAC {slsfac:g} (a value LS-DYNA "
+                      "does not define)")
+    if c.sfs < 0.0 or c.sfm < 0.0:
+        return None, (f"Card 3 SFS {c.sfs:g} / SFM {c.sfm:g} (a negative "
+                      "penalty scale)")
+    solid = ({e.pid for e in state.solid_elems}
+             | {e.pid for e in state.tshell_elems})
+    if solid & (set(main_pids) | set(sec_pids)):
+        return None, "a solid side (eq. 30.7 has no measured carrier)"
+    km, nm = _ls_shell_penalty(state, set(main_pids))
+    ks, ns = _ls_shell_penalty(state, set(sec_pids))
+    if km is None or ks is None:
+        return None, "no Young's modulus on a side (contacts._part_e_nu)"
+    slsfac = slsfac or 0.1
+    sfs, sfm = (c.sfs or 1.0), (c.sfm or 1.0)
+    k_ls = slsfac * min(sfm * km, sfs * ks)
+    stmax = 2.0 * k_ls
+    return _ToolCap(stmax, min(_TYPE7_STMIN, stmax), k_ls, km, ks, nm, ns,
+                    slsfac, sfs, sfm), ""
+
+
+def _warn_tool_cap(state: ConversionState, c: ContactAutoSurf2Surf,
+                   cap: _ToolCap, sec_pids: Set[int]) -> None:
+    """W-A8-cell: one sentence per capped interface, its numbers."""
+    ests = _part_stiffness(state, sorted(sec_pids))
+    et = [x.k_sec for x in ests.values() if x is not None
+          and x.kind == "shell"]
+    alone = (f" where k2rad's card alone gives 1/2 E t = "
+             f"{0.5 * _median(et):g}" if et else "")
+    floor = (f"Stmin = min(1000, Stmax) = {cap.stmin:g}"
+             if c.inter_id not in state.options.inter_stmin else
+             f"Stmin = --inter-stmin {state.type7_written_stmin.get(c.inter_id, cap.stmin):g}"
+             + (" (above Stmax: the floor then sets K, i7cor3.F:288)"
+                if state.type7_written_stmin.get(c.inter_id, 0.0) > cap.stmax
+                else ""))
+    state.warn(
+        f"*{c.keyword} {c.inter_id} -> /INTER/TYPE7/{c.inter_id}: the "
+        f"rigid-tool penalty cap Stmax = 2 x k_LS = {cap.stmax:g} and "
+        f"{floor}, with k_LS = SLSFAC x min(SFM x k_tool, SFS x k_blank) = "
+        f"{cap.slsfac:g} x min({cap.sfm:g} x {cap.k_main:g}, {cap.sfs:g} x "
+        f"{cap.k_sec:g}) = {cap.k_ls:g}: LS-DYNA Theory R16 eq. 30.8 (K A / "
+        "max shell diagonal, K = E / (3 (1 - 2 nu)), the median over the "
+        f"{cap.n_main} tool and {cap.n_sec} blank shells) x SLSFAC x SF. The "
+        "factor 2 undoes the 1/2 an Istf-4 TYPE7 applies per node "
+        "(i7for3.F:976), so the engine's MAX(Stmin, MIN(Km, Ks, Stmax)) "
+        "(i7cor3.F:277-288) gives each blank node 1/2 K = k_LS" + alone
+        + ". --no-rigid-tool-penalty-cap writes Stmax 0.")
+
+
+def _warn_tool_cap_deck(state: ConversionState) -> None:
+    """W-A8-deck: ONE sentence per deck with a capped interface - the
+    formula's status, the class, every excluded class, the measured
+    effect."""
+    state.warn(
+        "The rigid-tool penalty cap (round 10, A8) is LS-DYNA Theory eq. "
+        "30.8 x SLSFAC x SF - the manual's formula, which LS-DYNA's own runs "
+        "do not show as their holder penalty: on "
+        "mat_transversely_anisotropic.cup-draw its rcforc force over the "
+        "penetration of the flange nodes in its d3plot is about 200 N/mm per "
+        "node, ~100x below the formula's 20565, and on pan.drawbead's binder "
+        "1.36x above it. It is written only on a non-automatic "
+        "*CONTACT_ONE_WAY_SURFACE_TO_SURFACE / "
+        "*CONTACT_FORMING_ONE_WAY_SURFACE_TO_SURFACE with an all-rigid shell "
+        "tool, SOFT 0 and PENOPT 0 / 1 - the class four R14 decks measured; "
+        "NOT on *CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE (14 Ryan_Lee W13 "
+        "files, no LS-DYNA reference), the two-way *CONTACT_SURFACE_TO_SURFACE "
+        "(20 R14 keys with a rigid main), MORTAR, PENOPT 2-5, SOFT 1 / 2, a "
+        "solid side (eq. 30.7) or a deformable tool. " + _A8_MEASURED
+        + " --no-rigid-tool-penalty-cap writes Stmax 0.")
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
@@ -5081,13 +5296,22 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       state: Optional[ConversionState] = None,
                       thermal: Optional["_ThermalCells"] = None,
                       tstart: float = 0.0,
-                      tstop: float = 0.0) -> List[str]:
+                      tstop: float = 0.0,
+                      stmax: float = 0.0,
+                      stmin_cap: Optional[float] = None) -> List[str]:
     """One ``/INTER/TYPE7`` block.
 
     ``tstart`` / ``tstop`` fill the Tstart / Tstop cells (round 9, A2: the
     routed implicit node-to-surface contact carries the deck's BT / DT); 0 is
     written as today's ``0`` (a Tstop of 0 is 'never',
     hm_read_inter_type07.F:544), so every other caller is byte-identical.
+
+    ``stmax`` / ``stmin_cap`` are the rigid-tool penalty cap (R14 round 10,
+    A8, :func:`_rigid_tool_cap`): Stmax in Card 3 (0 = the reader's 1e30,
+    ``hm_read_inter_type07.F:479-486``: today's ``0``) and Stmin = min(the
+    floor, ``stmin_cap``) unless ``--inter-stmin`` names the interface (the
+    user's value wins). The WRITTEN Stmin is recorded in
+    ``state.type7_written_stmin`` for the K-02 sentence.
 
     ``Fpenmax`` is derived from ``inacti`` HERE, in the single emitter, rather
     than at each of the four call sites — a guard keyed on one caller goes dead
@@ -5143,6 +5367,10 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
             "MAX(Stmin, K) (i7cor3.F:251-301)"
             + (": with 0 a secondary node no element stiffens contacts with "
                "K = 0." if stmin == 0.0 else "."))
+    elif stmin_cap is not None:
+        stmin = min(stmin, stmin_cap)        # round 10, A8: min(1000, Stmax)
+    if state is not None:
+        state.type7_written_stmin[inter_id] = stmin
     fpenmax = _FPENMAX_ZERO_NORMAL if inacti in _FPENMAX_INACTI else 0.0
     if fpenmax and state is not None:
         state.warn(
@@ -5172,7 +5400,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#          Fscalegap             GAP_MAX             Fpenmax",
         f"                   0                   0{_f(fpenmax)}",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
-        f"{_f(stmin)}                   0                   0                   0         0",
+        f"{_f(stmin)}{_f(stmax)}                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}{_f(tstart)}{_f(tstop)}",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
