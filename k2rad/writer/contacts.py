@@ -2458,10 +2458,10 @@ def _s2s_type25_route(state: ConversionState, c: ContactAutoSurf2Surf,
     tstart, tstop = _birth_death(state, c.inter_id, c.bt, c.dt, kw, "TYPE25",
                                  dt_was_written=True)
     # CardStack K-16: Card E SRNDE 1 -> Ishape 2
-    ishape = _type25_ishape(
-        state, c, kw, c.inter_id,
-        _contact_master_pids(state, c.ssid, c.sstyp)
-        | _contact_master_pids(state, c.msid, c.mstyp))
+    both_pids = (_contact_master_pids(state, c.ssid, c.sstyp)
+                 | _contact_master_pids(state, c.msid, c.mstyp))
+    ishape = _type25_ishape(state, c, kw, c.inter_id, both_pids)
+    _warn_type25_no_contact_stiffness(state, c.inter_id, both_pids)  # B6
     lines += _emit_inter_type25(
         c.inter_id, c.title, surf1, surf2, istf=4, igap=2, idel=_TYPE25_IDEL,
         iedge=_TYPE25_IEDGE_NONE, stfac=stfac, fric=fric, tstart=tstart,
@@ -2745,6 +2745,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int], *,
                 _warn_type25_self_vdc(state, c, kw)
                 # CardStack K-16: Card E SRNDE 1 -> Ishape 2 (the split too)
                 ishape = _type25_ishape(state, c, kw, c.inter_id, scope)
+                # round 10, B6 (the split inherits the parent's line)
+                _warn_type25_no_contact_stiffness(state, c.inter_id, scope)
                 lines += _emit_inter_type25_self(
                     c.inter_id, c.title, self_surf, fric, inacti, stfac,
                     fric_id=fric_id, iedge=iedge, tstart=tstart, tstop=tstop,
@@ -5187,6 +5189,44 @@ def _warn_no_contact_stiffness(state: ConversionState, inter_id: int,
            "usual." if rest else ".") + measured)
 
 
+def _warn_type25_no_contact_stiffness(state: ConversionState, inter_id: int,
+                                      pids: Iterable[int]) -> None:
+    """Round 10, B6: the TYPE25 twin of :func:`_warn_no_contact_stiffness`
+    (which reaches the /INTER/TYPE7 routes through the K-02 floor check):
+    name the parts of /INTER/TYPE25 *inter_id* - the SSID = 0 / SURFATYP 5
+    / 6 self-contact, the eroding / node-to-surface family, ``--s2s-type25``
+    - whose law the starter gives no contact stiffness
+    (:data:`_NO_CONTACT_STIFFNESS_LAWS`). Text only; no byte moves."""
+    by_law: Dict[Tuple[str, str, str], List[int]] = {}
+    for pid in sorted(set(pids)):
+        law = _part_no_contact_stiffness(state, pid)
+        if law is not None:
+            by_law.setdefault(law, []).append(pid)
+    if not by_law:
+        return
+    names = "; ".join(
+        f"part{'s' if len(p) > 1 else ''} {', '.join(str(x) for x in p)} "
+        f"({law[0]}, {law[1]})" for law, p in by_law.items())
+    readers = "; ".join(f"{law[0]}'s reader leaves PARMAT(1) unset "
+                        f"({law[2]})" for law in by_law)
+    measured = (" MEASURED (two t 0.35 shell cards thrown at 1000 mm/s onto a "
+                "2 x 2 x 1 hex block in an SSID = 0 TYPE25, nt 4): with the "
+                "block /MAT/LAW169 the cards keep their translational kinetic "
+                "energy (0.04725 at t 0, 0.2, 0.4, 0.6, 0.8 and 1 ms: a 0.00 % "
+                "drop), against a 50.33 % drop with *MAT_ELASTIC E 10."
+                if any(law[0] == "/MAT/LAW169" for law in by_law) else "")
+    state.warn(
+        f"/INTER/TYPE25 {inter_id}: {names} - a law that gives the starter "
+        f"no contact stiffness: {readers}, so its bulk modulus PM(32) = 0 "
+        "and PM(107) = 0 (hm_read_mat.F90:1451/1464/1506/1546, "
+        "updmat.F:418). A segment of such a part gets STF = 0 on either "
+        "Icontrol branch (i25sti3.F:884-889) and its nodes a secondary "
+        "stiffness of 0 (sbulk3.F:99, asstifi.F:50, i25stslav.F:63-64), and "
+        "the engine search skips both (i25trivox.F:276/471, "
+        "inter_voxel_creation.F:109), so whatever the Stfac this interface "
+        "carries no load on those parts." + measured)
+
+
 def _warn_stmin_floor(state: ConversionState, inter_id: int,
                       main_pids: Optional[Iterable[int]],
                       sec_pids: Optional[Iterable[int]],
@@ -7449,6 +7489,9 @@ def _make_type25_interfaces(state: ConversionState,
                 # _type25_ishape, so a stated Card E is named here
                 _warn_card_e_type7(state, c, kw, viss)
                 continue
+            # round 10, B6: the parts a no-contact-stiffness law is named on
+            law_pids = ish_pids | _secondary_pids(state, sec25_sid, sec25_styp,
+                                                  rigid_nodes, keep25)
             state.warn(
                 f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
                 "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
@@ -7462,6 +7505,7 @@ def _make_type25_interfaces(state: ConversionState,
             ish_pids = (set(state.parts) if single and c.ssid == 0 else   # K-16
                         _contact_master_pids(state, c.ssid, c.sstyp)
                         | _contact_master_pids(state, c.msid, c.mstyp))
+            law_pids = ish_pids                     # round 10, B6
             # Only a SINGLE_SURFACE reads SSID=0 as "all parts" (Vol I p.11-24).
             surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
                                     f"contact_{c.inter_id}_{tag}", lines,
@@ -7509,6 +7553,7 @@ def _make_type25_interfaces(state: ConversionState,
         # are the surfaces' (a node-to-surface one: its main side's, after
         # any rigid swap; an SSID = 0 single surface: every part)
         ishape = _type25_ishape(state, c, kw, c.inter_id, ish_pids)
+        _warn_type25_no_contact_stiffness(state, c.inter_id, law_pids)  # B6
         lines += _emit_inter_type25(
             c.inter_id, c.title, surf1, surf2, grnod_id=grnod, istf=istf,
             igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,

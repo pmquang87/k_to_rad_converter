@@ -3546,6 +3546,83 @@ class StminFloorNoStiffnessLaw(unittest.TestCase):
         self.assertAlmostEqual(est.b, 10.0 / (3.0 * (1.0 - 0.76)))
 
 
+def _type25_law_lines(res, iid: int = 12):
+    return [w for w in res.warnings
+            if w.startswith(f"/INTER/TYPE25 {iid}:")
+            and "gives the starter no contact stiffness" in w]
+
+
+class Type25NoContactStiffnessLaw(unittest.TestCase):
+    """Round 10, B6 (text only): the K-02 naming of a no-contact-stiffness
+    law covered the /INTER/TYPE7 routes only; the three /INTER/TYPE25
+    emitters - the SSID = 0 / SURFATYP 5 / 6 self-contact, the eroding /
+    node-to-surface family, --s2s-type25 - now name a *MAT_ARUP_ADHESIVE
+    (/MAT/LAW169) part: its segments get STF = 0 (i25sti3.F:884-889), its
+    nodes a secondary stiffness of 0 (i25stslav.F:63-64), and the engine
+    search skips both (i25trivox.F:276/471). MEASURED (two cards thrown onto
+    a LAW169 block in an SSID = 0 TYPE25, nt 4): KE 0.04725 at every 0.2 ms,
+    a 0.00 % drop, against 50.33 % with *MAT_ELASTIC E 10."""
+
+    _lines = staticmethod(_type25_law_lines)
+
+    def _deck(self, contact, mat=_ADHESIVE_BLOCK_MAT):
+        base = _k1a_deck(contact, block_e=10.0)
+        self.assertEqual(base.count(_SOFT_BLOCK_MAT), 1)
+        return base.replace(_SOFT_BLOCK_MAT, mat)
+
+    def test_the_ssid_0_self_contact_names_the_law169_part(self):
+        res, s, _e = _convert(self._deck(_k1a_ass(12, 0, 0)))
+        self.assertIn("/INTER/TYPE25/12", s)
+        ws = self._lines(res)
+        self.assertEqual(len(ws), 1, res.warnings)
+        for needle in ("/INTER/TYPE25 12: part 1 (/MAT/LAW169, "
+                       "*MAT_ARUP_ADHESIVE)", "hm_read_mat169.F90:202",
+                       "i25sti3.F:884-889", "i25stslav.F:63-64",
+                       "i25trivox.F:276/471", "0.00 % drop", "50.33 %"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, ws[0])
+
+    def test_an_elastic_block_is_not_named(self):
+        res, _s, _e = _convert(self._deck(_k1a_ass(12, 0, 0),
+                                          mat=_SOFT_BLOCK_MAT))
+        self.assertEqual(self._lines(res), [])
+
+    def test_the_eroding_family_names_it(self):
+        res, s, _e = _convert(self._deck(_eroding_s2s(12, card_a=())))
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(len(self._lines(res)), 1, res.warnings)
+
+    def test_the_s2s_type25_route_names_it_and_no_type7_line(self):
+        res, s, _e = _convert(self._deck(_k1a_s2s(12)), s2s_type25=True)
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(len(self._lines(res)), 1, res.warnings)
+        self.assertEqual(_inert_warnings(res), [], res.warnings)
+
+    def test_a_law169_part_outside_the_contact_is_not_named(self):
+        """An eroding single surface over part set 1 (the cards): the LAW169
+        block is in no contact."""
+        res, s, _e = _convert(self._deck(_k1a_ass(
+            12, 1, 2, kw="CONTACT_ERODING_SINGLE_SURFACE_ID",
+            tail=_row(0, 1, 1) + "\n")))
+        self.assertIn("/INTER/TYPE25/12", s)
+        self.assertEqual(self._lines(res), [], res.warnings)
+
+    def test_the_line_moves_no_byte(self):
+        from unittest import mock
+        for name, deck, kw in (
+                ("ssid0", self._deck(_k1a_ass(12, 0, 0)), {}),
+                ("eroding", self._deck(_eroding_s2s(12, card_a=())), {}),
+                ("s2s", self._deck(_k1a_s2s(12)), {"s2s_type25": True})):
+            with self.subTest(name):
+                _r, s, e = _convert(deck, **kw)
+                with mock.patch(
+                        "k2rad.writer.contacts._warn_type25_no_contact_"
+                        "stiffness", lambda *a, **k: None):
+                    _r0, s0, e0 = _convert(deck, **kw)
+                self.assertEqual(s, s0)
+                self.assertEqual(e, e0)
+
+
 # ── the hand-overs: MAXINT, two help texts, the *DAMPING_GLOBAL sentence ─────
 
 class DbExtentBinaryMaxint(unittest.TestCase):
