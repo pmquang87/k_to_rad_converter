@@ -90,7 +90,8 @@ class TestNothingIsEmittedUninvitedLegacy(unittest.TestCase):
     ed52c93 default and now run under round 10's A11 default, where no floor
     is ever written, so they pin nothing of the deck route. On the
     ``--no-erode-tsmin-rule`` arm a floor still needs BOTH ERODE=1 and
-    TSLIMT>0: half a request writes no card and is reported."""
+    TSLIMT>0: half a request writes no card and is reported, and so does a
+    TSLIMT > 0 with an ERODE other than 1 (findings 6.35 (2)(a))."""
 
     def test_erode_without_a_threshold_emits_nothing(self):
         st = _state(erode=1, tslimt=0.0, **_LEGACY)
@@ -113,6 +114,24 @@ class TestNothingIsEmittedUninvitedLegacy(unittest.TestCase):
                 for needle in (f"ERODE={erode} / TSLIMT={tslimt:g}",
                                "a floor needs BOTH ERODE=1 and TSLIMT>0",
                                "--dt-del"):
+                    self.assertIn(needle, reason)
+
+    def test_a_digit_erode_with_a_threshold_emits_nothing(self):
+        """Findings 6.35 (2)(a), mutant V_legacy_erode_ne0: the ed52c93
+        trigger is ERODE EQUAL to 1, so the pins at ERODE 0 above hold only
+        one neighbour. ERODE 2, 10 and 111 (the digit forms the A11 record
+        reads) with TSLIMT > 0 write no card and no warning on the
+        ``--no-erode-tsmin-rule`` arm and are reported; ``!= 0`` or ``>= 1``
+        would write all three /DT/<elem>/DEL cards."""
+        for erode in (2, 10, 111):
+            with self.subTest(erode=erode):
+                st = _state(erode=erode, tslimt=3.5e-8, **_LEGACY)
+                self.assertEqual(_make_engine_dt_deletion(st), [])
+                self.assertEqual(st.warnings, [])
+                reason = dict(st.recognized_not_emitted).get(
+                    "CONTROL_TIMESTEP", "")
+                for needle in (f"ERODE={erode} / TSLIMT=3.5e-08",
+                               "a floor needs BOTH ERODE=1 and TSLIMT>0"):
                     self.assertIn(needle, reason)
 
 

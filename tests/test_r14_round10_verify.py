@@ -20,10 +20,20 @@ the code verifier's surviving mutations).
    MAIN-side SURFATYP 6 / 7 drop, the main side's written parts and a
    segment-set side's part in the B6 scope. The eighth pin (the legacy arm of
    the deletion floor's half requests) is in tests/test_dt_deletion_floor.py.
+   The closing round (findings 6.35 (2), the final check's tests reviewer)
+   adds the set id inside the SURFATYP 6 / 7 drop on both sides, the
+   sentence naming a section recorded twice once, and every member of
+   _SHRF_NO_SHEAR_ELFORMS on the *PART_COMPOSITE recorder; its legacy ERODE
+   2 / 10 / 111 pin is in tests/test_dt_deletion_floor.py.
 
-Every test of sections 1 - 3 fails on bc2910c (or on the named mutant of
-it); every test of section 4 fails on the named coordinator mutant of
-5108531.
+Every CLASS of sections 1 - 3 fails on bc2910c or, in section 1, on its
+named mutant of it; a test that passes on bc2910c is a section-1 pin of code
+that was right there, one of the three section-2 controls (the part-set
+side, the silent TYPE9 sections, the plain shell) or one of the two
+section-3 guard self-tests, which pin the guard itself. Every CLASS of
+section 4 fails on its named mutant (the two 5/6 tests are negative
+controls: they pass on the recorder mutants and fail on an always-record
+one).
 """
 
 import math
@@ -374,10 +384,15 @@ class ErodingRouteScope(unittest.TestCase):
         self.assertEqual(_C._type25_law_lines(res), [])
 
     def test_surfatyp_6_and_7_are_dropped_by_their_meaning(self):
-        for sstyp, needle in ((6, "SURFATYP 6 means 'Part set ID for "
-                                  "exempted parts"),
-                              (7, "SURFATYP 7 means 'Branch ID; see "
-                                  "*SET_PART_TREE'")):
+        """SSID 2, MSID 0: the clause and the remedy name the SSID's set /
+        branch (findings 6.35 (2)(b), the twin of the MAIN side's id pin)."""
+        for sstyp, needle, what, remedy in (
+                (6, "SURFATYP 6 means 'Part set ID for exempted parts",
+                 "i.e. every part except those of *SET_PART 2,",
+                 "REMEDY: invert *SET_PART 2 by hand"),
+                (7, "SURFATYP 7 means 'Branch ID; see *SET_PART_TREE'",
+                 "i.e. the parts of *SET_PART_TREE branch 2,",
+                 "REMEDY: list the branch's parts in a *SET_PART")):
             with self.subTest(sstyp=sstyp):
                 res, st, _e = _convert(self._deck(2, sstyp))
                 self.assertNotIn("/INTER/TYPE25/12", st)
@@ -385,7 +400,8 @@ class ErodingRouteScope(unittest.TestCase):
                          and "eroding /INTER/TYPE25 route builds its "
                          "surface" in w]
                 self.assertEqual(len(drops), 1, res.warnings)
-                self.assertIn(needle, drops[0])
+                for n in (needle, what, remedy):
+                    self.assertIn(n, drops[0])
                 self.assertNotIn("names no part or part set", drops[0])
 
 
@@ -701,6 +717,8 @@ class ShrfRouteType11IsRecorded(unittest.TestCase):
         self.assertTrue(lines[0].startswith(
             "*SECTION_SHELL 7 (SHRF 1) -> /PROP/TYPE11: a shell route the "
             "SHRF rule"), lines[0])
+        # the sentence's fixed tail cites all three readers on every route:
+        # this pins the tail; the route is pinned by the startswith above
         self.assertIn("hm_read_prop11.F:280", lines[0])
 
     def test_a_five_sixths_section_on_type11_is_not(self):
@@ -724,6 +742,7 @@ class ShrfRouteRuleLayupType51IsRecorded(unittest.TestCase):
         self.assertTrue(lines[0].startswith(
             "*SECTION_SHELL 7 (SHRF 1) -> /PROP/TYPE51: a shell route the "
             "SHRF rule"), lines[0])
+        # the shared tail, as in ShrfRouteType11IsRecorded
         self.assertIn("hm_read_prop51.F:255", lines[0])
 
     def test_a_five_sixths_section_on_a_type51_layup_is_not(self):
@@ -736,7 +755,9 @@ class ShrfRouteSkipsMembraneComposites(unittest.TestCase):
     """J_shrf_comp_noshear (6.34 (4)(c)): a membrane *PART_COMPOSITE (ELFORM
     5 / 9: no bending, no transverse shear) is not named, whatever its SHRF -
     LS-DYNA's factor acts on nothing there (writer/mesh.
-    _SHRF_NO_SHEAR_ELFORMS); the same card on ELFORM 2 is."""
+    _SHRF_NO_SHEAR_ELFORMS); the same card on ELFORM 2 is.
+    V_comp_membrane_59 (6.35 (2)(d)): one subTest per member of that set -
+    the 2-D and +-29 ELFORMs too, each written as a /PROP/TYPE51."""
 
     def _pc(self, elform):
         return _convert("*KEYWORD\n" + _tc.NODES + _tc.SHELL
@@ -744,7 +765,8 @@ class ShrfRouteSkipsMembraneComposites(unittest.TestCase):
                         + _tc._mat002() + _tc.END)
 
     def test_a_membrane_composite_is_silent(self):
-        for elform in (5, 9):
+        from k2rad.writer.mesh import _SHRF_NO_SHEAR_ELFORMS
+        for elform in sorted(_SHRF_NO_SHEAR_ELFORMS):
             with self.subTest(elform=elform):
                 res, st, _e = self._pc(elform)
                 self.assertIn("/PROP/TYPE51/", st)
@@ -785,6 +807,39 @@ class ShrfRouteSentenceCapsAtTen(unittest.TestCase):
                          + ["... (11 in all)"])
 
 
+class ShrfRouteSentenceNamesASectionOnce(unittest.TestCase):
+    """V_dedup_off (6.35 (2)(c)): the sentence names a section once however
+    often it is recorded. The synthesized /PROP/TYPE9 of a *MAT_037 part is
+    written per PART (writer/composites._emit_composite_props), so one
+    *SECTION_SHELL on two such parts is written, and recorded, twice."""
+
+    def test_a_section_on_two_parts_is_named_once(self):
+        second = ("*ELEMENT_SHELL\n" + _tp._elem(2, 2, 2, 5, 6, 3)
+                  + "*PART\nsecond plate\n" + _row(2, 1, 1) + "\n")
+        res, st, _e = _convert(_tp._shell_deck(
+            nip="5", mat=_tc._mat037(mid=1), shrf="1.0", second=second))
+        self.assertEqual(st.count("/PROP/TYPE9/"), 2)
+        lines = _route_lines(res)
+        self.assertEqual(len(lines), 1, res.warnings)
+        self.assertEqual(
+            lines[0].split(": a shell route the SHRF rule")[0].split("; "),
+            ["*SECTION_SHELL 1 (SHRF 1) -> /PROP/TYPE9"])
+
+    def test_two_records_of_one_section_are_one_item(self):
+        from k2rad.state import ConversionState
+        from k2rad.writer.mesh import _warn_shrf_other_routes
+        st = ConversionState()
+        for _part in (1, 2):
+            st.shrf_other_routes.append(("*SECTION_SHELL", 1, "/PROP/TYPE9",
+                                         1.0, 1.0))
+        self.assertEqual(_warn_shrf_other_routes(st), [])
+        lines = [w for w in st.warnings if "a shell route the SHRF rule" in w]
+        self.assertEqual(len(lines), 1, st.warnings)
+        self.assertTrue(lines[0].startswith(
+            "*SECTION_SHELL 1 (SHRF 1) -> /PROP/TYPE9: a shell route the "
+            "SHRF rule"), lines[0])
+
+
 def _eroding_deck(contact, extra=""):
     """The K1a probe (part 1 = the hex block, here *MAT_ARUP_ADHESIVE ->
     /MAT/LAW169; parts 101 / 102 = the two shell cards = *SET_PART 1; *SET_PART
@@ -814,13 +869,17 @@ class ErodingMainSideSurfatyp67(unittest.TestCase):
     """J_ero_drop_main67 (6.34 (4)(e)): the MAIN side of an eroding
     surface-to-surface card with SURFBTYP 6 / 7 is dropped by the type's
     meaning and remedy (the twin of ErodingRouteScope's SECONDARY-side
-    test), not as 'resolved to no contact surface'."""
+    test), not as 'resolved to no contact surface'. V_main_clause_ssid
+    (6.35 (2)(b)): the clause names the MSID's set / branch (2), not the
+    SSID's (1)."""
 
     def test_the_main_side_is_dropped_by_its_meaning(self):
-        for mstyp, meaning, remedy in (
+        for mstyp, meaning, what, remedy in (
                 (6, "SURFATYP 6 means 'Part set ID for exempted parts",
+                 "i.e. every part except those of *SET_PART 2,",
                  "REMEDY: invert *SET_PART 2 by hand"),
                 (7, "SURFATYP 7 means 'Branch ID; see *SET_PART_TREE'",
+                 "i.e. the parts of *SET_PART_TREE branch 2,",
                  "REMEDY: list the branch's parts in a *SET_PART")):
             with self.subTest(mstyp=mstyp):
                 res, st, _e = _convert(_eroding_s2s(1, 2, 2, mstyp))
@@ -833,7 +892,7 @@ class ErodingMainSideSurfatyp67(unittest.TestCase):
                                 drops[0])
                 for needle in ("the eroding /INTER/TYPE25 route builds its "
                                "surface from a part, a part set or SURFATYP "
-                               "5 only", remedy):
+                               "5 only", what, remedy):
                     self.assertIn(needle, drops[0])
                 self.assertNotIn("resolved to no contact surface", drops[0])
 
