@@ -33,10 +33,11 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
    `C:\Users\pmqua\PycharmProjects\k_to_rad_converter\PROJECT_MISTAKES.md` (gitignored; the campaign section's
    2026-11-01 entries tagged `k2rad #144 merge` = the 0.35 lessons, and the `k2rad round 10` entries).
 2. The memory `k2rad-parity-roadmap-2026-07.md` (line 48 = the round-10 record; its END is the newest state) and
-   `dynaexamples-r14-computed-collection.md` (the LAST paragraphs = 0.35 and 0.36).
+   `dynaexamples-r14-computed-collection.md` (the LAST paragraphs = 0.35, then 0.36 with 0.36.1, then 0.36.2).
 3. `C:\dynaexamples_r14_ton-mm-s_openradioss\OPENRADIOSS_REPORT.md` sections 0.34 (the round-9 merge re-baseline),
    0.35 (the CardStack re-baseline: the FIRST merge whose batch moved roster bytes - its order is this checklist's
-   when D0 = 0) and 0.36 (the round-10 pass); `README.md` sections 7-10 (section 7's C6 paragraph "Rows that name
+   when D0 = 0) and 0.36, 0.36.1 and 0.36.2 (the round-10 pass, its fix round and its verification round);
+   `README.md` sections 7-10 (section 7's C6 paragraph "Rows that name
    another branch" is re-measured in place at every merge re-baseline).
 4. The durable archive of the round-10 session: `C:\Users\pmqua\rcv_r14_round10_session_2026-11-01\scratchpad\`
    with the 15 templates of the 0.35 duties (the scratchpad they came from is NOT durable):
@@ -152,6 +153,11 @@ worktree; commit nothing (the duties write only the campaign mirror, the memorie
 - origin/master `b17c298` is merged into the branch (`e512676`). If master moved beyond `b17c298` before the user's
   merge, M10 carries those commits too: assert the package identity across the PR head and M10 and name every
   extra commit in 0.37.
+- The campaign README's `_infra/audit_or_run.py` row in section 8's runner table (line 772 on 2026-11-12)
+  still gives the strict-gate census of the round's start ('42 of the 300 normal rows', on the 0.35 listings, report
+  section 0.36), while section 8's 'Solver launch rules' paragraph gives the census after the round-10 re-runs
+  (report section 0.36.2): restate the row, or point it at that paragraph, in the 0.37 pass (measure the census
+  again; never copy it).
 
 ## Facts measured by the fix-and-PR agent and the verification round (2026-11-12) - the record
 

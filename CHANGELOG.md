@@ -54,8 +54,8 @@ Prior history (before this changelog was introduced) is summarized in the
 ### Added
 
 - **R14 CAMPAIGN PARITY batch, round 10 - the verification round (the four
-  post-PR verifiers of PR #148; findings 6.29 - 6.33; no default changes, no
-  emitted byte moves).** On the PR head `bc2910c`; the code commit is
+  post-PR verifiers of PR #148; findings 6.29 - 6.35; no default changes, no
+  emitted byte moves).** Started on the then PR head `bc2910c`; the code commit is
   `218b06a`. Every figure below was re-measured by this round (its own runs,
   scorers and scans; the verifiers' run directories only where their decks
   were SHA-checked against this round's own conversions).
@@ -88,15 +88,25 @@ Prior history (before this changelog was introduced) is summarized in the
     (11 routes print ten and '... (11 in all)'), the eroding route's MAIN-side SURFATYP 6 / 7 drop,
     the main side's written parts (MSID 0 / SURFBTYP 5) and a `*SET_SEGMENT` side's part in the B6
     scope, and the `--no-erode-tsmin-rule` twins of the three deletion-floor half-request tests, each
-    mutant KILLED by its own new test in the two changed modules and in the whole suite.
+    mutant KILLED by its own new test in the two changed modules and in the whole suite. The closing
+    round (findings 6.35 (2), the final check's tests reviewer; tests only, `e1e007b`) adds four more:
+    ERODE 2 / 10 / 111 with TSLIMT > 0 on the `--no-erode-tsmin-rule` arm write no `/DT/<elem>/DEL`
+    card (the trigger is ERODE equal to 1), the set id inside the SURFATYP 6 / 7 drop on the main side
+    and on the secondary side (there with its remedy), a section recorded twice is named once, and
+    every member of `_SHRF_NO_SHEAR_ELFORMS` on the `*PART_COMPOSITE` recorder: 8 mutants (the
+    reviewer's four whole-suite survivors and four of the round's own), each surviving the whole suite
+    at `b6862a5` (7087 passed) and KILLED at `e1e007b` by its own new test and by no other test of the
+    two modules (a run without `-x`).
   - **The eroding `/INTER/TYPE25` route** (findings 6.31 (2)(b), 6.33 (4)):
     its B6 sentence named a no-contact-stiffness law (LAW169) only on the
     parts `ish_pids` reads, so an `*CONTACT_ERODING_SINGLE_SURFACE` with
     SURFATYP 5 over a stated SSID wrote `/SURF/PART/ALL` over the LAW169 part
     and said nothing. It now names the parts of the surface it WRITES
-    (`_type25_surface(written_pids=...)`), and a SURFATYP 6 / 7 side is
-    dropped by the type's meaning (`_styp567_clause`), not 'names no part or
-    part set'. Six sites share the one predicate `single_surface_scope`; the
+    (`_type25_surface(written_pids=...)`), and a SURFATYP 6 / 7 side of an
+    eroding single-surface or surface-to-surface card is dropped by the type's
+    meaning (`_styp567_clause`), not 'names no part or part set' (the MAIN
+    side of an `*CONTACT_ERODING_NODES_TO_SURFACE` card keeps the old text: a
+    ROADMAP round-11 text item). Six sites share the one predicate `single_surface_scope`; the
     eroding family keeps its own rule, and its sentence follows the surface
     it writes. `ish_pids` (the Ishape cell's scope, an emitted byte) is not
     changed: a ROADMAP round-11 question.
@@ -178,13 +188,18 @@ Prior history (before this changelog was introduced) is summarized in the
     RECONVERTED, not re-run; a first batch, run while a docs edit sat in the worktree, was
     discarded); the ledger and WORSE 20 / BETTER 23 unchanged; the rows naming the branch 243 -
     report section 0.36.2. Tests:
-    `tests/test_r14_round10_verify.py` (new, 49 tests, 10 of them from the
-    follow-up); re-derived
+    `tests/test_r14_round10_verify.py` (new, 51 tests: 39 of this round, 10
+    of the follow-up, 2 of the closing round); re-derived
     pins in `tests/test_r14_round10.py` (the S-excl prefix, the A replacement
     needle, the K-04 bullet record), `tests/test_cardstack_pipeline_props.py`
-    (the S-excl prefix) - each fails on `bc2910c`; the follow-up's 13 tests
+    (the S-excl prefix) - each of these four fails on `bc2910c`. Each class of
+    this round's 39 tests fails on `bc2910c` or, for the boundary pins, on its
+    named mutant of it (24 of the module's 51 tests pass on `bc2910c` by
+    design - pins of code that was right there, controls and the two guard
+    self-tests; the module docstring says which); the follow-up's 13 tests
     (10 in the new module, 3 in `tests/test_dt_deletion_floor.py`) form 8
-    classes, each failing on its own mutant of `5108531`.
+    classes, each failing on its own mutant of `5108531`, and the closing
+    round's pins each fail on their own mutants (above).
 - **R14 CAMPAIGN PARITY batch, round 10 - the fix round (the four
   validators' findings; text only, no emitted byte moves).** On the part-B
   head `ab53752`; the review diff of the round stays `git diff

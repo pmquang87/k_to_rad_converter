@@ -3327,7 +3327,11 @@ as N keys / M models on the 356-key / 312-model roster.
    fifths farther); the TYPE51 blank branch moves 3.3_Composite_Analysis + 7
    Ryan_Lee W6 files; TYPE11 0 movers; DK / BCIZ at 1.0 vs 5/6 is a choice
    (145 / 129 bytes if excluded). Next: the TYPE9 arm on the cup-draw ALONE
-   with a same-window base. 2 keys / 2 models (TYPE9), 1 / 1 (TYPE51).
+   with a same-window base. 2 keys / 2 models (TYPE9), 3 / 3 (TYPE51: the
+   `*PART_COMPOSITE` 1 / 1 and the two `*INTEGRATION_SHELL` layups 2 / 2),
+   TYPE11 0 - the verification round's warning scan, item (b) of 'Found by
+   the verification round' below (re-counted on the 356 roster conversion
+   logs by the closing round).
 2. **The ALE reference system as a DEFAULT and the TYPE18 coupling
    stiffness** (round-8 entry 1; round-9 NOT 2) - CLOSED on bird_B by A10's
    package: A10's gate PASSED (the converter-side first-step estimate -
@@ -3664,6 +3668,23 @@ half of the one before); the 0.36.2 scan finds no scored implicit row below
 section with an NTHICK-1 initial-state record** keeps N 2 and the record is
 skipped: keep N 1 where every record states NTHICK 1 (0 R14 carriers).
 (f) **the K-04 cap** is RE-OPENED (its bullet under 'Opened by the batch').
+(g) **the eroding node-to-surface MAIN side with SURFBTYP 6 / 7** (the closing
+round, findings 6.35 (3)(c)): an `*CONTACT_ERODING_NODES_TO_SURFACE` card
+whose MSTYP is 6 or 7 still drops as 'resolved to no contact surface (it names
+no part or part set carrying shell/solid elements)', where the single-surface
+and surface-to-surface cards name the type's meaning since this round
+(`_styp567_clause` / `_styp567_remedy`); a text item, measured on the K1a
+probe with MSID 2; 0 R14 keys (none of the 356 roster conversion logs carries
+the drop). (h) **'admits no material' without LS-DYNA's clause** in three code
+strings (the closing round, 6.35 (3)(f)): the A7 1b refusal warning
+(`writer/loads._make_imposed_motions_set`), the docstring of
+`writer/loads._pm_inlet_decision` and the `ale_inflow_ebcs` comment in
+`state.py` say that an `/IMPVEL` on an Eulerian ALE face admits no material -
+true of OpenRadioss - without the clause that LS-DYNA's own face admits the
+inflow (the mass balance of (a)); a text item (the refusal warning is the
+warning record of a refused row; 0 R14 keys print it - none of the 356 roster
+conversion logs). `docs/K_ROUTE_FOR_RADIOSS_CARDS.md` carries the clause since
+the closing round.
 
 **52 of the 59 starter failures.** What is deliberately left, by name:
 
@@ -4886,9 +4907,11 @@ recipe's section 17 lists all nine). The four that concern k2rad:
 - Round 9's NOT list, entry 11: the Stmin half is named and settable (K-02);
   the entry's next steps stand.
 - Round 10 (2026-11): 11 of the 21 'Opened by the batch' bullets CLOSED, 4
-  closed in part (their rest re-pointed), 3 closed by measurement and 3
-  re-pointed to the round-10 NOT list - each says so in its **Round 10:**
-  sentence; the merge re-baseline owed above was done at report section 0.35.
+  closed in part (their rest re-pointed), 2 closed by measurement, 3
+  re-pointed to the round-10 NOT list and 1 RE-OPENED for round 11 (the K-04
+  cap: the verification round's head-byte arms; B10 had closed it by
+  measurement) - each says so in its **Round 10:** sentence; the merge
+  re-baseline owed above was done at report section 0.35.
 
 ## Lossy conversions to tighten
 

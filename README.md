@@ -680,7 +680,9 @@ by bytes, by two scanners - report section 0.36.2):
   where LS-DYNA runs the stated SHRF or its default 1.0.
 - **The eroding `/INTER/TYPE25`** names a no-contact-stiffness law on the
   parts of the surface it writes (a SURFATYP 5 card over a stated SSID) and
-  drops a SURFATYP 6 / 7 side by the type's meaning. Six sites share the one
+  drops a SURFATYP 6 / 7 side of a single-surface or surface-to-surface card
+  by the type's meaning (the main side of a node-to-surface card keeps the
+  old text: a ROADMAP round-11 item). Six sites share the one
   predicate `single_surface_scope`; the eroding family keeps its own rule,
   and its sentence follows the surface it writes.
 - **The conditional-TSSFAC sentence** is silent where OpenRadioss's own
