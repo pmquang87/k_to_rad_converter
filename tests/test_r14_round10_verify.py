@@ -576,8 +576,10 @@ _RETRACTED_ROUND_10_VERIFY = (
     # the A2 / S-excl wordings (findings 6.32 (2)(d))
     "(these default bytes, nt 4)",
     "(it stays 0, the starter's 5/6)",
-    # the single-sample sliver (6.32 (2)(e)) and the unscoped N2S default
+    # the single-sample sliver (6.32 (2)(e)), in both arrow spellings, and
+    # the unscoped N2S default
     "KE 91.3 -> 6.06e8",
+    "KE 91.3 → 6.06e8",
     "the shipped default with --implicit-n2s-type7",
     # A8's FN figure without its definition (6.31 (2)(d))
     "contact-1 force RMS 448.66",

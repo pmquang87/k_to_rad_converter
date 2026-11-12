@@ -303,8 +303,9 @@ writes, byte for byte.
 - **The sliver.** `IMP_DTF` cuts the step to the remainder whatever its size
   (`imp_dt.F:311-320`). When the remainder is a sliver of the step, the LAST
   printed row is an integration artifact: on `efg/metal-cutting/main.k` the
-  step 2.0e-4 is cut to 1.0e-5 and the row at t 0.03 prints K-ENERGY 6.06e8
-  (91.3 one cycle before) and ERROR 99.9 %; on a 2 x 2 x 2-hex probe the step
+  step 2.0e-4 is cut to 1.0e-5 and the row at t 0.03 prints K-ENERGY 3.57e8 ..
+  6.06e8 (52.3 .. 111.0 one cycle before; four runs of the same bytes at nt 4)
+  and ERROR 99.9 %; on a 2 x 2 x 2-hex probe the step
   2.0e-3 is cut to 1.05e-4 and the last row prints KE 170.1 (0.160 before) and
   ERROR -99.9 %, rows 1-33 equal to the run without the card. Read the row
   before it. On the R14 stop rows the remainder is 62 - 85 % of the step and

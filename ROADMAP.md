@@ -3608,9 +3608,13 @@ as N keys / M models on the 356-key / 312-model roster.
     cuts the last step to the remainder whatever its size
     (`imp_dt.F:311-320`), so where the remainder is a sliver of the step the
     LAST printed row is an integration artifact: on `efg/metal-cutting/main.k`
-    (step 2.0e-4 cut to 1.0e-5, r 0.050) KE 91.3 → 6.06e8 and ERROR 99.9 % at
-    t 0.03; on a 2 x 2 x 2-hex probe (step 2.0e-3 cut to 1.05e-4, r 0.052) KE
-    0.160 → 170.1, ERROR −99.9 %; the remainders of the 9 / 5 R14 stop rows
+    (step 2.0e-4 cut to 1.0e-5, r 0.050) the last row's KE 52.3 .. 111.0 →
+    3.57e8 .. 6.06e8 and ERROR 99.9 % at t 0.03 over four runs of the same
+    bytes at nt 4 (the listing does not repeat digit for digit); on a
+    2 x 2 x 2-hex probe (step 2.0e-3 cut to 1.05e-4, r 0.052) KE 0.160 →
+    170.1, ERROR −99.9 %, and with ENDTIM 0.0201 (r 0.115) 0.160 → 37.16 - the
+    risk is a remainder below a sizeable fraction of the step, not r ~0.05
+    only; the remainders of the 9 / 5 R14 stop rows
     are 0.62 - 0.85 of the step (clean last rows). An END value read on such
     a row is not physics; the warning, the help, README and CHANGELOG name
     it. Next: a floor on the remainder (fold a sliver into the step before),
