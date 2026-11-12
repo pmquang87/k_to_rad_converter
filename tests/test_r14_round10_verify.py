@@ -27,13 +27,13 @@ the code verifier's surviving mutations).
    2 / 10 / 111 pin is in tests/test_dt_deletion_floor.py.
 
 Every CLASS of sections 1 - 3 fails on bc2910c or, in section 1, on its
-named mutant of it; a test that passes on bc2910c is a section-1 pin of code
-that was right there, one of the three section-2 controls (the part-set
-side, the silent TYPE9 sections, the plain shell) or one of the two
-section-3 guard self-tests, which pin the guard itself. Every CLASS of
-section 4 fails on its named mutant (the two 5/6 tests are negative
+named mutant of it; a test of sections 1 - 3 that passes on bc2910c is a
+section-1 pin of code that was right there, one of the three section-2
+controls (the part-set side, the silent TYPE9 sections, the plain shell) or
+one of the two section-3 guard self-tests, which pin the guard itself. Every
+CLASS of section 4 fails on its named mutant (the two 5/6 tests are negative
 controls: they pass on the recorder mutants and fail on an always-record
-one).
+one); section 4 makes no claim about bc2910c.
 """
 
 import math
